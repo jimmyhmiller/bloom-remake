@@ -14,6 +14,10 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4.13"
+blossom-base = { path = "../crates/blossom-base" }
+blossom-syntax = { path = "../crates/blossom-syntax" }
+blossom-smt = { path = "../crates/blossom-smt" }
+blossom-store = { path = "../crates/blossom-store" }
 
 [workspace]
 members = ["."]
