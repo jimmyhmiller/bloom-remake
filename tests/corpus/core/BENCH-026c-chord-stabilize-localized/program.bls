@@ -9,12 +9,25 @@
 //!
 //! Identifiers are 8-bit ring ids (`Mod<8>`), and `x in (a,b)` is the ring interval `x in a<..b` (LANG-026). A
 //! node's id and its best successor are static configuration here (the n-rules that maintain `bestSucc` are not
-//! part of this test). `pred` holds one row (keys(1): a key overwrite, so an upsert); `"NIL"` is `known = false`.
-//! sb3's head lives at SI, so it is delivered there as `pred_update`, whose sender is NI. `succ` is a plain table
-//! (P2's 30 s TTL does not matter within the run). BENCH-026e localizes the same rules by hand.
+//! part of this test). `"NIL"` is `known = false`. sb3's head lives at SI, so it is delivered there as
+//! `pred_update`, whose sender is NI. `succ` is a plain table (P2's 30 s TTL does not matter within the run).
+//!
+//! The compiler localizes a body by mirroring the remote relations it reads, which is exact only for insert-only
+//! relations: a localized body that mirrors a relation with a `delete` or `upsert` is BLS0805 (LANGUAGE §14.6).
+//! P2's `pred` is keys(1), a key overwrite, so the literal port is rejected (BENCH-026f). Here the remote atoms
+//! read `pred_seen` instead: an insert-only record of every predecessor a node has had, its initial one and each
+//! one it accepted since. The current predecessor, `pred`, is still replaced by `upsert`, and only its own node
+//! reads it.
+//! - sb1 adopts every known recorded predecessor of SI that lies in (N, S). P2 adopts only SI's current one; the
+//!   two differ only when an earlier predecessor of SI also lies in (N, S), which this scenario never produces.
+//! - sb3 notifies SI when some recorded predecessor P of SI is unknown or has N in (P, N1). A node accepts only a
+//!   predecessor closer than its current one, so its current predecessor is the closest one recorded, and P2's
+//!   condition on it implies this one. `set_pred` applies P2's condition to SI's current predecessor, so every
+//!   node's `pred` changes exactly as P2's sb3 changes it.
 //!
 //! Scenario: a ring of na (10) and nb (50) that nc (100) has just joined: nc knows its successor na but has no
-//! predecessor, and nobody knows nc. nc stabilizes once; later nb stabilizes once.
+//! predecessor, and nobody knows nc. nc stabilizes once; later nb stabilizes once. BENCH-026e localizes P2's rules
+//! by hand and reaches the same `succ` and `pred`.
 
 program chord_stabilize_localized version 1;
 
@@ -45,6 +58,7 @@ at Peer {
 
     table succ(s: Mod<8>, si: Node<Peer>) key(s);
     table pred(p: Mod<8>, pi: Node<Peer>, known: bool) key();
+    table pred_seen(p: Mod<8>, pi: Node<Peer>, known: bool);
 
     bootstrap {
         for init_succ(self, s, si) {
@@ -52,11 +66,12 @@ at Peer {
         }
         for init_pred(self, p, pi, k) {
             emit pred(p, pi, k);
+            emit pred_seen(p, pi, k);
         }
     }
 
     #[localize(chain)]
-    sb1: on stabilize(), node_id(self, n), best_succ(self, s, si), pred(p, pi, true) @ si where p in n<..s {
+    sb1: on stabilize(), node_id(self, n), best_succ(self, s, si), pred_seen(p, pi, true) @ si where p in n<..s {
         emit succ(p, pi);
     }
 
@@ -66,12 +81,13 @@ at Peer {
     }
 
     #[localize(chain)]
-    sb3: on stabilize(), node_id(self, n), succ(_, si), pred(p, _, known) @ si, node_id(si, n1)
+    sb3: on stabilize(), node_id(self, n), succ(_, si), pred_seen(p, _, known) @ si, node_id(si, n1)
         where (not known || n in p<..n1) && si != self {
         send pred_update(n) to si;
     }
 
-    set_pred: on pred_update(n) from ni {
+    set_pred: on pred_update(n) from ni, node_id(self, n1), pred(p, _, known) where not known || n in p<..n1 {
         upsert pred(n, ni, true);
+        emit pred_seen(n, ni, true);
     }
 }

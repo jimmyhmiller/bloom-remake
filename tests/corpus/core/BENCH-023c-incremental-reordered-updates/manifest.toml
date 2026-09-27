@@ -6,11 +6,13 @@ program = "program.bls"
 derived = true
 expected_from = "literature"
 title = "Incremental shortest paths, changes in the reverse order: the final state equals evaluation from scratch"
-source = "R01 §5.5 and TEST PROGRAMS T3 (Loo thesis §5.4.2 Fig. 5.7, Theorem A.3 bursty model); FEATURES.md BENCH-023"
+source = "R01 §5.5 and TEST PROGRAMS T3 (Loo thesis §5.4.2 Fig. 5.7, §3.5 Fig. 3.9, Theorem A.3 bursty model; SIGMOD06 Fig. 2 network); FEATURES.md BENCH-023"
 notes = """
-The same two changes as BENCH-023a applied in the other order: the deletion of b->d at tick 3 (visible from 4),
-then the update of a->b at tick 5 (visible from 6). The intermediate stage has its own from-scratch answer; the
-final state equals BENCH-023a's final state, which is the from-scratch answer on the final links."""
+The same two changes as BENCH-023a (Fig. 5.7's update and, in place of Fig. 3.9's deletion of c->d, which the
+SIGMOD06 network lacks, the deletion of b->d; see BENCH-023a) applied in the other order: the deletion of b->d at
+tick 3 (visible from 4), then the update of a->b at tick 5 (visible from 6). The intermediate stage has its own
+from-scratch answer; the final state equals BENCH-023a's final state, which is the from-scratch answer on the final
+links."""
 
 [run]
 ticks = 10

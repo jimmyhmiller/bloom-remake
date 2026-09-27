@@ -2,7 +2,9 @@
 //!
 //! Each multi-location body becomes a request to the remote node and a reply: sb1 asks the best successor for its
 //! predecessor, sb2 asks each successor for its successors, sb3 notifies each successor, which updates its own
-//! predecessor. Same configuration, scenario and expected result as BENCH-026c.
+//! predecessor. A request reads the remote node's current state, so P2's key-overwritten `pred` is ported as is.
+//! Same configuration and scenario as BENCH-026c, whose compiler-localized bodies must read an insert-only record of
+//! predecessors instead (LANGUAGE §14.6); both reach the same final `succ` and `pred`.
 
 program chord_stabilize_hand_localized version 1;
 

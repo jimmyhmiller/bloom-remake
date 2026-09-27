@@ -3,7 +3,7 @@ id = "BENCH-043"
 title = "Two nodes with the same candidates always agree on choose (shared choice seed)"
 priority = "P0"
 source = "R12 §12 T4 item 4 and T11 (HRW agreement); FEATURES.md SEM-084, SEM-085, CR-45, BENCH-043"
-features = ["SEM-084", "SEM-085", "LANG-108", "LANG-040", "LANG-042", "LANG-045", "LANG-047", "LANG-062", "LANG-152", "LANG-153", "LANG-200", "LANG-241", "LANG-100", "LANG-060"]
+features = ["SEM-084", "SEM-085", "LANG-108", "LANG-040", "LANG-042", "LANG-045", "LANG-047", "LANG-062", "LANG-152", "LANG-153", "LANG-200", "LANG-241", "LANG-100", "LANG-060", "LANG-190"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -22,17 +22,17 @@ seeds = 128
 
 [backend.oracle]
 status = "unimplemented"
-unimplemented = ["SEM-084", "SEM-085", "LANG-108", "LANG-040", "LANG-042", "LANG-045", "LANG-047", "LANG-062", "LANG-152", "LANG-153", "LANG-200", "LANG-241", "LANG-100", "LANG-060"]
+unimplemented = ["SEM-084", "SEM-085", "LANG-108", "LANG-040", "LANG-042", "LANG-045", "LANG-047", "LANG-062", "LANG-152", "LANG-153", "LANG-200", "LANG-241", "LANG-100", "LANG-060", "LANG-190"]
 until = "M6"
 
 [backend.interp]
 status = "unimplemented"
-unimplemented = ["SEM-084", "SEM-085", "LANG-108", "LANG-040", "LANG-042", "LANG-045", "LANG-047", "LANG-062", "LANG-152", "LANG-153", "LANG-200", "LANG-241", "LANG-100", "LANG-060", "SEM-002"]
+unimplemented = ["SEM-084", "SEM-085", "LANG-108", "LANG-040", "LANG-042", "LANG-045", "LANG-047", "LANG-062", "LANG-152", "LANG-153", "LANG-200", "LANG-241", "LANG-100", "LANG-060", "LANG-190", "SEM-002"]
 until = "M7"
 
 [backend.sim]
 status = "unimplemented"
-unimplemented = ["SEM-084", "SEM-085", "LANG-108", "LANG-040", "LANG-042", "LANG-045", "LANG-047", "LANG-062", "LANG-152", "LANG-153", "LANG-200", "LANG-241", "LANG-100", "LANG-060", "TEST-001"]
+unimplemented = ["SEM-084", "SEM-085", "LANG-108", "LANG-040", "LANG-042", "LANG-045", "LANG-047", "LANG-062", "LANG-152", "LANG-153", "LANG-200", "LANG-241", "LANG-100", "LANG-060", "LANG-190", "TEST-001"]
 until = "M7"
 
 [[expect]]

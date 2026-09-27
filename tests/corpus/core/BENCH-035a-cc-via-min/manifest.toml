@@ -3,7 +3,7 @@ id = "BENCH-035"
 title = "Connected components via recursive MIN match union-find"
 priority = "P0"
 source = "R09 §13.1 and §16 T7 (RecStep VLDB'19 CC rules); FEATURES.md CR-09, SEM-031, BENCH-035"
-features = ["SEM-031", "LANG-045", "LANG-047", "LANG-120", "LANG-122", "LANG-124", "LANG-127", "LANG-085"]
+features = ["SEM-031", "LANG-045", "LANG-047", "LANG-120", "LANG-122", "LANG-124", "LANG-127", "LANG-085", "LANG-190"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -17,12 +17,12 @@ stop = "ticks"
 
 [backend.oracle]
 status = "unimplemented"
-unimplemented = ["SEM-031", "LANG-045", "LANG-047", "LANG-120", "LANG-122", "LANG-124", "LANG-127", "LANG-085"]
+unimplemented = ["SEM-031", "LANG-045", "LANG-047", "LANG-120", "LANG-122", "LANG-124", "LANG-127", "LANG-085", "LANG-190"]
 until = "M5"
 
 [backend.interp]
 status = "unimplemented"
-unimplemented = ["SEM-031", "LANG-045", "LANG-047", "LANG-120", "LANG-122", "LANG-124", "LANG-127", "LANG-085", "SEM-002"]
+unimplemented = ["SEM-031", "LANG-045", "LANG-047", "LANG-120", "LANG-122", "LANG-124", "LANG-127", "LANG-085", "LANG-190", "SEM-002"]
 until = "M7"
 
 [[expect]]
