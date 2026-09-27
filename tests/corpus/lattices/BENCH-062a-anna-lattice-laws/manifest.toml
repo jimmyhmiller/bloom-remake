@@ -5,10 +5,11 @@ priority = "P0"
 source   = "R04 §12 T16; R04 §4.3 (Anna LWWPairLattice), §4.5 (the DomPair counterexample); CR-25"
 features = ["LANG-047", "LANG-089", "LANG-124", "LANG-131", "LANG-180", "LANG-190", "SEM-030", "SEM-033"]
 program  = "program.bls"
-derived  = false
+derived  = true
 expected_from = "literature"
 notes    = """
-Expected values follow from the merge definitions in R04 §4.3–§4.5.
+Expected values follow from the merge definitions in R04 §4.3–§4.5. The DomPair inputs are R04 §4.5's counterexample
+verbatim; the LWW, bare-`>=` and Lex inputs are re-derived (R04 T16 names those checks without data).
 - LWW: ((1,r2),y) dominates ((1,r1),x) and ((0,r3),w), so all three orders give ((1,r2),y).
 - Bare >=: merge((1,x),(1,y)) = (1,y) but merge((1,y),(1,x)) = (1,x).
 - DomPair: (x ⊔ y) ⊔ z = ({1,2}, {p,q,r}) while x ⊔ (y ⊔ z) = ({1,2}, {r}), R04 §4.5's counterexample.
