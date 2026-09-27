@@ -1,0 +1,43 @@
+# BENCH-087 (R02 T21): TPLP Figure 2, random ordering, under the sync harness.
+#
+# TPLP Example 2: the node sends every element of S to itself in every step and extends the order only when exactly
+# one unused element arrives; "some executions will not lead to orderings if some elements are always jointly
+# delivered". The synchronous schedule is such an execution: every element sent in tick t arrives in tick t+1, so
+# from tick 1 on all three elements arrive together in every tick, two() always holds, keep is always empty, and F
+# and N stay empty forever.
+schema = 1
+id = "BENCH-087"
+title = "TPLP Fig. 2 (random ordering): the synchronous schedule always delivers every element together, so no order forms"
+priority = "P1"
+source = "R02 T21; TPLP 2016 Figure 2 and Example 2 (verbatim program)"
+features = ["LANG-040", "LANG-043", "LANG-045", "LANG-046", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-085", "LANG-190"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[run]
+ticks = 8
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-045", "LANG-046", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-085", "LANG-190"]
+until = "M5"
+
+[[expect]]
+node = "n1"
+rel = "m"
+tick = 1
+rows = [["a"], ["b"], ["c"]]
+
+[[expect]]
+node = "n1"
+rel = "f"
+final = true
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "n"
+final = true
+rows = []

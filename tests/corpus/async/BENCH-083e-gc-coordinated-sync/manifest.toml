@@ -1,0 +1,61 @@
+# BENCH-083 (R02 T16): MAR Appendix C's coordinated garbage collector under the sync harness.
+#
+# Derivation (sync harness, PLAN §5.1):
+#   tick 0  H1, H2 send their pointers to M. M owns no pointer, so its `forall` over an empty send log holds and it
+#           reports done to itself.
+#   tick 1  M stores both pointers and acknowledges them; done_from(M).
+#   tick 2  H1, H2 hold an acknowledgement for every pointer they send and report done.
+#   tick 3  M has done_from for M, H1 and H2: reach_done holds, reach = {r->a, r->b, a->b}, and garbage(c) is derived.
+# garbage(c) holds from tick 3 on; a and b are never collected.
+schema = 1
+id = "BENCH-083"
+title = "Distributed GC after MAR's coordination rewrite: synchronous rounds collect c once reachability is sealed"
+priority = "P0"
+source = "R02 T16 and §7.5 (MAR Appendix C, Examples 8-9, synthesized rules)"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-090", "LANG-190", "LANG-240", "LANG-241"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "M", role = "Node" }, { name = "H1", role = "Node" }, { name = "H2", role = "Node" }]
+
+[run]
+ticks = 8
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-090", "LANG-190", "LANG-240", "LANG-241"]
+until = "M5"
+
+[[expect]]
+node = "M"
+rel = "done_from"
+tick = 1
+rows = [["M"]]
+
+[[expect]]
+node = "M"
+rel = "done_from"
+tick = 3
+rows = [["H1"], ["H2"], ["M"]]
+
+[[expect]]
+node = "M"
+rel = "garbage"
+row = ["c"]
+holds = "3.."
+absent = "..=2"
+
+[[expect]]
+node = "M"
+rel = "garbage"
+row = ["a"]
+absent = "0.."
+
+[[expect]]
+node = "M"
+rel = "garbage"
+row = ["b"]
+absent = "0.."

@@ -1,0 +1,36 @@
+# BENCH-099 (R13 §12 T16; SEM-017): the retracting variant's outputs are all NEVER-FINAL (ANA-120).
+#
+# R13 T16: in the retracting variant "hot(w) is no longer POS-FINAL: it is reclassified NEVER-FINAL"; R13 §9.6: "An
+# accumulating-and-retracting pane is Z-set valued: NEVER-FINAL until the watermark seal." Here the counts are a Z-set
+# written by an unsealed correction stream, so no seal ever closes them: hot, the per-word counts and the number of
+# distinct words can all return to an earlier value (FT Thm 18, Cor 20), and ANA-120 classifies each as NEVER-FINAL.
+# The program is BENCH-099 (c)'s without the `final` annotation, so it compiles.
+schema = 1
+id = "BENCH-099"
+title = "Batch completion, retracting variant: hot, the counts and count<w> are NEVER-FINAL"
+priority = "P1"
+source = "R13 §12 T16 (retracting variant), §9.3 (NEVER-FINAL), §9.6 (Streaming panes); FT (ICDT 2025) Thm 18, Cor 20"
+features = ["LANG-009", "LANG-010", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-138", "LANG-153", "LANG-154", "LANG-181", "LANG-207", "LANG-212", "ANA-120", "SEM-016", "SEM-017"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "The correction stream is unsealed on purpose; see docs/plan/notes/M1.4.md (BENCH-099)."
+
+# The deployment of BENCH-099a: the program's `split_of` facts name the mappers M1-M4, so their Node values decode
+# through the deployment directory (PLAN §5.1), and a multi-role program has no default deployment.
+[deploy]
+nodes = [
+    { name = "M1", role = "Mapper" },
+    { name = "M2", role = "Mapper" },
+    { name = "M3", role = "Mapper" },
+    { name = "M4", role = "Mapper" },
+    { name = "R", role = "Reducer" },
+]
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-009", "LANG-010", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-138", "LANG-153", "LANG-154", "LANG-181", "LANG-207", "LANG-212", "ANA-120", "SEM-016", "SEM-017"]
+until = "M7"
+
+[expect_analysis]
+finality = { hot = ["NEVER"], word_count = ["NEVER"], total_distinct = ["NEVER"] }

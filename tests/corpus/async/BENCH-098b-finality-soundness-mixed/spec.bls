@@ -1,0 +1,40 @@
+//! BENCH-098: the mixed queries of BENCH-097 (b) under 10⁴ schedules with crashes (R13 §12 T15).
+//!
+//! With every fact delivered, a replica ends with R = {1, 20}, S = {1, 5, 7}, T = {5}: q_c is false, and Q holds
+//! for 20 (from R), 7 and 1 (from S, with no T). Only (20) can ever be final-present and only (5) final-absent; q_c
+//! can be final-false (once S(1) is in) but never final-true, because S is never sealed. A lost or late fact may
+//! leave a replica provisional, never wrong.
+
+spec MixedFinalitySound for r#program {
+    nodes SRC, R1, R2;
+
+    fact r_in(1) @ SRC at tick 1;
+    fact r_in(20) @ SRC at tick 1;
+    fact s_in(5) @ SRC at tick 1;
+    fact t_in(5) @ SRC at tick 1;
+    fact s_in(7) @ SRC at tick 2;
+    fact s_in(1) @ SRC at tick 3;
+
+    faults { crashes: 1, model: async }
+
+    /// Replicas never finalize different values (the tables only grow, so updates commute: FT Prop 33).
+    invariant q_agrees: never q_final_present(x) @ a, q_final_absent(x) @ b;
+    invariant q_c_agrees: never q_c_final_true() @ a, q_c_final_false() @ b;
+
+    /// FT §5.1 on this instance: (20) is final-present, (5) final-absent, (7) and (1) provisional-present.
+    invariant twenty_never_absent: never q_final_absent(20) @ a;
+    invariant five_never_present: never q_final_present(5) @ a;
+    invariant seven_never_present: never q_final_present(7) @ a;
+    invariant seven_never_absent: never q_final_absent(7) @ a;
+    invariant one_never_present: never q_final_present(1) @ a;
+    invariant one_never_absent: never q_final_absent(1) @ a;
+    /// R13 T6: q_c is final-false once S(c) arrives, and never final-true while S may still grow.
+    invariant q_c_never_final_true: never q_c_final_true() @ a;
+
+    /// Finality is monotone (SEM-016) at the replica that reports it.
+    invariant present_holds: never q_final_present(x) @ a, not q(x) @ a;
+    invariant absent_stays_absent: never q_final_absent(x) @ a, q(x) @ a;
+    invariant q_c_false_stays_false: never q_c_final_false() @ a, q_c() @ a;
+
+    check sim { runs: 10000, seed: 1 } expect holds;
+}

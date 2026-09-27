@@ -1,0 +1,37 @@
+# BENCH-098 (R13 §12 T15; TEST-088): finality soundness under fuzzing, over BENCH-097 (b) (R13 T6, FT §5.1).
+#
+# R13 T15: "no fact emitted final-present is absent from the ultimate model; no fact emitted final-absent is present;
+# two replicas never emit different final values for the same key."
+#
+# BENCH-097 (b)'s queries run at two replicas fed by one source over the default (lossy) channels. On this instance
+# only Q(20) may become final-present, only Q(5) final-absent, and q_c final-false (never final-true); Q(7) and Q(1)
+# stay provisional-present. The spec pins those facts and the replicas' agreement in every one of 10⁴ seeded
+# schedules with at most one crash, on top of the TEST-088 oracle.
+schema = 1
+id = "BENCH-098"
+title = "Finality soundness under fuzzing (b): replicated mixed queries finalize only what FT §5.1 allows"
+priority = "P1"
+source = "R13 §12 T15 over T6; FEATURES TEST-088; FT (ICDT 2025) §5.1, Def 3, Prop 33"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-201", "LANG-212", "ANA-120", "ANA-121", "SEM-016", "SEM-070", "SEM-073", "TEST-001", "TEST-002", "TEST-081", "TEST-088", "VER-001"]
+program = "program.bls"
+spec = "spec.bls"
+derived = false
+expected_from = "literature"
+notes = "The spec's scenario facts are BENCH-097 (b)'s inputs, entered at the source instead of at the query node."
+
+[deploy]
+nodes = [{ name = "SRC", role = "Node" }, { name = "R1", role = "Node" }, { name = "R2", role = "Node" }]
+
+[run]
+ticks = 40
+stop = "ticks"
+seeds = 10000
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-201", "LANG-212", "ANA-120", "ANA-121", "SEM-016", "SEM-070", "SEM-073", "TEST-001", "TEST-002", "TEST-081", "TEST-088", "VER-001"]
+until = "M8"
+
+[expect_verify]
+check = "sim"
+result = "holds"

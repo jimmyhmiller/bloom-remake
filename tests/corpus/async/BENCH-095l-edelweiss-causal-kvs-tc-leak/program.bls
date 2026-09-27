@@ -1,0 +1,132 @@
+//! BENCH-095: Edelweiss's causally consistent key-value store (Edelweiss, VLDB 2014, §6, Fig. 6; artifact
+//! causal-kvs.rb), in the negative variant where dominance follows the transitive closure of dependencies.
+//!
+//! Replicas broadcast their write logs to a fixed membership (Bud's sealed :node; here the static node set). A write is
+//! safe once every write it depends on is safe; the view holds the safe writes that no later safe write to the same key
+//! dominates. Reads carry the dependencies the client has seen and are answered from the view once those are safe.
+
+program edelweiss_causal_kvs_tc version 1;
+
+static node(addr: Node);
+fact node("n1");
+fact node("n2");
+
+// ---------------- replication
+channel log_chn(@addr: Node, id: u64, key: String, val: String, deps: Set<u64>) key(addr, id);
+table log(id: u64, key: String, val: String, deps: Set<u64>) key(id);
+
+/// From the host, at a replica: a client write with its dependencies.
+input write(id: u64, key: String, val: String, deps: Set<u64>);
+
+accept_write: on write(i, k, v, d) {
+    emit log(i, k, v, d);
+}
+
+/// `log_chn <~ (node * log).pairs {|n,l| n + l}`
+replicate: while node(a), log(i, k, v, d) {
+    send log_chn(a, i, k, v, d);
+}
+
+/// `log <= log_chn.payloads`
+store: on log_chn(_, i, k, v, d) {
+    emit log(i, k, v, d);
+}
+
+// ---------------- check_safe
+table safe(id: u64, key: String, val: String) key(id);
+table dep(id: u64, target: u64);
+table safe_keys(id: u64) range(id);
+
+/// `dep <= log.flat_map {|l| l.deps.map {|d| [l.id, d]}}`
+record_dep: while log(i, _, _, deps), t in deps {
+    emit dep(i, t);
+}
+
+view pending(id, key, val, deps) = log(id, key, val, deps), not safe_keys(id);
+view missing_dep(id, target) = dep(id, target), not safe_keys(target);
+
+/// `safe <+ pending.notin(missing_dep, 0 => :id).pro {|p| [p.id, p.key, p.val]}`
+make_safe: while pending(i, k, v, _d), not missing_dep(i, _) {
+    next safe(i, k, v);
+}
+
+record_safe_key: while safe(i, _, _) {
+    emit safe_keys(i);
+}
+
+// ---------------- live_view
+/// The negative variant: a write is dominated by any later safe write to the same key that depends on it
+/// transitively, through the closure of the dependency graph.
+view dep_tc(id, target) {
+    dep(id, target);
+    dep_tc(id, m), dep(m, target);
+}
+
+table safe_dep(target: u64, src_key: String);
+
+record_safe_dep: while dep_tc(i, t), safe(i, k, _) {
+    emit safe_dep(t, k);
+}
+
+table dom(id: u64);
+
+/// `dom <+ (safe_dep * safe).lefts(:target => :id, :src_key => :key) {|d| [d.target]}.notin(dom, 0 => :id)`
+dominate: while safe_dep(t, k), safe(t, k, _), not dom(t) {
+    next dom(t);
+}
+
+/// `view <= safe.notin(dom, :id => :id)` (a hard keyword, written as a raw identifier).
+view r#view(id, key, val) = safe(id, key, val), not dom(id);
+
+// ---------------- read_server
+channel req_chn(@addr: Node, id: u64, key: String, deps: Set<u64>) key(addr, id);
+channel resp_chn(@addr: Node, id: u64, key: String, val: String);
+
+table read_buf(id: u64, key: String, deps: Set<u64>, src_addr: Node) key(id);
+table read_resp(addr: Node, id: u64, key: String, val: String);
+scratch safe_read(id: u64, key: String, deps: Set<u64>, src_addr: Node);
+
+/// `read_buf <= req_chn {|r| [r.id, r.key, r.deps, r.source_addr]}`
+take_read: on req_chn(_, i, k, d) from s {
+    emit read_buf(i, k, d, s);
+}
+
+view read_pending(id, key, deps, src_addr) = read_buf(id, key, deps, src_addr), not read_resp(_, id, _, _);
+view read_dep(id, target) = read_pending(id, _, deps, _), target in deps;
+view missing_read_dep(id, target) = read_dep(id, target), not safe_keys(target);
+
+/// `safe_read <+ read_pending.notin(missing_read_dep, 0 => :id)`
+read_ready: while read_pending(i, k, d, s), not missing_read_dep(i, _) {
+    next safe_read(i, k, d, s);
+}
+
+/// `read_resp <= (safe_read * view).pairs(:key => :key) {|r,v| [r.src_addr, r.id, r.key, v.val]}`
+answer_read: while safe_read(i, k, _d, s), r#view(_w, k, v) {
+    emit read_resp(s, i, k, v);
+}
+
+/// `resp_chn <~ read_resp`
+respond: while read_resp(s, i, k, v) {
+    send resp_chn(s, i, k, v);
+}
+
+// ---------------- read_client
+table read_req(addr: Node, id: u64, key: String, deps: Set<u64>) key(addr, id);
+table read_result(addr: Node, id: u64, key: String, val: String);
+
+/// From the host, at a client: a read of `key` from `server`, after the writes the client has seen.
+input read(server: Node, id: u64, key: String, deps: Set<u64>);
+
+issue_read: on read(s, i, k, d) {
+    emit read_req(s, i, k, d);
+}
+
+/// `req_chn <~ read_req`
+request: while read_req(a, i, k, d) {
+    send req_chn(a, i, k, d);
+}
+
+/// `read_result <= resp_chn`
+collect: on resp_chn(a, i, k, v) {
+    emit read_result(a, i, k, v);
+}

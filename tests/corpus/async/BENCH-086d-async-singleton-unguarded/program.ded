@@ -1,0 +1,8 @@
+// BENCH-086: MAR Example 1 (the asynchronous singleton) in Molly's Dedalus dialect; the `.ded` twin of BENCH-086a.
+
+p(L)@async :- q(L);
+
+// MAR's EDB holds at every tick; it is persisted by hand from tick 1.
+q(L)@next :- q(L);
+
+q("n1")@1;

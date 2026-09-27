@@ -1,0 +1,30 @@
+# BENCH-093 (R03 T30; R05 T12): with BestEffortMulticast and StaticMembership mixed in, ReplicatedKVS is no longer
+# underspecified: ANA-008 reports nothing.
+#
+# The second half of FEATURES BENCH-093 bullet 4. Bud's budplot on `ReplicatedKVS BestEffortMulticast
+# StaticMembership` prints no underspecification warning (bud docs/visualizations.md; R03 T30: "With
+# BestEffortMulticast StaticMembership mixed in, it does not"). The program is BENCH-093f's: StaticMembership reads
+# `add_member` and writes `member`, the multicast reads `mcast_send` and writes `mcast_done` and `pipe_out`, and every
+# rule can fire. BENCH-093e is the same store without them (BLS1002 at `add_member` and `mcast_send`).
+#
+# The case lists ANA-008, so its analysis backend compares BLS1002 exhaustively: no [[expect_diag]] means ANA-008
+# reports nothing (the diagnostic-matching convention of docs/plan/notes/M1.4.md). The schema requires an
+# [expect_analysis] key for an analysis backend; the one here, the kvput -> kvget_response path, is the dataflow that
+# BENCH-093e lacks (its puts end at `mcast_send`), and BENCH-093f checks the same label from M5 on.
+schema = 1
+id = "BENCH-093"
+title = "CIDR'11 ReplicatedKVS with multicast and membership: fully specified, no underspecification reported"
+priority = "P0"
+source = "R03 T30 and §5.5(a); R05 T12; CIDR 2011 §4.5 and Figures 6-7; bud docs/visualizations.md (budplot); bud-sandbox kvs/kvs.rb, delivery/multicast.rb, membership/membership.rb"
+features = ["LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "LANG-063", "LANG-064", "LANG-082", "LANG-108", "LANG-241", "ANA-008", "ANA-022", "ANA-023"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "LANG-063", "LANG-064", "LANG-082", "LANG-108", "LANG-241", "ANA-008", "ANA-022", "ANA-023"]
+until = "M6"
+
+[expect_analysis]
+calm_labels = { paths = [{ from = "kvput", to = "kvget_response", label = "D" }] }

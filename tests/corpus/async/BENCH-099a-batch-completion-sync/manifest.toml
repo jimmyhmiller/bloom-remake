@@ -1,0 +1,280 @@
+# BENCH-099 (R13 §12 T16; FLAG-141): batch completion by seals and thresholds, in synchronous rounds.
+#
+# R13 T16: "a word-count stage with 4 input splits. Each split source emits a whole-split seal after its last record.
+# hot(w) tuples are final the moment n reaches 1000, before any seal. counts and total_distinct stay provisional until
+# all 4 split seals arrive, then are final (SEALED). The stage reports 'complete' exactly when all three outputs are
+# final." FEATURES BENCH-099 adds that the retracting variant makes hot NEVER-FINAL (cases c and d).
+#
+# Scenario (sync harness; a message sent in round t arrives in round t + 1). Mappers M1-M4 read splits 1-4; one
+# reducer R owns every word. In tick 1, M1 reads ten lines of 50 x "the" and "cat dog", M2 ten lines of 50 x "the" and
+# "dog", M3 "dog"; in tick 4, M4 reads "cat bird". The host ends split 1 in tick 2, split 2 in tick 3, split 3 in
+# tick 4 and split 4 in tick 6; each mapper seals its split at once. At R: in tick 2 "the" has 1000 occurrences, so
+# hot("the") holds and is final, while the first seal only arrives in tick 3; the counts are the(1000), dog(3), cat(1)
+# and total_distinct(3). Split 4's words arrive in tick 5: cat(2), bird(1), total_distinct(4). Split 4's seal arrives
+# in tick 7, the fourth: every split is done, so from tick 7 the stage is complete, every count and total_distinct(4)
+# are final, and the words that are not hot are final-absent from hot. The superseded values cat(1) and
+# total_distinct(3) are never final.
+schema = 1
+id = "BENCH-099"
+title = "Batch completion: hot is final early; counts and count<w> become final at the fourth split seal"
+priority = "P1"
+source = "R13 §12 T16 and §9.6 (Batch stage); FEATURES BENCH-099, FLAG-141; LANGUAGE E6 (the word-count program)"
+features = ["LANG-009", "LANG-010", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-120", "LANG-122", "LANG-124", "LANG-126", "LANG-153", "LANG-154", "LANG-181", "LANG-207", "LANG-212", "ANA-065", "ANA-120", "ANA-121", "SEM-016"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "Counts are an LSet of occurrence ids (LANGUAGE E6), not R13's bag; see docs/plan/notes/M1.4.md (BENCH-099)."
+
+[deploy]
+nodes = [
+    { name = "M1", role = "Mapper" },
+    { name = "M2", role = "Mapper" },
+    { name = "M3", role = "Mapper" },
+    { name = "M4", role = "Mapper" },
+    { name = "R", role = "Reducer" },
+]
+
+[run]
+ticks = 12
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-009", "LANG-010", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-120", "LANG-122", "LANG-124", "LANG-126", "LANG-153", "LANG-154", "LANG-181", "LANG-207", "LANG-212", "ANA-065", "ANA-120", "ANA-121", "SEM-016"]
+until = "M6"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-009", "LANG-010", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-120", "LANG-122", "LANG-124", "LANG-126", "LANG-153", "LANG-154", "LANG-181", "LANG-207", "LANG-212", "ANA-065", "ANA-120", "ANA-121", "SEM-016"]
+until = "M7"
+
+[[input]]
+node = "M1"
+tick = 1
+rel = "line"
+rows = [
+    [1, 1, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"],
+    [1, 2, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"],
+    [1, 3, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"],
+    [1, 4, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"],
+    [1, 5, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"],
+    [1, 6, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"],
+    [1, 7, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"],
+    [1, 8, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"],
+    [1, 9, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"],
+    [1, 10, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"],
+    [1, 11, "cat dog"],
+]
+
+[[input]]
+node = "M2"
+tick = 1
+rel = "line"
+rows = [
+    [2, 1, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"],
+    [2, 2, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"],
+    [2, 3, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"],
+    [2, 4, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"],
+    [2, 5, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"],
+    [2, 6, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"],
+    [2, 7, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"],
+    [2, 8, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"],
+    [2, 9, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"],
+    [2, 10, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"],
+    [2, 11, "dog"],
+]
+
+[[input]]
+node = "M3"
+tick = 1
+rel = "line"
+rows = [[3, 1, "dog"]]
+
+[[input]]
+node = "M4"
+tick = 4
+rel = "line"
+rows = [[4, 1, "cat bird"]]
+
+[[input]]
+node = "M1"
+tick = 2
+rel = "split_end"
+rows = [[1]]
+
+[[input]]
+node = "M2"
+tick = 3
+rel = "split_end"
+rows = [[2]]
+
+[[input]]
+node = "M3"
+tick = 4
+rel = "split_end"
+rows = [[3]]
+
+[[input]]
+node = "M4"
+tick = 6
+rel = "split_end"
+rows = [[4]]
+
+[[expect]]
+node = "R"
+rel = "hot"
+row = ["the"]
+holds = "2.."
+absent = "..=1"
+
+[[expect]]
+node = "R"
+rel = "hot_final"
+row = ["the"]
+holds = "2.."
+absent = "..=1"
+
+[[expect]]
+node = "R"
+rel = "hot"
+row = ["cat"]
+absent = "0.."
+
+[[expect]]
+node = "R"
+rel = "hot_final"
+row = ["cat"]
+absent = "0.."
+
+[[expect]]
+node = "R"
+rel = "not_hot_final"
+row = ["cat"]
+holds = "7.."
+absent = "..=6"
+
+[[expect]]
+node = "R"
+rel = "not_hot_final"
+row = ["dog"]
+holds = "7.."
+absent = "..=6"
+
+[[expect]]
+node = "R"
+rel = "not_hot_final"
+row = ["bird"]
+holds = "7.."
+absent = "..=6"
+
+[[expect]]
+node = "R"
+rel = "not_hot_final"
+row = ["the"]
+absent = "0.."
+
+[[expect]]
+node = "R"
+rel = "word_count"
+row = ["the", 1000]
+holds = "2.."
+absent = "..=1"
+
+[[expect]]
+node = "R"
+rel = "word_count"
+row = ["dog", 3]
+holds = "2.."
+absent = "..=1"
+
+[[expect]]
+node = "R"
+rel = "word_count"
+row = ["cat", 1]
+holds = "2..=4"
+absent = "5.."
+
+[[expect]]
+node = "R"
+rel = "word_count"
+row = ["cat", 2]
+holds = "5.."
+absent = "..=4"
+
+[[expect]]
+node = "R"
+rel = "word_count"
+row = ["bird", 1]
+holds = "5.."
+absent = "..=4"
+
+[[expect]]
+node = "R"
+rel = "word_count_final"
+row = ["the", 1000]
+holds = "7.."
+absent = "..=6"
+
+[[expect]]
+node = "R"
+rel = "word_count_final"
+row = ["dog", 3]
+holds = "7.."
+absent = "..=6"
+
+[[expect]]
+node = "R"
+rel = "word_count_final"
+row = ["cat", 2]
+holds = "7.."
+absent = "..=6"
+
+[[expect]]
+node = "R"
+rel = "word_count_final"
+row = ["bird", 1]
+holds = "7.."
+absent = "..=6"
+
+[[expect]]
+node = "R"
+rel = "word_count_final"
+row = ["cat", 1]
+absent = "0.."
+
+[[expect]]
+node = "R"
+rel = "total_distinct"
+row = [3]
+holds = "2..=4"
+absent = "5.."
+
+[[expect]]
+node = "R"
+rel = "total_distinct"
+row = [4]
+holds = "5.."
+absent = "..=4"
+
+[[expect]]
+node = "R"
+rel = "total_distinct_final"
+row = [4]
+holds = "7.."
+absent = "..=6"
+
+[[expect]]
+node = "R"
+rel = "total_distinct_final"
+row = [3]
+absent = "0.."
+
+[[expect]]
+node = "R"
+rel = "stage_complete"
+row = []
+holds = "7.."
+absent = "..=6"
+
+[expect_analysis]
+finality = { hot = ["THRESH", "SEALED"], word_count = ["SEALED"], total_distinct = ["SEALED"] }

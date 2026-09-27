@@ -1,0 +1,51 @@
+//! BENCH-080: the reliable broadcast of "Dedalus: Datalog in Time and Space" (Datalog 2.0 2010, §5.7), ported rule
+//! by rule. Every relation of the Dedalus program keeps its name; the location specifier is implicit (CR-14).
+//!
+//! An agent that receives a broadcast relays it to every member before delivering it (`rdeliver` holds one tick
+//! after the relay), so if any correct node delivers, every correct node does. The program has no duplicate
+//! suppression: every copy that arrives is relayed again, so the flood never stops. That is the paper's program.
+
+program dl11_reliable_broadcast version 1;
+
+/// DL11's `members(#Agent, Member)`: every agent's member list is the whole deployment, i.e. the node directory.
+view members(m) = node_dir(m, _, _, _);
+
+/// DL11's `rmessage(Agent, Sender, Message)`: a broadcast request from the host at the originating agent.
+input rmessage(sender: Node, msg: String);
+
+/// DL11's `sbcast(#Member, Sender, Message)`: the only asynchronous relation.
+channel sbcast(sender: Node, msg: String);
+
+/// sdeliver(#Member, Sender, Message) ← sbcast(#Member, Sender, Message);
+view sdeliver(s, m) = sbcast(s, m);
+
+/// buf_bcast(Sender, Me, Message) ← sdeliver(Me, Sender, Message);
+view buf_bcast(s, m) = sdeliver(s, m);
+
+/// smessage(Agent, Sender, Message) ← rmessage(Agent, Sender, Message);
+/// smessage(Me, Sender, Message) ← buf_bcast(Sender, Me, Message);
+view smessage(s, m) {
+    rmessage(s, m);
+    buf_bcast(s, m);
+}
+
+/// DL11's `rdeliver(Me, Sender, Message)@next`: not persisted, so it holds in the tick after each relay.
+scratch rdeliver(sender: Node, msg: String);
+
+/// sbcast(#Member, Sender, Message)@async ← smessage(#Agent, Sender, Message), members(#Agent, Member);
+fan_out: on smessage(s, m), members(p) {
+    send sbcast(s, m) to p;
+}
+
+/// rdeliver(Me, Sender, Message)@next ← buf_bcast(Sender, Me, Message);
+deliver: on buf_bcast(s, m) {
+    next rdeliver(s, m);
+}
+
+/// Test harness, not part of DL11: `rdeliver` holds for one tick only, so every delivery is also recorded here
+/// and the end of the run shows who delivered. Nothing reads `delivered`.
+table delivered(sender: Node, msg: String);
+
+record: on rdeliver(s, m) {
+    emit delivered(s, m);
+}

@@ -1,0 +1,37 @@
+# BENCH-150 (R10 T15; VER-006-VER-010): Paxos Made EPR, eqs. (4)-(15): the inductive invariant proves agreement.
+#
+# Padon, Losa, Sagiv, Shoham, "Paxos Made EPR", OOPSLA 2017, §6: "the invariant given by the conjunction of eqs. (4)
+# to (11) and (13) to (15) is indeed an inductive invariant for the transformed model. Fig. 4 depicts the quantifier
+# alternation graph of the resulting verification condition. This graph is acyclic, and so the invariant can be
+# verified in EPR." R10 A2.6 and test 15: "V5 must verify eqs. (4)-(15) in EPR."
+#
+# The program is EPR Fig. 3 written in Blossom (see its header for the correspondence); the spec states EPR's
+# vocabulary as views over the network and the paper's equations verbatim, plus representation lemmas for the
+# program's local copies of the network. Expected: the EPR check finds the quantifier-alternation graph acyclic
+# (quorum -> node, round/value -> quorum, round/value/quorum -> node; EPR Fig. 4), and INIT => INV, INV ∧ TR => INV'
+# and INV => agreement are all valid (z3; cvc5 when installed).
+#
+# The verifier has to do what the paper does: treat left_round and the message projections as derived relations
+# (VER-009), and establish the propose action's max over the reported votes the way EPR §6.2 does (a rewrite whose
+# condition is checked in EPR under eqs. (5), (6), (8)-(11)). docs/plan/notes/M1.4.md (BENCH-150) records how the port
+# was checked and what M10.4 must provide.
+schema = 1
+id = "BENCH-150"
+title = "Paxos Made EPR: eqs. (4)-(15) are an inductive invariant in EPR, proving agreement"
+priority = "P1"
+source = "R10 T15, A2.6 and test 15; Paxos Made EPR (OOPSLA 2017) Fig. 3, Fig. 4, Fig. 5, eqs. (3)-(15), §5-§6"
+features = ["LANG-009", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-083", "LANG-088", "LANG-100", "LANG-111", "LANG-120", "LANG-122", "LANG-123", "LANG-124", "LANG-126", "LANG-153", "LANG-201", "VER-001", "VER-006", "VER-007", "VER-008", "VER-009", "VER-010", "VER-042"]
+program = "program.bls"
+spec = "spec.bls"
+derived = true
+expected_from = "literature"
+notes = "Unbounded: no nodes, facts or faults; the statics owns and value are arbitrary relations with their keys."
+
+[backend.smt]
+status = "unimplemented"
+unimplemented = ["LANG-009", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-083", "LANG-088", "LANG-100", "LANG-111", "LANG-120", "LANG-122", "LANG-123", "LANG-124", "LANG-126", "LANG-153", "LANG-201", "VER-001", "VER-006", "VER-007", "VER-008", "VER-009", "VER-010", "VER-042"]
+until = "M10"
+
+[expect_verify]
+check = "smt"
+result = "holds"

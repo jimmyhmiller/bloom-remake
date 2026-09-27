@@ -1,0 +1,78 @@
+# BENCH-089 (R02 T25): CRON Figure 1, transitive closure by broadcast, under the sync harness; certified.
+#
+# Scenario: x holds a->b, y holds b->c, z holds c->d; the global closure has six edges.
+# Derivation (sync harness; every node rebroadcasts all of T in every tick):
+#   tick 0  each node derives its own edge and broadcasts it.
+#   tick 1  every node holds the three edges; x derives a->c (its a->b with b->c), y derives b->d, z nothing new.
+#   tick 2  x receives b->d and derives a->d: x holds all six. y receives a->c (five edges); z receives a->c, b->d.
+#   tick 3  y and z receive a->d: every node holds the whole closure from here on.
+# Analysis: the program is positive and the asynchronous head is persisted, so it is Dedalus+ (MAR §3.2): certified,
+# with no point of order. R02 T25: "Consistent, positive, and tolerates non-causality."
+schema = 1
+id = "BENCH-089"
+title = "CRON Fig. 1 (transitive closure by broadcast): every node stores the global closure; certified Dedalus+"
+priority = "P1"
+source = "R02 T25; CRON (JCSS 2014) Figure 1 and §3.7 (verbatim program)"
+features = ["LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-190", "LANG-240", "ANA-022", "ANA-024", "ANA-025", "ANA-029"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "x", role = "Node" }, { name = "y", role = "Node" }, { name = "z", role = "Node" }]
+
+[run]
+ticks = 8
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-190", "LANG-240", "ANA-022", "ANA-024", "ANA-025", "ANA-029"]
+until = "M5"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-190", "LANG-240", "ANA-022", "ANA-024", "ANA-025", "ANA-029"]
+until = "M7"
+
+[[expect]]
+node = "x"
+rel = "t"
+tick = 1
+rows = [["a", "b"], ["a", "c"], ["b", "c"], ["c", "d"]]
+
+[[expect]]
+node = "x"
+rel = "t"
+tick = 2
+rows = [["a", "b"], ["a", "c"], ["a", "d"], ["b", "c"], ["b", "d"], ["c", "d"]]
+
+[[expect]]
+node = "y"
+rel = "t"
+tick = 2
+rows = [["a", "b"], ["a", "c"], ["b", "c"], ["b", "d"], ["c", "d"]]
+
+[[expect]]
+node = "y"
+rel = "t"
+tick = 3
+rows = [["a", "b"], ["a", "c"], ["a", "d"], ["b", "c"], ["b", "d"], ["c", "d"]]
+
+[[expect]]
+node = "z"
+rel = "t"
+tick = 3
+rows = [["a", "b"], ["a", "c"], ["a", "d"], ["b", "c"], ["b", "d"], ["c", "d"]]
+
+[[expect]]
+node = "z"
+rel = "t"
+final = true
+rows = [["a", "b"], ["a", "c"], ["a", "d"], ["b", "c"], ["b", "d"], ["c", "d"]]
+
+[expect_analysis]
+points_of_order = { complete = true, edges = [], clusters = [] }
+certificates = { t = ["dedalus_plus"] }
+confluent = { t = "certified" }
+fair_consistency = { t = "certified" }

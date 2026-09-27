@@ -1,0 +1,115 @@
+# BENCH-095 (R05 T21; §5.9, §9.4 item 21): Edelweiss's causal broadcast: logs reclaimed once delivered and safe.
+#
+# R05 §9.4 item 21: "Causal broadcast: log entries are reclaimed once delivered everywhere and safe." R05 §5.9: "Causal
+# broadcast | 6 -> 14 | log once delivered everywhere and safe." The artifact's rewrite (BroadcastCausal_rewrite_src.rb)
+# reclaims `log < -(del_log_r0 * del_log_r2).matches`: delivered to every node of the sealed membership (r0) and no longer
+# pending (r2, a DR+ against safe_log); safe_log itself is never reclaimed.
+#
+# Scenario: n1 originates m1 (no dependency, tick 1) and m2 (depends on m1, tick 2); n2 originates m3 (depends on m2, tick
+# 5), under 32 seeded schedules over the default lossy channel, bounded by ticks. In every seed every node delivers all
+# three to safe_log (a message waits until its dependencies are delivered). In the rewritten program every log ends
+# empty while safe_log keeps all three.
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss causal broadcast: every node delivers all messages in causal order; logs reclaimed once safe everywhere"
+priority = "P1"
+source = "R05 T21, §5.9, §9.4 item 21; artifact broadcast_causal.rb, BroadcastCausal_rewrite_src.rb"
+features = ["LANG-023", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-088", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-062", "ANA-063", "ANA-066", "DIST-007"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "n1", role = "Node" }, { name = "n2", role = "Node" }, { name = "n3", role = "Node" }]
+
+[run]
+ticks = 40
+stop = "ticks"
+seeds = 32
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-023", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-088", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-062", "ANA-063", "ANA-066", "DIST-007"]
+until = "M7"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-023", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-088", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-062", "ANA-063", "ANA-066", "DIST-007"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "originate"
+rows = [[1, "m1", []]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "originate"
+rows = [[2, "m2", [1]]]
+
+[[input]]
+node = "n2"
+tick = 5
+rel = "originate"
+rows = [[3, "m3", [2]]]
+
+[[expect]]
+node = "n1"
+rel = "safe_log"
+final = true
+rows = [[1, "m1", []], [2, "m2", [1]], [3, "m3", [2]]]
+
+[[expect]]
+node = "n2"
+rel = "safe_log"
+final = true
+rows = [[1, "m1", []], [2, "m2", [1]], [3, "m3", [2]]]
+
+[[expect]]
+node = "n3"
+rel = "safe_log"
+final = true
+rows = [[1, "m1", []], [2, "m2", [1]], [3, "m3", [2]]]
+
+[expect_analysis.reclaimable]
+reclaimed = { log = "join_seal" }
+kept = { safe_log = "not_reclaimable", node = "unsealed_join" }
+channels = { chn = "arm" }
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "log"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n2"
+rel = "log"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n3"
+rel = "log"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "safe_log"
+final = true
+rows = [[1, "m1", []], [2, "m2", [1]], [3, "m3", [2]]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n2"
+rel = "safe_log"
+final = true
+rows = [[1, "m1", []], [2, "m2", [1]], [3, "m3", [2]]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n3"
+rel = "safe_log"
+final = true
+rows = [[1, "m1", []], [2, "m2", [1]], [3, "m3", [2]]]

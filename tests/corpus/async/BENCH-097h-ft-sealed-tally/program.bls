@@ -1,0 +1,56 @@
+//! BENCH-097 (f): a sealed aggregate (R13 §12 T10).
+//!
+//! Five voters each send one vote for election 1, followed by that voter's seal on the election. The exact tally is a
+//! non-monotone aggregate: provisional until every voter's seal has arrived with its digest, then final with the
+//! exact count (SEALED-final). The threshold "at least 3 votes" is monotone: final as soon as the third vote arrives,
+//! before any seal matters.
+
+program ft_sealed_tally version 1;
+
+static voter(v: Node);
+static counter(c: Node);
+fact voter("V1");
+fact voter("V2");
+fact voter("V3");
+fact voter("V4");
+fact voter("V5");
+fact counter("C");
+
+/// At a voter, from the host: its vote.
+input cast(e: u64, choice: String);
+
+/// One vote per voter per election; each voter seals the election once it has voted.
+channel vote(e: u64, choice: String) sealed by (e) producers voter;
+
+/// At the counter: every vote received, with its voter.
+table votes(e: u64, voter: Node, choice: String);
+
+output tally(e: u64, n: u64) key(e);
+output at_least_three(e: u64);
+output tally_final(e: u64, n: u64);
+output three_final(e: u64);
+
+send_vote: on cast(e, choice), counter(c) {
+    send vote(e, choice) to c;
+    seal vote(e: e) to c;
+}
+
+record: on vote(e, choice) from v {
+    emit votes(e, v, choice);
+}
+
+count_votes: while votes(e, v, _) {
+    emit tally(e, count!(v));
+}
+
+three: while votes(e, _, _) where lset{ v | votes(e, v, _) }.size() >= 3 {
+    emit at_least_three(e);
+}
+
+tally_is_final: while final tally(e, n) {
+    emit tally_final(e, n);
+}
+
+three_is_final: while final at_least_three(e) {
+    emit three_final(e);
+}

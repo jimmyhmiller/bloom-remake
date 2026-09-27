@@ -1,0 +1,34 @@
+# BENCH-098 (R13 §12 T15; TEST-088): finality soundness under fuzzing, over BENCH-097 (c) (R13 T7).
+#
+# R13 T7: "allpos is provisional-true until R(−2), then final-false (Ex 11, Thm 24 negative). It is never final-true
+# unless R is sealed." Two replicas are fed by one source over the default (lossy) channel, under 10⁴ seeded
+# schedules with at most one crash. allpos() is declared `final output` (NEG-final is accepted, LANGUAGE §7.6), so the
+# TEST-088 oracle checks the marks on its own rows as well as the spec's invariants.
+schema = 1
+id = "BENCH-098"
+title = "Finality soundness under fuzzing (d): replicated forall is final-false only after a violation, never final-true"
+priority = "P1"
+source = "R13 §12 T15 over T7; FEATURES TEST-088; FT (ICDT 2025) Example 11, Thm 24"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "LANG-090", "LANG-201", "LANG-212", "ANA-120", "ANA-121", "SEM-016", "SEM-070", "SEM-073", "TEST-001", "TEST-002", "TEST-081", "TEST-088", "VER-001"]
+program = "program.bls"
+spec = "spec.bls"
+derived = false
+expected_from = "literature"
+notes = "The spec's scenario facts are BENCH-097 (c)'s inputs, entered at the source instead of at the query node."
+
+[deploy]
+nodes = [{ name = "SRC", role = "Node" }, { name = "R1", role = "Node" }, { name = "R2", role = "Node" }]
+
+[run]
+ticks = 40
+stop = "ticks"
+seeds = 10000
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "LANG-090", "LANG-201", "LANG-212", "ANA-120", "ANA-121", "SEM-016", "SEM-070", "SEM-073", "TEST-001", "TEST-002", "TEST-081", "TEST-088", "VER-001"]
+until = "M8"
+
+[expect_verify]
+check = "sim"
+result = "holds"

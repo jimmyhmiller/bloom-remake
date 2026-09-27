@@ -1,0 +1,73 @@
+//! BENCH-098: finality soundness under fuzzing, over BENCH-097 (a) (R13 §12 T15, TEST-088).
+//!
+//! A source sends edges to two replicas and then seals the stream; each replica seals its edge table once the seal
+//! and every edge it covers have arrived. `reach` (s reaches t) holds on the instance and is final on derivation;
+//! `reach_z` (s reaches z) never holds and is final-false after the seal. The `*_final*` outputs make the runtime
+//! finality status observable to the spec.
+
+program ft_soundness_reach version 1;
+
+static edge_source(n: Node);
+static replica(g: Node);
+fact edge_source("SRC");
+fact replica("R1");
+fact replica("R2");
+
+/// At the source, from the host.
+input add_edge(a: String, b: String);
+input end_of_edges();
+
+channel edge_msg(a: String, b: String) sealed by () producers edge_source;
+table edge(a: String, b: String) sealed by ();
+
+final output reach();
+final output reach_z();
+output reach_final();
+output reach_final_false();
+output reach_z_final();
+output reach_z_final_false();
+
+ship: on add_edge(a, b), replica(g) {
+    send edge_msg(a, b) to g;
+}
+
+close_stream: on end_of_edges(), replica(g) {
+    seal edge_msg() to g;
+}
+
+store: on edge_msg(a, b) {
+    emit edge(a, b);
+}
+
+close_table: while sealed edge_msg() {
+    seal edge();
+}
+
+view p(x, y) {
+    edge(x, y);
+    p(x, m), edge(m, y);
+}
+
+to_t: while p("s", "t") {
+    emit reach();
+}
+
+to_z: while p("s", "z") {
+    emit reach_z();
+}
+
+reach_true: while final reach() {
+    emit reach_final();
+}
+
+reach_false: while final not reach() {
+    emit reach_final_false();
+}
+
+reach_z_true: while final reach_z() {
+    emit reach_z_final();
+}
+
+reach_z_false: while final not reach_z() {
+    emit reach_z_final_false();
+}

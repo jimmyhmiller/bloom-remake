@@ -1,0 +1,48 @@
+//! BENCH-089: CRON Figure 1, transitive closure by broadcast (Ameloot, Van den Bussche, "Positive Dedalus programs
+//! tolerate non-causality", JCSS 2014), ported rule by rule.
+//!
+//!     T(u, v) ← R(u, v).
+//!     T(u, v) ← R(u, w), T(w, v).
+//!     T(u, v) | y ← T(u, v), Node(y).
+//!     T(u, v)• ← T(u, v).
+//!
+//! "Eventually all nodes have stored the transitive closure of the entire input graph that is the union of all local
+//! input graphs", on any distribution of R.
+
+program cron_tc_broadcast version 1;
+
+/// CRON's `Node`: every node of the network.
+view node(y) = node_dir(y, _, _, _);
+
+/// Each node's local graph R, keyed by the node holding it.
+static r_edb(at: Node, u: String, v: String);
+fact r_edb("x", "a", "b");
+fact r_edb("y", "b", "c");
+fact r_edb("z", "c", "d");
+
+view r(u, v) = r_edb(self, u, v);
+
+/// The asynchronous head `T(u, v) | y`.
+channel t_msg(u: String, v: String);
+/// CRON's output relation T: deductive rules, arrivals and the persistence rule.
+output t(u: String, v: String);
+
+base: while r(u, v) {
+    emit t(u, v);
+}
+
+close: while r(u, w), t(w, v) {
+    emit t(u, v);
+}
+
+share: while t(u, v), node(y) {
+    send t_msg(u, v) to y;
+}
+
+arrive: on t_msg(u, v) {
+    emit t(u, v);
+}
+
+keep: while t(u, v) {
+    next t(u, v);
+}

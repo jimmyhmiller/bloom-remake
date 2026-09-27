@@ -1,0 +1,37 @@
+# BENCH-088 (R02 T23): TPLP Figure 4 under the sync harness.
+#
+# Derivation: A() is sent in tick 0 (and in every tick, since Id is input) and first arrives in tick 1, where B() is
+# not yet present (the first B() is sent in tick 1 and arrives in tick 2): T() is derived in tick 1 and persists.
+# B() holds from tick 2 on.
+schema = 1
+id = "BENCH-088"
+title = "TPLP Fig. 4 (non-causality): T() is derived when the first A() arrives, before any B()"
+priority = "P1"
+source = "R02 T23 and §5.4; TPLP 2016 Figure 4 (verbatim program)"
+features = ["LANG-040", "LANG-043", "LANG-046", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-240"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[run]
+ticks = 6
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-046", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-240"]
+until = "M5"
+
+[[expect]]
+node = "n1"
+rel = "t"
+row = []
+holds = "1.."
+absent = "0"
+
+[[expect]]
+node = "n1"
+rel = "b"
+row = []
+holds = "2.."
+absent = "..=1"

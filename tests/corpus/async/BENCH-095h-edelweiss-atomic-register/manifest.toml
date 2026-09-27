@@ -1,0 +1,86 @@
+# BENCH-095 (R05 T25; §5.8, §5.9, §9.4 item 25): Edelweiss's atomic register: writes and replaced versions reclaimed.
+#
+# R05 §5.9: "Atomic registers (§7.1) | 4 -> 11 | write once in write_log (DR+); write_log and dom via DR- with a write-id
+# range." The artifact's rewrite (AtomicRegister_rewrite_src.rb): `write < -(write * write_log).lefts(:wid => :wid)`;
+# write_log reclaimed once its write is gone and it is replaced (in dom); dom reclaimed once the replaced write_log entry
+# is gone (`dom < -(dom * write_log_keys).lefts(...).notin(write_log, ...)`); write_keys and write_log_keys are ranges.
+# dom(0), the "no previous write" marker, names no write and is never reclaimed.
+#
+# Scenario (one node, synchronous rounds): writes 1 (x = 10) at tick 1, 2 (x = 20) at tick 3 and 3 (y = 5) at tick 5. The
+# live writes end as 2 (replacing 1) and 3 (replacing none). In the rewritten program write ends empty, write_log keeps
+# only the live writes and dom only the marker 0.
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss atomic register: the live value per register; writes, replaced versions and their dom entries reclaimed"
+priority = "P1"
+source = "R05 T25, §5.8, §5.9, §9.4 item 25; Edelweiss (VLDB 2014) §7.1, Fig. 8; artifact atomic_register.rb, AtomicRegister_rewrite_src.rb"
+features = ["LANG-025", "LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-061", "LANG-082", "LANG-087", "ANA-060", "ANA-062", "ANA-064", "ANA-066"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[run]
+ticks = 10
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-025", "LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-061", "LANG-082", "LANG-087", "ANA-060", "ANA-062", "ANA-064", "ANA-066"]
+until = "M7"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-025", "LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-061", "LANG-082", "LANG-087", "ANA-060", "ANA-062", "ANA-064", "ANA-066"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "put"
+rows = [[1, "x", 10]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "put"
+rows = [[2, "x", 20]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "put"
+rows = [[3, "y", 5]]
+
+[[expect]]
+node = "n1"
+rel = "live"
+tick = 2
+rows = [[1, "x", 10, 0]]
+
+[[expect]]
+node = "n1"
+rel = "live"
+final = true
+rows = [[2, "x", 20, 1], [3, "y", 5, 0]]
+
+[expect_analysis.reclaimable]
+reclaimed = { write = "dr_plus", write_log = "dr_minus", dom = "dr_minus" }
+kept = {  }
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "write"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "write_log"
+final = true
+rows = [[2, "x", 20, 1], [3, "y", 5, 0]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "dom"
+final = true
+rows = [[0]]

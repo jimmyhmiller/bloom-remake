@@ -1,0 +1,37 @@
+# BENCH-088 (R02 T23): TPLP Figure 4 in every causal schedule.
+#
+# R02 T23: "Under causal semantics T() is always produced." B() is sent only in ticks in which A() has arrived, and a
+# message arrives strictly after it is sent (SEM-040, SEM-041), so in the tick of the first arrival of A() no B() is
+# present and T() is derived; it persists. (The non-causal SZ-models in which B() arrives first are excluded by the
+# semantics; the simulator never produces them.) T() and B() hold at the end of every seed.
+schema = 1
+id = "BENCH-088"
+title = "TPLP Fig. 4 (non-causality): every causal schedule produces T()"
+priority = "P1"
+source = "R02 T23 and §5.4; TPLP 2016 Figure 4 (verbatim program)"
+features = ["LANG-040", "LANG-043", "LANG-046", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-240", "SEM-040", "SEM-041", "SEM-044", "TEST-001"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[run]
+ticks = 30
+stop = "ticks"
+seeds = 32
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-046", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-240", "SEM-040", "SEM-041", "SEM-044", "TEST-001"]
+until = "M8"
+
+[[expect]]
+node = "n1"
+rel = "t"
+final = true
+rows = [[]]
+
+[[expect]]
+node = "n1"
+rel = "b"
+final = true
+rows = [[]]

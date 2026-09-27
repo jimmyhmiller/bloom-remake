@@ -1,0 +1,378 @@
+# BENCH-095 (R05 T26; §5.7): bud-gc's JoinReclaim unit tests where no seal is needed, or which seal is (ANA-063).
+#
+# R05 §5.7 (seal dependencies): "(c) if the join is a semijoin from X's perspective (the tlist references only X, e.g.
+# rights/lefts, or a pairs whose tlist only uses X: 'hidden semijoin'), any single matching Z tuple suffices, because
+# later Z tuples produce no new distinct results; (d) if the join predicates cover all key columns of Z, a single match
+# suffices (a key constraint acts like a seal)." Otherwise a seal on a join column of Z is needed.
+#
+# Fixtures (bud-gc test/tc_gc.rb), each ported with prefixed relation names:
+# - sjr: JoinReclaimSemiJoin, test_join_reclaim_semijoin.
+# - sjl: JoinReclaimSemiJoinLefts, test_join_reclaim_semijoin_lefts.
+# - hsj: JoinReclaimHiddenSemiJoin, test_join_reclaim_hidden_semijoin.
+# - wj: JoinReclaimWithJoin, test_join_reclaim_with_join.
+# - ok: JoinReclaimOnKeys, test_join_reclaim_on_keys.
+# - omk: JoinReclaimOnMultipleKeys, test_join_reclaim_on_multiple_keys.
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss semijoins and keys (tc_gc.rb): one observed partner or a key-covering predicate replaces a seal"
+priority = "P1"
+source = "R05 T26, §5.4-§5.8, §9.4 item 26; bud-gc test/tc_gc.rb (Edelweiss prototype, VLDB 2014)"
+features = ["LANG-040", "LANG-043", "LANG-060", "LANG-082", "LANG-086", "LANG-207", "ANA-060", "ANA-062", "ANA-063", "ANA-065", "ANA-066"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+notes = "Timeline mapping and the storage expectations of the rewritten program: docs/plan/notes/M1.4.md (BENCH-095)."
+
+[run]
+ticks = 9
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-060", "LANG-082", "LANG-086", "LANG-207", "ANA-060", "ANA-062", "ANA-063", "ANA-065", "ANA-066"]
+until = "M7"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-060", "LANG-082", "LANG-086", "LANG-207", "ANA-060", "ANA-062", "ANA-063", "ANA-065", "ANA-066"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "sjr_t2_in"
+rows = [["foo", "bar"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "sjr_t3_in"
+rows = [["qux", "foo2"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "sjr_t4_in"
+rows = [["qux", "foo2"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "sjr_t2_in"
+rows = [["foo2", "baz"]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "sjr_t2_seal"
+rows = [["foo3"]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "sjr_t3_in"
+rows = [["qux2", "foo3"]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "sjr_t4_in"
+rows = [["qux2", "foo3"]]
+
+[[input]]
+node = "n1"
+tick = 7
+rel = "sjr_t3_in"
+rows = [["qux2", "foo3"], ["qux", "foo2"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "sjl_t2_in"
+rows = [["foo", "bar"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "sjl_t3_in"
+rows = [["qux", "foo2"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "sjl_t4_in"
+rows = [["qux", "foo2"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "sjl_t2_in"
+rows = [["foo2", "baz"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "hsj_t2_in"
+rows = [["foo", "bar"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "hsj_t3_in"
+rows = [["qux", "foo2"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "hsj_t4_in"
+rows = [["qux", "foo2"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "hsj_t2_in"
+rows = [["foo2", "baz"]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "hsj_t2_seal"
+rows = [["foo3"]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "hsj_t3_in"
+rows = [["qux2", "foo3"]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "hsj_t4_in"
+rows = [["qux2", "foo3"]]
+
+[[input]]
+node = "n1"
+tick = 7
+rel = "hsj_t3_in"
+rows = [["qux2", "foo3"], ["qux", "foo2"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "wj_t2_in"
+rows = [[5, 10]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "wj_t3_in"
+rows = [[20, 5]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "wj_t4_in"
+rows = [[20, 25]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "wj_t4_seal"
+rows = [[20]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "wj_t5_in"
+rows = [[5, 25]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "wj_t2_seal"
+rows = [[5]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ok_t2_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ok_t3_in"
+rows = [[6, 20], [7, 21]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ok_t4_in"
+rows = [[6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "omk_t2_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "omk_t3_in"
+rows = [[5, 6, 7, 8], [6, 6, 6, 20]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "omk_t4_in"
+rows = [[6, 11]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "omk_t3_seal"
+rows = [[6]]
+
+[[expect]]
+node = "n1"
+rel = "wj_r1"
+tick = 2
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "ok_r1"
+tick = 2
+rows = [[5, 10]]
+
+[[expect]]
+node = "n1"
+rel = "omk_r1"
+tick = 2
+rows = [[5, 10]]
+
+[expect_analysis.reclaimable]
+reclaimed = { sjr_t3 = "join_semijoin", sjl_t3 = "join_semijoin", hsj_t3 = "join_semijoin", wj_t3 = "join_seal", ok_t2 = "join_keys", omk_t2 = "join_seal" }
+kept = {  }
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sjr_t3"
+tick = 2
+rows = [["qux", "foo2"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sjr_t3"
+tick = 4
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sjr_t3"
+tick = 6
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sjr_t3"
+tick = 8
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sjl_t3"
+tick = 2
+rows = [["qux", "foo2"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sjl_t3"
+tick = 4
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "hsj_t3"
+tick = 2
+rows = [["qux", "foo2"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "hsj_t3"
+tick = 4
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "hsj_t3"
+tick = 6
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "hsj_t3"
+tick = 8
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "wj_r1"
+tick = 2
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "wj_t3"
+tick = 2
+rows = [[20, 5]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "wj_t3"
+tick = 4
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ok_t1"
+tick = 2
+rows = [[11, 20]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ok_r1"
+tick = 2
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ok_t2"
+tick = 2
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "omk_t1"
+tick = 2
+rows = [[11, 20]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "omk_r1"
+tick = 2
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "omk_t2"
+tick = 2
+rows = [[5, 10], [6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "omk_t2"
+tick = 4
+rows = [[5, 10]]

@@ -1,0 +1,75 @@
+//! BENCH-095: Edelweiss's atomic snapshot reads (Edelweiss, VLDB 2014, §7.3; artifact atomic_reads.rb), ported rule for
+//! rule: the batch-write program plus
+//!
+//!     snapshot_exists <= snapshot {|r| [r.effective]}
+//!     read_event <= read.notin(snapshot_exists, :batch => :batch)
+//!     snapshot <+ (read_event * live).pairs {|r,l| r + l}
+//!     read_view <= snapshot.notin(read_commit, :effective => :batch)
+//!
+//! A read takes a snapshot of the live writes; the snapshot is visible until the client commits the read.
+
+program edelweiss_atomic_reads version 1;
+
+table write(wid: u64, batch: u64, name: String, val: u64) key(wid) sealed by (batch);
+table commit(batch: u64);
+table write_log(wid: u64, batch: u64, name: String, val: u64, prev_wid: u64) key(wid);
+table dom(wid: u64);
+
+/// From the host: a client's write in a batch, the batch's commit, and the client's promise that the batch is complete.
+input put(wid: u64, batch: u64, name: String, val: u64);
+input commit_batch(batch: u64);
+input close_batch(batch: u64);
+
+accept: on put(w, b, n, v) {
+    emit write(w, b, n, v);
+}
+
+accept_commit: on commit_batch(b) {
+    emit commit(b);
+}
+
+close: on close_batch(b) {
+    seal write(batch: b);
+}
+
+/// `write_commit_event <= (write * commit).lefts(:batch => :batch).notin(write_log, 0 => :wid)`
+view write_commit_event(wid, batch, name, val) = write(wid, batch, name, val), commit(batch), not write_log(wid, _, _, _, _);
+view live(wid, batch, name, val, prev_wid) = write_log(wid, batch, name, val, prev_wid), not dom(wid);
+
+log_write: while write_commit_event(w, b, n, v), outer live(lw, _lb, n, _lv, _lp) {
+    next write_log(w, b, n, v, lw.unwrap_or(0));
+}
+
+replaced: while write_log(_w, _b, _n, _v, p) {
+    emit dom(p);
+}
+
+table read(batch: u64);
+table read_commit(batch: u64) range(batch);
+table snapshot(effective: u64, wid: u64, batch: u64, name: String, val: u64, prev_wid: u64);
+table snapshot_exists(batch: u64) range(batch);
+
+/// From the host: a snapshot read, and its commit.
+input start_read(batch: u64);
+input finish_read(batch: u64);
+
+accept_read: on start_read(b) {
+    emit read(b);
+}
+
+accept_read_commit: on finish_read(b) {
+    emit read_commit(b);
+}
+
+record_snapshot: while snapshot(e, _w, _b, _n, _v, _p) {
+    emit snapshot_exists(e);
+}
+
+view read_event(batch) = read(batch), not snapshot_exists(batch);
+
+take_snapshot: while read_event(r), live(w, b, n, v, p) {
+    next snapshot(r, w, b, n, v, p);
+}
+
+view read_view(effective, wid, batch, name, val, prev_wid) =
+    snapshot(effective, wid, batch, name, val, prev_wid), not read_commit(effective);

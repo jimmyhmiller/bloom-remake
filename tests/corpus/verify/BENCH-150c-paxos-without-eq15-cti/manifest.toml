@@ -1,0 +1,35 @@
+# BENCH-150 (R10 T15; VER-010): with eq. (15) omitted, the check produces a counterexample to induction.
+#
+# FEATURES BENCH-150: "With equation (15) omitted, the Fig. 6 counterexample to induction is reproduced." Paxos Made
+# EPR §6.2: after the rewrite, eqs. (4)-(11) and (13) are "still not an inductive invariant, due to a counterexample to
+# induction in which a node has joined a higher round according to joined_round, but has not left a lower round
+# according to left_round ... this time the counterexample (and another similar one) can be eliminated by
+# strengthening the inductive invariant" with eqs. (14) and (15).
+#
+# The program is BENCH-150 (a)'s; the spec is (a)'s without eq. (15) (join_ack_msg(n, r, r′, v) -> joined_round(n,
+# r)). Expected: INV ∧ TR => INV' is not valid, and the counterexample to induction, rendered as a node/message
+# graph, is the "similar one" of §6.2: a node n has sent join_ack(r2, ⊥, _) but joined_round(n, r2) does not hold,
+# so neither does left_round(n, r1) for r1 < r2; n receives a proposal for r1, votes, and eq. (8) fails. The paper's
+# Fig. 6 itself (joined_round without a join_ack, and an arbitrary proposal) belongs to its first rewrite attempt,
+# before the max of the propose action is rewritten; FEATURES attributes it to omitting eq. (15). The discrepancy is
+# recorded in docs/plan/notes/M1.4.md; either way the check must fail with a counterexample to induction.
+schema = 1
+id = "BENCH-150"
+title = "Paxos Made EPR without eq. (15): not inductive, a counterexample to induction is produced"
+priority = "P1"
+source = "R10 T15 and test 15; Paxos Made EPR (OOPSLA 2017) §6.2, Fig. 6, eqs. (14)-(15); FEATURES BENCH-150"
+features = ["LANG-009", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-083", "LANG-088", "LANG-100", "LANG-111", "LANG-120", "LANG-122", "LANG-123", "LANG-124", "LANG-126", "LANG-153", "LANG-201", "VER-001", "VER-006", "VER-007", "VER-008", "VER-009", "VER-010", "VER-042"]
+program = "program.bls"
+spec = "spec.bls"
+derived = true
+expected_from = "literature"
+notes = "The program is BENCH-150 (a)'s. The expected failure is a counterexample to induction, not the EPR fragment report."
+
+[backend.smt]
+status = "unimplemented"
+unimplemented = ["LANG-009", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-083", "LANG-088", "LANG-100", "LANG-111", "LANG-120", "LANG-122", "LANG-123", "LANG-124", "LANG-126", "LANG-153", "LANG-201", "VER-001", "VER-006", "VER-007", "VER-008", "VER-009", "VER-010", "VER-042"]
+until = "M10"
+
+[expect_verify]
+check = "smt"
+result = "fails"

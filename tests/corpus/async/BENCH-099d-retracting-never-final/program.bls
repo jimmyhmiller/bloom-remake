@@ -1,0 +1,91 @@
+//! BENCH-099, the retracting variant (R13 §12 T16): every output is NEVER-FINAL (ANA-120).
+//!
+//! R13 T16: "Retracting variant: a split may emit corrections, so counts becomes zset-typed. hot(w) is no longer
+//! POS-FINAL: it is reclassified NEVER-FINAL until the seal. A final annotation on hot becomes a compile error. This is
+//! Cor 20 applied to a job." R13 §9.6: "An accumulating-and-retracting pane is Z-set valued: NEVER-FINAL until the
+//! watermark seal."
+//!
+//! BENCH-099's word count with corrections: a mapper may withdraw an occurrence of its split at any time, so the
+//! reducer keeps signed counts in a Z-set. The occurrence stream is still sealed per split, but the correction stream
+//! carries no seal, so no seal ever closes the counts: they can return to an earlier state (the inverse curse,
+//! SEM-017), and every output over them is NEVER-FINAL.
+
+program batch_completion_retracting version 1;
+
+const HOT: i64 = 1000;
+
+role Mapper: cluster;
+role Reducer: cluster;
+
+/// The job plan: which mapper reads each of the four input splits.
+static split_of(split: u32, mapper: Node<Mapper>) key(split);
+fact split_of(1, "M1");
+fact split_of(2, "M2");
+fact split_of(3, "M3");
+fact split_of(4, "M4");
+
+fn words(text: String) -> Vec<String> {
+    text.split_whitespace().map(|w| w.to_lowercase())
+}
+
+/// One tuple per word occurrence, sealed per split as in BENCH-099 (a).
+channel occ(word: String, split: u32, line: u64, pos: u64): Mapper -> Reducer
+    partition by word
+    sealed by (split);
+/// A correction withdraws one occurrence. It may come at any time, before or after its split's seal: no seal.
+channel retraction(word: String, split: u32, line: u64, pos: u64): Mapper -> Reducer
+    partition by word;
+
+at Mapper {
+    /// A split's records, from the host.
+    input line(split: u32, lineno: u64, text: String);
+    /// The host marks the end of a split once it has been read completely.
+    input split_end(split: u32);
+    /// The host withdraws one occurrence of a split's word.
+    input correct(split: u32, lineno: u64, pos: u64, word: String);
+
+    map: on line(s, l, text), split_of(s, self), (p, w) in words(text).enumerate() {
+        send occ(w, s, l, p);
+    }
+
+    punctuate: on split_end(s), split_of(s, self) {
+        seal occ(split: s);
+    }
+
+    withdraw: on correct(s, l, p, w), split_of(s, self) {
+        send retraction(w, s, l, p);
+    }
+}
+
+at Reducer {
+    /// Signed occurrence counts per word: +1 for each occurrence, −1 for each correction. The named variables keep
+    /// every occurrence a separate valuation, so each one contributes its own weight.
+    zset table counts(word: String);
+
+    output hot(word: String);
+    output word_count(word: String, n: i64);
+    output total_distinct(k: u64);
+
+    keep: on occ(w, s, _line, _pos), split_of(s, _) {
+        emit counts(w);
+    }
+
+    retract: on retraction(w, s, _line, _pos), split_of(s, _) {
+        emit counts(w) weight -1;
+    }
+
+    /// The count read out of the Z-set: max(weight, 0), for the words with a positive count.
+    view live(w, n) = clamped!(counts(w), n);
+
+    early: while live(w, n) where n >= HOT {
+        emit hot(w);
+    }
+
+    count_words: while live(w, n) {
+        emit word_count(w, n);
+    }
+
+    count_distinct: while distinct!(counts(w)) {
+        emit total_distinct(count!(w));
+    }
+}

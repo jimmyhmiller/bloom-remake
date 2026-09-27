@@ -1,0 +1,33 @@
+//! BENCH-097 (c): an antitone query (R13 §12 T7; Power, Koutris, Hellerstein, ICDT 2025, Example 11 and §5.1: "the
+//! Boolean query ∀x : R(x) > 0 freely terminates on all false instances").
+//!
+//!     allpos() :- forall R(x): x > 0.
+//!
+//! R only grows. allpos() is provisional-true until the first violation, and final-false from then on; it could be
+//! final-true only if R were sealed.
+
+program ft_forall version 1;
+
+input r_in(x: i64);
+table r(x: i64);
+
+output allpos();
+output allpos_final_true();
+output allpos_final_false();
+
+store: on r_in(x) {
+    emit r(x);
+}
+
+/// `forall` over the open table r: antitone, so a point of order (LANGUAGE §9.8), and NEG-final (ANA-120).
+all_positive: while forall r(x) { x > 0 } {
+    emit allpos();
+}
+
+final_true: while final allpos() {
+    emit allpos_final_true();
+}
+
+final_false: while final not allpos() {
+    emit allpos_final_false();
+}

@@ -1,0 +1,65 @@
+//! BENCH-090: threshold queries over replicated lattices return a final answer early (Laddad et al., "Keep CALM and
+//! CRDT On", VLDB 2023, Example 2 and the two-phase-set rate limit), and the "potato and Ferrari" read A − R is
+//! flagged non-monotone.
+//!
+//! The paper's thresholds are 50 gift-card transactions over 100 and |A| + |R| > 100; this scenario scales them to 2
+//! and 3. Each threshold, once reached, holds forever, so it is final the moment it holds; the difference A − R can
+//! lose an element when a removal arrives, so it is a point of order.
+
+program threshold_queries version 1;
+
+/// The paper's thresholds, scaled to the scenario.
+const GIFT_LIMIT: u64 = 2;
+const CAPACITY: u64 = 3;
+
+/// Replica updates, supplied by the host.
+input txn(id: u64, kind: String, amount: u64);
+input add(item: String);
+input remove(item: String);
+
+/// The replicated state: the gift-card transactions over 100, and a two-phase set of adds (A) and removes (R).
+cell gift_big: LSet<u64>;
+cell adds: LSet<String>;
+cell removes: LSet<String>;
+
+output big_gift_cards();
+output busy();
+output in_cart(item: String);
+/// Observers of the runtime finality status of the two thresholds (LANGUAGE §14.5).
+output gift_final();
+output busy_final();
+
+note_gift: on txn(i, k, a) where k == "giftcard", a > 100 {
+    emit gift_big(set[i]);
+}
+
+note_add: on add(x) {
+    emit adds(set[x]);
+}
+
+note_remove: on remove(x) {
+    emit removes(set[x]);
+}
+
+/// |{txn : giftcard ∧ amount > 100}| > GIFT_LIMIT: a monotone threshold.
+flag_gift: while gift_big.size() > GIFT_LIMIT {
+    emit big_gift_cards();
+}
+
+/// |A| + |R| > CAPACITY: size is monotone, `+` on `LMax` is a bimorphism, and `>` a threshold.
+flag_busy: while adds.size() + removes.size() > CAPACITY {
+    emit busy();
+}
+
+/// A − R: `difference!` is antitone in its argument, a point of order.
+list_cart: while x in adds.difference!(removes) {
+    emit in_cart(x);
+}
+
+gift_is_final: while final big_gift_cards() {
+    emit gift_final();
+}
+
+busy_is_final: while final busy() {
+    emit busy_final();
+}

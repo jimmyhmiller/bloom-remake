@@ -1,0 +1,110 @@
+# BENCH-095 (R05 T23; §5.8, §5.9, §9.4 item 23): Edelweiss's replicated KVS: inserts and deletes both reclaimed.
+#
+# R05 §5.8 and §9.4 item 23: "an insertion is reclaimed after delivery-to-all and deletion. A duplicate re-delivery of a
+# reclaimed insertion must not resurrect it (DR- duplicate suppression via ins_log_keys)." "Reading: an insertion is
+# reclaimed once (a) it has been delivered to every node (r0: sealed node set and no missing acks) and (b) it has been
+# deleted (r4). A deletion is reclaimed once (a) it has been delivered everywhere and (b) its target id has been seen and
+# is already gone from ins_log." (the artifact's KvsReplica_rewrite_src.rb, 5 rules -> 23). Replicas resend their logs
+# until acknowledged, so copies of a reclaimed insert do arrive later.
+#
+# Scenario: n1 inserts 1 (k1 = a) and 2 (k2 = b) at tick 1; n2 deletes insert 1 (delete id 11) at tick 3; 32 seeded
+# schedules over the default lossy channels, bounded by ticks. In every seed every replica's view ends as {2: k2 = b}.
+# In the rewritten program every replica keeps only insert 2 and no delete.
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss KVS: every replica converges to the live view; deleted inserts and settled deletes are reclaimed"
+priority = "P1"
+source = "R05 T23, §5.8, §5.9, §9.4 item 23; Edelweiss (VLDB 2014) §5; artifact kvs.rb, KvsReplica_rewrite_src.rb"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "LANG-082", "LANG-083", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-062", "ANA-063", "ANA-064", "ANA-066", "DIST-007"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "n1", role = "Node" }, { name = "n2", role = "Node" }, { name = "n3", role = "Node" }]
+
+[run]
+ticks = 40
+stop = "ticks"
+seeds = 32
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "LANG-082", "LANG-083", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-062", "ANA-063", "ANA-064", "ANA-066", "DIST-007"]
+until = "M7"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "LANG-082", "LANG-083", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-062", "ANA-063", "ANA-064", "ANA-066", "DIST-007"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "put"
+rows = [[1, "k1", "a"], [2, "k2", "b"]]
+
+[[input]]
+node = "n2"
+tick = 3
+rel = "remove"
+rows = [[11, 1]]
+
+[[expect]]
+node = "n1"
+rel = "view"
+final = true
+rows = [[2, "k2", "b"]]
+
+[[expect]]
+node = "n2"
+rel = "view"
+final = true
+rows = [[2, "k2", "b"]]
+
+[[expect]]
+node = "n3"
+rel = "view"
+final = true
+rows = [[2, "k2", "b"]]
+
+[expect_analysis.reclaimable]
+reclaimed = { ins_log = "join_seal", del_log = "dr_minus" }
+kept = { node = "unsealed_join" }
+channels = { ins_chn = "arm", del_chn = "arm" }
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ins_log"
+final = true
+rows = [[2, "k2", "b"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n2"
+rel = "ins_log"
+final = true
+rows = [[2, "k2", "b"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n3"
+rel = "ins_log"
+final = true
+rows = [[2, "k2", "b"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "del_log"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n2"
+rel = "del_log"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n3"
+rel = "del_log"
+final = true
+rows = []

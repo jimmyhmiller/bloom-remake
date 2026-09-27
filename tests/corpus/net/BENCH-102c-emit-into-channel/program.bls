@@ -1,0 +1,33 @@
+//! BENCH-102: Bud's `ChannelWithKey` (bud `test/tc_channel.rb`, TestPayloads#test_channel_with_key), the part of the
+//! test that inserts into the channel with `<=`.
+//!
+//! Bud raises `CompileError` for `c <= [...]`: a channel is written only by an asynchronous merge (`<~`). The Blossom
+//! spelling of the instantaneous merge is `emit` into a channel, which the legality matrix rejects (LANGUAGE §12,
+//! BLS0400). This case's compile backend compares the complete diagnostic list, so the program keeps only what the
+//! error needs: the channel and its sender and receiver, without Bud's key and without the keyed payload tables
+//! (BENCH-102a and 102b test those). A keyed relation filled from a channel may receive two values for one key in
+//! one tick from two senders, which is a possible key-conflict lint (BLS1003, ANA-007) this case does not test.
+
+program channel_emit version 1;
+
+/// Bud: `channel :c, [:@addr, :k1] => [:v1]`, without the key.
+channel c(@addr: Node, k1: i64, v1: i64);
+/// Bud: `scratch :kickoff, [:addr, :v1, :v2]`, which the test fills with `kickoff <+ [...]`.
+input kickoff(addr: Node, v1: i64, v2: i64);
+/// Bud: `table :recv, c.key_cols => c.val_cols`, without the key.
+table recv(addr: Node, k1: i64, v1: i64);
+
+/// Bud: `c <~ kickoff {|k| [k.addr, k.v1, k.v2]}`.
+kick: on kickoff(a, x, y) {
+    send c(a, x, y);
+}
+
+/// Bud's `c <= [[...]]`, an instantaneous merge into a channel: `emit` into a channel is BLS0400.
+bad_insert: on kickoff(a, x, y) {
+    emit c(a, x, y);
+}
+
+/// Bud: `recv <= c`.
+receive: on c(a, k, v) {
+    emit recv(a, k, v);
+}

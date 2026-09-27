@@ -1,0 +1,33 @@
+//! BENCH-098: over 10⁴ schedules with crashes, no replica finalizes a value the run's outcome contradicts, and the
+//! two replicas never finalize different values (R13 §12 T15). The simulator's finality oracle (TEST-088) checks every
+//! final emission against the run's ultimate model; the invariants below state the same facts for this instance, so
+//! the check does not rest on the oracle alone.
+
+spec ReachFinalitySound for r#program {
+    nodes SRC, R1, R2;
+
+    /// R13 T5, instance 1: s -> a -> t, then t -> u; the source ends the stream after its last edge.
+    fact add_edge("s", "a") @ SRC at tick 1;
+    fact add_edge("a", "t") @ SRC at tick 2;
+    fact add_edge("t", "u") @ SRC at tick 3;
+    fact end_of_edges() @ SRC at tick 4;
+
+    faults { crashes: 1, model: async }
+
+    /// Replicas never finalize different values (FT Prop 15, 33: the edge table only grows, so updates commute).
+    invariant reach_agrees: never reach_final() @ a, reach_final_false() @ b;
+    invariant reach_z_agrees: never reach_z_final() @ a, reach_z_final_false() @ b;
+
+    /// s reaches t on this instance and never reaches z, so neither can be finalized the other way. A replica can
+    /// only seal its edge table once every edge the source sent has arrived, so a lost or delayed edge delays
+    /// finality; it never makes a wrong answer final.
+    invariant reach_never_final_false: never reach_final_false() @ a;
+    invariant reach_z_never_final: never reach_z_final() @ a;
+
+    /// Finality is monotone (SEM-016): a fact reported final-present holds from then on, and a fact reported
+    /// final-absent never holds afterwards, at the replica that reported it.
+    invariant final_true_holds: never reach_final() @ a, not reach() @ a;
+    invariant final_false_absent: never reach_z_final_false() @ a, reach_z() @ a;
+
+    check sim { runs: 10000, seed: 1 } expect holds;
+}

@@ -1,0 +1,99 @@
+# BENCH-095 (R05 T22; §5.8, §5.9, §9.4 item 22): Edelweiss's request-response: every buffer reclaimed once answered.
+#
+# R05 §5.9: "Request-response | 7 -> 16 | read_req when acked; req_log when responded (did_resp); did_resp via DR- with
+# req_log_keys; resp_log when acked." R05 §9.4 item 22: "did_resp is reclaimed via DR-, and duplicate requests after
+# reclamation must not produce a second response." The artifact's rewrite (RequestResponse_rewrite_src.rb) acknowledges
+# both channels, reclaims read_req and resp_log once acknowledged, req_log once in did_resp, and did_resp once its request
+# is gone, and suppresses later copies of a reclaimed request (`req_log <= req_chn.payloads.notin(req_log_keys, ...)`):
+# the client resends each request until acknowledged, so copies do arrive after reclamation.
+#
+# Scenario: the server S stores k1 = v1 and k2 = v2 (tick 1); the client C reads k1, k2 and k3 from S (tick 1), under 32
+# seeded schedules over the default lossy channels, bounded by ticks. In every seed C ends with exactly one answer per
+# read, "MISSING" for k3. In the rewritten program C's read_req and S's req_log, did_resp and resp_log all end empty; C's
+# answers and S's state stay.
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss request-response: one answer per read; requests, answers and did_resp reclaimed (did_resp by DR-)"
+priority = "P1"
+source = "R05 T22, §5.8, §5.9, §9.4 item 22; artifact req-resp.rb, RequestResponse_rewrite_src.rb"
+features = ["LANG-025", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-087", "LANG-152", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-062", "ANA-064", "ANA-066", "DIST-007"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "S", role = "Node" }, { name = "C", role = "Node" }]
+
+[run]
+ticks = 40
+stop = "ticks"
+seeds = 32
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-025", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-087", "LANG-152", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-062", "ANA-064", "ANA-066", "DIST-007"]
+until = "M7"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-025", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-087", "LANG-152", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-062", "ANA-064", "ANA-066", "DIST-007"]
+until = "M7"
+
+[[input]]
+node = "S"
+tick = 1
+rel = "stored"
+rows = [["k1", "v1"], ["k2", "v2"]]
+
+[[input]]
+node = "C"
+tick = 1
+rel = "read"
+rows = [["S", 1, "k1"], ["S", 2, "k2"], ["S", 3, "k3"]]
+
+[[expect]]
+node = "C"
+rel = "read_resp"
+final = true
+rows = [["C", 1, "k1", "v1"], ["C", 2, "k2", "v2"], ["C", 3, "k3", "MISSING"]]
+
+[expect_analysis.reclaimable]
+reclaimed = { read_req = "dr_plus", req_log = "dr_plus", did_resp = "dr_minus", resp_log = "dr_plus" }
+kept = { state = "no_negation", read_resp = "no_negation" }
+channels = { req_chn = "arm", resp_chn = "arm" }
+
+[[expect_analysis.reclaimable.storage]]
+node = "C"
+rel = "read_req"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "C"
+rel = "read_resp"
+final = true
+rows = [["C", 1, "k1", "v1"], ["C", 2, "k2", "v2"], ["C", 3, "k3", "MISSING"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "S"
+rel = "req_log"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "S"
+rel = "did_resp"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "S"
+rel = "resp_log"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "S"
+rel = "state"
+final = true
+rows = [["k1", "v1"], ["k2", "v2"]]

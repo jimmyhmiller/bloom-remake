@@ -1,0 +1,44 @@
+//! BENCH-088: TPLP Figure 5, a program sensitive to infinite message grouping (Ameloot et al., TPLP 2016, §4.4.3),
+//! ported rule by rule.
+//!
+//!     A() | y ← contact(y).
+//!     first()• ← A().
+//!     first()• ← first().
+//!     T() ← first(), A().
+//!     T()• ← T().
+//!
+//! x keeps sending A() to y. first() holds at y from the step after the first arrival, so T() is derived as soon as
+//! a later copy arrives. Only an infinite number of arrivals grouped into one step could prevent it, which the
+//! finiteness layer of the semantics rules out.
+
+program tplp_infinite_grouping version 1;
+
+/// x's EDB `contact(y)`, keyed by the node that holds it.
+static contact(at: Node, y: Node);
+fact contact("x", "y");
+
+/// The asynchronous head `A() | y`.
+channel a_msg();
+/// first, persisted by first()• ← first().
+table first();
+/// T, persisted by T()• ← T().
+output t();
+
+send_a: while contact(self, y) {
+    send a_msg() to y;
+}
+
+note_first: on a_msg() {
+    next first();
+}
+
+derive_t: on a_msg(), first() {
+    emit t();
+}
+
+/// `t` is written only by event-driven statements, this one included, so it is an event relation
+/// (LANGUAGE §8.5, the greatest fixpoint) and the loop that carries it to the next tick is an `on`
+/// handler, although `t` then holds in every later tick.
+keep: on t() {
+    next t();
+}

@@ -1,0 +1,91 @@
+# BENCH-097 (R13 §12 T5; FT §1.1, §5.2): (a) on a graph with no s->t path, reach() stays provisional until
+# Edge is sealed, then it is final-false; count<*> Edge > 10 with 7 edges likewise.
+#
+# R13 T5: "Instance 2: edges arrive but none connects s to t. reach() stays provisional forever ... After seal Edge,
+# reach() becomes final-false (SEALED). Cardinality variant: big() :- count<*> Edge > 10 with only 7 edges ever sent.
+# It is monotone and never final until the seal, after which it is final-false."
+#
+# Scenario (sync harness): the source sends s->a and b->t (tick 1) and five more edges (tick 2), seven in all, none
+# connecting s to t; the host ends the stream in tick 4, and the source seals the channel. The edges reach G in ticks
+# 2 and 3, the seal in tick 5, where its digest (7) matches the edges received: `sealed edge_msg()` holds, G seals its
+# edge table, and reach() and big() become final-false in tick 5. Before that they are false but provisional.
+schema = 1
+id = "BENCH-097"
+title = "Free termination (a): a false reach() and |Edge| > 10 are provisional until Edge is sealed, then final-false"
+priority = "P0"
+source = "R13 §12 T5 (instance 2, cardinality variant); FT (ICDT 2025) §1.1, §5.2"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-207", "LANG-212", "ANA-120", "ANA-121", "SEM-016", "LANG-123", "LANG-126"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "SRC", role = "Node" }, { name = "G", role = "Node" }]
+
+[run]
+ticks = 12
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-207", "LANG-212", "ANA-120", "ANA-121", "SEM-016", "LANG-123", "LANG-126"]
+until = "M6"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-207", "LANG-212", "ANA-120", "ANA-121", "SEM-016", "LANG-123", "LANG-126"]
+until = "M7"
+
+
+[[input]]
+node = "SRC"
+tick = 1
+rel = "add_edge"
+rows = [["b", "t"], ["s", "a"]]
+
+[[input]]
+node = "SRC"
+tick = 2
+rel = "add_edge"
+rows = [["c", "d"], ["d", "e"], ["e", "f"], ["f", "g"], ["g", "h"]]
+
+[[input]]
+node = "SRC"
+tick = 4
+rel = "end_of_edges"
+rows = [[]]
+
+[[expect]]
+node = "G"
+rel = "reach"
+row = []
+absent = "0.."
+
+[[expect]]
+node = "G"
+rel = "reach_final"
+row = []
+absent = "0.."
+
+[[expect]]
+node = "G"
+rel = "reach_final_false"
+row = []
+holds = "5.."
+absent = "..=4"
+
+[[expect]]
+node = "G"
+rel = "big"
+row = []
+absent = "0.."
+
+[[expect]]
+node = "G"
+rel = "big_final_false"
+row = []
+holds = "5.."
+absent = "..=4"
+
+[expect_analysis]
+finality = { reach = ["POS", "SEALED"], big = ["THRESH", "SEALED"] }

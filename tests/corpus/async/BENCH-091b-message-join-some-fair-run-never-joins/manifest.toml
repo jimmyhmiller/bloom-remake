@@ -1,0 +1,28 @@
+# BENCH-091 (R10 T21): bounded model checking shows a run that never joins.
+#
+# R10 T21: "V4 should show fair runs with different outputs." The synchronous run joins in tick 1 (BENCH-091a); this
+# case shows the other output: with delivery within two ticks of the send, the model checker finds a run that keeps
+# a(1) and b(1) in different ticks, so "the join eventually fires" fails within the bounds.
+schema = 1
+id = "BENCH-091"
+title = "Ameloot's message join: some run never delivers the two messages together (bounded model checking)"
+priority = "P1"
+source = "R10 T21 and A1(4); Ameloot, ICDT 2014 §1 (re-derived from the description)"
+features = ["LANG-042", "LANG-043", "LANG-045", "LANG-061", "LANG-062", "LANG-190", "LANG-201", "TEST-081", "VER-001", "VER-002"]
+program = "program.bls"
+spec = "spec.bls"
+derived = true
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "X", role = "Node" }, { name = "Y", role = "Node" }, { name = "Z", role = "Node" }]
+
+[backend.bmc]
+status = "unimplemented"
+unimplemented = ["LANG-042", "LANG-043", "LANG-045", "LANG-061", "LANG-062", "LANG-190", "LANG-201", "TEST-081", "VER-001", "VER-002"]
+until = "M9"
+
+[expect_verify]
+check = "bmc"
+result = "fails"
+bounds = { ticks = 8, delay = 2 }

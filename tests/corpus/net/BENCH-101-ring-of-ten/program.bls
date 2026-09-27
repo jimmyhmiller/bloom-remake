@@ -1,0 +1,52 @@
+//! BENCH-101: Bud's `RingMember` (bud `test/tc_channel.rb`, TestRing#test_basic_ring), ported statement by statement.
+//!
+//! Ten members form a ring. A token carrying a count travels around it; each member adds one before passing it
+//! on, until the count reaches 39. Every member remembers the last count it saw, replacing the previous one with
+//! Bud's `<+` / `<-` idiom (a deferred insert and a deferred delete in the same tick).
+//!
+//! The Bud test writes `next_guy` and `kickoff` from the host with `<+`. Blossom hosts write only `input`s, so the
+//! test's writes arrive through two inputs; `set_next` is stored into `next_guy`, which keeps Bud's table.
+
+program ring_member version 1;
+
+/// Bud: `channel :pipe, [:@addr, :cnt]`.
+channel pipe(@addr: Node, cnt: i64);
+/// Bud: `scratch :kickoff, [:cnt]`, which the test fills with `kickoff <+ [[0]]` on the first member.
+input kickoff(cnt: i64);
+/// The test's `next_guy <+ [[next_addr]]`.
+input set_next(addr: Node);
+/// Bud: `table :next_guy, [:addr]`.
+table next_guy(addr: Node);
+/// Bud: `table :last_cnt, [:cnt]`.
+table last_cnt(cnt: i64);
+/// Bud: `scratch :done, [:cnt]`.
+scratch done(cnt: i64);
+
+wire: on set_next(a) {
+    emit next_guy(a);
+}
+
+/// Bud: `pipe <~ kickoff {|k| [ip_port, k.cnt]}`.
+start: on kickoff(c) {
+    send pipe(self, c);
+}
+
+/// Bud: `pipe <~ (pipe * next_guy).pairs {|p, n| [n.addr, p.cnt + 1] if p.cnt < 39}`.
+pass: on pipe(_, c), next_guy(n) where c < 39 {
+    send pipe(n, c + 1);
+}
+
+/// Bud: `done <= pipe {|p| [p.cnt] if p.cnt == 39}`.
+finish: on pipe(_, c) where c == 39 {
+    emit done(c);
+}
+
+/// Bud: `last_cnt <+ pipe {|p| [p.cnt]}`.
+remember: on pipe(_, c) {
+    next last_cnt(c);
+}
+
+/// Bud: `last_cnt <- (pipe * last_cnt).pairs {|p, lc| [lc.cnt]}`.
+forget: on pipe(_, _), last_cnt(old) {
+    delete last_cnt(old);
+}

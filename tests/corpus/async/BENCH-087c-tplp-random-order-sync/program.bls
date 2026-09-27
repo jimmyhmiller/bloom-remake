@@ -1,0 +1,64 @@
+//! BENCH-087: TPLP Figure 2 / Example 2, a random ordering of a set through asynchronous delivery, ported rule by
+//! rule.
+//!
+//!     M(u) | x ← S(u), Id(x).
+//!     used(u) ← F(u).            used(u) ← N(u, v).          used(u) ← N(v, u).
+//!     new(u) ← M(u), ¬used(u).
+//!     eq(u, u) ← S(u).
+//!     two() ← new(u), new(v), ¬eq(u, v).
+//!     keep(u) ← new(u), ¬two().
+//!     notlast(u) ← N(u, v).
+//!     last(u) ← F(u), ¬notlast(u).   last(u) ← N(v, u), ¬notlast(u).
+//!     started() ← F(u).
+//!     F(u)• ← ¬started(), keep(u).
+//!     N(u, v)• ← started(), last(u), keep(v).
+//!     F(u)• ← F(u).                  N(u, v)• ← N(u, v).
+//!
+//! The node keeps sending every element of S to itself and extends the order by one element whenever exactly one
+//! unused element arrives in a step. "Some executions will not lead to orderings if some elements are always jointly
+//! delivered." (TPLP writes `F` and `N`; Blossom relation names are lowercase.)
+
+program tplp_random_order version 1;
+
+/// The input set S.
+static s(u: String);
+fact s("a");
+fact s("b");
+fact s("c");
+
+/// The asynchronous head `M(u) | x` with x = Id: addressed to this node.
+loopback m(u: String);
+/// F (first) and N (next): the order so far, persisted by F(u)• ← F(u) and N(u, v)• ← N(u, v).
+table f(u: String);
+table n(u: String, v: String);
+
+view used(u) {
+    f(u);
+    n(u, _);
+    n(_, u);
+}
+view new(u) = m(u), not used(u);
+/// TPLP is constant-free and has no built-in ≠, so equality is a relation over S.
+view eq(u, v) = s(u), let v = u;
+view two() = new(u), new(v), not eq(u, v);
+view keep(u) = new(u), not two();
+view notlast(u) = n(u, _);
+view last(u) {
+    f(u), not notlast(u);
+    n(_, u), not notlast(u);
+}
+view started() = f(_);
+
+resend: while s(u) {
+    send m(u);
+}
+
+/// `keep` is derived from the loopback `m` (through `new`), so it is an event relation (LANGUAGE §8.5) and
+/// `first` and `extend` are `on` handlers: each fires for the elements that arrive in a step.
+first: on not started(), keep(u) {
+    next f(u);
+}
+
+extend: on started(), last(u), keep(v) {
+    next n(u, v);
+}

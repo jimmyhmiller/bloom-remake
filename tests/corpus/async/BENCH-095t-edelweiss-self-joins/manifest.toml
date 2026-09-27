@@ -1,0 +1,230 @@
+# BENCH-095 (R05 T26; §5.7): bud-gc's self-join reclamation tests (ANA-063).
+#
+# For a self-join "there's only a single join input collection (which appears twice), so we need more seal information
+# before we can reclaim something" (bud-gc bud_meta.rb, create_self_join_del_rules): a tuple goes only when no future
+# tuple can join it as either input and none of its results on either side is missing.
+#
+# test_rse_self_join_diff_preds_partial_seal is not ported (docs/plan/notes/M1.4.md, BENCH-095). It seals t1 on two
+# different columns, x and y, which LANGUAGE does not allow (one `sealed by` clause per relation). Its expected
+# reclamation is also unsound: after seals on x = 1 and y = 2 it reclaims t1(1, 2), but for left.x = right.y the partners
+# of t1(1, 2) are tuples with y = 1 (as the left input) and x = 2 (as the right input). A later t1(5, 1) is allowed by
+# those seals and would join it; bud-gc matches each seal against the tuple's own column instead. The sound rule is
+# pinned by the whole-relation variant here and by RseSelfJoin, whose predicate uses one column.
+#
+# Fixtures (bud-gc test/tc_gc.rb), each ported with prefixed relation names:
+# - sj: RseSelfJoin, test_rse_self_join.
+# - dp: RseSelfJoinDiffPreds, test_rse_self_join_diff_preds.
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss self-joins (tc_gc.rb): a tuple is reclaimed only when its results on both sides of the join are settled"
+priority = "P1"
+source = "R05 T26, §5.4-§5.8, §9.4 item 26; bud-gc test/tc_gc.rb (Edelweiss prototype, VLDB 2014)"
+features = ["LANG-040", "LANG-043", "LANG-060", "LANG-082", "LANG-086", "LANG-207", "ANA-060", "ANA-063", "ANA-066"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+notes = "Timeline mapping and the storage expectations of the rewritten program: docs/plan/notes/M1.4.md (BENCH-095)."
+
+[run]
+ticks = 10
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-060", "LANG-082", "LANG-086", "LANG-207", "ANA-060", "ANA-063", "ANA-066"]
+until = "M7"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-060", "LANG-082", "LANG-086", "LANG-207", "ANA-060", "ANA-063", "ANA-066"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "sj_t1_in"
+rows = [[5, 10], [6, 10]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "sj_t2_in"
+rows = [[5, 5], [5, 6]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel = "sj_t1_seal"
+rows = [[10]]
+
+[[input]]
+node = "n1"
+tick = 6
+rel = "sj_t2_in"
+rows = [[6, 5]]
+
+[[input]]
+node = "n1"
+tick = 8
+rel = "sj_t2_in"
+rows = [[6, 6]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "dp_t1_in"
+rows = [[1, 2], [2, 3], [3, 4]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "dp_t2_in"
+rows = [[1, 2, 3, 4], [2, 3, 1, 2]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "dp_t1_seal"
+rows = [[]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "dp_t2_in"
+rows = [[3, 4, 2, 3]]
+
+[[expect]]
+node = "n1"
+rel = "sj_r1"
+tick = 1
+rows = [[5, 5], [5, 6], [6, 5], [6, 6]]
+
+[[expect]]
+node = "n1"
+rel = "sj_r1"
+tick = 2
+rows = [[6, 5], [6, 6]]
+
+[[expect]]
+node = "n1"
+rel = "sj_r1"
+tick = 3
+rows = [[6, 5], [6, 6]]
+
+[[expect]]
+node = "n1"
+rel = "sj_r1"
+tick = 7
+rows = [[6, 6]]
+
+[[expect]]
+node = "n1"
+rel = "sj_r1"
+tick = 9
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "dp_r1"
+tick = 2
+rows = [[3, 4, 2, 3]]
+
+[[expect]]
+node = "n1"
+rel = "dp_r1"
+tick = 4
+rows = [[3, 4, 2, 3]]
+
+[[expect]]
+node = "n1"
+rel = "dp_r1"
+tick = 6
+rows = []
+
+[expect_analysis.reclaimable]
+reclaimed = { sj_t1 = "join_seal", dp_t1 = "join_seal" }
+kept = {  }
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sj_r1"
+tick = 1
+rows = [[5, 5], [5, 6], [6, 5], [6, 6]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sj_r1"
+tick = 2
+rows = [[6, 5], [6, 6]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sj_r1"
+tick = 3
+rows = [[6, 5], [6, 6]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sj_t1"
+tick = 5
+rows = [[5, 10], [6, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sj_r1"
+tick = 7
+rows = [[6, 6]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sj_t1"
+tick = 7
+rows = [[6, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sj_r1"
+tick = 9
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sj_t1"
+tick = 9
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "dp_r1"
+tick = 2
+rows = [[3, 4, 2, 3]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "dp_t1"
+tick = 2
+rows = [[1, 2], [2, 3], [3, 4]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "dp_r1"
+tick = 4
+rows = [[3, 4, 2, 3]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "dp_t1"
+tick = 4
+rows = [[2, 3], [3, 4]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "dp_r1"
+tick = 6
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "dp_t1"
+tick = 6
+rows = []

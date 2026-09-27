@@ -1,0 +1,51 @@
+# BENCH-091 (R10 T21; CR-29): Ameloot's message join is confluent but not consistent under fairness.
+#
+# R10 A1(4): "Ameloot distinguishes confluence (any two finite traces can be extended to agree) from consistency (all
+# infinite fair traces give the same output). Consistency is strictly stronger. The counterexample is a 'message
+# join' program that needs simultaneous delivery of two messages." CR-29: certificates report "confluent" and
+# "consistent under fair runs" separately, and this program is the regression test: the certificate must say
+# confluent, and must not claim consistency under fair runs.
+#
+# Analysis: the program has no point of order; the two channel streams meet in `join` without passing through
+# persistent state or a lattice (unguarded asynchrony, ANA-024), so the output's label is D.
+# Oracle (sync harness): the synchronous schedule delivers a(1) and b(1) together in tick 1: joined(1) from tick 1.
+schema = 1
+id = "BENCH-091"
+title = "Ameloot's message join: certified confluent, not certified consistent under fair runs"
+priority = "P1"
+source = "R10 T21 and A1(4); Ameloot, ICDT 2014 §1 (re-derived from the description); CR-29"
+features = ["LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-061", "LANG-062", "LANG-190", "ANA-022", "ANA-023", "ANA-024", "ANA-029"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "The ICDT'14 paper could not be fetched; the program is re-derived from R10's description (see docs/plan/notes/M1.4.md)."
+
+[deploy]
+nodes = [{ name = "X", role = "Node" }, { name = "Y", role = "Node" }, { name = "Z", role = "Node" }]
+
+[run]
+ticks = 6
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-061", "LANG-062", "LANG-190", "ANA-022", "ANA-023", "ANA-024", "ANA-029"]
+until = "M5"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-061", "LANG-062", "LANG-190", "ANA-022", "ANA-023", "ANA-024", "ANA-029"]
+until = "M7"
+
+[[expect]]
+node = "Z"
+rel = "joined"
+row = [1]
+holds = "1.."
+absent = "0"
+
+[expect_analysis]
+points_of_order = { complete = true, edges = [], clusters = [] }
+calm_labels = { outputs = { joined = "D" }, races = [{ channels = ["a_msg", "b_msg"], meet = "joined", guarded = false }] }
+confluent = { joined = "certified" }
+fair_consistency = { joined = "not_certified" }

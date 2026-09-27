@@ -1,0 +1,11 @@
+//! BENCH-085: some schedule delivers c1 and c2 together (MAR Appendix F: the stable models with s = t).
+
+spec SomeRunTogether for r#program {
+    nodes N1;
+
+    /// "The two arrivals are never concurrent." The run that delivers both messages in tick 1 derives
+    /// `concurrent`, so this invariant fails.
+    invariant never_together: never concurrent() @ N1;
+
+    check bmc { ticks: 4, delay: 2 } expect fails;
+}

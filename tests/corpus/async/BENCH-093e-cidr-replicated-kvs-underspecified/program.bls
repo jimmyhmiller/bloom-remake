@@ -1,0 +1,66 @@
+//! BENCH-093: the replicated key-value store of CIDR 2011 Figure 6 (bud-sandbox kvs/kvs.rb, ReplicatedKVS), with its
+//! multicast and membership protocols mixed in but not implemented.
+//!
+//! Bud mixes modules into one namespace: ReplicatedKVS writes the multicast's `mcast_send` and reads its
+//! `mcast_done`, the delivery layer's `pipe_out` and the membership's `member`, and nothing implements them. This port
+//! keeps that single namespace: the protocol relations are declared here, and no rule provides the multicast or the
+//! membership. The dataflow from a put to the store is cut at the multicast: underspecified (CIDR §4.5, Figure 9).
+//! Bud's BasicKVS raises a key error for two puts to one key in one tick; this port keeps one per key with
+//! `choose_most!`, as Blossom's KVS example does (E1), which does not matter for this case.
+
+program replicated_kvs_abstract version 1;
+
+/// KVSProtocol.
+input kvput(client: Node, key: String, reqid: u64, value: String);
+input kvdel(key: String, reqid: u64);
+input kvget(reqid: u64, key: String);
+output kvget_response(reqid: u64, key: String, value: String);
+
+/// MembershipProtocol, mixed in and not implemented.
+input add_member(ident: u64, host: Node);
+input member(ident: u64, host: Node);
+
+/// MulticastProtocol and the DeliveryProtocol output it mixes in, not implemented: the store writes `mcast_send`,
+/// and reads `mcast_done` and `pipe_out`, which only an implementation (or the host) could supply.
+scratch mcast_send(ident: u64, op: String, origin: Node, key: String, reqid: u64, value: String);
+input mcast_done(ident: u64, op: String, origin: Node, key: String, reqid: u64, value: String);
+input pipe_out(src: Node, ident: u64, op: String, origin: Node, key: String, reqid: u64, value: String);
+
+// ---- BasicKVS, imported as `kvs` in bud
+
+table kvstate(key: String, value: String) key(key);
+scratch kvs_put(client: Node, key: String, reqid: u64, value: String);
+scratch kvs_del(key: String, reqid: u64);
+
+mutate: on kvs_put(c, k, r, v), choose_most!((c, r, v) per k) {
+    upsert kvstate(k, v);
+}
+
+get: on kvget(r, k), kvstate(k, v) {
+    emit kvget_response(r, k, v);
+}
+
+remove: on kvs_del(k, _), kvstate(k, v) {
+    delete kvstate(k, v);
+}
+
+// ---- ReplicatedKVS
+
+/// local_indir: `kvs.kvdel <= kvdel`.
+local_del: on kvdel(k, r) {
+    emit kvs_del(k, r);
+}
+
+/// puts: "if I am the master, multicast store requests".
+put_send: on kvput(c, k, r, v), not member(_, c) {
+    emit mcast_send(r, "put", self, k, r, v);
+}
+
+put_done: on mcast_done(_, "put", o, k, r, v) {
+    emit kvs_put(o, k, r, v);
+}
+
+/// "if I am a replica, store the payload of the multicast".
+put_replica: on pipe_out(s, _, "put", o, k, r, v) where s != self {
+    emit kvs_put(o, k, r, v);
+}

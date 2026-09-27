@@ -1,0 +1,92 @@
+//! BENCH-094: the gate of an antijoin is the set of columns of its theta clause (ANA-040; R05 T16; Blazes §7.2 and
+//! footnote 5).
+//!
+//! Blazes §7.2: "If the statement is an antijoin (not in), the subscript is the set of columns occurring in the theta
+//! clause." Footnote 5: "select * from R where x not in (select x from S where y = 'Yahoo!') is deterministic for R
+//! tuples once (a) no more S records with y='Yahoo!' will arrive, or (b) there will never be a corresponding S.x."
+//! R05 T16: "R.notin(S where y='Yahoo!', x) gets gate {x}."
+//!
+//! Two instances of the same component evaluate the query. One receives an S stream sealed on x, so every partition
+//! the antijoin reads is closed once its seal arrives; the other receives an unsealed S stream. Both receive the same
+//! R stream, unsealed: R is the positive side of the antijoin, so its path is confluent.
+
+program antijoin_subscript version 1;
+
+role Source: cluster;
+role Filterer: cluster;
+
+channel r_msg(x: u64, z: u64): Source -> Filterer;
+channel s_sealed(x: u64, y: String): Source -> Filterer
+    sealed by (x);
+channel s_open(x: u64, y: String): Source -> Filterer;
+
+/// `select * from R where x not in (select x from S where y = 'Yahoo!')`, over the R and S tuples received so far.
+module Filter {
+    input r(x: u64, z: u64);
+    input s(x: u64, y: String);
+    output out(x: u64, z: u64);
+
+    table rs(x: u64, z: u64);
+    table ss(x: u64, y: String);
+
+    keep_r: on r(x, z) {
+        emit rs(x, z);
+    }
+
+    keep_s: on s(x, y) {
+        emit ss(x, y);
+    }
+
+    select: while rs(x, z), not { ss(x, y) where y == "Yahoo!" } {
+        emit out(x, z);
+    }
+}
+
+at Source {
+    input r_in(x: u64, z: u64);
+    input s_in(x: u64, y: String);
+    /// No more S tuples with this x.
+    input s_done(x: u64);
+
+    send_r: on r_in(x, z), f in Filterer {
+        send r_msg(x, z) to f;
+    }
+
+    send_s: on s_in(x, y), f in Filterer {
+        send s_sealed(x, y) to f;
+        send s_open(x, y) to f;
+    }
+
+    close_s: on s_done(x) {
+        seal s_sealed(x: x);
+    }
+}
+
+at Filterer {
+    import Filter as sealed_filter;
+    import Filter as open_filter;
+
+    output sealed_out(x: u64, z: u64);
+    output open_out(x: u64, z: u64);
+
+    take_r: on r_msg(x, z) {
+        emit sealed_filter.r(x, z);
+        emit open_filter.r(x, z);
+    }
+
+    take_sealed: on s_sealed(x, y) {
+        emit sealed_filter.s(x, y);
+    }
+
+    take_open: on s_open(x, y) {
+        emit open_filter.s(x, y);
+    }
+
+    out_sealed: while sealed_filter.out(x, z) {
+        emit sealed_out(x, z);
+    }
+
+    out_open: while open_filter.out(x, z) {
+        emit open_out(x, z);
+    }
+}

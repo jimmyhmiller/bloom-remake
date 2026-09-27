@@ -1,0 +1,34 @@
+# BENCH-098 (R13 §12 T15; TEST-088): finality soundness under fuzzing, over BENCH-097 (e) (R13 T9).
+#
+# R13 T9: "Insert a, b; delete b. 'b ∈ set' is final-absent. 'a ∈ set' is provisional-present forever ('never
+# positively')." Two replicas of the set are fed by one source over the default (lossy) channels, under 10⁴ seeded
+# schedules with at most one crash; no replica may ever report an element final-present, nor a final-absent for an
+# element that is (or becomes) a member at that replica.
+schema = 1
+id = "BENCH-098"
+title = "Finality soundness under fuzzing (f): replicated 2P-set membership is final-absent only, never final-present"
+priority = "P1"
+source = "R13 §12 T15 over T9; FEATURES TEST-088; FT (ICDT 2025) Appendix B (Two-Phase Set CRDT)"
+features = ["LANG-042", "LANG-043", "LANG-045", "LANG-062", "LANG-090", "LANG-120", "LANG-122", "LANG-124", "LANG-125", "LANG-126", "LANG-128", "LANG-201", "LANG-212", "ANA-120", "ANA-121", "SEM-016", "SEM-070", "SEM-073", "TEST-001", "TEST-002", "TEST-081", "TEST-088", "VER-001"]
+program = "program.bls"
+spec = "spec.bls"
+derived = false
+expected_from = "literature"
+notes = "The spec's scenario facts are BENCH-097 (e)'s inputs, entered at the source instead of at the set."
+
+[deploy]
+nodes = [{ name = "SRC", role = "Node" }, { name = "R1", role = "Node" }, { name = "R2", role = "Node" }]
+
+[run]
+ticks = 40
+stop = "ticks"
+seeds = 10000
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-042", "LANG-043", "LANG-045", "LANG-062", "LANG-090", "LANG-120", "LANG-122", "LANG-124", "LANG-125", "LANG-126", "LANG-128", "LANG-201", "LANG-212", "ANA-120", "ANA-121", "SEM-016", "SEM-070", "SEM-073", "TEST-001", "TEST-002", "TEST-081", "TEST-088", "VER-001"]
+until = "M8"
+
+[expect_verify]
+check = "sim"
+result = "holds"
