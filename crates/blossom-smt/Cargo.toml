@@ -1,0 +1,13 @@
+[package]
+name = "blossom-smt"
+description = "SMT-LIB2 terms and printer, the SmtSolver trait, child-process drivers for z3 and cvc5, and the clingo AspSolver."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+blossom-base.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,24 @@
+[package]
+name = "codegen-corpus"
+description = "Every corpus program compiled to Rust by build.rs and run against the interpreter and the oracle (ARCHITECTURE §10.4)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Implemented by WP M8.5 (`cargo run -p xtask -- gen-codegen-corpus`). Generated code names only
+# `blossom_engine::abi` and `blossom_wire::abi`.
+[dependencies]
+blossom-base.workspace = true
+blossom-engine.workspace = true
+blossom-value.workspace = true
+blossom-wire.workspace = true
+
+[build-dependencies]
+blossom-build.workspace = true
+
+[dev-dependencies]
+blossom-testkit.workspace = true
+
+[lints]
+workspace = true

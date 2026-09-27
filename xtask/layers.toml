@@ -1,0 +1,219 @@
+# The crate layer table (ARCHITECTURE §1.2–§1.3, ARCH-01; PLAN §4 D2). `cargo run -p xtask -- check-layers` checks
+# every normal, build and dev dependency edge of the workspace against it, and `--print-table` prints the §1.2
+# table from it. Owned by M1.1; a change is a plan change made at a milestone gate.
+#
+# Rules:
+# - A crate may depend on a crate that is reachable from its `deps` in this graph (its direct deps and everything
+#   below them). `build_deps` and `dev_deps` extend that set for build and dev edges only.
+# - A declared dependency never points to a higher layer; the graph is acyclic.
+# - `"*"` stands for every crate of layers L0–L5 except the test-only ones.
+# - A `test_only` crate is reachable only where it is listed explicitly, and only as a dev-dependency.
+# - `[[forbid]]` rules hold over the resolved graph: `closure` checks the crate's direct edges of every kind and
+#   the normal and build dependencies below them; `normal-path` checks the normal-only dependency closure of the
+#   crate built alone (`cargo tree -e normal -p <crate>`).
+
+layers = ["L0", "L1", "L2", "L3", "L4", "L5", "tests", "systems", "tools"]
+
+[crates.blossom-base]
+layer = "L0"
+deps = []
+
+[crates.blossom-value]
+layer = "L0"
+deps = ["blossom-base"]
+
+[crates.blossom-lattice]
+layer = "L0"
+deps = ["blossom-base", "blossom-value"]
+
+[crates.blossom-std-src]
+layer = "L1"
+deps = []
+
+[crates.blossom-syntax]
+layer = "L1"
+deps = ["blossom-base"]
+
+[crates.blossom-ir]
+layer = "L1"
+deps = ["blossom-base", "blossom-value"]
+
+[crates.blossom-schema]
+layer = "L1"
+deps = ["blossom-base", "blossom-value", "blossom-ir"]
+
+[crates.blossom-artifact]
+layer = "L1"
+deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-schema"]
+
+[crates.blossom-front]
+layer = "L1"
+deps = ["blossom-base", "blossom-value", "blossom-lattice", "blossom-std-src", "blossom-syntax", "blossom-ir", "blossom-schema"]
+
+[crates.blossom-analysis]
+layer = "L1"
+deps = ["blossom-base", "blossom-value", "blossom-lattice", "blossom-ir", "blossom-schema", "blossom-artifact"]
+
+[crates.blossom-rewrite]
+layer = "L1"
+deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-analysis"]
+
+[crates.blossom-plan]
+layer = "L1"
+deps = ["blossom-base", "blossom-value", "blossom-lattice", "blossom-ir", "blossom-schema", "blossom-artifact", "blossom-analysis"]
+
+[crates.blossom-oracle]
+layer = "L1"
+deps = ["blossom-base", "blossom-value", "blossom-lattice", "blossom-ir"]
+
+[crates.blossom-driver]
+layer = "L1"
+deps = ["blossom-base", "blossom-value", "blossom-std-src", "blossom-syntax", "blossom-front", "blossom-ir", "blossom-schema", "blossom-artifact", "blossom-analysis", "blossom-rewrite", "blossom-plan"]
+
+[crates.blossom-kernel]
+layer = "L2"
+deps = ["blossom-base", "blossom-value", "blossom-lattice"]
+
+[crates.blossom-engine]
+layer = "L2"
+deps = ["blossom-base", "blossom-value", "blossom-lattice", "blossom-ir", "blossom-kernel"]
+
+[crates.blossom-prov]
+layer = "L2"
+deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-kernel"]
+
+[crates.blossom-codegen]
+layer = "L2"
+deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-schema"]
+
+[crates.blossom-std-host]
+layer = "L2"
+deps = ["blossom-base", "blossom-value"]
+
+[crates.blossom-wire]
+layer = "L3"
+deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-schema"]
+
+[crates.blossom-store]
+layer = "L3"
+deps = ["blossom-base", "blossom-value", "blossom-schema", "blossom-wire"]
+
+[crates.blossom-trace]
+layer = "L3"
+deps = ["blossom-base", "blossom-value", "blossom-ir"]
+
+[crates.blossom-node]
+layer = "L3"
+deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-schema", "blossom-artifact", "blossom-engine", "blossom-wire", "blossom-store", "blossom-trace"]
+
+[crates.blossom-runtime]
+layer = "L3"
+deps = ["blossom-base", "blossom-value", "blossom-lattice", "blossom-ir", "blossom-schema", "blossom-artifact", "blossom-kernel", "blossom-engine", "blossom-wire", "blossom-store", "blossom-trace", "blossom-node"]
+
+[crates.blossom-sim]
+layer = "L3"
+deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-artifact", "blossom-engine", "blossom-node", "blossom-store", "blossom-wire", "blossom-trace"]
+
+[crates.blossom-smt]
+layer = "L4"
+deps = ["blossom-base"]
+
+[crates.blossom-sat]
+layer = "L4"
+deps = ["blossom-base"]
+
+[crates.blossom-ldfi]
+layer = "L4"
+deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-artifact", "blossom-analysis", "blossom-prov", "blossom-sim", "blossom-trace", "blossom-sat"]
+
+[crates.blossom-verify]
+layer = "L4"
+deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-artifact", "blossom-analysis", "blossom-prov", "blossom-sim", "blossom-trace", "blossom-smt", "blossom-sat"]
+
+[crates.blossom-testkit]
+layer = "L4"
+deps = ["blossom-base", "blossom-value", "blossom-lattice", "blossom-std-src", "blossom-syntax", "blossom-ir", "blossom-schema", "blossom-artifact", "blossom-front", "blossom-analysis", "blossom-rewrite", "blossom-plan", "blossom-oracle", "blossom-driver", "blossom-kernel", "blossom-engine", "blossom-prov", "blossom-codegen", "blossom-std-host", "blossom-wire", "blossom-store", "blossom-trace", "blossom-node", "blossom-runtime", "blossom-sim", "blossom-smt", "blossom-sat", "blossom-ldfi", "blossom-verify"]
+test_only = true
+
+[crates.blossom-build]
+layer = "L5"
+deps = ["blossom-base", "blossom-driver", "blossom-artifact", "blossom-codegen"]
+
+[crates.blossom-cli]
+layer = "L5"
+deps = ["blossom-base", "blossom-value", "blossom-lattice", "blossom-std-src", "blossom-syntax", "blossom-ir", "blossom-schema", "blossom-artifact", "blossom-front", "blossom-analysis", "blossom-rewrite", "blossom-plan", "blossom-oracle", "blossom-driver", "blossom-kernel", "blossom-engine", "blossom-prov", "blossom-codegen", "blossom-std-host", "blossom-wire", "blossom-store", "blossom-trace", "blossom-node", "blossom-runtime", "blossom-sim", "blossom-smt", "blossom-sat", "blossom-ldfi", "blossom-verify", "blossom-build", "blossom-lsp"]
+
+[crates.blossom]
+layer = "L5"
+deps = ["blossom-base", "blossom-value", "blossom-node", "blossom-runtime", "blossom-std-host", "blossom-driver"]
+
+[crates.blossom-bench]
+layer = "L5"
+deps = ["blossom-base", "blossom-value", "blossom-kernel", "blossom-engine", "blossom-driver", "blossom-node", "blossom-sim"]
+
+[crates.blossom-lsp]
+layer = "L5"
+deps = ["blossom-base", "blossom-driver", "blossom-syntax", "blossom-analysis"]
+
+[crates.blossom-integration-tests]
+layer = "tests"
+deps = ["*"]
+dev_deps = ["blossom-testkit"]
+
+[crates.codegen-corpus]
+layer = "tests"
+deps = ["*"]
+build_deps = ["blossom-build"]
+dev_deps = ["blossom-testkit"]
+
+[crates.xtask]
+layer = "tools"
+deps = ["*"]
+
+# Every package whose manifest is under systems/ (the flagship systems, ARCHITECTURE §1.5).
+[groups.systems]
+path = "systems/"
+layer = "systems"
+deps = [
+    "blossom", "blossom-base", "blossom-value", "blossom-lattice", "blossom-ir", "blossom-schema", "blossom-artifact",
+    "blossom-kernel", "blossom-engine", "blossom-std-host", "blossom-wire", "blossom-store", "blossom-trace",
+    "blossom-node", "blossom-runtime",
+]
+build_deps = ["blossom-build"]
+dev_deps = ["blossom-sim", "blossom-ldfi", "blossom-verify", "blossom-prov"]
+
+[[forbid]]
+from = ["blossom-kernel"]
+to = ["blossom-ir"]
+why = "the kernel knows nothing about the IR (ARCH-04)"
+
+[[forbid]]
+from = ["blossom-oracle"]
+to = ["blossom-kernel", "blossom-engine", "blossom-plan", "blossom-analysis"]
+why = "the oracle shares no code with what it checks (ARCH-16)"
+
+[[forbid]]
+from = ["blossom-engine"]
+to = ["blossom-plan", "blossom-node", "blossom-prov", "tokio"]
+why = "the engine is independent of the planner, the node, provenance graphs and async I/O (ARCHITECTURE §1.3)"
+
+[[forbid]]
+from = ["blossom-node"]
+to = ["tokio"]
+why = "the node is sans-IO (ARCH-03; source paths are checked by check-sans-io)"
+
+[[forbid]]
+from = ["blossom-node", "blossom-sim", "blossom-runtime"]
+to = ["blossom-syntax", "blossom-front", "blossom-analysis", "blossom-rewrite", "blossom-plan", "blossom-driver"]
+why = "nodes, the simulator and the runtime run compiled artifacts, never the compiler (ARCHITECTURE §1.3)"
+
+[[forbid]]
+from = ["blossom-ir"]
+to = ["blossom-lattice"]
+why = "the IR and the lattice library are built independently (PLAN §4 D2)"
+
+[[forbid]]
+from = ["group:systems"]
+to = ["blossom-driver"]
+mode = "normal-path"
+why = "a system's build.rs reaches the compiler only through blossom-build (ARCHITECTURE §1.3)"

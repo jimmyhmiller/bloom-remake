@@ -1,0 +1,23 @@
+# cargo-nextest configuration (ARCHITECTURE §11.10). A hung simulation or solver run fails instead of stalling CI.
+
+[profile.default]
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[profile.ci]
+fail-fast = false
+retries = 0
+slow-timeout = { period = "30s", terminate-after = 10 }
+failure-output = "immediate-final"
+
+# Tests that drive external solver processes (z3, cvc5, clingo) are limited so they do not oversubscribe the machine.
+[test-groups]
+external-solvers = { max-threads = 2 }
+
+[[profile.default.overrides]]
+filter = "package(blossom-smt) | package(blossom-verify)"
+test-group = "external-solvers"
+
+[[profile.ci.overrides]]
+filter = "package(blossom-smt) | package(blossom-verify)"
+test-group = "external-solvers"

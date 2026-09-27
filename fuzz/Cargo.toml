@@ -1,0 +1,82 @@
+# cargo-fuzz targets (ARCHITECTURE §11.8), run nightly with `cargo +nightly fuzz run <target>`. This is its own
+# workspace, excluded from the main one, so the nightly-only libFuzzer build never touches the stable build.
+# Each target has a stable proptest mirror in its crate's tests. Owned by M13.3 after M1; each target file by the
+# WP that implements it.
+
+[package]
+name = "blossom-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "lexer_parser"
+path = "fuzz_targets/lexer_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "formatter"
+path = "fuzz_targets/formatter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "front"
+path = "fuzz_targets/front.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_decoder"
+path = "fuzz_targets/wire_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wal_recovery"
+path = "fuzz_targets/wal_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trace_reader"
+path = "fuzz_targets/trace_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "artifact_decoder"
+path = "fuzz_targets/artifact_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "smt_response"
+path = "fuzz_targets/smt_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "admission"
+path = "fuzz_targets/admission.rs"
+test = false
+doc = false
+bench = false
