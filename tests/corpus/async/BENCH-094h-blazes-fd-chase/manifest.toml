@@ -1,0 +1,90 @@
+# BENCH-094 (R05 T15; ANA-043): the injective-FD chase behind compatible(gate, key).
+#
+# R05 T15: "S ≡ π_a π_ab π_abc R ⇒ injectivefd(R.a, S.a). A computed column f(a) is not injective unless declared.
+# Company→ticker declared injective seals ticker; company→city does not." Blazes §4.2.1 and §7.2 (the Yahoo!/YHOO/
+# Sunnyvale example; "the identity function, and transitive applications of it").
+#
+# The listing stream is sealed on company. `derive` is confluent and stateless on every path (CR); R05 §4.4.1
+# resolution 3 propagates a seal through a C path iff the seal attributes injectively determine an output column:
+# through the three projections the company survives unchanged (Seal(company)); through the declared #[injective]
+# ticker_of the ticker is sealed (Seal(ticker)); the tag has the same expression as the ticker but no declaration, and
+# the city is not injective, so both streams degrade to Async. Each Tally instance is OW gated on its key: the two
+# sealed streams are compatible (identity on the key), so their sinks are Async and their coordination is sealing;
+# the other two are tainted by rule 2 and reconcile to Run (no Rep), needing ordering.
+schema = 1
+id = "BENCH-094"
+title = "Blazes FD chase: projections and a declared injective function carry a seal; an undeclared or non-injective one does not"
+priority = "P1"
+source = "R05 T15, §4.4 (compatible, injectivefd), §4.4.1 resolution 3, §4.6 item 4; Blazes (ICDE 2014) §4.2.1, §7.2"
+features = ["LANG-003", "LANG-004", "LANG-009", "LANG-042", "LANG-043", "LANG-047", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-153", "LANG-181", "LANG-182", "LANG-207", "ANA-040", "ANA-041", "ANA-042", "ANA-043", "ANA-045"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-003", "LANG-004", "LANG-009", "LANG-042", "LANG-043", "LANG-047", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-153", "LANG-181", "LANG-182", "LANG-207", "ANA-040", "ANA-041", "ANA-042", "ANA-043", "ANA-045"]
+until = "M7"
+
+[expect_analysis.blazes]
+cycles = []
+streams = { listing = "Seal(company)", by_company = "Seal(company)", by_ticker = "Seal(ticker)", by_tag = "Async", by_city = "Async" }
+sinks = { company_days = "Async", ticker_days = "Async", tag_days = "Run", city_days = "Run" }
+coordination = [
+    { at = "per_company", mechanism = "sealing", key = ["company"] },
+    { at = "per_ticker", mechanism = "sealing", key = ["ticker"] },
+    { at = "per_tag", mechanism = "ordering" },
+    { at = "per_city", mechanism = "ordering" },
+]
+
+[[expect_analysis.blazes.paths]]
+component = "derive"
+from = "listings"
+to = "companies"
+annotation = "CR"
+
+[[expect_analysis.blazes.paths]]
+component = "derive"
+from = "listings"
+to = "tickers"
+annotation = "CR"
+
+[[expect_analysis.blazes.paths]]
+component = "derive"
+from = "listings"
+to = "tags"
+annotation = "CR"
+
+[[expect_analysis.blazes.paths]]
+component = "derive"
+from = "listings"
+to = "cities"
+annotation = "CR"
+
+[[expect_analysis.blazes.paths]]
+component = "per_company"
+from = "keyed"
+to = "counts"
+annotation = "OW"
+gate = ["key"]
+
+[[expect_analysis.blazes.paths]]
+component = "per_ticker"
+from = "keyed"
+to = "counts"
+annotation = "OW"
+gate = ["key"]
+
+[[expect_analysis.blazes.paths]]
+component = "per_tag"
+from = "keyed"
+to = "counts"
+annotation = "OW"
+gate = ["key"]
+
+[[expect_analysis.blazes.paths]]
+component = "per_city"
+from = "keyed"
+to = "counts"
+annotation = "OW"
+gate = ["key"]

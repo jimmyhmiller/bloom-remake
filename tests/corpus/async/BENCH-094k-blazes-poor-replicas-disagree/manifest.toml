@@ -1,0 +1,42 @@
+# BENCH-094 (R05 T14; Blazes §5.2.2, §8.2): without coordination, POOR's replicated reporting servers disagree.
+#
+# R05 §9.3 item 14: "POOR ⇒ Diverge. The runtime shows replicas disagreeing without coordination and agreeing with
+# ordering." Blazes §8.2: "The uncoordinated baseline produced observably inconsistent answers across replicas."
+# The program is BENCH-094 (d)'s (POOR, no seal), which the analysis labels Inst at the reporting servers. In the
+# spec's scenario, 100 clicks for ad 7 race the forwarded question at the two reporting servers; the simulator must
+# find a schedule in which one server answers "poor" and the other does not, so the agreement invariant fails. (The
+# ordered, coordinated variant is ANA-046/047's rewrite, checked by M7.5, not here.)
+schema = 1
+id = "BENCH-094"
+title = "Blazes POOR at runtime: the replicated reporting servers answer the same question differently"
+priority = "P1"
+source = "R05 T14 and §9.3 item 14; Blazes (ICDE 2014) §3.4, §5.2.2, §8.2"
+features = ["LANG-003", "LANG-004", "LANG-009", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-153", "LANG-201", "SEM-040", "TEST-001", "TEST-002", "TEST-003", "TEST-081", "VER-001"]
+program = "program.bls"
+spec = "spec.bls"
+derived = true
+expected_from = "literature"
+notes = "The program is BENCH-094 (d)'s; the scenario inputs are the spec's facts."
+
+[deploy]
+nodes = [
+    { name = "A1", role = "AdServer" },
+    { name = "R1", role = "Reporter" },
+    { name = "R2", role = "Reporter" },
+    { name = "C1", role = "CacheServer" },
+    { name = "N1", role = "Analyst" },
+]
+
+[run]
+ticks = 40
+stop = "quiescent"
+seeds = 1000
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-003", "LANG-004", "LANG-009", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-153", "LANG-201", "SEM-040", "TEST-001", "TEST-002", "TEST-003", "TEST-081", "VER-001"]
+until = "M8"
+
+[expect_verify]
+check = "sim"
+result = "fails"

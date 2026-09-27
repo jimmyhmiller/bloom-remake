@@ -1,0 +1,49 @@
+# BENCH-094 (R05 T17; Blazes §4.2): a cycle collapses to one node with the severity of its worst member.
+#
+# R05 T17: "Cycle collapse: a component in a cycle with an OW member gives the whole SCC OW severity." Blazes §4.2: "it
+# reduces each cycle in the graph to a single node with a collapsed label by selecting the label of highest severity
+# among the cycle members." R05 §4.4 step 0 and §4.6 ("Cycles are collapsed coarsely").
+#
+# `expand` (CW on both paths) and `shortest` (OW_a,b) form a cycle through best_msg and ext_msg; the collapsed node has
+# annotation OW_a,b (severity 4 > 2). The unsealed edge stream enters it Async: rule 2 gives Taint, reconciled to Run
+# (no Rep), so the sink is Run and the coordination (ordering) goes on the collapsed node's input.
+schema = 1
+id = "BENCH-094"
+title = "Blazes cycle collapse: a CW component in a cycle with an OW one takes OW severity; the sink is Run"
+priority = "P1"
+source = "R05 T17, §4.4 (step 0) and §4.6; Blazes (ICDE 2014) §4.2"
+features = ["LANG-003", "LANG-004", "LANG-009", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-153", "ANA-040", "ANA-042", "ANA-045"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-003", "LANG-004", "LANG-009", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-153", "ANA-040", "ANA-042", "ANA-045"]
+until = "M7"
+
+[expect_analysis.blazes]
+cycles = [["expand", "shortest"]]
+collapsed = [{ members = ["expand", "shortest"], annotation = "OW", gate = ["a", "b"] }]
+streams = { edge_msg = "Async" }
+sinks = { shortest_paths = "Run" }
+coordination = [{ at = "expand", mechanism = "ordering" }]
+
+[[expect_analysis.blazes.paths]]
+component = "expand"
+from = "edge"
+to = "extended"
+annotation = "CW"
+
+[[expect_analysis.blazes.paths]]
+component = "expand"
+from = "best"
+to = "extended"
+annotation = "CW"
+
+[[expect_analysis.blazes.paths]]
+component = "shortest"
+from = "paths"
+to = "best"
+annotation = "OW"
+gate = ["a", "b"]

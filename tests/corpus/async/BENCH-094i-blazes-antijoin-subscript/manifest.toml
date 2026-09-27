@@ -1,0 +1,61 @@
+# BENCH-094 (R05 T16; Blazes §7.2, footnote 5): the antijoin subscript is the theta columns, {x}.
+#
+# R05 T16: "Antijoin subscript (Blazes fn. 5): R.notin(S where y='Yahoo!', x) gets gate {x}. It is deterministic once S
+# is sealed on y='Yahoo!', or on x." Blazes §7.2: "If the statement is an antijoin (not in), the subscript is the set of
+# columns occurring in the theta clause."
+#
+# In both instances of the filter the S path stores S and reaches the output through the antijoin's negative side
+# (OW_x), and the R path stores R and reaches it through the positive side (CW). With S sealed on x, compatible({x},
+# {x}) holds by identity: no Taint, the seal is consumed by the sealing strategy, and `sealed_out` is Async. With S
+# unsealed, rule 2 taints the component and `open_out` is Run (no Rep). Footnote 5's other case, a seal on the
+# selected partition y = 'Yahoo!', is outside the compatible() predicate (y does not determine x) and is not pinned here
+# (docs/plan/notes/M1.4.md, BENCH-094).
+schema = 1
+id = "BENCH-094"
+title = "Blazes antijoin subscript: gate {x}; sealed on x the output is Async, unsealed it is Run"
+priority = "P1"
+source = "R05 T16, §4.6 item 3; Blazes (ICDE 2014) §7.2 and footnote 5"
+features = ["LANG-003", "LANG-004", "LANG-009", "LANG-040", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "LANG-083", "LANG-088", "LANG-153", "LANG-207", "ANA-040", "ANA-041", "ANA-042", "ANA-043", "ANA-045"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-003", "LANG-004", "LANG-009", "LANG-040", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "LANG-083", "LANG-088", "LANG-153", "LANG-207", "ANA-040", "ANA-041", "ANA-042", "ANA-043", "ANA-045"]
+until = "M7"
+
+[expect_analysis.blazes]
+cycles = []
+streams = { r_msg = "Async", s_sealed = "Seal(x)", s_open = "Async" }
+sinks = { sealed_out = "Async", open_out = "Run" }
+coordination = [
+    { at = "sealed_filter", mechanism = "sealing", key = ["x"] },
+    { at = "open_filter", mechanism = "ordering" },
+]
+
+[[expect_analysis.blazes.paths]]
+component = "sealed_filter"
+from = "r"
+to = "out"
+annotation = "CW"
+
+[[expect_analysis.blazes.paths]]
+component = "sealed_filter"
+from = "s"
+to = "out"
+annotation = "OW"
+gate = ["x"]
+
+[[expect_analysis.blazes.paths]]
+component = "open_filter"
+from = "r"
+to = "out"
+annotation = "CW"
+
+[[expect_analysis.blazes.paths]]
+component = "open_filter"
+from = "s"
+to = "out"
+annotation = "OW"
+gate = ["x"]

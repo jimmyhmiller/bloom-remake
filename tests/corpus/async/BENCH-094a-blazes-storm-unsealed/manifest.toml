@@ -1,0 +1,51 @@
+# BENCH-094 (R05 T13; Blazes §5.1): the Storm wordcount with no seal: the sink is labeled Run and ordering is needed.
+#
+# Blazes (ICDE 2014) §5.1.2: "Blazes performs the following reduction in the absence of any seal annotation: Async
+# -(p, CR)-> Async [Splitter]; Async, OW_word,batch -(2)-> Taint [Count]; Run -(p, CW)-> Run [Committer]. Without
+# coordination, nondeterministic input orders may produce nondeterministic output contents. To ensure that replay ...
+# is deterministic, Blazes will recommend that the topology be coordinated ... totally ordering the batch commits."
+# R05 §4.4.2 and T13: "No seal ⇒ sink label Run, ordering inserted."
+#
+# White-box annotations (ANA-040) of the three module instances: `split` is stateless and monotone (CR); `count`
+# stores the words it sees and counts them per (batch, word), a non-monotone aggregate whose gate is its grouping
+# columns (OW_batch,word); `commit` appends to its store (CW). The components are not replicated, so the Taint of
+# rule 2 reconciles to Run (R-a), which the Commit path preserves (p). The coordination point is `count`'s input
+# (R05 §4.5 placement), by ordering, since no seal is available.
+schema = 1
+id = "BENCH-094"
+title = "Blazes, Storm wordcount without a seal: Count taints its output, the sink is Run, ordering is required"
+priority = "P1"
+source = "R05 T13, §4.4.2 (reference derivations) and §9.3 item 13; Blazes (ICDE 2014) §1.3, §5.1, Figs. 2, 8, 9"
+features = ["LANG-003", "LANG-004", "LANG-009", "LANG-040", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-153", "LANG-154", "LANG-181", "ANA-040", "ANA-042", "ANA-045"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-003", "LANG-004", "LANG-009", "LANG-040", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-153", "LANG-154", "LANG-181", "ANA-040", "ANA-042", "ANA-045"]
+until = "M7"
+
+[expect_analysis.blazes]
+streams = { tweet = "Async", word = "Async", tally = "Run" }
+sinks = { committed = "Run" }
+coordination = [{ at = "count", mechanism = "ordering" }]
+
+[[expect_analysis.blazes.paths]]
+component = "split"
+from = "tweets"
+to = "words"
+annotation = "CR"
+
+[[expect_analysis.blazes.paths]]
+component = "count"
+from = "words"
+to = "counts"
+annotation = "OW"
+gate = ["batch", "word"]
+
+[[expect_analysis.blazes.paths]]
+component = "commit"
+from = "counts"
+to = "db"
+annotation = "CW"
