@@ -7,7 +7,7 @@
 //! `<+-` and its alias `<-+` are the upsert: at the next tick the key's rows are replaced (LANGUAGE §8.2).
 //! Bud's first tick is our tick 0, so Bud's "tick 1" and "tick 2" are our ticks 0 and 1.
 
-program upsert version 1;
+program bud_upsert version 1;
 
 table joe(key: i64, val: String) key(key);
 table t2(key: i64, val: String) key(key);

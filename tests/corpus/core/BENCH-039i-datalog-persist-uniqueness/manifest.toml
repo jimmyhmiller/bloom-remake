@@ -10,7 +10,7 @@ expected_from = "literature"
 notes = "Inputs and outputs are ours: {1, 2} at tick 1, then {2, 3} (2 again) at tick 2: the count is 2, then 3, not 4."
 
 [run]
-ticks = 4
+ticks = 5
 stop = "ticks"
 
 [backend.oracle]
