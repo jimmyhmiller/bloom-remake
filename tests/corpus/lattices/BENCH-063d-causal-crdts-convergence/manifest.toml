@@ -20,8 +20,8 @@ run no two replicas disagree on any query. The check must hold in every explored
 
 [backend.sim]
 status = "unimplemented"
-unimplemented = ["LANG-082", "LANG-088", "LANG-124", "LANG-135", "LANG-137", "LANG-153", "LANG-201", "SEM-040", "SEM-082",
-                 "TEST-001", "TEST-002", "TEST-022"]
+unimplemented = ["LANG-082", "LANG-088", "LANG-124", "LANG-135", "LANG-137", "LANG-153", "LANG-201", "SEM-040",
+                 "SEM-082", "TEST-001", "TEST-002", "TEST-022"]
 until = "M8"
 
 [expect_verify]

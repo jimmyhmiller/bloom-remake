@@ -1,6 +1,6 @@
 //! BENCH-054b. AllPathsL, AllPathsImplicitProject and AllPathsEqJoin (bud test/tc_lattice.rb; R04 §12 T6): the
-//! transitive closure with summed costs, computed entirely inside lset lattices. Both formulations start from AllPathsL's
-//! seed `path <= link` and must compute the same set:
+//! transitive closure with summed costs, computed entirely inside lset lattices. Both formulations start from
+//! AllPathsL's seed `path <= link` and must compute the same set:
 //!   - `path_gen`: an equi-join written with generators over the sets (a morphism, LANG-123), which is Bud's
 //!     implicit projection (AllPathsImplicitProject);
 //!   - `path_eq`: `product`, then `filter`, then `map` (Bud's `eqjoin`, AllPathsEqJoin), a bimorphism followed by
