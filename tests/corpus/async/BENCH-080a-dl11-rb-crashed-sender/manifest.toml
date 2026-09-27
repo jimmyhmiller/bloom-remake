@@ -1,0 +1,101 @@
+# BENCH-080 (R02 T12): DL11 reliable broadcast, agreement when the sender crashes mid-broadcast.
+#
+# R02 T12: "In fair runs every member eventually has rdeliver. Under loss plus a crashed sender, all non-failed
+# nodes agree." The loss that the textbook model (and DL11) allows is the loss a crash causes: a sender that crashes
+# while broadcasting reaches only some members. Links between correct nodes are reliable. (Arbitrary loss between
+# correct nodes breaks agreement; that is Molly's classic_rb verdict, BENCH-130.) The scenario: a broadcasts "m1" in
+# tick 1, its message to c is lost (the part of the broadcast the crash cut off), and a crashes in tick 2.
+#
+# Derivation (sync harness, PLAN §5.1; `members` is every node, a included):
+#   tick 1  a: smessage(a, m1) -> sbcast to a, b, c, d; a -> c is omitted.
+#   tick 2  a is crashed (CR-20: no firings). b and d receive sbcast(a, m1): they relay to every member and stage
+#           rdeliver for tick 3.
+#   tick 3  b, c, d all receive copies (from b and d); each relays again. rdeliver(a, m1) holds at b and d.
+#   tick 4+ every live node receives a copy in every tick and relays it (the program never stops flooding), so
+#           rdeliver(a, m1) holds at b and d from tick 3 on and at c from tick 4 on. a never delivers.
+# Every copy of the same fact in one tick is one fact (SEM-007): c's batch in tick 3 is the single row (a, m1).
+schema = 1
+id = "BENCH-080"
+title = "DL11 reliable broadcast: every non-failed node delivers when the sender crashes mid-broadcast"
+priority = "P1"
+source = "R02 T12 and §4.7 (DL11 §5.7, verbatim program)"
+features = ["LANG-041", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-152", "LANG-240", "SEM-007"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+notes = "The crash and the omission are scripted faults of the sync harness (PLAN §5.1, BENCH-000)."
+
+[deploy]
+nodes = [
+    { name = "a", role = "Node" },
+    { name = "b", role = "Node" },
+    { name = "c", role = "Node" },
+    { name = "d", role = "Node" },
+]
+
+[run]
+ticks = 10
+stop = "ticks"
+
+[[input]]
+node = "a"
+tick = 1
+rel = "rmessage"
+rows = [["a", "m1"]]
+
+[[fault]]
+kind = "omit"
+from = "a"
+to = "c"
+send_tick = 1
+
+[[fault]]
+kind = "crash"
+node = "a"
+tick = 2
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-041", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-152", "LANG-240", "SEM-007"]
+until = "M5"
+
+# c misses a's own message and hears the broadcast only through the relays.
+[[expect]]
+node = "c"
+rel = "sbcast"
+tick = 2
+rows = []
+
+[[expect]]
+node = "c"
+rel = "sbcast"
+tick = 3
+rows = [["a", "m1"]]
+
+[[expect]]
+node = "b"
+rel = "rdeliver"
+row = ["a", "m1"]
+holds = "3.."
+absent = "..=2"
+
+[[expect]]
+node = "d"
+rel = "rdeliver"
+row = ["a", "m1"]
+holds = "3.."
+absent = "..=2"
+
+[[expect]]
+node = "c"
+rel = "rdeliver"
+row = ["a", "m1"]
+holds = "4.."
+absent = "..=3"
+
+# The crashed sender never delivers.
+[[expect]]
+node = "a"
+rel = "rdeliver"
+row = ["a", "m1"]
+absent = "0.."

@@ -1,0 +1,12 @@
+//! BENCH-082: some schedule of the marriage ceremony never calls the wedding off (MAR Example 3: the ultimate model
+//! without `runaway()`).
+
+spec SomeRunWeds for r#program {
+    nodes N1;
+
+    /// "The wedding is always called off." A schedule that delivers the two vows sent in tick 0 together in tick 1
+    /// has both vows present from tick 1 on, so `runaway` never holds and this bounded liveness property fails.
+    liveness always_off: eventually runaway() @ N1 within 4 ticks after 0;
+
+    check bmc { ticks: 6, delay: 2 } expect fails;
+}

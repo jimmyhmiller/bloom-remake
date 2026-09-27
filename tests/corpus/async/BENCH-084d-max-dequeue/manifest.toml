@@ -1,0 +1,100 @@
+# BENCH-084 (R02 T17): the `.ded` twin of BENCH-084a, through the Molly frontend (LANG-220).
+#
+# The b_edb facts hold only in tick 1 (each element is sent once, as in BENCH-084a). The derivation is BENCH-084a's:
+# {1,2,3} everywhere in ticks 2-3, {2,3} in ticks 4-5, {3} from tick 6. Rows omit the location column.
+schema = 1
+id = "BENCH-084"
+title = "Max-element dequeue (.ded twin): every node ends with the maximum under synchronous rounds"
+priority = "P1"
+source = "R02 T17 and §7.3 (MAR Appendix E, Example 10, verbatim rules; elements sent once, see BENCH-084a)"
+features = ["LANG-065", "LANG-069", "LANG-220"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "x", role = "Node" }, { name = "y", role = "Node" }]
+
+[run]
+ticks = 12
+stop = "quiescent"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-065", "LANG-069", "LANG-220"]
+until = "M5"
+
+[[expect]]
+node = "x"
+rel = "b"
+tick = 2
+rows = [[1], [2], [3]]
+
+[[expect]]
+node = "x"
+rel = "b"
+tick = 3
+rows = [[1], [2], [3]]
+
+[[expect]]
+node = "x"
+rel = "b"
+tick = 4
+rows = [[2], [3]]
+
+[[expect]]
+node = "x"
+rel = "b"
+tick = 5
+rows = [[2], [3]]
+
+[[expect]]
+node = "x"
+rel = "b"
+tick = 6
+rows = [[3]]
+
+[[expect]]
+node = "x"
+rel = "b"
+tick = 7
+rows = [[3]]
+
+[[expect]]
+node = "y"
+rel = "b"
+tick = 2
+rows = [[1], [2], [3]]
+
+[[expect]]
+node = "y"
+rel = "b"
+tick = 3
+rows = [[1], [2], [3]]
+
+[[expect]]
+node = "y"
+rel = "b"
+tick = 4
+rows = [[2], [3]]
+
+[[expect]]
+node = "y"
+rel = "b"
+tick = 5
+rows = [[2], [3]]
+
+[[expect]]
+node = "y"
+rel = "b"
+tick = 6
+rows = [[3]]
+
+[[expect]]
+node = "y"
+rel = "b"
+tick = 7
+rows = [[3]]
+
+[[expect]]
+quiescent_from = 8

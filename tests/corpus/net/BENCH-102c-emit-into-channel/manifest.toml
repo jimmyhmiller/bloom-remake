@@ -1,0 +1,22 @@
+# BENCH-102 (R03 T13): Bud's test also asserts that `c <= [[...]]` (an instantaneous merge into a channel) raises
+# `Bud::CompileError`. In Blossom that is `emit` into a channel, which the operator x collection legality matrix
+# forbids (LANGUAGE §12, LANG-066): BLS0400 at the offending statement (line 28 of program.bls).
+schema = 1
+id = "BENCH-102"
+title = "Bud channel with a key: an instantaneous insert into a channel is a compile error"
+priority = "P0"
+source = "R03 T13; bud test/tc_channel.rb (TestPayloads#test_channel_with_key, `c <= ...` raises CompileError)"
+features = ["LANG-042", "LANG-066", "ANA-005"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[backend.compile]
+status = "unimplemented"
+unimplemented = ["LANG-042", "LANG-066", "ANA-005"]
+until = "M5"
+
+[[expect_diag]]
+code = "BLS0400"
+line = 28
+severity = "error"

@@ -1,0 +1,43 @@
+//! BENCH-102: Bud's `ChannelWithKey` (bud `test/tc_channel.rb`, TestPayloads#test_channel_with_key).
+//!
+//! A keyed column-form channel. The receiver stores what arrives, and three rules read the channel's payloads
+//! (every column except the `@` one, LANG-094): as they are, with named fields, and by position.
+
+program channel_with_key version 1;
+
+/// Bud: `channel :c, [:@addr, :k1] => [:v1]`. The key (addr, k1) is checked at the sender, per tick (SEM-050).
+channel c(@addr: Node, k1: i64, v1: i64) key(addr, k1);
+/// Bud: `scratch :kickoff, [:addr, :v1, :v2]`, which the test fills with `kickoff <+ [...]`.
+input kickoff(addr: Node, v1: i64, v2: i64);
+/// Bud: `table :recv, c.key_cols => c.val_cols`.
+table recv(addr: Node, k1: i64, v1: i64) key(addr, k1);
+/// Bud: `table :ploads`, `table :ploads_blk`, `table :ploads_blk_colnos`, each with Bud's default schema
+/// `[:key] => [:val]`.
+table ploads(key: i64, val: i64) key(key);
+table ploads_blk(key: i64, val: i64) key(key);
+table ploads_blk_colnos(key: i64, val: i64) key(key);
+
+/// Bud: `c <~ kickoff {|k| [k.addr, k.v1, k.v2]}`.
+kick: on kickoff(a, x, y) {
+    send c(a, x, y);
+}
+
+/// Bud: `recv <= c`.
+receive: on c(a, k, v) {
+    emit recv(a, k, v);
+}
+
+/// Bud: `ploads <= c.payloads`.
+strip: on c.payloads(k, v) {
+    emit ploads(k, v);
+}
+
+/// Bud: `ploads_blk <= c.payloads {|m| [m.k1 + 1, m.v1 + 1]}`: the payload fields by name.
+strip_named: on c.payloads(k1: k, v1: v) {
+    emit ploads_blk(k + 1, v + 1);
+}
+
+/// Bud: `ploads_blk_colnos <= c.payloads {|m| [m[0] + 2, m[1] + 2]}`: the payload fields by position.
+strip_positional: on c.payloads(k, v) {
+    emit ploads_blk_colnos(k + 2, v + 2);
+}

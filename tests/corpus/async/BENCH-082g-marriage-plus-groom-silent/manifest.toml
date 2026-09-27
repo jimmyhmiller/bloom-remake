@@ -1,0 +1,36 @@
+# BENCH-082 (R02 T15): the Dedalus+ marriage ceremony has exactly one ultimate model on every schedule.
+#
+# Only the bride vows, so `refuse` sends i_dont(groom) in every tick; its first arrival derives runaway(), which
+# persists. Whatever the schedule, the ultimate model is {runaway()} (MAR Theorem 1): runaway holds at the end of
+# every seed. The resends never stop, so the run is bounded by ticks.
+schema = 1
+id = "BENCH-082"
+title = "Marriage ceremony in Dedalus+: when the groom is silent, every schedule calls the wedding off"
+priority = "P0"
+source = "R02 T15 and §7.3 (MAR Example 4, verbatim rules)"
+features = ["LANG-040", "LANG-043", "LANG-045", "LANG-046", "LANG-061", "LANG-062", "LANG-082", "LANG-190", "SEM-040", "SEM-044", "TEST-001"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[run]
+ticks = 20
+stop = "ticks"
+seeds = 16
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-045", "LANG-046", "LANG-061", "LANG-062", "LANG-082", "LANG-190", "SEM-040", "SEM-044", "TEST-001"]
+until = "M8"
+
+[[expect]]
+node = "n1"
+rel = "runaway"
+final = true
+rows = [[]]
+
+[[expect]]
+node = "n1"
+rel = "i_dont"
+final = true
+rows = [["groom"]]

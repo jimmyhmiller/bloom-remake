@@ -1,0 +1,126 @@
+# BENCH-100 (R03 T11): Bud's TickleCount.
+#
+# Bud's test asserts `loopback_done == [[5]]` and `mcast_done == [[5]]` in the ticks where they are non-empty,
+# `c.stratified_rules.length == 2`, and that the `t_depends` row mcast <- loop_chan has `nm == false`.
+#
+# Derivation of the tick numbers (sync harness, PLAN §5.1: a message sent in round t arrives in round t+1, self-sends
+# included): the bootstrap sends loop_chan(0) in tick 0, so loop_chan(k) arrives in tick k+1 for k = 0..6. The count 5
+# arrives in tick 6 (loopback_done) and is relayed on `mcast` in tick 6, arriving in tick 7 (mcast_done). loop_chan(6)
+# arrives in tick 7 and sends nothing. Tick 8 is empty and tick 9 is equivalent to it: quiescent from 9 (SEM-010).
+#
+# Strata: every deductive rule reads only received messages positively, so there is one deductive stratum; the
+# temporal (async) rules form the final pseudo-stratum (SEM-022 step 5), which is Bud's second "stratum".
+# `strata.count` counts that pseudo-stratum, as Bud's `stratified_rules.length` does (see docs/plan/notes/M1.4.md).
+schema = 1
+id = "BENCH-100"
+title = "Bud TickleCount: loopback and self-addressed channel counters, two strata, no point of order"
+priority = "P0"
+source = "R03 T11; bud test/tc_channel.rb (TickleCount, TestTickle#test_tickle_run_bg, #test_tickle_single_step)"
+features = ["LANG-042", "LANG-046", "LANG-060", "LANG-062", "LANG-150", "LANG-190", "SEM-021", "SEM-022", "ANA-002", "ANA-022"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[run]
+ticks = 12
+stop = "quiescent"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-042", "LANG-046", "LANG-060", "LANG-062", "LANG-150", "LANG-190", "SEM-021", "SEM-022", "ANA-002", "ANA-022"]
+until = "M5"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-042", "LANG-046", "LANG-060", "LANG-062", "LANG-150", "LANG-190", "SEM-021", "SEM-022", "ANA-002", "ANA-022"]
+until = "M5"
+
+# The counter itself: one value per tick.
+[[expect]]
+node = "n1"
+rel = "loop_chan"
+tick = 1
+rows = [[0]]
+
+[[expect]]
+node = "n1"
+rel = "loop_chan"
+tick = 6
+rows = [[5]]
+
+[[expect]]
+node = "n1"
+rel = "loop_chan"
+tick = 7
+rows = [[6]]
+
+[[expect]]
+node = "n1"
+rel = "loop_chan"
+tick = 8
+rows = []
+
+# loopback_done == [[5]], in exactly one tick.
+[[expect]]
+node = "n1"
+rel = "loopback_done"
+tick = 6
+rows = [[5]]
+
+[[expect]]
+node = "n1"
+rel = "loopback_done"
+row = [5]
+absent = "..=5"
+
+[[expect]]
+node = "n1"
+rel = "loopback_done"
+row = [5]
+absent = "7.."
+
+[[expect]]
+node = "n1"
+rel = "loopback_done"
+tick = 5
+rows = []
+
+# mcast carries (self, 0) .. (self, 5); mcast_done == [[5]], in exactly one tick.
+[[expect]]
+node = "n1"
+rel = "mcast"
+tick = 2
+rows = [["n1", 0]]
+
+[[expect]]
+node = "n1"
+rel = "mcast"
+tick = 7
+rows = [["n1", 5]]
+
+[[expect]]
+node = "n1"
+rel = "mcast_done"
+tick = 7
+rows = [[5]]
+
+[[expect]]
+node = "n1"
+rel = "mcast_done"
+row = [5]
+absent = "..=6"
+
+[[expect]]
+node = "n1"
+rel = "mcast_done"
+row = [5]
+absent = "8.."
+
+[[expect]]
+quiescent_from = 9
+
+[expect_analysis]
+# Exactly two strata: one deductive stratum plus the temporal pseudo-stratum.
+strata = { count = 2, of = { loopback_done = 0, mcast_done = 0 } }
+# No negative edge anywhere; in particular mcast <- loop_chan is monotone (`nm == false` in Bud).
+points_of_order = { complete = true, edges = [], clusters = [] }

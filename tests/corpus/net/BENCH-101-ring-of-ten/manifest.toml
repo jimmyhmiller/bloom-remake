@@ -1,0 +1,216 @@
+# BENCH-101 (R03 T12): Bud's ring of 10.
+#
+# Bud's test builds ten members, points each at the next one (`next_guy <+`), kicks off member 0 with count 0, waits
+# for `done` at the last member, then asserts `last_cnt.first == [30 + i]` at member i.
+#
+# Derivation (sync harness, PLAN §5.1): `set_next` arrives in tick 1 on every member; `kickoff(0)` arrives at n0 in
+# tick 2 and n0 sends pipe(n0, 0) to itself. Count k then arrives at member n(k mod 10) in tick 3 + k: n0 gets 0, 10,
+# 20, 30; member i gets i, 10+i, 20+i, 30+i. Count 39 arrives at n9 in tick 42, which derives done(39) and passes
+# nothing on. Each arrival of count k stages last_cnt(k) and deletes the previous value for tick 4 + k, so member i
+# ends with last_cnt == [30 + i] (n9 from tick 43). Nothing changes after tick 43: quiescent from 44 (SEM-010).
+schema = 1
+id = "BENCH-101"
+title = "Bud ring of 10: the token count reaches 39 and member i ends with last_cnt == 30 + i"
+priority = "P0"
+source = "R03 T12; bud test/tc_channel.rb (RingMember, TestRing#test_basic_ring)"
+features = ["LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-061", "LANG-062", "LANG-063", "LANG-150", "SEM-005", "SEM-006"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [
+    { name = "n0", role = "Node" },
+    { name = "n1", role = "Node" },
+    { name = "n2", role = "Node" },
+    { name = "n3", role = "Node" },
+    { name = "n4", role = "Node" },
+    { name = "n5", role = "Node" },
+    { name = "n6", role = "Node" },
+    { name = "n7", role = "Node" },
+    { name = "n8", role = "Node" },
+    { name = "n9", role = "Node" },
+]
+
+[run]
+ticks = 60
+stop = "quiescent"
+
+[[input]]
+node = "n0"
+tick = 1
+rel = "set_next"
+rows = [["n1"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "set_next"
+rows = [["n2"]]
+
+[[input]]
+node = "n2"
+tick = 1
+rel = "set_next"
+rows = [["n3"]]
+
+[[input]]
+node = "n3"
+tick = 1
+rel = "set_next"
+rows = [["n4"]]
+
+[[input]]
+node = "n4"
+tick = 1
+rel = "set_next"
+rows = [["n5"]]
+
+[[input]]
+node = "n5"
+tick = 1
+rel = "set_next"
+rows = [["n6"]]
+
+[[input]]
+node = "n6"
+tick = 1
+rel = "set_next"
+rows = [["n7"]]
+
+[[input]]
+node = "n7"
+tick = 1
+rel = "set_next"
+rows = [["n8"]]
+
+[[input]]
+node = "n8"
+tick = 1
+rel = "set_next"
+rows = [["n9"]]
+
+[[input]]
+node = "n9"
+tick = 1
+rel = "set_next"
+rows = [["n0"]]
+
+[[input]]
+node = "n0"
+tick = 2
+rel = "kickoff"
+rows = [[0]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-061", "LANG-062", "LANG-063", "LANG-150", "SEM-005", "SEM-006"]
+until = "M5"
+
+# The token's first hop: n0 sends to itself.
+[[expect]]
+node = "n0"
+rel = "pipe"
+tick = 3
+rows = [["n0", 0]]
+
+# The token reaches 39 at the last member, in exactly one tick.
+[[expect]]
+node = "n9"
+rel = "pipe"
+tick = 42
+rows = [["n9", 39]]
+
+[[expect]]
+node = "n9"
+rel = "done"
+tick = 42
+rows = [[39]]
+
+[[expect]]
+node = "n9"
+rel = "done"
+row = [39]
+absent = "..=41"
+
+[[expect]]
+node = "n9"
+rel = "done"
+row = [39]
+absent = "43.."
+
+# The <+ / <- replacement idiom: n0 holds 0 from tick 4, and 10 replaces it in tick 14.
+[[expect]]
+node = "n0"
+rel = "last_cnt"
+tick = 13
+rows = [[0]]
+
+[[expect]]
+node = "n0"
+rel = "last_cnt"
+tick = 14
+rows = [[10]]
+
+[[expect]]
+node = "n0"
+rel = "last_cnt"
+final = true
+rows = [[30]]
+
+[[expect]]
+node = "n1"
+rel = "last_cnt"
+final = true
+rows = [[31]]
+
+[[expect]]
+node = "n2"
+rel = "last_cnt"
+final = true
+rows = [[32]]
+
+[[expect]]
+node = "n3"
+rel = "last_cnt"
+final = true
+rows = [[33]]
+
+[[expect]]
+node = "n4"
+rel = "last_cnt"
+final = true
+rows = [[34]]
+
+[[expect]]
+node = "n5"
+rel = "last_cnt"
+final = true
+rows = [[35]]
+
+[[expect]]
+node = "n6"
+rel = "last_cnt"
+final = true
+rows = [[36]]
+
+[[expect]]
+node = "n7"
+rel = "last_cnt"
+final = true
+rows = [[37]]
+
+[[expect]]
+node = "n8"
+rel = "last_cnt"
+final = true
+rows = [[38]]
+
+[[expect]]
+node = "n9"
+rel = "last_cnt"
+final = true
+rows = [[39]]
+
+[[expect]]
+quiescent_from = 44

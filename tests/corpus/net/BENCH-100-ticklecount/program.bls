@@ -1,0 +1,42 @@
+//! BENCH-100: Bud's `TickleCount` (bud `test/tc_channel.rb`), ported statement by statement.
+//!
+//! A loopback counts from 0 to 6. Every count below 6 is also sent on a column-form channel whose `@` column is
+//! this node (Bud's `ip_port`). The two scratches fire once, in the tick in which the count 5 is seen on each
+//! path. The program has no point of order: every edge is positive.
+
+program tickle_count version 1;
+
+/// Bud: `loopback :loop_chan, [:cnt]`.
+loopback loop_chan(cnt: i64);
+/// Bud: `channel :mcast, [:@addr, :cnt]`: the column form, with one `@` column.
+channel mcast(@addr: Node, cnt: i64);
+/// Bud: `scratch :loopback_done, [:nums]`.
+scratch loopback_done(nums: i64);
+/// Bud: `scratch :mcast_done, [:nums]`.
+scratch mcast_done(nums: i64);
+
+/// Bud: `bootstrap do loop_chan <~ [[0]] end`.
+bootstrap {
+    send loop_chan(0);
+}
+
+/// Bud: `loop_chan <~ loop_chan {|l| [l.cnt + 1] if l.cnt < 6}`.
+count_up: on loop_chan(c) where c < 6 {
+    send loop_chan(c + 1);
+}
+
+/// Bud: `loopback_done <= loop_chan {|l| [l.cnt] if l.cnt == 5}`.
+loop_seen: on loop_chan(c) where c == 5 {
+    emit loopback_done(c);
+}
+
+/// Bud: `mcast <~ loop_chan {|l| [ip_port, l.cnt] if l.cnt < 6}`. The column form takes the destination from the
+/// `@` column, so the statement has no `to`.
+relay: on loop_chan(c) where c < 6 {
+    send mcast(self, c);
+}
+
+/// Bud: `mcast_done <= mcast {|m| [m.cnt] if m.cnt == 5}`.
+mcast_seen: on mcast(_, c) where c == 5 {
+    emit mcast_done(c);
+}

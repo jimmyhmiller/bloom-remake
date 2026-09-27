@@ -1,0 +1,30 @@
+//! BENCH-086: the asynchronous singleton of Marczak et al. (Datalog 2.0 2012, Examples 1 and 2) with the persistence
+//! rule added, which R02 T19 and MAR §3.2 (guarded asynchrony) prescribe.
+//!
+//!     p(#L)@async ← q(#L).
+//!     p(L)@next ← p(L).
+//!
+//! The first arrival of p makes it true forever: the program is Dedalus+ and its only ultimate model is {p}.
+
+program async_singleton_persisted version 1;
+
+/// MAR's EDB: q(n1).
+static q();
+fact q();
+
+/// The asynchronous head `p(#L)@async`, addressed to the same node.
+loopback p_msg();
+/// MAR's output relation p, persisted by `p(L)@next ← p(L)`.
+output p();
+
+ping: while q() {
+    send p_msg();
+}
+
+arrive: on p_msg() {
+    emit p();
+}
+
+keep: while p() {
+    next p();
+}

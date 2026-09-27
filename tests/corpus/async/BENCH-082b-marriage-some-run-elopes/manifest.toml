@@ -1,0 +1,28 @@
+# BENCH-082 (R02 T14; R05 T5): the marriage ceremony has an ultimate model with runaway().
+#
+# MAR Example 3: a schedule in which the first arrivals of the two vows differ derives runaway() and keeps it. The
+# spec's invariant says the wedding stays on; bounded model checking over asynchronous schedules (delivery within 2
+# ticks of the send) finds such a run, so the check fails. BENCH-082c shows the other ultimate model.
+schema = 1
+id = "BENCH-082"
+title = "Marriage ceremony: some schedule calls the wedding off (bounded model checking finds it)"
+priority = "P0"
+source = "R02 T14 and §7.2 (MAR Example 3, verbatim program)"
+features = ["LANG-040", "LANG-043", "LANG-045", "LANG-046", "LANG-061", "LANG-062", "LANG-082", "LANG-201", "VER-001", "VER-002"]
+program = "program.bls"
+spec = "spec.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "N1", role = "Node" }]
+
+[backend.bmc]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-045", "LANG-046", "LANG-061", "LANG-062", "LANG-082", "LANG-201", "VER-001", "VER-002"]
+until = "M9"
+
+[expect_verify]
+check = "bmc"
+result = "fails"
+bounds = { ticks = 4, delay = 2 }

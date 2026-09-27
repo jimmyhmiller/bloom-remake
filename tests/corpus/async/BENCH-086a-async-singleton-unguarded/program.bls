@@ -1,0 +1,25 @@
+//! BENCH-086: the asynchronous singleton (Marczak et al., Datalog 2.0 2012, Examples 1 and 2), ported rule by rule.
+//!
+//!     p(#L)@async ← q(#L).
+//!
+//! q is EDB, so p is sent in every tick; p is not persisted, so it holds exactly in the ticks in which a copy
+//! arrives. p is ultimately true only if arrivals eventually cover every tick: the ultimate models are {} and {p}.
+
+program async_singleton version 1;
+
+/// MAR's EDB: q(n1).
+static q();
+fact q();
+
+/// The asynchronous head `p(#L)@async`, addressed to the same node.
+loopback p_msg();
+/// MAR's output relation p: it holds in the ticks in which a copy arrives.
+output p();
+
+ping: while q() {
+    send p_msg();
+}
+
+arrive: on p_msg() {
+    emit p();
+}

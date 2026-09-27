@@ -1,0 +1,67 @@
+//! BENCH-083: distributed garbage collection (Marczak et al., Datalog 2.0 2012, Appendix B, Example 7), ported rule
+//! by rule.
+//!
+//!     addr(Addr)@async ← addr_edb(Addr).
+//!     refers_to(#M, Src, Dst)@async ← local_ptr_edb(#N, Src, Dst), master(#M).
+//!     refers_to(Src, Dst)@next ← refers_to(Src, Dst).
+//!     reach(Src, Dst) ← refers_to(Src, Dst).
+//!     reach(Src, Next) ← reach(Src, Dst), refers_to(Dst, Next).
+//!     garbage(Addr) ← addr(Addr), root_edb(Root), ¬reach(Root, Addr).
+//!     garbage(Addr)@next ← garbage(Addr).
+//!
+//! Every node forwards the pointers it owns to the master, which computes what the root reaches and declares every
+//! other address garbage. Nothing makes the negation wait until every pointer has arrived: if an address arrives
+//! before a pointer that reaches it, a live address is collected, and `garbage` persists.
+
+program gc version 1;
+
+/// The node that computes reachability: the same fact at every node.
+static master(m: Node);
+fact master("M");
+
+/// MAR's per-node EDB relations are located where they are held. That node is an explicit first column here, and
+/// each node reads its own rows.
+static local_ptr_edb(at: Node, src: String, dst: String);
+static addr_edb(at: Node, addr: String);
+static root_edb(at: Node, root: String);
+
+fact local_ptr_edb("H1", "r", "a");
+fact local_ptr_edb("H2", "a", "b");
+fact addr_edb("M", "a");
+fact addr_edb("M", "b");
+fact addr_edb("M", "c");
+fact root_edb("M", "r");
+
+/// The asynchronous head `addr(Addr)@async`, addressed to the same node. It is not persisted.
+loopback addr(a: String);
+/// The asynchronous head `refers_to(#M, Src, Dst)@async`.
+channel refers_to_msg(src: String, dst: String);
+/// `refers_to` itself: every arrival, persisted by `refers_to(Src, Dst)@next ← refers_to(Src, Dst)`.
+table refers_to(src: String, dst: String);
+/// MAR's output, persisted by `garbage(Addr)@next ← garbage(Addr)`.
+output garbage(a: String);
+
+announce: while addr_edb(self, a) {
+    send addr(a);
+}
+
+ship: while local_ptr_edb(self, s, d), master(m) {
+    send refers_to_msg(s, d) to m;
+}
+
+arrive: on refers_to_msg(s, d) {
+    emit refers_to(s, d);
+}
+
+view reach(s, d) {
+    refers_to(s, d);
+    reach(s, mid), refers_to(mid, d);
+}
+
+collect: on addr(a), root_edb(self, r), not reach(r, a) {
+    emit garbage(a);
+}
+
+keep: while garbage(a) {
+    next garbage(a);
+}
