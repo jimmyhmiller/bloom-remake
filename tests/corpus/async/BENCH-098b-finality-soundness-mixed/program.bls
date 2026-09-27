@@ -1,0 +1,87 @@
+//! BENCH-098: finality soundness under fuzzing, over BENCH-097 (b) (R13 §12 T6 and T15; TEST-088).
+//!
+//!     q_c() :- R(c), notin S(c).                                        (with c = 1)
+//!     Q(x) = (R(x) ∧ x > 10) ∨ (S(x) ∧ ¬T(x))                           (FT §5.1)
+//!
+//! A source forwards the host's R, S and T facts to two replicas; each replica keeps them in insert-only tables and
+//! evaluates both queries, exactly as BENCH-097 (b) does on one node. Both queries are MIXED (ANA-120): each tuple is
+//! decided at run time (ANA-121), and a replica may report a tuple final only once no continuation can change it.
+
+program ft_soundness_mixed version 1;
+
+static replica(g: Node);
+fact replica("R1");
+fact replica("R2");
+
+/// At the source, from the host.
+input r_in(x: i64);
+input s_in(x: i64);
+input t_in(x: i64);
+
+channel r_msg(x: i64);
+channel s_msg(x: i64);
+channel t_msg(x: i64);
+
+/// At each replica: every fact received. The tables only grow.
+table r(x: i64);
+table s(x: i64);
+table t(x: i64);
+
+output q_c();
+output q(x: i64);
+/// Observers of the runtime finality status (LANGUAGE §14.5).
+output q_c_final_true();
+output q_c_final_false();
+output q_final_present(x: i64);
+output q_final_absent(x: i64);
+
+fan_r: on r_in(x), replica(g) {
+    send r_msg(x) to g;
+}
+fan_s: on s_in(x), replica(g) {
+    send s_msg(x) to g;
+}
+fan_t: on t_in(x), replica(g) {
+    send t_msg(x) to g;
+}
+
+store_r: on r_msg(x) {
+    emit r(x);
+}
+store_s: on s_msg(x) {
+    emit s(x);
+}
+store_t: on t_msg(x) {
+    emit t(x);
+}
+
+rc_not_sc: while r(1), not s(1) {
+    emit q_c();
+}
+
+big_r: while r(x) where x > 10 {
+    emit q(x);
+}
+s_not_t: while s(x), not t(x) {
+    emit q(x);
+}
+
+/// Every value mentioned in any input: the candidates whose finality is observed.
+view candidate(x) {
+    r(x);
+    s(x);
+    t(x);
+}
+
+q_c_true: while final q_c() {
+    emit q_c_final_true();
+}
+q_c_false: while final not q_c() {
+    emit q_c_final_false();
+}
+q_present: while final q(x) {
+    emit q_final_present(x);
+}
+q_absent: while candidate(x), final not q(x) {
+    emit q_final_absent(x);
+}

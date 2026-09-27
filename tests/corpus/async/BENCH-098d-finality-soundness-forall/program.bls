@@ -1,0 +1,44 @@
+//! BENCH-098: finality soundness under fuzzing, over BENCH-097 (c) (R13 §12 T7 and T15; TEST-088).
+//!
+//!     allpos() :- forall R(x): x > 0.
+//!
+//! A source forwards R's facts to two replicas; each keeps them in an insert-only table. allpos() is antitone in R
+//! (NEG-final, ANA-120): it may be reported final-false at the first violation, and never final-true while R may grow.
+
+program ft_soundness_forall version 1;
+
+static replica(g: Node);
+fact replica("R1");
+fact replica("R2");
+
+/// At the source, from the host.
+input r_in(x: i64);
+
+channel r_msg(x: i64);
+
+table r(x: i64);
+
+final output allpos();
+output allpos_final_true();
+output allpos_final_false();
+
+fan: on r_in(x), replica(g) {
+    send r_msg(x) to g;
+}
+
+store: on r_msg(x) {
+    emit r(x);
+}
+
+/// `forall` over the open table r: antitone, so a point of order (LANGUAGE §9.8), and NEG-final (ANA-120).
+all_positive: while forall r(x) { x > 0 } {
+    emit allpos();
+}
+
+final_true: while final allpos() {
+    emit allpos_final_true();
+}
+
+final_false: while final not allpos() {
+    emit allpos_final_false();
+}

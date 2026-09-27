@@ -1,0 +1,22 @@
+//! BENCH-098: the antitone query of BENCH-097 (c) under 10⁴ schedules with crashes (R13 §12 T7 and T15).
+//!
+//! R(3) and R(9), then R(−2): a replica that has the violation reports allpos() final-false; before that allpos()
+//! is provisional-true. R is never sealed, so allpos() is never final-true, whatever the schedule.
+
+spec ForallFinalitySound for r#program {
+    nodes SRC, R1, R2;
+
+    fact r_in(3) @ SRC at tick 1;
+    fact r_in(9) @ SRC at tick 1;
+    fact r_in(-2) @ SRC at tick 2;
+
+    faults { crashes: 1, model: async }
+
+    invariant replicas_agree: never allpos_final_true() @ a, allpos_final_false() @ b;
+    /// R13 T7: "It is never final-true unless R is sealed."
+    invariant never_final_true: never allpos_final_true() @ a;
+    /// Finality is monotone (SEM-016): once reported final-false, allpos() never holds again at that replica.
+    invariant false_stays_false: never allpos_final_false() @ a, allpos() @ a;
+
+    check sim { runs: 10000, seed: 1 } expect holds;
+}
