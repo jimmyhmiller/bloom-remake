@@ -3,7 +3,7 @@ id = "BENCH-007"
 title = "DL11 §3.4 priority queue, global FIFO: eve@124, bob/bash@125, alice@126, bob/ssh@127"
 priority = "P0"
 source = "R02 §3.3 and §17 T7 (DL11 §3.4, global-FIFO variant); FEATURES.md BENCH-007"
-features = ["LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-063", "LANG-100", "LANG-101", "SEM-005"]
+features = ["LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-063", "LANG-100", "LANG-101", "SEM-005", "LANG-060"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -15,12 +15,12 @@ stop = "ticks"
 
 [backend.oracle]
 status = "unimplemented"
-unimplemented = ["LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-063", "LANG-100", "LANG-101", "SEM-005"]
+unimplemented = ["LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-063", "LANG-100", "LANG-101", "SEM-005", "LANG-060"]
 until = "M5"
 
 [backend.interp]
 status = "unimplemented"
-unimplemented = ["LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-063", "LANG-100", "LANG-101", "SEM-005", "SEM-002"]
+unimplemented = ["LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-063", "LANG-100", "LANG-101", "SEM-005", "LANG-060", "SEM-002"]
 until = "M7"
 
 [[input]]

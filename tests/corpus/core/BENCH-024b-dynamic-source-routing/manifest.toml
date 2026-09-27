@@ -3,7 +3,7 @@ id = "BENCH-024"
 title = "Dynamic source routing finds the same best paths as distance vector, before and after a failure"
 priority = "P1"
 source = "R01 §8.3 and TEST PROGRAMS T5 (Loo thesis §3.3.4 Fig. 3.6 vs Figs. 3.3-3.4); FEATURES.md BENCH-024"
-features = ["SEM-008", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-062", "LANG-063", "LANG-064", "LANG-085", "LANG-088", "LANG-100", "LANG-152", "LANG-153", "LANG-025"]
+features = ["SEM-008", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-062", "LANG-063", "LANG-064", "LANG-085", "LANG-088", "LANG-100", "LANG-152", "LANG-153", "LANG-025", "LANG-060"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -21,12 +21,12 @@ stop = "ticks"
 
 [backend.oracle]
 status = "unimplemented"
-unimplemented = ["SEM-008", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-062", "LANG-063", "LANG-064", "LANG-085", "LANG-088", "LANG-100", "LANG-152", "LANG-153", "LANG-025"]
+unimplemented = ["SEM-008", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-062", "LANG-063", "LANG-064", "LANG-085", "LANG-088", "LANG-100", "LANG-152", "LANG-153", "LANG-025", "LANG-060"]
 until = "M6"
 
 [backend.interp]
 status = "unimplemented"
-unimplemented = ["SEM-008", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-062", "LANG-063", "LANG-064", "LANG-085", "LANG-088", "LANG-100", "LANG-152", "LANG-153", "LANG-025", "SEM-002"]
+unimplemented = ["SEM-008", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-062", "LANG-063", "LANG-064", "LANG-085", "LANG-088", "LANG-100", "LANG-152", "LANG-153", "LANG-025", "LANG-060", "SEM-002"]
 until = "M7"
 
 [[input]]

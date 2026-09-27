@@ -3,7 +3,7 @@ id = "BENCH-028"
 title = "Soft-state lifetime inversion oscillates at runtime (mocked clock)"
 priority = "P1"
 source = "R01 TEST PROGRAMS T19 (Loo thesis App. A.3.1 case 2); R02 §3.3 (DI §3.3.1 TTL idiom); FEATURES.md SEM-061, BENCH-028"
-features = ["SEM-060", "SEM-061", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-190"]
+features = ["SEM-060", "SEM-061", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-190", "LANG-060"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -18,12 +18,12 @@ stop = "ticks"
 
 [backend.oracle]
 status = "unimplemented"
-unimplemented = ["SEM-060", "SEM-061", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-190"]
+unimplemented = ["SEM-060", "SEM-061", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-190", "LANG-060"]
 until = "M6"
 
 [backend.interp]
 status = "unimplemented"
-unimplemented = ["SEM-060", "SEM-061", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-190", "SEM-002"]
+unimplemented = ["SEM-060", "SEM-061", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-190", "LANG-060", "SEM-002"]
 until = "M7"
 
 [[input]]

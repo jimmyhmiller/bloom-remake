@@ -3,7 +3,7 @@ id = "BENCH-045"
 title = "fold_ordered over a growing log: sm 0,5,21,21,52; total 8,21,21,52,276; bad 0,8,149,2405,77012"
 priority = "P0"
 source = "R12 §12 T6 (fold_ordered over a growing log); FEATURES.md CR-46, LANG-110, BENCH-045"
-features = ["SEM-083", "LANG-106", "LANG-110", "LANG-118", "LANG-181", "LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-100", "LANG-190"]
+features = ["SEM-083", "LANG-106", "LANG-110", "LANG-118", "LANG-181", "LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-100", "LANG-190", "LANG-060"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -20,12 +20,12 @@ stop = "ticks"
 
 [backend.oracle]
 status = "unimplemented"
-unimplemented = ["SEM-083", "LANG-106", "LANG-110", "LANG-118", "LANG-181", "LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-100", "LANG-190"]
+unimplemented = ["SEM-083", "LANG-106", "LANG-110", "LANG-118", "LANG-181", "LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-100", "LANG-190", "LANG-060"]
 until = "M6"
 
 [backend.interp]
 status = "unimplemented"
-unimplemented = ["SEM-083", "LANG-106", "LANG-110", "LANG-118", "LANG-181", "LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-100", "LANG-190", "SEM-002"]
+unimplemented = ["SEM-083", "LANG-106", "LANG-110", "LANG-118", "LANG-181", "LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-100", "LANG-190", "LANG-060", "SEM-002"]
 until = "M7"
 
 [[input]]
