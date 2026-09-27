@@ -1,0 +1,38 @@
+//! BENCH-098: the PN-counter of BENCH-097 (d) under 10⁴ schedules with crashes (R13 §12 T8 and T15).
+//!
+//! Twelve increments, then three decrements: with every message delivered a replica ends at pos = 12 and value = 9,
+//! so `value >= 10` held for a while and then stopped. R13 T8: "A later decrement to 9 must flip value >= 10 back to
+//! false. TEST-088 checks that it was never emitted as final."
+
+spec PnCounterFinalitySound for r#program {
+    nodes SRC, R1, R2;
+
+    fact inc(1) @ SRC at tick 1;
+    fact inc(2) @ SRC at tick 2;
+    fact inc(3) @ SRC at tick 3;
+    fact inc(4) @ SRC at tick 4;
+    fact inc(5) @ SRC at tick 5;
+    fact inc(6) @ SRC at tick 6;
+    fact inc(7) @ SRC at tick 7;
+    fact inc(8) @ SRC at tick 8;
+    fact inc(9) @ SRC at tick 9;
+    fact inc(10) @ SRC at tick 10;
+    fact inc(11) @ SRC at tick 11;
+    fact inc(12) @ SRC at tick 12;
+    fact dec(101) @ SRC at tick 13;
+    fact dec(102) @ SRC at tick 14;
+    fact dec(103) @ SRC at tick 15;
+
+    faults { crashes: 1, model: async }
+
+    /// The inverse curse (SEM-017): the value can always return, so it is never final in either direction.
+    invariant value_never_final: never value_final() @ a;
+    invariant value_never_final_false: never value_final_false() @ a;
+    /// The increments only grow and are never sealed, so `pos >= 10` can be final-true but never final-false.
+    invariant pos_never_final_false: never pos_final_false() @ a;
+
+    /// Finality is monotone (SEM-016) at the replica that reports it.
+    invariant pos_final_holds: never pos_final() @ a, not pos_ge_10() @ a;
+
+    check sim { runs: 10000, seed: 1 } expect holds;
+}

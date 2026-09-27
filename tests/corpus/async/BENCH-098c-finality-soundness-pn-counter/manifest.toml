@@ -1,0 +1,37 @@
+# BENCH-098 (R13 §12 T15; TEST-088; SEM-017): finality soundness under fuzzing, over BENCH-097 (d) (R13 T8).
+#
+# R13 T8: "PN-counter with increments to 12 and no decrements yet. pn.value >= 10 must not be final: ANA-120 =
+# NEVER-FINAL, and the runtime keeps it provisional. pn.pos >= 10 is final-true at the 10th increment. A later
+# decrement to 9 must flip value >= 10 back to false. TEST-088 checks that it was never emitted as final."
+#
+# Two replicas of the counter are fed by one source over the default (lossy) channels, under 10⁴ seeded schedules
+# with at most one crash. `value >= 10` must never be reported final (in either direction); `pos >= 10` may be
+# final-true (and is then true forever) but never final-false. The static classes are BENCH-097 (d)'s.
+schema = 1
+id = "BENCH-098"
+title = "Finality soundness under fuzzing (c): a replicated PN-counter never finalizes its value threshold"
+priority = "P1"
+source = "R13 §12 T15 over T8; FEATURES TEST-088, SEM-017; FT (ICDT 2025) §4.2, Thm 18, App. B"
+features = ["LANG-042", "LANG-043", "LANG-045", "LANG-062", "LANG-120", "LANG-122", "LANG-124", "LANG-125", "LANG-126", "LANG-127", "LANG-128", "LANG-201", "LANG-212", "ANA-120", "ANA-121", "SEM-016", "SEM-017", "SEM-070", "SEM-073", "TEST-001", "TEST-002", "TEST-081", "TEST-088", "VER-001"]
+program = "program.bls"
+spec = "spec.bls"
+derived = false
+expected_from = "literature"
+notes = "The spec's scenario facts are BENCH-097 (d)'s inputs, entered at the source instead of at the counter."
+
+[deploy]
+nodes = [{ name = "SRC", role = "Node" }, { name = "R1", role = "Node" }, { name = "R2", role = "Node" }]
+
+[run]
+ticks = 50
+stop = "ticks"
+seeds = 10000
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-042", "LANG-043", "LANG-045", "LANG-062", "LANG-120", "LANG-122", "LANG-124", "LANG-125", "LANG-126", "LANG-127", "LANG-128", "LANG-201", "LANG-212", "ANA-120", "ANA-121", "SEM-016", "SEM-017", "SEM-070", "SEM-073", "TEST-001", "TEST-002", "TEST-081", "TEST-088", "VER-001"]
+until = "M8"
+
+[expect_verify]
+check = "sim"
+result = "holds"

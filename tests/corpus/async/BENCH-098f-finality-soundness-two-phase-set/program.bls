@@ -1,0 +1,52 @@
+//! BENCH-098: finality soundness under fuzzing, over BENCH-097 (e) (R13 §12 T9 and T15; TEST-088).
+//!
+//! A source forwards inserts and deletes to two replicas of a two-phase set: a grow-only set of inserts and one of
+//! deletes; an element is in the set when it has been inserted and not deleted. Membership is MIXED (ANA-120): a
+//! deleted element is final-absent, and no element is ever final-present, because a delete may still arrive.
+
+program ft_soundness_two_phase_set version 1;
+
+static replica(g: Node);
+fact replica("R1");
+fact replica("R2");
+
+/// At the source, from the host.
+input ins(x: String);
+input del(x: String);
+
+channel ins_msg(x: String);
+channel del_msg(x: String);
+
+cell inserts: LSet<String>;
+cell deletes: LSet<String>;
+
+output in_set(x: String);
+output final_present(x: String);
+output final_absent(x: String);
+
+fan_ins: on ins(x), replica(g) {
+    send ins_msg(x) to g;
+}
+fan_del: on del(x), replica(g) {
+    send del_msg(x) to g;
+}
+
+do_insert: on ins_msg(x) {
+    emit inserts(set[x]);
+}
+do_delete: on del_msg(x) {
+    emit deletes(set[x]);
+}
+
+/// INSERTS − DELETES.
+members: while x in inserts, not (x in deletes) {
+    emit in_set(x);
+}
+
+present: while final in_set(x) {
+    emit final_present(x);
+}
+
+absent: while x in inserts, final not in_set(x) {
+    emit final_absent(x);
+}

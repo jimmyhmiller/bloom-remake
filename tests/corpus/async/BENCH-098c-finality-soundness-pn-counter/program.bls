@@ -1,0 +1,67 @@
+//! BENCH-098: finality soundness under fuzzing, over BENCH-097 (d) (R13 §12 T8 and T15; TEST-088; SEM-017).
+//!
+//! A source forwards increments and decrements to two replicas of a PN-counter: a grow-only set of increments and one
+//! of decrements, whose value is the difference of their sizes. `pos >= 10` is a threshold on a grow-only lattice
+//! (THRESH-final); `value >= 10` is subject to the inverse curse (NEVER-FINAL), so declaring it `final output` would be
+//! rejected (BLS0705) and the runtime must never report it final, whichever way it points.
+
+program ft_soundness_pn_counter version 1;
+
+static replica(g: Node);
+fact replica("R1");
+fact replica("R2");
+
+/// At the source, from the host: each increment and decrement carries a unique id.
+input inc(id: u64);
+input dec(id: u64);
+
+channel inc_msg(id: u64);
+channel dec_msg(id: u64);
+
+cell incs: LSet<u64>;
+cell decs: LSet<u64>;
+
+final output pos_ge_10();
+output value_ge_10();
+output pos_final();
+output pos_final_false();
+output value_final();
+output value_final_false();
+
+fan_inc: on inc(i), replica(g) {
+    send inc_msg(i) to g;
+}
+fan_dec: on dec(i), replica(g) {
+    send dec_msg(i) to g;
+}
+
+count_inc: on inc_msg(i) {
+    emit incs(set[i]);
+}
+count_dec: on dec_msg(i) {
+    emit decs(set[i]);
+}
+
+/// pn.pos >= 10: `size` is monotone and `>=` a threshold.
+pos_reached: while incs.size() >= 10 {
+    emit pos_ge_10();
+}
+
+/// pn.value >= 10: the difference of the two sizes is an exact (revealed) read, a point of order.
+value_reached: while let v = (reveal!(incs.size()).unwrap_or(0) as i64) - (reveal!(decs.size()).unwrap_or(0) as i64)
+    where v >= 10 {
+    emit value_ge_10();
+}
+
+pos_is_final: while final pos_ge_10() {
+    emit pos_final();
+}
+pos_is_final_false: while final not pos_ge_10() {
+    emit pos_final_false();
+}
+value_is_final: while final value_ge_10() {
+    emit value_final();
+}
+value_is_final_false: while final not value_ge_10() {
+    emit value_final_false();
+}

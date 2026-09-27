@@ -1,0 +1,39 @@
+# BENCH-098 (R13 §12 T15; TEST-088): finality soundness under fuzzing, over BENCH-097 (a) (R13 T5).
+#
+# R13 T15: "Across 10⁴ random schedules with crashes, for T5–T10: no fact emitted final-present is absent from the
+# ultimate model; no fact emitted final-absent is present; two replicas never emit different final values for the
+# same key. The components are commutative, so Prop 33 applies."
+#
+# BENCH-097 (a)'s reachability query runs at two replicas fed by one edge source over the default (lossy) channel.
+# `reach` (s reaches t) is true on the instance and final on derivation (POS); `reach_z` (s reaches z) is false and
+# becomes final-false only after the replica has sealed its edge table (SEALED). The simulator explores 10⁴ seeded
+# schedules with at most one crash; the spec's invariants and the TEST-088 oracle must hold in every one of them.
+# The run is bounded by ticks: a seal is resent at every tick (LANGUAGE §14.4), so the nodes never go quiet.
+schema = 1
+id = "BENCH-098"
+title = "Finality soundness under fuzzing (a): replicated reachability never finalizes a wrong or divergent answer"
+priority = "P1"
+source = "R13 §12 T15 over T5; FEATURES TEST-088; FT (ICDT 2025) Def 3, Prop 15, Prop 33"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-201", "LANG-207", "LANG-212", "ANA-120", "ANA-121", "SEM-016", "SEM-070", "SEM-073", "TEST-001", "TEST-002", "TEST-081", "TEST-088", "VER-001"]
+program = "program.bls"
+spec = "spec.bls"
+derived = false
+expected_from = "literature"
+notes = "The spec's scenario facts are the inputs. See docs/plan/notes/M1.4.md (BENCH-098) for why each BENCH-097 query is replicated."
+
+[deploy]
+nodes = [{ name = "SRC", role = "Node" }, { name = "R1", role = "Node" }, { name = "R2", role = "Node" }]
+
+[run]
+ticks = 40
+stop = "ticks"
+seeds = 10000
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-201", "LANG-207", "LANG-212", "ANA-120", "ANA-121", "SEM-016", "SEM-070", "SEM-073", "TEST-001", "TEST-002", "TEST-081", "TEST-088", "VER-001"]
+until = "M8"
+
+[expect_verify]
+check = "sim"
+result = "holds"
