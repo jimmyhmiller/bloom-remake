@@ -235,11 +235,27 @@ pub(crate) fn canonical(p: &Program) -> Result<Program, IrError> {
             .map(|r| r.label.text.as_ref())
             .min()
             .unwrap_or("");
+        let mut owned_rels = c
+            .rels
+            .iter()
+            .filter_map(|id| p.rels.get(*id))
+            .map(|r| r.name.to_string())
+            .collect::<Vec<_>>();
+        owned_rels.sort();
+        let mut owned_rules = c
+            .rules
+            .iter()
+            .filter_map(|id| p.rules.get(*id))
+            .map(|r| r.label.text.to_string())
+            .collect::<Vec<_>>();
+        owned_rules.sort();
         format!(
-            "{:?}|{}|{}|{first}",
-            std::mem::discriminant(&c.kind),
+            "{:?}|{}|{}|{first}|{:?}|{:?}",
+            c.kind.name(),
             c.surface.label.map_or(String::new(), |s| s.as_str().to_string()),
-            c.surface.module
+            c.surface.module,
+            owned_rels,
+            owned_rules
         )
     });
     let group_order = order(&p.groups, |g| group_key(p, g.id));
