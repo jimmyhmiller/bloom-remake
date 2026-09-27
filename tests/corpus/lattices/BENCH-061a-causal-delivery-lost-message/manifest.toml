@@ -1,0 +1,113 @@
+schema   = 1
+id       = "BENCH-061"
+title    = "Causal delivery: with c lost, pipe_out delivers a then b and never d or e"
+priority = "P1"
+source   = "R04 §12 T15; R03 §11 T21 (tc_causal_delivery#test_reorder_simple) and §6.1 (bud-sandbox delivery/causal.rb)"
+features = ["LANG-043", "LANG-082", "LANG-124", "LANG-125", "LANG-128", "LANG-130", "LANG-137", "LANG-153", "LANG-241",
+            "SEM-021", "SEM-102"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The source sends a, b, c, d, e (ids 1–5) at ticks 1–5; the send of c is omitted. The expected outcome is R03 T21's:
+"pipe_out delivers a, then b, and never d or e, because c is missing". In the synchronous harness a arrives at
+tick 2 and is delivered (its ord_buf entry for the receiver is ⊥); the receiver's clock advances at tick 3, when b
+arrives with ord_buf[dst] = {src:1} ≤ {dst:1, src:1} and is delivered. d (ord_buf[dst] = {src:3}) and e ({src:4})
+wait forever, because only c would have raised the receiver's src entry to 3. The Bud filter that also holds
+messages until d arrives only reorders deliveries; the reordering itself is covered by BENCH-061b under the
+simulator.
+"""
+
+[deploy]
+nodes = [{ name = "src", role = "Proc" }, { name = "dst", role = "Proc" }]
+
+[run]
+ticks = 10
+stop  = "ticks"
+
+[[fault]]
+kind      = "omit"
+from      = "src"
+to        = "dst"
+send_tick = 3
+
+[[input]]
+node = "src"
+tick = 1
+rel  = "pipe_in"
+rows = [["dst", 1, "a"]]
+
+[[input]]
+node = "src"
+tick = 2
+rel  = "pipe_in"
+rows = [["dst", 2, "b"]]
+
+[[input]]
+node = "src"
+tick = 3
+rel  = "pipe_in"
+rows = [["dst", 3, "c"]]
+
+[[input]]
+node = "src"
+tick = 4
+rel  = "pipe_in"
+rows = [["dst", 4, "d"]]
+
+[[input]]
+node = "src"
+tick = 5
+rel  = "pipe_in"
+rows = [["dst", 5, "e"]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-043", "LANG-082", "LANG-124", "LANG-125", "LANG-128", "LANG-130", "LANG-137", "LANG-153",
+                 "LANG-241", "SEM-021", "SEM-102"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-043", "LANG-082", "LANG-124", "LANG-125", "LANG-128", "LANG-130", "LANG-137", "LANG-153",
+                 "LANG-241", "SEM-021", "SEM-102"]
+until = "M7"
+
+[[expect]]
+node = "dst"
+rel  = "pipe_out"
+tick = 2
+rows = [["src", 1, "a"]]
+
+[[expect]]
+node = "dst"
+rel  = "pipe_out"
+tick = 3
+rows = [["src", 2, "b"]]
+
+[[expect]]
+node   = "dst"
+rel    = "pipe_out"
+row    = ["src", 4, "d"]
+absent = "0.."
+
+[[expect]]
+node   = "dst"
+rel    = "pipe_out"
+row    = ["src", 5, "e"]
+absent = "0.."
+
+[[expect]]
+node  = "dst"
+rel   = "log"
+final = true
+rows  = [["a"], ["b"]]
+
+[[expect]]
+node  = "dst"
+rel   = "recv_buf"
+final = true
+rows  = [["src", 1, "a", [["src", 1]], []],
+         ["src", 2, "b", [["src", 2]], [["dst", [["src", 1]]]]],
+         ["src", 4, "d", [["src", 4]], [["dst", [["src", 3]]]]],
+         ["src", 5, "e", [["src", 5]], [["dst", [["src", 4]]]]]]

@@ -1,0 +1,46 @@
+schema   = 1
+id       = "BENCH-051"
+title    = "Bud MaxConstructorImplicit: literals are lifted into the target lattice"
+priority = "P0"
+source   = "R04 §12 T2 and §3.2 (bud test/tc_lattice.rb MaxConstructorImplicit, MapBareHashLiteral)"
+features = ["LANG-021", "LANG-122", "LANG-124", "LANG-128", "LANG-190", "LANG-280"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+Re-derived from R04 §3.2's description of Bud's literal rewriting. The explicit constructor and the implicit lift
+give the same value (m1 = m2 = 6), and the map literal carrying a lattice read gives h = {x ↦ 6}, from the boot
+tick on (the cells persist).
+"""
+
+[run]
+ticks = 3
+stop  = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-021", "LANG-122", "LANG-124", "LANG-128", "LANG-190", "LANG-280"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-021", "LANG-122", "LANG-124", "LANG-128", "LANG-190", "LANG-280"]
+until = "M7"
+
+[[expect]]
+node  = "n1"
+rel   = "m1"
+row   = [6]
+holds = "0.."
+
+[[expect]]
+node  = "n1"
+rel   = "m2"
+row   = [6]
+holds = "0.."
+
+[[expect]]
+node  = "n1"
+rel   = "h"
+row   = [[["x", 6]]]
+holds = "0.."

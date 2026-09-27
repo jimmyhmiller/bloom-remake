@@ -1,0 +1,58 @@
+schema   = 1
+id       = "BENCH-054"
+title    = "AllPathsL variants: lset transitive closure with summed costs (generators and eqjoin)"
+priority = "P1"
+source   = "R04 §12 T6 (bud test/tc_lattice.rb AllPathsL, AllPathsImplicitProject, AllPathsEqJoin)"
+features = ["LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-128", "LANG-088", "LANG-180", "SEM-031", "SEM-103"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+R04 T6: "pure lset transitive closure with eqjoin. Expected: the transitive closure with summed costs." The Bud
+programs were not vendored; the input DAG is re-derived: a→b 1, b→c 2, a→c 5, c→d 1. Every distinct path
+contributes its own (from, to, cost) element, so both (a,c,5) and (a,c,3) are present, and (a,d,6) and (a,d,4).
+The expected set was computed from the definition by exhaustive enumeration. Both formulations must equal it.
+"""
+
+[run]
+ticks = 4
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "link_in"
+rows = [["a", "b", 1], ["b", "c", 2], ["a", "c", 5], ["c", "d", 1]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-128", "LANG-088", "LANG-180", "SEM-031",
+                 "SEM-103"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-128", "LANG-088", "LANG-180", "SEM-031",
+                 "SEM-103"]
+until = "M7"
+
+[[expect]]
+node  = "n1"
+rel   = "path_gen"
+final = true
+rows  = [[[["a", "b", 1], ["a", "c", 3], ["a", "c", 5], ["a", "d", 4], ["a", "d", 6], ["b", "c", 2],
+           ["b", "d", 3], ["c", "d", 1]]]]
+
+[[expect]]
+node  = "n1"
+rel   = "path_eq"
+final = true
+rows  = [[[["a", "b", 1], ["a", "c", 3], ["a", "c", 5], ["a", "d", 4], ["a", "d", 6], ["b", "c", 2],
+           ["b", "d", 3], ["c", "d", 1]]]]
+
+[[expect]]
+node = "n1"
+rel  = "path_gen"
+tick = 1
+rows = [[[["a", "b", 1], ["a", "c", 3], ["a", "c", 5], ["a", "d", 4], ["a", "d", 6], ["b", "c", 2],
+          ["b", "d", 3], ["c", "d", 1]]]]

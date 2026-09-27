@@ -1,0 +1,84 @@
+schema   = 1
+id       = "BENCH-061"
+title    = "vc_scenario: node 3 receives message 3 before message 1 and reports the causal violation"
+priority = "P1"
+source   = "R04 §12 T15; R03 §11 T27 and §6.9 (bud-sandbox lattices/vc_scenario.rb)"
+features = ["LANG-043", "LANG-124", "LANG-125", "LANG-130", "LANG-137", "LANG-153", "LANG-283", "SEM-021", "SEM-102"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The scenario's shape is R03 T27's; the exact schedule is re-derived. Tick 1: n1 stamps message 1 ({n1:1}) and holds
+it; n2 is told to forward message 2 as message 3 to n3. Tick 2: n1 stamps message 2 ({n1:2}) and sends it to n2.
+Tick 3: n2 receives it and sends message 3 with {n1:2, n2:1} to n3 (1 → 2 → 3 is a causal chain). Tick 4: n3
+receives message 3 (no violation: its clock was ⊥) and n1 releases message 1. Tick 5: message 1 arrives at n3 with
+{n1:1} ≤ n3's clock {n1:2, n2:1}: the violation is reported for message 1. No other node reports one.
+"""
+
+[deploy]
+nodes = [{ name = "n1", role = "Proc" }, { name = "n2", role = "Proc" }, { name = "n3", role = "Proc" }]
+
+[run]
+ticks = 8
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "hold"
+rows = [[1, "n3"]]
+
+[[input]]
+node = "n2"
+tick = 1
+rel  = "forward"
+rows = [[2, 3, "n3"]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel  = "event"
+rows = [[2, "n2"]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel  = "release"
+rows = [[1]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-043", "LANG-124", "LANG-125", "LANG-130", "LANG-137", "LANG-153", "LANG-283", "SEM-021",
+                 "SEM-102"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-043", "LANG-124", "LANG-125", "LANG-130", "LANG-137", "LANG-153", "LANG-283", "SEM-021",
+                 "SEM-102"]
+until = "M7"
+
+[[expect]]
+node   = "n3"
+rel    = "causal_violation"
+row    = [1]
+absent = "..=4"
+holds  = "5.."
+
+[[expect]]
+node  = "n3"
+rel   = "causal_violation"
+final = true
+rows  = [[1]]
+
+[[expect]]
+node  = "n2"
+rel   = "causal_violation"
+final = true
+rows  = []
+
+[[expect]]
+node = "n3"
+rel  = "vc"
+tick = 5
+rows = [[[["n1", 2], ["n2", 1]]]]

@@ -1,0 +1,72 @@
+schema   = 1
+id       = "BENCH-076"
+title    = "2P-Set: a deleted element is final-absent and cannot be re-inserted"
+priority = "P1"
+source   = "R13 §12 T4 (2P-Set variant) and T9; Wrapping Rings §5; FT App. B (2P-Set: negatively FT on DELETES)"
+features = ["LANG-124", "LANG-135", "LANG-212", "SEM-016", "ANA-121"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+Inserts a and b at tick 1, delete b at tick 2, re-insert b at tick 3. b is a member at tick 1 only; from tick 2 on it
+is absent, re-insert included, and its absence is final (R13 T4: "w ∈ DELETES makes 'w absent' NEG-FINAL"). a stays
+a member but is never final-present ("never positively", FT App. B).
+"""
+
+[run]
+ticks = 5
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "add"
+rows = [["a"], ["b"]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel  = "remove"
+rows = [["b"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel  = "add"
+rows = [["b"]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-124", "LANG-135", "LANG-212", "SEM-016", "ANA-121"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-124", "LANG-135", "LANG-212", "SEM-016", "ANA-121"]
+until = "M7"
+
+[[expect]]
+node   = "n1"
+rel    = "member"
+row    = ["b"]
+holds  = "1"
+absent = "2.."
+
+[[expect]]
+node  = "n1"
+rel   = "member"
+row   = ["a"]
+holds = "1.."
+
+[[expect]]
+node   = "n1"
+rel    = "b_final_absent"
+row    = []
+absent = "..=1"
+holds  = "2.."
+
+[[expect]]
+node   = "n1"
+rel    = "a_final_present"
+row    = []
+absent = "0.."

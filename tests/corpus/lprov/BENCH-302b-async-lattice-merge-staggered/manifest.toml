@@ -1,0 +1,107 @@
+schema   = 1
+id       = "BENCH-302"
+title    = "T3 with arrivals at ticks 2 and 3: seen_both_eph never holds, seen_both holds from tick 3"
+priority = "P0"
+source   = "R11/G1 §7 T3 (asynchronous schedule: a's message at @2, b's at @3; ✓sim)"
+features = ["LANG-122", "LANG-126", "LANG-137", "LANG-153", "LANG-280", "SEM-104", "SEM-105"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+R11's schedule (a's message arrives at tick 2, b's at tick 3) is reproduced in the lockstep harness by letting b send
+one tick later. @2: snap = store = {x↦1, y↦5}; @3: snap = {x↦3}, store = {x↦3, y↦5}, seen_both holds;
+seen_both_eph never holds, because no single batch reaches both atoms.
+Ultimate L-model at r for this schedule (R11 T3): store ↦ {x↦3, y↦5} and seen_both, without seen_both_eph; the `final`
+rows state it.
+"""
+
+[deploy]
+nodes = [{ name = "a", role = "Sender" }, { name = "b", role = "Sender" }, { name = "r", role = "Recv" }]
+
+[run]
+ticks = 6
+stop  = "ticks"
+
+[[input]]
+node = "a"
+tick = 1
+rel  = "set_kv"
+rows = [["x", 1], ["y", 5]]
+
+[[input]]
+node = "a"
+tick = 1
+rel  = "send_now"
+rows = [[]]
+
+[[input]]
+node = "b"
+tick = 2
+rel  = "set_kv"
+rows = [["x", 3]]
+
+[[input]]
+node = "b"
+tick = 2
+rel  = "send_now"
+rows = [[]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-126", "LANG-137", "LANG-153", "LANG-280", "SEM-104", "SEM-105"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-126", "LANG-137", "LANG-153", "LANG-280", "SEM-104", "SEM-105"]
+until = "M7"
+
+[[expect]]
+node = "r"
+rel  = "store"
+tick = 2
+rows = [[[["x", 1], ["y", 5]]]]
+
+[[expect]]
+node = "r"
+rel  = "snap"
+tick = 3
+rows = [[[["x", 3]]]]
+
+[[expect]]
+node  = "r"
+rel   = "store"
+row   = [[["x", 3], ["y", 5]]]
+holds = "3.."
+
+[[expect]]
+node   = "r"
+rel    = "seen_both"
+row    = []
+absent = "..=2"
+holds  = "3.."
+
+[[expect]]
+node   = "r"
+rel    = "seen_both_eph"
+row    = []
+absent = "0.."
+
+# ---- the ultimate L-model (contents at the end of the run)
+[[expect]]
+node  = "r"
+rel   = "store"
+final = true
+rows  = [[[["x", 3], ["y", 5]]]]
+
+[[expect]]
+node  = "r"
+rel   = "seen_both"
+final = true
+rows  = [[]]
+
+[[expect]]
+node  = "r"
+rel   = "seen_both_eph"
+final = true
+rows  = []

@@ -1,0 +1,25 @@
+//! BENCH-052c. ShortestPathsVariant (bud test/tc_lattice.rb; R04 §12 T3: "Also run ShortestPathsVariant (path
+//! extended at the end)"): the recursive rule joins `path * link` and appends the edge at the end instead of
+//! prepending it. min_cost does not depend on where the recursion extends the path.
+
+program shortest_paths_variant version 1;
+
+input link_in(from: String, to: String, c: u64);
+
+table link(from: String, to: String, c: u64);
+table path(from: String, to: String, next_hop: String, c: LMin<u64>);
+table min_cost(from: String, to: String, c: LMin<u64>);
+
+load: on link_in(f, t, c) {
+    emit link(f, t, c);
+}
+direct: while link(f, t, c) {
+    emit path(f, t, "direct", c);
+}
+/// The path is extended by one edge at its end; the first hop of a one-edge path is its target.
+extend_end: while path(f, m, nh, pc), link(m, t, c) {
+    emit path(f, t, if nh == "direct" { m } else { nh }, pc + c);
+}
+summarize: while path(f, t, _, c) {
+    emit min_cost(f, t, c);
+}

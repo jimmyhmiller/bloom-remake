@@ -1,0 +1,101 @@
+schema   = 1
+id       = "BENCH-069"
+title    = "Merge at the sender is equivalent to sending individually, with fewer messages"
+priority = "P1"
+source   = "R04 §12 T23 (Anna §V-A); R04 §4.1 (merge-at-sender batching); CR-52; SEM-105"
+features = ["LANG-122", "LANG-124", "LANG-137", "LANG-153", "LANG-241", "SEM-105", "DIST-005"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+Sender `batch` derives the three updates {1}, {2}, {3} in tick 1: they share the channel key (), so exactly one
+message carrying {1,2,3} is sent. Sender `single` derives one update per tick (ticks 1–3): three messages. The
+receiver's per-sender sink ends identical for both, {1,2,3}. This equivalence holds because the consumer is a
+join-morphism into persistent state (CR-52; BENCH-303 shows an ephemeral threshold consumer that can tell the
+difference).
+"""
+
+[deploy]
+nodes = [{ name = "batch", role = "Sender" }, { name = "single", role = "Sender" }, { name = "r", role = "Receiver" }]
+
+[run]
+ticks = 6
+stop  = "ticks"
+
+[[input]]
+node = "batch"
+tick = 1
+rel  = "update"
+rows = [[1], [2], [3]]
+
+[[input]]
+node = "single"
+tick = 1
+rel  = "update"
+rows = [[1]]
+
+[[input]]
+node = "single"
+tick = 2
+rel  = "update"
+rows = [[2]]
+
+[[input]]
+node = "single"
+tick = 3
+rel  = "update"
+rows = [[3]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-124", "LANG-137", "LANG-153", "LANG-241", "SEM-105", "DIST-005"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-124", "LANG-137", "LANG-153", "LANG-241", "SEM-105", "DIST-005"]
+until = "M7"
+
+[[expect_send]]
+from    = "batch"
+to      = "r"
+channel = "upd"
+row     = [[1, 2, 3]]
+tick    = 1
+count   = 1
+
+[[expect_send]]
+from    = "single"
+to      = "r"
+channel = "upd"
+row     = [[1]]
+tick    = 1
+count   = 1
+
+[[expect_send]]
+from    = "single"
+to      = "r"
+channel = "upd"
+row     = [[2]]
+tick    = 2
+count   = 1
+
+[[expect_send]]
+from    = "single"
+to      = "r"
+channel = "upd"
+row     = [[3]]
+tick    = 3
+count   = 1
+
+[[expect]]
+node = "r"
+rel  = "sink"
+tick = 2
+rows = [["batch", [1, 2, 3]], ["single", [1]]]
+
+[[expect]]
+node  = "r"
+rel   = "sink"
+final = true
+rows  = [["batch", [1, 2, 3]], ["single", [1, 2, 3]]]

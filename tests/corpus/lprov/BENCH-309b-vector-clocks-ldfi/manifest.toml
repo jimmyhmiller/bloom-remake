@@ -1,0 +1,29 @@
+schema   = 1
+id       = "BENCH-309"
+title    = "T10 under LDFI 4/2/0, post saw_a1 at b: the falsifier is {O(a,b,1)}"
+priority = "P1"
+source   = "R11/G1 §7 T10 (LDFI 4/2/0 ✓sim)"
+features = ["LANG-126", "LANG-130", "LANG-137", "LANG-153", "LANG-201", "TEST-020", "TEST-022", "TEST-023", "TEST-026",
+            "TEST-028", "TEST-029", "TEST-140"]
+program  = "program.bls"
+spec     = "spec.bls"
+derived  = false
+expected_from = "literature"
+notes    = "a sends its clock once, at tick 1: losing that message is the only way b never sees a's event."
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-126", "LANG-130", "LANG-137", "LANG-153", "LANG-201", "TEST-020", "TEST-022", "TEST-023",
+                 "TEST-026", "TEST-028", "TEST-029", "TEST-140"]
+until = "M8"
+
+[expect_ldfi]
+eot        = 4
+eff        = 2
+crashes    = 0
+nodes      = ["A", "B"]
+verdict    = "counterexample"
+crash_view = "frozen"
+falsifiers = [
+    ["O(A,B,1)"],
+]

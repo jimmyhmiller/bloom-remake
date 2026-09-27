@@ -1,0 +1,56 @@
+//! BENCH-079b. Free termination, FT Ex. 4 / Fig. 1(b) (R13 §12 T11): every path reaches an FT state, but the FT states
+//! give different values. The DFA accepts when two a's are seen before the second b: the accepting sink and the
+//! rejecting sink are both FT, with different answers; no other state is FT.
+
+program ft_two_sinks version 1;
+
+pub enum Letter {
+    A #1,
+    B #2,
+    C #3,
+    #[unknown]
+    Other #4,
+}
+
+/// Snm: n a's and m b's seen so far (n, m < 2); Acc and Rej are the two sinks.
+enum St {
+    S00,
+    S10,
+    S01,
+    S11,
+    Acc,
+    Rej,
+}
+
+fn step(s: St, c: Letter) -> St {
+    match (s, c) {
+        (St::S00, Letter::A) => St::S10,
+        (St::S10, Letter::A) => St::Acc,
+        (St::S01, Letter::A) => St::S11,
+        (St::S11, Letter::A) => St::Acc,
+        (St::S00, Letter::B) => St::S01,
+        (St::S01, Letter::B) => St::Rej,
+        (St::S10, Letter::B) => St::S11,
+        (St::S11, Letter::B) => St::Rej,
+        (x, _) => x,
+    }
+}
+
+#[finite(cap = 16)]
+module TwoSinks {
+    input letter(c: Letter) key();
+    output accepted(yes: bool);
+    table state(s: St) key();
+
+    bootstrap {
+        emit state(St::S00);
+    }
+    advance: on letter(c), state(s) {
+        upsert state(step(s, c));
+    }
+    report: while state(s) {
+        emit accepted(s == St::Acc);
+    }
+}
+
+import TwoSinks as dfa;

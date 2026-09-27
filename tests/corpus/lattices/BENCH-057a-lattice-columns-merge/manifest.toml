@@ -1,0 +1,52 @@
+schema   = 1
+id       = "BENCH-057"
+title    = "Embedded lattices: same-key tuples with different lattice values merge"
+priority = "P0"
+source   = "R04 §12 T11; R04 §3.6 item 2 (Bud merge_to_buf); CR-07; CR-51"
+features = ["LANG-020", "LANG-121", "LANG-122", "LANG-124", "SEM-030", "SEM-050", "SEM-100", "SEM-103"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+Re-derived data. Tick 1 derives (a, 3, {x}) and (a, 7, {y}) for one key in one tick: they merge to (a, 7, {x,y})
+with no key error (CR-51). Tick 2 adds (a, 5, {x}), which changes nothing (5 < 7, x already present), and
+(b, 1, {z}).
+"""
+
+[run]
+ticks = 4
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "deposit"
+rows = [["a", 3, "x"], ["a", 7, "y"]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel  = "deposit"
+rows = [["a", 5, "x"], ["b", 1, "z"]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-020", "LANG-121", "LANG-122", "LANG-124", "SEM-030", "SEM-050", "SEM-100", "SEM-103"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-020", "LANG-121", "LANG-122", "LANG-124", "SEM-030", "SEM-050", "SEM-100", "SEM-103"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel  = "acct"
+tick = 1
+rows = [["a", 7, ["x", "y"]]]
+
+[[expect]]
+node  = "n1"
+rel   = "acct"
+final = true
+rows  = [["a", 7, ["x", "y"]], ["b", 1, ["z"]]]

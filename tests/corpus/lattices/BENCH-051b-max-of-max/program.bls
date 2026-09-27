@@ -1,0 +1,29 @@
+//! BENCH-051b. Bud tc_lattice `MaxOfMax` (R04 §12 T2): two lmax cells fed from one input stream, a third lmax
+//! merged from both (`m3 <= m1; m3 <= m2`), and a threshold over the third.
+
+program max_of_max version 1;
+
+input in_t(v: i64);
+
+cell m1: LMax<i64>;
+cell m2: LMax<i64>;
+cell m3: LMax<i64>;
+cell done: LBool;
+
+evens: on in_t(v) where v % 2 == 0 {
+    emit m1(v);
+}
+odds: on in_t(v) where v % 2 == 1 {
+    emit m2(v);
+}
+/// `m3 <= m1` and `m3 <= m2`: merging one lattice into another. A lookup of an absent cell is ⊥, and merging ⊥
+/// is a no-op (SEM-101).
+from_m1: while let x = m1 {
+    emit m3(x);
+}
+from_m2: while let x = m2 {
+    emit m3(x);
+}
+check: while m3 > 20 {
+    emit done(true);
+}

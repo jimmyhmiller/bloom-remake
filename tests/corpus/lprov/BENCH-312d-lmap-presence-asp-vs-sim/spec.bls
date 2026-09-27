@@ -1,0 +1,18 @@
+//! BENCH-312d spec: T13 with asynchronous delivery (delay ≤ 2) and no omissions (EFF 1). Every schedule delivers the
+//! put and the gossip, so every model has key?(k) at r3 by tick 6; the bounded ASP encoding must find the same.
+
+spec PresenceModels for r#program {
+    nodes CL, R1, R2, R3;
+    assign Client = [CL];
+    assign Replica = [R1, R2];
+    assign Observer = [R3];
+
+    fact do_put("k", 1) @ CL at tick 1;
+
+    faults { eot: 8, eff: 1, crashes: 0, model: async, delay: 2 }
+
+    invariant key_present "r3 lacks k at the horizon":
+        never not has_k() @ R3 at tick 8;
+
+    check asp { ticks: 8 } expect holds;
+}

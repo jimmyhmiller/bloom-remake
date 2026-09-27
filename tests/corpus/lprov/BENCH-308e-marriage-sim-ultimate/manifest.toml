@@ -1,0 +1,56 @@
+schema   = 1
+id       = "BENCH-308"
+title    = "T9 under simulation: votes, at_least_one and both are the same in every schedule"
+priority = "P0"
+source   = "R11/G1 §7 T9 (both ultimate models contain M1 = {votes ↦ {bride, groom}, at_least_one, both})"
+features = ["LANG-126", "LANG-153", "SEM-040", "SEM-044", "SEM-107", "TEST-001", "TEST-002"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+Every schedule's ultimate model contains M1, so in every seed the run ends with votes = {bride, groom}, at_least_one
+and both. exactly_one differs between schedules and is deliberately not asserted.
+"""
+
+[deploy]
+nodes = [{ name = "bride", role = "Party" }, { name = "groom", role = "Party" }, { name = "o", role = "Officiant" }]
+
+[run]
+ticks = 40
+stop  = "quiescent"
+seeds = 32
+
+[[input]]
+node = "bride"
+tick = 1
+rel  = "say_yes"
+rows = [[]]
+
+[[input]]
+node = "groom"
+tick = 1
+rel  = "say_yes"
+rows = [[]]
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-126", "LANG-153", "SEM-040", "SEM-044", "SEM-107", "TEST-001", "TEST-002"]
+until = "M8"
+
+[[expect]]
+node  = "o"
+rel   = "votes"
+final = true
+rows  = [[["bride", "groom"]]]
+
+[[expect]]
+node  = "o"
+rel   = "at_least_one"
+final = true
+rows  = [[]]
+
+[[expect]]
+node  = "o"
+rel   = "both"
+final = true
+rows  = [[]]

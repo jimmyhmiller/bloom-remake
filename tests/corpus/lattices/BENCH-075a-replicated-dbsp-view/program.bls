@@ -1,0 +1,66 @@
+//! BENCH-075a. The replicated DBSP view under chaos: after quiescence every replica equals the centralized view.
+//!
+//! A replicated DBSP view (R13 §12 T12, §7.1): three replicas maintain V(a, c) :- R(a, b), S(b, c), notin D(a) over
+//! Z-set inputs R, S and D, each replicated through a W2 exactly-once channel. Replicas that have applied the same
+//! updates hold the same inputs and so the same view (SEC), with no coordination; but a view over invertible state
+//! can always be changed by a later retraction, so it is never final (FT Cor 20).
+
+program replicated_dbsp_view version 1;
+
+role Replica: cluster;
+
+#[fault(lossy)]
+channel r_delta(a: String, b: String, w: Z): Replica -> Replica key(a, b) exactly_once(dots);
+#[fault(lossy)]
+channel s_delta(b: String, c: String, w: Z): Replica -> Replica key(b, c) exactly_once(dots);
+#[fault(lossy)]
+channel d_delta(a: String, w: Z): Replica -> Replica key(a) exactly_once(dots);
+
+at Replica {
+    input r_in(a: String, b: String, w: Z);
+    input s_in(b: String, c: String, w: Z);
+    input d_in(a: String, w: Z);
+
+    zset table r(a: String, b: String);
+    zset table s(b: String, c: String);
+    zset table d(a: String);
+
+    output v_out(a: String, c: String);
+
+    local_r: on r_in(a, b, w) {
+        emit r(a, b) weight w;
+        for p in Replica where p != self {
+            send r_delta(a, b, w) to p;
+        }
+    }
+    local_s: on s_in(b, c, w) {
+        emit s(b, c) weight w;
+        for p in Replica where p != self {
+            send s_delta(b, c, w) to p;
+        }
+    }
+    local_d: on d_in(a, w) {
+        emit d(a) weight w;
+        for p in Replica where p != self {
+            send d_delta(a, w) to p;
+        }
+    }
+    remote_r: on r_delta(a, b, w) {
+        emit r(a, b) weight w;
+    }
+    remote_s: on s_delta(b, c, w) {
+        emit s(b, c) weight w;
+    }
+    remote_d: on d_delta(a, w) {
+        emit d(a) weight w;
+    }
+
+    view r_set(a, b) = distinct!(r(a, b));
+    view s_set(b, c) = distinct!(s(b, c));
+    view d_set(a) = distinct!(d(a));
+    view v(a, c) = r_set(a, b), s_set(b, c), not d_set(a);
+
+    report: while v(a, c) {
+        emit v_out(a, c);
+    }
+}

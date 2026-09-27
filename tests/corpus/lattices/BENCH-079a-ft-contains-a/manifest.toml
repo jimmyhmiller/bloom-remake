@@ -1,0 +1,25 @@
+schema   = 1
+id       = "BENCH-079"
+title    = "Free termination, FT Fig. 1(a) \"contains an a\": exactly the post-a sink is FT"
+priority = "P1"
+source   = "R13 §12 T11 (FT Ex. 4 / Fig. 1; Power diss. Fig. 3.1 ★ marks); R13 §8.6 (Prop. 26) and §9.5 (ANA-122)"
+features = ["LANG-004", "LANG-023", "LANG-064", "LANG-190", "SEM-016", "ANA-122"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The DFA is re-derived from FT Ex. 4's description (the figure itself was not read): states Start and SeenA; a moves
+Start to SeenA; every other transition is a self-loop; the query is `s == SeenA`. FT Prop. 26 marks SeenA (a sink)
+and not Start (it reaches SeenA, whose value differs).
+"""
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-004", "LANG-023", "LANG-064", "LANG-190", "SEM-016", "ANA-122"]
+until = "M7"
+
+[expect_analysis]
+# ANA-122 over the #[finite] component: `class` is its ANA-120 class and `ft` the exact table of free-termination
+# states, keyed by the value of the component's state register and giving the query's value there. Every state not
+# listed is not FT.
+finality = { "dfa.accepted" = { class = "FINITE", ft = { SeenA = true } } }

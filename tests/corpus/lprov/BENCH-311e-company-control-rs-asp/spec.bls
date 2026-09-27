@@ -1,0 +1,20 @@
+//! BENCH-311e. T12, Ross–Sagiv input, through the ASP encoding: exactly {c(b,c), c(c,b)}.
+//! The ASP backend must agree with the simulator on the controls derived from this input.
+
+spec CompanyControlAsp for r#program {
+    nodes N;
+
+    fact share("a", "b", 30) @ N at tick 1;
+    fact share("a", "c", 30) @ N at tick 1;
+    fact share("b", "c", 60) @ N at tick 1;
+    fact share("c", "b", 60) @ N at tick 1;
+
+    invariant only_expected "an unexpected control":
+        never c(x, y) @ N where not ((x == "b" && y == "c") || (x == "c" && y == "b"));
+    invariant bc_present "c(b, c) is missing":
+        never not c("b", "c") @ N at tick 2;
+    invariant cb_present "c(c, b) is missing":
+        never not c("c", "b") @ N at tick 2;
+
+    check asp { ticks: 3 } expect holds;
+}

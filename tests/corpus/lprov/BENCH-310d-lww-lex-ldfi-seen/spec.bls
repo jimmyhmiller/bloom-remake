@@ -1,0 +1,17 @@
+//! BENCH-310d spec: R11 T11, EOT 4, EFF 2, no crashes, post = seen_v11 at r3.
+
+spec LwwSeenLdfi for r#program {
+    nodes R1, R2, R3;
+    assign Writer = [R1, R2];
+    assign Reader = [R3];
+
+    fact write(1, "r1", "x") @ R1 at tick 1;
+    fact write(1, "r2", "y") @ R2 at tick 1;
+
+    faults { eot: 4, eff: 2, crashes: 0, model: sync }
+
+    view pre() = not crashed(R3);
+    view post() = seen_v11() @ R3;
+
+    check ldfi expect fails;
+}

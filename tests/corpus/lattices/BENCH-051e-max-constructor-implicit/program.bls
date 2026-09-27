@@ -1,0 +1,18 @@
+//! BENCH-051e. Bud tc_lattice `MaxConstructorImplicit` (R04 §12 T2; R04 §3.2: "`m2 <= 6` or
+//! `h <= {"x" => m1}` work and are wrapped with the lhs lattice's constructor"). In Blossom the wrapping is the
+//! lattice lift of LANGUAGE §5.6: a plain value is lifted into the head column's lattice type.
+
+program max_constructor_implicit version 1;
+
+cell m1: LMax<i64>;
+cell m2: LMax<i64>;
+cell h: LMap<String, LMax<i64>>;
+
+bootstrap {
+    emit m1(LMax::of(6));           // the explicit constructor
+    emit m2(6);                     // the implicit one: 6 is lifted into LMax<i64>
+}
+/// `h <= {"x" => m1}`: a map literal whose value is a lattice read, lifted into the map lattice.
+wrap: while let x = m1 {
+    emit h(map["x" => x]);
+}

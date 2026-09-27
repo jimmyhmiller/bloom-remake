@@ -1,0 +1,17 @@
+//! BENCH-068c. Stratification negative (R04 §12 T22): `ldom.value` inside a recursive cycle must be rejected.
+//! `value!()` of a dominating set is non-monotone (R04 §2.4), and the cycle store → flagged → store runs through it
+//! within one tick (BLS0502).
+
+program ldom_value_in_recursion version 1;
+
+input put(k: u64, d: LDom<VClock, LSet<String>>);
+
+table store(k: u64, d: LDom<VClock, LSet<String>>);
+
+feed: on put(k, d) {
+    emit store(k, d);
+}
+view flagged(k, d) = store(k, d) where d.value!().contains("x");
+copy: while flagged(k, d) where k < 10 {
+    emit store(k + 1, d);
+}

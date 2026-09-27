@@ -1,0 +1,12 @@
+//! BENCH-062b. The dominating pair is not associative in general (R04 §4.5, CR-25), so it exists only as
+//! `unsafe DomPair<K, V>` (LANG-136); writing the type without `unsafe` is an error (BLS0706).
+
+program dompair_requires_unsafe version 1;
+
+input put(k: u64, d: unsafe DomPair<LSet<u64>, LSet<String>>);
+
+table versions(key: u64, d: DomPair<LSet<u64>, LSet<String>>);
+
+record: on put(k, d) {
+    emit versions(k, d);
+}

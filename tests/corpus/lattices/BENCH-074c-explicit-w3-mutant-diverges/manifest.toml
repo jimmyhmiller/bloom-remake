@@ -1,0 +1,28 @@
+schema   = 1
+id       = "BENCH-074"
+title    = "W3 mutation test: applying C′ instead of C′ − C must be caught diverging"
+priority = "P1"
+source   = "R13 §12 T2 (\"A mutant that applies C′ instead of C′−C must be caught diverging\"); R13 §6.3"
+features = ["LANG-124", "LANG-131", "LANG-138", "LANG-153", "LANG-173", "LANG-201", "SEM-073", "TEST-001", "TEST-002",
+            "TEST-022"]
+program  = "program.bls"
+spec     = "spec.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The mutant double-counts whenever a replica observes two successive entries of one origin: e.g. A's entry goes
+(1, {x:1}) then (2, {x:2}), and the mutant applies +1 and then +2 at the receiver. Whether a replica sees the
+intermediate entry depends on gossip timing and loss, so the divergence is schedule-dependent, and the simulator's
+check must find a run that violates the convergence oracle (x = 1 everywhere): `expect fails`.
+"""
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-124", "LANG-131", "LANG-138", "LANG-153", "LANG-173", "LANG-201", "SEM-073", "TEST-001",
+                 "TEST-002", "TEST-022"]
+until = "M8"
+
+[expect_verify]
+check  = "sim"
+result = "fails"
+bounds = { ticks = 60, eff = 20, crashes = 0, delay = 3 }

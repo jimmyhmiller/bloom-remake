@@ -1,0 +1,30 @@
+//! BENCH-073c. The inverse curse (R13 §12 T1; FT Thm 18, Cor 20; SEM-017): a view over a replicated Z-set can always
+//! be changed by a future retraction, so no replica state is a free-termination state for it. Declaring the count
+//! view `final output` is rejected as NEVER-FINAL (BLS0705).
+
+program count_view_never_final version 1;
+
+role Replica: cluster;
+
+#[fault(lossy)]
+channel count_delta(item: String, w: Z): Replica -> Replica key(item) exactly_once(dots);
+
+at Replica {
+    input local_update(item: String, w: Z);
+    zset table counts(item: String);
+    final output count_view(item: String, n: i64);
+
+    apply_local: on local_update(item, w) {
+        emit counts(item) weight w;
+        for r in Replica where r != self {
+            send count_delta(item, w) to r;
+        }
+    }
+    apply_remote: on count_delta(item, w) {
+        emit counts(item) weight w;
+    }
+    view qty(item, n) = clamped!(counts(item), n);
+    report: while qty(item, n) {
+        emit count_view(item, n);
+    }
+}

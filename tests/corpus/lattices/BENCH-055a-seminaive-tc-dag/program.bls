@@ -1,0 +1,36 @@
+//! BENCH-055a. Semi-naive equivalence on transitive closure over a DAG (R04 §12 T7; SoCC'12 §4.2, Fig. 5
+//! workload): the lattice formulation (one lset of reachable nodes per source) must produce exactly the relation of
+//! the set-based Datalog formulation. The oracle evaluates naively and the interpreter semi-naively, so the same
+//! expected rows on both backends are the naive/semi-naive equivalence the test asks for.
+
+program seminaive_tc_equivalence version 1;
+
+input edge_in(src: u32, dst: u32);
+
+table edge(src: u32, dst: u32);
+/// One lset per source: the nodes reachable from it.
+table reach_l(src: u32, dsts: LSet<u32>);
+
+load: on edge_in(a, b) {
+    emit edge(a, b);
+}
+
+/// The set-based Datalog version.
+monotone view reach(a, b) {
+    edge(a, b);
+    reach(a, c), edge(c, b);
+}
+
+/// The lattice version: `reach_l(a) ⊇ {b}` for an edge, and `reach_l(a) ⊇ reach_l(m)` for an edge a → m.
+seed_l: while edge(a, b) {
+    emit reach_l(a, set[b]);
+}
+step_l: while edge(a, m), reach_l(m, s) {
+    emit reach_l(a, s);
+}
+/// Flattening the lattice with a generator is a morphism (LANG-123).
+monotone view reach_from_l(a, b) = reach_l(a, s), b in s;
+
+/// Any difference between the two formulations is a row here.
+view only_in_set(a, b) = reach(a, b), not reach_from_l(a, b);
+view only_in_lattice(a, b) = reach_from_l(a, b), not reach(a, b);

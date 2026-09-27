@@ -1,0 +1,20 @@
+schema   = 1
+id       = "BENCH-057"
+title    = "Embedded lattices: a lattice column used as a key is a type error (BLS0304)"
+priority = "P0"
+source   = "R04 §12 T11; R04 §3.6 item 2 (\"Lattice elements cannot be used as keys in Bloom collections\")"
+features = ["LANG-020", "LANG-121", "ANA-005"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = "The key clause on line 8 names the lattice column `v`; the error is reported there and nowhere else."
+
+[backend.compile]
+status = "unimplemented"
+unimplemented = ["LANG-020", "LANG-121", "ANA-005"]
+until = "M5"
+
+[[expect_diag]]
+code     = "BLS0304"
+line     = 8
+severity = "error"

@@ -1,0 +1,17 @@
+//! BENCH-067c. Flo/LVars thresholds (R04 §12 T21, §2.2): a threshold set must be pairwise incompatible (the join of
+//! any two elements is ⊤), or the value a read returns could change later. LMax 3 and LMax 7 are comparable, so
+//! `threshold(x, 3, 7)` is rejected (BLS0707).
+
+program flo_thresholds_not_incompatible version 1;
+
+input num(n: u64);
+
+cell high: LMax<u64>;
+table level(i: u32);
+
+feed: on num(n) {
+    emit high(n);
+}
+classify: while let Some(i) = threshold(high, LMax::of(3u64), LMax::of(7u64)) {
+    emit level(i);
+}

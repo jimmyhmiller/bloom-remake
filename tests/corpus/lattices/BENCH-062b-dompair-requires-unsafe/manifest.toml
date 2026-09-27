@@ -1,0 +1,23 @@
+schema   = 1
+id       = "BENCH-062"
+title    = "DomPair without `unsafe` is rejected (BLS0706)"
+priority = "P0"
+source   = "R04 §12 T16 and §4.5 (DomPair fails associativity with a set key); CR-25; LANGUAGE §11.5"
+features = ["LANG-136", "ANA-005"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The input on line 6 spells the type `unsafe DomPair<…>` and is accepted; the table on line 8 omits `unsafe`, and
+BLS0706 is reported there, once. `unsafe` marks the type, it does not change it, so the `emit` type-checks.
+"""
+
+[backend.compile]
+status = "unimplemented"
+unimplemented = ["LANG-136", "ANA-005"]
+until = "M5"
+
+[[expect_diag]]
+code     = "BLS0706"
+line     = 8
+severity = "error"

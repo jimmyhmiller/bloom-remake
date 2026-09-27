@@ -1,0 +1,71 @@
+schema   = 1
+id       = "BENCH-312"
+title    = "SEM-108 differential guard on T13: ASP models and simulator schedules give the same ultimate model"
+priority = "P1"
+source   = "R11/G1 §7 T13 and §4.1 (\"bounded ASP enumeration of models against exhaustive schedule enumeration\")"
+features = ["LANG-126", "LANG-137", "LANG-153", "LANG-201", "SEM-106", "SEM-107", "SEM-108", "TEST-001", "TEST-002",
+            "VER-003", "VER-041"]
+program  = "program.bls"
+spec     = "spec.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+BENCH-312's second half is a harness requirement (the SEM-108 guard runs for every corpus program, R11 §4.1). This
+case is its instance on T13 with fair, loss-free asynchronous delivery: in every simulated seed r1, r2 and r3 end
+with {k ↦ 1}, and the bounded ASP encoding (delay ≤ 2, horizon 8) has key?(k) at r3 in every model. The two backends
+must agree. The replicas gossip at every tick, so the simulated runs stop at their 40-tick bound.
+"""
+
+[deploy]
+nodes = [
+    { name = "cl", role = "Client" },
+    { name = "r1", role = "Replica" },
+    { name = "r2", role = "Replica" },
+    { name = "r3", role = "Observer" },
+]
+
+[run]
+ticks = 40
+stop  = "ticks"
+seeds = 32
+
+[[input]]
+node = "cl"
+tick = 1
+rel  = "do_put"
+rows = [["k", 1]]
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-126", "LANG-137", "LANG-153", "LANG-201", "SEM-106", "SEM-107", "SEM-108", "TEST-001",
+                 "TEST-002", "VER-003", "VER-041"]
+until = "M10"
+
+[backend.asp]
+status = "unimplemented"
+unimplemented = ["LANG-126", "LANG-137", "LANG-153", "LANG-201", "SEM-106", "SEM-107", "SEM-108", "TEST-001",
+                 "TEST-002", "VER-003", "VER-041"]
+until = "M10"
+
+[[expect]]
+node  = "r3"
+rel   = "mirror"
+final = true
+rows  = [[[["k", 1]]]]
+
+[[expect]]
+node  = "r1"
+rel   = "store"
+final = true
+rows  = [[[["k", 1]]]]
+
+[[expect]]
+node  = "r2"
+rel   = "store"
+final = true
+rows  = [[[["k", 1]]]]
+
+[expect_verify]
+check  = "asp"
+result = "holds"
+bounds = { ticks = 8, delay = 2, eff = 1, crashes = 0 }

@@ -1,0 +1,24 @@
+schema   = 1
+id       = "BENCH-079"
+title    = "Free termination of the per-transaction 2PC automaton: committed and aborted are FT"
+priority = "P1"
+source   = "R13 §12 T11 (\"2PC per-transaction automaton: committed and aborted are FT\"); R13 §9.5 (ANA-122 uses)"
+features = ["LANG-004", "LANG-023", "LANG-025", "LANG-064", "LANG-087", "SEM-016", "ANA-122"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The automaton is the standard per-transaction 2PC state machine (R13 §9.5 lists its states). The component is
+analysed per key (txn). Init is the absence of a row; it and Prepared can reach both Committed and Aborted, so only the
+two absorbing decision states are FT, with the decisions Commit and Abort as their values.
+"""
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-004", "LANG-023", "LANG-025", "LANG-064", "LANG-087", "SEM-016", "ANA-122"]
+until = "M7"
+
+[expect_analysis]
+# Per key: the FT states of the component's `st` register and the query (`decision`) value in each; Init (no row)
+# and Prepared are not FT.
+finality = { "tpc.decision" = { class = "FINITE", ft = { Committed = "Commit", Aborted = "Abort" } } }

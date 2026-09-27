@@ -1,0 +1,30 @@
+schema   = 1
+id       = "BENCH-063"
+title    = "Causal CRDTs under fuzzed delta delivery: the replicas converge in every schedule"
+priority = "P1"
+source   = "R04 §12 T17 (\"Fuzz convergence with random delta-group delivery\"); R04 §5.1 (strong eventual convergence)"
+features = ["LANG-082", "LANG-088", "LANG-124", "LANG-135", "LANG-137", "LANG-153", "LANG-201", "SEM-040", "SEM-082",
+            "TEST-001", "TEST-002", "TEST-022"]
+program  = "program.bls"
+spec     = "spec.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The BENCH-063c workload under the simulator's random delays and batching. Unlike the counters and sets of BENCH-063b,
+the final values of the causal CRDTs depend on causality: in a schedule where r2's add of x reaches r1 before r1's
+remove, the remove observes that dot too and x ends absent; in one where r3 writes c before b has arrived, the
+register ends with {b, c}. What every schedule guarantees is strong eventual convergence (R04 §5.1: equal delivered
+updates give equal states and equal query answers), which the spec states as its outcome oracle: at the end of the
+run no two replicas disagree on any query. The check must hold in every explored run.
+"""
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-082", "LANG-088", "LANG-124", "LANG-135", "LANG-137", "LANG-153", "LANG-201", "SEM-040", "SEM-082",
+                 "TEST-001", "TEST-002", "TEST-022"]
+until = "M8"
+
+[expect_verify]
+check  = "sim"
+result = "holds"
+bounds = { ticks = 30, eff = 1, crashes = 0, delay = 3 }

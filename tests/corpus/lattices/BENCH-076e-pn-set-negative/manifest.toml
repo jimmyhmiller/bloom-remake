@@ -1,0 +1,79 @@
+schema   = 1
+id       = "BENCH-076"
+title    = "PN-Set: add, remove, remove reaches −1; a later add returns to empty"
+priority = "P1"
+source   = "R13 §12 T4 (PN-Set variant); R13 §5 (Dolan: the PN-Set reaches −1 states)"
+features = ["LANG-138", "LANG-142", "ENG-062"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = "Add @1, remove @2, remove @3, add @4: weights 1, 0, −1, 0. The element is present only at tick 1."
+
+[run]
+ticks = 6
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "add"
+rows = [["w"]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel  = "remove"
+rows = [["w"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel  = "remove"
+rows = [["w"]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel  = "add"
+rows = [["w"]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-138", "LANG-142", "ENG-062"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-138", "LANG-142", "ENG-062"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel  = "raw"
+tick = 1
+rows = [["w", 1]]
+
+[[expect]]
+node = "n1"
+rel  = "raw"
+tick = 2
+rows = []
+
+[[expect]]
+node = "n1"
+rel  = "raw"
+tick = 3
+rows = [["w", -1]]
+
+[[expect]]
+node = "n1"
+rel  = "raw"
+tick = 4
+rows = []
+
+[[expect]]
+node   = "n1"
+rel    = "present"
+row    = ["w"]
+holds  = "1"
+absent = "2.."

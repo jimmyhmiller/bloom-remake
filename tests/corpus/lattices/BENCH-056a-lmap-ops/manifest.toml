@@ -1,0 +1,172 @@
+schema   = 1
+id       = "BENCH-056"
+title    = "Bud map-lattice tests: merge, intersect, at, apply/filter/key_set, from/to collection"
+priority = "P1"
+source   = "R04 §12 T9 (bud test/tc_lattice.rb map tests); R04 §2.4 and §3.4 (operation classes)"
+features = ["LANG-088", "LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-126", "LANG-128", "LANG-129", "LANG-280",
+            "SEM-030", "SEM-101"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The Bud tests were not vendored; the operations are R04 T9's and the data is re-derived. Expected values follow
+from the lattice definitions of R04 §2.4: m1 = {x:3, y:5} @1 then {x:7, y:5, z:1} @2; m2 = {y:2, z:4} @1 then
+{y:2, z:4, w:9} @2; intersect keeps the keys in both with values joined ({y:5} @1, {y:5, z:4} @2); `at` on the
+missing key "zz" is ⊥, so `at_missing` never exists; m4's keys with at least two elements are {a, c} @1 and
+{a, b, c} @2 (b gains its second element at tick 2). All result cells are persistent, so they accumulate.
+"""
+
+[run]
+ticks = 5
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "put1"
+rows = [["x", 3], ["y", 5]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel  = "put1"
+rows = [["x", 7], ["z", 1]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "put2"
+rows = [["y", 2], ["z", 4]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel  = "put2"
+rows = [["w", 9]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "put4"
+rows = [["a", 1], ["a", 2], ["b", 3], ["c", 4], ["c", 5], ["c", 6]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel  = "put4"
+rows = [["b", 7]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "kv_in"
+rows = [["p", 1], ["q", 2]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-088", "LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-126", "LANG-128", "LANG-129",
+                 "LANG-280", "SEM-030", "SEM-101"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-088", "LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-126", "LANG-128", "LANG-129",
+                 "LANG-280", "SEM-030", "SEM-101"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel  = "m1"
+tick = 1
+rows = [[[["x", 3], ["y", 5]]]]
+
+[[expect]]
+node  = "n1"
+rel   = "m1"
+final = true
+rows  = [[[["x", 7], ["y", 5], ["z", 1]]]]
+
+[[expect]]
+node = "n1"
+rel  = "inter"
+tick = 1
+rows = [[[["y", 5]]]]
+
+[[expect]]
+node  = "n1"
+rel   = "inter"
+final = true
+rows  = [[[["y", 5], ["z", 4]]]]
+
+[[expect]]
+node  = "n1"
+rel   = "keys1"
+final = true
+rows  = [[["x", "y", "z"]]]
+
+[[expect]]
+node = "n1"
+rel  = "size1"
+tick = 1
+rows = [[2]]
+
+[[expect]]
+node  = "n1"
+rel   = "size1"
+final = true
+rows  = [[3]]
+
+[[expect]]
+node = "n1"
+rel  = "at_x"
+tick = 1
+rows = [[3]]
+
+[[expect]]
+node  = "n1"
+rel   = "at_x"
+final = true
+rows  = [[7]]
+
+[[expect]]
+node  = "n1"
+rel   = "at_missing"
+final = true
+rows  = []
+
+[[expect]]
+node = "n1"
+rel  = "big_keys"
+tick = 1
+rows = [[["a", "c"]]]
+
+[[expect]]
+node  = "n1"
+rel   = "big_keys"
+final = true
+rows  = [[["a", "b", "c"]]]
+
+[[expect]]
+node  = "n1"
+rel   = "from_coll"
+final = true
+rows  = [[[["p", 1], ["q", 2]]]]
+
+[[expect]]
+node   = "n1"
+rel    = "has_x"
+row    = []
+absent = "0"
+holds  = "1.."
+
+[[expect]]
+node   = "n1"
+rel    = "has_w"
+row    = []
+absent = "0.."
+
+[[expect]]
+node  = "n1"
+rel   = "pairs"
+final = true
+rows  = [["x", 7], ["y", 5], ["z", 1]]

@@ -1,0 +1,55 @@
+//! BENCH-079d. Free termination, FT Ex. 4 / Fig. 1(d) (R13 §12 T11): some paths reach an FT state and others never
+//! do. A word that does not start with b accepts after two a's and then never changes (an FT sink); a word that
+//! starts with b answers "odd number of b's", which toggles forever.
+
+program ft_one_branch version 1;
+
+pub enum Letter {
+    A #1,
+    B #2,
+    C #3,
+    #[unknown]
+    Other #4,
+}
+
+/// D0/D1: the doesn't-start-with-b branch with zero or one a; POdd/PEven: the starts-with-b branch.
+enum St {
+    Start,
+    D0,
+    D1,
+    Acc,
+    POdd,
+    PEven,
+}
+
+fn step(s: St, c: Letter) -> St {
+    match (s, c) {
+        (St::Start, Letter::A) => St::D1,
+        (St::Start, Letter::B) => St::POdd,
+        (St::Start, Letter::C) => St::D0,
+        (St::D0, Letter::A) => St::D1,
+        (St::D1, Letter::A) => St::Acc,
+        (St::POdd, Letter::B) => St::PEven,
+        (St::PEven, Letter::B) => St::POdd,
+        (x, _) => x,
+    }
+}
+
+#[finite(cap = 16)]
+module OneBranch {
+    input letter(c: Letter) key();
+    output accepted(yes: bool);
+    table state(s: St) key();
+
+    bootstrap {
+        emit state(St::Start);
+    }
+    advance: on letter(c), state(s) {
+        upsert state(step(s, c));
+    }
+    report: while state(s) {
+        emit accepted(s == St::Acc || s == St::POdd);
+    }
+}
+
+import OneBranch as dfa;

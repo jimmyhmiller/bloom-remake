@@ -1,0 +1,62 @@
+//! BENCH-050a. QuorumVoteL: the monotone quorum vote of Conway et al., SoCC'12 Fig. 3 (R04 §3.9), ported to
+//! Blossom. The Bloom^L original:
+//!
+//!     lset  :votes          votes       <= vote_chn {|v| v.voter_id}
+//!     lmax  :cnt            cnt         <= votes.size
+//!     lbool :quorum_done    quorum_done <= cnt.gt_eq(QUORUM_SIZE)
+//!                           result_chn  <~ quorum_done.when_true { [RESULT_ADDR] }
+//!
+//! `Voter` nodes stand in for the test driver that feeds `vote_chn` (duplicates included); `Sink` is RESULT_ADDR.
+//! Every operation below is a morphism, a monotone function or a threshold, so the program has no point of order.
+
+program quorum_vote_l version 1;
+
+const QUORUM_SIZE: u64 = 5;
+
+role Voter: cluster;
+role Tally;
+role Sink;
+
+channel vote_chn(voter_id: u64): Voter -> Tally;
+channel result_chn(): Tally -> Sink;
+
+at Voter {
+    /// A voter id to put on the wire; the same id may be cast several times, by several voters.
+    input cast(voter_id: u64);
+
+    forward: on cast(id), t in Tally {
+        send vote_chn(id) to t;
+    }
+}
+
+at Tally {
+    cell votes: LSet<u64>;
+    cell cnt: LMax<u64>;
+    cell quorum_done: LBool;
+
+    /// `votes <= vote_chn {|v| v.voter_id}`: the implicit fold of the delivered batch into the set.
+    collect: on vote_chn(id) {
+        emit votes(set[id]);
+    }
+    /// `cnt <= votes.size`: `size` is monotone (not a morphism). With no votes it is 0, a real value (LANG-281).
+    count: while let n = votes.size() {
+        emit cnt(n);
+    }
+    /// `quorum_done <= cnt.gt_eq(QUORUM_SIZE)`: a threshold on the max lattice.
+    reach: while cnt >= QUORUM_SIZE {
+        emit quorum_done(true);
+    }
+    /// `result_chn <~ quorum_done.when_true { … }`: level-triggered, as in Bloom^L, so it is resent every tick
+    /// after the quorum; the sink sees one distinct fact.
+    announce: while quorum_done, s in Sink {
+        send result_chn() to s;
+    }
+}
+
+at Sink {
+    table got_result();
+
+    receive: on result_chn() {
+        emit got_result();
+    }
+}

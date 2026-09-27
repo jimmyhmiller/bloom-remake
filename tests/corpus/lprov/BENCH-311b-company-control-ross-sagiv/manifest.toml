@@ -1,0 +1,45 @@
+schema   = 1
+id       = "BENCH-311"
+title    = "T12 company control, Ross–Sagiv §5.6 input: {c(b,c), c(c,b)}"
+priority = "P1"
+source   = "R11/G1 §7 T12 (✓sim, ✓clingo); Ross–Sagiv Ex. 2.7 and §5.6; FLP Ex. 1.1 and 2.13"
+features = ["LANG-121", "LANG-122", "LANG-124", "LANG-126", "LANG-282", "SEM-031", "SEM-103"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+Input (×100) s(a,b,30), s(a,c,30), s(b,c,60), s(c,b,60): c(b,c) and c(c,b) hold (60% each); c(a,b) and c(a,c) are
+false, because a holds only 30% of each and controls neither.
+"""
+
+[run]
+ticks = 3
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "share"
+rows = [["a", "b", 30], ["a", "c", 30], ["b", "c", 60], ["c", "b", 60]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-121", "LANG-122", "LANG-124", "LANG-126", "LANG-282", "SEM-031", "SEM-103"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-121", "LANG-122", "LANG-124", "LANG-126", "LANG-282", "SEM-031", "SEM-103"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel  = "c"
+tick = 1
+rows = [["b", "c"], ["c", "b"]]
+
+[[expect]]
+node  = "n1"
+rel   = "c"
+final = true
+rows  = [["b", "c"], ["c", "b"]]

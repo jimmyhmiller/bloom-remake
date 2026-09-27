@@ -1,0 +1,19 @@
+//! BENCH-305a. R11/G1 T6: an antitone read across strata, ported to Blossom. The R11 program:
+//!
+//!     lat seen() : lset<int>        rel small()
+//!     seen(; {X}) :- inp(X).                          -- stratum 0
+//!     small()     :- s = seen[], s.size <= 2.         -- the antitone (lt_eq) read puts this in stratum 1
+//!
+//! A lattice comparison is allowed only in the threshold direction (`>=`, `>` on an LMax), so `size <= 2` is written as
+//! the negation of the threshold `size > 2` (LANGUAGE §11.4): antitone, a negative edge.
+
+program antitone_read version 1;
+
+input inp(x: i64);
+
+cell seen: LSet<i64>;
+
+record: on inp(x) {
+    emit seen(set[x]);
+}
+view small() = let s = seen, not (s.size() > 2);

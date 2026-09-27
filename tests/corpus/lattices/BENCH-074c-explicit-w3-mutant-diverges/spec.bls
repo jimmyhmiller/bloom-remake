@@ -1,0 +1,27 @@
+//! BENCH-074c spec: R13 T1's operations on the line A — B — C, and convergence to x = 1 at every replica as the
+//! outcome oracle. Against the correct unwrap (BENCH-074b) the check holds; against the mutant it must fail.
+
+spec MutantW3 for r#program {
+    nodes A, B, C;
+    assign Replica = [A, B, C];
+
+    fact neighbor_in(B) @ A at tick 1;
+    fact neighbor_in(A) @ B at tick 1;
+    fact neighbor_in(C) @ B at tick 1;
+    fact neighbor_in(B) @ C at tick 1;
+
+    fact local_update("x", 1) @ A at tick 1;
+    fact local_update("x", 1) @ A at tick 2;
+    fact local_update("y", -1) @ A at tick 5;
+    fact local_update("x", -1) @ B at tick 1;
+    fact local_update("z", 1) @ B at tick 3;
+    fact local_update("z", -1) @ B at tick 3;
+    fact local_update("y", 1) @ C at tick 1;
+
+    faults { eot: 60, eff: 20, crashes: 0, model: async, delay: 3 }
+
+    view pre() = not crashed(A), not crashed(B), not crashed(C);
+    view post() = raw("x", 1) @ A, raw("x", 1) @ B, raw("x", 1) @ C;
+
+    check sim { runs: 1000, seed: 7 } expect fails;
+}

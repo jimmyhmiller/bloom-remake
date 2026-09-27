@@ -1,0 +1,27 @@
+schema   = 1
+id       = "BENCH-073"
+title    = "Forced through with nondet, the plain-channel replicated count diverges: the simulator finds x ≠ 1"
+priority = "P0"
+source   = "R13 §12 T1 negative variant (\"Forcing it with nondet lets the simulator find a schedule with x ≠ 1\")"
+features = ["LANG-138", "LANG-142", "LANG-201", "LANG-204", "ANA-015", "SEM-073", "TEST-001", "TEST-002", "TEST-022"]
+program  = "program.bls"
+spec     = "spec.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+The spec replays R13 T1's operations and states convergence as the outcome oracle: x has weight 1 at A, B and C at
+the end of the run. With omissions allowed before EFF and no wrapper, a single lost update of x leaves some replica
+at x = 0 or 2, so the simulator's check must fail (find a counterexample). The same spec against the W2 program of
+BENCH-073a/b would hold.
+"""
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-138", "LANG-142", "LANG-201", "LANG-204", "ANA-015", "SEM-073", "TEST-001", "TEST-002",
+                 "TEST-022"]
+until = "M8"
+
+[expect_verify]
+check  = "sim"
+result = "fails"
+bounds = { ticks = 12, eff = 6, crashes = 0, delay = 3 }

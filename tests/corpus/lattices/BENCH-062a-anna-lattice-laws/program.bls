@@ -1,0 +1,86 @@
+//! BENCH-062a. The Anna lattice-law cases (R04 §12 T16, §4.5), as a program whose outputs exercise every operation
+//! (the law harness itself is TEST-083's):
+//!   - LWW with a tie-free (ts, node) key is a proper lattice (`Lex` with a chain key, LANG-131): every merge order
+//!     gives the same register.
+//!   - Anna's `LWWPairLattice` merge "take incoming if ts >= current" is not commutative on equal timestamps.
+//!   - The dominating pair (Anna causal pair / Hydro `DomPair`) is not associative when its key is a set:
+//!     x = ({1},p), y = ({2},q), z = ({1,2},r).
+//!   - The proper Lex with a chain key passes associativity.
+//! The two broken merges are not lattices, so they cannot be Blossom lattice types (CR-25); they are written as the
+//! plain functions R04 §4.3 and §4.5 define, and their outputs show the failed law.
+
+program anna_lattice_laws version 1;
+
+type Lww = Lex<LMax<(u64, String)>, LPoint<String>>;
+type LexSet = Lex<LMax<u64>, LSet<String>>;
+
+const DX: (Set<u64>, Set<String>) = (set[1u64], set["p"]);
+const DY: (Set<u64>, Set<String>) = (set[2u64], set["q"]);
+const DZ: (Set<u64>, Set<String>) = (set[1u64, 2u64], set["r"]);
+
+/// Anna's LWWPairLattice merge: take the incoming pair if its timestamp is >= the current one.
+fn bare_ge_merge(cur: (u64, String), inc: (u64, String)) -> (u64, String) {
+    if inc.0 >= cur.0 { inc } else { cur }
+}
+
+fn strictly_below(x: Set<u64>, y: Set<u64>) -> bool {
+    x.union(y) == y && x != y
+}
+
+/// The dominating-pair merge (Anna causal pair, Hydro DomPair, Katara LexicalProduct), R04 §4.5.
+fn dom_merge(a: (Set<u64>, Set<String>), b: (Set<u64>, Set<String>)) -> (Set<u64>, Set<String>) {
+    if strictly_below(b.0, a.0) {
+        a
+    } else if strictly_below(a.0, b.0) {
+        b
+    } else {
+        (a.0.union(b.0), a.1.union(b.1))
+    }
+}
+
+cell lww_a: Lww;
+cell lww_b: Lww;
+cell lww_c: Lww;
+cell lww_abc: Lww;
+cell lww_a_bc: Lww;
+cell lww_cba: Lww;
+
+cell lex_x: LexSet;
+cell lex_y: LexSet;
+cell lex_z: LexSet;
+cell lex_xy_z: LexSet;
+cell lex_x_yz: LexSet;
+
+bootstrap {
+    emit lww_a(Lex::of((1, "r1"), "x"));
+    emit lww_b(Lex::of((1, "r2"), "y"));
+    emit lww_c(Lex::of((0, "r3"), "w"));
+    emit lex_x(Lex::of(1, set["p"]));
+    emit lex_y(Lex::of(2, set["q"]));
+    emit lex_z(Lex::of(2, set["r"]));
+}
+
+/// LWW with a (ts, node) key: three merge orders, one result.
+lww_orders: while let a = lww_a, let b = lww_b, let c = lww_c {
+    emit lww_abc(a.join(b).join(c));
+    emit lww_a_bc(a.join(b.join(c)));
+    emit lww_cba(c.join(b).join(a));
+}
+
+/// Lex with a chain key: both associations agree.
+lex_orders: while let x = lex_x, let y = lex_y, let z = lex_z {
+    emit lex_xy_z(x.join(y).join(z));
+    emit lex_x_yz(x.join(y.join(z)));
+}
+
+/// A bare `>=` fails commutativity: x ⊔ y and y ⊔ x differ when the timestamps are equal.
+view bare_ge(order, ts, v) {
+    let order = "x_then_y", let (ts, v) = bare_ge_merge((1, "x"), (1, "y"));
+    let order = "y_then_x", let (ts, v) = bare_ge_merge((1, "y"), (1, "x"));
+}
+
+/// DomPair with a set key fails associativity on R04 §4.5's counterexample.
+view dom_pair(order, key, val) {
+    let order = "(x+y)+z", let (key, val) = dom_merge(dom_merge(DX, DY), DZ);
+    let order = "x+(y+z)", let (key, val) = dom_merge(DX, dom_merge(DY, DZ));
+}

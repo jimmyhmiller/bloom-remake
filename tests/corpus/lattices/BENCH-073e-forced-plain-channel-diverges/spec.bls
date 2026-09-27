@@ -1,0 +1,19 @@
+//! BENCH-073e spec: the R13 §12 T1 operations, and the convergence property x = 1 at every replica.
+
+spec ForcedPlainChannel for r#program {
+    nodes A, B, C;
+    assign Replica = [A, B, C];
+
+    fact local_update("x", 1) @ A at tick 1;
+    fact local_update("x", 1) @ A at tick 2;
+    fact local_update("x", -1) @ B at tick 1;
+    fact local_update("y", 1) @ C at tick 1;
+    fact local_update("y", -1) @ A at tick 5;
+
+    faults { eot: 12, eff: 6, crashes: 0, model: async, delay: 3 }
+
+    view pre() = not crashed(A), not crashed(B), not crashed(C);
+    view post() = raw("x", 1) @ A, raw("x", 1) @ B, raw("x", 1) @ C;
+
+    check sim { runs: 500, seed: 7 } expect fails;
+}

@@ -1,0 +1,23 @@
+schema   = 1
+id       = "BENCH-310"
+title    = "T11 verdicts: val_is_y is confluent but not certified; seen_v11 and reg are certified"
+priority = "P1"
+source   = "R11/G1 §7 T11 (\"confluent but not certified\") and §4.2 (\"the certificate must say not certified\")"
+features = ["LANG-127", "LANG-131", "LANG-153", "ANA-029", "ANA-141", "ANA-143", "SEM-044", "SEM-107"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+Every schedule has the ultimate model {reg ↦ ((1,r2),y), seen_v11, val_is_y}, so val_is_y is confluent; but it is an
+exact read of an async-fed cell, which the Dedalus+^L certificate cannot cover. ANA-143 requires the verdict
+"confluent but not certified", not "diffluent". reg (a join-morphism sink) and seen_v11 (a threshold over it) are
+certified.
+"""
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-127", "LANG-131", "LANG-153", "ANA-029", "ANA-141", "ANA-143", "SEM-044", "SEM-107"]
+until = "M8"
+
+[expect_analysis]
+confluent = { reg = "certified", seen_v11 = "certified", val_is_y = "confluent_not_certified" }
