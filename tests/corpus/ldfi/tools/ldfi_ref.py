@@ -33,8 +33,8 @@ Semantics (R06 §3.2-§3.7, ARCHITECTURE §8.1 and §13.12, CR-13, CR-21, CR-22,
   ``@next`` heads hold at t+1 on the same node; ``@async`` heads are delivered to the head's first column at t+1.
 * A rule fires only when its location (the first column of its first body predicate) is one of the nodes (Molly's
   clock guard); a ``_`` there matches any clock, so the rule is not guarded. An ``@async`` rule fires only when its
-  destination is a node, and its sender is up or sends to itself. An aggregate is computed at its head's first
-  column (the second rule of Molly's split), so a group whose first column is not a node yields nothing.
+  destination is a node, and its sender is up or sends to itself. For an aggregate the guard applies to each
+  valuation (Molly's split keeps the clock atom in the bindings rule), not to the aggregated row.
 * Each time step evaluates the deductive rules stratum by stratum (temporal stratification, SEM-020). An aggregate
   groups by its non-aggregate head columns and ranges over the distinct valuations of the group columns and the
   aggregated variable (Molly's split rewrite, LANGUAGE §10.1); an empty group yields no row.
@@ -939,15 +939,13 @@ class Evaluator:
         return max(vals)
 
     def agg_tuples(self, rule, model, history, crashes, t):
-        """Molly's split rewrite evaluates the aggregate in a second rule whose body is the bindings relation, so the
-        aggregate is computed at the location in the head's first column; a group whose first column is not a node
-        yields nothing (the clock guard of that rule fails)."""
+        """Molly rewrites clocks before it splits aggregates, so the clock guard stays on the bindings rule (each
+        valuation must be located at a node, checked in group_values) and the aggregating rule has no guard of its
+        own: every group yields its row, whatever its first column holds."""
         out = set()
         for key, per_value in self.group_values(rule, model, history, crashes, t).items():
             v = self.agg_value(rule.agg.func, per_value.keys())
-            tup = tuple(v if k is None else k for k in key)
-            if tup[0] in self.nodes:
-                out.add(tup)
+            out.add(tuple(v if k is None else k for k in key))
         return out
 
     # -- one step -----------------------------------------------------------------------------------------------------
