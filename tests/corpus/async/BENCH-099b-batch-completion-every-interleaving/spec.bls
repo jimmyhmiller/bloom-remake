@@ -1,0 +1,57 @@
+//! BENCH-099: the word-count stage under many split interleavings (R13 §12 T16: "Two runs with different split
+//! interleavings produce identical final values"; "The stage reports 'complete' exactly when all three outputs are
+//! final").
+//!
+//! The scenario is BENCH-099 (a)'s: splits 1 and 2 hold 500 occurrences of "the" each, plus "cat dog" and "dog";
+//! split 3 is "dog"; split 4 is "cat bird", read later. Each mapper seals its split when the host ends it. Messages
+//! are delayed and reordered but never lost, and no node crashes, so every run completes.
+
+spec StageCompletion for r#program {
+    nodes M1, M2, M3, M4, R;
+    assign Mapper = [M1, M2, M3, M4];
+    assign Reducer = [R];
+
+    fact line(1, 1, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M1 at tick 1;
+    fact line(1, 2, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M1 at tick 1;
+    fact line(1, 3, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M1 at tick 1;
+    fact line(1, 4, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M1 at tick 1;
+    fact line(1, 5, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M1 at tick 1;
+    fact line(1, 6, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M1 at tick 1;
+    fact line(1, 7, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M1 at tick 1;
+    fact line(1, 8, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M1 at tick 1;
+    fact line(1, 9, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M1 at tick 1;
+    fact line(1, 10, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M1 at tick 1;
+    fact line(1, 11, "cat dog") @ M1 at tick 1;
+    fact line(2, 1, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M2 at tick 1;
+    fact line(2, 2, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M2 at tick 1;
+    fact line(2, 3, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M2 at tick 1;
+    fact line(2, 4, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M2 at tick 1;
+    fact line(2, 5, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M2 at tick 1;
+    fact line(2, 6, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M2 at tick 1;
+    fact line(2, 7, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M2 at tick 1;
+    fact line(2, 8, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M2 at tick 1;
+    fact line(2, 9, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M2 at tick 1;
+    fact line(2, 10, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M2 at tick 1;
+    fact line(2, 11, "dog") @ M2 at tick 1;
+    fact line(3, 1, "dog") @ M3 at tick 1;
+    fact line(4, 1, "cat bird") @ M4 at tick 4;
+    fact split_end(1) @ M1 at tick 2;
+    fact split_end(2) @ M2 at tick 3;
+    fact split_end(3) @ M3 at tick 4;
+    fact split_end(4) @ M4 at tick 6;
+
+    faults { crashes: 0, model: async, delay: 3 }
+
+    /// Completion and finality coincide: nothing exact is final before the stage is complete, and once it is
+    /// complete every count and the distinct-word count are final.
+    invariant count_final_only_when_complete: never word_count_final(w, n) @ x, not stage_complete() @ x;
+    invariant total_final_only_when_complete: never total_distinct_final(k) @ x, not stage_complete() @ x;
+    invariant complete_counts_final: never stage_complete() @ x, word_count(w, n) @ x, not word_count_final(w, n) @ x;
+    invariant complete_total_final: never stage_complete() @ x, total_distinct(k) @ x, not total_distinct_final(k) @ x;
+
+    /// Finality is monotone (SEM-016): a value reported final holds from then on.
+    invariant count_final_holds: never word_count_final(w, n) @ x, not word_count(w, n) @ x;
+    invariant hot_final_holds: never hot_final(w) @ x, not hot(w) @ x;
+
+    check sim { runs: 256, seed: 1 } expect holds;
+}

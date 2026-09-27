@@ -1,0 +1,91 @@
+# BENCH-099 (R13 §12 T16; FLAG-141): batch completion under many interleavings of the splits.
+#
+# R13 T16: "Two runs with different split interleavings produce identical final values", and "The stage reports
+# 'complete' exactly when all three outputs are final." The program is BENCH-099 (a)'s with its shuffle channel
+# declared reliable (as in LANGUAGE E6), and the scenario is (a)'s, given as the spec's facts. Under 256 seeded
+# asynchronous schedules (delay up to 3 ticks, no loss, no crash), every run must end with the same finals at the
+# reducer, and the spec's invariants must hold at every visited state: nothing exact is final before the stage is
+# complete, and once it is complete every count and total_distinct are final. When the early threshold fires
+# relative to the seals depends on the schedule, so that half of T16 is pinned by the synchronous case (a).
+schema = 1
+id = "BENCH-099"
+title = "Batch completion under every interleaving: identical finals, and complete exactly when the outputs are final"
+priority = "P1"
+source = "R13 §12 T16 and §9.6 (Batch stage); FEATURES BENCH-099, FLAG-141; LANGUAGE E6 (the word-count program)"
+features = ["LANG-009", "LANG-010", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-120", "LANG-122", "LANG-124", "LANG-126", "LANG-153", "LANG-154", "LANG-155", "LANG-181", "LANG-201", "LANG-207", "LANG-212", "ANA-065", "ANA-120", "ANA-121", "SEM-016", "TEST-001", "TEST-002", "TEST-081", "VER-001"]
+program = "program.bls"
+spec = "spec.bls"
+derived = true
+expected_from = "literature"
+notes = "The scenario inputs are the spec's facts (BENCH-099 (a)'s inputs). See docs/plan/notes/M1.4.md (BENCH-099)."
+
+[deploy]
+nodes = [
+    { name = "M1", role = "Mapper" },
+    { name = "M2", role = "Mapper" },
+    { name = "M3", role = "Mapper" },
+    { name = "M4", role = "Mapper" },
+    { name = "R", role = "Reducer" },
+]
+
+[run]
+ticks = 40
+stop = "ticks"
+seeds = 256
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-009", "LANG-010", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-120", "LANG-122", "LANG-124", "LANG-126", "LANG-153", "LANG-154", "LANG-155", "LANG-181", "LANG-201", "LANG-207", "LANG-212", "ANA-065", "ANA-120", "ANA-121", "SEM-016", "TEST-001", "TEST-002", "TEST-081", "VER-001"]
+until = "M8"
+
+[[expect]]
+node = "R"
+rel = "word_count"
+final = true
+rows = [["bird", 1], ["cat", 2], ["dog", 3], ["the", 1000]]
+
+[[expect]]
+node = "R"
+rel = "word_count_final"
+final = true
+rows = [["bird", 1], ["cat", 2], ["dog", 3], ["the", 1000]]
+
+[[expect]]
+node = "R"
+rel = "total_distinct"
+final = true
+rows = [[4]]
+
+[[expect]]
+node = "R"
+rel = "total_distinct_final"
+final = true
+rows = [[4]]
+
+[[expect]]
+node = "R"
+rel = "hot"
+final = true
+rows = [["the"]]
+
+[[expect]]
+node = "R"
+rel = "hot_final"
+final = true
+rows = [["the"]]
+
+[[expect]]
+node = "R"
+rel = "not_hot_final"
+final = true
+rows = [["bird"], ["cat"], ["dog"]]
+
+[[expect]]
+node = "R"
+rel = "stage_complete"
+final = true
+rows = [[]]
+
+[expect_verify]
+check = "sim"
+result = "holds"
