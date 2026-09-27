@@ -1,0 +1,51 @@
+# BENCH-094 (R05 T13; Blazes §5.1): the Storm wordcount with its input sealed on batch: the sink is Async.
+#
+# Blazes (ICDE 2014) §5.1.2: "If, on the other hand, the input stream is sealed on batch, Blazes instead produces this
+# reduction: Seal_batch -(p, CR)-> Seal_batch [Splitter]; Seal_batch, OW_word,batch -(p)-> Async [Count]; Async -(p, CW)
+# -> Async [Committer]. Because a batch is atomic ... and independent ..., the topology will produce deterministic
+# outputs ... under all interleavings." R05 §4.4.2: "compatible({word,batch}, {batch}) holds (batch ↦ batch is the
+# identity), so no Taint; output Async ... Deterministic without global coordination."
+#
+# The tweet channel is declared `sealed by (batch)` (ANA-041's Seal_batch) and the spout punctuates each batch. The
+# seal crosses `split` because its CR path copies `batch` unchanged (an injective FD, ANA-043; R05 §4.4.1 resolution
+# 3), so the word stream is Seal_batch; `count`'s gate {batch, word} is compatible with it, so rule 4 does not fire and
+# the seal is consumed by the sealing strategy (resolution 2): Async from `count` on. The coordination is sealing on
+# batch at `count`'s input; the splitters are several producers per batch, so it includes the unanimous vote (§4.5).
+schema = 1
+id = "BENCH-094"
+title = "Blazes, Storm wordcount sealed on batch: the seal is compatible with Count, the sink is Async"
+priority = "P1"
+source = "R05 T13, §4.4.1, §4.4.2, §4.5 and §9.3 item 13; Blazes (ICDE 2014) §4.2.1, §5.1, §6.2"
+features = ["LANG-003", "LANG-004", "LANG-009", "LANG-040", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-153", "LANG-154", "LANG-181", "ANA-040", "ANA-042", "ANA-045", "LANG-207", "ANA-041", "ANA-043"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-003", "LANG-004", "LANG-009", "LANG-040", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-153", "LANG-154", "LANG-181", "ANA-040", "ANA-042", "ANA-045", "LANG-207", "ANA-041", "ANA-043"]
+until = "M7"
+
+[expect_analysis.blazes]
+streams = { tweet = "Seal(batch)", word = "Seal(batch)", tally = "Async" }
+sinks = { committed = "Async" }
+coordination = [{ at = "count", mechanism = "sealing", key = ["batch"] }]
+
+[[expect_analysis.blazes.paths]]
+component = "split"
+from = "tweets"
+to = "words"
+annotation = "CR"
+
+[[expect_analysis.blazes.paths]]
+component = "count"
+from = "words"
+to = "counts"
+annotation = "OW"
+gate = ["batch", "word"]
+
+[[expect_analysis.blazes.paths]]
+component = "commit"
+from = "counts"
+to = "db"
+annotation = "CW"

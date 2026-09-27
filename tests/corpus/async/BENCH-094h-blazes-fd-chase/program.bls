@@ -1,0 +1,160 @@
+//! BENCH-094: the injective-FD chase that decides compatible(gate, key) (ANA-043; R05 T15, §4.4; Blazes §4.2.1, §7.2).
+//!
+//! Blazes §4.2.1: "the stream partitioning matches the component partitioning if at least one of the attributes in gate
+//! is injectively determined by all of the attributes in key ... when the company name Yahoo! is "sealed" ... their
+//! stock symbol YHOO is implicitly sealed as well, but the city of Sunnyvale is not. A trivial (and ubiquitous) example
+//! of an injective function ... is the identity function." §7.2: "given S ≡ π_a π_ab π_abc R, we have
+//! injectivefd(R.a, S.a)." R05 T15 adds: "A computed column f(a) is not injective unless declared."
+//!
+//! A source streams listings sealed on the company. The `derive` component turns each listing into four streams:
+//! the company itself, through three nested projections (S ≡ π_a π_ab π_abc R); the ticker, through a function declared
+//! #[injective]; a tag computed by the same expression but not declared; and the headquarters city, which is not
+//! injective. Four instances of one order-sensitive counter, each gated on its key, consume them.
+
+program fd_chase version 1;
+
+role Source: cluster;
+role Deriver: cluster;
+role Tallier: cluster;
+
+/// R(a, b, c, d): a company's listing for a day, sealed per company by the source.
+channel listing(company: String, day: u64, price: u64, volume: u64): Source -> Deriver
+    sealed by (company);
+channel by_company(company: String, day: u64): Deriver -> Tallier;
+channel by_ticker(ticker: String, day: u64): Deriver -> Tallier;
+channel by_tag(tag: String, day: u64): Deriver -> Tallier;
+channel by_city(city: String, day: u64): Deriver -> Tallier;
+
+/// The company's stock symbol: distinct companies have distinct symbols, and the claim is declared.
+#[injective]
+fn ticker_of(company: String) -> String {
+    "T:" ++ company
+}
+
+/// The same expression, with no declaration: the analysis may not assume it is injective.
+fn tag_of(company: String) -> String {
+    "T:" ++ company
+}
+
+/// The city of the headquarters: many companies share one.
+fn city_of(company: String) -> String {
+    if company.starts_with("Y") { "Sunnyvale" } else { "Elsewhere" }
+}
+
+/// Stateless and monotone on every path (CR).
+module Derive {
+    input listings(company: String, day: u64, price: u64, volume: u64);
+    output companies(company: String, day: u64);
+    output tickers(ticker: String, day: u64);
+    output tags(tag: String, day: u64);
+    output cities(city: String, day: u64);
+
+    /// π_abc R, π_ab π_abc R, and S = π_a π_ab π_abc R (keeping the day, so the four outputs have one shape).
+    view abc(company, day, price) = listings(company, day, price, _);
+    view ab(company, day) = abc(company, day, _);
+
+    project: on ab(company, day) {
+        emit companies(company, day);
+    }
+
+    to_ticker: on listings(company, day, _, _) {
+        emit tickers(ticker_of(company), day);
+    }
+
+    to_tag: on listings(company, day, _, _) {
+        emit tags(tag_of(company), day);
+    }
+
+    to_city: on listings(company, day, _, _) {
+        emit cities(city_of(company), day);
+    }
+}
+
+/// The number of distinct days seen per key: stateful and order-sensitive, gated on the key (OW_key).
+module Tally {
+    input keyed(key: String, day: u64);
+    output counts(key: String, n: u64);
+
+    table seen(key: String, day: u64);
+
+    keep: on keyed(k, d) {
+        emit seen(k, d);
+    }
+
+    count_days: while seen(k, d) {
+        emit counts(k, count!(d));
+    }
+}
+
+at Source {
+    input listed(company: String, day: u64, price: u64, volume: u64);
+    input delisted(company: String);
+
+    publish: on listed(c, d, p, v), n in Deriver {
+        send listing(c, d, p, v) to n;
+    }
+
+    /// No more listings of this company.
+    close: on delisted(c) {
+        seal listing(company: c);
+    }
+}
+
+at Deriver {
+    import Derive as derive;
+
+    take: on listing(c, d, p, v) {
+        emit derive.listings(c, d, p, v);
+    }
+
+    give_company: on derive.companies(c, d), t in Tallier {
+        send by_company(c, d) to t;
+    }
+    give_ticker: on derive.tickers(k, d), t in Tallier {
+        send by_ticker(k, d) to t;
+    }
+    give_tag: on derive.tags(k, d), t in Tallier {
+        send by_tag(k, d) to t;
+    }
+    give_city: on derive.cities(k, d), t in Tallier {
+        send by_city(k, d) to t;
+    }
+}
+
+at Tallier {
+    import Tally as per_company;
+    import Tally as per_ticker;
+    import Tally as per_tag;
+    import Tally as per_city;
+
+    output company_days(company: String, n: u64);
+    output ticker_days(ticker: String, n: u64);
+    output tag_days(tag: String, n: u64);
+    output city_days(city: String, n: u64);
+
+    take_company: on by_company(k, d) {
+        emit per_company.keyed(k, d);
+    }
+    take_ticker: on by_ticker(k, d) {
+        emit per_ticker.keyed(k, d);
+    }
+    take_tag: on by_tag(k, d) {
+        emit per_tag.keyed(k, d);
+    }
+    take_city: on by_city(k, d) {
+        emit per_city.keyed(k, d);
+    }
+
+    out_company: while per_company.counts(k, n) {
+        emit company_days(k, n);
+    }
+    out_ticker: while per_ticker.counts(k, n) {
+        emit ticker_days(k, n);
+    }
+    out_tag: while per_tag.counts(k, n) {
+        emit tag_days(k, n);
+    }
+    out_city: while per_city.counts(k, n) {
+        emit city_days(k, n);
+    }
+}

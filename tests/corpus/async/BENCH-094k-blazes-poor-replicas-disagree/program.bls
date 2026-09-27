@@ -1,0 +1,157 @@
+//! BENCH-094: the ad-tracking network of Blazes (Alvaro, Conway, Hellerstein, Maier, ICDE 2014, §1.3, §3.4, §5.2),
+//! with the reporting servers running query POOR.
+//!
+//! "A collection of ad servers deliver ads to users ... and send click logs (edges labeled "c") to a set of reporting
+//! servers. Reporting servers compute a continuous query; analysts make requests ("q") for subsets of the query answer
+//! ... and receive results via the stream labeled "r". ... a caching tier is interposed between analysts and reporting
+//! servers. An analyst poses a request about a particular ad to a cache server. If the cache contains an answer for
+//! the query, it returns the answer directly. Otherwise, it forwards the request to a reporting server; when a
+//! response is received, the cache updates its local state and returns a response to the analyst. Asynchronously, it
+//! also sends the response to the other caches. The clickstream c is sent to all reporting servers."
+//!
+//! The two Blazes components are the module instances `report` (Report, at every reporting server) and `cache`
+//! (Cache, at every cache server). Both are replicated: their output streams carry `#[replicated]` (LANGUAGE §14.1,
+//! Blazes' Rep). The click stream carries no seal. The cache forwards every request, answered or not, so its request -> request path stays
+//! the confluent read the paper annotates (CR); answers from another cache are stored, not passed on again.
+
+program ad_reporting_poor version 1;
+
+role AdServer: cluster;
+role Reporter: cluster;
+role CacheServer: cluster;
+role Analyst: cluster;
+
+/// Stream c: every click, to every reporting server.
+channel click(click_id: u64, id: u64, campaign: String, window: u64): AdServer -> Reporter;
+/// Stream q: an analyst's request, to a cache server.
+channel ask(q: u64, id: u64): Analyst -> CacheServer;
+/// A cache server passes the request on to the reporting servers.
+channel lookup(q: u64, id: u64): CacheServer -> Reporter;
+/// The reporting servers' answers, to the cache servers.
+#[replicated]
+channel found(q: u64, id: u64): Reporter -> CacheServer;
+/// A cache server shares each answer with the other cache servers (the Cache self-edge).
+#[replicated]
+channel share(q: u64, id: u64): CacheServer -> CacheServer;
+/// Stream r: answers, to the analysts.
+#[replicated]
+channel result(q: u64, id: u64): CacheServer -> Analyst;
+
+/// Report: logs every click (click -> response: CW) and answers requests with query POOR (request -> response).
+module Report {
+    input click(click_id: u64, id: u64, campaign: String, window: u64);
+    input request(q: u64, id: u64);
+    output response(q: u64, id: u64);
+
+    table clicks(click_id: u64, id: u64, campaign: String, window: u64);
+
+    log: on click(c, id, cp, w) {
+        emit clicks(c, id, cp, w);
+    }
+
+    /// POOR: `select id from clicks group by id having count(*) < 100`. A non-monotone aggregate grouped by id.
+    view per_ad(id, n = count!(c)) = clicks(c, id, _, _);
+
+    answer: on request(q, id), per_ad(id, n) where n < 100 {
+        emit response(q, id);
+    }
+}
+
+/// Cache: answers from its store (request -> response: CR), forwards every request (request -> request: CR), and
+/// stores the answers it receives (response -> response: CW), sharing those that come from a reporting server.
+module Cache {
+    input request(q: u64, id: u64);
+    input response(q: u64, id: u64);
+    input peer(q: u64, id: u64);
+    output forward(q: u64, id: u64);
+    output answer(q: u64, id: u64);
+    output share(q: u64, id: u64);
+
+    table cached(id: u64);
+
+    pass_on: on request(q, id) {
+        emit forward(q, id);
+    }
+
+    hit: on request(q, id), cached(id) {
+        emit answer(q, id);
+    }
+
+    fill: on response(q, id) {
+        emit cached(id);
+        emit answer(q, id);
+        emit share(q, id);
+    }
+
+    learn: on peer(q, id) {
+        emit cached(id);
+    }
+}
+
+at AdServer {
+    /// From the host: the clicks this ad server logged.
+    input clicked(click_id: u64, id: u64, campaign: String, window: u64);
+
+    send_click: on clicked(c, id, cp, w), r in Reporter {
+        send click(c, id, cp, w) to r;
+    }
+}
+
+at Reporter {
+    import Report as report;
+
+    take_click: on click(c, id, cp, w) {
+        emit report.click(c, id, cp, w);
+    }
+
+    take_lookup: on lookup(q, id) {
+        emit report.request(q, id);
+    }
+
+    give: on report.response(q, id), s in CacheServer {
+        send found(q, id) to s;
+    }
+}
+
+at CacheServer {
+    import Cache as cache;
+
+    take_ask: on ask(q, id) {
+        emit cache.request(q, id);
+    }
+
+    take_found: on found(q, id) {
+        emit cache.response(q, id);
+    }
+
+    take_share: on share(q, id) {
+        emit cache.peer(q, id);
+    }
+
+    ask_reporters: on cache.forward(q, id), r in Reporter {
+        send lookup(q, id) to r;
+    }
+
+    reply: on cache.answer(q, id), a in Analyst {
+        send result(q, id) to a;
+    }
+
+    spread: on cache.share(q, id), s in CacheServer where s != self {
+        send share(q, id) to s;
+    }
+}
+
+at Analyst {
+    /// From the host: a question about an ad.
+    input question(q: u64, id: u64);
+    /// The answers an analyst receives: the sink of the dataflow.
+    output answers(q: u64, id: u64);
+
+    pose: on question(q, id), s in CacheServer {
+        send ask(q, id) to s;
+    }
+
+    receive: on result(q, id) {
+        emit answers(q, id);
+    }
+}

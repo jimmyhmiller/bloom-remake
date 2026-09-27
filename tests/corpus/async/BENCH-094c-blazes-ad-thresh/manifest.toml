@@ -1,0 +1,75 @@
+# BENCH-094 (R05 T14; Blazes §5.2.2): the ad-tracking network running THRESH is Async end to end.
+#
+# Blazes §5.2.2: "If we supply THRESH, Blazes performs the following reductions, deriving a final label of Async for the
+# output path from cache to sink ... All components are confluent, so the complete dataflow produces deterministic
+# outputs without coordination." R05 §4.4.2: "THRESH (request→response CR): Async end to end."
+#
+# Annotations (ANA-040, white box; Blazes §5.2.1): `report` logs clicks (click -> response: CW, the click only writes
+# the log the query reads) and answers requests (request -> response: CR, a threshold over the growing click set);
+# `cache` reads its store and forwards (request -> answer, request -> forward: CR) and stores answers (response ->
+# answer/share, peer -> answer: CW). Both components are replicated (`#[replicated]` on their output streams). The only
+# cycle is the cache's self-edge through `share`: "Cache and Report form no cycle, because Cache provides no path from r
+# to q" (Blazes §4.2).
+schema = 1
+id = "BENCH-094"
+title = "Blazes, ad reporting with THRESH: every stream and the sink are Async; no coordination"
+priority = "P1"
+source = "R05 T14, §4.4.1, §4.4.2 (reference derivations) and §9.3 item 14; Blazes (ICDE 2014) §1.3, §3.4, §4, §5.2, §7"
+features = ["LANG-003", "LANG-004", "LANG-009", "LANG-040", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "LANG-088", "LANG-153", "ANA-040", "ANA-041", "ANA-042", "ANA-045", "LANG-123", "LANG-126"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "The Bloom ad-reporting source (~125 LOC) is not published; the program is re-derived from the paper's description and Fig. 5 queries."
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-003", "LANG-004", "LANG-009", "LANG-040", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "LANG-088", "LANG-153", "ANA-040", "ANA-041", "ANA-042", "ANA-045", "LANG-123", "LANG-126"]
+until = "M7"
+
+[expect_analysis.blazes]
+cycles = [["cache"]]
+streams = { click = "Async", ask = "Async", lookup = "Async", found = "Async", share = "Async", result = "Async" }
+sinks = { answers = "Async" }
+coordination = []
+
+[[expect_analysis.blazes.paths]]
+component = "report"
+from = "click"
+to = "response"
+annotation = "CW"
+
+[[expect_analysis.blazes.paths]]
+component = "report"
+from = "request"
+to = "response"
+annotation = "CR"
+
+[[expect_analysis.blazes.paths]]
+component = "cache"
+from = "request"
+to = "forward"
+annotation = "CR"
+
+[[expect_analysis.blazes.paths]]
+component = "cache"
+from = "request"
+to = "answer"
+annotation = "CR"
+
+[[expect_analysis.blazes.paths]]
+component = "cache"
+from = "response"
+to = "answer"
+annotation = "CW"
+
+[[expect_analysis.blazes.paths]]
+component = "cache"
+from = "response"
+to = "share"
+annotation = "CW"
+
+[[expect_analysis.blazes.paths]]
+component = "cache"
+from = "peer"
+to = "answer"
+annotation = "CW"

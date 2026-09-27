@@ -1,0 +1,109 @@
+//! BENCH-094: cycle collapse in Blazes label propagation (ANA-042; R05 T17, §4.4 step 0; Blazes §4.2).
+//!
+//! Blazes §4.2: "To rule out infinite paths, it reduces each cycle in the graph to a single node with a collapsed label
+//! by selecting the label of highest severity among the cycle members." R05 T17: "a component in a cycle with an OW
+//! member gives the whole SCC OW severity."
+//!
+//! Shortest paths computed by two components in a loop: `expand` (confluent and stateful: it stores the edges and the
+//! best paths it hears of, and extends each best path by one edge) and `shortest` (order-sensitive and stateful: the
+//! least length per pair, a `min!` aggregate grouped by (a, b)). Each best path goes back to `expand`, whose extensions
+//! go back to `shortest`: a cycle at the path level, expand.best -> expand.extended -> shortest.paths -> shortest.best.
+//! Collapsed, the pair has the severity of its worst member, OW_a,b, so the unsealed edge stream taints it (rule 2) and
+//! the sink is Run, although `expand` alone is confluent.
+
+program cycle_collapse version 1;
+
+role Loader: cluster;
+role Expander: cluster;
+role Minimizer: cluster;
+
+channel edge_msg(a: u64, b: u64): Loader -> Expander;
+channel ext_msg(a: u64, b: u64, d: u64): Expander -> Minimizer;
+channel best_msg(a: u64, b: u64, d: u64): Minimizer -> Expander;
+
+/// Stores edges and best paths, and extends each best path by one edge (CW on both paths).
+module Expand {
+    input edge(a: u64, b: u64);
+    input best(a: u64, b: u64, d: u64);
+    output extended(a: u64, b: u64, d: u64);
+
+    table edges(a: u64, b: u64);
+    table bests(a: u64, b: u64, d: u64);
+
+    keep_edge: on edge(a, b) {
+        emit edges(a, b);
+    }
+
+    keep_best: on best(a, b, d) {
+        emit bests(a, b, d);
+    }
+
+    one_hop: while edges(a, b) {
+        emit extended(a, b, 1);
+    }
+
+    extend: while bests(a, m, d), edges(m, b) {
+        emit extended(a, b, d + 1);
+    }
+}
+
+/// The least length heard of per pair (OW_a,b).
+module Shortest {
+    input paths(a: u64, b: u64, d: u64);
+    output best(a: u64, b: u64, d: u64);
+
+    table heard(a: u64, b: u64, d: u64);
+
+    keep: on paths(a, b, d) {
+        emit heard(a, b, d);
+    }
+
+    view least(a, b, d = min!(dd)) = heard(a, b, dd);
+
+    report: while least(a, b, d) {
+        emit best(a, b, d);
+    }
+}
+
+at Loader {
+    input edge_in(a: u64, b: u64);
+
+    load: on edge_in(a, b), x in Expander {
+        send edge_msg(a, b) to x;
+    }
+}
+
+at Expander {
+    import Expand as expand;
+
+    take_edge: on edge_msg(a, b) {
+        emit expand.edge(a, b);
+    }
+
+    take_best: on best_msg(a, b, d) {
+        emit expand.best(a, b, d);
+    }
+
+    give: while expand.extended(a, b, d), m in Minimizer {
+        send ext_msg(a, b, d) to m;
+    }
+}
+
+at Minimizer {
+    import Shortest as shortest;
+
+    /// The shortest paths found so far: the sink.
+    output shortest_paths(a: u64, b: u64, d: u64);
+
+    take: on ext_msg(a, b, d) {
+        emit shortest.paths(a, b, d);
+    }
+
+    give: while shortest.best(a, b, d), x in Expander {
+        send best_msg(a, b, d) to x;
+    }
+
+    out: while shortest.best(a, b, d) {
+        emit shortest_paths(a, b, d);
+    }
+}
