@@ -177,6 +177,10 @@ the runner (M5.2) and the triage WPs can check the cases against it rather than 
 - **Run length.** `[run] ticks = N` is chosen with a margin: no expectation refers to a tick later than N − 2, so
   the case holds whether the runner counts ticks `0..N` or `0..=N`. Cases with future inputs use `stop = "ticks"`.
 - **Host inputs** arrive from tick 1 on; tick 0 is the boot tick.
+- **Node-local ticks under the simulator.** Scripted inputs, faults and per-tick expectations name node-local ticks.
+  When a node has nothing to do before such a tick (no message, timer, input or staged change), the simulator runs
+  empty ticks up to it; by SEM-009 an idle stretch is observationally equivalent to a run of empty ticks, so this
+  changes no result. Messages still arrive whenever the schedule delivers them.
 - **Faults.** `[[fault]] kind = "restart"` at tick k means the node's tick k is the first tick of a new incarnation:
   durable relations are reloaded, everything else starts empty, and `boot()` and `recovered()` hold at tick k.
 - **Row values** follow PLAN §5.1. A lattice column compares by its revealed value (`LMin<u64>` as an integer,
