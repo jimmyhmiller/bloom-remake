@@ -1,0 +1,39 @@
+//! BENCH-097 (e): 2P-Set finality (R13 §12 T9; Power, Koutris, Hellerstein, ICDT 2025, Appendix B, "Two-Phase Set
+//! CRDT": "we can negatively partially freely terminate on any value in DELETES. On the other hand, we can never
+//! positively partially free terminate").
+//!
+//! A two-phase set keeps a grow-only set of inserts and one of deletes; an element is in the set when it has been
+//! inserted and not deleted. Once deleted, it is final-absent; while only inserted, it stays provisional-present.
+
+program ft_two_phase_set version 1;
+
+input ins(x: String);
+input del(x: String);
+
+cell inserts: LSet<String>;
+cell deletes: LSet<String>;
+
+output in_set(x: String);
+output final_present(x: String);
+output final_absent(x: String);
+
+do_insert: on ins(x) {
+    emit inserts(set[x]);
+}
+
+do_delete: on del(x) {
+    emit deletes(set[x]);
+}
+
+/// INSERTS − DELETES.
+members: while x in inserts, not (x in deletes) {
+    emit in_set(x);
+}
+
+present: while final in_set(x) {
+    emit final_present(x);
+}
+
+absent: while x in inserts, final not in_set(x) {
+    emit final_absent(x);
+}

@@ -1,0 +1,64 @@
+# BENCH-097 (R13 §12 T7; FT Example 11, Thm 24): (c) `forall R(x): x > 0` is final-false at the first violation.
+#
+# R13 T7: "The inputs are R(3), R(9), then R(−2). allpos is provisional-true until R(−2), then final-false (Ex 11,
+# Thm 24 negative). It is never final-true unless R is sealed." Over an empty R the quantifier is vacuously true, so
+# allpos also holds in tick 0. NEG-FINAL (ANA-120).
+schema = 1
+id = "BENCH-097"
+title = "Free termination (c): forall R(x): x > 0 is provisional-true, then final-false at the first violation"
+priority = "P0"
+source = "R13 §12 T7; FT (ICDT 2025) Example 11, Thm 24"
+features = ["LANG-040", "LANG-043", "LANG-060", "LANG-090", "LANG-212", "ANA-120", "ANA-121", "SEM-016"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[run]
+ticks = 12
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-060", "LANG-090", "LANG-212", "ANA-120", "ANA-121", "SEM-016"]
+until = "M6"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-060", "LANG-090", "LANG-212", "ANA-120", "ANA-121", "SEM-016"]
+until = "M7"
+
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "r_in"
+rows = [[3], [9]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "r_in"
+rows = [[-2]]
+
+[[expect]]
+node = "n1"
+rel = "allpos"
+row = []
+holds = "0..=1"
+absent = "2.."
+
+[[expect]]
+node = "n1"
+rel = "allpos_final_false"
+row = []
+holds = "2.."
+absent = "..=1"
+
+[[expect]]
+node = "n1"
+rel = "allpos_final_true"
+row = []
+absent = "0.."
+
+[expect_analysis]
+finality = { allpos = ["NEG"] }

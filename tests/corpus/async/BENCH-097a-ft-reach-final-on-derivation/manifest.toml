@@ -1,0 +1,104 @@
+# BENCH-097 (R13 §12 T5; FT §1.1, §4.1): (a) reachability is final-true the moment P(s, t) is derived.
+#
+# R13 T5: "reach() is final-true at tick 3, the moment P(s,t) is derived (Prop 13)"; "each derived P(x,y) tuple is
+# final-present on derivation (Thm 25)". Edge only grows (it is never deleted, and no seal is sent here), so every
+# tuple of the monotone P and the monotone reach() is final as soon as it holds (POS-FINAL, ANA-120).
+#
+# Scenario (sync harness): the source sends s->a (input in tick 1), a->t (tick 3), t->u (tick 5) and u->v (tick 7);
+# each edge arrives at G one tick later. P(s, a) holds from tick 2; P(s, t), and so reach(), from tick 4; P(s, v)
+# from tick 8. Each is final in the tick it is first derived; reach() is never final-false.
+schema = 1
+id = "BENCH-097"
+title = "Free termination (a): reach() and every P tuple are final the moment they are derived"
+priority = "P0"
+source = "R13 §12 T5 (instance 1); FT (ICDT 2025) Prop 13, Thm 25"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-207", "LANG-212", "ANA-120", "ANA-121", "SEM-016"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "SRC", role = "Node" }, { name = "G", role = "Node" }]
+
+[run]
+ticks = 12
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-207", "LANG-212", "ANA-120", "ANA-121", "SEM-016"]
+until = "M6"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-207", "LANG-212", "ANA-120", "ANA-121", "SEM-016"]
+until = "M7"
+
+
+[[input]]
+node = "SRC"
+tick = 1
+rel = "add_edge"
+rows = [["s", "a"]]
+
+[[input]]
+node = "SRC"
+tick = 3
+rel = "add_edge"
+rows = [["a", "t"]]
+
+[[input]]
+node = "SRC"
+tick = 5
+rel = "add_edge"
+rows = [["t", "u"]]
+
+[[input]]
+node = "SRC"
+tick = 7
+rel = "add_edge"
+rows = [["u", "v"]]
+
+[[expect]]
+node = "G"
+rel = "reach"
+row = []
+holds = "4.."
+absent = "..=3"
+
+[[expect]]
+node = "G"
+rel = "reach_final"
+row = []
+holds = "4.."
+absent = "..=3"
+
+[[expect]]
+node = "G"
+rel = "reach_final_false"
+row = []
+absent = "0.."
+
+[[expect]]
+node = "G"
+rel = "p_final"
+row = ["s", "a"]
+holds = "2.."
+absent = "..=1"
+
+[[expect]]
+node = "G"
+rel = "p_final"
+row = ["s", "t"]
+holds = "4.."
+absent = "..=3"
+
+[[expect]]
+node = "G"
+rel = "p_final"
+row = ["s", "v"]
+holds = "8.."
+absent = "..=7"
+
+[expect_analysis]
+finality = { reach = ["POS"] }
