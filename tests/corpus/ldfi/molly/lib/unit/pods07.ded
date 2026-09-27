@@ -1,0 +1,12 @@
+// The provenance-semiring example of Green, Karvounarakis and Tannen, "Provenance Semirings" (PODS 2007, Figures 3
+// and 5): R = {(a, b, c), (d, b, e), (f, g, e)} and q(R) = pi_ac(pi_ab R join pi_bc R union pi_ac R join pi_bc R), as
+// the Datalog of R06 §12.6 with a location column n added (every `.ded` relation is located). The answers are
+// (a, c), (a, e), (d, c), (d, e) and (f, e); their provenance polynomials are in ../../golden/provenance.toml.
+// Blossom golden corpus, derived (derived = true); see ../../README.md.
+
+q(N, X, Z) :- r(N, X, Y, W), r(N, U, Y, Z);
+q(N, X, Z) :- r(N, X, Y, Z), r(N, U, V, Z);
+
+r("n", "a", "b", "c")@1;
+r("n", "d", "b", "e")@1;
+r("n", "f", "g", "e")@1;

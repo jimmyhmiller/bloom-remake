@@ -1,0 +1,12 @@
+// Raft scenario "commit": election timeouts, in steps of silence, a 9 (the first leader does not compete again
+// within the bound), b 3, c 4; the client submits "x" to a at time 2, "y" to b at time 6 and "y" to c at time 8.
+// When a's messages stop reaching a follower, that follower can become the leader of term 2 and append "y" at the
+// index where a appended "x". Blossom golden corpus, re-derived (derived = true); see ../../README.md.
+
+patience("a", 9)@1;
+patience("b", 3)@1;
+patience("c", 4)@1;
+
+submit("a", "x")@2;
+submit("b", "y")@6;
+submit("c", "y")@8;

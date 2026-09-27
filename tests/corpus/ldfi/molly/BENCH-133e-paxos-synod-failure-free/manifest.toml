@@ -1,0 +1,76 @@
+# BENCH-133e-paxos-synod-failure-free: paxos-synod: the failure-free run.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-133"
+title = "paxos-synod: the failure-free run"
+priority = "P1"
+source = "FEATURES.md BENCH-133; R06 §12.4; LDFI SIGMOD'15 §5.1.2, Fig. 13"
+features = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004", "LANG-100", "LANG-101", "SEM-020"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+Failure-free: prepares at 1, b's promises at 3 (ballot 5 beats 4), accept at 3, acceptances at 4, learned at 5; a's and b's timers start new rounds at 4, which propose foobar again.
+
+Molly round k is tick k (CR-13). The rows omit the location column. The spec is not included.
+"""
+
+[deploy]
+nodes = [
+  { name = "a", role = "Node" },
+  { name = "b", role = "Node" },
+  { name = "c", role = "Node" },
+]
+
+[run]
+ticks = 8
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004", "LANG-100", "LANG-101", "SEM-020"]
+until = "M5"
+
+# b's ballot 5 dominates a's 4 at every acceptor at tick 2, so only b collects promises
+[[expect]]
+node = "b"
+rel = "promises"
+tick = 3
+rows = [[5, "a", 0, "none"], [5, "b", 0, "none"], [5, "c", 0, "none"]]
+
+# every acceptor accepts (5, foobar) at tick 4
+[[expect]]
+node = "a"
+rel = "acc_log"
+tick = 4
+rows = [[5, "foobar"]]
+
+# every node learns foobar at tick 5
+[[expect]]
+node = "a"
+rel = "learned"
+row = ["foobar"]
+holds = "5..=7"
+absent = "..=4"
+
+[[expect]]
+node = "c"
+rel = "learned"
+row = ["foobar"]
+holds = "5..=7"
+absent = "..=4"
+
+# nobody ever learns peter
+[[expect]]
+node = "c"
+rel = "learned"
+tick = 7
+rows = [["foobar"]]
+
+# a's timer fires at tick 4 before a learned anything: a new round, ballot 7
+[[expect]]
+node = "a"
+rel = "round"
+tick = 4
+rows = [[7]]

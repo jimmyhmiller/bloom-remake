@@ -1,0 +1,30 @@
+# BENCH-137h-raft-election-10-7-1: raft-election: no counterexample at EOT 10, EFF 7, 1 crash.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-137"
+title = "raft-election: no counterexample at EOT 10, EFF 7, 1 crash"
+priority = "P1"
+source = "FEATURES.md BENCH-137; R10 T13-T14; R06 §12.7"
+features = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "TEST-024", "LANG-100", "LANG-101", "SEM-020", "TEST-027", "ANA-010"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+Correct Raft with a crash, on the election scenario: at most one leader per term.
+
+../lib/raft/raft.ded is a compact Raft (Ongaro and Ousterhout 2014) standing in for Molly's raft/*.ded, which could not be vendored and has no published expected result (R06 §12.7); raft_spec.ded flags 'two leaders' in a term and committed values that disagree, as Molly's raft spec does.
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "TEST-024", "LANG-100", "LANG-101", "SEM-020", "TEST-027", "ANA-010"]
+until = "M8"
+
+[expect_ldfi]
+eot = 10
+eff = 7
+crashes = 1
+nodes = ["a", "b", "c"]
+crash_view = "molly"
+verdict = "no_counterexample"

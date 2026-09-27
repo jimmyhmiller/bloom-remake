@@ -1,0 +1,11 @@
+// Molly's provenance unit test "aggregate provenance is computed correctly" (R06 §12.6, ProvenanceSuite): counts(loc,
+// A, 3) has the three contributors derived(loc, A, 100 | 200 | 300) and counts(loc, B, 1) the single contributor
+// derived(loc, B, 400). Blossom golden corpus, transcribed from R06 (derived = true); see ../../README.md.
+
+derived(X, Y, Z) :- fact(X, Y, Z);
+counts(L, A, count<B>) :- derived(L, A, B);
+
+fact("loc", "A", 100)@1;
+fact("loc", "A", 200)@1;
+fact("loc", "A", 300)@1;
+fact("loc", "B", 400)@1;

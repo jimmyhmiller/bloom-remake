@@ -1,0 +1,51 @@
+// Single-decree Paxos, the synod protocol (Lamport, "The Part-Time Parliament" / "Paxos Made Simple"), the LDFI
+// paper's Paxos case study (SIGMOD 2015, §5.1.2 and Figure 13; R06 §12.4). Blossom golden corpus, re-derived
+// (derived = true); see ../../README.md. Used together with ../util/timer.ded.
+//
+// Every node is an acceptor and a learner; a and b propose. A proposer runs a round with a ballot of its own (seeds
+// 4, 5 and 6, stepping by the number of nodes, so ballots never collide): it sends prepare once, collects promises,
+// and once a majority has promised it sends accept with the value of the highest-ballot acceptance reported in the
+// promises, or its own value if there is none. An acceptor promises a ballot only if it is at least every ballot it
+// has seen, reports its highest acceptance in the promise, and accepts a ballot only if it is at least every ballot
+// it has promised. Acceptors tell every learner what they accepted, at every step. A proposer that has learned no
+// decision when its round's timer fires starts a new round with its next ballot.
+
+node(N, M)@next :- node(N, M);
+
+// proposer
+proposes(P, V) :- proposal(P, V);
+proposes(P, V)@next :- proposes(P, V);
+round(P, B) :- proposal(P, V), seed(P, B);
+round(P, B + 3) :- timeout(P, "round", B), notin learned(P, _);
+prepare(A, P, B)@async :- round(P, B), node(P, A);
+arm_timer(P, "round", B, 3) :- round(P, B);
+promises(P, B, A, Bacc, Vacc) :- promise(P, A, B, Bacc, Vacc);
+promises(P, B, A, Bacc, Vacc)@next :- promises(P, B, A, Bacc, Vacc);
+promise_cnt(P, B, count<A>) :- promises(P, B, A, Bacc, Vacc);
+best_acc(P, B, max<Bacc>) :- promises(P, B, A, Bacc, Vacc);
+quorum(P, B) :- promise_cnt(P, B, N), N > 1;
+accept(A, P, B, V)@async :- quorum(P, B), best_acc(P, B, 0), proposes(P, V), node(P, A), notin accept_sent(P, B);
+accept(A, P, B, V)@async :- quorum(P, B), best_acc(P, B, Bacc), Bacc > 0, promises(P, B, Q, Bacc, V), node(P, A),
+                            notin accept_sent(P, B);
+accept_sent(P, B)@next :- quorum(P, B);
+accept_sent(P, B)@next :- accept_sent(P, B);
+
+// acceptor
+prep_log(A, B) :- prepare(A, P, B);
+prep_log(A, B)@next :- prep_log(A, B);
+top_prep(A, max<B>) :- prep_log(A, B);
+acc_log(A, B, V) :- accept(A, P, B, V), top_prep(A, M), B >= M;
+acc_log(A, B, V)@next :- acc_log(A, B, V);
+any_acc(A) :- acc_log(A, B, V);
+top_acc(A, max<B>) :- acc_log(A, B, V);
+ballot_seen(A, B) :- prep_log(A, B);
+ballot_seen(A, B) :- acc_log(A, B, V);
+top_seen(A, max<B>) :- ballot_seen(A, B);
+promise(P, A, B, Bacc, Vacc)@async :- prepare(A, P, B), top_seen(A, B), top_acc(A, Bacc), acc_log(A, Bacc, Vacc);
+promise(P, A, B, 0, "none")@async :- prepare(A, P, B), top_seen(A, B), notin any_acc(A);
+learn(L, A, B, V)@async :- acc_log(A, B, V), node(A, L);
+
+// learner: a value is learned once a majority (two of the three acceptors) accepted it in the same ballot
+learn_log(L, A, B, V) :- learn(L, A, B, V);
+learn_log(L, A, B, V)@next :- learn_log(L, A, B, V);
+learned(L, V) :- learn_log(L, A1, B, V), learn_log(L, A2, B, V), A1 != A2;

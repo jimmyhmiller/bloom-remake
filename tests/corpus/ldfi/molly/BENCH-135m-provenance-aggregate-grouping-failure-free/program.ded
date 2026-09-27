@@ -1,0 +1,4 @@
+// BENCH-135m-provenance-aggregate-grouping-failure-free: provenance: aggregate grouping.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/unit/agg_grouping.ded";

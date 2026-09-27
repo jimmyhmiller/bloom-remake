@@ -1,0 +1,4 @@
+// BENCH-135j-provenance-aggregate-contributors: provenance: aggregate contributors.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/unit/agg_contributors.ded";

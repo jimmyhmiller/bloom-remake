@@ -1,0 +1,4 @@
+// BENCH-135n-semiring-pods07-query: the PODS'07 provenance-semiring query.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/unit/pods07.ded";

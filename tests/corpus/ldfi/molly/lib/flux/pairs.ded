@@ -1,0 +1,48 @@
+// Flux process pairs (Shah, Hellerstein and Brewer, "Highly Available, Fault-Tolerant, Parallel Dataflows", SIGMOD
+// 2004), the LDFI paper's Flux case study (SIGMOD 2015, §5.1.2 and Figure 13: "Flux achieves fault-tolerance by
+// ensuring that a pair of replicas receives the same message stream without loss, duplication or reordering; at any
+// time, should one replica fail, the other can take over"). Blossom golden corpus, re-derived (derived = true); see
+// ../../README.md.
+//
+// Four nodes: the ingress i, the replica pair p (primary) and s (secondary), and the egress e. The ingress sends every
+// input tuple (sequence number, data) to both replicas and resends it until that replica acknowledges it. Both
+// replicas buffer what they receive. The primary forwards its buffer to the egress at every step until the egress
+// acknowledges each tuple; the secondary does the same only while it suspects the primary, that is, at every step at
+// which the primary's heartbeat did not arrive (the takeover). The egress acknowledges every copy it receives,
+// buffers them, and delivers them in sequence order, one per step, each sequence number once.
+
+role(N, R)@next :- role(N, R);
+replica(I, Rep)@next :- replica(I, Rep);
+egress(Rep, E)@next :- egress(Rep, E);
+backup(P, S)@next :- backup(P, S);
+
+// ingress
+pending(I, S, D) :- input(I, S, D);
+pending(I, S, D)@next :- pending(I, S, D);
+tuple(Rep, I, S, D)@async :- pending(I, S, D), replica(I, Rep), notin stored_at(I, Rep, S);
+stored_at(I, Rep, S) :- tuple_ack(I, Rep, S);
+stored_at(I, Rep, S)@next :- stored_at(I, Rep, S);
+
+// replicas
+tuple_ack(I, Rep, S)@async :- tuple(Rep, I, S, D);
+buffered(Rep, S, D) :- tuple(Rep, I, S, D);
+buffered(Rep, S, D)@next :- buffered(Rep, S, D);
+heartbeat(S, P)@async :- role(P, "primary"), backup(P, S);
+suspects(S) :- role(S, "secondary"), notin heard_primary(S);
+heard_primary(S) :- heartbeat(S, P);
+forwarding(Rep) :- role(Rep, "primary");
+forwarding(Rep) :- suspects(Rep);
+out(E, Rep, S, D)@async :- forwarding(Rep), buffered(Rep, S, D), egress(Rep, E), notin delivered_ack(Rep, S);
+delivered_ack(Rep, S) :- out_ack(Rep, E, S);
+delivered_ack(Rep, S)@next :- delivered_ack(Rep, S);
+
+// egress
+out_ack(Rep, E, S)@async :- out(E, Rep, S, D);
+arrived(E, S, D) :- out(E, Rep, S, D);
+arrived(E, S, D)@next :- arrived(E, S, D);
+delivered(E, S, D)@next :- arrived(E, S, D), next_expected(E, S);
+delivered(E, S, D)@next :- delivered(E, S, D);
+any_delivered(E) :- delivered(E, S, D);
+last_delivered(E, max<S>) :- delivered(E, S, D);
+next_expected(E, 1) :- role(E, "egress"), notin any_delivered(E);
+next_expected(E, S + 1) :- last_delivered(E, S);

@@ -1,0 +1,31 @@
+# BENCH-136h-redun-deliv-11-10-1-runs: redun-deliv: certified within 11 executions at EOT 11, EFF 10, 1 crash.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-136"
+title = "redun-deliv: certified within 11 executions at EOT 11, EFF 10, 1 crash"
+priority = "P1"
+source = "FEATURES.md BENCH-136; R06 §3.9; LDFI SIGMOD'15 Figures 12 and 13"
+features = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-030", "TEST-031", "TEST-032", "TEST-027", "ANA-010", "BENCH-130"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+Figure 13: redun-deliv certified at 11/10 in 11 executions of 8.07e18 combinations (BENCH-130m).
+
+runs_max counts concrete executions, the failure-free run included: up to and including the first counterexample for a buggy program (Figure 12, 'Molly exe'), and all executions needed to exhaust the hypotheses for a certified one (Figure 13, 'exe'). The P1 search reductions (single-shot mode, vacuity pruning, symmetry; TEST-030-TEST-032, WP M9.4) are listed because the published counts come from Molly's search; docs/plan/notes/M1.5.md records the counts of the reference checker (tests/corpus/ldfi/tools/ldfi_ref.py) under ARCHITECTURE §8.3-§8.5 for every case, and ../golden/run_counts.toml lists every published count and where it is pinned.
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-030", "TEST-031", "TEST-032", "TEST-027", "ANA-010", "BENCH-130"]
+until = "M9"
+
+[expect_ldfi]
+eot = 11
+eff = 10
+crashes = 1
+nodes = ["a", "b", "c"]
+crash_view = "molly"
+verdict = "no_counterexample"
+runs_max = 11

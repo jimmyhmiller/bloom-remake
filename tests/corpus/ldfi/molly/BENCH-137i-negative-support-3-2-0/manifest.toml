@@ -1,0 +1,31 @@
+# BENCH-137i-negative-support-3-2-0: negative support: counterexample at EOT 3, EFF 2, 0 crashes; stated falsifier.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-137"
+title = "negative support: counterexample at EOT 3, EFF 2, 0 crashes; stated falsifier"
+priority = "P1"
+source = "FEATURES.md BENCH-137; R10 T13-T14; R06 §12.7; R06 D26"
+features = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+R10 T14: Molly's negative_support_test 'exercises why-not provenance (bad depends on the absence of snd)'. ../lib/unit/negative_support.ded is a re-derivation with a pre/post pair: the outcome's positive lineage is an input fact, and only the negated subgoal leads to b's greeting, whose loss makes `missing` appear. Conservative negative support (TEST-025, CR-31) finds it in the failure-free lineage; without negative support no hypothesis exists and the search would wrongly report no counterexample.
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025"]
+until = "M8"
+
+[expect_ldfi]
+eot = 3
+eff = 2
+crashes = 0
+nodes = ["a", "b"]
+crash_view = "molly"
+verdict = "counterexample"
+falsifiers = [
+  ["O(b,a,1)"],
+]

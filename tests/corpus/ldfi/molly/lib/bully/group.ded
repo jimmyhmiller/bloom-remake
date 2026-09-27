@@ -1,0 +1,20 @@
+// Input of the bully election: nodes a, b and c with ids 1, 2 and 3, each knowing every node's id (itself included),
+// all starting round 1 at time 1. Blossom golden corpus, re-derived (derived = true); see ../../README.md.
+
+slf("a", 1)@1;
+slf("b", 2)@1;
+slf("c", 3)@1;
+
+peer("a", "a", 1)@1;
+peer("a", "b", 2)@1;
+peer("a", "c", 3)@1;
+peer("b", "a", 1)@1;
+peer("b", "b", 2)@1;
+peer("b", "c", 3)@1;
+peer("c", "a", 1)@1;
+peer("c", "b", 2)@1;
+peer("c", "c", 3)@1;
+
+election("a", 1)@1;
+election("b", 1)@1;
+election("c", 1)@1;

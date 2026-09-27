@@ -1,0 +1,9 @@
+// BENCH-137b-raft-vote-twice-8-5-0: raft-vote-twice: counterexample at EOT 8, EFF 5, 0 crashes.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/raft/raft.ded";
+include "../lib/raft/vote_twice.ded";
+include "../lib/raft/commit_majority.ded";
+include "../lib/raft/group.ded";
+include "../lib/raft/election_timing.ded";
+include "../lib/raft/raft_spec.ded";

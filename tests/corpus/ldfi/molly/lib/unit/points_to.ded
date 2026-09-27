@@ -1,0 +1,19 @@
+// The points-to analysis of Zhao, Subotić and Scholz, "Debugging Large-scale Datalog: A Scalable Provenance
+// Evaluation Strategy" (TOPLAS 2020; arXiv 1907.05045), Figure 1: input program (b), rules r1-r4 (c), with a location
+// column n added (every `.ded` relation is located). The analysis derives vpt(a, l1), vpt(b, l1), vpt(c, l3),
+// vpt(d, l4), alias(a, b) and alias(b, a); the minimal proof heights are in ../../golden/provenance.toml.
+// Blossom golden corpus, derived (derived = true); see ../../README.md.
+
+vpt(N, Var, Obj) :- new(N, Var, Obj);
+vpt(N, Var, Obj) :- assign(N, Var, Var2), vpt(N, Var2, Obj);
+vpt(N, Var, Obj) :- load(N, Var, Y, F), store(N, P, F, Q), vpt(N, Q, Obj), alias(N, P, Y);
+alias(N, Var1, Var2) :- vpt(N, Var1, Obj), vpt(N, Var2, Obj), Var1 != Var2;
+
+new("n", "a", "l1")@1;
+assign("n", "b", "a")@1;
+new("n", "c", "l3")@1;
+new("n", "d", "l4")@1;
+store("n", "c", "f", "a")@1;
+load("n", "e", "d", "f")@1;
+load("n", "b", "c", "f")@1;
+assign("n", "a", "b")@1;

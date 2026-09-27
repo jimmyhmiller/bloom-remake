@@ -1,0 +1,23 @@
+// Input of the Paxos case study (R06 §12.4: two proposers, proposal("a", "peter")@1 and proposal("b", "foobar")@1,
+// with seeds 4, 5 and 6 on nodes a, b and c). Every node knows every node, itself included; prep_log(N, 0) is the
+// initial promise of every acceptor. Blossom golden corpus, re-derived (derived = true); see ../../README.md.
+
+node("a", "a")@1;
+node("a", "b")@1;
+node("a", "c")@1;
+node("b", "a")@1;
+node("b", "b")@1;
+node("b", "c")@1;
+node("c", "a")@1;
+node("c", "b")@1;
+node("c", "c")@1;
+
+seed("a", 4)@1;
+seed("b", 5)@1;
+seed("c", 6)@1;
+prep_log("a", 0)@1;
+prep_log("b", 0)@1;
+prep_log("c", 0)@1;
+
+proposal("a", "peter")@1;
+proposal("b", "foobar")@1;

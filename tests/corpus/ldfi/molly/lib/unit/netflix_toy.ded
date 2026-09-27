@@ -1,0 +1,31 @@
+// The Netflix toy lineage (Alvaro, Andrus, Sanden, Rosenthal, Basiri, Hochstein, "Automating Failure Testing
+// Research at Internet Scale", SoCC 2016, §2.2 and Figure 1): "the write is stable" if it is stored on RepA or on
+// RepB, and each replica stores it if Bcast1 or Bcast2 reaches it. Blossom golden corpus, derived from the paper's
+// figure (derived = true); see ../../README.md.
+//
+// Each abstract failure of the figure is one crash here: the broadcasters b1 and b2 each send the write to both
+// replicas at time 1 (Bcast1, Bcast2), and the replicas ra and rb confirm what they stored to the observer o at time 2
+// (RepA, RepB). With EOT 3 the observer's outcome has the paper's four supports, and its hazard is the paper's
+// formula (RepA v Bcast1) & (RepA v Bcast2) & (RepB v Bcast1) & (RepB v Bcast2).
+
+replica(B, R)@next :- replica(B, R);
+observer(R, O)@next :- observer(R, O);
+
+store(R, W)@async :- write(B, W), replica(B, R);
+stored(R, W) :- store(R, W);
+stored(R, W)@next :- stored(R, W);
+confirm(O, R, W)@async :- stored(R, W), observer(R, O);
+stable(O, W) :- confirm(O, R, W);
+stable(O, W)@next :- stable(O, W);
+
+pre(W) :- write(B, W)@1;
+post(W) :- stable(O, W);
+
+write("b1", "w")@1;
+write("b2", "w")@1;
+replica("b1", "ra")@1;
+replica("b1", "rb")@1;
+replica("b2", "ra")@1;
+replica("b2", "rb")@1;
+observer("ra", "o")@1;
+observer("rb", "o")@1;

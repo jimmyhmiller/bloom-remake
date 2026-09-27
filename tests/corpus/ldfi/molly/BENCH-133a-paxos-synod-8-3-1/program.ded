@@ -1,0 +1,7 @@
+// BENCH-133a-paxos-synod-8-3-1: paxos-synod: no counterexample at EOT 8, EFF 3, 1 crash.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/paxos/synod.ded";
+include "../lib/util/timer.ded";
+include "../lib/paxos/group.ded";
+include "../lib/paxos/paxos_spec.ded";

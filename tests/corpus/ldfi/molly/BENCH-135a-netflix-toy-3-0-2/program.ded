@@ -1,0 +1,4 @@
+// BENCH-135a-netflix-toy-3-0-2: netflix-toy: counterexample at EOT 3, EFF 0, 2 crashes; stated falsifiers.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/unit/netflix_toy.ded";

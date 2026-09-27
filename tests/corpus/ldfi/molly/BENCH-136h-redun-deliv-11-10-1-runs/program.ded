@@ -1,0 +1,6 @@
+// BENCH-136h-redun-deliv-11-10-1-runs: redun-deliv: certified within 11 executions at EOT 11, EFF 10, 1 crash.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/delivery/redun_deliv.ded";
+include "../lib/delivery/group.ded";
+include "../lib/delivery/delivery_spec.ded";

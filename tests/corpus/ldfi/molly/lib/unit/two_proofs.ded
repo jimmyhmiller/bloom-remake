@@ -1,0 +1,17 @@
+// The worked example of the LDFI paper's hazard analysis (SIGMOD 2015, §4.3): a goal with two proofs, whose formula
+// is (O(a,c,2) v C(a,2) v C(a,1)) & (O(b,c,1) v C(b,1)). c holds `got` if b's message sent at time 1 or a's message
+// sent at time 2 reached it; a also sends at time 1 (to b), so a's first send is at time 1 and the crash variables of
+// the first proof start there, as in the formula. Blossom golden corpus, derived from the paper's formula
+// (derived = true); see ../../README.md.
+
+recv(D, S, V)@async :- send(S, D, V);
+ping(D, S)@async :- poke(S, D);
+got(N, V) :- recv(N, S, V);
+got(N, V)@next :- got(N, V);
+
+pre(V) :- send(S, "c", V)@1;
+post(V) :- got(N, V);
+
+send("b", "c", "v")@1;
+send("a", "c", "v")@2;
+poke("a", "b")@1;

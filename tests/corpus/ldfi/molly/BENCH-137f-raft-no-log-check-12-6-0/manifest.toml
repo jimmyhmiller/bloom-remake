@@ -1,0 +1,30 @@
+# BENCH-137f-raft-no-log-check-12-6-0: raft-no-log-check: counterexample at EOT 12, EFF 6, 0 crashes.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-137"
+title = "raft-no-log-check: counterexample at EOT 12, EFF 6, 0 crashes"
+priority = "P1"
+source = "FEATURES.md BENCH-137; R10 T13-T14; R06 §12.7"
+features = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "TEST-024", "LANG-100", "LANG-101", "SEM-020", "ANA-010"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+SEEDED BUG (vote_unchecked.ded): votes are granted without Raft's log up-to-date check (§5.4.1). A server that missed the committed x can win term 2 with the vote of a server that holds x, append y at x's index and commit it: Leader Completeness fails and correct servers disagree on a committed value.
+
+../lib/raft/raft.ded is a compact Raft (Ongaro and Ousterhout 2014) standing in for Molly's raft/*.ded, which could not be vendored and has no published expected result (R06 §12.7); raft_spec.ded flags 'two leaders' in a term and committed values that disagree, as Molly's raft spec does.
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "TEST-024", "LANG-100", "LANG-101", "SEM-020", "ANA-010"]
+until = "M8"
+
+[expect_ldfi]
+eot = 12
+eff = 6
+crashes = 0
+nodes = ["a", "b", "c"]
+crash_view = "molly"
+verdict = "counterexample"

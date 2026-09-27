@@ -1,0 +1,205 @@
+# Golden data for BENCH-135 (grossEstimate) and the Combinations columns of LDFI Figures 12 and 13.
+# Consumer: TEST-035, the run-count estimator (P1, WP M9.4; ARCHITECTURE §8.5 "Extras").
+# Not a corpus case (no manifest): manifest schema v1 has no field for estimates. See ../../README.md.
+#
+# Molly's estimate (FailureSpec.grossEstimate, R06 §3.7), computed with arbitrary-precision integers:
+#   L          = 2^(|nodes| - 1)                                  outgoing-loss patterns per node and step
+#   crashFree  = L^EFF
+#   crashProne = sum over ct in 1..=EOT+1 of L^min(EFF, ct - 1)   (ct = EOT + 1 means "never crashes")
+#   estimate   = C(|nodes|, crashes) * crashFree^(|nodes| - crashes) * crashProne^crashes
+# It counts EFF steps of loss, although omissions are admissible only at send times < EFF (CR-21); the estimate is
+# reproduced as Molly defines it, because the published Combinations were computed with it.
+# `estimate` is exact (a decimal string); `published` is the figure's value, to three significant digits.
+
+schema = 1
+feature = "TEST-035"
+source = "R06 §3.7 and §12.6 (Molly FailureSpecSuite); LDFI SIGMOD'15 Figures 12 and 13"
+
+# Molly's unit tests (FailureSpecSuite, transcribed in R06 §12.6).
+[[unit]]
+eot = 3
+eff = 0
+crashes = 0
+nodes = ["a", "b", "c"]
+estimate = "1"
+why = "the failure-free scenario is the only run"
+
+[[unit]]
+eot = 3
+eff = 0
+crashes = 2
+nodes = ["a", "b"]
+estimate = "16"
+why = "fail-stop: each of the two nodes crashes at one of 4 times or never"
+
+[[unit]]
+eot = 3
+eff = 0
+crashes = 1
+nodes = ["a"]
+estimate = "4"
+why = "one node crashes once or never"
+
+[[unit]]
+eot = 3
+eff = 0
+crashes = 2
+nodes = ["a", "b", "c", "d"]
+estimate = "96"
+why = "respects maxCrashes: 6 ways to pick the crash-prone pair, 4 crash choices each"
+
+[[unit]]
+eot = 3
+eff = 2
+crashes = 0
+nodes = ["a", "b"]
+estimate = "16"
+why = "omissions only, until EFF"
+
+[[unit]]
+eot = 3
+eff = 1
+crashes = 0
+nodes = ["a", "b"]
+estimate = "4"
+why = "omissions only, until EFF"
+
+[[unit]]
+eot = 3
+eff = 2
+crashes = 2
+nodes = ["a", "b"]
+estimate = "121"
+why = "a crashed node sends nothing: 1 + 2 + 4 + 4 = 11 schedules per node, squared"
+
+[[unit]]
+eot = 6
+eff = 4
+crashes = 1
+nodes = ["a", "b", "c", "C", "Z"]
+estimate = "18536856418509622775644160"
+why = "must not overflow to zero (the unit test asserts only that); the exact value is the formula's and matches Figure 12's Kafka row"
+
+# LDFI Figure 12 (buggy programs, minimal parameters) and Figure 13 (bug-free programs, highest parameters reached).
+# Figure 13 omits the crash bound and the node count; the Combinations column equals the formula for exactly the node
+# count and crash bound given here, and for no other node count up to 8 or crash bound, which is how they were
+# recovered (docs/plan/notes/M1.5.md).
+[[figure]]
+program = "simple-deliv"
+figure = 12
+eot = 4
+eff = 2
+crashes = 0
+nodes = 3
+estimate = "4096"
+published = "4.10e3"
+
+[[figure]]
+program = "retry-deliv"
+figure = 12
+eot = 4
+eff = 2
+crashes = 1
+nodes = 3
+estimate = "40704"
+published = "4.07e4"
+
+[[figure]]
+program = "classic-deliv"
+figure = 12
+eot = 5
+eff = 3
+crashes = 0
+nodes = 3
+estimate = "262144"
+published = "2.62e5"
+
+[[figure]]
+program = "2pc"
+figure = 12
+eot = 5
+eff = 0
+crashes = 1
+nodes = 4
+estimate = "24"
+published = "24"
+
+[[figure]]
+program = "2pc-ctp"
+figure = 12
+eot = 8
+eff = 0
+crashes = 1
+nodes = 4
+estimate = "36"
+published = "36"
+
+[[figure]]
+program = "3pc"
+figure = 12
+eot = 9
+eff = 7
+crashes = 1
+nodes = 4
+estimate = "243166788160558532938170368"
+published = "2.43e26"
+
+[[figure]]
+program = "Kafka"
+figure = 12
+eot = 6
+eff = 4
+crashes = 1
+nodes = 5
+estimate = "18536856418509622775644160"
+published = "1.85e25"
+
+[[figure]]
+program = "redun-deliv"
+figure = 13
+eot = 11
+eff = 10
+crashes = 1
+nodes = 3
+estimate = "8070449432736301056"
+published = "8.07e18"
+
+[[figure]]
+program = "ack-deliv"
+figure = 13
+eot = 8
+eff = 7
+crashes = 1
+nodes = 3
+estimate = "30786057142272"
+published = "3.08e13"
+
+[[figure]]
+program = "paxos-synod"
+figure = 13
+eot = 7
+eff = 6
+crashes = 1
+nodes = 3
+estimate = "481019559936"
+published = "4.81e11"
+
+[[figure]]
+program = "bully-le"
+figure = 13
+eot = 10
+eff = 9
+crashes = 1
+nodes = 3
+estimate = "126100720846897152"
+published = "1.26e17"
+
+[[figure]]
+program = "flux"
+figure = 13
+eot = 22
+eff = 21
+crashes = 1
+nodes = 4
+estimate = "62031476377133676119321806130698044866834935397792611705702108901063174127616"
+published = "6.20e76"
