@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use blossom_base::Unimplemented;
+use blossom_base::{TypeId, Unimplemented};
 
 use crate::error::ValueError;
 use crate::value::Value;
@@ -64,9 +64,20 @@ where
     }
 }
 
+/// The value-level signature supplied by a host registration and compared to a source `FnDecl`.
+/// The IR owns `FnDecl`; this type keeps the value crate independent of the IR.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternSignature {
+    pub params: Vec<TypeId>,
+    /// One scalar return for `extern fn`, or columns for `extern table fn`.
+    pub outputs: Vec<TypeId>,
+    pub table: bool,
+}
+
 /// Host function implementations by path (for example `blossom_std::hash::sha256`).
 #[derive(Clone, Default)]
 pub struct ExternRegistry {
+    signatures: BTreeMap<Arc<str>, ExternSignature>,
     fns: BTreeMap<Arc<str>, Arc<dyn ExternFn>>,
     table_fns: BTreeMap<Arc<str>, Arc<dyn ExternTableFn>>,
 }
@@ -94,6 +105,68 @@ impl ExternRegistry {
         let path = path.into();
         self.check_free(&path)?;
         self.table_fns.insert(path, Arc::new(f));
+        Ok(())
+    }
+
+    /// Registers a host scalar function with a concrete signature for load-time binding.
+    pub fn register_typed_fn(
+        &mut self,
+        path: impl Into<Arc<str>>,
+        params: Vec<TypeId>,
+        ret: TypeId,
+        f: impl ExternFn + 'static,
+    ) -> Result<(), ValueError> {
+        let path = path.into();
+        self.register_fn(path.clone(), f)?;
+        self.signatures.insert(
+            path,
+            ExternSignature {
+                params,
+                outputs: vec![ret],
+                table: false,
+            },
+        );
+        Ok(())
+    }
+    /// Registers a host table function with its output columns.
+    pub fn register_typed_table_fn(
+        &mut self,
+        path: impl Into<Arc<str>>,
+        params: Vec<TypeId>,
+        outputs: Vec<TypeId>,
+        f: impl ExternTableFn + 'static,
+    ) -> Result<(), ValueError> {
+        let path = path.into();
+        self.register_table_fn(path.clone(), f)?;
+        self.signatures.insert(
+            path,
+            ExternSignature {
+                params,
+                outputs,
+                table: true,
+            },
+        );
+        Ok(())
+    }
+    /// Checks a compiled declaration against the registered implementation before loading it.
+    /// Untyped registrations are useful for direct tests but cannot be bound to source programs.
+    pub fn bind(&self, path: &str, declared: &ExternSignature) -> Result<(), ValueError> {
+        if !self.contains(path) {
+            return Err(ValueError::ExternSignature {
+                path: path.into(),
+                reason: "no host implementation registered".into(),
+            });
+        }
+        let actual = self.signatures.get(path).ok_or_else(|| ValueError::ExternSignature {
+            path: path.into(),
+            reason: "host registration has no declared signature".into(),
+        })?;
+        if actual != declared {
+            return Err(ValueError::ExternSignature {
+                path: path.into(),
+                reason: format!("declared {declared:?}, host provides {actual:?}"),
+            });
+        }
         Ok(())
     }
 
@@ -153,6 +226,7 @@ impl ExternRegistry {
         }
         self.fns.extend(other.fns);
         self.table_fns.extend(other.table_fns);
+        self.signatures.extend(other.signatures);
         Ok(())
     }
 }
@@ -226,5 +300,40 @@ mod tests {
             format!("{reg:?}"),
             r#"ExternRegistry { fns: ["m::double"], table_fns: ["m::rows"] }"#
         );
+    }
+}
+#[cfg(test)]
+mod m2_tests {
+    use super::*;
+    #[test]
+    fn extern_signature_binding_is_exact() {
+        let a = TypeId::from_raw(1);
+        let b = TypeId::from_raw(2);
+        let mut reg = ExternRegistry::new();
+        reg.register_typed_fn("math::double", vec![a], b, |_: &[Value]| Ok(Value::u64(2)))
+            .unwrap();
+        let sig = ExternSignature {
+            params: vec![a],
+            outputs: vec![b],
+            table: false,
+        };
+        assert!(reg.bind("math::double", &sig).is_ok());
+        let bad = ExternSignature {
+            params: vec![b],
+            ..sig.clone()
+        };
+        assert!(matches!(
+            reg.bind("math::double", &bad),
+            Err(ValueError::ExternSignature { .. })
+        ));
+        assert!(matches!(
+            reg.bind("missing", &sig),
+            Err(ValueError::ExternSignature { .. })
+        ));
+        reg.register_fn("untyped", |_: &[Value]| Ok(Value::Unit)).unwrap();
+        assert!(matches!(
+            reg.bind("untyped", &sig),
+            Err(ValueError::ExternSignature { .. })
+        ));
     }
 }

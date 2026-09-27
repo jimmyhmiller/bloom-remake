@@ -9,7 +9,6 @@
 
 use std::fmt;
 
-use blossom_base::unimplemented_feature;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ValueError;
@@ -45,8 +44,19 @@ impl Digest128 {
 
 /// The set element for a member identified by fingerprints, in a digest domain (a relation, the outbox, …).
 pub fn set_element(domain: &str, fingerprints: &[Fingerprint]) -> Result<SetElement, ValueError> {
-    let _ = (domain, fingerprints);
-    unimplemented_feature!("ENG-120", "set-hash elements (WP M2.1)")
+    let mut h = blake3::Hasher::new();
+    h.update(b"blossom-set-element-v1");
+    h.update(&(domain.len() as u64).to_le_bytes());
+    h.update(domain.as_bytes());
+    h.update(&(fingerprints.len() as u64).to_le_bytes());
+    for fp in fingerprints {
+        h.update(&fp.0.to_le_bytes());
+    }
+    let bytes = h.finalize();
+    let arr: [u8; 16] = bytes.as_bytes()[..16]
+        .try_into()
+        .map_err(|_| ValueError::InvalidValue("digest length".into()))?;
+    Ok(SetElement(u128::from_le_bytes(arr)))
 }
 
 /// A BLAKE3-256 digest.
@@ -66,8 +76,13 @@ impl fmt::Debug for Digest256 {
 /// BLAKE3-256 of `bytes` in the given domain: program digests (recorded in trace headers, TEST-010), schema and plan
 /// digests, and checkpoint files (ARCH-18).
 pub fn digest256(domain: &str, bytes: &[u8]) -> Result<Digest256, ValueError> {
-    let _ = (domain, bytes);
-    unimplemented_feature!("TEST-010", "domain-separated BLAKE3 digests (WP M2.1)")
+    let mut h = blake3::Hasher::new();
+    h.update(b"blossom-digest-v1");
+    h.update(&(domain.len() as u64).to_le_bytes());
+    h.update(domain.as_bytes());
+    h.update(&(bytes.len() as u64).to_le_bytes());
+    h.update(bytes);
+    Ok(Digest256(*h.finalize().as_bytes()))
 }
 
 #[cfg(test)]
@@ -75,7 +90,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn digest128_set_arithmetic_is_order_independent() {
+    fn digest128_order_independent() {
         let elements = [SetElement(u128::MAX), SetElement(3), SetElement(1 << 100)];
         let mut forward = Digest128::EMPTY;
         elements.iter().for_each(|e| forward.add(*e));

@@ -28,6 +28,9 @@ pub enum ValueError {
     /// Two host functions registered under one path.
     #[error("host function `{0}` is registered twice")]
     DuplicateExtern(Arc<str>),
+    /// A host function lacks a typed binding or its registered type disagrees with the source declaration.
+    #[error("extern `{path}` signature mismatch: {reason}")]
+    ExternSignature { path: Arc<str>, reason: String },
     /// More types than a [`TypeId`] can number.
     #[error(transparent)]
     TooManyTypes(#[from] IdxOverflow),
