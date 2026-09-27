@@ -1,0 +1,33 @@
+// BENCH-080: the reliable broadcast of DL11 §5.7 in Molly's Dedalus dialect (the `.ded` twin of BENCH-080a).
+// The first column of every relation is its location. DL11 marks the location with `#`; the rules are otherwise
+// verbatim, with buf_bcast's columns reordered so that its location (Me) comes first.
+
+sbcast(Member, Sender, Message)@async :- smessage(Agent, Sender, Message), members(Agent, Member);
+sdeliver(Member, Sender, Message) :- sbcast(Member, Sender, Message);
+smessage(Agent, Sender, Message) :- rmessage(Agent, Sender, Message);
+buf_bcast(Me, Sender, Message) :- sdeliver(Me, Sender, Message);
+smessage(Me, Sender, Message) :- buf_bcast(Me, Sender, Message);
+rdeliver(Me, Sender, Message)@next :- buf_bcast(Me, Sender, Message);
+
+// The member lists are EDB. Molly facts hold only at their tick, so the EDB is persisted by hand.
+members(Agent, Member)@next :- members(Agent, Member);
+
+members("a", "a")@1;
+members("a", "b")@1;
+members("a", "c")@1;
+members("a", "d")@1;
+members("b", "a")@1;
+members("b", "b")@1;
+members("b", "c")@1;
+members("b", "d")@1;
+members("c", "a")@1;
+members("c", "b")@1;
+members("c", "c")@1;
+members("c", "d")@1;
+members("d", "a")@1;
+members("d", "b")@1;
+members("d", "c")@1;
+members("d", "d")@1;
+
+// a broadcasts in tick 1.
+rmessage("a", "a", "m1")@1;

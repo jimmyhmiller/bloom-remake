@@ -1,0 +1,19 @@
+// BENCH-084: MAR Appendix E (the max-element dequeue) in Molly's Dedalus dialect; the `.ded` twin of BENCH-084a.
+// The first column of every relation is its node. As in BENCH-084a, each element is sent once: the b_edb facts hold
+// only in tick 1 and are not persisted.
+
+b(N, I)@async :- b_edb(L, I), node(L, N);
+b(N, I)@next :- b(N, I), notin dequeued(N, I);
+b_lt(N, I, J) :- b(N, I), b(N, J), I < J;
+dequeued(N, I)@next :- b(N, I), notin b_lt(N, _, I), b_lt(N, _, _);
+
+node(L, N)@next :- node(L, N);
+
+node("x", "x")@1;
+node("x", "y")@1;
+node("y", "x")@1;
+node("y", "y")@1;
+
+b_edb("x", 1)@1;
+b_edb("x", 3)@1;
+b_edb("y", 2)@1;

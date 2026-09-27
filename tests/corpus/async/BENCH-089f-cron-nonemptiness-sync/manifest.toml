@@ -1,0 +1,48 @@
+# BENCH-089 (R02 T27): CRON Figure 4, non-emptiness with a single B(), under the sync harness.
+#
+# Derivation: A() is sent in tick 0 and arrives in tick 1, where it is stored; B() is sent once, in tick 1 (sentB()
+# holds from tick 2), and arrives in tick 2, where the stored A() pairs with it: T() from tick 2 on.
+schema = 1
+id = "BENCH-089"
+title = "CRON Fig. 4 (non-emptiness, B() once): the single B() meets the stored A() and T() holds from tick 2"
+priority = "P1"
+source = "R02 T27; CRON (JCSS 2014) Figure 4 and §6.1.2 (verbatim program)"
+features = ["LANG-040", "LANG-043", "LANG-045", "LANG-046", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-190", "LANG-240"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[run]
+ticks = 6
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-045", "LANG-046", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-190", "LANG-240"]
+until = "M5"
+
+[[expect]]
+node = "n1"
+rel = "b_msg"
+tick = 2
+rows = [[]]
+
+[[expect]]
+node = "n1"
+rel = "b_msg"
+row = []
+absent = "3.."
+
+[[expect]]
+node = "n1"
+rel = "sent_b"
+row = []
+holds = "2.."
+absent = "..=1"
+
+[[expect]]
+node = "n1"
+rel = "t"
+row = []
+holds = "2.."
+absent = "..=1"

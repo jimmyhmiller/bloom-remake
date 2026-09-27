@@ -1,0 +1,204 @@
+//! BENCH-095: Edelweiss implied semijoins, key joins and flat_map seals, from bud-gc's tc_gc.rb (R05 T26, §5.7).
+//!
+//! BENCH-095 (R05 T26; §5.7): bud-gc's unit tests where equalities, keys or flat_map stand in for seals.
+//!
+//! R05 §5.7: a semijoin needs one observed partner; "if the join predicates cover all key columns of Z, a single match
+//! suffices (a key constraint acts like a seal)". Seal inference from flat_map: "for lhs <= rhs.flat_map {|t| t.vals.map
+//! {|x| [t.key, x]}} where rhs has a single key column that is projected into lhs column i, the rule seal_<lhs>_<col_i> <=
+//! rhs {|t| [t.key]} is emitted" (ANA-065: seals implied by flat_map). The non-key variant must not get one.
+
+program edelweiss_implied_seals_keys version 1;
+
+// ---------------- ImpliedSemiJoin, test_implied_semi_join
+// `s1 <= (t1 * t2).rights(:z => :c, :x => :b) {|t| [t.b]}.notin(t3)`: "The targetlist of the join only references fields
+// from t2, so clearly we can reclaim from t2 without needing seals. However, we also have an equality constraint against
+// t1.x, so we can also reclaim from t1 without seals."
+
+table isj_t1(x: u64, y: u64, z: u64);
+
+input isj_t1_in(x: u64, y: u64, z: u64);
+
+isj_t1_load: on isj_t1_in(x, y, z) {
+    emit isj_t1(x, y, z);
+}
+
+table isj_t2(a: u64, b: u64, c: u64);
+
+input isj_t2_in(a: u64, b: u64, c: u64);
+
+isj_t2_load: on isj_t2_in(a, b, c) {
+    emit isj_t2(a, b, c);
+}
+
+table isj_t3(val: u64);
+
+input isj_t3_in(val: u64);
+
+isj_t3_load: on isj_t3_in(val) {
+    emit isj_t3(val);
+}
+
+output isj_s1(val: u64);
+
+isj_join: while isj_t1(x, _y, z), isj_t2(_a, x, z), not isj_t3(x) {
+    emit isj_s1(x);
+}
+
+// ---------------- JoinOnKeys, test_join_on_keys
+// `t3 <= (t1 * t2).lefts(:key1 => :key2).notin(t3_prev)` and `t3_prev <+ t3`: "Once we have t1(X, _) and t2(X, _), we can
+// discard t1(X, _) and t2(X, _) because we know that the join result has been persisted in t3; hence no future t1 or t2
+// tuples can depend on t2(X, _) or t1(X, _) respectively, due to the join's semantics and the keys of the two
+// relations."
+
+table jk_t1(key1: u64, val1: u64) key(key1);
+
+input jk_t1_in(key1: u64, val1: u64);
+
+jk_t1_load: on jk_t1_in(key1, val1) {
+    emit jk_t1(key1, val1);
+}
+
+table jk_t2(key2: u64, val2: u64) key(key2);
+
+input jk_t2_in(key2: u64, val2: u64);
+
+jk_t2_load: on jk_t2_in(key2, val2) {
+    emit jk_t2(key2, val2);
+}
+
+table jk_t3(key: u64, val: u64) key(key);
+
+table jk_t3_prev(key: u64, val: u64) key(key);
+
+jk_join: while jk_t1(k, v), jk_t2(k, _v2), not jk_t3_prev(k, v) {
+    emit jk_t3(k, v);
+}
+
+jk_remember: while jk_t3(k, v) {
+    next jk_t3_prev(k, v);
+}
+
+// ---------------- JoinOnKeysExtraPreds, test_join_on_keys_extra_preds
+// The same join with an extra predicate (`:val1 => :val2`): t1(5, 10) and t2(5, 20) never join, and with the keys
+// covered neither ever can, so both are reclaimed.
+
+table jkx_t1(key1: u64, val1: u64) key(key1);
+
+input jkx_t1_in(key1: u64, val1: u64);
+
+jkx_t1_load: on jkx_t1_in(key1, val1) {
+    emit jkx_t1(key1, val1);
+}
+
+table jkx_t2(key2: u64, val2: u64) key(key2);
+
+input jkx_t2_in(key2: u64, val2: u64);
+
+jkx_t2_load: on jkx_t2_in(key2, val2) {
+    emit jkx_t2(key2, val2);
+}
+
+table jkx_t3(key: u64, val: u64) key(key);
+
+table jkx_t3_prev(key: u64, val: u64) key(key);
+
+jkx_join: while jkx_t1(k, v), jkx_t2(k, v), not jkx_t3_prev(k, v) {
+    emit jkx_t3(k, v);
+}
+
+jkx_remember: while jkx_t3(k, v) {
+    next jkx_t3_prev(k, v);
+}
+
+// ---------------- FlatMapImpliedSeal, test_flat_map_implied_seal
+// `t2 <= t1.flat_map {|t| t.vals.map {|v| [v, t.key]}}`: every t2 tuple with a given key comes from the one t1 tuple with
+// that key, so "no new dependencies will be observed for a given write" and t2 is implicitly sealed on its key column
+// (ANA-065). t3(6, 10) is then reclaimed once it is in t5, without an explicit seal.
+
+table fm_t1(key: u64, vals: Vec<u64>) key(key);
+
+input fm_t1_in(key: u64, vals: Vec<u64>);
+
+fm_t1_load: on fm_t1_in(key, vals) {
+    emit fm_t1(key, vals);
+}
+
+table fm_t2(v: u64, key: u64);
+
+table fm_t3(key: u64, val: u64) key(key);
+
+input fm_t3_in(key: u64, val: u64);
+
+fm_t3_load: on fm_t3_in(key, val) {
+    emit fm_t3(key, val);
+}
+
+table fm_t4(x: u64, y: u64);
+
+table fm_t5(key: u64, val: u64) key(key);
+
+input fm_t5_in(key: u64, val: u64);
+
+fm_t5_load: on fm_t5_in(key, val) {
+    emit fm_t5(key, val);
+}
+
+output fm_r1(key: u64, val: u64);
+
+fm_spread: while fm_t1(k, vals), v in vals {
+    emit fm_t2(v, k);
+}
+
+fm_join: while fm_t2(v, k), fm_t3(k, val) {
+    emit fm_t4(val, v);
+}
+
+fm_notin: while fm_t3(k, v), not fm_t5(k, v) {
+    emit fm_r1(k, v);
+}
+
+// ---------------- FlatMapImpliedSealNonKeys, test_flat_map_implied_seal_non_keys
+// The same, but t2's join column comes from a non-key column of t1 (`[t.other_val, v]`): several t1 tuples may produce t2
+// tuples with one key, so no seal is implied and t3(6, 10) is kept.
+
+table fmn_t1(key: u64, other_val: u64, vals: Vec<u64>) key(key);
+
+input fmn_t1_in(key: u64, other_val: u64, vals: Vec<u64>);
+
+fmn_t1_load: on fmn_t1_in(key, other_val, vals) {
+    emit fmn_t1(key, other_val, vals);
+}
+
+table fmn_t2(key: u64, v: u64);
+
+table fmn_t3(key: u64, val: u64) key(key);
+
+input fmn_t3_in(key: u64, val: u64);
+
+fmn_t3_load: on fmn_t3_in(key, val) {
+    emit fmn_t3(key, val);
+}
+
+table fmn_t4(x: u64, y: u64);
+
+table fmn_t5(key: u64, val: u64) key(key);
+
+input fmn_t5_in(key: u64, val: u64);
+
+fmn_t5_load: on fmn_t5_in(key, val) {
+    emit fmn_t5(key, val);
+}
+
+output fmn_r1(key: u64, val: u64);
+
+fmn_spread: while fmn_t1(_k, o, vals), v in vals {
+    emit fmn_t2(o, v);
+}
+
+fmn_join: while fmn_t2(k, v), fmn_t3(k, val) {
+    emit fmn_t4(val, v);
+}
+
+fmn_notin: while fmn_t3(k, v), not fmn_t5(k, v) {
+    emit fmn_r1(k, v);
+}

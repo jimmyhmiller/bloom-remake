@@ -1,0 +1,138 @@
+# BENCH-084 (R02 T17): the max-element dequeue is confluent but not certified.
+#
+# MAR Appendix E: "Any instance of this program has a single ultimate model in which b() (at all nodes) contains the
+# highest element in b_edb() according to the order <. Thus it is confluent, but the program uses IDB negation and
+# does not have guarded asynchrony." R02 T17: "The analyzer should not certify it." ANA-143 (whose FEATURES entry
+# cites this item): the certificate must say "not certified", never "diffluent".
+#
+# Deliberate change (judgement call, docs/plan/notes/M1.4.md): each element is sent once, from a host input, instead
+# of from an EDB relation that re-sends it in every tick. As printed, the synchronous schedule re-delivers every
+# element in every tick, every element stays in b forever, and MAR's stated ultimate model does not hold.
+#
+# Scenario: x contributes 1 and 3, y contributes 2, all in tick 1. Derivation (sync harness): the elements arrive
+# everywhere in tick 2. dequeued(1) is staged for tick 3, so 1 is carried to tick 3 and dropped from tick 4; then 2
+# is the least of two, dequeued in tick 5 and dropped from tick 6. From tick 6 both nodes hold only 3. Tick 7 is
+# equivalent to tick 8: quiescent from 8.
+#
+# Analysis: b, b_lt and dequeued form a strongly connected component with negative and temporal edges, a temporal
+# cluster (CIDR'11 §4.4).
+schema = 1
+id = "BENCH-084"
+title = "Max-element dequeue: every node ends with the maximum; confluent but not certified as Dedalus+"
+priority = "P1"
+source = "R02 T17 and §7.3 (MAR Appendix E, Example 10, verbatim rules; elements sent once, see notes)"
+features = ["LANG-041", "LANG-042", "LANG-043", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-065", "LANG-082", "LANG-240", "SEM-021", "ANA-022", "ANA-025", "ANA-029", "ANA-143"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "Elements are sent once (a host input) instead of from an EDB relation resent every tick; see the comment above."
+
+[deploy]
+nodes = [{ name = "x", role = "Node" }, { name = "y", role = "Node" }]
+
+[run]
+ticks = 12
+stop = "quiescent"
+
+[[input]]
+node = "x"
+tick = 1
+rel = "b_edb"
+rows = [[1], [3]]
+
+[[input]]
+node = "y"
+tick = 1
+rel = "b_edb"
+rows = [[2]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-041", "LANG-042", "LANG-043", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-065", "LANG-082", "LANG-240", "SEM-021", "ANA-022", "ANA-025", "ANA-029", "ANA-143"]
+until = "M5"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-041", "LANG-042", "LANG-043", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-065", "LANG-082", "LANG-240", "SEM-021", "ANA-022", "ANA-025", "ANA-029", "ANA-143"]
+until = "M7"
+
+[[expect]]
+node = "x"
+rel = "b"
+tick = 2
+rows = [[1], [2], [3]]
+
+[[expect]]
+node = "x"
+rel = "b"
+tick = 3
+rows = [[1], [2], [3]]
+
+[[expect]]
+node = "x"
+rel = "b"
+tick = 4
+rows = [[2], [3]]
+
+[[expect]]
+node = "x"
+rel = "b"
+tick = 5
+rows = [[2], [3]]
+
+[[expect]]
+node = "x"
+rel = "b"
+tick = 6
+rows = [[3]]
+
+[[expect]]
+node = "x"
+rel = "b"
+tick = 7
+rows = [[3]]
+
+[[expect]]
+node = "y"
+rel = "b"
+tick = 2
+rows = [[1], [2], [3]]
+
+[[expect]]
+node = "y"
+rel = "b"
+tick = 3
+rows = [[1], [2], [3]]
+
+[[expect]]
+node = "y"
+rel = "b"
+tick = 4
+rows = [[2], [3]]
+
+[[expect]]
+node = "y"
+rel = "b"
+tick = 5
+rows = [[2], [3]]
+
+[[expect]]
+node = "y"
+rel = "b"
+tick = 6
+rows = [[3]]
+
+[[expect]]
+node = "y"
+rel = "b"
+tick = 7
+rows = [[3]]
+
+[[expect]]
+quiescent_from = 8
+
+[expect_analysis]
+points_of_order = { complete = false, edges = [{ from = "dequeued", to = "b", kind = "negation" }, { from = "b_lt", to = "dequeued", kind = "negation" }], clusters = [["b", "b_lt", "dequeued"]] }
+certificates = { b = [] }
+confluent = { b = "confluent_not_certified" }
+fair_consistency = { b = "not_certified" }

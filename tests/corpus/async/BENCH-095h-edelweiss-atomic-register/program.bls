@@ -1,0 +1,37 @@
+//! BENCH-095: Edelweiss's atomic register (Edelweiss, VLDB 2014, §7.1, Fig. 8; artifact atomic_register.rb), ported
+//! rule for rule.
+//!
+//!     write_event <= write.notin(write_log, :wid => :wid)
+//!     write_log <+ (write_event * live).outer(:name => :name) do |e,l|
+//!       e + [l.wid.nil? ? 0 : l.wid]
+//!     end
+//!     dom <= write_log {|l| [l.prev_wid]}
+//!     live <= write_log.notin(dom, :wid => :wid)
+//!
+//! Each write names the register it writes and records the write it replaces (0 for none); the live value of a register
+//! is its write that no later write replaced.
+
+program edelweiss_atomic_register version 1;
+
+table write(wid: u64, name: String, val: u64) key(wid);
+table write_log(wid: u64, name: String, val: u64, prev_wid: u64) key(wid);
+table dom(wid: u64);
+
+/// From the host: a client write.
+input put(wid: u64, name: String, val: u64);
+
+accept: on put(w, n, v) {
+    emit write(w, n, v);
+}
+
+view write_event(wid, name, val) = write(wid, name, val), not write_log(wid, _, _, _);
+view live(wid, name, val, prev_wid) = write_log(wid, name, val, prev_wid), not dom(wid);
+
+/// The previous live write of the register, or 0.
+log_write: while write_event(w, n, v), outer live(lw, n, _lv, _lp) {
+    next write_log(w, n, v, lw.unwrap_or(0));
+}
+
+replaced: while write_log(_w, _n, _v, p) {
+    emit dom(p);
+}

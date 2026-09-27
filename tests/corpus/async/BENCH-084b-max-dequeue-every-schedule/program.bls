@@ -1,0 +1,51 @@
+//! BENCH-084: the max-element dequeue of Marczak et al. (Datalog 2.0 2012, Appendix E, Example 10), ported rule by
+//! rule.
+//!
+//!     b(#N, I)@async ← b_edb(#L, I).
+//!     b(I)@next ← b(I), ¬dequeued(I).
+//!     b_lt(I, J) ← b(I), b(J), I < J.
+//!     dequeued(I)@next ← b(I), ¬b_lt(_, I), b_lt(_, _).
+//!
+//! Every node sends its elements to every node. While `b` holds at least two elements, its least element is dequeued
+//! (it leaves `b` two ticks later), so every node ends up holding only the greatest element. The program is confluent
+//! but not Dedalus+: it negates IDB relations and `b` is persisted through a negation.
+//!
+//! One deliberate change, recorded in the manifest: each element is sent once, when the host supplies it. As printed,
+//! `b_edb` is EDB and holds at every tick, so the rule re-sends every element at every tick; under the synchronous
+//! schedule every element then re-arrives in every tick and stays in `b` forever, which contradicts the single
+//! ultimate model MAR states. Sending each element once is the reading under which MAR's claim holds.
+
+program max_dequeue version 1;
+
+/// MAR's `b_edb(#L, I)`: the elements this node contributes, supplied once by the host.
+input b_edb(i: u64);
+/// The asynchronous head `b(#N, I)@async`.
+channel b_msg(i: u64);
+/// MAR's output relation `b`. It holds the elements that arrive, and is carried to the next tick unless dequeued.
+output b(i: u64);
+scratch dequeued(i: u64);
+
+view b_lt(i, j) = b(i), b(j) where i < j;
+
+/// b(#N, I)@async ← b_edb(#L, I): to every node of the deployment.
+spread: on b_edb(i), node_dir(n, _, _, _) {
+    send b_msg(i) to n;
+}
+
+arrive: on b_msg(i) {
+    emit b(i);
+}
+
+/// b(I)@next ← b(I), ¬dequeued(I).
+/// `b` is written only by event-driven statements, this one included, so it is an event relation (LANGUAGE
+/// §8.5, the greatest fixpoint) and this handler is `on`, although the loop keeps an undequeued element in `b`
+/// in every later tick.
+carry: on b(i), not dequeued(i) {
+    next b(i);
+}
+
+/// dequeued(I)@next ← b(I), ¬b_lt(_, I), b_lt(_, _).
+/// `on`: its header reads the event relation `b`.
+dequeue: on b(i), not b_lt(_, i), b_lt(_, _) {
+    next dequeued(i);
+}

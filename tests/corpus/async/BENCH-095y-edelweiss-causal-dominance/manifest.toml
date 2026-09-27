@@ -1,0 +1,346 @@
+# BENCH-095 (R05 T26; §5.7, §5.9): bud-gc's causal-GC unit tests (the building blocks of the causal KVS).
+#
+# R05 §5.9 (Causal KVS): "dep once its log entry is safe; safe_dep and dom 'as soon as they are produced'; safe once
+# dominated." R05 §5.7: a semijoin (the target list uses one input only) needs a single observed partner, not a seal, and
+# join predicates imply equalities that the reclamation may use. These fixtures isolate the dominance rules.
+#
+# Fixtures (bud-gc test/tc_gc.rb), each ported with prefixed relation names:
+# - sc: SimpleCausal, test_simple_causal.
+# - scn: SimpleCausalAtNext, test_simple_causal_at_next.
+# - cdr: CausalDomRights, test_dom_rights.
+# - ros: JoinReclaimRightsOnSeal, test_join_reclaim_rights_on_seal.
+# - ch: CausalHack, test_causal_hack.
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss causal dominance (tc_gc.rb): dependencies, dominated writes and dom entries reclaimed as dom grows"
+priority = "P1"
+source = "R05 T26, §5.4-§5.8, §9.4 item 26; bud-gc test/tc_gc.rb (Edelweiss prototype, VLDB 2014)"
+features = ["LANG-040", "LANG-043", "LANG-060", "LANG-061", "LANG-082", "LANG-086", "LANG-207", "ANA-060", "ANA-062", "ANA-063", "ANA-064", "ANA-065", "ANA-066"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+notes = "Timeline mapping and the storage expectations of the rewritten program: docs/plan/notes/M1.4.md (BENCH-095)."
+
+[run]
+ticks = 7
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-060", "LANG-061", "LANG-082", "LANG-086", "LANG-207", "ANA-060", "ANA-062", "ANA-063", "ANA-064", "ANA-065", "ANA-066"]
+until = "M7"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-060", "LANG-061", "LANG-082", "LANG-086", "LANG-207", "ANA-060", "ANA-062", "ANA-063", "ANA-064", "ANA-065", "ANA-066"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "sc_safe_in"
+rows = [[5, "foo"], [6, "bar"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "sc_dep_in"
+rows = [[7, 6]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "sc_safe_in"
+rows = [[7, "bar"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "scn_safe_in"
+rows = [[5, "foo"], [6, "bar"]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel = "scn_dep_in"
+rows = [[7, 6]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel = "scn_safe_in"
+rows = [[7, "bar"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "cdr_dep_in"
+rows = [[7, 6]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "cdr_sk_in"
+rows = [[6, 7], [7, 6]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel = "cdr_dep_seal"
+rows = [[6]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ros_t1_in"
+rows = [[5, 10], [5, 11], [5, 12], [6, 13]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ros_t2_in"
+rows = [[5, 99]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "ros_t3_in"
+rows = [[99]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "ros_t2_seal"
+rows = [[5]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ch_dep_in"
+rows = [[7, 5, "foo"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ch_safe_in"
+rows = [[5, "foo"], [6, "bar"], [7, "foo"]]
+
+[[expect]]
+node = "n1"
+rel = "sc_view"
+tick = 2
+rows = [[5, "foo"], [6, "bar"]]
+
+[[expect]]
+node = "n1"
+rel = "sc_sk"
+tick = 2
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "sc_view"
+tick = 4
+rows = [[5, "foo"], [7, "bar"]]
+
+[[expect]]
+node = "n1"
+rel = "sc_sk"
+tick = 4
+rows = [[6, 7], [7, 6]]
+
+[[expect]]
+node = "n1"
+rel = "scn_view"
+tick = 3
+rows = [[5, "foo"], [6, "bar"]]
+
+[[expect]]
+node = "n1"
+rel = "scn_sk"
+tick = 3
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "scn_view"
+tick = 6
+rows = [[5, "foo"], [7, "bar"]]
+
+[[expect]]
+node = "n1"
+rel = "scn_sk"
+tick = 6
+rows = [[6, 7], [7, 6]]
+
+[[expect]]
+node = "n1"
+rel = "ros_r1"
+tick = 2
+rows = [[99]]
+
+[[expect]]
+node = "n1"
+rel = "ros_r1"
+tick = 4
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "ch_view"
+tick = 4
+rows = [[6, "bar"], [7, "foo"]]
+
+[expect_analysis.reclaimable]
+reclaimed = { scn_dep = "join_semijoin", cdr_dep = "join_semijoin", cdr_sk = "join_seal", ros_t2 = "join_semijoin", ros_t1 = "join_seal", ch_safe = "dr_plus", ch_dep = "join_semijoin", ch_dom = "dr_minus" }
+kept = {  }
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sc_view"
+tick = 2
+rows = [[5, "foo"], [6, "bar"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sc_sk"
+tick = 2
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sc_dom"
+tick = 2
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sc_view"
+tick = 4
+rows = [[5, "foo"], [7, "bar"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sc_sk"
+tick = 4
+rows = [[6, 7], [7, 6]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sc_dom"
+tick = 4
+rows = [[6]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "scn_view"
+tick = 3
+rows = [[5, "foo"], [6, "bar"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "scn_sk"
+tick = 3
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "scn_dom"
+tick = 3
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "scn_view"
+tick = 6
+rows = [[5, "foo"], [7, "bar"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "scn_sk"
+tick = 6
+rows = [[6, 7], [7, 6]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "scn_dom"
+tick = 6
+rows = [[6]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "scn_dep"
+tick = 6
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "cdr_dom"
+tick = 3
+rows = [[6]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "cdr_dep"
+tick = 3
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "cdr_sk"
+tick = 3
+rows = [[6, 7]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "cdr_sk"
+tick = 5
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ros_r1"
+tick = 2
+rows = [[99]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ros_r1"
+tick = 4
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ros_t2"
+tick = 4
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ros_t1"
+tick = 6
+rows = [[6, 13]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ch_view"
+tick = 4
+rows = [[6, "bar"], [7, "foo"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ch_safe"
+tick = 4
+rows = [[6, "bar"], [7, "foo"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ch_dep"
+tick = 4
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ch_dom"
+tick = 4
+rows = []

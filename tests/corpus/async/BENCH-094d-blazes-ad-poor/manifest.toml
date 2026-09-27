@@ -1,0 +1,78 @@
+# BENCH-094 (R05 T14; Blazes §5.2.2): the ad-tracking network running POOR, with no seal, diverges.
+#
+# Blazes §5.2.2: "If we consider query POOR with no input stream annotations, it leads to the following reduction:
+# Async, CW -(p)-> Async [Report]; Async, OR -(2)-> NDRead, Rep -> Inst; Inst, CW -(3)-> Taint [Cache] -> Split. The
+# poor performers query is not confluent ... Preventing split brain will require a coordination strategy that controls
+# message delivery order to the reporting server." R05 §4.4.2: "POOR (OR_{id}), no seal: NDRead_id, unprotected, Rep ⇒
+# Inst. Then Inst into the Cache's CW path ⇒ (rule 3) Taint ⇒ Rep ⇒ Diverge" (the TR's Split is FEATURES' Diverge; R05
+# §4.4.1 item 5 notes the paper's typo of rule (2) for rule (1) and OR_campaign for OR_id).
+#
+# Annotations (ANA-040, white box; Blazes §5.2.1): `report` logs clicks (click -> response: CW, the click only writes
+# the log the query reads) and answers requests (request -> response: OR_id, POOR's group-by column); `cache` reads its
+# store and forwards (request -> answer, request -> forward: CR) and stores answers (response -> answer/share, peer ->
+# answer: CW). Both components are replicated (`#[replicated]` on their output streams). The only cycle is the cache's
+# self-edge through `share`: "Cache and Report form no cycle, because Cache provides no path from r to q" (Blazes §4.2).
+schema = 1
+id = "BENCH-094"
+title = "Blazes, ad reporting with POOR and no seal: Report is Inst, the cache and the sink Diverge; ordering needed"
+priority = "P1"
+source = "R05 T14, §4.4.1, §4.4.2 (reference derivations) and §9.3 item 14; Blazes (ICDE 2014) §1.3, §3.4, §4, §5.2, §7"
+features = ["LANG-003", "LANG-004", "LANG-009", "LANG-040", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "LANG-088", "LANG-153", "ANA-040", "ANA-041", "ANA-042", "ANA-045", "LANG-047", "LANG-100"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "The Bloom ad-reporting source (~125 LOC) is not published; the program is re-derived from the paper's description and Fig. 5 queries."
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-003", "LANG-004", "LANG-009", "LANG-040", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "LANG-088", "LANG-153", "ANA-040", "ANA-041", "ANA-042", "ANA-045", "LANG-047", "LANG-100"]
+until = "M7"
+
+[expect_analysis.blazes]
+cycles = [["cache"]]
+streams = { click = "Async", ask = "Async", lookup = "Async", found = "Inst", share = "Diverge", result = "Diverge" }
+sinks = { answers = "Diverge" }
+coordination = [{ at = "report", mechanism = "ordering" }]
+
+[[expect_analysis.blazes.paths]]
+component = "report"
+from = "click"
+to = "response"
+annotation = "CW"
+
+[[expect_analysis.blazes.paths]]
+component = "report"
+from = "request"
+to = "response"
+annotation = "OR"
+gate = ["id"]
+
+[[expect_analysis.blazes.paths]]
+component = "cache"
+from = "request"
+to = "forward"
+annotation = "CR"
+
+[[expect_analysis.blazes.paths]]
+component = "cache"
+from = "request"
+to = "answer"
+annotation = "CR"
+
+[[expect_analysis.blazes.paths]]
+component = "cache"
+from = "response"
+to = "answer"
+annotation = "CW"
+
+[[expect_analysis.blazes.paths]]
+component = "cache"
+from = "response"
+to = "share"
+annotation = "CW"
+
+[[expect_analysis.blazes.paths]]
+component = "cache"
+from = "peer"
+to = "answer"
+annotation = "CW"

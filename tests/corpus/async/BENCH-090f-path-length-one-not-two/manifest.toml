@@ -1,0 +1,57 @@
+# BENCH-090 (R05 T9): "a path of length 1 but not 2", the negative test.
+#
+# R05 T9 (Zinn Remark 3.3): "stratified, not semi-positive, not adom-monotone. Negative test for any 'SP ⇒
+# coordination-free under N1' optimization." The negation reads e2, an IDB relation fed by asynchronous edges, so the
+# program is not semipositive and must get no certificate; the negation is a point of order on a D path.
+#
+# Oracle (sync harness): nothing has arrived in tick 0; in tick 1 the edges a->b, b->c and a->c arrive everywhere,
+# e2 = {a->c}, and q = {a->b, b->c}: a->c is a path of length one and also of length two.
+schema = 1
+id = "BENCH-090"
+title = "CALM oracle: a path of length one but not two is not semipositive and is not certified"
+priority = "P1"
+source = "R05 T9 and §2.3; Zinn 2012 (arXiv 1202.0242) Remark 3.3"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-190", "LANG-240", "ANA-022", "ANA-023", "ANA-025", "ANA-029"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "x", role = "Node" }, { name = "y", role = "Node" }]
+
+[run]
+ticks = 6
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-190", "LANG-240", "ANA-022", "ANA-023", "ANA-025", "ANA-029"]
+until = "M5"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-190", "LANG-240", "ANA-022", "ANA-023", "ANA-025", "ANA-029"]
+until = "M7"
+
+[[expect]]
+node = "x"
+rel = "q"
+tick = 0
+rows = []
+
+[[expect]]
+node = "x"
+rel = "q"
+tick = 1
+rows = [["a", "b"], ["b", "c"]]
+
+[[expect]]
+node = "y"
+rel = "q"
+final = true
+rows = [["a", "b"], ["b", "c"]]
+
+[expect_analysis]
+points_of_order = { complete = true, edges = [{ from = "e2", to = "q", kind = "negation" }], clusters = [] }
+calm_labels = { outputs = { q = "D" } }
+certificates = { q = [] }

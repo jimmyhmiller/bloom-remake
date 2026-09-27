@@ -1,0 +1,69 @@
+//! BENCH-097 (b): non-monotone queries that terminate freely on some inputs (R13 §12 T6; Power, Koutris, Hellerstein,
+//! ICDT 2025, §4.1 and §5.1).
+//!
+//!     q_c() :- R(c), notin S(c).                                        (with c = 1)
+//!     Q(x) = (R(x) ∧ x > 10) ∨ (S(x) ∧ ¬T(x))                           (FT §5.1)
+//!
+//! R, S and T only grow. q_c is provisional-true once R(1) holds, and final-false once S(1) arrives. For Q, "any
+//! instance that contains a tuple R(20) freely terminates (with true) for the output tuple (20). Also, any instance
+//! that contains T(5) freely terminates (with false) for the output tuple (5)." A tuple such as (7), derived from
+//! S(7) while T(7) may still arrive, stays provisional.
+
+program ft_mixed_query version 1;
+
+/// Host inputs, each stored in an insert-only table.
+input r_in(x: i64);
+input s_in(x: i64);
+input t_in(x: i64);
+table r(x: i64);
+table s(x: i64);
+table t(x: i64);
+
+output q_c();
+output q(x: i64);
+/// Observers of the runtime finality status (LANGUAGE §14.5).
+output q_c_final_true();
+output q_c_final_false();
+output q_final_present(x: i64);
+output q_final_absent(x: i64);
+
+store_r: on r_in(x) {
+    emit r(x);
+}
+store_s: on s_in(x) {
+    emit s(x);
+}
+store_t: on t_in(x) {
+    emit t(x);
+}
+
+rc_not_sc: while r(1), not s(1) {
+    emit q_c();
+}
+
+big_r: while r(x) where x > 10 {
+    emit q(x);
+}
+s_not_t: while s(x), not t(x) {
+    emit q(x);
+}
+
+/// Every value mentioned in any input: the candidates whose finality is observed.
+view candidate(x) {
+    r(x);
+    s(x);
+    t(x);
+}
+
+q_c_true: while final q_c() {
+    emit q_c_final_true();
+}
+q_c_false: while final not q_c() {
+    emit q_c_final_false();
+}
+q_present: while final q(x) {
+    emit q_final_present(x);
+}
+q_absent: while candidate(x), final not q(x) {
+    emit q_final_absent(x);
+}

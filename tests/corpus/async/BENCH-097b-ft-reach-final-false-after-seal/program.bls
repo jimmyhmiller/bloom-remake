@@ -1,0 +1,83 @@
+//! BENCH-097 (a): free termination of monotone queries that are false on the instance (R13 §12 T5, instance 2 and
+//! the cardinality variant; Power, Koutris, Hellerstein, "The Free Termination Property of Queries Over Time",
+//! ICDT 2025, §1.1 and §5.2).
+//!
+//!     P(x, y) :- Edge(x, y).      P(x, y) :- P(x, z), Edge(z, y).      reach() :- P(s, t).
+//!     big() :- count<*> Edge > 10.
+//!
+//! "Threshold queries only offer free termination for database instances where the answer is true": while edges may
+//! still arrive, a false reach() or big() stays provisional. Once the edge table is sealed (R13's "seal Edge"), its
+//! state can no longer change and both become final-false (SEALED).
+
+program ft_reachability version 1;
+
+/// The node that sends the edges, and the node that holds the graph.
+static edge_source(n: Node);
+static graph_holder(g: Node);
+fact edge_source("SRC");
+fact graph_holder("G");
+
+/// At the source, from the host: edges to send, and the end of the edge stream.
+input add_edge(a: String, b: String);
+input end_of_edges();
+
+/// The edge stream, punctuated as a whole by its producers.
+channel edge_msg(a: String, b: String) sealed by () producers edge_source;
+
+/// At the graph node: every edge received. It only grows until it is sealed.
+table edge(a: String, b: String) sealed by ();
+
+output reach();
+output big();
+output big_final_false();
+output reach_final();
+output reach_final_false();
+output p_final(x: String, y: String);
+
+ship: on add_edge(a, b), graph_holder(g) {
+    send edge_msg(a, b) to g;
+}
+
+close_stream: on end_of_edges(), graph_holder(g) {
+    seal edge_msg() to g;
+}
+
+store: on edge_msg(a, b) {
+    emit edge(a, b);
+}
+
+/// Once every producer has sealed the stream and every edge it sent has arrived, no edge will ever be added.
+close_table: while sealed edge_msg() {
+    seal edge();
+}
+
+view p(x, y) {
+    edge(x, y);
+    p(x, z), edge(z, y);
+}
+
+answer: while p("s", "t") {
+    emit reach();
+}
+
+/// count<*> Edge > 10, written as a threshold on the size of the edge set (monotone, LANGUAGE §11.6).
+too_big: while lset{ (a, b) | edge(a, b) }.size() > 10 {
+    emit big();
+}
+
+big_is_final_false: while final not big() {
+    emit big_final_false();
+}
+
+/// The runtime finality status (LANGUAGE §14.5), made observable.
+reach_is_final: while final reach() {
+    emit reach_final();
+}
+
+reach_is_final_false: while final not reach() {
+    emit reach_final_false();
+}
+
+tuple_is_final: while final p(x, y) {
+    emit p_final(x, y);
+}

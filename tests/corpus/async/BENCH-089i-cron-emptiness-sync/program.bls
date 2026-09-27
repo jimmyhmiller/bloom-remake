@@ -1,0 +1,39 @@
+//! BENCH-089: CRON Figure 3, the emptiness query (Ameloot, Van den Bussche, JCSS 2014, §6.1.1), ported rule by rule.
+//!
+//!     empty(x) | y ← ¬S(), Id(x), Node(y).
+//!     empty(y)• ← empty(y).
+//!     missing() ← Node(y), ¬empty(y).
+//!     T() ← Id(x), ¬missing().
+//!
+//! Every node whose S is empty broadcasts its identifier; a node outputs T() once it holds every identifier. T() is
+//! output (at every node) iff S is empty on all nodes: a non-monotone query, computed consistently.
+
+program cron_emptiness version 1;
+
+view node(y) = node_dir(y, _, _, _);
+/// CRON's `Id(x)`: this node's identifier.
+view id(x) = node_dir(x, _, _, _) where x == self;
+
+/// The nullary input relation S, keyed by the node at which S() holds. Here S is empty everywhere.
+static s_edb(at: Node);
+
+/// The asynchronous head `empty(x) | y`.
+channel empty_msg(x: Node);
+/// `empty`: arrivals, persisted by empty(y)• ← empty(y).
+table empty(x: Node);
+/// CRON's output, re-derived in every step.
+output t();
+
+report: while not s_edb(self), id(x), node(y) {
+    send empty_msg(x) to y;
+}
+
+arrive: on empty_msg(x) {
+    emit empty(x);
+}
+
+view missing() = node(y), not empty(y);
+
+derive: while id(_), not missing() {
+    emit t();
+}

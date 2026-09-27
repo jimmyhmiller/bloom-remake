@@ -1,0 +1,17 @@
+//! BENCH-095: range compression (Edelweiss, VLDB 2014, §3.3, §4.1.2; bud-gc collections.rb BudRangeCompress and
+//! multirange.rb; LANGUAGE §7.11 `range(col)` tables, LANG-050).
+//!
+//! A range table keeps every column as a key and stores its integer column as disjoint [lo, hi] buckets per value of
+//! the other columns. Its contents, and so every rule's result, are those of an ordinary table.
+
+program edelweiss_range_compression version 1;
+
+/// Sequence numbers acknowledged per sender.
+table acked(src: Node, seq: u64) range(seq);
+
+/// From the host: an acknowledgement.
+input ack(src: Node, seq: u64);
+
+record: on ack(s, n) {
+    emit acked(s, n);
+}

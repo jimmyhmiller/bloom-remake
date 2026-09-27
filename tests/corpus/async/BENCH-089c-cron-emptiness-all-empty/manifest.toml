@@ -1,0 +1,45 @@
+# BENCH-089 (R02 T26): CRON Figure 3, the emptiness query, when S is empty everywhere.
+#
+# CRON §6.1.1: "the deductive rules let a node output T() starting at the moment that it has all identifiers
+# (including its own). The program is consistent." With S empty at x, y and z, every node eventually holds all three
+# identifiers and outputs T() in every step from then on: T() holds at the end of every seed at every node.
+schema = 1
+id = "BENCH-089"
+title = "CRON Fig. 3 (emptiness): when S is empty everywhere, every schedule outputs T() at every node"
+priority = "P1"
+source = "R02 T26; CRON (JCSS 2014) Figure 3 and §6.1.1 (verbatim program)"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-190", "LANG-240", "SEM-040", "SEM-044", "TEST-001"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "x", role = "Node" }, { name = "y", role = "Node" }, { name = "z", role = "Node" }]
+
+[run]
+ticks = 40
+stop = "ticks"
+seeds = 32
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-190", "LANG-240", "SEM-040", "SEM-044", "TEST-001"]
+until = "M8"
+
+[[expect]]
+node = "x"
+rel = "t"
+final = true
+rows = [[]]
+
+[[expect]]
+node = "y"
+rel = "t"
+final = true
+rows = [[]]
+
+[[expect]]
+node = "z"
+rel = "t"
+final = true
+rows = [[]]

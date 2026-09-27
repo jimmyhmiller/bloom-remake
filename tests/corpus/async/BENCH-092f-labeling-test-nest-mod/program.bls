@@ -1,0 +1,51 @@
+//! BENCH-092: bud's `TestNestMod` labeling fixture (bud `test/tc_labeling.rb`), ported statement by statement.
+//!
+//! Bud collections without a schema get Bud's defaults: an interface or table is `[:key] => [:val]` and a channel is
+//! `[:@address, :val]`. Every column is part of the key here (Bud's primary keys play no part in the labels).
+
+program test_nest_mod version 1;
+
+/// TestNM as a module: its interfaces are TestState's inputs and output.
+module TestNm {
+    input i1(key: Node, val: String);
+    input i2(key: Node, val: String);
+    output response(key: Node, val: String);
+    channel c1(@address: Node, val: String);
+    channel c2(@address: Node, val: String);
+    table guard1(key: Node, val: String);
+    table guard2(key: Node, val: String);
+
+    send1: on i1(k, v) {
+        send c1(k, v);
+    }
+    send2: on i2(k, v) {
+        send c2(k, v);
+    }
+    store1: on c1(a, v) {
+        emit guard1(a, v);
+    }
+    store2: on c2(a, v) {
+        emit guard2(a, v);
+    }
+    nm: while guard1(k, v), not guard2(_, v) {
+        emit response(k, v);
+    }
+}
+
+/// TestNestMod: `import TestNM => :tnm`.
+import TestNm as tnm;
+
+input inn1(key: Node, val: String);
+input inn2(key: Node, val: String);
+output outt(key: Node, val: String);
+
+/// `tnm.i1 <= inn1; tnm.i2 <= inn2; outt <= tnm.response`.
+forward1: on inn1(k, v) {
+    emit tnm.i1(k, v);
+}
+forward2: on inn2(k, v) {
+    emit tnm.i2(k, v);
+}
+collect: while tnm.response(k, v) {
+    emit outt(k, v);
+}

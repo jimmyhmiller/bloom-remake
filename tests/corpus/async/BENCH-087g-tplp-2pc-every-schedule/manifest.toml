@@ -1,0 +1,45 @@
+# BENCH-087 (R02 T22): TPLP Figure 3 / Example 3, two-phase commit, in every schedule.
+#
+# Same scenario as BENCH-087f. Whatever the delays, every vote eventually reaches C; a "no" vote makes decideNo hold
+# from its arrival on, and decideYes needs every vote, so transaction 2 is never announced "yes" and transaction 1 is
+# never announced "no". Every agent ends with outcome = {(1, yes), (2, no)}.
+schema = 1
+id = "BENCH-087"
+title = "TPLP Fig. 3 (2PC): every schedule gives every agent yes for transaction 1 and no for transaction 2"
+priority = "P1"
+source = "R02 T22; TPLP 2016 Figure 3 and Example 3 (verbatim program)"
+features = ["LANG-040", "LANG-042", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-190", "SEM-040", "SEM-044", "TEST-001"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "C", role = "Node" }, { name = "A1", role = "Node" }, { name = "A2", role = "Node" }]
+
+[run]
+ticks = 40
+stop = "ticks"
+seeds = 32
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-190", "SEM-040", "SEM-044", "TEST-001"]
+until = "M8"
+
+[[expect]]
+node = "A1"
+rel = "outcome"
+final = true
+rows = [[1, "yes"], [2, "no"]]
+
+[[expect]]
+node = "A2"
+rel = "outcome"
+final = true
+rows = [[1, "yes"], [2, "no"]]
+
+[[expect]]
+node = "C"
+rel = "log"
+final = true
+rows = [[1], [2]]

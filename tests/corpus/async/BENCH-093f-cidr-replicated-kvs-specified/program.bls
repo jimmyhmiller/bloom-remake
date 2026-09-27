@@ -1,0 +1,97 @@
+//! BENCH-093: the replicated key-value store of CIDR 2011 Figure 6 (bud-sandbox kvs/kvs.rb, ReplicatedKVS), with
+//! BestEffortMulticast and StaticMembership mixed in (bud-sandbox delivery/multicast.rb, membership/membership.rb).
+//!
+//! Bud mixes modules into one namespace; this port keeps that namespace, with the multicast and membership rules in
+//! the same module as the store. The multicast reports a message done as soon as it is handed to the delivery
+//! layer (BestEffortDelivery: "more like 'an effort'"), and sends it to every other member.
+//! Bud's BasicKVS raises a key error for two puts to one key in one tick; this port keeps one per key with
+//! `choose_most!`, as Blossom's KVS example does (E1), which does not matter for this case.
+
+program replicated_kvs version 1;
+
+/// KVSProtocol.
+input kvput(client: Node, key: String, reqid: u64, value: String);
+input kvdel(key: String, reqid: u64);
+input kvget(reqid: u64, key: String);
+output kvget_response(reqid: u64, key: String, value: String);
+
+/// MembershipProtocol, implemented by StaticMembership below.
+input add_member(ident: u64, host: Node);
+scratch member(ident: u64, host: Node);
+
+/// MulticastProtocol and the DeliveryProtocol output it mixes in, implemented by the multicast below.
+scratch mcast_send(ident: u64, op: String, origin: Node, key: String, reqid: u64, value: String);
+scratch mcast_done(ident: u64, op: String, origin: Node, key: String, reqid: u64, value: String);
+scratch pipe_out(src: Node, ident: u64, op: String, origin: Node, key: String, reqid: u64, value: String);
+
+// ---- BasicKVS, imported as `kvs` in bud
+
+table kvstate(key: String, value: String) key(key);
+scratch kvs_put(client: Node, key: String, reqid: u64, value: String);
+scratch kvs_del(key: String, reqid: u64);
+
+mutate: on kvs_put(c, k, r, v), choose_most!((c, r, v) per k) {
+    upsert kvstate(k, v);
+}
+
+get: on kvget(r, k), kvstate(k, v) {
+    emit kvget_response(r, k, v);
+}
+
+remove: on kvs_del(k, _), kvstate(k, v) {
+    delete kvstate(k, v);
+}
+
+// ---- ReplicatedKVS
+
+/// local_indir: `kvs.kvdel <= kvdel`.
+local_del: on kvdel(k, r) {
+    emit kvs_del(k, r);
+}
+
+/// puts: "if I am the master, multicast store requests".
+put_send: on kvput(c, k, r, v), not member(_, c) {
+    emit mcast_send(r, "put", self, k, r, v);
+}
+
+put_done: on mcast_done(_, "put", o, k, r, v) {
+    emit kvs_put(o, k, r, v);
+}
+
+/// "if I am a replica, store the payload of the multicast".
+put_replica: on pipe_out(s, _, "put", o, k, r, v) where s != self {
+    emit kvs_put(o, k, r, v);
+}
+
+// ---- StaticMembership: `private_members <= add_member; member <= private_members`
+
+table private_members(ident: u64, host: Node);
+
+join_group: on add_member(i, h) {
+    emit private_members(i, h);
+}
+
+list_group: while private_members(i, h) {
+    emit member(i, h);
+}
+
+// ---- Multicast over BestEffortDelivery
+
+/// BestEffortDelivery's `pipe_chan`. Bud carries the sending address as a payload column (`src`); here the receiver
+/// takes it from the channel's authenticated sender (`from`, LANGUAGE §18.2), which a payload cannot forge.
+channel pipe_chan(ident: u64, op: String, origin: Node, key: String, reqid: u64, value: String);
+
+/// `pipe_in <= (mcast_send * member).pairs {...} unless m.host == ip_port`, and `pipe_chan <~ pipe_in`.
+fan_out: on mcast_send(i, op, o, k, r, v), member(_, h) where h != self {
+    send pipe_chan(i, op, o, k, r, v) to h;
+}
+
+/// `pipe_out <= pipe_chan`, with the sender as `pipe_out`'s `src`.
+deliver: on pipe_chan(i, op, o, k, r, v) from s {
+    emit pipe_out(s, i, op, o, k, r, v);
+}
+
+/// Best effort: every send is reported delivered at once, so the multicast is done in the tick it is sent.
+done: on mcast_send(i, op, o, k, r, v) {
+    emit mcast_done(i, op, o, k, r, v);
+}

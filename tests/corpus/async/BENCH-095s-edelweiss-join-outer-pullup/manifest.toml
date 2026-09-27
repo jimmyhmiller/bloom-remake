@@ -1,0 +1,371 @@
+# BENCH-095 (R05 T26; §5.7): bud-gc's unit tests for outer joins and the notin pull-up (ANA-063).
+#
+# R05 §5.7: "Only binary inner or outer joins are supported." "Pull-up shortcut (is_not_qual_local_to_rel,
+# quals_tlist_pullup). If the notin quals reference only columns derived from A (possibly through a join equality), the
+# notin is pushed above the join and a simple rule is added: del_A_r <= (A * Y).lefts(pulled-up quals). It needs no seal,
+# because any future join output involving a would also be filtered by the persistent Y.
+#
+# Fixtures (bud-gc test/tc_gc.rb), each ported with prefixed relation names:
+# - osane: JoinRseOuter, test_rse_join_outer_check_sane.
+# - oouter: JoinRseOuter, test_rse_join_outer.
+# - pu: JoinRseNotinPullup, test_rse_join_notin_pullup.
+# - iq: JoinRseNotinPullupImplicitQual, test_rse_join_notin_pullup_implicit_qual.
+# - iql: JoinRseNotinPullupImplicitQualLefts, test_rse_join_notin_pullup_implicit_qual_lefts.
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss join reclamation (tc_gc.rb): outer joins with per-column and whole seals; negations pulled above the join"
+priority = "P1"
+source = "R05 T26, §5.4-§5.8, §9.4 item 26; bud-gc test/tc_gc.rb (Edelweiss prototype, VLDB 2014)"
+features = ["LANG-025", "LANG-040", "LANG-043", "LANG-049", "LANG-060", "LANG-082", "LANG-087", "LANG-190", "LANG-207", "ANA-060", "ANA-063", "ANA-066"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+notes = "Timeline mapping and the storage expectations of the rewritten program: docs/plan/notes/M1.4.md (BENCH-095)."
+
+[run]
+ticks = 11
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-025", "LANG-040", "LANG-043", "LANG-049", "LANG-060", "LANG-082", "LANG-087", "LANG-190", "LANG-207", "ANA-060", "ANA-063", "ANA-066"]
+until = "M7"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-025", "LANG-040", "LANG-043", "LANG-049", "LANG-060", "LANG-082", "LANG-087", "LANG-190", "LANG-207", "ANA-060", "ANA-063", "ANA-066"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "osane_t1_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "osane_t2_in"
+rows = [[5, 100], [6, 110]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "osane_t3_in"
+rows = [[11, { some = 110 }]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "osane_t2_seal"
+rows = [[6]]
+
+[[input]]
+node = "n1"
+tick = 7
+rel = "osane_t3_in"
+rows = [[10, { some = 100 }]]
+
+[[input]]
+node = "n1"
+tick = 9
+rel = "osane_t1_seal"
+rows = [[5]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "oouter_t1_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "oouter_t3_in"
+rows = [[11, { none = true }]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "oouter_t2_seal"
+rows = [[]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "pu_obj_in"
+rows = [[100, "xxx"], [101, "yyy"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "pu_del_ref_in"
+rows = [[20, 1], [21, 2]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "iq_obj_in"
+rows = [[100, "xxx"], [101, "yyy"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "iq_del_ref_in"
+rows = [[1]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "iql_obj_in"
+rows = [[100, "xxx"], [101, "yyy"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "iql_del_ref_in"
+rows = [[1]]
+
+[[expect]]
+node = "n1"
+rel = "osane_r1"
+tick = 2
+rows = [[10, { some = 100 }], [11, { some = 110 }]]
+
+[[expect]]
+node = "n1"
+rel = "osane_r1"
+tick = 4
+rows = [[10, { some = 100 }]]
+
+[[expect]]
+node = "n1"
+rel = "osane_r1"
+tick = 6
+rows = [[10, { some = 100 }]]
+
+[[expect]]
+node = "n1"
+rel = "osane_r1"
+tick = 8
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "oouter_r1"
+tick = 2
+rows = [[10, { none = true }]]
+
+[[expect]]
+node = "n1"
+rel = "oouter_r1"
+tick = 4
+rows = [[10, { none = true }]]
+
+[[expect]]
+node = "n1"
+rel = "pu_view"
+tick = 2
+rows = [["foo", 1, "xxx"], ["bar", 2, "xxx"], ["baz", 3, "yyy"]]
+
+[[expect]]
+node = "n1"
+rel = "pu_view"
+tick = 4
+rows = [["baz", 3, "yyy"]]
+
+[[expect]]
+node = "n1"
+rel = "iq_live_ref"
+tick = 2
+rows = [[1], [2], [3]]
+
+[[expect]]
+node = "n1"
+rel = "iq_live_ref"
+tick = 4
+rows = [[2], [3]]
+
+[[expect]]
+node = "n1"
+rel = "iql_live_ref"
+tick = 2
+rows = [[1], [2], [3]]
+
+[[expect]]
+node = "n1"
+rel = "iql_live_ref"
+tick = 4
+rows = [[2], [3]]
+
+[expect_analysis.reclaimable]
+reclaimed = { osane_t1 = "join_seal", osane_t2 = "join_seal", oouter_t1 = "join_seal", pu_ref = "join_pullup", pu_obj = "join_seal", iq_ref = "join_pullup", iql_ref = "join_pullup" }
+kept = {  }
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "osane_r1"
+tick = 2
+rows = [[10, { some = 100 }], [11, { some = 110 }]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "osane_r1"
+tick = 4
+rows = [[10, { some = 100 }]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "osane_t1"
+tick = 4
+rows = [[5, 10], [6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "osane_t2"
+tick = 4
+rows = [[5, 100], [6, 110]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "osane_r1"
+tick = 6
+rows = [[10, { some = 100 }]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "osane_t1"
+tick = 6
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "osane_t2"
+tick = 6
+rows = [[5, 100], [6, 110]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "osane_r1"
+tick = 8
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "osane_t1"
+tick = 8
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "osane_t2"
+tick = 8
+rows = [[5, 100], [6, 110]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "osane_t1"
+tick = 10
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "osane_t2"
+tick = 10
+rows = [[6, 110]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "oouter_r1"
+tick = 2
+rows = [[10, { none = true }]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "oouter_t1"
+tick = 2
+rows = [[5, 10], [6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "oouter_r1"
+tick = 4
+rows = [[10, { none = true }]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "oouter_t1"
+tick = 4
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "pu_view"
+tick = 2
+rows = [["foo", 1, "xxx"], ["bar", 2, "xxx"], ["baz", 3, "yyy"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "pu_view"
+tick = 4
+rows = [["baz", 3, "yyy"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "pu_obj"
+tick = 4
+rows = [[101, "yyy"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "pu_ref"
+tick = 4
+rows = [[3, "baz", 101]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "iq_live_ref"
+tick = 2
+rows = [[1], [2], [3]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "iq_live_ref"
+tick = 4
+rows = [[2], [3]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "iq_obj"
+tick = 4
+rows = [[100, "xxx"], [101, "yyy"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "iq_ref"
+tick = 4
+rows = [[2, "bar", 100], [3, "baz", 101]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "iql_live_ref"
+tick = 2
+rows = [[1], [2], [3]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "iql_live_ref"
+tick = 4
+rows = [[2], [3]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "iql_obj"
+tick = 4
+rows = [[100, "xxx"], [101, "yyy"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "iql_ref"
+tick = 4
+rows = [[2, "bar", 100], [3, "baz", 101]]

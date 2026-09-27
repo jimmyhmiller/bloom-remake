@@ -1,0 +1,44 @@
+# BENCH-090 (R05 T2): deadlock detection in every schedule.
+#
+# R05 T2: "Runtime: every detected cycle is a true cycle and the final set is the same everywhere." Same scenario as
+# BENCH-090a: at the end of every seed each node reports exactly t1 and t2.
+schema = 1
+id = "BENCH-090"
+title = "CALM oracle: distributed deadlock detection finds the same cycles in every schedule"
+priority = "P1"
+source = "R05 T2; Hellerstein and Alvaro, Keeping CALM (CACM 2020) §1.3.1"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-190", "LANG-240", "SEM-040", "SEM-044", "TEST-001"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "n1", role = "Node" }, { name = "n2", role = "Node" }, { name = "n3", role = "Node" }]
+
+[run]
+ticks = 30
+stop = "ticks"
+seeds = 32
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-190", "LANG-240", "SEM-040", "SEM-044", "TEST-001"]
+until = "M8"
+
+[[expect]]
+node = "n1"
+rel = "deadlocked"
+final = true
+rows = [["t1"], ["t2"]]
+
+[[expect]]
+node = "n2"
+rel = "deadlocked"
+final = true
+rows = [["t1"], ["t2"]]
+
+[[expect]]
+node = "n3"
+rel = "deadlocked"
+final = true
+rows = [["t1"], ["t2"]]

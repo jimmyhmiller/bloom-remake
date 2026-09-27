@@ -1,0 +1,42 @@
+//! BENCH-090: the complement of transitive closure over a distributed graph (the CALM oracle of Zinn 2012 and
+//! Ameloot's 2014 survey: domain-disjoint-monotone, not domain-distinct-monotone).
+//!
+//! Every node floods its edges; each node reports every ordered pair of vertices the graph does not connect. A new
+//! edge can remove a pair from the answer, so the query is not monotone. It is coordination-free only under a
+//! domain-guided placement of the data (policy-aware analysis, ANA-035, is P2); without one it needs coordination,
+//! and the analysis must say so.
+
+program complement_tc version 1;
+
+view node(y) = node_dir(y, _, _, _);
+
+/// The vertex domain (the same at every node) and each node's edges, keyed by the node holding them.
+static vertex(v: String);
+static edge_edb(at: Node, a: String, b: String);
+
+fact vertex("a");
+fact vertex("b");
+fact vertex("c");
+fact edge_edb("x", "a", "b");
+fact edge_edb("y", "b", "c");
+
+channel edge_msg(a: String, b: String);
+table edge(a: String, b: String);
+output unreachable(a: String, b: String);
+
+share: while edge_edb(self, a, b), node(y) {
+    send edge_msg(a, b) to y;
+}
+
+arrive: on edge_msg(a, b) {
+    emit edge(a, b);
+}
+
+view tc(a, b) {
+    edge(a, b);
+    tc(a, m), edge(m, b);
+}
+
+report: while vertex(a), vertex(b), not tc(a, b) {
+    emit unreachable(a, b);
+}

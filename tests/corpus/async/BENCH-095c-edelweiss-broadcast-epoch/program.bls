@@ -1,0 +1,49 @@
+//! BENCH-095: Edelweiss's reliable broadcast with epoch-based membership (Edelweiss, VLDB 2014, §4.2; artifact
+//! broadcast_epoch_all.rb), ported rule for rule.
+//!
+//!     table :node, [:addr, :epoch]
+//!     table :log, [:id] => [:epoch, :val]
+//!     channel :chn, [:@addr, :id] => [:epoch, :val]
+//!     chn <~ (node * log).pairs(:epoch => :epoch) {|n,l| [n.addr] + l}
+//!     log <= chn.payloads
+//!
+//! A message of epoch k goes to the members of epoch k. The host punctuates an epoch in each relation once it is over
+//! (Bud's seal_node_epoch and seal_log_epoch tables: here the seals of relations declared `sealed by (epoch)`).
+
+program edelweiss_broadcast_epoch_all version 1;
+
+table node(addr: Node, epoch: u64) sealed by (epoch);
+table log(id: u64, epoch: u64, val: String) key(id) sealed by (epoch);
+channel chn(@addr: Node, id: u64, epoch: u64, val: String) key(addr, id);
+
+/// From the host: membership, messages this node originates, and the end of an epoch.
+input member(addr: Node, epoch: u64);
+input originate(id: u64, epoch: u64, val: String);
+input seal_node_epoch(epoch: u64);
+input seal_log_epoch(epoch: u64);
+
+join_epoch: on member(a, e) {
+    emit node(a, e);
+}
+
+create: on originate(i, e, v) {
+    emit log(i, e, v);
+}
+
+close_node_epoch: on seal_node_epoch(e) {
+    seal node(epoch: e);
+}
+
+close_log_epoch: on seal_log_epoch(e) {
+    seal log(epoch: e);
+}
+
+/// `chn <~ (node * log).pairs(:epoch => :epoch) {|n,l| [n.addr] + l}`
+rebroadcast: while node(a, e), log(i, e, v) {
+    send chn(a, i, e, v);
+}
+
+/// `log <= chn.payloads`
+store: on chn(_, i, e, v) {
+    emit log(i, e, v);
+}

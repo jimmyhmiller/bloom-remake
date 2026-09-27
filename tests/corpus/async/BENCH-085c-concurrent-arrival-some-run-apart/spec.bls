@@ -1,0 +1,11 @@
+//! BENCH-085: some schedule delivers c1 and c2 in different ticks (MAR Appendix F: the stable models with s ≠ t).
+
+spec SomeRunApart for r#program {
+    nodes N1;
+
+    /// "The two arrivals are always concurrent." The run that delivers c1 in tick 1 and c2 in tick 2 never derives
+    /// `concurrent` (each message is sent once), so this bounded liveness property fails.
+    liveness always_together: eventually concurrent() @ N1 within 4 ticks after 0;
+
+    check bmc { ticks: 6, delay: 2 } expect fails;
+}

@@ -1,0 +1,61 @@
+//! BENCH-150: Paxos with the first-order invariant of Paxos Made EPR §5.2, eqs. (4)-(12), before the rewrite of §6.
+//! Its verification condition is outside EPR: the check must report the quantifier-alternation cycle (VER-007).
+//!
+//! EPR §5.2: "Equations (4) to (12) define an inductive invariant that proves the safety of the Paxos model of
+//! Fig. 3. However, the verification condition for this inductive invariant contains cyclic quantifier alternations,
+//! and is therefore outside of EPR." Eq. (12) keeps the existential that EPR §6.1 later names left_round: "there must
+//! be at least one node that has already left round r1 (i.e., joined a higher round), and did not vote for v1 at r1".
+//! Its prefix is ∀round, value, quorum ∃node, round, value, which "introduces 9 edges in the quantifier alternation
+//! graph, including self-loops at round and value"; the propose action's "join-acknowledgment messages were received
+//! from a quorum" adds edges from node to round and to value; eq. (7) adds edges from round and value to quorum.
+//!
+//! The spec names EPR's message relations as BENCH-150 (a) does, but no derived relation. The representation lemmas
+//! tie the program's local copies to the network, including that a node that sent an acknowledgement for r has
+//! recorded joining r (the program's guards read that record).
+
+spec PaxosBeforeRewrite for r#program {
+    // ---------------- EPR's message relations (Fig. 3 lines 10-14)
+    view start_round_msg(r) = sent start_round(r) @ _ from _;
+    view join_ack_msg(n, r, maxr, v) = sent join_ack(r, maxr, v) @ _ from n;
+    view propose_msg(r, v) = sent propose(r, v) @ _ from _;
+    view vote_msg(n, r, v) = sent vote(r, v) @ _ from n;
+
+    /// (4) Only one value is decided.
+    invariant agreement: never decision(r1, v1) @ n1, decision(r2, v2) @ n2 where v1 != v2;
+
+    /// (5)-(11), as in BENCH-150 (a).
+    invariant unique_proposal: never propose_msg(r, v1), propose_msg(r, v2) where v1 != v2;
+    invariant vote_needs_proposal: never vote_msg(n, r, v), not propose_msg(r, v);
+    invariant decision_needs_quorum: never decision(r, v) @ n, not quorum m in Replica { vote_msg(m, r, v) };
+    invariant ack_bottom_no_vote: never join_ack_msg(n, r, 0, _), vote_msg(n, r2, _) where r2 < r;
+    invariant ack_vote_below: never join_ack_msg(n, r, r2, _) where r2 != 0, r2 >= r;
+    invariant ack_vote_cast: never join_ack_msg(n, r, r2, v), not vote_msg(n, r2, v) where r2 != 0;
+    invariant ack_vote_highest: never join_ack_msg(n, r, r2, _), vote_msg(n, r3, _) where r2 != 0, r2 < r3, r3 < r;
+    invariant no_vote_at_bottom: never vote_msg(_, 0, _);
+
+    /// (12) Once v2 is proposed in r2, every quorum has a node that joined a round above r1 and did not vote for v1
+    /// in r1: the existential is written out, as EPR §5.2 states it.
+    invariant nothing_else_choosable: never propose_msg(r2, v2), r1 in 0..r2, value(v1) @ _, v1 != v2,
+        quorum n in Replica { any { vote_msg(n, r1, v1); not { join_ack_msg(n, r3, _, _) where r3 > r1 } } };
+
+    // ---------------- representation lemmas: the program's local copies of the network
+    invariant acks_sent_are_joined: never join_ack_msg(n, r, _, _), not joined(r) @ n;
+    invariant votes_recorded: never vote_msg(n, r, v), not voted(r, v) @ n;
+    invariant recorded_votes_sent: never voted(r, v) @ n, not vote_msg(n, r, v);
+    invariant acks_were_sent: never acks(r, m, r2, v) @ o, not join_ack_msg(m, r, r2, v);
+    invariant tallied_votes_were_sent: never votes(r, v, s) @ n, m in s, not vote_msg(m, r, v);
+    invariant owners_start_rounds: never owned(r, _) @ o, not owns(r, o) @ o;
+    invariant owners_propose: never sent propose(r, _) @ _ from o, not owns(r, o) @ o;
+    invariant proposals_recorded: never sent propose(r, v) @ _ from o, not proposed(r, v) @ o;
+    invariant one_recorded_proposal: never proposed(r, v1) @ o, proposed(r, v2) @ o where v1 != v2;
+    invariant one_owner: never owns(r, a) @ x, owns(r, b) @ y where a != b;
+
+    prove agreement by induction using unique_proposal, vote_needs_proposal, decision_needs_quorum,
+        ack_bottom_no_vote, ack_vote_below, ack_vote_cast, ack_vote_highest, no_vote_at_bottom,
+        nothing_else_choosable, acks_sent_are_joined, votes_recorded, recorded_votes_sent, acks_were_sent,
+        tallied_votes_were_sent, owners_start_rounds, owners_propose, proposals_recorded, one_recorded_proposal,
+        one_owner;
+
+    /// Outside EPR, the check does not establish the goal: it reports the cycle and the equations that cause it.
+    check smt expect fails;
+}

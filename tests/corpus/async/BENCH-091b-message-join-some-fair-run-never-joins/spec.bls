@@ -1,0 +1,11 @@
+//! BENCH-091: a run of the message join in which the two messages are never delivered together.
+
+spec NeverTogether for r#program {
+    nodes X, Y, Z;
+
+    /// "The join eventually fires." A schedule that delivers every a(1) in even ticks and every b(1) in odd ticks
+    /// (each within two ticks of its send) never joins, so this bounded liveness property fails.
+    liveness joins: eventually joined(1) @ Z within 6 ticks after 0;
+
+    check bmc { ticks: 8, delay: 2 } expect fails;
+}

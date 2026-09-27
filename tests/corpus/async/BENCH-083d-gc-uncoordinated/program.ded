@@ -1,0 +1,26 @@
+// BENCH-083: MAR Appendix B (distributed garbage collection) in Molly's Dedalus dialect; the `.ded` twin of
+// BENCH-083a. The first column of every relation is its node.
+
+addr(M, A)@async :- addr_edb(M, A);
+refers_to(M, Src, Dst)@async :- local_ptr_edb(N, Src, Dst), master(N, M);
+refers_to(M, Src, Dst)@next :- refers_to(M, Src, Dst);
+reach(M, Src, Dst) :- refers_to(M, Src, Dst);
+reach(M, Src, Nxt) :- reach(M, Src, Dst), refers_to(M, Dst, Nxt);
+garbage(M, A) :- addr(M, A), root_edb(M, R), notin reach(M, R, A);
+garbage(M, A)@next :- garbage(M, A);
+
+// MAR's EDB holds at every tick; Molly facts hold only at their tick, so the EDB is persisted by hand from tick 1.
+addr_edb(M, A)@next :- addr_edb(M, A);
+local_ptr_edb(N, S, D)@next :- local_ptr_edb(N, S, D);
+master(N, M)@next :- master(N, M);
+root_edb(M, R)@next :- root_edb(M, R);
+
+master("M", "M")@1;
+master("H1", "M")@1;
+master("H2", "M")@1;
+local_ptr_edb("H1", "r", "a")@1;
+local_ptr_edb("H2", "a", "b")@1;
+addr_edb("M", "a")@1;
+addr_edb("M", "b")@1;
+addr_edb("M", "c")@1;
+root_edb("M", "r")@1;

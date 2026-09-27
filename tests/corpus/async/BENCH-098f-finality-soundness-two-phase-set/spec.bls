@@ -1,0 +1,25 @@
+//! BENCH-098: the two-phase set of BENCH-097 (e) under 10⁴ schedules with crashes (R13 §12 T9 and T15).
+//!
+//! Insert a and b, then delete b. FT Appendix B: the 2P-set can "negatively partially freely terminate on any value
+//! in DELETES", but never positively. So b may be reported final-absent (once its delete is in), a never, and
+//! nothing is ever reported final-present, whatever the schedule.
+
+spec TwoPhaseSetFinalitySound for r#program {
+    nodes SRC, R1, R2;
+
+    fact ins("a") @ SRC at tick 1;
+    fact ins("b") @ SRC at tick 1;
+    fact del("b") @ SRC at tick 2;
+
+    faults { crashes: 1, model: async }
+
+    invariant replicas_agree: never final_present(x) @ a, final_absent(x) @ b;
+    /// "we can never positively partially free terminate".
+    invariant never_final_present: never final_present(x) @ a;
+    /// a is never deleted, so it is never final-absent.
+    invariant a_never_final_absent: never final_absent("a") @ r;
+    /// Finality is monotone (SEM-016): a final-absent element never returns at that replica.
+    invariant absent_stays_absent: never final_absent(x) @ a, in_set(x) @ a;
+
+    check sim { runs: 10000, seed: 1 } expect holds;
+}

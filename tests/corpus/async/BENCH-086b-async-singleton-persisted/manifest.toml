@@ -1,0 +1,41 @@
+# BENCH-086 (R02 T19): with persistence the asynchronous singleton is certified.
+#
+# R02 T19: "Adding p(L)@next ← p(L) (guarded asynchrony) makes it confluent, with UM {p(n1)}." The program is
+# semipositive (no negation) with guarded asynchrony: Dedalus+ (MAR §3.2), certified confluent and consistent under
+# fair runs. Oracle (sync harness): the first copy arrives in tick 1, so p holds from tick 1 on.
+schema = 1
+id = "BENCH-086"
+title = "Asynchronous singleton with persistence: certified Dedalus+, p true from its first arrival"
+priority = "P1"
+source = "R02 T19 and §7.1-7.3 (MAR Examples 1-2 and §3.2)"
+features = ["LANG-043", "LANG-045", "LANG-046", "LANG-060", "LANG-061", "LANG-062", "LANG-190", "ANA-022", "ANA-024", "ANA-025", "ANA-029", "ANA-141"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[run]
+ticks = 6
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-043", "LANG-045", "LANG-046", "LANG-060", "LANG-061", "LANG-062", "LANG-190", "ANA-022", "ANA-024", "ANA-025", "ANA-029", "ANA-141"]
+until = "M5"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-043", "LANG-045", "LANG-046", "LANG-060", "LANG-061", "LANG-062", "LANG-190", "ANA-022", "ANA-024", "ANA-025", "ANA-029", "ANA-141"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "p"
+row = []
+holds = "1.."
+absent = "0"
+
+[expect_analysis]
+points_of_order = { complete = true, edges = [], clusters = [] }
+certificates = { p = ["dedalus_plus"] }
+confluent = { p = "certified" }
+fair_consistency = { p = "certified" }

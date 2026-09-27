@@ -1,0 +1,74 @@
+# BENCH-102 (R03 T13), first half: `payloads` strips the address column.
+#
+# Bud's test sends [p2, 10, 20] through `kickoff` and inserts [p2, 50, 100] into `c` directly, in one `sync_do`, and
+# then expects at p2: recv == [[p2,10,20],[p2,50,100]], ploads == [[10,20],[50,100]], ploads_blk == [[11,21],[51,101]]
+# and ploads_blk_colnos == [[12,22],[52,102]]. A Blossom host writes only inputs, so both tuples come through
+# `kickoff` in the same tick; the two keys (p2, 10) and (p2, 50) differ, so no key conflict arises.
+# Sync harness: the inputs arrive at p1 in tick 1, the messages at p2 in tick 2; the tables persist.
+schema = 1
+id = "BENCH-102"
+title = "Bud channel with a key: payloads drop the address column"
+priority = "P0"
+source = "R03 T13; bud test/tc_channel.rb (ChannelWithKey, TestPayloads#test_channel_with_key)"
+features = ["LANG-020", "LANG-040", "LANG-042", "LANG-043", "LANG-062", "LANG-094", "LANG-150"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "p1", role = "Node" }, { name = "p2", role = "Node" }]
+
+[run]
+ticks = 8
+stop = "quiescent"
+
+[[input]]
+node = "p1"
+tick = 1
+rel = "kickoff"
+rows = [["p2", 10, 20], ["p2", 50, 100]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-020", "LANG-040", "LANG-042", "LANG-043", "LANG-062", "LANG-094", "LANG-150"]
+until = "M5"
+
+[[expect]]
+node = "p2"
+rel = "c"
+tick = 2
+rows = [["p2", 10, 20], ["p2", 50, 100]]
+
+[[expect]]
+node = "p2"
+rel = "recv"
+final = true
+rows = [["p2", 10, 20], ["p2", 50, 100]]
+
+[[expect]]
+node = "p2"
+rel = "ploads"
+final = true
+rows = [[10, 20], [50, 100]]
+
+[[expect]]
+node = "p2"
+rel = "ploads_blk"
+final = true
+rows = [[11, 21], [51, 101]]
+
+[[expect]]
+node = "p2"
+rel = "ploads_blk_colnos"
+final = true
+rows = [[12, 22], [52, 102]]
+
+# Nothing is sent to p1, so p1 stores nothing.
+[[expect]]
+node = "p1"
+rel = "recv"
+final = true
+rows = []
+
+[[expect]]
+quiescent_from = 4

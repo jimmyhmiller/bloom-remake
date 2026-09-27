@@ -1,0 +1,28 @@
+//! BENCH-098: the sealed tally of BENCH-097 (f) under 10⁴ schedules with crashes (R13 §12 T10 and T15).
+//!
+//! All five voters vote "yes" in election 1. A counter can finalize the tally only when every voter's seal has
+//! arrived and matches the votes received from that voter, so a final tally is always the exact count, 5. A crashed
+//! voter or a lost vote leaves the tally provisional (its seal's digest cannot be met), never wrong.
+
+spec TallyFinalitySound for r#program {
+    nodes V1, V2, V3, V4, V5, C1, C2;
+
+    fact cast(1, "yes") @ V1 at tick 1;
+    fact cast(1, "yes") @ V2 at tick 2;
+    fact cast(1, "yes") @ V3 at tick 3;
+    fact cast(1, "yes") @ V4 at tick 4;
+    fact cast(1, "yes") @ V5 at tick 5;
+
+    faults { crashes: 1, model: async }
+
+    /// The counters never finalize different tallies (FT Prop 33: the vote log only grows).
+    invariant tallies_agree: never tally_final(e, n) @ a, tally_final(e, m) @ b where n != m;
+    /// R13 T10: "tally(e, count) is provisional until all 5 seals are in, then final with the exact count."
+    invariant exact_count: never tally_final(1, n) @ a where n != 5;
+
+    /// Finality is monotone (SEM-016) at the counter that reports it.
+    invariant tally_final_holds: never tally_final(e, n) @ a, not tally(e, n) @ a;
+    invariant three_final_holds: never three_final(e) @ a, not at_least_three(e) @ a;
+
+    check sim { runs: 10000, seed: 1 } expect holds;
+}

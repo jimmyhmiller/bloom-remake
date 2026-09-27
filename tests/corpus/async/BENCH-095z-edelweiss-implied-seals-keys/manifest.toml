@@ -1,0 +1,215 @@
+# BENCH-095 (R05 T26; §5.7): bud-gc's unit tests where equalities, keys or flat_map stand in for seals.
+#
+# R05 §5.7: a semijoin needs one observed partner; "if the join predicates cover all key columns of Z, a single match
+# suffices (a key constraint acts like a seal)". Seal inference from flat_map: "for lhs <= rhs.flat_map {|t| t.vals.map
+# {|x| [t.key, x]}} where rhs has a single key column that is projected into lhs column i, the rule seal_<lhs>_<col_i> <=
+# rhs {|t| [t.key]} is emitted" (ANA-065: seals implied by flat_map). The non-key variant must not get one.
+#
+# Fixtures (bud-gc test/tc_gc.rb), each ported with prefixed relation names:
+# - isj: ImpliedSemiJoin, test_implied_semi_join.
+# - jk: JoinOnKeys, test_join_on_keys.
+# - jkx: JoinOnKeysExtraPreds, test_join_on_keys_extra_preds.
+# - fm: FlatMapImpliedSeal, test_flat_map_implied_seal.
+# - fmn: FlatMapImpliedSealNonKeys, test_flat_map_implied_seal_non_keys.
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss implied semijoins, key joins and flat_map seals (tc_gc.rb): reclamation without explicit seals"
+priority = "P1"
+source = "R05 T26, §5.4-§5.8, §9.4 item 26; bud-gc test/tc_gc.rb (Edelweiss prototype, VLDB 2014)"
+features = ["LANG-023", "LANG-040", "LANG-043", "LANG-060", "LANG-061", "LANG-082", "LANG-086", "LANG-088", "ANA-060", "ANA-062", "ANA-063", "ANA-065", "ANA-066"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+notes = "Timeline mapping and the storage expectations of the rewritten program: docs/plan/notes/M1.4.md (BENCH-095)."
+
+[run]
+ticks = 5
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-023", "LANG-040", "LANG-043", "LANG-060", "LANG-061", "LANG-082", "LANG-086", "LANG-088", "ANA-060", "ANA-062", "ANA-063", "ANA-065", "ANA-066"]
+until = "M7"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-023", "LANG-040", "LANG-043", "LANG-060", "LANG-061", "LANG-082", "LANG-086", "LANG-088", "ANA-060", "ANA-062", "ANA-063", "ANA-065", "ANA-066"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "isj_t1_in"
+rows = [[5, 6, 10], [7, 8, 10]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "isj_t2_in"
+rows = [[10, 5, 10], [11, 20, 10], [12, 7, 10]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "isj_t3_in"
+rows = [[5]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "jk_t1_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "jk_t2_in"
+rows = [[5, 20], [7, 21]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "jkx_t1_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "jkx_t2_in"
+rows = [[5, 20], [7, 21]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "fm_t1_in"
+rows = [[5, [1, 2, 3]], [6, [4, 5, 6]]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "fm_t3_in"
+rows = [[6, 10]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "fm_t5_in"
+rows = [[6, 10]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "fmn_t1_in"
+rows = [[5, 5, [1, 2, 3]], [6, 6, [4, 5, 6]]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "fmn_t3_in"
+rows = [[6, 10]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "fmn_t5_in"
+rows = [[6, 10]]
+
+[[expect]]
+node = "n1"
+rel = "isj_s1"
+tick = 2
+rows = [[7]]
+
+[expect_analysis.reclaimable]
+reclaimed = { isj_t2 = "join_semijoin", isj_t1 = "join_semijoin", jk_t1 = "join_keys", jk_t2 = "join_keys", jkx_t1 = "join_keys", jkx_t2 = "join_keys", fm_t3 = "join_seal" }
+kept = { fmn_t3 = "unsealed_join" }
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "isj_s1"
+tick = 2
+rows = [[7]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "isj_t2"
+tick = 2
+rows = [[11, 20, 10], [12, 7, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "isj_t1"
+tick = 2
+rows = [[7, 8, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jk_t3"
+tick = 3
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jk_t1"
+tick = 3
+rows = [[6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jk_t2"
+tick = 3
+rows = [[7, 21]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jkx_t3"
+tick = 3
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jkx_t1"
+tick = 3
+rows = [[6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jkx_t2"
+tick = 3
+rows = [[7, 21]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "fm_t4"
+tick = 2
+rows = [[10, 4], [10, 5], [10, 6]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "fm_t3"
+tick = 2
+rows = [[6, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "fm_t3"
+tick = 4
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "fmn_t4"
+tick = 2
+rows = [[10, 4], [10, 5], [10, 6]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "fmn_t3"
+tick = 2
+rows = [[6, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "fmn_t3"
+tick = 4
+rows = [[6, 10]]

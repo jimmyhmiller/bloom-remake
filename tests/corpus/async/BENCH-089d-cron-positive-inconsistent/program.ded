@@ -1,0 +1,12 @@
+// BENCH-089: CRON Figure 5 (positive but not consistent) in Molly's Dedalus dialect; the `.ded` twin of BENCH-089h.
+// The first column of every relation is its node; `| x` with Id(x) addresses the node itself.
+
+a(X)@async :- id(X);
+b(X)@async :- id(X);
+t(X) :- a(X), b(X);
+t(X)@next :- t(X);
+
+// Id is input, true at every step; Molly facts hold only at their tick, so it is persisted by hand.
+id(X)@next :- id(X);
+
+id("n1")@1;

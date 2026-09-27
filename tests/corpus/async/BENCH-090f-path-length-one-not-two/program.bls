@@ -1,0 +1,35 @@
+//! BENCH-090: "a path of length one but not two" (Zinn 2012, Remark 3.3), the negative test for any
+//! "semi-positive, hence coordination-free" shortcut: the query is stratified, not semi-positive, and not
+//! adom-monotone.
+//!
+//!     q(x, y) ← e(x, y), ¬e2(x, y).       e2(x, y) ← e(x, z), e(z, y).
+//!
+//! The edges are spread over the nodes and flooded; each node answers over the edges it has received. A new edge can
+//! create a path of length two and withdraw a pair from the answer.
+
+program path_one_not_two version 1;
+
+view node(y) = node_dir(y, _, _, _);
+
+static e_edb(at: Node, a: String, b: String);
+fact e_edb("x", "a", "b");
+fact e_edb("y", "b", "c");
+fact e_edb("y", "a", "c");
+
+channel e_msg(a: String, b: String);
+table e(a: String, b: String);
+output q(a: String, b: String);
+
+share: while e_edb(self, a, b), node(y) {
+    send e_msg(a, b) to y;
+}
+
+arrive: on e_msg(a, b) {
+    emit e(a, b);
+}
+
+view e2(a, b) = e(a, m), e(m, b);
+
+answer: while e(a, b), not e2(a, b) {
+    emit q(a, b);
+}

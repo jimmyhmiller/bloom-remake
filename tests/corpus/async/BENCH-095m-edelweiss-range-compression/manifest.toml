@@ -1,0 +1,85 @@
+# BENCH-095 (R05 T27; §5.6, §9.4 item 27; LANG-050): range compression merges gap-free runs into one bucket.
+#
+# FEATURES BENCH-095: "Range compression: [1-4],[8] becomes [1-8] after 5–7 are inserted." R05 §9.4 item 27: "the ids
+# 1..4, 8 are stored as buckets [1-4], [8]. Inserting 5–7 merges them into [1-8]." R05 §5.6: "Storage is a map from (all
+# other columns) → MultiRange, a sorted list of disjoint [lo, hi] buckets. Insert extends or merges adjacent buckets."
+#
+# The oracle checks the contents (a range table has a table's semantics); `ranges` pins the bucket representation per
+# value of the other columns, as [src, lo, hi], at each tick. R05 item 27's two compile-time checks are not pinned here:
+# LANGUAGE declares the compressed column explicitly and makes every column a key, and §20 names no diagnostic for a
+# non-integer range column or a key() clause on a range table (docs/plan/notes/M1.4.md, BENCH-095).
+#
+# The acknowledgements come from a peer, n2, so `src` (a Node column) names a deployed node: row values of a Node column
+# decode through the deployment directory (PLAN §5.1, ARCHITECTURE §2). n2 receives no input and stores nothing.
+schema = 1
+id = "BENCH-095"
+title = "Range compression: sequence numbers 1-4 and 8 are two buckets; after 5-7 arrive they are one, [1-8]"
+priority = "P1"
+source = "R05 T27, §5.6, §9.4 item 27; Edelweiss (VLDB 2014) §3.3, §4.1.2; bud-gc lib/bud/collections.rb (BudRangeCompress), multirange.rb"
+features = ["LANG-040", "LANG-043", "LANG-050", "LANG-060", "ANA-060"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "n1", role = "Node" }, { name = "n2", role = "Node" }]
+
+[run]
+ticks = 4
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-050", "LANG-060", "ANA-060"]
+until = "M6"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-050", "LANG-060", "ANA-060"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ack"
+rows = [["n2", 1], ["n2", 2], ["n2", 3], ["n2", 4], ["n2", 8]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "ack"
+rows = [["n2", 5], ["n2", 6], ["n2", 7]]
+
+[[expect]]
+node = "n1"
+rel = "acked"
+tick = 1
+rows = [["n2", 1], ["n2", 2], ["n2", 3], ["n2", 4], ["n2", 8]]
+
+[[expect]]
+node = "n1"
+rel = "acked"
+tick = 2
+rows = [["n2", 1], ["n2", 2], ["n2", 3], ["n2", 4], ["n2", 5], ["n2", 6], ["n2", 7], ["n2", 8]]
+
+[[expect]]
+node = "n2"
+rel = "acked"
+final = true
+rows = []
+
+[expect_analysis.reclaimable]
+reclaimed = {}
+kept = { acked = "range" }
+
+[[expect_analysis.reclaimable.ranges]]
+node = "n1"
+rel = "acked"
+tick = 1
+buckets = [["n2", 1, 4], ["n2", 8, 8]]
+
+[[expect_analysis.reclaimable.ranges]]
+node = "n1"
+rel = "acked"
+tick = 2
+buckets = [["n2", 1, 8]]

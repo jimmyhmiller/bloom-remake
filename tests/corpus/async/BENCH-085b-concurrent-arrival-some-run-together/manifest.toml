@@ -1,0 +1,24 @@
+# BENCH-085 (R02 T18): concurrent arrival has an ultimate model with concurrent() (MAR Appendix F, s = t).
+schema = 1
+id = "BENCH-085"
+title = "Concurrent arrival: some schedule delivers both messages together (bounded model checking)"
+priority = "P1"
+source = "R02 T18 and §11 (MAR Appendix F, Example 11, verbatim program)"
+features = ["LANG-040", "LANG-043", "LANG-045", "LANG-046", "LANG-061", "LANG-062", "LANG-082", "LANG-201", "VER-001", "VER-002", "TEST-081"]
+program = "program.bls"
+spec = "spec.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "N1", role = "Node" }]
+
+[backend.bmc]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-045", "LANG-046", "LANG-061", "LANG-062", "LANG-082", "LANG-201", "VER-001", "VER-002", "TEST-081"]
+until = "M9"
+
+[expect_verify]
+check = "bmc"
+result = "fails"
+bounds = { ticks = 4, delay = 2 }

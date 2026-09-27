@@ -1,0 +1,47 @@
+# BENCH-083 (R02 T16; R05 T3): "After the coordination rewrite, every schedule is correct."
+#
+# The program is MAR Appendix C's rewritten garbage collector (the synthesized rules of Example 8 and the rewritten
+# rule of Example 9). MAR: "the resulting program has a single ultimate model ... the model in which ¬reach is not
+# evaluated until reach is fully determined." In every seed the master ends with garbage = {c}; the owners never
+# collect anything. The owners resend their pointers in every tick, so the run is bounded by ticks.
+schema = 1
+id = "BENCH-083"
+title = "Distributed GC after MAR's coordination rewrite: every schedule collects exactly the unreachable address"
+priority = "P0"
+source = "R02 T16 and §7.5 (MAR Appendix C, Examples 8-9, synthesized rules); R05 T3"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-090", "LANG-190", "LANG-240", "LANG-241", "SEM-040", "SEM-044", "TEST-001"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+notes = "The rewritten program is MAR's published output of the rewrite; checking that ANA-047 synthesizes an equivalent one is M7.5's (see docs/plan/notes/M1.4.md)."
+
+[deploy]
+nodes = [{ name = "M", role = "Node" }, { name = "H1", role = "Node" }, { name = "H2", role = "Node" }]
+
+[run]
+ticks = 40
+stop = "ticks"
+seeds = 32
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-090", "LANG-190", "LANG-240", "LANG-241", "SEM-040", "SEM-044", "TEST-001"]
+until = "M8"
+
+[[expect]]
+node = "M"
+rel = "garbage"
+final = true
+rows = [["c"]]
+
+[[expect]]
+node = "H1"
+rel = "garbage"
+final = true
+rows = []
+
+[[expect]]
+node = "H2"
+rel = "garbage"
+final = true
+rows = []

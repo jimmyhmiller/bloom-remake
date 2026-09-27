@@ -1,0 +1,36 @@
+//! BENCH-095: Edelweiss's reliable unicast (Conway, Alvaro, Andrews, Hellerstein, "Edelweiss: Automatic Storage
+//! Reclamation for Distributed Programming", VLDB 2014, Fig. 1; artifact unicast.rb), ported rule for rule.
+//!
+//!     channel :chn, [:id] => [:@addr, :val]
+//!     table :sbuf, chn.schema
+//!     table :rbuf, chn.schema
+//!     chn  <~ sbuf
+//!     rbuf <= chn
+//!
+//! The sender keeps every message in sbuf and, being level-triggered, resends it at every tick; the receiver keeps
+//! what arrives in rbuf. Edelweiss's ARM rewrite acknowledges each delivery, stops the resends and reclaims sbuf; the
+//! acknowledged ids compress into one range, a logical clock (§3.1, §3.3).
+
+program edelweiss_unicast version 1;
+
+channel chn(id: u64, @addr: Node, val: String) key(id);
+
+table sbuf(id: u64, addr: Node, val: String) key(id);
+table rbuf(id: u64, addr: Node, val: String) key(id);
+
+/// From the host, at the sender: a message to deliver.
+input send_msg(id: u64, addr: Node, val: String);
+
+buffer: on send_msg(i, a, v) {
+    emit sbuf(i, a, v);
+}
+
+/// `chn <~ sbuf`
+transmit: while sbuf(i, a, v) {
+    send chn(i, a, v);
+}
+
+/// `rbuf <= chn`
+deliver: on chn(i, a, v) {
+    emit rbuf(i, a, v);
+}

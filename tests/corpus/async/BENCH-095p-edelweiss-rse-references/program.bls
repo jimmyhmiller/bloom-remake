@@ -1,0 +1,377 @@
+//! BENCH-095: Edelweiss, other uses of the relation to be reclaimed, from bud-gc's tc_gc.rb (R05 T26, §5.5).
+//!
+//! BENCH-095 (R05 T26; §5.5, §5.7): bud-gc's unit tests of the other rules that read the relation to be reclaimed.
+//!
+//! R05 §5.5 (can_reclaim_rel): X is reclaimable only if every other rule reading X is safe: false for a use inside a code
+//! block, for a non-monotone use other than as a notin's negative input (group, argagg, ...), and when the rule's target is
+//! deleted from; a join records a seal dependency; a scratch target is safe only if all its readers are, and an unread
+//! one is an output. R05 §9.4 item 26: "RseRhsRef: t1 = [[1,1]] after 2 ticks. RseRhsRefBad: t1, t4, t7, t11, t13 all
+//! retain [[1,1],[2,2]]." PeterBug, ReclaimLeftsNoBlock (§5.7 pull-up), RseJoinRecursion, RseJoinRhs and RseFromRange
+//! complete the class.
+
+program edelweiss_rse_references version 1;
+
+// ---------------- RseRhsRef, test_rse_rhs_ref
+// Uses of t1 that do not block reclaiming it: copies into persistent tables (identity, and a selected and computed
+// projection), a copy through a scratch that is persisted, and a table (t6) that is itself a reclamation target.
+
+table ref_t1(key: u64, val: u64) key(key);
+
+input ref_t1_in(key: u64, val: u64);
+
+ref_t1_load: on ref_t1_in(key, val) {
+    emit ref_t1(key, val);
+}
+
+table ref_t2(key: u64, val: u64) key(key);
+
+input ref_t2_in(key: u64, val: u64);
+
+ref_t2_load: on ref_t2_in(key, val) {
+    emit ref_t2(key, val);
+}
+
+table ref_t7(key: u64, val: u64) key(key);
+
+input ref_t7_in(key: u64, val: u64);
+
+ref_t7_load: on ref_t7_in(key, val) {
+    emit ref_t7(key, val);
+}
+
+table ref_t3(key: u64, val: u64) key(key);
+
+table ref_t4(key: u64, val: u64) key(key);
+
+table ref_t5(key: u64, val: u64) key(key);
+
+table ref_t6(key: u64, val: u64) key(key);
+
+output ref_res(key: u64, val: u64);
+output ref_s2(key: u64, val: u64);
+
+/// `s1 <= t1`
+view ref_s1(key, val) = ref_t1(key, val);
+
+ref_to_t6: while ref_t1(k, v) {
+    emit ref_t6(k, v);
+}
+
+ref_to_s2: while ref_t6(k, v), not ref_t7(k, v) {
+    emit ref_s2(k, v);
+}
+
+ref_to_res: while ref_t1(k, v), not ref_t2(k, v) {
+    emit ref_res(k, v);
+}
+
+ref_to_t3: while ref_t1(k, v) {
+    emit ref_t3(k, v);
+}
+
+ref_to_t4: while ref_t1(k, v) where k < 100 {
+    emit ref_t4(k + 100, v + 100);
+}
+
+ref_to_t5: while ref_s1(k, v) {
+    emit ref_t5(k, v);
+}
+
+// ---------------- RseRhsRefBad, test_rse_rhs_ref_bad
+// Uses of the positive input that block reclamation: a copy into a table that is deleted from (t1), an aggregate (t4),
+// use as the negative input of another negation (t7), a copy into a transient output (t11) and use as the negative
+// input of a negation with a predicate block (t13).
+
+table rbd_t1(key: u64, val: u64) key(key);
+
+input rbd_t1_in(key: u64, val: u64);
+
+rbd_t1_load: on rbd_t1_in(key, val) {
+    emit rbd_t1(key, val);
+}
+
+table rbd_t2(key: u64, val: u64) key(key);
+
+input rbd_t2_in(key: u64, val: u64);
+
+rbd_t2_load: on rbd_t2_in(key, val) {
+    emit rbd_t2(key, val);
+}
+
+table rbd_t4(key: u64, val: u64) key(key);
+
+input rbd_t4_in(key: u64, val: u64);
+
+rbd_t4_load: on rbd_t4_in(key, val) {
+    emit rbd_t4(key, val);
+}
+
+table rbd_t5(key: u64, val: u64) key(key);
+
+input rbd_t5_in(key: u64, val: u64);
+
+rbd_t5_load: on rbd_t5_in(key, val) {
+    emit rbd_t5(key, val);
+}
+
+table rbd_t7(key: u64, val: u64) key(key);
+
+input rbd_t7_in(key: u64, val: u64);
+
+rbd_t7_load: on rbd_t7_in(key, val) {
+    emit rbd_t7(key, val);
+}
+
+table rbd_t8(key: u64, val: u64) key(key);
+
+input rbd_t8_in(key: u64, val: u64);
+
+rbd_t8_load: on rbd_t8_in(key, val) {
+    emit rbd_t8(key, val);
+}
+
+table rbd_t10(key: u64, val: u64) key(key);
+
+input rbd_t10_in(key: u64, val: u64);
+
+rbd_t10_load: on rbd_t10_in(key, val) {
+    emit rbd_t10(key, val);
+}
+
+table rbd_t11(key: u64, val: u64) key(key);
+
+input rbd_t11_in(key: u64, val: u64);
+
+rbd_t11_load: on rbd_t11_in(key, val) {
+    emit rbd_t11(key, val);
+}
+
+table rbd_t12(key: u64, val: u64) key(key);
+
+input rbd_t12_in(key: u64, val: u64);
+
+rbd_t12_load: on rbd_t12_in(key, val) {
+    emit rbd_t12(key, val);
+}
+
+table rbd_t13(key: u64, val: u64) key(key);
+
+input rbd_t13_in(key: u64, val: u64);
+
+rbd_t13_load: on rbd_t13_in(key, val) {
+    emit rbd_t13(key, val);
+}
+
+table rbd_t14(key: u64, val: u64) key(key);
+
+input rbd_t14_in(key: u64, val: u64);
+
+rbd_t14_load: on rbd_t14_in(key, val) {
+    emit rbd_t14(key, val);
+}
+
+table rbd_t15(key: u64, val: u64) key(key);
+
+input rbd_t15_in(key: u64, val: u64);
+
+rbd_t15_load: on rbd_t15_in(key, val) {
+    emit rbd_t15(key, val);
+}
+
+table rbd_t3(key: u64, val: u64) key(key);
+
+table rbd_t9(key: u64, val: u64) key(key);
+
+table rbd_t6(cnt: u64);
+
+input rbd_some_event(key: u64, val: u64);
+
+output rbd_res(key: u64, val: u64);
+output rbd_out(key: u64, val: u64);
+
+rbd_res1: while rbd_t1(k, v), not rbd_t2(k, v) {
+    emit rbd_res(k, v);
+}
+
+rbd_to_t3: while rbd_t1(k, v) {
+    emit rbd_t3(k, v);
+}
+
+rbd_forget: on rbd_some_event(k, v) {
+    delete rbd_t3(k, v);
+}
+
+rbd_res2: while rbd_t4(k, v), not rbd_t5(k, v) {
+    emit rbd_res(k, v);
+}
+
+/// `t6 <= t4.group(nil, count)`
+rbd_count: while rbd_t4(k, v) {
+    emit rbd_t6(count!(*));
+}
+
+rbd_res3: while rbd_t7(k, v), not rbd_t8(k, v) {
+    emit rbd_res(k, v);
+}
+
+rbd_t10_less_t7: while rbd_t10(k, v), not rbd_t7(k, v) {
+    emit rbd_t9(k, v);
+}
+
+rbd_res4: while rbd_t11(k, v), not rbd_t12(k, v) {
+    emit rbd_res(k, v);
+}
+
+rbd_t11_to_t9: while rbd_t11(k, v) {
+    emit rbd_t9(k, v);
+}
+
+rbd_t11_out: while rbd_t11(k, v) {
+    emit rbd_out(k, v);
+}
+
+rbd_res5: while rbd_t13(k, v), not rbd_t14(k, v) {
+    emit rbd_res(k, v);
+}
+
+/// `t9 <= t15.notin(t13) {|x,y| x != y}`: a t15 tuple is excluded by any t13 tuple that differs from it.
+rbd_block: while rbd_t15(k, v), not { rbd_t13(k2, v2) where k2 != k || v2 != v } {
+    emit rbd_t9(k, v);
+}
+
+// ---------------- RseJoinRecursion, test_rse_join_recursion
+// A negated scratch defined by a recursive join (with no base case, as in bud-gc: it stays empty) over a flat_map of
+// the positive input. The test only runs a tick: the analysis and the rewrite must handle the recursion.
+
+table jrec_safe_log(id: u64, key: String, val: String, deps: Set<u64>) key(id);
+
+output jrec_view(id: u64, key: String, val: String, deps: Set<u64>);
+
+/// `dep <= safe_log.flat_map {|l| l.deps.map {|d| [d, l.id]}}`
+view jrec_dep(from, to) = jrec_safe_log(to, _, _, deps), from in deps;
+
+/// `dep_tc <= (dep * dep_tc).pairs(:to => :from) {|d,t| [d.from, t.to]}`
+view jrec_dep_tc(from, to) = jrec_dep(from, m), jrec_dep_tc(m, to);
+
+jrec_notin: while jrec_safe_log(i, k, v, d), not jrec_dep_tc(i, _) {
+    emit jrec_view(i, k, v, d);
+}
+
+// ---------------- RseJoinRhs, test_rse_join_rhs
+// `dominated <= (safe_log * safe_log).pairs(:key => :val) {|w1,w2| [w1.id] if w1 != w2}` and `view <=
+// safe_log.notin(dominated)`: safe_log is also an input of an unsealed self-join, so the tuples it dominates cannot be
+// reclaimed (write 1 is still needed at tick 3 to dominate write 3).
+
+table jrhs_safe_log(id: u64, key: String, val: String) key(id);
+
+input jrhs_safe_log_in(id: u64, key: String, val: String);
+
+jrhs_safe_log_load: on jrhs_safe_log_in(id, key, val) {
+    emit jrhs_safe_log(id, key, val);
+}
+
+table jrhs_dominated(id: u64);
+
+output jrhs_view(id: u64, key: String, val: String);
+
+jrhs_dominate: while jrhs_safe_log(i1, k1, v1), jrhs_safe_log(i2, k2, v2) where k1 == v2, i1 != i2 {
+    emit jrhs_dominated(i1);
+}
+
+jrhs_live: while jrhs_safe_log(i, k, v), not jrhs_dominated(i) {
+    emit jrhs_view(i, k, v);
+}
+
+// ---------------- PeterBug, test_peter_bug
+// `out1 <= in1.notin(in2)` would reclaim in1(5), but `out2 <= in1` and `out3 <= out2.notin(in3)` carry in1 to an output
+// through a scratch: in1 is kept and out3 still has 5.
+
+table peter_in1(id: u64);
+
+input peter_in1_in(id: u64);
+
+peter_in1_load: on peter_in1_in(id) {
+    emit peter_in1(id);
+}
+
+table peter_in2(id: u64);
+
+input peter_in2_in(id: u64);
+
+peter_in2_load: on peter_in2_in(id) {
+    emit peter_in2(id);
+}
+
+table peter_in3(id: u64);
+
+input peter_in3_in(id: u64);
+
+peter_in3_load: on peter_in3_in(id) {
+    emit peter_in3(id);
+}
+
+output peter_out1(id: u64);
+output peter_out3(id: u64);
+
+peter_to_out1: while peter_in1(i), not peter_in2(i) {
+    emit peter_out1(i);
+}
+
+/// `out2 <= in1`
+view peter_out2(id) = peter_in1(id);
+
+peter_to_out3: while peter_out2(i), not peter_in3(i) {
+    emit peter_out3(i);
+}
+
+// ---------------- ReclaimLeftsNoBlock, test_reclaim_lefts_no_block
+// `commit_event <= (write * commit).lefts(:batch => :batch).notin(write_log, 0 => :wid)`: the negation only names
+// write's columns, so it is pulled above the join and write is reclaimed without a seal on commit.
+
+table nob_write(wid: u64, batch: u64) key(wid);
+
+input nob_write_in(wid: u64, batch: u64);
+
+nob_write_load: on nob_write_in(wid, batch) {
+    emit nob_write(wid, batch);
+}
+
+table nob_commit(batch: u64);
+
+input nob_commit_in(batch: u64);
+
+nob_commit_load: on nob_commit_in(batch) {
+    emit nob_commit(batch);
+}
+
+table nob_write_log(wid: u64);
+
+input nob_write_log_in(wid: u64);
+
+nob_write_log_load: on nob_write_log_in(wid) {
+    emit nob_write_log(wid);
+}
+
+output nob_commit_event(wid: u64, batch: u64);
+
+nob_event: while nob_write(w, b), nob_commit(b), not nob_write_log(w) {
+    emit nob_commit_event(w, b);
+}
+
+// ---------------- RseFromRange, test_rse_from_range
+// A range collection as a join input of a channel send, received back into the range: the test only runs a tick. Range
+// collections are never reclaimed; the channel is eligible for acknowledgement-based suppression (ARM).
+
+sealed table frange_node(addr: Node);
+
+channel frange_log_commit_chn(@addr: Node, id: u64);
+
+table frange_log_commit(id: u64) range(id);
+
+frange_send: while frange_node(a), frange_log_commit(i) {
+    send frange_log_commit_chn(a, i);
+}
+
+frange_receive: on frange_log_commit_chn(_, i) {
+    emit frange_log_commit(i);
+}

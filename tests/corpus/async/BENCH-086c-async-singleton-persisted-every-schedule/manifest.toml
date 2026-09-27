@@ -1,0 +1,29 @@
+# BENCH-086 (R02 T19): "With persistence the ultimate model is {p}" in every schedule.
+#
+# Every fair schedule delivers some copy of p eventually, and persistence keeps it: p holds at the end of every seed.
+# q keeps sending, so the run is bounded by ticks.
+schema = 1
+id = "BENCH-086"
+title = "Asynchronous singleton with persistence: every schedule ends with p"
+priority = "P1"
+source = "R02 T19 and §7.1-7.3 (MAR Examples 1-2 and §3.2)"
+features = ["LANG-043", "LANG-045", "LANG-046", "LANG-061", "LANG-062", "LANG-190", "SEM-040", "SEM-044", "TEST-001"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[run]
+ticks = 20
+stop = "ticks"
+seeds = 16
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-043", "LANG-045", "LANG-046", "LANG-061", "LANG-062", "LANG-190", "SEM-040", "SEM-044", "TEST-001"]
+until = "M8"
+
+[[expect]]
+node = "n1"
+rel = "p"
+final = true
+rows = [[]]

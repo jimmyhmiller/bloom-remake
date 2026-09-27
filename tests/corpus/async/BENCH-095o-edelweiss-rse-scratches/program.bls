@@ -1,0 +1,353 @@
+//! BENCH-095: Edelweiss DR+ with scratches on either side of the negation, from bud-gc's tc_gc.rb (R05 T26, §5.5).
+//!
+//! BENCH-095 (R05 T26; §5.5): bud-gc's unit tests of scratches around a negation (DR+, ANA-062).
+//!
+//! R05 §5.5: the target of a notin rule does not matter; "Scratch lhs is fine when it is the positive side of another
+//! notin"; "An unread scratch is treated as an output, so X cannot be reclaimed (RseNegateScratchLhsBad3)". A negated
+//! scratch "is OK if it is derived monotonically from persistent collections (RseNegateScratchRhs). It is not OK if it is
+//! derived via notin, from an ungrounded scratch, or from a channel (RseNegateScratchRhsBad)". rel_is_inflationary: a
+//! scratch qualifies only if every rule defining it is monotone over inflationary inputs, and at least one exists.
+
+program edelweiss_rse_scratches version 1;
+
+// ---------------- RseNegateScratchLhs, test_rse_negate_scratch_lhs
+// `r1 <= t1.notin(t2)` and `r2 <= t1.notin(t3)` into scratches: "Despite the fact that r2 is not persistent, we can reclaim
+// t1 tuples once they appear in both t2 and t3 -- because r2 is derived from t1 via negating t1 against t3." Bud's
+// unread scratches are the program's outputs.
+
+table lhs_t1(key: u64, val: u64) key(key);
+
+input lhs_t1_in(key: u64, val: u64);
+
+lhs_t1_load: on lhs_t1_in(key, val) {
+    emit lhs_t1(key, val);
+}
+
+table lhs_t2(key: u64, val: u64) key(key);
+
+input lhs_t2_in(key: u64, val: u64);
+
+lhs_t2_load: on lhs_t2_in(key, val) {
+    emit lhs_t2(key, val);
+}
+
+table lhs_t3(key: u64, val: u64) key(key);
+
+input lhs_t3_in(key: u64, val: u64);
+
+lhs_t3_load: on lhs_t3_in(key, val) {
+    emit lhs_t3(key, val);
+}
+
+output lhs_r1(key: u64, val: u64);
+output lhs_r2(key: u64, val: u64);
+
+lhs_to_r1: while lhs_t1(k, v), not lhs_t2(k, v) {
+    emit lhs_r1(k, v);
+}
+
+lhs_to_r2: while lhs_t1(k, v), not lhs_t3(k, v) {
+    emit lhs_r2(k, v);
+}
+
+// ---------------- RseNegateScratchLhsBad, test_rse_negate_scratch_lhs_bad
+// `r2 <= t1.notin(r3)` where r3 is a scratch with no defining rule: it is not inflationary, so t1 is never reclaimed.
+
+table lbad_t1(key: u64, val: u64) key(key);
+
+input lbad_t1_in(key: u64, val: u64);
+
+lbad_t1_load: on lbad_t1_in(key, val) {
+    emit lbad_t1(key, val);
+}
+
+table lbad_t2(key: u64, val: u64) key(key);
+
+input lbad_t2_in(key: u64, val: u64);
+
+lbad_t2_load: on lbad_t2_in(key, val) {
+    emit lbad_t2(key, val);
+}
+
+/// Bud's scratch r3, which no rule defines.
+scratch lbad_r3(key: u64, val: u64);
+
+output lbad_r1(key: u64, val: u64);
+output lbad_r2(key: u64, val: u64);
+
+lbad_to_r1: while lbad_t1(k, v), not lbad_t2(k, v) {
+    emit lbad_r1(k, v);
+}
+
+lbad_to_r2: while lbad_t1(k, v), not lbad_r3(k, v) {
+    emit lbad_r2(k, v);
+}
+
+// ---------------- RseNegateScratchLhsBad2, test_rse_negate_scratch_lhs_bad2
+// `r2 <= t1.notin(t3).notin(r3)`, with r3 fed by the test in each tick: a chained negation through a transient r3 is
+// not a reclamation condition, so t1 is never reclaimed.
+
+table lbad2_t1(key: u64, val: u64) key(key);
+
+input lbad2_t1_in(key: u64, val: u64);
+
+lbad2_t1_load: on lbad2_t1_in(key, val) {
+    emit lbad2_t1(key, val);
+}
+
+table lbad2_t2(key: u64, val: u64) key(key);
+
+input lbad2_t2_in(key: u64, val: u64);
+
+lbad2_t2_load: on lbad2_t2_in(key, val) {
+    emit lbad2_t2(key, val);
+}
+
+table lbad2_t3(key: u64, val: u64) key(key);
+
+input lbad2_t3_in(key: u64, val: u64);
+
+lbad2_t3_load: on lbad2_t3_in(key, val) {
+    emit lbad2_t3(key, val);
+}
+
+/// Bud's scratch r3, which the test fills before each tick.
+input lbad2_r3(key: u64, val: u64);
+
+output lbad2_r1(key: u64, val: u64);
+output lbad2_r2(key: u64, val: u64);
+
+lbad2_to_r1: while lbad2_t1(k, v), not lbad2_t2(k, v) {
+    emit lbad2_r1(k, v);
+}
+
+lbad2_to_r2: while lbad2_t1(k, v), not lbad2_t3(k, v), not lbad2_r3(k, v) {
+    emit lbad2_r2(k, v);
+}
+
+// ---------------- RseNegateScratchLhsBad3, test_rse_negate_scratch_lhs_bad3
+// `r2 <= t1` into an unread scratch: "We can't reclaim from t1, because that would cause r2 to shrink -- and we regard r2
+// as potentially an "output" collection." In the port r2 is an output.
+
+table lbad3_t1(key: u64, val: u64) key(key);
+
+input lbad3_t1_in(key: u64, val: u64);
+
+lbad3_t1_load: on lbad3_t1_in(key, val) {
+    emit lbad3_t1(key, val);
+}
+
+table lbad3_t2(key: u64, val: u64) key(key);
+
+input lbad3_t2_in(key: u64, val: u64);
+
+lbad3_t2_load: on lbad3_t2_in(key, val) {
+    emit lbad3_t2(key, val);
+}
+
+output lbad3_r1(key: u64, val: u64);
+output lbad3_r2(key: u64, val: u64);
+
+lbad3_to_r1: while lbad3_t1(k, v), not lbad3_t2(k, v) {
+    emit lbad3_r1(k, v);
+}
+
+lbad3_copy: while lbad3_t1(k, v) {
+    emit lbad3_r2(k, v);
+}
+
+// ---------------- RseNegateScratchRhs, test_rse_negate_scratch_rhs
+// A negated scratch is fine when it is derived by monotone rules from persistent tables: a swap of t3 (t2), a join of t6
+// and t7 with a recursive join against t20 (t5), and a chain of computed copies of t12 (t9 <- t10 <- t11). t1, t4 and t8
+// are reclaimed where they match.
+
+table rhs_t1(key: u64, val: u64) key(key);
+
+input rhs_t1_in(key: u64, val: u64);
+
+rhs_t1_load: on rhs_t1_in(key, val) {
+    emit rhs_t1(key, val);
+}
+
+table rhs_t3(key: u64, val: u64) key(key);
+
+input rhs_t3_in(key: u64, val: u64);
+
+rhs_t3_load: on rhs_t3_in(key, val) {
+    emit rhs_t3(key, val);
+}
+
+table rhs_t4(key: u64, val: u64) key(key);
+
+input rhs_t4_in(key: u64, val: u64);
+
+rhs_t4_load: on rhs_t4_in(key, val) {
+    emit rhs_t4(key, val);
+}
+
+table rhs_t6(key: u64, val: u64) key(key);
+
+input rhs_t6_in(key: u64, val: u64);
+
+rhs_t6_load: on rhs_t6_in(key, val) {
+    emit rhs_t6(key, val);
+}
+
+table rhs_t7(key: u64, val: u64) key(key);
+
+input rhs_t7_in(key: u64, val: u64);
+
+rhs_t7_load: on rhs_t7_in(key, val) {
+    emit rhs_t7(key, val);
+}
+
+table rhs_t8(key: u64, val: u64) key(key);
+
+input rhs_t8_in(key: u64, val: u64);
+
+rhs_t8_load: on rhs_t8_in(key, val) {
+    emit rhs_t8(key, val);
+}
+
+table rhs_t12(key: u64, val: u64) key(key);
+
+input rhs_t12_in(key: u64, val: u64);
+
+rhs_t12_load: on rhs_t12_in(key, val) {
+    emit rhs_t12(key, val);
+}
+
+table rhs_t20(key: u64, val: u64) key(key);
+
+input rhs_t20_in(key: u64, val: u64);
+
+rhs_t20_load: on rhs_t20_in(key, val) {
+    emit rhs_t20(key, val);
+}
+
+output rhs_r1(key: u64, val: u64);
+output rhs_r2(key: u64, val: u64);
+output rhs_r3(key: u64, val: u64);
+
+/// `t2 <= t3 {|q| [q.val, q.key]}`
+view rhs_t2(key, val) = rhs_t3(val, key);
+
+/// `t5 <= (t6 * t7).pairs(:val => :key) {|x,y| [x.key, y.val]}` and `t5 <= (t5 * t20).lefts`
+view rhs_t5(key, val) {
+    rhs_t6(key, m), rhs_t7(m, val);
+    rhs_t5(key, val), rhs_t20(_, _);
+}
+
+/// `t11 <= t12`, `t10 <= t11 {|t| [t.key, t.val + 1]}`, `t9 <= t10 {|t| [t.key + 1, t.val]}`
+view rhs_t11(key, val) = rhs_t12(key, val);
+view rhs_t10(key, val) = rhs_t11(key, v), let val = v + 1;
+view rhs_t9(key, val) = rhs_t10(k, val), let key = k + 1;
+
+rhs_to_r1: while rhs_t1(k, v), not rhs_t2(k, v) {
+    emit rhs_r1(k, v);
+}
+
+rhs_to_r2: while rhs_t4(k, v), not rhs_t5(k, v) {
+    emit rhs_r2(k, v);
+}
+
+rhs_to_r3: while rhs_t8(k, v), not rhs_t9(k, v) {
+    emit rhs_r3(k, v);
+}
+
+// ---------------- RseNegateScratchRhsBad, test_rse_negate_scratch_rhs_bad
+// Three negated scratches that do not qualify: t2 is derived by a negation, t6 from a scratch (t8) that no rule
+// grounds in persistent state, and t10 from a channel ("the channel has a sender-side persistent ground, but that
+// doesn't matter"). t1, t5 and t9 are never reclaimed. The channel's address is the node itself (Bud: localhost:port).
+
+table rbad_t1(key: u64, val: u64) key(key);
+
+input rbad_t1_in(key: u64, val: u64);
+
+rbad_t1_load: on rbad_t1_in(key, val) {
+    emit rbad_t1(key, val);
+}
+
+table rbad_t3(key: u64, val: u64) key(key);
+
+input rbad_t3_in(key: u64, val: u64);
+
+rbad_t3_load: on rbad_t3_in(key, val) {
+    emit rbad_t3(key, val);
+}
+
+table rbad_t4(key: u64, val: u64) key(key);
+
+input rbad_t4_in(key: u64, val: u64);
+
+rbad_t4_load: on rbad_t4_in(key, val) {
+    emit rbad_t4(key, val);
+}
+
+table rbad_t5(key: u64, val: u64) key(key);
+
+input rbad_t5_in(key: u64, val: u64);
+
+rbad_t5_load: on rbad_t5_in(key, val) {
+    emit rbad_t5(key, val);
+}
+
+table rbad_t7(key: u64, val: u64) key(key);
+
+input rbad_t7_in(key: u64, val: u64);
+
+rbad_t7_load: on rbad_t7_in(key, val) {
+    emit rbad_t7(key, val);
+}
+
+table rbad_t9(x: Node, y: u64);
+
+input rbad_t9_in(x: Node, y: u64);
+
+rbad_t9_load: on rbad_t9_in(x, y) {
+    emit rbad_t9(x, y);
+}
+
+table rbad_t12(x: Node, y: u64);
+
+input rbad_t12_in(x: Node, y: u64);
+
+rbad_t12_load: on rbad_t12_in(x, y) {
+    emit rbad_t12(x, y);
+}
+
+scratch rbad_t8(key: u64, val: u64);
+
+channel rbad_t11(@x: Node, y: u64);
+
+output rbad_r1(key: u64, val: u64);
+output rbad_r2(key: u64, val: u64);
+output rbad_r3(x: Node, y: u64);
+
+/// `t2 <= t3.notin(t4)`
+view rbad_t2(key, val) = rbad_t3(key, val), not rbad_t4(key, val);
+
+/// `t6 <= t7` and `t6 <= t8`
+view rbad_t6(key, val) {
+    rbad_t7(key, val);
+    rbad_t8(key, val);
+}
+
+/// `t11 <~ t12` and `t10 <= t11`
+rbad_ship: while rbad_t12(x, y) {
+    send rbad_t11(x, y);
+}
+
+view rbad_t10(x, y) = rbad_t11(x, y);
+
+rbad_to_r1: while rbad_t1(k, v), not rbad_t2(k, v) {
+    emit rbad_r1(k, v);
+}
+
+rbad_to_r2: while rbad_t5(k, v), not rbad_t6(k, v) {
+    emit rbad_r2(k, v);
+}
+
+rbad_to_r3: while rbad_t9(x, y), not rbad_t10(x, y) {
+    emit rbad_r3(x, y);
+}

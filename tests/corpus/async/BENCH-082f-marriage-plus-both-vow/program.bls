@@ -1,0 +1,50 @@
+//! BENCH-082: the marriage ceremony rewritten into Dedalus+ (MAR Example 4), ported rule by rule.
+//!
+//!     i_dont(X)@async ← ¬i_do_edb(X).
+//!     runaway() ← i_dont(bride).
+//!     runaway() ← i_dont(groom).
+//!     runaway()@next ← runaway().
+//!     i_dont(X)@next ← i_dont(X).
+//!
+//! Negation now applies only to the EDB relation `i_do_edb` (semipositive) and the asynchronous head `i_dont` is
+//! persisted (guarded asynchrony), so the program is Dedalus+ and has one ultimate model on every input (MAR Thm 1).
+//! MAR's first rule binds X only under negation; a rule must be range-restricted (TPLP Def. 4.1, ANA-001), so the
+//! parties form an EDB relation of their own that binds X positively.
+
+program marriage_plus version 1;
+
+/// The parties to the ceremony (see the module comment).
+static party(who: String);
+fact party("bride");
+fact party("groom");
+
+/// MAR's `i_do_edb`: both parties say "I do".
+static i_do_edb(who: String);
+fact i_do_edb("bride");
+fact i_do_edb("groom");
+
+/// The asynchronous head `i_dont(X)@async`, addressed to the same node.
+loopback i_dont_msg(who: String);
+/// `i_dont` itself: every arrival, persisted by `i_dont(X)@next ← i_dont(X)`.
+table i_dont(who: String);
+output runaway();
+
+refuse: while party(x), not i_do_edb(x) {
+    send i_dont_msg(x);
+}
+
+arrive: on i_dont_msg(x) {
+    emit i_dont(x);
+}
+
+off_bride: while i_dont("bride") {
+    emit runaway();
+}
+
+off_groom: while i_dont("groom") {
+    emit runaway();
+}
+
+keep: while runaway() {
+    next runaway();
+}

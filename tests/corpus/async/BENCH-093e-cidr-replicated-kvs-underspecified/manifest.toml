@@ -1,0 +1,39 @@
+# BENCH-093 (R03 T30; R05 T12): ReplicatedKVS reports underspecification until multicast and membership are mixed in.
+#
+# CIDR §4.5 and Figure 9 mark a dataflow with no implementation as underspecified ("??"). Bud's budplot on
+# ReplicatedKVS alone (bud docs/visualizations.md, R03 T30) warns `my_id`, `add_member`, `send_mcast` (input) and
+# `mcast_done` (output); bud's analysis (bud_meta.rb analyze_dependencies) reports an input interface no rule body
+# reads and an output interface no rule head writes. ANA-008 reports the same, plus rules that can never fire, as
+# BLS1002 at the relation's declaration.
+#
+# The port (program.bls) has exactly two, both pinned with their lines:
+# - line 20, `input add_member`: MembershipProtocol's input, which nobody reads while no membership is mixed in;
+# - line 25, `scratch mcast_send`: the multicast's input, which the store writes and nobody reads. The put's dataflow
+#   ends there; that dead end is Figure 9's "??".
+# Every other relation is read and written, and no rule is dead: the protocol outputs the store reads (`mcast_done`,
+# `pipe_out`, `member`) are host inputs here, and `my_id` is not declared. docs/plan/notes/M1.4.md (BENCH-093) gives
+# the reasons, and why the list differs from budplot's.
+schema = 1
+id = "BENCH-093"
+title = "CIDR'11 ReplicatedKVS without multicast and membership: underspecified (BLS1002)"
+priority = "P0"
+source = "R03 T30 and §5.5(a); R05 T12; CIDR 2011 §4.5, Figures 6 and 9; bud-sandbox kvs/kvs.rb"
+features = ["LANG-040", "LANG-041", "LANG-043", "LANG-060", "LANG-063", "LANG-064", "LANG-082", "LANG-108", "ANA-008"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-041", "LANG-043", "LANG-060", "LANG-063", "LANG-064", "LANG-082", "LANG-108", "ANA-008"]
+until = "M6"
+
+[[expect_diag]]
+code = "BLS1002"
+line = 20
+severity = "warning"
+
+[[expect_diag]]
+code = "BLS1002"
+line = 25
+severity = "warning"

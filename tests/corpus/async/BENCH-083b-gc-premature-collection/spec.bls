@@ -1,0 +1,11 @@
+//! BENCH-083: without coordination, some schedule collects a live address (MAR Appendix B).
+
+spec PrematureCollection for r#program {
+    nodes M, H1, H2;
+
+    /// The root r reaches a (H1's pointer) and b (H2's pointer); only c is garbage. A schedule that delivers the
+    /// address b to the master before H2's pointer a -> b derives garbage(b), so this invariant fails.
+    invariant only_c_is_garbage: never garbage(x) @ M where x != "c";
+
+    check bmc { ticks: 4, delay: 2 } expect fails;
+}

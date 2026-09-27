@@ -1,0 +1,40 @@
+//! BENCH-095: Edelweiss's reliable broadcast with a fixed membership (Edelweiss, VLDB 2014, §4.1; artifact
+//! broadcast_all.rb), ported rule for rule.
+//!
+//!     sealed :node, [:addr]
+//!     table :log, [:id] => [:val]
+//!     channel :chn, [:@addr, :id] => [:val]
+//!     chn <~ (node * log).pairs {|n,l| n + l}
+//!     log <= chn.payloads
+//!
+//! "Any node can send a message; when a node receives a message, it rebroadcasts the message to all other nodes." Log
+//! ids are globally unique: Bud builds them from the creating node and a counter, so each node's ids are one
+//! contiguous block (here 1-5, 101-105 and 201-205). The membership is fixed: Bud's sealed collection is the static
+//! node set here (rules may not build node names from strings), which is closed in the same way.
+
+program edelweiss_broadcast_all version 1;
+
+static node(addr: Node);
+fact node("n1");
+fact node("n2");
+fact node("n3");
+
+table log(id: u64, val: String) key(id);
+channel chn(@addr: Node, id: u64, val: String) key(addr, id);
+
+/// From the host: a message this node originates.
+input originate(id: u64, val: String);
+
+create: on originate(i, v) {
+    emit log(i, v);
+}
+
+/// `chn <~ (node * log).pairs {|n,l| n + l}`
+rebroadcast: while node(a), log(i, v) {
+    send chn(a, i, v);
+}
+
+/// `log <= chn.payloads`
+store: on chn(_, i, v) {
+    emit log(i, v);
+}

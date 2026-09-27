@@ -1,0 +1,87 @@
+//! BENCH-083: distributed garbage collection after the coordination rewrite of Marczak et al. (Datalog 2.0 2012,
+//! Appendix C, Examples 8 and 9), ported rule by rule.
+//!
+//!     refers_to_to_send(M, Src, Dst) ← local_ptr_edb(N, Src, Dst), master(M).
+//!     refers_to_send(#M, L, Src, Dst)@async ← refers_to_to_send(#L, M, Src, Dst).
+//!     refers_to_ack(#N, L, Src, Dst)@async ← refers_to_send(#L, N, Src, Dst).
+//!     refers_to_done_node(#M, N)@async ← local_ptr_edb_done(#N), master(#N, M),
+//!                                        (∀X. refers_to_to_send(#N, M, X) ⇒ refers_to_ack(#N, M, X)).
+//!     refers_to_done(M) ← (∀N. node(N) ⇒ refers_to_done_node(M, N)).
+//!     reach_done() ← refers_to_done(), (∀N. node(N) ⇒ local_ptr_edb_done(N)).
+//!     garbage(Addr) ← addr_edb(Addr), root_edb(Root), ¬reach(Root, Addr), reach_done().
+//!
+//! Each node sends its pointers and keeps its send log; the master acknowledges each pointer; a node holding an
+//! acknowledgement for every pointer in its log reports "done"; once every node has reported, reachability is
+//! complete and the negation may run. MAR prints the acknowledgement rule without `@async`, but it crosses nodes, so
+//! it is asynchronous (MAR Appendix D). `local_ptr_edb_done` is the done flag of an EDB relation, which always holds
+//! (MAR §4.2), so it is left out. Every relation that heads an asynchronous rule is persisted where it arrives
+//! (guarded asynchrony, MAR §4).
+
+program gc_coordinated version 1;
+
+static master(m: Node);
+fact master("M");
+
+static local_ptr_edb(at: Node, src: String, dst: String);
+static addr_edb(at: Node, addr: String);
+static root_edb(at: Node, root: String);
+
+fact local_ptr_edb("H1", "r", "a");
+fact local_ptr_edb("H2", "a", "b");
+fact addr_edb("M", "a");
+fact addr_edb("M", "b");
+fact addr_edb("M", "c");
+fact root_edb("M", "r");
+
+channel refers_to_send(src: String, dst: String);
+channel refers_to_ack(src: String, dst: String);
+channel refers_to_done_node();
+
+/// At the master: the pointers received (MAR's `refers_to`) and the nodes that reported done.
+table refers_to(src: String, dst: String);
+table done_from(n: Node);
+/// At a pointer owner: the acknowledgements received.
+table acked(by: Node, src: String, dst: String);
+output garbage(a: String);
+
+/// MAR's `refers_to_to_send`: the send log. It is a view over EDB relations, so its domain is closed (§9.8).
+view to_send(m, s, d) = local_ptr_edb(self, s, d), master(m);
+
+ship: while to_send(m, s, d) {
+    send refers_to_send(s, d) to m;
+}
+
+receive: on refers_to_send(s, d) from n {
+    emit refers_to(s, d);
+    send refers_to_ack(s, d) to n;
+}
+
+note_ack: on refers_to_ack(s, d) from m {
+    emit acked(m, s, d);
+}
+
+/// ∀X. refers_to_to_send(#N, M, X) ⇒ refers_to_ack(#N, M, X): a node with no pointers reports at once.
+report_done: while master(m), forall to_send(m, s, d) { acked(m, s, d) } {
+    send refers_to_done_node() to m;
+}
+
+note_done: on refers_to_done_node() from n {
+    emit done_from(n);
+}
+
+/// refers_to_done and reach_done: every node of the deployment has reported.
+view reach_done() = forall node_dir(n, _, _, _) { done_from(n) };
+
+view reach(s, d) {
+    refers_to(s, d);
+    reach(s, mid), refers_to(mid, d);
+}
+
+/// MAR Example 9: the rewritten garbage rule reads the EDB addresses and waits for reach_done.
+collect: while addr_edb(self, a), root_edb(self, r), not reach(r, a), reach_done() {
+    emit garbage(a);
+}
+
+keep: while garbage(a) {
+    next garbage(a);
+}

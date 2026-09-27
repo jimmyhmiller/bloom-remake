@@ -1,0 +1,61 @@
+# BENCH-082 (R02 T14; R05 T5): the marriage ceremony is diffluent, and the analyzer must flag it.
+#
+# MAR Example 3: "Any stable model where i_do(groom) and i_do(bride) disagree in their first chosen timestamps yields
+# an ultimate model containing runaway(). If the votes are assigned the same timestamp, the ultimate model does not
+# contain runaway()." Two ultimate models, so the program is diffluent (MAR §3.1); it is not Dedalus+ because it
+# negates the IDB relation i_do.
+#
+# Analysis: the only negative edges are the two negations of i_do in runaway's rules. i_do is fed by the asynchronous
+# rule, so every path from the vows to runaway is A followed by N, which is D (ANA-023). The certificate must not
+# claim Dedalus+, must not claim consistency under fair runs, and must report the program as not confluent.
+#
+# Oracle (sync harness): both vows are sent in tick 0 and arrive together in tick 1, which is the ultimate model
+# without runaway(): both vows hold from tick 1 on and runaway never holds.
+schema = 1
+id = "BENCH-082"
+title = "Marriage ceremony: diffluent; the synchronous schedule weds, and the analysis flags diffluence"
+priority = "P0"
+source = "R02 T14 and §7.2 (MAR Example 3, verbatim program); R05 T5"
+features = ["LANG-040", "LANG-043", "LANG-045", "LANG-046", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-190", "SEM-021", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[run]
+ticks = 6
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-045", "LANG-046", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-190", "SEM-021", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+until = "M5"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-045", "LANG-046", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-190", "SEM-021", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "i_do"
+tick = 0
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "i_do"
+tick = 1
+rows = [["bride"], ["groom"]]
+
+[[expect]]
+node = "n1"
+rel = "runaway"
+row = []
+absent = "0.."
+
+[expect_analysis]
+points_of_order = { complete = true, edges = [{ from = "i_do", to = "runaway", kind = "negation" }], clusters = [] }
+calm_labels = { outputs = { runaway = "D" } }
+certificates = { runaway = [] }
+confluent = { runaway = "not_confluent" }
+fair_consistency = { runaway = "not_certified" }

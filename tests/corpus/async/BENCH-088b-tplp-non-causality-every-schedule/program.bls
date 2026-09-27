@@ -1,0 +1,47 @@
+//! BENCH-088: TPLP Figure 4, a program sensitive to non-causality (Ameloot et al., TPLP 2016, §4.3.3), ported rule
+//! by rule.
+//!
+//!     A() | x ← Id(x).
+//!     B() | x ← A(), Id(x).
+//!     T() ← A(), ¬B().
+//!     T()• ← T().
+//!     B()• ← B().
+//!
+//! "Intuitively T() should always be produced, because at least one A() must arrive before any B() is sent." Under
+//! causal delivery the first arrival of A() precedes every arrival of B(), so T() is derived in that tick.
+
+program tplp_non_causality version 1;
+
+/// TPLP's `Id(x)`: this node's own entry in the node directory.
+view id() = node_dir(self, _, _, _);
+
+/// The asynchronous heads `A() | x` and `B() | x`, both addressed to this node.
+loopback a_msg();
+loopback b_msg();
+/// B, persisted by B()• ← B().
+table b();
+/// T, persisted by T()• ← T().
+output t();
+
+send_a: while id() {
+    send a_msg();
+}
+
+send_b: on a_msg(), id() {
+    send b_msg();
+}
+
+arrive_b: on b_msg() {
+    emit b();
+}
+
+derive_t: on a_msg(), not b() {
+    emit t();
+}
+
+/// `t` is written only by event-driven statements, this one included, so it is an event relation
+/// (LANGUAGE §8.5, the greatest fixpoint) and the loop that carries it to the next tick is an `on`
+/// handler, although `t` then holds in every later tick.
+keep: on t() {
+    next t();
+}

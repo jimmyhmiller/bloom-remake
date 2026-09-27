@@ -1,0 +1,65 @@
+# BENCH-090 (R05 T2): "Deadlock detection is certified monotone."
+#
+# Keeping CALM §1.3.1: deadlock detection (a cycle in the waits-for graph) is monotone and coordination-free.
+# Scenario: n1 sees t1->t2 and t3->t4, n2 sees t2->t1, n3 sees t4->t5; the only cycle is t1 <-> t2.
+# Analysis: no negation, no aggregate, and the asynchronous edges land in a persistent table: Dedalus+ (semipositive
+# with guarded asynchrony), certified confluent and consistent; the output's path label is A (asynchronous only).
+# Oracle (sync harness): the edges arrive everywhere in tick 1, and every node reports t1 and t2 from tick 1.
+schema = 1
+id = "BENCH-090"
+title = "CALM oracle: distributed deadlock detection is certified monotone"
+priority = "P1"
+source = "R05 T2; Hellerstein and Alvaro, Keeping CALM (CACM 2020) §1.3.1"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-190", "LANG-240", "ANA-020", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "The program is written from the paper's description (Keeping CALM gives no code)."
+
+[deploy]
+nodes = [{ name = "n1", role = "Node" }, { name = "n2", role = "Node" }, { name = "n3", role = "Node" }]
+
+[run]
+ticks = 6
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-190", "LANG-240", "ANA-020", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+until = "M5"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-190", "LANG-240", "ANA-020", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "deadlocked"
+tick = 1
+rows = [["t1"], ["t2"]]
+
+[[expect]]
+node = "n2"
+rel = "deadlocked"
+tick = 1
+rows = [["t1"], ["t2"]]
+
+[[expect]]
+node = "n3"
+rel = "deadlocked"
+tick = 1
+rows = [["t1"], ["t2"]]
+
+[[expect]]
+node = "n1"
+rel = "deadlocked"
+tick = 0
+rows = []
+
+[expect_analysis]
+points_of_order = { complete = true, edges = [], clusters = [] }
+calm_labels = { outputs = { deadlocked = "A" } }
+certificates = { deadlocked = ["dedalus_plus"] }
+confluent = { deadlocked = "certified" }
+fair_consistency = { deadlocked = "certified" }

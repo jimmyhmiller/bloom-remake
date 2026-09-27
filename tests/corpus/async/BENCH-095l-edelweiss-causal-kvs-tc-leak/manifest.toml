@@ -1,0 +1,99 @@
+# BENCH-095 (R05 T24; §5.9, §9.4 item 24): the causal KVS with dominance by transitive closure leaks, as expected.
+#
+# R05 §5.9: "Causal KVS with dominance via transitive closure of dependencies: dominated writes cannot be reclaimed, and
+# this is also correct in principle. The fix (the COPS-style assumption that a write depends on the previous write to the
+# same key, so dominance uses direct dependencies) enables reclamation." R05 §9.4 item 24: "Negative variant: dominance by
+# transitive closure ⇒ dominated writes are never reclaimed." causal-kvs.rb: "implementing this correctly (w/o any
+# further assumptions) would mean we couldn't safely garbage collect any dependency metadata, because we might always see
+# a subsequent write that depends on a earlier part of the dependency graph."
+#
+# The program is BENCH-095 (g)'s with safe_dep computed over the transitive closure of dep. Scenario: n1 writes w1, w2
+# (depending on w1) and w3 (depending on w2), all to k1, at ticks 1-3; 32 seeded schedules. Every replica's view ends as
+# {w3}. In the rewritten program the dominated writes w1 and w2 stay in safe, and the dependencies stay in dep: the
+# storage leak is the expected, safe outcome (ANA-066: leak rather than lose).
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss causal KVS, dominance by transitive closure: dominated writes and dependencies are never reclaimed"
+priority = "P1"
+source = "R05 T24, §5.9, §9.4 item 24; Edelweiss (VLDB 2014) §6, §8; artifact causal-kvs.rb (the live_view comment)"
+features = ["LANG-023", "LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-050", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-088", "LANG-241", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-062", "ANA-063", "ANA-064", "ANA-065", "ANA-066", "DIST-007"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "n1", role = "Node" }, { name = "n2", role = "Node" }]
+
+[run]
+ticks = 50
+stop = "ticks"
+seeds = 32
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-023", "LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-050", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-088", "LANG-241", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-062", "ANA-063", "ANA-064", "ANA-065", "ANA-066", "DIST-007"]
+until = "M7"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-023", "LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-050", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-088", "LANG-241", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-062", "ANA-063", "ANA-064", "ANA-065", "ANA-066", "DIST-007"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "write"
+rows = [[1, "k1", "v1", []]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "write"
+rows = [[2, "k1", "v2", [1]]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "write"
+rows = [[3, "k1", "v3", [2]]]
+
+[[expect]]
+node = "n1"
+rel = "view"
+final = true
+rows = [[3, "k1", "v3"]]
+
+[[expect]]
+node = "n2"
+rel = "view"
+final = true
+rows = [[3, "k1", "v3"]]
+
+[expect_analysis.reclaimable]
+reclaimed = { log = "join_seal" }
+kept = { safe = "dominance_by_transitive_closure", dep = "dominance_by_transitive_closure", safe_keys = "range" }
+channels = { log_chn = "arm" }
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "safe"
+final = true
+rows = [[1, "k1", "v1"], [2, "k1", "v2"], [3, "k1", "v3"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n2"
+rel = "safe"
+final = true
+rows = [[1, "k1", "v1"], [2, "k1", "v2"], [3, "k1", "v3"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "dep"
+final = true
+rows = [[2, 1], [3, 2]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n2"
+rel = "dep"
+final = true
+rows = [[2, 1], [3, 2]]

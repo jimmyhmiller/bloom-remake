@@ -1,0 +1,46 @@
+# BENCH-089 (R02 T28): CRON Figure 5, a positive program that is not consistent; it must not be certified.
+#
+# R02 T28: "Some fair runs never produce T(). The analyzer must not certify it as order-insensitive." CRON §6.2: T() is
+# created only when A() and B() are delivered simultaneously. The program has no point of order at all; what breaks
+# it is unguarded asynchrony (ANA-024): two channel streams that pass through no persistent state or lattice meet in
+# T's rule, so the output is D and no certificate may be given (R02 §8: "Fig. 5 is the minimal counterexample and
+# should be a regression test for the analyzer").
+#
+# Oracle (sync harness): the synchronous schedule delivers A() and B() together in every tick from tick 1, so T()
+# holds from tick 1 on (the ultimate model with T()).
+schema = 1
+id = "BENCH-089"
+title = "CRON Fig. 5 (positive but inconsistent): not certified; the synchronous schedule produces T()"
+priority = "P1"
+source = "R02 T28 and §8; CRON (JCSS 2014) Figure 5 and §6.2 (verbatim program)"
+features = ["LANG-043", "LANG-046", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-240", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[run]
+ticks = 6
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-043", "LANG-046", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-240", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+until = "M5"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-043", "LANG-046", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-240", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "t"
+row = []
+holds = "1.."
+absent = "0"
+
+[expect_analysis]
+points_of_order = { complete = true, edges = [], clusters = [] }
+calm_labels = { outputs = { t = "D" }, races = [{ channels = ["a_msg", "b_msg"], meet = "t", guarded = false }] }
+certificates = { t = [] }
+fair_consistency = { t = "not_certified" }
