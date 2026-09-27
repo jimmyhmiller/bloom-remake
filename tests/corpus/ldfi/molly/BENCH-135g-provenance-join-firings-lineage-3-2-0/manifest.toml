@@ -11,7 +11,7 @@ program = "program.ded"
 derived = true
 expected_from = "literature"
 notes = """
-The two firings of BENCH-135f made observable (../lib/unit/join_firings_net.ded): each firing's a-fact arrives from its own node, so c(loc, 1) falls only when both messages are lost. runs_max = 2: with complete lineage (TEST-023, every alternative firing) the failure-free run's hazard is the conjunction of the two losses, whose only minimal model is the counterexample itself; lineage that kept one firing would first try one loss alone.
+The two firings of BENCH-135f made observable (../lib/unit/join_firings_net.ded): each firing's `hop` fact arrives from its own relay, so route(n, "d") falls only when both messages are lost. runs_max = 2: with complete lineage (TEST-023, every alternative firing) the failure-free run's hazard is the conjunction of the two losses, whose only minimal model is the counterexample itself; lineage that kept one firing would first try one loss alone.
 """
 
 [backend.ldfi]
@@ -23,10 +23,10 @@ until = "M8"
 eot = 3
 eff = 2
 crashes = 0
-nodes = ["loc", "px", "py"]
+nodes = ["n", "r1", "r2"]
 crash_view = "molly"
 verdict = "counterexample"
 runs_max = 2
 falsifiers = [
-  ["O(px,loc,1)", "O(py,loc,1)"],
+  ["O(r1,n,1)", "O(r2,n,1)"],
 ]

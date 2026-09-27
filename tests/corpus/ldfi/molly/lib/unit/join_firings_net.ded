@@ -1,17 +1,17 @@
-// The two firings of join_firings.ded made observable to LDFI (BENCH-135, provenance counts): the a-facts that the two
-// firings join with arrive from different nodes, px (M = x) and py (M = y), so c(loc, 1) survives the loss of either
-// message and falls only with both. A search whose lineage keeps both firings (TEST-023) proposes the pair at once.
-// Blossom golden corpus, derived (derived = true); see ../../README.md.
+// The two firings of join_firings.ded made observable to LDFI (BENCH-135, provenance counts): the `hop` facts the two
+// firings join with arrive from different relays, r1 and r2, so route(n, "d") survives the loss of either message and
+// falls only with both. A search whose lineage keeps both firings (TEST-023) proposes the pair at once. Blossom golden
+// corpus, re-derived (derived = true); see ../../README.md.
 
-a(L, M, V)@async :- a_src(S, L, M, V);
-a(L, M, V)@next :- a(L, M, V);
-b(L, M, V)@next :- b(L, M, V);
-c(L, V) :- b(L, M, V), a(L, M, V);
+hop(N, R, Dst)@async :- announce(R, N, Dst);
+hop(N, R, Dst)@next :- hop(N, R, Dst);
+link(N, R, Dst)@next :- link(N, R, Dst);
+route(N, Dst) :- link(N, R, Dst), hop(N, R, Dst);
 
-pre(L, V) :- b(L, M, V);
-post(L, V) :- c(L, V);
+pre(N, Dst) :- link(N, R, Dst);
+post(N, Dst) :- route(N, Dst);
 
-a_src("px", "loc", "x", 1)@1;
-a_src("py", "loc", "y", 1)@1;
-b("loc", "x", 1)@1;
-b("loc", "y", 1)@1;
+announce("r1", "n", "d")@1;
+announce("r2", "n", "d")@1;
+link("n", "r1", "d")@1;
+link("n", "r2", "d")@1;

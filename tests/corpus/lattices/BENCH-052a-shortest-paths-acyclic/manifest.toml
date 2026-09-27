@@ -60,4 +60,4 @@ rows  = [["a", "b", 10], ["a", "c", 15], ["a", "d", 20], ["a", "e", 30], ["b", "
          ["b", "e", 35], ["c", "d", 5], ["c", "e", 15], ["d", "e", 10]]
 
 [expect_analysis]
-strata = { link = 0, path = 0, min_cost = 0 }
+strata = { of = { link = 0, path = 0, min_cost = 0 } }

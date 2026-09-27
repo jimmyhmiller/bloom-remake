@@ -5,6 +5,10 @@
 # Items already collected (same source) are skipped, so re-running is harmless. The formats are described in
 # docs/plan/notes/README.md.
 #
+# Nothing is dropped silently: a `## Bugs` section with text but no list item, an item without its leading
+# backticked owner, or an item whose text differs from the row it was collected into (notes are append-only once
+# collected, since the source id is the item's position) stops the script with an error.
+#
 #   scripts/collect-notes.sh [--check]    --check: report what would be added, change nothing
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -19,6 +23,9 @@ bugs_path = pathlib.Path("docs/plan/BUGS.md")
 deps_path = pathlib.Path("docs/design/DEPENDENCIES.md")
 BUGS_HEADER = "| # | Source | Crate | Summary | Status |"
 DEPS_HEADER = "| Crate | Version | License | Used by | Reason | Source |"
+ITEM = re.compile(r"(?:-|\d+\.)\s+(.*)")
+NONE = re.compile(r"(none|n/a|—|-)\.?", re.I)
+errors = []
 
 def section(text, title):
     lines, out, inside = text.splitlines(), [], False
@@ -31,16 +38,22 @@ def section(text, title):
     return out
 
 def bullets(lines):
-    items, cur = [], None
+    """Top-level list items (`- …` or `1. …` at column 0). Indented lines continue the current item, also after a
+    blank line; any other text at column 0 is prose and ends the item. Returns (items, prose lines)."""
+    items, prose, cur = [], [], None
     for line in lines:
-        if line.startswith("- "):
-            cur = [line[2:].strip()]
+        m = ITEM.fullmatch(line.rstrip()) if line[:1] not in (" ", "\t") else None
+        if m:
+            cur = [m.group(1).strip()]
             items.append(cur)
-        elif cur is not None and line.startswith("  ") and line.strip():
-            cur.append(line.strip())
         elif not line.strip():
+            continue
+        elif line[:1] in (" ", "\t") and cur is not None:
+            cur.append(line.strip())
+        else:
             cur = None
-    return [" ".join(i) for i in items]
+            prose.append(line)
+    return [" ".join(i) for i in items], prose
 
 def cell(s):
     return s.replace("|", "\\|").strip()
@@ -65,7 +78,12 @@ def read_table(path, header):
 
 bugs_text = read_table(bugs_path, BUGS_HEADER)
 deps_text = read_table(deps_path, DEPS_HEADER)
-known_sources = set(re.findall(r"\| \[([^\]]+)\]\(notes/", bugs_text))
+# Collected rows by source: `| n | [WP#k](notes/WP.md) | `crate` | summary | status |`.
+collected = {}
+for row in table_rows(bugs_text.split(BUGS_HEADER, 1)[1].splitlines()):
+    m = re.fullmatch(r"\[([^\]]+)\]\(notes/[^)]+\)", row[1]) if len(row) >= 5 else None
+    if m:
+        collected[m.group(1)] = (row[0], row[2], row[3])
 numbers = [int(n) for n in re.findall(r"^\| (\d+) \|", bugs_text, re.M)]
 next_no = max(numbers, default=0) + 1
 known_deps = {(r[0], r[3]) for r in table_rows(deps_text.split(DEPS_HEADER, 1)[1].splitlines())}
@@ -76,14 +94,25 @@ for note in sorted(notes_dir.glob("*.md")):
         continue
     wp = note.stem
     text = note.read_text()
-    for k, item in enumerate(bullets(section(text, "Bugs")), start=1):
-        if re.fullmatch(r"(none|n/a|—|-)\.?", item.strip(), re.I):
+    lines = section(text, "Bugs")
+    items, prose = bullets(lines)
+    if not items and any(l.strip() for l in lines) and not any(NONE.fullmatch(l.strip()) for l in prose):
+        errors.append(f"{note}: `## Bugs` has text but no list item (write `- None.` when there is no bug)")
+    for k, item in enumerate(items, start=1):
+        if NONE.fullmatch(item.strip()):
             continue
         source = f"{wp}#{k}"
-        if source in known_sources:
-            continue
         m = re.match(r"`([^`]+)`\s*[:—-]\s*(.*)", item)
-        crate, summary = (m.group(1), m.group(2)) if m else ("unknown", item)
+        if not m:
+            errors.append(f"{note}: bug item {k} does not start with its owner as `crate`: …: {item[:80]}…")
+            continue
+        crate, summary = m.group(1), m.group(2)
+        if source in collected:
+            row_no, row_crate, row_summary = collected[source]
+            if (row_crate, row_summary) != (f"`{cell(crate)}`", cell(summary)):
+                errors.append(f"{note}: bug item {k} differs from BUGS.md row {row_no}, which it was collected into; "
+                              "notes are append-only after a gate (add a new item, or fix the row by hand)")
+            continue
         new_bugs.append(f"| {next_no} | [{source}](notes/{note.name}) | `{cell(crate)}` | {cell(summary)} | open |")
         next_no += 1
     for row in table_rows(section(text, "New dependencies")):
@@ -94,6 +123,11 @@ for note in sorted(notes_dir.glob("*.md")):
             continue
         known_deps.add(key)
         new_deps.append("| " + " | ".join(row[:5] + [wp]) + " |")
+
+if errors:
+    for e in errors:
+        print(f"collect-notes: {e}", file=sys.stderr)
+    sys.exit(f"collect-notes: {len(errors)} problem(s); nothing was changed")
 
 for label, rows in (("BUGS.md", new_bugs), ("DEPENDENCIES.md", new_deps)):
     for r in rows:

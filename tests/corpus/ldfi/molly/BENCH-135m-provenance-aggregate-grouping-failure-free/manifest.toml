@@ -11,16 +11,16 @@ program = "program.ded"
 derived = true
 expected_from = "literature"
 notes = """
-Molly ProvenanceSuite (R06 §12.6): vote_cnt(M, 2) with 2 contributors.
+BENCH-135's grouping regression (`vote_cnt` 2 in Molly's provenance suite, R06 §12.6; program written for the corpus, ../lib/unit/agg_grouping.ded): turnout(t, 2) with 2 contributors.
 
 Molly round k is tick k (CR-13); the rows omit the location column. The provenance counts this program is about are in ../golden/provenance.toml.
 """
 
 [deploy]
 nodes = [
-  { name = "a", role = "Node" },
-  { name = "b", role = "Node" },
-  { name = "M", role = "Node" },
+  { name = "p", role = "Node" },
+  { name = "q", role = "Node" },
+  { name = "t", role = "Node" },
 ]
 
 [run]
@@ -34,14 +34,14 @@ until = "M5"
 
 # one group, both votes
 [[expect]]
-node = "M"
-rel = "vote_cnt"
+node = "t"
+rel = "turnout"
 tick = 2
 rows = [[2]]
 
 # the votes arrive at time 2
 [[expect]]
-node = "M"
-rel = "vote_cnt"
+node = "t"
+rel = "turnout"
 tick = 1
 rows = []

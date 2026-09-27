@@ -104,6 +104,16 @@ pub enum SourceError {
         /// The file's length.
         len: u32,
     },
+    /// A 1-based line number the file does not have (line 0, or past the last line).
+    #[error("{path} has no line {line} (its lines are 1..={lines})")]
+    LineOutOfRange {
+        /// The file's path.
+        path: Arc<str>,
+        /// The requested line.
+        line: u32,
+        /// The number of lines of the file.
+        lines: usize,
+    },
     /// An offset inside a multi-byte character.
     #[error("offset {offset} of {path} is not on a character boundary")]
     NotCharBoundary {
@@ -294,16 +304,23 @@ impl SourceDb {
         let index = (line as usize).checked_sub(1);
         let start = index.and_then(|i| f.line_starts.get(i)).copied();
         let Some(start) = start else {
-            return Err(SourceError::OffsetOutOfRange {
+            return Err(SourceError::LineOutOfRange {
                 path: f.path.clone(),
-                offset: line,
-                len,
+                line,
+                lines: f.line_starts.len(),
             });
         };
         let end = index
             .and_then(|i| f.line_starts.get(i + 1))
             .map_or(len, |next| next - 1);
-        let text = f.text.get(start as usize..end as usize).unwrap_or("");
+        // Line starts follow a '\n' and a line ends at one, so both are character boundaries.
+        let text = f
+            .text
+            .get(start as usize..end as usize)
+            .ok_or_else(|| SourceError::NotCharBoundary {
+                path: f.path.clone(),
+                offset: start,
+            })?;
         Ok(text.strip_suffix('\r').unwrap_or(text))
     }
 }
@@ -630,7 +647,20 @@ mod tests {
         assert_eq!(db.line_text(f, 2).unwrap(), "λx");
         assert_eq!(db.line_text(f, 3).unwrap(), "");
         assert_eq!(db.line_text(f, 4).unwrap(), "end");
-        assert!(db.line_text(f, 5).is_err() && db.line_text(f, 0).is_err());
+        for line in [0, 5] {
+            assert_eq!(
+                db.line_text(f, line),
+                Err(SourceError::LineOutOfRange {
+                    path: "a.bls".into(),
+                    line,
+                    lines: 4
+                })
+            );
+        }
+        assert_eq!(
+            db.line_text(f, 5).unwrap_err().to_string(),
+            "a.bls has no line 5 (its lines are 1..=4)"
+        );
         assert_eq!(db.span_text(Span::new(f, 3, 6)).unwrap(), "λx");
         assert!(matches!(
             db.span_text(Span::new(f, 6, 3)),

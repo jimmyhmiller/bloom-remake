@@ -9,7 +9,9 @@ derived = true
 expected_from = "literature"
 notes = """
 The invariant fails the run if a received choice differs from the receiver's own. Each node hears the other from
-tick 1 on (heard_count 1). The simulator repeats the check for 128 seeds, i.e. 128 choice seeds."""
+tick 1 on (heard_count 1). The simulator repeats the check for 128 seeds. `[deploy] seed = 42` fixes the deployment
+seed; whether each simulator seed also varies the shared choice seed is the simulator runner's decision (M7.2). If
+it varies only the schedule, the case checks agreement for one choice seed under 128 schedules."""
 
 [deploy]
 nodes = [{ name = "n1", role = "Peer" }, { name = "n2", role = "Peer" }]

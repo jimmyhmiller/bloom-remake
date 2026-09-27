@@ -11,7 +11,7 @@ program = "program.ded"
 derived = true
 expected_from = "literature"
 notes = """
-Molly ProvenanceSuite's grouping regression (R06 §12.6): vote_cnt(M, count<I>) :- vote(M, V), member(M, V, I) groups by M only (the split rewrite records V without grouping by it), so vote_cnt(M, 2) has the two votes as contributors, and losing either falsifies it. An implementation that grouped by V would compute vote_cnt(M, 1) twice, its failure-free post would be empty and the verdict would differ.
+BENCH-135's grouping regression (`vote_cnt` 2 in Molly's provenance suite, R06 §12.6; program written for the corpus, ../lib/unit/agg_grouping.ded): turnout(T, count<Id>) :- ballot(T, P), roster(T, P, Id) groups by T only (the split rewrite records P without grouping by it), so turnout(t, 2) has the two ballots as contributors, and losing either falsifies it. An implementation that grouped by P would compute turnout(t, 1), its failure-free post would be empty and the verdict would differ.
 """
 
 [backend.ldfi]
@@ -23,10 +23,10 @@ until = "M8"
 eot = 3
 eff = 2
 crashes = 0
-nodes = ["a", "b", "M"]
+nodes = ["p", "q", "t"]
 crash_view = "molly"
 verdict = "counterexample"
 falsifiers = [
-  ["O(a,M,1)"],
-  ["O(b,M,1)"],
+  ["O(p,t,1)"],
+  ["O(q,t,1)"],
 ]

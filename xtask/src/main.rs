@@ -3,6 +3,7 @@
 //! This file is the dispatch table and is frozen after M1 (PLAN §4 D7). Each task lives in `src/cmd/<name>.rs`,
 //! owned by the WP that implements it; tasks not implemented yet exit with code 7 naming their WP.
 
+#![deny(unsafe_op_in_unsafe_fn)]
 // A command-line tool reports on stdout and stderr.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 

@@ -2,8 +2,22 @@
 //! `blossom-std-host`: the Rust implementations behind the standard library's `extern fn`s and
 //! `extern table fn`s, as an [`ExternRegistry`] (ARCHITECTURE §1.2, §1.5).
 //!
-//! One module per standard-library area; each is owned by the WP that implements that area. This file is a
-//! dispatch file, frozen after M1 (PLAN §2.4): adding an area is a plan change.
+//! One module per standard-library area; each is owned by the WP that implements that area, and until then its
+//! `register` adds nothing. This file is a dispatch file, frozen after M1 (PLAN §2.4): adding an area is a plan
+//! change. The implementing WPs (plan.json):
+//!
+//! | WP | Areas |
+//! |---|---|
+//! | M8.3 | `delivery`, `bcast`, `membership`, `fd`, `timers`, `vote`, `commit`, `quorum`, `coord` |
+//! | M8.4 | `ids`, `queue`, `seq`, `clock`, `seal`, `kvs`, `crdt` |
+//! | M9.1 | `consensus` |
+//! | M9.6 | `election`, `lease`, `lock` |
+//! | M9.7 | `gc`, `zset`, `authz` |
+//! | M10.7 | `examples` |
+//! | M11.3 | `push` |
+//! | M12.3 | `upgrade` |
+//! | M15.4 | `crypto`, `oncetree` |
+//! | M15.7 | `pipeline` |
 
 use blossom_value::error::ValueError;
 use blossom_value::externs::ExternRegistry;

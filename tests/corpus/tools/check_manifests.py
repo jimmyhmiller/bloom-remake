@@ -34,6 +34,24 @@ FAULT_KINDS = {"crash": {"node", "tick"}, "restart": {"node", "tick"}, "omit": {
                "partition": {"from", "to", "ticks"}, "reject": {"from", "to", "send_tick", "reason"}}
 ANALYSIS_KEYS = {"points_of_order", "strata", "certificates", "calm_labels", "finality", "blazes", "reclaimable",
                  "confluent", "deterministic", "fair_consistency"}
+# The value vocabulary of each [expect_analysis] key, fixed at the M1 gate (tests/corpus/README.md, "Expectation
+# vocabularies").
+EDGE_KINDS = {"negation", "aggregate", "deletion", "choice", "order", "lattice_op", "reveal", "delta_read",
+              "z_boundary"}
+CALM_LABELS = {"Bot", "A", "N", "D"}
+CERT_KINDS = {"dedalus_plus", "dedalus_s", "dedalus_plus_l", "dedalus_s_l"}
+CONFLUENCE = {"certified", "confluent_not_certified", "not_confluent", "inconclusive"}
+FAIR = {"certified", "not_certified"}
+DETERMINISM = {"confluent", "confluent_given_seals", "coordinated", "nondeterministic_by_design"}
+FINALITY = {"POS", "NEG", "TOP", "THRESH", "MIXED", "FINITE", "SEALED", "NEVER"}
+BLAZES_ANNOTATIONS = {"CR", "CW", "OR", "OW"}
+BLAZES_LABEL = re.compile(r"^(NDRead|Taint|Async|Run|Inst|Diverge|Seal\([A-Za-z_][A-Za-z0-9_]*(, ?[A-Za-z_][A-Za-z0-9_]*)*\))$")
+RECLAIMED = {"dr_plus", "dr_minus", "join_seal", "join_pullup", "join_semijoin", "join_keys"}
+KEPT = {"negated_input_deleted", "negated_scratch_not_inflationary", "negated_scratch_not_monotone",
+        "negated_scratch_not_grounded", "negated_scratch_from_channel", "reaches_output", "aggregated",
+        "negated_by_non_candidate", "negated_with_predicate_block", "downstream_table_deleted",
+        "quals_not_positive_keys", "unsealed_join", "range", "no_negation", "not_reclaimable",
+        "dominance_by_transitive_closure"}
 LDFI_KEYS = {"eot", "eff", "crashes", "nodes", "crash_view", "verdict", "runs_max", "falsifiers"}
 VERIFY_KEYS = {"check", "result", "bounds"}
 RANGE = re.compile(r"^(\d+(\.\.(=\d+)?)?|\.\.=\d+)$")
@@ -65,6 +83,106 @@ def expand(spec, known):
 
 def is_rows(v):
     return isinstance(v, list) and all(isinstance(r, list) for r in v)
+
+
+def is_str_list(v):
+    return isinstance(v, list) and all(isinstance(x, str) for x in v)
+
+
+def records(v, required, optional=frozenset()):
+    """Whether v is a list of tables that each have the required keys and no others but the optional ones."""
+    return isinstance(v, list) and all(
+        isinstance(x, dict) and required <= set(x) <= required | optional for x in v)
+
+
+def rel_map(v, ok):
+    """Whether v is a table from relation names to values accepted by ok."""
+    return isinstance(v, dict) and all(isinstance(k, str) and ok(x) for k, x in v.items())
+
+
+def check_analysis(ea, e):
+    """The value shapes of [expect_analysis] (tests/corpus/README.md, "Expectation vocabularies")."""
+    def bad(key, shape):
+        e(f"[expect_analysis] {key} must be {shape}")
+    if "strata" in ea:
+        v = ea["strata"]
+        if not (isinstance(v, dict) and set(v) <= {"count", "of"}
+                and (not isinstance(v.get("count", 1), bool) and isinstance(v.get("count", 1), int))
+                and rel_map(v.get("of", {}), lambda k: isinstance(k, int) and not isinstance(k, bool) and k >= 0)):
+            bad("strata", "{ count = n, of = { rel = stratum } } (both optional)")
+    if "points_of_order" in ea:
+        v = ea["points_of_order"]
+        ok = isinstance(v, dict) and isinstance(v.get("complete"), bool) and set(v) <= {
+            "complete", "edges", "clusters", "sites", "crossing", "free"}
+        ok = ok and records(v.get("edges", []), {"from", "to", "kind"}, {"reason"}) and all(
+            x["kind"] in EDGE_KINDS for x in v.get("edges", []))
+        ok = ok and isinstance(v.get("clusters", []), list) and all(is_str_list(c) for c in v.get("clusters", []))
+        ok = ok and records(v.get("sites", []), {"at", "op"})
+        ok = ok and records(v.get("crossing", []), {"from", "to"}) and records(v.get("free", []), {"from", "to"})
+        if not ok:
+            bad("points_of_order", "{ complete = bool, edges = [{from, to, kind, reason?}], clusters = [[rel]], "
+                "sites = [{at, op}], crossing = [{from, to}], free = [{from, to}] } with kind in "
+                + ", ".join(sorted(EDGE_KINDS)))
+    if "calm_labels" in ea:
+        v = ea["calm_labels"]
+        ok = isinstance(v, dict) and set(v) <= {"outputs", "paths", "races"}
+        ok = ok and rel_map(v.get("outputs", {}), lambda x: x in CALM_LABELS)
+        ok = ok and records(v.get("paths", []), {"from", "to", "label"}) and all(
+            x["label"] in CALM_LABELS for x in v.get("paths", []))
+        ok = ok and records(v.get("races", []), {"channels", "meet", "guarded"}) and all(
+            is_str_list(x["channels"]) and len(x["channels"]) == 2 and isinstance(x["guarded"], bool)
+            for x in v.get("races", []))
+        if not ok:
+            bad("calm_labels", "{ outputs = { rel = Bot|A|N|D }, paths = [{from, to, label}], "
+                "races = [{channels = [a, b], meet, guarded = bool}] }")
+    if "certificates" in ea and not rel_map(ea["certificates"], lambda x: is_str_list(x) and set(x) <= CERT_KINDS
+                                            and len(set(x)) == len(x)):
+        bad("certificates", "{ rel = [kind] } with kinds from " + ", ".join(sorted(CERT_KINDS)))
+    for key, allowed in (("confluent", CONFLUENCE), ("fair_consistency", FAIR), ("deterministic", DETERMINISM)):
+        if key in ea and not rel_map(ea[key], lambda x, allowed=allowed: x in allowed):
+            bad(key, "{ rel = verdict } with verdicts " + ", ".join(sorted(allowed)))
+    if "finality" in ea:
+        def finality_ok(x):
+            if isinstance(x, list):
+                return bool(x) and is_str_list(x) and set(x) <= FINALITY and len(set(x)) == len(x)
+            return (isinstance(x, dict) and x.get("class") == "FINITE" and isinstance(x.get("ft"), dict)
+                    and {"class", "ft"} <= set(x) <= {"class", "ft", "abstraction"}
+                    and isinstance(x.get("abstraction", ""), str))
+        if not rel_map(ea["finality"], finality_ok):
+            bad("finality", "{ rel = [CLASS] } with classes " + ", ".join(sorted(FINALITY))
+                + ', or { "inst.rel" = { class = "FINITE", ft = { state = value }, abstraction? } }')
+    if "blazes" in ea:
+        v = ea["blazes"]
+        ok = isinstance(v, dict) and set(v) <= {"paths", "streams", "sinks", "coordination", "cycles", "collapsed"}
+        ok = ok and records(v.get("paths", []), {"component", "from", "to", "annotation"}, {"gate"}) and all(
+            x["annotation"] in BLAZES_ANNOTATIONS and is_str_list(x.get("gate", [])) for x in v.get("paths", []))
+        ok = ok and all(rel_map(v.get(k, {}), lambda x: isinstance(x, str) and BLAZES_LABEL.match(x))
+                        for k in ("streams", "sinks"))
+        ok = ok and records(v.get("coordination", []), {"at", "mechanism"}, {"key"}) and all(
+            x["mechanism"] in ("ordering", "sealing") for x in v.get("coordination", []))
+        ok = ok and isinstance(v.get("cycles", []), list) and all(is_str_list(c) for c in v.get("cycles", []))
+        ok = ok and records(v.get("collapsed", []), {"members", "annotation", "gate"})
+        if not ok:
+            bad("blazes", "the BENCH-094 table of tests/corpus/README.md (paths, streams, sinks, coordination, "
+                "cycles, collapsed)")
+    if "reclaimable" in ea:
+        v = ea["reclaimable"]
+        ok = isinstance(v, dict) and set(v) <= {"reclaimed", "kept", "channels", "storage", "ranges"}
+        ok = ok and rel_map(v.get("reclaimed", {}), lambda x: x in RECLAIMED)
+        ok = ok and rel_map(v.get("kept", {}), lambda x: x in KEPT)
+        ok = ok and rel_map(v.get("channels", {}), lambda x: x == "arm")
+        ok = ok and all(
+            isinstance(x, dict) and {"node", "rel", "rows"} <= set(x) and len(set(x) & {"tick", "final"}) == 1
+            and set(x) <= {"node", "rel", "rows", "tick", "final"} and is_rows(x["rows"])
+            for x in v.get("storage", []))
+        ok = ok and all(
+            isinstance(x, dict) and {"node", "buckets"} <= set(x) and len(set(x) & {"tick", "final"}) == 1
+            and len(set(x) & {"channel", "rel"}) == 1 and is_rows(x["buckets"])
+            and set(x) <= {"node", "buckets", "tick", "final", "channel", "rel"}
+            for x in v.get("ranges", []))
+        if not ok:
+            bad("reclaimable", "the BENCH-095 table of tests/corpus/README.md (reclaimed, kept, channels, storage, "
+                "ranges)")
 
 
 def check_case(path, m, known, err):
@@ -211,6 +329,7 @@ def check_case(path, m, known, err):
     for k in m.get("expect_analysis", {}):
         if k not in ANALYSIS_KEYS:
             e(f"[expect_analysis] unknown key `{k}`")
+    check_analysis(m.get("expect_analysis", {}), e)
     ld = m.get("expect_ldfi")
     if ld is not None:
         for k in ld:

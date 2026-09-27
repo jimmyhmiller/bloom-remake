@@ -11,14 +11,14 @@ program = "program.ded"
 derived = true
 expected_from = "literature"
 notes = """
-Molly ProvenanceSuite (R06 §12.6): c(loc, 1) has 2 rule firings.
+BENCH-135 "2 firings" (the repeated-firings test of Molly's provenance suite, R06 §12.6; program written for the corpus, ../lib/unit/join_firings.ded): route(n, "d") has 2 rule firings, one through each relay.
 
 Molly round k is tick k (CR-13); the rows omit the location column. The provenance counts this program is about are in ../golden/provenance.toml.
 """
 
 [deploy]
 nodes = [
-  { name = "loc", role = "Node" },
+  { name = "n", role = "Node" },
 ]
 
 [run]
@@ -32,14 +32,14 @@ until = "M5"
 
 # c(loc, 1) at time 1, derived by two firings (M = x, M = y)
 [[expect]]
-node = "loc"
-rel = "c"
+node = "n"
+rel = "route"
 tick = 1
-rows = [[1]]
+rows = [["d"]]
 
 # the inputs are events of time 1
 [[expect]]
-node = "loc"
-rel = "c"
+node = "n"
+rel = "route"
 tick = 2
 rows = []

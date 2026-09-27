@@ -85,3 +85,33 @@ changes what is built):
   `publish = false`); the Raft core is the library module `std::consensus::raft`.
 - Priority inversions are placed as PLAN.md §6 lists; FLAG-028 (CompPaxos, P2) is pulled into M9.2 because
   BENCH-177 (P1) requires it.
+
+## M1 gate (made by Claude, 2026-09-27)
+
+The M1 gate merged M1.1–M1.5; every change it made is listed in `docs/plan/notes/M1-gate.md`.
+
+- **xxhash-rust is allowed under BSL-1.0** (for that crate only, in `deny.toml`). ARCHITECTURE §1.2 names the crate
+  for blossom-value's xxh3 fingerprints but its license allowlist omits the crate's license; the named crate wins,
+  as §1.2 already does for MPL-2.0 (M1.1 deviation; `docs/design/DEPENDENCIES.md`).
+- **The frozen `blossom-base` surface is what M1.1 built**, including its recorded deviations from ARCHITECTURE:
+  `Symbol` is an interned text handle, not a `define_idx!` id (ARCHITECTURE §2.1 amended), `Diagnostic::primary` is
+  an `Option<Span>`, `CodeInfo` carries `also` and `origin`, CLI subcommands take `run(args, &Context)`, and
+  `blossom_std_host::registry()` returns a `Result`. The gate added `graph::shortest_cycle_through_node` and
+  `SourceError::LineOutOfRange` before the freeze; from now on `blossom-base` changes follow ARCHITECTURE §1.6.
+- **One `[expect_analysis]` vocabulary for the corpus** (`tests/corpus/README.md`, "Expectation vocabularies"),
+  validated by `tests/corpus/tools/check_manifests.py` and, from M5.2, by `xtask corpus --lint`. Finality classes
+  use ARCHITECTURE §7.2's names (`POS` … `NEVER`); `confluent` is ConfluenceStatus in CR-29's (Ameloot's) sense;
+  `certificates` lists the Dedalus-family certificates (ANA-025/026/141/142) exactly; `points_of_order` is a table
+  whose `complete` flag makes its lists exact; `calm_labels.paths` is not exhaustive. The M1.2 and M1.3 cases that
+  used other shapes were converted without changing what they assert.
+- **Diagnostic comparison.** The `compile` backend compares every frontend diagnostic, warnings included, with
+  `[[expect_diag]]` exactly (PLAN §5.2's "no diagnostics expected when empty"); the `analysis` backend requires
+  every listed diagnostic and makes the codes of the ANA features a case lists exhaustive; runtime backends compare
+  no diagnostics and fail on any hard error not in `[[expect_error]]`.
+- **Molly's unit tests are represented by their properties.** The corpus programs for Molly's `ProvenanceSuite` and
+  `negative_support_test` had transcribed Molly's test inputs, which PLAN §8 (M1.5) forbids for an unlicensed
+  repository; the gate replaced them with programs written for the corpus (BENCH-135f–m, BENCH-137i), checked with
+  the reference checker.
+- **Bug items in WP notes name their owner crate first** and are append-only once collected;
+  `scripts/collect-notes.sh` refuses a notes file that breaks this instead of dropping its bugs
+  (`docs/plan/notes/README.md`).

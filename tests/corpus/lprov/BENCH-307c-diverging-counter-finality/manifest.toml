@@ -18,4 +18,4 @@ unimplemented = ["LANG-126", "SEM-016", "SEM-107", "ANA-120"]
 until = "M8"
 
 [expect_analysis]
-finality = { ge5_out = ["POS-FINAL"] }
+finality = { ge5_out = ["POS"] }

@@ -8,6 +8,7 @@
 //! - [`condensation`] — the DAG of components;
 //! - [`topo_sort`] — the smallest-index-first topological order, or a witness cycle;
 //! - [`shortest_cycle_through_edge`] — the BFS-shortest cycle through an edge (stratification witnesses, ANA-002);
+//! - [`shortest_cycle_through_node`] — the BFS-shortest cycle through a node;
 //! - [`max_bipartite_matching`] — Hopcroft–Karp;
 //! - [`min_chain_cover`] — a minimum chain cover of a strict partial order (Dilworth), used for index selection.
 
@@ -106,8 +107,8 @@ pub enum GraphError {
         /// Target.
         to: usize,
     },
-    /// The graph is not acyclic; `cycle` lists the nodes of one shortest cycle in order (the last has an edge back
-    /// to the first).
+    /// The graph is not acyclic; `cycle` lists the nodes of a witness cycle in order (the last has an edge back to
+    /// the first). The function that reports it says which cycle it is.
     #[error("the graph has a cycle: {cycle:?}")]
     Cycle {
         /// The witness cycle.
@@ -312,24 +313,54 @@ pub fn topo_sort<G: DirectedGraph + ?Sized>(graph: &G) -> Result<Vec<usize>, Gra
         if !sccs.is_cyclic(graph, c) {
             continue;
         }
-        let Some(&from) = component.first() else { continue };
-        // The smallest successor of `from` inside the component closes a cycle through `from`.
-        let to = graph
-            .successors(from)
-            .filter(|w| sccs.component_of.get(*w) == Some(&c))
-            .min();
-        if let Some(to) = to {
-            let within = |x: usize| sccs.component_of.get(x) == Some(&c);
-            if let Some(cycle) = shortest_cycle_through_edge(graph, from, to, within)? {
-                return Err(GraphError::Cycle { cycle });
-            }
+        let Some(&smallest) = component.first() else { continue };
+        let within = |x: usize| sccs.component_of.get(x) == Some(&c);
+        if let Some(cycle) = shortest_cycle_through_node(graph, smallest, within)? {
+            return Err(GraphError::Cycle { cycle });
         }
     }
-    // Kahn's algorithm left nodes unordered, so some component is cyclic; in it, the smallest node has a successor
-    // inside the component, and the component is strongly connected, so the loop above returned a cycle.
+    // Kahn's algorithm left nodes unordered, so some component is cyclic; a cyclic component is strongly connected
+    // (or a self-loop), so every one of its nodes lies on a cycle inside it and the loop above returned one.
     Err(GraphError::Internal {
         what: crate::internal_error!("topo_sort found no witness for a cyclic graph").to_string(),
     })
+}
+
+/// The shortest cycle through `node` whose other nodes all satisfy `within`. The result starts with `node`; its last
+/// node has an edge back to `node`; a self-loop is `[node]`. Among several shortest cycles it is the first that a
+/// breadth-first search from `node` finds, visiting successors in the graph's order. `Ok(None)` when `node` lies on
+/// no such cycle.
+pub fn shortest_cycle_through_node<G: DirectedGraph + ?Sized>(
+    graph: &G,
+    node: usize,
+    within: impl Fn(usize) -> bool,
+) -> Result<Option<Vec<usize>>, GraphError> {
+    let n = graph.node_count();
+    let mut parent = vec![UNVISITED; n];
+    *parent.get_mut(node).ok_or(out_of_range(node, n))? = node;
+    // Nodes leave the queue in order of their distance from `node`, so the first edge back to `node` closes a
+    // shortest cycle.
+    let mut queue = VecDeque::from([node]);
+    while let Some(v) = queue.pop_front() {
+        for w in graph.successors(v) {
+            if w == node {
+                let mut path = vec![v];
+                let mut cur = v;
+                while cur != node {
+                    cur = *parent.get(cur).ok_or(out_of_range(cur, n))?;
+                    path.push(cur);
+                }
+                path.reverse();
+                return Ok(Some(path));
+            }
+            let seen = parent.get_mut(w).ok_or(out_of_range(w, n))?;
+            if *seen == UNVISITED && within(w) {
+                *seen = v;
+                queue.push_back(w);
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// The shortest cycle that uses the edge `from → to`, visiting only nodes for which `within` holds (besides `from`
@@ -523,7 +554,8 @@ fn augment_from(start: usize, adjacency: &[Vec<usize>], m: &mut Matching, dist: 
 /// the fewest chains, each listed in ascending order of `less`, that together contain every element exactly once.
 ///
 /// `less` must be irreflexive, asymmetric and transitive; this is checked (O(n³)), and a violation is
-/// [`GraphError::NotStrictPartialOrder`] with a witness. Chains are ordered by their smallest element index.
+/// [`GraphError::NotStrictPartialOrder`] with a witness. Chains are listed in ascending order of their first
+/// element, which is the chain's least element under `less` (not necessarily its smallest index).
 pub fn min_chain_cover(n: usize, less: impl Fn(usize, usize) -> bool) -> Result<Vec<Vec<usize>>, GraphError> {
     let mut relation = vec![vec![false; n]; n];
     for (i, row) in relation.iter_mut().enumerate() {
@@ -684,10 +716,63 @@ mod tests {
                         let next = cycle[(i + 1) % cycle.len()];
                         prop_assert!(g.has_edge(*v, next), "{:?}", cycle);
                     }
+                    // The witness runs through the smallest node of the first cyclic component and is a shortest
+                    // cycle through it inside that component.
+                    let sccs = tarjan_scc(&g).unwrap();
+                    let c = (0..sccs.count()).find(|&c| sccs.is_cyclic(&g, c)).unwrap();
+                    let smallest = sccs.components[c][0];
+                    prop_assert_eq!(cycle[0], smallest);
+                    prop_assert!(cycle.iter().all(|v| sccs.component_of[*v] == c));
+                    let shortest = shortest_cycle_len_brute_force(&g, smallest, |v| sccs.component_of[v] == c);
+                    prop_assert_eq!(Some(cycle.len()), shortest);
                 }
                 Err(other) => prop_assert!(false, "unexpected error {other:?}"),
             }
         }
+
+        #[test]
+        fn shortest_cycle_through_node_matches_brute_force(g in arb_graph(8), node in 0usize..8) {
+            let node = node % g.node_count().max(1);
+            if g.node_count() > 0 {
+                let found = shortest_cycle_through_node(&g, node, |_| true).unwrap();
+                prop_assert_eq!(found.as_ref().map(Vec::len), shortest_cycle_len_brute_force(&g, node, |_| true));
+                if let Some(cycle) = found {
+                    prop_assert_eq!(cycle[0], node);
+                    for (i, v) in cycle.iter().enumerate() {
+                        prop_assert!(g.has_edge(*v, cycle[(i + 1) % cycle.len()]), "{:?}", cycle);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The length of a shortest cycle through `node` whose nodes all satisfy `within`, by exhaustive search over
+    /// simple paths.
+    fn shortest_cycle_len_brute_force(g: &AdjacencyList, node: usize, within: impl Fn(usize) -> bool) -> Option<usize> {
+        fn walk(
+            g: &AdjacencyList,
+            start: usize,
+            v: usize,
+            len: usize,
+            on_path: &mut Vec<bool>,
+            within: &dyn Fn(usize) -> bool,
+            best: &mut Option<usize>,
+        ) {
+            for w in g.successors(v) {
+                if w == start {
+                    *best = Some(best.map_or(len, |b| b.min(len)));
+                } else if !on_path[w] && within(w) {
+                    on_path[w] = true;
+                    walk(g, start, w, len + 1, on_path, within, best);
+                    on_path[w] = false;
+                }
+            }
+        }
+        let mut best = None;
+        let mut on_path = vec![false; g.node_count()];
+        on_path[node] = true;
+        walk(g, node, node, 1, &mut on_path, &within, &mut best);
+        best
     }
 
     #[test]
@@ -698,6 +783,23 @@ mod tests {
         assert_eq!(topo_sort(&cyclic), Err(GraphError::Cycle { cycle: vec![1, 2, 3] }));
         let self_loop = graph(2, &[(0, 1), (1, 1)]);
         assert_eq!(topo_sort(&self_loop), Err(GraphError::Cycle { cycle: vec![1] }));
+    }
+
+    #[test]
+    fn topo_sort_witness_is_shortest_cycle_through_smallest_node() {
+        // Both cycles run through 0, the smallest node of the only cyclic component: 0 1 3 4 0 and the shorter 0 2 0.
+        // The witness is the shorter one, although 0 -> 1 is the smallest edge out of 0.
+        let g = graph(5, &[(0, 1), (1, 3), (3, 4), (4, 0), (0, 2), (2, 0)]);
+        assert_eq!(topo_sort(&g), Err(GraphError::Cycle { cycle: vec![0, 2] }));
+        assert_eq!(
+            shortest_cycle_through_node(&g, 3, |_| true).unwrap(),
+            Some(vec![3, 4, 0, 1])
+        );
+        assert_eq!(shortest_cycle_through_node(&g, 3, |v| v != 1).unwrap(), None);
+        assert_eq!(
+            shortest_cycle_through_node(&g, 5, |_| true),
+            Err(GraphError::NodeOutOfRange { node: 5, count: 5 })
+        );
     }
 
     #[test]
@@ -853,6 +955,16 @@ mod tests {
         assert_eq!(
             min_chain_cover(3, |_, _| false).unwrap(),
             vec![vec![0], vec![1], vec![2]]
+        );
+    }
+
+    #[test]
+    fn chain_cover_lists_chains_by_first_element() {
+        // 3 < 0 is the only relation: the chain [3, 0] starts at its least element 3, so it comes after [1] and [2]
+        // although it holds the smallest index.
+        assert_eq!(
+            min_chain_cover(4, |a, b| (a, b) == (3, 0)).unwrap(),
+            vec![vec![1], vec![2], vec![3, 0]]
         );
     }
 }

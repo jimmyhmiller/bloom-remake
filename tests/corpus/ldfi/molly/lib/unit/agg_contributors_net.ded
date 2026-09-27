@@ -1,20 +1,20 @@
-// The contributors of agg_contributors.ded made observable to LDFI (BENCH-135, provenance counts): each fact arrives
-// from its own node, and an aggregate depends on every contributor (TEST-024, Molly's conjunctive encoding), so losing
-// any one of the three messages behind counts(loc, A, 3) falsifies it, and only the one message behind
-// counts(loc, B, 1) falsifies that. Blossom golden corpus, derived (derived = true); see ../../README.md.
+// The contributors of agg_contributors.ded made observable to LDFI (BENCH-135, provenance counts): each reading
+// arrives from its own probe node, and an aggregate depends on every contributor (TEST-024, Molly's conjunctive
+// encoding), so losing any one of the three messages behind tally(k, "x", 3) falsifies it, and only the one message
+// behind tally(k, "y", 1) falsifies that. Blossom golden corpus, re-derived (derived = true); see ../../README.md.
 
-fact(L, Y, Z)@async :- fact_src(S, L, Y, Z);
-fact(L, Y, Z)@next :- fact(L, Y, Z);
-expected(L, A, N)@next :- expected(L, A, N);
-derived(X, Y, Z) :- fact(X, Y, Z);
-counts(L, A, count<B>) :- derived(L, A, B);
+reading(K, Sensor, V)@async :- probe(P, K, Sensor, V);
+reading(K, Sensor, V)@next :- reading(K, Sensor, V);
+quota(K, Sensor, N)@next :- quota(K, Sensor, N);
+seen(K, Sensor, V) :- reading(K, Sensor, V);
+tally(K, Sensor, count<V>) :- seen(K, Sensor, V);
 
-pre(L, A) :- expected(L, A, N);
-post(L, A) :- counts(L, A, N), expected(L, A, N);
+pre(K, Sensor) :- quota(K, Sensor, N);
+post(K, Sensor) :- tally(K, Sensor, N), quota(K, Sensor, N);
 
-expected("loc", "A", 3)@1;
-expected("loc", "B", 1)@1;
-fact_src("p1", "loc", "A", 100)@1;
-fact_src("p2", "loc", "A", 200)@1;
-fact_src("p3", "loc", "A", 300)@1;
-fact_src("p4", "loc", "B", 400)@1;
+quota("k", "x", 3)@1;
+quota("k", "y", 1)@1;
+probe("p1", "k", "x", 5)@1;
+probe("p2", "k", "x", 6)@1;
+probe("p3", "k", "x", 7)@1;
+probe("p4", "k", "y", 9)@1;

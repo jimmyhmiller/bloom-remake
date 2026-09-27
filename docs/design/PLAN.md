@@ -315,6 +315,9 @@ absent = "6.."
 [perf]                                         # informational targets read by the benchmark harness
 ```
 
+**Values of `[expect_analysis]` and diagnostic comparison.** Fixed at the M1 gate (DECISIONS.md) in
+`tests/corpus/README.md`, "Expectation vocabularies", and validated by the manifest lint.
+
 **Ticks.** Node-local ticks; tick 0 is the boot tick (CR-13). In the sync harness every live node ticks in every
 round, so a round number equals every node's tick; messages sent in round t are delivered in round t + 1
 (self-sends included). Inputs at tick k are delivered in tick k.

@@ -1,16 +1,19 @@
-// A lineage that runs through negation only (the role of Molly's negative_support_test, R10 T14 and R06 D26):
-// b greets a once, and b's outcome is good unless the greeting is missing at a. The outcome's positive lineage is an
-// input fact, which no fault can remove; only the negated subgoal `notin missing(B, A)` leads to the message, and a
-// fault that removes the message makes `missing` appear. A search without negative support (TEST-025 Off) finds no
-// hypothesis and reports no counterexample; conservative negative support (CR-31) finds the lost greeting.
-// Blossom golden corpus, re-derived (derived = true); see ../../README.md.
+// A lineage that runs only through negation (BENCH-137; the property of Molly's negative_support_test, R10 T14 and
+// R06 D26), written for this corpus. The server s acknowledges the client c's request once; c's outcome is good unless
+// the acknowledgement is overdue. The outcome's positive lineage is c's own request, which no fault can remove; the
+// acknowledgement reaches it only through `notin overdue`. A search without negative support (TEST-025 Off) has no
+// hypothesis and reports no counterexample; conservative negative support (CR-31) finds the lost acknowledgement.
+// Every rule is an ordinary deductive, `@next` or `@async` rule (no absolute-time body atom). Blossom golden corpus,
+// re-derived (derived = true); see ../../README.md.
 
-hello(A, B)@async :- greet(B, A);
-hello(A, B)@next :- hello(A, B);
+ack(C, S)@async :- asked(S, C);
+ack(C, S)@next :- ack(C, S);
+request(C, S)@next :- request(C, S);
+overdue(C, S) :- request(C, S), notin ack(C, S);
 
-// spec: pre holds once b greeted; post also needs the greeting to have arrived
-missing(B, A) :- greet(B, A)@1, notin hello(A, B);
-pre(B, A) :- greet(B, A)@1;
-post(B, A) :- greet(B, A)@1, notin missing(B, A);
+// spec: pre holds once c has asked; post also needs the acknowledgement not to be overdue
+pre(C, S) :- request(C, S);
+post(C, S) :- request(C, S), notin overdue(C, S);
 
-greet("b", "a")@1;
+request("c", "s")@1;
+asked("s", "c")@1;

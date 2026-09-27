@@ -394,8 +394,11 @@ The IR is the *meaning* of a program (LANGUAGE §4, ENG-001, CR-01, CR-50). It i
 
 ```rust
 // blossom-base::idx — every id is a dense u32 newtype over an IndexVec.
-define_idx!(FileId, Symbol, TypeId, LatticeTypeId, GroupTypeId, ConstId, ParamId, FnId, UdaId, ServiceId,
+define_idx!(FileId, TypeId, LatticeTypeId, GroupTypeId, ConstId, ParamId, FnId, UdaId, ServiceId,
             RoleId, RelId, RuleId, VarId, SiteId, ConstructId, StratumId, ColIdx, InvariantId, OccId);
+// blossom-base::span — an interned identifier: a handle to process-wide interned text (amended at the M1 gate,
+// DECISIONS.md). It has no observable id: it compares, orders, hashes and serializes by its text.
+#[derive(Copy, Clone)] pub struct Symbol(&'static str);
 
 pub struct Span { pub file: FileId, pub lo: u32, pub hi: u32 }
 /// A path of instance segments plus a final name, e.g. `chat.data.msg`, `M::receive$when`.
