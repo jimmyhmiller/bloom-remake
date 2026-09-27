@@ -1,0 +1,30 @@
+# BENCH-131a-2pc-7-3-0: 2pc: no counterexample at EOT 7, EFF 3, 0 crashes.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-131"
+title = "2pc: no counterexample at EOT 7, EFF 3, 0 crashes"
+priority = "P0"
+source = "FEATURES.md BENCH-131; R06 §12.2"
+features = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "SEM-020"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+Molly's CounterexampleSuite: 2pc at 7/3/0 has no counterexample. The coordinator re-sends the vote request while undecided and announces its decision at every step, so losses before EFF 3 only delay the protocol, and EOT 7 leaves room for it to finish (failure-free: votes in at 3, coordinator commits at 4, participants at 5).
+
+Programs and spec are re-derived (../lib/commit/*.ded); commit_spec.ded checks termination (at least two nodes decide once a participant prepared) and agreement exactly as Molly's commit spec does (R06 §12.2).
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "SEM-020"]
+until = "M8"
+
+[expect_ldfi]
+eot = 7
+eff = 3
+crashes = 0
+nodes = ["a", "b", "C", "d"]
+crash_view = "molly"
+verdict = "no_counterexample"

@@ -1,0 +1,13 @@
+// Input of the reliable-broadcast match (LDFI, SIGMOD 2015, §3.1): a fully connected `node` relation over the agents
+// {a, b, c}, and one broadcast of the payload "data" by agent a at time 1 ("Input is a single record
+// bcast(A, data)@1, along with a fully-connected node relation for the agents {A, B, C}").
+// Blossom golden corpus, re-derived from the paper text (derived = true); see ../../README.md.
+
+node("a", "b")@1;
+node("a", "c")@1;
+node("b", "a")@1;
+node("b", "c")@1;
+node("c", "a")@1;
+node("c", "b")@1;
+
+bcast("a", "data")@1;

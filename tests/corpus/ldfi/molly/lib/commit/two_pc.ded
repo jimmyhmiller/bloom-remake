@@ -1,0 +1,31 @@
+// Two-phase commit (Gray; LDFI, SIGMOD 2015, §5.1.1 and Figure 8). Blossom golden corpus, re-derived from the paper
+// and R06 §12.2 (derived = true); see ../../README.md.
+//
+// The coordinator keeps asking for votes while it is undecided; a willing participant answers every request with a
+// yes vote and becomes prepared. Once every participant's vote is in, the coordinator commits at the next step and
+// announces its decision at every step from then on. Nothing lets a participant decide without the coordinator: if
+// the coordinator crashes after asking, the prepared participants block (Figure 8), and if a participant crashes
+// before voting, everybody waits forever.
+
+participant(C, A)@next :- participant(C, A);
+peer(A, B)@next :- peer(A, B);
+can(A, X)@next :- can(A, X);
+
+// coordinator
+voting(C, X) :- begin(C, X);
+voting(C, X)@next :- voting(C, X), notin commit(C, X), notin abort(C, X);
+prepare(A, C, X)@async :- voting(C, X), participant(C, A);
+yes_vote(C, A, X)@next :- yes_vote(C, A, X);
+lacking_vote(C, X) :- voting(C, X), participant(C, A), notin yes_vote(C, A, X);
+commit(C, X)@next :- voting(C, X), notin lacking_vote(C, X);
+commit(A, X)@async :- commit(C, X), participant(C, A);
+abort(A, X)@async :- abort(C, X), participant(C, A);
+
+// participant
+yes_vote(C, A, X)@async :- prepare(A, C, X), can(A, X);
+prepared(A, C, X) :- prepare(A, C, X), can(A, X);
+prepared(A, C, X)@next :- prepared(A, C, X);
+
+// decisions are durable
+commit(N, X)@next :- commit(N, X);
+abort(N, X)@next :- abort(N, X);

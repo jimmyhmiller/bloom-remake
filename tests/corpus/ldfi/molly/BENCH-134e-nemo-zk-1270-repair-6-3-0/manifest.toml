@@ -1,0 +1,30 @@
+# BENCH-134e-nemo-zk-1270-repair-6-3-0: Nemo zk-1270-repair-6-3-0: no counterexample at EOT 6, EFF 3, 0 crashes.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-134"
+title = "Nemo zk-1270-repair-6-3-0: no counterexample at EOT 6, EFF 3, 0 crashes"
+priority = "P1"
+source = "FEATURES.md BENCH-134; R06 §12.5; Oldenburg, Zhu, Ramasubramanian, Alvaro, Fixed It For You (Nemo), CIDR 2019"
+features = ["LANG-220", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "TEST-024", "LANG-100", "LANG-101"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+FEATURES.md BENCH-134: 'The suggested repair for ZK-1270 is success(L) :- sent_flag(L), ack(F)'. Nemo §4: the synthesized line enforces the ordering constraint, and 'after repair is confirmed' Nemo only suggests retries for robustness. With the repair the leader keeps the acknowledgment, so success follows whenever an acknowledgment arrived, whatever the order.
+
+program.ded is ZK-1270-racing-sent-flag.ded from github.com/numbleroot/nemo (case-studies/, commit 18fe0a3), GPL-3.0; the license is third_party/molly/nemo/LICENSE and third_party/molly/README.md lists every vendored file. The failure spec is the one in the file's own header (the Molly command line the Nemo authors used). This case's program is a MODIFIED version of that file (the header states the modification, as GPL-3.0 §5 requires); the modified file is licensed under GPL-3.0 as well.
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "TEST-024", "LANG-100", "LANG-101"]
+until = "M8"
+
+[expect_ldfi]
+eot = 6
+eff = 3
+crashes = 0
+nodes = ["FF", "LL", "A"]
+crash_view = "molly"
+verdict = "no_counterexample"

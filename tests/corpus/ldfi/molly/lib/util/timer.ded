@@ -1,0 +1,9 @@
+// A logical timer (Blossom golden corpus; re-derived, derived = true; see ../../README.md).
+// arm_timer(Host, Purpose, Id, N) makes timeout(Host, Purpose, Id) hold exactly N steps later, unless
+// cancel_timer(Host, Purpose, Id) holds at one of the intermediate steps. Several timers with the same key may run at
+// once. Molly's examples use a reusable logical timeout service of the same kind (R06 §12.2, CR-19); this is a
+// countdown written for the corpus, with an explicit purpose column so that one host can run independent timers.
+
+timer(H, P, I, N) :- arm_timer(H, P, I, N);
+timer(H, P, I, N - 1)@next :- timer(H, P, I, N), N > 0, notin cancel_timer(H, P, I);
+timeout(H, P, I) :- timer(H, P, I, 0);

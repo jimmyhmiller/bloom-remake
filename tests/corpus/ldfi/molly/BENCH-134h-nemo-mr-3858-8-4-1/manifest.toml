@@ -1,0 +1,30 @@
+# BENCH-134h-nemo-mr-3858-8-4-1: Nemo mr-3858-8-4-1: counterexample at EOT 8, EFF 4, 1 crash.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-134"
+title = "Nemo mr-3858-8-4-1: counterexample at EOT 8, EFF 4, 1 crash"
+priority = "P1"
+source = "FEATURES.md BENCH-134; R06 §12.5; Oldenburg, Zhu, Ramasubramanian, Alvaro, Fixed It For You (Nemo), CIDR 2019"
+features = ["LANG-220", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "TEST-027", "TEST-024", "LANG-100", "LANG-101", "ANA-010"]
+program = "program.ded"
+derived = false
+expected_from = "literature"
+notes = """
+MR-3858 (incorrect local logic when a job result is committed from several workers; Nemo's TaxDC study): the commit can be granted to an attempt whose completion never arrives. R06 §12.5: each Nemo case study has a CE.
+
+program.ded is MR-3858-hadoop.ded from github.com/numbleroot/nemo (case-studies/, commit 18fe0a3), GPL-3.0; the license is third_party/molly/nemo/LICENSE and third_party/molly/README.md lists every vendored file. The failure spec is the one in the file's own header (the Molly command line the Nemo authors used).
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "TEST-027", "TEST-024", "LANG-100", "LANG-101", "ANA-010"]
+until = "M8"
+
+[expect_ldfi]
+eot = 8
+eff = 4
+crashes = 1
+nodes = ["am", "w1", "w2"]
+crash_view = "molly"
+verdict = "counterexample"

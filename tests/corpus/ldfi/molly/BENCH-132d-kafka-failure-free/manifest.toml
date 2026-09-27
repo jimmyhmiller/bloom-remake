@@ -1,0 +1,82 @@
+# BENCH-132d-kafka-failure-free: Kafka ISR: the failure-free run.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-132"
+title = "Kafka ISR: the failure-free run"
+priority = "P0"
+source = "FEATURES.md BENCH-132; R06 §12.3; LDFI SIGMOD'15 §1.1, §5.1.3, Fig. 10"
+features = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+Failure-free: registration at 1, ISR known at the leader and the write arriving at 3, copies at 4, their acknowledgments at 5, the client's acknowledgment at 6.
+
+Molly round k is tick k (CR-13). The rows omit the location column. The spec is not included: this case checks the protocol alone.
+"""
+
+[deploy]
+nodes = [
+  { name = "a", role = "Node" },
+  { name = "b", role = "Node" },
+  { name = "c", role = "Node" },
+  { name = "C", role = "Node" },
+  { name = "Z", role = "Node" },
+]
+
+[run]
+ticks = 8
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004"]
+until = "M5"
+
+# each replica registers once, at tick 1
+[[expect]]
+node = "Z"
+rel = "registered"
+row = ["b"]
+holds = "2..=7"
+absent = "..=1"
+
+# Zookeeper tells the leader the ISR from tick 2 on
+[[expect]]
+node = "a"
+rel = "isr"
+row = ["b"]
+holds = "3..=7"
+absent = "..=2"
+
+# the client's write reaches the leader at tick 3
+[[expect]]
+node = "a"
+rel = "data"
+row = ["w1"]
+holds = "3..=7"
+absent = "..=2"
+
+# the leader replicates it at tick 3
+[[expect]]
+node = "b"
+rel = "data"
+row = ["w1"]
+holds = "4..=7"
+absent = "..=3"
+
+[[expect]]
+node = "a"
+rel = "got_copy_ack"
+row = ["w1", "c"]
+holds = "5..=7"
+absent = "..=4"
+
+# every other ISR member acknowledged at tick 4, so the leader acknowledges at tick 5
+[[expect]]
+node = "C"
+rel = "acked"
+row = ["w1", "a"]
+holds = "6..=7"
+absent = "..=5"

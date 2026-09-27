@@ -1,0 +1,7 @@
+// BENCH-131o-3pc-8-0-1: 3pc: no counterexample at EOT 8, EFF 0, 1 crash.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/commit/three_pc.ded";
+include "../lib/util/timer.ded";
+include "../lib/commit/group.ded";
+include "../lib/commit/commit_spec.ded";

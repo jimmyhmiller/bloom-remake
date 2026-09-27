@@ -1,0 +1,6 @@
+// BENCH-132b-kafka-7-4-0: Kafka ISR: no counterexample at EOT 7, EFF 4, 0 crashes.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/kafka/replication.ded";
+include "../lib/kafka/group.ded";
+include "../lib/kafka/kafka_spec.ded";

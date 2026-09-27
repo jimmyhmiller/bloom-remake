@@ -1,0 +1,30 @@
+# BENCH-130m-redun-deliv-11-10-1: redun-deliv: no counterexample at EOT 11, EFF 10, 1 crash.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-130"
+title = "redun-deliv: no counterexample at EOT 11, EFF 10, 1 crash"
+priority = "P0"
+source = "FEATURES.md BENCH-130; R06 §12.1; LDFI SIGMOD'15 Fig. 13"
+features = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "ANA-010", "TEST-027"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+LDFI Figure 13 certifies redun-deliv at EOT 11 / EFF 10. The figure omits the crash bound; its Combinations column (8.07e18) equals Molly's grossEstimate for 3 nodes and exactly 1 crash (and no other node count or crash bound), so the certified configuration is 11/10/1. (The run count, 11, is pinned by BENCH-136h.)
+
+The program is the paper's (see ../lib/delivery/*.ded for the provenance of each line); the input is the paper's (group.ded) and the spec is delivery_spec.ded, whose oracle judges every run exactly as Molly's delivery spec does on this input (proof in that file).
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "ANA-010", "TEST-027"]
+until = "M8"
+
+[expect_ldfi]
+eot = 11
+eff = 10
+crashes = 1
+nodes = ["a", "b", "c"]
+crash_view = "molly"
+verdict = "no_counterexample"

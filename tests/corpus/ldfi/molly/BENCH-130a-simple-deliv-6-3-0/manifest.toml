@@ -1,0 +1,34 @@
+# BENCH-130a-simple-deliv-6-3-0: simple-deliv: counterexample at EOT 6, EFF 3, 0 crashes.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-130"
+title = "simple-deliv: counterexample at EOT 6, EFF 3, 0 crashes"
+priority = "P0"
+source = "FEATURES.md BENCH-130; R06 §12.1; LDFI SIGMOD'15 §3.1.1, Fig. 2, Fig. 4a"
+features = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "ANA-010"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+Molly's CounterexampleSuite: simplog + deliv_assert at 6/3/0 finds a counterexample. LDFI §3.1.1 and Figure 4a: log(B, data) has a single support, a's send to b at time 1; dropping it (O(a,b,1)) leaves b without the entry while c, a correct non-broadcaster, holds it.
+
+The program is the paper's (see ../lib/delivery/*.ded for the provenance of each line); the input is the paper's (group.ded) and the spec is delivery_spec.ded, whose oracle judges every run exactly as Molly's delivery spec does on this input (proof in that file).
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "ANA-010"]
+until = "M8"
+
+[expect_ldfi]
+eot = 6
+eff = 3
+crashes = 0
+nodes = ["a", "b", "c"]
+crash_view = "molly"
+verdict = "counterexample"
+falsifiers = [
+  ["O(a,b,1)"],
+  ["O(a,c,1)"],
+]

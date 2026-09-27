@@ -1,0 +1,8 @@
+// BENCH-131j-2pc-timeout-6-0-1: 2pc-timeout: counterexample at EOT 6, EFF 0, 1 crash.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/commit/two_pc.ded";
+include "../lib/util/timer.ded";
+include "../lib/commit/two_pc_timeout.ded";
+include "../lib/commit/group.ded";
+include "../lib/commit/commit_spec.ded";
