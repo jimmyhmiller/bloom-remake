@@ -1,0 +1,15 @@
+[package]
+name = "blossom-kernel"
+description = "Row stores, indexes, cursors and join kernels, the interner, the tick arena, the lattice heap, group tables, Z-set kernels, incremental digests and the Tier C provenance records. No dependency on the IR."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+blossom-base.workspace = true
+blossom-value.workspace = true
+blossom-lattice.workspace = true
+
+[lints]
+workspace = true

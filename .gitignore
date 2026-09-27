@@ -1,4 +1,13 @@
 .DS_Store
 .claude/settings.local.json
-/target
 .worktrees/
+# Build outputs, including private per-WP target directories (PLAN §2.1).
+/target*
+# Repository-local tool installs (scripts/install-dev-tools.sh, scripts/install-solvers.sh).
+/.tools
+# Benchmark inputs fetched by `cargo run -p xtask -- fetch-datasets`.
+/datasets
+# cargo-fuzz outputs.
+/fuzz/target
+/fuzz/artifacts
+/fuzz/coverage

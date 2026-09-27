@@ -1,0 +1,23 @@
+# Determinism discipline (ARCHITECTURE §12.1, ARCH-19). Exemptions are per module with a written reason
+# (`runtime::clock`, `runtime::entropy`); `blossom_base::det::{DetMap, DetSet}` are the hashed collections.
+# `allow-invalid = true` keeps the list valid in crates that do not depend on the named crate.
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order is not deterministic: use blossom_base::det::DetMap or BTreeMap" },
+    { path = "std::collections::HashSet", reason = "iteration order is not deterministic: use blossom_base::det::DetSet or BTreeSet" },
+    { path = "std::collections::hash_map::RandomState", reason = "randomly keyed hashing: use blossom_base::det::DetState" },
+    { path = "std::hash::RandomState", reason = "randomly keyed hashing: use blossom_base::det::DetState" },
+    { path = "hashbrown::HashMap", reason = "use blossom_base::det::DetMap (hashbrown::HashTable with an explicit hash stays allowed)", allow-invalid = true },
+    { path = "hashbrown::HashSet", reason = "use blossom_base::det::DetSet (hashbrown::HashTable with an explicit hash stays allowed)", allow-invalid = true },
+    { path = "hashbrown::DefaultHashBuilder", reason = "use blossom_base::det::DetState", allow-invalid = true },
+    { path = "foldhash::fast::RandomState", reason = "randomly keyed hashing: use blossom_base::det::DetState", allow-invalid = true },
+]
+disallowed-methods = [
+    { path = "std::time::Instant::now", reason = "ambient time: time comes from the node's Clock (blossom-node::env)" },
+    { path = "std::time::SystemTime::now", reason = "ambient time: time comes from the node's Clock (blossom-node::env)" },
+    { path = "rand::thread_rng", reason = "ambient randomness: use the SEM-084 PRF (blossom_value::prf) or the node's Entropy", allow-invalid = true },
+    { path = "rand::rng", reason = "ambient randomness: use the SEM-084 PRF (blossom_value::prf) or the node's Entropy", allow-invalid = true },
+]
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true

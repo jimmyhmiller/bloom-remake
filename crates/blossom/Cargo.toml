@@ -1,0 +1,25 @@
+[package]
+name = "blossom"
+description = "The facade for embedding Blossom: feature runtime (default) and feature compiler."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+blossom-base.workspace = true
+blossom-value.workspace = true
+blossom-node = { workspace = true, optional = true }
+blossom-runtime = { workspace = true, optional = true }
+blossom-std-host = { workspace = true, optional = true }
+blossom-driver = { workspace = true, optional = true }
+
+[features]
+default = ["runtime"]
+# Runtime, NodeHandle and typed rows (ARCHITECTURE §5.10).
+runtime = ["dep:blossom-node", "dep:blossom-runtime", "dep:blossom-std-host"]
+# The Compiler entry point.
+compiler = ["dep:blossom-driver"]
+
+[lints]
+workspace = true

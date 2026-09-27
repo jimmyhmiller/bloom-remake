@@ -1,0 +1,19 @@
+[package]
+name = "blossom-front"
+description = "Module loading, name resolution, instantiation, role placement, type checking, event classification, the HIR, lowering to the IR, specs and the schema lock."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+blossom-base.workspace = true
+blossom-value.workspace = true
+blossom-lattice.workspace = true
+blossom-std-src.workspace = true
+blossom-syntax.workspace = true
+blossom-ir.workspace = true
+blossom-schema.workspace = true
+
+[lints]
+workspace = true

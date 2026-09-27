@@ -1,0 +1,16 @@
+[package]
+name = "blossom-store"
+description = "The Vfs with RealFs and SimFs, the WAL, checkpoints, MetaStore, store identity and lock, recovery and migrations ordering, and store tooling."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+blossom-base.workspace = true
+blossom-value.workspace = true
+blossom-schema.workspace = true
+blossom-wire.workspace = true
+
+[lints]
+workspace = true
