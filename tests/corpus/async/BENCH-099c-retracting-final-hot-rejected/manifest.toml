@@ -1,0 +1,28 @@
+# BENCH-099 (R13 §12 T16; SEM-017): the retracting variant with `final` on hot is a compile error (BLS0705).
+#
+# R13 T16: "Retracting variant: a split may emit corrections, so counts becomes zset-typed. hot(w) is no longer
+# POS-FINAL ... A final annotation on hot becomes a compile error. This is Cor 20 applied to a job." LANGUAGE §14.5:
+# NEVER-FINAL outputs (the inverse curse: Z-set inputs, ...) are BLS0705. The counts are a Z-set written by an
+# unsealed correction stream, so no seal closes them and hot is NEVER-FINAL (R13 §9.3's invertibility test: "its
+# writers include a Z-set input or channel that can carry negative weights"). The one diagnostic is at the
+# `final output hot` declaration.
+schema = 1
+id = "BENCH-099"
+title = "Batch completion, retracting variant: `final output hot` over Z-set counts is rejected as NEVER-FINAL"
+priority = "P1"
+source = "R13 §12 T16 (retracting variant), §9.3 (NEVER-FINAL), §9.6 (Streaming panes); FT (ICDT 2025) Thm 18, Cor 20; LANGUAGE §14.5"
+features = ["LANG-009", "LANG-010", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-138", "LANG-153", "LANG-154", "LANG-181", "LANG-207", "LANG-212", "ANA-120", "SEM-016", "SEM-017"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "The correction stream is unsealed on purpose; see docs/plan/notes/M1.4.md (BENCH-099)."
+
+[backend.compile]
+status = "unimplemented"
+unimplemented = ["LANG-009", "LANG-010", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-138", "LANG-153", "LANG-154", "LANG-181", "LANG-207", "LANG-212", "ANA-120", "SEM-016", "SEM-017"]
+until = "M6"
+
+[[expect_diag]]
+code = "BLS0705"
+line = 65
+severity = "error"
