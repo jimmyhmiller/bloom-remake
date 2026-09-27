@@ -1,0 +1,35 @@
+# BENCH-150 (R10 T15; VER-007): before the rewrite, Paxos's invariant is reported outside EPR, with a QA-graph cycle.
+#
+# FEATURES BENCH-150: "Before the rewrite, the program is reported as outside EPR, with a cycle in the QA graph." R10
+# test 15: "The pre-rewrite model must be reported as outside EPR, with a QA-graph cycle through round/value/quorum/
+# node." Paxos Made EPR §5.2: eqs. (4)-(12) are an inductive invariant for the Fig. 3 model, but "the verification
+# condition for this inductive invariant contains cyclic quantifier alternations, and is therefore outside of EPR".
+#
+# The program is BENCH-150 (a)'s; the spec states eqs. (4)-(12) with eq. (12)'s existential written out and no derived
+# relation. Expected: the EPR check (VER-007) builds the quantifier-alternation graph and reports its cycles with the
+# fragments that cause them: eq. (12) (prefix ∀round, value, quorum ∃node, round, value: self-loops at round and
+# value), the propose action's quorum-of-acknowledgements condition (node -> round, node -> value) and eq. (7) (round,
+# value -> quorum; quorum -> node). It may offer the derived relations of VER-009 (left_round, joined_round), but it
+# does not apply them to this spec, so the check does not establish agreement: `result = "fails"` here means
+# "outside EPR, not proved", never a counterexample (the invariant is inductive). docs/plan/notes/M1.4.md records this
+# encoding.
+schema = 1
+id = "BENCH-150"
+title = "Paxos Made EPR before the rewrite: eqs. (4)-(12) are outside EPR and the QA-graph cycle is reported"
+priority = "P1"
+source = "R10 T15, A2.6 and test 15; Paxos Made EPR (OOPSLA 2017) §2.2, §5.2 and §6"
+features = ["LANG-009", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-083", "LANG-088", "LANG-100", "LANG-111", "LANG-120", "LANG-122", "LANG-123", "LANG-124", "LANG-126", "LANG-153", "LANG-201", "VER-001", "VER-006", "VER-007", "VER-008", "VER-009", "VER-010", "VER-042"]
+program = "program.bls"
+spec = "spec.bls"
+derived = true
+expected_from = "literature"
+notes = "The program is BENCH-150 (a)'s. The expected failure is the EPR fragment report, not a counterexample to induction."
+
+[backend.smt]
+status = "unimplemented"
+unimplemented = ["LANG-009", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-083", "LANG-088", "LANG-100", "LANG-111", "LANG-120", "LANG-122", "LANG-123", "LANG-124", "LANG-126", "LANG-153", "LANG-201", "VER-001", "VER-006", "VER-007", "VER-008", "VER-009", "VER-010", "VER-042"]
+until = "M10"
+
+[expect_verify]
+check = "smt"
+result = "fails"
