@@ -1,0 +1,38 @@
+# BENCH-102 (R03 T13), second half: a channel key conflict at the sender.
+#
+# Bud's test sends [p2, 70, 120] and [p2, 70, 130] on `c` in one tick and expects `Bud::KeyConstraintError` at the
+# sender. Both tuples have the key (addr, k1) = (p2, 70) and differ in v1, so the channel's send buffer holds two
+# distinct tuples with one key in one tick: SEM-050, checked at the sender (LANGUAGE §7.7), a hard runtime error
+# BLSR001 in p1's tick 1, before anything is sent.
+schema = 1
+id = "BENCH-102"
+title = "Bud channel with a key: two sends with one key in one tick are a key violation at the sender"
+priority = "P0"
+source = "R03 T13; bud test/tc_channel.rb (ChannelWithKey, TestPayloads#test_channel_with_key)"
+features = ["LANG-020", "LANG-042", "LANG-043", "LANG-062", "LANG-150", "SEM-050"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "p1", role = "Node" }, { name = "p2", role = "Node" }]
+
+[run]
+ticks = 4
+stop = "ticks"
+
+[[input]]
+node = "p1"
+tick = 1
+rel = "kickoff"
+rows = [["p2", 70, 120], ["p2", 70, 130]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-020", "LANG-042", "LANG-043", "LANG-062", "LANG-150", "SEM-050"]
+until = "M6"
+
+[[expect_error]]
+code = "BLSR001"
+node = "p1"
+tick = 1

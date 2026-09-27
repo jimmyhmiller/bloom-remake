@@ -1,0 +1,14 @@
+// BENCH-085: MAR Appendix F (concurrent arrival) in Molly's Dedalus dialect; the `.ded` twin of BENCH-085a. The
+// first column of every relation is its node; MAR's constant n1 in the `concurrent` rule is that column.
+
+p(L, X)@async :- q(L, X), notin r(L, X);
+r(L, X)@next :- q(L, X);
+r(L, X)@next :- r(L, X);
+concurrent(L) :- p(L, "c1"), p(L, "c2");
+concurrent(L)@next :- concurrent(L);
+
+// MAR's EDB holds at every tick; it is persisted by hand from tick 1.
+q(L, X)@next :- q(L, X);
+
+q("n1", "c1")@1;
+q("n1", "c2")@1;

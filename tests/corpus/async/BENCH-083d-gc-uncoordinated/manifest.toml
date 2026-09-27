@@ -1,0 +1,57 @@
+# BENCH-083 (R02 T16; R05 T3): the `.ded` twin of BENCH-083a, through the Molly frontend (LANG-220).
+#
+# The EDB appears in tick 1 (the `@1` facts); addresses and pointers are sent in tick 1 and arrive together in tick 2
+# (sync harness), so garbage = {c} from tick 2 on. Rows omit the location column (ARCHITECTURE §13.12). The analysis
+# verdicts are BENCH-083a's.
+schema = 1
+id = "BENCH-083"
+title = "Distributed GC without coordination (.ded twin): synchronous rounds collect only c; flagged diffluent"
+priority = "P0"
+source = "R02 T16 and §7.5 (MAR Appendix B, Example 7, verbatim program); R05 T3"
+features = ["LANG-065", "LANG-069", "LANG-220", "SEM-021", "SEM-022", "ANA-002", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+program = "program.ded"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "M", role = "Node" }, { name = "H1", role = "Node" }, { name = "H2", role = "Node" }]
+
+[run]
+ticks = 6
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-065", "LANG-069", "LANG-220", "SEM-021", "SEM-022", "ANA-002", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+until = "M5"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-065", "LANG-069", "LANG-220", "SEM-021", "SEM-022", "ANA-002", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+until = "M7"
+
+[[expect]]
+node = "M"
+rel = "garbage"
+row = ["c"]
+holds = "2.."
+absent = "..=1"
+
+[[expect]]
+node = "M"
+rel = "garbage"
+row = ["b"]
+absent = "0.."
+
+[[expect]]
+node = "M"
+rel = "garbage"
+row = ["a"]
+absent = "0.."
+
+[expect_analysis]
+points_of_order = { complete = true, edges = [{ from = "reach", to = "garbage", kind = "negation" }], clusters = [] }
+calm_labels = { outputs = { garbage = "D" } }
+certificates = { garbage = [] }
+confluent = { garbage = "not_confluent" }
+fair_consistency = { garbage = "not_certified" }

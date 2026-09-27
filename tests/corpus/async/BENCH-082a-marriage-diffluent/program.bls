@@ -1,0 +1,47 @@
+//! BENCH-082: the asynchronous marriage ceremony (Marczak, Alvaro, Conway, Hellerstein, Maier, "Confluence Analysis
+//! for Distributed Programs: A Model-Theoretic Approach", Datalog 2.0 2012, Example 3), ported rule by rule.
+//!
+//!     i_do(X)@async ← i_do_edb(X).
+//!     runaway() ← ¬i_do(bride), i_do(groom).
+//!     runaway() ← ¬i_do(groom), i_do(bride).
+//!     runaway()@next ← runaway().
+//!     i_do(X)@next ← i_do(X).
+//!
+//! Both vows are EDB facts, so the asynchronous rule sends both in every tick. If the first arrivals of the two
+//! vows fall in different ticks, `runaway` is derived in the first of them and persists; if they fall in the same
+//! tick, both vows are present from then on and `runaway` never holds. Two ultimate models: diffluent.
+
+program marriage version 1;
+
+/// MAR's `i_do_edb`: an EDB relation, true at every tick.
+static i_do_edb(who: String);
+fact i_do_edb("bride");
+fact i_do_edb("groom");
+
+/// The asynchronous head `i_do(X)@async`, addressed to the same node.
+loopback i_do_msg(who: String);
+/// `i_do` itself: every arrival, persisted by `i_do(X)@next ← i_do(X)`.
+table i_do(who: String);
+/// MAR's output relation.
+output runaway();
+
+vow: while i_do_edb(x) {
+    send i_do_msg(x);
+}
+
+arrive: on i_do_msg(x) {
+    emit i_do(x);
+}
+
+jilted_groom: while i_do("groom"), not i_do("bride") {
+    emit runaway();
+}
+
+jilted_bride: while i_do("bride"), not i_do("groom") {
+    emit runaway();
+}
+
+/// runaway()@next ← runaway().
+keep: while runaway() {
+    next runaway();
+}

@@ -1,0 +1,14 @@
+// BENCH-082: MAR Example 3 (the asynchronous marriage ceremony) in Molly's Dedalus dialect; the `.ded` twin of
+// BENCH-082a. The first column of every relation is the node; the rules are MAR's, with that column added.
+
+i_do(L, X)@async :- i_do_edb(L, X);
+runaway(L) :- i_do(L, "groom"), notin i_do(L, "bride");
+runaway(L) :- i_do(L, "bride"), notin i_do(L, "groom");
+runaway(L)@next :- runaway(L);
+i_do(L, X)@next :- i_do(L, X);
+
+// MAR's EDB holds at every tick; Molly facts hold only at their tick, so it is persisted by hand from tick 1.
+i_do_edb(L, X)@next :- i_do_edb(L, X);
+
+i_do_edb("n1", "bride")@1;
+i_do_edb("n1", "groom")@1;

@@ -1,0 +1,56 @@
+# BENCH-085 (R02 T18): concurrent arrival is diffluent.
+#
+# MAR Appendix F: for every pair of arrival ticks (s, t) there is a stable model, and concurrent() is ultimately
+# true iff s = t. R02 T18: "concurrent() is in the UM iff c1 and c2 are delivered at the same step, so the program is
+# diffluent." Analysis: the negation of r guards the send, and concurrent joins two arrivals of the unpersisted
+# channel p, which is not a join-morphism in p (ANA-141 condition 2), so the asynchrony is unguarded: D, not
+# confluent, no certificate.
+#
+# Oracle (sync harness): both messages are sent in tick 0 and arrive together in tick 1, the "s = t" ultimate model:
+# concurrent holds from tick 1 on. r holds from tick 1, so nothing is sent after tick 0; quiescent from tick 3.
+schema = 1
+id = "BENCH-085"
+title = "Concurrent arrival: diffluent; the synchronous schedule delivers both messages together"
+priority = "P1"
+source = "R02 T18 and §11 (MAR Appendix F, Example 11, verbatim program)"
+features = ["LANG-040", "LANG-043", "LANG-045", "LANG-046", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-190", "SEM-021", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[run]
+ticks = 8
+stop = "quiescent"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-045", "LANG-046", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-190", "SEM-021", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+until = "M5"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-045", "LANG-046", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-190", "SEM-021", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "p"
+tick = 1
+rows = [["c1"], ["c2"]]
+
+[[expect]]
+node = "n1"
+rel = "concurrent"
+row = []
+holds = "1.."
+absent = "0"
+
+[[expect]]
+quiescent_from = 3
+
+[expect_analysis]
+points_of_order = { complete = true, edges = [{ from = "r", to = "p", kind = "negation" }], clusters = [] }
+calm_labels = { outputs = { concurrent = "D" } }
+certificates = { concurrent = [] }
+confluent = { concurrent = "not_confluent" }
+fair_consistency = { concurrent = "not_certified" }

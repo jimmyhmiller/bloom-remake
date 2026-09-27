@@ -1,0 +1,65 @@
+# BENCH-080 (R02 T12): DL11 reliable broadcast under fair asynchronous delivery.
+#
+# R02 T12: "In fair runs every member eventually has rdeliver." With no faults every message is eventually
+# delivered (SEM-040), so each member receives sbcast(a, m1) at some tick, relays it and delivers it in the next tick.
+# `rdeliver` is not persisted, so the program also records each delivery in `delivered` (a harness table that nothing
+# reads); at the end of every run each of the four members, a included (it is its own member), has delivered.
+# The program floods forever, so the run is bounded by ticks rather than quiescence.
+schema = 1
+id = "BENCH-080"
+title = "DL11 reliable broadcast: every member eventually delivers under fair asynchronous delivery"
+priority = "P1"
+source = "R02 T12 and §4.7 (DL11 §5.7, verbatim program)"
+features = ["LANG-041", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-152", "LANG-240", "SEM-007", "SEM-040", "TEST-001"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+notes = "`delivered` and `record` are a harness addition (see program.bls); the DL11 rules are unchanged."
+
+[deploy]
+nodes = [
+    { name = "a", role = "Node" },
+    { name = "b", role = "Node" },
+    { name = "c", role = "Node" },
+    { name = "d", role = "Node" },
+]
+
+[run]
+ticks = 40
+stop = "ticks"
+seeds = 32
+
+[[input]]
+node = "a"
+tick = 1
+rel = "rmessage"
+rows = [["a", "m1"]]
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-041", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-152", "LANG-240", "SEM-007", "SEM-040", "TEST-001"]
+until = "M7"
+
+[[expect]]
+node = "a"
+rel = "delivered"
+final = true
+rows = [["a", "m1"]]
+
+[[expect]]
+node = "b"
+rel = "delivered"
+final = true
+rows = [["a", "m1"]]
+
+[[expect]]
+node = "c"
+rel = "delivered"
+final = true
+rows = [["a", "m1"]]
+
+[[expect]]
+node = "d"
+rel = "delivered"
+final = true
+rows = [["a", "m1"]]

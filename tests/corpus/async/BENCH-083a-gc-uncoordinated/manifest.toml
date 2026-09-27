@@ -1,0 +1,78 @@
+# BENCH-083 (R02 T16; R05 T3): distributed garbage collection without coordination.
+#
+# Scenario: master M, pointer owners H1 (r -> a) and H2 (a -> b), addresses {a, b, c} at M, root r. The root reaches
+# a and b; the only garbage is c.
+#
+# Oracle (sync harness): in tick 0 M sends the addresses to itself and H1, H2 send their pointers to M; everything
+# arrives together in tick 1, so reach is complete when the negation runs and garbage = {c} from tick 1 on. That is
+# the ultimate model "in which garbage is not computed until the transitive closure of refers_to has been fully
+# determined" (MAR Appendix B). BENCH-083b shows the premature ultimate models.
+#
+# Analysis (R05 T3: "point of order at the negation of reachability"): the only negative edge is reach -> garbage.
+# reach is fed by the asynchronous refers_to, so the path is A then N = D (ANA-023): diffluent, not certified.
+# Strata: refers_to and reach in stratum 0, garbage in stratum 1, plus the temporal pseudo-stratum: 3.
+schema = 1
+id = "BENCH-083"
+title = "Distributed GC without coordination: the synchronous schedule collects only unreachable c; flagged diffluent"
+priority = "P0"
+source = "R02 T16 and §7.5 (MAR Appendix B, Example 7, verbatim program); R05 T3"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-046", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-190", "SEM-021", "SEM-022", "ANA-002", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "M", role = "Node" }, { name = "H1", role = "Node" }, { name = "H2", role = "Node" }]
+
+[run]
+ticks = 6
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-046", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-190", "SEM-021", "SEM-022", "ANA-002", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+until = "M5"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-046", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-190", "SEM-021", "SEM-022", "ANA-002", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+until = "M7"
+
+[[expect]]
+node = "M"
+rel = "refers_to"
+tick = 1
+rows = [["a", "b"], ["r", "a"]]
+
+[[expect]]
+node = "M"
+rel = "garbage"
+row = ["c"]
+holds = "1.."
+absent = "0"
+
+[[expect]]
+node = "M"
+rel = "garbage"
+row = ["a"]
+absent = "0.."
+
+[[expect]]
+node = "M"
+rel = "garbage"
+row = ["b"]
+absent = "0.."
+
+[[expect]]
+node = "H1"
+rel = "garbage"
+final = true
+rows = []
+
+[expect_analysis]
+strata = { count = 3, of = { reach = 0, garbage = 1 } }
+points_of_order = { complete = true, edges = [{ from = "reach", to = "garbage", kind = "negation" }], clusters = [] }
+calm_labels = { outputs = { garbage = "D" } }
+certificates = { garbage = [] }
+confluent = { garbage = "not_confluent" }
+fair_consistency = { garbage = "not_certified" }

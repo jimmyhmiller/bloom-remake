@@ -1,0 +1,12 @@
+//! BENCH-082: some schedule of the marriage ceremony calls the wedding off (MAR Example 3: an ultimate model that
+//! contains `runaway()`).
+
+spec SomeRunElopes for r#program {
+    nodes N1;
+
+    /// "The wedding stays on." The two vows are sent in tick 0; a schedule that delivers one of them a tick before
+    /// the other derives `runaway` in the tick the first one arrives, so this invariant fails within the bounds.
+    invariant wedding_on: never runaway() @ N1;
+
+    check bmc { ticks: 4, delay: 2 } expect fails;
+}
