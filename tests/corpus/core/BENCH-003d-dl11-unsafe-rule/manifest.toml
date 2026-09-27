@@ -10,7 +10,9 @@ expected_from = "literature"
 notes = """
 Compile-only. The `.ded` frontend renders validator failure V1 (range restriction) as a user diagnostic with the
 `.ded` span (ARCHITECTURE §13.12). The code is assumed to be the range-restriction code BLS0500, the same as for
-a `.bls` program; LANGUAGE §20 assigns no separate code to `.ded` validator failures."""
+a `.bls` program; LANGUAGE §20 assigns no separate code to `.ded` validator failures. The second rule for p (ours)
+is safe and types p's third column, so the unsafe rule's range restriction is the only error (as the `.bls` twin
+annotates the column's type)."""
 
 [backend.compile]
 status = "unimplemented"
@@ -19,4 +21,4 @@ until = "M5"
 
 [[expect_diag]]
 code = "BLS0500"
-line = 6
+line = 7

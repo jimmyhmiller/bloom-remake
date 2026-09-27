@@ -7,7 +7,9 @@ features = ["SEM-020", "LANG-045", "LANG-047", "LANG-082", "LANG-085", "LANG-086
 program = "program.bls"
 derived = true
 expected_from = "literature"
-notes = "R09 T1: I contains s and l3 (the vulnerable call is reachable) and neither l1 nor l2 (l2 is reachable only through the protected l1)."
+notes = """
+R09 T1: I contains s and l3 (the vulnerable call is reachable) and neither l1 nor l2 (l2 is reachable only through
+the protected l1)."""
 
 [run]
 ticks = 2

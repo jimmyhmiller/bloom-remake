@@ -1,8 +1,11 @@
 // BENCH-003 (DL11 Ex. 6) in Molly's Dedalus dialect: the `.ded` twin of BENCH-003.
 //
 // `p(A, B) <- q(A);` with the location column added. B is bound by no positive subgoal, so the rule is not
-// range-restricted and the program must be rejected.
+// range-restricted and the program must be rejected. The second rule for p is ours: it is safe and gives p's third
+// column a type (INT, from the fact for s), so the only error is range restriction, not type inference.
 
 p(N, A, B) :- q(N, A);          // expect: BLS0500 (B is bound by no positive subgoal)
+p(N, A, B) :- q(N, A), s(N, B);
 
 q("n1", 1)@1;
+s("n1", 2)@1;

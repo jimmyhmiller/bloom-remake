@@ -8,7 +8,11 @@ expected_from = "literature"
 title = "Naive vs semi-naive: Andersen points-to analysis on random input"
 source = "R09 §13.1 and §16 T2 (RecStep VLDB'19 Andersen rules); FEATURES.md ENG-041, ENG-042, BENCH-030"
 notes = """
-The oracle evaluates naively and the interpreter semi-naively (ENG-041/042), and both must produce this exact relation. The input is pseudo-random (Python random.Random(101)) and fixed in the program; the expected relation is the least fixpoint of the published rules, computed by exhaustive naive evaluation independent of Blossom. Not asserted: that each (delta, old) combination is derived exactly once, which is an engine counter rather than an observable of the program (TEST-level check)."""
+The oracle evaluates naively and the interpreter semi-naively (ENG-041/042), and both must produce this exact
+relation. The input is pseudo-random (Python random.Random(101)) and fixed in the program; the expected relation is
+the least fixpoint of the published rules, computed by exhaustive naive evaluation independent of Blossom. Not
+asserted: that each (delta, old) combination is derived exactly once, which is an engine counter rather than an
+observable of the program (TEST-level check)."""
 
 [run]
 ticks = 2

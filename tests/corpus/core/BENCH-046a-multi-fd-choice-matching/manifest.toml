@@ -9,9 +9,8 @@ derived = true
 expected_from = "literature"
 notes = """
 On this g the invariants (edges only, both FDs, maximality) admit exactly the two choice models R12 lists. Node 1
-is matched in both, so matched_x(1) always holds. Judgement call: the canonical-mode answer {(1,a)} is not pinned,
-because LANGUAGE §10.4 does not say how `least`/`most` costs of several choice literals combine in one multi-FD
-scan; the simulator's 128 seeds exercise many priorities (every permutation is TEST-012's job)."""
+is matched in both, so matched_x(1) always holds. The canonical-mode answer {(1,a)} is pinned by BENCH-046c; the
+simulator's 128 seeds exercise many priorities here (every permutation is TEST-012's job, M8.2)."""
 
 [deploy]
 seed = 42
