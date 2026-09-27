@@ -1,4 +1,4 @@
-// BENCH-135c-ldfi-4-3-formula-4-2-1: ldfi-4-3-formula: counterexample at EOT 4, EFF 2, 1 crash; stated falsifiers.
+// BENCH-135d-two-proofs-formula-4-0-1: two-proofs-formula: no counterexample at EOT 4, EFF 0, 1 crash; stated falsifiers.
 // Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
 
 include "../lib/unit/two_proofs.ded";
