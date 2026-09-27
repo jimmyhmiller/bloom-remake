@@ -8,6 +8,10 @@ publish.workspace = true
 
 [dependencies]
 blossom-base.workspace = true
+blake3.workspace = true
+xxhash-rust.workspace = true
+siphasher.workspace = true
+postcard.workspace = true
 proptest = { workspace = true, optional = true }
 serde.workspace = true
 smallvec.workspace = true
