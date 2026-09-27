@@ -268,7 +268,9 @@ fn atom(p: &Program, r: &Rule, a: &Atom) -> String {
             out.push_str(&term(p, r, s));
         }
         if let Some(pr) = &a.principal {
-            out.push_str(", ");
+            if a.sender.is_some() {
+                out.push_str(", ");
+            }
             out.push_str(&term(p, r, pr));
         }
         out.push(')');
@@ -366,18 +368,101 @@ pub fn print(p: &Program) -> String {
             RelClass::Weighted(WeightKind::Bag) => "bag",
             RelClass::HostTable => "host table",
         };
-        let cols = r
+        let col_name = |i: ColIdx| {
+            r.schema.cols.get(i.index()).map_or(format!("<col:{}>", i.raw()), |c| {
+                if c.hidden_dest {
+                    format!("@{}", c.name)
+                } else {
+                    c.name.to_string()
+                }
+            })
+        };
+        let ordinary = r
             .schema
             .cols
             .iter()
-            .map(|c| format!("{}: {}", c.name, type_name(p, c.ty)))
+            .enumerate()
+            .filter(|(i, _)| {
+                !(r.schema.lattice.iter().any(|(col, _)| col.index() == *i)
+                    || matches!(
+                        &r.class,
+                        RelClass::Channel(ChannelDecl {
+                            form: ChannelForm::Direction { .. },
+                            ..
+                        })
+                    ) && *i == 0)
+            })
+            .map(|(_, c)| format!("{}: {}", c.name, type_name(p, c.ty)))
             .collect::<Vec<_>>()
             .join(", ");
+        let lattice = r
+            .schema
+            .lattice
+            .iter()
+            .map(|(col, ty)| {
+                let name = col_name(*col);
+                let lattice = p
+                    .lattices
+                    .get(*ty)
+                    .map_or(format!("<lattice:{}>", ty.raw()), |l| l.name.to_string());
+                format!("{name}: {lattice}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let columns = if lattice.is_empty() {
+            ordinary
+        } else {
+            format!("{ordinary}; {lattice}")
+        };
+        let mut flags = Vec::new();
+        if !r.schema.key.is_empty() {
+            flags.push(format!(
+                "key({})",
+                r.schema.key.iter().map(|i| col_name(*i)).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if !r.schema.payload.is_empty() {
+            flags.push(format!(
+                "payload({})",
+                r.schema
+                    .payload
+                    .iter()
+                    .map(|i| col_name(*i))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if let RelClass::Channel(ch) = &r.class {
+            if let ChannelForm::Direction { src, dst } = ch.form {
+                let role = |id: RoleId| {
+                    p.roles
+                        .get(id)
+                        .map_or(format!("<role:{}>", id.raw()), |r| r.name.to_string())
+                };
+                flags.push(format!("dir({} -> {})", role(src), role(dst)));
+            }
+            flags.push(format!(
+                "fault({})",
+                match ch.fault {
+                    FaultModel::Lossy => "lossy",
+                    FaultModel::LossyDelayed => "lossy_delayed",
+                    FaultModel::Reliable => "reliable",
+                    FaultModel::ReliableOrdered => "reliable_ordered",
+                }
+            ));
+        }
+        if r.durable {
+            flags.push("durable".into());
+        }
         writeln!(
             out,
-            "decl {class} {}({cols}){}",
+            "decl {class} {}({columns}){}",
             r.name,
-            if r.durable { " durable" } else { "" }
+            if flags.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", flags.join(" "))
+            }
         )
         .ok();
     }

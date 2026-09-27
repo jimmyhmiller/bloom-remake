@@ -359,7 +359,7 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
             );
             for (arg, col) in rule.head.args.iter().zip(&rel.schema.cols) {
                 let compatible = match arg {
-                    HeadArg::Term(t) => term_type(p, rule, t, col.ty),
+                    HeadArg::Term(t) => !matches!(t, Term::Wild) && term_type(p, rule, t, col.ty),
                     HeadArg::Agg(a) => agg_type(p, rule, a, col.ty),
                 };
                 check(
@@ -372,7 +372,7 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
             }
             if let HeadMode::ZAdd { weight } = &rule.head.mode {
                 check(
-                    term_matches(p, rule, weight, &TypeDef::Int(IntTy::I64)),
+                    !matches!(weight, Term::Wild) && term_matches(p, rule, weight, &TypeDef::Int(IntTy::I64)),
                     8,
                     Some(rule),
                     None,
@@ -671,15 +671,42 @@ fn term_matches(p: &Program, r: &Rule, t: &Term, ty: &TypeDef) -> bool {
     }
 }
 fn agg_type(p: &Program, r: &Rule, a: &AggCall, ty: TypeId) -> bool {
+    let is_numeric = |arg: &Term| {
+        !matches!(arg, Term::Wild)
+            && p.types
+                .iter()
+                .any(|(id, def)| matches!(def, TypeDef::Int(_) | TypeDef::F64) && term_type(p, r, arg, id))
+    };
+    let is_f64 = |arg: &Term| {
+        !matches!(arg, Term::Wild) && p.types.lookup(&TypeDef::F64).is_some_and(|id| term_type(p, r, arg, id))
+    };
+    let ola_result = || matches!(p.types.get(ty), Some(TypeDef::Tuple(fields)) if fields.len()==3 && fields.iter().all(|field| matches!(p.types.get(*field),Some(TypeDef::F64))));
     match &a.func {
-        AggFunc::Count | AggFunc::OlaCount => matches!(p.types.get(ty), Some(TypeDef::Int(IntTy::U64))),
-        AggFunc::BoolAnd | AggFunc::BoolOr => matches!(p.types.get(ty), Some(TypeDef::Bool)),
-        AggFunc::Avg | AggFunc::OlaAvg => matches!(p.types.get(ty), Some(TypeDef::F64)),
+        AggFunc::Count => {
+            a.args.len() <= 1
+                && a.args.iter().all(|arg| !matches!(arg, Term::Wild))
+                && matches!(p.types.get(ty), Some(TypeDef::Int(IntTy::U64)))
+        }
+        AggFunc::OlaCount => (1..=2).contains(&a.args.len()) && ola_result() && a.args.first().is_some_and(is_f64),
+        AggFunc::BoolAnd | AggFunc::BoolOr => {
+            a.args.len() == 1
+                && matches!(p.types.get(ty), Some(TypeDef::Bool))
+                && a.args.first().is_some_and(|arg| term_type(p, r, arg, ty))
+        }
+        AggFunc::Avg => {
+            a.args.len() == 1 && matches!(p.types.get(ty), Some(TypeDef::F64)) && a.args.first().is_some_and(is_numeric)
+        }
+        AggFunc::OlaSum | AggFunc::OlaAvg => {
+            (2..=3).contains(&a.args.len())
+                && ola_result()
+                && a.args.first().is_some_and(is_numeric)
+                && a.args.get(1).is_some_and(is_f64)
+        }
         AggFunc::Uda(id) => p
             .udas
             .get(*id)
             .and_then(|u| p.fns.get(u.finish))
-            .is_some_and(|f| f.ret == ty),
+            .is_some_and(|f| f.ret == ty && a.args.len() == 1),
         AggFunc::CollectVec => {
             matches!(p.types.get(ty),Some(TypeDef::Vec(t)) if a.args.len()==1&&a.args.first().is_some_and(|arg|term_type(p,r,arg,*t)))
         }
@@ -695,6 +722,12 @@ fn agg_type(p: &Program, r: &Rule, a: &AggCall, ty: TypeId) -> bool {
 fn check_literal(p: &Program, r: &Rule, l: &Literal) -> Result<(), String> {
     match l {
         Literal::Bind { pat, expr } => {
+            if let Pattern::Var(id) = pat {
+                let expected = r.body.vars.get(*id).ok_or("unknown binding variable")?.ty;
+                if expr_matches_type(p, r, expr, expected) {
+                    return Ok(());
+                }
+            }
             let ty = expr_type(p, r, expr)?;
             pattern_type(p, r, pat, ty)
         }
@@ -841,6 +874,15 @@ fn pattern_type(p: &Program, r: &Rule, pat: &Pattern, ty: TypeId) -> Result<(), 
         }
     }
 }
+fn expr_matches_type(p: &Program, r: &Rule, e: &Expr, expected: TypeId) -> bool {
+    match e {
+        Expr::Term(Term::Const(id)) => p
+            .consts
+            .get(*id)
+            .is_some_and(|v| p.types.check_value(expected, v).is_ok()),
+        _ => expr_type(p, r, e).is_ok_and(|actual| actual == expected),
+    }
+}
 fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
     let lookup = |d: TypeDef| {
         p.types
@@ -891,7 +933,12 @@ fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
         Expr::Binary { op, lhs, rhs } => {
             let a = expr_type(p, r, lhs)?;
             let b = expr_type(p, r, rhs)?;
-            if a != b {
+            let a = if a != b && expr_matches_type(p, r, lhs, b) {
+                b
+            } else {
+                a
+            };
+            if a != b && !expr_matches_type(p, r, rhs, a) {
                 return Err("binary operand type mismatch".into());
             }
             let def = p.types.get(a).ok_or("unknown binary type")?;
@@ -928,7 +975,7 @@ fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
                     return Err("function arity mismatch".into());
                 }
                 for (arg, (_, ty)) in args.iter().zip(&decl.params) {
-                    if expr_type(p, r, arg)? != *ty {
+                    if !expr_matches_type(p, r, arg, *ty) {
                         return Err("function argument type mismatch".into());
                     }
                 }
@@ -958,7 +1005,7 @@ fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
                 return Err("constructor arity mismatch".into());
             }
             for (x, t) in fields.iter().zip(expected) {
-                if expr_type(p, r, x)? != t {
+                if !expr_matches_type(p, r, x, t) {
                     return Err("constructor field type mismatch".into());
                 }
             }
@@ -985,7 +1032,13 @@ fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
                 return Err("if condition must be bool".into());
             }
             let a = expr_type(p, r, then)?;
-            if a != expr_type(p, r, els)? {
+            let b = expr_type(p, r, els)?;
+            let a = if a != b && expr_matches_type(p, r, then, b) {
+                b
+            } else {
+                a
+            };
+            if a != b && !expr_matches_type(p, r, els, a) {
                 return Err("if branch type mismatch".into());
             }
             Ok(a)
@@ -1104,18 +1157,52 @@ fn builtin_type(p: &Program, r: &Rule, b: &BuiltinFn, args: &[Expr]) -> Result<T
         }
         BuiltinFn::Route { role } => {
             arity(1)?;
+            if p.roles.get(*role).is_none() {
+                return Err("route references unknown role".into());
+            }
             lookup(TypeDef::Node(Some(*role))).or_else(|_| lookup(TypeDef::Node(None)))
         }
-        BuiltinFn::Majority { .. } => {
+        BuiltinFn::Majority { domain } => {
             arity(1)?;
+            let member = match domain {
+                MajorityDomain::Role(role) => {
+                    p.roles.get(*role).ok_or("majority references unknown role")?;
+                    p.types
+                        .lookup(&TypeDef::Node(Some(*role)))
+                        .or_else(|| p.types.lookup(&TypeDef::Node(None)))
+                }
+                MajorityDomain::Relation(rel) => {
+                    let decl = p.rels.get(*rel).ok_or("majority references unknown relation")?;
+                    if decl.schema.cols.len() != 1 || !matches!(decl.class, RelClass::Static) {
+                        return Err("majority domain must be a closed unary relation".into());
+                    }
+                    decl.schema.cols.first().map(|col| col.ty)
+                }
+            }
+            .ok_or("majority member type is not interned")?;
+            let input = types
+                .first()
+                .and_then(|id| p.types.get(*id))
+                .ok_or("missing majority input")?;
+            let TypeDef::Lattice(lattice) = input else {
+                return Err("majority expects a set-like lattice".into());
+            };
+            if !matches!(p.lattices.get(*lattice).map(|d| &d.ctor), Some(LatticeCtor::Set(element) | LatticeCtor::PSet(element)) if *element == member || matches!((p.types.get(*element),p.types.get(member)),(Some(TypeDef::Node(_)),Some(TypeDef::Node(_)))))
+            {
+                return Err("majority lattice element does not match its domain".into());
+            }
             lookup(TypeDef::Bool)
         }
         BuiltinFn::ClusterVersionAtLeast(_) => {
             arity(0)?;
             lookup(TypeDef::Bool)
         }
-        BuiltinFn::ZWeight { .. } | BuiltinFn::ZDelta { .. } => {
+        BuiltinFn::ZWeight { rel } | BuiltinFn::ZDelta { rel } => {
             arity(1)?;
+            let decl = p.rels.get(*rel).ok_or("weighted builtin references unknown relation")?;
+            if !matches!(decl.class, RelClass::Weighted(_)) {
+                return Err("weighted builtin requires a weighted relation".into());
+            }
             lookup(TypeDef::Int(IntTy::I64))
         }
         BuiltinFn::PrincipalOf => {
