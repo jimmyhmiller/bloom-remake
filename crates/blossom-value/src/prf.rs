@@ -7,8 +7,9 @@
 use std::fmt;
 use std::sync::Arc;
 
-use blossom_base::unimplemented_feature;
 use serde::{Deserialize, Serialize};
+use siphasher::sip::SipHasher13;
+use std::hash::Hasher;
 
 use crate::error::ValueError;
 use crate::fp::Fingerprint;
@@ -40,15 +41,49 @@ pub struct Seeds {
 impl Seeds {
     /// Derives a node's seeds from the root seed and the node's stable name.
     pub fn derive(root: Seed, node_name: &str) -> Result<Seeds, ValueError> {
-        let _ = (root, node_name);
-        unimplemented_feature!("SEM-084", "seed derivation (WP M2.1)")
+        Ok(Seeds {
+            deployment: root,
+            choice: derive_key(&root, "choose", b"")?,
+            node: derive_key(&root, "node", node_name.as_bytes())?,
+        })
     }
 }
 
 /// The keyed PRF: `PRF_key(domain, fingerprints…, words…)`.
 pub fn prf(key: &Seed, domain: &str, fingerprints: &[Fingerprint], words: &[u64]) -> Result<u64, ValueError> {
-    let _ = (key, domain, fingerprints, words);
-    unimplemented_feature!("SEM-084", "the SipHash-1-3 PRF (WP M2.1)")
+    let k0 = u64::from_le_bytes(
+        key.0[..8]
+            .try_into()
+            .map_err(|_| ValueError::InvalidValue("invalid seed".into()))?,
+    );
+    let k1 = u64::from_le_bytes(
+        key.0[8..]
+            .try_into()
+            .map_err(|_| ValueError::InvalidValue("invalid seed".into()))?,
+    );
+    let mut h = SipHasher13::new_with_keys(k0, k1);
+    h.write(&PRF_VERSION.to_le_bytes());
+    h.write(&(domain.len() as u64).to_le_bytes());
+    h.write(domain.as_bytes());
+    h.write(&(fingerprints.len() as u64).to_le_bytes());
+    for f in fingerprints {
+        h.write(&f.0.to_le_bytes());
+    }
+    h.write(&(words.len() as u64).to_le_bytes());
+    for w in words {
+        h.write(&w.to_le_bytes());
+    }
+    Ok(h.finish())
+}
+fn derive_key(root: &Seed, domain: &str, identity: &[u8]) -> Result<Seed, ValueError> {
+    // Length framing prevents distinct identities and domains from aliasing.
+    let id_hash = xxhash_rust::xxh3::xxh3_64(identity);
+    let lo = prf(root, domain, &[Fingerprint(id_hash)], &[0])?;
+    let hi = prf(root, domain, &[Fingerprint(id_hash)], &[1])?;
+    let mut bytes = [0; 16];
+    bytes[..8].copy_from_slice(&lo.to_le_bytes());
+    bytes[8..].copy_from_slice(&hi.to_le_bytes());
+    Ok(Seed(bytes))
 }
 
 /// An independent stream of pseudo-random decisions for one purpose, e.g. one simulator decision kind
@@ -84,8 +119,13 @@ impl PrfStream {
 
     /// The next value.
     pub fn next_u64(&mut self) -> Result<u64, ValueError> {
-        let _ = (&self.root, &self.identity);
-        unimplemented_feature!("DIST-032", "PRF decision streams (WP M2.1)")
+        let id_hash = xxhash_rust::xxh3::xxh3_64(&self.identity);
+        let value = prf(&self.root, &self.purpose, &[Fingerprint(id_hash)], &[self.position])?;
+        self.position = self
+            .position
+            .checked_add(1)
+            .ok_or_else(|| ValueError::InvalidValue("PRF stream counter overflow".into()))?;
+        Ok(value)
     }
 }
 
@@ -122,5 +162,44 @@ mod tests {
             Err(ValueError::Unimplemented(u)) => assert_eq!(u.feature.as_str(), "SEM-084"),
             Err(other) => panic!("unexpected error: {other}"),
         }
+    }
+}
+#[cfg(test)]
+mod m2_tests {
+    use super::*;
+    #[test]
+    fn prf_kat() {
+        assert_eq!(
+            prf(&Seed([0; 16]), "choose", &[Fingerprint(1), Fingerprint(2)], &[3]).unwrap(),
+            0x047f018c732edc10
+        );
+        let seeds = Seeds::derive(Seed([1; 16]), "n1").unwrap();
+        assert_eq!(
+            seeds.choice.0,
+            [
+                0x5a, 0x57, 0x1f, 0x53, 0xd9, 0x39, 0x7e, 0xa5, 0xcf, 0x4d, 0x80, 0x95, 0x9a, 0x9f, 0x79, 0xfe
+            ]
+        );
+        assert_eq!(
+            seeds.node.0,
+            [
+                0x81, 0xcf, 0xf6, 0x1d, 0x9e, 0x87, 0x82, 0xd9, 0x14, 0x09, 0xdd, 0x7a, 0xd3, 0x4b, 0xf3, 0x23
+            ]
+        );
+    }
+    #[test]
+    fn prf_stream_independent() {
+        let root = Seed([9; 16]);
+        let mut a = PrfStream::new(root, "timer", b"node-a");
+        let mut b = PrfStream::new(root, "network", b"node-a");
+        let first = a.next_u64().unwrap();
+        let second = a.next_u64().unwrap();
+        assert_ne!(first, second);
+        let before = b.next_u64().unwrap();
+        assert_ne!(first, before);
+        let mut replay = PrfStream::new(root, "timer", b"node-a");
+        assert_eq!(first, replay.next_u64().unwrap());
+        assert_eq!(second, replay.next_u64().unwrap());
+        assert_eq!(a.position(), 2);
     }
 }
