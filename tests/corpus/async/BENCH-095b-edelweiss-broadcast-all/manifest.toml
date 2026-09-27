@@ -1,0 +1,134 @@
+# BENCH-095 (R05 T19; §5.7, §5.9, §9.4 item 19): Edelweiss's reliable broadcast, fixed membership.
+#
+# R05 §5.9: "Reliable broadcast, fixed membership (§4.1) | 2 -> 8 | log entry once delivered to all (sealed) nodes; node
+# entries once log sealed." §5.7: "Fixed membership (sealed :node): DR+ reclaims log entries once every node has acked."
+# The artifact's rewrite (BroadcastAll_rewrite_src.rb) adds the ARM acknowledgement channel and range, and reclaims
+# `log < -(log * seal_node).lefts.notin(r0_node_log_missing, ...)`; node entries would need a seal on log, which never
+# comes. R05 §5.6: "For broadcast, you get one clock per node, a vector clock."
+#
+# Scenario: each of three nodes originates five messages (ticks 1 and 2), under 32 seeded schedules over the default
+# lossy channel; the run is bounded by ticks (the program resends forever). In every seed every node's log ends with all
+# 15 messages. In the rewritten program every log ends empty (no output reads the log) and each node's approximation of
+# delivered (addr, id) keys is three ranges per destination, one per originating node's id block: nine in all.
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss reliable broadcast, fixed membership: all delivered; logs reclaimed once acked everywhere"
+priority = "P1"
+source = "R05 T19, §5.6, §5.7, §5.9, §9.4 item 19; Edelweiss (VLDB 2014) §4.1; artifact broadcast_all.rb, BroadcastAll_rewrite_src.rb"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-063", "ANA-066", "DIST-007"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "n1", role = "Node" }, { name = "n2", role = "Node" }, { name = "n3", role = "Node" }]
+
+[run]
+ticks = 40
+stop = "ticks"
+seeds = 32
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-063", "ANA-066", "DIST-007"]
+until = "M7"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-063", "ANA-066", "DIST-007"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "originate"
+rows = [[1, "m1"], [2, "m2"], [3, "m3"]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "originate"
+rows = [[4, "m4"], [5, "m5"]]
+
+[[input]]
+node = "n2"
+tick = 1
+rel = "originate"
+rows = [[101, "m101"], [102, "m102"], [103, "m103"]]
+
+[[input]]
+node = "n2"
+tick = 2
+rel = "originate"
+rows = [[104, "m104"], [105, "m105"]]
+
+[[input]]
+node = "n3"
+tick = 1
+rel = "originate"
+rows = [[201, "m201"], [202, "m202"], [203, "m203"]]
+
+[[input]]
+node = "n3"
+tick = 2
+rel = "originate"
+rows = [[204, "m204"], [205, "m205"]]
+
+[[expect]]
+node = "n1"
+rel = "log"
+final = true
+rows = [[1, "m1"], [2, "m2"], [3, "m3"], [4, "m4"], [5, "m5"], [101, "m101"], [102, "m102"], [103, "m103"], [104, "m104"], [105, "m105"], [201, "m201"], [202, "m202"], [203, "m203"], [204, "m204"], [205, "m205"]]
+
+[[expect]]
+node = "n2"
+rel = "log"
+final = true
+rows = [[1, "m1"], [2, "m2"], [3, "m3"], [4, "m4"], [5, "m5"], [101, "m101"], [102, "m102"], [103, "m103"], [104, "m104"], [105, "m105"], [201, "m201"], [202, "m202"], [203, "m203"], [204, "m204"], [205, "m205"]]
+
+[[expect]]
+node = "n3"
+rel = "log"
+final = true
+rows = [[1, "m1"], [2, "m2"], [3, "m3"], [4, "m4"], [5, "m5"], [101, "m101"], [102, "m102"], [103, "m103"], [104, "m104"], [105, "m105"], [201, "m201"], [202, "m202"], [203, "m203"], [204, "m204"], [205, "m205"]]
+
+[expect_analysis.reclaimable]
+reclaimed = { log = "join_seal" }
+kept = { node = "unsealed_join" }
+channels = { chn = "arm" }
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "log"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n2"
+rel = "log"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n3"
+rel = "log"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.ranges]]
+node = "n1"
+channel = "chn"
+final = true
+buckets = [["n1", 1, 5], ["n1", 101, 105], ["n1", 201, 205], ["n2", 1, 5], ["n2", 101, 105], ["n2", 201, 205], ["n3", 1, 5], ["n3", 101, 105], ["n3", 201, 205]]
+
+[[expect_analysis.reclaimable.ranges]]
+node = "n2"
+channel = "chn"
+final = true
+buckets = [["n1", 1, 5], ["n1", 101, 105], ["n1", 201, 205], ["n2", 1, 5], ["n2", 101, 105], ["n2", 201, 205], ["n3", 1, 5], ["n3", 101, 105], ["n3", 201, 205]]
+
+[[expect_analysis.reclaimable.ranges]]
+node = "n3"
+channel = "chn"
+final = true
+buckets = [["n1", 1, 5], ["n1", 101, 105], ["n1", 201, 205], ["n2", 1, 5], ["n2", 101, 105], ["n2", 201, 205], ["n3", 1, 5], ["n3", 101, 105], ["n3", 201, 205]]

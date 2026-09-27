@@ -1,0 +1,80 @@
+# BENCH-095 (R05 T18; §5.4, §5.6, §9.4 item 18): Edelweiss's reliable unicast: delivered everywhere, sbuf reclaimed.
+#
+# R05 §9.4 item 18: "Reliable unicast (Fig. 1): after delivery, sbuf is empty and chn_approx holds one range. Messages stop
+# being re-sent." The artifact's rewrite (Unicast_rewrite_src.rb): `chn < sbuf.notin(chn_approx, 0 => :id).~`,
+# `sbuf < -(sbuf * chn_approx).lefts(0 => :id)`, `chn_ack <~ chn {|c| [c.source_addr, c.id]}`, `chn_approx <=
+# chn_ack.payloads` -- 2 rules become 5 (Edelweiss Table 4). The channel is eligible for ARM: every rule reading it
+# stores what it reads in a persistent table (R05 §5.4 (i)-(iii)).
+#
+# Scenario: the sender S buffers messages 1..10 for R (five in tick 1, five in tick 2) over the default lossy channel,
+# under 32 seeded schedules. The program resends until the end of the run, so it is bounded by ticks. In every seed R
+# ends with all ten messages; in the rewritten program S's sbuf ends empty and its approximation of delivered ids is
+# the single range [1, 10].
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss reliable unicast: every message delivered; ARM stops resends, reclaims sbuf, one range remains"
+priority = "P1"
+source = "R05 T18, §5.4, §5.6, §9.4 item 18; Edelweiss (VLDB 2014) Fig. 1, §3.1, §3.3; artifact unicast.rb, Unicast_rewrite_src.rb"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-062", "ANA-066", "DIST-007"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "S", role = "Node" }, { name = "R", role = "Node" }]
+
+[run]
+ticks = 40
+stop = "ticks"
+seeds = 32
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-062", "ANA-066", "DIST-007"]
+until = "M7"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-062", "ANA-066", "DIST-007"]
+until = "M7"
+
+[[input]]
+node = "S"
+tick = 1
+rel = "send_msg"
+rows = [[1, "R", "m1"], [2, "R", "m2"], [3, "R", "m3"], [4, "R", "m4"], [5, "R", "m5"]]
+
+[[input]]
+node = "S"
+tick = 2
+rel = "send_msg"
+rows = [[6, "R", "m6"], [7, "R", "m7"], [8, "R", "m8"], [9, "R", "m9"], [10, "R", "m10"]]
+
+[[expect]]
+node = "R"
+rel = "rbuf"
+final = true
+rows = [[1, "R", "m1"], [2, "R", "m2"], [3, "R", "m3"], [4, "R", "m4"], [5, "R", "m5"], [6, "R", "m6"], [7, "R", "m7"], [8, "R", "m8"], [9, "R", "m9"], [10, "R", "m10"]]
+
+[expect_analysis.reclaimable]
+reclaimed = { sbuf = "dr_plus" }
+kept = { rbuf = "no_negation" }
+channels = { chn = "arm" }
+
+[[expect_analysis.reclaimable.storage]]
+node = "S"
+rel = "sbuf"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "R"
+rel = "rbuf"
+final = true
+rows = [[1, "R", "m1"], [2, "R", "m2"], [3, "R", "m3"], [4, "R", "m4"], [5, "R", "m5"], [6, "R", "m6"], [7, "R", "m7"], [8, "R", "m8"], [9, "R", "m9"], [10, "R", "m10"]]
+
+[[expect_analysis.reclaimable.ranges]]
+node = "S"
+channel = "chn"
+final = true
+buckets = [[1, 10]]

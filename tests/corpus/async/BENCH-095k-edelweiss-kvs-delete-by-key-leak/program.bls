@@ -1,0 +1,52 @@
+//! BENCH-095: the negative variant of Edelweiss's replicated KVS in which a delete names a key, not an insert id
+//! (Edelweiss, VLDB 2014, §8; artifact kvs.rb's comment on Wuu and Bernstein: "a delete references a _key_, and deleted
+//! elements can never be reinstated").
+//!
+//!     view <= ins_log.notin(del_log, :key => :del_key)
+
+program edelweiss_kvs_delete_by_key version 1;
+
+static node(addr: Node);
+fact node("n1");
+fact node("n2");
+fact node("n3");
+
+channel ins_chn(@addr: Node, id: u64, key: String, val: String) key(addr, id);
+channel del_chn(@addr: Node, id: u64, del_key: String) key(addr, id);
+table ins_log(id: u64, key: String, val: String) key(id);
+table del_log(id: u64, del_key: String) key(id);
+
+/// The live key-value mappings (Bud's `view`, a hard keyword here, written as a raw identifier).
+output r#view(id: u64, key: String, val: String);
+
+/// From the host: an insert, or the deletion of a key.
+input put(id: u64, key: String, val: String);
+input remove_key(id: u64, del_key: String);
+
+insert: on put(i, k, v) {
+    emit ins_log(i, k, v);
+}
+
+delete_key: on remove_key(i, k) {
+    emit del_log(i, k);
+}
+
+ship_inserts: while node(a), ins_log(i, k, v) {
+    send ins_chn(a, i, k, v);
+}
+
+ship_deletes: while node(a), del_log(i, k) {
+    send del_chn(a, i, k);
+}
+
+store_insert: on ins_chn(_, i, k, v) {
+    emit ins_log(i, k, v);
+}
+
+store_delete: on del_chn(_, i, k) {
+    emit del_log(i, k);
+}
+
+live: while ins_log(i, k, v), not del_log(_, k) {
+    emit r#view(i, k, v);
+}
