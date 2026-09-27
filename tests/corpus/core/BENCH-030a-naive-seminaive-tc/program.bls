@@ -1,0 +1,32 @@
+//! BENCH-030: naive and semi-naive evaluation agree: transitive closure (RecStep VLDB'19, R09 §13.1).
+//!
+//!     tc(x, y) :- arc(x, y).
+//!     tc(x, y) :- tc(x, z), arc(z, y).
+//!
+//! A random graph of 10 nodes and 16 arcs.
+
+program naive_seminaive_tc version 1;
+
+static arc(x: u64, y: u64);
+
+fact arc(0, 1);
+fact arc(0, 3);
+fact arc(1, 4);
+fact arc(1, 6);
+fact arc(2, 1);
+fact arc(2, 9);
+fact arc(4, 0);
+fact arc(5, 8);
+fact arc(6, 9);
+fact arc(7, 0);
+fact arc(8, 3);
+fact arc(8, 4);
+fact arc(8, 6);
+fact arc(9, 0);
+fact arc(9, 3);
+fact arc(9, 4);
+
+view tc(x, y) {
+    arc(x, y);
+    tc(x, z), arc(z, y);
+}

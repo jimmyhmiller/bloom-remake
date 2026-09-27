@@ -1,0 +1,77 @@
+//! BENCH-026: Chord stabilization rules sb1-sb3 (p2/doc/chord.olg) with multi-location bodies, localized by the
+//! compiler (LANG-095, `#[localize(chain)]`).
+//!
+//!     sb1 succ(@NI,P,PI) :- stabilizeEvent(@NI), node(@NI,N), bestSucc(@NI,S,SI), pred(@SI,P,PI),
+//!                           PI != "NIL", P in (N,S).
+//!     sb2 succ(@NI,S1,SI1) :- stabilizeEvent(@NI), succ(@NI,S,SI), succ(@SI,S1,SI1).
+//!     sb3 pred(@SI,N,NI) :- stabilizeEvent(@NI), node(@NI,N), succ(@NI,S,SI), pred(@SI,P,PI), node(@SI,N1),
+//!                           ((PI == "NIL") || (N in (P,N1))) && (NI != SI).
+//!
+//! Identifiers are 8-bit ring ids (`Mod<8>`), and `x in (a,b)` is the ring interval `x in a<..b` (LANG-026). A
+//! node's id and its best successor are static configuration here (the n-rules that maintain `bestSucc` are not
+//! part of this test). `pred` holds one row (keys(1): a key overwrite, so an upsert); `"NIL"` is `known = false`.
+//! sb3's head lives at SI, so it is delivered there as `pred_update`. `succ` is a plain table (P2's 30 s TTL does
+//! not matter within the run). BENCH-026e localizes the same rules by hand.
+//!
+//! Scenario: a ring of na (10) and nb (50) that nc (100) has just joined: nc knows its successor na but has no
+//! predecessor, and nobody knows nc. nc stabilizes once; later nb stabilizes once.
+
+program chord_stabilize_localized version 1;
+
+role Peer: cluster;
+
+static node_id(n: Node<Peer>, id: Mod<8>);
+static best_succ(n: Node<Peer>, s: Mod<8>, si: Node<Peer>);
+static init_succ(n: Node<Peer>, s: Mod<8>, si: Node<Peer>);
+static init_pred(n: Node<Peer>, p: Mod<8>, pi: Node<Peer>, known: bool);
+
+fact node_id("na", 0x0aI);
+fact node_id("nb", 0x32I);
+fact node_id("nc", 0x64I);
+fact best_succ("na", 0x32I, "nb");
+fact best_succ("nb", 0x0aI, "na");
+fact best_succ("nc", 0x0aI, "na");
+fact init_succ("na", 0x32I, "nb");
+fact init_succ("nb", 0x0aI, "na");
+fact init_succ("nc", 0x0aI, "na");
+fact init_pred("na", 0x32I, "nb", true);
+fact init_pred("nb", 0x0aI, "na", true);
+fact init_pred("nc", 0x00I, "nc", false);
+
+channel pred_update(p: Mod<8>, pi: Node<Peer>): Peer -> Peer;
+
+at Peer {
+    input stabilize();
+
+    table succ(s: Mod<8>, si: Node<Peer>) key(s);
+    table pred(p: Mod<8>, pi: Node<Peer>, known: bool) key();
+
+    bootstrap {
+        for init_succ(self, s, si) {
+            emit succ(s, si);
+        }
+        for init_pred(self, p, pi, k) {
+            emit pred(p, pi, k);
+        }
+    }
+
+    #[localize(chain)]
+    sb1: on stabilize(), node_id(self, n), best_succ(self, s, si), pred(p, pi, true) @ si where p in n<..s {
+        emit succ(p, pi);
+    }
+
+    #[localize(chain)]
+    sb2: on stabilize(), succ(_, si), succ(s1, si1) @ si {
+        emit succ(s1, si1);
+    }
+
+    #[localize(chain)]
+    sb3: on stabilize(), node_id(self, n), succ(_, si), pred(p, _, known) @ si, node_id(si, n1)
+        where (not known || n in p<..n1) && si != self {
+        send pred_update(n, self) to si;
+    }
+
+    set_pred: on pred_update(n, ni) {
+        upsert pred(n, ni, true);
+    }
+}

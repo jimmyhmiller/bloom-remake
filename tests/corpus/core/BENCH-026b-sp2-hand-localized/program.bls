@@ -1,0 +1,51 @@
+//! BENCH-026: SP2 localized by hand, following the CACM09 rewrite quoted in R01 §5.6:
+//!
+//!     sp2a linkD(@Nxt,Src,Cost) :- link(@Src,Nxt,Cost).
+//!     sp2b path(@Src,Dest,Nxt,Path,Cost) :- linkD(@Nxt,Src,Cost1), path(@Nxt,Dest,Path2,Cost2),
+//!                                           Cost=Cost1+Cost2, Path = f_concatPath(Src,Path2).
+//!
+//! S ships its link to Z (`link_d`); Z joins it with its own paths and sends each new path to S. Same network and
+//! expected result as BENCH-026a.
+
+program sp2_hand_localized version 1;
+
+role Router: cluster;
+
+static link(src: Node<Router>, dst: Node<Router>, cost: u64);
+
+fact link("e", "a", 1);
+fact link("a", "b", 5);
+fact link("a", "c", 1);
+fact link("c", "b", 1);
+fact link("b", "d", 1);
+
+channel link_d(cost: u64): Router -> Router;
+channel path_ad(dst: Node<Router>, p: Vec<Node<Router>>, cost: u64): Router -> Router;
+
+at Router {
+    table path(dst: Node<Router>, nxt: Node<Router>, p: Vec<Node<Router>>, cost: u64);
+    table in_link(src: Node<Router>, cost: u64);
+
+    view sp_cost(d, c = min!(x)) = path(d, _, _, x);
+    view shortest_path(d, p, c) = sp_cost(d, c), path(d, _, p, c);
+
+    sp1: while link(self, d, c) {
+        emit path(d, d, [self, d], c);
+    }
+
+    sp2a: while link(self, z, c) {
+        send link_d(c) to z;
+    }
+
+    keep_link_d: on link_d(c) from s {
+        emit in_link(s, c);
+    }
+
+    sp2b: while in_link(s, c1), path(d, _, p2, c2) {
+        send path_ad(d, [s] ++ p2, c1 + c2) to s;
+    }
+
+    learn: on path_ad(d, p, c) from z {
+        emit path(d, z, p, c);
+    }
+}

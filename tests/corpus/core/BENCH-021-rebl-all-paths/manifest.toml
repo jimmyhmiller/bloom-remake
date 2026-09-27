@@ -1,0 +1,38 @@
+schema = 1
+id = "BENCH-021"
+title = "REBL all-paths: exactly 14 path tuples, including (a,b,b,1), (a,b,b,4) and (a,e,b,7)"
+priority = "P0"
+source = "R03 §11 T2 (bud docs/rebl.md, output of the first /tick); FEATURES.md BENCH-021"
+features = ["LANG-040", "LANG-045", "LANG-047", "LANG-060", "LANG-086"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+The 14 tuples are exactly REBL's printed output (docs/rebl.md). The links are static, so the paths exist from the
+boot tick; the relation is unchanged at later ticks."""
+
+[run]
+ticks = 3
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-045", "LANG-047", "LANG-060", "LANG-086"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-045", "LANG-047", "LANG-060", "LANG-086", "SEM-002"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "path"
+tick = 0
+rows = [["a", "c", "b", 5], ["a", "e", "b", 4], ["a", "b", "b", 1], ["b", "d", "c", 2], ["a", "c", "b", 2], ["a", "d", "b", 6], ["b", "e", "c", 3], ["b", "c", "c", 1], ["a", "d", "b", 3], ["c", "e", "d", 2], ["a", "e", "b", 7], ["a", "b", "b", 4], ["d", "e", "e", 1], ["c", "d", "d", 1]]
+
+[[expect]]
+node = "n1"
+rel = "path"
+final = true
+rows = [["a", "c", "b", 5], ["a", "e", "b", 4], ["a", "b", "b", 1], ["b", "d", "c", 2], ["a", "c", "b", 2], ["a", "d", "b", 6], ["b", "e", "c", 3], ["b", "c", "c", 1], ["a", "d", "b", 3], ["c", "e", "d", 2], ["a", "e", "b", 7], ["a", "b", "b", 4], ["d", "e", "e", 1], ["c", "d", "d", 1]]

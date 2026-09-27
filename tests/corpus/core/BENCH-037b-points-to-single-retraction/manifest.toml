@@ -1,0 +1,82 @@
+schema = 1
+id = "BENCH-037"
+title = "DOOP-style single-fact retraction from a points-to analysis equals a recompute"
+priority = "P1"
+source = "R09 §16 T10 (FlowLog DOOP retraction demo) and §13.1 (Andersen rules); FEATURES.md ENG-062, BENCH-037"
+features = ["ENG-004", "ENG-042", "ENG-062", "LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-063", "LANG-086"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Judgement call: DOOP itself (136 rules over Java bytecode) is out of reach of a hand-checked case, so the
+retraction is shown on Andersen's analysis. Retracting assign(v1, v4) at tick 3 (effective at 4) removes six
+points-to facts, including heap facts derived through store. Expected relations computed independently of
+Blossom. The "milliseconds" claim is a performance target, not a corpus expectation."""
+
+[run]
+ticks = 6
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["ENG-004", "ENG-042", "ENG-062", "LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-063", "LANG-086"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["ENG-004", "ENG-042", "ENG-062", "LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-063", "LANG-086", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "add_address_of"
+rows = [["v3", "o0"], ["v4", "o0"], ["v4", "o1"], ["v5", "o2"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "add_assign"
+rows = [["v1", "v2"], ["v1", "v4"], ["v3", "v5"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "add_load"
+rows = [["v1", "v0"], ["v2", "v1"], ["v3", "v0"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "add_store"
+rows = [["v2", "v1"], ["v3", "v2"], ["v3", "v4"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "retract_assign"
+rows = [["v1", "v4"]]
+
+[[expect]]
+node = "n1"
+rel = "points_to"
+tick = 1
+rows = [["o0", "o0"], ["o0", "o1"], ["o1", "o0"], ["o1", "o1"], ["o2", "o0"], ["o2", "o1"], ["v1", "o0"], ["v1", "o1"], ["v2", "o0"], ["v2", "o1"], ["v3", "o0"], ["v3", "o2"], ["v4", "o0"], ["v4", "o1"], ["v5", "o2"]]
+
+[[expect]]
+node = "n1"
+rel = "points_to"
+tick = 3
+rows = [["o0", "o0"], ["o0", "o1"], ["o1", "o0"], ["o1", "o1"], ["o2", "o0"], ["o2", "o1"], ["v1", "o0"], ["v1", "o1"], ["v2", "o0"], ["v2", "o1"], ["v3", "o0"], ["v3", "o2"], ["v4", "o0"], ["v4", "o1"], ["v5", "o2"]]
+
+[[expect]]
+node = "n1"
+rel = "points_to"
+tick = 4
+rows = [["o0", "o0"], ["o0", "o1"], ["o2", "o0"], ["o2", "o1"], ["v3", "o0"], ["v3", "o2"], ["v4", "o0"], ["v4", "o1"], ["v5", "o2"]]
+
+[[expect]]
+node = "n1"
+rel = "points_to"
+final = true
+rows = [["o0", "o0"], ["o0", "o1"], ["o2", "o0"], ["o2", "o1"], ["v3", "o0"], ["v3", "o2"], ["v4", "o0"], ["v4", "o1"], ["v5", "o2"]]

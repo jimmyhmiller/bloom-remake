@@ -1,0 +1,26 @@
+//! BENCH-029: the Soufflé security example (Jordan et al., CAV'16), quoted in R09 §16 T1:
+//!
+//!     .decl E(s:Node,d:Node) input
+//!     .decl P(node:Node) input
+//!     .decl I(node:Node) output
+//!     I("s").
+//!     I(y) :- I(x), E(x,y), !P(y).
+//!
+//! I is the set of call-graph nodes reachable from "s" without passing a protected node. Soufflé's `Node` is a
+//! symbol type here (Blossom's `Node` is a network address), so the columns are strings.
+
+program souffle_security version 1;
+
+static e(s: String, d: String);
+static p(node: String);
+
+fact e("s", "l1");
+fact e("l1", "l2");
+fact e("l2", "s");
+fact e("s", "l3");
+fact p("l1");
+
+view i(node) {
+    let node = "s";
+    i(x), e(x, node), not p(node);
+}

@@ -1,0 +1,32 @@
+//! BENCH-023: incremental maintenance of NDlog shortest paths under link updates (THESIS §5.4, Fig. 5.7).
+//!
+//! The Shortest-Path program of BENCH-022 over a mutable `link` table. Loo's thesis (§5.4.2, Theorem A.3)
+//! shows that incremental maintenance under a stream of inserts, deletes and updates reaches the state that
+//! evaluation from scratch gives on the final links. Here `link` is keyed by (src, dst): an update is an
+//! upsert (a delete of the old cost plus an insert of the new, as the thesis describes) and a link failure is a
+//! delete. `path`, `sp_cost` and `shortest_path` are views, so their meaning is re-evaluation from scratch every
+//! tick; the engine maintains them incrementally and must agree exactly (ENG-062, ENG-067).
+
+program ndlog_incremental_paths version 1;
+
+input set_link(src: String, dst: String, cost: u64);
+input drop_link(src: String, dst: String);
+
+table link(src: String, dst: String, cost: u64) key(src, dst);
+
+view path(s, d, z, p, c) {
+    link(s, d, c), let z = d, let p = [s, d];
+    link(s, z, c1), path(z, d, _, p2, c2), let p = [s] ++ p2, let c = c1 + c2;
+}
+
+view sp_cost(s, d, c = min!(x)) = path(s, d, _, _, x);
+
+view shortest_path(s, d, p, c) = sp_cost(s, d, c), path(s, d, _, p, c);
+
+insert_or_update: on set_link(s, d, c) {
+    upsert link(s, d, c);
+}
+
+remove: on drop_link(s, d), link(s, d, c) {
+    delete link(s, d, c);
+}

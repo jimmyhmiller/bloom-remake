@@ -1,0 +1,24 @@
+//! BENCH-028: the soft-state lifetime lint (Loo's thesis App. A.3.1; ANA-006).
+//!
+//! A pure soft-state rule whose soft head lives shorter than a soft body atom ("case 2") may time out between
+//! the body's refreshes, so "some soft-state derivations will oscillate being derived and timing out"; the thesis
+//! proposes a syntactic check that the head's lifetime exceeds every soft body's. ANA-006 warns (BLS1007).
+
+program soft_lifetime_lint version 1;
+
+input ping(n: String);
+
+soft table body(n: String) ttl 10s;
+soft table head(n: String) ttl 3s;
+
+output alive(n: String);
+
+refresh: on ping(n) {
+    emit body(n);
+}
+
+derive: while body(n) { emit head(n); }     // expect: BLS1007 (head ttl 3s < body ttl 10s)
+
+report: while head(n) {
+    emit alive(n);
+}

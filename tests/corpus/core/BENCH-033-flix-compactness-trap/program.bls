@@ -1,0 +1,24 @@
+//! BENCH-033: the Flix compactness trap (Madsen et al., "From Datalog to Flix", PLDI'16 §5; R09 §16 T5).
+//!
+//!     A(Odd). B(Even). A(x) :- B(x). R(x) :- isMaybeZero(x), A(x).
+//!
+//! over the parity lattice {⊥ < Odd, Even < ⊤}, where isMaybeZero holds for Even and ⊤. A's cell joins Odd and
+//! Even into ⊤, and a rule body must see that joined value: R(⊤). Evaluating the filter on each contribution
+//! separately would give R(Even) only. The parity lattice is written as the powerset lattice of {"odd", "even"}
+//! (isomorphic: ⊥ = {}, ⊤ = both), and isMaybeZero is the monotone threshold `"even" in v`. The unary relations
+//! of the Flix program get a unit key column.
+
+program flix_compactness version 1;
+
+static unit(k: u64);
+
+fact unit(0);
+
+view b(k, v: LSet<String>) = unit(k), let v = set["even"];
+
+view a(k, v: LSet<String>) {
+    unit(k), let v = set["odd"];
+    b(k, v);
+}
+
+view r(k, v: LSet<String>) = a(k, v) where "even" in v;
