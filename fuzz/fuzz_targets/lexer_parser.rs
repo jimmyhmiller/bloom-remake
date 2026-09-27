@@ -1,12 +1,12 @@
-//! Fuzz target `lexer_parser` (ARCHITECTURE §11.8): the lexer and parser: no panic; `print(parse(s)) == s` (lossless CST); every error has a span.
-//!
-//! Implemented by WP M2.3, together with its stable proptest mirror. Until then running it is an immediate
-//! finding, so the target can never pass silently.
+//! Lossless parser fuzz target (ARCHITECTURE §11.8).
 #![no_main]
-
+use blossom_base::FileId;
+use blossom_syntax::parser::parse;
 use libfuzzer_sys::fuzz_target;
-
 fuzz_target!(|data: &[u8]| {
-    let _ = data;
-    panic!("fuzz target lexer_parser is not implemented yet (WP M2.3)");
+    if let Ok(source) = std::str::from_utf8(data) {
+        let parsed = parse(FileId::from_raw(0), source);
+        assert_eq!(parsed.syntax().to_string(), source);
+        assert!(parsed.errors.iter().all(|e| e.primary.is_some()));
+    }
 });
