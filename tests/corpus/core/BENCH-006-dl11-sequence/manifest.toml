@@ -1,0 +1,77 @@
+schema = 1
+id = "BENCH-006"
+title = "DL11 §3.3: seq increments exactly at the ticks that have events"
+priority = "P0"
+source = "R02 §3.3 and §17 T6 (DL11 §3.3 Sequences); FEATURES.md BENCH-006"
+features = ["LANG-041", "LANG-043", "LANG-061", "LANG-082", "LANG-190", "SEM-003", "SEM-008"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Events at ticks 3, 4 and 7 (two events at tick 7, which still count once: the rule fires once per valuation of
+`seq(a)`). seq: 0 at ticks 0-3, 1 at tick 4, 2 at ticks 5-7, 3 from tick 8 on."""
+
+[run]
+ticks = 15
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-041", "LANG-043", "LANG-061", "LANG-082", "LANG-190", "SEM-003", "SEM-008"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-041", "LANG-043", "LANG-061", "LANG-082", "LANG-190", "SEM-003", "SEM-008", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "event"
+rows = [[1]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel = "event"
+rows = [[2]]
+
+[[input]]
+node = "n1"
+tick = 7
+rel = "event"
+rows = [[3], [4]]
+
+[[expect]]
+node = "n1"
+rel = "seq"
+row = [0]
+holds = "..=3"
+absent = "4.."
+
+[[expect]]
+node = "n1"
+rel = "seq"
+row = [1]
+holds = "4"
+
+[[expect]]
+node = "n1"
+rel = "seq"
+row = [2]
+holds = "5..=7"
+absent = "8.."
+
+[[expect]]
+node = "n1"
+rel = "seq"
+row = [3]
+absent = "..=7"
+holds = "8.."
+
+[[expect]]
+node = "n1"
+rel = "seq"
+tick = 5
+rows = [[2]]

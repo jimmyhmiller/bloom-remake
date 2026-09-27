@@ -1,0 +1,100 @@
+schema = 1
+id = "BENCH-005"
+title = "DI Fig. 1: toggle/announce alternates state 0/1 and announces asynchronously"
+priority = "P1"
+source = "R02 §3.2 and §17 T5 (Declarative Imperative Fig. 1, seed state(0)@1 added by R02); FEATURES.md BENCH-005"
+features = ["LANG-041", "LANG-043", "LANG-046", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-081"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+state is 0 at odd ticks and 1 at even ticks from tick 1 on (seed at tick 1). The announcement of toggle(x) sent at
+tick t arrives at t+1 (synchronous rounds deliver self-sends in the next round, PLAN §5.1), so announce(t) equals
+state(t) from tick 2 on."""
+
+[run]
+ticks = 30
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-041", "LANG-043", "LANG-046", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-081"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-041", "LANG-043", "LANG-046", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-081", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "seed_state"
+rows = [[0]]
+
+[[expect]]
+node = "n1"
+rel = "state"
+tick = 0
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "state"
+tick = 1
+rows = [[0]]
+
+[[expect]]
+node = "n1"
+rel = "state"
+tick = 2
+rows = [[1]]
+
+[[expect]]
+node = "n1"
+rel = "state"
+tick = 3
+rows = [[0]]
+
+[[expect]]
+node = "n1"
+rel = "state"
+tick = 20
+rows = [[1]]
+
+[[expect]]
+node = "n1"
+rel = "toggle"
+tick = 1
+rows = [[1]]
+
+[[expect]]
+node = "n1"
+rel = "announce"
+tick = 1
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "announce"
+tick = 2
+rows = [[1]]
+
+[[expect]]
+node = "n1"
+rel = "announce"
+tick = 3
+rows = [[0]]
+
+[[expect]]
+node = "n1"
+rel = "announce"
+tick = 21
+rows = [[0]]
+
+[[expect_send]]
+from = "n1"
+to = "n1"
+channel = "announce"
+row = [1]
+tick = 1

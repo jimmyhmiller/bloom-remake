@@ -1,0 +1,94 @@
+schema = 1
+id = "BENCH-009"
+title = "DI §3.3.1 soft state: a fact disappears once now - birth >= TTL unless refreshed (mocked now)"
+priority = "P1"
+source = "R02 §3.3 and §17 T10 (Declarative Imperative §3.3.1); R01 T8; FEATURES.md BENCH-009, CR-17"
+features = ["SEM-060", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-190"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Mocked clock: now = 10·t. TTL 35 means a tuple born at tick b (birth 10b) is carried while 10(t - b) < 35, so it
+holds at ticks b..=b+4. x: inserted at 2, holds 2..=6. y: inserted at 2 and refreshed (inserted again) at 5, so
+the second tuple (birth 50) holds 5..=9 and y is alive 2..=9. z: inserted at 2, deleted at 3, holds 2..=3.
+The `soft table` sugar reads the harness's sampled `now()`, which schema v1 cannot mock, so the exact-tick TTL
+behaviour is pinned here on the explicit DI encoding; BENCH-009b covers the sugar's refresh and eviction rules."""
+
+[run]
+ticks = 14
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-060", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-190"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-060", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-190", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "insert"
+rows = [["x", 35], ["y", 35], ["z", 35]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "del_q"
+rows = [["z"]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "insert"
+rows = [["y", 35]]
+
+[[expect]]
+node = "n1"
+rel = "mock_now"
+tick = 7
+rows = [[70]]
+
+[[expect]]
+node = "n1"
+rel = "q"
+row = ["x", 35, 20]
+absent = "..=1"
+holds = "2..=6"
+
+[[expect]]
+node = "n1"
+rel = "q"
+row = ["x", 35, 20]
+absent = "7.."
+
+[[expect]]
+node = "n1"
+rel = "q"
+row = ["y", 35, 50]
+holds = "5..=9"
+absent = "10.."
+
+[[expect]]
+node = "n1"
+rel = "alive"
+row = ["x"]
+holds = "2..=6"
+absent = "7.."
+
+[[expect]]
+node = "n1"
+rel = "alive"
+row = ["y"]
+holds = "2..=9"
+absent = "10.."
+
+[[expect]]
+node = "n1"
+rel = "alive"
+row = ["z"]
+holds = "2..=3"
+absent = "4.."

@@ -1,0 +1,20 @@
+//! BENCH-015: Bud's unstratifiable `glass` rule (docs/operational.md) must be rejected.
+//!
+//!     glass <= one_item {|t| ['full'] if glass.empty? }
+//!
+//! "glass.empty? => not glass.empty? ... a contradiction" (Bud docs). The instantaneous merge `<=` is an `emit`,
+//! and `glass.empty?` is the negation `not glass(_)`. The attribute silences the handler-level self-negation
+//! error BLS0506 (whose fix-it would be `next`), so that the stratifier's verdict is what this case checks:
+//! `glass` depends negatively on itself within one tick (BLS0502, with the cycle as witness).
+
+program glass_unstratifiable version 1;
+
+static one_item(t: String);
+
+fact one_item("item");
+
+output glass(v: String);
+
+// The whole cycle (the negation in the header and the write) is on one line, so the reported line is
+// unambiguous whichever construct the witness starts with.
+fill: while one_item(_), not glass(_) { #[allow(self_negation)] emit glass("full"); }   // expect: BLS0502

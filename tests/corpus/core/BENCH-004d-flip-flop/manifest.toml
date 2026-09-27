@@ -1,0 +1,54 @@
+schema = 1
+id = "BENCH-004"
+title = "DL11 Ex. 7: flip_flop oscillates with period 2 (.ded twin)"
+priority = "P0"
+source = "R02 §3.5 and §17 T4 (DL11 Example 7); FEATURES.md BENCH-004"
+features = ["LANG-069", "LANG-220", "SEM-008"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = "Same expectations as BENCH-004. The temporal-safety warning is not asserted (no diagnostic code exists)."
+
+[run]
+ticks = 60
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-069", "LANG-220", "SEM-008"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-069", "LANG-220", "SEM-008", "SEM-002"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "flip_flop"
+tick = 1
+rows = [[0, 1]]
+
+[[expect]]
+node = "n1"
+rel = "flip_flop"
+tick = 2
+rows = [[1, 0]]
+
+[[expect]]
+node = "n1"
+rel = "flip_flop"
+tick = 3
+rows = [[0, 1]]
+
+[[expect]]
+node = "n1"
+rel = "flip_flop"
+tick = 51
+rows = [[0, 1]]
+
+[[expect]]
+node = "n1"
+rel = "flip_flop"
+tick = 52
+rows = [[1, 0]]

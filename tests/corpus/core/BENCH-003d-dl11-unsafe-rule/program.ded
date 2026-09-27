@@ -1,0 +1,8 @@
+// BENCH-003 (DL11 Ex. 6) in Molly's Dedalus dialect: the `.ded` twin of BENCH-003.
+//
+// `p(A, B) <- q(A);` with the location column added. B is bound by no positive subgoal, so the rule is not
+// range-restricted and the program must be rejected.
+
+p(N, A, B) :- q(N, A);          // expect: BLS0500 (B is bound by no positive subgoal)
+
+q("n1", 1)@1;

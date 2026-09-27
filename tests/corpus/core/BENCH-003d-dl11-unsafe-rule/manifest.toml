@@ -1,0 +1,22 @@
+schema = 1
+id = "BENCH-003"
+title = "DL11 Ex. 6: the unsafe rule is rejected (.ded twin)"
+priority = "P0"
+source = "R02 §3.5 and §17 T3 (DL11 Example 6); ARCHITECTURE §13.12 (V1 as a user diagnostic); FEATURES.md BENCH-003"
+features = ["ANA-001", "LANG-220"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+Compile-only. The `.ded` frontend renders validator failure V1 (range restriction) as a user diagnostic with the
+`.ded` span (ARCHITECTURE §13.12). The code is assumed to be the range-restriction code BLS0500, the same as for
+a `.bls` program; LANGUAGE §20 assigns no separate code to `.ded` validator failures."""
+
+[backend.compile]
+status = "unimplemented"
+unimplemented = ["ANA-001", "LANG-220"]
+until = "M5"
+
+[[expect_diag]]
+code = "BLS0500"
+line = 6

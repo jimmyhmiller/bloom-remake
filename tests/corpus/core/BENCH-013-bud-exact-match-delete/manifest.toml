@@ -1,0 +1,58 @@
+schema = 1
+id = "BENCH-013"
+title = "Bud exact-match delete: deleting [5,11] never removes [5,10]"
+priority = "P0"
+source = "R03 §2.3 and §11 T5 (bud test/tc_collections.rb test_delete_key); FEATURES.md CR-06, BENCH-013"
+features = ["SEM-005", "LANG-040", "LANG-043", "LANG-060", "LANG-063", "LANG-190"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Bud: t1 has 1 tuple after each tick until [5,10] is buffered; it is gone two ticks after the host's `<+` into
+del_buf (one tick for the deferred insert, one for the deferred delete). Here the host's insertion lands in
+del_buf at tick 3 and the deletion takes effect at tick 4. [5, 11] is buffered at tick 1 and deletes nothing."""
+
+[run]
+ticks = 8
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-005", "LANG-040", "LANG-043", "LANG-060", "LANG-063", "LANG-190"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-005", "LANG-040", "LANG-043", "LANG-060", "LANG-063", "LANG-190", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "buffer_delete"
+rows = [[5, 11]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "buffer_delete"
+rows = [[5, 10]]
+
+[[expect]]
+node = "n1"
+rel = "t1"
+row = [5, 10]
+holds = "0..=3"
+absent = "4.."
+
+[[expect]]
+node = "n1"
+rel = "t1"
+tick = 2
+rows = [[5, 10]]
+
+[[expect]]
+node = "n1"
+rel = "t1"
+final = true
+rows = []

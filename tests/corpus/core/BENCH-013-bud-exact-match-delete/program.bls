@@ -1,0 +1,28 @@
+//! BENCH-013: Bud's exact-match delete (test/tc_collections.rb#test_delete_key).
+//!
+//!     table :t1, [:k] => [:v]
+//!     table :del_buf, [:k, :v]
+//!     bootstrap: t1 << [5, 10]
+//!     bloom:     t1 <- del_buf
+//!
+//! A deletion matches the exact tuple, never the key alone (CR-06): buffering [5, 11] never removes [5, 10];
+//! buffering [5, 10] removes it at the next tick. The host fills `del_buf` through the input `buffer_delete`.
+
+program exact_match_delete version 1;
+
+input buffer_delete(k: i64, v: i64);
+
+table t1(k: i64, v: i64) key(k);
+table del_buf(k: i64, v: i64);
+
+bootstrap {
+    emit t1(5, 10);
+}
+
+fill: on buffer_delete(k, v) {
+    emit del_buf(k, v);
+}
+
+remove: while del_buf(k, v) {
+    delete t1(k, v);
+}

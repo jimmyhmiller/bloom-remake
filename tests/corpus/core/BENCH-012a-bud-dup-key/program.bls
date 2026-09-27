@@ -1,0 +1,26 @@
+//! BENCH-012: Bud's `DupKeyBud` (test/tc_collections.rb#test_dup_keys).
+//!
+//!     scratch :tab, [:k] => [:name]
+//!     tab <= [[2000, 'bush']]
+//!     tab <= [[2000, 'gore']]
+//!
+//! Two distinct tuples with the same key in one relation in one tick: `KeyConstraintError` on the first tick
+//! (SEM-050, BLSR001). Bud's literal right-hand sides become `static` facts.
+
+program dup_key version 1;
+
+static lit_bush(k: i64, name: String);
+static lit_gore(k: i64, name: String);
+
+fact lit_bush(2000, "bush");
+fact lit_gore(2000, "gore");
+
+scratch tab(k: i64, name: String) key(k);
+
+from_bush: while lit_bush(k, n) {
+    emit tab(k, n);
+}
+
+from_gore: while lit_gore(k, n) {
+    emit tab(k, n);
+}

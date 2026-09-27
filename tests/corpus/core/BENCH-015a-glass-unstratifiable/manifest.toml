@@ -1,0 +1,22 @@
+schema = 1
+id = "BENCH-015"
+title = "Bud glass rule with <= is unstratifiable and rejected"
+priority = "P0"
+source = "R03 §4.3 and §11 T7 (bud docs/operational.md glass example); FEATURES.md SEM-020, BENCH-015"
+features = ["SEM-020", "SEM-021", "SEM-022", "ANA-002", "LANG-082"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Compile-only. The negative same-tick cycle glass -> fill$when -> glass is rejected with BLS0502 and its cycle
+witness. The handler is written on one line, so the expected line holds whichever construct (the negation or the
+write) the implementation reports as the primary span."""
+
+[backend.compile]
+status = "unimplemented"
+unimplemented = ["SEM-020", "SEM-021", "SEM-022", "ANA-002", "LANG-082"]
+until = "M5"
+
+[[expect_diag]]
+code = "BLS0502"
+line = 20

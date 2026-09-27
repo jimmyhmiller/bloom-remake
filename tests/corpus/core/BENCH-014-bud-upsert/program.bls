@@ -1,0 +1,30 @@
+//! BENCH-014: Bud's `TestUpsert` (test/tc_collections.rb).
+//!
+//!     table :joe ; table :t2 ; scratch :t1d ; scratch :t2d      # default schema [:key] => [:val]
+//!     bootstrap: joe << [1,'a'];  t2 << [2,'x'];  t1d << [1,'b'];  t2d << [2,'y']
+//!     bloom:     joe <+- t1d;  t2 <-+ t2d
+//!
+//! `<+-` and its alias `<-+` are the upsert: at the next tick the key's rows are replaced (LANGUAGE §8.2).
+//! Bud's first tick is our tick 0, so Bud's "tick 1" and "tick 2" are our ticks 0 and 1.
+
+program upsert version 1;
+
+table joe(key: i64, val: String) key(key);
+table t2(key: i64, val: String) key(key);
+scratch t1d(key: i64, val: String) key(key);
+scratch t2d(key: i64, val: String) key(key);
+
+bootstrap {
+    emit joe(1, "a");
+    emit t2(2, "x");
+    emit t1d(1, "b");
+    emit t2d(2, "y");
+}
+
+replace_joe: while t1d(k, v) {
+    upsert joe(k, v);
+}
+
+replace_t2: while t2d(k, v) {
+    upsert t2(k, v);
+}

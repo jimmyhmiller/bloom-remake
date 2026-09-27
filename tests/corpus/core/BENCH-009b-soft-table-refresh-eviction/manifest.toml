@@ -1,0 +1,95 @@
+schema = 1
+id = "BENCH-009"
+title = "soft table: refresh is not an insertion; max eviction removes the oldest in the same tick"
+priority = "P1"
+source = "FEATURES.md CR-17, SEM-060, BENCH-009; LANGUAGE §7.9; R01 §2.3 (P2 soft state, refresh and max size)"
+features = ["LANG-048", "SEM-060", "LANG-043", "LANG-060", "LANG-071"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Ticks 1-3 insert a, b, c; with max 2, c's arrival evicts a in tick 3 (oldest by birth, and least in canonical
+order if births tie). Tick 4 inserts d and evicts b. Tick 5 re-derives c: a refresh, so `inserted heard(c)` does
+not fire again and nothing is evicted. Assumption: the harness clock advances by less than 1000 days over the
+run, so no tuple expires; the TTL-driven expiry itself is pinned by BENCH-009a with a mocked clock."""
+
+[run]
+ticks = 8
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-048", "SEM-060", "LANG-043", "LANG-060", "LANG-071"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-048", "SEM-060", "LANG-043", "LANG-060", "LANG-071", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "seen"
+rows = [["a"]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "seen"
+rows = [["b"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "seen"
+rows = [["c"]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel = "seen"
+rows = [["d"]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "seen"
+rows = [["c"]]
+
+[[expect]]
+node = "n1"
+rel = "heard"
+tick = 2
+rows = [["a"], ["b"]]
+
+[[expect]]
+node = "n1"
+rel = "heard"
+tick = 3
+rows = [["b"], ["c"]]
+
+[[expect]]
+node = "n1"
+rel = "heard"
+tick = 4
+rows = [["c"], ["d"]]
+
+[[expect]]
+node = "n1"
+rel = "heard"
+tick = 5
+rows = [["c"], ["d"]]
+
+[[expect]]
+node = "n1"
+rel = "came_up"
+row = ["c"]
+holds = "3"
+absent = "4.."
+
+[[expect]]
+node = "n1"
+rel = "came_up"
+tick = 5
+rows = []

@@ -1,0 +1,13 @@
+// BENCH-002 (DL11 Ex. 4) in Molly's Dedalus dialect: the `.ded` twin of BENCH-002.
+//
+// Example 4 of DL11 (R02 §3.4) with the persist macro expanded. Every relation gains a leading location column.
+
+p_pos(N, A, B, T) :- insert_p(N, A, B, T);
+p_neg(N, A, B, T) :- p_pos(N, A, B, T), delete_p(N, T);
+p_pos(N, A, B, T)@next :- p_pos(N, A, B, T), notin p_neg(N, A, B, T);
+
+insert_p("n1", 1, 2, 10)@1;
+insert_p("n1", 3, 4, 10)@2;
+insert_p("n1", 5, 6, 20)@2;
+delete_p("n1", 10)@5;
+insert_p("n1", 1, 2, 10)@8;

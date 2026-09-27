@@ -1,0 +1,14 @@
+// BENCH-007 (DL11 §3.4 priority queue, per user) in Molly's Dedalus dialect: the `.ded` twin of BENCH-007a.
+//
+// The persist macro is expanded; every relation gains a leading location column. The input tuples are loaded
+// into m_priority_queue at 123 (R02 §17 T7).
+
+m_priority_queue(N, A, B, C)@next :- m_priority_queue(N, A, B, C), notin m_priority_queue_neg(N, A, B, C);
+omin(N, A, min<C>) :- m_priority_queue(N, A, _, C);
+priority_queue(N, A, B, C)@next :- m_priority_queue(N, A, B, C), omin(N, A, C);
+m_priority_queue_neg(N, A, B, C) :- m_priority_queue(N, A, B, C), omin(N, A, C);
+
+m_priority_queue("n1", "bob", "bash", 200)@123;
+m_priority_queue("n1", "eve", "ls", 1)@123;
+m_priority_queue("n1", "alice", "ssh", 204)@123;
+m_priority_queue("n1", "bob", "ssh", 205)@123;

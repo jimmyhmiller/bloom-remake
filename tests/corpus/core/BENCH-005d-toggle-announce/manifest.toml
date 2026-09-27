@@ -1,0 +1,60 @@
+schema = 1
+id = "BENCH-005"
+title = "DI Fig. 1: toggle/announce (.ded twin)"
+priority = "P1"
+source = "R02 §3.2 and §17 T5 (Declarative Imperative Fig. 1, seed state(0)@1 added by R02); FEATURES.md BENCH-005"
+features = ["LANG-069", "LANG-220", "LANG-081"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = "Same expectations as BENCH-005; nodes and inputs come from the program's `@k` facts."
+
+[run]
+ticks = 30
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-069", "LANG-220", "LANG-081"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-069", "LANG-220", "LANG-081", "SEM-002"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "state"
+tick = 1
+rows = [[0]]
+
+[[expect]]
+node = "n1"
+rel = "state"
+tick = 2
+rows = [[1]]
+
+[[expect]]
+node = "n1"
+rel = "state"
+tick = 20
+rows = [[1]]
+
+[[expect]]
+node = "n1"
+rel = "announce"
+tick = 2
+rows = [[1]]
+
+[[expect]]
+node = "n1"
+rel = "announce"
+tick = 3
+rows = [[0]]
+
+[[expect]]
+node = "n1"
+rel = "announce"
+tick = 21
+rows = [[0]]

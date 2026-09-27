@@ -1,0 +1,10 @@
+// BENCH-005 (DI Fig. 1, toggle/announce) in Molly's Dedalus dialect: the `.ded` twin of BENCH-005.
+//
+// Every relation gains a leading location column; `announce` is sent asynchronously to the node itself.
+
+toggle(N, 1) :- state(N, 0);
+toggle(N, 0) :- state(N, 1);
+state(N, X)@next :- toggle(N, X);
+announce(N, X)@async :- toggle(N, X);
+
+state("n1", 0)@1;

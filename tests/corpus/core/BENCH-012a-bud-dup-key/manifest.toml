@@ -1,0 +1,29 @@
+schema = 1
+id = "BENCH-012"
+title = "Bud DupKeyBud: two tuples with one key in one tick raise a key violation"
+priority = "P0"
+source = "R03 §2.6 and §11 T4 (bud test/tc_collections.rb DupKeyBud, test_dup_keys); FEATURES.md SEM-050, BENCH-012"
+features = ["SEM-050", "LANG-020", "LANG-041", "LANG-045", "LANG-060"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "Bud raises KeyConstraintError in its first tick; both rules fire at tick 0, so BLSR001 at tick 0."
+
+[run]
+ticks = 3
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-050", "LANG-020", "LANG-041", "LANG-045", "LANG-060"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-050", "LANG-020", "LANG-041", "LANG-045", "LANG-060", "SEM-002"]
+until = "M7"
+
+[[expect_error]]
+code = "BLSR001"
+node = "n1"
+tick = 0
