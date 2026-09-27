@@ -1,0 +1,95 @@
+//! BENCH-064b. Potato/Ferrari under simulation: the monotone query never retracts; the replicated state converges.
+//!
+//! Queries over a replicated 2P-Set cart and a gift-card transaction log ("Keep CALM and CRDT On", R04 §5.4): the
+//! replicated state converges, but only monotone queries are safe to answer locally.
+//!   - `checkout` = A − R is non-monotone: a remove that has not arrived yet can make it wrong (Potato/Ferrari).
+//!   - `suspicious`: more than 50 large gift-card transactions, a threshold: once true it stays true.
+//!   - `big_cart`: |A| + |R| > 100, a threshold over a bimorphism of two monotone sizes.
+//! Every operation is disseminated once to every other replica and merged by a join.
+
+program keep_calm version 1;
+
+role Client;
+role Replica: cluster;
+
+pub lattice TwoPSet {
+    adds: LSet<String>,
+    removes: LSet<String>,
+}
+
+channel add_msg(item: String): Client -> Replica;
+channel remove_msg(item: String): Client -> Replica;
+channel txn_msg(id: u64, amount: u64): Client -> Replica;
+channel cart_delta(d: TwoPSet): Replica -> Replica;
+channel txn_delta(id: u64, amount: LMax<u64>): Replica -> Replica;
+
+at Client {
+    input do_add(dst: Node<Replica>, item: String);
+    input do_remove(dst: Node<Replica>, item: String);
+    input do_txn(dst: Node<Replica>, id: u64, amount: u64);
+
+    add: on do_add(r, i) {
+        send add_msg(i) to r;
+    }
+    remove: on do_remove(r, i) {
+        send remove_msg(i) to r;
+    }
+    txn: on do_txn(r, id, a) {
+        send txn_msg(id, a) to r;
+    }
+}
+
+at Replica {
+    cell cart: TwoPSet;
+    table txns(id: u64, amount: LMax<u64>);
+
+    output checkout(item: String);
+    output suspicious();
+    output big_cart();
+
+    on_add: on add_msg(i) {
+        emit cart(TwoPSet { adds: set[i] });
+        for r in Replica where r != self {
+            send cart_delta(TwoPSet { adds: set[i] }) to r;
+        }
+    }
+    on_remove: on remove_msg(i) {
+        emit cart(TwoPSet { removes: set[i] });
+        for r in Replica where r != self {
+            send cart_delta(TwoPSet { removes: set[i] }) to r;
+        }
+    }
+    on_txn: on txn_msg(id, a) {
+        emit txns(id, a);
+        for r in Replica where r != self {
+            send txn_delta(id, a) to r;
+        }
+    }
+    merge_cart: on cart_delta(d) {
+        emit cart(d);
+    }
+    merge_txn: on txn_delta(id, a) {
+        emit txns(id, a);
+    }
+
+    /// Everything ever added: a monotone query.
+    view added(e) = e in cart.adds;
+    /// A − R: non-monotone.
+    view in_cart(e) = e in cart.adds, not (e in cart.removes);
+
+    report_checkout: while in_cart(e) {
+        emit checkout(e);
+    }
+    report_suspicious: while lset{ id | txns(id, a) where a >= 1000 }.size() > 50 {
+        emit suspicious();
+    }
+    report_big: while cart.adds.size() + cart.removes.size() > 100 {
+        emit big_cart();
+    }
+}
+
+at Replica {
+    /// A monotone query's rows are final when derived (FT Thm 25): a retraction is a hard error.
+    invariant added_never_retracts "a monotone query retracted a row":
+        never deleted added(_);
+}

@@ -1,0 +1,27 @@
+schema   = 1
+id       = "BENCH-067"
+title    = "Flo: reveal of an unbounded lattice in a coordination-free region is rejected (BLS0702)"
+priority = "P1"
+source   = "R04 §12 T21 (\"A to_sequence/reveal on an unbounded lattice must be rejected by the type checker\"); R04 §8"
+features = ["LANG-125", "LANG-127", "ANA-020", "ANA-031"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+Blossom has no bounded/unbounded stream types in its surface; the guarantee Flo's typing enforces (no exact read of a
+still-growing lattice where eager, coordination-free execution is claimed) is the `monotone` assertion of LANGUAGE
+§13.5. The view on line 15 claims monotonicity and reads the input-fed cell with `reveal!`, so the compiler rejects
+it with BLS0702, naming the reveal as the point of order.
+"""
+
+# BLS0502/BLS0503, BLS0702 and BLS0705 come from blossom-analysis over the IR (ARCHITECTURE §13.1), so the
+# diagnostic is expected from the analysis backend, not from the frontend-only compile backend.
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-125", "LANG-127", "ANA-020", "ANA-031"]
+until = "M5"
+
+[[expect_diag]]
+code     = "BLS0702"
+line     = 15
+severity = "error"

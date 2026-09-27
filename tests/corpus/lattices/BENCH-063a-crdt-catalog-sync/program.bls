@@ -1,0 +1,108 @@
+//! BENCH-063a. The CRDT catalog in lockstep rounds: exact replica states and query values per tick.
+//!
+//! The state-based CRDT catalog as lattice compositions (R04 §5.2), replicated with δ-state dissemination: every local
+//! update is merged locally and its delta is sent to every other replica (R04 §5.3: "a full state can be seen as a
+//! special case of a delta-group"). Merges are the lattices' joins, so any delivery order, batching or duplication
+//! gives the same replica states.
+//!   - G-Counter: `LMap<Node, LMax<u64>>`, increment = own entry + k; value = Σ entries (monotone, LANG-282).
+//!   - PN-Counter: a pair of G-Counters; value = P − N, which is neither monotone nor antitone.
+//!   - G-Set: `LSet`. 2P-Set: a pair (adds, removes); member = added and not removed (non-monotone).
+//!   - LWW register: the prelude's `Lww<String>`, a `Lex` over a tie-free (ts, node) key.
+
+program crdt_catalog version 1;
+
+role Replica: cluster;
+
+type GCounter = LMap<Node, LMax<u64>>;
+
+pub lattice PNCounter {
+    p: LMap<Node, LMax<u64>>,
+    n: LMap<Node, LMax<u64>>,
+}
+
+pub lattice TwoPSet {
+    adds: LSet<String>,
+    removes: LSet<String>,
+}
+
+channel gc_delta(d: GCounter): Replica -> Replica;
+channel pn_delta(d: PNCounter): Replica -> Replica;
+channel gs_delta(d: LSet<String>): Replica -> Replica;
+channel tp_delta(d: TwoPSet): Replica -> Replica;
+channel reg_delta(d: Lww<String>): Replica -> Replica;
+
+at Replica {
+    input incr(k: u64);
+    input decr(k: u64);
+    input add(e: String);
+    input remove(e: String);
+    input write(ts: u64, v: String);
+
+    cell gc: GCounter;
+    cell pn: PNCounter;
+    cell gs: LSet<String>;
+    cell tp: TwoPSet;
+    cell reg: Lww<String>;
+
+    /// Increments read this tick's entry and land at t+1 (an increment that fed itself in one tick would diverge).
+    inc: on incr(k) {
+        next gc(map[self => gc.at(self).join(0) + k]);
+        next pn(PNCounter { p: map[self => pn.p.at(self).join(0) + k] });
+        for r in Replica where r != self {
+            send gc_delta(map[self => gc.at(self).join(0) + k]) to r;
+            send pn_delta(PNCounter { p: map[self => pn.p.at(self).join(0) + k] }) to r;
+        }
+    }
+    dec: on decr(k) {
+        next pn(PNCounter { n: map[self => pn.n.at(self).join(0) + k] });
+        for r in Replica where r != self {
+            send pn_delta(PNCounter { n: map[self => pn.n.at(self).join(0) + k] }) to r;
+        }
+    }
+    insert: on add(e) {
+        emit gs(set[e]);
+        emit tp(TwoPSet { adds: set[e] });
+        for r in Replica where r != self {
+            send gs_delta(set[e]) to r;
+            send tp_delta(TwoPSet { adds: set[e] }) to r;
+        }
+    }
+    tombstone: on remove(e) {
+        emit tp(TwoPSet { removes: set[e] });
+        for r in Replica where r != self {
+            send tp_delta(TwoPSet { removes: set[e] }) to r;
+        }
+    }
+    assign: on write(ts, v) {
+        emit reg(Lex::of((ts, self), v));
+        for r in Replica where r != self {
+            send reg_delta(Lex::of((ts, self), v)) to r;
+        }
+    }
+
+    merge_gc: on gc_delta(d) {
+        emit gc(d);
+    }
+    merge_pn: on pn_delta(d) {
+        emit pn(d);
+    }
+    merge_gs: on gs_delta(d) {
+        emit gs(d);
+    }
+    merge_tp: on tp_delta(d) {
+        emit tp(d);
+    }
+    merge_reg: on reg_delta(d) {
+        emit reg(d);
+    }
+
+    // ---- queries
+    view gc_total(t) = let t = gc.sum_values();
+    view pn_value(v) =
+        let p = reveal!(pn.p.sum_values()).unwrap_or(0),
+        let n = reveal!(pn.n.sum_values()).unwrap_or(0),
+        let v = p as i64 - n as i64;
+    view gset_members(e) = e in gs;
+    view tp_members(e) = e in tp.adds, not (e in tp.removes);
+    view reg_value(v) = let Some(v) = reg.val!().get();
+}

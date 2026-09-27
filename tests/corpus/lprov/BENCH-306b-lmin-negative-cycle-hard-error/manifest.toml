@@ -1,0 +1,39 @@
+schema   = 1
+id       = "BENCH-306"
+title    = "T7-neg: a negative cycle makes the in-tick fixpoint diverge: the iteration-bound hard error BLSR007"
+priority = "P0"
+source   = "R11/G1 §7 T7-neg; R11 §3.2 D8; CR-53; ENG-140"
+features = ["LANG-121", "LANG-124", "SEM-032", "SEM-103", "ENG-047", "ENG-140"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+R11 T7-neg replaces c→a 3 with c→a −4: the cycle a→b→c→a weighs −1, so every round lowers some path again and the
+tick's fixpoint is undefined (D8). The engine must raise the iteration-bound hard error in the tick the edges
+arrive, naming the offending cells (ENG-140); silently truncating is a bug.
+"""
+
+[run]
+ticks = 3
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "edge_in"
+rows = [["a", "b", 1], ["b", "c", 2], ["c", "a", -4], ["a", "c", 5]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-121", "LANG-124", "SEM-032", "SEM-103", "ENG-047", "ENG-140"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-121", "LANG-124", "SEM-032", "SEM-103", "ENG-047", "ENG-140"]
+until = "M7"
+
+[[expect_error]]
+code = "BLSR007"
+node = "n1"
+tick = 1

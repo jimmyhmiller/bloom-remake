@@ -1,0 +1,25 @@
+schema   = 1
+id       = "BENCH-313"
+title    = "T14 FLP-vs-GZ oracle in ASP: the verifier backend must find the model {a, b}"
+priority = "P0"
+source   = "R11/G1 §7 T14 (\"A VER-003 backend that disagrees with the simulator here is misconfigured\"); CR-54; VER-040"
+features = ["LANG-201", "SEM-106", "VER-003", "VER-040", "VER-041"]
+program  = "program.bls"
+spec     = "spec.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+`p(a). p(b) :- #count{X:p(X)} > 0.` has the FLP/Ferraris answer set {p(a), p(b)} (confirmed on clingo 5.8.2 in R11
+§2.7) and no Alog answer set. The spec's invariant is violated exactly by that model, so the check must fail; "holds"
+would mean no model was found, i.e. GZ semantics.
+"""
+
+[backend.asp]
+status = "unimplemented"
+unimplemented = ["LANG-201", "SEM-106", "VER-003", "VER-040", "VER-041"]
+until = "M10"
+
+[expect_verify]
+check  = "asp"
+result = "fails"
+bounds = { ticks = 1 }

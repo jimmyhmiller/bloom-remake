@@ -1,0 +1,93 @@
+schema   = 1
+id       = "BENCH-305"
+title    = "T6 antitone read: small holds at ticks 0–2 and not at 3–4; small is one stratum above seen"
+priority = "P0"
+source   = "R11/G1 §7 T6 (✓sim)"
+features = ["LANG-124", "LANG-125", "LANG-126", "LANG-280", "LANG-281", "SEM-020", "SEM-021", "SEM-022", "SEM-102"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+inp holds 1, 2 and 3 at ticks 1, 2 and 3. R11 T6: @0 seen ⊥ and small true (the lookup is ⊥ and its size is 0 ≤ 2);
+@1 {1} true; @2 {1,2} true; @3 and @4 {1,2,3} false. Ultimately small is false. The negated threshold is an exact
+read, so small is in stratum 1 and seen in stratum 0.
+Ultimate L-model (R11 T6): seen ↦ {1,2,3}, and small is false; the `final` rows state it.
+"""
+
+[run]
+ticks = 5
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "inp"
+rows = [[1]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel  = "inp"
+rows = [[2]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel  = "inp"
+rows = [[3]]
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-124", "LANG-125", "LANG-126", "LANG-280", "LANG-281", "SEM-020", "SEM-021", "SEM-022", "SEM-102"]
+until = "M5"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-124", "LANG-125", "LANG-126", "LANG-280", "LANG-281", "SEM-020", "SEM-021", "SEM-022", "SEM-102"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-124", "LANG-125", "LANG-126", "LANG-280", "LANG-281", "SEM-020", "SEM-021", "SEM-022", "SEM-102"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel  = "seen"
+tick = 0
+rows = []
+
+[[expect]]
+node = "n1"
+rel  = "seen"
+tick = 2
+rows = [[[1, 2]]]
+
+[[expect]]
+node  = "n1"
+rel   = "seen"
+row   = [[1, 2, 3]]
+holds = "3..=4"
+
+[[expect]]
+node   = "n1"
+rel    = "small"
+row    = []
+holds  = "0..=2"
+absent = "3..=4"
+
+[expect_analysis]
+strata = { seen = 0, small = 1 }
+
+# ---- the ultimate L-model (contents at the end of the run)
+[[expect]]
+node  = "n1"
+rel   = "seen"
+final = true
+rows  = [[[1, 2, 3]]]
+
+[[expect]]
+node  = "n1"
+rel   = "small"
+final = true
+rows  = []

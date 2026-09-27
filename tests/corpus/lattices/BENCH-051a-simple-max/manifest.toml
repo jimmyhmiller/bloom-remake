@@ -1,0 +1,72 @@
+schema   = 1
+id       = "BENCH-051"
+title    = "Bud SimpleMax: m.gt(12) becomes true once an input exceeds 12 and stays true"
+priority = "P0"
+source   = "R04 §12 T2 (bud test/tc_lattice.rb SimpleMax, as summarized by R04)"
+features = ["LANG-120", "LANG-122", "LANG-124", "LANG-126", "LANG-128", "LANG-280", "SEM-030", "SEM-104"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+Re-derived from R04 T2's description ("`done <= m.gt(12)` becomes true once any input > 12 and stays true"); the
+Bud source was not vendored. Inputs: 2 and 10 at tick 1, 15 at tick 2, 12 at tick 3. `m` is the running max
+(10, 15, 15); `done` is ⊥ (absent) until the tick in which m first exceeds 12 and stays true afterwards, including
+after the input 12, which does not exceed 12.
+"""
+
+[run]
+ticks = 6
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "put"
+rows = [[2], [10]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel  = "put"
+rows = [[15]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel  = "put"
+rows = [[12]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-120", "LANG-122", "LANG-124", "LANG-126", "LANG-128", "LANG-280", "SEM-030", "SEM-104"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-120", "LANG-122", "LANG-124", "LANG-126", "LANG-128", "LANG-280", "SEM-030", "SEM-104"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel  = "m"
+tick = 0
+rows = []
+
+[[expect]]
+node = "n1"
+rel  = "m"
+tick = 1
+rows = [[10]]
+
+[[expect]]
+node  = "n1"
+rel   = "m"
+row   = [15]
+holds = "2.."
+
+[[expect]]
+node   = "n1"
+rel    = "done"
+row    = [true]
+absent = "..=1"
+holds  = "2.."

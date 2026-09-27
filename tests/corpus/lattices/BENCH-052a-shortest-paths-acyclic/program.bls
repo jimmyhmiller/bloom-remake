@@ -1,0 +1,33 @@
+//! BENCH-052a. ShortestPathsL (bud test/tc_lattice.rb, R04 §3.9, verbatim Bud program) ported to Blossom:
+//!
+//!     table :link, [:from, :to, :c]
+//!     table :path, [:from, :to, :next_hop] => [:c]        # c is an lmin
+//!     table :min_cost, [:from, :to] => [:c]               # c is an lmin
+//!     path <= link {|l| [l.from, l.to, "direct", Bud::MinLattice.new(l.c)]}
+//!     path <= (link * path).pairs(:to => :from) {|l,p| [l.from, p.to, l.to, p.c + l.c]}
+//!     min_cost <= path {|p| [p.from, p.to, p.c]}
+//!
+//! Recursion goes through `+` on an LMin, a morphism, so everything stays in stratum 0 (SEM-031). Positive edge
+//! weights make the in-tick fixpoint finite (Trop+ is 0-stable).
+
+program shortest_paths_l version 1;
+
+input link_in(from: String, to: String, c: u64);
+
+table link(from: String, to: String, c: u64);
+/// Keyed by (from, to, next_hop); the lmin column merges per key.
+table path(from: String, to: String, next_hop: String, c: LMin<u64>);
+table min_cost(from: String, to: String, c: LMin<u64>);
+
+load: on link_in(f, t, c) {
+    emit link(f, t, c);
+}
+direct: while link(f, t, c) {
+    emit path(f, t, "direct", c);           // c is lifted into LMin<u64>
+}
+extend: while link(f, t, c), path(t, t2, _, pc) {
+    emit path(f, t2, t, pc + c);             // LMin + constant: a morphism
+}
+summarize: while path(f, t, _, c) {
+    emit min_cost(f, t, c);
+}

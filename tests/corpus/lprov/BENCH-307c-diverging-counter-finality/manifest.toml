@@ -1,0 +1,21 @@
+schema   = 1
+id       = "BENCH-307"
+title    = "T8 analysis: ge5 is an ultimate threshold fact (POS-FINAL) over a value that never converges"
+priority = "P1"
+source   = "R11/G1 §7 T8 (\"ge5 is an ultimate threshold fact\"); R13 §9.3 (POS-FINAL: a threshold over inflationary state)"
+features = ["LANG-126", "SEM-016", "SEM-107", "ANA-120"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+c only grows (a persistent lattice), so the threshold ge5 is final the moment it holds (FT Prop. 13): ANA-120 class
+POS-FINAL for `ge5_out`. The value of c itself has no finite ultimate value; no class is asserted for it.
+"""
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-126", "SEM-016", "SEM-107", "ANA-120"]
+until = "M8"
+
+[expect_analysis]
+finality = { ge5_out = ["POS-FINAL"] }

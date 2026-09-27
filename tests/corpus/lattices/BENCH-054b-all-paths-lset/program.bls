@@ -1,0 +1,40 @@
+//! BENCH-054b. AllPathsL, AllPathsImplicitProject and AllPathsEqJoin (bud test/tc_lattice.rb; R04 §12 T6): the
+//! transitive closure with summed costs, computed entirely inside lset lattices. Both formulations start from
+//! AllPathsL's seed `path <= link` and must compute the same set:
+//!   - `path_gen`: an equi-join written with generators over the sets (a morphism, LANG-123), which is Bud's
+//!     implicit projection (AllPathsImplicitProject);
+//!   - `path_eq`: `product`, then `filter`, then `map` (Bud's `eqjoin`, AllPathsEqJoin), a bimorphism followed by
+//!     morphisms.
+//! The input is a DAG, so the set of paths (and their costs) is finite.
+
+program all_paths_l version 1;
+
+input link_in(from: String, to: String, c: u64);
+
+cell link: LSet<(String, String, u64)>;
+cell path_gen: LSet<(String, String, u64)>;
+cell path_eq: LSet<(String, String, u64)>;
+
+fn joins(p: ((String, String, u64), (String, String, u64))) -> bool {
+    p.0.1 == p.1.0
+}
+fn concat(p: ((String, String, u64), (String, String, u64))) -> (String, String, u64) {
+    (p.0.0, p.1.1, p.0.2 + p.1.2)
+}
+
+load: on link_in(f, t, c) {
+    emit link(set[(f, t, c)]);
+}
+/// `path <= link` for both formulations.
+seed: while let l = link {
+    emit path_gen(l);
+    emit path_eq(l);
+}
+/// AllPathsImplicitProject: generators over the two sets, joined on the shared node.
+extend_gen: while (f, m, c1) in link, (m, t, c2) in path_gen {
+    emit path_gen(set[(f, t, c1 + c2)]);
+}
+/// AllPathsEqJoin: `link.eqjoin(path, 1 => 0)` as product, filter and map.
+extend_eq: while let joined = link.product(path_eq).filter(joins).map(concat) {
+    emit path_eq(joined);
+}

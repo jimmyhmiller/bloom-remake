@@ -1,0 +1,92 @@
+schema   = 1
+id       = "BENCH-060"
+title    = "Monotone cart: every complete replica produces the identical summary, with no coordination"
+priority = "P1"
+source   = "R04 §12 T14; R03 §6.8 and §11 T20 (bud-sandbox cart workloads: simple_workload's expected summary)"
+features = ["LANG-122", "LANG-124", "LANG-126", "LANG-135", "LANG-137", "LANG-153", "LANG-180", "LANG-241", "SEM-030",
+            "SEM-050"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The workload is R03 T20's simple_workload: meat +1, books −1, beer +1, diapers +1, meat −1, then 12 × beer +1, with
+the expected checkout [["beer",13],["diapers",1]] (meat nets to 0 and books to −1, so both are dropped). The ops get
+ids 1–17 and the checkout id 18 with lbound 1; routing is re-derived: id mod 3 picks the replica, the checkout goes
+to r3 at tick 1, and op 17 is withheld until tick 3, so no replica is complete before tick 4. Replicas gossip whole
+carts every tick. r2 receives op 17 at tick 4 and completes then; r1 and r3 complete at tick 5 through gossip. All
+three summaries are identical, and the client, whose receipts are keyed by session, records one receipt. R04 T14's
+"at most one response per distinct summary" is a sender-side deduplication (DIST-007) that must not be observable:
+under set semantics the client sees one distinct response tuple per session.
+"""
+
+[deploy]
+nodes = [
+    { name = "c", role = "Client" },
+    { name = "r1", role = "Replica" },
+    { name = "r2", role = "Replica" },
+    { name = "r3", role = "Replica" },
+]
+
+[run]
+ticks = 9
+stop  = "ticks"
+
+[[input]]
+node = "c"
+tick = 1
+rel  = "do_action"
+rows = [["r1", 1, 1, "meat", 1], ["r2", 1, 2, "books", -1], ["r3", 1, 3, "beer", 1], ["r1", 1, 4, "diapers", 1],
+        ["r2", 1, 5, "meat", -1], ["r3", 1, 6, "beer", 1], ["r1", 1, 7, "beer", 1], ["r2", 1, 8, "beer", 1],
+        ["r3", 1, 9, "beer", 1], ["r1", 1, 10, "beer", 1], ["r2", 1, 11, "beer", 1], ["r3", 1, 12, "beer", 1],
+        ["r1", 1, 13, "beer", 1], ["r2", 1, 14, "beer", 1], ["r3", 1, 15, "beer", 1], ["r1", 1, 16, "beer", 1]]
+
+[[input]]
+node = "c"
+tick = 1
+rel  = "do_checkout"
+rows = [["r3", 1, 18, 1]]
+
+[[input]]
+node = "c"
+tick = 3
+rel  = "do_action"
+rows = [["r2", 1, 17, "beer", 1]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-124", "LANG-126", "LANG-135", "LANG-137", "LANG-153", "LANG-180", "LANG-241",
+                 "SEM-030", "SEM-050"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-124", "LANG-126", "LANG-135", "LANG-137", "LANG-153", "LANG-180", "LANG-241",
+                 "SEM-030", "SEM-050"]
+until = "M7"
+
+[[expect]]
+node   = "r2"
+rel    = "summaries"
+row    = [1, [["beer", 13], ["diapers", 1]]]
+absent = "..=3"
+holds  = "4.."
+
+[[expect]]
+node   = "r1"
+rel    = "summaries"
+row    = [1, [["beer", 13], ["diapers", 1]]]
+absent = "..=4"
+holds  = "5.."
+
+[[expect]]
+node   = "r3"
+rel    = "summaries"
+row    = [1, [["beer", 13], ["diapers", 1]]]
+absent = "..=4"
+holds  = "5.."
+
+[[expect]]
+node  = "c"
+rel   = "receipts"
+final = true
+rows  = [[1, [["beer", 13], ["diapers", 1]]]]

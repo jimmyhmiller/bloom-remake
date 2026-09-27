@@ -1,0 +1,21 @@
+//! BENCH-053a. lmin shortest paths over a negative cycle (R04 §12 T4). The recursion through `+` on an LMin never
+//! reaches a fixpoint: every trip around the cycle lowers the cost again. Blossom gives such a tick no meaning
+//! (CR-53, SEM-032): the iteration bound fires and the tick aborts with the hard error BLSR007, never a silent
+//! truncation. (A static rejection is not Blossom's rule: ENG-047/ENG-142 only warn about non-ACC recursion.)
+
+program lmin_negative_cycle version 1;
+
+input edge_in(from: String, to: String, w: i64);
+
+table edge(from: String, to: String, w: i64);
+table dist(from: String, to: String, d: LMin<i64>);
+
+load: on edge_in(f, t, w) {
+    emit edge(f, t, w);
+}
+base: while edge(f, t, w) {
+    emit dist(f, t, w);
+}
+step: while dist(f, m, d), edge(m, t, w) {
+    emit dist(f, t, d + w);
+}

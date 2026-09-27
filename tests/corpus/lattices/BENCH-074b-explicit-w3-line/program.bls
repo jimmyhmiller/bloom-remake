@@ -1,0 +1,89 @@
+//! BENCH-074b. Explicit W3 on the line A — B — C under simulated loss and reordering: every seed converges.
+//!
+//! W3, the cumulative-per-origin wrapper (R13 §6.3; Power diss. §4.2.1), written explicitly in Blossom instead of
+//! with `exactly_once(cumulative)`, so that its unwrap step can be inspected and mutated. The lattice is
+//! `Map<origin, Lex<seq, Point<cumulative>>>`: an origin's entry is the number of its non-zero update batches and
+//! their cumulative sum, and a higher seq supersedes a lower one (a reused seq with a different cumulative is an
+//! LPoint conflict). Replicas gossip the whole map to their neighbors every 5 ticks, with no acknowledgements, so
+//! loss, duplication, reordering and multi-hop relaying are all harmless. Unwrap: when a remote origin's entry
+//! advances from (k1, C1) to (k2, C2), the replica applies C2 − C1 to its Z-set.
+
+program explicit_w3 version 1;
+
+role Replica: cluster;
+
+type Entry = Lex<LMax<u64>, LPoint<Map<String, i64>>>;
+
+#[fault(lossy)]
+channel cum_msg(m: LMap<Node, Entry>): Replica -> Replica;
+
+fn add_maps(a: Map<String, i64>, b: Map<String, i64>) -> Map<String, i64> {
+    b.entries().fold(a, |acc, e| acc.insert(e.0, acc.get(e.0).unwrap_or(0) + e.1))
+}
+
+/// C2 − C1 as a list of non-zero (item, weight) changes.
+fn diff(new: Map<String, i64>, old: Map<String, i64>) -> Vec<(String, i64)> {
+    new.entries().map(|e| (e.0, e.1 - old.get(e.0).unwrap_or(0))).filter(|e| e.1 != 0)
+        ++ old.entries().filter(|e| not new.contains_key(e.0)).map(|e| (e.0, 0 - e.1)).filter(|e| e.1 != 0)
+}
+
+at Replica {
+    input neighbor_in(n: Node<Replica>);
+    input local_update(item: String, w: i64);
+
+    table neighbor(n: Node<Replica>);
+    timer ae every 5 ticks;
+
+    zset table counts(item: String);
+    /// This replica's own contribution: its number of non-zero batches and their cumulative sum.
+    table my_state(seq: u64, cum: Map<String, i64>) key();
+    /// Every origin's latest entry known here.
+    cell seen: LMap<Node, Entry>;
+    /// For each remote origin, the entry whose contribution has been applied to `counts`.
+    table applied(origin: Node, seq: u64, cum: Map<String, i64>) key(origin);
+
+    bootstrap {
+        emit my_state(0, map[]);
+    }
+    link: on neighbor_in(n) {
+        emit neighbor(n);
+    }
+
+    // ---- local updates: applied now; a non-zero batch advances this origin's entry at t+1
+    view batch(item, s = sum!(w)) = local_update(item, w);
+    view batch_map(m = collect_map!(item, s)) = batch(item, s) where s != 0;
+    apply_local: on local_update(item, w) {
+        emit counts(item) weight w;
+    }
+    advance_own: on batch_map(m), my_state(k, c) {
+        upsert my_state(k + 1, add_maps(c, m));
+    }
+    publish: while my_state(k, c) where k > 0 {
+        emit seen(map[self => Lex::of(k, c)]);
+    }
+
+    // ---- anti-entropy
+    gossip: on ae, neighbor(n) {
+        send cum_msg(seen) to n;
+    }
+    absorb: on cum_msg(m) {
+        emit seen(m);
+    }
+
+    // ---- unwrap
+    view current(o, k, c) =
+        (o, e) in seen, let Some(k) = reveal!(e.key()), let Some(c) = e.val!().get()
+        where o != self;
+    view advanced(o, k2, c2, c1) {
+        current(o, k2, c2), applied(o, k1, c1) where k2 > k1;
+        current(o, k2, c2), not applied(o, _, _), let c1 = map[];
+    }
+    unwrap: while advanced(o, _, c2, c1), (item, w) in diff(c2, c1) {
+        emit counts(item) weight w;
+    }
+    record: while advanced(o, k2, c2, _) {
+        upsert applied(o, k2, c2);
+    }
+
+    view raw(item, w) = weights!(counts(item), w);
+}

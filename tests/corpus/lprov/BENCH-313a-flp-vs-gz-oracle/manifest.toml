@@ -1,0 +1,41 @@
+schema   = 1
+id       = "BENCH-313"
+title    = "T14 FLP-vs-GZ oracle: the Dedalus^L form yields {a, b}"
+priority = "P0"
+source   = "R11/G1 §7 T14 and §2.7 (GZ Ex. 8; FLP answer set {p(a), p(b)} confirmed on clingo 5.8.2); CR-54"
+features = ["LANG-122", "LANG-124", "LANG-125", "LANG-126", "LANG-190", "SEM-031", "SEM-103"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+In the boot tick p = {a} makes the threshold `size > 0` true, which adds b in the same fixpoint: p = {a, b} from tick
+0 on (the cell persists). This is the least-fixpoint (FLP) answer; Alog would have no model.
+Ultimate L-model (R11 T14): p ↦ {a, b}; the `final` row states it.
+"""
+
+[run]
+ticks = 3
+stop  = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-124", "LANG-125", "LANG-126", "LANG-190", "SEM-031", "SEM-103"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-124", "LANG-125", "LANG-126", "LANG-190", "SEM-031", "SEM-103"]
+until = "M7"
+
+[[expect]]
+node  = "n1"
+rel   = "p"
+row   = [["a", "b"]]
+holds = "0.."
+
+# ---- the ultimate L-model (contents at the end of the run)
+[[expect]]
+node  = "n1"
+rel   = "p"
+final = true
+rows  = [[["a", "b"]]]

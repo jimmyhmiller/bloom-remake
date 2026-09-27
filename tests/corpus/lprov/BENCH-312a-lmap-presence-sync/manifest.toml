@@ -1,0 +1,95 @@
+schema   = 1
+id       = "BENCH-312"
+title    = "T13 key presence, failure-free: r1 and r2 hold {k↦1} from tick 2, r3 from tick 3"
+priority = "P1"
+source   = "R11/G1 §7 T13 (failure-free)"
+features = ["LANG-122", "LANG-126", "LANG-137", "LANG-153", "SEM-101", "SEM-104", "SEM-105"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+R11 T13: "r1 and r2 hold {k↦1} from @2 on; r3 from @3 on". The gossip at tick 1 is ⊥ and is no message. Ultimate
+L-model, failure-free (R11 T13): {k↦1} in the stores of r1 and r2 and in r3's copy, and key?(k) at r3; the `final`
+rows state it.
+"""
+
+[deploy]
+nodes = [
+    { name = "cl", role = "Client" },
+    { name = "r1", role = "Replica" },
+    { name = "r2", role = "Replica" },
+    { name = "r3", role = "Observer" },
+]
+
+[run]
+ticks = 6
+stop  = "ticks"
+
+[[input]]
+node = "cl"
+tick = 1
+rel  = "do_put"
+rows = [["k", 1]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-126", "LANG-137", "LANG-153", "SEM-101", "SEM-104", "SEM-105"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-126", "LANG-137", "LANG-153", "SEM-101", "SEM-104", "SEM-105"]
+until = "M7"
+
+[[expect]]
+node   = "r1"
+rel    = "store"
+row    = [[["k", 1]]]
+absent = "..=1"
+holds  = "2.."
+
+[[expect]]
+node   = "r2"
+rel    = "store"
+row    = [[["k", 1]]]
+absent = "..=1"
+holds  = "2.."
+
+[[expect]]
+node   = "r3"
+rel    = "mirror"
+row    = [[["k", 1]]]
+absent = "..=2"
+holds  = "3.."
+
+[[expect]]
+node   = "r3"
+rel    = "has_k"
+row    = []
+absent = "..=2"
+holds  = "3.."
+
+# ---- the ultimate L-model (contents at the end of the run)
+[[expect]]
+node  = "r1"
+rel   = "store"
+final = true
+rows  = [[[["k", 1]]]]
+
+[[expect]]
+node  = "r2"
+rel   = "store"
+final = true
+rows  = [[[["k", 1]]]]
+
+[[expect]]
+node  = "r3"
+rel   = "mirror"
+final = true
+rows  = [[[["k", 1]]]]
+
+[[expect]]
+node  = "r3"
+rel   = "has_k"
+final = true
+rows  = [[]]

@@ -1,0 +1,16 @@
+//! BENCH-311d. T12, FLP input, through the ASP encoding: no control in any model.
+//! The ASP backend must agree with the simulator on the controls derived from this input.
+
+spec CompanyControlAsp for r#program {
+    nodes N;
+
+    fact share("a", "b", 40) @ N at tick 1;
+    fact share("c", "b", 20) @ N at tick 1;
+    fact share("a", "c", 40) @ N at tick 1;
+    fact share("b", "c", 20) @ N at tick 1;
+
+    invariant no_control "a company controls another":
+        never c(_, _) @ N;
+
+    check asp { ticks: 3 } expect holds;
+}

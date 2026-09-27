@@ -1,0 +1,189 @@
+schema   = 1
+id       = "BENCH-050"
+title    = "QuorumVoteL (SoCC'12 Fig. 3): one result once 5 distinct voters are seen, no points of order"
+priority = "P0"
+source   = "R04 §12 T1; R04 §3.9 (SoCC'12 Fig. 3, verbatim Bloom^L program)"
+features = ["LANG-120", "LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-126", "LANG-128", "LANG-153", "LANG-280",
+            "LANG-281", "SEM-030", "SEM-031", "SEM-104", "ANA-020", "ANA-022"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+The Bloom^L program is ported rule for rule. The vote stream is re-derived: R04 T1 only says "feed vote_chn with
+voter ids, including duplicates, in random order", so three voters cast ids 1–5 with duplicates spread over
+ticks 1–5 (a vote cast at tick t is delivered to the tally at t + 1). Distinct ids at the tally: {1,2} @2,
+{1,2,3} @3, {1,2,3,4} @4, still 4 @5 (duplicate 3), {1,…,5} @6. `cnt` is 0 before any vote because
+size(⊥) = 0 is a real LMax value (LANG-281, R11 T5). The quorum is reached at tick 6 in the same tick fixpoint
+(collect → count → reach → announce are one monotone stratum), so the sink first sees `result_chn` at tick 7
+and never before. `announce` is level-triggered, exactly like the Bloom^L rule over a persistent lbool, so the
+message is re-derived every tick (CR-26); "exactly one result" is one distinct fact at the sink (`got_result`
+has one row). R04 T1 also requires "no points of order" (the analysis backend).
+"""
+
+[deploy]
+nodes = [
+    { name = "v1", role = "Voter" },
+    { name = "v2", role = "Voter" },
+    { name = "v3", role = "Voter" },
+    { name = "tally", role = "Tally" },
+    { name = "sink", role = "Sink" },
+]
+
+[run]
+ticks = 10
+stop  = "ticks"
+
+[[input]]
+node = "v1"
+tick = 1
+rel  = "cast"
+rows = [[1]]
+
+[[input]]
+node = "v2"
+tick = 1
+rel  = "cast"
+rows = [[2]]
+
+[[input]]
+node = "v1"
+tick = 2
+rel  = "cast"
+rows = [[1]]            # duplicate of voter 1
+
+[[input]]
+node = "v3"
+tick = 2
+rel  = "cast"
+rows = [[3]]
+
+[[input]]
+node = "v2"
+tick = 3
+rel  = "cast"
+rows = [[2]]            # duplicate of voter 2
+
+[[input]]
+node = "v3"
+tick = 3
+rel  = "cast"
+rows = [[4]]
+
+[[input]]
+node = "v1"
+tick = 4
+rel  = "cast"
+rows = [[3]]            # voter 3 again, from another node
+
+[[input]]
+node = "v2"
+tick = 5
+rel  = "cast"
+rows = [[5]]            # the fifth distinct voter
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-120", "LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-126", "LANG-128", "LANG-153",
+                 "LANG-280", "LANG-281", "SEM-030", "SEM-031", "SEM-104", "ANA-020", "ANA-022"]
+until = "M6"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-120", "LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-126", "LANG-128", "LANG-153",
+                 "LANG-280", "LANG-281", "SEM-030", "SEM-031", "SEM-104", "ANA-020", "ANA-022"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-120", "LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-126", "LANG-128", "LANG-153",
+                 "LANG-280", "LANG-281", "SEM-030", "SEM-031", "SEM-104", "ANA-020", "ANA-022"]
+until = "M7"
+
+# ---- the distinct voters at the tally (the cell is absent until the first vote arrives)
+[[expect]]
+node = "tally"
+rel  = "votes"
+tick = 1
+rows = []
+
+[[expect]]
+node = "tally"
+rel  = "votes"
+tick = 2
+rows = [[[1, 2]]]
+
+[[expect]]
+node = "tally"
+rel  = "votes"
+tick = 4
+rows = [[[1, 2, 3, 4]]]
+
+[[expect]]
+node = "tally"
+rel  = "votes"
+tick = 5
+rows = [[[1, 2, 3, 4]]]  # the duplicate id 3 adds nothing
+
+[[expect]]
+node = "tally"
+rel  = "votes"
+tick = 6
+rows = [[[1, 2, 3, 4, 5]]]
+
+# ---- cnt = votes.size, a persistent lmax
+[[expect]]
+node = "tally"
+rel  = "cnt"
+tick = 0
+rows = [[0]]
+
+[[expect]]
+node = "tally"
+rel  = "cnt"
+tick = 3
+rows = [[3]]
+
+[[expect]]
+node = "tally"
+rel  = "cnt"
+tick = 5
+rows = [[4]]
+
+[[expect]]
+node = "tally"
+rel  = "cnt"
+final = true
+rows = [[5]]
+
+# ---- the threshold: false (⊥, absent) until the fifth distinct voter, true from then on
+[[expect]]
+node   = "tally"
+rel    = "quorum_done"
+row    = [true]
+absent = "..=5"
+holds  = "6.."
+
+# ---- the result: never before the quorum; one distinct fact at the sink
+[[expect]]
+node   = "sink"
+rel    = "result_chn"
+row    = []
+absent = "..=6"
+holds  = "7.."
+
+[[expect_send]]
+from    = "tally"
+to      = "sink"
+channel = "result_chn"
+row     = []
+tick    = 6
+
+[[expect]]
+node  = "sink"
+rel   = "got_result"
+final = true
+rows  = [[]]
+
+[expect_analysis]
+# R04 T1: "CALM analysis reports no points of order." An empty list means the ANA-022 report is empty.
+points_of_order = []

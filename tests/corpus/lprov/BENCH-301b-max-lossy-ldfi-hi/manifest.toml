@@ -1,0 +1,32 @@
+schema   = 1
+id       = "BENCH-301"
+title    = "T2 under LDFI 4/2/0, post best ≥ 7: exactly one minimal falsifier {O(b,s,1), O(d,s,1)}"
+priority = "P0"
+source   = "R11/G1 §7 T2 (✓sim, ✓clingo); R11 §6.3 (lmax ≥ c: lose every contribution ≥ c)"
+features = ["LANG-126", "LANG-137", "LANG-153", "LANG-201", "TEST-020", "TEST-022", "TEST-023", "TEST-026", "TEST-028",
+            "TEST-029", "TEST-140", "TEST-142"]
+program  = "program.bls"
+spec     = "spec.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+The atom 7 has two contributors (b and d), so hi fails iff both are lost (R11 §6.3, TEST-140). a's value 3 is not a
+contributor of the atom 7.
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-126", "LANG-137", "LANG-153", "LANG-201", "TEST-020", "TEST-022", "TEST-023", "TEST-026",
+                 "TEST-028", "TEST-029", "TEST-140", "TEST-142"]
+until = "M8"
+
+[expect_ldfi]
+eot        = 4
+eff        = 2
+crashes    = 0
+nodes      = ["A", "B", "D", "S"]
+verdict    = "counterexample"
+crash_view = "frozen"
+falsifiers = [
+    ["O(B,S,1)", "O(D,S,1)"],
+]

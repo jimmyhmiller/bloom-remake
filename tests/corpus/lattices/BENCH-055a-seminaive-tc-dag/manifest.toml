@@ -1,0 +1,78 @@
+schema   = 1
+id       = "BENCH-055"
+title    = "Semi-naive equivalence: lattice TC equals set-based TC over a DAG"
+priority = "P1"
+source   = "R04 §12 T7 (SoCC'12 §4.2, Fig. 5 workload: DAG with n nodes and ~log2 n out-edges)"
+features = ["LANG-047", "LANG-082", "LANG-121", "LANG-122", "LANG-123", "LANG-124", "SEM-031", "ENG-041", "ENG-043"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The Fig. 5 workload is generated DAGs; this case fixes one deterministic DAG with n = 12 and edges i → 2i+1,
+i → 2i+2, i → i+5 (when < 12): 16 edges, about log2(12) out-edges per inner node. The expected closure (31 pairs)
+was computed from the definition by exhaustive iteration. The test's claim is equality of the formulations; the
+full relation is listed so a wrong-but-equal pair of formulations still fails.
+"""
+
+[run]
+ticks = 4
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "edge_in"
+rows = [[0, 1], [0, 2], [0, 5], [1, 3], [1, 4], [1, 6], [2, 5], [2, 6], [2, 7], [3, 7], [3, 8], [4, 9],
+        [4, 10], [5, 10], [5, 11], [6, 11]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-047", "LANG-082", "LANG-121", "LANG-122", "LANG-123", "LANG-124", "SEM-031", "ENG-041",
+                 "ENG-043"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-047", "LANG-082", "LANG-121", "LANG-122", "LANG-123", "LANG-124", "SEM-031", "ENG-041",
+                 "ENG-043"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel  = "reach"
+tick = 1
+rows = [[0, 1], [0, 2], [0, 3], [0, 4], [0, 5], [0, 6], [0, 7], [0, 8], [0, 9], [0, 10], [0, 11],
+        [1, 3], [1, 4], [1, 6], [1, 7], [1, 8], [1, 9], [1, 10], [1, 11],
+        [2, 5], [2, 6], [2, 7], [2, 10], [2, 11], [3, 7], [3, 8], [4, 9], [4, 10], [5, 10], [5, 11], [6, 11]]
+
+[[expect]]
+node = "n1"
+rel  = "reach_from_l"
+tick = 1
+rows = [[0, 1], [0, 2], [0, 3], [0, 4], [0, 5], [0, 6], [0, 7], [0, 8], [0, 9], [0, 10], [0, 11],
+        [1, 3], [1, 4], [1, 6], [1, 7], [1, 8], [1, 9], [1, 10], [1, 11],
+        [2, 5], [2, 6], [2, 7], [2, 10], [2, 11], [3, 7], [3, 8], [4, 9], [4, 10], [5, 10], [5, 11], [6, 11]]
+
+[[expect]]
+node = "n1"
+rel  = "only_in_set"
+tick = 1
+rows = []
+
+[[expect]]
+node = "n1"
+rel  = "only_in_lattice"
+tick = 1
+rows = []
+
+[[expect]]
+node  = "n1"
+rel   = "only_in_set"
+final = true
+rows  = []
+
+[[expect]]
+node  = "n1"
+rel   = "only_in_lattice"
+final = true
+rows  = []

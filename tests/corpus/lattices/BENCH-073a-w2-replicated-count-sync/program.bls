@@ -1,0 +1,40 @@
+//! BENCH-073a. Replicated count with retractions over W2, in lockstep rounds: exact per-tick weights at each replica.
+//!
+//! Replicated count with retractions (R13 §12 T1; Wrapping Rings §3.2): each replica keeps a Z-set of item counts
+//! and replicates its updates through a W2 exactly-once channel. The compiler inserts the wrapper: globally unique
+//! dots, a durable send buffer, cumulative acknowledgements and resend-until-ack (DIST-015); the receiver applies each
+//! dot's payload exactly once (SEM-036). The updates a replica makes in one tick are summed per key, and a zero sum
+//! sends nothing and consumes no dot. Views over the Z-set: raw weights, the clamped multiset (negative counts shown
+//! as 0) and the set of present items.
+
+program replicated_count version 1;
+
+role Replica: cluster;
+
+/// A group-typed payload (`w: Z`) may cross nodes only through an exactly-once channel (CR-35, LANG-158).
+#[fault(lossy)]
+channel count_delta(item: String, w: Z): Replica -> Replica key(item) exactly_once(dots);
+
+at Replica {
+    /// A client's update at this replica: +1 inserts, −1 retracts.
+    input local_update(item: String, w: Z);
+
+    zset table counts(item: String);
+    /// Every item this replica ever received from another replica.
+    table ever_received(item: String);
+
+    apply_local: on local_update(item, w) {
+        emit counts(item) weight w;
+        for r in Replica where r != self {
+            send count_delta(item, w) to r;
+        }
+    }
+    apply_remote: on count_delta(item, w) {
+        emit counts(item) weight w;
+        emit ever_received(item);
+    }
+
+    view raw(item, w) = weights!(counts(item), w);
+    view qty(item, n) = clamped!(counts(item), n);
+    view present(item) = distinct!(counts(item));
+}

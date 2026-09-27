@@ -1,0 +1,42 @@
+//! BENCH-309a. T10 in lockstep rounds: b's clock per tick, saw_a1, and happens-before by clock comparison.
+//!
+//! R11/G1 T10: vector clocks, ported to Blossom. The R11 program:
+//!
+//!     lat vc() : lmap<node, lmax<int>>
+//!     vc(; {"a" ↦ 1}) :- ev().                               -- at a, deductively in the event's tick
+//!     msg(@b; v)@async :- ev(), v = vc[].
+//!     vc(; m) :- msg(; m).                                    -- at b
+//!     vc(; {"b" ↦ n+1})@next :- msg(; _), n = vc[].at("b") ⊔ 0.  -- own-entry increment at the NEXT tick
+//!     saw_a1() :- v = vc[], v.at("a") >= 1.
+//!
+//! Both nodes run the same projection of role Proc. `saw_other` is `saw_a1` from b's side, and
+//! `hb_got_before_now` is the stratified antitone comparison of the received clock with the current one (strictly
+//! less: happens-before).
+
+program vector_clocks version 1;
+
+role Proc: cluster;
+
+channel msg(v: VClock): Proc -> Proc;
+
+at Proc {
+    input ev();
+
+    cell vc: VClock;
+    table got(v: VClock);
+
+    stamp: on ev() {
+        emit vc(map[self => 1]);
+    }
+    ship: on ev(), p in Proc where p != self {
+        send msg(vc) to p;
+    }
+    /// `⊔ 0` gives an absent entry the value 0 (a morphism, LANG-283); the own-entry increment lands at t+1.
+    recv: on msg(m), let bumped = map[self => vc.at(self).join(0) + 1] {
+        emit vc(m);
+        emit got(m);
+        next vc(bumped);
+    }
+    view saw_other() = p in Proc, vc.at(p) >= 1 where p != self;
+    view hb_got_before_now() = got(m) where m.lt!(vc);
+}

@@ -1,0 +1,64 @@
+//! BENCH-058c. QuorumKvsClient (Conway thesis App. A.1; R04 §3.9 and §12 T12): "the write returns after W acks; the
+//! read returns the lub of R responses". The published client keeps an lset of acknowledging replicas per request
+//! in a table keyed by reqid and fires on the threshold `acks.size.gt_eq(W).when_true` — the embedded-lattice +
+//! threshold pattern. Read responses merge by the value lattice's join.
+
+program quorum_kvs_client version 1;
+
+const W: u64 = 2;
+const R: u64 = 2;
+
+role Client;
+role Replica: cluster;
+
+channel kvput(reqid: u64, key: String, val: LSet<String>): Client -> Replica;
+channel kvput_resp(reqid: u64): Replica -> Client;
+channel kvget(reqid: u64, key: String): Client -> Replica;
+channel kvget_resp(reqid: u64, val: LSet<String>): Replica -> Client;
+
+at Client {
+    input do_put(reqid: u64, key: String, val: String);
+    input do_get(reqid: u64, key: String);
+
+    table put_reqs(reqid: u64, acks: LSet<Node<Replica>>);
+    table get_reqs(reqid: u64, responders: LSet<Node<Replica>>, val: LSet<String>);
+    table put_done(reqid: u64);
+    table read_done(reqid: u64, val: LSet<String>);
+
+    put: on do_put(id, k, v), r in Replica {
+        send kvput(id, k, set[v]) to r;
+    }
+    get: on do_get(id, k), r in Replica {
+        send kvget(id, k) to r;
+    }
+    ack: on kvput_resp(id) from r {
+        emit put_reqs(id, set[r]);
+    }
+    response: on kvget_resp(id, v) from r {
+        emit get_reqs(id, set[r], v);
+    }
+    write_quorum: while put_reqs(id, acks) where acks.size() >= W {
+        emit put_done(id);
+    }
+    /// The read's value is the join of every response received so far; it is released once R replicas answered.
+    read_quorum: while get_reqs(id, resp, v) where resp.size() >= R {
+        emit read_done(id, v);
+    }
+}
+
+at Replica {
+    /// A value written at one replica only, so the replicas differ when the read arrives.
+    input seed(key: String, val: String);
+    cell kv_store: LMap<String, LSet<String>>;
+
+    local: on seed(k, v) {
+        emit kv_store(map[k => set[v]]);
+    }
+    store: on kvput(id, k, v) from c {
+        emit kv_store(map[k => v]);
+        send kvput_resp(id) to c;
+    }
+    lookup: on kvget(id, k) from c {
+        send kvget_resp(id, kv_store.at(k)) to c;
+    }
+}

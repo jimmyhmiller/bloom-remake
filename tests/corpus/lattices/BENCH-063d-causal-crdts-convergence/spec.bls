@@ -1,0 +1,34 @@
+//! BENCH-063d spec: BENCH-063c's updates under asynchronous delivery (delay ≤ 3, no loss), and strong eventual
+//! convergence as the outcome oracle: at the end of the run no two replicas disagree on the AW-Set's members, the
+//! EW-Flag or the MV-Register's values. Which values they agree on depends on the schedule (whether r1's remove of x
+//! observed r2's add, whether r3's write observed both earlier writes), so the oracle compares replicas, not values.
+
+spec CausalCrdtConvergence for r#program {
+    nodes R1, R2, R3;
+    assign Replica = [R1, R2, R3];
+
+    fact aw_add("x", 1) @ R1 at tick 1;
+    fact ew_enable(10) @ R1 at tick 1;
+    fact mv_write("a", 20) @ R1 at tick 1;
+    fact aw_add("y", 2) @ R2 at tick 1;
+    fact mv_write("b", 21) @ R2 at tick 1;
+    fact aw_remove("x") @ R1 at tick 3;
+    fact aw_add("x", 3) @ R2 at tick 3;
+    fact ew_disable() @ R2 at tick 3;
+    fact aw_remove("y") @ R3 at tick 3;
+    fact ew_enable(11) @ R3 at tick 3;
+    fact mv_write("c", 22) @ R3 at tick 4;
+    fact ew_disable() @ R1 at tick 6;
+
+    faults { eot: 30, eff: 1, crashes: 0, model: async, delay: 3 }
+
+    /// Some replica holds a member, flag or value that another replica lacks.
+    view aw_differ(e) = aw_members(e) @ x, y in Replica, not aw_members(e) @ y;
+    view ew_differ() = ew_on() @ x, y in Replica, not ew_on() @ y;
+    view mv_differ(v) = mv_values(v) @ x, y in Replica, not mv_values(v) @ y;
+
+    view pre() = not crashed(R1), not crashed(R2), not crashed(R3);
+    view post() = not aw_differ(_), not ew_differ(), not mv_differ(_);
+
+    check sim { runs: 500, seed: 11 } expect holds;
+}

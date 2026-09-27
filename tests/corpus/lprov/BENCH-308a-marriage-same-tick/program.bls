@@ -1,0 +1,39 @@
+//! BENCH-308a. T9 with both vows arriving in the same tick: votes = {bride, groom}; exactly_one never holds.
+//!
+//! R11/G1 T9: a lattice marriage ceremony (diffluence through an exact read), ported to Blossom. The R11 program:
+//!
+//!     lat votes() : lset<node>     votes(; {V}) :- vote(V).
+//!     exactly_one() :- s = votes[], s.size == 1.     exactly_one()@next :- exactly_one().      -- NM: stratum 1
+//!     at_least_one() :- s = votes[], s.size >= 1.    both() :- s = votes[], s.size >= 2.       -- monotone
+//!
+//! The bride and the groom each send `vote(@o, self)` once. `== 1` is an exact read of a lattice, written with
+//! `reveal!` (LANGUAGE §11.4 forbids `==` on lattice values).
+
+program marriage_ceremony version 1;
+
+role Party: cluster;
+role Officiant;
+
+channel vote(): Party -> Officiant;
+
+at Party {
+    input say_yes();
+
+    cast: on say_yes(), o in Officiant {
+        send vote() to o;
+    }
+}
+
+at Officiant {
+    cell votes: LSet<Node<Party>>;
+    table exactly_one();
+
+    tally: on vote() from v {
+        emit votes(set[v]);
+    }
+    one: while let s = reveal!(votes) where s.len() == 1 {
+        emit exactly_one();
+    }
+    view at_least_one() = votes.size() >= 1;
+    view both() = votes.size() >= 2;
+}

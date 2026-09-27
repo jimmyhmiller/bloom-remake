@@ -1,0 +1,18 @@
+//! BENCH-301b spec: R11 T2, EOT 4, EFF 2, no crashes, post = hi (best ≥ 7) at the sink.
+
+spec MaxHi for r#program {
+    nodes A, B, D, S;
+    assign Sender = [A, B, D];
+    assign Sink = [S];
+
+    fact x(3) @ A at tick 1;
+    fact x(7) @ B at tick 1;
+    fact x(7) @ D at tick 1;
+
+    faults { eot: 4, eff: 2, crashes: 0, model: sync }
+
+    view pre() = not crashed(S);
+    view post() = hi() @ S;
+
+    check ldfi expect fails;
+}

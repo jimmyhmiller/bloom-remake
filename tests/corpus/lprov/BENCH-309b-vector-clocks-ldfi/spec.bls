@@ -1,0 +1,15 @@
+//! BENCH-309b spec: R11 T10, EOT 4, EFF 2, no crashes, post = saw_a1 at b.
+
+spec VectorClockLdfi for r#program {
+    nodes A, B;
+    assign Proc = [A, B];
+
+    fact ev() @ A at tick 1;
+
+    faults { eot: 4, eff: 2, crashes: 0, model: sync }
+
+    view pre() = not crashed(B);
+    view post() = saw_other() @ B;
+
+    check ldfi expect fails;
+}

@@ -1,0 +1,26 @@
+//! BENCH-079f. Free termination through a homomorphic abstraction (R13 §12 T11 and §9.5 step 4; FT §1.1): the
+//! running product of the inputs, queried for "is it even?". The state space is infinite, but h(p) = p mod 2 is a
+//! congruence of the update p ↦ p·n and the query factors through it (even = Q′ ∘ h). In the abstraction, `even` is
+//! absorbing (an even product stays even), so every state with an even product is FT; odd states are not (a later
+//! even factor changes the answer).
+
+program ft_running_product version 1;
+
+#[finite(cap = 16)]
+module RunningProduct {
+    input factor(n: u64) key();
+    output even(yes: bool);
+    table prod(p: u64) key();
+
+    bootstrap {
+        emit prod(1);
+    }
+    advance: on factor(n), prod(p) {
+        upsert prod(p * n);
+    }
+    report: while prod(p) {
+        emit even(p % 2 == 0);
+    }
+}
+
+import RunningProduct as rp;

@@ -1,0 +1,52 @@
+schema   = 1
+id       = "BENCH-307"
+title    = "T8 under simulation: never quiescent, so the run stops at its bound with c still growing (a limit value)"
+priority = "P1"
+source   = "R11/G1 §7 T8 (\"The program is never quiescent (SEM-010), so simulation must stop at a bound\"); R11 §3.4 D11"
+features = ["LANG-124", "LANG-126", "SEM-010", "SEM-107", "TEST-001"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+The simulator's run is bounded by 40 ticks (`stop = "ticks"`); no `quiescent_from` expectation is given because the
+program is never quiescent. The ultimate value of c is a limit (non-compact): the value keeps increasing up to the bound
+(c = 39 at tick 39), and the ultimate threshold fact ge5 holds from tick 5 on. PLAN's M1.3 scope asks for T8 to be an
+"inconclusive or limit" expectation: the simulator's ultimate-model computation (SEM-107; M8.2) finds neither a
+quiescent state nor a lasso (a repeated world digest), because c changes at every tick, so its verdict on c is
+`inconclusive`, never "confluent". That verdict is the `[expect_analysis] confluent` entry below, which the sim
+backend checks (the key's verdict vocabulary is the one of BENCH-302c: certified | confluent_not_certified |
+not_confluent | inconclusive).
+"""
+
+[run]
+ticks = 40
+stop  = "ticks"
+seeds = 4
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-124", "LANG-126", "SEM-010", "SEM-107", "TEST-001"]
+until = "M8"
+
+[[expect]]
+node = "n1"
+rel  = "c"
+tick = 20
+rows = [[20]]
+
+[[expect]]
+node = "n1"
+rel  = "c"
+tick = 39
+rows = [[39]]
+
+[[expect]]
+node   = "n1"
+rel    = "ge5"
+row    = []
+absent = "..=4"
+holds  = "5.."
+
+[expect_analysis]
+# The simulator's ultimate-model verdict for the diverging cell (R11 T8: ult(c) is the non-compact ideal of ℕ).
+confluent = { c = "inconclusive" }

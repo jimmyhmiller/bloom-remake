@@ -1,0 +1,89 @@
+schema   = 1
+id       = "BENCH-051"
+title    = "Bud MaxOverChannel: the received lmax equals the sender's value at send time"
+priority = "P0"
+source   = "R04 §12 T2 (bud test/tc_lattice.rb MaxOverChannel); R04 §3.6 item 2"
+features = ["LANG-009", "LANG-042", "LANG-062", "LANG-122", "LANG-124", "LANG-128", "LANG-137", "LANG-280", "SEM-003",
+            "SEM-104"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+Re-derived inputs. The sender's m grows 3 (@1), 8 (@2), 20 (@3). Send 1 happens at tick 2, so it carries 8 even
+though m later reaches 20; send 2 happens at tick 4 and carries 20. Messages arrive one tick later.
+"""
+
+[deploy]
+nodes = [{ name = "s", role = "Sender" }, { name = "r", role = "Receiver" }]
+
+[run]
+ticks = 7
+stop  = "ticks"
+
+[[input]]
+node = "s"
+tick = 1
+rel  = "put"
+rows = [[3]]
+
+[[input]]
+node = "s"
+tick = 2
+rel  = "put"
+rows = [[8]]
+
+[[input]]
+node = "s"
+tick = 2
+rel  = "do_send"
+rows = [[1]]
+
+[[input]]
+node = "s"
+tick = 3
+rel  = "put"
+rows = [[20]]
+
+[[input]]
+node = "s"
+tick = 4
+rel  = "do_send"
+rows = [[2]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-009", "LANG-042", "LANG-062", "LANG-122", "LANG-124", "LANG-128", "LANG-137", "LANG-280",
+                 "SEM-003", "SEM-104"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-009", "LANG-042", "LANG-062", "LANG-122", "LANG-124", "LANG-128", "LANG-137", "LANG-280",
+                 "SEM-003", "SEM-104"]
+until = "M7"
+
+[[expect_send]]
+from    = "s"
+to      = "r"
+channel = "chn"
+row     = [1, 8]
+tick    = 2
+
+[[expect_send]]
+from    = "s"
+to      = "r"
+channel = "chn"
+row     = [2, 20]
+tick    = 4
+
+[[expect]]
+node = "r"
+rel  = "chn_log"
+tick = 3
+rows = [[1, 8]]
+
+[[expect]]
+node  = "r"
+rel   = "chn_log"
+final = true
+rows  = [[1, 8], [2, 20]]

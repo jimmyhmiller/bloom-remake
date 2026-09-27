@@ -1,0 +1,32 @@
+schema   = 1
+id       = "BENCH-310"
+title    = "T11 under LDFI 4/2/0, post val_is_y: the falsifier is {O(r2,r3,1)} (negative support)"
+priority = "P1"
+source   = "R11/G1 §7 T11 (LDFI 4/2/0: ✓sim, ✓clingo); R11 §6.2 (exact reads: negative support); TEST-143"
+features = ["LANG-127", "LANG-131", "LANG-137", "LANG-153", "LANG-201", "TEST-020", "TEST-022", "TEST-023", "TEST-025",
+            "TEST-026", "TEST-028", "TEST-029", "TEST-143"]
+program  = "program.bls"
+spec     = "spec.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+val_is_y is an exact read: it needs r2's write and, as negative support, the absence of any larger key. Losing r2's
+message leaves ((1,r1),x), so {O(r2,r3,1)} is the one minimal falsifier; losing r1's message is harmless.
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-127", "LANG-131", "LANG-137", "LANG-153", "LANG-201", "TEST-020", "TEST-022", "TEST-023",
+                 "TEST-025", "TEST-026", "TEST-028", "TEST-029", "TEST-143"]
+until = "M9"
+
+[expect_ldfi]
+eot        = 4
+eff        = 2
+crashes    = 0
+nodes      = ["R1", "R2", "R3"]
+verdict    = "counterexample"
+crash_view = "frozen"
+falsifiers = [
+    ["O(R2,R3,1)"],
+]

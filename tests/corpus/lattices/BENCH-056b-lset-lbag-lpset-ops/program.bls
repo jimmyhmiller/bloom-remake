@@ -1,0 +1,97 @@
+//! BENCH-056b. The Bud set, bag and sum tests (R04 §12 T10: SetProduct, SetEqjoin, SetSimpleGroupCnt,
+//! CollectionToSet, SetToCollection, SetToChannel, NotInToLattice, SimpleSum, SimpleBag). "Bag merge is max of
+//! multiplicities; + sums them." `lpset.sum()` is SQL's SUM(DISTINCT …) (R04 §3.4).
+
+program set_bag_sum_ops version 1;
+
+input num_in(n: u64);
+input word_in(w: String);
+input pair_in(g: String, x: u64);
+input a_in(x: u64);
+input b_in(x: u64);
+input sum_in(n: u64);
+input bag_in(e: String);
+
+table grouped(g: String, x: u64);
+table a_t(x: u64);
+table b_t(x: u64);
+
+cell s1: LSet<u64>;
+cell s2: LSet<String>;
+cell prod: LSet<(u64, String)>;
+cell eq: LSet<(u64, u64)>;
+cell groups: LMap<String, LSet<u64>>;
+cell not_in: LSet<u64>;
+cell ps: LPSet<u64>;
+cell total: LMax<u64>;
+cell bag1: LBag<String>;
+cell bag2: LBag<String>;
+cell mult_x: LMax<u64>;
+cell bag_size: LMax<u64>;
+cell via_chan: LSet<u64>;
+
+/// SetToChannel: a set sent to this node through the network path.
+loopback lb(s: LSet<u64>);
+
+/// CollectionToSet: every valuation contributes a singleton (LANG-123).
+feed_nums: on num_in(n) {
+    emit s1(set[n]);
+}
+feed_words: on word_in(w) {
+    emit s2(set[w]);
+}
+feed_pairs: on pair_in(g, x) {
+    emit grouped(g, x);
+}
+feed_a: on a_in(x) {
+    emit a_t(x);
+}
+feed_b: on b_in(x) {
+    emit b_t(x);
+}
+
+/// SetProduct: a bimorphism.
+product: while let p = s1.product(s2) {
+    emit prod(p);
+}
+/// SetEqjoin: an equi-join of two generators over the set, on x + 1.
+eqjoin: while x in s1, y in s1 where y == x + 1 {
+    emit eq(set[(x, y)]);
+}
+/// SetSimpleGroupCnt: the collection grouped into a map of sets; the per-group count is read in `group_cnt`.
+group: while let m = lmap{ g => set[x] | grouped(g, x) } {
+    emit groups(m);
+}
+view group_cnt(g, n) = (g, s) in groups, let n = s.size();
+/// SetToCollection: a generator over the set.
+view elems(x) = x in s1;
+/// NotInToLattice: a stratified negation feeding a lattice fold.
+not_in_lattice: while let s = lset{ x | a_t(x), not b_t(x) } {
+    emit not_in(s);
+}
+/// SimpleSum: SUM(DISTINCT …) over a set of non-negative numbers; a repeated number counts once.
+sum_feed: while let p = lpset{ m | sum_in(m) } {
+    emit ps(p);
+}
+sum: while let t = ps.sum() {
+    emit total(t);
+}
+/// SimpleBag: bag merge keeps the larger multiplicity; `+` adds multiplicities.
+bag_feed: while let b = lbag{ e | bag_in(e) } {
+    emit bag1(b);
+}
+bag_double: while let b = bag1 + bag1 {
+    emit bag2(b);
+}
+bag_mult: while let m = bag2.multiplicity("x") {
+    emit mult_x(m);
+}
+bag_sz: while let z = bag2.size() {
+    emit bag_size(z);
+}
+ship: on num_in(_) {
+    send lb(s1);
+}
+receive: on lb(s) {
+    emit via_chan(s);
+}

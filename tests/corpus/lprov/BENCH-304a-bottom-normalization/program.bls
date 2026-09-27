@@ -1,0 +1,47 @@
+//! BENCH-304a. R11/G1 T5: ⊥-normalization (SEM-101 N1–N6), ported to Blossom. The R11 program:
+//!
+//!     lat m(k: str) : lset<int>     lat cnt() : lmax<int>      rel has_a(), has_b()
+//!     chan out(@r, tag: str) : lset<int>
+//!     m("a"; {})  :- start().        m("b"; {7}) :- start().
+//!     has_a() :- m("a"; _).          has_b() :- m("b"; _).
+//!     cnt(; x.size) :- start(), x = m["a"].                    -- lookup of an absent cell gives ⊥; size is non-strict
+//!     out(@R, "from_a"; x)@async :- start(), x = m["a"], dst(R).
+//!     out(@R, "from_b"; x)@async :- start(), x = m["b"], dst(R).
+//!
+//! `start()` is the boot tick. Writing ⊥ creates no cell, a ⊥ message is no message, a generator skips absent cells,
+//! and a lookup of an absent cell is ⊥; `size` of ⊥ is 0, a real value because LMax has an adjoined ⊥ (LANG-281).
+
+program bottom_normalization version 1;
+
+role Src;
+role Dst;
+
+channel out(tag: String, x: LSet<i64>): Src -> Dst;
+
+at Src {
+    table m(k: String, s: LSet<i64>);
+    cell cnt: LMax<u64>;
+
+    bootstrap {
+        emit m("a", set[]);
+        emit m("b", set[7]);
+        emit cnt(m["a"].size());
+        for r in Dst {
+            send out("from_a", m["a"]) to r;
+            send out("from_b", m["b"]) to r;
+        }
+    }
+    view has_a() = m("a", _);
+    view has_b() = m("b", _);
+    /// m read as one map value: `key?("a")` and the value-level size.
+    view key_a() = lmap{ k => s | m(k, s) }.has_key("a");
+    view m_size(n) = let n = reveal!(lmap{ k => s | m(k, s) }.size());
+}
+
+at Dst {
+    table got(tag: String, x: LSet<i64>);
+
+    recv: on out(t, x) {
+        emit got(t, x);
+    }
+}

@@ -1,0 +1,24 @@
+schema   = 1
+id       = "BENCH-068"
+title    = "Stratification negative: reveal inside recursion is rejected (BLS0502)"
+priority = "P0"
+source   = "R04 §12 T22; SEM-102; LANGUAGE §13.3"
+features = ["LANG-127", "SEM-020", "SEM-021", "SEM-102", "ANA-002"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The cycle is t →(reveal!, exact) exact →(emit, same tick) t. The compiler reports BLS0502 with that cycle as its
+witness; the line is not pinned because the primary span may be either construct on the cycle.
+"""
+
+# BLS0502/BLS0503, BLS0702 and BLS0705 come from blossom-analysis over the IR (ARCHITECTURE §13.1), so the
+# diagnostic is expected from the analysis backend, not from the frontend-only compile backend.
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-127", "SEM-020", "SEM-021", "SEM-102", "ANA-002"]
+until = "M5"
+
+[[expect_diag]]
+code     = "BLS0502"
+severity = "error"

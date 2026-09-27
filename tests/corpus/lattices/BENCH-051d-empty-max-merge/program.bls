@@ -1,0 +1,15 @@
+//! BENCH-051d. Bud tc_lattice `EmptyMaxMerge` (R04 §12 T2): `bootstrap do m1 <= 5 end` and `m1 <= m2` with m2 = ⊥.
+//! Merging ⊥ is the identity, so m1 stays 5 (R04 T2: "EmptyMaxMerge: m1 <= m2 with m2 = ⊥ leaves m1 = 5").
+
+program empty_max_merge version 1;
+
+cell m1: LMax<i64>;
+cell m2: LMax<i64>;
+
+bootstrap {
+    emit m1(5);
+}
+/// A lookup of the absent cell m2 is ⊥; merging it is a no-op (SEM-101 N3).
+merge: while let x = m2 {
+    emit m1(x);
+}

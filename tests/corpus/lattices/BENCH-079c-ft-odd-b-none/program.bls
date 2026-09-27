@@ -1,0 +1,44 @@
+//! BENCH-079c. Free termination, FT Ex. 4 / Fig. 1(c) (R13 §12 T11): "odd number of b's". Every b toggles the answer,
+//! so no state is a free-termination state.
+
+program ft_odd_b version 1;
+
+pub enum Letter {
+    A #1,
+    B #2,
+    C #3,
+    #[unknown]
+    Other #4,
+}
+
+enum St {
+    Even,
+    Odd,
+}
+
+fn step(s: St, c: Letter) -> St {
+    match (s, c) {
+        (St::Even, Letter::B) => St::Odd,
+        (St::Odd, Letter::B) => St::Even,
+        (x, _) => x,
+    }
+}
+
+#[finite(cap = 16)]
+module OddB {
+    input letter(c: Letter) key();
+    output accepted(yes: bool);
+    table state(s: St) key();
+
+    bootstrap {
+        emit state(St::Even);
+    }
+    advance: on letter(c), state(s) {
+        upsert state(step(s, c));
+    }
+    report: while state(s) {
+        emit accepted(s == St::Odd);
+    }
+}
+
+import OddB as dfa;

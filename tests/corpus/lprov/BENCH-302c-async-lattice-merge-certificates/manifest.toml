@@ -1,0 +1,25 @@
+schema   = 1
+id       = "BENCH-302"
+title    = "T3 certificates: seen_both_eph is flagged diffluent; store and seen_both are certified confluent"
+priority = "P0"
+source   = "R11/G1 §7 T3 (\"diffluent in seen_both_eph … confluent in store and seen_both\") and §4.2 (guarded asynchrony^L)"
+features = ["LANG-126", "LANG-137", "LANG-153", "ANA-024", "ANA-029", "ANA-141", "SEM-044", "SEM-107"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+The ultimate L-models are {store ↦ {x↦3, y↦5}, seen_both} plus seen_both_eph iff both snapshots arrive in one tick.
+`snap` is ephemeral; its consumer `sink` is a join-morphism into persistent state (guarded asynchrony^L case (b)), so
+store and seen_both are certified (ANA-141). `both_eph` applies a threshold that is not join-prime to the ephemeral
+batch, which fails condition (2) of case (b): the analyzer must report seen_both_eph as not confluent.
+"""
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-126", "LANG-137", "LANG-153", "ANA-024", "ANA-029", "ANA-141", "SEM-044", "SEM-107"]
+until = "M8"
+
+[expect_analysis]
+# Confluence verdict per relation (ANA-029/ANA-141/ANA-143): certified | confluent_not_certified | not_confluent |
+# inconclusive.
+confluent = { store = "certified", seen_both = "certified", seen_both_eph = "not_confluent" }

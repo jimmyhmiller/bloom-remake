@@ -1,0 +1,46 @@
+schema   = 1
+id       = "BENCH-053"
+title    = "lmin over a negative cycle: the iteration bound fires as a hard error (BLSR007)"
+priority = "P0"
+source   = "R04 §12 T4; CR-53; SEM-032; R11 §3.2 D8"
+features = ["LANG-121", "LANG-124", "LANG-125", "SEM-031", "SEM-032", "SEM-103", "ENG-047", "ENG-140"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+R04 T4 gives no data; the graph is re-derived: a → b (2), b → a (−3), a cycle of weight −1, arriving at tick 1.
+R04 allows "either the iteration bound fires as a hard error or the program is rejected statically"; the adopted
+semantics (CR-53, SEM-032, ENG-047) makes the runtime error normative and the static check only a warning, so the
+case expects BLSR007 in the tick the edges arrive. Tick 0 has no edges and succeeds.
+"""
+
+[run]
+ticks = 3
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "edge_in"
+rows = [["a", "b", 2], ["b", "a", -3]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-121", "LANG-124", "LANG-125", "SEM-031", "SEM-032", "SEM-103", "ENG-047", "ENG-140"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-121", "LANG-124", "LANG-125", "SEM-031", "SEM-032", "SEM-103", "ENG-047", "ENG-140"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel  = "dist"
+tick = 0
+rows = []
+
+[[expect_error]]
+code = "BLSR007"
+node = "n1"
+tick = 1

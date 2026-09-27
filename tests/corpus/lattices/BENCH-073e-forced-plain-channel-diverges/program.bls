@@ -1,0 +1,26 @@
+//! BENCH-073e. Negative variant forced through (R13 §12 T1): the plain channel of BENCH-073d with its at-least-once
+//! delivery accepted explicitly by `#[nondet(…)]`. Nothing deduplicates or retransmits the updates any more, so the
+//! simulator finds runs in which a replica's count of x is not 1 (a lost update; a duplicated one would double it).
+
+program forced_plain_channel version 1;
+
+role Replica: cluster;
+
+#[nondet("BENCH-073e: at-least-once, unwrapped group payloads, accepted on purpose to show the divergence")]
+channel count_delta(item: String, w: Z): Replica -> Replica key(item);
+
+at Replica {
+    input local_update(item: String, w: Z);
+    zset table counts(item: String);
+
+    apply_local: on local_update(item, w) {
+        emit counts(item) weight w;
+        for r in Replica where r != self {
+            send count_delta(item, w) to r;
+        }
+    }
+    apply_remote: on count_delta(item, w) {
+        emit counts(item) weight w;
+    }
+    view raw(item, w) = weights!(counts(item), w);
+}

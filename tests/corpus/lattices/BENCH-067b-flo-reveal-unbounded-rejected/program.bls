@@ -1,0 +1,15 @@
+//! BENCH-067b. Flo (R04 §12 T21, §8): reading an unbounded lattice with `to_sequence`/`reveal` violates eager
+//! execution and must be rejected; only thresholds may leave the lattice world. In Blossom, `reveal!` is a point of
+//! order (LANGUAGE §13.2), and a region declared coordination-free (`monotone`) that contains one is rejected
+//! (BLS0702, ANA-031).
+
+program flo_reveal_unbounded version 1;
+
+input num(n: u64);
+
+cell total: LPSet<u64>;
+
+fold: while let s = lpset{ n | num(n) } {
+    emit total(s);
+}
+monotone view exact_total(t) = let t = reveal!(total.sum());

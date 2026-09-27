@@ -1,0 +1,51 @@
+//! BENCH-074a. The cumulative-per-origin wrapper W3 (R13 §6.3, DIST-016) over lossy links on a line A — B — C (R13
+//! §12 T2). There is no A–C link: the hub B relays every update it receives from one edge node to the other, so C
+//! learns A's updates only through B. W3 needs no acknowledgements: each origin's latest cumulative contribution
+//! supersedes the earlier ones, so loss, duplication and reordering are repaired by the wrapper's anti-entropy, and
+//! the receiver applies C′ − C when an origin's entry advances.
+
+program cumulative_line version 1;
+
+role Edge: cluster;
+role Hub;
+
+#[fault(lossy)]
+channel up(item: String, w: Z): Edge -> Hub key(item) exactly_once(cumulative);
+#[fault(lossy)]
+channel down(item: String, w: Z): Hub -> Edge key(item) exactly_once(cumulative);
+
+at Edge {
+    input edge_update(item: String, w: Z);
+    zset table edge_counts(item: String);
+    table edge_received(item: String);
+
+    local: on edge_update(item, w), h in Hub {
+        emit edge_counts(item) weight w;
+        send up(item, w) to h;
+    }
+    remote: on down(item, w) {
+        emit edge_counts(item) weight w;
+        emit edge_received(item);
+    }
+    view edge_raw(item, w) = weights!(edge_counts(item), w);
+}
+
+at Hub {
+    input hub_update(item: String, w: Z);
+    zset table hub_counts(item: String);
+
+    local_hub: on hub_update(item, w) {
+        emit hub_counts(item) weight w;
+        for e in Edge {
+            send down(item, w) to e;
+        }
+    }
+    /// Relay: an update from one edge node is applied here and forwarded to every other edge node.
+    relay: on up(item, w) from src {
+        emit hub_counts(item) weight w;
+        for e in Edge where e != src {
+            send down(item, w) to e;
+        }
+    }
+    view hub_raw(item, w) = weights!(hub_counts(item), w);
+}

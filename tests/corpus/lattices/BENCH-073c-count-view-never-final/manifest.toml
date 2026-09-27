@@ -1,0 +1,26 @@
+schema   = 1
+id       = "BENCH-073"
+title    = "`final output` on the replicated Z-set count view is rejected as NEVER-FINAL (BLS0705)"
+priority = "P0"
+source   = "R13 §12 T1 (\"output final count_view is rejected by ANA-120: NEVER-FINAL (Thm 18)\"); R13 §9.3"
+features = ["LANG-138", "LANG-158", "LANG-212", "SEM-016", "SEM-017", "ANA-120"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+`count_view` depends on a Z-set that receives possibly negative weights from host input and from other replicas,
+with no seal: its update semiautomaton is invertible, so ANA-120 classifies it NEVER-FINAL and the `final output`
+declaration on line 15 is BLS0705.
+"""
+
+# BLS0502/BLS0503, BLS0702 and BLS0705 come from blossom-analysis over the IR (ARCHITECTURE §13.1), so the
+# diagnostic is expected from the analysis backend, not from the frontend-only compile backend.
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-138", "LANG-158", "LANG-212", "SEM-016", "SEM-017", "ANA-120"]
+until = "M6"
+
+[[expect_diag]]
+code     = "BLS0705"
+line     = 15
+severity = "error"

@@ -1,0 +1,19 @@
+//! BENCH-311f. T12, chain input, through the ASP encoding: exactly {c(a,b), c(a,c)}.
+//! The ASP backend must agree with the simulator on the controls derived from this input.
+
+spec CompanyControlAsp for r#program {
+    nodes N;
+
+    fact share("a", "b", 60) @ N at tick 1;
+    fact share("b", "c", 30) @ N at tick 1;
+    fact share("a", "c", 30) @ N at tick 1;
+
+    invariant only_expected "an unexpected control":
+        never c(x, y) @ N where not ((x == "a" && y == "b") || (x == "a" && y == "c"));
+    invariant ab_present "c(a, b) is missing":
+        never not c("a", "b") @ N at tick 2;
+    invariant ac_present "c(a, c) is missing":
+        never not c("a", "c") @ N at tick 2;
+
+    check asp { ticks: 3 } expect holds;
+}

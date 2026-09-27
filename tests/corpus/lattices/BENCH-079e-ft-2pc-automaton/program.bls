@@ -1,0 +1,63 @@
+//! BENCH-079e. Free termination of the per-transaction 2PC automaton (R13 §12 T11; R13 §9.5: "2PC and Paxos
+//! decisions: committed and chosen are absorbing, so they are final"). Per transaction the state is Init (no row yet),
+//! Prepared, Committed or Aborted; the query is the decision. Committed and Aborted are absorbing, so they are FT with
+//! their decisions; Init and Prepared can still reach either decision, so they are not.
+
+program ft_two_phase_commit version 1;
+
+pub enum TxnEvent {
+    Prepare #1,
+    Commit #2,
+    Abort #3,
+    #[unknown]
+    Other #4,
+}
+
+pub enum Decision {
+    Commit #1,
+    Abort #2,
+    #[unknown]
+    Other #3,
+}
+
+enum TxnState {
+    Prepared,
+    Committed,
+    Aborted,
+}
+
+/// `None` is Init: a transaction with no row yet.
+fn step(s: Option<TxnState>, e: TxnEvent) -> Option<TxnState> {
+    match (s, e) {
+        (None, TxnEvent::Prepare) => Some(TxnState::Prepared),
+        (None, TxnEvent::Abort) => Some(TxnState::Aborted),
+        (Some(TxnState::Prepared), TxnEvent::Commit) => Some(TxnState::Committed),
+        (Some(TxnState::Prepared), TxnEvent::Abort) => Some(TxnState::Aborted),
+        (x, _) => x,
+    }
+}
+
+fn decision_of(s: TxnState) -> Option<Decision> {
+    match s {
+        TxnState::Committed => Some(Decision::Commit),
+        TxnState::Aborted => Some(Decision::Abort),
+        TxnState::Prepared => None,
+    }
+}
+
+#[finite(cap = 16)]
+module TxnAutomaton {
+    /// At most one event per transaction per tick.
+    input ev(txn: u64, e: TxnEvent) key(txn);
+    output decision(txn: u64, d: Decision);
+    table st(txn: u64, s: TxnState) key(txn);
+
+    advance: on ev(t, e), outer st(t, s), let Some(s2) = step(s, e) {
+        upsert st(t, s2);
+    }
+    report: while st(t, s), let Some(d) = decision_of(s) {
+        emit decision(t, d);
+    }
+}
+
+import TxnAutomaton as tpc;

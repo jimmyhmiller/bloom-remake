@@ -1,0 +1,88 @@
+schema   = 1
+id       = "BENCH-310"
+title    = "T11 LWW Lex register, r1 first: ((1,r1),\"x\") at tick 2, ((1,r2),\"y\") from tick 3"
+priority = "P1"
+source   = "R11/G1 §7 T11 (r1-first schedule; ✓sim, ✓clingo)"
+features = ["LANG-124", "LANG-127", "LANG-131", "LANG-137", "LANG-153", "SEM-102"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+R11's r1-first schedule is reproduced by r2 writing one tick later (its timestamp is still (1, r2)). @2: reg =
+((1,r1),x), seen_v11 holds, val_is_y does not. @3: reg = ((1,r2),y) and val_is_y holds.
+Ultimate L-model at r3 in every schedule (R11 T11): {reg ↦ ((1,r2),y), seen_v11, val_is_y}; the `final` rows state it.
+"""
+
+[deploy]
+nodes = [{ name = "r1", role = "Writer" }, { name = "r2", role = "Writer" }, { name = "r3", role = "Reader" }]
+
+[run]
+ticks = 5
+stop  = "ticks"
+
+[[input]]
+node = "r1"
+tick = 1
+rel  = "write"
+rows = [[1, "r1", "x"]]
+
+[[input]]
+node = "r2"
+tick = 2
+rel  = "write"
+rows = [[1, "r2", "y"]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-124", "LANG-127", "LANG-131", "LANG-137", "LANG-153", "SEM-102"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-124", "LANG-127", "LANG-131", "LANG-137", "LANG-153", "SEM-102"]
+until = "M7"
+
+[[expect]]
+node = "r3"
+rel  = "reg"
+tick = 2
+rows = [[{ blossom = 'Lex::of((1, "r1"), "x")' }]]
+
+[[expect]]
+node  = "r3"
+rel   = "reg"
+row   = [{ blossom = 'Lex::of((1, "r2"), "y")' }]
+holds = "3.."
+
+[[expect]]
+node   = "r3"
+rel    = "seen_v11"
+row    = []
+absent = "..=1"
+holds  = "2.."
+
+[[expect]]
+node   = "r3"
+rel    = "val_is_y"
+row    = []
+absent = "..=2"
+holds  = "3.."
+
+# ---- the ultimate L-model (contents at the end of the run)
+[[expect]]
+node  = "r3"
+rel   = "reg"
+final = true
+rows  = [[{ blossom = 'Lex::of((1, "r2"), "y")' }]]
+
+[[expect]]
+node  = "r3"
+rel   = "seen_v11"
+final = true
+rows  = [[]]
+
+[[expect]]
+node  = "r3"
+rel   = "val_is_y"
+final = true
+rows  = [[]]

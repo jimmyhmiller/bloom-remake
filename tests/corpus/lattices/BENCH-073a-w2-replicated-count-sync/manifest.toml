@@ -1,0 +1,178 @@
+schema   = 1
+id       = "BENCH-073"
+title    = "Replicated count with retractions over W2 (sync): x = 1, y absent, z never sent; B transiently at −1"
+priority = "P0"
+source   = "R13 §12 T1; R13 §6.2 (W2) and §6.5 (views); Wrapping Rings §3.2 and §5"
+features = ["LANG-138", "LANG-142", "LANG-153", "LANG-158", "SEM-036", "DIST-015", "ENG-062", "ENG-070"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+Operations (R13 T1): A: +x @1, +x @2, −y @5 (after C's +y has arrived); B: −x @1, then +z and −z in the same tick @3;
+C: +y @1. In lockstep rounds a wrapped update sent at tick t is applied at t + 1 at every other replica.
+- B: raw x = −1 @1 (its clamped count shows nothing, i.e. 0), 0 @2, 1 @3; y = 1 from @2 to @5, 0 from @6.
+- A: raw {x:1, y:1} @2–@4, {x:1} from @5. C: {y:1} @2, {x:1, y:1} @3–@5, {x:1} from @6.
+- B's +z and −z sum to 0 in one tick: z never has a weight anywhere and is never sent (no replica ever receives z).
+- Final everywhere: raw {x:1}, present {x}.
+R13 T1's instrumented check that payload applications equal the number of distinct dots (5 per remote replica) is a
+wrapper counter that schema v1 cannot express; it belongs to the ENG-070/DIST-015 tests (docs/plan/notes/M1.3.md).
+"""
+
+[deploy]
+nodes = [{ name = "A", role = "Replica" }, { name = "B", role = "Replica" }, { name = "C", role = "Replica" }]
+
+[run]
+ticks = 9
+stop  = "ticks"
+
+[[input]]
+node = "A"
+tick = 1
+rel  = "local_update"
+rows = [["x", 1]]
+
+[[input]]
+node = "A"
+tick = 2
+rel  = "local_update"
+rows = [["x", 1]]
+
+[[input]]
+node = "A"
+tick = 5
+rel  = "local_update"
+rows = [["y", -1]]
+
+[[input]]
+node = "B"
+tick = 1
+rel  = "local_update"
+rows = [["x", -1]]
+
+[[input]]
+node = "B"
+tick = 3
+rel  = "local_update"
+rows = [["z", 1], ["z", -1]]
+
+[[input]]
+node = "C"
+tick = 1
+rel  = "local_update"
+rows = [["y", 1]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-138", "LANG-142", "LANG-153", "LANG-158", "SEM-036", "DIST-015", "ENG-062", "ENG-070"]
+until = "M8"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-138", "LANG-142", "LANG-153", "LANG-158", "SEM-036", "DIST-015", "ENG-062", "ENG-070"]
+until = "M8"
+
+# ---- B: transiently −1, clamped to nothing
+[[expect]]
+node = "B"
+rel  = "raw"
+tick = 1
+rows = [["x", -1]]
+
+[[expect]]
+node = "B"
+rel  = "qty"
+tick = 1
+rows = []
+
+[[expect]]
+node = "B"
+rel  = "raw"
+tick = 2
+rows = [["y", 1]]
+
+[[expect]]
+node = "B"
+rel  = "raw"
+tick = 3
+rows = [["x", 1], ["y", 1]]
+
+[[expect]]
+node = "B"
+rel  = "qty"
+tick = 3
+rows = [["x", 1], ["y", 1]]
+
+# ---- A and C
+[[expect]]
+node = "A"
+rel  = "raw"
+tick = 2
+rows = [["x", 1], ["y", 1]]
+
+[[expect]]
+node = "A"
+rel  = "raw"
+tick = 5
+rows = [["x", 1]]
+
+[[expect]]
+node = "C"
+rel  = "raw"
+tick = 2
+rows = [["y", 1]]
+
+[[expect]]
+node = "C"
+rel  = "raw"
+tick = 3
+rows = [["x", 1], ["y", 1]]
+
+# ---- z never exists and is never sent
+[[expect]]
+node   = "B"
+rel    = "present"
+row    = ["z"]
+absent = "0.."
+
+[[expect]]
+node  = "A"
+rel   = "ever_received"
+final = true
+rows  = [["x"], ["y"]]
+
+[[expect]]
+node  = "B"
+rel   = "ever_received"
+final = true
+rows  = [["x"], ["y"]]
+
+[[expect]]
+node  = "C"
+rel   = "ever_received"
+final = true
+rows  = [["x"], ["y"]]
+
+# ---- final state everywhere: x = 1, y absent
+[[expect]]
+node  = "A"
+rel   = "raw"
+final = true
+rows  = [["x", 1]]
+
+[[expect]]
+node  = "B"
+rel   = "raw"
+final = true
+rows  = [["x", 1]]
+
+[[expect]]
+node  = "C"
+rel   = "raw"
+final = true
+rows  = [["x", 1]]
+
+[[expect]]
+node  = "B"
+rel   = "present"
+final = true
+rows  = [["x"]]

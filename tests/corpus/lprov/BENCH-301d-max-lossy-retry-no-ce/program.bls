@@ -1,0 +1,33 @@
+//! BENCH-301d. T2 retry variant under LDFI 4/3/0: no counterexample.
+//!
+//! R11/G1 T2, retry variant: `x` is persistent, so the sender re-derives and re-sends its value at every tick (CR-26:
+//! Dedalus replay of an async rule over persistent state).
+
+program max_lossy_retry version 1;
+
+role Sender: cluster;
+role Sink;
+
+channel m(v: LMax<i64>): Sender -> Sink;
+
+at Sender {
+    input x(v: i64);
+    cell xv: LMax<i64>;
+
+    remember: on x(v) {
+        emit xv(v);
+    }
+    /// Level-triggered: resent at every tick from the first tick `xv` is non-⊥ (a ⊥ value sends nothing).
+    resend: while let v = xv, s in Sink {
+        send m(v) to s;
+    }
+}
+
+at Sink {
+    cell best: LMax<i64>;
+
+    recv: on m(v) {
+        emit best(v);
+    }
+    view hi() = best >= 7;
+}

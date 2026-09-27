@@ -1,0 +1,25 @@
+//! BENCH-054a. MaxCapacityPaths (bud test/tc_lattice.rb; R04 §12 T5): the widest path per pair, as ShortestPathsL
+//! with the roles of the lattices swapped. A path's capacity is an lmax combined with an edge's capacity by
+//! `min_of`, a morphism of lmax (R04 §2.4), so the recursion stays monotone and in one stratum. Capacities are
+//! bounded by the largest edge, so the in-tick fixpoint is finite even around cycles.
+
+program max_capacity_paths version 1;
+
+input link_in(from: String, to: String, cap: u64);
+
+table link(from: String, to: String, cap: u64);
+table path(from: String, to: String, next_hop: String, cap: LMax<u64>);
+table max_cap(from: String, to: String, cap: LMax<u64>);
+
+load: on link_in(f, t, c) {
+    emit link(f, t, c);
+}
+direct: while link(f, t, c) {
+    emit path(f, t, "direct", c);
+}
+extend: while link(f, t, c), path(t, t2, _, pc) {
+    emit path(f, t2, t, pc.min_of(c));
+}
+summarize: while path(f, t, _, c) {
+    emit max_cap(f, t, c);
+}

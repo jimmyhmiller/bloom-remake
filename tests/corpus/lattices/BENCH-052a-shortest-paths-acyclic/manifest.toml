@@ -1,0 +1,63 @@
+schema   = 1
+id       = "BENCH-052"
+title    = "ShortestPathsL, acyclic input: exact min_cost set, everything in stratum 0"
+priority = "P0"
+source   = "R04 §12 T3 (bud test/tc_lattice.rb ShortestPathsL: input link and expected min_cost verbatim)"
+features = ["LANG-040", "LANG-121", "LANG-122", "LANG-124", "LANG-125", "LANG-128", "SEM-030", "SEM-031", "SEM-032",
+            "SEM-103", "SEM-022", "ANA-002"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+Input and expected `min_cost` are R04 T3's (acyclic): link = [a,b,11],[a,b,10],[a,c,15],[b,c,20],[b,c,21],
+[b,d,30],[c,d,5],[d,e,10]. The links arrive at tick 1 and the whole closure is computed in that tick. The test
+also asserts that link, path and min_cost are all in stratum 0 (recursion through lattice arithmetic needs no
+stratification); `strata` maps relation names to their stratum number (SEM-022, the longest path counting negative
+edges).
+"""
+
+[run]
+ticks = 4
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "link_in"
+rows = [["a", "b", 11], ["a", "b", 10], ["a", "c", 15], ["b", "c", 20], ["b", "c", 21], ["b", "d", 30],
+        ["c", "d", 5], ["d", "e", 10]]
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-121", "LANG-122", "LANG-124", "LANG-125", "LANG-128", "SEM-030", "SEM-031",
+                 "SEM-032", "SEM-103", "SEM-022", "ANA-002"]
+until = "M5"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-121", "LANG-122", "LANG-124", "LANG-125", "LANG-128", "SEM-030", "SEM-031",
+                 "SEM-032", "SEM-103", "SEM-022", "ANA-002"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-121", "LANG-122", "LANG-124", "LANG-125", "LANG-128", "SEM-030", "SEM-031",
+                 "SEM-032", "SEM-103", "SEM-022", "ANA-002"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel  = "min_cost"
+tick = 1
+rows = [["a", "b", 10], ["a", "c", 15], ["a", "d", 20], ["a", "e", 30], ["b", "c", 20], ["b", "d", 25],
+        ["b", "e", 35], ["c", "d", 5], ["c", "e", 15], ["d", "e", 10]]
+
+[[expect]]
+node  = "n1"
+rel   = "min_cost"
+final = true
+rows  = [["a", "b", 10], ["a", "c", 15], ["a", "d", 20], ["a", "e", 30], ["b", "c", 20], ["b", "d", 25],
+         ["b", "e", 35], ["c", "d", 5], ["c", "e", 15], ["d", "e", 10]]
+
+[expect_analysis]
+strata = { link = 0, path = 0, min_cost = 0 }

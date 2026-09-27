@@ -1,0 +1,41 @@
+//! BENCH-078a. Dot reuse after a crash, negative (R13 §12 T14; R13 §6.2): a hand-written W2 whose origin keeps its
+//! sequence number in volatile state and has no incarnation in its dots. After a crash and restart it numbers new
+//! updates from 1 again, and every receiver silently drops them as duplicates of dots it has already applied. The
+//! replicas diverge; the expected final states pin that divergence (the built-in wrapper avoids it: BENCH-078b).
+
+program dot_reuse version 1;
+
+role Replica: cluster;
+
+/// The program deduplicates by dot itself, so it accepts the plain channel's at-least-once delivery explicitly.
+#[nondet("BENCH-078a: a hand-written dotted wrapper; deduplication by (origin, seq) is the program's own")]
+channel gdelta(seq: u64, item: String, w: i64): Replica -> Replica;
+
+at Replica {
+    input local_update(item: String, w: i64);
+
+    /// The bug: the next sequence number is volatile, and dots carry no incarnation.
+    table seqno(n: u64) key();
+    table outbuf(seq: u64, item: String, w: i64);
+    durable zset table counts(item: String);
+    table seen_dot(origin: Node<Replica>, seq: u64);
+
+    bootstrap {
+        emit seqno(0);
+    }
+    stamp: on local_update(item, w), seqno(n) {
+        emit counts(item) weight w;
+        emit outbuf(n + 1, item, w);
+        upsert seqno(n + 1);
+    }
+    /// No acknowledgements: every buffered update is resent every tick; receivers deduplicate by dot.
+    resend: while outbuf(s, item, w), p in Replica where p != self {
+        send gdelta(s, item, w) to p;
+    }
+    receive: on gdelta(s, item, w) from o, not seen_dot(o, s) {
+        emit counts(item) weight w;
+        next seen_dot(o, s);
+    }
+
+    view raw(item, w) = weights!(counts(item), w);
+}

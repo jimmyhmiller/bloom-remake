@@ -1,0 +1,112 @@
+//! BENCH-063d. The causal CRDTs of BENCH-063c under simulated schedules: the replicas agree on every query at the end.
+//!
+//! R04 T17 lists the causal CRDTs of the δ-CRDT paper next to the counters and sets of BENCH-063a: the add-wins set
+//! (AW-Set, δ paper Fig. 15, `Causal<DotMap<E, DotSet>>`), the enable-wins flag (EW-Flag, Fig. 13, `Causal<DotSet>`)
+//! and the multi-value register (MV-Register, Fig. 14, `Causal<DotFun<V>>`). LANGUAGE §11.5 names `Causal<…>` but gives
+//! it no constructor or update operation, so each CRDT is written here as a product of grow-only sets over dots: an
+//! update creates a fresh dot, and a remove, disable or overwrite tombstones exactly the dots its replica has observed
+//! (the dot store plus the tombstone set play the roles of the causal store and its context). Observable behavior is
+//! that of the causal versions:
+//!   - AW-Set: a remove deletes the element's observed dots, so a concurrent add (a dot the remove did not observe)
+//!     wins;
+//!   - EW-Flag: the flag is on while some enable dot is live, so a concurrent enable beats a disable;
+//!   - MV-Register: concurrent writes all survive; a write tombstones every write it observed.
+//! Dots are (replica, op id); the workload gives each update an op id, unique per replica. Every update is merged
+//! locally in its own tick and shipped as a delta to every other replica (R04 §5.3).
+
+program causal_crdts version 1;
+
+role Replica: cluster;
+
+type Dot = (Node<Replica>, u64);
+
+/// Add-wins set: each element's dots, and the dots that removes have tombstoned.
+pub lattice AWSet {
+    dots: LMap<String, LSet<Dot>>,
+    dead: LSet<Dot>,
+}
+
+/// Enable-wins flag: the enable dots, and the dots that disables have tombstoned.
+pub lattice EWFlag {
+    enables: LSet<Dot>,
+    dead: LSet<Dot>,
+}
+
+/// Multi-value register: every write as (dot, value), and the dots that later writes have tombstoned.
+pub lattice MVReg {
+    writes: LSet<(Dot, String)>,
+    dead: LSet<Dot>,
+}
+
+channel aw_delta(d: AWSet): Replica -> Replica;
+channel ew_delta(d: EWFlag): Replica -> Replica;
+channel mv_delta(d: MVReg): Replica -> Replica;
+
+at Replica {
+    input aw_add(e: String, op: u64);
+    input aw_remove(e: String);
+    input ew_enable(op: u64);
+    input ew_disable();
+    input mv_write(v: String, op: u64);
+
+    cell aw: AWSet;
+    cell ew: EWFlag;
+    cell mv: MVReg;
+
+    // ---- AW-Set
+    aw_add_new: on aw_add(e, op) {
+        emit aw(AWSet { dots: map[e => set[(self, op)]] });
+        for p in Replica where p != self {
+            send aw_delta(AWSet { dots: map[e => set[(self, op)]] }) to p;
+        }
+    }
+    /// Tombstones the dots of `e` observed in this tick.
+    aw_remove_observed: on aw_remove(e), d in aw.dots.at(e) {
+        emit aw(AWSet { dead: set[d] });
+        for p in Replica where p != self {
+            send aw_delta(AWSet { dead: set[d] }) to p;
+        }
+    }
+    aw_absorb: on aw_delta(d) {
+        emit aw(d);
+    }
+    view aw_members(e) = (e, ds) in aw.dots, d in ds, not (d in aw.dead);
+
+    // ---- EW-Flag
+    ew_enable_new: on ew_enable(op) {
+        emit ew(EWFlag { enables: set[(self, op)] });
+        for p in Replica where p != self {
+            send ew_delta(EWFlag { enables: set[(self, op)] }) to p;
+        }
+    }
+    /// Tombstones the enable dots observed in this tick.
+    ew_disable_observed: on ew_disable(), d in ew.enables {
+        emit ew(EWFlag { dead: set[d] });
+        for p in Replica where p != self {
+            send ew_delta(EWFlag { dead: set[d] }) to p;
+        }
+    }
+    ew_absorb: on ew_delta(d) {
+        emit ew(d);
+    }
+    view ew_on() = d in ew.enables, not (d in ew.dead);
+
+    // ---- MV-Register
+    mv_write_new: on mv_write(v, op) {
+        emit mv(MVReg { writes: set[((self, op), v)] });
+        for p in Replica where p != self {
+            send mv_delta(MVReg { writes: set[((self, op), v)] }) to p;
+        }
+    }
+    /// A write supersedes every other write this replica has observed in this tick.
+    mv_supersede: on mv_write(_, op), (d, _) in mv.writes where d != (self, op) {
+        emit mv(MVReg { dead: set[d] });
+        for p in Replica where p != self {
+            send mv_delta(MVReg { dead: set[d] }) to p;
+        }
+    }
+    mv_absorb: on mv_delta(d) {
+        emit mv(d);
+    }
+    view mv_values(v) = (d, v) in mv.writes, not (d in mv.dead);
+}

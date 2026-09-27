@@ -1,0 +1,30 @@
+//! BENCH-059b. Versioned KVS, negative case (R04 §12 T13: "Equal-version/different-value input must be rejected";
+//! R04 §3.9: Bud's preserve_dominants lets the last write win for equal versions, which is not commutative). With a
+//! point-valued register as the value lattice, two different values under one version cannot both be the value of
+//! that version: merging them is a hard Conflict (LANGUAGE §11.5, `LPoint`: BLSR006), never a silent choice.
+
+program ldom_equal_version version 1;
+
+role Client: cluster;
+role Replica;
+
+channel put(key: String, ver: VClock, val: String): Client -> Replica;
+
+at Client {
+    input write(key: String, ver: VClock, val: String);
+
+    send_write: on write(k, ver, v), r in Replica {
+        send put(k, ver, v) to r;
+    }
+}
+
+at Replica {
+    table store(key: String, d: LDom<VClock, LPoint<String>>);
+    /// Read every tick, so the conflicting values are joined in the tick they arrive whichever way LDom stores two
+    /// pairs with one version.
+    view current(key, val) = store(key, d), let val = d.value!().get();
+
+    accept: on put(k, ver, v) {
+        emit store(k, LDom::of(ver, v));
+    }
+}

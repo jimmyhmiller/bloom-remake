@@ -1,0 +1,27 @@
+//! BENCH-078b. Dot reuse after a crash, positive (R13 §12 T14; DIST-015): with the compiler-inserted W2 wrapper, an
+//! origin's dots carry its incarnation (or its sequence number is durable), so updates made after a restart get fresh
+//! dots and nothing is lost.
+
+program dot_reuse_builtin version 1;
+
+role Replica: cluster;
+
+#[fault(lossy)]
+channel count_delta(item: String, w: Z): Replica -> Replica key(item) exactly_once(dots);
+
+at Replica {
+    input local_update(item: String, w: Z);
+    durable zset table counts(item: String);
+
+    apply_local: on local_update(item, w) {
+        emit counts(item) weight w;
+        for p in Replica where p != self {
+            send count_delta(item, w) to p;
+        }
+    }
+    apply_remote: on count_delta(item, w) {
+        emit counts(item) weight w;
+    }
+
+    view raw(item, w) = weights!(counts(item), w);
+}

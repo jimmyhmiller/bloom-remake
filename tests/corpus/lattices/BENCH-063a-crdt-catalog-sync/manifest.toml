@@ -1,0 +1,238 @@
+schema   = 1
+id       = "BENCH-063"
+title    = "CRDT catalog (G-Counter, PN-Counter, G-Set, 2P-Set, LWW) as lattice compositions: replica states"
+priority = "P1"
+source   = "R04 §12 T17; R04 §5.2 (the CRDT catalog as lattice compositions), §5.3 (δ-CRDTs)"
+features = ["LANG-122", "LANG-124", "LANG-125", "LANG-127", "LANG-130", "LANG-131", "LANG-135", "LANG-137", "LANG-153",
+            "LANG-282", "LANG-283"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The compositions are R04 §5.2's; the workload is re-derived. r1: incr 3, add a, write (1, x) at tick 1. r2: incr 2
+and add b at tick 1, remove a at tick 3, decr 1 at tick 4. r3: incr 5, add c and write (2, y) at tick 2. Deltas
+arrive one tick after they are sent and increments land at t+1, so every replica holds every update from tick 5 on:
+G-Counter {r1:3, r2:2, r3:5} (total 10, complete from tick 3); PN-Counter value 10 − 1 = 9; G-Set {a,b,c}; 2P-Set
+members {b,c} (a is removed for good); LWW register ((2, r3), y). The PN value is not monotone: at r2 it is 0, 5,
+10, 10, 9 at ticks 1–5. The causal CRDTs of R04 T17 (AW-Set, EW-Flag, MV-Register) are BENCH-063c/063d.
+"""
+
+[deploy]
+nodes = [{ name = "r1", role = "Replica" }, { name = "r2", role = "Replica" }, { name = "r3", role = "Replica" }]
+
+[run]
+ticks = 8
+stop  = "ticks"
+
+[[input]]
+node = "r1"
+tick = 1
+rel  = "incr"
+rows = [[3]]
+
+[[input]]
+node = "r1"
+tick = 1
+rel  = "add"
+rows = [["a"]]
+
+[[input]]
+node = "r1"
+tick = 1
+rel  = "write"
+rows = [[1, "x"]]
+
+[[input]]
+node = "r2"
+tick = 1
+rel  = "incr"
+rows = [[2]]
+
+[[input]]
+node = "r2"
+tick = 1
+rel  = "add"
+rows = [["b"]]
+
+[[input]]
+node = "r2"
+tick = 3
+rel  = "remove"
+rows = [["a"]]
+
+[[input]]
+node = "r2"
+tick = 4
+rel  = "decr"
+rows = [[1]]
+
+[[input]]
+node = "r3"
+tick = 2
+rel  = "incr"
+rows = [[5]]
+
+[[input]]
+node = "r3"
+tick = 2
+rel  = "add"
+rows = [["c"]]
+
+[[input]]
+node = "r3"
+tick = 2
+rel  = "write"
+rows = [[2, "y"]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-124", "LANG-125", "LANG-127", "LANG-130", "LANG-131", "LANG-135", "LANG-137",
+                 "LANG-153", "LANG-282", "LANG-283"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-124", "LANG-125", "LANG-127", "LANG-130", "LANG-131", "LANG-135", "LANG-137",
+                 "LANG-153", "LANG-282", "LANG-283"]
+until = "M7"
+
+[[expect]]
+node  = "r1"
+rel   = "gc"
+row   = [[["r1", 3], ["r2", 2], ["r3", 5]]]
+holds = "3.."
+
+[[expect]]
+node  = "r1"
+rel   = "gc_total"
+row   = [10]
+holds = "3.."
+
+[[expect]]
+node  = "r1"
+rel   = "pn_value"
+row   = [9]
+holds = "5.."
+
+[[expect]]
+node  = "r1"
+rel   = "gset_members"
+final = true
+rows  = [["a"], ["b"], ["c"]]
+
+[[expect]]
+node  = "r1"
+rel   = "tp_members"
+final = true
+rows  = [["b"], ["c"]]
+
+[[expect]]
+node  = "r1"
+rel   = "reg_value"
+final = true
+rows  = [["y"]]
+
+[[expect]]
+node  = "r2"
+rel   = "gc"
+row   = [[["r1", 3], ["r2", 2], ["r3", 5]]]
+holds = "3.."
+
+[[expect]]
+node  = "r2"
+rel   = "gc_total"
+row   = [10]
+holds = "3.."
+
+[[expect]]
+node  = "r2"
+rel   = "pn_value"
+row   = [9]
+holds = "5.."
+
+[[expect]]
+node  = "r2"
+rel   = "gset_members"
+final = true
+rows  = [["a"], ["b"], ["c"]]
+
+[[expect]]
+node  = "r2"
+rel   = "tp_members"
+final = true
+rows  = [["b"], ["c"]]
+
+[[expect]]
+node  = "r2"
+rel   = "reg_value"
+final = true
+rows  = [["y"]]
+
+[[expect]]
+node  = "r3"
+rel   = "gc"
+row   = [[["r1", 3], ["r2", 2], ["r3", 5]]]
+holds = "3.."
+
+[[expect]]
+node  = "r3"
+rel   = "gc_total"
+row   = [10]
+holds = "3.."
+
+[[expect]]
+node  = "r3"
+rel   = "pn_value"
+row   = [9]
+holds = "5.."
+
+[[expect]]
+node  = "r3"
+rel   = "gset_members"
+final = true
+rows  = [["a"], ["b"], ["c"]]
+
+[[expect]]
+node  = "r3"
+rel   = "tp_members"
+final = true
+rows  = [["b"], ["c"]]
+
+[[expect]]
+node  = "r3"
+rel   = "reg_value"
+final = true
+rows  = [["y"]]
+
+# the PN value is not monotone: it goes down at r2 when the decrement lands
+[[expect]]
+node = "r2"
+rel  = "pn_value"
+tick = 1
+rows = [[0]]
+
+[[expect]]
+node = "r2"
+rel  = "pn_value"
+tick = 2
+rows = [[5]]
+
+[[expect]]
+node = "r2"
+rel  = "pn_value"
+tick = 4
+rows = [[10]]
+
+[[expect]]
+node = "r2"
+rel  = "pn_value"
+tick = 5
+rows = [[9]]
+
+# a is a member of the 2P-Set at r1 until the removal arrives, and never again
+[[expect]]
+node   = "r1"
+rel    = "tp_members"
+row    = ["a"]
+holds  = "1..=3"
+absent = "4.."

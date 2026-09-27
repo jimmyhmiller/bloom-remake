@@ -1,0 +1,26 @@
+//! BENCH-305c. R11/G1 T6 with an asynchronous input: "If inp were async-fed, small must be reported as a point of
+//! order (ANA-022)". The values now arrive over a channel; the negated threshold in `small` is the one point of order.
+
+program antitone_read_async version 1;
+
+role Feeder;
+role Reader;
+
+channel inp(x: i64): Feeder -> Reader;
+
+at Feeder {
+    input value(x: i64);
+
+    forward: on value(x), r in Reader {
+        send inp(x) to r;
+    }
+}
+
+at Reader {
+    cell seen: LSet<i64>;
+
+    record: on inp(x) {
+        emit seen(set[x]);
+    }
+    view small() = let s = seen, not (s.size() > 2);
+}

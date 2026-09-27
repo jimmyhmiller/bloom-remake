@@ -1,0 +1,43 @@
+//! BENCH-310b. T11 with r1's write arriving first: the exact read is false at tick 2 and true from tick 3.
+//!
+//! R11/G1 T11: an LWW register as `Lex<(ts, node), Point<str>>`, ported to Blossom. The R11 program:
+//!
+//!     reg(; w) :- write(; w).     reg(; w) :- w_msg(; w).
+//!     seen_v11() :- g = reg[], g ⊒ ((1,"r1"), ⊥).          -- monotone Lex threshold
+//!     val_is_y() :- g = reg[], g.value == "y".              -- exact read (stratum 1), NOT persisted
+//!
+//! r1 writes ((1, r1), "x") and r2 writes ((1, r2), "y"); each is sent once to r3. The timestamp's node component is
+//! the replica name as a string, so the tie-break order is the documented one ((1, "r1") < (1, "r2")).
+
+program lww_register version 1;
+
+type Reg = Lex<LMax<(u64, String)>, LPoint<String>>;
+
+role Writer: cluster;
+role Reader;
+
+channel w_msg(w: Reg): Writer -> Reader;
+
+at Writer {
+    input write(ts: u64, replica: String, v: String);
+    cell local_reg: Reg;
+
+    local: on write(ts, rep, v) {
+        emit local_reg(Lex::of((ts, rep), v));
+    }
+    ship: on write(ts, rep, v), r in Reader {
+        send w_msg(Lex::of((ts, rep), v)) to r;
+    }
+}
+
+at Reader {
+    cell reg: Reg;
+
+    recv: on w_msg(w) {
+        emit reg(w);
+    }
+    /// `reg ⊒ ((1, "r1"), ⊥)`: with a chain key this is the threshold "the key has reached (1, r1)".
+    view seen_v11() = reg.key() >= (1, "r1");
+    /// An exact read of the value, re-derived every tick and not persisted.
+    view val_is_y() = let v = reg.val!() where v.get() == Some("y");
+}

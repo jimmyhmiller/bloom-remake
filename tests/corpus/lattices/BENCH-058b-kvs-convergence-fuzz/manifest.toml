@@ -1,0 +1,85 @@
+schema   = 1
+id       = "BENCH-058"
+title    = "Replicated lattice KVS under fuzzing: every delivery order converges to the same stores"
+priority = "P1"
+source   = "R04 §12 T12 (\"Fuzz: any order of puts and replications converges\"); SoCC'12 §5.1; SEM-082"
+features = ["LANG-042", "LANG-122", "LANG-124", "LANG-137", "LANG-153", "SEM-040", "SEM-044", "SEM-082", "SEM-105",
+            "TEST-001", "TEST-002"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+Re-derived workload: two clients put four values (two concurrent values for key k) at different replicas, and
+two cause_repl triggers ship whole stores at arbitrary points. Replicas forward each put to every other replica,
+so the ultimate store at every replica is the join of all puts, {j:{x}, k:{a,b,c}}, in every seed: the program is
+monotone with guarded asynchrony (SEM-082). The simulator randomizes delays and batching; the expectation is on
+the final state of each seed.
+"""
+
+[deploy]
+nodes = [
+    { name = "c1", role = "Client" },
+    { name = "c2", role = "Client" },
+    { name = "r1", role = "Replica" },
+    { name = "r2", role = "Replica" },
+    { name = "r3", role = "Replica" },
+]
+
+[run]
+ticks = 60
+stop  = "quiescent"
+seeds = 32
+
+[[input]]
+node = "c1"
+tick = 1
+rel  = "do_put"
+rows = [[1, "r1", "k", "a"], [2, "r2", "j", "x"]]
+
+[[input]]
+node = "c2"
+tick = 1
+rel  = "do_put"
+rows = [[3, "r3", "k", "b"]]
+
+[[input]]
+node = "c2"
+tick = 2
+rel  = "do_put"
+rows = [[4, "r2", "k", "c"]]
+
+[[input]]
+node = "r1"
+tick = 2
+rel  = "cause_repl"
+rows = [["r3"]]
+
+[[input]]
+node = "r3"
+tick = 3
+rel  = "cause_repl"
+rows = [["r2"]]
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-042", "LANG-122", "LANG-124", "LANG-137", "LANG-153", "SEM-040", "SEM-044", "SEM-082", "SEM-105",
+                 "TEST-001", "TEST-002"]
+until = "M8"
+
+[[expect]]
+node  = "r1"
+rel   = "kv_store"
+final = true
+rows  = [[[["j", ["x"]], ["k", ["a", "b", "c"]]]]]
+
+[[expect]]
+node  = "r2"
+rel   = "kv_store"
+final = true
+rows  = [[[["j", ["x"]], ["k", ["a", "b", "c"]]]]]
+
+[[expect]]
+node  = "r3"
+rel   = "kv_store"
+final = true
+rows  = [[[["j", ["x"]], ["k", ["a", "b", "c"]]]]]

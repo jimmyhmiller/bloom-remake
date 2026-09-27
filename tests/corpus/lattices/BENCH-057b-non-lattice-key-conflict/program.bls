@@ -1,0 +1,14 @@
+//! BENCH-057b. Key semantics with embedded lattices (R04 §12 T11; SEM-050, CR-51): lattice columns merge, but two
+//! tuples with one key that differ in a non-lattice column are a key violation, a runtime hard error (BLSR001),
+//! exactly as Bud's merge_to_buf raises KeyConstraintError.
+
+program non_lattice_key_conflict version 1;
+
+input claim(k: String, owner: String, hi: i64);
+
+/// Key: `k`. `owner` is a non-lattice payload column, so SEM-050 governs it; `high_water` merges.
+table asset(k: String, owner: String, high_water: LMax<i64>) key(k);
+
+record: on claim(k, owner, hi) {
+    emit asset(k, owner, hi);
+}
