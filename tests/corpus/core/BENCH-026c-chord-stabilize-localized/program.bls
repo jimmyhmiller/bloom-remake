@@ -10,8 +10,8 @@
 //! Identifiers are 8-bit ring ids (`Mod<8>`), and `x in (a,b)` is the ring interval `x in a<..b` (LANG-026). A
 //! node's id and its best successor are static configuration here (the n-rules that maintain `bestSucc` are not
 //! part of this test). `pred` holds one row (keys(1): a key overwrite, so an upsert); `"NIL"` is `known = false`.
-//! sb3's head lives at SI, so it is delivered there as `pred_update`. `succ` is a plain table (P2's 30 s TTL does
-//! not matter within the run). BENCH-026e localizes the same rules by hand.
+//! sb3's head lives at SI, so it is delivered there as `pred_update`, whose sender is NI. `succ` is a plain table
+//! (P2's 30 s TTL does not matter within the run). BENCH-026e localizes the same rules by hand.
 //!
 //! Scenario: a ring of na (10) and nb (50) that nc (100) has just joined: nc knows its successor na but has no
 //! predecessor, and nobody knows nc. nc stabilizes once; later nb stabilizes once.
@@ -38,7 +38,7 @@ fact init_pred("na", 0x32I, "nb", true);
 fact init_pred("nb", 0x0aI, "na", true);
 fact init_pred("nc", 0x00I, "nc", false);
 
-channel pred_update(p: Mod<8>, pi: Node<Peer>): Peer -> Peer;
+channel pred_update(p: Mod<8>): Peer -> Peer;
 
 at Peer {
     input stabilize();
@@ -68,10 +68,10 @@ at Peer {
     #[localize(chain)]
     sb3: on stabilize(), node_id(self, n), succ(_, si), pred(p, _, known) @ si, node_id(si, n1)
         where (not known || n in p<..n1) && si != self {
-        send pred_update(n, self) to si;
+        send pred_update(n) to si;
     }
 
-    set_pred: on pred_update(n, ni) {
+    set_pred: on pred_update(n) from ni {
         upsert pred(n, ni, true);
     }
 }

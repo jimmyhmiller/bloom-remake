@@ -3,7 +3,7 @@ id = "BENCH-009"
 title = "soft table: refresh is not an insertion; max eviction removes the oldest in the same tick"
 priority = "P1"
 source = "FEATURES.md CR-17, SEM-060, BENCH-009; LANGUAGE §7.9; R01 §2.3 (P2 soft state, refresh and max size)"
-features = ["LANG-048", "SEM-060", "LANG-043", "LANG-060", "LANG-071"]
+features = ["LANG-048", "SEM-060", "LANG-043", "LANG-060", "LANG-071", "LANG-040"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -19,12 +19,12 @@ stop = "ticks"
 
 [backend.oracle]
 status = "unimplemented"
-unimplemented = ["LANG-048", "SEM-060", "LANG-043", "LANG-060", "LANG-071"]
+unimplemented = ["LANG-048", "SEM-060", "LANG-043", "LANG-060", "LANG-071", "LANG-040"]
 until = "M6"
 
 [backend.interp]
 status = "unimplemented"
-unimplemented = ["LANG-048", "SEM-060", "LANG-043", "LANG-060", "LANG-071", "SEM-002"]
+unimplemented = ["LANG-048", "SEM-060", "LANG-043", "LANG-060", "LANG-071", "LANG-040", "SEM-002"]
 until = "M7"
 
 [[input]]
