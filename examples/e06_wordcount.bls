@@ -1,0 +1,66 @@
+//! E6. Word count: a hash-partitioned shuffle, reducers that aggregate, and seals that mark the end of input.
+
+program wordcount version 1;
+
+const HOT: u64 = 1000;
+
+role Mapper: cluster;
+role Reducer: cluster;
+
+/// The job plan: which mapper reads each input split. Supplied by the deployment.
+static split_of(split: u32, mapper: Node<Mapper>) key(split);
+
+fn words(text: String) -> Vec<String> {
+    text.split_whitespace().map(|w| w.to_lowercase())
+}
+
+/// One tuple per word occurrence. (split, line, pos) keeps occurrences apart under set semantics, so
+/// at-least-once delivery cannot inflate a count (CR-35). The channel routes each word to the reducer that owns
+/// it (rendezvous hashing over the Reducer members), and it carries seals per split whose count digests the
+/// compiler maintains from the sender's send log.
+#[fault(reliable)]
+channel occ(word: String, split: u32, line: u64, pos: u64): Mapper -> Reducer
+    partition by word
+    sealed by (split);
+
+at Mapper {
+    /// The host streams each assigned split and seals it once the split has been read completely.
+    input line(split: u32, lineno: u64, text: String) sealed by (split);
+
+    map: on line(s, l, text), (p, w) in words(text).enumerate() {
+        send occ(w, s, l, p);                       // no `to`: the partitioning picks the owner of `w`
+    }
+
+    /// Once the host has sealed a split, punctuate it at every reducer. A seal is idempotent, so the
+    /// level-triggered form states what happens: the seal is resent until the runtime proves it arrived.
+    punctuate: while sealed line(split: s), split_of(s, self) {
+        seal occ(split: s);                         // no `to`: every member of the destination role
+    }
+}
+
+at Reducer {
+    table seen(word: String, split: u32, line: u64, pos: u64);
+    table occs(word: String, ids: LSet<(u32, u64, u64)>);
+
+    /// Early answers that need no seal: a threshold over a growing set (THRESH-final).
+    final output hot(word: String);
+    /// Exact counts, final once every split's mapper has sealed it (SEALED-final).
+    final output word_count(word: String, n: u64) key(word);
+
+    keep: on occ(w, s, l, p) {
+        emit seen(w, s, l, p);
+        emit occs(w, set[(s, l, p)]);
+    }
+    early: while occs(w, ids) where ids.size() >= HOT {
+        emit hot(w);
+    }
+
+    /// A split is complete here when its mapper's seal has arrived and the digest matches what arrived.
+    view split_done(s) = split_of(s, m), sealed occ(split: s) from m;
+    /// A universal over a static domain, so it is monotone: once every split is done, it stays done.
+    view all_done() = forall split_of(s, _) { split_done(s) };
+
+    finish: while all_done(), seen(w, s, l, p) {
+        emit word_count(w, count!(*));
+    }
+}

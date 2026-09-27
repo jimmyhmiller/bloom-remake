@@ -1,0 +1,152 @@
+//! E3. Raft leader election as rules, with no step function.
+//!
+//! Every server runs the same code. The rules follow R07 §11.1: the tick's effective term is the largest term
+//! known ("term first"), a server grants at most one vote per term per tick, and every read sees the state at
+//! the start of the tick. Roles are views over term-indexed facts, so stepping down on a higher term needs no
+//! rule of its own: a higher term makes `leader(t)` and `candidate(t)` false for the old term in the tick it
+//! arrives. Log replication (FLAG-004) writes `log`; election only reads it, for the election restriction.
+
+program raft_election version 1;
+
+param ELECTION_MIN: Duration = 150ms;
+param ELECTION_MAX: Duration = 300ms;
+param HEARTBEAT: Duration = 50ms;
+param POLL: Duration = 10ms;
+
+role Server: cluster;
+
+channel request_vote(term: u64, last_idx: u64, last_term: u64): Server -> Server;
+channel vote(term: u64, granted: bool): Server -> Server;
+channel append_entries(term: u64): Server -> Server;           // the heartbeat form
+channel append_reply(term: u64, ok: bool): Server -> Server;
+
+at Server {
+    // ---- persistent state (Raft Fig. 2): on disk before any message of the same tick leaves (SEM-072)
+
+    /// The latest term seen. Several writes in one tick keep the largest, because terms only grow.
+    durable table current_term(t: u64) key() resolve choose_most(t);
+    /// At most one vote per term, ever.
+    durable table voted_for(term: u64, cand: Node<Server>) key(term);
+    /// The log. Replication writes it; election reads its last entry.
+    durable table log(idx: u64, term: u64, cmd: Bytes) key(idx);
+
+    // ---- volatile state
+    table won(term: u64);
+    table leader_of(term: u64, leader: Node<Server>) key(term);
+    table votes(term: u64, voters: LSet<Node<Server>>);
+    table deadline(at: Instant) key();
+    timer poll every POLL;
+    timer heartbeat every HEARTBEAT;
+
+    output leader_term(term: u64);
+
+    bootstrap fresh {
+        emit current_term(0);                       // durable: written on a node's very first start only
+    }
+    bootstrap {
+        emit deadline(now() + rand_range(ELECTION_MIN, ELECTION_MAX, ("boot", 0u64)));
+    }
+
+    // ---- term first
+    view heard_term(t) {
+        request_vote(term: t, ..);
+        vote(term: t, ..);
+        append_entries(t);
+        append_reply(term: t, ..);
+    }
+    view eff(t = max!(x)) {
+        current_term(x);
+        heard_term(x);
+    }
+    persist_term: while eff(t) {
+        next current_term(t);
+    }
+
+    invariant vote_needs_term "a vote was recorded for a term above the current term":
+        never voted_for(t, _), current_term(c) where t > c;
+
+    // ---- roles are views; a higher term makes each of them false for the old term
+    view leader(t) = eff(t), won(t);
+    view candidate(t) = eff(t), voted_for(t, self), not won(t), not leader_of(t, _);
+
+    report_leader: while leader(t) {
+        emit leader_term(t);
+    }
+
+    // ---- the election restriction (Raft §5.4.1): compare last term, then last index
+    view last_log(i, t) {
+        log(i, t, _), argmax!(i);
+        not log(_, _, _), let i = 0, let t = 0;
+    }
+
+    // ---- voter side
+    view rv_ok(c, t) =
+        request_vote(t, li, lt) from c, eff(t), last_log(mi, mt)
+        where lt > mt || (lt == mt && li >= mi);
+    /// At most one new vote per term per tick. The seeded choice is the same on every replay (SEM-085).
+    view fresh_grant(c, t) = rv_ok(c, t), not voted_for(t, _), choose!(c per t);
+    view grant(c, t) {
+        fresh_grant(c, t);
+        rv_ok(c, t), voted_for(t, c);               // a candidate's retry gets the same answer
+    }
+
+    grant_vote: on grant(c, t) {
+        next voted_for(t, c);                       // durable before the reply is released
+        send vote(t, true) to c;
+    }
+    refuse_vote: on request_vote(t, _, _) from c, eff(e), not grant(c, t) {
+        send vote(e, false) to c;                   // carries our term: a stale candidate steps down
+    }
+
+    // ---- the randomized election timeout
+    view heard_leader() = append_entries(t), eff(t);
+    view granted_now() = grant(_, _);
+    view timed_out(t) =
+        poll, eff(t), deadline(d), not leader(t), not granted_now(), not heard_leader()
+        where now() >= d;
+    view reset_timer() {
+        granted_now();
+        heard_leader();
+        timed_out(_);
+    }
+    /// The draw is captured in state, so it stays fixed until the next reset (R12 §5.8).
+    rearm: on reset_timer(), eff(t) {
+        upsert deadline(now() + rand_range(ELECTION_MIN, ELECTION_MAX, ("election", t)));
+    }
+
+    start_election: on timed_out(t), last_log(li, lt), let nt = t + 1 {
+        next current_term(nt);
+        next voted_for(nt, self);                   // vote for myself, durably
+        next votes(nt, set[self]);
+        for p in Server where p != self {
+            send request_vote(nt, li, lt) to p;
+        }
+    }
+
+    // ---- candidate side
+    count_vote: on vote(t, true) from v {
+        emit votes(t, set[v]);
+    }
+    /// `majority` is a monotone threshold over a grow-only set: once true it stays true (VER-008 quorum sort).
+    become_leader: while candidate(t), votes(t, s) where majority(s, Server) {
+        next won(t);
+        next leader_of(t, self);
+        for p in Server where p != self {
+            send append_entries(t) to p;            // announce at once
+        }
+    }
+
+    // ---- heartbeats
+    send_heartbeat: on heartbeat, leader(t) {
+        for p in Server where p != self {
+            send append_entries(t) to p;
+        }
+    }
+    accept_leader: on append_entries(t) from l, eff(t) {
+        emit leader_of(t, l);                       // two leaders of one term would break the key (SEM-050)
+        send append_reply(t, true) to l;
+    }
+    reject_stale: on append_entries(st) from l, eff(t) where st < t {
+        send append_reply(t, false) to l;
+    }
+}

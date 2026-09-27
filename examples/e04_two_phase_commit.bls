@@ -1,0 +1,148 @@
+//! E4. Two-phase commit with presumed abort and a coordinator timeout (LIB-041), as one reusable choreography
+//! with three roles. The protocol is written in message order by reopening `at` sections. Durable writes are
+//! made in the same tick as the sends that depend on them; the durability barrier orders the two (SEM-072).
+//!
+//! Projection gives three programs. The inferred, default-deny ACLs (LANG-242) are: `begin` only from Client
+//! sessions; `prepare` and `decide` only from the Coordinator; `vote` and `ack` only from Participants.
+
+program two_phase_commit version 1;
+
+pub enum Decision {
+    Commit,
+    Abort,
+    /// A decision written by a newer program version: kept as opaque bytes and re-encoded unchanged.
+    #[unknown]
+    Unknown,
+}
+
+pub choreography TwoPhaseCommit(TIMEOUT: Duration = 5s, RETRY: Duration = 500ms) {
+    role Client: external;
+    role Coordinator;
+    role Participant: cluster;
+
+    channel begin(txn: u64): Client -> Coordinator;
+    channel prepare(txn: u64): Coordinator -> Participant;
+    channel vote(txn: u64, yes: bool): Participant -> Coordinator;
+    channel decide(txn: u64, d: Decision): Coordinator -> Participant;
+    channel ack(txn: u64): Participant -> Coordinator;
+    channel outcome(txn: u64, d: Decision): Coordinator -> Client;
+
+    // ---------------- phase 1a: the coordinator logs the transaction and asks every participant
+    at Coordinator {
+        /// Two clients racing on one id: the seeded choice keeps one of them (LANG-117).
+        durable table txn(id: u64, client: Session, started: Instant) key(id) resolve choose;
+        durable table decision(id: u64, d: Decision) key(id);
+        table yes_from(id: u64, voters: LSet<Node<Participant>>);
+        table no_from(id: u64, voters: LSet<Node<Participant>>);
+        table acked(id: u64, by: LSet<Node<Participant>>);
+        timer retry every RETRY;
+
+        start: on begin(id) from c, not txn(id, _, _) {
+            next txn(id, c, now());                 // durable before `prepare` leaves
+            for p in Participant {
+                send prepare(id) to p;
+            }
+        }
+        /// A retrying client learns the decision.
+        repeat_outcome: on begin(id) from c, decision(id, d) {
+            send outcome(id, d) to c;
+        }
+        re_prepare: on retry, txn(id, _, _), p in Participant, not decision(id, _)
+            where not (p in yes_from[id]), not (p in no_from[id]) {
+            send prepare(id) to p;
+        }
+    }
+
+    // ---------------- phase 1b: each participant logs its vote, then answers
+    at Participant {
+        /// The local resource manager refuses `txn`. It may arrive before or after `prepare`.
+        input refuse(txn: u64);
+        table refused(txn: u64);
+        durable table prepared(txn: u64, yes: bool) key(txn);
+        durable table decided(txn: u64, d: Decision) key(txn);
+        output commit_txn(txn: u64);
+        output abort_txn(txn: u64);
+
+        note_refusal: on refuse(txn) {
+            emit refused(txn);
+        }
+        first_vote: on prepare(txn) from co, not prepared(txn, _), not decided(txn, _) {
+            if refused(txn) {
+                next prepared(txn, false);
+                send vote(txn, false) to co;
+            }
+            if not refused(txn) {
+                next prepared(txn, true);
+                send vote(txn, true) to co;
+            }
+        }
+        /// A repeated `prepare` gets the logged vote, never a new one.
+        repeat_vote: on prepare(txn) from co, prepared(txn, y) {
+            send vote(txn, y) to co;
+        }
+    }
+
+    // ---------------- phase 2a: the coordinator decides once, logs the decision, then announces it
+    at Coordinator {
+        count_yes: on vote(id, true) from p {
+            emit yes_from(id, set[p]);
+        }
+        count_no: on vote(id, false) from p {
+            emit no_from(id, set[p]);
+        }
+
+        /// Monotone: a threshold for every member of a closed domain.
+        view all_yes(id) = txn(id, _, _), forall p in Participant { p in yes_from[id] };
+        view any_no(id) = no_from(id, s) where s.size() >= 1;
+        /// Not monotone: it reads the clock and negates `all_yes`.
+        view timed_out(id) = txn(id, _, t0), not all_yes(id) where now() - t0 > TIMEOUT;
+        view verdict(id, d) {
+            all_yes(id), not any_no(id), let d = Decision::Commit;
+            any_no(id), let d = Decision::Abort;
+            timed_out(id), let d = Decision::Abort;
+        }
+
+        /// A participant that voted both ways would give two verdicts for one id; the key of `decision` turns
+        /// that into a loud SEM-050 error at the next tick instead of a silent pick.
+        decide_once: while verdict(id, d), not decision(id, _) {
+            next decision(id, d);                   // durable: logged before `announce` runs
+        }
+        announce: on inserted decision(id, d), txn(id, c, _) {
+            send outcome(id, d) to c;
+            for p in Participant {
+                send decide(id, d) to p;
+            }
+        }
+        redecide: on retry, decision(id, d), p in Participant where not (p in acked[id]) {
+            send decide(id, d) to p;
+        }
+        count_ack: on ack(id) from p {
+            emit acked(id, set[p]);
+        }
+    }
+
+    // ---------------- phase 2b: participants apply the decision once and acknowledge every copy
+    at Participant {
+        apply_decision: on decide(txn, d) from co {
+            send ack(txn) to co;
+            if not decided(txn, _) {
+                next decided(txn, d);
+                if d == Decision::Commit {
+                    emit commit_txn(txn);
+                } else {
+                    emit abort_txn(txn);
+                }
+            }
+        }
+
+        invariant known_decision "a decision from an unknown program version was applied":
+            never decided(_, Decision::Unknown);
+    }
+}
+
+// ---------------- the deployed program: application clients, one coordinator, and a worker cluster
+role App: external;
+role Coord;
+role Worker: cluster;
+
+import TwoPhaseCommit(TIMEOUT = 2s) as tpc with (Client = App, Coordinator = Coord, Participant = Worker);
