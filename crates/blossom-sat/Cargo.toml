@@ -1,6 +1,6 @@
 [package]
 name = "blossom-sat"
-description = "The SatSolver trait with CaDiCaL, batsat, exhaustive and DIMACS backends, and cardinality encodings."
+description = "Incremental SAT solvers and cardinality encodings"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,15 @@ publish.workspace = true
 
 [dependencies]
 blossom-base.workspace = true
+thiserror.workspace = true
+rustsat = { version = "=0.7.5", default-features = false, optional = true }
+rustsat-cadical = { version = "=0.7.5", optional = true }
+batsat = { version = "=0.6.0", optional = true }
+
+[features]
+default = ["sat-cadical"]
+sat-cadical = ["dep:rustsat", "dep:rustsat-cadical"]
+sat-batsat = ["dep:batsat"]
 
 [lints]
 workspace = true
