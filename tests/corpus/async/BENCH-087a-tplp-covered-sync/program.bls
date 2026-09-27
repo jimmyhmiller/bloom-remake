@@ -1,0 +1,62 @@
+//! BENCH-087: TPLP Figure 1 / Example 1, reachability "covered" (Ameloot, Van den Bussche, Marczak, Alvaro,
+//! Hellerstein, "Putting Logic-Based Distributed Systems on Stable Grounds", TPLP 2016), ported rule by rule.
+//!
+//!     marked(u) | y ← start(u), Node(y).
+//!     marked(u)• ← marked(u).
+//!     marked(v) ← marked(u), R(u, v).
+//!     vert(u) ← R(u, v).
+//!     vert(u) ← R(v, u).
+//!     missing() ← vert(u), ¬marked(u).
+//!     covered() ← ¬missing().
+//!
+//! Every node broadcasts its start vertices; each node marks what it can reach from them in its own graph R and
+//! derives covered() when all of its vertices are marked. "Eventually a node will produce covered() during each step
+//! iff all its local vertices are reachable from the distributed start vertices."
+
+program tplp_covered version 1;
+
+/// TPLP's `Node`: every node of the network.
+view node(y) = node_dir(y, _, _, _);
+
+/// The input distributed database: each node's local graph R and start vertices, keyed by the node holding them.
+static r_edb(at: Node, u: String, v: String);
+static start_edb(at: Node, u: String);
+
+fact r_edb("x", "a", "b");
+fact r_edb("y", "a", "c");
+fact r_edb("y", "c", "d");
+fact r_edb("z", "e", "f");
+fact r_edb("w", "f", "g");
+fact start_edb("x", "a");
+fact start_edb("z", "e");
+
+view r(u, v) = r_edb(self, u, v);
+
+/// The asynchronous head `marked(u) | y`.
+channel marked_msg(u: String);
+/// `marked`: arrivals, the deductive closure over R, and the inductive persistence rule.
+table marked(u: String);
+output covered();
+
+announce: while start_edb(self, u), node(y) {
+    send marked_msg(u) to y;
+}
+
+arrive: on marked_msg(u) {
+    emit marked(u);
+}
+
+propagate: while marked(u), r(u, v) {
+    emit marked(v);
+}
+
+view vert(u) {
+    r(u, _);
+    r(_, u);
+}
+
+view missing() = vert(u), not marked(u);
+
+report: while not missing() {
+    emit covered();
+}

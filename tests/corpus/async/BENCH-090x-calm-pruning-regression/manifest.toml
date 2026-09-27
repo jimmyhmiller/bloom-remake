@@ -1,0 +1,35 @@
+# BENCH-090 (ARCHITECTURE §6.2): the CALM-pruning regression program.
+#
+# ARCHITECTURE §6.2: "`on put(k) { emit got(k); }` followed by `while got(1), not got(2) { send alarm(1) to
+# MONITOR; }` sends an alarm only if put(1) and put(2) arrive in different ticks. That program is a pruning regression
+# test in the async corpus." The client issues both puts in tick 1; a correct simulator treats `put` as branching
+# (its receive side reaches a negation through the persistent `got`) and splits the two deliveries across ticks in
+# some runs, one of which delivers put(1) first and raises the alarm, so the spec's "no alarm" invariant fails.
+schema = 1
+id = "BENCH-090"
+title = "CALM pruning regression: branching deliveries through persistent state must be split (alarm is found)"
+priority = "P1"
+source = "ARCHITECTURE §6.2 (CALM pruning, TEST-003); PLAN M1.4 scope"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "LANG-082", "LANG-190", "LANG-201", "SEM-040", "TEST-001", "TEST-003", "TEST-081", "VER-001"]
+program = "program.bls"
+spec = "spec.bls"
+derived = false
+expected_from = "literature"
+notes = "Required by PLAN M1.4: `async/BENCH-090x-calm-pruning-regression`. The scenario inputs are the spec's facts."
+
+[deploy]
+nodes = [{ name = "CL", role = "Node" }, { name = "SRV", role = "Node" }, { name = "MON", role = "Node" }]
+
+[run]
+ticks = 20
+stop = "quiescent"
+seeds = 500
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "LANG-082", "LANG-190", "LANG-201", "SEM-040", "TEST-001", "TEST-003", "TEST-081", "VER-001"]
+until = "M8"
+
+[expect_verify]
+check = "sim"
+result = "fails"

@@ -1,0 +1,75 @@
+# BENCH-087 (R02 T20): TPLP Figure 1, reachability "covered", under the sync harness.
+#
+# TPLP Example 1: "eventually a node will produce covered() during each step iff all its local vertices are reachable
+# from the distributed start vertices." Scenario: x holds a->b, y holds a->c and c->d, z holds e->f, w holds f->g; the
+# start vertices are a (at x) and e (at z). Locally, x reaches {a, b}, y {a, c, d} and z {e, f} from {a, e}, but w
+# cannot reach f or g: covered holds at x, y, z and never at w.
+#
+# Derivation (sync harness): the start vertices are broadcast in tick 0 (and resent in every tick, since start is
+# input) and arrive in tick 1, where each node closes marked over its graph. In tick 0 nothing is marked, so no node
+# with a vertex is covered. From tick 1 on covered holds at x, y, z. The resends never stop, so the run is bounded.
+schema = 1
+id = "BENCH-087"
+title = "TPLP Fig. 1 (covered): synchronous rounds cover exactly the nodes whose vertices the start vertices reach"
+priority = "P1"
+source = "R02 T20; TPLP 2016 Figure 1 and Example 1 (verbatim program)"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-190", "LANG-240"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [
+    { name = "x", role = "Node" },
+    { name = "y", role = "Node" },
+    { name = "z", role = "Node" },
+    { name = "w", role = "Node" },
+]
+
+[run]
+ticks = 6
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-190", "LANG-240"]
+until = "M5"
+
+[[expect]]
+node = "x"
+rel = "covered"
+row = []
+holds = "1.."
+absent = "0"
+
+[[expect]]
+node = "y"
+rel = "covered"
+row = []
+holds = "1.."
+absent = "0"
+
+[[expect]]
+node = "z"
+rel = "covered"
+row = []
+holds = "1.."
+absent = "0"
+
+[[expect]]
+node = "w"
+rel = "covered"
+row = []
+absent = "0.."
+
+[[expect]]
+node = "y"
+rel = "marked"
+tick = 1
+rows = [["a"], ["c"], ["d"], ["e"]]
+
+[[expect]]
+node = "w"
+rel = "marked"
+tick = 1
+rows = [["a"], ["e"]]

@@ -1,0 +1,39 @@
+//! BENCH-090: distributed deadlock detection (Hellerstein and Alvaro, "Keeping CALM: When Distributed Consistency is
+//! Easy", CACM 2020, §1.3.1).
+//!
+//! Each node observes part of a waits-for graph between transactions. The nodes share their edges, and every node
+//! reports each transaction that lies on a cycle of the union. A cycle, once found, is still a cycle however many more
+//! edges arrive: the query is monotone, so it needs no coordination.
+
+program deadlock_detection version 1;
+
+view node(y) = node_dir(y, _, _, _);
+
+/// The waits-for edges each node observed (transaction t waits for transaction u), keyed by the observer.
+static waits_edb(at: Node, t: String, u: String);
+fact waits_edb("n1", "t1", "t2");
+fact waits_edb("n1", "t3", "t4");
+fact waits_edb("n2", "t2", "t1");
+fact waits_edb("n3", "t4", "t5");
+
+channel waits_msg(t: String, u: String);
+/// Every edge this node has heard of.
+table waits(t: String, u: String);
+output deadlocked(t: String);
+
+share: while waits_edb(self, t, u), node(y) {
+    send waits_msg(t, u) to y;
+}
+
+arrive: on waits_msg(t, u) {
+    emit waits(t, u);
+}
+
+monotone view waits_tc(t, u) {
+    waits(t, u);
+    waits_tc(t, v), waits(v, u);
+}
+
+detect: while waits_tc(t, t) {
+    emit deadlocked(t);
+}

@@ -1,0 +1,58 @@
+# BENCH-090 (R05 T8): the complement of transitive closure is not monotone and needs coordination.
+#
+# R05 T8: "domain-disjoint-monotone and not domain-distinct-monotone. It needs domain-guided placement."
+# Policy-aware certification (ANA-035) is P2, so the analysis must flag the negation of tc as a point of order on an
+# asynchronously fed relation (A then N: D) and give no certificate.
+#
+# Oracle (sync harness): in tick 0 no edge has arrived and all nine ordered pairs are reported; in tick 1 the edges
+# a->b (from x) and b->c (from y) arrive everywhere, tc = {a->b, b->c, a->c}, and three pairs are withdrawn: the
+# output is not monotone in the input.
+schema = 1
+id = "BENCH-090"
+title = "CALM oracle: the complement of transitive closure is flagged as needing coordination"
+priority = "P1"
+source = "R05 T8 and §2.3; Zinn 2012 (arXiv 1202.0242); Ameloot, SIGMOD Record 2014"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-190", "LANG-240", "ANA-022", "ANA-023", "ANA-025", "ANA-029"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "x", role = "Node" }, { name = "y", role = "Node" }]
+
+[run]
+ticks = 6
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-190", "LANG-240", "ANA-022", "ANA-023", "ANA-025", "ANA-029"]
+until = "M5"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-190", "LANG-240", "ANA-022", "ANA-023", "ANA-025", "ANA-029"]
+until = "M7"
+
+[[expect]]
+node = "x"
+rel = "unreachable"
+tick = 0
+rows = [['a', 'a'], ['a', 'b'], ['a', 'c'], ['b', 'a'], ['b', 'b'], ['b', 'c'], ['c', 'a'], ['c', 'b'], ['c', 'c']]
+
+[[expect]]
+node = "x"
+rel = "unreachable"
+tick = 1
+rows = [['a', 'a'], ['b', 'a'], ['b', 'b'], ['c', 'a'], ['c', 'b'], ['c', 'c']]
+
+[[expect]]
+node = "y"
+rel = "unreachable"
+final = true
+rows = [['a', 'a'], ['b', 'a'], ['b', 'b'], ['c', 'a'], ['c', 'b'], ['c', 'c']]
+
+[expect_analysis]
+points_of_order = { complete = true, edges = [{ from = "tc", to = "unreachable", kind = "negation" }], clusters = [] }
+calm_labels = { outputs = { unreachable = "D" } }
+certificates = { unreachable = [] }

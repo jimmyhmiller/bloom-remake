@@ -1,0 +1,16 @@
+//! BENCH-090: the simulator must find the schedule that raises the alarm (ARCHITECTURE §6.2).
+
+spec PruningFindsTheAlarm for r#program {
+    nodes CL, SRV, MON;
+
+    /// The client asks for both puts in the same tick.
+    fact request(1) @ CL at tick 1;
+    fact request(2) @ CL at tick 1;
+
+    /// The client requests put(1) and put(2) in the same tick; a schedule that delivers put(1) to the server a tick
+    /// before put(2) raises the alarm. With correct CALM pruning the simulator explores such schedules and this
+    /// invariant fails; with the unsound pruning it would always hold.
+    invariant no_alarm: never alarmed(1) @ MON;
+
+    check sim { runs: 500, seed: 1 } expect fails;
+}

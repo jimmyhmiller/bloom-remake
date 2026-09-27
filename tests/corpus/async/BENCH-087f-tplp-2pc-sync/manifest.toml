@@ -1,0 +1,73 @@
+# BENCH-087 (R02 T22): TPLP Figure 3 / Example 3, two-phase commit, under the sync harness.
+#
+# TPLP: "Every agent eventually stores the coordinator's decision: 'no' if any agent votes no, else 'yes'."
+# Scenario: coordinator C, agents A1 and A2; transaction 1 gets two yes votes, transaction 2 gets yes from A1 and no
+# from A2.
+#
+# Derivation (sync harness): the agents send their votes in tick 0 (and in every tick after, since myVote is input);
+# C receives all four in tick 1, where both transactions are complete: decideYes(1), decideNo(2). C sends the outcomes
+# in tick 1 and logs both transactions for tick 2, so it announces nothing after tick 1. The agents store
+# outcome(1, yes) and outcome(2, no) from tick 2 on. C itself stores no outcome.
+schema = 1
+id = "BENCH-087"
+title = "TPLP Fig. 3 (2PC): synchronous rounds; every agent stores yes for the unanimous transaction and no for the other"
+priority = "P1"
+source = "R02 T22; TPLP 2016 Figure 3 and Example 3 (verbatim program)"
+features = ["LANG-040", "LANG-042", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-190"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "C", role = "Node" }, { name = "A1", role = "Node" }, { name = "A2", role = "Node" }]
+
+[run]
+ticks = 8
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-190"]
+until = "M5"
+
+[[expect]]
+node = "C"
+rel = "vote"
+tick = 1
+rows = [[1, "A1", "yes"], [1, "A2", "yes"], [2, "A1", "yes"], [2, "A2", "no"]]
+
+[[expect]]
+node = "C"
+rel = "log"
+tick = 2
+rows = [[1], [2]]
+
+[[expect]]
+node = "A1"
+rel = "outcome"
+tick = 2
+rows = [[1, "yes"], [2, "no"]]
+
+[[expect]]
+node = "A2"
+rel = "outcome"
+tick = 2
+rows = [[1, "yes"], [2, "no"]]
+
+[[expect]]
+node = "A1"
+rel = "outcome"
+tick = 1
+rows = []
+
+[[expect]]
+node = "A1"
+rel = "outcome"
+final = true
+rows = [[1, "yes"], [2, "no"]]
+
+[[expect]]
+node = "C"
+rel = "outcome"
+final = true
+rows = []

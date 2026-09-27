@@ -1,0 +1,44 @@
+# BENCH-089 (R02 T25): CRON Figure 1 in every schedule.
+#
+# CRON §3.7: "eventually all nodes have stored the transitive closure of the entire input graph". Same scenario as
+# BENCH-089a; at the end of every seed each node holds the six edges of the closure.
+schema = 1
+id = "BENCH-089"
+title = "CRON Fig. 1 (transitive closure by broadcast): every schedule leaves the global closure at every node"
+priority = "P1"
+source = "R02 T25; CRON (JCSS 2014) Figure 1 and §3.7 (verbatim program)"
+features = ["LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-190", "LANG-240", "SEM-040", "SEM-044", "TEST-001"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "x", role = "Node" }, { name = "y", role = "Node" }, { name = "z", role = "Node" }]
+
+[run]
+ticks = 40
+stop = "ticks"
+seeds = 32
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-190", "LANG-240", "SEM-040", "SEM-044", "TEST-001"]
+until = "M8"
+
+[[expect]]
+node = "x"
+rel = "t"
+final = true
+rows = [["a", "b"], ["a", "c"], ["a", "d"], ["b", "c"], ["b", "d"], ["c", "d"]]
+
+[[expect]]
+node = "y"
+rel = "t"
+final = true
+rows = [["a", "b"], ["a", "c"], ["a", "d"], ["b", "c"], ["b", "d"], ["c", "d"]]
+
+[[expect]]
+node = "z"
+rel = "t"
+final = true
+rows = [["a", "b"], ["a", "c"], ["a", "d"], ["b", "c"], ["b", "d"], ["c", "d"]]

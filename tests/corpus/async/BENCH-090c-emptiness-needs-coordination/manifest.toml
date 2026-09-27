@@ -1,0 +1,26 @@
+# BENCH-090 (R05 T4): "The emptiness query needs coordination."
+#
+# JACM 2013 Example 10: the emptiness query is not coordination-free; the program must know every member (All) and
+# wait for each. R05 T4: "Analysis: non-monotone, needs coordination via All/Id." ANA-027 reports a negation whose
+# completeness depends on the membership as coordination; here that is `not empty(y)` over `node(y)` in `missing`.
+# The other negative edges are the negation of the EDB relation s_edb and the negation of missing. The program is not
+# semipositive, so it gets no certificate.
+schema = 1
+id = "BENCH-090"
+title = "CALM oracle: the emptiness query depends on the membership, which is coordination"
+priority = "P1"
+source = "R05 T4 and §2.2; Ameloot, Neven, Van den Bussche (JACM 2013) Example 10"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-240", "ANA-022", "ANA-025", "ANA-027", "ANA-029"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "The program implements JACM Example 10 as the paper describes it (the same algorithm as CRON Fig. 3)."
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-240", "ANA-022", "ANA-025", "ANA-027", "ANA-029"]
+until = "M7"
+
+[expect_analysis]
+points_of_order = { complete = true, edges = [{ from = "s_edb", to = "empty_msg", kind = "negation" }, { from = "empty", to = "missing", kind = "negation", reason = "membership" }, { from = "missing", to = "t", kind = "negation" }], clusters = [] }
+certificates = { t = [] }

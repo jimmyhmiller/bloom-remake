@@ -1,0 +1,36 @@
+//! BENCH-089: CRON Figure 5, a positive program that is not consistent (Ameloot, Van den Bussche, JCSS 2014, §6.2),
+//! ported rule by rule.
+//!
+//!     A() | x ← Id(x).
+//!     B() | x ← Id(x).
+//!     T() ← A(), B().
+//!     T()• ← T().
+//!
+//! "In any fair run, a node will send A() and B() to itself during every transition, but the output T() is only
+//! created when we deliver A() and B() simultaneously; some fair runs never do this."
+
+program cron_positive_inconsistent version 1;
+
+view id() = node_dir(self, _, _, _);
+
+/// The asynchronous heads `A() | x` and `B() | x`, both addressed to this node, and not persisted.
+loopback a_msg();
+loopback b_msg();
+/// T, persisted by T()• ← T().
+output t();
+
+send_a: while id() {
+    send a_msg();
+}
+
+send_b: while id() {
+    send b_msg();
+}
+
+derive_t: on a_msg(), b_msg() {
+    emit t();
+}
+
+keep: while t() {
+    next t();
+}
