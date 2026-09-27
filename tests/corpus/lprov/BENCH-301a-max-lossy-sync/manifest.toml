@@ -1,0 +1,98 @@
+schema   = 1
+id       = "BENCH-301"
+title    = "T2 max over a lossy channel: failure-free, best = 7 and hi, lo hold at s from tick 2"
+priority = "P0"
+source   = "R11/G1 §7 T2 (failure-free states)"
+features = ["LANG-122", "LANG-124", "LANG-126", "LANG-137", "LANG-153", "LANG-280", "SEM-104", "SEM-105"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+R11 T2 at s: @0 and @1 best ⊥; @2, @3, @4 best = 7, hi and lo hold (the three values merge on arrival). Ultimate
+L-model at s (R11 T2): best ↦ 7, hi and lo; the `final` rows state it.
+"""
+
+[deploy]
+nodes = [
+    { name = "a", role = "Sender" },
+    { name = "b", role = "Sender" },
+    { name = "d", role = "Sender" },
+    { name = "s", role = "Sink" },
+]
+
+[run]
+ticks = 5
+stop  = "ticks"
+
+[[input]]
+node = "a"
+tick = 1
+rel  = "x"
+rows = [[3]]
+
+[[input]]
+node = "b"
+tick = 1
+rel  = "x"
+rows = [[7]]
+
+[[input]]
+node = "d"
+tick = 1
+rel  = "x"
+rows = [[7]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-124", "LANG-126", "LANG-137", "LANG-153", "LANG-280", "SEM-104", "SEM-105"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-124", "LANG-126", "LANG-137", "LANG-153", "LANG-280", "SEM-104", "SEM-105"]
+until = "M7"
+
+[[expect]]
+node = "s"
+rel  = "best"
+tick = 1
+rows = []
+
+[[expect]]
+node  = "s"
+rel   = "best"
+row   = [7]
+holds = "2..=4"
+
+[[expect]]
+node   = "s"
+rel    = "hi"
+row    = []
+absent = "..=1"
+holds  = "2..=4"
+
+[[expect]]
+node   = "s"
+rel    = "lo"
+row    = []
+absent = "..=1"
+holds  = "2..=4"
+
+# ---- the ultimate L-model (contents at the end of the run)
+[[expect]]
+node  = "s"
+rel   = "best"
+final = true
+rows  = [[7]]
+
+[[expect]]
+node  = "s"
+rel   = "hi"
+final = true
+rows  = [[]]
+
+[[expect]]
+node  = "s"
+rel   = "lo"
+final = true
+rows  = [[]]

@@ -1,0 +1,26 @@
+//! BENCH-070a. Lattice persistence (R04 §12 T24; CR-24; LANG-128):
+//!   - a persistent lattice keeps its value (`cell`, the implicit identity rule of SEM-104);
+//!   - a tick-scoped lattice resets to ⊥ at every tick (`scratch cell`);
+//!   - `<+` (`next`) takes effect at t+1 (Bud PendingLatticeMerge);
+//!   - a lattice with only bootstrap facts and no rules keeps its value (Bud BootstrapNoRules).
+
+program lattice_persistence version 1;
+
+input put(v: u64);
+input put_next(v: u64);
+
+cell persistent: LMax<u64>;
+scratch cell tick_scoped: LMax<u64>;
+cell pending: LMax<u64>;
+cell boot_only: LSet<u64>;
+
+bootstrap {
+    emit boot_only(set[1u64, 2u64]);
+}
+merge_now: on put(v) {
+    emit persistent(v);
+    emit tick_scoped(v);
+}
+merge_next: on put_next(v) {
+    next pending(v);
+}

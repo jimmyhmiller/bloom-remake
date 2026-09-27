@@ -1,0 +1,55 @@
+//! BENCH-059a. The versioned KVS of SoCC'12 §5.2 (R04 §3.9, §12 T13): the replica is unchanged from the plain KVS,
+//! and clients store single-pair dominating-set values (Bloom^L `ldom`, Blossom `LDom<VClock, L>`, LANG-132) whose
+//! versions are vector clocks. The map merge does the rest: a pair survives unless another pair's version strictly
+//! dominates it, so concurrent writes are both kept, a write that has seen both replaces them, and a stale write is
+//! ignored. `version()` is a morphism (the lub of the versions); `value!()` is non-monotone (the join of the values
+//! of the surviving pairs, the user merge; here set union).
+
+program versioned_kvs version 1;
+
+role Client: cluster;
+role Replica: cluster;
+
+channel put(key: String, ver: VClock, val: String): Client -> Replica;
+channel repair(key: String, d: LDom<VClock, LSet<String>>): Client -> Replica;
+channel get(reqid: u64, key: String): Client -> Replica;
+channel get_resp(reqid: u64, d: LDom<VClock, LSet<String>>): Replica -> Client;
+
+at Client {
+    input write(key: String, dst: Node<Replica>, ver: VClock, val: String);
+    input read(reqid: u64, key: String, dst: Node<Replica>);
+    input do_repair(reqid: u64, key: String);
+
+    /// Responses to one read merge: the client holds the lub of what the replicas returned.
+    table resp(reqid: u64, d: LDom<VClock, LSet<String>>);
+    view answer(reqid, ver, val) = resp(reqid, d), let ver = d.version(), let val = reveal!(d.value!());
+
+    send_write: on write(k, r, ver, v) {
+        send put(k, ver, v) to r;
+    }
+    send_read: on read(id, k, r) {
+        send get(id, k) to r;
+    }
+    record: on get_resp(id, d) {
+        emit resp(id, d);
+    }
+    /// Read repair: the lub of the responses is written back to every replica.
+    read_repair: on do_repair(id, k), resp(id, d), r in Replica {
+        send repair(k, d) to r;
+    }
+}
+
+at Replica {
+    table store(key: String, d: LDom<VClock, LSet<String>>);
+    view current(key, ver, val) = store(key, d), let ver = d.version(), let val = reveal!(d.value!());
+
+    accept: on put(k, ver, v) {
+        emit store(k, LDom::of(ver, set[v]));
+    }
+    absorb: on repair(k, d) {
+        emit store(k, d);
+    }
+    serve: on get(id, k) from c {
+        send get_resp(id, store[k]) to c;
+    }
+}

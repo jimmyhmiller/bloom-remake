@@ -1,0 +1,22 @@
+schema   = 1
+id       = "BENCH-073"
+title    = "A raw weight column on a plain channel is a compile error (BLS0307)"
+priority = "P0"
+source   = "R13 §12 T1 negative variant (\"a plain channel with a raw weight column is a compile error (ANA-015)\"); CR-35"
+features = ["LANG-138", "LANG-142", "LANG-158", "ANA-015", "ANA-030"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+The channel on line 9 carries the group-typed weight `w: Z` without `exactly_once`; BLS0307 is reported there.
+"""
+
+[backend.compile]
+status = "unimplemented"
+unimplemented = ["LANG-138", "LANG-142", "LANG-158", "ANA-015", "ANA-030"]
+until = "M6"
+
+[[expect_diag]]
+code     = "BLS0307"
+line     = 9
+severity = "error"

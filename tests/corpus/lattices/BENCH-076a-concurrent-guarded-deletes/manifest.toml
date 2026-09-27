@@ -1,0 +1,124 @@
+schema   = 1
+id       = "BENCH-076"
+title    = "Concurrent guarded deletes of a count-1 item give −1 (clamped 0, absent from the set view)"
+priority = "P1"
+source   = "R13 §12 T3; Wrapping Rings §5 (\"two clients both see count 1 and delete concurrently, giving −1\")"
+features = ["LANG-138", "LANG-142", "LANG-153", "LANG-158", "SEM-036", "DIST-015", "ENG-062", "ENG-070"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+R13 T3: x has count 1 at A and B from an earlier +x at C (C inserts at tick 1; A and B apply it at tick 2). Clients
+at A and B each delete x at tick 3, concurrently, with the guard on; both guards see count 1, so both deletes are
+sent at tick 3 and applied at tick 4, locally (the guard reads the current weight, so its write is a `next`) and
+remotely. The final weight is −1 at every replica: the clamped multiset view shows nothing (count 0) and the set
+view has no x. This is documented behavior, not a bug.
+"""
+
+[deploy]
+nodes = [{ name = "A", role = "Replica" }, { name = "B", role = "Replica" }, { name = "C", role = "Replica" }]
+
+[run]
+ticks = 7
+stop  = "ticks"
+
+[[input]]
+node = "C"
+tick = 1
+rel  = "insert"
+rows = [["x"]]
+
+[[input]]
+node = "A"
+tick = 3
+rel  = "guarded_delete"
+rows = [["x"]]
+
+[[input]]
+node = "B"
+tick = 3
+rel  = "guarded_delete"
+rows = [["x"]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-138", "LANG-142", "LANG-153", "LANG-158", "SEM-036", "DIST-015", "ENG-062", "ENG-070"]
+until = "M8"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-138", "LANG-142", "LANG-153", "LANG-158", "SEM-036", "DIST-015", "ENG-062", "ENG-070"]
+until = "M8"
+
+[[expect]]
+node = "A"
+rel  = "raw"
+tick = 2
+rows = [["x", 1]]
+
+[[expect]]
+node = "A"
+rel  = "raw"
+tick = 3
+rows = [["x", 1]]
+
+[[expect]]
+node = "A"
+rel  = "raw"
+tick = 4
+rows = [["x", -1]]
+
+[[expect]]
+node  = "A"
+rel   = "raw"
+final = true
+rows  = [["x", -1]]
+
+[[expect]]
+node  = "A"
+rel   = "qty"
+final = true
+rows  = []
+
+[[expect]]
+node  = "A"
+rel   = "present"
+final = true
+rows  = []
+
+[[expect]]
+node  = "B"
+rel   = "raw"
+final = true
+rows  = [["x", -1]]
+
+[[expect]]
+node  = "B"
+rel   = "qty"
+final = true
+rows  = []
+
+[[expect]]
+node  = "B"
+rel   = "present"
+final = true
+rows  = []
+
+[[expect]]
+node  = "C"
+rel   = "raw"
+final = true
+rows  = [["x", -1]]
+
+[[expect]]
+node  = "C"
+rel   = "qty"
+final = true
+rows  = []
+
+[[expect]]
+node  = "C"
+rel   = "present"
+final = true
+rows  = []
+

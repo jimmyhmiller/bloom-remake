@@ -1,0 +1,23 @@
+//! BENCH-067a. Flo's LVar threshold (R04 §12 T21, §8; Hydro `monotone_fold_threshold`): a monotone fold (here the
+//! sum of the distinct inputs) read through `threshold(total, 7)` fires exactly once, whatever the batching of the
+//! input stream. `threshold` is monotone (LANG-126): once some tᵢ is reached it stays reached, and a single threshold
+//! is trivially pairwise incompatible.
+
+program flo_threshold version 1;
+
+input num(n: u64);
+
+cell total: LPSet<u64>;
+table fired(v: u64);
+output emitted(v: u64);
+
+fold: while let s = lpset{ n | num(n) } {
+    emit total(s);
+}
+crossed: while let Some(_) = threshold(total.sum(), LMax::of(7u64)) {
+    emit fired(7);
+}
+/// The emission: exactly one tick has a new `fired` row.
+emission: on inserted fired(v) {
+    emit emitted(v);
+}

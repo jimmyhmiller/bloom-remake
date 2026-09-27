@@ -1,0 +1,102 @@
+schema   = 1
+id       = "BENCH-309"
+title    = "T10 vector clocks: b holds {a↦1} at tick 2 and {a↦1, b↦1} at 3; hb(a@1, b@3) but not hb(a@1, b@2)"
+priority = "P1"
+source   = "R11/G1 §7 T10 (✓sim; hb ✓clingo)"
+features = ["LANG-125", "LANG-126", "LANG-130", "LANG-137", "LANG-153", "LANG-280", "LANG-283", "SEM-102"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+a has its event at tick 1 and sends its clock {a↦1}. At b: @2 msg = vc = {a↦1} and saw_a1 holds; @3 and @4
+vc = {a↦1, b↦1}. Happens-before is the strict clock order: the event a@1 (clock {a↦1}) happens before b@3 but not
+before b@2, where the clocks are equal; `hb_got_before_now` tests exactly that at each tick.
+Ultimate L-model (R11 T10): vc ↦ {a↦1} at a; vc ↦ {a↦1, b↦1}, saw_a1 and the happens-before fact at b; the `final`
+rows state it.
+"""
+
+[deploy]
+nodes = [{ name = "a", role = "Proc" }, { name = "b", role = "Proc" }]
+
+[run]
+ticks = 5
+stop  = "ticks"
+
+[[input]]
+node = "a"
+tick = 1
+rel  = "ev"
+rows = [[]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-125", "LANG-126", "LANG-130", "LANG-137", "LANG-153", "LANG-280", "LANG-283", "SEM-102"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-125", "LANG-126", "LANG-130", "LANG-137", "LANG-153", "LANG-280", "LANG-283", "SEM-102"]
+until = "M7"
+
+[[expect]]
+node  = "a"
+rel   = "vc"
+row   = [[["a", 1]]]
+holds = "1.."
+
+[[expect]]
+node = "b"
+rel  = "msg"
+tick = 2
+rows = [[[["a", 1]]]]
+
+[[expect]]
+node = "b"
+rel  = "vc"
+tick = 2
+rows = [[[["a", 1]]]]
+
+[[expect]]
+node  = "b"
+rel   = "vc"
+row   = [[["a", 1], ["b", 1]]]
+holds = "3..=4"
+
+[[expect]]
+node   = "b"
+rel    = "saw_other"
+row    = []
+absent = "..=1"
+holds  = "2.."
+
+[[expect]]
+node   = "b"
+rel    = "hb_got_before_now"
+row    = []
+absent = "..=2"
+holds  = "3..=4"
+
+# ---- the ultimate L-model (contents at the end of the run)
+[[expect]]
+node  = "a"
+rel   = "vc"
+final = true
+rows  = [[[["a", 1]]]]
+
+[[expect]]
+node  = "b"
+rel   = "vc"
+final = true
+rows  = [[[["a", 1], ["b", 1]]]]
+
+[[expect]]
+node  = "b"
+rel   = "saw_other"
+final = true
+rows  = [[]]
+
+[[expect]]
+node  = "b"
+rel   = "hb_got_before_now"
+final = true
+rows  = [[]]

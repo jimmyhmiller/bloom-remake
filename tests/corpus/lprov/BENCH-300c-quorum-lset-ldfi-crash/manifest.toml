@@ -1,0 +1,74 @@
+schema   = 1
+id       = "BENCH-300"
+title    = "T1 under LDFI 4/2/1 (crashes among voters): 40 minimal falsifiers, each of size 3"
+priority = "P0"
+source   = "R11/G1 §7 T1 (LDFI 4/2/1, crashes restricted to voters: ✓sim)"
+features = ["LANG-126", "LANG-153", "LANG-201", "SEM-070", "TEST-020", "TEST-022", "TEST-023", "TEST-024", "TEST-026",
+            "TEST-027", "TEST-028", "TEST-029", "TEST-140", "TEST-141", "TEST-142"]
+program  = "program.bls"
+spec     = "spec.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+R11 T1: "40 minimal falsifiers, all of size 3: the 10 pure-omission sets plus 30 = 5 × C(4,2) sets of the form
+{K(vi,1), O(vj,c,1), O(vk,c,1)}". A voter crashed from tick 1 never sends its vote; a crash at a later tick is
+harmless (the vote left at tick 1). R11 restricts crashes to voters; here the restriction is `pre` (the coordinator
+must be up), which removes exactly the runs where c crashes. Confirmed by an independent brute-force enumeration.
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-126", "LANG-153", "LANG-201", "SEM-070", "TEST-020", "TEST-022", "TEST-023", "TEST-024",
+                 "TEST-026", "TEST-027", "TEST-028", "TEST-029", "TEST-140", "TEST-141", "TEST-142"]
+until = "M8"
+
+[expect_ldfi]
+eot        = 4
+eff        = 2
+crashes    = 1
+nodes      = ["V1", "V2", "V3", "V4", "V5", "C"]
+verdict    = "counterexample"
+crash_view = "frozen"
+falsifiers = [
+    ["O(V1,C,1)", "O(V2,C,1)", "O(V3,C,1)"],
+    ["O(V1,C,1)", "O(V2,C,1)", "O(V4,C,1)"],
+    ["O(V1,C,1)", "O(V2,C,1)", "O(V5,C,1)"],
+    ["O(V1,C,1)", "O(V3,C,1)", "O(V4,C,1)"],
+    ["O(V1,C,1)", "O(V3,C,1)", "O(V5,C,1)"],
+    ["O(V1,C,1)", "O(V4,C,1)", "O(V5,C,1)"],
+    ["O(V2,C,1)", "O(V3,C,1)", "O(V4,C,1)"],
+    ["O(V2,C,1)", "O(V3,C,1)", "O(V5,C,1)"],
+    ["O(V2,C,1)", "O(V4,C,1)", "O(V5,C,1)"],
+    ["O(V3,C,1)", "O(V4,C,1)", "O(V5,C,1)"],
+    ["C(V1,1)", "O(V2,C,1)", "O(V3,C,1)"],
+    ["C(V1,1)", "O(V2,C,1)", "O(V4,C,1)"],
+    ["C(V1,1)", "O(V2,C,1)", "O(V5,C,1)"],
+    ["C(V1,1)", "O(V3,C,1)", "O(V4,C,1)"],
+    ["C(V1,1)", "O(V3,C,1)", "O(V5,C,1)"],
+    ["C(V1,1)", "O(V4,C,1)", "O(V5,C,1)"],
+    ["C(V2,1)", "O(V1,C,1)", "O(V3,C,1)"],
+    ["C(V2,1)", "O(V1,C,1)", "O(V4,C,1)"],
+    ["C(V2,1)", "O(V1,C,1)", "O(V5,C,1)"],
+    ["C(V2,1)", "O(V3,C,1)", "O(V4,C,1)"],
+    ["C(V2,1)", "O(V3,C,1)", "O(V5,C,1)"],
+    ["C(V2,1)", "O(V4,C,1)", "O(V5,C,1)"],
+    ["C(V3,1)", "O(V1,C,1)", "O(V2,C,1)"],
+    ["C(V3,1)", "O(V1,C,1)", "O(V4,C,1)"],
+    ["C(V3,1)", "O(V1,C,1)", "O(V5,C,1)"],
+    ["C(V3,1)", "O(V2,C,1)", "O(V4,C,1)"],
+    ["C(V3,1)", "O(V2,C,1)", "O(V5,C,1)"],
+    ["C(V3,1)", "O(V4,C,1)", "O(V5,C,1)"],
+    ["C(V4,1)", "O(V1,C,1)", "O(V2,C,1)"],
+    ["C(V4,1)", "O(V1,C,1)", "O(V3,C,1)"],
+    ["C(V4,1)", "O(V1,C,1)", "O(V5,C,1)"],
+    ["C(V4,1)", "O(V2,C,1)", "O(V3,C,1)"],
+    ["C(V4,1)", "O(V2,C,1)", "O(V5,C,1)"],
+    ["C(V4,1)", "O(V3,C,1)", "O(V5,C,1)"],
+    ["C(V5,1)", "O(V1,C,1)", "O(V2,C,1)"],
+    ["C(V5,1)", "O(V1,C,1)", "O(V3,C,1)"],
+    ["C(V5,1)", "O(V1,C,1)", "O(V4,C,1)"],
+    ["C(V5,1)", "O(V2,C,1)", "O(V3,C,1)"],
+    ["C(V5,1)", "O(V2,C,1)", "O(V4,C,1)"],
+    ["C(V5,1)", "O(V3,C,1)", "O(V4,C,1)"],
+]
+# 40 sets

@@ -1,0 +1,27 @@
+schema   = 1
+id       = "BENCH-064"
+title    = "Keep CALM: checkout = A − R needs coordination; the threshold queries are local-safe"
+priority = "P1"
+source   = "R04 §12 T18; R04 §5.4 (\"Keep CALM and CRDT On\": Potato/Ferrari, suspicious_activity, |A|+|R| > 100)"
+features = ["LANG-124", "LANG-125", "LANG-126", "LANG-135", "LANG-153", "ANA-020", "ANA-022", "ANA-023", "ANA-033"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+R04 T18: "On a 2P-Set, checkout = A − R is classified as needing coordination; suspicious_activity (count > 50 →
+true/ABORT) and |A|+|R| > 100 are classified local-safe." In ANA-023's path labels (Bot, A, N, D; A followed by N
+gives D) the replicated inputs are async, so an output reached only through monotone operations is labeled A
+(local-safe) and one reached through the negation of `in_cart` is labeled D (needs coordination). The negation is
+the program's only point of order.
+"""
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-124", "LANG-125", "LANG-126", "LANG-135", "LANG-153", "ANA-020", "ANA-022", "ANA-023", "ANA-033"]
+until = "M6"
+
+[expect_analysis]
+# ANA-023 path label per output: A = asynchronous and monotone (safe to answer locally, ANA-033 "local"), D =
+# asynchronous input reaching a non-monotone operation (needs coordination, ANA-033 "quorum").
+calm_labels = { checkout = "D", suspicious = "A", big_cart = "A" }
+points_of_order = [{ at = "in_cart", op = "not" }]

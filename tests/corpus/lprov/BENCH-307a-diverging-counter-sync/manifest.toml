@@ -1,0 +1,52 @@
+schema   = 1
+id       = "BENCH-307"
+title    = "T8 diverging value: c = t at tick t; ge5 holds from tick 5"
+priority = "P1"
+source   = "R11/G1 §7 T8 (✓sim)"
+features = ["LANG-122", "LANG-124", "LANG-125", "LANG-126", "LANG-128", "LANG-190", "SEM-030", "SEM-104"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+c is 0 in the boot tick and each tick merges c + 1 into the next, so c = t at tick t; ge5 holds from tick 5 on. The
+run is bounded by `ticks`: the program never quiesces.
+"""
+
+[run]
+ticks = 10
+stop  = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-124", "LANG-125", "LANG-126", "LANG-128", "LANG-190", "SEM-030", "SEM-104"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-124", "LANG-125", "LANG-126", "LANG-128", "LANG-190", "SEM-030", "SEM-104"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel  = "c"
+tick = 0
+rows = [[0]]
+
+[[expect]]
+node = "n1"
+rel  = "c"
+tick = 4
+rows = [[4]]
+
+[[expect]]
+node = "n1"
+rel  = "c"
+tick = 9
+rows = [[9]]
+
+[[expect]]
+node   = "n1"
+rel    = "ge5"
+row    = []
+absent = "..=4"
+holds  = "5.."

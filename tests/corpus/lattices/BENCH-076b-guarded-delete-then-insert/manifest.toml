@@ -1,0 +1,74 @@
+schema   = 1
+id       = "BENCH-076"
+title    = "Guarded delete-then-insert gives 1; the unguarded version gives 0"
+priority = "P1"
+source   = "R13 §12 T4; Wrapping Rings §5 (the insert/delete anomaly and the client guard)"
+features = ["LANG-138", "LANG-142", "LANG-153", "LANG-158", "SEM-036", "DIST-015", "ENG-062", "ENG-070"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+R13 T4: at A, a client deletes w while its observable count of w is 0, then inserts w. Two items run the two
+variants side by side: `wg` with the guard (the delete is dropped because the count is 0, so the final weight is 1)
+and `wu` without it (the delete applies −1 and the insert +1, so the final weight is 0: the anomaly the guard
+prevents). The deletes happen at tick 1 and the inserts at tick 2; B receives both through W2.
+"""
+
+[deploy]
+nodes = [{ name = "A", role = "Replica" }, { name = "B", role = "Replica" }]
+
+[run]
+ticks = 6
+stop  = "ticks"
+
+[[input]]
+node = "A"
+tick = 1
+rel  = "guarded_delete"
+rows = [["wg"]]
+
+[[input]]
+node = "A"
+tick = 1
+rel  = "unguarded_delete"
+rows = [["wu"]]
+
+[[input]]
+node = "A"
+tick = 2
+rel  = "insert"
+rows = [["wg"], ["wu"]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-138", "LANG-142", "LANG-153", "LANG-158", "SEM-036", "DIST-015", "ENG-062", "ENG-070"]
+until = "M8"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-138", "LANG-142", "LANG-153", "LANG-158", "SEM-036", "DIST-015", "ENG-062", "ENG-070"]
+until = "M8"
+
+[[expect]]
+node = "A"
+rel  = "raw"
+tick = 1
+rows = [["wu", -1]]
+
+[[expect]]
+node  = "A"
+rel   = "raw"
+final = true
+rows  = [["wg", 1]]
+
+[[expect]]
+node  = "B"
+rel   = "raw"
+final = true
+rows  = [["wg", 1]]
+
+[[expect]]
+node  = "A"
+rel   = "present"
+final = true
+rows  = [["wg"]]

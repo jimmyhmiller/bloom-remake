@@ -1,0 +1,67 @@
+schema   = 1
+id       = "BENCH-064"
+title    = "Potato/Ferrari: with a delayed remove the monotone query never retracts, and the states converge"
+priority = "P1"
+source   = "R04 §12 T18 (Potato/Ferrari with a delayed remove: \"the monotone version never retracts\"); R04 §5.4"
+features = ["LANG-071", "LANG-124", "LANG-125", "LANG-135", "LANG-153", "LANG-200", "SEM-040", "SEM-082", "TEST-001",
+            "TEST-002"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The client adds potato and ferrari at r1 and removes ferrari at r2 (so r1 learns of the removal only through
+dissemination, possibly late). In seeds where the removal lags, r1's non-monotone checkout shows ferrari and later
+retracts it: that is the anomaly, and it is schedule-dependent, so it is not asserted. What holds in every seed is
+asserted: the monotone query `added` never retracts a row (the invariant would abort the tick), and every replica
+ends with added = {ferrari, potato} and in_cart (the checkout) = {potato}.
+"""
+
+[deploy]
+nodes = [{ name = "c", role = "Client" }, { name = "r1", role = "Replica" }, { name = "r2", role = "Replica" }]
+
+[run]
+ticks = 60
+stop  = "quiescent"
+seeds = 32
+
+[[input]]
+node = "c"
+tick = 1
+rel  = "do_add"
+rows = [["r1", "potato"], ["r1", "ferrari"]]
+
+[[input]]
+node = "c"
+tick = 2
+rel  = "do_remove"
+rows = [["r2", "ferrari"]]
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-071", "LANG-124", "LANG-125", "LANG-135", "LANG-153", "LANG-200", "SEM-040", "SEM-082",
+                 "TEST-001", "TEST-002"]
+until = "M8"
+
+[[expect]]
+node  = "r1"
+rel   = "added"
+final = true
+rows  = [["ferrari"], ["potato"]]
+
+[[expect]]
+node  = "r2"
+rel   = "added"
+final = true
+rows  = [["ferrari"], ["potato"]]
+
+[[expect]]
+node  = "r1"
+rel   = "in_cart"
+final = true
+rows  = [["potato"]]
+
+[[expect]]
+node  = "r2"
+rel   = "in_cart"
+final = true
+rows  = [["potato"]]

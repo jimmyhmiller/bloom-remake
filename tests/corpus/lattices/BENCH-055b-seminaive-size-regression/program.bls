@@ -1,0 +1,26 @@
+//! BENCH-055b. The size-in-recursion regression of SoCC'12 §4.1 (R04 §12 T8): `cnt <= s.size` where s grows over
+//! several evaluation rounds of one tick. `size` is monotone but not a morphism, so semi-naive evaluation must apply
+//! it to the total value; distributing it over the deltas would give the maximum of the delta sizes (1 here) instead
+//! of the size of the total (5).
+
+program seminaive_size_regression version 1;
+
+input edge_in(src: u32, dst: u32);
+
+table edge(src: u32, dst: u32);
+cell s: LSet<u32>;
+cell cnt: LMax<u64>;
+
+bootstrap {
+    emit s(set[0u32]);
+}
+load: on edge_in(a, b) {
+    emit edge(a, b);
+}
+/// Reachability from node 0, grown one hop per evaluation round.
+grow: while x in s, edge(x, y) {
+    emit s(set[y]);
+}
+count: while let n = s.size() {
+    emit cnt(n);
+}

@@ -1,0 +1,45 @@
+//! BENCH-079a. Free termination of a finite-state component (R13 §12 T11; FT Ex. 4, Fig. 1(a)): the DFA "contains an
+//! a" over {a, b, c}. Once an a has been seen the answer can never change, so exactly the post-a sink is a
+//! free-termination state; the start state is not (a later a would change the answer).
+
+program ft_contains_a version 1;
+
+pub enum Letter {
+    A #1,
+    B #2,
+    C #3,
+    #[unknown]
+    Other #4,
+}
+
+enum St {
+    Start,
+    SeenA,
+}
+
+fn step(s: St, c: Letter) -> St {
+    match (s, c) {
+        (St::Start, Letter::A) => St::SeenA,
+        (x, _) => x,
+    }
+}
+
+#[finite(cap = 16)]
+module ContainsA {
+    /// One letter per tick.
+    input letter(c: Letter) key();
+    output accepted(yes: bool);
+    table state(s: St) key();
+
+    bootstrap {
+        emit state(St::Start);
+    }
+    advance: on letter(c), state(s) {
+        upsert state(step(s, c));
+    }
+    report: while state(s) {
+        emit accepted(s == St::SeenA);
+    }
+}
+
+import ContainsA as dfa;

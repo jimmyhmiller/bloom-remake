@@ -1,0 +1,70 @@
+//! BENCH-056a. The Bud map-lattice tests (R04 §12 T9: SimpleMap, MapIntersect, MapAt, MapApply,
+//! MapFromCollection, MapToCollection) over LMap. Every operation used is monotone (R04 §2.4 / LANGUAGE §11.5):
+//! merge, `intersect` (a bimorphism; values are joined, it is not the meet), `at` (a morphism; ⊥ for a missing key,
+//! LANG-129), `key_set` (a morphism), `size` (monotone), `has_key` (a threshold), generators (morphisms) and the
+//! lattice folds `lset{…}` / `lmap{…}`.
+
+program lmap_ops version 1;
+
+input put1(k: String, v: u64);
+input put2(k: String, v: u64);
+input put4(k: String, e: u64);
+input kv_in(k: String, v: u64);
+
+cell m1: LMap<String, LMax<u64>>;
+cell m2: LMap<String, LMax<u64>>;
+cell m4: LMap<String, LSet<u64>>;
+table kv(k: String, v: u64);
+
+cell inter: LMap<String, LMax<u64>>;
+cell keys1: LSet<String>;
+cell size1: LMax<u64>;
+cell at_x: LMax<u64>;
+cell at_missing: LMax<u64>;
+cell big_keys: LSet<String>;
+cell from_coll: LMap<String, LMax<u64>>;
+
+feed1: on put1(k, v) {
+    emit m1(map[k => v]);                   // SimpleMap: values merge per key with max
+}
+feed2: on put2(k, v) {
+    emit m2(map[k => v]);
+}
+feed4: on put4(k, e) {
+    emit m4(map[k => set[e]]);
+}
+feed_kv: on kv_in(k, v) {
+    emit kv(k, v);
+}
+
+/// MapIntersect: the keys present in both maps, with their values joined.
+intersect: while let i = m1.intersect(m2) {
+    emit inter(i);
+}
+key_set: while let s = m1.key_set() {
+    emit keys1(s);
+}
+size: while let n = m1.size() {
+    emit size1(n);
+}
+/// MapAt: a present key, and a missing key whose value is ⊥ of LMax (so the cell stays absent).
+at_present: while let x = m1.at("x") {
+    emit at_x(x);
+}
+at_absent: while let x = m1.at("zz") {
+    emit at_missing(x);
+}
+/// MapApply: Bud's `m4.apply(:size).apply(:gt_eq, 2).filter.key_set`, the keys whose sets have at least two
+/// elements. A generator over the map, a monotone `size` and a threshold, folded into an lset.
+apply: while let b = lset{ k | (k, s) in m4 where s.size() >= 2 } {
+    emit big_keys(b);
+}
+/// MapFromCollection: a collection folded into a map lattice.
+from_collection: while let c = lmap{ k => LMax::of(v) | kv(k, v) } {
+    emit from_coll(c);
+}
+
+view has_x() = m1.has_key("x");
+view has_w() = m1.has_key("w");
+/// MapToCollection: a generator over the map.
+view pairs(k, v) = (k, v) in m1;

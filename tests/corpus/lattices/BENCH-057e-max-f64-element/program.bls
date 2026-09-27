@@ -1,0 +1,12 @@
+//! BENCH-057e. Bud `MaxErrors`, the float form (R04 §12 T11; R04 §7.2: `T: Ord` excludes raw f64): an lmax needs a
+//! totally ordered element type, and f64 is not usable as the element of LMax/LMin (BLS0312).
+
+program max_f64_element version 1;
+
+input reading(x: f64);
+
+cell m: LMax<f64>;
+
+record: on reading(x) {
+    emit m(x);
+}

@@ -1,0 +1,195 @@
+schema   = 1
+id       = "BENCH-056"
+title    = "Bud set/bag/sum tests: product, eqjoin, group count, collection conversions, channel, notin, sum, bag"
+priority = "P1"
+source   = "R04 §12 T10 (bud test/tc_lattice.rb set, bag and sum tests); R04 §2.4 and §3.4"
+features = ["LANG-046", "LANG-082", "LANG-088", "LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-128", "LANG-137",
+            "LANG-280", "SEM-030"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The Bud tests were not vendored; the operations are R04 T10's and the data is re-derived. Inputs arrive at ticks
+1 and 2 and every result cell is persistent.
+- s1 = {1,2} @1, {1,2,3} @2 (2 repeats); s2 = {a,b}. The product has 4 pairs @1 and 6 @2.
+- The eqjoin pairs x with x+1: {(1,2)} @1, {(1,2),(2,3)} @2.
+- Groups g1 → {1,2}, g2 → {5}: counts 2 and 1.
+- NotInToLattice: a = {1,2,3}, b = {2} gives {1,3}.
+- SimpleSum: 5, 3 @1 then 5, 7 @2: SUM(DISTINCT) is 8 @1 and 15 @2, not 20.
+- SimpleBag: x, y @1 then x @2. bag1 stays {x:1, y:1}, because merging keeps the larger multiplicity; bag2 =
+  bag1 + bag1 = {x:2, y:2}; multiplicity(x) = 2; size = 4.
+- SetToChannel: the loopback carries s1 as of the sending tick and arrives one tick later (self-sends arrive at
+  t+1 in the sync harness): {1,2} @2, {1,2,3} @3.
+"""
+
+[run]
+ticks = 5
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "num_in"
+rows = [[1], [2]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel  = "num_in"
+rows = [[2], [3]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "word_in"
+rows = [["a"], ["b"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "pair_in"
+rows = [["g1", 1], ["g1", 2], ["g2", 5]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "a_in"
+rows = [[1], [2], [3]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "b_in"
+rows = [[2]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "sum_in"
+rows = [[5], [3]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel  = "sum_in"
+rows = [[5], [7]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "bag_in"
+rows = [["x"], ["y"]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel  = "bag_in"
+rows = [["x"]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-046", "LANG-082", "LANG-088", "LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-128",
+                 "LANG-137", "LANG-280", "SEM-030"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-046", "LANG-082", "LANG-088", "LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-128",
+                 "LANG-137", "LANG-280", "SEM-030"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel  = "prod"
+tick = 1
+rows = [[[[1, "a"], [1, "b"], [2, "a"], [2, "b"]]]]
+
+[[expect]]
+node  = "n1"
+rel   = "prod"
+final = true
+rows  = [[[[1, "a"], [1, "b"], [2, "a"], [2, "b"], [3, "a"], [3, "b"]]]]
+
+[[expect]]
+node = "n1"
+rel  = "eq"
+tick = 1
+rows = [[[[1, 2]]]]
+
+[[expect]]
+node  = "n1"
+rel   = "eq"
+final = true
+rows  = [[[[1, 2], [2, 3]]]]
+
+[[expect]]
+node  = "n1"
+rel   = "group_cnt"
+final = true
+rows  = [["g1", 2], ["g2", 1]]
+
+[[expect]]
+node  = "n1"
+rel   = "elems"
+final = true
+rows  = [[1], [2], [3]]
+
+[[expect]]
+node  = "n1"
+rel   = "not_in"
+final = true
+rows  = [[[1, 3]]]
+
+[[expect]]
+node = "n1"
+rel  = "total"
+tick = 1
+rows = [[8]]
+
+[[expect]]
+node  = "n1"
+rel   = "total"
+final = true
+rows  = [[15]]
+
+[[expect]]
+node  = "n1"
+rel   = "bag1"
+final = true
+rows  = [[[["x", 1], ["y", 1]]]]
+
+[[expect]]
+node  = "n1"
+rel   = "bag2"
+final = true
+rows  = [[[["x", 2], ["y", 2]]]]
+
+[[expect]]
+node  = "n1"
+rel   = "mult_x"
+final = true
+rows  = [[2]]
+
+[[expect]]
+node  = "n1"
+rel   = "bag_size"
+final = true
+rows  = [[4]]
+
+[[expect]]
+node = "n1"
+rel  = "via_chan"
+tick = 1
+rows = []
+
+[[expect]]
+node = "n1"
+rel  = "via_chan"
+tick = 2
+rows = [[[1, 2]]]
+
+[[expect]]
+node  = "n1"
+rel   = "via_chan"
+final = true
+rows  = [[[1, 2, 3]]]

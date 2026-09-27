@@ -1,0 +1,12 @@
+//! BENCH-057d. Bud `MaxErrors` (R04 §12 T11): "merging a non-comparable value into lmax is a type error". In a typed
+//! language the error is static: a String merged into an LMax<i64> is a type mismatch (BLS0300).
+
+program max_errors_type version 1;
+
+input word(w: String);
+
+cell m: LMax<i64>;
+
+record: on word(w) {
+    emit m(w);
+}

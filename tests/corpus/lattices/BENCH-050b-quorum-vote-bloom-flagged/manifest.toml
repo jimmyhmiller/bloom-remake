@@ -1,0 +1,25 @@
+schema   = 1
+id       = "BENCH-050"
+title    = "QuorumVote (SoCC'12 Fig. 2): the count-based quorum is flagged at count!"
+priority = "P0"
+source   = "R04 §12 T1; R04 §3.9 (SoCC'12 Fig. 2, verbatim Bloom program)"
+features = ["LANG-042", "LANG-100", "LANG-101", "LANG-153", "SEM-021", "ANA-020", "ANA-022"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+Fig. 2 ported rule for rule: `votes` is a table fed by the channel and `cnt` is a relational count over it. The
+count is the one point of order R04 T1 requires the analysis to flag ("non-monotone at group/count"); the
+comparison `n >= QUORUM_SIZE` is over a plain value and adds none. The expected report names the construct by its
+surface location: the aggregate column of view `cnt`.
+"""
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-042", "LANG-100", "LANG-101", "LANG-153", "SEM-021", "ANA-020", "ANA-022"]
+until = "M6"
+
+[expect_analysis]
+# One entry per ANA-022 point of order: `at` is the handler label or view name that contains it, `op` the surface
+# construct (a bang call or one of the keywords of LANGUAGE §13.2). The list is exact: no other point of order.
+points_of_order = [{ at = "cnt", op = "count!" }]

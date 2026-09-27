@@ -1,0 +1,60 @@
+//! BENCH-061a. Causal delivery (tc_causal_delivery#test_reorder_simple): c is lost, so d and e are never delivered.
+//!
+//! Point-to-point causal delivery with the Schiper–Eggli–Sandoz algorithm, built on lattices: bud-sandbox
+//! `delivery/causal.rb` (R03 §6.1, R04 §3.9), ported to Blossom. `my_vc` is the node's vector clock; `ord_buf` maps a
+//! destination to the clock it must have reached before a later message from this node may be delivered there. A
+//! buffered message is delivered once `m.ord_buf.at(self) ≤ my_vc`, a non-monotone (antitone) comparison that sits
+//! one stratum above `my_vc`. Bud deletes delivered messages from `recv_buf`; a relation with lattice columns cannot
+//! be deleted from (LANG-284), so delivered messages are excluded through `delivered` instead, which has the same
+//! observable behavior.
+
+program causal_delivery version 1;
+
+role Proc: cluster;
+
+/// `chn [:@dst, :src, :ident] => [:payload, :clock, :ord_buf]`; the source is the transport sender.
+channel chn(ident: u64, payload: String, clock: VClock, ord_buf: LMap<Node, VClock>): Proc -> Proc;
+
+at Proc {
+    input pipe_in(dst: Node<Proc>, ident: u64, payload: String);
+    output pipe_out(src: Node<Proc>, ident: u64, payload: String);
+
+    cell my_vc: VClock;
+    scratch cell next_vc: VClock;
+    cell ord_buf: LMap<Node, VClock>;
+    table recv_buf(src: Node<Proc>, ident: u64, payload: String, clock: VClock, ord: LMap<Node, VClock>);
+    table delivered(src: Node<Proc>, ident: u64);
+    /// Every payload delivered in an earlier tick.
+    table log(payload: String);
+
+    // ---- update_vc: next_vc <= my_vc; my_vc <+ next_vc
+    keep: while let v = my_vc {
+        emit next_vc(v);
+    }
+    advance: while let v = next_vc {
+        next my_vc(v);
+    }
+
+    // ---- outbound: stamp, send with the current ord_buf, then remember the clock this destination must reach
+    outbound: on pipe_in(d, id, p) {
+        emit next_vc(map[self => my_vc.at(self).join(0) + 1]);
+        send chn(id, p, next_vc, ord_buf) to d;
+        next ord_buf(map[d => next_vc]);
+    }
+
+    // ---- inbound
+    buffer: on chn(id, p, clk, ob) from s {
+        emit recv_buf(s, id, p, clk, ob);
+    }
+    view buf_chosen(s, id, p, clk, ob) =
+        recv_buf(s, id, p, clk, ob), not delivered(s, id)
+        where ob.at(self).leq!(my_vc);
+    deliver: while buf_chosen(s, id, p, clk, ob) {
+        emit pipe_out(s, id, p);
+        emit next_vc(map[self => my_vc.at(self).join(0) + 1]);
+        emit next_vc(clk);
+        next ord_buf(ob);
+        next delivered(s, id);
+        next log(p);
+    }
+}

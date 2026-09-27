@@ -1,0 +1,16 @@
+//! BENCH-303c spec: R11 T4, EOT 3, EFF 2, no crashes, post = 2 ∈ store[k] at r.
+
+spec MergeAtSenderLdfi for r#program {
+    nodes A, R;
+    assign Src = [A];
+    assign Dst = [R];
+
+    fact go() @ A at tick 1;
+
+    faults { eot: 3, eff: 2, crashes: 0, model: sync }
+
+    view pre() = not crashed(R);
+    view post() = has_two() @ R;
+
+    check ldfi expect fails;
+}

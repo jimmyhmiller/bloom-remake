@@ -1,0 +1,180 @@
+schema   = 1
+id       = "BENCH-063"
+title    = "CRDT catalog under fuzzed delta delivery: every schedule converges to the same replica states"
+priority = "P1"
+source   = "R04 §12 T17 (\"Fuzz convergence with random delta-group delivery\"); R04 §5.1 (CvRDT convergence, Prop. 2.1)"
+features = ["LANG-122", "LANG-124", "LANG-130", "LANG-131", "LANG-135", "LANG-137", "LANG-153", "LANG-282", "SEM-040",
+            "SEM-044", "SEM-082", "TEST-001", "TEST-002"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The BENCH-063a workload under the simulator: deltas are delayed, reordered and batched differently in each seed, and
+the remove of a may reach a replica before its add. Every update is disseminated to every replica and merged by a
+join, so the final state is the same in every seed (SEM-082): the values listed in BENCH-063a.
+"""
+
+[deploy]
+nodes = [{ name = "r1", role = "Replica" }, { name = "r2", role = "Replica" }, { name = "r3", role = "Replica" }]
+
+[run]
+ticks = 60
+stop  = "quiescent"
+seeds = 32
+
+[[input]]
+node = "r1"
+tick = 1
+rel  = "incr"
+rows = [[3]]
+
+[[input]]
+node = "r1"
+tick = 1
+rel  = "add"
+rows = [["a"]]
+
+[[input]]
+node = "r1"
+tick = 1
+rel  = "write"
+rows = [[1, "x"]]
+
+[[input]]
+node = "r2"
+tick = 1
+rel  = "incr"
+rows = [[2]]
+
+[[input]]
+node = "r2"
+tick = 1
+rel  = "add"
+rows = [["b"]]
+
+[[input]]
+node = "r2"
+tick = 3
+rel  = "remove"
+rows = [["a"]]
+
+[[input]]
+node = "r2"
+tick = 4
+rel  = "decr"
+rows = [[1]]
+
+[[input]]
+node = "r3"
+tick = 2
+rel  = "incr"
+rows = [[5]]
+
+[[input]]
+node = "r3"
+tick = 2
+rel  = "add"
+rows = [["c"]]
+
+[[input]]
+node = "r3"
+tick = 2
+rel  = "write"
+rows = [[2, "y"]]
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-124", "LANG-130", "LANG-131", "LANG-135", "LANG-137", "LANG-153", "LANG-282",
+                 "SEM-040", "SEM-044", "SEM-082", "TEST-001", "TEST-002"]
+until = "M8"
+
+[[expect]]
+node  = "r1"
+rel   = "gc"
+final = true
+rows  = [[[["r1", 3], ["r2", 2], ["r3", 5]]]]
+
+[[expect]]
+node  = "r1"
+rel   = "pn_value"
+final = true
+rows  = [[9]]
+
+[[expect]]
+node  = "r1"
+rel   = "gset_members"
+final = true
+rows  = [["a"], ["b"], ["c"]]
+
+[[expect]]
+node  = "r1"
+rel   = "tp_members"
+final = true
+rows  = [["b"], ["c"]]
+
+[[expect]]
+node  = "r1"
+rel   = "reg_value"
+final = true
+rows  = [["y"]]
+
+[[expect]]
+node  = "r2"
+rel   = "gc"
+final = true
+rows  = [[[["r1", 3], ["r2", 2], ["r3", 5]]]]
+
+[[expect]]
+node  = "r2"
+rel   = "pn_value"
+final = true
+rows  = [[9]]
+
+[[expect]]
+node  = "r2"
+rel   = "gset_members"
+final = true
+rows  = [["a"], ["b"], ["c"]]
+
+[[expect]]
+node  = "r2"
+rel   = "tp_members"
+final = true
+rows  = [["b"], ["c"]]
+
+[[expect]]
+node  = "r2"
+rel   = "reg_value"
+final = true
+rows  = [["y"]]
+
+[[expect]]
+node  = "r3"
+rel   = "gc"
+final = true
+rows  = [[[["r1", 3], ["r2", 2], ["r3", 5]]]]
+
+[[expect]]
+node  = "r3"
+rel   = "pn_value"
+final = true
+rows  = [[9]]
+
+[[expect]]
+node  = "r3"
+rel   = "gset_members"
+final = true
+rows  = [["a"], ["b"], ["c"]]
+
+[[expect]]
+node  = "r3"
+rel   = "tp_members"
+final = true
+rows  = [["b"], ["c"]]
+
+[[expect]]
+node  = "r3"
+rel   = "reg_value"
+final = true
+rows  = [["y"]]
+

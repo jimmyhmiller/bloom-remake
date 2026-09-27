@@ -1,0 +1,58 @@
+schema   = 1
+id       = "BENCH-051"
+title    = "Bud EmbedMax: an lmax column in a table merges per key"
+priority = "P0"
+source   = "R04 §12 T2 (bud test/tc_lattice.rb EmbedMax); R04 §3.6 (Bud merge_to_buf)"
+features = ["LANG-121", "LANG-122", "LANG-124", "LANG-128", "SEM-030", "SEM-100", "SEM-103"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+Re-derived inputs. Tick 1 inserts (a,1), (a,5), (b,2): the two `a` derivations merge in the same tick (max 5)
+instead of raising a key error, as Bud's merge_to_buf does for lattice columns. Tick 2 inserts (a,3), which is
+dominated, and (b,9). The table persists, so the merged values stay.
+"""
+
+[run]
+ticks = 5
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "put"
+rows = [["a", 1], ["a", 5], ["b", 2]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel  = "put"
+rows = [["a", 3], ["b", 9]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-121", "LANG-122", "LANG-124", "LANG-128", "SEM-030", "SEM-100", "SEM-103"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-121", "LANG-122", "LANG-124", "LANG-128", "SEM-030", "SEM-100", "SEM-103"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel  = "t"
+tick = 1
+rows = [["a", 5], ["b", 2]]
+
+[[expect]]
+node = "n1"
+rel  = "t"
+tick = 2
+rows = [["a", 5], ["b", 9]]
+
+[[expect]]
+node  = "n1"
+rel   = "t"
+final = true
+rows  = [["a", 5], ["b", 9]]

@@ -1,0 +1,16 @@
+//! BENCH-068a. Stratification negative (R04 §12 T22): `reveal` inside a recursive cycle must be rejected. `reveal!`
+//! is an exact read, a negative edge (SEM-102), and here it lies on a same-tick cycle t → exact → t (BLS0502).
+
+program reveal_in_recursion version 1;
+
+input seed(k: u64, v: u64);
+
+table t(k: u64, v: LMax<u64>);
+
+feed: on seed(k, v) {
+    emit t(k, v);
+}
+view exact(k, n) = t(k, v), let n = reveal!(v);
+bump: while exact(k, n) where n < 10 {
+    emit t(k, n + 1);
+}

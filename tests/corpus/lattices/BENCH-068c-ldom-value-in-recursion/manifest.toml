@@ -1,0 +1,24 @@
+schema   = 1
+id       = "BENCH-068"
+title    = "Stratification negative: ldom value inside recursion is rejected (BLS0502)"
+priority = "P0"
+source   = "R04 §12 T22; R04 §2.4 (ldom value is NM); SEM-102"
+features = ["LANG-132", "SEM-020", "SEM-021", "SEM-102", "ANA-002"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The cycle is store →(value!, non-monotone) flagged →(emit, same tick) store. BLS0502 names the cycle; the line is
+not pinned. LDom values arrive from the host, so the program needs no LDom constructor.
+"""
+
+# BLS0502/BLS0503, BLS0702 and BLS0705 come from blossom-analysis over the IR (ARCHITECTURE §13.1), so the
+# diagnostic is expected from the analysis backend, not from the frontend-only compile backend.
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-132", "SEM-020", "SEM-021", "SEM-102", "ANA-002"]
+until = "M5"
+
+[[expect_diag]]
+code     = "BLS0502"
+severity = "error"

@@ -1,0 +1,228 @@
+schema   = 1
+id       = "BENCH-063"
+title    = "CRDT catalog, causal CRDTs (AW-Set, EW-Flag, MV-Register) as dot compositions: replica states per tick"
+priority = "P1"
+source   = "R04 §12 T17 (AW-Set via DotMap, EW-Flag, MV-Register via DotFun); R04 §5.2 (δ paper Figs. 13–15) and §5.3"
+features = ["LANG-082", "LANG-088", "LANG-122", "LANG-124", "LANG-125", "LANG-135", "LANG-137", "LANG-153"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The semantics are the δ-CRDT paper's as R04 §5.2 summarizes them (a remove, disable or overwrite deletes only the dots
+it observed; concurrent adds, enables and writes survive); the workload is re-derived. Three replicas; every local
+update is merged in its own tick, and its delta reaches the other replicas one tick later.
+- AW-Set: r1 adds x (dot r1·1) and r2 adds y (r2·2) @1. @3, concurrently: r1 removes x (it has observed only r1·1),
+  r2 adds x again (r2·3), r3 removes y (observed r2·2). At r1, x is a member @1–@2, not @3 (its own remove), and again
+  from @4, when r2's concurrent add arrives: the add wins. y is removed everywhere by @4. Final: {x}.
+- EW-Flag: r1 enables (r1·10) @1. @3, concurrently: r2 disables (observed r1·10) and r3 enables (r3·11). The flag is
+  off at r2 @3 only and on everywhere @4–@5: the enable wins. @6 r1 disables, having observed both dots: off at r1
+  from @6 and everywhere from @7.
+- MV-Register: r1 writes a (r1·20) and r2 writes b (r2·21) concurrently @1: every replica holds {a, b} @2–@4. @4 r3
+  writes c (r3·22), having observed both, and tombstones them: {c} at r3 from @4 and everywhere from @5.
+"""
+
+[deploy]
+nodes = [{ name = "r1", role = "Replica" }, { name = "r2", role = "Replica" }, { name = "r3", role = "Replica" }]
+
+[run]
+ticks = 9
+stop  = "ticks"
+
+[[input]]
+node = "r1"
+tick = 1
+rel  = "aw_add"
+rows = [["x", 1]]
+
+[[input]]
+node = "r1"
+tick = 1
+rel  = "ew_enable"
+rows = [[10]]
+
+[[input]]
+node = "r1"
+tick = 1
+rel  = "mv_write"
+rows = [["a", 20]]
+
+[[input]]
+node = "r2"
+tick = 1
+rel  = "aw_add"
+rows = [["y", 2]]
+
+[[input]]
+node = "r2"
+tick = 1
+rel  = "mv_write"
+rows = [["b", 21]]
+
+[[input]]
+node = "r1"
+tick = 3
+rel  = "aw_remove"
+rows = [["x"]]
+
+[[input]]
+node = "r2"
+tick = 3
+rel  = "aw_add"
+rows = [["x", 3]]
+
+[[input]]
+node = "r2"
+tick = 3
+rel  = "ew_disable"
+rows = [[]]
+
+[[input]]
+node = "r3"
+tick = 3
+rel  = "aw_remove"
+rows = [["y"]]
+
+[[input]]
+node = "r3"
+tick = 3
+rel  = "ew_enable"
+rows = [[11]]
+
+[[input]]
+node = "r3"
+tick = 4
+rel  = "mv_write"
+rows = [["c", 22]]
+
+[[input]]
+node = "r1"
+tick = 6
+rel  = "ew_disable"
+rows = [[]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-082", "LANG-088", "LANG-122", "LANG-124", "LANG-125", "LANG-135", "LANG-137", "LANG-153"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-082", "LANG-088", "LANG-122", "LANG-124", "LANG-125", "LANG-135", "LANG-137", "LANG-153"]
+until = "M7"
+
+# ---- AW-Set: the concurrent add of x beats r1's remove
+[[expect]]
+node   = "r1"
+rel    = "aw_members"
+row    = ["x"]
+holds  = "1..=2"
+absent = "3"
+
+[[expect]]
+node  = "r1"
+rel   = "aw_members"
+row   = ["x"]
+holds = "4.."
+
+[[expect]]
+node   = "r1"
+rel    = "aw_members"
+row    = ["y"]
+holds  = "2..=3"
+absent = "4.."
+
+[[expect]]
+node = "r3"
+rel  = "aw_members"
+tick = 3
+rows = [["x"]]
+
+[[expect]]
+node  = "r1"
+rel   = "aw_members"
+final = true
+rows  = [["x"]]
+
+[[expect]]
+node  = "r2"
+rel   = "aw_members"
+final = true
+rows  = [["x"]]
+
+[[expect]]
+node  = "r3"
+rel   = "aw_members"
+final = true
+rows  = [["x"]]
+
+# ---- EW-Flag: the concurrent enable beats r2's disable; r1's later disable, which observed both, turns it off
+[[expect]]
+node   = "r1"
+rel    = "ew_on"
+row    = []
+holds  = "1..=5"
+absent = "6.."
+
+[[expect]]
+node   = "r2"
+rel    = "ew_on"
+row    = []
+holds  = "2"
+absent = "3"
+
+[[expect]]
+node   = "r2"
+rel    = "ew_on"
+row    = []
+holds  = "4..=6"
+absent = "7.."
+
+[[expect]]
+node   = "r3"
+rel    = "ew_on"
+row    = []
+holds  = "2..=6"
+absent = "7.."
+
+# ---- MV-Register: concurrent writes both survive; a write that observed both replaces them
+[[expect]]
+node = "r1"
+rel  = "mv_values"
+tick = 1
+rows = [["a"]]
+
+[[expect]]
+node = "r1"
+rel  = "mv_values"
+tick = 2
+rows = [["a"], ["b"]]
+
+[[expect]]
+node = "r3"
+rel  = "mv_values"
+tick = 3
+rows = [["a"], ["b"]]
+
+[[expect]]
+node = "r3"
+rel  = "mv_values"
+tick = 4
+rows = [["c"]]
+
+[[expect]]
+node = "r2"
+rel  = "mv_values"
+tick = 4
+rows = [["a"], ["b"]]
+
+[[expect]]
+node  = "r1"
+rel   = "mv_values"
+row   = ["c"]
+holds = "5.."
+
+[[expect]]
+node  = "r2"
+rel   = "mv_values"
+final = true
+rows  = [["c"]]

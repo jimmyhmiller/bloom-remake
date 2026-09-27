@@ -1,0 +1,41 @@
+//! BENCH-300d. T1 through the bounded ASP encoding (VER-003): counterexample runs of the quorum exist.
+//!
+//! R11/G1 T1: QuorumVoteL (SoCC'12 Fig. 3) in Dedalus^L, ported to Blossom. The R11 program:
+//!
+//!     chan vote(@c: node, v: node)     lat votes() : lset<node>     rel decided()
+//!     vote(@C, V)@async :- cast(), coord(C), Id(V).        -- cast()@1 at every voter
+//!     votes(; {V})      :- vote(V).
+//!     decided()         :- s = votes[], s.size >= 3.
+//!     decided()@next    :- decided().
+//!
+//! The voter's identity is the transport-authenticated sender (`from v`) rather than a payload column; `decided` is
+//! a table, which is the explicit persistence rule. k = 3 of 5.
+
+program quorum_vote_lset version 1;
+
+const K: u64 = 3;
+
+role Voter: cluster;
+role Coord;
+
+channel vote(): Voter -> Coord;
+
+at Voter {
+    input cast();
+
+    send_vote: on cast(), c in Coord {
+        send vote() to c;
+    }
+}
+
+at Coord {
+    cell votes: LSet<Node<Voter>>;
+    table decided();
+
+    tally: on vote() from v {
+        emit votes(set[v]);
+    }
+    decide: while votes.size() >= K {
+        emit decided();
+    }
+}

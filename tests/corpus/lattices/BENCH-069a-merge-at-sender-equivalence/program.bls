@@ -1,0 +1,28 @@
+//! BENCH-069a. Merging at the sender is equivalent to sending individually (R04 §12 T23; Anna §V-A; CR-52): n updates
+//! sent one by one and the same n updates pre-merged into one message give identical receiver state, because the
+//! receiver consumes them with a join-morphism into persistent state. Batching reduces the message count: all of a
+//! tick's derivations for one (destination, key) become one message carrying their join (SEM-105).
+
+program merge_at_sender version 1;
+
+role Sender: cluster;
+role Receiver;
+
+/// No non-lattice column: the key is (), so one message per destination per tick.
+channel upd(u: LSet<u64>): Sender -> Receiver;
+
+at Sender {
+    input update(x: u64);
+
+    ship: on update(x), r in Receiver {
+        send upd(set[x]) to r;
+    }
+}
+
+at Receiver {
+    table sink(from: Node<Sender>, s: LSet<u64>);
+
+    absorb: on upd(u) from src {
+        emit sink(src, u);
+    }
+}

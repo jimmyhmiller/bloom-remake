@@ -1,0 +1,84 @@
+schema   = 1
+id       = "BENCH-061"
+title    = "Causal delivery under reordering: a before b in every schedule; d and e never delivered"
+priority = "P1"
+source   = "R04 §12 T15; R03 §11 T21 (the Bud channel filter reorders and holds messages)"
+features = ["LANG-043", "LANG-082", "LANG-124", "LANG-125", "LANG-128", "LANG-130", "LANG-137", "LANG-153", "LANG-200",
+            "LANG-241", "SEM-021", "SEM-040", "TEST-001", "TEST-002"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+Bud's test reorders deliveries with a channel filter; here the simulator's random delays and batching do that in
+every seed, with the send of c omitted by a scripted fault. In every schedule b is delivered strictly after a (the
+receiver's clock advances only at the tick after a's delivery), which the added invariant checks at every tick,
+and d and e wait forever for c. The final delivered log is {a, b} in every seed.
+"""
+
+[deploy]
+nodes = [{ name = "src", role = "Proc" }, { name = "dst", role = "Proc" }]
+
+[run]
+ticks = 40
+stop  = "quiescent"
+seeds = 32
+
+[[fault]]
+kind      = "omit"
+from      = "src"
+to        = "dst"
+send_tick = 3
+
+[[input]]
+node = "src"
+tick = 1
+rel  = "pipe_in"
+rows = [["dst", 1, "a"]]
+
+[[input]]
+node = "src"
+tick = 2
+rel  = "pipe_in"
+rows = [["dst", 2, "b"]]
+
+[[input]]
+node = "src"
+tick = 3
+rel  = "pipe_in"
+rows = [["dst", 3, "c"]]
+
+[[input]]
+node = "src"
+tick = 4
+rel  = "pipe_in"
+rows = [["dst", 4, "d"]]
+
+[[input]]
+node = "src"
+tick = 5
+rel  = "pipe_in"
+rows = [["dst", 5, "e"]]
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-043", "LANG-082", "LANG-124", "LANG-125", "LANG-128", "LANG-130", "LANG-137", "LANG-153",
+                 "LANG-200", "LANG-241", "SEM-021", "SEM-040", "TEST-001", "TEST-002"]
+until = "M7"
+
+[[expect]]
+node   = "dst"
+rel    = "pipe_out"
+row    = ["src", 4, "d"]
+absent = "0.."
+
+[[expect]]
+node   = "dst"
+rel    = "pipe_out"
+row    = ["src", 5, "e"]
+absent = "0.."
+
+[[expect]]
+node  = "dst"
+rel   = "log"
+final = true
+rows  = [["a"], ["b"]]

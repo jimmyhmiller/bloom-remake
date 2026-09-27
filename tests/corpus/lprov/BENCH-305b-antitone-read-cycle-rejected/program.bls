@@ -1,0 +1,17 @@
+//! BENCH-305b. R11/G1 T6, cyclic variant: adding `seen(; {X}) :- small(), inp2(X)` makes a same-tick cycle
+//! seen → small → seen through a negative edge, which must be rejected statically with that cycle as the witness.
+
+program antitone_read_cycle version 1;
+
+input inp(x: i64);
+input inp2(x: i64);
+
+cell seen: LSet<i64>;
+
+record: on inp(x) {
+    emit seen(set[x]);
+}
+view small() = let s = seen, not (s.size() > 2);
+feed_back: on inp2(x), small() {
+    emit seen(set[x]);
+}

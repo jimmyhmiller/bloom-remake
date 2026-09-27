@@ -1,0 +1,18 @@
+//! BENCH-308d spec: R11 T9 in the bounded ASP encoding with delivery delay Δ = 3 and horizon 6 (R11 §5.1): each of the
+//! two votes, sent at tick 1, arrives at tick 2, 3 or 4, which gives 9 schedules. In 6 of them the votes arrive in
+//! different ticks and exactly_one holds, so the invariant below has counterexample models.
+
+spec MarriageAsp for r#program {
+    nodes BRIDE, GROOM, O;
+    assign Party = [BRIDE, GROOM];
+    assign Officiant = [O];
+
+    fact say_yes() @ BRIDE at tick 1;
+    fact say_yes() @ GROOM at tick 1;
+
+    faults { eot: 6, eff: 1, crashes: 0, model: async, delay: 3 }
+
+    invariant never_exactly_one "exactly one vow was counted": never exactly_one() @ O;
+
+    check asp { ticks: 6 } expect fails;
+}

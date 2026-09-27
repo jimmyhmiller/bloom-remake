@@ -1,0 +1,47 @@
+//! BENCH-302c. T3's confluence certificates: diffluent in seen_both_eph, confluent in store and seen_both.
+//!
+//! R11/G1 T3: a lattice sent over `@async` and merged at the receiver (guarded asynchrony^L), ported to Blossom:
+//!
+//!     store(; m) :- snap(; m).                          -- persistent lmap: the sink
+//!     seen_both()     :- s = store[], s.at("x") >= 3, s.at("y") >= 5.     seen_both()@next :- seen_both().
+//!     seen_both_eph() :- snap(; m), m.at("x") >= 3, m.at("y") >= 5.       seen_both_eph()@next :- seen_both_eph().
+//!
+//! a's kv = {x ↦ 1, y ↦ 5} and b's kv = {x ↦ 3}, both `lmap<str, lmax<int>>`; each sends `snap(@r; kv)` once.
+//! `seen_both_eph` applies a two-atom threshold to the ephemeral delivered batch: it is not a join-morphism of the
+//! batch, so whether it ever holds depends on how the arrivals are batched.
+
+program lattice_async_merge version 1;
+
+role Sender: cluster;
+role Recv;
+
+channel snap(m: LMap<String, LMax<i64>>): Sender -> Recv;
+
+at Sender {
+    input set_kv(k: String, v: i64);
+    input send_now();
+    cell kv: LMap<String, LMax<i64>>;
+
+    load: on set_kv(k, v) {
+        emit kv(map[k => v]);
+    }
+    ship: on send_now(), r in Recv {
+        send snap(kv) to r;
+    }
+}
+
+at Recv {
+    cell store: LMap<String, LMax<i64>>;
+    table seen_both();
+    table seen_both_eph();
+
+    sink: on snap(m) {
+        emit store(m);
+    }
+    both: while store.at("x") >= 3, store.at("y") >= 5 {
+        emit seen_both();
+    }
+    both_eph: on snap(m) where m.at("x") >= 3, m.at("y") >= 5 {
+        emit seen_both_eph();
+    }
+}

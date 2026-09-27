@@ -1,0 +1,14 @@
+//! BENCH-057a. Key semantics with embedded lattices (R04 §12 T11; CR-07, CR-51): inserting two tuples with the same
+//! key and different lattice values merges them. `acct` has two lattice columns, so its value is their product
+//! (SEM-100) and both columns merge per key.
+
+program lattice_columns_merge version 1;
+
+input deposit(k: String, hi: i64, tag: String);
+
+/// Key: `k`, the only non-lattice column.
+table acct(k: String, high_water: LMax<i64>, tags: LSet<String>);
+
+record: on deposit(k, hi, tag) {
+    emit acct(k, hi, set[tag]);
+}

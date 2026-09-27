@@ -1,0 +1,41 @@
+schema   = 1
+id       = "BENCH-309"
+title    = "T10b: incrementing the own entry deductively in the same tick is a hard error (BLSR007)"
+priority = "P1"
+source   = "R11/G1 §7 T10b (✓sim: \"the tick diverges and the engine must raise a hard error\"); R11 §4.1 C2"
+features = ["LANG-130", "LANG-283", "SEM-032", "SEM-103", "ENG-047", "ENG-140"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+At b's tick 2 the received clock is merged and the increment {b ↦ vc.at(b) ⊔ 0 + 1} is merged in the same tick; each
+Kleene round sees the larger clock and raises b's entry again, so the stratum never converges: BLSR007 at b, tick 2.
+"""
+
+[deploy]
+nodes = [{ name = "a", role = "Proc" }, { name = "b", role = "Proc" }]
+
+[run]
+ticks = 4
+stop  = "ticks"
+
+[[input]]
+node = "a"
+tick = 1
+rel  = "ev"
+rows = [[]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-130", "LANG-283", "SEM-032", "SEM-103", "ENG-047", "ENG-140"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-130", "LANG-283", "SEM-032", "SEM-103", "ENG-047", "ENG-140"]
+until = "M7"
+
+[[expect_error]]
+code = "BLSR007"
+node = "b"
+tick = 2

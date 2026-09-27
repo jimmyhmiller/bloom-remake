@@ -1,0 +1,45 @@
+schema   = 1
+id       = "BENCH-311"
+title    = "T12 company control, FLP input: no controls"
+priority = "P1"
+source   = "R11/G1 §7 T12 (✓sim, ✓clingo); Ross–Sagiv Ex. 2.7 and §5.6; FLP Ex. 1.1 and 2.13"
+features = ["LANG-121", "LANG-122", "LANG-124", "LANG-126", "LANG-282", "SEM-031", "SEM-103"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+Input s(a,b,40), s(c,b,20), s(a,c,40), s(b,c,20). Each direct holding is at most 40%; control of b or c by a would
+need the other controlled first, and the least fixpoint derives neither, which is FLP's answer set (Ex. 2.13).
+"""
+
+[run]
+ticks = 3
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "share"
+rows = [["a", "b", 40], ["c", "b", 20], ["a", "c", 40], ["b", "c", 20]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-121", "LANG-122", "LANG-124", "LANG-126", "LANG-282", "SEM-031", "SEM-103"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-121", "LANG-122", "LANG-124", "LANG-126", "LANG-282", "SEM-031", "SEM-103"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel  = "c"
+tick = 1
+rows = []
+
+[[expect]]
+node  = "n1"
+rel   = "c"
+final = true
+rows  = []

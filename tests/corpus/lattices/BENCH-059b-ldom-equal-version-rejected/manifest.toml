@@ -1,0 +1,54 @@
+schema   = 1
+id       = "BENCH-059"
+title    = "Versioned KVS: an equal version with a different value is rejected (LPoint conflict, BLSR006)"
+priority = "P1"
+source   = "R04 §12 T13; R04 §3.9 (ldom edge case: equal versions with different values)"
+features = ["LANG-124", "LANG-130", "LANG-132", "LANG-137", "LANG-153"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+Two clients write key k with the same version {c1:1} and different values at tick 1; both arrive at the replica
+at tick 2. R04 T13 requires the input to be rejected. With `LPoint<String>` as the value lattice the two values
+cannot be joined: whether LDom joins the values of pairs with equal versions at merge time or keeps both pairs
+until `value!()` joins them, the replica's tick 2 aborts with BLSR006 (the standing view `current` reads the value
+every tick). `LDom::of` is assumed as in BENCH-059a.
+"""
+
+[deploy]
+nodes = [
+    { name = "c1", role = "Client" },
+    { name = "c2", role = "Client" },
+    { name = "r", role = "Replica" },
+]
+
+[run]
+ticks = 4
+stop  = "ticks"
+
+[[input]]
+node = "c1"
+tick = 1
+rel  = "write"
+rows = [["k", [["c1", 1]], "x"]]
+
+[[input]]
+node = "c2"
+tick = 1
+rel  = "write"
+rows = [["k", [["c1", 1]], "y"]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-124", "LANG-130", "LANG-132", "LANG-137", "LANG-153"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-124", "LANG-130", "LANG-132", "LANG-137", "LANG-153"]
+until = "M7"
+
+[[expect_error]]
+code = "BLSR006"
+node = "r"
+tick = 2

@@ -1,0 +1,45 @@
+schema   = 1
+id       = "BENCH-051"
+title    = "Bud EmptyMaxMerge: merging an empty lmax leaves m1 = 5"
+priority = "P0"
+source   = "R04 §12 T2 (bud test/tc_lattice.rb EmptyMaxMerge: \"m1 <= m2 with m2 = ⊥ leaves m1 = 5\")"
+features = ["LANG-122", "LANG-124", "LANG-128", "LANG-190", "LANG-280", "SEM-034", "SEM-101"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+The bootstrap seeds m1 = 5 in the boot tick; m1 is a persistent cell (CR-24), so it keeps 5 at every tick. m2 is
+never written: it stays ⊥, which is represented by the absence of the cell (SEM-101 N1).
+"""
+
+[run]
+ticks = 4
+stop  = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-124", "LANG-128", "LANG-190", "LANG-280", "SEM-034", "SEM-101"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-124", "LANG-128", "LANG-190", "LANG-280", "SEM-034", "SEM-101"]
+until = "M7"
+
+[[expect]]
+node  = "n1"
+rel   = "m1"
+row   = [5]
+holds = "0.."
+
+[[expect]]
+node = "n1"
+rel  = "m2"
+tick = 0
+rows = []
+
+[[expect]]
+node  = "n1"
+rel   = "m2"
+final = true
+rows  = []

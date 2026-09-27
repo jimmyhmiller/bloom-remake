@@ -1,0 +1,22 @@
+schema   = 1
+id       = "BENCH-075"
+title    = "The replicated DBSP view is NEVER-FINAL"
+priority = "P1"
+source   = "R13 §12 T12 (\"V is NEVER-FINAL\"); R13 §9.3 (ANA-120); FT Thm 18, Cor 20"
+features = ["LANG-138", "LANG-158", "SEM-016", "SEM-017", "ANA-120"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+V's inputs are Z-sets written from host input and from replicated deltas with possibly negative weights and no seal:
+their update semiautomaton is invertible, so ANA-120 classifies the view's output `v_out` NEVER-FINAL.
+"""
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-138", "LANG-158", "SEM-016", "SEM-017", "ANA-120"]
+until = "M7"
+
+[expect_analysis]
+# ANA-120 finality classes per output (exact set of classes).
+finality = { v_out = ["NEVER-FINAL"] }

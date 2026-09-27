@@ -1,0 +1,91 @@
+schema   = 1
+id       = "BENCH-078"
+title    = "W3 with a reused seq and a different cumulative is a hard Conflict error"
+priority = "P1"
+source   = "R13 §12 T14 (\"W3 with a reused seq and a different cumulative raises a Conflict hard error\"); R13 §6.3, §7.3"
+features = ["LANG-124", "LANG-131", "LANG-137", "LANG-153", "SEM-070", "SEM-071"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+A: +x @1 and +x @2 advance its entry to (1, {x:1}) at tick 2 and (2, {x:2}) at tick 3; B holds (2, {x:2}) from tick
+4. A crashes at tick 5 and restarts at tick 6 with its volatile state reset to (0, {}). A: +y @7 gives (1, {y:1}),
+which B receives at tick 9 and ignores (a lower seq is dominated by the Lex merge): the silent drop of R13 T14. A:
++z @8 gives (2, {y:1, z:1}), which reaches B at tick 10 and conflicts with the held (2, {x:2}) inside the LPoint: B's
+tick 10 aborts.
+The error code: PLAN's M1.3 scope says "BENCH-078 expects BLSR011", which ARCHITECTURE §0.3 L1 defines as "an
+exactly-once dot reused with a different payload" for the compiler-inserted wrapper. The built-in wrapper cannot be
+made to reuse a dot from a surface program (its seq is durable or its incarnation increments, and nothing is
+released before the durable commit, SEM-072), so the reuse is written out here with user lattices, and the conflict
+it raises is the LPoint conflict LANGUAGE §20 defines: BLSR006. LANGUAGE (higher precedence than PLAN) is followed;
+the built-in BLSR011 path is recorded as a follow-up for the wrapper tests of M8.6 (docs/plan/notes/M1.3.md).
+"""
+
+[deploy]
+nodes = [{ name = "A", role = "Replica" }, { name = "B", role = "Replica" }]
+
+[run]
+ticks = 12
+stop  = "ticks"
+
+[[fault]]
+kind = "crash"
+node = "A"
+tick = 5
+
+[[fault]]
+kind = "restart"
+node = "A"
+tick = 6
+
+[[input]]
+node = "A"
+tick = 1
+rel  = "local_update"
+rows = [["x", 1]]
+
+[[input]]
+node = "A"
+tick = 2
+rel  = "local_update"
+rows = [["x", 1]]
+
+[[input]]
+node = "A"
+tick = 7
+rel  = "local_update"
+rows = [["y", 1]]
+
+[[input]]
+node = "A"
+tick = 8
+rel  = "local_update"
+rows = [["z", 1]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-124", "LANG-131", "LANG-137", "LANG-153", "SEM-070", "SEM-071"]
+until = "M7"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-124", "LANG-131", "LANG-137", "LANG-153", "SEM-070", "SEM-071"]
+until = "M7"
+
+[[expect]]
+node = "B"
+rel  = "known"
+tick = 4
+rows = [["A", 2, [["x", 2]]]]
+
+# the seq-1 entry after the restart is silently dominated
+[[expect]]
+node = "B"
+rel  = "known"
+tick = 9
+rows = [["A", 2, [["x", 2]]]]
+
+[[expect_error]]
+code = "BLSR006"
+node = "B"
+tick = 10

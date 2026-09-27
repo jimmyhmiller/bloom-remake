@@ -1,0 +1,18 @@
+schema   = 1
+id       = "BENCH-305"
+title    = "T6 with an async-fed input: small is reported as a point of order"
+priority = "P0"
+source   = "R11/G1 §7 T6 (\"If inp were async-fed, small must be reported as a point of order (ANA-022)\")"
+features = ["LANG-125", "LANG-126", "SEM-021", "SEM-102", "ANA-020", "ANA-022"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = "The report lists exactly one point of order: the negation of the size threshold in view `small`."
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-125", "LANG-126", "SEM-021", "SEM-102", "ANA-020", "ANA-022"]
+until = "M5"
+
+[expect_analysis]
+points_of_order = [{ at = "small", op = "not" }]

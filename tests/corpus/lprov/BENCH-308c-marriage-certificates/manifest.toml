@@ -1,0 +1,23 @@
+schema   = 1
+id       = "BENCH-308"
+title    = "T9 certificates: exactly_one is diffluent; at_least_one and both are certified confluent"
+priority = "P0"
+source   = "R11/G1 §7 T9 (\"The certificate must show exactly_one as diffluent, with its point of order at the size read\")"
+features = ["LANG-127", "LANG-153", "ANA-022", "ANA-029", "ANA-141", "SEM-044", "SEM-107"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+exactly_one reads the async-fed cell exactly (`reveal!`), so its value depends on how the arrivals are batched: two
+ultimate models exist, and it is not confluent. at_least_one and both are thresholds over the persistent set, fed by
+a join-morphism of the ephemeral channel: certified (ANA-141).
+"""
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-127", "LANG-153", "ANA-022", "ANA-029", "ANA-141", "SEM-044", "SEM-107"]
+until = "M8"
+
+[expect_analysis]
+points_of_order = [{ at = "one", op = "reveal!" }]
+confluent = { exactly_one = "not_confluent", at_least_one = "certified", both = "certified" }

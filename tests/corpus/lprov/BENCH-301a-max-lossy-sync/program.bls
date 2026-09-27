@@ -1,0 +1,34 @@
+//! BENCH-301a. T2 in lockstep rounds with no faults: best = 7 at the sink from tick 2.
+//!
+//! R11/G1 T2: a max over a lossy channel, ported to Blossom. The R11 program:
+//!
+//!     chan m(@s) : lmax<int>      lat best() : lmax<int>      rel hi(), lo()
+//!     m(@S; v)@async :- x(; v), sink(S).          -- x(;v) is an EDB event at tick 1 ("send once")
+//!     best(; v) :- m(; v).        hi() :- b = best[], b >= 7.        lo() :- b = best[], b >= 3.
+//!
+//! Senders a (x = 3), b (x = 7) and d (x = 7); the sink s.
+
+program max_lossy version 1;
+
+role Sender: cluster;
+role Sink;
+
+channel m(v: LMax<i64>): Sender -> Sink;
+
+at Sender {
+    input x(v: i64);
+
+    send_once: on x(v), s in Sink {
+        send m(v) to s;
+    }
+}
+
+at Sink {
+    cell best: LMax<i64>;
+
+    recv: on m(v) {
+        emit best(v);
+    }
+    view hi() = best >= 7;
+    view lo() = best >= 3;
+}

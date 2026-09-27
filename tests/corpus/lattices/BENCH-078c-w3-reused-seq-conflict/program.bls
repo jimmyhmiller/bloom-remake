@@ -1,0 +1,44 @@
+//! BENCH-078c. W3 with a reused seq and a different cumulative raises a Conflict error (R13 §12 T14; R13 §6.3: "an
+//! equal seq with a different value is a Conflict error"). The W3 lattice `Map<origin, Lex<seq, Point<cumulative>>>` is
+//! written out, and the origin keeps its (seq, cumulative) in volatile state. After a crash and restart it counts from
+//! seq 0 again: its seq-1 entry is dominated by the receiver's seq-2 entry and silently ignored, and its next entry,
+//! seq 2 with a different cumulative, meets the old seq-2 entry in one `LPoint`: a hard Conflict.
+
+program w3_reused_seq version 1;
+
+role Replica: cluster;
+
+type Entry = Lex<LMax<u64>, LPoint<Map<String, i64>>>;
+
+#[fault(lossy)]
+channel cum_msg(m: LMap<Node, Entry>): Replica -> Replica;
+
+fn add_maps(a: Map<String, i64>, b: Map<String, i64>) -> Map<String, i64> {
+    b.entries().fold(a, |acc, e| acc.insert(e.0, acc.get(e.0).unwrap_or(0) + e.1))
+}
+
+at Replica {
+    input local_update(item: String, w: i64);
+
+    /// The bug under test: the origin's (seq, cumulative) is volatile.
+    table my_state(seq: u64, cum: Map<String, i64>) key();
+    cell seen: LMap<Node, Entry>;
+
+    bootstrap {
+        emit my_state(0, map[]);
+    }
+    view batch(item, s = sum!(w)) = local_update(item, w);
+    view batch_map(m = collect_map!(item, s)) = batch(item, s) where s != 0;
+    advance_own: on batch_map(m), my_state(k, c) {
+        upsert my_state(k + 1, add_maps(c, m));
+    }
+    /// This origin's current entry is sent to every other replica at every tick.
+    share: while my_state(k, c), p in Replica where k > 0, p != self {
+        send cum_msg(map[self => Lex::of(k, c)]) to p;
+    }
+    absorb: on cum_msg(m) {
+        emit seen(m);
+    }
+
+    view known(o, k, c) = (o, e) in seen, let Some(k) = reveal!(e.key()), let Some(c) = e.val!().get();
+}

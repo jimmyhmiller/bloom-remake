@@ -1,0 +1,43 @@
+//! BENCH-312b. T13 under LDFI 4/3/0: the tick-3 gossip cannot be omitted, so only losing both puts falsifies.
+//!
+//! R11/G1 T13: key presence in a replicated `lmap` (put plus anti-entropy), ported to Blossom. The client cl sends
+//! put {k ↦ 1} to r1 and r2 at tick 1; r1 and r2 merge it into a persistent store and gossip the store to r3 at every
+//! tick (a ⊥ store sends nothing); the post is `key?("k")` at r3. r3's copy is named `mirror` because it lives on a
+//! different role.
+
+program replicated_lmap_presence version 1;
+
+role Client;
+role Replica: cluster;
+role Observer;
+
+channel put(m: LMap<String, LMax<i64>>): Client -> Replica;
+channel gossip(m: LMap<String, LMax<i64>>): Replica -> Observer;
+
+at Client {
+    input do_put(k: String, v: i64);
+
+    send_put: on do_put(k, v), r in Replica {
+        send put(map[k => v]) to r;
+    }
+}
+
+at Replica {
+    cell store: LMap<String, LMax<i64>>;
+
+    absorb: on put(m) {
+        emit store(m);
+    }
+    spread: while let s = store, o in Observer {
+        send gossip(s) to o;
+    }
+}
+
+at Observer {
+    cell mirror: LMap<String, LMax<i64>>;
+
+    absorb_gossip: on gossip(m) {
+        emit mirror(m);
+    }
+    view has_k() = mirror.has_key("k");
+}

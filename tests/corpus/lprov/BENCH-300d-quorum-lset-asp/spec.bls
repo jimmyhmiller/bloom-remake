@@ -1,0 +1,22 @@
+//! BENCH-300d spec: R11 T1 in the ASP encoding of R11 §5.1 (lossy mode: an omission is allowed for 1 ≤ send tick <
+//! EFF). The invariant states that the coordinator has decided at EOT; each run that violates it is one of the stable
+//! models R11 obtains with `:- decided(c,eot).` (clingo finds 16 of them).
+
+spec QuorumAsp for r#program {
+    nodes V1, V2, V3, V4, V5, C;
+    assign Voter = [V1, V2, V3, V4, V5];
+    assign Coord = [C];
+
+    fact cast() @ V1 at tick 1;
+    fact cast() @ V2 at tick 1;
+    fact cast() @ V3 at tick 1;
+    fact cast() @ V4 at tick 1;
+    fact cast() @ V5 at tick 1;
+
+    faults { eot: 4, eff: 2, crashes: 0, model: sync }
+
+    invariant decided_by_eot "the coordinator has not decided at EOT":
+        never not decided() @ C at tick 4;
+
+    check asp { ticks: 4 } expect fails;
+}
