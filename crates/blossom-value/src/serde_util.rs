@@ -7,11 +7,7 @@
 //! - `nonempty_tuple`: a tuple's elements, rejecting an empty sequence, whose canonical form is `()` (`Unit`).
 
 pub(crate) mod f64_bits {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub(crate) fn serialize<S: Serializer>(v: &f64, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_u64(v.to_bits())
-    }
+    use serde::{Deserialize, Deserializer};
 
     pub(crate) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
         u64::deserialize(deserializer).map(f64::from_bits)

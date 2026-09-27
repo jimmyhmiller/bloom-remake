@@ -19,12 +19,11 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ValueError;
-use crate::serde_util;
 use crate::time::{Duration, Instant, NodeId};
 use crate::types::{ExternCodecId, IntTy};
 
 /// A value of any Blossom type.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub enum Value {
     /// `()`.
     Unit,
@@ -33,7 +32,7 @@ pub enum Value {
     /// An integer, stored with its integer type.
     Int(IntValue),
     /// `f64`, ordered by IEEE 754 `totalOrder` (serialized as its bit pattern, so every NaN payload round-trips).
-    F64(#[serde(with = "serde_util::f64_bits")] f64),
+    F64(f64),
     /// `String`.
     Str(Arc<str>),
     /// `Bytes`.
@@ -53,7 +52,7 @@ pub enum Value {
     /// `Node` / `Node<R>`.
     Node(NodeId),
     /// A tuple (at least one element; `()` is [`Value::Unit`], and deserialization rejects an empty tuple).
-    Tuple(#[serde(deserialize_with = "serde_util::nonempty_tuple::deserialize")] Arc<[Value]>),
+    Tuple(Arc<[Value]>),
     /// A struct: its fields in declaration order.
     Struct(Arc<[Value]>),
     /// An enum value: the variant's stable number (`#n`) and its payload fields.
@@ -76,9 +75,9 @@ pub enum Value {
     /// `Vec<T>`.
     Vec(Arc<[Value]>),
     /// `Set<T>`.
-    Set(#[serde(with = "serde_util::set_strict")] Arc<BTreeSet<Value>>),
+    Set(Arc<BTreeSet<Value>>),
     /// `Map<K, V>`.
-    Map(#[serde(with = "serde_util::map_pairs")] Arc<BTreeMap<Value, Value>>),
+    Map(Arc<BTreeMap<Value, Value>>),
     /// `Option<T>`.
     Option(Option<Arc<Value>>),
     /// A lattice value.
@@ -232,6 +231,160 @@ impl ModValue {
         ModValue::new(bits, [0, 0, 0, n])
     }
 
+    /// Adds modulo 2^N, including 160- and 256-bit widths.
+    pub fn wrapping_add(self, rhs: ModValue) -> Result<ModValue, ValueError> {
+        self.same_width(rhs)?;
+        let mut out = [0u64; 4];
+        let mut carry = false;
+        for ((lhs, rhs), dst) in self.limbs.iter().zip(rhs.limbs.iter()).zip(out.iter_mut()).rev() {
+            let (x, c1) = lhs.overflowing_add(*rhs);
+            let (y, c2) = x.overflowing_add(u64::from(carry));
+            *dst = y;
+            carry = c1 || c2;
+        }
+        Self::new(self.bits, Self::mask(self.bits, out))
+    }
+    /// Subtracts modulo 2^N.
+    pub fn wrapping_sub(self, rhs: ModValue) -> Result<ModValue, ValueError> {
+        self.same_width(rhs)?;
+        let mut out = [0u64; 4];
+        let mut borrow = false;
+        for ((lhs, rhs), dst) in self.limbs.iter().zip(rhs.limbs.iter()).zip(out.iter_mut()).rev() {
+            let (x, b1) = lhs.overflowing_sub(*rhs);
+            let (y, b2) = x.overflowing_sub(u64::from(borrow));
+            *dst = y;
+            borrow = b1 || b2;
+        }
+        Self::new(self.bits, Self::mask(self.bits, out))
+    }
+    /// Logical shift left modulo 2^N.
+    pub fn shl_bits(self, amount: u32) -> ModValue {
+        if amount >= u32::from(self.bits) {
+            return Self {
+                bits: self.bits,
+                limbs: [0; 4],
+            };
+        }
+        let whole = (amount / 64) as usize;
+        let part = amount % 64;
+        let out = std::array::from_fn(|i| {
+            let shifted = self.limbs.get(i + whole).copied().unwrap_or(0) << part;
+            if part == 0 {
+                shifted
+            } else {
+                shifted | (self.limbs.get(i + whole + 1).copied().unwrap_or(0) >> (64 - part))
+            }
+        });
+        Self {
+            bits: self.bits,
+            limbs: Self::mask(self.bits, out),
+        }
+    }
+    /// Logical shift right, filling high bits with zero.
+    pub fn shr_bits(self, amount: u32) -> ModValue {
+        if amount >= u32::from(self.bits) {
+            return Self {
+                bits: self.bits,
+                limbs: [0; 4],
+            };
+        }
+        let whole = (amount / 64) as usize;
+        let part = amount % 64;
+        let out = std::array::from_fn(|i| {
+            let shifted = i
+                .checked_sub(whole)
+                .and_then(|j| self.limbs.get(j))
+                .copied()
+                .unwrap_or(0)
+                >> part;
+            if part == 0 {
+                shifted
+            } else {
+                shifted
+                    | (i.checked_sub(whole + 1)
+                        .and_then(|j| self.limbs.get(j))
+                        .copied()
+                        .unwrap_or(0)
+                        << (64 - part))
+            }
+        });
+        Self {
+            bits: self.bits,
+            limbs: out,
+        }
+    }
+    fn same_width(self, rhs: ModValue) -> Result<(), ValueError> {
+        if self.bits == rhs.bits {
+            Ok(())
+        } else {
+            Err(ValueError::InvalidValue(format!(
+                "Mod<{}> and Mod<{}> have different widths",
+                self.bits, rhs.bits
+            )))
+        }
+    }
+    fn mask(bits: u16, mut limbs: [u64; 4]) -> [u64; 4] {
+        for (i, limb) in limbs.iter_mut().enumerate() {
+            let low = 64 * (3 - i as u32);
+            let allowed = u32::from(bits).saturating_sub(low).min(64);
+            *limb &= if allowed == 64 {
+                u64::MAX
+            } else if allowed == 0 {
+                0
+            } else {
+                (1u64 << allowed) - 1
+            };
+        }
+        limbs
+    }
+    /// Parses an unsuffixed hex modular literal's digits at the expected width.
+    pub fn from_hex(bits: u16, digits: &str) -> Result<ModValue, ValueError> {
+        let digits = digits.strip_prefix("0x").unwrap_or(digits);
+        let digits = digits.strip_suffix('I').unwrap_or(digits);
+        if digits.is_empty()
+            || !digits.bytes().any(|b| b.is_ascii_hexdigit())
+            || !digits.bytes().all(|b| b.is_ascii_hexdigit() || b == b'_')
+        {
+            return Err(ValueError::InvalidValue("invalid modular hex literal".into()));
+        }
+        let mut out = Self::from_u64(bits, 0)?;
+        for ch in digits.bytes().filter(|b| *b != b'_') {
+            let digit = (ch as char)
+                .to_digit(16)
+                .ok_or_else(|| ValueError::InvalidValue("invalid hex digit".into()))? as u64;
+            let shifted = out.shl_bits(4);
+            // Detect overflow instead of wrapping a literal.
+            if shifted.shr_bits(4) != out
+                || shifted.wrapping_add(Self::from_u64(bits, digit)?)?.limbs()[3] < shifted.limbs()[3]
+            {
+                return Err(ValueError::InvalidValue(format!("literal does not fit in Mod<{bits}>")));
+            }
+            out = shifted.wrapping_add(Self::from_u64(bits, digit)?)?;
+        }
+        Ok(out)
+    }
+    /// Tests membership in a circular interval with independently open/closed endpoints.
+    pub fn in_ring_interval(
+        self,
+        start: ModValue,
+        end: ModValue,
+        start_inclusive: bool,
+        end_inclusive: bool,
+    ) -> Result<bool, ValueError> {
+        self.same_width(start)?;
+        self.same_width(end)?;
+        if start == end {
+            return Ok(match (start_inclusive, end_inclusive) {
+                (false, true) | (true, false) => true,
+                (true, true) => self == start,
+                (false, false) => self != start,
+            });
+        }
+        let after = if start_inclusive { self >= start } else { self > start };
+        let before = if end_inclusive { self <= end } else { self < end };
+        Ok(if start < end { after && before } else { after || before })
+    }
+
     /// The width `N`.
     pub const fn bits(&self) -> u16 {
         self.bits
@@ -263,7 +416,7 @@ pub struct SessionId(pub u64);
 ///
 /// Canonical form is the lattice library's obligation (for example: no ⊥ entries in a map, sorted sets), so
 /// structural equality is value equality and the derived order is LANGUAGE §5.5's "compare by canonical form".
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum LatValue {
     /// ⊥ of a lattice with an adjoined or distinguished bottom (`LMax`, `LMin`, `LPoint`, `LConflict`, `LWithBot`,
     /// `LUnit`).
@@ -275,11 +428,11 @@ pub enum LatValue {
     /// One carried element (`LMax`, `LMin`, `LPoint`, `LConflict`).
     Elem(Arc<Value>),
     /// A set of elements (`LSet`, `LPSet`, `LUnionFind`'s classes, `LDom`'s pairs, dot sets).
-    Set(#[serde(with = "serde_util::set_strict")] Arc<BTreeSet<Value>>),
+    Set(Arc<BTreeSet<Value>>),
     /// Keys to lattice values (`LMap`, `VClock`); ⊥ values are absent.
-    Map(#[serde(with = "serde_util::map_pairs")] Arc<BTreeMap<Value, LatValue>>),
+    Map(Arc<BTreeMap<Value, LatValue>>),
     /// Element multiplicities (`LBag`); zero counts are absent.
-    Bag(#[serde(with = "serde_util::map_pairs")] Arc<BTreeMap<Value, u64>>),
+    Bag(Arc<BTreeMap<Value, u64>>),
     /// A fixed sequence of lattice values (products, `LPair`, `Lex`, `LVec`, tombstone and causal pairs).
     Seq(Arc<[LatValue]>),
     /// An `extern lattice` value (LANG-135): its codec and encoded bytes.
@@ -292,18 +445,18 @@ pub enum LatValue {
 }
 
 /// A group or ring value as data (LANG-138, LANG-142). Group arithmetic lives in `blossom-lattice`.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum GroupValue {
     /// `Z`: a checked `i64`.
     Z(i64),
     /// `Zn<N>`: a residue modulo `N`.
     Zn(u64),
     /// `ZSet<T>`: element weights; zero weights are absent.
-    ZSet(#[serde(with = "serde_util::map_pairs")] Arc<BTreeMap<Value, i64>>),
+    ZSet(Arc<BTreeMap<Value, i64>>),
     /// A tuple of group values.
     Tuple(Arc<[GroupValue]>),
     /// Keys to group values; zero values are absent.
-    Map(#[serde(with = "serde_util::map_pairs")] Arc<BTreeMap<Value, GroupValue>>),
+    Map(Arc<BTreeMap<Value, GroupValue>>),
     /// A value of a user `impl Group`/`impl Ring` type: its carrier value.
     User(Arc<Value>),
 }
@@ -508,5 +661,56 @@ mod tests {
             entries.keys().cloned().collect::<Vec<_>>(),
             vec![Value::u64(1), Value::u64(2)]
         );
+    }
+}
+#[cfg(test)]
+mod m2_mod_tests {
+    use super::*;
+    #[test]
+    fn mod_arith_160_and_256() {
+        let max = ModValue::new(160, [0, u32::MAX as u64, u64::MAX, u64::MAX]).unwrap();
+        let one = ModValue::from_u64(160, 1).unwrap();
+        let zero = ModValue::from_u64(160, 0).unwrap();
+        assert_eq!(max.wrapping_add(one).unwrap(), zero);
+        assert_eq!(zero.wrapping_sub(one).unwrap(), max);
+        assert_eq!(one.shl_bits(159).shr_bits(159), one);
+        assert_eq!(
+            ModValue::from_hex(160, "0xffffffffffffffffffffffffffffffffffffffffI").unwrap(),
+            max
+        );
+        assert!(ModValue::from_hex(160, "0x1ffffffffffffffffffffffffffffffffffffffffI").is_err());
+        assert_eq!(
+            ModValue::from_u64(256, 1).unwrap().shl_bits(255).shr_bits(255),
+            ModValue::from_u64(256, 1).unwrap()
+        );
+    }
+    #[test]
+    fn ring_interval_wraps() {
+        let a = ModValue::from_u64(8, 250).unwrap();
+        let b = ModValue::from_u64(8, 5).unwrap();
+        for n in [251, 255, 0, 5] {
+            assert!(
+                ModValue::from_u64(8, n)
+                    .unwrap()
+                    .in_ring_interval(a, b, false, true)
+                    .unwrap()
+            );
+        }
+        for n in [6, 249, 250] {
+            assert!(
+                !ModValue::from_u64(8, n)
+                    .unwrap()
+                    .in_ring_interval(a, b, false, true)
+                    .unwrap()
+            );
+        }
+        for n in 0..=255 {
+            assert!(
+                ModValue::from_u64(8, n)
+                    .unwrap()
+                    .in_ring_interval(a, a, false, true)
+                    .unwrap()
+            );
+        }
     }
 }

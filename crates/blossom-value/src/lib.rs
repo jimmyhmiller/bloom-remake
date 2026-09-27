@@ -18,6 +18,8 @@
 //! return [`Unimplemented`](blossom_base::Unimplemented) naming their FEATURES id. The crate is frozen after
 //! milestone M2 (ARCHITECTURE §1.6).
 
+#[cfg(feature = "arbitrary")]
+pub mod arbitrary;
 pub mod class;
 pub mod digest;
 pub mod error;
@@ -32,14 +34,17 @@ pub mod types;
 pub mod value;
 pub mod word;
 
+mod bounded;
 mod serde_util;
+mod serde_value;
+mod serialize_value;
 #[cfg(test)]
 mod testgen;
 
 pub use class::{Claim, HeightClass, LatOpKind, LawStatus, MonoClass, ProofStatus};
 pub use digest::{Digest128, Digest256, SetElement};
 pub use error::ValueError;
-pub use externs::{ExternError, ExternFn, ExternRegistry, ExternTableFn, TableFn};
+pub use externs::{ExternError, ExternFn, ExternRegistry, ExternSignature, ExternTableFn, TableFn};
 pub use fp::{ENCODING_VERSION, Fingerprint};
 pub use prf::{PRF_VERSION, PrfStream, Seed, Seeds};
 pub use sink::{IngestSlot, RowMeta, RowSender, WordSink};
