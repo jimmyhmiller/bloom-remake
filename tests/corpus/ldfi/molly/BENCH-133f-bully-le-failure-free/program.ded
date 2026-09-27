@@ -1,0 +1,5 @@
+// BENCH-133f-bully-le-failure-free: bully-le: the failure-free run.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/bully/election.ded";
+include "../lib/bully/group.ded";

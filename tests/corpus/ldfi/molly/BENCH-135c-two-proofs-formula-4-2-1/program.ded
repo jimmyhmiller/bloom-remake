@@ -1,0 +1,4 @@
+// BENCH-135c-two-proofs-formula-4-2-1: two-proofs-formula: counterexample at EOT 4, EFF 2, 1 crash; stated falsifiers.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/unit/two_proofs.ded";

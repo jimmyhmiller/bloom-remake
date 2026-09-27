@@ -1,0 +1,11 @@
+// Molly's provenance unit test "repeat rule firings with different contributing tuples (missing fields are
+// wildcards)" (R06 §12.6, ProvenanceSuite): c(loc, 1) has two distinct derivations, through proxy(loc, x, 1) and
+// proxy(loc, y, 1), although the rule mentions the middle column only as `_`. Blossom golden corpus, transcribed from
+// R06 (derived = true); see ../../README.md.
+
+proxy("loc", A, B) :- a(L, A, B);
+c(L, V) :- b(L, V), proxy(L, _, V);
+
+a("loc", "x", 1)@1;
+a("loc", "y", 1)@1;
+b("loc", 1)@1;

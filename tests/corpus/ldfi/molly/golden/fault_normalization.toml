@@ -1,0 +1,36 @@
+# Golden data for BENCH-135 ("solver normalization"): turning a model of the hazard formula into a fault schedule.
+# Consumer: TEST-028 (WP M8.1; ARCHITECTURE §8.4: "Omissions implied by a crash (the sender, or under Frozen the
+# receiver, crashed early enough) are removed when a model is converted to a FaultSchedule"; an empty model is dropped).
+# Not a corpus case (no manifest). See ../../README.md.
+#
+# Molly's unit test (SolverSuite, R06 §12.6): failure spec EOT 4, EFF 2, 1 crash, nodes A and B, and the model
+# {C(A,2), O(A,B,1), O(A,B,2), O(A,B,3), O(B,A,1)}. O(A,B,2) and O(A,B,3) are implied by A's crash at 2 (the sender
+# sends nothing from its crash time). O(B,A,1) is delivered at time 2, when its receiver A crashes: Molly removes it
+# (its receiver rule), which is right for the paper's crash semantics and ARCHITECTURE's Frozen view, where a node
+# crashed at 2 processes nothing at 2; under MollyContinue the crashed receiver still receives, so the omission is not
+# implied there and must stay.
+
+schema = 1
+feature = "TEST-028"
+source = "R06 §3.6 and §12.6 (Molly SolverSuite); ARCHITECTURE §8.3 (Frozen receiver rule), §8.4"
+
+[[case]]
+eot = 4
+eff = 2
+crashes = 1
+nodes = ["A", "B"]
+model = ["C(A,2)", "O(A,B,1)", "O(A,B,2)", "O(A,B,3)", "O(B,A,1)"]
+frozen = ["C(A,2)", "O(A,B,1)"]
+molly_continue = ["C(A,2)", "O(A,B,1)", "O(B,A,1)"]
+molly_reported = ["C(A,2)", "O(A,B,1)"]
+
+[[case]]
+eot = 4
+eff = 2
+crashes = 1
+nodes = ["A", "B"]
+model = []
+frozen = "none"
+molly_continue = "none"
+molly_reported = "none"
+why = "an empty model is not a hypothesis"

@@ -1,0 +1,86 @@
+// Raft (Ongaro and Ousterhout, "In Search of an Understandable Consensus Algorithm", 2014): leader election and log
+// replication for three servers, standing in for Molly's raft/*.ded (R06 §12.7, R10 T13), which could not be
+// vendored. Blossom golden corpus, re-derived (derived = true); see ../../README.md. Used together with one vote
+// module (vote_checked.ded, or a seeded bug), one commit module (commit_majority.ded, or a seeded bug), group.ded
+// and one scenario's timing file.
+//
+// Terms: every server adopts the highest term it sees in a message (and never goes back).
+// Elections: a server that for `patience` steps has not led, heard the leader of its term, granted a vote or started
+// a candidacy becomes a candidate for the next term, votes for itself and asks its peers once; a server grants one
+// vote per term, to a candidate whose log is at least as up to date as its own (the vote module), preferring the
+// highest-ranked of simultaneous requests; a candidate with votes from a majority (two of three) leads the term.
+// Replication: a leader ships its whole log and its commit index to every peer at every step (AppendEntries from
+// index 1); a server that hears the leader of its current term replaces its log with the leader's, acknowledges each
+// entry and learns which entries are committed. The leader commits by the commit module's rule. A leader appends a
+// client value that is submitted to it while it leads.
+
+peer(N, M)@next :- peer(N, M);
+rank(N, M, R)@next :- rank(N, M, R);
+patience(N, K)@next :- patience(N, K);
+
+// terms
+seen_term(N, T) :- cur_term(N, T);
+seen_term(N, T) :- request(N, C, T, LI, LT);
+seen_term(N, T) :- vote(N, M, T);
+seen_term(N, T) :- beat(N, L, T, CI);
+seen_term(N, T) :- starts(N, T);
+top_term(N, max<T>) :- seen_term(N, T);
+cur_term(N, T)@next :- top_term(N, T);
+
+// election timer: steps since the leader of the current term was last heard (or since the last candidacy)
+heard_leader(N) :- beat(N, L, T, CI), top_term(N, T);
+reset_timer(N) :- heard_leader(N);
+reset_timer(N) :- starts(N, T);
+reset_timer(N) :- grant(N, C, T);
+reset_timer(N) :- leading(N);
+quiet(N, 0)@next :- reset_timer(N);
+quiet(N, K + 1)@next :- quiet(N, K), notin reset_timer(N);
+led(N, T)@next :- leads(N, T);
+led(N, T)@next :- led(N, T);
+was_leading(N) :- led(N, T), cur_term(N, T);
+starts(N, T + 1) :- quiet(N, K), patience(N, K), cur_term(N, T), notin was_leading(N);
+
+// logs
+has_log(N) :- log(N, I, T, V);
+last_index(N, max<I>) :- log(N, I, T, V);
+last_entry(N, I, T) :- last_index(N, I), log(N, I, T, V);
+last_entry(N, 0, 0) :- cur_term(N, X), notin has_log(N);
+
+// candidate
+request(M, C, T, LI, LT)@async :- starts(C, T), peer(C, M), last_entry(C, LI, LT);
+cast(C, T, C)@next :- starts(C, T);
+tally(C, T, C) :- starts(C, T);
+tally(C, T, M) :- vote(C, M, T);
+tally(C, T, M)@next :- tally(C, T, M);
+votes_for(C, T, count<M>) :- tally(C, T, M);
+leads(C, T) :- votes_for(C, T, K), K > 1, top_term(C, T);
+leads(C, T)@next :- leads(C, T);
+leading(N) :- leads(N, T), top_term(N, T);
+
+// voter: grant(M, C, T) comes from the vote module; cast(M, T, C) records a vote given at an earlier step
+voted_before(M, T) :- cast(M, T, C);
+cast(M, T, C)@next :- grant(M, C, T);
+cast(M, T, C)@next :- cast(M, T, C);
+vote(C, M, T)@async :- grant(M, C, T);
+
+// replication
+log(L, I + 1, T, V)@next :- submit(L, V), leading(L), leads(L, T), last_entry(L, I, LT);
+beat(F, L, T, CI)@async :- leading(L), leads(L, T), peer(L, F), commit_index(L, CI);
+entry(F, L, T, I, ET, V)@async :- leading(L), leads(L, T), peer(L, F), log(L, I, ET, V);
+follows(F, L, T) :- beat(F, L, T, CI), top_term(F, T);
+log(F, I, ET, V)@next :- follows(F, L, T), entry(F, L, T, I, ET, V);
+replaced(F) :- follows(F, L, T);
+log(N, I, T, V)@next :- log(N, I, T, V), notin replaced(N), notin appending(N);
+log(N, I, T, V)@next :- log(N, I, T, V), appending(N);
+appending(N) :- submit(N, V), leading(N);
+has_copy(L, F, T, I)@async :- follows(F, L, T), entry(F, L, T, I, ET, V);
+copies(L, T, I, F) :- has_copy(L, F, T, I);
+copies(L, T, I, F)@next :- copies(L, T, I, F);
+
+// commit: committed_upto(L, I) comes from the commit module
+committed(L, J, V) :- committed_upto(L, I), log(L, J, ET, V), J <= I;
+committed(F, J, V) :- follows(F, L, T), beat(F, L, T, CI), entry(F, L, T, J, ET, V), J <= CI;
+committed(N, J, V)@next :- committed(N, J, V);
+any_committed(N) :- committed(N, J, V);
+commit_index(N, max<J>) :- committed(N, J, V);
+commit_index(N, 0) :- cur_term(N, X), notin any_committed(N);

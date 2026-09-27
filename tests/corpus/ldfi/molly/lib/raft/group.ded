@@ -1,0 +1,30 @@
+// Input of the Raft model shared by every scenario: servers a, b and c; a leads term 1 from the start (the outcome of
+// a first election, which keeps the failure-free run free of elections), every server is in term 1 with an empty log,
+// and simultaneous vote requests are decided by rank (c > b > a). The election timeouts and the client's
+// submissions are in the scenario files (election_timing.ded, commit_timing.ded). A server appends a submitted value
+// only while it leads. Blossom golden corpus, re-derived (derived = true); see ../../README.md.
+
+peer("a", "b")@1;
+peer("a", "c")@1;
+peer("b", "a")@1;
+peer("b", "c")@1;
+peer("c", "a")@1;
+peer("c", "b")@1;
+
+rank("a", "a", 1)@1;
+rank("a", "b", 2)@1;
+rank("a", "c", 3)@1;
+rank("b", "a", 1)@1;
+rank("b", "b", 2)@1;
+rank("b", "c", 3)@1;
+rank("c", "a", 1)@1;
+rank("c", "b", 2)@1;
+rank("c", "c", 3)@1;
+
+cur_term("a", 1)@1;
+cur_term("b", 1)@1;
+cur_term("c", 1)@1;
+quiet("a", 0)@1;
+quiet("b", 0)@1;
+quiet("c", 0)@1;
+leads("a", 1)@1;

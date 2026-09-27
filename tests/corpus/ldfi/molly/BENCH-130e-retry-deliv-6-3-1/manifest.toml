@@ -1,0 +1,30 @@
+# BENCH-130e-retry-deliv-6-3-1: retry-deliv: counterexample at EOT 6, EFF 3, 1 crash.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-130"
+title = "retry-deliv: counterexample at EOT 6, EFF 3, 1 crash"
+priority = "P0"
+source = "FEATURES.md BENCH-130; R06 §12.1; LDFI SIGMOD'15 §3.1.2, Fig. 4b"
+features = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "ANA-010", "TEST-027"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+CounterexampleSuite: rdlog at 6/3/1 finds a counterexample. LDFI §3.1.2: every support of a receiver's entry passes through a (redundancy in time, not in space); crashing a after it reached one receiver but not the other falsifies the other receiver's entry while the first, correct, holds it.
+
+The program is the paper's (see ../lib/delivery/*.ded for the provenance of each line); the input is the paper's (group.ded) and the spec is delivery_spec.ded, whose oracle judges every run exactly as Molly's delivery spec does on this input (proof in that file).
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "ANA-010", "TEST-027"]
+until = "M8"
+
+[expect_ldfi]
+eot = 6
+eff = 3
+crashes = 1
+nodes = ["a", "b", "c"]
+crash_view = "molly"
+verdict = "counterexample"

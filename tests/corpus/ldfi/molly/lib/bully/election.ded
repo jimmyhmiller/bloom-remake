@@ -1,0 +1,37 @@
+// Bully leader election (Garcia-Molina, "Elections in a Distributed Computing System", 1982), the LDFI paper's
+// bully-le (SIGMOD 2015, §5.1.2 and Figure 13; R06 §12.4). Blossom golden corpus, re-derived (derived = true); see
+// ../../README.md. The paper's program is not published and Molly's repository does not identify it (R06 §13).
+//
+// Every node starts an election for round 1 and keeps announcing its candidacy, with its id, to every node until it
+// is elected. The bully rule decides the vote: at the first step a node hears candidacies, it votes for the candidate
+// with the highest id among them, and it never votes again in that round. A candidate that holds votes from a
+// majority (two of the three nodes) is elected and announces itself at every step; a node that hears the
+// announcement takes the candidate as the round's leader. Votes are resent at every step, so a lost vote only delays
+// the election; since every node votes once, two candidates can never both hold a majority.
+
+slf(N, I)@next :- slf(N, I);
+peer(N, M, J)@next :- peer(N, M, J);
+
+// candidate
+running(N, R) :- election(N, R);
+running(N, R)@next :- running(N, R), notin elected(N, R);
+candidacy(M, N, R, I)@async :- running(N, R), slf(N, I), peer(N, M, J);
+
+// voter
+best_candidate(M, R, max<I>) :- candidacy(M, N, R, I);
+vote_now(M, R, N) :- best_candidate(M, R, I), candidacy(M, N, R, I), notin has_voted(M, R);
+voted(M, R, N) :- vote_now(M, R, N);
+voted(M, R, N)@next :- voted(M, R, N);
+has_voted(M, R)@next :- vote_now(M, R, N);
+has_voted(M, R)@next :- has_voted(M, R);
+vote(N, M, R)@async :- voted(M, R, N);
+
+// tally and announcement
+votes(N, R, M) :- vote(N, M, R);
+votes(N, R, M)@next :- votes(N, R, M);
+vote_count(N, R, count<M>) :- votes(N, R, M);
+elected(N, R) :- vote_count(N, R, K), K > 1;
+elected(N, R)@next :- elected(N, R);
+announce(M, N, R)@async :- elected(N, R), peer(N, M, J);
+leader(M, R, N) :- announce(M, N, R);
+leader(M, R, N)@next :- leader(M, R, N);

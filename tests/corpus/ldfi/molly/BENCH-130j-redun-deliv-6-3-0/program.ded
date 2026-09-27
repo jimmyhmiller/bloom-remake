@@ -1,0 +1,6 @@
+// BENCH-130j-redun-deliv-6-3-0: redun-deliv: no counterexample at EOT 6, EFF 3, 0 crashes.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/delivery/redun_deliv.ded";
+include "../lib/delivery/group.ded";
+include "../lib/delivery/delivery_spec.ded";

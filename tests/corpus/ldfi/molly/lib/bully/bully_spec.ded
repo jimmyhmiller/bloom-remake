@@ -1,0 +1,8 @@
+// Agreement of leader election (LDFI §5.1.2: "we are able to validate their agreement properties"): in a round, the
+// nodes that know a leader know the same one. pre: some node knows the round's leader; post: it does and no node
+// knows another. The same shape as Molly's leader specification (R06 §12.4). Blossom golden corpus, re-derived
+// (derived = true); see ../../README.md.
+
+disagree(R) :- leader(N1, R, L1), leader(N2, R, L2), L1 != L2;
+pre(R) :- leader(N, R, L);
+post(R) :- leader(N, R, L), notin disagree(R);

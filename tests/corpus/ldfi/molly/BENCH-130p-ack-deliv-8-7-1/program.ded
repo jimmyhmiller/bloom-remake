@@ -1,0 +1,6 @@
+// BENCH-130p-ack-deliv-8-7-1: ack-deliv: no counterexample at EOT 8, EFF 7, 1 crash.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/delivery/ack_deliv.ded";
+include "../lib/delivery/group.ded";
+include "../lib/delivery/delivery_spec.ded";

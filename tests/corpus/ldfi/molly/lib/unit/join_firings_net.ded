@@ -1,0 +1,17 @@
+// The two firings of join_firings.ded made observable to LDFI (BENCH-135, provenance counts): the a-facts that the two
+// firings join with arrive from different nodes, px (M = x) and py (M = y), so c(loc, 1) survives the loss of either
+// message and falls only with both. A search whose lineage keeps both firings (TEST-023) proposes the pair at once.
+// Blossom golden corpus, derived (derived = true); see ../../README.md.
+
+a(L, M, V)@async :- a_src(S, L, M, V);
+a(L, M, V)@next :- a(L, M, V);
+b(L, M, V)@next :- b(L, M, V);
+c(L, V) :- b(L, M, V), a(L, M, V);
+
+pre(L, V) :- b(L, M, V);
+post(L, V) :- c(L, V);
+
+a_src("px", "loc", "x", 1)@1;
+a_src("py", "loc", "y", 1)@1;
+b("loc", "x", 1)@1;
+b("loc", "y", 1)@1;

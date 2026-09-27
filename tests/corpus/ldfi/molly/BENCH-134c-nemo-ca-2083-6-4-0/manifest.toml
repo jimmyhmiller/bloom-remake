@@ -1,0 +1,30 @@
+# BENCH-134c-nemo-ca-2083-6-4-0: Nemo ca-2083: counterexample at EOT 6, EFF 4, 0 crashes.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-134"
+title = "Nemo ca-2083: counterexample at EOT 6, EFF 4, 0 crashes"
+priority = "P1"
+source = "FEATURES.md BENCH-134; R06 §12.5; Oldenburg, Zhu, Ramasubramanian, Alvaro, Fixed It For You (Nemo), CIDR 2019"
+features = ["LANG-220", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025"]
+program = "program.ded"
+derived = false
+expected_from = "literature"
+notes = """
+Nemo §4, CA-2083 (message-message race): the schema message and the data message race; if the data message arrives without the schema, it is dropped. In the synchronous model the race appears as the loss of the schema message. R06 §12.5: each Nemo case study has a CE.
+
+program.ded is CA-2083-hinted-handoff.ded from github.com/numbleroot/nemo (case-studies/, commit 18fe0a3), GPL-3.0; the license is third_party/molly/nemo/LICENSE and third_party/molly/README.md lists every vendored file. The failure spec is the one in the file's own header (the Molly command line the Nemo authors used).
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025"]
+until = "M8"
+
+[expect_ldfi]
+eot = 6
+eff = 4
+crashes = 0
+nodes = ["n1", "n2"]
+crash_view = "molly"
+verdict = "counterexample"

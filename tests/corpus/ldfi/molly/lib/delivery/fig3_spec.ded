@@ -1,0 +1,7 @@
+// Correctness specification for reliable broadcast. LDFI (SIGMOD 2015) Figure 3, verbatim.
+// pre: a correct process has a log entry; post: the log entry exists and no node is missing it.
+// Blossom golden corpus; see ../../README.md.
+
+missing_log(A, Pl) :- log(X, Pl), node(X, A), notin log(A, Pl) ;
+pre(X, Pl) :- log(X, Pl), notin crash(_, X, _) ;
+post(X, Pl) :- log(X, Pl), notin missing_log(_, Pl) ;

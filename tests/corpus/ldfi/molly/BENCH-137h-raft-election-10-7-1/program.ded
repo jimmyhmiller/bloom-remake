@@ -1,0 +1,9 @@
+// BENCH-137h-raft-election-10-7-1: raft-election: no counterexample at EOT 10, EFF 7, 1 crash.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/raft/raft.ded";
+include "../lib/raft/vote_checked.ded";
+include "../lib/raft/commit_majority.ded";
+include "../lib/raft/group.ded";
+include "../lib/raft/election_timing.ded";
+include "../lib/raft/raft_spec.ded";

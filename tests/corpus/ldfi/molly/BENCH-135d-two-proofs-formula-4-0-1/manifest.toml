@@ -1,0 +1,29 @@
+# BENCH-135d-two-proofs-formula-4-0-1: two-proofs-formula: no counterexample at EOT 4, EFF 0, 1 crash; stated falsifiers.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-135"
+title = "two-proofs-formula: no counterexample at EOT 4, EFF 0, 1 crash; stated falsifiers"
+priority = "P0"
+source = "FEATURES.md BENCH-135; R06 §12.6; LDFI SIGMOD'15 §4.3"
+features = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-027"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+LDFI §4.3: '(O(a,c,2) v C(a,2) v C(a,1)) & (O(b,c,1) v C(b,1)) corresponds to a derivation graph that represents two proofs' (../lib/unit/two_proofs.ded has exactly that lineage). The falsifiers are the Appendix-B-minimal ones (ARCHITECTURE §8.3: fault sets are compared by the clock facts they remove; C(n,t) removes n's outgoing clocks from t on), within the failure spec: omissions only at send times < EFF (CR-21), at most `crashes` crashes. With EFF 0 nothing can be lost, so both proofs need a crash: two crashes, one more than allowed. No fault set falsifies the goal.
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-027"]
+until = "M8"
+
+[expect_ldfi]
+eot = 4
+eff = 0
+crashes = 1
+nodes = ["a", "b", "c"]
+crash_view = "molly"
+verdict = "no_counterexample"
+falsifiers = []

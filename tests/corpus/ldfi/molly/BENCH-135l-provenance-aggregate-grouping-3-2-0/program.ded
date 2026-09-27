@@ -1,0 +1,4 @@
+// BENCH-135l-provenance-aggregate-grouping-3-2-0: provenance-aggregate-grouping: counterexample at EOT 3, EFF 2, 0 crashes; stated falsifiers.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/unit/agg_grouping.ded";

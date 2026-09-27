@@ -1,0 +1,6 @@
+// BENCH-136a-simple-deliv-4-2-0-runs: simple-deliv: counterexample within 2 executions at EOT 4, EFF 2, 0 crashes.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/delivery/simple_deliv.ded";
+include "../lib/delivery/group.ded";
+include "../lib/delivery/delivery_spec.ded";

@@ -1,0 +1,7 @@
+// SEEDED BUG (BENCH-137): Raft's vote rule without the log up-to-date check (§5.4.1), so a candidate that lacks a
+// committed entry can win an election and overwrite it: Leader Completeness, and with it State Machine Safety, fails.
+// Blossom golden corpus; see ../../README.md.
+
+eligible(M, C, T) :- request(M, C, T, LI, LT), top_term(M, T), notin voted_before(M, T), notin starts(M, T);
+best_rank(M, T, max<R>) :- eligible(M, C, T), rank(M, C, R);
+grant(M, C, T) :- eligible(M, C, T), rank(M, C, R), best_rank(M, T, R);

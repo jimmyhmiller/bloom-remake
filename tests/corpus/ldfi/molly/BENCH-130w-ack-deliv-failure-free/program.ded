@@ -1,0 +1,5 @@
+// BENCH-130w-ack-deliv-failure-free: ack-deliv: the failure-free run.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/delivery/ack_deliv.ded";
+include "../lib/delivery/group.ded";

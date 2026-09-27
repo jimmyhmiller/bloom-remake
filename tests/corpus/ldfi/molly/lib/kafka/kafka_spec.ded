@@ -1,0 +1,6 @@
+// Durability (LDFI §5.1.3): if a write is acknowledged at the client, it is stored on a correct (non-crashed) replica.
+// The same pre/post as Molly's Kafka specification (R06 §12.3). Blossom golden corpus, re-derived (derived = true);
+// see ../../README.md.
+
+pre(W) :- acked(Cli, W, L);
+post(W) :- acked(Cli, W, L), data(R, W), notin crash(R, R, _);

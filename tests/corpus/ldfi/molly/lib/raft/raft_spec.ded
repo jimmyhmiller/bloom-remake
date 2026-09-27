@@ -1,0 +1,14 @@
+// Raft's safety properties as the smoke test's spec (R06 §12.7: Molly's raft spec flags "two leaders" in the same term
+// and "disagree"): Election Safety, at most one leader per term; State Machine Safety, servers that have not crashed
+// never hold different committed values at the same index. pre: some term has a leader; post: it does, and neither
+// violation occurred. Every rule's first body predicate is located at a server, so the rules are evaluated alike by
+// Molly's clock guard and by a global spec engine. Blossom golden corpus, re-derived (derived = true); see
+// ../../README.md.
+
+two_leaders(T) :- leads(N1, T), leads(N2, T), N1 != N2;
+disagree(I) :- committed(N1, I, V1), committed(N2, I, V2), V1 != V2, notin crash(N1, N1, _), notin crash(N2, N2, _);
+marker(N, "raft") :- peer(N, M);
+unsafe(X) :- marker(N, X), leads(N, T), two_leaders(T);
+unsafe(X) :- marker(N, X), committed(N, I, V), disagree(I);
+pre(X) :- marker(N, X), leads(N, T);
+post(X) :- marker(N, X), leads(N, T), notin unsafe(X);

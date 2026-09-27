@@ -1,0 +1,9 @@
+// BENCH-137d-raft-eager-commit-8-4-0: raft-eager-commit: counterexample at EOT 8, EFF 4, 0 crashes.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/raft/raft.ded";
+include "../lib/raft/vote_checked.ded";
+include "../lib/raft/commit_eager.ded";
+include "../lib/raft/group.ded";
+include "../lib/raft/commit_timing.ded";
+include "../lib/raft/raft_spec.ded";

@@ -1,0 +1,9 @@
+// BENCH-131m-2pc-ctp-6-0-2: 2pc-ctp: counterexample at EOT 6, EFF 0, 2 crashes.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/commit/two_pc.ded";
+include "../lib/util/timer.ded";
+include "../lib/commit/two_pc_timeout.ded";
+include "../lib/commit/ctp.ded";
+include "../lib/commit/group.ded";
+include "../lib/commit/commit_spec.ded";

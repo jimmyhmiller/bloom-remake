@@ -1,0 +1,5 @@
+// The "optimist" variant of the commit specification (Molly's 2pc_assert_optimist, R06 §12.2): termination is
+// excused in runs where the coordinator crashes ("anything goes when the coordinator goes"). Used together with
+// commit_spec.ded. Blossom golden corpus, re-derived (derived = true); see ../../README.md.
+
+post("termination", X) :- begin(C, X)@1, crash(C, C, _);

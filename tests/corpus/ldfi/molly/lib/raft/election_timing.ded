@@ -1,0 +1,7 @@
+// Raft scenario "election": election timeouts, in steps of silence, a 9 (the first leader does not compete again
+// within the bound), b 2, c 4; the client submits nothing. When a's messages stop reaching b and c, both can become
+// candidates for term 2. Blossom golden corpus, re-derived (derived = true); see ../../README.md.
+
+patience("a", 9)@1;
+patience("b", 2)@1;
+patience("c", 4)@1;

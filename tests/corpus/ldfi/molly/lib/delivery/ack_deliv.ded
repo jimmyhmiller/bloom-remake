@@ -1,0 +1,13 @@
+// ack-deliv: redundant broadcast with acknowledgments. LDFI (SIGMOD 2015) Figure 5, verbatim, together with the
+// persistence of `node` and `log` from Figure 2 (lines 2-3), which Figure 5 builds on. Every node that holds a log
+// entry relays it to each neighbour until that neighbour's ACK arrives; retries appear only when ACKs are lost.
+// Blossom golden corpus; see ../../README.md.
+
+node(Node, Neighbor)@next :- node(Node, Neighbor);
+log(Node, Pload)@next :- log(Node, Pload);
+
+ack(S, H, P)@next :- ack(S, H, P);
+rbcast(Node2, Node1, Pload)@async :- log(Node1, Pload), node(Node1, Node2), notin ack(Node1, Node2, Pload);
+ack(From, Host, Pl)@async :- rbcast(Host, From, Pl);
+rbcast(A, A, P) :- bcast(A, P);
+log(N, P) :- rbcast(N, _, P);

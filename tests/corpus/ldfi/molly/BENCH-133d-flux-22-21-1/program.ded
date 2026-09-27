@@ -1,0 +1,6 @@
+// BENCH-133d-flux-22-21-1: flux: no counterexample at EOT 22, EFF 21, 1 crash.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/flux/pairs.ded";
+include "../lib/flux/group.ded";
+include "../lib/flux/flux_spec.ded";

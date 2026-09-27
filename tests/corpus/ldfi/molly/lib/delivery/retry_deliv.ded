@@ -1,0 +1,10 @@
+// retry-deliv: simple-deliv (Figure 2) plus the rule of LDFI (SIGMOD 2015) §3.1.2 that turns the broadcast request
+// into persistent state, so the broadcaster retransmits at every step: redundancy in time, but every copy leaves a.
+// Blossom golden corpus; see ../../README.md.
+
+log(Node, Pload) :- bcast(Node, Pload);
+node(Node, Neighbor)@next :- node(Node, Neighbor);
+log(Node, Pload)@next :- log(Node, Pload);
+log(Node2, Pload)@async :- bcast(Node1, Pload), node(Node1, Node2);
+
+bcast(N, P)@next :- bcast(N, P);

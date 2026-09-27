@@ -1,0 +1,5 @@
+// BENCH-133g-flux-failure-free: flux: the failure-free run.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/flux/pairs.ded";
+include "../lib/flux/group.ded";

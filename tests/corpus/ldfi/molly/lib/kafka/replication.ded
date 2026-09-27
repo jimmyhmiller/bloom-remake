@@ -1,0 +1,37 @@
+// Kafka 0.8 replication with an in-sync replica set (ISR), the LDFI paper's durability case study (SIGMOD 2015,
+// §1.1, §5.1.3 and Figure 10; R06 §12.3). Blossom golden corpus, re-derived from the paper (derived = true); see
+// ../../README.md.
+//
+// As in the paper, the replication logic is modelled in some detail while Zookeeper (one abstract node Z) and the
+// client (C) are sketched. Each replica registers with Zookeeper once, when it starts; Zookeeper tells the leader at
+// every step which replicas are in sync. The leader stores a client write, replicates it to every other ISR member
+// (at every step) and acknowledges the client once every other ISR member has acknowledged its copy. A brief
+// partition that keeps b's and c's registrations from Zookeeper leaves the leader believing it is the only in-sync
+// replica, so it acknowledges the client alone; if it then crashes, an acknowledged write is on no correct replica
+// (Figure 10).
+
+// Zookeeper, sketched
+zk(R, Z)@next :- zk(R, Z);
+leads(Z, L)@next :- leads(Z, L);
+registered(Z, R)@async :- start(R), zk(R, Z);
+registered(Z, R)@next :- registered(Z, R);
+isr(L, R)@async :- registered(Z, R), leads(Z, L);
+
+// replicas
+isr(L, R)@next :- isr(L, R);
+write(L, W, Cli)@next :- write(L, W, Cli);
+data(L, W) :- write(L, W, Cli), isr(L, L);
+replicate(F, W, L)@async :- write(L, W, Cli), isr(L, L), isr(L, F), F != L;
+data(F, W) :- replicate(F, W, L);
+data(R, W)@next :- data(R, W);
+ack_copy(L, W, F)@async :- replicate(F, W, L);
+got_copy_ack(L, W, F) :- ack_copy(L, W, F);
+got_copy_ack(L, W, F)@next :- got_copy_ack(L, W, F);
+missing_copy_ack(L, W) :- write(L, W, Cli), isr(L, F), F != L, notin got_copy_ack(L, W, F);
+ack(Cli, W, L)@async :- write(L, W, Cli), isr(L, L), notin missing_copy_ack(L, W);
+
+// client, sketched
+leader_of(Cli, L)@next :- leader_of(Cli, L);
+write(L, W, Cli)@async :- write_req(Cli, W), leader_of(Cli, L);
+acked(Cli, W, L) :- ack(Cli, W, L);
+acked(Cli, W, L)@next :- acked(Cli, W, L);

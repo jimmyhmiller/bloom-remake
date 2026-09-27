@@ -1,0 +1,124 @@
+# Every run count LDFI Figures 12 and 13 publish (BENCH-136), and where the corpus pins it.
+# Consumers: TEST-029 (the forward/backward loop, M8.1) and the P1 search reductions TEST-030-TEST-032 (M9.4).
+# Not a corpus case (no manifest). See ../README.md and ../../README.md.
+#
+# A run count is a property of a program and a search, so it is pinned (as `runs_max` of a BENCH-136 case) only
+# where the corpus program is the one the count was measured on, or a faithful re-derivation of it with the same
+# message pattern. It is not pinned where the measured program is unavailable or its measured configuration is
+# vacuous: a count taken on a different program is not a parity target (docs/plan/notes/M1.5.md explains each).
+# `executions` counts the failure-free run: Figure 12, up to and including the first counterexample; Figure 13, all
+# executions to exhaust the hypotheses.
+
+schema = 1
+source = "LDFI SIGMOD'15 Figures 12 and 13; R06 §3.9; FEATURES.md BENCH-136"
+
+[[count]]
+program = "simple-deliv"
+figure = 12
+eot = 4
+eff = 2
+crashes = 0
+executions = 2
+pinned_by = "BENCH-136a-simple-deliv-4-2-0-runs"
+
+[[count]]
+program = "retry-deliv"
+figure = 12
+eot = 4
+eff = 2
+crashes = 1
+executions = 3
+pinned_by = "BENCH-136b-retry-deliv-4-2-1-runs"
+
+[[count]]
+program = "classic-deliv"
+figure = 12
+eot = 5
+eff = 3
+crashes = 0
+executions = 5
+pinned_by = "BENCH-136c-classic-deliv-5-3-0-runs"
+
+[[count]]
+program = "2pc"
+figure = 12
+eot = 5
+eff = 0
+crashes = 1
+executions = 2
+pinned_by = "BENCH-136d-2pc-5-0-1-runs"
+
+[[count]]
+program = "2pc-ctp"
+figure = 12
+eot = 8
+eff = 0
+crashes = 1
+executions = 3
+pinned_by = "BENCH-136e-2pc-ctp-8-0-1-runs"
+
+[[count]]
+program = "3pc"
+figure = 12
+eot = 9
+eff = 7
+crashes = 1
+executions = 55
+pinned_by = "BENCH-136f-3pc-9-7-1-runs"
+
+[[count]]
+program = "Kafka"
+figure = 12
+eot = 6
+eff = 4
+crashes = 1
+executions = 38
+pinned_by = "BENCH-136g-kafka-6-4-1-runs"
+
+[[count]]
+program = "redun-deliv"
+figure = 13
+eot = 11
+eff = 10
+crashes = 1
+executions = 11
+pinned_by = "BENCH-136h-redun-deliv-11-10-1-runs"
+
+[[count]]
+program = "ack-deliv"
+figure = 13
+eot = 8
+eff = 7
+crashes = 1
+executions = 673
+pinned_by = "BENCH-136i-ack-deliv-8-7-1-runs"
+
+[[count]]
+program = "paxos-synod"
+figure = 13
+eot = 7
+eff = 6
+crashes = 1
+executions = 173
+pinned_by = "none"
+reason = "Measured on Molly's paxos_synod.ded, whose acceptors take accept requests below a ballot they promised; with conservative negative support that program has an agreement violation at 7/6/1, so the published certification is a search miss. The corpus's Paxos (BENCH-133a/b) is a correct synod protocol with a different message pattern."
+
+[[count]]
+program = "bully-le"
+figure = 13
+eot = 10
+eff = 9
+crashes = 1
+executions = 2
+pinned_by = "none"
+reason = "The measured program is not published and not identifiable in Molly's repository (R06 §13); its util/leader.ded has agreement violations at 10/9/1. The corpus's election (BENCH-133c) is a re-derivation, not the measured program."
+
+[[count]]
+program = "flux"
+figure = 13
+eot = 22
+eff = 21
+crashes = 1
+executions = 187
+pinned_by = "none"
+reason = "On the four nodes the Combinations column implies, the repository's flux_clusterpairs.ded has an empty pre at EOT in its failure-free run, so the measured certification is vacuous. The corpus's Flux (BENCH-133d) is a re-derivation with Flux's safety guarantee as its spec."

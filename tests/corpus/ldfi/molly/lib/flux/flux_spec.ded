@@ -1,0 +1,17 @@
+// Flux's guarantee at the egress (LDFI §5.1.2: the stream is delivered "without loss, duplication or reordering"),
+// as safety over what has been delivered by EOT: every delivered tuple is the input tuple with that sequence number,
+// no sequence number is delivered with two data values, and no sequence number above 1 is delivered unless its
+// predecessor is (the delivered sequence numbers are 1..n). pre: the egress delivered the data; post: it did, and the
+// delivered stream is sound. Blossom golden corpus, re-derived (derived = true); see ../../README.md.
+
+wrong(E) :- delivered(E, S, D), pending(I, S, D2), D != D2;
+twice(E) :- delivered(E, S, D1), delivered(E, S, D2), D1 != D2;
+has_seq(E, S) :- delivered(E, S, D);
+pred_delivered(E, S) :- delivered(E, S, D), has_seq(E, P), S == P + 1;
+gap(E) :- delivered(E, S, D), S > 1, notin pred_delivered(E, S);
+broken(E) :- wrong(E);
+broken(E) :- twice(E);
+broken(E) :- gap(E);
+
+pre(D) :- delivered(E, S, D);
+post(D) :- delivered(E, S, D), notin broken(E);

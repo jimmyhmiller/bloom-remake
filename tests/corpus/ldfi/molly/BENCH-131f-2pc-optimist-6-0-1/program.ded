@@ -1,0 +1,7 @@
+// BENCH-131f-2pc-optimist-6-0-1: 2pc (optimist spec): counterexample at EOT 6, EFF 0, 1 crash.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/commit/two_pc.ded";
+include "../lib/commit/group.ded";
+include "../lib/commit/commit_spec.ded";
+include "../lib/commit/optimist_spec.ded";

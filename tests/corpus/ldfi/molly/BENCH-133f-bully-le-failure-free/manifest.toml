@@ -1,0 +1,74 @@
+# BENCH-133f-bully-le-failure-free: bully-le: the failure-free run.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-133"
+title = "bully-le: the failure-free run"
+priority = "P1"
+source = "FEATURES.md BENCH-133; R06 §12.4; LDFI SIGMOD'15 §5.1.2, Fig. 13"
+features = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004", "LANG-100", "LANG-101", "SEM-020"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+Failure-free: candidacies at 1, votes for c at 2, c elected at 3, every node knows the leader from 4.
+
+Molly round k is tick k (CR-13). The rows omit the location column. The spec is not included.
+"""
+
+[deploy]
+nodes = [
+  { name = "a", role = "Node" },
+  { name = "b", role = "Node" },
+  { name = "c", role = "Node" },
+]
+
+[run]
+ticks = 8
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004", "LANG-100", "LANG-101", "SEM-020"]
+until = "M5"
+
+# all three candidacies arrive at tick 2; everyone votes for c (id 3)
+[[expect]]
+node = "a"
+rel = "voted"
+tick = 2
+rows = [[1, "c"]]
+
+[[expect]]
+node = "b"
+rel = "voted"
+tick = 2
+rows = [[1, "c"]]
+
+[[expect]]
+node = "c"
+rel = "elected"
+row = [1]
+holds = "3..=7"
+absent = "..=2"
+
+[[expect]]
+node = "a"
+rel = "leader"
+row = [1, "c"]
+holds = "4..=7"
+absent = "..=3"
+
+[[expect]]
+node = "b"
+rel = "leader"
+row = [1, "c"]
+holds = "4..=7"
+absent = "..=3"
+
+# b never gathers a majority
+[[expect]]
+node = "b"
+rel = "elected"
+tick = 7
+rows = []

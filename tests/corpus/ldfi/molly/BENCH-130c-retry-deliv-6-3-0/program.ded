@@ -1,0 +1,6 @@
+// BENCH-130c-retry-deliv-6-3-0: retry-deliv: no counterexample at EOT 6, EFF 3, 0 crashes.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/delivery/retry_deliv.ded";
+include "../lib/delivery/group.ded";
+include "../lib/delivery/delivery_spec.ded";
