@@ -1,0 +1,34 @@
+# BENCH-087 (R02 T21): TPLP Figure 2, random ordering: whatever the schedule, F and N form a chain.
+#
+# R02 T21: "The output F/N is a total order of S whenever no two elements are ever delivered together." The order
+# depends on the schedule (the point of the example), so the golden expectation is the shape: F never holds two
+# elements, N never gives an element two successors or two predecessors, the first element has no predecessor, and
+# N has no self-loop. keep holds at most one element per step, so the program extends a single chain; the spec's
+# invariants hold in every simulated schedule.
+schema = 1
+id = "BENCH-087"
+title = "TPLP Fig. 2 (random ordering): every schedule builds a single chain"
+priority = "P1"
+source = "R02 T21; TPLP 2016 Figure 2 and Example 2 (verbatim program)"
+features = ["LANG-040", "LANG-045", "LANG-046", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-085", "LANG-190", "LANG-201", "SEM-040", "TEST-001", "VER-001", "TEST-081"]
+program = "program.bls"
+spec = "spec.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "N1", role = "Node" }]
+
+[run]
+ticks = 40
+stop = "ticks"
+seeds = 200
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-045", "LANG-046", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-085", "LANG-190", "LANG-201", "SEM-040", "TEST-001", "VER-001", "TEST-081"]
+until = "M8"
+
+[expect_verify]
+check = "sim"
+result = "holds"

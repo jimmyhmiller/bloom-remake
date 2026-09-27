@@ -1,0 +1,37 @@
+//! BENCH-090: the emptiness query (Ameloot, Neven, Van den Bussche, "Relational transducers for declarative
+//! networking", JACM 2013, Example 10).
+//!
+//! "Each node sends its Id if its local S is empty, and outputs true when Ids from All have all arrived." The answer
+//! is correct, but only because every node waits for a message from every member of the network: the negation of
+//! `empty` is complete only relative to the membership (All). That dependence on All is coordination, and the CALM
+//! theorem says the query cannot do without it: it is not monotone.
+
+program emptiness_query version 1;
+
+/// All: every node of the network.
+view node(y) = node_dir(y, _, _, _);
+/// Id: this node's identifier.
+view id(x) = node_dir(x, _, _, _) where x == self;
+
+/// The nullary relation S, keyed by the node at which S() holds; here it is empty everywhere.
+static s_edb(at: Node);
+
+channel empty_msg(x: Node);
+/// The identifiers received so far.
+table empty(x: Node);
+output t();
+
+report: while not s_edb(self), id(x), node(y) {
+    send empty_msg(x) to y;
+}
+
+arrive: on empty_msg(x) {
+    emit empty(x);
+}
+
+/// A member of All whose identifier has not arrived: the negation is complete only once every member has reported.
+view missing() = node(y), not empty(y);
+
+derive: while id(_), not missing() {
+    emit t();
+}

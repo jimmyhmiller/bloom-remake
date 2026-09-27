@@ -1,0 +1,41 @@
+//! BENCH-090: the CALM-pruning regression program of ARCHITECTURE §6.2.
+//!
+//! The server records each put in a table, and raises an alarm while it has seen put(1) but not put(2). The alarm is
+//! sent only if put(1) and put(2) arrive in different ticks, with put(1) first. The receive side of `put` reaches a
+//! negation through persistent state (`got`), so `put` deliveries are branching and the simulator must split them
+//! across tick batches (TEST-003). An early draft stopped the branching search at persistent state; it would deliver
+//! both puts in one batch in every run and never find the alarm.
+
+program calm_pruning_regression version 1;
+
+/// Who plays which part: the node that issues requests, the server, and the monitor that receives alarms.
+static server(s: Node);
+static monitor(m: Node);
+fact server("SRV");
+fact monitor("MON");
+
+/// Requests from the host at the client.
+input request(k: u64);
+
+channel put(k: u64);
+channel alarm(k: u64);
+
+table got(k: u64);
+/// At the monitor: every alarm received.
+table alarmed(k: u64);
+
+issue: on request(k), server(s) {
+    send put(k) to s;
+}
+
+receive: on put(k) {
+    emit got(k);
+}
+
+watch: while got(1), not got(2), monitor(m) {
+    send alarm(1) to m;
+}
+
+note_alarm: on alarm(k) {
+    emit alarmed(k);
+}

@@ -1,0 +1,13 @@
+// BENCH-088: TPLP Figure 4 (sensitivity to non-causality) in Molly's Dedalus dialect; the `.ded` twin of
+// BENCH-088a. The first column of every relation is its node; TPLP's `| x` with Id(x) addresses the node itself.
+
+a(X)@async :- id(X);
+b(X)@async :- a(X), id(X);
+t(X) :- a(X), notin b(X);
+t(X)@next :- t(X);
+b(X)@next :- b(X);
+
+// Id is input, true at every step; Molly facts hold only at their tick, so it is persisted by hand.
+id(X)@next :- id(X);
+
+id("n1")@1;

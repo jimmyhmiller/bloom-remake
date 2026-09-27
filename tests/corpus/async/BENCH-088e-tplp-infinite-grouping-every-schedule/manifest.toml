@@ -1,0 +1,39 @@
+# BENCH-088 (R02 T24): TPLP Figure 5 in every schedule.
+#
+# R02 T24: "Under finite-arrival semantics T() is always produced." x sends A() in every tick and only finitely many
+# messages arrive in any one tick (SEM-040), so some copy arrives after the tick of the first arrival, when first()
+# holds: T() holds at y at the end of every seed, and never at x.
+schema = 1
+id = "BENCH-088"
+title = "TPLP Fig. 5 (infinite grouping): every schedule with finite arrivals produces T()"
+priority = "P1"
+source = "R02 T24 and §5.4; TPLP 2016 Figure 5 (verbatim program)"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-061", "LANG-062", "LANG-190", "SEM-040", "SEM-044", "TEST-001"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "x", role = "Node" }, { name = "y", role = "Node" }]
+
+[run]
+ticks = 30
+stop = "ticks"
+seeds = 32
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-061", "LANG-062", "LANG-190", "SEM-040", "SEM-044", "TEST-001"]
+until = "M8"
+
+[[expect]]
+node = "y"
+rel = "t"
+final = true
+rows = [[]]
+
+[[expect]]
+node = "x"
+rel = "t"
+final = true
+rows = []

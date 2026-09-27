@@ -1,0 +1,15 @@
+//! BENCH-087: whatever the schedule, TPLP Example 2's F and N describe a chain: one first element, and no element
+//! with two successors or two predecessors. When no two elements are ever delivered together, the chain is a total
+//! order of S (TPLP §4.1.3).
+
+spec AlwaysAChain for r#program {
+    nodes N1;
+
+    invariant one_first: never f(u) @ N1, f(v) @ N1 where u != v;
+    invariant one_successor: never n(u, v) @ N1, n(u, w) @ N1 where v != w;
+    invariant one_predecessor: never n(v, u) @ N1, n(w, u) @ N1 where v != w;
+    invariant first_has_no_predecessor: never f(u) @ N1, n(_, u) @ N1;
+    invariant no_self_loop: never n(u, u) @ N1;
+
+    check sim { runs: 200, seed: 1 } expect holds;
+}

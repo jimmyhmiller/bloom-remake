@@ -1,0 +1,62 @@
+# BENCH-087 (R02 T20): TPLP Figure 1, reachability "covered", in every schedule.
+#
+# TPLP §4.1.3: with every message eventually delivered, "a node will produce covered() during each step iff all its
+# local vertices are reachable from the distributed start vertices". Same scenario as BENCH-087a: at the end of every
+# seed x, y and z are covered and w is not, whatever order the start vertices arrived in.
+schema = 1
+id = "BENCH-087"
+title = "TPLP Fig. 1 (covered): every schedule covers x, y, z and never w"
+priority = "P1"
+source = "R02 T20; TPLP 2016 Figure 1 and Example 1 (verbatim program)"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-190", "LANG-240", "SEM-040", "SEM-044", "TEST-001"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [
+    { name = "x", role = "Node" },
+    { name = "y", role = "Node" },
+    { name = "z", role = "Node" },
+    { name = "w", role = "Node" },
+]
+
+[run]
+ticks = 40
+stop = "ticks"
+seeds = 32
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-190", "LANG-240", "SEM-040", "SEM-044", "TEST-001"]
+until = "M8"
+
+[[expect]]
+node = "x"
+rel = "covered"
+final = true
+rows = [[]]
+
+[[expect]]
+node = "y"
+rel = "covered"
+final = true
+rows = [[]]
+
+[[expect]]
+node = "z"
+rel = "covered"
+final = true
+rows = [[]]
+
+[[expect]]
+node = "w"
+rel = "covered"
+final = true
+rows = []
+
+[[expect]]
+node = "w"
+rel = "marked"
+final = true
+rows = [["a"], ["e"]]

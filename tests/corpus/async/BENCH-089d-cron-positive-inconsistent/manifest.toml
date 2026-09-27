@@ -1,0 +1,40 @@
+# BENCH-089 (R02 T28): the `.ded` twin of BENCH-089h, through the Molly frontend (LANG-220).
+#
+# Id appears in tick 1, A() and B() are sent in tick 1 and arrive together in tick 2: T() from tick 2 on. The analysis
+# verdicts are BENCH-089h's; the two channel streams are the `.ded` relations a and b.
+schema = 1
+id = "BENCH-089"
+title = "CRON Fig. 5 (positive but inconsistent, .ded twin): not certified; synchronous rounds produce T()"
+priority = "P1"
+source = "R02 T28 and §8; CRON (JCSS 2014) Figure 5 and §6.2 (verbatim program)"
+features = ["LANG-065", "LANG-069", "LANG-220", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+program = "program.ded"
+derived = false
+expected_from = "literature"
+
+[run]
+ticks = 6
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-065", "LANG-069", "LANG-220", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+until = "M5"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-065", "LANG-069", "LANG-220", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "t"
+row = []
+holds = "2.."
+absent = "..=1"
+
+[expect_analysis]
+points_of_order = { complete = true, edges = [], clusters = [] }
+calm_labels = { outputs = { t = "D" }, races = [{ channels = ["a", "b"], meet = "t", guarded = false }] }
+certificates = { t = [] }
+fair_consistency = { t = "not_certified" }

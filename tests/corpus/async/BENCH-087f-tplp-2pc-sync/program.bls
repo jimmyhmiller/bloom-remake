@@ -1,0 +1,87 @@
+//! BENCH-087: TPLP Figure 3 / Example 3, two-phase commit between agents and a coordinator, ported rule by rule.
+//!
+//! Agent:        vote(t, x, v) | y ← myVote(t, v), Id(x), coord(y).
+//!               outcome(t, v)• ← outcome(t, v).
+//! Coordinator:  vote(t, x, v)• ← vote(t, x, v).
+//!               known(t, x) ← vote(t, x, v).
+//!               missing(t) ← T(t), agent(x), ¬known(t, x).
+//!               complete(t) ← T(t), ¬missing(t).
+//!               decideNo(t) ← vote(t, x, v), N(v).
+//!               decideYes(t) ← complete(t), ¬decideNo(t).
+//!               outcome(t, v) | y ← decideNo(t), ¬log(t), N(v), agent(y).
+//!               outcome(t, v) | y ← decideYes(t), ¬log(t), Y(v), agent(y).
+//!               log(t)• ← complete(t).
+//!               log(t)• ← log(t).
+//!
+//! TPLP's formalism runs one program on every node, so footnote 4 encodes the two roles as one program whose rules
+//! are guarded by a role flag in the input; that is how this port places them. (The figure's `votes` in decideNo is
+//! the relation `vote`, and its `agents` is `agent`.) TPLP's EDB relations Y and N hold the constants "yes" and "no".
+
+program tplp_two_phase_commit version 1;
+
+/// The role flags and the input, keyed by node name where the input is local to one node.
+static coord(y: Node);
+static agent(x: Node);
+static my_vote(at: Node, t: u64, v: String);
+static txn(t: u64);
+static yes_val(v: String);
+static no_val(v: String);
+
+fact coord("C");
+fact agent("A1");
+fact agent("A2");
+fact my_vote("A1", 1, "yes");
+fact my_vote("A2", 1, "yes");
+fact my_vote("A1", 2, "yes");
+fact my_vote("A2", 2, "no");
+fact txn(1);
+fact txn(2);
+fact yes_val("yes");
+fact no_val("no");
+
+/// The asynchronous heads `vote(t, x, v) | y` and `outcome(t, v) | y`.
+channel vote_msg(t: u64, x: Node, v: String);
+channel outcome_msg(t: u64, v: String);
+
+// ---- agent
+
+/// vote(t, x, v) | y ← myVote(t, v), Id(x), coord(y).
+cast: while agent(self), my_vote(self, t, v), coord(y) {
+    send vote_msg(t, self, v) to y;
+}
+
+/// The decisions received, persisted by outcome(t, v)• ← outcome(t, v).
+table outcome(t: u64, v: String);
+
+learn: on outcome_msg(t, v) {
+    emit outcome(t, v);
+}
+
+// ---- coordinator
+
+/// The votes received, persisted by vote(t, x, v)• ← vote(t, x, v).
+table vote(t: u64, x: Node, v: String);
+/// log(t)• ← complete(t). log(t)• ← log(t).
+table log(t: u64);
+
+tally: on vote_msg(t, x, v) {
+    emit vote(t, x, v);
+}
+
+view known(t, x) = vote(t, x, _);
+view missing(t) = txn(t), agent(x), not known(t, x);
+view complete(t) = txn(t), not missing(t);
+view decide_no(t) = vote(t, _, v), no_val(v);
+view decide_yes(t) = complete(t), not decide_no(t);
+
+announce_no: while coord(self), decide_no(t), not log(t), no_val(v), agent(y) {
+    send outcome_msg(t, v) to y;
+}
+
+announce_yes: while coord(self), decide_yes(t), not log(t), yes_val(v), agent(y) {
+    send outcome_msg(t, v) to y;
+}
+
+close: while coord(self), complete(t) {
+    next log(t);
+}

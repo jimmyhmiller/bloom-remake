@@ -1,0 +1,56 @@
+//! BENCH-089: CRON Figure 4, the non-emptiness query with a single B() (Ameloot, Van den Bussche, JCSS 2014,
+//! §6.1.2), ported rule by rule.
+//!
+//!     A() | x ← S(), Id(x).
+//!     A()• ← A().
+//!     B() | x ← A(), ¬sentB(), Id(x).
+//!     sentB()• ← A().
+//!     T() ← A(), B().
+//!     T()• ← T().
+//!
+//! "If a node sends A() then it sends B() precisely once. When the B() is later received, it is paired with the
+//! stored A(), producing the fact T()." The program is consistent under causal delivery, but does not tolerate
+//! non-causality: a B() delivered before any A() erases the only chance of producing T().
+
+program cron_nonemptiness version 1;
+
+/// CRON's `Id(x)`: this node's own entry in the node directory.
+view id() = node_dir(self, _, _, _);
+
+/// The nullary input S: here S() holds.
+static s();
+fact s();
+
+/// The asynchronous heads `A() | x` and `B() | x`, both addressed to this node.
+loopback a_msg();
+loopback b_msg();
+/// A, persisted by A()• ← A().
+table a();
+/// sentB()• ← A().
+table sent_b();
+/// T, persisted by T()• ← T().
+output t();
+
+send_a: while s(), id() {
+    send a_msg();
+}
+
+arrive_a: on a_msg() {
+    emit a();
+}
+
+send_b: while a(), not sent_b(), id() {
+    send b_msg();
+}
+
+note_sent: while a() {
+    next sent_b();
+}
+
+derive_t: on b_msg(), a() {
+    emit t();
+}
+
+keep: while t() {
+    next t();
+}
