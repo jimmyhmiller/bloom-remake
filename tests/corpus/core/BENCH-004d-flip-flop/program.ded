@@ -1,0 +1,7 @@
+// BENCH-004 (DL11 Ex. 7) in Molly's Dedalus dialect: the `.ded` twin of BENCH-004.
+//
+// Verbatim except for the location column that Molly requires.
+
+flip_flop(N, B, A)@next :- flip_flop(N, A, B);
+
+flip_flop("n1", 0, 1)@1;

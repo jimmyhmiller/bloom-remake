@@ -1,0 +1,102 @@
+schema = 1
+id = "BENCH-008"
+title = "Counter with request/response: one increment per tick, replies carry the pre-increment value"
+priority = "P0"
+source = "R02 §3.3 and §17 T9 (Alvaro thesis §3.1 counter); FEATURES.md BENCH-008, CR-04"
+features = ["SEM-004", "SEM-007", "LANG-041", "LANG-042", "LANG-043", "LANG-061", "LANG-062", "LANG-082", "LANG-152", "LANG-153", "LANG-190", "LANG-241"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+c1 and c2 ask at tick 1, so both requests reach the server at tick 2: both get 0 (the pre-increment value) and
+the counter increments once, to 1 at tick 3. c1 asks again at tick 3: its request arrives at 4 and gets 1; the
+counter is 2 from tick 5. Replies arrive one tick after they are sent."""
+
+[deploy]
+nodes = [{ name = "s", role = "Server" }, { name = "c1", role = "Client" }, { name = "c2", role = "Client" }]
+
+[run]
+ticks = 10
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-004", "SEM-007", "LANG-041", "LANG-042", "LANG-043", "LANG-061", "LANG-062", "LANG-082", "LANG-152", "LANG-153", "LANG-190", "LANG-241"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-004", "SEM-007", "LANG-041", "LANG-042", "LANG-043", "LANG-061", "LANG-062", "LANG-082", "LANG-152", "LANG-153", "LANG-190", "LANG-241", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "c1"
+tick = 1
+rel = "ask"
+rows = [[]]
+
+[[input]]
+node = "c2"
+tick = 1
+rel = "ask"
+rows = [[]]
+
+[[input]]
+node = "c1"
+tick = 3
+rel = "ask"
+rows = [[]]
+
+[[expect]]
+node = "s"
+rel = "counter"
+row = [0]
+holds = "0..=2"
+absent = "3.."
+
+[[expect]]
+node = "s"
+rel = "counter"
+row = [1]
+absent = "..=2"
+holds = "3..=4"
+
+[[expect]]
+node = "s"
+rel = "counter"
+row = [2]
+absent = "..=4"
+holds = "5.."
+
+[[expect_send]]
+from = "s"
+to = "c1"
+channel = "response"
+row = [0]
+tick = 2
+
+[[expect_send]]
+from = "s"
+to = "c2"
+channel = "response"
+row = [0]
+tick = 2
+
+[[expect_send]]
+from = "s"
+to = "c1"
+channel = "response"
+row = [1]
+tick = 4
+
+[[expect]]
+node = "c1"
+rel = "got"
+final = true
+rows = [[0], [1]]
+
+[[expect]]
+node = "c2"
+rel = "got"
+final = true
+rows = [[0]]

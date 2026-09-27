@@ -1,0 +1,30 @@
+//! BENCH-006 (DL11 §3.3): sequences.
+//!
+//! DL11 §3.3, quoted in R02 §3.3:
+//!
+//!     seq(B)@next <- seq(A), successor(A, B), event(_);
+//!     seq(A)@next <- seq(A), ¬event(_);
+//!     seq(0);
+//!
+//! `seq` increments exactly at the timesteps that have an event (the new value is visible at the next tick) and
+//! otherwise keeps its value; there is one value per timestep. `successor` is used as data, which is `a + 1`
+//! here. The initial fact `seq(0)` is the bootstrap state. `seq` is a singleton (`key()`), so two values in one
+//! tick would be a key violation.
+
+program dl11_sequence version 1;
+
+input event(id: i64);
+
+scratch seq(n: i64) key();
+
+bootstrap {
+    emit seq(0);
+}
+
+advance: on seq(a), event(_) {
+    next seq(a + 1);
+}
+
+hold: while seq(a), not event(_) {
+    next seq(a);
+}

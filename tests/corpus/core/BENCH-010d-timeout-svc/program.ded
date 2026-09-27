@@ -1,0 +1,13 @@
+// BENCH-010: Molly's reusable logical timer `util/timeout_svc.ded`, quoted verbatim in R02 §12.5, plus a
+// driver (ours) that arms two timers and cancels the second.
+//
+// timer_svc(H, I, 3)@k starts a countdown; timer_state is 2 at k+1 and 1 at k+2, where timeout(H, I) fires,
+// unless timer_cancel(H, I) stops the countdown first.
+
+timer_state(H, I, T-1)@next :- timer_svc(H, I, T);
+timer_state(H, I, T-1)@next :- timer_state(H, I, T), notin timer_cancel(H, I), T > 1;
+timeout(H, I) :- timer_state(H, I, 1);
+
+timer_svc("n1", "t1", 3)@2;
+timer_svc("n1", "t2", 3)@4;
+timer_cancel("n1", "t2")@5;

@@ -1,0 +1,60 @@
+schema = 1
+id = "BENCH-007"
+title = "DL11 §3.4 priority queue, global FIFO: eve@124, bob/bash@125, alice@126, bob/ssh@127"
+priority = "P0"
+source = "R02 §3.3 and §17 T7 (DL11 §3.4, global-FIFO variant); FEATURES.md BENCH-007"
+features = ["LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-063", "LANG-100", "LANG-101", "SEM-005"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "R02 §17 T7: dropping A from omin gives eve@124, bob/bash@125, alice@126, bob/ssh@127."
+
+[run]
+ticks = 132
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-063", "LANG-100", "LANG-101", "SEM-005"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-063", "LANG-100", "LANG-101", "SEM-005", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 123
+rel = "enqueue"
+rows = [["bob", "bash", 200], ["eve", "ls", 1], ["alice", "ssh", 204], ["bob", "ssh", 205]]
+
+[[expect]]
+node = "n1"
+rel = "priority_queue"
+tick = 124
+rows = [["eve", "ls", 1]]
+
+[[expect]]
+node = "n1"
+rel = "priority_queue"
+tick = 125
+rows = [["bob", "bash", 200]]
+
+[[expect]]
+node = "n1"
+rel = "priority_queue"
+tick = 126
+rows = [["alice", "ssh", 204]]
+
+[[expect]]
+node = "n1"
+rel = "priority_queue"
+tick = 127
+rows = [["bob", "ssh", 205]]
+
+[[expect]]
+node = "n1"
+rel = "priority_queue"
+tick = 128
+rows = []

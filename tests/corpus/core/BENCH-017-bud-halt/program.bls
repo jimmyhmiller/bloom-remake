@@ -1,0 +1,24 @@
+//! BENCH-017: Bud's `tc_halt` (test/tc_halt.rb).
+//!
+//!     scratch :tbl, [:key]
+//!     bootstrap: tbl << [1]
+//!     bloom:     halt <= tbl {|t| t if t.key == 2};  tbl <+ tbl {|t| [t.key+1]}
+//!
+//! The instance stops at the end of the tick where key 2 appears. Bud's periodic only keeps its instance
+//! ticking; the synchronous harness ticks every round, so it is not needed here.
+
+program halt version 1;
+
+scratch tbl(key: i64);
+
+bootstrap {
+    emit tbl(1);
+}
+
+count: while tbl(k) {
+    next tbl(k + 1);
+}
+
+stop: while tbl(k) where k == 2 {
+    emit halt(false);
+}

@@ -1,0 +1,48 @@
+//! BENCH-011: Bud's `tc_collections#test_simple_deduction` (the BabyBud program).
+//!
+//! Bud (test/tc_collections.rb):
+//!
+//!     scratch :scrtch, [:k1, :k2] => [:v1, :v2]
+//!     scratch :scrtch2, [:k1, :k2]
+//!     table :tbl, [:k1, :k2] => [:v1, :v2]
+//!     scratch :the_keys ; scratch :the_vals
+//!     bootstrap: scrtch <= [['a','b',1,2]]; scrtch <= [['a','c',3,4]]; scrtch2 <= [['a','b']]
+//!                tbl <= [['a','b',1,2]]; tbl <= [['z','y',9,8]]
+//!     bloom:     scrtch <+ [['c','d',5,6]]; tbl <+ [['c','d',5,6]]; tbl <- [['a','b',1,2]]
+//!                the_keys <= tbl.keys; the_vals <= tbl.values
+//!
+//! Bud's literal right-hand sides are re-evaluated every tick; they are `static` facts here. `tbl.keys` and
+//! `tbl.values` project onto the key and value columns. Bud's first tick is budtime 0, our tick 0, so Bud's
+//! "after tick 2" is our tick 1.
+
+program baby_bud version 1;
+
+static lit_cd(k1: String, k2: String, v1: i64, v2: i64);
+static lit_ab(k1: String, k2: String, v1: i64, v2: i64);
+
+fact lit_cd("c", "d", 5, 6);
+fact lit_ab("a", "b", 1, 2);
+
+scratch scrtch(k1: String, k2: String, v1: i64, v2: i64) key(k1, k2);
+scratch scrtch2(k1: String, k2: String);
+table tbl(k1: String, k2: String, v1: i64, v2: i64) key(k1, k2);
+
+view the_keys(k1, k2) = tbl(k1, k2, _, _);
+view the_vals(v1, v2) = tbl(_, _, v1, v2);
+
+bootstrap {
+    emit scrtch("a", "b", 1, 2);
+    emit scrtch("a", "c", 3, 4);
+    emit scrtch2("a", "b");
+    emit tbl("a", "b", 1, 2);
+    emit tbl("z", "y", 9, 8);
+}
+
+defer_scrtch: while lit_cd(k1, k2, v1, v2) {
+    next scrtch(k1, k2, v1, v2);
+    next tbl(k1, k2, v1, v2);
+}
+
+remove_ab: while lit_ab(k1, k2, v1, v2) {
+    delete tbl(k1, k2, v1, v2);
+}

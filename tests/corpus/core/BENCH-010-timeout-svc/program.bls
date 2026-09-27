@@ -1,0 +1,29 @@
+//! BENCH-010: Molly's logical timer service `util/timeout_svc.ded`, ported to Blossom.
+//!
+//! The Molly rules (R02 §12.5):
+//!
+//!     timer_state(H, I, T-1)@next :- timer_svc(H, I, T);
+//!     timer_state(H, I, T-1)@next :- timer_state(H, I, T), notin timer_cancel(H, I), T > 1;
+//!     timeout(H, I) :- timer_state(H, I, 1);
+//!
+//! The location column H is implicit in Blossom (CR-14). `timer_svc` and `timer_cancel` are host inputs.
+
+program timeout_svc version 1;
+
+input timer_svc(id: String, t: i64);
+input timer_cancel(id: String);
+
+scratch timer_state(id: String, t: i64);
+output timeout(id: String);
+
+arm: on timer_svc(i, t) {
+    next timer_state(i, t - 1);
+}
+
+count_down: while timer_state(i, t), not timer_cancel(i) where t > 1 {
+    next timer_state(i, t - 1);
+}
+
+fire: while timer_state(i, 1) {
+    emit timeout(i);
+}

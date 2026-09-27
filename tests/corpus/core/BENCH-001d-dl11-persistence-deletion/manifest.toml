@@ -1,0 +1,56 @@
+schema = 1
+id = "BENCH-001"
+title = "DL11 Ex. 3: persistence and deletion (.ded twin)"
+priority = "P0"
+source = "R02 §3.3 and §17 T1 (DL11 Example 3); FEATURES.md BENCH-001"
+features = ["SEM-005", "SEM-008", "LANG-065", "LANG-069", "LANG-220"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+Same expectations as BENCH-001a. A `.ded` case takes its nodes and inputs from the program: node "n1" is the
+location constant of the facts, and the `@k` facts are input events at tick k (CR-13). Rows are written without
+the location column, which the `.ded` frontend strips (LANGUAGE §21.1)."""
+
+[run]
+ticks = 320
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-005", "SEM-008", "LANG-065", "LANG-069", "LANG-220"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-005", "SEM-008", "LANG-065", "LANG-069", "LANG-220", "SEM-002"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "p_pos"
+row = [1, 2]
+absent = "..=100"
+
+[[expect]]
+node = "n1"
+rel = "p_pos"
+row = [1, 2]
+holds = "101..=300"
+absent = "301.."
+
+[[expect]]
+node = "n1"
+rel = "p_pos"
+row = [1, 3]
+absent = "..=101"
+holds = "102.."
+
+[[expect]]
+node = "n1"
+rel = "p_pos"
+tick = 301
+rows = [[1, 3]]
+
+[[expect]]
+quiescent_from = 302

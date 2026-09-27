@@ -1,0 +1,27 @@
+//! BENCH-001 scenario b: insert wins (CR-05, SEM-006), on the DL11 Ex. 3 program.
+//!
+//! DL11 §3.2 and R02 §3.3 ("Insert-vs-delete conflict"): in Dedalus the persistence rule and an insertion rule
+//! are separate rules, so when a fact is both deleted at T and inserted for T+1 the insertion rule re-derives it
+//! at T+1. This program is BENCH-001a plus an inductive insertion `p_next` (Dedalus `p_pos(A, B)@next <-
+//! p_next(A, B)`, Bloom `<+`). It also pins the contrast: a *deductive* insertion at T and a deletion at T
+//! leave the fact present at T and absent from T+1, because that insertion is for T, not for T+1.
+
+program dl11_insert_wins version 1;
+
+input p(a: i64, b: i64);
+input p_next(a: i64, b: i64);
+input p_neg(a: i64, b: i64);
+
+table p_pos(a: i64, b: i64);
+
+insert_now: on p(a, b) {
+    emit p_pos(a, b);
+}
+
+insert_next: on p_next(a, b) {
+    next p_pos(a, b);
+}
+
+retract: on p_neg(a, b) {
+    delete p_pos(a, b);
+}

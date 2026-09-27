@@ -1,0 +1,57 @@
+//! BENCH-018: P2's `doc/seAtomicity.olg` regression test for deferred mutation visibility.
+//!
+//! The Overlog program (declarativitydotnet/p2, doc/seAtomicity.olg; R01 §4.4):
+//!
+//!     materialize(tCounter,infinity,infinity,keys(2)).
+//!     materialize(tSoftCounter,5,infinity,keys(2)).
+//!     t1   a(@X, I) :- periodic(@X,E,1,1), I := 0.
+//!     t2   tCounter(@X,I) :- a(@X,I), I < 11.
+//!     t21  b(@X,I) :- a(@X,I), I < 11.
+//!     t22  c(@X,I,a_count<*>) :- b(@X,I), tCounter(@X,I).
+//!     t22a cerr(@X,I,C,M) :- c(@X,I,C), C != 0, M := "If you see this msg, there is a bbbuuguguguguggg!!".
+//!     t23  tSoftCounter(@X,I,a_count<*>) :- c(@X,I,C), tCounter(@X,I).
+//!     t23a serr(@X,I,C,M ) :- tSoftCounter(@X,I,C), C != 0, M := "If you see this message, there issssss a buggg 2!!!".
+//!     t3   a(@X,J) :- tCounter(@X,I), J := I + 1.
+//!
+//! Port, following R01 §10 item 1 (final P2's mutation semantics are Dedalus's `@next`):
+//! - an insertion into a materialized table (tCounter, tSoftCounter) becomes visible after the fixpoint: `next`;
+//! - `a`, `b`, `c`, `cerr` and `serr` are events (tick-local);
+//! - a per-event aggregate (`a_count<*>` driven by the event `b` or `c`) emits one row per event even when the
+//!   join is empty (count 0, R01 §4.3): a `per` driver with the count's identity 0 (LANG-106, CR-08);
+//! - t3 has no event in its body, so P2 compiles it to a delta rule on tCounter's insertions: `inserted`;
+//! - the one-shot `periodic(@X,E,1,1)` is a one-shot timer.
+//! P2 prints its message when `cerr` or `serr` fires; the invariants make either a hard error (BLSR003).
+
+program se_atomicity version 1;
+
+table t_counter(i: i64) key(i);
+soft table t_soft_counter(i: i64, c: u64) key(i) ttl 5s;
+
+timer start once;
+
+scratch a(i: i64);
+
+view b(i) = a(i) where i < 11;
+view c(i, n = count!(*)) = per b(i), t_counter(i);
+view soft_count(i, n = count!(*)) = per c(i, _), t_counter(i);
+view cerr(i, n, m) = c(i, n), let m = "If you see this msg, there is a bbbuuguguguguggg!!" where n != 0;
+view serr(i, n, m) = t_soft_counter(i, n), let m = "If you see this message, there issssss a buggg 2!!!" where n != 0;
+
+t1: on start {
+    emit a(0);
+}
+
+t2: on a(i) where i < 11 {
+    next t_counter(i);
+}
+
+t23: while soft_count(i, n) {
+    next t_soft_counter(i, n);
+}
+
+t3: on inserted t_counter(i) {
+    emit a(i + 1);
+}
+
+invariant no_cerr "a same-fixpoint count saw tCounter's own insertion": never cerr(_, _, _);
+invariant no_serr "tSoftCounter recorded a nonzero same-fixpoint count": never serr(_, _, _);

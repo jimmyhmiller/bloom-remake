@@ -1,0 +1,18 @@
+//! BENCH-015: the `glass` rule with a deferred merge (`<+`) is accepted: temporal stratification.
+//!
+//!     glass <+ one_item {|t| ['full'] if glass.empty? }
+//!
+//! The cycle now passes through `next`, which is allowed (SEM-020). `glass` is a table, so once full it stays
+//! full: the glass is filled at tick 1 and the rule never fires again.
+
+program glass_deferred version 1;
+
+static one_item(t: String);
+
+fact one_item("item");
+
+table glass(v: String);
+
+fill: while one_item(_), not glass(_) {
+    next glass("full");
+}

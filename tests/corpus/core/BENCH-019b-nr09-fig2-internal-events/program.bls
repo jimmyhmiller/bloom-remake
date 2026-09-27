@@ -1,0 +1,55 @@
+//! BENCH-019: NR09 Fig. 2, internal vs. external events (R01 §8.8).
+//!
+//!     materialize(neighbor, keys(1,2)).  materialize(store, keys(1,2)).  materialize(sequence, keys(1)).
+//!     neighbor(@X, "node1"). neighbor(@X, "node2"). neighbor(@X, "node3").
+//!     store(@X, 1). ... store(@X, 10).
+//!     sequence(@X, 0).
+//!     sequence(@X, New) :- ping(@X), sequence(@X, Old), New := Old + 1.
+//!     ping(@Y) :- broadcast(@X), neighbor(@X, Y), store(@X, _).
+//!     broadcast(@X) :- periodic(@X, E, 5, 1), X = "node1".
+//!
+//! In P2, node2 and node3 reach 10 but node1 reaches 1: events are bags, and node1's ten self-pings are processed
+//! in one step. CR-03/SEM-013: every relation, including a delivered batch, is a set per tick, and a self-send
+//! arrives at a later tick like any other, so *every* node increments exactly once. The one-shot periodic at
+//! node1 is a host input `broadcast` at node1.
+
+program nr09_internal_events version 1;
+
+role Peer: cluster;
+
+static neighbor(y: Node<Peer>);
+static store(v: u64);
+
+fact neighbor("node1");
+fact neighbor("node2");
+fact neighbor("node3");
+fact store(1);
+fact store(2);
+fact store(3);
+fact store(4);
+fact store(5);
+fact store(6);
+fact store(7);
+fact store(8);
+fact store(9);
+fact store(10);
+
+channel ping(): Peer -> Peer;
+
+at Peer {
+    input broadcast();
+
+    table sequence(s: u64) key();
+
+    bootstrap {
+        emit sequence(0);
+    }
+
+    increment: on ping(), sequence(old) {
+        upsert sequence(old + 1);
+    }
+
+    fan_out: on broadcast(), neighbor(y), store(_) {
+        send ping() to y;
+    }
+}

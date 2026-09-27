@@ -1,0 +1,38 @@
+schema = 1
+id = "BENCH-015"
+title = "Bud glass rule with <+ is temporally stratified and accepted"
+priority = "P0"
+source = "R03 §4.3 and §11 T7 (bud docs/operational.md glass example, <+ variant); FEATURES.md SEM-020, BENCH-015"
+features = ["SEM-020", "SEM-022", "ANA-002", "LANG-040", "LANG-045", "LANG-061", "LANG-082"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Accepted with no diagnostics. Judgement call: Bud's example does not say whether `glass` is a table or a scratch;
+it is a table here (a glass stays full). Run: empty at tick 0, full from tick 1."""
+
+[run]
+ticks = 5
+stop = "ticks"
+
+[backend.compile]
+status = "unimplemented"
+unimplemented = ["SEM-020", "SEM-022", "ANA-002", "LANG-040", "LANG-045", "LANG-061", "LANG-082"]
+until = "M5"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-020", "SEM-022", "ANA-002", "LANG-040", "LANG-045", "LANG-061", "LANG-082"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-020", "SEM-022", "ANA-002", "LANG-040", "LANG-045", "LANG-061", "LANG-082", "SEM-002"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "glass"
+row = ["full"]
+absent = "0"
+holds = "1.."

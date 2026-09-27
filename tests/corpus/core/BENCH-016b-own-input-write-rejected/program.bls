@@ -1,0 +1,25 @@
+//! BENCH-016: an instantaneous write into a relation the host owns is rejected.
+//!
+//! Bud rejects `<=` from outside a tick (test/tc_collections.rb#test_instant_merge_outside_bud): "illegal use of
+//! <= outside of bloom block, use <+ instead", because a scratch written between ticks would be wiped at the
+//! next tick. Blossom makes the host half of that rule structural: the host API writes only `input`s, always for
+//! a future tick (LANG-067, LANGUAGE §16.5), so there is no host `<=` to reject. The static half remains: the
+//! program itself may never write the interface the host owns, its own `input` (LANGUAGE §7.6, BLS0406).
+
+program own_input_write version 1;
+
+input request(n: u64);
+
+static item(n: u64);
+
+fact item(1);
+
+output echo(n: u64);
+
+forge: while item(n) {
+    emit request(n);                        // expect: BLS0406 (a module never writes its own input)
+}
+
+reply: on request(n) {
+    emit echo(n);
+}
