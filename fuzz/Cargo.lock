@@ -52,8 +52,13 @@ dependencies = [
 name = "blossom-ir"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "blossom-base",
  "blossom-value",
+ "postcard",
+ "serde",
+ "smallvec",
+ "thiserror",
 ]
 
 [[package]]
@@ -78,10 +83,15 @@ dependencies = [
 name = "blossom-store"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "blossom-base",
  "blossom-schema",
  "blossom-value",
  "blossom-wire",
+ "crc32c",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -162,6 +172,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "crc32c"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a47af21622d091a8f0fb295b88bc886ac74efcc613efc19f5d0b21de5c89e47"
+dependencies = [
+ "rustc_version",
 ]
 
 [[package]]
@@ -296,6 +315,21 @@ name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
+
+[[package]]
+name = "rustc_version"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
+dependencies = [
+ "semver",
+]
+
+[[package]]
+name = "semver"
+version = "1.0.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "serde"
