@@ -9,6 +9,7 @@ derived = true
 expected_from = "literature"
 notes = """
 a and b are inserted at tick 1; del_p(a) at tick 4 removes p(a) and q(a) from tick 5 on; b is unaffected.
+BENCH-036d is the `.ded` twin of R09's Dedalus rules.
 Not expressible in schema v1 and left to the engine's own tests and benchmarks (BENCH-036 bullets 1 and 3):
 storage O(changes) rather than O(|p| x T), and flat per-tick time with 10^6 persisted tuples and 1-100 messages
 per tick (R09 T13)."""

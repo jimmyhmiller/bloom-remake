@@ -3,7 +3,7 @@ id = "BENCH-033"
 title = "Flix compactness trap: R(⊤)"
 priority = "P1"
 source = "R09 §16 T5 (Flix PLDI'16 §5); FEATURES.md SEM-103, BENCH-033"
-features = ["SEM-101", "SEM-103", "LANG-045", "LANG-047", "LANG-120", "LANG-121", "LANG-123", "LANG-124", "LANG-126", "LANG-085"]
+features = ["SEM-101", "SEM-103", "LANG-045", "LANG-047", "LANG-120", "LANG-121", "LANG-123", "LANG-124", "LANG-126", "LANG-085", "LANG-190"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -17,12 +17,12 @@ stop = "ticks"
 
 [backend.oracle]
 status = "unimplemented"
-unimplemented = ["SEM-101", "SEM-103", "LANG-045", "LANG-047", "LANG-120", "LANG-121", "LANG-123", "LANG-124", "LANG-126", "LANG-085"]
+unimplemented = ["SEM-101", "SEM-103", "LANG-045", "LANG-047", "LANG-120", "LANG-121", "LANG-123", "LANG-124", "LANG-126", "LANG-085", "LANG-190"]
 until = "M5"
 
 [backend.interp]
 status = "unimplemented"
-unimplemented = ["SEM-101", "SEM-103", "LANG-045", "LANG-047", "LANG-120", "LANG-121", "LANG-123", "LANG-124", "LANG-126", "LANG-085", "SEM-002"]
+unimplemented = ["SEM-101", "SEM-103", "LANG-045", "LANG-047", "LANG-120", "LANG-121", "LANG-123", "LANG-124", "LANG-126", "LANG-085", "LANG-190", "SEM-002"]
 until = "M7"
 
 [[expect]]

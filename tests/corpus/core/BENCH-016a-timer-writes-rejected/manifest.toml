@@ -3,7 +3,7 @@ id = "BENCH-016"
 title = "Bud test_periodic_lhs_error: <=, <+ and <- into a periodic are rejected"
 priority = "P0"
 source = "R03 §2.2 and §11 T8 (bud test/tc_collections.rb test_periodic_lhs_error); FEATURES.md LANG-066, BENCH-016"
-features = ["LANG-066", "ANA-005", "LANG-172", "LANG-063", "LANG-061", "LANG-045", "LANG-043", "LANG-060"]
+features = ["LANG-066", "ANA-005", "LANG-172", "LANG-063", "LANG-061", "LANG-045", "LANG-043", "LANG-060", "LANG-190"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -11,7 +11,7 @@ notes = "Compile-only: one BLS0400 per illegal statement."
 
 [backend.compile]
 status = "unimplemented"
-unimplemented = ["LANG-066", "ANA-005", "LANG-172", "LANG-063", "LANG-061", "LANG-045", "LANG-043", "LANG-060"]
+unimplemented = ["LANG-066", "ANA-005", "LANG-172", "LANG-063", "LANG-061", "LANG-045", "LANG-043", "LANG-060", "LANG-190"]
 until = "M5"
 
 [[expect_diag]]

@@ -5,14 +5,19 @@ features = ["ENG-004", "ENG-062", "LANG-040", "LANG-043", "LANG-047", "LANG-063"
 program = "program.bls"
 derived = true
 expected_from = "literature"
-title = "Incremental shortest paths, one change per tick (THESIS Fig. 5.7): every stage equals evaluation from scratch"
-source = "R01 §5.5 and TEST PROGRAMS T3 (Loo thesis §5.4.2 Fig. 5.7, Theorem A.3; SIGMOD06 Fig. 2 network); FEATURES.md BENCH-023"
+title = "Incremental shortest paths, one change per tick (THESIS Figs. 5.7 and 3.9 changes on the SIGMOD06 network): every stage equals evaluation from scratch"
+source = "R01 §5.5 and TEST PROGRAMS T3 (Loo thesis §5.4.2 Fig. 5.7, §3.5 Fig. 3.9, Theorem A.3; SIGMOD06 Fig. 2 network); FEATURES.md BENCH-023"
 notes = """
-THESIS Fig. 5.7 on the SIGMOD06 network: updating #link(a,b,5) to cost 1 replaces path(a,d,b,[a,b,d],6) by
-[a,b,d],2 and path(e,d,a,[e,a,b,d],7) by 3; deleting #link(b,d,1) removes path(b,d,[b,d],1), path(a,d,[a,b,d],2)
-and path(e,d,[e,a,b,d],3). Changes applied FIFO, one per tick: links set at tick 1 (visible from 2), the update at
-tick 4 (visible from 5), the deletion at tick 7 (visible from 8). Each stage's expected contents are the
-from-scratch shortest paths of that stage's links (derived by hand from SP1-SP4)."""
+The changes of THESIS Figs. 5.7 and 3.9, applied to the SIGMOD06 Fig. 2 network of BENCH-022. Judgement call: the
+thesis's figures use small networks of their own, which R01 T3 describes only by their changes ("these are the
+thesis's own small networks, not the SIGMOD06 one"), so the cases substitute the SIGMOD06 network, whose links and
+from-scratch answers are known. Fig. 5.7's change is kept: updating #link(a,b,5) to cost 1 replaces
+path(a,d,b,[a,b,d],6) by [a,b,d],2 and path(e,d,a,[e,a,b,d],7) by 3. Fig. 3.9 deletes l(c,d,1), a link this network
+does not have; the cases delete b->d, its last hop into d, which removes path(b,d,[b,d],1), path(a,d,[a,b,d],2) and
+path(e,d,[e,a,b,d],3) and leaves d unreachable (in Fig. 3.9, a falls back to sp(a,d,[a,b,d],3) instead). Changes
+are applied FIFO, one per tick: links set at tick 1 (visible from 2), the update at tick 4 (visible from 5), the
+deletion at tick 7 (visible from 8). Each stage's expected contents are the from-scratch shortest paths of that
+stage's links (derived by hand from SP1-SP4)."""
 
 [run]
 ticks = 12

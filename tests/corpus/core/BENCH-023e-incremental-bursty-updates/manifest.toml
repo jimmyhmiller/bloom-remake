@@ -6,10 +6,11 @@ program = "program.bls"
 derived = true
 expected_from = "literature"
 title = "Incremental shortest paths, both changes in one burst: the final state equals evaluation from scratch"
-source = "R01 §5.5 and TEST PROGRAMS T3 (Loo thesis §5.4.2 bursty model, Theorem A.3); FEATURES.md BENCH-023"
+source = "R01 §5.5 and TEST PROGRAMS T3 (Loo thesis §5.4.2 bursty model, Theorem A.3; SIGMOD06 Fig. 2 network); FEATURES.md BENCH-023"
 notes = """
-The update of a->b and the deletion of b->d requested in the same tick (3), so the engine sees one burst of
-changes; the state from tick 4 on equals the from-scratch answer on the final links (BENCH-023a's final state)."""
+The update of a->b and the deletion of b->d (the changes of BENCH-023a, on the SIGMOD06 network in place of the
+thesis's own; see BENCH-023a) requested in the same tick (3), so the engine sees one burst of changes; the state
+from tick 4 on equals the from-scratch answer on the final links (BENCH-023a's final state)."""
 
 [run]
 ticks = 8

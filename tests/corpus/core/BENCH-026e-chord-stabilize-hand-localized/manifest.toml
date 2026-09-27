@@ -14,7 +14,8 @@ precedes 100 in (50, 10), so na's predecessor becomes nc. nb stabilizes at tick 
 finds pred(na) = nc (100), which lies in (50, 10), so nb adopts nc as a successor (Chord's join repair); sb2 adds
 na's successor nb (nb itself); sb3 does not change na's predecessor (50 is not in (100, 10)). Mod<8> ids are
 written as integers.
-Same final expectations as BENCH-026c (the compiler-localized program)."""
+The final succ and pred equal BENCH-026c's (the compiler-localized program over an insert-only predecessor
+record)."""
 
 [deploy]
 nodes = [{ name = "na", role = "Peer" }, { name = "nb", role = "Peer" }, { name = "nc", role = "Peer" }]

@@ -3,7 +3,7 @@ id = "BENCH-045"
 title = "ANA-011 lints a carried fold over a persistent input (BLS0601)"
 priority = "P0"
 source = "R12 §12 T6; LANGUAGE §10.6, §13.6; FEATURES.md ANA-011, BENCH-045"
-features = ["ANA-011", "LANG-106", "LANG-110", "LANG-181", "LANG-064", "LANG-040", "LANG-043", "LANG-047", "LANG-190", "LANG-060"]
+features = ["ANA-011", "LANG-106", "LANG-110", "LANG-181", "LANG-064", "LANG-040", "LANG-043", "LANG-047", "LANG-190", "LANG-060", "LANG-100"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -13,7 +13,7 @@ table, so no `while` header reads an event relation (no BLS0505)."""
 
 [backend.compile]
 status = "unimplemented"
-unimplemented = ["ANA-011", "LANG-106", "LANG-110", "LANG-181", "LANG-064", "LANG-040", "LANG-043", "LANG-047", "LANG-190", "LANG-060"]
+unimplemented = ["ANA-011", "LANG-106", "LANG-110", "LANG-181", "LANG-064", "LANG-040", "LANG-043", "LANG-047", "LANG-190", "LANG-060", "LANG-100"]
 until = "M6"
 
 [[expect_diag]]

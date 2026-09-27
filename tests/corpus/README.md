@@ -182,7 +182,13 @@ the runner (M5.2) and the triage WPs can check the cases against it rather than 
   empty ticks up to it; by SEM-009 an idle stretch is observationally equivalent to a run of empty ticks, so this
   changes no result. Messages still arrive whenever the schedule delivers them.
 - **Faults.** `[[fault]] kind = "restart"` at tick k means the node's tick k is the first tick of a new incarnation:
-  durable relations are reloaded, everything else starts empty, and `boot()` and `recovered()` hold at tick k.
+  durable relations are reloaded, everything else starts empty, and `boot()` and `recovered()` hold at tick k. A
+  scripted restart happens at a commit point: tick k − 1's durable deltas, including its `next`, `delete` and
+  `upsert` effects, are synced before the crash, so durable relations hold at tick k what they would have held
+  without the restart. It drops no message either: a message in flight to the node is delivered after the restart.
+  The losses SEM-071 and SEM-072 allow (unsynced writes, in-flight messages) come only from the fault kinds that
+  model them: omissions and partitions, scripted or swarm, and the swarm's storage faults (TEST-002). BENCH-044c
+  relies on this reading for its non-vacuous final expectation.
 - **Row values** follow PLAN §5.1. A lattice column compares by its revealed value (`LMin<u64>` as an integer,
   `LSet<T>` as an array); an `Option` is written `{ some = v }` or `{ none = true }`; a zero-column relation's row
   is `[]`; `Mod<N>` ids are integers.
@@ -190,8 +196,19 @@ the runner (M5.2) and the triage WPs can check the cases against it rather than 
   trailing `// expect: BLSnnnn` comment, and the construct the diagnostic is about is kept on that one line, so the
   line does not depend on which span an implementation reports as primary.
 - **Compile cases are otherwise clean.** A case with a `compile` backend is written so that its `[[expect_diag]]`
-  entries are the only diagnostics a conforming compiler reports, warnings included; the case holds whether the
-  runner compares the reported set with the expected set exactly or checks inclusion.
+  entries are the only diagnostics a conforming compiler reports, warnings included. Where LANGUAGE leaves no
+  choice, the case therefore holds whether the runner compares the reported set with the expected set exactly or
+  checks inclusion. Three cases rest on a reading of a point LANGUAGE leaves open, recorded in their notes and in
+  `docs/plan/notes/M1.2.md` (Bugs 3–5) with the WP that settles it:
+  - BENCH-016b expects BLS0406 for a write into the program's own `input`, which the §12 matrix would also call
+    BLS0400;
+  - BENCH-047a expects BLS0503 for a choice on a same-tick cycle, which §13.3 would also call BLS0502;
+  - BENCH-026f expects BLS1005 only on the localized handler the compiler rewrites, not on the two it rejects with
+    BLS0805.
+
+  An implementation that makes the other choice by reporting both codes (016b, 047a) or the extra lints (026f)
+  passes an inclusion check and fails an exact comparison. One that reports only the general code (BLS0400 or
+  BLS0502) fails both. Either way the triage WP settles the reading; the expectation is not loosened to match.
 - **Level-triggered ports.** Dedalus rules that re-derive every tick are ported as `while` handlers, following the
   explicit-persistence idiom of LANGUAGE §7.2. When such a handler reads a scratch whose only writers are
   event-driven, the greatest-fixpoint classification of LANGUAGE §8.5 makes that scratch an event relation and a
@@ -211,7 +228,15 @@ the runner (M5.2) and the triage WPs can check the cases against it rather than 
   column of §5.2), because the ratchet requires the reported id to be listed.
 - **`features`** lists the FEATURES ids a case exercises: the semantic properties it pins (SEM, ENG, ANA, TEST) and
   the language constructs it uses (LANG). Conventions of the synchronous harness itself (self-sends delivered in the
-  next round, quiescence detection) belong to BENCH-000 and M5.2 and are not listed.
+  next round, quiescence detection) belong to BENCH-000 and M5.2 and are not listed. Some construct ids also carry
+  a semantic property, which the case then lists through them:
+  - facts and `bootstrap` blocks list LANG-190, whose definition includes their evaluation in the boot tick, and
+    `static` relations list LANG-045. The engine's boot tick, SEM-012 (M6.1), is listed only by BENCH-011, the case
+    written to pin it. Many cases check tick-0 contents that come from facts or a `bootstrap` block; listing SEM-012
+    on each would move their oracle deadlines to M6 (PLAN §5.4), although the oracle runs facts and bootstrap rules
+    in the boot tick through their lowering (LANG-190, M5.3) and the sync-round harness (M5.2);
+  - a head aggregate (`v = agg!(…)` in a view head) lists LANG-100, which fixes its grouping by the other head terms
+    and its deduplicated input, besides the id of its aggregate family (LANG-102, LANG-104, LANG-110, LANG-097, …).
 
 ## Checking manifests
 

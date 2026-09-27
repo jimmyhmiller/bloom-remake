@@ -3,7 +3,7 @@ id = "BENCH-038"
 title = "DFIR fold_keyed, unique and multiset_delta lifetimes, adapted to sets and canonical order"
 priority = "P1"
 source = "R08 §15 T6 (DFIR operator docs: fold_keyed, unique, multiset_delta); FEATURES.md CR-03, CR-46, BENCH-038"
-features = ["LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-110", "LANG-118", "LANG-181", "SEM-007", "LANG-060"]
+features = ["LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-110", "LANG-118", "LANG-181", "SEM-007", "LANG-060", "LANG-100"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -21,12 +21,12 @@ stop = "ticks"
 
 [backend.oracle]
 status = "unimplemented"
-unimplemented = ["LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-110", "LANG-118", "LANG-181", "SEM-007", "LANG-060"]
+unimplemented = ["LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-110", "LANG-118", "LANG-181", "SEM-007", "LANG-060", "LANG-100"]
 until = "M5"
 
 [backend.interp]
 status = "unimplemented"
-unimplemented = ["LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-110", "LANG-118", "LANG-181", "SEM-007", "LANG-060", "SEM-002"]
+unimplemented = ["LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-110", "LANG-118", "LANG-181", "SEM-007", "LANG-060", "LANG-100", "SEM-002"]
 until = "M7"
 
 [[input]]

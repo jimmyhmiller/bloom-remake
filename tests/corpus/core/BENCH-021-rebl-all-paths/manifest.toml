@@ -3,7 +3,7 @@ id = "BENCH-021"
 title = "REBL all-paths: exactly 14 path tuples, including (a,b,b,1), (a,b,b,4) and (a,e,b,7)"
 priority = "P0"
 source = "R03 §11 T2 (bud docs/rebl.md, output of the first /tick); FEATURES.md BENCH-021"
-features = ["LANG-040", "LANG-045", "LANG-047", "LANG-060", "LANG-086"]
+features = ["LANG-040", "LANG-045", "LANG-047", "LANG-060", "LANG-086", "LANG-190"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -17,12 +17,12 @@ stop = "ticks"
 
 [backend.oracle]
 status = "unimplemented"
-unimplemented = ["LANG-040", "LANG-045", "LANG-047", "LANG-060", "LANG-086"]
+unimplemented = ["LANG-040", "LANG-045", "LANG-047", "LANG-060", "LANG-086", "LANG-190"]
 until = "M5"
 
 [backend.interp]
 status = "unimplemented"
-unimplemented = ["LANG-040", "LANG-045", "LANG-047", "LANG-060", "LANG-086", "SEM-002"]
+unimplemented = ["LANG-040", "LANG-045", "LANG-047", "LANG-060", "LANG-086", "LANG-190", "SEM-002"]
 until = "M7"
 
 [[expect]]

@@ -1,0 +1,77 @@
+//! BENCH-026: P2's Chord stabilization rules sb1-sb3 cannot be localized by the compiler as P2 writes them, because
+//! sb1 and sb3 read the remote predecessor, which P2 overwrites (LANGUAGE §14.6, BLS0805).
+//!
+//!     sb1 succ(@NI,P,PI) :- stabilizeEvent(@NI), node(@NI,N), bestSucc(@NI,S,SI), pred(@SI,P,PI),
+//!                           PI != "NIL", P in (N,S).
+//!     sb2 succ(@NI,S1,SI1) :- stabilizeEvent(@NI), succ(@NI,S,SI), succ(@SI,S1,SI1).
+//!     sb3 pred(@SI,N,NI) :- stabilizeEvent(@NI), node(@NI,N), succ(@NI,S,SI), pred(@SI,P,PI), node(@SI,N1),
+//!                           ((PI == "NIL") || (N in (P,N1))) && (NI != SI).
+//!
+//! The compiler localizes a body by mirroring the remote relations it reads, which is exact only for insert-only
+//! relations, so a localized body that mirrors a relation with a `delete` or `upsert` is BLS0805. P2 declares
+//! `pred` keys(1): a predecessor a node accepts replaces the previous one. Here the replacement is a `delete` of the
+//! old row and a `next` of the new one, so sb1 and sb3, which read `pred` at SI, are BLS0805. sb2 reads only
+//! `succ`, which nothing deletes from, so it is rewritten, with the lint every rewritten body carries (BLS1005).
+//!
+//! The configuration and sb1-sb3 are BENCH-026c's, with `pred` read where BENCH-026c reads its insert-only record
+//! of predecessors, `pred_seen`; that record is why BENCH-026c is accepted and runs. The relations here have no
+//! declared keys (every column is a key), so no key-conflict lint (BLS1003) can join the diagnostics this case is
+//! about. Each localized handler keeps its attribute, label and header on one line, so the line of each
+//! diagnostic does not depend on which span an implementation reports as primary.
+
+program chord_localized_overwrite_rejected version 1;
+
+role Peer: cluster;
+
+static node_id(n: Node<Peer>, id: Mod<8>);
+static best_succ(n: Node<Peer>, s: Mod<8>, si: Node<Peer>);
+static init_succ(n: Node<Peer>, s: Mod<8>, si: Node<Peer>);
+static init_pred(n: Node<Peer>, p: Mod<8>, pi: Node<Peer>, known: bool);
+
+fact node_id("na", 0x0aI);
+fact node_id("nb", 0x32I);
+fact node_id("nc", 0x64I);
+fact best_succ("na", 0x32I, "nb");
+fact best_succ("nb", 0x0aI, "na");
+fact best_succ("nc", 0x0aI, "na");
+fact init_succ("na", 0x32I, "nb");
+fact init_succ("nb", 0x0aI, "na");
+fact init_succ("nc", 0x0aI, "na");
+fact init_pred("na", 0x32I, "nb", true);
+fact init_pred("nb", 0x0aI, "na", true);
+fact init_pred("nc", 0x00I, "nc", false);
+
+channel pred_update(p: Mod<8>): Peer -> Peer;
+
+at Peer {
+    input stabilize();
+
+    table succ(s: Mod<8>, si: Node<Peer>);
+    table pred(p: Mod<8>, pi: Node<Peer>, known: bool);
+
+    bootstrap {
+        for init_succ(self, s, si) {
+            emit succ(s, si);
+        }
+        for init_pred(self, p, pi, k) {
+            emit pred(p, pi, k);
+        }
+    }
+
+    #[localize(chain)] sb1: on stabilize(), node_id(self, n), best_succ(self, s, si), pred(p, pi, true) @ si where p in n<..s {    // expect: BLS0805
+        emit succ(p, pi);
+    }
+
+    #[localize(chain)] sb2: on stabilize(), succ(_, si), succ(s1, si1) @ si {    // expect: BLS1005
+        emit succ(s1, si1);
+    }
+
+    #[localize(chain)] sb3: on stabilize(), node_id(self, n), succ(_, si), pred(p, _, known) @ si, node_id(si, n1) where (not known || n in p<..n1) && si != self {    // expect: BLS0805
+        send pred_update(n) to si;
+    }
+
+    set_pred: on pred_update(n) from ni, node_id(self, n1), pred(p, pi, known) where not known || n in p<..n1 {
+        delete pred(p, pi, known);
+        next pred(n, ni, true);
+    }
+}

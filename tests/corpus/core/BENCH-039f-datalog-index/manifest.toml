@@ -3,7 +3,7 @@ id = "BENCH-039"
 title = "dfir-datalog test_index under CR-46: per-tick canonical ranks, re-ranked over a persisted input"
 priority = "P1"
 source = "R08 §15 T8 (dfir_datalog_core lib.rs test test_index); R12 §5.9; FEATURES.md CR-46, LANG-097, BENCH-039"
-features = ["LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-093", "LANG-097", "LANG-118"]
+features = ["LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-093", "LANG-097", "LANG-118", "LANG-100"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -18,12 +18,12 @@ stop = "ticks"
 
 [backend.oracle]
 status = "unimplemented"
-unimplemented = ["LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-093", "LANG-097", "LANG-118"]
+unimplemented = ["LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-093", "LANG-097", "LANG-118", "LANG-100"]
 until = "M5"
 
 [backend.interp]
 status = "unimplemented"
-unimplemented = ["LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-093", "LANG-097", "LANG-118", "SEM-002"]
+unimplemented = ["LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-093", "LANG-097", "LANG-118", "LANG-100", "SEM-002"]
 until = "M7"
 
 [[input]]

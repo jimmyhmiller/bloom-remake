@@ -11,16 +11,22 @@ notes = """
 The scenario of BENCH-044b under the asynchronous simulator: requests may arrive at any later tick, so which
 candidate wins each term depends on the schedule and the seed. n1's initial state (current_term 4, last entry
 (7, 3)) is written by `bootstrap fresh` in its boot tick, so it is in place even if a request is delivered in the
-boot tick's batch. The durable invariant one_grantee must hold in
-every run (128 seeds). Not asserted here: the LDFI choice-stability claim of R12 T5 (dropping the grantee's request
-makes choose pick the other up-to-date candidate), which needs the LDFI backend (TEST-040, M9)."""
+boot tick's batch. The durable invariant one_grantee must hold in every run (128 seeds).
+Non-vacuity: n1's final current_term is 6 in every run. No fault drops a message (the only fault is the scripted
+restart, which loses no message and reloads everything committed before it; see the README), so every request
+reaches n1, and the term-6 requests of c5 and c3 raise its effective term, which persist_term carries into the
+durable current_term (terms only grow: eff is a max and current_term resolves by choose_most). n1 needs at most 23
+ticks for that (ticks 0-6 up to the restart, then at most two per request for 8 requests), within the run's 30.
+A run in which the simulator delivered no request would end with current_term 4.
+Not asserted here: the LDFI choice-stability claim of R12 T5 (dropping the grantee's request makes choose pick the
+other up-to-date candidate), which needs the LDFI backend (TEST-040, M9)."""
 
 [deploy]
 nodes = [{ name = "n1", role = "Server" }, { name = "c2", role = "Server" }, { name = "c3", role = "Server" }, { name = "c4", role = "Server" }, { name = "c5", role = "Server" }]
 seed = 42
 
 [run]
-ticks = 20
+ticks = 30
 stop = "ticks"
 seeds = 128
 
@@ -81,3 +87,9 @@ rows = [["n1", 6, 3, 8, 3]]
 kind = "restart"
 node = "n1"
 tick = 6
+
+[[expect]]
+node = "n1"
+rel = "current_term"
+final = true
+rows = [[6]]

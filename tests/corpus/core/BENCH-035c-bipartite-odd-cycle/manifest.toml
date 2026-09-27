@@ -3,7 +3,7 @@ id = "BENCH-035"
 title = "FlowLog bipartite check: a graph with an odd cycle derives answer()"
 priority = "P0"
 source = "R09 §13.1 and §16 T8 (FlowLog bipartite rules); FEATURES.md BENCH-035"
-features = ["LANG-045", "LANG-047", "LANG-060", "LANG-086"]
+features = ["LANG-045", "LANG-047", "LANG-060", "LANG-086", "LANG-190"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -17,12 +17,12 @@ stop = "ticks"
 
 [backend.oracle]
 status = "unimplemented"
-unimplemented = ["LANG-045", "LANG-047", "LANG-060", "LANG-086"]
+unimplemented = ["LANG-045", "LANG-047", "LANG-060", "LANG-086", "LANG-190"]
 until = "M5"
 
 [backend.interp]
 status = "unimplemented"
-unimplemented = ["LANG-045", "LANG-047", "LANG-060", "LANG-086", "SEM-002"]
+unimplemented = ["LANG-045", "LANG-047", "LANG-060", "LANG-086", "LANG-190", "SEM-002"]
 until = "M7"
 
 [[expect]]
