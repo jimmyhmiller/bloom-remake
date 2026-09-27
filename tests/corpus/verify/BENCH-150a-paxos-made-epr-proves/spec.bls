@@ -1,0 +1,73 @@
+//! BENCH-150: the safety of the Paxos program by the inductive invariant of Paxos Made EPR (Padon, Losa, Sagiv,
+//! Shoham, OOPSLA 2017, §5.2 and §6), eqs. (4)-(11) and (13)-(15), checked in EPR (VER-006-VER-010).
+//!
+//! The spec first names EPR's vocabulary. The message relations are the network with the fields EPR does not have
+//! projected away (EPR: "all messages are sent to all nodes, so the relations do not contain destination fields";
+//! the propose and start messages have no sender either, because EPR treats the round as the proposer). The derived
+//! relations of EPR §6 are joined_round, which the program maintains itself (`joined`), and left_round, the
+//! "exists-greater" view over it (VER-009), which is also exactly the program's guard `not { joined(r2) where r2 > r }`.
+//! With them, each equation is stated as the paper writes it, as a denial constraint. Round variables range over all
+//! rounds below a bound (`r1 in 0..r2`, round 0 being ⊥); the values of eq. (13) range over the static domain `value`,
+//! which every proposal comes from.
+//!
+//! The program keeps local copies of what EPR reads from the network (its votes, the acknowledgements and votes it
+//! received, its proposals and the owners of rounds), so the proof also uses representation lemmas that tie each
+//! copy to the network. They are universally quantified and add no quantifier alternation.
+
+spec PaxosMadeEpr for r#program {
+    // ---------------- EPR's vocabulary (Fig. 3 lines 10-14; §6.1, §6.2)
+    view start_round_msg(r) = sent start_round(r) @ _ from _;
+    view join_ack_msg(n, r, maxr, v) = sent join_ack(r, maxr, v) @ _ from n;
+    view propose_msg(r, v) = sent propose(r, v) @ _ from _;
+    view vote_msg(n, r, v) = sent vote(r, v) @ _ from n;
+    view joined_round(n, r) = joined(r) @ n;
+    view left_round(n, r) = joined(r2) @ n, r in 0..r2;
+
+    // ---------------- the safety property
+    /// (4) Only one value is decided.
+    invariant agreement: never decision(r1, v1) @ n1, decision(r2, v2) @ n2 where v1 != v2;
+
+    // ---------------- the inductive invariant (§5.2 and §6)
+    /// (5) A unique proposal per round.
+    invariant unique_proposal: never propose_msg(r, v1), propose_msg(r, v2) where v1 != v2;
+    /// (6) A vote for v in round r is cast only when v was proposed in r.
+    invariant vote_needs_proposal: never vote_msg(n, r, v), not propose_msg(r, v);
+    /// (7) A decision for v in round r is made only if a quorum voted for v in r.
+    invariant decision_needs_quorum: never decision(r, v) @ n, not quorum m in Replica { vote_msg(m, r, v) };
+    /// (8) An acknowledgement that reports no vote below r means there is none.
+    invariant ack_bottom_no_vote: never join_ack_msg(n, r, 0, _), vote_msg(n, r2, _) where r2 < r;
+    /// (9) A reported vote is below the joined round, and was cast.
+    invariant ack_vote_below: never join_ack_msg(n, r, r2, _) where r2 != 0, r2 >= r;
+    invariant ack_vote_cast: never join_ack_msg(n, r, r2, v), not vote_msg(n, r2, v) where r2 != 0;
+    /// (10) The reported vote is the highest below the joined round.
+    invariant ack_vote_highest: never join_ack_msg(n, r, r2, _), vote_msg(n, r3, _) where r2 != 0, r2 < r3, r3 < r;
+    /// (11) No vote in round ⊥.
+    invariant no_vote_at_bottom: never vote_msg(_, 0, _);
+    /// (13) Once v2 is proposed in r2, no other value is choosable in a lower round: every quorum has a node that
+    /// left r1 without voting for v1 there.
+    invariant nothing_else_choosable: never propose_msg(r2, v2), r1 in 0..r2, value(v1) @ _, v1 != v2,
+        quorum n in Replica { any { vote_msg(n, r1, v1); not left_round(n, r1) } };
+    /// (14) Joining a round leaves every lower round.
+    invariant joining_leaves_lower: never joined_round(n, r2), r1 in 0..r2, not left_round(n, r1);
+    /// (15) A node that sent an acknowledgement for r has joined r.
+    invariant ack_means_joined: never join_ack_msg(n, r, _, _), not joined_round(n, r);
+
+    // ---------------- representation lemmas: the program's local copies of the network
+    invariant votes_recorded: never vote_msg(n, r, v), not voted(r, v) @ n;
+    invariant recorded_votes_sent: never voted(r, v) @ n, not vote_msg(n, r, v);
+    invariant acks_were_sent: never acks(r, m, r2, v) @ o, not join_ack_msg(m, r, r2, v);
+    invariant tallied_votes_were_sent: never votes(r, v, s) @ n, m in s, not vote_msg(m, r, v);
+    invariant owners_start_rounds: never owned(r, _) @ o, not owns(r, o) @ o;
+    invariant owners_propose: never sent propose(r, _) @ _ from o, not owns(r, o) @ o;
+    invariant proposals_recorded: never sent propose(r, v) @ _ from o, not proposed(r, v) @ o;
+    invariant one_recorded_proposal: never proposed(r, v1) @ o, proposed(r, v2) @ o where v1 != v2;
+    invariant one_owner: never owns(r, a) @ x, owns(r, b) @ y where a != b;
+
+    prove agreement by induction using unique_proposal, vote_needs_proposal, decision_needs_quorum,
+        ack_bottom_no_vote, ack_vote_below, ack_vote_cast, ack_vote_highest, no_vote_at_bottom,
+        nothing_else_choosable, joining_leaves_lower, ack_means_joined, votes_recorded, recorded_votes_sent,
+        acks_were_sent, tallied_votes_were_sent, owners_start_rounds, owners_propose, proposals_recorded,
+        one_recorded_proposal, one_owner;
+
+    check smt expect holds;
+}

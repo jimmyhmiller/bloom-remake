@@ -1,0 +1,133 @@
+//! BENCH-150: single-decree Paxos as modeled in Padon, Losa, Sagiv, Shoham, "Paxos Made EPR: Decidable Reasoning
+//! about Distributed Protocols", OOPSLA 2017, Fig. 3, written as a Blossom program.
+//!
+//! EPR's model is a transition system over the messages sent: start_round_msg (1a), join_ack_msg (1b), propose_msg
+//! (2a) and vote_msg (2b), all "sent to all nodes", plus each node's decisions. Each EPR action is a handler here, and
+//! each message relation a channel that every send broadcasts to every replica; the verifier sees the channels as a
+//! grow-only network (`sent` in specs). The model's abstractions become configuration:
+//! - rounds are u64, only ever compared, never computed with; round 0 is EPR's ⊥ ("no vote"), and no action happens
+//!   in round 0 (EPR: "any action assumes that the round it involves is not ⊥");
+//! - each round has one owner, the static `owns` (EPR §5.1: "each round r has a unique owner that will exclusively
+//!   propose in r", which the model abstracts by treating the round itself as the proposer);
+//! - the value an owner proposes when no vote has to be carried over comes from the host, out of the static domain
+//!   `value` (EPR: nodes "propose arbitrary values").
+//! A node reads only what it sent or received: the rounds it joined (`joined`, which is EPR's derived relation
+//! joined_round, maintained by the program), its own votes, and the acknowledgements and votes sent to it.
+//!
+//! Ticks batch actions: in one tick a node may join several rounds and vote. A vote is cast only if no round above it
+//! is joined, before or in this tick, so a tick's joins report exactly the votes cast before them; every tick is then
+//! one of EPR's interleavings (its joins in increasing round order, then its votes).
+
+program paxos_made_epr version 1;
+
+role Replica: cluster;
+
+/// The owner of each round.
+static owns(r: u64, n: Node<Replica>) key(r);
+/// The values that may be proposed.
+static value(v: String);
+
+/// 1a: start round r.
+channel start_round(r: u64): Replica -> Replica;
+/// 1b: the sender joins round r and reports its highest vote below r; (0, "") if it cast none (EPR: "maxr = ⊥ and v
+/// is arbitrary when n never voted").
+channel join_ack(r: u64, maxr: u64, maxv: String): Replica -> Replica;
+/// 2a: the owner of round r proposes v.
+channel propose(r: u64, v: String): Replica -> Replica;
+/// 2b: the sender votes for v in round r.
+channel vote(r: u64, v: String): Replica -> Replica;
+
+at Replica {
+    /// From the host: start round r at its owner, with the value to propose if no vote must be carried over.
+    input start(r: u64, v: String);
+
+    /// The rounds this node joined: EPR's joined_round(self, r), updated as EPR Fig. 5 line 16 does.
+    table joined(r: u64);
+    /// This node's votes.
+    table voted(r: u64, v: String);
+    /// At an owner: the rounds it started, with the values it may propose freely.
+    table owned(r: u64, v: String);
+    /// At an owner: its proposal in each of its rounds.
+    table proposed(r: u64, v: String) key(r);
+    /// At an owner: the join acknowledgements received for its rounds.
+    table acks(r: u64, from: Node<Replica>, maxr: u64, maxv: String);
+    /// Votes received, per round and value.
+    table votes(r: u64, v: String, from: LSet<Node<Replica>>);
+    /// Decisions learned: EPR's decision(self, r, v).
+    table decision(r: u64, v: String);
+
+    // ---------------- start_round (EPR Fig. 3 lines 22-25)
+    begin: on start(r, v), owns(r, self), value(v) where r > 0 {
+        next owned(r, v);
+        for n in Replica {
+            send start_round(r) to n;
+        }
+    }
+
+    // ---------------- join_round (lines 26-34)
+    /// The rounds joined in this tick: "assume start_round_msg(r)" and "assume ¬∃r′, r″, v. r′ > r ∧
+    /// join_ack_msg(n, r′, r″, v)", which is EPR Fig. 5's ¬left_round(n, r).
+    view joining(r) = start_round(r), not { joined(r2) where r2 > r } where r > 0;
+    /// "maxr, v := max {(r′, v′) | vote_msg(n, r′, v′) ∧ r′ < r}" (EPR eq. (3)); absent when there is no such vote.
+    view vote_below(r, top = max!((vr, vv))) = joining(r), voted(vr, vv) where vr < r;
+
+    join: on joining(r) {
+        next joined(r);
+        for vote_below(r, top), n in Replica {
+            send join_ack(r, top.0, top.1) to n;
+        }
+        if not vote_below(r, _) {
+            for n in Replica {
+                send join_ack(r, 0, "") to n;
+            }
+        }
+    }
+
+    // ---------------- propose (lines 35-46)
+    record_ack: on join_ack(r, mr, mv) from m, owned(r, _) {
+        emit acks(r, m, mr, mv);
+    }
+
+    /// "assume ∀v. ¬propose_msg(r, v)" and "assume ∀n. member(n, q) → ∃r′, v. join_ack_msg(n, r, r′, v)": the
+    /// nodes that joined r include a quorum.
+    view ready(r) = owned(r, _), not proposed(r, _) where majority(lset{ m | acks(r, m, _, _) }, Replica);
+    /// "maxr, v := max {(r′, v′) | ∃n. member(n, q) ∧ join_ack_msg(n, r, r′, v′) ∧ r′ ≠ ⊥}", over every node that
+    /// joined r so far (a superset of a quorum).
+    view reported(r, top = max!((mr, mv))) = acks(r, _, mr, mv) where mr > 0;
+    /// "v is arbitrary if the nodes reported not voting": the least value the owner was started with.
+    view free_value(r, fv = min!(v)) = owned(r, v);
+
+    propose_reported: while ready(r), reported(r, top) {
+        next proposed(r, top.1);
+        for n in Replica {
+            send propose(r, top.1) to n;
+        }
+    }
+
+    propose_free: while ready(r), free_value(r, fv), not reported(r, _) {
+        next proposed(r, fv);
+        for n in Replica {
+            send propose(r, fv) to n;
+        }
+    }
+
+    // ---------------- vote (lines 47-52)
+    /// "assume propose_msg(r, v)" and "assume ¬∃r′, r″, v. r′ > r ∧ join_ack_msg(n, r′, r″, v)", counting the rounds
+    /// joined in this same tick.
+    cast: on propose(r, v), not { joined(r2) where r2 > r }, not { joining(r2) where r2 > r } where r > 0 {
+        next voted(r, v);
+        for n in Replica {
+            send vote(r, v) to n;
+        }
+    }
+
+    // ---------------- learn (lines 53-58)
+    tally: on vote(r, v) from m {
+        emit votes(r, v, set[m]);
+    }
+
+    /// "assume ∀n. member(n, q) → vote_msg(n, r, v)".
+    learn: while votes(r, v, s) where majority(s, Replica) {
+        emit decision(r, v);
+    }
+}
