@@ -16,3 +16,6 @@ pub mod hydro;
 pub mod lexer;
 pub mod overlog;
 pub mod parser;
+
+mod kind;
+pub use kind::{BlossomLanguage, SyntaxKind, SyntaxNode, SyntaxToken};
