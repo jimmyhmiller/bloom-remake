@@ -1,9 +1,9 @@
-# BENCH-134b-nemo-pb-asynchronous-ack-log-repair-6-4-1: Nemo pb-asynchronous-ack-log-repair-6-4-1: no counterexample at EOT 6, EFF 4, 1 crash.
+# BENCH-134b-nemo-pb-asynchronous-ack-log-repair-6-4-1: Nemo pb-asynchronous-ack-log-repair: no counterexample at EOT 6, EFF 4, 1 crash.
 # Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
 
 schema = 1
 id = "BENCH-134"
-title = "Nemo pb-asynchronous-ack-log-repair-6-4-1: no counterexample at EOT 6, EFF 4, 1 crash"
+title = "Nemo pb-asynchronous-ack-log-repair: no counterexample at EOT 6, EFF 4, 1 crash"
 priority = "P1"
 source = "FEATURES.md BENCH-134; R06 §12.5; Oldenburg, Zhu, Ramasubramanian, Alvaro, Fixed It For You (Nemo), CIDR 2019"
 features = ["LANG-220", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "TEST-027", "ANA-010"]
