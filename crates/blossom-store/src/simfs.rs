@@ -35,6 +35,16 @@ struct Inode {
     writes: Vec<UnsyncedWrite>,
 }
 #[derive(Clone, Default)]
+struct StateImage {
+    names: BTreeMap<PathBuf, u64>,
+    stable_names: BTreeMap<PathBuf, u64>,
+    dirs: BTreeSet<PathBuf>,
+    stable_dirs: BTreeSet<PathBuf>,
+    inodes: BTreeMap<u64, Inode>,
+    next_inode: u64,
+    generation: u64,
+}
+#[derive(Clone, Default)]
 struct State {
     names: BTreeMap<PathBuf, u64>,
     stable_names: BTreeMap<PathBuf, u64>,
@@ -46,6 +56,39 @@ struct State {
     fault: Option<FsFault>,
     trace: Vec<String>,
     generation: u64,
+    recording: bool,
+    cuts: Vec<StateImage>,
+}
+impl State {
+    fn image(&self) -> StateImage {
+        StateImage {
+            names: self.names.clone(),
+            stable_names: self.stable_names.clone(),
+            dirs: self.dirs.clone(),
+            stable_dirs: self.stable_dirs.clone(),
+            inodes: self.inodes.clone(),
+            next_inode: self.next_inode,
+            generation: self.generation,
+        }
+    }
+    fn from_image(image: StateImage) -> Self {
+        Self {
+            names: image.names,
+            stable_names: image.stable_names,
+            dirs: image.dirs,
+            stable_dirs: image.stable_dirs,
+            inodes: image.inodes,
+            next_inode: image.next_inode,
+            generation: image.generation,
+            ..Self::default()
+        }
+    }
+    fn record(&mut self, label: String) {
+        self.trace.push(label);
+        if self.recording {
+            self.cuts.push(self.image());
+        }
+    }
 }
 /// Shared deterministic filesystem; open handles refer to inodes rather than mutable path names.
 #[derive(Clone, Default)]
@@ -65,20 +108,74 @@ impl SimFs {
     pub fn trace(&self) -> Result<Vec<String>, StoreError> {
         Ok(self.state()?.trace.clone())
     }
+    /// Record a deep filesystem image after each mutating Vfs operation.
+    pub fn enable_crash_recording(&self) -> Result<(), StoreError> {
+        let mut state = self.state()?;
+        state.recording = true;
+        state.cuts.clear();
+        Ok(())
+    }
+    /// Number of captured syscall cuts.
+    pub fn cut_count(&self) -> Result<usize, StoreError> {
+        Ok(self.state()?.cuts.len())
+    }
+    /// Independent filesystem states at every captured syscall cut.
+    pub fn recorded_cuts(&self) -> Result<Vec<Self>, StoreError> {
+        Ok(self
+            .state()?
+            .cuts
+            .iter()
+            .cloned()
+            .map(|image| Self {
+                state: Arc::new(Mutex::new(State::from_image(image))),
+            })
+            .collect())
+    }
+    /// Pending writes in the same stable inode order used when applying crash fates.
+    pub fn unsynced_writes(&self) -> Result<Vec<UnsyncedWrite>, StoreError> {
+        Ok(self
+            .state()?
+            .inodes
+            .values()
+            .flat_map(|inode| inode.writes.iter().cloned())
+            .collect())
+    }
     /// Deep copy for independent crash branches. Locks and open handles are not copied.
     pub fn fork(&self) -> Result<Self, StoreError> {
         let mut state = self.state()?.clone();
         state.locks.clear();
+        state.recording = false;
+        state.cuts.clear();
         Ok(Self {
             state: Arc::new(Mutex::new(state)),
         })
     }
     /// Crash discards volatile namespace changes. Data fates are applied to stable inode contents.
     pub fn crash(&mut self, fate: &mut dyn FnMut(&UnsyncedWrite) -> WriteFate) -> Result<(), StoreError> {
+        self.crash_result(&mut |write| Ok(fate(write)))
+    }
+    /// Apply exactly one fate per unsynced write, rejecting missing or extra choices.
+    pub fn crash_with_fates(&mut self, fates: &[WriteFate]) -> Result<(), StoreError> {
+        let count = self
+            .state()?
+            .inodes
+            .values()
+            .map(|inode| inode.writes.len())
+            .sum::<usize>();
+        if count != fates.len() {
+            return Err(invalid("crash fate count does not match unsynced writes"));
+        }
+        let mut fates = fates.iter().copied();
+        self.crash_result(&mut |_| fates.next().ok_or_else(|| invalid("crash fate missing")))
+    }
+    fn crash_result(
+        &mut self,
+        fate: &mut dyn FnMut(&UnsyncedWrite) -> Result<WriteFate, StoreError>,
+    ) -> Result<(), StoreError> {
         let mut state = self.state()?;
         for inode in state.inodes.values_mut() {
             for write in &inode.writes {
-                match fate(write) {
+                match fate(write)? {
                     WriteFate::Lost => {}
                     WriteFate::Survive => apply(&mut inode.stable, write, write.bytes.len())?,
                     WriteFate::Torn { sectors } => {
@@ -169,6 +266,7 @@ impl VfsFile for SimFile {
         let count = match s.fault {
             Some(FsFault::AppendEnospc) => {
                 s.fault = None;
+                s.record(format!("append_failed {}", self.path.display()));
                 return Err(io::Error::from_raw_os_error(28).into());
             }
             Some(FsFault::ShortWrite(n)) => {
@@ -189,7 +287,7 @@ impl VfsFile for SimFile {
         };
         apply(&mut inode.live, &write, write.bytes.len())?;
         inode.writes.push(write);
-        s.trace.push(format!("append {}", self.path.display()));
+        s.record(format!("append {}", self.path.display()));
         if count.is_some() {
             return Err(io::Error::new(io::ErrorKind::WriteZero, "injected short write").into());
         }
@@ -205,11 +303,12 @@ impl VfsFile for SimFile {
         if fail {
             inode.live = inode.stable.clone();
             inode.writes.clear();
+            s.record(format!("sync_data_failed {}", self.path.display()));
             return Err(io::Error::from_raw_os_error(5).into());
         }
         inode.stable = inode.live.clone();
         inode.writes.clear();
-        s.trace.push(format!("sync_data {}", self.path.display()));
+        s.record(format!("sync_data {}", self.path.display()));
         Ok(())
     }
     fn len(&self) -> Result<u64, StoreError> {
@@ -232,6 +331,7 @@ impl VfsFile for SimFile {
         };
         apply(&mut inode.live, &write, 0)?;
         inode.writes.push(write);
+        s.record(format!("truncate {}", self.path.display()));
         Ok(())
     }
 }
@@ -271,6 +371,7 @@ impl Vfs for SimFs {
             s.next_inode = id.checked_add(1).ok_or_else(|| invalid("inode overflow"))?;
             s.inodes.insert(id, Inode::default());
             s.names.insert(path.into(), id);
+            s.record(format!("create {}", path.display()));
             id
         };
         let generation = s.generation;
@@ -290,11 +391,13 @@ impl Vfs for SimFs {
         let mut s = self.state()?;
         let id = s.names.remove(from).ok_or_else(|| not_found(from))?;
         s.names.insert(to.into(), id);
-        s.trace.push(format!("rename {} {}", from.display(), to.display()));
+        s.record(format!("rename {} {}", from.display(), to.display()));
         Ok(())
     }
     fn remove(&self, path: &Path) -> Result<(), StoreError> {
-        self.state()?.names.remove(path).ok_or_else(|| not_found(path))?;
+        let mut s = self.state()?;
+        s.names.remove(path).ok_or_else(|| not_found(path))?;
+        s.record(format!("remove {}", path.display()));
         Ok(())
     }
     fn list(&self, dir: &Path) -> Result<Vec<PathBuf>, StoreError> {
@@ -317,6 +420,7 @@ impl Vfs for SimFs {
         }
         if matches!(s.fault, Some(FsFault::SyncEio)) {
             s.fault = None;
+            s.record(format!("sync_dir_failed {}", dir.display()));
             return Err(io::Error::from_raw_os_error(5).into());
         }
         s.stable_names.retain(|p, _| p.parent() != Some(dir));
@@ -335,13 +439,15 @@ impl Vfs for SimFs {
             .cloned()
             .collect::<Vec<_>>();
         s.stable_dirs.extend(dirs);
-        s.trace.push(format!("sync_dir {}", dir.display()));
+        s.record(format!("sync_dir {}", dir.display()));
         Ok(())
     }
     fn create_dir_all(&self, path: &Path) -> Result<(), StoreError> {
         let mut s = self.state()?;
-        for p in path.ancestors() {
-            s.dirs.insert(p.into());
+        for p in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
+            if s.dirs.insert(p.into()) {
+                s.record(format!("mkdir {}", p.display()));
+            }
         }
         Ok(())
     }

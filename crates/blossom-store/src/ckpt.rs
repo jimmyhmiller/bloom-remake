@@ -37,6 +37,10 @@ pub struct FileCheckpoints {
     dir: PathBuf,
 }
 impl FileCheckpoints {
+    /// Read an existing checkpoint namespace without changing the crash image.
+    pub fn from_existing(fs: Arc<dyn Vfs>, dir: &Path) -> Self {
+        Self { fs, dir: dir.into() }
+    }
     /// Create the checkpoint namespace and durably publish its directory entry.
     pub fn new(fs: Arc<dyn Vfs>, dir: &Path) -> Result<Self, StoreError> {
         crate::vfs::durable_dir(&*fs, &dir.join("ckpt"))?;

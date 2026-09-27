@@ -210,6 +210,29 @@ mod tests {
         ));
     }
     #[test]
+    fn synced_marker_and_receipt_media_fault_refused() {
+        let (fs, root) = sim();
+        let dir = root.join("wal");
+        let mut wal = FileWal::create(fs.clone(), &dir, header(), Lsn(0)).unwrap();
+        wal.append(&rec(1, 1, b"data")).unwrap();
+        wal.sync().unwrap();
+        let segment = dir.join("00000000000000000001.seg");
+        let receipt = dir.join("00000000000000000001.ack");
+        let marker_offset = super::wal::test_header_len(&header()) + 41 + 4;
+        let marker_fault = fs.fork().unwrap();
+        marker_fault.corrupt(&segment, marker_offset + 10).unwrap();
+        assert!(matches!(
+            WalScan::scan(&marker_fault, &dir, [7; 16], true),
+            Err(StoreError::Corruption { .. })
+        ));
+        let receipt_fault = fs.fork().unwrap();
+        receipt_fault.corrupt(&receipt, 40).unwrap();
+        assert!(matches!(
+            WalScan::scan(&receipt_fault, &dir, [7; 16], true),
+            Err(StoreError::Corruption { .. })
+        ));
+    }
+    #[test]
     fn failed_sync_poisons() {
         let (fs, root) = sim();
         let mut wal = FileWal::create(fs.clone(), &root.join("wal"), header(), Lsn(0)).unwrap();
@@ -296,34 +319,72 @@ mod tests {
     }
     #[test]
     fn crashcheck_store_workload() {
-        let (fs, root) = sim();
-        let dir = root.join("wal");
-        let mut wal = FileWal::create(fs.clone(), &dir, header(), Lsn(0)).unwrap();
-        let cut0 = crash::CrashPoint {
-            fs: fs.fork().unwrap(),
-            acknowledged: vec![],
-            wal_dir: dir.clone(),
-            uuid: [7; 16],
-        };
-        let first = rec(1, 1, b"data");
-        wal.append(&first).unwrap();
-        let cut1 = crash::CrashPoint {
-            fs: fs.fork().unwrap(),
-            acknowledged: vec![],
-            wal_dir: dir.clone(),
-            uuid: [7; 16],
-        };
-        wal.sync().unwrap();
-        let cut2 = crash::CrashPoint {
-            fs: fs.fork().unwrap(),
-            acknowledged: vec![first],
-            wal_dir: dir,
-            uuid: [7; 16],
-        };
-        assert_eq!(
-            crash::enumerate_crash_points(|| Ok(vec![cut0, cut1, cut2]), 100).unwrap(),
-            4
+        let checked = crash::enumerate_crash_points(
+            |fs| {
+                let root = PathBuf::from("/store");
+                fs.create_dir_all(&root)?;
+                let dir = root.join("wal");
+                let mut workload = crash::CrashWorkload::new(dir.clone(), [7; 16]);
+                let mut wal = FileWal::create(fs.clone(), &dir, header(), Lsn(0))?;
+                let first = rec(1, 1, b"data");
+                wal.append(&first)?;
+                workload.appended(first);
+                let synced = wal.sync()?;
+                workload.acknowledged(&fs, synced)?;
+                let mut checkpoints = FileCheckpoints::new(fs.clone(), &root)?;
+                let mut snapshot = DurableSnapshot::default();
+                snapshot.relations.insert(3, b"checkpoint".to_vec());
+                let id = checkpoints.write(snapshot.clone(), synced.synced_tick().unwrap())?;
+                checkpoints.install(id)?;
+                workload.checkpoint = Some((root, snapshot));
+                Ok(workload)
+            },
+            10000,
+        )
+        .unwrap();
+        assert!(
+            checked > 5000,
+            "every mutating Vfs call and synced byte must be explored"
         );
+    }
+    #[test]
+    fn simfs_captures_each_mutation_cut() {
+        let fs = SimFs::default();
+        fs.enable_crash_recording().unwrap();
+        fs.create_dir_all(Path::new("/store")).unwrap();
+        let mut file = fs
+            .open(
+                Path::new("/store/a"),
+                OpenOpts {
+                    create_new: true,
+                    ..OpenOpts::default()
+                },
+            )
+            .unwrap();
+        file.append(b"data").unwrap();
+        file.sync_data().unwrap();
+        file.truncate(2).unwrap();
+        fs.rename(Path::new("/store/a"), Path::new("/store/b")).unwrap();
+        fs.sync_dir(Path::new("/store")).unwrap();
+        fs.remove(Path::new("/store/b")).unwrap();
+        assert_eq!(fs.cut_count().unwrap(), fs.trace().unwrap().len());
+        assert_eq!(fs.recorded_cuts().unwrap().len(), fs.cut_count().unwrap());
+    }
+    #[test]
+    fn crash_fate_count_mismatch_is_error() {
+        let (fs, root) = sim();
+        let mut file = fs
+            .open(
+                &root.join("pending"),
+                OpenOpts {
+                    create_new: true,
+                    ..OpenOpts::default()
+                },
+            )
+            .unwrap();
+        file.append(b"unsynced").unwrap();
+        let mut copy = fs.fork().unwrap();
+        assert!(copy.crash_with_fates(&[]).is_err());
     }
     #[test]
     fn wal_recovery_fuzz_mirror() {
