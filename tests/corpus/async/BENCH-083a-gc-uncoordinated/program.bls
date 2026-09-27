@@ -62,6 +62,9 @@ collect: on addr(a), root_edb(self, r), not reach(r, a) {
     emit garbage(a);
 }
 
-keep: while garbage(a) {
+/// `garbage` is written only by event-driven statements, this one included, so it is an event relation
+/// (LANGUAGE §8.5, the greatest fixpoint) and the loop that carries it to the next tick is an `on`
+/// handler, although `garbage` then holds in every later tick.
+keep: on garbage(a) {
     next garbage(a);
 }

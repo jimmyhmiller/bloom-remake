@@ -53,10 +53,12 @@ resend: while s(u) {
     send m(u);
 }
 
-first: while not started(), keep(u) {
+/// `keep` is derived from the loopback `m` (through `new`), so it is an event relation (LANGUAGE §8.5) and
+/// `first` and `extend` are `on` handlers: each fires for the elements that arrive in a step.
+first: on not started(), keep(u) {
     next f(u);
 }
 
-extend: while started(), last(u), keep(v) {
+extend: on started(), last(u), keep(v) {
     next n(u, v);
 }

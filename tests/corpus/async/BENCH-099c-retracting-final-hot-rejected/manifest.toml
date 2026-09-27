@@ -6,6 +6,10 @@
 # unsealed correction stream, so no seal closes them and hot is NEVER-FINAL (R13 §9.3's invertibility test: "its
 # writers include a Z-set input or channel that can carry negative weights"). The one diagnostic is at the
 # `final output hot` declaration.
+#
+# BLS0705 comes from blossom-analysis (ANA-120), not from the frontend (ARCHITECTURE §13.1: "CALM and determinism
+# diagnostics (…, BLS0705, …) come from blossom-analysis over the IR"), so the expectation belongs to the analysis
+# backend; the compile backend runs the frontend only (PLAN §5.2).
 schema = 1
 id = "BENCH-099"
 title = "Batch completion, retracting variant: `final output hot` over Z-set counts is rejected as NEVER-FINAL"
@@ -17,7 +21,18 @@ derived = true
 expected_from = "literature"
 notes = "The correction stream is unsealed on purpose; see docs/plan/notes/M1.4.md (BENCH-099)."
 
-[backend.compile]
+# The deployment of BENCH-099a: the program's `split_of` facts name the mappers M1-M4, so their Node values decode
+# through the deployment directory (PLAN §5.1), and a multi-role program has no default deployment.
+[deploy]
+nodes = [
+    { name = "M1", role = "Mapper" },
+    { name = "M2", role = "Mapper" },
+    { name = "M3", role = "Mapper" },
+    { name = "M4", role = "Mapper" },
+    { name = "R", role = "Reducer" },
+]
+
+[backend.analysis]
 status = "unimplemented"
 unimplemented = ["LANG-009", "LANG-010", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-138", "LANG-153", "LANG-154", "LANG-181", "LANG-207", "LANG-212", "ANA-120", "SEM-016", "SEM-017"]
 until = "M6"

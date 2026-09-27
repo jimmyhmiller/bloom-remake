@@ -25,6 +25,9 @@ arrive: on p_msg() {
     emit p();
 }
 
-keep: while p() {
+/// `p` is written only by event-driven statements, this one included, so it is an event relation
+/// (LANGUAGE §8.5, the greatest fixpoint) and the loop that carries it to the next tick is an `on`
+/// handler, although `p` then holds in every later tick.
+keep: on p() {
     next p();
 }

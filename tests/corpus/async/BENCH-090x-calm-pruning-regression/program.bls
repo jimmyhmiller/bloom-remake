@@ -3,8 +3,11 @@
 //! The server records each put in a table, and raises an alarm while it has seen put(1) but not put(2). The alarm is
 //! sent only if put(1) and put(2) arrive in different ticks, with put(1) first. The receive side of `put` reaches a
 //! negation through persistent state (`got`), so `put` deliveries are branching and the simulator must split them
-//! across tick batches (TEST-003). An early draft stopped the branching search at persistent state; it would deliver
-//! both puts in one batch in every run and never find the alarm.
+//! across tick batches (TEST-003). An early draft stopped the branching search at persistent state; when both puts
+//! have arrived at the server, it would deliver them in one batch in every run and never find the alarm.
+//!
+//! ARCHITECTURE §6.2 writes `send alarm(1) to MONITOR`. Rules never build node names from strings (LANGUAGE §2.4), so
+//! the monitor is named by a `static` fact and joined (`monitor(m)`); the rule's meaning is the same.
 
 program calm_pruning_regression version 1;
 

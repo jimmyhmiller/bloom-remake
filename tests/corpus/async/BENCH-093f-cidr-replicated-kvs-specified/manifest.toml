@@ -4,20 +4,21 @@
 # R03 T30: "With BestEffortMulticast StaticMembership mixed in, it does not [warn]." The multicast now reads mcast_send
 # and supplies mcast_done and pipe_out, so a put reaches the store and the store's reply: the dataflow from kvput to
 # kvget_response exists. Its path label is D: the replicated path is asynchronous and then crosses the upsert (and
-# the per-key choice), A followed by N (ANA-023).
+# the per-key choice), A followed by N (ANA-023). This case checks that label from M5 on; the absence of ANA-008
+# reports (BLS1002) on the same program is BENCH-093g, which waits for ANA-008 (M6).
 schema = 1
 id = "BENCH-093"
 title = "CIDR'11 ReplicatedKVS with multicast and membership: a complete dataflow from kvput, labeled D"
 priority = "P0"
 source = "R03 T30 and §5.5(a); R05 T12; CIDR 2011 §4.5 and Figures 6-7; bud-sandbox kvs/kvs.rb, delivery/multicast.rb"
-features = ["LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "LANG-063", "LANG-064", "LANG-082", "LANG-108", "ANA-022", "ANA-023"]
+features = ["LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "LANG-063", "LANG-064", "LANG-082", "LANG-108", "LANG-241", "ANA-022", "ANA-023"]
 program = "program.bls"
 derived = false
 expected_from = "literature"
 
 [backend.analysis]
 status = "unimplemented"
-unimplemented = ["LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "LANG-063", "LANG-064", "LANG-082", "LANG-108", "ANA-022", "ANA-023"]
+unimplemented = ["LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "LANG-063", "LANG-064", "LANG-082", "LANG-108", "LANG-241", "ANA-022", "ANA-023"]
 until = "M5"
 
 [expect_analysis]

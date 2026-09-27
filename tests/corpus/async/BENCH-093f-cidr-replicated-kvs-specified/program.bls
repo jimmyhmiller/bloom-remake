@@ -77,16 +77,17 @@ list_group: while private_members(i, h) {
 
 // ---- Multicast over BestEffortDelivery
 
-/// BestEffortDelivery's `pipe_chan`.
-channel pipe_chan(src: Node, ident: u64, op: String, origin: Node, key: String, reqid: u64, value: String);
+/// BestEffortDelivery's `pipe_chan`. Bud carries the sending address as a payload column (`src`); here the receiver
+/// takes it from the channel's authenticated sender (`from`, LANGUAGE §18.2), which a payload cannot forge.
+channel pipe_chan(ident: u64, op: String, origin: Node, key: String, reqid: u64, value: String);
 
 /// `pipe_in <= (mcast_send * member).pairs {...} unless m.host == ip_port`, and `pipe_chan <~ pipe_in`.
 fan_out: on mcast_send(i, op, o, k, r, v), member(_, h) where h != self {
-    send pipe_chan(self, i, op, o, k, r, v) to h;
+    send pipe_chan(i, op, o, k, r, v) to h;
 }
 
-/// `pipe_out <= pipe_chan`.
-deliver: on pipe_chan(s, i, op, o, k, r, v) {
+/// `pipe_out <= pipe_chan`, with the sender as `pipe_out`'s `src`.
+deliver: on pipe_chan(i, op, o, k, r, v) from s {
     emit pipe_out(s, i, op, o, k, r, v);
 }
 
