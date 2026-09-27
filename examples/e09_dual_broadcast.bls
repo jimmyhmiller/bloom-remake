@@ -1,0 +1,73 @@
+//! E9. Two instances of E2's reliable broadcast, with interposition on one interface.
+
+program chat version 1;
+
+use e02_reliable_broadcast::{ReliableBroadcast, MsgId};
+
+/// Every node of the deployment, this one included.
+static member(n: Node);
+
+/// A fast instance for small control messages and a slow one for bulk data, with different payload types and
+/// retry periods. The two instances are disjoint: their channels are `data.msg` and `control.msg`, whose wire
+/// identities include the instance path, so a bulk message can never be delivered by the control instance.
+///
+/// Every write to the bulk instance's `bcast` interface is interposed on, including `publish_bulk` below:
+/// oversized payloads are refused before anything is sent, and admitted bytes are metered.
+pub module DualBroadcast(peers: rel(n: Node), MAX_PAYLOAD: u64 = 65536) {
+    import ReliableBroadcast<Bytes>(RETRY = 2s) as data;
+    import ReliableBroadcast<String>(RETRY = 200ms) as control;
+
+    input publish(id: MsgId, payload: Bytes);
+    input command(id: MsgId, text: String);
+    output received(origin: Node, id: MsgId, payload: Bytes);
+    output command_received(origin: Node, id: MsgId, text: String);
+    output published(id: MsgId);
+    output rejected(id: MsgId, size: u64);
+    output bulk_bytes(total: u64) key();
+
+    /// Admitted bulk payloads, by id.
+    table accepted(id: MsgId, size: u64);
+
+    /// Both instances see the same group. Instance inputs are tick-local, so they are fed at every tick.
+    membership: while peers(n) {
+        emit data.members(n);
+        emit control.members(n);
+    }
+
+    publish_bulk: on publish(id, p) {
+        emit data.bcast(id, p);
+    }
+    publish_ctrl: on command(id, t) {
+        emit control.bcast(id, t);
+    }
+    deliver_bulk: on data.deliver(o, id, p) {
+        emit received(o, id, p);
+    }
+    deliver_ctrl: on control.deliver(o, id, t) {
+        emit command_received(o, id, t);
+    }
+    /// `bcast_done` is derived from standing state inside the instance, so this handler is level-triggered.
+    /// It still fires in one tick per message, because the instance reports each completion once.
+    done_bulk: while data.bcast_done(id) {
+        emit published(id);
+    }
+
+    /// `_id` is a named variable: it keeps two payloads of equal size apart, because the sum folds over distinct
+    /// valuations. With `_` in its place, equal sizes would be summed once (and the compiler would warn).
+    view metered(total = sum!(size default 0)) = accepted(_id, size);
+    report_bytes: while metered(t) {
+        emit bulk_bytes(t);
+    }
+
+    interpose data.bcast as (outside, inside) {
+        admit: on outside(id, p) where p.len() <= MAX_PAYLOAD {
+            emit inside(id, p);
+            emit accepted(id, p.len());
+        }
+        refuse: on outside(id, p) where p.len() > MAX_PAYLOAD {
+            emit rejected(id, p.len());
+        }
+    }
+}
+
+import DualBroadcast(peers = member) as chat;

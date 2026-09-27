@@ -1,0 +1,116 @@
+//! E10. Verification specs: LDFI for two broadcast protocols (Molly's simplog and ack_rb, whose verdicts must
+//! match Molly's exactly) and election safety for E3, checked on explored runs and proved by induction.
+//! This file is a library of modules and specs: it has no `program` header.
+
+/// Molly's simplog: one attempt, no retries.
+pub module SimpleLog {
+    static neighbor(n: Node);
+    input bcast(payload: String);
+    table log(payload: String);
+    channel log_msg(payload: String);
+
+    origin: on bcast(p) {
+        emit log(p);
+        for neighbor(n) {
+            send log_msg(p) to n;
+        }
+    }
+    receive: on log_msg(p) {
+        emit log(p);
+    }
+}
+
+/// Molly's ack_rb: every node that logs a message relays it to each neighbor until that neighbor acknowledges.
+pub module AckRb {
+    static neighbor(n: Node);
+    input bcast(payload: String);
+    table log(payload: String);
+    table acked(by: Node, payload: String);
+    channel rbcast(payload: String);
+    channel ack(payload: String);
+
+    origin: on bcast(p) {
+        emit log(p);
+    }
+    /// Level-triggered on purpose: resent at every tick until acknowledged (ODD-05's literal semantics).
+    relay: while log(p), neighbor(n), not acked(n, p) {
+        send rbcast(p) to n;
+    }
+    receive: on rbcast(p) from s {
+        emit log(p);
+        send ack(p) to s;
+    }
+    note_ack: on ack(p) from s {
+        emit acked(s, p);
+    }
+}
+
+/// Molly's delivery/deliv_assert.ded, as a reusable spec fragment (a spec with no target).
+spec DelivAssert {
+    /// Someone has the message in its log, but one of its neighbors does not.
+    view missing_log(a, p) = log(p) @ x, neighbor(a) @ x, not log(p) @ a;
+    /// Precondition: a node other than the broadcaster logged the message and did not crash.
+    view pre(x, p) = log(p) @ x, not bcast(p) @ x at tick 1, not crashed(x);
+    /// Outcome: nobody who could have the message is missing it.
+    view post(x, p) = log(p) @ x, not missing_log(_, p);
+}
+
+/// Molly's delivery/bcast_edb.ded: three nodes in a clique, and A broadcasts at tick 1.
+spec Clique {
+    nodes A, B, C;
+    fact neighbor(B) @ A;
+    fact neighbor(C) @ A;
+    fact neighbor(A) @ B;
+    fact neighbor(C) @ B;
+    fact neighbor(A) @ C;
+    fact neighbor(B) @ C;
+    fact bcast("hello") @ A at tick 1;
+}
+
+/// Molly: simplog + deliv_assert with EOT 4, EFF 2 and no crashes has a counterexample. The minimal falsifier
+/// is one omission, A → B at tick 1: C logs the message, so `pre` holds, while B never does.
+spec SimpleLogFaults for SimpleLog {
+    include Clique;
+    include DelivAssert;
+    faults { eot: 4, eff: 2, crashes: 0, model: sync }
+    check ldfi expect fails;
+}
+
+/// Molly: ack_rb + deliv_assert with EOT 8, EFF 6 and one crash has no counterexample.
+spec AckRbFaults for AckRb {
+    include Clique;
+    include DelivAssert;
+    faults { eot: 8, eff: 6, crashes: 1, model: sync }
+
+    /// A live holder and a live neighbor that lacks the message. After the last omission, every live holder
+    /// resends to every unacknowledged live neighbor, so such pairs disappear within one round.
+    view missing_live(a, p) = log(p) @ x, neighbor(a) @ x, not log(p) @ a, not crashed(x), not crashed(a);
+    liveness spreads: eventually not missing_live(_, "hello") within 2 ticks after eff;
+
+    check ldfi expect holds;
+    check bmc { ticks: 8 } expect holds;
+}
+
+/// Election safety for E3 (Raft §5.2): at most one leader per term.
+spec RaftElectionSafety for e03_raft_election {
+    nodes S1, S2, S3;
+    assign Server = [S1, S2, S3];
+    faults { eot: 30, eff: 20, crashes: 1, model: async, delay: 3, round: 10ms }
+
+    /// The history form: no two nodes ever won the same term, anywhere in the run.
+    invariant election_safety: never ever won(t) @ a, ever won(t) @ b where a != b;
+
+    /// The state form, and the lemmas that make it inductive. Each is a denial constraint: any row is a
+    /// counterexample. `quorum` keeps the first-order encoding in EPR (VER-008).
+    invariant one_leader: never won(t) @ a, won(t) @ b where a != b;
+    invariant vote_once: never voted_for(t, x) @ n, voted_for(t, y) @ n where x != y;
+    invariant reply_backed: never sent vote(t, true) @ c from v, not voted_for(t, c) @ v;
+    invariant tally_backed: never votes(t, s) @ c, v in s, not voted_for(t, c) @ v;
+    invariant won_by_quorum: never won(t) @ l, not quorum v in Server { voted_for(t, l) @ v };
+
+    prove one_leader by induction using vote_once, reply_backed, tally_backed, won_by_quorum;
+
+    check bmc { ticks: 30, delay: 3 } expect holds;
+    check smt expect holds;
+    check sim { runs: 20000, seed: 7 } expect holds;
+}

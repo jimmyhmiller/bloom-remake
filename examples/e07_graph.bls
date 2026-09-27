@@ -1,0 +1,67 @@
+//! E7. Single-node analytics: transitive closure, shortest paths on a lattice, and stratified negation.
+//!
+//! Every relation is derived from static facts, so all the work happens at tick 0. Expected outputs:
+//!
+//!   reachable   (1,1) (1,2) (1,3) (2,1) (2,2) (2,3) (3,1) (3,2) (3,3) (4,5)
+//!   shortest    (1,1,7) (1,2,4) (1,3,5) (2,1,3) (2,2,7) (2,3,1) (3,1,2) (3,2,6) (3,3,7) (4,5,3)
+//!   first_hop   (1,1,2) (1,2,2) (1,3,2) (2,1,3) (2,2,3) (2,3,3) (3,1,1) (3,2,1) (3,3,1) (4,5,5)
+//!   unreachable (1,4) (1,5) (2,4) (2,5) (3,4) (3,5) (4,1) (4,2) (4,3) (5,1) (5,2) (5,3) (5,4)
+
+program graph_analytics version 1;
+
+static node(id: u32);
+static edge(src: u32, dst: u32, w: u64);
+
+fact node(1);
+fact node(2);
+fact node(3);
+fact node(4);
+fact node(5);
+fact edge(1, 2, 4);
+fact edge(2, 3, 1);
+fact edge(1, 3, 7);
+fact edge(3, 1, 2);
+fact edge(4, 5, 3);
+
+output reachable(src: u32, dst: u32);
+output shortest(src: u32, dst: u32, d: u64) key(src, dst);
+output first_hop(src: u32, dst: u32, via: u32);
+output unreachable(src: u32, dst: u32);
+
+/// Transitive closure: positive recursion, checked to be monotone.
+monotone view reach(a, b) {
+    edge(a, b, _);
+    reach(a, c), edge(c, b, _);
+}
+
+/// Shortest distances as a min-lattice, so the minimum can sit inside the recursion: `d0 + w` on an `LMin` is a
+/// morphism, and non-negative weights make the in-tick fixpoint finite (CR-53).
+monotone view dist(a, b, d: LMin<u64>) {
+    edge(a, b, w), let d = LMin::of(w);
+    dist(a, c, d0), edge(c, b, w), let d = d0 + w;
+}
+
+/// The exact distance. `reveal!` is a point of order, so this view sits one stratum above `dist`. `d` comes from
+/// a generator, so it is never bottom and `reveal!(d)` has type `u64`.
+view distance(a, b, n) = dist(a, b, d), let n = reveal!(d);
+
+/// The first hop of a shortest path: an exemplary minimum that keeps every tie.
+view via_cost(a, c, via, cost) {
+    edge(a, c, w), let via = c, let cost = w;
+    edge(a, b, w), distance(b, c, n), let via = b, let cost = w + n;
+}
+view best_hop(a, c, via) = via_cost(a, c, via, cost), argmin!(cost per (a, c));
+
+report_reach: while reach(a, b) {
+    emit reachable(a, b);
+}
+report_distance: while distance(a, b, n) {
+    emit shortest(a, b, n);
+}
+report_hop: while best_hop(a, c, via) {
+    emit first_hop(a, c, via);
+}
+/// Stratified negation: ordered pairs of distinct nodes with no path between them.
+report_unreachable: while node(a), node(b), not reach(a, b) where a != b {
+    emit unreachable(a, b);
+}

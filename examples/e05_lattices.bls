@@ -1,0 +1,161 @@
+//! E5. Lattices: vector clocks, a monotone shopping cart built on a user-defined lattice, and a quorum threshold.
+
+program lattice_demo version 1;
+
+// =============== (a) vector clocks ===============
+
+/// Vector clocks over gossip (`VClock` is the prelude's `LMap<Node, LMax<u64>>`). A tick with local events is
+/// one step of this node's entry. Received clocks are merged for the next tick, so the comparisons in this tick
+/// see my clock as it was before the arrival.
+pub module ClockGossip(peers: rel(n: Node), SYNC: Duration = 500ms) {
+    input local_event(id: u64);
+    /// A received event that my history already covered when it arrived.
+    output stale(origin: Node, id: u64);
+    /// A received event concurrent with my history when it arrived.
+    output concurrent(origin: Node, id: u64);
+    /// At least ten events from `n` are known here: a threshold, so once true it is true forever.
+    final output heard_ten(n: Node);
+
+    cell clock: VClock;
+    channel stamped(id: u64, vc: VClock);
+    channel sync(vc: VClock);
+    timer gossip every SYNC;
+
+    /// `at` is a morphism, `join` with the constant 0 gives a missing entry a monotone default (LANG-283), and
+    /// `+ 1` on an `LMax` is a morphism: no point of order.
+    stamp: on local_event(id), let vc = clock.join(map[self => clock.at(self).join(0) + 1]) {
+        next clock(vc);
+        for peers(p) where p != self {
+            send stamped(id, vc) to p;
+        }
+    }
+    /// Comparing two clocks is exact and needs a bang: "is this concurrent?" is a non-monotone question.
+    receive: on stamped(id, vc) from o {
+        next clock(vc);
+        if vc.leq!(clock) {
+            emit stale(o, id);
+        }
+        if vc.concurrent!(clock) {
+            emit concurrent(o, id);
+        }
+    }
+    anti_entropy: on gossip, peers(p) where p != self {
+        send sync(clock) to p;
+    }
+    merge_sync: on sync(vc) {
+        next clock(vc);
+    }
+    ten: while peers(n) where clock.at(n) >= 10 {
+        emit heard_ten(n);
+    }
+}
+
+// =============== (b) a monotone shopping cart on a user-defined lattice ===============
+
+pub struct CartOp {
+    item: String,
+    delta: i64,
+}
+
+/// One session's cart as a replica knows it. It is a product of built-in lattices, so its merge, bottom and laws
+/// hold by construction; only the method classes below are claims to check. Two different operations under one
+/// id make the `LPoint` a hard Conflict error, as in Bloom's lcart.
+pub lattice Cart {
+    ops: LMap<u64, LPoint<CartOp>>,
+    expect: LPoint<u64>,
+}
+
+impl Cart {
+    /// Complete once checkout has fixed the number of operations and that many are here. A threshold: once
+    /// true, true for every larger cart. The law harness tests the claim and the SMT backend proves it where it
+    /// can (TEST-083, VER-014).
+    threshold fn complete(self) -> bool {
+        match reveal!(self.expect) {
+            Some(n) => reveal!(self.ops).len() >= n,
+            None => false,
+        }
+    }
+
+    /// The cart's contents. Stable after `complete`: once `complete` holds, no larger cart changes the result,
+    /// so a read guarded by `complete` is monotone (Bloom^L's "monotone, then immutable"). Revealing the map
+    /// gives `Map<u64, CartOp>`: map entries are never bottom, so their `LPoint`s reveal to plain values.
+    stable fn summary(self) -> Map<String, i64> after complete {
+        reveal!(self.ops).values().fold(map[], |acc, o| acc.insert(o.item, acc.get(o.item).unwrap_or(0) + o.delta))
+    }
+}
+
+pub module MonotoneCart(replicas: rel(n: Node), SYNC: Duration = 1s) {
+    input add_item(session: u64, op: u64, item: String, delta: i64);
+    input checkout(session: u64, nops: u64);
+    /// The contents of a completed cart. Final when emitted: it never changes afterwards.
+    final output receipt(session: u64, items: Map<String, i64>) key(session);
+
+    channel cart_sync(session: u64, cart: Cart);
+    table carts(session: u64, cart: Cart);
+    timer sync every SYNC;
+
+    /// A product-lattice literal may leave fields out; they are bottom.
+    add: on add_item(s, op, item, delta) {
+        emit carts(s, Cart { ops: map[op => LPoint::of(CartOp { item, delta })] });
+    }
+    close: on checkout(s, n) {
+        emit carts(s, Cart { expect: LPoint::of(n) });
+    }
+    /// Anti-entropy ships whole carts. Duplicates and reordering are harmless because the receiver merges.
+    ship: on sync, carts(s, c), replicas(r) where r != self {
+        send cart_sync(s, c) to r;
+    }
+    absorb: on cart_sync(s, c) {
+        emit carts(s, c);
+    }
+    /// No coordination: `summary` is stable once `complete` holds.
+    finish: while carts(s, c) where c.complete() {
+        emit receipt(s, c.summary());
+    }
+}
+
+// =============== (c) a quorum write: a monotone threshold ===============
+
+/// A write is committed once W replicas have stored it. The module is checked `monotone`: it contains no point of
+/// order, so `committed` is final the moment it is emitted and needs no coordination (ANA-141). Retries resend
+/// every pending write to every replica; nothing is ever deleted, so Edelweiss (ANA-061) is what reclaims them.
+pub monotone module QuorumWrite(replicas: rel(n: Node), W: u64 = 2, RETRY: Duration = 1s) {
+    input write(req: u64, key: String, val: Bytes);
+    final output committed(req: u64);
+
+    channel store(req: u64, key: String, val: Bytes);
+    channel stored(req: u64);
+    table pending(req: u64, key: String, val: Bytes);
+    table acks(req: u64, by: LSet<Node>);
+    /// The replica side.
+    table held(req: u64, key: String, val: Bytes);
+    timer retry every RETRY;
+
+    fan_out: on write(req, key, val) {
+        emit pending(req, key, val);
+        for replicas(r) {
+            send store(req, key, val) to r;
+        }
+    }
+    resend: on retry, pending(req, key, val), replicas(r) {
+        send store(req, key, val) to r;
+    }
+    keep: on store(req, key, val) from c {
+        emit held(req, key, val);
+        send stored(req) to c;
+    }
+    collect: on stored(req) from r {
+        emit acks(req, set[r]);
+    }
+    reached: while acks(req, s) where s.size() >= W {
+        emit committed(req);
+    }
+}
+
+// =============== composition ===============
+
+static member(n: Node);
+
+import ClockGossip(peers = member) as clocks;
+import MonotoneCart(replicas = member) as cart;
+import QuorumWrite(replicas = member, W = 2) as quorum;

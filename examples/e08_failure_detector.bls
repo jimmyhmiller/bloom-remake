@@ -1,0 +1,55 @@
+//! E8. A soft-state heartbeat failure detector.
+
+program failure_detector version 1;
+
+/// Every node of the deployment, this one included.
+static member(n: Node);
+
+pub module FailureDetector(members: rel(n: Node), PERIOD: Duration = 1s, TTL: Duration = 3500ms) {
+    output alive(n: Node);
+    output suspect(n: Node);
+    output went_down(n: Node);
+    output came_up(n: Node);
+
+    channel heartbeat();
+
+    /// A peer is alive while a heartbeat from it arrived within the last TTL. Each heartbeat re-derives the row
+    /// and refreshes its birth time. Expiry is decided at tick boundaries against the tick's sampled `now()`
+    /// (CR-17). The beat timer guarantees a tick at least every PERIOD, so a silent peer expires within
+    /// TTL + PERIOD. With TTL = 3.5 × PERIOD, three lost heartbeats in a row are needed to suspect a peer.
+    soft table heard(n: Node) ttl TTL max 4096;
+    table started(at: Instant) key();
+    timer beat every PERIOD;
+
+    /// Runs in the first tick of every incarnation, so a restarted node gets a fresh grace period.
+    bootstrap {
+        emit started(now());
+    }
+
+    view peer(n) = members(n) where n != self;
+    /// Nobody is suspected before one TTL has passed since this incarnation started.
+    view settled() = started(t0) where now() - t0 > TTL;
+
+    beat_out: on beat, peer(p) {
+        send heartbeat() to p;
+    }
+    beat_in: on heartbeat() from p, peer(p) {
+        emit heard(p);
+    }
+
+    report_alive: while peer(n), heard(n) {
+        emit alive(n);
+    }
+    report_suspect: while peer(n), settled(), not heard(n) {
+        emit suspect(n);
+    }
+    /// An expiry is a deletion delta (SEM-060), so `deleted heard(n)` is exactly the expiry event.
+    report_down: on deleted heard(n) {
+        emit went_down(n);
+    }
+    report_up: on inserted heard(n) {
+        emit came_up(n);
+    }
+}
+
+import FailureDetector(members = member) as fd;

@@ -1,0 +1,61 @@
+//! E1. A key-value store node: put, get and delete with acknowledgements, a durable table, and upsert.
+//!
+//! Clients are external sessions and the server is one process. Every reply is released only after the
+//! tick's durable writes are on disk (SEM-072), so an acknowledged put survives a crash of the server.
+
+program kvs version 1;
+
+pub type Key = String;
+pub type Val = Bytes;
+pub type ReqId = u64;
+
+role Client: external;
+role Server;
+
+/// Principals that may delete. Supplied by the deployment configuration.
+static admins(p: Principal);
+
+// ---- requests: external ingress. The sender of each request is the client's Session.
+channel put(id: ReqId #1, key: Key #2, val: Val #3): Client -> Server;
+channel get(id: ReqId #1, key: Key #2): Client -> Server;
+/// Narrows the inferred ACL (every Client session) to sessions whose principal is an admin.
+#[accept(external, principal in admins)]
+channel del(id: ReqId #1, key: Key #2): Client -> Server;
+
+// ---- replies: egress only, addressed to the session.
+channel put_ok(id: ReqId #1): Server -> Client;
+channel get_resp(id: ReqId #1, key: Key #2, val: Option<Val> #3): Server -> Client;
+channel del_ok(id: ReqId #1, existed: bool #2): Server -> Client;
+
+at Server {
+    /// The store: one value per key.
+    durable table store(key: Key #1, val: Val #2) key(key);
+
+    /// Puts to one key in one tick are concurrent. The greatest (session, id, value) wins, so exactly one
+    /// upsert per key reaches `store` and SEM-051 cannot fire. The cost is unique per request, so the
+    /// choice needs no seed (ANA-038 D5).
+    apply_put: on put(id, key, val) from c, choose_most!((c, id, val) per key) {
+        upsert store(key, val);
+    }
+
+    /// Every put is acknowledged, winner or not: the losers are ordered before the winner.
+    ack_put: on put(id, _, _) from c {
+        send put_ok(id) to c;
+    }
+
+    /// Reads see the state at the start of the tick (CR-04): a put in this tick is visible from the next.
+    /// `val` is first bound by the `outer` atom, so its type is `Option<Val>`.
+    read: on get(id, key) from c, outer store(key, val) {
+        send get_resp(id, key, val) to c;
+    }
+
+    /// Delete removes the exact stored row at t+1. If a put of the same key wins in the same tick, the upsert
+    /// re-inserts the key and insert wins (CR-05): the delete is ordered before the put.
+    remove: on del(id, key) from c, store(key, v) {
+        delete store(key, v);
+        send del_ok(id, true) to c;
+    }
+    remove_missing: on del(id, key) from c, not store(key, _) {
+        send del_ok(id, false) to c;
+    }
+}

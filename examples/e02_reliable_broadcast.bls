@@ -1,0 +1,70 @@
+//! E2. Reliable broadcast as a reusable module, in the style of bud-sandbox's ReliableDelivery.
+//!
+//! The origin keeps an outbox entry per (destination, message), retransmits every entry each time its timer
+//! fires until that destination acknowledges, and receivers deduplicate. Each member delivers each broadcast
+//! once per incarnation. This file is a library: it has no `program` header.
+
+pub type MsgId = u64;
+
+/// The broadcast contract. Membership is an input, so the importer decides the group (and can interpose on it).
+pub protocol Broadcast<P> {
+    /// Broadcast `payload` under an id that is unique for this origin.
+    input bcast(id: MsgId, payload: P);
+    /// The current group, supplied at every tick. Self may be listed; it is ignored.
+    input members(n: Node);
+    /// A message delivered on this node: once per (origin, id) per incarnation.
+    output deliver(origin: Node, id: MsgId, payload: P) key(origin, id);
+    /// Every other member has acknowledged `id`.
+    output bcast_done(id: MsgId);
+}
+
+pub module ReliableBroadcast<P>(RETRY: Duration = 1s): Broadcast<P> {
+    channel msg(origin: Node, id: MsgId, payload: P);
+    channel ack(origin: Node, id: MsgId);
+    timer retry every RETRY;
+
+    /// (destination, message) pairs that are not acknowledged yet.
+    table outbox(dst: Node, id: MsgId, payload: P);
+    /// Broadcasts this node originated, and those already reported complete.
+    table mine(id: MsgId);
+    table done(id: MsgId);
+    /// Messages already delivered here.
+    table seen(origin: Node, id: MsgId);
+
+    view peer(n) = members(n) where n != self;
+    view pending(id) = outbox(_, id, _);
+
+    originate: on bcast(id, payload) {
+        emit mine(id);
+        emit deliver(self, id, payload);            // the origin delivers to itself at once
+        next seen(self, id);
+        for peer(n) {
+            emit outbox(n, id, payload);            // `emit`: `pending` already holds in this tick
+            send msg(self, id, payload) to n;
+        }
+    }
+
+    /// Every unacknowledged pair is resent each time the timer fires.
+    retransmit: on retry, outbox(dst, id, payload) {
+        send msg(self, id, payload) to dst;
+    }
+
+    receive: on msg(origin, id, payload) from s {
+        send ack(origin, id) to s;                  // ack every copy: an earlier ack may have been lost
+        if not seen(origin, id) {
+            emit deliver(origin, id, payload);
+            next seen(origin, id);                  // `next`: this tick's `not seen` must not see its own write
+        }
+    }
+
+    acked: on ack(self, id) from d, outbox(d, id, p) {
+        delete outbox(d, id, p);
+    }
+
+    /// Level-triggered, but it fires in one tick only: `done` holds from the next tick on. With no other
+    /// members, `pending` is empty in the tick of the broadcast and completion is reported in that tick.
+    complete: while mine(id), not pending(id), not done(id) {
+        emit bcast_done(id);
+        next done(id);
+    }
+}
