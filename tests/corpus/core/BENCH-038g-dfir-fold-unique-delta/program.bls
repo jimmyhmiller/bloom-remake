@@ -1,0 +1,38 @@
+//! BENCH-038: lifetimes of `fold_keyed`, `unique` and `multiset_delta` (DFIR operator documentation, R08 §15 T6),
+//! adapted to CR-03 (sets per tick) and CR-46 (ordered folds run in canonical order).
+//!
+//! - `fold_keyed::<'tick>` concatenates each key's values within a tick: "oakland, berkeley, san francisco, "
+//!   in DFIR's arrival order, then "palo alto, " in the next tick. Here the fold runs in canonical order.
+//!   `fold_keyed::<'static>` remembers values across ticks.
+//! - `unique::<'tick>` re-emits 3 in the next tick; `unique::<'static>` never emits a value twice.
+//! - `multiset_delta` emits what was not in the previous tick's input. DFIR counts multiplicities (bag input);
+//!   under set semantics per tick (CR-03) a repeated value is one fact, so the delta is a set difference.
+
+program dfir_fold_unique_delta version 1;
+
+fn append_word(acc: String, w: String) -> String {
+    acc ++ w ++ ", "
+}
+
+input word(k: String, w: String);
+input num(v: u64);
+
+table all_words(k: String, w: String);
+table seen_num(v: u64);
+scratch prev_num(v: u64);
+
+view fold_tick(k, s = fold!("", append_word, w by w)) = word(k, w);
+view fold_static(k, s = fold!("", append_word, w by w)) = all_words(k, w);
+
+view unique_tick(v) = num(v);
+view unique_static(v) = num(v), not seen_num(v);
+view multiset_delta(v) = num(v), not prev_num(v);
+
+keep_word: on word(k, w) {
+    emit all_words(k, w);
+}
+
+keep_num: on num(v) {
+    next seen_num(v);
+    next prev_num(v);
+}

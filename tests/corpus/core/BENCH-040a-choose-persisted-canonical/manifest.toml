@@ -1,0 +1,163 @@
+schema = 1
+id = "BENCH-040"
+title = "Per-tick vs sticky choose over a persisted table (canonical mode): pick m,m,c,c,p,-,m; spick m,m,m,c,p,-,m"
+priority = "P0"
+source = "R12 §12 T1 (choose over a persisted table, inserts and retraction); FEATURES.md SEM-085, LANG-115, BENCH-040"
+features = ["SEM-083", "SEM-085", "LANG-065", "LANG-108", "LANG-114", "LANG-115", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+cand(a) is {m,p} at 1-2, {c,m,p} at 3, {c,p} at 4, {p} at 5, {} at 6, {m} at 7. Canonical-mode choices from R12's
+table: pick = m, m, c, c, p, -, m; spick = m, m, m, c, p, -, m (held m is revoked at 4; the held value is dropped at
+6, so 7 is a fresh choice). Bud's behaviour (m, m, m, p, p, -, m) is a reference for TEST-014 (BENCH-049), not an
+expectation of ours. Judgement call: canonical mode is realized with choose_least!/least (see the program)."""
+
+[deploy]
+seed = 42
+
+[run]
+ticks = 9
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-083", "SEM-085", "LANG-065", "LANG-108", "LANG-114", "LANG-115", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-083", "SEM-085", "LANG-065", "LANG-108", "LANG-114", "LANG-115", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ins"
+rows = [["a", "m"], ["a", "p"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "ins"
+rows = [["a", "c"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "del"
+rows = [["a", "m"]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel = "del"
+rows = [["a", "c"]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "del"
+rows = [["a", "p"]]
+
+[[input]]
+node = "n1"
+tick = 7
+rel = "ins"
+rows = [["a", "m"]]
+
+[[expect]]
+node = "n1"
+rel = "cand"
+tick = 3
+rows = [["a", "c"], ["a", "m"], ["a", "p"]]
+
+[[expect]]
+node = "n1"
+rel = "cand"
+tick = 4
+rows = [["a", "c"], ["a", "p"]]
+
+[[expect]]
+node = "n1"
+rel = "pick"
+tick = 1
+rows = [["a", "m"]]
+
+[[expect]]
+node = "n1"
+rel = "pick"
+tick = 2
+rows = [["a", "m"]]
+
+[[expect]]
+node = "n1"
+rel = "pick"
+tick = 3
+rows = [["a", "c"]]
+
+[[expect]]
+node = "n1"
+rel = "pick"
+tick = 4
+rows = [["a", "c"]]
+
+[[expect]]
+node = "n1"
+rel = "pick"
+tick = 5
+rows = [["a", "p"]]
+
+[[expect]]
+node = "n1"
+rel = "pick"
+tick = 6
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "pick"
+tick = 7
+rows = [["a", "m"]]
+
+[[expect]]
+node = "n1"
+rel = "spick"
+tick = 1
+rows = [["a", "m"]]
+
+[[expect]]
+node = "n1"
+rel = "spick"
+tick = 2
+rows = [["a", "m"]]
+
+[[expect]]
+node = "n1"
+rel = "spick"
+tick = 3
+rows = [["a", "m"]]
+
+[[expect]]
+node = "n1"
+rel = "spick"
+tick = 4
+rows = [["a", "c"]]
+
+[[expect]]
+node = "n1"
+rel = "spick"
+tick = 5
+rows = [["a", "p"]]
+
+[[expect]]
+node = "n1"
+rel = "spick"
+tick = 6
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "spick"
+tick = 7
+rows = [["a", "m"]]

@@ -1,0 +1,15 @@
+//! BENCH-038: DFIR's reachability example (hydroflow examples/example_5_reachability.rs, R08 §15 T1).
+//!
+//! Origin 0; edges (0,1), (2,4), (3,4), (1,2), (0,3), (0,3), (4,0). DFIR's flow unions the origin with the
+//! targets of reached vertices, joins with the edges, and dedups with `unique()`; "Reached" prints each of
+//! {0,1,2,3,4} once. Tests in-tick recursion, set-semantics dedup (the duplicate edge) and termination on a cycle.
+
+program dfir_reachability version 1;
+
+input origin(v: u64);
+input edge(src: u64, dst: u64);
+
+view reached(v) {
+    origin(v);
+    reached(u), edge(u, v);
+}

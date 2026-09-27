@@ -1,0 +1,30 @@
+//! BENCH-039: dfir-datalog frontend tests `test_expr_lhs` and `test_expr_predicate` (dfir_datalog_core lib.rs;
+//! R08 §15 T8):
+//!
+//!     result(123) :- ints(a)                result(1) :- ints(a), (a == 0)
+//!     result(a + 123) :- ints(a)            result(2) :- ints(a), (a != 0)
+//!     result(a + a) :- ints(a)              result(3) :- ints(a), (a - 1 == 0)
+//!     result(123 - a) :- ints(a)            result(4) :- ints(a), (a - 1 == 1 - 1)
+//!     result(123 % (a + 5)) :- ints(a)
+//!     result(a * 5) :- ints(a)
+
+program datalog_expressions version 1;
+
+input ints(a: i64);
+input pints(a: i64);
+
+view expr_lhs(v) {
+    ints(_a), let v = 123;
+    ints(a), let v = a + 123;
+    ints(a), let v = a + a;
+    ints(a), let v = 123 - a;
+    ints(a), let v = 123 % (a + 5);
+    ints(a), let v = a * 5;
+}
+
+view expr_predicate(v) {
+    pints(a), let v = 1 where a == 0;
+    pints(a), let v = 2 where a != 0;
+    pints(a), let v = 3 where a - 1 == 0;
+    pints(a), let v = 4 where a - 1 == 1 - 1;
+}

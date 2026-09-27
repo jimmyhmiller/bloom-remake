@@ -1,0 +1,38 @@
+schema = 1
+id = "BENCH-041"
+title = "A second rule writing the key of a choose-fed keyed view raises SEM-050 (BLSR001)"
+priority = "P0"
+source = "R12 §12 T2 (variant with sel(G, \"zz\") :- cand(G, _)); FEATURES.md SEM-050, BENCH-041"
+features = ["SEM-050", "LANG-108", "LANG-114", "LANG-020", "LANG-041", "LANG-043", "LANG-047", "LANG-060"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "Both rules fire at tick 1 (the first tick with candidates): BLSR001 at tick 1."
+
+[deploy]
+seed = 42
+
+[run]
+ticks = 4
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-050", "LANG-108", "LANG-114", "LANG-020", "LANG-041", "LANG-043", "LANG-047", "LANG-060"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-050", "LANG-108", "LANG-114", "LANG-020", "LANG-041", "LANG-043", "LANG-047", "LANG-060", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ins"
+rows = [["a", "m"], ["a", "p"]]
+
+[[expect_error]]
+code = "BLSR001"
+node = "n1"
+tick = 1

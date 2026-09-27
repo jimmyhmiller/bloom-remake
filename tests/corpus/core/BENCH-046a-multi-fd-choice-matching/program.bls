@@ -1,0 +1,24 @@
+//! BENCH-046: several choose goals in one rule: bipartite matching (GZ01 Ex. 4.2; R12 §12 T7).
+//!
+//!     match(X, Y) :- g(X, Y), choose((X),(Y)), choose((Y),(X)).
+//!
+//! Both functional dependencies hold at once, and the result is a maximal matching (a choice model). With
+//! g = {(1,a), (1,b), (2,a)} the maximal matchings are {(1,a)} (canonical priority) and {(1,b), (2,a)}; every
+//! priority permutation gives one of them. The invariants state exactly "an FD-respecting, maximal matching of g".
+
+program multi_fd_choice version 1;
+
+static g(x: u64, y: String);
+
+fact g(1, "a");
+fact g(1, "b");
+fact g(2, "a");
+
+view matching(x, y) = g(x, y), choose!(y per x), choose!(x per y);
+view matched_x(x) = matching(x, _);
+view matched_y(y) = matching(_, y);
+
+invariant is_edge "matching chose a non-edge": never matching(x, y), not g(x, y);
+invariant fd_x "x is matched twice": never matching(x, y1), matching(x, y2) where y1 != y2;
+invariant fd_y "y is matched twice": never matching(x1, y), matching(x2, y) where x1 != x2;
+invariant maximal "an edge with two unmatched ends could be added": never g(x, y), not matched_x(x), not matched_y(y);

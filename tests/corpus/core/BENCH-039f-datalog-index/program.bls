@@ -1,0 +1,30 @@
+//! BENCH-039: dfir-datalog frontend test `test_index` (dfir_datalog_core lib.rs; R08 §15 T8), adapted to CR-46.
+//!
+//!     result(a, b, index()) :- ints(a, b)
+//!     .persist ints_persisted
+//!     ints_persisted(a, b) :- ints(a, b)
+//!     result3(a, b, index()) :- ints_persisted(a, b)
+//!     .persist result5
+//!     result5(a, b, index()) :- ints_persisted(a, b)
+//!
+//! dfir-datalog numbers body rows in arrival order; CR-46 makes `index!` a dense per-tick rank of the deduplicated
+//! head tuples in canonical order. Over a persisted input it re-ranks every tick (ANA-011 lints that), and a
+//! persisted head keeps every rank it was ever given.
+
+program datalog_index version 1;
+
+input ints(a: u64, b: u64);
+
+table ints_persisted(a: u64, b: u64);
+table result5(a: u64, b: u64, i: u64);
+
+view result(a, b, i = index!()) = ints(a, b);
+view result3(a, b, i = index!()) = ints_persisted(a, b);
+
+persist_ints: on ints(a, b) {
+    emit ints_persisted(a, b);
+}
+
+keep_rank: while result3(a, b, i) {
+    emit result5(a, b, i);
+}

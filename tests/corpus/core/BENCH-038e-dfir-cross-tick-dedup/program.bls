@@ -1,0 +1,20 @@
+//! BENCH-038: cross-tick dedup with `defer_tick` and `difference` (the `defer_tick` documentation, R08 §15 T4).
+//!
+//!     inp = source_stream(input_recv) -> tee();
+//!     inp -> [pos]diff;
+//!     inp -> defer_tick() -> [neg]diff;
+//!     diff = difference() -> for_each(|x| println!("{}", x));
+//!
+//! Outputs the items of this tick's input that were not in the previous tick's input.
+
+program dfir_cross_tick_dedup version 1;
+
+input inp(v: u64);
+
+scratch prev(v: u64);
+
+view out(v) = inp(v), not prev(v);
+
+remember: on inp(v) {
+    next prev(v);
+}

@@ -1,0 +1,54 @@
+schema = 1
+id = "BENCH-038"
+title = "DFIR flip-flop: one value per tick, true at even ticks and false at odd ticks"
+priority = "P1"
+source = "R08 §15 T3 (DFIR defer_tick operator documentation); FEATURES.md BENCH-038"
+features = ["LANG-041", "LANG-061", "LANG-190", "LANG-200", "SEM-008"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "DFIR's assertion becomes the exact per-tick contents; the invariant states \"never both\" at every tick."
+
+[run]
+ticks = 12
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-041", "LANG-061", "LANG-190", "LANG-200", "SEM-008"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-041", "LANG-061", "LANG-190", "LANG-200", "SEM-008", "SEM-002"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "state"
+tick = 0
+rows = [[true]]
+
+[[expect]]
+node = "n1"
+rel = "state"
+tick = 1
+rows = [[false]]
+
+[[expect]]
+node = "n1"
+rel = "state"
+tick = 2
+rows = [[true]]
+
+[[expect]]
+node = "n1"
+rel = "state"
+tick = 9
+rows = [[false]]
+
+[[expect]]
+node = "n1"
+rel = "state"
+tick = 10
+rows = [[true]]

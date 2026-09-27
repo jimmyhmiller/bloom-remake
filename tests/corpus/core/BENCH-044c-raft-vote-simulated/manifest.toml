@@ -1,0 +1,87 @@
+schema = 1
+id = "BENCH-044"
+title = "Raft vote under simulated schedules and seeds: at most one grantee per term, across restarts"
+priority = "P0"
+source = "R12 §12 T5 (\"for every seed and every schedule, each term has at most one grantee\"); FEATURES.md SEM-085, FLAG-007, BENCH-044"
+features = ["SEM-071", "SEM-072", "SEM-084", "SEM-085", "SEM-040", "LANG-044", "LANG-108", "LANG-117", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-093", "LANG-100", "LANG-153", "LANG-200", "LANG-241"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+The scenario of BENCH-044b under the asynchronous simulator: requests may arrive at any later tick, so which
+candidate wins each term depends on the schedule and the seed. The durable invariant one_grantee must hold in
+every run (128 seeds). Not asserted here: the LDFI choice-stability claim of R12 T5 (dropping the grantee's request
+makes choose pick the other up-to-date candidate), which needs the LDFI backend (TEST-040, M9)."""
+
+[deploy]
+nodes = [{ name = "n1", role = "Server" }, { name = "c2", role = "Server" }, { name = "c3", role = "Server" }, { name = "c4", role = "Server" }, { name = "c5", role = "Server" }]
+seed = 42
+
+[run]
+ticks = 20
+stop = "ticks"
+seeds = 128
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["SEM-071", "SEM-072", "SEM-084", "SEM-085", "SEM-040", "LANG-044", "LANG-108", "LANG-117", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-093", "LANG-100", "LANG-153", "LANG-200", "LANG-241", "TEST-001"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "init_state"
+rows = [[4, 7, 3]]
+
+[[input]]
+node = "c2"
+tick = 1
+rel = "campaign"
+rows = [["n1", 5, 2, 7, 3]]
+
+[[input]]
+node = "c3"
+tick = 1
+rel = "campaign"
+rows = [["n1", 5, 3, 8, 3]]
+
+[[input]]
+node = "c4"
+tick = 1
+rel = "campaign"
+rows = [["n1", 5, 4, 6, 3]]
+
+[[input]]
+node = "c2"
+tick = 2
+rel = "campaign"
+rows = [["n1", 5, 2, 7, 3]]
+
+[[input]]
+node = "c3"
+tick = 2
+rel = "campaign"
+rows = [["n1", 5, 3, 8, 3]]
+
+[[input]]
+node = "c5"
+tick = 3
+rel = "campaign"
+rows = [["n1", 6, 5, 7, 3]]
+
+[[input]]
+node = "c2"
+tick = 4
+rel = "campaign"
+rows = [["n1", 5, 2, 7, 3]]
+
+[[input]]
+node = "c3"
+tick = 6
+rel = "campaign"
+rows = [["n1", 6, 3, 8, 3]]
+
+[[fault]]
+kind = "restart"
+node = "n1"
+tick = 6

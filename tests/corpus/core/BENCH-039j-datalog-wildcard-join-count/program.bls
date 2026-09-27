@@ -1,0 +1,17 @@
+//! BENCH-039: dfir-datalog frontend test `test_wildcard_join_count` (dfir_datalog_core lib.rs; R08 §15 T8).
+//!
+//!     result(count(*)) :- ints1(a, _), ints2(a)
+//!     result2(count(a)) :- ints1(a, _), ints2(a)
+//!
+//! In Blossom an aggregate folds over the distinct valuations of the body's *named* variables (CR-03, LANGUAGE
+//! §10.1): the wildcard is not a variable, so `count!(*)` counts distinct `a` here, the same as `count!(a)`. That
+//! is the case BLS1004 warns about; binding the column (`_x`) would count join rows.
+
+program datalog_wildcard_join_count version 1;
+
+input ints1(a: u64, b: u64);
+input ints2(a: u64);
+
+view result(n = count!(*)) = ints1(a, _), ints2(a);
+view result2(n = count!(a)) = ints1(a, _), ints2(a);
+view result_rows(n = count!(*)) = ints1(a, _x), ints2(a);

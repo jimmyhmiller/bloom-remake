@@ -1,0 +1,31 @@
+//! BENCH-038: `persist::<'static>()` replays its contents every tick (DFIR operator documentation, R08 §15 T7).
+//!
+//!     source_iter(["hello"]) -> persist::<'static>() -> assert_eq(["hello"]);   // every tick
+//!
+//!     source_iter([("hello", "world")]) -> persist::<'static>() -> [0]my_join;
+//!     source_stream(input_recv) -> persist::<'static>() -> [1]my_join;
+//!     my_join = join::<'tick>() -> for_each(...);
+//!     // input ("hello", "oakland"), tick; input ("hello", "san francisco"), tick
+//!     // prints (hello, (world, oakland)); then (hello, (world, oakland)), (hello, (world, san francisco))
+//!
+//! A persisted relation is a `table`: its contents hold at every tick, so a join over two of them re-derives
+//! its full output each tick.
+
+program dfir_persist_replay version 1;
+
+input city(k: String, v: String);
+
+table greeting(s: String);
+table left(k: String, v: String);
+table right(k: String, v: String);
+
+view joined(k, a, b) = left(k, a), right(k, b);
+
+bootstrap {
+    emit greeting("hello");
+    emit left("hello", "world");
+}
+
+keep_city: on city(k, v) {
+    emit right(k, v);
+}

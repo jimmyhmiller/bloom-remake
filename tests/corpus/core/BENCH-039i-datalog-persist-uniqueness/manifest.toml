@@ -1,0 +1,54 @@
+schema = 1
+id = "BENCH-039"
+title = "dfir-datalog test_persist_uniqueness: a count over a persisted relation counts distinct facts once"
+priority = "P1"
+source = "R08 §15 T8 (dfir_datalog_core lib.rs test test_persist_uniqueness); FEATURES.md SEM-007, BENCH-039"
+features = ["SEM-007", "LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-100", "LANG-101"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "Inputs and outputs are ours: {1, 2} at tick 1, then {2, 3} (2 again) at tick 2: the count is 2, then 3, not 4."
+
+[run]
+ticks = 4
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-007", "LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-100", "LANG-101"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-007", "LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-100", "LANG-101", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ints2"
+rows = [[1], [2]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "ints2"
+rows = [[2], [3]]
+
+[[expect]]
+node = "n1"
+rel = "result"
+tick = 1
+rows = [[2]]
+
+[[expect]]
+node = "n1"
+rel = "result"
+tick = 2
+rows = [[3]]
+
+[[expect]]
+node = "n1"
+rel = "result"
+tick = 3
+rows = [[3]]

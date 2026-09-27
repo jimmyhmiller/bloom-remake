@@ -1,0 +1,40 @@
+//! BENCH-039: dfir-datalog frontend test `test_persist` (dfir_datalog_core lib.rs; R08 §15 T8).
+//!
+//!     .input ints1 .persist ints1      .input ints2 .persist ints2      .input ints3
+//!     result(a, b, c) :- ints1(a), ints2(b), ints3(c)
+//!     result2(a) :- ints1(a), !ints2(a)
+//!     intermediate(a) :- ints1(a)
+//!     result3(a) :- intermediate(a)
+//!     .persist intermediate_persist
+//!     intermediate_persist(a) :- ints1(a)
+//!     result4(a) :- intermediate_persist(a)
+//!
+//! A `.persist`ed relation is a `table`; the other relations are per tick.
+
+program datalog_persist version 1;
+
+input ints1_in(a: u64);
+input ints2_in(a: u64);
+input ints3(c: u64);
+
+table ints1(a: u64);
+table ints2(a: u64);
+table intermediate_persist(a: u64);
+
+view result(a, b, c) = ints1(a), ints2(b), ints3(c);
+view result2(a) = ints1(a), not ints2(a);
+view intermediate(a) = ints1(a);
+view result3(a) = intermediate(a);
+view result4(a) = intermediate_persist(a);
+
+keep1: on ints1_in(a) {
+    emit ints1(a);
+}
+
+keep2: on ints2_in(a) {
+    emit ints2(a);
+}
+
+keep_intermediate: while ints1(a) {
+    emit intermediate_persist(a);
+}

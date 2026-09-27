@@ -1,0 +1,70 @@
+schema = 1
+id = "BENCH-039"
+title = "dfir-datalog aggregations: max, max_all, count/sum(:+)/choose with a # comment, keyed sum over an expression"
+priority = "P1"
+source = "R08 §15 T8 (dfir_datalog_core lib.rs tests test_max, test_max_all, test_aggregations_and_comments, test_aggregations_fold_keyed_expr); FEATURES.md BENCH-039"
+features = ["LANG-043", "LANG-060", "LANG-061", "LANG-100", "LANG-101", "LANG-103", "LANG-108", "LANG-200", "LANG-208", "SEM-085"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Inputs and outputs are ours. ints = {(1,10), (5,10), (3,20)} at tick 1. max per b: (5,10), (3,20); max over all:
+(5, 20); count per b: (2,10), (1,20); the sums of the `:+` rule land at tick 2: (6,10), (3,20); grouping by a % 2
+(all odd) sums b over the three valuations: (1, 40). The choice for b = 20 has one candidate, so it is 3 under any
+seed; for b = 10 it is 1 or 5, which the invariants check."""
+
+[run]
+ticks = 4
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-043", "LANG-060", "LANG-061", "LANG-100", "LANG-101", "LANG-103", "LANG-108", "LANG-200", "LANG-208", "SEM-085"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-043", "LANG-060", "LANG-061", "LANG-100", "LANG-101", "LANG-103", "LANG-108", "LANG-200", "LANG-208", "SEM-085", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ints"
+rows = [[1, 10], [5, 10], [3, 20]]
+
+[[expect]]
+node = "n1"
+rel = "max_per_b"
+tick = 1
+rows = [[5, 10], [3, 20]]
+
+[[expect]]
+node = "n1"
+rel = "max_all"
+tick = 1
+rows = [[5, 20]]
+
+[[expect]]
+node = "n1"
+rel = "result"
+tick = 1
+rows = [[2, 10], [1, 20]]
+
+[[expect]]
+node = "n1"
+rel = "result"
+tick = 2
+rows = [[6, 10], [3, 20]]
+
+[[expect]]
+node = "n1"
+rel = "result2"
+row = [3, 20]
+holds = "1"
+
+[[expect]]
+node = "n1"
+rel = "by_parity"
+tick = 1
+rows = [[1, 40]]
