@@ -1,7 +1,7 @@
 schema = 1
 id = "BENCH-023"
 priority = "P1"
-features = ["ENG-004", "ENG-062", "LANG-040", "LANG-043", "LANG-047", "LANG-063", "LANG-064", "LANG-086", "LANG-100", "SEM-005"]
+features = ["ENG-004", "ENG-062", "LANG-040", "LANG-043", "LANG-047", "LANG-063", "LANG-064", "LANG-086", "LANG-100", "SEM-005", "LANG-085"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -20,12 +20,12 @@ stop = "ticks"
 
 [backend.oracle]
 status = "unimplemented"
-unimplemented = ["ENG-004", "ENG-062", "LANG-040", "LANG-043", "LANG-047", "LANG-063", "LANG-064", "LANG-086", "LANG-100", "SEM-005"]
+unimplemented = ["ENG-004", "ENG-062", "LANG-040", "LANG-043", "LANG-047", "LANG-063", "LANG-064", "LANG-086", "LANG-100", "SEM-005", "LANG-085"]
 until = "M6"
 
 [backend.interp]
 status = "unimplemented"
-unimplemented = ["ENG-004", "ENG-062", "LANG-040", "LANG-043", "LANG-047", "LANG-063", "LANG-064", "LANG-086", "LANG-100", "SEM-005", "SEM-002"]
+unimplemented = ["ENG-004", "ENG-062", "LANG-040", "LANG-043", "LANG-047", "LANG-063", "LANG-064", "LANG-086", "LANG-100", "SEM-005", "LANG-085", "SEM-002"]
 until = "M7"
 
 [[input]]

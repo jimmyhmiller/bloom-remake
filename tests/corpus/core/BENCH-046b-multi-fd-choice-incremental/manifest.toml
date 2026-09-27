@@ -3,7 +3,7 @@ id = "BENCH-046"
 title = "Multi-FD choice under an insertion: only the new edge's conflict component changes"
 priority = "P1"
 source = "R12 §12 T7 (incremental: adding (3,c) at t2); FEATURES.md LANG-116, ENG-075, BENCH-046"
-features = ["LANG-116", "ENG-075", "LANG-108", "SEM-085", "LANG-040", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-200"]
+features = ["LANG-116", "ENG-075", "LANG-108", "SEM-085", "LANG-040", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-200", "LANG-041"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -22,17 +22,17 @@ seeds = 128
 
 [backend.oracle]
 status = "unimplemented"
-unimplemented = ["LANG-116", "ENG-075", "LANG-108", "SEM-085", "LANG-040", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-200"]
+unimplemented = ["LANG-116", "ENG-075", "LANG-108", "SEM-085", "LANG-040", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-200", "LANG-041"]
 until = "M8"
 
 [backend.interp]
 status = "unimplemented"
-unimplemented = ["LANG-116", "ENG-075", "LANG-108", "SEM-085", "LANG-040", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-200", "SEM-002"]
+unimplemented = ["LANG-116", "ENG-075", "LANG-108", "SEM-085", "LANG-040", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-200", "LANG-041", "SEM-002"]
 until = "M8"
 
 [backend.sim]
 status = "unimplemented"
-unimplemented = ["LANG-116", "ENG-075", "LANG-108", "SEM-085", "LANG-040", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-200", "TEST-001"]
+unimplemented = ["LANG-116", "ENG-075", "LANG-108", "SEM-085", "LANG-040", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-200", "LANG-041", "TEST-001"]
 until = "M8"
 
 [[input]]

@@ -3,7 +3,7 @@ id = "BENCH-044"
 title = "Raft vote under simulated schedules and seeds: at most one grantee per term, across restarts"
 priority = "P0"
 source = "R12 §12 T5 (\"for every seed and every schedule, each term has at most one grantee\"); FEATURES.md SEM-085, FLAG-007, BENCH-044"
-features = ["SEM-071", "SEM-072", "SEM-084", "SEM-085", "SEM-040", "LANG-044", "LANG-108", "LANG-117", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-093", "LANG-100", "LANG-153", "LANG-200", "LANG-241"]
+features = ["SEM-071", "SEM-072", "SEM-084", "SEM-085", "SEM-040", "LANG-044", "LANG-108", "LANG-117", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-093", "LANG-100", "LANG-153", "LANG-200", "LANG-241", "LANG-040", "LANG-085"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -24,7 +24,7 @@ seeds = 128
 
 [backend.sim]
 status = "unimplemented"
-unimplemented = ["SEM-071", "SEM-072", "SEM-084", "SEM-085", "SEM-040", "LANG-044", "LANG-108", "LANG-117", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-093", "LANG-100", "LANG-153", "LANG-200", "LANG-241", "TEST-001"]
+unimplemented = ["SEM-071", "SEM-072", "SEM-084", "SEM-085", "SEM-040", "LANG-044", "LANG-108", "LANG-117", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-093", "LANG-100", "LANG-153", "LANG-200", "LANG-241", "LANG-040", "LANG-085", "TEST-001"]
 until = "M7"
 
 [[input]]

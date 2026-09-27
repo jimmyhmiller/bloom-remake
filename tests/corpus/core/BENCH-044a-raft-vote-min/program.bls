@@ -5,7 +5,8 @@
 //! least ours; at most one *new* vote per term per tick, chosen among the up-to-date candidates; a candidate that
 //! already holds the term's vote is granted again (retransmission); every other request is refused with our
 //! term. `voted_for` is durable, so the vote is on disk before the reply leaves (SEM-072) and survives a crash.
-//! This variant writes the grant as R12's (a), `grant(N, T, min<C>)`: the least candidate id among the up-to-date requests.
+//! This variant writes the grant as R12's (a), `grant(N, T, min<C>)`: the least candidate id among the up-to-date
+//! requests.
 //!
 //! Every server runs this program; the host drives the candidates (`campaign`) and loads the voter's initial state
 //! (`init_state`). A request carries the candidate's id, which orders the candidates for the `min` variant.

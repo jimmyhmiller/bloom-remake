@@ -3,7 +3,7 @@ id = "BENCH-028"
 title = "Soft-state lifetime lint: a soft head with a shorter TTL than its soft body is warned about"
 priority = "P1"
 source = "R01 TEST PROGRAMS T19 (Loo thesis §5.5.2, App. A.3.1); FEATURES.md ANA-006, BENCH-028"
-features = ["ANA-006", "LANG-048"]
+features = ["ANA-006", "LANG-048", "LANG-040", "LANG-043"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -13,7 +13,7 @@ runtime oscillation with a mocked clock; this program's own run would depend on 
 
 [backend.compile]
 status = "unimplemented"
-unimplemented = ["ANA-006", "LANG-048"]
+unimplemented = ["ANA-006", "LANG-048", "LANG-040", "LANG-043"]
 until = "M6"
 
 [[expect_diag]]

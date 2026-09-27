@@ -3,7 +3,7 @@ id = "BENCH-015"
 title = "Declarative Imperative toggle without @next is rejected"
 priority = "P0"
 source = "R05 §9.1 T6 (Declarative Imperative §3.4.4 toggle, deductive variant); FEATURES.md SEM-020, BENCH-015"
-features = ["SEM-020", "SEM-021", "SEM-022", "ANA-002", "LANG-082"]
+features = ["SEM-020", "SEM-021", "SEM-022", "ANA-002", "LANG-082", "LANG-041", "LANG-043"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -11,7 +11,7 @@ notes = "Compile-only. The cycle is on one line (see BENCH-015a), so the expecte
 
 [backend.compile]
 status = "unimplemented"
-unimplemented = ["SEM-020", "SEM-021", "SEM-022", "ANA-002", "LANG-082"]
+unimplemented = ["SEM-020", "SEM-021", "SEM-022", "ANA-002", "LANG-082", "LANG-041", "LANG-043"]
 until = "M5"
 
 [[expect_diag]]

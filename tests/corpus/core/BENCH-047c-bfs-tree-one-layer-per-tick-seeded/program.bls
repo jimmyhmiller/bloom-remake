@@ -10,7 +10,8 @@
 //! The cycle through `reached` passes through `next`, so the choice is stratified (SEM-086). With
 //! g = {r->a, r->b, a->c, b->c, c->d}: tick 0 gives a <- r and b <- r; tick 1 chooses c's parent from {a, b};
 //! tick 2 gives d <- c; tick 3 is quiescent.
-//! This variant uses the seeded `choose!`: under any seed c's parent is a or b, and every other node has a single candidate parent.
+//! This variant uses the seeded `choose!`: under any seed c's parent is a or b, and every other node has a single
+//! candidate parent.
 
 program bfs_tree_seeded version 1;
 

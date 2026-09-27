@@ -3,7 +3,7 @@ id = "BENCH-027"
 title = "Evita stratification: p :- notin p gets stratum infinity and is rejected"
 priority = "P1"
 source = "R01 §7 and TEST PROGRAMS T21 (Evita Raced stratify.olg); FEATURES.md ANA-002, SEM-022, BENCH-027"
-features = ["ANA-002", "SEM-020", "SEM-022", "LANG-047", "LANG-082"]
+features = ["ANA-002", "SEM-020", "SEM-022", "LANG-047", "LANG-082", "LANG-043"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -13,7 +13,7 @@ not fix their column schemas, so the corpus asserts the stratifier's verdict (BL
 
 [backend.compile]
 status = "unimplemented"
-unimplemented = ["ANA-002", "SEM-020", "SEM-022", "LANG-047", "LANG-082"]
+unimplemented = ["ANA-002", "SEM-020", "SEM-022", "LANG-047", "LANG-082", "LANG-043"]
 until = "M5"
 
 [[expect_diag]]

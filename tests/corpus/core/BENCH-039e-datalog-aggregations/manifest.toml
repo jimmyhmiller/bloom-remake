@@ -3,7 +3,7 @@ id = "BENCH-039"
 title = "dfir-datalog aggregations: max, max_all, count/sum(:+)/choose with a # comment, keyed sum over an expression"
 priority = "P1"
 source = "R08 §15 T8 (dfir_datalog_core lib.rs tests test_max, test_max_all, test_aggregations_and_comments, test_aggregations_fold_keyed_expr); FEATURES.md BENCH-039"
-features = ["LANG-043", "LANG-060", "LANG-061", "LANG-100", "LANG-101", "LANG-103", "LANG-108", "LANG-200", "LANG-208", "SEM-085"]
+features = ["LANG-043", "LANG-060", "LANG-061", "LANG-100", "LANG-101", "LANG-103", "LANG-108", "LANG-200", "LANG-208", "SEM-085", "LANG-047", "LANG-082"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -19,12 +19,12 @@ stop = "ticks"
 
 [backend.oracle]
 status = "unimplemented"
-unimplemented = ["LANG-043", "LANG-060", "LANG-061", "LANG-100", "LANG-101", "LANG-103", "LANG-108", "LANG-200", "LANG-208", "SEM-085"]
+unimplemented = ["LANG-043", "LANG-060", "LANG-061", "LANG-100", "LANG-101", "LANG-103", "LANG-108", "LANG-200", "LANG-208", "SEM-085", "LANG-047", "LANG-082"]
 until = "M5"
 
 [backend.interp]
 status = "unimplemented"
-unimplemented = ["LANG-043", "LANG-060", "LANG-061", "LANG-100", "LANG-101", "LANG-103", "LANG-108", "LANG-200", "LANG-208", "SEM-085", "SEM-002"]
+unimplemented = ["LANG-043", "LANG-060", "LANG-061", "LANG-100", "LANG-101", "LANG-103", "LANG-108", "LANG-200", "LANG-208", "SEM-085", "LANG-047", "LANG-082", "SEM-002"]
 until = "M7"
 
 [[input]]

@@ -3,7 +3,7 @@ id = "BENCH-005"
 title = "DI Fig. 1: toggle/announce alternates state 0/1 and announces asynchronously"
 priority = "P1"
 source = "R02 §3.2 and §17 T5 (Declarative Imperative Fig. 1, seed state(0)@1 added by R02); FEATURES.md BENCH-005"
-features = ["LANG-041", "LANG-043", "LANG-046", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-081"]
+features = ["LANG-041", "LANG-043", "LANG-046", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-081", "LANG-085"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -18,12 +18,12 @@ stop = "ticks"
 
 [backend.oracle]
 status = "unimplemented"
-unimplemented = ["LANG-041", "LANG-043", "LANG-046", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-081"]
+unimplemented = ["LANG-041", "LANG-043", "LANG-046", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-081", "LANG-085"]
 until = "M5"
 
 [backend.interp]
 status = "unimplemented"
-unimplemented = ["LANG-041", "LANG-043", "LANG-046", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-081", "SEM-002"]
+unimplemented = ["LANG-041", "LANG-043", "LANG-046", "LANG-047", "LANG-060", "LANG-061", "LANG-062", "LANG-081", "LANG-085", "SEM-002"]
 until = "M7"
 
 [[input]]
