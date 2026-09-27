@@ -1,4 +1,7 @@
-use crate::{OpenOpts, StoreError, Vfs, VfsFile, invalid, read_all};
+use crate::{
+    OpenOpts, StoreError, Vfs, VfsFile, invalid, read_all,
+    vfs::{atomic_write, read_path},
+};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -280,6 +283,43 @@ impl FileWal {
 fn segment_path(dir: &Path, seq: u64) -> PathBuf {
     dir.join(format!("{seq:020}.seg"))
 }
+fn receipt_path(dir: &Path, seq: u64) -> PathBuf {
+    dir.join(format!("{seq:020}.ack"))
+}
+fn receipt_bytes(header: &SegmentHeader, end: Lsn) -> Vec<u8> {
+    let mut bytes = b"BLSA".to_vec();
+    bytes.extend(header.store_uuid);
+    bytes.extend(header.segment_seq.to_le_bytes());
+    bytes.extend(end.0.to_le_bytes());
+    bytes.extend(blake3::hash(&bytes).as_bytes());
+    bytes
+}
+fn read_receipt(fs: &dyn Vfs, dir: &Path, header: &SegmentHeader) -> Result<Option<Lsn>, StoreError> {
+    let path = receipt_path(dir, header.segment_seq);
+    let bytes = match read_path(fs, &path) {
+        Ok(bytes) => bytes,
+        Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if bytes.len() != 68
+        || bytes.get(..4) != Some(b"BLSA")
+        || bytes.get(4..20) != Some(header.store_uuid.as_slice())
+        || bytes.get(20..28) != Some(header.segment_seq.to_le_bytes().as_slice())
+        || bytes.get(36..68)
+            != Some(
+                blake3::hash(bytes.get(..36).ok_or_else(|| invalid("receipt length"))?)
+                    .as_bytes()
+                    .as_slice(),
+            )
+    {
+        return Err(corrupt(&path, 0, "acknowledgement receipt checksum or identity"));
+    }
+    let end = bytes
+        .get(28..36)
+        .ok_or_else(|| corrupt(&path, 28, "receipt frontier"))?;
+    let end = u64::from_le_bytes(end.try_into().map_err(|_| corrupt(&path, 28, "receipt frontier"))?);
+    Ok(Some(Lsn(end)))
+}
 impl WalWriter for FileWal {
     fn append(&mut self, rec: &WalRecordBuf) -> Result<Lsn, StoreError> {
         self.healthy()?;
@@ -338,6 +378,12 @@ impl WalWriter for FileWal {
     fn sync(&mut self) -> Result<SyncedUpTo, StoreError> {
         self.healthy()?;
         if self.dirty {
+            // The marker must never survive a crash while the data it certifies is still volatile.
+            // This first sync establishes that ordering; the second sync acknowledges the marker.
+            if let Err(e) = self.file.sync_data() {
+                self.poisoned = true;
+                return Err(e);
+            }
             let batch = self.batch.ok_or_else(|| invalid("dirty WAL without batch"))?;
             let marker = WalRecordBuf {
                 batch: batch + 1,
@@ -364,6 +410,20 @@ impl WalWriter for FileWal {
             self.poisoned = true;
             return Err(e);
         }
+        if self.dirty {
+            let end = Lsn(self
+                .base
+                .checked_add(self.offset)
+                .ok_or_else(|| invalid("receipt LSN overflow"))?);
+            if let Err(e) = atomic_write(
+                &*self.fs,
+                &receipt_path(&self.dir, self.header.segment_seq),
+                &receipt_bytes(&self.header, end),
+            ) {
+                self.poisoned = true;
+                return Err(e);
+            }
+        }
         self.dirty = false;
         Ok(SyncedUpTo {
             lsn: Lsn(self
@@ -382,6 +442,11 @@ impl WalWriter for FileWal {
         for segment in scan.segments {
             if segment.header.segment_seq < self.header.segment_seq && segment.end <= token.lsn {
                 self.fs.remove(&segment.path)?;
+                match self.fs.remove(&receipt_path(&self.dir, segment.header.segment_seq)) {
+                    Ok(()) => {}
+                    Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
             }
         }
         self.fs.sync_dir(&self.dir)?;
@@ -421,6 +486,7 @@ impl WalScan {
             }
             let bytes = read_all(&*file)?;
             let (header, mut off) = parse_header(&bytes).map_err(|e| corrupt(&path, 0, &e.to_string()))?;
+            let receipt = read_receipt(fs, dir, &header)?;
             if header.store_uuid != uuid
                 || path != segment_path(dir, header.segment_seq)
                 || previous_seq.is_some_and(|seq: u64| seq.checked_add(1) != Some(header.segment_seq))
@@ -432,6 +498,9 @@ impl WalScan {
                 return Err(corrupt(&path, 0, "segment stream base"));
             }
             base = header.lsn_base.0;
+            if receipt.is_some_and(|end| end.0 < base + off as u64 || end.0 > base + bytes.len() as u64) {
+                return Err(corrupt(&path, 0, "acknowledgement frontier outside segment"));
+            }
             let mut records = Vec::new();
             let mut last_batch = 0;
             while off < bytes.len() {
@@ -450,7 +519,10 @@ impl WalScan {
                         let later_batch = (off + 1..bytes.len()).any(|candidate| {
                             parse_record(&bytes, candidate, base).is_ok_and(|(r, _)| r.batch > last_batch)
                         });
-                        if later_batch || segment_index + 1 < segment_count {
+                        if later_batch
+                            || segment_index + 1 < segment_count
+                            || receipt.is_some_and(|end| end.0 > base + off as u64)
+                        {
                             return Err(corrupt(&path, off, "damage before a later synced batch or segment"));
                         }
                         if repair {
