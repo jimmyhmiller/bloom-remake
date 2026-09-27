@@ -1,0 +1,126 @@
+schema = 1
+id = "BENCH-044"
+title = "Raft vote among same-tick RequestVotes (seeded choose<C>): exactly one grantee per term under every seed"
+priority = "P0"
+source = "R12 §12 T5 (voter rules of R07 §11.3, grant written with choose); FEATURES.md SEM-085, FLAG-002, FLAG-006, FLAG-007, BENCH-044"
+features = ["SEM-071", "SEM-072", "SEM-084", "SEM-085", "LANG-044", "LANG-108", "LANG-117", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-093", "LANG-100", "LANG-153", "LANG-200", "LANG-241", "LANG-040", "LANG-085", "LANG-045", "LANG-190", "LANG-060"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+R12 T5, shifted by one tick (requests arrive one tick after they are sent): n1 starts (bootstrap fresh, boot
+tick) with current_term 4, no vote and last log entry (7, 3). Tick 2: RequestVotes for term 5 from c2 (7, 3),
+c3 (8, 3) and c4 (6, 3); c2 and c3 are up to date, c4 is behind. Tick 3: c3 and c2 retransmit. Tick 4: c5 asks for
+term 6 (7, 3). Tick 5: c2 asks again for the stale term 5. Tick 6: n1 restarts (a new incarnation that reloads its
+durable state); c3 asks for term 6, which arrives at tick 7.
+Under the seed, term 5's grantee is c2 or c3 (c2 in canonical mode, pinned by BENCH-044a). Seed-independent
+expectations: c4 is refused at tick 2; c5 is granted term 6 at tick 4; the stale request is refused at tick 5; c3
+is refused at tick 7; voted_for(6, c5) survives the restart; the invariant allows one grantee per term. The
+seeded variant runs under the simulator in its own case, BENCH-044c, because asynchronous delivery changes the
+per-tick schedule these expectations are stated for."""
+
+[deploy]
+nodes = [{ name = "n1", role = "Server" }, { name = "c2", role = "Server" }, { name = "c3", role = "Server" }, { name = "c4", role = "Server" }, { name = "c5", role = "Server" }]
+seed = 42
+
+[run]
+ticks = 10
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-071", "SEM-072", "SEM-084", "SEM-085", "LANG-044", "LANG-108", "LANG-117", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-093", "LANG-100", "LANG-153", "LANG-200", "LANG-241", "LANG-040", "LANG-085", "LANG-045", "LANG-190", "LANG-060"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-071", "SEM-072", "SEM-084", "SEM-085", "LANG-044", "LANG-108", "LANG-117", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-093", "LANG-100", "LANG-153", "LANG-200", "LANG-241", "LANG-040", "LANG-085", "LANG-045", "LANG-190", "LANG-060", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "c2"
+tick = 1
+rel = "campaign"
+rows = [["n1", 5, 2, 7, 3]]
+
+[[input]]
+node = "c3"
+tick = 1
+rel = "campaign"
+rows = [["n1", 5, 3, 8, 3]]
+
+[[input]]
+node = "c4"
+tick = 1
+rel = "campaign"
+rows = [["n1", 5, 4, 6, 3]]
+
+[[input]]
+node = "c2"
+tick = 2
+rel = "campaign"
+rows = [["n1", 5, 2, 7, 3]]
+
+[[input]]
+node = "c3"
+tick = 2
+rel = "campaign"
+rows = [["n1", 5, 3, 8, 3]]
+
+[[input]]
+node = "c5"
+tick = 3
+rel = "campaign"
+rows = [["n1", 6, 5, 7, 3]]
+
+[[input]]
+node = "c2"
+tick = 4
+rel = "campaign"
+rows = [["n1", 5, 2, 7, 3]]
+
+[[input]]
+node = "c3"
+tick = 6
+rel = "campaign"
+rows = [["n1", 6, 3, 8, 3]]
+
+[[fault]]
+kind = "restart"
+node = "n1"
+tick = 6
+
+[[expect_send]]
+from = "n1"
+to = "c4"
+channel = "vote"
+row = [5, false]
+tick = 2
+
+[[expect_send]]
+from = "n1"
+to = "c5"
+channel = "vote"
+row = [6, true]
+tick = 4
+
+[[expect_send]]
+from = "n1"
+to = "c2"
+channel = "vote"
+row = [6, false]
+tick = 5
+
+[[expect_send]]
+from = "n1"
+to = "c3"
+channel = "vote"
+row = [6, false]
+tick = 7
+
+[[expect]]
+node = "n1"
+rel = "voted_for"
+row = [6, "c5"]
+absent = "..=4"
+holds = "5.."

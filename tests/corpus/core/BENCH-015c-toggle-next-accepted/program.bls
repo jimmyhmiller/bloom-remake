@@ -1,0 +1,24 @@
+//! BENCH-015: the toggle program of The Declarative Imperative §3.4.4 is accepted with `@next`.
+//!
+//! R05 §9.1 T6:
+//!
+//!     state(X)@next :- state(X), !del_state(X).
+//!     state(1)@next :- !state(X).
+//!     del_state(X) :- state(X).
+//!
+//! Stratifiable only because of `@next`, and `state` alternates between {1} and {}. The persistence rule is
+//! explicit (LANG-065). `!state(X)` in a rule with no positive subgoal reads as "state is empty", `not state(_)`.
+
+program toggle_next version 1;
+
+scratch state(x: i64);
+
+view del_state(x) = state(x);
+
+persist: while state(x), not del_state(x) {
+    next state(x);
+}
+
+flip: while not state(_) {
+    next state(1);
+}

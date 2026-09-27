@@ -1,0 +1,61 @@
+schema = 1
+id = "BENCH-026"
+title = "Localization equivalence: SP2 localized by #[localize(link)] reaches the SIGMOD06 answer"
+priority = "P1"
+source = "R01 §5.6 and TEST PROGRAMS T20 (SIGMOD06 Algorithm 2, Claim 1); LANGUAGE §14.6; FEATURES.md LANG-095, BENCH-026"
+features = ["LANG-095", "LANG-040", "LANG-045", "LANG-047", "LANG-060", "LANG-100", "LANG-150", "LANG-152", "LANG-153", "LANG-190"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Only the quiescent state is asserted: the rewrite's hop count is the compiler's (LANGUAGE §14.6 says two hops per
+derivation), so intermediate ticks differ from the hand-localized BENCH-026b. The final shortest paths equal
+BENCH-026b's and BENCH-022's. `path` is insert-only, as LANGUAGE §14.6 requires of a mirrored relation. The
+mandatory BLS1005 lint is not asserted here (runtime backends only); the compile case BENCH-026f asserts it."""
+
+[deploy]
+nodes = [{ name = "a", role = "Router" }, { name = "b", role = "Router" }, { name = "c", role = "Router" }, { name = "d", role = "Router" }, { name = "e", role = "Router" }]
+
+[run]
+ticks = 30
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-095", "LANG-040", "LANG-045", "LANG-047", "LANG-060", "LANG-100", "LANG-150", "LANG-152", "LANG-153", "LANG-190"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-095", "LANG-040", "LANG-045", "LANG-047", "LANG-060", "LANG-100", "LANG-150", "LANG-152", "LANG-153", "LANG-190", "SEM-002"]
+until = "M7"
+
+[[expect]]
+node = "a"
+rel = "shortest_path"
+final = true
+rows = [["b", ["a", "c", "b"], 2], ["c", ["a", "c"], 1], ["d", ["a", "c", "b", "d"], 3]]
+
+[[expect]]
+node = "b"
+rel = "shortest_path"
+final = true
+rows = [["d", ["b", "d"], 1]]
+
+[[expect]]
+node = "c"
+rel = "shortest_path"
+final = true
+rows = [["b", ["c", "b"], 1], ["d", ["c", "b", "d"], 2]]
+
+[[expect]]
+node = "d"
+rel = "shortest_path"
+final = true
+rows = []
+
+[[expect]]
+node = "e"
+rel = "shortest_path"
+final = true
+rows = [["a", ["e", "a"], 1], ["b", ["e", "a", "c", "b"], 3], ["c", ["e", "a", "c"], 2], ["d", ["e", "a", "c", "b", "d"], 4]]

@@ -1,0 +1,25 @@
+//! BENCH-045: a false commutativity declaration on the fold step is refuted (R12 §12 T6: "with step declared
+//! commutative (falsely), TEST-015 must fail").
+//!
+//! step(s, x) = 2s + x is not commutative: step(1, 2) = 4 but step(2, 1) = 5. Declared properties of functions are
+//! claims checked by the law and shuffle harnesses (TEST-015, TEST-087); a refuted claim is BLS0704.
+
+program false_commutativity version 1;
+
+#[commutative] fn step(s: i64, x: i64) -> i64 { 2 * s + x }    // expect: BLS0704
+
+input append(i: u64, x: i64);
+
+table log(i: u64, x: i64) key(i);
+
+output total(t: i64);
+
+view folded(t = fold!(0, step, x by i)) = log(i, x);
+
+load_log: on append(i, x) {
+    emit log(i, x);
+}
+
+report: while folded(t) {
+    emit total(t);
+}

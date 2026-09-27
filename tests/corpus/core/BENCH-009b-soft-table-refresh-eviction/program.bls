@@ -1,0 +1,24 @@
+//! BENCH-009 (CR-17, SEM-060): the `soft table` sugar's refresh and `max` eviction.
+//!
+//! LANGUAGE §7.9: a tuple of a soft table is visible while its birth is less than `ttl` before the tick's `now`;
+//! re-deriving a tuple resets its birth (a refresh, not an insertion); when more than `max` tuples are alive the
+//! oldest are evicted, ordered by (birth, canonical order), in the same tick. This case pins the parts that do
+//! not depend on how far the harness clock moves per tick: the TTL is far longer than any run, the names are
+//! inserted in canonical order (so "oldest" is the same whether births differ or tie), and `came_up` observes
+//! insertions, so a refresh must not produce one.
+
+program soft_table_refresh version 1;
+
+input seen(n: String);
+
+soft table heard(n: String) ttl 1000d max 2;
+
+output came_up(n: String);
+
+note: on seen(n) {
+    emit heard(n);
+}
+
+report: on inserted heard(n) {
+    emit came_up(n);
+}

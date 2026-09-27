@@ -1,0 +1,66 @@
+schema = 1
+id = "BENCH-002"
+title = "DL11 Ex. 4: accepted although not syntactically stratifiable (.ded twin)"
+priority = "P0"
+source = "R02 §3.4 and §17 T2 (DL11 Example 4); FEATURES.md BENCH-002, SEM-020"
+features = ["SEM-020", "SEM-022", "ANA-002", "LANG-065", "LANG-069", "LANG-220"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = "Same scenario and expectations as BENCH-002; nodes and inputs come from the program's `@k` facts."
+
+[run]
+ticks = 12
+stop = "ticks"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["SEM-020", "SEM-022", "ANA-002", "LANG-065", "LANG-069", "LANG-220"]
+until = "M5"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-020", "SEM-022", "ANA-002", "LANG-065", "LANG-069", "LANG-220"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-020", "SEM-022", "ANA-002", "LANG-065", "LANG-069", "LANG-220", "SEM-002"]
+until = "M7"
+
+[expect_analysis]
+strata = { p_pos = 0, p_neg = 0 }
+
+[[expect]]
+node = "n1"
+rel = "p_pos"
+row = [1, 2, 10]
+absent = "..=0"
+holds = "1..=5"
+
+[[expect]]
+node = "n1"
+rel = "p_pos"
+row = [1, 2, 10]
+absent = "6..=7"
+holds = "8.."
+
+[[expect]]
+node = "n1"
+rel = "p_pos"
+row = [3, 4, 10]
+holds = "2..=5"
+absent = "6.."
+
+[[expect]]
+node = "n1"
+rel = "p_pos"
+row = [5, 6, 20]
+absent = "..=1"
+holds = "2.."
+
+[[expect]]
+node = "n1"
+rel = "p_pos"
+tick = 6
+rows = [[5, 6, 20]]

@@ -1,0 +1,21 @@
+//! BENCH-038: DFIR's flip-flop (the `defer_tick` operator documentation, R08 §15 T3).
+//!
+//!     source_iter(vec!(true)) -> state;
+//!     state = union() -> assert(|x| if tick % 2 == 0 { *x == true } else { *x == false })
+//!                     -> map(|x| !x) -> defer_tick() -> state;
+//!
+//! Exactly one value per tick, alternating; it must never hold both. `defer_tick` is `next`.
+
+program dfir_flip_flop version 1;
+
+scratch state(b: bool);
+
+bootstrap {
+    emit state(true);
+}
+
+flip: while state(b) {
+    next state(not b);
+}
+
+invariant one_value "the flip-flop holds true and false in one tick": never state(true), state(false);

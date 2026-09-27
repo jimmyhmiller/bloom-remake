@@ -1,0 +1,16 @@
+// BENCH-008 (counter with request/response, Alvaro thesis §3.1) in Molly's Dedalus dialect: the `.ded` twin of
+// BENCH-008.
+//
+// Verbatim rules with the location column made explicit: request(To, From) is located at the server To, and the
+// response is sent to From. The requests are EDB facts at the server at the ticks at which, in BENCH-008, the
+// clients' requests arrive (2 and 4). The initial counter(0) is a fact at tick 1 (tick 0 has no events, CR-13).
+
+counter(N, X+1)@next :- counter(N, X), request(N, _);
+counter(N, X)@next :- counter(N, X), notin request(N, _);
+response(From, X)@async :- counter(N, X), request(N, From);
+response(From, X)@next :- response(From, X);
+
+counter("s", 0)@1;
+request("s", "c1")@2;
+request("s", "c2")@2;
+request("s", "c1")@4;

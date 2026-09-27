@@ -1,0 +1,36 @@
+//! BENCH-030: naive and semi-naive evaluation agree: Andersen's points-to analysis (RecStep VLDB'19, R09 §13.1).
+//!
+//!     pointsTo(y, x) :- addressOf(y, x).
+//!     pointsTo(y, x) :- assign(y, z), pointsTo(z, x).
+//!     pointsTo(y, w) :- load(y, x), pointsTo(x, z), pointsTo(z, w).
+//!     pointsTo(z, w) :- store(y, x), pointsTo(y, z), pointsTo(x, w).
+//!
+//! A random program of 6 variables and 3 allocation sites; every rule contributes derivations.
+
+program naive_seminaive_andersen version 1;
+
+static address_of(y: String, x: String);
+static assign(y: String, x: String);
+static load(y: String, x: String);
+static store(y: String, x: String);
+
+fact address_of("v3", "o0");
+fact address_of("v4", "o0");
+fact address_of("v4", "o1");
+fact address_of("v5", "o2");
+fact assign("v1", "v2");
+fact assign("v1", "v4");
+fact assign("v3", "v5");
+fact load("v1", "v0");
+fact load("v2", "v1");
+fact load("v3", "v0");
+fact store("v2", "v1");
+fact store("v3", "v2");
+fact store("v3", "v4");
+
+view points_to(y, x) {
+    address_of(y, x);
+    assign(y, z), points_to(z, x);
+    load(y, v), points_to(v, z), points_to(z, x);
+    store(v, u), points_to(v, y), points_to(u, x);
+}

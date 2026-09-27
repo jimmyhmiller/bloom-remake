@@ -1,0 +1,29 @@
+//! BENCH-002 (DL11 Ex. 4): temporally stratifiable but not syntactically stratifiable.
+//!
+//! Port of Example 4 of DL11 (R02 §3.4):
+//!
+//!     persist[p_pos, p_neg, 3]
+//!     p_pos(A, B, T) <- insert_p(A, B, T);
+//!     p_neg(A, B, T) <- p_pos(A, B, T), delete_p(T);
+//!
+//! The dependency graph has the cycle p_pos -> p_neg -(not)-> p_pos, but the negative edge lies in the
+//! *inductive* persistence rule, so the deductive reduction is stratified and the program must be accepted
+//! (SEM-020). The persistence rule is written out (LANGUAGE §7.2, LANG-065) so that the negative inductive edge
+//! stays visible, as in the paper's `persist` expansion. `t` is a data column here, not the time.
+
+program dl11_temporal_stratification version 1;
+
+input insert_p(a: i64, b: i64, t: i64);
+input delete_p(t: i64);
+
+scratch p_pos(a: i64, b: i64, t: i64);
+
+view p_neg(a, b, t) = p_pos(a, b, t), delete_p(t);
+
+insert: on insert_p(a, b, t) {
+    emit p_pos(a, b, t);
+}
+
+persist: while p_pos(a, b, t), not p_neg(a, b, t) {
+    next p_pos(a, b, t);
+}

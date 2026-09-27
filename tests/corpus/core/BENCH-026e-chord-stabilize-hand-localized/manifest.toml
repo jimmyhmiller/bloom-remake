@@ -1,0 +1,83 @@
+schema = 1
+id = "BENCH-026"
+title = "Localization equivalence: Chord sb1-sb3 localized by hand"
+priority = "P1"
+source = "R01 §5.6, §8.5 and TEST PROGRAMS T20 (declarativitydotnet/p2 doc/chord.olg sb1-sb3); FEATURES.md BENCH-026"
+features = ["LANG-026", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "LANG-064", "LANG-152", "LANG-153", "LANG-190", "LANG-241"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Derived from the rules, in a quiescent network. nc stabilizes at tick 2: sb1 finds pred(na) = nb (50), not
+in (100, 10); sb2 copies na's successor nb into nc's successors; sb3 notifies na, whose predecessor nb (50)
+precedes 100 in (50, 10), so na's predecessor becomes nc. nb stabilizes at tick 8, after that has settled: sb1
+finds pred(na) = nc (100), which lies in (50, 10), so nb adopts nc as a successor (Chord's join repair); sb2 adds
+na's successor nb (nb itself); sb3 does not change na's predecessor (50 is not in (100, 10)). Mod<8> ids are
+written as integers.
+The final succ and pred equal BENCH-026c's (the compiler-localized program over an insert-only predecessor
+record)."""
+
+[deploy]
+nodes = [{ name = "na", role = "Peer" }, { name = "nb", role = "Peer" }, { name = "nc", role = "Peer" }]
+
+[run]
+ticks = 20
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-026", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "LANG-064", "LANG-152", "LANG-153", "LANG-190", "LANG-241"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-026", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "LANG-064", "LANG-152", "LANG-153", "LANG-190", "LANG-241", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "nc"
+tick = 2
+rel = "stabilize"
+rows = [[]]
+
+[[input]]
+node = "nb"
+tick = 8
+rel = "stabilize"
+rows = [[]]
+
+[[expect]]
+node = "na"
+rel = "succ"
+final = true
+rows = [[50, "nb"]]
+
+[[expect]]
+node = "na"
+rel = "pred"
+final = true
+rows = [[100, "nc", true]]
+
+[[expect]]
+node = "nb"
+rel = "succ"
+final = true
+rows = [[10, "na"], [50, "nb"], [100, "nc"]]
+
+[[expect]]
+node = "nb"
+rel = "pred"
+final = true
+rows = [[10, "na", true]]
+
+[[expect]]
+node = "nc"
+rel = "succ"
+final = true
+rows = [[10, "na"], [50, "nb"]]
+
+[[expect]]
+node = "nc"
+rel = "pred"
+final = true
+rows = [[0, "nc", false]]

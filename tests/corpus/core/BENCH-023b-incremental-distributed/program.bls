@@ -1,0 +1,41 @@
+//! BENCH-023: distributed shortest paths under link updates, with FIFO (synchronous) links.
+//!
+//! The SIGMOD06 network with one router per node and path vectors (THESIS ch. 3). Each router's `path` is a view
+//! recomputed every tick from its current links and the advertisements that arrived in this tick, and every
+//! router re-advertises its paths every tick (Dedalus re-derivation, CR-26). A link update or failure therefore
+//! propagates hop by hop and the state converges to the from-scratch answer on the final links in time
+//! proportional to the network diameter (THESIS §3.5). An advertisement is used only by a router that has a link
+//! to its sender; the path vector excludes cycles (`f_inPath`).
+
+program ndlog_incremental_paths_distributed version 1;
+
+role Router: cluster;
+
+channel path_ad(dst: Node<Router>, p: Vec<Node<Router>>, cost: u64): Router -> Router;
+
+at Router {
+    input set_link(dst: Node<Router>, cost: u64);
+    input drop_link(dst: Node<Router>);
+
+    table link(dst: Node<Router>, cost: u64) key(dst);
+
+    view path(d, z, p, c) {
+        link(d, c), let z = d, let p = [self, d];
+        path_ad(d, p2, c2) from z, link(z, c1), let p = [self] ++ p2, let c = c1 + c2 where not p2.contains(self);
+    }
+
+    view sp_cost(d, c = min!(x)) = path(d, _, _, x);
+    view shortest_path(d, p, c) = sp_cost(d, c), path(d, _, p, c);
+
+    insert_or_update: on set_link(d, c) {
+        upsert link(d, c);
+    }
+
+    remove: on drop_link(d), link(d, c) {
+        delete link(d, c);
+    }
+
+    advertise: while path(d, _, p, c), s in Router where s != self {
+        send path_ad(d, p, c) to s;
+    }
+}

@@ -1,0 +1,22 @@
+//! BENCH-036: tick-local relations are cleared every tick (R09 §16 T12).
+//!
+//! A relation derived from channel messages is empty at the next tick unless re-derived. `msg` is delivered through
+//! the network path to the node itself (a `loopback`); `got` is a view over it and `seen_now` a scratch written
+//! from it. Both hold only in the ticks in which a message arrives.
+
+program tick_local_clearing version 1;
+
+input poke(x: String);
+
+loopback msg(x: String);
+scratch seen_now(x: String);
+
+view got(x) = msg(x);
+
+relay: on poke(x) {
+    send msg(x);
+}
+
+note: on msg(x) {
+    emit seen_now(x);
+}

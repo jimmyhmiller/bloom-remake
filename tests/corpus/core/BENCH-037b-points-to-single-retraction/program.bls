@@ -1,0 +1,45 @@
+//! BENCH-037: retracting a single fact from a points-to analysis (the FlowLog/DOOP demo; R09 §16 T10).
+//!
+//! Andersen's analysis (RecStep VLDB'19 rules, R09 §13.1) over the input of BENCH-030c, loaded into tables so
+//! that a single `assign` fact can be retracted. The maintained `points_to` must equal the recomputation without
+//! that fact, which removes derivations that flowed through `load` and `store` as well.
+
+program points_to_retraction version 1;
+
+input add_address_of(y: String, x: String);
+input add_assign(y: String, x: String);
+input add_load(y: String, x: String);
+input add_store(y: String, x: String);
+input retract_assign(y: String, x: String);
+
+table address_of(y: String, x: String);
+table assign(y: String, x: String);
+table load(y: String, x: String);
+table store(y: String, x: String);
+
+view points_to(y, x) {
+    address_of(y, x);
+    assign(y, z), points_to(z, x);
+    load(y, v), points_to(v, z), points_to(z, x);
+    store(v, u), points_to(v, y), points_to(u, x);
+}
+
+load_address_of: on add_address_of(y, x) {
+    emit address_of(y, x);
+}
+
+load_assign: on add_assign(y, x) {
+    emit assign(y, x);
+}
+
+load_load: on add_load(y, x) {
+    emit load(y, x);
+}
+
+load_store: on add_store(y, x) {
+    emit store(y, x);
+}
+
+retract: on retract_assign(y, x), assign(y, x) {
+    delete assign(y, x);
+}

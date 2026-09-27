@@ -1,0 +1,87 @@
+schema = 1
+id = "BENCH-019"
+title = "NR09 Fig. 1: update carries the sequence number from before the increment"
+priority = "P0"
+source = "R01 §8.8 and TEST PROGRAMS T14 (Navarro & Rybalchenko 2009 Fig. 1); FEATURES.md CR-04, SEM-013, BENCH-019"
+features = ["SEM-013", "SEM-004", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-062", "LANG-064", "LANG-152", "LANG-153", "LANG-190", "LANG-060"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+node1 refreshes at ticks 1 and 3. Tick 1 sends update(node1, 0) and sequence becomes 1 at tick 2; tick 3 sends
+update(node1, 1) and sequence becomes 2 at tick 4. Each update arrives at node2 one tick after it is sent."""
+
+[deploy]
+nodes = [{ name = "node1", role = "Peer" }, { name = "node2", role = "Peer" }]
+
+[run]
+ticks = 8
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-013", "SEM-004", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-062", "LANG-064", "LANG-152", "LANG-153", "LANG-190", "LANG-060"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-013", "SEM-004", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-062", "LANG-064", "LANG-152", "LANG-153", "LANG-190", "LANG-060", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "node1"
+tick = 1
+rel = "refresh"
+rows = [[]]
+
+[[input]]
+node = "node1"
+tick = 3
+rel = "refresh"
+rows = [[]]
+
+[[expect_send]]
+from = "node1"
+to = "node2"
+channel = "update"
+row = ["node1", 0]
+tick = 1
+
+[[expect_send]]
+from = "node1"
+to = "node2"
+channel = "update"
+row = ["node1", 1]
+tick = 3
+
+[[expect]]
+node = "node1"
+rel = "sequence"
+row = [0]
+holds = "0..=1"
+absent = "2.."
+
+[[expect]]
+node = "node1"
+rel = "sequence"
+row = [1]
+holds = "2..=3"
+absent = "4.."
+
+[[expect]]
+node = "node1"
+rel = "sequence"
+row = [2]
+holds = "4.."
+
+[[expect]]
+node = "node2"
+rel = "update"
+tick = 2
+rows = [["node1", 0]]
+
+[[expect]]
+node = "node2"
+rel = "received"
+final = true
+rows = [["node1", 0], ["node1", 1]]

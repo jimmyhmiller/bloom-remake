@@ -1,0 +1,44 @@
+schema = 1
+id = "BENCH-032"
+title = "Non-morphism trap: size of an lset built over several rounds equals the naive result (5)"
+priority = "P0"
+source = "R04 §12 T8 and R09 §16 T4 (Bloom^L SoCC'12 §4.1); FEATURES.md ENG-043, BENCH-032"
+features = ["ENG-043", "SEM-031", "LANG-045", "LANG-120", "LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-126", "LANG-127", "LANG-128", "LANG-280", "LANG-041", "LANG-047", "LANG-085", "LANG-060", "LANG-190"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Size 5 is pinned two ways: through the thresholds (at least 5 holds, at least 6 does not) and through `reveal!`.
+`reach.size()` is not a generator-bound variable, so its reveal has type Option<u64> (LANGUAGE §5.6)."""
+
+[run]
+ticks = 2
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["ENG-043", "SEM-031", "LANG-045", "LANG-120", "LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-126", "LANG-127", "LANG-128", "LANG-280", "LANG-041", "LANG-047", "LANG-085", "LANG-060", "LANG-190"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["ENG-043", "SEM-031", "LANG-045", "LANG-120", "LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-126", "LANG-127", "LANG-128", "LANG-280", "LANG-041", "LANG-047", "LANG-085", "LANG-060", "LANG-190", "SEM-002"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "at_least_five"
+row = []
+holds = "0.."
+
+[[expect]]
+node = "n1"
+rel = "at_least_six"
+row = []
+absent = "0.."
+
+[[expect]]
+node = "n1"
+rel = "reach_size"
+tick = 0
+rows = [[{ some = 5 }]]

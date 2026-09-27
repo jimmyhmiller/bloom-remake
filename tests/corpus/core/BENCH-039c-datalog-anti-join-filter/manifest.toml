@@ -1,0 +1,62 @@
+schema = 1
+id = "BENCH-039"
+title = "dfir-datalog test_anti_join and test_simple_filter"
+priority = "P1"
+source = "R08 §15 T8 (dfir_datalog_core lib.rs tests test_anti_join, test_simple_filter); FEATURES.md BENCH-039"
+features = ["LANG-043", "LANG-047", "LANG-082", "LANG-084", "LANG-086"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Inputs and outputs are ours. result: (1,2)-(2,5) survives, (3,4)-(4,6) is removed by ints_3(4). The filter's two
+guards contradict each other, so `filtered` is empty whatever the input."""
+
+[run]
+ticks = 3
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-043", "LANG-047", "LANG-082", "LANG-084", "LANG-086"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-043", "LANG-047", "LANG-082", "LANG-084", "LANG-086", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ints_1"
+rows = [[1, 2], [3, 4]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ints_2"
+rows = [[2, 5], [4, 6]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ints_3"
+rows = [[4]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "inp"
+rows = [[2, 1], [1, 1], [1, 2]]
+
+[[expect]]
+node = "n1"
+rel = "result"
+tick = 1
+rows = [[1, 5]]
+
+[[expect]]
+node = "n1"
+rel = "filtered"
+tick = 1
+rows = []

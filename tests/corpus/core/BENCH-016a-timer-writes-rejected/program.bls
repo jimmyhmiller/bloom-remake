@@ -1,0 +1,31 @@
+//! BENCH-016: any write into a periodic is rejected (Bud test/tc_collections.rb#test_periodic_lhs_error).
+//!
+//! Bud rejects `timer <+ …`, `timer <= …` and `timer <- …` into a `periodic` with CompileError. A Blossom
+//! `timer` is its periodic (LANGUAGE §15.2), and the legality matrix forbids every verb on it (LANGUAGE §12,
+//! BLS0400). The three statements are the three Bud operators.
+
+program timer_writes version 1;
+
+static item(n: u64);
+
+fact item(5);
+
+timer ticker every 1s;
+
+output fired(n: u64);
+
+w_emit: while item(n) {
+    emit ticker(n, now());                  // expect: BLS0400 (`<=` into a periodic)
+}
+
+w_next: while item(n) {
+    next ticker(n, now());                  // expect: BLS0400 (`<+` into a periodic)
+}
+
+w_delete: on ticker(c, t) {
+    delete ticker(c, t);                    // expect: BLS0400 (`<-` from a periodic)
+}
+
+report: on ticker(c, _) {
+    emit fired(c);
+}

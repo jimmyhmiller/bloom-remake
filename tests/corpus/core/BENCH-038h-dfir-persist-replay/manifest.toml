@@ -1,0 +1,54 @@
+schema = 1
+id = "BENCH-038"
+title = "DFIR persist replay: the persisted source holds every tick; the join prints oakland, oakland, san francisco"
+priority = "P1"
+source = "R08 §15 T7 (DFIR persist operator documentation); FEATURES.md CR-26, BENCH-038"
+features = ["LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-086", "LANG-190", "ENG-004"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "The cities arrive at ticks 1 and 2. DFIR's source_iter emits in its first tick; the bootstrap emits in tick 0."
+
+[run]
+ticks = 5
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-086", "LANG-190", "ENG-004"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-086", "LANG-190", "ENG-004", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "city"
+rows = [["hello", "oakland"]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "city"
+rows = [["hello", "san francisco"]]
+
+[[expect]]
+node = "n1"
+rel = "greeting"
+row = ["hello"]
+holds = "0.."
+
+[[expect]]
+node = "n1"
+rel = "joined"
+tick = 1
+rows = [["hello", "world", "oakland"]]
+
+[[expect]]
+node = "n1"
+rel = "joined"
+tick = 2
+rows = [["hello", "world", "oakland"], ["hello", "world", "san francisco"]]

@@ -1,0 +1,15 @@
+//! BENCH-039: dfir-datalog frontend flatten and detuple tests (dfir_datalog_core lib.rs; R08 §5.3, §15 T8):
+//!
+//!     result(a, b) :- ints1(a, *b)                    // flatten: one row per element of the column
+//!     result(a, b, c, d) :- ints1((a, b), (c, d))     // detuple: destructure tuple-valued columns
+//!
+//! `*b` is a generator over a `Vec` column (`b in bs`, LANG-088), and the tuple patterns destructure the columns
+//! in the atom (LANGUAGE §9.2).
+
+program datalog_flatten_detuple version 1;
+
+input ints1(a: u64, bs: Vec<u64>);
+input pairs(l: (u64, u64), r: (u64, u64));
+
+view flattened(a, b) = ints1(a, bs), b in bs;
+view detupled(a, b, c, d) = pairs((a, b), (c, d));

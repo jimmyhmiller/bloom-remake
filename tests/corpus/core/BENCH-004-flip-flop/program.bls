@@ -1,0 +1,23 @@
+//! BENCH-004 (DL11 Ex. 7): flip_flop, temporally unsafe by infinite oscillation.
+//!
+//! DL11 Example 7 (R02 §3.5):
+//!
+//!     flip_flop(B, A)@next <- flip_flop(A, B);
+//!     flip_flop(0, 1)@1;
+//!
+//! Accepted (Dedalus warns about temporally unsafe programs and does not forbid them). The state alternates
+//! between (0, 1) and (1, 0) forever: period 2, and no fact holds forever, so the ultimate model is empty.
+
+program flip_flop version 1;
+
+input seed(a: i64, b: i64);
+
+scratch flip_flop(a: i64, b: i64);
+
+start: on seed(a, b) {
+    emit flip_flop(a, b);
+}
+
+flip: while flip_flop(a, b) {
+    next flip_flop(b, a);
+}

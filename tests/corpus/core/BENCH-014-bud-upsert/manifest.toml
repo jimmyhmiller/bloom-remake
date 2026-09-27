@@ -1,0 +1,62 @@
+schema = 1
+id = "BENCH-014"
+title = "Bud upsert: joe is [[1,'a']] at its first tick and [[1,'b']] from the next"
+priority = "P0"
+source = "R03 §2.3 and §11 T6 (bud test/tc_collections.rb TestUpsert); FEATURES.md CR-07, BENCH-014"
+features = ["SEM-005", "SEM-006", "LANG-040", "LANG-041", "LANG-064", "LANG-190", "LANG-060"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Bud: after the first tick joe == [[1,'a']] and t2 == [[2,'x']]; after the second joe == [[1,'b']] and
+t2 == [[2,'y']] (`<-+` behaves as `<+-`). The replacement persists afterwards (tick 4 checked)."""
+
+[run]
+ticks = 6
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-005", "SEM-006", "LANG-040", "LANG-041", "LANG-064", "LANG-190", "LANG-060"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-005", "SEM-006", "LANG-040", "LANG-041", "LANG-064", "LANG-190", "LANG-060", "SEM-002"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "joe"
+tick = 0
+rows = [[1, "a"]]
+
+[[expect]]
+node = "n1"
+rel = "joe"
+tick = 1
+rows = [[1, "b"]]
+
+[[expect]]
+node = "n1"
+rel = "t2"
+tick = 0
+rows = [[2, "x"]]
+
+[[expect]]
+node = "n1"
+rel = "t2"
+tick = 1
+rows = [[2, "y"]]
+
+[[expect]]
+node = "n1"
+rel = "joe"
+tick = 4
+rows = [[1, "b"]]
+
+[[expect]]
+node = "n1"
+rel = "t2"
+final = true
+rows = [[2, "y"]]

@@ -1,0 +1,114 @@
+schema = 1
+id = "BENCH-024"
+title = "Dynamic source routing finds the same best paths as distance vector, before and after a failure"
+priority = "P1"
+source = "R01 §8.3 and TEST PROGRAMS T5 (Loo thesis §3.3.4 Fig. 3.6 vs Figs. 3.3-3.4); FEATURES.md BENCH-024"
+features = ["SEM-008", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-062", "LANG-063", "LANG-064", "LANG-085", "LANG-088", "LANG-100", "LANG-152", "LANG-153", "LANG-025", "LANG-060"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Same topology, inputs and failure as BENCH-024a. Each extension takes two ticks (to the path's last node and
+back). Before the failure (tick 10) the routes equal BENCH-024a's exactly; after it (converged by tick 15) they
+equal BENCH-024a's finite routes, and d is simply unreachable (DSR keeps no infinite-cost entries)."""
+
+[deploy]
+nodes = [{ name = "a", role = "Router" }, { name = "b", role = "Router" }, { name = "c", role = "Router" }, { name = "d", role = "Router" }]
+
+[run]
+ticks = 24
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-008", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-062", "LANG-063", "LANG-064", "LANG-085", "LANG-088", "LANG-100", "LANG-152", "LANG-153", "LANG-025", "LANG-060"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-008", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-062", "LANG-063", "LANG-064", "LANG-085", "LANG-088", "LANG-100", "LANG-152", "LANG-153", "LANG-025", "LANG-060", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "a"
+tick = 1
+rel = "set_link"
+rows = [["b", 1]]
+
+[[input]]
+node = "b"
+tick = 1
+rel = "set_link"
+rows = [["a", 1], ["c", 1]]
+
+[[input]]
+node = "c"
+tick = 1
+rel = "set_link"
+rows = [["b", 1], ["d", 1]]
+
+[[input]]
+node = "d"
+tick = 1
+rel = "set_link"
+rows = [["c", 1]]
+
+[[input]]
+node = "c"
+tick = 10
+rel = "drop_link"
+rows = [["d"]]
+
+[[input]]
+node = "d"
+tick = 10
+rel = "drop_link"
+rows = [["c"]]
+
+[[expect]]
+node = "a"
+rel = "route"
+tick = 10
+rows = [["b", "b", 1], ["c", "b", 2], ["d", "b", 3]]
+
+[[expect]]
+node = "b"
+rel = "route"
+tick = 10
+rows = [["a", "a", 1], ["c", "c", 1], ["d", "c", 2]]
+
+[[expect]]
+node = "c"
+rel = "route"
+tick = 10
+rows = [["a", "b", 2], ["b", "b", 1], ["d", "d", 1]]
+
+[[expect]]
+node = "d"
+rel = "route"
+tick = 10
+rows = [["a", "c", 3], ["b", "c", 2], ["c", "c", 1]]
+
+[[expect]]
+node = "a"
+rel = "route"
+final = true
+rows = [["b", "b", 1], ["c", "b", 2]]
+
+[[expect]]
+node = "b"
+rel = "route"
+final = true
+rows = [["a", "a", 1], ["c", "c", 1]]
+
+[[expect]]
+node = "c"
+rel = "route"
+final = true
+rows = [["a", "b", 2], ["b", "b", 1]]
+
+[[expect]]
+node = "d"
+rel = "route"
+final = true
+rows = []

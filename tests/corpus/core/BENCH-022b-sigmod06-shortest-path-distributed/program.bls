@@ -1,0 +1,39 @@
+//! BENCH-022: NDlog shortest path (SIGMOD06 Fig. 1) run distributed over the SIGMOD06 Fig. 2 network.
+//!
+//! One router per node. SP2's body spans two locations (`#link` at S, `path` at Z); it is localized the way
+//! SIGMOD06 Algorithm 2 / CACM09 (sp2a, sp2b) do: the computation runs at Z, which knows its in-links from the
+//! link table, and the new path is shipped to S. `path` is materialized (a table), so each router accumulates
+//! its paths; SP3 and SP4 are local views. Links are static topology known to both endpoints (`#link`).
+
+program sigmod06_shortest_path_distributed version 1;
+
+role Router: cluster;
+
+static link(src: Node<Router>, dst: Node<Router>, cost: u64);
+
+fact link("e", "a", 1);
+fact link("a", "b", 5);
+fact link("a", "c", 1);
+fact link("c", "b", 1);
+fact link("b", "d", 1);
+
+channel path_ad(dst: Node<Router>, p: Vec<Node<Router>>, cost: u64): Router -> Router;
+
+at Router {
+    table path(dst: Node<Router>, nxt: Node<Router>, p: Vec<Node<Router>>, cost: u64);
+
+    view sp_cost(d, c = min!(x)) = path(d, _, _, x);
+    view shortest_path(d, p, c) = sp_cost(d, c), path(d, _, p, c);
+
+    sp1: while link(self, d, c) {
+        emit path(d, d, [self, d], c);
+    }
+
+    sp2: while path(d, _, p2, c2), link(s, self, c1) {
+        send path_ad(d, [s] ++ p2, c1 + c2) to s;
+    }
+
+    learn: on path_ad(d, p, c) from z {
+        emit path(d, z, p, c);
+    }
+}

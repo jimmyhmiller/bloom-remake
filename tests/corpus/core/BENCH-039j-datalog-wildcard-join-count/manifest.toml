@@ -1,0 +1,57 @@
+schema = 1
+id = "BENCH-039"
+title = "dfir-datalog test_wildcard_join_count under Blossom's valuation semantics"
+priority = "P1"
+source = "R08 §15 T8 (dfir_datalog_core lib.rs test test_wildcard_join_count); LANGUAGE §10.1; FEATURES.md CR-03, BENCH-039"
+features = ["SEM-007", "LANG-043", "LANG-047", "LANG-086", "LANG-100", "LANG-101"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Inputs and outputs are ours: ints1 {(1,10), (1,20), (2,30)}, ints2 {1, 2}. count!(*) and count!(a) are both 2
+(distinct a); with the column bound to `_x` the count is the 3 join rows. Judgement call: dfir-datalog's own
+count(*) semantics is not stated by the sources (the test is a graph snapshot); this case pins LANGUAGE §10.1."""
+
+[run]
+ticks = 3
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-007", "LANG-043", "LANG-047", "LANG-086", "LANG-100", "LANG-101"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-007", "LANG-043", "LANG-047", "LANG-086", "LANG-100", "LANG-101", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ints1"
+rows = [[1, 10], [1, 20], [2, 30]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ints2"
+rows = [[1], [2]]
+
+[[expect]]
+node = "n1"
+rel = "result"
+tick = 1
+rows = [[2]]
+
+[[expect]]
+node = "n1"
+rel = "result2"
+tick = 1
+rows = [[2]]
+
+[[expect]]
+node = "n1"
+rel = "result_rows"
+tick = 1
+rows = [[3]]

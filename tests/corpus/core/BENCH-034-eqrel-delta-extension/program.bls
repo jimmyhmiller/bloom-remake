@@ -1,0 +1,32 @@
+//! BENCH-034: equivalence-relation Δ-extension (Nappa et al., "Fast Parallel Equivalence Relations in a Datalog
+//! Compiler", PACT'19, Fig. 4; R09 §16 T6).
+//!
+//! Current classes {a,b,c}, {f,g}, {d,e}; the new pairs (b,f) and (g,c) merge the first two. A downstream rule
+//! joining on the relation must see (a,f) in the same fixpoint. Soufflé's `eqrel` is the reflexive, symmetric
+//! and transitive closure of the inserted pairs; here it is a recursive view, and the downstream rule is `alert`.
+
+program eqrel_delta version 1;
+
+input add_pair(x: String, y: String);
+input watch(x: String, y: String);
+
+table pair(x: String, y: String);
+table watched(x: String, y: String);
+
+view eq(x, y) {
+    pair(x, y);
+    pair(y, x);
+    pair(x, _), let y = x;
+    pair(_, x), let y = x;
+    eq(x, z), eq(z, y);
+}
+
+view alert(x, y) = eq(x, y), watched(x, y);
+
+load_pair: on add_pair(x, y) {
+    emit pair(x, y);
+}
+
+load_watch: on watch(x, y) {
+    emit watched(x, y);
+}

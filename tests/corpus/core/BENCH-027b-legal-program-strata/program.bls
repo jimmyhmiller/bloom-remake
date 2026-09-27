@@ -1,0 +1,27 @@
+//! BENCH-027: a legal program gets correct strata (Evita Raced's metaprogrammed stratifier, R01 T21).
+//!
+//! Three strata: `reach` is positive recursion (stratum 0), `unreach` negates it (stratum 1), and
+//! `reaches_all` negates `unreach` (stratum 2). A relation's stratum is the longest same-tick path to it
+//! counting negative edges (SEM-022).
+
+program evita_strata version 1;
+
+static node(n: u64);
+static edge(a: u64, b: u64);
+
+fact node(1);
+fact node(2);
+fact node(3);
+fact node(4);
+fact edge(1, 2);
+fact edge(2, 3);
+fact edge(3, 4);
+
+view reach(a, b) {
+    edge(a, b);
+    reach(a, c), edge(c, b);
+}
+
+view unreach(a, b) = node(a), node(b), not reach(a, b) where a != b;
+
+view reaches_all(a) = node(a), not unreach(a, _);

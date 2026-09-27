@@ -1,0 +1,36 @@
+//! BENCH-009 (DI §3.3.1): soft state as TTL-guarded persistence, with a mocked `now`.
+//!
+//! The Declarative Imperative §3.3.1, quoted in R02 §3.3:
+//!
+//!     q(A, TTL, Birth)@next :- q(A, TTL, Birth), !del_q(A), now() - Birth < TTL.
+//!
+//! R02 §17 T10 asks for a mocked `now()`. Here the clock is program state that advances by 10 time units per
+//! tick (`mock_now` is 10·t at tick t), so the expiry ticks are exact. A tuple is born with the current mocked
+//! time; it is carried to the next tick while `now - birth < ttl`. Inserting the same `a` again re-derives it
+//! with a new birth time, which is a refresh; `del_q(a)` stops every tuple of `a` from being carried.
+
+program soft_state_mocked_now version 1;
+
+input insert(a: String, ttl: i64);
+input del_q(a: String);
+
+scratch mock_now(t: i64) key();
+scratch q(a: String, ttl: i64, birth: i64);
+
+view alive(a) = q(a, _, _);
+
+bootstrap {
+    emit mock_now(0);
+}
+
+clock: while mock_now(t) {
+    next mock_now(t + 10);
+}
+
+born: on insert(a, ttl), mock_now(clk) {
+    emit q(a, ttl, clk);
+}
+
+keep: while q(a, ttl, birth), mock_now(clk), not del_q(a) where clk - birth < ttl {
+    next q(a, ttl, birth);
+}

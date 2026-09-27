@@ -1,0 +1,22 @@
+//! BENCH-031: single-source shortest paths over a min lattice (Ascent's lattice SSSP; egglog's path with
+//! `:merge (min old new)`), R09 §16 T3.
+//!
+//!     lattice path(x, y, Dual<u32>);
+//!     path(x, y, Dual(*w)) <-- edge(x, y, w);
+//!     path(x, z, Dual(w + l)) <-- edge(x, y, w), path(y, z, ?Dual(l));
+//!
+//! The min lives inside the recursion: `d0 + w` on an `LMin` is a morphism, so the recursion stays in one
+//! stratum (SEM-031), and non-negative weights make the in-tick fixpoint finite.
+
+program lattice_sssp version 1;
+
+static edge(a: u64, b: u64, w: u64);
+
+fact edge(1, 2, 10);
+fact edge(2, 3, 10);
+fact edge(1, 3, 30);
+
+view path(a, b, d: LMin<u64>) {
+    edge(a, b, w), let d = LMin::of(w);
+    edge(a, c, w), path(c, b, d0), let d = d0 + w;
+}

@@ -1,0 +1,50 @@
+schema = 1
+id = "BENCH-036"
+title = "Tick behaviour: deletion at t removes p and the derived q from t+1 (.ded twin)"
+priority = "P0"
+source = "R09 §16 T11 (persistence and deletion across ticks); FEATURES.md SEM-005, ENG-003, BENCH-036"
+features = ["SEM-005", "ENG-003", "ENG-062", "LANG-065", "LANG-069", "LANG-082", "LANG-220"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+Same expectations as BENCH-036a: p(a) and p(b) hold from tick 1; del_p(a) at tick 4 stops p(a)'s persistence, so
+p(a) and the derived q(a) are absent from tick 5 on, and b is unaffected. A `.ded` case takes its nodes and inputs
+from the program: node "n1" is the location constant of the facts, and the `@k` facts are input events at tick k
+(CR-13). Rows are written without the location column, which the `.ded` frontend strips (LANGUAGE §21.1). The
+storage and per-tick-time bullets of BENCH-036 are not expressible in schema v1 (see BENCH-036a)."""
+
+[run]
+ticks = 8
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-005", "ENG-003", "ENG-062", "LANG-065", "LANG-069", "LANG-082", "LANG-220"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-005", "ENG-003", "ENG-062", "LANG-065", "LANG-069", "LANG-082", "LANG-220", "SEM-002"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "p"
+row = ["a"]
+holds = "1..=4"
+absent = "5.."
+
+[[expect]]
+node = "n1"
+rel = "q"
+row = ["a"]
+holds = "1..=4"
+absent = "5.."
+
+[[expect]]
+node = "n1"
+rel = "q"
+row = ["b"]
+absent = "0"
+holds = "1.."

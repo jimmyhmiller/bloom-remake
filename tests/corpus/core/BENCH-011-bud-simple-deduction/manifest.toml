@@ -1,0 +1,82 @@
+schema = 1
+id = "BENCH-011"
+title = "Bud test_simple_deduction (BabyBud): scratch clearing, deferred insert and delete"
+priority = "P0"
+source = "R03 §11 T3 (bud test/tc_collections.rb test_simple_deduction); FEATURES.md BENCH-011"
+features = ["SEM-005", "SEM-008", "SEM-012", "LANG-040", "LANG-041", "LANG-045", "LANG-047", "LANG-061", "LANG-063", "LANG-190", "LANG-060"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Bud asserts after its first tick (our tick 0) that scrtch2 has 1 tuple, and after its second (our tick 1) that
+scrtch == [[c,d,5,6]] (the `<+` arrived and the bootstrap tuples are gone), scrtch2 is empty, tbl holds exactly
+(c,d,5,6) and (z,y,9,8), the_keys == [[c,d],[z,y]] and the_vals == [[5,6],[9,8]]. Tick-0 contents follow from
+the bootstrap block (SEM-012). The rules re-fire every tick, so the tick-1 contents persist (tick 3 checked)."""
+
+[run]
+ticks = 6
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-005", "SEM-008", "SEM-012", "LANG-040", "LANG-041", "LANG-045", "LANG-047", "LANG-061", "LANG-063", "LANG-190", "LANG-060"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-005", "SEM-008", "SEM-012", "LANG-040", "LANG-041", "LANG-045", "LANG-047", "LANG-061", "LANG-063", "LANG-190", "LANG-060", "SEM-002"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "scrtch"
+tick = 0
+rows = [["a", "b", 1, 2], ["a", "c", 3, 4]]
+
+[[expect]]
+node = "n1"
+rel = "scrtch2"
+tick = 0
+rows = [["a", "b"]]
+
+[[expect]]
+node = "n1"
+rel = "tbl"
+tick = 0
+rows = [["a", "b", 1, 2], ["z", "y", 9, 8]]
+
+[[expect]]
+node = "n1"
+rel = "scrtch"
+tick = 1
+rows = [["c", "d", 5, 6]]
+
+[[expect]]
+node = "n1"
+rel = "scrtch2"
+tick = 1
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "tbl"
+tick = 1
+rows = [["c", "d", 5, 6], ["z", "y", 9, 8]]
+
+[[expect]]
+node = "n1"
+rel = "the_keys"
+tick = 1
+rows = [["c", "d"], ["z", "y"]]
+
+[[expect]]
+node = "n1"
+rel = "the_vals"
+tick = 1
+rows = [[5, 6], [9, 8]]
+
+[[expect]]
+node = "n1"
+rel = "tbl"
+tick = 3
+rows = [["c", "d", 5, 6], ["z", "y", 9, 8]]

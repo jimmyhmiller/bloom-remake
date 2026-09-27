@@ -1,0 +1,57 @@
+schema = 1
+id = "BENCH-047"
+title = "One-layer-per-tick BFS tree (canonical mode): tree = {(a,r), (b,r), (c,a), (d,c)}"
+priority = "P0"
+source = "R12 §12 T8 (SZ90 §6, GZ01 Ex. 4.3); FEATURES.md SEM-086, BENCH-047"
+features = ["SEM-086", "SEM-085", "LANG-108", "LANG-114", "LANG-040", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-082", "LANG-190"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "R12 T8 in canonical mode: t0 a<-r, b<-r; t1 c<-a (least of {a, b}); t2 d<-c; t3 quiescent."
+
+[deploy]
+seed = 42
+
+[run]
+ticks = 6
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-086", "SEM-085", "LANG-108", "LANG-114", "LANG-040", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-082", "LANG-190"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-086", "SEM-085", "LANG-108", "LANG-114", "LANG-040", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-082", "LANG-190", "SEM-002"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "parent"
+tick = 0
+rows = [["a", "r"], ["b", "r"]]
+
+[[expect]]
+node = "n1"
+rel = "parent"
+tick = 1
+rows = [["c", "a"]]
+
+[[expect]]
+node = "n1"
+rel = "parent"
+tick = 2
+rows = [["d", "c"]]
+
+[[expect]]
+node = "n1"
+rel = "parent"
+tick = 3
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "tree"
+final = true
+rows = [["a", "r"], ["b", "r"], ["c", "a"], ["d", "c"]]

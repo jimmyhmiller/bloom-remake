@@ -1,0 +1,50 @@
+schema = 1
+id = "BENCH-017"
+title = "Bud tc_halt: the node stops at the tick where key 2 appears"
+priority = "P1"
+source = "R03 §2.2 and §11 T10 (bud test/tc_halt.rb); LANGUAGE §7.15 halt; FEATURES.md LANG-052, BENCH-017"
+features = ["LANG-052", "LANG-041", "LANG-061", "LANG-190", "LANG-060"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+tbl is 1 at tick 0 and 2 at tick 1, where `halt` is emitted; the node stops at the end of tick 1 and never runs
+tick 2, so tbl(3) never holds (without the halt it would hold at tick 2)."""
+
+[run]
+ticks = 6
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-052", "LANG-041", "LANG-061", "LANG-190", "LANG-060"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-052", "LANG-041", "LANG-061", "LANG-190", "LANG-060", "SEM-002"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "tbl"
+row = [1]
+holds = "0"
+
+[[expect]]
+node = "n1"
+rel = "tbl"
+row = [2]
+holds = "1"
+
+[[expect]]
+node = "n1"
+rel = "halt"
+row = [false]
+holds = "1"
+
+[[expect]]
+node = "n1"
+rel = "tbl"
+row = [3]
+absent = "2.."

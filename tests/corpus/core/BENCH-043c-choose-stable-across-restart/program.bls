@@ -1,0 +1,26 @@
+//! BENCH-043: after a restart `choose` makes the same choice again (R12 §12 T4 item 5).
+//!
+//! `choose` depends only on the candidates and the shared choice seed, not on the incarnation, so a node that
+//! restarts with the same (durable) candidates chooses the same value. (`rand` and `choose_rand` include the
+//! incarnation in their key, so their values change; that is not asserted, being probabilistic.) The first choice
+//! is recorded durably and compared with every later one, across the restart.
+
+program choose_restart version 1;
+
+input load(g: String, v: u64);
+
+durable table pool(g: String, v: u64);
+durable table recorded(g: String, v: u64);
+
+view pick(g, v) = pool(g, v), choose!(v per g);
+view recorded_count(n = count!(v)) = recorded(_g, v);
+
+keep: on load(g, v) {
+    emit pool(g, v);
+}
+
+record: while pick(g, v), not recorded(g, _) {
+    next recorded(g, v);
+}
+
+invariant same_choice "choose changed although its candidates did not": never recorded(g, v), pick(g, w) where v != w;

@@ -1,0 +1,22 @@
+schema = 1
+id = "BENCH-016"
+title = "A program's write into its own input (the host-owned interface) is rejected"
+priority = "P0"
+source = "R03 §2.3 and §11 T8 (bud test_instant_merge_outside_bud); LANGUAGE §7.6, §16.5; FEATURES.md LANG-067, BENCH-016"
+features = ["LANG-066", "LANG-067", "ANA-005", "LANG-043", "LANG-045", "LANG-060", "LANG-190"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Judgement call: Bud's check is on host code; Blossom's host API cannot express a same-tick write at all
+(host inputs always land in a future tick), so the corpus pins the in-program counterpart, BLS0406. The host
+API's own guarantee is tested with the node's host API (LANG-067, M5.5)."""
+
+[backend.compile]
+status = "unimplemented"
+unimplemented = ["LANG-066", "LANG-067", "ANA-005", "LANG-043", "LANG-045", "LANG-060", "LANG-190"]
+until = "M5"
+
+[[expect_diag]]
+code = "BLS0406"
+line = 20

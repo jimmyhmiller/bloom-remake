@@ -1,0 +1,16 @@
+//! BENCH-012: Bud's `EmptyPk` (test/tc_collections.rb#test_empty_pk_error).
+//!
+//!     table :t1, [] => [:foo, :bar]      # an empty key: at most one tuple
+//!
+//! The host inserts ["xyz", 6], then the same tuple again (accepted), then ["xxx", 2], a second distinct tuple,
+//! which raises `KeyConstraintError`. Host insertions arrive through the input `put` (LANG-067).
+
+program empty_key version 1;
+
+input put(foo: String, bar: i64);
+
+table t1(foo: String, bar: i64) key();
+
+store: on put(f, b) {
+    emit t1(f, b);
+}

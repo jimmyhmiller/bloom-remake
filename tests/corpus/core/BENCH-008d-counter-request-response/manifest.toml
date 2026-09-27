@@ -1,0 +1,67 @@
+schema = 1
+id = "BENCH-008"
+title = "Counter with request/response (.ded twin)"
+priority = "P0"
+source = "R02 §3.3 and §17 T9 (Alvaro thesis §3.1 counter); FEATURES.md BENCH-008, CR-04"
+features = ["SEM-004", "SEM-007", "LANG-069", "LANG-220"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+Nodes "s", "c1" and "c2" are the location constants of the program. counter: 0 at ticks 1-2, 1 at 3-4, 2 from 5.
+response (persisted at the requester): c1 holds 0 from tick 3 and 1 from tick 5; c2 holds 0 from tick 3."""
+
+[run]
+ticks = 10
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-004", "SEM-007", "LANG-069", "LANG-220"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-004", "SEM-007", "LANG-069", "LANG-220", "SEM-002"]
+until = "M7"
+
+[[expect]]
+node = "s"
+rel = "counter"
+row = [0]
+holds = "1..=2"
+absent = "3.."
+
+[[expect]]
+node = "s"
+rel = "counter"
+row = [1]
+holds = "3..=4"
+absent = "5.."
+
+[[expect]]
+node = "s"
+rel = "counter"
+row = [2]
+absent = "..=4"
+holds = "5.."
+
+[[expect]]
+node = "c1"
+rel = "response"
+row = [0]
+absent = "..=2"
+holds = "3.."
+
+[[expect]]
+node = "c1"
+rel = "response"
+row = [1]
+absent = "..=4"
+holds = "5.."
+
+[[expect]]
+node = "c2"
+rel = "response"
+final = true
+rows = [[0]]

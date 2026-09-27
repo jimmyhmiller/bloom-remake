@@ -1,0 +1,31 @@
+//! BENCH-007 (DL11 §3.4): the priority queue, per-user discipline.
+//!
+//! DL11 §3.4, quoted in R02 §3.3:
+//!
+//!     persist[m_priority_queue_pos, m_priority_queue_neg, 3]
+//!     omin(A, min<C>) <- m_priority_queue(A, _, C);
+//!     priority_queue(A, B, C)@next <- m_priority_queue(A, B, C), omin(A, C);
+//!     m_priority_queue_neg(A, B, C) <- m_priority_queue(A, B, C), omin(A, C);
+//!
+//! Each timestep dequeues, per user A, the minimum-priority entry into `priority_queue` at the next timestep and
+//! deletes it atomically. The persist macro is a Blossom `table`, and `m_priority_queue_neg` is its `delete`.
+//! The paper lists the input tuples as `priority_queue(...)@123`, but the program drains `m_priority_queue`;
+//! following R02 §17 T7 they are loaded into `m_priority_queue` at tick 123.
+
+program dl11_priority_queue version 1;
+
+input enqueue(user: String, cmd: String, prio: i64);
+
+table m_priority_queue(user: String, cmd: String, prio: i64);
+scratch priority_queue(user: String, cmd: String, prio: i64);
+
+view omin(user, lowest = min!(prio)) = m_priority_queue(user, _, prio);
+
+load: on enqueue(u, c, p) {
+    emit m_priority_queue(u, c, p);
+}
+
+dequeue: while m_priority_queue(u, c, p), omin(u, p) {
+    next priority_queue(u, c, p);
+    delete m_priority_queue(u, c, p);
+}

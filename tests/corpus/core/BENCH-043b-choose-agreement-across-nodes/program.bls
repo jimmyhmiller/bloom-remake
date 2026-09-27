@@ -1,0 +1,37 @@
+//! BENCH-043: nodes that see the same candidates agree on `choose` (R12 §12 T4 item 4, T11; SEM-085).
+//!
+//! `choose` ranks candidates by a PRF keyed with the choice seed σc, which all nodes share (ODD-38), like
+//! rendezvous hashing: two nodes with the same pool always make the same choice. (For `choose_rand`, which keys the
+//! PRF with each node's own seed, they agree only about a quarter of the time with four candidates; that
+//! statistic is not asserted.) Each node tells the other its choice and checks that the choices agree.
+
+program choose_agreement version 1;
+
+role Peer: cluster;
+
+static pool(g: String, v: u64);
+
+fact pool("q", 1);
+fact pool("q", 2);
+fact pool("q", 3);
+fact pool("q", 4);
+
+channel my_pick(g: String, v: u64): Peer -> Peer;
+
+at Peer {
+    table heard(peer: Node<Peer>, g: String, v: u64);
+
+    view pick(g, v) = pool(g, v), choose!(v per g);
+    view heard_count(n = count!(p)) = heard(p, _g, _v);
+
+    tell: while pick(g, v), p in Peer where p != self {
+        send my_pick(g, v) to p;
+    }
+
+    hear: on my_pick(g, v) from p {
+        emit heard(p, g, v);
+    }
+
+    invariant agree "two nodes with the same candidates chose differently":
+        never heard(_, g, v), pick(g, w) where v != w;
+}

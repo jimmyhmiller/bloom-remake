@@ -1,0 +1,33 @@
+//! BENCH-047: a choice on a same-tick recursive cycle is rejected (SZ90 §6 condition (c); GZ01 Ex. 4.3; R12 §12 T8).
+//!
+//!     parent(Y, choose<X>) :- reached(X), g(X, Y), notin reached(Y).
+//!     reached(Y) :- parent(Y, _).
+//!
+//! No choice site may lie on a same-tick recursive cycle, even a positive one (SEM-086, BLS0503 with the cycle as
+//! witness). R12's program also negates `reached` inside the cycle, which would add a second, unrelated error
+//! (BLS0502); this case drops that negation so that the choice-stratification verdict is the only one.
+
+program recursive_choose_rejected version 1;
+
+static root(n: String);
+static g(x: String, y: String);
+
+fact root("r");
+fact g("r", "a");
+fact g("r", "b");
+fact g("a", "c");
+fact g("b", "c");
+fact g("c", "d");
+
+output tree(y: String, x: String);
+
+view reached(y) {
+    root(y);
+    parent(y, _);
+}
+
+view parent(y, x) = reached(x), g(x, y), choose!(x per y);    // expect: BLS0503
+
+report: while parent(y, x) {
+    emit tree(y, x);
+}

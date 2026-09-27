@@ -1,0 +1,91 @@
+schema = 1
+id = "BENCH-019"
+title = "NR09 Fig. 2: every node, including node1, increments exactly once"
+priority = "P0"
+source = "R01 §8.8 and TEST PROGRAMS T15 (Navarro & Rybalchenko 2009 Fig. 2); FEATURES.md CR-03, SEM-013, BENCH-019"
+features = ["SEM-013", "SEM-007", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-062", "LANG-064", "LANG-152", "LANG-153", "LANG-190", "LANG-060"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+node1 broadcasts at tick 1: ten derivations per destination collapse to one ping per (sender, tick, receiver)
+(SEM-007), including the self-ping. Every node receives exactly one ping at tick 2 and its sequence is 1 from
+tick 3 on, forever (no further pings)."""
+
+[deploy]
+nodes = [{ name = "node1", role = "Peer" }, { name = "node2", role = "Peer" }, { name = "node3", role = "Peer" }]
+
+[run]
+ticks = 8
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-013", "SEM-007", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-062", "LANG-064", "LANG-152", "LANG-153", "LANG-190", "LANG-060"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-013", "SEM-007", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-062", "LANG-064", "LANG-152", "LANG-153", "LANG-190", "LANG-060", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "node1"
+tick = 1
+rel = "broadcast"
+rows = [[]]
+
+[[expect_send]]
+from = "node1"
+to = "node1"
+channel = "ping"
+row = []
+tick = 1
+count = 1
+
+[[expect_send]]
+from = "node1"
+to = "node2"
+channel = "ping"
+row = []
+tick = 1
+count = 1
+
+[[expect_send]]
+from = "node1"
+to = "node3"
+channel = "ping"
+row = []
+tick = 1
+count = 1
+
+[[expect]]
+node = "node1"
+rel = "sequence"
+row = [0]
+holds = "0..=2"
+absent = "3.."
+
+[[expect]]
+node = "node1"
+rel = "sequence"
+row = [1]
+holds = "3.."
+
+[[expect]]
+node = "node2"
+rel = "sequence"
+row = [1]
+holds = "3.."
+
+[[expect]]
+node = "node3"
+rel = "sequence"
+row = [1]
+holds = "3.."
+
+[[expect]]
+node = "node3"
+rel = "sequence"
+final = true
+rows = [[1]]

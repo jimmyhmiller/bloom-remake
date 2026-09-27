@@ -1,0 +1,36 @@
+//! BENCH-041: the conflicting writers of BENCH-041c resolved by a declared policy instead of an error
+//! (R12 §12 T2 variant; LANG-117).
+//!
+//! R12 resolves the same-tick conflict with `resolve choose` on `sel`. LANGUAGE §10.7 (which takes precedence)
+//! gives relation-level policies only the candidates for t+1: persisted tuples that are not deleted, `next`
+//! inserts and upserts; same-tick `emit`s stay subject to SEM-050 (§22.2). The two writers therefore stage their
+//! tuples with `next` into a keyed table, and the policy picks one. In canonical mode "the least-priority value"
+//! is the least value: `resolve choose_least(v)`.
+
+program choose_resolve_policy version 1;
+
+input ins(g: String, v: String);
+input del(g: String, v: String);
+
+/// The candidates: persisted explicitly (LANG-065), so the frame rule and its deletion guard are visible.
+scratch cand(g: String, v: String);
+
+insert: on ins(g, v) {
+    emit cand(g, v);
+}
+
+persist: while cand(g, v), not del(g, v) {
+    next cand(g, v);
+}
+
+view pick(g, v) = cand(g, v), choose_least!(v per g);
+
+table sel(g: String, v: String) key(g) resolve choose_least(v);
+
+select: while pick(g, v) {
+    next sel(g, v);
+}
+
+filler: while cand(g, _) {
+    next sel(g, "zz");
+}

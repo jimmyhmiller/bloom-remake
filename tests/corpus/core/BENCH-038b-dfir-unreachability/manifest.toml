@@ -1,0 +1,48 @@
+schema = 1
+id = "BENCH-038"
+title = "DFIR unreachability: unreached = {11, 12}"
+priority = "P1"
+source = "R08 §15 T2 (hydroflow examples/example_6_unreachability.rs); FEATURES.md BENCH-038"
+features = ["ENG-042", "SEM-020", "LANG-043", "LANG-047", "LANG-060", "LANG-082", "LANG-086"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "Vertices 0, 3, 6, 5 and 10 are reachable from 0; 11 and 12 are not."
+
+[run]
+ticks = 3
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["ENG-042", "SEM-020", "LANG-043", "LANG-047", "LANG-060", "LANG-082", "LANG-086"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["ENG-042", "SEM-020", "LANG-043", "LANG-047", "LANG-060", "LANG-082", "LANG-086", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "origin"
+rows = [[0]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "pair"
+rows = [[5, 10], [0, 3], [3, 6], [6, 5], [11, 12]]
+
+[[expect]]
+node = "n1"
+rel = "reached"
+tick = 1
+rows = [[0], [3], [5], [6], [10]]
+
+[[expect]]
+node = "n1"
+rel = "unreached"
+tick = 1
+rows = [[11], [12]]

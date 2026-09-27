@@ -1,0 +1,11 @@
+// BENCH-015 (toggle, Declarative Imperative §3.4.4) in Molly's Dedalus dialect: the `.ded` twin of BENCH-015c.
+//
+// Molly locates every rule by its first body predicate, so the emptiness rule needs a positive subgoal that
+// binds the location: node(N), persisted from a fact at tick 1.
+
+state(N, X)@next :- state(N, X), notin del_state(N, X);
+state(N, 1)@next :- node(N), notin state(N, _);
+del_state(N, X) :- state(N, X);
+node(N)@next :- node(N);
+
+node("n1")@1;

@@ -1,0 +1,79 @@
+schema = 1
+id = "BENCH-010"
+title = "timeout_svc ported to Blossom: timeout at k+2 unless cancelled"
+priority = "P0"
+source = "R02 §12.5 and §17 T11 (Molly util/timeout_svc.ded); FEATURES.md BENCH-010"
+features = ["LANG-041", "LANG-043", "LANG-061", "LANG-081", "LANG-082", "SEM-003", "LANG-060"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "Same driver and expectations as the verbatim `.ded` case BENCH-010d."
+
+[run]
+ticks = 12
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-041", "LANG-043", "LANG-061", "LANG-081", "LANG-082", "SEM-003", "LANG-060"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-041", "LANG-043", "LANG-061", "LANG-081", "LANG-082", "SEM-003", "LANG-060", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "timer_svc"
+rows = [["t1", 3]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel = "timer_svc"
+rows = [["t2", 3]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "timer_cancel"
+rows = [["t2"]]
+
+[[expect]]
+node = "n1"
+rel = "timer_state"
+tick = 3
+rows = [["t1", 2]]
+
+[[expect]]
+node = "n1"
+rel = "timer_state"
+tick = 4
+rows = [["t1", 1]]
+
+[[expect]]
+node = "n1"
+rel = "timeout"
+row = ["t1"]
+absent = "..=3"
+holds = "4"
+
+[[expect]]
+node = "n1"
+rel = "timeout"
+row = ["t1"]
+absent = "5.."
+
+[[expect]]
+node = "n1"
+rel = "timer_state"
+tick = 6
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "timeout"
+row = ["t2"]
+absent = "..=9"

@@ -1,0 +1,32 @@
+//! BENCH-021: all paths in REBL (bud docs/rebl.md).
+//!
+//!     table :link, [:from, :to, :cost]
+//!     table :path, [:from, :to, :next, :cost]
+//!     path <= link {|e| [e.from, e.to, e.to, e.cost]}
+//!     temp :j <= (link*path).pairs(:to => :from)
+//!     path <= j { |l,p| [l.from, p.to, p.from, l.cost+p.cost] }
+//!     link <= [['a','b',1],['a','b',4],['b','c',1],['c','d',1],['d','e',1]]
+//!
+//! The link literal is a rule, re-evaluated every tick: `static` facts. The first `/tick` prints 14 paths.
+
+program rebl_all_paths version 1;
+
+static link(src: String, dst: String, cost: i64);
+
+fact link("a", "b", 1);
+fact link("a", "b", 4);
+fact link("b", "c", 1);
+fact link("c", "d", 1);
+fact link("d", "e", 1);
+
+table path(src: String, dst: String, nxt: String, cost: i64);
+
+view j(l_src, l_cost, p_src, p_dst, p_cost) = link(l_src, p_src, l_cost), path(p_src, p_dst, _, p_cost);
+
+base: while link(s, d, c) {
+    emit path(s, d, d, c);
+}
+
+extend: while j(ls, lc, ps, pd, pc) {
+    emit path(ls, pd, ps, lc + pc);
+}

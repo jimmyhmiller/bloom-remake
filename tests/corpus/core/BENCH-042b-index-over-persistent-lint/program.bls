@@ -1,0 +1,19 @@
+//! BENCH-042: `index()` over a persistent relation re-ranks every tick, and ANA-011 lints it (R12 §12 T3).
+
+program index_over_persistent version 1;
+
+input arrive(p: String);
+
+table all_req(p: String);
+
+output ranked(p: String, i: u64);
+
+record: on arrive(p) {
+    emit all_req(p);
+}
+
+view rank(p, i = index!()) = all_req(p);    // expect: BLS0601 (index! over a persistent input)
+
+report: while rank(p, i) {
+    emit ranked(p, i);
+}

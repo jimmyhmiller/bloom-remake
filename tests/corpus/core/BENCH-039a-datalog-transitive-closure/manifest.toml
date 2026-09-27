@@ -1,0 +1,57 @@
+schema = 1
+id = "BENCH-039"
+title = "dfir-datalog transitive_closure: reachable from the seed, per tick"
+priority = "P1"
+source = "R08 §15 T8 (dfir_datalog_core lib.rs test transitive_closure); FEATURES.md BENCH-039"
+features = ["ENG-042", "LANG-043", "LANG-047", "LANG-060", "LANG-086", "SEM-008"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+The dfir-datalog tests snapshot the generated graph, not outputs; the inputs and outputs here are ours, derived
+from the rules. Tick 1: seed {1}, edges 1->2, 2->3, 4->5 gives {1, 2, 3}. Tick 2 has only the edge 3->4 and no
+seed, and nothing is persisted, so reachable is empty."""
+
+[run]
+ticks = 4
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["ENG-042", "LANG-043", "LANG-047", "LANG-060", "LANG-086", "SEM-008"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["ENG-042", "LANG-043", "LANG-047", "LANG-060", "LANG-086", "SEM-008", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "seed_reachable"
+rows = [[1]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "edges"
+rows = [[1, 2], [2, 3], [4, 5]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "edges"
+rows = [[3, 4]]
+
+[[expect]]
+node = "n1"
+rel = "reachable"
+tick = 1
+rows = [[1], [2], [3]]
+
+[[expect]]
+node = "n1"
+rel = "reachable"
+tick = 2
+rows = []

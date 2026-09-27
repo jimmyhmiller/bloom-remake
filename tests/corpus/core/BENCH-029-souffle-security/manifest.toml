@@ -1,0 +1,38 @@
+schema = 1
+id = "BENCH-029"
+title = "Soufflé CAV'16 security example: I = {s, l3}"
+priority = "P0"
+source = "R09 §16 T1 (Soufflé CAV'16 security example); FEATURES.md BENCH-029"
+features = ["SEM-020", "LANG-045", "LANG-047", "LANG-082", "LANG-085", "LANG-086", "LANG-190"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+R09 T1: I contains s and l3 (the vulnerable call is reachable) and neither l1 nor l2 (l2 is reachable only through
+the protected l1)."""
+
+[run]
+ticks = 2
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-020", "LANG-045", "LANG-047", "LANG-082", "LANG-085", "LANG-086", "LANG-190"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-020", "LANG-045", "LANG-047", "LANG-082", "LANG-085", "LANG-086", "LANG-190", "SEM-002"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "i"
+tick = 0
+rows = [["s"], ["l3"]]
+
+[[expect]]
+node = "n1"
+rel = "i"
+final = true
+rows = [["s"], ["l3"]]
