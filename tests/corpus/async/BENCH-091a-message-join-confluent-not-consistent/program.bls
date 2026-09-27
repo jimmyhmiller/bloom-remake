@@ -1,0 +1,41 @@
+//! BENCH-091: Ameloot's "message join" (Ameloot, "Deciding Correctness with Fairness for Simple Transducer
+//! Networks", ICDT 2014, §1), re-derived from its description: a program whose output needs two messages to be
+//! delivered in the same step.
+//!
+//! x keeps sending a(v) and y keeps sending b(v) to z, which joins the two in one step and keeps the result. The
+//! program is positive and its output only grows, so any two finite runs can be extended to agree (it is confluent in
+//! Ameloot's sense: deliver a pending a(v) and b(v) together). But a fair run may always deliver them in different
+//! steps, and then the join never fires: it is not consistent under fair runs. The certificate must report the two
+//! separately (CR-29).
+
+program message_join version 1;
+
+/// The joiner, and the data each sender holds, keyed by the sender.
+static joiner(j: Node);
+static a_data(at: Node, v: u64);
+static b_data(at: Node, v: u64);
+
+fact joiner("Z");
+fact a_data("X", 1);
+fact b_data("Y", 1);
+
+channel a_msg(v: u64);
+channel b_msg(v: u64);
+/// The join result, persisted: the output only grows.
+output joined(v: u64);
+
+send_a: while a_data(self, v), joiner(j) {
+    send a_msg(v) to j;
+}
+
+send_b: while b_data(self, v), joiner(j) {
+    send b_msg(v) to j;
+}
+
+join: on a_msg(v), b_msg(v) {
+    emit joined(v);
+}
+
+keep: while joined(v) {
+    next joined(v);
+}

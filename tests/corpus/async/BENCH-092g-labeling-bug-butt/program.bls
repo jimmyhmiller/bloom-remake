@@ -1,0 +1,50 @@
+//! BENCH-092: bud's `BugButt` labeling fixture (bud `test/tc_labeling.rb`), ported statement by statement.
+//!
+//! Bud collections without a schema get Bud's defaults: an interface or table is `[:key] => [:val]` and a channel is
+//! `[:@address, :val]`. Every column is part of the key here (Bud's primary keys play no part in the labels).
+
+program bug_butt version 1;
+
+/// JoinProto and Buffers. Bud declares `ileft` and `iright` as input interfaces but writes them from the channels
+/// (Bud rewrites such writes to a mixed-in collection); a Blossom module may not write its own input, so they are
+/// scratch buffers here.
+scratch ileft(address: Node, val: String);
+scratch iright(address: Node, val: String);
+scratch ls(address: Node, val: String);
+scratch rs(address: Node, val: String);
+table lt(address: Node, val: String);
+table rt(address: Node, val: String);
+channel lchan(@address: Node, val: String);
+channel rchan(@address: Node, val: String);
+output result(address: Node, val: String);
+
+/// BBG: `lchan <~ ul; rchan <~ ur`.
+input ul(key: Node, val: String);
+input ur(key: Node, val: String);
+send_left: on ul(k, v) {
+    send lchan(k, v);
+}
+send_right: on ur(k, v) {
+    send rchan(k, v);
+}
+
+/// Buffers: `ileft <= lchan; iright <= rchan; ls <= ileft; rs <= iright; lt <= ileft; rt <= iright`.
+take_left: on lchan(a, v) {
+    emit ileft(a, v);
+}
+take_right: on rchan(a, v) {
+    emit iright(a, v);
+}
+buffer_left: on ileft(a, v) {
+    emit ls(a, v);
+    emit lt(a, v);
+}
+buffer_right: on iright(a, v) {
+    emit rs(a, v);
+    emit rt(a, v);
+}
+
+/// BugButt: `result <= (ls * rs).lefts`: two scratch buffers, each fed by its own channel.
+join: on ls(a, v), rs(_, _) {
+    emit result(a, v);
+}

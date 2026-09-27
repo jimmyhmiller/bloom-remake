@@ -1,0 +1,24 @@
+# BENCH-092 (R03 T29; R05 T11): bud's labeling suite, fixture TestNM.
+#
+# test_labeler1: `Label.new("TestNM")` gives output_report {"response"=>"D"} and path_report {"response"=>{"i1"=>"A","i2"=>"D"}}; test_label1 reports a D flow.
+# Path labels (R05 §3.2): an async edge is A, a non-monotone edge N, A followed by N is D, and an output takes the
+# disjunction of its paths. Guarded asynchrony: two channel streams that meet are guarded only if both pass through
+# persistent state or a lattice first; an unguarded meeting labels the meeting relation and its descendants D. A race
+# is reported for the pair of channels, in either order.
+schema = 1
+id = "BENCH-092"
+title = "Bud tc_labeling, TestNM: negation of a channel-fed table: response is D; path i1 is A, path i2 is D"
+priority = "P0"
+source = "R03 T29; R05 T11 and §3.2; bud test/tc_labeling.rb (TestNM)"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "ANA-022", "ANA-023", "ANA-024", "LANG-082"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "ANA-022", "ANA-023", "ANA-024", "LANG-082"]
+until = "M5"
+
+[expect_analysis]
+calm_labels = { outputs = { response = "D" }, paths = [{ from = "i1", to = "response", label = "A" }, { from = "i2", to = "response", label = "D" }] }
