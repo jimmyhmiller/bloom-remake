@@ -438,6 +438,8 @@ def validate(prog: Program):
             raise DedError(f"{r.where}: head variables {sorted(hv - pos)} are not bound by positive body predicates")
         if aggs > 1:
             raise DedError(f"{r.where}: at most one aggregate per head in this reference")
+        if aggs and isinstance(r.head.args[0], Agg):
+            raise DedError(f"{r.where}: the first head column is the location and cannot be an aggregate")
         if aggs and r.kind != "ded":
             raise DedError(f"{r.where}: aggregate heads must be deductive in this reference")
         if aggs and any(isinstance(x, BinOp) for x in r.head.args):
@@ -928,10 +930,15 @@ class Evaluator:
         return max(vals)
 
     def agg_tuples(self, rule, model, history, crashes, t):
+        """Molly's split rewrite evaluates the aggregate in a second rule whose body is the bindings relation, so the
+        aggregate is computed at the location in the head's first column; a group whose first column is not a node
+        yields nothing (the clock guard of that rule fails)."""
         out = set()
         for key, per_value in self.group_values(rule, model, history, crashes, t).items():
             v = self.agg_value(rule.agg.func, per_value.keys())
-            out.add(tuple(v if k is None else k for k in key))
+            tup = tuple(v if k is None else k for k in key)
+            if tup[0] in self.nodes:
+                out.add(tup)
         return out
 
     # -- one step -----------------------------------------------------------------------------------------------------
@@ -1120,8 +1127,39 @@ def exhaustive(prog: Program, spec: Spec, stop_at_first=True, max_states=2_000_0
 # Appendix-B-minimal falsifiers (exhaustive)
 
 
-def all_fault_sets(spec: Spec):
+def sends_cannot_grow(prog: Program):
+    """True when no fault can make a node send a message it does not send in the failure-free run: either no @async
+    rule reads a relation downstream of a message, or every rule deriving such a relation is monotone (no negation of
+    a message-dependent relation and no aggregate). Faults only remove clock facts, so in both cases the messages of a
+    faulty run are a subset of the failure-free ones, and omissions of channel-times that carry no failure-free message
+    change nothing."""
+    edges = {}
+    for r in prog.rules:
+        for a in r.atoms:
+            edges.setdefault(a.rel, set()).add(r.head.rel)
+    influenced = set()
+    work = [r.head.rel for r in prog.rules if r.kind == "async"]
+    while work:
+        v = work.pop()
+        if v in influenced:
+            continue
+        influenced.add(v)
+        work += list(edges.get(v, ()))
+    async_reads_influenced = any(a.rel in influenced for r in prog.rules if r.kind == "async" for a in r.atoms)
+    if not async_reads_influenced:
+        return True
+    for r in prog.rules:
+        if r.head.rel not in influenced:
+            continue
+        if r.agg is not None or any(a.negated and a.rel in influenced for a in r.atoms):
+            return False
+    return True
+
+
+def all_fault_sets(spec: Spec, channels=None):
     chans = [(f, d, s) for s in range(1, spec.eff) for f in spec.nodes for d in spec.nodes if f != d]
+    if channels is not None:
+        chans = [c for c in chans if c in channels]
     seen = set()
     for crashes in crash_schedules(spec):
         live = [c for c in chans if not (c[0] in crashes and crashes[c[0]] <= c[2])]
@@ -1156,11 +1194,30 @@ def minimal_falsifiers(prog: Program, spec: Spec, limit=200_000):
     """Per post goal of the failure-free run: its Appendix-B-minimal falsifiers among the admissible fault sets."""
     require_prepost(prog)
     evl = Evaluator(prog, spec)
-    ff_post = evl.run().post()
+    ff = evl.run()
+    ff_post = ff.post()
+    channels = None
+    if sends_cannot_grow(prog):
+        channels = {(f, d, s) for _rel, f, d, s, _r in ff.messages if f != d}
     per_goal = {g: [] for g in ff_post}
     n = 0
-    for fs in all_fault_sets(spec):
+    for fs in all_fault_sets(spec, channels):
         n += 1
+        if n > limit:
+            raise TooLarge(f"more than {limit} admissible fault sets")
+        post = evl.run(fs).post()
+        for g in ff_post:
+            if g not in post:
+                per_goal[g].append(fs)
+    return {g: minimal_by_clocks(v, spec) for g, v in per_goal.items()}
+
+
+def minimal_falsifiers_full(prog: Program, spec: Spec, limit=200_000):
+    """minimal_falsifiers without the channel restriction (for self-checking the restriction)."""
+    evl = Evaluator(prog, spec)
+    ff_post = evl.run().post()
+    per_goal = {g: [] for g in ff_post}
+    for n, fs in enumerate(all_fault_sets(spec)):
         if n > limit:
             raise TooLarge(f"more than {limit} admissible fault sets")
         post = evl.run(fs).post()
@@ -1567,15 +1624,22 @@ def check_case(case: pathlib.Path, opts):
             except TooLarge as e:
                 lines.append(f"exhaustive: {e}")
         try:
-            v, ces, runs = ldfi(prog, spec, max_runs=opts.max_runs)
+            # the search reductions a case lists are the ones it may rely on for its run count
+            vac = "TEST-031" in m.get("features", [])
+            v, ces, runs = ldfi(prog, spec, max_runs=opts.max_runs, vacuity_pruning=vac)
             good = v == want
             ok &= good
             note = ""
             if "runs_max" in ld:
-                note = f" runs_max={ld['runs_max']}" + ("" if runs <= ld["runs_max"] else " (EXCEEDED)")
-            lines.append(f"ldfi={v} runs={runs}{note}{'' if good else '  MISMATCH'}")
+                over = runs > ld["runs_max"]
+                note = f" runs_max={ld['runs_max']}" + (" (EXCEEDED)" if over else "")
+                if over and opts.strict_runs:
+                    ok = False
+            lines.append(f"ldfi{'+vacuity' if vac else ''}={v} runs={runs}{note}{'' if good else '  MISMATCH'}")
         except TooLarge as e:
             lines.append(f"ldfi: {e}")
+            if "runs_max" in ld and opts.strict_runs:
+                ok = False
         if "falsifiers" in ld:
             try:
                 per_goal = minimal_falsifiers(prog, spec)
@@ -1700,6 +1764,11 @@ def selftest():
             if want_v == "counterexample" and runs != 2:
                 failures.append(f"§4.3 {eot}/{eff}/{cr}: ldfi took {runs} runs, the failure-free lineage gives the "
                                 f"counterexample directly")
+            # the falsifier search restricted to failure-free message channels must agree with the full search
+            if sends_cannot_grow(prog):
+                full = union_of_goal_falsifiers(minimal_falsifiers_full(prog, spec))
+                if sorted(f.labels() for f in full) != got:
+                    failures.append(f"§4.3 {eot}/{eff}/{cr}: restricted falsifier search differs from the full one")
         # the hazard formula itself (variable space): (O(a,c,2) v K(a,2)) & (O(b,c,1) v K(b,1)) with EFF 3, 2 crashes
         spec = Spec(4, 3, 2, ("a", "b", "c"))
         evl = Evaluator(prog, spec)
@@ -1828,6 +1897,7 @@ def main(argv=None):
     p.add_argument("--no-exhaustive", action="store_true")
     p.add_argument("--max-states", type=int, default=2_000_000)
     p.add_argument("--max-runs", type=int, default=20_000)
+    p.add_argument("--strict-runs", action="store_true", help="count a run count above runs_max as a problem")
     sub.add_parser("selftest")
     a = ap.parse_args(argv)
     try:

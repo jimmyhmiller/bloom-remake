@@ -1,9 +1,9 @@
 // Correctness of reliable broadcast, keyed per node (Blossom golden corpus, derived = true; see ../../README.md).
 //
 // LDFI (SIGMOD 2015) Figure 3 states the property as "if a correct process has a log entry, all correct processes
-// have it", with post = "my log entry exists and no node is missing it". Molly's delivery spec additionally excludes the
-// broadcaster from witnessing pre (it holds the entry from time 1 whatever happens; R06 §2.4). This file states the
-// same oracle with the negation moved out of post:
+// have it", with post = "my log entry exists and no node is missing it". Molly's delivery spec additionally excludes
+// the broadcaster from witnessing pre (it holds the entry from time 1 whatever happens; R06 §2.4). This file states
+// the same oracle with the negation moved out of post:
 //
 //   pre(N, P):  some correct node M other than the broadcaster, with N as a neighbour, holds P;
 //   post(N, P): N holds P.

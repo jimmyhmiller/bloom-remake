@@ -1,0 +1,4 @@
+// BENCH-135i-provenance-wildcard-derivations-lineage-3-2-0: provenance-wildcard-derivations-lineage: counterexample at EOT 3, EFF 2, 0 crashes; stated falsifiers.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/unit/wildcard_derivations_net.ded";

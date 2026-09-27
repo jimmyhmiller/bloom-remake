@@ -1,0 +1,127 @@
+# Golden data for BENCH-135's provenance items: rule firings, derivations and aggregate contributors (Molly's
+# ProvenanceSuite and DerivationTreesSuite), the PODS'07 provenance polynomials, and the Soufflé minimal-height
+# annotations. Consumers: TEST-023 complete lineage and ENG-112 Tier C (WPs M7.1, M8.1), ENG-114 semiring
+# annotations (M7.6), ENG-111 Tier B minimal-height annotations (M5.7). Not corpus cases: manifest schema v1 cannot
+# state provenance counts or annotations. Where a program's *model* can be pinned, a corpus case does it (the
+# `case` fields), and the *_net variants make the counts observable to LDFI as falsifier sets and run counts.
+# See ../../README.md.
+
+schema = 1
+source = "R06 §12.6 (Molly ProvenanceSuite, DerivationTreesSuite); Green, Karvounarakis, Tannen, PODS 2007, Figures 3 and 5; Zhao, Subotić, Scholz, TOPLAS 2020 (arXiv 1907.05045), Figures 1 and 10"
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Molly ProvenanceSuite: failure-free runs with EOT 2 on the single node "loc" (the last one on a, b, M).
+
+[[firings]]
+name = "repeat rule firings with different contributing tuples (missing fields are part of a join)"
+program = "../lib/unit/join_firings.ded"
+goal = 'c("loc", 1) at time 1'
+rule_firings = 2
+why = "one firing through M = x and one through M = y; the join column does not reach the head"
+case = "BENCH-135f-provenance-join-firings"
+lineage_case = "BENCH-135g-provenance-join-firings-lineage-3-2-0"
+
+[[firings]]
+name = "repeat rule firings with different contributing tuples (missing fields are wildcards)"
+program = "../lib/unit/wildcard_derivations.ded"
+goal = 'c("loc", 1) at time 1'
+distinct_derivations = 2
+why = "through proxy(loc, x, 1) and proxy(loc, y, 1), which differ only in a column the rule writes as `_`"
+case = "BENCH-135h-provenance-wildcard-derivations"
+lineage_case = "BENCH-135i-provenance-wildcard-derivations-lineage-3-2-0"
+
+[[aggregate]]
+name = "aggregate provenance is computed correctly"
+program = "../lib/unit/agg_contributors.ded"
+goals = ['counts("loc", "A", 3) at time 1', 'counts("loc", "B", 1) at time 1']
+contributors = [3, 1]
+case = "BENCH-135j-provenance-aggregate-contributors"
+lineage_case = "BENCH-135k-provenance-aggregate-contributors-lineage-3-2-0"
+
+[[aggregate]]
+name = "aggregate rewrites don't affect grouping by including un-aggregated variables"
+program = "../lib/unit/agg_grouping.ded"
+goals = ['vote_cnt("M", 2) at time 2']
+contributors = [2]
+why = "the split rewrite records V, but grouping stays by M only (LANGUAGE §10.1)"
+case = "BENCH-135m-provenance-aggregate-grouping-failure-free"
+lineage_case = "BENCH-135l-provenance-aggregate-grouping-3-2-0"
+
+# Molly DerivationTreesSuite (unit tests over hand-built rule/goal graphs).
+[[derivation_trees]]
+name = "cross-product of trees"
+graph = "root has two rule firings, one over goal a and one over goal b; a and b each have two firings, one over leaf c and one over leaf d"
+distinct_derivations = 4
+derivations = [["root", "a", "c"], ["root", "a", "d"], ["root", "b", "c"], ["root", "b", "d"]]
+
+[[derivation_trees]]
+name = "goal with two rule firings"
+graph = "log(A, data, 2) is derived by persistence from log(A, data, 1) over clock(A, A, 1) and by a send from log(B, data, 1) over clock(B, A, 1)"
+important_clocks = [["B", "A", 1]]
+distinct_derivations = 2
+why = "a self-clock is never an important clock (self-sends cannot be lost)"
+
+# ---------------------------------------------------------------------------------------------------------------------
+# PODS'07 (Green, Karvounarakis, Tannen): R = {(a,b,c): p, (d,b,e): r, (f,g,e): s} and
+# q(R) = pi_ac(pi_ab R join pi_bc R  union  pi_ac R join pi_bc R). As Datalog (R06 §12.6):
+#   q(X, Z) :- r(X, Y, _), r(_, Y, Z).      q(X, Z) :- r(X, _, Z), r(_, _, Z).
+# The corpus case BENCH-135n runs the program (with a location column) and pins the set of answers.
+
+[[semiring]]
+name = "provenance polynomials of q (PODS'07 Figure 5(c))"
+program = "../lib/unit/pods07.ded"
+case = "BENCH-135n-semiring-pods07-query"
+variables = { p = '(a, b, c)', r = '(d, b, e)', s = '(f, g, e)' }
+n_x = [
+  { tuple = ["a", "c"], polynomial = "2p^2" },
+  { tuple = ["a", "e"], polynomial = "pr" },
+  { tuple = ["d", "c"], polynomial = "pr" },
+  { tuple = ["d", "e"], polynomial = "2r^2 + rs" },
+  { tuple = ["f", "e"], polynomial = "2s^2 + rs" },
+]
+bag = { assignment = { p = 2, r = 5, s = 1 }, multiplicities = [8, 10, 10, 55, 7] }
+why_provenance = [
+  { tuple = ["a", "c"], witnesses = "{p}" },
+  { tuple = ["d", "e"], witnesses = "{r, s}" },
+  { tuple = ["f", "e"], witnesses = "{r, s}" },
+]
+posbool = [
+  { tuple = ["d", "e"], value = "r" },
+  { tuple = ["f", "e"], value = "s" },
+]
+note = "Lin(X) cannot tell (d, e) from (f, e) (both {r, s}); N[X] and PosBool can (R06 §7.1)."
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Soufflé (Zhao, Subotić, Scholz): the points-to analysis of Figure 1 with minimal-height annotations.
+
+[[heights]]
+name = "points-to analysis, Figure 1, all inputs at height 0"
+program = "../lib/unit/points_to.ded"
+case = "BENCH-135o-souffle-points-to"
+final = [
+  { tuple = 'vpt(a, l1)', height = 1 },
+  { tuple = 'vpt(c, l3)', height = 1 },
+  { tuple = 'vpt(d, l4)', height = 1 },
+  { tuple = 'vpt(b, l1)', height = 2 },
+  { tuple = 'alias(a, b)', height = 3 },
+  { tuple = 'alias(b, a)', height = 3 },
+]
+why = "heights by the paper's definition h(t) = min over derivations of (max premise height + 1), inputs at 0"
+
+[[heights]]
+name = "height updates in the fixpoint iterations, Figure 10"
+program = "../lib/unit/points_to.ded"
+input_heights = { "new(a, l1)" = 0, "assign(b, a)" = 6, "new(c, l3)" = 0, "new(d, l4)" = 0, "store(c, f, a)" = 0, "load(e, d, f)" = 0, "load(b, c, f)" = 0, "assign(a, b)" = 0 }
+iterations = [
+  "i1: vpt(a, l1) 1, vpt(c, l3) 1, vpt(d, l4) 1",
+  "i2: vpt(a, l1) 1, vpt(c, l3) 1, vpt(d, l4) 1, vpt(b, l1) 7",
+  "i3: vpt(a, l1) 1, vpt(c, l3) 1, vpt(d, l4) 1, vpt(b, l1) 3",
+  "i4: vpt(a, l1) 1, vpt(c, l3) 1, vpt(d, l4) 1, vpt(b, l1) 3",
+]
+caveat = "The paper attributes the i3 update to r3 through alias(c, c) ('b = c.f; c.f = a'), but rule r4 requires Var1 != Var2, so alias(c, c) is not derivable from Figure 1 as printed; a consumer must decide whether r4 is reflexive before using the i3 value (docs/plan/notes/M1.5.md)."
+
+[[heights]]
+name = "worst case: Theta(k^2) updates (Figure 11)"
+program = "reach(a, N) :- reach(a, M), edge(M, N).  over a graph with a k-node leg and a bottom chain"
+claim = "reach(a, e) is updated k times and every node of the leg O(k) times: O(k^2) updates in total, which meets the O(n * max h) bound"
+note = "Figure 11 is not recoverable from the paper's text precisely enough to pin an instance; the claim is recorded for the WP that implements Tier B annotations."

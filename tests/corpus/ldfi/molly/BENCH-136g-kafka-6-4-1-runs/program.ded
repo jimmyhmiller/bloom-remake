@@ -1,0 +1,6 @@
+// BENCH-136g-kafka-6-4-1-runs: kafka: counterexample within 38 executions at EOT 6, EFF 4, 1 crash.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/kafka/replication.ded";
+include "../lib/kafka/group.ded";
+include "../lib/kafka/kafka_spec.ded";

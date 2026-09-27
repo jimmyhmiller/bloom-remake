@@ -1,0 +1,86 @@
+# BENCH-133g-flux-failure-free: flux: the failure-free run.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-133"
+title = "flux: the failure-free run"
+priority = "P1"
+source = "FEATURES.md BENCH-133; R06 §12.4; LDFI SIGMOD'15 §5.1.2, Fig. 13"
+features = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004", "LANG-100", "LANG-101", "SEM-020"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+Failure-free: the ingress sends at 1 (and the late tuple at 2), the replicas buffer at 2 and the primary forwards, the egress delivers one tuple per tick from 4.
+
+Molly round k is tick k (CR-13). The rows omit the location column. The spec is not included.
+"""
+
+[deploy]
+nodes = [
+  { name = "i", role = "Node" },
+  { name = "p", role = "Node" },
+  { name = "s", role = "Node" },
+  { name = "e", role = "Node" },
+]
+
+[run]
+ticks = 9
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004", "LANG-100", "LANG-101", "SEM-020"]
+until = "M5"
+
+# tuples reach the egress at tick 3
+[[expect]]
+node = "e"
+rel = "delivered"
+row = [1, "foo"]
+holds = "4..=8"
+absent = "..=3"
+
+# one delivery per tick, in order
+[[expect]]
+node = "e"
+rel = "delivered"
+row = [2, "bar"]
+holds = "5..=8"
+absent = "..=4"
+
+[[expect]]
+node = "e"
+rel = "delivered"
+row = [3, "baz"]
+holds = "6..=8"
+absent = "..=5"
+
+[[expect]]
+node = "e"
+rel = "delivered"
+row = [4, "qux"]
+holds = "7..=8"
+absent = "..=6"
+
+# the secondary holds a copy
+[[expect]]
+node = "s"
+rel = "buffered"
+tick = 2
+rows = [[1, "foo"], [2, "bar"], [3, "baz"]]
+
+# the tuple that arrived at the ingress at tick 2 is buffered at tick 3
+[[expect]]
+node = "s"
+rel = "buffered"
+tick = 3
+rows = [[1, "foo"], [2, "bar"], [3, "baz"], [4, "qux"]]
+
+# the primary's heartbeats arrive from tick 2 on
+[[expect]]
+node = "s"
+rel = "suspects"
+row = []
+holds = "1"
+absent = "2..=8"

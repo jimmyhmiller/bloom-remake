@@ -1,0 +1,86 @@
+# BENCH-137j-raft-failure-free: raft: the failure-free run.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-137"
+title = "raft: the failure-free run"
+priority = "P1"
+source = "FEATURES.md BENCH-137; R10 T13-T14; R06 §12.7"
+features = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004", "LANG-100", "LANG-101", "SEM-020"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+Failure-free (commit_timing.ded): a leads term 1, appends x at 3, ships it at 3, collects copies at 5 and commits; the followers commit at 6. No election happens.
+
+../lib/raft/raft.ded is a compact Raft (Ongaro and Ousterhout 2014) standing in for Molly's raft/*.ded, which could not be vendored and has no published expected result (R06 §12.7); raft_spec.ded flags 'two leaders' in a term and committed values that disagree, as Molly's raft spec does.
+
+Molly round k is tick k (CR-13). The rows omit the location column. The spec is not included.
+"""
+
+[deploy]
+nodes = [
+  { name = "a", role = "Node" },
+  { name = "b", role = "Node" },
+  { name = "c", role = "Node" },
+]
+
+[run]
+ticks = 10
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004", "LANG-100", "LANG-101", "SEM-020"]
+until = "M5"
+
+# a leads term 1 throughout; nobody starts an election
+[[expect]]
+node = "a"
+rel = "leads"
+row = [1]
+holds = "1..=9"
+absent = "0"
+
+[[expect]]
+node = "b"
+rel = "leads"
+tick = 9
+rows = []
+
+# x is appended at a at tick 3 (submitted at 2)
+[[expect]]
+node = "a"
+rel = "log"
+tick = 3
+rows = [[1, 1, "x"]]
+
+# a copy is acknowledged at 5: committed
+[[expect]]
+node = "a"
+rel = "committed"
+row = [1, "x"]
+holds = "5..=9"
+absent = "..=4"
+
+# followers learn the commit index at 6
+[[expect]]
+node = "b"
+rel = "committed"
+row = [1, "x"]
+holds = "6..=9"
+absent = "..=5"
+
+[[expect]]
+node = "c"
+rel = "committed"
+row = [1, "x"]
+holds = "6..=9"
+absent = "..=5"
+
+# b does not lead at tick 6, so its submission is ignored
+[[expect]]
+node = "b"
+rel = "log"
+tick = 9
+rows = [[1, 1, "x"]]

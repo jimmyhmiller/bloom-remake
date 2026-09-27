@@ -1,0 +1,5 @@
+// Raft's commit rule (§5.3, §5.4.2): the leader of term T commits index I once a majority (itself and one of the two
+// others) holds the entry and the entry was created in term T; earlier entries are committed with it.
+// Blossom golden corpus, re-derived; see ../../README.md.
+
+committed_upto(L, I) :- leading(L), leads(L, T), log(L, I, T, V), copies(L, T, I, F);

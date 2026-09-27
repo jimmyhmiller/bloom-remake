@@ -1,0 +1,4 @@
+// BENCH-135o-souffle-points-to: the Soufflé provenance paper's points-to analysis.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/unit/points_to.ded";

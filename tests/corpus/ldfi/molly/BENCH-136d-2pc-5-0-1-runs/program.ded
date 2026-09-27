@@ -1,0 +1,6 @@
+// BENCH-136d-2pc-5-0-1-runs: 2pc: counterexample within 2 executions at EOT 5, EFF 0, 1 crash.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/commit/two_pc.ded";
+include "../lib/commit/group.ded";
+include "../lib/commit/commit_spec.ded";

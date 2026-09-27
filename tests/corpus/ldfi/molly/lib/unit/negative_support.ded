@@ -1,0 +1,16 @@
+// A lineage that runs through negation only (the role of Molly's negative_support_test, R10 T14 and R06 D26):
+// b greets a once, and b's outcome is good unless the greeting is missing at a. The outcome's positive lineage is an
+// input fact, which no fault can remove; only the negated subgoal `notin missing(B, A)` leads to the message, and a
+// fault that removes the message makes `missing` appear. A search without negative support (TEST-025 Off) finds no
+// hypothesis and reports no counterexample; conservative negative support (CR-31) finds the lost greeting.
+// Blossom golden corpus, re-derived (derived = true); see ../../README.md.
+
+hello(A, B)@async :- greet(B, A);
+hello(A, B)@next :- hello(A, B);
+
+// spec: pre holds once b greeted; post also needs the greeting to have arrived
+missing(B, A) :- greet(B, A)@1, notin hello(A, B);
+pre(B, A) :- greet(B, A)@1;
+post(B, A) :- greet(B, A)@1, notin missing(B, A);
+
+greet("b", "a")@1;

@@ -1,0 +1,44 @@
+# Golden data for BENCH-135 ("the symmetry cases"): which fault schedules are equivalent under node permutations.
+# Consumer: TEST-032, symmetry reduction (P1, WP M9.4; ARCHITECTURE §8.5: permutations that fix the program's EDB and
+# never appear as literals in rules). Not a corpus case (no manifest). See ../../README.md.
+# Transcribed from Molly's SymmetryCheckerSuite (R06 §12.6). Every scenario uses nodes A, B, C and the failure spec
+# EOT 4, EFF 3, 2 crashes; `program` is a Molly-dialect program text.
+
+schema = 1
+feature = "TEST-032"
+source = "R06 §12.6 (Molly SymmetryCheckerSuite)"
+
+[[scenario]]
+name = "empty EDB and no rules: every node is interchangeable"
+program = ""
+equivalent = [
+  [["C(A,2)"], ["C(B,2)"]],
+  [["C(B,2)"], ["C(C,2)"]],
+  [["C(C,2)"], ["C(A,2)"]],
+  [["O(A,B,2)"], ["O(B,A,2)"]],
+]
+distinct = [
+  [["C(A,2)"], ["O(B,A,2)"]],
+  [["O(B,A,2)"], ["O(B,A,1)"]],
+]
+
+[[scenario]]
+name = "a node named as a literal in a rule body is excluded from the permutations"
+program = 'seen(L) :- ping("A", L);'
+equivalent = [
+  [["C(B,2)"], ["C(C,2)"]],
+]
+distinct = [
+  [["C(A,2)"], ["C(B,2)"]],
+  [["C(C,2)"], ["C(A,2)"]],
+]
+
+[[scenario]]
+name = "the EDB must be symmetric: A and B are, A and C are not"
+program = 'foo("A", 1)@1; foo("B", 1)@1; foo("C", 2)@1;'
+equivalent = [
+  [["C(A,2)"], ["C(B,2)"]],
+]
+distinct = [
+  [["C(B,2)"], ["C(C,2)"]],
+]
