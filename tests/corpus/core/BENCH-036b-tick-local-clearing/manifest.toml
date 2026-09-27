@@ -1,0 +1,77 @@
+schema = 1
+id = "BENCH-036"
+title = "Tick behaviour: relations derived from channel messages are cleared at the next tick"
+priority = "P0"
+source = "R09 §16 T12 (tick-local clearing); FEATURES.md SEM-008, BENCH-036"
+features = ["SEM-008", "LANG-041", "LANG-043", "LANG-046", "LANG-047", "LANG-060", "LANG-062"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+poke(a) at tick 1 sends msg(a), which arrives at tick 2 only: got(a) and seen_now(a) hold at 2 and not at 3.
+poke(b) at ticks 3 and 4 re-derives msg(b) at 4 and 5, so b holds at 4-5 and is gone at 6."""
+
+[run]
+ticks = 8
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-008", "LANG-041", "LANG-043", "LANG-046", "LANG-047", "LANG-060", "LANG-062"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-008", "LANG-041", "LANG-043", "LANG-046", "LANG-047", "LANG-060", "LANG-062", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "poke"
+rows = [["a"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "poke"
+rows = [["b"]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel = "poke"
+rows = [["b"]]
+
+[[expect]]
+node = "n1"
+rel = "got"
+row = ["a"]
+absent = "..=1"
+holds = "2"
+
+[[expect]]
+node = "n1"
+rel = "got"
+row = ["a"]
+absent = "3.."
+
+[[expect]]
+node = "n1"
+rel = "seen_now"
+row = ["a"]
+holds = "2"
+absent = "3.."
+
+[[expect]]
+node = "n1"
+rel = "seen_now"
+row = ["b"]
+absent = "..=3"
+holds = "4..=5"
+
+[[expect]]
+node = "n1"
+rel = "seen_now"
+row = ["b"]
+absent = "6.."

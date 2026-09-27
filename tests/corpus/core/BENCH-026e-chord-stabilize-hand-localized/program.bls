@@ -1,0 +1,76 @@
+//! BENCH-026: Chord stabilization rules sb1-sb3 (p2/doc/chord.olg) localized by hand.
+//!
+//! Each multi-location body becomes a request to the remote node and a reply: sb1 asks the best successor for its
+//! predecessor, sb2 asks each successor for its successors, sb3 notifies each successor, which updates its own
+//! predecessor. Same configuration, scenario and expected result as BENCH-026c.
+
+program chord_stabilize_hand_localized version 1;
+
+role Peer: cluster;
+
+static node_id(n: Node<Peer>, id: Mod<8>);
+static best_succ(n: Node<Peer>, s: Mod<8>, si: Node<Peer>);
+static init_succ(n: Node<Peer>, s: Mod<8>, si: Node<Peer>);
+static init_pred(n: Node<Peer>, p: Mod<8>, pi: Node<Peer>, known: bool);
+
+fact node_id("na", 0x0aI);
+fact node_id("nb", 0x32I);
+fact node_id("nc", 0x64I);
+fact best_succ("na", 0x32I, "nb");
+fact best_succ("nb", 0x0aI, "na");
+fact best_succ("nc", 0x0aI, "na");
+fact init_succ("na", 0x32I, "nb");
+fact init_succ("nb", 0x0aI, "na");
+fact init_succ("nc", 0x0aI, "na");
+fact init_pred("na", 0x32I, "nb", true);
+fact init_pred("nb", 0x0aI, "na", true);
+fact init_pred("nc", 0x00I, "nc", false);
+
+channel stab_req(): Peer -> Peer;
+channel stab_resp(p: Mod<8>, pi: Node<Peer>): Peer -> Peer;
+channel succ_req(): Peer -> Peer;
+channel succ_resp(s1: Mod<8>, si1: Node<Peer>): Peer -> Peer;
+channel notify_req(n: Mod<8>): Peer -> Peer;
+
+at Peer {
+    input stabilize();
+
+    table succ(s: Mod<8>, si: Node<Peer>) key(s);
+    table pred(p: Mod<8>, pi: Node<Peer>, known: bool) key();
+
+    bootstrap {
+        for init_succ(self, s, si) {
+            emit succ(s, si);
+        }
+        for init_pred(self, p, pi, k) {
+            emit pred(p, pi, k);
+        }
+    }
+
+    sb1_ask: on stabilize(), best_succ(self, _, si) {
+        send stab_req() to si;
+    }
+    sb1_answer: on stab_req() from ni, pred(p, pi, true) {
+        send stab_resp(p, pi) to ni;
+    }
+    sb1_adopt: on stab_resp(p, pi), node_id(self, n), best_succ(self, s, _) where p in n<..s {
+        emit succ(p, pi);
+    }
+
+    sb2_ask: on stabilize(), succ(_, si) {
+        send succ_req() to si;
+    }
+    sb2_answer: on succ_req() from ni, succ(s1, si1) {
+        send succ_resp(s1, si1) to ni;
+    }
+    sb2_learn: on succ_resp(s1, si1) {
+        emit succ(s1, si1);
+    }
+
+    sb3_notify: on stabilize(), node_id(self, n), succ(_, si) where si != self {
+        send notify_req(n) to si;
+    }
+    sb3_update: on notify_req(n) from ni, node_id(self, n1), pred(p, _, known) where not known || n in p<..n1 {
+        upsert pred(n, ni, true);
+    }
+}

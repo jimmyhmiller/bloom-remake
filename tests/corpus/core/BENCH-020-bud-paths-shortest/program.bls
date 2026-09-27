@@ -1,0 +1,38 @@
+//! BENCH-020: Bud's `examples/basics/paths.rb` (shortest paths).
+//!
+//!     table :link, [:from, :to, :cost]
+//!     table :path, [:from, :to, :nxt, :cost]
+//!     table :shortest, [:from, :to] => [:nxt, :cost]
+//!     path <= link {|l| [l.from, l.to, l.to, l.cost]}
+//!     path <= (link*path).pairs(:to => :from) {|l,p| [l.from, p.to, l.to, l.cost+p.cost]}
+//!     shortest <= path.argmin([path.from, path.to], path.cost)
+//!
+//! The host inserts the links with `<+` and ticks; later it adds (e, f, 1) and ticks again. `shortest` is a
+//! table keyed by (from, to), so a changed minimum would be a key conflict; adding (e, f, 1) changes none.
+//! Column names `from`/`to` are spelled `src`/`dst`.
+
+program bud_shortest_paths version 1;
+
+input add_link(src: String, dst: String, cost: i64);
+
+table link(src: String, dst: String, cost: i64);
+table path(src: String, dst: String, nxt: String, cost: i64);
+table shortest(src: String, dst: String, nxt: String, cost: i64) key(src, dst);
+
+view best(src, dst, nxt, cost) = path(src, dst, nxt, cost), argmin!(cost per (src, dst));
+
+load: on add_link(s, d, c) {
+    emit link(s, d, c);
+}
+
+base: while link(s, d, c) {
+    emit path(s, d, d, c);
+}
+
+extend: while link(s, m, c1), path(m, d, _, c2) {
+    emit path(s, d, m, c1 + c2);
+}
+
+find_shortest: while best(s, d, n, c) {
+    emit shortest(s, d, n, c);
+}

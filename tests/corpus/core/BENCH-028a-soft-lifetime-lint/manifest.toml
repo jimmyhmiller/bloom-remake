@@ -1,0 +1,21 @@
+schema = 1
+id = "BENCH-028"
+title = "Soft-state lifetime lint: a soft head with a shorter TTL than its soft body is warned about"
+priority = "P1"
+source = "R01 TEST PROGRAMS T19 (Loo thesis §5.5.2, App. A.3.1); FEATURES.md ANA-006, BENCH-028"
+features = ["ANA-006", "LANG-048"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Compile-only: the lint BLS1007 on the rule (written on one line, so the line is unambiguous). BENCH-028b shows the
+runtime oscillation with a mocked clock; this program's own run would depend on the harness clock."""
+
+[backend.compile]
+status = "unimplemented"
+unimplemented = ["ANA-006", "LANG-048"]
+until = "M6"
+
+[[expect_diag]]
+code = "BLS1007"
+line = 20

@@ -1,0 +1,57 @@
+schema = 1
+id = "BENCH-026"
+title = "Localization equivalence: SP2 localized by hand (CACM09 sp2a/sp2b) reaches the same answer"
+priority = "P1"
+source = "R01 §5.6 and TEST PROGRAMS T20 (CACM09 sp2a/sp2b rewrite of SIGMOD06 SP2); FEATURES.md BENCH-026"
+features = ["LANG-040", "LANG-042", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-100", "LANG-150", "LANG-152", "LANG-153", "LANG-241"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "Same final expectations as BENCH-026a (the compiler-localized program)."
+
+[deploy]
+nodes = [{ name = "a", role = "Router" }, { name = "b", role = "Router" }, { name = "c", role = "Router" }, { name = "d", role = "Router" }, { name = "e", role = "Router" }]
+
+[run]
+ticks = 30
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-100", "LANG-150", "LANG-152", "LANG-153", "LANG-241"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-100", "LANG-150", "LANG-152", "LANG-153", "LANG-241", "SEM-002"]
+until = "M7"
+
+[[expect]]
+node = "a"
+rel = "shortest_path"
+final = true
+rows = [["b", ["a", "c", "b"], 2], ["c", ["a", "c"], 1], ["d", ["a", "c", "b", "d"], 3]]
+
+[[expect]]
+node = "b"
+rel = "shortest_path"
+final = true
+rows = [["d", ["b", "d"], 1]]
+
+[[expect]]
+node = "c"
+rel = "shortest_path"
+final = true
+rows = [["b", ["c", "b"], 1], ["d", ["c", "b", "d"], 2]]
+
+[[expect]]
+node = "d"
+rel = "shortest_path"
+final = true
+rows = []
+
+[[expect]]
+node = "e"
+rel = "shortest_path"
+final = true
+rows = [["a", ["e", "a"], 1], ["b", ["e", "a", "c", "b"], 3], ["c", ["e", "a", "c"], 2], ["d", ["e", "a", "c", "b", "d"], 4]]

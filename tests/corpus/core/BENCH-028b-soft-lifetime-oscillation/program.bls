@@ -1,0 +1,46 @@
+//! BENCH-028: a soft head with a shorter lifetime than its soft body oscillates at runtime (Loo's thesis
+//! App. A.3.1, case 2).
+//!
+//! NDlog re-derives a pure soft-state head at each refresh of its soft body. When the head's lifetime is shorter
+//! than the refresh interval, the head times out between refreshes and "ts(∞) will oscillate between 0 and 1 in
+//! the eventual steady state". Soft state is written in the TTL-guarded Dedalus form of DI §3.3.1 over a mocked
+//! clock (`mock_now` is 10·t at tick t), so expiries fall on exact ticks: the body lives 100 time units and is
+//! refreshed every 50; the head, derived at each refresh, lives 30.
+
+program soft_lifetime_oscillation version 1;
+
+const BODY_TTL: i64 = 100;
+const HEAD_TTL: i64 = 30;
+
+input ping(n: String);
+
+scratch mock_now(t: i64) key();
+scratch body(n: String, birth: i64);
+scratch head(n: String, birth: i64);
+
+view body_alive(n) = body(n, _);
+view head_alive(n) = head(n, _);
+
+bootstrap {
+    emit mock_now(0);
+}
+
+clock: while mock_now(t) {
+    next mock_now(t + 10);
+}
+
+refresh_body: on ping(n), mock_now(clk) {
+    emit body(n, clk);
+}
+
+keep_body: while body(n, b), mock_now(clk) where clk - b < BODY_TTL {
+    next body(n, b);
+}
+
+derive_head: on ping(n), body_alive(n), mock_now(clk) {
+    emit head(n, clk);
+}
+
+keep_head: while head(n, b), mock_now(clk) where clk - b < HEAD_TTL {
+    next head(n, b);
+}

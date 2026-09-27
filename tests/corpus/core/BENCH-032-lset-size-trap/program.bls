@@ -1,0 +1,32 @@
+//! BENCH-032: the non-morphism trap: `size` of a set lattice built over several rounds (Bloom^L SoCC'12 §4.1;
+//! R04 T8, R09 T4).
+//!
+//! `size` is monotone but not a morphism: the size of a union is not the union (max) of the sizes. A semi-naive
+//! evaluator that feeds only each round's delta to `size`, as it may for a morphism, would compute the largest
+//! delta size (1 here) instead of the size of the whole set. The engine must match the naive result: the
+//! reachable set {1, 2, 3, 4, 5}, built one element per round, has size 5.
+
+program lset_size_trap version 1;
+
+static start(n: u64);
+static edge(a: u64, b: u64);
+
+fact start(1);
+fact edge(1, 2);
+fact edge(2, 3);
+fact edge(3, 4);
+fact edge(4, 5);
+
+scratch cell reach: LSet<u64>;
+
+view at_least_five() = start(_) where reach.size() >= 5;
+view at_least_six() = start(_) where reach.size() >= 6;
+view reach_size(n) = start(_), let n = reveal!(reach.size());
+
+seed: while start(n) {
+    emit reach(set[n]);
+}
+
+grow: while x in reach, edge(x, y) {
+    emit reach(set[y]);
+}

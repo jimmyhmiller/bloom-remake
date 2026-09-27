@@ -1,0 +1,114 @@
+schema = 1
+id = "BENCH-024"
+title = "Plain distance vector counts to infinity after a link failure (contrast for BENCH-024a)"
+priority = "P1"
+source = "R01 §8.3 and TEST PROGRAMS T4 (Loo thesis §3.3.2 Fig. 3.3 and its count-to-infinity remark); FEATURES.md BENCH-024"
+features = ["SEM-008", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-062", "LANG-063", "LANG-064", "LANG-100", "LANG-152", "LANG-153", "LANG-241"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Same topology, inputs and failure as BENCH-024a. Derived from the rules: after the failure b and c route to d
+through each other and a, and the cost at a rises by 2 every 2 ticks (5 at tick 13, 13 at 21, 21 at 29) with no
+bound; this is the behaviour split horizon and poison reverse remove."""
+
+[deploy]
+nodes = [{ name = "a", role = "Router" }, { name = "b", role = "Router" }, { name = "c", role = "Router" }, { name = "d", role = "Router" }]
+
+[run]
+ticks = 32
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-008", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-062", "LANG-063", "LANG-064", "LANG-100", "LANG-152", "LANG-153", "LANG-241"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-008", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-062", "LANG-063", "LANG-064", "LANG-100", "LANG-152", "LANG-153", "LANG-241", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "a"
+tick = 1
+rel = "set_link"
+rows = [["b", 1]]
+
+[[input]]
+node = "b"
+tick = 1
+rel = "set_link"
+rows = [["a", 1], ["c", 1]]
+
+[[input]]
+node = "c"
+tick = 1
+rel = "set_link"
+rows = [["b", 1], ["d", 1]]
+
+[[input]]
+node = "d"
+tick = 1
+rel = "set_link"
+rows = [["c", 1]]
+
+[[input]]
+node = "c"
+tick = 10
+rel = "drop_link"
+rows = [["d"]]
+
+[[input]]
+node = "d"
+tick = 10
+rel = "drop_link"
+rows = [["c"]]
+
+[[expect]]
+node = "a"
+rel = "route"
+tick = 10
+rows = [["b", "b", 1], ["c", "b", 2], ["d", "b", 3]]
+
+[[expect]]
+node = "b"
+rel = "route"
+tick = 10
+rows = [["a", "a", 1], ["c", "c", 1], ["d", "c", 2]]
+
+[[expect]]
+node = "c"
+rel = "route"
+tick = 10
+rows = [["a", "b", 2], ["b", "b", 1], ["d", "d", 1]]
+
+[[expect]]
+node = "d"
+rel = "route"
+tick = 10
+rows = [["a", "c", 3], ["b", "c", 2], ["c", "c", 1]]
+
+[[expect]]
+node = "a"
+rel = "route"
+tick = 13
+rows = [["b", "b", 1], ["c", "b", 2], ["d", "b", 5]]
+
+[[expect]]
+node = "a"
+rel = "route"
+tick = 21
+rows = [["b", "b", 1], ["c", "b", 2], ["d", "b", 13]]
+
+[[expect]]
+node = "a"
+rel = "route"
+tick = 29
+rows = [["b", "b", 1], ["c", "b", 2], ["d", "b", 21]]
+
+[[expect]]
+node = "b"
+rel = "route"
+tick = 28
+rows = [["a", "a", 1], ["c", "c", 1], ["d", "a", 20], ["d", "c", 20]]
