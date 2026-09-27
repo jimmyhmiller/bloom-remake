@@ -101,6 +101,16 @@ pub(crate) fn project(valid: &ValidatedProgram, role: RoleId) -> Result<Validate
     }
     let mut want = Needed::default();
     want.roles.insert(role);
+    // Channel endpoints exist even when no local handler mentions the channel.
+    // The runtime still needs the source's egress and destination's ingress schema.
+    for (id, rel) in p.rels.iter_enumerated() {
+        if let RelClass::Channel(ch) = &rel.class
+            && let ChannelForm::Direction { src, dst } = ch.form
+            && (src == role || dst == role)
+        {
+            want.rels.insert(id);
+        }
+    }
     for (id, r) in p.rules.iter_enumerated() {
         if r.role == Some(role) {
             want.rules.insert(id);
@@ -129,10 +139,13 @@ pub(crate) fn project(valid: &ValidatedProgram, role: RoleId) -> Result<Validate
                 .remap(&mut want);
         }
         for id in want.constructs.clone() {
-            p.constructs
+            let mut construct = p
+                .constructs
                 .get(id)
                 .ok_or_else(|| IrError::builder("projection references missing construct"))?
-                .remap(&mut want);
+                .clone();
+            construct.rules.retain(|id| want.rules.contains(id));
+            construct.remap(&mut want);
         }
         for id in want.sites.clone() {
             p.sites
@@ -234,7 +247,11 @@ pub(crate) fn project(valid: &ValidatedProgram, role: RoleId) -> Result<Validate
     out.roles = select(&p.roles, &want.roles)?.remap(&mut n);
     out.rels = select(&p.rels, &want.rels)?.remap(&mut n);
     out.rules = select(&p.rules, &want.rules)?.remap(&mut n);
-    out.constructs = select(&p.constructs, &want.constructs)?.remap(&mut n);
+    let mut constructs = select(&p.constructs, &want.constructs)?;
+    for (_, construct) in constructs.iter_enumerated_mut() {
+        construct.rules.retain(|id| want.rules.contains(id));
+    }
+    out.constructs = constructs.remap(&mut n);
     out.sites = select(&p.sites, &want.sites)?.remap(&mut n);
     out.lattices = select(&p.lattices, &want.lattices)?.remap(&mut n);
     out.groups = select(&p.groups, &want.groups)?.remap(&mut n);

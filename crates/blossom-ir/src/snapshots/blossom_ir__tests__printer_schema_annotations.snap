@@ -1,0 +1,12 @@
+---
+source: crates/blossom-ir/src/tests.rs
+assertion_line: 555
+expression: text
+---
+decl table kv(x: u64, value: u64) key(x) payload(value) durable
+decl table r(x: u64) key(x)
+decl static s(x: u64) key(x)
+decl channel vote(term: u64) key(@dest, term) dir(A -> B) fault(reliable_ordered)
+decl table votes$now(x: u64; count: LMax) key(x)
+// r/from_s
+r(X) :- vote(X | X).

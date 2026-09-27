@@ -201,6 +201,158 @@ fn validator_v8_accept_and_reject() {
     assert!(has(p, 8));
 }
 #[test]
+fn validator_v8_aggregate_signatures() {
+    let mut p = good();
+    let var = Term::Var(VarId::from_raw(0));
+    let rule = p.rules.get_mut(RuleId::from_raw(0)).unwrap();
+    rule.head.args[0] = HeadArg::Agg(AggCall {
+        func: AggFunc::Count,
+        args: vec![var.clone(), var.clone()],
+        order: None,
+    });
+    assert!(has(p.clone(), 8));
+    p.rules.get_mut(RuleId::from_raw(0)).unwrap().head.args[0] = HeadArg::Agg(AggCall {
+        func: AggFunc::Count,
+        args: vec![var.clone()],
+        order: None,
+    });
+    assert!(!has(p.clone(), 8));
+    p.rules.get_mut(RuleId::from_raw(0)).unwrap().head.args[0] = HeadArg::Agg(AggCall {
+        func: AggFunc::BoolAnd,
+        args: vec![var],
+        order: None,
+    });
+    assert!(has(p, 8));
+}
+#[test]
+fn validator_v8_rejects_head_wildcard() {
+    let mut p = good();
+    p.rules.get_mut(RuleId::from_raw(0)).unwrap().head.args[0] = HeadArg::Term(Term::Wild);
+    assert!(has(p, 8));
+}
+#[test]
+fn validator_v8_uses_context_for_node_constant() {
+    let mut p = good();
+    let role = p
+        .roles
+        .push(RoleDecl {
+            id: RoleId::from_raw(0),
+            name: name("A"),
+            kind: RoleKind::Process,
+        })
+        .unwrap();
+    let _generic = p.types.insert(TypeDef::Node(None)).unwrap();
+    let specific = p.types.insert(TypeDef::Node(Some(role))).unwrap();
+    p.types.insert(TypeDef::Bool).unwrap();
+    p.rels.push(rel(2, "nodes", specific, RelClass::Static)).unwrap();
+    let constant = p
+        .consts
+        .push(blossom_value::Value::Node(blossom_value::NodeId(1)))
+        .unwrap();
+    let rule = p.rules.get_mut(RuleId::from_raw(0)).unwrap();
+    let node_var = rule
+        .body
+        .vars
+        .push(VarDecl {
+            name: s("N"),
+            ty: specific,
+            non_bottom: false,
+        })
+        .unwrap();
+    rule.body.lits.push(Literal::Pos(Atom {
+        rel: RelId::from_raw(2),
+        args: vec![Term::Var(node_var)],
+        sender: None,
+        principal: None,
+        weight: None,
+        spec: None,
+        span: span(),
+    }));
+    rule.body.lits.push(Literal::Guard(Expr::Binary {
+        op: BinOp::Eq,
+        lhs: Box::new(Expr::Term(Term::Var(node_var))),
+        rhs: Box::new(Expr::Term(Term::Const(constant))),
+    }));
+    assert!(ValidatedProgram::validate(p).is_ok());
+}
+#[test]
+fn validator_v8_rejects_non_lattice_majority_and_non_weighted_zweight() {
+    let mut p = good();
+    p.types.insert(TypeDef::Bool).unwrap();
+    p.roles
+        .push(RoleDecl {
+            id: RoleId::from_raw(0),
+            name: name("A"),
+            kind: RoleKind::Process,
+        })
+        .unwrap();
+    let arg = Expr::Term(Term::Var(VarId::from_raw(0)));
+    let rule = p.rules.get_mut(RuleId::from_raw(0)).unwrap();
+    rule.body.lits.push(Literal::Guard(Expr::Call {
+        f: FnRef::Builtin(BuiltinFn::Majority {
+            domain: MajorityDomain::Role(RoleId::from_raw(0)),
+        }),
+        args: vec![arg.clone()],
+    }));
+    assert!(has(p.clone(), 8));
+    let guard = p
+        .rules
+        .get_mut(RuleId::from_raw(0))
+        .unwrap()
+        .body
+        .lits
+        .last_mut()
+        .unwrap();
+    *guard = Literal::Bind {
+        pat: Pattern::Var(VarId::from_raw(0)),
+        expr: Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::ZWeight {
+                rel: RelId::from_raw(0),
+            }),
+            args: vec![arg],
+        },
+    };
+    assert!(has(p, 8));
+}
+#[test]
+fn validator_v8_polymorphic_builtin_requires_monomorphic_signature() {
+    let mut p = good();
+    let str_ty = p.types.insert(TypeDef::Str).unwrap();
+    let u = p.types.lookup(&TypeDef::Int(IntTy::U64)).unwrap();
+    let message = p.consts.push(blossom_value::Value::Str("bad input".into())).unwrap();
+    p.rules
+        .get_mut(RuleId::from_raw(0))
+        .unwrap()
+        .body
+        .lits
+        .push(Literal::Bind {
+            pat: Pattern::Var(VarId::from_raw(0)),
+            expr: Expr::Call {
+                f: FnRef::Builtin(BuiltinFn::Error),
+                args: vec![Expr::Term(Term::Const(message))],
+            },
+        });
+    assert!(has(p.clone(), 8));
+    p.fns
+        .push(FnDecl {
+            id: FnId::from_raw(0),
+            name: name("error_u64"),
+            params: vec![(s("message"), str_ty)],
+            ret: u,
+            body: FnBody::Builtin(BuiltinFn::Error),
+            props: FnProps {
+                classes: vec![],
+                injective: Claim::Absent,
+                commutative: Claim::Absent,
+                associative: Claim::Absent,
+                idempotent: Claim::Absent,
+                stable_after: None,
+            },
+        })
+        .unwrap();
+    assert!(!has(p, 8));
+}
+#[test]
 fn validator_v9_accept_and_reject() {
     let mut p = good();
     let node_ty = p.types.insert(TypeDef::Node(None)).unwrap();
@@ -339,6 +491,105 @@ fn printer_basic() {
     let p = good();
     let text = crate::printer::print(&p);
     assert!(text.contains("r(X) :- s(X)."));
+    insta::assert_snapshot!(text);
+}
+#[test]
+fn printer_schema_annotations() {
+    let mut p = base();
+    let u = p.types.lookup(&TypeDef::Int(IntTy::U64)).unwrap();
+    let lattice = p
+        .lattices
+        .push(LatticeDef {
+            id: LatticeTypeId::from_raw(0),
+            name: name("LMax"),
+            ctor: LatticeCtor::Max(u),
+            ops: vec![],
+            height: HeightClass::Acc,
+            laws: LawStatus::Builtin,
+            distributive: true,
+            dense_domain: None,
+        })
+        .unwrap();
+    let lat_ty = p.types.insert(TypeDef::Lattice(lattice)).unwrap();
+    let mut cell = rel(2, "votes$now", u, RelClass::Idb);
+    cell.schema.cols.push(Column {
+        name: s("count"),
+        ty: lat_ty,
+        field_no: None,
+        default: None,
+        since: None,
+        deprecated: None,
+        hidden_dest: false,
+    });
+    cell.schema.lattice.push((ColIdx::from_raw(1), lattice));
+    p.rels.push(cell).unwrap();
+    let mut payload = rel(3, "kv", u, RelClass::Idb);
+    payload.schema.cols.push(Column {
+        name: s("value"),
+        ty: u,
+        field_no: None,
+        default: None,
+        since: None,
+        deprecated: None,
+        hidden_dest: false,
+    });
+    payload.schema.payload.push(ColIdx::from_raw(1));
+    payload.durable = true;
+    p.rels.push(payload).unwrap();
+    for n in ["A", "B"] {
+        p.roles
+            .push(RoleDecl {
+                id: RoleId::from_raw(p.roles.len() as u32),
+                name: name(n),
+                kind: RoleKind::Process,
+            })
+            .unwrap();
+    }
+    let node = p.types.insert(TypeDef::Node(None)).unwrap();
+    let mut channel = rel(
+        4,
+        "vote",
+        node,
+        RelClass::Channel(ChannelDecl {
+            form: ChannelForm::Direction {
+                src: RoleId::from_raw(0),
+                dst: RoleId::from_raw(1),
+            },
+            loopback: false,
+            host_endpoint: false,
+            fault: FaultModel::ReliableOrdered,
+            partition: None,
+            sealed_by: None,
+            wrapper: None,
+            acl: AclSpec::Inferred,
+            egress_to_external: false,
+            replicated: false,
+        }),
+    );
+    channel.schema.cols[0].name = s("dest");
+    channel.schema.cols[0].hidden_dest = true;
+    channel.schema.cols.push(Column {
+        name: s("term"),
+        ty: u,
+        field_no: None,
+        default: None,
+        since: None,
+        deprecated: None,
+        hidden_dest: false,
+    });
+    channel.schema.key.push(ColIdx::from_raw(1));
+    p.rels.push(channel).unwrap();
+    p.rules.get_mut(RuleId::from_raw(0)).unwrap().body.lits[0] = Literal::Pos(Atom {
+        rel: RelId::from_raw(4),
+        args: vec![Term::Wild, Term::Var(VarId::from_raw(0))],
+        sender: None,
+        principal: Some(Term::Var(VarId::from_raw(0))),
+        weight: None,
+        spec: None,
+        span: span(),
+    });
+    let text = crate::printer::print(&p);
+    assert!(text.contains("vote(X | X)"));
     insta::assert_snapshot!(text);
 }
 #[test]
@@ -847,6 +1098,127 @@ fn project_role_keeps_channel_send_and_receive_sides() {
     let printed = crate::printer::print(valid.get());
     assert!(printed.contains("msg(@Node(NodeId(1)), X)@async"));
     assert!(printed.contains("msg(X)"));
+}
+#[test]
+fn project_role_keeps_endpoint_without_handler() {
+    let mut p = Program::new(meta());
+    let node = p.types.insert(TypeDef::Node(None)).unwrap();
+    for n in ["A", "B", "C"] {
+        p.roles
+            .push(RoleDecl {
+                id: RoleId::from_raw(p.roles.len() as u32),
+                name: name(n),
+                kind: RoleKind::Process,
+            })
+            .unwrap();
+    }
+    let mut channel = rel(
+        0,
+        "ingress",
+        node,
+        RelClass::Channel(ChannelDecl {
+            form: ChannelForm::Direction {
+                src: RoleId::from_raw(0),
+                dst: RoleId::from_raw(1),
+            },
+            loopback: false,
+            host_endpoint: false,
+            fault: FaultModel::Lossy,
+            partition: None,
+            sealed_by: None,
+            wrapper: None,
+            acl: AclSpec::Inferred,
+            egress_to_external: false,
+            replicated: false,
+        }),
+    );
+    channel.schema.cols[0].hidden_dest = true;
+    p.rels.push(channel).unwrap();
+    let valid = ValidatedProgram::validate(p).unwrap();
+    for id in [0, 1] {
+        let view = valid.project(RoleId::from_raw(id)).unwrap();
+        assert_eq!(view.get().rels.len(), 1);
+        assert_eq!(view.get().rules.len(), 0);
+    }
+    assert_eq!(valid.project(RoleId::from_raw(2)).unwrap().get().rels.len(), 0);
+}
+#[test]
+fn project_role_trims_shared_construct_membership() {
+    let mut p = base();
+    for n in ["A", "B"] {
+        p.roles
+            .push(RoleDecl {
+                id: RoleId::from_raw(p.roles.len() as u32),
+                name: name(n),
+                kind: RoleKind::Process,
+            })
+            .unwrap();
+    }
+    let mut second = p.rules.get(RuleId::from_raw(0)).unwrap().clone();
+    second.id = RuleId::from_raw(1);
+    second.label = RuleLabel::new("b/rule");
+    second.role = Some(RoleId::from_raw(1));
+    second.construct = Some(ConstructId::from_raw(0));
+    p.rules.push(second).unwrap();
+    let first = p.rules.get_mut(RuleId::from_raw(0)).unwrap();
+    first.role = Some(RoleId::from_raw(0));
+    first.construct = Some(ConstructId::from_raw(0));
+    p.constructs
+        .push(Construct {
+            id: ConstructId::from_raw(0),
+            kind: ConstructKind::Outer,
+            rules: vec![RuleId::from_raw(0), RuleId::from_raw(1)],
+            rels: vec![],
+            surface: SurfaceRef {
+                module: name("m"),
+                label: None,
+                stmt: None,
+                span: span(),
+            },
+        })
+        .unwrap();
+    let valid = ValidatedProgram::validate(p).unwrap();
+    for id in [0, 1] {
+        let view = valid.project(RoleId::from_raw(id)).unwrap();
+        assert_eq!(view.get().rules.len(), 1);
+        assert_eq!(
+            view.get().constructs.get(ConstructId::from_raw(0)).unwrap().rules.len(),
+            1
+        );
+    }
+}
+#[test]
+fn digest_invariant_under_equal_construct_sort_keys() {
+    fn program(reverse: bool) -> Program {
+        let mut p = base();
+        let ty = p.types.lookup(&TypeDef::Int(IntTy::U64)).unwrap();
+        let names = if reverse { ["m$b", "m$a"] } else { ["m$a", "m$b"] };
+        for (i, n) in names.into_iter().enumerate() {
+            let construct = ConstructId::from_raw(i as u32);
+            let id = RelId::from_raw((i + 2) as u32);
+            let mut decl = rel(id.raw(), n, ty, RelClass::Idb);
+            decl.origin = Origin::Generated { construct };
+            p.rels.push(decl).unwrap();
+            p.constructs
+                .push(Construct {
+                    id: construct,
+                    kind: ConstructKind::Outer,
+                    rules: vec![],
+                    rels: vec![id],
+                    surface: SurfaceRef {
+                        module: name("m"),
+                        label: None,
+                        stmt: None,
+                        span: span(),
+                    },
+                })
+                .unwrap();
+        }
+        p
+    }
+    let a = ValidatedProgram::validate(program(false)).unwrap();
+    let b = ValidatedProgram::validate(program(true)).unwrap();
+    assert_eq!(a.digest(), b.digest());
 }
 
 #[test]
