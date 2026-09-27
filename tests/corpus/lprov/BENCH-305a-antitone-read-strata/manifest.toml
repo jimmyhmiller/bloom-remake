@@ -77,7 +77,7 @@ holds  = "0..=2"
 absent = "3..=4"
 
 [expect_analysis]
-strata = { seen = 0, small = 1 }
+strata = { of = { seen = 0, small = 1 } }
 
 # ---- the ultimate L-model (contents at the end of the run)
 [[expect]]

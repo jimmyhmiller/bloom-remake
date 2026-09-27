@@ -15,4 +15,4 @@ unimplemented = ["LANG-125", "LANG-126", "SEM-021", "SEM-102", "ANA-020", "ANA-0
 until = "M5"
 
 [expect_analysis]
-points_of_order = [{ at = "small", op = "not" }]
+points_of_order = { complete = true, sites = [{ at = "small", op = "not" }] }

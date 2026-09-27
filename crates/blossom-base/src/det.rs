@@ -1012,7 +1012,9 @@ mod tests {
     #[test]
     fn det_map_platform_independent_hash() {
         // Pinned values: the hasher's output is part of no observable result, but a fixed key must mean the same
-        // hash on every platform (little-endian byte feeding, usize hashed as u64).
+        // hash on every platform (little-endian byte feeding, usize hashed as u64). The constants were computed on
+        // aarch64-apple-darwin; any target that disagrees has a platform-dependent hasher. They use only `write_*`
+        // calls and `u64`'s `Hash`, whose byte feeding std fixes, not the `Hash` impls of other types.
         let fixed = DetState::fixed();
         let h1 = fixed.hash_one(0u64);
         let h2 = fixed.hash_one(usize::MAX as u64);
@@ -1027,6 +1029,14 @@ mod tests {
             padded.finish(),
             "length must separate trailing zeros"
         );
+        let mut nonce_hasher = DetState::from_nonce(0x0123_4567_89ab_cdef).build_hasher();
+        nonce_hasher.write_u32(7);
+        nonce_hasher.write(b"blossom");
+        assert_eq!(h1, 0xd5fe_a547_551b_cd22);
+        assert_eq!(h2, 0xe782_b195_6de5_9388);
+        assert_eq!(bytes_hasher.finish(), 0x5672_58ed_040a_6760);
+        assert_eq!(padded.finish(), 0x48f0_dcaa_355b_27b0);
+        assert_eq!(nonce_hasher.finish(), 0x8722_a7fb_3998_06e8);
     }
 
     #[test]

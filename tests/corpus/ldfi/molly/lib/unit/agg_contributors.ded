@@ -1,11 +1,13 @@
-// Molly's provenance unit test "aggregate provenance is computed correctly" (R06 §12.6, ProvenanceSuite): counts(loc,
-// A, 3) has the three contributors derived(loc, A, 100 | 200 | 300) and counts(loc, B, 1) the single contributor
-// derived(loc, B, 400). Blossom golden corpus, transcribed from R06 (derived = true); see ../../README.md.
+// The contributors of a head aggregate (BENCH-135 "3 and 1 contributors"; the property of the aggregate-provenance
+// test in Molly's provenance suite, R06 §12.6), written for this corpus: tally(k, "x", 3) counts the three readings
+// 5, 6 and 7 of sensor x, and tally(k, "y", 1) the single reading 9 of sensor y, so they have 3 and 1 contributors.
+// The readings pass through the derived relation `seen`, so the contributors are derived goals. Blossom golden
+// corpus, re-derived (derived = true); see ../../README.md.
 
-derived(X, Y, Z) :- fact(X, Y, Z);
-counts(L, A, count<B>) :- derived(L, A, B);
+seen(K, Sensor, V) :- reading(K, Sensor, V);
+tally(K, Sensor, count<V>) :- seen(K, Sensor, V);
 
-fact("loc", "A", 100)@1;
-fact("loc", "A", 200)@1;
-fact("loc", "A", 300)@1;
-fact("loc", "B", 400)@1;
+reading("k", "x", 5)@1;
+reading("k", "x", 6)@1;
+reading("k", "x", 7)@1;
+reading("k", "y", 9)@1;

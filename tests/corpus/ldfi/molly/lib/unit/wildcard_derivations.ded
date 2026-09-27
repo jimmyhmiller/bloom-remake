@@ -1,11 +1,12 @@
-// Molly's provenance unit test "repeat rule firings with different contributing tuples (missing fields are
-// wildcards)" (R06 §12.6, ProvenanceSuite): c(loc, 1) has two distinct derivations, through proxy(loc, x, 1) and
-// proxy(loc, y, 1), although the rule mentions the middle column only as `_`. Blossom golden corpus, transcribed from
-// R06 (derived = true); see ../../README.md.
+// Two derivations that differ only in a wildcard column (BENCH-135 "2 derivations"; the property of the
+// repeated-firings-with-wildcards test in Molly's provenance suite, R06 §12.6), written for this corpus: `stock`
+// records each shelf that holds an item, and `available` reads it with the shelf written as `_`, so available(n,
+// "pen") has one derivation through stock(n, "s1", "pen") and one through stock(n, "s2", "pen"). Blossom golden
+// corpus, re-derived (derived = true); see ../../README.md.
 
-proxy("loc", A, B) :- a(L, A, B);
-c(L, V) :- b(L, V), proxy(L, _, V);
+stock(N, Shelf, Item) :- shelved(N, Item, Shelf);
+available(N, Item) :- wanted(N, Item), stock(N, _, Item);
 
-a("loc", "x", 1)@1;
-a("loc", "y", 1)@1;
-b("loc", 1)@1;
+shelved("n", "pen", "s1")@1;
+shelved("n", "pen", "s2")@1;
+wanted("n", "pen")@1;

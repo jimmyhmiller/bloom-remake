@@ -11,14 +11,14 @@ program = "program.ded"
 derived = true
 expected_from = "literature"
 notes = """
-Molly ProvenanceSuite (R06 §12.6): c(loc, 1) has 2 distinct derivations.
+BENCH-135 "2 derivations" (the repeated-firings-with-wildcards test of Molly's provenance suite, R06 §12.6; program written for the corpus, ../lib/unit/wildcard_derivations.ded): available(n, "pen") has 2 distinct derivations, through the stock of shelf s1 and of shelf s2.
 
 Molly round k is tick k (CR-13); the rows omit the location column. The provenance counts this program is about are in ../golden/provenance.toml.
 """
 
 [deploy]
 nodes = [
-  { name = "loc", role = "Node" },
+  { name = "n", role = "Node" },
 ]
 
 [run]
@@ -31,14 +31,14 @@ unimplemented = ["LANG-220", "LANG-005", "LANG-060", "SEM-004"]
 until = "M5"
 
 [[expect]]
-node = "loc"
-rel = "proxy"
+node = "n"
+rel = "stock"
 tick = 1
-rows = [["x", 1], ["y", 1]]
+rows = [["s1", "pen"], ["s2", "pen"]]
 
 # c(loc, 1) has two derivations, one per proxy fact
 [[expect]]
-node = "loc"
-rel = "c"
+node = "n"
+rel = "available"
 tick = 1
-rows = [[1]]
+rows = [["pen"]]

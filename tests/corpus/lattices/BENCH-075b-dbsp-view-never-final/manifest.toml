@@ -19,4 +19,4 @@ until = "M7"
 
 [expect_analysis]
 # ANA-120 finality classes per output (exact set of classes).
-finality = { v_out = ["NEVER-FINAL"] }
+finality = { v_out = ["NEVER"] }

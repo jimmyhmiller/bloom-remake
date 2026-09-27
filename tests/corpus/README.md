@@ -119,6 +119,9 @@ absent = "6.."
 [perf]                                         # informational targets read by the benchmark harness
 ```
 
+**Values of `[expect_analysis]` and diagnostic comparison.** Fixed at the M1 gate (DECISIONS.md) in
+`tests/corpus/README.md`, "Expectation vocabularies", and validated by the manifest lint.
+
 **Ticks.** Node-local ticks; tick 0 is the boot tick (CR-13). In the sync harness every live node ticks in every
 round, so a round number equals every node's tick; messages sent in round t are delivered in round t + 1
 (self-sends included). Inputs at tick k are delivered in tick k.
@@ -179,8 +182,15 @@ the runner (M5.2) and the triage WPs can check the cases against it rather than 
 - **Host inputs** arrive from tick 1 on; tick 0 is the boot tick.
 - **Node-local ticks under the simulator.** Scripted inputs, faults and per-tick expectations name node-local ticks.
   When a node has nothing to do before such a tick (no message, timer, input or staged change), the simulator runs
-  empty ticks up to it; by SEM-009 an idle stretch is observationally equivalent to a run of empty ticks, so this
-  changes no result. Messages still arrive whenever the schedule delivers them.
+  empty ticks up to it. By SEM-009 an idle stretch is observationally equivalent to a run of empty ticks **only when
+  an empty tick has no effect on that node** (ARCHITECTURE §0.2 L4: no level-triggered `send`, timer or state change
+  fires in it). The cases that rely on this reading (BENCH-040b, 041b, 043c, 044c, 046b, 047c) have no empty-tick
+  effect at the ticks involved, so it changes no result there; a case whose node does have one must script its
+  ticks explicitly. Messages still arrive whenever the schedule delivers them.
+- **Ticks a node never runs.** A node that has halted (LANGUAGE §7.15) or crashed without a restart runs no later
+  tick. No relation holds at a tick the node never runs: an `absent` range covering such ticks holds there, and a
+  `holds` range covering them fails. BENCH-017 relies on the first half (`tbl(3)` absent from tick 2 on a node that
+  halts at the end of tick 1).
 - **Faults.** `[[fault]] kind = "restart"` at tick k means the node's tick k is the first tick of a new incarnation:
   durable relations are reloaded, everything else starts empty, and `boot()` and `recovered()` hold at tick k. A
   scripted restart happens at a commit point: tick k − 1's durable deltas, including its `next`, `delete` and
@@ -198,13 +208,18 @@ the runner (M5.2) and the triage WPs can check the cases against it rather than 
 - **Compile cases are otherwise clean.** A case with a `compile` backend is written so that its `[[expect_diag]]`
   entries are the only diagnostics a conforming compiler reports, warnings included. Where LANGUAGE leaves no
   choice, the case therefore holds whether the runner compares the reported set with the expected set exactly or
-  checks inclusion. Three cases rest on a reading of a point LANGUAGE leaves open, recorded in their notes and in
-  `docs/plan/notes/M1.2.md` (Bugs 3–5) with the WP that settles it:
+  checks inclusion (the M1 gate fixed exact comparison, see "Diagnostics" below). These cases rest on a reading of a
+  point LANGUAGE leaves open, recorded in their notes and in `docs/plan/notes/M1.2.md` (Bugs 3–5) with the WP that
+  settles it:
   - BENCH-016b expects BLS0406 for a write into the program's own `input`, which the §12 matrix would also call
     BLS0400;
   - BENCH-047a expects BLS0503 for a choice on a same-tick cycle, which §13.3 would also call BLS0502;
   - BENCH-026f expects BLS1005 only on the localized handler the compiler rewrites, not on the two it rejects with
-    BLS0805.
+    BLS0805;
+  - BENCH-003d expects BLS0500 for the `.ded` frontend's validator failure V1 (ARCHITECTURE §13.12 renders V1–V4
+    as user diagnostics; LANGUAGE §20 has no separate `.ded` code);
+  - BENCH-045c expects BLS0704 (a refuted algebraic claim, LANGUAGE §16.1) where FEATURES and R12 T6 say the false
+    commutativity declaration "fails TEST-015", the oracle's runtime shuffle check, which has no code.
 
   An implementation that makes the other choice by reporting both codes (016b, 047a) or the extra lints (026f)
   passes an inclusion check and fails an exact comparison. One that reports only the general code (BLS0400 or
@@ -238,6 +253,61 @@ the runner (M5.2) and the triage WPs can check the cases against it rather than 
   - a head aggregate (`v = agg!(…)` in a view head) lists LANG-100, which fixes its grouping by the other head terms
     and its deduplicated input, besides the id of its aggregate family (LANG-102, LANG-104, LANG-110, LANG-097, …).
 
+## Expectation vocabularies (fixed at the M1 gate)
+
+PLAN §5.1 names the `[expect_analysis]` keys but not their values, and the four M1 corpus WPs wrote them
+independently. The M1 gate fixed one vocabulary (`docs/plan/notes/M1-gate.md`, DECISIONS.md) from their conventions,
+converted the cases that used another shape (without changing what they assert), and made
+`tools/check_manifests.py` validate it. M5.2 (`xtask corpus --lint` and the `analysis` backend) and M7.3 implement it
+as written here; a change to it is a plan change made at a gate.
+
+### `[expect_analysis]`
+
+Every key is optional, and a key that is present is checked. A table keyed by relation checks the relations it
+names and no others. Relations are named as in the source: a relation, view or output as declared, `inst.rel` for
+one of a module instance. Lists are exact unless the row says otherwise.
+
+| Key | Shape | What is compared |
+|---|---|---|
+| `strata` | `{ count = n, of = { rel = k } }`, both optional | SEM-022 / ANA-002. `of`: the 0-based stratum of each listed relation, the longest same-tick path to it counting negative edges (ARCHITECTURE §7.2). `count`: the number of strata **including** the final temporal pseudo-stratum that holds every `next` and async rule (Bud's `stratified_rules.length`, R03 §4.3). |
+| `points_of_order` | `{ complete, edges, clusters, sites, crossing, free }`; `complete` is required, each list optional | ANA-022. `edges = [{ from, to, kind, reason? }]`: negative dependency edges between relations; `kind` is `negation`, `aggregate`, `deletion`, `choice`, `order`, `lattice_op` (a non-monotone or antitone lattice operation), `reveal`, `delta_read` or `z_boundary`; `reason` qualifies it (`membership`). `clusters = [[rel, …]]`: temporal clusters, each the relations of one component with temporal edges, compared as sets. `sites = [{ at, op }]`: the handler label or view name holding a point of order and its surface construct (a bang call such as `count!` or `reveal!`, or a keyword of LANGUAGE §13.2 such as `not`). With `complete = true` each of these three lists that is present is the exact report of its kind; with `false`, each listed element must be reported and others may be. `crossing = [{ from, to }]`: every dependency path from `from` to `to` passes a point of order. `free = [{ from, to }]`: no such path does. |
+| `calm_labels` | `{ outputs = { rel = label }, paths = [{ from, to, label }], races = [{ channels = [a, b], meet, guarded }] }` | ANA-023 / ANA-024. Labels `Bot`, `A`, `N`, `D` (A then N gives D). `outputs`: each listed output's label, the disjunction of its paths. `paths`: the label of each listed path; **not exhaustive** (bud's labeling tests assert that the report *contains* a path, BENCH-092). `races`: the exact set of meetings of two channel streams at `meet` (channels in either order), each with its guarded-asynchrony verdict, for every `meet` relation listed. |
+| `certificates` | `{ rel = [kind, …] }` | The exact set of Dedalus-family certificates the output receives: `dedalus_plus` (ANA-025), `dedalus_s` (ANA-026), `dedalus_plus_l` (ANA-141), `dedalus_s_l` (ANA-142). `[]` asserts that none applies. They rest on guarded asynchrony, so they also certify consistency under fair runs. A `confluent = "certified"` verdict can rest on a certificate outside this family: BENCH-091a's message join has no point of order, so it is monotone and confluent by CALM, but its asynchrony is unguarded, and BENCH-089h/089d (the same shape) pin `certificates = []`. |
+| `confluent` | `{ rel = verdict }` | ANA-029's `ConfluenceStatus` (ARCHITECTURE §7.3) in CR-29's sense (Ameloot: any two finite runs can be extended to agree): `certified`, `confluent_not_certified` (ANA-143), `not_confluent`, `inconclusive`. SEM-044's "exactly one ultimate model" is read the same way. In a case whose only backend is `sim` (BENCH-307b), the verdict is the simulator's ultimate-model verdict (M8.2). |
+| `fair_consistency` | `{ rel = "certified" \| "not_certified" }` | Consistency under fair runs, reported separately from confluence (CR-29). |
+| `deterministic` | `{ rel = verdict }` | ANA-029's determinism verdict, one per output: `confluent`, `confluent_given_seals`, `coordinated`, `nondeterministic_by_design`. No M1 case uses it. |
+| `finality` | `{ rel = [CLASS, …] }`, or `{ "inst.rel" = { class = "FINITE", ft = { state = value }, abstraction = "…" } }` for an ANA-122 component (`abstraction` optional) | ANA-120: the exact set of classes of the output, spelled as ARCHITECTURE §7.2 spells them: `POS`, `NEG`, `TOP`, `THRESH`, `MIXED`, `FINITE`, `SEALED`, `NEVER` (FEATURES' POS-FINAL … NEVER-FINAL). A list has two classes when an output is final early one way and at a seal the other (`["THRESH", "SEALED"]`). The ANA-122 form is the exact table of free-termination states: for each state of the component's state register that is FT, the query's value there; unlisted states are not FT. |
+| `blazes` | a table (BENCH-094) | ANA-040–045. `paths = [{ component, from, to, annotation, gate? }]`: components are module instances (ARCHITECTURE §7.2), `from`/`to` the instance's input and output interfaces, `annotation` one of `CR`, `CW`, `OR`, `OW`, `gate` the sorted gate columns. `streams = { channel = label }`, `sinks = { output = label }` with labels `NDRead`, `Taint`, `Seal(k1, …)`, `Async`, `Run`, `Inst`, `Diverge`. `coordination = [{ at, mechanism = "ordering" \| "sealing", key? }]`. `cycles`: the collapsed components; `collapsed = [{ members, annotation, gate }]`. The lists are exact; the two maps check the entries they list. |
+| `reclaimable` | a table (BENCH-095) | ANA-060–066. `reclaimed = { rel = "dr_plus" \| "dr_minus" \| "join_seal" \| "join_pullup" \| "join_semijoin" \| "join_keys" }`; `kept = { rel = reason }` with the reasons listed in `docs/plan/notes/M1.4.md`; `channels = { channel = "arm" }`; `storage = [{ node, rel, tick \| final, rows }]`, the contents of a relation **in the Edelweiss-rewritten program**; `ranges = [{ node, channel \| rel, tick \| final, buckets }]`, ARM buckets as `[other columns…, lo, hi]`. `storage` and `ranges` are run-time facts of the rewritten program, checked where M7.5 runs the original and the rewritten program side by side; each listed entry must hold. |
+
+### Diagnostics
+
+- **`compile`** runs the frontend only (ARCHITECTURE §13.1's frontend phases) and compares **every** diagnostic it
+  reports, warnings included, with `[[expect_diag]]` exactly, as a multiset of codes (with `line` and `severity`
+  where given). An empty list expects no diagnostic (PLAN §5.2). The M1.2 and M1.4 compile cases were written this
+  way. The M1.3 compile cases list only the errors they are about; when a conforming frontend also reports a
+  warning for one of them, the triage WP adds that warning or changes the program so it no longer draws it, and
+  never removes an expected error.
+- **`analysis`** compares the diagnostics of `blossom-analysis` (stratification, CALM, determinism, finality,
+  lints). Every listed diagnostic must be reported, and, for the codes of the ANA features the case lists in
+  `features`, no other: listing ANA-008 makes BLS1002 exhaustive (BENCH-093e: exactly two, BENCH-093g: none),
+  listing ANA-120 does the same for BLS0705, and ANA-002 for BLS0502/BLS0503. The codes of analyses the case does
+  not list are ignored, so a case does not depend on the precision of unrelated lints. M5.2 defines the table from
+  codes to ANA features that this needs, from LANGUAGE §20 and ARCHITECTURE §7.2.
+- **Runtime backends** compare no diagnostics. A hard runtime error is expected only through `[[expect_error]]`;
+  any other one fails the case.
+- **`line`** is the line of the construct the diagnostic's primary span names: the statement for a statement-level
+  error, the relation's declaration for a relation-level report. The M1.2 cases also mark each such line with a
+  trailing `// expect: BLSnnnn` comment (see above). A case leaves `line` out where the construct is not one line
+  (a cycle through several statements).
+
+### Quiescence
+
+`quiescent_from = q` holds when, from tick q on, on every node, no relation (persistent or tick-local) differs from
+the previous tick and no message is in flight. This implies ARCHITECTURE §4.11's digest condition at every tick from
+q on. q may be later than the first quiescent tick. A runner that stops at quiescence (`stop = "quiescent"`) before
+q checks the claim through the determinism of an empty tick: a quiescent node repeats its last tick.
+
 ## Checking manifests
 
 ```sh
@@ -245,6 +315,7 @@ python3 tests/corpus/tools/check_manifests.py core
 python3 tests/corpus/tools/check_manifests.py core --require-ids BENCH-001..048 --skip BENCH-025
 ```
 
-The validator checks every key and value shape of schema v1, that each `id` exists in FEATURES.md with the stated
-priority and each listed feature exists, that referenced files exist, and, with `--require-ids`, that every P0/P1 id
-in the range has a case. It does not recompute `until`; the corpus runner does (§5.4).
+The validator checks every key and value shape of schema v1, including the `[expect_analysis]` vocabulary above,
+that each `id` exists in FEATURES.md with the stated priority and each listed feature exists, that referenced files
+exist, and, with `--require-ids`, that every P0/P1 id in the range has a case. It does not recompute `until`; the
+corpus runner does (§5.4).

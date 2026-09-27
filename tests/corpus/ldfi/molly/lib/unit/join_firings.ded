@@ -1,10 +1,11 @@
-// Molly's provenance unit test "repeat rule firings with different contributing tuples (missing fields are part of a
-// join)" (R06 §12.6, ProvenanceSuite): c(loc, 1) is derived by two firings of one rule, one through M = x and one
-// through M = y. Blossom golden corpus, transcribed from R06 (derived = true); see ../../README.md.
+// One head tuple, two firings of one rule (BENCH-135 "2 firings"; the property of the repeated-firings test in
+// Molly's provenance suite, R06 §12.6), written for this corpus: `route` joins `link` and `hop` on the relay R, which
+// the head drops, so route(n, "d") is derived once through relay r1 and once through relay r2. Blossom golden corpus,
+// re-derived (derived = true); see ../../README.md.
 
-c(L, V) :- b(L, M, V), a(L, M, V);
+route(N, Dst) :- link(N, R, Dst), hop(N, R, Dst);
 
-a("loc", "x", 1)@1;
-a("loc", "y", 1)@1;
-b("loc", "x", 1)@1;
-b("loc", "y", 1)@1;
+link("n", "r1", "d")@1;
+link("n", "r2", "d")@1;
+hop("n", "r1", "d")@1;
+hop("n", "r2", "d")@1;

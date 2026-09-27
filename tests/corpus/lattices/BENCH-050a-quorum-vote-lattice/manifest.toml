@@ -185,5 +185,6 @@ final = true
 rows  = [[]]
 
 [expect_analysis]
-# R04 T1: "CALM analysis reports no points of order." An empty list means the ANA-022 report is empty.
-points_of_order = []
+# R04 T1: "CALM analysis reports no points of order": the ANA-022 report is empty (no negative edge, no temporal
+# cluster, no site; `complete` makes each list exact).
+points_of_order = { complete = true, edges = [], clusters = [], sites = [] }

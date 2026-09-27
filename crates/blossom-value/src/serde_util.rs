@@ -3,7 +3,8 @@
 //! - `f64_bits`: an `f64` as its IEEE bit pattern, so NaN payloads and `-0.0` survive formats such as JSON;
 //! - `set_strict`: a set as a sequence, rejecting duplicate elements instead of merging them;
 //! - `map_pairs`: a map as a sequence of `(key, value)` pairs (JSON object keys must be strings), rejecting
-//!   duplicate keys instead of keeping the last one.
+//!   duplicate keys instead of keeping the last one;
+//! - `nonempty_tuple`: a tuple's elements, rejecting an empty sequence, whose canonical form is `()` (`Unit`).
 
 pub(crate) mod f64_bits {
     use serde::{Deserialize, Deserializer, Serializer};
@@ -109,5 +110,25 @@ pub(crate) mod map_pairs {
             }
         }
         deserializer.deserialize_seq(PairsVisitor(PhantomData))
+    }
+}
+
+pub(crate) mod nonempty_tuple {
+    use std::sync::Arc;
+
+    use serde::{Deserialize, Deserializer};
+
+    pub(crate) fn deserialize<'de, T, D>(deserializer: D) -> Result<Arc<[T]>, D::Error>
+    where
+        T: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        let items = Vec::<T>::deserialize(deserializer)?;
+        if items.is_empty() {
+            return Err(serde::de::Error::custom(
+                "an empty tuple is not canonical: the empty tuple is `()` (Unit)",
+            ));
+        }
+        Ok(items.into())
     }
 }

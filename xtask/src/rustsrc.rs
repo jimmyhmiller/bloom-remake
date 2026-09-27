@@ -28,6 +28,17 @@ pub struct Token {
     pub in_test: bool,
 }
 
+/// A module declared without a body (`mod name;`), whose code lives in another file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModDecl {
+    /// The module's name.
+    pub name: String,
+    /// The file named by a `#[path = "…"]` attribute, if any.
+    pub path: Option<String>,
+    /// Whether the declaration is test-only (`#[cfg(test)] mod name;`, or inside test code).
+    pub in_test: bool,
+}
+
 /// Everything `scan` collects from one file.
 #[derive(Debug, Default)]
 pub struct Scanned {
@@ -35,6 +46,8 @@ pub struct Scanned {
     pub paths: Vec<PathUse>,
     /// String literals and identifiers.
     pub tokens: Vec<Token>,
+    /// Out-of-line module declarations.
+    pub mods: Vec<ModDecl>,
 }
 
 /// Parses and scans one file.
@@ -48,22 +61,32 @@ pub fn scan(source: &str) -> syn::Result<Scanned> {
     // Collect every `use` first — at file level, in nested modules and inside function bodies — so each is
     // recorded and its aliases are known everywhere. Aliases are applied file-wide: an alias declared in one scope
     // may expand a same-named path in another, which can only add findings, never hide one.
-    let mut uses = UseItems(Vec::new());
+    let mut uses = UseItems(Vec::new(), Vec::new());
     uses.visit_file(&file);
     for u in uses.0 {
         let mut prefix = Vec::new();
         v.collect_use(&u.tree, &mut prefix, u.use_token.span.start().line);
     }
+    // `extern crate a as b;` makes `b` an alias of the crate `a`.
+    for e in uses.1 {
+        if let Some((_, rename)) = &e.rename {
+            v.aliases.push((rename.to_string(), vec![e.ident.to_string()]));
+        }
+    }
     v.visit_file(&file);
     Ok(v.out)
 }
 
-/// Every `use` item of a file, at any depth.
-struct UseItems<'ast>(Vec<&'ast syn::ItemUse>);
+/// Every `use` and `extern crate` item of a file, at any depth.
+struct UseItems<'ast>(Vec<&'ast syn::ItemUse>, Vec<&'ast syn::ItemExternCrate>);
 
 impl<'ast> Visit<'ast> for UseItems<'ast> {
     fn visit_item_use(&mut self, u: &'ast syn::ItemUse) {
         self.0.push(u);
+    }
+
+    fn visit_item_extern_crate(&mut self, e: &'ast syn::ItemExternCrate) {
+        self.1.push(e);
     }
 }
 
@@ -275,6 +298,26 @@ impl<'ast> Visit<'ast> for Scanner {
         // Recorded (with aliases) before the walk.
     }
 
+    fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+        if m.content.is_none() {
+            let path = m.attrs.iter().find_map(|a| match &a.meta {
+                syn::Meta::NameValue(nv) if nv.path.is_ident("path") => match &nv.value {
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(s), ..
+                    }) => Some(s.value()),
+                    _ => None,
+                },
+                _ => None,
+            });
+            self.out.mods.push(ModDecl {
+                name: m.ident.to_string(),
+                path,
+                in_test: self.test_depth > 0,
+            });
+        }
+        visit::visit_item_mod(self, m);
+    }
+
     fn visit_item_extern_crate(&mut self, e: &'ast syn::ItemExternCrate) {
         self.record_path(vec![e.ident.to_string()], e.ident.span().start().line);
     }
@@ -292,6 +335,15 @@ impl<'ast> Visit<'ast> for Scanner {
 
     fn visit_lit_str(&mut self, s: &'ast syn::LitStr) {
         self.record_token(s.value(), s.span().start().line);
+    }
+
+    // A code can also be spelled as a byte or C string (`b"BLS0502"`, `c"BLS0502"`); both are ASCII.
+    fn visit_lit_byte_str(&mut self, s: &'ast syn::LitByteStr) {
+        self.record_token(String::from_utf8_lossy(&s.value()).into_owned(), s.span().start().line);
+    }
+
+    fn visit_lit_cstr(&mut self, s: &'ast syn::LitCStr) {
+        self.record_token(s.value().to_string_lossy().into_owned(), s.span().start().line);
     }
 
     fn visit_macro(&mut self, m: &'ast syn::Macro) {
@@ -379,6 +431,39 @@ mod tests {
         // Double negation is not simplified: checked as production code (the strict side).
         assert_eq!(get("u"), Some(false));
         assert_eq!(get("t"), Some(true));
+    }
+
+    #[test]
+    fn rustsrc_records_out_of_line_modules() {
+        let s = scan(
+            "mod a;\n#[cfg(test)] mod tests;\n#[cfg(test)]\n#[path = \"t/x.rs\"] mod x;\nmod inline { fn f() {} }\n\
+             #[cfg(test)] mod outer { mod nested; }",
+        )
+        .unwrap();
+        let mods: Vec<(&str, Option<&str>, bool)> = s
+            .mods
+            .iter()
+            .map(|m| (m.name.as_str(), m.path.as_deref(), m.in_test))
+            .collect();
+        assert_eq!(
+            mods,
+            vec![
+                ("a", None, false),
+                ("tests", None, true),
+                ("x", Some("t/x.rs"), true),
+                ("nested", None, true)
+            ]
+        );
+    }
+
+    #[test]
+    fn rustsrc_extern_crate_aliases_and_byte_strings() {
+        let p = paths("extern crate std as s;\nfn f() { let _ = s::fs::read(\"p\"); }");
+        assert!(p.contains(&"std".to_string()), "{p:?}");
+        assert!(p.contains(&"std::fs::read".to_string()), "{p:?}");
+        let s = scan("fn f() { let _ = b\"BLS0502\"; let _ = c\"BLSR001\"; }").unwrap();
+        assert!(s.tokens.iter().any(|t| t.text == "BLS0502"), "{:?}", s.tokens);
+        assert!(s.tokens.iter().any(|t| t.text == "BLSR001"), "{:?}", s.tokens);
     }
 
     #[test]

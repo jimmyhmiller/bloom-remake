@@ -16,7 +16,13 @@ from the research report `docs/research/06-molly-ldfi.md` (R06):
   additions of §3.1.2 and §3.1.3;
 - the other programs (classic-deliv, the commit protocols, Kafka, Paxos, the bully election, Flux, Raft, the
   negative-support test, the timers and every specification) are written for the corpus from the papers' prose and
-  R06's descriptions, and checked against the published verdicts with `tests/corpus/ldfi/tools/ldfi_ref.py`.
+  R06's descriptions, and checked against the published verdicts with `tests/corpus/ldfi/tools/ldfi_ref.py`;
+- the unit tests of Molly's `ProvenanceSuite` and its `negative_support_test.ded` (BENCH-135, BENCH-137) are
+  represented by the property each checks (two firings through a join column, two derivations through a wildcard
+  column, aggregate contributors, grouping with an extra body variable, lineage only through negation), each on a
+  program written for the corpus under its own relation names and data (`tests/corpus/ldfi/molly/lib/unit/`). The
+  first versions of these five files transcribed Molly's test inputs, which R06 §12.6 quotes; the M1 gate replaced
+  them (`docs/plan/notes/M1-gate.md`).
 
 Molly's expectations (its CounterexampleSuite verdicts, the Figure 12 and 13 counts, the unit-test values) are
 facts reported in the literature and in R06; the corpus states them as data with their sources.

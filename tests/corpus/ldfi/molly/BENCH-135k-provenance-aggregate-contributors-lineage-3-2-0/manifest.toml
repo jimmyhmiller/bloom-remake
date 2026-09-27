@@ -11,7 +11,7 @@ program = "program.ded"
 derived = true
 expected_from = "literature"
 notes = """
-The contributors of BENCH-135j made observable (../lib/unit/agg_contributors_net.ded): each fact arrives from its own node, and an aggregate depends on every contributor (TEST-024), so each of the three losses behind counts(loc, A, 3) falsifies post(loc, A) and the one loss behind counts(loc, B, 1) falsifies post(loc, B).
+The contributors of BENCH-135j made observable (../lib/unit/agg_contributors_net.ded): each reading arrives from its own probe node, and an aggregate depends on every contributor (TEST-024), so each of the three losses behind tally(k, "x", 3) falsifies post(k, "x") and the one loss behind tally(k, "y", 1) falsifies post(k, "y").
 """
 
 [backend.ldfi]
@@ -23,12 +23,12 @@ until = "M8"
 eot = 3
 eff = 2
 crashes = 0
-nodes = ["loc", "p1", "p2", "p3", "p4"]
+nodes = ["k", "p1", "p2", "p3", "p4"]
 crash_view = "molly"
 verdict = "counterexample"
 falsifiers = [
-  ["O(p1,loc,1)"],
-  ["O(p2,loc,1)"],
-  ["O(p3,loc,1)"],
-  ["O(p4,loc,1)"],
+  ["O(p1,k,1)"],
+  ["O(p2,k,1)"],
+  ["O(p3,k,1)"],
+  ["O(p4,k,1)"],
 ]

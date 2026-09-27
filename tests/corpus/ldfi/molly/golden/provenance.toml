@@ -1,8 +1,8 @@
-# Golden data for BENCH-135's provenance items: rule firings, derivations and aggregate contributors (Molly's
-# ProvenanceSuite and DerivationTreesSuite), the PODS'07 provenance polynomials, and the Soufflé minimal-height
-# annotations. Consumers: TEST-023 complete lineage and ENG-112 Tier C (WPs M7.1, M8.1), ENG-114 semiring
-# annotations (M7.6), ENG-111 Tier B minimal-height annotations (M5.7). Not corpus cases: manifest schema v1 cannot
-# state provenance counts or annotations. Where a program's *model* can be pinned, a corpus case does it (the
+# Golden data for BENCH-135's provenance items: rule firings, derivations and aggregate contributors (the properties
+# Molly's ProvenanceSuite and DerivationTreesSuite test, on programs written for the corpus), the PODS'07 provenance
+# polynomials, and the Soufflé minimal-height annotations. Consumers: TEST-023 complete lineage and ENG-112 Tier C
+# (WPs M7.1, M8.1), ENG-114 semiring annotations (M7.6), ENG-111 Tier B minimal-height annotations (M5.7). Not
+# corpus cases: manifest schema v1 cannot state provenance counts or annotations. Where a program's *model* can be pinned, a corpus case does it (the
 # `case` fields), and the *_net variants make the counts observable to LDFI as falsifier sets and run counts.
 # See ../../README.md.
 
@@ -10,30 +10,32 @@ schema = 1
 source = "R06 §12.6 (Molly ProvenanceSuite, DerivationTreesSuite); Green, Karvounarakis, Tannen, PODS 2007, Figures 3 and 5; Zhao, Subotić, Scholz, TOPLAS 2020 (arXiv 1907.05045), Figures 1 and 10"
 
 # ---------------------------------------------------------------------------------------------------------------------
-# Molly ProvenanceSuite: failure-free runs with EOT 2 on the single node "loc" (the last one on a, b, M).
+# The properties of Molly's ProvenanceSuite (R06 §12.6), each on a program written for the corpus (Molly carries no
+# license, so none of its test programs is copied; third_party/molly/README.md): failure-free runs with EOT 2 on one
+# node (the last one on p, q and t).
 
 [[firings]]
 name = "repeat rule firings with different contributing tuples (missing fields are part of a join)"
 program = "../lib/unit/join_firings.ded"
-goal = 'c("loc", 1) at time 1'
+goal = 'route("n", "d") at time 1'
 rule_firings = 2
-why = "one firing through M = x and one through M = y; the join column does not reach the head"
+why = "one firing through relay R = r1 and one through R = r2; the join column does not reach the head"
 case = "BENCH-135f-provenance-join-firings"
 lineage_case = "BENCH-135g-provenance-join-firings-lineage-3-2-0"
 
 [[firings]]
 name = "repeat rule firings with different contributing tuples (missing fields are wildcards)"
 program = "../lib/unit/wildcard_derivations.ded"
-goal = 'c("loc", 1) at time 1'
+goal = 'available("n", "pen") at time 1'
 distinct_derivations = 2
-why = "through proxy(loc, x, 1) and proxy(loc, y, 1), which differ only in a column the rule writes as `_`"
+why = "through stock(n, s1, pen) and stock(n, s2, pen), which differ only in a column the rule writes as `_`"
 case = "BENCH-135h-provenance-wildcard-derivations"
 lineage_case = "BENCH-135i-provenance-wildcard-derivations-lineage-3-2-0"
 
 [[aggregate]]
 name = "aggregate provenance is computed correctly"
 program = "../lib/unit/agg_contributors.ded"
-goals = ['counts("loc", "A", 3) at time 1', 'counts("loc", "B", 1) at time 1']
+goals = ['tally("k", "x", 3) at time 1', 'tally("k", "y", 1) at time 1']
 contributors = [3, 1]
 case = "BENCH-135j-provenance-aggregate-contributors"
 lineage_case = "BENCH-135k-provenance-aggregate-contributors-lineage-3-2-0"
@@ -41,9 +43,9 @@ lineage_case = "BENCH-135k-provenance-aggregate-contributors-lineage-3-2-0"
 [[aggregate]]
 name = "aggregate rewrites don't affect grouping by including un-aggregated variables"
 program = "../lib/unit/agg_grouping.ded"
-goals = ['vote_cnt("M", 2) at time 2']
+goals = ['turnout("t", 2) at time 2']
 contributors = [2]
-why = "the split rewrite records V, but grouping stays by M only (LANGUAGE §10.1)"
+why = "the split rewrite records the voter P, but grouping stays by the teller T only (LANGUAGE §10.1)"
 case = "BENCH-135m-provenance-aggregate-grouping-failure-free"
 lineage_case = "BENCH-135l-provenance-aggregate-grouping-3-2-0"
 

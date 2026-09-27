@@ -19,5 +19,5 @@ unimplemented = ["LANG-127", "LANG-153", "ANA-022", "ANA-029", "ANA-141", "SEM-0
 until = "M8"
 
 [expect_analysis]
-points_of_order = [{ at = "one", op = "reveal!" }]
+points_of_order = { complete = true, sites = [{ at = "one", op = "reveal!" }] }
 confluent = { exactly_one = "not_confluent", at_least_one = "certified", both = "certified" }

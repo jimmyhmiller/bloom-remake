@@ -70,7 +70,9 @@ python3 -B tests/corpus/ldfi/tools/ldfi_ref.py verdict tests/corpus/ldfi/molly/B
 ```
 
 `check` reports the exhaustive verdict, the lineage-driven verdict and run count, and the falsifier comparison of
-every case. The exhaustive search of the largest configurations (Paxos 7/6/1, bully 10/9/1, ack-deliv 8/7/1) takes
+every case, and marks it `ok`, `BAD` (a mismatch) or `WARN`: a run count above `runs_max` (a target for Blossom's
+search that this reference search need not meet; `--strict-runs` makes it a problem), a check too large to run, or
+a `crash_view` the tool does not model. The exhaustive search of the largest configurations (Paxos 7/6/1, bully 10/9/1, ack-deliv 8/7/1) takes
 minutes; Flux 22/21/1 is beyond it, and its verdict rests on Flux's safety argument and on exhaustive checks at
 smaller bounds (docs/plan/notes/M1.5.md).
 

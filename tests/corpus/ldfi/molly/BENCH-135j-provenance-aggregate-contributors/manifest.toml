@@ -11,14 +11,14 @@ program = "program.ded"
 derived = true
 expected_from = "literature"
 notes = """
-Molly ProvenanceSuite (R06 §12.6): counts(loc, A, 3) has 3 contributors and counts(loc, B, 1) has 1.
+BENCH-135 "3 and 1 contributors" (the aggregate-provenance test of Molly's provenance suite, R06 §12.6; program written for the corpus, ../lib/unit/agg_contributors.ded): tally(k, "x", 3) has 3 contributors and tally(k, "y", 1) has 1.
 
 Molly round k is tick k (CR-13); the rows omit the location column. The provenance counts this program is about are in ../golden/provenance.toml.
 """
 
 [deploy]
 nodes = [
-  { name = "loc", role = "Node" },
+  { name = "k", role = "Node" },
 ]
 
 [run]
@@ -32,7 +32,7 @@ until = "M5"
 
 # 3 contributors to the first, 1 to the second
 [[expect]]
-node = "loc"
-rel = "counts"
+node = "k"
+rel = "tally"
 tick = 1
-rows = [["A", 3], ["B", 1]]
+rows = [["x", 3], ["y", 1]]

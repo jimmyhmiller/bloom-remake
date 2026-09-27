@@ -23,5 +23,6 @@ until = "M6"
 [expect_analysis]
 # ANA-023 path label per output: A = asynchronous and monotone (safe to answer locally, ANA-033 "local"), D =
 # asynchronous input reaching a non-monotone operation (needs coordination, ANA-033 "quorum").
-calm_labels = { checkout = "D", suspicious = "A", big_cart = "A" }
-points_of_order = [{ at = "in_cart", op = "not" }]
+calm_labels = { outputs = { checkout = "D", suspicious = "A", big_cart = "A" } }
+# The only point of order is the `not` in handler/view `in_cart` (the site list is exact).
+points_of_order = { complete = true, sites = [{ at = "in_cart", op = "not" }] }

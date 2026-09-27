@@ -31,7 +31,7 @@ unimplemented = ["ANA-002", "SEM-022", "LANG-045", "LANG-047", "LANG-082", "LANG
 until = "M7"
 
 [expect_analysis]
-strata = { node = 0, edge = 0, reach = 0, unreach = 1, reaches_all = 2 }
+strata = { of = { node = 0, edge = 0, reach = 0, unreach = 1, reaches_all = 2 } }
 
 [[expect]]
 node = "n1"

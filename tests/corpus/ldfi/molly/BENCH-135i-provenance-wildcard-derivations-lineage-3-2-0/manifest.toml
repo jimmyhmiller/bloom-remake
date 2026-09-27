@@ -11,7 +11,7 @@ program = "program.ded"
 derived = true
 expected_from = "literature"
 notes = """
-The two derivations of BENCH-135h made observable (../lib/unit/wildcard_derivations_net.ded): the two proxy facts arrive from different nodes, and they differ only in the column the rule writes as `_`. runs_max = 2 as in BENCH-135g: provenance must keep both derivations although the distinguishing column is a wildcard (Molly records only join and head variables, R06 §3.4, which loses exactly this).
+The two derivations of BENCH-135h made observable (../lib/unit/wildcard_derivations_net.ded): the two `stock` facts arrive from different nodes, and they differ only in the column the rule writes as `_`. runs_max = 2 as in BENCH-135g: provenance must keep both derivations although the distinguishing column is a wildcard (Molly records only join and head variables, R06 §3.4, which loses exactly this).
 """
 
 [backend.ldfi]
@@ -23,10 +23,10 @@ until = "M8"
 eot = 3
 eff = 2
 crashes = 0
-nodes = ["loc", "px", "py"]
+nodes = ["n", "s1", "s2"]
 crash_view = "molly"
 verdict = "counterexample"
 runs_max = 2
 falsifiers = [
-  ["O(px,loc,1)", "O(py,loc,1)"],
+  ["O(s1,n,1)", "O(s2,n,1)"],
 ]

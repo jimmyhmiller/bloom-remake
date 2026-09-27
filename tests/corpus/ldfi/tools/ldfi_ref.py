@@ -1602,14 +1602,24 @@ def case_files(case: pathlib.Path, m):
     return files
 
 
-def check_case(case: pathlib.Path, opts):
+class Warn:
+    """Collects what a check could not confirm without it being a mismatch: a run count above ``runs_max`` (a target
+    for Blossom's search, which this reference search need not meet unless ``--strict-runs``), a check too large to
+    run, or a crash view the tool does not model. A case with a warning is reported as WARN, never as ok."""
+
+    def __init__(self):
+        self.raised = False
+
+
+def check_case(case: pathlib.Path, opts, warn: Warn):
     m = tomllib.loads((case / "manifest.toml").read_text())
     ld = m.get("expect_ldfi")
     lines = []
     ok = True
     if ld is not None:
         if ld.get("crash_view", "molly") != "molly":
-            return True, [f"skipped: crash_view {ld.get('crash_view')} is not modelled"]
+            warn.raised = True
+            return True, [f"not checked: crash_view {ld.get('crash_view')} is not modelled"]
         spec = Spec(ld["eot"], ld["eff"], ld["crashes"], tuple(ld["nodes"]))
         try:
             prog = load_program(case_files(case, m))
@@ -1631,6 +1641,7 @@ def check_case(case: pathlib.Path, opts):
                              f"{'' if good else '  MISMATCH'}")
             except TooLarge as e:
                 lines.append(f"exhaustive: {e}")
+                warn.raised = True
         try:
             # the search reductions a case lists are the ones it may rely on for its run count
             vac = "TEST-031" in m.get("features", [])
@@ -1641,11 +1652,14 @@ def check_case(case: pathlib.Path, opts):
             if "runs_max" in ld:
                 over = runs > ld["runs_max"]
                 note = f" runs_max={ld['runs_max']}" + (" (EXCEEDED)" if over else "")
-                if over and opts.strict_runs:
-                    ok = False
+                if over:
+                    warn.raised = True
+                    if opts.strict_runs:
+                        ok = False
             lines.append(f"ldfi{'+vacuity' if vac else ''}={v} runs={runs}{note}{'' if good else '  MISMATCH'}")
         except TooLarge as e:
             lines.append(f"ldfi: {e}")
+            warn.raised = True
             if "runs_max" in ld and opts.strict_runs:
                 ok = False
         if "falsifiers" in ld:
@@ -1658,6 +1672,7 @@ def check_case(case: pathlib.Path, opts):
                 lines.append("falsifiers match" if good else f"falsifiers DIFFER: got {got}")
             except TooLarge as e:
                 lines.append(f"falsifiers: {e}")
+                warn.raised = True
         lines.append(f"({wallclock.time() - t0:.1f}s)")
     exp = [x for x in m.get("expect", []) if "rel" in x]
     if exp and m.get("program", "").endswith(".ded") and "oracle" in m.get("backend", {}):
@@ -1712,19 +1727,31 @@ def check_oracle_expectations(case, m, exp):
     return (not bad), ("oracle expectations hold" if not bad else "oracle MISMATCH: " + "; ".join(bad[:6]))
 
 
+def display(case: pathlib.Path) -> str:
+    """The case's path relative to the LDFI corpus, or as given when it lies elsewhere."""
+    try:
+        return str(case.relative_to(CORPUS))
+    except ValueError:
+        return str(case)
+
+
 def cmd_check(a):
     cases = [pathlib.Path(c).resolve() for c in a.cases]
     if not cases:
         cases = sorted(p.parent for p in (CORPUS / "molly").rglob("manifest.toml"))
-    bad = 0
+    bad = warned = 0
     for case in cases:
+        warn = Warn()
         try:
-            ok, lines = check_case(case, a)
+            ok, lines = check_case(case, a, warn)
         except DedError as e:
             ok, lines = False, [f"error: {e}"]
         bad += 0 if ok else 1
-        print(f"{'ok ' if ok else 'BAD'} {case.relative_to(CORPUS)}: {'  '.join(lines)}", flush=True)
-    print(f"{len(cases)} cases, {bad} problems")
+        warned += 1 if ok and warn.raised else 0
+        status = "BAD " if not ok else "WARN" if warn.raised else "ok  "
+        print(f"{status} {display(case)}: {'  '.join(lines)}", flush=True)
+    print(f"{len(cases)} cases, {bad} problems, {warned} with warnings (a run count above runs_max, or a check too "
+          f"large to run; --strict-runs makes the first a problem)")
     return 1 if bad else 0
 
 

@@ -4,6 +4,7 @@
 //! `src/cmd/<name>.rs`, owned by the WP that implements it; global options and start-up live in `src/common/`.
 //! There is no `corpus` subcommand: the corpus runs through `cargo run -p xtask -- corpus` (PLAN §4 D8).
 
+#![deny(unsafe_op_in_unsafe_fn)]
 // A command-line tool reports on stdout and stderr.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 

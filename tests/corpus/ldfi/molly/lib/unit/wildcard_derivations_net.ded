@@ -1,16 +1,17 @@
 // The two derivations of wildcard_derivations.ded made observable to LDFI (BENCH-135, provenance counts): the two
-// proxy facts arrive from different nodes, so c(loc, 1) falls only when both messages are lost. The derivations
-// differ only in a column the rule writes as `_`; provenance that drops that column sees one derivation and needs an
-// extra run to find the other. Blossom golden corpus, derived (derived = true); see ../../README.md.
+// `stock` facts arrive from different shelves' nodes, so available(n, "pen") falls only when both messages are lost.
+// The derivations differ only in a column the rule writes as `_`; provenance that drops that column sees one
+// derivation and needs an extra run to find the other. Blossom golden corpus, re-derived (derived = true); see
+// ../../README.md.
 
-proxy(L, A, B)@async :- a(S, L, A, B);
-proxy(L, A, B)@next :- proxy(L, A, B);
-b(L, V)@next :- b(L, V);
-c(L, V) :- b(L, V), proxy(L, _, V);
+stock(N, Shelf, Item)@async :- report(Shelf, N, Item);
+stock(N, Shelf, Item)@next :- stock(N, Shelf, Item);
+wanted(N, Item)@next :- wanted(N, Item);
+available(N, Item) :- wanted(N, Item), stock(N, _, Item);
 
-pre(L, V) :- b(L, V);
-post(L, V) :- c(L, V);
+pre(N, Item) :- wanted(N, Item);
+post(N, Item) :- available(N, Item);
 
-a("px", "loc", "x", 1)@1;
-a("py", "loc", "y", 1)@1;
-b("loc", 1)@1;
+report("s1", "n", "pen")@1;
+report("s2", "n", "pen")@1;
+wanted("n", "pen")@1;

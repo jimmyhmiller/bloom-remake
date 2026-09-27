@@ -1,21 +1,20 @@
-// Molly's provenance unit test "aggregate rewrites don't affect grouping by including un-aggregated variables" (a
-// regression test; R06 §12.6, ProvenanceSuite): a and b each send a vote to M at time 1; vote_cnt(M, count<I>) groups
-// by M only, although the body also binds V, so vote_cnt(M, 2) holds from time 2 with two contributors, and each
-// vote's loss falsifies it. The program is the unit test's with a pre/post pair added. Blossom golden corpus,
-// transcribed from R06 (derived = true); see ../../README.md.
+// Aggregate grouping with an extra body variable (BENCH-135's grouping regression, `vote_cnt` 2 in Molly's provenance
+// suite, R06 §12.6), written for this corpus. The voters p and q each send their ballot to the teller t at time 1.
+// `turnout` groups by the teller only, although its body also binds the voter P, so turnout(t, 2) holds from time 2
+// with both ballots as contributors, and losing either ballot falsifies it. An implementation that also grouped by P
+// would derive turnout(t, 1) instead. Blossom golden corpus, re-derived (derived = true); see ../../README.md.
 
-vote(M, V)@next :- vote(M, V);
-member(M, V, I)@next :- member(M, V, I);
-vote(M, V)@async :- begin(V, M);
+ballot(T, P)@async :- cast(P, T);
+ballot(T, P)@next :- ballot(T, P);
+roster(T, P, Id)@next :- roster(T, P, Id);
 
-vote_cnt(M, count<I>) :- vote(M, V), member(M, V, I);
-good(M, I) :- vote_cnt(M, I);
+turnout(T, count<Id>) :- ballot(T, P), roster(T, P, Id);
 
-// pre: M's members; post: the member, provided both votes are counted in one group (vote_cnt(M, 2))
-pre(M, I) :- member(M, V, I);
-post(M, I) :- vote_cnt(M, N), member(M, V, I), N == 2;
+// pre: the teller's registered ids; post: each of them, once both ballots are counted in one group (turnout(t, 2))
+pre(T, Id) :- roster(T, P, Id);
+post(T, Id) :- turnout(T, N), roster(T, P, Id), N == 2;
 
-member("M", "a", 1)@1;
-member("M", "b", 2)@1;
-begin("a", "M")@1;
-begin("b", "M")@1;
+roster("t", "p", 1)@1;
+roster("t", "q", 2)@1;
+cast("p", "t")@1;
+cast("q", "t")@1;

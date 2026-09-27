@@ -9,6 +9,9 @@ publish.workspace = true
 [[bin]]
 name = "blossom"
 path = "src/main.rs"
+# The binary's output file would collide with the `blossom` facade crate's documentation (cargo#6313); the CLI is
+# documented by `blossom --help`, and its modules are private.
+doc = false
 
 # Every non-test crate (ARCHITECTURE §1.2), so each subcommand's WP only edits its own `src/cmd/<name>.rs`.
 [dependencies]

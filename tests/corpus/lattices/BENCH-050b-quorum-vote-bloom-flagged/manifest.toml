@@ -20,6 +20,7 @@ unimplemented = ["LANG-042", "LANG-100", "LANG-101", "LANG-153", "SEM-021", "ANA
 until = "M6"
 
 [expect_analysis]
-# One entry per ANA-022 point of order: `at` is the handler label or view name that contains it, `op` the surface
-# construct (a bang call or one of the keywords of LANGUAGE §13.2). The list is exact: no other point of order.
-points_of_order = [{ at = "cnt", op = "count!" }]
+# One site per ANA-022 point of order: `at` is the handler label or view name that contains it, `op` the surface
+# construct (a bang call or one of the keywords of LANGUAGE §13.2). `complete` makes the list exact: no other point
+# of order.
+points_of_order = { complete = true, sites = [{ at = "cnt", op = "count!" }] }

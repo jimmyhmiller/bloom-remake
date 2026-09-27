@@ -6,8 +6,9 @@
 //! canonically, ARCHITECTURE §2.10).
 //!
 //! Lookups never panic: [`IndexVec::get`] returns an `Option`, and [`IndexVec::get_or_bug`] turns a missing id into
-//! an [`InternalError`](crate::InternalError) located at the caller, for code where a missing id is a violated
-//! invariant.
+//! an [`InternalError`] located at the caller, for code where a missing id is a violated invariant.
+//!
+//! [`define_idx!`]: crate::define_idx
 
 use std::fmt;
 use std::hash::Hash;

@@ -52,8 +52,8 @@ pub enum Value {
     Principal(Arc<str>),
     /// `Node` / `Node<R>`.
     Node(NodeId),
-    /// A tuple (at least one element; `()` is [`Value::Unit`]).
-    Tuple(Arc<[Value]>),
+    /// A tuple (at least one element; `()` is [`Value::Unit`], and deserialization rejects an empty tuple).
+    Tuple(#[serde(deserialize_with = "serde_util::nonempty_tuple::deserialize")] Arc<[Value]>),
     /// A struct: its fields in declaration order.
     Struct(Arc<[Value]>),
     /// An enum value: the variant's stable number (`#n`) and its payload fields.
@@ -335,9 +335,15 @@ impl Value {
         Value::Int(IntValue::U32(n))
     }
 
-    /// A tuple.
+    /// A tuple of `items`. No items make the empty tuple `()`, which is [`Value::Unit`]: a [`Value::Tuple`] always
+    /// has at least one element, so every value has one representation.
     pub fn tuple(items: impl IntoIterator<Item = Value>) -> Value {
-        Value::Tuple(items.into_iter().collect())
+        let items: Arc<[Value]> = items.into_iter().collect();
+        if items.is_empty() {
+            Value::Unit
+        } else {
+            Value::Tuple(items)
+        }
     }
 
     /// A struct from its fields in declaration order.
@@ -445,6 +451,20 @@ mod tests {
         let map = r#"{"Map":[["Unit",{"Bool":true}],["Unit",{"Bool":false}]]}"#;
         assert!(serde_json::from_str::<Value>(map).is_err());
         assert!(serde_json::from_str::<Value>(r#"{"Map":[["Unit",{"Bool":true}]]}"#).is_ok());
+    }
+
+    #[test]
+    fn value_serde_rejects_empty_tuple() {
+        // `()` has one representation, Unit; an empty Tuple would be a second one.
+        assert!(serde_json::from_str::<Value>(r#"{"Tuple":[]}"#).is_err());
+        assert_eq!(
+            serde_json::from_str::<Value>(r#"{"Tuple":["Unit"]}"#).unwrap(),
+            Value::tuple([Value::Unit])
+        );
+        let empty = postcard::to_allocvec(&Value::Tuple(Arc::from([]))).unwrap();
+        assert!(postcard::from_bytes::<Value>(&empty).is_err());
+        assert_eq!(Value::tuple([]), Value::Unit);
+        assert!(matches!(Value::tuple([Value::u64(1)]), Value::Tuple(items) if items.len() == 1));
     }
 
     #[test]

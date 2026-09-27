@@ -30,3 +30,11 @@ Anything deferred, with the FEATURES id and the reason.
 
 Each `## Bugs` item becomes a row of `docs/plan/BUGS.md` (the crate is the leading backticked name); each
 `## New dependencies` row is appended to `docs/design/DEPENDENCIES.md`.
+
+- An item is a top-level `- …` or `1. …` line; indented lines continue it, also across blank lines, so an item may
+  hold nested lists and paragraphs. Unindented text between items is prose and is not collected.
+- Every item starts with its owner: the crate whose next owning WP must fix or defer it (PLAN §2.1), also for a
+  problem in a normative document (name the crate of the WP that has to settle it, and say which document).
+- An item's source id is its position (`M3.3#2`), so a notes file is append-only once a gate has collected it.
+- `scripts/collect-notes.sh` refuses, and changes nothing, when a `## Bugs` section has text but no item, when an
+  item lacks its owner, or when a collected item's text no longer matches its row.

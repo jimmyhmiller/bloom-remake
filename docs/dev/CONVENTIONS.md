@@ -157,6 +157,8 @@ Most rules are enforced mechanically: `clippy.toml` and `[workspace.lints]`, `ca
 ## 9. Recording bugs
 
 A bug in code you do not own goes under `## Bugs` in your notes as `` - `crate-name`: summary. Reproducer: … ``;
-the gate copies it into `docs/plan/BUGS.md`. If it blocks you and the path is owned by no WP of your milestone, make
+the gate copies it into `docs/plan/BUGS.md`. Every item names its owner crate first, also for a problem in a
+normative document (the crate of the WP that must settle it), and a collected item is never edited or reordered
+(`docs/plan/notes/README.md`); `scripts/collect-notes.sh` stops the gate otherwise. If it blocks you and the path is owned by no WP of your milestone, make
 the minimal fix, list it under `## Out-of-scope fixes` and add a regression test; if a sibling WP owns it, do not
 touch it (PLAN §2.7).

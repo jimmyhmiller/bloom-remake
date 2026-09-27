@@ -4,10 +4,11 @@
 //!    ARCHITECTURE §0.3 amendments: the same codes, severities, meanings and origins.
 //! 2. Every `BLS[R]?nnn[n]` written in `crates/*/src` (a string literal, including inside macros and attributes, or
 //!    an identifier) is registered — test code included.
-//! 3. Outside test code (`#[cfg(test)]`, `#[test]`), a code is written only in its owning crate or a crate the
-//!    registry allows. The registry itself (`crates/blossom-base/src/codes.rs`) is exempt.
+//! 3. Outside test code (`#[cfg(test)]`, `#[test]`, and the files of test-only modules declared as
+//!    `#[cfg(test)] mod name;`), a code is written only in its owning crate or a crate the registry allows. The
+//!    registry itself (`crates/blossom-base/src/codes.rs`) is exempt.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -435,6 +436,7 @@ fn scan_sources(root: &Path) -> Result<(Vec<Occurrence>, usize), String> {
     let mut files = 0;
     for dir in dirs {
         let crate_name = package_name(&dir)?;
+        let mut scanned = Vec::new();
         for file in util::rust_files(&dir.join("src")).map_err(|e| format!("cannot list {}: {e}", dir.display()))? {
             files += 1;
             if file == registry_file {
@@ -442,15 +444,59 @@ fn scan_sources(root: &Path) -> Result<(Vec<Occurrence>, usize), String> {
             }
             let shown = util::display_relative(&file, root);
             let text = std::fs::read_to_string(&file).map_err(|e| format!("cannot read {shown}: {e}"))?;
-            out.extend(occurrences_in(&crate_name, &shown, &text)?);
+            let s = rustsrc::scan(&text).map_err(|e| format!("{shown}: cannot parse: {e}"))?;
+            scanned.push((file, shown, s));
+        }
+        let test_files = test_module_files(&scanned);
+        for (file, shown, s) in scanned {
+            out.extend(occurrences(&crate_name, &shown, s, test_files.contains(&file)));
         }
     }
     Ok((out, files))
 }
 
-/// The code occurrences in one file.
-pub fn occurrences_in(crate_name: &str, file: &str, text: &str) -> Result<Vec<Occurrence>, String> {
-    let scanned = rustsrc::scan(text).map_err(|e| format!("{file}: cannot parse: {e}"))?;
+/// The files that hold test-only modules: those declared by `#[cfg(test)] mod name;` (or by an out-of-line `mod`
+/// inside test code), and every module file declared from one of them, to a fixpoint. A module `name` declared in
+/// `dir/lib.rs`, `dir/main.rs` or `dir/mod.rs` lives in `dir/name.rs` or `dir/name/mod.rs`; one declared in
+/// `dir/file.rs` lives below `dir/file/`; a `#[path]` attribute names the file relative to the declaring file's
+/// directory.
+fn test_module_files(scanned: &[(PathBuf, String, rustsrc::Scanned)]) -> BTreeSet<PathBuf> {
+    let children = |file: &Path, decl: &rustsrc::ModDecl| -> Vec<PathBuf> {
+        let Some(parent) = file.parent() else { return Vec::new() };
+        if let Some(path) = &decl.path {
+            return vec![parent.join(path)];
+        }
+        let is_root = file
+            .file_name()
+            .is_some_and(|n| n == "lib.rs" || n == "main.rs" || n == "mod.rs");
+        let base = match (is_root, file.file_stem()) {
+            (true, _) | (false, None) => parent.to_path_buf(),
+            (false, Some(stem)) => parent.join(stem),
+        };
+        vec![
+            base.join(format!("{}.rs", decl.name)),
+            base.join(&decl.name).join("mod.rs"),
+        ]
+    };
+    let mut test_files = BTreeSet::new();
+    loop {
+        let before = test_files.len();
+        for (file, _, s) in scanned {
+            let file_is_test = test_files.contains(file);
+            for decl in &s.mods {
+                if decl.in_test || file_is_test {
+                    test_files.extend(children(file, decl));
+                }
+            }
+        }
+        if test_files.len() == before {
+            return test_files;
+        }
+    }
+}
+
+/// The code occurrences of one scanned file; `test_file` marks every one as test code.
+fn occurrences(crate_name: &str, file: &str, scanned: rustsrc::Scanned, test_file: bool) -> Vec<Occurrence> {
     let mut out = Vec::new();
     for token in scanned.tokens {
         for code in find_codes(&token.text) {
@@ -459,11 +505,11 @@ pub fn occurrences_in(crate_name: &str, file: &str, text: &str) -> Result<Vec<Oc
                 file: file.to_string(),
                 line: token.line,
                 code,
-                in_test: token.in_test,
+                in_test: test_file || token.in_test,
             });
         }
     }
-    Ok(out)
+    out
 }
 
 /// Unregistered codes anywhere, and codes constructed outside their owners in non-test code.
@@ -607,7 +653,12 @@ mod tests {
         let src = "/// BLS0502 in docs is fine\nfn f() { let _ = code!(\"BLS0502\"); }\n\
                    #[derive(thiserror::Error)] enum E { #[error(\"BLSR001 key\")] K }\n\
                    fn g() { let _ = \"BLS0510\"; }\n#[cfg(test)] mod t { fn h() { let _ = \"BLS0200\"; let _ = \"BLS9999\"; } }";
-        let occ = occurrences_in("blossom-front", "crates/blossom-front/src/x.rs", src).unwrap();
+        let occ = occurrences(
+            "blossom-front",
+            "crates/blossom-front/src/x.rs",
+            rustsrc::scan(src).unwrap(),
+            false,
+        );
         let findings = check_occurrences(&occ, REGISTRY);
         let joined = findings.join("\n");
         assert!(
@@ -628,6 +679,29 @@ mod tests {
             "test code may mention other crates' codes: {joined}"
         );
         assert_eq!(findings.len(), 4, "{joined}");
+    }
+
+    #[test]
+    fn check_codes_test_module_files() {
+        let file = |path: &str, src: &str| (PathBuf::from(path), path.to_string(), rustsrc::scan(src).unwrap());
+        let scanned = vec![
+            file("/c/src/lib.rs", "#[cfg(test)] mod tests; mod a;"),
+            file("/c/src/tests.rs", "mod helpers; fn t() { let _ = \"BLS0502\"; }"),
+            file("/c/src/tests/helpers.rs", "fn h() {}"),
+            file("/c/src/a.rs", "#[cfg(test)] #[path = \"a_tests.rs\"] mod t; mod b;"),
+            file("/c/src/a/b.rs", "fn b() {}"),
+        ];
+        let tests = test_module_files(&scanned);
+        for yes in ["/c/src/tests.rs", "/c/src/tests/helpers.rs", "/c/src/a_tests.rs"] {
+            assert!(tests.contains(Path::new(yes)), "{yes} in {tests:?}");
+        }
+        for no in ["/c/src/lib.rs", "/c/src/a.rs", "/c/src/a/b.rs"] {
+            assert!(!tests.contains(Path::new(no)), "{no} in {tests:?}");
+        }
+        let (path, shown, s) = scanned.into_iter().nth(1).unwrap();
+        let occ = occurrences("blossom-front", &shown, s, tests.contains(&path));
+        assert!(occ.iter().all(|o| o.in_test && o.code == "BLS0502"), "{occ:?}");
+        assert!(check_occurrences(&occ, REGISTRY).is_empty());
     }
 
     #[test]

@@ -11,6 +11,9 @@
 //!
 //! Every crate's error enum wraps both: `#[error(transparent)] Unimplemented(#[from] Unimplemented)` and
 //! `#[error(transparent)] Internal(#[from] InternalError)`.
+//!
+//! [`unimplemented_feature!`]: crate::unimplemented_feature
+//! [`bug!`]: crate::bug
 
 use std::backtrace::Backtrace;
 use std::ffi::OsStr;
@@ -156,7 +159,8 @@ macro_rules! unimplemented_feature {
     };
 }
 
-/// Evaluates to an [`Unimplemented`] error (the expression form of [`unimplemented_feature!`]).
+/// Evaluates to an [`Unimplemented`] error (the expression form of
+/// [`unimplemented_feature!`](crate::unimplemented_feature)).
 #[macro_export]
 macro_rules! unimplemented_error {
     ($feature:literal, $($fmt:tt)*) => {
@@ -271,7 +275,7 @@ macro_rules! bug {
     };
 }
 
-/// Evaluates to an [`InternalError`] (the expression form of [`bug!`]), with the same panic policy.
+/// Evaluates to an [`InternalError`] (the expression form of [`bug!`](crate::bug)), with the same panic policy.
 ///
 /// Useful where a value is needed: `map.get(&k).ok_or_else(|| internal_error!("{k:?} was registered"))?`.
 #[macro_export]
