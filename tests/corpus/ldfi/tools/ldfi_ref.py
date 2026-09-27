@@ -11,10 +11,13 @@ surface months later as a phantom failure of the LDFI work package. This tool ch
 * ``exhaustive``: the ground-truth verdict over *every* admissible fault schedule of the failure spec, with exact state
   merging per time step (feasible for most corpus configurations);
 * ``ldfi``: a lineage-driven search implementing the core algorithm of ARCHITECTURE §8.3-§8.5 (hazard antichains,
-  minimal models under the crash-order encoding, seeded hypotheses, a (fault count, canonical order) queue, an
-  explored set, Molly's oracle). It reports the verdict and the number of runs, which is compared with ``runs_max``;
+  minimal models under the crash-order encoding, seeded hypotheses, a queue ordered by fault count, then removed
+  clock facts, then labels, an explored set, Molly's oracle), with a hazard for the crash oracle and, on request,
+  TEST-031 vacuity pruning, the TEST-025 parity filter or no negative support. It reports the verdict and the number
+  of runs, which is compared with ``runs_max``;
 * ``falsifiers``: the Appendix-B-minimal falsifier sets of the failure-free run's post goals, by exhaustive enumeration,
-  compared with ``falsifiers`` where a manifest states them.
+  compared with ``falsifiers`` where a manifest states them;
+* ``oracle``: the failure-free run of a ``[backend.oracle]`` case, compared with its ``[[expect]]`` rows.
 
 It is a validation aid for corpus authors and for the triage work packages. It is not part of Blossom, nothing in the
 corpus is derived from its output, and it never decides an expectation: a disagreement means the program or the tool
@@ -22,13 +25,16 @@ is wrong, and the literature decides which.
 
 Semantics (R06 §3.2-§3.7, ARCHITECTURE §8.1 and §13.12, CR-13, CR-21, CR-22, CR-30, CR-31)
 --------------------------------------------------------------------------------------
-* Molly's dialect: ``include``, facts ``p(..)@k``, rules with ``@next`` / ``@async`` heads, ``notin``, absolute-time body
-  atoms ``p(..)@k``, head aggregates ``count``/``min``/``max``/``sum``, right-nested precedence-free expressions, and
-  ``//``, ``/* */`` and ``#`` comments. ``include`` resolves relative to the including file.
+* Molly's dialect: ``include``, facts ``p(..)@k``, rules with ``@next`` / ``@async`` heads, ``notin``,
+  absolute-time body atoms ``p(..)@k``, head aggregates ``count``/``min``/``max``/``sum``, right-nested
+  precedence-free expressions, and ``//``, ``/* */`` and ``#`` comments. ``include`` resolves relative to the
+  including file.
 * Time runs 1..EOT (Molly round k is tick k). A fact ``p(..)@k`` holds at time k only. Deductive rules fire at t;
   ``@next`` heads hold at t+1 on the same node; ``@async`` heads are delivered to the head's first column at t+1.
 * A rule fires only when its location (the first column of its first body predicate) is one of the nodes (Molly's
-  clock guard). An ``@async`` rule fires only when its destination is a node, and its sender is up or sends to itself.
+  clock guard); a ``_`` there matches any clock, so the rule is not guarded. An ``@async`` rule fires only when its
+  destination is a node, and its sender is up or sends to itself. An aggregate is computed at its head's first
+  column (the second rule of Molly's split), so a group whose first column is not a node yields nothing.
 * Each time step evaluates the deductive rules stratum by stratum (temporal stratification, SEM-020). An aggregate
   groups by its non-aggregate head columns and ranges over the distinct valuations of the group columns and the
   aggregated variable (Molly's split rewrite, LANGUAGE §10.1); an empty group yields no row.
@@ -42,7 +48,9 @@ Semantics (R06 §3.2-§3.7, ARCHITECTURE §8.1 and §13.12, CR-13, CR-21, CR-22,
   a message leaf (f,t,s) is O(f,t,s) when admissible, or K(f,s) ("f crashed at or before s"); an EDB fact, a ``crash``
   fact and a self-send are unfalsifiable (CR-22); a negated premise gets conservative negative support (CR-31): the OR
   of the hazards of every fact whose relation reaches the negated relation, at an earlier time or at the same time
-  along a purely deductive path; an aggregate depends on every contributor (Molly's conjunctive encoding).
+  along a purely deductive path; an aggregate depends on every contributor (Molly's conjunctive encoding);
+  ``notin crash(_, N, _)`` is falsified by crashing N at EOT-1 (ARCHITECTURE §8.3 has no row for the oracle; without
+  this the Kafka durability violation is unreachable by lineage).
 * Minimality of falsifiers (ARCHITECTURE §8.3): fault sets are compared by the set of clock facts they remove; a crash
   C(n,c) removes n's outgoing clocks at every time >= c.
 
@@ -51,7 +59,7 @@ Usage
   ldfi_ref.py run FILE --eot N --eff N --crashes N --nodes a,b,c [--omit a:b:1,...] [--crash a:2,...] [--dump]
   ldfi_ref.py verdict FILE --eot N --eff N --crashes N --nodes a,b,c [--mode exhaustive|ldfi|both] [--find-all]
   ldfi_ref.py falsifiers FILE --eot N --eff N --crashes N --nodes a,b,c
-  ldfi_ref.py check [CASE_DIR ...] [--skip-exhaustive-over N] [--falsifiers]   # manifests under tests/corpus/ldfi
+  ldfi_ref.py check [CASE_DIR ...] [--no-exhaustive] [--max-states N] [--max-runs N] [--strict-runs]
   ldfi_ref.py selftest
 
 Standard library only (Python >= 3.11).
@@ -412,15 +420,16 @@ def validate(prog: Program):
         if loc is None or isinstance(loc, (BinOp, Agg)):
             raise DedError(f"{r.where}: the first column of the first body predicate is the rule's location")
         if isinstance(loc, Wild) and r.kind == "async":
-            raise DedError(f"{r.where}: an @async rule needs a located sender (its first body predicate starts with `_`)")
+            raise DedError(f"{r.where}: an @async rule needs a located sender "
+                           f"(its first body predicate starts with `_`)")
         pos = set()
         for a in r.atoms:
             if not a.negated:
                 pos |= atom_vars(a)
         for a in r.atoms:
             if a.negated and not atom_vars(a) <= pos:
-                raise DedError(f"{r.where}: variables {sorted(atom_vars(a) - pos)} of `notin {a.rel}` are not bound by a "
-                               f"positive predicate")
+                raise DedError(f"{r.where}: variables {sorted(atom_vars(a) - pos)} of `notin {a.rel}` are not "
+                               f"bound by a positive predicate")
         for q in r.quals:
             if not expr_vars(q) <= pos:
                 raise DedError(f"{r.where}: unbound variable in a qualifier")
@@ -980,7 +989,8 @@ class Evaluator:
                     continue
                 tup = self.head_tuple(r, env)
                 if tup[0] not in self.nodes:
-                    raise DedError(f"{r.where}: @async to {tup[0]!r}, which is not a node ({', '.join(self.spec.nodes)})")
+                    raise DedError(f"{r.where}: @async to {tup[0]!r}, which is not a node "
+                                   f"({', '.join(self.spec.nodes)})")
                 sends.append((loc, tup[0], r.head.rel, tup))
         return model, sends, inductive
 

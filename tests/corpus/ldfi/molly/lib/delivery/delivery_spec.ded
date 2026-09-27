@@ -16,7 +16,8 @@
 // Keeping post monotone means the outcome lineage is exactly the lineage of `log`, which is what the paper's game
 // (§3, Figures 4-7) reasons about, and conservative negative support (CR-31) has nothing to add for the negation-free
 // protocols of the family. With `notin missing_log` in post, every log fact at every earlier time becomes a possible
-// cause of the negated goal, which is not what the published run counts (Figures 12-13, BENCH-136) measured.
+// cause of the negated goal, and the hypotheses grow far beyond the published run counts (Figures 12-13, BENCH-136),
+// which a search without negative support reproduces exactly on this family.
 // A case with Figure 3 verbatim (fig3_spec.ded) keeps that negative-support path under test.
 
 pre(N, P) :- log(M, P), node(M, N), notin bcast(M, P)@1, notin crash(M, M, _);

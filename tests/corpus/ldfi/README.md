@@ -143,10 +143,10 @@ EOT/EFF/crashes are the failure spec; "derived" says whether the program is re-d
 | `BENCH-134g-nemo-ca-2434-7-5-1` | no | ldfi | 7/5/1 | CE | M8 |
 | `BENCH-134h-nemo-mr-3858-8-4-1` | no | ldfi | 8/4/1 | CE | M8 |
 | `BENCH-135a-netflix-toy-3-0-2` | yes | ldfi | 3/0/2 | CE, 2 falsifier sets | M8 |
-| `BENCH-135b-ldfi-4-3-formula-4-3-1` | yes | ldfi | 4/3/1 | CE, 1 falsifier set | M8 |
-| `BENCH-135c-ldfi-4-3-formula-4-2-1` | yes | ldfi | 4/2/1 | CE, 1 falsifier set | M8 |
-| `BENCH-135d-ldfi-4-3-formula-4-0-1` | yes | ldfi | 4/0/1 | no CE, 0 falsifier sets | M8 |
-| `BENCH-135e-ldfi-4-3-formula-4-0-2` | yes | ldfi | 4/0/2 | CE, 1 falsifier set | M8 |
+| `BENCH-135b-two-proofs-formula-4-3-1` | yes | ldfi | 4/3/1 | CE, 1 falsifier set | M8 |
+| `BENCH-135c-two-proofs-formula-4-2-1` | yes | ldfi | 4/2/1 | CE, 1 falsifier set | M8 |
+| `BENCH-135d-two-proofs-formula-4-0-1` | yes | ldfi | 4/0/1 | no CE, 0 falsifier sets | M8 |
+| `BENCH-135e-two-proofs-formula-4-0-2` | yes | ldfi | 4/0/2 | CE, 1 falsifier set | M8 |
 | `BENCH-135f-provenance-join-firings` | yes | oracle | — | 2 row expectations | M5 |
 | `BENCH-135g-provenance-join-firings-lineage-3-2-0` | yes | ldfi | 3/2/0 | CE, runs ≤ 2, 1 falsifier set | M8 |
 | `BENCH-135h-provenance-wildcard-derivations` | yes | oracle | — | 2 row expectations | M5 |

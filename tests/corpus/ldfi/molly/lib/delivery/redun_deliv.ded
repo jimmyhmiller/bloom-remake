@@ -3,10 +3,11 @@
 // Re-derived (derived = true). §3.1.3 adds `bcast(N, P)@next :- log(N, P);` to retry-deliv, which relays one step
 // after the entry arrives; Figure 6's highlighted support `O(A,C,1) v O(C,B,2)` shows C relaying at the step it
 // received the entry, and with the one-step delay the program has a counterexample at EOT 11 / EFF 10 / 1 crash,
-// where Figure 13 certifies redun-deliv. The relay therefore reads `log` directly (same step), as Figure 6 draws it.
+// where Figure 13 certifies redun-deliv. The relay therefore reads `log` directly (same step), as Figure 6 draws it:
+// Figure 2's send rule with the holder of a log entry in place of the broadcaster.
 // Blossom golden corpus; see ../../README.md.
 
 log(Node, Pload) :- bcast(Node, Pload);
 node(Node, Neighbor)@next :- node(Node, Neighbor);
 log(Node, Pload)@next :- log(Node, Pload);
-log(Node2, Pload)@async :- log(Node1, Pload), node(Node1, Node2);
+log(Other, Pload)@async :- log(Holder, Pload), node(Holder, Other);
