@@ -1,0 +1,28 @@
+# BENCH-093 (R03 T28; R05 T12): CIDR'11 golden analysis of the disorderly cart.
+#
+# CIDR §5.4, Figure 17: "communication (via action_msg) between client and server, and among server replicas,
+# crosses no points of order ... However, there are points of order upon the appearance of checkout_msg messages,
+# which must be joined with an action_cnt aggregate over the set of updates. Additionally, using the accum aggregate
+# adds a point of order to the end of the dataflow, between status and response_msg." FEATURES BENCH-093: "points of
+# order only at the checkout join and at accum".
+#
+# The complete list of negative edges: the count aggregate cart_action -> action_cnt (the summary joined at checkout),
+# the negation action_cnt -> status (an added item that was never deleted), and the accumulating aggregate status ->
+# response_msg. Actions and their replication reach cart_action through positive edges only.
+schema = 1
+id = "BENCH-093"
+title = "CIDR'11 disorderly cart: points of order only at checkout and at accum; actions cross none"
+priority = "P0"
+source = "R03 T28 and §5.3; R05 T12; CIDR 2011 Figures 11, 12, 14, 16 and 17"
+features = ["LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-088", "LANG-100", "LANG-102", "LANG-150", "LANG-190", "SEM-021", "ANA-022"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-088", "LANG-100", "LANG-102", "LANG-150", "LANG-190", "SEM-021", "ANA-022"]
+until = "M5"
+
+[expect_analysis]
+points_of_order = { complete = true, edges = [{ from = "cart_action", to = "action_cnt", kind = "aggregate" }, { from = "action_cnt", to = "status", kind = "negation" }, { from = "status", to = "response_msg", kind = "aggregate" }], clusters = [], free = [{ from = "action_msg", to = "cart_action" }, { from = "replica_action", to = "cart_action" }], crossing = [{ from = "checkout_msg", to = "response_msg" }] }

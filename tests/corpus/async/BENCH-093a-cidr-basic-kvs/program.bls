@@ -1,0 +1,36 @@
+//! BENCH-093: the single-node key-value store of "Consistency Analysis in Bloom: a CALM and Collected Approach"
+//! (Alvaro, Conway, Hellerstein, Marczak, CIDR 2011), Figures 4 and 5, ported statement by statement.
+//!
+//! An overwrite is a deletion of the old pair and an insertion of the new one, both at the next tick; `prev` joins the
+//! store with the incoming puts to find the pairs to delete.
+
+program basic_kvs version 1;
+
+/// Figure 4, KVSProtocol.
+input kvput(client: String, key: String, reqid: u64, value: String);
+input kvget(reqid: u64, key: String);
+output kvget_response(reqid: u64, key: String, value: String);
+
+/// Figure 5, BasicKVS: `table :kvstate, ['key'], ['value']`.
+table kvstate(key: String, value: String) key(key);
+
+/// `kvstate <+ kvput.map{|p| [p.key, p.value]}`.
+put_new: on kvput(_, k, _, v) {
+    next kvstate(k, v);
+}
+
+/// `prev = join [kvstate, kvput], [kvstate.key, kvput.key]`.
+view prev(k, v) = kvstate(k, v), kvput(_, k, _, _);
+
+/// `kvstate <- prev.map{|b, p| b}`.
+put_old: on prev(k, v) {
+    delete kvstate(k, v);
+}
+
+/// `getj = join [kvget, kvstate], [kvget.key, kvstate.key]`.
+view getj(r, k, v) = kvget(r, k), kvstate(k, v);
+
+/// `kvget_response <= getj.map do |g, t| [g.reqid, t.key, t.value] end`.
+get: on getj(r, k, v) {
+    emit kvget_response(r, k, v);
+}

@@ -1,0 +1,25 @@
+# BENCH-093 (R03 T30; R05 T12): ReplicatedKVS reports underspecification until multicast and membership are mixed in.
+#
+# CIDR §4.5 and Figure 9 mark a dataflow with no implementation as underspecified ("??"); R03 T30: "ReplicatedKVS
+# alone warns my_id, add_member, send_mcast (input) and mcast_done (output) as underspecified". ANA-008 reports
+# relations nobody reads, outputs nobody writes and rules that can never fire as BLS1002. Here `mcast_send` is written
+# and never read, and `add_member` is never read, so the analysis warns (at least one BLS1002; the exact set depends
+# on how ANA-008 groups its reports, see docs/plan/notes/M1.4.md).
+schema = 1
+id = "BENCH-093"
+title = "CIDR'11 ReplicatedKVS without multicast and membership: underspecified (BLS1002)"
+priority = "P0"
+source = "R03 T30 and §5.5(a); R05 T12; CIDR 2011 §4.5, Figures 6 and 9; bud-sandbox kvs/kvs.rb"
+features = ["LANG-040", "LANG-041", "LANG-043", "LANG-060", "LANG-063", "LANG-064", "LANG-082", "LANG-108", "ANA-008"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-041", "LANG-043", "LANG-060", "LANG-063", "LANG-064", "LANG-082", "LANG-108", "ANA-008"]
+until = "M6"
+
+[[expect_diag]]
+code = "BLS1002"
+severity = "warning"

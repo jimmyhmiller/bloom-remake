@@ -1,0 +1,78 @@
+//! BENCH-093: the "disorderly" shopping cart of CIDR 2011 (Figures 11, 12 and 14, with the best-effort replication of
+//! the complete program analysed in Figure 17), ported statement by statement.
+//!
+//! Actions accumulate in a set, replicated to the other server replicas, and are summarized only at checkout: an
+//! aggregate counts each item's adds and deletes, and the reply accumulates the items of the session. The figure
+//! spells the actions both "Add"/"Del" and "A"/"D"; this port uses "Add" and "Del" throughout.
+
+program disorderly_cart version 1;
+
+/// Figure 11, CartProtocol: the client/server channels.
+channel action_msg(@server: Node, client: Node, session: u64, reqid: u64, item: String, action: String);
+channel checkout_msg(@server: Node, client: Node, session: u64, reqid: u64);
+channel response_msg(@client: Node, server: Node, session: u64, contents: Vec<String>);
+
+/// Figure 11, CartClientProtocol: the client's interface.
+input client_action(server: Node, session: u64, reqid: u64, item: String, action: String);
+input client_checkout(server: Node, session: u64, reqid: u64);
+output client_response(client: Node, server: Node, session: u64, contents: Vec<String>);
+
+// ---- Figure 12, CartClient
+
+act: on client_action(s, sess, r, item, a) {
+    send action_msg(s, self, sess, r, item, a);
+}
+
+check_out: on client_checkout(s, sess, r) {
+    send checkout_msg(s, self, sess, r);
+}
+
+answer: on response_msg(c, s, sess, contents) {
+    emit client_response(c, s, sess, contents);
+}
+
+// ---- Figure 14, DisorderlyCart
+
+table cart_action(session: u64, item: String, action: String, reqid: u64);
+scratch status(server: Node, client: Node, session: u64, item: String, cnt: i64);
+
+/// `cart_action <= action_msg.map{|c| [c.session, c.item, c.action, c.reqid]}`.
+do_action: on action_msg(_, _, sess, r, item, a) {
+    emit cart_action(sess, item, a, r);
+}
+
+/// `action_cnt <= cart_action.group([session, item, action], count(reqid))`.
+view action_cnt(session, item, action, cnt = count!(reqid)) = cart_action(session, item, action, reqid);
+
+/// `status <= join([action_cnt, checkout_msg])`: items added and never deleted.
+added_only: on checkout_msg(srv, c, sess, _), action_cnt(sess, item, "Add", n), not action_cnt(sess, item, "Del", _) {
+    emit status(srv, c, sess, item, n as i64);
+}
+
+/// `status <= join([action_cnt, action_cnt, checkout_msg])`: adds minus deletes.
+netted: on checkout_msg(srv, c, sess, _), action_cnt(sess, item, "Add", n_add), action_cnt(sess, item, "Del", n_del) {
+    emit status(srv, c, sess, item, (n_add as i64) - (n_del as i64));
+}
+
+/// `response_msg <~ status.group([client, server, session], accum(cnt.times.map{item}))`: each item repeated `cnt`
+/// times.
+reply: on status(srv, c, sess, item, cnt), i in 0..cnt {
+    send response_msg(c, srv, sess, collect!(item by (item, i)));
+}
+
+// ---- replication of cart_action among the server replicas (Figure 17, best-effort multicast)
+
+/// The server replicas; supplied as facts.
+static replica(n: Node);
+fact replica("S1");
+fact replica("S2");
+
+channel replica_action(session: u64, item: String, action: String, reqid: u64);
+
+replicate: on action_msg(_, _, sess, r, item, a), replica(p) where p != self {
+    send replica_action(sess, item, a, r) to p;
+}
+
+absorb: on replica_action(sess, item, a, r) {
+    emit cart_action(sess, item, a, r);
+}

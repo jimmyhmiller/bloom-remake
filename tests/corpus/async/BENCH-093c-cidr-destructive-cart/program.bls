@@ -1,0 +1,116 @@
+//! BENCH-093: the "destructive" shopping cart of CIDR 2011 (Figures 11, 12 and 13) on the replicated key-value store
+//! of Figures 5 and 6, ported statement by statement, flattened into one module as Bud's mixins are.
+//!
+//! Each action reads the session's cart from the store, and writes back a new value: the item pushed onto the list,
+//! or one occurrence of it removed. The store overwrites by deleting the old pair and inserting the new one, and
+//! every put is replicated to the other replicas. The figure spells the actions both "Add"/"Del" and "A"/"D"; this
+//! port uses "Add" and "Del". The cart writes the store's kvput and kvget, so those are scratch relations here.
+
+program destructive_cart version 1;
+
+/// Figure 11, CartProtocol and CartClientProtocol.
+channel action_msg(@server: Node, client: Node, session: u64, reqid: u64, item: String, action: String);
+channel checkout_msg(@server: Node, client: Node, session: u64, reqid: u64);
+channel response_msg(@client: Node, server: Node, session: u64, contents: Vec<String>);
+input client_action(server: Node, session: u64, reqid: u64, item: String, action: String);
+input client_checkout(server: Node, session: u64, reqid: u64);
+output client_response(client: Node, server: Node, session: u64, contents: Vec<String>);
+
+/// Removes the first occurrence of `item` (the paper's `delete_one`).
+fn delete_one(items: Vec<String>, item: String) -> Vec<String> {
+    items.fold((false, []), |acc, x| if not acc.0 && x == item { (true, acc.1) } else { (acc.0, acc.1.push(x)) }).1
+}
+
+// ---- Figure 12, CartClient
+
+act: on client_action(s, sess, r, item, a) {
+    send action_msg(s, self, sess, r, item, a);
+}
+
+check_out: on client_checkout(s, sess, r) {
+    send checkout_msg(s, self, sess, r);
+}
+
+answer: on response_msg(c, s, sess, contents) {
+    emit client_response(c, s, sess, contents);
+}
+
+// ---- Figures 4 and 5: the store (kvput overwrites a key: delete the old pair, insert the new one)
+
+scratch kvput(client: Node, key: u64, reqid: u64, value: Vec<String>);
+scratch kvget(reqid: u64, key: u64);
+scratch kvget_response(reqid: u64, key: u64, value: Vec<String>);
+table kvstate(key: u64, value: Vec<String>) key(key);
+
+put_new: on kvput(_, k, _, v) {
+    next kvstate(k, v);
+}
+
+view prev(k, v) = kvstate(k, v), kvput(_, k, _, _);
+
+put_old: on prev(k, v) {
+    delete kvstate(k, v);
+}
+
+view getj(r, k, v) = kvget(r, k), kvstate(k, v);
+
+get: on getj(r, k, v) {
+    emit kvget_response(r, k, v);
+}
+
+// ---- Figure 6, ReplicatedKVS: every put of the cart is applied here and at every other replica
+
+static replica(n: Node);
+fact replica("S1");
+fact replica("S2");
+
+scratch cart_put(client: Node, key: u64, reqid: u64, value: Vec<String>);
+channel kv_replicate(client: Node, key: u64, reqid: u64, value: Vec<String>);
+
+apply_local: on cart_put(c, k, r, v) {
+    emit kvput(c, k, r, v);
+}
+
+replicate: on cart_put(c, k, r, v), replica(p) where p != self {
+    send kv_replicate(c, k, r, v) to p;
+}
+
+apply_remote: on kv_replicate(c, k, r, v) {
+    emit kvput(c, k, r, v);
+}
+
+// ---- Figure 13, DestructiveCart
+
+/// `kvget <= action_msg.map{|a| [a.reqid, a.session]}`.
+read_cart: on action_msg(_, _, sess, r, _, _) {
+    emit kvget(r, sess);
+}
+
+/// `kvput <= action_msg.map ... unless kvget_response.map{|b| b.key}.include? a.session`: a new session's first add.
+new_cart: on action_msg(_, c, sess, r, item, "Add"), not kvget_response(_, sess, _) {
+    emit cart_put(c, sess, r, [item]);
+}
+
+/// `old_state = join [kvget_response, action_msg], [kvget_response.key, action_msg.session]`.
+view old_state(c, sess, r, item, a, v) = kvget_response(_, sess, v), action_msg(_, c, sess, r, item, a);
+
+/// `kvput <= old_state.map ...`: "replace" the session's value.
+add_item: on old_state(c, sess, r, item, "Add", v) {
+    emit cart_put(c, sess, r, v.push(item));
+}
+
+del_item: on old_state(c, sess, r, item, "Del", v) {
+    emit cart_put(c, sess, r, delete_one(v, item));
+}
+
+/// do_checkout: `kvget <= checkout_msg.map{|c| [c.reqid, c.session]}`.
+read_checkout: on checkout_msg(_, _, sess, r) {
+    emit kvget(r, sess);
+}
+
+/// `lookup = join [kvget_response, checkout_msg], ...; response_msg <~ lookup.map{...}`.
+view lookup(c, srv, sess, v) = kvget_response(_, sess, v), checkout_msg(srv, c, sess, _);
+
+reply: on lookup(c, srv, sess, v) {
+    send response_msg(c, srv, sess, v);
+}

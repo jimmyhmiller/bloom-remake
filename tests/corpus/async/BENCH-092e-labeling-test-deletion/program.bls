@@ -1,0 +1,46 @@
+//! BENCH-092: bud's `TestDeletion` labeling fixture (bud `test/tc_labeling.rb`), ported statement by statement.
+//!
+//! Bud collections without a schema get Bud's defaults: an interface or table is `[:key] => [:val]` and a channel is
+//! `[:@address, :val]`. Every column is part of the key here (Bud's primary keys play no part in the labels).
+
+program test_deletion version 1;
+
+/// TestState: two input interfaces, two channels, two tables and an output.
+input i1(key: Node, val: String);
+input i2(key: Node, val: String);
+channel c1(@address: Node, val: String);
+channel c2(@address: Node, val: String);
+table guard1(key: Node, val: String);
+table guard2(key: Node, val: String);
+output response(key: Node, val: String);
+
+/// TestDeletion's additions to TestMono.
+input dguard(key: Node, val: String);
+channel c3(@address: Node, val: String);
+
+/// TestBasic: `c1 <~ i1; c2 <~ i2; guard1 <= c1; guard2 <= c2`.
+send1: on i1(k, v) {
+    send c1(k, v);
+}
+send2: on i2(k, v) {
+    send c2(k, v);
+}
+store1: on c1(a, v) {
+    emit guard1(a, v);
+}
+store2: on c2(a, v) {
+    emit guard2(a, v);
+}
+
+/// TestMono: `response <= (guard1 * guard2).lefts(:val => :val)`.
+mono: while guard1(k, v), guard2(_, v) {
+    emit response(k, v);
+}
+
+/// TestDeletion: `c3 <~ dguard; guard2 <- (guard2 * c3).lefts(:val => :val)`.
+send3: on dguard(k, v) {
+    send c3(k, v);
+}
+remove: on c3(_, v), guard2(k, v) {
+    delete guard2(k, v);
+}
