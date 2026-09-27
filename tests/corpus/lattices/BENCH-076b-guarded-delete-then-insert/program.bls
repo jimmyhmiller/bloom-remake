@@ -1,0 +1,50 @@
+//! BENCH-076b. Delete-then-insert of an item whose count is 0: 1 with the client guard, 0 without it.
+//!
+//! Deletion semantics of a replicated Z-set (Wrapping Rings §5; R13 §3.6 and §6.5): an insert adds weight +1 and a
+//! delete adds −1, replicated through a W2 exactly-once channel. The optional client guard drops a delete whose
+//! observable count (the updates causally before it; here, this replica's current weight) is not positive. The
+//! multiset view shows negative weights as 0 and the set view keeps the items with a positive weight.
+
+program zset_deletion version 1;
+
+role Replica: cluster;
+
+#[fault(lossy)]
+channel delta(item: String, w: Z): Replica -> Replica key(item) exactly_once(dots);
+
+at Replica {
+    input insert(item: String);
+    input guarded_delete(item: String);
+    input unguarded_delete(item: String);
+
+    zset table counts(item: String);
+
+    view raw(item, w) = weights!(counts(item), w);
+    view qty(item, n) = clamped!(counts(item), n);
+    view present(item) = distinct!(counts(item));
+
+    ins: on insert(i) {
+        emit counts(i) weight 1;
+        for p in Replica where p != self {
+            send delta(i, 1) to p;
+        }
+    }
+    /// The guard: the delete takes effect only if the item's observable count here is positive. It reads the
+    /// current weight, so the local change lands at t+1 (writing it now would put the Z-set boundary on a same-tick
+    /// cycle).
+    guarded: on guarded_delete(i), raw(i, w) where w > 0 {
+        next counts(i) weight -1;
+        for p in Replica where p != self {
+            send delta(i, -1) to p;
+        }
+    }
+    unguarded: on unguarded_delete(i) {
+        emit counts(i) weight -1;
+        for p in Replica where p != self {
+            send delta(i, -1) to p;
+        }
+    }
+    remote: on delta(i, w) {
+        emit counts(i) weight w;
+    }
+}

@@ -1,0 +1,152 @@
+schema   = 1
+id       = "BENCH-076"
+title    = "OR-Set: remove-then-re-add ends present; remove-and-undo differs from no remove under a concurrent remove"
+priority = "P1"
+source   = "R13 §12 T4 (OR-Set variant: Dolan Fig. 1a/1b); R13 §5 (Dolan: undoable CRDTs are counters); R13 §3.6 (OR-Set)"
+features = ["LANG-082", "LANG-088", "LANG-124", "LANG-135", "LANG-137", "LANG-153"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+Dolan's figure was not read; the scenarios are re-derived from R13's summary ("Remove-then-re-add ends with w present.
+Doing and undoing a remove ends with w present in Fig. 1a, but w absent when no remove happened (Fig. 1b)") and from
+Dolan's claim that "doing and undoing a remove yields a different result from not removing at all". Both figures have
+the same concurrent remove at the other replica; they differ only in whether A removes and undoes. Tags are unique.
+- w1, remove then re-add (sequential, at A): add (tag 1) @1, remove @2, add (tag 5) @4. A: member @1–@2, not @3 (the
+  tombstone lands at t+1), member again from @4. B sees each step one tick later.
+- wa, Fig. 1a: A adds wa (tag 2) @1. At tick 3 A removes wa and B, concurrently, removes wa; both observe only tag 2.
+  At tick 4 A undoes its remove, which re-adds wa with the fresh tag 4. B's remove never observed tag 4, so wa ends
+  present. At A, wa never leaves the set (the re-add lands in the tick the tombstone does); at B it is absent at tick 4
+  only.
+- wb, Fig. 1b: A adds wb (tag 3) @1; B removes wb @3, concurrently with nothing at A. wb ends absent.
+wa and wb see the same remove at B; the only difference is A's remove-and-undo, and the results differ: the OR-Set is
+not undoable.
+"""
+
+[deploy]
+nodes = [{ name = "A", role = "Replica" }, { name = "B", role = "Replica" }]
+
+[run]
+ticks = 8
+stop  = "ticks"
+
+[[input]]
+node = "A"
+tick = 1
+rel  = "add"
+rows = [["w1", 1], ["wa", 2], ["wb", 3]]
+
+[[input]]
+node = "A"
+tick = 2
+rel  = "remove"
+rows = [["w1"]]
+
+[[input]]
+node = "A"
+tick = 3
+rel  = "remove"
+rows = [["wa"]]
+
+[[input]]
+node = "B"
+tick = 3
+rel  = "remove"
+rows = [["wa"], ["wb"]]
+
+[[input]]
+node = "A"
+tick = 4
+rel  = "undo_remove"
+rows = [["wa", 4]]
+
+[[input]]
+node = "A"
+tick = 4
+rel  = "add"
+rows = [["w1", 5]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-082", "LANG-088", "LANG-124", "LANG-135", "LANG-137", "LANG-153"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-082", "LANG-088", "LANG-124", "LANG-135", "LANG-137", "LANG-153"]
+until = "M7"
+
+# ---- w1: remove, then re-add
+[[expect]]
+node   = "A"
+rel    = "member"
+row    = ["w1"]
+holds  = "1..=2"
+absent = "3"
+
+[[expect]]
+node  = "A"
+rel   = "member"
+row   = ["w1"]
+holds = "4.."
+
+[[expect]]
+node   = "B"
+rel    = "member"
+row    = ["w1"]
+holds  = "2"
+absent = "3..=4"
+
+[[expect]]
+node  = "B"
+rel   = "member"
+row   = ["w1"]
+holds = "5.."
+
+# ---- wa (Fig. 1a): remove and undo at A, concurrent remove at B
+[[expect]]
+node  = "A"
+rel   = "member"
+row   = ["wa"]
+holds = "1.."
+
+[[expect]]
+node   = "B"
+rel    = "member"
+row    = ["wa"]
+holds  = "2..=3"
+absent = "4"
+
+[[expect]]
+node  = "B"
+rel   = "member"
+row   = ["wa"]
+holds = "5.."
+
+# ---- wb (Fig. 1b): the same concurrent remove at B, no remove at A
+[[expect]]
+node   = "A"
+rel    = "member"
+row    = ["wb"]
+holds  = "1..=3"
+absent = "4.."
+
+[[expect]]
+node   = "B"
+rel    = "member"
+row    = ["wb"]
+holds  = "2..=3"
+absent = "4.."
+
+# ---- the final sets agree
+[[expect]]
+node  = "A"
+rel   = "member"
+final = true
+rows  = [["w1"], ["wa"]]
+
+[[expect]]
+node  = "B"
+rel   = "member"
+final = true
+rows  = [["w1"], ["wa"]]

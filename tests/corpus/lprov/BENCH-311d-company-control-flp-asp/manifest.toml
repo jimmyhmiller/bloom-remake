@@ -1,0 +1,24 @@
+schema   = 1
+id       = "BENCH-311"
+title    = "T12 company control in ASP, FLP input: no controls in any model"
+priority = "P1"
+source   = "R11/G1 §7 T12 (\"The simulator and clingo agree on all three inputs\"); R11 §5.1 (keyed sum encoding); CR-54"
+features = ["LANG-201", "LANG-282", "SEM-106", "VER-003", "VER-040", "VER-041"]
+program  = "program.bls"
+spec     = "spec.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+The keyed-sum encoding of R11 §5.1 (#sum over contributions keyed by the holder, a monotone aggregate) under FLP
+semantics has the least model with no c facts; the invariant holds in every model.
+"""
+
+[backend.asp]
+status = "unimplemented"
+unimplemented = ["LANG-201", "LANG-282", "SEM-106", "VER-003", "VER-040", "VER-041"]
+until = "M10"
+
+[expect_verify]
+check  = "asp"
+result = "holds"
+bounds = { ticks = 3 }

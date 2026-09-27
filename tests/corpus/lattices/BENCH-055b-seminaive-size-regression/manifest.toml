@@ -1,0 +1,53 @@
+schema   = 1
+id       = "BENCH-055"
+title    = "Semi-naive regression: size() of a set grown over several rounds is the size of the total"
+priority = "P1"
+source   = "R04 §12 T8 and §3.8 (SoCC'12 §4.1: semi-naive cannot distribute a monotone non-morphism)"
+features = ["LANG-122", "LANG-123", "LANG-124", "LANG-125", "SEM-031", "SEM-103", "ENG-043", "ENG-141"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+R04 T8 is not a separate BENCH id; it is kept with BENCH-055 because it is the semi-naive equivalence regression
+for monotone non-morphisms (SoCC §4.1: the wrong strategy "computes ⊔j size(Δj), the maximum of the sizes of the
+incremental results"). A chain 0→1→2→3→4 arrives at tick 1, so s grows by one element per round inside tick 1.
+The correct cnt is 1 at tick 0 (s = {0}) and 5 from tick 1 on.
+"""
+
+[run]
+ticks = 4
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "edge_in"
+rows = [[0, 1], [1, 2], [2, 3], [3, 4]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-123", "LANG-124", "LANG-125", "SEM-031", "SEM-103", "ENG-043", "ENG-141"]
+until = "M8"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-123", "LANG-124", "LANG-125", "SEM-031", "SEM-103", "ENG-043", "ENG-141"]
+until = "M8"
+
+[[expect]]
+node = "n1"
+rel  = "cnt"
+tick = 0
+rows = [[1]]
+
+[[expect]]
+node = "n1"
+rel  = "s"
+tick = 1
+rows = [[[0, 1, 2, 3, 4]]]
+
+[[expect]]
+node  = "n1"
+rel   = "cnt"
+row   = [5]
+holds = "1.."

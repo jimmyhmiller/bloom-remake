@@ -1,0 +1,25 @@
+schema   = 1
+id       = "BENCH-079"
+title    = "Running product mod 2: even is FT through the homomorphic abstraction"
+priority = "P1"
+source   = "R13 §12 T11 (\"Running product mod 2: even is FT via the homomorphic abstraction\"); R13 §9.5 step 4; FT §1.1"
+features = ["LANG-004", "LANG-064", "LANG-190", "SEM-016", "ANA-122"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The concrete state (a u64 product) exceeds any finite cap, so the exact analysis only succeeds through the
+abstraction h(p) = p mod 2 of R13 §9.5 step 4. LANGUAGE gives no syntax to declare an abstraction; this case expects
+the analysis to find it from the query (`p % 2 == 0`) and the multiplicative update, and records the abstract FT
+table: the abstract state `even` (p mod 2 = 0) is FT with answer true, and `odd` is not. If ANA-122 needs a declared
+abstraction, that is a language gap to raise, not a reason to change the expected table (docs/plan/notes/M1.3.md).
+"""
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-004", "LANG-064", "LANG-190", "SEM-016", "ANA-122"]
+until = "M7"
+
+[expect_analysis]
+# The FT table of the abstracted component: abstract state `even` (p mod 2 = 0) → query value true; `odd` is not FT.
+finality = { "rp.even" = { class = "FINITE", abstraction = "p % 2", ft = { even = true } } }

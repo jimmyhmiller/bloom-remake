@@ -1,0 +1,43 @@
+//! BENCH-066a. The Hydro-derived lattice tests (R04 §12 T20, §7.4):
+//!   - `lattice_bimorphism` with `CartesianProductBimorphism` over the states {0,1,2} and {3,4}: all 6 pairs,
+//!     whatever the arrival interleaving (the product of two set lattices is a bimorphism).
+//!   - `state::<Lat>()[items]` emits only the input items that changed the lattice state: here the delta of the
+//!     set's contents (LANG-071).
+//!   - `lattice_reduce` of Max over [1..5] is Max(5).
+
+program hydro_lattice_ops version 1;
+
+input lhs(x: u64);
+input rhs(y: u64);
+input items(x: u64);
+input nums(n: u64);
+
+cell a: LSet<u64>;
+cell b: LSet<u64>;
+cell pairs: LSet<(u64, u64)>;
+cell st: LSet<u64>;
+cell reduced: LMax<u64>;
+
+output changed(x: u64);
+
+feed_a: on lhs(x) {
+    emit a(set[x]);
+}
+feed_b: on rhs(y) {
+    emit b(set[y]);
+}
+cross: while let p = a.product(b) {
+    emit pairs(p);
+}
+
+feed_state: on items(x) {
+    emit st(set[x]);
+}
+view elems(x) = x in st;
+report_changed: on inserted elems(x) {
+    emit changed(x);
+}
+
+reduce: while let m = lmax{ n | nums(n) } {
+    emit reduced(m);
+}

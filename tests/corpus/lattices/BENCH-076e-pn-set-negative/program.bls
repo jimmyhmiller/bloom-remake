@@ -1,0 +1,19 @@
+//! BENCH-076e. PN-Set deletion semantics (Dolan PODC'20 §1; R13 §5, §12 T4): a per-element counter is undoable, but
+//! it reaches states where an element is present −1 times. Add, remove, remove gives −1, and it takes a later add to
+//! reach empty again.
+
+program pn_set version 1;
+
+input add(e: String);
+input remove(e: String);
+
+zset table pn(e: String);
+
+do_add: on add(e) {
+    emit pn(e) weight 1;
+}
+do_remove: on remove(e) {
+    emit pn(e) weight -1;
+}
+view raw(e, w) = weights!(pn(e), w);
+view present(e) = distinct!(pn(e));

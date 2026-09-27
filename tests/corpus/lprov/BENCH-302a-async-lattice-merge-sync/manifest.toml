@@ -1,0 +1,101 @@
+schema   = 1
+id       = "BENCH-302"
+title    = "T3 synchronous run: the batch merges to {x↦3, y↦5}; seen_both and seen_both_eph hold from tick 2"
+priority = "P0"
+source   = "R11/G1 §7 T3 (synchronous run)"
+features = ["LANG-122", "LANG-126", "LANG-137", "LANG-153", "LANG-280", "SEM-104", "SEM-105"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+Both senders ship at tick 1, so both messages arrive at tick 2 in one delivered batch, which is merged
+(SEM-105): snap = store = {x↦3, y↦5} at tick 2, and seen_both and seen_both_eph hold from tick 2 on (both persist).
+Ultimate L-model at r for this schedule (R11 T3): store ↦ {x↦3, y↦5}, seen_both, and seen_both_eph (both snapshots
+arrived in one tick); the `final` rows state it.
+"""
+
+[deploy]
+nodes = [{ name = "a", role = "Sender" }, { name = "b", role = "Sender" }, { name = "r", role = "Recv" }]
+
+[run]
+ticks = 5
+stop  = "ticks"
+
+[[input]]
+node = "a"
+tick = 1
+rel  = "set_kv"
+rows = [["x", 1], ["y", 5]]
+
+[[input]]
+node = "a"
+tick = 1
+rel  = "send_now"
+rows = [[]]
+
+[[input]]
+node = "b"
+tick = 1
+rel  = "set_kv"
+rows = [["x", 3]]
+
+[[input]]
+node = "b"
+tick = 1
+rel  = "send_now"
+rows = [[]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-126", "LANG-137", "LANG-153", "LANG-280", "SEM-104", "SEM-105"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-126", "LANG-137", "LANG-153", "LANG-280", "SEM-104", "SEM-105"]
+until = "M7"
+
+[[expect]]
+node = "r"
+rel  = "snap"
+tick = 2
+rows = [[[["x", 3], ["y", 5]]]]
+
+[[expect]]
+node  = "r"
+rel   = "store"
+row   = [[["x", 3], ["y", 5]]]
+holds = "2.."
+
+[[expect]]
+node   = "r"
+rel    = "seen_both"
+row    = []
+absent = "..=1"
+holds  = "2.."
+
+[[expect]]
+node   = "r"
+rel    = "seen_both_eph"
+row    = []
+absent = "..=1"
+holds  = "2.."
+
+# ---- the ultimate L-model (contents at the end of the run)
+[[expect]]
+node  = "r"
+rel   = "store"
+final = true
+rows  = [[[["x", 3], ["y", 5]]]]
+
+[[expect]]
+node  = "r"
+rel   = "seen_both"
+final = true
+rows  = [[]]
+
+[[expect]]
+node  = "r"
+rel   = "seen_both_eph"
+final = true
+rows  = [[]]

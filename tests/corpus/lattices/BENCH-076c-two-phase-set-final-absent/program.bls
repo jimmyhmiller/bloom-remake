@@ -1,0 +1,28 @@
+//! BENCH-076c. 2P-Set deletion semantics (Wrapping Rings §5; R13 §12 T4; FT App. B): deletions are treated as if
+//! they happen after all insertions, so an element can be inserted at most once and deleted at most once. Once b is in
+//! the removes set it is absent forever: re-inserting it changes nothing, and its absence is final (NEG-FINAL: the
+//! membership test is antitone in an inflationary set). The presence of a is never final, because a later remove can
+//! always arrive.
+
+program two_phase_set version 1;
+
+pub lattice TwoPSet {
+    adds: LSet<String>,
+    removes: LSet<String>,
+}
+
+input add(e: String);
+input remove(e: String);
+
+cell tp: TwoPSet;
+
+do_add: on add(e) {
+    emit tp(TwoPSet { adds: set[e] });
+}
+do_remove: on remove(e) {
+    emit tp(TwoPSet { removes: set[e] });
+}
+
+view member(e) = e in tp.adds, not (e in tp.removes);
+view b_final_absent() = final not member("b");
+view a_final_present() = final member("a");

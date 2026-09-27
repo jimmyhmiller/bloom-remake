@@ -1,0 +1,17 @@
+//! BENCH-051a. Bud tc_lattice `SimpleMax` (R04 §12 T2): an lmax fed by inputs and the morphism
+//! `done <= m.gt(12)`, which becomes true once any input exceeds 12 and stays true.
+
+program simple_max version 1;
+
+input put(v: i64);
+
+cell m: LMax<i64>;
+cell done: LBool;
+
+feed: on put(v) {
+    emit m(v);
+}
+/// `m.gt(12)` is a threshold (Bloom^L: a morphism into lbool); it never becomes false again.
+check: while m > 12 {
+    emit done(true);
+}

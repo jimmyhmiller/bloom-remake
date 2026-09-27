@@ -1,0 +1,31 @@
+//! BENCH-051f. Bud tc_lattice `MaxOverChannel` (R04 §12 T2): an lmax sent over a channel. "The received lmax in
+//! chn_log equals the sender's value at send time" (CR-04: a message derived at t carries the value of tick t).
+
+program max_over_channel version 1;
+
+role Sender;
+role Receiver;
+
+/// The key is `send_id`; the lattice column `v` would merge per key within one tick.
+channel chn(send_id: u64, v: LMax<i64>): Sender -> Receiver;
+
+at Sender {
+    input put(v: i64);
+    input do_send(send_id: u64);
+    cell m: LMax<i64>;
+
+    feed: on put(v) {
+        emit m(v);
+    }
+    ship: on do_send(id), r in Receiver {
+        send chn(id, m) to r;
+    }
+}
+
+at Receiver {
+    table chn_log(send_id: u64, v: LMax<i64>);
+
+    log: on chn(id, v) {
+        emit chn_log(id, v);
+    }
+}

@@ -1,0 +1,12 @@
+//! BENCH-057c. "Lattice elements cannot be used as keys" (SoCC'12 §3.5; R04 §12 T11): declaring a lattice column as
+//! a key is a type error (BLS0304).
+
+program lattice_key_type_error version 1;
+
+input put(v: u64, n: u64);
+
+table bad(v: LMax<u64>, n: u64) key(v);
+
+record: on put(v, n) {
+    emit bad(v, n);
+}

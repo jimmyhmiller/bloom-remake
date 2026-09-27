@@ -1,0 +1,55 @@
+schema   = 1
+id       = "BENCH-060"
+title    = "Monotone cart, bad input: an action id after the checkout id is an error (BLSR010)"
+priority = "P1"
+source   = "R04 §12 T14 (\"bad inputs raise errors\"); R03 §6.8 and §11 T20 (an action after the checkout ID is an error)"
+features = ["LANG-122", "LANG-124", "LANG-126", "LANG-135", "LANG-137", "LANG-153", "LANG-180", "LANG-241", "SEM-030",
+            "SEM-050"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+A cart with lbound 1 and checkout id 4 receives actions 1–3 and an action with id 7, all at r1 at tick 1. At tick 2
+the checkout makes the range known and `complete` finds id 7 outside [1, 4): its `error(…)` aborts r1's tick 2 with
+BLSR010. r1 had nothing to gossip at tick 1, so no other replica ever sees the cart.
+"""
+
+[deploy]
+nodes = [
+    { name = "c", role = "Client" },
+    { name = "r1", role = "Replica" },
+    { name = "r2", role = "Replica" },
+]
+
+[run]
+ticks = 4
+stop  = "ticks"
+
+[[input]]
+node = "c"
+tick = 1
+rel  = "do_action"
+rows = [["r1", 1, 1, "beer", 1], ["r1", 1, 2, "beer", 1], ["r1", 1, 3, "wine", 1], ["r1", 1, 7, "beer", 1]]
+
+[[input]]
+node = "c"
+tick = 1
+rel  = "do_checkout"
+rows = [["r1", 1, 4, 1]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-124", "LANG-126", "LANG-135", "LANG-137", "LANG-153", "LANG-180", "LANG-241",
+                 "SEM-030", "SEM-050"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-124", "LANG-126", "LANG-135", "LANG-137", "LANG-153", "LANG-180", "LANG-241",
+                 "SEM-030", "SEM-050"]
+until = "M7"
+
+[[expect_error]]
+code = "BLSR010"
+node = "r1"
+tick = 2

@@ -1,0 +1,86 @@
+schema   = 1
+id       = "BENCH-078"
+title    = "Dot reuse after a crash (negative): without a durable seq or incarnation, post-restart updates are dropped"
+priority = "P1"
+source   = "R13 §12 T14; R13 §6.2 (\"reusing (origin, seq) after a crash makes the receiver silently drop new updates\")"
+features = ["LANG-044", "LANG-138", "LANG-153", "LANG-204", "SEM-070", "SEM-071", "DIST-021"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The wrapper is written out (R13 §6.6 style) with R13's two missing safeguards removed: `seqno` is volatile and dots
+are (origin, seq). A: +x @1 (dot A1) and +x @2 (dot A2); B applies both (x = 2 from tick 3). A crashes at tick 5 and
+restarts at tick 6: its durable counts survive, but seqno restarts at 0 and its resend buffer is empty. A: +y @7 gets
+dot A1 again; B already has (A, 1) in `seen_dot` and drops it at tick 8. Final: A holds {x:2, y:1}, B holds {x:2}:
+the replicas diverge forever, which is what the test must detect (R13 T14).
+"""
+
+[deploy]
+nodes = [{ name = "A", role = "Replica" }, { name = "B", role = "Replica" }]
+
+[run]
+ticks = 12
+stop  = "ticks"
+
+[[fault]]
+kind = "crash"
+node = "A"
+tick = 5
+
+[[fault]]
+kind = "restart"
+node = "A"
+tick = 6
+
+[[input]]
+node = "A"
+tick = 1
+rel  = "local_update"
+rows = [["x", 1]]
+
+[[input]]
+node = "A"
+tick = 2
+rel  = "local_update"
+rows = [["x", 1]]
+
+[[input]]
+node = "A"
+tick = 7
+rel  = "local_update"
+rows = [["y", 1]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-044", "LANG-138", "LANG-153", "LANG-204", "SEM-070", "SEM-071", "DIST-021"]
+until = "M7"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-044", "LANG-138", "LANG-153", "LANG-204", "SEM-070", "SEM-071", "DIST-021"]
+until = "M7"
+
+[[expect]]
+node = "B"
+rel  = "raw"
+tick = 3
+rows = [["x", 2]]
+
+[[expect]]
+node  = "A"
+rel   = "raw"
+final = true
+rows  = [["x", 2], ["y", 1]]
+
+[[expect]]
+node  = "B"
+rel   = "raw"
+final = true
+rows  = [["x", 2]]
+
+[[expect_send]]
+from    = "A"
+to      = "B"
+channel = "gdelta"
+row     = [1, "y", 1]
+tick    = 7

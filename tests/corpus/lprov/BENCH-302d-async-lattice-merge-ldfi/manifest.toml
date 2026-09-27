@@ -1,0 +1,33 @@
+schema   = 1
+id       = "BENCH-302"
+title    = "T3 under LDFI 4/2/0, post seen_both: minimal falsifiers {O(a,r,1)} and {O(b,r,1)}"
+priority = "P0"
+source   = "R11/G1 §7 T3 (LDFI 4/2/0 ✓sim) and §6.3 (lmap sub-thresholds: one support per atom)"
+features = ["LANG-126", "LANG-137", "LANG-153", "LANG-201", "TEST-020", "TEST-022", "TEST-023", "TEST-026", "TEST-028",
+            "TEST-029", "TEST-140", "TEST-142"]
+program  = "program.bls"
+spec     = "spec.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+The threshold {x↦3, y↦5} has two atoms: x ≥ 3 has only b as a contributor and y ≥ 5 has only a (R11 §6.3). Losing
+either message falsifies seen_both, so the minimal falsifiers are the two singletons.
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-126", "LANG-137", "LANG-153", "LANG-201", "TEST-020", "TEST-022", "TEST-023", "TEST-026",
+                 "TEST-028", "TEST-029", "TEST-140", "TEST-142"]
+until = "M8"
+
+[expect_ldfi]
+eot        = 4
+eff        = 2
+crashes    = 0
+nodes      = ["A", "B", "R"]
+verdict    = "counterexample"
+crash_view = "frozen"
+falsifiers = [
+    ["O(A,R,1)"],
+    ["O(B,R,1)"],
+]

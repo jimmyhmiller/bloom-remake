@@ -1,0 +1,118 @@
+//! BENCH-060b. Monotone cart, bad input: two different checkouts for one session (an LPoint conflict).
+//!
+//! The monotone shopping cart of SoCC'12 §6 / Fig. 10 and bud-sandbox `cart/monotone_cart.rb` + `cart_lattice.rb`
+//! (R03 §6.8, R04 §3.9), ported to a Blossom product lattice. A cart maps operation ids to actions; the checkout
+//! fixes the id range [lbound, checkout id). `complete` holds when the checkout is known and every id in the range
+//! is present; `summary` sums the deltas per item and keeps the positive counts, and is stable once `complete`
+//! holds ("monotonic-then-immutable", Conway thesis §3.7), so replicas answer without coordination. Illegal inputs
+//! raise errors: a second, different checkout is an LPoint conflict, and an action id outside the range is a
+//! located `error(…)`.
+
+program monotone_cart version 1;
+
+role Client;
+role Replica: cluster;
+
+pub struct CartOp {
+    item: String,
+    delta: i64,
+}
+
+pub struct Checkout {
+    lbound: u64,
+    ubound: u64,
+    client: Node<Client>,
+}
+
+/// A product of built-in lattices: merge, ⊥ and the laws hold by construction; two different values for one
+/// operation id, or two different checkouts, are an LPoint conflict (BLSR006).
+pub lattice Cart {
+    ops: LMap<u64, LPoint<CartOp>>,
+    checkout: LPoint<Checkout>,
+}
+
+fn out_of_range(ops: Map<u64, CartOp>, co: Checkout) -> bool {
+    ops.entries().any(|e| e.0 < co.lbound || e.0 >= co.ubound)
+}
+
+fn all_present(ops: Map<u64, CartOp>, co: Checkout) -> bool {
+    if out_of_range(ops, co) {
+        error("cart: an operation id lies outside [lbound, checkout id)")
+    } else {
+        ops.len() == co.ubound - co.lbound
+    }
+}
+
+fn add_delta(acc: Map<String, i64>, o: CartOp) -> Map<String, i64> {
+    acc.insert(o.item, acc.get(o.item).unwrap_or(0) + o.delta)
+}
+
+fn positive(m: Map<String, i64>) -> Map<String, i64> {
+    m.entries().filter(|e| e.1 > 0).fold(map[], |acc, e| acc.insert(e.0, e.1))
+}
+
+impl Cart {
+    threshold fn complete(self) -> bool {
+        match reveal!(self.checkout) {
+            Some(co) => all_present(reveal!(self.ops), co),
+            None => false,
+        }
+    }
+
+    stable fn summary(self) -> Map<String, i64> after complete {
+        positive(reveal!(self.ops).values().fold(map[], |acc, o| add_delta(acc, o)))
+    }
+
+    stable fn reply_to(self) -> Node<Client> after complete {
+        match reveal!(self.checkout) {
+            Some(co) => co.client,
+            None => error("cart: reply_to read before checkout"),
+        }
+    }
+}
+
+channel action_msg(session: u64, op_id: u64, item: String, delta: i64): Client -> Replica;
+channel checkout_msg(session: u64, op_id: u64, lbound: u64): Client -> Replica;
+channel cart_sync(session: u64, cart: Cart): Replica -> Replica;
+channel response_msg(session: u64, items: Map<String, i64>): Replica -> Client;
+
+at Client {
+    input do_action(dst: Node<Replica>, session: u64, op_id: u64, item: String, delta: i64);
+    input do_checkout(dst: Node<Replica>, session: u64, op_id: u64, lbound: u64);
+    /// Keyed by session: two replicas answering with different summaries would be a key violation (BLSR001).
+    table receipts(session: u64, items: Map<String, i64>) key(session);
+
+    act: on do_action(r, s, id, item, delta) {
+        send action_msg(s, id, item, delta) to r;
+    }
+    check_out: on do_checkout(r, s, id, lb) {
+        send checkout_msg(s, id, lb) to r;
+    }
+    receive: on response_msg(s, items) {
+        emit receipts(s, items);
+    }
+}
+
+at Replica {
+    table carts(session: u64, cart: Cart);
+    table summaries(session: u64, items: Map<String, i64>) key(session);
+
+    add: on action_msg(s, id, item, delta) {
+        emit carts(s, Cart { ops: map[id => LPoint::of(CartOp { item, delta })] });
+    }
+    close: on checkout_msg(s, id, lb) from c {
+        emit carts(s, Cart { checkout: LPoint::of(Checkout { lbound: lb, ubound: id, client: c }) });
+    }
+    /// Anti-entropy: whole carts are shipped every tick; duplicates and reordering are harmless.
+    gossip: while carts(s, c), r in Replica where r != self {
+        send cart_sync(s, c) to r;
+    }
+    absorb: on cart_sync(s, c) {
+        emit carts(s, c);
+    }
+    /// No coordination: `summary` and `reply_to` are stable once `complete` holds.
+    finish: while carts(s, c) where c.complete() {
+        emit summaries(s, c.summary());
+        send response_msg(s, c.summary()) to c.reply_to();
+    }
+}

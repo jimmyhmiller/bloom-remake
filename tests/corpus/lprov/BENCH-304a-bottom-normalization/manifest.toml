@@ -1,0 +1,117 @@
+schema   = 1
+id       = "BENCH-304"
+title    = "T5 ⊥-normalization: no \"a\" cell, has_a false, cnt = 0, exactly one message sent"
+priority = "P0"
+source   = "R11/G1 §7 T5 (✓sim); R11 §3.1 N1–N6"
+features = ["LANG-123", "LANG-124", "LANG-126", "LANG-127", "LANG-129", "LANG-190", "LANG-280", "LANG-281", "SEM-034",
+            "SEM-101"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+R11 T5 at n@0: m = {"b" ↦ {7}} with no "a" cell (N1, N3); has_a false, has_b true; cnt = 0 (a real value, ⊥ is −∞).
+Exactly one message is sent, out(@r, "from_b"; {7}); the ⊥ payload for "from_a" produces nothing (N3). At r@1:
+out = {("from_b") ↦ {7}}. m's key?("a") is false and m's value-level map size is 1. m, cnt and got persist.
+Ultimate L-model (R11 T5): at n, m ↦ {"b" ↦ {7}}, cnt ↦ 0 and has_b, without has_a; at r, got ↦ {("from_b") ↦ {7}};
+the `final` rows state it.
+"""
+
+[deploy]
+nodes = [{ name = "n", role = "Src" }, { name = "r", role = "Dst" }]
+
+[run]
+ticks = 3
+stop  = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-123", "LANG-124", "LANG-126", "LANG-127", "LANG-129", "LANG-190", "LANG-280", "LANG-281",
+                 "SEM-034", "SEM-101"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-123", "LANG-124", "LANG-126", "LANG-127", "LANG-129", "LANG-190", "LANG-280", "LANG-281",
+                 "SEM-034", "SEM-101"]
+until = "M7"
+
+[[expect]]
+node = "n"
+rel  = "m"
+tick = 0
+rows = [["b", [7]]]
+
+[[expect]]
+node   = "n"
+rel    = "has_a"
+row    = []
+absent = "0.."
+
+[[expect]]
+node  = "n"
+rel   = "has_b"
+row   = []
+holds = "0.."
+
+[[expect]]
+node  = "n"
+rel   = "cnt"
+row   = [0]
+holds = "0.."
+
+[[expect]]
+node   = "n"
+rel    = "key_a"
+row    = []
+absent = "0.."
+
+[[expect]]
+node = "n"
+rel  = "m_size"
+tick = 0
+rows = [[{ some = 1 }]]
+
+[[expect_send]]
+from    = "n"
+to      = "r"
+channel = "out"
+row     = ["from_b", [7]]
+tick    = 0
+count   = 1
+
+[[expect]]
+node = "r"
+rel  = "out"
+tick = 1
+rows = [["from_b", [7]]]
+
+[[expect]]
+node  = "r"
+rel   = "got"
+final = true
+rows  = [["from_b", [7]]]
+
+# ---- the ultimate L-model (contents at the end of the run)
+[[expect]]
+node  = "n"
+rel   = "m"
+final = true
+rows  = [["b", [7]]]
+
+[[expect]]
+node  = "n"
+rel   = "cnt"
+final = true
+rows  = [[0]]
+
+[[expect]]
+node  = "n"
+rel   = "has_b"
+final = true
+rows  = [[]]
+
+[[expect]]
+node  = "n"
+rel   = "has_a"
+final = true
+rows  = []

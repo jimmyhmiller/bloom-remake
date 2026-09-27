@@ -1,0 +1,36 @@
+schema   = 1
+id       = "BENCH-312"
+title    = "T13 under LDFI 4/4/0: exactly the four minimal falsifiers of R11"
+priority = "P1"
+source   = "R11/G1 §7 T13 (LDFI 4/4/0: ✓sim, ✓clingo)"
+features = ["LANG-126", "LANG-137", "LANG-153", "LANG-201", "TEST-020", "TEST-022", "TEST-023", "TEST-026", "TEST-028",
+            "TEST-029", "TEST-140", "TEST-142"]
+program  = "program.bls"
+spec     = "spec.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+With EFF 4 the gossip at ticks 2 and 3 is omittable too. The support is
+Φ = m(cl,r1,1) ∧ (m(r1,r3,2) ∨ m(r1,r3,3)) ∨ m(cl,r2,1) ∧ (m(r2,r3,2) ∨ m(r2,r3,3)), whose minimal hitting sets are
+R11's four falsifiers (also confirmed by an independent brute-force enumeration).
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-126", "LANG-137", "LANG-153", "LANG-201", "TEST-020", "TEST-022", "TEST-023", "TEST-026",
+                 "TEST-028", "TEST-029", "TEST-140", "TEST-142"]
+until = "M8"
+
+[expect_ldfi]
+eot        = 4
+eff        = 4
+crashes    = 0
+nodes      = ["CL", "R1", "R2", "R3"]
+verdict    = "counterexample"
+crash_view = "frozen"
+falsifiers = [
+    ["O(CL,R1,1)", "O(CL,R2,1)"],
+    ["O(CL,R1,1)", "O(R2,R3,2)", "O(R2,R3,3)"],
+    ["O(CL,R2,1)", "O(R1,R3,2)", "O(R1,R3,3)"],
+    ["O(R1,R3,2)", "O(R1,R3,3)", "O(R2,R3,2)", "O(R2,R3,3)"],
+]

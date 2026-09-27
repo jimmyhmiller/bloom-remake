@@ -1,0 +1,46 @@
+schema   = 1
+id       = "BENCH-052"
+title    = "ShortestPathsVariant (path extended at the end): same min_cost as ShortestPathsL"
+priority = "P0"
+source   = "R04 §12 T3 (bud test/tc_lattice.rb ShortestPathsVariant); expected set from R04 T3 (acyclic)"
+features = ["LANG-040", "LANG-121", "LANG-122", "LANG-124", "LANG-125", "LANG-128", "SEM-030", "SEM-031", "SEM-032",
+            "SEM-103"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The Variant's source was not vendored; R04 only says the path is extended at the end. The rule body is
+re-derived, including the choice of `next_hop` for an extended path (the first hop). The expected min_cost is R04
+T3's acyclic set, because the minimum over all paths does not depend on the direction in which the recursion
+extends them.
+"""
+
+[run]
+ticks = 4
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "link_in"
+rows = [["a", "b", 11], ["a", "b", 10], ["a", "c", 15], ["b", "c", 20], ["b", "c", 21], ["b", "d", 30],
+        ["c", "d", 5], ["d", "e", 10]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-121", "LANG-122", "LANG-124", "LANG-125", "LANG-128", "SEM-030", "SEM-031",
+                 "SEM-032", "SEM-103"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-121", "LANG-122", "LANG-124", "LANG-125", "LANG-128", "SEM-030", "SEM-031",
+                 "SEM-032", "SEM-103"]
+until = "M7"
+
+[[expect]]
+node  = "n1"
+rel   = "min_cost"
+final = true
+rows  = [["a", "b", 10], ["a", "c", 15], ["a", "d", 20], ["a", "e", 30], ["b", "c", 20], ["b", "d", 25],
+         ["b", "e", 35], ["c", "d", 5], ["c", "e", 15], ["d", "e", 10]]

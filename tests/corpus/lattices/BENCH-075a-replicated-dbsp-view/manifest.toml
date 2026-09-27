@@ -1,0 +1,154 @@
+schema   = 1
+id       = "BENCH-075"
+title    = "Replicated DBSP view over W2-replicated Z-sets: after quiescence every replica equals the centralized view"
+priority = "P1"
+source   = "R13 §12 T12; R13 §7.1 (the replication theorem); ENG-067"
+features = ["LANG-082", "LANG-138", "LANG-142", "LANG-153", "LANG-158", "SEM-036", "DIST-015", "ENG-062", "ENG-067",
+            "ENG-070", "TEST-001", "TEST-002"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+R13 T12 uses random inserts and deletes; this case scripts a fixed set with both, spread over the replicas:
+- p1: R +(a1,b1) and +(a2,b1) @1, S +(b1,c1) @2, D +(a2) @3.
+- p2: S +(b1,c2) @1, R +(a3,b2) @2, R −(a1,b1) @4 (which may arrive before the insert it cancels).
+- p3: S +(b2,c3) @1, D +(a3) @2, D −(a3) @5.
+Σ of all updates: R = {(a2,b1), (a3,b2)}, S = {(b1,c1), (b1,c2), (b2,c3)}, D = {a2}. The centralized naive
+evaluation of V over Σ (ENG-067) is {(a3, c3)}: a2's rows are excluded by D, a1 no longer has an R row, and a3's D
+insert was retracted. Every replica's final V equals it in every seed, whatever the delays and scripted drops.
+"""
+
+[deploy]
+nodes = [{ name = "p1", role = "Replica" }, { name = "p2", role = "Replica" }, { name = "p3", role = "Replica" }]
+
+[run]
+ticks = 200
+stop  = "quiescent"
+seeds = 32
+
+[[fault]]
+kind      = "omit"
+from      = "p1"
+to        = "p3"
+send_tick = 1
+
+[[fault]]
+kind      = "omit"
+from      = "p3"
+to        = "p2"
+send_tick = 2
+
+[[input]]
+node = "p1"
+tick = 1
+rel  = "r_in"
+rows = [["a1", "b1", 1], ["a2", "b1", 1]]
+
+[[input]]
+node = "p1"
+tick = 2
+rel  = "s_in"
+rows = [["b1", "c1", 1]]
+
+[[input]]
+node = "p1"
+tick = 3
+rel  = "d_in"
+rows = [["a2", 1]]
+
+[[input]]
+node = "p2"
+tick = 1
+rel  = "s_in"
+rows = [["b1", "c2", 1]]
+
+[[input]]
+node = "p2"
+tick = 2
+rel  = "r_in"
+rows = [["a3", "b2", 1]]
+
+[[input]]
+node = "p2"
+tick = 4
+rel  = "r_in"
+rows = [["a1", "b1", -1]]
+
+[[input]]
+node = "p3"
+tick = 1
+rel  = "s_in"
+rows = [["b2", "c3", 1]]
+
+[[input]]
+node = "p3"
+tick = 2
+rel  = "d_in"
+rows = [["a3", 1]]
+
+[[input]]
+node = "p3"
+tick = 5
+rel  = "d_in"
+rows = [["a3", -1]]
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-082", "LANG-138", "LANG-142", "LANG-153", "LANG-158", "SEM-036", "DIST-015", "ENG-062",
+                 "ENG-067", "ENG-070", "TEST-001", "TEST-002"]
+until = "M8"
+
+[[expect]]
+node  = "p1"
+rel   = "v"
+final = true
+rows  = [["a3", "c3"]]
+
+[[expect]]
+node  = "p1"
+rel   = "r_set"
+final = true
+rows  = [["a2", "b1"], ["a3", "b2"]]
+
+[[expect]]
+node  = "p1"
+rel   = "d_set"
+final = true
+rows  = [["a2"]]
+
+[[expect]]
+node  = "p2"
+rel   = "v"
+final = true
+rows  = [["a3", "c3"]]
+
+[[expect]]
+node  = "p2"
+rel   = "r_set"
+final = true
+rows  = [["a2", "b1"], ["a3", "b2"]]
+
+[[expect]]
+node  = "p2"
+rel   = "d_set"
+final = true
+rows  = [["a2"]]
+
+[[expect]]
+node  = "p3"
+rel   = "v"
+final = true
+rows  = [["a3", "c3"]]
+
+[[expect]]
+node  = "p3"
+rel   = "r_set"
+final = true
+rows  = [["a2", "b1"], ["a3", "b2"]]
+
+[[expect]]
+node  = "p3"
+rel   = "d_set"
+final = true
+rows  = [["a2"]]
+

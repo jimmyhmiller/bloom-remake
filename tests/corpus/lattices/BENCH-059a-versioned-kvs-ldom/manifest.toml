@@ -1,0 +1,126 @@
+schema   = 1
+id       = "BENCH-059"
+title    = "Versioned KVS with ldom: concurrent writes kept, dominating write replaces, stale write ignored, read repair"
+priority = "P1"
+source   = "R04 §12 T13; R04 §3.9 (SoCC'12 §5.2 and Conway thesis Listing A.1: DomLattice, preserve_dominants)"
+features = ["LANG-127", "LANG-130", "LANG-132", "LANG-137", "LANG-153", "LANG-241", "LANG-280", "SEM-105"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+Re-derived workload over two clients and two replicas. Versions are supplied by the host, as the SoCC clients do.
+- Tick 1: c1 writes k=x with {c1:1} to r1; c2 writes k=y with {c2:1} to r1 and r2. The clocks are incomparable,
+  so r1 keeps both pairs: version = lub = {c1:1, c2:1}, value = {x, y} (tick 2). r2 has only ({c2:1}, {y}).
+- Tick 3: c1 reads k from both replicas under one reqid; the merged responses (tick 5) are r1's state.
+- Tick 6: read repair sends that lub to both replicas; from tick 7 r2 holds the same pairs as r1.
+- Tick 8: c1 writes z with {c1:2, c2:1}, which has seen both writes; it dominates both pairs and replaces them
+  (tick 9).
+- Tick 10: a stale write old with {c1:2} (dominated by {c1:2, c2:1}) arrives at r1 and is ignored.
+LANGUAGE §11.5 lists `LDom` but no constructor; `LDom::of(version, value)` is assumed by analogy with
+`Lex::of(k, v)` (recorded in docs/plan/notes/M1.3.md). Only the program text depends on that spelling.
+"""
+
+[deploy]
+nodes = [
+    { name = "c1", role = "Client" },
+    { name = "c2", role = "Client" },
+    { name = "r1", role = "Replica" },
+    { name = "r2", role = "Replica" },
+]
+
+[run]
+ticks = 13
+stop  = "ticks"
+
+[[input]]
+node = "c1"
+tick = 1
+rel  = "write"
+rows = [["k", "r1", [["c1", 1]], "x"]]
+
+[[input]]
+node = "c2"
+tick = 1
+rel  = "write"
+rows = [["k", "r1", [["c2", 1]], "y"], ["k", "r2", [["c2", 1]], "y"]]
+
+[[input]]
+node = "c1"
+tick = 3
+rel  = "read"
+rows = [[1, "k", "r1"], [1, "k", "r2"]]
+
+[[input]]
+node = "c1"
+tick = 6
+rel  = "do_repair"
+rows = [[1, "k"]]
+
+[[input]]
+node = "c1"
+tick = 8
+rel  = "write"
+rows = [["k", "r1", [["c1", 2], ["c2", 1]], "z"], ["k", "r2", [["c1", 2], ["c2", 1]], "z"]]
+
+[[input]]
+node = "c1"
+tick = 10
+rel  = "write"
+rows = [["k", "r1", [["c1", 2]], "old"]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-127", "LANG-130", "LANG-132", "LANG-137", "LANG-153", "LANG-241", "LANG-280", "SEM-105"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-127", "LANG-130", "LANG-132", "LANG-137", "LANG-153", "LANG-241", "LANG-280", "SEM-105"]
+until = "M7"
+
+# concurrent writes: both kept, version = lub, value = user merge
+[[expect]]
+node = "r1"
+rel  = "current"
+tick = 2
+rows = [["k", [["c1", 1], ["c2", 1]], ["x", "y"]]]
+
+[[expect]]
+node = "r2"
+rel  = "current"
+tick = 2
+rows = [["k", [["c2", 1]], ["y"]]]
+
+# the read returns the lub of the responses
+[[expect]]
+node = "c1"
+rel  = "answer"
+tick = 5
+rows = [[1, [["c1", 1], ["c2", 1]], ["x", "y"]]]
+
+# read repair stores the lub at r2
+[[expect]]
+node = "r2"
+rel  = "current"
+tick = 7
+rows = [["k", [["c1", 1], ["c2", 1]], ["x", "y"]]]
+
+# a write that has seen both replaces both
+[[expect]]
+node = "r1"
+rel  = "current"
+tick = 9
+rows = [["k", [["c1", 2], ["c2", 1]], ["z"]]]
+
+# the stale write is ignored
+[[expect]]
+node  = "r1"
+rel   = "current"
+final = true
+rows  = [["k", [["c1", 2], ["c2", 1]], ["z"]]]
+
+[[expect]]
+node  = "r2"
+rel   = "current"
+final = true
+rows  = [["k", [["c1", 2], ["c2", 1]], ["z"]]]

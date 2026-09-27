@@ -1,0 +1,18 @@
+//! BENCH-301c spec: R11 T2, EOT 4, EFF 2, no crashes, post = lo (best ≥ 3) at the sink.
+
+spec MaxLo for r#program {
+    nodes A, B, D, S;
+    assign Sender = [A, B, D];
+    assign Sink = [S];
+
+    fact x(3) @ A at tick 1;
+    fact x(7) @ B at tick 1;
+    fact x(7) @ D at tick 1;
+
+    faults { eot: 4, eff: 2, crashes: 0, model: sync }
+
+    view pre() = not crashed(S);
+    view post() = lo() @ S;
+
+    check ldfi expect fails;
+}

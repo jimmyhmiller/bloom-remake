@@ -1,0 +1,24 @@
+//! BENCH-073d. Negative variant (R13 §12 T1; ANA-015; CR-35): a raw weight column on a plain channel is a compile
+//! error. A plain channel delivers at least once, and applying a group-typed update twice is wrong, so the payload
+//! may cross only through an `exactly_once` wrapper (BLS0307).
+
+program raw_weight_plain_channel version 1;
+
+role Replica: cluster;
+
+channel count_delta(item: String, w: Z): Replica -> Replica key(item);
+
+at Replica {
+    input local_update(item: String, w: Z);
+    zset table counts(item: String);
+
+    apply_local: on local_update(item, w) {
+        emit counts(item) weight w;
+        for r in Replica where r != self {
+            send count_delta(item, w) to r;
+        }
+    }
+    apply_remote: on count_delta(item, w) {
+        emit counts(item) weight w;
+    }
+}

@@ -1,0 +1,20 @@
+//! BENCH-302d spec: R11 T3, EOT 4, EFF 2, no crashes, post = seen_both at the receiver.
+
+spec AsyncMergeLdfi for r#program {
+    nodes A, B, R;
+    assign Sender = [A, B];
+    assign Recv = [R];
+
+    fact set_kv("x", 1) @ A at tick 1;
+    fact set_kv("y", 5) @ A at tick 1;
+    fact send_now() @ A at tick 1;
+    fact set_kv("x", 3) @ B at tick 1;
+    fact send_now() @ B at tick 1;
+
+    faults { eot: 4, eff: 2, crashes: 0, model: sync }
+
+    view pre() = not crashed(R);
+    view post() = seen_both() @ R;
+
+    check ldfi expect fails;
+}

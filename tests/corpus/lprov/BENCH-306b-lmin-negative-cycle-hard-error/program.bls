@@ -1,0 +1,27 @@
+//! BENCH-306b. T7-neg: with c→a −4 the cycle weight is −1, the fixpoint is undefined, and the tick aborts (BLSR007).
+//!
+//! R11/G1 T7: in-tick convergence of a recursive lmin, ported to Blossom. The R11 program:
+//!
+//!     lat path(src: node, dst: node) : lmin<int>
+//!     path(X, Y; W)   :- edge(X, Y, W).
+//!     path(X, Z; d+W) :- path(X, Y; d), edge(Y, Z, W).
+//!
+//! With non-negative weights the stratum converges in finitely many Kleene rounds (Trop+ is 0-stable, bound N = 9).
+//! With a negative cycle it never converges, and the tick has no meaning: a hard error, never a truncation (D8).
+
+program lmin_all_pairs version 1;
+
+input edge_in(src: String, dst: String, w: i64);
+
+table edge(src: String, dst: String, w: i64);
+table path(src: String, dst: String, d: LMin<i64>);
+
+load: on edge_in(x, y, w) {
+    emit edge(x, y, w);
+}
+base: while edge(x, y, w) {
+    emit path(x, y, w);
+}
+step: while path(x, y, d), edge(y, z, w) {
+    emit path(x, z, d + w);
+}

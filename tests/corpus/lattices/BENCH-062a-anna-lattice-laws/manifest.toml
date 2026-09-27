@@ -1,0 +1,74 @@
+schema   = 1
+id       = "BENCH-062"
+title    = "Anna lattice laws: LWW converges, bare >= is not commutative, DomPair is not associative, Lex passes"
+priority = "P0"
+source   = "R04 §12 T16; R04 §4.3 (Anna LWWPairLattice), §4.5 (the DomPair counterexample); CR-25"
+features = ["LANG-047", "LANG-089", "LANG-124", "LANG-131", "LANG-180", "LANG-190", "SEM-030", "SEM-033"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+Expected values follow from the merge definitions in R04 §4.3–§4.5.
+- LWW: ((1,r2),y) dominates ((1,r1),x) and ((0,r3),w), so all three orders give ((1,r2),y).
+- Bare >=: merge((1,x),(1,y)) = (1,y) but merge((1,y),(1,x)) = (1,x).
+- DomPair: (x ⊔ y) ⊔ z = ({1,2}, {p,q,r}) while x ⊔ (y ⊔ z) = ({1,2}, {r}), R04 §4.5's counterexample.
+- Lex over a chain key: (1,{p}) ⊔ (2,{q}) ⊔ (2,{r}) = (2,{q,r}) in both associations.
+All values exist from the boot tick on. Lattice cells compare by their revealed value; the `blossom` escape gives
+the expected lattice value as a constant expression of the cell's type.
+"""
+
+[run]
+ticks = 2
+stop  = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-047", "LANG-089", "LANG-124", "LANG-131", "LANG-180", "LANG-190", "SEM-030", "SEM-033"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-047", "LANG-089", "LANG-124", "LANG-131", "LANG-180", "LANG-190", "SEM-030", "SEM-033"]
+until = "M7"
+
+[[expect]]
+node  = "n1"
+rel   = "lww_abc"
+row   = [{ blossom = 'Lex::of((1, "r2"), "y")' }]
+holds = "0.."
+
+[[expect]]
+node  = "n1"
+rel   = "lww_a_bc"
+row   = [{ blossom = 'Lex::of((1, "r2"), "y")' }]
+holds = "0.."
+
+[[expect]]
+node  = "n1"
+rel   = "lww_cba"
+row   = [{ blossom = 'Lex::of((1, "r2"), "y")' }]
+holds = "0.."
+
+[[expect]]
+node  = "n1"
+rel   = "lex_xy_z"
+row   = [{ blossom = 'Lex::of(2, set["q", "r"])' }]
+holds = "0.."
+
+[[expect]]
+node  = "n1"
+rel   = "lex_x_yz"
+row   = [{ blossom = 'Lex::of(2, set["q", "r"])' }]
+holds = "0.."
+
+[[expect]]
+node = "n1"
+rel  = "bare_ge"
+tick = 0
+rows = [["x_then_y", 1, "y"], ["y_then_x", 1, "x"]]
+
+[[expect]]
+node = "n1"
+rel  = "dom_pair"
+tick = 0
+rows = [["(x+y)+z", [1, 2], ["p", "q", "r"]], ["x+(y+z)", [1, 2], ["r"]]]

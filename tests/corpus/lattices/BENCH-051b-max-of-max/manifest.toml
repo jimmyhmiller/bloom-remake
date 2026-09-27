@@ -1,0 +1,92 @@
+schema   = 1
+id       = "BENCH-051"
+title    = "Bud MaxOfMax: an lmax merged from two lmax cells, with a threshold"
+priority = "P0"
+source   = "R04 §12 T2 (bud test/tc_lattice.rb MaxOfMax, as summarized by R04)"
+features = ["LANG-120", "LANG-122", "LANG-124", "LANG-126", "LANG-128", "LANG-280", "SEM-030", "SEM-034", "SEM-101",
+            "SEM-104"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+Re-derived: R04 T2 names MaxOfMax without its data, so the inputs are chosen here. m1 takes the even inputs and
+m2 the odd ones; m3 is the join of both. Inputs {4, 7} @1, {12, 9} @2, {22, 3} @3 give m1 = 4, 12, 22; m2 = 7, 9,
+9; m3 = 7, 12, 22; `m3 > 20` first holds at tick 3.
+"""
+
+[run]
+ticks = 6
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "in_t"
+rows = [[4], [7]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel  = "in_t"
+rows = [[12], [9]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel  = "in_t"
+rows = [[22], [3]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-120", "LANG-122", "LANG-124", "LANG-126", "LANG-128", "LANG-280", "SEM-030", "SEM-034",
+                 "SEM-101", "SEM-104"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-120", "LANG-122", "LANG-124", "LANG-126", "LANG-128", "LANG-280", "SEM-030", "SEM-034",
+                 "SEM-101", "SEM-104"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel  = "m3"
+tick = 0
+rows = []
+
+[[expect]]
+node = "n1"
+rel  = "m3"
+tick = 1
+rows = [[7]]
+
+[[expect]]
+node = "n1"
+rel  = "m3"
+tick = 2
+rows = [[12]]
+
+[[expect]]
+node = "n1"
+rel  = "m2"
+tick = 3
+rows = [[9]]
+
+[[expect]]
+node  = "n1"
+rel   = "m1"
+final = true
+rows  = [[22]]
+
+[[expect]]
+node  = "n1"
+rel   = "m3"
+final = true
+rows  = [[22]]
+
+[[expect]]
+node   = "n1"
+rel    = "done"
+row    = [true]
+absent = "..=2"
+holds  = "3.."

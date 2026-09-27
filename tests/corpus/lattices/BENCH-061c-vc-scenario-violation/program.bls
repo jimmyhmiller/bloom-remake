@@ -1,0 +1,52 @@
+//! BENCH-061c. The vector-clock scenario of bud-sandbox `lattices/vc_scenario.rb` (R03 §6.9 and §11 T27; R04 §12 T15):
+//! three nodes, and node 3 receives message 3 before message 1 although 1 happened before 3. A received clock that is
+//! already ≤ the receiver's clock (`r.clock.lt_eq(my_vc).when_true`) is a causal-order violation. As in the original,
+//! the network delay is simulated inside the program: node 1 holds message 1 in a buffer and releases it later. The
+//! report is named `causal_violation`, because `violation` is the IR's relation for invariant and seal violations
+//! (LANGUAGE §14.4, §17.1).
+
+program vc_scenario version 1;
+
+role Proc: cluster;
+
+channel msg(id: u64, clock: VClock): Proc -> Proc;
+
+at Proc {
+    /// Stamp a local event and send message `id` to `dst` now.
+    input event(id: u64, dst: Node<Proc>);
+    /// Stamp a local event now, but hold message `id` until `release`.
+    input hold(id: u64, dst: Node<Proc>);
+    input release(id: u64);
+    /// On receiving message `in_id`, stamp and send message `out_id` to `dst`.
+    input forward(in_id: u64, out_id: u64, dst: Node<Proc>);
+
+    cell vc: VClock;
+    table held(id: u64, dst: Node<Proc>, clock: VClock);
+    table fwd(in_id: u64, out_id: u64, dst: Node<Proc>);
+    table causal_violation(id: u64);
+
+    stamp_send: on event(id, d), let v = vc.join(map[self => vc.at(self).join(0) + 1]) {
+        next vc(v);
+        send msg(id, v) to d;
+    }
+    stamp_hold: on hold(id, d), let v = vc.join(map[self => vc.at(self).join(0) + 1]) {
+        next vc(v);
+        emit held(id, d, v);
+    }
+    let_go: on release(id), held(id, d, v) {
+        send msg(id, v) to d;
+    }
+    configure: on forward(i, o, d) {
+        emit fwd(i, o, d);
+    }
+    receive: on msg(id, clk) {
+        next vc(clk);
+        if clk.leq!(vc) {
+            emit causal_violation(id);
+        }
+    }
+    relay: on msg(id, clk), fwd(id, out, d), let v = vc.join(clk).join(map[self => vc.at(self).join(0) + 1]) {
+        next vc(v);
+        send msg(out, v) to d;
+    }
+}

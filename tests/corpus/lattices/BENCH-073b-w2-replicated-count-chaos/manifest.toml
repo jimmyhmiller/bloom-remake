@@ -1,0 +1,158 @@
+schema   = 1
+id       = "BENCH-073"
+title    = "Replicated count with retractions over W2 under chaos: x = 1 and y absent everywhere, z never sent"
+priority = "P0"
+source   = "R13 §12 T1 (chaos: duplication, reordering, 30% of first sends dropped, with resends); R13 §6.2"
+features = ["LANG-138", "LANG-142", "LANG-153", "LANG-155", "LANG-158", "SEM-036", "SEM-073", "DIST-015", "ENG-070",
+            "TEST-001", "TEST-002"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+The operations of BENCH-073a under the simulator: random delays and reordering in every seed, plus scripted drops of
+first sends (A→B and B→C at tick 1, C→A at tick 1, A→C at tick 2), which the wrapper recovers by resend-until-ack.
+In every seed the final state is x = 1 and y absent at every replica, and no replica ever holds or receives z.
+Frame duplication, the rest of R13's chaos, is an opt-in simulator fault class (ARCHITECTURE §0.2) that manifest
+schema v1 cannot request; the omissions still force resends, and resends of an unacknowledged dot are delivered as
+duplicates whenever an acknowledgement is slower than the resend timer. Recorded in docs/plan/notes/M1.3.md.
+"""
+
+[deploy]
+nodes = [{ name = "A", role = "Replica" }, { name = "B", role = "Replica" }, { name = "C", role = "Replica" }]
+
+[run]
+ticks = 200
+stop  = "quiescent"
+seeds = 32
+
+[[fault]]
+kind      = "omit"
+from      = "A"
+to        = "B"
+send_tick = 1
+
+[[fault]]
+kind      = "omit"
+from      = "B"
+to        = "C"
+send_tick = 1
+
+[[fault]]
+kind      = "omit"
+from      = "C"
+to        = "A"
+send_tick = 1
+
+[[fault]]
+kind      = "omit"
+from      = "A"
+to        = "C"
+send_tick = 2
+
+[[input]]
+node = "A"
+tick = 1
+rel  = "local_update"
+rows = [["x", 1]]
+
+[[input]]
+node = "A"
+tick = 2
+rel  = "local_update"
+rows = [["x", 1]]
+
+[[input]]
+node = "A"
+tick = 5
+rel  = "local_update"
+rows = [["y", -1]]
+
+[[input]]
+node = "B"
+tick = 1
+rel  = "local_update"
+rows = [["x", -1]]
+
+[[input]]
+node = "B"
+tick = 3
+rel  = "local_update"
+rows = [["z", 1], ["z", -1]]
+
+[[input]]
+node = "C"
+tick = 1
+rel  = "local_update"
+rows = [["y", 1]]
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-138", "LANG-142", "LANG-153", "LANG-155", "LANG-158", "SEM-036", "SEM-073", "DIST-015",
+                 "ENG-070", "TEST-001", "TEST-002"]
+until = "M8"
+
+[[expect]]
+node  = "A"
+rel   = "raw"
+final = true
+rows  = [["x", 1]]
+
+[[expect]]
+node  = "A"
+rel   = "present"
+final = true
+rows  = [["x"]]
+
+[[expect]]
+node   = "A"
+rel    = "present"
+row    = ["z"]
+absent = "0.."
+
+[[expect]]
+node  = "B"
+rel   = "raw"
+final = true
+rows  = [["x", 1]]
+
+[[expect]]
+node  = "B"
+rel   = "present"
+final = true
+rows  = [["x"]]
+
+[[expect]]
+node   = "B"
+rel    = "present"
+row    = ["z"]
+absent = "0.."
+
+[[expect]]
+node  = "C"
+rel   = "raw"
+final = true
+rows  = [["x", 1]]
+
+[[expect]]
+node  = "C"
+rel   = "present"
+final = true
+rows  = [["x"]]
+
+[[expect]]
+node   = "C"
+rel    = "present"
+row    = ["z"]
+absent = "0.."
+
+[[expect]]
+node  = "A"
+rel   = "ever_received"
+final = true
+rows  = [["x"], ["y"]]
+
+[[expect]]
+node  = "C"
+rel   = "ever_received"
+final = true
+rows  = [["x"], ["y"]]

@@ -1,0 +1,20 @@
+schema   = 1
+id       = "BENCH-057"
+title    = "An lmax over f64 is rejected: the element type must be totally ordered (BLS0312)"
+priority = "P0"
+source   = "R04 §12 T11 (MaxErrors); R04 §7.2 (Max<T> requires T: Ord, which excludes f64); LANGUAGE §5.1"
+features = ["LANG-120", "LANG-124", "ANA-005"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = "The cell declaration on line 8 uses f64 as the LMax element; BLS0312 is reported there."
+
+[backend.compile]
+status = "unimplemented"
+unimplemented = ["LANG-120", "LANG-124", "ANA-005"]
+until = "M5"
+
+[[expect_diag]]
+code     = "BLS0312"
+line     = 8
+severity = "error"

@@ -1,0 +1,78 @@
+schema   = 1
+id       = "BENCH-303"
+title    = "T4 merge at the sender: exactly one message {k↦{1,2}}; upd = store = {k↦{1,2}} and both_eph at r@2"
+priority = "P0"
+source   = "R11/G1 §7 T4 (✓sim); R11 §3.3 D9 (merge at the sender)"
+features = ["LANG-122", "LANG-126", "LANG-137", "LANG-280", "SEM-104", "SEM-105", "DIST-005"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+R11 T4: "exactly one message, (a → r, send tick 1, upd, key (), value {k↦{1,2}})". At r, tick 2: upd = store =
+{k↦{1,2}} and both_eph holds (and persists).
+Ultimate L-model at r (R11 T4, the same under every schedule): store ↦ {k↦{1,2}} and both_eph; the `final` rows state
+it.
+"""
+
+[deploy]
+nodes = [{ name = "a", role = "Src" }, { name = "r", role = "Dst" }]
+
+[run]
+ticks = 4
+stop  = "ticks"
+
+[[input]]
+node = "a"
+tick = 1
+rel  = "go"
+rows = [[]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-126", "LANG-137", "LANG-280", "SEM-104", "SEM-105", "DIST-005"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-126", "LANG-137", "LANG-280", "SEM-104", "SEM-105", "DIST-005"]
+until = "M7"
+
+[[expect_send]]
+from    = "a"
+to      = "r"
+channel = "upd"
+row     = [[["k", [1, 2]]]]
+tick    = 1
+count   = 1
+
+[[expect]]
+node = "r"
+rel  = "upd"
+tick = 2
+rows = [[[["k", [1, 2]]]]]
+
+[[expect]]
+node  = "r"
+rel   = "store"
+row   = [[["k", [1, 2]]]]
+holds = "2.."
+
+[[expect]]
+node   = "r"
+rel    = "both_eph"
+row    = []
+absent = "..=1"
+holds  = "2.."
+
+# ---- the ultimate L-model (contents at the end of the run)
+[[expect]]
+node  = "r"
+rel   = "store"
+final = true
+rows  = [[[["k", [1, 2]]]]]
+
+[[expect]]
+node  = "r"
+rel   = "both_eph"
+final = true
+rows  = [[]]

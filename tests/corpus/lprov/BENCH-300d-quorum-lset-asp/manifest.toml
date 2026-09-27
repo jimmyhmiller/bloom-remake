@@ -1,0 +1,26 @@
+schema   = 1
+id       = "BENCH-300"
+title    = "T1 in the ASP encoding: counterexample runs exist (clingo finds 16)"
+priority = "P0"
+source   = "R11/G1 §7 T1 (\"clingo finds 16 counterexample runs\") and §5.1 (validated fragment, T1)"
+features = ["LANG-126", "LANG-153", "LANG-201", "SEM-106", "VER-003", "VER-040", "VER-041"]
+program  = "program.bls"
+spec     = "spec.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+R11 §5.1: "clingo enumerates 16 counterexample runs, whose 10 minimal omission sets equal the brute-force LDFI
+result". 16 = the omission sets over the five tick-1 votes with at least three lost: C(5,3) + C(5,4) + C(5,5). The
+check must fail (some model violates the invariant). The model count is part of R11's validated fragment and is
+pinned in `bounds.counterexample_models` for the ASP backend's enumeration mode.
+"""
+
+[backend.asp]
+status = "unimplemented"
+unimplemented = ["LANG-126", "LANG-153", "LANG-201", "SEM-106", "VER-003", "VER-040", "VER-041"]
+until = "M10"
+
+[expect_verify]
+check  = "asp"
+result = "fails"
+bounds = { ticks = 4, eff = 2, crashes = 0, counterexample_models = 16 }

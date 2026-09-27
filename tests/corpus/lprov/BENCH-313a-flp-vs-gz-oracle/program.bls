@@ -1,0 +1,20 @@
+//! BENCH-313a. T14 on the oracle: the Dedalus^L form yields p = {a, b} in the boot tick.
+//!
+//! R11/G1 T14: the FLP-vs-GZ oracle for the verifiers, ported to Blossom. The R11 program:
+//!
+//!     lat p() : lset<sym>;   p(; {a}) :- boot();   p(; {b}) :- s = p[], s.size > 0.
+//!
+//! Its ASP form is `p(a). p(b) :- #count{X:p(X)} > 0.`. Dedalus^L's least fixpoint gives {a, b}, and so do FLP and
+//! clingo's Ferraris semantics; Gelfond–Zhang's Alog has no answer set (GZ Ex. 8). The recursion goes through a
+//! monotone size threshold, so it is positive and stays in one stratum.
+
+program flp_vs_gz version 1;
+
+cell p: LSet<String>;
+
+bootstrap {
+    emit p(set["a"]);
+}
+grow: while p.size() > 0 {
+    emit p(set["b"]);
+}

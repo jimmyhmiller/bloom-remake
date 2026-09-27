@@ -1,0 +1,45 @@
+schema   = 1
+id       = "BENCH-303"
+title    = "T4 under every async schedule: both_eph is ultimately true"
+priority = "P0"
+source   = "R11/G1 §7 T4 (\"both_eph is ultimately true under every async schedule\"); R11 §4.1 C6"
+features = ["LANG-126", "LANG-137", "SEM-040", "SEM-044", "SEM-105", "SEM-107", "TEST-001", "TEST-002"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+Whatever the delay of the single merged message, both elements arrive in one batch, so both_eph holds from the
+arrival tick on and is in the ultimate model of every run. Without merge at the sender (two messages), a schedule
+that delivered them in different ticks would never make both_eph true: that is the observable content of C6.
+"""
+
+[deploy]
+nodes = [{ name = "a", role = "Src" }, { name = "r", role = "Dst" }]
+
+[run]
+ticks = 40
+stop  = "quiescent"
+seeds = 32
+
+[[input]]
+node = "a"
+tick = 1
+rel  = "go"
+rows = [[]]
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-126", "LANG-137", "SEM-040", "SEM-044", "SEM-105", "SEM-107", "TEST-001", "TEST-002"]
+until = "M8"
+
+[[expect]]
+node  = "r"
+rel   = "both_eph"
+final = true
+rows  = [[]]
+
+[[expect]]
+node  = "r"
+rel   = "store"
+final = true
+rows  = [[[["k", [1, 2]]]]]

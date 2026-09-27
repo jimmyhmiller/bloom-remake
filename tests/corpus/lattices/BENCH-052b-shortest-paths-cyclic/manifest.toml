@@ -1,0 +1,52 @@
+schema   = 1
+id       = "BENCH-052"
+title    = "ShortestPathsL, cyclic input: exact min_cost set"
+priority = "P0"
+source   = "R04 §12 T3 (bud test/tc_lattice.rb ShortestPathsL: cyclic input and expected min_cost verbatim)"
+features = ["LANG-040", "LANG-121", "LANG-122", "LANG-124", "LANG-125", "LANG-128", "SEM-030", "SEM-031", "SEM-032",
+            "SEM-103"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+R04 T3's cyclic input: [a,b,20],[a,b,21],[b,a,5],[b,a,8],[b,c,10],[b,c,12],[a,c,35],[d,a,15],[d,b,5]. Cycles only
+raise costs, so the lmin recursion converges inside tick 1 and min_cost is exactly R04's set, including the cyclic
+pairs (a,a,25) and (b,b,25).
+"""
+
+[run]
+ticks = 4
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "link_in"
+rows = [["a", "b", 20], ["a", "b", 21], ["b", "a", 5], ["b", "a", 8], ["b", "c", 10], ["b", "c", 12],
+        ["a", "c", 35], ["d", "a", 15], ["d", "b", 5]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-121", "LANG-122", "LANG-124", "LANG-125", "LANG-128", "SEM-030", "SEM-031",
+                 "SEM-032", "SEM-103"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-121", "LANG-122", "LANG-124", "LANG-125", "LANG-128", "SEM-030", "SEM-031",
+                 "SEM-032", "SEM-103"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel  = "min_cost"
+tick = 1
+rows = [["a", "a", 25], ["a", "b", 20], ["a", "c", 30], ["b", "a", 5], ["b", "b", 25], ["b", "c", 10],
+        ["d", "a", 10], ["d", "b", 5], ["d", "c", 15]]
+
+[[expect]]
+node  = "n1"
+rel   = "min_cost"
+final = true
+rows  = [["a", "a", 25], ["a", "b", 20], ["a", "c", 30], ["b", "a", 5], ["b", "b", 25], ["b", "c", 10],
+         ["d", "a", 10], ["d", "b", 5], ["d", "c", 15]]

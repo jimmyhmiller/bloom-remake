@@ -1,0 +1,26 @@
+schema   = 1
+id       = "BENCH-308"
+title    = "T9 in ASP (Δ = 3, horizon 6): 9 schedules split 3 + 6 into exactly two ultimate models"
+priority = "P0"
+source   = "R11/G1 §7 T9 (\"clingo: the 9 schedules split 3 + 6\"; ✓clingo) and §5.1 (validated fragment, T9)"
+features = ["LANG-127", "LANG-153", "LANG-201", "SEM-106", "SEM-107", "VER-003", "VER-040", "VER-041"]
+program  = "program.bls"
+spec     = "spec.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+R11 T9: 3 schedules give M1 = {votes ↦ {bride, groom}, at_least_one, both} and 6 give M1 ∪ {exactly_one}. EFF 1 allows
+no omission, so the choice is only the arrival tick of each vote. The invariant "exactly_one never holds" fails in
+the 6 schedules whose arrivals differ, so the check must fail; the model and ultimate-model counts are pinned in
+`bounds` for the backend's enumeration mode.
+"""
+
+[backend.asp]
+status = "unimplemented"
+unimplemented = ["LANG-127", "LANG-153", "LANG-201", "SEM-106", "SEM-107", "VER-003", "VER-040", "VER-041"]
+until = "M10"
+
+[expect_verify]
+check  = "asp"
+result = "fails"
+bounds = { ticks = 6, delay = 3, eff = 1, crashes = 0, schedules = 9, counterexample_models = 6, ultimate_models = 2 }

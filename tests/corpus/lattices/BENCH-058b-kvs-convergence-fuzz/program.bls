@@ -1,0 +1,42 @@
+//! BENCH-058b. Replica convergence of the Bloom^L KVS under fuzzing (R04 §12 T12: "any order of puts and
+//! replications converges"). Each replica merges a put into its map lattice and forwards the put, once, to every
+//! other replica; replicas also merge whole stores shipped by `cause_repl`. Every rule is a lattice merge, so the
+//! order, batching and duplication of deliveries cannot change the final stores.
+
+program kvs_convergence version 1;
+
+role Client: cluster;
+role Replica: cluster;
+
+channel kvput(reqid: u64, key: String, val: LSet<String>): Client -> Replica;
+channel repl_put(key: String, val: LSet<String>): Replica -> Replica;
+channel repl_propagate(store: LMap<String, LSet<String>>): Replica -> Replica;
+
+at Client {
+    input do_put(reqid: u64, dst: Node<Replica>, key: String, val: String);
+
+    put: on do_put(id, r, k, v) {
+        send kvput(id, k, set[v]) to r;
+    }
+}
+
+at Replica {
+    input cause_repl(target: Node<Replica>);
+    cell kv_store: LMap<String, LSet<String>>;
+
+    store: on kvput(_, k, v) {
+        emit kv_store(map[k => v]);
+        for r in Replica where r != self {
+            send repl_put(k, v) to r;
+        }
+    }
+    absorb_put: on repl_put(k, v) {
+        emit kv_store(map[k => v]);
+    }
+    replicate: on cause_repl(t) {
+        send repl_propagate(kv_store) to t;
+    }
+    absorb_store: on repl_propagate(m) {
+        emit kv_store(m);
+    }
+}

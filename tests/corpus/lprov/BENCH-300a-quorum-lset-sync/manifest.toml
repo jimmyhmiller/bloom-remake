@@ -1,0 +1,109 @@
+schema   = 1
+id       = "BENCH-300"
+title    = "T1 quorum vote over lset (k = 3 of 5): decided holds at c from tick 2"
+priority = "P0"
+source   = "R11/G1 §7 T1 (failure-free states, checked with the R11 reference simulator); R11 §3.6"
+features = ["LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-126", "LANG-153", "LANG-241", "LANG-280", "SEM-101",
+            "SEM-104"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+R11 T1, failure-free, at c: @0 and @1 votes ⊥ and decided false; @2, @3, @4 votes = {v1,…,v5} and decided true.
+Every voter casts at tick 1 and the votes arrive together at tick 2.
+Ultimate L-model at c (R11 T1): votes ↦ {v1,…,v5} and decided; the `final` rows state it.
+"""
+
+[deploy]
+nodes = [
+    { name = "v1", role = "Voter" },
+    { name = "v2", role = "Voter" },
+    { name = "v3", role = "Voter" },
+    { name = "v4", role = "Voter" },
+    { name = "v5", role = "Voter" },
+    { name = "c", role = "Coord" },
+]
+
+[run]
+ticks = 5
+stop  = "ticks"
+
+[[input]]
+node = "v1"
+tick = 1
+rel  = "cast"
+rows = [[]]
+
+[[input]]
+node = "v2"
+tick = 1
+rel  = "cast"
+rows = [[]]
+
+[[input]]
+node = "v3"
+tick = 1
+rel  = "cast"
+rows = [[]]
+
+[[input]]
+node = "v4"
+tick = 1
+rel  = "cast"
+rows = [[]]
+
+[[input]]
+node = "v5"
+tick = 1
+rel  = "cast"
+rows = [[]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-126", "LANG-153", "LANG-241", "LANG-280",
+                 "SEM-101", "SEM-104"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-126", "LANG-153", "LANG-241", "LANG-280",
+                 "SEM-101", "SEM-104"]
+until = "M7"
+
+[[expect]]
+node = "c"
+rel  = "votes"
+tick = 0
+rows = []
+
+[[expect]]
+node = "c"
+rel  = "votes"
+tick = 1
+rows = []
+
+[[expect]]
+node  = "c"
+rel   = "votes"
+row   = [["v1", "v2", "v3", "v4", "v5"]]
+holds = "2..=4"
+
+[[expect]]
+node   = "c"
+rel    = "decided"
+row    = []
+absent = "..=1"
+holds  = "2..=4"
+
+# ---- the ultimate L-model (contents at the end of the run)
+[[expect]]
+node  = "c"
+rel   = "votes"
+final = true
+rows  = [[["v1", "v2", "v3", "v4", "v5"]]]
+
+[[expect]]
+node  = "c"
+rel   = "decided"
+final = true
+rows  = [[]]

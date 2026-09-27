@@ -1,0 +1,31 @@
+schema   = 1
+id       = "BENCH-301"
+title    = "T2 retry variant under LDFI 3/3/0: exactly one minimal falsifier of size 4"
+priority = "P0"
+source   = "R11/G1 §7 T2 retry variant (✓sim)"
+features = ["LANG-126", "LANG-137", "LANG-153", "LANG-201", "TEST-020", "TEST-022", "TEST-023", "TEST-026", "TEST-028",
+            "TEST-029", "TEST-140", "TEST-142"]
+program  = "program.bls"
+spec     = "spec.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+With EOT 3 the tick-3 sends arrive too late, so hi fails iff b's and d's sends at ticks 1 and 2 are all lost.
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-126", "LANG-137", "LANG-153", "LANG-201", "TEST-020", "TEST-022", "TEST-023", "TEST-026",
+                 "TEST-028", "TEST-029", "TEST-140", "TEST-142"]
+until = "M8"
+
+[expect_ldfi]
+eot        = 3
+eff        = 3
+crashes    = 0
+nodes      = ["A", "B", "D", "S"]
+verdict    = "counterexample"
+crash_view = "frozen"
+falsifiers = [
+    ["O(B,S,1)", "O(B,S,2)", "O(D,S,1)", "O(D,S,2)"],
+]

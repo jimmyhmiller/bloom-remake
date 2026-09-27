@@ -1,0 +1,29 @@
+schema   = 1
+id       = "BENCH-303"
+title    = "T4 under LDFI 3/2/0, post 2 ∈ store[k]: the falsifier is {O(a,r,1)}"
+priority = "P0"
+source   = "R11/G1 §7 T4 (LDFI 3/2/0 ✓sim)"
+features = ["LANG-126", "LANG-137", "LANG-201", "SEM-105", "TEST-020", "TEST-022", "TEST-023", "TEST-026", "TEST-028",
+            "TEST-029", "TEST-140"]
+program  = "program.bls"
+spec     = "spec.bls"
+derived  = false
+expected_from = "literature"
+notes    = "There is one (merged) message, so losing it is the only falsifier."
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-126", "LANG-137", "LANG-201", "SEM-105", "TEST-020", "TEST-022", "TEST-023", "TEST-026",
+                 "TEST-028", "TEST-029", "TEST-140"]
+until = "M8"
+
+[expect_ldfi]
+eot        = 3
+eff        = 2
+crashes    = 0
+nodes      = ["A", "R"]
+verdict    = "counterexample"
+crash_view = "frozen"
+falsifiers = [
+    ["O(A,R,1)"],
+]

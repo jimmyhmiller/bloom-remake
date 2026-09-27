@@ -1,0 +1,20 @@
+//! BENCH-307a. T8 in lockstep rounds: c = t at tick t, and ge5 holds from tick 5.
+//!
+//! R11/G1 T8: an ultimate value that diverges, ported to Blossom. The R11 program:
+//!
+//!     lat c() : lmax<int>      c(; 0) :- bootstrap().      c(; v+1)@next :- v = c[].      ge5() :- v = c[], v >= 5.
+//!
+//! c = t at every tick t. Its ultimate value is the non-compact ideal of all naturals (the history increases forever,
+//! D11), while ge5 is an ultimate threshold fact. The program is never quiescent (SEM-010).
+
+program diverging_counter version 1;
+
+cell c: LMax<i64>;
+
+bootstrap {
+    emit c(0);
+}
+grow: while let v = c {
+    next c(v + 1);
+}
+view ge5() = c >= 5;

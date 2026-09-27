@@ -1,0 +1,22 @@
+//! BENCH-068b. Stratification negative (R04 §12 T22): `lt_eq` on a growing receiver inside a recursive cycle must be
+//! rejected. `x.leq!(y)` is antitone in x (R04 §2.2), an exact occurrence; the cycle a → le → a runs through it
+//! within one tick (BLS0502).
+
+program leq_in_recursion version 1;
+
+input seed_a(k: u64, e: u64);
+input seed_b(k: u64, e: u64);
+
+table a(k: u64, s: LSet<u64>);
+table b(k: u64, s: LSet<u64>);
+
+feed_a: on seed_a(k, e) {
+    emit a(k, set[e]);
+}
+feed_b: on seed_b(k, e) {
+    emit b(k, set[e]);
+}
+view le(k) = a(k, x), b(k, y) where x.leq!(y);
+grow: while le(k) {
+    emit a(k, set[k]);
+}

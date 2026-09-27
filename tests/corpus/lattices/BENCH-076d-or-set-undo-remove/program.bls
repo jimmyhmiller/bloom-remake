@@ -1,0 +1,60 @@
+//! BENCH-076d. OR-Set deletion semantics (Dolan PODC'20 §1, Fig. 1; R13 §5 and §12 T4), replicated on two nodes.
+//!
+//! An observed-remove set: every add carries a unique tag, and a remove tombstones exactly the tags of the element that
+//! the removing replica has observed. Causality fixes the sequential case (remove, then re-add: the element is
+//! present). But the OR-Set is not undoable: "doing and undoing a remove yields a different result from not removing
+//! at all". The undo of a remove can only re-add the element with a fresh tag (tombstones are permanent), and a remove
+//! made concurrently at another replica never observed that tag. So with a concurrent remove elsewhere, "remove, then
+//! undo" leaves the element present, while "no remove" leaves it absent.
+//!
+//! Updates are merged locally and shipped as deltas to the other replica (R04 §5.3); the set is a product of two
+//! grow-only sets, so every delivery order converges.
+
+program or_set version 1;
+
+role Replica: cluster;
+
+/// (element, tag) pairs: the tags added, and the tags tombstoned by removes.
+pub lattice ORSet {
+    adds: LSet<(String, u64)>,
+    removes: LSet<(String, u64)>,
+}
+
+channel or_delta(d: ORSet): Replica -> Replica;
+
+at Replica {
+    /// Add `e` with a tag that is unique across the whole run (the workload supplies it).
+    input add(e: String, tag: u64);
+    input remove(e: String);
+    /// The undo of an earlier remove of `e`: `e` is added again with the fresh tag `tag`.
+    input undo_remove(e: String, tag: u64);
+
+    cell s: ORSet;
+
+    do_add: on add(e, tag) {
+        emit s(ORSet { adds: set[(e, tag)] });
+        for p in Replica where p != self {
+            send or_delta(ORSet { adds: set[(e, tag)] }) to p;
+        }
+    }
+    /// Observed remove: tombstones every tag of `e` this replica holds now. The header reads the set the handler
+    /// writes, so the local tombstones land at t+1; the delta leaves in this tick.
+    do_remove: on remove(e), (e, tag) in s.adds {
+        next s(ORSet { removes: set[(e, tag)] });
+        for p in Replica where p != self {
+            send or_delta(ORSet { removes: set[(e, tag)] }) to p;
+        }
+    }
+    do_undo: on undo_remove(e, tag) {
+        emit s(ORSet { adds: set[(e, tag)] });
+        for p in Replica where p != self {
+            send or_delta(ORSet { adds: set[(e, tag)] }) to p;
+        }
+    }
+    absorb: on or_delta(d) {
+        emit s(d);
+    }
+
+    /// An element is a member while one of its tags is not tombstoned.
+    view member(e) = (e, tag) in s.adds, not ((e, tag) in s.removes);
+}

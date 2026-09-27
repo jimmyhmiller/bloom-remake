@@ -1,0 +1,13 @@
+//! BENCH-051c. Bud tc_lattice `EmbedMax` (R04 §12 T2): an lmax embedded as a column of a table. Tuples that differ
+//! only in the lattice column share the key `k`, so they merge instead of conflicting (CR-51, LANG-121).
+
+program embed_max version 1;
+
+input put(k: String, v: i64);
+
+/// The key is `k` (every non-lattice column); `v` merges per key.
+table t(k: String, v: LMax<i64>);
+
+store: on put(k, v) {
+    emit t(k, v);
+}

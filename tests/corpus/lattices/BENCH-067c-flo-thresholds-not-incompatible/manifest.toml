@@ -1,0 +1,23 @@
+schema   = 1
+id       = "BENCH-067"
+title    = "Flo: thresholds that are not pairwise incompatible are rejected (BLS0707)"
+priority = "P1"
+source   = "R04 §12 T21 (\"Threshold sets that are not pairwise incompatible must be rejected\"); R04 §2.2 (LVars)"
+features = ["LANG-124", "LANG-126", "ANA-005"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The threshold elements on line 15 are constants, so the compiler checks incompatibility itself (LANGUAGE §11.6):
+3 ⊔ 7 = 7 is not ⊤, so the set is not pairwise incompatible and BLS0707 is reported there.
+"""
+
+[backend.compile]
+status = "unimplemented"
+unimplemented = ["LANG-124", "LANG-126", "ANA-005"]
+until = "M5"
+
+[[expect_diag]]
+code     = "BLS0707"
+line     = 15
+severity = "error"

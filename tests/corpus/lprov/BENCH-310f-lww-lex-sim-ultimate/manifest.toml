@@ -1,0 +1,54 @@
+schema   = 1
+id       = "BENCH-310"
+title    = "T11 under every schedule: the register converges to ((1,r2),\"y\") with seen_v11 and val_is_y"
+priority = "P1"
+source   = "R11/G1 §7 T11 (\"Ultimate model in every schedule: {reg ↦ ((1,r2),\\\"y\\\"), seen_v11, val_is_y}\")"
+features = ["LANG-127", "LANG-131", "LANG-137", "LANG-153", "SEM-040", "SEM-044", "SEM-107", "TEST-001", "TEST-002"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = "In every seed r3 ends with ((1,r2),y), seen_v11 and val_is_y, whichever write arrives first."
+
+[deploy]
+nodes = [{ name = "r1", role = "Writer" }, { name = "r2", role = "Writer" }, { name = "r3", role = "Reader" }]
+
+[run]
+ticks = 40
+stop  = "quiescent"
+seeds = 32
+
+[[input]]
+node = "r1"
+tick = 1
+rel  = "write"
+rows = [[1, "r1", "x"]]
+
+[[input]]
+node = "r2"
+tick = 1
+rel  = "write"
+rows = [[1, "r2", "y"]]
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-127", "LANG-131", "LANG-137", "LANG-153", "SEM-040", "SEM-044", "SEM-107", "TEST-001",
+                 "TEST-002"]
+until = "M8"
+
+[[expect]]
+node  = "r3"
+rel   = "reg"
+final = true
+rows  = [[{ blossom = 'Lex::of((1, "r2"), "y")' }]]
+
+[[expect]]
+node  = "r3"
+rel   = "seen_v11"
+final = true
+rows  = [[]]
+
+[[expect]]
+node  = "r3"
+rel   = "val_is_y"
+final = true
+rows  = [[]]

@@ -1,0 +1,45 @@
+schema   = 1
+id       = "BENCH-300"
+title    = "T1 under LDFI 4/2/0: exactly 10 minimal falsifiers, the 3-subsets of {O(vi,c,1)}"
+priority = "P0"
+source   = "R11/G1 §7 T1 (LDFI 4/2/0: ✓sim, ✓clingo) and §6.3 (cardinality thresholds count elements)"
+features = ["LANG-126", "LANG-153", "LANG-201", "TEST-020", "TEST-022", "TEST-023", "TEST-024", "TEST-026", "TEST-028",
+            "TEST-029", "TEST-140", "TEST-141", "TEST-142"]
+program  = "program.bls"
+spec     = "spec.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+`decided` needs 3 distinct voters, so it is falsified exactly when at least 3 of the 5 tick-1 votes are lost: the 10
+minimal falsifiers are the 3-subsets (R11 T1; confirmed by an independent brute-force enumeration over this port's
+message pattern). With exact cardinality supports (TEST-141) the first hypothesis round is exactly these 10 sets, so
+a find-all run needs the failure-free run plus 10 runs: runs_max = 11. (All-contributors lineage would instead start
+with 5 non-falsifying single omissions.)
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-126", "LANG-153", "LANG-201", "TEST-020", "TEST-022", "TEST-023", "TEST-024", "TEST-026",
+                 "TEST-028", "TEST-029", "TEST-140", "TEST-141", "TEST-142"]
+until = "M8"
+
+[expect_ldfi]
+eot        = 4
+eff        = 2
+crashes    = 0
+nodes      = ["V1", "V2", "V3", "V4", "V5", "C"]
+verdict    = "counterexample"
+crash_view = "frozen"
+runs_max   = 11
+falsifiers = [
+    ["O(V1,C,1)", "O(V2,C,1)", "O(V3,C,1)"],
+    ["O(V1,C,1)", "O(V2,C,1)", "O(V4,C,1)"],
+    ["O(V1,C,1)", "O(V2,C,1)", "O(V5,C,1)"],
+    ["O(V1,C,1)", "O(V3,C,1)", "O(V4,C,1)"],
+    ["O(V1,C,1)", "O(V3,C,1)", "O(V5,C,1)"],
+    ["O(V1,C,1)", "O(V4,C,1)", "O(V5,C,1)"],
+    ["O(V2,C,1)", "O(V3,C,1)", "O(V4,C,1)"],
+    ["O(V2,C,1)", "O(V3,C,1)", "O(V5,C,1)"],
+    ["O(V2,C,1)", "O(V4,C,1)", "O(V5,C,1)"],
+    ["O(V3,C,1)", "O(V4,C,1)", "O(V5,C,1)"],
+]

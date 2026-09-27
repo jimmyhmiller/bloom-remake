@@ -1,0 +1,95 @@
+schema   = 1
+id       = "BENCH-058"
+title    = "QuorumKvsClient: the write returns after W acks and the read returns the lub of R responses"
+priority = "P1"
+source   = "R04 §12 T12; R04 §3.9 (Conway thesis App. A.1 QuorumKvsClient: put_reqs with an embedded lset + threshold)"
+features = ["LANG-042", "LANG-121", "LANG-122", "LANG-124", "LANG-126", "LANG-137", "LANG-153", "LANG-241", "SEM-070",
+            "SEM-105"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+Re-derived scenario with W = R = 2 of three replicas, and r3 crashed from tick 1 so only two replicas ever answer.
+Tick 1: the client writes k=a to every replica, and r1 alone also holds k=z (a local seed). r1 and r2 store a and
+ack at tick 2; the acks arrive at tick 3, so the write returns at tick 3 (put_done), with two acks. Tick 4: the
+client reads k; r1 answers {a,z} and r2 answers {a} at tick 5; at tick 6 the two responses are merged and the read
+returns their lub {a,z}. With r3 crashed, neither quorum could be met with W or R = 3.
+"""
+
+[deploy]
+nodes = [
+    { name = "c", role = "Client" },
+    { name = "r1", role = "Replica" },
+    { name = "r2", role = "Replica" },
+    { name = "r3", role = "Replica" },
+]
+
+[run]
+ticks = 9
+stop  = "ticks"
+
+[[fault]]
+kind = "crash"
+node = "r3"
+tick = 1
+
+[[input]]
+node = "c"
+tick = 1
+rel  = "do_put"
+rows = [[1, "k", "a"]]
+
+[[input]]
+node = "r1"
+tick = 1
+rel  = "seed"
+rows = [["k", "z"]]
+
+[[input]]
+node = "c"
+tick = 4
+rel  = "do_get"
+rows = [[2, "k"]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-042", "LANG-121", "LANG-122", "LANG-124", "LANG-126", "LANG-137", "LANG-153", "LANG-241",
+                 "SEM-070", "SEM-105"]
+until = "M7"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-042", "LANG-121", "LANG-122", "LANG-124", "LANG-126", "LANG-137", "LANG-153", "LANG-241",
+                 "SEM-070", "SEM-105"]
+until = "M7"
+
+[[expect]]
+node   = "c"
+rel    = "put_done"
+row    = [1]
+absent = "..=2"
+holds  = "3.."
+
+[[expect]]
+node = "c"
+rel  = "put_reqs"
+tick = 3
+rows = [[1, ["r1", "r2"]]]
+
+[[expect]]
+node = "c"
+rel  = "read_done"
+tick = 5
+rows = []
+
+[[expect]]
+node = "c"
+rel  = "read_done"
+tick = 6
+rows = [[2, ["a", "z"]]]
+
+[[expect]]
+node  = "c"
+rel   = "read_done"
+final = true
+rows  = [[2, ["a", "z"]]]

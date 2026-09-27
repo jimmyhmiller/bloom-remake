@@ -1,0 +1,60 @@
+schema   = 1
+id       = "BENCH-060"
+title    = "Monotone cart, bad input: a second, different checkout is a conflict (BLSR006)"
+priority = "P1"
+source   = "R04 §12 T14 (\"bad inputs raise errors\"); R03 §6.8 and §11 T20 (a second different checkout is an error)"
+features = ["LANG-122", "LANG-124", "LANG-126", "LANG-135", "LANG-137", "LANG-153", "LANG-180", "LANG-241", "SEM-030",
+            "SEM-050"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+Two checkouts for session 1 with different lower bounds reach r1 and r2 at tick 2. Gossip carries each to the other
+replicas, and at tick 3 every replica merges the two different checkout values of one LPoint: the tick aborts with
+BLSR006 on r1, r2 and r3 (r3 receives both in the same delivered batch).
+"""
+
+[deploy]
+nodes = [
+    { name = "c", role = "Client" },
+    { name = "r1", role = "Replica" },
+    { name = "r2", role = "Replica" },
+    { name = "r3", role = "Replica" },
+]
+
+[run]
+ticks = 5
+stop  = "ticks"
+
+[[input]]
+node = "c"
+tick = 1
+rel  = "do_checkout"
+rows = [["r1", 1, 18, 1], ["r2", 1, 18, 2]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-124", "LANG-126", "LANG-135", "LANG-137", "LANG-153", "LANG-180", "LANG-241",
+                 "SEM-030", "SEM-050"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-122", "LANG-124", "LANG-126", "LANG-135", "LANG-137", "LANG-153", "LANG-180", "LANG-241",
+                 "SEM-030", "SEM-050"]
+until = "M7"
+
+[[expect_error]]
+code = "BLSR006"
+node = "r1"
+tick = 3
+
+[[expect_error]]
+code = "BLSR006"
+node = "r2"
+tick = 3
+
+[[expect_error]]
+code = "BLSR006"
+node = "r3"
+tick = 3

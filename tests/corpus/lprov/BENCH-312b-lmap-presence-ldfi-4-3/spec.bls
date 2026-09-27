@@ -1,0 +1,17 @@
+//! BENCH-312b spec: R11 T13, EOT 4, EFF 3, no crashes, post = key?(k) at r3.
+
+spec PresenceLdfi43 for r#program {
+    nodes CL, R1, R2, R3;
+    assign Client = [CL];
+    assign Replica = [R1, R2];
+    assign Observer = [R3];
+
+    fact do_put("k", 1) @ CL at tick 1;
+
+    faults { eot: 4, eff: 3, crashes: 0, model: sync }
+
+    view pre() = not crashed(R3);
+    view post() = has_k() @ R3;
+
+    check ldfi expect fails;
+}

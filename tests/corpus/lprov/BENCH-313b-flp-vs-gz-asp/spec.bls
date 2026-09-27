@@ -1,0 +1,13 @@
+//! BENCH-313b spec: the ASP backend must agree with the simulator on T14. The invariant claims that {a, b} is never
+//! reached; under FLP/Ferraris semantics (clingo's default, CR-54) the model with p = {a, b} exists and violates it,
+//! so the check fails. A backend configured with Gelfond–Zhang semantics would find no model at all and report
+//! "holds": that is the misconfiguration this oracle catches (VER-040).
+
+spec FlpOracle for r#program {
+    nodes N;
+
+    invariant never_both "p contains both a and b":
+        never has_both() @ N;
+
+    check asp { ticks: 1 } expect fails;
+}

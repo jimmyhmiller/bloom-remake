@@ -1,0 +1,31 @@
+//! BENCH-311a. T12 on FLP Ex. 2.13's input: no company controls another.
+//!
+//! R11/G1 T12: company control, recursion through a monotone sum (Ross–Sagiv Ex. 2.7; FLP Ex. 1.1/2.13), ported to
+//! Blossom. The R11 program:
+//!
+//!     lat cv(x: co, y: co) : lmap<co, lmax<int>>
+//!     cv(X, Y; {X ↦ N}) :- s(X, Y, N).
+//!     cv(X, Y; {Z ↦ N}) :- c(X, Z), s(Z, Y, N).
+//!     c(X, Y) :- cv(X, Y; m), X != Y, m.sum_values > 50.           -- monotone non-morphism + threshold
+//!
+//! The shares X holds in Y, directly or through companies X controls, are keyed by the holding company, so the sum
+//! counts each holder once. `sum_values` is monotone (LANG-282), so the recursion is positive: its meaning is the least
+//! fixpoint, which agrees with the FLP answer set (CR-54).
+
+program company_control version 1;
+
+input share(x: String, y: String, n: u64);
+
+table s(x: String, y: String, n: u64);
+table cv(x: String, y: String, m: LMap<String, LMax<u64>>);
+
+load: on share(x, y, n) {
+    emit s(x, y, n);
+}
+direct: while s(x, y, n) {
+    emit cv(x, y, map[x => n]);
+}
+via: while c(x, z), s(z, y, n) {
+    emit cv(x, y, map[z => n]);
+}
+view c(x, y) = cv(x, y, m) where x != y, m.sum_values() > 50;

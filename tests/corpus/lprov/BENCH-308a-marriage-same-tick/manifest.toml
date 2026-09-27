@@ -1,0 +1,94 @@
+schema   = 1
+id       = "BENCH-308"
+title    = "T9 marriage ceremony, same arrival tick: exactly_one never holds; at_least_one and both from tick 2"
+priority = "P0"
+source   = "R11/G1 §7 T9 (same arrival tick)"
+features = ["LANG-124", "LANG-126", "LANG-127", "LANG-153", "LANG-241", "SEM-021", "SEM-102"]
+program  = "program.bls"
+derived  = false
+expected_from = "literature"
+notes    = """
+Both parties vow at tick 1; both votes arrive at tick 2, so votes = {bride, groom} from the arrival tick on.
+Ultimate L-model for this schedule (R11 T9): M1 = {votes ↦ {bride, groom}, at_least_one, both}, without exactly_one;
+the `final` rows state it.
+"""
+
+[deploy]
+nodes = [{ name = "bride", role = "Party" }, { name = "groom", role = "Party" }, { name = "o", role = "Officiant" }]
+
+[run]
+ticks = 5
+stop  = "ticks"
+
+[[input]]
+node = "bride"
+tick = 1
+rel  = "say_yes"
+rows = [[]]
+
+[[input]]
+node = "groom"
+tick = 1
+rel  = "say_yes"
+rows = [[]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-124", "LANG-126", "LANG-127", "LANG-153", "LANG-241", "SEM-021", "SEM-102"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-124", "LANG-126", "LANG-127", "LANG-153", "LANG-241", "SEM-021", "SEM-102"]
+until = "M7"
+
+[[expect]]
+node  = "o"
+rel   = "votes"
+row   = [["bride", "groom"]]
+holds = "2.."
+
+[[expect]]
+node   = "o"
+rel    = "exactly_one"
+row    = []
+absent = "0.."
+
+[[expect]]
+node   = "o"
+rel    = "at_least_one"
+row    = []
+absent = "..=1"
+holds  = "2.."
+
+[[expect]]
+node   = "o"
+rel    = "both"
+row    = []
+absent = "..=1"
+holds  = "2.."
+
+# ---- the ultimate L-model (contents at the end of the run)
+[[expect]]
+node  = "o"
+rel   = "votes"
+final = true
+rows  = [[["bride", "groom"]]]
+
+[[expect]]
+node  = "o"
+rel   = "at_least_one"
+final = true
+rows  = [[]]
+
+[[expect]]
+node  = "o"
+rel   = "both"
+final = true
+rows  = [[]]
+
+[[expect]]
+node  = "o"
+rel   = "exactly_one"
+final = true
+rows  = []

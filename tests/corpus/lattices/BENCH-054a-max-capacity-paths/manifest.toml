@@ -1,0 +1,53 @@
+schema   = 1
+id       = "BENCH-054"
+title    = "MaxCapacityPaths: widest path per pair with lmax and min_of"
+priority = "P1"
+source   = "R04 §12 T5 (bud test/tc_lattice.rb MaxCapacityPaths); R04 §2.4 (lmax min_of is a morphism)"
+features = ["LANG-121", "LANG-122", "LANG-124", "LANG-125", "LANG-128", "SEM-030", "SEM-031", "SEM-103"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+R04 T5 names the test without its data. The graph is re-derived and includes a cycle: a→b 10, b→c 5, a→c 3,
+c→d 8, b→d 2, d→a 4. The expected widest-path capacities (the maximum over paths of the minimum edge capacity)
+were computed by exhaustive enumeration of simple paths from the definition, independently of any Blossom
+implementation.
+"""
+
+[run]
+ticks = 4
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "link_in"
+rows = [["a", "b", 10], ["b", "c", 5], ["a", "c", 3], ["c", "d", 8], ["b", "d", 2], ["d", "a", 4]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-121", "LANG-122", "LANG-124", "LANG-125", "LANG-128", "SEM-030", "SEM-031", "SEM-103"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-121", "LANG-122", "LANG-124", "LANG-125", "LANG-128", "SEM-030", "SEM-031", "SEM-103"]
+until = "M7"
+
+[[expect]]
+node  = "n1"
+rel   = "max_cap"
+final = true
+rows  = [["a", "a", 4], ["a", "b", 10], ["a", "c", 5], ["a", "d", 5],
+         ["b", "a", 4], ["b", "b", 4], ["b", "c", 5], ["b", "d", 5],
+         ["c", "a", 4], ["c", "b", 4], ["c", "c", 4], ["c", "d", 8],
+         ["d", "a", 4], ["d", "b", 4], ["d", "c", 4], ["d", "d", 4]]
+
+[[expect]]
+node = "n1"
+rel  = "max_cap"
+tick = 1
+rows = [["a", "a", 4], ["a", "b", 10], ["a", "c", 5], ["a", "d", 5],
+        ["b", "a", 4], ["b", "b", 4], ["b", "c", 5], ["b", "d", 5],
+        ["c", "a", 4], ["c", "b", 4], ["c", "c", 4], ["c", "d", 8],
+        ["d", "a", 4], ["d", "b", 4], ["d", "c", 4], ["d", "d", 4]]

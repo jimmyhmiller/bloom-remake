@@ -1,0 +1,51 @@
+schema   = 1
+id       = "BENCH-057"
+title    = "Embedded lattices: a conflict in a non-lattice column is a key violation (BLSR001)"
+priority = "P0"
+source   = "R04 §12 T11; R04 §3.6 item 2 (Bud merge_to_buf raises KeyConstraintError); SEM-050; CR-51"
+features = ["LANG-020", "LANG-121", "LANG-122", "LANG-124", "SEM-050", "SEM-100"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+Re-derived data. Tick 1: two claims for key a with the same owner and different lattice values merge (no error).
+Tick 2: a claim for key a with a different owner conflicts with the persisted row in the non-lattice column, so the
+tick aborts with BLSR001 naming both derivations.
+"""
+
+[run]
+ticks = 4
+stop  = "ticks"
+
+[[input]]
+node = "n1"
+tick = 1
+rel  = "claim"
+rows = [["a", "alice", 3], ["a", "alice", 7]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel  = "claim"
+rows = [["a", "bob", 9]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-020", "LANG-121", "LANG-122", "LANG-124", "SEM-050", "SEM-100"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-020", "LANG-121", "LANG-122", "LANG-124", "SEM-050", "SEM-100"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel  = "asset"
+tick = 1
+rows = [["a", "alice", 7]]
+
+[[expect_error]]
+code = "BLSR001"
+node = "n1"
+tick = 2

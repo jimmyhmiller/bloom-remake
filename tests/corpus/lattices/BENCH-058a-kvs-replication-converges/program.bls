@@ -1,0 +1,63 @@
+//! BENCH-058a. The Bloom^L KVS (SoCC'12 Figs. 6–7) with ReplicatedKvsReplica's anti-entropy (Conway thesis App. A.1;
+//! R04 §3.9). The store is a map lattice, so a put merges into it and a replication message merges a whole store:
+//!
+//!     kv_store       <= kvput {|c| {c.key => c.val}}
+//!     kvput_resp     <~ kvput {|c| [c.reqid, c.client_addr, ip_port]}
+//!     kvget_resp     <~ kvget {|c| [c.reqid, c.client_addr, kv_store.at(c.key), ip_port]}
+//!     repl_propagate <~ kvrepl {|r| [r.target_addr, kv_store]}
+//!     kv_store       <= repl_propagate {|r| r.kv_store}
+//!
+//! Values are LSet<String>, so concurrent puts to one key merge by union. The client and replica addresses are the
+//! channel direction and the transport-authenticated sender (`from c`) instead of payload columns.
+
+program replicated_kvs version 1;
+
+role Client: cluster;
+role Replica: cluster;
+
+channel kvput(reqid: u64, key: String, val: LSet<String>): Client -> Replica;
+channel kvput_resp(reqid: u64): Replica -> Client;
+channel kvget(reqid: u64, key: String): Client -> Replica;
+channel kvget_resp(reqid: u64, val: LSet<String>): Replica -> Client;
+channel repl_propagate(store: LMap<String, LSet<String>>): Replica -> Replica;
+
+at Client {
+    input do_put(reqid: u64, dst: Node<Replica>, key: String, val: String);
+    input do_get(reqid: u64, dst: Node<Replica>, key: String);
+    table put_acked(reqid: u64);
+    table got(reqid: u64, val: LSet<String>);
+
+    put: on do_put(id, r, k, v) {
+        send kvput(id, k, set[v]) to r;
+    }
+    get: on do_get(id, r, k) {
+        send kvget(id, k) to r;
+    }
+    acked: on kvput_resp(id) {
+        emit put_acked(id);
+    }
+    answered: on kvget_resp(id, v) {
+        emit got(id, v);
+    }
+}
+
+at Replica {
+    /// `cause_repl`: the test's trigger to ship this replica's whole store to a target replica.
+    input cause_repl(target: Node<Replica>);
+    cell kv_store: LMap<String, LSet<String>>;
+
+    store: on kvput(id, k, v) from c {
+        emit kv_store(map[k => v]);
+        send kvput_resp(id) to c;
+    }
+    /// `at` of a missing key is ⊥; a ⊥-valued reply is no message at all (SEM-101 N3).
+    lookup: on kvget(id, k) from c {
+        send kvget_resp(id, kv_store.at(k)) to c;
+    }
+    replicate: on cause_repl(t) {
+        send repl_propagate(kv_store) to t;
+    }
+    absorb: on repl_propagate(m) {
+        emit kv_store(m);
+    }
+}

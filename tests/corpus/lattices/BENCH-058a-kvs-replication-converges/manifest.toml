@@ -1,0 +1,119 @@
+schema   = 1
+id       = "BENCH-058"
+title    = "Replicated lattice KVS: puts to one replica plus cause_repl converge; gets return the merged value"
+priority = "P1"
+source   = "R04 §12 T12; R04 §3.9 (SoCC'12 Figs. 6–7 and Conway thesis App. A.1, verbatim Bloom^L KVS)"
+features = ["LANG-042", "LANG-062", "LANG-122", "LANG-124", "LANG-129", "LANG-137", "LANG-153", "LANG-241", "LANG-280",
+            "SEM-030", "SEM-101", "SEM-105"]
+program  = "program.bls"
+derived  = true
+expected_from = "literature"
+notes    = """
+The replica rules are the published ones; the workload is re-derived. Tick 1: put k=a to r1, k=b to r2, j=x to r1.
+Tick 3: r1 replicates to r2 and r2 to r3. Tick 4: r2 (now {j:{x}, k:{a,b}}) replicates to r1 and r3. From tick 5
+all three stores are equal. Tick 6: gets for k at r3 and for the missing key zz at r1. R04 T12 says a get returns
+"the merged value or ⊥": the merged value arrives for k, and for zz the reply's value is ⊥, which under
+⊥-normalization (SEM-101 N3, R11 §3.1) is no message, so the client never records reqid 11.
+"""
+
+[deploy]
+nodes = [
+    { name = "c1", role = "Client" },
+    { name = "r1", role = "Replica" },
+    { name = "r2", role = "Replica" },
+    { name = "r3", role = "Replica" },
+]
+
+[run]
+ticks = 10
+stop  = "ticks"
+
+[[input]]
+node = "c1"
+tick = 1
+rel  = "do_put"
+rows = [[1, "r1", "k", "a"], [2, "r2", "k", "b"], [3, "r1", "j", "x"]]
+
+[[input]]
+node = "r1"
+tick = 3
+rel  = "cause_repl"
+rows = [["r2"]]
+
+[[input]]
+node = "r2"
+tick = 3
+rel  = "cause_repl"
+rows = [["r3"]]
+
+[[input]]
+node = "r2"
+tick = 4
+rel  = "cause_repl"
+rows = [["r1"], ["r3"]]
+
+[[input]]
+node = "c1"
+tick = 6
+rel  = "do_get"
+rows = [[10, "r3", "k"], [11, "r1", "zz"]]
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-042", "LANG-062", "LANG-122", "LANG-124", "LANG-129", "LANG-137", "LANG-153", "LANG-241",
+                 "LANG-280", "SEM-030", "SEM-101", "SEM-105"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-042", "LANG-062", "LANG-122", "LANG-124", "LANG-129", "LANG-137", "LANG-153", "LANG-241",
+                 "LANG-280", "SEM-030", "SEM-101", "SEM-105"]
+until = "M7"
+
+[[expect]]
+node = "r1"
+rel  = "kv_store"
+tick = 2
+rows = [[[["j", ["x"]], ["k", ["a"]]]]]
+
+[[expect]]
+node = "r2"
+rel  = "kv_store"
+tick = 2
+rows = [[[["k", ["b"]]]]]
+
+[[expect]]
+node = "r2"
+rel  = "kv_store"
+tick = 4
+rows = [[[["j", ["x"]], ["k", ["a", "b"]]]]]
+
+[[expect]]
+node  = "r1"
+rel   = "kv_store"
+row   = [[["j", ["x"]], ["k", ["a", "b"]]]]
+holds = "5.."
+
+[[expect]]
+node  = "r2"
+rel   = "kv_store"
+row   = [[["j", ["x"]], ["k", ["a", "b"]]]]
+holds = "5.."
+
+[[expect]]
+node  = "r3"
+rel   = "kv_store"
+row   = [[["j", ["x"]], ["k", ["a", "b"]]]]
+holds = "5.."
+
+[[expect]]
+node  = "c1"
+rel   = "put_acked"
+final = true
+rows  = [[1], [2], [3]]
+
+[[expect]]
+node  = "c1"
+rel   = "got"
+final = true
+rows  = [[10, ["a", "b"]]]
