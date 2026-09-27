@@ -12,5 +12,11 @@ blossom-value.workspace = true
 blossom-schema.workspace = true
 blossom-wire.workspace = true
 
+thiserror.workspace = true
+blake3.workspace = true
+crc32c.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
 [lints]
 workspace = true
