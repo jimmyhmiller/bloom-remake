@@ -1,9 +1,9 @@
 ---
 source: crates/blossom-ir/src/tests.rs
-assertion_line: 342
+assertion_line: 372
 expression: text
 ---
-decl table r(x: u64)
-decl static s(x: u64)
+decl table r(x: u64) key(x)
+decl static s(x: u64) key(x)
 // r/from_s
 r(X) :- s(X).
