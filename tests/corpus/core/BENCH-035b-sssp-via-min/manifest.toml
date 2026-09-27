@@ -1,0 +1,30 @@
+schema = 1
+id = "BENCH-035"
+title = "SSSP via recursive MIN matches Dijkstra"
+priority = "P0"
+source = "R09 §13.1 and §16 T7 (RecStep VLDB'19 SSSP rules); FEATURES.md CR-09, SEM-031, BENCH-035"
+features = ["SEM-031", "LANG-045", "LANG-047", "LANG-120", "LANG-122", "LANG-124", "LANG-127", "LANG-085", "LANG-190"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "Distances from node 1 by Dijkstra: 1:0, 2:7, 3:9, 6:11 (via 3), 4:20 (via 3), 5:26 (via 4)."
+
+[run]
+ticks = 2
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-031", "LANG-045", "LANG-047", "LANG-120", "LANG-122", "LANG-124", "LANG-127", "LANG-085", "LANG-190"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-031", "LANG-045", "LANG-047", "LANG-120", "LANG-122", "LANG-124", "LANG-127", "LANG-085", "LANG-190", "SEM-002"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "sssp"
+tick = 0
+rows = [[1, 0], [2, 7], [3, 9], [4, 20], [5, 26], [6, 11]]

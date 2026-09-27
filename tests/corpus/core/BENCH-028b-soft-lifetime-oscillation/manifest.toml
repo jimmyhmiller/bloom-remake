@@ -1,0 +1,86 @@
+schema = 1
+id = "BENCH-028"
+title = "Soft-state lifetime inversion oscillates at runtime (mocked clock)"
+priority = "P1"
+source = "R01 TEST PROGRAMS T19 (Loo thesis App. A.3.1 case 2); R02 §3.3 (DI §3.3.1 TTL idiom); FEATURES.md SEM-061, BENCH-028"
+features = ["SEM-060", "SEM-061", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-190", "LANG-060"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Pings (refreshes) at ticks 1, 6, 11 and 16. A tuple born at tick r is carried while 10(t - r) < TTL: the body
+(TTL 100) holds r..=r+10, so it never lapses; the head (TTL 30) holds r..=r+3, so it lapses at ticks 5, 10, 15
+and 20 and reappears at the next refresh: it oscillates while its body is stable."""
+
+[run]
+ticks = 24
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-060", "SEM-061", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-190", "LANG-060"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-060", "SEM-061", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-190", "LANG-060", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ping"
+rows = [["x"]]
+
+[[input]]
+node = "n1"
+tick = 6
+rel = "ping"
+rows = [["x"]]
+
+[[input]]
+node = "n1"
+tick = 11
+rel = "ping"
+rows = [["x"]]
+
+[[input]]
+node = "n1"
+tick = 16
+rel = "ping"
+rows = [["x"]]
+
+[[expect]]
+node = "n1"
+rel = "body_alive"
+row = ["x"]
+absent = "0"
+holds = "1..=21"
+
+[[expect]]
+node = "n1"
+rel = "head_alive"
+row = ["x"]
+holds = "1..=4"
+absent = "5"
+
+[[expect]]
+node = "n1"
+rel = "head_alive"
+row = ["x"]
+holds = "6..=9"
+absent = "10"
+
+[[expect]]
+node = "n1"
+rel = "head_alive"
+row = ["x"]
+holds = "11..=14"
+absent = "15"
+
+[[expect]]
+node = "n1"
+rel = "head_alive"
+row = ["x"]
+holds = "16..=19"
+absent = "20.."

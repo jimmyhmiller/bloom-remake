@@ -1,0 +1,16 @@
+// BENCH-036 (R09 §16 T11, persistence and deletion across ticks) in Molly's Dedalus dialect: the `.ded` twin of
+// BENCH-036a.
+//
+//     p(X)@next :- p(X), !del_p(X).
+//     q(X) :- p(X).
+//
+// Molly makes the first column of every relation its location, so each relation gains a leading location column;
+// everything runs at node "n1". The inserts are timestamped facts of `p` itself at tick 1, and the deletion is the
+// event del_p(a) at tick 4.
+
+p(N, X)@next :- p(N, X), notin del_p(N, X);
+q(N, X) :- p(N, X);
+
+p("n1", "a")@1;
+p("n1", "b")@1;
+del_p("n1", "a")@4;

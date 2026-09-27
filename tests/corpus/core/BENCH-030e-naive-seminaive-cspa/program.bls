@@ -1,0 +1,47 @@
+//! BENCH-030: naive and semi-naive evaluation agree: context-sensitive points-to analysis CSPA (Graspan;
+//! RecStep VLDB'19, R09 §13.1), three mutually recursive relations.
+//!
+//!     valueFlow(y, x) :- assign(y, x).
+//!     valueFlow(x, y) :- assign(x, z), memoryAlias(z, y).
+//!     valueFlow(x, y) :- valueFlow(x, z), valueFlow(z, y).
+//!     memoryAlias(x, w) :- dereference(y, x), valueAlias(y, z), dereference(z, w).
+//!     valueAlias(x, y) :- valueFlow(z, x), valueFlow(z, y).
+//!     valueAlias(x, y) :- valueFlow(z, x), memoryAlias(z, w), valueFlow(w, y).
+//!     valueFlow(x, x) :- assign(x, y).
+//!     valueFlow(x, x) :- assign(y, x).
+//!     memoryAlias(x, x) :- assign(y, x).
+//!     memoryAlias(x, x) :- assign(x, y).
+//!
+//! A random program of 6 variables; memoryAlias gains non-reflexive pairs through dereference.
+
+program naive_seminaive_cspa version 1;
+
+static assign(x: String, y: String);
+static dereference(x: String, y: String);
+
+fact assign("x0", "x3");
+fact assign("x2", "x0");
+fact assign("x3", "x1");
+fact assign("x3", "x5");
+fact dereference("x2", "x5");
+fact dereference("x4", "x3");
+fact dereference("x5", "x1");
+
+view value_flow(x, y) {
+    assign(x, y);
+    assign(x, z), memory_alias(z, y);
+    value_flow(x, z), value_flow(z, y);
+    assign(x, _), let y = x;
+    assign(_, x), let y = x;
+}
+
+view memory_alias(x, w) {
+    dereference(y, x), value_alias(y, z), dereference(z, w);
+    assign(_, x), let w = x;
+    assign(x, _), let w = x;
+}
+
+view value_alias(x, y) {
+    value_flow(z, x), value_flow(z, y);
+    value_flow(z, x), memory_alias(z, w), value_flow(w, y);
+}

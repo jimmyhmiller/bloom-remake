@@ -1,0 +1,13 @@
+// BENCH-007 (DL11 §3.4 priority queue, global FIFO) in Molly's Dedalus dialect: the `.ded` twin of BENCH-007b.
+//
+// As BENCH-007d with the user column A dropped from omin.
+
+m_priority_queue(N, A, B, C)@next :- m_priority_queue(N, A, B, C), notin m_priority_queue_neg(N, A, B, C);
+omin(N, min<C>) :- m_priority_queue(N, _, _, C);
+priority_queue(N, A, B, C)@next :- m_priority_queue(N, A, B, C), omin(N, C);
+m_priority_queue_neg(N, A, B, C) :- m_priority_queue(N, A, B, C), omin(N, C);
+
+m_priority_queue("n1", "bob", "bash", 200)@123;
+m_priority_queue("n1", "eve", "ls", 1)@123;
+m_priority_queue("n1", "alice", "ssh", 204)@123;
+m_priority_queue("n1", "bob", "ssh", 205)@123;

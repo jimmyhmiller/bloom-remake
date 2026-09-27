@@ -1,0 +1,19 @@
+schema = 1
+id = "BENCH-003"
+title = "DL11 Ex. 6: the unsafe rule p(A, B) :- q(A) is rejected"
+priority = "P0"
+source = "R02 §3.5 and §17 T3 (DL11 Example 6, Definition 4); FEATURES.md BENCH-003, ANA-001"
+features = ["ANA-001", "LANG-047", "LANG-045", "LANG-043", "LANG-060", "LANG-190"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "Compile-only. The view alternative leaves column `b` unbound: BLS0500 (range restriction) on line 13."
+
+[backend.compile]
+status = "unimplemented"
+unimplemented = ["ANA-001", "LANG-047", "LANG-045", "LANG-043", "LANG-060", "LANG-190"]
+until = "M5"
+
+[[expect_diag]]
+code = "BLS0500"
+line = 13

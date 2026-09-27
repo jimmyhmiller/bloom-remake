@@ -1,0 +1,130 @@
+schema = 1
+id = "BENCH-023"
+title = "Distributed shortest paths under updates (FIFO links): converges to the from-scratch answer after each change"
+priority = "P1"
+source = "R01 §5.5 and TEST PROGRAMS T3 (Loo thesis §3.5, §5.4.2 Fig. 5.7, Claim A.3 FIFO links); FEATURES.md BENCH-023"
+features = ["ENG-004", "ENG-062", "SEM-008", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-062", "LANG-063", "LANG-064", "LANG-100", "LANG-152", "LANG-153", "LANG-241", "LANG-085"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Links are set at tick 1 (visible from 2) at their source routers; a->b is updated at 7 (visible from 8); b->d
+fails at 11 (visible from 12). Derived timeline, one hop per tick: the first stage has converged by tick 5, the
+update by tick 9, the failure by tick 15 (it reaches e last: e still routes to d over [e,a,c,b,d] at tick 14).
+Expectations pin every router's converged state per stage. The reordering half of R01 T3 is covered by the
+centralized BENCH-023c/e: with tick-local recomputation, asynchronous batching changes which advertisements a
+tick sees, so the simulator backend cannot state per-tick contents for this program."""
+
+[deploy]
+nodes = [{ name = "a", role = "Router" }, { name = "b", role = "Router" }, { name = "c", role = "Router" }, { name = "d", role = "Router" }, { name = "e", role = "Router" }]
+
+[run]
+ticks = 20
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["ENG-004", "ENG-062", "SEM-008", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-062", "LANG-063", "LANG-064", "LANG-100", "LANG-152", "LANG-153", "LANG-241", "LANG-085"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["ENG-004", "ENG-062", "SEM-008", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-062", "LANG-063", "LANG-064", "LANG-100", "LANG-152", "LANG-153", "LANG-241", "LANG-085", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "a"
+tick = 1
+rel = "set_link"
+rows = [["b", 5], ["c", 1]]
+
+[[input]]
+node = "b"
+tick = 1
+rel = "set_link"
+rows = [["d", 1]]
+
+[[input]]
+node = "c"
+tick = 1
+rel = "set_link"
+rows = [["b", 1]]
+
+[[input]]
+node = "e"
+tick = 1
+rel = "set_link"
+rows = [["a", 1]]
+
+[[input]]
+node = "a"
+tick = 7
+rel = "set_link"
+rows = [["b", 1]]
+
+[[input]]
+node = "b"
+tick = 11
+rel = "drop_link"
+rows = [["d"]]
+
+[[expect]]
+node = "a"
+rel = "shortest_path"
+tick = 6
+rows = [["b", ["a", "c", "b"], 2], ["c", ["a", "c"], 1], ["d", ["a", "c", "b", "d"], 3]]
+
+[[expect]]
+node = "e"
+rel = "shortest_path"
+tick = 6
+rows = [["a", ["e", "a"], 1], ["b", ["e", "a", "c", "b"], 3], ["c", ["e", "a", "c"], 2], ["d", ["e", "a", "c", "b", "d"], 4]]
+
+[[expect]]
+node = "a"
+rel = "shortest_path"
+tick = 10
+rows = [["b", ["a", "b"], 1], ["c", ["a", "c"], 1], ["d", ["a", "b", "d"], 2]]
+
+[[expect]]
+node = "e"
+rel = "shortest_path"
+tick = 10
+rows = [["a", ["e", "a"], 1], ["b", ["e", "a", "b"], 2], ["c", ["e", "a", "c"], 2], ["d", ["e", "a", "b", "d"], 3]]
+
+[[expect]]
+node = "e"
+rel = "shortest_path"
+row = ["d", ["e", "a", "c", "b", "d"], 4]
+holds = "14"
+absent = "15.."
+
+[[expect]]
+node = "a"
+rel = "shortest_path"
+final = true
+rows = [["b", ["a", "b"], 1], ["c", ["a", "c"], 1]]
+
+[[expect]]
+node = "b"
+rel = "shortest_path"
+final = true
+rows = []
+
+[[expect]]
+node = "c"
+rel = "shortest_path"
+final = true
+rows = [["b", ["c", "b"], 1]]
+
+[[expect]]
+node = "d"
+rel = "shortest_path"
+final = true
+rows = []
+
+[[expect]]
+node = "e"
+rel = "shortest_path"
+final = true
+rows = [["a", ["e", "a"], 1], ["b", ["e", "a", "b"], 2], ["c", ["e", "a", "c"], 2]]

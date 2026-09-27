@@ -1,0 +1,32 @@
+//! BENCH-035: the bipartiteness check of FlowLog (R09 §13.1):
+//!
+//!     red(y) :- edge(x,y), blue(x).
+//!     blue(y) :- edge(x,y), red(x).
+//!     answer() :- red(x), blue(x).
+//!
+//! answer() holds iff the graph (reachable from the seed) has an odd cycle. The listing has no seed; `start`
+//! colours one node blue. Edges are undirected (listed both ways).
+
+program flowlog_bipartite version 1;
+
+static start(x: u64);
+static edge(x: u64, y: u64);
+
+fact start(1);
+fact edge(1, 2);
+fact edge(2, 1);
+fact edge(2, 3);
+fact edge(3, 2);
+fact edge(3, 4);
+fact edge(4, 3);
+fact edge(4, 1);
+fact edge(1, 4);
+
+view red(y) = edge(x, y), blue(x);
+
+view blue(y) {
+    start(y);
+    edge(x, y), red(x);
+}
+
+view answer() = red(x), blue(x);

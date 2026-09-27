@@ -1,0 +1,47 @@
+//! BENCH-019: NR09 Fig. 1, event creation vs. effect (R01 §8.8).
+//!
+//!     materialize(neighbor, keys(1,2)).  materialize(sequence, keys(1)).
+//!     refresh(@X) :- periodic(@X, E, 3).
+//!     sequence(@X, NewSeq) :- refresh(@X), sequence(@X, CurSeq), NewSeq := CurSeq + 1.
+//!     send_updates(@X) :- refresh(@X).
+//!     update(@Y, X, S) :- send_updates(@X), neighbor(@X, Y), sequence(@X, S).
+//!
+//! Does `update` carry the old or the new sequence number? CR-04/SEM-013: every read in a tick sees the state of
+//! that tick, so the update carries the value from *before* the increment. The key overwrite of `sequence`
+//! (keys(1)) is an upsert (CR-07). The periodic is replaced by a host input `refresh` at chosen ticks, and the
+//! initial `sequence` value, which the figure leaves open, is 0.
+
+program nr09_update_visibility version 1;
+
+role Peer: cluster;
+
+static neighbor(x: Node<Peer>, y: Node<Peer>);
+
+fact neighbor("node1", "node2");
+
+channel update(x: Node, s: u64): Peer -> Peer;
+
+at Peer {
+    input refresh();
+
+    table sequence(s: u64) key();
+    table received(x: Node, s: u64);
+
+    view send_updates() = refresh();
+
+    bootstrap {
+        emit sequence(0);
+    }
+
+    increment: on refresh(), sequence(cur) {
+        upsert sequence(cur + 1);
+    }
+
+    announce: on send_updates(), neighbor(self, y), sequence(s) {
+        send update(self, s) to y;
+    }
+
+    record: on update(x, s) {
+        emit received(x, s);
+    }
+}

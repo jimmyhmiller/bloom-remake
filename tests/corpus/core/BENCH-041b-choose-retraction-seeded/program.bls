@@ -1,0 +1,64 @@
+//! BENCH-041: retracting a non-chosen candidate leaves the seeded choice unchanged (R12 §12 T2).
+//!
+//! The program of BENCH-041a with the seeded `choose!`. Whichever of b's candidates the seed picks at tick 1,
+//! the per-tick choice over a fixed priority is the minimum of the candidates, so deleting a candidate that was
+//! not chosen cannot change it (invariant `pick_stable`).
+
+program choose_retraction_seeded version 1;
+
+input ins(g: String, v: String);
+input del(g: String, v: String);
+
+/// The candidates: persisted explicitly (LANG-065), so the frame rule and its deletion guard are visible.
+scratch cand(g: String, v: String);
+
+insert: on ins(g, v) {
+    emit cand(g, v);
+}
+
+persist: while cand(g, v), not del(g, v) {
+    next cand(g, v);
+}
+
+view pick(g, v) = cand(g, v), choose!(v per g);
+view spick(g, v) = cand(g, v), choose!(v per g sticky);
+
+scratch sel(g: String, v: String) key(g);
+
+select: while pick(g, v) {
+    emit sel(g, v);
+}
+
+scratch pick_prev(g: String, v: String);
+scratch spick_prev(g: String, v: String);
+scratch cand_prev(g: String, v: String);
+
+remember_pick: while pick(g, v) {
+    next pick_prev(g, v);
+}
+
+remember_spick: while spick(g, v) {
+    next spick_prev(g, v);
+}
+
+remember_cand: while cand(g, v) {
+    next cand_prev(g, v);
+}
+
+/// A group gained a candidate since the previous tick.
+view gained(g) = cand(g, v), not cand_prev(g, v);
+
+// The choice-validity properties of R12 §12 T1 (TEST-013), checked at every tick under every seed.
+invariant pick_is_candidate "pick chose a non-candidate": never pick(g, v), not cand(g, v);
+invariant one_pick "pick chose twice in one group": never pick(g, v1), pick(g, v2) where v1 != v2;
+invariant pick_total "a group with candidates has no pick": never cand(g, _), not pick(g, _);
+/// pick is min over a fixed seeded priority of the candidates: while no candidate arrives, removing candidates
+/// other than the chosen one cannot change the choice.
+invariant pick_stable "pick changed although its value stayed and nothing new arrived":
+    never pick_prev(g, v), cand(g, v), pick(g, w), not gained(g) where v != w;
+invariant spick_is_candidate "spick chose a non-candidate": never spick(g, v), not cand(g, v);
+invariant one_spick "spick chose twice in one group": never spick(g, v1), spick(g, v2) where v1 != v2;
+invariant spick_total "a group with candidates has no spick": never cand(g, _), not spick(g, _);
+/// Sticky: the previous tick's choice is kept while it is still a candidate, even when new candidates arrive.
+invariant sticky_keeps "spick dropped a held value that is still a candidate":
+    never spick_prev(g, v), cand(g, v), spick(g, w) where v != w;

@@ -1,0 +1,24 @@
+//! BENCH-036: persistence and deletion across ticks, and retraction of what was derived (R09 §16 T11).
+//!
+//!     p(X)@next :- p(X), !del_p(X).
+//!     q(X) :- p(X).
+//!
+//! After `del_p(a)` at tick t, p(a) is absent from t+1 on, and the derived q(a) is retracted at t+1. The
+//! persistence rule is explicit (LANG-065); the engine stores `p` (ENG-003) and maintains `q` incrementally.
+
+program persistence_retraction version 1;
+
+input ins_p(x: String);
+input del_p(x: String);
+
+scratch p(x: String);
+
+view q(x) = p(x);
+
+insert: on ins_p(x) {
+    emit p(x);
+}
+
+persist: while p(x), not del_p(x) {
+    next p(x);
+}

@@ -1,0 +1,65 @@
+schema = 1
+id = "BENCH-015"
+title = "Declarative Imperative toggle: accepted with @next, state alternates"
+priority = "P0"
+source = "R05 §9.1 T6 (Declarative Imperative §3.4.4 toggle); R03 §11 T7; FEATURES.md SEM-020, BENCH-015"
+features = ["SEM-020", "SEM-022", "ANA-002", "LANG-041", "LANG-047", "LANG-061", "LANG-065", "LANG-082"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Judgement call: `!state(X)` with X bound nowhere else is read as the emptiness test `not state(_)` (otherwise the
+rule would be unsafe). state is empty at tick 0, so state = {1} at odd ticks and {} at even ticks. The analysis
+backend confirms that nothing but `next` edges close the cycle (state and del_state share stratum 0)."""
+
+[run]
+ticks = 12
+stop = "ticks"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["SEM-020", "SEM-022", "ANA-002", "LANG-041", "LANG-047", "LANG-061", "LANG-065", "LANG-082"]
+until = "M5"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-020", "SEM-022", "ANA-002", "LANG-041", "LANG-047", "LANG-061", "LANG-065", "LANG-082"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-020", "SEM-022", "ANA-002", "LANG-041", "LANG-047", "LANG-061", "LANG-065", "LANG-082", "SEM-002"]
+until = "M7"
+
+[expect_analysis]
+strata = { state = 0, del_state = 0 }
+
+[[expect]]
+node = "n1"
+rel = "state"
+tick = 0
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "state"
+tick = 1
+rows = [[1]]
+
+[[expect]]
+node = "n1"
+rel = "state"
+tick = 2
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "state"
+tick = 3
+rows = [[1]]
+
+[[expect]]
+node = "n1"
+rel = "state"
+tick = 10
+rows = []

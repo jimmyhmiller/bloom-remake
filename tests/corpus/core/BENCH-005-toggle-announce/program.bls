@@ -1,0 +1,33 @@
+//! BENCH-005 (DI Fig. 1): toggle/announce.
+//!
+//! Hellerstein, "The Declarative Imperative" (PODS 2010 keynote / SIGMOD Record), Fig. 1, quoted in R02 §3.2:
+//!
+//!     toggle(1) :- state(0).
+//!     toggle(0) :- state(1).
+//!     state(X)@next :- toggle(X).
+//!     announce(X)@async :- toggle(X).
+//!
+//! plus the seed `state(0)@1` that R02 §17 T5 adds (the figure has no initial state). `state` is not persisted:
+//! it holds only where the inductive rule derives it. `announce` is sent to the node itself through the network
+//! path (a `loopback`), so each copy arrives at a later tick; in the synchronous harness that is the next tick.
+
+program toggle_announce version 1;
+
+input seed_state(x: i64);
+
+scratch state(x: i64);
+loopback announce(x: i64);
+
+view toggle(y) {
+    state(0), let y = 1;
+    state(1), let y = 0;
+}
+
+seed: on seed_state(x) {
+    emit state(x);
+}
+
+step: while toggle(x) {
+    next state(x);
+    send announce(x);
+}

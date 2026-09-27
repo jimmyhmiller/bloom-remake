@@ -1,0 +1,65 @@
+schema = 1
+id = "BENCH-034"
+title = "eqrel Δ-extension: (a,f) is visible to a downstream join in the same fixpoint"
+priority = "P1"
+source = "R09 §16 T6 (Soufflé eqrel, PACT'19 Fig. 4); FEATURES.md ENG-042, BENCH-034"
+features = ["ENG-042", "LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-085", "LANG-086"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Tick 1 builds the classes {a,b,c}, {f,g}, {d,e} (17 pairs) and watches (a,f); tick 2 inserts (b,f) and (g,c).
+eq at tick 2 is the full relation over {a,b,c,f,g} and {d,e} (29 pairs, by union-find), and alert(a,f) holds at
+tick 2, not later."""
+
+[run]
+ticks = 4
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["ENG-042", "LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-085", "LANG-086"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["ENG-042", "LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-085", "LANG-086", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "add_pair"
+rows = [["a", "b"], ["b", "c"], ["f", "g"], ["d", "e"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "watch"
+rows = [["a", "f"]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "add_pair"
+rows = [["b", "f"], ["g", "c"]]
+
+[[expect]]
+node = "n1"
+rel = "alert"
+row = ["a", "f"]
+absent = "..=1"
+holds = "2.."
+
+[[expect]]
+node = "n1"
+rel = "eq"
+row = ["a", "f"]
+absent = "1"
+holds = "2"
+
+[[expect]]
+node = "n1"
+rel = "eq"
+tick = 2
+rows = [["a", "a"], ["a", "b"], ["a", "c"], ["a", "f"], ["a", "g"], ["b", "a"], ["b", "b"], ["b", "c"], ["b", "f"], ["b", "g"], ["c", "a"], ["c", "b"], ["c", "c"], ["c", "f"], ["c", "g"], ["d", "d"], ["d", "e"], ["e", "d"], ["e", "e"], ["f", "a"], ["f", "b"], ["f", "c"], ["f", "f"], ["f", "g"], ["g", "a"], ["g", "b"], ["g", "c"], ["g", "f"], ["g", "g"]]

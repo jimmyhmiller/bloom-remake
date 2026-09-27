@@ -1,0 +1,57 @@
+schema = 1
+id = "BENCH-020"
+title = "Bud paths.rb: 10 shortest tuples; adding (e,f,1) adds exactly 5 with no key conflict"
+priority = "P0"
+source = "R03 §11 T1 (bud examples/basics/paths.rb); FEATURES.md BENCH-020"
+features = ["SEM-050", "LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-086", "LANG-093", "LANG-103", "LANG-118"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+R03 T1: after one tick, shortest = (a,b,b,1) (a,c,b,2) (a,d,b,3) (a,e,b,4) (b,c,c,1) (b,d,c,2) (b,e,c,3) (c,d,d,1)
+(c,e,d,2) (d,e,e,1). After adding (e,f,1) it also contains (a,f,b,5) (b,f,c,4) (c,f,d,3) (d,f,e,2) (e,f,f,1),
+and no key conflict is raised because no existing minimum changes (a KeyConstraintError would fail the run)."""
+
+[run]
+ticks = 5
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-050", "LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-086", "LANG-093", "LANG-103", "LANG-118"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-050", "LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-086", "LANG-093", "LANG-103", "LANG-118", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "add_link"
+rows = [["a", "b", 1], ["a", "b", 4], ["b", "c", 1], ["c", "d", 1], ["d", "e", 1]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "add_link"
+rows = [["e", "f", 1]]
+
+[[expect]]
+node = "n1"
+rel = "shortest"
+tick = 1
+rows = [["a", "b", "b", 1], ["a", "c", "b", 2], ["a", "d", "b", 3], ["a", "e", "b", 4], ["b", "c", "c", 1], ["b", "d", "c", 2], ["b", "e", "c", 3], ["c", "d", "d", 1], ["c", "e", "d", 2], ["d", "e", "e", 1]]
+
+[[expect]]
+node = "n1"
+rel = "shortest"
+tick = 2
+rows = [["a", "b", "b", 1], ["a", "c", "b", 2], ["a", "d", "b", 3], ["a", "e", "b", 4], ["b", "c", "c", 1], ["b", "d", "c", 2], ["b", "e", "c", 3], ["c", "d", "d", 1], ["c", "e", "d", 2], ["d", "e", "e", 1], ["a", "f", "b", 5], ["b", "f", "c", 4], ["c", "f", "d", 3], ["d", "f", "e", 2], ["e", "f", "f", 1]]
+
+[[expect]]
+node = "n1"
+rel = "shortest"
+final = true
+rows = [["a", "b", "b", 1], ["a", "c", "b", 2], ["a", "d", "b", 3], ["a", "e", "b", 4], ["b", "c", "c", 1], ["b", "d", "c", 2], ["b", "e", "c", 3], ["c", "d", "d", 1], ["c", "e", "d", 2], ["d", "e", "e", 1], ["a", "f", "b", 5], ["b", "f", "c", 4], ["c", "f", "d", 3], ["d", "f", "e", 2], ["e", "f", "f", 1]]

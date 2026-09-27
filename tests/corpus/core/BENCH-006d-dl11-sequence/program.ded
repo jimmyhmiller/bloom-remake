@@ -1,0 +1,13 @@
+// BENCH-006 (DL11 §3.3 sequences) in Molly's Dedalus dialect: the `.ded` twin of BENCH-006.
+//
+// `successor(A, B)` is written as the head expression A+1. The initial fact seq(0) becomes seq("n1", 0)@1,
+// because Molly facts carry a time and tick 0 has no events (CR-13).
+
+seq(N, A+1)@next :- seq(N, A), event(N, _);
+seq(N, A)@next :- seq(N, A), notin event(N, _);
+
+seq("n1", 0)@1;
+event("n1", 1)@3;
+event("n1", 2)@4;
+event("n1", 3)@7;
+event("n1", 4)@7;

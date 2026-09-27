@@ -1,0 +1,50 @@
+//! BENCH-024 (contrast case): the plain distance-vector program of Loo's thesis, Fig. 3.3, which "has the
+//! count-to-infinity problem, where link failures may result in long (sometimes infinite) protocol convergence
+//! times" (THESIS §3.3.2).
+//!
+//!     dv1 hop(@S,D,D,C) :- #link(@S,D,C).
+//!     dv2 hop(@S,D,Z,C) :- #link(@S,Z,C1), hop(@Z,D,W,C2), C = f_compute(C1,C2).
+//!     dv3 bestHopCost(@S,D,AGG<C>) :- hop(@S,D,Z,C).
+//!     dv4 bestPathHop(@S,D,Z,C) :- hop(@S,D,Z,C), bestHopCost(@S,D,C).
+//!
+//! with `f_compute` = sum and `AGG` = min (shortest paths). Same topology and failure as BENCH-024a; without split
+//! horizon the routers keep routing to the lost destination through each other at ever higher cost.
+
+program ndlog_distance_vector_plain version 1;
+
+role Router: cluster;
+
+channel hop_ad(dst: Node<Router>, via: Node<Router>, cost: u64): Router -> Router;
+
+at Router {
+    input set_link(dst: Node<Router>, cost: u64);
+    input drop_link(dst: Node<Router>);
+
+    table link(dst: Node<Router>, cost: u64) key(dst);
+
+    output route(dst: Node<Router>, via: Node<Router>, cost: u64);
+
+    view hop(d, z, c) {
+        link(d, c), let z = d;
+        link(z, c1), hop_ad(d, _, c2) from z, let c = c1 + c2;
+    }
+
+    view best_hop_cost(d, c = min!(x)) = hop(d, _, x);
+    view best_path_hop(d, z, c) = hop(d, z, c), best_hop_cost(d, c);
+
+    insert_or_update: on set_link(d, c) {
+        upsert link(d, c);
+    }
+
+    remove: on drop_link(d), link(d, c) {
+        delete link(d, c);
+    }
+
+    advertise: while hop(d, w, c), s in Router where s != self {
+        send hop_ad(d, w, c) to s;
+    }
+
+    report: while best_path_hop(d, z, c) where d != self {
+        emit route(d, z, c);
+    }
+}

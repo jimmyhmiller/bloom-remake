@@ -1,0 +1,95 @@
+schema = 1
+id = "BENCH-044"
+title = "Raft vote under simulated schedules and seeds: at most one grantee per term, across restarts"
+priority = "P0"
+source = "R12 §12 T5 (\"for every seed and every schedule, each term has at most one grantee\"); FEATURES.md SEM-085, FLAG-007, BENCH-044"
+features = ["SEM-071", "SEM-072", "SEM-084", "SEM-085", "SEM-040", "LANG-044", "LANG-108", "LANG-117", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-093", "LANG-100", "LANG-153", "LANG-200", "LANG-241", "LANG-040", "LANG-085", "LANG-045", "LANG-190", "LANG-060"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+The scenario of BENCH-044b under the asynchronous simulator: requests may arrive at any later tick, so which
+candidate wins each term depends on the schedule and the seed. n1's initial state (current_term 4, last entry
+(7, 3)) is written by `bootstrap fresh` in its boot tick, so it is in place even if a request is delivered in the
+boot tick's batch. The durable invariant one_grantee must hold in every run (128 seeds).
+Non-vacuity: n1's final current_term is 6 in every run. No fault drops a message (the only fault is the scripted
+restart, which loses no message and reloads everything committed before it; see the README), so every request
+reaches n1, and the term-6 requests of c5 and c3 raise its effective term, which persist_term carries into the
+durable current_term (terms only grow: eff is a max and current_term resolves by choose_most). n1 needs at most 23
+ticks for that (ticks 0-6 up to the restart, then at most two per request for 8 requests), within the run's 30.
+A run in which the simulator delivered no request would end with current_term 4.
+Not asserted here: the LDFI choice-stability claim of R12 T5 (dropping the grantee's request makes choose pick the
+other up-to-date candidate), which needs the LDFI backend (TEST-040, M9)."""
+
+[deploy]
+nodes = [{ name = "n1", role = "Server" }, { name = "c2", role = "Server" }, { name = "c3", role = "Server" }, { name = "c4", role = "Server" }, { name = "c5", role = "Server" }]
+seed = 42
+
+[run]
+ticks = 30
+stop = "ticks"
+seeds = 128
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["SEM-071", "SEM-072", "SEM-084", "SEM-085", "SEM-040", "LANG-044", "LANG-108", "LANG-117", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-093", "LANG-100", "LANG-153", "LANG-200", "LANG-241", "LANG-040", "LANG-085", "LANG-045", "LANG-190", "LANG-060", "TEST-001"]
+until = "M7"
+
+[[input]]
+node = "c2"
+tick = 1
+rel = "campaign"
+rows = [["n1", 5, 2, 7, 3]]
+
+[[input]]
+node = "c3"
+tick = 1
+rel = "campaign"
+rows = [["n1", 5, 3, 8, 3]]
+
+[[input]]
+node = "c4"
+tick = 1
+rel = "campaign"
+rows = [["n1", 5, 4, 6, 3]]
+
+[[input]]
+node = "c2"
+tick = 2
+rel = "campaign"
+rows = [["n1", 5, 2, 7, 3]]
+
+[[input]]
+node = "c3"
+tick = 2
+rel = "campaign"
+rows = [["n1", 5, 3, 8, 3]]
+
+[[input]]
+node = "c5"
+tick = 3
+rel = "campaign"
+rows = [["n1", 6, 5, 7, 3]]
+
+[[input]]
+node = "c2"
+tick = 4
+rel = "campaign"
+rows = [["n1", 5, 2, 7, 3]]
+
+[[input]]
+node = "c3"
+tick = 6
+rel = "campaign"
+rows = [["n1", 6, 3, 8, 3]]
+
+[[fault]]
+kind = "restart"
+node = "n1"
+tick = 6
+
+[[expect]]
+node = "n1"
+rel = "current_term"
+final = true
+rows = [[6]]

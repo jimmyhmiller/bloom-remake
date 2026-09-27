@@ -1,0 +1,15 @@
+//! BENCH-027: stratification of `p :- notin p` (Evita Raced's metaprogrammed stratifier, R01 T21).
+//!
+//! Evita computes strata with Overlog rules over the program catalog (`stratify.olg`); a program with
+//! `p :- notin p` gets stratum infinity and is rejected. Blossom's stratifier (ANA-002, SEM-022) runs over the
+//! same dependency information and rejects it with the cycle as witness.
+
+program evita_self_negation version 1;
+
+output answer();
+
+view p() = not p();                         // expect: BLS0502
+
+report: while p() {
+    emit answer();
+}

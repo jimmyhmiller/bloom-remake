@@ -1,0 +1,30 @@
+//! BENCH-022: NDlog shortest path (SIGMOD06 Fig. 1) on the SIGMOD06 Fig. 2 network, evaluated centrally.
+//!
+//!     SP1: path(@S,@D,@D,P,C) :- #link(@S,@D,C), P = f_concatPath(link(@S,@D,C), nil).
+//!     SP2: path(@S,@D,@Z,P,C) :- #link(@S,@Z,C1), path(@Z,@D,@Z2,P2,C2), C = C1 + C2,
+//!                                P = f_concatPath(link(@S,@Z,C1),P2).
+//!     SP3: spCost(@S,@D,min<C>) :- path(@S,@D,@Z,P,C).
+//!     SP4: shortestPath(@S,@D,P,C) :- spCost(@S,@D,C), path(@S,@D,@Z,P,C).
+//!
+//! Links (R01 T2): e->a 1, a->b 5, a->c 1, c->b 1, b->d 1. Path vectors are `Vec<String>`; `f_concatPath`
+//! prepends the link's source. The graph is acyclic, so the recursive view is finite. BENCH-022b is the
+//! distributed version.
+
+program sigmod06_shortest_path version 1;
+
+static link(src: String, dst: String, cost: u64);
+
+fact link("e", "a", 1);
+fact link("a", "b", 5);
+fact link("a", "c", 1);
+fact link("c", "b", 1);
+fact link("b", "d", 1);
+
+view path(s, d, z, p, c) {
+    link(s, d, c), let z = d, let p = [s, d];
+    link(s, z, c1), path(z, d, _, p2, c2), let p = [s] ++ p2, let c = c1 + c2;
+}
+
+view sp_cost(s, d, c = min!(x)) = path(s, d, _, _, x);
+
+view shortest_path(s, d, p, c) = sp_cost(s, d, c), path(s, d, _, p, c);

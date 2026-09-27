@@ -1,0 +1,37 @@
+//! BENCH-045: a carried `fold_ordered` over a persistent input re-applies every row every tick, and ANA-011 lints
+//! it (R12 §12 T6: "ANA-011 must lint bad").
+//!
+//! The carried state `bad` is a keyed table replaced by `upsert` (R12 carries it with explicit `@next` rules over a
+//! scratch; the meaning is the same). Being a table, it is standing, so every handler here is level-triggered by
+//! construction and the lint is the program's only diagnostic.
+
+program carried_fold_lint version 1;
+
+fn step(s: i64, x: i64) -> i64 {
+    2 * s + x
+}
+
+input append(i: u64, x: i64);
+
+table log(i: u64, x: i64) key(i);
+table bad(s: i64) key();
+
+output bad_out(s: i64);
+
+bootstrap {
+    emit bad(0);
+}
+
+load_log: on append(i, x) {
+    emit log(i, x);
+}
+
+view next_bad(b2 = fold!(b, step, x by i)) = per bad(b), log(i, x);    // expect: BLS0601
+
+advance_bad: while next_bad(b2) {
+    upsert bad(b2);
+}
+
+report: while bad(b) {
+    emit bad_out(b);
+}

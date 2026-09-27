@@ -1,0 +1,55 @@
+//! BENCH-008 (Alvaro's thesis §3.1): a counter with request/response.
+//!
+//! Quoted in R02 §3.3:
+//!
+//!     counter(0).
+//!     counter(X+1)@next :- counter(X), request(_, _).
+//!     counter(X)@next :- counter(X), notin request(_, _).
+//!     response(@From, X)@async :- counter(X), request(To, From).
+//!     response(From, X)@next :- response(From, X).
+//!
+//! The counter increments once per tick that has any request, and every requester receives the value from
+//! before the increment. `request(To, From)` becomes a channel into the Server whose sender is `From`; the
+//! persisted `response` becomes the client's table `got`. Clients send a request when the host asks them to.
+
+program counter_request_response version 1;
+
+role Server;
+role Client: cluster;
+
+channel request(): Client -> Server;
+channel response(x: i64): Server -> Client;
+
+at Server {
+    scratch counter(x: i64) key();
+
+    bootstrap {
+        emit counter(0);
+    }
+
+    bump: on request(), counter(x) {
+        next counter(x + 1);
+    }
+
+    hold: while counter(x), not request() {
+        next counter(x);
+    }
+
+    reply: on request() from c, counter(x) {
+        send response(x) to c;
+    }
+}
+
+at Client {
+    input ask();
+
+    table got(x: i64);
+
+    ask_server: on ask(), s in Server {
+        send request() to s;
+    }
+
+    keep: on response(x) {
+        emit got(x);
+    }
+}

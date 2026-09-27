@@ -1,0 +1,59 @@
+//! BENCH-024: distance vector with split horizon and poison reverse (Loo's thesis, Fig. 3.4).
+//!
+//!     dv1 hop(@S,D,D,C) :- #link(@S,D,C).
+//!     dv2 hop(@S,D,Z,C) :- #link(@S,Z,C1), hop(@Z,D,W,C2), C = C1 + C2, W != S.
+//!     dv5 hop(@S,D,Z,infinity) :- #link(@S,Z,C1), hop(@Z,D,S,C2).
+//!     dv3 bestHopCost(@S,D,min<C>) :- hop(@S,D,Z,C).
+//!     dv4 bestPathHop(@S,D,Z,C) :- hop(@S,D,Z,C), bestHopCost(@S,D,C).
+//!
+//! "If node Z learns about the path to D from node S, then node Z does not report this path back to S" (split
+//! horizon, `W != S`), and Z reports it with infinite cost instead (poison reverse). Z's `hop` tuples reach S as
+//! advertisements, which S uses only if it has a link to Z. `hop` is recomputed every tick from the tick's
+//! advertisements, and every router re-advertises every tick (CR-26). Infinity is RIP's 16, and costs saturate
+//! at it. `route` reports bestPathHop for destinations other than the router itself.
+
+program ndlog_distance_vector version 1;
+
+role Router: cluster;
+
+const INF: u64 = 16;
+
+fn add_cost(a: u64, b: u64) -> u64 {
+    if a + b >= INF { INF } else { a + b }
+}
+
+channel hop_ad(dst: Node<Router>, via: Node<Router>, cost: u64): Router -> Router;
+
+at Router {
+    input set_link(dst: Node<Router>, cost: u64);
+    input drop_link(dst: Node<Router>);
+
+    table link(dst: Node<Router>, cost: u64) key(dst);
+
+    output route(dst: Node<Router>, via: Node<Router>, cost: u64);
+
+    view hop(d, z, c) {
+        link(d, c), let z = d;
+        link(z, c1), hop_ad(d, w, c2) from z, let c = add_cost(c1, c2) where w != self;
+        link(z, _), hop_ad(d, self, _) from z, let c = INF;
+    }
+
+    view best_hop_cost(d, c = min!(x)) = hop(d, _, x);
+    view best_path_hop(d, z, c) = hop(d, z, c), best_hop_cost(d, c);
+
+    insert_or_update: on set_link(d, c) {
+        upsert link(d, c);
+    }
+
+    remove: on drop_link(d), link(d, c) {
+        delete link(d, c);
+    }
+
+    advertise: while hop(d, w, c), s in Router where s != self {
+        send hop_ad(d, w, c) to s;
+    }
+
+    report: while best_path_hop(d, z, c) where d != self {
+        emit route(d, z, c);
+    }
+}

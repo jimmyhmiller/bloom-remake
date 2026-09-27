@@ -1,0 +1,55 @@
+schema = 1
+id = "BENCH-012"
+title = "Bud EmptyPk: an empty-key table rejects a second distinct tuple, accepts the same tuple again"
+priority = "P0"
+source = "R03 §2.6 and §11 T4 (bud test/tc_collections.rb EmptyPk, test_empty_pk_error); FEATURES.md SEM-050, BENCH-012"
+features = ["SEM-050", "LANG-020", "LANG-040", "LANG-043", "LANG-060"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Ticks 1 and 2 insert ("xyz", 6): the second insertion is the same tuple, so no error. Tick 3 inserts ("xxx", 2)
+while ("xyz", 6) persists: two distinct tuples with the empty key, BLSR001 at tick 3."""
+
+[run]
+ticks = 5
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-050", "LANG-020", "LANG-040", "LANG-043", "LANG-060"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-050", "LANG-020", "LANG-040", "LANG-043", "LANG-060", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "put"
+rows = [["xyz", 6]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "put"
+rows = [["xyz", 6]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "put"
+rows = [["xxx", 2]]
+
+[[expect]]
+node = "n1"
+rel = "t1"
+row = ["xyz", 6]
+holds = "1..=2"
+
+[[expect_error]]
+code = "BLSR001"
+node = "n1"
+tick = 3

@@ -1,0 +1,26 @@
+//! BENCH-048: ties in `topk`, `sort` and `percentile` are broken by canonical order (R12 §12 T9; CR-46, LANG-118).
+//!
+//! scores = {(u1,9), (u2,7), (u3,9), (u4,5)}:
+//!   top2<U by S desc> = {u1, u3}: the tie at 9 is broken canonically by u;
+//!   sort<U by S desc> = [u1, u3, u2, u4];
+//!   percentile<0.5, S> = 7 (nearest rank 2 of [5, 7, 9, 9]).
+//! Deleting u1 at t2 gives top2 = {u3, u2}: the output changes by exactly -u1 +u2.
+
+program ties_top_sort_percentile version 1;
+
+input add_score(u: String, s: u64);
+input drop_score(u: String);
+
+table scores(u: String, s: u64) key(u);
+
+view top2(u) = scores(u, s), top!(2 by s desc);
+view sorted(v = collect!(u by s desc)) = scores(u, s);
+view median(m = percentile!(0.5, s)) = scores(_u, s);
+
+load: on add_score(u, s) {
+    emit scores(u, s);
+}
+
+drop: on drop_score(u), scores(u, s) {
+    delete scores(u, s);
+}

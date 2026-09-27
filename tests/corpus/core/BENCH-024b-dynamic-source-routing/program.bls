@@ -1,0 +1,56 @@
+//! BENCH-024: dynamic source routing (Loo's thesis, Fig. 3.6), to compare with distance vector (BENCH-024a).
+//!
+//!     bp1  path(@S,D,D,P,C) :- #link(@S,D,C), P = f_concatPath(S, D).
+//!     dsr2 path(@S,D,Z,P,C) :- path(@S,Z,W,P1,C1), #link(@Z,D,C2), C = f_compute(C1,C2), P = f_concatPath(P1,D).
+//!     bp3  bestPathCost(@S,D,AGG<C>) :- path(@S,D,Z,P,C).
+//!     bp4  bestPath(@S,D,P,C) :- bestPathCost(@S,D,C), path(@S,D,Z,P,C).
+//!
+//! dsr2 is left-recursive: "newly computed path tuples [are] shipped by their destination fields to find
+//! matching links", so S ships each path to its last node Z, and Z extends it with each of Z's links (no cycles)
+//! and returns the extension to the path's source. `path` is recomputed every tick (CR-26). THESIS §3.3.4: path
+//! vector and DSR "differ only in the order in which predicates are evaluated", so both find the same best paths.
+//! `route` reports each best path's destination, next hop and cost, in the shape of BENCH-024a's `route`.
+
+program ndlog_dynamic_source_routing version 1;
+
+role Router: cluster;
+
+channel extend_req(p: Vec<Node<Router>>, cost: u64): Router -> Router;
+channel extended(dst: Node<Router>, p: Vec<Node<Router>>, cost: u64): Router -> Router;
+
+at Router {
+    input set_link(dst: Node<Router>, cost: u64);
+    input drop_link(dst: Node<Router>);
+
+    table link(dst: Node<Router>, cost: u64) key(dst);
+
+    output route(dst: Node<Router>, via: Node<Router>, cost: u64);
+
+    view path(d, p, c) {
+        link(d, c), let p = [self, d];
+        extended(d, p, c);
+    }
+
+    view best_path_cost(d, c = min!(x)) = path(d, _, x);
+    view best_path(d, p, c) = best_path_cost(d, c), path(d, p, c);
+
+    insert_or_update: on set_link(d, c) {
+        upsert link(d, c);
+    }
+
+    remove: on drop_link(d), link(d, c) {
+        delete link(d, c);
+    }
+
+    ship: while path(z, p1, c1) {
+        send extend_req(p1, c1) to z;
+    }
+
+    extend: on extend_req(p1, c1), link(d, c2), let Some(s) = p1.first() where not p1.contains(d) {
+        send extended(d, p1 ++ [d], c1 + c2) to s;
+    }
+
+    report: while best_path(d, p, c), let Some(z) = p.get(1) {
+        emit route(d, z, c);
+    }
+}

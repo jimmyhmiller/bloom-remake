@@ -1,0 +1,55 @@
+schema = 1
+id = "BENCH-047"
+title = "One-layer-per-tick BFS tree (seeded): c's parent is a or b under every seed"
+priority = "P0"
+source = "R12 §12 T8 (\"under any seed, c's parent is a or b\"); FEATURES.md SEM-086, SEM-085, BENCH-047"
+features = ["SEM-086", "SEM-084", "SEM-085", "LANG-108", "LANG-040", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-082", "LANG-190", "LANG-200"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+The single-candidate parents are forced: (a,r) and (b,r) from tick 0, (d,c) from tick 2 (c is reached at tick 2
+whichever parent it got). The invariants pin c's parent to {a, b} and one parent per node. ANA-038 classifies
+parent and tree as seed-dependent (R12 T8), which is not a schema v1 expectation."""
+
+[deploy]
+seed = 42
+
+[run]
+ticks = 6
+stop = "ticks"
+seeds = 128
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-086", "SEM-084", "SEM-085", "LANG-108", "LANG-040", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-082", "LANG-190", "LANG-200"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-086", "SEM-084", "SEM-085", "LANG-108", "LANG-040", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-082", "LANG-190", "LANG-200", "SEM-002"]
+until = "M7"
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["SEM-086", "SEM-084", "SEM-085", "LANG-108", "LANG-040", "LANG-045", "LANG-047", "LANG-060", "LANG-061", "LANG-082", "LANG-190", "LANG-200", "TEST-001"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "tree"
+row = ["a", "r"]
+holds = "0.."
+
+[[expect]]
+node = "n1"
+rel = "tree"
+row = ["b", "r"]
+holds = "0.."
+
+[[expect]]
+node = "n1"
+rel = "tree"
+row = ["d", "c"]
+absent = "..=1"
+holds = "2.."

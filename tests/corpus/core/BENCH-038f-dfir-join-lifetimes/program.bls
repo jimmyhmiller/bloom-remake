@@ -1,0 +1,41 @@
+//! BENCH-038: DFIR join lifetimes (dfir_rs tests/surface_join.rs, R08 §15 T5), adapted to CR-26.
+//!
+//! Left input {(7,1), (7,2)} arrives once; right input (7,0), (7,1), (7,2) arrives one per tick. A `'tick` side is
+//! the tick's input (an `input`); a `'static` side is persisted (a `table`). The four joins are
+//! ('tick,'tick), ('tick,'static), ('static,'tick) and ('static,'static). `replay_static` joins two persisted
+//! sides {(7,1),(7,2)} and {(7,3),(7,4)} and must give its full output on every tick.
+//! DFIR's tick i is our tick i + 1.
+
+program dfir_join_lifetimes version 1;
+
+input l_in(k: u64, v: u64);
+input r_in(k: u64, v: u64);
+input l2_in(k: u64, v: u64);
+input r2_in(k: u64, v: u64);
+
+table l_static(k: u64, v: u64);
+table r_static(k: u64, v: u64);
+table l2_static(k: u64, v: u64);
+table r2_static(k: u64, v: u64);
+
+view tick_tick(k, a, b) = l_in(k, a), r_in(k, b);
+view tick_static(k, a, b) = l_in(k, a), r_static(k, b);
+view static_tick(k, a, b) = l_static(k, a), r_in(k, b);
+view static_static(k, a, b) = l_static(k, a), r_static(k, b);
+view replay_static(k, a, b) = l2_static(k, a), r2_static(k, b);
+
+keep_l: on l_in(k, v) {
+    emit l_static(k, v);
+}
+
+keep_r: on r_in(k, v) {
+    emit r_static(k, v);
+}
+
+keep_l2: on l2_in(k, v) {
+    emit l2_static(k, v);
+}
+
+keep_r2: on r2_in(k, v) {
+    emit r2_static(k, v);
+}

@@ -1,0 +1,34 @@
+//! BENCH-037: incremental maintenance of reachability behind a firewall (after DDlog's firewall reachability
+//! benchmark, Ryzhyk & Budiu, Datalog 2.0 2019; R09 §16 T9).
+//!
+//! Hosts are connected by links; a firewall rule blocks one hop. `reach` is the transitive closure over the links
+//! the firewall allows. The benchmark inserts 12% more links and then deletes 3%, and the maintained result must
+//! equal a full recomputation. Here the base network has 25 links; 3 are inserted (12%) and then 1 is deleted
+//! (3% of the enlarged set, rounded up).
+
+program firewall_reachability version 1;
+
+input add_link(a: u64, b: u64);
+input drop_link(a: u64, b: u64);
+
+static firewall(a: u64, b: u64);
+
+fact firewall(2, 3);
+fact firewall(8, 9);
+
+table link(a: u64, b: u64);
+
+view allowed(a, b) = link(a, b), not firewall(a, b);
+
+view reach(a, b) {
+    allowed(a, b);
+    reach(a, m), allowed(m, b);
+}
+
+add: on add_link(a, b) {
+    emit link(a, b);
+}
+
+remove: on drop_link(a, b), link(a, b) {
+    delete link(a, b);
+}

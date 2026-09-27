@@ -1,0 +1,46 @@
+//! BENCH-043: `choose_rand` under a fixed seed (R12 §12 T4).
+//!
+//!     table pool(g: str, v: u64)          // {(q,1),(q,2),(q,3),(q,4)} inserted at t1
+//!     r(G, choose_rand<V>)         :- pool(G, V).
+//!     rs(G, choose_rand sticky<V>) :- pool(G, V).
+//!     // at t4 the chosen rs value is deleted, taking effect at t5
+//!
+//! The golden values of r and rs for ρ = 42 are produced by the reference PRF once the canonical encoding is
+//! frozen (M2.1); R12 says they are not hand-computable, so this case asserts what is: every draw is a candidate,
+//! one per group and total; rs keeps its value while it is a candidate (rs1 = rs2 = rs3 = rs4); after its value is
+//! deleted rs draws among the three survivors (rs5 != rs4); and two runs with ρ = 42 are identical (replay).
+
+program choose_rand_fixed_seed version 1;
+
+input load(g: String, v: u64);
+input drop_chosen();
+
+table pool(g: String, v: u64);
+
+view r(g, v) = pool(g, v), choose_rand!(v per g);
+view rs(g, v) = pool(g, v), choose_rand!(v per g sticky);
+view pool_size(n = count!(v)) = pool(_g, v);
+
+scratch rs_prev(g: String, v: u64);
+
+keep: on load(g, v) {
+    emit pool(g, v);
+}
+
+drop_sticky_choice: on drop_chosen(), rs(g, v) {
+    delete pool(g, v);
+}
+
+remember: while rs(g, v) {
+    next rs_prev(g, v);
+}
+
+invariant r_is_candidate "choose_rand drew a non-candidate": never r(g, v), not pool(g, v);
+invariant one_r "choose_rand drew twice in one group": never r(g, v1), r(g, v2) where v1 != v2;
+invariant r_total "a group with candidates has no draw": never pool(g, _), not r(g, _);
+invariant rs_is_candidate "sticky choose_rand holds a non-candidate": never rs(g, v), not pool(g, v);
+invariant one_rs "sticky choose_rand holds two values": never rs(g, v1), rs(g, v2) where v1 != v2;
+invariant rs_total "a group with candidates has no sticky draw": never pool(g, _), not rs(g, _);
+invariant rs_sticky "sticky choose_rand redrew while its value was still a candidate":
+    never rs_prev(g, v), pool(g, v), rs(g, w) where v != w;
+invariant rs_redraws "sticky choose_rand kept a deleted value": never rs_prev(g, v), rs(g, v), not pool(g, v);

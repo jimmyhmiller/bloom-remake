@@ -1,0 +1,144 @@
+schema = 1
+id = "BENCH-024"
+title = "Distance vector with split horizon and poison reverse: no count-to-infinity after a link failure"
+priority = "P1"
+source = "R01 §8.3 and TEST PROGRAMS T4-T5 (Loo thesis §3.3.2 Figs. 3.3-3.4); FEATURES.md BENCH-024"
+features = ["SEM-008", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-062", "LANG-063", "LANG-064", "LANG-081", "LANG-100", "LANG-152", "LANG-153", "LANG-181", "LANG-241", "LANG-085", "LANG-060"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Topology (ours; the thesis gives none): the line a - b - c - d with unit links, set at tick 1 (visible from 2);
+the link c - d fails at tick 10 (visible from 11). Converged state before the failure (tick 10) and after it are
+derived from the rules, one hop per tick. After the failure every router's cost to d becomes infinity (16) at
+once and stays there: it never counts upwards (compare BENCH-024c). a still uses its old cost 3 at ticks 11-12
+while the failure propagates. The converged finite routes equal DSR's (BENCH-024b): THESIS T5."""
+
+[deploy]
+nodes = [{ name = "a", role = "Router" }, { name = "b", role = "Router" }, { name = "c", role = "Router" }, { name = "d", role = "Router" }]
+
+[run]
+ticks = 24
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-008", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-062", "LANG-063", "LANG-064", "LANG-081", "LANG-100", "LANG-152", "LANG-153", "LANG-181", "LANG-241", "LANG-085", "LANG-060"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-008", "LANG-040", "LANG-042", "LANG-043", "LANG-047", "LANG-062", "LANG-063", "LANG-064", "LANG-081", "LANG-100", "LANG-152", "LANG-153", "LANG-181", "LANG-241", "LANG-085", "LANG-060", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "a"
+tick = 1
+rel = "set_link"
+rows = [["b", 1]]
+
+[[input]]
+node = "b"
+tick = 1
+rel = "set_link"
+rows = [["a", 1], ["c", 1]]
+
+[[input]]
+node = "c"
+tick = 1
+rel = "set_link"
+rows = [["b", 1], ["d", 1]]
+
+[[input]]
+node = "d"
+tick = 1
+rel = "set_link"
+rows = [["c", 1]]
+
+[[input]]
+node = "c"
+tick = 10
+rel = "drop_link"
+rows = [["d"]]
+
+[[input]]
+node = "d"
+tick = 10
+rel = "drop_link"
+rows = [["c"]]
+
+[[expect]]
+node = "a"
+rel = "route"
+tick = 10
+rows = [["b", "b", 1], ["c", "b", 2], ["d", "b", 3]]
+
+[[expect]]
+node = "b"
+rel = "route"
+tick = 10
+rows = [["a", "a", 1], ["c", "c", 1], ["d", "c", 2]]
+
+[[expect]]
+node = "c"
+rel = "route"
+tick = 10
+rows = [["a", "b", 2], ["b", "b", 1], ["d", "d", 1]]
+
+[[expect]]
+node = "d"
+rel = "route"
+tick = 10
+rows = [["a", "c", 3], ["b", "c", 2], ["c", "c", 1]]
+
+[[expect]]
+node = "c"
+rel = "route"
+row = ["d", "b", 16]
+absent = "..=10"
+holds = "11.."
+
+[[expect]]
+node = "b"
+rel = "route"
+row = ["d", "c", 2]
+holds = "4..=11"
+absent = "12.."
+
+[[expect]]
+node = "a"
+rel = "route"
+row = ["d", "b", 3]
+holds = "4..=12"
+absent = "13.."
+
+[[expect]]
+node = "a"
+rel = "route"
+row = ["d", "b", 16]
+absent = "..=12"
+holds = "13.."
+
+[[expect]]
+node = "a"
+rel = "route"
+final = true
+rows = [["b", "b", 1], ["c", "b", 2], ["d", "b", 16]]
+
+[[expect]]
+node = "b"
+rel = "route"
+final = true
+rows = [["a", "a", 1], ["c", "c", 1], ["d", "a", 16], ["d", "c", 16]]
+
+[[expect]]
+node = "c"
+rel = "route"
+final = true
+rows = [["a", "b", 2], ["b", "b", 1], ["d", "b", 16]]
+
+[[expect]]
+node = "d"
+rel = "route"
+final = true
+rows = []

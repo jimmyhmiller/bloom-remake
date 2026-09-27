@@ -1,0 +1,20 @@
+// BENCH-009 (Declarative Imperative §3.3.1, soft state as TTL-guarded persistence) in Molly's Dedalus dialect:
+// the `.ded` twin of BENCH-009a.
+//
+//     q(A, TTL, Birth)@next :- q(A, TTL, Birth), !del_q(A), now() - Birth < TTL.
+//
+// Molly's dialect has no wall clock, so `now()` is the mocked clock of BENCH-009a written as data: mock_now is
+// 10·t at tick t (seeded at tick 1, because tick 0 has no events, CR-13). Expressions are right-nested with no
+// precedence, so `now() - Birth < TTL` is written `Clk < Birth + TTL` (Clk < (Birth + TTL)).
+
+mock_now(N, T+10)@next :- mock_now(N, T);
+q(N, A, Ttl, Clk) :- insert(N, A, Ttl), mock_now(N, Clk);
+q(N, A, Ttl, Birth)@next :- q(N, A, Ttl, Birth), mock_now(N, Clk), notin del_q(N, A), Clk < Birth + Ttl;
+alive(N, A) :- q(N, A, _, _);
+
+mock_now("n1", 10)@1;
+insert("n1", "x", 35)@2;
+insert("n1", "y", 35)@2;
+insert("n1", "z", 35)@2;
+del_q("n1", "z")@3;
+insert("n1", "y", 35)@5;

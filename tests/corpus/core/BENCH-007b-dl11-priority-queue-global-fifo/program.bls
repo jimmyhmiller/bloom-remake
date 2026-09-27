@@ -1,0 +1,26 @@
+//! BENCH-007 (DL11 §3.4): the priority queue, global FIFO discipline.
+//!
+//! The same program as BENCH-007a with `A` dropped from `omin`, which DL11 notes turns the per-user queue into a
+//! global FIFO over the priority attribute (R02 §3.3):
+//!
+//!     omin(min<C>) <- m_priority_queue(_, _, C);
+//!     priority_queue(A, B, C)@next <- m_priority_queue(A, B, C), omin(C);
+//!     m_priority_queue_neg(A, B, C) <- m_priority_queue(A, B, C), omin(C);
+
+program dl11_priority_queue_fifo version 1;
+
+input enqueue(user: String, cmd: String, prio: i64);
+
+table m_priority_queue(user: String, cmd: String, prio: i64);
+scratch priority_queue(user: String, cmd: String, prio: i64);
+
+view omin(lowest = min!(prio)) = m_priority_queue(_, _, prio);
+
+load: on enqueue(u, c, p) {
+    emit m_priority_queue(u, c, p);
+}
+
+dequeue: while m_priority_queue(u, c, p), omin(p) {
+    next priority_queue(u, c, p);
+    delete m_priority_queue(u, c, p);
+}

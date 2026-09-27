@@ -1,0 +1,19 @@
+schema = 1
+id = "BENCH-042"
+title = "ANA-011 lints index() over a persistent relation (BLS0601)"
+priority = "P0"
+source = "R12 §12 T3 (\"ANA-011 must lint rank\"); LANGUAGE §10.5, §13.6; FEATURES.md ANA-011, BENCH-042"
+features = ["ANA-011", "LANG-097", "LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-100"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "Compile-only: the lint is a warning (an error under --strict)."
+
+[backend.compile]
+status = "unimplemented"
+unimplemented = ["ANA-011", "LANG-097", "LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-100"]
+until = "M6"
+
+[[expect_diag]]
+code = "BLS0601"
+line = 15

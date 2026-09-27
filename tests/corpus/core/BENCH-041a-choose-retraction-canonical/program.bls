@@ -1,0 +1,30 @@
+//! BENCH-041: retracting a chosen vs a non-chosen candidate, and a keyed view fed by `choose` (R12 §12 T2),
+//! in canonical-priority mode (`choose_least!`, see BENCH-040a).
+//!
+//! The T1 program plus `scratch sel(g, v) key(g)` fed by the per-tick choice, and a second group b with
+//! candidates x and y, of which the non-chosen y is deleted at tick 2.
+
+program choose_retraction_canonical version 1;
+
+input ins(g: String, v: String);
+input del(g: String, v: String);
+
+/// The candidates: persisted explicitly (LANG-065), so the frame rule and its deletion guard are visible.
+scratch cand(g: String, v: String);
+
+insert: on ins(g, v) {
+    emit cand(g, v);
+}
+
+persist: while cand(g, v), not del(g, v) {
+    next cand(g, v);
+}
+
+view pick(g, v) = cand(g, v), choose_least!(v per g);
+
+/// A per-tick keyed view fed by the choice. Its determinant g is within its key, so it never conflicts.
+scratch sel(g: String, v: String) key(g);
+
+select: while pick(g, v) {
+    emit sel(g, v);
+}

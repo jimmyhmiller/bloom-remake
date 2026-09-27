@@ -1,0 +1,18 @@
+//! BENCH-015: the toggle program without `@next` must be rejected as unstratifiable.
+//!
+//! R05 §9.1 T6: `state(1) :- !state(X).` makes `state` depend negatively on itself within one tick. The
+//! attribute silences the handler-level self-negation error BLS0506, so that the stratifier's verdict is what
+//! this case checks (BLS0502).
+
+program toggle_deductive version 1;
+
+scratch state(x: i64);
+
+output seen(x: i64);
+
+// The whole cycle is on one line, so the reported line is unambiguous.
+flip: while not state(_) { #[allow(self_negation)] emit state(1); }                     // expect: BLS0502
+
+report: while state(x) {
+    emit seen(x);
+}

@@ -1,0 +1,31 @@
+//! BENCH-035: single-source shortest paths via recursive MIN (RecStep VLDB'19, R09 §13.1):
+//!
+//!     sssp2(y, MIN(0)) :- id(y).
+//!     sssp2(y, MIN(d1 + d2)) :- sssp2(x, d1), arc(x, y, d2).
+//!     sssp(x, MIN(d)) :- sssp2(x, d).
+//!
+//! The recursive MIN is the `LMin` lattice (CR-09). The graph is the directed version of the classic six-node
+//! Dijkstra example.
+
+program recstep_sssp version 1;
+
+static id(y: u64);
+static arc(x: u64, y: u64, d: u64);
+
+fact id(1);
+fact arc(1, 2, 7);
+fact arc(1, 3, 9);
+fact arc(1, 6, 14);
+fact arc(2, 3, 10);
+fact arc(2, 4, 15);
+fact arc(3, 4, 11);
+fact arc(3, 6, 2);
+fact arc(4, 5, 6);
+fact arc(5, 6, 9);
+
+view sssp2(y, d: LMin<u64>) {
+    id(y), let d = LMin::of(0);
+    sssp2(x, d1), arc(x, y, d2), let d = d1 + d2;
+}
+
+view sssp(x, dist) = sssp2(x, d), let dist = reveal!(d);

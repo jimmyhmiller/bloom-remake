@@ -1,0 +1,65 @@
+schema = 1
+id = "BENCH-043"
+title = "choose is unchanged by a restart (the incarnation is not in its key)"
+priority = "P0"
+source = "R12 §12 T4 item 5; FEATURES.md SEM-071, SEM-084, SEM-085, BENCH-043"
+features = ["SEM-071", "SEM-084", "SEM-085", "LANG-044", "LANG-108", "LANG-043", "LANG-047", "LANG-060", "LANG-061", "LANG-082", "LANG-200", "LANG-040", "LANG-100"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+The pool is loaded at tick 1, the choice recorded at tick 2, and the node restarts as a new incarnation at tick 4
+(fault `restart`), reloading both durable tables. The invariant compares every later choice with the recorded one.
+The simulator repeats the run for 128 seeds."""
+
+[deploy]
+seed = 42
+
+[run]
+ticks = 8
+stop = "ticks"
+seeds = 128
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-071", "SEM-084", "SEM-085", "LANG-044", "LANG-108", "LANG-043", "LANG-047", "LANG-060", "LANG-061", "LANG-082", "LANG-200", "LANG-040", "LANG-100"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-071", "SEM-084", "SEM-085", "LANG-044", "LANG-108", "LANG-043", "LANG-047", "LANG-060", "LANG-061", "LANG-082", "LANG-200", "LANG-040", "LANG-100", "SEM-002"]
+until = "M7"
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["SEM-071", "SEM-084", "SEM-085", "LANG-044", "LANG-108", "LANG-043", "LANG-047", "LANG-060", "LANG-061", "LANG-082", "LANG-200", "LANG-040", "LANG-100", "TEST-001"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "load"
+rows = [["q", 1], ["q", 2], ["q", 3], ["q", 4]]
+
+[[fault]]
+kind = "restart"
+node = "n1"
+tick = 4
+
+[[expect]]
+node = "n1"
+rel = "recorded_count"
+tick = 3
+rows = [[1]]
+
+[[expect]]
+node = "n1"
+rel = "recorded_count"
+final = true
+rows = [[1]]
+
+[[expect]]
+node = "n1"
+rel = "pool"
+final = true
+rows = [["q", 1], ["q", 2], ["q", 3], ["q", 4]]

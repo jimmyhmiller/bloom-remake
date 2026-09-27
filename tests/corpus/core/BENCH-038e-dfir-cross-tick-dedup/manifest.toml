@@ -1,0 +1,48 @@
+schema = 1
+id = "BENCH-038"
+title = "DFIR cross-tick dedup: outputs 1 2 3 4, then 5 6"
+priority = "P1"
+source = "R08 §15 T4 (DFIR defer_tick operator documentation); FEATURES.md BENCH-038"
+features = ["LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "SEM-008"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "Tick 1 input {1,2,3,4}, tick 2 input {3,4,5,6}: out is {1,2,3,4} at tick 1 and {5,6} at tick 2."
+
+[run]
+ticks = 4
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "SEM-008"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "SEM-008", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "inp"
+rows = [[1], [2], [3], [4]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "inp"
+rows = [[3], [4], [5], [6]]
+
+[[expect]]
+node = "n1"
+rel = "out"
+tick = 1
+rows = [[1], [2], [3], [4]]
+
+[[expect]]
+node = "n1"
+rel = "out"
+tick = 2
+rows = [[5], [6]]

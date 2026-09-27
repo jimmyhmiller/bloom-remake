@@ -1,0 +1,27 @@
+//! BENCH-001 (DL11 Ex. 3): persistence and deletion.
+//!
+//! Port of Example 3 of "Dedalus: Datalog in Time and Space" (Alvaro et al., Datalog 2.0, 2011), quoted in
+//! R02 §3.3:
+//!
+//!     p_pos(A, B) <- p(A, B);
+//!     p_pos(A, B)@next <- p_pos(A, B), ¬p_neg(A, B);
+//!     p(1,2)@101;  p(1,3)@102;  p_neg(1,2)@300;
+//!
+//! A Blossom `table` is Dedalus's `persist[p_pos, p_neg, 2]` macro: its frame rule carries every tuple to t+1
+//! unless a `delete` names that exact tuple (LANGUAGE §7.2), so the `p_neg` event becomes a `delete`. The
+//! timestamped EDB facts `p` and `p_neg` are host inputs delivered at their ticks (CR-13: timestep k is tick k).
+
+program dl11_persistence version 1;
+
+input p(a: i64, b: i64);
+input p_neg(a: i64, b: i64);
+
+table p_pos(a: i64, b: i64);
+
+insert: on p(a, b) {
+    emit p_pos(a, b);
+}
+
+retract: on p_neg(a, b) {
+    delete p_pos(a, b);
+}

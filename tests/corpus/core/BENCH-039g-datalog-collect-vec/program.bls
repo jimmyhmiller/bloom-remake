@@ -1,0 +1,13 @@
+//! BENCH-039: dfir-datalog frontend test `test_collect_vec` (dfir_datalog_core lib.rs; R08 §15 T8).
+//!
+//!     result(collect_vec(a, b)) :- ints1(a), ints2(b)
+//!
+//! `collect!` builds the vector in canonical order (LANG-102, LANG-118), so the result does not depend on the
+//! order in which the join produced its rows.
+
+program datalog_collect_vec version 1;
+
+input ints1(a: u64);
+input ints2(b: u64);
+
+view result(v = collect!((a, b))) = ints1(a), ints2(b);

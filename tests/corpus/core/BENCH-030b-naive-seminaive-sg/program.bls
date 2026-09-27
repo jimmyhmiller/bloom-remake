@@ -1,0 +1,27 @@
+//! BENCH-030: naive and semi-naive evaluation agree: same generation (RecStep VLDB'19, R09 §13.1).
+//!
+//!     sg(x, y) :- arc(p, x), arc(p, y), x != y.
+//!     sg(x, y) :- arc(a, x), sg(a, b), arc(b, y).
+//!
+//! A random graph of 9 nodes and 11 arcs.
+
+program naive_seminaive_sg version 1;
+
+static arc(x: u64, y: u64);
+
+fact arc(0, 7);
+fact arc(1, 0);
+fact arc(1, 6);
+fact arc(2, 0);
+fact arc(2, 1);
+fact arc(2, 3);
+fact arc(3, 1);
+fact arc(6, 5);
+fact arc(8, 3);
+fact arc(8, 6);
+fact arc(8, 7);
+
+view sg(x, y) {
+    arc(p, x), arc(p, y) where x != y;
+    arc(a, x), sg(a, b), arc(b, y);
+}

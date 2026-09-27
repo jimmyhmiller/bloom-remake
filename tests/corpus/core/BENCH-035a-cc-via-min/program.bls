@@ -1,0 +1,38 @@
+//! BENCH-035: connected components via recursive MIN (RecStep VLDB'19, R09 §13.1):
+//!
+//!     cc3(x, MIN(x)) :- arc(x, _).
+//!     cc3(y, MIN(z)) :- cc3(x, z), arc(x, y).
+//!     cc2(x, MIN(y)) :- cc3(x, y).
+//!     cc(x) :- cc2(_, x).
+//!
+//! A relational `min!` cannot sit inside a recursion (it is a point of order, CR-09), so the recursive MIN is the
+//! monotone `LMin` lattice (CR-09: "monotone aggregation is written with lattices"). The graph is undirected: every
+//! arc is listed in both directions.
+
+program recstep_cc version 1;
+
+static arc(x: u64, y: u64);
+
+fact arc(1, 2);
+fact arc(2, 1);
+fact arc(2, 3);
+fact arc(3, 2);
+fact arc(3, 4);
+fact arc(4, 3);
+fact arc(5, 6);
+fact arc(6, 5);
+fact arc(7, 8);
+fact arc(8, 7);
+fact arc(8, 9);
+fact arc(9, 8);
+fact arc(9, 7);
+fact arc(7, 9);
+
+view cc3(x, m: LMin<u64>) {
+    arc(x, _), let m = LMin::of(x);
+    cc3(z, m), arc(z, x);
+}
+
+view cc2(x, label) = cc3(x, m), let label = reveal!(m);
+
+view cc(label) = cc2(_, label);

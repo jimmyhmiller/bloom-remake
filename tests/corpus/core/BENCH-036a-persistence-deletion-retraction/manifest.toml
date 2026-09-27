@@ -1,0 +1,62 @@
+schema = 1
+id = "BENCH-036"
+title = "Tick behaviour: deletion at t removes p and the derived q from t+1"
+priority = "P0"
+source = "R09 §16 T11 (persistence and deletion across ticks); FEATURES.md SEM-005, ENG-003, BENCH-036"
+features = ["SEM-005", "ENG-003", "ENG-062", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-065", "LANG-082", "LANG-060"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+a and b are inserted at tick 1; del_p(a) at tick 4 removes p(a) and q(a) from tick 5 on; b is unaffected.
+BENCH-036d is the `.ded` twin of R09's Dedalus rules.
+Not expressible in schema v1 and left to the engine's own tests and benchmarks (BENCH-036 bullets 1 and 3):
+storage O(changes) rather than O(|p| x T), and flat per-tick time with 10^6 persisted tuples and 1-100 messages
+per tick (R09 T13)."""
+
+[run]
+ticks = 8
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-005", "ENG-003", "ENG-062", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-065", "LANG-082", "LANG-060"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-005", "ENG-003", "ENG-062", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-065", "LANG-082", "LANG-060", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ins_p"
+rows = [["a"], ["b"]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel = "del_p"
+rows = [["a"]]
+
+[[expect]]
+node = "n1"
+rel = "p"
+row = ["a"]
+holds = "1..=4"
+absent = "5.."
+
+[[expect]]
+node = "n1"
+rel = "q"
+row = ["a"]
+holds = "1..=4"
+absent = "5.."
+
+[[expect]]
+node = "n1"
+rel = "q"
+row = ["b"]
+absent = "0"
+holds = "1.."

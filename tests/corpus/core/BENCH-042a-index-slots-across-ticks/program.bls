@@ -1,0 +1,46 @@
+//! BENCH-042: `index()` slot assignment with arrivals across ticks (R12 §12 T3), for FLAG-021 (Paxos slots).
+//!
+//!     input   client_in(p: str)
+//!     scratch next_slot(s: u64) key()        // carried only by its own @next rules
+//!     next_slot(0) :- bootstrap.
+//!     indexed(P, index()) :- client_in(P).
+//!     slot(P, S + I)      :- indexed(P, I), next_slot(S).
+//!     n(count<P>)         :- client_in(P).
+//!     next_slot(S + N)@next :- next_slot(S), n(N).
+//!     next_slot(S)@next     :- next_slot(S), notin n(_).
+//!     table all_req(p: str)
+//!     all_req(P) :- client_in(P).
+//!     rank(P, index()) :- all_req(P).        // per-tick rank over a persistent relation (linted)
+//!     id(P, seq())     :- all_req(P).        // stable numbering
+//!
+//! `index!` is the dense per-tick rank of the deduplicated head tuples in canonical order (CR-46); `seq!` gives
+//! each distinct head tuple the next number the first tick it appears, and never reuses one.
+
+program index_slots version 1;
+
+input client_in(p: String);
+
+scratch next_slot(s: u64) key();
+table all_req(p: String);
+
+view indexed(p, i = index!()) = client_in(p);
+view slot(p, s) = indexed(p, i), next_slot(base), let s = base + i;
+view n(c = count!(p)) = client_in(p);
+view rank(p, i = index!()) = all_req(p);
+view id(p, i = seq!()) = all_req(p);
+
+bootstrap {
+    emit next_slot(0);
+}
+
+advance: while next_slot(s), n(c) {
+    next next_slot(s + c);
+}
+
+hold: while next_slot(s), not n(_) {
+    next next_slot(s);
+}
+
+record: on client_in(p) {
+    emit all_req(p);
+}

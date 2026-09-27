@@ -1,0 +1,104 @@
+schema = 1
+id = "BENCH-026"
+title = "Localization equivalence: Chord sb1-sb3 over an insert-only predecessor record, localized by #[localize(chain)]"
+priority = "P1"
+source = "R01 §5.6, §8.5 and TEST PROGRAMS T20 (declarativitydotnet/p2 doc/chord.olg sb1-sb3); LANGUAGE §14.6; FEATURES.md LANG-095, BENCH-026"
+features = ["LANG-095", "LANG-026", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "LANG-064", "LANG-152", "LANG-153", "LANG-190", "LANG-241"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Derived from the rules of program.bls, in a quiescent network. nc stabilizes at tick 2: sb1 finds na's recorded
+predecessor nb (50), not in (100, 10); sb2 copies na's successor nb into nc's successors; sb3 notifies na, because
+100 lies in (50, 10) for na's recorded predecessor nb (50), and set_pred at na, whose current predecessor is still
+nb, makes nc (100) its predecessor and records it. nb stabilizes at tick 8, after that has settled: sb1 finds na's recorded predecessors nb (50) and nc (100); only
+100 lies in (50, 10), so nb adopts nc as a successor (Chord's join repair); sb2 adds na's successor nb (nb itself);
+sb3 sends nothing (50 is neither in (50, 10) nor in (100, 10)). Mod<8> ids are written as integers.
+The final succ and pred equal BENCH-026e's, the hand localization of P2's own rules: P2's sb1 would read only na's
+current predecessor nc, and the earlier one, nb, is not in (50, 10). pred_seen is the insert-only record that
+LANGUAGE §14.6 requires a compiler-localized body to read (see program.bls and BENCH-026f).
+Judgement call: with a single stabilization at a time, no rule reads state another rule of the same round
+writes, so the quiescent result does not depend on how many hops the compiler's localization takes."""
+
+[deploy]
+nodes = [{ name = "na", role = "Peer" }, { name = "nb", role = "Peer" }, { name = "nc", role = "Peer" }]
+
+[run]
+ticks = 20
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-095", "LANG-026", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "LANG-064", "LANG-152", "LANG-153", "LANG-190", "LANG-241"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-095", "LANG-026", "LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "LANG-064", "LANG-152", "LANG-153", "LANG-190", "LANG-241", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "nc"
+tick = 2
+rel = "stabilize"
+rows = [[]]
+
+[[input]]
+node = "nb"
+tick = 8
+rel = "stabilize"
+rows = [[]]
+
+[[expect]]
+node = "na"
+rel = "succ"
+final = true
+rows = [[50, "nb"]]
+
+[[expect]]
+node = "na"
+rel = "pred"
+final = true
+rows = [[100, "nc", true]]
+
+[[expect]]
+node = "nb"
+rel = "succ"
+final = true
+rows = [[10, "na"], [50, "nb"], [100, "nc"]]
+
+[[expect]]
+node = "nb"
+rel = "pred"
+final = true
+rows = [[10, "na", true]]
+
+[[expect]]
+node = "nc"
+rel = "succ"
+final = true
+rows = [[10, "na"], [50, "nb"]]
+
+[[expect]]
+node = "nc"
+rel = "pred"
+final = true
+rows = [[0, "nc", false]]
+
+[[expect]]
+node = "na"
+rel = "pred_seen"
+final = true
+rows = [[50, "nb", true], [100, "nc", true]]
+
+[[expect]]
+node = "nb"
+rel = "pred_seen"
+final = true
+rows = [[10, "na", true]]
+
+[[expect]]
+node = "nc"
+rel = "pred_seen"
+final = true
+rows = [[0, "nc", false]]

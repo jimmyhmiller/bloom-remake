@@ -1,0 +1,109 @@
+schema = 1
+id = "BENCH-041"
+title = "With a resolve policy the conflicting writers resolve to the least value instead of an error"
+priority = "P0"
+source = "R12 §12 T2 (resolve choose variant); LANGUAGE §10.7, §22.2; FEATURES.md LANG-117, BENCH-041"
+features = ["SEM-050", "LANG-117", "LANG-108", "LANG-114", "LANG-020", "LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-060"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Contradiction resolved by precedence: R12 applies `resolve` to same-tick writes, LANGUAGE §10.7 only to t+1
+candidates, so the writers use `next`. R12's answer is kept: sel(a) = min{"m", "zz"} = "m", one tick later (from
+tick 2). Derived continuation: the relation-level candidates include the persisted row, so sel(a) is the running
+least of the picks and "zz": m at ticks 2-3, c from tick 4 on; sel(b) is x from tick 2 on. No BLSR001 is raised."""
+
+[deploy]
+seed = 42
+
+[run]
+ticks = 9
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-050", "LANG-117", "LANG-108", "LANG-114", "LANG-020", "LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-060"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-050", "LANG-117", "LANG-108", "LANG-114", "LANG-020", "LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-060", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ins"
+rows = [["a", "m"], ["a", "p"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "ins"
+rows = [["a", "c"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "del"
+rows = [["a", "m"]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel = "del"
+rows = [["a", "c"]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "del"
+rows = [["a", "p"]]
+
+[[input]]
+node = "n1"
+tick = 7
+rel = "ins"
+rows = [["a", "m"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ins"
+rows = [["b", "x"], ["b", "y"]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "del"
+rows = [["b", "y"]]
+
+[[expect]]
+node = "n1"
+rel = "sel"
+tick = 1
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "sel"
+tick = 2
+rows = [["a", "m"], ["b", "x"]]
+
+[[expect]]
+node = "n1"
+rel = "sel"
+tick = 3
+rows = [["a", "m"], ["b", "x"]]
+
+[[expect]]
+node = "n1"
+rel = "sel"
+tick = 4
+rows = [["a", "c"], ["b", "x"]]
+
+[[expect]]
+node = "n1"
+rel = "sel"
+final = true
+rows = [["a", "c"], ["b", "x"]]

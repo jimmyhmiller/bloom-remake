@@ -1,0 +1,41 @@
+//! BENCH-047: choice stratified through time: a BFS tree built one layer per tick (R12 §12 T8).
+//!
+//!     table reached(n: str)
+//!     reached("r") :- bootstrap.
+//!     parent(Y, choose<X>) :- reached(X), g(X, Y), notin reached(Y).
+//!     reached(Y)@next :- parent(Y, _).
+//!     table tree(y: str, x: str)
+//!     tree(Y, X) :- parent(Y, X).
+//!
+//! The cycle through `reached` passes through `next`, so the choice is stratified (SEM-086). With
+//! g = {r->a, r->b, a->c, b->c, c->d}: tick 0 gives a <- r and b <- r; tick 1 chooses c's parent from {a, b};
+//! tick 2 gives d <- c; tick 3 is quiescent.
+//! In canonical-priority mode (R12 T8) the choice is the least candidate: here `choose_least!`, which is exactly that
+//! under every seed (see BENCH-040a).
+
+program bfs_tree_canonical version 1;
+
+static g(x: String, y: String);
+
+fact g("r", "a");
+fact g("r", "b");
+fact g("a", "c");
+fact g("b", "c");
+fact g("c", "d");
+
+table reached(n: String);
+table tree(y: String, x: String);
+
+view parent(y, x) = reached(x), g(x, y), not reached(y), choose_least!(x per y);
+
+bootstrap {
+    emit reached("r");
+}
+
+grow: while parent(y, _) {
+    next reached(y);
+}
+
+record: while parent(y, x) {
+    emit tree(y, x);
+}

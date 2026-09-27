@@ -1,0 +1,17 @@
+//! BENCH-039: dfir-datalog frontend tests `join_with_self`, `wildcard_fields` and `local_constraints`
+//! (dfir_datalog_core lib.rs; R08 §15 T8):
+//!
+//!     out(x, y) :- input(x, y), input(y, x).
+//!     out(x) :- input(x, _), input(_, x).
+//!     out(x, x) :- input(x, x).
+//!     out(x, x, y, y) :- input(x, x, y, y).
+
+program datalog_self_join_constraints version 1;
+
+input inp(x: u64, y: u64);
+input inp4(a: u64, b: u64, c: u64, d: u64);
+
+view join_with_self(x, y) = inp(x, y), inp(y, x);
+view wildcard_fields(x) = inp(x, _), inp(_, x);
+view local_constraints(x, y) = inp(x, x), let y = x;
+view local_constraints4(x, y) = inp4(x, x, y, y);

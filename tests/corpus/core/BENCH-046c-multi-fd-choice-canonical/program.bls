@@ -1,0 +1,20 @@
+//! BENCH-046: several choose goals in one rule, in canonical-priority mode (GZ01 Ex. 4.2; R12 §12 T7).
+//!
+//!     match(X, Y) :- g(X, Y), choose((X),(Y)), choose((Y),(X)).
+//!
+//! R12 gives the canonical-priority answer: the greedy scan in the order (1,a) < (1,b) < (2,a) accepts (1,a) and
+//! rejects the other two, which conflict with it (x = 1 is matched; y = a is matched), so the matching is {(1,a)}.
+//! A manifest cannot select R12's test-only priority table, so the canonical scan order is stated in the language:
+//! a `least` cost on one choice literal of a multi-FD site orders the whole greedy scan by (cost, priority, tuple)
+//! (R12 §5.2, §5.4; LANGUAGE §10.4), and a cost equal to the whole candidate (x, y) is unique per candidate, so the
+//! scan is canonical under every seed. BENCH-046a checks the seeded site.
+
+program multi_fd_choice_canonical version 1;
+
+static g(x: u64, y: String);
+
+fact g(1, "a");
+fact g(1, "b");
+fact g(2, "a");
+
+view matching(x, y) = g(x, y), choose!(y per x least (x, y)), choose!(x per y);

@@ -1,0 +1,35 @@
+//! BENCH-041: a second rule writing the same key of the keyed view raises SEM-050 (R12 §12 T2 variant).
+//!
+//!     sel(G, V) :- pick(G, V).
+//!     sel(G, "zz") :- cand(G, _).
+//!
+//! At tick 1 group a's pick (m in canonical mode) and "zz" are two distinct tuples with one key: a cross-rule
+//! conflict, BLSR001 at tick 1.
+
+program choose_key_conflict version 1;
+
+input ins(g: String, v: String);
+input del(g: String, v: String);
+
+/// The candidates: persisted explicitly (LANG-065), so the frame rule and its deletion guard are visible.
+scratch cand(g: String, v: String);
+
+insert: on ins(g, v) {
+    emit cand(g, v);
+}
+
+persist: while cand(g, v), not del(g, v) {
+    next cand(g, v);
+}
+
+view pick(g, v) = cand(g, v), choose_least!(v per g);
+
+scratch sel(g: String, v: String) key(g);
+
+select: while pick(g, v) {
+    emit sel(g, v);
+}
+
+filler: while cand(g, _) {
+    emit sel(g, "zz");
+}

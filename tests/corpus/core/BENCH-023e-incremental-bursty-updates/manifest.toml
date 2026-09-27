@@ -1,0 +1,63 @@
+schema = 1
+id = "BENCH-023"
+priority = "P1"
+features = ["ENG-004", "ENG-062", "LANG-040", "LANG-043", "LANG-047", "LANG-063", "LANG-064", "LANG-086", "LANG-100", "SEM-005", "LANG-085"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+title = "Incremental shortest paths, both changes in one burst: the final state equals evaluation from scratch"
+source = "R01 §5.5 and TEST PROGRAMS T3 (Loo thesis §5.4.2 bursty model, Theorem A.3; SIGMOD06 Fig. 2 network); FEATURES.md BENCH-023"
+notes = """
+The update of a->b and the deletion of b->d (the changes of BENCH-023a, on the SIGMOD06 network in place of the
+thesis's own; see BENCH-023a) requested in the same tick (3), so the engine sees one burst of changes; the state
+from tick 4 on equals the from-scratch answer on the final links (BENCH-023a's final state)."""
+
+[run]
+ticks = 8
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["ENG-004", "ENG-062", "LANG-040", "LANG-043", "LANG-047", "LANG-063", "LANG-064", "LANG-086", "LANG-100", "SEM-005", "LANG-085"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["ENG-004", "ENG-062", "LANG-040", "LANG-043", "LANG-047", "LANG-063", "LANG-064", "LANG-086", "LANG-100", "SEM-005", "LANG-085", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "set_link"
+rows = [["e", "a", 1], ["a", "b", 5], ["a", "c", 1], ["c", "b", 1], ["b", "d", 1]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "set_link"
+rows = [["a", "b", 1]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "drop_link"
+rows = [["b", "d"]]
+
+[[expect]]
+node = "n1"
+rel = "shortest_path"
+tick = 3
+rows = [["a", "b", ["a", "c", "b"], 2], ["a", "c", ["a", "c"], 1], ["a", "d", ["a", "c", "b", "d"], 3], ["b", "d", ["b", "d"], 1], ["c", "b", ["c", "b"], 1], ["c", "d", ["c", "b", "d"], 2], ["e", "a", ["e", "a"], 1], ["e", "b", ["e", "a", "c", "b"], 3], ["e", "c", ["e", "a", "c"], 2], ["e", "d", ["e", "a", "c", "b", "d"], 4]]
+
+[[expect]]
+node = "n1"
+rel = "shortest_path"
+tick = 4
+rows = [["a", "b", ["a", "b"], 1], ["a", "c", ["a", "c"], 1], ["c", "b", ["c", "b"], 1], ["e", "a", ["e", "a"], 1], ["e", "b", ["e", "a", "b"], 2], ["e", "c", ["e", "a", "c"], 2]]
+
+[[expect]]
+node = "n1"
+rel = "shortest_path"
+final = true
+rows = [["a", "b", ["a", "b"], 1], ["a", "c", ["a", "c"], 1], ["c", "b", ["c", "b"], 1], ["e", "a", ["e", "a"], 1], ["e", "b", ["e", "a", "b"], 2], ["e", "c", ["e", "a", "c"], 2]]

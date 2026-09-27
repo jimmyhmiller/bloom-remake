@@ -1,0 +1,45 @@
+schema = 1
+id = "BENCH-046"
+title = "Multi-FD choice in canonical-priority mode: the greedy scan gives {(1,a)}"
+priority = "P1"
+source = "R12 §12 T7 (GZ01 Ex. 4.2, canonical priority); R12 §5.2, §5.4; FEATURES.md LANG-114, LANG-116, BENCH-046"
+features = ["LANG-116", "LANG-114", "LANG-108", "SEM-085", "LANG-045", "LANG-047", "LANG-190"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+FEATURES BENCH-046 and R12 T7: "canonical priority (1,a) < (1,b) < (2,a) gives {(1,a)}, maximal: 2's only partner
+a is taken". Judgement call: canonical mode is realized with a `least (x, y)` cost on the first choice literal.
+LANGUAGE §10.4 orders a `least` choice by cost, then priority, then canonical order, and scans a multi-FD site in
+that order; it does not spell out the combination of one costed literal with an uncosted one, which R12 §5.4 does:
+"combined with other choose goals, the greedy order of §5.2 is (C, prio, W)". The cost is the whole candidate, so it
+is unique and the seed never matters (ANA-038 D5). The static input makes the answer hold at every tick."""
+
+[deploy]
+seed = 42
+
+[run]
+ticks = 2
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-116", "LANG-114", "LANG-108", "SEM-085", "LANG-045", "LANG-047", "LANG-190"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-116", "LANG-114", "LANG-108", "SEM-085", "LANG-045", "LANG-047", "LANG-190", "SEM-002"]
+until = "M7"
+
+[[expect]]
+node = "n1"
+rel = "matching"
+tick = 0
+rows = [[1, "a"]]
+
+[[expect]]
+node = "n1"
+rel = "matching"
+final = true
+rows = [[1, "a"]]
