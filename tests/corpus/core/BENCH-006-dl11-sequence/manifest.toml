@@ -3,7 +3,7 @@ id = "BENCH-006"
 title = "DL11 §3.3: seq increments exactly at the ticks that have events"
 priority = "P0"
 source = "R02 §3.3 and §17 T6 (DL11 §3.3 Sequences); FEATURES.md BENCH-006"
-features = ["LANG-041", "LANG-043", "LANG-061", "LANG-082", "LANG-190", "SEM-003", "SEM-008"]
+features = ["LANG-041", "LANG-043", "LANG-061", "LANG-082", "LANG-190", "SEM-003", "SEM-008", "LANG-060"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -17,12 +17,12 @@ stop = "ticks"
 
 [backend.oracle]
 status = "unimplemented"
-unimplemented = ["LANG-041", "LANG-043", "LANG-061", "LANG-082", "LANG-190", "SEM-003", "SEM-008"]
+unimplemented = ["LANG-041", "LANG-043", "LANG-061", "LANG-082", "LANG-190", "SEM-003", "SEM-008", "LANG-060"]
 until = "M5"
 
 [backend.interp]
 status = "unimplemented"
-unimplemented = ["LANG-041", "LANG-043", "LANG-061", "LANG-082", "LANG-190", "SEM-003", "SEM-008", "SEM-002"]
+unimplemented = ["LANG-041", "LANG-043", "LANG-061", "LANG-082", "LANG-190", "SEM-003", "SEM-008", "LANG-060", "SEM-002"]
 until = "M7"
 
 [[input]]

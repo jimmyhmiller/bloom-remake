@@ -3,7 +3,7 @@ id = "BENCH-040"
 title = "Per-tick vs sticky choose over a persisted table (canonical mode): pick m,m,c,c,p,-,m; spick m,m,m,c,p,-,m"
 priority = "P0"
 source = "R12 §12 T1 (choose over a persisted table, inserts and retraction); FEATURES.md SEM-085, LANG-115, BENCH-040"
-features = ["SEM-083", "SEM-085", "LANG-065", "LANG-108", "LANG-114", "LANG-115", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082"]
+features = ["SEM-083", "SEM-085", "LANG-065", "LANG-108", "LANG-114", "LANG-115", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-060"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -22,12 +22,12 @@ stop = "ticks"
 
 [backend.oracle]
 status = "unimplemented"
-unimplemented = ["SEM-083", "SEM-085", "LANG-065", "LANG-108", "LANG-114", "LANG-115", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082"]
+unimplemented = ["SEM-083", "SEM-085", "LANG-065", "LANG-108", "LANG-114", "LANG-115", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-060"]
 until = "M5"
 
 [backend.interp]
 status = "unimplemented"
-unimplemented = ["SEM-083", "SEM-085", "LANG-065", "LANG-108", "LANG-114", "LANG-115", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "SEM-002"]
+unimplemented = ["SEM-083", "SEM-085", "LANG-065", "LANG-108", "LANG-114", "LANG-115", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-060", "SEM-002"]
 until = "M7"
 
 [[input]]

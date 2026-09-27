@@ -3,7 +3,7 @@ id = "BENCH-045"
 title = "A false #[commutative] claim on the fold step is refuted (BLS0704)"
 priority = "P0"
 source = "R12 §12 T6; LANGUAGE §10.8, §16.1; FEATURES.md TEST-015, TEST-087, BENCH-045"
-features = ["TEST-015", "TEST-087", "LANG-182", "LANG-110", "LANG-181", "LANG-040", "LANG-043", "LANG-047"]
+features = ["TEST-015", "TEST-087", "LANG-182", "LANG-110", "LANG-181", "LANG-040", "LANG-043", "LANG-047", "LANG-060"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
@@ -11,7 +11,7 @@ notes = "Compile-only: the claim is refuted by a counterexample, so the result i
 
 [backend.compile]
 status = "unimplemented"
-unimplemented = ["TEST-015", "TEST-087", "LANG-182", "LANG-110", "LANG-181", "LANG-040", "LANG-043", "LANG-047"]
+unimplemented = ["TEST-015", "TEST-087", "LANG-182", "LANG-110", "LANG-181", "LANG-040", "LANG-043", "LANG-047", "LANG-060"]
 until = "M10"
 
 [[expect_diag]]
