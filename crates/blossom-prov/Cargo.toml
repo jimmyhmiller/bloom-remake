@@ -1,0 +1,16 @@
+[package]
+name = "blossom-prov"
+description = "Provenance graphs from Tier C logs and Tier B annotations, why/whynot, the Nemo graph algebra, semiring annotations and rendering."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+blossom-base.workspace = true
+blossom-value.workspace = true
+blossom-ir.workspace = true
+blossom-kernel.workspace = true
+
+[lints]
+workspace = true

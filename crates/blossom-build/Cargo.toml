@@ -1,0 +1,16 @@
+[package]
+name = "blossom-build"
+description = "The build.rs API (Builder) and the regeneration cache: runs CompileSession, then blossom-codegen."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+blossom-base.workspace = true
+blossom-driver.workspace = true
+blossom-artifact.workspace = true
+blossom-codegen.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,26 @@
+[package]
+name = "blossom-value"
+description = "The type language and TypeTable, the canonical Value model and its total order, words and lanes, value stores, fingerprints, the PRF, digests and the extern registry."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+blossom-base.workspace = true
+proptest = { workspace = true, optional = true }
+serde.workspace = true
+smallvec.workspace = true
+thiserror.workspace = true
+
+[features]
+# proptest strategies producing values of any TypeDef (implemented by WP M2.1).
+arbitrary = ["dep:proptest"]
+
+[dev-dependencies]
+postcard.workspace = true
+proptest.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

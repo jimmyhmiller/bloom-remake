@@ -1,0 +1,4 @@
+# The pinned toolchain is also the MSRV (ARCHITECTURE, header). Nightly is used only by the fuzz and Miri jobs.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
