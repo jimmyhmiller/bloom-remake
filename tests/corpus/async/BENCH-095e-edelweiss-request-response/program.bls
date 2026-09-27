@@ -1,0 +1,73 @@
+//! BENCH-095: Edelweiss's request-response protocol (artifact req-resp.rb; Edelweiss, VLDB 2014, Table 4), ported
+//! rule for rule.
+//!
+//!     req_log <= req_chn.payloads
+//!     resp_chn <~ resp_log
+//!     need_resp <= req_log.notin(did_resp, :client => :client, :id => :id)
+//!     resp_log <= (need_resp * state).outer(:key => :key) do |r,s| r + [s.val || "MISSING"] end
+//!     did_resp <+ resp_log {|r| [r.client, r.id]}
+//!     # client
+//!     req_chn <~ read_req
+//!     read_resp <= resp_chn
+//!
+//! A client keeps each read request in read_req and resends it until it is acknowledged; the server logs requests,
+//! answers each one once (did_resp) from its state, and resends the answer.
+
+program edelweiss_request_response version 1;
+
+channel req_chn(@addr: Node, client: Node, id: u64, key: String) key(addr, client, id);
+channel resp_chn(@addr: Node, id: u64, key: String, val: String) key(addr, id);
+
+// Server state.
+table req_log(client: Node, id: u64, key: String) key(client, id);
+table resp_log(client: Node, id: u64, key: String, val: String) key(client, id);
+table did_resp(client: Node, id: u64);
+table state(key: String, val: String) key(key);
+
+// Client state.
+table read_req(addr: Node, client: Node, id: u64, key: String) key(addr, client, id);
+table read_resp(addr: Node, id: u64, key: String, val: String) key(addr, id);
+
+/// From the host: at a client, a read of `key` from `server`; at the server, a stored value.
+input read(server: Node, id: u64, key: String);
+input stored(key: String, val: String);
+
+ask: on read(s, i, k) {
+    emit read_req(s, self, i, k);
+}
+
+keep_value: on stored(k, v) {
+    emit state(k, v);
+}
+
+/// `req_chn <~ read_req`
+request: while read_req(a, c, i, k) {
+    send req_chn(a, c, i, k);
+}
+
+/// `req_log <= req_chn.payloads`
+log_request: on req_chn(_, c, i, k) {
+    emit req_log(c, i, k);
+}
+
+view need_resp(client, id, key) = req_log(client, id, key), not did_resp(client, id);
+
+/// `resp_log <= (need_resp * state).outer(:key => :key) ...`: the value, or "MISSING".
+answer: while need_resp(c, i, k), outer state(k, v) {
+    emit resp_log(c, i, k, v.unwrap_or("MISSING"));
+}
+
+/// `did_resp <+ resp_log {|r| [r.client, r.id]}`
+answered: while resp_log(c, i, _k, _v) {
+    next did_resp(c, i);
+}
+
+/// `resp_chn <~ resp_log`
+respond: while resp_log(c, i, k, v) {
+    send resp_chn(c, i, k, v);
+}
+
+/// `read_resp <= resp_chn`
+collect: on resp_chn(a, i, k, v) {
+    emit read_resp(a, i, k, v);
+}

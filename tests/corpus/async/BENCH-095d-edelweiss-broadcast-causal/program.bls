@@ -1,0 +1,46 @@
+//! BENCH-095: Edelweiss's causal broadcast (artifact broadcast_causal.rb; Edelweiss, VLDB 2014, Table 4), ported rule
+//! for rule.
+//!
+//!     chn <~ (node * log).pairs {|n,l| n + l}
+//!     log <= chn.payloads
+//!     pending <= log.notin(safe_log, :id => :id)
+//!     flat_dep <= pending.flat_map {|l| l.deps.map {|d| [l.id, d]}}
+//!     missing_dep <= flat_dep.notin(safe_log, :dep => :id)
+//!     safe_log <+ pending.notin(missing_dep, :id => :id)
+//!
+//! Every node rebroadcasts its log to every node of a fixed membership (Bud's sealed :node; here the static node set)
+//! and delivers a message to safe_log once all the messages it depends on have been delivered.
+
+program edelweiss_broadcast_causal version 1;
+
+static node(addr: Node);
+fact node("n1");
+fact node("n2");
+fact node("n3");
+
+table log(id: u64, val: String, deps: Set<u64>) key(id);
+channel chn(@addr: Node, id: u64, val: String, deps: Set<u64>) key(addr, id);
+table safe_log(id: u64, val: String, deps: Set<u64>) key(id);
+
+/// From the host: a message this node originates, with the ids it causally depends on.
+input originate(id: u64, val: String, deps: Set<u64>);
+
+create: on originate(i, v, d) {
+    emit log(i, v, d);
+}
+
+rebroadcast: while node(a), log(i, v, d) {
+    send chn(a, i, v, d);
+}
+
+store: on chn(_, i, v, d) {
+    emit log(i, v, d);
+}
+
+view pending(id, val, deps) = log(id, val, deps), not safe_log(id, _, _);
+view flat_dep(id, dep) = pending(id, _, deps), dep in deps;
+view missing_dep(id, dep) = flat_dep(id, dep), not safe_log(dep, _, _);
+
+deliver: while pending(i, v, d), not missing_dep(i, _) {
+    next safe_log(i, v, d);
+}

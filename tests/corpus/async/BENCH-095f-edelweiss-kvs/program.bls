@@ -1,0 +1,59 @@
+//! BENCH-095: Edelweiss's replicated key-value store (Edelweiss, VLDB 2014, §5; artifact kvs.rb, after Wuu and
+//! Bernstein's replicated dictionary), ported rule for rule.
+//!
+//!     ins_chn <~ (node * ins_log).pairs {|n,l| n + l}
+//!     del_chn <~ (node * del_log).pairs {|n,l| n + l}
+//!     ins_log <= ins_chn.payloads
+//!     del_log <= del_chn.payloads
+//!     view <= ins_log.notin(del_log, :id => :del_id)
+//!
+//! Every replica rebroadcasts its insert and delete logs to every replica of a fixed membership (Bud's sealed :node;
+//! here the static node set). "Deletes reference an insertion ID; once a given ID has been deleted, it cannot be
+//! reinstated -- but another insert with the same key is allowed."
+
+program edelweiss_kvs version 1;
+
+static node(addr: Node);
+fact node("n1");
+fact node("n2");
+fact node("n3");
+
+channel ins_chn(@addr: Node, id: u64, key: String, val: String) key(addr, id);
+channel del_chn(@addr: Node, id: u64, del_id: u64) key(addr, id);
+table ins_log(id: u64, key: String, val: String) key(id);
+table del_log(id: u64, del_id: u64) key(id);
+
+/// The live key-value mappings (Bud's `view`, a hard keyword here, written as a raw identifier).
+output r#view(id: u64, key: String, val: String);
+
+/// From the host: an insert with a fresh id, or the deletion of an insert's id.
+input put(id: u64, key: String, val: String);
+input remove(id: u64, del_id: u64);
+
+insert: on put(i, k, v) {
+    emit ins_log(i, k, v);
+}
+
+delete_id: on remove(i, d) {
+    emit del_log(i, d);
+}
+
+ship_inserts: while node(a), ins_log(i, k, v) {
+    send ins_chn(a, i, k, v);
+}
+
+ship_deletes: while node(a), del_log(i, d) {
+    send del_chn(a, i, d);
+}
+
+store_insert: on ins_chn(_, i, k, v) {
+    emit ins_log(i, k, v);
+}
+
+store_delete: on del_chn(_, i, d) {
+    emit del_log(i, d);
+}
+
+live: while ins_log(i, k, v), not del_log(_, i) {
+    emit r#view(i, k, v);
+}

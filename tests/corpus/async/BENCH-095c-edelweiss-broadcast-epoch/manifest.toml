@@ -1,0 +1,184 @@
+# BENCH-095 (R05 T20; §5.7, §5.9, §9.4 item 20): Edelweiss's reliable broadcast with epoch membership.
+#
+# R05 §9.4 item 20: "Reliable broadcast, epoch membership: no reclamation until seal_node_epoch(k). Then epoch-k entries
+# delivered to all members are reclaimed. Adding a node to a new epoch never loses messages destined for it." R05 §5.7:
+# "A punctuation 'no more node facts for epoch k' ... lets DR+ reclaim epoch-k messages delivered to all epoch-k members.
+# Symmetrically, a seal on log.epoch lets it reclaim node entries." The artifact's rewrite
+# (BroadcastEpochAll_rewrite_src.rb) reclaims log through `(log * seal_node_epoch).lefts(:epoch => :epoch).notin(
+# r0_node_log_missing, ...)` and node through `(node * seal_log_epoch)...`.
+#
+# Scenario (synchronous rounds, so the seals can be issued after delivery): every node learns epoch 1 = {n1, n2} and
+# epoch 2 = {n1, n2, n3} in tick 1; n1 originates messages 1 and 2 in epoch 1 (tick 1) and 3 and 4 in epoch 2 (tick 2).
+# Every delivery and acknowledgement completes by tick 5. The host seals node epoch 1 at every node in tick 6 and log
+# epoch 1 in tick 7. Without the rewrite n1 and n2 keep all four messages and n3, never a member of epoch 1, gets
+# messages 3 and 4. In the rewritten program nothing is reclaimed before the seal (tick 5), the epoch-1 messages go
+# once node epoch 1 is sealed, and the epoch-1 node entries once log epoch 1 is sealed; epoch 2 is never sealed.
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss epoch broadcast: epoch-1 messages reclaimed only after the node-epoch seal; the new member loses nothing"
+priority = "P1"
+source = "R05 T20, §5.7, §5.9, §9.4 item 20; Edelweiss (VLDB 2014) §4.2; artifact broadcast_epoch_all.rb, BroadcastEpochAll_rewrite_src.rb"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "LANG-207", "ANA-060", "ANA-061", "ANA-063", "ANA-065", "ANA-066", "DIST-007"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "n1", role = "Node" }, { name = "n2", role = "Node" }, { name = "n3", role = "Node" }]
+
+[run]
+ticks = 12
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "LANG-207", "ANA-060", "ANA-061", "ANA-063", "ANA-065", "ANA-066", "DIST-007"]
+until = "M7"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-060", "LANG-062", "LANG-207", "ANA-060", "ANA-061", "ANA-063", "ANA-065", "ANA-066", "DIST-007"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "member"
+rows = [["n1", 1], ["n2", 1], ["n1", 2], ["n2", 2], ["n3", 2]]
+
+[[input]]
+node = "n2"
+tick = 1
+rel = "member"
+rows = [["n1", 1], ["n2", 1], ["n1", 2], ["n2", 2], ["n3", 2]]
+
+[[input]]
+node = "n3"
+tick = 1
+rel = "member"
+rows = [["n1", 1], ["n2", 1], ["n1", 2], ["n2", 2], ["n3", 2]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "originate"
+rows = [[1, 1, "a"], [2, 1, "b"]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "originate"
+rows = [[3, 2, "c"], [4, 2, "d"]]
+
+[[input]]
+node = "n1"
+tick = 6
+rel = "seal_node_epoch"
+rows = [[1]]
+
+[[input]]
+node = "n2"
+tick = 6
+rel = "seal_node_epoch"
+rows = [[1]]
+
+[[input]]
+node = "n3"
+tick = 6
+rel = "seal_node_epoch"
+rows = [[1]]
+
+[[input]]
+node = "n1"
+tick = 7
+rel = "seal_log_epoch"
+rows = [[1]]
+
+[[input]]
+node = "n2"
+tick = 7
+rel = "seal_log_epoch"
+rows = [[1]]
+
+[[input]]
+node = "n3"
+tick = 7
+rel = "seal_log_epoch"
+rows = [[1]]
+
+[[expect]]
+node = "n1"
+rel = "log"
+final = true
+rows = [[1, 1, "a"], [2, 1, "b"], [3, 2, "c"], [4, 2, "d"]]
+
+[[expect]]
+node = "n2"
+rel = "log"
+final = true
+rows = [[1, 1, "a"], [2, 1, "b"], [3, 2, "c"], [4, 2, "d"]]
+
+[[expect]]
+node = "n3"
+rel = "log"
+final = true
+rows = [[3, 2, "c"], [4, 2, "d"]]
+
+[expect_analysis.reclaimable]
+reclaimed = { log = "join_seal", node = "join_seal" }
+kept = {  }
+channels = { chn = "arm" }
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "log"
+tick = 5
+rows = [[1, 1, "a"], [2, 1, "b"], [3, 2, "c"], [4, 2, "d"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n2"
+rel = "log"
+tick = 5
+rows = [[1, 1, "a"], [2, 1, "b"], [3, 2, "c"], [4, 2, "d"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n3"
+rel = "log"
+tick = 5
+rows = [[3, 2, "c"], [4, 2, "d"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "log"
+final = true
+rows = [[3, 2, "c"], [4, 2, "d"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n2"
+rel = "log"
+final = true
+rows = [[3, 2, "c"], [4, 2, "d"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n3"
+rel = "log"
+final = true
+rows = [[3, 2, "c"], [4, 2, "d"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "node"
+final = true
+rows = [["n1", 2], ["n2", 2], ["n3", 2]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n2"
+rel = "node"
+final = true
+rows = [["n1", 2], ["n2", 2], ["n3", 2]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n3"
+rel = "node"
+final = true
+rows = [["n1", 2], ["n2", 2], ["n3", 2]]

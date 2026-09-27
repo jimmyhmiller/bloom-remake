@@ -1,0 +1,185 @@
+# BENCH-095 (R05 T24; §5.7, §5.9, §9.4 item 24): Edelweiss's causal KVS: storage stays flat under dominating writes.
+#
+# R05 §5.9: "Causal KVS (§6) | 19 -> 62 | log once replicated everywhere and locally safe; dep once its log entry is safe;
+# safe_dep and dom 'as soon as they are produced'; safe once dominated." R05 §9.4 item 24: "storage stays flat under 100%
+# dominating updates." The artifact's rewrite (CausalKvsReplica_rewrite_src.rb) acknowledges all three channels,
+# reclaims log (delivered everywhere, r0, and safe, r3), dep (its write and its target are safe), safe_dep (its target is
+# dominated), safe (dominated, with the seal on dep implied by the flat_map: `seal_dep_id <= log {|x| [x.id]}`), dom (DR-
+# once the dominated write is gone), read_buf (answered), read_resp (DR- once read_buf is gone, and acknowledged) and the
+# client's read_req (acknowledged); safe_keys is a range and is never reclaimed.
+#
+# Scenario: replicas n1 and n2 and a client cl; n1 writes w1 (k1 = v1) at tick 1 and w2 (k1 = v2, depending on w1) at
+# tick 2; n2 writes w3 (k2 = x) at tick 2; at tick 3 cl reads k1 from n2 after having seen w2. 32 seeded schedules over
+# the default lossy channels, bounded by ticks. In every seed both replicas' views end as {w2, w3} and cl gets v2 exactly
+# once (the read waits until w2 is safe, and dom drops w1 in the tick the read is answered). In the rewritten program
+# only the live writes and the ranges remain.
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss causal KVS: reads see causally consistent values; logs, dependencies and dominated writes reclaimed"
+priority = "P1"
+source = "R05 T24, §5.7, §5.9, §9.4 item 24; Edelweiss (VLDB 2014) §6, Fig. 6; artifact causal-kvs.rb, CausalKvsReplica_rewrite_src.rb"
+features = ["LANG-023", "LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-050", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-088", "LANG-241", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-062", "ANA-063", "ANA-064", "ANA-065", "ANA-066", "DIST-007"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[deploy]
+nodes = [{ name = "n1", role = "Node" }, { name = "n2", role = "Node" }, { name = "cl", role = "Node" }]
+
+[run]
+ticks = 50
+stop = "ticks"
+seeds = 32
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-023", "LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-050", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-088", "LANG-241", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-062", "ANA-063", "ANA-064", "ANA-065", "ANA-066", "DIST-007"]
+until = "M7"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-023", "LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-050", "LANG-060", "LANG-061", "LANG-062", "LANG-082", "LANG-088", "LANG-241", "SEM-040", "SEM-073", "TEST-001", "ANA-060", "ANA-061", "ANA-062", "ANA-063", "ANA-064", "ANA-065", "ANA-066", "DIST-007"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "write"
+rows = [[1, "k1", "v1", []]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "write"
+rows = [[2, "k1", "v2", [1]]]
+
+[[input]]
+node = "n2"
+tick = 2
+rel = "write"
+rows = [[3, "k2", "x", []]]
+
+[[input]]
+node = "cl"
+tick = 3
+rel = "read"
+rows = [["n2", 50, "k1", [2]]]
+
+[[expect]]
+node = "n1"
+rel = "view"
+final = true
+rows = [[2, "k1", "v2"], [3, "k2", "x"]]
+
+[[expect]]
+node = "n2"
+rel = "view"
+final = true
+rows = [[2, "k1", "v2"], [3, "k2", "x"]]
+
+[[expect]]
+node = "cl"
+rel = "read_result"
+final = true
+rows = [["cl", 50, "k1", "v2"]]
+
+[expect_analysis.reclaimable]
+reclaimed = { log = "join_seal", dep = "join_seal", safe_dep = "dr_plus", safe = "dr_plus", dom = "dr_minus", read_buf = "dr_plus", read_resp = "dr_minus", read_req = "dr_plus" }
+kept = { safe_keys = "range", read_result = "no_negation", node = "unsealed_join" }
+channels = { log_chn = "arm", req_chn = "arm", resp_chn = "arm" }
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "log"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "dep"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "safe_dep"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "dom"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "read_buf"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "read_resp"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n2"
+rel = "log"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n2"
+rel = "dep"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n2"
+rel = "safe_dep"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n2"
+rel = "dom"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n2"
+rel = "read_buf"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n2"
+rel = "read_resp"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "safe"
+final = true
+rows = [[2, "k1", "v2"], [3, "k2", "x"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n2"
+rel = "safe"
+final = true
+rows = [[2, "k1", "v2"], [3, "k2", "x"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "cl"
+rel = "read_req"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "cl"
+rel = "read_result"
+final = true
+rows = [["cl", 50, "k1", "v2"]]
