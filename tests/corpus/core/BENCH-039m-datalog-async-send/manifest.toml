@@ -1,0 +1,81 @@
+schema = 1
+id = "BENCH-039"
+title = "dfir-datalog async send: each row goes to the node in its @ column, self-sends included"
+priority = "P1"
+source = "R08 §5.2, §5.3 and §15 T8 (dfir_datalog_core lib.rs async test result@b(a) :~ ints(a, b)); FEATURES.md BENCH-039"
+features = ["LANG-042", "LANG-043", "LANG-062", "LANG-150", "LANG-153"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Inputs and outputs are ours (the test snapshots the generated graph). n1 receives ints {(1, n2), (2, n2), (3, n1)}
+at tick 1: it sends result(1) and result(2) to n2 and result(3) to itself. Every message arrives one round later,
+so received is {1, 2} at n2 and {3} at n1 in tick 2, and empty again in tick 3 (received is tick-local)."""
+
+[deploy]
+nodes = [{ name = "n1", role = "Peer" }, { name = "n2", role = "Peer" }]
+
+[run]
+ticks = 5
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-042", "LANG-043", "LANG-062", "LANG-150", "LANG-153"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-042", "LANG-043", "LANG-062", "LANG-150", "LANG-153", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ints"
+rows = [[1, "n2"], [2, "n2"], [3, "n1"]]
+
+[[expect_send]]
+from = "n1"
+to = "n2"
+channel = "result"
+row = [1]
+tick = 1
+
+[[expect_send]]
+from = "n1"
+to = "n2"
+channel = "result"
+row = [2]
+tick = 1
+
+[[expect_send]]
+from = "n1"
+to = "n1"
+channel = "result"
+row = [3]
+tick = 1
+
+[[expect]]
+node = "n2"
+rel = "received"
+tick = 2
+rows = [[1], [2]]
+
+[[expect]]
+node = "n1"
+rel = "received"
+tick = 2
+rows = [[3]]
+
+[[expect]]
+node = "n1"
+rel = "received"
+tick = 1
+rows = []
+
+[[expect]]
+node = "n2"
+rel = "received"
+tick = 3
+rows = []

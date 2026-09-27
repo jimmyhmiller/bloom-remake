@@ -1,0 +1,27 @@
+//! BENCH-039: dfir-datalog frontend async-send test (dfir_datalog_core lib.rs; R08 §5.3, §15 T8):
+//!
+//!     .async result `...send...` `...recv...`
+//!     result@b(a) :~ ints(a, b)
+//!
+//! An async rule sends each row to the node named in its `@` column: a `send … to b` into a channel. A self-send
+//! goes through the network path like any other and arrives at a later tick.
+
+program datalog_async_send version 1;
+
+role Peer: cluster;
+
+channel result(a: u64): Peer -> Peer;
+
+at Peer {
+    input ints(a: u64, b: Node<Peer>);
+
+    output received(a: u64);
+
+    ship: on ints(a, b) {
+        send result(a) to b;
+    }
+
+    land: on result(a) {
+        emit received(a);
+    }
+}

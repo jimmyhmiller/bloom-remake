@@ -1,0 +1,63 @@
+schema = 1
+id = "BENCH-039"
+title = "dfir-datalog flatten and detuple: *b yields one row per element; tuple columns destructure"
+priority = "P1"
+source = "R08 §5.3 and §15 T8 (dfir_datalog_core lib.rs flatten and detuple tests); FEATURES.md BENCH-039"
+features = ["LANG-023", "LANG-043", "LANG-047", "LANG-080", "LANG-088"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Inputs and outputs are ours (the tests snapshot graphs). ints1 = {(1, [10, 20]), (2, [30]), (3, [])}: flattened is
+{(1,10), (1,20), (2,30)}, and the empty vector contributes no row. pairs = {((1,2),(3,4)), ((5,6),(7,8))}: detupled
+is {(1,2,3,4), (5,6,7,8)}. Nothing is persisted, so both are empty at tick 2."""
+
+[run]
+ticks = 4
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-023", "LANG-043", "LANG-047", "LANG-080", "LANG-088"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-023", "LANG-043", "LANG-047", "LANG-080", "LANG-088", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ints1"
+rows = [[1, [10, 20]], [2, [30]], [3, []]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "pairs"
+rows = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]
+
+[[expect]]
+node = "n1"
+rel = "flattened"
+tick = 1
+rows = [[1, 10], [1, 20], [2, 30]]
+
+[[expect]]
+node = "n1"
+rel = "detupled"
+tick = 1
+rows = [[1, 2, 3, 4], [5, 6, 7, 8]]
+
+[[expect]]
+node = "n1"
+rel = "flattened"
+tick = 2
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "detupled"
+tick = 2
+rows = []
