@@ -1,0 +1,51 @@
+//! BENCH-095: bud-gc's SealedCollection and ReliableBroadcast space tests (tc_gc.rb; R05 T26, §5.4, §5.6).
+//!
+//! SealedCollection: a sealed collection is filled in bootstrap and copied into a table. ReliableBroadcast: every node
+//! sends its whole log to every node of a fixed membership, level-triggered, and stores what it receives. Edelweiss's
+//! acknowledgement rewrite (ARM) applies to the channel, and range compression turns each node's record of delivered
+//! messages into one range per destination: storage is O(nodes), not O(messages).
+
+program edelweiss_sealed_and_broadcast_space version 1;
+
+// ---------------- SealedCollection, test_simple
+// `sealed :foo, [:x] => [:y]` filled in bootstrap, and `baz <= foo`. Writing foo outside bootstrap is a compile error
+// in Blossom (BLS0401), as inserting into it after bootstrap is in bud-gc.
+
+sealed table sc_foo(x: u64, y: u64) key(x);
+table sc_baz(x: u64, y: u64) key(x);
+
+bootstrap {
+    emit sc_foo(5, 10);
+    emit sc_foo(6, 12);
+}
+
+sc_copy: while sc_foo(x, y) {
+    emit sc_baz(x, y);
+}
+
+// ---------------- ReliableBroadcast, test_space_basic
+// `chn <~ (node * log).pairs {|n,l| n + l}` and `log <= chn.payloads` over a fixed membership (Bud: `sealed :node`;
+// here the static node set, which is closed in the same way; rules may not build node names from strings).
+
+static rb_node(addr: Node);
+fact rb_node("n1");
+fact rb_node("n2");
+fact rb_node("n3");
+
+table rb_log(id: u64, val: String) key(id);
+channel rb_chn(@addr: Node, id: u64, val: String) key(addr, id);
+
+/// From the host, at the first node: a message to broadcast.
+input rb_log_in(id: u64, val: String);
+
+rb_load: on rb_log_in(i, v) {
+    emit rb_log(i, v);
+}
+
+rb_send: while rb_node(a), rb_log(i, v) {
+    send rb_chn(a, i, v);
+}
+
+rb_receive: on rb_chn(_, i, v) {
+    emit rb_log(i, v);
+}

@@ -1,0 +1,379 @@
+# BENCH-095 (R05 T26; §5.7): bud-gc's JoinReclaim unit tests where reclamation waits on seals (ANA-063, ANA-065).
+#
+# R05 §5.7 ("Seal dependencies for other joins", is_safe_rhs_ref): "If X is also joined, in a rule that is not itself an
+# RSE target, with Z (t1 <= (Z * X)...), reclamation of X is chained behind one of: (a) a whole-relation seal on Z; (b) a
+# seal on Z's join column (seal_Z_<col>), matched on the predicate; ... Multiple seal dependencies are chained." Here the
+# reclaimed relation t3 is the positive input of a negation and also joined with t2 (and t4).
+#
+# Fixtures (bud-gc test/tc_gc.rb), each ported with prefixed relation names:
+# - ws: JoinReclaimWithSeal, test_join_reclaim_with_seal.
+# - wsr: JoinReclaimWithSealReorder, test_join_reclaim_with_seal_reorder.
+# - mpa: JoinReclaimMultiplePreds, test_join_reclaim_multi_preds (the seal on t2.a).
+#   Bud seals t2 on a and on b; one seal key per relation, so the test is split over mpa (a) and mpb (b).
+# - mpb: JoinReclaimMultiplePreds, test_join_reclaim_multi_preds (the seal on t2.b).
+# - isx: JoinReclaimIntersectSeal, test_join_reclaim_intersect.
+#   Bud's whole-relation seals of t2 and t4 at the last step become seals on val 11 (one seal key per relation).
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss seal dependencies (tc_gc.rb): reclaiming a join input waits for seals of every relation it joins"
+priority = "P1"
+source = "R05 T26, §5.4-§5.8, §9.4 item 26; bud-gc test/tc_gc.rb (Edelweiss prototype, VLDB 2014)"
+features = ["LANG-040", "LANG-043", "LANG-060", "LANG-082", "LANG-086", "LANG-207", "ANA-060", "ANA-062", "ANA-063", "ANA-065", "ANA-066"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+notes = "Timeline mapping and the storage expectations of the rewritten program: docs/plan/notes/M1.4.md (BENCH-095)."
+
+[run]
+ticks = 7
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-060", "LANG-082", "LANG-086", "LANG-207", "ANA-060", "ANA-062", "ANA-063", "ANA-065", "ANA-066"]
+until = "M7"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-060", "LANG-082", "LANG-086", "LANG-207", "ANA-060", "ANA-062", "ANA-063", "ANA-065", "ANA-066"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ws_t2_in"
+rows = [["foo", "bar"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ws_t3_in"
+rows = [["qux", "bar"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "ws_t4_in"
+rows = [["qux", "bar"]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "ws_t2_seal"
+rows = [["bar"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "wsr_t2_in"
+rows = [["foo", "bar"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "wsr_t3_in"
+rows = [["qux", "bar"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "wsr_t4_in"
+rows = [["qux", "bar"]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "wsr_t2_seal"
+rows = [["bar"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "mpa_t2_in"
+rows = [["foo1", "bar1", "baz1"], ["foo2", "bar2", "baz2"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "mpa_t3_in"
+rows = [["foo1", "bar1", "qux1"], ["foo3", "bar3", "qux3"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "mpa_t4_in"
+rows = [["foo1"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "mpa_t2_seal"
+rows = [["foo1"]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "mpa_t2_seal"
+rows = [["foo3"]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "mpa_t4_in"
+rows = [["foo3"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "mpb_t2_in"
+rows = [["foo1", "bar1", "baz1"], ["foo2", "bar2", "baz2"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "mpb_t3_in"
+rows = [["foo1", "bar1", "qux1"], ["foo3", "bar3", "qux3"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "mpb_t4_in"
+rows = [["foo1"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "mpb_t2_seal"
+rows = [["bar1"], ["bar3"]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "mpb_t4_in"
+rows = [["foo3"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "isx_t2_in"
+rows = [[5, 10]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "isx_t2_seal"
+rows = [[10]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "isx_t3_in"
+rows = [[6, 10], [20, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "isx_t4_in"
+rows = [[7, 10]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "isx_t5_in"
+rows = [[6, 10], [20, 11]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "isx_t4_seal"
+rows = [[10]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "isx_t2_seal"
+rows = [[11]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "isx_t4_seal"
+rows = [[11]]
+
+[[expect]]
+node = "n1"
+rel = "ws_r1"
+tick = 2
+rows = [["qux", "bar"]]
+
+[[expect]]
+node = "n1"
+rel = "ws_r1"
+tick = 4
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "wsr_r1"
+tick = 2
+rows = [["qux", "bar"]]
+
+[[expect]]
+node = "n1"
+rel = "wsr_r1"
+tick = 4
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "mpa_r1"
+tick = 2
+rows = [["foo3", "bar3", "qux3"]]
+
+[[expect]]
+node = "n1"
+rel = "mpb_r1"
+tick = 2
+rows = [["foo3", "bar3", "qux3"]]
+
+[expect_analysis.reclaimable]
+reclaimed = { ws_t3 = "join_seal", wsr_t3 = "join_seal", mpa_t3 = "join_seal", mpb_t3 = "join_seal", isx_t3 = "join_seal" }
+kept = {  }
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ws_t1"
+tick = 2
+rows = [["foo", "qux"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ws_r1"
+tick = 2
+rows = [["qux", "bar"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ws_r1"
+tick = 4
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ws_t3"
+tick = 4
+rows = [["qux", "bar"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ws_t3"
+tick = 6
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "wsr_t1"
+tick = 2
+rows = [["foo", "qux"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "wsr_r1"
+tick = 2
+rows = [["qux", "bar"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "wsr_r1"
+tick = 4
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "wsr_t3"
+tick = 4
+rows = [["qux", "bar"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "wsr_t3"
+tick = 6
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "mpa_t1"
+tick = 2
+rows = [["baz1", "qux1"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "mpa_r1"
+tick = 2
+rows = [["foo3", "bar3", "qux3"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "mpa_t3"
+tick = 2
+rows = [["foo1", "bar1", "qux1"], ["foo3", "bar3", "qux3"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "mpa_t3"
+tick = 4
+rows = [["foo3", "bar3", "qux3"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "mpa_t3"
+tick = 6
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "mpb_t1"
+tick = 2
+rows = [["baz1", "qux1"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "mpb_r1"
+tick = 2
+rows = [["foo3", "bar3", "qux3"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "mpb_t3"
+tick = 2
+rows = [["foo1", "bar1", "qux1"], ["foo3", "bar3", "qux3"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "mpb_t3"
+tick = 4
+rows = [["foo3", "bar3", "qux3"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "mpb_t3"
+tick = 6
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "isx_t3"
+tick = 2
+rows = [[6, 10], [20, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "isx_t3"
+tick = 4
+rows = [[20, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "isx_t3"
+tick = 6
+rows = []

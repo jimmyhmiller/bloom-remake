@@ -1,0 +1,202 @@
+//! BENCH-095: Edelweiss join reclamation for outer joins and pulled-up negations, from bud-gc's tc_gc.rb (R05 T26, §5.7).
+//!
+//! BENCH-095 (R05 T26; §5.7): bud-gc's unit tests for outer joins and the notin pull-up (ANA-063).
+//!
+//! R05 §5.7: "Only binary inner or outer joins are supported." "Pull-up shortcut (is_not_qual_local_to_rel,
+//! quals_tlist_pullup). If the notin quals reference only columns derived from A (possibly through a join equality), the
+//! notin is pushed above the join and a simple rule is added: del_A_r <= (A * Y).lefts(pulled-up quals). It needs no seal,
+//! because any future join output involving a would also be filtered by the persistent Y.
+
+program edelweiss_join_outer_pullup version 1;
+
+// ---------------- JoinRseOuter, test_rse_join_outer_check_sane
+// The outer join behaves as an inner join while every t1 tuple has a partner. t1(6, 11) is reclaimed once its result is
+// in t3 and t2 is sealed on c = 6; t2(5, 100) once its result is in t3 and t1 is sealed on a = 5. (Bud's comment on why
+// t2(6, 110) is kept: a duplicate t1 tuple would produce a padded result.)
+
+table osane_t1(a: u64, b: u64) sealed by (a);
+
+input osane_t1_in(a: u64, b: u64);
+
+osane_t1_load: on osane_t1_in(a, b) {
+    emit osane_t1(a, b);
+}
+
+input osane_t1_seal(a: u64);
+
+osane_t1_close: on osane_t1_seal(a) {
+    seal osane_t1(a: a);
+}
+
+table osane_t2(c: u64, d: u64) sealed by (c);
+
+input osane_t2_in(c: u64, d: u64);
+
+osane_t2_load: on osane_t2_in(c, d) {
+    emit osane_t2(c, d);
+}
+
+input osane_t2_seal(c: u64);
+
+osane_t2_close: on osane_t2_seal(c) {
+    seal osane_t2(c: c);
+}
+
+table osane_t3(e: u64, f: Option<u64>);
+
+input osane_t3_in(e: u64, f: Option<u64>);
+
+osane_t3_load: on osane_t3_in(e, f) {
+    emit osane_t3(e, f);
+}
+
+output osane_r1(key: u64, val: Option<u64>);
+
+/// `r1 <= (t1 * t2).outer(:a => :c) {|x,y| [x.b, y.d]}.notin(t3)`: d is None when t1 has no partner.
+osane_join: while osane_t1(a, b), outer osane_t2(a, d), not osane_t3(b, d) {
+    emit osane_r1(b, d);
+}
+
+// ---------------- JoinRseOuter, test_rse_join_outer
+// With t2 empty every t1 tuple gets a padded result (Bud's nil is None). t1(6, 11) is reclaimed once its padded result is
+// in t3 and t2 is sealed as a whole.
+
+table oouter_t1(a: u64, b: u64);
+
+input oouter_t1_in(a: u64, b: u64);
+
+oouter_t1_load: on oouter_t1_in(a, b) {
+    emit oouter_t1(a, b);
+}
+
+table oouter_t2(c: u64, d: u64) sealed by ();
+
+input oouter_t2_in(c: u64, d: u64);
+
+oouter_t2_load: on oouter_t2_in(c, d) {
+    emit oouter_t2(c, d);
+}
+
+input oouter_t2_seal();
+
+oouter_t2_close: on oouter_t2_seal() {
+    seal oouter_t2();
+}
+
+table oouter_t3(e: u64, f: Option<u64>);
+
+input oouter_t3_in(e: u64, f: Option<u64>);
+
+oouter_t3_load: on oouter_t3_in(e, f) {
+    emit oouter_t3(e, f);
+}
+
+output oouter_r1(key: u64, val: Option<u64>);
+
+/// `r1 <= (t1 * t2).outer(:a => :c) {|x,y| [x.b, y.d]}.notin(t3)`: d is None when t1 has no partner.
+oouter_join: while oouter_t1(a, b), outer oouter_t2(a, d), not oouter_t3(b, d) {
+    emit oouter_r1(b, d);
+}
+
+// ---------------- JoinRseNotinPullup, test_rse_join_notin_pullup
+// `view <= ((ref * obj).pairs(:obj_id => :id) {|r,o| [r.name, r.id, o.val]}).notin(del_ref, 1 => :del_id)`: the negation
+// names ref's id only, so it is pulled above the join and ref 1 and 2 are reclaimed as soon as they are deleted; obj 100
+// then has no result left that is not deleted, and ref is sealed, so it is reclaimed too. ref is a sealed collection
+// filled in bootstrap (Bud inserts it before the first tick).
+
+sealed table pu_ref(id: u64, name: String, obj_id: u64) key(id);
+
+bootstrap {
+    emit pu_ref(1, "foo", 100);
+    emit pu_ref(2, "bar", 100);
+    emit pu_ref(3, "baz", 101);
+}
+
+table pu_obj(id: u64, val: String) key(id);
+
+input pu_obj_in(id: u64, val: String);
+
+pu_obj_load: on pu_obj_in(id, val) {
+    emit pu_obj(id, val);
+}
+
+table pu_del_ref(id: u64, del_id: u64) key(id);
+
+input pu_del_ref_in(id: u64, del_id: u64);
+
+pu_del_ref_load: on pu_del_ref_in(id, del_id) {
+    emit pu_del_ref(id, del_id);
+}
+
+output pu_view(name: String, ref_id: u64, val: String);
+
+pu_join: while pu_ref(i, n, o), pu_obj(o, v), not pu_del_ref(_, i) {
+    emit pu_view(n, i, v);
+}
+
+// ---------------- JoinRseNotinPullupImplicitQual, test_rse_join_notin_pullup_implicit_qual
+// `live_ref <= ((ref * obj).pairs(:obj_id => :id) {|r,o| [r.id]}).notin(del_ref)`: the whole target list is ref's id, so the
+// implicit (whole-tuple) negation is pulled up; ref 1 is reclaimed, obj 100 stays because ref 2 still joins it.
+
+sealed table iq_ref(id: u64, name: String, obj_id: u64) key(id);
+
+bootstrap {
+    emit iq_ref(1, "foo", 100);
+    emit iq_ref(2, "bar", 100);
+    emit iq_ref(3, "baz", 101);
+}
+
+table iq_obj(id: u64, val: String) key(id);
+
+input iq_obj_in(id: u64, val: String);
+
+iq_obj_load: on iq_obj_in(id, val) {
+    emit iq_obj(id, val);
+}
+
+table iq_del_ref(del_id: u64);
+
+input iq_del_ref_in(del_id: u64);
+
+iq_del_ref_load: on iq_del_ref_in(del_id) {
+    emit iq_del_ref(del_id);
+}
+
+output iq_live_ref(ref_id: u64);
+
+iq_join: while iq_ref(i, _n, o), iq_obj(o, _v), not iq_del_ref(i) {
+    emit iq_live_ref(i);
+}
+
+// ---------------- JoinRseNotinPullupImplicitQualLefts, test_rse_join_notin_pullup_implicit_qual_lefts
+// The same query written as a semijoin (`(ref * obj).lefts(:obj_id => :id) {|r| [r.id]}`): the same reclamation.
+
+sealed table iql_ref(id: u64, name: String, obj_id: u64) key(id);
+
+bootstrap {
+    emit iql_ref(1, "foo", 100);
+    emit iql_ref(2, "bar", 100);
+    emit iql_ref(3, "baz", 101);
+}
+
+table iql_obj(id: u64, val: String) key(id);
+
+input iql_obj_in(id: u64, val: String);
+
+iql_obj_load: on iql_obj_in(id, val) {
+    emit iql_obj(id, val);
+}
+
+table iql_del_ref(del_id: u64);
+
+input iql_del_ref_in(del_id: u64);
+
+iql_del_ref_load: on iql_del_ref_in(del_id) {
+    emit iql_del_ref(del_id);
+}
+
+output iql_live_ref(ref_id: u64);
+
+iql_join: while iql_ref(i, _n, o), iql_obj(o, _), not iql_del_ref(i) {
+    emit iql_live_ref(i);
+}

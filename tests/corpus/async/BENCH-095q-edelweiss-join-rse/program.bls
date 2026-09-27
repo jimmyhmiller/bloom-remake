@@ -1,0 +1,250 @@
+//! BENCH-095: Edelweiss join reclamation with seals, from bud-gc's tc_gc.rb (R05 T26, §5.7).
+//!
+//! BENCH-095 (R05 T26; §5.7): bud-gc's JoinRse unit tests (join reclamation, ANA-063).
+//!
+//! R05 §5.7: for `(X * Y).notin(Z)`, "to reclaim y ∈ Y, we must know that every X tuple that will ever join with y has
+//! already arrived, and that every current join result involving y has a match in Z." The rewrite keeps joinbuf and
+//! missing buffers and reclaims a join input once the other input is sealed (whole-relation, or on the join value) and
+//! none of its join results is missing. "Users supply seals by inserting into these tables"; a `sealed` collection needs
+//! none. In the port a Bud seal table seal_<rel>_<col> is the seal of a table declared `sealed by (col)`, fed by the
+//! host through an input.
+
+program edelweiss_join_rse version 1;
+
+// ---------------- JoinRse, test_join_rse
+// `res <= (sbuf * node).pairs(:epoch => :epoch) {|s,n| [n.addr] + s}.notin(res_approx)`: a buffered message is reclaimed
+// once it has reached every node of its epoch and node's epoch is sealed; a node entry once every message of its epoch
+// reached it and sbuf's epoch is sealed. Bud's seal tables seal_sbuf_epoch and seal_node_epoch are the seals of tables
+// declared `sealed by (epoch)`.
+
+table jr_node(addr: String, epoch: u64) sealed by (epoch);
+
+input jr_node_in(addr: String, epoch: u64);
+
+jr_node_load: on jr_node_in(addr, epoch) {
+    emit jr_node(addr, epoch);
+}
+
+input jr_node_seal(epoch: u64);
+
+jr_node_close: on jr_node_seal(epoch) {
+    seal jr_node(epoch: epoch);
+}
+
+table jr_sbuf(id: u64, epoch: u64, val: String) key(id) sealed by (epoch);
+
+input jr_sbuf_in(id: u64, epoch: u64, val: String);
+
+jr_sbuf_load: on jr_sbuf_in(id, epoch, val) {
+    emit jr_sbuf(id, epoch, val);
+}
+
+input jr_sbuf_seal(epoch: u64);
+
+jr_sbuf_close: on jr_sbuf_seal(epoch) {
+    seal jr_sbuf(epoch: epoch);
+}
+
+table jr_res_approx(addr: String, id: u64, epoch: u64, val: String);
+
+input jr_res_approx_in(addr: String, id: u64, epoch: u64, val: String);
+
+jr_res_approx_load: on jr_res_approx_in(addr, id, epoch, val) {
+    emit jr_res_approx(addr, id, epoch, val);
+}
+
+output jr_res(addr: String, id: u64, epoch: u64, val: String);
+
+jr_deliver: while jr_sbuf(i, e, v), jr_node(a, e), not jr_res_approx(a, i, e, v) {
+    emit jr_res(a, i, e, v);
+}
+
+// ---------------- JoinRseVariantQuals, test_join_rse_variant_qual
+// The same program with the join predicate written the other way round (`pairs(node.epoch => sbuf.epoch)`): the same
+// reclamation. In the port the join atoms are written in the other order.
+
+table jrv_node(addr: String, epoch: u64) sealed by (epoch);
+
+input jrv_node_in(addr: String, epoch: u64);
+
+jrv_node_load: on jrv_node_in(addr, epoch) {
+    emit jrv_node(addr, epoch);
+}
+
+input jrv_node_seal(epoch: u64);
+
+jrv_node_close: on jrv_node_seal(epoch) {
+    seal jrv_node(epoch: epoch);
+}
+
+table jrv_sbuf(id: u64, epoch: u64, val: String) key(id) sealed by (epoch);
+
+input jrv_sbuf_in(id: u64, epoch: u64, val: String);
+
+jrv_sbuf_load: on jrv_sbuf_in(id, epoch, val) {
+    emit jrv_sbuf(id, epoch, val);
+}
+
+input jrv_sbuf_seal(epoch: u64);
+
+jrv_sbuf_close: on jrv_sbuf_seal(epoch) {
+    seal jrv_sbuf(epoch: epoch);
+}
+
+table jrv_res_approx(addr: String, id: u64, epoch: u64, val: String);
+
+input jrv_res_approx_in(addr: String, id: u64, epoch: u64, val: String);
+
+jrv_res_approx_load: on jrv_res_approx_in(addr, id, epoch, val) {
+    emit jrv_res_approx(addr, id, epoch, val);
+}
+
+output jrv_res(addr: String, id: u64, epoch: u64, val: String);
+
+jrv_deliver: while jrv_node(a, e), jrv_sbuf(i, e, v), not jrv_res_approx(a, i, e, v) {
+    emit jrv_res(a, i, e, v);
+}
+
+// ---------------- JoinRseNoQual, test_join_rse_no_qual
+// A join with no predicate (a Cartesian product): `res <= ((sbuf * node).pairs {|s,n| s + n}).notin(res_approx)`, with
+// whole-relation seals on node and on sbuf.
+
+table nq_node(addr: String) sealed by ();
+
+input nq_node_in(addr: String);
+
+nq_node_load: on nq_node_in(addr) {
+    emit nq_node(addr);
+}
+
+input nq_node_seal();
+
+nq_node_close: on nq_node_seal() {
+    seal nq_node();
+}
+
+table nq_sbuf(id: u64, val: String) key(id) sealed by ();
+
+input nq_sbuf_in(id: u64, val: String);
+
+nq_sbuf_load: on nq_sbuf_in(id, val) {
+    emit nq_sbuf(id, val);
+}
+
+input nq_sbuf_seal();
+
+nq_sbuf_close: on nq_sbuf_seal() {
+    seal nq_sbuf();
+}
+
+table nq_res_approx(id: u64, val: String, addr: String);
+
+input nq_res_approx_in(id: u64, val: String, addr: String);
+
+nq_res_approx_load: on nq_res_approx_in(id, val, addr) {
+    emit nq_res_approx(id, val, addr);
+}
+
+output nq_res(id: u64, val: String, addr: String);
+
+nq_deliver: while nq_sbuf(i, v), nq_node(a), not nq_res_approx(i, v, a) {
+    emit nq_res(i, v, a);
+}
+
+// ---------------- JoinRseSealed, test_join_rse_sealed
+// "Sealed collections don't need an explicit seal": node is a sealed collection filled in bootstrap.
+
+sealed table sld_node(addr: String);
+
+bootstrap {
+    emit sld_node("foo");
+    emit sld_node("bar");
+}
+
+table sld_sbuf(id: u64, val: String) key(id);
+
+input sld_sbuf_in(id: u64, val: String);
+
+sld_sbuf_load: on sld_sbuf_in(id, val) {
+    emit sld_sbuf(id, val);
+}
+
+table sld_res_approx(id: u64, val: String, addr: String);
+
+input sld_res_approx_in(id: u64, val: String, addr: String);
+
+sld_res_approx_load: on sld_res_approx_in(id, val, addr) {
+    emit sld_res_approx(id, val, addr);
+}
+
+output sld_res(id: u64, val: String, addr: String);
+
+sld_deliver: while sld_sbuf(i, v), sld_node(a), not sld_res_approx(i, v, a) {
+    emit sld_res(i, v, a);
+}
+
+// ---------------- JoinRseNegationQual, test_join_rse_negation_qual
+// `res <= ((node * sbuf).pairs {|n,s| n + s}).notin(res_approx, 0 => :addr, 1 => 1)`: the negation matches (addr, id) and
+// ignores res_approx's third column.
+
+sealed table nqual_node(addr: String);
+
+bootstrap {
+    emit nqual_node("foo");
+    emit nqual_node("bar");
+}
+
+table nqual_sbuf(id: u64, val: String) key(id);
+
+input nqual_sbuf_in(id: u64, val: String);
+
+nqual_sbuf_load: on nqual_sbuf_in(id, val) {
+    emit nqual_sbuf(id, val);
+}
+
+table nqual_res_approx(addr: String, id: u64, garbage: String);
+
+input nqual_res_approx_in(addr: String, id: u64, garbage: String);
+
+nqual_res_approx_load: on nqual_res_approx_in(addr, id, garbage) {
+    emit nqual_res_approx(addr, id, garbage);
+}
+
+output nqual_res(addr: String, id: u64, val: String) key(addr, id);
+
+nqual_deliver: while nqual_node(a), nqual_sbuf(i, v), not nqual_res_approx(a, i, _) {
+    emit nqual_res(a, i, v);
+}
+
+// ---------------- JoinRseNegationQualVariant, test_join_rse_negation_qual_variant
+// `notin(res_approx, 1 => :id)`: the negation matches on id alone, so one res_approx tuple for an id excludes that id's
+// result at every node.
+
+sealed table nqv_node(addr: String);
+
+bootstrap {
+    emit nqv_node("foo");
+    emit nqv_node("bar");
+}
+
+table nqv_sbuf(id: u64, val: String) key(id);
+
+input nqv_sbuf_in(id: u64, val: String);
+
+nqv_sbuf_load: on nqv_sbuf_in(id, val) {
+    emit nqv_sbuf(id, val);
+}
+
+table nqv_res_approx(garbage: String, addr: String, id: u64);
+
+input nqv_res_approx_in(garbage: String, addr: String, id: u64);
+
+nqv_res_approx_load: on nqv_res_approx_in(garbage, addr, id) {
+    emit nqv_res_approx(garbage, addr, id);
+}
+
+output nqv_res(addr: String, id: u64, val: String) key(addr, id);
+
+nqv_deliver: while nqv_node(a), nqv_sbuf(i, v), not nqv_res_approx(_, _, i) {
+    emit nqv_res(a, i, v);
+}

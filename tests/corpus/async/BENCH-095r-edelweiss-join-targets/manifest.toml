@@ -1,0 +1,250 @@
+# BENCH-095 (R05 T26; §5.7): bud-gc's JoinRse unit tests for shared join inputs and target lists (ANA-063).
+#
+# R05 §5.7: a join input is reclaimed once the other input is sealed and no join result involving it is missing; with a
+# pull-up, "if the notin quals reference only columns derived from A ... a simple rule is added: del_A_r <= (A *
+# Y).lefts(pulled-up quals). It needs no seal". A relation that is an input of several reclamation rules is reclaimed
+# only when all of them allow it. Constants in the target list (literals, the node's address and port) are part of the
+# join result the negation is matched against.
+#
+# Fixtures (bud-gc test/tc_gc.rb), each ported with prefixed relation names:
+# - sut: JoinRseSealedUseTwice, test_rse_join_sealed_twice.
+# - ut: JoinRseUseTwice, test_rse_join_twice.
+# - dr: JoinRseSealDoubleReclaim, test_rse_join_twice_reclaim_from_sealed.
+# - ds: JoinRseDoubleScratch, test_rse_join_double_scratch.
+# - tc: JoinRseTlistConst, test_rse_join_tlist_const.
+#   Bud's constant 99 shares a column with the string "foo"; the port writes "99".
+# - ip: JoinRseTlistIpPort, test_rse_join_tlist_ip_port.
+# - cq: JoinRseTlistConstQual, test_rse_join_tlist_const_qual.
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss join reclamation (tc_gc.rb): sealed inputs used twice, double reclaim, double scratch, constant target lists"
+priority = "P1"
+source = "R05 T26, §5.4-§5.8, §9.4 item 26; bud-gc test/tc_gc.rb (Edelweiss prototype, VLDB 2014)"
+features = ["LANG-010", "LANG-040", "LANG-042", "LANG-043", "LANG-049", "LANG-060", "LANG-062", "LANG-082", "LANG-152", "LANG-190", "LANG-207", "ANA-060", "ANA-061", "ANA-063", "ANA-066"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+notes = "Timeline mapping and the storage expectations of the rewritten program: docs/plan/notes/M1.4.md (BENCH-095)."
+
+[run]
+ticks = 7
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-010", "LANG-040", "LANG-042", "LANG-043", "LANG-049", "LANG-060", "LANG-062", "LANG-082", "LANG-152", "LANG-190", "LANG-207", "ANA-060", "ANA-061", "ANA-063", "ANA-066"]
+until = "M7"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-010", "LANG-040", "LANG-042", "LANG-043", "LANG-049", "LANG-060", "LANG-062", "LANG-082", "LANG-152", "LANG-190", "LANG-207", "ANA-060", "ANA-061", "ANA-063", "ANA-066"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "dr_x_log_in"
+rows = [[100, "a"], [101, "b"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "dr_x_res_approx_in"
+rows = [["foo", "a", 1, 100, "a"], ["foo", "b", 1, 101, "b"]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "dr_x_log_seal"
+rows = [["b"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ds_obj_in"
+rows = [[5, "foo"], [10, "bar"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ds_ref_in"
+rows = [[1, "x", 5], [2, "y", 5], [3, "z", 10]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "ds_del_ref_in"
+rows = [[100, 1], [101, 2]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "ds_ref_seal"
+rows = [[]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "tc_a_approx_in"
+rows = [[5, "foo", 12], [6, "99", 12]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "tc_b_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "tc_a_approx_in"
+rows = [[5, "99", 12]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ip_a_approx_in"
+rows = [[5, "n1", 5555, 12]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ip_b_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "cq_a_approx_in"
+rows = [[5, 5556, 100], [6, 5557, 12]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "cq_b_in"
+rows = [[5, 10], [6, 11]]
+
+[[expect]]
+node = "n1"
+rel = "ds_view"
+tick = 2
+rows = [[1, "x", 5, 5, "foo"], [2, "y", 5, 5, "foo"], [3, "z", 10, 10, "bar"]]
+
+[[expect]]
+node = "n1"
+rel = "ds_view"
+tick = 4
+rows = [[3, "z", 10, 10, "bar"]]
+
+[expect_analysis.reclaimable]
+reclaimed = { dr_x_log = "join_seal", ds_ref = "join_pullup", ds_obj = "join_seal", tc_b = "join_seal", ip_b = "join_seal", cq_b = "join_seal" }
+kept = { dr_node = "unsealed_join" }
+channels = { sut_ins_chn = "arm", sut_del_chn = "arm", ut_ins_chn = "arm", ut_del_chn = "arm" }
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sut_ins_log"
+tick = 1
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ut_ins_log"
+tick = 1
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "dr_x_res"
+tick = 2
+rows = [["foo", "a", 1, 100, "a"], ["foo", "b", 1, 101, "b"], ["bar", "a", 1, 100, "a"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "dr_x_log"
+tick = 4
+rows = [[100, "a"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "dr_node"
+tick = 6
+rows = [["foo", "a", 1], ["bar", "a", 1], ["foo", "b", 1], ["bar", "c", 2]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ds_obj"
+tick = 2
+rows = [[5, "foo"], [10, "bar"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ds_ref"
+tick = 2
+rows = [[1, "x", 5], [2, "y", 5], [3, "z", 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ds_view"
+tick = 2
+rows = [[1, "x", 5, 5, "foo"], [2, "y", 5, 5, "foo"], [3, "z", 10, 10, "bar"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ds_obj"
+tick = 4
+rows = [[10, "bar"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ds_ref"
+tick = 4
+rows = [[3, "z", 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ds_view"
+tick = 4
+rows = [[3, "z", 10, 10, "bar"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "tc_a"
+tick = 2
+rows = [[5, "99", 12], [6, "foo", 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "tc_b"
+tick = 2
+rows = [[5, 10], [6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "tc_b"
+tick = 4
+rows = [[6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ip_a"
+tick = 2
+rows = [[6, "n1", 5555, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ip_b"
+tick = 2
+rows = [[6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "cq_a"
+tick = 2
+rows = [[6, 5556, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "cq_b"
+tick = 2
+rows = [[6, 11]]

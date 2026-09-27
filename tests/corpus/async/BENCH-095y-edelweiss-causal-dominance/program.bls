@@ -1,0 +1,190 @@
+//! BENCH-095: Edelweiss reclamation in causal dominance programs, from bud-gc's tc_gc.rb (R05 T26, §5.7, §5.9).
+//!
+//! BENCH-095 (R05 T26; §5.7, §5.9): bud-gc's causal-GC unit tests (the building blocks of the causal KVS).
+//!
+//! R05 §5.9 (Causal KVS): "dep once its log entry is safe; safe_dep and dom 'as soon as they are produced'; safe once
+//! dominated." R05 §5.7: a semijoin (the target list uses one input only) needs a single observed partner, not a seal, and
+//! join predicates imply equalities that the reclamation may use. These fixtures isolate the dominance rules.
+
+program edelweiss_causal_dominance version 1;
+
+// ---------------- SimpleCausal, test_simple_causal
+// A write dominated by a later write to the same key (through a dependency) leaves the view: `sk <= (safe * safe)
+// .pairs(:key => :key)`, `dom <= (sk * dep).rights(:w1 => :id, :w2 => :target) {|d| [d.target]}` and `view <=
+// safe.notin(dom)`.
+
+table sc_safe(id: u64, key: String) key(id);
+
+input sc_safe_in(id: u64, key: String);
+
+sc_safe_load: on sc_safe_in(id, key) {
+    emit sc_safe(id, key);
+}
+
+table sc_dep(id: u64, target: u64);
+
+input sc_dep_in(id: u64, target: u64);
+
+sc_dep_load: on sc_dep_in(id, target) {
+    emit sc_dep(id, target);
+}
+
+table sc_dom(id: u64);
+
+output sc_sk(w1: u64, w2: u64);
+output sc_view(id: u64, key: String);
+
+sc_same_key: while sc_safe(i1, k), sc_safe(i2, k) where i1 != i2 {
+    emit sc_sk(i1, i2);
+}
+
+sc_dominate: while sc_sk(w1, w2), sc_dep(w1, w2) {
+    emit sc_dom(w2);
+}
+
+sc_live: while sc_safe(i, k), not sc_dom(i) {
+    emit sc_view(i, k);
+}
+
+// ---------------- SimpleCausalAtNext, test_simple_causal_at_next
+// The same with `dom <+ (...).notin(dom, 0 => :id)`: dom grows at the next tick, and each dependency is reclaimed once
+// its target is in dom. The rest of the test is skipped in bud-gc (`skip`) and is not ported.
+
+table scn_safe(id: u64, key: String) key(id);
+
+input scn_safe_in(id: u64, key: String);
+
+scn_safe_load: on scn_safe_in(id, key) {
+    emit scn_safe(id, key);
+}
+
+table scn_dep(id: u64, target: u64);
+
+input scn_dep_in(id: u64, target: u64);
+
+scn_dep_load: on scn_dep_in(id, target) {
+    emit scn_dep(id, target);
+}
+
+table scn_dom(id: u64);
+
+output scn_sk(w1: u64, w2: u64);
+output scn_view(id: u64, key: String);
+
+scn_same_key: while scn_safe(i1, k), scn_safe(i2, k) where i1 != i2 {
+    emit scn_sk(i1, i2);
+}
+
+scn_dominate: while scn_sk(w1, w2), scn_dep(w1, w2), not scn_dom(w2) {
+    next scn_dom(w2);
+}
+
+scn_live: while scn_safe(i, k), not scn_dom(i) {
+    emit scn_view(i, k);
+}
+
+// ---------------- CausalDomRights, test_dom_rights
+// `dom <+ (sk * dep).rights(:w1 => :id, :w2 => :target) {|d| [d.target]}.notin(dom, 0 => :id)`: "As dom grows, we can
+// discard values from dep without needing any additional info. We can _also_ discard from sk without seal, because of the
+// equality constraint between dep.target and sk.w2 implied by the join predicate." sk(6, 7) has no partner and goes once
+// dep is sealed on id 6.
+
+table cdr_sk(w1: u64, w2: u64);
+
+input cdr_sk_in(w1: u64, w2: u64);
+
+cdr_sk_load: on cdr_sk_in(w1, w2) {
+    emit cdr_sk(w1, w2);
+}
+
+table cdr_dep(id: u64, target: u64) sealed by (id);
+
+input cdr_dep_in(id: u64, target: u64);
+
+cdr_dep_load: on cdr_dep_in(id, target) {
+    emit cdr_dep(id, target);
+}
+
+input cdr_dep_seal(id: u64);
+
+cdr_dep_close: on cdr_dep_seal(id) {
+    seal cdr_dep(id: id);
+}
+
+table cdr_dom(id: u64);
+
+cdr_dominate: while cdr_sk(w1, w2), cdr_dep(w1, w2), not cdr_dom(w2) {
+    next cdr_dom(w2);
+}
+
+// ---------------- JoinReclaimRightsOnSeal, test_join_reclaim_rights_on_seal
+// `r1 <= (t1 * t2).rights(:id => :id) {|t| [t.val]}.notin(t3)`: t2(5, 99) is reclaimed once its value is in t3 (a
+// semijoin from t2's side with a partner seen); the t1 tuples with id 5 once t2 is sealed on id 5.
+
+table ros_t1(id: u64, val: u64);
+
+input ros_t1_in(id: u64, val: u64);
+
+ros_t1_load: on ros_t1_in(id, val) {
+    emit ros_t1(id, val);
+}
+
+table ros_t2(id: u64, val: u64) sealed by (id);
+
+input ros_t2_in(id: u64, val: u64);
+
+ros_t2_load: on ros_t2_in(id, val) {
+    emit ros_t2(id, val);
+}
+
+input ros_t2_seal(id: u64);
+
+ros_t2_close: on ros_t2_seal(id) {
+    seal ros_t2(id: id);
+}
+
+table ros_t3(val: u64);
+
+input ros_t3_in(val: u64);
+
+ros_t3_load: on ros_t3_in(val) {
+    emit ros_t3(val);
+}
+
+output ros_r1(val: u64);
+
+ros_join: while ros_t1(i, _v1), ros_t2(i, v), not ros_t3(v) {
+    emit ros_r1(v);
+}
+
+// ---------------- CausalHack, test_causal_hack
+// `dom <+ (dep * safe).rights(:target_key => :key, :target => :id) {|d| [d.id]}.notin(dom, 0 => :id)` and `view <=
+// safe.notin(dom)`: the dominated write, its dependency and, once the write is gone, its dom entry are all reclaimed.
+
+table ch_safe(id: u64, key: String) key(id);
+
+input ch_safe_in(id: u64, key: String);
+
+ch_safe_load: on ch_safe_in(id, key) {
+    emit ch_safe(id, key);
+}
+
+table ch_dep(id: u64, target: u64, target_key: String) key(id, target);
+
+input ch_dep_in(id: u64, target: u64, target_key: String);
+
+ch_dep_load: on ch_dep_in(id, target, target_key) {
+    emit ch_dep(id, target, target_key);
+}
+
+table ch_dom(id: u64);
+
+output ch_view(id: u64, key: String);
+
+ch_dominate: while ch_dep(_i, t, k), ch_safe(t, k), not ch_dom(t) {
+    next ch_dom(t);
+}
+
+ch_live: while ch_safe(i, k), not ch_dom(i) {
+    emit ch_view(i, k);
+}

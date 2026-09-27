@@ -1,0 +1,81 @@
+//! BENCH-095: Edelweiss reclamation from self-joins, from bud-gc's tc_gc.rb (R05 T26, §5.7).
+//!
+//! BENCH-095 (R05 T26; §5.7): bud-gc's self-join reclamation tests (ANA-063).
+//!
+//! For a self-join "there's only a single join input collection (which appears twice), so we need more seal information
+//! before we can reclaim something" (bud-gc bud_meta.rb, create_self_join_del_rules): a tuple goes only when no future
+//! tuple can join it as either input and none of its results on either side is missing.
+//!
+//! test_rse_self_join_diff_preds_partial_seal is not ported (docs/plan/notes/M1.4.md, BENCH-095). It seals t1 on two
+//! different columns, x and y, which LANGUAGE does not allow (one `sealed by` clause per relation). Its expected
+//! reclamation is also unsound: after seals on x = 1 and y = 2 it reclaims t1(1, 2), but for left.x = right.y the partners
+//! of t1(1, 2) are tuples with y = 1 (as the left input) and x = 2 (as the right input). A later t1(5, 1) is allowed by
+//! those seals and would join it; bud-gc matches each seal against the tuple's own column instead. The sound rule is
+//! pinned by the whole-relation variant here and by RseSelfJoin, whose predicate uses one column.
+
+program edelweiss_self_joins version 1;
+
+// ---------------- RseSelfJoin, test_rse_self_join
+// `r1 <= (t1 * t1).pairs(:val => :val) {|x,y| [x.key, y.key]}.notin(t2)`: a self-join on one column. After the partial
+// seal on val = 10, t1(5, 10) is reclaimed once all its results, on either side of the join, are in t2; then t1(6, 10).
+
+table sj_t1(key: u64, val: u64) key(key) sealed by (val);
+
+input sj_t1_in(key: u64, val: u64);
+
+sj_t1_load: on sj_t1_in(key, val) {
+    emit sj_t1(key, val);
+}
+
+input sj_t1_seal(val: u64);
+
+sj_t1_close: on sj_t1_seal(val) {
+    seal sj_t1(val: val);
+}
+
+table sj_t2(x: u64, y: u64);
+
+input sj_t2_in(x: u64, y: u64);
+
+sj_t2_load: on sj_t2_in(x, y) {
+    emit sj_t2(x, y);
+}
+
+output sj_r1(x: u64, y: u64);
+
+sj_pairs: while sj_t1(k1, v), sj_t1(k2, v), not sj_t2(k1, k2) {
+    emit sj_r1(k1, k2);
+}
+
+// ---------------- RseSelfJoinDiffPreds, test_rse_self_join_diff_preds
+// `r1 <= (t1 * t1).pairs(:x => :y) {|a,b| a + b}.notin(t2)`: a self-join whose predicate relates two different columns
+// (left.x = right.y), with a whole-relation seal. t1(1, 2) has no partner as the left input and its one result as the
+// right input is in t2, so the seal lets it go; t1(2, 3) and t1(3, 4) follow once [3, 4, 2, 3] is in t2.
+
+table dp_t1(x: u64, y: u64) sealed by ();
+
+input dp_t1_in(x: u64, y: u64);
+
+dp_t1_load: on dp_t1_in(x, y) {
+    emit dp_t1(x, y);
+}
+
+input dp_t1_seal();
+
+dp_t1_close: on dp_t1_seal() {
+    seal dp_t1();
+}
+
+table dp_t2(a: u64, b: u64, c: u64, d: u64);
+
+input dp_t2_in(a: u64, b: u64, c: u64, d: u64);
+
+dp_t2_load: on dp_t2_in(a, b, c, d) {
+    emit dp_t2(a, b, c, d);
+}
+
+output dp_r1(a: u64, b: u64, c: u64, d: u64);
+
+dp_pairs: while dp_t1(x1, y1), dp_t1(x2, x1), not dp_t2(x1, y1, x2, x1) {
+    emit dp_r1(x1, y1, x2, x1);
+}

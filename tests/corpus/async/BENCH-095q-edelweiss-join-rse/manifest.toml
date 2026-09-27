@@ -1,0 +1,453 @@
+# BENCH-095 (R05 T26; §5.7): bud-gc's JoinRse unit tests (join reclamation, ANA-063).
+#
+# R05 §5.7: for `(X * Y).notin(Z)`, "to reclaim y ∈ Y, we must know that every X tuple that will ever join with y has
+# already arrived, and that every current join result involving y has a match in Z." The rewrite keeps joinbuf and
+# missing buffers and reclaims a join input once the other input is sealed (whole-relation, or on the join value) and
+# none of its join results is missing. "Users supply seals by inserting into these tables"; a `sealed` collection needs
+# none. In the port a Bud seal table seal_<rel>_<col> is the seal of a table declared `sealed by (col)`, fed by the
+# host through an input.
+#
+# Fixtures (bud-gc test/tc_gc.rb), each ported with prefixed relation names:
+# - jr: JoinRse, test_join_rse.
+# - jrv: JoinRseVariantQuals, test_join_rse_variant_qual.
+# - nq: JoinRseNoQual, test_join_rse_no_qual.
+# - sld: JoinRseSealed, test_join_rse_sealed.
+# - nqual: JoinRseNegationQual, test_join_rse_negation_qual.
+# - nqv: JoinRseNegationQualVariant, test_join_rse_negation_qual_variant.
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss join reclamation (tc_gc.rb): a join input is reclaimed once the other side is sealed and nothing is missing"
+priority = "P1"
+source = "R05 T26, §5.4-§5.8, §9.4 item 26; bud-gc test/tc_gc.rb (Edelweiss prototype, VLDB 2014)"
+features = ["LANG-040", "LANG-043", "LANG-049", "LANG-060", "LANG-082", "LANG-190", "LANG-207", "ANA-060", "ANA-063", "ANA-065", "ANA-066"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+notes = "Timeline mapping and the storage expectations of the rewritten program: docs/plan/notes/M1.4.md (BENCH-095)."
+
+[run]
+ticks = 13
+stop = "ticks"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-049", "LANG-060", "LANG-082", "LANG-190", "LANG-207", "ANA-060", "ANA-063", "ANA-065", "ANA-066"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "jr_node_in"
+rows = [["foo", 1], ["bar", 1], ["bar", 2]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "jr_sbuf_in"
+rows = [[100, 1, "x"], [101, 1, "y"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "jr_res_approx_in"
+rows = [["foo", 100, 1, "x"], ["foo", 101, 1, "y"]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "jr_sbuf_seal"
+rows = [[1]]
+
+[[input]]
+node = "n1"
+tick = 7
+rel = "jr_node_seal"
+rows = [[1]]
+
+[[input]]
+node = "n1"
+tick = 9
+rel = "jr_res_approx_in"
+rows = [["bar", 100, 1, "x"]]
+
+[[input]]
+node = "n1"
+tick = 11
+rel = "jr_res_approx_in"
+rows = [["bar", 101, 1, "y"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "jrv_node_in"
+rows = [["foo", 1], ["bar", 1], ["bar", 2]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "jrv_sbuf_in"
+rows = [[100, 1, "x"], [101, 1, "y"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "jrv_res_approx_in"
+rows = [["foo", 100, 1, "x"], ["foo", 101, 1, "y"]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "jrv_sbuf_seal"
+rows = [[1]]
+
+[[input]]
+node = "n1"
+tick = 7
+rel = "jrv_node_seal"
+rows = [[1]]
+
+[[input]]
+node = "n1"
+tick = 9
+rel = "jrv_res_approx_in"
+rows = [["bar", 100, 1, "x"]]
+
+[[input]]
+node = "n1"
+tick = 11
+rel = "jrv_res_approx_in"
+rows = [["bar", 101, 1, "y"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "nq_node_in"
+rows = [["foo"], ["bar"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "nq_sbuf_in"
+rows = [[1, "x"], [2, "y"], [3, "z"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "nq_node_seal"
+rows = [[]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "nq_res_approx_in"
+rows = [[1, "x", "foo"], [2, "y", "bar"], [3, "z", "foo"], [3, "z", "bar"]]
+
+[[input]]
+node = "n1"
+tick = 7
+rel = "nq_res_approx_in"
+rows = [[2, "y", "foo"]]
+
+[[input]]
+node = "n1"
+tick = 9
+rel = "nq_sbuf_seal"
+rows = [[]]
+
+[[input]]
+node = "n1"
+tick = 11
+rel = "nq_res_approx_in"
+rows = [[1, "x", "bar"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "sld_sbuf_in"
+rows = [[1, "a"], [2, "b"], [3, "c"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "sld_res_approx_in"
+rows = [[1, "a", "bar"], [1, "a", "foo"], [2, "b", "bar"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "nqual_sbuf_in"
+rows = [[1, "a"], [2, "b"], [3, "c"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "nqual_res_approx_in"
+rows = [["bar", 1, "x"], ["foo", 1, "x"], ["bar", 2, "x"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "nqv_sbuf_in"
+rows = [[1, "a"], [2, "b"], [3, "c"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "nqv_res_approx_in"
+rows = [["x", "bar", 1], ["y", "foo", 1], ["z", "bar", 2]]
+
+[expect_analysis.reclaimable]
+reclaimed = { jr_sbuf = "join_seal", jr_node = "join_seal", jrv_sbuf = "join_seal", jrv_node = "join_seal", nq_sbuf = "join_seal", nq_node = "join_seal", sld_sbuf = "join_seal", nqual_sbuf = "join_seal", nqv_sbuf = "join_seal" }
+kept = {  }
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jr_sbuf"
+tick = 2
+rows = [[100, 1, "x"], [101, 1, "y"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jr_node"
+tick = 2
+rows = [["bar", 1], ["bar", 2], ["foo", 1]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jr_sbuf"
+tick = 4
+rows = [[100, 1, "x"], [101, 1, "y"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jr_node"
+tick = 4
+rows = [["bar", 1], ["bar", 2], ["foo", 1]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jr_sbuf"
+tick = 6
+rows = [[100, 1, "x"], [101, 1, "y"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jr_node"
+tick = 6
+rows = [["bar", 1], ["bar", 2]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jr_sbuf"
+tick = 8
+rows = [[100, 1, "x"], [101, 1, "y"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jr_node"
+tick = 8
+rows = [["bar", 1], ["bar", 2]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jr_sbuf"
+tick = 10
+rows = [[101, 1, "y"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jr_node"
+tick = 10
+rows = [["bar", 1], ["bar", 2]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jr_sbuf"
+tick = 12
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jr_node"
+tick = 12
+rows = [["bar", 2]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jrv_sbuf"
+tick = 2
+rows = [[100, 1, "x"], [101, 1, "y"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jrv_node"
+tick = 2
+rows = [["bar", 1], ["bar", 2], ["foo", 1]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jrv_sbuf"
+tick = 4
+rows = [[100, 1, "x"], [101, 1, "y"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jrv_node"
+tick = 4
+rows = [["bar", 1], ["bar", 2], ["foo", 1]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jrv_sbuf"
+tick = 6
+rows = [[100, 1, "x"], [101, 1, "y"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jrv_node"
+tick = 6
+rows = [["bar", 1], ["bar", 2]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jrv_sbuf"
+tick = 8
+rows = [[100, 1, "x"], [101, 1, "y"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jrv_node"
+tick = 8
+rows = [["bar", 1], ["bar", 2]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jrv_sbuf"
+tick = 10
+rows = [[101, 1, "y"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jrv_node"
+tick = 10
+rows = [["bar", 1], ["bar", 2]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jrv_sbuf"
+tick = 12
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "jrv_node"
+tick = 12
+rows = [["bar", 2]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "nq_node"
+tick = 2
+rows = [["bar"], ["foo"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "nq_sbuf"
+tick = 2
+rows = [[1, "x"], [2, "y"], [3, "z"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "nq_node"
+tick = 4
+rows = [["bar"], ["foo"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "nq_sbuf"
+tick = 4
+rows = [[1, "x"], [2, "y"], [3, "z"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "nq_node"
+tick = 6
+rows = [["bar"], ["foo"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "nq_sbuf"
+tick = 6
+rows = [[1, "x"], [2, "y"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "nq_node"
+tick = 8
+rows = [["bar"], ["foo"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "nq_sbuf"
+tick = 8
+rows = [[1, "x"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "nq_node"
+tick = 10
+rows = [["bar"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "nq_sbuf"
+tick = 10
+rows = [[1, "x"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "nq_node"
+tick = 12
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "nq_sbuf"
+tick = 12
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sld_sbuf"
+tick = 2
+rows = [[1, "a"], [2, "b"], [3, "c"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sld_sbuf"
+tick = 4
+rows = [[2, "b"], [3, "c"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "nqual_sbuf"
+tick = 2
+rows = [[1, "a"], [2, "b"], [3, "c"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "nqual_sbuf"
+tick = 4
+rows = [[2, "b"], [3, "c"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "nqv_sbuf"
+tick = 2
+rows = [[1, "a"], [2, "b"], [3, "c"]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "nqv_sbuf"
+tick = 4
+rows = [[3, "c"]]

@@ -1,0 +1,792 @@
+# BENCH-095 (R05 T26; §5.8): bud-gc's ReclaimOuter unit tests (negative-difference reclamation, DR−, ANA-064).
+#
+# R05 §5.8: DR− applies to X.notin(Y, :A => :B) when X and Y are persistent, A is a key of X ("the negation qual columns on
+# X [must be] exactly X's key columns") and the downstream uses are reclaim-safe. The rewrite adds a range X_keys, drops
+# later insertions of a key already in it (duplicate suppression), reclaims X by DR+ and reclaims Y "only after the
+# matching X tuple is gone", one tick later. Conditions from several rules combine with AND.
+#
+# Fixtures (bud-gc test/tc_gc.rb), each ported with prefixed relation names:
+# - ro: ReclaimOuter, test_outer_reclaim_simple.
+#   y is keyed on all its columns (Bud: y_key): the test later inserts y(6, 49) beside y(6, 11), a key conflict in
+#   the program without the rewrite. DR− only needs the keys of the positive input x.
+# - ri: ReclaimOuterIntersect, test_outer_reclaim_intersect.
+#   t3 is keyed on all its columns (Bud: key): the test later inserts t3(7, 99) beside t3(7, 12).
+# - rv: ReclaimOuterIntersectInverse, test_outer_reclaim_intersect_inverse.
+#   t2 and t3 are keyed on all their columns (Bud: key): the test later inserts t2(7, 121) beside t2(7, 120).
+# - rc: ReclaimOuterInnerCombine, test_outer_inner_reclaim_combine.
+# - rp: ReclaimOuterPending, test_outer_reclaim_pending.
+#   Bud re-inserts [6, 12] for key 6; the port re-inserts the reclaimed tuple [6, 11]: a different value for a
+#   key of t1 is a key conflict without the rewrite (DR− assumes keys determine tuples).
+# - rill: ReclaimOuterIllegal, test_outer_reclaim_illegal.
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss DR− (tc_gc.rb): matched negative inputs reclaimed behind a key range; duplicates suppressed; illegal cases kept"
+priority = "P1"
+source = "R05 T26, §5.4-§5.8, §9.4 item 26; bud-gc test/tc_gc.rb (Edelweiss prototype, VLDB 2014)"
+features = ["LANG-040", "LANG-043", "LANG-060", "LANG-061", "LANG-082", "LANG-083", "LANG-100", "ANA-060", "ANA-062", "ANA-064", "ANA-066"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+notes = "Timeline mapping and the storage expectations of the rewritten program: docs/plan/notes/M1.4.md (BENCH-095)."
+
+[run]
+ticks = 13
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-060", "LANG-061", "LANG-082", "LANG-083", "LANG-100", "ANA-060", "ANA-062", "ANA-064", "ANA-066"]
+until = "M7"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-060", "LANG-061", "LANG-082", "LANG-083", "LANG-100", "ANA-060", "ANA-062", "ANA-064", "ANA-066"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ro_input_x"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ro_y_in"
+rows = [[6, 11], [100, 12], [150, 13]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel = "ro_input_x"
+rows = [[6, 11], [7, 12]]
+
+[[input]]
+node = "n1"
+tick = 7
+rel = "ro_y_in"
+rows = [[6, 49]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ri_t1_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ri_t2_in"
+rows = [[6, 11], [7, 12]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ri_t3_in"
+rows = [[7, 12]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel = "ri_t1_in"
+rows = [[7, 13], [8, 14]]
+
+[[input]]
+node = "n1"
+tick = 7
+rel = "ri_t3_in"
+rows = [[7, 99]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rv_t1_in"
+rows = [[5, 10], [6, 11], [7, 12]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rv_t2_in"
+rows = [[6, 99]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rv_t3_in"
+rows = [[7, 99]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel = "rv_t2_in"
+rows = [[7, 120]]
+
+[[input]]
+node = "n1"
+tick = 7
+rel = "rv_t3_in"
+rows = [[6, 101]]
+
+[[input]]
+node = "n1"
+tick = 10
+rel = "rv_t2_in"
+rows = [[7, 121]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rc_t1_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rc_t2_in"
+rows = [[6, 99], [7, 12]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rc_t3_in"
+rows = [[7, 12], [8, 13]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel = "rc_t3_in"
+rows = [[6, 99]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rp_input_t1"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rp_t2_in"
+rows = [[6, 11], [7, 12]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "rp_input_t1"
+rows = [[6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rill_t1_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rill_t10_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rill_t11_in"
+rows = [[6, 12], [7, 12]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rill_t2_in"
+rows = [[6, 11], [7, 12]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rill_t3_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rill_t4_in"
+rows = [[6, 11], [7, 12]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rill_t6_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rill_t7_in"
+rows = [[6, 11], [7, 12]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rill_t9_in"
+rows = [[5, 10], [6, 11]]
+
+[[expect]]
+node = "n1"
+rel = "ro_z"
+tick = 3
+rows = [[5, 10]]
+
+[[expect]]
+node = "n1"
+rel = "ro_z"
+tick = 6
+rows = [[5, 10], [7, 12]]
+
+[[expect]]
+node = "n1"
+rel = "ro_z"
+tick = 9
+rows = [[5, 10], [7, 12]]
+
+[[expect]]
+node = "n1"
+rel = "ri_r1"
+tick = 3
+rows = [[5, 10], [6, 11]]
+
+[[expect]]
+node = "n1"
+rel = "ri_r2"
+tick = 3
+rows = [[6, 11]]
+
+[[expect]]
+node = "n1"
+rel = "rv_r1"
+tick = 3
+rows = [[5, 10], [7, 12]]
+
+[[expect]]
+node = "n1"
+rel = "rv_r2"
+tick = 3
+rows = [[5, 10], [6, 11]]
+
+[[expect]]
+node = "n1"
+rel = "rv_r1"
+tick = 6
+rows = [[5, 10]]
+
+[[expect]]
+node = "n1"
+rel = "rv_r2"
+tick = 6
+rows = [[5, 10], [6, 11]]
+
+[[expect]]
+node = "n1"
+rel = "rv_r1"
+tick = 9
+rows = [[5, 10]]
+
+[[expect]]
+node = "n1"
+rel = "rv_r2"
+tick = 9
+rows = [[5, 10]]
+
+[[expect]]
+node = "n1"
+rel = "rv_r1"
+tick = 12
+rows = [[5, 10]]
+
+[[expect]]
+node = "n1"
+rel = "rv_r2"
+tick = 12
+rows = [[5, 10]]
+
+[[expect]]
+node = "n1"
+rel = "rc_r1"
+tick = 3
+rows = [[5, 10]]
+
+[[expect]]
+node = "n1"
+rel = "rc_r2"
+tick = 3
+rows = [[6, 99]]
+
+[[expect]]
+node = "n1"
+rel = "rc_r1"
+tick = 6
+rows = [[5, 10]]
+
+[[expect]]
+node = "n1"
+rel = "rc_r2"
+tick = 6
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "rp_r1"
+tick = 4
+rows = [[5, 10]]
+
+[[expect]]
+node = "n1"
+rel = "rp_r1"
+tick = 8
+rows = [[5, 10]]
+
+[[expect]]
+node = "n1"
+rel = "rill_r1"
+tick = 3
+rows = [[5, 10]]
+
+[[expect]]
+node = "n1"
+rel = "rill_r2"
+tick = 3
+rows = [[6, 11], [7, 12]]
+
+[[expect]]
+node = "n1"
+rel = "rill_r3"
+tick = 3
+rows = [[5, 10]]
+
+[[expect]]
+node = "n1"
+rel = "rill_r4"
+tick = 3
+rows = [[5, 10]]
+
+[[expect]]
+node = "n1"
+rel = "rill_r5"
+tick = 3
+rows = [[5, 10]]
+
+[[expect]]
+node = "n1"
+rel = "rill_r6"
+tick = 3
+rows = [[5, 10], [6, 11]]
+
+[expect_analysis.reclaimable]
+reclaimed = { ro_x = "dr_plus", ro_y = "dr_minus", ri_t1 = "dr_plus", ri_t2 = "dr_plus", ri_t3 = "dr_minus", rv_t1 = "dr_plus", rv_t2 = "dr_minus", rv_t3 = "dr_minus", rc_t1 = "dr_plus", rc_t2 = "dr_minus", rp_t1 = "dr_plus", rp_t2 = "dr_minus", rill_t1 = "dr_plus", rill_t3 = "dr_plus", rill_t6 = "dr_plus", rill_t9 = "dr_plus" }
+kept = { rc_t3 = "quals_not_positive_keys", rill_t2 = "reaches_output", rill_t4 = "aggregated", rill_t7 = "negated_by_non_candidate", rill_t11 = "quals_not_positive_keys" }
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ro_z"
+tick = 3
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ro_x"
+tick = 3
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ro_y"
+tick = 3
+rows = [[100, 12], [150, 13]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ro_y_copy"
+tick = 3
+rows = [[7, 11], [101, 12], [151, 13]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ro_z"
+tick = 6
+rows = [[5, 10], [7, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ro_x"
+tick = 6
+rows = [[5, 10], [7, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ro_z"
+tick = 9
+rows = [[5, 10], [7, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ro_y"
+tick = 9
+rows = [[100, 12], [150, 13]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ro_y_copy"
+tick = 9
+rows = [[7, 11], [7, 49], [101, 12], [151, 13]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ri_r1"
+tick = 3
+rows = [[5, 10], [6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ri_r2"
+tick = 3
+rows = [[6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ri_t1"
+tick = 3
+rows = [[5, 10], [6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ri_t2"
+tick = 3
+rows = [[6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ri_t3"
+tick = 3
+rows = [[7, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ri_t1"
+tick = 6
+rows = [[5, 10], [6, 11], [8, 14]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ri_t3"
+tick = 6
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ri_t1"
+tick = 9
+rows = [[5, 10], [6, 11], [8, 14]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "ri_t3"
+tick = 9
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rv_r1"
+tick = 3
+rows = [[5, 10], [7, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rv_r2"
+tick = 3
+rows = [[5, 10], [6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rv_t1"
+tick = 3
+rows = [[5, 10], [6, 11], [7, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rv_t2"
+tick = 3
+rows = [[6, 99]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rv_t3"
+tick = 3
+rows = [[7, 99]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rv_r1"
+tick = 6
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rv_r2"
+tick = 6
+rows = [[5, 10], [6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rv_t1"
+tick = 6
+rows = [[5, 10], [6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rv_t2"
+tick = 6
+rows = [[6, 99]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rv_t3"
+tick = 6
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rv_r1"
+tick = 9
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rv_r2"
+tick = 9
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rv_t1"
+tick = 9
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rv_t2"
+tick = 9
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rv_t3"
+tick = 9
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rv_r1"
+tick = 12
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rv_r2"
+tick = 12
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rv_t1"
+tick = 12
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rv_t2"
+tick = 12
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rv_t3"
+tick = 12
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rc_r1"
+tick = 3
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rc_r2"
+tick = 3
+rows = [[6, 99]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rc_t1"
+tick = 3
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rc_t2"
+tick = 3
+rows = [[6, 99], [7, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rc_t3"
+tick = 3
+rows = [[7, 12], [8, 13]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rc_r1"
+tick = 6
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rc_r2"
+tick = 6
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rc_t1"
+tick = 6
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rc_t2"
+tick = 6
+rows = [[7, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rc_t3"
+tick = 6
+rows = [[6, 99], [7, 12], [8, 13]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rp_r1"
+tick = 4
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rp_t1"
+tick = 4
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rp_t2"
+tick = 4
+rows = [[7, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rp_r1"
+tick = 8
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rp_t1"
+tick = 8
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rp_t2"
+tick = 8
+rows = [[7, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rill_r1"
+tick = 3
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rill_t1"
+tick = 3
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rill_r2"
+tick = 3
+rows = [[6, 11], [7, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rill_t2"
+tick = 3
+rows = [[6, 11], [7, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rill_r3"
+tick = 3
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rill_t3"
+tick = 3
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rill_r4"
+tick = 3
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rill_t6"
+tick = 3
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rill_t7"
+tick = 3
+rows = [[6, 11], [7, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rill_r5"
+tick = 3
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rill_r6"
+tick = 3
+rows = [[5, 10], [6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rill_t9"
+tick = 3
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rill_t10"
+tick = 3
+rows = [[5, 10], [6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rill_t11"
+tick = 3
+rows = [[6, 12], [7, 12]]
