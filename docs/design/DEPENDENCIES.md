@@ -66,3 +66,11 @@ Appended at each milestone gate from the `## New dependencies` sections of `docs
 
 | Crate | Version | License | Used by | Reason | Source |
 |---|---|---|---|---|---|
+| blake3 | workspace | CC0-1.0 OR Apache-2.0 | blossom-value | Versioned 256-bit and set-element digests | M2.1 |
+| xxhash-rust | workspace | MIT | blossom-value | Stable xxh3-64 fingerprints | M2.1 |
+| siphasher | workspace | MIT OR Apache-2.0 | blossom-value | Versioned SipHash-1-3 PRF | M2.1 |
+| postcard | workspace | MIT OR Apache-2.0 | blossom-value | Canonical primitive encodings for fingerprints | M2.1 |
+| rustsat | 0.7.5 | MIT | blossom-sat | Shared CaDiCaL types and incremental solver interface | M2.4 |
+| rustsat-cadical | 0.7.5 | MIT | blossom-sat | Production incremental SAT backend | M2.4 |
+| batsat | 0.6.0 | MIT | blossom-sat | Pure-Rust incremental SAT backend | M2.4 |
+| thiserror | workspace | MIT OR Apache-2.0 | blossom-sat | Typed solver errors | M2.4 |
