@@ -1,6 +1,6 @@
 # Handoff: Blossom (bloom-remake)
 
-Last updated: 2026-09-27, while M2 was running.
+Last updated: 2026-09-27, after the M2 gate.
 
 ## What this is
 
@@ -37,14 +37,16 @@ Bloom^L → Blazes → Edelweiss → Molly → Hydro), built as its own statical
 | Research | ✅ `08c08e9` |
 | Design | ✅ `4b0efe4` |
 | M1: workspace skeleton, blossom-base, blossom-value type surface, golden corpus I–IV | ✅ gate green, `85060ad` |
-| M2: value encodings, Dedalus^L IR, parser/CST/AST, SAT, SMT (z3), storage I/O | ⏳ running (workflow run `wf_61663d67-5c5`) |
+| M2: value encodings, Dedalus^L IR, parser/CST/AST, SAT, SMT/ASP, storage I/O | ✅ gate green, `8fc2268` |
 | M3–M15 | not started |
 
-Nothing executes Blossom programs yet. The first runnable programs arrive with:
+Nothing executes Blossom programs yet. M2 supplies the value model, validated IR, lossless parser, solvers and durable byte layer. The first runnable programs arrive with:
 
 - the oracle (M4.1)
 - lowering (M5.3)
 - the interpreter (M6.1)
+
+M2 verification: all six WP acceptance commands passed, followed by `scripts/milestone-gate.sh M2 --no-merge`. The gate passed formatting, workspace Clippy, 245 tests across 54 binaries, corpus lint and cargo-deny. The lexer/parser, SMT-response and WAL-recovery fuzz targets compile. M2.6's crash workload exhaustively checked over 5,000 crash and acknowledged-byte media-fault images. `docs/plan/MILESTONE` is now `M3`; the M2 worktrees and branches were removed.
 
 ## How the build runs
 
@@ -74,46 +76,15 @@ To resume an interrupted run, re-invoke Workflow with the same `scriptPath` and 
 `resumeFromRunId`. Finished agents replay from cache. State that matters lives in git: the `wp/*` branches and
 `main`.
 
-## Next steps
+## Reassessment: one incomplete end-to-end demo
 
-1. **Wait for M2 to finish.** Check its gate result (`git log main`, `docs/plan/notes/M2-gate.md`) and update the
-   pad.
-2. **Run M3** (7 WPs):
-   - lattices I
-   - IR fixtures
-   - kernel storage I
-   - schema/artifact
-   - front I (modules/resolution)
-   - the Molly `.ded` frontend
-   - syntax II (formatter)
-3. **Run M4** (8 WPs):
-   - the naive Dedalus^L oracle
-   - analysis I (stratification, locality)
-   - kernel II (indexes, joins)
-   - the wire codec
-   - type checking
-   - lattices II
-   - the trace format
-   - the engine boundary types
-4. **Run M5**: planner, corpus runner (`cargo xtask corpus`), lowering, durable recovery, the sans-IO node, CALM
-   certificates, provenance I. **This is the first milestone where corpus cases pass on the oracle.** From here on,
-   the gate also runs the corpus ratchet and coverage.
-5. **Run M6**: the interpreter plus the full surface language. **This is the first point where Blossom programs
-   run on the real engine.** Spot-check `examples/` by hand here.
-6. **Continue M7–M15** in order, per `PLAN.md` §7:
-   - M7: simulator, differential testing, production driver
-   - M8: LDFI/Molly parity, std lib I–II, codegen, mTLS
-   - M9: Raft core, Multi-Paxos, Anna KVS, BMC
-   - M10: Raft P1, commit protocols, BOOM-FS, SMT/ASP verification
-   - M11: BOOM-MR, lakehouse, benchmarks
-   - M12: HOP, the lineage dataflow engine, upgrades
-   - M13: Tide streaming, release engineering
-   - M14: P0/P1 audit
-   - M15: P2
-7. **After each gate:**
-   - skim new `docs/plan/BUGS.md` rows (50 rows so far, all minor review findings from M1) and route real ones into
-     the owning WP's prompt;
-   - make sure `cargo test --workspace` is green on `main`.
+The smallest useful target is **source to answer on the oracle**: feed an actual `.bls` file with a few static facts and one view through parsing, resolution, type checking, lowering and the naive evaluator; assert the resulting relation rows from a repeatable command. This proves one complete language path while leaving the optimized engine, durability, networking and broad language coverage for later. Use one small checked-in example/fixture rather than the full KVS program.
+
+Under the current `plan.json` dependencies, the remaining closure for that target is **eight WPs**: M3.1, M3.2, M3.5, M3.6, M3.7, M4.1, M4.5 and M5.3. M3.6 is in M5.3's declared dependency closure even though this `.bls` demo does not exercise `.ded`; changing that ordering would require a reviewed plan amendment. Execute these WPs with their specified acceptance and an integration test that starts at source text and checks exact oracle rows. If maintaining whole-milestone gates, finish the other M3–M5 WPs too.
+
+The next, stronger demo is **source to in-memory engine output** through M6.1 and M6.3 (20 remaining WPs in their combined declared closure). It should drive two ticks with `ManualDriver`/`MemTransport`, inject an input, observe an output and compare each tick with the oracle. The original `examples/e01_kvs.bls` put/get/restart demo needs M5.4 durable recovery and M7.4's host-facing production runtime (22 WPs in M7.4's closure), plus its upsert, outer-join, session and ACL lowering. It is a good later acceptance target, not the shortest first demo.
+
+This handoff changes no M3 implementation or milestone ordering. Before beginning a selected vertical slice, record its narrower acceptance scope in the plan; otherwise follow the complete M3, M4 and M5 gates. Continue to route open `docs/plan/BUGS.md` rows to each owning WP.
 
 ## Things to watch
 
@@ -127,9 +98,8 @@ To resume an interrupted run, re-invoke Workflow with the same `scriptPath` and 
   another WP (PLAN §2.2–2.4).
 - **No stubs.** Unimplemented paths must return `Unimplemented` / BLS0908 / exit code 7 naming the feature id and
   owning WP. Reviewers fail any WP that fakes behavior or weakens tests.
-- **Known minor issues from M1 review, not yet fixed:**
+- **Remaining M1 review notes:**
   - `graph::topo_sort` and `min_chain_cover` doc comments are inaccurate;
-  - `Value` serde deserialization has unbounded recursion (fuzz targets in M13.3 should catch it);
   - several golden cases in `tests/corpus/lattices` re-derive Bud tests instead of porting them verbatim (flagged
     for the M6.7/M8.8 corpus triage).
 - **No license chosen.** Every package is `publish = false` until the user picks one.
