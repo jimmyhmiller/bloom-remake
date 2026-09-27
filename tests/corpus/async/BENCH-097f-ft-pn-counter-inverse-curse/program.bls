@@ -1,0 +1,47 @@
+//! BENCH-097 (d): the inverse curse on counters (R13 §12 T8; Power, Koutris, Hellerstein, ICDT 2025, §4.2 and
+//! Appendix B; SEM-017).
+//!
+//! A PN-counter keeps a grow-only set of increments and one of decrements; its value is the difference of their sizes.
+//! `pos >= 10` is a threshold on a grow-only lattice: final the moment it holds. `value >= 10` is not: a later
+//! decrement can undo it, so it is NEVER-FINAL (ANA-120) and the runtime keeps it provisional.
+
+program ft_pn_counter version 1;
+
+/// Each increment and decrement carries a unique id.
+input inc(id: u64);
+input dec(id: u64);
+
+cell incs: LSet<u64>;
+cell decs: LSet<u64>;
+
+output pos_ge_10();
+output value_ge_10();
+output pos_final();
+output value_final();
+
+count_inc: on inc(i) {
+    emit incs(set[i]);
+}
+
+count_dec: on dec(i) {
+    emit decs(set[i]);
+}
+
+/// pn.pos >= 10: `size` is monotone and `>=` a threshold.
+pos_reached: while incs.size() >= 10 {
+    emit pos_ge_10();
+}
+
+/// pn.value >= 10: the difference of the two sizes is an exact (revealed) read, a point of order.
+value_reached: while let v = (reveal!(incs.size()).unwrap_or(0) as i64) - (reveal!(decs.size()).unwrap_or(0) as i64)
+    where v >= 10 {
+    emit value_ge_10();
+}
+
+pos_is_final: while final pos_ge_10() {
+    emit pos_final();
+}
+
+value_is_final: while final value_ge_10() {
+    emit value_final();
+}

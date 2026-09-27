@@ -1,0 +1,159 @@
+# BENCH-097 (R13 §12 T8; FT §4.2, App. B; SEM-017): (d) `pn.value >= 10` is never final; `pn.pos >= 10` is.
+#
+# R13 T8: "PN-counter with increments to 12 and no decrements yet. pn.value >= 10 must not be final: ANA-120 =
+# NEVER-FINAL, and the runtime keeps it provisional. pn.pos >= 10 is final-true at the 10th increment. A later
+# decrement to 9 must flip value >= 10 back to false."
+#
+# Inputs: increment i in tick i for i = 1..12; decrements in ticks 13, 14 and 15. The value is 10 in tick 10, 12 in
+# tick 12, then 11, 10 and 9: value >= 10 holds in ticks 10-14 and never as final; pos >= 10 holds, and is final,
+# from tick 10.
+schema = 1
+id = "BENCH-097"
+title = "Free termination (d): the PN-counter's value threshold is never final, its pos threshold is"
+priority = "P0"
+source = "R13 §12 T8; FT (ICDT 2025) §4.2 and Appendix B; SEM-017"
+features = ["LANG-043", "LANG-120", "LANG-122", "LANG-124", "LANG-125", "LANG-126", "LANG-127", "LANG-128", "LANG-212", "ANA-120", "ANA-121", "SEM-016", "SEM-017"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+
+[run]
+ticks = 18
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-043", "LANG-120", "LANG-122", "LANG-124", "LANG-125", "LANG-126", "LANG-127", "LANG-128", "LANG-212", "ANA-120", "ANA-121", "SEM-016", "SEM-017"]
+until = "M6"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-043", "LANG-120", "LANG-122", "LANG-124", "LANG-125", "LANG-126", "LANG-127", "LANG-128", "LANG-212", "ANA-120", "ANA-121", "SEM-016", "SEM-017"]
+until = "M7"
+
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "inc"
+rows = [[1]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "inc"
+rows = [[2]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "inc"
+rows = [[3]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel = "inc"
+rows = [[4]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "inc"
+rows = [[5]]
+
+[[input]]
+node = "n1"
+tick = 6
+rel = "inc"
+rows = [[6]]
+
+[[input]]
+node = "n1"
+tick = 7
+rel = "inc"
+rows = [[7]]
+
+[[input]]
+node = "n1"
+tick = 8
+rel = "inc"
+rows = [[8]]
+
+[[input]]
+node = "n1"
+tick = 9
+rel = "inc"
+rows = [[9]]
+
+[[input]]
+node = "n1"
+tick = 10
+rel = "inc"
+rows = [[10]]
+
+[[input]]
+node = "n1"
+tick = 11
+rel = "inc"
+rows = [[11]]
+
+[[input]]
+node = "n1"
+tick = 12
+rel = "inc"
+rows = [[12]]
+
+[[input]]
+node = "n1"
+tick = 13
+rel = "dec"
+rows = [[101]]
+
+[[input]]
+node = "n1"
+tick = 14
+rel = "dec"
+rows = [[102]]
+
+[[input]]
+node = "n1"
+tick = 15
+rel = "dec"
+rows = [[103]]
+
+[[expect]]
+node = "n1"
+rel = "pos_ge_10"
+row = []
+holds = "10.."
+absent = "..=9"
+
+[[expect]]
+node = "n1"
+rel = "pos_final"
+row = []
+holds = "10.."
+absent = "..=9"
+
+[[expect]]
+node = "n1"
+rel = "value_ge_10"
+row = []
+holds = "10..=14"
+absent = "..=9"
+
+[[expect]]
+node = "n1"
+rel = "value_ge_10"
+row = []
+absent = "15.."
+
+[[expect]]
+node = "n1"
+rel = "value_final"
+row = []
+absent = "0.."
+
+[expect_analysis]
+finality = { pos_ge_10 = ["THRESH"], value_ge_10 = ["NEVER"] }
