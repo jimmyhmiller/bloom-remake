@@ -1,0 +1,719 @@
+# BENCH-095 (R05 T26, T18-T19; §5.4, §5.6): bud-gc's SealedCollection and ReliableBroadcast space tests.
+#
+# tc_gc.rb test_simple: after one tick "foo" and "baz" are [[5, 10], [6, 12]]. test_space_basic: three nodes with
+# `sealed :node` holding all three addresses; the first node logs messages 0..100 in shuffled order, one per tick, with
+# every node ticking; after ten more rounds "assert_equal(3, r.chn_approx.physical_size)" at every node. R05 §5.6: "for
+# unicast, chn_approx compresses to a single [k, n], a logical clock. For broadcast, you get one clock per node, a vector
+# clock." Every node forwards its log to every node (itself included), so each node's approximation of delivered
+# (addr, id) keys is three ranges, [0-100] per destination. The program is the artifact's broadcast_all.rb, whose
+# published rewrite (BroadcastAll_rewrite_src.rb) also reclaims log entries once delivered to every node of the sealed
+# membership: `log <- (log * seal_node).lefts.notin(r0_node_log_missing, ...)`. No output reads the log, so in the
+# rewritten program every node's log ends empty; without the rewrite it keeps all 101 messages.
+#
+# Port: messages go in at n1 in the fixed permutation below (Bud shuffles at random; the order is irrelevant to the
+# result), one per tick from tick 1; every node ticks every round. `ranges` pins the buckets of the ARM approximation
+# of rb_chn at each node in the rewritten program, as [addr, lo, hi].
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss sealed collection and broadcast space (tc_gc.rb): ARM plus range compression leave one range per node"
+priority = "P1"
+source = "R05 T18-T19, T26, §5.4, §5.6; bud-gc test/tc_gc.rb (TestSealed, TestReliableDelivery); Edelweiss (VLDB 2014) §3.1, §3.3"
+features = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-049", "LANG-050", "LANG-060", "LANG-062", "LANG-094", "LANG-190", "ANA-060", "ANA-061", "ANA-066", "DIST-007"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+notes = "The shuffled insertion order is fixed (seed 1234) so the case is deterministic; see docs/plan/notes/M1.4.md (BENCH-095)."
+
+[deploy]
+nodes = [{ name = "n1", role = "Node" }, { name = "n2", role = "Node" }, { name = "n3", role = "Node" }]
+
+[run]
+ticks = 113
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-049", "LANG-050", "LANG-060", "LANG-062", "LANG-094", "LANG-190", "ANA-060", "ANA-061", "ANA-066", "DIST-007"]
+until = "M7"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-049", "LANG-050", "LANG-060", "LANG-062", "LANG-094", "LANG-190", "ANA-060", "ANA-061", "ANA-066", "DIST-007"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rb_log_in"
+rows = [[72, "message 72"]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "rb_log_in"
+rows = [[81, "message 81"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "rb_log_in"
+rows = [[18, "message 18"]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel = "rb_log_in"
+rows = [[26, "message 26"]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "rb_log_in"
+rows = [[55, "message 55"]]
+
+[[input]]
+node = "n1"
+tick = 6
+rel = "rb_log_in"
+rows = [[51, "message 51"]]
+
+[[input]]
+node = "n1"
+tick = 7
+rel = "rb_log_in"
+rows = [[27, "message 27"]]
+
+[[input]]
+node = "n1"
+tick = 8
+rel = "rb_log_in"
+rows = [[100, "message 100"]]
+
+[[input]]
+node = "n1"
+tick = 9
+rel = "rb_log_in"
+rows = [[6, "message 6"]]
+
+[[input]]
+node = "n1"
+tick = 10
+rel = "rb_log_in"
+rows = [[76, "message 76"]]
+
+[[input]]
+node = "n1"
+tick = 11
+rel = "rb_log_in"
+rows = [[84, "message 84"]]
+
+[[input]]
+node = "n1"
+tick = 12
+rel = "rb_log_in"
+rows = [[7, "message 7"]]
+
+[[input]]
+node = "n1"
+tick = 13
+rel = "rb_log_in"
+rows = [[93, "message 93"]]
+
+[[input]]
+node = "n1"
+tick = 14
+rel = "rb_log_in"
+rows = [[20, "message 20"]]
+
+[[input]]
+node = "n1"
+tick = 15
+rel = "rb_log_in"
+rows = [[53, "message 53"]]
+
+[[input]]
+node = "n1"
+tick = 16
+rel = "rb_log_in"
+rows = [[25, "message 25"]]
+
+[[input]]
+node = "n1"
+tick = 17
+rel = "rb_log_in"
+rows = [[58, "message 58"]]
+
+[[input]]
+node = "n1"
+tick = 18
+rel = "rb_log_in"
+rows = [[73, "message 73"]]
+
+[[input]]
+node = "n1"
+tick = 19
+rel = "rb_log_in"
+rows = [[28, "message 28"]]
+
+[[input]]
+node = "n1"
+tick = 20
+rel = "rb_log_in"
+rows = [[67, "message 67"]]
+
+[[input]]
+node = "n1"
+tick = 21
+rel = "rb_log_in"
+rows = [[49, "message 49"]]
+
+[[input]]
+node = "n1"
+tick = 22
+rel = "rb_log_in"
+rows = [[36, "message 36"]]
+
+[[input]]
+node = "n1"
+tick = 23
+rel = "rb_log_in"
+rows = [[75, "message 75"]]
+
+[[input]]
+node = "n1"
+tick = 24
+rel = "rb_log_in"
+rows = [[46, "message 46"]]
+
+[[input]]
+node = "n1"
+tick = 25
+rel = "rb_log_in"
+rows = [[43, "message 43"]]
+
+[[input]]
+node = "n1"
+tick = 26
+rel = "rb_log_in"
+rows = [[63, "message 63"]]
+
+[[input]]
+node = "n1"
+tick = 27
+rel = "rb_log_in"
+rows = [[16, "message 16"]]
+
+[[input]]
+node = "n1"
+tick = 28
+rel = "rb_log_in"
+rows = [[38, "message 38"]]
+
+[[input]]
+node = "n1"
+tick = 29
+rel = "rb_log_in"
+rows = [[40, "message 40"]]
+
+[[input]]
+node = "n1"
+tick = 30
+rel = "rb_log_in"
+rows = [[66, "message 66"]]
+
+[[input]]
+node = "n1"
+tick = 31
+rel = "rb_log_in"
+rows = [[50, "message 50"]]
+
+[[input]]
+node = "n1"
+tick = 32
+rel = "rb_log_in"
+rows = [[47, "message 47"]]
+
+[[input]]
+node = "n1"
+tick = 33
+rel = "rb_log_in"
+rows = [[48, "message 48"]]
+
+[[input]]
+node = "n1"
+tick = 34
+rel = "rb_log_in"
+rows = [[13, "message 13"]]
+
+[[input]]
+node = "n1"
+tick = 35
+rel = "rb_log_in"
+rows = [[37, "message 37"]]
+
+[[input]]
+node = "n1"
+tick = 36
+rel = "rb_log_in"
+rows = [[39, "message 39"]]
+
+[[input]]
+node = "n1"
+tick = 37
+rel = "rb_log_in"
+rows = [[71, "message 71"]]
+
+[[input]]
+node = "n1"
+tick = 38
+rel = "rb_log_in"
+rows = [[89, "message 89"]]
+
+[[input]]
+node = "n1"
+tick = 39
+rel = "rb_log_in"
+rows = [[86, "message 86"]]
+
+[[input]]
+node = "n1"
+tick = 40
+rel = "rb_log_in"
+rows = [[91, "message 91"]]
+
+[[input]]
+node = "n1"
+tick = 41
+rel = "rb_log_in"
+rows = [[24, "message 24"]]
+
+[[input]]
+node = "n1"
+tick = 42
+rel = "rb_log_in"
+rows = [[57, "message 57"]]
+
+[[input]]
+node = "n1"
+tick = 43
+rel = "rb_log_in"
+rows = [[9, "message 9"]]
+
+[[input]]
+node = "n1"
+tick = 44
+rel = "rb_log_in"
+rows = [[21, "message 21"]]
+
+[[input]]
+node = "n1"
+tick = 45
+rel = "rb_log_in"
+rows = [[97, "message 97"]]
+
+[[input]]
+node = "n1"
+tick = 46
+rel = "rb_log_in"
+rows = [[60, "message 60"]]
+
+[[input]]
+node = "n1"
+tick = 47
+rel = "rb_log_in"
+rows = [[32, "message 32"]]
+
+[[input]]
+node = "n1"
+tick = 48
+rel = "rb_log_in"
+rows = [[95, "message 95"]]
+
+[[input]]
+node = "n1"
+tick = 49
+rel = "rb_log_in"
+rows = [[42, "message 42"]]
+
+[[input]]
+node = "n1"
+tick = 50
+rel = "rb_log_in"
+rows = [[33, "message 33"]]
+
+[[input]]
+node = "n1"
+tick = 51
+rel = "rb_log_in"
+rows = [[29, "message 29"]]
+
+[[input]]
+node = "n1"
+tick = 52
+rel = "rb_log_in"
+rows = [[90, "message 90"]]
+
+[[input]]
+node = "n1"
+tick = 53
+rel = "rb_log_in"
+rows = [[68, "message 68"]]
+
+[[input]]
+node = "n1"
+tick = 54
+rel = "rb_log_in"
+rows = [[15, "message 15"]]
+
+[[input]]
+node = "n1"
+tick = 55
+rel = "rb_log_in"
+rows = [[17, "message 17"]]
+
+[[input]]
+node = "n1"
+tick = 56
+rel = "rb_log_in"
+rows = [[22, "message 22"]]
+
+[[input]]
+node = "n1"
+tick = 57
+rel = "rb_log_in"
+rows = [[54, "message 54"]]
+
+[[input]]
+node = "n1"
+tick = 58
+rel = "rb_log_in"
+rows = [[92, "message 92"]]
+
+[[input]]
+node = "n1"
+tick = 59
+rel = "rb_log_in"
+rows = [[80, "message 80"]]
+
+[[input]]
+node = "n1"
+tick = 60
+rel = "rb_log_in"
+rows = [[41, "message 41"]]
+
+[[input]]
+node = "n1"
+tick = 61
+rel = "rb_log_in"
+rows = [[94, "message 94"]]
+
+[[input]]
+node = "n1"
+tick = 62
+rel = "rb_log_in"
+rows = [[35, "message 35"]]
+
+[[input]]
+node = "n1"
+tick = 63
+rel = "rb_log_in"
+rows = [[52, "message 52"]]
+
+[[input]]
+node = "n1"
+tick = 64
+rel = "rb_log_in"
+rows = [[34, "message 34"]]
+
+[[input]]
+node = "n1"
+tick = 65
+rel = "rb_log_in"
+rows = [[5, "message 5"]]
+
+[[input]]
+node = "n1"
+tick = 66
+rel = "rb_log_in"
+rows = [[65, "message 65"]]
+
+[[input]]
+node = "n1"
+tick = 67
+rel = "rb_log_in"
+rows = [[77, "message 77"]]
+
+[[input]]
+node = "n1"
+tick = 68
+rel = "rb_log_in"
+rows = [[70, "message 70"]]
+
+[[input]]
+node = "n1"
+tick = 69
+rel = "rb_log_in"
+rows = [[83, "message 83"]]
+
+[[input]]
+node = "n1"
+tick = 70
+rel = "rb_log_in"
+rows = [[69, "message 69"]]
+
+[[input]]
+node = "n1"
+tick = 71
+rel = "rb_log_in"
+rows = [[8, "message 8"]]
+
+[[input]]
+node = "n1"
+tick = 72
+rel = "rb_log_in"
+rows = [[31, "message 31"]]
+
+[[input]]
+node = "n1"
+tick = 73
+rel = "rb_log_in"
+rows = [[62, "message 62"]]
+
+[[input]]
+node = "n1"
+tick = 74
+rel = "rb_log_in"
+rows = [[64, "message 64"]]
+
+[[input]]
+node = "n1"
+tick = 75
+rel = "rb_log_in"
+rows = [[1, "message 1"]]
+
+[[input]]
+node = "n1"
+tick = 76
+rel = "rb_log_in"
+rows = [[98, "message 98"]]
+
+[[input]]
+node = "n1"
+tick = 77
+rel = "rb_log_in"
+rows = [[23, "message 23"]]
+
+[[input]]
+node = "n1"
+tick = 78
+rel = "rb_log_in"
+rows = [[96, "message 96"]]
+
+[[input]]
+node = "n1"
+tick = 79
+rel = "rb_log_in"
+rows = [[19, "message 19"]]
+
+[[input]]
+node = "n1"
+tick = 80
+rel = "rb_log_in"
+rows = [[59, "message 59"]]
+
+[[input]]
+node = "n1"
+tick = 81
+rel = "rb_log_in"
+rows = [[78, "message 78"]]
+
+[[input]]
+node = "n1"
+tick = 82
+rel = "rb_log_in"
+rows = [[61, "message 61"]]
+
+[[input]]
+node = "n1"
+tick = 83
+rel = "rb_log_in"
+rows = [[79, "message 79"]]
+
+[[input]]
+node = "n1"
+tick = 84
+rel = "rb_log_in"
+rows = [[82, "message 82"]]
+
+[[input]]
+node = "n1"
+tick = 85
+rel = "rb_log_in"
+rows = [[44, "message 44"]]
+
+[[input]]
+node = "n1"
+tick = 86
+rel = "rb_log_in"
+rows = [[87, "message 87"]]
+
+[[input]]
+node = "n1"
+tick = 87
+rel = "rb_log_in"
+rows = [[3, "message 3"]]
+
+[[input]]
+node = "n1"
+tick = 88
+rel = "rb_log_in"
+rows = [[2, "message 2"]]
+
+[[input]]
+node = "n1"
+tick = 89
+rel = "rb_log_in"
+rows = [[30, "message 30"]]
+
+[[input]]
+node = "n1"
+tick = 90
+rel = "rb_log_in"
+rows = [[45, "message 45"]]
+
+[[input]]
+node = "n1"
+tick = 91
+rel = "rb_log_in"
+rows = [[12, "message 12"]]
+
+[[input]]
+node = "n1"
+tick = 92
+rel = "rb_log_in"
+rows = [[10, "message 10"]]
+
+[[input]]
+node = "n1"
+tick = 93
+rel = "rb_log_in"
+rows = [[88, "message 88"]]
+
+[[input]]
+node = "n1"
+tick = 94
+rel = "rb_log_in"
+rows = [[85, "message 85"]]
+
+[[input]]
+node = "n1"
+tick = 95
+rel = "rb_log_in"
+rows = [[4, "message 4"]]
+
+[[input]]
+node = "n1"
+tick = 96
+rel = "rb_log_in"
+rows = [[74, "message 74"]]
+
+[[input]]
+node = "n1"
+tick = 97
+rel = "rb_log_in"
+rows = [[11, "message 11"]]
+
+[[input]]
+node = "n1"
+tick = 98
+rel = "rb_log_in"
+rows = [[0, "message 0"]]
+
+[[input]]
+node = "n1"
+tick = 99
+rel = "rb_log_in"
+rows = [[14, "message 14"]]
+
+[[input]]
+node = "n1"
+tick = 100
+rel = "rb_log_in"
+rows = [[56, "message 56"]]
+
+[[input]]
+node = "n1"
+tick = 101
+rel = "rb_log_in"
+rows = [[99, "message 99"]]
+
+[[expect]]
+node = "n1"
+rel = "sc_foo"
+tick = 1
+rows = [[5, 10], [6, 12]]
+
+[[expect]]
+node = "n1"
+rel = "sc_baz"
+tick = 1
+rows = [[5, 10], [6, 12]]
+
+[[expect]]
+node = "n3"
+rel = "rb_log"
+final = true
+rows = [[0, "message 0"], [1, "message 1"], [2, "message 2"], [3, "message 3"], [4, "message 4"], [5, "message 5"], [6, "message 6"], [7, "message 7"], [8, "message 8"], [9, "message 9"], [10, "message 10"], [11, "message 11"], [12, "message 12"], [13, "message 13"], [14, "message 14"], [15, "message 15"], [16, "message 16"], [17, "message 17"], [18, "message 18"], [19, "message 19"], [20, "message 20"], [21, "message 21"], [22, "message 22"], [23, "message 23"], [24, "message 24"], [25, "message 25"], [26, "message 26"], [27, "message 27"], [28, "message 28"], [29, "message 29"], [30, "message 30"], [31, "message 31"], [32, "message 32"], [33, "message 33"], [34, "message 34"], [35, "message 35"], [36, "message 36"], [37, "message 37"], [38, "message 38"], [39, "message 39"], [40, "message 40"], [41, "message 41"], [42, "message 42"], [43, "message 43"], [44, "message 44"], [45, "message 45"], [46, "message 46"], [47, "message 47"], [48, "message 48"], [49, "message 49"], [50, "message 50"], [51, "message 51"], [52, "message 52"], [53, "message 53"], [54, "message 54"], [55, "message 55"], [56, "message 56"], [57, "message 57"], [58, "message 58"], [59, "message 59"], [60, "message 60"], [61, "message 61"], [62, "message 62"], [63, "message 63"], [64, "message 64"], [65, "message 65"], [66, "message 66"], [67, "message 67"], [68, "message 68"], [69, "message 69"], [70, "message 70"], [71, "message 71"], [72, "message 72"], [73, "message 73"], [74, "message 74"], [75, "message 75"], [76, "message 76"], [77, "message 77"], [78, "message 78"], [79, "message 79"], [80, "message 80"], [81, "message 81"], [82, "message 82"], [83, "message 83"], [84, "message 84"], [85, "message 85"], [86, "message 86"], [87, "message 87"], [88, "message 88"], [89, "message 89"], [90, "message 90"], [91, "message 91"], [92, "message 92"], [93, "message 93"], [94, "message 94"], [95, "message 95"], [96, "message 96"], [97, "message 97"], [98, "message 98"], [99, "message 99"], [100, "message 100"]]
+
+[expect_analysis.reclaimable]
+reclaimed = { rb_log = "join_seal" }
+kept = { rb_node = "unsealed_join" }
+channels = { rb_chn = "arm" }
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sc_foo"
+tick = 1
+rows = [[5, 10], [6, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "sc_baz"
+tick = 1
+rows = [[5, 10], [6, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rb_log"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n2"
+rel = "rb_log"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.storage]]
+node = "n3"
+rel = "rb_log"
+final = true
+rows = []
+
+[[expect_analysis.reclaimable.ranges]]
+node = "n1"
+channel = "rb_chn"
+final = true
+buckets = [["n1", 0, 100], ["n2", 0, 100], ["n3", 0, 100]]
+
+[[expect_analysis.reclaimable.ranges]]
+node = "n2"
+channel = "rb_chn"
+final = true
+buckets = [["n1", 0, 100], ["n2", 0, 100], ["n3", 0, 100]]
+
+[[expect_analysis.reclaimable.ranges]]
+node = "n3"
+channel = "rb_chn"
+final = true
+buckets = [["n1", 0, 100], ["n2", 0, 100], ["n3", 0, 100]]

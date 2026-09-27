@@ -1,0 +1,295 @@
+//! BENCH-095: Edelweiss reclamation through semijoins and key-covering joins, from bud-gc's tc_gc.rb (R05 T26, §5.7).
+//!
+//! BENCH-095 (R05 T26; §5.7): bud-gc's JoinReclaim unit tests where no seal is needed, or which seal is (ANA-063).
+//!
+//! R05 §5.7 (seal dependencies): "(c) if the join is a semijoin from X's perspective (the tlist references only X, e.g.
+//! rights/lefts, or a pairs whose tlist only uses X: 'hidden semijoin'), any single matching Z tuple suffices, because
+//! later Z tuples produce no new distinct results; (d) if the join predicates cover all key columns of Z, a single match
+//! suffices (a key constraint acts like a seal)." Otherwise a seal on a join column of Z is needed.
+
+program edelweiss_semijoins_keys version 1;
+
+// ---------------- JoinReclaimSemiJoin, test_join_reclaim_semijoin
+// `t1 <= (t2 * t3).rights(:key => :val)`: "We _can_ reclaim from t3 when a matching tuple appears in t4 provided there is at
+// least one tuple in t2 that joins with the t3 tuple, because the join between t2 and t3 does not preserve any tuples
+// from t2". A seal on t2.key also does, and a redelivered reclaimed tuple is reclaimed again.
+
+table sjr_t1(key: String, val: String);
+
+table sjr_t2(key: String, val: String) key(key) sealed by (key);
+
+input sjr_t2_in(key: String, val: String);
+
+sjr_t2_load: on sjr_t2_in(key, val) {
+    emit sjr_t2(key, val);
+}
+
+input sjr_t2_seal(key: String);
+
+sjr_t2_close: on sjr_t2_seal(key) {
+    seal sjr_t2(key: key);
+}
+
+table sjr_t3(key: String, val: String) key(key);
+
+input sjr_t3_in(key: String, val: String);
+
+sjr_t3_load: on sjr_t3_in(key, val) {
+    emit sjr_t3(key, val);
+}
+
+table sjr_t4(key: String, val: String) key(key);
+
+input sjr_t4_in(key: String, val: String);
+
+sjr_t4_load: on sjr_t4_in(key, val) {
+    emit sjr_t4(key, val);
+}
+
+output sjr_r1(key: String, val: String);
+
+sjr_join: while sjr_t2(v, _w), sjr_t3(k, v) {
+    emit sjr_t1(k, v);
+}
+
+sjr_notin: while sjr_t3(k, v), not sjr_t4(k, v) {
+    emit sjr_r1(k, v);
+}
+
+// ---------------- JoinReclaimSemiJoinLefts, test_join_reclaim_semijoin_lefts
+// The same semijoin written `(t3 * t2).lefts(:val => :key)`.
+
+table sjl_t1(key: String, val: String);
+
+table sjl_t2(key: String, val: String) key(key) sealed by (key);
+
+input sjl_t2_in(key: String, val: String);
+
+sjl_t2_load: on sjl_t2_in(key, val) {
+    emit sjl_t2(key, val);
+}
+
+input sjl_t2_seal(key: String);
+
+sjl_t2_close: on sjl_t2_seal(key) {
+    seal sjl_t2(key: key);
+}
+
+table sjl_t3(key: String, val: String) key(key);
+
+input sjl_t3_in(key: String, val: String);
+
+sjl_t3_load: on sjl_t3_in(key, val) {
+    emit sjl_t3(key, val);
+}
+
+table sjl_t4(key: String, val: String) key(key);
+
+input sjl_t4_in(key: String, val: String);
+
+sjl_t4_load: on sjl_t4_in(key, val) {
+    emit sjl_t4(key, val);
+}
+
+output sjl_r1(key: String, val: String);
+
+sjl_join: while sjl_t3(k, v), sjl_t2(v, _w) {
+    emit sjl_t1(k, v);
+}
+
+sjl_notin: while sjl_t3(k, v), not sjl_t4(k, v) {
+    emit sjl_r1(k, v);
+}
+
+// ---------------- JoinReclaimHiddenSemiJoin, test_join_reclaim_hidden_semijoin
+// "Semantically a semijoin, but specified using pairs rather than lefts/rights": `(t2 * t3).pairs(:key => :val)
+// {|x,y| [y.key, y.val]}`.
+
+table hsj_t1(key: String, val: String);
+
+table hsj_t2(key: String, val: String) key(key) sealed by (key);
+
+input hsj_t2_in(key: String, val: String);
+
+hsj_t2_load: on hsj_t2_in(key, val) {
+    emit hsj_t2(key, val);
+}
+
+input hsj_t2_seal(key: String);
+
+hsj_t2_close: on hsj_t2_seal(key) {
+    seal hsj_t2(key: key);
+}
+
+table hsj_t3(key: String, val: String) key(key);
+
+input hsj_t3_in(key: String, val: String);
+
+hsj_t3_load: on hsj_t3_in(key, val) {
+    emit hsj_t3(key, val);
+}
+
+table hsj_t4(key: String, val: String) key(key);
+
+input hsj_t4_in(key: String, val: String);
+
+hsj_t4_load: on hsj_t4_in(key, val) {
+    emit hsj_t4(key, val);
+}
+
+output hsj_r1(key: String, val: String);
+
+hsj_join: while hsj_t2(v, w), hsj_t3(k, v) {
+    emit hsj_t1(k, v);
+}
+
+hsj_notin: while hsj_t3(k, v), not hsj_t4(k, v) {
+    emit hsj_r1(k, v);
+}
+
+// ---------------- JoinReclaimWithJoin, test_join_reclaim_with_join
+// t3 is the input of a reclamation rule over a join, `r1 <= (t3 * t4).pairs(:key => :key) {|x,y| [x.val, y.val]}.notin(t5)`,
+// and also joined with t2 by `t1 <= (t2 * t3).pairs(:key => :val)`. t2 is keyed on all its columns, which "inhibit[s]
+// key-based reclamation", so t3 waits for seals on t4.key (for its own rule) and on t2.key (for the other join).
+
+table wj_t1(key: u64, val: u64);
+
+table wj_t2(key: u64, val: u64) sealed by (key);
+
+input wj_t2_in(key: u64, val: u64);
+
+wj_t2_load: on wj_t2_in(key, val) {
+    emit wj_t2(key, val);
+}
+
+input wj_t2_seal(key: u64);
+
+wj_t2_close: on wj_t2_seal(key) {
+    seal wj_t2(key: key);
+}
+
+table wj_t3(key: u64, val: u64) key(key);
+
+input wj_t3_in(key: u64, val: u64);
+
+wj_t3_load: on wj_t3_in(key, val) {
+    emit wj_t3(key, val);
+}
+
+table wj_t4(key: u64, val: u64) key(key) sealed by (key);
+
+input wj_t4_in(key: u64, val: u64);
+
+wj_t4_load: on wj_t4_in(key, val) {
+    emit wj_t4(key, val);
+}
+
+input wj_t4_seal(key: u64);
+
+wj_t4_close: on wj_t4_seal(key) {
+    seal wj_t4(key: key);
+}
+
+table wj_t5(key: u64, val: u64) key(key);
+
+input wj_t5_in(key: u64, val: u64);
+
+wj_t5_load: on wj_t5_in(key, val) {
+    emit wj_t5(key, val);
+}
+
+output wj_r1(key: u64, val: u64);
+
+wj_other: while wj_t2(k2, v2), wj_t3(k3, k2) {
+    emit wj_t1(v2, k3);
+}
+
+wj_rse: while wj_t3(k, v3), wj_t4(k, v4), not wj_t5(v3, v4) {
+    emit wj_r1(v3, v4);
+}
+
+// ---------------- JoinReclaimOnKeys, test_join_reclaim_on_keys
+// `t1 <= (t2 * t3).pairs(:key => :key)` and `r1 <= t2.notin(t4)`: "t2's join predicate covers the keys of t3 (and t3 is
+// inflationary); hence, once a matching t3 tuple has been observed, we don't need to wait for a seal".
+
+table ok_t1(key: u64, val: u64);
+
+table ok_t2(key: u64, val: u64) key(key);
+
+input ok_t2_in(key: u64, val: u64);
+
+ok_t2_load: on ok_t2_in(key, val) {
+    emit ok_t2(key, val);
+}
+
+table ok_t3(key: u64, val: u64) key(key);
+
+input ok_t3_in(key: u64, val: u64);
+
+ok_t3_load: on ok_t3_in(key, val) {
+    emit ok_t3(key, val);
+}
+
+table ok_t4(key: u64, val: u64) key(key);
+
+input ok_t4_in(key: u64, val: u64);
+
+ok_t4_load: on ok_t4_in(key, val) {
+    emit ok_t4(key, val);
+}
+
+output ok_r1(key: u64, val: u64);
+
+ok_join: while ok_t2(k, v2), ok_t3(k, v3) {
+    emit ok_t1(v2, v3);
+}
+
+ok_notin: while ok_t2(k, v), not ok_t4(k, v) {
+    emit ok_r1(k, v);
+}
+
+// ---------------- JoinReclaimOnMultipleKeys, test_join_reclaim_on_multiple_keys
+// "Join predicate doesn't entirely cover t3's keys" (k1 and k2 of k1, k2, k3), so t2 waits for a seal: "A seal on (any
+// of) t3's key columns allows reclamation."
+
+table omk_t1(key: u64, val: u64);
+
+table omk_t2(key: u64, val: u64) key(key);
+
+input omk_t2_in(key: u64, val: u64);
+
+omk_t2_load: on omk_t2_in(key, val) {
+    emit omk_t2(key, val);
+}
+
+table omk_t3(k1: u64, k2: u64, k3: u64, val: u64) key(k1, k2, k3) sealed by (k2);
+
+input omk_t3_in(k1: u64, k2: u64, k3: u64, val: u64);
+
+omk_t3_load: on omk_t3_in(k1, k2, k3, val) {
+    emit omk_t3(k1, k2, k3, val);
+}
+
+input omk_t3_seal(k2: u64);
+
+omk_t3_close: on omk_t3_seal(k2) {
+    seal omk_t3(k2: k2);
+}
+
+table omk_t4(key: u64, val: u64) key(key);
+
+input omk_t4_in(key: u64, val: u64);
+
+omk_t4_load: on omk_t4_in(key, val) {
+    emit omk_t4(key, val);
+}
+
+output omk_r1(key: u64, val: u64);
+
+omk_join: while omk_t3(k, k, _k3, v3), omk_t2(k, v2) {
+    emit omk_t1(v2, v3);
+}
+
+omk_notin: while omk_t2(k, v), not omk_t4(k, v) {
+    emit omk_r1(k, v);
+}

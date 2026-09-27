@@ -1,0 +1,309 @@
+//! BENCH-095: Edelweiss negative-difference reclamation (DR−), from bud-gc's tc_gc.rb (R05 T26, §5.8).
+//!
+//! BENCH-095 (R05 T26; §5.8): bud-gc's ReclaimOuter unit tests (negative-difference reclamation, DR−, ANA-064).
+//!
+//! R05 §5.8: DR− applies to X.notin(Y, :A => :B) when X and Y are persistent, A is a key of X ("the negation qual columns on
+//! X [must be] exactly X's key columns") and the downstream uses are reclaim-safe. The rewrite adds a range X_keys, drops
+//! later insertions of a key already in it (duplicate suppression), reclaims X by DR+ and reclaims Y "only after the
+//! matching X tuple is gone", one tick later. Conditions from several rules combine with AND.
+
+program edelweiss_dr_minus version 1;
+
+// ---------------- ReclaimOuter, test_outer_reclaim_simple
+// `x <= input_x` and `z <= x.notin(y, :x_key => :y_key)`: x and y tuples that match are both reclaimed (x by DR+, y by DR−
+// once the matching x is gone); a later duplicate of a reclaimed x key is suppressed by the x key range, and a later y
+// tuple for a reclaimed x key is reclaimed again. y's copy into y_copy stays.
+
+table ro_x(x_key: u64, x_val: u64) key(x_key);
+
+table ro_y(y_key: u64, y_val: u64);
+
+input ro_y_in(y_key: u64, y_val: u64);
+
+ro_y_load: on ro_y_in(y_key, y_val) {
+    emit ro_y(y_key, y_val);
+}
+
+table ro_y_copy(a: u64, b: u64);
+
+input ro_input_x(x_key: u64, x_val: u64);
+
+output ro_z(x_key: u64, x_val: u64);
+
+ro_take: on ro_input_x(k, v) {
+    emit ro_x(k, v);
+}
+
+ro_notin: while ro_x(k, v), not ro_y(k, _) {
+    emit ro_z(k, v);
+}
+
+ro_copy: while ro_y(k, v) {
+    emit ro_y_copy(k + 1, v);
+}
+
+// ---------------- ReclaimOuterIntersect, test_outer_reclaim_intersect
+// t1 and t2 are both negated against t3 on key: a t1 or t2 tuple goes when a matching t3 tuple appears (DR+); a t3 tuple
+// only when matching tuples appeared in BOTH t1 and t2 and are gone (DR− under both rules).
+
+table ri_t1(key: u64, val: u64) key(key);
+
+input ri_t1_in(key: u64, val: u64);
+
+ri_t1_load: on ri_t1_in(key, val) {
+    emit ri_t1(key, val);
+}
+
+table ri_t2(key: u64, val: u64) key(key);
+
+input ri_t2_in(key: u64, val: u64);
+
+ri_t2_load: on ri_t2_in(key, val) {
+    emit ri_t2(key, val);
+}
+
+table ri_t3(key: u64, val: u64);
+
+input ri_t3_in(key: u64, val: u64);
+
+ri_t3_load: on ri_t3_in(key, val) {
+    emit ri_t3(key, val);
+}
+
+output ri_r1(key: u64, val: u64);
+output ri_r2(key: u64, val: u64);
+
+ri_to_r1: while ri_t1(k, v), not ri_t3(k, _) {
+    emit ri_r1(k, v);
+}
+
+ri_to_r2: while ri_t2(k, v), not ri_t3(k, _) {
+    emit ri_r2(k, v);
+}
+
+// ---------------- ReclaimOuterIntersectInverse, test_outer_reclaim_intersect_inverse
+// t1 is negated against t2 and against t3 on key: a t1 tuple goes once a match is in BOTH; a t2 or t3 tuple goes only once
+// its t1 match is gone ("if we reclaimed a t2 tuple when its match appears in t1 (but before a match appears in t3), the
+// result would be to allow the t1 tuple to appear in the output of the negation, which is incorrect").
+
+table rv_t1(key: u64, val: u64) key(key);
+
+input rv_t1_in(key: u64, val: u64);
+
+rv_t1_load: on rv_t1_in(key, val) {
+    emit rv_t1(key, val);
+}
+
+table rv_t2(key: u64, val: u64);
+
+input rv_t2_in(key: u64, val: u64);
+
+rv_t2_load: on rv_t2_in(key, val) {
+    emit rv_t2(key, val);
+}
+
+table rv_t3(key: u64, val: u64);
+
+input rv_t3_in(key: u64, val: u64);
+
+rv_t3_load: on rv_t3_in(key, val) {
+    emit rv_t3(key, val);
+}
+
+output rv_r1(key: u64, val: u64);
+output rv_r2(key: u64, val: u64);
+
+rv_to_r1: while rv_t1(k, v), not rv_t2(k, _) {
+    emit rv_r1(k, v);
+}
+
+rv_to_r2: while rv_t1(k, v), not rv_t3(k, _) {
+    emit rv_r2(k, v);
+}
+
+// ---------------- ReclaimOuterInnerCombine, test_outer_inner_reclaim_combine
+// t2 is the negative input of `r1 <= t1.notin(t2, :key => :key)` and the positive input of `r2 <= t2.notin(t3)`: a t2
+// tuple goes only when both allow it. t3 is never reclaimed: the whole-tuple negation of t2 is not on t2's key.
+
+table rc_t1(key: u64, val: u64) key(key);
+
+input rc_t1_in(key: u64, val: u64);
+
+rc_t1_load: on rc_t1_in(key, val) {
+    emit rc_t1(key, val);
+}
+
+table rc_t2(key: u64, val: u64) key(key);
+
+input rc_t2_in(key: u64, val: u64);
+
+rc_t2_load: on rc_t2_in(key, val) {
+    emit rc_t2(key, val);
+}
+
+table rc_t3(key: u64, val: u64) key(key);
+
+input rc_t3_in(key: u64, val: u64);
+
+rc_t3_load: on rc_t3_in(key, val) {
+    emit rc_t3(key, val);
+}
+
+output rc_r1(key: u64, val: u64);
+output rc_r2(key: u64, val: u64);
+
+rc_to_r1: while rc_t1(k, v), not rc_t2(k, _) {
+    emit rc_r1(k, v);
+}
+
+rc_to_r2: while rc_t2(k, v), not rc_t3(k, v) {
+    emit rc_r2(k, v);
+}
+
+// ---------------- ReclaimOuterPending, test_outer_reclaim_pending
+// `t1 <+ input_t1` (a deferred insert) and `r1 <= t1.notin(t2, :key => :key)`: reclamation copes with the insert landing a
+// tick later, and a later duplicate of a reclaimed t1 key is suppressed.
+
+table rp_t1(key: u64, val: u64) key(key);
+
+table rp_t2(key: u64, val: u64);
+
+input rp_t2_in(key: u64, val: u64);
+
+rp_t2_load: on rp_t2_in(key, val) {
+    emit rp_t2(key, val);
+}
+
+input rp_input_t1(key: u64, val: u64);
+
+output rp_r1(key: u64, val: u64);
+
+rp_take: on rp_input_t1(k, v) {
+    next rp_t1(k, v);
+}
+
+rp_notin: while rp_t1(k, v), not rp_t2(k, _) {
+    emit rp_r1(k, v);
+}
+
+// ---------------- ReclaimOuterIllegal, test_outer_reclaim_illegal
+// Negative inputs that cannot be reclaimed: t2 feeds an output; t4 is aggregated; t7 is also the negative input of a
+// negation that is no reclamation candidate (its positive side is a scratch); t11 is also negated on the whole tuple,
+// which is not t10's key. The positive inputs t1, t3, t6 and t9 are reclaimed where they match.
+
+table rill_t1(key: u64, val: u64) key(key);
+
+input rill_t1_in(key: u64, val: u64);
+
+rill_t1_load: on rill_t1_in(key, val) {
+    emit rill_t1(key, val);
+}
+
+table rill_t2(key: u64, val: u64) key(key);
+
+input rill_t2_in(key: u64, val: u64);
+
+rill_t2_load: on rill_t2_in(key, val) {
+    emit rill_t2(key, val);
+}
+
+table rill_t3(key: u64, val: u64) key(key);
+
+input rill_t3_in(key: u64, val: u64);
+
+rill_t3_load: on rill_t3_in(key, val) {
+    emit rill_t3(key, val);
+}
+
+table rill_t4(key: u64, val: u64) key(key);
+
+input rill_t4_in(key: u64, val: u64);
+
+rill_t4_load: on rill_t4_in(key, val) {
+    emit rill_t4(key, val);
+}
+
+table rill_t6(key: u64, val: u64) key(key);
+
+input rill_t6_in(key: u64, val: u64);
+
+rill_t6_load: on rill_t6_in(key, val) {
+    emit rill_t6(key, val);
+}
+
+table rill_t7(key: u64, val: u64) key(key);
+
+input rill_t7_in(key: u64, val: u64);
+
+rill_t7_load: on rill_t7_in(key, val) {
+    emit rill_t7(key, val);
+}
+
+table rill_t9(key: u64, val: u64) key(key);
+
+input rill_t9_in(key: u64, val: u64);
+
+rill_t9_load: on rill_t9_in(key, val) {
+    emit rill_t9(key, val);
+}
+
+table rill_t10(key: u64, val: u64) key(key);
+
+input rill_t10_in(key: u64, val: u64);
+
+rill_t10_load: on rill_t10_in(key, val) {
+    emit rill_t10(key, val);
+}
+
+table rill_t11(key: u64, val: u64) key(key);
+
+input rill_t11_in(key: u64, val: u64);
+
+rill_t11_load: on rill_t11_in(key, val) {
+    emit rill_t11(key, val);
+}
+
+table rill_t5(cnt: u64);
+
+table rill_t8(key: u64, val: u64) key(key);
+
+scratch rill_s1(key: u64, val: u64);
+
+output rill_r1(key: u64, val: u64);
+output rill_r2(key: u64, val: u64);
+output rill_r3(key: u64, val: u64);
+output rill_r4(key: u64, val: u64);
+output rill_r5(key: u64, val: u64);
+output rill_r6(key: u64, val: u64);
+
+rill_to_r1: while rill_t1(k, v), not rill_t2(k, _) {
+    emit rill_r1(k, v);
+}
+
+rill_to_r2: while rill_t2(k, v) {
+    emit rill_r2(k, v);
+}
+
+rill_to_r3: while rill_t3(k, v), not rill_t4(k, _) {
+    emit rill_r3(k, v);
+}
+
+rill_count: while rill_t4(k, v) {
+    emit rill_t5(count!(*));
+}
+
+rill_to_r4: while rill_t6(k, v), not rill_t7(k, _) {
+    emit rill_r4(k, v);
+}
+
+rill_to_t8: while rill_s1(k, v), not rill_t7(k, v) {
+    emit rill_t8(k, v);
+}
+
+rill_to_r5: while rill_t9(k, v), not rill_t11(k, _) {
+    emit rill_r5(k, v);
+}
+
+rill_to_r6: while rill_t10(k, v), not rill_t11(k, v) {
+    emit rill_r6(k, v);
+}

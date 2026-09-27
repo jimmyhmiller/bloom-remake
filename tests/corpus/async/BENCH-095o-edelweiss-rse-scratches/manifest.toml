@@ -1,0 +1,289 @@
+# BENCH-095 (R05 T26; §5.5): bud-gc's unit tests of scratches around a negation (DR+, ANA-062).
+#
+# R05 §5.5: the target of a notin rule does not matter; "Scratch lhs is fine when it is the positive side of another
+# notin"; "An unread scratch is treated as an output, so X cannot be reclaimed (RseNegateScratchLhsBad3)". A negated
+# scratch "is OK if it is derived monotonically from persistent collections (RseNegateScratchRhs). It is not OK if it is
+# derived via notin, from an ungrounded scratch, or from a channel (RseNegateScratchRhsBad)". rel_is_inflationary: a
+# scratch qualifies only if every rule defining it is monotone over inflationary inputs, and at least one exists.
+#
+# Fixtures (bud-gc test/tc_gc.rb), each ported with prefixed relation names:
+# - lhs: RseNegateScratchLhs, test_rse_negate_scratch_lhs.
+# - lbad: RseNegateScratchLhsBad, test_rse_negate_scratch_lhs_bad.
+# - lbad2: RseNegateScratchLhsBad2, test_rse_negate_scratch_lhs_bad2.
+# - lbad3: RseNegateScratchLhsBad3, test_rse_negate_scratch_lhs_bad3.
+# - rhs: RseNegateScratchRhs, test_rse_negate_scratch_rhs.
+# - rbad: RseNegateScratchRhsBad, test_rse_negate_scratch_rhs_bad.
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss DR+ and scratches (tc_gc.rb): which scratch targets and negated scratches allow reclamation"
+priority = "P1"
+source = "R05 T26, §5.4-§5.8, §9.4 item 26; bud-gc test/tc_gc.rb (Edelweiss prototype, VLDB 2014)"
+features = ["LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-085", "ANA-060", "ANA-062", "ANA-066"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+notes = "Timeline mapping and the storage expectations of the rewritten program: docs/plan/notes/M1.4.md (BENCH-095)."
+
+[run]
+ticks = 8
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-085", "ANA-060", "ANA-062", "ANA-066"]
+until = "M7"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-085", "ANA-060", "ANA-062", "ANA-066"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "lhs_t1_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "lhs_t2_in"
+rows = [[6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "lhs_t3_in"
+rows = [[6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "lbad_t1_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "lbad_t2_in"
+rows = [[6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "lbad2_r3"
+rows = [[6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "lbad2_t1_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "lbad2_t2_in"
+rows = [[6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "lbad2_t3_in"
+rows = [[6, 11]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "lbad2_r3"
+rows = [[6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "lbad3_t1_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "lbad3_t2_in"
+rows = [[6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rhs_t1_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rhs_t12_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rhs_t3_in"
+rows = [[11, 6], [12, 7]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rhs_t4_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rhs_t6_in"
+rows = [[5, 99]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rhs_t7_in"
+rows = [[99, 10]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rhs_t8_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rbad_t1_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rbad_t12_in"
+rows = [["n1", 100]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rbad_t3_in"
+rows = [[6, 11], [7, 12]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rbad_t5_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rbad_t7_in"
+rows = [[6, 11], [7, 12]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "rbad_t9_in"
+rows = [["n1", 100], ["n1", 101]]
+
+[[expect]]
+node = "n1"
+rel = "rhs_r1"
+tick = 2
+rows = [[5, 10]]
+
+[[expect]]
+node = "n1"
+rel = "rhs_r2"
+tick = 2
+rows = [[6, 11]]
+
+[[expect]]
+node = "n1"
+rel = "rhs_r3"
+tick = 2
+rows = [[5, 10]]
+
+[expect_analysis.reclaimable]
+reclaimed = { lhs_t1 = "dr_plus", rhs_t1 = "dr_plus", rhs_t4 = "dr_plus", rhs_t8 = "dr_plus" }
+kept = { lbad_t1 = "negated_scratch_not_inflationary", lbad2_t1 = "negated_scratch_not_inflationary", lbad3_t1 = "reaches_output", rbad_t1 = "negated_scratch_not_monotone", rbad_t5 = "negated_scratch_not_grounded", rbad_t9 = "negated_scratch_from_channel" }
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "lhs_t1"
+tick = 2
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "lbad_t1"
+tick = 2
+rows = [[5, 10], [6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "lbad2_t1"
+tick = 2
+rows = [[5, 10], [6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "lbad3_t1"
+tick = 2
+rows = [[5, 10], [6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rhs_r1"
+tick = 2
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rhs_t1"
+tick = 2
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rhs_r2"
+tick = 2
+rows = [[6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rhs_t4"
+tick = 2
+rows = [[6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rhs_r3"
+tick = 2
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rhs_t8"
+tick = 2
+rows = [[5, 10]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rbad_t1"
+tick = 7
+rows = [[5, 10], [6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rbad_t5"
+tick = 7
+rows = [[5, 10], [6, 11]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "rbad_t9"
+tick = 7
+rows = [["n1", 100], ["n1", 101]]

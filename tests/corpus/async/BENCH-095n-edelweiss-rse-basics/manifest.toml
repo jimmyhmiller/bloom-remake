@@ -1,0 +1,315 @@
+# BENCH-095 (R05 T26; §5.5): bud-gc's positive-difference reclamation (DR+, ANA-062) unit tests.
+#
+# R05 §5.5: for X.notin(Y) with X and Y persistent, "any X tuple that has a match in Y will never appear in the output of
+# the notin again"; reclaim it if no other use of X can observe the deletion. "Across rules: AND. Within a chained
+# negation: OR." R05 §9.4 item 26: "RseSimple: reclaim [5,10] after res_approx gets it; sbuf = [[6,12]]. RseQual: after
+# sbuf_val_seen <+ [[5]], sbuf = {[3,6]}. RseChainedNeg and RseNegateIntersect: the AND/OR semantics.
+# RseNegateIntersectDelete: no reclamation when one negated input is user-deleted. RseDeleteDownstream: reclamation
+# allowed." Storage rows are the contents of the Edelweiss-rewritten program; output rows hold with and without it.
+#
+# Fixtures (bud-gc test/tc_gc.rb), each ported with prefixed relation names:
+# - simple: RseSimple, test_rse_simple.
+# - qual: RseQual, test_rse_qual.
+# - chain: RseChainedNeg, test_rse_chained_neg.
+# - isect: RseNegateIntersect, test_rse_negate_intersect.
+# - isdel: RseNegateIntersectDelete, test_rse_negate_intersect_del.
+#   Bud inserts [[5,10],[7,12]] and then [[5,10],[6,11]] into t4 before one tick; the port gives their union.
+# - down: RseDeleteDownstream, test_rse_delete_downstream.
+schema = 1
+id = "BENCH-095"
+title = "Edelweiss DR+ basics (tc_gc.rb): simple, qualified, chained and intersected negations; deletes block reclamation"
+priority = "P1"
+source = "R05 T26, §5.4-§5.8, §9.4 item 26; bud-gc test/tc_gc.rb (Edelweiss prototype, VLDB 2014)"
+features = ["LANG-040", "LANG-043", "LANG-060", "LANG-063", "LANG-082", "ANA-060", "ANA-062", "ANA-066"]
+program = "program.bls"
+derived = false
+expected_from = "literature"
+notes = "Timeline mapping and the storage expectations of the rewritten program: docs/plan/notes/M1.4.md (BENCH-095)."
+
+[run]
+ticks = 7
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-060", "LANG-063", "LANG-082", "ANA-060", "ANA-062", "ANA-066"]
+until = "M7"
+
+[backend.analysis]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-060", "LANG-063", "LANG-082", "ANA-060", "ANA-062", "ANA-066"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "simple_sbuf_in"
+rows = [[5, 10], [6, 12]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "simple_res_approx_in"
+rows = [[5, 10]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "qual_sbuf_in"
+rows = [[1, 5], [2, 5], [3, 6]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "qual_val_seen_in"
+rows = [[5]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "chain_t2_in"
+rows = [[1, 1], [2, 2], [3, 3]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "chain_t3_in"
+rows = [[2, 2]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "chain_t4_in"
+rows = [[3, 3]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "chain_t6_in"
+rows = [[2, 2], [3, 3]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "chain_t2_in"
+rows = [[4, 4], [5, 5]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "chain_t5_in"
+rows = [[4, 4]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "chain_t2_in"
+rows = [[6, 6]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "chain_t3_in"
+rows = [[5, 5], [6, 6]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "chain_t6_in"
+rows = [[4, 4], [5, 5]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "isect_t2_in"
+rows = [[5, 10], [6, 11], [7, 12]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "isect_t3_in"
+rows = [[5, 10], [7, 12]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "isect_t4_in"
+rows = [[6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "isect_t5_in"
+rows = [[7, 12], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "isect_t6_in"
+rows = [[7, 12], [5, 10]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "isect_t2_in"
+rows = [[8, 13], [9, 14]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "isect_t3_in"
+rows = [[6, 11], [8, 13]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "isect_t4_in"
+rows = [[5, 10], [8, 13]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "isect_t5_in"
+rows = [[5, 10], [8, 13]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "isect_t6_in"
+rows = [[6, 11], [8, 13]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "isdel_t2_in"
+rows = [[5, 10], [6, 11], [7, 12]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "isdel_t3_in"
+rows = [[5, 10]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "isdel_t4_in"
+rows = [[6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "isdel_t5_in"
+rows = [[7, 12]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "isdel_t3_in"
+rows = [[6, 11], [7, 12]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "isdel_t4_in"
+rows = [[5, 10], [7, 12], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "down_t2_in"
+rows = [[5, 10], [6, 11]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "down_t3_in"
+rows = [[5, 10]]
+
+[[expect]]
+node = "n1"
+rel = "qual_res"
+tick = 1
+rows = [[1, 5], [2, 5], [3, 6]]
+
+[[expect]]
+node = "n1"
+rel = "qual_res"
+tick = 3
+rows = [[3, 6]]
+
+[expect_analysis.reclaimable]
+reclaimed = { simple_sbuf = "dr_plus", qual_sbuf = "dr_plus", chain_t2 = "dr_plus", isect_t2 = "dr_plus", down_t2 = "dr_plus" }
+kept = { isdel_t2 = "negated_input_deleted" }
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "simple_sbuf"
+tick = 3
+rows = [[6, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "qual_res"
+tick = 1
+rows = [[1, 5], [2, 5], [3, 6]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "qual_res"
+tick = 3
+rows = [[3, 6]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "qual_sbuf"
+tick = 3
+rows = [[3, 6]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "chain_t2"
+tick = 2
+rows = [[1, 1]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "chain_t2"
+tick = 4
+rows = [[1, 1], [4, 4], [5, 5]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "chain_t2"
+tick = 6
+rows = [[1, 1], [6, 6]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "isect_t2"
+tick = 2
+rows = [[5, 10], [6, 11], [7, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "isect_t2"
+tick = 4
+rows = [[7, 12], [9, 14]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "isdel_t2"
+tick = 2
+rows = [[5, 10], [6, 11], [7, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "isdel_t2"
+tick = 4
+rows = [[5, 10], [6, 11], [7, 12]]
+
+[[expect_analysis.reclaimable.storage]]
+node = "n1"
+rel = "down_t2"
+tick = 2
+rows = [[6, 11]]

@@ -1,0 +1,261 @@
+//! BENCH-095: Edelweiss, seals of the other join input, from bud-gc's tc_gc.rb (R05 T26, §5.7).
+//!
+//! BENCH-095 (R05 T26; §5.7): bud-gc's JoinReclaim unit tests where reclamation waits on seals (ANA-063, ANA-065).
+//!
+//! R05 §5.7 ("Seal dependencies for other joins", is_safe_rhs_ref): "If X is also joined, in a rule that is not itself an
+//! RSE target, with Z (t1 <= (Z * X)...), reclamation of X is chained behind one of: (a) a whole-relation seal on Z; (b) a
+//! seal on Z's join column (seal_Z_<col>), matched on the predicate; ... Multiple seal dependencies are chained." Here the
+//! reclaimed relation t3 is the positive input of a negation and also joined with t2 (and t4).
+
+program edelweiss_join_seals version 1;
+
+// ---------------- JoinReclaimWithSeal, test_join_reclaim_with_seal
+// `t1 <= (t2 * t3).pairs(:val2 => :val)` and `r1 <= t3.notin(t4)`: "When a tuple appears in t4, we would like to reclaim
+// the matching tuple in t3. To do this safely, we need to know that no future t2 tuple will arrive that joins with the
+// reclaimed t3 tuple" -- here a seal on t2.val2.
+
+table ws_t1(key: String, val: String);
+
+table ws_t2(key: String, val2: String) key(key) sealed by (val2);
+
+input ws_t2_in(key: String, val2: String);
+
+ws_t2_load: on ws_t2_in(key, val2) {
+    emit ws_t2(key, val2);
+}
+
+input ws_t2_seal(val2: String);
+
+ws_t2_close: on ws_t2_seal(val2) {
+    seal ws_t2(val2: val2);
+}
+
+table ws_t3(key: String, val: String) key(key);
+
+input ws_t3_in(key: String, val: String);
+
+ws_t3_load: on ws_t3_in(key, val) {
+    emit ws_t3(key, val);
+}
+
+table ws_t4(key: String, val: String) key(key);
+
+input ws_t4_in(key: String, val: String);
+
+ws_t4_load: on ws_t4_in(key, val) {
+    emit ws_t4(key, val);
+}
+
+output ws_r1(key: String, val: String);
+
+ws_join: while ws_t2(k2, v), ws_t3(k3, v) {
+    emit ws_t1(k2, k3);
+}
+
+ws_notin: while ws_t3(k, v), not ws_t4(k, v) {
+    emit ws_r1(k, v);
+}
+
+// ---------------- JoinReclaimWithSealReorder, test_join_reclaim_with_seal_reorder
+// The same, with the join written `(t3 * t2).pairs(:val => :val2)`: the same reclamation.
+
+table wsr_t1(key: String, val: String);
+
+table wsr_t2(key: String, val2: String) key(key) sealed by (val2);
+
+input wsr_t2_in(key: String, val2: String);
+
+wsr_t2_load: on wsr_t2_in(key, val2) {
+    emit wsr_t2(key, val2);
+}
+
+input wsr_t2_seal(val2: String);
+
+wsr_t2_close: on wsr_t2_seal(val2) {
+    seal wsr_t2(val2: val2);
+}
+
+table wsr_t3(key: String, val: String) key(key);
+
+input wsr_t3_in(key: String, val: String);
+
+wsr_t3_load: on wsr_t3_in(key, val) {
+    emit wsr_t3(key, val);
+}
+
+table wsr_t4(key: String, val: String) key(key);
+
+input wsr_t4_in(key: String, val: String);
+
+wsr_t4_load: on wsr_t4_in(key, val) {
+    emit wsr_t4(key, val);
+}
+
+output wsr_r1(key: String, val: String);
+
+wsr_join: while wsr_t3(k3, v), wsr_t2(k2, v) {
+    emit wsr_t1(k2, k3);
+}
+
+wsr_notin: while wsr_t3(k, v), not wsr_t4(k, v) {
+    emit wsr_r1(k, v);
+}
+
+// ---------------- JoinReclaimMultiplePreds, test_join_reclaim_multi_preds (the seal on t2.a)
+// `t1 <= (t2 * t3).pairs(:a => :d, :b => :e)` and `r1 <= t3.notin(t4, :d => :key)`: with two join predicates a seal on
+// either predicate column rules out future partners. Bud's test seals t2.a = foo1 and t2.b = bar3 on one relation;
+// LANGUAGE allows one seal key per relation, so this fixture seals a (foo1, then foo3) and the next one seals b.
+
+table mpa_t1(key: String, val: String);
+
+table mpa_t2(a: String, b: String, c: String) sealed by (a);
+
+input mpa_t2_in(a: String, b: String, c: String);
+
+mpa_t2_load: on mpa_t2_in(a, b, c) {
+    emit mpa_t2(a, b, c);
+}
+
+input mpa_t2_seal(a: String);
+
+mpa_t2_close: on mpa_t2_seal(a) {
+    seal mpa_t2(a: a);
+}
+
+table mpa_t3(d: String, e: String, f: String);
+
+input mpa_t3_in(d: String, e: String, f: String);
+
+mpa_t3_load: on mpa_t3_in(d, e, f) {
+    emit mpa_t3(d, e, f);
+}
+
+table mpa_t4(key: String);
+
+input mpa_t4_in(key: String);
+
+mpa_t4_load: on mpa_t4_in(key) {
+    emit mpa_t4(key);
+}
+
+output mpa_r1(d: String, e: String, f: String);
+
+mpa_join: while mpa_t2(a, b, c), mpa_t3(a, b, fv) {
+    emit mpa_t1(c, fv);
+}
+
+mpa_notin: while mpa_t3(d, e, fv), not mpa_t4(d) {
+    emit mpa_r1(d, e, fv);
+}
+
+// ---------------- JoinReclaimMultiplePreds, test_join_reclaim_multi_preds (the seal on t2.b)
+// As above, sealing t2 on b: bar1 and bar3 in Bud's seal step, so t3(foo3, bar3, qux3) goes as soon as t4 has foo3.
+
+table mpb_t1(key: String, val: String);
+
+table mpb_t2(a: String, b: String, c: String) sealed by (b);
+
+input mpb_t2_in(a: String, b: String, c: String);
+
+mpb_t2_load: on mpb_t2_in(a, b, c) {
+    emit mpb_t2(a, b, c);
+}
+
+input mpb_t2_seal(b: String);
+
+mpb_t2_close: on mpb_t2_seal(b) {
+    seal mpb_t2(b: b);
+}
+
+table mpb_t3(d: String, e: String, f: String);
+
+input mpb_t3_in(d: String, e: String, f: String);
+
+mpb_t3_load: on mpb_t3_in(d, e, f) {
+    emit mpb_t3(d, e, f);
+}
+
+table mpb_t4(key: String);
+
+input mpb_t4_in(key: String);
+
+mpb_t4_load: on mpb_t4_in(key) {
+    emit mpb_t4(key);
+}
+
+output mpb_r1(d: String, e: String, f: String);
+
+mpb_join: while mpb_t2(a, b, c), mpb_t3(a, b, fv) {
+    emit mpb_t1(c, fv);
+}
+
+mpb_notin: while mpb_t3(d, e, fv), not mpb_t4(d) {
+    emit mpb_r1(d, e, fv);
+}
+
+// ---------------- JoinReclaimIntersectSeal, test_join_reclaim_intersect
+// t3 is an input of two joins, with t2 (on val2) and with t4 (on val4): a t3 tuple goes only once both are sealed on its
+// value. Bud's last step seals t2 and t4 as wholes; with one seal key per relation the port seals them on the one value
+// left, 11, which rules out the same partners of t3(20, 11).
+
+table isx_t0(key: u64, val: u64);
+
+table isx_t1(key: u64, val: u64);
+
+table isx_t2(key: u64, val2: u64) key(key) sealed by (val2);
+
+input isx_t2_in(key: u64, val2: u64);
+
+isx_t2_load: on isx_t2_in(key, val2) {
+    emit isx_t2(key, val2);
+}
+
+input isx_t2_seal(val2: u64);
+
+isx_t2_close: on isx_t2_seal(val2) {
+    seal isx_t2(val2: val2);
+}
+
+table isx_t3(key: u64, val: u64) key(key);
+
+input isx_t3_in(key: u64, val: u64);
+
+isx_t3_load: on isx_t3_in(key, val) {
+    emit isx_t3(key, val);
+}
+
+table isx_t4(key: u64, val4: u64) key(key) sealed by (val4);
+
+input isx_t4_in(key: u64, val4: u64);
+
+isx_t4_load: on isx_t4_in(key, val4) {
+    emit isx_t4(key, val4);
+}
+
+input isx_t4_seal(val4: u64);
+
+isx_t4_close: on isx_t4_seal(val4) {
+    seal isx_t4(val4: val4);
+}
+
+table isx_t5(key: u64, val: u64) key(key);
+
+input isx_t5_in(key: u64, val: u64);
+
+isx_t5_load: on isx_t5_in(key, val) {
+    emit isx_t5(key, val);
+}
+
+output isx_r1(key: u64, val: u64);
+
+isx_join_t2: while isx_t2(k2, v), isx_t3(k3, v) {
+    emit isx_t0(k2, k3);
+}
+
+isx_join_t4: while isx_t3(k3, v), isx_t4(k4, v) {
+    emit isx_t1(k3, k4);
+}
+
+isx_notin: while isx_t3(k, v), not isx_t5(k, v) {
+    emit isx_r1(k, v);
+}

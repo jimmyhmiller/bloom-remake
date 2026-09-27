@@ -1,0 +1,288 @@
+//! BENCH-095: Edelweiss join reclamation, shared inputs and target lists, from bud-gc's tc_gc.rb (R05 T26, §5.7).
+//!
+//! BENCH-095 (R05 T26; §5.7): bud-gc's JoinRse unit tests for shared join inputs and target lists (ANA-063).
+//!
+//! R05 §5.7: a join input is reclaimed once the other input is sealed and no join result involving it is missing; with a
+//! pull-up, "if the notin quals reference only columns derived from A ... a simple rule is added: del_A_r <= (A *
+//! Y).lefts(pulled-up quals). It needs no seal". A relation that is an input of several reclamation rules is reclaimed
+//! only when all of them allow it. Constants in the target list (literals, the node's address and port) are part of the
+//! join result the negation is matched against.
+
+program edelweiss_join_targets version 1;
+
+// ---------------- JoinRseSealedUseTwice, test_rse_join_sealed_twice
+// A sealed node relation joined with two logs whose channels feed them back: the test only runs a tick (bud-gc must not
+// fail when one sealed collection is a join input of two reclamation rules). Both channels are received into persistent
+// logs, so both are eligible for acknowledgement-based suppression (ARM).
+
+sealed table sut_node(addr: Node);
+
+channel sut_ins_chn(@addr: Node, id: u64);
+channel sut_del_chn(@addr: Node, id: u64);
+
+table sut_ins_log(id: u64);
+table sut_del_log(id: u64);
+
+sut_ins_send: while sut_node(a), sut_ins_log(i) {
+    send sut_ins_chn(a, i);
+}
+
+sut_del_send: while sut_node(a), sut_del_log(i) {
+    send sut_del_chn(a, i);
+}
+
+sut_ins_keep: on sut_ins_chn(_, i) {
+    emit sut_ins_log(i);
+}
+
+sut_del_keep: on sut_del_chn(_, i) {
+    emit sut_del_log(i);
+}
+
+// ---------------- JoinRseUseTwice, test_rse_join_twice
+// The same with epochs: node(addr, epoch) is joined on epoch with both logs. The test only runs a tick.
+
+sealed table ut_node(addr: Node, epoch: u64);
+
+channel ut_ins_chn(@addr: Node, id: u64, epoch: u64) key(addr, id);
+channel ut_del_chn(@addr: Node, id: u64, epoch: u64) key(addr, id);
+
+table ut_ins_log(id: u64, epoch: u64) key(id);
+table ut_del_log(id: u64, epoch: u64) key(id);
+
+ut_ins_send: while ut_node(a, e), ut_ins_log(i, e) {
+    send ut_ins_chn(a, i, e);
+}
+
+ut_del_send: while ut_node(a, e), ut_del_log(i, e) {
+    send ut_del_chn(a, i, e);
+}
+
+ut_ins_keep: on ut_ins_chn(_, i, e) {
+    emit ut_ins_log(i, e);
+}
+
+ut_del_keep: on ut_del_chn(_, i, e) {
+    emit ut_del_log(i, e);
+}
+
+// ---------------- JoinRseSealDoubleReclaim, test_rse_join_twice_reclaim_from_sealed
+// A sealed node relation is a join input of two reclamation rules (with x_log on epoch_x and with y_log on epoch_y): "We
+// only want to reclaim from n when we see seals for _both_ r and s." x_log message 101 is reclaimed once delivered to
+// every node of x_epoch "b"; the node facts stay, because y_log is never sealed. Bud inserts the node facts before its
+// first tick, which is bootstrap for a sealed collection; the port writes them in bootstrap.
+
+sealed table dr_node(addr: String, epoch_x: String, epoch_y: u64);
+
+bootstrap {
+    emit dr_node("foo", "a", 1);
+    emit dr_node("bar", "a", 1);
+    emit dr_node("foo", "b", 1);
+    emit dr_node("bar", "c", 2);
+}
+
+table dr_x_log(id: u64, epoch: String) sealed by (epoch);
+
+input dr_x_log_in(id: u64, epoch: String);
+
+dr_x_log_load: on dr_x_log_in(id, epoch) {
+    emit dr_x_log(id, epoch);
+}
+
+input dr_x_log_seal(epoch: String);
+
+dr_x_log_close: on dr_x_log_seal(epoch) {
+    seal dr_x_log(epoch: epoch);
+}
+
+table dr_y_log(id: u64, epoch: u64) sealed by (epoch);
+
+input dr_y_log_in(id: u64, epoch: u64);
+
+dr_y_log_load: on dr_y_log_in(id, epoch) {
+    emit dr_y_log(id, epoch);
+}
+
+input dr_y_log_seal(epoch: u64);
+
+dr_y_log_close: on dr_y_log_seal(epoch) {
+    seal dr_y_log(epoch: epoch);
+}
+
+table dr_x_res_approx(addr: String, epoch_x: String, epoch_y: u64, id: u64, epoch: String);
+
+input dr_x_res_approx_in(addr: String, epoch_x: String, epoch_y: u64, id: u64, epoch: String);
+
+dr_x_res_approx_load: on dr_x_res_approx_in(addr, epoch_x, epoch_y, id, epoch) {
+    emit dr_x_res_approx(addr, epoch_x, epoch_y, id, epoch);
+}
+
+table dr_y_res_approx(addr: String, epoch_x: String, epoch_y: u64, id: u64, epoch: u64);
+
+input dr_y_res_approx_in(addr: String, epoch_x: String, epoch_y: u64, id: u64, epoch: u64);
+
+dr_y_res_approx_load: on dr_y_res_approx_in(addr, epoch_x, epoch_y, id, epoch) {
+    emit dr_y_res_approx(addr, epoch_x, epoch_y, id, epoch);
+}
+
+table dr_x_res(addr: String, epoch_x: String, epoch_y: u64, id: u64, epoch: String);
+
+table dr_y_res(addr: String, epoch_x: String, epoch_y: u64, id: u64, epoch: u64);
+
+dr_x: while dr_node(a, ex, ey), dr_x_log(i, ex), not dr_x_res_approx(a, ex, ey, i, ex) {
+    emit dr_x_res(a, ex, ey, i, ex);
+}
+
+dr_y: while dr_node(a, ex, ey), dr_y_log(i, ey), not dr_y_res_approx(a, ex, ey, i, ey) {
+    emit dr_y_res(a, ex, ey, i, ey);
+}
+
+// ---------------- JoinRseDoubleScratch, test_rse_join_double_scratch
+// Two identical rules `view <= ((ref * obj).pairs(:obj_id => :oid) {|r,o| r + o}).notin(del_ref, 0 => :del_id)` into two
+// scratches. The negation names only ref's id, so ref is reclaimed through the pulled-up negation; obj 5 is reclaimed
+// once ref is sealed and none of its join results is missing.
+
+table ds_obj(oid: u64, val: String) key(oid);
+
+input ds_obj_in(oid: u64, val: String);
+
+ds_obj_load: on ds_obj_in(oid, val) {
+    emit ds_obj(oid, val);
+}
+
+table ds_ref(id: u64, name: String, obj_id: u64) key(id) sealed by ();
+
+input ds_ref_in(id: u64, name: String, obj_id: u64);
+
+ds_ref_load: on ds_ref_in(id, name, obj_id) {
+    emit ds_ref(id, name, obj_id);
+}
+
+input ds_ref_seal();
+
+ds_ref_close: on ds_ref_seal() {
+    seal ds_ref();
+}
+
+table ds_del_ref(id: u64, del_id: u64) key(id);
+
+input ds_del_ref_in(id: u64, del_id: u64);
+
+ds_del_ref_load: on ds_del_ref_in(id, del_id) {
+    emit ds_del_ref(id, del_id);
+}
+
+output ds_view(id: u64, name: String, obj_id: u64, oid: u64, val: String);
+output ds_view2(id: u64, name: String, obj_id: u64, oid: u64, val: String);
+
+ds_one: while ds_ref(i, n, o), ds_obj(o, v), not ds_del_ref(_, i) {
+    emit ds_view(i, n, o, o, v);
+}
+
+ds_two: while ds_ref(i, n, o), ds_obj(o, v), not ds_del_ref(_, i) {
+    emit ds_view2(i, n, o, o, v);
+}
+
+// ---------------- JoinRseTlistConst, test_rse_join_tlist_const
+// Two rules put constants in the join's target list: `[t1.key, "foo", t2.val]` and `[t1.key, 99, t2.val]`. Blossom columns
+// have one type, so the column is a String and Bud's 99 is written "99". A b tuple is reclaimed once both of its results
+// are in a_approx (c is sealed).
+
+table tc_a(c1: u64, c2: String, c3: u64);
+
+table tc_a_approx(c1: u64, c2: String, c3: u64);
+
+input tc_a_approx_in(c1: u64, c2: String, c3: u64);
+
+tc_a_approx_load: on tc_a_approx_in(c1, c2, c3) {
+    emit tc_a_approx(c1, c2, c3);
+}
+
+table tc_b(key: u64, val: u64) key(key);
+
+input tc_b_in(key: u64, val: u64);
+
+tc_b_load: on tc_b_in(key, val) {
+    emit tc_b(key, val);
+}
+
+sealed table tc_c(key: u64, val: u64) key(key);
+
+bootstrap {
+    emit tc_c(7, 12);
+}
+
+tc_foo: while tc_b(k, _v), tc_c(_k2, cv), not tc_a_approx(k, "foo", cv) {
+    emit tc_a(k, "foo", cv);
+}
+
+tc_99: while tc_b(k, _v), tc_c(_k2, cv), not tc_a_approx(k, "99", cv) {
+    emit tc_a(k, "99", cv);
+}
+
+// ---------------- JoinRseTlistIpPort, test_rse_join_tlist_ip_port
+// The target list holds the node's address and port (Bud's ip_port and port): the node itself (`self`) and a constant
+// port.
+
+const IP_PORT: u64 = 5555;
+
+table ip_a(c1: u64, c2: Node, c3: u64, c4: u64);
+
+table ip_a_approx(c1: u64, c2: Node, c3: u64, c4: u64);
+
+input ip_a_approx_in(c1: u64, c2: Node, c3: u64, c4: u64);
+
+ip_a_approx_load: on ip_a_approx_in(c1, c2, c3, c4) {
+    emit ip_a_approx(c1, c2, c3, c4);
+}
+
+table ip_b(key: u64, val: u64) key(key);
+
+input ip_b_in(key: u64, val: u64);
+
+ip_b_load: on ip_b_in(key, val) {
+    emit ip_b(key, val);
+}
+
+sealed table ip_c(key: u64, val: u64) key(key);
+
+bootstrap {
+    emit ip_c(7, 12);
+}
+
+ip_join: while ip_b(k, _v), ip_c(_k2, cv), not ip_a_approx(k, self, IP_PORT, cv) {
+    emit ip_a(k, self, IP_PORT, cv);
+}
+
+// ---------------- JoinRseTlistConstQual, test_rse_join_tlist_const_qual
+// `[t1.key, port, t2.val]` negated on its first two columns only (`notin(a_approx, 0 => :c1, 1 => :c2)`).
+
+const CQ_PORT: u64 = 5556;
+
+table cq_a(c1: u64, c2: u64, c3: u64);
+
+table cq_a_approx(c1: u64, c2: u64, c3: u64);
+
+input cq_a_approx_in(c1: u64, c2: u64, c3: u64);
+
+cq_a_approx_load: on cq_a_approx_in(c1, c2, c3) {
+    emit cq_a_approx(c1, c2, c3);
+}
+
+table cq_b(key: u64, val: u64) key(key);
+
+input cq_b_in(key: u64, val: u64);
+
+cq_b_load: on cq_b_in(key, val) {
+    emit cq_b(key, val);
+}
+
+sealed table cq_c(key: u64, val: u64) key(key);
+
+bootstrap {
+    emit cq_c(7, 12);
+}
+
+cq_join: while cq_b(k, _v), cq_c(_k2, cv), not cq_a_approx(k, CQ_PORT, _) {
+    emit cq_a(k, CQ_PORT, cv);
+}
