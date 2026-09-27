@@ -1,0 +1,9 @@
+---
+source: crates/blossom-ir/src/tests.rs
+assertion_line: 342
+expression: text
+---
+decl table r(x: u64)
+decl static s(x: u64)
+// r/from_s
+r(X) :- s(X).

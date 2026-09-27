@@ -10,5 +10,16 @@ publish.workspace = true
 blossom-base.workspace = true
 blossom-value.workspace = true
 
+serde.workspace = true
+thiserror.workspace = true
+postcard.workspace = true
+blake3.workspace = true
+smallvec.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+proptest.workspace = true
+serde_json.workspace = true
+
 [lints]
 workspace = true
