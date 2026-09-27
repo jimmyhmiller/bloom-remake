@@ -9,5 +9,17 @@ publish.workspace = true
 [dependencies]
 blossom-base.workspace = true
 
+thiserror.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+libtest-mimic.workspace = true
+proptest.workspace = true
+
+[[test]]
+name = "smt_suite"
+path = "tests/smt_suite.rs"
+harness = false
+
 [lints]
 workspace = true

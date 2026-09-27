@@ -1,12 +1,12 @@
-//! Fuzz target `smt_response` (ARCHITECTURE §11.8): the SMT-LIB2 response parser: no panic; typed errors.
-//!
-//! Implemented by WP M2.5, together with its stable proptest mirror. Until then running it is an immediate
-//! finding, so the target can never pass silently.
+//! SMT-LIB2 responses must parse without panicking or return a typed error.
 #![no_main]
-
+use blossom_smt::Sexp;
 use libfuzzer_sys::fuzz_target;
-
 fuzz_target!(|data: &[u8]| {
-    let _ = data;
-    panic!("fuzz target smt_response is not implemented yet (WP M2.5)");
+    if let Ok(text) = std::str::from_utf8(data) {
+        if let Ok(parsed) = Sexp::parse(text) {
+            let printed = parsed.to_string();
+            assert_eq!(Sexp::parse(&printed).ok(), Some(parsed));
+        }
+    }
 });
