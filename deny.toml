@@ -1,0 +1,49 @@
+# cargo-deny policy (ARCHITECTURE §1.2). Run by `scripts/ci.sh gate` when cargo-deny is installed in `.tools/`
+# (`scripts/install-dev-tools.sh`).
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+# The allowlist of ARCHITECTURE §1.2. MPL-2.0 is allowed for `imbl` and `webpki-roots` only (exceptions below).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+]
+exceptions = [
+    { allow = ["MPL-2.0"], crate = "imbl" },
+    { allow = ["MPL-2.0"], crate = "webpki-roots" },
+    # ARCHITECTURE §1.2 names xxhash-rust (xxh3, ENG-032) for blossom-value but its allowlist omits the crate's
+    # license, the permissive Boost Software License. Allowed for this crate only; see docs/design/DEPENDENCIES.md.
+    { allow = ["BSL-1.0"], crate = "xxhash-rust" },
+]
+
+# Workspace crates are `publish = false` and carry no license yet (PLAN §4 D19).
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = [
+    # rustls is built with the `ring` provider (ARCH-11); aws-lc must never be pulled in.
+    { crate = "aws-lc-sys", reason = "rustls uses the ring provider (ARCHITECTURE §1.2)" },
+    { crate = "aws-lc-rs", reason = "rustls uses the ring provider (ARCHITECTURE §1.2)" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

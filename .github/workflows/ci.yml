@@ -1,0 +1,40 @@
+# Pull-request CI (ARCHITECTURE §11.10): the fast tier on both supported platforms. The merge-queue and nightly
+# tiers are added by the WPs that own them (M13.3 owns .github/** after M1).
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  fast:
+    name: fast tier (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            .tools
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/install-dev-tools.sh') }}
+      - name: Install development tools into .tools/
+        run: scripts/install-dev-tools.sh
+      - name: scripts/ci.sh fast
+        run: scripts/ci.sh fast
+      - name: cargo deny
+        run: .tools/bin/cargo-deny check

@@ -1,0 +1,16 @@
+[package]
+name = "blossom-artifact"
+description = "Compiler outputs as data: CompileOutput, role and spec artifacts, certificate records and the artifact header."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+blossom-base.workspace = true
+blossom-value.workspace = true
+blossom-ir.workspace = true
+blossom-schema.workspace = true
+
+[lints]
+workspace = true

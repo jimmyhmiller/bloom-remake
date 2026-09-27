@@ -1,0 +1,21 @@
+[package]
+name = "blossom-ldfi"
+description = "Molly-2 lineage-driven fault injection: failure specs, crash views, the hazard DAG and encodings, minimal enumeration, the forward/backward driver and reports."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+blossom-base.workspace = true
+blossom-value.workspace = true
+blossom-ir.workspace = true
+blossom-artifact.workspace = true
+blossom-analysis.workspace = true
+blossom-prov.workspace = true
+blossom-sim.workspace = true
+blossom-trace.workspace = true
+blossom-sat.workspace = true
+
+[lints]
+workspace = true

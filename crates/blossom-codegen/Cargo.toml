@@ -1,0 +1,16 @@
+[package]
+name = "blossom-codegen"
+description = "Validated physical plan and schema catalog to Rust tokens: generated executors, typed host bindings and specialized wire codecs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+blossom-base.workspace = true
+blossom-value.workspace = true
+blossom-ir.workspace = true
+blossom-schema.workspace = true
+
+[lints]
+workspace = true

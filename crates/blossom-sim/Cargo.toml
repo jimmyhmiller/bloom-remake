@@ -1,0 +1,21 @@
+[package]
+name = "blossom-sim"
+description = "The deterministic simulator: worlds, schedulers, fault injection, exploration, shrinking, replay, space-time diagrams, history checkers and the spec engine driver."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+blossom-base.workspace = true
+blossom-value.workspace = true
+blossom-ir.workspace = true
+blossom-artifact.workspace = true
+blossom-engine.workspace = true
+blossom-node.workspace = true
+blossom-store.workspace = true
+blossom-wire.workspace = true
+blossom-trace.workspace = true
+
+[lints]
+workspace = true

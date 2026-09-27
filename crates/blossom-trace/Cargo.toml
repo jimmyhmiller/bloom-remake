@@ -1,0 +1,15 @@
+[package]
+name = "blossom-trace"
+description = "The observation vocabulary and the record/replay trace format."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+blossom-base.workspace = true
+blossom-value.workspace = true
+blossom-ir.workspace = true
+
+[lints]
+workspace = true

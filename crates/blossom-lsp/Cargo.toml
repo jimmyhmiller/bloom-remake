@@ -1,0 +1,16 @@
+[package]
+name = "blossom-lsp"
+description = "The language server [P2]."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+blossom-base.workspace = true
+blossom-driver.workspace = true
+blossom-syntax.workspace = true
+blossom-analysis.workspace = true
+
+[lints]
+workspace = true
