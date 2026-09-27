@@ -35,6 +35,9 @@ both: on p("c1"), p("c2") {
     emit concurrent();
 }
 
-keep: while concurrent() {
+/// `concurrent` is written only by event-driven statements, this one included, so it is an event relation
+/// (LANGUAGE §8.5, the greatest fixpoint) and the loop that carries it to the next tick is an `on`
+/// handler, although `concurrent` then holds in every later tick.
+keep: on concurrent() {
     next concurrent();
 }

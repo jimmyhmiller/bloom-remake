@@ -36,6 +36,9 @@ join: on a_msg(v), b_msg(v) {
     emit joined(v);
 }
 
-keep: while joined(v) {
+/// `joined` is written only by event-driven statements, this one included, so it is an event relation
+/// (LANGUAGE §8.5, the greatest fixpoint) and the loop that carries it to the next tick is an `on`
+/// handler, although `joined` then holds in every later tick.
+keep: on joined(v) {
     next joined(v);
 }

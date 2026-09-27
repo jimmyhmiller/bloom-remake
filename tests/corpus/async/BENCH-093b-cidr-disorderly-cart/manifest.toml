@@ -19,6 +19,11 @@ program = "program.bls"
 derived = false
 expected_from = "literature"
 
+# The program's `replica` facts name the server replicas S1 and S2; they are the deployment (every node runs the
+# single-location program), so the facts' Node values decode through the deployment directory (PLAN §5.1).
+[deploy]
+nodes = [{ name = "S1", role = "Node" }, { name = "S2", role = "Node" }]
+
 [backend.analysis]
 status = "unimplemented"
 unimplemented = ["LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-045", "LANG-047", "LANG-060", "LANG-062", "LANG-082", "LANG-088", "LANG-100", "LANG-102", "LANG-150", "LANG-190", "SEM-021", "ANA-022"]

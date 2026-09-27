@@ -9,7 +9,8 @@ spec PruningFindsTheAlarm for r#program {
 
     /// The client requests put(1) and put(2) in the same tick; a schedule that delivers put(1) to the server a tick
     /// before put(2) raises the alarm. With correct CALM pruning the simulator explores such schedules and this
-    /// invariant fails; with the unsound pruning it would always hold.
+    /// invariant fails; with the unsound pruning it would always hold when both puts arrive together, which is the
+    /// network this check must run on (equal delays; see the manifest).
     invariant no_alarm: never alarmed(1) @ MON;
 
     check sim { runs: 500, seed: 1 } expect fails;

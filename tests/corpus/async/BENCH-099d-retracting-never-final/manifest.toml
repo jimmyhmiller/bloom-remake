@@ -16,6 +16,17 @@ derived = true
 expected_from = "literature"
 notes = "The correction stream is unsealed on purpose; see docs/plan/notes/M1.4.md (BENCH-099)."
 
+# The deployment of BENCH-099a: the program's `split_of` facts name the mappers M1-M4, so their Node values decode
+# through the deployment directory (PLAN §5.1), and a multi-role program has no default deployment.
+[deploy]
+nodes = [
+    { name = "M1", role = "Mapper" },
+    { name = "M2", role = "Mapper" },
+    { name = "M3", role = "Mapper" },
+    { name = "M4", role = "Mapper" },
+    { name = "R", role = "Reducer" },
+]
+
 [backend.analysis]
 status = "unimplemented"
 unimplemented = ["LANG-009", "LANG-010", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-062", "LANG-088", "LANG-100", "LANG-138", "LANG-153", "LANG-154", "LANG-181", "LANG-207", "LANG-212", "ANA-120", "SEM-016", "SEM-017"]

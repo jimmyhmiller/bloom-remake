@@ -31,6 +31,9 @@ derive_t: on a_msg(), b_msg() {
     emit t();
 }
 
-keep: while t() {
+/// `t` is written only by event-driven statements, this one included, so it is an event relation
+/// (LANGUAGE §8.5, the greatest fixpoint) and the loop that carries it to the next tick is an `on`
+/// handler, although `t` then holds in every later tick.
+keep: on t() {
     next t();
 }

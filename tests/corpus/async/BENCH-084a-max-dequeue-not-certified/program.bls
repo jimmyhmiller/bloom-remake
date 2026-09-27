@@ -37,11 +37,15 @@ arrive: on b_msg(i) {
 }
 
 /// b(I)@next ← b(I), ¬dequeued(I).
-carry: while b(i), not dequeued(i) {
+/// `b` is written only by event-driven statements, this one included, so it is an event relation (LANGUAGE
+/// §8.5, the greatest fixpoint) and this handler is `on`, although the loop keeps an undequeued element in `b`
+/// in every later tick.
+carry: on b(i), not dequeued(i) {
     next b(i);
 }
 
 /// dequeued(I)@next ← b(I), ¬b_lt(_, I), b_lt(_, _).
-dequeue: while b(i), not b_lt(_, i), b_lt(_, _) {
+/// `on`: its header reads the event relation `b`.
+dequeue: on b(i), not b_lt(_, i), b_lt(_, _) {
     next dequeued(i);
 }
