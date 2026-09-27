@@ -7,7 +7,9 @@ features = ["LANG-045", "LANG-047", "LANG-060", "LANG-086"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
-notes = "The triangle 1-2-3 with a pendant 4: an odd cycle, so some node is both red and blue and answer() holds. Judgement call: the `start` seed is ours."
+notes = """
+The triangle 1-2-3 with a pendant 4: an odd cycle, so some node is both red and blue and answer() holds. Judgement
+call: the `start` seed is ours."""
 
 [run]
 ticks = 2

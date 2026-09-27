@@ -1,0 +1,13 @@
+// BENCH-015 (toggle, Declarative Imperative §3.4.4, without @next) in Molly's Dedalus dialect: the `.ded` twin of
+// BENCH-015e.
+//
+// The toggle program of BENCH-015d with the flip rule made deductive: `state` now depends negatively on itself
+// within one tick, so the program is not temporally stratifiable and must be rejected (BLS0502). As in BENCH-015d,
+// node(N) binds the rule's location.
+
+state(N, X)@next :- state(N, X), notin del_state(N, X);
+state(N, 1) :- node(N), notin state(N, _);          // expect: BLS0502
+del_state(N, X) :- state(N, X);
+node(N)@next :- node(N);
+
+node("n1")@1;

@@ -39,9 +39,11 @@ tests/corpus/
 
 A case directory is named after the FEATURES id it belongs to (`BENCH-001`, or `LIB-…` for library cases), an
 optional lower-case letter when the item has several scenarios, and a slug. By convention of the M1 corpus WPs the
-letter `d` marks the `.ded` twin of a case whose source is a Dedalus program (and `e` a second twin when an item has
-two); other letters are scenarios. Programs are self-contained: `.bls` programs start with `program NAME version N;`
-and import nothing from `std::` (the standard library has its own cases).
+letter `d` is reserved for the `.ded` twin of a case whose source is a Dedalus program, so `.bls` scenarios skip it;
+an item with more than one twin gives the others the next free letters (BENCH-001e, BENCH-007e, BENCH-015f). Every
+other letter is an ordinary scenario, and the manifest's `program` field, not the letter, decides which frontend a
+case runs. Programs are self-contained: `.bls` programs start with `program NAME version N;` and import nothing from
+`std::` (the standard library has its own cases).
 
 ## The schema (PLAN §5, verbatim)
 
@@ -164,10 +166,12 @@ include a P2 id belongs to M15. Corpus authors compute it from plan.json; the co
 PLAN §5 leaves a few things to the runner. The M1 corpus relies on the readings below; each is stated here so that
 the runner (M5.2) and the triage WPs can check the cases against it rather than against guesswork.
 
-- **`.ded` cases** take their nodes and their inputs from the program: the nodes are the location constants of the
-  facts, and `p(…)@k` facts are input events at tick k (LANGUAGE §21.1, CR-13; tick 0 has none). Their manifests
-  have no `[deploy]` nodes and no `[[input]]`. Rows are written **without** the location column, which the `.ded`
-  frontend strips from every relation.
+- **`.ded` cases** take their nodes and their inputs from the program. The nodes are the constants the `.ded`
+  typer infers as locations in the program's facts: the first column of every fact, and any other column unified
+  with a location (in BENCH-008d the requesters `"c1"` and `"c2"` of `request("s", "c1")`, which
+  `response(From, X)@async` addresses). `p(…)@k` facts are input events at tick k (LANGUAGE §21.1, CR-13; tick 0
+  has none). Their manifests have no `[deploy]` nodes and no `[[input]]`. Rows are written **without** the location
+  column, which the `.ded` frontend strips from every relation.
 - **Deployment.** A program with no roles runs on the default single node `n1`. Every multi-node case declares
   roles in its program (`role Peer: cluster;`), so that `[deploy] nodes` can name each node's role.
 - **Run length.** `[run] ticks = N` is chosen with a margin: no expectation refers to a tick later than N − 2, so
@@ -181,12 +185,21 @@ the runner (M5.2) and the triage WPs can check the cases against it rather than 
 - **`[[expect_diag]]` lines.** Every expected diagnostic with a `line` points at a program line that carries a
   trailing `// expect: BLSnnnn` comment, and the construct the diagnostic is about is kept on that one line, so the
   line does not depend on which span an implementation reports as primary.
+- **Compile cases are otherwise clean.** A case with a `compile` backend is written so that its `[[expect_diag]]`
+  entries are the only diagnostics a conforming compiler reports, warnings included; the case holds whether the
+  runner compares the reported set with the expected set exactly or checks inclusion.
+- **Level-triggered ports.** Dedalus rules that re-derive every tick are ported as `while` handlers, following the
+  explicit-persistence idiom of LANGUAGE §7.2. When such a handler reads a scratch whose only writers are
+  event-driven, the greatest-fixpoint classification of LANGUAGE §8.5 makes that scratch an event relation and a
+  compiler may warn BLS0505 ("write `on`"). No compile case contains such a handler, and the runtime backends do not
+  check warnings.
 - **Validity as invariants.** Where the literature states a property rather than a value (the seeded `choose!`,
   `choose_rand!`, several choices at once), the program states it as `invariant … : never …;`. A violation aborts
   the tick with BLSR003, which fails the case on every backend and under every simulated seed.
 - **Canonical-priority mode.** R12's choice tests give exact answers "in canonical-priority mode", a test-only
   priority table. A manifest cannot select it, so the exact-answer cases write the choice as `choose_least!` /
-  `least v`, which is that mode's choice under every seed; separate cases check the seeded `choose!` itself.
+  `least v`, which is that mode's choice under every seed; a multi-FD site puts a `least` cost equal to the whole
+  candidate on one of its literals (BENCH-046c). Separate cases check the seeded `choose!` itself.
 - **`[expect_analysis] strata`** is a table from relation names in the source to their stratum under SEM-022: the
   longest same-tick path to the relation counting negative edges, numbered from 0.
 - **`unimplemented` lists** hold the case's `features` plus, for the `interp`, `sim`, `ldfi`, `codegen`, `bmc`,
@@ -204,5 +217,5 @@ python3 tests/corpus/tools/check_manifests.py core --require-ids BENCH-001..048 
 ```
 
 The validator checks every key and value shape of schema v1, that each `id` exists in FEATURES.md with the stated
-priority and each listed feature exists, that referenced files exist, and, with `--require-ids`, that every P0/P1 id in the range has a
-case. It does not recompute `until`; the corpus runner does (§5.4).
+priority and each listed feature exists, that referenced files exist, and, with `--require-ids`, that every P0/P1 id
+in the range has a case. It does not recompute `until`; the corpus runner does (§5.4).

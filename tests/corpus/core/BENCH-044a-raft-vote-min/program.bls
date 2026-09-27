@@ -8,8 +8,10 @@
 //! This variant writes the grant as R12's (a), `grant(N, T, min<C>)`: the least candidate id among the up-to-date
 //! requests.
 //!
-//! Every server runs this program; the host drives the candidates (`campaign`) and loads the voter's initial state
-//! (`init_state`). A request carries the candidate's id, which orders the candidates for the `min` variant.
+//! Every server runs this program; the host drives the candidates (`campaign`). The voter's initial state is static
+//! configuration that `bootstrap fresh` writes into its durable tables in the boot tick, so it is in place before
+//! any request can arrive, under every schedule, and a restart reloads it instead of rewriting it. A request
+//! carries the candidate's id, which orders the candidates for the `min` variant.
 //! `granted_ever` records every grant durably; the invariant is R12's "at most one grantee per term, across all
 //! ticks and restarts".
 
@@ -17,11 +19,15 @@ program raft_same_tick_vote version 1;
 
 role Server: cluster;
 
+/// The voters' initial state: current term and last log entry (R12 T5: n1 at term 4 with last entry (7, 3)).
+static init_state(n: Node<Server>, term: u64, last_idx: u64, last_term: u64);
+
+fact init_state("n1", 4, 7, 3);
+
 channel request_vote(term: u64, cand_id: u64, last_idx: u64, last_term: u64): Server -> Server;
 channel vote(term: u64, granted: bool): Server -> Server;
 
 at Server {
-    input init_state(term: u64, last_idx: u64, last_term: u64);
     input campaign(dst: Node<Server>, term: u64, cand_id: u64, last_idx: u64, last_term: u64);
 
     durable table current_term(t: u64) key() resolve choose_most(t);
@@ -30,9 +36,11 @@ at Server {
     durable table granted_ever(term: u64, cand: Node<Server>);
     table replies(term: u64, granted: bool);
 
-    load_state: on init_state(t, i, lt) {
-        emit current_term(t);
-        emit log(i, lt);
+    bootstrap fresh {
+        for init_state(self, t, i, lt) {
+            emit current_term(t);
+            emit log(i, lt);
+        }
     }
 
     view heard_term(t) = request_vote(term: t, ..);

@@ -3,13 +3,13 @@ id = "BENCH-044"
 title = "Raft vote among same-tick RequestVotes (seeded choose<C>): exactly one grantee per term under every seed"
 priority = "P0"
 source = "R12 §12 T5 (voter rules of R07 §11.3, grant written with choose); FEATURES.md SEM-085, FLAG-002, FLAG-006, FLAG-007, BENCH-044"
-features = ["SEM-071", "SEM-072", "SEM-084", "SEM-085", "LANG-044", "LANG-108", "LANG-117", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-093", "LANG-100", "LANG-153", "LANG-200", "LANG-241", "LANG-040", "LANG-085"]
+features = ["SEM-071", "SEM-072", "SEM-084", "SEM-085", "LANG-044", "LANG-108", "LANG-117", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-093", "LANG-100", "LANG-153", "LANG-200", "LANG-241", "LANG-040", "LANG-085", "LANG-045", "LANG-190"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
 notes = """
-R12 T5, shifted by one tick (the host loads n1 at tick 1 and requests arrive one tick after they are sent):
-n1 starts with current_term 4, no vote and last log entry (7, 3). Tick 2: RequestVotes for term 5 from c2 (7, 3),
+R12 T5, shifted by one tick (requests arrive one tick after they are sent): n1 starts (bootstrap fresh, boot
+tick) with current_term 4, no vote and last log entry (7, 3). Tick 2: RequestVotes for term 5 from c2 (7, 3),
 c3 (8, 3) and c4 (6, 3); c2 and c3 are up to date, c4 is behind. Tick 3: c3 and c2 retransmit. Tick 4: c5 asks for
 term 6 (7, 3). Tick 5: c2 asks again for the stale term 5. Tick 6: n1 restarts (a new incarnation that reloads its
 durable state); c3 asks for term 6, which arrives at tick 7.
@@ -29,19 +29,13 @@ stop = "ticks"
 
 [backend.oracle]
 status = "unimplemented"
-unimplemented = ["SEM-071", "SEM-072", "SEM-084", "SEM-085", "LANG-044", "LANG-108", "LANG-117", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-093", "LANG-100", "LANG-153", "LANG-200", "LANG-241", "LANG-040", "LANG-085"]
+unimplemented = ["SEM-071", "SEM-072", "SEM-084", "SEM-085", "LANG-044", "LANG-108", "LANG-117", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-093", "LANG-100", "LANG-153", "LANG-200", "LANG-241", "LANG-040", "LANG-085", "LANG-045", "LANG-190"]
 until = "M6"
 
 [backend.interp]
 status = "unimplemented"
-unimplemented = ["SEM-071", "SEM-072", "SEM-084", "SEM-085", "LANG-044", "LANG-108", "LANG-117", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-093", "LANG-100", "LANG-153", "LANG-200", "LANG-241", "LANG-040", "LANG-085", "SEM-002"]
+unimplemented = ["SEM-071", "SEM-072", "SEM-084", "SEM-085", "LANG-044", "LANG-108", "LANG-117", "LANG-042", "LANG-043", "LANG-047", "LANG-061", "LANG-062", "LANG-082", "LANG-093", "LANG-100", "LANG-153", "LANG-200", "LANG-241", "LANG-040", "LANG-085", "LANG-045", "LANG-190", "SEM-002"]
 until = "M7"
-
-[[input]]
-node = "n1"
-tick = 1
-rel = "init_state"
-rows = [[4, 7, 3]]
 
 [[input]]
 node = "c2"
