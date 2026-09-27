@@ -7,7 +7,7 @@
 //! The instance stops at the end of the tick where key 2 appears. Bud's periodic only keeps its instance
 //! ticking; the synchronous harness ticks every round, so it is not needed here.
 
-program halt version 1;
+program bud_halt version 1;
 
 scratch tbl(key: i64);
 

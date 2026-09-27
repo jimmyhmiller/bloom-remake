@@ -14,7 +14,7 @@ a0 m1 x2 b3 c4 z5 and never renumbers. Duplicate payload: {a, a} at tick 6 is on
 The ANA-011 lint on rank is BENCH-042b. Judgement call: R12's `next_slot(0) :- bootstrap` is the boot tick."""
 
 [run]
-ticks = 8
+ticks = 9
 stop = "ticks"
 
 [backend.oracle]

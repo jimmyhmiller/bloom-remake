@@ -10,7 +10,7 @@ expected_from = "literature"
 notes = "Same driver and expectations as the verbatim `.ded` case BENCH-010d."
 
 [run]
-ticks = 10
+ticks = 12
 stop = "ticks"
 
 [backend.oracle]

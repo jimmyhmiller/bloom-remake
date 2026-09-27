@@ -7,7 +7,11 @@ features = ["SEM-086", "ANA-002", "LANG-108", "LANG-045", "LANG-047"]
 program = "program.bls"
 derived = true
 expected_from = "literature"
-notes = "Compile-only. Judgement call: the negation in R12's rejected program is removed so that only BLS0503 applies."
+notes = """
+Compile-only. Judgement call: the negation in R12's rejected program is removed so that the cycle's only point of
+order is the choice. A choice site is itself a negative edge (LANGUAGE §13.2), so an implementation could also
+report the cycle as BLS0502; §13.4 gives choice and order sites on a same-tick cycle the specific code BLS0503,
+which is what this case pins. The triage WP decides if both are reported."""
 
 [backend.compile]
 status = "unimplemented"

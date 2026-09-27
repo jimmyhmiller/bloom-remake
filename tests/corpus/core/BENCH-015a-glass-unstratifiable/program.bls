@@ -13,7 +13,7 @@ static one_item(t: String);
 
 fact one_item("item");
 
-output glass(v: String);
+table glass(v: String);
 
 // The whole cycle (the negation in the header and the write) is on one line, so the reported line is
 // unambiguous whichever construct the witness starts with.
