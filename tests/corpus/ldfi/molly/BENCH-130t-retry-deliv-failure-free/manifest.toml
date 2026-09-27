@@ -1,0 +1,62 @@
+# BENCH-130t-retry-deliv-failure-free: retry-deliv: the failure-free run.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-130"
+title = "retry-deliv: the failure-free run"
+priority = "P0"
+source = "FEATURES.md BENCH-130; R06 §12.1; LDFI SIGMOD'15 §3.1 and the program's figure"
+features = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+LDFI §3.1.2: a keeps sending; b and c hold the entry from tick 2.
+
+Molly round k is tick k (CR-13): tick 0 has no events and the `@1` facts arrive at tick 1; an @async message sent at tick t is delivered at t + 1. The rows omit the location column, which is the node (ARCHITECTURE §13.12). The spec is not included: this case checks the protocol alone.
+"""
+
+[deploy]
+nodes = [
+  { name = "a", role = "Node" },
+  { name = "b", role = "Node" },
+  { name = "c", role = "Node" },
+]
+
+[run]
+ticks = 7
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004"]
+until = "M5"
+
+# the broadcast request persists, so a retransmits at every tick
+[[expect]]
+node = "a"
+rel = "bcast"
+row = ["data"]
+holds = "1..=6"
+absent = "0"
+
+[[expect]]
+node = "b"
+rel = "log"
+row = ["data"]
+holds = "2..=6"
+absent = "..=1"
+
+[[expect]]
+node = "c"
+rel = "log"
+row = ["data"]
+holds = "2..=6"
+absent = "..=1"
+
+# only a broadcasts
+[[expect]]
+node = "b"
+rel = "bcast"
+tick = 6
+rows = []

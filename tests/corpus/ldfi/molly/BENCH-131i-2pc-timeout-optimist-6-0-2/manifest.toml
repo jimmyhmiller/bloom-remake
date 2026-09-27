@@ -1,0 +1,30 @@
+# BENCH-131i-2pc-timeout-optimist-6-0-2: 2pc-timeout (optimist spec): no counterexample at EOT 6, EFF 0, 2 crashes.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-131"
+title = "2pc-timeout (optimist spec): no counterexample at EOT 6, EFF 0, 2 crashes"
+priority = "P0"
+source = "FEATURES.md BENCH-131; R06 §12.2"
+features = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "SEM-020", "TEST-027", "ANA-010"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+CounterexampleSuite: 2pc_timeout with the optimist spec at 6/0/2 has no counterexample (see BENCH-131h).
+
+Programs and spec are re-derived (../lib/commit/*.ded); commit_spec.ded checks termination (at least two nodes decide once a participant prepared) and agreement exactly as Molly's commit spec does (R06 §12.2).
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "SEM-020", "TEST-027", "ANA-010"]
+until = "M8"
+
+[expect_ldfi]
+eot = 6
+eff = 0
+crashes = 2
+nodes = ["a", "b", "C", "d"]
+crash_view = "molly"
+verdict = "no_counterexample"

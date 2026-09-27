@@ -1,0 +1,30 @@
+# BENCH-134b-nemo-pb-asynchronous-ack-log-repair-6-4-1: Nemo pb-asynchronous-ack-log-repair-6-4-1: no counterexample at EOT 6, EFF 4, 1 crash.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-134"
+title = "Nemo pb-asynchronous-ack-log-repair-6-4-1: no counterexample at EOT 6, EFF 4, 1 crash"
+priority = "P1"
+source = "FEATURES.md BENCH-134; R06 §12.5; Oldenburg, Zhu, Ramasubramanian, Alvaro, Fixed It For You (Nemo), CIDR 2019"
+features = ["LANG-220", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "TEST-027", "ANA-010"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+Nemo §4 (Async P/B): the repair introduces ack_log from the replicas to the client and makes receipt of ack_log from all replicas the condition for success; 'a subsequent run confirms our success in eliminating the bug'. R06 §12.5: after the ack_log repair, no CE. With the repair an acknowledged payload is on both replicas, and one crash leaves one of them correct.
+
+program.ded is pb_asynchronous.ded from github.com/numbleroot/nemo (case-studies/, commit 18fe0a3), GPL-3.0; the license is third_party/molly/nemo/LICENSE and third_party/molly/README.md lists every vendored file. The failure spec is the one in the file's own header (the Molly command line the Nemo authors used). This case's program is a MODIFIED version of that file (the header states the modification, as GPL-3.0 §5 requires); the modified file is licensed under GPL-3.0 as well.
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "TEST-027", "ANA-010"]
+until = "M8"
+
+[expect_ldfi]
+eot = 6
+eff = 4
+crashes = 1
+nodes = ["C", "a", "b", "c"]
+crash_view = "molly"
+verdict = "no_counterexample"

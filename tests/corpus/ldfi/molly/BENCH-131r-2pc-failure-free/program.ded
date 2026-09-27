@@ -1,0 +1,5 @@
+// BENCH-131r-2pc-failure-free: 2pc: the failure-free run.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/commit/two_pc.ded";
+include "../lib/commit/group.ded";

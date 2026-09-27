@@ -1,0 +1,51 @@
+// Three-phase commit (Skeen; LDFI, SIGMOD 2015, §5.1.1 and Figure 9). Blossom golden corpus, re-derived from the
+// paper and R06 §12.2 (derived = true); see ../../README.md. Used together with ../util/timer.ded.
+//
+// canCommit?, vote, preCommit, ack, then the decision. Timeouts act as the failure detector, and a site whose timer
+// fires decides unilaterally from its state (the paper: "depending on the state a coordinator or agent is in when a
+// timeout fires, that site can unilaterally determine the transaction outcome"):
+//   - a participant that voted yes but got no preCommit aborts;
+//   - a participant that got preCommit rolls forward to commit unless an abort reached it;
+//   - the coordinator aborts when a vote or an ack is missing at its timeout (Figure 9: "the coordinator, which has
+//     detected that agent d ... has failed, has decided to abort").
+// Timeline of a failure-free run: canCommit? at 1, votes at 2, preCommit at 3, acks at 4, the coordinator's timer and
+// the acks at 5, the coordinator's decision from 6 (announced at every step), the participants' decisions at 7.
+
+participant(C, A)@next :- participant(C, A);
+can(A, X)@next :- can(A, X);
+
+// coordinator
+can_commit(A, C, X)@async :- begin(C, X), participant(C, A);
+arm_timer(C, "decide", X, 4) :- begin(C, X);
+deciding(C, X) :- begin(C, X);
+deciding(C, X)@next :- deciding(C, X), notin commit(C, X), notin abort(C, X);
+yes_vote(C, A, X)@next :- yes_vote(C, A, X);
+acked(C, A, X)@next :- acked(C, A, X);
+lacking_vote(C, X) :- deciding(C, X), participant(C, A), notin yes_vote(C, A, X);
+lacking_ack(C, X) :- deciding(C, X), participant(C, A), notin acked(C, A, X);
+authorized(C, X) :- deciding(C, X), notin lacking_vote(C, X), notin precommit_sent(C, X);
+precommit_sent(C, X)@next :- authorized(C, X);
+precommit_sent(C, X)@next :- precommit_sent(C, X);
+precommit(A, C, X)@async :- authorized(C, X), participant(C, A);
+commit(C, X)@next :- deciding(C, X), notin lacking_ack(C, X);
+abort(C, X)@next :- timeout(C, "decide", X), lacking_vote(C, X);
+abort(C, X)@next :- timeout(C, "decide", X), lacking_ack(C, X);
+commit(A, X)@async :- commit(C, X), participant(C, A);
+abort(A, X)@async :- abort(C, X), participant(C, A);
+
+// participant
+yes_vote(C, A, X)@async :- can_commit(A, C, X), can(A, X);
+prepared(A, C, X) :- can_commit(A, C, X), can(A, X);
+prepared(A, C, X)@next :- prepared(A, C, X);
+arm_timer(A, "vote", X, 3) :- can_commit(A, C, X), can(A, X);
+precommitted(A, C, X) :- precommit(A, C, X);
+precommitted(A, C, X)@next :- precommitted(A, C, X);
+acked(C, A, X)@async :- precommit(A, C, X);
+cancel_timer(A, "vote", X) :- precommit(A, C, X);
+arm_timer(A, "precommit", X, 3) :- precommit(A, C, X);
+abort(A, X)@next :- timeout(A, "vote", X), prepared(A, _, X), notin precommitted(A, _, X), notin commit(A, X);
+commit(A, X) :- timeout(A, "precommit", X), precommitted(A, _, X), notin abort(A, X);
+
+// decisions are durable
+commit(N, X)@next :- commit(N, X);
+abort(N, X)@next :- abort(N, X);

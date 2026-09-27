@@ -1,0 +1,15 @@
+// The collaborative termination protocol on top of two_pc_timeout.ded (Bernstein, Hadzilacos and Goodman; LDFI §5.1:
+// "CTP attempts to ameliorate the blocking problem by augmenting the 2PC protocol so as to allow agents who suspect
+// that the coordinator has failed to exchange their knowledge about the outcome"). A participant that times out
+// while prepared and undecided asks its peers. A peer that has decided answers with its decision; a peer that has not
+// voted yet aborts unilaterally and answers abort; a peer that voted yes and is undecided is uncertain as well and
+// cannot help, so CTP still has blocking executions. Used together with two_pc.ded, two_pc_timeout.ded and
+// ../util/timer.ded. Blossom golden corpus, re-derived (derived = true); see ../../README.md.
+
+arm_timer(A, "decision", X, 3) :- prepare(A, C, X), can(A, X);
+knows(A, X) :- commit(A, X);
+knows(A, X) :- abort(A, X);
+decision_req(P, A, X)@async :- timeout(A, "decision", X), prepared(A, _, X), peer(A, P), notin knows(A, X);
+commit(Q, X)@async :- decision_req(P, Q, X), commit(P, X);
+abort(Q, X)@async :- decision_req(P, Q, X), abort(P, X);
+abort(P, X) :- decision_req(P, Q, X), notin prepared(P, _, X);

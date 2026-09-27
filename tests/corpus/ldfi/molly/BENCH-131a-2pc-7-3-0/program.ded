@@ -1,0 +1,6 @@
+// BENCH-131a-2pc-7-3-0: 2pc: no counterexample at EOT 7, EFF 3, 0 crashes.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/commit/two_pc.ded";
+include "../lib/commit/group.ded";
+include "../lib/commit/commit_spec.ded";

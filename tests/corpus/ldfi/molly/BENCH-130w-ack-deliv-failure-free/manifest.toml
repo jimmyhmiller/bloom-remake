@@ -1,0 +1,83 @@
+# BENCH-130w-ack-deliv-failure-free: ack-deliv: the failure-free run.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-130"
+title = "ack-deliv: the failure-free run"
+priority = "P0"
+source = "FEATURES.md BENCH-130; R06 §12.1; LDFI SIGMOD'15 §3.1 and the program's figure"
+features = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004", "SEM-020"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+LDFI Figure 7: all sites relay; ACKs stop the retries once they arrive.
+
+Molly round k is tick k (CR-13): tick 0 has no events and the `@1` facts arrive at tick 1; an @async message sent at tick t is delivered at t + 1. The rows omit the location column, which is the node (ARCHITECTURE §13.12). The spec is not included: this case checks the protocol alone.
+"""
+
+[deploy]
+nodes = [
+  { name = "a", role = "Node" },
+  { name = "b", role = "Node" },
+  { name = "c", role = "Node" },
+]
+
+[run]
+ticks = 7
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004", "SEM-020"]
+until = "M5"
+
+# rbcast(a, a, data) at tick 1 puts the entry in a's log
+[[expect]]
+node = "a"
+rel = "log"
+row = ["data"]
+holds = "1..=6"
+absent = "0"
+
+[[expect]]
+node = "b"
+rel = "log"
+row = ["data"]
+holds = "2..=6"
+absent = "..=1"
+
+[[expect]]
+node = "c"
+rel = "log"
+row = ["data"]
+holds = "2..=6"
+absent = "..=1"
+
+# a acknowledged its own rbcast (a self-send) and b and c acknowledged a's
+[[expect]]
+node = "a"
+rel = "ack"
+tick = 6
+rows = [["a", "data"], ["b", "data"], ["c", "data"]]
+
+# b's relays to a and c were acknowledged
+[[expect]]
+node = "b"
+rel = "ack"
+tick = 6
+rows = [["a", "data"], ["c", "data"]]
+
+[[expect]]
+node = "c"
+rel = "ack"
+tick = 6
+rows = [["a", "data"], ["b", "data"]]
+
+# a sends to b at ticks 1 and 2; b's ACK of the first copy reaches a at tick 3
+[[expect]]
+node = "b"
+rel = "rbcast"
+row = ["a", "data"]
+holds = "2..=3"
+absent = "4..=6"

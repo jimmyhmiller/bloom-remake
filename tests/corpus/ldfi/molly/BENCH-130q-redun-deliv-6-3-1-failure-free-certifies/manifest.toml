@@ -1,0 +1,31 @@
+# BENCH-130q-redun-deliv-6-3-1-failure-free-certifies: redun-deliv: no counterexample at EOT 6, EFF 3, 1 crash, certified by the failure-free lineage alone.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-130"
+title = "redun-deliv: no counterexample at EOT 6, EFF 3, 1 crash, certified by the failure-free lineage alone"
+priority = "P0"
+source = "FEATURES.md BENCH-130; R06 §12.1; LDFI SIGMOD'15 §3.1.3, §4.3, Fig. 6"
+features = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "ANA-010", "TEST-027", "TEST-031"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+FEATURES.md BENCH-130: 'At 6/3/1, the failure-free lineage alone must certify it' (LDFI Figure 6: 'The lineage from this single failure-free execution is sufficient to show that no counterexamples exist'). runs_max = 1: the failure-free run and no other. The lineage of every post goal needs two crashes to falsify, except by crashing a before it reaches anybody, which also falsifies the matching pre and is vacuous; the paper skips such hypotheses before running them (§4.3, 'we need not explore such faults'), which is TEST-031 (vacuity pruning, P1), hence the feature list and until. Without that pruning the core loop also runs the vacuous hypotheses.
+
+The program is the paper's (see ../lib/delivery/*.ded for the provenance of each line); the input is the paper's (group.ded) and the spec is delivery_spec.ded, whose oracle judges every run exactly as Molly's delivery spec does on this input (proof in that file).
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "ANA-010", "TEST-027", "TEST-031"]
+until = "M9"
+
+[expect_ldfi]
+eot = 6
+eff = 3
+crashes = 1
+nodes = ["a", "b", "c"]
+crash_view = "molly"
+verdict = "no_counterexample"
+runs_max = 1

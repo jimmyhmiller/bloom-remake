@@ -1,0 +1,51 @@
+// MODIFIED FILE. This is numbleroot/nemo case-studies/ZK-1270-racing-sent-flag.ded (commit 18fe0a3), licensed under
+// the GNU General Public License version 3 (see third_party/molly/nemo/LICENSE in the Blossom repository), modified on
+// 2026-09-27 for the Blossom golden corpus (BENCH-134): the repair Nemo synthesizes for ZK-1270 (Oldenburg et al.,
+// CIDR 2019, §4: "Nemo resolves the race by synthesizing a single line of code enforcing the ordering constraint:
+// success(L) :- sent_flag(L), ack(F)"). The leader keeps the acknowledgment it received, so success depends on the
+// sent flag and the ack whatever their order. Every change is marked REPAIR; the rest of the file is unchanged.
+
+// ZK-1270, Setting local sent flag races with remote acknowledgement.
+// sbt "run-main edu.berkeley.cs.boom.molly.SyncFTChecker --nodes FF,LL,A --EOT 6 --EFF 3 --crashes 0 --prov-diagrams src/test/resources/examples_ft/nemo/ZK-1270-racing-sent-flag.ded"
+
+
+// Logic.
+
+newleader(F, L, Round)@async :- elected(L, Round), ff(L, F);
+timerr(L, R, 0) :- elected(L, R);
+timerr(L, R, C+1)@next :- timerr(L, R, C);
+
+sent_flag(L, R)@next :- timerr(L, R, C), C > 1;
+ff(L, F)@next :- ff(L, F);
+
+attest(F, A, C)@async :- attestor(A, F, C);
+attest(F, A, C)@next :- attest(F, A, C);
+attestor(A, F, C+1)@next :- attestor(A, F, C);
+attestations(F, count<C>) :- attest(F, _, C);
+
+defer(F, L, Round)@next :- newleader(F, L, Round), attestations(F, N), N > 1;
+ack(L, F, Round)@async :- newleader(F, L, Round), attestations(F, 1);
+ack(L, F, Round)@async :- defer(F, L, Round);
+
+acked(L, R) :- ack(L, _, R);
+acked(L, R)@next :- acked(L, R);
+
+// REPAIR: success once the sent flag is set and an ack arrived, in either order (was:
+// end_proto(L, F, R) :- ack(L, F, R), sent_flag(L, R);).
+ack_seen(L, F, R) :- ack(L, F, R);
+ack_seen(L, F, R)@next :- ack_seen(L, F, R);
+end_proto(L, F, R) :- ack_seen(L, F, R), sent_flag(L, R);
+end_proto(L, F, R)@next :- end_proto(L, F, R);
+
+
+// Correctness specification.
+
+pre(L, R) :- acked(L, R);
+post(L, R) :- end_proto(L, _, R);
+
+
+// Init.
+
+attestor("A", "FF", 1)@1;
+ff("LL", "FF")@1;
+elected("LL", 1)@2;

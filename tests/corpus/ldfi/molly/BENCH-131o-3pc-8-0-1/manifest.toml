@@ -1,0 +1,30 @@
+# BENCH-131o-3pc-8-0-1: 3pc: no counterexample at EOT 8, EFF 0, 1 crash.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-131"
+title = "3pc: no counterexample at EOT 8, EFF 0, 1 crash"
+priority = "P0"
+source = "FEATURES.md BENCH-131; R06 §12.2; LDFI SIGMOD'15 §5.1.1"
+features = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "SEM-020", "TEST-027"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+CounterexampleSuite: 3pc is 'nonblocking' in the synchronous, fail-stop model (LDFI §5.1.1: 'Three-phase commit solves the blocking problem, under the assumption of a connected and synchronous network'). With one crash and no losses every site's timeout decision agrees: a missing vote or ack makes the coordinator abort, and its abort reaches the participants at the step their precommit timers fire; a coordinator crash leaves them all precommitted (they commit) or all merely prepared (they abort).
+
+Programs and spec are re-derived (../lib/commit/*.ded); commit_spec.ded checks termination (at least two nodes decide once a participant prepared) and agreement exactly as Molly's commit spec does (R06 §12.2).
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "SEM-020", "TEST-027"]
+until = "M8"
+
+[expect_ldfi]
+eot = 8
+eff = 0
+crashes = 1
+nodes = ["a", "b", "C", "d"]
+crash_view = "molly"
+verdict = "no_counterexample"

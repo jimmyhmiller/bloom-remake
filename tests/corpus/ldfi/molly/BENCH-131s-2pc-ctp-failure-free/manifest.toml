@@ -1,0 +1,83 @@
+# BENCH-131s-2pc-ctp-failure-free: 2pc-ctp: the failure-free run.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-131"
+title = "2pc-ctp: the failure-free run"
+priority = "P0"
+source = "FEATURES.md BENCH-131; R06 §12.2; LDFI SIGMOD'15 §5.1.1"
+features = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004", "SEM-020"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+2PC with the coordinator timeout and CTP, without failures: the same decisions as 2PC; no timer changes anything because every vote and the decision arrive in time.
+
+Molly round k is tick k (CR-13); an @async message sent at tick t is delivered at t + 1. The rows omit the location column. The spec is not included: this case checks the protocol alone.
+"""
+
+[deploy]
+nodes = [
+  { name = "a", role = "Node" },
+  { name = "b", role = "Node" },
+  { name = "C", role = "Node" },
+  { name = "d", role = "Node" },
+]
+
+[run]
+ticks = 9
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004", "SEM-020"]
+until = "M5"
+
+[[expect]]
+node = "C"
+rel = "commit"
+row = ["tx"]
+holds = "4..=8"
+absent = "..=3"
+
+[[expect]]
+node = "a"
+rel = "commit"
+row = ["tx"]
+holds = "5..=8"
+absent = "..=4"
+
+# a participant's timer is re-armed at every vote request (ticks 2 to 5) and fires three steps later
+[[expect]]
+node = "a"
+rel = "timeout"
+row = ["decision", "tx"]
+holds = "5..=8"
+absent = "..=4"
+
+# decided participants ask nobody
+[[expect]]
+node = "a"
+rel = "decision_req"
+tick = 8
+rows = []
+
+[[expect]]
+node = "b"
+rel = "decision_req"
+tick = 8
+rows = []
+
+# the coordinator's timer fires once, with every vote in
+[[expect]]
+node = "C"
+rel = "timeout"
+row = ["votes", "tx"]
+holds = "4"
+absent = "5..=8"
+
+[[expect]]
+node = "C"
+rel = "abort"
+tick = 8
+rows = []

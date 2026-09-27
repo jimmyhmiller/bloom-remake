@@ -1,0 +1,30 @@
+# BENCH-131p-3pc-8-0-2: 3pc: counterexample at EOT 8, EFF 0, 2 crashes.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-131"
+title = "3pc: counterexample at EOT 8, EFF 0, 2 crashes"
+priority = "P0"
+source = "FEATURES.md BENCH-131; R06 §12.2; LDFI SIGMOD'15 §5.1.1, Fig. 9; Molly CounterexampleSuite (3pc 8/0/2, see notes)"
+features = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "SEM-020", "TEST-027"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+DEVIATION FROM THE FEATURES TEXT (BENCH-131 says 'no CE at 8/0/2'; recorded in docs/plan/notes/M1.5.md). The three-phase commit the paper describes (Figure 9: the coordinator aborts when it detects a failed participant; participants that precommitted roll forward to commit on timeout) has a two-crash agreement violation without any message loss: participant a crashes after voting and before acking, the coordinator times out on the missing ack and decides abort at step 6, and crashes at step 6, before its abort leaves; b and d, precommitted, time out at 7 and commit. The decision is taken before the coordinator's crash, so the run is a violation under the paper's crash semantics (CR-20) as well as Molly's (R06 §3.4). The same run violates agreement for Molly's own 3pc.ded (found by exhaustive search of every admissible 2-crash schedule, tests/corpus/ldfi/tools/ldfi_ref.py). Molly's test table reports no counterexample because its lineage-driven search does not reach the run: the coordinator's abort has no message in its positive lineage, and a search without negative support (the one that reproduces the published run counts) never proposes the second crash. LDFI with conservative negative support (CR-31) is complete (Appendix B, TEST-029) and must report it.
+
+Programs and spec are re-derived (../lib/commit/*.ded); commit_spec.ded checks termination (at least two nodes decide once a participant prepared) and agreement exactly as Molly's commit spec does (R06 §12.2).
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "SEM-020", "TEST-027"]
+until = "M8"
+
+[expect_ldfi]
+eot = 8
+eff = 0
+crashes = 2
+nodes = ["a", "b", "C", "d"]
+crash_view = "molly"
+verdict = "counterexample"

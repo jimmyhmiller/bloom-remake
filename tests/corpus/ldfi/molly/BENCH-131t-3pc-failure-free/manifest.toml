@@ -1,0 +1,104 @@
+# BENCH-131t-3pc-failure-free: 3pc: the failure-free run.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-131"
+title = "3pc: the failure-free run"
+priority = "P0"
+source = "FEATURES.md BENCH-131; R06 §12.2; LDFI SIGMOD'15 §5.1.1"
+features = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004", "SEM-020"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+Skeen's 3PC without failures, on the timeline of Figure 9: canCommit? at 1, votes at 2, preCommit at 3, acks at 4, the coordinator's timer and the acks at 5, the coordinator's commit at 6, the participants' at 7.
+
+Molly round k is tick k (CR-13); an @async message sent at tick t is delivered at t + 1. The rows omit the location column. The spec is not included: this case checks the protocol alone.
+"""
+
+[deploy]
+nodes = [
+  { name = "a", role = "Node" },
+  { name = "b", role = "Node" },
+  { name = "C", role = "Node" },
+  { name = "d", role = "Node" },
+]
+
+[run]
+ticks = 9
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004", "SEM-020"]
+until = "M5"
+
+# canCommit? arrives at tick 2
+[[expect]]
+node = "a"
+rel = "can_commit"
+tick = 2
+rows = [["C", "tx"]]
+
+# preCommit arrives at tick 4
+[[expect]]
+node = "a"
+rel = "precommitted"
+row = ["C", "tx"]
+holds = "4..=8"
+absent = "..=3"
+
+# every ack is in at tick 5
+[[expect]]
+node = "C"
+rel = "acked"
+tick = 5
+rows = [["a", "tx"], ["b", "tx"], ["d", "tx"]]
+
+[[expect]]
+node = "C"
+rel = "commit"
+row = ["tx"]
+holds = "6..=8"
+absent = "..=5"
+
+[[expect]]
+node = "a"
+rel = "commit"
+row = ["tx"]
+holds = "7..=8"
+absent = "..=6"
+
+[[expect]]
+node = "d"
+rel = "commit"
+row = ["tx"]
+holds = "7..=8"
+absent = "..=6"
+
+# the precommit timer fires with the commit
+[[expect]]
+node = "a"
+rel = "timeout"
+row = ["precommit", "tx"]
+holds = "7"
+absent = "8"
+
+# the vote timer was cancelled by preCommit at tick 4
+[[expect]]
+node = "a"
+rel = "timeout"
+tick = 5
+rows = []
+
+[[expect]]
+node = "C"
+rel = "abort"
+tick = 8
+rows = []
+
+[[expect]]
+node = "a"
+rel = "abort"
+tick = 8
+rows = []

@@ -1,0 +1,12 @@
+// classic-deliv: the reliable broadcast of Birman et al. as LDFI (SIGMOD 2015) §3.1.5 states it: a site that receives
+// a message sends a copy to all other sites and delivers it. As the paper describes the Dedalus version, every copy
+// received is relayed again, so a failure-free run relays forever ("it has infinite behaviors like the protocols
+// submitted in Rounds 2-3"): redundancy in space, but a partial broadcast whose relays are all lost is never repaired.
+// Delivery (`log`) happens at the step after receipt. Re-derived from the paper text (derived = true).
+// Blossom golden corpus; see ../../README.md.
+
+node(Node, Neighbor)@next :- node(Node, Neighbor);
+log(Node, Pload)@next :- log(Node, Pload);
+
+bcast(Other, Pload)@async :- bcast(Site, Pload), node(Site, Other);
+log(Site, Pload)@next :- bcast(Site, Pload);

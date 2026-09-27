@@ -1,0 +1,5 @@
+// BENCH-130t-retry-deliv-failure-free: retry-deliv: the failure-free run.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/delivery/retry_deliv.ded";
+include "../lib/delivery/group.ded";
