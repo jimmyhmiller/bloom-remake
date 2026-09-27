@@ -1,0 +1,15 @@
+//! BENCH-039: dfir-datalog frontend tests `test_anti_join` and `test_simple_filter` (dfir_datalog_core lib.rs;
+//! R08 §15 T8):
+//!
+//!     result(x, z) :- ints_1(x, y), ints_2(y, z), !ints_3(y)
+//!     out(x, y) :- input(x, y), ( x > y ), ( y == x ).
+
+program datalog_anti_join_filter version 1;
+
+input ints_1(x: u64, y: u64);
+input ints_2(y: u64, z: u64);
+input ints_3(y: u64);
+input inp(x: u64, y: u64);
+
+view result(x, z) = ints_1(x, y), ints_2(y, z), not ints_3(y);
+view filtered(x, y) = inp(x, y) where x > y, y == x;

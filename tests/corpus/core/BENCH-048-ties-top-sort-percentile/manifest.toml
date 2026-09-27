@@ -1,0 +1,96 @@
+schema = 1
+id = "BENCH-048"
+title = "Ties in top, sort and percentile: top2 {u1,u3}; sort [u1,u3,u2,u4]; median 7; deleting u1 swaps in u2"
+priority = "P1"
+source = "R12 §12 T9 (topk, sort and percentile with ties); FEATURES.md CR-46, LANG-093, LANG-118, BENCH-048"
+features = ["SEM-083", "LANG-093", "LANG-102", "LANG-104", "LANG-118", "LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-063"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Scores arrive at tick 1; u1 is deleted at tick 2 (effective at tick 3): top2 becomes {u2, u3}, sorted
+[u3, u2, u4], and the median of [5, 7, 9] is still 7. `percentile!` ranks the body's valuations (u, s), so the two
+9s count twice. Not expressible in schema v1: ANA-038's "ties broken by canonical order" lint on top2 (LANGUAGE
+§20 assigns it no diagnostic code); recorded as a follow-up in docs/plan/notes/M1.2.md."""
+
+[run]
+ticks = 5
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-083", "LANG-093", "LANG-102", "LANG-104", "LANG-118", "LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-063"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-083", "LANG-093", "LANG-102", "LANG-104", "LANG-118", "LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-063", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "add_score"
+rows = [["u1", 9], ["u2", 7], ["u3", 9], ["u4", 5]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "drop_score"
+rows = [["u1"]]
+
+[[expect]]
+node = "n1"
+rel = "top2"
+tick = 1
+rows = [["u1"], ["u3"]]
+
+[[expect]]
+node = "n1"
+rel = "top2"
+row = ["u1"]
+holds = "1..=2"
+absent = "3.."
+
+[[expect]]
+node = "n1"
+rel = "top2"
+row = ["u2"]
+absent = "..=2"
+holds = "3.."
+
+[[expect]]
+node = "n1"
+rel = "top2"
+row = ["u3"]
+holds = "1.."
+
+[[expect]]
+node = "n1"
+rel = "top2"
+row = ["u4"]
+absent = "0.."
+
+[[expect]]
+node = "n1"
+rel = "sorted"
+tick = 1
+rows = [[["u1", "u3", "u2", "u4"]]]
+
+[[expect]]
+node = "n1"
+rel = "sorted"
+tick = 3
+rows = [[["u3", "u2", "u4"]]]
+
+[[expect]]
+node = "n1"
+rel = "median"
+tick = 1
+rows = [[7]]
+
+[[expect]]
+node = "n1"
+rel = "median"
+tick = 3
+rows = [[7]]

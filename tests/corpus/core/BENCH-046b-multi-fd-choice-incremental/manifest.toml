@@ -1,0 +1,55 @@
+schema = 1
+id = "BENCH-046"
+title = "Multi-FD choice under an insertion: only the new edge's conflict component changes"
+priority = "P1"
+source = "R12 §12 T7 (incremental: adding (3,c) at t2); FEATURES.md LANG-116, ENG-075, BENCH-046"
+features = ["LANG-116", "ENG-075", "LANG-108", "SEM-085", "LANG-040", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-200"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+g = {(1,a), (1,b), (2,a)} at tick 1; (3,c) is added at tick 2. The greedy multi-FD scan accepts (3,c), which
+conflicts with nothing, and keeps every earlier acceptance (invariant component_stable). ENG-075's claim that only
+the affected component is recomputed is the engine's cost; its observable consequence is asserted here."""
+
+[deploy]
+seed = 42
+
+[run]
+ticks = 5
+stop = "ticks"
+seeds = 128
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-116", "ENG-075", "LANG-108", "SEM-085", "LANG-040", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-200"]
+until = "M8"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-116", "ENG-075", "LANG-108", "SEM-085", "LANG-040", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-200", "SEM-002"]
+until = "M8"
+
+[backend.sim]
+status = "unimplemented"
+unimplemented = ["LANG-116", "ENG-075", "LANG-108", "SEM-085", "LANG-040", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-200", "TEST-001"]
+until = "M8"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "add_edge"
+rows = [[1, "a"], [1, "b"], [2, "a"]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "add_edge"
+rows = [[3, "c"]]
+
+[[expect]]
+node = "n1"
+rel = "matching"
+row = [3, "c"]
+absent = "..=1"
+holds = "2.."

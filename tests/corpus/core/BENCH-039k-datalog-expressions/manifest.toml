@@ -1,0 +1,50 @@
+schema = 1
+id = "BENCH-039"
+title = "dfir-datalog test_expr_lhs and test_expr_predicate: expressions in heads and guards"
+priority = "P1"
+source = "R08 §15 T8 (dfir_datalog_core lib.rs tests test_expr_lhs, test_expr_predicate); FEATURES.md LANG-084, BENCH-039"
+features = ["LANG-043", "LANG-047", "LANG-084", "LANG-085", "LANG-089"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Inputs and outputs are ours. ints {0, 1, 5}: 123; 123, 124, 128; 0, 2, 10; 123, 122, 118; 123 % 5 = 123 % 6 =
+123 % 10 = 3; 0, 5, 25. pints {0, 1, 2}: 1 (a = 0), 2 (a = 1, 2), 3 and 4 (a = 1)."""
+
+[run]
+ticks = 3
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-043", "LANG-047", "LANG-084", "LANG-085", "LANG-089"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-043", "LANG-047", "LANG-084", "LANG-085", "LANG-089", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ints"
+rows = [[0], [1], [5]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "pints"
+rows = [[0], [1], [2]]
+
+[[expect]]
+node = "n1"
+rel = "expr_lhs"
+tick = 1
+rows = [[0], [2], [3], [5], [10], [25], [118], [122], [123], [124], [128]]
+
+[[expect]]
+node = "n1"
+rel = "expr_predicate"
+tick = 1
+rows = [[1], [2], [3], [4]]

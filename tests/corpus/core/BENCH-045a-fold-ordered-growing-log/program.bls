@@ -1,0 +1,66 @@
+//! BENCH-045: `fold_ordered` over a growing log with the non-commutative step 2s + x (R12 §12 T6), for FLAG-005
+//! (the Raft state machine) and LANG-110.
+//!
+//!     to_apply(I, X) :- log(I, X), applied(A), commit(C), I > A, I <= C.
+//!     sm(S2)@next :- sm(S), S2 = fold_ordered(S, step, to_apply(I, X) order by I).
+//!     applied(M)@next :- to_apply(M, _), M == max<I>{to_apply(I, _)}.
+//!     applied(A)@next :- applied(A), notin to_apply(_, _).
+//!     total(fold_ordered(0, step, log(I, X) order by I)) :- log(_, _).       // aggregate form
+//!     bad(S2)@next :- bad(S), S2 = fold_ordered(S, step, log(I, X) order by I).  // carried over persistent input
+//!
+//! The carried form is `fold!` with a `per` driver (its `init` is the driver's value, and an empty group yields
+//! it); the aggregate form has no driver, so an empty log has no `total` (LANGUAGE §10.6). The commit index only
+//! grows, so it is the maximum of the commit values the host has reported (visible in the tick they arrive).
+
+program fold_ordered_log version 1;
+
+fn step(s: i64, x: i64) -> i64 {
+    2 * s + x
+}
+
+input append(i: u64, x: i64);
+input set_commit(c: u64);
+
+table log(i: u64, x: i64) key(i);
+table commit_log(c: u64);
+
+scratch applied(a: u64) key();
+scratch sm(s: i64) key();
+scratch bad(s: i64) key();
+
+view commit(c = max!(x)) = commit_log(x);
+view to_apply(i, x) = log(i, x), applied(a), commit(c) where i > a, i <= c;
+view next_sm(s2 = fold!(s, step, x by i)) = per sm(s), to_apply(i, x);
+view max_applied(m = max!(i)) = to_apply(i, _);
+view total(t = fold!(0, step, x by i)) = log(i, x);
+view next_bad(b2 = fold!(b, step, x by i)) = per bad(b), log(i, x);
+
+bootstrap {
+    emit applied(0);
+    emit sm(0);
+    emit bad(0);
+}
+
+load_log: on append(i, x) {
+    emit log(i, x);
+}
+
+load_commit: on set_commit(c) {
+    emit commit_log(c);
+}
+
+advance_sm: while next_sm(s2) {
+    next sm(s2);
+}
+
+advance_applied: while max_applied(m) {
+    next applied(m);
+}
+
+hold_applied: while applied(a), not to_apply(_, _) {
+    next applied(a);
+}
+
+advance_bad: while next_bad(b2) {
+    next bad(b2);
+}

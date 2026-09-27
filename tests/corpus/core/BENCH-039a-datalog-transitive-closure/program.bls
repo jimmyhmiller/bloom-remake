@@ -1,0 +1,25 @@
+//! BENCH-039: dfir-datalog frontend test `transitive_closure` (dfir_datalog_core lib.rs; R08 §15 T8).
+//!
+//!     .input edges `source_stream(edges)`
+//!     .input seed_reachable `source_stream(seed_reachable)`
+//!     .output reachable `for_each(...)`
+//!     reachable(x) :- seed_reachable(x).
+//!     reachable(y) :- reachable(x), edges(x, y).
+//!
+//! `.input` relations are per-tick streams and derived relations are per tick unless `.persist`ed.
+
+program datalog_transitive_closure version 1;
+
+input edges(x: u64, y: u64);
+input seed_reachable(x: u64);
+
+output reachable(x: u64);
+
+view reach(x) {
+    seed_reachable(x);
+    reach(y), edges(y, x);
+}
+
+report: while reach(x) {
+    emit reachable(x);
+}

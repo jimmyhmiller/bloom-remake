@@ -1,0 +1,109 @@
+schema = 1
+id = "BENCH-041"
+title = "Deleting a non-chosen candidate leaves the choice unchanged; a keyed view fed by choose never conflicts"
+priority = "P0"
+source = "R12 §12 T2; FEATURES.md SEM-050, SEM-085, BENCH-041"
+features = ["SEM-050", "SEM-083", "SEM-085", "LANG-065", "LANG-108", "LANG-114", "LANG-020", "LANG-041", "LANG-043", "LANG-047", "LANG-060", "LANG-061", "LANG-082"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+R12 T2 in canonical mode: pick(b) = x at ticks 1, 2 and 3; deleting the non-chosen y (at tick 2, effective at 3)
+changes nothing. sel never raises SEM-050 (a BLSR001 would fail the run) because its determinant g is within
+key(g). Group a follows T1 (pick m, m, c, c, p, -, m)."""
+
+[deploy]
+seed = 42
+
+[run]
+ticks = 9
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-050", "SEM-083", "SEM-085", "LANG-065", "LANG-108", "LANG-114", "LANG-020", "LANG-041", "LANG-043", "LANG-047", "LANG-060", "LANG-061", "LANG-082"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-050", "SEM-083", "SEM-085", "LANG-065", "LANG-108", "LANG-114", "LANG-020", "LANG-041", "LANG-043", "LANG-047", "LANG-060", "LANG-061", "LANG-082", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ins"
+rows = [["a", "m"], ["a", "p"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "ins"
+rows = [["a", "c"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "del"
+rows = [["a", "m"]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel = "del"
+rows = [["a", "c"]]
+
+[[input]]
+node = "n1"
+tick = 5
+rel = "del"
+rows = [["a", "p"]]
+
+[[input]]
+node = "n1"
+tick = 7
+rel = "ins"
+rows = [["a", "m"]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ins"
+rows = [["b", "x"], ["b", "y"]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "del"
+rows = [["b", "y"]]
+
+[[expect]]
+node = "n1"
+rel = "pick"
+row = ["b", "x"]
+absent = "0"
+holds = "1.."
+
+[[expect]]
+node = "n1"
+rel = "cand"
+tick = 3
+rows = [["a", "c"], ["a", "m"], ["a", "p"], ["b", "x"]]
+
+[[expect]]
+node = "n1"
+rel = "sel"
+tick = 1
+rows = [["a", "m"], ["b", "x"]]
+
+[[expect]]
+node = "n1"
+rel = "sel"
+tick = 3
+rows = [["a", "c"], ["b", "x"]]
+
+[[expect]]
+node = "n1"
+rel = "sel"
+tick = 6
+rows = [["b", "x"]]

@@ -1,0 +1,19 @@
+schema = 1
+id = "BENCH-045"
+title = "A false #[commutative] claim on the fold step is refuted (BLS0704)"
+priority = "P0"
+source = "R12 §12 T6; LANGUAGE §10.8, §16.1; FEATURES.md TEST-015, TEST-087, BENCH-045"
+features = ["TEST-015", "TEST-087", "LANG-182", "LANG-110"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "Compile-only: the claim is refuted by a counterexample, so the result is refuted, not merely untested."
+
+[backend.compile]
+status = "unimplemented"
+unimplemented = ["TEST-015", "TEST-087", "LANG-182", "LANG-110"]
+until = "M10"
+
+[[expect_diag]]
+code = "BLS0704"
+line = 9

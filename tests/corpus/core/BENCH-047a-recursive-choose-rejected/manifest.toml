@@ -1,0 +1,19 @@
+schema = 1
+id = "BENCH-047"
+title = "A same-tick recursive choose is rejected with a cycle witness (BLS0503)"
+priority = "P0"
+source = "R12 §12 T8 (SZ90 §6 condition (c), GZ01 Ex. 4.3); FEATURES.md SEM-086, BENCH-047"
+features = ["SEM-086", "ANA-002", "LANG-108", "LANG-045", "LANG-047"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "Compile-only. Judgement call: the negation in R12's rejected program is removed so that only BLS0503 applies."
+
+[backend.compile]
+status = "unimplemented"
+unimplemented = ["SEM-086", "ANA-002", "LANG-108", "LANG-045", "LANG-047"]
+until = "M5"
+
+[[expect_diag]]
+code = "BLS0503"
+line = 29

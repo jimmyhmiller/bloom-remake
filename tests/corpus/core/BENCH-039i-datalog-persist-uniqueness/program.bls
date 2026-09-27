@@ -1,0 +1,20 @@
+//! BENCH-039: dfir-datalog frontend test `test_persist_uniqueness` (dfir_datalog_core lib.rs; R08 §15 T8).
+//!
+//!     .persist ints1
+//!     .input ints2 `source_stream(ints2)`
+//!     ints1(a) :- ints2(a)
+//!     result(count(a)) :- ints1(a)
+//!
+//! A count over a persisted relation must count each distinct fact once, however often it is re-inserted.
+
+program datalog_persist_uniqueness version 1;
+
+input ints2(a: u64);
+
+table ints1(a: u64);
+
+view result(n = count!(a)) = ints1(a);
+
+keep: on ints2(a) {
+    emit ints1(a);
+}

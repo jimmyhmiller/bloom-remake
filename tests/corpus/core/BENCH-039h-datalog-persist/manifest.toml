@@ -1,0 +1,86 @@
+schema = 1
+id = "BENCH-039"
+title = "dfir-datalog test_persist: persisted inputs survive ticks, per-tick inputs do not"
+priority = "P1"
+source = "R08 §15 T8 (dfir_datalog_core lib.rs test test_persist); FEATURES.md BENCH-039"
+features = ["LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-082", "LANG-086", "SEM-008"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+Inputs and outputs are ours. Tick 1: ints1 {1, 2}, ints2 {1}, ints3 {10}. Tick 2: ints1 {3}, nothing else. result
+needs this tick's ints3, so it is empty at tick 2; result2..4 read persisted relations and grow."""
+
+[run]
+ticks = 4
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-082", "LANG-086", "SEM-008"]
+until = "M5"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["LANG-040", "LANG-043", "LANG-047", "LANG-060", "LANG-082", "LANG-086", "SEM-008", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ints1_in"
+rows = [[1], [2]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ints2_in"
+rows = [[1]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "ints3"
+rows = [[10]]
+
+[[input]]
+node = "n1"
+tick = 2
+rel = "ints1_in"
+rows = [[3]]
+
+[[expect]]
+node = "n1"
+rel = "result"
+tick = 1
+rows = [[1, 1, 10], [2, 1, 10]]
+
+[[expect]]
+node = "n1"
+rel = "result"
+tick = 2
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "result2"
+tick = 1
+rows = [[2]]
+
+[[expect]]
+node = "n1"
+rel = "result2"
+tick = 2
+rows = [[2], [3]]
+
+[[expect]]
+node = "n1"
+rel = "result3"
+tick = 2
+rows = [[1], [2], [3]]
+
+[[expect]]
+node = "n1"
+rel = "result4"
+tick = 2
+rows = [[1], [2], [3]]

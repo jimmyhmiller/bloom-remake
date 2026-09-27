@@ -1,0 +1,42 @@
+schema = 1
+id = "BENCH-038"
+title = "DFIR reachability: reached = {0,1,2,3,4}"
+priority = "P1"
+source = "R08 §15 T1 (hydroflow examples/example_5_reachability.rs); FEATURES.md BENCH-038"
+features = ["ENG-042", "SEM-007", "LANG-043", "LANG-047", "LANG-060", "LANG-086"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = "DFIR's input arrives in its first tick; here it is delivered at tick 1. The duplicate edge (0,3) is one fact."
+
+[run]
+ticks = 3
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["ENG-042", "SEM-007", "LANG-043", "LANG-047", "LANG-060", "LANG-086"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["ENG-042", "SEM-007", "LANG-043", "LANG-047", "LANG-060", "LANG-086", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "origin"
+rows = [[0]]
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "edge"
+rows = [[0, 1], [2, 4], [3, 4], [1, 2], [0, 3], [0, 3], [4, 0]]
+
+[[expect]]
+node = "n1"
+rel = "reached"
+tick = 1
+rows = [[0], [1], [2], [3], [4]]

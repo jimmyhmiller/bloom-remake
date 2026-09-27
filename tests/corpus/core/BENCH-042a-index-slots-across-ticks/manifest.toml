@@ -1,0 +1,154 @@
+schema = 1
+id = "BENCH-042"
+title = "index() slots across ticks: a0 m1 x2, then b3, then c4 z5; rank re-ranks; seq is stable"
+priority = "P0"
+source = "R12 §12 T3 (index() slot assignment with arrivals across ticks); FEATURES.md CR-46, LANG-097, LANG-098, BENCH-042"
+features = ["SEM-083", "LANG-093", "LANG-097", "LANG-098", "LANG-100", "LANG-118", "LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-190"]
+program = "program.bls"
+derived = true
+expected_from = "literature"
+notes = """
+R12 T3: batches {x, a, m} at tick 1, {} at 2, {b} at 3, {z, c} at 4. slot: a0 m1 x2, then b3, then c4 z5;
+next_slot is 0, 3, 3, 4, 6 at ticks 1-5. rank over all_req re-ranks every tick (a0 b1 m2 x3 at tick 3). seq gives
+a0 m1 x2 b3 c4 z5 and never renumbers. Duplicate payload: {a, a} at tick 6 is one fact and takes one slot (6).
+The ANA-011 lint on rank is BENCH-042b. Judgement call: R12's `next_slot(0) :- bootstrap` is the boot tick."""
+
+[run]
+ticks = 8
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["SEM-083", "LANG-093", "LANG-097", "LANG-098", "LANG-100", "LANG-118", "LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-190"]
+until = "M6"
+
+[backend.interp]
+status = "unimplemented"
+unimplemented = ["SEM-083", "LANG-093", "LANG-097", "LANG-098", "LANG-100", "LANG-118", "LANG-040", "LANG-041", "LANG-043", "LANG-047", "LANG-061", "LANG-082", "LANG-190", "SEM-002"]
+until = "M7"
+
+[[input]]
+node = "n1"
+tick = 1
+rel = "client_in"
+rows = [["x"], ["a"], ["m"]]
+
+[[input]]
+node = "n1"
+tick = 3
+rel = "client_in"
+rows = [["b"]]
+
+[[input]]
+node = "n1"
+tick = 4
+rel = "client_in"
+rows = [["z"], ["c"]]
+
+[[input]]
+node = "n1"
+tick = 6
+rel = "client_in"
+rows = [["a"], ["a"]]
+
+[[expect]]
+node = "n1"
+rel = "slot"
+tick = 1
+rows = [["a", 0], ["m", 1], ["x", 2]]
+
+[[expect]]
+node = "n1"
+rel = "slot"
+tick = 2
+rows = []
+
+[[expect]]
+node = "n1"
+rel = "slot"
+tick = 3
+rows = [["b", 3]]
+
+[[expect]]
+node = "n1"
+rel = "slot"
+tick = 4
+rows = [["c", 4], ["z", 5]]
+
+[[expect]]
+node = "n1"
+rel = "slot"
+tick = 6
+rows = [["a", 6]]
+
+[[expect]]
+node = "n1"
+rel = "next_slot"
+tick = 1
+rows = [[0]]
+
+[[expect]]
+node = "n1"
+rel = "next_slot"
+tick = 2
+rows = [[3]]
+
+[[expect]]
+node = "n1"
+rel = "next_slot"
+tick = 3
+rows = [[3]]
+
+[[expect]]
+node = "n1"
+rel = "next_slot"
+tick = 4
+rows = [[4]]
+
+[[expect]]
+node = "n1"
+rel = "next_slot"
+tick = 5
+rows = [[6]]
+
+[[expect]]
+node = "n1"
+rel = "rank"
+tick = 1
+rows = [["a", 0], ["m", 1], ["x", 2]]
+
+[[expect]]
+node = "n1"
+rel = "rank"
+tick = 3
+rows = [["a", 0], ["b", 1], ["m", 2], ["x", 3]]
+
+[[expect]]
+node = "n1"
+rel = "rank"
+tick = 4
+rows = [["a", 0], ["b", 1], ["c", 2], ["m", 3], ["x", 4], ["z", 5]]
+
+[[expect]]
+node = "n1"
+rel = "id"
+tick = 1
+rows = [["a", 0], ["m", 1], ["x", 2]]
+
+[[expect]]
+node = "n1"
+rel = "id"
+tick = 3
+rows = [["a", 0], ["b", 3], ["m", 1], ["x", 2]]
+
+[[expect]]
+node = "n1"
+rel = "id"
+tick = 4
+rows = [["a", 0], ["b", 3], ["c", 4], ["m", 1], ["x", 2], ["z", 5]]
+
+[[expect]]
+node = "n1"
+rel = "id"
+tick = 7
+rows = [["a", 0], ["b", 3], ["c", 4], ["m", 1], ["x", 2], ["z", 5]]

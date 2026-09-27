@@ -1,0 +1,31 @@
+//! BENCH-040: per-tick vs sticky choice over a persisted table, in canonical-priority mode (R12 §12 T1).
+//!
+//!     cand(G, V)      :- ins(G, V).
+//!     cand(G, V)@next :- cand(G, V), notin del(G, V).
+//!     pick(G, choose<V>)         :- cand(G, V).     // per tick
+//!     spick(G, choose sticky<V>) :- cand(G, V).     // sticky
+//!
+//! R12's expectations are stated for a test-only priority table in which priority equals canonical order, where
+//! `choose` behaves like `min`. A manifest cannot select a priority table, so this case states the same
+//! choices in the language: `choose_least!` (least cost first, the cost being the value itself, which is unique
+//! per candidate) is exactly the canonical-mode choice, under every seed (ANA-038 D5). BENCH-040b checks the
+//! seeded `choose!` itself.
+
+program choose_persisted_canonical version 1;
+
+input ins(g: String, v: String);
+input del(g: String, v: String);
+
+/// The candidates: persisted explicitly (LANG-065), so the frame rule and its deletion guard are visible.
+scratch cand(g: String, v: String);
+
+insert: on ins(g, v) {
+    emit cand(g, v);
+}
+
+persist: while cand(g, v), not del(g, v) {
+    next cand(g, v);
+}
+
+view pick(g, v) = cand(g, v), choose_least!(v per g);
+view spick(g, v) = cand(g, v), choose!(v per g least v sticky);

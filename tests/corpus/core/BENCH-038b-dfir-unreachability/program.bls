@@ -1,0 +1,21 @@
+//! BENCH-038: DFIR's unreachability example (hydroflow examples/example_6_unreachability.rs, R08 §15 T2).
+//!
+//! Origin 0; pairs (5,10), (0,3), (3,6), (6,5), (11,12). The unreached vertices are the vertices of the pairs that
+//! reachability from 0 does not reach: {11, 12}. Tests the stratum barrier of `difference` after a recursive SCC.
+
+program dfir_unreachability version 1;
+
+input origin(v: u64);
+input pair(src: u64, dst: u64);
+
+view vertex(v) {
+    pair(v, _);
+    pair(_, v);
+}
+
+view reached(v) {
+    origin(v);
+    reached(u), pair(u, v);
+}
+
+view unreached(v) = vertex(v), not reached(v);
