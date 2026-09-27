@@ -1,0 +1,5 @@
+// BENCH-130s-simple-deliv-failure-free: simple-deliv: the failure-free run.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/delivery/simple_deliv.ded";
+include "../lib/delivery/group.ded";

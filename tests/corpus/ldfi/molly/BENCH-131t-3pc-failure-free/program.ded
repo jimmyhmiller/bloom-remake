@@ -1,0 +1,6 @@
+// BENCH-131t-3pc-failure-free: 3pc: the failure-free run.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/commit/three_pc.ded";
+include "../lib/util/timer.ded";
+include "../lib/commit/group.ded";

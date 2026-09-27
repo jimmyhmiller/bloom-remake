@@ -1,0 +1,21 @@
+// Molly's provenance unit test "aggregate rewrites don't affect grouping by including un-aggregated variables" (a
+// regression test; R06 §12.6, ProvenanceSuite): a and b each send a vote to M at time 1; vote_cnt(M, count<I>) groups
+// by M only, although the body also binds V, so vote_cnt(M, 2) holds from time 2 with two contributors, and each
+// vote's loss falsifies it. The program is the unit test's with a pre/post pair added. Blossom golden corpus,
+// transcribed from R06 (derived = true); see ../../README.md.
+
+vote(M, V)@next :- vote(M, V);
+member(M, V, I)@next :- member(M, V, I);
+vote(M, V)@async :- begin(V, M);
+
+vote_cnt(M, count<I>) :- vote(M, V), member(M, V, I);
+good(M, I) :- vote_cnt(M, I);
+
+// pre: M's members; post: the member, provided both votes are counted in one group (vote_cnt(M, 2))
+pre(M, I) :- member(M, V, I);
+post(M, I) :- vote_cnt(M, N), member(M, V, I), N == 2;
+
+member("M", "a", 1)@1;
+member("M", "b", 2)@1;
+begin("a", "M")@1;
+begin("b", "M")@1;

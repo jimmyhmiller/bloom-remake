@@ -1,0 +1,43 @@
+# BENCH-135o-souffle-points-to: the Soufflé provenance paper's points-to analysis.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-135"
+title = "the Soufflé provenance paper's points-to analysis"
+priority = "P0"
+source = "FEATURES.md BENCH-135; R06 §12.6; Zhao, Subotić, Scholz, TOPLAS 2020, Fig. 1, Fig. 10"
+features = ["LANG-220", "LANG-005", "LANG-060", "SEM-004"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+Soufflé provenance paper Figure 1 (and Figure 10's final iteration): vpt = {(a, l1), (c, l3), (d, l4), (b, l1)}; alias(a, b) holds (Figure 3's proof tree). The minimal proof heights are in ../golden/provenance.toml (ENG-111).
+
+Molly round k is tick k (CR-13); the rows omit the location column. The provenance counts this program is about are in ../golden/provenance.toml.
+"""
+
+[deploy]
+nodes = [
+  { name = "n", role = "Node" },
+]
+
+[run]
+ticks = 2
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-060", "SEM-004"]
+until = "M5"
+
+[[expect]]
+node = "n"
+rel = "vpt"
+tick = 1
+rows = [["a", "l1"], ["b", "l1"], ["c", "l3"], ["d", "l4"]]
+
+[[expect]]
+node = "n"
+rel = "alias"
+tick = 1
+rows = [["a", "b"], ["b", "a"]]

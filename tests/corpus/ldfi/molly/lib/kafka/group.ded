@@ -1,0 +1,13 @@
+// Input of the Kafka case study (LDFI §5.1.3; nodes a, b, c, C, Z): replicas a, b and c register with Zookeeper Z,
+// which names a as the leader; the client C knows the leader and writes "w1" at time 2.
+// Blossom golden corpus, re-derived (derived = true); see ../../README.md.
+
+zk("a", "Z")@1;
+zk("b", "Z")@1;
+zk("c", "Z")@1;
+start("a")@1;
+start("b")@1;
+start("c")@1;
+leads("Z", "a")@1;
+leader_of("C", "a")@1;
+write_req("C", "w1")@2;

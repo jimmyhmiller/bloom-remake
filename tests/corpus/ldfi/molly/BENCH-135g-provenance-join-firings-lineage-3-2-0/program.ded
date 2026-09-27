@@ -1,0 +1,4 @@
+// BENCH-135g-provenance-join-firings-lineage-3-2-0: provenance-join-firings-lineage: counterexample at EOT 3, EFF 2, 0 crashes; stated falsifiers.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/unit/join_firings_net.ded";

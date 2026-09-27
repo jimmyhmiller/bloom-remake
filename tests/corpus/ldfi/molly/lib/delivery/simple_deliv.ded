@@ -1,0 +1,8 @@
+// simple-deliv: best-effort broadcast. LDFI (SIGMOD 2015) Figure 2, verbatim.
+// The broadcaster logs its payload and makes a single attempt to send it to every neighbour; `node` and `log` persist.
+// Blossom golden corpus; see ../../README.md.
+
+log(Node, Pload) :- bcast(Node, Pload);
+node(Node, Neighbor)@next :- node(Node, Neighbor);
+log(Node, Pload)@next :- log(Node, Pload);
+log(Node2, Pload)@async :- bcast(Node1, Pload), node(Node1, Node2);

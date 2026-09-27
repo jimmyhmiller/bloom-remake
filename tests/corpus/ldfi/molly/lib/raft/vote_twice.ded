@@ -1,0 +1,7 @@
+// SEEDED BUG (BENCH-137): a server grants every up-to-date request in its current term, including after it has
+// already voted in that term, so two candidates of one term can both gather a majority: Election Safety fails.
+// Blossom golden corpus; see ../../README.md.
+
+grant(M, C, T) :- request(M, C, T, LI, LT), top_term(M, T), notin starts(M, T), last_entry(M, MI, MT), LT > MT;
+grant(M, C, T) :- request(M, C, T, LI, LT), top_term(M, T), notin starts(M, T), last_entry(M, MI, MT), LT == MT,
+                  LI >= MI;

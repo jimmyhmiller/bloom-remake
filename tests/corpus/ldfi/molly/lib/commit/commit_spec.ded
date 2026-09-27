@@ -1,0 +1,17 @@
+// Correctness of atomic commitment, as Molly's commit specification checks it (LDFI §5.1.1; R06 §12.2).
+// Blossom golden corpus, re-derived (derived = true); see ../../README.md.
+//
+// Termination: once some participant prepared X, at least two distinct nodes reach a decision on X.
+// Agreement: the nodes that decided X decided alike.
+// (Molly's termination check counts deciders rather than requiring every participant to decide; the corpus keeps
+// that reading, because the published verdicts were obtained with it.)
+
+decision(N, X, "commit") :- commit(N, X);
+decision(N, X, "abort") :- abort(N, X);
+
+pre("termination", X) :- prepared(_, _, X);
+post("termination", X) :- decision(N1, X, _), decision(N2, X, _), N1 != N2;
+
+conflict(X) :- decision(_, X, V1), decision(_, X, V2), V1 != V2;
+pre("agreement", X) :- decision(_, X, _);
+post("agreement", X) :- decision(_, X, V), notin conflict(X);

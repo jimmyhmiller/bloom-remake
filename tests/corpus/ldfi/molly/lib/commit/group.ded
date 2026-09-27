@@ -1,0 +1,21 @@
+// Input of the commit protocols (LDFI, SIGMOD 2015, §5.1.1; nodes a, b, C, d with C the coordinator): the
+// coordinator C begins transaction "tx" at time 1; a, b and d are its participants and each other's peers, and every
+// participant is willing to commit.
+// Blossom golden corpus, re-derived (derived = true); see ../../README.md.
+
+begin("C", "tx")@1;
+
+participant("C", "a")@1;
+participant("C", "b")@1;
+participant("C", "d")@1;
+
+peer("a", "b")@1;
+peer("a", "d")@1;
+peer("b", "a")@1;
+peer("b", "d")@1;
+peer("d", "a")@1;
+peer("d", "b")@1;
+
+can("a", "tx")@1;
+can("b", "tx")@1;
+can("d", "tx")@1;

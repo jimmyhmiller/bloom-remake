@@ -1,0 +1,32 @@
+# BENCH-135a-netflix-toy-3-0-2: netflix-toy: counterexample at EOT 3, EFF 0, 2 crashes; stated falsifiers.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-135"
+title = "netflix-toy: counterexample at EOT 3, EFF 0, 2 crashes; stated falsifiers"
+priority = "P0"
+source = "FEATURES.md BENCH-135; R06 §12.6; Alvaro et al., SoCC 2016, §2.2, Fig. 1"
+features = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-027"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+FEATURES.md BENCH-135: 'Netflix toy example: the only minimal falsifiers are {RepA,RepB} and {Bcast1,Bcast2}' (SoCC'16 Figure 1: (RepA v Bcast1) & (RepA v Bcast2) & (RepB v Bcast1) & (RepB v Bcast2)). In ../lib/unit/netflix_toy.ded each abstract failure is a crash: Bcast1 = C(b1,1), Bcast2 = C(b2,1) (the broadcasters send at time 1), RepA = C(ra,2), RepB = C(rb,2) (the replicas confirm at time 2). EFF 0 leaves crashes as the only faults; a later crash removes fewer clock facts, so these crash times are the Appendix-B-minimal ones.
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-027"]
+until = "M8"
+
+[expect_ldfi]
+eot = 3
+eff = 0
+crashes = 2
+nodes = ["b1", "b2", "ra", "rb", "o"]
+crash_view = "molly"
+verdict = "counterexample"
+falsifiers = [
+  ["C(b1,1)", "C(b2,1)"],
+  ["C(ra,2)", "C(rb,2)"],
+]

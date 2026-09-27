@@ -1,0 +1,30 @@
+# BENCH-132c-kafka-6-4-1: Kafka ISR: counterexample at EOT 6, EFF 4, 1 crash.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-132"
+title = "Kafka ISR: counterexample at EOT 6, EFF 4, 1 crash"
+priority = "P0"
+source = "FEATURES.md BENCH-132; R06 §12.3; LDFI SIGMOD'15 §1.1, §5.1.3, Fig. 10; LDFI SIGMOD'15 Fig. 12"
+features = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "TEST-027", "ANA-010"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+LDFI Figure 12 lists 6/4/1 as the Kafka bug's minimal counterexample parameters (38 executions, BENCH-136g). In this model the failure-free acknowledgment reaches the client at time 6, and the partitioned run acknowledges at time 4 and crashes the leader afterwards, as in Figure 10 (the leader crashes at time 5, EOT 6).
+
+Program re-derived from the paper (../lib/kafka/replication.ded): the replication logic in some detail, Zookeeper and the client sketched, as §5.1.3 describes. The spec is Molly's durability spec (R06 §12.3). Reaching the counterexample by lineage needs the crash oracle: the violating run crashes the leader after it acknowledged, a crash that removes no message the outcome depends on and matters only through `notin crash(R, R, _)` in post (see docs/plan/notes/M1.5.md on ARCHITECTURE §8.3).
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "TEST-027", "ANA-010"]
+until = "M8"
+
+[expect_ldfi]
+eot = 6
+eff = 4
+crashes = 1
+nodes = ["a", "b", "c", "C", "Z"]
+crash_view = "molly"
+verdict = "counterexample"

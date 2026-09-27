@@ -1,0 +1,5 @@
+// SEEDED BUG (BENCH-137): the leader commits an entry of its term as soon as it appends it, without waiting for a
+// majority, so a value can be committed on the leader alone and lost when another server leads.
+// Blossom golden corpus; see ../../README.md.
+
+committed_upto(L, I) :- leading(L), leads(L, T), log(L, I, T, V);

@@ -1,0 +1,47 @@
+# BENCH-135m-provenance-aggregate-grouping-failure-free: provenance: aggregate grouping.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-135"
+title = "provenance: aggregate grouping"
+priority = "P0"
+source = "FEATURES.md BENCH-135; R06 §12.6"
+features = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004", "LANG-100", "LANG-101"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+Molly ProvenanceSuite (R06 §12.6): vote_cnt(M, 2) with 2 contributors.
+
+Molly round k is tick k (CR-13); the rows omit the location column. The provenance counts this program is about are in ../golden/provenance.toml.
+"""
+
+[deploy]
+nodes = [
+  { name = "a", role = "Node" },
+  { name = "b", role = "Node" },
+  { name = "M", role = "Node" },
+]
+
+[run]
+ticks = 3
+stop = "ticks"
+
+[backend.oracle]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004", "LANG-100", "LANG-101"]
+until = "M5"
+
+# one group, both votes
+[[expect]]
+node = "M"
+rel = "vote_cnt"
+tick = 2
+rows = [[2]]
+
+# the votes arrive at time 2
+[[expect]]
+node = "M"
+rel = "vote_cnt"
+tick = 1
+rows = []

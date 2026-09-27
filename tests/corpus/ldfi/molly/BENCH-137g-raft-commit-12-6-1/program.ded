@@ -1,0 +1,9 @@
+// BENCH-137g-raft-commit-12-6-1: raft-commit: no counterexample at EOT 12, EFF 6, 1 crash.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/raft/raft.ded";
+include "../lib/raft/vote_checked.ded";
+include "../lib/raft/commit_majority.ded";
+include "../lib/raft/group.ded";
+include "../lib/raft/commit_timing.ded";
+include "../lib/raft/raft_spec.ded";

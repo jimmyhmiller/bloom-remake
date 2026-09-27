@@ -1,0 +1,4 @@
+// BENCH-137i-negative-support-3-2-0: negative support: counterexample at EOT 3, EFF 2, 0 crashes; stated falsifier.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/unit/negative_support.ded";

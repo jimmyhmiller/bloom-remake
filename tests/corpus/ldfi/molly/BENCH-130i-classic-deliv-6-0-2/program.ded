@@ -1,0 +1,6 @@
+// BENCH-130i-classic-deliv-6-0-2: classic-deliv: no counterexample at EOT 6, EFF 0, 2 crashes.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/delivery/classic_deliv.ded";
+include "../lib/delivery/group.ded";
+include "../lib/delivery/delivery_spec.ded";

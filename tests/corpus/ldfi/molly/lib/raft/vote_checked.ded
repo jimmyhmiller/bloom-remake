@@ -1,0 +1,11 @@
+// Raft's vote rule (§5.2, §5.4.1): in the highest term it has seen, a server that has not voted in that term and is
+// not itself starting a candidacy for it grants its vote to a candidate whose log is at least as up to date as its
+// own (a later last term, or the same last term and at least as long); of simultaneous requests it grants the
+// highest-ranked. Blossom golden corpus, re-derived; see ../../README.md.
+
+eligible(M, C, T) :- request(M, C, T, LI, LT), top_term(M, T), notin voted_before(M, T), notin starts(M, T),
+                     last_entry(M, MI, MT), LT > MT;
+eligible(M, C, T) :- request(M, C, T, LI, LT), top_term(M, T), notin voted_before(M, T), notin starts(M, T),
+                     last_entry(M, MI, MT), LT == MT, LI >= MI;
+best_rank(M, T, max<R>) :- eligible(M, C, T), rank(M, C, R);
+grant(M, C, T) :- eligible(M, C, T), rank(M, C, R), best_rank(M, T, R);

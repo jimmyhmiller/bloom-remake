@@ -1,0 +1,18 @@
+// Input of the Flux case study: ingress i feeds the replica pair p (primary) and s (secondary), which feed the
+// egress e; four tuples arrive at the ingress, three at time 1 and one at time 2 (the stream of Molly's Flux input,
+// R06 §12.4). Blossom golden corpus, re-derived (derived = true); see ../../README.md.
+
+role("i", "ingress")@1;
+role("p", "primary")@1;
+role("s", "secondary")@1;
+role("e", "egress")@1;
+replica("i", "p")@1;
+replica("i", "s")@1;
+egress("p", "e")@1;
+egress("s", "e")@1;
+backup("p", "s")@1;
+
+input("i", 1, "foo")@1;
+input("i", 2, "bar")@1;
+input("i", 3, "baz")@1;
+input("i", 4, "qux")@2;

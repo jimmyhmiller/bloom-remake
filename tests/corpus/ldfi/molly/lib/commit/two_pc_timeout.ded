@@ -1,0 +1,7 @@
+// Two-phase commit with a coordinator timeout (LDFI §5.1.1; Molly's 2pc_timeout, R06 §12.2): if votes are still
+// missing when the coordinator's timer fires, the coordinator aborts. Participants still cannot decide on their own,
+// so a coordinator crash after the vote request still blocks them. Used together with two_pc.ded and
+// ../util/timer.ded. Blossom golden corpus, re-derived (derived = true); see ../../README.md.
+
+arm_timer(C, "votes", X, 3) :- begin(C, X);
+abort(C, X)@next :- timeout(C, "votes", X), lacking_vote(C, X);

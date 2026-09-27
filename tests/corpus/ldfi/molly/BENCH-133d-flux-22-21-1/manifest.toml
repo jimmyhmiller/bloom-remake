@@ -1,0 +1,30 @@
+# BENCH-133d-flux-22-21-1: flux: no counterexample at EOT 22, EFF 21, 1 crash.
+# Blossom golden corpus, Molly LDFI parity (docs/design/PLAN.md §5; tests/corpus/ldfi/README.md).
+
+schema = 1
+id = "BENCH-133"
+title = "flux: no counterexample at EOT 22, EFF 21, 1 crash"
+priority = "P1"
+source = "FEATURES.md BENCH-133; R06 §12.4; LDFI SIGMOD'15 §5.1.2, Fig. 13"
+features = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "TEST-024", "LANG-100", "LANG-101", "TEST-027"]
+program = "program.ded"
+derived = true
+expected_from = "literature"
+notes = """
+LDFI Figure 13 certifies Flux at EOT 22 / EFF 21 (187 executions, BENCH-136l; 'the most thorough validation of the Flux protocol to date'). The figure omits the node count and crash bound; its Combinations column (6.20e76) equals Molly's grossEstimate for exactly 4 nodes and 1 crash.
+
+Re-derived from the Flux paper and §5.1.2 (../lib/flux/pairs.ded: ingress, primary and secondary replica, egress, with takeover by the secondary) with Flux's guarantee as the spec (no loss, duplication or reordering of what the egress delivers; ../lib/flux/flux_spec.ded). Molly's flux files cannot serve as the reference: run on the four nodes Figure 13 implies, the repository's flux_clusterpairs.ded has an empty pre at EOT in its failure-free run, so every run is vacuous (docs/plan/notes/M1.5.md).
+"""
+
+[backend.ldfi]
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "TEST-024", "LANG-100", "LANG-101", "TEST-027"]
+until = "M8"
+
+[expect_ldfi]
+eot = 22
+eff = 21
+crashes = 1
+nodes = ["i", "p", "s", "e"]
+crash_view = "molly"
+verdict = "no_counterexample"

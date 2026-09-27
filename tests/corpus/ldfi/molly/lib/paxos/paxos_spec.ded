@@ -1,0 +1,12 @@
+// Agreement of the synod protocol (LDFI §5.1.2, "we are able to validate their agreement properties"): no two nodes
+// learn different values. pre: some node learned a value; post: it did and nobody learned another.
+// Blossom golden corpus, re-derived (derived = true); see ../../README.md.
+//
+// Molly's Paxos spec compares every value accepted by a correct acceptor (R06 §12.4). Correct Paxos lets an acceptor
+// accept a value in a ballot that never gathers a majority and then accept the chosen value in a later ballot, so
+// that spec is stronger than Paxos agreement; this one checks the property Paxos guarantees: at most one value is
+// chosen, observed as learned values (a learner learns a value only from a majority of acceptances in one ballot).
+
+conflict(V) :- learned(L1, V), learned(L2, W), V != W;
+pre(V) :- learned(L, V);
+post(V) :- learned(L, V), notin conflict(V);

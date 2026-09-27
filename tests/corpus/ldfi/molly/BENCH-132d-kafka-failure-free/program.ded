@@ -1,0 +1,5 @@
+// BENCH-132d-kafka-failure-free: Kafka ISR: the failure-free run.
+// Blossom golden corpus (Molly LDFI parity); the included files are described in ../README.md.
+
+include "../lib/kafka/replication.ded";
+include "../lib/kafka/group.ded";
