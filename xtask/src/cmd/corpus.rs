@@ -123,6 +123,8 @@ pub fn run(args: Args) -> ExitCode {
         let mut new_text = text.clone();
         for (backend, table) in backends {
             let status = table.get("status").and_then(toml::Value::as_str).unwrap_or("");
+            // Wall-clock time only reports how long each case took; it never affects a result.
+            #[allow(clippy::disallowed_methods)]
             let started = Instant::now();
             let outcome = run_backend(&case, &manifest, backend, workers, args.max_runs);
             let secs = started.elapsed().as_secs_f64();
