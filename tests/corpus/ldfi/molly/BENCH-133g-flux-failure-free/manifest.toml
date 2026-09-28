@@ -29,9 +29,7 @@ ticks = 9
 stop = "ticks"
 
 [backend.oracle]
-status = "unimplemented"
-unimplemented = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004", "LANG-100", "LANG-101", "SEM-020"]
-until = "M5"
+status = "pass"
 
 # tuples reach the egress at tick 3
 [[expect]]

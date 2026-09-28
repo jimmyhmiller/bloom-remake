@@ -48,3 +48,6 @@ pub enum LdfiError {
     #[error(transparent)]
     Internal(#[from] InternalError),
 }
+
+#[cfg(test)]
+mod tests;

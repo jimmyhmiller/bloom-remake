@@ -17,9 +17,7 @@ runs_max counts concrete executions, the failure-free run included: up to and in
 """
 
 [backend.ldfi]
-status = "unimplemented"
-unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-030", "TEST-031", "TEST-032", "TEST-027", "ANA-010", "BENCH-130"]
-until = "M9"
+status = "pass"
 
 [expect_ldfi]
 eot = 4

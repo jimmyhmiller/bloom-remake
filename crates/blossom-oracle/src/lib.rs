@@ -110,7 +110,7 @@ pub struct TickOutput {
     pub next: Instance,
     /// The async heads.
     pub outbox: BTreeSet<Send>,
-    /// The distinct firings of the tick, in canonical order; empty unless capture was requested.
+    /// The distinct firings of the tick, in evaluation order (deterministic); empty unless capture was requested.
     pub firings: Vec<FiringRecord>,
 }
 

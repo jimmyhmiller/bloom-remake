@@ -28,9 +28,7 @@ ticks = 7
 stop = "ticks"
 
 [backend.oracle]
-status = "unimplemented"
-unimplemented = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004"]
-until = "M5"
+status = "pass"
 
 # the broadcast request persists, so a retransmits at every tick
 [[expect]]
