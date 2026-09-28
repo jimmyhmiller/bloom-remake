@@ -154,6 +154,20 @@ mod cadical {
         inner: rustsat_cadical::CaDiCaL<'static, 'static>,
         state: State,
     }
+    impl CadicalSolver {
+        /// CaDiCaL configured for many small incremental calls under assumptions (LDFI's minimal enumeration):
+        /// no preprocessing (the `plain` configuration) and no lucky-phase probing before each search. Both only pay
+        /// off on large single problems.
+        pub fn plain() -> Result<CadicalSolver, SatError> {
+            let mut inner = rustsat_cadical::CaDiCaL::default();
+            inner.set_configuration(rustsat_cadical::Config::Plain).map_err(error)?;
+            inner.set_option("lucky", 0).map_err(error)?;
+            Ok(CadicalSolver {
+                inner,
+                state: State::default(),
+            })
+        }
+    }
     fn rl(l: Lit) -> RLit {
         RLit::new(l.var().0, l.is_negative())
     }
@@ -206,17 +220,8 @@ mod cadical {
                 .solve_assumps(&assumptions.iter().copied().map(rl).collect::<Vec<_>>());
             self.inner.detach_terminator();
             let outcome = match result.map_err(error)? {
-                SolverResult::Sat => {
-                    self.state.model = (0..self.state.vars)
-                        .map(|v| {
-                            self.inner
-                                .var_val(RVar::new(v))
-                                .map(|x| x == TernaryVal::True)
-                                .map_err(error)
-                        })
-                        .collect::<Result<_, _>>()?;
-                    SatOutcome::Sat
-                }
+                // The model is read from the solver on demand (`value`): callers usually need a few variables.
+                SolverResult::Sat => SatOutcome::Sat,
                 SolverResult::Unsat => {
                     self.state.core = self
                         .inner
@@ -239,7 +244,14 @@ mod cadical {
             Ok(outcome)
         }
         fn value(&self, v: Var) -> Result<bool, SatError> {
-            self.state.value(v)
+            self.state.check_var(v)?;
+            if self.state.outcome != Some(SatOutcome::Sat) {
+                return Err(SatError::InvalidState("a SAT result"));
+            }
+            self.inner
+                .var_val(RVar::new(v.0))
+                .map(|x| x == TernaryVal::True)
+                .map_err(error)
         }
         fn failed_assumption(&self, l: Lit) -> Result<bool, SatError> {
             self.state.failed(l)

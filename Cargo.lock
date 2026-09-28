@@ -399,11 +399,13 @@ dependencies = [
  "blossom-artifact",
  "blossom-base",
  "blossom-ir",
+ "blossom-oracle",
  "blossom-prov",
  "blossom-sat",
  "blossom-sim",
  "blossom-trace",
  "blossom-value",
+ "thiserror",
 ]
 
 [[package]]

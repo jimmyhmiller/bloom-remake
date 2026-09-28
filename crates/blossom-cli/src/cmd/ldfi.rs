@@ -1,23 +1,132 @@
-//! `blossom ldfi`: lineage-driven fault injection (Molly-2).
+//! `blossom ldfi`: lineage-driven fault injection (Molly-2, ARCHITECTURE §8).
 //!
-//! Implemented by WP M8.1 (TEST-029). Until then the command accepts any arguments and exits with code 7
-//! (ARCHITECTURE §12.5), naming the feature and the WP.
+//! Slice 1 (docs/design/SLICES.md) runs LDFI on Molly `.ded` programs, whose `pre` and `post` rules are the outcome
+//! spec: `blossom ldfi simplog.ded deliv_assert.ded --eot 4 --eff 2 --nodes a,b,c --crashes 0` is Molly's
+//! `SyncFTChecker` (LANGUAGE §21.1). `.bls` programs with `spec` blocks follow in slice 2.
+//!
+//! Exit codes: 0 when no counterexample exists within the failure spec, 3 when one does (verification failed), 1 for
+//! a program error, 7 for an unimplemented feature.
 
-use std::ffi::OsString;
 use std::process::ExitCode;
 
-use crate::common::Context;
+use blossom_ldfi::report::{fault_labels, post_lineage, render};
+use blossom_ldfi::{FailureSpec, LdfiConfig, LdfiError, Verdict, falsifiers};
+use blossom_sim::ded::DedSim;
 
-/// Arguments of `blossom ldfi`. Not parsed yet: WP M8.1 replaces them with the real options.
+use crate::common::{Context, ded};
+use crate::exit::Exit;
+
+/// Arguments of `blossom ldfi`.
 #[derive(Debug, clap::Args)]
 pub struct Args {
-    /// The command's arguments.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
-    pub args: Vec<OsString>,
+    /// The program's `.ded` files (their `include`s are loaded too).
+    #[arg(required = true)]
+    pub files: Vec<String>,
+    /// The deployment's nodes.
+    #[arg(long, value_delimiter = ',', required = true)]
+    pub nodes: Vec<String>,
+    /// The end of time: the tick at which `pre` and `post` are read.
+    #[arg(long)]
+    pub eot: u64,
+    /// The end of finite failures: messages sent before this tick may be lost.
+    #[arg(long)]
+    pub eff: u64,
+    /// How many nodes may crash.
+    #[arg(long, default_value_t = 0)]
+    pub crashes: u32,
+    /// Report every counterexample, not only the first.
+    #[arg(long)]
+    pub find_all: bool,
+    /// Print the Appendix-B-minimal falsifiers of the failure-free run's `post` goals instead of a verdict.
+    #[arg(long)]
+    pub falsifiers: bool,
+    /// Print the failure-free lineage of every `post` tuple.
+    #[arg(long)]
+    pub lineage: bool,
+    /// Turn conservative negative support off (for experiments; hypotheses may be missed).
+    #[arg(long)]
+    pub no_negative_support: bool,
+    /// Give up after this many runs.
+    #[arg(long, default_value_t = 100_000)]
+    pub max_runs: u64,
+    /// Worker threads (default: the machine's parallelism). Results do not depend on it.
+    #[arg(long)]
+    pub jobs: Option<usize>,
+    /// The SAT backend: cadical-plain (CaDiCaL tuned for many small incremental calls), cadical, batsat or
+    /// exhaustive.
+    #[arg(long, default_value = "cadical-plain")]
+    pub sat: String,
 }
 
 /// Runs the command.
 pub fn run(args: Args, cx: &Context) -> ExitCode {
-    let _ = (args, cx);
-    crate::exit::not_implemented("TEST-029", "M8.1")
+    let _ = cx;
+    if !ded::all_ded(&args.files) {
+        eprintln!("`blossom ldfi` on `.bls` specs arrives with slice 2 (docs/design/SLICES.md)");
+        return crate::exit::not_implemented("TEST-029", "slice 2");
+    }
+    let artifact = match ded::compile(&args.files, &args.nodes) {
+        Ok(a) => a,
+        Err(code) => return code,
+    };
+    let nodes = match u32::try_from(artifact.nodes.len()) {
+        Ok(n) => n,
+        Err(_) => return Exit::UserError.into(),
+    };
+    let spec = match FailureSpec::new(args.eot, args.eff, args.crashes, nodes) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{e}");
+            return Exit::UserError.into();
+        }
+    };
+    let mut config = LdfiConfig::new(spec);
+    config.find_all = args.find_all;
+    config.negative_support = !args.no_negative_support;
+    config.max_runs = args.max_runs;
+    config.sat = args.sat.clone();
+    config.workers = args
+        .jobs
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get));
+    let sim = match DedSim::new(&artifact) {
+        Ok(s) => s,
+        Err(e) => return fail(&LdfiError::Sim(e)),
+    };
+    if args.falsifiers {
+        return match falsifiers(&sim, &config) {
+            Ok(sets) => {
+                println!("{} minimal falsifier(s)", sets.len());
+                for f in sets {
+                    println!("  {{{}}}", fault_labels(&artifact, &f).join(", "));
+                }
+                Exit::Ok.into()
+            }
+            Err(e) => fail(&e),
+        };
+    }
+    match blossom_ldfi::run(&sim, &config) {
+        Ok(report) => {
+            print!("{}", render(&artifact, &report));
+            if args.lineage {
+                println!("\nfailure-free lineage of `post`:");
+                print!("{}", post_lineage(&artifact, &report.failure_free_graph, &report));
+            }
+            match report.verdict {
+                Verdict::NoCounterexample => Exit::Ok.into(),
+                Verdict::Counterexample => Exit::VerifyFailed.into(),
+            }
+        }
+        Err(e) => fail(&e),
+    }
+}
+
+fn fail(e: &LdfiError) -> ExitCode {
+    eprintln!("{e}");
+    match e {
+        LdfiError::Unimplemented(_) => Exit::Unimplemented.into(),
+        LdfiError::Internal(_) | LdfiError::Sat(_) => Exit::Internal.into(),
+        LdfiError::Sim(blossom_sim::SimError::Internal(_)) => Exit::Internal.into(),
+        LdfiError::Sim(blossom_sim::SimError::Unimplemented(_)) => Exit::Unimplemented.into(),
+        _ => Exit::UserError.into(),
+    }
 }

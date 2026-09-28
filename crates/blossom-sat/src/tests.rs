@@ -9,6 +9,12 @@ fn sat_suite_exhaustive_selfcheck() {
 fn sat_suite_cadical() {
     conformance::sat_suite(|| Box::new(CadicalSolver::default())).unwrap();
 }
+#[cfg(feature = "sat-cadical")]
+#[test]
+fn sat_suite_cadical_plain() {
+    conformance::sat_suite(|| Box::new(CadicalSolver::plain().unwrap())).unwrap();
+    assert_eq!(select_backend("cadical-plain").unwrap().backend(), "cadical");
+}
 #[cfg(feature = "sat-batsat")]
 #[test]
 fn sat_suite_batsat() {

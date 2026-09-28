@@ -16,6 +16,8 @@ blossom-prov.workspace = true
 blossom-sim.workspace = true
 blossom-trace.workspace = true
 blossom-sat.workspace = true
+blossom-oracle.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true
