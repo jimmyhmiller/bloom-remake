@@ -176,7 +176,10 @@ impl Model {
         }
     }
 
-    /// Splits the relations into protocol and spec: `pre`, `post` and every relation read only by spec relations.
+    /// Splits the relations into protocol and spec. A relation belongs to the spec when it has to: it is `pre` or
+    /// `post`, one of its rules cannot run at one node (it reads `crash` or a relation at a fixed time, or its body
+    /// or head is not at the rule's location), or it reads a spec relation. Every other relation is protocol, run by
+    /// the nodes at every tick; the spec reads its tuples at EOT.
     fn classify(&mut self, program: &Program, diags: &mut Diagnostics) {
         let pre = Symbol::intern("pre");
         let post = Symbol::intern("post");
@@ -206,44 +209,21 @@ impl Model {
             );
             return;
         }
-        let mut readers: BTreeMap<Symbol, BTreeSet<Symbol>> = BTreeMap::new();
+        let mut spec: BTreeSet<Symbol> = [pre, post].into_iter().collect();
         for rule in &program.rules {
-            for atom in body_atoms(rule) {
-                readers.entry(atom.rel.text).or_default().insert(rule.head.rel.text);
+            if !placement_problems(rule).is_empty() {
+                spec.insert(rule.head.rel.text);
             }
         }
-        let mut spec: BTreeSet<Symbol> = [pre, post].into_iter().collect();
         loop {
             let before = spec.len();
             for rule in &program.rules {
-                let name = rule.head.rel.text;
-                if spec.contains(&name) {
-                    continue;
-                }
-                if readers
-                    .get(&name)
-                    .is_some_and(|rd| !rd.is_empty() && rd.is_subset(&spec))
-                {
-                    spec.insert(name);
+                if body_atoms(rule).any(|a| spec.contains(&a.rel.text)) {
+                    spec.insert(rule.head.rel.text);
                 }
             }
             if spec.len() == before {
                 break;
-            }
-        }
-        for name in [pre, post] {
-            if let Some(protocol_reader) = readers.get(&name).and_then(|rd| rd.iter().find(|r| !spec.contains(*r))) {
-                let span = self.rel(*protocol_reader).map(|r| r.first);
-                let mut d = Diagnostic::new(
-                    code!("BLS0901"),
-                    format!(
-                        "`{name}` is read by the protocol relation `{protocol_reader}`: the spec may not feed the protocol"
-                    ),
-                );
-                if let Some(span) = span {
-                    d = d.with_primary(span);
-                }
-                diags.push(d);
             }
         }
         for r in &mut self.rels {
@@ -261,13 +241,15 @@ impl Model {
     fn check_placement(&self, program: &Program, diags: &mut Diagnostics) {
         for (i, rule) in program.rules.iter().enumerate() {
             let spec = self.spec_rule.get(i).copied().unwrap_or(false);
-            if spec {
-                if rule.time != HeadTime::Now {
-                    diags.push(not_yet(
-                        "an `@next` or `@async` rule that only feeds `pre`/`post`",
-                        rule.span,
-                    ));
+            let problems = placement_problems(rule);
+            if !spec {
+                // A protocol rule: everything that would make it a spec rule is an error.
+                for d in problems {
+                    diags.push(d);
                 }
+                continue;
+            }
+            if rule.time == HeadTime::Now {
                 if self.rel(rule.head.rel.text).is_some_and(|r| r.facts) {
                     diags.push(not_yet(
                         "`@k` facts into a relation that only feeds `pre`/`post`",
@@ -276,103 +258,115 @@ impl Model {
                 }
                 continue;
             }
-            for atom in body_atoms(rule) {
-                if atom.rel.text.as_str() == CRASH {
-                    diags.push(
-                        Diagnostic::new(
-                            code!("BLS0509"),
-                            format!(
-                                "`crash` is the spec's oracle, but `{}` is a protocol relation (ANA-010)",
-                                rule.head.rel.text
-                            ),
-                        )
-                        .with_primary(atom.span),
-                    );
-                } else if atom.time.is_some() {
-                    diags.push(
-                        Diagnostic::new(
-                            code!("BLS0509"),
-                            format!(
-                                "an absolute-time atom is legal only in rules that feed `pre`/`post`, and `{}` is a protocol relation",
-                                rule.head.rel.text
-                            ),
-                        )
-                        .with_primary(atom.span),
-                    );
-                } else if self.rel(atom.rel.text).is_some_and(|r| r.kind == DedRelKind::Spec) {
-                    diags.push(
-                        Diagnostic::new(
-                            code!("BLS0901"),
-                            format!(
-                                "the protocol relation `{}` reads the spec relation `{}`",
-                                rule.head.rel.text, atom.rel.text
-                            ),
-                        )
-                        .with_primary(atom.span),
-                    );
+            // An `@next` or `@async` rule always runs at the nodes; it cannot be part of the spec.
+            if problems.is_empty() {
+                let read = body_atoms(rule).find(|a| self.rel(a.rel.text).is_some_and(|r| r.kind == DedRelKind::Spec));
+                let mut d = Diagnostic::new(
+                    code!("BLS0901"),
+                    format!(
+                        "this `@next`/`@async` rule of `{}` reads a relation of the spec{}: the spec may not feed the protocol",
+                        rule.head.rel.text,
+                        read.map(|a| format!(" (`{}`)", a.rel.text)).unwrap_or_default()
+                    ),
+                )
+                .with_primary(rule.span);
+                if let Some(a) = read {
+                    d = d.with_label(a.span, "a spec relation: `pre`, `post`, or a relation that reads `crash`, a fixed time or several nodes");
+                }
+                diags.push(d);
+            } else {
+                for d in problems {
+                    diags.push(d);
                 }
             }
-            self.check_locality(rule, diags);
         }
     }
+}
 
-    /// A protocol rule runs at one node: every body atom has the rule's location in its first column, and a
-    /// deductive or `@next` head is placed there too.
-    fn check_locality(&self, rule: &Rule, diags: &mut Diagnostics) {
-        let Some(first) = body_atoms(rule).next() else {
-            return;
-        };
-        let Some(loc) = first.args.first().and_then(arg_term) else {
-            return;
-        };
-        if matches!(loc, Term::Wild(_)) {
-            diags.push(
+/// Why a rule cannot run at one node (empty when it can): it reads `crash` or a relation at a fixed time (legal only
+/// in the spec, ANA-010), its first body predicate is not located, a body atom is at another location, or a
+/// deductive or `@next` head is placed elsewhere.
+fn placement_problems(rule: &Rule) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for atom in body_atoms(rule) {
+        if atom.rel.text.as_str() == CRASH {
+            out.push(
+                Diagnostic::new(
+                    code!("BLS0509"),
+                    format!(
+                        "`crash` is the spec's oracle, but this rule of `{}` runs at the nodes (ANA-010)",
+                        rule.head.rel.text
+                    ),
+                )
+                .with_primary(atom.span),
+            );
+        } else if atom.time.is_some() {
+            out.push(
+                Diagnostic::new(
+                    code!("BLS0509"),
+                    format!(
+                        "an absolute-time atom is legal only in rules that feed `pre`/`post`, but this rule of `{}` runs at the nodes",
+                        rule.head.rel.text
+                    ),
+                )
+                .with_primary(atom.span),
+            );
+        }
+    }
+    let Some(first) = body_atoms(rule).next() else {
+        return out;
+    };
+    let Some(loc) = first.args.first().and_then(arg_term) else {
+        return out;
+    };
+    if matches!(loc, Term::Wild(_)) {
+        out.push(
+            Diagnostic::new(
+                code!("BLS0508"),
+                "a rule that runs at the nodes needs a location: the first column of its first body predicate is `_`",
+            )
+            .with_primary(first.span),
+        );
+        return out;
+    }
+    for atom in body_atoms(rule).skip(1) {
+        let same = atom.args.first().and_then(arg_term).is_some_and(|t| same_term(t, loc));
+        if !same {
+            out.push(
                 Diagnostic::new(
                     code!("BLS0508"),
-                    "a protocol rule needs a location: the first column of its first body predicate is `_`",
+                    format!(
+                        "`{}` is read at another location than the rule's (the first column of `{}`): rules that run at the nodes are local to one node",
+                        atom.rel.text, first.rel.text
+                    ),
                 )
-                .with_primary(first.span),
+                .with_primary(atom.span)
+                .with_label(first.span, "the rule's location comes from here"),
             );
-            return;
-        }
-        for atom in body_atoms(rule).skip(1) {
-            let same = atom.args.first().and_then(arg_term).is_some_and(|t| same_term(t, loc));
-            if !same {
-                diags.push(
-                    Diagnostic::new(
-                        code!("BLS0508"),
-                        format!(
-                            "`{}` is read at another location than the rule's (the first column of `{}`): protocol rules are local to one node",
-                            atom.rel.text, first.rel.text
-                        ),
-                    )
-                    .with_primary(atom.span)
-                    .with_label(first.span, "the rule's location comes from here"),
-                );
-            }
-        }
-        if rule.time != HeadTime::Async {
-            let same = rule
-                .head
-                .args
-                .first()
-                .and_then(|a| match a {
-                    Arg::Expr(Expr::Term(t)) => Some(t),
-                    _ => None,
-                })
-                .is_some_and(|t| same_term(t, loc));
-            if !same {
-                diags.push(
-                    Diagnostic::new(
-                        code!("BLS0508"),
-                        "a deductive or `@next` head is placed at the rule's location: use `@async` to derive a fact at another node",
-                    )
-                    .with_primary(rule.head.span)
-                    .with_label(first.span, "the rule's location comes from here"),
-                );
-            }
         }
     }
+    if rule.time != HeadTime::Async {
+        let same = rule
+            .head
+            .args
+            .first()
+            .and_then(|a| match a {
+                Arg::Expr(Expr::Term(t)) => Some(t),
+                _ => None,
+            })
+            .is_some_and(|t| same_term(t, loc));
+        if !same {
+            out.push(
+                Diagnostic::new(
+                    code!("BLS0508"),
+                    "a deductive or `@next` head is placed at the rule's location: use `@async` to derive a fact at another node",
+                )
+                .with_primary(rule.head.span)
+                .with_label(first.span, "the rule's location comes from here"),
+            );
+        }
+    }
+    out
 }
 
 /// Molly's per-rule static rules (R06 §3.2).
