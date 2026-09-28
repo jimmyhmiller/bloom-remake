@@ -1,0 +1,116 @@
+# Blossom delivery by vertical slices
+
+Status: **normative for delivery order from 2026-09-28**. It replaces the milestone *ordering* of PLAN.md §4–§8 (M3
+onward) and plan.json. It does not replace what anything means: LANGUAGE.md, ARCHITECTURE.md and FEATURES.md are still
+the specification, the golden corpus is still the executable spec, and CONVENTIONS.md still governs code.
+
+## Why
+
+After M1 and M2 (roughly 31k lines of Rust in six crates, plus the corpus) no Blossom program ran. The milestone plan
+built each crate to its full specification before anything consumed it: the first program would run on the oracle at
+the end of M5, the first multi-node run under simulation in M7–M8, Raft in M9. Every crate interface was fixed from the
+design documents alone, so the first test of whether they fit together would come as late, and as expensively, as
+possible. The parallel work packages kept many agents busy without shortening the critical path (parse → resolve →
+lower → evaluate → time → network), which is sequential.
+
+The user chose (2026-09-28): **deliver by vertical slices, Molly parity first.**
+
+## Rules
+
+1. **A slice is gated by behaviour.** Its gate is a list of corpus cases and CLI demos that run end to end from
+   source text. Crate-level acceptance criteria from PLAN.md §8 apply only as far as the slice exercises them.
+2. **Build what the slice exercises, fully.** No layer is built ahead of a consumer, and what is built is built
+   properly: real data structures, real error handling, tests. Everything outside the slice fails loudly with
+   `Unimplemented` / BLS0908 / exit code 7 naming the feature id and the slice that will deliver it (the no-stub rule
+   of CONVENTIONS.md is unchanged; only the "owning WP" in the message becomes the owning slice).
+3. **Interfaces are provisional until a second consumer exists.** When a slice finds that ARCHITECTURE.md's shape is
+   wrong, it changes the code and records the deviation in its notes file; the next slice that consumes the
+   interface a second time freezes it.
+4. **The corpus ratchet still applies.** A case that passes on a backend has its manifest status flipped to `pass`
+   and must keep passing; a case never moves back to `unimplemented`.
+5. **One driver per slice's critical path.** Work fans out to parallel agents only where it is genuinely wide
+   (corpus triage, independent standard-library modules, independent systems).
+6. **The slice gate** is `scripts/ci.sh gate` (fmt, workspace Clippy, all tests, corpus lint, cargo-deny) plus the
+   slice's own acceptance command, followed by an adversarial review of the slice's diff. A slice ends with one commit
+   on `main` titled `Slice N: <title>`, and `docs/plan/MILESTONE` names the slice being built.
+
+## The slices
+
+### Slice 1: Molly parity (LDFI end to end on `.ded` programs)
+
+Molly's programs, run unchanged, through the whole LDFI pipeline, reproducing the published verdicts.
+
+| Component | Crate / module | Specification |
+|---|---|---|
+| Molly-dialect lexer, parser, `include` | `blossom-syntax::ded` | LANGUAGE §21.1, LANG-220 |
+| Lowering `.ded` to the IR: location column, rule kinds, type inference, aggregates, `crash`, `pre`/`post` as the implicit spec, `@k` facts as input events | `blossom-front::ded` | LANGUAGE §21.1, ARCHITECTURE §8.1, §13 |
+| Stratification sufficient for the oracle (its own naive algorithm) | `blossom-oracle` | ARCHITECTURE §11.2 |
+| The naive per-node tick evaluator over the IR, with a firing log (Tier C, literal profile) for provenance | `blossom-oracle` | ARCHITECTURE §11.2, §4.9, §3.10 |
+| Synchronous-round world: nodes, message delivery at t+1, omissions, crashes under `CrashView::MollyContinue`, fault schedules | `blossom-sim` (minimal) | ARCHITECTURE §6, §8.1 |
+| Provenance graph from the firing and message logs | `blossom-prov` | ARCHITECTURE §8.2 |
+| Hazard encoding, Plaisted–Greenbaum CNF, crash order variables, crash budget totalizer, minimal enumeration, driver, Molly's oracle, reports | `blossom-ldfi` | ARCHITECTURE §8.3–§8.5, §8.7 |
+| `blossom run <file.ded> --nodes … --ticks n` (failure-free run, prints relations) and `blossom ldfi <files> --eot --eff --crashes --nodes` | `blossom-cli` | ARCHITECTURE §12 |
+| Corpus runner for `.ded` cases (`[backend.oracle]` failure-free and `[backend.ldfi]`), with the ratchet | `blossom-testkit`, `xtask corpus` | PLAN §5 |
+
+**Gate.**
+
+- Every failure-free `.ded` case in `tests/corpus/ldfi` passes on the oracle backend.
+- Every `[backend.ldfi]` case in BENCH-130–134 and BENCH-137 gives the published verdict, and every case that states
+  `falsifiers` produces exactly that set of Appendix-B-minimal falsifiers.
+- The demo: `blossom ldfi tests/corpus/ldfi/molly/BENCH-130a-simple-deliv-6-3-0/program.ded --eot 6 --eff 3
+  --crashes 0 --nodes a,b,c` prints the counterexample `O(a,b,1)` and its lineage; the same command on
+  retry-deliv certifies it.
+- Agreement with `tests/corpus/ldfi/tools/ldfi_ref.py` on every case it can check (it is a validation aid, not an
+  expectation source; a disagreement is resolved from the literature).
+
+**Stretch (not gating).** BENCH-136 run counts at most the published ones; those need the P1 search reductions
+(TEST-030–032). Cases the gate cannot reach are listed with the reason in the slice notes.
+
+Former work packages covered in part: M3.6, M4.1, M5.2, M5.7, M7.2, M8.1 (and the SAT layer from M2.4, now consumed).
+
+### Slice 2: the Blossom language on the same core
+
+The `.bls` frontend lowered onto the IR that slice 1 already executes: programs, relation declarations (`table`,
+`scratch`, `static`, `input`, `output`, `channel`), handlers and views, joins, stratified negation, recursion,
+aggregates, `let`/`where`, ticks, `send … to`, facts and bootstrap. Type checking and resolution cover this subset
+fully, with loud errors for the rest.
+
+**Gate.** The `core/` and `async/` corpus cases that use only this subset pass on the oracle; `e02_reliable_broadcast`
+and `e04_two_phase_commit`, written in Blossom, run under `blossom sim` and `blossom ldfi` with the verdicts their
+`.ded` counterparts have.
+
+Former work packages covered in part: M3.5, M4.2, M4.5, M5.3, M6.3, M6.7.
+
+### Slice 3: real processes
+
+The sans-IO node over the oracle evaluator, TCP transport, durable tables over the M2 WAL and checkpoint layer,
+recovery, `blossom run` as a real server with a host-facing client API. Durable-before-release (SEM-072).
+
+**Gate.** `e01_kvs` (with the constructs it needs: upsert, `choose_most!`, `outer`, sessions) runs as separate
+processes; a client workload with `kill -9` of the server at random points loses no acknowledged write, checked by a
+history checker; the same program passes under the simulator over `SimFs` crash images.
+
+Former work packages covered in part: M4.4, M4.7, M5.4, M5.5, M7.4, M6.4.
+
+### Slice 4: Raft
+
+`std::consensus::raft` in Blossom: elections, replication, commit, durability, then a KV service on top.
+
+**Gate.** Raft under the simulator with partitions and crashes passes a linearizability checker; LDFI finds the seeded
+bugs of the Molly Raft cases and certifies the correct version at its bounds; a 3-node Raft KV runs as real processes
+and survives leader `kill -9`.
+
+Former work packages covered in part: M8.3, M9.1, M8.2.
+
+### Slice 5 onward (order to be set when slice 4 closes)
+
+- **The fast engine.** Semi-naive, indexed, the planner; differential tests oracle ⇄ interpreter under plan
+  perturbation on the whole passing corpus (M4.3, M5.1, M6.1, M6.2, M7.1, M7.3).
+- **Lattices and analyses.** Bloom^L lattices, CALM certificates, Blazes, Edelweiss (M3.1, M4.6, M5.6, M6.6, M7.5).
+- **Verification.** BMC, SMT inductive invariants, Paxos Made EPR (M9.5, M10.4).
+- **Code generation** equal to the interpreter (M8.5).
+- **Systems.** Multi-Paxos, the Anna-style KVS, BOOM-FS, BOOM-MR/HOP, the lineage dataflow engine and Tide
+  (M9.2, M9.3, M10.3, M11.1, M12.1, M12.2, M13.1).
+- **Operations and release** (M8.7, M11.5, M12.3, M12.4, M13.3, M13.4, M14.1).
+
+Each is still a slice: a named end-to-end demo and corpus gate, built through every layer it touches.

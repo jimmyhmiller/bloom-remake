@@ -115,3 +115,14 @@ The M1 gate merged M1.1–M1.5; every change it made is listed in `docs/plan/not
 - **Bug items in WP notes name their owner crate first** and are append-only once collected;
   `scripts/collect-notes.sh` refuses a notes file that breaks this instead of dropping its bugs
   (`docs/plan/notes/README.md`).
+
+## Delivery by vertical slices (user decision, 2026-09-28)
+
+After the M2 gate no Blossom program ran, and under the milestone plan none would until M5–M6. Asked through the
+question tool, the user chose:
+
+- **Deliver by vertical slices** instead of the remaining crate-by-crate milestones M3–M15. `docs/design/SLICES.md`
+  is now normative for delivery order; LANGUAGE.md, ARCHITECTURE.md, FEATURES.md and the corpus stay the
+  specification.
+- **Slice 1 is Molly parity**: the `.ded` frontend, the oracle, a synchronous-round simulator, provenance and LDFI,
+  gated on the Molly corpus verdicts (BENCH-130–134, BENCH-137).
