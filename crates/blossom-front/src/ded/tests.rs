@@ -183,11 +183,37 @@ fn static_errors_have_their_codes() {
         codes(
             &[(
                 "p.ded",
-                "p(N) :- q(N), notin pre(N);\npre(N) :- q(N);\npost(N) :- q(N);"
+                "p(N)@next :- q(N), notin pre(N);\npre(N) :- q(N);\npost(N) :- q(N);"
             )],
             &["a"]
         ),
         ["BLS0901"]
+    );
+    // A deductive rule that reads the spec is a spec helper.
+    assert!(
+        codes(
+            &[(
+                "p.ded",
+                "p(N) :- q(N), notin pre(N);\npre(N) :- q(N);\npost(N) :- q(N);"
+            )],
+            &["a"]
+        )
+        .is_empty()
+    );
+    // With a spec, a relation that reads several nodes is a spec helper; without one it is an error.
+    assert!(
+        codes(
+            &[(
+                "p.ded",
+                "d(X) :- q(N, X), q(M, X), N != M;\npre(X) :- d(X);\npost(X) :- d(X);"
+            )],
+            &["a"]
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        codes(&[("p.ded", "d(X) :- q(N, X), q(M, X), N != M;")], &["a"]),
+        ["BLS0508", "BLS0508"]
     );
 }
 

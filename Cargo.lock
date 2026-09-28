@@ -355,6 +355,7 @@ dependencies = [
  "blossom-verify",
  "blossom-wire",
  "proptest",
+ "toml",
 ]
 
 [[package]]
@@ -438,6 +439,7 @@ dependencies = [
  "blossom-ir",
  "blossom-lattice",
  "blossom-value",
+ "thiserror",
 ]
 
 [[package]]
@@ -520,10 +522,12 @@ dependencies = [
  "blossom-engine",
  "blossom-ir",
  "blossom-node",
+ "blossom-oracle",
  "blossom-store",
  "blossom-trace",
  "blossom-value",
  "blossom-wire",
+ "thiserror",
 ]
 
 [[package]]
