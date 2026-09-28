@@ -49,7 +49,7 @@ Molly's programs, run unchanged, through the whole LDFI pipeline, reproducing th
 | Synchronous-round world: nodes, message delivery at t+1, omissions, crashes under `CrashView::MollyContinue`, fault schedules | `blossom-sim` (minimal) | ARCHITECTURE §6, §8.1 |
 | Provenance graph from the firing and message logs | `blossom-prov` | ARCHITECTURE §8.2 |
 | Hazard encoding, Plaisted–Greenbaum CNF, crash order variables, crash budget totalizer, minimal enumeration, driver, Molly's oracle, reports | `blossom-ldfi` | ARCHITECTURE §8.3–§8.5, §8.7 |
-| `blossom run <file.ded> --nodes … --ticks n` (failure-free run, prints relations) and `blossom ldfi <files> --eot --eff --crashes --nodes` | `blossom-cli` | ARCHITECTURE §12 |
+| `blossom sim <file.ded> --nodes … --ticks n [--omit a:b:1] [--crash a:2]` (prints every node's relations tick by tick, and `pre`/`post`) and `blossom ldfi <files> --eot --eff --crashes --nodes` | `blossom-cli` | ARCHITECTURE §12 (`run` stays the production runtime's command) |
 | Corpus runner for `.ded` cases (`[backend.oracle]` failure-free and `[backend.ldfi]`), with the ratchet | `blossom-testkit`, `xtask corpus` | PLAN §5 |
 
 **Gate.**

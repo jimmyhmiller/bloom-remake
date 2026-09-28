@@ -21,7 +21,7 @@ pub mod lineage;
 pub mod reach;
 pub mod report;
 
-pub use driver::{LdfiConfig, LdfiReport, Verdict, falsifiers, run};
+pub use driver::{LdfiConfig, LdfiReport, SearchStats, Verdict, falsifiers, run};
 pub use faults::FailureSpec;
 
 use blossom_base::{InternalError, Unimplemented};
