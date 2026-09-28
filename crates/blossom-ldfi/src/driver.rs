@@ -72,9 +72,21 @@ pub struct LdfiReport {
     pub counterexamples: Vec<Counterexample>,
     /// Concrete executions, the failure-free run included.
     pub runs: u64,
+    pub stats: SearchStats,
     pub failure_free: Outcome,
     pub failure_free_run: SyncRun,
     pub failure_free_graph: ProvGraph,
+}
+
+/// How a search went.
+#[derive(Clone, Debug, Default)]
+pub struct SearchStats {
+    /// Hypotheses the lineage suggested, before deduplication against the explored set.
+    pub suggested: u64,
+    /// The largest number of hypotheses waiting at once.
+    pub queue_peak: usize,
+    /// Executed fault sets by their number of faults.
+    pub by_size: BTreeMap<usize, u64>,
 }
 
 /// The read-only state every hypothesis is processed against. Processing a hypothesis is a pure function of its
@@ -236,28 +248,36 @@ pub fn run(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, LdfiErro
     queue.push(search.hypotheses(&ff_graph, &ff_goals, &FaultSchedule::default())?);
     let mut runs: u64 = 1;
     let mut counterexamples = Vec::new();
+    let mut stats = SearchStats {
+        queue_peak: queue.order.len(),
+        ..SearchStats::default()
+    };
     let workers = config.workers.max(1);
     let ff_post = &ff.post;
     let search = &search;
-    let mut commit = |processed: Processed, runs: &mut u64, queue: &mut Queue<'_>| -> Result<bool, LdfiError> {
-        *runs += 1;
-        match processed {
-            Processed::Bad(ce) => {
-                counterexamples.push(*ce);
-                Ok(!config.find_all)
+    let mut commit =
+        |h: &FaultSchedule, processed: Processed, runs: &mut u64, queue: &mut Queue<'_>| -> Result<bool, LdfiError> {
+            *runs += 1;
+            *stats.by_size.entry(h.len()).or_insert(0) += 1;
+            match processed {
+                Processed::Bad(ce) => {
+                    counterexamples.push(*ce);
+                    Ok(!config.find_all)
+                }
+                Processed::Good(next) => {
+                    stats.suggested += next.len() as u64;
+                    queue.push(next);
+                    stats.queue_peak = stats.queue_peak.max(queue.order.len());
+                    Ok(false)
+                }
             }
-            Processed::Good(next) => {
-                queue.push(next);
-                Ok(false)
-            }
-        }
-    };
+        };
     if workers == 1 {
         while let Some(h) = queue.pop() {
             if runs >= config.max_runs {
                 return Err(LdfiError::Budget(config.max_runs));
             }
-            if commit(search.process(&h, ff_post)?, &mut runs, &mut queue)? {
+            if commit(&h, search.process(&h, ff_post)?, &mut runs, &mut queue)? {
                 break;
             }
         }
@@ -309,7 +329,7 @@ pub fn run(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, LdfiErro
                     }
                 };
                 dispatched.remove(&h);
-                match processed.and_then(|p| commit(p, &mut runs, &mut queue)) {
+                match processed.and_then(|p| commit(&h, p, &mut runs, &mut queue)) {
                     Ok(true) => break Ok(()),
                     Ok(false) => {}
                     Err(e) => break Err(e),
@@ -328,6 +348,7 @@ pub fn run(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, LdfiErro
         },
         counterexamples,
         runs,
+        stats,
         failure_free: ff,
         failure_free_run: ff_run,
         failure_free_graph: ff_graph,

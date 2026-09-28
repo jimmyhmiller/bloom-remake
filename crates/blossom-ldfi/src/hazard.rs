@@ -18,9 +18,8 @@
 //! A derivation that needs the goal it derives is not a support (derivation trees are finite): a goal met again on
 //! the current path counts as already falsified, and a goal whose encoding depended on the path is not shared.
 //!
-//! [`FaultVars`] owns the fault variables of one solver, so the hazards of several runs can share them (the
-//! accumulating search); [`Encoder`] encodes one run's graph into a solver; [`minimal_extensions`] is the seeded
-//! enumeration of §8.4.
+//! [`FaultVars`] owns the fault variables of one solver; [`Encoder`] encodes one run's graph into a solver;
+//! [`minimal_extensions`] is the seeded enumeration of §8.4.
 
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -43,6 +43,9 @@ pub struct Args {
     /// Print the failure-free lineage of every `post` tuple.
     #[arg(long)]
     pub lineage: bool,
+    /// Print search statistics.
+    #[arg(long)]
+    pub stats: bool,
     /// Turn conservative negative support off (for experiments; hypotheses may be missed).
     #[arg(long)]
     pub no_negative_support: bool,
@@ -85,6 +88,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
     config.negative_support = !args.no_negative_support;
     config.max_runs = args.max_runs;
     config.sat = args.sat.clone();
+
     config.workers = args
         .jobs
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get));
@@ -107,6 +111,19 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
     match blossom_ldfi::run(&sim, &config) {
         Ok(report) => {
             print!("{}", render(&artifact, &report));
+            if args.stats {
+                let s = &report.stats;
+                println!(
+                    "\nsearch: {} hypotheses suggested, queue peak {}, executed by fault count: {}",
+                    s.suggested,
+                    s.queue_peak,
+                    s.by_size
+                        .iter()
+                        .map(|(k, n)| format!("{k}:{n}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+            }
             if args.lineage {
                 println!("\nfailure-free lineage of `post`:");
                 print!("{}", post_lineage(&artifact, &report.failure_free_graph, &report));
