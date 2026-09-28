@@ -13,7 +13,6 @@ use blossom_sim::ded::{DedSim, Outcome, is_good};
 
 use crate::LdfiError;
 use crate::faults::{FailureSpec, order_key};
-use crate::hazard::Encoder;
 use crate::lineage;
 use crate::reach::Preds;
 
@@ -145,27 +144,23 @@ impl<'a> Search<'a> {
         goals: &[Row],
         seed: &FaultSchedule,
     ) -> Result<BTreeSet<FaultSchedule>, LdfiError> {
-        let solver = select_backend(&self.config.sat)?;
-        let mut enc = Encoder::new(
+        let mut solver = select_backend(&self.config.sat)?;
+        let mut ids = Vec::with_capacity(goals.len());
+        for row in goals {
+            if let Some(goal) = self.post_goal(graph, row)? {
+                ids.push(goal);
+            }
+        }
+        let found = crate::hazard::minimal_extensions(
             graph,
             &self.config.spec,
             &self.preds,
             self.config.negative_support,
-            solver,
-            seed.clone(),
+            solver.as_mut(),
+            seed,
+            &ids,
         )?;
-        let mut out = BTreeSet::new();
-        for row in goals {
-            let Some(goal) = self.post_goal(graph, row)? else {
-                continue;
-            };
-            for h in enc.minimal_extensions(goal)? {
-                if self.config.spec.admits(&h) {
-                    out.insert(h);
-                }
-            }
-        }
-        Ok(out)
+        Ok(found.into_iter().filter(|h| self.config.spec.admits(h)).collect())
     }
 
     /// Runs `h`, judges it against the failure-free `post`, and for a good run derives the next hypotheses.

@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::sync::Arc;
 
-use blossom_base::{RelId, RuleId};
+use blossom_base::{DetMap, RelId, RuleId};
 use blossom_ir::obs::FiringKind;
 use blossom_value::{
     Value,
@@ -100,7 +100,8 @@ pub enum Premise {
 #[derive(Clone, Debug, Default)]
 pub struct ProvGraph {
     goals: Vec<Goal>,
-    index: BTreeMap<GoalKey, GoalId>,
+    /// Hash iteration order is never observed: the index is only probed.
+    index: DetMap<GoalKey, GoalId>,
     firings: Vec<Firing>,
     by_logical: BTreeMap<(u32, Tick), Vec<GoalId>>,
 }

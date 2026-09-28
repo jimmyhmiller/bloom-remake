@@ -180,7 +180,9 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
     for d in input.delivered {
         db.insert(d.rel, d.row.clone());
     }
-    let mut firings: BTreeSet<FiringRecord> = BTreeSet::new();
+    // A firing is found once per evaluation of its rule, so only a recursive stratum, whose rules are evaluated
+    // again every round, can find one twice.
+    let mut firings: Vec<FiringRecord> = Vec::new();
     let fail = |rule: &Rule, e: ExprError| -> OracleError {
         match e {
             ExprError::Arithmetic(detail) => OracleError::Program {
@@ -201,11 +203,10 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
             let rows = aggregate(&scope, &db, rule, plan, input.capture).map_err(|e| fail(rule, e))?;
             for (row, firing) in rows {
                 db.insert(rule.head.rel, row);
-                if let Some(f) = firing {
-                    firings.insert(f);
-                }
+                firings.extend(firing);
             }
         }
+        let mut recursive_firings: BTreeSet<FiringRecord> = BTreeSet::new();
         let mut rounds = 0u32;
         loop {
             let mut changed = false;
@@ -216,11 +217,16 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
                 for (row, firing) in derived {
                     changed |= db.insert(rule.head.rel, row);
                     if let Some(f) = firing {
-                        firings.insert(f);
+                        if stratum.recursive {
+                            recursive_firings.insert(f);
+                        } else {
+                            firings.push(f);
+                        }
                     }
                 }
             }
             if !stratum.recursive || !changed {
+                firings.extend(std::mem::take(&mut recursive_firings));
                 break;
             }
             rounds += 1;
@@ -250,9 +256,7 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
         db.prepare(rule, plan);
         for (row, firing) in derive(&scope, &db, rule, plan, input.capture).map_err(|e| fail(rule, e))? {
             out.next.insert(rule.head.rel, row);
-            if let Some(f) = firing {
-                firings.insert(f);
-            }
+            firings.extend(firing);
         }
     }
     for &id in &oracle.asynchronous {
@@ -268,15 +272,13 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
                 to,
                 row,
             });
-            if let Some(f) = firing {
-                firings.insert(f);
-            }
+            firings.extend(firing);
         }
     }
     out.instance = Instance {
         rels: db.rows.into_iter().filter(|(_, rows)| !rows.is_empty()).collect(),
     };
-    out.firings = firings.into_iter().collect();
+    out.firings = firings;
     Ok(out)
 }
 
@@ -344,10 +346,10 @@ fn search(
                     )),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let rows: Vec<Row> = db.lookup(*rel, bound, &values).cloned().collect();
-            for row in rows {
-                let saved = env.clone();
-                if unify(scope, env, atom, &row)? {
+            let mut bound_here: Vec<usize> = Vec::with_capacity(atom.args.len());
+            for row in db.lookup(*rel, bound, &values) {
+                let matched = unify(scope, env, atom, row, &mut bound_here)?;
+                if matched {
                     if let Some(slot) = reads.get_mut(*lit) {
                         *slot = Some(row.clone());
                     }
@@ -356,7 +358,12 @@ fn search(
                         *slot = None;
                     }
                 }
-                *env = saved;
+                // Undo exactly the bindings this row made.
+                for i in bound_here.drain(..) {
+                    if let Some(slot) = env.get_mut(i) {
+                        *slot = None;
+                    }
+                }
             }
             Ok(())
         }
@@ -395,11 +402,12 @@ fn search(
             }
             Some(Literal::Bind { pat, expr: e }) => {
                 let v = expr::eval(scope, env, e)?;
-                let saved = env.clone();
+                let mut newly_bound = None;
                 let ok = match pat {
                     Pattern::Var(var) => match env.get_mut(var.index()) {
                         Some(slot @ None) => {
                             *slot = Some(v);
+                            newly_bound = Some(var.index());
                             true
                         }
                         Some(Some(existing)) => *existing == v,
@@ -423,7 +431,9 @@ fn search(
                 } else {
                     Ok(())
                 };
-                *env = saved;
+                if let Some(slot) = newly_bound.and_then(|i| env.get_mut(i)) {
+                    *slot = None;
+                }
                 r
             }
             other => Err(ExprError::Oracle(
@@ -433,8 +443,15 @@ fn search(
     }
 }
 
-/// Binds the atom's unbound variables to `row`, checking its constants and repeated variables.
-fn unify(scope: &Scope<'_>, env: &mut [Option<Value>], atom: &Atom, row: &[Value]) -> expr::ExprResult<bool> {
+/// Binds the atom's unbound variables to `row`, recording each variable it binds in `bound_here` (also on a
+/// mismatch, so the caller can undo them).
+fn unify(
+    scope: &Scope<'_>,
+    env: &mut [Option<Value>],
+    atom: &Atom,
+    row: &[Value],
+    bound_here: &mut Vec<usize>,
+) -> expr::ExprResult<bool> {
     if atom.args.len() != row.len() {
         return Err(ExprError::Oracle(internal_error!("a row of the wrong arity").into()));
     }
@@ -447,7 +464,10 @@ fn unify(scope: &Scope<'_>, env: &mut [Option<Value>], atom: &Atom, row: &[Value
                 }
             }
             Term::Var(var) => match env.get_mut(var.index()) {
-                Some(slot @ None) => *slot = Some(v.clone()),
+                Some(slot @ None) => {
+                    *slot = Some(v.clone());
+                    bound_here.push(var.index());
+                }
                 Some(Some(existing)) => {
                     if existing != v {
                         return Ok(false);

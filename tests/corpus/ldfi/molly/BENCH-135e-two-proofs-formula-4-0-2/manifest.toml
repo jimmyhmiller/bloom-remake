@@ -15,9 +15,7 @@ LDFI §4.3: '(O(a,c,2) v C(a,2) v C(a,1)) & (O(b,c,1) v C(b,1)) corresponds to a
 """
 
 [backend.ldfi]
-status = "unimplemented"
-unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-027"]
-until = "M8"
+status = "pass"
 
 [expect_ldfi]
 eot = 4

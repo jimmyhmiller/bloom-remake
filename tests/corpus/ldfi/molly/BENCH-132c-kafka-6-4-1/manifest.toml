@@ -17,9 +17,7 @@ Program re-derived from the paper (../lib/kafka/replication.ded): the replicatio
 """
 
 [backend.ldfi]
-status = "unimplemented"
-unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025", "TEST-027", "ANA-010"]
-until = "M8"
+status = "pass"
 
 [expect_ldfi]
 eot = 6
