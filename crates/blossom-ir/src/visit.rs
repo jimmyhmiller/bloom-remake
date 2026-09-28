@@ -961,6 +961,7 @@ impl Remap for ConstructKind {
             },
             Self::Interpose => Self::Interpose,
             Self::Localize => Self::Localize,
+            Self::DedRelation { rel } => Self::DedRelation { rel: rel.remap(m) },
             Self::Invariant { id } => Self::Invariant { id: id.remap(m) },
             Self::SpecOracle => Self::SpecOracle,
             Self::Service { id } => Self::Service { id: id.remap(m) },

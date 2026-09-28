@@ -304,6 +304,7 @@ dependencies = [
 name = "blossom-front"
 version = "0.1.0"
 dependencies = [
+ "blossom-artifact",
  "blossom-base",
  "blossom-ir",
  "blossom-lattice",
@@ -311,6 +312,8 @@ dependencies = [
  "blossom-std-src",
  "blossom-syntax",
  "blossom-value",
+ "thiserror",
+ "toml",
 ]
 
 [[package]]
