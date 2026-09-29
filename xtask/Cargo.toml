@@ -19,6 +19,8 @@ blossom-ir.workspace = true
 blossom-oracle.workspace = true
 blossom-sim.workspace = true
 blossom-ldfi.workspace = true
+blossom-node.workspace = true
+blossom-engine.workspace = true
 clap.workspace = true
 proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
 serde.workspace = true

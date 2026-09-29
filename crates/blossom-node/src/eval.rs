@@ -114,3 +114,67 @@ impl<X: Executor + ?Sized> Executor for Box<X> {
         (**self).carried_rows(rel)
     }
 }
+
+impl Executor for blossom_engine::Engine {
+    fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
+        blossom_engine::Engine::reset(self, carried)
+    }
+
+    fn step(&mut self, input: &StepInput<'_>, observe: &[RelId]) -> Result<StepOutput, EvalError> {
+        blossom_engine::Engine::step(self, input, observe)
+    }
+
+    fn carried_rows(&self, rel: RelId) -> Vec<Row> {
+        blossom_engine::Engine::carried_rows(self, rel)
+    }
+}
+
+/// The engine behind the reference interface, for the simulator and the differential suite: one engine per node,
+/// created at the node's first tick from the carried state that tick names. Every later tick must name the state
+/// that engine carried (the harness feeds each node its own last output), which is checked.
+pub struct EngineEvaluator {
+    program: blossom_ir::ValidatedProgram,
+    cfg: blossom_engine::EngineConfig,
+    engines: std::sync::Mutex<BTreeMap<blossom_value::time::NodeId, blossom_engine::Engine>>,
+    /// Check at every tick that the carried state named is the one the engine carried (O(state) per tick).
+    pub check_carried: bool,
+}
+
+impl EngineEvaluator {
+    pub fn new(program: blossom_ir::ValidatedProgram, cfg: blossom_engine::EngineConfig) -> EngineEvaluator {
+        EngineEvaluator {
+            program,
+            cfg,
+            engines: std::sync::Mutex::new(BTreeMap::new()),
+            check_carried: true,
+        }
+    }
+}
+
+impl Evaluator for EngineEvaluator {
+    fn tick(&self, input: &TickInput<'_>) -> Result<TickOutput, EvalError> {
+        let mut engines = self
+            .engines
+            .lock()
+            .map_err(|_| blossom_base::internal_error!("the engine table's lock is poisoned"))?;
+        let engine = match engines.entry(input.node) {
+            std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::btree_map::Entry::Vacant(v) => {
+                let mut engine = blossom_engine::Engine::new(self.program.clone(), input.node, self.cfg.clone())?;
+                engine.reset(input.carried.clone())?;
+                v.insert(engine)
+            }
+        };
+        if self.check_carried {
+            let mine = engine.carried_instance();
+            if mine != *input.carried {
+                return Err(blossom_base::internal_error!(
+                    "node {} ticked from a carried state that is not the engine's own",
+                    input.node.0
+                )
+                .into());
+            }
+        }
+        engine.tick_full(input)
+    }
+}
