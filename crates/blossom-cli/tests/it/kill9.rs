@@ -127,6 +127,7 @@ fn kill_9_never_loses_an_acknowledged_write() {
         mix: (45, 40, 15),
         value_size: 24,
         seed: 42,
+        namespace: String::new(),
         record: true,
     };
     let stop = Arc::new(AtomicBool::new(false));

@@ -39,6 +39,9 @@ pub struct Workload {
     /// Bytes per value (at least long enough to be unique).
     pub value_size: usize,
     pub seed: u64,
+    /// A prefix for every key, so runs against a store that already holds data do not see each other's keys (the
+    /// checker assumes every key starts absent).
+    pub namespace: String,
     /// Whether to keep the full history (for the checker); latencies are always recorded.
     pub record: bool,
 }
@@ -131,7 +134,7 @@ fn client(
                 }
             },
         };
-        let key = format!("k{}", rng.below(w.keys as u64)).into_bytes();
+        let key = format!("{}k{}", w.namespace, rng.below(w.keys as u64)).into_bytes();
         let pick = rng.below(total);
         seq += 1;
         let input = if pick < u64::from(w.mix.0) {
