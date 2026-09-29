@@ -10,6 +10,7 @@
 
 pub mod acl;
 pub mod durable;
+pub mod env;
 pub mod eval;
 pub mod manual;
 pub mod node;

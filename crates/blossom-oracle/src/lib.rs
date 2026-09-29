@@ -262,6 +262,11 @@ impl Oracle {
         &self.program
     }
 
+    /// The rows of the program's `fact`s: the static rows every tick starts with.
+    pub fn static_facts(&self) -> &Instance {
+        &self.statics
+    }
+
     /// The deductive strata, in evaluation order.
     pub fn strata(&self) -> &[Stratum] {
         &self.strata

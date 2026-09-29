@@ -49,11 +49,18 @@ at Server {
         send get_resp(id, key, val) to c;
     }
 
+    /// Deletes of one key in one tick are concurrent, and only one of them can observe the stored row: the one with
+    /// the greatest (session, id). The others are ordered after it and report that the key did not exist.
+    view del_winner(key, c, id) = del(id, key) from c, store(key, _), choose_most!((c, id) per key);
+
     /// Delete removes the exact stored row at t+1. If a put of the same key wins in the same tick, the upsert
-    /// re-inserts the key and insert wins (CR-05): the delete is ordered before the put.
-    remove: on del(id, key) from c, store(key, v) {
+    /// re-inserts the key and insert wins (CR-05): the deletes are ordered before the put.
+    remove: on del(id, key) from c, del_winner(key, c, id), store(key, v) {
         delete store(key, v);
         send del_ok(id, true) to c;
+    }
+    remove_after: on del(id, key) from c, store(key, _), not del_winner(key, c, id) {
+        send del_ok(id, false) to c;
     }
     remove_missing: on del(id, key) from c, not store(key, _) {
         send del_ok(id, false) to c;

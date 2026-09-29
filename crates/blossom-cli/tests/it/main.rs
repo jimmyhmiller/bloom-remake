@@ -1,5 +1,7 @@
 //! Integration tests of the `blossom` binary: dispatch, exit codes and placeholders.
 
+mod kill9;
+
 use std::process::Command;
 
 /// Runs the built `blossom` binary (test-only helper).
