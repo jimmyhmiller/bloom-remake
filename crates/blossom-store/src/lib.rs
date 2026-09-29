@@ -300,6 +300,7 @@ mod tests {
             understood_version: 1,
             poison_deny_list: vec![],
             clean_shutdown: false,
+            certification: Certification::default(),
         };
         meta.write(&record).unwrap();
         let mut fs2 = fs.fork().unwrap();

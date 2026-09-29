@@ -50,6 +50,7 @@ struct Kvs {
     schema: DurableSchema,
     names: Arc<[Arc<str>]>,
     dir: PathBuf,
+    certification: blossom_store::Certification,
 }
 
 #[cfg(test)]
@@ -73,7 +74,14 @@ impl Kvs {
             schema,
             names,
             dir: PathBuf::from("/data/s1"),
+            certification: blossom_store::Certification::Strict,
         }
+    }
+
+    /// The same node with stores that certify their WAL tails as `c`.
+    fn certified(mut self, c: blossom_store::Certification) -> Kvs {
+        self.certification = c;
+        self
     }
 
     fn rel(&self, name: &str) -> blossom_base::RelId {
@@ -90,6 +98,7 @@ impl Kvs {
                 dir: self.dir.clone(),
                 identity: identity(),
                 mode: OpenMode::InitFresh,
+                certification: self.certification,
             },
             self.artifact.program.get(),
             self.names.clone(),
@@ -304,6 +313,7 @@ fn invariant_r_holds_under_random_sync_schedules() {
                     dir: k.dir.clone(),
                     identity: identity(),
                     mode: OpenMode::InitFresh,
+                    certification: k.certification,
                 },
                 k.artifact.program.get(),
                 k.names.clone(),
@@ -352,7 +362,17 @@ fn invariant_r_holds_under_random_sync_schedules() {
 /// acknowledged before the crash is in the recovered store, and nothing that was never sent is.
 #[test]
 fn every_crash_point_keeps_every_acknowledged_put() {
-    let k = Kvs::new();
+    crash_points(&Kvs::new());
+}
+
+/// The same with one sync per group commit (`Certification::Crc`, etcd's model): the guarantee to clients is the same.
+#[test]
+fn every_crash_point_keeps_every_acknowledged_put_with_one_sync_per_commit() {
+    crash_points(&Kvs::new().certified(blossom_store::Certification::Crc));
+}
+
+#[cfg(test)]
+fn crash_points(k: &Kvs) {
     let fs = SimFs::default();
     fs.enable_crash_recording().unwrap();
     // For each acknowledged put: (key, value, the number of recorded cuts when its reply was released).
@@ -617,4 +637,29 @@ fn large_puts_are_spread_over_ticks() {
     let r = d.run_until_quiescent(Instant(2_000)).unwrap();
     assert_eq!(replies(&k, &r).len(), 5);
     assert_eq!(k.store(&d).len(), 5);
+}
+
+/// A store keeps the tail certification it was created with: opening it with another is refused.
+#[test]
+fn a_store_refuses_another_tail_certification() {
+    let k = Kvs::new();
+    let fs = SimFs::default();
+    drop(k.boot(&fs, 0));
+    let crc = Kvs::new().certified(blossom_store::Certification::Crc);
+    let err = recovery::open(
+        Arc::new(fs.clone()),
+        &StoreSpec {
+            dir: crc.dir.clone(),
+            identity: identity(),
+            mode: OpenMode::Existing,
+            certification: crc.certification,
+        },
+        crc.artifact.program.get(),
+        crc.names.clone(),
+        Instant(10),
+        2,
+    )
+    .err();
+    let Some(err) = err else { panic!("a strict store opened as crc") };
+    assert!(err.to_string().contains("tail certification"), "{err}");
 }

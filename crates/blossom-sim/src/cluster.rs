@@ -94,6 +94,8 @@ pub struct ClusterConfig {
     pub principal: String,
     /// The evaluator the nodes run.
     pub backend: Backend,
+    /// How the nodes' stores certify their WAL tails.
+    pub certification: blossom_store::Certification,
 }
 
 impl Default for ClusterConfig {
@@ -114,6 +116,7 @@ impl Default for ClusterConfig {
             duration: 5_000_000_000,
             principal: "spiffe://sim/client".into(),
             backend: Backend::default(),
+            certification: blossom_store::Certification::default(),
         }
     }
 }
@@ -330,6 +333,7 @@ impl<'p> Cluster<'p> {
     fn boot(&mut self, n: NodeId, fresh: bool) -> Result<(), SimError> {
         let names = self.names.clone();
         let now = self.now;
+        let certification = self.cfg.certification;
         let artifact = self.artifact;
         let statics = self.statics.clone();
         let schema = self.schema;
@@ -344,6 +348,7 @@ impl<'p> Cluster<'p> {
                 dir: PathBuf::from(format!("/node{}", n.0)),
                 identity: identity(&names, n),
                 mode: if fresh { OpenMode::InitFresh } else { OpenMode::Existing },
+                certification,
             },
             artifact.program.get(),
             names.clone(),

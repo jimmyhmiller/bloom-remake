@@ -318,6 +318,7 @@ impl Server {
                 dir,
                 identity: store_identity(spec, &artifact, &cfg.node)?,
                 mode: cfg.mode,
+                certification: spec.tail_certification,
             },
             program,
             names.clone(),
