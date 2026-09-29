@@ -325,6 +325,7 @@ impl Lowerer<'_> {
             HRelKind::Input { root: false } => (RelClass::Idb, Some(InterfaceDir::Input)),
             HRelKind::Output { .. } | HRelKind::Halt => (RelClass::Idb, Some(InterfaceDir::Output)),
             HRelKind::Boot => (RelClass::Event(EventSource::Boot), None),
+            HRelKind::Recovered => (RelClass::Event(EventSource::Recovered), None),
             HRelKind::Timer { every } => {
                 let every = i64::try_from(*every)
                     .map(Duration::from_nanos)
@@ -377,6 +378,7 @@ impl Lowerer<'_> {
             | HRelKind::Members(_)
             | HRelKind::NodeDir
             | HRelKind::Boot
+            | HRelKind::Recovered
             | HRelKind::Halt => Placement::Shared,
             _ => Self::placement(r.role),
         };

@@ -91,6 +91,8 @@ pub struct Boot {
     pub time_reserved: Instant,
     /// The boot instant: after every instant an earlier incarnation used.
     pub now: Instant,
+    /// The incarnation: the store's restart count after this boot (1 on the first boot).
+    pub incarnation: u64,
     /// Whether durable state was reloaded: every incarnation after the first. `recovered()` holds in the boot tick
     /// iff this is set (LANGUAGE §8.4, SEM-071).
     pub recovered: bool,
@@ -152,6 +154,7 @@ pub struct Node<E: Evaluator> {
     boot_rel: Option<RelId>,
     recovered_rel: Option<RelId>,
     recovered: bool,
+    incarnation: u64,
     /// The next tick to run.
     tick: Tick,
     reserved: Tick,
@@ -222,6 +225,7 @@ impl<E: Evaluator> Node<E> {
             boot_rel,
             recovered_rel,
             recovered: boot.recovered,
+            incarnation: boot.incarnation,
             tick: boot.tick,
             reserved: boot.reserved,
             time_reserved: boot.time_reserved,
@@ -417,6 +421,7 @@ impl<E: Evaluator> Node<E> {
         }
         let out = self.eval.tick(&TickInput {
             node: self.cfg.node,
+            incarnation: self.incarnation,
             tick,
             now,
             carried: &self.carried,

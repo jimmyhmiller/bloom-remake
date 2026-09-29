@@ -540,6 +540,10 @@ impl Lowerer<'_> {
                     Builtin::RoleSize(r) => ir::BuiltinFn::Size {
                         role: RoleId::from_raw(r.0),
                     },
+                    Builtin::RandRange => ir::BuiltinFn::RandRange,
+                    Builtin::Majority(r) => ir::BuiltinFn::Majority {
+                        domain: ir::MajorityDomain::Role(RoleId::from_raw(r.0)),
+                    },
                 };
                 Expr::Call {
                     f: ir::FnRef::Builtin(f),

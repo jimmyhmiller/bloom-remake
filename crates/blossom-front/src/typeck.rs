@@ -1306,6 +1306,34 @@ impl Checker<'_> {
                             self.con(&mut hir.types, TypeDef::Int(IntTy::U64))
                         }
                         Builtin::RoleSize(_) => self.con(&mut hir.types, TypeDef::Int(IntTy::U64)),
+                        Builtin::RandRange => {
+                            // `lo` and `hi` share a type that subtracts to itself: an integer or a duration.
+                            match (ats.first().copied(), ats.get(1).copied()) {
+                                (Some(lo), Some(hi)) => {
+                                    self.unify(&hir.types, lo, hi, span);
+                                    self.deferred.push(Deferred::Arith {
+                                        op: BinOp::Sub,
+                                        l: lo,
+                                        r: hi,
+                                        res: lo,
+                                        span,
+                                    });
+                                    lo
+                                }
+                                _ => self.fresh(false),
+                            }
+                        }
+                        Builtin::Majority(role) => {
+                            if let Some(s) = ats.first().copied() {
+                                let node = self.con(&mut hir.types, TypeDef::Node(Some(RoleId::from_raw(role.0))));
+                                self.deferred.push(Deferred::In {
+                                    elem: node,
+                                    coll: s,
+                                    span,
+                                });
+                            }
+                            self.con(&mut hir.types, TypeDef::Bool)
+                        }
                         Builtin::Contains => {
                             if let (Some(c), Some(x)) = (ats.first(), ats.get(1)) {
                                 self.deferred.push(Deferred::In {

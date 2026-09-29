@@ -31,8 +31,84 @@ impl Lowerer<'_> {
         super::expr::tuple_type(&mut self.b, tys)
     }
 
+    /// Lowers the order filter `argmin!`/`argmax!` of the body drafted in `d` (LANGUAGE §10.3):
+    ///
+    /// ```ir
+    /// s$cand(X̄, C) :- body.
+    /// s$ext(X̄, max<C>) :- s$cand(X̄, C).                                   // `min` for argmin
+    /// head :- body, s$ext(X̄, C).                                          // every tie survives
+    /// ```
+    fn extreme(&mut self, d: &mut Draft, c: &HChoose, names: &mut Names) -> Result<(), InternalError> {
+        let Some((cost_e, most)) = &c.cost else {
+            return Err(internal_error!("an order filter without its order"));
+        };
+        let mut x = Vec::new();
+        let mut xt = Vec::new();
+        for e in &c.per {
+            x.push(self.term(d, e)?);
+            xt.push(ty_of(e)?);
+        }
+        let cost = self.term(d, cost_e)?;
+        let ct = ty_of(cost_e)?;
+        names.counter += 1;
+        let tag = format!("${}#{}", if *most { "argmax" } else { "argmin" }, names.counter);
+        let role = names.role;
+        let span = c.span;
+        let col = |name: String, ty: TypeId| column(Symbol::intern(&name), ty, false);
+        let mut cols: Vec<Column> = xt.iter().enumerate().map(|(i, t)| col(format!("x{i}"), *t)).collect();
+        cols.push(col("cost".into(), ct));
+        let nx = x.len();
+        let group: Vec<usize> = (0..nx).collect();
+        let cand = self.generated(names.rel_segments(&format!("{tag}$cand")), cols.clone(), None, role, false, span)?;
+        let ext = self.generated(names.rel_segments(&format!("{tag}$ext")), cols, Some(&group), role, false, span)?;
+        let mut args: Vec<Term> = x.clone();
+        args.push(cost.clone());
+        let label = self.label(format!("{}{tag}$cand", names.base));
+        d.clone().build(
+            &mut self.b,
+            RuleKind::Deductive,
+            label,
+            span,
+            Head {
+                rel: cand,
+                args: args.iter().cloned().map(HeadArg::Term).collect(),
+                mode: HeadMode::Insert,
+            },
+            role,
+        )?;
+        let role_id = role.map(|r| blossom_base::RoleId::from_raw(r.0));
+        let label = self.label(format!("{}{tag}$ext", names.base));
+        let mut rb = self.b.rule(RuleKind::Deductive, label, span);
+        let mut vs = Vec::new();
+        for (i, t) in xt.iter().chain(std::iter::once(&ct)).enumerate() {
+            vs.push(rb.var(Symbol::intern(&format!("V{i}")), *t).map_err(ir)?);
+        }
+        rb.lit(Literal::Pos(atom(cand, vs.iter().map(|v| Term::Var(*v)).collect(), span)));
+        let mut hargs: Vec<HeadArg> = vs.iter().take(nx).map(|v| HeadArg::Term(Term::Var(*v))).collect();
+        let cv = vs.get(nx).copied().ok_or_else(|| internal_error!("an order filter without its cost variable"))?;
+        hargs.push(HeadArg::Agg(AggCall {
+            func: if *most { AggFunc::Max } else { AggFunc::Min },
+            args: vec![Term::Var(cv)],
+            order: None,
+        }));
+        rb.head(
+            Head {
+                rel: ext,
+                args: hargs,
+                mode: HeadMode::Insert,
+            },
+            role_id,
+        )
+        .map_err(ir)?;
+        d.lits.push(Literal::Pos(atom(ext, args, span)));
+        Ok(())
+    }
+
     /// Lowers the choice `c` of the body drafted in `d`: its expansion, and `s$chosen(X̄, Ȳ)` added to `d`.
     pub(crate) fn choose(&mut self, d: &mut Draft, c: &HChoose, names: &mut Names) -> Result<(), InternalError> {
+        if c.ties {
+            return self.extreme(d, c, names);
+        }
         let mut x = Vec::new();
         let mut xt = Vec::new();
         for e in &c.per {

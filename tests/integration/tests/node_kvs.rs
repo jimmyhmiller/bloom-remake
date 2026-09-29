@@ -61,6 +61,8 @@ impl Kvs {
                 .unwrap()
                 .with_roles(artifact.roles.clone())
                 .with_seed(blossom_value::Seed([9; 16]))
+                .unwrap()
+                .with_node_names(artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect())
                 .unwrap(),
         );
         let schema = DurableSchema::of(artifact.program.get());

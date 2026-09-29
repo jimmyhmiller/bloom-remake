@@ -31,10 +31,47 @@ pub struct NodeSpec {
     pub role: Option<String>,
 }
 
+/// A deployment's value for a deploy-time parameter (LANG-010), typed as the deployment spec writes it: an integer,
+/// a bool, or text (a string, or a duration such as `"150ms"`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ParamBinding {
+    Int(i128),
+    Bool(bool),
+    Text(String),
+}
+
+/// A duration written like a Blossom literal: `500ms`, `1s`, `2m`, `1h`, `10us`, `5ns`.
+pub fn parse_duration(text: &str) -> Option<blossom_value::time::Duration> {
+    let split = text.find(|c: char| c.is_ascii_alphabetic())?;
+    let (num, unit) = text.split_at(split);
+    let n: i64 = num.trim().parse().ok()?;
+    let scale: i64 = match unit {
+        "ns" => 1,
+        "us" => 1_000,
+        "ms" => 1_000_000,
+        "s" => 1_000_000_000,
+        "m" => 60_000_000_000,
+        "h" => 3_600_000_000_000,
+        _ => return None,
+    };
+    n.checked_mul(scale).map(blossom_value::time::Duration::from_nanos)
+}
+
 /// Compiles the program rooted at `root` for a deployment of `nodes`. Warnings are returned with the artifact.
 pub fn compile(
     root: &str,
     nodes: &[NodeSpec],
+    loader: &mut dyn Loader,
+    sources: &mut SourceDb,
+) -> Result<(BlsArtifact, Diagnostics), BlsError> {
+    compile_with(root, nodes, &std::collections::BTreeMap::new(), loader, sources)
+}
+
+/// [`compile`] with the deployment's values of deploy-time parameters.
+pub fn compile_with(
+    root: &str,
+    nodes: &[NodeSpec],
+    params: &std::collections::BTreeMap<String, ParamBinding>,
     loader: &mut dyn Loader,
     sources: &mut SourceDb,
 ) -> Result<(BlsArtifact, Diagnostics), BlsError> {
@@ -45,7 +82,7 @@ pub fn compile(
     if diags.has_errors() {
         return Err(BlsError::Rejected(diags));
     }
-    let Some(mut hir) = crate::resolve::resolve(&tree, sources, &mut diags)? else {
+    let Some(mut hir) = crate::resolve::resolve(&tree, sources, &mut diags, params)? else {
         return Err(BlsError::Rejected(diags));
     };
     crate::typeck::check(&mut hir, &mut diags)?;

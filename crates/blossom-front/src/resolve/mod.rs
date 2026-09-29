@@ -30,7 +30,12 @@ use crate::hir::*;
 use crate::modules::ModuleTree;
 
 /// Resolves the program rooted at `tree.root`. Returns `None` when the program is rejected; `diags` says why.
-pub fn resolve(tree: &ModuleTree, sources: &SourceDb, diags: &mut Diagnostics) -> Result<Option<Hir>, InternalError> {
+pub fn resolve(
+    tree: &ModuleTree,
+    sources: &SourceDb,
+    diags: &mut Diagnostics,
+    params: &BTreeMap<String, crate::api::ParamBinding>,
+) -> Result<Option<Hir>, InternalError> {
     let Some(header) = &tree.root.header else {
         diags.push(
             Diagnostic::new(
@@ -42,8 +47,19 @@ pub fn resolve(tree: &ModuleTree, sources: &SourceDb, diags: &mut Diagnostics) -
         return Ok(None);
     };
     let mut r = Resolver::new(tree, sources, diags, header.name.name, header.version, header.edition);
+    r.param_bindings = params.clone();
     let root = r.new_scope(ModScope::empty(FileKey::Root));
     r.process(root, &tree.root.items, None);
+    for name in params.keys() {
+        if !r.params_declared.contains(name) {
+            let span = Span::point(tree.root.span.file, 0);
+            r.error(
+                code!("BLS0205"),
+                span,
+                format!("the deployment binds `{name}`, which the program does not declare as a `param`"),
+            );
+        }
+    }
     r.finish()
 }
 
@@ -232,6 +248,7 @@ pub(crate) struct Instance {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum BuiltinRel {
     Boot,
+    Recovered,
     LocalTick,
     Halt,
     NodeDir,
@@ -269,6 +286,11 @@ pub(crate) struct Resolver<'t, 'd> {
     pub empty: ModScope<'t>,
     /// Spec mode, when resolving a spec's views.
     pub spec: Option<SpecMode>,
+    /// The deployment's values of deploy-time parameters (LANG-010), by name; a `param` it does not bind takes its
+    /// default.
+    pub param_bindings: BTreeMap<String, crate::api::ParamBinding>,
+    /// The parameters declared, to report bindings of names that are not parameters.
+    pub params_declared: BTreeSet<String>,
 }
 
 impl<'t, 'd> Resolver<'t, 'd> {
@@ -307,6 +329,8 @@ impl<'t, 'd> Resolver<'t, 'd> {
             bugs: Vec::new(),
             empty: ModScope::empty(FileKey::Root),
             spec: None,
+            param_bindings: BTreeMap::new(),
+            params_declared: BTreeSet::new(),
         }
     }
 
@@ -425,6 +449,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
         }
         let (name, kind) = match which {
             BuiltinRel::Boot => ("boot", HRelKind::Boot),
+            BuiltinRel::Recovered => ("recovered", HRelKind::Recovered),
             BuiltinRel::LocalTick => ("localtick", HRelKind::LocalTick),
             BuiltinRel::Halt => ("halt", HRelKind::Halt),
             BuiltinRel::NodeDir => ("node_dir", HRelKind::NodeDir),
@@ -1444,9 +1469,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 | ItemKind::Rel(_)
                 | ItemKind::Timer(_)
                 | ItemKind::Unsupported { .. } => {}
-                ItemKind::Param { name, .. } => {
-                    self.unsupported("LANG-010", "deploy-time parameters", name.span);
-                }
+                ItemKind::Param { .. } => {}
             }
         }
     }
@@ -1749,6 +1772,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 .copied()
                 .or_else(|| match name.as_str() {
                     "boot" => Some(self.builtin(BuiltinRel::Boot, name.span)),
+                    "recovered" => Some(self.builtin(BuiltinRel::Recovered, name.span)),
                     "localtick" => Some(self.builtin(BuiltinRel::LocalTick, name.span)),
                     "halt" => Some(self.builtin(BuiltinRel::Halt, name.span)),
                     "node_dir" => Some(self.builtin(BuiltinRel::NodeDir, name.span)),
@@ -1813,8 +1837,77 @@ impl<'t, 'd> Resolver<'t, 'd> {
         self.scope_mut(s).write_redirect.insert(real, outside);
     }
 
-    /// Fold `const` items of the scope's module and file.
+    /// Fold `const` items of the scope's module and file, then `param` items: a deploy-time parameter is a constant
+    /// of the deployment, its binding or else its default (LANG-010; the program is compiled per deployment).
     fn fold_consts(&mut self, s: ScopeIdx, items: &'t [ast::Item]) {
+        self.fold_const_items(s, items);
+        for item in items {
+            let ItemKind::Param { name, ty, default } = &item.kind else {
+                continue;
+            };
+            self.params_declared.insert(name.as_str().to_owned());
+            let Some(t) = self.resolve_type(s, ty) else { continue };
+            let value = match self.param_bindings.get(name.as_str()).cloned() {
+                Some(b) => self.bound_param(name, t, &b),
+                None => match default {
+                    Some(e) => self.const_value(s, e, Some(t)),
+                    None => {
+                        self.error(
+                            code!("BLS0205"),
+                            name.span,
+                            format!(
+                                "the parameter `{}` has no default and the deployment does not bind it",
+                                name.as_str()
+                            ),
+                        );
+                        None
+                    }
+                },
+            };
+            if let Some(v) = value {
+                if self.scope(s).values.contains_key(&name.name) {
+                    self.error(
+                        code!("BLS0201"),
+                        name.span,
+                        format!("`{}` is defined twice", name.as_str()),
+                    );
+                }
+                self.scope_mut(s).values.insert(name.name, v);
+            }
+        }
+    }
+
+    /// A deployment's binding of parameter `name` of type `t`.
+    fn bound_param(&mut self, name: &Ident, t: TypeId, b: &crate::api::ParamBinding) -> Option<(Value, TypeId)> {
+        use crate::api::ParamBinding as B;
+        let def = self.hir.types.get(t).cloned();
+        let v = match (&def, b) {
+            (Some(TypeDef::Int(ity)), B::Int(n)) => blossom_value::value::IntValue::from_i128(*ity, *n).map(Value::Int),
+            (Some(TypeDef::Bool), B::Bool(x)) => Some(Value::Bool(*x)),
+            (Some(TypeDef::Str), B::Text(x)) => Some(Value::Str(x.as_str().into())),
+            (Some(TypeDef::Duration), B::Text(x)) => crate::api::parse_duration(x).map(Value::Duration),
+            _ => None,
+        };
+        match v {
+            Some(v) => Some((v, t)),
+            None => {
+                self.error(
+                    code!("BLS0205"),
+                    name.span,
+                    format!(
+                        "the deployment's value {b:?} for `{}` is not a {} (bindings are integers, bools, strings and \
+                         durations such as \"150ms\")",
+                        name.as_str(),
+                        def.map_or("known type".to_string(), |d| format!("{d:?}"))
+                    ),
+                );
+                None
+            }
+        }
+    }
+
+    /// Fold `const` items of the scope's module and file.
+    fn fold_const_items(&mut self, s: ScopeIdx, items: &'t [ast::Item]) {
         for item in items {
             if let ItemKind::Const { name, ty, value } = &item.kind {
                 let Some(t) = self.resolve_type(s, ty) else { continue };
