@@ -23,10 +23,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use blossom_base::internal_error;
-use blossom_prov::{GoalId, Premise, ProvGraph, Support};
+use blossom_base::{ConstId, RelId, internal_error};
+use blossom_ir::core::{Expr, HeadArg, Literal, Rule, Term};
+use blossom_prov::{GoalId, Loc, Premise, ProvGraph, Space, Support};
 use blossom_sat::{Lit, SatOutcome, SatSolver, SolveLimits, Var, card};
 use blossom_sim::{FaultSchedule, Omission};
+use blossom_value::Value;
 use blossom_value::time::{NodeId, Tick};
 
 use crate::LdfiError;
@@ -42,6 +44,49 @@ pub enum Hazard {
     True,
     Lit(Lit),
 }
+
+/// How negated reads are supported (TEST-025).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum NegSupport {
+    /// Negated reads are never falsified. Unsound for non-monotone programs (it misses the 3PC and Kafka
+    /// counterexamples); for experiments and Molly comparisons only.
+    Off,
+    /// Relation-level (CR-31): the facts of every relation that reaches the negated one, at earlier ticks or along a
+    /// deductive path at the same tick.
+    Conservative,
+    /// Tuple-level: a negated read is falsified only if a tuple matching its pattern can appear, which needs some rule
+    /// that derives such a tuple to gain a satisfying valuation: one of its positive body atoms gains a matching
+    /// tuple, or a tuple blocking one of its negated atoms is lost (see [`Encoder`]).
+    Precise,
+}
+
+/// How the tuples of a program's relations come about, for tuple-level negative support.
+pub trait Rules {
+    /// The deployment's node count.
+    fn nodes(&self) -> u32;
+    fn origin(&self, space: Space, rel: RelId) -> Origin<'_>;
+    fn constant(&self, space: Space, id: ConstId) -> Option<&Value>;
+}
+
+/// Where a relation's tuples come from.
+pub enum Origin<'r> {
+    /// Input events and static facts: faults create none.
+    Input,
+    /// Derived by rules: deductive and inductive ones, and for a channel the async rules that send to it.
+    Rules {
+        deductive: Vec<&'r Rule>,
+        inductive: Vec<&'r Rule>,
+        asynchronous: Vec<&'r Rule>,
+    },
+    /// A copy of a protocol relation's tuples (the spec's inputs): column 0 is the node; at a fixed tick, or at the
+    /// read's own tick.
+    Snapshot { protocol: RelId, tick: Option<Tick> },
+    /// The crash oracle `crash(Observer, Node, Time)`.
+    Crash,
+}
+
+type Pattern = Vec<Option<Value>>;
+type PlaceKey = (Space, RelId, Loc, Tick, Pattern);
 
 /// The fault variables of one solver: `O(from,to,send)` per allowed omission, and the crash-order variables
 /// `K(n,t)` for `t` in `1..EOT` per node, created on first use.
@@ -214,7 +259,11 @@ pub struct Encoder<'a> {
     graph: &'a ProvGraph,
     spec: &'a FailureSpec,
     preds: &'a Preds,
-    negative_support: bool,
+    neg: NegSupport,
+    rules: Option<&'a dyn Rules>,
+    appear_memo: BTreeMap<PlaceKey, Hazard>,
+    appear_path: BTreeMap<PlaceKey, usize>,
+    remove_memo: BTreeMap<PlaceKey, Hazard>,
     solver: &'a mut dyn SatSolver,
     vars: &'a mut FaultVars,
     /// Per goal (dense by id): its memoized hazard, and its depth on the current path.
@@ -229,11 +278,14 @@ pub struct Encoder<'a> {
 }
 
 impl<'a> Encoder<'a> {
+    /// An encoder for `graph`. Tuple-level negative support needs the program's `rules`; without them
+    /// [`NegSupport::Precise`] falls back to relation-level support.
     pub fn new(
         graph: &'a ProvGraph,
         spec: &'a FailureSpec,
         preds: &'a Preds,
-        negative_support: bool,
+        neg: NegSupport,
+        rules: Option<&'a dyn Rules>,
         solver: &'a mut dyn SatSolver,
         vars: &'a mut FaultVars,
     ) -> Encoder<'a> {
@@ -241,7 +293,11 @@ impl<'a> Encoder<'a> {
             graph,
             spec,
             preds,
-            negative_support,
+            neg,
+            rules,
+            appear_memo: BTreeMap::new(),
+            appear_path: BTreeMap::new(),
+            remove_memo: BTreeMap::new(),
             solver,
             vars,
             memo: vec![None; graph.goal_count()],
@@ -395,7 +451,17 @@ impl<'a> Encoder<'a> {
                 options.push(self.vars.k(self.solver, self.spec, from, send)?);
                 self.or(options)
             }
-            Premise::Neg { logical, tick } => self.negative_support(logical, tick),
+            Premise::Neg(id) => {
+                let graph = self.graph;
+                let n = graph
+                    .negated(id)
+                    .ok_or_else(|| internal_error!("unknown negated read {id:?}"))?;
+                match (self.neg, self.rules) {
+                    (NegSupport::Off, _) => Ok(Hazard::False),
+                    (NegSupport::Precise, Some(_)) => self.appear(n.space, n.rel, n.loc, n.tick, &n.pattern),
+                    (NegSupport::Conservative | NegSupport::Precise, _) => self.negative_support(n.logical, n.tick),
+                }
+            }
             Premise::CrashOracle { node } => {
                 let last = Tick(self.spec.eot.0.saturating_sub(1));
                 match node {
@@ -426,9 +492,6 @@ impl<'a> Encoder<'a> {
     /// Conservative negative support of a negated read of `logical` at `tick`: the facts of every relation that
     /// reaches it, at earlier ticks, or at `tick` along a purely deductive path.
     fn negative_support(&mut self, logical: u32, tick: Tick) -> Result<Hazard, LdfiError> {
-        if !self.negative_support {
-            return Ok(Hazard::False);
-        }
         if let Some(h) = self.neg_memo.get(&(logical, tick)) {
             return Ok(*h);
         }
@@ -447,6 +510,300 @@ impl<'a> Encoder<'a> {
         })?;
         if independent {
             self.neg_memo.insert((logical, tick), h);
+        }
+        Ok(h)
+    }
+
+    /// Tuple-level negative support: whether faults (supersets of the run's own) can make a tuple of `rel` matching
+    /// `pattern` appear at `loc` and `tick`. Such a tuple has a derivation under the faults; if every positive body
+    /// tuple of it held in the run and every negated body atom was absent, the run would have derived the tuple too.
+    /// So one of its positive body atoms gains a matching tuple (recursively), or a tuple that blocks one of its
+    /// negated atoms is lost (that tuple's hazard). A channel tuple appears only through a new send one tick earlier
+    /// (a message the run sent and lost stays lost under a superset of its faults); inputs never appear. A derivation
+    /// that needs its own appearance is no reason (least fixpoint): a place met again on the path contributes false.
+    fn appear(
+        &mut self,
+        space: Space,
+        rel: RelId,
+        loc: Loc,
+        tick: Tick,
+        pattern: &[Option<Value>],
+    ) -> Result<Hazard, LdfiError> {
+        if loc == Loc::AnyNode {
+            let nodes = self.rules.map_or(0, |r| r.nodes());
+            let mut options = Vec::new();
+            for n in (0..nodes).map(NodeId) {
+                let h = self.appear(space, rel, Loc::Node(n), tick, pattern)?;
+                if h == Hazard::True {
+                    return Ok(Hazard::True);
+                }
+                options.push(h);
+            }
+            return self.or(options);
+        }
+        let key: PlaceKey = (space, rel, loc, tick, pattern.to_vec());
+        if let Some(h) = self.appear_memo.get(&key) {
+            return Ok(*h);
+        }
+        if let Some(depth) = self.appear_path.get(&key) {
+            self.low = self.low.min(*depth);
+            return Ok(Hazard::False);
+        }
+        let depth = self.depth;
+        self.appear_path.insert(key.clone(), depth);
+        self.depth += 1;
+        let saved = std::mem::replace(&mut self.low, usize::MAX);
+        let result = self.appear_body(space, rel, loc, tick, pattern);
+        self.depth -= 1;
+        self.appear_path.remove(&key);
+        let result = result?;
+        if self.low >= depth {
+            self.appear_memo.insert(key, result);
+        }
+        self.low = saved.min(self.low);
+        Ok(result)
+    }
+
+    fn appear_body(
+        &mut self,
+        space: Space,
+        rel: RelId,
+        loc: Loc,
+        tick: Tick,
+        pattern: &[Option<Value>],
+    ) -> Result<Hazard, LdfiError> {
+        let Some(rules) = self.rules else {
+            return Err(internal_error!("tuple-level negative support without the program's rules").into());
+        };
+        match rules.origin(space, rel) {
+            Origin::Input => Ok(Hazard::False),
+            Origin::Crash => {
+                // A crash tuple crash(Observer, Node, Time) appears when that node crashes.
+                let last = Tick(self.spec.eot.0.saturating_sub(1));
+                match pattern.get(1) {
+                    Some(Some(Value::Node(n))) => self.vars.k(self.solver, self.spec, *n, last),
+                    _ => {
+                        let mut options = Vec::new();
+                        for n in (0..rules.nodes()).map(NodeId) {
+                            options.push(self.vars.k(self.solver, self.spec, n, last)?);
+                        }
+                        self.or(options)
+                    }
+                }
+            }
+            Origin::Snapshot { protocol, tick: at } => {
+                let (node_loc, rest) = split_node(pattern);
+                self.appear(Space::Protocol, protocol, node_loc, at.unwrap_or(tick), rest)
+            }
+            Origin::Rules {
+                deductive,
+                inductive,
+                asynchronous,
+            } => {
+                let mut options = Vec::new();
+                for r in deductive {
+                    options.push(self.rule_appear(r, space, loc, tick, pattern)?);
+                    if options.last() == Some(&Hazard::True) {
+                        return Ok(Hazard::True);
+                    }
+                }
+                if let Some(earlier) = tick.prev() {
+                    for r in inductive {
+                        options.push(self.rule_appear(r, space, loc, earlier, pattern)?);
+                        if options.last() == Some(&Hazard::True) {
+                            return Ok(Hazard::True);
+                        }
+                    }
+                    if !asynchronous.is_empty() {
+                        // A channel tuple at its destination: column 0 is the destination.
+                        let Loc::Node(dest) = loc else {
+                            return Err(internal_error!("a channel read outside a node").into());
+                        };
+                        let mut sent: Pattern = pattern.to_vec();
+                        match sent.first_mut() {
+                            Some(slot @ None) => *slot = Some(Value::Node(dest)),
+                            Some(Some(v)) if *v != Value::Node(dest) => return self.or(options),
+                            _ => {}
+                        }
+                        for s in (0..rules.nodes()).map(NodeId) {
+                            for r in &asynchronous {
+                                options.push(self.rule_appear(r, space, Loc::Node(s), earlier, &sent)?);
+                                if options.last() == Some(&Hazard::True) {
+                                    return Ok(Hazard::True);
+                                }
+                            }
+                        }
+                    }
+                }
+                self.or(options)
+            }
+        }
+    }
+
+    /// Whether `rule`, evaluated at `loc` and `tick`, can gain a valuation that derives a head matching `pattern`.
+    fn rule_appear(
+        &mut self,
+        rule: &Rule,
+        space: Space,
+        loc: Loc,
+        tick: Tick,
+        pattern: &[Option<Value>],
+    ) -> Result<Hazard, LdfiError> {
+        let Some(rules) = self.rules else {
+            return Err(internal_error!("tuple-level negative support without the program's rules").into());
+        };
+        let mut sigma: Vec<Option<Value>> = vec![None; rule.body.vars.len()];
+        let mut aggregate = false;
+        for (arg, want) in rule.head.args.iter().zip(pattern) {
+            match (arg, want) {
+                (HeadArg::Agg(_), _) => aggregate = true,
+                (HeadArg::Term(Term::Var(v)), Some(val)) => match sigma.get_mut(v.index()) {
+                    Some(slot @ None) => *slot = Some(val.clone()),
+                    Some(Some(bound)) if bound != val => return Ok(Hazard::False),
+                    _ => {}
+                },
+                (HeadArg::Term(Term::Const(c)), Some(val)) if rules.constant(space, *c).is_some_and(|k| k != val) => {
+                    return Ok(Hazard::False);
+                }
+                _ => {}
+            }
+        }
+        // Bindings that follow from the location and from copies.
+        loop {
+            let mut changed = false;
+            for lit in &rule.body.lits {
+                let Literal::Bind {
+                    pat: blossom_ir::core::Pattern::Var(v),
+                    expr,
+                } = lit
+                else {
+                    continue;
+                };
+                if sigma.get(v.index()).is_some_and(Option::is_some) {
+                    continue;
+                }
+                let value = match expr {
+                    Expr::Scalar(blossom_ir::core::BuiltinScalar::SelfNode) => match loc {
+                        Loc::Node(n) => Some(Value::Node(n)),
+                        _ => None,
+                    },
+                    Expr::Term(Term::Const(c)) => rules.constant(space, *c).cloned(),
+                    Expr::Term(Term::Var(w)) => sigma.get(w.index()).cloned().flatten(),
+                    _ => None,
+                };
+                if let (Some(value), Some(slot)) = (value, sigma.get_mut(v.index())) {
+                    *slot = Some(value);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let atom_loc = match space {
+            Space::Protocol => loc,
+            Space::Spec => Loc::Global,
+        };
+        let mut options = Vec::new();
+        for lit in &rule.body.lits {
+            let (atom, negated) = match lit {
+                Literal::Pos(a) => (a, false),
+                Literal::Neg(a) => (a, true),
+                _ => continue,
+            };
+            let pat: Pattern = atom
+                .args
+                .iter()
+                .map(|t| match t {
+                    Term::Const(c) => rules.constant(space, *c).cloned(),
+                    Term::Var(v) => sigma.get(v.index()).cloned().flatten(),
+                    Term::Wild => None,
+                })
+                .collect();
+            if !negated || aggregate {
+                options.push(self.appear(space, atom.rel, atom_loc, tick, &pat)?);
+            }
+            if negated || aggregate {
+                options.push(self.remove(space, atom.rel, atom_loc, tick, &pat)?);
+            }
+            if options.last() == Some(&Hazard::True) || options.iter().rev().nth(1) == Some(&Hazard::True) {
+                return Ok(Hazard::True);
+            }
+        }
+        self.or(options)
+    }
+
+    /// Whether faults can make the run lose some tuple of `rel` matching `pattern` at `loc` and `tick`: the
+    /// disjunction of those tuples' hazards.
+    fn remove(
+        &mut self,
+        space: Space,
+        rel: RelId,
+        loc: Loc,
+        tick: Tick,
+        pattern: &[Option<Value>],
+    ) -> Result<Hazard, LdfiError> {
+        let Some(rules) = self.rules else {
+            return Err(internal_error!("tuple-level negative support without the program's rules").into());
+        };
+        match rules.origin(space, rel) {
+            // Faults never undo a crash.
+            Origin::Crash => return Ok(Hazard::False),
+            Origin::Snapshot { protocol, tick: at } => {
+                let (node_loc, rest) = split_node(pattern);
+                return self.remove(Space::Protocol, protocol, node_loc, at.unwrap_or(tick), rest);
+            }
+            Origin::Input | Origin::Rules { .. } => {}
+        }
+        if loc == Loc::AnyNode {
+            let mut options = Vec::new();
+            for n in (0..rules.nodes()).map(NodeId) {
+                let h = self.remove(space, rel, Loc::Node(n), tick, pattern)?;
+                if h == Hazard::True {
+                    return Ok(Hazard::True);
+                }
+                options.push(h);
+            }
+            return self.or(options);
+        }
+        let key: PlaceKey = (space, rel, loc, tick, pattern.to_vec());
+        if let Some(h) = self.remove_memo.get(&key) {
+            return Ok(*h);
+        }
+        let node = match loc {
+            Loc::Node(n) => Some(n),
+            _ => None,
+        };
+        let graph = self.graph;
+        let goals: Vec<GoalId> = graph
+            .goals_at(space, rel, node, tick)
+            .iter()
+            .copied()
+            .filter(|g| {
+                graph.get(*g).is_some_and(|goal| {
+                    goal.key.row.len() == pattern.len()
+                        && goal
+                            .key
+                            .row
+                            .iter()
+                            .zip(pattern)
+                            .all(|(v, p)| p.as_ref().is_none_or(|p| p == v))
+                })
+            })
+            .collect();
+        let (h, independent) = self.tracked(|e| {
+            let mut options = Vec::with_capacity(goals.len());
+            for g in goals {
+                let h = e.goal(g)?;
+                if h == Hazard::True {
+                    return Ok(Hazard::True);
+                }
+                options.push(h);
+            }
+            e.or(options)
+        })?;
+        if independent {
+            self.remove_memo.insert(key, h);
         }
         Ok(h)
     }
@@ -498,6 +855,15 @@ impl<'a> Encoder<'a> {
     }
 }
 
+/// A snapshot row's location column and the rest of its pattern.
+fn split_node(pattern: &[Option<Value>]) -> (Loc, &[Option<Value>]) {
+    let loc = match pattern.first() {
+        Some(Some(Value::Node(n))) => Loc::Node(*n),
+        _ => Loc::AnyNode,
+    };
+    (loc, pattern.get(1..).unwrap_or(&[]))
+}
+
 pub(crate) fn solve(solver: &mut dyn SatSolver, assume: &[Lit]) -> Result<bool, LdfiError> {
     match solver.solve(assume, &SolveLimits::default())? {
         SatOutcome::Sat => Ok(true),
@@ -538,11 +904,13 @@ pub(crate) fn shrink(solver: &mut dyn SatSolver, assume: &[Lit], free: &[Var]) -
 /// The seeded enumeration (ARCHITECTURE §8.4, TEST-028): for each of `goals`, the minimal fault sets that falsify it
 /// according to `graph` and extend `seed`, the run's own faults. A goal the seed already falsifies (according to the
 /// lineage) contributes nothing.
+#[allow(clippy::too_many_arguments)]
 pub fn minimal_extensions(
     graph: &ProvGraph,
     spec: &FailureSpec,
     preds: &Preds,
-    negative_support: bool,
+    neg: NegSupport,
+    rules: Option<&dyn Rules>,
     solver: &mut dyn SatSolver,
     seed: &FaultSchedule,
     goals: &[GoalId],
@@ -551,7 +919,7 @@ pub fn minimal_extensions(
     vars.cover(solver, spec, seed)?;
     let mut roots = Vec::with_capacity(goals.len());
     {
-        let mut enc = Encoder::new(graph, spec, preds, negative_support, solver, &mut vars);
+        let mut enc = Encoder::new(graph, spec, preds, neg, rules, solver, &mut vars);
         for g in goals {
             roots.push(enc.hazard(*g)?);
         }

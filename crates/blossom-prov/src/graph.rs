@@ -88,18 +88,48 @@ pub enum Premise {
     /// The delivery of what `from` sent to `to` at `send` (a message leaf, TEST-026). A node's sends to itself are
     /// not premises: nothing can falsify them.
     Clock { from: NodeId, to: NodeId, send: Tick },
-    /// A negated read of the source-level relation `logical` at `tick` (ENG-113), for conservative negative
-    /// support (TEST-025).
-    Neg { logical: u32, tick: Tick },
+    /// A negated read (ENG-113): the absence of every tuple matching [`NegRead`]'s pattern, recorded in
+    /// [`ProvGraph::negation`].
+    Neg(NegId),
     /// A negated read of the crash oracle, `notin crash(_, n, _)`: it holds while `n` is correct. `None` when the
     /// read leaves the node open.
     CrashOracle { node: Option<NodeId> },
+}
+
+/// A negated read's index.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NegId(pub u32);
+
+/// Where a relation's tuples are.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Loc {
+    /// At one node (protocol relations).
+    Node(NodeId),
+    /// At any node (a read that leaves the node open).
+    AnyNode,
+    /// Nowhere in particular (global spec relations).
+    Global,
+}
+
+/// A negated read: no tuple of `rel` at `loc` and `tick` matched `pattern` (`None` for an open column).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NegRead {
+    pub space: Space,
+    pub rel: RelId,
+    pub loc: Loc,
+    pub tick: Tick,
+    pub pattern: Vec<Option<Value>>,
+    /// The source-level relation read, for relation-level (conservative) negative support.
+    pub logical: u32,
 }
 
 /// The provenance graph of one run.
 #[derive(Clone, Debug, Default)]
 pub struct ProvGraph {
     goals: Vec<Goal>,
+    negations: Vec<NegRead>,
+    /// Goals by relation, node and tick, for scans of tuples matching a pattern.
+    by_place: BTreeMap<(Space, RelId, Option<NodeId>, Tick), Vec<GoalId>>,
     /// Hash iteration order is never observed: the index is only probed.
     index: DetMap<GoalKey, GoalId>,
     firings: Vec<Firing>,
@@ -120,6 +150,10 @@ impl ProvGraph {
         if let Some(l) = logical {
             self.by_logical.entry((l, key.tick)).or_default().push(id);
         }
+        self.by_place
+            .entry((key.space, key.rel, key.node, key.tick))
+            .or_default()
+            .push(id);
         self.index.insert(key.clone(), id);
         self.goals.push(Goal {
             key,
@@ -161,6 +195,25 @@ impl ProvGraph {
 
     pub fn firing(&self, id: FiringId) -> Option<&Firing> {
         self.firings.get(id.0 as usize)
+    }
+
+    /// Records a negated read; equal reads share one id.
+    pub fn negation(&mut self, read: NegRead) -> NegId {
+        if let Some(i) = self.negations.iter().position(|n| *n == read) {
+            return NegId(u32::try_from(i).unwrap_or(u32::MAX));
+        }
+        let id = NegId(u32::try_from(self.negations.len()).unwrap_or(u32::MAX));
+        self.negations.push(read);
+        id
+    }
+
+    pub fn negated(&self, id: NegId) -> Option<&NegRead> {
+        self.negations.get(id.0 as usize)
+    }
+
+    /// Every goal of `rel` at `node` (or globally) and `tick`.
+    pub fn goals_at(&self, space: Space, rel: RelId, node: Option<NodeId>, tick: Tick) -> &[GoalId] {
+        self.by_place.get(&(space, rel, node, tick)).map_or(&[], Vec::as_slice)
     }
 
     /// Every goal of source-level relation `logical` at `tick`.
@@ -233,13 +286,15 @@ impl ProvGraph {
                                     send.0
                                 );
                             }
-                            Premise::Neg { logical, tick } => {
-                                let _ = writeln!(
-                                    out,
-                                    "{indent}    the absence of a `{}` tuple at {}",
-                                    names.logical(*logical),
-                                    tick.0
-                                );
+                            Premise::Neg(id) => {
+                                if let Some(n) = self.negated(*id) {
+                                    let _ = writeln!(
+                                        out,
+                                        "{indent}    the absence of a matching `{}` tuple at {}",
+                                        names.logical(n.logical),
+                                        n.tick.0
+                                    );
+                                }
                             }
                             Premise::CrashOracle { node } => {
                                 let _ = match node {

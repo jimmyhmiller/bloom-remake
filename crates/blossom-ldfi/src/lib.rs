@@ -23,6 +23,7 @@ pub mod report;
 
 pub use driver::{LdfiConfig, LdfiReport, SearchStats, Verdict, falsifiers, run};
 pub use faults::FailureSpec;
+pub use hazard::NegSupport;
 
 use blossom_base::{InternalError, Unimplemented};
 

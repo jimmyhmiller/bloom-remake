@@ -23,6 +23,7 @@ use blossom_base::{InternalError, RelId, internal_error};
 use blossom_ir::core::{RelClass, RuleKind};
 use blossom_ir::obs::{FiringRecord, NegRead};
 use blossom_prov::{Firing, GoalId, GoalKey, Premise, ProvGraph, Space};
+use blossom_prov::{Loc, NegRead as ProvNegRead};
 use blossom_sim::ded::Outcome;
 use blossom_sim::{Fate, SyncRun};
 use blossom_value::{
@@ -131,7 +132,15 @@ pub fn build(artifact: &DedArtifact, run: &SyncRun, outcome: &Outcome) -> Result
                 }
                 for neg in &f.negations {
                     let logical = protocol_logical(artifact, neg.rel)?;
-                    premises.push(Premise::Neg { logical, tick });
+                    let id = g.negation(ProvNegRead {
+                        space: Space::Protocol,
+                        rel: neg.rel,
+                        loc: Loc::Node(node),
+                        tick,
+                        pattern: neg.pattern.clone(),
+                        logical,
+                    });
+                    premises.push(Premise::Neg(id));
                 }
                 g.add_firing(head, firing(Space::Protocol, f, Some(node), tick, premises));
             }
@@ -210,7 +219,7 @@ pub fn build(artifact: &DedArtifact, run: &SyncRun, outcome: &Outcome) -> Result
                 }
             }
             for neg in &f.negations {
-                premises.push(spec_negation(artifact, &feeds, &main_spec, neg, eot)?);
+                premises.push(spec_negation(&mut g, artifact, &feeds, &main_spec, neg, eot)?);
             }
             g.add_firing(head, firing(Space::Spec, f, None, eot, premises));
         }
@@ -264,41 +273,128 @@ fn snapshot_goal(
 }
 
 fn spec_negation(
+    g: &mut ProvGraph,
     artifact: &DedArtifact,
     feeds: &BTreeMap<RelId, SpecFeed>,
     main_spec: &BTreeMap<RelId, u32>,
     neg: &NegRead,
     eot: Tick,
 ) -> Result<Premise, InternalError> {
-    match feeds.get(&neg.rel) {
+    let logical = match feeds.get(&neg.rel) {
         Some(SpecFeed::Crash { .. }) => {
             let node = match neg.pattern.get(1) {
                 Some(Some(Value::Node(n))) => Some(*n),
                 Some(None) => None,
                 other => return Err(internal_error!("a crash-oracle read with node column {other:?}")),
             };
-            Ok(Premise::CrashOracle { node })
+            return Ok(Premise::CrashOracle { node });
         }
-        Some(SpecFeed::AtEot { rel, .. }) => Ok(Premise::Neg {
-            logical: rel.0,
-            tick: eot,
-        }),
-        Some(SpecFeed::AtTick { rel, tick, .. }) => Ok(Premise::Neg {
-            logical: rel.0,
-            tick: *tick,
-        }),
-        None => {
-            let logical = main_spec
-                .get(&neg.rel)
-                .copied()
-                .or_else(|| artifact.spec_owner(neg.rel).map(|i| i.0))
-                .ok_or_else(|| {
-                    internal_error!(
-                        "a negated read of spec relation {:?}, which no Molly relation owns",
-                        neg.rel
-                    )
-                })?;
-            Ok(Premise::Neg { logical, tick: eot })
+        Some(SpecFeed::AtEot { rel, .. } | SpecFeed::AtTick { rel, .. }) => rel.0,
+        None => main_spec
+            .get(&neg.rel)
+            .copied()
+            .or_else(|| artifact.spec_owner(neg.rel).map(|i| i.0))
+            .ok_or_else(|| {
+                internal_error!(
+                    "a negated read of spec relation {:?}, which no Molly relation owns",
+                    neg.rel
+                )
+            })?,
+    };
+    // Relation-level support reads a snapshot input at its own tick; the read itself is the spec's, at EOT.
+    let tick = match feeds.get(&neg.rel) {
+        Some(SpecFeed::AtTick { tick, .. }) => *tick,
+        _ => eot,
+    };
+    let id = g.negation(ProvNegRead {
+        space: Space::Spec,
+        rel: neg.rel,
+        loc: Loc::Global,
+        tick,
+        pattern: neg.pattern.clone(),
+        logical,
+    });
+    Ok(Premise::Neg(id))
+}
+
+/// How the tuples of a `.ded` program's relations come about, for tuple-level negative support.
+pub struct DedRules<'a> {
+    artifact: &'a DedArtifact,
+    feeds: BTreeMap<RelId, SpecFeed>,
+}
+
+impl<'a> DedRules<'a> {
+    pub fn new(artifact: &'a DedArtifact) -> DedRules<'a> {
+        let mut feeds = BTreeMap::new();
+        if let Some(spec) = &artifact.spec {
+            for feed in &spec.feeds {
+                let rel = match *feed {
+                    SpecFeed::AtEot { spec, .. } | SpecFeed::AtTick { spec, .. } | SpecFeed::Crash { spec } => spec,
+                };
+                feeds.insert(rel, *feed);
+            }
+        }
+        DedRules { artifact, feeds }
+    }
+}
+
+impl crate::hazard::Rules for DedRules<'_> {
+    fn nodes(&self) -> u32 {
+        u32::try_from(self.artifact.nodes.len()).unwrap_or(u32::MAX)
+    }
+
+    fn constant(&self, space: Space, id: blossom_base::ConstId) -> Option<&Value> {
+        match space {
+            Space::Protocol => self.artifact.protocol.get().consts.get(id),
+            Space::Spec => self.artifact.spec.as_ref().and_then(|s| s.program.get().consts.get(id)),
+        }
+    }
+
+    fn origin(&self, space: Space, rel: RelId) -> crate::hazard::Origin<'_> {
+        use crate::hazard::Origin;
+        let program = match space {
+            Space::Protocol => self.artifact.protocol.get(),
+            Space::Spec => match self.feeds.get(&rel) {
+                Some(SpecFeed::Crash { .. }) => return Origin::Crash,
+                Some(SpecFeed::AtEot { rel: ded, .. }) => {
+                    return match self.artifact.rel(*ded).and_then(|r| r.protocol) {
+                        Some(protocol) => Origin::Snapshot { protocol, tick: None },
+                        None => Origin::Input,
+                    };
+                }
+                Some(SpecFeed::AtTick { rel: ded, tick, .. }) => {
+                    return match self.artifact.rel(*ded).and_then(|r| r.protocol) {
+                        Some(protocol) => Origin::Snapshot {
+                            protocol,
+                            tick: Some(*tick),
+                        },
+                        None => Origin::Input,
+                    };
+                }
+                None => match &self.artifact.spec {
+                    Some(s) => s.program.get(),
+                    None => return Origin::Input,
+                },
+            },
+        };
+        match program.rels.get(rel).map(|r| &r.class) {
+            Some(RelClass::Idb | RelClass::Channel(_)) => {}
+            _ => return Origin::Input,
+        }
+        let mut deductive = Vec::new();
+        let mut inductive = Vec::new();
+        let mut asynchronous = Vec::new();
+        for rule in program.rules.iter().filter(|r| r.head.rel == rel) {
+            match rule.kind {
+                RuleKind::Deductive => deductive.push(rule),
+                RuleKind::Inductive => inductive.push(rule),
+                RuleKind::Async => asynchronous.push(rule),
+            }
+        }
+        Origin::Rules {
+            deductive,
+            inductive,
+            asynchronous,
         }
     }
 }

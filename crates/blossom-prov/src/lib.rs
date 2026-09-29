@@ -7,4 +7,6 @@
 
 pub mod graph;
 
-pub use graph::{Firing, FiringId, Goal, GoalId, GoalKey, Names, Premise, ProvGraph, Space, Support};
+pub use graph::{
+    Firing, FiringId, Goal, GoalId, GoalKey, Loc, Names, NegId, NegRead, Premise, ProvGraph, Space, Support,
+};

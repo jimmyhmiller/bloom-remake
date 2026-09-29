@@ -46,9 +46,10 @@ pub struct Args {
     /// Print search statistics.
     #[arg(long)]
     pub stats: bool,
-    /// Turn conservative negative support off (for experiments; hypotheses may be missed).
-    #[arg(long)]
-    pub no_negative_support: bool,
+    /// How negated reads are supported: precise (tuple-level), conservative (relation-level, CR-31) or off (unsound
+    /// for non-monotone programs; for experiments).
+    #[arg(long, default_value = "precise")]
+    pub negative_support: String,
     /// Give up after this many runs.
     #[arg(long, default_value_t = 100_000)]
     pub max_runs: u64,
@@ -85,7 +86,15 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
     };
     let mut config = LdfiConfig::new(spec);
     config.find_all = args.find_all;
-    config.negative_support = !args.no_negative_support;
+    config.negative_support = match args.negative_support.as_str() {
+        "precise" => blossom_ldfi::NegSupport::Precise,
+        "conservative" => blossom_ldfi::NegSupport::Conservative,
+        "off" => blossom_ldfi::NegSupport::Off,
+        other => {
+            eprintln!("unknown negative support `{other}`: expected precise, conservative or off");
+            return Exit::Usage.into();
+        }
+    };
     config.max_runs = args.max_runs;
     config.sat = args.sat.clone();
 

@@ -20,8 +20,8 @@ use crate::reach::Preds;
 #[derive(Clone, Debug)]
 pub struct LdfiConfig {
     pub spec: FailureSpec,
-    /// Conservative negative support (TEST-025, CR-31); off only for experiments.
-    pub negative_support: bool,
+    /// How negated reads are supported (TEST-025).
+    pub negative_support: crate::hazard::NegSupport,
     /// Keep searching after the first counterexample (FindMode::All).
     pub find_all: bool,
     /// Give up without a verdict after this many runs.
@@ -37,7 +37,7 @@ impl LdfiConfig {
     pub fn new(spec: FailureSpec) -> LdfiConfig {
         LdfiConfig {
             spec,
-            negative_support: true,
+            negative_support: crate::hazard::NegSupport::Precise,
             find_all: false,
             max_runs: 100_000,
             sat: "cadical-plain".into(),
@@ -96,6 +96,7 @@ struct Search<'a> {
     artifact: &'a DedArtifact,
     config: &'a LdfiConfig,
     preds: Preds,
+    rules: lineage::DedRules<'a>,
 }
 
 /// What processing one hypothesis found.
@@ -123,6 +124,7 @@ impl<'a> Search<'a> {
             artifact,
             config,
             preds: Preds::of(artifact),
+            rules: lineage::DedRules::new(artifact),
         })
     }
 
@@ -168,6 +170,7 @@ impl<'a> Search<'a> {
             &self.config.spec,
             &self.preds,
             self.config.negative_support,
+            Some(&self.rules),
             solver.as_mut(),
             seed,
             &ids,
