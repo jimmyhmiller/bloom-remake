@@ -89,6 +89,9 @@ pub struct Setting<'a> {
     pub preds: &'a Preds,
     pub neg: NegSupport,
     pub rules: Option<&'a dyn Rules>,
+    /// The frozen crash view (CR-20): a crashed node keeps the state of the tick before its crash, so a crash can
+    /// also make a tuple appear (one that would have been deleted), which tuple-level support accounts for.
+    pub frozen: bool,
 }
 
 /// Where a relation's tuples come from.
@@ -302,6 +305,7 @@ pub struct Encoder<'a> {
     low: usize,
     /// The run's own crashes: hypotheses extend them (a crash may only move earlier).
     seed_crashes: BTreeMap<NodeId, Tick>,
+    frozen: bool,
 }
 
 impl<'a> Encoder<'a> {
@@ -319,9 +323,11 @@ impl<'a> Encoder<'a> {
             preds,
             neg,
             rules,
+            frozen,
         } = setting;
         Encoder {
             seed_crashes: seed.crashes.clone(),
+            frozen,
             graph,
             spec,
             preds,
@@ -727,7 +733,53 @@ impl<'a> Encoder<'a> {
         let Some(rules) = self.rules else {
             return Err(internal_error!("tuple-level negative support without the program's rules").into());
         };
-        match rules.origin(space, rel)? {
+        let origin = rules.origin(space, rel)?;
+        // Under the frozen crash view, a tuple a node held before some tick stays if the node crashes at that tick.
+        let frozen = match (&origin, loc) {
+            (Origin::Input | Origin::Rules { .. }, Loc::Node(n)) if self.frozen && space == Space::Protocol => {
+                self.frozen_appear(rel, n, tick, pattern)?
+            }
+            _ => Hazard::False,
+        };
+        if frozen == Hazard::True {
+            return Ok(Hazard::True);
+        }
+        let derived = self.appear_origin(origin, space, rel, loc, tick, pattern)?;
+        self.or(vec![frozen, derived])
+    }
+
+    /// A crash of `node` at some tick `c <= tick` whose previous tick held a matching tuple (the frozen view).
+    fn frozen_appear(
+        &mut self,
+        rel: RelId,
+        node: NodeId,
+        tick: Tick,
+        pattern: &[Option<Value>],
+    ) -> Result<Hazard, LdfiError> {
+        let mut options = Vec::new();
+        for c in self.spec.crash_ticks().filter(|c| *c <= tick) {
+            let Some(before) = c.prev() else { continue };
+            if self.exists(Space::Protocol, rel, Loc::Node(node), before, pattern)? {
+                options.push(self.crash_appears(node, Some(c))?);
+            }
+        }
+        self.or(options)
+    }
+
+    fn appear_origin(
+        &mut self,
+        origin: Origin<'_>,
+        space: Space,
+        rel: RelId,
+        loc: Loc,
+        tick: Tick,
+        pattern: &[Option<Value>],
+    ) -> Result<Hazard, LdfiError> {
+        let _ = rel;
+        let Some(rules) = self.rules else {
+            return Err(internal_error!("tuple-level negative support without the program's rules").into());
+        };
+        match origin {
             Origin::Input => Ok(Hazard::False),
             Origin::Crash => {
                 // A tuple crash(Observer, Node, Time) appears when that node crashes at that time.

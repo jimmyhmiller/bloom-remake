@@ -137,6 +137,14 @@ enum Processed {
 impl<'a> Search<'a> {
     fn new(sim: &'a SpecSim<'a>, config: &'a LdfiConfig) -> Result<Search<'a>, LdfiError> {
         let artifact = sim.artifact();
+        if artifact.profile.frozen() && config.negative_support == crate::hazard::NegSupport::Conservative {
+            // Relation-level support does not account for the state a frozen crash preserves.
+            return Err(blossom_base::unimplemented_error!(
+                "TEST-025",
+                "relation-level negative support under the frozen crash view (use precise)"
+            )
+            .into());
+        }
         if artifact.spec.is_none() {
             return Err(LdfiError::NoSpec);
         }
@@ -209,6 +217,7 @@ impl<'a> Search<'a> {
             preds: &self.preds,
             neg: self.config.negative_support,
             rules: Some(&self.rules),
+            frozen: self.artifact.profile.frozen(),
         };
         let found = crate::hazard::minimal_extensions(graph, setting, solver.as_mut(), seed, &targets)?;
         let admitted = found
@@ -367,10 +376,6 @@ fn lineage_search(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, 
     let ff_goals: Vec<Row> = ff.post.iter().cloned().collect();
     let mut queue = Queue::new(&config.spec);
     let (first, mut incomplete) = search.hypotheses(&ff_graph, &ff_goals, &[], &FaultSchedule::default())?;
-    // Under the frozen crash view a crash also keeps state that the lineage does not model as a support (a tuple
-    // that would have been deleted, a negation that would have been falsified), so without crashes the lineage is
-    // complete, and with them a verdict of no counterexample needs exhaustive certification.
-    incomplete |= sim.artifact().profile.frozen() && config.spec.max_crashes > 0;
     queue.push(first);
     let mut runs: u64 = 1;
     let mut counterexamples = Vec::new();

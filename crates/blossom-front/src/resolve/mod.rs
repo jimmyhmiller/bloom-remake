@@ -41,52 +41,129 @@ pub fn resolve(tree: &ModuleTree, sources: &SourceDb, diags: &mut Diagnostics) -
         );
         return Ok(None);
     };
-    let mut r = Resolver {
-        tree,
-        sources,
-        diags,
-        hir: Hir {
-            name: header.name.name,
-            version: header.version,
-            edition: header.edition,
-            types: TypeTable::new(),
-            roles: Vec::new(),
-            rels: Vec::new(),
-            handlers: Vec::new(),
-            views: Vec::new(),
-            facts: Vec::new(),
-            scopes: Vec::new(),
-            var_types: Vec::new(),
-        },
-        scopes: Vec::new(),
-        builtins: BTreeMap::new(),
-        members: BTreeMap::new(),
-        nominal: BTreeMap::new(),
-        rel_spans: BTreeMap::new(),
-        bugs: Vec::new(),
-        empty: ModScope::empty(FileKey::Root),
+    let mut r = Resolver::new(tree, sources, diags, header.name.name, header.version, header.edition);
+    let root = r.new_scope(ModScope::empty(FileKey::Root));
+    r.process(root, &tree.root.items, None);
+    r.finish()
+}
+
+/// Resolves the module `path` of the root file (or of a module it uses), instantiated as a program root: the
+/// target of a spec (LANGUAGE §17.2). Its inputs are host-fed, its value parameters take `args` or their defaults.
+pub fn resolve_module_root(
+    tree: &ModuleTree,
+    sources: &SourceDb,
+    diags: &mut Diagnostics,
+    path: &[Ident],
+    type_args: &[ast::Type],
+    args: &[ast::Arg],
+    spec: Option<SpecMode>,
+) -> Result<Option<(Hir, Option<SpecMode>)>, InternalError> {
+    let name = path.last().map_or(Symbol::intern("<spec>"), |i| i.name);
+    let mut r = Resolver::new(tree, sources, diags, name, 1, 1);
+    let file_scope = r.new_scope(ModScope::empty(FileKey::Root));
+    let Some((file, module)) = r.find_module(file_scope, path) else {
+        let names: Vec<&str> = path.iter().map(Ident::as_str).collect();
+        let span = path.first().map_or(Span::point(tree.root.span.file, 0), |i| i.span);
+        r.error(code!("BLS0200"), span, format!("unknown module `{}`", names.join("::")));
+        return Ok(None);
     };
     let root = r.new_scope(ModScope {
-        file: FileKey::Root,
-        prefix: Vec::new(),
-        generics: BTreeMap::new(),
-        values: BTreeMap::new(),
-        rels: BTreeMap::new(),
-        instances: BTreeMap::new(),
-        roles: BTreeMap::new(),
-        role_template: None,
-        has_roles: false,
-        write_redirect: BTreeMap::new(),
-        own_items: None,
+        own_items: Some(&module.items),
+        ..ModScope::empty(file)
     });
-    r.process(root, &tree.root.items, None);
-    if let Some(bug) = r.bugs.into_iter().next() {
-        return Err(bug);
-    }
-    if r.diags.has_errors() {
+    if module.generics.len() != type_args.len() {
+        let span = path.first().map_or(Span::point(tree.root.span.file, 0), |i| i.span);
+        r.error(
+            code!("BLS0301"),
+            span,
+            format!(
+                "`{}` takes {} type argument(s), {} given",
+                module.name.as_str(),
+                module.generics.len(),
+                type_args.len()
+            ),
+        );
         return Ok(None);
     }
-    Ok(Some(r.hir))
+    for (g, a) in module.generics.iter().zip(type_args) {
+        let Some(t) = r.resolve_type(file_scope, a) else {
+            return r.finish().map(|_| None);
+        };
+        r.scope_mut(root).generics.insert(g.name.name, t);
+    }
+    let mut given: BTreeMap<Symbol, &ast::Expr> = BTreeMap::new();
+    for a in args {
+        match a {
+            ast::Arg::Named(n, e) => {
+                given.insert(n.name, e);
+            }
+            other => r.error(
+                code!("BLS0205"),
+                other.span(),
+                "module arguments are written `NAME = value`",
+            ),
+        }
+    }
+    for p in &module.params {
+        match &p.kind {
+            ast::ModParamKind::Value { ty, default } => {
+                let Some(t) = r.resolve_type(root, ty) else { continue };
+                let value = match (given.remove(&p.name.name), default) {
+                    (Some(e), _) => r.const_value(file_scope, e, Some(t)),
+                    (None, Some(d)) => r.const_value(root, d, Some(t)),
+                    (None, None) => {
+                        r.error(
+                            code!("BLS0205"),
+                            p.span,
+                            format!("module parameter `{}` has no default and is not given", p.name.as_str()),
+                        );
+                        None
+                    }
+                };
+                if let Some(v) = value {
+                    r.scope_mut(root).values.insert(p.name.name, v);
+                }
+            }
+            ast::ModParamKind::Rel { .. } => {
+                r.unsupported("LANG-010", "relation parameters of a spec target", p.span);
+            }
+        }
+    }
+    for (name, e) in given {
+        r.error(
+            code!("BLS0205"),
+            e.span,
+            format!("`{}` has no parameter `{}`", module.name.as_str(), name.as_str()),
+        );
+    }
+    for proto in &module.protocols {
+        r.protocol_interfaces(root, proto, None);
+    }
+    r.spec = spec;
+    r.process(root, &module.items, None);
+    let spec = r.spec.take();
+    Ok(r.finish()?.map(|h| (h, spec)))
+}
+
+/// Resolves a spec's views (`items`) in spec mode, over the target `target` (whose types and roles the spec program
+/// shares, so type ids carry over).
+pub fn resolve_spec_views(
+    tree: &ModuleTree,
+    sources: &SourceDb,
+    diags: &mut Diagnostics,
+    name: Symbol,
+    target: &Hir,
+    items: &[ast::Item],
+    mode: SpecMode,
+) -> Result<Option<(Hir, SpecMode)>, InternalError> {
+    let mut r = Resolver::new(tree, sources, diags, name, 1, 1);
+    r.hir.types = target.types.clone();
+    r.hir.roles = target.roles.clone();
+    r.spec = Some(mode);
+    let root = r.new_scope(ModScope::empty(FileKey::Root));
+    r.process(root, items, None);
+    let mode = r.spec.take().unwrap_or_default();
+    Ok(r.finish()?.map(|h| (h, mode)))
 }
 
 /// Which file a scope's module is defined in.
@@ -155,6 +232,21 @@ pub(crate) enum BuiltinRel {
     Halt,
 }
 
+/// Spec mode (LANGUAGE §17.3): the target's relations are read through trace relations, one per relation and time
+/// (`r(…) @ n` at the evaluation point, `r(…) @ n at tick k`), each with the node as column 0; `crashed(n)` is the
+/// crash oracle; spec node constants name the scenario's nodes.
+#[derive(Clone, Debug, Default)]
+pub struct SpecMode {
+    /// The target's relations by surface name: their columns (in the target's type table, which the spec shares).
+    pub targets: BTreeMap<Symbol, Vec<HCol>>,
+    /// Trace relations created so far, by target relation and time (`None` for the evaluation point).
+    pub traces: BTreeMap<(Symbol, Option<u64>), HRelId>,
+    /// The `crashed(n)` oracle, once used.
+    pub crashed: Option<HRelId>,
+    /// The scenario's node constants, by name, with their node index.
+    pub nodes: BTreeMap<Symbol, u32>,
+}
+
 pub(crate) struct Resolver<'t, 'd> {
     pub tree: &'t ModuleTree,
     pub sources: &'t SourceDb,
@@ -170,9 +262,58 @@ pub(crate) struct Resolver<'t, 'd> {
     pub bugs: Vec<InternalError>,
     /// What a missing scope reads as.
     pub empty: ModScope<'t>,
+    /// Spec mode, when resolving a spec's views.
+    pub spec: Option<SpecMode>,
 }
 
-impl<'t> Resolver<'t, '_> {
+impl<'t, 'd> Resolver<'t, 'd> {
+    pub(crate) fn new(
+        tree: &'t ModuleTree,
+        sources: &'t SourceDb,
+        diags: &'d mut Diagnostics,
+        name: Symbol,
+        version: u32,
+        edition: u16,
+    ) -> Resolver<'t, 'd> {
+        Resolver {
+            tree,
+            sources,
+            diags,
+            hir: Hir {
+                name,
+                version,
+                edition,
+                types: TypeTable::new(),
+                roles: Vec::new(),
+                rels: Vec::new(),
+                handlers: Vec::new(),
+                views: Vec::new(),
+                facts: Vec::new(),
+                scopes: Vec::new(),
+                var_types: Vec::new(),
+            },
+            scopes: Vec::new(),
+            builtins: BTreeMap::new(),
+            members: BTreeMap::new(),
+            nominal: BTreeMap::new(),
+            rel_spans: BTreeMap::new(),
+            bugs: Vec::new(),
+            empty: ModScope::empty(FileKey::Root),
+            spec: None,
+        }
+    }
+
+    /// The HIR, unless a bug or an error was reported.
+    pub(crate) fn finish(self) -> Result<Option<Hir>, InternalError> {
+        if let Some(bug) = self.bugs.into_iter().next() {
+            return Err(bug);
+        }
+        if self.diags.has_errors() {
+            return Ok(None);
+        }
+        Ok(Some(self.hir))
+    }
+
     pub fn error(&mut self, code: blossom_base::Code, span: Span, msg: impl Into<String>) {
         self.diags.push(Diagnostic::new(code, msg).with_primary(span));
     }
@@ -298,6 +439,62 @@ impl<'t> Resolver<'t, '_> {
         });
         self.builtins.insert(which, id);
         id
+    }
+
+    /// The spec oracle `crashed(n: Node)` (LANGUAGE §17.3), created on first use.
+    pub fn crashed_oracle(&mut self, span: Span) -> HRelId {
+        if let Some(id) = self.spec.as_ref().and_then(|s| s.crashed) {
+            return id;
+        }
+        let ty = self.node_type(None);
+        let id = self.add_rel(HRel {
+            name: QualName::single(Symbol::intern("crashed")),
+            kind: HRelKind::Input { root: true },
+            cols: vec![HCol {
+                name: Symbol::intern("n"),
+                ty: Some(ty),
+            }],
+            key: None,
+            durable: false,
+            role: None,
+            span,
+        });
+        if let Some(spec) = self.spec.as_mut() {
+            spec.crashed = Some(id);
+        }
+        id
+    }
+
+    /// The trace relation of target relation `name` at `time` (`None`: the evaluation point), created on first use:
+    /// the target's columns after a `node: Node` column.
+    pub fn trace_rel(&mut self, name: Ident, time: Option<u64>) -> Option<HRelId> {
+        let cols = self.spec.as_ref()?.targets.get(&name.name)?.clone();
+        if let Some(id) = self.spec.as_ref().and_then(|s| s.traces.get(&(name.name, time))) {
+            return Some(*id);
+        }
+        let node = self.node_type(None);
+        let mut all = vec![HCol {
+            name: Symbol::intern("node"),
+            ty: Some(node),
+        }];
+        all.extend(cols);
+        let suffix = match time {
+            None => "$eot".to_owned(),
+            Some(k) => format!("$at{k}"),
+        };
+        let id = self.add_rel(HRel {
+            name: QualName::single(Symbol::intern(&format!("{}{suffix}", name.as_str()))),
+            kind: HRelKind::Input { root: true },
+            cols: all,
+            key: None,
+            durable: false,
+            role: None,
+            span: name.span,
+        });
+        if let Some(spec) = self.spec.as_mut() {
+            spec.traces.insert((name.name, time), id);
+        }
+        Some(id)
     }
 
     /// `R$members(n: Node<R>)`, created on first use.
@@ -1060,7 +1257,7 @@ impl<'t> Resolver<'t, '_> {
     }
 
     /// Declares the interfaces of `module M: P<…>` in the instance scope (LANGUAGE §6.7).
-    fn protocol_interfaces(&mut self, child: ScopeIdx, proto: &'t ast::Type, placement: Option<HRoleId>) {
+    pub(crate) fn protocol_interfaces(&mut self, child: ScopeIdx, proto: &'t ast::Type, placement: Option<HRoleId>) {
         let ast::Type::Named { path, args, span } = proto else {
             self.error(code!("BLS0206"), proto.span(), "a module's protocols are named");
             return;
@@ -1097,7 +1294,8 @@ impl<'t> Resolver<'t, '_> {
         for item in &p.items {
             match &item.kind {
                 ItemKind::Rel(d) if matches!(d.kind, RelKind::Input | RelKind::Output) => {
-                    if let Some(id) = self.rel_decl(tmp, d, placement, false) {
+                    let root = self.scope(child).prefix.is_empty();
+                    if let Some(id) = self.rel_decl(tmp, d, placement, root) {
                         self.bind_rel(child, d.name, id);
                     }
                 }
@@ -1125,6 +1323,7 @@ impl<'t> Resolver<'t, '_> {
                     "boot" => Some(self.builtin(BuiltinRel::Boot, name.span)),
                     "localtick" => Some(self.builtin(BuiltinRel::LocalTick, name.span)),
                     "halt" => Some(self.builtin(BuiltinRel::Halt, name.span)),
+                    "crashed" if self.spec.is_some() => Some(self.crashed_oracle(name.span)),
                     _ => None,
                 }),
             [inst, name] => self

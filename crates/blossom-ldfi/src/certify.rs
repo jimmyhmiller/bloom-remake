@@ -282,8 +282,23 @@ fn step_state(
     if channels.len() >= 63 {
         return Err(internal_error!("{} droppable channels in one tick", channels.len()).into());
     }
+    // A node's last instance matters only once it is frozen: keep it for nodes that crash by the next tick, so that
+    // states differing only in other nodes' tick-local contents still merge.
     let last: Vec<Instance> = if frozen_view {
-        outs.iter().map(|o| o.instance.clone()).collect()
+        outs.iter()
+            .enumerate()
+            .map(|(i, o)| {
+                let freezes = u32::try_from(i)
+                    .ok()
+                    .and_then(|i| crashes.get(&NodeId(i)))
+                    .is_some_and(|c| c.0 <= tick.0 + 1);
+                if freezes {
+                    o.instance.clone()
+                } else {
+                    Instance::default()
+                }
+            })
+            .collect()
     } else {
         Vec::new()
     };
