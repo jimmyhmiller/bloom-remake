@@ -1,0 +1,4 @@
+//! A rand_range whose span exceeds 2^64.
+program rand_range_wide version 1;
+input go(lo: i128, hi: i128);
+view r(x) = go(lo, hi), let x = rand_range(lo, hi, ("r", lo));

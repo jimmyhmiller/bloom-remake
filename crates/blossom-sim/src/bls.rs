@@ -94,8 +94,21 @@ impl<'a> BlsSim<'a> {
         faults: &FaultSchedule,
         capture: bool,
     ) -> Result<SyncRun, SimError> {
+        self.run_on(&self.oracle, inputs, last, round, faults, capture)
+    }
+
+    /// [`BlsSim::run`] with another evaluator of the program (the engine, for the differential suite).
+    pub fn run_on<E: crate::Evaluator>(
+        &self,
+        eval: &E,
+        inputs: &[InputEvent],
+        last: Tick,
+        round: Duration,
+        faults: &FaultSchedule,
+        capture: bool,
+    ) -> Result<SyncRun, SimError> {
         let n = u32::try_from(self.artifact.nodes.len()).map_err(|_| internal_error!("too many nodes"))?;
-        let mut world = SyncWorld::new(&self.oracle, n);
+        let mut world = SyncWorld::new(eval, n);
         for (node, tick, rel, row) in self.runtime_events(last, round)? {
             world.input(node, tick, rel, row);
         }

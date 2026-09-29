@@ -37,10 +37,7 @@ until = "M5"
 status = "pass"
 
 [backend.interp]
-status = "unimplemented"
-unimplemented = ["LANG-040", "LANG-121", "LANG-122", "LANG-124", "LANG-125", "LANG-128", "SEM-030", "SEM-031",
-                 "SEM-032", "SEM-103", "SEM-022", "ANA-002"]
-until = "M7"
+status = "pass"
 
 [[expect]]
 node = "n1"

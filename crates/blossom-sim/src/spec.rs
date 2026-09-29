@@ -96,8 +96,20 @@ impl<'a> SpecSim<'a> {
         capture: bool,
         crash_view: CrashView,
     ) -> Result<SyncRun, SimError> {
+        self.run_on(&self.protocol, last, faults, capture, crash_view)
+    }
+
+    /// [`SpecSim::run_with_view`] with another evaluator of the protocol (the engine, for the differential suite).
+    pub fn run_on<E: crate::Evaluator>(
+        &self,
+        eval: &E,
+        last: Tick,
+        faults: &FaultSchedule,
+        capture: bool,
+        crash_view: CrashView,
+    ) -> Result<SyncRun, SimError> {
         let nodes = u32::try_from(self.artifact.nodes.len()).map_err(|_| internal_error!("too many nodes"))?;
-        let mut world = SyncWorld::new(&self.protocol, nodes);
+        let mut world = SyncWorld::new(eval, nodes);
         let profile = self.artifact.profile;
         for t in profile.first_tick().0..=last.0 {
             for n in 0..nodes {

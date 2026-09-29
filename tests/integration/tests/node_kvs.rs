@@ -11,7 +11,7 @@ use blossom_front::api::NodeSpec;
 use blossom_node::durable::DurableSchema;
 use blossom_node::manual::ManualDriver;
 use blossom_node::recovery::{self, StoreSpec};
-use blossom_node::{Node, NodeConfig, ReleasedTick};
+use blossom_node::{Executor, Node, NodeConfig, OracleExecutor, ReleasedTick};
 use blossom_oracle::{Ingress, Oracle};
 use blossom_store::{OpenMode, SimFs, StoreIdentity, Vfs, WriteFate};
 use blossom_value::Value;
@@ -50,6 +50,7 @@ struct Kvs {
     schema: DurableSchema,
     names: Arc<[Arc<str>]>,
     dir: PathBuf,
+    certification: blossom_store::Certification,
 }
 
 #[cfg(test)]
@@ -73,7 +74,14 @@ impl Kvs {
             schema,
             names,
             dir: PathBuf::from("/data/s1"),
+            certification: blossom_store::Certification::Strict,
         }
+    }
+
+    /// The same node with stores that certify their WAL tails as `c`.
+    fn certified(mut self, c: blossom_store::Certification) -> Kvs {
+        self.certification = c;
+        self
     }
 
     fn rel(&self, name: &str) -> blossom_base::RelId {
@@ -81,7 +89,7 @@ impl Kvs {
     }
 
     /// Opens (recovers) the store on `fs` and boots the node.
-    fn boot<'a>(&'a self, fs: &SimFs, wall: i64) -> ManualDriver<'a, Arc<Oracle>> {
+    fn boot<'a>(&'a self, fs: &SimFs, wall: i64) -> ManualDriver<'a, Box<dyn Executor>> {
         // A clone of a `SimFs` is another handle on the same filesystem.
         let fs: Arc<dyn Vfs> = Arc::new(fs.clone());
         let opened = recovery::open(
@@ -90,6 +98,7 @@ impl Kvs {
                 dir: self.dir.clone(),
                 identity: identity(),
                 mode: OpenMode::InitFresh,
+                certification: self.certification,
             },
             self.artifact.program.get(),
             self.names.clone(),
@@ -99,7 +108,8 @@ impl Kvs {
         .unwrap();
         let mut cfg = NodeConfig::new(NodeId(0), self.artifact.roles.first().copied().flatten());
         cfg.halt = self.artifact.halt;
-        let node = Node::boot(cfg, &self.artifact.program, self.oracle.clone(), opened.boot.clone()).unwrap();
+        let exec: Box<dyn Executor> = Box::new(OracleExecutor::new(self.oracle.clone()));
+        let node = Node::boot(cfg, &self.artifact.program, exec, opened.boot.clone()).unwrap();
         ManualDriver::new(node, self.artifact.program.get(), &self.schema, self.names.clone(), opened)
     }
 
@@ -128,7 +138,7 @@ impl Kvs {
         }
     }
 
-    fn store(&self, d: &ManualDriver<'_, Arc<Oracle>>) -> Vec<(String, Vec<u8>)> {
+    fn store(&self, d: &ManualDriver<'_, Box<dyn Executor>>) -> Vec<(String, Vec<u8>)> {
         let rel = self.rel("store");
         d.node
             .released_image()
@@ -303,6 +313,7 @@ fn invariant_r_holds_under_random_sync_schedules() {
                     dir: k.dir.clone(),
                     identity: identity(),
                     mode: OpenMode::InitFresh,
+                    certification: k.certification,
                 },
                 k.artifact.program.get(),
                 k.names.clone(),
@@ -311,7 +322,8 @@ fn invariant_r_holds_under_random_sync_schedules() {
             )
             .unwrap();
             let cfg = NodeConfig::new(NodeId(0), k.artifact.roles.first().copied().flatten());
-            let mut node = Node::boot(cfg, &k.artifact.program, k.oracle.clone(), opened.boot).unwrap();
+            let exec: Box<dyn Executor> = Box::new(OracleExecutor::new(k.oracle.clone()));
+            let mut node = Node::boot(cfg, &k.artifact.program, exec, opened.boot).unwrap();
             let mut computed: Vec<(Tick, bool)> = Vec::new();
             let mut released: Vec<Tick> = Vec::new();
             let mut synced: Option<Tick> = None;
@@ -350,7 +362,17 @@ fn invariant_r_holds_under_random_sync_schedules() {
 /// acknowledged before the crash is in the recovered store, and nothing that was never sent is.
 #[test]
 fn every_crash_point_keeps_every_acknowledged_put() {
-    let k = Kvs::new();
+    crash_points(&Kvs::new());
+}
+
+/// The same with one sync per group commit (`Certification::Crc`, etcd's model): the guarantee to clients is the same.
+#[test]
+fn every_crash_point_keeps_every_acknowledged_put_with_one_sync_per_commit() {
+    crash_points(&Kvs::new().certified(blossom_store::Certification::Crc));
+}
+
+#[cfg(test)]
+fn crash_points(k: &Kvs) {
     let fs = SimFs::default();
     fs.enable_crash_recording().unwrap();
     // For each acknowledged put: (key, value, the number of recorded cuts when its reply was released).
@@ -381,7 +403,7 @@ fn every_crash_point_keeps_every_acknowledged_put() {
     assert!(cuts.len() > 30, "only {} cuts", cuts.len());
     // The value of each key must be the last put acknowledged by the cut, or any later put to it (a put may be
     // durable before its reply is released).
-    let check = |d: &ManualDriver<'_, Arc<Oracle>>, c: usize, what: &str| {
+    let check = |d: &ManualDriver<'_, Box<dyn Executor>>, c: usize, what: &str| {
         let store: std::collections::BTreeMap<String, Vec<u8>> = k.store(d).into_iter().collect();
         for key in (0..4).map(|i| format!("k{i}")) {
             let last_acked = acked.iter().rfind(|(k2, _, at)| *k2 == key && *at <= c + 1);
@@ -615,4 +637,29 @@ fn large_puts_are_spread_over_ticks() {
     let r = d.run_until_quiescent(Instant(2_000)).unwrap();
     assert_eq!(replies(&k, &r).len(), 5);
     assert_eq!(k.store(&d).len(), 5);
+}
+
+/// A store keeps the tail certification it was created with: opening it with another is refused.
+#[test]
+fn a_store_refuses_another_tail_certification() {
+    let k = Kvs::new();
+    let fs = SimFs::default();
+    drop(k.boot(&fs, 0));
+    let crc = Kvs::new().certified(blossom_store::Certification::Crc);
+    let err = recovery::open(
+        Arc::new(fs.clone()),
+        &StoreSpec {
+            dir: crc.dir.clone(),
+            identity: identity(),
+            mode: OpenMode::Existing,
+            certification: crc.certification,
+        },
+        crc.artifact.program.get(),
+        crc.names.clone(),
+        Instant(10),
+        2,
+    )
+    .err();
+    let Some(err) = err else { panic!("a strict store opened as crc") };
+    assert!(err.to_string().contains("tail certification"), "{err}");
 }

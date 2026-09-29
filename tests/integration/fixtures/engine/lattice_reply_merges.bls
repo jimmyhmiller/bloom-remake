@@ -1,0 +1,9 @@
+//! Two contributions to one key of a lattice-valued reply channel to a session in one tick.
+program lattice_reply_merges version 1;
+role Client: external;
+role Server;
+channel ask(k: u8): Client -> Server;
+channel ans(k: u8, m: LMax<u8>): Server -> Client;
+at Server {
+    on ask(k) from c { send ans(k, LMax::of(1)) to c; send ans(k, LMax::of(2)) to c; }
+}

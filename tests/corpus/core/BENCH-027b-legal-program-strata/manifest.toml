@@ -24,9 +24,7 @@ until = "M5"
 status = "pass"
 
 [backend.interp]
-status = "unimplemented"
-unimplemented = ["ANA-002", "SEM-022", "LANG-045", "LANG-047", "LANG-082", "LANG-083", "LANG-086", "LANG-190", "SEM-002"]
-until = "M7"
+status = "pass"
 
 [expect_analysis]
 strata = { of = { node = 0, edge = 0, reach = 0, unreach = 1, reaches_all = 2 } }

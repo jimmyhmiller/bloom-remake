@@ -1,0 +1,13 @@
+//! The same `let` when the atom after it has a row: the valuation (a(0), b(7)) is complete and its `let` underflows,
+//! so the tick fails with BLSR004 (the error is counted for the complete valuation, found by joining `b` without
+//! the `let`'s output).
+program hoisted_let_completed version 1;
+table a(i: u64);
+table b(j: u64);
+table out(i: u64, j: u64);
+bootstrap {
+    emit a(0);
+    emit a(5);
+    emit b(7);
+}
+while a(i), let j = i - 1, b(j) { emit out(i, j); }

@@ -64,10 +64,12 @@ at Server {
     durable table current_term(t: u64) key() resolve choose_most(t);
     /// At most one vote per term, ever.
     durable table voted_for(term: u64, cand: Node<Server>) key(term);
-    /// The log. An entry records who took the request (`origin`, its client `session` and request `id`) so that
-    /// server can answer when the entry is applied.
-    durable table log(idx: u64, term: u64, origin: Node<Server>, session: Session, id: ReqId, kind: u8, key: Key,
-                      val: Option<Val>) key(idx);
+    /// The log. An entry records the term of the entry before it (`prev`, what replication's consistency check
+    /// sends), and who took the request (`origin`, its client `session` and request `id`) so that server can answer
+    /// when the entry is applied. An entry's `prev` stays true: an entry is stored only after its predecessor's term
+    /// matched, and replacing the predecessor truncates it too.
+    durable table log(idx: u64, term: u64, prev: u64, origin: Node<Server>, session: Session, id: ReqId, kind: u8,
+                      key: Key, val: Option<Val>) key(idx);
 
     // ---- volatile state
     table won(term: u64);
@@ -198,25 +200,20 @@ at Server {
     }
     /// The leader numbers this tick's requests after its last entry, in canonical order.
     view slot(s, id, kind, key, val, n = index!()) = request(s, id, kind, key, val), eff(t), leader(t);
-    append: on slot(s, id, kind, key, val, n), leader(t), last_log(li, _) {
-        next log(li + 1 + n, t, self, s, id, kind, key, val);
+    append: on slot(s, id, kind, key, val, n), leader(t), last_log(li, lt) {
+        next log(li + 1 + n, t, if n == 0 { lt } else { t }, self, s, id, kind, key, val);
     }
 
     // ---- replication, leader side
-    /// The term of the entry before index `i` (0 before the first).
-    view prev_term(i, pt) {
-        log(idx: i, ..), log(idx: j, term: pt, ..) where j + 1 == i;
-        log(idx: i, ..), let pt = 0 where i == 1;
-    }
     /// New entries go out in the tick after they are appended.
-    push: while leader(t), sent(f, s), log(i, et, o, ss, id, k, key, val), prev_term(i, pt) where i > s {
+    push: while leader(t), sent(f, s), log(i, et, pt, o, ss, id, k, key, val) where i > s {
         send entry(t, i, et, pt, o, ss, id, k, key, val) to f;
     }
     pushed: while leader(t), sent(f, s), last_log(li, _) where li > s {
         next sent(f, li);
     }
     /// At every heartbeat, each follower gets its unacknowledged entries again (at most `BATCH`) and a beat.
-    resend: on heartbeat, leader(t), match_idx(f, m), log(i, et, o, ss, id, k, key, val), prev_term(i, pt)
+    resend: on heartbeat, leader(t), match_idx(f, m), log(i, et, pt, o, ss, id, k, key, val)
         where i > m && i <= m + BATCH {
         send entry(t, i, et, pt, o, ss, id, k, key, val) to f;
     }
@@ -230,27 +227,36 @@ at Server {
     on_ack: on ack(t, m) from f, leader(t) {
         next match_idx(f, m);
     }
-    /// An index of our term that a majority stores is committed (§5.4.2). The leader counts itself.
-    view stored(i, n = count!(f)) = leader(t), log(idx: i, term: t, ..), match_idx(f, m) where m >= i;
-    view commit_to(i = max!(j)) = stored(j, n) where (n + 1) * 2 > Server.size();
-    advance_commit: while commit_to(i), commit(c) where i > c {
+    /// How many followers store at least index `i`, for each index a follower acknowledged.
+    view support(i, n = count!(g)) = leader(_), match_idx(_, i), match_idx(g, m) where m >= i;
+    /// The highest index a majority stores (the leader holds its whole log, and counts itself). It is committed if it
+    /// is of the leader's term (§5.4.2); since terms never decrease along the log, no lower index of the term can be
+    /// committed when this one is not. The cost is in the number of servers, not the length of the log.
+    view quorum(i = max!(j)) = support(j, n) where (n + 1) * 2 > Server.size();
+    advance_commit: while quorum(i), leader(t), log(idx: i, term: t, ..), commit(c) where i > c {
         next commit(i);
+    }
+    /// A leader with no followers is a majority alone.
+    advance_alone: while leader(t), last_log(li, lt), commit(c) where Server.size() == 1 && lt == t && li > c {
+        next commit(li);
     }
 
     // ---- replication, follower side
     /// Entries of the leader of our term whose predecessor matches: in the log, or earlier in the same batch.
     view acceptable(i, et) {
-        entry(term: t, idx: i, eterm: et, prev_term: pt, ..), eff(t), log(idx: j, term: pt, ..) where j + 1 == i;
+        entry(term: t, idx: i, eterm: et, prev_term: pt, ..), eff(t), let j = if i > 0 { i - 1 } else { 0 },
+            log(idx: j, term: pt, ..);
         entry(term: t, idx: i, eterm: et, prev_term: pt, ..), eff(t) where i == 1 && pt == 0;
-        entry(term: t, idx: i, eterm: et, prev_term: pt, ..), eff(t), acceptable(j, pt) where j + 1 == i;
+        entry(term: t, idx: i, eterm: et, prev_term: pt, ..), eff(t), let j = if i > 0 { i - 1 } else { 0 },
+            acceptable(j, pt);
     }
     /// A stored entry that conflicts with an acceptable one (same index, another term): it and all after it go.
     view conflict(c = min!(i)) = acceptable(i, et), log(idx: i, term: lt, ..) where lt != et;
-    truncate: on conflict(c), log(j, jt, o, s, id, k, key, val) where j >= c {
-        delete log(j, jt, o, s, id, k, key, val);
+    truncate: on conflict(c), log(j, jt, jp, o, s, id, k, key, val) where j >= c {
+        delete log(j, jt, jp, o, s, id, k, key, val);
     }
     store_entry: on acceptable(i, et), entry(t, i, et, pt, o, s, id, k, key, val), eff(t) {
-        next log(i, et, o, s, id, k, key, val);
+        next log(i, et, pt, o, s, id, k, key, val);
     }
     view matched(m = max!(i)) = acceptable(i, _);
     reply_entries: on entry(term: t, ..) from l, eff(t), matched(m) {
@@ -274,11 +280,11 @@ at Server {
     // ---- applying committed entries in log order
     view to_apply(i) = applied(a), commit(c), log(idx: i, ..) where i > a && i <= c;
     /// The newest write to each key among the entries applied this tick.
-    view last_write(key, i = max!(j)) = to_apply(j), log(j, _, _, _, _, k, key, _) where k != GET;
-    apply_put: while last_write(key, i), log(i, _, _, _, _, k, key, Some(v)) where k == PUT {
+    view last_write(key, i = max!(j)) = to_apply(j), log(j, _, _, _, _, _, k, key, _) where k != GET;
+    apply_put: while last_write(key, i), log(i, _, _, _, _, _, k, key, Some(v)) where k == PUT {
         upsert kv(key, v);
     }
-    apply_del: while last_write(key, i), log(i, _, _, _, _, k, key, _), kv(key, old) where k == DEL {
+    apply_del: while last_write(key, i), log(i, _, _, _, _, _, k, key, _), kv(key, old) where k == DEL {
         delete kv(key, old);
     }
     advance_applied: while commit(c), applied(a) where c > a {
@@ -286,14 +292,14 @@ at Server {
     }
     /// The newest write to `key` before entry `i` of this batch, if any.
     view write_before(i, key, j = max!(w)) =
-        to_apply(i), log(i, _, _, _, _, _, key, _), to_apply(w), log(w, _, _, _, _, k, key, _)
+        to_apply(i), log(i, _, _, _, _, _, _, key, _), to_apply(w), log(w, _, _, _, _, _, k, key, _)
         where w < i && k != GET;
     /// The value of `key` just before entry `i` is applied.
     view value_before(i, key, v) {
-        write_before(i, key, j), log(j, _, _, _, _, k, key, Some(v)) where k == PUT;
-        to_apply(i), log(i, _, _, _, _, _, key, _), not write_before(i, key, _), kv(key, v);
+        write_before(i, key, j), log(j, _, _, _, _, _, k, key, Some(v)) where k == PUT;
+        to_apply(i), log(i, _, _, _, _, _, _, key, _), not write_before(i, key, _), kv(key, v);
     }
-    answer: while to_apply(i), log(i, _, o, s, id, k, key, _) where o == self {
+    answer: while to_apply(i), log(i, _, _, o, s, id, k, key, _) where o == self {
         if k == PUT {
             send put_ok(id) to s;
         }

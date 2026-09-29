@@ -1,0 +1,8 @@
+//! A point-lattice cell whose only contribution changes from a larger to a smaller value in one tick.
+program point_scratch_changes version 1;
+input set(v: u64);
+table cur(v: u64) key();
+scratch pc(k: u64, p: LPoint<u64>) key(k);
+bootstrap { emit cur(5); }
+on set(v) { upsert cur(v); }
+while cur(v) { emit pc(0, LPoint::of(v)); }

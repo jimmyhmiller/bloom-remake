@@ -19,6 +19,7 @@ pub mod obs;
 pub mod plan;
 pub mod polarity;
 pub mod spec;
+pub mod tick;
 pub mod strata;
 
 mod canonical;

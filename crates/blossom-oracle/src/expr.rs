@@ -171,6 +171,24 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
             Ok(Value::Int(IntValue::U64(n as u64)))
         }
         Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::IntCast(to)),
+            args,
+        } => {
+            let [a] = args.as_slice() else {
+                return Err(ExprError::Oracle(internal_error!("a cast takes one argument").into()));
+            };
+            match eval(scope, env, a)? {
+                // Out of range is BLSR004 (LANGUAGE §5.2); a u128 above i128::MAX fits only a u128.
+                Value::Int(IntValue::U128(u)) if *to == blossom_value::types::IntTy::U128 => Ok(Value::Int(IntValue::U128(u))),
+                Value::Int(i) => i
+                    .to_i128()
+                    .and_then(|w| IntValue::from_i128(*to, w))
+                    .map(Value::Int)
+                    .ok_or_else(|| ExprError::Arithmetic(format!("{i:?} as {} is out of range", to.name()))),
+                other => Err(ExprError::Oracle(internal_error!("an integer cast of {other:?}").into())),
+            }
+        }
+        Expr::Call {
             f: FnRef::Builtin(BuiltinFn::Size { role }),
             ..
         } => Ok(Value::Int(IntValue::U64(scope.oracle.role_size(*role)))),

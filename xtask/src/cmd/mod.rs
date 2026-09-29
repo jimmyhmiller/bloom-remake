@@ -9,6 +9,7 @@ pub mod check_layers;
 pub mod check_sans_io;
 pub mod corpus;
 mod corpus_bls;
+mod corpus_interp;
 pub mod coverage;
 pub mod crashcheck;
 pub mod fetch_datasets;

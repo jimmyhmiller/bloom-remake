@@ -1,0 +1,11 @@
+//! A hoisted `let` that raises an error for a partial valuation no atom completes: no error (the reference raises a
+//! check's error only for complete valuations).
+program hoisted_let_no_completion version 1;
+table a(i: u64);
+table b(j: u64);
+table out(i: u64, j: u64);
+bootstrap {
+    emit a(0);
+    emit a(5);
+}
+while a(i), let j = i - 1, b(j) { emit out(i, j); }

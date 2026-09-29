@@ -36,7 +36,7 @@ use blossom_node::acl::{AclTable, Source};
 use blossom_node::durable::{DurableCodec, DurableSchema};
 use blossom_node::env::{Clock, Entropy};
 use blossom_node::recovery::{self, KIND_DELTA, StoreSpec};
-use blossom_node::{Node, NodeConfig, NodeState, ReleasedTick};
+use blossom_node::{Backend, Executor, Executors, Node, NodeConfig, NodeState, ReleasedTick};
 use blossom_oracle::{Delivery, Ingress, Oracle, Row};
 use blossom_store::{
     CheckpointWriter, FileCheckpoints, FileWal, MetaRecord, MetaStore, OpenMode, RealFs, StoreIdentity, StoreLock,
@@ -66,6 +66,8 @@ pub struct ServerConfig {
     pub mode: OpenMode,
     /// Where the node's store lives (default: `<data_dir>/<node>`).
     pub dir: Option<PathBuf>,
+    /// The evaluator the node runs.
+    pub backend: Backend,
 }
 
 /// Counters of what the node did and dropped.
@@ -300,12 +302,14 @@ impl Server {
         let (me, entry) = spec.node(&cfg.node)?;
         let role = artifact.roles.get(me.0 as usize).copied().flatten();
         let seed: Seed = spec.seed()?;
-        let oracle = Arc::new(
-            Oracle::new(artifact.program.clone())?
-                .with_roles(artifact.roles.clone())
-                .with_seed(seed)?
-                .with_node_names(names.to_vec())?,
-        );
+        let executors = Executors::new(
+            cfg.backend,
+            artifact.program.clone(),
+            artifact.roles.clone(),
+            names.to_vec(),
+            seed,
+        )?;
+        let oracle = executors.oracle().clone();
         let nonce = OsEntropy.boot_nonce().map_err(RuntimeError::Config)?;
         let dir = cfg.dir.clone().unwrap_or_else(|| spec.data_dir.join(&entry.name));
         let opened = recovery::open(
@@ -314,6 +318,7 @@ impl Server {
                 dir,
                 identity: store_identity(spec, &artifact, &cfg.node)?,
                 mode: cfg.mode,
+                certification: spec.tail_certification,
             },
             program,
             names.clone(),
@@ -325,7 +330,8 @@ impl Server {
         ncfg.statics = spec.static_rows(program, &names)?;
         let inbox_cap = ncfg.max_batch.saturating_mul(4);
         let boot = opened.boot.clone();
-        let node = Node::boot(ncfg, &artifact.program, oracle.clone(), boot.clone())?;
+        let exec = executors.make(me)?;
+        let node = Node::boot(ncfg, &artifact.program, exec, boot.clone())?;
         let restarts = opened.record.restarts;
         let last_checkpoint_lsn = opened.checkpoint.map_or(0, |c| c.lsn.0);
 
@@ -865,7 +871,7 @@ fn session(stream: TcpStream, ctx: &Accept) -> Result<(), RuntimeError> {
 }
 
 struct Engine {
-    node: Node<Arc<Oracle>>,
+    node: Node<Box<dyn Executor>>,
     artifact: Arc<BlsArtifact>,
     schema: DurableSchema,
     names: Arc<[Arc<str>]>,

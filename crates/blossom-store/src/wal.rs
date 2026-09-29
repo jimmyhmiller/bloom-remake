@@ -224,8 +224,21 @@ pub struct FileWal {
     batch: Option<u64>,
     dirty: bool,
     last_tick: Option<u64>,
+    certification: crate::Certification,
+    /// Crc: the synced batch whose sync marker goes at the head of the next batch (so it is durable with that
+    /// batch's one sync), as (the batch, its last tick).
+    uncertified: Option<(u64, u64)>,
+    /// Crc: whether this segment's receipt was written (at its first sync: it marks the segment as holding
+    /// acknowledged data, so a damaged header is corruption, not an aborted creation).
+    receipt_written: bool,
 }
 impl FileWal {
+    /// This WAL's tail certification (strict by default; it must match how its store was created).
+    pub fn certified(mut self, certification: crate::Certification) -> Self {
+        self.certification = certification;
+        self
+    }
+
     /// Create a new incarnation segment. `base` is the absolute offset at the end of older segments.
     pub fn create(fs: Arc<dyn Vfs>, dir: &Path, header: SegmentHeader, base: Lsn) -> Result<Self, StoreError> {
         crate::vfs::durable_dir(&*fs, dir)?;
@@ -254,6 +267,9 @@ impl FileWal {
             batch: None,
             dirty: false,
             last_tick: None,
+            certification: crate::Certification::Strict,
+            uncertified: None,
+            receipt_written: false,
         })
     }
     fn healthy(&self) -> Result<(), StoreError> {
@@ -287,6 +303,20 @@ impl FileWal {
         self.file.sync_data()?;
         self.fs.sync_dir(&self.dir)?;
         self.offset = bytes.len() as u64;
+        self.receipt_written = false;
+        Ok(())
+    }
+
+    /// Appends `bytes` at the end of the current segment.
+    fn append_bytes(&mut self, bytes: &[u8]) -> Result<(), StoreError> {
+        if let Err(e) = self.file.append(bytes) {
+            self.poisoned = true;
+            return Err(e);
+        }
+        self.offset = self
+            .offset
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| invalid("offset overflow"))?;
         Ok(())
     }
 }
@@ -345,6 +375,13 @@ impl WalWriter for FileWal {
         if self.last_tick.is_some_and(|t| rec.tick <= t) {
             return Err(invalid("WAL ticks must increase"));
         }
+        // Crc recovery reads a batch's end from the next batch's number, so batches count up by one.
+        if self.certification == crate::Certification::Crc
+            && !self.dirty
+            && self.batch.is_some_and(|b| b.checked_add(1) != Some(rec.batch))
+        {
+            return Err(invalid("with crc certification, each batch is the one after the last"));
+        }
         let prospective = FIXED_RECORD
             .checked_add(rec.payload.len())
             .ok_or_else(|| invalid("record overflow"))?;
@@ -367,19 +404,28 @@ impl WalWriter for FileWal {
             self.poisoned = true;
             return Err(e);
         }
+        // Crc: the last synced batch's marker leads this batch, and becomes durable with its sync.
+        if let Some((_, tick)) = self.uncertified.take() {
+            let marker = WalRecordBuf {
+                batch: rec.batch,
+                tick,
+                now: 0,
+                kind: SYNC_MARKER,
+                payload: Vec::new(),
+            };
+            let lsn = Lsn(self
+                .base
+                .checked_add(self.offset)
+                .ok_or_else(|| invalid("marker LSN overflow"))?);
+            let bytes = record_bytes(&marker, lsn)?;
+            self.append_bytes(&bytes)?;
+        }
         let lsn = Lsn(self
             .base
             .checked_add(self.offset)
             .ok_or_else(|| invalid("LSN overflow"))?);
         let bytes = record_bytes(rec, lsn)?;
-        if let Err(e) = self.file.append(&bytes) {
-            self.poisoned = true;
-            return Err(e);
-        }
-        self.offset = self
-            .offset
-            .checked_add(bytes.len() as u64)
-            .ok_or_else(|| invalid("offset overflow"))?;
+        self.append_bytes(&bytes)?;
         self.batch = Some(rec.batch);
         self.dirty = true;
         self.last_tick = Some(rec.tick);
@@ -387,6 +433,39 @@ impl WalWriter for FileWal {
     }
     fn sync(&mut self) -> Result<SyncedUpTo, StoreError> {
         self.healthy()?;
+        if self.certification == crate::Certification::Crc {
+            // One sync. This batch's marker is written at the head of the next one; the segment's receipt, once, at
+            // its first sync.
+            if let Err(e) = self.file.sync_data() {
+                self.poisoned = true;
+                return Err(e);
+            }
+            let end = Lsn(self
+                .base
+                .checked_add(self.offset)
+                .ok_or_else(|| invalid("LSN overflow"))?);
+            if self.dirty {
+                if !self.receipt_written {
+                    if let Err(e) = atomic_write(
+                        &*self.fs,
+                        &receipt_path(&self.dir, self.header.segment_seq),
+                        &receipt_bytes(&self.header, end),
+                    ) {
+                        self.poisoned = true;
+                        return Err(e);
+                    }
+                    self.receipt_written = true;
+                }
+                if let (Some(b), Some(t)) = (self.batch, self.last_tick) {
+                    self.uncertified = Some((b, t));
+                }
+            }
+            self.dirty = false;
+            return Ok(SyncedUpTo {
+                lsn: end,
+                tick: self.last_tick,
+            });
+        }
         if self.dirty {
             // The marker must never survive a crash while the data it certifies is still volatile.
             // This first sync establishes that ordering; the second sync acknowledges the marker.
@@ -470,7 +549,10 @@ impl WalWriter for FileWal {
 /// whole record after it belongs to a single data batch `B` that no marker certifies, and `B` is the batch the damage
 /// is in: the batch of the record before the damage, or a later one when that record is a sync marker (the previous
 /// batch ended there) or the damage is at the start of the segment.
-fn torn_tail(bytes: &[u8], off: usize, base: u64, last: Option<(u64, u8)>) -> bool {
+///
+/// Without markers (`Certification::Crc`) a batch's end is not recorded, so damage followed only by records of the
+/// batch after the last whole record's is also a torn tail (a crash in the first record of the next batch).
+fn torn_tail(bytes: &[u8], off: usize, base: u64, last: Option<(u64, u8)>, crc: bool) -> bool {
     let mut later: Option<u64> = None;
     for candidate in off + 1..bytes.len() {
         let Ok((r, _)) = parse_record(bytes, candidate, base) else {
@@ -484,7 +566,7 @@ fn torn_tail(bytes: &[u8], off: usize, base: u64, last: Option<(u64, u8)>) -> bo
     match (later, last) {
         (None, _) => true,
         (Some(_), None) => true,
-        (Some(b), Some((lb, kind))) => b == lb || (b > lb && kind == SYNC_MARKER),
+        (Some(b), Some((lb, kind))) => b == lb || (b > lb && kind == SYNC_MARKER) || (crc && Some(b) == lb.checked_add(1)),
     }
 }
 
@@ -510,6 +592,18 @@ pub struct WalScan {
 impl WalScan {
     /// Scan canonical segment order; optionally repair a torn tail by truncating and syncing it.
     pub fn scan(fs: &dyn Vfs, dir: &Path, uuid: [u8; 16], repair: bool) -> Result<Self, StoreError> {
+        Self::scan_certified(fs, dir, uuid, repair, crate::Certification::Strict)
+    }
+
+    /// [`WalScan::scan`] for a WAL written with `certification`.
+    pub fn scan_certified(
+        fs: &dyn Vfs,
+        dir: &Path,
+        uuid: [u8; 16],
+        repair: bool,
+        certification: crate::Certification,
+    ) -> Result<Self, StoreError> {
+        let crc = certification == crate::Certification::Crc;
         let paths = fs.list(dir)?;
         let mut result = Self::default();
         let mut base = 0u64;
@@ -589,7 +683,7 @@ impl WalScan {
                                 "damage before a later segment or acknowledged data",
                             ));
                         }
-                        if !torn_tail(&bytes, off, base, last) {
+                        if !torn_tail(&bytes, off, base, last, crc) {
                             return Err(corrupt(&path, off, "damage before a later synced batch"));
                         }
                         if repair {
