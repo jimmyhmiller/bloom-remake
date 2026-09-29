@@ -279,6 +279,7 @@ pub enum Persistence {
 pub struct RelAttrs {
     pub nondet: Option<Arc<str>>,             // LANG-204 reason
     pub deterministic: bool,                  // `#[deterministic]` assertion (checked, BLS0603)
+    pub monotone: bool,                       // `monotone view` assertion (checked, BLS0702; ANA-020)
     pub final_output: bool,                   // LANG-212
     pub atomic: bool,                         // LANG-206
     pub handler: Option<Arc<str>>,            // LANG-186 host handler path

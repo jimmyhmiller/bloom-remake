@@ -29,6 +29,7 @@ fn attrs() -> RelAttrs {
     RelAttrs {
         nondet: None,
         deterministic: false,
+        monotone: false,
         final_output: false,
         atomic: false,
         handler: None,

@@ -45,3 +45,10 @@ fn monotone_lattice_recursion_stratifies() {
         assert_eq!(compile(rel), Vec::<String>::new(), "{rel}");
     }
 }
+
+#[test]
+fn monotone_views_reject_points_of_order() {
+    let codes = compile("tests/integration/fixtures/monotone_view_points_of_order.bls");
+    // `open_edge` negates and `seen_count` reveals; the recursive `reach` is monotone.
+    assert_eq!(codes.iter().filter(|c| *c == "BLS0702").count(), 2, "{codes:?}");
+}

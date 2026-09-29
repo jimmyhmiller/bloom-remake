@@ -17,13 +17,14 @@ impl Loader for FsLoader {
 /// Compiles the program rooted at `root` from disk for a deployment of `nodes`. The source database is returned
 /// either way, so diagnostics can be rendered.
 ///
-/// After the frontend, the program's deductive rules must stratify (BLS0502, `blossom-analysis`).
+/// After the frontend, the program's deductive rules must stratify (BLS0502) and its `monotone` regions must have no
+/// point of order (BLS0702), both checked by `blossom-analysis`.
 pub fn compile_file(root: &str, nodes: &[NodeSpec]) -> (Result<(BlsArtifact, Diagnostics), BlsError>, SourceDb) {
     let mut sources = SourceDb::new();
     let result = api::compile(root, nodes, &mut FsLoader, &mut sources).and_then(|(artifact, mut diags)| {
-        let strata = blossom_analysis::strata::check(artifact.program.get())?;
-        let rejected = strata.has_errors();
-        for d in strata.iter() {
+        let found = analyses(artifact.program.get())?;
+        let rejected = found.has_errors();
+        for d in found.iter() {
             diags.push(d.clone());
         }
         if rejected {
@@ -51,9 +52,9 @@ pub fn compile_spec_file(
             let programs =
                 std::iter::once(&spec.artifact.protocol).chain(spec.artifact.spec.as_ref().map(|s| &s.program));
             for p in programs {
-                let strata = blossom_analysis::strata::check(p.get())?;
-                rejected |= strata.has_errors();
-                for d in strata.iter() {
+                let found = analyses(p.get())?;
+                rejected |= found.has_errors();
+                for d in found.iter() {
                     diags.push(d.clone());
                 }
             }
@@ -64,4 +65,13 @@ pub fn compile_spec_file(
             }
         });
     (result, sources)
+}
+
+/// The analyses every compiled program passes: stratification (BLS0502) and `monotone` assertions (BLS0702).
+fn analyses(p: &blossom_ir::core::Program) -> Result<Diagnostics, blossom_base::InternalError> {
+    let mut out = blossom_analysis::strata::check(p)?;
+    for d in blossom_analysis::monotone::check(p).iter() {
+        out.push(d.clone());
+    }
+    Ok(out)
 }

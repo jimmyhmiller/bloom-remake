@@ -1,0 +1,20 @@
+//! A `monotone view` with points of order (BLS0702, LANGUAGE §13.5): a negated read and an exact lattice read.
+
+program monotone_points_of_order version 1;
+
+input edge(a: u64, b: u64);
+input blocked(a: u64);
+table seen(k: u64, s: LSet<u64>);
+
+note: on edge(a, b) {
+    emit seen(a, set[b]);
+}
+
+monotone view open_edge(a, b) = edge(a, b), not blocked(a);
+
+monotone view seen_count(k, n) = seen(k, s), let n = reveal!(s.size());
+
+monotone view reach(a, b) {
+    edge(a, b);
+    reach(a, c), edge(c, b);
+}

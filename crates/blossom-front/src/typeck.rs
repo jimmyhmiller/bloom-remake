@@ -117,8 +117,17 @@ impl LatS {
 /// the coercion slot through which it may be lifted.
 #[derive(Clone, Debug)]
 struct MethodRes {
-    op: Op,
+    target: MethodTarget,
     lifts: Vec<Option<usize>>,
+}
+
+/// What a method call resolved to.
+#[derive(Clone, Copy, Debug)]
+enum MethodTarget {
+    /// An operation of the receiver's lattice.
+    Lattice(Op),
+    /// A method of a plain value (the standard library, Appendix B).
+    Plain(Builtin),
 }
 
 #[derive(Clone, Debug)]
@@ -1266,6 +1275,16 @@ impl Checker<'_> {
                             self.con(&mut hir.types, TypeDef::Int(IntTy::U64))
                         }
                         Builtin::RoleSize(_) => self.con(&mut hir.types, TypeDef::Int(IntTy::U64)),
+                        Builtin::Contains => {
+                            if let (Some(c), Some(x)) = (ats.first(), ats.get(1)) {
+                                self.deferred.push(Deferred::In {
+                                    elem: *x,
+                                    coll: *c,
+                                    span,
+                                });
+                            }
+                            self.con(&mut hir.types, TypeDef::Bool)
+                        }
                     };
                     self.record(t)
                 }
@@ -1415,10 +1434,9 @@ impl Checker<'_> {
                             _ => x,
                         });
                     }
-                    e.kind = HExprKind::LatOp {
-                        lattice,
-                        op: res.op,
-                        args: out,
+                    e.kind = match res.target {
+                        MethodTarget::Lattice(op) => HExprKind::LatOp { lattice, op, args: out },
+                        MethodTarget::Plain(f) => HExprKind::Builtin { f, args: out },
                     };
                     match self.solved(hir, t) {
                         Some(ty) => e.ty = Some(ty),
@@ -2106,6 +2124,23 @@ impl Checker<'_> {
                 return false;
             }
             // Methods of plain values are the standard library's (Appendix B).
+            let rr = self.find(recv);
+            let elem = match self.node(rr) {
+                Node::Bound(Shape::Vec(e) | Shape::Set(e) | Shape::Map(e, _)) => Some(e),
+                _ => None,
+            };
+            if let (Some(e), "contains", false, [x]) = (elem, name.as_str(), banged, args) {
+                self.unify(&hir.types, *x, e, span);
+                let b = self.con(&mut hir.types, TypeDef::Bool);
+                self.unify(&hir.types, res, b, span);
+                if let Some(m) = self.methods.get_mut(slot) {
+                    *m = Some(MethodRes {
+                        target: MethodTarget::Plain(Builtin::Contains),
+                        lifts: vec![None],
+                    });
+                }
+                return true;
+            }
             let d = self.describe(&hir.types, recv);
             self.diags.push(
                 Diagnostic::not_implemented(
@@ -2251,7 +2286,10 @@ impl Checker<'_> {
         };
         self.unify(&hir.types, res, result, span);
         if let Some(m) = self.methods.get_mut(slot) {
-            *m = Some(MethodRes { op, lifts });
+            *m = Some(MethodRes {
+                target: MethodTarget::Lattice(op),
+                lifts,
+            });
         }
         true
     }

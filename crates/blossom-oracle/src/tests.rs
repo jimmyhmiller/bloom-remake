@@ -82,6 +82,7 @@ impl B {
                 attrs: RelAttrs {
                     nondet: None,
                     deterministic: false,
+                    monotone: false,
                     final_output: false,
                     atomic: false,
                     handler: None,
