@@ -88,6 +88,19 @@ and `e04_two_phase_commit`, written in Blossom, run under `blossom sim` and `blo
 
 Former work packages covered in part: M3.5, M4.2, M4.5, M5.3, M6.3, M6.7.
 
+### The flagship goal (user decision, 2026-09-29)
+
+**A linearizable, Raft-replicated key-value store written in Blossom, running as real processes on the network, and
+measured against etcd.** Three `blossom run` processes over TCP with durable state on the M2 WAL; clients through the
+host-facing API. Correctness evidence: LDFI finds the seeded bugs of Molly's Raft cases and certifies the correct
+version at its bounds; a history checker finds every client history linearizable under `kill -9` and partitions; the
+engine that runs it agrees with the oracle on the whole corpus. Speed: there is no fixed bar (the program runs on an
+interpreter); the same workload runs against etcd on the same machine and both results are reported, with the
+numbers kept honest (same durability settings, same client, same hardware).
+
+Slices 3 and 4 below are its first two steps. The fast engine (semi-naive, indexed, planned; "Slice 5 onward")
+comes before the etcd comparison, which closes the flagship.
+
 ### Slice 3: real processes
 
 The sans-IO node over the oracle evaluator, TCP transport, durable tables over the M2 WAL and checkpoint layer,
