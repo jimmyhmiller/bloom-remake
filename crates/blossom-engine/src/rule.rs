@@ -272,6 +272,7 @@ impl Plan {
             RuleKind::Inductive => StoreKey::Next(rule.head.rel),
             RuleKind::Async => StoreKey::Async(rule.head.rel),
         };
+        let no_atoms = atoms.is_empty();
         Ok(Plan {
             rule: rule.id,
             nvars: rule.body.vars.len(),
@@ -279,7 +280,7 @@ impl Plan {
             checks,
             // A rule with no positive atom has valuations even over empty relations (`not r(_)` holds there), which
             // no change announces; it is cheap to re-evaluate (it joins nothing).
-            regime: if time_varying || atoms.is_empty() {
+            regime: if time_varying || no_atoms {
                 Regime::Recompute
             } else {
                 Regime::Delta

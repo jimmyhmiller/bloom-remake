@@ -18,8 +18,8 @@ use blossom_node::acl::{AclTable, Source};
 use blossom_node::durable::DurableSchema;
 use blossom_node::manual::ManualDriver;
 use blossom_node::recovery::{self, StoreSpec};
-use blossom_node::{Executor, Node, NodeConfig, OracleExecutor, ReleasedTick};
-use blossom_oracle::{Delivery, Ingress, Oracle, Row};
+use blossom_node::{Backend, Executor, Executors, Node, NodeConfig, ReleasedTick};
+use blossom_oracle::{Delivery, Ingress, Row};
 use blossom_store::{OpenMode, SimFs, StoreIdentity, Vfs, WriteFate};
 use blossom_value::Value;
 use blossom_value::time::{Instant, NodeId};
@@ -69,6 +69,8 @@ pub struct ClusterConfig {
     pub duration: i64,
     /// The principal clients claim.
     pub principal: String,
+    /// The evaluator the nodes run.
+    pub backend: Backend,
 }
 
 impl Default for ClusterConfig {
@@ -87,6 +89,7 @@ impl Default for ClusterConfig {
             partitions: false,
             duration: 5_000_000_000,
             principal: "spiffe://sim/client".into(),
+            backend: Backend::default(),
         }
     }
 }
@@ -183,7 +186,7 @@ struct SimNode<'p> {
 pub struct Cluster<'p> {
     artifact: &'p BlsArtifact,
     schema: &'p DurableSchema,
-    oracle: Arc<Oracle>,
+    executors: Executors,
     acl: AclTable,
     names: Arc<[Arc<str>]>,
     statics: Vec<(RelId, Row)>,
@@ -230,20 +233,20 @@ impl<'p> Cluster<'p> {
         protocol: Box<dyn ClientProtocol + 'p>,
         cfg: ClusterConfig,
     ) -> Result<Cluster<'p>, SimError> {
-        let oracle = Arc::new(
-            Oracle::new(artifact.program.clone())
-                .map_err(SimError::Load)?
-                .with_roles(artifact.roles.clone())
-                .with_seed(program_seed)
-                .and_then(|o| o.with_node_names(artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect()))
-                .map_err(SimError::Load)?,
-        );
+        let executors = Executors::new(
+            cfg.backend,
+            artifact.program.clone(),
+            artifact.roles.clone(),
+            artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect(),
+            program_seed,
+        )
+        .map_err(SimError::Load)?;
         let names: Arc<[Arc<str>]> = artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect();
         let mut c = Cluster {
             artifact,
             schema,
             acl: AclTable::of(artifact.program.get()),
-            oracle,
+            executors,
             names,
             statics,
             nodes: Vec::new(),
@@ -287,7 +290,6 @@ impl<'p> Cluster<'p> {
         let names = self.names.clone();
         let now = self.now;
         let artifact = self.artifact;
-        let oracle = self.oracle.clone();
         let statics = self.statics.clone();
         let schema = self.schema;
         let slot = self
@@ -315,7 +317,10 @@ impl<'p> Cluster<'p> {
         let mut cfg = NodeConfig::new(n, artifact.roles.get(n.0 as usize).copied().flatten());
         cfg.halt = artifact.halt;
         cfg.statics = statics;
-        let exec: Box<dyn Executor> = Box::new(OracleExecutor::new(oracle));
+        let exec = self
+            .executors
+            .make(n)
+            .map_err(|e| SimError::Internal(internal_error!("node {} cannot start its evaluator: {e}", n.0)))?;
         let node = Node::boot(cfg, &artifact.program, exec, opened.boot.clone())
             .map_err(|e| SimError::Internal(internal_error!("node {} cannot boot: {e}", n.0)))?;
         slot.driver = Some(ManualDriver::new(node, artifact.program.get(), schema, names, opened));
@@ -470,7 +475,7 @@ impl<'p> Cluster<'p> {
                 }
                 let principal = format!("spiffe://sim/node/{}", from.0);
                 let role = self.artifact.roles.get(from.0 as usize).copied().flatten();
-                let facts = self.oracle.static_facts();
+                let facts = self.executors.oracle().static_facts();
                 let Some(d) = self.nodes.get_mut(to.0 as usize).and_then(|s| s.driver.as_mut()) else {
                     self.run.dropped += 1;
                     return Ok(());
@@ -490,7 +495,7 @@ impl<'p> Cluster<'p> {
                 }
             }
             Envelope::FromClient { client, to, rel, row } => {
-                let facts = self.oracle.static_facts();
+                let facts = self.executors.oracle().static_facts();
                 let principal = self.cfg.principal.clone();
                 let Some(slot) = self.nodes.get_mut(to.0 as usize) else {
                     return Err(internal_error!("no node {}", to.0).into());

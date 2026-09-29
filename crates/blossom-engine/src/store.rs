@@ -91,6 +91,8 @@ pub(crate) struct Store {
     /// The tick's change to the present rows.
     pub ins: BTreeSet<Row>,
     pub del: BTreeSet<Row>,
+    /// Whether any support changed this tick, even where the present rows did not.
+    pub touched: bool,
 }
 
 fn key(row: &[Value], cols: &[usize]) -> Vec<Value> {
@@ -116,6 +118,7 @@ impl Store {
     pub fn clear_delta(&mut self) {
         self.ins.clear();
         self.del.clear();
+        self.touched = false;
     }
 
     /// Adds `w` (non-zero) to the support of `row`.
@@ -123,6 +126,7 @@ impl Store {
         if w == 0 {
             return Ok(());
         }
+        self.touched = true;
         let Some(spec) = self.cell.clone() else {
             let count = self.counts.entry(row.clone()).or_insert(0);
             let before = *count;
