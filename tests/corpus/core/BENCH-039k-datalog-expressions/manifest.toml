@@ -19,9 +19,7 @@ stop = "ticks"
 status = "pass"
 
 [backend.interp]
-status = "unimplemented"
-unimplemented = ["LANG-043", "LANG-047", "LANG-084", "LANG-085", "LANG-089", "SEM-002"]
-until = "M7"
+status = "pass"
 
 [[input]]
 node = "n1"

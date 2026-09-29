@@ -2,6 +2,9 @@
 //! `/v3/kv/range`, `/v3/kv/deleterange`) over a kept-alive HTTP/1.1 connection per session.
 //!
 //! Reads are etcd's default linearizable range (not `serializable`), so the history checker applies to etcd too.
+//! Sessions go to the leader by default, found through `/v3/maintenance/status` (the Blossom client follows
+//! redirects to its leader, so both are measured at their leaders); `Routing::Spread` spreads them over the
+//! endpoints instead, which makes followers forward.
 //! The gateway translates JSON to gRPC inside etcd, which costs something; etcd's own gRPC `benchmark` tool gives
 //! its best case alongside (docs/plan/notes on the comparison).
 
@@ -11,10 +14,54 @@ use std::time::Duration;
 
 use crate::kv::{KvError, KvSession, KvStore};
 
-/// Sessions to an etcd cluster's client URLs; client `c` uses endpoint `c mod n`.
+/// Sessions to an etcd cluster's client URLs.
 pub struct EtcdStore {
     pub endpoints: Vec<SocketAddr>,
     pub timeout: Duration,
+    pub routing: Routing,
+}
+
+/// Which endpoint a session uses.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Routing {
+    /// The current leader's.
+    #[default]
+    Leader,
+    /// Client `c` uses endpoint `c mod n`.
+    Spread,
+}
+
+impl EtcdStore {
+    fn open(&self, addr: &SocketAddr) -> Result<EtcdSession, String> {
+        let stream = TcpStream::connect_timeout(addr, self.timeout).map_err(|e| e.to_string())?;
+        stream.set_nodelay(true).map_err(|e| e.to_string())?;
+        stream.set_read_timeout(Some(self.timeout)).map_err(|e| e.to_string())?;
+        let writer = stream.try_clone().map_err(|e| e.to_string())?;
+        Ok(EtcdSession {
+            host: addr.to_string(),
+            reader: BufReader::new(stream),
+            writer,
+        })
+    }
+
+    /// The endpoint of the member that reports itself as the leader.
+    fn leader(&self) -> Result<SocketAddr, String> {
+        let id = |v: &serde_json::Value| match v {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        };
+        for addr in &self.endpoints {
+            let Ok(mut s) = self.open(addr) else { continue };
+            let Ok(status) = s.post("/v3/maintenance/status", "{}") else { continue };
+            let member = status.get("header").and_then(|h| h.get("member_id")).and_then(id);
+            let leader = status.get("leader").and_then(id);
+            if member.is_some() && member == leader {
+                return Ok(*addr);
+            }
+        }
+        Err("no etcd endpoint reports itself as the leader".into())
+    }
 }
 
 struct EtcdSession {
@@ -25,19 +72,14 @@ struct EtcdSession {
 
 impl KvStore for EtcdStore {
     fn connect(&self, client: usize) -> Result<Box<dyn KvSession>, String> {
-        let addr = self
-            .endpoints
-            .get(client % self.endpoints.len().max(1))
-            .ok_or_else(|| "no etcd endpoints".to_string())?;
-        let stream = TcpStream::connect_timeout(addr, self.timeout).map_err(|e| e.to_string())?;
-        stream.set_nodelay(true).map_err(|e| e.to_string())?;
-        stream.set_read_timeout(Some(self.timeout)).map_err(|e| e.to_string())?;
-        let writer = stream.try_clone().map_err(|e| e.to_string())?;
-        Ok(Box::new(EtcdSession {
-            host: addr.to_string(),
-            reader: BufReader::new(stream),
-            writer,
-        }))
+        let addr = match self.routing {
+            Routing::Leader => self.leader()?,
+            Routing::Spread => *self
+                .endpoints
+                .get(client % self.endpoints.len().max(1))
+                .ok_or_else(|| "no etcd endpoints".to_string())?,
+        };
+        Ok(Box::new(self.open(&addr)?))
     }
 }
 

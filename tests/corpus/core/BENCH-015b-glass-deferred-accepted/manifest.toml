@@ -22,9 +22,7 @@ status = "pass"
 status = "pass"
 
 [backend.interp]
-status = "unimplemented"
-unimplemented = ["SEM-020", "SEM-022", "ANA-002", "LANG-040", "LANG-045", "LANG-061", "LANG-082", "LANG-190", "SEM-002"]
-until = "M7"
+status = "pass"
 
 [[expect]]
 node = "n1"

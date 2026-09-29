@@ -394,6 +394,7 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
     }
     let mut out = TickOutput::default();
     let mut outgoing: BTreeMap<(RelId, blossom_value::time::NodeId), BTreeSet<Row>> = BTreeMap::new();
+    let mut replies: BTreeMap<(RelId, blossom_value::value::SessionId), BTreeSet<Row>> = BTreeMap::new();
     for &id in &oracle.inductive {
         let (rule, plan) = rule_and_plan(oracle, id)?;
         if !oracle.runs_on(rule, input.node) {
@@ -415,13 +416,11 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
         for (row, firing) in heads(&scope, &db, rule, plan, input.capture).map_err(|e| fail(rule, e))? {
             let to = match row.first() {
                 Some(Value::Node(n)) => *n,
-                // A reply to a client session leaves the deployment (LANGUAGE §18.4).
+                // A reply to a client session leaves the deployment (LANGUAGE §18.4); a session is a destination
+                // like a node, so a lattice reply channel merges per session and key too (§14.2).
                 Some(Value::Session(s)) => {
-                    out.egress.insert(Egress {
-                        rel: rule.head.rel,
-                        session: *s,
-                        row,
-                    });
+                    let set = replies.entry((rule.head.rel, *s)).or_default();
+                    insert_merged(&oracle.cells, set, rule.head.rel, row).map_err(|e| fail(rule, e.into()))?;
                     firings.extend(firing);
                     continue;
                 }
@@ -436,6 +435,11 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
     for ((rel, to), rows) in outgoing {
         for row in rows {
             out.outbox.insert(Send { rel, to, row });
+        }
+    }
+    for ((rel, session), rows) in replies {
+        for row in rows {
+            out.egress.insert(Egress { rel, session, row });
         }
     }
     check_keys(program, &db.rows, input.tick)?;

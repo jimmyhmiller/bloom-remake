@@ -50,9 +50,7 @@ rows = [[3]]
 status = "pass"
 
 [backend.interp]
-status = "unimplemented"
-unimplemented = ["LANG-122", "LANG-124", "LANG-137", "LANG-153", "LANG-241", "SEM-105", "DIST-005"]
-until = "M7"
+status = "pass"
 
 [[expect_send]]
 from    = "batch"

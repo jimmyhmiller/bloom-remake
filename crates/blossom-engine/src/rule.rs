@@ -705,12 +705,18 @@ pub(crate) fn run_term(
     {
         *slot = Some(row.clone());
     }
+    // A negation or lookup driver is a check: an error raised by a check before it does not depend on its change.
+    let driver_check = match driver {
+        Driver::Neg { lit, .. } | Driver::Lookup { lit, .. } => plan.checks.iter().position(|c| c == lit),
+        _ => None,
+    };
     let mut search = Search {
         cx,
         stores,
         rule,
         plan,
         driver,
+        driver_check,
         old,
         steps: &order.steps,
         sign,
@@ -812,6 +818,8 @@ struct Search<'a, 'b> {
     rule: &'a Rule,
     plan: &'a Plan,
     driver: &'a Driver,
+    /// The driver's position among the checks, when it is a negation or a lookup.
+    driver_check: Option<usize>,
     old: &'a dyn Fn(usize) -> bool,
     steps: &'a [Step],
     sign: i64,
@@ -1052,6 +1060,11 @@ impl Search<'_, '_> {
     }
 
     /// A check at `pc` raised `e`: the valuation fails, once per completion of the atoms still to join.
+    ///
+    /// The reference raises a check's error for every valuation of the atoms and the checks before it, whatever the
+    /// checks after it say. So in a term driven by a negation's or a lookup's change, an error from a check before
+    /// the driver is not this term's: the set of erring valuations does not depend on the driver, and the terms
+    /// driven by the atoms count it.
     fn fail(
         &mut self,
         pc: usize,
@@ -1060,6 +1073,11 @@ impl Search<'_, '_> {
         rows: &mut Vec<Option<Row>>,
         looked: &mut Vec<Value>,
     ) -> Result<(), EvalError> {
+        if let (Some(Step::Check(k)), Some(d)) = (self.steps.get(pc), self.driver_check)
+            && *k < d
+        {
+            return Ok(());
+        }
         self.run(pc + 1, env, rows, looked, Some(&e))
     }
 }

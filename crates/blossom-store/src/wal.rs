@@ -225,6 +225,12 @@ pub struct FileWal {
     dirty: bool,
     last_tick: Option<u64>,
     certification: crate::Certification,
+    /// Crc: the synced batch whose sync marker goes at the head of the next batch (so it is durable with that
+    /// batch's one sync), as (the batch, its last tick).
+    uncertified: Option<(u64, u64)>,
+    /// Crc: whether this segment's receipt was written (at its first sync: it marks the segment as holding
+    /// acknowledged data, so a damaged header is corruption, not an aborted creation).
+    receipt_written: bool,
 }
 impl FileWal {
     /// This WAL's tail certification (strict by default; it must match how its store was created).
@@ -262,6 +268,8 @@ impl FileWal {
             dirty: false,
             last_tick: None,
             certification: crate::Certification::Strict,
+            uncertified: None,
+            receipt_written: false,
         })
     }
     fn healthy(&self) -> Result<(), StoreError> {
@@ -295,6 +303,20 @@ impl FileWal {
         self.file.sync_data()?;
         self.fs.sync_dir(&self.dir)?;
         self.offset = bytes.len() as u64;
+        self.receipt_written = false;
+        Ok(())
+    }
+
+    /// Appends `bytes` at the end of the current segment.
+    fn append_bytes(&mut self, bytes: &[u8]) -> Result<(), StoreError> {
+        if let Err(e) = self.file.append(bytes) {
+            self.poisoned = true;
+            return Err(e);
+        }
+        self.offset = self
+            .offset
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| invalid("offset overflow"))?;
         Ok(())
     }
 }
@@ -353,6 +375,13 @@ impl WalWriter for FileWal {
         if self.last_tick.is_some_and(|t| rec.tick <= t) {
             return Err(invalid("WAL ticks must increase"));
         }
+        // Crc recovery reads a batch's end from the next batch's number, so batches count up by one.
+        if self.certification == crate::Certification::Crc
+            && !self.dirty
+            && self.batch.is_some_and(|b| b.checked_add(1) != Some(rec.batch))
+        {
+            return Err(invalid("with crc certification, each batch is the one after the last"));
+        }
         let prospective = FIXED_RECORD
             .checked_add(rec.payload.len())
             .ok_or_else(|| invalid("record overflow"))?;
@@ -375,19 +404,28 @@ impl WalWriter for FileWal {
             self.poisoned = true;
             return Err(e);
         }
+        // Crc: the last synced batch's marker leads this batch, and becomes durable with its sync.
+        if let Some((_, tick)) = self.uncertified.take() {
+            let marker = WalRecordBuf {
+                batch: rec.batch,
+                tick,
+                now: 0,
+                kind: SYNC_MARKER,
+                payload: Vec::new(),
+            };
+            let lsn = Lsn(self
+                .base
+                .checked_add(self.offset)
+                .ok_or_else(|| invalid("marker LSN overflow"))?);
+            let bytes = record_bytes(&marker, lsn)?;
+            self.append_bytes(&bytes)?;
+        }
         let lsn = Lsn(self
             .base
             .checked_add(self.offset)
             .ok_or_else(|| invalid("LSN overflow"))?);
         let bytes = record_bytes(rec, lsn)?;
-        if let Err(e) = self.file.append(&bytes) {
-            self.poisoned = true;
-            return Err(e);
-        }
-        self.offset = self
-            .offset
-            .checked_add(bytes.len() as u64)
-            .ok_or_else(|| invalid("offset overflow"))?;
+        self.append_bytes(&bytes)?;
         self.batch = Some(rec.batch);
         self.dirty = true;
         self.last_tick = Some(rec.tick);
@@ -396,17 +434,35 @@ impl WalWriter for FileWal {
     fn sync(&mut self) -> Result<SyncedUpTo, StoreError> {
         self.healthy()?;
         if self.certification == crate::Certification::Crc {
-            // One sync; the records' checksums are the only certification.
+            // One sync. This batch's marker is written at the head of the next one; the segment's receipt, once, at
+            // its first sync.
             if let Err(e) = self.file.sync_data() {
                 self.poisoned = true;
                 return Err(e);
             }
+            let end = Lsn(self
+                .base
+                .checked_add(self.offset)
+                .ok_or_else(|| invalid("LSN overflow"))?);
+            if self.dirty {
+                if !self.receipt_written {
+                    if let Err(e) = atomic_write(
+                        &*self.fs,
+                        &receipt_path(&self.dir, self.header.segment_seq),
+                        &receipt_bytes(&self.header, end),
+                    ) {
+                        self.poisoned = true;
+                        return Err(e);
+                    }
+                    self.receipt_written = true;
+                }
+                if let (Some(b), Some(t)) = (self.batch, self.last_tick) {
+                    self.uncertified = Some((b, t));
+                }
+            }
             self.dirty = false;
             return Ok(SyncedUpTo {
-                lsn: Lsn(self
-                    .base
-                    .checked_add(self.offset)
-                    .ok_or_else(|| invalid("LSN overflow"))?),
+                lsn: end,
                 tick: self.last_tick,
             });
         }

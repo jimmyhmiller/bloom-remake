@@ -33,9 +33,11 @@ pub enum Certification {
     /// receipt's directory): recovery tells damage to acknowledged records (corruption, an error) from a torn tail.
     #[default]
     Strict,
-    /// Each group commit syncs the data once, and records carry checksums (etcd's model): recovery truncates damage
-    /// in the newest batch, or at the start of the one after it, as a torn tail, so damage to the last acknowledged
-    /// batch is not told from a crash. Damage anywhere earlier is still an error.
+    /// Each group commit syncs once, as etcd's WAL does. A batch's sync marker leads the next batch (durable with its
+    /// sync), and a segment's receipt is written at its first sync. Recovery still refuses damage to any acknowledged
+    /// batch but the last. Damage confined to the last acknowledged batch cannot be told from a torn write of the
+    /// unsynced batch after it (which may lose sectors in any order), so it is truncated as a torn tail. etcd, which
+    /// assumes a write tears only at its end, would refuse to start there.
     Crc,
 }
 

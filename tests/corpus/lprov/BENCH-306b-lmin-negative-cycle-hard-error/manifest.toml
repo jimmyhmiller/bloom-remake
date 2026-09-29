@@ -27,9 +27,7 @@ rows = [["a", "b", 1], ["b", "c", 2], ["c", "a", -4], ["a", "c", 5]]
 status = "pass"
 
 [backend.interp]
-status = "unimplemented"
-unimplemented = ["LANG-121", "LANG-124", "SEM-032", "SEM-103", "ENG-047", "ENG-140"]
-until = "M7"
+status = "pass"
 
 [[expect_error]]
 code = "BLSR007"

@@ -1,0 +1,5 @@
+//! A runtime error raised before a negation is reached, in a tick where the negation flips to false.
+program error_before_a_flipping_negation version 1;
+input ia(x: u8);
+input ib(x: u8);
+view out(x, y) = ia(x), let y = 10 / x, not ib(x);

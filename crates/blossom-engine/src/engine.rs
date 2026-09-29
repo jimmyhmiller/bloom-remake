@@ -84,6 +84,8 @@ pub struct Engine {
     keyed: Vec<(RelId, Vec<usize>, bool)>,
     violations: Vec<RuleId>,
     poisoned: bool,
+    /// Lattice stores written since the last settle.
+    unsettled: BTreeSet<StoreKey>,
     /// Rows the atom probes returned since the engine was created: the join work, measured without a clock.
     examined: u64,
 }
@@ -302,6 +304,7 @@ impl Engine {
             keyed,
             violations,
             poisoned: false,
+            unsettled: BTreeSet::new(),
             examined: 0,
             program,
         };
@@ -363,10 +366,28 @@ impl Engine {
         self.build_indexes()
     }
 
+    /// A store to write. A lattice store written is settled at the next [`Engine::settle`].
     fn store(&mut self, key: StoreKey) -> Result<&mut Store, EvalError> {
-        self.stores
+        let store = self
+            .stores
             .get_mut(&key)
-            .ok_or_else(|| internal_error!("no store for {key:?}").into())
+            .ok_or_else(|| EvalError::from(internal_error!("no store for {key:?}")))?;
+        if store.cell.is_some() {
+            self.unsettled.insert(key);
+        }
+        Ok(store)
+    }
+
+    /// Joins the changed cells of every lattice store written since the last settle. Called where the reference's
+    /// state is defined: after the tick's inputs, after each stratum (and each step of a fixpoint), and after the
+    /// next state and the sends; a conflict raised here is one the reference raises too.
+    fn settle(&mut self, tick: Tick) -> Result<(), EvalError> {
+        for key in std::mem::take(&mut self.unsettled) {
+            if let Some(s) = self.stores.get_mut(&key) {
+                s.settle().map_err(|e| to_eval(e, tick, None))?;
+            }
+        }
+        Ok(())
     }
 
     /// Runs one tick.
@@ -450,6 +471,7 @@ impl Engine {
             }
         }
         self.inputs = now_inputs;
+        self.settle(tick)?;
         let program = self.program.clone();
         let p = program.get();
         // 2. The strata.
@@ -458,15 +480,21 @@ impl Engine {
             if s.recursive {
                 self.recursive_stratum(p, input, s)?;
             } else {
-                for id in s.aggregates.iter().chain(&s.rules) {
+                for id in &s.aggregates {
+                    self.maintain(p, input, *id)?;
+                }
+                self.settle(tick)?;
+                for id in &s.rules {
                     self.maintain(p, input, *id)?;
                 }
             }
+            self.settle(tick)?;
         }
         // 3. The next tick's state and the tick's sends.
         for id in self.inductive.clone().iter().chain(&self.asynchronous.clone()) {
             self.maintain(p, input, *id)?;
         }
+        self.settle(tick)?;
         // 4. Keys and invariants.
         self.check_keys(p, tick)?;
         self.check_invariants(p, tick)?;
@@ -905,12 +933,14 @@ impl Engine {
                 store.add(row, -w).map_err(|e| to_eval(e, tick, Some(rule)))?;
             }
         }
+        self.settle(tick)?;
         // The aggregates read only lower strata: once, first.
         for id in &s.aggregates {
             let plan = self.plans.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?.clone();
             let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
             self.recompute_rule(p, input, rule, &plan)?;
         }
+        self.settle(tick)?;
         // The other rules, naively to the fixpoint. A program error counts only at the fixpoint, where every rule
         // runs once more with errors fatal (a row that run adds resumes the iteration).
         let mut derived: BTreeMap<RuleId, BTreeSet<Row>> = BTreeMap::new();
@@ -936,12 +966,16 @@ impl Engine {
                         fresh.push(row);
                     }
                 }
-                if !fresh.is_empty() {
-                    changed = true;
-                }
+                // A round changed the database if a row appeared or a cell's value moved (a row another rule
+                // already derived, or a dominated contribution, changes nothing: the reference counts only changes).
+                let before = self.stores.get(&plan.head).map_or(0, Store::generation);
                 for row in fresh {
                     mine.insert(row.clone());
                     self.store(plan.head)?.add(row, 1).map_err(|e| to_eval(e, tick, Some(rule)))?;
+                }
+                self.settle(tick)?;
+                if self.stores.get(&plan.head).map_or(0, Store::generation) != before {
+                    changed = true;
                 }
             }
             if strict && !changed {

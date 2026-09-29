@@ -1,0 +1,6 @@
+//! Integer casts (`as`): in range they convert; out of range they are BLSR004 (LANGUAGE §5.2). The S5 review found
+//! that a cast between different integer types crashed the compiler.
+program integer_casts version 1;
+input e(c: u16);
+view widened(y) = e(c), let y = c as u64;
+view narrowed(y) = e(c), let y = c as u8;
