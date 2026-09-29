@@ -299,10 +299,19 @@ impl Frame {
     /// Reads one frame from a byte stream (blocking). `Ok(None)` at a clean end of stream.
     pub fn read(r: &mut dyn Read, limits: &WireLimits) -> Result<Option<Frame>, FrameIoError> {
         let mut len = [0u8; 4];
-        match r.read_exact(&mut len) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(FrameIoError::Io(e)),
+        // A clean end of stream is one before the first byte of a frame; an end inside a frame is an error.
+        let mut got = 0;
+        while got < len.len() {
+            let Some(rest) = len.get_mut(got..) else {
+                break;
+            };
+            match r.read(rest) {
+                Ok(0) if got == 0 => return Ok(None),
+                Ok(0) => return Err(FrameIoError::Io(std::io::ErrorKind::UnexpectedEof.into())),
+                Ok(n) => got += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(FrameIoError::Io(e)),
+            }
         }
         let len = u32::from_le_bytes(len) as usize;
         if len == 0 || len > limits.max_frame {
@@ -314,6 +323,22 @@ impl Frame {
             .split_first()
             .ok_or(FrameIoError::Wire(WireError::Truncated("frame type")))?;
         Frame::decode(t, body, limits).map(Some).map_err(FrameIoError::Wire)
+    }
+
+    /// Decodes the first whole frame of `buf`, if it holds one: the frame and the bytes it used.
+    pub fn parse(buf: &[u8], limits: &WireLimits) -> Result<Option<(Frame, usize)>, WireError> {
+        let Some(len) = buf.get(..4) else {
+            return Ok(None);
+        };
+        let len = u32::from_le_bytes(len.try_into().map_err(|_| WireError::Truncated("frame length"))?) as usize;
+        if len == 0 || len > limits.max_frame {
+            return Err(WireError::Limit("frame length"));
+        }
+        let Some(frame) = buf.get(4..4 + len) else {
+            return Ok(None);
+        };
+        let (&t, body) = frame.split_first().ok_or(WireError::Truncated("frame type"))?;
+        Ok(Some((Frame::decode(t, body, limits)?, 4 + len)))
     }
 
     /// Writes one frame.

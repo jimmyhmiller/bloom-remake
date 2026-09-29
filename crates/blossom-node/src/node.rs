@@ -13,6 +13,10 @@
 //!
 //! **Tick numbers** are never reused across incarnations (SEM-001): the node boots at the tick recovery reserved,
 //! runs only ticks within the reserved bound, and asks the driver to extend the bound ahead of reaching it.
+//!
+//! **Time never goes back across incarnations.** A tick is released only if its `now` is within a durable time
+//! bound (`META.last_now`), which the node asks the driver to extend ahead of need, and a restart boots after the
+//! bound. So no instant a released tick exposed can be sampled again after a crash, whatever the wall clock does.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -30,6 +34,16 @@ use crate::{NodeError, NodeFault};
 
 /// How many ticks a reservation adds (ARCHITECTURE §5.6 step 5).
 pub const RESERVE_STEP: u64 = 65_536;
+/// How far ahead of the clock a time reservation reaches, in nanoseconds (one second). A restart within it boots up
+/// to this far ahead of the wall clock.
+pub const TIME_STEP: i64 = 1_000_000_000;
+
+/// The durable bounds a node runs within: its highest tick and its latest releasable instant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reservation {
+    pub ticks: Tick,
+    pub now: Instant,
+}
 
 /// A node's configuration.
 #[derive(Clone, Debug)]
@@ -43,6 +57,9 @@ pub struct NodeConfig {
     /// The most messages (deliveries and client messages) one tick takes (CR-02: batch composition is a
     /// scheduling choice). The rest wait for the next tick.
     pub max_batch: usize,
+    /// The most bytes of messages (estimated from their values) one tick takes; a tick always takes at least one
+    /// message. It bounds a tick's input, and with it the size of its WAL record.
+    pub max_batch_bytes: usize,
     /// The most ticks parked awaiting their WAL sync before the node stops taking new work (backpressure).
     pub max_inflight: usize,
 }
@@ -55,6 +72,7 @@ impl NodeConfig {
             halt: None,
             statics: Vec::new(),
             max_batch: 4096,
+            max_batch_bytes: 8 * 1024 * 1024,
             max_inflight: 64,
         }
     }
@@ -69,6 +87,8 @@ pub struct Boot {
     pub tick: Tick,
     /// The highest tick the incarnation may run before the driver extends the reservation.
     pub reserved: Tick,
+    /// The latest instant a released tick may have before the driver extends the reservation.
+    pub time_reserved: Instant,
     /// The boot instant: after every instant an earlier incarnation used.
     pub now: Instant,
     /// Whether durable state was reloaded: every incarnation after the first. `recovered()` holds in the boot tick
@@ -93,8 +113,8 @@ pub struct TickEffects {
     pub now: Instant,
     /// The durable delta, encoded, when the tick changed durable rows: append it to the WAL.
     pub wal: Option<Delta>,
-    /// Extend the tick reservation to this bound (write it to `META`, then call [`Node::reserved`]).
-    pub reserve: Option<Tick>,
+    /// Extend the reservation to these bounds (write them to `META`, then call [`Node::reserved`]).
+    pub reserve: Option<Reservation>,
 }
 
 /// A released tick's externally visible effects.
@@ -115,6 +135,7 @@ struct Parked {
     sends: Vec<Send>,
     egress: Vec<Egress>,
     halts: bool,
+    now: Instant,
 }
 
 /// A message waiting for a tick.
@@ -134,6 +155,7 @@ pub struct Node<E: Evaluator> {
     /// The next tick to run.
     tick: Tick,
     reserved: Tick,
+    time_reserved: Instant,
     reserving: bool,
     booted: bool,
     last_now: Instant,
@@ -202,6 +224,7 @@ impl<E: Evaluator> Node<E> {
             recovered: boot.recovered,
             tick: boot.tick,
             reserved: boot.reserved,
+            time_reserved: boot.time_reserved,
             reserving: false,
             booted: false,
             last_now: boot.now,
@@ -261,7 +284,13 @@ impl<E: Evaluator> Node<E> {
     /// Admission by ACL (ARCHITECTURE §5.8): whether a message on `rel` from `source` is admitted. `principal in REL`
     /// reads REL's committed rows: the deployment's static rows, the program's facts (`facts`, the evaluator's
     /// static rows), the rows at the last released tick for a durable table, or else those at the last computed tick.
-    pub fn admits(&self, acl: &crate::acl::AclTable, facts: &Instance, rel: RelId, source: crate::acl::Source<'_>) -> bool {
+    pub fn admits(
+        &self,
+        acl: &crate::acl::AclTable,
+        facts: &Instance,
+        rel: RelId,
+        source: crate::acl::Source<'_>,
+    ) -> bool {
         let principal_in = |r: RelId, p: &str| {
             let is = |row: &Row| matches!(row.first(), Some(blossom_value::Value::Principal(x)) if &**x == p);
             self.cfg.statics.iter().any(|(sr, row)| *sr == r && is(row))
@@ -297,6 +326,15 @@ impl<E: Evaluator> Node<E> {
     /// The number of computed ticks waiting for release.
     pub fn parked(&self) -> usize {
         self.parked.len()
+    }
+
+    /// Whether the node cannot run a tick until the driver reports progress (a sync, a reservation) or it stopped:
+    /// a due timer or new input does not make it ready.
+    pub fn waiting(&self) -> bool {
+        self.state != NodeState::Running
+            || self.halting
+            || self.tick > self.reserved
+            || self.parked.len() >= self.cfg.max_inflight
     }
 
     /// Whether the node wants to run a tick at `now`.
@@ -360,7 +398,17 @@ impl<E: Evaluator> Node<E> {
         events.append(&mut self.inputs);
         let mut delivered = Vec::new();
         let mut ingress = Vec::new();
-        for _ in 0..self.cfg.max_batch {
+        let mut bytes = 0usize;
+        for taken in 0..self.cfg.max_batch {
+            let size = match self.inbox.front() {
+                Some(Message::Deliver(d)) => row_size(&d.row),
+                Some(Message::Ingress(m)) => row_size(&m.row),
+                None => break,
+            };
+            if taken > 0 && bytes.saturating_add(size) > self.cfg.max_batch_bytes {
+                break;
+            }
+            bytes = bytes.saturating_add(size);
             match self.inbox.pop_front() {
                 Some(Message::Deliver(d)) => delivered.push(d),
                 Some(Message::Ingress(m)) => ingress.push(m),
@@ -399,15 +447,25 @@ impl<E: Evaluator> Node<E> {
             sends: out.outbox.into_iter().collect(),
             egress: out.egress.into_iter().collect(),
             halts,
+            now,
         });
-        let reserve = if !self.reserving && self.reserved.0.saturating_sub(tick.0) < RESERVE_STEP / 2 {
+        let ticks_low = self.reserved.0.saturating_sub(tick.0) < RESERVE_STEP / 2;
+        let time_low = self.time_reserved.0.saturating_sub(now.0) < TIME_STEP / 2;
+        let reserve = if !self.reserving && (ticks_low || time_low) {
             self.reserving = true;
-            Some(Tick(
-                self.reserved
-                    .0
-                    .checked_add(RESERVE_STEP)
-                    .ok_or_else(|| internal_error!("the tick reservation overflows"))?,
-            ))
+            Some(Reservation {
+                ticks: if ticks_low {
+                    Tick(
+                        self.reserved
+                            .0
+                            .checked_add(RESERVE_STEP)
+                            .ok_or_else(|| internal_error!("the tick reservation overflows"))?,
+                    )
+                } else {
+                    self.reserved
+                },
+                now: Instant(self.time_reserved.0.max(now.0).saturating_add(TIME_STEP)),
+            })
         } else {
             None
         };
@@ -419,12 +477,16 @@ impl<E: Evaluator> Node<E> {
         })
     }
 
-    /// The driver made the reservation `upto` durable.
-    pub fn reserved(&mut self, upto: Tick) {
-        if upto > self.reserved {
-            self.reserved = upto;
+    /// The driver made the reservation `r` durable. Returns the ticks that it makes releasable.
+    pub fn reserved(&mut self, r: Reservation) -> Vec<ReleasedTick> {
+        if r.ticks > self.reserved {
+            self.reserved = r.ticks;
+        }
+        if r.now > self.time_reserved {
+            self.time_reserved = r.now;
         }
         self.reserving = false;
+        self.release()
     }
 
     /// The driver reports that every WAL record of a tick `≤ upto` is durable. Returns every tick that is now
@@ -442,6 +504,10 @@ impl<E: Evaluator> Node<E> {
         let mut out = Vec::new();
         while let Some(p) = self.parked.front() {
             if p.wal && self.synced.is_none_or(|s| p.tick > s) {
+                break;
+            }
+            // Its instant is not yet covered by the durable time bound.
+            if p.now > self.time_reserved {
                 break;
             }
             let Some(p) = self.parked.pop_front() else {
@@ -465,5 +531,25 @@ impl<E: Evaluator> Node<E> {
     /// The driver calls this after each tick; `wal_synced` does it too.
     pub fn release_ready(&mut self) -> Vec<ReleasedTick> {
         self.release()
+    }
+}
+
+/// An estimate of a row's encoded size, for batching.
+fn row_size(row: &Row) -> usize {
+    row.iter().map(value_size).sum()
+}
+
+fn value_size(v: &blossom_value::Value) -> usize {
+    use blossom_value::Value as V;
+    match v {
+        V::Str(s) | V::Principal(s) => s.len() + 2,
+        V::Bytes(b) => b.len() + 2,
+        V::Tuple(xs) | V::Struct(xs) | V::Vec(xs) => xs.iter().map(value_size).sum::<usize>() + 2,
+        V::Enum { fields, .. } => fields.iter().map(value_size).sum::<usize>() + 2,
+        V::Set(xs) => xs.iter().map(value_size).sum::<usize>() + 2,
+        V::Map(m) => m.iter().map(|(k, v)| value_size(k) + value_size(v)).sum::<usize>() + 2,
+        V::Option(Some(x)) => value_size(x) + 1,
+        V::UnknownVariant { payload, .. } | V::Extern { bytes: payload, .. } => payload.len() + 4,
+        _ => 9,
     }
 }

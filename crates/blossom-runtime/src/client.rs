@@ -26,6 +26,7 @@ pub struct Client {
     hello: PeerHello,
     server: NodeId,
     received: VecDeque<(RelId, Row)>,
+    frames: net::FrameReader,
 }
 
 impl Client {
@@ -62,6 +63,7 @@ impl Client {
             hello,
             server: NodeId(server),
             received: VecDeque::new(),
+            frames: net::FrameReader::new(),
         })
     }
 
@@ -93,9 +95,17 @@ impl Client {
             .collect();
         let refs: Vec<&Row> = full.iter().collect();
         let program = self.artifact.program.get();
-        let bytes = net::batch_frame(&net::wire_codec(program), program, sid, rel, 0, &refs)?;
+        let out = net::batch_frames(&net::wire_codec(program), program, sid, rel, 0, &refs)?;
+        if out.oversized > 0 {
+            return Err(RuntimeError::Net(format!(
+                "{} row(s) are too large for a frame",
+                out.oversized
+            )));
+        }
         use std::io::Write;
-        self.conn.writer.write_all(&bytes).map_err(RuntimeError::Io)?;
+        for f in &out.frames {
+            self.conn.writer.write_all(f).map_err(RuntimeError::Io)?;
+        }
         self.conn.writer.flush().map_err(RuntimeError::Io)
     }
 
@@ -105,17 +115,14 @@ impl Client {
         if let Some(r) = self.received.pop_front() {
             return Ok(Some(r));
         }
-        self.conn.reader.get_ref().set_read_timeout(timeout).map_err(RuntimeError::Io)?;
+        self.conn
+            .reader
+            .get_ref()
+            .set_read_timeout(timeout)
+            .map_err(RuntimeError::Io)?;
         loop {
-            let frame = match Frame::read(&mut self.conn.reader, &self.conn.limits) {
-                Ok(Some(f)) => f,
-                Ok(None) => return Err(RuntimeError::Net("the server closed the session".into())),
-                Err(blossom_wire::frame::FrameIoError::Io(e))
-                    if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) =>
-                {
-                    return Ok(None);
-                }
-                Err(e) => return Err(RuntimeError::Net(e.to_string())),
+            let Some(frame) = self.frames.next(&mut self.conn.reader)? else {
+                return Ok(None);
             };
             let Frame::Batch(b) = frame else {
                 continue;

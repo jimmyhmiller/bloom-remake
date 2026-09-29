@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
-use crate::kv::{KvSession, KvStore};
+use crate::kv::{KvError, KvSession, KvStore};
 
 /// Sessions to an etcd cluster's client URLs; client `c` uses endpoint `c mod n`.
 pub struct EtcdStore {
@@ -43,7 +43,7 @@ impl KvStore for EtcdStore {
 
 impl EtcdSession {
     /// One POST with a JSON body; returns the response body.
-    fn post(&mut self, path: &str, body: &str) -> Result<serde_json::Value, String> {
+    fn post(&mut self, path: &str, body: &str) -> Result<serde_json::Value, KvError> {
         let req = format!(
             "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             self.host,
@@ -53,7 +53,7 @@ impl EtcdSession {
         let mut status = String::new();
         self.reader.read_line(&mut status).map_err(|e| e.to_string())?;
         if status.is_empty() {
-            return Err("etcd closed the connection".into());
+            return Err(KvError::Unavailable("etcd closed the connection".into()));
         }
         let ok = status.split_whitespace().nth(1) == Some("200");
         let mut length: Option<usize> = None;
@@ -77,7 +77,8 @@ impl EtcdSession {
             loop {
                 let mut size = String::new();
                 self.reader.read_line(&mut size).map_err(|e| e.to_string())?;
-                let n = usize::from_str_radix(size.trim(), 16).map_err(|e| format!("chunk size: {e}"))?;
+                let n = usize::from_str_radix(size.trim(), 16)
+                    .map_err(|e| KvError::Protocol(format!("chunk size: {e}")))?;
                 let mut chunk = vec![0u8; n + 2];
                 self.reader.read_exact(&mut chunk).map_err(|e| e.to_string())?;
                 if n == 0 {
@@ -87,46 +88,46 @@ impl EtcdSession {
                 body.extend_from_slice(&chunk);
             }
         } else {
-            let n = length.ok_or_else(|| "a response without a length".to_string())?;
+            let n = length.ok_or_else(|| KvError::Protocol("a response without a length".to_string()))?;
             body.resize(n, 0);
             self.reader.read_exact(&mut body).map_err(|e| e.to_string())?;
         }
         let text = String::from_utf8_lossy(&body);
         if !ok {
-            return Err(format!("etcd: {} {text}", status.trim_end()));
+            return Err(KvError::Unavailable(format!("etcd: {} {text}", status.trim_end())));
         }
-        serde_json::from_slice(&body).map_err(|e| format!("etcd response {text}: {e}"))
+        serde_json::from_slice(&body).map_err(|e| KvError::Protocol(format!("etcd response {text}: {e}")))
     }
 }
 
 impl KvSession for EtcdSession {
-    fn put(&mut self, key: &[u8], val: &[u8]) -> Result<(), String> {
+    fn put(&mut self, key: &[u8], val: &[u8]) -> Result<(), KvError> {
         let body = format!(r#"{{"key":"{}","value":"{}"}}"#, b64(key), b64(val));
         self.post("/v3/kv/put", &body).map(|_| ())
     }
 
-    fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, KvError> {
         let body = format!(r#"{{"key":"{}"}}"#, b64(key));
         let r = self.post("/v3/kv/range", &body)?;
         match r.get("kvs").and_then(|k| k.as_array()).and_then(|a| a.first()) {
             None => Ok(None),
             // An empty value is omitted from the JSON.
             Some(kv) => match kv.get("value").and_then(|v| v.as_str()) {
-                Some(v) => unb64(v).map(Some),
+                Some(v) => unb64(v).map(Some).map_err(KvError::Protocol),
                 None => Ok(Some(Vec::new())),
             },
         }
     }
 
-    fn delete(&mut self, key: &[u8]) -> Result<bool, String> {
+    fn delete(&mut self, key: &[u8]) -> Result<bool, KvError> {
         let body = format!(r#"{{"key":"{}"}}"#, b64(key));
         let r = self.post("/v3/kv/deleterange", &body)?;
         // int64 fields are JSON strings; zero is omitted.
         let deleted = match r.get("deleted") {
             None => 0,
-            Some(serde_json::Value::String(s)) => s.parse::<u64>().map_err(|e| e.to_string())?,
+            Some(serde_json::Value::String(s)) => s.parse::<u64>().map_err(|e| KvError::Protocol(e.to_string()))?,
             Some(serde_json::Value::Number(n)) => n.as_u64().unwrap_or(0),
-            Some(other) => return Err(format!("deleted = {other}")),
+            Some(other) => return Err(KvError::Protocol(format!("deleted = {other}"))),
         };
         Ok(deleted > 0)
     }
@@ -183,7 +184,16 @@ mod tests {
 
     #[test]
     fn base64_round_trips() {
-        for s in [&b""[..], b"f", b"fo", b"foo", b"foob", b"fooba", b"foobar", &[0, 255, 128, 7]] {
+        for s in [
+            &b""[..],
+            b"f",
+            b"fo",
+            b"foo",
+            b"foob",
+            b"fooba",
+            b"foobar",
+            &[0, 255, 128, 7],
+        ] {
             assert_eq!(unb64(&b64(s)).unwrap(), s);
         }
         assert_eq!(b64(b"foobar"), "Zm9vYmFy");

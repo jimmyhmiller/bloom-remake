@@ -71,7 +71,11 @@ impl Catalog {
     pub fn accept(&self, theirs: &[ChannelSchema]) -> BTreeMap<u32, RelId> {
         let mut out = BTreeMap::new();
         for c in theirs {
-            if let Some((rel, _)) = self.channels.iter().find(|(_, mine)| mine.name == c.name && mine.hash == c.hash) {
+            if let Some((rel, _)) = self
+                .channels
+                .iter()
+                .find(|(_, mine)| mine.name == c.name && mine.hash == c.hash)
+            {
                 out.insert(c.sid, *rel);
             }
         }
@@ -97,7 +101,10 @@ pub fn hello(id: &Identity, peer: Peer, restarts: u64, boot_nonce: u64, catalog:
 /// Checks a peer's `HELLO` against this side's identity.
 pub fn check_hello(h: &Hello, id: &Identity) -> Result<(), (RejectReason, String)> {
     if h.proto != PROTO {
-        return Err((RejectReason::Protocol, format!("protocol {} (this node speaks {PROTO})", h.proto)));
+        return Err((
+            RejectReason::Protocol,
+            format!("protocol {} (this node speaks {PROTO})", h.proto),
+        ));
     }
     if h.deployment != id.deployment {
         return Err((RejectReason::Deployment, "another deployment".into()));
@@ -105,7 +112,10 @@ pub fn check_hello(h: &Hello, id: &Identity) -> Result<(), (RejectReason, String
     if h.program_id != id.program_id || h.program_version != id.program_version {
         return Err((
             RejectReason::Program,
-            format!("program version {} (this node runs {})", h.program_version, id.program_version),
+            format!(
+                "program version {} (this node runs {})",
+                h.program_version, id.program_version
+            ),
         ));
     }
     if h.directory != id.directory {
@@ -220,33 +230,110 @@ pub fn open_handshake(
     })
 }
 
-/// Encodes rows of one channel as a `BATCH` frame's bytes.
-pub fn batch_frame(
+/// The most bytes of tuples one `BATCH` carries: well under the receiver's frame limit.
+pub const BATCH_BODY: usize = 1024 * 1024;
+
+/// Rows of one channel encoded as `BATCH` frames: as many frames as it takes to keep each body under
+/// [`BATCH_BODY`], and the number of rows too large for any frame (dropped: a message that cannot be sent is lost).
+pub struct Frames {
+    pub frames: Vec<Vec<u8>>,
+    pub oversized: u64,
+}
+
+/// Encodes rows of one channel as `BATCH` frames.
+pub fn batch_frames(
     codec: &Codec<'_>,
     program: &Program,
     sid: u32,
     rel: RelId,
     send_tick: u64,
     rows: &[&Row],
-) -> Result<Vec<u8>, RuntimeError> {
+) -> Result<Frames, RuntimeError> {
     let cols = &program
         .rels
         .get(rel)
         .ok_or_else(|| blossom_base::internal_error!("channel {rel:?} is not declared"))?
         .schema
         .cols;
+    let limit = WireLimits::default().max_frame.saturating_sub(64);
+    let mut out = Frames {
+        frames: Vec::new(),
+        oversized: 0,
+    };
     let mut body = Vec::new();
+    let mut count = 0u64;
+    let flush = |body: &mut Vec<u8>, count: &mut u64, out: &mut Frames| {
+        if *count > 0 {
+            out.frames.push(
+                Frame::Batch(Batch {
+                    sid,
+                    send_tick,
+                    kind: KIND_PLAIN,
+                    count: *count,
+                    body: std::mem::take(body),
+                })
+                .encode(),
+            );
+            *count = 0;
+        }
+    };
     for r in rows {
-        codec.encode_row(cols, r, &mut body)?;
+        let mut one = Vec::new();
+        codec.encode_row(cols, r, &mut one)?;
+        if one.len() > limit {
+            out.oversized += 1;
+            continue;
+        }
+        if count > 0 && body.len() + one.len() > BATCH_BODY {
+            flush(&mut body, &mut count, &mut out);
+        }
+        body.extend_from_slice(&one);
+        count += 1;
     }
-    Ok(Frame::Batch(Batch {
-        sid,
-        send_tick,
-        kind: KIND_PLAIN,
-        count: rows.len() as u64,
-        body,
-    })
-    .encode())
+    flush(&mut body, &mut count, &mut out);
+    Ok(out)
+}
+
+/// Reads frames from a stream through a buffer, so a read timeout in the middle of a frame loses nothing: the bytes
+/// read so far stay buffered for the next call.
+pub struct FrameReader {
+    buf: Vec<u8>,
+    limits: WireLimits,
+}
+
+impl FrameReader {
+    pub fn new() -> FrameReader {
+        FrameReader {
+            buf: Vec::new(),
+            limits: WireLimits::default(),
+        }
+    }
+
+    /// The next frame. `Ok(None)` when the stream's read timeout expires before a whole frame arrived.
+    pub fn next(&mut self, stream: &mut dyn std::io::Read) -> Result<Option<Frame>, RuntimeError> {
+        loop {
+            if let Some((frame, used)) = Frame::parse(&self.buf, &self.limits)? {
+                self.buf.drain(..used);
+                return Ok(Some(frame));
+            }
+            let mut chunk = [0u8; 64 * 1024];
+            match stream.read(&mut chunk) {
+                Ok(0) => return Err(RuntimeError::Net("the connection closed".into())),
+                Ok(n) => self.buf.extend_from_slice(chunk.get(..n).unwrap_or(&[])),
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+                    return Ok(None);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(RuntimeError::Io(e)),
+            }
+        }
+    }
+}
+
+impl Default for FrameReader {
+    fn default() -> FrameReader {
+        FrameReader::new()
+    }
 }
 
 /// Decodes a `BATCH`'s rows of channel `rel`.

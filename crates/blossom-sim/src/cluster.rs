@@ -128,9 +128,23 @@ impl Rng {
 }
 
 enum Envelope {
-    Peer { from: NodeId, to: NodeId, rel: RelId, row: Row },
-    FromClient { client: usize, to: NodeId, rel: RelId, row: Row },
-    ToClient { client: usize, rel: RelId, row: Row },
+    Peer {
+        from: NodeId,
+        to: NodeId,
+        rel: RelId,
+        row: Row,
+    },
+    FromClient {
+        client: usize,
+        to: NodeId,
+        rel: RelId,
+        row: Row,
+    },
+    ToClient {
+        client: usize,
+        rel: RelId,
+        row: Row,
+    },
 }
 
 struct Pending {
@@ -157,6 +171,9 @@ struct SimNode<'p> {
     fs: SimFs,
     driver: Option<ManualDriver<'p, Arc<Oracle>>>,
     restarts: u64,
+    /// How far this incarnation's clock is ahead of virtual time: a restart boots after every instant the previous
+    /// incarnation may have exposed, which can be ahead of the virtual clock (the real clock anchors the same way).
+    offset: i64,
     next_session: u64,
     /// Open sessions: which client each is.
     sessions: BTreeMap<SessionId, usize>,
@@ -244,6 +261,7 @@ impl<'p> Cluster<'p> {
                 fs: SimFs::default(),
                 driver: None,
                 restarts: 0,
+                offset: 0,
                 next_session: 0,
                 sessions: BTreeMap::new(),
             });
@@ -290,6 +308,7 @@ impl<'p> Cluster<'p> {
         )
         .map_err(|e| SimError::Internal(internal_error!("node {} cannot recover: {e}", n.0)))?;
         slot.restarts = opened.record.restarts;
+        slot.offset = opened.boot.now.0.saturating_sub(now).max(0);
         slot.next_session = 0;
         slot.sessions.clear();
         let mut cfg = NodeConfig::new(n, artifact.roles.get(n.0 as usize).copied().flatten());
@@ -335,7 +354,7 @@ impl<'p> Cluster<'p> {
                 if let Some(d) = &n.driver
                     && let Some(t) = d.node.next_deadline().map_err(|e| internal_error!("{e}"))?
                 {
-                    next = next.min(t.0);
+                    next = next.min(t.0.saturating_sub(n.offset));
                 }
             }
             self.now = next.max(self.now + 1);
@@ -370,10 +389,10 @@ impl<'p> Cluster<'p> {
     }
 
     fn step_node(&mut self, n: NodeId) -> Result<(), SimError> {
-        let now = Instant(self.now);
         let Some(slot) = self.nodes.get_mut(n.0 as usize) else {
             return Err(internal_error!("no node {}", n.0).into());
         };
+        let now = Instant(self.now.saturating_add(slot.offset));
         let Some(driver) = slot.driver.as_mut() else {
             return Ok(());
         };
@@ -454,7 +473,15 @@ impl<'p> Cluster<'p> {
                     self.run.dropped += 1;
                     return Ok(());
                 };
-                if d.node.admits(&self.acl, facts, rel, Source::Node { role, principal: &principal }) {
+                if d.node.admits(
+                    &self.acl,
+                    facts,
+                    rel,
+                    Source::Node {
+                        role,
+                        principal: &principal,
+                    },
+                ) {
                     d.node.offer_delivery(Delivery { rel, from, row });
                 } else {
                     self.run.dropped += 1;
@@ -485,7 +512,9 @@ impl<'p> Cluster<'p> {
                         s
                     }
                 };
-                if d.node.admits(&self.acl, facts, rel, Source::Session { principal: &principal }) {
+                if d.node
+                    .admits(&self.acl, facts, rel, Source::Session { principal: &principal })
+                {
                     d.node.offer_ingress(Ingress { rel, session, row });
                 } else {
                     self.run.dropped += 1;
@@ -555,7 +584,10 @@ impl<'p> Cluster<'p> {
             let wake = now + self.rng.range(0, self.cfg.think);
             let nodes = self.nodes.len() as u64;
             let target = node_id(usize::try_from(self.rng.below(nodes)).unwrap_or(0))?;
-            let c = self.clients.get_mut(client).ok_or_else(|| internal_error!("no client"))?;
+            let c = self
+                .clients
+                .get_mut(client)
+                .ok_or_else(|| internal_error!("no client"))?;
             if let Some(p) = c.pending.take() {
                 self.run.history.push(Operation {
                     call: u64::try_from(p.call - EPOCH).unwrap_or(0),
@@ -580,7 +612,10 @@ impl<'p> Cluster<'p> {
                 let key = format!("k{}", self.rng.below(self.cfg.keys as u64)).into_bytes();
                 let total = u64::from(self.cfg.mix.0 + self.cfg.mix.1 + self.cfg.mix.2);
                 let pick = self.rng.below(total);
-                let c = self.clients.get_mut(client).ok_or_else(|| internal_error!("no client"))?;
+                let c = self
+                    .clients
+                    .get_mut(client)
+                    .ok_or_else(|| internal_error!("no client"))?;
                 c.next_req += 1;
                 let req = c.next_req;
                 let op = if pick < u64::from(self.cfg.mix.0) {
@@ -609,7 +644,10 @@ impl<'p> Cluster<'p> {
         let mut row = vec![Value::Node(to)];
         row.extend(fields);
         let delay = self.rng.range(self.cfg.latency.0, self.cfg.latency.1);
-        let c = self.clients.get_mut(client).ok_or_else(|| internal_error!("no client"))?;
+        let c = self
+            .clients
+            .get_mut(client)
+            .ok_or_else(|| internal_error!("no client"))?;
         c.target = to;
         c.retry = None;
         c.wake = i64::MAX;
@@ -660,7 +698,9 @@ impl<'p> Cluster<'p> {
                     })
                     .map_err(|e| internal_error!("crash: {e}"))?;
                 self.run.crashes += 1;
-                self.run.log.push(format!("{}: crash and restart node {}", self.now - EPOCH, victim.0));
+                self.run
+                    .log
+                    .push(format!("{}: crash and restart node {}", self.now - EPOCH, victim.0));
                 self.boot(victim, false)?;
             }
             1 => {
@@ -674,7 +714,9 @@ impl<'p> Cluster<'p> {
                     }
                 }
                 self.run.partitions += 1;
-                self.run.log.push(format!("{}: isolate node {}", self.now - EPOCH, victim.0));
+                self.run
+                    .log
+                    .push(format!("{}: isolate node {}", self.now - EPOCH, victim.0));
             }
             _ => {
                 self.blocked.clear();

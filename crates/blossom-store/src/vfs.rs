@@ -18,6 +18,8 @@ pub trait Vfs: Send + Sync {
     fn open(&self, path: &Path, opts: OpenOpts) -> Result<Box<dyn VfsFile>, StoreError>;
     fn rename(&self, from: &Path, to: &Path) -> Result<(), StoreError>;
     fn remove(&self, path: &Path) -> Result<(), StoreError>;
+    /// Remove an empty directory. The caller syncs the parent to make the removal durable.
+    fn remove_dir(&self, path: &Path) -> Result<(), StoreError>;
     fn list(&self, dir: &Path) -> Result<Vec<PathBuf>, StoreError>;
     fn sync_dir(&self, dir: &Path) -> Result<(), StoreError>;
     fn lock_exclusive(&self, path: &Path) -> Result<Box<dyn VfsLock>, StoreError>;
@@ -104,6 +106,10 @@ impl Vfs for RealFs {
         std::fs::remove_file(path)?;
         Ok(())
     }
+    fn remove_dir(&self, path: &Path) -> Result<(), StoreError> {
+        std::fs::remove_dir(path)?;
+        Ok(())
+    }
     fn list(&self, dir: &Path) -> Result<Vec<PathBuf>, StoreError> {
         let mut paths = std::fs::read_dir(dir)?
             .map(|e| e.map(|e| e.path()))
@@ -167,7 +173,11 @@ pub fn durable_dir(fs: &dyn Vfs, path: &Path) -> Result<(), StoreError> {
     for ancestor in path.ancestors() {
         if let Some(parent) = ancestor.parent() {
             // The parent of a relative path's first component is the empty path: the current directory.
-            fs.sync_dir(if parent.as_os_str().is_empty() { Path::new(".") } else { parent })?;
+            fs.sync_dir(if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            })?;
         }
     }
     Ok(())

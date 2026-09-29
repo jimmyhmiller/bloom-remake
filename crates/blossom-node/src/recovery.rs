@@ -7,7 +7,8 @@
 //! 3. replay the WAL records after the checkpoint (a torn tail is truncated: it was never synced, so never
 //!    acknowledged);
 //! 4. reserve ticks: boot at `reserved + 1` (at tick 0 on the first boot), and make `boot + 65 536` the new bound;
-//! 5. count the restart, pick the boot instant `max(wall, last_now + 1 ns)`, write `META`, and open a new WAL segment.
+//! 5. count the restart, pick the boot instant `max(wall, last_now + 1 ns)` (`META.last_now` bounds every instant a
+//!    released tick had), reserve time up to one `TIME_STEP` past it, write `META`, and open a new WAL segment.
 //!
 //! The layout under the node's directory: `LOCK`, `META`, `CURRENT`, `ckpt/<tick>/`, `wal/<seq>.seg`.
 
@@ -25,7 +26,7 @@ use blossom_wire::codec::put_varint;
 
 use crate::NodeError;
 use crate::durable::{DurableCodec, DurableImage, DurableSchema};
-use crate::node::{Boot, RESERVE_STEP};
+use crate::node::{Boot, RESERVE_STEP, TIME_STEP};
 
 /// The on-disk format of this build.
 pub const FORMAT: u16 = 1;
@@ -221,7 +222,8 @@ pub fn open(
         .checked_add(1)
         .ok_or_else(|| internal_error!("the restart counter overflows"))?;
     record.reserved_tick = reserved;
-    record.last_now = now.0;
+    let time_reserved = Instant(now.0.saturating_add(TIME_STEP));
+    record.last_now = time_reserved.0;
     record.clean_shutdown = false;
     meta.write(&record)?;
     let seq = scan
@@ -250,6 +252,7 @@ pub fn open(
             image,
             tick: Tick(boot_tick),
             reserved: Tick(reserved),
+            time_reserved,
             now,
             recovered: record.restarts > 1,
         },

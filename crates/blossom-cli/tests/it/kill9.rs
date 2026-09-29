@@ -154,6 +154,7 @@ fn kill_9_never_loses_an_acknowledged_write() {
     server.wait().unwrap();
 
     assert!(kills >= 5, "only {kills} kills");
+    assert!(outcome.protocol_errors.is_empty(), "protocol errors: {:?}", outcome.protocol_errors);
     assert!(outcome.answered > 200, "only {} operations answered", outcome.answered);
     assert!(outcome.unanswered > 0, "no operation was in flight at a kill: the test did not test anything");
     let (verdict, key) = check_partitioned(&KvModel, &outcome.history, |i| i.key().to_vec(), 50_000_000);
