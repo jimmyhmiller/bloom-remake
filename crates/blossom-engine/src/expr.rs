@@ -27,6 +27,17 @@ pub(crate) enum ExprError {
     Eval(EvalError),
 }
 
+impl ExprError {
+    /// A copy of a program error (the kind a valuation raises; an evaluator error is never repeated).
+    pub(crate) fn duplicate(&self) -> ExprError {
+        match self {
+            ExprError::Arithmetic(m) => ExprError::Arithmetic(m.clone()),
+            ExprError::Conflict(m) => ExprError::Conflict(m.clone()),
+            ExprError::Eval(e) => bug(format!("an evaluator error repeated per valuation: {e}")),
+        }
+    }
+}
+
 impl From<EvalError> for ExprError {
     fn from(e: EvalError) -> ExprError {
         ExprError::Eval(e)
@@ -438,10 +449,22 @@ fn binary(op: &BinOp, l: Value, r: Value) -> ExprResult<Value> {
     }
 }
 
+/// An arithmetic operator as written.
+fn op_text(op: &BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::Rem => "%",
+        _ => "?",
+    }
+}
+
 fn arithmetic(op: &BinOp, l: Value, r: Value) -> ExprResult<Value> {
     use BinOp::*;
     let overflow = |l: &dyn std::fmt::Debug, r: &dyn std::fmt::Debug| {
-        ExprError::Arithmetic(format!("{l:?} {op:?} {r:?} overflows or divides by zero"))
+        ExprError::Arithmetic(format!("{l:?} {} {r:?} overflows or divides by zero", op_text(op)))
     };
     match (l, r) {
         (Value::Int(a), Value::Int(b)) => int_op(op, a, b).map(Value::Int),
@@ -476,7 +499,7 @@ macro_rules! same_width {
                     _ => None,
                 };
                 r.map(IntValue::$v)
-                    .ok_or_else(|| ExprError::Arithmetic(format!("{x} {:?} {y} overflows or divides by zero", $op)))
+                    .ok_or_else(|| ExprError::Arithmetic(format!("{x} {} {y} overflows or divides by zero", op_text($op))))
             })*
             (a, b) => Err(bug(format!("arithmetic on {a:?} and {b:?}"))),
         }

@@ -84,6 +84,8 @@ pub struct Engine {
     keyed: Vec<(RelId, Vec<usize>, bool)>,
     violations: Vec<RuleId>,
     poisoned: bool,
+    /// Rows the atom probes returned since the engine was created: the join work, measured without a clock.
+    examined: u64,
 }
 
 fn kinds(p: &Program) -> Vec<Option<Kind>> {
@@ -300,6 +302,7 @@ impl Engine {
             keyed,
             violations,
             poisoned: false,
+            examined: 0,
             program,
         };
         engine.build_indexes()?;
@@ -312,46 +315,6 @@ impl Engine {
         let mut wanted: BTreeSet<(StoreKey, Vec<usize>)> = BTreeSet::new();
         for plan in self.plans.values() {
             let rule = p.rules.get(plan.rule).ok_or_else(|| internal_error!("rule {:?}", plan.rule))?;
-            let mut drivers: Vec<(Option<usize>, BTreeSet<blossom_base::VarId>)> = vec![(None, BTreeSet::new())];
-            for &lit in &plan.deps {
-                let vars: BTreeSet<blossom_base::VarId> = match rule.body.lits.get(lit) {
-                    Some(Literal::Pos(a)) => a
-                        .args
-                        .iter()
-                        .chain(a.sender.iter())
-                        .filter_map(|t| match t {
-                            blossom_ir::core::Term::Var(v) => Some(*v),
-                            _ => None,
-                        })
-                        .collect(),
-                    Some(Literal::Neg(a)) => a
-                        .args
-                        .iter()
-                        .filter_map(|t| match t {
-                            blossom_ir::core::Term::Var(v) => Some(*v),
-                            _ => None,
-                        })
-                        .collect(),
-                    Some(Literal::Lookup { var, key, .. }) => key
-                        .iter()
-                        .filter_map(|t| match t {
-                            blossom_ir::core::Term::Var(v) => Some(*v),
-                            _ => None,
-                        })
-                        .chain(std::iter::once(*var))
-                        .collect(),
-                    _ => BTreeSet::new(),
-                };
-                let skip = matches!(rule.body.lits.get(lit), Some(Literal::Pos(_))).then_some(lit);
-                drivers.push((skip, vars));
-            }
-            for (skip, vars) in drivers {
-                for (lit, cols) in plan.join_order(rule, skip, &vars) {
-                    if let Some(Literal::Pos(a)) = rule.body.lits.get(lit) {
-                        wanted.insert((rule::atom_store(a), cols));
-                    }
-                }
-            }
             for lit in &rule.body.lits {
                 match lit {
                     Literal::Neg(a) => {
@@ -626,6 +589,7 @@ impl Engine {
                     return Ok(());
                 }
                 let terms = self.evaluate(p, input, rule, &plan, false)?;
+                self.examined += terms.examined;
                 self.apply(p, input, rule, &plan, terms)
             }
         }
@@ -673,8 +637,8 @@ impl Engine {
                             .map(|(r, _)| cols.iter().filter_map(|c| r.get(*c).cloned()).collect())
                             .collect();
                         for k in keys {
-                            let absent_old = store.old_rows(&cols, &k)?.is_empty();
-                            let absent_new = store.new_rows(&cols, &k)?.is_empty();
+                            let absent_old = !store.any(true, &cols, &k)?;
+                            let absent_new = !store.any(false, &cols, &k)?;
                             if absent_old == absent_new {
                                 continue;
                             }
@@ -733,7 +697,23 @@ impl Engine {
                 }
             }
         }
+        // The join order of each driver's terms, from the stores as they are now.
+        let cost = |lit: usize, cols: &[usize], range: bool| -> usize {
+            let Some(Literal::Pos(a)) = rule.body.lits.get(lit) else { return usize::MAX };
+            let rows = self.stores.get(&rule::atom_store(a)).map_or(0, |s| s.estimate(cols));
+            // A range keeps some of the rows its probe finds: assume a small fraction.
+            if range { rows / 16 + 1 } else { rows }
+        };
+        let mut orders: BTreeMap<Option<usize>, rule::Order> = BTreeMap::new();
+        for (driver, _) in &drivers {
+            orders
+                .entry(driver.lit())
+                .or_insert_with(|| plan.order_for(rule, driver.lit(), &cost));
+        }
         for (driver, pos) in drivers {
+            let order = orders
+                .get(&driver.lit())
+                .ok_or_else(|| internal_error!("no join order for driver {:?}", driver.lit()))?;
             let old = |lit: usize| position.get(&lit).is_some_and(|q| *q > pos);
             let mut emit = |f: Found<'_>| -> expr::ExprResult<()> {
                 if plan.aggregate {
@@ -762,7 +742,7 @@ impl Engine {
             };
             let mut errors: Vec<(Token, ExprError, i64)> = Vec::new();
             let mut error = |t: Token, e: ExprError, s: i64| errors.push((t, e, s));
-            rule::run_term(&cx, &self.stores, rule, plan, &driver, &old, &mut emit, &mut error)?;
+            out.examined += rule::run_term(&cx, &self.stores, rule, plan, order, &driver, &old, &mut emit, &mut error)?;
             for (t, e, s) in errors {
                 let slot = out.errors.entry(t).or_insert((0, None));
                 slot.0 += s;
@@ -851,6 +831,7 @@ impl Engine {
     /// A recompute rule: evaluated in full, its change is the difference from its last output.
     fn recompute_rule(&mut self, p: &Program, input: &StepInput<'_>, rule: &Rule, plan: &Plan) -> Result<(), EvalError> {
         let terms = self.evaluate(p, input, rule, plan, true)?;
+        self.examined += terms.examined;
         let tick = input.tick;
         if let Some((_, (_, Some(e)))) = terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
             return Err(to_eval(e, tick, Some(rule)));
@@ -941,6 +922,7 @@ impl Engine {
                 let plan = self.plans.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?.clone();
                 let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
                 let terms = self.evaluate(p, input, rule, &plan, true)?;
+                self.examined += terms.examined;
                 if let Some((_, (_, Some(e)))) = terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
                     if strict {
                         return Err(to_eval(e, tick, Some(rule)));
@@ -1085,6 +1067,11 @@ impl Engine {
         })
     }
 
+    /// Rows the atom probes returned since the engine was created: the join work, measured without a clock.
+    pub fn rows_examined(&self) -> u64 {
+        self.examined
+    }
+
     pub fn node(&self) -> NodeId {
         self.node
     }
@@ -1093,6 +1080,8 @@ impl Engine {
 /// A rule's evaluated change: head rows (or aggregate tuples) with signed weights, and runtime errors per valuation.
 #[derive(Default)]
 struct Terms {
+    /// The rows its atom probes returned (the work it did).
+    examined: u64,
     heads: BTreeMap<Row, i64>,
     aggs: BTreeMap<(Vec<Value>, usize, Vec<Value>), i64>,
     errors: BTreeMap<Token, (i64, Option<ExprError>)>,

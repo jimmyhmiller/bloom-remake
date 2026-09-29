@@ -1,0 +1,11 @@
+//! A range guard after a check that can fail: the guard does not narrow the scan (the division raises its error
+//! before the guard runs, for rows the guard would reject too). `v` is settled before `s` arrives, so the change to
+//! `s` drives the join and `v` is probed.
+program range_after_fallible version 1;
+input s(x: u64);
+table v(i: u64);
+table out(i: u64);
+bootstrap {
+    emit v(1);
+}
+while s(x), v(i), let y = i / x where i > 5 { emit out(y); }

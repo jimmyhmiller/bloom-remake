@@ -7,9 +7,12 @@
 //!
 //! A store records the tick's change to its present rows (`ins`, `del`), which drives the rules reading it, and can
 //! read the relation as it was at the start of the tick (`old`): the present rows, minus those inserted this tick, plus
-//! those deleted. Indexes on column sets are maintained with every change.
+//! those deleted. Indexes on column sets are built on first use (a probe, or a planner's estimate) and maintained with
+//! every change after; they are ordered, so a probe can also take a range of one more column.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 use std::sync::Arc;
 
 use blossom_base::internal_error;
@@ -87,7 +90,8 @@ pub(crate) struct Store {
     contributions: BTreeMap<Vec<Value>, BTreeSet<Row>>,
     merged: BTreeMap<Vec<Value>, Row>,
     present: BTreeSet<Row>,
-    indexes: BTreeMap<Vec<usize>, Index>,
+    /// Built lazily from `&self` (a node's engine runs on one thread).
+    indexes: RefCell<BTreeMap<Vec<usize>, Index>>,
     /// The tick's change to the present rows.
     pub ins: BTreeSet<Row>,
     pub del: BTreeSet<Row>,
@@ -191,7 +195,7 @@ impl Store {
     }
 
     fn show(&mut self, row: Row) {
-        for (cols, index) in &mut self.indexes {
+        for (cols, index) in self.indexes.get_mut() {
             index.entry(key(&row, cols)).or_default().insert(row.clone());
         }
         if !self.del.remove(&row) {
@@ -201,7 +205,7 @@ impl Store {
     }
 
     fn hide(&mut self, row: &Row) {
-        for (cols, index) in &mut self.indexes {
+        for (cols, index) in self.indexes.get_mut() {
             let k = key(row, cols);
             if let Some(bucket) = index.get_mut(&k) {
                 bucket.remove(row);
@@ -216,27 +220,58 @@ impl Store {
         self.present.remove(row);
     }
 
-    pub fn ensure_index(&mut self, cols: &[usize]) {
-        if cols.is_empty() || self.indexes.contains_key(cols) {
+    /// Builds the index on `cols` if there is none.
+    pub fn ensure_index(&self, cols: &[usize]) {
+        if cols.is_empty() || self.indexes.borrow().contains_key(cols) {
             return;
         }
         let mut index = Index::new();
         for row in &self.present {
             index.entry(key(row, cols)).or_default().insert(row.clone());
         }
-        self.indexes.insert(cols.to_vec(), index);
+        self.indexes.borrow_mut().insert(cols.to_vec(), index);
+    }
+
+    /// About how many present rows match a probe on `cols`: all of them, or the average bucket of the index.
+    pub fn estimate(&self, cols: &[usize]) -> usize {
+        let n = self.present.len();
+        if cols.is_empty() {
+            return n;
+        }
+        self.ensure_index(cols);
+        let keys = self.indexes.borrow().get(cols).map_or(1, BTreeMap::len).max(1);
+        n.div_ceil(keys)
     }
 
     /// The present rows whose columns `cols` hold `values`.
-    pub fn new_rows<'a>(&'a self, cols: &[usize], values: &[Value]) -> Result<Vec<&'a Row>, EvalError> {
+    pub fn new_rows(&self, cols: &[usize], values: &[Value]) -> Result<Vec<Row>, EvalError> {
         if cols.is_empty() {
-            return Ok(self.present.iter().collect());
+            return Ok(self.present.iter().cloned().collect());
         }
-        let index = self
-            .indexes
+        self.ensure_index(cols);
+        let indexes = self.indexes.borrow();
+        let index = indexes
             .get(cols)
             .ok_or_else(|| internal_error!("a probe on columns {cols:?} without an index"))?;
-        Ok(index.get(values).map(|b| b.iter().collect()).unwrap_or_default())
+        Ok(index.get(values).map(|b| b.iter().cloned().collect()).unwrap_or_default())
+    }
+
+    /// Whether a row of one version has columns `cols` holding `values` (without collecting them).
+    pub fn any(&self, old: bool, cols: &[usize], values: &[Value]) -> Result<bool, EvalError> {
+        let matches = |r: &Row| key(r, cols) == values;
+        if old && self.del.iter().any(matches) {
+            return Ok(true);
+        }
+        let live = |r: &Row| !old || !self.ins.contains(r);
+        if cols.is_empty() {
+            return Ok(self.present.iter().any(live));
+        }
+        self.ensure_index(cols);
+        let indexes = self.indexes.borrow();
+        let index = indexes
+            .get(cols)
+            .ok_or_else(|| internal_error!("a probe on columns {cols:?} without an index"))?;
+        Ok(index.get(values).is_some_and(|b| b.iter().any(live)))
     }
 
     /// The rows that were present at the start of the tick with columns `cols` holding `values`.
@@ -244,20 +279,79 @@ impl Store {
         let mut out: Vec<Row> = self
             .new_rows(cols, values)?
             .into_iter()
-            .filter(|r| !self.ins.contains(*r))
-            .cloned()
+            .filter(|r| !self.ins.contains(r))
             .collect();
         out.extend(self.del.iter().filter(|r| key(r, cols) == values).cloned());
         Ok(out)
     }
 
+    /// The rows of one version whose columns `cols` hold `values` and whose column `col` lies between `lo` and
+    /// `hi`, from the ordered index on `cols` then `col`.
+    pub fn range_rows(
+        &self,
+        old: bool,
+        cols: &[usize],
+        values: &[Value],
+        col: usize,
+        lo: Bound<Value>,
+        hi: Bound<Value>,
+    ) -> Result<Vec<Row>, EvalError> {
+        let mut key_cols = cols.to_vec();
+        key_cols.push(col);
+        self.ensure_index(&key_cols);
+        let indexes = self.indexes.borrow();
+        let index = indexes
+            .get(&key_cols)
+            .ok_or_else(|| internal_error!("a range probe on columns {key_cols:?} without an index"))?;
+        let within = |v: &Value| {
+            (match &lo {
+                Bound::Included(l) => v >= l,
+                Bound::Excluded(l) => v > l,
+                Bound::Unbounded => true,
+            }) && (match &hi {
+                Bound::Included(h) => v <= h,
+                Bound::Excluded(h) => v < h,
+                Bound::Unbounded => true,
+            })
+        };
+        // Keys are `values` then the range column: start at the lower end, stop past the prefix or the upper end.
+        let mut start = values.to_vec();
+        let lower = match &lo {
+            Bound::Included(l) | Bound::Excluded(l) => {
+                start.push(l.clone());
+                Bound::Included(start)
+            }
+            Bound::Unbounded => Bound::Included(start),
+        };
+        let mut out: Vec<Row> = Vec::new();
+        for (k, bucket) in index.range((lower, Bound::Unbounded)) {
+            let (prefix, last) = k.split_at(k.len().saturating_sub(1));
+            if prefix != values {
+                break;
+            }
+            let Some(v) = last.first() else { continue };
+            if !within(v) {
+                if matches!(&hi, Bound::Included(h) | Bound::Excluded(h) if v >= h) {
+                    break;
+                }
+                continue;
+            }
+            out.extend(bucket.iter().filter(|r| !old || !self.ins.contains(*r)).cloned());
+        }
+        if old {
+            out.extend(
+                self.del
+                    .iter()
+                    .filter(|r| key(r, cols) == values && r.get(col).is_some_and(within))
+                    .cloned(),
+            );
+        }
+        Ok(out)
+    }
+
     /// The rows of one version whose columns `cols` hold `values`.
     pub fn rows(&self, old: bool, cols: &[usize], values: &[Value]) -> Result<Vec<Row>, EvalError> {
-        if old {
-            self.old_rows(cols, values)
-        } else {
-            Ok(self.new_rows(cols, values)?.into_iter().cloned().collect())
-        }
+        if old { self.old_rows(cols, values) } else { self.new_rows(cols, values) }
     }
 
     /// The tick's change: inserted rows with weight 1, deleted rows with weight -1.
