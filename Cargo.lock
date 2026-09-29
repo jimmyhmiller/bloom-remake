@@ -811,10 +811,13 @@ dependencies = [
 name = "blossom-wire"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "blossom-base",
  "blossom-ir",
  "blossom-schema",
  "blossom-value",
+ "proptest",
+ "thiserror",
 ]
 
 [[package]]
