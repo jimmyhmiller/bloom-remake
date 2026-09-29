@@ -92,8 +92,16 @@ fn flush(
                     }
                     ready
                 }
-                Literal::Lookup { .. } => {
-                    blossom_base::unimplemented_feature!("LANG-280", "lattice lookups in the oracle (WP M4.1)")
+                Literal::Lookup { var, key, .. } => {
+                    let ready = key.iter().all(|t| match t {
+                        Term::Var(v) => bound.contains(v),
+                        Term::Const(_) => true,
+                        Term::Wild => false,
+                    });
+                    if ready {
+                        bound.insert(*var);
+                    }
+                    ready
                 }
                 Literal::Gen { pat, src } => {
                     let ready = match src {
@@ -110,11 +118,9 @@ fn flush(
                         GenSource::Range { ring_bits: Some(_), .. } => {
                             blossom_base::unimplemented_feature!("LANG-026", "ring-interval generators in the oracle")
                         }
-                        GenSource::Value(_) | GenSource::Lattice(_) | GenSource::TableFn { .. } => {
-                            blossom_base::unimplemented_feature!(
-                                "LANG-088",
-                                "generators over values, lattices and table functions in the oracle"
-                            )
+                        GenSource::Value(e) | GenSource::Lattice(e) => expr_vars(e)?.is_subset(bound),
+                        GenSource::TableFn { .. } => {
+                            blossom_base::unimplemented_feature!("LANG-183", "table-function generators in the oracle")
                         }
                     };
                     if ready {

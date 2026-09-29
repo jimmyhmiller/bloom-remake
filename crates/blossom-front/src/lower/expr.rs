@@ -148,6 +148,35 @@ pub(crate) fn try_const(hir: &Hir, e: &HExpr) -> Option<Value> {
             let vs: Option<Vec<Value>> = fields.iter().map(|x| try_const(hir, x)).collect();
             Some(Value::Struct(vs?.into()))
         }
+        HExprKind::Collection { kind, elems } => {
+            let vs: Option<Vec<Value>> = elems.iter().map(|x| try_const(hir, x)).collect();
+            let vs = vs?;
+            Some(match kind {
+                CollectionKind::Vec => Value::Vec(vs.into()),
+                CollectionKind::Set => Value::Set(std::sync::Arc::new(vs.into_iter().collect())),
+                CollectionKind::Map => {
+                    let mut m = BTreeMap::new();
+                    let mut it = vs.into_iter();
+                    while let (Some(k), Some(v)) = (it.next(), it.next()) {
+                        m.insert(k, v);
+                    }
+                    Value::Map(std::sync::Arc::new(m))
+                }
+            })
+        }
+        HExprKind::Lift { expr, lattice } => {
+            let v = try_const(hir, expr)?;
+            let kind = super::lattice::kind_of_type(&hir.types, &hir.lattices, *lattice)?;
+            kind.eval(blossom_lattice::Op::Lift, &[v]).ok()
+        }
+        HExprKind::LatCtor { bot, args, .. } => {
+            let kind = super::lattice::kind_of_type(&hir.types, &hir.lattices, e.ty?)?;
+            if *bot {
+                return Some(Value::Lattice(kind.bottom()));
+            }
+            let vs: Option<Vec<Value>> = args.iter().map(|x| try_const(hir, x)).collect();
+            kind.eval(blossom_lattice::Op::Of, &vs?).ok()
+        }
         HExprKind::Cast { expr, .. } if matches!(expr.kind, HExprKind::IntLit(..)) => {
             let HExprKind::IntLit(n, neg) = expr.kind else {
                 return None;
@@ -223,11 +252,16 @@ impl Lowerer<'_> {
             HExprKind::Value(..) | HExprKind::IntLit(..) | HExprKind::TypedInt(..) => {
                 return Err(internal_error!("a literal that does not fold to a value"));
             }
-            HExprKind::Binary { op, lhs, rhs } => Expr::Binary {
-                op: bin_op(*op)?,
-                lhs: Box::new(self.expr(d, lhs)?),
-                rhs: Box::new(self.expr(d, rhs)?),
-            },
+            HExprKind::Binary { op, lhs, rhs } => {
+                if let Some(x) = self.lattice_binary(d, *op, lhs, rhs)? {
+                    return Ok(x);
+                }
+                Expr::Binary {
+                    op: bin_op(*op)?,
+                    lhs: Box::new(self.expr(d, lhs)?),
+                    rhs: Box::new(self.expr(d, rhs)?),
+                }
+            }
             HExprKind::Prefix { op, arg } => Expr::Unary {
                 op: match op {
                     PrefixOp::Not => ir::UnOp::Not,
@@ -315,6 +349,117 @@ impl Lowerer<'_> {
             HExprKind::SelfNode => Expr::Scalar(ir::BuiltinScalar::SelfNode),
             HExprKind::Now => Expr::Scalar(ir::BuiltinScalar::Now),
             HExprKind::Tick => Expr::Scalar(ir::BuiltinScalar::Tick),
+            HExprKind::Lookup { rel, key } => {
+                // `V = r[k̄]` as its own literal (LANGUAGE §9.9): the cell's value, ⊥ if absent.
+                let mut keys = Vec::new();
+                for k in key {
+                    keys.push(self.term(d, k)?);
+                }
+                let v = d.fresh(ty_of(e)?);
+                d.lits.push(Literal::Lookup {
+                    var: v,
+                    rel: self.rel(*rel)?,
+                    key: keys,
+                });
+                Expr::Term(Term::Var(v))
+            }
+            HExprKind::In { elem, coll } => {
+                let c = self.expr(d, coll)?;
+                let x = self.expr(d, elem)?;
+                match self.lattice_id(ty_of(coll)?) {
+                    Some(lattice) => self.lat_op(lattice, blossom_lattice::Op::Contains, vec![c, x]),
+                    None => Expr::Call {
+                        f: ir::FnRef::Builtin(ir::BuiltinFn::Contains),
+                        args: vec![c, x],
+                    },
+                }
+            }
+            HExprKind::Collection { kind, elems } => {
+                let mut xs = Vec::new();
+                if *kind == CollectionKind::Map {
+                    // The IR's map literal holds (key, value) pairs.
+                    for pair in elems.chunks(2) {
+                        let [k, v] = pair else {
+                            return Err(internal_error!("a map literal with a dangling key"));
+                        };
+                        let ty = self
+                            .b
+                            .types()
+                            .insert(TypeDef::Tuple(vec![ty_of(k)?, ty_of(v)?]))
+                            .map_err(|e| internal_error!("interning a type: {e}"))?;
+                        xs.push(Expr::Construct {
+                            ty,
+                            variant: None,
+                            fields: vec![self.expr(d, k)?, self.expr(d, v)?],
+                        });
+                    }
+                } else {
+                    for x in elems {
+                        xs.push(self.expr(d, x)?);
+                    }
+                }
+                Expr::Collection {
+                    kind: match kind {
+                        CollectionKind::Vec => ir::CollKind::Vec,
+                        CollectionKind::Set => ir::CollKind::Set,
+                        CollectionKind::Map => ir::CollKind::Map,
+                    },
+                    elems: xs,
+                }
+            }
+            HExprKind::LatCtor { bot: true, .. } => {
+                let ty = ty_of(e)?;
+                let kind = self
+                    .lattice_kind(ty)
+                    .ok_or_else(|| internal_error!("`bot()` of a non-lattice type"))?;
+                return Ok(Expr::Term(self.konst(Value::Lattice(kind.bottom()))?));
+            }
+            HExprKind::LatCtor { args, .. } => {
+                let lattice = self
+                    .lattice_id(ty_of(e)?)
+                    .ok_or_else(|| internal_error!("a lattice constructor of a non-lattice type"))?;
+                let mut xs = Vec::new();
+                for x in args {
+                    xs.push(self.expr(d, x)?);
+                }
+                self.lat_op(lattice, blossom_lattice::Op::Of, xs)
+            }
+            HExprKind::Lift { expr, lattice } => {
+                let id = self
+                    .lattice_id(*lattice)
+                    .ok_or_else(|| internal_error!("a lift into a non-lattice type"))?;
+                // A map whose values already are lattice values lifts entry by entry.
+                let entries = match self.b.types().get(ty_of(expr)?) {
+                    Some(TypeDef::Map(_, v)) => {
+                        let v = *v;
+                        self.lattice_id(v).is_some()
+                    }
+                    _ => false,
+                };
+                let x = self.expr(d, expr)?;
+                let op = if entries {
+                    blossom_lattice::Op::LiftEntries
+                } else {
+                    blossom_lattice::Op::Lift
+                };
+                self.lat_op(id, op, vec![x])
+            }
+            HExprKind::LatOp { lattice, op, args } => {
+                let id = self
+                    .lattice_id(*lattice)
+                    .ok_or_else(|| internal_error!("a lattice operation on a non-lattice type"))?;
+                let mut xs = Vec::new();
+                for x in args {
+                    xs.push(self.expr(d, x)?);
+                }
+                self.lat_op(id, *op, xs)
+            }
+            HExprKind::Method { name, .. } => {
+                return Err(internal_error!(
+                    "the method `{}` was not resolved by type checking",
+                    name.as_str()
+                ));
+            }
             HExprKind::Builtin { f, args } => {
                 let mut xs = Vec::new();
                 for a in args {
@@ -332,6 +477,74 @@ impl Lowerer<'_> {
                 }
             }
         })
+    }
+
+    /// The IR lattice of a lattice type.
+    pub fn lattice_id(&mut self, ty: TypeId) -> Option<blossom_base::LatticeTypeId> {
+        match self.b.types().get(ty) {
+            Some(TypeDef::Lattice(id)) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// The built-in lattice of a lattice type.
+    pub fn lattice_kind(&mut self, ty: TypeId) -> Option<blossom_lattice::Kind> {
+        let id = self.lattice_id(ty)?;
+        let ctors: Vec<ir::LatticeCtor> = self.b.program().lattices.iter().map(|l| l.ctor.clone()).collect();
+        super::lattice::kind_of(&ctors, ctors.get(id.index())?)
+    }
+
+    fn lat_op(&self, lattice: blossom_base::LatticeTypeId, op: blossom_lattice::Op, args: Vec<Expr>) -> Expr {
+        Expr::Lattice {
+            op: ir::LatOpRef {
+                lattice,
+                op: Symbol::intern(op.name()),
+            },
+            args,
+        }
+    }
+
+    /// A comparison or arithmetic with a lattice operand (type checking admitted only the monotone forms): a
+    /// threshold `x >= c` (flipped when the lattice is on the right), `x + c`, `x - c`, or `a + b`.
+    fn lattice_binary(
+        &mut self,
+        d: &mut Draft,
+        op: BinOp,
+        lhs: &HExpr,
+        rhs: &HExpr,
+    ) -> Result<Option<Expr>, InternalError> {
+        use blossom_lattice::Op as L;
+        let (lt, rt) = (self.lattice_id(ty_of(lhs)?), self.lattice_id(ty_of(rhs)?));
+        let (lattice, lat_first) = match (lt, rt) {
+            (None, None) => return Ok(None),
+            (Some(l), _) => (l, true),
+            (None, Some(r)) => (r, false),
+        };
+        let op = if lat_first {
+            op
+        } else {
+            match op {
+                BinOp::Lt => BinOp::Gt,
+                BinOp::Le => BinOp::Ge,
+                BinOp::Gt => BinOp::Lt,
+                BinOp::Ge => BinOp::Le,
+                other => other,
+            }
+        };
+        let lat_op = match (op, lt.is_some() && rt.is_some()) {
+            (BinOp::Ge, false) => L::AtLeast,
+            (BinOp::Gt, false) => L::Above,
+            (BinOp::Le, false) => L::AtMost,
+            (BinOp::Lt, false) => L::Below,
+            (BinOp::Add, false) => L::Add,
+            (BinOp::Sub, false) if lat_first => L::Sub,
+            (BinOp::Add, true) => L::AddLat,
+            (other, _) => return Err(internal_error!("the lattice operator {other:?} reached lowering")),
+        };
+        let a = self.expr(d, lhs)?;
+        let b = self.expr(d, rhs)?;
+        let args = if lat_first { vec![a, b] } else { vec![b, a] };
+        Ok(Some(self.lat_op(lattice, lat_op, args)))
     }
 
     /// A pattern of a `let`, a generator or a match arm. Computed sub-patterns (an expression over bound variables)

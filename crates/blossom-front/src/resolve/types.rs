@@ -134,6 +134,7 @@ impl<'t> Resolver<'t, '_> {
             has_roles: false,
             write_redirect: Default::default(),
             own_items: None,
+            broken: Default::default(),
         });
         ScopeIdx(self.scopes.len() - 1)
     }
@@ -155,6 +156,18 @@ impl<'t> Resolver<'t, '_> {
                 Some(self.intern_type(TypeDef::Tuple(ids), *span))
             }
             ast::Type::Named { path, args, span } => self.named_type(s, path, args, *span),
+            ast::Type::Unsafe { inner, span } => match &**inner {
+                ast::Type::Named { path, .. }
+                    if path.len() == 1 && path.first().is_some_and(|n| n.as_str() == "DomPair") =>
+                {
+                    self.unsupported("LANG-136", "`unsafe DomPair<K, V>`", *span);
+                    None
+                }
+                _ => {
+                    self.error(code!("BLS0300"), *span, "`unsafe` applies only to `DomPair<K, V>`");
+                    None
+                }
+            },
         }
     }
 
@@ -247,9 +260,34 @@ impl<'t> Resolver<'t, '_> {
             }
             return Some(self.node_type(Some(role)));
         }
-        if text.starts_with('L') && is_lattice_name(text) {
-            self.unsupported("LANG-120", &format!("lattice type `{text}`"), span);
-            return None;
+        if is_lattice_name(text) {
+            return self.lattice_type(s, text, args, span);
+        }
+        match text {
+            // Prelude aliases (LANGUAGE §11.5).
+            "VClock" if self.find_def(s, name.name).is_none() => {
+                if !arity(self, 0) {
+                    return None;
+                }
+                let node = self.node_type(None);
+                let u64t = self.intern_type(TypeDef::Int(IntTy::U64), span);
+                let max = self.intern_lattice_or_bug(blossom_ir::core::LatticeCtor::Max(u64t))?;
+                let (inner, _) = self.hir.lattice_of(max)?;
+                return self.intern_lattice_or_bug(blossom_ir::core::LatticeCtor::Map(node, inner));
+            }
+            "Ballot" | "Lww" if self.find_def(s, name.name).is_none() => {
+                self.unsupported("LANG-131", &format!("the prelude lattice `{text}` (a `Lex`)"), span);
+                return None;
+            }
+            "DomPair" if self.find_def(s, name.name).is_none() => {
+                self.error(
+                    code!("BLS0706"),
+                    span,
+                    "`DomPair` is not associative (CR-25): it exists only as `unsafe DomPair<K, V>`",
+                );
+                return None;
+            }
+            _ => {}
         }
         match self.find_def(s, name.name) {
             Some(Def::Alias(t, file)) => {
@@ -562,10 +600,97 @@ fn field(name: Symbol, ty: TypeId) -> FieldDef {
     }
 }
 
+impl Resolver<'_, '_> {
+    /// A built-in lattice type (LANGUAGE §11.5): `LBool`, `LMax<T>`, `LMin<T>`, `LSet<T>`, `LPSet<T>`, `LMap<K, L>`,
+    /// `LPoint<T>`. The others are not implemented in this build.
+    fn lattice_type(&mut self, s: ScopeIdx, text: &str, args: &[ast::Type], span: Span) -> Option<TypeId> {
+        use blossom_ir::core::LatticeCtor;
+        let want = match text {
+            "LBool" => 0,
+            "LMap" => 2,
+            "LMax" | "LMin" | "LSet" | "LPSet" | "LPoint" => 1,
+            other => {
+                self.unsupported("LANG-124", &format!("the lattice `{other}`"), span);
+                return None;
+            }
+        };
+        if args.len() != want {
+            self.error(
+                code!("BLS0301"),
+                span,
+                format!("`{text}` takes {want} type argument(s), {} given", args.len()),
+            );
+            return None;
+        }
+        let mut tys = Vec::new();
+        for a in args {
+            tys.push(self.resolve_type(s, a)?);
+        }
+        let elem = tys.first().copied();
+        let ctor = match (text, elem) {
+            ("LBool", _) => LatticeCtor::Bool,
+            ("LMax", Some(t)) | ("LMin", Some(t)) => {
+                if matches!(self.hir.types.get(t), Some(TypeDef::F64)) {
+                    self.error(code!("BLS0312"), span, "`f64` is not the element of `LMax`/`LMin`");
+                    return None;
+                }
+                if text == "LMax" {
+                    LatticeCtor::Max(t)
+                } else {
+                    LatticeCtor::Min(t)
+                }
+            }
+            ("LSet", Some(t)) => LatticeCtor::Set(t),
+            ("LPSet", Some(t)) => LatticeCtor::PSet(t),
+            ("LPoint", Some(t)) => LatticeCtor::Point(t),
+            ("LMap", Some(k)) => {
+                let v = tys.get(1).copied()?;
+                let Some((inner, _)) = self.hir.lattice_of(v) else {
+                    self.error(code!("BLS0300"), span, "the values of `LMap<K, L>` are a lattice");
+                    return None;
+                };
+                LatticeCtor::Map(k, inner)
+            }
+            _ => return None,
+        };
+        self.intern_lattice_or_bug(ctor)
+    }
+
+    fn intern_lattice_or_bug(&mut self, ctor: blossom_ir::core::LatticeCtor) -> Option<TypeId> {
+        match self.hir.intern_lattice(ctor) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                self.bugs.push(e);
+                None
+            }
+        }
+    }
+}
+
+/// The built-in lattice type constructors (LANGUAGE §11.5).
 fn is_lattice_name(text: &str) -> bool {
     matches!(
         text,
-        "LMax" | "LMin" | "LBool" | "LSet" | "LPSet" | "LMap" | "LPoint" | "LBag" | "LDom" | "LCounter" | "LLww"
+        "LBool"
+            | "LMax"
+            | "LMin"
+            | "LSet"
+            | "LPSet"
+            | "LBag"
+            | "LMap"
+            | "LPair"
+            | "Lex"
+            | "LDom"
+            | "LPoint"
+            | "LConflict"
+            | "LWithBot"
+            | "LWithTop"
+            | "LUnit"
+            | "LVec"
+            | "LUnionFind"
+            | "LTombSet"
+            | "LTombMap"
+            | "Causal"
     )
 }
 

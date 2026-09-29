@@ -157,5 +157,23 @@ question tool, the user chose:
 - **IR amendments (additive):** `IrBuilder::set_persistence` and `set_construct_kind` (expansions whose spec names
   relations declared inside the construct), `ConstructKind::Members` (a role's `R$members`), `Node<R>` assignable
   where `Node` is expected (LANGUAGE §5.3), and `count` over a tuple (LANGUAGE §10.1's `count<(S, L, P)>`).
+- **Lattices (slice 2 subset).** `LBool`, `LMax`, `LMin`, `LSet`, `LPSet`, `LMap`, `LPoint` with the operations of
+  LANGUAGE §11.5 that `blossom-lattice::Op` lists; each IR lattice's catalogue is generated from that list with
+  concrete types (catalogue names: `at_least`/`above`/`at_most`/`below` for the scalar thresholds so they do not
+  clash with the `lt!` method, `lift`/`lift_entries` for implicit lifts, `of` for constructors, `reveal_nonbot` for
+  the non-⊥ reveal). Other lattices, user-defined lattices, lattice folds and functions report BLS0908.
+- **Roles inside lattices are erased.** `LSet<Node<R>>` is interned as `LSet<Node>`: one lattice type keeps one
+  catalogue, and a `Node<R>` value is a `Node` value. Declared column types are instantiated afresh at each use in
+  type checking, so meeting `Node` with `Node<R>` at one use no longer refines the declared column (a latent bug
+  that also affected plain `Node` columns written with two different roles).
+- **Lattice polarity** (SEM-102) is computed on the IR by `blossom_ir::polarity`, shared by the analysis and the
+  oracle's own stratifier (the oracle still shares no code with `blossom-analysis`). It is conservative where the
+  language leaves room: a refutable pattern over a lattice-derived value is exact, and so is any plain operator
+  over one (a threshold's `bool` used as data).
+- **The oracle's lattice lookups** are recorded in firings as the cell's row (present) or a negation over its key
+  (absent), until LDFI's lattice lineage defines the exact support (ARCHITECTURE §8.3).
+- **A negative number in an `LPSet`** is reported as BLSR004 (an out-of-range value), there being no dedicated code.
+- **IR amendments (additive, 2):** `assignable` is covariant through tuples, options and collections (`Map<Node<R>,
+  V>` stands for `Map<Node, V>`), and lattice operation arguments are checked with it.
 - **Code registry:** `BLS0106` may also be constructed by `blossom-front` (a clause against the relation's kind is a
   semantic check; ARCHITECTURE §13.1 gives the parser the syntactic part of BLS0100–0110).

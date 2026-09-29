@@ -10,6 +10,7 @@
 //! builder starts from the HIR's type table.
 
 mod expr;
+pub(crate) mod lattice;
 mod rules;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -74,6 +75,7 @@ pub fn lower(hir: &Hir, deployment: &Deployment<'_>) -> Result<Lowered, Internal
         labels: BTreeSet::new(),
         rel_names: BTreeSet::new(),
     };
+    l.declare_lattices()?;
     for r in &hir.roles {
         let kind = match r.kind {
             hir::RoleKind::Process => RoleKind::Process,
@@ -162,19 +164,32 @@ pub(crate) fn column(name: Symbol, ty: TypeId, hidden_dest: bool) -> Column {
     }
 }
 
-/// A schema over `cols` keyed by `key` (every column when `None`).
-pub(crate) fn schema(cols: Vec<Column>, key: Option<&[usize]>) -> Schema {
+/// A schema over `cols` keyed by `key` (every non-lattice column when `None`). Lattice-typed columns are the
+/// relation's value, merged per key (SEM-100, LANGUAGE §11.1).
+pub(crate) fn schema(types: &blossom_value::TypeTable, cols: Vec<Column>, key: Option<&[usize]>) -> Schema {
     let n = cols.len();
+    let lattice: Vec<(ColIdx, blossom_base::LatticeTypeId)> = cols
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| match types.get(c.ty) {
+            Some(TypeDef::Lattice(l)) => Some((col_idx(i), *l)),
+            _ => None,
+        })
+        .collect();
+    let is_lattice = |c: &ColIdx| lattice.iter().any(|(l, _)| l == c);
     let key: Vec<ColIdx> = match key {
         Some(k) => k.iter().map(|i| col_idx(*i)).collect(),
-        None => (0..n).map(col_idx).collect(),
+        None => (0..n).map(col_idx).filter(|c| !is_lattice(c)).collect(),
     };
-    let payload = (0..n).map(col_idx).filter(|c| !key.contains(c)).collect();
+    let payload = (0..n)
+        .map(col_idx)
+        .filter(|c| !key.contains(c) && !is_lattice(c))
+        .collect();
     Schema {
         cols,
         key,
         payload,
-        lattice: Vec::new(),
+        lattice,
     }
 }
 
@@ -286,7 +301,7 @@ impl Lowerer<'_> {
     fn declare_hrel(&mut self, h: HRelId) -> Result<RelId, InternalError> {
         let r = self.hir.rel(h)?.clone();
         let (cols, key) = self.ir_columns(h)?;
-        let schema = schema(cols, key.as_deref());
+        let schema = schema(self.b.types(), cols, key.as_deref());
         let (class, interface) = match &r.kind {
             HRelKind::Table | HRelKind::Scratch | HRelKind::View | HRelKind::LocalTick => (RelClass::Idb, None),
             HRelKind::Static | HRelKind::Members(_) => (RelClass::Static, None),
@@ -402,12 +417,13 @@ impl Lowerer<'_> {
         span: Span,
     ) -> Result<RelId, InternalError> {
         let name = self.rel_name(segments);
+        let schema = schema(self.b.types(), cols, key);
         self.b
             .declare_relation(RelDecl {
                 id: RelId::from_raw(0),
                 name,
                 class: RelClass::Idb,
-                schema: schema(cols, key),
+                schema,
                 persistence: Persistence::None,
                 durable,
                 interface: None,
@@ -439,12 +455,60 @@ impl Lowerer<'_> {
         Ok(())
     }
 
-    /// Every table's `$del` relation and frame rule (LANGUAGE §7.2).
+    /// Whether a HIR relation has lattice columns.
+    pub fn is_lattice_rel(&self, h: HRelId) -> Result<bool, InternalError> {
+        let rel = self.rel(h)?;
+        Ok(self
+            .b
+            .program()
+            .rels
+            .get(rel)
+            .is_some_and(|r| !r.schema.lattice.is_empty()))
+    }
+
+    /// A lattice table's identity rule `r(k̄; X)@next :- r(k̄; X).` (SEM-104, LANGUAGE §11.1): its cells only grow.
+    fn lattice_table(&mut self, h: HRelId, r: &hir::HRel) -> Result<(), InternalError> {
+        let rel = self.rel(h)?;
+        let construct = self
+            .b
+            .begin_construct(ConstructKind::Identity { rel }, surface(&r.name, None, r.span))
+            .map_err(ir)?;
+        let (cols, _) = self.ir_columns(h)?;
+        let label = self.label(format!("{}$identity", r.name));
+        let mut rb = self.b.rule(RuleKind::Inductive, label, r.span);
+        let mut vars = Vec::new();
+        for (i, c) in cols.iter().enumerate() {
+            vars.push(rb.var(Symbol::intern(&format!("X{i}")), c.ty).map_err(ir)?);
+        }
+        let args: Vec<Term> = vars.iter().map(|v| Term::Var(*v)).collect();
+        rb.lit(Literal::Pos(atom(rel, args.clone(), r.span)));
+        let rule = rb
+            .head(
+                Head {
+                    rel,
+                    args: args.into_iter().map(HeadArg::Term).collect(),
+                    mode: HeadMode::Insert,
+                },
+                r.role.map(|x| RoleId::from_raw(x.0)),
+            )
+            .map_err(ir)?;
+        self.b.end_construct(construct).map_err(ir)?;
+        self.b
+            .set_persistence(rel, Persistence::Identity { rule })
+            .map_err(ir)?;
+        Ok(())
+    }
+
+    /// Every table's `$del` relation and frame rule (LANGUAGE §7.2), or a lattice table's identity rule.
     fn tables(&mut self) -> Result<(), InternalError> {
         for i in 0..self.hir.rels.len() {
             let h = HRelId(i as u32);
             let r = self.hir.rel(h)?.clone();
             if !matches!(r.kind, HRelKind::Table) {
+                continue;
+            }
+            if self.is_lattice_rel(h)? {
+                self.lattice_table(h, &r)?;
                 continue;
             }
             let rel = self.rel(h)?;

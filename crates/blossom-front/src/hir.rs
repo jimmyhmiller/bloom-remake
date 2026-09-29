@@ -46,6 +46,8 @@ pub struct Hir {
     pub version: u32,
     pub edition: u16,
     pub types: TypeTable,
+    /// Lattice types: `TypeDef::Lattice(id)` names `lattices[id]`, declared in this order in the IR.
+    pub lattices: Vec<blossom_ir::core::LatticeCtor>,
     pub roles: Vec<HRole>,
     pub rels: Vec<HRel>,
     pub handlers: Vec<HHandler>,
@@ -80,6 +82,67 @@ impl Hir {
             .ok_or_else(|| internal_error!("HIR scope {id:?} does not exist"))
     }
 
+    /// The lattice of a lattice type: its id and constructor.
+    pub fn lattice_of(&self, ty: TypeId) -> Option<(blossom_base::LatticeTypeId, &blossom_ir::core::LatticeCtor)> {
+        match self.types.get(ty) {
+            Some(blossom_value::TypeDef::Lattice(id)) => self.lattices.get(id.index()).map(|c| (*id, c)),
+            _ => None,
+        }
+    }
+
+    /// `ty` with every `Node<R>` inside it widened to `Node`.
+    pub fn erase_roles(&mut self, ty: TypeId) -> Result<TypeId, InternalError> {
+        use blossom_value::TypeDef as D;
+        let def = match self.types.get(ty).cloned() {
+            Some(D::Node(Some(_))) => D::Node(None),
+            Some(D::Tuple(ts)) => {
+                let mut out = Vec::new();
+                for t in ts {
+                    out.push(self.erase_roles(t)?);
+                }
+                D::Tuple(out)
+            }
+            Some(D::Option(t)) => D::Option(self.erase_roles(t)?),
+            Some(D::Vec(t)) => D::Vec(self.erase_roles(t)?),
+            Some(D::Set(t)) => D::Set(self.erase_roles(t)?),
+            Some(D::Map(k, v)) => {
+                let k = self.erase_roles(k)?;
+                D::Map(k, self.erase_roles(v)?)
+            }
+            _ => return Ok(ty),
+        };
+        self.types
+            .insert(def)
+            .map_err(|e| internal_error!("interning a type: {e}"))
+    }
+
+    /// Interns the lattice type with constructor `ctor`. A lattice's elements carry no role (`LSet<Node<R>>` is
+    /// `LSet<Node>`): values of `Node<R>` are values of `Node`, and one lattice type keeps one operation catalogue.
+    pub fn intern_lattice(&mut self, ctor: blossom_ir::core::LatticeCtor) -> Result<TypeId, InternalError> {
+        use blossom_ir::core::LatticeCtor as C;
+        let ctor = match ctor {
+            C::Max(t) => C::Max(self.erase_roles(t)?),
+            C::Min(t) => C::Min(self.erase_roles(t)?),
+            C::Set(t) => C::Set(self.erase_roles(t)?),
+            C::PSet(t) => C::PSet(self.erase_roles(t)?),
+            C::Point(t) => C::Point(self.erase_roles(t)?),
+            C::Map(k, inner) => C::Map(self.erase_roles(k)?, inner),
+            other => other,
+        };
+        let id = match self.lattices.iter().position(|c| *c == ctor) {
+            Some(i) => i,
+            None => {
+                self.lattices.push(ctor);
+                self.lattices.len() - 1
+            }
+        };
+        let id =
+            blossom_base::LatticeTypeId::from_raw(u32::try_from(id).map_err(|_| internal_error!("too many lattices"))?);
+        self.types
+            .insert(blossom_value::TypeDef::Lattice(id))
+            .map_err(|e| internal_error!("interning a lattice type: {e}"))
+    }
+
     /// Variable `v` of scope `s`.
     pub fn var(&self, s: ScopeId, v: HVarId) -> Result<&HVar, InternalError> {
         self.scope(s)?
@@ -99,6 +162,7 @@ impl HRel {
             cols: Vec::new(),
             key: None,
             durable: false,
+            cell: false,
             role: None,
             span: Span::point(blossom_base::FileId::from_raw(0), 0),
         }
@@ -142,6 +206,8 @@ pub struct HRel {
     /// Key columns; `None` means every column (a set relation).
     pub key: Option<Vec<usize>>,
     pub durable: bool,
+    /// A `cell`: read only by lookup, its name as an expression being `c[]` (LANGUAGE §7.13).
+    pub cell: bool,
     /// Where the relation lives; `None` in a role-free program and for shared declarations.
     pub role: Option<HRoleId>,
     pub span: Span,
@@ -385,6 +451,13 @@ pub enum HLit {
         kind: RangeKind,
         span: Span,
     },
+    /// `pat in e` with an unbound variable over a value collection or a set-like lattice (LANGUAGE §9.4); type
+    /// checking tells which.
+    Gen {
+        pat: HPat,
+        src: HExpr,
+        span: Span,
+    },
     /// `p in R` with `p` unbound: the role's members.
     RoleGen {
         pat: HPat,
@@ -539,6 +612,81 @@ pub enum HExprKind {
         f: Builtin,
         args: Vec<HExpr>,
     },
+    /// `r[k̄]` on a lattice-valued relation: the cell's value, ⊥ if absent (LANGUAGE §9.9, §11.3).
+    Lookup {
+        rel: HRelId,
+        key: Vec<HExpr>,
+    },
+    /// `x in e` with `x` bound: membership in a set-like lattice (a threshold) or a collection (LANGUAGE §9.4).
+    In {
+        elem: Box<HExpr>,
+        coll: Box<HExpr>,
+    },
+    /// `[a, b]`, `set[a, b]`, `map[k => v]` (a map's entries as key, value, key, value, …).
+    Collection {
+        kind: CollectionKind,
+        elems: Vec<HExpr>,
+    },
+    /// A method call (or `reveal!(x)`) that type checking resolves by the receiver's type.
+    Method {
+        recv: Box<HExpr>,
+        name: Symbol,
+        banged: bool,
+        args: Vec<HExpr>,
+    },
+    /// `LMax::of(x)`, `LSet::of(x)`, `LMap::of(k, v)`, … and `L::bot()` (LANGUAGE §11.5); the lattice's element
+    /// types are inferred.
+    LatCtor {
+        kind: LatCtorKind,
+        /// `bot()` rather than `of(…)`.
+        bot: bool,
+        args: Vec<HExpr>,
+    },
+    /// A lattice operation, resolved by type checking: the receiver first (LANGUAGE §11.4–11.5).
+    LatOp {
+        lattice: TypeId,
+        op: blossom_lattice::Op,
+        args: Vec<HExpr>,
+    },
+    /// A value lifted into a lattice where a lattice is expected (LANGUAGE §5.6), inserted by type checking.
+    Lift {
+        expr: Box<HExpr>,
+        lattice: TypeId,
+    },
+}
+
+/// The built-in lattice named by a constructor path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LatCtorKind {
+    Bool,
+    Max,
+    Min,
+    Set,
+    PSet,
+    Map,
+    Point,
+}
+
+impl LatCtorKind {
+    pub fn named(name: &str) -> Option<LatCtorKind> {
+        Some(match name {
+            "LBool" => LatCtorKind::Bool,
+            "LMax" => LatCtorKind::Max,
+            "LMin" => LatCtorKind::Min,
+            "LSet" => LatCtorKind::Set,
+            "LPSet" => LatCtorKind::PSet,
+            "LMap" => LatCtorKind::Map,
+            "LPoint" => LatCtorKind::Point,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CollectionKind {
+    Vec,
+    Set,
+    Map,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

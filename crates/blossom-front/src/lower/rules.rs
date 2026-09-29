@@ -52,7 +52,10 @@ pub(crate) fn binders(body: &HBody) -> Vec<HVarId> {
                     pat(f, &mut out);
                 }
             }
-            HLit::Let { pat: p, .. } | HLit::RangeGen { pat: p, .. } | HLit::RoleGen { pat: p, .. } => pat(p, &mut out),
+            HLit::Let { pat: p, .. }
+            | HLit::RangeGen { pat: p, .. }
+            | HLit::RoleGen { pat: p, .. }
+            | HLit::Gen { pat: p, .. } => pat(p, &mut out),
             HLit::Any(alts, _) => {
                 let sets: Vec<Vec<HVarId>> = alts.iter().map(binders).collect();
                 if let Some(first) = sets.first() {
@@ -96,6 +99,10 @@ fn mentioned_lit(l: &HLit, out: &mut BTreeSet<HVarId>) {
             mentioned_expr(hi, out);
         }
         HLit::RoleGen { pat, .. } => mentioned_pat(pat, out),
+        HLit::Gen { pat, src, .. } => {
+            mentioned_pat(pat, out);
+            mentioned_expr(src, out);
+        }
         HLit::Any(alts, _) => alts.iter().for_each(|b| mentioned(b, out)),
         HLit::Forall { domain, body, .. } => {
             mentioned_lit(domain, out);
@@ -129,7 +136,20 @@ fn mentioned_expr(e: &HExpr, out: &mut BTreeSet<HVarId>) {
         HExprKind::Tuple(es) | HExprKind::Variant { fields: es, .. } | HExprKind::Struct { fields: es, .. } => {
             es.iter().for_each(|x| mentioned_expr(x, out));
         }
-        HExprKind::Builtin { args, .. } => args.iter().for_each(|x| mentioned_expr(x, out)),
+        HExprKind::Builtin { args, .. }
+        | HExprKind::Collection { elems: args, .. }
+        | HExprKind::LatCtor { args, .. }
+        | HExprKind::LatOp { args, .. }
+        | HExprKind::Lookup { key: args, .. } => args.iter().for_each(|x| mentioned_expr(x, out)),
+        HExprKind::In { elem, coll } => {
+            mentioned_expr(elem, out);
+            mentioned_expr(coll, out);
+        }
+        HExprKind::Method { recv, args, .. } => {
+            mentioned_expr(recv, out);
+            args.iter().for_each(|x| mentioned_expr(x, out));
+        }
+        HExprKind::Lift { expr, .. } => mentioned_expr(expr, out),
         HExprKind::If { cond, then, els } => {
             mentioned_expr(cond, out);
             mentioned_expr(then, out);
@@ -309,6 +329,23 @@ impl<'h> Lowerer<'h> {
                                     RangeKind::OpenClosed => ir::RangeKind::OpenClosed,
                                 },
                                 ring_bits: None,
+                            },
+                        });
+                        d.lits.extend(post);
+                    }
+                }
+                HLit::Gen { pat, src, .. } => {
+                    let over_lattice = src.ty.and_then(|t| self.lattice_id(t)).is_some();
+                    for d in &mut drafts {
+                        let x = self.expr(d, src)?;
+                        let mut post = Vec::new();
+                        let p = self.pattern(d, pat, &mut post)?;
+                        d.lits.push(Literal::Gen {
+                            pat: p,
+                            src: if over_lattice {
+                                GenSource::Lattice(x)
+                            } else {
+                                GenSource::Value(x)
                             },
                         });
                         d.lits.extend(post);

@@ -30,9 +30,7 @@ rel  = "put"
 rows = [["a", 3], ["b", 9]]
 
 [backend.oracle]
-status = "unimplemented"
-unimplemented = ["LANG-121", "LANG-122", "LANG-124", "LANG-128", "SEM-030", "SEM-100", "SEM-103"]
-until = "M5"
+status = "pass"
 
 [backend.interp]
 status = "unimplemented"

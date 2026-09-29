@@ -339,7 +339,7 @@ impl Cx<'_> {
             BLOCKITEM => self.unsupported_item("LANG-007", "named blocks", span),
             OVERRIDEITEM => self.unsupported_item("LANG-007", "override", span),
             ACLITEM => self.unsupported_item("LANG-242", "ACL items", span),
-            CELLDECL => self.unsupported_item("LANG-120", "cells", span),
+            CELLDECL => ItemKind::Rel(self.cell_decl(node)),
             MIGRATEITEM => self.unsupported_item("LANG-262", "migrations", span),
             TRANSLATEITEM => self.unsupported_item("LANG-263", "channel translations", span),
             SNAPSHOTITEM => self.unsupported_item("LANG-139", "progressive snapshots", span),
@@ -491,6 +491,16 @@ impl Cx<'_> {
 
     fn ty(&mut self, node: &SyntaxNode) -> Type {
         let span = self.span(node);
+        if tokens(node)
+            .next()
+            .is_some_and(|t| t.kind() == IDENT && t.text() == "unsafe")
+            && let Some(inner) = child_of(node, TYPE)
+        {
+            return Type::Unsafe {
+                inner: Box::new(self.ty(&inner)),
+                span,
+            };
+        }
         let path = self.names(node);
         if path.is_empty() {
             let elems = children_of(node, TYPE).map(|t| self.ty(&t)).collect();
@@ -677,6 +687,44 @@ impl Cx<'_> {
             key,
             direction,
             other_clauses,
+            span,
+        }
+    }
+
+    /// `[durable] [scratch] cell name: L;` as the relation `name(value: L)` (LANGUAGE §7.13).
+    fn cell_decl(&mut self, node: &SyntaxNode) -> RelDecl {
+        let span = self.span(node);
+        let name = self.need_name(node);
+        let kind = if has_token(node, SCRATCH_KW) {
+            RelKind::Scratch
+        } else {
+            RelKind::Table
+        };
+        let mods = RelMods {
+            durable: tokens(node).any(|t| t.text() == "durable"),
+            cell: true,
+            ..RelMods::default()
+        };
+        let ty = self.need_type(node);
+        RelDecl {
+            name,
+            kind,
+            mods,
+            cols: vec![ColDecl {
+                attrs: Vec::new(),
+                dest: false,
+                name: Ident {
+                    name: Symbol::intern("value"),
+                    span,
+                },
+                ty,
+                default: None,
+                span,
+            }],
+            like: None,
+            key: None,
+            direction: None,
+            other_clauses: Vec::new(),
             span,
         }
     }

@@ -88,10 +88,7 @@ unimplemented = ["LANG-120", "LANG-122", "LANG-123", "LANG-124", "LANG-125", "LA
 until = "M6"
 
 [backend.oracle]
-status = "unimplemented"
-unimplemented = ["LANG-120", "LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-126", "LANG-128", "LANG-153",
-                 "LANG-280", "LANG-281", "SEM-030", "SEM-031", "SEM-104", "ANA-020", "ANA-022"]
-until = "M6"
+status = "pass"
 
 [backend.interp]
 status = "unimplemented"

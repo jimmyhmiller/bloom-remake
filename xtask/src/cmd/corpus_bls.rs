@@ -12,11 +12,12 @@ use blossom_base::{Diagnostic, RelId, SourceDb};
 use blossom_driver::bls::compile_file;
 use blossom_driver::render::{is_not_implemented, render};
 use blossom_front::api::{BlsError, NodeSpec};
+use blossom_ir::core::LatticeCtor;
 use blossom_oracle::OracleError;
 use blossom_sim::bls::{BlsSim, InputEvent};
 use blossom_sim::{FaultSchedule, Omission, SimError, SyncRun};
 use blossom_value::time::{Duration, Instant, NodeId, Tick};
-use blossom_value::value::IntValue;
+use blossom_value::value::{IntValue, LatValue};
 use blossom_value::{TypeDef, TypeTable, Value};
 
 type Pattern = Vec<Option<Value>>;
@@ -237,8 +238,45 @@ fn value(a: &BlsArtifact, types: &TypeTable, v: &toml::Value, ty: blossom_base::
             }
             Value::Bytes(out.into())
         }
+        // A lattice column is written as its revealed value (a set as an array, a map as `[key, value]` pairs).
+        (_, TypeDef::Lattice(id)) => Value::Lattice(lattice_value(a, types, v, *id)?),
         (toml::Value::Table(t), _) if t.contains_key("blossom") => {
             return Err("`{ blossom = … }` row values arrive with a later slice".into());
+        }
+        _ => return Err(bad()),
+    })
+}
+
+/// A lattice value from its revealed form.
+fn lattice_value(
+    a: &BlsArtifact,
+    types: &TypeTable,
+    v: &toml::Value,
+    id: blossom_base::LatticeTypeId,
+) -> Result<LatValue, String> {
+    let def = a.program.get().lattices.get(id).ok_or("unknown lattice")?;
+    let bad = || format!("{v} does not decode as the lattice {}", def.name);
+    Ok(match (&def.ctor, v) {
+        (LatticeCtor::Bool, toml::Value::Boolean(b)) => LatValue::Bool(*b),
+        (LatticeCtor::Max(e) | LatticeCtor::Min(e) | LatticeCtor::Point(e), x) => {
+            LatValue::Elem(Arc::new(value(a, types, x, *e)?))
+        }
+        (LatticeCtor::Set(e) | LatticeCtor::PSet(e), toml::Value::Array(xs)) => {
+            let mut out = BTreeSet::new();
+            for x in xs {
+                out.insert(value(a, types, x, *e)?);
+            }
+            LatValue::Set(Arc::new(out))
+        }
+        (LatticeCtor::Map(k, inner), toml::Value::Array(pairs)) => {
+            let mut out = std::collections::BTreeMap::new();
+            for pair in pairs {
+                let [key, val] = pair.as_array().map(Vec::as_slice).ok_or_else(bad)? else {
+                    return Err(bad());
+                };
+                out.insert(value(a, types, key, *k)?, lattice_value(a, types, val, *inner)?);
+            }
+            LatValue::Map(Arc::new(out))
         }
         _ => return Err(bad()),
     })

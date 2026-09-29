@@ -735,8 +735,10 @@ impl<'t> Resolver<'t, '_> {
                 span,
             }));
         }
-        // A unary relation.
-        if let Some((rel, None)) = self.atom_parts(cx, rhs) {
+        // A unary relation (a cell is a lattice value, below).
+        if let Some((rel, None)) = self.atom_parts(cx, rhs)
+            && !self.rel_of(rel).cell
+        {
             if self.rel_of(rel).cols.len() != 1 {
                 self.error(code!("BLS0301"), rhs.span, "`x in r` needs a relation with one column");
                 return None;
@@ -789,12 +791,21 @@ impl<'t> Resolver<'t, '_> {
                 bin(hi_op, x, hi),
             )));
         }
-        if let ExprKind::Index { .. } = &rhs.kind {
-            self.unsupported("LANG-280", "lattice lookups `r[k]`", rhs.span);
-            return None;
+        if generator {
+            let pat = self.pattern(cx, lhs)?;
+            let src = self.expr(cx, rhs)?;
+            return Some(HLit::Gen { pat, src, span });
         }
-        self.unsupported("LANG-088", "membership in and generators over collection values", span);
-        None
+        // A membership test in a value: a set-like lattice (a threshold) or a collection; type checking decides.
+        let elem = self.expr(cx, lhs)?;
+        let coll = self.expr(cx, rhs)?;
+        Some(HLit::Guard(HExpr::new(
+            HExprKind::In {
+                elem: Box::new(elem),
+                coll: Box::new(coll),
+            },
+            span,
+        )))
     }
 
     // ------------------------------------------------------------------ patterns and expressions
@@ -969,6 +980,13 @@ impl<'t> Resolver<'t, '_> {
                             match Self::lookup_var(cx, name.name) {
                                 Some(v) => HExprKind::Var(v),
                                 None => {
+                                    if let Some(rel) = self.callee_rel(cx, e)
+                                        && self.rel_of(rel).cell
+                                    {
+                                        // A cell's name is its lookup `c[]` (LANGUAGE §7.13).
+                                        self.check_readable(cx, rel, span);
+                                        return Some(HExpr::new(HExprKind::Lookup { rel, key: Vec::new() }, span));
+                                    }
                                     if self.callee_rel(cx, e).is_some() {
                                         self.error(
                                             code!("BLS0202"),
@@ -1024,6 +1042,19 @@ impl<'t> Resolver<'t, '_> {
             }
             ExprKind::Call { callee, args } => return self.call(cx, callee, args, span),
             ExprKind::Method { receiver, name, args } => return self.method(cx, receiver, *name, args, span),
+            // `reveal!(x)`: the exact read of a lattice value.
+            ExprKind::Bang { name, args, clauses } if name.as_str() == "reveal" && clauses.is_empty() => {
+                let [Arg::Pos(x)] = args.as_slice() else {
+                    self.error(code!("BLS0301"), span, "`reveal!` takes one value");
+                    return None;
+                };
+                HExprKind::Method {
+                    recv: Box::new(self.expr(cx, x)?),
+                    name: Symbol::intern("reveal"),
+                    banged: true,
+                    args: Vec::new(),
+                }
+            }
             ExprKind::Bang { name, .. } => {
                 self.error(
                     code!("BLS0202"),
@@ -1047,14 +1078,55 @@ impl<'t> Resolver<'t, '_> {
                 base: Box::new(self.expr(cx, base)?),
                 index: *index,
             },
-            ExprKind::Index { .. } => {
-                self.unsupported("LANG-280", "lookups `r[k]`", span);
-                return None;
+            ExprKind::Index { base, index } => {
+                let Some((rel, None)) = self.atom_parts(cx, base) else {
+                    self.unsupported(
+                        "LANG-091",
+                        "indexing values (only a relation's cell `r[k]` is read by index)",
+                        span,
+                    );
+                    return None;
+                };
+                let keys: Vec<&ast::Expr> = match &index.kind {
+                    ExprKind::Tuple(es) if !es.is_empty() => es.iter().collect(),
+                    ExprKind::Tuple(_) => Vec::new(),
+                    _ => vec![index.as_ref()],
+                };
+                let mut key = Vec::new();
+                for k in keys {
+                    key.push(self.expr(cx, k)?);
+                }
+                self.check_readable(cx, rel, span);
+                HExprKind::Lookup { rel, key }
             }
             ExprKind::Binary { op, lhs, rhs } => {
                 if matches!(op, BinOp::In) {
-                    self.unsupported("LANG-088", "`in` inside an expression", span);
-                    return None;
+                    // A membership test in a value (LANGUAGE §9.4); roles and relations are tested as literals.
+                    let names_rel = self
+                        .atom_parts(cx, rhs)
+                        .is_some_and(|(r, a)| a.is_none() && !self.rel_of(r).cell);
+                    let names_role = matches!(&rhs.kind, ExprKind::Path(p, t) if t.is_empty()
+                        && p.len() == 1 && p.first().is_some_and(|n| self.role_named(cx.ms, n.name).is_some()));
+                    if names_rel
+                        || names_role
+                        || matches!(&rhs.kind, ExprKind::Binary { op, .. } if range_kind(*op).is_some())
+                    {
+                        self.unsupported(
+                            "LANG-088",
+                            "membership in a role, relation or range inside an expression (write it as a literal)",
+                            span,
+                        );
+                        return None;
+                    }
+                    let elem = self.expr(cx, lhs)?;
+                    let coll = self.expr(cx, rhs)?;
+                    return Some(HExpr::new(
+                        HExprKind::In {
+                            elem: Box::new(elem),
+                            coll: Box::new(coll),
+                        },
+                        span,
+                    ));
                 }
                 if range_kind(*op).is_some() {
                     self.unsupported("LANG-092", "ranges as values", span);
@@ -1093,9 +1165,30 @@ impl<'t> Resolver<'t, '_> {
                     HExprKind::Tuple(es)
                 }
             }
-            ExprKind::Vec(_) | ExprKind::Set(_) | ExprKind::Map(_) => {
-                self.unsupported("LANG-023", "collection values", span);
-                return None;
+            ExprKind::Vec(es) | ExprKind::Set(es) => {
+                let mut elems = Vec::new();
+                for x in es {
+                    elems.push(self.expr(cx, x)?);
+                }
+                HExprKind::Collection {
+                    kind: if matches!(&e.kind, ExprKind::Vec(_)) {
+                        CollectionKind::Vec
+                    } else {
+                        CollectionKind::Set
+                    },
+                    elems,
+                }
+            }
+            ExprKind::Map(pairs) => {
+                let mut elems = Vec::new();
+                for (k, v) in pairs {
+                    elems.push(self.expr(cx, k)?);
+                    elems.push(self.expr(cx, v)?);
+                }
+                HExprKind::Collection {
+                    kind: CollectionKind::Map,
+                    elems,
+                }
             }
             ExprKind::If { cond, then, els } => {
                 let Some(els) = els else {
@@ -1263,6 +1356,29 @@ impl<'t> Resolver<'t, '_> {
                     span,
                 })
             }
+            [l, f] if LatCtorKind::named(l.as_str()).is_some() && matches!(f.as_str(), "of" | "bot") => {
+                let kind = LatCtorKind::named(l.as_str())?;
+                let bot = f.as_str() == "bot";
+                let want = match (bot, kind) {
+                    (true, _) => 0,
+                    (false, LatCtorKind::Map) => 2,
+                    (false, _) => 1,
+                };
+                if pos.len() != want {
+                    self.error(
+                        code!("BLS0301"),
+                        span,
+                        format!("`{}::{}` takes {want} value(s)", l.as_str(), f.as_str()),
+                    );
+                    return None;
+                }
+                let mut xs = Vec::new();
+                for p in pos {
+                    xs.push(self.expr(cx, p)?);
+                }
+                Some(HExpr::new(HExprKind::LatCtor { kind, bot, args: xs }, span))
+            }
+            [name] if self.scope(cx.ms).broken.contains(&name.name) => None,
             _ => {
                 let names: Vec<&str> = path.iter().map(Ident::as_str).collect();
                 self.unsupported("LANG-180", &format!("calls of `{}`", names.join("::")), span);
@@ -1311,8 +1427,29 @@ impl<'t> Resolver<'t, '_> {
                 })
             }
             other => {
-                self.unsupported("LANG-180", &format!("method `{other}`"), span);
-                None
+                // Resolved by the receiver's type (lattice operations, LANGUAGE §11.5).
+                let (name, banged) = match other.strip_suffix('!') {
+                    Some(n) => (n, true),
+                    None => (other, false),
+                };
+                let recv = self.expr(cx, receiver)?;
+                let mut xs = Vec::new();
+                for a in args {
+                    let Arg::Pos(x) = a else {
+                        self.error(code!("BLS0302"), a.span(), "method arguments are positional");
+                        return None;
+                    };
+                    xs.push(self.expr(cx, x)?);
+                }
+                Some(HExpr::new(
+                    HExprKind::Method {
+                        recv: Box::new(recv),
+                        name: Symbol::intern(name),
+                        banged,
+                        args: xs,
+                    },
+                    span,
+                ))
             }
         }
     }
@@ -1612,6 +1749,11 @@ impl<'t> Resolver<'t, '_> {
             _ => None,
         };
         let Some(mut rel) = found else {
+            if let [name] = path
+                && self.scope(cx.ms).broken.contains(&name.name)
+            {
+                return None;
+            }
             let names: Vec<&str> = path.iter().map(Ident::as_str).collect();
             self.error(
                 code!("BLS0200"),
@@ -1646,6 +1788,19 @@ impl<'t> Resolver<'t, '_> {
             (HRelKind::Channel(_), v) if v != Verb::Send => None,
             (k, Verb::Delete | Verb::Upsert) if !k.is_table() => {
                 Some((code!("BLS0400"), bad("only tables accept `delete` and `upsert`")))
+            }
+            // A lattice only grows (LANG-284): it is reset by raising an epoch, never retracted.
+            (_, Verb::Delete | Verb::Upsert)
+                if r.cols
+                    .iter()
+                    .any(|c| c.ty.is_some_and(|t| self.hir.lattice_of(t).is_some())) =>
+            {
+                Some((
+                    code!("BLS0410"),
+                    bad(
+                        "a lattice-valued relation cannot be deleted from or upserted (raise an epoch with `Lex` instead)",
+                    ),
+                ))
             }
             _ => None,
         };
@@ -1843,10 +1998,18 @@ impl<'t> Resolver<'t, '_> {
             self.unsupported("ANA-020", "`monotone` assertions", v.span);
         }
         let placement = self.rel_of(rel).role;
-        for c in &v.cols {
-            if c.ty.is_some() {
-                self.unsupported("LANG-047", "view column type annotations", c.span);
-                return;
+        // Annotated columns are declared; the others are inferred (LANGUAGE §5.6).
+        for (i, c) in v.cols.iter().enumerate() {
+            let Some(ty) = &c.ty else { continue };
+            let Some(t) = self.resolve_type(s, ty) else { return };
+            match self.hir.rels.get_mut(rel.index()).and_then(|r| r.cols.get_mut(i)) {
+                Some(col) => col.ty = Some(t),
+                None => {
+                    self.bugs.push(blossom_base::internal_error!(
+                        "view column {i} of {rel:?} was not declared"
+                    ));
+                    return;
+                }
             }
         }
         let has_agg = v.cols.iter().any(|c| c.agg.is_some());

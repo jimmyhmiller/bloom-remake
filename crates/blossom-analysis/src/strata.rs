@@ -1,6 +1,7 @@
 //! Temporal stratification (SEM-020, SEM-022, ANA-002; LANGUAGE §13.3): the deductive rules of a program must
 //! stratify. A relation depends on every relation a deductive rule deriving it reads; the dependency is a point of
-//! order when the read is negated or the rule aggregates (CR-09). A point of order inside a strongly connected
+//! order when the read is negated, the rule aggregates (CR-09), or a lattice read reaches a use non-monotonically
+//! (SEM-102, `blossom_ir::polarity`). A point of order inside a strongly connected
 //! component is a negation or aggregation through same-tick recursion: the program is rejected with BLS0502, whose
 //! witness is the cycle.
 //!
@@ -32,21 +33,23 @@ pub fn check(p: &Program) -> Result<Diagnostics, InternalError> {
         }
         let head = rule.head.rel.index();
         let agg = rule.head.args.iter().any(|a| matches!(a, HeadArg::Agg(_)));
-        for lit in &rule.body.lits {
-            let (atom, negated) = match lit {
-                Literal::Pos(a) => (a, false),
-                Literal::Neg(a) => (a, true),
+        let exact = blossom_ir::polarity::non_monotone_reads(p, rule);
+        for (i, lit) in rule.body.lits.iter().enumerate() {
+            let (rel, negated, span) = match lit {
+                Literal::Pos(a) => (a.rel, false, rule.span),
+                Literal::Neg(a) => (a.rel, true, a.span),
+                Literal::Lookup { rel, .. } => (*rel, false, rule.span),
                 _ => continue,
             };
-            let body = atom.rel.index();
+            let body = rel.index();
             graph
                 .add_edge(head, body)
                 .map_err(|e| internal_error!("dependency graph: {e}"))?;
             edges.push(Edge {
                 head,
                 body,
-                strict: negated || agg,
-                span: if negated { atom.span } else { rule.span },
+                strict: negated || agg || exact.contains(&i),
+                span,
             });
         }
     }

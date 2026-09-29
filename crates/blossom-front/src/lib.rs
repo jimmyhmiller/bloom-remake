@@ -25,3 +25,6 @@ pub mod resolve;
 pub mod roles;
 pub mod spec;
 pub mod typeck;
+
+#[cfg(test)]
+mod tests;
