@@ -13,6 +13,10 @@
 //! [[node]]
 //! name = "s1"; role = "Server"; addr = "127.0.0.1:7400"; client_addr = "127.0.0.1:7500"
 //! principal = "spiffe://dev/kvs/Server/s1"
+//! dial = { s2 = "127.0.0.1:17402" }  # optional: dial node s2 here instead of at its `addr` (a proxy, a NAT)
+//!
+//! [params]                        # deploy-time parameters (LANG-010): integers, bools, strings, durations
+//! ELECTION_MIN = "150ms"
 //!
 //! [statics]                       # rows of `static` relations, by name; each row an array of column values
 //! admins = [["spiffe://dev/kvs/client/admin"]]
@@ -54,6 +58,8 @@ struct RawSpec {
     nodes: Vec<RawNode>,
     #[serde(default)]
     statics: BTreeMap<String, Vec<Vec<toml::Value>>>,
+    #[serde(default)]
+    params: BTreeMap<String, toml::Value>,
     security: RawSecurity,
     storage: RawStorage,
 }
@@ -76,6 +82,8 @@ struct RawNode {
     addr: SocketAddr,
     client_addr: Option<SocketAddr>,
     principal: String,
+    #[serde(default)]
+    dial: BTreeMap<String, SocketAddr>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -89,6 +97,15 @@ struct RawSecurity {
 struct RawStorage {
     data_dir: PathBuf,
     checkpoint_wal_bytes: Option<u64>,
+}
+
+/// A deploy-time parameter's value as the spec writes it (LANG-010): the compiler checks it against the declared type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ParamValue {
+    Int(i128),
+    Bool(bool),
+    /// A string, or a duration such as `"150ms"`.
+    Text(String),
 }
 
 /// How connections are secured.
@@ -106,6 +123,8 @@ pub struct NodeEntry {
     pub addr: SocketAddr,
     pub client_addr: Option<SocketAddr>,
     pub principal: String,
+    /// Where this node dials other nodes when it is not their `addr` (a proxy, a NAT), by node name.
+    pub dial: BTreeMap<String, SocketAddr>,
 }
 
 /// A validated deployment spec.
@@ -120,6 +139,8 @@ pub struct DeploymentSpec {
     /// The nodes, sorted by name (the canonical directory order: node `i` is `NodeId(i)`).
     pub nodes: Vec<NodeEntry>,
     pub statics: BTreeMap<String, Vec<Vec<toml::Value>>>,
+    /// Values of the program's deploy-time parameters.
+    pub params: BTreeMap<String, ParamValue>,
     pub security: SecurityMode,
     pub data_dir: PathBuf,
     pub checkpoint_wal_bytes: u64,
@@ -172,9 +193,17 @@ impl DeploymentSpec {
                 addr: n.addr,
                 client_addr: n.client_addr,
                 principal: n.principal,
+                dial: n.dial,
             })
             .collect();
         nodes.sort_by(|a, b| a.name.cmp(&b.name));
+        for n in &nodes {
+            for target in n.dial.keys() {
+                if !nodes.iter().any(|m| m.name == *target) {
+                    return Err(invalid(&format!("node.dial.{target}"), "no such node"));
+                }
+            }
+        }
         for w in nodes.windows(2) {
             if let [a, b] = w
                 && a.name == b.name
@@ -183,6 +212,16 @@ impl DeploymentSpec {
             }
         }
         let resolve = |p: PathBuf| if p.is_absolute() { p } else { base.join(p) };
+        let mut params = BTreeMap::new();
+        for (name, v) in raw.params {
+            let value = match v {
+                toml::Value::Integer(n) => ParamValue::Int(i128::from(n)),
+                toml::Value::Boolean(b) => ParamValue::Bool(b),
+                toml::Value::String(s) => ParamValue::Text(s),
+                other => return Err(invalid(&format!("params.{name}"), format!("{other} is not an integer, bool or string"))),
+            };
+            params.insert(name, value);
+        }
         Ok(DeploymentSpec {
             id: raw.deployment.id,
             program: raw.deployment.program,
@@ -191,6 +230,7 @@ impl DeploymentSpec {
             secrets: raw.deployment.secrets.map(resolve),
             nodes,
             statics: raw.statics,
+            params,
             security,
             data_dir: resolve(raw.storage.data_dir),
             checkpoint_wal_bytes: raw.storage.checkpoint_wal_bytes.unwrap_or(256 * 1024 * 1024),

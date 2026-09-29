@@ -169,6 +169,8 @@ enum Deferred {
     },
     /// `elem in coll` as a test.
     In { elem: T, coll: T, span: Span },
+    /// `majority(coll, R)`: `coll` is a set-like lattice of `elem` (LANGUAGE §11.6).
+    Quorum { elem: T, coll: T, span: Span },
     /// `pat in src` as a generator.
     Gen { pat: T, src: T, span: Span },
     /// `recv.name(args)` (or `reveal!(recv)`).
@@ -742,6 +744,10 @@ impl Checker<'_> {
                 self.deferred.push(Deferred::IntColumn { t: col, span: agg.span });
                 self.count_cols.push(col);
             }
+            AggKind::Index => {
+                let u64t = self.con(&mut hir.types, TypeDef::Int(IntTy::U64));
+                self.unify(&hir.types, col, u64t, agg.span);
+            }
             AggKind::Sum | AggKind::Min | AggKind::Max => {
                 if let Some(a) = arg_terms.first() {
                     self.unify(&hir.types, *a, col, agg.span);
@@ -1306,6 +1312,34 @@ impl Checker<'_> {
                             self.con(&mut hir.types, TypeDef::Int(IntTy::U64))
                         }
                         Builtin::RoleSize(_) => self.con(&mut hir.types, TypeDef::Int(IntTy::U64)),
+                        Builtin::RandRange => {
+                            // `lo` and `hi` share a type that subtracts to itself: an integer or a duration.
+                            match (ats.first().copied(), ats.get(1).copied()) {
+                                (Some(lo), Some(hi)) => {
+                                    self.unify(&hir.types, lo, hi, span);
+                                    self.deferred.push(Deferred::Arith {
+                                        op: BinOp::Sub,
+                                        l: lo,
+                                        r: hi,
+                                        res: lo,
+                                        span,
+                                    });
+                                    lo
+                                }
+                                _ => self.fresh(false),
+                            }
+                        }
+                        Builtin::Majority(role) => {
+                            if let Some(s) = ats.first().copied() {
+                                let node = self.con(&mut hir.types, TypeDef::Node(Some(RoleId::from_raw(role.0))));
+                                self.deferred.push(Deferred::Quorum {
+                                    elem: node,
+                                    coll: s,
+                                    span,
+                                });
+                            }
+                            self.con(&mut hir.types, TypeDef::Bool)
+                        }
                         Builtin::Contains => {
                             if let (Some(c), Some(x)) = (ats.first(), ats.get(1)) {
                                 self.deferred.push(Deferred::In {
@@ -1635,6 +1669,7 @@ impl Checker<'_> {
                 | Deferred::Compare { span, .. }
                 | Deferred::Lookup { span, .. }
                 | Deferred::In { span, .. }
+                | Deferred::Quorum { span, .. }
                 | Deferred::Gen { span, .. }
                 | Deferred::Method { span, .. } => span,
             };
@@ -1981,6 +2016,26 @@ impl Checker<'_> {
                         self.error(
                             span,
                             format!("`x in e` needs a set-like lattice, a set or a vector, found {d}"),
+                        );
+                    }
+                    _ => return false,
+                }
+                true
+            }
+            Deferred::Quorum { elem, coll, span } => {
+                let rc = self.find(coll);
+                match self.node(rc) {
+                    Node::Bound(Shape::Lat(LatS::Set(e) | LatS::PSet(e))) => {
+                        self.unify(&hir.types, elem, e, span);
+                    }
+                    Node::Bound(_) => {
+                        let d = self.describe(&hir.types, coll);
+                        self.error(
+                            span,
+                            format!(
+                                "`majority` counts a set-like lattice of nodes (`LSet`, `LPSet`), found {d}; a quorum \
+                                 only grows, so a plain set is not accepted"
+                            ),
                         );
                     }
                     _ => return false,

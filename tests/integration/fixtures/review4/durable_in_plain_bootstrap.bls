@@ -1,0 +1,11 @@
+//! S4 review: a durable relation written in a plain `bootstrap` must be BLS0402 (it would collide with the state
+//! reloaded after a restart, and the node could never come back).
+program durable_in_plain_bootstrap version 1;
+
+durable table term(t: u64) key();
+table scratchpad(t: u64) key();
+
+bootstrap {
+    emit term(0);
+    emit scratchpad(0);
+}

@@ -71,8 +71,24 @@ pub fn load(deploy: &std::path::Path) -> Result<(DeploymentSpec, Arc<blossom_art
         eprintln!("the program path {} is not UTF-8", spec.source.display());
         return Err(Exit::Refused.into());
     };
-    let artifact = bls::compile(source, &nodes)?;
+    let params = spec
+        .params
+        .iter()
+        .map(|(k, v)| (k.clone(), param_binding(v)))
+        .collect();
+    let artifact = bls::compile_with(source, &nodes, &params)?;
     Ok((spec, Arc::new(artifact)))
+}
+
+/// A deployment's parameter value for the compiler.
+pub fn param_binding(v: &blossom_runtime::deploy::ParamValue) -> blossom_front::api::ParamBinding {
+    use blossom_front::api::ParamBinding as B;
+    use blossom_runtime::deploy::ParamValue as V;
+    match v {
+        V::Int(n) => B::Int(*n),
+        V::Bool(b) => B::Bool(*b),
+        V::Text(t) => B::Text(t.clone()),
+    }
 }
 
 /// Runs the command.

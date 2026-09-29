@@ -303,7 +303,8 @@ impl Server {
         let oracle = Arc::new(
             Oracle::new(artifact.program.clone())?
                 .with_roles(artifact.roles.clone())
-                .with_seed(seed)?,
+                .with_seed(seed)?
+                .with_node_names(names.to_vec())?,
         );
         let nonce = OsEntropy.boot_nonce().map_err(RuntimeError::Config)?;
         let dir = cfg.dir.clone().unwrap_or_else(|| spec.data_dir.join(&entry.name));
@@ -386,7 +387,8 @@ impl Server {
             }
             let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(4096);
             peers.insert(to, tx);
-            let (addr, id, catalog, stop) = (n.addr, id.clone(), catalog.clone(), stop.clone());
+            let addr = entry.dial.get(&n.name).copied().unwrap_or(n.addr);
+            let (id, catalog, stop) = (id.clone(), catalog.clone(), stop.clone());
             threads.push(spawn("peer-writer", move || {
                 peer_writer(addr, id, me, restarts, nonce, catalog, rx, stop)
             })?);

@@ -1,0 +1,313 @@
+//! E11. A linearizable key-value store replicated with Raft (Ongaro and Ousterhout, 2014).
+//!
+//! Every server runs the same rules. Clients are external sessions: a client sends a request to any server, and a
+//! server that does not lead answers `redirect` with the leader it knows (the request had no effect). The leader
+//! appends each request to its log and replicates it; an entry is committed once a majority stores it and it is of
+//! the leader's term (§5.4.2). Every server applies committed entries in log order, and the server that took a request
+//! answers its session when it applies the entry. Reads go through the log too, so every answer is linearizable.
+//!
+//! Durability: `current_term`, `voted_for` and `log` are durable, so a vote or a log entry is on disk before any
+//! message of the same tick leaves (SEM-072) — a follower acknowledges only entries it has made durable. The commit
+//! index, the applied index and the key-value state are volatile: a restarted server relearns the commit index from
+//! the leader and re-applies its log.
+//!
+//! Replication: the leader sends new entries to every follower in the tick after it appends them, and at every
+//! heartbeat it resends each follower's entries from the last index that follower acknowledged (at most `BATCH`
+//! of them), with a `beat` carrying its commit index. Every entry carries the term of the entry before it; a follower
+//! stores an entry whose predecessor matches its log (or the same batch), removes a conflicting suffix, and
+//! acknowledges the highest index it now holds in agreement with the leader.
+
+program raft_kv version 1;
+
+pub type Key = String;
+pub type Val = Bytes;
+pub type ReqId = u64;
+
+param ELECTION_MIN: Duration = 300ms;
+param ELECTION_MAX: Duration = 600ms;
+param HEARTBEAT: Duration = 50ms;
+param POLL: Duration = 20ms;
+param BATCH: u64 = 256;
+
+const PUT: u8 = 1;
+const GET: u8 = 2;
+const DEL: u8 = 3;
+
+role Client: external;
+role Server: cluster;
+
+// ---- the client protocol
+channel put(id: ReqId #1, key: Key #2, val: Val #3): Client -> Server;
+channel get(id: ReqId #1, key: Key #2): Client -> Server;
+channel del(id: ReqId #1, key: Key #2): Client -> Server;
+channel put_ok(id: ReqId #1): Server -> Client;
+channel get_resp(id: ReqId #1, key: Key #2, val: Option<Val> #3): Server -> Client;
+channel del_ok(id: ReqId #1, existed: bool #2): Server -> Client;
+/// This server does not lead: retry at `leader` when it is known. The request had no effect.
+channel redirect(id: ReqId #1, leader: Option<Node<Server>> #2): Server -> Client;
+
+// ---- Raft
+channel request_vote(term: u64, last_idx: u64, last_term: u64): Server -> Server;
+channel vote(term: u64, granted: bool): Server -> Server;
+/// One log entry of the leader of `term`, with the term of the entry before it (the consistency check, §5.3).
+channel entry(term: u64, idx: u64, eterm: u64, prev_term: u64, origin: Node<Server>, session: Session, id: ReqId,
+              kind: u8, key: Key, val: Option<Val>): Server -> Server;
+/// A heartbeat: the leader's log holds `(prev_idx, prev_term)`, and its commit index is `commit`.
+channel beat(term: u64, prev_idx: u64, prev_term: u64, commit: u64): Server -> Server;
+/// A follower's answer: its log agrees with the leader's up to `idx`.
+channel ack(term: u64, idx: u64): Server -> Server;
+
+at Server {
+    // ---- persistent state (Raft Fig. 2)
+
+    /// The latest term seen. Several writes in one tick keep the largest: terms only grow.
+    durable table current_term(t: u64) key() resolve choose_most(t);
+    /// At most one vote per term, ever.
+    durable table voted_for(term: u64, cand: Node<Server>) key(term);
+    /// The log. An entry records who took the request (`origin`, its client `session` and request `id`) so that
+    /// server can answer when the entry is applied.
+    durable table log(idx: u64, term: u64, origin: Node<Server>, session: Session, id: ReqId, kind: u8, key: Key,
+                      val: Option<Val>) key(idx);
+
+    // ---- volatile state
+    table won(term: u64);
+    table leader_of(term: u64, leader: Node<Server>) key(term);
+    table votes(term: u64, voters: LSet<Node<Server>>);
+    table deadline(at: Instant) key();
+    /// The highest index known committed.
+    table commit(i: u64) key() resolve choose_most(i);
+    /// The highest index applied to `kv`.
+    table applied(i: u64) key() resolve choose_most(i);
+    table kv(key: Key, val: Val) key(key);
+    /// Leader state per follower: the highest index it acknowledged, and the highest index sent to it.
+    table match_idx(f: Node<Server>, i: u64) key(f) resolve choose_most(i);
+    table sent(f: Node<Server>, i: u64) key(f) resolve choose_most(i);
+    timer poll every POLL;
+    timer heartbeat every HEARTBEAT;
+
+    bootstrap fresh {
+        emit current_term(0);
+    }
+    bootstrap {
+        emit deadline(now() + rand_range(ELECTION_MIN, ELECTION_MAX, ("boot", 0u64)));
+        emit commit(0);
+        emit applied(0);
+    }
+
+    // ---- term first: the tick's effective term is the largest known (as e03)
+    view heard_term(t) {
+        request_vote(term: t, ..);
+        vote(term: t, ..);
+        entry(term: t, ..);
+        beat(term: t, ..);
+        ack(term: t, ..);
+    }
+    view eff(t = max!(x)) {
+        current_term(x);
+        heard_term(x);
+    }
+    persist_term: while eff(t) {
+        next current_term(t);
+    }
+
+    view leader(t) = eff(t), won(t);
+    view candidate(t) = eff(t), voted_for(t, self), not won(t), not leader_of(t, _);
+    view known_leader(l) = eff(t), leader_of(t, l);
+
+    view last_log(i, t) {
+        log(idx: i, term: t, ..), argmax!(i);
+        not log(..), let i = 0, let t = 0;
+    }
+
+    // ---- elections (as e03)
+    view rv_ok(c, t) =
+        request_vote(t, li, lt) from c, eff(t), last_log(mi, mt)
+        where lt > mt || (lt == mt && li >= mi);
+    view fresh_grant(c, t) = rv_ok(c, t), not voted_for(t, _), choose!(c per t);
+    view grant(c, t) {
+        fresh_grant(c, t);
+        rv_ok(c, t), voted_for(t, c);
+    }
+    grant_vote: on grant(c, t) {
+        next voted_for(t, c);
+        send vote(t, true) to c;
+    }
+    refuse_vote: on request_vote(t, _, _) from c, eff(e), not grant(c, t) {
+        send vote(e, false) to c;
+    }
+
+    view heard_leader() {
+        beat(term: t, ..), eff(t);
+        entry(term: t, ..), eff(t);
+    }
+    view granted_now() = grant(_, _);
+    view timed_out(t) =
+        poll, eff(t), deadline(d), not leader(t), not granted_now(), not heard_leader()
+        where now() >= d;
+    view reset_timer() {
+        granted_now();
+        heard_leader();
+        timed_out(_);
+    }
+    rearm: on reset_timer(), eff(t) {
+        upsert deadline(now() + rand_range(ELECTION_MIN, ELECTION_MAX, ("election", t)));
+    }
+    start_election: on timed_out(t), last_log(li, lt), let nt = t + 1 {
+        next current_term(nt);
+        next voted_for(nt, self);
+        next votes(nt, set[self]);
+        for p in Server where p != self {
+            send request_vote(nt, li, lt) to p;
+        }
+    }
+    count_vote: on vote(t, true) from v {
+        emit votes(t, set[v]);
+    }
+    view elected(t) = candidate(t), votes(t, s) where majority(s, Server);
+    become_leader: while elected(t), last_log(li, _) {
+        next won(t);
+        next leader_of(t, self);
+        for p in Server where p != self {
+            next match_idx(p, 0);
+            next sent(p, li);
+        }
+    }
+    /// A new leader starts its view of the followers afresh (Fig. 2: reinitialized after election). What an earlier
+    /// leadership recorded goes: under `choose_most` a larger stale acknowledgement would otherwise outvote the fresh
+    /// 0 and count toward commits it never acknowledged.
+    forget_match: while elected(_), match_idx(p, m) {
+        delete match_idx(p, m);
+    }
+    forget_sent: while elected(_), sent(p, s) {
+        delete sent(p, s);
+    }
+
+    // ---- client requests
+    view request(s, id, kind, key, val) {
+        put(id, key, v) from s, let kind = PUT, let val = Some(v);
+        get(id, key) from s, let kind = GET, let val = None;
+        del(id, key) from s, let kind = DEL, let val = None;
+    }
+    not_leader: on request(s, id, _, _, _), eff(t), not leader(t) {
+        if known_leader(l) {
+            send redirect(id, Some(l)) to s;
+        }
+        if not known_leader(_) {
+            send redirect(id, None) to s;
+        }
+    }
+    /// The leader numbers this tick's requests after its last entry, in canonical order.
+    view slot(s, id, kind, key, val, n = index!()) = request(s, id, kind, key, val), eff(t), leader(t);
+    append: on slot(s, id, kind, key, val, n), leader(t), last_log(li, _) {
+        next log(li + 1 + n, t, self, s, id, kind, key, val);
+    }
+
+    // ---- replication, leader side
+    /// The term of the entry before index `i` (0 before the first).
+    view prev_term(i, pt) {
+        log(idx: i, ..), log(idx: j, term: pt, ..) where j + 1 == i;
+        log(idx: i, ..), let pt = 0 where i == 1;
+    }
+    /// New entries go out in the tick after they are appended.
+    push: while leader(t), sent(f, s), log(i, et, o, ss, id, k, key, val), prev_term(i, pt) where i > s {
+        send entry(t, i, et, pt, o, ss, id, k, key, val) to f;
+    }
+    pushed: while leader(t), sent(f, s), last_log(li, _) where li > s {
+        next sent(f, li);
+    }
+    /// At every heartbeat, each follower gets its unacknowledged entries again (at most `BATCH`) and a beat.
+    resend: on heartbeat, leader(t), match_idx(f, m), log(i, et, o, ss, id, k, key, val), prev_term(i, pt)
+        where i > m && i <= m + BATCH {
+        send entry(t, i, et, pt, o, ss, id, k, key, val) to f;
+    }
+    view term_at(i, it) {
+        log(idx: i, term: it, ..);
+        match_idx(_, i), let it = 0 where i == 0;
+    }
+    beat_followers: on heartbeat, leader(t), match_idx(f, m), term_at(m, mt), commit(c) {
+        send beat(t, m, mt, c) to f;
+    }
+    on_ack: on ack(t, m) from f, leader(t) {
+        next match_idx(f, m);
+    }
+    /// An index of our term that a majority stores is committed (§5.4.2). The leader counts itself.
+    view stored(i, n = count!(f)) = leader(t), log(idx: i, term: t, ..), match_idx(f, m) where m >= i;
+    view commit_to(i = max!(j)) = stored(j, n) where (n + 1) * 2 > Server.size();
+    advance_commit: while commit_to(i), commit(c) where i > c {
+        next commit(i);
+    }
+
+    // ---- replication, follower side
+    /// Entries of the leader of our term whose predecessor matches: in the log, or earlier in the same batch.
+    view acceptable(i, et) {
+        entry(term: t, idx: i, eterm: et, prev_term: pt, ..), eff(t), log(idx: j, term: pt, ..) where j + 1 == i;
+        entry(term: t, idx: i, eterm: et, prev_term: pt, ..), eff(t) where i == 1 && pt == 0;
+        entry(term: t, idx: i, eterm: et, prev_term: pt, ..), eff(t), acceptable(j, pt) where j + 1 == i;
+    }
+    /// A stored entry that conflicts with an acceptable one (same index, another term): it and all after it go.
+    view conflict(c = min!(i)) = acceptable(i, et), log(idx: i, term: lt, ..) where lt != et;
+    truncate: on conflict(c), log(j, jt, o, s, id, k, key, val) where j >= c {
+        delete log(j, jt, o, s, id, k, key, val);
+    }
+    store_entry: on acceptable(i, et), entry(t, i, et, pt, o, s, id, k, key, val), eff(t) {
+        next log(i, et, o, s, id, k, key, val);
+    }
+    view matched(m = max!(i)) = acceptable(i, _);
+    reply_entries: on entry(term: t, ..) from l, eff(t), matched(m) {
+        emit leader_of(t, l);
+        send ack(t, m) to l;
+    }
+    /// A heartbeat whose `prev` matches confirms our log up to it and tells us the commit index.
+    view beat_ok(l, t, p, c) {
+        beat(t, p, pt, c) from l, eff(t), log(idx: p, term: pt, ..);
+        beat(t, p, pt, c) from l, eff(t) where p == 0;
+    }
+    follow: on beat_ok(l, t, p, c) {
+        emit leader_of(t, l);
+        send ack(t, p) to l;
+        next commit(if c < p { c } else { p });
+    }
+    lagging: on beat(term: t, ..) from l, eff(t), not beat_ok(l, t, _, _) {
+        emit leader_of(t, l);
+    }
+
+    // ---- applying committed entries in log order
+    view to_apply(i) = applied(a), commit(c), log(idx: i, ..) where i > a && i <= c;
+    /// The newest write to each key among the entries applied this tick.
+    view last_write(key, i = max!(j)) = to_apply(j), log(j, _, _, _, _, k, key, _) where k != GET;
+    apply_put: while last_write(key, i), log(i, _, _, _, _, k, key, Some(v)) where k == PUT {
+        upsert kv(key, v);
+    }
+    apply_del: while last_write(key, i), log(i, _, _, _, _, k, key, _), kv(key, old) where k == DEL {
+        delete kv(key, old);
+    }
+    advance_applied: while commit(c), applied(a) where c > a {
+        next applied(c);
+    }
+    /// The newest write to `key` before entry `i` of this batch, if any.
+    view write_before(i, key, j = max!(w)) =
+        to_apply(i), log(i, _, _, _, _, _, key, _), to_apply(w), log(w, _, _, _, _, k, key, _)
+        where w < i && k != GET;
+    /// The value of `key` just before entry `i` is applied.
+    view value_before(i, key, v) {
+        write_before(i, key, j), log(j, _, _, _, _, k, key, Some(v)) where k == PUT;
+        to_apply(i), log(i, _, _, _, _, _, key, _), not write_before(i, key, _), kv(key, v);
+    }
+    answer: while to_apply(i), log(i, _, o, s, id, k, key, _) where o == self {
+        if k == PUT {
+            send put_ok(id) to s;
+        }
+        if k == GET, value_before(i, key, v) {
+            send get_resp(id, key, Some(v)) to s;
+        }
+        if k == GET, not value_before(i, key, _) {
+            send get_resp(id, key, None) to s;
+        }
+        if k == DEL, value_before(i, key, _) {
+            send del_ok(id, true) to s;
+        }
+        if k == DEL, not value_before(i, key, _) {
+            send del_ok(id, false) to s;
+        }
+    }
+}

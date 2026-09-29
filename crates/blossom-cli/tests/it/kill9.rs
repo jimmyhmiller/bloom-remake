@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use blossom_bench::blossom_kv::E01Store;
+use blossom_bench::blossom_kv::BlossomKvStore;
 use blossom_bench::kv::{self, KvStore, Workload};
 use blossom_front::api::NodeSpec;
 use blossom_runtime::deploy::DeploymentSpec;
@@ -113,8 +113,8 @@ fn kill_9_never_loses_an_acknowledged_write() {
     let artifact = Arc::new(compiled.unwrap().0);
 
     let mut server = start(&deploy, true);
-    let store: Arc<dyn KvStore> = Arc::new(E01Store {
-        addrs: spec.nodes.iter().filter_map(|n| n.client_addr).collect(),
+    let store: Arc<dyn KvStore> = Arc::new(BlossomKvStore {
+        addrs: spec.nodes.iter().map(|n| n.client_addr).collect(),
         id: blossom_runtime::server::identity(&spec, &artifact),
         artifact,
         principal: "spiffe://test/kvs/client/admin".into(),
