@@ -1,6 +1,7 @@
 //! Integration tests of the `blossom` binary: dispatch, exit codes and placeholders.
 
 mod kill9;
+mod raft3;
 
 use std::process::Command;
 

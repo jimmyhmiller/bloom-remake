@@ -387,7 +387,8 @@ impl Server {
             }
             let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(4096);
             peers.insert(to, tx);
-            let (addr, id, catalog, stop) = (n.addr, id.clone(), catalog.clone(), stop.clone());
+            let addr = entry.dial.get(&n.name).copied().unwrap_or(n.addr);
+            let (id, catalog, stop) = (id.clone(), catalog.clone(), stop.clone());
             threads.push(spawn("peer-writer", move || {
                 peer_writer(addr, id, me, restarts, nonce, catalog, rx, stop)
             })?);
