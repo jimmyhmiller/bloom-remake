@@ -402,6 +402,9 @@ pub enum AggKind {
     Sum,
     Min,
     Max,
+    /// `index!()` (LANGUAGE §10.5): the dense 0-based rank of each head tuple in canonical order, per tick. A view
+    /// column only.
+    Index,
 }
 
 /// A view: a closed relation defined by its alternatives.

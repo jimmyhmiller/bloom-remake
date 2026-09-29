@@ -997,6 +997,7 @@ impl<'h> Lowerer<'h> {
             AggKind::Sum => AggFunc::Sum,
             AggKind::Min => AggFunc::Min,
             AggKind::Max => AggFunc::Max,
+            AggKind::Index => return Err(internal_error!("`index!` reached a plain aggregate")),
         };
         let args = if g.args.is_empty() {
             self.var_terms(d, over)?
@@ -1250,6 +1251,185 @@ impl<'h> Lowerer<'h> {
         Ok(())
     }
 
+    /// A view with an `index!()` column (LANGUAGE §10.5): each distinct head tuple of the tick gets its dense 0-based
+    /// rank in canonical order. The reference lowering is quadratic; an engine sorts instead.
+    ///
+    /// ```ir
+    /// v$h(Ḡ) :- v$u(…).                                  // the head tuples, without the index
+    /// v$lt(Ḡ, Ḡ2) :- v$h(Ḡ), v$h(Ḡ2), (Ḡ2) < (Ḡ).        // canonical order
+    /// v(Ḡ, count<Ḡ2>) :- v$lt(Ḡ, Ḡ2).
+    /// v$ak(Ḡ) :- v$lt(Ḡ, _).
+    /// v(Ḡ, 0) :- v$h(Ḡ), notin v$ak(Ḡ).
+    /// ```
+    #[allow(clippy::too_many_arguments)]
+    fn index_view(
+        &mut self,
+        v: &'h HView,
+        rel: RelId,
+        r: &HRel,
+        union: ScopeId,
+        u: RelId,
+        union_vars: &[HVarId],
+        cols: &'h [HViewAggCol],
+        names: &mut Names,
+    ) -> Result<(), InternalError> {
+        let base = names.base.clone();
+        let mut groups: Vec<HVarId> = Vec::new();
+        let mut index_at = None;
+        for (i, c) in cols.iter().enumerate() {
+            match c {
+                HViewAggCol::Group(uv) => groups.push(*uv),
+                HViewAggCol::Agg(a) if a.func == AggKind::Index && index_at.is_none() => index_at = Some(i),
+                HViewAggCol::Agg(a) => {
+                    return Err(internal_error!(
+                        "a view with `index!` and another aggregate column ({:?}) reached lowering",
+                        a.func
+                    ));
+                }
+            }
+        }
+        let index_at = index_at.ok_or_else(|| internal_error!("an index view without its index column"))?;
+        let gtys: Vec<TypeId> = groups
+            .iter()
+            .map(|g| self.var_ty(union, *g))
+            .collect::<Result<_, _>>()?;
+        let gcols = |pre: &str| -> Vec<ir::Column> {
+            gtys.iter()
+                .enumerate()
+                .map(|(i, t)| column(Symbol::intern(&format!("{pre}{i}")), *t, false))
+                .collect()
+        };
+        let h = self.generated(suffixed(&r.name, "$h"), gcols("g"), None, r.role, false, v.span)?;
+        let mut lt_cols = gcols("g");
+        lt_cols.extend(gcols("h"));
+        let lt = self.generated(suffixed(&r.name, "$lt"), lt_cols, None, r.role, false, v.span)?;
+        let ak = self.generated(suffixed(&r.name, "$ak"), gcols("g"), None, r.role, false, v.span)?;
+        let role = r.role;
+        // v$h(Ḡ) :- v$u(union).
+        let mut d = Draft::new(union);
+        let uargs = self.var_terms(&mut d, union_vars)?;
+        d.lits.push(Literal::Pos(ir_atom(u, uargs, v.span)));
+        let gargs = self.var_terms(&mut d, &groups)?;
+        let l = self.label(format!("{base}$h"));
+        d.build(
+            &mut self.b,
+            RuleKind::Deductive,
+            l,
+            v.span,
+            Head {
+                rel: h,
+                args: gargs.into_iter().map(HeadArg::Term).collect(),
+                mode: HeadMode::Insert,
+            },
+            role,
+        )?;
+        let head_args = |xs: Vec<Term>, idx: Term| -> Vec<HeadArg> {
+            let mut out: Vec<HeadArg> = xs.into_iter().map(HeadArg::Term).collect();
+            out.insert(index_at.min(out.len()), HeadArg::Term(idx));
+            out
+        };
+        let unit = self.b.intern_const(Value::Unit).map_err(ir)?;
+        let gtuple = super::expr::tuple_type(&mut self.b, gtys.clone())?;
+        // v$lt(Ḡ, Ḡ2) :- v$h(Ḡ), v$h(Ḡ2), (Ḡ2) < (Ḡ).
+        let mut d = Draft::new(union);
+        let a: Vec<Term> = gtys.iter().map(|t| Term::Var(d.fresh(*t))).collect();
+        let b2: Vec<Term> = gtys.iter().map(|t| Term::Var(d.fresh(*t))).collect();
+        d.lits.push(Literal::Pos(ir_atom(h, a.clone(), v.span)));
+        d.lits.push(Literal::Pos(ir_atom(h, b2.clone(), v.span)));
+        let tup = |xs: &[Term]| super::expr::tuple_expr(unit, gtuple, xs.iter().cloned().map(Expr::Term).collect());
+        d.lits.push(Literal::Guard(Expr::Binary {
+            op: ir::BinOp::CanonLt,
+            lhs: Box::new(tup(&b2)),
+            rhs: Box::new(tup(&a)),
+        }));
+        let mut lt_args = a.clone();
+        lt_args.extend(b2.clone());
+        let l = self.label(format!("{base}$lt"));
+        d.build(
+            &mut self.b,
+            RuleKind::Deductive,
+            l,
+            v.span,
+            Head {
+                rel: lt,
+                args: lt_args.into_iter().map(HeadArg::Term).collect(),
+                mode: HeadMode::Insert,
+            },
+            role,
+        )?;
+        // v(Ḡ, count<Ḡ2>) :- v$lt(Ḡ, Ḡ2).
+        let mut d = Draft::new(union);
+        let a: Vec<Term> = gtys.iter().map(|t| Term::Var(d.fresh(*t))).collect();
+        let b2: Vec<Term> = gtys.iter().map(|t| Term::Var(d.fresh(*t))).collect();
+        let mut lt_args = a.clone();
+        lt_args.extend(b2.clone());
+        d.lits.push(Literal::Pos(ir_atom(lt, lt_args, v.span)));
+        let mut head: Vec<HeadArg> = a.iter().cloned().map(HeadArg::Term).collect();
+        head.insert(
+            index_at.min(head.len()),
+            HeadArg::Agg(AggCall {
+                func: AggFunc::Count,
+                args: b2,
+                order: None,
+            }),
+        );
+        let l = self.label(format!("{base}$index"));
+        d.build(
+            &mut self.b,
+            RuleKind::Deductive,
+            l,
+            v.span,
+            Head {
+                rel,
+                args: head,
+                mode: HeadMode::Insert,
+            },
+            role,
+        )?;
+        // v$ak(Ḡ) :- v$lt(Ḡ, _).
+        let mut d = Draft::new(union);
+        let a: Vec<Term> = gtys.iter().map(|t| Term::Var(d.fresh(*t))).collect();
+        let mut lt_args = a.clone();
+        lt_args.extend(gtys.iter().map(|_| Term::Wild));
+        d.lits.push(Literal::Pos(ir_atom(lt, lt_args, v.span)));
+        let l = self.label(format!("{base}$ak"));
+        d.build(
+            &mut self.b,
+            RuleKind::Deductive,
+            l,
+            v.span,
+            Head {
+                rel: ak,
+                args: a.into_iter().map(HeadArg::Term).collect(),
+                mode: HeadMode::Insert,
+            },
+            role,
+        )?;
+        // v(Ḡ, 0) :- v$h(Ḡ), notin v$ak(Ḡ).
+        let mut d = Draft::new(union);
+        let a: Vec<Term> = gtys.iter().map(|t| Term::Var(d.fresh(*t))).collect();
+        d.lits.push(Literal::Pos(ir_atom(h, a.clone(), v.span)));
+        d.lits.push(Literal::Neg(ir_atom(ak, a.clone(), v.span)));
+        let zero = self
+            .b
+            .intern_const(Value::Int(blossom_value::value::IntValue::U64(0)))
+            .map_err(ir)?;
+        let l = self.label(format!("{base}$index0"));
+        d.build(
+            &mut self.b,
+            RuleKind::Deductive,
+            l,
+            v.span,
+            Head {
+                rel,
+                args: head_args(a, Term::Const(zero)),
+                mode: HeadMode::Insert,
+            },
+            role,
+        )?;
+        Ok(())
+    }
+
     /// A view with aggregate columns (LANGUAGE §8.3, §10.1–10.2).
     #[allow(clippy::too_many_arguments)]
     fn aggregate_view(
@@ -1296,6 +1476,9 @@ impl<'h> Lowerer<'h> {
                     r.role,
                 )?;
             }
+        }
+        if cols.iter().any(|c| matches!(c, HViewAggCol::Agg(a) if a.func == AggKind::Index)) {
+            return self.index_view(v, rel, r, union, u, &union_vars, cols, names);
         }
         // Defaults: explicit `default e`, or the identity of count and sum under a driver.
         let groups: Vec<(usize, HVarId)> = cols
