@@ -8,7 +8,8 @@
 //! placeholder that exposes nothing (PLAN §4 D1).
 
 pub mod bls;
-pub mod ded;
+pub mod runtime;
+pub mod spec;
 pub mod sync;
 
 pub use sync::{

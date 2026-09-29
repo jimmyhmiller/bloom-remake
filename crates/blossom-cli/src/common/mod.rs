@@ -40,14 +40,14 @@ pub fn long_version() -> &'static str {
 pub mod ded {
     use std::process::ExitCode;
 
-    use blossom_artifact::ded::DedArtifact;
+    use blossom_artifact::sim::SimArtifact;
     use blossom_driver::{ded::compile_files, render::render};
     use blossom_front::ded::DedError;
 
     use crate::exit::Exit;
 
     /// Compiles `files` for `nodes`, printing diagnostics; on failure, the exit code to return.
-    pub fn compile(files: &[String], nodes: &[String]) -> Result<DedArtifact, ExitCode> {
+    pub fn compile(files: &[String], nodes: &[String]) -> Result<SimArtifact, ExitCode> {
         let files: Vec<&str> = files.iter().map(String::as_str).collect();
         let nodes: Vec<&str> = nodes.iter().map(String::as_str).collect();
         let (result, sources) = compile_files(&files, &nodes);

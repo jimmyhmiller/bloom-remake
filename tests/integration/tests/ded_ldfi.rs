@@ -5,17 +5,17 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use blossom_artifact::ded::DedArtifact;
+use blossom_artifact::sim::SimArtifact;
 use blossom_driver::ded::compile_files;
 use blossom_ldfi::certify::exhaustive;
 use blossom_ldfi::report::fault_labels;
 use blossom_ldfi::{FailureSpec, LdfiConfig, Method, Verdict};
 use blossom_sim::FaultSchedule;
-use blossom_sim::ded::DedSim;
+use blossom_sim::spec::SpecSim;
 
 #[cfg(test)]
 struct Case {
-    artifact: DedArtifact,
+    artifact: SimArtifact,
     spec: FailureSpec,
     verdict: Verdict,
 }
@@ -55,7 +55,7 @@ fn case(name: &str) -> Case {
 #[test]
 fn simple_deliv_counterexample_is_the_papers() {
     let c = case("BENCH-130a");
-    let sim = DedSim::new(&c.artifact).unwrap();
+    let sim = SpecSim::new(&c.artifact).unwrap();
     let report = blossom_ldfi::run(&sim, &LdfiConfig::new(c.spec.clone())).unwrap();
     assert_eq!(report.verdict, Verdict::Counterexample);
     assert_eq!(report.method, Method::Lineage);
@@ -78,7 +78,7 @@ fn lineage_verdicts_on_small_cases() {
         "BENCH-137i",
     ] {
         let c = case(name);
-        let sim = DedSim::new(&c.artifact).unwrap();
+        let sim = SpecSim::new(&c.artifact).unwrap();
         let mut config = LdfiConfig::new(c.spec.clone());
         config.exhaustive_fallback = None;
         let report = blossom_ldfi::run(&sim, &config).unwrap();
@@ -98,7 +98,7 @@ fn exhaustive_certification_agrees_with_the_lineage_driven_search() {
         "BENCH-137i",
     ] {
         let c = case(name);
-        let sim = DedSim::new(&c.artifact).unwrap();
+        let sim = SpecSim::new(&c.artifact).unwrap();
         let ff = sim.run(c.spec.eot, &FaultSchedule::default(), false).unwrap();
         let ff_post: BTreeSet<_> = sim.outcome(&ff, c.spec.eot, false).unwrap().post;
         let cert = exhaustive(&sim, &c.spec, &ff_post, 1, 10_000_000).unwrap();
@@ -112,7 +112,7 @@ fn exhaustive_certification_agrees_with_the_lineage_driven_search() {
             let run = sim.run(c.spec.eot, &faults, false).unwrap();
             let outcome = sim.outcome(&run, c.spec.eot, false).unwrap();
             assert!(
-                !blossom_sim::ded::is_good(&ff_post, &outcome),
+                !blossom_sim::spec::is_good(&ff_post, &outcome),
                 "{name}: the witness reproduces"
             );
         }
@@ -196,7 +196,7 @@ fn review_regressions_find_their_counterexamples() {
         let artifact = blossom_front::ded::compile(&["p.ded"], nodes, &mut OneFile((*text).to_owned()), &mut sources)
             .unwrap_or_else(|e| panic!("{name}: {e}"));
         let spec = FailureSpec::new(*eot, *eff, *crashes as u32, nodes.len() as u32).unwrap();
-        let sim = DedSim::new(&artifact).unwrap();
+        let sim = SpecSim::new(&artifact).unwrap();
         for neg in [
             blossom_ldfi::NegSupport::Precise,
             blossom_ldfi::NegSupport::Conservative,
@@ -218,7 +218,7 @@ fn review_regressions_find_their_counterexamples() {
 fn results_do_not_depend_on_the_worker_count() {
     for name in ["BENCH-131q", "BENCH-137c"] {
         let c = case(name);
-        let sim = DedSim::new(&c.artifact).unwrap();
+        let sim = SpecSim::new(&c.artifact).unwrap();
         let mut outcomes = Vec::new();
         for workers in [1, 4] {
             let mut config = LdfiConfig::new(c.spec.clone());

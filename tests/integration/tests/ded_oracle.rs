@@ -3,12 +3,12 @@
 
 use std::path::{Path, PathBuf};
 
-use blossom_artifact::ded::DedArtifact;
+use blossom_artifact::sim::SimArtifact;
 use blossom_driver::ded::compile_files;
 use blossom_driver::render::render;
 use blossom_front::ded::DedError;
 use blossom_sim::FaultSchedule;
-use blossom_sim::ded::DedSim;
+use blossom_sim::spec::SpecSim;
 use blossom_value::time::Tick;
 use blossom_value::types::IntTy;
 use blossom_value::value::IntValue;
@@ -25,7 +25,7 @@ fn manifest(case: &Path) -> toml::Table {
 }
 
 #[cfg(test)]
-fn compile_case(case: &Path, m: &toml::Table, nodes: &[String]) -> DedArtifact {
+fn compile_case(case: &Path, m: &toml::Table, nodes: &[String]) -> SimArtifact {
     let program = case.join(m["program"].as_str().unwrap());
     let nodes: Vec<&str> = nodes.iter().map(String::as_str).collect();
     let (result, sources) = compile_files(&[program.to_str().unwrap()], &nodes);
@@ -42,7 +42,7 @@ fn compile_case(case: &Path, m: &toml::Table, nodes: &[String]) -> DedArtifact {
 
 /// A manifest value as a Blossom value of the column's type: strings in node columns name nodes.
 #[cfg(test)]
-fn value(a: &DedArtifact, v: &toml::Value, ty: &TypeDef) -> Value {
+fn value(a: &SimArtifact, v: &toml::Value, ty: &TypeDef) -> Value {
     match (v, ty) {
         (toml::Value::Integer(i), TypeDef::Int(IntTy::U64)) => Value::Int(IntValue::U64(*i as u64)),
         (toml::Value::Integer(i), _) => Value::Int(IntValue::I64(*i)),
@@ -97,7 +97,7 @@ fn ded_failure_free_cases_match_their_expectations() {
         let a = compile_case(&case, &m, &nodes);
         let run_ticks = m["run"]["ticks"].as_integer().unwrap() as u64;
         let last = run_ticks - 1;
-        let sim = DedSim::new(&a).unwrap();
+        let sim = SpecSim::new(&a).unwrap();
         let run = sim.run(Tick(last), &FaultSchedule::default(), false).unwrap();
         let name = case.file_name().unwrap().to_string_lossy().into_owned();
         for x in m["expect"].as_array().unwrap() {

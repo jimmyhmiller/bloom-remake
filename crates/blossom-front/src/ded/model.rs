@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use blossom_artifact::ded::DedRelKind;
+use blossom_artifact::sim::LogicalKind;
 use blossom_base::{Diagnostic, Diagnostics, Span, Symbol, code};
 use blossom_syntax::ded::{Arg, BodyAtom, BodyItem, Expr, HeadTime, Rule, Term};
 
@@ -25,7 +25,7 @@ pub(crate) struct RelInfo {
     pub name: Symbol,
     pub arity: usize,
     pub first: Span,
-    pub kind: DedRelKind,
+    pub kind: LogicalKind,
     /// Heads of deductive and `@next` rules.
     pub local_heads: bool,
     pub async_heads: bool,
@@ -105,7 +105,7 @@ impl Model {
                     name,
                     arity,
                     first: span,
-                    kind: DedRelKind::Protocol,
+                    kind: LogicalKind::Protocol,
                     local_heads: false,
                     async_heads: false,
                     facts: false,
@@ -182,7 +182,7 @@ impl Model {
             }
         }
         if let Some(r) = self.rel_mut(Symbol::intern(CRASH)) {
-            r.kind = DedRelKind::Crash;
+            r.kind = LogicalKind::Crash;
         }
     }
 
@@ -238,7 +238,7 @@ impl Model {
         }
         for r in &mut self.rels {
             if spec.contains(&r.name) {
-                r.kind = DedRelKind::Spec;
+                r.kind = LogicalKind::Spec;
             }
         }
         for (i, rule) in program.rules.iter().enumerate() {
@@ -270,7 +270,7 @@ impl Model {
             }
             // An `@next` or `@async` rule always runs at the nodes; it cannot be part of the spec.
             if problems.is_empty() {
-                let read = body_atoms(rule).find(|a| self.rel(a.rel.text).is_some_and(|r| r.kind == DedRelKind::Spec));
+                let read = body_atoms(rule).find(|a| self.rel(a.rel.text).is_some_and(|r| r.kind == LogicalKind::Spec));
                 let mut d = Diagnostic::new(
                     code!("BLS0901"),
                     format!(

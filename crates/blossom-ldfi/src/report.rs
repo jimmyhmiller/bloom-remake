@@ -3,7 +3,7 @@
 
 use std::fmt::Write;
 
-use blossom_artifact::ded::DedArtifact;
+use blossom_artifact::sim::SimArtifact;
 use blossom_prov::{Firing, GoalKey, Names, ProvGraph, Space};
 use blossom_sim::{Fate, FaultSchedule, SyncRun};
 use blossom_value::{Value, time::NodeId};
@@ -13,7 +13,7 @@ use crate::faults::labels;
 
 /// Names for a `.ded` program's goals.
 pub struct DedNames<'a> {
-    pub artifact: &'a DedArtifact,
+    pub artifact: &'a SimArtifact,
 }
 
 impl DedNames<'_> {
@@ -89,13 +89,13 @@ impl Names for DedNames<'_> {
 }
 
 /// The fault set in the corpus's notation: `{C(a,2), O(a,b,1)}`.
-pub fn fault_labels(artifact: &DedArtifact, faults: &FaultSchedule) -> Vec<String> {
+pub fn fault_labels(artifact: &SimArtifact, faults: &FaultSchedule) -> Vec<String> {
     let names = DedNames { artifact };
     labels(faults, &|n| names.node(n))
 }
 
 /// A human-readable report.
-pub fn render(artifact: &DedArtifact, report: &LdfiReport) -> String {
+pub fn render(artifact: &SimArtifact, report: &LdfiReport) -> String {
     let names = DedNames { artifact };
     let mut out = String::new();
     match (report.verdict, report.method) {
@@ -149,7 +149,7 @@ pub fn render(artifact: &DedArtifact, report: &LdfiReport) -> String {
 
 fn render_counterexample(
     out: &mut String,
-    artifact: &DedArtifact,
+    artifact: &SimArtifact,
     names: &DedNames<'_>,
     report: &LdfiReport,
     ce: &Counterexample,
@@ -220,7 +220,7 @@ pub fn timeline(names: &DedNames<'_>, run: &SyncRun) -> String {
 }
 
 /// The lineage of every `post` tuple of a run, for `blossom ldfi --lineage`.
-pub fn post_lineage(artifact: &DedArtifact, graph: &ProvGraph, report: &LdfiReport) -> String {
+pub fn post_lineage(artifact: &SimArtifact, graph: &ProvGraph, report: &LdfiReport) -> String {
     let names = DedNames { artifact };
     let mut out = String::new();
     let Some(spec) = &artifact.spec else { return out };

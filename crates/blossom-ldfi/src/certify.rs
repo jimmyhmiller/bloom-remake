@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use blossom_base::internal_error;
 use blossom_oracle::{Delivery, Instance, Row};
-use blossom_sim::ded::{DedSim, is_good};
+use blossom_sim::spec::{SpecSim, is_good};
 use blossom_sim::{FaultSchedule, Omission};
 use blossom_value::time::{NodeId, Tick};
 
@@ -33,13 +33,14 @@ pub struct Certification {
     pub schedules: u64,
 }
 
-/// One point of the search: what every node carries into the next tick, what is delivered to it, and the
-/// instances at the ticks the spec reads.
+/// One point of the search: what every node carries into the next tick, what is delivered to it, the instances at
+/// the ticks the spec reads, and (under the frozen crash view) every node's last instance, which a crashed node keeps.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct State {
     carried: Vec<Instance>,
     inbox: Vec<Vec<Delivery>>,
     history: Vec<(Tick, Vec<Instance>)>,
+    last: Vec<Instance>,
 }
 
 /// The fewest omissions reaching a state, compared by count and then canonically.
@@ -81,12 +82,19 @@ enum Stepped {
 /// Searches every admissible schedule of `spec` for a violation of the outcome spec against `ff_post`, the
 /// failure-free run's `post`. Stops at the first violation. Fails with a budget error beyond `max_states` states.
 pub fn exhaustive(
-    sim: &DedSim<'_>,
+    sim: &SpecSim<'_>,
     spec: &FailureSpec,
     ff_post: &BTreeSet<Row>,
     workers: usize,
     max_states: u64,
 ) -> Result<Certification, LdfiError> {
+    if sim.artifact().halt.is_some() {
+        return Err(blossom_base::unimplemented_error!(
+            "TEST-029",
+            "exhaustive certification of a program that writes `halt`"
+        )
+        .into());
+    }
     let snapshot_ticks = sim.snapshot_ticks();
     let n = spec.nodes as usize;
     let mut result = Certification {
@@ -102,11 +110,16 @@ pub fn exhaustive(
                 carried: vec![Instance::default(); n],
                 inbox: vec![Vec::new(); n],
                 history: Vec::new(),
+                last: if sim.artifact().profile.frozen() {
+                    vec![Instance::default(); n]
+                } else {
+                    Vec::new()
+                },
             },
             BTreeSet::new(),
         );
-        // The `.ded` profile starts at tick 1 (DedSim::run): tick 0 is the empty initial state.
-        for t in 1..=spec.eot.0 {
+        // The Molly profile starts at tick 1 (tick 0 is the empty initial state); the Blossom profile at tick 0.
+        for t in sim.artifact().profile.first_tick().0..=spec.eot.0 {
             let tick = Tick(t);
             let items: Vec<(State, BTreeSet<Omission>)> = std::mem::take(&mut frontier).into_iter().collect();
             result.states += items.len() as u64;
@@ -156,7 +169,7 @@ pub fn exhaustive(
 /// Steps every state of a frontier, in parallel when `workers > 1`; results come back in frontier order.
 #[allow(clippy::too_many_arguments)]
 fn step_all(
-    sim: &DedSim<'_>,
+    sim: &SpecSim<'_>,
     spec: &FailureSpec,
     crashes: &BTreeMap<NodeId, Tick>,
     snapshot_ticks: &BTreeSet<Tick>,
@@ -194,7 +207,7 @@ fn step_all(
 
 #[allow(clippy::too_many_arguments)]
 fn step_state(
-    sim: &DedSim<'_>,
+    sim: &SpecSim<'_>,
     spec: &FailureSpec,
     crashes: &BTreeMap<NodeId, Tick>,
     snapshot_ticks: &BTreeSet<Tick>,
@@ -203,9 +216,21 @@ fn step_state(
     state: &State,
     oms: &BTreeSet<Omission>,
 ) -> Result<Stepped, LdfiError> {
+    let frozen_view = sim.artifact().profile.frozen();
+    let crashed = |node: NodeId| crashes.get(&node).is_some_and(|c| *c <= tick);
     let mut outs = Vec::with_capacity(state.carried.len());
     for (i, (carried, inbox)) in state.carried.iter().zip(&state.inbox).enumerate() {
         let node = NodeId(u32::try_from(i).map_err(|_| internal_error!("node index overflow"))?);
+        if frozen_view && crashed(node) {
+            // A crashed node runs no tick and keeps its state (CR-20).
+            outs.push(blossom_oracle::TickOutput {
+                instance: state.last.get(i).cloned().unwrap_or_default(),
+                next: carried.clone(),
+                outbox: BTreeSet::new(),
+                firings: Vec::new(),
+            });
+            continue;
+        }
         outs.push(sim.step(node, tick, carried, inbox)?);
     }
     let mut history = state.history.clone();
@@ -230,7 +255,6 @@ fn step_state(
             Stepped::Violation(oms.clone())
         });
     }
-    let crashed = |node: NodeId| crashes.get(&node).is_some_and(|c| *c <= tick);
     let mut always: Vec<Vec<Delivery>> = vec![Vec::new(); outs.len()];
     let mut droppable: BTreeMap<(NodeId, NodeId), Vec<Delivery>> = BTreeMap::new();
     for (i, out) in outs.iter().enumerate() {
@@ -258,6 +282,11 @@ fn step_state(
     if channels.len() >= 63 {
         return Err(internal_error!("{} droppable channels in one tick", channels.len()).into());
     }
+    let last: Vec<Instance> = if frozen_view {
+        outs.iter().map(|o| o.instance.clone()).collect()
+    } else {
+        Vec::new()
+    };
     let carried: Vec<Instance> = outs.into_iter().map(|o| o.next).collect();
     let mut successors = Vec::with_capacity(1usize << channels.len());
     for mask in 0u64..(1u64 << channels.len()) {
@@ -283,6 +312,7 @@ fn step_state(
                 carried: carried.clone(),
                 inbox,
                 history: history.clone(),
+                last: last.clone(),
             },
             cand,
         ));

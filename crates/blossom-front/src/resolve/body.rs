@@ -102,6 +102,18 @@ impl<'t> Resolver<'t, '_> {
     fn atom_parts<'e>(&mut self, cx: &RuleCx, e: &'e ast::Expr) -> Option<(HRelId, Option<&'e [Arg]>)> {
         match &e.kind {
             ExprKind::Call { callee, args } => self.callee_rel(cx, callee).map(|r| (r, Some(args.as_slice()))),
+            // `a.r(args)`, an instance interface, parses as a method call.
+            ExprKind::Method { receiver, name, args } => match &receiver.kind {
+                ExprKind::Path(p, targs) if targs.is_empty() && p.len() == 1 => {
+                    let inst = p.first()?;
+                    if Self::lookup_var(cx, inst.name).is_some() {
+                        return None;
+                    }
+                    self.lookup_rel(cx.ms, &[*inst, *name])
+                        .map(|r| (r, Some(args.as_slice())))
+                }
+                _ => None,
+            },
             ExprKind::Path(..) | ExprKind::Field { .. } => self.callee_rel(cx, e).map(|r| (r, None)),
             _ => None,
         }

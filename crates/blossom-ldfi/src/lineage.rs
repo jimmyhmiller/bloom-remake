@@ -18,13 +18,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use blossom_artifact::ded::{DedArtifact, DedRelIdx, DedRelKind, SpecFeed};
+use blossom_artifact::sim::{LogicalIdx, LogicalKind, SimArtifact, SpecFeed};
 use blossom_base::{InternalError, RelId, internal_error};
 use blossom_ir::core::{RelClass, RuleKind};
 use blossom_ir::obs::{FiringKind, FiringRecord, NegRead};
 use blossom_prov::{AggGroup, Loc, NegRead as ProvNegRead};
 use blossom_prov::{Firing, GoalId, GoalKey, Premise, ProvGraph, Space};
-use blossom_sim::ded::Outcome;
+use blossom_sim::spec::Outcome;
 use blossom_sim::{Fate, SyncRun};
 use blossom_value::{
     Value,
@@ -35,7 +35,7 @@ use blossom_value::{
 type Arrival = (RelId, NodeId, NodeId, Tick, Arc<[Value]>);
 
 /// Builds the provenance graph of `run` and its `outcome`.
-pub fn build(artifact: &DedArtifact, run: &SyncRun, outcome: &Outcome) -> Result<ProvGraph, InternalError> {
+pub fn build(artifact: &SimArtifact, run: &SyncRun, outcome: &Outcome) -> Result<ProvGraph, InternalError> {
     let protocol = artifact.protocol.get();
     let main_protocol: BTreeMap<RelId, u32> = artifact
         .rels
@@ -68,6 +68,37 @@ pub fn build(artifact: &DedArtifact, run: &SyncRun, outcome: &Outcome) -> Result
                     )?;
                     if leaf {
                         g.set_leaf(id);
+                    }
+                }
+            }
+        }
+    }
+
+    // A crashed node's frozen ticks (CR-20): each tuple is the one it held at the previous tick.
+    if artifact.profile.frozen() {
+        for (t, round) in run.rounds.iter().enumerate().skip(1) {
+            let tick = Tick(u64::try_from(t).map_err(|_| internal_error!("tick overflow"))?);
+            for (n, nt) in round.iter().enumerate() {
+                let node = NodeId(u32::try_from(n).map_err(|_| internal_error!("node overflow"))?);
+                if nt.ran || !run.faults.crashed(node, tick) {
+                    continue;
+                }
+                for (rel, rows) in &nt.instance.rels {
+                    for row in rows {
+                        let key = |tick: Tick| GoalKey {
+                            space: Space::Protocol,
+                            rel: *rel,
+                            node: Some(node),
+                            tick,
+                            row: row.clone(),
+                        };
+                        let (Some(goal), Some(prev)) = (g.find(&key(tick)), g.find(&key(Tick(tick.0 - 1)))) else {
+                            return Err(internal_error!(
+                                "a frozen tuple without its previous tick: {:?}",
+                                key(tick)
+                            ));
+                        };
+                        g.set_frozen(goal, prev);
                     }
                 }
             }
@@ -113,9 +144,13 @@ pub fn build(artifact: &DedArtifact, run: &SyncRun, outcome: &Outcome) -> Result
                     // An inductive head at EOT + 1 lies outside the run.
                     continue;
                 };
-                let mut premises = Vec::with_capacity(f.reads.len() + f.negations.len() + 1);
+                let mut premises = Vec::with_capacity(f.reads.len() + f.negations.len() + 2);
                 if let Some((from, to, send)) = clock {
                     premises.push(Premise::Clock { from, to, send });
+                }
+                // Under the frozen crash view a crashed node fires nothing; its persisted state is its frozen copy.
+                if artifact.profile.frozen() && !is_frame(protocol, rule) {
+                    premises.push(Premise::Alive { node, tick });
                 }
                 for r in &f.reads {
                     let key = GoalKey {
@@ -157,16 +192,13 @@ pub fn build(artifact: &DedArtifact, run: &SyncRun, outcome: &Outcome) -> Result
         let eot = outcome.eot;
         let mut feeds: BTreeMap<RelId, SpecFeed> = BTreeMap::new();
         for feed in &spec.feeds {
-            let rel = match *feed {
-                SpecFeed::AtEot { spec, .. } | SpecFeed::AtTick { spec, .. } | SpecFeed::Crash { spec } => spec,
-            };
-            feeds.insert(rel, *feed);
+            feeds.insert(feed.spec_rel(), *feed);
         }
         let main_spec: BTreeMap<RelId, u32> = artifact
             .rels
             .iter()
             .enumerate()
-            .filter(|(_, r)| r.kind == DedRelKind::Spec)
+            .filter(|(_, r)| r.kind == LogicalKind::Spec)
             .filter_map(|(i, r)| Some((r.spec?, u32::try_from(i).ok()?)))
             .collect();
         for (rel, rows) in &outcome.instance.rels {
@@ -201,6 +233,8 @@ pub fn build(artifact: &DedArtifact, run: &SyncRun, outcome: &Outcome) -> Result
             let mut premises = Vec::with_capacity(f.reads.len() + f.negations.len());
             for r in &f.reads {
                 match feeds.get(&r.rel) {
+                    // crashed(n): a crashed node stays crashed in every superset of the run's faults.
+                    Some(SpecFeed::Crashed { .. }) => {}
                     // crash(Observer, Node, Time): lost if the node crashes earlier.
                     Some(SpecFeed::Crash { .. }) => match (r.row.get(1), r.row.get(2)) {
                         (Some(Value::Node(node)), Some(time)) => premises.push(Premise::CrashPresent {
@@ -243,6 +277,14 @@ pub fn build(artifact: &DedArtifact, run: &SyncRun, outcome: &Outcome) -> Result
     Ok(g)
 }
 
+/// Whether `rule` is a table's frame rule or a lattice's identity rule (the persistence of state).
+fn is_frame(program: &blossom_ir::core::Program, rule: &blossom_ir::core::Rule) -> bool {
+    use blossom_ir::core::ConstructKind;
+    rule.construct
+        .and_then(|c| program.constructs.get(c))
+        .is_some_and(|c| matches!(c.kind, ConstructKind::Persist { .. } | ConstructKind::Identity { .. }))
+}
+
 fn firing(space: Space, f: &FiringRecord, node: Option<NodeId>, tick: Tick, premises: Vec<Premise>) -> Firing {
     Firing {
         space,
@@ -255,18 +297,18 @@ fn firing(space: Space, f: &FiringRecord, node: Option<NodeId>, tick: Tick, prem
 }
 
 /// The source-level relation a negated protocol read names.
-fn protocol_logical(artifact: &DedArtifact, rel: RelId) -> Result<u32, InternalError> {
+fn protocol_logical(artifact: &SimArtifact, rel: RelId) -> Result<u32, InternalError> {
     artifact
         .protocol_owner(rel)
-        .map(|DedRelIdx(i)| i)
+        .map(|LogicalIdx(i)| i)
         .ok_or_else(|| internal_error!("a negated read of protocol relation {rel:?}, which no Molly relation owns"))
 }
 
 /// The protocol goal a spec input tuple copies: `row` is `[node, …]`.
 fn snapshot_goal(
     g: &ProvGraph,
-    artifact: &DedArtifact,
-    ded: DedRelIdx,
+    artifact: &SimArtifact,
+    ded: LogicalIdx,
     tick: Tick,
     row: &[Value],
 ) -> Result<GoalId, InternalError> {
@@ -290,13 +332,21 @@ fn snapshot_goal(
 
 fn spec_negation(
     g: &mut ProvGraph,
-    artifact: &DedArtifact,
+    artifact: &SimArtifact,
     feeds: &BTreeMap<RelId, SpecFeed>,
     main_spec: &BTreeMap<RelId, u32>,
     neg: &NegRead,
     eot: Tick,
 ) -> Result<Premise, InternalError> {
     let logical = match feeds.get(&neg.rel) {
+        Some(SpecFeed::Crashed { .. }) => {
+            let node = match neg.pattern.first() {
+                Some(Some(Value::Node(n))) => Some(*n),
+                Some(None) => None,
+                other => return Err(internal_error!("a crashed-oracle read with node column {other:?}")),
+            };
+            return Ok(Premise::CrashAbsent { node, time: None });
+        }
         Some(SpecFeed::Crash { .. }) => {
             let node = match neg.pattern.get(1) {
                 Some(Some(Value::Node(n))) => Some(*n),
@@ -370,29 +420,26 @@ fn aggregate_group(space: Space, rule: &blossom_ir::core::Rule, loc: Loc, tick: 
 }
 
 /// How the tuples of a `.ded` program's relations come about, for tuple-level negative support.
-pub struct DedRules<'a> {
-    artifact: &'a DedArtifact,
+pub struct ArtifactRules<'a> {
+    artifact: &'a SimArtifact,
     feeds: BTreeMap<RelId, SpecFeed>,
     nodes: u32,
 }
 
-impl<'a> DedRules<'a> {
-    pub fn new(artifact: &'a DedArtifact) -> Result<DedRules<'a>, InternalError> {
+impl<'a> ArtifactRules<'a> {
+    pub fn new(artifact: &'a SimArtifact) -> Result<ArtifactRules<'a>, InternalError> {
         let nodes = u32::try_from(artifact.nodes.len()).map_err(|_| internal_error!("too many nodes"))?;
         let mut feeds = BTreeMap::new();
         if let Some(spec) = &artifact.spec {
             for feed in &spec.feeds {
-                let rel = match *feed {
-                    SpecFeed::AtEot { spec, .. } | SpecFeed::AtTick { spec, .. } | SpecFeed::Crash { spec } => spec,
-                };
-                feeds.insert(rel, *feed);
+                feeds.insert(feed.spec_rel(), *feed);
             }
         }
-        Ok(DedRules { artifact, feeds, nodes })
+        Ok(ArtifactRules { artifact, feeds, nodes })
     }
 }
 
-impl crate::hazard::Rules for DedRules<'_> {
+impl crate::hazard::Rules for ArtifactRules<'_> {
     fn nodes(&self) -> u32 {
         self.nodes
     }
@@ -420,7 +467,7 @@ impl crate::hazard::Rules for DedRules<'_> {
 
     fn origin(&self, space: Space, rel: RelId) -> Result<crate::hazard::Origin<'_>, InternalError> {
         use crate::hazard::Origin;
-        let snapshot_of = |ded: DedRelIdx| {
+        let snapshot_of = |ded: LogicalIdx| {
             self.artifact
                 .rel(ded)
                 .and_then(|r| r.protocol)
@@ -430,6 +477,7 @@ impl crate::hazard::Rules for DedRules<'_> {
             Space::Protocol => self.artifact.protocol.get(),
             Space::Spec => match self.feeds.get(&rel) {
                 Some(SpecFeed::Crash { .. }) => return Ok(Origin::Crash),
+                Some(SpecFeed::Crashed { .. }) => return Ok(Origin::Crashed),
                 Some(SpecFeed::AtEot { rel: ded, .. }) => {
                     return Ok(Origin::Snapshot {
                         protocol: snapshot_of(*ded)?,

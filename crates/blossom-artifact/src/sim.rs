@@ -1,49 +1,95 @@
-//! A Molly `.ded` program compiled for one deployment (LANGUAGE §21.1, ARCHITECTURE §8.1): what the simulator runs,
-//! what the spec engine judges, and what LDFI needs to relate provenance back to Molly's relations.
+//! A program compiled for one deployment, as the simulator runs it, the spec engine judges it and LDFI explains it
+//! (ARCHITECTURE §8.1). Both frontends produce it: the Molly `.ded` frontend (LANGUAGE §21.1) under the Molly
+//! [`Profile`], and the Blossom frontend with a spec (LANGUAGE §17) under the Blossom profile.
 //!
-//! Molly's relations are global, with the location in their first column. Blossom splits a `.ded` program in two:
+//! It has two programs:
 //!
-//! - the **protocol**, a role-free per-node IR program in which the location column is implicit (every node runs
-//!   every rule; `@async` heads go through generated channels; `@k` facts are input events);
+//! - the **protocol**, the per-node IR program in which the location column is implicit (rules placed at a role
+//!   run only on that role's nodes);
 //! - the **outcome spec**: `pre`, `post` and the rules that only feed them, compiled to a second IR program in which
 //!   every relation keeps its location column. It is evaluated once, at EOT, over the protocol's relations at EOT,
-//!   their snapshots at fixed times (`p(…)@k` atoms), and the `crash` oracle (Molly's `isGood` reads `pre` and `post`
-//!   at EOT only, TEST-022).
+//!   their snapshots at fixed times, and the crash oracle (`isGood` reads `pre` and `post` at EOT only, TEST-022).
 //!
-//! [`DedRel`] ties each Molly relation to its IR relations in both programs, and [`DedEdge`] records Molly's own
-//! rule graph, which conservative negative support (TEST-025) reasons about.
+//! [`LogicalRel`] ties each source-level relation to its IR relations in both programs, and [`LogicalEdge`] records
+//! the source-level rule graph, which conservative negative support (TEST-025) reasons about. A Molly relation owns
+//! its generated channel and input; a Blossom program's logical relations are its IR relations one for one.
 
-use blossom_base::{RelId, Symbol};
+use blossom_base::{RelId, RoleId, Symbol};
 use blossom_ir::ValidatedProgram;
 use blossom_value::{
     Value,
-    time::{NodeId, Tick},
+    time::{Duration, NodeId, Tick},
 };
 
-/// A compiled `.ded` program. The deployment's node `nodes[i]` is `NodeId(i)`; names are sorted (canonical directory
-/// order, ARCHITECTURE §5.9).
+/// A compiled program for one deployment. The deployment's node `nodes[i]` is `NodeId(i)`; names are sorted
+/// (canonical directory order, ARCHITECTURE §5.9).
 #[derive(Clone)]
-pub struct DedArtifact {
+pub struct SimArtifact {
     pub nodes: Vec<Symbol>,
+    /// Each node's role (empty for a role-free program).
+    pub roles: Vec<Option<RoleId>>,
+    pub profile: Profile,
     pub protocol: ValidatedProgram,
-    /// The `@k` facts, as input events of the protocol.
+    /// Scheduled input events of the protocol (`.ded` `@k` facts, spec facts `@ n at tick k`).
     pub inputs: Vec<InputFact>,
+    /// Rows of static relations that hold at one node only (spec facts `@ n` into a static relation, and deployment
+    /// configuration, LANGUAGE §7.5): present at every tick of that node.
+    pub statics: Vec<NodeStatic>,
+    /// The built-in `halt` output, which stops a node at the end of its tick.
+    pub halt: Option<RelId>,
     /// Every Molly relation, in order of first appearance.
-    pub rels: Vec<DedRel>,
+    pub rels: Vec<LogicalRel>,
     /// One edge per body atom of every rule (protocol and spec).
-    pub edges: Vec<DedEdge>,
+    pub edges: Vec<LogicalEdge>,
     /// Present when the program defines `pre` and `post`.
     pub spec: Option<OutcomeSpec>,
 }
 
-/// An index into [`DedArtifact::rels`].
+/// An index into [`SimArtifact::rels`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DedRelIdx(pub u32);
+pub struct LogicalIdx(pub u32);
 
-impl DedRelIdx {
+impl LogicalIdx {
     /// The index as a `usize`.
     pub const fn index(self) -> usize {
         self.0 as usize
+    }
+}
+
+/// How runs of the program go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Profile {
+    /// Molly's: round `k` is tick `k` and no node runs at tick 0 (CR-13); a crashed node keeps running its local
+    /// rules and sends nothing (the `.ded` crash view).
+    Molly,
+    /// Blossom's: tick 0 is every node's boot tick (SEM-012), physical timers fire on a clock of `round` per tick
+    /// (LANGUAGE §15.2), and a crashed node is frozen from its crash tick (CR-20).
+    Blossom { round: Duration },
+}
+
+/// The round duration of the Molly profile; Molly's programs never read the clock.
+pub const MOLLY_ROUND: Duration = Duration::from_nanos(1_000_000);
+
+impl Profile {
+    /// The first tick a node runs.
+    pub const fn first_tick(self) -> Tick {
+        match self {
+            Profile::Molly => Tick(1),
+            Profile::Blossom { .. } => Tick(0),
+        }
+    }
+
+    /// Whether a crashed node is frozen (CR-20) rather than running on without sending (Molly's view).
+    pub const fn frozen(self) -> bool {
+        matches!(self, Profile::Blossom { .. })
+    }
+
+    /// The clock advance per tick.
+    pub const fn round(self) -> Duration {
+        match self {
+            Profile::Molly => MOLLY_ROUND,
+            Profile::Blossom { round } => round,
+        }
     }
 }
 
@@ -58,13 +104,21 @@ pub struct InputFact {
     pub row: Vec<Value>,
 }
 
-/// One Molly relation and the IR relations that implement it.
+/// A static row at one node: `rel(row…)` holds at every tick of `node`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NodeStatic {
+    pub node: NodeId,
+    pub rel: RelId,
+    pub row: Vec<Value>,
+}
+
+/// One source-level relation and the IR relations that implement it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DedRel {
+pub struct LogicalRel {
     pub name: Symbol,
     /// Molly's arity, the location column included.
     pub arity: usize,
-    pub kind: DedRelKind,
+    pub kind: LogicalKind,
     /// The protocol relation holding the tuples at each node (location column dropped). `None` for spec relations
     /// and for `crash`.
     pub protocol: Option<RelId>,
@@ -82,7 +136,7 @@ pub struct DedRel {
 
 /// Which side of the program a Molly relation belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DedRelKind {
+pub enum LogicalKind {
     /// Run by the nodes.
     Protocol,
     /// `pre`, `post`, or a relation that only feeds them.
@@ -93,9 +147,9 @@ pub enum DedRelKind {
 
 /// A body atom of a rule: `from` is read (possibly negated) to derive `to`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct DedEdge {
-    pub from: DedRelIdx,
-    pub to: DedRelIdx,
+pub struct LogicalEdge {
+    pub from: LogicalIdx,
+    pub to: LogicalIdx,
     pub time: EdgeTime,
     pub negated: bool,
 }
@@ -123,35 +177,49 @@ pub struct OutcomeSpec {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpecFeed {
     /// Every node's tuples of the protocol relation at EOT, each prefixed with the node.
-    AtEot { spec: RelId, rel: DedRelIdx },
+    AtEot { spec: RelId, rel: LogicalIdx },
     /// The same at a fixed tick (a body atom `p(…)@k`); empty when `k` is after EOT.
-    AtTick { spec: RelId, rel: DedRelIdx, tick: Tick },
+    AtTick { spec: RelId, rel: LogicalIdx, tick: Tick },
     /// `crash(Observer, Node, Time)`: every node observes every crash of the run.
     Crash { spec: RelId },
+    /// `crashed(n)` (a Blossom spec's oracle, LANGUAGE §17.3): every node that crashed during the run.
+    Crashed { spec: RelId },
 }
 
-impl DedArtifact {
+impl SpecFeed {
+    /// The spec input relation the feed fills.
+    pub const fn spec_rel(self) -> RelId {
+        match self {
+            SpecFeed::AtEot { spec, .. }
+            | SpecFeed::AtTick { spec, .. }
+            | SpecFeed::Crash { spec }
+            | SpecFeed::Crashed { spec } => spec,
+        }
+    }
+}
+
+impl SimArtifact {
     /// The relation at `idx`.
-    pub fn rel(&self, idx: DedRelIdx) -> Option<&DedRel> {
+    pub fn rel(&self, idx: LogicalIdx) -> Option<&LogicalRel> {
         self.rels.get(idx.index())
     }
 
     /// The Molly relation implemented by protocol relation `rel` (its own relation, channel or input).
-    pub fn protocol_owner(&self, rel: RelId) -> Option<DedRelIdx> {
+    pub fn protocol_owner(&self, rel: RelId) -> Option<LogicalIdx> {
         self.rels
             .iter()
             .position(|r| r.protocol == Some(rel) || r.channel == Some(rel) || r.input == Some(rel))
             .and_then(|i| u32::try_from(i).ok())
-            .map(DedRelIdx)
+            .map(LogicalIdx)
     }
 
     /// The Molly relation implemented by spec relation `rel`.
-    pub fn spec_owner(&self, rel: RelId) -> Option<DedRelIdx> {
+    pub fn spec_owner(&self, rel: RelId) -> Option<LogicalIdx> {
         self.rels
             .iter()
             .position(|r| r.spec == Some(rel) || r.spec_at.iter().any(|(_, s)| *s == rel))
             .and_then(|i| u32::try_from(i).ok())
-            .map(DedRelIdx)
+            .map(LogicalIdx)
     }
 
     /// The node's name.
