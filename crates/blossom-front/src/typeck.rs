@@ -142,6 +142,8 @@ enum Deferred {
     Ordered { t: T, span: Span },
     /// An aggregate `count!` result: an integer column.
     IntColumn { t: T, span: Span },
+    /// `a ++ b`: strings, bytes or vectors.
+    Concat { t: T, span: Span },
     /// A value of term `from` where `to` is expected: lifted when `to` is a lattice and `from` is not (LANGUAGE §5.6).
     Coerce { slot: usize, from: T, to: T, span: Span },
     /// `l op r` for `<`, `<=`, `>`, `>=`: plain operands, or a lattice threshold against a scalar (§11.4).
@@ -1054,6 +1056,11 @@ impl Checker<'_> {
                             });
                             res
                         }
+                        BinOp::Concat => {
+                            self.unify(&hir.types, a, b, span);
+                            self.deferred.push(Deferred::Concat { t: a, span });
+                            a
+                        }
                         BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
                             self.unify(&hir.types, a, b, span);
                             self.deferred.push(Deferred::IntColumn { t: a, span });
@@ -1571,6 +1578,7 @@ impl Checker<'_> {
                 | Deferred::Len { span, .. }
                 | Deferred::Ordered { span, .. }
                 | Deferred::IntColumn { span, .. }
+                | Deferred::Concat { span, .. }
                 | Deferred::Coerce { span, .. }
                 | Deferred::Compare { span, .. }
                 | Deferred::Lookup { span, .. }
@@ -1760,6 +1768,20 @@ impl Checker<'_> {
                 if !ok {
                     let d = self.describe(&hir.types, t);
                     self.error(span, format!("expected an integer, found {d}"));
+                }
+                true
+            }
+            Deferred::Concat { t, span } => {
+                let r = self.find(t);
+                match self.node(r) {
+                    Node::Bound(Shape::Vec(_)) => {}
+                    Node::Bound(Shape::Con(ty)) if matches!(hir.types.get(ty), Some(TypeDef::Str | TypeDef::Bytes)) => {
+                    }
+                    Node::Bound(_) => {
+                        let d = self.describe(&hir.types, t);
+                        self.error(span, format!("`++` joins strings, bytes or vectors, not {d}"));
+                    }
+                    _ => return false,
                 }
                 true
             }

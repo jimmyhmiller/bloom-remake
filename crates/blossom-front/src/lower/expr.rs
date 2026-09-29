@@ -191,6 +191,29 @@ pub(crate) fn try_const(hir: &Hir, e: &HExpr) -> Option<Value> {
     }
 }
 
+/// `ty` with every `Node<R>` inside it widened to `Node`, interned in `types`.
+pub(crate) fn erase_roles(types: &mut blossom_value::TypeTable, ty: TypeId) -> Result<TypeId, InternalError> {
+    let def = match types.get(ty).cloned() {
+        Some(TypeDef::Node(Some(_))) => TypeDef::Node(None),
+        Some(TypeDef::Tuple(ts)) => {
+            let mut out = Vec::new();
+            for t in ts {
+                out.push(erase_roles(types, t)?);
+            }
+            TypeDef::Tuple(out)
+        }
+        Some(TypeDef::Option(t)) => TypeDef::Option(erase_roles(types, t)?),
+        Some(TypeDef::Vec(t)) => TypeDef::Vec(erase_roles(types, t)?),
+        Some(TypeDef::Set(t)) => TypeDef::Set(erase_roles(types, t)?),
+        Some(TypeDef::Map(k, v)) => {
+            let k = erase_roles(types, k)?;
+            TypeDef::Map(k, erase_roles(types, v)?)
+        }
+        _ => return Ok(ty),
+    };
+    types.insert(def).map_err(|e| internal_error!("interning a type: {e}"))
+}
+
 /// The value of an expression that must be constant (a fact's row).
 pub(crate) fn const_eval(hir: &Hir, e: &HExpr) -> Result<Value, InternalError> {
     try_const(hir, e).ok_or_else(|| internal_error!("a fact value is not a constant"))
@@ -255,6 +278,12 @@ impl Lowerer<'_> {
             HExprKind::Binary { op, lhs, rhs } => {
                 if let Some(x) = self.lattice_binary(d, *op, lhs, rhs)? {
                     return Ok(x);
+                }
+                if *op == BinOp::Concat {
+                    return Ok(Expr::Call {
+                        f: ir::FnRef::Builtin(ir::BuiltinFn::Concat),
+                        args: vec![self.expr(d, lhs)?, self.expr(d, rhs)?],
+                    });
                 }
                 Expr::Binary {
                     op: bin_op(*op)?,
@@ -395,6 +424,21 @@ impl Lowerer<'_> {
                     }
                 } else {
                     for x in elems {
+                        // The IR types the literal by its widest element (`[self, d]`, where `self` is a `Node`):
+                        // intern each candidate, and its role-free form.
+                        let t = ty_of(x)?;
+                        let wide = erase_roles(self.b.types(), t)?;
+                        for t in [t, wide] {
+                            let def = if *kind == CollectionKind::Vec {
+                                TypeDef::Vec(t)
+                            } else {
+                                TypeDef::Set(t)
+                            };
+                            self.b
+                                .types()
+                                .insert(def)
+                                .map_err(|e| internal_error!("interning a type: {e}"))?;
+                        }
                         xs.push(self.expr(d, x)?);
                     }
                 }

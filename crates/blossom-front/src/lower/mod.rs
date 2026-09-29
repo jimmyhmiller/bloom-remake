@@ -309,7 +309,7 @@ impl Lowerer<'_> {
         let schema = schema(self.b.types(), cols, key.as_deref());
         let (class, interface) = match &r.kind {
             HRelKind::Table | HRelKind::Scratch | HRelKind::View | HRelKind::LocalTick => (RelClass::Idb, None),
-            HRelKind::Static | HRelKind::Members(_) => (RelClass::Static, None),
+            HRelKind::Static | HRelKind::Members(_) | HRelKind::NodeDir => (RelClass::Static, None),
             HRelKind::Input { root: true } => (RelClass::Event(EventSource::Input), Some(InterfaceDir::Input)),
             HRelKind::Input { root: false } => (RelClass::Idb, Some(InterfaceDir::Input)),
             HRelKind::Output { .. } | HRelKind::Halt => (RelClass::Idb, Some(InterfaceDir::Output)),
@@ -361,9 +361,12 @@ impl Lowerer<'_> {
             }
         };
         let placement = match &r.kind {
-            HRelKind::Channel(_) | HRelKind::Static | HRelKind::Members(_) | HRelKind::Boot | HRelKind::Halt => {
-                Placement::Shared
-            }
+            HRelKind::Channel(_)
+            | HRelKind::Static
+            | HRelKind::Members(_)
+            | HRelKind::NodeDir
+            | HRelKind::Boot
+            | HRelKind::Halt => Placement::Shared,
             _ => Self::placement(r.role),
         };
         let generated = r.name.to_string().contains('$');
@@ -442,9 +445,34 @@ impl Lowerer<'_> {
             .map_err(ir)
     }
 
-    /// `R$members` rows from the deployment.
+    /// `R$members` rows and the node directory from the deployment. In simulation a node's address and principal
+    /// are its deployment name.
     fn members(&mut self, d: &Deployment<'_>) -> Result<(), InternalError> {
         for (i, r) in self.hir.rels.iter().enumerate() {
+            if r.kind == HRelKind::NodeDir {
+                let rel = *self
+                    .rels
+                    .get(i)
+                    .ok_or_else(|| internal_error!("relation {i} was not lowered"))?;
+                for (n, name) in d.nodes.iter().enumerate() {
+                    let role = match d.roles.get(n).copied().flatten() {
+                        Some(r) => self.hir.role(r)?.name.to_string(),
+                        None => "Node".to_owned(),
+                    };
+                    let row = [
+                        Value::Node(NodeId(n as u32)),
+                        Value::Str(Arc::from(name.as_str())),
+                        Value::Principal(Arc::from(name.as_str())),
+                        Value::Str(Arc::from(role.as_str())),
+                    ];
+                    let mut consts = Vec::new();
+                    for v in row {
+                        consts.push(self.b.intern_const(v).map_err(ir)?);
+                    }
+                    self.b.fact(rel, consts, r.span).map_err(ir)?;
+                }
+                continue;
+            }
             let HRelKind::Members(role) = r.kind else { continue };
             let rel = *self
                 .rels

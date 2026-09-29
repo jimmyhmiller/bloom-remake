@@ -905,6 +905,7 @@ impl Remap for BuiltinFn {
             Self::RoleOf => Self::RoleOf,
             Self::Size { role } => Self::Size { role: role.remap(m) },
             Self::Len => Self::Len,
+            Self::Concat => Self::Concat,
             Self::Contains => Self::Contains,
             Self::Keys => Self::Keys,
             Self::Values => Self::Values,

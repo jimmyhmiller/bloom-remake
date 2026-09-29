@@ -176,6 +176,20 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
             ..
         } => Ok(Value::Int(IntValue::U64(scope.oracle.role_size(*role)))),
         Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::Concat),
+            args,
+        } => {
+            let [a, b] = args.as_slice() else {
+                return Err(ExprError::Oracle(internal_error!("`++` takes two operands").into()));
+            };
+            Ok(match (eval(scope, env, a)?, eval(scope, env, b)?) {
+                (Value::Str(x), Value::Str(y)) => Value::Str(format!("{x}{y}").into()),
+                (Value::Bytes(x), Value::Bytes(y)) => Value::Bytes(x.iter().chain(y.iter()).copied().collect()),
+                (Value::Vec(x), Value::Vec(y)) => Value::Vec(x.iter().chain(y.iter()).cloned().collect()),
+                (x, y) => return Err(ExprError::Oracle(internal_error!("`++` on {x:?} and {y:?}").into())),
+            })
+        }
+        Expr::Call {
             f: FnRef::Builtin(BuiltinFn::Contains),
             args,
         } => {

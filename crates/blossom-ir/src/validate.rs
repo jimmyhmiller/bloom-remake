@@ -937,7 +937,11 @@ fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
         Expr::Scalar(s) => match s {
             BuiltinScalar::Now => lookup(TypeDef::Instant),
             BuiltinScalar::Tick => lookup(TypeDef::Int(IntTy::U64)),
-            BuiltinScalar::SelfNode => lookup(TypeDef::Node(None)),
+            // A rule placed at role R runs on R's members: its `$self` is a `Node<R>` (LANGUAGE §6.10).
+            BuiltinScalar::SelfNode => match r.role.and_then(|role| p.types.lookup(&TypeDef::Node(Some(role)))) {
+                Some(t) => Ok(t),
+                None => lookup(TypeDef::Node(None)),
+            },
             BuiltinScalar::Incarnation => lookup(TypeDef::Int(IntTy::U64)),
             BuiltinScalar::Host => lookup(TypeDef::Node(None)),
         },
@@ -1102,10 +1106,17 @@ fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
                 .iter()
                 .map(|e| expr_type(p, r, e))
                 .collect::<Result<Vec<_>, _>>()?;
-            let first = *types.first().ok_or("empty collection requires a type annotation")?;
-            if types.iter().any(|t| *t != first) {
-                return Err("collection element type mismatch".into());
-            }
+            // The element type is the one every element is assignable to (`[self, d]` with `d: Node<R>` is a
+            // `Vec<Node>`).
+            let missing = if types.is_empty() {
+                "empty collection requires a type annotation"
+            } else {
+                "collection element type mismatch"
+            };
+            let first = *types
+                .iter()
+                .find(|t| types.iter().all(|x| assignable(p, *x, **t)))
+                .ok_or(missing)?;
             match kind {
                 CollKind::Vec => lookup(TypeDef::Vec(first)),
                 CollKind::Set => lookup(TypeDef::Set(first)),
@@ -1270,6 +1281,22 @@ fn builtin_type(p: &Program, r: &Rule, b: &BuiltinFn, args: &[Expr]) -> Result<T
                 return Err("len expects a collection, String or Bytes".into());
             }
             lookup(TypeDef::Int(IntTy::U64))
+        }
+        BuiltinFn::Concat => {
+            arity(2)?;
+            let (a, b) = (
+                *types.first().ok_or("missing operand")?,
+                *types.get(1).ok_or("missing operand")?,
+            );
+            // The wider operand's type (`Vec<Node<R>> ++ Vec<Node>` is a `Vec<Node>`).
+            let ty = if assignable(p, a, b) { b } else { a };
+            if !assignable(p, a, ty)
+                || !assignable(p, b, ty)
+                || !matches!(p.types.get(ty), Some(TypeDef::Str | TypeDef::Bytes | TypeDef::Vec(_)))
+            {
+                return Err("concat expects two Strings, Bytes or Vecs of one type".into());
+            }
+            Ok(ty)
         }
         BuiltinFn::Contains => {
             arity(2)?;

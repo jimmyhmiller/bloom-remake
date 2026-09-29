@@ -269,6 +269,8 @@ pub enum HRelKind {
     Halt,
     /// `R$members(n: Node<R>)`: a role's member set, a static relation filled from the deployment.
     Members(HRoleId),
+    /// The node directory `node_dir(node, addr, principal, role)`, from the deployment (LANGUAGE §7.15).
+    NodeDir,
 }
 
 impl HRelKind {
