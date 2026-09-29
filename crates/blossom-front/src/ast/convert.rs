@@ -204,8 +204,14 @@ impl Cx<'_> {
 
     fn attr(&mut self, node: &SyntaxNode) -> Attr {
         let name = self.need_name(node);
-        let args = children_of(node, ARG).map(|a| self.arg(&a)).collect();
-        let value = expr_children(node).next().map(|e| self.expr(&e));
+        let mut args: Vec<Arg> = children_of(node, ARG).map(|a| self.arg(&a)).collect();
+        // `#[name(e, …)]` holds its arguments as expressions; `#[name = e]` has a value.
+        let (value, extra) = if has_token(node, EQ) {
+            (expr_children(node).next().map(|e| self.expr(&e)), Vec::new())
+        } else {
+            (None, expr_children(node).map(|e| Arg::Pos(self.expr(&e))).collect())
+        };
+        args.extend(extra);
         Attr {
             name,
             args,

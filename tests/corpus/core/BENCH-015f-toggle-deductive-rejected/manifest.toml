@@ -14,9 +14,7 @@ which is written on one line. The `.ded` letter of this case is `f` because `e` 
 case (tests/corpus/README.md, naming)."""
 
 [backend.compile]
-status = "unimplemented"
-unimplemented = ["SEM-020", "SEM-021", "SEM-022", "ANA-002", "LANG-065", "LANG-069", "LANG-220"]
-until = "M5"
+status = "pass"
 
 [[expect_diag]]
 code = "BLS0502"

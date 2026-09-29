@@ -12,6 +12,7 @@ publish.workspace = true
 blossom-base.workspace = true
 blossom-value.workspace = true
 blossom-artifact.workspace = true
+blossom-analysis.workspace = true
 blossom-front.workspace = true
 blossom-driver.workspace = true
 blossom-ir.workspace = true

@@ -106,6 +106,7 @@ impl<'a> BlsSim<'a> {
                 crash_view: CrashView::Frozen,
                 round,
                 capture,
+                halt: self.artifact.halt,
             },
             faults,
         )

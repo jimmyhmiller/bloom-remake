@@ -53,7 +53,9 @@ pub enum DedError {
     Internal(#[from] InternalError),
 }
 
-/// Compiles the `.ded` files `roots` for a deployment of `nodes` (LANGUAGE §21.1). Source files are added to
+/// Compiles the `.ded` files `roots` for a deployment of `nodes` (LANGUAGE §21.1). With no nodes given, the
+/// deployment is the program's own locations: every string constant the typer infers as a `Node` (the first column
+/// of every fact, and any column unified with a location; tests/corpus/README.md). Source files are added to
 /// `sources`, which diagnostics point into.
 pub fn compile(
     roots: &[&str],
@@ -62,13 +64,6 @@ pub fn compile(
     sources: &mut SourceDb,
 ) -> Result<DedArtifact, DedError> {
     let mut diags = Diagnostics::new();
-    let deployment = match lower::Deployment::new(nodes) {
-        Ok(d) => d,
-        Err(message) => {
-            diags.push(Diagnostic::new(code!("BLS0200"), message));
-            return Err(DedError::Rejected(diags));
-        }
-    };
     let program = load::load(roots, loader, sources, &mut diags);
     if diags.has_errors() {
         return Err(DedError::Rejected(diags));
@@ -81,9 +76,70 @@ pub fn compile(
     if diags.has_errors() {
         return Err(DedError::Rejected(diags));
     }
+    let inferred;
+    let nodes: Vec<&str> = if nodes.is_empty() {
+        inferred = inferred_nodes(&program, &types);
+        inferred.iter().map(String::as_str).collect()
+    } else {
+        nodes.to_vec()
+    };
+    let deployment = match lower::Deployment::new(&nodes) {
+        Ok(d) => d,
+        Err(message) => {
+            diags.push(Diagnostic::new(code!("BLS0200"), message));
+            return Err(DedError::Rejected(diags));
+        }
+    };
     let artifact = lower::lower(&program, &model, &types, &deployment, &mut diags)?;
     if diags.has_errors() {
         return Err(DedError::Rejected(diags));
     }
     Ok(artifact)
+}
+
+/// The string constants the typer inferred as nodes, sorted and deduplicated.
+fn inferred_nodes(program: &load::Program, types: &types::Types) -> Vec<String> {
+    use blossom_syntax::ded::{Arg, BodyItem, Expr, Term};
+    let mut out = std::collections::BTreeSet::new();
+    let mut term = |t: &Term| {
+        if let Term::Str(text, span) = t
+            && types.at.get(span) == Some(&types::ColTy::Node)
+        {
+            out.insert(text.to_string());
+        }
+    };
+    fn expr(e: &Expr, term: &mut dyn FnMut(&Term)) {
+        match e {
+            Expr::Term(t) => term(t),
+            Expr::Binary { lhs, rhs, .. } => {
+                term(lhs);
+                expr(rhs, term);
+            }
+        }
+    }
+    for f in &program.facts {
+        for t in &f.args {
+            term(t);
+        }
+    }
+    for r in &program.rules {
+        for a in &r.head.args {
+            if let Arg::Expr(e) = a {
+                expr(e, &mut term);
+            }
+        }
+        for b in &r.body {
+            match b {
+                BodyItem::Atom(a) => {
+                    for x in &a.args {
+                        if let Arg::Expr(e) = x {
+                            expr(e, &mut term);
+                        }
+                    }
+                }
+                BodyItem::Qual(e) => expr(e, &mut term),
+            }
+        }
+    }
+    out.into_iter().collect()
 }

@@ -695,8 +695,7 @@ fn agg_type(p: &Program, r: &Rule, a: &AggCall, ty: TypeId) -> bool {
         // Molly's `count<X>` (LANGUAGE §21.1).
         // The counted tuple may have any width (LANGUAGE §10.1: `count<(S, L, P)>` for `count!(*)`).
         AggFunc::Count => {
-            a.args.iter().all(|arg| !matches!(arg, Term::Wild))
-                && matches!(p.types.get(ty), Some(TypeDef::Int(_)))
+            a.args.iter().all(|arg| !matches!(arg, Term::Wild)) && matches!(p.types.get(ty), Some(TypeDef::Int(_)))
         }
         AggFunc::OlaCount => (1..=2).contains(&a.args.len()) && ola_result() && a.args.first().is_some_and(is_f64),
         AggFunc::BoolAnd | AggFunc::BoolOr => {

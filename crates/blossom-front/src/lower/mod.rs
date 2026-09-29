@@ -51,6 +51,19 @@ pub fn lower(hir: &Hir, deployment: &Deployment<'_>) -> Result<Lowered, Internal
     };
     let mut b = IrBuilder::new(meta, FrontendKind::Blossom);
     *b.types() = hir.types.clone();
+    // The validator types guards, `$self`, `$tick` and `$now` through these; intern them whether or not a column uses
+    // them.
+    for def in [
+        TypeDef::Bool,
+        TypeDef::Node(None),
+        TypeDef::Int(blossom_value::types::IntTy::U64),
+        TypeDef::Instant,
+        TypeDef::Duration,
+    ] {
+        b.types()
+            .insert(def)
+            .map_err(|e| internal_error!("interning a type: {e}"))?;
+    }
     let mut l = Lowerer {
         hir,
         b,
@@ -75,7 +88,7 @@ pub fn lower(hir: &Hir, deployment: &Deployment<'_>) -> Result<Lowered, Internal
     }
     l.members(deployment)?;
     l.tables()?;
-    l.facts()?;
+    l.facts(deployment)?;
     l.handlers()?;
     l.views()?;
     let rels = l.rels.clone();
@@ -278,7 +291,7 @@ impl Lowerer<'_> {
             HRelKind::Static | HRelKind::Members(_) => (RelClass::Static, None),
             HRelKind::Input { root: true } => (RelClass::Event(EventSource::Input), Some(InterfaceDir::Input)),
             HRelKind::Input { root: false } => (RelClass::Idb, Some(InterfaceDir::Input)),
-            HRelKind::Output { .. } => (RelClass::Idb, Some(InterfaceDir::Output)),
+            HRelKind::Output { .. } | HRelKind::Halt => (RelClass::Idb, Some(InterfaceDir::Output)),
             HRelKind::Boot => (RelClass::Event(EventSource::Boot), None),
             HRelKind::Timer { every } => {
                 let every = i64::try_from(*every)
@@ -327,7 +340,9 @@ impl Lowerer<'_> {
             }
         };
         let placement = match &r.kind {
-            HRelKind::Channel(_) | HRelKind::Static | HRelKind::Members(_) | HRelKind::Boot => Placement::Shared,
+            HRelKind::Channel(_) | HRelKind::Static | HRelKind::Members(_) | HRelKind::Boot | HRelKind::Halt => {
+                Placement::Shared
+            }
             _ => Self::placement(r.role),
         };
         let generated = r.name.to_string().contains('$');
@@ -473,12 +488,21 @@ impl Lowerer<'_> {
     }
 
     /// `fact r(…);` rows of static relations.
-    fn facts(&mut self) -> Result<(), InternalError> {
+    fn facts(&mut self, d: &Deployment<'_>) -> Result<(), InternalError> {
         for f in &self.hir.facts {
             let rel = self.rel(f.rel)?;
             let mut row = Vec::new();
             for e in &f.row {
-                let v = expr::const_eval(self.hir, e)?;
+                let v = match expr::const_eval(self.hir, e)? {
+                    // A node named by a string (checked against the deployment before lowering).
+                    Value::Str(name) if matches!(e.ty.and_then(|t| self.hir.types.get(t)), Some(TypeDef::Node(_))) => {
+                        let i = d.nodes.iter().position(|n| n.as_str() == &*name).ok_or_else(|| {
+                            internal_error!("fact names the node `{name}`, which the deployment lacks")
+                        })?;
+                        Value::Node(NodeId(i as u32))
+                    }
+                    v => v,
+                };
                 row.push(self.b.intern_const(v).map_err(ir)?);
             }
             self.b.fact(rel, row, f.span).map_err(ir)?;
