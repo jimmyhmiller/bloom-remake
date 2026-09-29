@@ -105,7 +105,8 @@ deps = ["blossom-base", "blossom-value", "blossom-ir"]
 
 [crates.blossom-node]
 layer = "L3"
-deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-schema", "blossom-artifact", "blossom-engine", "blossom-wire", "blossom-store", "blossom-trace"]
+# blossom-oracle: slice 3 (docs/design/SLICES.md) — until the engine exists the oracle is the node's evaluator.
+deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-schema", "blossom-artifact", "blossom-engine", "blossom-wire", "blossom-store", "blossom-trace", "blossom-oracle"]
 
 [crates.blossom-runtime]
 layer = "L3"

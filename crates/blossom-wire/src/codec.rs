@@ -25,8 +25,8 @@ use std::sync::Arc;
 use blossom_base::{LatticeTypeId, TypeId};
 use blossom_ir::core::{Column, LatticeCtor, Program};
 use blossom_value::time::{Duration, Instant, NodeId};
-use blossom_value::value::{IntValue, LatValue, SessionId};
 use blossom_value::types::IntTy;
+use blossom_value::value::{IntValue, LatValue, SessionId};
 use blossom_value::{TypeDef, Value};
 
 /// Why bytes did not encode or decode.
@@ -202,9 +202,12 @@ impl<'p> Codec<'p> {
                 NodeEncoding::Dense => WT_VARINT,
                 NodeEncoding::ByName(_) => WT_BYTES,
             },
-            TypeDef::Tuple(_) | TypeDef::Struct(_) | TypeDef::Vec(_) | TypeDef::Set(_) | TypeDef::Map(..) | TypeDef::Option(_) => {
-                WT_NESTED
-            }
+            TypeDef::Tuple(_)
+            | TypeDef::Struct(_)
+            | TypeDef::Vec(_)
+            | TypeDef::Set(_)
+            | TypeDef::Map(..)
+            | TypeDef::Option(_) => WT_NESTED,
             TypeDef::Enum(_) => WT_VARIANT,
             TypeDef::Lattice(_) => WT_LATTICE,
             other => return Err(WireError::Unsupported(format!("values of type {other:?}"))),
@@ -247,7 +250,7 @@ impl<'p> Codec<'p> {
             },
             (TypeDef::Tuple(ts), Value::Tuple(vs)) => {
                 let mut inner = Vec::new();
-                self.encode_fields(ts.iter().copied().zip(vs.iter()).map(|(t, v)| (t, v)), vs.len(), ts.len(), &mut inner)?;
+                self.encode_fields(ts.iter().copied().zip(vs.iter()), vs.len(), ts.len(), &mut inner)?;
                 put_bytes(out, &inner);
             }
             (TypeDef::Struct(s), Value::Struct(vs)) => {
@@ -301,10 +304,20 @@ impl<'p> Codec<'p> {
                 put_varint(out, u64::from(*variant));
                 let tys: Vec<TypeId> = var.payload.iter().map(|f| f.ty).collect();
                 let mut inner = Vec::new();
-                self.encode_fields(tys.iter().copied().zip(fields.iter()), fields.len(), tys.len(), &mut inner)?;
+                self.encode_fields(
+                    tys.iter().copied().zip(fields.iter()),
+                    fields.len(),
+                    tys.len(),
+                    &mut inner,
+                )?;
                 put_bytes(out, &inner);
             }
-            (TypeDef::Enum(_), Value::UnknownVariant { wire_number, payload, .. }) => {
+            (
+                TypeDef::Enum(_),
+                Value::UnknownVariant {
+                    wire_number, payload, ..
+                },
+            ) => {
                 // A newer version's variant re-encodes exactly as it arrived (LANG-261).
                 put_varint(out, u64::from(*wire_number));
                 put_bytes(out, payload);
@@ -451,7 +464,7 @@ impl<'p> Codec<'p> {
                 for _ in 0..n {
                     out.push(self.decode_at(*t, &mut inner, depth + 1)?);
                 }
-                done(&inner, "a vector")?;
+                done(inner, "a vector")?;
                 Value::Vec(Arc::from(out))
             }
             TypeDef::Set(t) => {
@@ -461,7 +474,7 @@ impl<'p> Codec<'p> {
                 for _ in 0..n {
                     out.insert(self.decode_at(*t, &mut inner, depth + 1)?);
                 }
-                done(&inner, "a set")?;
+                done(inner, "a set")?;
                 Value::Set(Arc::new(out))
             }
             TypeDef::Map(k, t) => {
@@ -473,7 +486,7 @@ impl<'p> Codec<'p> {
                     let b = self.decode_at(*t, &mut inner, depth + 1)?;
                     out.insert(a, b);
                 }
-                done(&inner, "a map")?;
+                done(inner, "a map")?;
                 Value::Map(Arc::new(out))
             }
             TypeDef::Option(t) => {
@@ -483,7 +496,7 @@ impl<'p> Codec<'p> {
                     1 => Value::some(self.decode_at(*t, &mut inner, depth + 1)?),
                     n => return Err(WireError::Malformed(format!("an option with {n} elements"))),
                 };
-                done(&inner, "an option")?;
+                done(inner, "an option")?;
                 v
             }
             TypeDef::Enum(e) => {
@@ -514,7 +527,7 @@ impl<'p> Codec<'p> {
                 let ctor = self.lattice(*id)?.clone();
                 let mut inner = get_bytes(input, "a lattice value")?;
                 let l = self.decode_lattice(&ctor, &mut inner, depth + 1)?;
-                done(&inner, "a lattice value")?;
+                done(inner, "a lattice value")?;
                 Value::Lattice(l)
             }
             other => return Err(WireError::Unsupported(format!("values of type {other:?}"))),
@@ -545,7 +558,9 @@ impl<'p> Codec<'p> {
                     let ty = *tys.get(i).ok_or_else(|| WireError::Malformed("field index".into()))?;
                     let want = self.wire_type(ty)?;
                     if want != wt {
-                        return Err(WireError::Malformed(format!("field #{number} has wire type {wt}, expected {want}")));
+                        return Err(WireError::Malformed(format!(
+                            "field #{number} has wire type {wt}, expected {want}"
+                        )));
                     }
                     let v = self.decode_at(ty, input, depth + 1)?;
                     if let Some(slot) = slots.get_mut(i) {
@@ -594,7 +609,7 @@ impl<'p> Codec<'p> {
                     let key = self.decode_at(*k, input, depth)?;
                     let mut nested = get_bytes(input, "a lattice map entry")?;
                     let v = self.decode_lattice(&inner, &mut nested, depth + 1)?;
-                    done(&nested, "a lattice map entry")?;
+                    done(nested, "a lattice map entry")?;
                     out.insert(key, v);
                 }
                 LatValue::Map(Arc::new(out))
@@ -614,7 +629,11 @@ impl<'p> Codec<'p> {
     /// Appends a row of `cols` as a tuple.
     pub fn encode_row(&self, cols: &[Column], row: &[Value], out: &mut Vec<u8>) -> Result<(), WireError> {
         if cols.len() != row.len() {
-            return Err(WireError::Malformed(format!("{} values for {} columns", row.len(), cols.len())));
+            return Err(WireError::Malformed(format!(
+                "{} values for {} columns",
+                row.len(),
+                cols.len()
+            )));
         }
         let numbers = Self::numbers(cols);
         let mut order: Vec<usize> = (0..cols.len()).collect();
@@ -649,7 +668,10 @@ fn done(rest: &[u8], what: &'static str) -> Result<(), WireError> {
     if rest.is_empty() {
         Ok(())
     } else {
-        Err(WireError::Malformed(format!("{} trailing bytes after {what}", rest.len())))
+        Err(WireError::Malformed(format!(
+            "{} trailing bytes after {what}",
+            rest.len()
+        )))
     }
 }
 
