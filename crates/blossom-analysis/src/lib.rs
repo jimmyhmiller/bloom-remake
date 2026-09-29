@@ -7,5 +7,6 @@
 //! nothing (PLAN §4 D1).
 
 pub mod acl;
+pub mod determinism;
 pub mod monotone;
 pub mod strata;

@@ -1299,7 +1299,32 @@ impl<'h> Lowerer<'h> {
                 .map(|(i, t)| column(Symbol::intern(&format!("{pre}{i}")), *t, false))
                 .collect()
         };
+        let construct = self
+            .b
+            .begin_construct(
+                ConstructKind::Index(ir::IndexSpec {
+                    input: RelId::from_raw(0),
+                    output: rel,
+                    group: Vec::new(),
+                    order: ir::OrderSpec { keys: Vec::new() },
+                    mode: ir::IndexMode::Index,
+                }),
+                surface(&names.module, None, v.span),
+            )
+            .map_err(ir)?;
         let h = self.generated(suffixed(&r.name, "$h"), gcols("g"), None, r.role, false, v.span)?;
+        self.b
+            .set_construct_kind(
+                construct,
+                ConstructKind::Index(ir::IndexSpec {
+                    input: h,
+                    output: rel,
+                    group: Vec::new(),
+                    order: ir::OrderSpec { keys: Vec::new() },
+                    mode: ir::IndexMode::Index,
+                }),
+            )
+            .map_err(ir)?;
         let mut lt_cols = gcols("g");
         lt_cols.extend(gcols("h"));
         let lt = self.generated(suffixed(&r.name, "$lt"), lt_cols, None, r.role, false, v.span)?;
@@ -1427,6 +1452,7 @@ impl<'h> Lowerer<'h> {
             },
             role,
         )?;
+        self.b.end_construct(construct).map_err(ir)?;
         Ok(())
     }
 
