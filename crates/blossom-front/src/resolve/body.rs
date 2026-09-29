@@ -162,6 +162,20 @@ impl<'t> Resolver<'t, '_> {
     }
 
     fn declare_atom_args(&mut self, cx: &mut RuleCx, atom: &ast::AtomLit) {
+        // A spec atom `r(args) @ loc [at tick k]` binds its arguments and its location.
+        if self.spec.is_some()
+            && let Some(loc) = &atom.at
+        {
+            if let ExprKind::Call { args, .. } = &atom.expr.kind {
+                for a in args {
+                    if let Arg::Pos(p) | Arg::Named(_, p) = a {
+                        self.declare_pattern(cx, p);
+                    }
+                }
+            }
+            self.declare_pattern(cx, loc);
+            return;
+        }
         if let Some((_, Some(args))) = self.atom_parts(cx, &atom.expr) {
             for a in args {
                 match a {
@@ -388,7 +402,86 @@ impl<'t> Resolver<'t, '_> {
     }
 
     /// `Some(Some(atom))` if the literal reads a relation, `Some(None)` if it does not, `None` on an error.
+    /// The relation name an atom literal's expression names (`r` of `r(…)` or `r`), or a symbol that names none.
+    fn rel_name_of(&self, e: &ast::Expr) -> Symbol {
+        match &e.kind {
+            ExprKind::Call { callee, .. } => self.rel_name_of(callee),
+            ExprKind::Path(p, _) if p.len() == 1 => p.first().map_or(Symbol::intern(""), |i| i.name),
+            _ => Symbol::intern(""),
+        }
+    }
+
+    /// A spec atom `r(args) @ loc [at tick k]`: an atom of `r`'s trace relation at that time, the node first.
+    fn spec_atom(&mut self, cx: &mut RuleCx, a: &ast::AtomLit, loc: &ast::Expr) -> Option<HAtom> {
+        let (name, args) = match &a.expr.kind {
+            ExprKind::Call { callee, args } => match &callee.kind {
+                ExprKind::Path(p, _) if p.len() == 1 => (*p.first()?, args.as_slice()),
+                _ => {
+                    self.error(
+                        code!("BLS0200"),
+                        a.span,
+                        "`@ n` locates an atom of the target's relation",
+                    );
+                    return None;
+                }
+            },
+            ExprKind::Path(p, _) if p.len() == 1 => (*p.first()?, &[][..]),
+            _ => {
+                self.error(
+                    code!("BLS0200"),
+                    a.span,
+                    "`@ n` locates an atom of the target's relation",
+                );
+                return None;
+            }
+        };
+        let time = match &a.at_tick {
+            None => None,
+            Some(k) => match self.const_value(cx.ms, k, None) {
+                Some((blossom_value::Value::Int(i), _)) => match i.to_i128().and_then(|v| u64::try_from(v).ok()) {
+                    Some(t) => Some(t),
+                    None => {
+                        self.error(code!("BLS0300"), k.span, "`at tick k` needs a non-negative tick");
+                        return None;
+                    }
+                },
+                _ => {
+                    self.error(code!("BLS0300"), k.span, "`at tick k` needs a constant tick");
+                    return None;
+                }
+            },
+        };
+        let Some(rel) = self.trace_rel(name, time) else {
+            self.error(
+                code!("BLS0200"),
+                name.span,
+                format!("`{}` is not a relation of the spec's target", name.as_str()),
+            );
+            return None;
+        };
+        let loc = self.pattern(cx, loc)?;
+        let r = self.rel_of(rel);
+        let cols: Vec<Symbol> = r.cols.iter().skip(1).map(|c| c.name).collect();
+        let mut out = vec![loc];
+        if matches!(&a.expr.kind, ExprKind::Call { .. }) {
+            out.extend(self.args_for(cx, name.as_str(), &cols, args, a.span)?);
+        } else {
+            out.extend(cols.iter().map(|_| HPat::Wild(a.span)));
+        }
+        Some(HAtom {
+            rel,
+            args: out,
+            from: None,
+            span: a.span,
+        })
+    }
+
     fn try_atom(&mut self, cx: &mut RuleCx, a: &ast::AtomLit) -> Option<Option<HAtom>> {
+        if self.spec.is_some()
+            && let Some(loc) = &a.at
+        {
+            return Some(Some(self.spec_atom(cx, a, loc)?));
+        }
         let Some((rel, args)) = self.atom_parts(cx, &a.expr) else {
             if a.from.is_some() {
                 self.error(code!("BLS0212"), a.span, "`from` applies only to channel atoms");
@@ -408,6 +501,18 @@ impl<'t> Resolver<'t, '_> {
                 code!("BLS0509"),
                 a.span,
                 "`@ n` and `at tick k` are allowed only in a spec",
+            );
+            return None;
+        }
+        if self
+            .spec
+            .as_ref()
+            .is_some_and(|s| s.targets.contains_key(&self.rel_name_of(&a.expr)))
+        {
+            self.error(
+                code!("BLS0509"),
+                a.span,
+                "an atom of the target's relation names its location with `@ n` (LANGUAGE §17.3)",
             );
             return None;
         }
@@ -474,8 +579,20 @@ impl<'t> Resolver<'t, '_> {
 
     /// Arguments of an atom, positional or named (LANGUAGE §9.2), one pattern per column.
     fn atom_args(&mut self, cx: &mut RuleCx, rel: HRelId, args: &[Arg], span: Span) -> Option<Vec<HPat>> {
-        let cols: Vec<Symbol> = self.rel_of(rel).cols.iter().map(|c| c.name).collect();
-        let name = self.rel_of(rel).name.clone();
+        let r = self.rel_of(rel);
+        let cols: Vec<Symbol> = r.cols.iter().map(|c| c.name).collect();
+        self.args_for(cx, &r.name.to_string(), &cols, args, span)
+    }
+
+    /// Arguments over the columns `cols` of the relation `name`, positional or named, one pattern per column.
+    fn args_for(
+        &mut self,
+        cx: &mut RuleCx,
+        name: &str,
+        cols: &[Symbol],
+        args: &[Arg],
+        span: Span,
+    ) -> Option<Vec<HPat>> {
         let named = args.iter().any(|a| matches!(a, Arg::Named(..) | Arg::Rest(_)));
         if !named {
             if args.len() != cols.len() {
@@ -546,7 +663,7 @@ impl<'t> Resolver<'t, '_> {
             }
         }
         let mut out = Vec::new();
-        for (slot, col) in slots.into_iter().zip(&cols) {
+        for (slot, col) in slots.into_iter().zip(cols) {
             match slot {
                 Some(p) => out.push(p),
                 None if rest => out.push(HPat::Wild(span)),
@@ -877,6 +994,9 @@ impl<'t> Resolver<'t, '_> {
                                 variant: 0,
                                 fields: Vec::new(),
                             }
+                        } else if let Some(i) = self.spec.as_ref().and_then(|s| s.nodes.get(&name.name)).copied() {
+                            let t = self.node_type(None);
+                            HExprKind::Value(Value::Node(blossom_value::time::NodeId(i)), t)
                         } else if let Some((v, t)) = self.lookup_value(cx.ms, name.name) {
                             HExprKind::Value(v, t)
                         } else {

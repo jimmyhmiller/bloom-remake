@@ -34,3 +34,34 @@ pub fn compile_file(root: &str, nodes: &[NodeSpec]) -> (Result<(BlsArtifact, Dia
     });
     (result, sources)
 }
+
+/// Compiles the spec `name` of the file `root` with its target (LANGUAGE §17). After the frontend, the target's and
+/// the spec's deductive rules must stratify (BLS0502).
+pub fn compile_spec_file(
+    root: &str,
+    name: &str,
+) -> (
+    Result<(blossom_front::spec::CompiledSpec, Diagnostics), BlsError>,
+    SourceDb,
+) {
+    let mut sources = SourceDb::new();
+    let result =
+        blossom_front::spec::compile_spec(root, name, &mut FsLoader, &mut sources).and_then(|(spec, mut diags)| {
+            let mut rejected = false;
+            let programs =
+                std::iter::once(&spec.artifact.protocol).chain(spec.artifact.spec.as_ref().map(|s| &s.program));
+            for p in programs {
+                let strata = blossom_analysis::strata::check(p.get())?;
+                rejected |= strata.has_errors();
+                for d in strata.iter() {
+                    diags.push(d.clone());
+                }
+            }
+            if rejected {
+                Err(BlsError::Rejected(diags))
+            } else {
+                Ok((spec, diags))
+            }
+        });
+    (result, sources)
+}

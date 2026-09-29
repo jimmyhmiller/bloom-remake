@@ -56,7 +56,43 @@ pub fn compile(
     if diags.has_errors() {
         return Err(BlsError::Rejected(diags));
     }
-    // The deployment: sorted names, each with its role.
+    let (names, roles) = deployment(&hir, nodes, &mut diags);
+    if diags.has_errors() {
+        return Err(BlsError::Rejected(diags));
+    }
+    let lowered = crate::lower::lower(
+        &hir,
+        &crate::lower::Deployment {
+            nodes: &names,
+            roles: &roles,
+        },
+    )?;
+    let roles = roles.iter().map(|r| r.map(|r| RoleId::from_raw(r.0))).collect();
+    let halt = hir
+        .rels
+        .iter()
+        .position(|r| r.kind == crate::hir::HRelKind::Halt)
+        .and_then(|i| lowered.rels.get(i).copied());
+    Ok((
+        BlsArtifact {
+            nodes: names,
+            roles,
+            program: lowered.program,
+            surface: lowered.surface.into_iter().collect(),
+            halt,
+        },
+        diags,
+    ))
+}
+
+/// The deployment of `nodes` for `hir`: names sorted, each node's role checked against the program's roles (a
+/// process role holds one node, a cluster one or more, an external role none), and the node names that facts write
+/// as strings checked (LANGUAGE §2.4). Problems go to `diags`.
+pub(crate) fn deployment(
+    hir: &crate::hir::Hir,
+    nodes: &[NodeSpec],
+    diags: &mut Diagnostics,
+) -> (Vec<Symbol>, Vec<Option<HRoleId>>) {
     let mut sorted: Vec<&NodeSpec> = nodes.iter().collect();
     sorted.sort_by(|a, b| a.name.cmp(&b.name));
     let mut names = Vec::new();
@@ -167,30 +203,5 @@ pub fn compile(
             }
         }
     }
-    if diags.has_errors() {
-        return Err(BlsError::Rejected(diags));
-    }
-    let lowered = crate::lower::lower(
-        &hir,
-        &crate::lower::Deployment {
-            nodes: &names,
-            roles: &roles,
-        },
-    )?;
-    let roles = roles.iter().map(|r| r.map(|r| RoleId::from_raw(r.0))).collect();
-    let halt = hir
-        .rels
-        .iter()
-        .position(|r| r.kind == crate::hir::HRelKind::Halt)
-        .and_then(|i| lowered.rels.get(i).copied());
-    Ok((
-        BlsArtifact {
-            nodes: names,
-            roles,
-            program: lowered.program,
-            surface: lowered.surface.into_iter().collect(),
-            halt,
-        },
-        diags,
-    ))
+    (names, roles)
 }

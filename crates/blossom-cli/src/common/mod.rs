@@ -37,6 +37,45 @@ pub fn long_version() -> &'static str {
 }
 
 /// Compiling `.ded` programs for the commands that run them (`sim`, `ldfi`).
+pub mod bls {
+    use std::process::ExitCode;
+
+    use blossom_driver::{bls::compile_spec_file, render::render};
+    use blossom_front::api::BlsError;
+    use blossom_front::spec::CompiledSpec;
+
+    use crate::exit::Exit;
+
+    /// Compiles the spec `name` of `file`, printing diagnostics; on failure, the exit code to return.
+    pub fn compile_spec(file: &str, name: &str) -> Result<CompiledSpec, ExitCode> {
+        let (result, sources) = compile_spec_file(file, name);
+        match result {
+            Ok((spec, warnings)) => {
+                for d in warnings.iter() {
+                    eprint!("{}", render(d, &sources));
+                }
+                Ok(spec)
+            }
+            Err(BlsError::Rejected(diags)) => {
+                for d in diags.iter() {
+                    eprint!("{}", render(d, &sources));
+                }
+                let unimplemented = diags.iter().any(blossom_driver::render::is_not_implemented);
+                Err(if unimplemented {
+                    Exit::Unimplemented
+                } else {
+                    Exit::UserError
+                }
+                .into())
+            }
+            Err(BlsError::Internal(e)) => {
+                eprintln!("{e}");
+                Err(Exit::Internal.into())
+            }
+        }
+    }
+}
+
 pub mod ded {
     use std::process::ExitCode;
 

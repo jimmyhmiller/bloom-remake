@@ -1586,27 +1586,19 @@ impl Cx<'_> {
                     ty: self.need_type(&c),
                     value: self.need_expr(&c),
                 },
-                LIVENESSMEMBER => {
-                    self.unsupported("TEST-021", "liveness properties", cspan);
-                    SpecMember::Unsupported {
-                        what: "liveness",
-                        span: cspan,
-                    }
-                }
-                PROVEMEMBER => {
-                    self.unsupported("VER-003", "`prove … by induction`", cspan);
-                    SpecMember::Unsupported {
-                        what: "prove",
-                        span: cspan,
-                    }
-                }
-                EXPECTMEMBER => {
-                    self.unsupported("TEST-020", "`expect` members", cspan);
-                    SpecMember::Unsupported {
-                        what: "expect",
-                        span: cspan,
-                    }
-                }
+                // Checked by tools this build does not have; the spec compiler reports them as not run.
+                LIVENESSMEMBER => SpecMember::Unsupported {
+                    what: "liveness",
+                    span: cspan,
+                },
+                PROVEMEMBER => SpecMember::Unsupported {
+                    what: "prove",
+                    span: cspan,
+                },
+                EXPECTMEMBER => SpecMember::Unsupported {
+                    what: "expect",
+                    span: cspan,
+                },
                 other => {
                     self.malformed(&format!("spec member {other:?}"), cspan);
                     continue;
