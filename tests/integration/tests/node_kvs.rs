@@ -380,3 +380,128 @@ fn every_crash_point_keeps_every_acknowledged_put() {
         }
     }
 }
+
+/// The e01 client protocol for the cluster simulator.
+#[cfg(test)]
+struct E01Protocol {
+    put: blossom_base::RelId,
+    get: blossom_base::RelId,
+    del: blossom_base::RelId,
+    put_ok: blossom_base::RelId,
+    get_resp: blossom_base::RelId,
+    del_ok: blossom_base::RelId,
+}
+
+#[cfg(test)]
+impl E01Protocol {
+    fn of(a: &BlsArtifact) -> E01Protocol {
+        let r = |n: &str| a.rel_named(n).unwrap();
+        E01Protocol {
+            put: r("put"),
+            get: r("get"),
+            del: r("del"),
+            put_ok: r("put_ok"),
+            get_resp: r("get_resp"),
+            del_ok: r("del_ok"),
+        }
+    }
+}
+
+#[cfg(test)]
+impl blossom_sim::cluster::ClientProtocol for E01Protocol {
+    fn request(
+        &self,
+        op: &blossom_sim::linearize::KvInput,
+        id: u64,
+    ) -> Result<(blossom_base::RelId, Vec<Value>), String> {
+        use blossom_sim::linearize::KvInput;
+        let key = |k: &[u8]| Value::Str(String::from_utf8(k.to_vec()).unwrap().into());
+        let id = Value::Int(IntValue::U64(id));
+        Ok(match op {
+            KvInput::Put { key: k, val } => (self.put, vec![id, key(k), Value::Bytes(val.as_slice().into())]),
+            KvInput::Get { key: k } => (self.get, vec![id, key(k)]),
+            KvInput::Delete { key: k } => (self.del, vec![id, key(k)]),
+        })
+    }
+
+    fn reply(
+        &self,
+        rel: blossom_base::RelId,
+        row: &blossom_oracle::Row,
+    ) -> Option<(u64, blossom_sim::cluster::Reply)> {
+        use blossom_sim::cluster::Reply;
+        use blossom_sim::linearize::KvOutput;
+        let Value::Int(IntValue::U64(id)) = row.get(1)? else {
+            return None;
+        };
+        let out = if rel == self.put_ok {
+            KvOutput::PutOk
+        } else if rel == self.get_resp {
+            match row.get(3)? {
+                Value::Option(None) => KvOutput::Value(None),
+                Value::Option(Some(v)) => match &**v {
+                    Value::Bytes(b) => KvOutput::Value(Some(b.to_vec())),
+                    _ => return None,
+                },
+                _ => return None,
+            }
+        } else if rel == self.del_ok {
+            match row.get(2)? {
+                Value::Bool(b) => KvOutput::Deleted(*b),
+                _ => return None,
+            }
+        } else {
+            return None;
+        };
+        Some((*id, Reply::Done(out)))
+    }
+}
+
+/// e01 in the cluster simulator: crash-restarts that lose or tear unsynced writes, many seeds, every history
+/// linearizable.
+#[test]
+fn e01_in_the_cluster_simulator_is_linearizable_under_crashes() {
+    use blossom_sim::cluster::{Cluster, ClusterConfig};
+    use blossom_sim::linearize::{KvModel, Verdict, check_partitioned};
+    let k = Kvs::new();
+    let statics = vec![(
+        k.rel("admins"),
+        blossom_oracle::Row::from(vec![Value::Principal("spiffe://sim/client".into())]),
+    )];
+    let mut total = (0, 0, 0);
+    for seed in 1..=12u64 {
+        let cfg = ClusterConfig {
+            seed,
+            clients: 5,
+            keys: 3,
+            nemesis: 150_000_000,
+            crashes: true,
+            duration: 3_000_000_000,
+            timeout: 100_000_000,
+            ..ClusterConfig::default()
+        };
+        let cluster = Cluster::new(
+            &k.artifact,
+            &k.schema,
+            blossom_value::Seed([9; 16]),
+            statics.clone(),
+            Box::new(E01Protocol::of(&k.artifact)),
+            cfg,
+        )
+        .unwrap();
+        let run = cluster.run().unwrap();
+        let answered = run.history.iter().filter(|o| o.ret.is_some()).count();
+        total.0 += answered;
+        total.1 += run.history.len() - answered;
+        total.2 += run.crashes;
+        let (verdict, key) = check_partitioned(&KvModel, &run.history, |i| i.key().to_vec(), 50_000_000);
+        assert!(
+            verdict == Verdict::Linearizable,
+            "seed {seed}: not linearizable at key {:?}\n{}",
+            key.map(|k| String::from_utf8_lossy(&k).into_owned()),
+            run.log.join("\n")
+        );
+    }
+    assert!(total.0 > 1000, "only {} answered", total.0);
+    assert!(total.1 > 0 && total.2 > 50, "unanswered {}, crashes {}", total.1, total.2);
+}

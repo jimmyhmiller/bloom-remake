@@ -39,7 +39,7 @@ use blossom_store::{
 };
 use blossom_value::time::{Instant, NodeId, Tick};
 use blossom_value::value::SessionId;
-use blossom_value::{Seed, Value};
+use blossom_value::Seed;
 use blossom_wire::frame::{Frame, Peer, RejectReason};
 
 use blossom_node::env::{Clock, Entropy};
@@ -866,27 +866,13 @@ impl Engine {
         Ok(None)
     }
 
-    /// Admission by ACL. `principal in REL` reads REL's committed rows: its deployment and program static rows, or
-    /// its rows at the last released tick for a durable table, or else at the last computed tick.
+    /// Admission by ACL (the node reads the committed rows `principal in REL` needs), counting rejections.
     fn admit(&self, rel: RelId, source: Source<'_>) -> bool {
-        let node = &self.node;
-        let facts = self.oracle.static_facts();
-        let principal_in = |r: RelId, p: &str| {
-            let is = |row: &Row| matches!(row.first(), Some(Value::Principal(x)) if &**x == p);
-            node.statics().iter().any(|(sr, row)| *sr == r && is(row))
-                || facts.rows(r).any(is)
-                || match node.released_image().rows.get(&r) {
-                    Some(rows) => rows.iter().any(is),
-                    None => node.carried().rows(r).any(is),
-                }
-        };
-        match self.acl.admit(rel, source, &principal_in) {
-            Ok(()) => true,
-            Err(_) => {
-                bump(&self.stats.rejected_acl, 1);
-                false
-            }
+        let admitted = self.node.admits(&self.acl, self.oracle.static_facts(), rel, source);
+        if !admitted {
+            bump(&self.stats.rejected_acl, 1);
         }
+        admitted
     }
 
     /// Sends a released tick's frames: to peers merged per (destination, channel), to sessions per (session,

@@ -19,6 +19,8 @@ pub struct ManualDriver<'p, E: Evaluator> {
     batch: u64,
     /// The latest synced tick with a WAL record, and the byte frontier covering it.
     synced: Option<SyncedTick>,
+    /// The tick the latest checkpoint covers (from recovery, or taken here).
+    checkpointed: Option<u64>,
 }
 
 impl<'p, E: Evaluator> ManualDriver<'p, E> {
@@ -32,9 +34,10 @@ impl<'p, E: Evaluator> ManualDriver<'p, E> {
         ManualDriver {
             node,
             codec: DurableCodec::new(program, schema, names),
-            opened,
             batch: 0,
             synced: None,
+            checkpointed: opened.checkpoint.map(|c| c.tick),
+            opened,
         }
     }
 
@@ -108,6 +111,10 @@ impl<'p, E: Evaluator> ManualDriver<'p, E> {
         let Some(covers) = self.synced else {
             return Ok(());
         };
+        // Nothing was written since the last checkpoint: it already covers this tick.
+        if self.checkpointed == Some(covers.tick()) {
+            return Ok(());
+        }
         if self.node.parked() != 0 {
             return Err(internal_error!("checkpoint with ticks still parked").into());
         }
@@ -115,6 +122,7 @@ impl<'p, E: Evaluator> ManualDriver<'p, E> {
         let id = self.opened.checkpoints.write(snap, covers)?;
         let token = self.opened.checkpoints.install(id)?;
         self.opened.wal.truncate_through(token)?;
+        self.checkpointed = Some(covers.tick());
         Ok(())
     }
 }

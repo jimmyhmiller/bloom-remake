@@ -249,6 +249,22 @@ impl<E: Evaluator> Node<E> {
         &self.cfg.statics
     }
 
+    /// Admission by ACL (ARCHITECTURE §5.8): whether a message on `rel` from `source` is admitted. `principal in REL`
+    /// reads REL's committed rows: the deployment's static rows, the program's facts (`facts`, the evaluator's
+    /// static rows), the rows at the last released tick for a durable table, or else those at the last computed tick.
+    pub fn admits(&self, acl: &crate::acl::AclTable, facts: &Instance, rel: RelId, source: crate::acl::Source<'_>) -> bool {
+        let principal_in = |r: RelId, p: &str| {
+            let is = |row: &Row| matches!(row.first(), Some(blossom_value::Value::Principal(x)) if &**x == p);
+            self.cfg.statics.iter().any(|(sr, row)| *sr == r && is(row))
+                || facts.rows(r).any(is)
+                || match self.released_image.rows.get(&r) {
+                    Some(rows) => rows.iter().any(is),
+                    None => self.carried.rows(r).any(is),
+                }
+        };
+        acl.admit(rel, source, &principal_in).is_ok()
+    }
+
     /// A channel tuple from a peer, already admitted.
     pub fn offer_delivery(&mut self, d: Delivery) {
         self.inbox.push_back(Message::Deliver(d));
