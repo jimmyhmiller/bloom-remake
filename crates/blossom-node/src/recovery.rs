@@ -254,7 +254,9 @@ pub fn open(
             reserved: Tick(reserved),
             time_reserved,
             now,
-            recovered: record.restarts > 1,
+            // Durable state was reloaded iff an earlier incarnation's first boot tick became durable (it always
+            // leaves a WAL record, which a checkpoint may since cover): a crash before that boots fresh again.
+            recovered: checkpoint.is_some() || replayed > 0,
             incarnation: record.restarts,
         },
         wal,

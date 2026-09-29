@@ -275,6 +275,11 @@ impl<E: Evaluator> Node<E> {
         self.released
     }
 
+    /// Whether this incarnation booted from durable state (`recovered()` holds in its boot tick).
+    pub fn recovered(&self) -> bool {
+        self.recovered
+    }
+
     /// Last tick's carried state (for inspection and admission).
     pub fn carried(&self) -> &Instance {
         &self.carried
@@ -433,7 +438,10 @@ impl<E: Evaluator> Node<E> {
         let next_image = DurableImage::of(&out.next, &self.schema);
         let delta = self.image.delta(&next_image);
         let halts = self.cfg.halt.is_some_and(|h| out.instance.rows(h).next().is_some());
-        let wal = !delta.is_empty();
+        // A new node's first boot tick always leaves a WAL record, even an empty one: it marks the store as holding
+        // a boot that happened, so a restart knows it recovers (`recovered()`). Until that record is durable the
+        // boot did not happen: nothing of it is released, and a crash before the sync boots fresh again.
+        let wal = !delta.is_empty() || (!self.booted && !self.recovered);
         self.staged = out.next != self.carried;
         self.carried = out.next;
         self.image = next_image;

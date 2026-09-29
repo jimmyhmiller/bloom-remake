@@ -453,7 +453,21 @@ impl Lowerer<'_> {
                         // intern each candidate, and its role-free form.
                         let t = ty_of(x)?;
                         let wide = erase_roles(self.b.types(), t)?;
-                        for t in [t, wide] {
+                        let mut candidates = vec![t, wide];
+                        // The IR types `self` as a `Node<R>` of the rule's role R (LANGUAGE §6.10), which is not
+                        // known here: intern the literal's type for every role.
+                        if matches!(x.kind, HExprKind::SelfNode) {
+                            for r in 0..self.hir.roles.len() {
+                                let role = RoleId::from_raw(u32::try_from(r).map_err(|_| internal_error!("too many roles"))?);
+                                candidates.push(
+                                    self.b
+                                        .types()
+                                        .insert(TypeDef::Node(Some(role)))
+                                        .map_err(|e| internal_error!("interning a type: {e}"))?,
+                                );
+                            }
+                        }
+                        for t in candidates {
                             let def = if *kind == CollectionKind::Vec {
                                 TypeDef::Vec(t)
                             } else {
