@@ -39,9 +39,7 @@ rows = [[3]]
 status = "pass"
 
 [backend.interp]
-status = "unimplemented"
-unimplemented = ["LANG-122", "LANG-124", "LANG-128", "LANG-190", "SEM-012", "SEM-030", "SEM-104"]
-until = "M7"
+status = "pass"
 
 [[expect]]
 node   = "n1"

@@ -154,12 +154,63 @@ fn a_group_commit_syncs_once_with_crc_certification_and_four_times_strict() {
         let mut wal = FileWal::create(fs.clone(), &dir, header(0), Lsn(0))
             .unwrap()
             .certified(certification);
+        // The segment's first commit (crc writes the segment's receipt then, once).
         wal.append(&rec(1, 1, b"a")).unwrap();
-        wal.append(&rec(1, 2, b"b")).unwrap();
+        wal.sync().unwrap();
+        wal.append(&rec(2, 2, b"b")).unwrap();
+        wal.append(&rec(2, 3, b"c")).unwrap();
         let before = syncs(&fs);
         wal.sync().unwrap();
         assert_eq!(syncs(&fs) - before, want, "{certification:?}");
     }
+}
+
+#[test]
+fn with_crc_certification_damage_in_an_earlier_synced_batch_is_corruption() {
+    // Batch 1's marker leads batch 2, and is durable with batch 2's sync: damage to batch 1 is then told from a torn
+    // tail even though batch 1 was the last before it.
+    let (fs, dir) = sim();
+    let mut wal = FileWal::create(fs.clone(), &dir, header(0), Lsn(0))
+        .unwrap()
+        .certified(Certification::Crc);
+    wal.append(&rec(1, 1, &[1u8; 300])).unwrap();
+    wal.sync().unwrap();
+    wal.append(&rec(2, 2, &[2u8; 300])).unwrap();
+    wal.sync().unwrap();
+    drop(wal);
+    let first = WalScan::scan_certified(&*fs, &dir, [7; 16], false, Certification::Crc)
+        .unwrap()
+        .records()
+        .next()
+        .unwrap()
+        .0
+        .0 as usize;
+    fs.corrupt(&dir.join(format!("{:020}.seg", 0)), first + 100).unwrap();
+    assert!(WalScan::scan_certified(&*fs, &dir, [7; 16], false, Certification::Crc).is_err());
+}
+
+#[test]
+fn with_crc_certification_a_damaged_header_of_an_acknowledged_segment_is_corruption() {
+    let (fs, dir) = sim();
+    let mut wal = FileWal::create(fs.clone(), &dir, header(0), Lsn(0))
+        .unwrap()
+        .certified(Certification::Crc);
+    wal.append(&rec(1, 1, b"acked")).unwrap();
+    wal.sync().unwrap();
+    drop(wal);
+    fs.corrupt(&dir.join(format!("{:020}.seg", 0)), 6).unwrap();
+    assert!(WalScan::scan_certified(&*fs, &dir, [7; 16], true, Certification::Crc).is_err());
+}
+
+#[test]
+fn with_crc_certification_batches_count_up_by_one() {
+    let (fs, dir) = sim();
+    let mut wal = FileWal::create(fs.clone(), &dir, header(0), Lsn(0))
+        .unwrap()
+        .certified(Certification::Crc);
+    wal.append(&rec(1, 1, b"a")).unwrap();
+    wal.sync().unwrap();
+    assert!(wal.append(&rec(3, 2, b"b")).is_err());
 }
 
 #[test]
@@ -170,15 +221,20 @@ fn with_crc_certification_a_torn_start_of_the_next_batch_is_a_torn_tail() {
         .certified(Certification::Crc);
     wal.append(&rec(1, 1, b"acked")).unwrap();
     wal.sync().unwrap();
-    // Batch 2's first record is lost and its second survives: without markers, the damage is followed by the batch
-    // after the last whole record's.
+    // Batch 2 is batch 1's marker, then two records, all unsynced. Losing the marker (followed by the batch after the
+    // last whole record's) or the first record (after the marker) is a torn tail.
     wal.append(&rec(2, 2, &[2u8; 700])).unwrap();
     wal.append(&rec(2, 3, &[3u8; 700])).unwrap();
-    let mut image = fs.fork().unwrap();
-    image.crash_with_fates(&[WriteFate::Lost, WriteFate::Survive]).unwrap();
-    let scan = WalScan::scan_certified(&image, &dir, [7; 16], true, Certification::Crc).unwrap();
-    assert_eq!(scan.records().count(), 1);
-    assert!(scan.records().all(|(_, r)| r.tick == 1));
+    for fates in [
+        [WriteFate::Lost, WriteFate::Survive, WriteFate::Survive],
+        [WriteFate::Survive, WriteFate::Lost, WriteFate::Survive],
+    ] {
+        let mut image = fs.fork().unwrap();
+        image.crash_with_fates(&fates).unwrap();
+        let scan = WalScan::scan_certified(&image, &dir, [7; 16], true, Certification::Crc).unwrap();
+        assert_eq!(scan.records().count(), 1, "{fates:?}");
+        assert!(scan.records().all(|(_, r)| r.tick == 1));
+    }
 }
 
 #[test]

@@ -3,7 +3,9 @@
 //! A store holds one relation's rows with a count per row: how many sources support it (the carried state, the tick's
 //! input, the program's facts, and every derivation of every rule). A row is present while its count is positive, so
 //! deletions are exact (DBSP's counting). A lattice-valued relation (SEM-100) holds one row per cell: the join of the
-//! cell's live contributions, recomputed when they change (a join has no inverse).
+//! cell's live contributions, recomputed when they change (a join has no inverse). A changed cell is joined when the
+//! store is settled, not at each contribution: a tick retracts one contribution and adds another in some order, and a
+//! join of the two (a point lattice's conflict, BLSR006) is a state the reference never sees.
 //!
 //! A store records the tick's change to its present rows (`ins`, `del`), which drives the rules reading it, and can
 //! read the relation as it was at the start of the tick (`old`): the present rows, minus those inserted this tick, plus
@@ -89,6 +91,10 @@ pub(crate) struct Store {
     /// Lattice relation: each cell's live contributions, and its merged row.
     contributions: BTreeMap<Vec<Value>, BTreeSet<Row>>,
     merged: BTreeMap<Vec<Value>, Row>,
+    /// Cells whose contributions changed since the store was last settled.
+    unsettled: BTreeSet<Vec<Value>>,
+    /// Counts every change to the present rows.
+    generation: u64,
     present: BTreeSet<Row>,
     /// Built lazily from `&self` (a node's engine runs on one thread).
     indexes: RefCell<BTreeMap<Vec<usize>, Index>>,
@@ -173,28 +179,55 @@ impl Store {
         } else {
             live.remove(&row);
         }
-        let new = if live.is_empty() {
+        if live.is_empty() {
             self.contributions.remove(&id);
-            None
-        } else {
-            Some(spec.join(live.iter())?)
-        };
-        let old = self.merged.get(&id).cloned();
-        if old == new {
+        }
+        self.unsettled.insert(id);
+        Ok(())
+    }
+
+    /// Joins every changed cell's live contributions into its row.
+    pub fn settle(&mut self) -> ExprResult<()> {
+        let Some(spec) = self.cell.clone() else {
             return Ok(());
-        }
-        if let Some(o) = old {
-            self.hide(&o);
-            self.merged.remove(&id);
-        }
-        if let Some(n) = new {
-            self.merged.insert(id, n.clone());
-            self.show(n);
+        };
+        for id in std::mem::take(&mut self.unsettled) {
+            let new = match self.contributions.get(&id) {
+                Some(live) if !live.is_empty() => Some(spec.join(live.iter())?),
+                _ => None,
+            };
+            let old = self.merged.get(&id).cloned();
+            if old == new {
+                continue;
+            }
+            if let Some(o) = old {
+                self.hide(&o);
+                self.merged.remove(&id);
+            }
+            if let Some(n) = new {
+                self.merged.insert(id, n.clone());
+                self.show(n);
+            }
         }
         Ok(())
     }
 
+    /// A read must see settled cells.
+    fn settled(&self) -> Result<(), EvalError> {
+        if self.unsettled.is_empty() {
+            Ok(())
+        } else {
+            Err(internal_error!("a read of a lattice store with unsettled cells").into())
+        }
+    }
+
+    /// A counter that moves with every change to the present rows.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     fn show(&mut self, row: Row) {
+        self.generation = self.generation.wrapping_add(1);
         for (cols, index) in self.indexes.get_mut() {
             index.entry(key(&row, cols)).or_default().insert(row.clone());
         }
@@ -205,6 +238,7 @@ impl Store {
     }
 
     fn hide(&mut self, row: &Row) {
+        self.generation = self.generation.wrapping_add(1);
         for (cols, index) in self.indexes.get_mut() {
             let k = key(row, cols);
             if let Some(bucket) = index.get_mut(&k) {
@@ -245,6 +279,7 @@ impl Store {
 
     /// The present rows whose columns `cols` hold `values`.
     pub fn new_rows(&self, cols: &[usize], values: &[Value]) -> Result<Vec<Row>, EvalError> {
+        self.settled()?;
         if cols.is_empty() {
             return Ok(self.present.iter().cloned().collect());
         }
@@ -258,6 +293,7 @@ impl Store {
 
     /// Whether a row of one version has columns `cols` holding `values` (without collecting them).
     pub fn any(&self, old: bool, cols: &[usize], values: &[Value]) -> Result<bool, EvalError> {
+        self.settled()?;
         let matches = |r: &Row| key(r, cols) == values;
         if old && self.del.iter().any(matches) {
             return Ok(true);
@@ -296,6 +332,7 @@ impl Store {
         lo: Bound<Value>,
         hi: Bound<Value>,
     ) -> Result<Vec<Row>, EvalError> {
+        self.settled()?;
         let mut key_cols = cols.to_vec();
         key_cols.push(col);
         self.ensure_index(&key_cols);

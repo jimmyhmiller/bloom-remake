@@ -295,6 +295,22 @@ fn builtin(cx: &Ctx<'_>, env: &[Option<Value>], f: &BuiltinFn, args: &[Expr]) ->
             Ok(Value::Int(IntValue::U64(n as u64)))
         }
         BuiltinFn::Size { role } => Ok(Value::Int(IntValue::U64(cx.shared.role_size(*role)))),
+        BuiltinFn::IntCast(to) => match arg(0)? {
+            Value::Int(i) => {
+                let wide = match i {
+                    IntValue::U128(u) => i128::try_from(u).ok(),
+                    other => other.to_i128(),
+                };
+                let cast = match (i, to) {
+                    // A u128 above i128::MAX fits only a u128.
+                    (IntValue::U128(u), blossom_value::types::IntTy::U128) => Some(IntValue::U128(u)),
+                    _ => wide.and_then(|w| IntValue::from_i128(*to, w)),
+                };
+                cast.map(Value::Int)
+                    .ok_or_else(|| ExprError::Arithmetic(format!("{i:?} as {} is out of range", to.name())))
+            }
+            other => Err(bug(format!("an integer cast of {other:?}"))),
+        },
         BuiltinFn::Concat => match (arg(0)?, arg(1)?) {
             (Value::Str(a), Value::Str(b)) => Ok(Value::Str(format!("{a}{b}").into())),
             (Value::Bytes(a), Value::Bytes(b)) => Ok(Value::Bytes(a.iter().chain(b.iter()).copied().collect())),
@@ -363,18 +379,6 @@ fn fingerprint(v: &Value) -> ExprResult<blossom_value::fp::Fingerprint> {
 /// `lo + PRF_σn("rand", fp(k̄), incarnation, tick, attempt) mod span`, redrawing from the incomplete last span so the
 /// result is unbiased (LANGUAGE §15.1).
 fn rand_range(cx: &Ctx<'_>, lo: &Value, hi: &Value, key: &[Value]) -> ExprResult<Value> {
-    let (l, h, int) = match (lo, hi) {
-        (Value::Duration(l), Value::Duration(h)) => (i128::from(l.as_nanos()), i128::from(h.as_nanos()), None),
-        (Value::Int(l), Value::Int(h)) => match (l.to_i128(), h.to_i128()) {
-            (Some(a), Some(b)) => (a, b, Some(l.ty())),
-            _ => return Err(bug("`rand_range` bounds beyond i128".into())),
-        },
-        (a, b) => return Err(bug(format!("`rand_range` over {a:?} and {b:?}"))),
-    };
-    if h <= l {
-        return Err(ExprError::Arithmetic(format!("rand_range: the range [{l}, {h}) is empty")));
-    }
-    let span = u64::try_from(h - l).map_err(|_| bug("`rand_range` spans more than 2^64 values".into()))?;
     let seed = cx
         .shared
         .node_seeds
@@ -382,24 +386,47 @@ fn rand_range(cx: &Ctx<'_>, lo: &Value, hi: &Value, key: &[Value]) -> ExprResult
         .copied()
         .ok_or_else(|| bug(format!("a `rand` draw on node {}, which has no seed", cx.node.0)))?;
     let fp = blossom_value::fp::fingerprint_row(key).map_err(|e| bug(format!("fingerprinting a rand key: {e}")))?;
-    let limit = u64::MAX - (u64::MAX % span);
-    let mut attempt = 0u64;
-    let offset = loop {
-        let x = blossom_value::prf::prf(&seed, "rand", &[fp], &[cx.incarnation, cx.tick.0, attempt])
-            .map_err(|e| bug(format!("rand: {e}")))?;
-        if x < limit {
-            break x % span;
-        }
-        attempt += 1;
+    let draw = |span: u128| {
+        blossom_value::prf::uniform_below(&seed, "rand", &[fp], &[cx.incarnation, cx.tick.0], span)
+            .map_err(|e| bug(format!("rand: {e}")))
     };
-    let v = l + i128::from(offset);
-    match int {
-        None => Ok(Value::Duration(blossom_value::time::Duration::from_nanos(
-            i64::try_from(v).map_err(|_| bug("a duration out of range".into()))?,
-        ))),
-        Some(ty) => IntValue::from_i128(ty, v)
-            .map(Value::Int)
-            .ok_or_else(|| bug("a rand_range result out of its type".into())),
+    let empty = |l: &dyn std::fmt::Display, h: &dyn std::fmt::Display| {
+        ExprError::Arithmetic(format!("rand_range: the range [{l}, {h}) is empty"))
+    };
+    match (lo, hi) {
+        // `u128` bounds may exceed `i128`: they draw in `u128`.
+        (Value::Int(IntValue::U128(l)), Value::Int(IntValue::U128(h))) => {
+            if h <= l {
+                return Err(empty(l, h));
+            }
+            Ok(Value::Int(IntValue::U128(l + draw(h - l)?)))
+        }
+        (Value::Duration(_), Value::Duration(_)) | (Value::Int(_), Value::Int(_)) => {
+            let bound = |v: &Value| match v {
+                Value::Duration(d) => Some(i128::from(d.as_nanos())),
+                Value::Int(i) => i.to_i128(),
+                _ => None,
+            };
+            let (Some(l), Some(h)) = (bound(lo), bound(hi)) else {
+                return Err(bug(format!("`rand_range` over {lo:?} and {hi:?}")));
+            };
+            if h <= l {
+                return Err(empty(&l, &h));
+            }
+            // An `i128` span may exceed `i128::MAX`; in two's complement it is exact as a `u128`, and so is the result.
+            let span = h.cast_unsigned().wrapping_sub(l.cast_unsigned());
+            let v = l.cast_unsigned().wrapping_add(draw(span)?).cast_signed();
+            match lo {
+                Value::Duration(_) => Ok(Value::Duration(blossom_value::time::Duration::from_nanos(
+                    i64::try_from(v).map_err(|_| bug("a duration out of range".into()))?,
+                ))),
+                Value::Int(i) => IntValue::from_i128(i.ty(), v)
+                    .map(Value::Int)
+                    .ok_or_else(|| bug("a rand_range result out of its type".into())),
+                _ => Err(bug(format!("`rand_range` over {lo:?}"))),
+            }
+        }
+        (a, b) => Err(bug(format!("`rand_range` over {a:?} and {b:?}"))),
     }
 }
 

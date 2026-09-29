@@ -104,6 +104,7 @@ fn builtin_name(p: &Program, f: &BuiltinFn) -> String {
             p.roles.get(*role).map_or("<?>".into(), |r| r.name.to_string())
         ),
         BuiltinFn::Len => "$len".into(),
+        BuiltinFn::IntCast(t) => format!("$as_{}", t.name()),
         BuiltinFn::Concat => "$concat".into(),
         BuiltinFn::Contains => "$contains".into(),
         BuiltinFn::Keys => "$keys".into(),

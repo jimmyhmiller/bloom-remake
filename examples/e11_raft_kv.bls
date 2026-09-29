@@ -236,6 +236,10 @@ at Server {
     advance_commit: while quorum(i), leader(t), log(idx: i, term: t, ..), commit(c) where i > c {
         next commit(i);
     }
+    /// A leader with no followers is a majority alone.
+    advance_alone: while leader(t), last_log(li, lt), commit(c) where Server.size() == 1 && lt == t && li > c {
+        next commit(li);
+    }
 
     // ---- replication, follower side
     /// Entries of the leader of our term whose predecessor matches: in the log, or earlier in the same batch.

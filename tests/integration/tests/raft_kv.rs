@@ -117,7 +117,8 @@ impl ClientProtocol for RaftProtocol {
 /// Raft's safety properties (Fig. 3) over e11's state, checked after every step of the cluster:
 /// - election safety: at most one node ever wins a term;
 /// - state machine safety: every node's committed prefix agrees with every committed entry seen before, at any node;
-/// - leader completeness: a leader holds every entry seen committed in an earlier term.
+/// - leader completeness: a leader holds every entry seen committed in an earlier term;
+/// - every entry's recorded `prev` is the term of the entry before it (0 before the first).
 #[cfg(test)]
 struct RaftSafety {
     log: RelId,
@@ -160,6 +161,14 @@ impl Observer for RaftSafety {
             let Some(state) = state else { continue };
             let term = state.rows(self.current_term).map(|r| u64_at(r, 0)).max().unwrap_or(0);
             let log: BTreeMap<u64, &Row> = state.rows(self.log).map(|r| (u64_at(r, 0), r)).collect();
+            for (i, entry) in &log {
+                let before = if *i == 1 { Some(0) } else { log.get(&(i - 1)).map(|r| u64_at(r, 1)) };
+                if let Some(pt) = before
+                    && u64_at(entry, 2) != pt
+                {
+                    return Err(format!("node {n}: entry {i} records prev {}, but the entry before it has term {pt}", u64_at(entry, 2)));
+                }
+            }
             for won in state.rows(self.won).map(|r| u64_at(r, 0)) {
                 if let Some(other) = self.winners.insert(won, n)
                     && other != n
@@ -590,4 +599,111 @@ fn join_work_per_tick_is_flat_as_the_log_grows() {
     let (a, b) = (r1 as f64 / t1 as f64, r2 as f64 / t2 as f64);
     assert!(t2 > 3 * t1, "the longer run has {t2} ticks against {t1}");
     assert!(b < a * 1.25, "{b:.1} rows per tick over 8s against {a:.1} over 2s: the work grows with the log");
+}
+
+/// A new leader's first appending tick carries several requests while its last entry is of an older term: the one
+/// case where an appended entry's `prev` is the current term rather than the last entry's (found by the S5 review: a
+/// mutant recording the last entry's term for every slot passed the rest of this suite).
+#[test]
+fn a_new_leaders_first_append_is_a_burst() {
+    let artifact = raft_kv();
+    let schema = DurableSchema::of(artifact.program.get());
+    let safety = RaftSafety::of(&artifact);
+    let all = [NodeId(0), NodeId(1), NodeId(2)];
+    for seed in 1..=3u64 {
+        let mut c = Cluster::new(
+            &artifact,
+            &schema,
+            blossom_value::Seed::from_u64(seed),
+            Vec::new(),
+            Box::new(RaftProtocol::of(&artifact)),
+            ClusterConfig {
+                seed,
+                clients: 8,
+                keys: 4,
+                think: 0,
+                timeout: 1_000_000_000,
+                latency: (1_000_000, 1_000_000),
+                ..ClusterConfig::default()
+            },
+        )
+        .unwrap();
+        c.observe(Box::new(RaftSafety::of(&artifact)));
+        c.pause_clients(true);
+        let mut term = 0;
+        let mut bursts = 0;
+        for _ in 0..3 {
+            let (l, t) = await_leader(&mut c, &safety, &all, term, 5_000_000_000);
+            // Every client sends to the new leader at the same instant.
+            write_through(&mut c, l, 1_500_000);
+            wait(&mut c, 400_000_000);
+            let st = c.state(l).unwrap();
+            if st.rows(safety.log).filter(|r| u64_at(r, 1) == t).count() >= 2 {
+                bursts += 1;
+            }
+            // Depose it: isolated, the others elect; healed, it hears the new term before anyone writes.
+            let others: Vec<NodeId> = all.iter().copied().filter(|n| *n != l).collect();
+            c.partition(&[&[l], &others]).unwrap();
+            let (_, t2) = await_leader(&mut c, &safety, &others, t, 5_000_000_000);
+            c.heal();
+            wait(&mut c, 300_000_000);
+            term = t2 - 1;
+        }
+        wait(&mut c, 1_000_000_000);
+        let run = c.finish();
+        let (verdict, key) = check_partitioned(&KvModel, &run.history, |i| i.key().to_vec(), 50_000_000);
+        assert!(verdict == Verdict::Linearizable, "seed {seed}: {verdict:?} at {key:?}");
+        assert!(bursts > 0, "seed {seed}: no leader appended a burst");
+        assert_eq!(answered(&run), run.history.len(), "seed {seed}: operations went unanswered");
+    }
+}
+
+/// One server is its own majority: it commits and answers alone (found by the S5 review: with no followers no
+/// acknowledgement ever counted).
+#[test]
+fn a_single_server_commits_alone() {
+    let artifact = raft_kv_on(1);
+    let schema = DurableSchema::of(artifact.program.get());
+    let run = run_and_check(
+        &artifact,
+        &schema,
+        ClusterConfig {
+            seed: 1,
+            clients: 3,
+            keys: 3,
+            duration: 2_000_000_000,
+            ..ClusterConfig::default()
+        },
+    );
+    assert!(answered(&run) > 50, "only {} answered of {}", answered(&run), run.history.len());
+}
+
+/// The same guarantees on stores with one sync per group commit (`tail_certification = "crc"`, what the etcd
+/// comparison runs): crashes (some between a WAL append and its sync) lose nothing acknowledged.
+#[test]
+fn raft_kv_is_linearizable_on_one_sync_per_commit() {
+    let artifact = raft_kv();
+    let schema = DurableSchema::of(artifact.program.get());
+    for seed in 1..=4u64 {
+        let run = run_and_check(
+            &artifact,
+            &schema,
+            ClusterConfig {
+                seed,
+                clients: 3,
+                keys: 3,
+                loss_ppm: 10_000,
+                nemesis: 300_000_000,
+                crashes: true,
+                partitions: true,
+                downtime: 800_000_000,
+                timeout: 400_000_000,
+                duration: 4_000_000_000,
+                certification: blossom_store::Certification::Crc,
+                ..ClusterConfig::default()
+            },
+        );
+        assert!(run.crashes > 0, "seed {seed}: no crash");
+        assert!(answered(&run) > 20, "seed {seed}: only {} answered", answered(&run));
+    }
 }

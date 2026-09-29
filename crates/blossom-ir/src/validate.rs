@@ -1289,6 +1289,13 @@ fn builtin_type(p: &Program, r: &Rule, b: &BuiltinFn, args: &[Expr]) -> Result<T
             arity(0)?;
             lookup(TypeDef::Int(IntTy::U64))
         }
+        BuiltinFn::IntCast(to) => {
+            arity(1)?;
+            if !matches!(types.first().and_then(|t| p.types.get(*t)), Some(TypeDef::Int(_))) {
+                return Err("an integer cast expects an integer".into());
+            }
+            lookup(TypeDef::Int(*to))
+        }
         BuiltinFn::Len => {
             arity(1)?;
             if !matches!(

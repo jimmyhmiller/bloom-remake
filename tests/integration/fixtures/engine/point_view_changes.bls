@@ -1,0 +1,7 @@
+//! A view with a point-lattice column whose one contribution changes from a larger to a smaller point.
+program point_view_changes version 1;
+input set(v: u8);
+table cur(v: u8) key();
+bootstrap { emit cur(5); }
+on set(v) { upsert cur(v); }
+view pv(k, p: LPoint<u8>) = cur(v), let k = 0, let p = LPoint::of(v);

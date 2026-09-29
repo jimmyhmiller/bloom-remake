@@ -26,9 +26,7 @@ seeds = 128
 status = "pass"
 
 [backend.interp]
-status = "unimplemented"
-unimplemented = ["SEM-084", "SEM-085", "LANG-108", "LANG-040", "LANG-042", "LANG-045", "LANG-047", "LANG-062", "LANG-152", "LANG-153", "LANG-200", "LANG-241", "LANG-100", "LANG-060", "LANG-190", "SEM-002"]
-until = "M7"
+status = "pass"
 
 [backend.sim]
 status = "unimplemented"

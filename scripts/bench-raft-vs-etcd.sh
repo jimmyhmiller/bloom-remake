@@ -9,7 +9,9 @@
 #
 # Usage: ETCD_BIN=/path/to/etcd [ETCD_BENCH=/path/to/etcd/benchmark] scripts/bench-raft-vs-etcd.sh
 # Knobs (environment): CLIENTS (16), RUN_SECONDS (20), KEYS (1000), MIX (put:get:del, 50:50:0), VALUE (16 bytes),
-# BASE_PORT (27100), OUT (a fresh temporary directory), CHECK (1: check linearizability), TAILS ("crc strict").
+# BASE_PORT (27100), OUT (a fresh temporary directory), CHECK (1: check linearizability), TAILS ("crc strict"),
+# ETCD_ROUTE ("leader": every etcd session at the leader, as the Blossom client follows redirects to its leader;
+# "spread": client c at endpoint c mod 3).
 set -euo pipefail
 
 ETCD_BIN=${ETCD_BIN:?set ETCD_BIN to an etcd binary (v3.6)}
@@ -21,13 +23,15 @@ VALUE=${VALUE:-16}
 BASE_PORT=${BASE_PORT:-27100}
 CHECK=${CHECK:-1}
 TAILS=${TAILS:-crc strict}
+ETCD_ROUTE=${ETCD_ROUTE:-leader}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${OUT:-$(mktemp -d -t blossom-bench)}
 mkdir -p "$OUT"
 
 cargo build --quiet --release --manifest-path "$ROOT/Cargo.toml" -p blossom-cli -p blossom-bench
-BLOSSOM="$ROOT/target/release/blossom"
-KV="$ROOT/target/release/blossom-kv"
+TARGET=${CARGO_TARGET_DIR:-$ROOT/target}
+BLOSSOM="$TARGET/release/blossom"
+KV="$TARGET/release/blossom-kv"
 check_flag=()
 if [ "$CHECK" = 1 ]; then check_flag=(--check); fi
 common=(--clients "$CLIENTS" --seconds "$RUN_SECONDS" --keys "$KEYS" --mix "$MIX" --value-size "$VALUE" "${check_flag[@]}")
@@ -87,7 +91,16 @@ for i in 1 2 3; do
     done
     grep -q ready "$bdir/s$i.out" || { echo "s$i did not start:"; cat "$bdir/s$i.err"; exit 1; }
 done
-sleep 2 # a leader
+# Until a leader answers.
+ready=0
+for _ in $(seq 40); do
+    if "$KV" load --deploy "$deploy" --principal spiffe://bench/raft/client --clients 1 --seconds 0.3 \
+        --namespace warmup- 2>/dev/null | grep -Eq ': [1-9][0-9]* ops answered'; then
+        ready=1
+        break
+    fi
+done
+[ "$ready" = 1 ] || { echo "the Blossom cluster never answered"; exit 1; }
 echo "== Blossom (e11 Raft KV, 3 processes, tail certification $tail)"
 "$KV" load --deploy "$deploy" --principal spiffe://bench/raft/client "${common[@]}" | tee "$bdir/report.txt"
 cleanup 2>/dev/null
@@ -121,9 +134,11 @@ for i in 1 2 3; do
         curl -fs "http://127.0.0.1:$((BASE_PORT + 30 + i))/health" | grep -q '"health":"true"' && break
         sleep 0.1
     done
+    curl -fs "http://127.0.0.1:$((BASE_PORT + 30 + i))/health" | grep -q '"health":"true"' \
+        || { echo "etcd member e$i never became healthy"; cat "$edir/e$i.log"; exit 1; }
 done
-echo "== etcd $("$ETCD_BIN" --version | head -1 | awk '{print $3}') (3 members)"
-"$KV" etcd --endpoints "$endpoints" "${common[@]}" | tee "$edir/report.txt"
+echo "== etcd $("$ETCD_BIN" --version | head -1 | awk '{print $3}') (3 members, sessions routed: $ETCD_ROUTE)"
+"$KV" etcd --endpoints "$endpoints" --route "$ETCD_ROUTE" "${common[@]}" | tee "$edir/report.txt"
 
 if [ -n "${ETCD_BENCH:-}" ]; then
     echo "== etcd's own gRPC benchmark (for reference: a different client)"
