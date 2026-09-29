@@ -184,11 +184,14 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
         for (col, lat) in &r.schema.lattice {
             valid &= matches!(r.schema.cols.get(col.index()).and_then(|c|p.types.get(c.ty)),Some(TypeDef::Lattice(l)) if l==lat);
         }
-        for col in r.schema.key.iter().chain(&r.schema.payload) {
-            valid &= !matches!(
-                r.schema.cols.get(col.index()).and_then(|c| p.types.get(c.ty)),
-                Some(TypeDef::Lattice(_))
-            );
+        // A generated relation holds valuations: a lattice value in it is plain data (compared exactly, never merged).
+        if !matches!(r.origin, Origin::Generated { .. }) {
+            for col in r.schema.key.iter().chain(&r.schema.payload) {
+                valid &= !matches!(
+                    r.schema.cols.get(col.index()).and_then(|c| p.types.get(c.ty)),
+                    Some(TypeDef::Lattice(_))
+                );
+            }
         }
         check(
             valid,

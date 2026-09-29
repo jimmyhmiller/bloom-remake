@@ -1,0 +1,6 @@
+//! Slice 2 review: `key() resolve choose_most(t)` (LANGUAGE §10.7's own example) lowers with `()` for the empty key.
+
+program r3a version 1;
+input put(t: u64);
+table current_term(t: u64) key() resolve choose_most(t);
+w: on put(t) { next current_term(t); }

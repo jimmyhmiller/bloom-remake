@@ -171,15 +171,21 @@ pub(crate) fn column(name: Symbol, ty: TypeId, hidden_dest: bool) -> Column {
     }
 }
 
-/// A schema over `cols` keyed by `key` (every non-lattice column when `None`). Lattice-typed columns are the
-/// relation's value, merged per key (SEM-100, LANGUAGE §11.1).
-pub(crate) fn schema(types: &blossom_value::TypeTable, cols: Vec<Column>, key: Option<&[usize]>) -> Schema {
+/// A schema over `cols` keyed by `key` (every non-lattice column when `None`). With `merge`, lattice-typed columns are
+/// the relation's value, merged per key (SEM-100, LANGUAGE §11.1); without it (a generated relation of valuations),
+/// they are plain data.
+pub(crate) fn schema(
+    types: &blossom_value::TypeTable,
+    cols: Vec<Column>,
+    key: Option<&[usize]>,
+    merge: bool,
+) -> Schema {
     let n = cols.len();
     let lattice: Vec<(ColIdx, blossom_base::LatticeTypeId)> = cols
         .iter()
         .enumerate()
         .filter_map(|(i, c)| match types.get(c.ty) {
-            Some(TypeDef::Lattice(l)) => Some((col_idx(i), *l)),
+            Some(TypeDef::Lattice(l)) if merge => Some((col_idx(i), *l)),
             _ => None,
         })
         .collect();
@@ -308,7 +314,9 @@ impl Lowerer<'_> {
     fn declare_hrel(&mut self, h: HRelId) -> Result<RelId, InternalError> {
         let r = self.hir.rel(h)?.clone();
         let (cols, key) = self.ir_columns(h)?;
-        let schema = schema(self.b.types(), cols, key.as_deref());
+        // A generated relation (an instance's members) holds plain rows; a declared one merges its lattice columns.
+        let merge = !r.name.to_string().contains('$');
+        let schema = schema(self.b.types(), cols, key.as_deref(), merge);
         let (class, interface) = match &r.kind {
             HRelKind::Table | HRelKind::Scratch | HRelKind::View | HRelKind::LocalTick => (RelClass::Idb, None),
             HRelKind::Static | HRelKind::Members(_) | HRelKind::NodeDir => (RelClass::Static, None),
@@ -430,7 +438,8 @@ impl Lowerer<'_> {
         span: Span,
     ) -> Result<RelId, InternalError> {
         let name = self.rel_name(segments);
-        let schema = schema(self.b.types(), cols, key);
+        // Valuations: lattice values in them are data, never merged.
+        let schema = schema(self.b.types(), cols, key, false);
         self.b
             .declare_relation(RelDecl {
                 id: RelId::from_raw(0),
@@ -589,11 +598,8 @@ impl Lowerer<'_> {
             .set_construct_kind(construct, spec(cand, Some(site)))
             .map_err(ir)?;
         let role = r.role.map(|x| RoleId::from_raw(x.0));
-        let tuple = |b: &mut IrBuilder, tys: Vec<TypeId>| {
-            b.types()
-                .insert(TypeDef::Tuple(tys))
-                .map_err(|e| internal_error!("interning a type: {e}"))
-        };
+        let tuple = expr::tuple_type;
+        let unit = self.b.intern_const(Value::Unit).map_err(ir)?;
         let key_ty = tuple(
             &mut self.b,
             key.iter().filter_map(|c| cols.get(*c).map(|x| x.ty)).collect(),
@@ -612,24 +618,23 @@ impl Lowerer<'_> {
         let prio = |vars: &[VarId]| Expr::Call {
             f: FnRef::Builtin(BuiltinFn::Prio { site }),
             args: vec![
-                Expr::Construct {
-                    ty: key_ty,
-                    variant: None,
-                    fields: key
+                expr::tuple_expr(
+                    unit,
+                    key_ty,
+                    key.iter()
+                        .filter_map(|c| vars.get(*c))
+                        .map(|v| Expr::Term(Term::Var(*v)))
+                        .collect(),
+                ),
+                expr::tuple_expr(
+                    unit,
+                    val_ty,
+                    values
                         .iter()
                         .filter_map(|c| vars.get(*c))
                         .map(|v| Expr::Term(Term::Var(*v)))
                         .collect(),
-                },
-                Expr::Construct {
-                    ty: val_ty,
-                    variant: None,
-                    fields: values
-                        .iter()
-                        .filter_map(|c| vars.get(*c))
-                        .map(|v| Expr::Term(Term::Var(*v)))
-                        .collect(),
-                },
+                ),
             ],
         };
         let col_vars = |rb: &mut blossom_ir::build::RuleBuilder<'_>| -> Result<Vec<VarId>, InternalError> {

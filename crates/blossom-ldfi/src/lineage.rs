@@ -69,6 +69,17 @@ pub fn build(artifact: &SimArtifact, run: &SyncRun, outcome: &Outcome) -> Result
             (id, ident)
         })
         .collect();
+    // A node that halts runs no later tick and its state is gone; faults can make a node halt that did not, which
+    // the hazard encoding does not model yet.
+    if let Some(halt) = artifact.halt
+        && protocol.rules.iter().any(|r| r.head.rel == halt)
+    {
+        return Err(blossom_base::unimplemented_error!(
+            "LANG-052",
+            "LDFI over a program that can `halt` (a halt that faults cause is not a modelled hazard yet)"
+        )
+        .into());
+    }
     for rule in protocol.rules.iter() {
         if rule.kind == RuleKind::Async && cells.contains_key(&rule.head.rel) {
             return Err(blossom_base::unimplemented_error!(
@@ -602,6 +613,17 @@ impl crate::hazard::Rules for ArtifactRules<'_> {
             Space::Protocol => self.artifact.protocol.get().consts.get(id),
             Space::Spec => self.artifact.spec.as_ref().and_then(|s| s.program.get().consts.get(id)),
         }
+    }
+
+    fn lattice_cols(&self, space: Space, rel: RelId) -> Vec<usize> {
+        let program = match space {
+            Space::Protocol => Some(self.artifact.protocol.get()),
+            Space::Spec => self.artifact.spec.as_ref().map(|s| s.program.get()),
+        };
+        program
+            .and_then(|p| p.rels.get(rel))
+            .map(|r| r.schema.lattice.iter().map(|(c, _)| c.index()).collect())
+            .unwrap_or_default()
     }
 
     fn origin(&self, space: Space, rel: RelId) -> Result<crate::hazard::Origin<'_>, InternalError> {

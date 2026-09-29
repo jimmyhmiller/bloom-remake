@@ -12,7 +12,7 @@
 //! The checker walks the HIR twice in the same order: the first walk creates terms and constraints, the second
 //! writes the solved types into every expression, variable and `Option` pattern.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use blossom_base::{Diagnostic, Diagnostics, InternalError, RoleId, Span, Symbol, TypeId, code, internal_error};
 use blossom_ir::core::LatticeCtor;
@@ -40,7 +40,7 @@ pub fn check(hir: &mut Hir, diags: &mut Diagnostics) -> Result<(), InternalError
         lift_cursor: 0,
         methods: Vec::new(),
         method_cursor: 0,
-        atom_vars: BTreeSet::new(),
+        bindings: BTreeMap::new(),
     };
     cx.errors_before = cx.diags.error_count();
     cx.run(hir);
@@ -113,6 +113,9 @@ impl LatS {
     }
 }
 
+/// One binding occurrence of a variable: a positive atom's column, or `None` for any other binding.
+type Binding = Option<(HRelId, usize)>;
+
 /// A method call on a lattice value, resolved by the solver: the operation and, per argument (receiver excluded),
 /// the coercion slot through which it may be lifted.
 #[derive(Clone, Debug)]
@@ -174,8 +177,8 @@ enum Deferred {
         recv: T,
         name: Symbol,
         banged: bool,
-        /// The receiver is a variable bound by a positive atom: known non-⊥ (SEM-101 N4).
-        nonbot: bool,
+        /// The receiver's variable, when it is one (its bindings decide the non-⊥ refinement, SEM-101 N4).
+        recv_var: Option<(u32, u32)>,
         args: Vec<T>,
         res: T,
         span: Span,
@@ -205,8 +208,9 @@ struct Checker<'d> {
     /// Method calls in walk order and their resolutions.
     methods: Vec<Option<MethodRes>>,
     method_cursor: usize,
-    /// Variables bound by a positive atom, per scope: known non-⊥ when they hold a lattice.
-    atom_vars: BTreeSet<(u32, u32)>,
+    /// Every binding occurrence of each variable (per scope): the relation and column of a positive atom that binds it
+    /// directly, or `None` for any other binding (a `let`, a generator, a nested pattern, `outer`).
+    bindings: BTreeMap<(u32, u32), Vec<Binding>>,
 }
 
 impl Checker<'_> {
@@ -800,17 +804,30 @@ impl Checker<'_> {
     fn lit(&mut self, hir: &mut Hir, scope: ScopeId, l: &mut HLit, role: Option<HRoleId>, bound: &BTreeSet<HVarId>) {
         match l {
             HLit::Atom(a) | HLit::Per(a) | HLit::Delta { atom: a, .. } => {
-                for p in &a.args {
-                    if let HPat::Var(v, _) = p {
-                        self.atom_vars.insert((scope.0, v.0));
+                if !self.apply {
+                    for (c, p) in a.args.iter().enumerate() {
+                        match p {
+                            HPat::Var(v, _) => self.bindings.entry((scope.0, v.0)).or_default().push(Some((a.rel, c))),
+                            other => self.other_bindings(scope, other),
+                        }
                     }
                 }
                 self.atom(hir, scope, a, None);
             }
             HLit::Not(a) => self.atom(hir, scope, a, None),
-            HLit::Outer(a) => self.atom(hir, scope, a, Some(bound)),
+            HLit::Outer(a) => {
+                if !self.apply {
+                    for p in &a.args {
+                        self.other_bindings(scope, p);
+                    }
+                }
+                self.atom(hir, scope, a, Some(bound))
+            }
             HLit::NotBody(b, _) => self.body(hir, scope, b, role),
             HLit::Let { pat, expr, span } => {
+                if !self.apply {
+                    self.other_bindings(scope, pat);
+                }
                 let t = self.expr(hir, scope, expr);
                 let p = self.pat(hir, scope, pat);
                 if matches!(pat, HPat::Var(..)) {
@@ -832,6 +849,9 @@ impl Checker<'_> {
                 }
             }
             HLit::Gen { pat, src, span } => {
+                if !self.apply {
+                    self.other_bindings(scope, pat);
+                }
                 let t = self.expr(hir, scope, src);
                 let p = self.pat(hir, scope, pat);
                 if !self.apply {
@@ -1418,7 +1438,10 @@ impl Checker<'_> {
                 args,
             } => {
                 let (name, banged) = (*name, *banged);
-                let nonbot = matches!(recv.kind, HExprKind::Var(v) if self.atom_vars.contains(&(scope.0, v.0)));
+                let recv_var = match recv.kind {
+                    HExprKind::Var(v) => Some((scope.0, v.0)),
+                    _ => None,
+                };
                 let r = self.expr(hir, scope, recv);
                 let mut ts = Vec::new();
                 for x in args.iter_mut() {
@@ -1463,7 +1486,7 @@ impl Checker<'_> {
                         recv: r,
                         name,
                         banged,
-                        nonbot,
+                        recv_var,
                         args: ts,
                         res,
                         span,
@@ -1992,12 +2015,50 @@ impl Checker<'_> {
                 recv,
                 name,
                 banged,
-                nonbot,
+                recv_var,
                 ref args,
                 res,
                 span,
-            } => self.method(hir, slot, recv, name, banged, nonbot, args, res, span),
+            } => {
+                let nonbot = recv_var.is_some_and(|v| self.non_bottom(hir, v));
+                self.method(hir, slot, recv, name, banged, nonbot, args, res, span)
+            }
         }
+    }
+
+    /// Records the variables of a pattern that binds them other than as a positive atom's column.
+    fn other_bindings(&mut self, scope: ScopeId, p: &HPat) {
+        match p {
+            HPat::Var(v, _) => self.bindings.entry((scope.0, v.0)).or_default().push(None),
+            HPat::Tuple(ps, _) | HPat::Variant { fields: ps, .. } => {
+                for x in ps {
+                    self.other_bindings(scope, x);
+                }
+            }
+            HPat::Wild(_) | HPat::Expr(_) => {}
+        }
+    }
+
+    /// Whether a variable is known non-⊥ (SEM-101 N4): every binding of it is the one lattice column of a positive
+    /// atom (a row with several lattice columns may hold ⊥ in all but one).
+    fn non_bottom(&mut self, hir: &Hir, var: (u32, u32)) -> bool {
+        let Some(occs) = self.bindings.get(&var).cloned() else {
+            return false;
+        };
+        !occs.is_empty()
+            && occs.iter().all(|o| match o {
+                Some((rel, col)) => {
+                    let n = hir.rels.get(rel.index()).map_or(0, |r| r.cols.len());
+                    let lattice: Vec<usize> = (0..n)
+                        .filter(|c| {
+                            let t = self.col_term(hir, rel.index(), *c);
+                            self.lat(t).is_some()
+                        })
+                        .collect();
+                    lattice == vec![*col]
+                }
+                None => false,
+            })
     }
 
     /// The lattice shape of a solved term.
@@ -2573,6 +2634,32 @@ fn check_lattice_keys(hir: &Hir, bodies: &[&HBody], diags: &mut Diagnostics) {
         for v in vs {
             *count.entry(v).or_default() += 1;
         }
+    }
+    // A variable a `let` or a generator binds is a value: at a lattice column it would be a join too.
+    fn lit_binders(l: &HLit, out: &mut Vec<HVarId>) {
+        match l {
+            HLit::Let { pat, .. } | HLit::Gen { pat, .. } | HLit::RangeGen { pat, .. } | HLit::RoleGen { pat, .. } => {
+                pat_vars(pat, out)
+            }
+            HLit::NotBody(b, _) => b.lits.iter().for_each(|x| lit_binders(x, out)),
+            HLit::Any(alts, _) => alts
+                .iter()
+                .for_each(|b| b.lits.iter().for_each(|x| lit_binders(x, out))),
+            HLit::Forall { domain, body, .. } => {
+                lit_binders(domain, out);
+                body.lits.iter().for_each(|x| lit_binders(x, out));
+            }
+            _ => {}
+        }
+    }
+    let mut bound_otherwise = Vec::new();
+    for b in bodies {
+        for l in &b.lits {
+            lit_binders(l, &mut bound_otherwise);
+        }
+    }
+    for v in bound_otherwise {
+        *count.entry(v).or_default() += 1;
     }
     let mut reported = BTreeSet::new();
     for a in &all {

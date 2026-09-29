@@ -191,6 +191,31 @@ pub(crate) fn try_const(hir: &Hir, e: &HExpr) -> Option<Value> {
     }
 }
 
+/// The type of a tuple of `tys`: `()` when there are none (the empty tuple is written `()`).
+pub(crate) fn tuple_type(b: &mut IrBuilder, tys: Vec<TypeId>) -> Result<TypeId, InternalError> {
+    let def = if tys.is_empty() {
+        TypeDef::Unit
+    } else {
+        TypeDef::Tuple(tys)
+    };
+    b.types()
+        .insert(def)
+        .map_err(|e| internal_error!("interning a type: {e}"))
+}
+
+/// A tuple of `fields` of type `ty` (from [`tuple_type`]): the constant `()` when there are none.
+pub(crate) fn tuple_expr(unit: blossom_base::ConstId, ty: TypeId, fields: Vec<Expr>) -> Expr {
+    if fields.is_empty() {
+        Expr::Term(Term::Const(unit))
+    } else {
+        Expr::Construct {
+            ty,
+            variant: None,
+            fields,
+        }
+    }
+}
+
 /// `ty` with every `Node<R>` inside it widened to `Node`, interned in `types`.
 pub(crate) fn erase_roles(types: &mut blossom_value::TypeTable, ty: TypeId) -> Result<TypeId, InternalError> {
     let def = match types.get(ty).cloned() {

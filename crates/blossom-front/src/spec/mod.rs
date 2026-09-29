@@ -381,6 +381,28 @@ fn compile(
                 );
                 continue;
             };
+            // The message goes to a member of the channel's destination role.
+            let dst = match &hrel.kind {
+                HRelKind::Channel(ch) => ch.direction.map(|(_, d)| d),
+                _ => None,
+            };
+            let member = roles.get(node.0 as usize).copied().flatten();
+            if dst.is_some() && member != dst {
+                let role = dst
+                    .and_then(|d| hir.roles.get(d.index()))
+                    .map_or_else(|| "?".to_owned(), |r| r.name.to_string());
+                diags.push(
+                    Diagnostic::new(
+                        code!("BLS0405"),
+                        format!(
+                            "`{}` is sent to `{role}`, and the node this fact names is not one",
+                            path.join(".")
+                        ),
+                    )
+                    .with_primary(n.span),
+                );
+                continue;
+            }
             if let Some(dest) = row.first_mut() {
                 *dest = Value::Node(node);
             }

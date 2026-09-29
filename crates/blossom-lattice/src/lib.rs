@@ -405,9 +405,27 @@ impl Kind {
         })
     }
 
-    /// `a ⊑ b`.
+    /// `a ⊑ b`, by the order itself (not through `join`, which fails on two different `LPoint` values).
     pub fn leq(&self, a: &LatValue, b: &LatValue) -> Result<bool, LatticeError> {
-        Ok(self.join(a, b)? == *b)
+        Ok(match (self, a, b) {
+            (Kind::Bool, LatValue::Bool(x), LatValue::Bool(y)) => !x || *y,
+            (Kind::Max | Kind::Min | Kind::Point, LatValue::Bottom, _) => true,
+            (Kind::Max | Kind::Min | Kind::Point, LatValue::Elem(_), LatValue::Bottom) => false,
+            (Kind::Max, LatValue::Elem(x), LatValue::Elem(y)) => x <= y,
+            (Kind::Min, LatValue::Elem(x), LatValue::Elem(y)) => x >= y,
+            (Kind::Point, LatValue::Elem(x), LatValue::Elem(y)) => x == y,
+            (Kind::Set | Kind::PSet, LatValue::Set(x), LatValue::Set(y)) => x.is_subset(y),
+            (Kind::Map(inner), LatValue::Map(x), LatValue::Map(y)) => {
+                for (k, v) in x.iter() {
+                    match y.get(k) {
+                        Some(w) if inner.leq(v, w)? => {}
+                        _ => return Ok(false),
+                    }
+                }
+                true
+            }
+            (_, x, y) => return Err(LatticeError::Shape(format!("comparing {x:?} and {y:?} in {self:?}"))),
+        })
     }
 
     /// Lifts a plain value into the lattice (LANGUAGE §5.6): `T` into `LMax`/`LMin`/`LPoint`, `bool` into `LBool`,
@@ -784,6 +802,24 @@ mod tests {
                 assert_eq!(op.sig(&kind).params.len(), op.arity(&kind), "{kind:?} {op:?}");
             }
         }
+    }
+
+    #[test]
+    fn order_without_join() {
+        let e = |n| LatValue::Elem(Arc::new(int(n)));
+        assert!(!Kind::Point.leq(&e(5), &e(6)).unwrap());
+        assert!(Kind::Point.leq(&LatValue::Bottom, &e(6)).unwrap());
+        assert!(Kind::Min.leq(&e(6), &e(5)).unwrap());
+        let m = Kind::Map(Box::new(Kind::Point));
+        let map = |pairs: &[(u64, u64)]| LatValue::Map(Arc::new(pairs.iter().map(|(a, b)| (int(*a), e(*b))).collect()));
+        assert!(!m.leq(&map(&[(1, 5)]), &map(&[(1, 6)])).unwrap());
+        assert!(m.leq(&map(&[(1, 5)]), &map(&[(1, 5), (2, 1)])).unwrap());
+        assert_eq!(
+            Kind::Point
+                .eval(Op::Leq, &[Value::Lattice(e(5)), Value::Lattice(e(6))])
+                .unwrap(),
+            Value::Bool(false)
+        );
     }
 
     #[test]

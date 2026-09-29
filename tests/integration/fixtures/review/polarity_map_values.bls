@@ -1,0 +1,7 @@
+//! Slice 2 review: The values of a map lattice follow the map: a negated threshold over one on a same-tick cycle is BLS0502.
+
+program f1b version 1;
+cell m: LMap<u64, LSet<u64>>;
+start: on boot() { emit m(map[1 => set[1]]); }
+view small(k) = (k, s) in m where not s.contains(2);
+g: while small(k) { emit m(map[k => set[2]]); }

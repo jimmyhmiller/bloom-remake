@@ -1,0 +1,17 @@
+//! Slice 2 review: A header binding two different LPoint values holds both valuations; it must not merge them (no BLSR006).
+
+pub module M {
+    input ask(k: u64);
+    input put(j: u64, v: u64);
+    table p(j: u64, x: LPoint<u64>);
+    table seen(k: u64);
+    f: on put(j, v) { emit p(j, v); }
+    r: on ask(k), p(_, x) { emit seen(k); }
+}
+spec S for M {
+    nodes N;
+    fact put(1, 10) @ N at tick 1;
+    fact put(2, 20) @ N at tick 1;
+    fact ask(7) @ N at tick 2;
+    faults { eot: 2, eff: 1, crashes: 0, model: sync }
+}

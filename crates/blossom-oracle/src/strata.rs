@@ -36,14 +36,14 @@ pub(crate) fn stratify(p: &Program) -> Result<Vec<Stratum>, OracleError> {
     // Edges point from a relation to the relations it depends on.
     let mut graph = AdjacencyList::new(n);
     let mut strict: Vec<(usize, usize)> = Vec::new();
+    // Lattice reads that reach a use antitone or exact are points of order too (SEM-102).
+    let exact = blossom_ir::polarity::non_monotone_reads(p);
     for rule in p.rules.iter() {
         if rule.kind != RuleKind::Deductive {
             continue;
         }
         let head = rule.head.rel.index();
         let agg = is_aggregate(rule);
-        // Lattice reads that reach a use antitone or exact are points of order too (SEM-102).
-        let exact = blossom_ir::polarity::non_monotone_reads(p, rule);
         for (i, lit) in rule.body.lits.iter().enumerate() {
             let (rel, negated) = match lit {
                 Literal::Pos(a) => (a.rel, false),
@@ -55,7 +55,7 @@ pub(crate) fn stratify(p: &Program) -> Result<Vec<Stratum>, OracleError> {
             graph
                 .add_edge(head, body)
                 .map_err(|e| internal_error!("dependency graph: {e}"))?;
-            if negated || agg || exact.contains(&i) {
+            if negated || agg || exact.contains(&(rule.id, i)) {
                 strict.push((head, body));
             }
         }

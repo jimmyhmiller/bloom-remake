@@ -69,6 +69,9 @@ pub trait Rules {
     /// The source-level relation a relation implements, for relation-level support.
     fn logical(&self, space: Space, rel: RelId) -> Option<u32>;
     fn constant(&self, space: Space, id: ConstId) -> Option<&Value>;
+    /// The lattice columns of a lattice-valued relation (empty for a set relation): its rows are merged per key, so a
+    /// cell's row changes when a contribution is gained or lost (SEM-100).
+    fn lattice_cols(&self, space: Space, rel: RelId) -> Vec<usize>;
 }
 
 /// What a seeded enumeration looks for.
@@ -744,6 +747,18 @@ impl<'a> Encoder<'a> {
         if frozen == Hazard::True {
             return Ok(Hazard::True);
         }
+        // A lattice cell's row is the join of its contributions: a new row for a key appears when a contribution is
+        // gained (with any value) or lost (the join shrinks).
+        let lattice = rules.lattice_cols(space, rel);
+        if !lattice.is_empty() {
+            let key = key_pattern(pattern, &lattice);
+            let gained = self.appear_origin(origin, space, rel, loc, tick, &key)?;
+            if gained == Hazard::True {
+                return Ok(Hazard::True);
+            }
+            let lost = self.remove(space, rel, loc, tick, &key)?;
+            return self.or(vec![frozen, gained, lost]);
+        }
         let derived = self.appear_origin(origin, space, rel, loc, tick, pattern)?;
         self.or(vec![frozen, derived])
     }
@@ -906,11 +921,30 @@ impl<'a> Encoder<'a> {
         let mut required = Vec::new();
         let mut options = Vec::new();
         for lit in &rule.body.lits {
+            // A lookup reads a cell, which faults can grow or shrink (or make absent or present): either may enable
+            // the rule, depending on how its value is used.
+            if let Literal::Lookup { rel, key, .. } = lit {
+                let n = rules.lattice_cols(space, *rel).len() + key.len();
+                let mut pat: Pattern = key
+                    .iter()
+                    .map(|t| match t {
+                        Term::Const(c) => rules.constant(space, *c).cloned(),
+                        Term::Var(v) => sigma.get(v.index()).cloned().flatten(),
+                        Term::Wild => None,
+                    })
+                    .collect();
+                pat.resize(n, None);
+                let pat = lookup_pattern(rules, space, *rel, &pat);
+                options.push(self.appear(space, *rel, atom_loc, tick, &pat)?);
+                options.push(self.remove(space, *rel, atom_loc, tick, &pat)?);
+                continue;
+            }
             let (atom, negated) = match lit {
                 Literal::Pos(a) => (a, false),
                 Literal::Neg(a) => (a, true),
                 _ => continue,
             };
+            let lattice = rules.lattice_cols(space, atom.rel);
             let pat: Pattern = atom
                 .args
                 .iter()
@@ -920,6 +954,25 @@ impl<'a> Encoder<'a> {
                     Term::Wild => None,
                 })
                 .collect();
+            // A lattice cell matches by its key: its value can change either way.
+            let pat = if lattice.is_empty() {
+                pat
+            } else {
+                key_pattern(&pat, &lattice)
+            };
+            if !lattice.is_empty() && !negated {
+                if !self.exists(space, atom.rel, atom_loc, tick, &pat)? {
+                    let h = self.appear(space, atom.rel, atom_loc, tick, &pat)?;
+                    if h == Hazard::False {
+                        return Ok(Hazard::False);
+                    }
+                    required.push(h);
+                    continue;
+                }
+                options.push(self.appear(space, atom.rel, atom_loc, tick, &pat)?);
+                options.push(self.remove(space, atom.rel, atom_loc, tick, &pat)?);
+                continue;
+            }
             if !negated && !aggregate && !self.exists(space, atom.rel, atom_loc, tick, &pat)? {
                 let h = self.appear(space, atom.rel, atom_loc, tick, &pat)?;
                 if h == Hazard::False {
@@ -1266,4 +1319,29 @@ pub fn minimal_extensions(
         }
     }
     Ok(out)
+}
+
+/// `pattern` with the lattice columns open: a cell is identified by its key.
+fn key_pattern(pattern: &[Option<Value>], lattice: &[usize]) -> Pattern {
+    pattern
+        .iter()
+        .enumerate()
+        .map(|(i, v)| if lattice.contains(&i) { None } else { v.clone() })
+        .collect()
+}
+
+/// A lookup's key values placed at the relation's key columns (the columns that are not lattice columns, in order).
+fn lookup_pattern(rules: &dyn Rules, space: Space, rel: RelId, key: &[Option<Value>]) -> Pattern {
+    let lattice = rules.lattice_cols(space, rel);
+    let n = key.len();
+    let mut values = key.iter().cloned();
+    (0..n)
+        .map(|i| {
+            if lattice.contains(&i) {
+                None
+            } else {
+                values.next().flatten()
+            }
+        })
+        .collect()
 }

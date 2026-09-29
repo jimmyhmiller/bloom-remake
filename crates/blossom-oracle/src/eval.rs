@@ -336,6 +336,10 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
         }
         let mut recursive_firings: BTreeSet<FiringRecord> = BTreeSet::new();
         let mut rounds = 0u32;
+        // In a recursive stratum a rule may meet a value its stratum has not finished growing (an `LMax` below its
+        // fixpoint, say): a program error there is judged only at the fixpoint, where every rule runs once more with
+        // errors fatal (and any row that run adds resumes the iteration).
+        let mut strict = !stratum.recursive;
         loop {
             let mut changed = false;
             for &id in &stratum.rules {
@@ -344,7 +348,11 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
                     continue;
                 }
                 db.prepare(rule, plan);
-                let derived = derive(&scope, &db, rule, plan, input.capture).map_err(|e| fail(rule, e))?;
+                let derived = match derive(&scope, &db, rule, plan, input.capture) {
+                    Ok(rows) => rows,
+                    Err(ExprError::Arithmetic(_) | ExprError::Conflict(_)) if !strict => continue,
+                    Err(e) => return Err(fail(rule, e)),
+                };
                 for (row, firing) in derived {
                     changed |= db.insert(rule.head.rel, row).map_err(|e| fail(rule, e))?;
                     if let Some(f) = firing {
@@ -356,10 +364,12 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
                     }
                 }
             }
-            if !stratum.recursive || !changed {
+            if !stratum.recursive || (strict && !changed) {
                 firings.extend(std::mem::take(&mut recursive_firings));
                 break;
             }
+            // Quiescent: run once more with errors fatal; a row it adds resumes the iteration.
+            strict = !changed;
             rounds += 1;
             if rounds >= oracle.limits.max_rounds {
                 let label = stratum

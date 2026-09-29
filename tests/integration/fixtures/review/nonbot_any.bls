@@ -1,0 +1,16 @@
+//! Slice 2 review: A variable bound by an atom in one `any` alternative and by a `let` in another may be ⊥: `reveal!` is an Option.
+
+pub module M {
+    input seed(k: u64, v: u64);
+    cell c: LMax<u64>;
+    table a(k: u64, x: LMax<u64>);
+    table out(k: u64, r: u64);
+    feed: on seed(k, v) { emit a(k, v); }
+    look: while seed(k, _), any { a(k, x); let x = c; }, let r = reveal!(x) { emit out(k, r); }
+}
+spec S for M {
+    nodes N;
+    fact seed(1, 5) @ N at tick 1;
+    fact seed(2, 3) @ N at tick 1;
+    faults { eot: 2, eff: 1, crashes: 0, model: sync }
+}

@@ -586,6 +586,9 @@ pub enum ConstructKind {
     Forall {
         fa: RelId,
         miss: RelId,
+        /// The domain is closed (a static relation or a role's members): the quantifier is then monotone in its body
+        /// (LANGUAGE §9.8), although its expansion negates.
+        closed: bool,
     },
     DeltaRead {
         rel: RelId,

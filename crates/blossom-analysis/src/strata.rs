@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use blossom_base::graph::{AdjacencyList, tarjan_scc};
 use blossom_base::{Diagnostic, Diagnostics, InternalError, RelId, Span, code, internal_error};
-use blossom_ir::core::{ConstructKind, HeadArg, Literal, Origin, Program, RuleKind};
+use blossom_ir::core::{ConstructKind, HeadArg, Literal, Origin, Persistence, Program, RuleKind};
 
 /// One dependency: `head` reads `body` in a deductive rule, at `span`; `strict` for a point of order, `choice` when
 /// the rule belongs to a choice's expansion (its priority aggregate or sticky negation).
@@ -29,13 +29,13 @@ pub fn check(p: &Program) -> Result<Diagnostics, InternalError> {
     let n = p.rels.len();
     let mut graph = AdjacencyList::new(n);
     let mut edges = Vec::new();
+    let exact = blossom_ir::polarity::non_monotone_reads(p);
     for rule in p.rules.iter() {
         if rule.kind != RuleKind::Deductive {
             continue;
         }
         let head = rule.head.rel.index();
         let agg = rule.head.args.iter().any(|a| matches!(a, HeadArg::Agg(_)));
-        let exact = blossom_ir::polarity::non_monotone_reads(p, rule);
         let choice = rule
             .construct
             .and_then(|c| p.constructs.get(c))
@@ -54,7 +54,7 @@ pub fn check(p: &Program) -> Result<Diagnostics, InternalError> {
             edges.push(Edge {
                 head,
                 body,
-                strict: negated || agg || exact.contains(&i),
+                strict: negated || agg || exact.contains(&(rule.id, i)),
                 choice,
                 span,
             });
@@ -62,6 +62,36 @@ pub fn check(p: &Program) -> Result<Diagnostics, InternalError> {
     }
     let sccs = tarjan_scc(&graph).map_err(|e| internal_error!("dependency graph: {e}"))?;
     let mut diags = Diagnostics::new();
+    // SEM-086: a relation with a resolution policy may not lie on a same-tick cycle (its candidates would depend on
+    // what the policy keeps).
+    for (id, r) in p.rels.iter_enumerated() {
+        if !matches!(r.persistence, Persistence::Resolved { .. }) {
+            continue;
+        }
+        let i = id.index();
+        let comp = sccs.component_of.get(i);
+        let on_cycle = edges.iter().any(|e| {
+            (e.head == i && e.body == i)
+                || (comp.is_some()
+                    && sccs.component_of.get(e.head) == comp
+                    && sccs.component_of.get(e.body) == comp
+                    && (e.head == i || e.body == i)
+                    && e.head != e.body)
+        });
+        if on_cycle {
+            diags.push(
+                Diagnostic::new(
+                    code!("BLS0503"),
+                    format!(
+                        "`{}` has a `resolve` policy and lies on a same-tick cycle (SEM-086)",
+                        r.name
+                    ),
+                )
+                .with_primary(r.span)
+                .with_note("write into it with `next`, or break the cycle"),
+            );
+        }
+    }
     let mut reported = BTreeSet::new();
     let component = |e: &Edge| match (sccs.component_of.get(e.head), sccs.component_of.get(e.body)) {
         (Some(a), Some(b)) if a == b => Some(*a),
