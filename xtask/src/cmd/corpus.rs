@@ -128,7 +128,8 @@ pub fn run(args: Args) -> ExitCode {
             let started = Instant::now();
             let outcome = run_backend(&case, &manifest, backend, workers, args.max_runs);
             let secs = started.elapsed().as_secs_f64();
-            let in_gate = gate_scope(&milestone, &args.area, &name, backend);
+            let features = strings(manifest.get("features"));
+            let in_gate = gate_scope(&milestone, &args.area, &name, &features, backend);
             match (&outcome, status) {
                 (Outcome::Pass(msg), "pass") => {
                     counts.0 += 1;
@@ -200,10 +201,20 @@ pub fn run(args: Args) -> ExitCode {
 }
 
 /// Whether a backend of a case belongs to the current slice's gate (docs/design/SLICES.md).
-fn gate_scope(milestone: &str, area: &str, case: &str, backend: &str) -> bool {
+fn gate_scope(milestone: &str, area: &str, case: &str, features: &[String], backend: &str) -> bool {
+    // The P1 search reductions behind Molly's published run counts (single-shot mode, vacuity pruning, symmetry)
+    // are not built yet; cases that list them wait for them (SLICES.md, slice 1, "Stretch").
+    let needs_p1_reductions = features
+        .iter()
+        .any(|f| matches!(f.as_str(), "TEST-030" | "TEST-031" | "TEST-032"));
     match milestone {
         // BENCH-133d (Flux 22/21/1) is excluded from S1's gate: SLICES.md, slice 1, "Exception".
-        "S1" => area == "ldfi" && (backend == "oracle" || backend == "ldfi") && !case.starts_with("BENCH-133d"),
+        "S1" => {
+            area == "ldfi"
+                && (backend == "oracle" || backend == "ldfi")
+                && !case.starts_with("BENCH-133d")
+                && !needs_p1_reductions
+        }
         _ => false,
     }
 }
@@ -520,8 +531,14 @@ fn ldfi_backend(files: &[PathBuf], m: &toml::Table, workers: usize, max_runs: u6
             )
         }
     };
+    // A published run count is part of the expectation (the BENCH-136 cases pin Molly's counts, which need the P1
+    // search reductions): exceeding it fails the case.
     if let Some(max) = int("runs_max") {
-        note.push_str(&format!(" (published {max})"));
+        let lineage = matches!(report.method, blossom_ldfi::Method::Lineage);
+        if !lineage || report.runs > max {
+            return Outcome::Fail(format!("{note}, but the published run count is at most {max}"));
+        }
+        note.push_str(&format!(" (published at most {max})"));
     }
     if let Some(stated) = ld.get("falsifiers").and_then(toml::Value::as_array) {
         let mut want_sets: Vec<Vec<String>> = stated

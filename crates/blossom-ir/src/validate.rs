@@ -682,10 +682,12 @@ fn agg_type(p: &Program, r: &Rule, a: &AggCall, ty: TypeId) -> bool {
     };
     let ola_result = || matches!(p.types.get(ty), Some(TypeDef::Tuple(fields)) if fields.len()==3 && fields.iter().all(|field| matches!(p.types.get(*field),Some(TypeDef::F64))));
     match &a.func {
+        // A count may land in any integer column (checked on overflow, BLSR004): `u64` for Blossom's `count`, `i64` for
+        // Molly's `count<X>` (LANGUAGE §21.1).
         AggFunc::Count => {
             a.args.len() <= 1
                 && a.args.iter().all(|arg| !matches!(arg, Term::Wild))
-                && matches!(p.types.get(ty), Some(TypeDef::Int(IntTy::U64)))
+                && matches!(p.types.get(ty), Some(TypeDef::Int(_)))
         }
         AggFunc::OlaCount => (1..=2).contains(&a.args.len()) && ola_result() && a.args.first().is_some_and(is_f64),
         AggFunc::BoolAnd | AggFunc::BoolOr => {

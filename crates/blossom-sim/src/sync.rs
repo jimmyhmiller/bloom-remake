@@ -26,6 +26,9 @@ impl Evaluator for Oracle {
 /// Why a simulation stopped.
 #[derive(Debug, thiserror::Error)]
 pub enum SimError {
+    /// The program cannot be prepared for evaluation (for example, it does not stratify).
+    #[error("the program cannot run: {0}")]
+    Load(OracleError),
     /// A node's tick failed: a program error (BLSRnnn) or an evaluator error.
     #[error("node {} at tick {}: {error}", .node.0, .tick.0)]
     Node {
@@ -89,7 +92,9 @@ pub enum CrashView {
 /// How to run.
 #[derive(Clone, Debug)]
 pub struct SyncConfig {
-    /// Rounds `0..=last` run.
+    /// Rounds before `first` are empty: no node runs (the `.ded` profile starts at Molly's round 1).
+    pub first: Tick,
+    /// Rounds `first..=last` run.
     pub last: Tick,
     pub crash_view: CrashView,
     /// Whether to record every node's firings.
@@ -180,7 +185,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
         self.inputs.entry((tick, node)).or_default().push((rel, row));
     }
 
-    /// Runs rounds `0..=config.last` under `faults`.
+    /// Runs rounds `config.first..=config.last` under `faults` (earlier rounds are empty).
     pub fn run(&self, config: &SyncConfig, faults: &FaultSchedule) -> Result<SyncRun, SimError> {
         let n = self.nodes as usize;
         let mut run = SyncRun {
@@ -193,6 +198,10 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
         let empty: Vec<(RelId, Row)> = Vec::new();
         for t in 0..=config.last.0 {
             let tick = Tick(t);
+            if tick < config.first {
+                run.rounds.push(vec![NodeTick::default(); n]);
+                continue;
+            }
             let mut round = Vec::with_capacity(n);
             let mut next_carried = Vec::with_capacity(n);
             let mut next_inbox: Vec<Vec<Delivery>> = vec![Vec::new(); n];
@@ -293,4 +302,117 @@ fn round_of(rounds: &[Vec<NodeTick>], t: Option<u64>, node: usize) -> Instance {
         .and_then(|r| r.get(node))
         .map(|nt| nt.instance.clone())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use blossom_base::RelId;
+    use blossom_oracle::{Send, TickOutput};
+    use blossom_value::Value;
+
+    use super::*;
+
+    /// Every node sends `ping(n)` to every other node and to itself at every tick it runs.
+    struct Pinger {
+        nodes: u32,
+    }
+
+    const PING: RelId = RelId::from_raw(0);
+
+    impl Evaluator for Pinger {
+        fn tick(&self, input: &TickInput<'_>) -> Result<TickOutput, OracleError> {
+            let mut out = TickOutput::default();
+            for d in input.delivered {
+                out.instance.insert(PING, d.row.clone());
+            }
+            for to in (0..self.nodes).map(NodeId) {
+                out.outbox.insert(Send {
+                    rel: PING,
+                    to,
+                    row: Arc::from(vec![Value::Node(to), Value::Node(input.node)]),
+                });
+            }
+            Ok(out)
+        }
+    }
+
+    fn senders(run: &SyncRun, t: u64, node: u32) -> Vec<u32> {
+        run.node_tick(Tick(t), NodeId(node))
+            .unwrap()
+            .delivered
+            .iter()
+            .map(|d| d.from.0)
+            .collect()
+    }
+
+    fn config(view: CrashView) -> SyncConfig {
+        SyncConfig {
+            first: Tick(1),
+            last: Tick(3),
+            crash_view: view,
+            capture: false,
+        }
+    }
+
+    #[test]
+    fn messages_arrive_one_tick_later_unless_omitted() {
+        let eval = Pinger { nodes: 2 };
+        let world = SyncWorld::new(&eval, 2);
+        let mut faults = FaultSchedule::default();
+        faults.omissions.insert(Omission {
+            from: NodeId(0),
+            to: NodeId(1),
+            send: Tick(1),
+        });
+        let run = world.run(&config(CrashView::MollyContinue), &faults).unwrap();
+        assert!(
+            run.node_tick(Tick(0), NodeId(0)).is_some_and(|nt| !nt.ran),
+            "nothing runs before the first tick"
+        );
+        assert_eq!(
+            senders(&run, 1, 1),
+            Vec::<u32>::new(),
+            "nothing is delivered at the first tick"
+        );
+        assert_eq!(
+            senders(&run, 2, 1),
+            [1],
+            "0's message sent at 1 was lost; 1's own arrives"
+        );
+        assert_eq!(senders(&run, 3, 1), [0, 1]);
+        assert!(
+            run.messages
+                .iter()
+                .any(|m| m.from == NodeId(0) && m.to == NodeId(1) && m.fate == Fate::Lost)
+        );
+        assert!(
+            run.messages
+                .iter()
+                .filter(|m| m.send == Tick(3))
+                .all(|m| m.fate == Fate::AfterEnd)
+        );
+    }
+
+    #[test]
+    fn a_crashed_node_stops_sending_to_others_but_keeps_its_own_messages() {
+        let eval = Pinger { nodes: 2 };
+        let world = SyncWorld::new(&eval, 2);
+        let mut faults = FaultSchedule::default();
+        faults.crashes.insert(NodeId(0), Tick(2));
+        let run = world.run(&config(CrashView::MollyContinue), &faults).unwrap();
+        assert_eq!(senders(&run, 2, 1), [0, 1], "sent at 1, before the crash");
+        assert_eq!(senders(&run, 3, 1), [1], "0 crashed at 2: nothing more from it");
+        assert_eq!(
+            senders(&run, 3, 0),
+            [0, 1],
+            "a crashed node keeps receiving and its own messages"
+        );
+        let frozen = world.run(&config(CrashView::Frozen), &faults).unwrap();
+        assert!(
+            frozen.node_tick(Tick(2), NodeId(0)).is_some_and(|nt| !nt.ran),
+            "a frozen node does not run"
+        );
+    }
 }

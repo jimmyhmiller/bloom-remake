@@ -208,16 +208,6 @@ impl Values<'_> {
     fn literal(&self, t: &Term, ty: ColTy) -> Result<Result<Value, Diagnostic>, InternalError> {
         Ok(Ok(match (t, ty) {
             (Term::Int(n, _), ColTy::I64) => Value::Int(IntValue::I64(*n)),
-            (Term::Int(n, s), ColTy::U64) => match u64::try_from(*n) {
-                Ok(v) => Value::Int(IntValue::U64(v)),
-                Err(_) => {
-                    return Ok(Err(Diagnostic::new(
-                        code!("BLS0300"),
-                        "a negative integer where a `u64` count is expected",
-                    )
-                    .with_primary(*s)));
-                }
-            },
             (Term::Str(text, _), ColTy::Str) => Value::Str(text.clone()),
             (Term::Str(text, s), ColTy::Node) => match self.deployment.id(text) {
                 Some(id) => Value::Node(id),
@@ -310,7 +300,6 @@ impl Lowerer {
         let mut ty = BTreeMap::new();
         for (t, def) in [
             (ColTy::I64, TypeDef::Int(IntTy::I64)),
-            (ColTy::U64, TypeDef::Int(IntTy::U64)),
             (ColTy::Str, TypeDef::Str),
             (ColTy::Node, TypeDef::Node(None)),
         ] {

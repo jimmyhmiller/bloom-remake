@@ -11,11 +11,14 @@ use blossom_artifact::ded::{DedArtifact, DedRelIdx, DedRelKind, EdgeTime};
 #[derive(Clone, Debug, Default)]
 pub struct Preds {
     preds: BTreeMap<u32, BTreeMap<u32, bool>>,
+    /// Relations the crash oracle reaches: faults add crash tuples, so these can gain tuples.
+    from_crash: BTreeSet<u32>,
 }
 
 impl Preds {
-    /// Reachability over a `.ded` program's rule graph. The crash oracle is not a source: faults cannot remove its
-    /// facts.
+    /// Reachability over a `.ded` program's rule graph. The crash oracle is not a source (faults cannot remove its
+    /// facts, and the crash premises encode its own changes); the relations it reaches are recorded, since faults add
+    /// crash facts.
     pub fn of(artifact: &DedArtifact) -> Preds {
         let mut edges: BTreeMap<u32, Vec<(u32, bool)>> = BTreeMap::new();
         for e in &artifact.edges {
@@ -25,8 +28,18 @@ impl Preds {
                 .push((e.to.0, e.time == EdgeTime::Deductive));
         }
         let mut preds: BTreeMap<u32, BTreeMap<u32, bool>> = BTreeMap::new();
+        let mut from_crash = BTreeSet::new();
         for (src, rel) in artifact.rels.iter().enumerate() {
             if rel.kind == DedRelKind::Crash {
+                let Ok(src) = u32::try_from(src) else { continue };
+                let mut work = vec![src];
+                while let Some(v) = work.pop() {
+                    for &(w, _) in edges.get(&v).map_or(&[][..], Vec::as_slice) {
+                        if from_crash.insert(w) {
+                            work.push(w);
+                        }
+                    }
+                }
                 continue;
             }
             let Ok(src) = u32::try_from(src) else { continue };
@@ -44,7 +57,12 @@ impl Preds {
                 }
             }
         }
-        Preds { preds }
+        Preds { preds, from_crash }
+    }
+
+    /// Whether the crash oracle reaches `p`.
+    pub fn crash_reaches(&self, p: u32) -> bool {
+        self.from_crash.contains(&p)
     }
 
     /// The relations `p` is reachable from, with the deductive-path flag.

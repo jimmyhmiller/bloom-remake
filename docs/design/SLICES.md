@@ -69,7 +69,9 @@ Molly's programs, run unchanged, through the whole LDFI pipeline, reproducing th
   expectation source; a disagreement is resolved from the literature).
 
 **Stretch (not gating).** BENCH-136 run counts at most the published ones; those need the P1 search reductions
-(TEST-030–032). Cases the gate cannot reach are listed with the reason in the slice notes.
+(TEST-030–032). Cases whose features list those reductions (BENCH-130q and BENCH-136a–i) are outside the gate:
+they pass, and are ratcheted, only when their lineage-driven run count is at most the published one. Cases the gate
+cannot reach are listed with the reason in the slice notes.
 
 Former work packages covered in part: M3.6, M4.1, M5.2, M5.7, M7.2, M8.1 (and the SAT layer from M2.4, now consumed).
 

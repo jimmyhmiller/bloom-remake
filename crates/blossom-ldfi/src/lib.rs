@@ -22,7 +22,7 @@ pub mod lineage;
 pub mod reach;
 pub mod report;
 
-pub use driver::{LdfiConfig, LdfiReport, Method, SearchStats, Verdict, falsifiers, run};
+pub use driver::{Fallback, LdfiConfig, LdfiReport, Method, SearchStats, Verdict, falsifiers, run};
 pub use faults::FailureSpec;
 pub use hazard::NegSupport;
 
@@ -42,9 +42,18 @@ pub enum LdfiError {
     Sim(#[from] blossom_sim::SimError),
     #[error(transparent)]
     Sat(#[from] blossom_sat::SatError),
-    /// The search exceeded its run budget before reaching a verdict.
+    /// The lineage-driven search exceeded its run budget before reaching a verdict.
     #[error("no verdict within {0} runs")]
-    Budget(u64),
+    RunBudget(u64),
+    /// Exhaustive certification exceeded its state budget.
+    #[error("no verdict within {0} states")]
+    StateBudget(u64),
+    /// The lineage-driven search found no counterexample, but some hazard held already under a run's own faults, so
+    /// its lineage cannot certify the program (see `hazard::Extensions::incomplete`).
+    #[error(
+        "inconclusive: the lineage-driven search found no counterexample, but its lineage was incomplete; certify exhaustively"
+    )]
+    Incomplete,
     #[error(transparent)]
     Unimplemented(#[from] Unimplemented),
     #[error(transparent)]

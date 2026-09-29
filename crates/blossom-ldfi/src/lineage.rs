@@ -21,9 +21,9 @@ use std::sync::Arc;
 use blossom_artifact::ded::{DedArtifact, DedRelIdx, DedRelKind, SpecFeed};
 use blossom_base::{InternalError, RelId, internal_error};
 use blossom_ir::core::{RelClass, RuleKind};
-use blossom_ir::obs::{FiringRecord, NegRead};
+use blossom_ir::obs::{FiringKind, FiringRecord, NegRead};
+use blossom_prov::{AggGroup, Loc, NegRead as ProvNegRead};
 use blossom_prov::{Firing, GoalId, GoalKey, Premise, ProvGraph, Space};
-use blossom_prov::{Loc, NegRead as ProvNegRead};
 use blossom_sim::ded::Outcome;
 use blossom_sim::{Fate, SyncRun};
 use blossom_value::{
@@ -65,7 +65,7 @@ pub fn build(artifact: &DedArtifact, run: &SyncRun, outcome: &Outcome) -> Result
                             row: row.clone(),
                         },
                         main_protocol.get(rel).copied(),
-                    );
+                    )?;
                     if leaf {
                         g.set_leaf(id);
                     }
@@ -139,10 +139,15 @@ pub fn build(artifact: &DedArtifact, run: &SyncRun, outcome: &Outcome) -> Result
                         tick,
                         pattern: neg.pattern.clone(),
                         logical,
-                    });
+                    })?;
                     premises.push(Premise::Neg(id));
                 }
-                g.add_firing(head, firing(Space::Protocol, f, Some(node), tick, premises));
+                if f.kind == FiringKind::Aggregate {
+                    let id =
+                        g.aggregate_group(aggregate_group(Space::Protocol, rule, Loc::Node(node), tick, &f.head))?;
+                    premises.push(Premise::Aggregate(id));
+                }
+                g.add_firing(head, firing(Space::Protocol, f, Some(node), tick, premises))?;
             }
         }
     }
@@ -178,7 +183,7 @@ pub fn build(artifact: &DedArtifact, run: &SyncRun, outcome: &Outcome) -> Result
                         row: row.clone(),
                     },
                     main_spec.get(rel).copied(),
-                );
+                )?;
             }
         }
         let spec_program = spec.program.get();
@@ -196,7 +201,14 @@ pub fn build(artifact: &DedArtifact, run: &SyncRun, outcome: &Outcome) -> Result
             let mut premises = Vec::with_capacity(f.reads.len() + f.negations.len());
             for r in &f.reads {
                 match feeds.get(&r.rel) {
-                    Some(SpecFeed::Crash { .. }) => {}
+                    // crash(Observer, Node, Time): lost if the node crashes earlier.
+                    Some(SpecFeed::Crash { .. }) => match (r.row.get(1), r.row.get(2)) {
+                        (Some(Value::Node(node)), Some(time)) => premises.push(Premise::CrashPresent {
+                            node: *node,
+                            time: crash_time(time)?,
+                        }),
+                        other => return Err(internal_error!("a crash-oracle tuple {other:?}")),
+                    },
                     Some(SpecFeed::AtEot { rel, .. }) => {
                         premises.push(Premise::Goal(snapshot_goal(&g, artifact, *rel, eot, &r.row)?))
                     }
@@ -221,7 +233,11 @@ pub fn build(artifact: &DedArtifact, run: &SyncRun, outcome: &Outcome) -> Result
             for neg in &f.negations {
                 premises.push(spec_negation(&mut g, artifact, &feeds, &main_spec, neg, eot)?);
             }
-            g.add_firing(head, firing(Space::Spec, f, None, eot, premises));
+            if f.kind == FiringKind::Aggregate {
+                let id = g.aggregate_group(aggregate_group(Space::Spec, rule, Loc::Global, eot, &f.head))?;
+                premises.push(Premise::Aggregate(id));
+            }
+            g.add_firing(head, firing(Space::Spec, f, None, eot, premises))?;
         }
     }
     Ok(g)
@@ -287,7 +303,12 @@ fn spec_negation(
                 Some(None) => None,
                 other => return Err(internal_error!("a crash-oracle read with node column {other:?}")),
             };
-            return Ok(Premise::CrashOracle { node });
+            let time = match neg.pattern.get(2) {
+                Some(Some(t)) => Some(crash_time(t)?),
+                Some(None) => None,
+                other => return Err(internal_error!("a crash-oracle read with time column {other:?}")),
+            };
+            return Ok(Premise::CrashAbsent { node, time });
         }
         Some(SpecFeed::AtEot { rel, .. } | SpecFeed::AtTick { rel, .. }) => rel.0,
         None => main_spec
@@ -313,18 +334,51 @@ fn spec_negation(
         tick,
         pattern: neg.pattern.clone(),
         logical,
-    });
+    })?;
     Ok(Premise::Neg(id))
+}
+
+/// A crash oracle's time column as a tick (Molly's INT, an `i64`).
+fn crash_time(v: &Value) -> Result<Tick, InternalError> {
+    match v {
+        Value::Int(blossom_value::value::IntValue::I64(t)) => u64::try_from(*t)
+            .map(Tick)
+            .map_err(|_| internal_error!("a negative crash time {t}")),
+        other => Err(internal_error!("a crash time {other:?}")),
+    }
+}
+
+/// An aggregate firing's group: its head with the aggregate columns open.
+fn aggregate_group(space: Space, rule: &blossom_ir::core::Rule, loc: Loc, tick: Tick, head: &[Value]) -> AggGroup {
+    let key = rule
+        .head
+        .args
+        .iter()
+        .zip(head)
+        .map(|(arg, v)| match arg {
+            blossom_ir::core::HeadArg::Agg(_) => None,
+            blossom_ir::core::HeadArg::Term(_) => Some(v.clone()),
+        })
+        .collect();
+    AggGroup {
+        space,
+        rule: rule.id,
+        loc,
+        tick,
+        key,
+    }
 }
 
 /// How the tuples of a `.ded` program's relations come about, for tuple-level negative support.
 pub struct DedRules<'a> {
     artifact: &'a DedArtifact,
     feeds: BTreeMap<RelId, SpecFeed>,
+    nodes: u32,
 }
 
 impl<'a> DedRules<'a> {
-    pub fn new(artifact: &'a DedArtifact) -> DedRules<'a> {
+    pub fn new(artifact: &'a DedArtifact) -> Result<DedRules<'a>, InternalError> {
+        let nodes = u32::try_from(artifact.nodes.len()).map_err(|_| internal_error!("too many nodes"))?;
         let mut feeds = BTreeMap::new();
         if let Some(spec) = &artifact.spec {
             for feed in &spec.feeds {
@@ -334,13 +388,27 @@ impl<'a> DedRules<'a> {
                 feeds.insert(rel, *feed);
             }
         }
-        DedRules { artifact, feeds }
+        Ok(DedRules { artifact, feeds, nodes })
     }
 }
 
 impl crate::hazard::Rules for DedRules<'_> {
     fn nodes(&self) -> u32 {
-        u32::try_from(self.artifact.nodes.len()).unwrap_or(u32::MAX)
+        self.nodes
+    }
+
+    fn rule(&self, space: Space, id: blossom_base::RuleId) -> Option<&blossom_ir::core::Rule> {
+        match space {
+            Space::Protocol => self.artifact.protocol.get().rules.get(id),
+            Space::Spec => self.artifact.spec.as_ref().and_then(|s| s.program.get().rules.get(id)),
+        }
+    }
+
+    fn logical(&self, space: Space, rel: RelId) -> Option<u32> {
+        match space {
+            Space::Protocol => self.artifact.protocol_owner(rel).map(|i| i.0),
+            Space::Spec => self.artifact.spec_owner(rel).map(|i| i.0),
+        }
     }
 
     fn constant(&self, space: Space, id: blossom_base::ConstId) -> Option<&Value> {
@@ -350,36 +418,40 @@ impl crate::hazard::Rules for DedRules<'_> {
         }
     }
 
-    fn origin(&self, space: Space, rel: RelId) -> crate::hazard::Origin<'_> {
+    fn origin(&self, space: Space, rel: RelId) -> Result<crate::hazard::Origin<'_>, InternalError> {
         use crate::hazard::Origin;
+        let snapshot_of = |ded: DedRelIdx| {
+            self.artifact
+                .rel(ded)
+                .and_then(|r| r.protocol)
+                .ok_or_else(|| internal_error!("a spec snapshot of a relation without a protocol relation"))
+        };
         let program = match space {
             Space::Protocol => self.artifact.protocol.get(),
             Space::Spec => match self.feeds.get(&rel) {
-                Some(SpecFeed::Crash { .. }) => return Origin::Crash,
+                Some(SpecFeed::Crash { .. }) => return Ok(Origin::Crash),
                 Some(SpecFeed::AtEot { rel: ded, .. }) => {
-                    return match self.artifact.rel(*ded).and_then(|r| r.protocol) {
-                        Some(protocol) => Origin::Snapshot { protocol, tick: None },
-                        None => Origin::Input,
-                    };
+                    return Ok(Origin::Snapshot {
+                        protocol: snapshot_of(*ded)?,
+                        tick: None,
+                    });
                 }
                 Some(SpecFeed::AtTick { rel: ded, tick, .. }) => {
-                    return match self.artifact.rel(*ded).and_then(|r| r.protocol) {
-                        Some(protocol) => Origin::Snapshot {
-                            protocol,
-                            tick: Some(*tick),
-                        },
-                        None => Origin::Input,
-                    };
+                    return Ok(Origin::Snapshot {
+                        protocol: snapshot_of(*ded)?,
+                        tick: Some(*tick),
+                    });
                 }
                 None => match &self.artifact.spec {
                     Some(s) => s.program.get(),
-                    None => return Origin::Input,
+                    None => return Err(internal_error!("a spec relation in a program without a spec")),
                 },
             },
         };
         match program.rels.get(rel).map(|r| &r.class) {
             Some(RelClass::Idb | RelClass::Channel(_)) => {}
-            _ => return Origin::Input,
+            Some(_) => return Ok(Origin::Input),
+            None => return Err(internal_error!("unknown relation {rel:?}")),
         }
         let mut deductive = Vec::new();
         let mut inductive = Vec::new();
@@ -391,10 +463,10 @@ impl crate::hazard::Rules for DedRules<'_> {
                 RuleKind::Async => asynchronous.push(rule),
             }
         }
-        Origin::Rules {
+        Ok(Origin::Rules {
             deductive,
             inductive,
             asynchronous,
-        }
+        })
     }
 }
