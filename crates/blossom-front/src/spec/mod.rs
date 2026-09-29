@@ -638,6 +638,37 @@ fn compile(
     }))
 }
 
+/// A compiled program root as the simulator runs it on its own: no spec, its IR relations as its logical relations.
+pub fn sim_artifact(bls: blossom_artifact::bls::BlsArtifact, round: Duration) -> SimArtifact {
+    let p = bls.program.get();
+    let rels = p
+        .rels
+        .iter()
+        .map(|r| LogicalRel {
+            name: Symbol::intern(&r.name.to_string()),
+            arity: r.schema.cols.len(),
+            kind: LogicalKind::Protocol,
+            protocol: Some(r.id),
+            channel: None,
+            input: None,
+            spec: None,
+            spec_at: Vec::new(),
+        })
+        .collect();
+    SimArtifact {
+        nodes: bls.nodes.clone(),
+        roles: bls.roles.clone(),
+        profile: Profile::Blossom { round },
+        protocol: bls.program.clone(),
+        inputs: Vec::new(),
+        statics: Vec::new(),
+        halt: bls.halt,
+        rels,
+        edges: Vec::new(),
+        spec: None,
+    }
+}
+
 type SpecCompiled = Option<(Hir, crate::lower::Lowered, SpecMode)>;
 
 /// The spec's views, resolved in spec mode over the target's relations, type-checked and lowered.
