@@ -33,6 +33,7 @@ fn goal(g: &mut ProvGraph, rel: u32, tick: u64, v: i64) -> GoalId {
         },
         Some(rel),
     )
+    .unwrap()
 }
 
 fn firing(premises: Vec<Premise>) -> Firing {
@@ -57,17 +58,21 @@ fn clock(from: NodeId, to: NodeId, send: u64) -> Premise {
 fn extensions(g: &ProvGraph, spec: &FailureSpec, seed: FaultSchedule, target: GoalId) -> BTreeSet<Vec<String>> {
     let preds = Preds::default();
     let mut solver = select_backend("cadical-plain").unwrap();
+    let setting = crate::hazard::Setting {
+        spec,
+        preds: &preds,
+        neg: crate::NegSupport::Conservative,
+        rules: None,
+    };
     minimal_extensions(
         g,
-        spec,
-        &preds,
-        crate::NegSupport::Conservative,
-        None,
+        setting,
         solver.as_mut(),
         &seed,
-        &[target],
+        &[crate::hazard::Target::Goal(target)],
     )
     .unwrap()
+    .hypotheses
     .iter()
     .map(|f| labels(f, &name))
     .collect()
@@ -84,8 +89,8 @@ fn set(items: &[&[&str]]) -> BTreeSet<Vec<String>> {
 fn two_supports() -> (ProvGraph, GoalId) {
     let mut g = ProvGraph::new();
     let target = goal(&mut g, 0, 3, 1);
-    g.add_firing(target, firing(vec![clock(A, C, 2)]));
-    g.add_firing(target, firing(vec![clock(B, C, 1)]));
+    g.add_firing(target, firing(vec![clock(A, C, 2)])).unwrap();
+    g.add_firing(target, firing(vec![clock(B, C, 1)])).unwrap();
     (g, target)
 }
 
@@ -163,9 +168,11 @@ fn a_premise_chain_is_falsified_anywhere() {
     let leaf = goal(&mut g, 2, 1, 0);
     g.set_leaf(leaf);
     let mid = goal(&mut g, 1, 2, 0);
-    g.add_firing(mid, firing(vec![clock(A, C, 1), Premise::Goal(leaf)]));
+    g.add_firing(mid, firing(vec![clock(A, C, 1), Premise::Goal(leaf)]))
+        .unwrap();
     let target = goal(&mut g, 0, 3, 0);
-    g.add_firing(target, firing(vec![Premise::Goal(mid), clock(B, C, 1)]));
+    g.add_firing(target, firing(vec![Premise::Goal(mid), clock(B, C, 1)]))
+        .unwrap();
     let spec = FailureSpec::new(4, 2, 0, 3).unwrap();
     assert_eq!(
         extensions(&g, &spec, FaultSchedule::default(), target),
@@ -179,9 +186,9 @@ fn a_derivation_through_its_own_goal_is_no_support() {
     let mut g = ProvGraph::new();
     let p = goal(&mut g, 0, 1, 0);
     let q = goal(&mut g, 1, 1, 0);
-    g.add_firing(p, firing(vec![Premise::Goal(q)]));
-    g.add_firing(p, firing(vec![clock(A, C, 1)]));
-    g.add_firing(q, firing(vec![Premise::Goal(p)]));
+    g.add_firing(p, firing(vec![Premise::Goal(q)])).unwrap();
+    g.add_firing(p, firing(vec![clock(A, C, 1)])).unwrap();
+    g.add_firing(q, firing(vec![Premise::Goal(p)])).unwrap();
     let spec = FailureSpec::new(3, 2, 0, 3).unwrap();
     assert_eq!(
         extensions(&g, &spec, FaultSchedule::default(), p),
@@ -221,4 +228,47 @@ fn fault_sets_normalize_and_compare_by_removed_clocks() {
     });
     assert!(!spec.admits(&bad), "a node's messages to itself cannot be lost");
     assert!(FailureSpec::new(4, 4, 0, 3).is_err(), "EFF must be before EOT");
+}
+
+#[test]
+fn crash_reads_depend_on_times_and_the_runs_own_crashes() {
+    // p holds while b does not crash at 1 (notin crash(_, b, 1)).
+    let mut g = ProvGraph::new();
+    let p = goal(&mut g, 0, 3, 0);
+    g.add_firing(
+        p,
+        firing(vec![Premise::CrashAbsent {
+            node: Some(B),
+            time: Some(Tick(1)),
+        }]),
+    )
+    .unwrap();
+    let spec = FailureSpec::new(4, 1, 1, 3).unwrap();
+    assert_eq!(extensions(&g, &spec, FaultSchedule::default(), p), set(&[&["C(b,1)"]]));
+    // The run already crashed b at 3: only moving that crash earlier, to 1, falsifies p.
+    let mut seed = FaultSchedule::default();
+    seed.crashes.insert(B, Tick(3));
+    assert_eq!(extensions(&g, &spec, seed, p), set(&[&["C(b,1)"]]));
+    // A crash of b at 2 already in the run cannot move to 3 (later), so a read of time 3 is safe.
+    let mut g2 = ProvGraph::new();
+    let q = goal(&mut g2, 0, 3, 0);
+    g2.add_firing(
+        q,
+        firing(vec![Premise::CrashAbsent {
+            node: Some(B),
+            time: Some(Tick(3)),
+        }]),
+    )
+    .unwrap();
+    let mut seed2 = FaultSchedule::default();
+    seed2.crashes.insert(B, Tick(2));
+    assert!(extensions(&g2, &spec, seed2, q).is_empty());
+    // A positive read of crash(_, b, 3) is lost by crashing b earlier.
+    let mut g3 = ProvGraph::new();
+    let r = goal(&mut g3, 0, 3, 0);
+    g3.add_firing(r, firing(vec![Premise::CrashPresent { node: B, time: Tick(3) }]))
+        .unwrap();
+    let mut seed3 = FaultSchedule::default();
+    seed3.crashes.insert(B, Tick(3));
+    assert_eq!(extensions(&g3, &spec, seed3, r), set(&[&["C(b,2)"]]));
 }

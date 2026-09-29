@@ -89,8 +89,21 @@ pub struct LdfiReport {
 pub enum Method {
     /// The lineage-driven search (ARCHITECTURE §8.5): it found a counterexample, or exhausted its hypotheses.
     Lineage,
-    /// The lineage-driven search ran out of runs and exhaustive certification decided.
-    Exhaustive { states: u64, schedules: u64 },
+    /// Exhaustive certification decided, after the lineage-driven search gave up.
+    Exhaustive {
+        states: u64,
+        schedules: u64,
+        after: Fallback,
+    },
+}
+
+/// Why the lineage-driven search handed over to exhaustive certification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fallback {
+    /// It spent its run budget.
+    RunBudget,
+    /// It found no counterexample, but its lineage was incomplete.
+    IncompleteLineage,
 }
 
 /// How a search went.
@@ -116,8 +129,8 @@ struct Search<'a> {
 
 /// What processing one hypothesis found.
 enum Processed {
-    /// The run is good; these are the hypotheses its lineage suggests.
-    Good(BTreeSet<FaultSchedule>),
+    /// The run is good; these are the hypotheses its lineage suggests, and whether its lineage was incomplete.
+    Good(BTreeSet<FaultSchedule>, bool),
     Bad(Box<Counterexample>),
 }
 
@@ -139,7 +152,7 @@ impl<'a> Search<'a> {
             artifact,
             config,
             preds: Preds::of(artifact),
-            rules: lineage::DedRules::new(artifact),
+            rules: lineage::DedRules::new(artifact)?,
         })
     }
 
@@ -166,31 +179,44 @@ impl<'a> Search<'a> {
         }))
     }
 
-    /// The minimal hypotheses extending `seed` that falsify one of `goals` according to `graph`.
+    /// The minimal hypotheses extending `seed` that falsify one of `goals`, or bring back one of the `revive`
+    /// tuples of `pre`, according to `graph`; and whether the lineage was incomplete.
     fn hypotheses(
         &self,
         graph: &ProvGraph,
         goals: &[Row],
+        revive: &[Row],
         seed: &FaultSchedule,
-    ) -> Result<BTreeSet<FaultSchedule>, LdfiError> {
+    ) -> Result<(BTreeSet<FaultSchedule>, bool), LdfiError> {
         let mut solver = select_backend(&self.config.sat)?;
-        let mut ids = Vec::with_capacity(goals.len());
+        let mut targets = Vec::with_capacity(goals.len() + revive.len());
         for row in goals {
             if let Some(goal) = self.post_goal(graph, row)? {
-                ids.push(goal);
+                targets.push(crate::hazard::Target::Goal(goal));
             }
         }
-        let found = crate::hazard::minimal_extensions(
-            graph,
-            &self.config.spec,
-            &self.preds,
-            self.config.negative_support,
-            Some(&self.rules),
-            solver.as_mut(),
-            seed,
-            &ids,
-        )?;
-        Ok(found.into_iter().filter(|h| self.config.spec.admits(h)).collect())
+        if !revive.is_empty() {
+            let pre = self.artifact.spec.as_ref().map(|s| s.pre).ok_or(LdfiError::NoSpec)?;
+            for row in revive {
+                targets.push(crate::hazard::Target::Appears {
+                    rel: pre,
+                    row: row.to_vec(),
+                });
+            }
+        }
+        let setting = crate::hazard::Setting {
+            spec: &self.config.spec,
+            preds: &self.preds,
+            neg: self.config.negative_support,
+            rules: Some(&self.rules),
+        };
+        let found = crate::hazard::minimal_extensions(graph, setting, solver.as_mut(), seed, &targets)?;
+        let admitted = found
+            .hypotheses
+            .into_iter()
+            .filter(|h| self.config.spec.admits(h))
+            .collect();
+        Ok((admitted, found.incomplete))
     }
 
     /// Runs `h`, judges it against the failure-free `post`, and for a good run derives the next hypotheses.
@@ -211,7 +237,15 @@ impl<'a> Search<'a> {
         }
         let graph = self.graph(&run, &outcome)?;
         let goals: Vec<Row> = outcome.post.iter().cloned().collect();
-        Ok(Processed::Good(self.hypotheses(&graph, &goals, h)?))
+        // A failure-free `post` tuple this run lost together with its `pre` tuple: a larger fault set that brings
+        // the `pre` tuple back while the `post` tuple stays lost is a counterexample.
+        let revive: Vec<Row> = ff_post
+            .iter()
+            .filter(|g| !outcome.post.contains(*g) && !outcome.pre.contains(*g))
+            .cloned()
+            .collect();
+        let (next, incomplete) = self.hypotheses(&graph, &goals, &revive, h)?;
+        Ok(Processed::Good(next, incomplete))
     }
 }
 
@@ -252,22 +286,29 @@ impl<'s> Queue<'s> {
 }
 
 /// LDFI on a compiled `.ded` program (ARCHITECTURE §8.5): the lineage-driven search, falling back on exhaustive
-/// certification when it runs out of runs (see [`LdfiConfig::exhaustive_fallback`]).
+/// certification (see [`LdfiConfig::exhaustive_fallback`]) when it runs out of runs, or when it finds no
+/// counterexample but its lineage was incomplete, so that it cannot certify the program by itself.
 pub fn run(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, LdfiError> {
-    match lineage_search(sim, config) {
-        Err(LdfiError::Budget(runs)) => match config.exhaustive_fallback {
-            Some(max_states) => certify_exhaustively(sim, config, runs, max_states),
-            None => Err(LdfiError::Budget(runs)),
-        },
-        other => other,
+    let (runs, why) = match lineage_search(sim, config) {
+        Err(LdfiError::RunBudget(runs)) => (runs, Fallback::RunBudget),
+        Err(LdfiError::Incomplete) => (0, Fallback::IncompleteLineage),
+        other => return other,
+    };
+    match config.exhaustive_fallback {
+        Some(max_states) => certify_exhaustively(sim, config, runs, why, max_states),
+        None => Err(match why {
+            Fallback::RunBudget => LdfiError::RunBudget(runs),
+            Fallback::IncompleteLineage => LdfiError::Incomplete,
+        }),
     }
 }
 
-/// Exhaustive certification after the lineage-driven search spent `runs` runs.
+/// Exhaustive certification after the lineage-driven search gave up.
 fn certify_exhaustively(
     sim: &DedSim<'_>,
     config: &LdfiConfig,
     runs: u64,
+    why: Fallback,
     max_states: u64,
 ) -> Result<LdfiReport, LdfiError> {
     let search = Search::new(sim, config)?;
@@ -302,6 +343,7 @@ fn certify_exhaustively(
         method: Method::Exhaustive {
             states: cert.states,
             schedules: cert.schedules,
+            after: why,
         },
         counterexamples,
         runs,
@@ -324,7 +366,8 @@ fn lineage_search(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, L
     let ff_graph = search.graph(&ff_run, &ff)?;
     let ff_goals: Vec<Row> = ff.post.iter().cloned().collect();
     let mut queue = Queue::new(&config.spec);
-    queue.push(search.hypotheses(&ff_graph, &ff_goals, &FaultSchedule::default())?);
+    let (first, mut incomplete) = search.hypotheses(&ff_graph, &ff_goals, &[], &FaultSchedule::default())?;
+    queue.push(first);
     let mut runs: u64 = 1;
     let mut counterexamples = Vec::new();
     let mut stats = SearchStats {
@@ -343,7 +386,8 @@ fn lineage_search(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, L
                     counterexamples.push(*ce);
                     Ok(!config.find_all)
                 }
-                Processed::Good(next) => {
+                Processed::Good(next, run_incomplete) => {
+                    incomplete |= run_incomplete;
                     stats.suggested += next.len() as u64;
                     queue.push(next);
                     stats.queue_peak = stats.queue_peak.max(queue.order.len());
@@ -354,7 +398,7 @@ fn lineage_search(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, L
     if workers == 1 {
         while let Some(h) = queue.pop() {
             if runs >= config.max_runs {
-                return Err(LdfiError::Budget(config.max_runs));
+                return Err(LdfiError::RunBudget(config.max_runs));
             }
             if commit(&h, search.process(&h, ff_post)?, &mut runs, &mut queue)? {
                 break;
@@ -375,7 +419,10 @@ fn lineage_search(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, L
                             Err(_) => return,
                         };
                         let Ok(h) = next else { return };
-                        let result = search.process(&h, ff_post);
+                        // A panicking worker must not leave the committer waiting for its hypothesis.
+                        let result =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| search.process(&h, ff_post)))
+                                .unwrap_or_else(|_| Err(internal_error!("an LDFI worker panicked").into()));
                         if result_tx.send((h, result)).is_err() {
                             return;
                         }
@@ -394,7 +441,7 @@ fn lineage_search(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, L
                 }
                 let Some(h) = queue.pop() else { break Ok(()) };
                 if runs >= config.max_runs {
-                    break Err(LdfiError::Budget(config.max_runs));
+                    break Err(LdfiError::RunBudget(config.max_runs));
                 }
                 let processed = loop {
                     if let Some(r) = ready.remove(&h) {
@@ -418,6 +465,10 @@ fn lineage_search(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, L
             drop(task_tx);
             outcome
         })?;
+    }
+    // Hypotheses exhausted without a counterexample prove nothing if some lineage was incomplete.
+    if counterexamples.is_empty() && incomplete {
+        return Err(LdfiError::Incomplete);
     }
     Ok(LdfiReport {
         verdict: if counterexamples.is_empty() {
@@ -448,10 +499,14 @@ pub fn falsifiers(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<Vec<FaultSche
         let target = std::slice::from_ref(goal);
         let mut found: Vec<FaultSchedule> = Vec::new();
         let mut queue = Queue::new(&config.spec);
-        queue.push(search.hypotheses(&ff_graph, target, &FaultSchedule::default())?);
+        let (first, incomplete) = search.hypotheses(&ff_graph, target, &[], &FaultSchedule::default())?;
+        if incomplete {
+            return Err(LdfiError::Incomplete);
+        }
+        queue.push(first);
         while let Some(h) = queue.pop() {
             if runs >= config.max_runs {
-                return Err(LdfiError::Budget(config.max_runs));
+                return Err(LdfiError::RunBudget(config.max_runs));
             }
             runs += 1;
             let (run, outcome) = search.execute(&h)?;
@@ -460,7 +515,11 @@ pub fn falsifiers(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<Vec<FaultSche
                 continue;
             }
             let graph = search.graph(&run, &outcome)?;
-            queue.push(search.hypotheses(&graph, target, &h)?);
+            let (next, incomplete) = search.hypotheses(&graph, target, &[], &h)?;
+            if incomplete {
+                return Err(LdfiError::Incomplete);
+            }
+            queue.push(next);
         }
         for f in minimal_by_clocks(&config.spec, found) {
             let key = config.spec.removed_clocks(&f);

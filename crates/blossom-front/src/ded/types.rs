@@ -5,7 +5,8 @@
 //!
 //! - the first column of a protocol relation is its location, a `Node`; so are the first two columns of `crash`,
 //!   whose third is a time (`i64`);
-//! - an integer literal is `i64` unless it meets a `u64` (the result of `count<X>`, as the IR's `count` yields);
+//! - integers are `i64`, `count<X>` included (Molly's INT);
+//! - `pre` and `post` columns have the same types, since Molly's oracle compares their tuples (TEST-022);
 //! - a string literal is a `String` unless it meets a `Node`, where it names a node of the deployment;
 //! - arithmetic and ordering comparisons take integers of one type;
 //! - a column that nothing constrains (a relation that is read but never written, whose variables meet no other
@@ -24,7 +25,6 @@ use super::model::{CRASH, Model, body_atoms};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ColTy {
     I64,
-    U64,
     Str,
     Node,
 }
@@ -33,7 +33,6 @@ impl ColTy {
     fn describe(self) -> &'static str {
         match self {
             ColTy::I64 => "i64",
-            ColTy::U64 => "u64",
             ColTy::Str => "String",
             ColTy::Node => "Node",
         }
@@ -81,7 +80,7 @@ impl Ty {
             (Unknown, x) | (x, Unknown) => x,
             (IntLit, IntLit) => IntLit,
             (StrLit, StrLit) => StrLit,
-            (IntLit, Known(t @ (I64 | U64))) | (Known(t @ (I64 | U64)), IntLit) => Known(t),
+            (IntLit, Known(I64)) | (Known(I64), IntLit) => Known(I64),
             (StrLit, Known(t @ (Str | Node))) | (Known(t @ (Str | Node)), StrLit) => Known(t),
             (Known(a), Known(b)) if a == b => Known(a),
             _ => return None,
@@ -222,6 +221,23 @@ pub(crate) fn infer(program: &Program, model: &Model, diags: &mut Diagnostics) -
     for rule in &program.rules {
         cx.rule(rule);
     }
+    // Molly's oracle compares `pre` tuples with `post` tuples, so their columns are one type.
+    if let (Some(pre), Some(post)) = (model.index(Symbol::intern("pre")), model.index(Symbol::intern("post"))) {
+        let span = model.rels.get(post).map(|r| r.first);
+        let pairs: Vec<(usize, usize)> = cx
+            .slots
+            .get(pre)
+            .into_iter()
+            .flatten()
+            .copied()
+            .zip(cx.slots.get(post).into_iter().flatten().copied())
+            .collect();
+        if let Some(span) = span {
+            for (i, (a, b)) in pairs.into_iter().enumerate() {
+                cx.unify(a, b, span, &format!("column {} of `pre` and `post`", i + 1));
+            }
+        }
+    }
     let Cx {
         mut uf,
         slots,
@@ -347,7 +363,7 @@ impl Cx<'_> {
                     match g.func {
                         AggFunc::Count => {
                             self.uf
-                                .constrain(slot, Ty::Known(ColTy::U64), g.span, &what, self.diags);
+                                .constrain(slot, Ty::Known(ColTy::I64), g.span, &what, self.diags);
                         }
                         AggFunc::Min | AggFunc::Max | AggFunc::Sum => {
                             self.uf

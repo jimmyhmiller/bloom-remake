@@ -109,15 +109,29 @@ pub fn render(artifact: &DedArtifact, report: &LdfiReport) -> String {
         (Verdict::Counterexample, Method::Lineage) => {
             let _ = writeln!(out, "counterexample found after {} run(s)", report.runs);
         }
-        (verdict, Method::Exhaustive { states, schedules }) => {
+        (
+            verdict,
+            Method::Exhaustive {
+                states,
+                schedules,
+                after,
+            },
+        ) => {
             let what = match verdict {
                 Verdict::NoCounterexample => "no counterexample",
                 Verdict::Counterexample => "counterexample found",
             };
+            let why = match after {
+                crate::driver::Fallback::RunBudget => {
+                    format!("after the lineage-driven search spent its {} run(s)", report.runs)
+                }
+                crate::driver::Fallback::IncompleteLineage => {
+                    "because the lineage-driven search's lineage was incomplete".to_owned()
+                }
+            };
             let _ = writeln!(
                 out,
-                "{what} by exhaustive certification: {states} distinct state(s) over {schedules} crash schedule(s), after the lineage-driven search spent its {} run(s)",
-                report.runs
+                "{what} by exhaustive certification: {states} distinct state(s) over {schedules} crash schedule(s), {why}"
             );
         }
     }

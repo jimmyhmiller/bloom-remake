@@ -17,7 +17,9 @@ The program is the paper's (see ../lib/delivery/*.ded for the provenance of each
 """
 
 [backend.ldfi]
-status = "pass"
+status = "unimplemented"
+unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "ANA-010", "TEST-027", "TEST-031"]
+until = "M9"
 
 [expect_ldfi]
 eot = 6

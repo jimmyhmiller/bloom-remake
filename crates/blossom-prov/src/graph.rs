@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::sync::Arc;
 
-use blossom_base::{DetMap, RelId, RuleId};
+use blossom_base::{DetMap, InternalError, RelId, RuleId, internal_error};
 use blossom_ir::obs::FiringKind;
 use blossom_value::{
     Value,
@@ -91,9 +91,29 @@ pub enum Premise {
     /// A negated read (ENG-113): the absence of every tuple matching [`NegRead`]'s pattern, recorded in
     /// [`ProvGraph::negation`].
     Neg(NegId),
-    /// A negated read of the crash oracle, `notin crash(_, n, _)`: it holds while `n` is correct. `None` when the
-    /// read leaves the node open.
-    CrashOracle { node: Option<NodeId> },
+    /// A negated read of the crash oracle, `notin crash(_, n, t)`: no node matching `node` crashed at a time
+    /// matching `time` (`None` leaves the column open). Falsified by such a crash.
+    CrashAbsent { node: Option<NodeId>, time: Option<Tick> },
+    /// A positive read of the crash oracle's tuple `crash(_, node, time)`: falsified if `node` crashes earlier.
+    CrashPresent { node: NodeId, time: Tick },
+    /// An aggregate firing's group, recorded in [`ProvGraph::aggregate`]: the firing's row changes when a
+    /// contributor appears (a contributor lost is one of its read premises).
+    Aggregate(AggId),
+}
+
+/// An aggregate group's index.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AggId(pub u32);
+
+/// An aggregate firing's group: `rule` evaluated at `loc` and `tick`, its head columns fixed where `key` is `Some`
+/// (the grouping columns) and open where it is `None` (the aggregates).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AggGroup {
+    pub space: Space,
+    pub rule: RuleId,
+    pub loc: Loc,
+    pub tick: Tick,
+    pub key: Vec<Option<Value>>,
 }
 
 /// A negated read's index.
@@ -128,6 +148,9 @@ pub struct NegRead {
 pub struct ProvGraph {
     goals: Vec<Goal>,
     negations: Vec<NegRead>,
+    negation_index: DetMap<NegRead, NegId>,
+    aggregates: Vec<AggGroup>,
+    aggregate_index: DetMap<AggGroup, AggId>,
     /// Goals by relation, node and tick, for scans of tuples matching a pattern.
     by_place: BTreeMap<(Space, RelId, Option<NodeId>, Tick), Vec<GoalId>>,
     /// Hash iteration order is never observed: the index is only probed.
@@ -142,11 +165,11 @@ impl ProvGraph {
     }
 
     /// The goal for `key`, added (with unknown support) if it is new.
-    pub fn goal(&mut self, key: GoalKey, logical: Option<u32>) -> GoalId {
+    pub fn goal(&mut self, key: GoalKey, logical: Option<u32>) -> Result<GoalId, InternalError> {
         if let Some(id) = self.index.get(&key) {
-            return *id;
+            return Ok(*id);
         }
-        let id = GoalId(u32::try_from(self.goals.len()).unwrap_or(u32::MAX));
+        let id = GoalId(dense(self.goals.len())?);
         if let Some(l) = logical {
             self.by_logical.entry((l, key.tick)).or_default().push(id);
         }
@@ -160,7 +183,7 @@ impl ProvGraph {
             logical,
             support: Support::Unknown,
         });
-        id
+        Ok(id)
     }
 
     /// The goal for `key`, if the run has it.
@@ -176,8 +199,8 @@ impl ProvGraph {
     }
 
     /// Adds a firing as an alternative derivation of `goal`.
-    pub fn add_firing(&mut self, goal: GoalId, firing: Firing) -> FiringId {
-        let id = FiringId(u32::try_from(self.firings.len()).unwrap_or(u32::MAX));
+    pub fn add_firing(&mut self, goal: GoalId, firing: Firing) -> Result<FiringId, InternalError> {
+        let id = FiringId(dense(self.firings.len())?);
         self.firings.push(firing);
         if let Some(g) = self.goals.get_mut(goal.0 as usize) {
             match &mut g.support {
@@ -186,7 +209,7 @@ impl ProvGraph {
                 Support::Leaf => {}
             }
         }
-        id
+        Ok(id)
     }
 
     pub fn get(&self, goal: GoalId) -> Option<&Goal> {
@@ -198,13 +221,29 @@ impl ProvGraph {
     }
 
     /// Records a negated read; equal reads share one id.
-    pub fn negation(&mut self, read: NegRead) -> NegId {
-        if let Some(i) = self.negations.iter().position(|n| *n == read) {
-            return NegId(u32::try_from(i).unwrap_or(u32::MAX));
+    pub fn negation(&mut self, read: NegRead) -> Result<NegId, InternalError> {
+        if let Some(id) = self.negation_index.get(&read) {
+            return Ok(*id);
         }
-        let id = NegId(u32::try_from(self.negations.len()).unwrap_or(u32::MAX));
+        let id = NegId(dense(self.negations.len())?);
+        self.negation_index.insert(read.clone(), id);
         self.negations.push(read);
-        id
+        Ok(id)
+    }
+
+    /// Records an aggregate group; equal groups share one id.
+    pub fn aggregate_group(&mut self, group: AggGroup) -> Result<AggId, InternalError> {
+        if let Some(id) = self.aggregate_index.get(&group) {
+            return Ok(*id);
+        }
+        let id = AggId(dense(self.aggregates.len())?);
+        self.aggregate_index.insert(group.clone(), id);
+        self.aggregates.push(group);
+        Ok(id)
+    }
+
+    pub fn aggregate(&self, id: AggId) -> Option<&AggGroup> {
+        self.aggregates.get(id.0 as usize)
     }
 
     pub fn negated(&self, id: NegId) -> Option<&NegRead> {
@@ -296,11 +335,26 @@ impl ProvGraph {
                                     );
                                 }
                             }
-                            Premise::CrashOracle { node } => {
-                                let _ = match node {
-                                    Some(n) => writeln!(out, "{indent}    {} does not crash", names.node(*n)),
-                                    None => writeln!(out, "{indent}    no node crashes"),
+                            Premise::CrashAbsent { node, time } => {
+                                let who = node.map_or_else(
+                                    || "no node crashes".to_owned(),
+                                    |n| format!("{} does not crash", names.node(n)),
+                                );
+                                let _ = match time {
+                                    Some(t) => writeln!(out, "{indent}    {who} at {}", t.0),
+                                    None => writeln!(out, "{indent}    {who}"),
                                 };
+                            }
+                            Premise::CrashPresent { node, time } => {
+                                let _ = writeln!(
+                                    out,
+                                    "{indent}    {} crashes at {}, not earlier",
+                                    names.node(*node),
+                                    time.0
+                                );
+                            }
+                            Premise::Aggregate(_) => {
+                                let _ = writeln!(out, "{indent}    no new contributor joins the group");
                             }
                         }
                     }
@@ -316,4 +370,70 @@ pub trait Names {
     fn rule(&self, firing: &Firing) -> String;
     fn node(&self, node: NodeId) -> String;
     fn logical(&self, logical: u32) -> String;
+}
+
+/// A table position as a dense `u32` id.
+fn dense(len: usize) -> Result<u32, InternalError> {
+    u32::try_from(len).map_err(|_| internal_error!("more than u32::MAX provenance records"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use blossom_value::value::IntValue;
+
+    use super::*;
+
+    fn key(rel: u32, node: u32, tick: u64, v: i64) -> GoalKey {
+        GoalKey {
+            space: Space::Protocol,
+            rel: RelId::from_raw(rel),
+            node: Some(NodeId(node)),
+            tick: Tick(tick),
+            row: Arc::from(vec![Value::Int(IntValue::I64(v))]),
+        }
+    }
+
+    #[test]
+    fn goals_negations_and_groups_are_shared_and_indexed() {
+        let mut g = ProvGraph::new();
+        let a = g.goal(key(1, 0, 2, 7), Some(9)).unwrap();
+        assert_eq!(g.goal(key(1, 0, 2, 7), Some(9)).unwrap(), a, "one goal per fact");
+        let b = g.goal(key(1, 0, 2, 8), Some(9)).unwrap();
+        g.goal(key(1, 1, 2, 7), Some(9)).unwrap();
+        assert_eq!(
+            g.goals_at(Space::Protocol, RelId::from_raw(1), Some(NodeId(0)), Tick(2)),
+            [a, b]
+        );
+        assert_eq!(g.goals_of(9, Tick(2)).len(), 3);
+        assert_eq!(g.find(&key(1, 0, 2, 8)), Some(b));
+        assert_eq!(g.find(&key(1, 0, 3, 8)), None);
+        let read = NegRead {
+            space: Space::Protocol,
+            rel: RelId::from_raw(2),
+            loc: Loc::Node(NodeId(0)),
+            tick: Tick(2),
+            pattern: vec![None],
+            logical: 3,
+        };
+        let n = g.negation(read.clone()).unwrap();
+        assert_eq!(g.negation(read).unwrap(), n, "equal reads share one id");
+        let f = g
+            .add_firing(
+                a,
+                Firing {
+                    space: Space::Protocol,
+                    rule: RuleId::from_raw(0),
+                    node: Some(NodeId(0)),
+                    tick: Tick(2),
+                    kind: FiringKind::Rule,
+                    premises: vec![Premise::Goal(b), Premise::Neg(n)],
+                },
+            )
+            .unwrap();
+        assert!(matches!(&g.get(a).unwrap().support, Support::Derived(list) if list == &[f]));
+        g.set_leaf(b);
+        assert_eq!(g.get(b).unwrap().support, Support::Leaf);
+    }
 }

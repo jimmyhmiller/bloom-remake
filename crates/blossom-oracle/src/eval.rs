@@ -579,7 +579,7 @@ fn aggregate(
         let mut keys = key.into_iter();
         let mut values = group.values.iter();
         let mut row = Vec::with_capacity(rule.head.args.len());
-        for a in &rule.head.args {
+        for (col, a) in rule.head.args.iter().enumerate() {
             match a {
                 HeadArg::Term(_) => row.push(
                     keys.next()
@@ -589,7 +589,11 @@ fn aggregate(
                     let set = values
                         .next()
                         .ok_or_else(|| ExprError::Oracle(internal_error!("aggregate values missing").into()))?;
-                    row.push(fold(agg.func.clone(), set)?);
+                    let folded = fold(agg.func.clone(), set)?;
+                    row.push(match agg.func {
+                        AggFunc::Count => count_as(scope, rule, col, folded)?,
+                        _ => folded,
+                    });
                 }
             }
         }
@@ -604,6 +608,40 @@ fn aggregate(
         out.push((row, firing));
     }
     Ok(out)
+}
+
+/// A count (computed as `u64`) in the integer type of the head column it lands in (BLSR004 when it does not fit).
+fn count_as(scope: &Scope<'_>, rule: &Rule, col: usize, count: Value) -> expr::ExprResult<Value> {
+    let Value::Int(IntValue::U64(n)) = count else {
+        return Err(ExprError::Oracle(internal_error!("a count is not a u64").into()));
+    };
+    let ty = scope
+        .program
+        .rels
+        .get(rule.head.rel)
+        .and_then(|r| r.schema.cols.get(col))
+        .and_then(|c| scope.program.types.get(c.ty))
+        .ok_or_else(|| ExprError::Oracle(internal_error!("a count's column has no type").into()))?;
+    let overflow = || ExprError::Arithmetic(format!("count {n} does not fit its column"));
+    use blossom_value::TypeDef;
+    use blossom_value::types::IntTy;
+    Ok(Value::Int(match ty {
+        TypeDef::Int(IntTy::U64) => IntValue::U64(n),
+        TypeDef::Int(IntTy::I64) => IntValue::I64(i64::try_from(n).map_err(|_| overflow())?),
+        TypeDef::Int(IntTy::U32) => IntValue::U32(u32::try_from(n).map_err(|_| overflow())?),
+        TypeDef::Int(IntTy::I32) => IntValue::I32(i32::try_from(n).map_err(|_| overflow())?),
+        TypeDef::Int(IntTy::U128) => IntValue::U128(u128::from(n)),
+        TypeDef::Int(IntTy::I128) => IntValue::I128(i128::from(n)),
+        TypeDef::Int(IntTy::U16) => IntValue::U16(u16::try_from(n).map_err(|_| overflow())?),
+        TypeDef::Int(IntTy::I16) => IntValue::I16(i16::try_from(n).map_err(|_| overflow())?),
+        TypeDef::Int(IntTy::U8) => IntValue::U8(u8::try_from(n).map_err(|_| overflow())?),
+        TypeDef::Int(IntTy::I8) => IntValue::I8(i8::try_from(n).map_err(|_| overflow())?),
+        other => {
+            return Err(ExprError::Oracle(
+                internal_error!("a count in a column of type {other:?}").into(),
+            ));
+        }
+    }))
 }
 
 fn fold(func: AggFunc, set: &BTreeSet<Vec<Value>>) -> expr::ExprResult<Value> {

@@ -1,7 +1,7 @@
 //! The `.ded` profile (LANGUAGE §21.1, ARCHITECTURE §8.1): a compiled Molly program on the synchronous-round world
 //! under [`CrashView::MollyContinue`], and its outcome spec judged at EOT.
 //!
-//! Molly's round `k` is tick `k` (CR-13): facts `p(…)@k` are input events of tick `k`, tick 0 has no events, and the
+//! Molly's round `k` is tick `k` (CR-13): facts `p(…)@k` are input events of tick `k`, no node runs at tick 0, and the
 //! spec reads `pre` and `post` at EOT (TEST-022). The spec engine feeds the spec program with every node's tuples at
 //! EOT (each prefixed with its node), the snapshots at fixed ticks that `p(…)@k` atoms read, and the crash oracle
 //! `crash(Observer, Node, Time)`, in which every node observes every crash of the run.
@@ -42,17 +42,9 @@ pub struct Outcome {
 
 impl<'a> DedSim<'a> {
     pub fn new(artifact: &'a DedArtifact) -> Result<DedSim<'a>, SimError> {
-        let protocol = Oracle::new(artifact.protocol.clone()).map_err(|error| SimError::Node {
-            node: NodeId(0),
-            tick: Tick(0),
-            error,
-        })?;
+        let protocol = Oracle::new(artifact.protocol.clone()).map_err(SimError::Load)?;
         let spec = match &artifact.spec {
-            Some(s) => Some(Oracle::new(s.program.clone()).map_err(|error| SimError::Node {
-                node: NodeId(0),
-                tick: Tick(0),
-                error,
-            })?),
+            Some(s) => Some(Oracle::new(s.program.clone()).map_err(SimError::Load)?),
             None => None,
         };
         Ok(DedSim {
@@ -75,6 +67,8 @@ impl<'a> DedSim<'a> {
         }
         world.run(
             &SyncConfig {
+                // Molly's round k is tick k and there is no round 0 (CR-13): nothing runs at tick 0.
+                first: Tick(1),
                 last,
                 crash_view: CrashView::MollyContinue,
                 capture,

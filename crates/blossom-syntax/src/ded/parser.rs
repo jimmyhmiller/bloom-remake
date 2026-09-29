@@ -28,11 +28,12 @@ pub fn parse(file: FileId, text: &str) -> (DedFile, Diagnostics) {
     };
     let mut out = DedFile::default();
     while p.kind() != TokenKind::Eof {
+        let clause_start = p.pos;
         match p.clause() {
             Ok(c) => out.clauses.push(c),
             Err(d) => {
                 p.diags.push(*d);
-                p.recover();
+                p.recover(clause_start);
             }
         }
     }
@@ -116,13 +117,41 @@ impl Parser<'_> {
     }
 
     /// Skips past the next `;` (or to the end of the file).
-    fn recover(&mut self) {
+    /// Skips past the next `;`, or up to the next token that starts a line and can start a clause (a clause whose
+    /// `;` is missing must not swallow the clause after it).
+    fn recover(&mut self, clause_start: usize) {
+        let start = clause_start;
         loop {
-            match self.bump().kind {
-                TokenKind::Semi | TokenKind::Eof => return,
-                _ => {}
+            let t = self.token(0);
+            match t.kind {
+                TokenKind::Eof => return,
+                TokenKind::Semi => {
+                    self.bump();
+                    return;
+                }
+                TokenKind::Ident
+                    if self.pos > start && self.starts_line(t) && self.token(1).kind == TokenKind::LParen =>
+                {
+                    return;
+                }
+                TokenKind::Ident if self.pos > start && self.starts_line(t) && self.text_of(t) == "include" => return,
+                _ => {
+                    self.bump();
+                }
             }
         }
+    }
+
+    /// Whether only whitespace and comments on earlier lines separate `t` from the previous token.
+    fn starts_line(&self, t: Token) -> bool {
+        let prev_end = self
+            .pos
+            .checked_sub(1)
+            .and_then(|i| self.tokens.get(i))
+            .map_or(0, |p| p.span.hi as usize);
+        self.text
+            .get(prev_end..t.span.lo as usize)
+            .is_some_and(|gap| gap.contains('\n'))
     }
 
     fn join(a: Span, b: Span) -> Span {

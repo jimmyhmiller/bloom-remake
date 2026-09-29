@@ -75,6 +75,16 @@ impl Model {
     }
 
     fn note(&mut self, name: Symbol, arity: usize, span: Span, diags: &mut Diagnostics) {
+        if arity == 0 {
+            diags.push(
+                Diagnostic::new(
+                    code!("BLS0110"),
+                    format!("`{name}` has no columns: a Molly relation's first column is its location"),
+                )
+                .with_primary(span),
+            );
+            return;
+        }
         if name.as_str() == RESERVED {
             diags.push(Diagnostic::new(code!("BLS0201"), "`clock` is reserved: Molly generates it").with_primary(span));
             return;
@@ -412,7 +422,7 @@ fn check_rule(rule: &Rule, diags: &mut Diagnostics) {
                 Arg::Expr(e) => diags.push(
                     Diagnostic::new(
                         code!("BLS0110"),
-                        "an expression inside a body predicate: bind it with a comparison (`X == Y + 1`)",
+                        "an expression inside a body predicate: only predicates bind variables in Molly's dialect; compute the value in the head of a helper rule and read that relation here",
                     )
                     .with_primary(e.span()),
                 ),
@@ -516,6 +526,12 @@ fn check_rule(rule: &Rule, diags: &mut Diagnostics) {
                 )
                 .with_primary(atom.span),
             );
+        }
+        if atom.time.is_some() && atom.rel.text.as_str() == CRASH {
+            diags.push(not_yet(
+                "`crash(…)@k`: the crash oracle read at a fixed time",
+                atom.span,
+            ));
         }
     }
 }

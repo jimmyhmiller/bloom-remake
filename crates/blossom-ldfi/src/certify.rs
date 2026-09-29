@@ -105,12 +105,13 @@ pub fn exhaustive(
             },
             BTreeSet::new(),
         );
-        for t in 0..=spec.eot.0 {
+        // The `.ded` profile starts at tick 1 (DedSim::run): tick 0 is the empty initial state.
+        for t in 1..=spec.eot.0 {
             let tick = Tick(t);
             let items: Vec<(State, BTreeSet<Omission>)> = std::mem::take(&mut frontier).into_iter().collect();
             result.states += items.len() as u64;
             if result.states > max_states {
-                return Err(LdfiError::Budget(max_states));
+                return Err(LdfiError::StateBudget(max_states));
             }
             // Step the frontier in bounded batches, merging each batch before the next, so the successors in memory
             // at once stay proportional to one batch.
@@ -138,7 +139,7 @@ pub fn exhaustive(
                                     None => {
                                         frontier.insert(state, oms);
                                         if result.states.saturating_add(frontier.len() as u64) > max_states {
-                                            return Err(LdfiError::Budget(max_states));
+                                            return Err(LdfiError::StateBudget(max_states));
                                         }
                                     }
                                 }

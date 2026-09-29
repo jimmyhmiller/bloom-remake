@@ -138,6 +138,10 @@ fn malformed_clauses_are_reported_and_skipped() {
     let (f, d) = parse(file(), "p(X :- q(X); r(X) :- s(X);");
     assert_eq!(d.len(), 1);
     assert_eq!(f.clauses.len(), 1);
+    // A missing `;` does not swallow the clause on the next line.
+    let (f, d) = parse(file(), "p(X) :- q(X)\nr(X) :- s(X);\nt(X) :- u(X);");
+    assert_eq!(d.len(), 1);
+    assert_eq!(f.clauses.len(), 2);
 }
 
 #[test]
