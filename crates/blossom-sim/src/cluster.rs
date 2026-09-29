@@ -131,6 +131,8 @@ pub struct ClusterRun {
     pub log: Vec<String>,
     /// The first invariant an observer found violated (the run stopped there).
     pub violation: Option<String>,
+    /// The nodes' join work, in rows examined, when their executors measure it.
+    pub rows_examined: Option<u64>,
 }
 
 /// SplitMix64: the simulation's only randomness.
@@ -387,6 +389,9 @@ impl<'p> Cluster<'p> {
 
     /// The run so far; operations still in flight never got an answer.
     pub fn finish(mut self) -> ClusterRun {
+        for i in 0..self.nodes.len() {
+            self.count_work(i);
+        }
         for c in &mut self.clients {
             if let Some(p) = c.pending.take() {
                 self.run.history.push(Operation {
@@ -477,6 +482,18 @@ impl<'p> Cluster<'p> {
             if c.pending.is_none() {
                 c.retry = None;
             }
+        }
+    }
+
+    /// Adds node `i`'s join work to the run's (before its executor goes).
+    fn count_work(&mut self, i: usize) {
+        if let Some(n) = self
+            .nodes
+            .get(i)
+            .and_then(|s| s.driver.as_ref())
+            .and_then(|d| d.node.rows_examined())
+        {
+            *self.run.rows_examined.get_or_insert(0) += n;
         }
     }
 
@@ -573,6 +590,7 @@ impl<'p> Cluster<'p> {
     /// Crashes node `n`. With `mid_tick`, a ready node first runs one tick up to its WAL append, so the crash lands
     /// between the append and the sync.
     fn crash_node(&mut self, n: NodeId, writes: CrashWrites, down_until: i64, mid_tick: bool) -> Result<(), SimError> {
+        self.count_work(n.0 as usize);
         let seed = self.rng.next();
         let now = self.now;
         let slot = self

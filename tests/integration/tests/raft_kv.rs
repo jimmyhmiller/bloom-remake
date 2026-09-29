@@ -555,3 +555,39 @@ fn leader_power_loss_loses_nothing_acknowledged() {
     assert!(verdict == Verdict::Linearizable, "{verdict:?} at key {key:?}");
     assert!(answered(&run) > 50, "only {} answered", answered(&run));
 }
+
+/// Runs the fault-free workload for `secs` simulated seconds with constant latency: (ticks, rows examined).
+#[cfg(test)]
+fn join_work(artifact: &BlsArtifact, schema: &DurableSchema, secs: i64) -> (u64, u64) {
+    let cluster = Cluster::new(
+        artifact,
+        schema,
+        blossom_value::Seed::from_u64(1),
+        Vec::new(),
+        Box::new(RaftProtocol::of(artifact)),
+        ClusterConfig {
+            seed: 1,
+            clients: 6,
+            keys: 6,
+            latency: (1_000_000, 1_000_000),
+            duration: secs * 1_000_000_000,
+            ..ClusterConfig::default()
+        },
+    )
+    .unwrap();
+    let run = cluster.run().unwrap();
+    (run.ticks, run.rows_examined.expect("the engine counts its join work"))
+}
+
+/// The engine's work per tick does not grow with the log: a run four times as long (a log four times as long)
+/// examines about as many rows per tick. Counted in rows, not time, so the check is exact and machine-independent.
+#[test]
+fn join_work_per_tick_is_flat_as_the_log_grows() {
+    let artifact = raft_kv();
+    let schema = DurableSchema::of(artifact.program.get());
+    let (t1, r1) = join_work(&artifact, &schema, 2);
+    let (t2, r2) = join_work(&artifact, &schema, 8);
+    let (a, b) = (r1 as f64 / t1 as f64, r2 as f64 / t2 as f64);
+    assert!(t2 > 3 * t1, "the longer run has {t2} ticks against {t1}");
+    assert!(b < a * 1.25, "{b:.1} rows per tick over 8s against {a:.1} over 2s: the work grows with the log");
+}

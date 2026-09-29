@@ -279,6 +279,11 @@ impl<E: Executor> Node<E> {
         self.exec.carried_rows(rel)
     }
 
+    /// The executor's join work so far, in rows examined, if it measures it.
+    pub fn rows_examined(&self) -> Option<u64> {
+        self.exec.rows_examined()
+    }
+
     /// Whether this incarnation booted from durable state (`recovered()` holds in its boot tick).
     pub fn recovered(&self) -> bool {
         self.recovered

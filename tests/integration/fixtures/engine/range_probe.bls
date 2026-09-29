@@ -1,0 +1,12 @@
+//! Range probes over an ordered index as rows come and go: `above` holds the entries just above a moving low mark.
+program range_probe version 1;
+input add(i: u64);
+input drop(i: u64);
+input mark(m: u64);
+table entry(i: u64);
+table low(m: u64) key() resolve choose_most(m);
+on add(i) { next entry(i); }
+on drop(i), entry(i) { delete entry(i); }
+on mark(m) { next low(m); }
+bootstrap { emit low(0); }
+view above(i) = low(m), entry(i) where i > m && i <= m + 3;

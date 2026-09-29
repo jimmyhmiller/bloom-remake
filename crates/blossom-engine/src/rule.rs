@@ -18,11 +18,21 @@
 //! the start of the tick. A valuation made of rows from both versions exists in neither, and cancels between terms;
 //! so does any runtime error it raises, which is why errors are counted per valuation and raised only when their net
 //! count is positive.
+//!
+//! A term runs a sequence of steps ([`Order`]), chosen per driver literal each time the rule is evaluated: the atoms
+//! in a greedy join order by estimated rows (from the stores' current sizes and index fan-outs), with each check
+//! hoisted to the earliest point its inputs are bound — but never past an earlier check, so the checks still run in
+//! the reference order and an earlier guard still protects a later expression. A hoisted `let` feeds a later atom's
+//! index probe (`let j = i - 1, log(idx: j, ..)`), and a guard `v > e` (or `<`, `>=`, `<=`) on a later atom's
+//! column narrows its probe to a range of an ordered index, when no check before the guard can fail (dropping the
+//! rows the guard rejects then hides nothing). A hoisted check that raises an error does not end the search: the
+//! reference raises it once per complete valuation, so the remaining atoms are joined without the check's outputs
+//! and the error counted for each.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use blossom_base::{RelId, RuleId, VarId, internal_error};
-use blossom_ir::core::{Atom, Expr, GenSource, HeadArg, Literal, Pattern, Rule, RuleKind, Term};
+use blossom_ir::core::{Atom, BinOp, Expr, GenSource, HeadArg, Literal, Pattern, Rule, RuleKind, Term, UnOp};
 use blossom_ir::tick::{EvalError, Row};
 use blossom_value::Value;
 
@@ -65,6 +75,40 @@ pub(crate) struct Plan {
     pub head: StoreKey,
     pub aggregate: bool,
     pub regime: Regime,
+}
+
+/// One end of a range probe: an expression over bound variables, and whether the end is included.
+#[derive(Clone, Debug)]
+pub(crate) struct RangeEnd {
+    pub expr: Expr,
+    pub inclusive: bool,
+}
+
+/// A range on one column of an atom, from the guards that follow it.
+#[derive(Clone, Debug)]
+pub(crate) struct RangeProbe {
+    pub col: usize,
+    pub lo: Option<RangeEnd>,
+    pub hi: Option<RangeEnd>,
+}
+
+/// One step of a term.
+#[derive(Clone, Debug)]
+pub(crate) enum Step {
+    /// Joins an atom, probing the columns whose values are known (`cols`), and a range of one more column.
+    Atom {
+        lit: usize,
+        cols: Vec<usize>,
+        range: Option<RangeProbe>,
+    },
+    /// Runs check `k` (an index into [`Plan::checks`]).
+    Check(usize),
+}
+
+/// A term's steps: every atom other than the driver, and every check.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Order {
+    pub steps: Vec<Step>,
 }
 
 /// The store an atom reads.
@@ -291,29 +335,250 @@ impl Plan {
         })
     }
 
-    /// The order to join the atoms other than `skip`, given the variables `bound` already: the atom with the most
-    /// bound columns first (the lowest literal index among equals), each with the columns it probes.
-    pub fn join_order(&self, rule: &Rule, skip: Option<usize>, bound: &BTreeSet<VarId>) -> Vec<(usize, Vec<usize>)> {
+    /// The steps of a term driven by literal `driver` (`None`: a full evaluation). `cost(lit, cols, range)` estimates
+    /// the rows atom `lit` yields per probe on `cols` (narrowed by a range, if `range`).
+    pub fn order_for(&self, rule: &Rule, driver: Option<usize>, cost: &dyn Fn(usize, &[usize], bool) -> usize) -> Order {
+        let (skip, bound) = match driver {
+            None => (None, BTreeSet::new()),
+            Some(lit) => (
+                matches!(rule.body.lits.get(lit), Some(Literal::Pos(_))).then_some(lit),
+                driver_vars(rule, lit),
+            ),
+        };
+        self.order(rule, skip, &bound, cost)
+    }
+
+    /// The steps of a term whose driver binds `bound` (and is atom `skip`, if an atom): repeatedly the atom with the
+    /// fewest estimated rows (then the lowest literal index), each followed by the checks that become ready, in order.
+    fn order(
+        &self,
+        rule: &Rule,
+        skip: Option<usize>,
+        bound: &BTreeSet<VarId>,
+        cost: &dyn Fn(usize, &[usize], bool) -> usize,
+    ) -> Order {
         let mut bound = bound.clone();
         let mut left: Vec<usize> = self.atoms.iter().copied().filter(|a| Some(*a) != skip).collect();
-        let mut out = Vec::new();
+        let mut steps = Vec::new();
+        let mut next = 0usize;
+        self.hoist(rule, &mut next, &mut bound, &mut steps);
         while !left.is_empty() {
-            let mut best: Option<(usize, usize, Vec<usize>)> = None;
-            for (pos, &i) in left.iter().enumerate() {
-                let Some(Literal::Pos(a)) = rule.body.lits.get(i) else { continue };
+            struct Candidate {
+                pos: usize,
+                lit: usize,
+                cols: Vec<usize>,
+                range: Option<RangeProbe>,
+                rows: usize,
+            }
+            let mut best: Option<Candidate> = None;
+            for (pos, &lit) in left.iter().enumerate() {
+                let Some(Literal::Pos(a)) = rule.body.lits.get(lit) else { continue };
                 let cols = bound_columns(a, &bound);
-                if best.as_ref().is_none_or(|(_, _, c)| cols.len() > c.len()) {
-                    best = Some((pos, i, cols));
+                let range = self.range_for(rule, a, &cols, &bound, next);
+                let rows = cost(lit, &cols, range.is_some());
+                if best.as_ref().is_none_or(|b| rows < b.rows) {
+                    best = Some(Candidate {
+                        pos,
+                        lit,
+                        cols,
+                        range,
+                        rows,
+                    });
                 }
             }
-            let Some((pos, i, cols)) = best else { break };
+            let Some(Candidate {
+                pos,
+                lit: i,
+                cols,
+                range,
+                ..
+            }) = best
+            else {
+                break;
+            };
             left.remove(pos);
             if let Some(Literal::Pos(a)) = rule.body.lits.get(i) {
                 bound.extend(atom_vars(a));
             }
-            out.push((i, cols));
+            steps.push(Step::Atom { lit: i, cols, range });
+            self.hoist(rule, &mut next, &mut bound, &mut steps);
         }
-        out
+        // Whatever is left runs after every atom (a check whose inputs no atom binds is not evaluable; Plan::new
+        // rejected that).
+        while next < self.checks.len() {
+            steps.push(Step::Check(next));
+            next += 1;
+        }
+        Order { steps }
+    }
+
+    /// Appends the checks from `next` on that are ready, in order, binding what they bind.
+    fn hoist(&self, rule: &Rule, next: &mut usize, bound: &mut BTreeSet<VarId>, steps: &mut Vec<Step>) {
+        while let Some(&lit) = self.checks.get(*next) {
+            let Some(l) = rule.body.lits.get(lit) else { return };
+            if !ready(l, bound) {
+                return;
+            }
+            bind_outputs(l, bound);
+            steps.push(Step::Check(*next));
+            *next += 1;
+        }
+    }
+
+    /// A range on one of `a`'s unbound columns from the guards among the checks not yet run (from `next`), up to the
+    /// first check that can fail: those rows the range drops would fail the guard before any error could be raised.
+    fn range_for(&self, rule: &Rule, a: &Atom, cols: &[usize], bound: &BTreeSet<VarId>, next: usize) -> Option<RangeProbe> {
+        for &lit in self.checks.get(next..).unwrap_or_default() {
+            let l = rule.body.lits.get(lit)?;
+            if let Literal::Guard(e) = l {
+                let mut probe: Option<RangeProbe> = None;
+                for c in conjuncts(e) {
+                    if let Some((col, end, lower)) = range_conjunct(c, a, cols, bound) {
+                        let p = probe.get_or_insert(RangeProbe { col, lo: None, hi: None });
+                        if p.col == col {
+                            if lower {
+                                p.lo.get_or_insert(end);
+                            } else {
+                                p.hi.get_or_insert(end);
+                            }
+                        }
+                    }
+                    // A later conjunct runs only if this one held and raised nothing.
+                    if !infallible(c) {
+                        break;
+                    }
+                }
+                if probe.is_some() {
+                    return probe;
+                }
+            }
+            if !check_infallible(l) {
+                return None;
+            }
+        }
+        None
+    }
+}
+
+/// The variables a driver literal binds: an atom's, a negation's, a lookup's key and value.
+fn driver_vars(rule: &Rule, lit: usize) -> BTreeSet<VarId> {
+    let var = |t: &Term| match t {
+        Term::Var(v) => Some(*v),
+        _ => None,
+    };
+    match rule.body.lits.get(lit) {
+        Some(Literal::Pos(a)) => atom_vars(a),
+        Some(Literal::Neg(a)) => a.args.iter().filter_map(var).collect(),
+        Some(Literal::Lookup { var: v, key, .. }) => key.iter().filter_map(var).chain(std::iter::once(*v)).collect(),
+        _ => BTreeSet::new(),
+    }
+}
+
+/// Whether a check's inputs are bound.
+fn ready(l: &Literal, bound: &BTreeSet<VarId>) -> bool {
+    match l {
+        Literal::Pos(_) => false,
+        Literal::Neg(a) => atom_vars(a).is_subset(bound),
+        Literal::Guard(e) => vars_of(e).is_subset(bound),
+        Literal::Bind { expr, .. } => vars_of(expr).is_subset(bound),
+        Literal::Lookup { key, .. } => key.iter().all(|t| match t {
+            Term::Var(v) => bound.contains(v),
+            Term::Const(_) => true,
+            Term::Wild => false,
+        }),
+        Literal::Gen { src, .. } => match src {
+            GenSource::Range { lo, hi, .. } => vars_of(lo).is_subset(bound) && vars_of(hi).is_subset(bound),
+            GenSource::Value(e) | GenSource::Lattice(e) => vars_of(e).is_subset(bound),
+            GenSource::TableFn { .. } => false,
+        },
+    }
+}
+
+/// Adds the variables a check binds.
+fn bind_outputs(l: &Literal, bound: &mut BTreeSet<VarId>) {
+    match l {
+        Literal::Bind { pat, .. } | Literal::Gen { pat, .. } => pattern_vars(pat, bound),
+        Literal::Lookup { var, .. } => {
+            bound.insert(*var);
+        }
+        _ => {}
+    }
+}
+
+/// The conjuncts of `a && b && …`, left to right.
+fn conjuncts(e: &Expr) -> Vec<&Expr> {
+    match e {
+        Expr::Binary {
+            op: BinOp::And,
+            lhs,
+            rhs,
+        } => {
+            let mut v = conjuncts(lhs);
+            v.extend(conjuncts(rhs));
+            v
+        }
+        other => vec![other],
+    }
+}
+
+/// `v op e` (or `e op v`) where `v` is the variable of one of `a`'s unbound columns and `e` is over bound variables:
+/// the column, the other end, and whether it is a lower bound.
+fn range_conjunct(c: &Expr, a: &Atom, cols: &[usize], bound: &BTreeSet<VarId>) -> Option<(usize, RangeEnd, bool)> {
+    let Expr::Binary { op, lhs, rhs } = c else { return None };
+    let column = |e: &Expr| match e {
+        Expr::Term(Term::Var(v)) if !bound.contains(v) => atom_terms(a)
+            .position(|t| matches!(t, Term::Var(x) if x == v))
+            .filter(|c| !cols.contains(c)),
+        _ => None,
+    };
+    let known = |e: &Expr| vars_of(e).is_subset(bound);
+    // `v < e`: an upper bound; `e < v`: a lower one.
+    let (col, other, var_left) = match (column(lhs), column(rhs)) {
+        (Some(col), None) if known(rhs) => (col, rhs, true),
+        (None, Some(col)) if known(lhs) => (col, lhs, false),
+        _ => return None,
+    };
+    let (lower, inclusive) = match (op, var_left) {
+        (BinOp::Gt, true) | (BinOp::Lt, false) => (true, false),
+        (BinOp::Ge, true) | (BinOp::Le, false) => (true, true),
+        (BinOp::Lt, true) | (BinOp::Gt, false) => (false, false),
+        (BinOp::Le, true) | (BinOp::Ge, false) => (false, true),
+        _ => return None,
+    };
+    Some((
+        col,
+        RangeEnd {
+            expr: (**other).clone(),
+            inclusive,
+        },
+        lower,
+    ))
+}
+
+/// Whether evaluating `e` can raise a runtime error: only variables, constants, scalars, comparisons and boolean
+/// connectives cannot.
+fn infallible(e: &Expr) -> bool {
+    match e {
+        Expr::Term(_) | Expr::Param(_) | Expr::Scalar(_) => true,
+        Expr::Unary { op: UnOp::Not, arg } => infallible(arg),
+        Expr::Binary { op, lhs, rhs } => {
+            matches!(
+                op,
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::And | BinOp::Or
+            ) && infallible(lhs)
+                && infallible(rhs)
+        }
+        _ => false,
+    }
+}
+
+/// Whether a check can raise a runtime error.
+fn check_infallible(l: &Literal) -> bool {
+    match l {
+        Literal::Neg(_) | Literal::Lookup { .. } => true,
+        Literal::Guard(e) => infallible(e),
+        Literal::Bind { expr, .. } => infallible(expr),
+        _ => false,
     }
 }
 
@@ -359,7 +624,7 @@ pub(crate) enum Driver {
 }
 
 impl Driver {
-    fn lit(&self) -> Option<usize> {
+    pub fn lit(&self) -> Option<usize> {
         match self {
             Driver::Full => None,
             Driver::Atom { lit, .. } | Driver::Neg { lit, .. } | Driver::Lookup { lit, .. } => Some(*lit),
@@ -391,11 +656,12 @@ pub(crate) fn run_term(
     stores: &BTreeMap<StoreKey, Store>,
     rule: &Rule,
     plan: &Plan,
+    order: &Order,
     driver: &Driver,
     old: &dyn Fn(usize) -> bool,
     emit: &mut dyn FnMut(Found<'_>) -> ExprResult<()>,
     error: &mut dyn FnMut(Token, ExprError, i64),
-) -> Result<(), EvalError> {
+) -> Result<u64, EvalError> {
     let mut env: Vec<Option<Value>> = vec![None; plan.nvars];
     let sign = driver.sign();
     // Bind what the driver fixes.
@@ -406,7 +672,7 @@ pub(crate) fn run_term(
                 return Err(internal_error!("an atom driver names a non-atom").into());
             };
             if !unify(cx, &mut env, atom_terms(a), row).map_err(fatal)? {
-                return Ok(());
+                return Ok(0);
             }
         }
         Driver::Neg { lit, key, .. } => {
@@ -415,7 +681,7 @@ pub(crate) fn run_term(
             };
             let terms: Vec<&Term> = non_wild(a).iter().filter_map(|c| a.args.get(*c)).collect();
             if !unify(cx, &mut env, terms.into_iter(), key).map_err(fatal)? {
-                return Ok(());
+                return Ok(0);
             }
         }
         Driver::Lookup { lit, key, value, .. } => {
@@ -423,36 +689,21 @@ pub(crate) fn run_term(
                 return Err(internal_error!("a lookup driver names a non-lookup").into());
             };
             if !unify(cx, &mut env, terms.iter(), key).map_err(fatal)? {
-                return Ok(());
+                return Ok(0);
             }
             match env.get_mut(var.index()) {
                 Some(slot @ None) => *slot = Some(value.clone()),
                 Some(Some(v)) if v == value => {}
-                Some(Some(_)) => return Ok(()),
+                Some(Some(_)) => return Ok(0),
                 None => return Err(internal_error!("variable {var:?} out of range").into()),
             }
         }
     }
-    let bound: BTreeSet<VarId> = env
-        .iter()
-        .enumerate()
-        .filter(|(_, v)| v.is_some())
-        .filter_map(|(i, _)| u32::try_from(i).ok().map(VarId::from_raw))
-        .collect();
-    let skip = match driver {
-        Driver::Atom { lit, .. } => Some(*lit),
-        _ => None,
-    };
-    let order = plan.join_order(rule, skip, &bound);
-    let driver_row = match driver {
-        Driver::Atom { row, .. } => Some(row.clone()),
-        _ => None,
-    };
     let mut rows: Vec<Option<Row>> = vec![None; rule.body.lits.len()];
-    if let (Some(l), Some(r)) = (skip, driver_row)
-        && let Some(slot) = rows.get_mut(l)
+    if let Driver::Atom { lit, row, .. } = driver
+        && let Some(slot) = rows.get_mut(*lit)
     {
-        *slot = Some(r);
+        *slot = Some(row.clone());
     }
     let mut search = Search {
         cx,
@@ -461,12 +712,14 @@ pub(crate) fn run_term(
         plan,
         driver,
         old,
-        order: &order,
+        steps: &order.steps,
         sign,
         emit,
         error,
+        examined: 0,
     };
-    search.atoms(0, &mut env, &mut rows)
+    search.run(0, &mut env, &mut rows, &mut Vec::new(), None)?;
+    Ok(search.examined)
 }
 
 fn fatal(e: ExprError) -> EvalError {
@@ -483,6 +736,22 @@ fn unify<'t>(
     terms: impl Iterator<Item = &'t Term>,
     values: &[Value],
 ) -> ExprResult<bool> {
+    let mut newly = Vec::new();
+    let ok = unify_tracked(cx, env, terms, values, &mut newly)?;
+    if !ok {
+        undo(env, &newly);
+    }
+    Ok(ok)
+}
+
+/// [`unify`], recording the variables it bound in `newly` (the caller undoes them, on a mismatch too).
+fn unify_tracked<'t>(
+    cx: &Ctx<'_>,
+    env: &mut [Option<Value>],
+    terms: impl Iterator<Item = &'t Term>,
+    values: &[Value],
+    newly: &mut Vec<usize>,
+) -> ExprResult<bool> {
     let mut n = 0;
     for (t, v) in terms.zip(values) {
         n += 1;
@@ -494,7 +763,10 @@ fn unify<'t>(
                 }
             }
             Term::Var(var) => match env.get_mut(var.index()) {
-                Some(slot @ None) => *slot = Some(v.clone()),
+                Some(slot @ None) => {
+                    *slot = Some(v.clone());
+                    newly.push(var.index());
+                }
                 Some(Some(existing)) => {
                     if existing != v {
                         return Ok(false);
@@ -510,6 +782,30 @@ fn unify<'t>(
     Ok(true)
 }
 
+/// Unbinds the variables a step bound.
+fn undo(env: &mut [Option<Value>], newly: &[usize]) {
+    for &i in newly {
+        if let Some(slot) = env.get_mut(i) {
+            *slot = None;
+        }
+    }
+}
+
+/// A range end's value, if it evaluates to an ordered scalar (integers, durations, instants: their value order is
+/// their numeric order). Anything else, an error included, means no range: the guard itself then decides.
+fn range_end(cx: &Ctx<'_>, env: &[Option<Value>], end: &Option<RangeEnd>) -> Option<std::ops::Bound<Value>> {
+    use std::ops::Bound;
+    let Some(end) = end else { return Some(Bound::Unbounded) };
+    match expr::eval(cx, env, &end.expr) {
+        Ok(v @ (Value::Int(_) | Value::Duration(_) | Value::Instant(_))) => Some(if end.inclusive {
+            Bound::Included(v)
+        } else {
+            Bound::Excluded(v)
+        }),
+        _ => None,
+    }
+}
+
 struct Search<'a, 'b> {
     cx: &'a Ctx<'a>,
     stores: &'a BTreeMap<StoreKey, Store>,
@@ -517,10 +813,11 @@ struct Search<'a, 'b> {
     plan: &'a Plan,
     driver: &'a Driver,
     old: &'a dyn Fn(usize) -> bool,
-    order: &'a [(usize, Vec<usize>)],
+    steps: &'a [Step],
     sign: i64,
     emit: &'b mut dyn FnMut(Found<'_>) -> ExprResult<()>,
     error: &'b mut dyn FnMut(Token, ExprError, i64),
+    examined: u64,
 }
 
 impl Search<'_, '_> {
@@ -528,38 +825,6 @@ impl Search<'_, '_> {
         self.stores
             .get(&key)
             .ok_or_else(|| internal_error!("no store for {key:?}").into())
-    }
-
-    fn atoms(&mut self, step: usize, env: &mut Vec<Option<Value>>, rows: &mut Vec<Option<Row>>) -> Result<(), EvalError> {
-        let Some((lit, cols)) = self.order.get(step) else {
-            return self.checks(0, env, rows, &mut Vec::new());
-        };
-        let Some(Literal::Pos(a)) = self.rule.body.lits.get(*lit) else {
-            return Err(internal_error!("a join step names a non-atom").into());
-        };
-        let terms: Vec<&Term> = atom_terms(a).collect();
-        let mut values = Vec::with_capacity(cols.len());
-        for c in cols {
-            let t = terms
-                .get(*c)
-                .ok_or_else(|| internal_error!("a bound column is out of range"))?;
-            values.push(expr::term(self.cx, env, t).map_err(fatal)?);
-        }
-        let candidates = self.store(atom_store(a))?.rows((self.old)(*lit), cols, &values)?;
-        for row in candidates {
-            let saved = env.clone();
-            if unify(self.cx, env, terms.iter().copied(), &row).map_err(fatal)? {
-                if let Some(slot) = rows.get_mut(*lit) {
-                    *slot = Some(row.clone());
-                }
-                self.atoms(step + 1, env, rows)?;
-                if let Some(slot) = rows.get_mut(*lit) {
-                    *slot = None;
-                }
-            }
-            *env = saved;
-        }
-        Ok(())
     }
 
     /// The valuation's token: its atom rows, then the values its lookups read.
@@ -574,15 +839,23 @@ impl Search<'_, '_> {
         t
     }
 
-    fn checks(
+    /// Runs the steps from `pc`. `failed` is the error a hoisted check raised: the remaining atoms are joined without
+    /// that check's outputs (and the checks skipped), and the error is counted for each complete valuation.
+    fn run(
         &mut self,
-        step: usize,
+        pc: usize,
         env: &mut Vec<Option<Value>>,
         rows: &mut Vec<Option<Row>>,
         looked: &mut Vec<Value>,
+        failed: Option<&ExprError>,
     ) -> Result<(), EvalError> {
-        let Some(&lit) = self.plan.checks.get(step) else {
+        let Some(step) = self.steps.get(pc) else {
             let sign = self.sign;
+            if let Some(e) = failed {
+                let token = self.token(rows, looked);
+                (self.error)(token, e.duplicate(), sign);
+                return Ok(());
+            }
             return match (self.emit)(Found { env, sign }) {
                 Ok(()) => Ok(()),
                 Err(ExprError::Eval(e)) => Err(e),
@@ -593,6 +866,97 @@ impl Search<'_, '_> {
                 }
             };
         };
+        match step {
+            Step::Atom { lit, cols, range } => self.atom(pc, *lit, cols, range.as_ref(), env, rows, looked, failed),
+            Step::Check(_) if failed.is_some() => self.run(pc + 1, env, rows, looked, failed),
+            Step::Check(k) => {
+                let lit = *self
+                    .plan
+                    .checks
+                    .get(*k)
+                    .ok_or_else(|| internal_error!("check {k} out of range"))?;
+                self.check(pc, lit, env, rows, looked)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn atom(
+        &mut self,
+        pc: usize,
+        lit: usize,
+        cols: &[usize],
+        range: Option<&RangeProbe>,
+        env: &mut Vec<Option<Value>>,
+        rows: &mut Vec<Option<Row>>,
+        looked: &mut Vec<Value>,
+        failed: Option<&ExprError>,
+    ) -> Result<(), EvalError> {
+        let Some(Literal::Pos(a)) = self.rule.body.lits.get(lit) else {
+            return Err(internal_error!("a join step names a non-atom").into());
+        };
+        let terms: Vec<&Term> = atom_terms(a).collect();
+        // The probe's values; after a failed check a planned column may be unbound, and the atom is scanned.
+        let mut values = Vec::with_capacity(cols.len());
+        let mut probe = true;
+        for c in cols {
+            let t = terms
+                .get(*c)
+                .ok_or_else(|| internal_error!("a bound column is out of range"))?;
+            match expr::term(self.cx, env, t) {
+                Ok(v) => values.push(v),
+                Err(_) if failed.is_some() => {
+                    probe = false;
+                    break;
+                }
+                Err(e) => return Err(fatal(e)),
+            }
+        }
+        let store = self.store(atom_store(a))?;
+        let old = (self.old)(lit);
+        let candidates = if !probe {
+            store.rows(old, &[], &[])?
+        } else {
+            let bounds = match range {
+                Some(r) if failed.is_none() => match (range_end(self.cx, env, &r.lo), range_end(self.cx, env, &r.hi)) {
+                    (Some(lo), Some(hi)) => Some((r.col, lo, hi)),
+                    _ => None,
+                },
+                _ => None,
+            };
+            match bounds {
+                Some((col, lo, hi)) => store.range_rows(old, cols, &values, col, lo, hi)?,
+                None => store.rows(old, cols, &values)?,
+            }
+        };
+        self.examined += candidates.len() as u64;
+        let mut newly = Vec::new();
+        for row in candidates {
+            newly.clear();
+            let ok = unify_tracked(self.cx, env, terms.iter().copied(), &row, &mut newly).map_err(fatal)?;
+            if ok {
+                if let Some(slot) = rows.get_mut(lit) {
+                    *slot = Some(row);
+                }
+                self.run(pc + 1, env, rows, looked, failed)?;
+                if let Some(slot) = rows.get_mut(lit) {
+                    *slot = None;
+                }
+            }
+            undo(env, &newly);
+        }
+        Ok(())
+    }
+
+    /// Runs check `lit`, then the steps after `pc` for each way it holds.
+    fn check(
+        &mut self,
+        pc: usize,
+        lit: usize,
+        env: &mut Vec<Option<Value>>,
+        rows: &mut Vec<Option<Row>>,
+        looked: &mut Vec<Value>,
+    ) -> Result<(), EvalError> {
         let is_driver = self.driver.lit() == Some(lit);
         let result: ExprResult<bool> = match self.rule.body.lits.get(lit) {
             Some(Literal::Neg(a)) => {
@@ -606,27 +970,23 @@ impl Search<'_, '_> {
                         let t = a.args.get(*c).ok_or_else(|| internal_error!("a negated column is out of range"))?;
                         values.push(expr::term(self.cx, env, t).map_err(fatal)?);
                     }
-                    let present = !self.store(StoreKey::Main(a.rel))?.rows((self.old)(lit), &cols, &values)?.is_empty();
+                    let present = self.store(StoreKey::Main(a.rel))?.any((self.old)(lit), &cols, &values)?;
                     Ok(!present)
                 }
             }
             Some(Literal::Guard(e)) => expr::eval(self.cx, env, e).and_then(|v| expr::truth(&v)),
             Some(Literal::Bind { pat, expr: e }) => match expr::eval(self.cx, env, e) {
                 Ok(v) => {
-                    let saved = env.clone();
-                    let r = expr::matches(self.cx, env, pat, &v, &mut Vec::new());
-                    match r {
-                        Ok(true) => {
-                            self.checks(step + 1, env, rows, looked)?;
-                            *env = saved;
-                            return Ok(());
-                        }
-                        Ok(false) => {
-                            *env = saved;
-                            Ok(false)
-                        }
-                        Err(e) => Err(e),
-                    }
+                    let mut newly = Vec::new();
+                    let r = expr::matches(self.cx, env, pat, &v, &mut newly);
+                    let out = match r {
+                        Ok(true) => self.run(pc + 1, env, rows, looked, None),
+                        Ok(false) => Ok(()),
+                        Err(ExprError::Eval(e)) => Err(e),
+                        Err(e) => self.fail(pc, e, env, rows, looked),
+                    };
+                    undo(env, &newly);
+                    return out;
                 }
                 Err(e) => Err(e),
             },
@@ -652,30 +1012,30 @@ impl Search<'_, '_> {
                         None => bottom,
                     }
                 };
-                let saved = env.clone();
+                let slot_was_empty = env.get(var.index()).is_some_and(Option::is_none);
                 if let Some(slot) = env.get_mut(var.index()) {
                     *slot = Some(value.clone());
                 }
                 looked.push(value);
-                self.checks(step + 1, env, rows, looked)?;
+                let out = self.run(pc + 1, env, rows, looked, None);
                 looked.pop();
-                *env = saved;
-                return Ok(());
+                if slot_was_empty {
+                    undo(env, &[var.index()]);
+                }
+                return out;
             }
             Some(Literal::Gen { pat, src }) => match expr::generate(self.cx, env, src) {
                 Ok(values) => {
                     for v in values {
-                        let saved = env.clone();
-                        match expr::matches(self.cx, env, pat, &v, &mut Vec::new()) {
-                            Ok(true) => self.checks(step + 1, env, rows, looked)?,
-                            Ok(false) => {}
-                            Err(ExprError::Eval(e)) => return Err(e),
-                            Err(e) => {
-                                let token = self.token(rows, looked);
-                                (self.error)(token, e, self.sign);
-                            }
-                        }
-                        *env = saved;
+                        let mut newly = Vec::new();
+                        let r = match expr::matches(self.cx, env, pat, &v, &mut newly) {
+                            Ok(true) => self.run(pc + 1, env, rows, looked, None),
+                            Ok(false) => Ok(()),
+                            Err(ExprError::Eval(e)) => Err(e),
+                            Err(e) => self.fail(pc, e, env, rows, looked),
+                        };
+                        undo(env, &newly);
+                        r?;
                     }
                     return Ok(());
                 }
@@ -684,15 +1044,23 @@ impl Search<'_, '_> {
             other => return Err(internal_error!("a check step names {other:?}").into()),
         };
         match result {
-            Ok(true) => self.checks(step + 1, env, rows, looked),
+            Ok(true) => self.run(pc + 1, env, rows, looked, None),
             Ok(false) => Ok(()),
             Err(ExprError::Eval(e)) => Err(e),
-            Err(e) => {
-                let token = self.token(rows, looked);
-                (self.error)(token, e, self.sign);
-                Ok(())
-            }
+            Err(e) => self.fail(pc, e, env, rows, looked),
         }
+    }
+
+    /// A check at `pc` raised `e`: the valuation fails, once per completion of the atoms still to join.
+    fn fail(
+        &mut self,
+        pc: usize,
+        e: ExprError,
+        env: &mut Vec<Option<Value>>,
+        rows: &mut Vec<Option<Row>>,
+        looked: &mut Vec<Value>,
+    ) -> Result<(), EvalError> {
+        self.run(pc + 1, env, rows, looked, Some(&e))
     }
 }
 

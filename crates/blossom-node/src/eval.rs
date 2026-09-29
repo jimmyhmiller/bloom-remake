@@ -49,6 +49,8 @@ pub trait Executor: Send {
     fn carried_rows(&self, rel: RelId) -> Vec<Row>;
     /// The whole carried state, for inspection (O(state)).
     fn carried(&self) -> Instance;
+    /// The join work done so far, in rows examined, if the executor measures it.
+    fn rows_examined(&self) -> Option<u64>;
 }
 
 /// Any [`Evaluator`] as an [`Executor`]: it keeps the carried state and diffs each tick's next state against it.
@@ -105,6 +107,11 @@ impl<E: Evaluator> Executor for OracleExecutor<E> {
     fn carried(&self) -> Instance {
         self.carried.clone()
     }
+
+    /// The reference evaluator does not count its work.
+    fn rows_examined(&self) -> Option<u64> {
+        None
+    }
 }
 
 impl<X: Executor + ?Sized> Executor for Box<X> {
@@ -123,6 +130,10 @@ impl<X: Executor + ?Sized> Executor for Box<X> {
     fn carried(&self) -> Instance {
         (**self).carried()
     }
+
+    fn rows_examined(&self) -> Option<u64> {
+        (**self).rows_examined()
+    }
 }
 
 impl Executor for blossom_engine::Engine {
@@ -140,6 +151,10 @@ impl Executor for blossom_engine::Engine {
 
     fn carried(&self) -> Instance {
         self.carried_instance()
+    }
+
+    fn rows_examined(&self) -> Option<u64> {
+        Some(blossom_engine::Engine::rows_examined(self))
     }
 }
 
