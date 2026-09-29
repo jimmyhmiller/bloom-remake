@@ -1,0 +1,12 @@
+//! A persistent row whose error becomes reachable (one negation starts holding) in the tick a later negation stops
+//! holding.
+program error_between_flipping_negations version 1;
+input unblock(x: u8);
+input mark(x: u8);
+table a(x: u8);
+table b(x: u8);
+table c(x: u8);
+bootstrap { emit a(0); emit b(0); }
+on unblock(x), b(x) { delete b(x); }
+on mark(x) { next c(x); }
+view out(x, y) = a(x), not b(x), let y = 10 / x, not c(x);

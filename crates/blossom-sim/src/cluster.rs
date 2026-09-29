@@ -24,8 +24,8 @@ use blossom_node::acl::{AclTable, Source};
 use blossom_node::durable::DurableSchema;
 use blossom_node::manual::ManualDriver;
 use blossom_node::recovery::{self, StoreSpec};
-use blossom_node::{Node, NodeConfig, ReleasedTick};
-use blossom_oracle::{Delivery, Ingress, Instance, Oracle, Row};
+use blossom_node::{Backend, Executor, Executors, Node, NodeConfig, ReleasedTick};
+use blossom_oracle::{Delivery, Ingress, Instance, Row};
 use blossom_store::{OpenMode, SimFs, StoreIdentity, Vfs, WriteFate};
 use blossom_value::Value;
 use blossom_value::time::{Instant, NodeId};
@@ -92,6 +92,10 @@ pub struct ClusterConfig {
     pub duration: i64,
     /// The principal clients claim.
     pub principal: String,
+    /// The evaluator the nodes run.
+    pub backend: Backend,
+    /// How the nodes' stores certify their WAL tails.
+    pub certification: blossom_store::Certification,
 }
 
 impl Default for ClusterConfig {
@@ -111,6 +115,8 @@ impl Default for ClusterConfig {
             downtime: 0,
             duration: 5_000_000_000,
             principal: "spiffe://sim/client".into(),
+            backend: Backend::default(),
+            certification: blossom_store::Certification::default(),
         }
     }
 }
@@ -128,6 +134,8 @@ pub struct ClusterRun {
     pub log: Vec<String>,
     /// The first invariant an observer found violated (the run stopped there).
     pub violation: Option<String>,
+    /// The nodes' join work, in rows examined, when their executors measure it.
+    pub rows_examined: Option<u64>,
 }
 
 /// SplitMix64: the simulation's only randomness.
@@ -195,7 +203,7 @@ struct Client {
 
 struct SimNode<'p> {
     fs: SimFs,
-    driver: Option<ManualDriver<'p, Arc<Oracle>>>,
+    driver: Option<ManualDriver<'p, Box<dyn Executor>>>,
     restarts: u64,
     /// How far this incarnation's clock is ahead of virtual time: a restart boots after every instant the previous
     /// incarnation may have exposed, which can be ahead of the virtual clock (the real clock anchors the same way).
@@ -211,7 +219,7 @@ struct SimNode<'p> {
 pub struct Cluster<'p> {
     artifact: &'p BlsArtifact,
     schema: &'p DurableSchema,
-    oracle: Arc<Oracle>,
+    executors: Executors,
     acl: AclTable,
     names: Arc<[Arc<str>]>,
     statics: Vec<(RelId, Row)>,
@@ -262,20 +270,20 @@ impl<'p> Cluster<'p> {
         protocol: Box<dyn ClientProtocol + 'p>,
         cfg: ClusterConfig,
     ) -> Result<Cluster<'p>, SimError> {
-        let oracle = Arc::new(
-            Oracle::new(artifact.program.clone())
-                .map_err(SimError::Load)?
-                .with_roles(artifact.roles.clone())
-                .with_seed(program_seed)
-                .and_then(|o| o.with_node_names(artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect()))
-                .map_err(SimError::Load)?,
-        );
+        let executors = Executors::new(
+            cfg.backend,
+            artifact.program.clone(),
+            artifact.roles.clone(),
+            artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect(),
+            program_seed,
+        )
+        .map_err(SimError::Load)?;
         let names: Arc<[Arc<str>]> = artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect();
         let mut c = Cluster {
             artifact,
             schema,
             acl: AclTable::of(artifact.program.get()),
-            oracle,
+            executors,
             names,
             statics,
             nodes: Vec::new(),
@@ -325,8 +333,8 @@ impl<'p> Cluster<'p> {
     fn boot(&mut self, n: NodeId, fresh: bool) -> Result<(), SimError> {
         let names = self.names.clone();
         let now = self.now;
+        let certification = self.cfg.certification;
         let artifact = self.artifact;
-        let oracle = self.oracle.clone();
         let statics = self.statics.clone();
         let schema = self.schema;
         let slot = self
@@ -340,6 +348,7 @@ impl<'p> Cluster<'p> {
                 dir: PathBuf::from(format!("/node{}", n.0)),
                 identity: identity(&names, n),
                 mode: if fresh { OpenMode::InitFresh } else { OpenMode::Existing },
+                certification,
             },
             artifact.program.get(),
             names.clone(),
@@ -355,7 +364,11 @@ impl<'p> Cluster<'p> {
         let mut cfg = NodeConfig::new(n, artifact.roles.get(n.0 as usize).copied().flatten());
         cfg.halt = artifact.halt;
         cfg.statics = statics;
-        let node = Node::boot(cfg, &artifact.program, oracle, opened.boot.clone())
+        let exec = self
+            .executors
+            .make(n)
+            .map_err(|e| SimError::Internal(internal_error!("node {} cannot start its evaluator: {e}", n.0)))?;
+        let node = Node::boot(cfg, &artifact.program, exec, opened.boot.clone())
             .map_err(|e| SimError::Internal(internal_error!("node {} cannot boot: {e}", n.0)))?;
         slot.driver = Some(ManualDriver::new(node, artifact.program.get(), schema, names, opened));
         Ok(())
@@ -381,6 +394,9 @@ impl<'p> Cluster<'p> {
 
     /// The run so far; operations still in flight never got an answer.
     pub fn finish(mut self) -> ClusterRun {
+        for i in 0..self.nodes.len() {
+            self.count_work(i);
+        }
         for c in &mut self.clients {
             if let Some(p) = c.pending.take() {
                 self.run.history.push(Operation {
@@ -409,8 +425,8 @@ impl<'p> Cluster<'p> {
         self.run.violation.as_deref()
     }
 
-    /// Node `n`'s carried state, or `None` while it is down.
-    pub fn state(&self, n: NodeId) -> Option<&Instance> {
+    /// Node `n`'s carried state, or `None` while it is down (O(state)).
+    pub fn state(&self, n: NodeId) -> Option<Instance> {
         self.nodes
             .get(n.0 as usize)
             .and_then(|s| s.driver.as_ref())
@@ -471,6 +487,18 @@ impl<'p> Cluster<'p> {
             if c.pending.is_none() {
                 c.retry = None;
             }
+        }
+    }
+
+    /// Adds node `i`'s join work to the run's (before its executor goes).
+    fn count_work(&mut self, i: usize) {
+        if let Some(n) = self
+            .nodes
+            .get(i)
+            .and_then(|s| s.driver.as_ref())
+            .and_then(|d| d.node.rows_examined())
+        {
+            *self.run.rows_examined.get_or_insert(0) += n;
         }
     }
 
@@ -543,11 +571,12 @@ impl<'p> Cluster<'p> {
         if self.observers.is_empty() {
             return Ok(());
         }
-        let states: Vec<Option<&Instance>> = self
+        let owned: Vec<Option<Instance>> = self
             .nodes
             .iter()
             .map(|s| s.driver.as_ref().map(|d| d.node.carried()))
             .collect();
+        let states: Vec<Option<&Instance>> = owned.iter().map(Option::as_ref).collect();
         let now = self.now - EPOCH;
         let mut violation = None;
         for o in &mut self.observers {
@@ -566,6 +595,7 @@ impl<'p> Cluster<'p> {
     /// Crashes node `n`. With `mid_tick`, a ready node first runs one tick up to its WAL append, so the crash lands
     /// between the append and the sync.
     fn crash_node(&mut self, n: NodeId, writes: CrashWrites, down_until: i64, mid_tick: bool) -> Result<(), SimError> {
+        self.count_work(n.0 as usize);
         let seed = self.rng.next();
         let now = self.now;
         let slot = self
@@ -684,7 +714,7 @@ impl<'p> Cluster<'p> {
                 }
                 let principal = format!("spiffe://sim/node/{}", from.0);
                 let role = self.artifact.roles.get(from.0 as usize).copied().flatten();
-                let facts = self.oracle.static_facts();
+                let facts = self.executors.oracle().static_facts();
                 let Some(d) = self.nodes.get_mut(to.0 as usize).and_then(|s| s.driver.as_mut()) else {
                     self.run.dropped += 1;
                     return Ok(());
@@ -704,7 +734,7 @@ impl<'p> Cluster<'p> {
                 }
             }
             Envelope::FromClient { client, to, rel, row } => {
-                let facts = self.oracle.static_facts();
+                let facts = self.executors.oracle().static_facts();
                 let principal = self.cfg.principal.clone();
                 let Some(slot) = self.nodes.get_mut(to.0 as usize) else {
                     return Err(internal_error!("no node {}", to.0).into());

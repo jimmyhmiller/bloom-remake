@@ -566,8 +566,15 @@ impl<'t> Resolver<'t, '_> {
     }
 
     /// Whether `rel` is an interface of an instance of the current scope (rather than a relation of the scope).
+    /// Whether `rel` is declared in the scope of `cx` (a module's own relation, not an instance's).
+    fn declared_here(&self, cx: &RuleCx, rel: HRelId) -> bool {
+        self.scope(cx.ms).rels.values().any(|r| *r == rel)
+    }
+
+    /// Whether `rel` is an instance's interface as seen from `cx`: not declared here, and not an interposition's
+    /// `inside`, which the interposition block reads.
     fn is_foreign_interface(&self, cx: &RuleCx, rel: HRelId) -> bool {
-        !self.scope(cx.ms).rels.values().any(|r| *r == rel) && !cx.aliases.values().any(|r| *r == rel)
+        !self.declared_here(cx, rel) && !cx.aliases.values().any(|r| *r == rel)
     }
 
     /// Arguments of an atom, positional or named (LANGUAGE §9.2), one pattern per column.
@@ -1954,7 +1961,9 @@ impl<'t> Resolver<'t, '_> {
             (HRelKind::View, _) => Some((code!("BLS0406"), bad("a view is closed; no statement may write it"))),
             (HRelKind::Static, _) => Some((code!("BLS0400"), bad("a static relation gets its rows from facts"))),
             (HRelKind::Input { root: true }, _) => Some((code!("BLS0406"), bad("a module never writes its own input"))),
-            (HRelKind::Input { root: false }, _) if !self.is_foreign_interface(cx, rel) => {
+            // An importer writes an instance's input (an interposition block its `inside`); a module never writes
+            // its own (LANGUAGE §7.6).
+            (HRelKind::Input { root: false }, _) if self.declared_here(cx, rel) => {
                 Some((code!("BLS0406"), bad("a module never writes its own input")))
             }
             (

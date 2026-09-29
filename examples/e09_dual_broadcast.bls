@@ -71,3 +71,14 @@ pub module DualBroadcast(peers: rel(n: Node), MAX_PAYLOAD: u64 = 65536) {
 }
 
 import DualBroadcast(peers = member) as chat;
+
+/// The host feeds the program's inputs; the program forwards them to the instance (an instance's inputs are written
+/// by its importer, LANGUAGE §7.6).
+input publish(id: MsgId, payload: Bytes);
+input command(id: MsgId, text: String);
+forward_publish: on publish(id, p) {
+    emit chat.publish(id, p);
+}
+forward_command: on command(id, t) {
+    emit chat.command(id, t);
+}

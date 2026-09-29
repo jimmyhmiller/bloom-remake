@@ -1,0 +1,1213 @@
+//! The engine: one node's program, evaluated tick by tick from state that lives across ticks.
+//!
+//! A tick:
+//! 1. clears every store's tick change, then applies what changes: the carried state (what the last tick's inductive
+//!    rules derived, relative to the tick before), the program's facts on the first tick, and the tick's inputs
+//!    (events, deliveries, client messages) relative to the last tick's;
+//! 2. brings each stratum up to date, in dependency order: a delta rule runs one term per dependency that changed; a
+//!    recompute rule runs in full and is diffed against its last output; a recursive stratum whose inputs changed is
+//!    re-evaluated to its fixpoint and diffed (errors judged at the fixpoint, as the reference semantics does);
+//! 3. brings the inductive rules (the next tick's state) and the asynchronous rules (the tick's sends) up to date the
+//!    same way;
+//! 4. checks keys (SEM-050/051) on the rows that changed, and invariants;
+//! 5. reports the change to the carried state, the sends, the replies, and what the caller observes.
+//!
+//! A tick that fails leaves the engine unusable until `reset`: in the node's semantics a failed tick is a crash.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+use blossom_base::{ParamId, RelId, RoleId, RuleId, internal_error};
+use blossom_ir::ValidatedProgram;
+use blossom_ir::core::{
+    AggFunc, ConstructKind, HeadArg, HeadMode, LatticeCtor, Literal, Program, RelClass, Rule, RuleKind,
+    ViolationAction,
+};
+use blossom_ir::obs::ProgramErrorRecord;
+use blossom_ir::tick::{
+    Changes, Egress, EvalError, Instance, Row, Send, StepInput, StepOutput, TickInput, TickOutput,
+};
+use blossom_lattice::Kind;
+use blossom_value::time::{NodeId, Tick};
+use blossom_value::value::IntValue;
+use blossom_value::{Seed, TypeDef, Value};
+
+use crate::expr::{self, Ctx, ExprError, Shared, bug};
+use crate::rule::{self, Driver, Found, Plan, Regime, StoreKey, Token, dep_store, non_wild};
+use crate::store::{CellSpec, Store};
+use crate::strata::{self, Stratum};
+
+/// How to set up an engine for one node of a deployment.
+#[derive(Clone, Debug, Default)]
+pub struct EngineConfig {
+    /// Each node's role, by node id (empty for a role-free program).
+    pub roles: Vec<Option<RoleId>>,
+    /// Each node's stable name, by node id (node seeds derive from names).
+    pub node_names: Vec<Arc<str>>,
+    /// The deployment's root seed ρ (choices and `rand` derive from it).
+    pub seed: Option<Seed>,
+    /// The deployment's values of deploy-time parameters.
+    pub params: BTreeMap<ParamId, Value>,
+    /// Rounds a recursive stratum may take before the tick fails with BLSR007.
+    pub max_rounds: u32,
+}
+
+/// The per-group state of an aggregate rule: per aggregate column, the support of each distinct argument tuple, and
+/// the group's current head row.
+#[derive(Clone, Debug, Default)]
+struct Group {
+    tuples: Vec<BTreeMap<Vec<Value>, i64>>,
+    row: Option<Row>,
+}
+
+pub struct Engine {
+    program: ValidatedProgram,
+    shared: Shared,
+    node: NodeId,
+    plans: BTreeMap<RuleId, Plan>,
+    strata: Vec<Stratum>,
+    inductive: Vec<RuleId>,
+    asynchronous: Vec<RuleId>,
+    stores: BTreeMap<StoreKey, Store>,
+    /// A recompute rule's (or a recursive stratum rule's) head rows at its last evaluation, with their support.
+    prev: BTreeMap<RuleId, BTreeMap<Row, i64>>,
+    groups: BTreeMap<RuleId, BTreeMap<Vec<Value>, Group>>,
+    /// The tick-local input rows of the last tick, per store.
+    inputs: BTreeMap<StoreKey, BTreeSet<Row>>,
+    /// Changes to the carried state, applied at the next tick's start.
+    pending: Changes,
+    /// The carried state `reset` loaded, until the first tick replaces it.
+    baseline: Option<Instance>,
+    facts_loaded: bool,
+    max_rounds: u32,
+    /// Relations with payload columns: their key columns, and whether they stage an upsert (BLSR002).
+    keyed: Vec<(RelId, Vec<usize>, bool)>,
+    violations: Vec<RuleId>,
+    poisoned: bool,
+    /// Lattice stores written since the last settle.
+    unsettled: BTreeSet<StoreKey>,
+    /// Rows the atom probes returned since the engine was created: the join work, measured without a clock.
+    examined: u64,
+}
+
+fn kinds(p: &Program) -> Vec<Option<Kind>> {
+    fn kind(p: &Program, ctor: &LatticeCtor, depth: usize) -> Option<Kind> {
+        if depth > p.lattices.len() {
+            return None;
+        }
+        Some(match ctor {
+            LatticeCtor::Bool => Kind::Bool,
+            LatticeCtor::Max(_) => Kind::Max,
+            LatticeCtor::Min(_) => Kind::Min,
+            LatticeCtor::Set(_) => Kind::Set,
+            LatticeCtor::PSet(_) => Kind::PSet,
+            LatticeCtor::Point(_) => Kind::Point,
+            LatticeCtor::Map(_, inner) => Kind::Map(Box::new(kind(p, &p.lattices.get(*inner)?.ctor, depth + 1)?)),
+            _ => return None,
+        })
+    }
+    p.lattices.iter().map(|l| kind(p, &l.ctor, 0)).collect()
+}
+
+/// The constructs the engine evaluates; anything else fails loudly.
+fn check_supported(p: &Program) -> Result<(), EvalError> {
+    for r in p.rels.iter() {
+        match r.class {
+            RelClass::Weighted(_) => {
+                return Err(blossom_base::unimplemented_error!("LANG-138", "weighted relations in the engine").into());
+            }
+            RelClass::HostTable => {
+                return Err(blossom_base::unimplemented_error!("LANG-051", "host-maintained tables in the engine").into());
+            }
+            _ => {}
+        }
+    }
+    for rule in p.rules.iter() {
+        let lattice_head = p.rels.get(rule.head.rel).is_some_and(|r| !r.schema.lattice.is_empty());
+        if lattice_head && strata::is_aggregate(rule) {
+            return Err(blossom_base::unimplemented_error!(
+                "LANG-100",
+                "aggregates into a lattice-valued relation in the engine"
+            )
+            .into());
+        }
+        if matches!(rule.head.mode, HeadMode::ZAdd { .. }) {
+            return Err(blossom_base::unimplemented_error!("LANG-138", "weighted heads in the engine").into());
+        }
+        for a in &rule.head.args {
+            if let HeadArg::Agg(agg) = a {
+                let ok = matches!(agg.func, AggFunc::Count | AggFunc::Sum | AggFunc::Min | AggFunc::Max)
+                    && agg.order.is_none()
+                    && (!agg.args.is_empty() || matches!(agg.func, AggFunc::Count));
+                if !ok {
+                    return Err(blossom_base::unimplemented_error!(
+                        "LANG-100",
+                        "the aggregate {:?} in the engine",
+                        agg.func
+                    )
+                    .into());
+                }
+            }
+        }
+        for lit in &rule.body.lits {
+            if let Literal::Pos(a) | Literal::Neg(a) = lit {
+                if a.principal.is_some() || a.weight.is_some() {
+                    return Err(blossom_base::unimplemented_error!(
+                        "LANG-241",
+                        "`principal` and weight bindings in the engine"
+                    )
+                    .into());
+                }
+                if matches!(lit, Literal::Neg(_)) && a.sender.is_some() {
+                    return Err(blossom_base::unimplemented_error!(
+                        "LANG-241",
+                        "`from` on a negated channel atom in the engine"
+                    )
+                    .into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cell_spec(p: &Program, kinds: &[Option<Kind>], rel: RelId, extra: usize) -> Result<Option<CellSpec>, EvalError> {
+    let decl = p.rels.get(rel).ok_or_else(|| internal_error!("relation {rel:?} is not declared"))?;
+    if decl.schema.lattice.is_empty() {
+        return Ok(None);
+    }
+    let mut lattice = Vec::new();
+    for (col, l) in &decl.schema.lattice {
+        match kinds.get(l.index()).cloned().flatten() {
+            Some(k) => lattice.push((col.index(), k)),
+            None => {
+                return Err(blossom_base::unimplemented_error!(
+                    "LANG-124",
+                    "the lattice of `{}` in the engine",
+                    decl.name
+                )
+                .into());
+            }
+        }
+    }
+    let mut ident: Vec<usize> = decl
+        .schema
+        .key
+        .iter()
+        .chain(decl.schema.payload.iter())
+        .map(|c| c.index())
+        .collect();
+    ident.sort_unstable();
+    Ok(Some(CellSpec { ident, extra, lattice }))
+}
+
+impl Engine {
+    /// Prepares `program` for node `node`: checks what it evaluates, stratifies, plans every rule the node runs, and
+    /// creates and indexes every store.
+    pub fn new(program: ValidatedProgram, node: NodeId, cfg: EngineConfig) -> Result<Engine, EvalError> {
+        let p = program.get();
+        check_supported(p)?;
+        let kinds = kinds(p);
+        let (choice, node_seeds) = match cfg.seed {
+            Some(root) => {
+                let choice = blossom_value::Seeds::derive(root, "")
+                    .map_err(|e| internal_error!("deriving the choice seed: {e}"))?
+                    .choice;
+                let mut seeds = Vec::new();
+                for n in &cfg.node_names {
+                    seeds.push(
+                        blossom_value::Seeds::derive(root, n)
+                            .map_err(|e| internal_error!("deriving the seed of node {n}: {e}"))?
+                            .node,
+                    );
+                }
+                (Some(choice), seeds)
+            }
+            None => (None, Vec::new()),
+        };
+        let my_role = cfg.roles.get(node.0 as usize).copied().flatten();
+        let runs = |rule: &Rule| rule.role.is_none_or(|r| Some(r) == my_role);
+        let mut plans = BTreeMap::new();
+        let mut inductive = Vec::new();
+        let mut asynchronous = Vec::new();
+        for (id, rule) in p.rules.iter_enumerated() {
+            if !runs(rule) {
+                continue;
+            }
+            plans.insert(id, Plan::new(rule)?);
+            match rule.kind {
+                RuleKind::Deductive => {}
+                RuleKind::Inductive => inductive.push(id),
+                RuleKind::Async => asynchronous.push(id),
+            }
+        }
+        let mut strata_list = strata::stratify(p)?;
+        for s in &mut strata_list {
+            s.aggregates.retain(|r| plans.contains_key(r));
+            s.rules.retain(|r| plans.contains_key(r));
+        }
+        strata_list.retain(|s| !s.aggregates.is_empty() || !s.rules.is_empty());
+        let mut stores: BTreeMap<StoreKey, Store> = BTreeMap::new();
+        for (id, r) in p.rels.iter_enumerated() {
+            stores.insert(StoreKey::Main(id), Store::new(cell_spec(p, &kinds, id, 0)?));
+            if matches!(r.class, RelClass::Channel(_)) {
+                stores.insert(StoreKey::Sent(id), Store::new(cell_spec(p, &kinds, id, 1)?));
+            }
+        }
+        for id in inductive.iter().chain(&asynchronous) {
+            if let Some(plan) = plans.get(id) {
+                let rel = p.rules.get(*id).map(|r| r.head.rel).ok_or_else(|| internal_error!("rule {id:?}"))?;
+                stores
+                    .entry(plan.head)
+                    .or_insert(Store::new(cell_spec(p, &kinds, rel, 0)?));
+            }
+        }
+        let mut keyed = Vec::new();
+        for (id, r) in p.rels.iter_enumerated() {
+            if r.schema.payload.is_empty() {
+                continue;
+            }
+            let cols: Vec<usize> = r.schema.key.iter().map(|c| c.index()).collect();
+            let upsert = p
+                .constructs
+                .iter()
+                .any(|c| matches!(c.kind, ConstructKind::Upsert { staging, .. } if staging == id));
+            keyed.push((id, cols, upsert));
+        }
+        let violations = p
+            .rules
+            .iter_enumerated()
+            .filter(|(id, r)| plans.contains_key(id) && matches!(r.head.mode, HeadMode::Violation { .. }))
+            .map(|(id, _)| id)
+            .collect();
+        let mut engine = Engine {
+            shared: Shared {
+                params: cfg.params,
+                choice,
+                node_seeds,
+                roles: cfg.roles,
+                kinds,
+            },
+            node,
+            plans,
+            strata: strata_list,
+            inductive,
+            asynchronous,
+            stores,
+            prev: BTreeMap::new(),
+            groups: BTreeMap::new(),
+            inputs: BTreeMap::new(),
+            pending: Changes::default(),
+            baseline: Some(Instance::default()),
+            facts_loaded: false,
+            max_rounds: if cfg.max_rounds == 0 { 10_000 } else { cfg.max_rounds },
+            keyed,
+            violations,
+            poisoned: false,
+            unsettled: BTreeSet::new(),
+            examined: 0,
+            program,
+        };
+        engine.build_indexes()?;
+        Ok(engine)
+    }
+
+    /// Creates every index a term, a check or a key check probes.
+    fn build_indexes(&mut self) -> Result<(), EvalError> {
+        let p = self.program.get();
+        let mut wanted: BTreeSet<(StoreKey, Vec<usize>)> = BTreeSet::new();
+        for plan in self.plans.values() {
+            let rule = p.rules.get(plan.rule).ok_or_else(|| internal_error!("rule {:?}", plan.rule))?;
+            for lit in &rule.body.lits {
+                match lit {
+                    Literal::Neg(a) => {
+                        wanted.insert((StoreKey::Main(a.rel), non_wild(a)));
+                    }
+                    Literal::Lookup { rel, .. } => {
+                        let cols: Vec<usize> = p
+                            .rels
+                            .get(*rel)
+                            .map(|d| d.schema.key.iter().map(|c| c.index()).collect())
+                            .unwrap_or_default();
+                        wanted.insert((StoreKey::Main(*rel), cols));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for (rel, cols, _) in &self.keyed {
+            wanted.insert((StoreKey::Main(*rel), cols.clone()));
+        }
+        for (key, cols) in wanted {
+            if let Some(s) = self.stores.get_mut(&key) {
+                s.ensure_index(&cols);
+            }
+        }
+        Ok(())
+    }
+
+    /// Starts over from `carried` (at boot: the recovered durable state): every store is emptied, and the next tick
+    /// sees the carried state, the facts and its inputs as new.
+    pub fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
+        for s in self.stores.values_mut() {
+            *s = Store::new(s.cell.clone());
+        }
+        self.prev.clear();
+        self.groups.clear();
+        self.inputs.clear();
+        self.facts_loaded = false;
+        self.poisoned = false;
+        let mut pending = Changes::default();
+        for (rel, rows) in &carried.rels {
+            pending.inserted.insert(*rel, rows.iter().cloned().collect());
+        }
+        self.pending = pending;
+        self.baseline = Some(carried);
+        self.build_indexes()
+    }
+
+    /// A store to write. A lattice store written is settled at the next [`Engine::settle`].
+    fn store(&mut self, key: StoreKey) -> Result<&mut Store, EvalError> {
+        let store = self
+            .stores
+            .get_mut(&key)
+            .ok_or_else(|| EvalError::from(internal_error!("no store for {key:?}")))?;
+        if store.cell.is_some() {
+            self.unsettled.insert(key);
+        }
+        Ok(store)
+    }
+
+    /// Joins the changed cells of every lattice store written since the last settle. Called where the reference's
+    /// state is defined: after the tick's inputs, after each stratum (and each step of a fixpoint), and after the
+    /// next state and the sends; a conflict raised here is one the reference raises too.
+    fn settle(&mut self, tick: Tick) -> Result<(), EvalError> {
+        for key in std::mem::take(&mut self.unsettled) {
+            if let Some(s) = self.stores.get_mut(&key) {
+                s.settle().map_err(|e| to_eval(e, tick, None))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs one tick.
+    pub fn step(&mut self, input: &StepInput<'_>, observe: &[RelId]) -> Result<StepOutput, EvalError> {
+        if self.poisoned {
+            return Err(internal_error!("the engine is used after a failed tick without a reset").into());
+        }
+        if input.node != self.node {
+            return Err(internal_error!("an engine for node {} ran a tick of node {}", self.node.0, input.node.0).into());
+        }
+        match self.step_inner(input, observe) {
+            Ok(out) => Ok(out),
+            Err(e) => {
+                self.poisoned = true;
+                Err(e)
+            }
+        }
+    }
+
+    fn step_inner(&mut self, input: &StepInput<'_>, observe: &[RelId]) -> Result<StepOutput, EvalError> {
+        let tick = input.tick;
+        let wrap = |e: ExprError| to_eval(e, tick, None);
+        // 1. What changes.
+        for s in self.stores.values_mut() {
+            s.clear_delta();
+        }
+        let pending = std::mem::take(&mut self.pending);
+        for (rel, rows) in &pending.deleted {
+            for r in rows {
+                self.store(StoreKey::Main(*rel))?.add(r.clone(), -1).map_err(wrap)?;
+            }
+        }
+        for (rel, rows) in &pending.inserted {
+            for r in rows {
+                self.store(StoreKey::Main(*rel))?.add(r.clone(), 1).map_err(wrap)?;
+            }
+        }
+        if !self.facts_loaded {
+            let p = self.program.get();
+            let mut facts = Vec::new();
+            for f in &p.facts {
+                let row = f
+                    .row
+                    .iter()
+                    .map(|c| p.consts.get(*c).cloned().ok_or_else(|| internal_error!("unknown constant {c:?}")))
+                    .collect::<Result<Vec<_>, _>>()?;
+                facts.push((f.rel, Row::from(row)));
+            }
+            for (rel, row) in facts {
+                self.store(StoreKey::Main(rel))?.add(row, 1).map_err(wrap)?;
+            }
+            self.facts_loaded = true;
+        }
+        let mut now_inputs: BTreeMap<StoreKey, BTreeSet<Row>> = BTreeMap::new();
+        for (rel, row) in input.events {
+            now_inputs.entry(StoreKey::Main(*rel)).or_default().insert(row.clone());
+        }
+        for d in input.delivered {
+            now_inputs.entry(StoreKey::Main(d.rel)).or_default().insert(d.row.clone());
+            let mut with_sender = d.row.to_vec();
+            with_sender.push(Value::Node(d.from));
+            now_inputs.entry(StoreKey::Sent(d.rel)).or_default().insert(Row::from(with_sender));
+        }
+        for g in input.ingress {
+            now_inputs.entry(StoreKey::Main(g.rel)).or_default().insert(g.row.clone());
+            let mut with_sender = g.row.to_vec();
+            with_sender.push(Value::Session(g.session));
+            now_inputs.entry(StoreKey::Sent(g.rel)).or_default().insert(Row::from(with_sender));
+        }
+        let before = std::mem::take(&mut self.inputs);
+        let keys: BTreeSet<StoreKey> = before.keys().chain(now_inputs.keys()).copied().collect();
+        let empty = BTreeSet::new();
+        for key in keys {
+            let old = before.get(&key).unwrap_or(&empty);
+            let new = now_inputs.get(&key).unwrap_or(&empty);
+            for r in old.difference(new) {
+                self.store(key)?.add(r.clone(), -1).map_err(wrap)?;
+            }
+            for r in new.difference(old) {
+                self.store(key)?.add(r.clone(), 1).map_err(wrap)?;
+            }
+        }
+        self.inputs = now_inputs;
+        self.settle(tick)?;
+        let program = self.program.clone();
+        let p = program.get();
+        // 2. The strata.
+        let strata_list = self.strata.clone();
+        for s in &strata_list {
+            if s.recursive {
+                self.recursive_stratum(p, input, s)?;
+            } else {
+                for id in &s.aggregates {
+                    self.maintain(p, input, *id)?;
+                }
+                self.settle(tick)?;
+                for id in &s.rules {
+                    self.maintain(p, input, *id)?;
+                }
+            }
+            self.settle(tick)?;
+        }
+        // 3. The next tick's state and the tick's sends.
+        for id in self.inductive.clone().iter().chain(&self.asynchronous.clone()) {
+            self.maintain(p, input, *id)?;
+        }
+        self.settle(tick)?;
+        // 4. Keys and invariants.
+        self.check_keys(p, tick)?;
+        self.check_invariants(p, tick)?;
+        // 5. The outputs.
+        let mut changes = Changes::default();
+        for id in &self.inductive {
+            let Some(plan) = self.plans.get(id) else { continue };
+            let StoreKey::Next(rel) = plan.head else { continue };
+            if changes.inserted.contains_key(&rel) || changes.deleted.contains_key(&rel) {
+                continue;
+            }
+            let s = self.stores.get(&plan.head).ok_or_else(|| internal_error!("no next store"))?;
+            if !s.ins.is_empty() {
+                changes.inserted.insert(rel, s.ins.iter().cloned().collect());
+            }
+            if !s.del.is_empty() {
+                changes.deleted.insert(rel, s.del.iter().cloned().collect());
+            }
+        }
+        if let Some(base) = self.baseline.take() {
+            // The first tick after a reset: the change is relative to the carried state it started from.
+            let next = self.next_instance()?;
+            changes = Changes::between(&base, &next);
+        }
+        self.pending = changes.clone();
+        let mut out = StepOutput {
+            changes,
+            ..StepOutput::default()
+        };
+        for id in &self.asynchronous {
+            let Some(plan) = self.plans.get(id) else { continue };
+            let StoreKey::Async(rel) = plan.head else { continue };
+            let s = self.stores.get(&plan.head).ok_or_else(|| internal_error!("no async store"))?;
+            for row in s.present() {
+                match row.first() {
+                    Some(Value::Node(to)) => {
+                        out.outbox.insert(Send {
+                            rel,
+                            to: *to,
+                            row: row.clone(),
+                        });
+                    }
+                    Some(Value::Session(session)) => {
+                        out.egress.insert(Egress {
+                            rel,
+                            session: *session,
+                            row: row.clone(),
+                        });
+                    }
+                    other => return Err(internal_error!("an async head's destination is {other:?}").into()),
+                }
+            }
+        }
+        for rel in observe {
+            let rows = self
+                .stores
+                .get(&StoreKey::Main(*rel))
+                .map(|s| s.present().iter().cloned().collect())
+                .unwrap_or_default();
+            out.observed.insert(*rel, rows);
+        }
+        Ok(out)
+    }
+
+    fn next_instance(&self) -> Result<Instance, EvalError> {
+        let mut next = Instance::default();
+        for (key, s) in &self.stores {
+            if let StoreKey::Next(rel) = key {
+                for r in s.present() {
+                    next.insert(*rel, r.clone());
+                }
+            }
+        }
+        Ok(next)
+    }
+
+    /// The whole carried state: what the next tick starts from (O(state)).
+    pub fn carried_instance(&self) -> Instance {
+        match &self.baseline {
+            Some(base) => base.clone(),
+            None => self.next_instance().unwrap_or_default(),
+        }
+    }
+
+    /// The carried rows of `rel`: what the next tick starts from.
+    pub fn carried_rows(&self, rel: RelId) -> Vec<Row> {
+        if let Some(base) = &self.baseline {
+            return base.rows(rel).cloned().collect();
+        }
+        self.stores
+            .get(&StoreKey::Next(rel))
+            .map(|s| s.present().iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn ctx<'a>(&'a self, p: &'a Program, input: &StepInput<'_>) -> Ctx<'a> {
+        Ctx {
+            program: p,
+            node: self.node,
+            incarnation: input.incarnation,
+            tick: input.tick,
+            now: input.now,
+            shared: &self.shared,
+        }
+    }
+
+    /// Brings one rule's output up to date.
+    fn maintain(&mut self, p: &Program, input: &StepInput<'_>, id: RuleId) -> Result<(), EvalError> {
+        let plan = self.plans.get(&id).ok_or_else(|| internal_error!("rule {id:?} has no plan"))?.clone();
+        let rule = p.rules.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?;
+        match plan.regime {
+            Regime::Recompute => self.recompute_rule(p, input, rule, &plan),
+            Regime::Delta => {
+                let changed = plan
+                    .deps
+                    .iter()
+                    .filter_map(|l| rule.body.lits.get(*l).and_then(dep_store))
+                    .any(|k| self.stores.get(&k).is_some_and(Store::changed));
+                if !changed {
+                    return Ok(());
+                }
+                let terms = self.evaluate(p, input, rule, &plan, false)?;
+                self.examined += terms.examined;
+                self.apply(p, input, rule, &plan, terms)
+            }
+        }
+    }
+
+    /// Evaluates a rule: every term of its delta query (`full` false), or a full evaluation.
+    fn evaluate(
+        &self,
+        p: &Program,
+        input: &StepInput<'_>,
+        rule: &Rule,
+        plan: &Plan,
+        full: bool,
+    ) -> Result<Terms, EvalError> {
+        let cx = self.ctx(p, input);
+        let mut out = Terms::default();
+        let position: BTreeMap<usize, usize> = plan.deps.iter().enumerate().map(|(i, l)| (*l, i)).collect();
+        let mut drivers: Vec<(Driver, usize)> = Vec::new();
+        if full {
+            drivers.push((Driver::Full, usize::MAX));
+        } else {
+            for (pos, &lit) in plan.deps.iter().enumerate() {
+                let Some(key) = rule.body.lits.get(lit).and_then(dep_store) else { continue };
+                let store = self.stores.get(&key).ok_or_else(|| internal_error!("no store for {key:?}"))?;
+                if !store.changed() {
+                    continue;
+                }
+                match rule.body.lits.get(lit) {
+                    Some(Literal::Pos(_)) => {
+                        for (row, sign) in store.delta() {
+                            drivers.push((
+                                Driver::Atom {
+                                    lit,
+                                    row: row.clone(),
+                                    sign,
+                                },
+                                pos,
+                            ));
+                        }
+                    }
+                    Some(Literal::Neg(a)) => {
+                        let cols = non_wild(a);
+                        let keys: BTreeSet<Vec<Value>> = store
+                            .delta()
+                            .map(|(r, _)| cols.iter().filter_map(|c| r.get(*c).cloned()).collect())
+                            .collect();
+                        for k in keys {
+                            let absent_old = !store.any(true, &cols, &k)?;
+                            let absent_new = !store.any(false, &cols, &k)?;
+                            if absent_old == absent_new {
+                                continue;
+                            }
+                            drivers.push((
+                                Driver::Neg {
+                                    lit,
+                                    key: k,
+                                    sign: if absent_new { 1 } else { -1 },
+                                },
+                                pos,
+                            ));
+                        }
+                    }
+                    Some(Literal::Lookup { rel, .. }) => {
+                        let (cols, col, bottom) = rule::lookup_shape(&cx, *rel)?;
+                        let keys: BTreeSet<Vec<Value>> = store
+                            .delta()
+                            .map(|(r, _)| cols.iter().filter_map(|c| r.get(*c).cloned()).collect())
+                            .collect();
+                        for k in keys {
+                            let value = |rows: Vec<Row>| -> Result<Value, EvalError> {
+                                match rows.first() {
+                                    Some(r) => r
+                                        .get(col)
+                                        .cloned()
+                                        .ok_or_else(|| internal_error!("a cell row without its value").into()),
+                                    None => Ok(bottom.clone()),
+                                }
+                            };
+                            let old_v = value(store.old_rows(&cols, &k)?)?;
+                            let new_v = value(store.rows(false, &cols, &k)?)?;
+                            if old_v == new_v {
+                                continue;
+                            }
+                            drivers.push((
+                                Driver::Lookup {
+                                    lit,
+                                    key: k.clone(),
+                                    value: new_v,
+                                    sign: 1,
+                                },
+                                pos,
+                            ));
+                            drivers.push((
+                                Driver::Lookup {
+                                    lit,
+                                    key: k,
+                                    value: old_v,
+                                    sign: -1,
+                                },
+                                pos,
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // The join order of each driver's terms, from the stores as they are now.
+        let cost = |lit: usize, cols: &[usize], range: bool| -> usize {
+            let Some(Literal::Pos(a)) = rule.body.lits.get(lit) else { return usize::MAX };
+            let rows = self.stores.get(&rule::atom_store(a)).map_or(0, |s| s.estimate(cols));
+            // A range keeps some of the rows its probe finds: assume a small fraction.
+            if range { rows / 16 + 1 } else { rows }
+        };
+        let mut orders: BTreeMap<Option<usize>, rule::Order> = BTreeMap::new();
+        for (driver, _) in &drivers {
+            orders
+                .entry(driver.lit())
+                .or_insert_with(|| plan.order_for(rule, driver.lit(), &cost));
+        }
+        for (driver, pos) in drivers {
+            let order = orders
+                .get(&driver.lit())
+                .ok_or_else(|| internal_error!("no join order for driver {:?}", driver.lit()))?;
+            let old = |lit: usize| position.get(&lit).is_some_and(|q| *q > pos);
+            let mut emit = |f: Found<'_>| -> expr::ExprResult<()> {
+                if plan.aggregate {
+                    let mut group = Vec::new();
+                    let mut aggs = Vec::new();
+                    for a in &rule.head.args {
+                        match a {
+                            HeadArg::Term(t) => group.push(expr::term(&cx, f.env, t)?),
+                            HeadArg::Agg(agg) => {
+                                let mut tuple = Vec::with_capacity(agg.args.len());
+                                for t in &agg.args {
+                                    tuple.push(expr::term(&cx, f.env, t)?);
+                                }
+                                aggs.push(tuple);
+                            }
+                        }
+                    }
+                    for (col, tuple) in aggs.into_iter().enumerate() {
+                        *out.aggs.entry((group.clone(), col, tuple)).or_insert(0) += f.sign;
+                    }
+                } else {
+                    let row = rule::head_row(&cx, rule, f.env)?;
+                    *out.heads.entry(row).or_insert(0) += f.sign;
+                }
+                Ok(())
+            };
+            let mut errors: Vec<(Token, ExprError, i64)> = Vec::new();
+            let mut error = |t: Token, e: ExprError, s: i64| errors.push((t, e, s));
+            out.examined += rule::run_term(&cx, &self.stores, rule, plan, order, &driver, &old, &mut emit, &mut error)?;
+            for (t, e, s) in errors {
+                let slot = out.errors.entry(t).or_insert((0, None));
+                slot.0 += s;
+                if slot.1.is_none() {
+                    slot.1 = Some(e);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Applies a rule's evaluated change: raises the errors real valuations hit, then updates its head.
+    fn apply(&mut self, p: &Program, input: &StepInput<'_>, rule: &Rule, plan: &Plan, terms: Terms) -> Result<(), EvalError> {
+        let tick = input.tick;
+        if let Some((_, (_, Some(e)))) = terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
+            return Err(to_eval(e, tick, Some(rule)));
+        }
+        if plan.aggregate {
+            return self.apply_aggregates(p, rule, plan, terms.aggs, tick);
+        }
+        let store = self.store(plan.head)?;
+        for (row, w) in terms.heads {
+            store.add(row, w).map_err(|e| to_eval(e, tick, Some(rule)))?;
+        }
+        Ok(())
+    }
+
+    fn apply_aggregates(
+        &mut self,
+        p: &Program,
+        rule: &Rule,
+        plan: &Plan,
+        changes: BTreeMap<(Vec<Value>, usize, Vec<Value>), i64>,
+        tick: Tick,
+    ) -> Result<(), EvalError> {
+        let naggs = rule.head.args.iter().filter(|a| matches!(a, HeadArg::Agg(_))).count();
+        let groups = self.groups.entry(rule.id).or_default();
+        let mut touched = BTreeSet::new();
+        for ((group, col, tuple), w) in changes {
+            if w == 0 {
+                continue;
+            }
+            let g = groups.entry(group.clone()).or_insert_with(|| Group {
+                tuples: vec![BTreeMap::new(); naggs],
+                row: None,
+            });
+            let slot = g.tuples.get_mut(col).ok_or_else(|| internal_error!("aggregate column {col} out of range"))?;
+            let c = slot.entry(tuple.clone()).or_insert(0);
+            *c += w;
+            if *c == 0 {
+                slot.remove(&tuple);
+            } else if *c < 0 {
+                return Err(internal_error!("an aggregate tuple's support went negative").into());
+            }
+            touched.insert(group);
+        }
+        let mut edits: Vec<(Option<Row>, Option<Row>)> = Vec::new();
+        for group in touched {
+            let Some(g) = groups.get_mut(&group) else { continue };
+            let live = g.tuples.first().is_some_and(|t| !t.is_empty());
+            let new = if live {
+                Some(group_row(p, rule, &group, &g.tuples).map_err(|e| to_eval(e, tick, Some(rule)))?)
+            } else {
+                None
+            };
+            if new != g.row {
+                edits.push((g.row.clone(), new.clone()));
+                g.row = new;
+            }
+            if !live {
+                groups.remove(&group);
+            }
+        }
+        let store = self.store(plan.head)?;
+        for (old, new) in edits {
+            if let Some(o) = old {
+                store.add(o, -1).map_err(|e| to_eval(e, tick, Some(rule)))?;
+            }
+            if let Some(n) = new {
+                store.add(n, 1).map_err(|e| to_eval(e, tick, Some(rule)))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A recompute rule: evaluated in full, its change is the difference from its last output.
+    fn recompute_rule(&mut self, p: &Program, input: &StepInput<'_>, rule: &Rule, plan: &Plan) -> Result<(), EvalError> {
+        let terms = self.evaluate(p, input, rule, plan, true)?;
+        self.examined += terms.examined;
+        let tick = input.tick;
+        if let Some((_, (_, Some(e)))) = terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
+            return Err(to_eval(e, tick, Some(rule)));
+        }
+        let new: BTreeMap<Row, i64> = if plan.aggregate {
+            // The groups from scratch.
+            let naggs = rule.head.args.iter().filter(|a| matches!(a, HeadArg::Agg(_))).count();
+            let mut groups: BTreeMap<Vec<Value>, Vec<BTreeMap<Vec<Value>, i64>>> = BTreeMap::new();
+            for ((group, col, tuple), w) in terms.aggs {
+                if w <= 0 {
+                    continue;
+                }
+                let g = groups.entry(group).or_insert_with(|| vec![BTreeMap::new(); naggs]);
+                if let Some(slot) = g.get_mut(col) {
+                    slot.insert(tuple, w);
+                }
+            }
+            let mut rows = BTreeMap::new();
+            for (group, tuples) in groups {
+                rows.insert(group_row(p, rule, &group, &tuples).map_err(|e| to_eval(e, tick, Some(rule)))?, 1);
+            }
+            rows
+        } else {
+            terms.heads.into_iter().filter(|(_, w)| *w > 0).collect()
+        };
+        let old = self.prev.remove(&rule.id).unwrap_or_default();
+        let store = self.store(plan.head)?;
+        for (row, w) in &old {
+            store.add(row.clone(), -w).map_err(|e| to_eval(e, tick, Some(rule)))?;
+        }
+        for (row, w) in &new {
+            store.add(row.clone(), *w).map_err(|e| to_eval(e, tick, Some(rule)))?;
+        }
+        self.prev.insert(rule.id, new);
+        Ok(())
+    }
+
+    /// A recursive stratum: re-evaluated to its fixpoint when anything it reads changed, when its own relations'
+    /// support from outside the stratum changed (the carried state, inputs, facts), or when a rule reads a
+    /// time-varying scalar; its change is the difference from its last fixpoint.
+    ///
+    /// The support from outside matters even where the present rows did not change: the naive fixpoint starts from
+    /// it, and a rule that reads a lattice cell into a set column keeps a row for every value the cell passes through
+    /// on the way to the fixpoint (a cell that starts at its final value passes through none).
+    fn recursive_stratum(&mut self, p: &Program, input: &StepInput<'_>, s: &Stratum) -> Result<(), EvalError> {
+        let tick = input.tick;
+        let ids: Vec<RuleId> = s.aggregates.iter().chain(&s.rules).copied().collect();
+        let mut dirty = false;
+        for id in &ids {
+            let plan = self.plans.get(id).ok_or_else(|| internal_error!("rule {id:?} has no plan"))?;
+            let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
+            dirty |= plan.regime == Regime::Recompute
+                || self.stores.get(&plan.head).is_some_and(|st| st.touched)
+                || rule
+                    .body
+                    .lits
+                    .iter()
+                    .filter_map(dep_store)
+                    .any(|k| self.stores.get(&k).is_some_and(Store::changed));
+        }
+        if !dirty {
+            return Ok(());
+        }
+        // Take back the last fixpoint's derivations.
+        for id in &ids {
+            let old = self.prev.remove(id).unwrap_or_default();
+            let head = self.plans.get(id).map(|pl| pl.head).ok_or_else(|| internal_error!("rule {id:?}"))?;
+            let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
+            let store = self.store(head)?;
+            for (row, w) in old {
+                store.add(row, -w).map_err(|e| to_eval(e, tick, Some(rule)))?;
+            }
+        }
+        self.settle(tick)?;
+        // The aggregates read only lower strata: once, first.
+        for id in &s.aggregates {
+            let plan = self.plans.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?.clone();
+            let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
+            self.recompute_rule(p, input, rule, &plan)?;
+        }
+        self.settle(tick)?;
+        // The other rules, naively to the fixpoint. A program error counts only at the fixpoint, where every rule
+        // runs once more with errors fatal (a row that run adds resumes the iteration).
+        let mut derived: BTreeMap<RuleId, BTreeSet<Row>> = BTreeMap::new();
+        let mut strict = false;
+        let mut rounds = 0u32;
+        loop {
+            let mut changed = false;
+            for id in &s.rules {
+                let plan = self.plans.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?.clone();
+                let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
+                let terms = self.evaluate(p, input, rule, &plan, true)?;
+                self.examined += terms.examined;
+                if let Some((_, (_, Some(e)))) = terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
+                    if strict {
+                        return Err(to_eval(e, tick, Some(rule)));
+                    }
+                    continue;
+                }
+                let mine = derived.entry(*id).or_default();
+                let mut fresh = Vec::new();
+                for (row, w) in terms.heads {
+                    if w > 0 && !mine.contains(&row) {
+                        fresh.push(row);
+                    }
+                }
+                // A round changed the database if a row appeared or a cell's value moved (a row another rule
+                // already derived, or a dominated contribution, changes nothing: the reference counts only changes).
+                let before = self.stores.get(&plan.head).map_or(0, Store::generation);
+                for row in fresh {
+                    mine.insert(row.clone());
+                    self.store(plan.head)?.add(row, 1).map_err(|e| to_eval(e, tick, Some(rule)))?;
+                }
+                self.settle(tick)?;
+                if self.stores.get(&plan.head).map_or(0, Store::generation) != before {
+                    changed = true;
+                }
+            }
+            if strict && !changed {
+                break;
+            }
+            strict = !changed;
+            rounds += 1;
+            if rounds >= self.max_rounds {
+                let label = s.rules.first().and_then(|id| p.rules.get(*id)).map(|r| r.label.clone());
+                return Err(EvalError::Program {
+                    tick,
+                    error: ProgramErrorRecord {
+                        code: blossom_base::code!("BLSR007").as_str(),
+                        rule: label,
+                        detail: Arc::from(format!(
+                            "the fixpoint did not converge within {} rounds (CR-53)",
+                            self.max_rounds
+                        )),
+                    },
+                });
+            }
+        }
+        for (id, rows) in derived {
+            self.prev.insert(id, rows.into_iter().map(|r| (r, 1)).collect());
+        }
+        Ok(())
+    }
+
+    fn check_keys(&self, p: &Program, tick: Tick) -> Result<(), EvalError> {
+        for (rel, cols, upsert) in &self.keyed {
+            let Some(store) = self.stores.get(&StoreKey::Main(*rel)) else { continue };
+            for row in &store.ins {
+                let k: Vec<Value> = cols.iter().filter_map(|c| row.get(*c).cloned()).collect();
+                let rows = store.new_rows(cols, &k)?;
+                if rows.len() > 1 {
+                    let name = p.rels.get(*rel).map(|d| d.name.to_string()).unwrap_or_default();
+                    let code = if *upsert {
+                        blossom_base::code!("BLSR002")
+                    } else {
+                        blossom_base::code!("BLSR001")
+                    };
+                    return Err(EvalError::Program {
+                        tick,
+                        error: ProgramErrorRecord {
+                            code: code.as_str(),
+                            rule: None,
+                            detail: Arc::from(format!("{name}: {} tuples with key {k:?} in one tick", rows.len())),
+                        },
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_invariants(&self, p: &Program, tick: Tick) -> Result<(), EvalError> {
+        for id in &self.violations {
+            let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
+            let HeadMode::Violation { invariant } = rule.head.mode else { continue };
+            let Some(row) = self
+                .stores
+                .get(&StoreKey::Main(rule.head.rel))
+                .and_then(|s| s.present().iter().next())
+            else {
+                continue;
+            };
+            let inv = p.invariants.get(invariant);
+            if let Some(inv) = inv
+                && inv.action != ViolationAction::Abort
+            {
+                return Err(blossom_base::unimplemented_error!(
+                    "LANG-200",
+                    "the `{:?}` violation action in the engine",
+                    inv.action
+                )
+                .into());
+            }
+            let name = inv.map_or_else(|| format!("{invariant:?}"), |i| i.name.to_string());
+            return Err(EvalError::Program {
+                tick,
+                error: ProgramErrorRecord {
+                    code: blossom_base::code!("BLSR003").as_str(),
+                    rule: Some(rule.label.clone()),
+                    detail: Arc::from(format!("invariant `{name}` is violated by {row:?}")),
+                },
+            });
+        }
+        Ok(())
+    }
+
+    /// Runs one tick in the reference interface (for the differential suite): the carried state in `input` must be
+    /// what this engine carried (the engine keeps its own), and the full instance is materialized.
+    pub fn tick_full(&mut self, input: &TickInput<'_>) -> Result<TickOutput, EvalError> {
+        if input.capture {
+            return Err(blossom_base::unimplemented_error!("TEST-050", "provenance capture in the engine").into());
+        }
+        let step = self.step(
+            &StepInput {
+                node: input.node,
+                incarnation: input.incarnation,
+                tick: input.tick,
+                now: input.now,
+                events: input.events,
+                delivered: input.delivered,
+                ingress: input.ingress,
+            },
+            &[],
+        )?;
+        let mut instance = Instance::default();
+        for (key, s) in &self.stores {
+            if let StoreKey::Main(rel) = key {
+                for r in s.present() {
+                    instance.insert(*rel, r.clone());
+                }
+            }
+        }
+        Ok(TickOutput {
+            instance,
+            next: self.next_instance()?,
+            outbox: step.outbox,
+            egress: step.egress,
+            firings: Vec::new(),
+        })
+    }
+
+    /// Rows the atom probes returned since the engine was created: the join work, measured without a clock.
+    pub fn rows_examined(&self) -> u64 {
+        self.examined
+    }
+
+    pub fn node(&self) -> NodeId {
+        self.node
+    }
+}
+
+/// A rule's evaluated change: head rows (or aggregate tuples) with signed weights, and runtime errors per valuation.
+#[derive(Default)]
+struct Terms {
+    /// The rows its atom probes returned (the work it did).
+    examined: u64,
+    heads: BTreeMap<Row, i64>,
+    aggs: BTreeMap<(Vec<Value>, usize, Vec<Value>), i64>,
+    errors: BTreeMap<Token, (i64, Option<ExprError>)>,
+}
+
+/// An aggregate rule's head row for a group whose live argument tuples are `tuples` (per aggregate column).
+fn group_row(
+    p: &Program,
+    rule: &Rule,
+    group: &[Value],
+    tuples: &[BTreeMap<Vec<Value>, i64>],
+) -> expr::ExprResult<Row> {
+    let mut keys = group.iter();
+    let mut aggs = tuples.iter();
+    let mut row = Vec::with_capacity(rule.head.args.len());
+    for (col, a) in rule.head.args.iter().enumerate() {
+        match a {
+            HeadArg::Term(_) => row.push(keys.next().cloned().ok_or_else(|| bug("a group key too short".into()))?),
+            HeadArg::Agg(agg) => {
+                let set = aggs.next().ok_or_else(|| bug("aggregate tuples missing".into()))?;
+                row.push(fold(p, rule, col, &agg.func, set)?);
+            }
+        }
+    }
+    Ok(Row::from(row))
+}
+
+/// An aggregate over a group's distinct argument tuples (LANG-100).
+fn fold(p: &Program, rule: &Rule, col: usize, func: &AggFunc, set: &BTreeMap<Vec<Value>, i64>) -> expr::ExprResult<Value> {
+    let single = |t: &Vec<Value>| -> expr::ExprResult<Value> {
+        match t.as_slice() {
+            [v] => Ok(v.clone()),
+            _ => Err(bug(format!("{func:?} over a tuple of {} values", t.len()))),
+        }
+    };
+    match func {
+        AggFunc::Count => {
+            let n = set.len() as u64;
+            let ty = p
+                .rels
+                .get(rule.head.rel)
+                .and_then(|r| r.schema.cols.get(col))
+                .and_then(|c| p.types.get(c.ty))
+                .ok_or_else(|| bug("a count's column has no type".into()))?;
+            let overflow = || ExprError::Arithmetic(format!("count {n} does not fit its column"));
+            use blossom_value::types::IntTy;
+            Ok(Value::Int(match ty {
+                TypeDef::Int(IntTy::U64) => IntValue::U64(n),
+                TypeDef::Int(IntTy::I64) => IntValue::I64(i64::try_from(n).map_err(|_| overflow())?),
+                TypeDef::Int(IntTy::U32) => IntValue::U32(u32::try_from(n).map_err(|_| overflow())?),
+                TypeDef::Int(IntTy::I32) => IntValue::I32(i32::try_from(n).map_err(|_| overflow())?),
+                TypeDef::Int(IntTy::U128) => IntValue::U128(u128::from(n)),
+                TypeDef::Int(IntTy::I128) => IntValue::I128(i128::from(n)),
+                TypeDef::Int(IntTy::U16) => IntValue::U16(u16::try_from(n).map_err(|_| overflow())?),
+                TypeDef::Int(IntTy::I16) => IntValue::I16(i16::try_from(n).map_err(|_| overflow())?),
+                TypeDef::Int(IntTy::U8) => IntValue::U8(u8::try_from(n).map_err(|_| overflow())?),
+                TypeDef::Int(IntTy::I8) => IntValue::I8(i8::try_from(n).map_err(|_| overflow())?),
+                other => return Err(bug(format!("a count in a column of type {other:?}"))),
+            }))
+        }
+        // The tuples are single values, kept in value order: the least and greatest are the ends.
+        AggFunc::Min => set.keys().next().map(single).ok_or_else(|| bug("min over an empty group".into()))?,
+        AggFunc::Max => set
+            .keys()
+            .next_back()
+            .map(single)
+            .ok_or_else(|| bug("max over an empty group".into()))?,
+        AggFunc::Sum => {
+            // The first component of each distinct tuple; the rest is the valuation it belongs to.
+            let vals = set
+                .keys()
+                .map(|t| t.first().cloned().ok_or_else(|| bug("a sum over an empty tuple".into())))
+                .collect::<Result<Vec<_>, _>>()?;
+            expr::int_sum(vals.iter())
+        }
+        other => Err(bug(format!("the aggregate {other:?} passed the support check"))),
+    }
+}
+
+/// A runtime error as the tick's error, attributed to `rule` when known.
+fn to_eval(e: ExprError, tick: Tick, rule: Option<&Rule>) -> EvalError {
+    let program_error = |code: &'static str, detail: String| EvalError::Program {
+        tick,
+        error: ProgramErrorRecord {
+            code,
+            rule: rule.map(|r| r.label.clone()),
+            detail: Arc::from(detail),
+        },
+    };
+    match e {
+        ExprError::Arithmetic(d) => program_error(blossom_base::code!("BLSR004").as_str(), d),
+        ExprError::Conflict(d) => program_error(blossom_base::code!("BLSR006").as_str(), d),
+        ExprError::Eval(e) => e,
+    }
+}

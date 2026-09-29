@@ -26,7 +26,7 @@ use blossom_front::ded::DedError;
 use blossom_ldfi::report::fault_labels;
 use blossom_ldfi::{FailureSpec, LdfiConfig, Verdict, falsifiers};
 use blossom_sim::spec::SpecSim;
-use blossom_value::time::Tick;
+use blossom_value::time::{NodeId, Tick};
 use blossom_value::types::IntTy;
 use blossom_value::value::IntValue;
 use blossom_value::{TypeDef, Value};
@@ -60,6 +60,10 @@ pub struct Args {
     /// The repository root (default: the one containing xtask).
     #[arg(long)]
     pub root: Option<PathBuf>,
+    /// Run every `oracle` backend on the engine instead, checked against the oracle at every tick (the engine must
+    /// agree with the oracle on the whole corpus, not only on the cases that declare an `interp` backend).
+    #[arg(long)]
+    pub engine: bool,
 }
 
 /// What running one backend of one case found.
@@ -124,7 +128,12 @@ pub fn run(args: Args) -> ExitCode {
             // Wall-clock time only reports how long each case took; it never affects a result.
             #[allow(clippy::disallowed_methods)]
             let started = Instant::now();
-            let outcome = run_backend(&case, &manifest, backend, workers, args.max_runs);
+            let run_as = match backend.as_str() {
+                "oracle" if args.engine => "interp",
+                "ldfi" if args.engine => "ldfi-engine",
+                other => other,
+            };
+            let outcome = run_backend(&case, &manifest, run_as, workers, args.max_runs);
             let secs = started.elapsed().as_secs_f64();
             let features = strings(manifest.get("features"));
             let in_gate = gate_scope(&milestone, &args.area, &name, &features, backend);
@@ -326,8 +335,10 @@ fn run_backend(case: &Path, m: &toml::Table, backend: &str, workers: usize, max_
         files.extend(extra.iter().filter_map(toml::Value::as_str).map(|f| case.join(f)));
     }
     match backend {
-        "oracle" => oracle_backend(&files, m),
-        "ldfi" => ldfi_backend(&files, m, workers, max_runs),
+        "oracle" => oracle_backend(&files, m, false),
+        "interp" => oracle_backend(&files, m, true),
+        "ldfi" => ldfi_backend(&files, m, workers, max_runs, false),
+        "ldfi-engine" => ldfi_backend(&files, m, workers, max_runs, true),
         "compile" => ded_compile_backend(&files, m),
         other => Outcome::NotRunnable(format!("the `{other}` backend arrives with a later slice")),
     }
@@ -379,7 +390,7 @@ fn strings(v: Option<&toml::Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn oracle_backend(files: &[PathBuf], m: &toml::Table) -> Outcome {
+fn oracle_backend(files: &[PathBuf], m: &toml::Table, engine: bool) -> Outcome {
     let nodes: Vec<String> = m
         .get("deploy")
         .and_then(|d| d.get("nodes"))
@@ -413,7 +424,19 @@ fn oracle_backend(files: &[PathBuf], m: &toml::Table) -> Outcome {
         Err(o) => return o,
     };
     // The synchronous harness follows CR-20 (a crashed node is frozen); Molly's view is LDFI's.
-    let run = match sim.run_with_view(Tick(last), &schedule, false, blossom_sim::CrashView::Frozen) {
+    let run = if engine {
+        let reference = sim.run_with_view(Tick(last), &schedule, false, blossom_sim::CrashView::Frozen);
+        let cfg = super::corpus_interp::engine_config(&artifact.roles, &artifact.nodes, artifact.seed);
+        let ev = blossom_node::EngineEvaluator::new(artifact.protocol.clone(), cfg);
+        let mine = sim.run_on(&ev, Tick(last), &schedule, false, blossom_sim::CrashView::Frozen);
+        if let Err(d) = super::corpus_interp::compare(&reference, &mine) {
+            return Outcome::Fail(format!("the engine differs from the oracle: {d}"));
+        }
+        mine
+    } else {
+        sim.run_with_view(Tick(last), &schedule, false, blossom_sim::CrashView::Frozen)
+    };
+    let run = match run {
         Ok(r) => r,
         Err(e) => return Outcome::Fail(e.to_string()),
     };
@@ -506,7 +529,10 @@ fn value(a: &SimArtifact, v: &toml::Value, ty: &TypeDef) -> Option<Value> {
     })
 }
 
-fn ldfi_backend(files: &[PathBuf], m: &toml::Table, workers: usize, max_runs: u64) -> Outcome {
+/// The LDFI backend. With `engine`, the case's program also runs on the engine against the oracle, in Molly's crash
+/// view: failure-free, under every counterexample LDFI found, and under seeded fault schedules within the case's
+/// bounds; every run must agree at every tick.
+fn ldfi_backend(files: &[PathBuf], m: &toml::Table, workers: usize, max_runs: u64, engine: bool) -> Outcome {
     let Some(ld) = m.get("expect_ldfi").and_then(toml::Value::as_table) else {
         return Outcome::Fail("an ldfi backend without [expect_ldfi]".into());
     };
@@ -535,7 +561,7 @@ fn ldfi_backend(files: &[PathBuf], m: &toml::Table, workers: usize, max_runs: u6
         Ok(s) => s,
         Err(e) => return Outcome::Fail(e.to_string()),
     };
-    let mut config = LdfiConfig::new(spec);
+    let mut config = LdfiConfig::new(spec.clone());
     config.workers = workers;
     config.max_runs = max_runs;
     let sim = match SpecSim::new(&artifact) {
@@ -545,6 +571,14 @@ fn ldfi_backend(files: &[PathBuf], m: &toml::Table, workers: usize, max_runs: u6
     let report = match blossom_ldfi::run(&sim, &config) {
         Ok(r) => r,
         Err(e) => return Outcome::Fail(e.to_string()),
+    };
+    let differential = if engine {
+        match ldfi_engine_differential(&sim, &artifact, &spec, &report) {
+            Ok(n) => format!("; the engine agrees on {n} schedules"),
+            Err(e) => return Outcome::Fail(format!("the engine differs from the oracle: {e}")),
+        }
+    } else {
+        String::new()
     };
     let got = match report.verdict {
         Verdict::Counterexample => "counterexample",
@@ -594,5 +628,60 @@ fn ldfi_backend(files: &[PathBuf], m: &toml::Table, workers: usize, max_runs: u6
         }
         note.push_str(&format!("; {} falsifier set(s) exact", want_sets.len()));
     }
+    note.push_str(&differential);
     Outcome::Pass(note)
+}
+
+/// Runs the program on the oracle and the engine under the failure-free schedule, LDFI's counterexamples and eight
+/// seeded schedules within `spec`, in the program's crash view; the number of schedules, or the first difference.
+fn ldfi_engine_differential(
+    sim: &SpecSim<'_>,
+    artifact: &SimArtifact,
+    spec: &FailureSpec,
+    report: &blossom_ldfi::LdfiReport,
+) -> Result<usize, String> {
+    let mut schedules: Vec<blossom_sim::FaultSchedule> = vec![blossom_sim::FaultSchedule::default()];
+    schedules.extend(report.counterexamples.iter().map(|c| c.faults.clone()));
+    // SplitMix64 over a fixed seed: the schedules are the same every run.
+    let mut state: u64 = 0x5eed;
+    let mut next = move || {
+        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    };
+    for _ in 0..8 {
+        let mut f = blossom_sim::FaultSchedule::default();
+        for t in 0..spec.eff.0 {
+            for from in 0..spec.nodes {
+                for to in 0..spec.nodes {
+                    if from != to && next() % 4 == 0 {
+                        f.omissions.insert(blossom_sim::Omission {
+                            from: NodeId(from),
+                            to: NodeId(to),
+                            send: Tick(t),
+                        });
+                    }
+                }
+            }
+        }
+        for _ in 0..spec.max_crashes {
+            if next() % 2 == 0 && spec.nodes > 0 {
+                let node = NodeId(u32::try_from(next() % u64::from(spec.nodes)).unwrap_or(0));
+                f.crashes.insert(node, Tick(next() % (spec.eot.0 + 1)));
+            }
+        }
+        schedules.push(f);
+    }
+    let cfg = super::corpus_interp::engine_config(&artifact.roles, &artifact.nodes, artifact.seed);
+    let view = sim.crash_view();
+    for (i, f) in schedules.iter().enumerate() {
+        // A fresh engine per schedule: each run starts from the program's initial state.
+        let ev = blossom_node::EngineEvaluator::new(artifact.protocol.clone(), cfg.clone());
+        let reference = sim.run_with_view(spec.eot, f, false, view);
+        let mine = sim.run_on(&ev, spec.eot, f, false, view);
+        super::corpus_interp::compare(&reference, &mine).map_err(|d| format!("schedule {i} ({f:?}): {d}"))?;
+    }
+    Ok(schedules.len())
 }

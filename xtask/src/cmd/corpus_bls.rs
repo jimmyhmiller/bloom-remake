@@ -66,7 +66,8 @@ pub(super) fn run(case: &Path, m: &toml::Table, program: &str, backend: &str) ->
     let root = case.join(program);
     let root = root.to_string_lossy().into_owned();
     match backend {
-        "oracle" => oracle(&root, m),
+        "oracle" => oracle(&root, m, false),
+        "interp" => oracle(&root, m, true),
         "compile" => compile_backend(&root, m),
         "sim" => Outcome::NotRunnable("the seeded asynchronous simulator (TEST-001) arrives with a later slice".into()),
         other => Outcome::NotRunnable(format!("the `{other}` backend arrives with a later slice")),
@@ -346,7 +347,9 @@ pub(super) fn ticks_of(range: &toml::Value, last: u64) -> Result<Vec<u64>, Strin
 
 // ---------------------------------------------------------------------------------------------- oracle
 
-fn oracle(root: &str, m: &toml::Table) -> Outcome {
+/// Runs the case on the oracle, or (`engine`) on the engine checked against the oracle at every tick, and checks its
+/// expectations on that run.
+pub(super) fn oracle(root: &str, m: &toml::Table, engine: bool) -> Outcome {
     let nodes = match deployment(m) {
         Ok(n) => n,
         Err(o) => return o,
@@ -416,7 +419,25 @@ fn oracle(root: &str, m: &toml::Table) -> Outcome {
         Err(o) => return o,
     };
     let round = Duration::from_nanos(1_000_000_000);
-    let run = sim.run(&inputs, Tick(last), round, &schedule, false);
+    let run = if engine {
+        let reference = sim.run(&inputs, Tick(last), round, &schedule, false);
+        if let Err(SimError::Node {
+            error: OracleError::Unimplemented(u),
+            ..
+        }) = &reference
+        {
+            return Outcome::NotRunnable(format!("the oracle does not run it: {u}"));
+        }
+        let cfg = super::corpus_interp::engine_config(&artifact.roles, &artifact.nodes, blossom_value::Seed::from_u64(seed));
+        let ev = blossom_node::EngineEvaluator::new(artifact.program.clone(), cfg);
+        let mine = sim.run_on(&ev, &inputs, Tick(last), round, &schedule, false);
+        if let Err(d) = super::corpus_interp::compare(&reference, &mine) {
+            return Outcome::Fail(format!("the engine differs from the oracle: {d}"));
+        }
+        mine
+    } else {
+        sim.run(&inputs, Tick(last), round, &schedule, false)
+    };
     let expected_errors = m
         .get("expect_error")
         .and_then(toml::Value::as_array)

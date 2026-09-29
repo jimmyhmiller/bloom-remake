@@ -118,14 +118,21 @@ pub fn run(store: Arc<dyn KvStore>, w: &Workload, stop: Arc<AtomicBool>) -> Outc
             client(c, &*store, &w, epoch, deadline, &stop, &out)
         }));
     }
-    for t in threads {
-        // A client thread that panicked has recorded what it did; the rest of the outcome stands.
-        let _ = t.join();
+    // A client thread that panicked lost the history it had not merged: that fails the run (a protocol error),
+    // since a history with holes proves nothing.
+    let mut panicked = Vec::new();
+    for (c, t) in threads.into_iter().enumerate() {
+        if t.join().is_err() {
+            panicked.push(c);
+        }
     }
     let mut o = match Arc::try_unwrap(out) {
         Ok(m) => m.into_inner().unwrap_or_default(),
         Err(shared) => shared.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default(),
     };
+    for c in panicked {
+        o.protocol_errors.push(format!("client {c} panicked; its history is lost"));
+    }
     o.elapsed = epoch.elapsed();
     o
 }

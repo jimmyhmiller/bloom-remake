@@ -397,7 +397,15 @@ impl Lowerer<'_> {
                 if expr.ty == Some(*ty) {
                     self.expr(d, expr)?
                 } else {
-                    return Err(internal_error!("a cast between different types reached lowering"));
+                    // Type checking admits casts between integer types only.
+                    let to = match self.b.types().get(*ty) {
+                        Some(TypeDef::Int(t)) => *t,
+                        other => return Err(internal_error!("a cast to {other:?} reached lowering")),
+                    };
+                    Expr::Call {
+                        f: ir::FnRef::Builtin(ir::BuiltinFn::IntCast(to)),
+                        args: vec![self.expr(d, expr)?],
+                    }
                 }
             }
             HExprKind::SelfNode => Expr::Scalar(ir::BuiltinScalar::SelfNode),

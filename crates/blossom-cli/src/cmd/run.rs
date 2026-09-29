@@ -38,6 +38,10 @@ pub struct Args {
     /// The node's store directory (default: `<storage.data_dir>/<node>`).
     #[arg(long)]
     pub store: Option<PathBuf>,
+    /// The evaluator: `engine` (incremental, the default) or `oracle` (the reference semantics, re-evaluating the
+    /// whole state every tick).
+    #[arg(long, default_value = "engine")]
+    pub evaluator: blossom_node::Backend,
 }
 
 /// The exit code for a runtime error.
@@ -112,6 +116,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
             OpenMode::Existing
         },
         dir: args.store,
+        backend: args.evaluator,
     }) {
         Ok(s) => s,
         Err(e) => {

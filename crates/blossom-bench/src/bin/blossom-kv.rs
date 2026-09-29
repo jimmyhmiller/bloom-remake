@@ -14,7 +14,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use blossom_bench::blossom_kv::BlossomKvStore;
-use blossom_bench::etcd::EtcdStore;
+use blossom_bench::etcd::{EtcdStore, Routing};
 use blossom_bench::kv::{self, KvStore, Outcome, Workload};
 use blossom_front::api::NodeSpec;
 use blossom_runtime::deploy::DeploymentSpec;
@@ -41,6 +41,9 @@ struct Etcd {
     /// Client URLs as `host:port`, comma-separated.
     #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:2379")]
     endpoints: Vec<std::net::SocketAddr>,
+    /// `leader` (every session at the leader, as the Blossom client) or `spread` (client c at endpoint c mod n).
+    #[arg(long, default_value = "leader")]
+    route: String,
     #[command(flatten)]
     common: Common,
 }
@@ -192,9 +195,18 @@ fn run_and_report(name: &str, store: Arc<dyn KvStore>, common: &Common) -> ExitC
 }
 
 fn etcd(args: Etcd) -> ExitCode {
+    let routing = match args.route.as_str() {
+        "leader" => Routing::Leader,
+        "spread" => Routing::Spread,
+        other => {
+            eprintln!("--route: unknown routing {other:?} (leader or spread)");
+            return ExitCode::from(2);
+        }
+    };
     let store: Arc<dyn KvStore> = Arc::new(EtcdStore {
         endpoints: args.endpoints,
         timeout: Duration::from_millis(args.common.timeout_ms),
+        routing,
     });
     run_and_report("etcd", store, &args.common)
 }
