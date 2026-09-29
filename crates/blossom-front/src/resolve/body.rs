@@ -2096,6 +2096,10 @@ impl<'t> Resolver<'t, '_> {
 
     fn head_arg(&mut self, cx: &mut RuleCx, e: &ast::Expr) -> Option<HHeadArg> {
         if let ExprKind::Bang { name, args, clauses } = &e.kind {
+            if name.as_str() == "index" {
+                self.unsupported("LANG-097", "`index!` in a statement head (write it as a view column)", e.span);
+                return None;
+            }
             return Some(HHeadArg::Agg(self.aggregate(cx, *name, args, clauses, e.span)?));
         }
         Some(HHeadArg::Expr(self.expr(cx, e)?))
@@ -2115,6 +2119,22 @@ impl<'t> Resolver<'t, '_> {
             "sum" => AggKind::Sum,
             "min" => AggKind::Min,
             "max" => AggKind::Max,
+            "index" => {
+                if let Some(c) = clauses.first() {
+                    self.unsupported("LANG-097", &format!("`index!` with `{}`", c.keyword.as_str()), c.span);
+                    return None;
+                }
+                if !args.is_empty() {
+                    self.error(code!("BLS0301"), span, "`index!` takes no argument");
+                    return None;
+                }
+                return Some(HAgg {
+                    func: AggKind::Index,
+                    args: Vec::new(),
+                    default: None,
+                    span,
+                });
+            }
             other => {
                 self.unsupported("LANG-100", &format!("the aggregate `{other}!`"), span);
                 return None;
@@ -2262,6 +2282,18 @@ impl<'t> Resolver<'t, '_> {
                         let Some(a) = self.aggregate(&mut ucx, *name, args, clauses, agg.span) else {
                             return;
                         };
+                        let has_agg = cols.iter().any(|c| matches!(c, HViewAggCol::Agg(_)));
+                        let has_index = cols
+                            .iter()
+                            .any(|c| matches!(c, HViewAggCol::Agg(x) if x.func == crate::hir::AggKind::Index));
+                        if has_agg && (a.func == crate::hir::AggKind::Index || has_index) {
+                            self.unsupported(
+                                "LANG-097",
+                                "`index!` together with another aggregate column in one view",
+                                agg.span,
+                            );
+                            return;
+                        }
                         cols.push(HViewAggCol::Agg(a));
                     }
                     None => match Self::lookup_var(&ucx, c.name.name) {

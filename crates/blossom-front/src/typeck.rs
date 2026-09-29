@@ -742,6 +742,10 @@ impl Checker<'_> {
                 self.deferred.push(Deferred::IntColumn { t: col, span: agg.span });
                 self.count_cols.push(col);
             }
+            AggKind::Index => {
+                let u64t = self.con(&mut hir.types, TypeDef::Int(IntTy::U64));
+                self.unify(&hir.types, col, u64t, agg.span);
+            }
             AggKind::Sum | AggKind::Min | AggKind::Max => {
                 if let Some(a) = arg_terms.first() {
                     self.unify(&hir.types, *a, col, agg.span);
