@@ -136,3 +136,26 @@ question tool, the user chose:
 - LDFI decides by the seeded lineage-driven search with tuple-level negative support, and hands over to exhaustive
   certification when it spends its run budget or its lineage was incomplete; the report names the deciding search.
 - The S1 gate excludes BENCH-133d (Flux 22/21/1), which no search here or in the reference checker decides.
+
+## Slice 2 decisions (made by Claude, 2026-09-29; details in docs/plan/notes/S2.md)
+
+- **Blossom specs and CR-20.** LDFI judges `.bls` programs under CR-20 (a crashed node is frozen from its crash tick,
+  ARCHITECTURE §8.1); Molly's view (crashed nodes keep receiving) stays the `.ded` profile. `examples/e10_specs.bls`
+  ported Molly's `deliv_assert` verbatim, whose `missing_log` counts a crashed neighbor that never received the
+  message; under CR-20 that makes `AckRbFaults` fail with `{C(B,2)}`. Its `DelivAssert` now excludes crashed
+  neighbors (`not crashed(a)`), which gives Molly's verdicts (SimpleLog fails with `{O(A,B,1)}`, AckRb holds).
+- **Frozen crashes in LDFI.** Firings get an `Alive` premise (a crash stops them), a crashed node's ticks are frozen
+  copies (`Support::Frozen`), and tuple-level negative support adds *frozen appearance*: a tuple a node held before
+  tick `c` stays if it crashes at `c`. Relation-level support under the frozen view is `Unimplemented`.
+- **`round` is required** in a spec's `faults` exactly when the target observes time (physical timers or `now()`);
+  ODD-16 names no default duration.
+- **Deployments.** A single-location program's only role is `Node` (LANGUAGE §7.7), so a manifest may assign it.
+  `.ded` programs without `--nodes` take their nodes from their location constants (tests/corpus/README.md).
+- **Sim artifact generalization.** `blossom-artifact::ded` became `::sim` (`SimArtifact`, `LogicalRel`, …) with a
+  `Profile` (Molly or Blossom), and `blossom-sim::ded` became `::spec` (`SpecSim`); LDFI runs both frontends'
+  programs through them.
+- **IR amendments (additive):** `IrBuilder::set_persistence` and `set_construct_kind` (expansions whose spec names
+  relations declared inside the construct), `ConstructKind::Members` (a role's `R$members`), `Node<R>` assignable
+  where `Node` is expected (LANGUAGE §5.3), and `count` over a tuple (LANGUAGE §10.1's `count<(S, L, P)>`).
+- **Code registry:** `BLS0106` may also be constructed by `blossom-front` (a clause against the relation's kind is a
+  semantic check; ARCHITECTURE §13.1 gives the parser the syntactic part of BLS0100–0110).
