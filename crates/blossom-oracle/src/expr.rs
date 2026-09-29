@@ -113,9 +113,7 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
                 eval(scope, env, els)
             }
         }
-        Expr::Param(_) => Err(ExprError::Oracle(
-            blossom_base::unimplemented_error!("LANG-010", "deploy-time parameters in the oracle (WP M4.1)").into(),
-        )),
+        Expr::Param(p) => scope.oracle.param(*p).map_err(ExprError::Oracle),
         Expr::Construct { ty, variant, fields } => {
             let mut vs = Vec::with_capacity(fields.len());
             for f in fields {

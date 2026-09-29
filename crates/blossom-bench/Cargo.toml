@@ -14,6 +14,13 @@ blossom-engine.workspace = true
 blossom-driver.workspace = true
 blossom-node.workspace = true
 blossom-sim.workspace = true
+blossom-runtime.workspace = true
+blossom-artifact.workspace = true
+blossom-front.workspace = true
+blossom-oracle.workspace = true
+clap.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

@@ -842,7 +842,16 @@ pub enum WrapperKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AclSpec {
     Inferred,
-    Explicit(Vec<RoleId>),
+    /// `#[accept(…)]` (LANGUAGE §18.3): narrows the inferred ACL to these sources.
+    Explicit(AclExplicit),
+}
+/// The sources an explicit ACL admits: the listed roles' nodes, client sessions when `external`, and when
+/// `principal_in` is set only senders whose principal is in that unary relation of the receiving node.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AclExplicit {
+    pub roles: Vec<RoleId>,
+    pub external: bool,
+    pub principal_in: Option<RelId>,
 }
 /// MaterializeHint data in the Dedalus core IR.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

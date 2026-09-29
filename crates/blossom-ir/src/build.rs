@@ -171,6 +171,22 @@ impl IrBuilder {
         r.persistence = persistence;
         Ok(())
     }
+    /// Sets a channel's ACL once every relation it names is declared (an explicit ACL's `principal in` relation may
+    /// be declared after the channel).
+    pub fn set_acl(&mut self, rel: RelId, acl: AclSpec) -> Result<(), IrError> {
+        let r = self
+            .program
+            .rels
+            .get_mut(rel)
+            .ok_or_else(|| IrError::builder("unknown relation"))?;
+        match &mut r.class {
+            RelClass::Channel(ch) => {
+                ch.acl = acl;
+                Ok(())
+            }
+            _ => Err(IrError::builder(format!("{} is not a channel: it has no ACL", r.name))),
+        }
+    }
     /// Replaces a construct's specification: for expansions whose spec names relations declared inside the
     /// construct (a table's `$del`).
     pub fn set_construct_kind(&mut self, id: ConstructId, kind: ConstructKindInput) -> Result<(), IrError> {

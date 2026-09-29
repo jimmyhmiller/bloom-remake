@@ -11,6 +11,12 @@ blossom-base.workspace = true
 blossom-value.workspace = true
 blossom-ir.workspace = true
 blossom-schema.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+blossom-value = { workspace = true, features = ["arbitrary"] }
 
 [lints]
 workspace = true

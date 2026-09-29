@@ -9,6 +9,7 @@
 
 // FEATURE: LANG-002
 
+pub mod attrs;
 mod convert;
 
 pub use convert::convert;
@@ -31,6 +32,8 @@ impl Ident {
 /// One parsed file.
 #[derive(Clone, Debug)]
 pub struct File {
+    /// `#![…]` at the top of the file.
+    pub inner_attrs: Vec<Attr>,
     pub header: Option<ProgramHeader>,
     pub items: Vec<Item>,
     pub span: Span,
@@ -45,7 +48,8 @@ pub struct ProgramHeader {
     pub span: Span,
 }
 
-/// An attribute `#[name]`, `#[name(args…)]` or `#[name = e]`.
+/// An attribute `#[name]`, `#[name(args…)]` or `#[name = e]`: one per comma-separated body, so `#[a, b]` is two.
+/// A path name `a::b` is kept whole as the name (no built-in attribute has one).
 #[derive(Clone, Debug)]
 pub struct Attr {
     pub name: Ident,
@@ -350,12 +354,14 @@ pub struct Block {
 pub enum Stmt {
     Verb(Box<VerbStmt>),
     If {
+        attrs: Vec<Attr>,
         cond: Body,
         then: Block,
         els: Option<Box<Else>>,
         span: Span,
     },
     For {
+        attrs: Vec<Attr>,
         cond: Body,
         block: Block,
         span: Span,
@@ -699,6 +705,8 @@ pub struct SpecItem {
     pub name: Option<Ident>,
     pub target: Option<Vec<Ident>>,
     pub members: Vec<SpecMember>,
+    /// The attributes written on its members (no built-in attribute applies to one).
+    pub member_attrs: Vec<Attr>,
     pub span: Span,
 }
 

@@ -598,6 +598,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
         self.roles(s, items);
         let has_roles = self.scope(s).has_roles;
         self.declare(s, items, placement, has_roles, false);
+        self.acls(s, items);
         self.imports(s, items, placement);
         self.rules(s, items, placement);
     }
@@ -789,6 +790,297 @@ impl<'t, 'd> Resolver<'t, 'd> {
         }
     }
 
+    /// Pass 2b: the explicit ACLs of the channels declared in `items` (LANGUAGE §18.3), once every relation and
+    /// role of the scope is known.
+    fn acls(&mut self, s: ScopeIdx, items: &'t [ast::Item]) {
+        for item in items {
+            match &item.kind {
+                ItemKind::At { items: inner, .. } => self.acls(s, inner),
+                ItemKind::Rel(d) if d.kind == RelKind::Channel => {
+                    let mut accepts = item.attrs.iter().filter(|a| a.name.as_str() == "accept");
+                    let Some(first) = accepts.next() else { continue };
+                    for extra in accepts {
+                        self.error(
+                            code!("BLS0210"),
+                            extra.span,
+                            "a channel takes at most one `#[accept(…)]`",
+                        );
+                    }
+                    // A duplicate or failed declaration was reported; only the channel this item declared gets the
+                    // ACL.
+                    let Some(id) = self.scope(s).rels.get(&d.name.name).copied() else {
+                        continue;
+                    };
+                    if self.rel_of(id).span != d.name.span {
+                        continue;
+                    }
+                    if let Some(acl) = self.accept(s, id, first)
+                        && let Some(HRel {
+                            kind: HRelKind::Channel(ch),
+                            ..
+                        }) = self.hir.rels.get_mut(id.index())
+                    {
+                        ch.acl = Some(acl);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// `#[accept(sources…[, principal in REL])]` on the channel `id`: its sources are role names and `external`
+    /// (client sessions of the channel's external source role); `REL` is a unary `static` or `table` relation of
+    /// type `Principal` at the receiving role.
+    fn accept(&mut self, s: ScopeIdx, id: HRelId, a: &ast::Attr) -> Option<HAcl> {
+        let rel = self.rel_of(id);
+        let HRelKind::Channel(ch) = &rel.kind else {
+            return None;
+        };
+        let shape = "`#[accept(…)]` takes role names, `external` and `principal in REL`";
+        if a.value.is_some() {
+            self.error(code!("BLS0210"), a.span, shape);
+            return None;
+        }
+        let src = ch.direction.map(|(src, _)| src);
+        let receiver = match (ch.direction, ch.dest_col) {
+            (Some((_, dst)), _) => Some(dst),
+            (None, Some(d)) => rel
+                .cols
+                .get(d)
+                .and_then(|c| c.ty)
+                .and_then(|t| match self.hir.types.get(t) {
+                    Some(blossom_value::TypeDef::Node(Some(r))) => Some(HRoleId(r.raw())),
+                    _ => None,
+                }),
+            (None, None) => None,
+        };
+        if let Some(dst) = receiver
+            && self.role_of(dst).kind == RoleKind::External
+        {
+            self.error(
+                code!("BLS0210"),
+                a.span,
+                format!(
+                    "`{}` is sent to an external role: an ACL admits what a node receives, and client sessions receive nothing through one",
+                    rel.name
+                ),
+            );
+            return None;
+        }
+        let mut ok = true;
+        let mut roles: Vec<HRoleId> = Vec::new();
+        let mut external = false;
+        let mut principal: Option<(Ident, Span)> = None;
+        for arg in &a.args {
+            let ast::Arg::Pos(e) = arg else {
+                self.error(code!("BLS0210"), arg.span(), shape);
+                ok = false;
+                continue;
+            };
+            if principal.is_some() {
+                self.error(
+                    code!("BLS0210"),
+                    e.span,
+                    "`principal in REL` comes last in `#[accept(…)]`",
+                );
+                ok = false;
+                continue;
+            }
+            if let ast::ExprKind::Binary {
+                op: ast::BinOp::In,
+                lhs,
+                rhs,
+            } = &e.kind
+                && crate::ast::attrs::word(lhs) == Some("principal")
+            {
+                match &rhs.kind {
+                    ast::ExprKind::Path(p, t) if t.is_empty() && p.len() == 1 => {
+                        principal = p.first().map(|n| (*n, e.span));
+                    }
+                    _ => {
+                        self.error(
+                            code!("BLS0210"),
+                            rhs.span,
+                            "`principal in` names a relation of this module by its name",
+                        );
+                        ok = false;
+                    }
+                }
+                continue;
+            }
+            let Some(word) = crate::ast::attrs::word(e) else {
+                self.error(code!("BLS0210"), e.span, shape);
+                ok = false;
+                continue;
+            };
+            if word == "external" {
+                if external {
+                    self.error(code!("BLS0210"), e.span, "`external` is named twice");
+                    ok = false;
+                }
+                external = true;
+                match src {
+                    Some(r) if self.role_of(r).kind == RoleKind::External => {}
+                    _ => {
+                        let why = match src {
+                            Some(r) => format!("its source `{}` is not an external role", self.role_of(r).name),
+                            None => "it has no source role".to_owned(),
+                        };
+                        self.error(
+                            code!("BLS0404"),
+                            e.span,
+                            format!(
+                                "`external` admits client sessions of the channel's external source role, but `{}` has none: {why}",
+                                rel.name
+                            ),
+                        );
+                        ok = false;
+                    }
+                }
+                continue;
+            }
+            let Some(r) = self.scope(s).roles.get(&Symbol::intern(word)).copied() else {
+                self.error(code!("BLS0200"), e.span, format!("unknown role `{word}`"));
+                ok = false;
+                continue;
+            };
+            let role = self.role_of(r);
+            if role.kind == RoleKind::External {
+                self.error(
+                    code!("BLS0210"),
+                    e.span,
+                    format!(
+                        "`{}` is an external role, whose clients are sessions, not nodes: admit them with `external`",
+                        role.name
+                    ),
+                );
+                ok = false;
+                continue;
+            }
+            if let Some(src) = src
+                && src != r
+            {
+                let src_name = self.role_of(src).name;
+                self.error(
+                    code!("BLS0404"),
+                    e.span,
+                    format!(
+                        "`{}` never sends on `{}`: its source role is `{src_name}`",
+                        role.name, rel.name
+                    ),
+                );
+                ok = false;
+                continue;
+            }
+            if roles.contains(&r) {
+                self.error(code!("BLS0210"), e.span, format!("`{}` is named twice", role.name));
+                ok = false;
+                continue;
+            }
+            roles.push(r);
+        }
+        if roles.is_empty() && !external && ok {
+            self.error(
+                code!("BLS0210"),
+                a.span,
+                "`#[accept(…)]` names at least one source: a role or `external`",
+            );
+            return None;
+        }
+        let principal_in = match principal {
+            None => None,
+            Some((name, span)) => self.principal_relation(s, name, span, receiver),
+        };
+        if !ok || principal.is_some() && principal_in.is_none() {
+            return None;
+        }
+        Some(HAcl {
+            roles,
+            external,
+            principal_in,
+            span: a.span,
+        })
+    }
+
+    /// The relation of `principal in REL`: a unary `static` or `table` relation of type `Principal` that the
+    /// receiving role (`None`: every node) can read.
+    fn principal_relation(
+        &mut self,
+        s: ScopeIdx,
+        name: Ident,
+        span: Span,
+        receiver: Option<HRoleId>,
+    ) -> Option<HRelId> {
+        let Some(id) = self.scope(s).rels.get(&name.name).copied() else {
+            if !self.scope(s).broken.contains(&name.name) {
+                self.error(
+                    code!("BLS0200"),
+                    name.span,
+                    format!("unknown relation `{}`", name.as_str()),
+                );
+            }
+            return None;
+        };
+        let r = self.rel_of(id);
+        if !matches!(r.kind, HRelKind::Static | HRelKind::Table) {
+            self.error(
+                code!("BLS0210"),
+                name.span,
+                format!(
+                    "`principal in` reads a `static` or `table` relation; `{}` is neither",
+                    r.name
+                ),
+            );
+            return None;
+        }
+        if r.cols.len() != 1 {
+            self.error(
+                code!("BLS0301"),
+                name.span,
+                format!(
+                    "`principal in` reads a unary relation; `{}` has {} columns",
+                    r.name,
+                    r.cols.len()
+                ),
+            );
+            return None;
+        }
+        let principal = r
+            .cols
+            .first()
+            .and_then(|c| c.ty)
+            .is_some_and(|t| matches!(self.hir.types.get(t), Some(blossom_value::TypeDef::Principal)));
+        if !principal {
+            self.error(
+                code!("BLS0300"),
+                name.span,
+                format!(
+                    "`principal in` compares principals; the column of `{}` is not a `Principal`",
+                    r.name
+                ),
+            );
+            return None;
+        }
+        if r.role.is_some() && r.role != receiver {
+            let at = |this: &mut Self, role: Option<HRoleId>| match role {
+                Some(x) => format!("`{}`", this.role_of(x).name),
+                None => "every node".to_owned(),
+            };
+            let (here, there) = (at(self, r.role), at(self, receiver));
+            self.error(
+                code!("BLS0404"),
+                span,
+                format!(
+                    "`principal in {}` is read where the channel is received ({there}), but `{}` lives at {here}",
+                    name.as_str(),
+                    r.name
+                ),
+            );
+            return None;
+        }
+        Some(id)
+    }
+
     /// A timer: `timer name every d;` declares the event relation `name(count: u64, at: Instant)` (LANGUAGE §7.14).
     fn timer(&mut self, s: ScopeIdx, t: &'t ast::TimerDecl, placement: Option<HRoleId>) -> Option<HRelId> {
         let words: Vec<&str> = t.words.iter().map(Ident::as_str).collect();
@@ -971,6 +1263,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                     loopback,
                     direction,
                     dest_col,
+                    acl: None,
                 })
             }
         };
@@ -1104,7 +1397,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                         );
                         continue;
                     }
-                    self.handler(s, h, placement, &item.attrs);
+                    self.handler(s, h, placement);
                 }
                 ItemKind::Bootstrap { fresh, block } => {
                     if has_roles && placement.is_none() {

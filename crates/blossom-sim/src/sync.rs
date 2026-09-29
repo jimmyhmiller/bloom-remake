@@ -9,19 +9,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use blossom_base::{InternalError, RelId, internal_error};
 use blossom_ir::obs::FiringRecord;
-use blossom_oracle::{Delivery, Egress, Ingress, Instance, Oracle, OracleError, Row, TickInput, TickOutput};
+use blossom_oracle::{Delivery, Egress, Ingress, Instance, OracleError, Row, TickInput};
 use blossom_value::time::{Duration, Instant, NodeId, Tick};
 
-/// Runs one node's tick.
-pub trait Evaluator {
-    fn tick(&self, input: &TickInput<'_>) -> Result<TickOutput, OracleError>;
-}
-
-impl Evaluator for Oracle {
-    fn tick(&self, input: &TickInput<'_>) -> Result<TickOutput, OracleError> {
-        Oracle::tick(self, input)
-    }
-}
+/// Runs one node's tick: the node's seam, shared with the network runtime.
+pub use blossom_node::Evaluator;
 
 /// Why a simulation stopped.
 #[derive(Debug, thiserror::Error)]

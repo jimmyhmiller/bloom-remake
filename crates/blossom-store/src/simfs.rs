@@ -400,6 +400,18 @@ impl Vfs for SimFs {
         s.record(format!("remove {}", path.display()));
         Ok(())
     }
+    fn remove_dir(&self, path: &Path) -> Result<(), StoreError> {
+        let mut s = self.state()?;
+        if !s.dirs.contains(path) {
+            return Err(not_found(path));
+        }
+        if s.names.keys().chain(s.dirs.iter()).any(|p| p.parent() == Some(path)) {
+            return Err(io::Error::from_raw_os_error(66).into()); // ENOTEMPTY
+        }
+        s.dirs.remove(path);
+        s.record(format!("rmdir {}", path.display()));
+        Ok(())
+    }
     fn list(&self, dir: &Path) -> Result<Vec<PathBuf>, StoreError> {
         let s = self.state()?;
         if !s.dirs.contains(dir) {

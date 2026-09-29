@@ -162,5 +162,9 @@ fn parse(file: &LoadedFile, sources: &mut SourceDb, diags: &mut Diagnostics) -> 
     }
     let before = diags.error_count();
     let converted = ast::convert(id, &parse.syntax(), diags);
-    (diags.error_count() == before).then_some(converted)
+    if diags.error_count() != before {
+        return None;
+    }
+    ast::attrs::check(&converted, diags);
+    Some(converted)
 }
