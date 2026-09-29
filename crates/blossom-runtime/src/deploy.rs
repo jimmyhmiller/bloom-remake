@@ -13,6 +13,7 @@
 //! [[node]]
 //! name = "s1"; role = "Server"; addr = "127.0.0.1:7400"; client_addr = "127.0.0.1:7500"
 //! principal = "spiffe://dev/kvs/Server/s1"
+//! dial = { s2 = "127.0.0.1:17402" }  # optional: dial node s2 here instead of at its `addr` (a proxy, a NAT)
 //!
 //! [params]                        # deploy-time parameters (LANG-010): integers, bools, strings, durations
 //! ELECTION_MIN = "150ms"
@@ -81,6 +82,8 @@ struct RawNode {
     addr: SocketAddr,
     client_addr: Option<SocketAddr>,
     principal: String,
+    #[serde(default)]
+    dial: BTreeMap<String, SocketAddr>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -120,6 +123,8 @@ pub struct NodeEntry {
     pub addr: SocketAddr,
     pub client_addr: Option<SocketAddr>,
     pub principal: String,
+    /// Where this node dials other nodes when it is not their `addr` (a proxy, a NAT), by node name.
+    pub dial: BTreeMap<String, SocketAddr>,
 }
 
 /// A validated deployment spec.
@@ -188,9 +193,17 @@ impl DeploymentSpec {
                 addr: n.addr,
                 client_addr: n.client_addr,
                 principal: n.principal,
+                dial: n.dial,
             })
             .collect();
         nodes.sort_by(|a, b| a.name.cmp(&b.name));
+        for n in &nodes {
+            for target in n.dial.keys() {
+                if !nodes.iter().any(|m| m.name == *target) {
+                    return Err(invalid(&format!("node.dial.{target}"), "no such node"));
+                }
+            }
+        }
         for w in nodes.windows(2) {
             if let [a, b] = w
                 && a.name == b.name

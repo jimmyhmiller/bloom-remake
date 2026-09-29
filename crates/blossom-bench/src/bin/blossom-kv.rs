@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use blossom_bench::blossom_kv::E01Store;
+use blossom_bench::blossom_kv::BlossomKvStore;
 use blossom_bench::etcd::EtcdStore;
 use blossom_bench::kv::{self, KvStore, Outcome, Workload};
 use blossom_front::api::NodeSpec;
@@ -215,7 +215,21 @@ fn load(args: Load) -> ExitCode {
             role: n.role.clone(),
         })
         .collect();
-    let (result, _) = blossom_driver::bls::compile_file(&spec.source.to_string_lossy(), &nodes);
+    let params = spec
+        .params
+        .iter()
+        .map(|(k, v)| {
+            use blossom_front::api::ParamBinding as B;
+            use blossom_runtime::deploy::ParamValue as V;
+            let b = match v {
+                V::Int(n) => B::Int(*n),
+                V::Bool(b) => B::Bool(*b),
+                V::Text(t) => B::Text(t.clone()),
+            };
+            (k.clone(), b)
+        })
+        .collect();
+    let (result, _) = blossom_driver::bls::compile_file_with(&spec.source.to_string_lossy(), &nodes, &params);
     let artifact = match result {
         Ok((a, _)) => Arc::new(a),
         Err(e) => {
@@ -223,8 +237,8 @@ fn load(args: Load) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let store: Arc<dyn KvStore> = Arc::new(E01Store {
-        addrs: spec.nodes.iter().filter_map(|n| n.client_addr).collect(),
+    let store: Arc<dyn KvStore> = Arc::new(BlossomKvStore {
+        addrs: spec.nodes.iter().map(|n| n.client_addr).collect(),
         id: blossom_runtime::server::identity(&spec, &artifact),
         artifact,
         principal: args.principal,
