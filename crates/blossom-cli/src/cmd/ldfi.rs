@@ -54,7 +54,7 @@ pub struct Args {
     #[arg(long, default_value_t = 20_000)]
     pub max_runs: u64,
     /// States exhaustive certification may explore.
-    #[arg(long, default_value_t = 50_000_000)]
+    #[arg(long, default_value_t = 2_000_000)]
     pub max_states: u64,
     /// Report the lineage-driven search's budget error instead of certifying exhaustively.
     #[arg(long)]

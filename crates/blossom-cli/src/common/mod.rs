@@ -57,7 +57,7 @@ pub mod ded {
                 for d in diags.iter() {
                     eprint!("{}", render(d, &sources));
                 }
-                let unimplemented = diags.iter().any(|d| d.code.as_str() == "BLS0908");
+                let unimplemented = diags.iter().any(blossom_driver::render::is_not_implemented);
                 Err(if unimplemented {
                     Exit::Unimplemented
                 } else {

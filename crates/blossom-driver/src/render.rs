@@ -55,3 +55,9 @@ fn snippet(out: &mut String, sources: &SourceDb, span: Span, message: Option<&st
         }
     }
 }
+
+/// Whether a diagnostic reports a feature this build does not implement (BLS0908, which only
+/// [`Diagnostic::not_implemented`] builds): commands exit with code 7 for it (ARCHITECTURE §12.5).
+pub fn is_not_implemented(d: &Diagnostic) -> bool {
+    d.code == Diagnostic::not_implemented(blossom_base::FeatureId("LANG-220"), "", "").code
+}

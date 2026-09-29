@@ -112,27 +112,35 @@ pub fn exhaustive(
             if result.states > max_states {
                 return Err(LdfiError::Budget(max_states));
             }
-            let stepped = step_all(sim, spec, &crashes, &snapshot_ticks, ff_post, tick, &items, workers)?;
-            for s in stepped {
-                match s {
-                    Stepped::Violation(oms) => {
-                        result.counterexample = Some(canonical(FaultSchedule {
-                            omissions: oms,
-                            crashes: crashes.clone(),
-                        }));
-                        return Ok(result);
-                    }
-                    Stepped::Good => {}
-                    Stepped::Next(successors) => {
-                        for (state, oms) in successors {
-                            match frontier.get_mut(&state) {
-                                Some(best) => {
-                                    if better(&oms, best) {
-                                        *best = oms;
+            // Step the frontier in bounded batches, merging each batch before the next, so the successors in memory
+            // at once stay proportional to one batch.
+            let batch = workers.max(1) * 64;
+            for part in items.chunks(batch) {
+                let stepped = step_all(sim, spec, &crashes, &snapshot_ticks, ff_post, tick, part, workers)?;
+                for s in stepped {
+                    match s {
+                        Stepped::Violation(oms) => {
+                            result.counterexample = Some(canonical(FaultSchedule {
+                                omissions: oms,
+                                crashes: crashes.clone(),
+                            }));
+                            return Ok(result);
+                        }
+                        Stepped::Good => {}
+                        Stepped::Next(successors) => {
+                            for (state, oms) in successors {
+                                match frontier.get_mut(&state) {
+                                    Some(best) => {
+                                        if better(&oms, best) {
+                                            *best = oms;
+                                        }
                                     }
-                                }
-                                None => {
-                                    frontier.insert(state, oms);
+                                    None => {
+                                        frontier.insert(state, oms);
+                                        if result.states.saturating_add(frontier.len() as u64) > max_states {
+                                            return Err(LdfiError::Budget(max_states));
+                                        }
+                                    }
                                 }
                             }
                         }

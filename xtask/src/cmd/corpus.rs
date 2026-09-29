@@ -203,9 +203,7 @@ pub fn run(args: Args) -> ExitCode {
 fn gate_scope(milestone: &str, area: &str, case: &str, backend: &str) -> bool {
     match milestone {
         // BENCH-133d (Flux 22/21/1) is excluded from S1's gate: SLICES.md, slice 1, "Exception".
-        "S1" => {
-            area == "ldfi" && (backend == "oracle" || backend == "ldfi") && !case.starts_with("BENCH-133d")
-        }
+        "S1" => area == "ldfi" && (backend == "oracle" || backend == "ldfi") && !case.starts_with("BENCH-133d"),
         _ => false,
     }
 }
@@ -293,7 +291,7 @@ fn compile(files: &[PathBuf], nodes: &[String]) -> Result<DedArtifact, Outcome> 
     match result {
         Ok(a) => Ok(a),
         Err(DedError::Rejected(d)) => {
-            let unimplemented = d.iter().any(|x| x.code.as_str() == "BLS0908");
+            let unimplemented = d.iter().any(blossom_driver::render::is_not_implemented);
             let text: String = d.iter().map(|x| render(x, &sources)).collect();
             Err(if unimplemented {
                 Outcome::NotRunnable(text)
@@ -516,7 +514,10 @@ fn ldfi_backend(files: &[PathBuf], m: &toml::Table, workers: usize, max_runs: u6
     let mut note = match report.method {
         blossom_ldfi::Method::Lineage => format!("{got} in {} runs", report.runs),
         blossom_ldfi::Method::Exhaustive { states, .. } => {
-            format!("{got} by exhaustive certification ({states} states) after {} runs", report.runs)
+            format!(
+                "{got} by exhaustive certification ({states} states) after {} runs",
+                report.runs
+            )
         }
     };
     if let Some(max) = int("runs_max") {

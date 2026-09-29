@@ -45,7 +45,7 @@ impl LdfiConfig {
             max_runs: 100_000,
             sat: "cadical-plain".into(),
             workers: 1,
-            exhaustive_fallback: Some(50_000_000),
+            exhaustive_fallback: Some(2_000_000),
         }
     }
 }
