@@ -12,13 +12,15 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use blossom_base::graph::{AdjacencyList, tarjan_scc};
 use blossom_base::{Diagnostic, Diagnostics, InternalError, RelId, Span, code, internal_error};
-use blossom_ir::core::{HeadArg, Literal, Origin, Program, RuleKind};
+use blossom_ir::core::{ConstructKind, HeadArg, Literal, Origin, Program, RuleKind};
 
-/// One dependency: `head` reads `body` in a deductive rule, at `span`; `strict` for a point of order.
+/// One dependency: `head` reads `body` in a deductive rule, at `span`; `strict` for a point of order, `choice` when
+/// the rule belongs to a choice's expansion (its priority aggregate or sticky negation).
 struct Edge {
     head: usize,
     body: usize,
     strict: bool,
+    choice: bool,
     span: Span,
 }
 
@@ -34,6 +36,10 @@ pub fn check(p: &Program) -> Result<Diagnostics, InternalError> {
         let head = rule.head.rel.index();
         let agg = rule.head.args.iter().any(|a| matches!(a, HeadArg::Agg(_)));
         let exact = blossom_ir::polarity::non_monotone_reads(p, rule);
+        let choice = rule
+            .construct
+            .and_then(|c| p.constructs.get(c))
+            .is_some_and(|c| matches!(c.kind, ConstructKind::Choose(_)));
         for (i, lit) in rule.body.lits.iter().enumerate() {
             let (rel, negated, span) = match lit {
                 Literal::Pos(a) => (a.rel, false, rule.span),
@@ -49,6 +55,7 @@ pub fn check(p: &Program) -> Result<Diagnostics, InternalError> {
                 head,
                 body,
                 strict: negated || agg || exact.contains(&i),
+                choice,
                 span,
             });
         }
@@ -56,13 +63,36 @@ pub fn check(p: &Program) -> Result<Diagnostics, InternalError> {
     let sccs = tarjan_scc(&graph).map_err(|e| internal_error!("dependency graph: {e}"))?;
     let mut diags = Diagnostics::new();
     let mut reported = BTreeSet::new();
+    let component = |e: &Edge| match (sccs.component_of.get(e.head), sccs.component_of.get(e.body)) {
+        (Some(a), Some(b)) if a == b => Some(*a),
+        _ => None,
+    };
     for e in edges.iter().filter(|e| e.strict) {
-        let (Some(ch), Some(cb)) = (sccs.component_of.get(e.head), sccs.component_of.get(e.body)) else {
-            continue;
-        };
-        if ch != cb || !reported.insert(*ch) {
+        let Some(ch) = component(e) else { continue };
+        if !reported.insert(ch) {
             continue;
         }
+        // A cycle whose every point of order is a choice site is BLS0503 (LANGUAGE §13.4), not BLS0502.
+        let only_choices = edges
+            .iter()
+            .filter(|x| x.strict && component(x) == Some(ch))
+            .all(|x| x.choice);
+        if only_choices {
+            diags.push(
+                Diagnostic::new(
+                    code!("BLS0503"),
+                    format!(
+                        "a choice lies on a same-tick cycle through `{}` (SEM-086): its candidates would depend on what \
+                         it chooses",
+                        surface_name(p, e.head)
+                    ),
+                )
+                .with_primary(e.span)
+                .with_note("read the chosen relation at the next tick (`next`) to break the cycle"),
+            );
+            continue;
+        }
+        let ch = &ch;
         // The cycle: head → body → … → head, following dependencies inside the component.
         let path = path_in(&edges, &sccs.component_of, *ch, e.body, e.head);
         let mut names = vec![surface_name(p, e.head)];

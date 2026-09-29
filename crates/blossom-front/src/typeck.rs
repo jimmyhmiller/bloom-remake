@@ -820,6 +820,17 @@ impl Checker<'_> {
                     self.unify(&hir.types, p, t, *span);
                 }
             }
+            HLit::Choose(c) => {
+                for e in c.chosen.iter_mut().chain(c.per.iter_mut()) {
+                    self.expr(hir, scope, e);
+                }
+                if let Some((e, _)) = &mut c.cost {
+                    let t = self.expr(hir, scope, e);
+                    if !self.apply {
+                        self.deferred.push(Deferred::Ordered { t, span: e.span });
+                    }
+                }
+            }
             HLit::Gen { pat, src, span } => {
                 let t = self.expr(hir, scope, src);
                 let p = self.pat(hir, scope, pat);

@@ -66,7 +66,7 @@ pub(crate) fn binders(body: &HBody) -> Vec<HVarId> {
                     }
                 }
             }
-            HLit::Not(_) | HLit::NotBody(..) | HLit::Guard(_) | HLit::Forall { .. } => {}
+            HLit::Not(_) | HLit::NotBody(..) | HLit::Guard(_) | HLit::Forall { .. } | HLit::Choose(_) => {}
         }
     }
     out
@@ -102,6 +102,11 @@ fn mentioned_lit(l: &HLit, out: &mut BTreeSet<HVarId>) {
         HLit::Gen { pat, src, .. } => {
             mentioned_pat(pat, out);
             mentioned_expr(src, out);
+        }
+        HLit::Choose(c) => {
+            for e in c.chosen.iter().chain(&c.per).chain(c.cost.iter().map(|(e, _)| e)) {
+                mentioned_expr(e, out);
+            }
         }
         HLit::Any(alts, _) => alts.iter().for_each(|b| mentioned(b, out)),
         HLit::Forall { domain, body, .. } => {
@@ -187,7 +192,7 @@ pub(crate) struct Names {
 }
 
 impl Names {
-    fn rel_segments(&self, suffix: &str) -> Vec<Symbol> {
+    pub(crate) fn rel_segments(&self, suffix: &str) -> Vec<Symbol> {
         let mut segs = self.module.segments().to_vec();
         segs.push(Symbol::intern(&format!("{}{suffix}", self.stem)));
         segs
@@ -267,6 +272,14 @@ impl<'h> Lowerer<'h> {
                     }
                 }
                 _ => {}
+            }
+        }
+        // A choice filters the valuations of everything else in the body.
+        for l in &body.lits {
+            if let HLit::Choose(c) = l {
+                for d in &mut drafts {
+                    self.choose(d, c, names)?;
+                }
             }
         }
         Ok(drafts)
@@ -410,7 +423,7 @@ impl<'h> Lowerer<'h> {
                     }
                     drafts = out;
                 }
-                HLit::Not(_) | HLit::NotBody(..) | HLit::Forall { .. } => {}
+                HLit::Not(_) | HLit::NotBody(..) | HLit::Forall { .. } | HLit::Choose(_) => {}
             }
         }
         Ok(drafts)
@@ -981,6 +994,10 @@ impl<'h> Lowerer<'h> {
             let mut out = Vec::new();
             for e in &g.args {
                 out.push(self.term(d, e)?);
+            }
+            // `sum!(e)` adds `e` once per distinct valuation of the group (LANGUAGE §10.1), not per distinct value.
+            if g.func == AggKind::Sum {
+                out.extend(self.var_terms(d, over)?);
             }
             out
         };

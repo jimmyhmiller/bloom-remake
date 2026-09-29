@@ -28,6 +28,10 @@ pub(crate) struct RuleCx {
     pub placement: Option<HRoleId>,
     /// The interposition aliases `outside`/`inside` in effect, if any.
     aliases: BTreeMap<Symbol, HRelId>,
+    /// Whether a choice literal may appear here: a labelled handler's header or a single-alternative view (BLS0600).
+    pub choice_allowed: bool,
+    /// The choice literals of the body being resolved.
+    pub choices: u32,
 }
 
 fn is_var_name(name: &str) -> bool {
@@ -47,6 +51,8 @@ impl<'t> Resolver<'t, '_> {
             frames: vec![BTreeMap::new()],
             placement,
             aliases: BTreeMap::new(),
+            choice_allowed: false,
+            choices: 0,
         }
     }
 
@@ -675,6 +681,11 @@ impl<'t> Resolver<'t, '_> {
                 lhs,
                 rhs,
             } => self.membership(cx, lhs, rhs, generator, a.span),
+            ExprKind::Bang { name, args, clauses }
+                if matches!(name.as_str(), "choose" | "choose_least" | "choose_most") =>
+            {
+                self.choose(cx, *name, args, clauses, a.span)
+            }
             ExprKind::Bang { name, .. } => {
                 self.unsupported(
                     "LANG-108",
@@ -685,6 +696,98 @@ impl<'t> Resolver<'t, '_> {
             }
             _ => Some(HLit::Guard(self.expr(cx, &a.expr)?)),
         }
+    }
+
+    /// `choose!(Ȳ per X̄ [least c | most c] [sticky])`, `choose_least!(Ȳ per X̄)` (the cost is Ȳ) and
+    /// `choose_most!` (LANGUAGE §10.4).
+    fn choose(
+        &mut self,
+        cx: &mut RuleCx,
+        name: Ident,
+        args: &[Arg],
+        clauses: &[ast::BangClause],
+        span: Span,
+    ) -> Option<HLit> {
+        if !cx.choice_allowed {
+            self.error(
+                code!("BLS0600"),
+                span,
+                "a choice belongs to a labelled handler's header or a single-alternative view",
+            );
+            return None;
+        }
+        cx.choices += 1;
+        if cx.choices > 1 {
+            self.unsupported("LANG-116", "several choices in one body (a multi-FD site)", span);
+            return None;
+        }
+        let [Arg::Pos(y)] = args else {
+            self.error(
+                code!("BLS0301"),
+                span,
+                format!("`{}!` chooses one value or tuple", name.as_str()),
+            );
+            return None;
+        };
+        let parts = |e: &ast::Expr| -> Vec<ast::Expr> {
+            match &e.kind {
+                ExprKind::Tuple(es) if !es.is_empty() => es.clone(),
+                _ => vec![e.clone()],
+            }
+        };
+        let mut chosen = Vec::new();
+        for e in parts(y) {
+            chosen.push(self.expr(cx, &e)?);
+        }
+        let mut per = Vec::new();
+        let mut cost = match name.as_str() {
+            "choose_least" => Some((y.clone(), false)),
+            "choose_most" => Some((y.clone(), true)),
+            _ => None,
+        };
+        let mut sticky = false;
+        for c in clauses {
+            match c.keyword.as_str() {
+                "per" => {
+                    for e in &c.exprs {
+                        for p in parts(e) {
+                            per.push(self.expr(cx, &p)?);
+                        }
+                    }
+                }
+                "least" | "most" if name.as_str() == "choose" && cost.is_none() => {
+                    let [e] = c.exprs.as_slice() else {
+                        self.error(code!("BLS0301"), c.span, "a choice has one cost");
+                        return None;
+                    };
+                    cost = Some((e.clone(), c.keyword.as_str() == "most"));
+                }
+                "sticky" => sticky = true,
+                "durable" => {
+                    self.unsupported("LANG-115", "`sticky durable` choices", c.span);
+                    return None;
+                }
+                other => {
+                    self.error(
+                        code!("BLS0302"),
+                        c.span,
+                        format!("`{other}` is not a clause of `{}!`", name.as_str()),
+                    );
+                    return None;
+                }
+            }
+        }
+        let cost = match cost {
+            Some((e, most)) => Some((self.expr(cx, &e)?, most)),
+            None => None,
+        };
+        Some(HLit::Choose(Box::new(HChoose {
+            chosen,
+            per,
+            cost,
+            sticky,
+            span,
+        })))
     }
 
     /// `pat in e` (LANGUAGE §9.4).
@@ -1454,7 +1557,9 @@ impl<'t> Resolver<'t, '_> {
             self.unsupported("ANA-020", "`monotone` assertions", h.span);
         }
         let mut cx = self.rule_cx(s, placement);
+        cx.choice_allowed = h.label.is_some();
         let header = self.body(&mut cx, &h.header);
+        cx.choice_allowed = false;
         let stmts = self.stmts(&mut cx, &h.block.stmts);
         let text = self.normalized(h.header.span);
         self.hir.handlers.push(HHandler {
@@ -1998,6 +2103,7 @@ impl<'t> Resolver<'t, '_> {
         let mut cxs = Vec::new();
         for alt in &v.alternatives {
             let mut cx = self.rule_cx(s, placement);
+            cx.choice_allowed = v.alternatives.len() == 1;
             let body = self.body(&mut cx, alt);
             alternatives.push((cx.scope, body));
             cxs.push(cx);
