@@ -146,6 +146,9 @@ pub enum OracleError {
     /// The deductive rules do not stratify: a negated or aggregated read on a same-tick cycle (SEM-020).
     #[error("the program does not stratify: {0}")]
     NotStratifiable(String),
+    /// A deploy-time parameter without a default that the deployment does not bind.
+    #[error("the deployment does not bind the parameter `{0}`, which has no default")]
+    Unbound(String),
     /// A runtime hard error of the program at this tick (BLSRnnn, ARCHITECTURE §6.6).
     #[error("{} at tick {}: {}", .error.code, .tick.0, .error.detail)]
     Program { tick: Tick, error: ProgramErrorRecord },
@@ -186,6 +189,9 @@ pub struct Oracle {
     /// Each node's role, for the `$role(R)` guards of rules placed at a role (LANGUAGE §6.10). Empty for a
     /// role-free program.
     roles: Vec<Option<RoleId>>,
+    /// The deployment's values of deploy-time parameters (LANG-010); a parameter it does not bind takes its
+    /// declared default.
+    params: BTreeMap<blossom_base::ParamId, Value>,
 }
 
 impl Oracle {
@@ -225,6 +231,7 @@ impl Oracle {
             statics,
             limits,
             roles: Vec::new(),
+            params: BTreeMap::new(),
         })
     }
 
@@ -233,6 +240,33 @@ impl Oracle {
     pub fn with_roles(mut self, roles: Vec<Option<RoleId>>) -> Oracle {
         self.roles = roles;
         self
+    }
+
+    /// Binds deploy-time parameters (LANG-010). A parameter left unbound takes its declared default; one with no
+    /// default is an error when it is read.
+    pub fn with_params(mut self, params: BTreeMap<blossom_base::ParamId, Value>) -> Oracle {
+        self.params = params;
+        self
+    }
+
+    /// The value of parameter `p`: the deployment's binding, else the declared default.
+    pub(crate) fn param(&self, p: blossom_base::ParamId) -> Result<Value, OracleError> {
+        if let Some(v) = self.params.get(&p) {
+            return Ok(v.clone());
+        }
+        let program = self.program.get();
+        let decl = program
+            .params
+            .get(p)
+            .ok_or_else(|| blossom_base::internal_error!("parameter {p:?} is not declared"))?;
+        let Some(c) = decl.default else {
+            return Err(OracleError::Unbound(decl.name.to_string()));
+        };
+        program
+            .consts
+            .get(c)
+            .cloned()
+            .ok_or_else(|| blossom_base::internal_error!("the default of parameter {} is not a constant", decl.name).into())
     }
 
     /// Seeds the run: σc = PRF(ρ, "choose") from the root seed ρ (the run seed in simulation), which seeded choices
