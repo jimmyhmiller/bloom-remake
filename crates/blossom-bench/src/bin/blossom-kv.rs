@@ -78,6 +78,9 @@ struct Common {
     /// Record the history and check it for linearizability.
     #[arg(long)]
     check: bool,
+    /// A prefix for every key (default: unique per run, so earlier runs' data is never read).
+    #[arg(long)]
+    namespace: Option<String>,
 }
 
 fn workload(c: &Common) -> Result<Workload, String> {
@@ -96,6 +99,7 @@ fn workload(c: &Common) -> Result<Workload, String> {
         mix: (*p, *g, *d),
         value_size: c.value_size,
         seed: c.seed,
+        namespace: c.namespace.clone().unwrap_or_else(|| format!("r{}-", std::process::id())),
         record: c.check,
     })
 }
