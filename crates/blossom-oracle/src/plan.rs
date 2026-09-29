@@ -1,6 +1,8 @@
-//! Per-rule evaluation order: nested loops over the positive atoms, most-bound first, with every guard, binding and
-//! negation evaluated as soon as its variables are bound. The order changes only how fast a rule is evaluated,
-//! never its result.
+//! Per-rule evaluation order: nested loops over the positive atoms, most-bound first, then every other literal in
+//! body order once its variables are bound. Bindings, guards, lookups and generators run only for valuations of all
+//! the positive atoms, so a rule with no such valuation raises no runtime error (BLSR004) from an expression it would
+//! never have needed, and an earlier guard protects a later expression. The order of the atoms changes only how fast a
+//! rule is evaluated, never its result.
 
 use std::collections::BTreeSet;
 
@@ -32,7 +34,6 @@ impl RulePlan {
         let mut done = vec![false; lits.len()];
         let mut steps = Vec::with_capacity(lits.len());
         loop {
-            flush(lits, &mut done, &mut bound, &mut steps)?;
             let best = lits
                 .iter()
                 .enumerate()
@@ -53,6 +54,7 @@ impl RulePlan {
             }
             bound.extend(atom_vars(atom));
         }
+        flush(lits, &mut done, &mut bound, &mut steps)?;
         if let Some(i) = done.iter().position(|d| !d) {
             let lit = lits.get(i);
             return Err(internal_error!(
@@ -68,7 +70,7 @@ impl RulePlan {
     }
 }
 
-/// Plans every non-positive literal that is evaluable now, in body order, until none is.
+/// Plans the non-positive literals in body order: each as soon as the ones before it that it depends on are planned.
 fn flush(
     lits: &[Literal],
     done: &mut [bool],

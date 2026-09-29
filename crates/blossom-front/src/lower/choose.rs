@@ -28,10 +28,7 @@ use crate::hir::HChoose;
 
 impl Lowerer<'_> {
     fn tuple_type(&mut self, tys: Vec<TypeId>) -> Result<TypeId, InternalError> {
-        self.b
-            .types()
-            .insert(TypeDef::Tuple(tys))
-            .map_err(|e| internal_error!("interning a type: {e}"))
+        super::expr::tuple_type(&mut self.b, tys)
     }
 
     /// Lowers the choice `c` of the body drafted in `d`: its expansion, and `s$chosen(X̄, Ȳ)` added to `d`.
@@ -160,19 +157,20 @@ impl Lowerer<'_> {
         let xs = |vs: &[VarId]| -> Vec<Term> { vs.iter().take(nx).map(|v| Term::Var(*v)).collect() };
         let xy = |vs: &[VarId]| -> Vec<Term> { vs.iter().take(nx + ny).map(|v| Term::Var(*v)).collect() };
         let at = |rel: RelId, args: Vec<Term>| -> Atom { atom(rel, args, span) };
+        let unit = self.b.intern_const(blossom_value::Value::Unit).map_err(ir)?;
         let prio = |vs: &[VarId]| Expr::Call {
             f: FnRef::Builtin(BuiltinFn::Prio { site }),
             args: vec![
-                Expr::Construct {
-                    ty: xtuple,
-                    variant: None,
-                    fields: vs.iter().take(nx).map(|v| Expr::Term(Term::Var(*v))).collect(),
-                },
-                Expr::Construct {
-                    ty: ytuple,
-                    variant: None,
-                    fields: vs.iter().skip(nx).take(ny).map(|v| Expr::Term(Term::Var(*v))).collect(),
-                },
+                super::expr::tuple_expr(
+                    unit,
+                    xtuple,
+                    vs.iter().take(nx).map(|v| Expr::Term(Term::Var(*v))).collect(),
+                ),
+                super::expr::tuple_expr(
+                    unit,
+                    ytuple,
+                    vs.iter().skip(nx).take(ny).map(|v| Expr::Term(Term::Var(*v))).collect(),
+                ),
             ],
         };
         let cost_var = |vs: &[VarId]| vs.get(nx + ny).copied();

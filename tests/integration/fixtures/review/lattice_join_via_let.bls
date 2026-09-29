@@ -1,0 +1,8 @@
+//! Slice 2 review: A lattice column bound to a `let` copy of another is a join on a lattice value: BLS0304.
+
+program b6 version 1;
+input seed(k: u64, v: u64);
+table a(k: u64, v: LMax<u64>);
+table b(k: u64, v: LMax<u64>);
+feed: on seed(k, v) { emit a(k, v); emit b(k, v); }
+view eq(k) = a(k, x), let y = x, b(k, y);

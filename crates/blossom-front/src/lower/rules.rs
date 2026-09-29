@@ -660,6 +660,7 @@ impl<'h> Lowerer<'h> {
                 ConstructKind::Forall {
                     fa: RelId::from_raw(0),
                     miss: RelId::from_raw(0),
+                    closed: false,
                 },
                 surface(&module, None, span),
             )
@@ -673,8 +674,17 @@ impl<'h> Lowerer<'h> {
             false,
             span,
         )?;
+        // A closed domain: a role's members, or a static relation (facts only).
+        let closed = match domain {
+            HLit::RoleGen { .. } => true,
+            HLit::Atom(a) => matches!(
+                self.hir.rel(a.rel)?.kind,
+                HRelKind::Static | HRelKind::Members(_) | HRelKind::NodeDir
+            ),
+            _ => false,
+        };
         self.b
-            .set_construct_kind(construct, ConstructKind::Forall { fa, miss })
+            .set_construct_kind(construct, ConstructKind::Forall { fa, miss, closed })
             .map_err(ir)?;
         // fa(Ō, X̄) :- context, D, B.
         let seed = self.given(vec![Draft::new(d.scope)], context, names)?;

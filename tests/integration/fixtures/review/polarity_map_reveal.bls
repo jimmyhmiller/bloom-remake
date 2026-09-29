@@ -1,0 +1,11 @@
+//! Slice 2 review: `reveal!` of a map lattice's value on a same-tick cycle is BLS0502.
+
+program f1 version 1;
+cell m: LMap<u64, LMax<u64>>;
+start: on boot() {
+    emit m(map[1 => 5]);
+}
+view exact(k, n) = (k, v) in m, let n = reveal!(v);
+bump: while exact(k, n) where n == Some(5) {
+    emit m(map[k => 7]);
+}

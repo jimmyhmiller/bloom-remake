@@ -1,0 +1,15 @@
+//! Slice 2 review: In a row with two lattice columns either may be ⊥: `reveal!(y)` is an Option (here a type error).
+
+pub module M {
+    input seed(k: u64, v: u64);
+    cell none: LMax<u64>;
+    table a(k: u64, x: LMax<u64>, y: LMax<u64>);
+    table out(k: u64, r: u64);
+    feed: on seed(k, v) { emit a(k, v, none); }
+    look: while a(k, x, y), let r = reveal!(y) { emit out(k, r); }
+}
+spec S for M {
+    nodes N;
+    fact seed(1, 5) @ N at tick 1;
+    faults { eot: 2, eff: 1, crashes: 0, model: sync }
+}

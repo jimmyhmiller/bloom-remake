@@ -953,9 +953,10 @@ impl Remap for ConstructKind {
             },
             Self::Outer => Self::Outer,
             Self::Any => Self::Any,
-            Self::Forall { fa, miss } => Self::Forall {
+            Self::Forall { fa, miss, closed } => Self::Forall {
                 fa: fa.remap(m),
                 miss: miss.remap(m),
+                closed: *closed,
             },
             Self::DeltaRead { rel, prev } => Self::DeltaRead {
                 rel: rel.remap(m),

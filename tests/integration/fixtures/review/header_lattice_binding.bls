@@ -1,0 +1,21 @@
+//! Slice 2 review: A handler header that binds a lattice value holds valuations: a ⊥ binding still fires (empty_a(2), count_a(2, 0)).
+
+pub module M {
+    input ask(k: u64);
+    input vote(k: u64, v: u64);
+    table votes(k: u64, s: LSet<u64>);
+    table empty_a(k: u64);
+    table empty_b(k: u64);
+    table count_a(k: u64, n: LMax<u64>);
+    v: on vote(k, v) { emit votes(k, set[v]); }
+    a: on ask(k), let s = votes[k] where s.is_empty!() { emit empty_a(k); }
+    b: on ask(k) where votes[k].is_empty!() { emit empty_b(k); }
+    c: on ask(k), let s = votes[k] { emit count_a(k, s.size()); }
+}
+spec S for M {
+    nodes N;
+    fact vote(1, 10) @ N at tick 1;
+    fact ask(1) @ N at tick 1;
+    fact ask(2) @ N at tick 1;
+    faults { eot: 2, eff: 1, crashes: 0, model: sync }
+}

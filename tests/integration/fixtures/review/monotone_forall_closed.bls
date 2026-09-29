@@ -1,0 +1,10 @@
+//! Slice 2 review: A `monotone view` with `forall` over a static domain is monotone (no BLS0702).
+
+program mv2 version 1;
+static part(p: u64);
+fact part(1);
+fact part(2);
+input a(x: u64, y: u64);
+table ta(x: u64, y: u64);
+f: on a(x, y) { emit ta(x, y); }
+monotone view all_yes(x) = ta(x, _), forall part(p) { ta(x, p) };

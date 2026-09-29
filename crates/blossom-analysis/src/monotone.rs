@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use blossom_base::{Diagnostic, Diagnostics, RelId, Span, code};
-use blossom_ir::core::{HeadArg, Literal, Origin, Program, RuleKind};
+use blossom_ir::core::{ConstructKind, HeadArg, Literal, Origin, Program, RuleKind};
 
 /// BLS0702 for every `monotone` view whose region has a point of order.
 pub fn check(p: &Program) -> Diagnostics {
@@ -71,6 +71,7 @@ fn points_of_order(p: &Program, root: RelId) -> Vec<(Span, String)> {
             .map_or_else(|| format!("#{}", r.index()), |x| x.name.to_string())
     };
     let mut out = Vec::new();
+    let exact = blossom_ir::polarity::non_monotone_reads(p);
     for rule in p.rules.iter() {
         if rule.kind != RuleKind::Deductive || !region.contains(&rule.head.rel) {
             continue;
@@ -78,18 +79,19 @@ fn points_of_order(p: &Program, root: RelId) -> Vec<(Span, String)> {
         if rule.head.args.iter().any(|a| matches!(a, HeadArg::Agg(_))) {
             out.push((rule.span, format!("`{}` aggregates", rule.label.text)));
         }
-        let exact = blossom_ir::polarity::non_monotone_reads(p, rule);
         for (i, lit) in rule.body.lits.iter().enumerate() {
             match lit {
+                // The negations of a `forall` over a closed domain are its expansion, not a point of order.
+                Literal::Neg(a) if closed_forall(p, a.rel) => {}
                 Literal::Neg(a) => out.push((
                     a.span,
                     format!("`{}` reads `{}` negatively", rule.label.text, name(a.rel)),
                 )),
-                Literal::Pos(a) if exact.contains(&i) => out.push((
+                Literal::Pos(a) if exact.contains(&(rule.id, i)) => out.push((
                     a.span,
                     format!("`{}` reads the lattice `{}` exactly", rule.label.text, name(a.rel)),
                 )),
-                Literal::Lookup { rel, .. } if exact.contains(&i) => out.push((
+                Literal::Lookup { rel, .. } if exact.contains(&(rule.id, i)) => out.push((
                     rule.span,
                     format!("`{}` reads the lattice `{}` exactly", rule.label.text, name(*rel)),
                 )),
@@ -98,4 +100,11 @@ fn points_of_order(p: &Program, root: RelId) -> Vec<(Span, String)> {
         }
     }
     out
+}
+
+/// Whether `rel` is a helper of a `forall` whose domain is closed.
+fn closed_forall(p: &Program, rel: RelId) -> bool {
+    p.constructs
+        .iter()
+        .any(|c| matches!(c.kind, ConstructKind::Forall { fa, miss, closed: true } if fa == rel || miss == rel))
 }
