@@ -287,6 +287,20 @@ pub struct ChannelInfo {
     pub direction: Option<(HRoleId, HRoleId)>,
     /// The column-form destination column (`@dst`), among the declared columns.
     pub dest_col: Option<usize>,
+    /// `#[accept(…)]`: the explicit ACL (LANGUAGE §18.3); `None` keeps the inferred one.
+    pub acl: Option<HAcl>,
+}
+
+/// An explicit ACL: the sources `#[accept(…)]` narrows the inferred ACL to (LANGUAGE §18.3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HAcl {
+    /// The roles whose nodes are admitted.
+    pub roles: Vec<HRoleId>,
+    /// Whether client sessions of the channel's external source role are admitted.
+    pub external: bool,
+    /// `principal in REL`: only senders whose principal is a row of this unary relation of the receiving node.
+    pub principal_in: Option<HRelId>,
+    pub span: Span,
 }
 
 /// A rule scope's variables.
