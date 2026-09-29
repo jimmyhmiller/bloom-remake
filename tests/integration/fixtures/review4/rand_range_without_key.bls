@@ -1,0 +1,6 @@
+//! S4 review: `rand_range` without its key crashed the compiler; it is BLS0301.
+program rand_range_without_key version 1;
+role S: cluster;
+at S {
+    view v(x) = boot(), let x = rand_range(1u64, 5u64);
+}

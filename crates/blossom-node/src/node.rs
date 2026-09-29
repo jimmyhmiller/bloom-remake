@@ -279,6 +279,17 @@ impl<E: Executor> Node<E> {
         self.exec.carried_rows(rel)
     }
 
+    /// Whether this incarnation booted from durable state (`recovered()` holds in its boot tick).
+    pub fn recovered(&self) -> bool {
+        self.recovered
+    }
+
+    /// The whole carried state at the last computed tick, for inspection (O(state): tests and tools, not the hot
+    /// path).
+    pub fn carried(&self) -> Instance {
+        self.exec.carried()
+    }
+
     /// The deployment's static rows.
     pub fn statics(&self) -> &[(RelId, Row)] {
         &self.cfg.statics
@@ -447,7 +458,10 @@ impl<E: Executor> Node<E> {
             .cfg
             .halt
             .is_some_and(|h| out.observed.get(&h).is_some_and(|rows| !rows.is_empty()));
-        let wal = !delta.is_empty();
+        // A new node's first boot tick always leaves a WAL record, even an empty one: it marks the store as holding
+        // a boot that happened, so a restart knows it recovers (`recovered()`). Until that record is durable the
+        // boot did not happen: nothing of it is released, and a crash before the sync boots fresh again.
+        let wal = !delta.is_empty() || (!self.booted && !self.recovered);
         self.staged = !out.changes.is_empty();
         self.image.apply(&delta);
         self.booted = true;

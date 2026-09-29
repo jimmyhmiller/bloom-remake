@@ -163,13 +163,23 @@ at Server {
     count_vote: on vote(t, true) from v {
         emit votes(t, set[v]);
     }
-    become_leader: while candidate(t), votes(t, s), last_log(li, _) where majority(s, Server) {
+    view elected(t) = candidate(t), votes(t, s) where majority(s, Server);
+    become_leader: while elected(t), last_log(li, _) {
         next won(t);
         next leader_of(t, self);
         for p in Server where p != self {
             next match_idx(p, 0);
             next sent(p, li);
         }
+    }
+    /// A new leader starts its view of the followers afresh (Fig. 2: reinitialized after election). What an earlier
+    /// leadership recorded goes: under `choose_most` a larger stale acknowledgement would otherwise outvote the fresh
+    /// 0 and count toward commits it never acknowledged.
+    forget_match: while elected(_), match_idx(p, m) {
+        delete match_idx(p, m);
+    }
+    forget_sent: while elected(_), sent(p, s) {
+        delete sent(p, s);
     }
 
     // ---- client requests

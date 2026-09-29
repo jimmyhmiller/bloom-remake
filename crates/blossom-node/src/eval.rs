@@ -47,6 +47,8 @@ pub trait Executor: Send {
     fn step(&mut self, input: &StepInput<'_>, observe: &[RelId]) -> Result<StepOutput, EvalError>;
     /// The carried rows of `rel` (for admission's `principal in REL` on a volatile table).
     fn carried_rows(&self, rel: RelId) -> Vec<Row>;
+    /// The whole carried state, for inspection (O(state)).
+    fn carried(&self) -> Instance;
 }
 
 /// Any [`Evaluator`] as an [`Executor`]: it keeps the carried state and diffs each tick's next state against it.
@@ -99,6 +101,10 @@ impl<E: Evaluator> Executor for OracleExecutor<E> {
     fn carried_rows(&self, rel: RelId) -> Vec<Row> {
         self.carried.rows(rel).cloned().collect()
     }
+
+    fn carried(&self) -> Instance {
+        self.carried.clone()
+    }
 }
 
 impl<X: Executor + ?Sized> Executor for Box<X> {
@@ -113,6 +119,10 @@ impl<X: Executor + ?Sized> Executor for Box<X> {
     fn carried_rows(&self, rel: RelId) -> Vec<Row> {
         (**self).carried_rows(rel)
     }
+
+    fn carried(&self) -> Instance {
+        (**self).carried()
+    }
 }
 
 impl Executor for blossom_engine::Engine {
@@ -126,6 +136,10 @@ impl Executor for blossom_engine::Engine {
 
     fn carried_rows(&self, rel: RelId) -> Vec<Row> {
         blossom_engine::Engine::carried_rows(self, rel)
+    }
+
+    fn carried(&self) -> Instance {
+        self.carried_instance()
     }
 }
 

@@ -1,0 +1,24 @@
+//! S4 review: deploy-time parameters. A constant may use a parameter and a parameter's default a constant; the
+//! deployment binds the root's parameters by name and a module's by its qualified name, so the module's `LIMIT` does
+//! not take the root's binding.
+program params_in_modules version 1;
+
+module Counter {
+    param LIMIT: u64 = 1;
+    output limit(x: u64);
+    bootstrap { emit limit(LIMIT); }
+}
+
+param LIMIT: u64 = 5;
+const TWICE: u64 = LIMIT * 2;
+param BASE: u64 = TWICE + 1;
+
+import Counter as c;
+table root_limit(x: u64);
+table module_limit(x: u64);
+table derived(twice: u64, base: u64);
+bootstrap {
+    emit root_limit(LIMIT);
+    emit derived(TWICE, BASE);
+}
+while c.limit(x) { emit module_limit(x); }

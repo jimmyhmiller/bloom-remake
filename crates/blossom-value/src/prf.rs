@@ -84,6 +84,58 @@ pub fn prf(key: &Seed, domain: &str, fingerprints: &[Fingerprint], words: &[u64]
     }
     Ok(h.finish())
 }
+/// An unbiased draw in `[0, span)` (`span ≥ 1`) from the PRF: `PRF_key(domain, fingerprints…, words…, attempt)` modulo
+/// `span`, retrying with the next attempt while the draw falls in the incomplete last span. A span above 2^64 takes
+/// two words per attempt, `PRF(…, attempt, 0)` high and `PRF(…, attempt, 1)` low.
+pub fn uniform_below(
+    key: &Seed,
+    domain: &str,
+    fingerprints: &[Fingerprint],
+    words: &[u64],
+    span: u128,
+) -> Result<u128, ValueError> {
+    if span == 0 {
+        return Err(ValueError::InvalidValue("a draw from an empty range".into()));
+    }
+    let mut input: Vec<u64> = words.to_vec();
+    input.push(0);
+    let slot = input.len() - 1;
+    let mut attempt = 0u64;
+    if let Ok(small) = u64::try_from(span) {
+        let limit = u64::MAX - (u64::MAX % small);
+        loop {
+            if let Some(w) = input.get_mut(slot) {
+                *w = attempt;
+            }
+            let x = prf(key, domain, fingerprints, &input)?;
+            if x < limit {
+                return Ok(u128::from(x % small));
+            }
+            attempt += 1;
+        }
+    }
+    let limit = u128::MAX - (u128::MAX % span);
+    input.push(0);
+    loop {
+        if let Some(w) = input.get_mut(slot) {
+            *w = attempt;
+        }
+        if let Some(w) = input.get_mut(slot + 1) {
+            *w = 0;
+        }
+        let hi = prf(key, domain, fingerprints, &input)?;
+        if let Some(w) = input.get_mut(slot + 1) {
+            *w = 1;
+        }
+        let lo = prf(key, domain, fingerprints, &input)?;
+        let x = (u128::from(hi) << 64) | u128::from(lo);
+        if x < limit {
+            return Ok(x % span);
+        }
+        attempt += 1;
+    }
+}
+
 fn derive_key(root: &Seed, domain: &str, identity: &[u8]) -> Result<Seed, ValueError> {
     // Length framing prevents distinct identities and domains from aliasing.
     let id_hash = xxhash_rust::xxh3::xxh3_64(identity);
@@ -210,5 +262,43 @@ mod m2_tests {
         assert_eq!(first, replay.next_u64().unwrap());
         assert_eq!(second, replay.next_u64().unwrap());
         assert_eq!(a.position(), 2);
+    }
+}
+
+#[cfg(test)]
+mod uniform_tests {
+    use super::*;
+
+    #[test]
+    fn a_small_span_draws_one_word_per_attempt() {
+        let key = Seed([5; 16]);
+        for span in [1u64, 2, 3, 7, 1000, u64::MAX] {
+            let got = uniform_below(&key, "rand", &[Fingerprint(9)], &[1, 2], u128::from(span)).unwrap();
+            // The first attempt, unless it falls in the incomplete last span.
+            let limit = u64::MAX - (u64::MAX % span);
+            let mut attempt = 0;
+            let want = loop {
+                let x = prf(&key, "rand", &[Fingerprint(9)], &[1, 2, attempt]).unwrap();
+                if x < limit {
+                    break x % span;
+                }
+                attempt += 1;
+            };
+            assert_eq!(got, u128::from(want), "span {span}");
+        }
+    }
+
+    #[test]
+    fn a_wide_span_stays_in_range_and_uses_the_high_bits() {
+        let key = Seed([6; 16]);
+        let span = u128::MAX;
+        let mut high = false;
+        for tick in 0..64u64 {
+            let x = uniform_below(&key, "rand", &[], &[tick], span).unwrap();
+            assert!(x < span);
+            high |= x > u128::from(u64::MAX);
+        }
+        assert!(high, "no draw above 2^64 in 64 tries");
+        assert!(uniform_below(&key, "rand", &[], &[], 0).is_err());
     }
 }

@@ -1,0 +1,10 @@
+//! S4 review: `rand_range` over ranges wider than 2^64 (and `u128` bounds above `i128::MAX`) was an internal error.
+program rand_range_wide version 1;
+role S: cluster;
+at S {
+    view signed(x) = boot(), let x = rand_range(-170141183460469231731687303715884105728i128,
+                                                170141183460469231731687303715884105727i128, 1u64);
+    view unsigned(x) = boot(), let x = rand_range(340282366920938463463374607431768211000u128,
+                                                  340282366920938463463374607431768211455u128, 2u64);
+    view full64(x) = boot(), let x = rand_range(-9223372036854775808i64, 9223372036854775807i64, 3u64);
+}

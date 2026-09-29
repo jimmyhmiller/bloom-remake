@@ -1,0 +1,9 @@
+//! S4 review: an `LSet<Node<S>>` column written with `set[self]` crashed the compiler unless the literal's type was
+//! interned by something else (e03 and e11 happened to).
+program lset_of_self version 1;
+role S: cluster;
+role C: cluster;
+at S {
+    table votes(t: u64, voters: LSet<Node<S>>);
+    bootstrap { emit votes(1, set[self]); }
+}

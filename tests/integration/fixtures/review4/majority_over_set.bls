@@ -1,0 +1,8 @@
+//! S4 review: `majority` over a plain `Set` crashed the compiler; a quorum counts a set-like lattice (BLS0300).
+program majority_over_set version 1;
+role S: cluster;
+at S {
+    table votes(voters: Set<Node<S>>);
+    bootstrap { emit votes(set[self]); }
+    view m(b) = votes(s), let b = majority(s, S);
+}

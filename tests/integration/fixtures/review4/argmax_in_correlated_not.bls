@@ -1,0 +1,19 @@
+//! S4 review: `argmax!` inside a correlated `not { … }` picks per valuation of the outer variables (here per group
+//! `g`), not over every row.
+program argmax_in_correlated_not version 1;
+
+table group(g: u64);
+table item(g: u64, c: u64, x: u64);
+table quiet(g: u64);
+bootstrap {
+    emit group(1);
+    emit group(2);
+    emit item(1, 9, 10);
+    emit item(1, 3, 99);
+    emit item(2, 5, 50);
+    emit item(2, 1, 7);
+}
+/// A group is quiet when its highest-`c` item has `x` below 20: group 1 (c 9, x 10), not group 2 (c 5, x 50). An
+/// argmax over every item would pick (1, 9, 10) for both groups and call group 2 quiet too.
+view is_quiet(g) = group(g), not { item(g, c, x), argmax!(c) where x >= 20 };
+while is_quiet(g) { emit quiet(g); }

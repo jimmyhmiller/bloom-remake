@@ -649,50 +649,51 @@ pub(crate) fn fixpoint_code() -> &'static str {
 /// `rand_range(lo, hi, k…)` (LANGUAGE §15.1): `lo + PRF_σn("rand", fp(k̄), incarnation, tick, attempt) mod span`,
 /// rejecting draws from the incomplete last span so the result is unbiased.
 fn rand_range(scope: &Scope<'_>, lo: &Value, hi: &Value, key: &[Value]) -> Result<Value, ExprError> {
-    let (l, h, dur) = match (lo, hi) {
-        (Value::Duration(l), Value::Duration(h)) => (i128::from(l.as_nanos()), i128::from(h.as_nanos()), None),
-        (Value::Int(l), Value::Int(h)) => {
-            let (Some(a), Some(b)) = (l.to_i128(), h.to_i128()) else {
-                return Err(ExprError::Oracle(internal_error!("`rand_range` bounds out of range").into()));
-            };
-            (a, b, Some(*l))
-        }
-        (a, b) => return Err(ExprError::Oracle(internal_error!("`rand_range` over {a:?} and {b:?}").into())),
-    };
-    if h <= l {
-        return Err(ExprError::Arithmetic(format!("rand_range: the range [{l}, {h}) is empty")));
-    }
-    let span = u128::try_from(h - l).map_err(|_| ExprError::Oracle(internal_error!("negative span").into()))?;
     let seed = scope.oracle.node_seed(scope.node).map_err(ExprError::Oracle)?;
     let fp = blossom_value::fp::fingerprint_row(key)
         .map_err(|e| ExprError::Oracle(internal_error!("fingerprinting a rand key: {e}").into()))?;
-    let incarnation = scope.incarnation;
-    let offset = if span > u128::from(u64::MAX) {
-        return Err(ExprError::Oracle(internal_error!("`rand_range` spans more than 2^64 values").into()));
-    } else {
-        let span = span as u64;
-        let limit = u64::MAX - (u64::MAX % span);
-        let mut attempt = 0u64;
-        loop {
-            let x = blossom_value::prf::prf(&seed, "rand", &[fp], &[incarnation, scope.tick.0, attempt])
-                .map_err(|e| ExprError::Oracle(internal_error!("rand: {e}").into()))?;
-            if x < limit {
-                break x % span;
-            }
-            attempt += 1;
-        }
+    let draw = |span: u128| {
+        blossom_value::prf::uniform_below(&seed, "rand", &[fp], &[scope.incarnation, scope.tick.0], span)
+            .map_err(|e| ExprError::Oracle(internal_error!("rand: {e}").into()))
     };
-    let v = l + i128::from(offset);
-    match dur {
-        None => Ok(Value::Duration(blossom_value::time::Duration::from_nanos(
-            i64::try_from(v).map_err(|_| ExprError::Oracle(internal_error!("duration out of range").into()))?,
-        ))),
-        Some(ity) => {
-            let t = int_ty_of(&ity);
-            IntValue::from_i128(t, v)
-                .map(Value::Int)
-                .ok_or_else(|| ExprError::Oracle(internal_error!("rand_range result out of range").into()))
+    let empty = |l: &dyn std::fmt::Display, h: &dyn std::fmt::Display| {
+        ExprError::Arithmetic(format!("rand_range: the range [{l}, {h}) is empty"))
+    };
+    match (lo, hi) {
+        // `u128` bounds may exceed `i128`: they draw in `u128`.
+        (Value::Int(IntValue::U128(l)), Value::Int(IntValue::U128(h))) => {
+            if h <= l {
+                return Err(empty(l, h));
+            }
+            Ok(Value::Int(IntValue::U128(l + draw(h - l)?)))
         }
+        (Value::Duration(_), Value::Duration(_)) | (Value::Int(_), Value::Int(_)) => {
+            let bound = |v: &Value| match v {
+                Value::Duration(d) => Some(i128::from(d.as_nanos())),
+                Value::Int(i) => i.to_i128(),
+                _ => None,
+            };
+            let (Some(l), Some(h)) = (bound(lo), bound(hi)) else {
+                return Err(ExprError::Oracle(internal_error!("`rand_range` over {lo:?} and {hi:?}").into()));
+            };
+            if h <= l {
+                return Err(empty(&l, &h));
+            }
+            // The span of an `i128` range may exceed `i128::MAX`; in two's complement it is exact as a `u128`, and
+            // so is the result.
+            let span = h.cast_unsigned().wrapping_sub(l.cast_unsigned());
+            let v = l.cast_unsigned().wrapping_add(draw(span)?).cast_signed();
+            match lo {
+                Value::Duration(_) => Ok(Value::Duration(blossom_value::time::Duration::from_nanos(
+                    i64::try_from(v).map_err(|_| ExprError::Oracle(internal_error!("duration out of range").into()))?,
+                ))),
+                Value::Int(i) => IntValue::from_i128(int_ty_of(i), v)
+                    .map(Value::Int)
+                    .ok_or_else(|| ExprError::Oracle(internal_error!("rand_range result out of range").into())),
+                _ => Err(ExprError::Oracle(internal_error!("`rand_range` over {lo:?}").into())),
+            }
+        }
+        (a, b) => Err(ExprError::Oracle(internal_error!("`rand_range` over {a:?} and {b:?}").into())),
     }
 }
 

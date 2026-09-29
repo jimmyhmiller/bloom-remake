@@ -1153,20 +1153,13 @@ fn fold(p: &Program, rule: &Rule, col: usize, func: &AggFunc, set: &BTreeMap<Vec
                 other => return Err(bug(format!("a count in a column of type {other:?}"))),
             }))
         }
-        AggFunc::Min => set
-            .keys()
-            .map(single)
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .min()
-            .ok_or_else(|| bug("min over an empty group".into())),
+        // The tuples are single values, kept in value order: the least and greatest are the ends.
+        AggFunc::Min => set.keys().next().map(single).ok_or_else(|| bug("min over an empty group".into()))?,
         AggFunc::Max => set
             .keys()
+            .next_back()
             .map(single)
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .max()
-            .ok_or_else(|| bug("max over an empty group".into())),
+            .ok_or_else(|| bug("max over an empty group".into()))?,
         AggFunc::Sum => {
             // The first component of each distinct tuple; the rest is the valuation it belongs to.
             let vals = set
