@@ -888,8 +888,13 @@ impl Engine {
         Ok(())
     }
 
-    /// A recursive stratum: re-evaluated to its fixpoint when anything it reads changed (or a rule reads a
-    /// time-varying scalar); its change is the difference from its last fixpoint.
+    /// A recursive stratum: re-evaluated to its fixpoint when anything it reads changed, when its own relations'
+    /// support from outside the stratum changed (the carried state, inputs, facts), or when a rule reads a
+    /// time-varying scalar; its change is the difference from its last fixpoint.
+    ///
+    /// The support from outside matters even where the present rows did not change: the naive fixpoint starts from
+    /// it, and a rule that reads a lattice cell into a set column keeps a row for every value the cell passes through
+    /// on the way to the fixpoint (a cell that starts at its final value passes through none).
     fn recursive_stratum(&mut self, p: &Program, input: &StepInput<'_>, s: &Stratum) -> Result<(), EvalError> {
         let tick = input.tick;
         let ids: Vec<RuleId> = s.aggregates.iter().chain(&s.rules).copied().collect();
@@ -898,6 +903,7 @@ impl Engine {
             let plan = self.plans.get(id).ok_or_else(|| internal_error!("rule {id:?} has no plan"))?;
             let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
             dirty |= plan.regime == Regime::Recompute
+                || self.stores.get(&plan.head).is_some_and(|st| st.touched)
                 || rule
                     .body
                     .lits

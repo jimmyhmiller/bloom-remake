@@ -178,3 +178,79 @@ impl Evaluator for EngineEvaluator {
         engine.tick_full(input)
     }
 }
+
+/// Which evaluator a node runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Backend {
+    /// The incremental engine: a tick costs in proportion to what it changes.
+    #[default]
+    Engine,
+    /// The reference oracle behind [`OracleExecutor`]: a tick re-evaluates the whole state.
+    Oracle,
+}
+
+impl std::str::FromStr for Backend {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Backend, String> {
+        match s {
+            "engine" => Ok(Backend::Engine),
+            "oracle" => Ok(Backend::Oracle),
+            other => Err(format!("unknown evaluator `{other}` (engine or oracle)")),
+        }
+    }
+}
+
+/// Makes the executors of one deployment's nodes: the program placed on its nodes (roles, stable names) and seeded.
+pub struct Executors {
+    backend: Backend,
+    program: blossom_ir::ValidatedProgram,
+    oracle: std::sync::Arc<Oracle>,
+    engine: blossom_engine::EngineConfig,
+}
+
+impl Executors {
+    pub fn new(
+        backend: Backend,
+        program: blossom_ir::ValidatedProgram,
+        roles: Vec<Option<blossom_base::RoleId>>,
+        names: Vec<std::sync::Arc<str>>,
+        seed: blossom_value::Seed,
+    ) -> Result<Executors, EvalError> {
+        let oracle = std::sync::Arc::new(
+            Oracle::new(program.clone())?
+                .with_roles(roles.clone())
+                .with_seed(seed)?
+                .with_node_names(names.clone())?,
+        );
+        let engine = blossom_engine::EngineConfig {
+            roles,
+            node_names: names,
+            seed: Some(seed),
+            ..blossom_engine::EngineConfig::default()
+        };
+        Ok(Executors {
+            backend,
+            program,
+            oracle,
+            engine,
+        })
+    }
+
+    pub fn backend(&self) -> Backend {
+        self.backend
+    }
+
+    /// The oracle for the deployment (its static facts serve admission whichever backend runs).
+    pub fn oracle(&self) -> &std::sync::Arc<Oracle> {
+        &self.oracle
+    }
+
+    /// A fresh executor for node `node`; the node resets it to its recovered state at boot.
+    pub fn make(&self, node: blossom_value::time::NodeId) -> Result<Box<dyn Executor>, EvalError> {
+        Ok(match self.backend {
+            Backend::Engine => Box::new(blossom_engine::Engine::new(self.program.clone(), node, self.engine.clone())?),
+            Backend::Oracle => Box::new(OracleExecutor::new(self.oracle.clone())),
+        })
+    }
+}

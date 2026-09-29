@@ -23,7 +23,7 @@ use blossom_store::StoreError;
 use blossom_value::time::Tick;
 use blossom_wire::codec::WireError;
 
-pub use eval::{EngineEvaluator, Evaluator, Executor, OracleExecutor};
+pub use eval::{Backend, EngineEvaluator, Evaluator, Executor, Executors, OracleExecutor};
 pub use node::{Boot, Node, NodeConfig, NodeState, ReleasedTick, TickEffects};
 
 /// Why a node operation failed.
