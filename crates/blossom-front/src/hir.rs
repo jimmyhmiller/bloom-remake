@@ -397,6 +397,8 @@ pub struct HView {
     /// Each alternative's normalized text, hashed for its rule id (LANGUAGE §4.3).
     pub texts: Vec<String>,
     pub shape: HViewShape,
+    /// `monotone view`: the view's rules must contain no point of order (ANA-020, checked by the analyses).
+    pub monotone: bool,
     pub span: Span,
 }
 
@@ -715,4 +717,6 @@ pub enum Builtin {
     Len,
     /// `R.size()`: a role's cardinality.
     RoleSize(HRoleId),
+    /// `c.contains(x)` on a `Vec` or `Set` (an element) or a `Map` (a key); the receiver first.
+    Contains,
 }

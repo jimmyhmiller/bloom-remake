@@ -511,6 +511,7 @@ impl Lowerer<'_> {
                 }
                 let f = match f {
                     Builtin::Len => ir::BuiltinFn::Len,
+                    Builtin::Contains => ir::BuiltinFn::Contains,
                     Builtin::RoleSize(r) => ir::BuiltinFn::Size {
                         role: RoleId::from_raw(r.0),
                     },

@@ -592,6 +592,7 @@ impl Remap for RelAttrs {
         Self {
             nondet: self.nondet.remap(m),
             deterministic: self.deterministic.remap(m),
+            monotone: self.monotone.remap(m),
             final_output: self.final_output.remap(m),
             atomic: self.atomic.remap(m),
             handler: self.handler.remap(m),

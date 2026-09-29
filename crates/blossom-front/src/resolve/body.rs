@@ -1978,9 +1978,6 @@ impl<'t> Resolver<'t, '_> {
 
     /// A view's alternatives and columns (LANGUAGE §8.3).
     pub(crate) fn view(&mut self, s: ScopeIdx, v: &'t ast::ViewDecl, rel: HRelId) {
-        if v.monotone {
-            self.unsupported("ANA-020", "`monotone` assertions", v.span);
-        }
         let placement = self.rel_of(rel).role;
         // Annotated columns are declared; the others are inferred (LANGUAGE §5.6).
         for (i, c) in v.cols.iter().enumerate() {
@@ -2120,6 +2117,7 @@ impl<'t> Resolver<'t, '_> {
             alternatives,
             texts,
             shape,
+            monotone: v.monotone,
             span: v.span,
         });
     }

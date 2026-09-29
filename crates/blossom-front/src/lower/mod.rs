@@ -142,6 +142,7 @@ pub(crate) fn attrs() -> RelAttrs {
     RelAttrs {
         nondet: None,
         deterministic: false,
+        monotone: false,
         final_output: false,
         atomic: false,
         handler: None,
@@ -404,7 +405,10 @@ impl Lowerer<'_> {
                 } else {
                     Origin::User(r.span)
                 },
-                attrs: attrs(),
+                attrs: RelAttrs {
+                    monotone: self.hir.views.iter().any(|v| v.rel == h && v.monotone),
+                    ..attrs()
+                },
                 span: r.span,
             })
             .map_err(ir)?;

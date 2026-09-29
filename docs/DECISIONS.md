@@ -198,5 +198,15 @@ question tool, the user chose:
   within a growing stratum) are dropped; LDFI over lattice channels reports BLS0908 (LANG-137).
 - **IR amendments (additive, 3):** time arithmetic in the validator (`Instant - Instant: Duration`,
   `Instant ± Duration: Instant`), and a direction channel to an external role has a `Session` destination.
+- **The S2 gate** is `xtask corpus --gate` under `docs/plan/MILESTONE = S2`: every `core/` and `async/` oracle or
+  compile case whose features all lie in `S2_SUBSET` (xtask/src/cmd/corpus.rs; analysis, test and verification ids
+  are other backends' concerns and do not exclude a case) must pass.
+- **`monotone view`** (ANA-020) is checked by `blossom_analysis::monotone` (BLS0702) over the view's rules and its
+  generated helpers, with the IR's `RelAttrs::monotone` carrying the assertion (additive). `monotone on`/`while`,
+  modules and choreographies still report BLS0908, as does ANA-141's confluence certificate.
+- **The simulated node directory:** `node_dir(node, addr, principal, role)` gives each node its deployment name as
+  address and principal.
+- **`$self` in the IR** is typed `Node<R>` in a rule placed at role R (when that type exists), and the validator
+  types collection literals and `++` by their widest operand, so role-refined values mix with plain `Node`s.
 - **Code registry:** `BLS0106` may also be constructed by `blossom-front` (a clause against the relation's kind is a
   semantic check; ARCHITECTURE §13.1 gives the parser the syntactic part of BLS0100–0110).

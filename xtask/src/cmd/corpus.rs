@@ -201,6 +201,24 @@ pub fn run(args: Args) -> ExitCode {
 }
 
 /// Whether a backend of a case belongs to the current slice's gate (docs/design/SLICES.md).
+/// Slice 2's Blossom subset (docs/design/SLICES.md, slice 2; docs/plan/notes/S2.md): the FEATURES ids the `.bls`
+/// frontend and the oracle implement. A `core/` or `async/` case whose language features all lie here is in the gate.
+const S2_SUBSET: &[&str] = &[
+    // Programs, declarations, handlers, views, statements, bodies, expressions, aggregates, facts and bootstrap.
+    "LANG-020", "LANG-023", "LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-045", "LANG-046", "LANG-047",
+    "LANG-052", "LANG-060", "LANG-061", "LANG-062", "LANG-063", "LANG-064", "LANG-065", "LANG-066", "LANG-067",
+    "LANG-069", "LANG-080", "LANG-081", "LANG-082", "LANG-083", "LANG-084", "LANG-085", "LANG-086", "LANG-088",
+    "LANG-089", "LANG-090", "LANG-100", "LANG-101", "LANG-190",
+    // Lattices (the core built-ins), locations and roles, timers, invariants, `.ded` includes, the directory, senders.
+    "LANG-120", "LANG-121", "LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-126", "LANG-127", "LANG-128",
+    "LANG-280", "LANG-150", "LANG-152", "LANG-153", "LANG-172", "LANG-200", "LANG-220", "LANG-240", "LANG-241",
+    // Semantics the oracle realizes.
+    "SEM-003", "SEM-004", "SEM-005", "SEM-006", "SEM-007", "SEM-008", "SEM-012", "SEM-013", "SEM-020", "SEM-021",
+    "SEM-022", "SEM-031", "SEM-050", "SEM-060", "SEM-061", "SEM-101", "SEM-103",
+    // The engine behaviors those cases pin (persistence, fixpoints, lattice evaluation, keys).
+    "ENG-003", "ENG-004", "ENG-041", "ENG-042", "ENG-043", "ENG-062", "ENG-067",
+];
+
 fn gate_scope(milestone: &str, area: &str, case: &str, features: &[String], backend: &str) -> bool {
     // The P1 search reductions behind Molly's published run counts (single-shot mode, vacuity pruning, symmetry)
     // are not built yet; cases that list them wait for them (SLICES.md, slice 1, "Stretch").
@@ -214,6 +232,18 @@ fn gate_scope(milestone: &str, area: &str, case: &str, features: &[String], back
                 && (backend == "oracle" || backend == "ldfi")
                 && !case.starts_with("BENCH-133d")
                 && !needs_p1_reductions
+        }
+        // Analyses (ANA) and verification tooling (TEST, VER) are other backends' concerns: the oracle case runs
+        // without them.
+        "S2" => {
+            (area == "core" || area == "async")
+                && (backend == "oracle" || backend == "compile")
+                && features.iter().all(|f| {
+                    f.starts_with("ANA-")
+                        || f.starts_with("TEST-")
+                        || f.starts_with("VER-")
+                        || S2_SUBSET.contains(&f.as_str())
+                })
         }
         _ => false,
     }
