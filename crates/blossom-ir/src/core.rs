@@ -563,43 +563,89 @@ pub struct SurfaceRef {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConstructKind {
     // Provenance-only groupings: never replaced; the planner may fuse them (§3.7).
-    HandlerHeader { when: RelId },
-    Block { rel: RelId },
-    ViewAlternatives { view: RelId },
-    Projection { rel: RelId, proj: RelId }, // `r$p1` for existential wildcards (§9.3)
-    NotExists { helper: RelId },
+    HandlerHeader {
+        when: RelId,
+    },
+    Block {
+        rel: RelId,
+    },
+    ViewAlternatives {
+        view: RelId,
+    },
+    Projection {
+        rel: RelId,
+        proj: RelId,
+    }, // `r$p1` for existential wildcards (§9.3)
+    NotExists {
+        helper: RelId,
+    },
     Outer,
     Any,
-    Forall { fa: RelId, miss: RelId },
-    DeltaRead { rel: RelId, prev: RelId },
+    Forall {
+        fa: RelId,
+        miss: RelId,
+    },
+    DeltaRead {
+        rel: RelId,
+        prev: RelId,
+    },
     Interpose,
     Localize,
-    Invariant { id: InvariantId },
+    /// A Molly `.ded` relation's Dedalus meaning (LANGUAGE §21.1): the generated channel that carries its `@async`
+    /// derivations or the generated input that carries its `@k` facts, with the rule that feeds it into `rel`.
+    DedRelation {
+        rel: RelId,
+    },
+    Invariant {
+        id: InvariantId,
+    },
     SpecOracle,
-    Service { id: ServiceId },
+    Service {
+        id: ServiceId,
+    },
     // Constructs with a native implementation (ARCH-02). Each spec carries exactly what the native operator
     // needs; the expansion carries the meaning.
-    Persist { rel: RelId, del: Option<RelId> },        // ENG-003
-    Identity { rel: RelId },                           // persistent lattice (SEM-104)
-    Upsert { rel: RelId, staging: RelId, del: RelId }, // SEM-051 keyed staging (LANGUAGE §8.2)
-    Resolve(ResolveSpec),                              // LANG-117: relation or statement level
-    Choose(ChooseSpec),                                // LANG-108/114/115, ENG-068
-    MultiChoose(MultiChooseSpec),                      // LANG-116, ENG-075
-    Index(IndexSpec),                                  // LANG-097, ENG-072; also top!/limit!/percentile
-    Seq(SeqSpec),                                      // LANG-098
-    FoldOrdered(FoldSpec),                             // LANG-110, ENG-073; reduce!, non-C/A UDAs
+    Persist {
+        rel: RelId,
+        del: Option<RelId>,
+    }, // ENG-003
+    Identity {
+        rel: RelId,
+    }, // persistent lattice (SEM-104)
+    Upsert {
+        rel: RelId,
+        staging: RelId,
+        del: RelId,
+    }, // SEM-051 keyed staging (LANGUAGE §8.2)
+    Resolve(ResolveSpec),         // LANG-117: relation or statement level
+    Choose(ChooseSpec),           // LANG-108/114/115, ENG-068
+    MultiChoose(MultiChooseSpec), // LANG-116, ENG-075
+    Index(IndexSpec),             // LANG-097, ENG-072; also top!/limit!/percentile
+    Seq(SeqSpec),                 // LANG-098
+    FoldOrdered(FoldSpec),        // LANG-110, ENG-073; reduce!, non-C/A UDAs
     ArgExt(ArgExtSpec),
     AggDefault(AggDefaultSpec), // LANG-103/106
     SoftTable(SoftSpec),        // LANG-048, CR-17
-    Sealed { rel: RelId, sealed: RelId },
-    Range { rel: RelId, col: ColIdx },       // LANG-049/050
-    LogicalTimer { rel: RelId, every: u64 }, // LANGUAGE §15.2
-    Seal(SealSpec),                          // LANGUAGE §14.4: producer log, votes, digests
-    Snapshot(SnapshotSpec),                  // LANG-139
-    Wrapped(WrapSpec),                       // LANG-158, DIST-015/016
-    LatticeFold { cell: RelId },             // `lset{…}`, `lmax{…}` in expressions
-    Finality(FinalitySpec),                  // ANA-121: M⁻/M⁺ bounds programs (P1)
-    Quorum(QuorumSpec),                      // spec `quorum v in R { … }` (VER-008)
+    Sealed {
+        rel: RelId,
+        sealed: RelId,
+    },
+    Range {
+        rel: RelId,
+        col: ColIdx,
+    }, // LANG-049/050
+    LogicalTimer {
+        rel: RelId,
+        every: u64,
+    }, // LANGUAGE §15.2
+    Seal(SealSpec),         // LANGUAGE §14.4: producer log, votes, digests
+    Snapshot(SnapshotSpec), // LANG-139
+    Wrapped(WrapSpec),      // LANG-158, DIST-015/016
+    LatticeFold {
+        cell: RelId,
+    }, // `lset{…}`, `lmax{…}` in expressions
+    Finality(FinalitySpec), // ANA-121: M⁻/M⁺ bounds programs (P1)
+    Quorum(QuorumSpec),     // spec `quorum v in R { … }` (VER-008)
 }
 /// ChooseSpec data in the Dedalus core IR.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1087,6 +1133,7 @@ impl ConstructKind {
             Self::DeltaRead { .. } => "DeltaRead",
             Self::Interpose => "Interpose",
             Self::Localize => "Localize",
+            Self::DedRelation { .. } => "DedRelation",
             Self::Invariant { .. } => "Invariant",
             Self::SpecOracle => "SpecOracle",
             Self::Service { .. } => "Service",

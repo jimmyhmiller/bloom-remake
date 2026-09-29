@@ -11,6 +11,7 @@ blossom-base.workspace = true
 blossom-value.workspace = true
 blossom-lattice.workspace = true
 blossom-ir.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

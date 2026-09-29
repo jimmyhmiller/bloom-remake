@@ -28,9 +28,7 @@ ticks = 8
 stop = "ticks"
 
 [backend.oracle]
-status = "unimplemented"
-unimplemented = ["LANG-220", "LANG-005", "LANG-065", "LANG-060", "LANG-061", "LANG-062", "SEM-003", "SEM-004", "LANG-100", "LANG-101", "SEM-020"]
-until = "M5"
+status = "pass"
 
 # b's ballot 5 dominates a's 4 at every acceptor at tick 2, so only b collects promises
 [[expect]]

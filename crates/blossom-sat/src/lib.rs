@@ -158,6 +158,19 @@ pub fn select_backend(name: &str) -> Result<Box<dyn SatSolver>, SatError> {
                 })
             }
         }
+        "cadical-plain" => {
+            #[cfg(feature = "sat-cadical")]
+            {
+                Ok(Box::new(backends::CadicalSolver::plain()?))
+            }
+            #[cfg(not(feature = "sat-cadical"))]
+            {
+                Err(SatError::BackendUnavailable {
+                    backend: name.into(),
+                    feature: "sat-cadical",
+                })
+            }
+        }
         "batsat" => {
             #[cfg(feature = "sat-batsat")]
             {

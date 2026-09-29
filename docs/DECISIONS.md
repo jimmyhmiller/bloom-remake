@@ -126,3 +126,13 @@ question tool, the user chose:
   specification.
 - **Slice 1 is Molly parity**: the `.ded` frontend, the oracle, a synchronous-round simulator, provenance and LDFI,
   gated on the Molly corpus verdicts (BENCH-130–134, BENCH-137).
+
+## Slice 1 amendments (made by Claude, 2026-09-28; details in docs/plan/notes/S1.md)
+
+- `xtask/layers.toml`: `blossom-front` → `blossom-artifact` (the `.ded` frontend produces a `DedArtifact`) and
+  `blossom-sim` → `blossom-oracle` (until the engine exists the oracle is the simulator's evaluator).
+- `blossom-ir` (additive): `ConstructKind::DedRelation`, Tier C `FiringRecord`/`PosRead`/`NegRead` in `obs`, and
+  `AggFunc::Count` may target any integer column (Molly's `count<X>` is an `i64`).
+- LDFI decides by the seeded lineage-driven search with tuple-level negative support, and hands over to exhaustive
+  certification when it spends its run budget or its lineage was incomplete; the report names the deciding search.
+- The S1 gate excludes BENCH-133d (Flux 22/21/1), which no search here or in the reference checker decides.
