@@ -42,7 +42,7 @@ pub use strata::Stratum;
 pub type Row = Arc<[Value]>;
 
 /// Relation contents: every non-empty relation's rows.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Instance {
     pub rels: BTreeMap<RelId, BTreeSet<Row>>,
 }
@@ -70,7 +70,7 @@ impl Instance {
 }
 
 /// A channel tuple delivered to the node this tick. Column 0 of `row` is the destination, the node itself.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Delivery {
     pub rel: RelId,
     pub from: NodeId,

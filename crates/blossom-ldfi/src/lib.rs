@@ -14,6 +14,7 @@
 //!
 //! When no hypothesis is left, the program has no counterexample within the failure spec.
 
+pub mod certify;
 pub mod driver;
 pub mod faults;
 pub mod hazard;
@@ -21,7 +22,7 @@ pub mod lineage;
 pub mod reach;
 pub mod report;
 
-pub use driver::{LdfiConfig, LdfiReport, SearchStats, Verdict, falsifiers, run};
+pub use driver::{LdfiConfig, LdfiReport, Method, SearchStats, Verdict, falsifiers, run};
 pub use faults::FailureSpec;
 pub use hazard::NegSupport;
 

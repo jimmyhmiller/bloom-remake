@@ -83,28 +83,50 @@ impl<'a> DedSim<'a> {
         )
     }
 
-    /// Evaluates the outcome spec on `run` at `eot`. Fails with BLS0900's meaning when the program has no spec.
+    /// Evaluates the outcome spec on `run` at `eot`. Fails when the program has no spec (CR-30).
     pub fn outcome(&self, run: &SyncRun, eot: Tick, capture: bool) -> Result<Outcome, SimError> {
+        let instances = |tick: Tick| -> Option<Vec<&Instance>> {
+            (0..self.artifact.nodes.len())
+                .map(|n| {
+                    let node = NodeId(u32::try_from(n).ok()?);
+                    run.node_tick(tick, node).map(|nt| &nt.instance)
+                })
+                .collect()
+        };
+        self.outcome_of(eot, &instances, &run.faults.crashes, capture)
+    }
+
+    /// Evaluates the outcome spec at `eot` over every node's instance at a tick, as `instances` gives them (one per
+    /// node, in node order; `None` for a tick it does not have), with the crashes of the run.
+    pub fn outcome_of<'i>(
+        &self,
+        eot: Tick,
+        instances: &dyn Fn(Tick) -> Option<Vec<&'i Instance>>,
+        crashes: &std::collections::BTreeMap<NodeId, Tick>,
+        capture: bool,
+    ) -> Result<Outcome, SimError> {
         let (Some(spec), Some(oracle)) = (&self.artifact.spec, &self.spec) else {
             return Err(internal_error!("outcome requested for a program without `pre` and `post` (CR-30)").into());
         };
         let mut events: Vec<(RelId, Row)> = Vec::new();
         for feed in &spec.feeds {
             match *feed {
-                SpecFeed::AtEot { spec: rel, rel: ded } => self.snapshot(run, eot, rel, ded, &mut events)?,
+                SpecFeed::AtEot { spec: rel, rel: ded } => {
+                    self.snapshot(instances(eot).as_deref(), rel, ded, &mut events)?;
+                }
                 SpecFeed::AtTick {
                     spec: rel,
                     rel: ded,
                     tick,
                 } => {
                     if tick <= eot {
-                        self.snapshot(run, tick, rel, ded, &mut events)?;
+                        self.snapshot(instances(tick).as_deref(), rel, ded, &mut events)?;
                     }
                 }
                 SpecFeed::Crash { spec: rel } => {
                     for observer in 0..self.artifact.nodes.len() {
                         let observer = node_id(observer)?;
-                        for (node, at) in &run.faults.crashes {
+                        for (node, at) in crashes {
                             let time = i64::try_from(at.0).map_err(|_| internal_error!("crash tick overflow"))?;
                             events.push((
                                 rel,
@@ -143,11 +165,38 @@ impl<'a> DedSim<'a> {
         })
     }
 
-    /// Every node's tuples of `ded`'s protocol relation at `tick`, prefixed with the node, as rows of `rel`.
+    /// Runs one node's tick directly (for searches that step every node themselves): its input events at `tick`
+    /// come from the program's facts.
+    pub fn step(
+        &self,
+        node: NodeId,
+        tick: Tick,
+        carried: &Instance,
+        delivered: &[blossom_oracle::Delivery],
+    ) -> Result<blossom_oracle::TickOutput, SimError> {
+        let events: Vec<(RelId, Row)> = self
+            .artifact
+            .inputs
+            .iter()
+            .filter(|f| f.node == node && f.tick == tick)
+            .map(|f| (f.rel, Arc::from(f.row.clone())))
+            .collect();
+        self.protocol
+            .tick(&TickInput {
+                node,
+                tick,
+                carried,
+                events: &events,
+                delivered,
+                capture: false,
+            })
+            .map_err(|error| SimError::Node { node, tick, error })
+    }
+
+    /// Every node's tuples of `ded`'s protocol relation, prefixed with the node, as rows of `rel`.
     fn snapshot(
         &self,
-        run: &SyncRun,
-        tick: Tick,
+        instances: Option<&[&Instance]>,
         rel: RelId,
         ded: blossom_artifact::ded::DedRelIdx,
         out: &mut Vec<(RelId, Row)>,
@@ -157,12 +206,10 @@ impl<'a> DedSim<'a> {
             .rel(ded)
             .and_then(|r| r.protocol)
             .ok_or_else(|| internal_error!("a spec feed names a relation without a protocol relation"))?;
-        for n in 0..self.artifact.nodes.len() {
+        let Some(instances) = instances else { return Ok(()) };
+        for (n, instance) in instances.iter().enumerate() {
             let node = node_id(n)?;
-            let Some(nt) = run.node_tick(tick, node) else {
-                continue;
-            };
-            for row in nt.instance.rows(protocol) {
+            for row in instance.rows(protocol) {
                 let mut full = Vec::with_capacity(row.len() + 1);
                 full.push(Value::Node(node));
                 full.extend(row.iter().cloned());
@@ -170,6 +217,19 @@ impl<'a> DedSim<'a> {
             }
         }
         Ok(())
+    }
+
+    /// The ticks whose instances the spec reads besides EOT (its `p(…)@k` atoms).
+    pub fn snapshot_ticks(&self) -> BTreeSet<Tick> {
+        self.artifact
+            .spec
+            .iter()
+            .flat_map(|s| s.feeds.iter())
+            .filter_map(|f| match f {
+                SpecFeed::AtTick { tick, .. } => Some(*tick),
+                _ => None,
+            })
+            .collect()
     }
 }
 
