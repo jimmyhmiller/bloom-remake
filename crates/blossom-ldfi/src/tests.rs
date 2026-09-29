@@ -57,11 +57,20 @@ fn clock(from: NodeId, to: NodeId, send: u64) -> Premise {
 fn extensions(g: &ProvGraph, spec: &FailureSpec, seed: FaultSchedule, target: GoalId) -> BTreeSet<Vec<String>> {
     let preds = Preds::default();
     let mut solver = select_backend("cadical-plain").unwrap();
-    minimal_extensions(g, spec, &preds, true, solver.as_mut(), &seed, &[target])
-        .unwrap()
-        .iter()
-        .map(|f| labels(f, &name))
-        .collect()
+    minimal_extensions(
+        g,
+        spec,
+        &preds,
+        crate::NegSupport::Conservative,
+        None,
+        solver.as_mut(),
+        &seed,
+        &[target],
+    )
+    .unwrap()
+    .iter()
+    .map(|f| labels(f, &name))
+    .collect()
 }
 
 fn set(items: &[&[&str]]) -> BTreeSet<Vec<String>> {
