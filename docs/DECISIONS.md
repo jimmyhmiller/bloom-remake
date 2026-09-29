@@ -171,7 +171,7 @@ question tool, the user chose:
   language leaves room: a refutable pattern over a lattice-derived value is exact, and so is any plain operator
   over one (a threshold's `bool` used as data).
 - **The oracle's lattice lookups** are recorded in firings as the cell's row (present) or a negation over its key
-  (absent), until LDFI's lattice lineage defines the exact support (ARCHITECTURE §8.3).
+  (absent); LDFI reads them as a premise on the cell's goal or a negated read.
 - **A negative number in an `LPSet`** is reported as BLSR004 (an out-of-range value), there being no dedicated code.
 - **IR amendments (additive, 2):** `assignable` is covariant through tuples, options and collections (`Map<Node<R>,
   V>` stands for `Map<Node, V>`), and lattice operation arguments are checked with it.
@@ -197,7 +197,8 @@ question tool, the user chose:
   premise per contributing rule (a new contribution changes the cell); stale firings (reads of a superseded value
   within a growing stratum) are dropped; LDFI over lattice channels reports BLS0908 (LANG-137).
 - **IR amendments (additive, 3):** time arithmetic in the validator (`Instant - Instant: Duration`,
-  `Instant ± Duration: Instant`), and a direction channel to an external role has a `Session` destination.
+  `Instant ± Duration: Instant`), a direction channel to an external role has a `Session` destination, and
+  `BuiltinFn::Concat` is `++` on `String`, `Bytes` and `Vec`.
 - **The S2 gate** is `xtask corpus --gate` under `docs/plan/MILESTONE = S2`: every `core/` and `async/` oracle or
   compile case whose features all lie in `S2_SUBSET` (xtask/src/cmd/corpus.rs; analysis, test and verification ids
   are other backends' concerns and do not exclude a case) must pass.
