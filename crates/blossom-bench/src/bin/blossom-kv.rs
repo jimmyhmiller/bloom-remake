@@ -99,7 +99,10 @@ fn workload(c: &Common) -> Result<Workload, String> {
         mix: (*p, *g, *d),
         value_size: c.value_size,
         seed: c.seed,
-        namespace: c.namespace.clone().unwrap_or_else(|| format!("r{}-", std::process::id())),
+        namespace: c
+            .namespace
+            .clone()
+            .unwrap_or_else(|| format!("r{}-", std::process::id())),
         record: c.check,
     })
 }
@@ -117,6 +120,14 @@ fn report(name: &str, w: &Workload, o: &Outcome, check: bool) -> bool {
         o.latency(0.999),
         o.latency(1.0)
     );
+    if !o.protocol_errors.is_empty() {
+        println!(
+            "PROTOCOL ERRORS ({}): first: {}",
+            o.protocol_errors.len(),
+            o.protocol_errors.first().map_or("", |e| e.as_str())
+        );
+        return false;
+    }
     if !check {
         return true;
     }
@@ -128,7 +139,10 @@ fn report(name: &str, w: &Workload, o: &Outcome, check: bool) -> bool {
             true
         }
         Verdict::NotLinearizable { longest } => {
-            println!("NOT linearizable at key {key:?}: longest linearizable prefix {} ops", longest.len());
+            println!(
+                "NOT linearizable at key {key:?}: longest linearizable prefix {} ops",
+                longest.len()
+            );
             let mut ops: Vec<_> = o
                 .history
                 .iter()

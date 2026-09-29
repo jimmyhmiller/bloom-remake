@@ -1,28 +1,32 @@
 //! The production driver for one node (ARCHITECTURE §5.2), on std threads:
 //!
-//! - the **engine thread** owns the [`Node`]: it takes what the I/O threads admitted, runs ticks, hands each tick's
-//!   WAL record to the committer, and releases ticks as the committer reports them synced (Invariant R lives in the
-//!   node), sending their frames to peers and sessions;
+//! - the **engine thread** owns the [`Node`]: it takes what the I/O threads received, admits it, runs ticks, hands
+//!   each tick's WAL record to the committer, and releases ticks as the committer reports them synced (Invariant R
+//!   lives in the node), sending their frames to peers and sessions;
 //! - the **committer thread** owns the WAL: it takes every submitted record, appends them as one batch, syncs once,
 //!   and reports the synced tick (Invariant B: batch k+1 is never written before batch k's sync returned). A failed
 //!   append or sync poisons the WAL and faults the node;
-//! - the **checkpoint thread** writes a checkpoint of the durable rows at a synced tick, installs it, and hands the
-//!   truncation token to the committer;
+//! - the **checkpoint thread** writes a checkpoint of the durable rows at a synced tick, installs it, removes the
+//!   older ones, and hands the truncation token to the committer;
 //! - **listeners** accept peer and client connections; a **reader thread** per connection decodes batches, and a
 //!   **writer thread** per peer and per session sends frames.
 //!
 //! Tick `t+1` computes while tick `t`'s fsync is in flight (pipelined group commit, ARCH-10).
 //!
+//! Two queues reach the engine. Control (sync reports, checkpoint results, stop) is unbounded and always drained.
+//! Data (peer deliveries, client messages) is bounded: the engine takes data only while the node's inbox has room, so
+//! a full queue blocks the readers and pushes back on the senders' TCP connections (DIST-008).
+//!
 //! The architecture puts I/O on tokio; this build uses blocking std threads (one reader per connection), which is
 //! enough for a handful of nodes and the clients of a benchmark. Admission runs on the engine thread rather than in
 //! the reader: it needs the node's committed state for `principal in REL` ACLs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -30,6 +34,7 @@ use blossom_artifact::bls::BlsArtifact;
 use blossom_base::{RelId, RoleId, internal_error};
 use blossom_node::acl::{AclTable, Source};
 use blossom_node::durable::{DurableCodec, DurableSchema};
+use blossom_node::env::{Clock, Entropy};
 use blossom_node::recovery::{self, KIND_DELTA, StoreSpec};
 use blossom_node::{Node, NodeConfig, NodeState, ReleasedTick};
 use blossom_oracle::{Delivery, Ingress, Oracle, Row};
@@ -37,17 +42,19 @@ use blossom_store::{
     CheckpointWriter, FileCheckpoints, FileWal, MetaRecord, MetaStore, OpenMode, RealFs, StoreIdentity, StoreLock,
     SyncedTick, TruncateToken, WalRecordBuf, WalWriter,
 };
+use blossom_value::Seed;
 use blossom_value::time::{Instant, NodeId, Tick};
 use blossom_value::value::SessionId;
-use blossom_value::Seed;
 use blossom_wire::frame::{Frame, Peer, RejectReason};
-
-use blossom_node::env::{Clock, Entropy};
 
 use crate::RuntimeError;
 use crate::clock::{OsEntropy, SystemClock, wall_now};
 use crate::deploy::DeploymentSpec;
 use crate::net::{self, Catalog, Conn, Identity};
+
+/// How long a new connection has to complete its handshake, and a peer writer to write a frame.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How to start a node.
 #[derive(Clone)]
@@ -83,6 +90,8 @@ pub struct Stats {
     pub dropped_closed_session: AtomicU64,
     /// Frames dropped because a peer's or session's queue was full (an omission).
     pub dropped_queue_full: AtomicU64,
+    /// Rows too large for any frame (an omission).
+    pub dropped_oversized: AtomicU64,
 }
 
 fn bump(c: &AtomicU64, n: u64) {
@@ -98,8 +107,8 @@ pub enum Stopped {
     Halted,
 }
 
-/// What reaches the engine thread.
-enum Inbound {
+/// A message received from the network, before admission.
+enum Data {
     Deliver {
         from: NodeId,
         rel: RelId,
@@ -111,16 +120,15 @@ enum Inbound {
         rel: RelId,
         row: Row,
     },
-    SessionOpened {
-        session: SessionId,
-        out: SyncSender<Vec<u8>>,
-    },
-    SessionClosed {
-        session: SessionId,
-    },
+}
+
+/// What else reaches the engine thread.
+enum Control {
     Synced(SyncedTick),
     WalFailed(String),
     CheckpointDone(Result<(), String>),
+    /// Data was queued.
+    Wake,
     Stop,
 }
 
@@ -129,12 +137,103 @@ enum Commit {
     Truncate(TruncateToken),
 }
 
+/// The bounded data queue between the readers and the engine.
+struct DataQueue {
+    q: Mutex<VecDeque<Data>>,
+    not_full: Condvar,
+    cap: usize,
+    closed: AtomicBool,
+    /// Whether a `Wake` is already on its way to the engine.
+    wake_pending: AtomicBool,
+    control: Sender<Control>,
+}
+
+impl DataQueue {
+    /// Queues `d`, waiting while the queue is full. False once the engine has stopped.
+    fn push(&self, d: Data) -> bool {
+        let Ok(mut q) = self.q.lock() else {
+            return false;
+        };
+        while q.len() >= self.cap && !self.closed.load(Ordering::SeqCst) {
+            q = match self.not_full.wait_timeout(q, Duration::from_millis(100)) {
+                Ok((q, _)) => q,
+                Err(_) => return false,
+            };
+        }
+        if self.closed.load(Ordering::SeqCst) {
+            return false;
+        }
+        q.push_back(d);
+        drop(q);
+        if !self.wake_pending.swap(true, Ordering::SeqCst) {
+            // The engine may be gone; the closed flag reports that on the next push.
+            let _ = self.control.send(Control::Wake);
+        }
+        true
+    }
+
+    /// Takes up to `max` messages.
+    fn take(&self, max: usize) -> Vec<Data> {
+        self.wake_pending.store(false, Ordering::SeqCst);
+        let Ok(mut q) = self.q.lock() else {
+            return Vec::new();
+        };
+        let n = max.min(q.len());
+        let out: Vec<Data> = q.drain(..n).collect();
+        self.not_full.notify_all();
+        out
+    }
+
+    fn len(&self) -> usize {
+        self.q.lock().map(|q| q.len()).unwrap_or(0)
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.not_full.notify_all();
+    }
+}
+
+/// The open connections, so that stopping can close them; each connection's thread removes its own on exit.
+#[derive(Default)]
+struct Conns {
+    next: AtomicU64,
+    open: Mutex<BTreeMap<u64, TcpStream>>,
+}
+
+impl Conns {
+    fn add(&self, s: &TcpStream) -> Option<u64> {
+        let id = self.next.fetch_add(1, Ordering::SeqCst);
+        let clone = s.try_clone().ok()?;
+        self.open.lock().ok()?.insert(id, clone);
+        Some(id)
+    }
+
+    fn remove(&self, id: Option<u64>) {
+        if let (Some(id), Ok(mut open)) = (id, self.open.lock()) {
+            open.remove(&id);
+        }
+    }
+
+    fn close_all(&self) {
+        if let Ok(open) = self.open.lock() {
+            for c in open.values() {
+                // Closing is best-effort: a connection may already be gone.
+                let _ = c.shutdown(std::net::Shutdown::Both);
+            }
+        }
+    }
+}
+
+type Sessions = Arc<Mutex<BTreeMap<SessionId, SyncSender<Vec<u8>>>>>;
+
 /// A running node.
 pub struct Server {
     engine: Option<JoinHandle<Result<Stopped, RuntimeError>>>,
-    inbound: SyncSender<Inbound>,
+    control: Sender<Control>,
+    data: Arc<DataQueue>,
     stop: Arc<AtomicBool>,
-    conns: Arc<Mutex<Vec<TcpStream>>>,
+    conns: Arc<Conns>,
     threads: Vec<JoinHandle<()>>,
     pub stats: Arc<Stats>,
     pub node: NodeId,
@@ -146,7 +245,11 @@ pub struct Server {
 }
 
 /// The store identity the deployment expects for a node.
-pub fn store_identity(spec: &DeploymentSpec, artifact: &BlsArtifact, node: &str) -> Result<StoreIdentity, RuntimeError> {
+pub fn store_identity(
+    spec: &DeploymentSpec,
+    artifact: &BlsArtifact,
+    node: &str,
+) -> Result<StoreIdentity, RuntimeError> {
     let (_, entry) = spec.node(node)?;
     Ok(StoreIdentity {
         store_uuid: [0; 16],
@@ -166,6 +269,15 @@ pub fn identity(spec: &DeploymentSpec, artifact: &BlsArtifact) -> Identity {
         program_id: artifact.program.get().meta.program_id,
         program_version: artifact.program.get().meta.version,
         directory: spec.directory_digest(),
+    }
+}
+
+/// Errors after startup are faults (restart from durable state), whatever layer they came from; only bugs and
+/// missing features keep their own kind.
+fn as_fault(e: RuntimeError) -> RuntimeError {
+    match e {
+        RuntimeError::Fault(_) | RuntimeError::Internal(_) | RuntimeError::Unimplemented(_) => e,
+        other => RuntimeError::Fault(other.to_string()),
     }
 }
 
@@ -210,11 +322,14 @@ impl Server {
         let mut ncfg = NodeConfig::new(me, role);
         ncfg.halt = artifact.halt;
         ncfg.statics = spec.static_rows(program, &names)?;
+        let inbox_cap = ncfg.max_batch.saturating_mul(4);
         let boot = opened.boot.clone();
         let node = Node::boot(ncfg, &artifact.program, oracle.clone(), boot.clone())?;
         let restarts = opened.record.restarts;
+        let last_checkpoint_lsn = opened.checkpoint.map_or(0, |c| c.lsn.0);
 
-        let peer_listener = TcpListener::bind(entry.addr).map_err(|e| RuntimeError::Net(format!("bind {}: {e}", entry.addr)))?;
+        let peer_listener =
+            TcpListener::bind(entry.addr).map_err(|e| RuntimeError::Net(format!("bind {}: {e}", entry.addr)))?;
         let peer_addr = peer_listener.local_addr().map_err(RuntimeError::Io)?;
         let client_listener = match entry.client_addr {
             Some(a) => Some(TcpListener::bind(a).map_err(|e| RuntimeError::Net(format!("bind {a}: {e}")))?),
@@ -227,24 +342,40 @@ impl Server {
 
         let stats = Arc::new(Stats::default());
         let stop = Arc::new(AtomicBool::new(false));
-        let conns: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
-        let (in_tx, in_rx) = mpsc::sync_channel::<Inbound>(65_536);
+        let conns = Arc::new(Conns::default());
+        let sessions: Sessions = Arc::new(Mutex::new(BTreeMap::new()));
+        let (ctl_tx, ctl_rx) = mpsc::channel::<Control>();
+        let data = Arc::new(DataQueue {
+            q: Mutex::new(VecDeque::new()),
+            not_full: Condvar::new(),
+            cap: inbox_cap,
+            closed: AtomicBool::new(false),
+            wake_pending: AtomicBool::new(false),
+            control: ctl_tx.clone(),
+        });
         let (commit_tx, commit_rx) = mpsc::channel::<Commit>();
         let (ckpt_tx, ckpt_rx) = mpsc::channel::<(blossom_store::DurableSnapshot, SyncedTick)>();
         let id = identity(spec, &artifact);
         let catalog = Arc::new(Catalog::of(program)?);
         let mut threads = Vec::new();
 
-        let Opened { wal, checkpoints, meta, record, lock } = split(opened);
+        let recovery::Opened {
+            wal,
+            checkpoints,
+            meta,
+            record,
+            lock,
+            ..
+        } = opened;
         {
-            let tx = in_tx.clone();
-            let stats = stats.clone();
+            let (tx, stats) = (ctl_tx.clone(), stats.clone());
             threads.push(spawn("committer", move || committer(wal, commit_rx, tx, stats))?);
         }
         {
-            let tx = in_tx.clone();
-            let commit = commit_tx.clone();
-            threads.push(spawn("checkpoint", move || checkpointer(checkpoints, ckpt_rx, commit, tx))?);
+            let (tx, commit) = (ctl_tx.clone(), commit_tx.clone());
+            threads.push(spawn("checkpoint", move || {
+                checkpointer(checkpoints, ckpt_rx, commit, tx)
+            })?);
         }
         // Peer writers: one per other node.
         let mut peers: BTreeMap<NodeId, SyncSender<Vec<u8>>> = BTreeMap::new();
@@ -256,7 +387,9 @@ impl Server {
             let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(4096);
             peers.insert(to, tx);
             let (addr, id, catalog, stop) = (n.addr, id.clone(), catalog.clone(), stop.clone());
-            threads.push(spawn("peer-writer", move || peer_writer(addr, id, me, restarts, nonce, catalog, rx, stop))?);
+            threads.push(spawn("peer-writer", move || {
+                peer_writer(addr, id, me, restarts, nonce, catalog, rx, stop)
+            })?);
         }
         // Listeners.
         {
@@ -267,11 +400,12 @@ impl Server {
                 restarts,
                 nonce,
                 catalog: catalog.clone(),
-                inbound: in_tx.clone(),
+                data: data.clone(),
                 stop: stop.clone(),
                 conns: conns.clone(),
                 stats: stats.clone(),
-                sessions: Arc::new(AtomicU64::new(0)),
+                sessions: sessions.clone(),
+                next_session: Arc::new(AtomicU64::new(0)),
                 incarnations: Arc::new(Mutex::new(BTreeMap::new())),
                 spec: Arc::new(spec.clone()),
             };
@@ -294,26 +428,35 @@ impl Server {
                 roles: artifact.roles.clone(),
                 principals: spec.nodes.iter().map(|n| Arc::from(n.principal.as_str())).collect(),
                 peers,
-                sessions: BTreeMap::new(),
+                sessions,
+                data: data.clone(),
+                inbox_cap,
                 commit: commit_tx,
                 checkpoint: ckpt_tx,
                 checkpoint_bytes: spec.checkpoint_wal_bytes,
                 checkpoint_busy: false,
-                last_checkpoint_lsn: 0,
+                last_checkpoint_lsn,
                 meta,
                 record,
                 _lock: lock,
                 clock: SystemClock::anchored_at(boot.now),
                 stats: stats.clone(),
             };
+            let data = data.clone();
             std::thread::Builder::new()
                 .name("engine".into())
-                .spawn(move || e.run(in_rx))
+                .spawn(move || {
+                    let r = e.run(ctl_rx).map_err(as_fault);
+                    // Readers blocked on a full queue give up.
+                    data.close();
+                    r
+                })
                 .map_err(RuntimeError::Io)?
         };
         Ok(Server {
             engine: Some(engine),
-            inbound: in_tx,
+            control: ctl_tx,
+            data,
             stop,
             conns,
             threads,
@@ -330,7 +473,7 @@ impl Server {
     /// never released (crash semantics, which are always legal).
     pub fn stop(mut self) -> Result<Stopped, RuntimeError> {
         // The engine may already have stopped (halted or faulted) and dropped its receiver.
-        let _ = self.inbound.try_send(Inbound::Stop);
+        let _ = self.control.send(Control::Stop);
         self.wait_engine()
     }
 
@@ -341,7 +484,9 @@ impl Server {
 
     fn wait_engine(&mut self) -> Result<Stopped, RuntimeError> {
         let result = match self.engine.take() {
-            Some(h) => h.join().map_err(|_| RuntimeError::Internal(internal_error!("the engine thread panicked")))?,
+            Some(h) => h
+                .join()
+                .map_err(|_| RuntimeError::Internal(internal_error!("the engine thread panicked")))?,
             None => Err(internal_error!("the engine was already joined").into()),
         };
         self.shutdown_io();
@@ -350,12 +495,8 @@ impl Server {
 
     fn shutdown_io(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Ok(conns) = self.conns.lock() {
-            for c in conns.iter() {
-                // Closing is best-effort: a connection may already be gone.
-                let _ = c.shutdown(std::net::Shutdown::Both);
-            }
-        }
+        self.data.close();
+        self.conns.close_all();
         for t in self.threads.drain(..) {
             // A thread that panicked has already reported through its connection; joining just reaps it.
             let _ = t.join();
@@ -366,27 +507,9 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         if self.engine.is_some() {
-            let _ = self.inbound.try_send(Inbound::Stop);
+            let _ = self.control.send(Control::Stop);
             let _ = self.wait_engine();
         }
-    }
-}
-
-struct Opened {
-    wal: FileWal,
-    checkpoints: FileCheckpoints,
-    meta: MetaStore,
-    record: MetaRecord,
-    lock: StoreLock,
-}
-
-fn split(o: recovery::Opened) -> Opened {
-    Opened {
-        wal: o.wal,
-        checkpoints: o.checkpoints,
-        meta: o.meta,
-        record: o.record,
-        lock: o.lock,
     }
 }
 
@@ -398,7 +521,7 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> Result<JoinHandle<()>
 }
 
 /// The committer (Invariant B): append everything submitted as one batch, sync once, report.
-fn committer(mut wal: FileWal, rx: Receiver<Commit>, tx: SyncSender<Inbound>, stats: Arc<Stats>) {
+fn committer(mut wal: FileWal, rx: Receiver<Commit>, tx: Sender<Control>, stats: Arc<Stats>) {
     let mut batch: u64 = 0;
     let mut truncates: Vec<TruncateToken> = Vec::new();
     while let Ok(first) = rx.recv() {
@@ -406,12 +529,13 @@ fn committer(mut wal: FileWal, rx: Receiver<Commit>, tx: SyncSender<Inbound>, st
         while let Ok(more) = rx.try_recv() {
             work.push(more);
         }
-        batch = batch.saturating_add(1);
         let mut appended = 0u64;
-        let mut result: Result<(), String> = Ok(());
         for w in work {
             match w {
                 Commit::Append { tick, now, payload } => {
+                    if appended == 0 {
+                        batch = batch.saturating_add(1);
+                    }
                     let rec = WalRecordBuf {
                         batch,
                         tick: tick.0,
@@ -420,17 +544,13 @@ fn committer(mut wal: FileWal, rx: Receiver<Commit>, tx: SyncSender<Inbound>, st
                         payload,
                     };
                     if let Err(e) = wal.append(&rec) {
-                        result = Err(format!("WAL append failed: {e}"));
-                        break;
+                        let _ = tx.send(Control::WalFailed(format!("WAL append of tick {} failed: {e}", tick.0)));
+                        return;
                     }
                     appended += 1;
                 }
                 Commit::Truncate(t) => truncates.push(t),
             }
-        }
-        if let Err(e) = result {
-            let _ = tx.send(Inbound::WalFailed(e));
-            return;
         }
         if appended > 0 {
             match wal.sync() {
@@ -438,14 +558,14 @@ fn committer(mut wal: FileWal, rx: Receiver<Commit>, tx: SyncSender<Inbound>, st
                     bump(&stats.wal_records, appended);
                     bump(&stats.wal_batches, 1);
                     if let Some(t) = synced.synced_tick()
-                        && tx.send(Inbound::Synced(t)).is_err()
+                        && tx.send(Control::Synced(t)).is_err()
                     {
                         return;
                     }
                 }
                 Err(e) => {
                     // A failed sync must never be retried: the WAL is poisoned for the incarnation.
-                    let _ = tx.send(Inbound::WalFailed(format!("WAL sync failed: {e}")));
+                    let _ = tx.send(Control::WalFailed(format!("WAL sync failed: {e}")));
                     return;
                 }
             }
@@ -453,27 +573,28 @@ fn committer(mut wal: FileWal, rx: Receiver<Commit>, tx: SyncSender<Inbound>, st
         // Truncation happens at a batch boundary, after the sync.
         for t in truncates.drain(..) {
             if let Err(e) = wal.truncate_through(t) {
-                let _ = tx.send(Inbound::WalFailed(format!("WAL truncation failed: {e}")));
+                let _ = tx.send(Control::WalFailed(format!("WAL truncation failed: {e}")));
                 return;
             }
         }
     }
 }
 
-/// The checkpoint thread: write, install, hand the truncation token to the committer.
+/// The checkpoint thread: write, install, remove the older checkpoints, hand the truncation token to the committer.
 fn checkpointer(
     mut ckpt: FileCheckpoints,
     rx: Receiver<(blossom_store::DurableSnapshot, SyncedTick)>,
     commit: Sender<Commit>,
-    tx: SyncSender<Inbound>,
+    tx: Sender<Control>,
 ) {
     while let Ok((snap, covers)) = rx.recv() {
         let result = ckpt
             .write(snap, covers)
             .and_then(|id| ckpt.install(id))
+            .and_then(|token| ckpt.prune().map(|_| token))
             .map_err(|e| e.to_string())
             .and_then(|token| commit.send(Commit::Truncate(token)).map_err(|e| e.to_string()));
-        if tx.send(Inbound::CheckpointDone(result)).is_err() {
+        if tx.send(Control::CheckpointDone(result)).is_err() {
             return;
         }
     }
@@ -496,6 +617,11 @@ fn peer_writer(
     let mut pending: Option<Vec<u8>> = None;
     while !stop.load(Ordering::SeqCst) {
         let conn = TcpStream::connect_timeout(&addr, Duration::from_secs(1))
+            .and_then(|s| {
+                s.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+                s.set_write_timeout(Some(WRITE_TIMEOUT))?;
+                Ok(s)
+            })
             .map_err(RuntimeError::Io)
             .and_then(Conn::new)
             .and_then(|mut c| net::open_handshake(&mut c, &id, Peer::Node(me.0), restarts, nonce, &catalog).map(|_| c));
@@ -550,11 +676,12 @@ struct Accept {
     restarts: u64,
     nonce: u64,
     catalog: Arc<Catalog>,
-    inbound: SyncSender<Inbound>,
+    data: Arc<DataQueue>,
     stop: Arc<AtomicBool>,
-    conns: Arc<Mutex<Vec<TcpStream>>>,
+    conns: Arc<Conns>,
     stats: Arc<Stats>,
-    sessions: Arc<AtomicU64>,
+    sessions: Sessions,
+    next_session: Arc<AtomicU64>,
     /// The newest incarnation (restart count) seen of each peer (ARCHITECTURE §5.8).
     incarnations: Arc<Mutex<BTreeMap<u32, u64>>>,
 }
@@ -566,17 +693,24 @@ fn accept_loop(listener: TcpListener, ctx: Accept, clients: bool) {
     while !ctx.stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
-                if stream.set_nonblocking(false).is_err() {
+                let configured = stream
+                    .set_nonblocking(false)
+                    .and_then(|()| stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT)))
+                    .and_then(|()| stream.set_write_timeout(Some(WRITE_TIMEOUT)));
+                if configured.is_err() {
                     continue;
                 }
-                if let (Ok(mut conns), Ok(c)) = (ctx.conns.lock(), stream.try_clone()) {
-                    conns.push(c);
-                }
+                let registered = ctx.conns.add(&stream);
                 let ctx = ctx.clone();
                 let name = if clients { "session" } else { "peer-reader" };
                 // A connection whose thread cannot start is dropped, which closes it.
                 let _ = spawn(name, move || {
-                    let _ = if clients { session(stream, ctx) } else { peer_reader(stream, ctx) };
+                    let _ = if clients {
+                        session(stream, &ctx)
+                    } else {
+                        peer_reader(stream, &ctx)
+                    };
+                    ctx.conns.remove(registered);
                 });
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(20)),
@@ -585,7 +719,7 @@ fn accept_loop(listener: TcpListener, ctx: Accept, clients: bool) {
     }
 }
 
-fn peer_reader(stream: TcpStream, ctx: Accept) -> Result<(), RuntimeError> {
+fn peer_reader(stream: TcpStream, ctx: &Accept) -> Result<(), RuntimeError> {
     let mut conn = Conn::new(stream)?;
     let nodes = ctx.spec.nodes.len();
     let hello = net::accept_handshake(
@@ -604,14 +738,21 @@ fn peer_reader(stream: TcpStream, ctx: Accept) -> Result<(), RuntimeError> {
                     .map_err(|_| (RejectReason::Protocol, "internal: poisoned lock".to_string()))?;
                 let newest = seen.entry(n).or_insert(h.restarts);
                 if h.restarts < *newest {
-                    return Err((RejectReason::NotAllowed, format!("stale incarnation {} of node {n}", h.restarts)));
+                    return Err((
+                        RejectReason::NotAllowed,
+                        format!("stale incarnation {} of node {n}", h.restarts),
+                    ));
                 }
                 *newest = h.restarts;
                 Ok(())
             }
-            _ => Err((RejectReason::NotAllowed, format!("{:?} is not a peer of this node", h.peer))),
+            _ => Err((
+                RejectReason::NotAllowed,
+                format!("{:?} is not a peer of this node", h.peer),
+            )),
         },
     )?;
+    conn.reader.get_ref().set_read_timeout(None).map_err(RuntimeError::Io)?;
     let Peer::Node(from) = hello.peer else {
         return Err(internal_error!("a peer HELLO without a node").into());
     };
@@ -631,7 +772,7 @@ fn peer_reader(stream: TcpStream, ctx: Accept) -> Result<(), RuntimeError> {
                 bump(&ctx.stats.rejected_unknown_dest, 1);
                 continue;
             }
-            if ctx.inbound.send(Inbound::Deliver { from, rel, row }).is_err() {
+            if !ctx.data.push(Data::Deliver { from, rel, row }) {
                 return Ok(());
             }
         }
@@ -639,7 +780,7 @@ fn peer_reader(stream: TcpStream, ctx: Accept) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-fn session(stream: TcpStream, ctx: Accept) -> Result<(), RuntimeError> {
+fn session(stream: TcpStream, ctx: &Accept) -> Result<(), RuntimeError> {
     let mut conn = Conn::new(stream)?;
     let hello = net::accept_handshake(
         &mut conn,
@@ -653,12 +794,13 @@ fn session(stream: TcpStream, ctx: Accept) -> Result<(), RuntimeError> {
             other => Err((RejectReason::NotAllowed, format!("{other:?} on the client listener"))),
         },
     )?;
+    conn.reader.get_ref().set_read_timeout(None).map_err(RuntimeError::Io)?;
     let Peer::Client { principal } = hello.peer else {
         return Err(internal_error!("a client HELLO without a principal").into());
     };
     let principal: Arc<str> = principal.into();
     // Session ids never repeat across incarnations: the restart count is the high half.
-    let n = ctx.sessions.fetch_add(1, Ordering::SeqCst);
+    let n = ctx.next_session.fetch_add(1, Ordering::SeqCst);
     let session = SessionId(ctx.restarts << 32 | (n & 0xffff_ffff));
     bump(&ctx.stats.sessions, 1);
     let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(4096);
@@ -678,8 +820,9 @@ fn session(stream: TcpStream, ctx: Accept) -> Result<(), RuntimeError> {
             }
         }
     })?;
-    if ctx.inbound.send(Inbound::SessionOpened { session, out: tx }).is_err() {
-        return Ok(());
+    // Registered before any of its messages is queued, so a reply always finds it while it is open.
+    if let Ok(mut s) = ctx.sessions.lock() {
+        s.insert(session, tx);
     }
     let program = ctx.artifact.program.get();
     let codec = net::wire_codec(program);
@@ -698,20 +841,23 @@ fn session(stream: TcpStream, ctx: Accept) -> Result<(), RuntimeError> {
                     bump(&ctx.stats.rejected_unknown_dest, 1);
                     continue;
                 }
-                let m = Inbound::Ingress {
+                let m = Data::Ingress {
                     session,
                     principal: principal.clone(),
                     rel,
                     row,
                 };
-                if ctx.inbound.send(m).is_err() {
+                if !ctx.data.push(m) {
                     return Ok(());
                 }
             }
         }
         Ok(())
     })();
-    let _ = ctx.inbound.send(Inbound::SessionClosed { session });
+    // Closing the session drops its sender, which ends the writer.
+    if let Ok(mut s) = ctx.sessions.lock() {
+        s.remove(&session);
+    }
     let _ = w.join();
     result
 }
@@ -728,7 +874,10 @@ struct Engine {
     roles: Vec<Option<RoleId>>,
     principals: Vec<Arc<str>>,
     peers: BTreeMap<NodeId, SyncSender<Vec<u8>>>,
-    sessions: BTreeMap<SessionId, SyncSender<Vec<u8>>>,
+    sessions: Sessions,
+    data: Arc<DataQueue>,
+    /// The most messages the node's inbox holds before the engine stops taking data.
+    inbox_cap: usize,
     commit: Sender<Commit>,
     checkpoint: Sender<(blossom_store::DurableSnapshot, SyncedTick)>,
     checkpoint_bytes: u64,
@@ -742,38 +891,38 @@ struct Engine {
 }
 
 impl Engine {
-    fn run(mut self, rx: Receiver<Inbound>) -> Result<Stopped, RuntimeError> {
+    fn run(mut self, ctl: Receiver<Control>) -> Result<Stopped, RuntimeError> {
         let program = self.artifact.program.clone();
         let codec = net::wire_codec(program.get());
         let schema = self.schema.clone();
         let durable = DurableCodec::new(program.get(), &schema, self.names.clone());
         loop {
-            // Wait for something to do: a message, or the next timer.
+            // Wait for something to do: control, data the inbox has room for, or the next timer.
             let now = self.clock.now();
-            let first = if self.node.ready(now)? {
-                match rx.try_recv() {
-                    Ok(m) => Some(m),
-                    Err(mpsc::TryRecvError::Empty) => None,
-                    Err(mpsc::TryRecvError::Disconnected) => return Err(internal_error!("the engine's inbox closed").into()),
-                }
+            let room = self.inbox_cap.saturating_sub(self.node.inbox_len());
+            let wait = if self.node.ready(now)? || (room > 0 && self.data.len() > 0) {
+                Duration::ZERO
+            } else if self.node.waiting() {
+                // Only a sync report or a stop can help; a due timer cannot.
+                Duration::from_secs(1)
             } else {
-                let wait = match self.node.next_deadline()? {
+                match self.node.next_deadline()? {
                     Some(d) => Duration::from_nanos(u64::try_from(d.0.saturating_sub(now.0)).unwrap_or(0)),
                     None => Duration::from_secs(1),
                 }
-                .min(Duration::from_secs(1));
-                match rx.recv_timeout(wait) {
-                    Ok(m) => Some(m),
-                    Err(RecvTimeoutError::Timeout) => None,
-                    Err(RecvTimeoutError::Disconnected) => return Err(internal_error!("the engine's inbox closed").into()),
-                }
+                .min(Duration::from_secs(1))
             };
-            let mut next = first;
-            while let Some(m) = next {
-                if let Some(stopped) = self.handle(m, &codec, &durable)? {
-                    return Ok(stopped);
+            match ctl.recv_timeout(wait) {
+                Ok(m) => {
+                    if let Some(stopped) = self.control(m, &codec, &durable)? {
+                        return Ok(stopped);
+                    }
                 }
-                next = rx.try_recv().ok();
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return Err(internal_error!("the engine's inbox closed").into()),
+            }
+            if let Some(stopped) = self.drain(&ctl, &codec, &durable)? {
+                return Ok(stopped);
             }
             if *self.node.state() == NodeState::Halted {
                 return Ok(Stopped::Halted);
@@ -781,13 +930,17 @@ impl Engine {
             // Run ticks while ready (bounded by the node's in-flight limit).
             while self.node.ready(self.clock.now())? {
                 let now = self.clock.now();
-                let fx = self.node.run_tick(now).map_err(|f| RuntimeError::Fault(f.to_string()))?;
+                let fx = self
+                    .node
+                    .run_tick(now)
+                    .map_err(|f| RuntimeError::Fault(f.to_string()))?;
                 bump(&self.stats.ticks, 1);
-                if let Some(upto) = fx.reserve {
-                    self.record.reserved_tick = upto.0;
-                    self.record.last_now = self.record.last_now.max(now.0);
+                if let Some(r) = fx.reserve {
+                    self.record.reserved_tick = r.ticks.0;
+                    self.record.last_now = self.record.last_now.max(r.now.0);
                     self.meta.write(&self.record)?;
-                    self.node.reserved(upto);
+                    let released = self.node.reserved(r);
+                    self.dispatch(released, &codec)?;
                 }
                 match fx.wal {
                     Some(delta) => {
@@ -805,25 +958,40 @@ impl Engine {
                         self.dispatch(released, &codec)?;
                     }
                 }
-                // Take newly arrived messages into the next tick's batch.
-                while let Ok(m) = rx.try_recv() {
-                    if let Some(stopped) = self.handle(m, &codec, &durable)? {
-                        return Ok(stopped);
-                    }
+                if let Some(stopped) = self.drain(&ctl, &codec, &durable)? {
+                    return Ok(stopped);
                 }
             }
         }
     }
 
-    fn handle(
+    /// Handles every queued control message, then takes the data the inbox has room for.
+    fn drain(
         &mut self,
-        m: Inbound,
+        ctl: &Receiver<Control>,
         codec: &blossom_wire::codec::Codec<'_>,
         durable: &DurableCodec<'_>,
     ) -> Result<Option<Stopped>, RuntimeError> {
-        match m {
-            Inbound::Deliver { from, rel, row } => {
-                let principal = self.principals.get(from.0 as usize).cloned().unwrap_or_else(|| Arc::from(""));
+        while let Ok(m) = ctl.try_recv() {
+            if let Some(stopped) = self.control(m, codec, durable)? {
+                return Ok(Some(stopped));
+            }
+        }
+        let room = self.inbox_cap.saturating_sub(self.node.inbox_len());
+        for d in self.data.take(room) {
+            self.admit_and_offer(d);
+        }
+        Ok(None)
+    }
+
+    fn admit_and_offer(&mut self, d: Data) {
+        match d {
+            Data::Deliver { from, rel, row } => {
+                let principal = self
+                    .principals
+                    .get(from.0 as usize)
+                    .cloned()
+                    .unwrap_or_else(|| Arc::from(""));
                 let source = Source::Node {
                     role: self.roles.get(from.0 as usize).copied().flatten(),
                     principal: &principal,
@@ -833,7 +1001,7 @@ impl Engine {
                     self.node.offer_delivery(Delivery { rel, from, row });
                 }
             }
-            Inbound::Ingress {
+            Data::Ingress {
                 session,
                 principal,
                 rel,
@@ -844,24 +1012,29 @@ impl Engine {
                     self.node.offer_ingress(Ingress { rel, session, row });
                 }
             }
-            Inbound::SessionOpened { session, out } => {
-                self.sessions.insert(session, out);
-            }
-            Inbound::SessionClosed { session } => {
-                self.sessions.remove(&session);
-            }
-            Inbound::Synced(t) => {
+        }
+    }
+
+    fn control(
+        &mut self,
+        m: Control,
+        codec: &blossom_wire::codec::Codec<'_>,
+        durable: &DurableCodec<'_>,
+    ) -> Result<Option<Stopped>, RuntimeError> {
+        match m {
+            Control::Synced(t) => {
                 let released = self.node.wal_synced(Tick(t.tick()));
                 self.dispatch(released, codec)?;
                 self.maybe_checkpoint(t, durable)?;
             }
-            Inbound::WalFailed(e) => return Err(RuntimeError::Fault(e)),
-            Inbound::CheckpointDone(r) => {
+            Control::WalFailed(e) => return Err(RuntimeError::Fault(e)),
+            Control::CheckpointDone(r) => {
                 self.checkpoint_busy = false;
                 r.map_err(|e| RuntimeError::Fault(format!("checkpoint failed: {e}")))?;
                 bump(&self.stats.checkpoints, 1);
             }
-            Inbound::Stop => return Ok(Some(Stopped::Stopped)),
+            Control::Wake => {}
+            Control::Stop => return Ok(Some(Stopped::Stopped)),
         }
         Ok(None)
     }
@@ -876,8 +1049,12 @@ impl Engine {
     }
 
     /// Sends a released tick's frames: to peers merged per (destination, channel), to sessions per (session,
-    /// channel); a send to this node itself is delivered locally.
-    fn dispatch(&mut self, released: Vec<ReleasedTick>, codec: &blossom_wire::codec::Codec<'_>) -> Result<(), RuntimeError> {
+    /// channel), split into frames under the size limit; a send to this node itself is delivered locally.
+    fn dispatch(
+        &mut self,
+        released: Vec<ReleasedTick>,
+        codec: &blossom_wire::codec::Codec<'_>,
+    ) -> Result<(), RuntimeError> {
         let program = self.artifact.program.clone();
         let p = program.get();
         for t in released {
@@ -896,38 +1073,60 @@ impl Engine {
             }
             for ((to, rel), rows) in to_peers {
                 let Some(q) = self.peers.get(&to) else {
-                    return Err(RuntimeError::Fault(format!("a send to node {}, which is not in the deployment", to.0)));
+                    return Err(RuntimeError::Fault(format!(
+                        "a send to node {}, which is not in the deployment",
+                        to.0
+                    )));
                 };
-                let sid = self.catalog.sid(rel).ok_or_else(|| internal_error!("{rel:?} is not a channel"))?;
-                let frame = net::batch_frame(codec, p, sid, rel, t.tick.0, &rows)?;
-                if let Err(TrySendError::Full(_)) = q.try_send(frame) {
-                    bump(&self.stats.dropped_queue_full, rows.len() as u64);
+                let sid = self
+                    .catalog
+                    .sid(rel)
+                    .ok_or_else(|| internal_error!("{rel:?} is not a channel"))?;
+                let out = net::batch_frames(codec, p, sid, rel, t.tick.0, &rows)?;
+                bump(&self.stats.dropped_oversized, out.oversized);
+                for f in out.frames {
+                    if let Err(TrySendError::Full(_)) = q.try_send(f) {
+                        bump(&self.stats.dropped_queue_full, 1);
+                    }
                 }
             }
             let mut to_sessions: BTreeMap<(SessionId, RelId), Vec<&Row>> = BTreeMap::new();
             for e in &t.egress {
                 to_sessions.entry((e.session, e.rel)).or_default().push(&e.row);
             }
+            if to_sessions.is_empty() {
+                continue;
+            }
+            let sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| internal_error!("the session table's lock is poisoned"))?;
             for ((session, rel), rows) in to_sessions {
                 bump(&self.stats.egress, rows.len() as u64);
-                let Some(q) = self.sessions.get(&session) else {
+                let Some(q) = sessions.get(&session) else {
                     bump(&self.stats.dropped_closed_session, rows.len() as u64);
                     continue;
                 };
-                let sid = self.catalog.sid(rel).ok_or_else(|| internal_error!("{rel:?} is not a channel"))?;
-                let frame = net::batch_frame(codec, p, sid, rel, t.tick.0, &rows)?;
-                match q.try_send(frame) {
-                    Ok(()) => {}
-                    Err(TrySendError::Full(_)) => bump(&self.stats.dropped_queue_full, rows.len() as u64),
-                    Err(TrySendError::Disconnected(_)) => bump(&self.stats.dropped_closed_session, rows.len() as u64),
+                let sid = self
+                    .catalog
+                    .sid(rel)
+                    .ok_or_else(|| internal_error!("{rel:?} is not a channel"))?;
+                let out = net::batch_frames(codec, p, sid, rel, t.tick.0, &rows)?;
+                bump(&self.stats.dropped_oversized, out.oversized);
+                for f in out.frames {
+                    match q.try_send(f) {
+                        Ok(()) => {}
+                        Err(TrySendError::Full(_)) => bump(&self.stats.dropped_queue_full, 1),
+                        Err(TrySendError::Disconnected(_)) => bump(&self.stats.dropped_closed_session, 1),
+                    }
                 }
             }
         }
         Ok(())
     }
 
-    /// Starts a checkpoint of the durable rows at the synced tick `t` when the WAL has grown past the threshold.
-    /// Every tick up to `t` has just been released, so the released image is the image at `t`.
+    /// Starts a checkpoint of the durable rows at the synced tick `t` when the WAL has grown past the threshold
+    /// since the last one. Every tick up to `t` has just been released, so the released image is the image at `t`.
     fn maybe_checkpoint(&mut self, t: SyncedTick, durable: &DurableCodec<'_>) -> Result<(), RuntimeError> {
         if self.checkpoint_busy || t.lsn().0.saturating_sub(self.last_checkpoint_lsn) < self.checkpoint_bytes {
             return Ok(());

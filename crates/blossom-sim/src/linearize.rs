@@ -42,7 +42,9 @@ pub enum Verdict {
     Linearizable,
     /// No linearization exists. `longest` is the longest prefix of operations (indices into the history, in
     /// linearization order) the search could place: the operation after it is where every ordering breaks.
-    NotLinearizable { longest: Vec<usize> },
+    NotLinearizable {
+        longest: Vec<usize>,
+    },
     /// The search visited more than the budget of states without an answer.
     Unknown,
 }
@@ -334,7 +336,10 @@ mod tests {
             op(2, Some(3), put("b"), Some(KvOutput::PutOk)),
             op(4, Some(5), get(), val(Some("a"))),
         ];
-        assert!(matches!(check(&KvModel, &stale, 1_000_000), Verdict::NotLinearizable { .. }));
+        assert!(matches!(
+            check(&KvModel, &stale, 1_000_000),
+            Verdict::NotLinearizable { .. }
+        ));
     }
 
     #[test]
@@ -356,7 +361,10 @@ mod tests {
             op(4, Some(6), get(), val(Some("b"))),
             op(7, Some(8), get(), val(Some("a"))),
         ];
-        assert!(matches!(check(&KvModel, &h, 1_000_000), Verdict::NotLinearizable { .. }));
+        assert!(matches!(
+            check(&KvModel, &h, 1_000_000),
+            Verdict::NotLinearizable { .. }
+        ));
     }
 
     #[test]
@@ -368,7 +376,10 @@ mod tests {
             op(3, Some(4), get(), val(Some("b"))),
             op(5, Some(6), get(), val(Some("a"))),
         ];
-        assert!(matches!(check(&KvModel, &h, 1_000_000), Verdict::NotLinearizable { .. }));
+        assert!(matches!(
+            check(&KvModel, &h, 1_000_000),
+            Verdict::NotLinearizable { .. }
+        ));
     }
 
     #[test]
@@ -385,7 +396,10 @@ mod tests {
             op(5, Some(6), get(), val(Some("a"))),
             op(7, Some(8), get(), val(None)),
         ];
-        assert!(matches!(check(&KvModel, &flicker, 1_000_000), Verdict::NotLinearizable { .. }));
+        assert!(matches!(
+            check(&KvModel, &flicker, 1_000_000),
+            Verdict::NotLinearizable { .. }
+        ));
     }
 
     #[test]
@@ -394,14 +408,33 @@ mod tests {
             op(0, Some(1), put("a"), Some(KvOutput::PutOk)),
             op(2, Some(3), get(), val(None)),
         ];
-        assert!(matches!(check(&KvModel, &h, 1_000_000), Verdict::NotLinearizable { .. }));
+        assert!(matches!(
+            check(&KvModel, &h, 1_000_000),
+            Verdict::NotLinearizable { .. }
+        ));
     }
 
     #[test]
     fn partitions_are_checked_independently() {
         let h = vec![
-            op(0, Some(1), KvInput::Put { key: b"x".to_vec(), val: b"1".to_vec() }, Some(KvOutput::PutOk)),
-            op(0, Some(1), KvInput::Put { key: b"y".to_vec(), val: b"2".to_vec() }, Some(KvOutput::PutOk)),
+            op(
+                0,
+                Some(1),
+                KvInput::Put {
+                    key: b"x".to_vec(),
+                    val: b"1".to_vec(),
+                },
+                Some(KvOutput::PutOk),
+            ),
+            op(
+                0,
+                Some(1),
+                KvInput::Put {
+                    key: b"y".to_vec(),
+                    val: b"2".to_vec(),
+                },
+                Some(KvOutput::PutOk),
+            ),
             op(2, Some(3), KvInput::Get { key: b"x".to_vec() }, val(Some("1"))),
             op(2, Some(3), KvInput::Get { key: b"y".to_vec() }, val(None)),
         ];
@@ -417,38 +450,47 @@ mod tests {
         use proptest::prelude::*;
         let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(200));
         runner
-            .run(&proptest::collection::vec((0u8..3, 0u8..4, 1u64..5, 0u64..4), 1..24), |steps| {
-                // Execute atomically at distinct instants, with each op's interval around its instant.
-                let mut state: Option<Vec<u8>> = None;
-                let mut h = Vec::new();
-                for (i, (kind, v, before, after)) in steps.iter().enumerate() {
-                    let at = 10 * i as u64 + 5;
-                    let (input, output) = match kind {
-                        0 => {
-                            state = Some(vec![*v]);
-                            (KvInput::Put { key: b"k".to_vec(), val: vec![*v] }, KvOutput::PutOk)
-                        }
-                        1 => (KvInput::Get { key: b"k".to_vec() }, KvOutput::Value(state.clone())),
-                        _ => {
-                            let existed = state.is_some();
-                            state = None;
-                            (KvInput::Delete { key: b"k".to_vec() }, KvOutput::Deleted(existed))
-                        }
-                    };
-                    h.push(op(at - before, Some(at + after), input, Some(output)));
-                }
-                prop_assert_eq!(check(&KvModel, &h, 10_000_000), Verdict::Linearizable);
-                // A read of a value nobody wrote is never linearizable.
-                if let Some(pos) = h.iter().position(|o| matches!(o.input, KvInput::Get { .. })) {
-                    let mut bad = h.clone();
-                    if let Some(o) = bad.get_mut(pos) {
-                        o.output = Some(KvOutput::Value(Some(vec![99])));
+            .run(
+                &proptest::collection::vec((0u8..3, 0u8..4, 1u64..5, 0u64..4), 1..24),
+                |steps| {
+                    // Execute atomically at distinct instants, with each op's interval around its instant.
+                    let mut state: Option<Vec<u8>> = None;
+                    let mut h = Vec::new();
+                    for (i, (kind, v, before, after)) in steps.iter().enumerate() {
+                        let at = 10 * i as u64 + 5;
+                        let (input, output) = match kind {
+                            0 => {
+                                state = Some(vec![*v]);
+                                (
+                                    KvInput::Put {
+                                        key: b"k".to_vec(),
+                                        val: vec![*v],
+                                    },
+                                    KvOutput::PutOk,
+                                )
+                            }
+                            1 => (KvInput::Get { key: b"k".to_vec() }, KvOutput::Value(state.clone())),
+                            _ => {
+                                let existed = state.is_some();
+                                state = None;
+                                (KvInput::Delete { key: b"k".to_vec() }, KvOutput::Deleted(existed))
+                            }
+                        };
+                        h.push(op(at - before, Some(at + after), input, Some(output)));
                     }
-                    let is_bad = matches!(check(&KvModel, &bad, 10_000_000), Verdict::NotLinearizable { .. });
-                    prop_assert!(is_bad);
-                }
-                Ok(())
-            })
+                    prop_assert_eq!(check(&KvModel, &h, 10_000_000), Verdict::Linearizable);
+                    // A read of a value nobody wrote is never linearizable.
+                    if let Some(pos) = h.iter().position(|o| matches!(o.input, KvInput::Get { .. })) {
+                        let mut bad = h.clone();
+                        if let Some(o) = bad.get_mut(pos) {
+                            o.output = Some(KvOutput::Value(Some(vec![99])));
+                        }
+                        let is_bad = matches!(check(&KvModel, &bad, 10_000_000), Verdict::NotLinearizable { .. });
+                        prop_assert!(is_bad);
+                    }
+                    Ok(())
+                },
+            )
             .unwrap();
     }
 
@@ -493,7 +535,10 @@ mod tests {
                     .iter()
                     .map(|(call, dur, answered, kind, v, out)| {
                         let input = match kind {
-                            0 => KvInput::Put { key: b"k".to_vec(), val: vec![*v] },
+                            0 => KvInput::Put {
+                                key: b"k".to_vec(),
+                                val: vec![*v],
+                            },
                             1 => KvInput::Get { key: b"k".to_vec() },
                             _ => KvInput::Delete { key: b"k".to_vec() },
                         };

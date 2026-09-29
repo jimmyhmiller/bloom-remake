@@ -16,11 +16,28 @@ use blossom_sim::linearize::{KvInput, KvOutput, Operation};
 
 use crate::stopwatch::Stopwatch;
 
+/// Why an operation has no answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KvError {
+    /// No answer (timeout, connection lost, the store refused for now): the operation may or may not have
+    /// happened, which the history records.
+    Unavailable(String),
+    /// An answer that breaks the protocol (a malformed reply). The workload stops trusting the store: it is
+    /// reported, never recorded as an unanswered operation the checker would accept.
+    Protocol(String),
+}
+
+impl From<String> for KvError {
+    fn from(e: String) -> KvError {
+        KvError::Unavailable(e)
+    }
+}
+
 /// A session with a key-value store: one operation at a time.
 pub trait KvSession: Send {
-    fn put(&mut self, key: &[u8], val: &[u8]) -> Result<(), String>;
-    fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, String>;
-    fn delete(&mut self, key: &[u8]) -> Result<bool, String>;
+    fn put(&mut self, key: &[u8], val: &[u8]) -> Result<(), KvError>;
+    fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, KvError>;
+    fn delete(&mut self, key: &[u8]) -> Result<bool, KvError>;
 }
 
 /// Opens sessions.
@@ -54,6 +71,8 @@ pub struct Outcome {
     pub latencies: Vec<u64>,
     pub answered: u64,
     pub unanswered: u64,
+    /// Protocol violations seen (malformed replies): any makes the run invalid.
+    pub protocol_errors: Vec<String>,
     pub elapsed: Duration,
 }
 
@@ -95,7 +114,9 @@ pub fn run(store: Arc<dyn KvStore>, w: &Workload, stop: Arc<AtomicBool>) -> Outc
     let mut threads = Vec::new();
     for c in 0..w.clients {
         let (store, out, stop, w) = (store.clone(), out.clone(), stop.clone(), w.clone());
-        threads.push(std::thread::spawn(move || client(c, &*store, &w, epoch, deadline, &stop, &out)));
+        threads.push(std::thread::spawn(move || {
+            client(c, &*store, &w, epoch, deadline, &stop, &out)
+        }));
     }
     for t in threads {
         // A client thread that panicked has recorded what it did; the rest of the outcome stands.
@@ -168,7 +189,11 @@ fn client(
                     });
                 }
             }
-            Err(_) => {
+            Err(KvError::Protocol(e)) => {
+                local.protocol_errors.push(e);
+                session = None;
+            }
+            Err(KvError::Unavailable(_)) => {
                 local.unanswered += 1;
                 if w.record {
                     local.history.push(Operation {
@@ -186,6 +211,7 @@ fn client(
         o.history.append(&mut local.history);
         o.latencies.append(&mut local.latencies);
         o.answered += local.answered;
+        o.protocol_errors.append(&mut local.protocol_errors);
         o.unanswered += local.unanswered;
     }
 }

@@ -35,11 +35,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use blossom_base::RelId;
+use blossom_base::TypeId;
 use blossom_ir::core::{Program, RelClass};
 use blossom_oracle::Row;
 use blossom_value::time::NodeId;
 use blossom_value::value::IntValue;
-use blossom_base::TypeId;
 use blossom_value::{Seed, TypeDef, Value};
 
 use crate::RuntimeError;
@@ -142,15 +142,21 @@ impl DeploymentSpec {
 
     /// Parses and validates a spec whose relative paths are relative to `base`.
     pub fn parse(text: &str, base: &Path) -> Result<DeploymentSpec, RuntimeError> {
-        let raw: RawSpec =
-            toml::from_str(text).map_err(|e| RuntimeError::Config(format!("deployment spec: {e}")))?;
+        let raw: RawSpec = toml::from_str(text).map_err(|e| RuntimeError::Config(format!("deployment spec: {e}")))?;
         if raw.format != 1 {
-            return Err(invalid("format", format!("{} is not a format this build reads (1)", raw.format)));
+            return Err(invalid(
+                "format",
+                format!("{} is not a format this build reads (1)", raw.format),
+            ));
         }
         let security = match raw.security.mode.as_str() {
             "insecure-dev" => SecurityMode::InsecureDev,
             "mtls" => {
-                return Err(blossom_base::unimplemented_error!("DIST-060", "mTLS transport (security.mode = \"mtls\")").into());
+                return Err(blossom_base::unimplemented_error!(
+                    "DIST-060",
+                    "mTLS transport (security.mode = \"mtls\")"
+                )
+                .into());
             }
             other => return Err(invalid("security.mode", format!("unknown mode {other:?}"))),
         };
@@ -341,9 +347,9 @@ fn value_of(program: &Program, ty: TypeId, v: &toml::Value, names: &[Arc<str>]) 
     let def = program.types.def(ty).map_err(|e| e.to_string())?;
     Ok(match (def, v) {
         (TypeDef::Bool, toml::Value::Boolean(b)) => Value::Bool(*b),
-        (TypeDef::Int(t), toml::Value::Integer(n)) => Value::Int(
-            IntValue::from_i128(*t, i128::from(*n)).ok_or_else(|| format!("{n} is out of range for {t:?}"))?,
-        ),
+        (TypeDef::Int(t), toml::Value::Integer(n)) => {
+            Value::Int(IntValue::from_i128(*t, i128::from(*n)).ok_or_else(|| format!("{n} is out of range for {t:?}"))?)
+        }
         (TypeDef::Str, toml::Value::String(s)) => Value::Str(s.as_str().into()),
         (TypeDef::Principal, toml::Value::String(s)) => Value::Principal(s.as_str().into()),
         (TypeDef::Bytes, toml::Value::String(s)) => Value::Bytes(s.as_bytes().into()),
@@ -354,6 +360,10 @@ fn value_of(program: &Program, ty: TypeId, v: &toml::Value, names: &[Arc<str>]) 
                 .ok_or_else(|| format!("no node named `{s}`"))?;
             Value::Node(NodeId(u32::try_from(i).map_err(|_| "too many nodes".to_string())?))
         }
-        (def, v) => return Err(format!("cannot read {v} as a {def:?} (this build reads bool, integers, strings, principals, bytes and nodes)")),
+        (def, v) => {
+            return Err(format!(
+                "cannot read {v} as a {def:?} (this build reads bool, integers, strings, principals, bytes and nodes)"
+            ));
+        }
     })
 }

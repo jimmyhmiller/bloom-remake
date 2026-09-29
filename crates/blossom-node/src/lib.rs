@@ -17,7 +17,6 @@ pub mod node;
 pub mod recovery;
 pub mod timers;
 
-
 use blossom_base::{InternalError, Unimplemented};
 use blossom_oracle::OracleError;
 use blossom_store::StoreError;

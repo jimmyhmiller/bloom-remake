@@ -357,14 +357,10 @@ fn every_crash_point_keeps_every_acknowledged_put() {
     }
     let cuts = fs.recorded_cuts().unwrap();
     assert!(cuts.len() > 30, "only {} cuts", cuts.len());
-    for (c, cut) in cuts.into_iter().enumerate() {
-        let mut cut = cut;
-        cut.crash(&mut |_| WriteFate::Lost).unwrap();
-        // A cut before the store was initialized has nothing to recover; `InitFresh` starts it again.
-        let d = k.boot(&cut, 0);
-        let store: std::collections::BTreeMap<String, Vec<u8>> = k.store(&d).into_iter().collect();
-        // The expected value of each key: the last put acknowledged at or before this cut, or any later put to it
-        // (a put may be durable before its reply is released).
+    // The value of each key must be the last put acknowledged by the cut, or any later put to it (a put may be
+    // durable before its reply is released).
+    let check = |d: &ManualDriver<'_, Arc<Oracle>>, c: usize, what: &str| {
+        let store: std::collections::BTreeMap<String, Vec<u8>> = k.store(d).into_iter().collect();
         for key in (0..4).map(|i| format!("k{i}")) {
             let last_acked = acked.iter().rfind(|(k2, _, at)| *k2 == key && *at <= c + 1);
             let allowed: Vec<&Vec<u8>> = acked
@@ -374,8 +370,44 @@ fn every_crash_point_keeps_every_acknowledged_put() {
                 .collect();
             match (store.get(&key), last_acked) {
                 (None, None) => {}
-                (Some(v), _) => assert!(allowed.contains(&v), "cut {c}: {key} = {v:?}, allowed {allowed:?}"),
-                (None, Some((_, v, _))) => panic!("cut {c}: {key} lost its acknowledged value {v:?}"),
+                (Some(v), _) => assert!(allowed.contains(&v), "cut {c} ({what}): {key} = {v:?}, allowed {allowed:?}"),
+                (None, Some((_, v, _))) => panic!("cut {c} ({what}): {key} lost its acknowledged value {v:?}"),
+            }
+        }
+    };
+    // Each unsynced write's fate at a crash: all lost, all kept, all torn, or a mix.
+    type Fate = fn(usize) -> WriteFate;
+    let fates: [(&str, Fate); 4] = [
+        ("lost", |_| WriteFate::Lost),
+        ("kept", |_| WriteFate::Survive),
+        ("torn", |_| WriteFate::Torn { sectors: 1 }),
+        ("mixed", |i| match i % 3 {
+            0 => WriteFate::Survive,
+            1 => WriteFate::Lost,
+            _ => WriteFate::Torn { sectors: 1 },
+        }),
+    ];
+    for (c, cut) in cuts.into_iter().enumerate() {
+        for (what, fate) in fates {
+            let mut image = cut.fork().unwrap();
+            let mut i = 0;
+            image
+                .crash(&mut |_| {
+                    i += 1;
+                    fate(i)
+                })
+                .unwrap();
+            // A cut before the store was initialized has nothing to recover; `InitFresh` starts it again.
+            if c % 7 != 0 || what != "mixed" {
+                check(&k.boot(&image, 0), c, what);
+                continue;
+            }
+            // Also crash during this recovery, at each of its durable syscalls, and recover again.
+            image.enable_crash_recording().unwrap();
+            check(&k.boot(&image, 0), c, what);
+            for (r, mut again) in image.recorded_cuts().unwrap().into_iter().enumerate() {
+                again.crash(&mut |_| WriteFate::Lost).unwrap();
+                check(&k.boot(&again, 0), c, &format!("{what}, then a crash at recovery step {r}"));
             }
         }
     }
@@ -504,4 +536,61 @@ fn e01_in_the_cluster_simulator_is_linearizable_under_crashes() {
     }
     assert!(total.0 > 1000, "only {} answered", total.0);
     assert!(total.1 > 0 && total.2 > 50, "unanswered {}, crashes {}", total.1, total.2);
+}
+
+/// Regression (S3 review): the boot instant is after every instant a released tick had, even when a checkpoint
+/// covered (and the WAL truncation deleted) the records that carried it.
+#[test]
+fn the_clock_does_not_go_back_after_a_checkpoint() {
+    let k = Kvs::new();
+    let mut fs = SimFs::default();
+    {
+        let mut d = k.boot(&fs, 1_000);
+        d.run_until_quiescent(Instant(1_000)).unwrap();
+        d.node.offer_ingress(k.put(1, 1, "a", b"x"));
+        let r = d.run_until_quiescent(Instant(5_000_000_000)).unwrap();
+        assert_eq!(replies(&k, &r).len(), 1, "the put was released at instant 5 s");
+        d.checkpoint().unwrap();
+        d.checkpoint().unwrap(); // nothing new: a no-op
+    }
+    fs.crash(&mut |_| WriteFate::Lost).unwrap();
+    let d = k.boot(&fs, 2_000);
+    assert!(d.node.last_now() > Instant(5_000_000_000), "boot instant {:?}", d.node.last_now());
+}
+
+/// Regression (S3 review): a tick that reads no WAL record still exposes its instant; after an idle stretch longer
+/// than the time reservation, its reply waits for the reservation to be durable, and a restart boots after it.
+#[test]
+fn a_released_read_is_covered_by_the_time_reservation() {
+    let k = Kvs::new();
+    let mut fs = SimFs::default();
+    let read_at = 60_000_000_000; // a minute after boot: far past the boot reservation
+    {
+        let mut d = k.boot(&fs, 0);
+        d.run_until_quiescent(Instant(0)).unwrap();
+        d.node.offer_ingress(k.get(1, 1, "a"));
+        let r = d.run_until_quiescent(Instant(read_at)).unwrap();
+        assert_eq!(replies(&k, &r).len(), 1);
+        assert!(d.meta().last_now >= read_at, "META's time bound {} covers the read", d.meta().last_now);
+    }
+    fs.crash(&mut |_| WriteFate::Lost).unwrap();
+    let d = k.boot(&fs, 0);
+    assert!(d.node.last_now() > Instant(read_at));
+}
+
+/// Regression (S3 review): large messages are spread over ticks by the batch byte limit, so no tick's WAL record
+/// exceeds the record limit.
+#[test]
+fn large_puts_are_spread_over_ticks() {
+    let k = Kvs::new();
+    let fs = SimFs::default();
+    let mut d = k.boot(&fs, 1_000);
+    d.run_until_quiescent(Instant(1_000)).unwrap();
+    let big = vec![b'v'; 14 << 20];
+    for i in 0..5u64 {
+        d.node.offer_ingress(k.put(1 + i, i, &format!("k{i}"), &big));
+    }
+    let r = d.run_until_quiescent(Instant(2_000)).unwrap();
+    assert_eq!(replies(&k, &r).len(), 5);
+    assert_eq!(k.store(&d).len(), 5);
 }

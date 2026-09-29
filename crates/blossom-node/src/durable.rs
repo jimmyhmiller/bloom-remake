@@ -208,7 +208,12 @@ impl<'p> DurableCodec<'p> {
     /// A WAL record payload: every changed relation's inserts and deletes.
     pub fn encode_delta(&self, delta: &Delta) -> Result<Vec<u8>, NodeError> {
         let mut out = Vec::new();
-        let changed = || delta.changes.iter().filter(|(_, (i, d))| !i.is_empty() || !d.is_empty());
+        let changed = || {
+            delta
+                .changes
+                .iter()
+                .filter(|(_, (i, d))| !i.is_empty() || !d.is_empty())
+        };
         put_varint(&mut out, changed().count() as u64);
         for (rel, (inserts, deletes)) in changed() {
             self.put_header(*rel, &mut out)?;

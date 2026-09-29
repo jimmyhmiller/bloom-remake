@@ -74,11 +74,11 @@ impl<'p, E: Evaluator> ManualDriver<'p, E> {
     }
 
     fn commit(&mut self, fx: &TickEffects, sink: &mut dyn FnMut(ReleasedTick)) -> Result<(), NodeError> {
-        if let Some(upto) = fx.reserve {
-            self.opened.record.reserved_tick = upto.0;
-            self.opened.record.last_now = self.opened.record.last_now.max(fx.now.0);
+        if let Some(r) = fx.reserve {
+            self.opened.record.reserved_tick = r.ticks.0;
+            self.opened.record.last_now = self.opened.record.last_now.max(r.now.0);
             MetaStore::write(&self.opened.meta, &self.opened.record)?;
-            self.node.reserved(upto);
+            self.node.reserved(r).into_iter().for_each(&mut *sink);
         }
         let Some(delta) = &fx.wal else {
             self.node.release_ready().into_iter().for_each(&mut *sink);
@@ -122,6 +122,7 @@ impl<'p, E: Evaluator> ManualDriver<'p, E> {
         let id = self.opened.checkpoints.write(snap, covers)?;
         let token = self.opened.checkpoints.install(id)?;
         self.opened.wal.truncate_through(token)?;
+        self.opened.checkpoints.prune()?;
         self.checkpointed = Some(covers.tick());
         Ok(())
     }

@@ -177,6 +177,16 @@ fn parse_record(b: &[u8], off: usize, base: u64) -> Result<(WalRecordBuf, usize)
     }
     let end = off.checked_add(len).ok_or_else(|| invalid("record overflow"))?;
     let raw = b.get(off..end).ok_or_else(|| invalid("record truncated"))?;
+    // The LSN is the record's own position: checking it first rejects almost every misaligned candidate without
+    // checksumming its (claimed) length, which keeps the torn-tail search linear.
+    let claimed = raw
+        .get(8..16)
+        .and_then(|l| <[u8; 8]>::try_from(l).ok())
+        .map(u64::from_le_bytes)
+        .ok_or_else(|| invalid("record LSN"))?;
+    if claimed != base.checked_add(off as u64).ok_or_else(|| invalid("LSN overflow"))? {
+        return Err(invalid("record LSN"));
+    }
     let crc = u32::from_le_bytes(take(b, &mut at)?);
     let mut content = raw.get(..4).ok_or_else(|| invalid("record length"))?.to_vec();
     content.extend(raw.get(8..).ok_or_else(|| invalid("record body"))?);
@@ -453,6 +463,36 @@ impl WalWriter for FileWal {
         Ok(())
     }
 }
+/// Whether damage at `off` can be the torn tail of the last, unsynced batch rather than corruption of synced data.
+///
+/// Batch `k + 1` is written only after batch `k`'s sync returned, and a sync ends with a marker whose batch is `k + 1`.
+/// The records of the one unsynced batch can be lost or torn in any order. So the damage is a torn tail iff every
+/// whole record after it belongs to a single data batch `B` that no marker certifies, and `B` is the batch the damage
+/// is in: the batch of the record before the damage, or a later one when that record is a sync marker (the previous
+/// batch ended there) or the damage is at the start of the segment.
+fn torn_tail(bytes: &[u8], off: usize, base: u64, last: Option<(u64, u8)>) -> bool {
+    let mut later: Option<u64> = None;
+    for candidate in off + 1..bytes.len() {
+        let Ok((r, _)) = parse_record(bytes, candidate, base) else {
+            continue;
+        };
+        if r.kind == SYNC_MARKER || later.is_some_and(|b| b != r.batch) {
+            return false;
+        }
+        later = Some(r.batch);
+    }
+    match (later, last) {
+        (None, _) => true,
+        (Some(_), None) => true,
+        (Some(b), Some((lb, kind))) => b == lb || (b > lb && kind == SYNC_MARKER),
+    }
+}
+
+/// A segment file's sequence number, from its name.
+fn segment_seq_of(path: &Path) -> Option<u64> {
+    path.file_stem()?.to_str()?.parse().ok()
+}
+
 /// Recovered segment and its own opaque catalog.
 #[derive(Debug)]
 pub struct ScannedSegment {
@@ -485,7 +525,32 @@ impl WalScan {
                 return Err(corrupt(&path, MAX_RECORD, "segment exceeds 64 MiB"));
             }
             let bytes = read_all(&*file)?;
-            let (header, mut off) = parse_header(&bytes).map_err(|e| corrupt(&path, 0, &e.to_string()))?;
+            let (header, mut off) = match parse_header(&bytes) {
+                Ok(h) => h,
+                Err(e) => {
+                    // A newest segment whose header never became durable (a crash inside `create` or `roll`, which
+                    // can leave the directory entry without the data): no record was ever appended to it, because
+                    // records follow the header's sync. With no receipt, nothing in it was acknowledged.
+                    let newest = segment_index + 1 == segment_count;
+                    let receipt =
+                        segment_seq_of(&path).map(|seq| fs.open(&receipt_path(dir, seq), OpenOpts::default()));
+                    let acknowledged = match receipt {
+                        Some(Ok(_)) => true,
+                        Some(Err(StoreError::Io(io))) if io.kind() == std::io::ErrorKind::NotFound => false,
+                        Some(Err(other)) => return Err(other),
+                        None => true,
+                    };
+                    if newest && !acknowledged {
+                        if repair {
+                            drop(file);
+                            fs.remove(&path)?;
+                            fs.sync_dir(dir)?;
+                        }
+                        break;
+                    }
+                    return Err(corrupt(&path, 0, &e.to_string()));
+                }
+            };
             let receipt = read_receipt(fs, dir, &header)?;
             if header.store_uuid != uuid
                 || path != segment_path(dir, header.segment_seq)
@@ -502,28 +567,30 @@ impl WalScan {
                 return Err(corrupt(&path, 0, "acknowledgement frontier outside segment"));
             }
             let mut records = Vec::new();
-            let mut last_batch = 0;
+            // The batch and kind of the last whole record (none yet in this segment).
+            let mut last: Option<(u64, u8)> = None;
             while off < bytes.len() {
                 match parse_record(&bytes, off, base) {
                     Ok((rec, end)) => {
-                        if rec.batch < last_batch {
+                        if last.is_some_and(|(b, _)| rec.batch < b) {
                             return Err(corrupt(&path, off, "batch decreases"));
                         }
-                        last_batch = rec.batch;
+                        last = Some((rec.batch, rec.kind));
                         if rec.kind != SYNC_MARKER {
                             records.push((Lsn(base + off as u64), rec));
                         }
                         off = end;
                     }
                     Err(_) => {
-                        let later_batch = (off + 1..bytes.len()).any(|candidate| {
-                            parse_record(&bytes, candidate, base).is_ok_and(|(r, _)| r.batch > last_batch)
-                        });
-                        if later_batch
-                            || segment_index + 1 < segment_count
-                            || receipt.is_some_and(|end| end.0 > base + off as u64)
-                        {
-                            return Err(corrupt(&path, off, "damage before a later synced batch or segment"));
+                        if segment_index + 1 < segment_count || receipt.is_some_and(|end| end.0 > base + off as u64) {
+                            return Err(corrupt(
+                                &path,
+                                off,
+                                "damage before a later segment or acknowledged data",
+                            ));
+                        }
+                        if !torn_tail(&bytes, off, base, last) {
+                            return Err(corrupt(&path, off, "damage before a later synced batch"));
                         }
                         if repair {
                             file.truncate(off as u64)?;
