@@ -19,6 +19,11 @@ blossom-wire.workspace = true
 blossom-store.workspace = true
 blossom-trace.workspace = true
 blossom-node.workspace = true
+blossom-oracle.workspace = true
+blake3.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true

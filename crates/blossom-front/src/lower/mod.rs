@@ -92,6 +92,7 @@ pub fn lower(hir: &Hir, deployment: &Deployment<'_>) -> Result<Lowered, Internal
         let id = l.declare_hrel(HRelId(i as u32))?;
         l.rels.push(id);
     }
+    l.acls()?;
     l.members(deployment)?;
     l.tables()?;
     l.facts(deployment)?;
@@ -425,6 +426,27 @@ impl Lowerer<'_> {
             self.b.end_construct(c).map_err(ir)?;
         }
         Ok(id)
+    }
+
+    /// Every channel's explicit ACL (LANGUAGE §18.3), once the relations it names are declared.
+    fn acls(&mut self) -> Result<(), InternalError> {
+        for (i, r) in self.hir.rels.iter().enumerate() {
+            let HRelKind::Channel(hir::ChannelInfo { acl: Some(acl), .. }) = &r.kind else {
+                continue;
+            };
+            let principal_in = match acl.principal_in {
+                Some(h) => Some(self.rel(h)?),
+                None => None,
+            };
+            let spec = AclSpec::Explicit(AclExplicit {
+                roles: acl.roles.iter().map(|r| RoleId::from_raw(r.0)).collect(),
+                external: acl.external,
+                principal_in,
+            });
+            let rel = self.rel(HRelId(i as u32))?;
+            self.b.set_acl(rel, spec).map_err(ir)?;
+        }
+        Ok(())
     }
 
     /// A generated relation in the currently open construct.

@@ -1,0 +1,193 @@
+//! E12. Raft (Ongaro and Ousterhout, "In Search of an Understandable Consensus Algorithm", 2014): leader election
+//! and log replication for a fixed group, as rules. This is the compact Raft of the Molly corpus
+//! (tests/corpus/ldfi/molly/lib/raft/raft.ded) written in Blossom, rule for rule, so that its LDFI verdicts can be
+//! compared with the `.ded` ones (`e12_raft_specs.bls`). This file is a library: it has no `program` header.
+//!
+//! Terms: every server adopts the highest term it sees in a message, and never goes back.
+//! Elections: a server that for `patience` ticks has not led, heard the leader of its term, granted a vote or started
+//! a candidacy becomes a candidate for the next term, votes for itself and asks its peers once; a server grants one
+//! vote per term, to a candidate whose log is at least as up to date as its own, preferring the highest-ranked of
+//! simultaneous requests; a candidate with votes from a majority (two of three) leads the term.
+//! Replication: a leader ships its whole log and its commit index to every peer at every tick (AppendEntries from
+//! index 1); a server that hears the leader of its current term replaces its log with the leader's, acknowledges each
+//! entry and learns which entries are committed. A leader appends a client value submitted to it while it leads.
+//!
+//! The `.ded` model is composed from a vote module and a commit module; here the three rules they vary are value
+//! parameters, and the seeded bugs of the corpus are instances with one of them turned off.
+
+/// One Raft server.
+///
+/// - `ONE_VOTE`: a server grants at most one vote per term, to the highest-ranked of simultaneous requests
+///   (vote_checked.ded). Off, it grants every acceptable request of its term, also after voting (vote_twice.ded).
+/// - `LOG_CHECK`: a vote needs the candidate's log to be at least as up to date as the voter's (§5.4.1). Off, any
+///   request of the voter's term is acceptable (vote_unchecked.ded).
+/// - `COMMIT_QUORUM`: the leader of term `t` commits index `i` once a majority holds the entry and the entry was
+///   created in term `t` (§5.3, §5.4.2; commit_majority.ded). Off, it commits an entry of its term as soon as it
+///   appends it (commit_eager.ded).
+pub module Raft(ONE_VOTE: bool = true, LOG_CHECK: bool = true, COMMIT_QUORUM: bool = true) {
+    /// The other servers of the group.
+    static peer(n: Node);
+    /// The rank of every server: of simultaneous vote requests, the highest-ranked is granted.
+    static rank(n: Node, r: u64);
+    /// The election timeout, in ticks of silence.
+    static patience(k: u64);
+    /// The server that leads term 1 from the start: the outcome of a first election.
+    static first_leader(n: Node);
+    /// A client submits a value to this server.
+    input submit(v: String);
+
+    /// RequestVote, with the candidate's last log index and term.
+    channel request(term: u64, last_idx: u64, last_term: u64);
+    /// A granted vote.
+    channel vote(term: u64);
+    /// AppendEntries' header: the leader's term and commit index.
+    channel beat(term: u64, commit: u64);
+    /// One log entry of the leader's AppendEntries.
+    channel entry(term: u64, idx: u64, eterm: u64, v: String);
+    /// A follower holds the leader's entry `idx`.
+    channel has_copy(term: u64, idx: u64);
+
+    /// The term this server is in: the highest term it saw in the previous tick.
+    table cur_term(t: u64) key();
+    /// Ticks since the leader of the current term was last heard (or since the last candidacy or vote).
+    table quiet(k: u64) key();
+    /// Terms this server led before this tick.
+    table led(t: u64);
+    /// Terms this server won.
+    table leads(t: u64);
+    /// Votes a candidate received (its own included).
+    table tally(t: u64, voter: Node);
+    /// Votes this server gave, from the tick after it gave them.
+    table cast(t: u64, cand: Node);
+    table log(idx: u64, term: u64, v: String);
+    /// Followers that hold entry `idx` of this leader's term `t`.
+    table copies(t: u64, idx: u64, f: Node);
+    table committed(idx: u64, v: String);
+
+    /// The group's initial state holds from tick 1, the tick of the `.ded` model's group facts: every server is in
+    /// term 1 with an empty log and a reset timer, and the first leader leads term 1.
+    bootstrap {
+        next cur_term(1);
+        next quiet(0);
+        if first_leader(self) {
+            next leads(1);
+        }
+    }
+
+    // ---- terms
+    view top_term(t = max!(x)) {
+        cur_term(x);
+        request(x, _, _);
+        vote(x);
+        beat(x, _);
+        starts(x);
+    }
+    adopt_term: while top_term(t) {
+        upsert cur_term(t);
+    }
+
+    // ---- the election timer
+    view leading() = leads(t), top_term(t);
+    view heard_leader() = beat(t, _), top_term(t);
+    view reset_timer() {
+        heard_leader();
+        starts(_);
+        grant(_, _);
+        leading();
+    }
+    reset: while reset_timer() {
+        upsert quiet(0);
+    }
+    wait: while quiet(k), not reset_timer() {
+        upsert quiet(k + 1);
+    }
+    remember_lead: while leads(t) {
+        next led(t);
+    }
+    view was_leading() = led(t), cur_term(t);
+    view starts(t) = quiet(k), patience(k), cur_term(c), not was_leading(), let t = c + 1;
+
+    // ---- the log
+    view last_index(i = max!(j)) = log(j, _, _);
+    view last_entry(i, t) {
+        last_index(i), log(i, t, _);
+        cur_term(_), not log(_, _, _), let i = 0, let t = 0;
+    }
+
+    // ---- candidate
+    campaign: while starts(t) {
+        next cast(t, self);
+        emit tally(t, self);
+        for peer(m), last_entry(li, lt) {
+            send request(t, li, lt) to m;
+        }
+    }
+    count_vote: on vote(t) from m {
+        emit tally(t, m);
+    }
+    view votes_for(t, k = count!(m)) = tally(t, m);
+    win: while votes_for(t, k), top_term(t) where k > 1 {
+        emit leads(t);
+    }
+
+    // ---- voter
+    /// A request this server may answer: of the highest term it has seen, not a term it is itself standing for,
+    /// and (with `LOG_CHECK`) from a candidate whose last entry has a later term, or the same term and at least
+    /// the same index.
+    view acceptable(c, t) {
+        request(t, li, lt) from c, top_term(t), not starts(t), last_entry(mi, mt)
+            where LOG_CHECK, lt > mt || (lt == mt && li >= mi);
+        request(t, _, _) from c, top_term(t), not starts(t) where not LOG_CHECK;
+    }
+    view eligible(c, t) = acceptable(c, t), not cast(t, _);
+    view best_rank(t, r = max!(x)) = eligible(c, t), rank(c, x);
+    view grant(c, t) {
+        eligible(c, t), rank(c, r), best_rank(t, r) where ONE_VOTE;
+        acceptable(c, t) where not ONE_VOTE;
+    }
+    grant_vote: on grant(c, t) {
+        next cast(t, c);
+        send vote(t) to c;
+    }
+
+    // ---- replication
+    view appending() = submit(_), leading();
+    append: on submit(v), leading(), leads(t), last_entry(i, _) {
+        next log(i + 1, t, v);
+    }
+    replicate: while leading(), leads(t), peer(f) {
+        for commit_index(ci) {
+            send beat(t, ci) to f;
+        }
+        for log(i, et, v) {
+            send entry(t, i, et, v) to f;
+        }
+    }
+    view follows(l, t) = beat(t, _) from l, top_term(t);
+    /// A follower replaces its log with the leader's: its own entries go, unless it is appending as a leader.
+    replace: on follows(_, _), log(i, et, v), not appending() {
+        delete log(i, et, v);
+    }
+    accept: on follows(l, t), entry(t, i, et, v) from l {
+        next log(i, et, v);
+        send has_copy(t, i) to l;
+    }
+    note_copy: on has_copy(t, i) from f {
+        emit copies(t, i, f);
+    }
+
+    // ---- commit
+    /// The highest index the leader commits: with `COMMIT_QUORUM`, an entry of its term that one of the two other
+    /// servers holds (with the leader, a majority of three); without, any entry of its term.
+    view committed_upto(i) {
+        leading(), leads(t), log(i, t, _), copies(t, i, _) where COMMIT_QUORUM;
+        leading(), leads(t), log(i, t, _) where not COMMIT_QUORUM;
+    }
+    commit: while committed_upto(n), log(j, _, v) where j <= n {
+        emit committed(j, v);
+    }
+    learn: on follows(l, t), beat(t, ci) from l, entry(t, j, _, v) from l where j <= ci {
+        emit committed(j, v);
+    }
+    view commit_index(ci = max!(j default 0)) = committed(j, _);
+}

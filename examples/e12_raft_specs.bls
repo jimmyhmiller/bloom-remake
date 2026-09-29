@@ -1,0 +1,177 @@
+//! E12 under LDFI: the Raft of `e12_raft.bls` with three servers, checked with the Molly corpus's Raft safety
+//! properties (raft_spec.ded): Election Safety, at most one leader per term, and State Machine Safety, servers that
+//! have not crashed never hold different committed values at one index.
+//!
+//! The `.ded` counterpart is the corpus's compact Raft (tests/corpus/ldfi/molly/lib/raft), BENCH-137a–h: correct
+//! Raft holds on the election scenario (8/5/0, 10/7/1) and on the commit scenario (8/4/0, 12/6/0, 12/6/1), and each
+//! seeded bug is a counterexample: a server that votes twice in a term (8/5/0), a leader that commits without a
+//! majority (8/4/0), and votes granted without the log check (12/6/0). The model's initial state holds from tick 1
+//! (`bootstrap` stages it with `next`), so its ticks are the `.ded` model's ticks and the bounds are the same. This
+//! file is a library of modules and specs: it has no `program` header.
+
+use e12_raft::Raft;
+
+/// Correct Raft: vote_checked.ded and commit_majority.ded.
+pub module Checked {
+    input submit(v: String);
+
+    import Raft as raft;
+
+    client: on submit(v) {
+        emit raft.submit(v);
+    }
+}
+
+/// SEEDED BUG (vote_twice.ded): a server grants every up-to-date request of its term, also after it voted in it.
+pub module VoteTwice {
+    input submit(v: String);
+
+    import Raft(ONE_VOTE = false) as raft;
+
+    client: on submit(v) {
+        emit raft.submit(v);
+    }
+}
+
+/// SEEDED BUG (vote_unchecked.ded): votes are granted without the log up-to-date check (§5.4.1).
+pub module VoteUnchecked {
+    input submit(v: String);
+
+    import Raft(LOG_CHECK = false) as raft;
+
+    client: on submit(v) {
+        emit raft.submit(v);
+    }
+}
+
+/// SEEDED BUG (commit_eager.ded): the leader commits an entry of its term as soon as it appends it.
+pub module EagerCommit {
+    input submit(v: String);
+
+    import Raft(COMMIT_QUORUM = false) as raft;
+
+    client: on submit(v) {
+        emit raft.submit(v);
+    }
+}
+
+/// group.ded: servers A, B and C; A leads term 1 from the start (the outcome of a first election, which keeps the
+/// failure-free run free of elections), and simultaneous vote requests are decided by rank (C > B > A).
+spec Group {
+    nodes A, B, C;
+    fact raft.peer(B) @ A;
+    fact raft.peer(C) @ A;
+    fact raft.peer(A) @ B;
+    fact raft.peer(C) @ B;
+    fact raft.peer(A) @ C;
+    fact raft.peer(B) @ C;
+    fact raft.rank(A, 1);
+    fact raft.rank(B, 2);
+    fact raft.rank(C, 3);
+    fact raft.first_leader(A);
+}
+
+/// election_timing.ded: election timeouts A 9 (the first leader does not compete again within the bound), B 2 and
+/// C 4; no client submits. When A's messages stop reaching B and C, both can become candidates for term 2.
+spec Election {
+    include Group;
+    fact raft.patience(9) @ A;
+    fact raft.patience(2) @ B;
+    fact raft.patience(4) @ C;
+}
+
+/// commit_timing.ded: election timeouts A 9, B 3 and C 4; the client submits "x" to A at tick 2, "y" to B at 6 and
+/// "y" to C at 8. When A's messages stop reaching a follower, that follower can become the leader of term 2 and
+/// append "y" at the index where A appended "x".
+spec Commit {
+    include Group;
+    fact raft.patience(9) @ A;
+    fact raft.patience(3) @ B;
+    fact raft.patience(4) @ C;
+    fact submit("x") @ A at tick 2;
+    fact submit("y") @ B at tick 6;
+    fact submit("y") @ C at tick 8;
+}
+
+/// raft_spec.ded, one row per property: some term has a leader (always: A leads term 1), and neither violation
+/// occurred. Under CR-20 a crashed server's state is frozen at its crash and stays visible, as Molly's is.
+spec RaftSafety {
+    view two_leaders(t) = raft.leads(t) @ n1, raft.leads(t) @ n2 where n1 != n2;
+    view disagree(i) =
+        raft.committed(i, v1) @ n1, raft.committed(i, v2) @ n2, not crashed(n1), not crashed(n2) where v1 != v2;
+    view pre(prop) {
+        raft.leads(_) @ _, let prop = "election safety";
+        raft.leads(_) @ _, let prop = "state machine safety";
+    }
+    view post(prop) {
+        raft.leads(_) @ _, not two_leaders(_), let prop = "election safety";
+        raft.leads(_) @ _, not disagree(_), let prop = "state machine safety";
+    }
+}
+
+/// No two leaders in a term, whatever messages are lost (BENCH-137a, 8/5/0).
+spec ElectionFaults for Checked {
+    include Election;
+    include RaftSafety;
+    faults { eot: 8, eff: 5, crashes: 0, model: sync }
+    check ldfi expect holds;
+}
+
+/// A server that votes twice in a term (BENCH-137b, 8/5/0): when A's messages stop reaching B and C, both stand for
+/// term 2 and A votes for both.
+spec VoteTwiceFaults for VoteTwice {
+    include Election;
+    include RaftSafety;
+    faults { eot: 8, eff: 5, crashes: 0, model: sync }
+    check ldfi expect fails;
+}
+
+/// Correct Raft on the commit scenario (BENCH-137c, 8/4/0).
+spec CommitFaults for Checked {
+    include Commit;
+    include RaftSafety;
+    faults { eot: 8, eff: 4, crashes: 0, model: sync }
+    check ldfi expect holds;
+}
+
+/// A leader that commits without a majority (BENCH-137d, 8/4/0): A commits "x" alone; when its messages are lost,
+/// B leads term 2 with C's vote and commits "y" at the same index.
+spec EagerCommitFaults for EagerCommit {
+    include Commit;
+    include RaftSafety;
+    faults { eot: 8, eff: 4, crashes: 0, model: sync }
+    check ldfi expect fails;
+}
+
+/// Correct Raft on the commit scenario over a longer run (BENCH-137e, 12/6/0).
+spec CommitLongFaults for Checked {
+    include Commit;
+    include RaftSafety;
+    faults { eot: 12, eff: 6, crashes: 0, model: sync }
+    check ldfi expect holds;
+}
+
+/// Votes without the log check (BENCH-137f, 12/6/0): a server that missed the committed "x" wins term 2 with the
+/// vote of a server that holds it, appends "y" at x's index and commits it.
+spec VoteUncheckedFaults for VoteUnchecked {
+    include Commit;
+    include RaftSafety;
+    faults { eot: 12, eff: 6, crashes: 0, model: sync }
+    check ldfi expect fails;
+}
+
+/// Correct Raft with a crash on the commit scenario (BENCH-137g, 12/6/1).
+spec CommitCrashFaults for Checked {
+    include Commit;
+    include RaftSafety;
+    faults { eot: 12, eff: 6, crashes: 1, model: sync }
+    check ldfi expect holds;
+}
+
+/// Correct Raft with a crash on the election scenario (BENCH-137h, 10/7/1).
+spec ElectionCrashFaults for Checked {
+    include Election;
+    include RaftSafety;
+    faults { eot: 10, eff: 7, crashes: 1, model: sync }
+    check ldfi expect holds;
+}

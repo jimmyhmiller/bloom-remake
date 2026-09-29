@@ -1,6 +1,16 @@
 #![deny(unsafe_op_in_unsafe_fn)]
-//! `blossom-wire`: the frame format, the field-numbered tuple codec, `WireLimits`, hello and version negotiation,
-//! cross-version translation and the codec ABI.
+//! `blossom-wire`: the frame format, the field-numbered tuple codec, `WireLimits`, hello and schema identities.
 //!
-//! See ARCHITECTURE §1.2. Implemented by WP M4.4, M11.3, M12.3; until then this crate is a placeholder that exposes
-//! nothing (PLAN §4 D1).
+//! See ARCHITECTURE §5.4. Slice 3 (docs/design/SLICES.md) implements the codec for every type the Blossom subset
+//! has, plain batches and the handshake; delta and group frame kinds, cross-version translation and the codec ABI
+//! belong to later slices and are rejected loudly.
+
+pub mod catalog;
+pub mod codec;
+pub mod frame;
+
+#[cfg(test)]
+mod tests;
+
+pub use codec::{Codec, NodeEncoding, WireError, WireLimits};
+pub use frame::{Batch, ChannelSchema, Frame, FrameIoError, Hello, Peer, RejectReason};

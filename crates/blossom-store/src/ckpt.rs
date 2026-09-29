@@ -89,6 +89,33 @@ impl FileCheckpoints {
         }
         Ok(snap)
     }
+    /// Removes every checkpoint directory other than the installed one (older checkpoints, and partial ones a crash
+    /// left behind). Call it after `install`: `CURRENT` no longer names any of them, so no crash can need them.
+    pub fn prune(&self) -> Result<usize, StoreError> {
+        let Some(current) = self.current()? else {
+            return Ok(0);
+        };
+        let root = self.dir.join("ckpt");
+        let mut removed = 0;
+        for dir in self.fs.list(&root)? {
+            let tick = dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.parse::<u64>().ok());
+            if tick == Some(current.tick) {
+                continue;
+            }
+            for f in self.fs.list(&dir)? {
+                self.fs.remove(&f)?;
+            }
+            self.fs.remove_dir(&dir)?;
+            removed += 1;
+        }
+        if removed > 0 {
+            self.fs.sync_dir(&root)?;
+        }
+        Ok(removed)
+    }
     /// Read the atomic CURRENT pointer. A missing pointer means no checkpoint was installed.
     pub fn current(&self) -> Result<Option<CheckpointId>, StoreError> {
         let bytes = match read_path(&*self.fs, &self.dir.join("CURRENT")) {

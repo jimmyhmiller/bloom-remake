@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b129e4d646b5e049e4a544cd81e030bb6c0a0d00813c01c2f53a54ca144a06e8 # shrinks to (i, v) = (5, Int(U128(170141183460469231731687303715884105728)))
