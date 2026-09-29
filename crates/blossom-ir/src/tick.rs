@@ -134,3 +134,78 @@ pub enum EvalError {
     #[error(transparent)]
     Internal(#[from] InternalError),
 }
+
+/// A tick's changes to a node's carried state: per relation, the rows added and the rows removed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Changes {
+    pub inserted: BTreeMap<RelId, Vec<Row>>,
+    pub deleted: BTreeMap<RelId, Vec<Row>>,
+}
+
+impl Changes {
+    pub fn is_empty(&self) -> bool {
+        self.inserted.values().all(Vec::is_empty) && self.deleted.values().all(Vec::is_empty)
+    }
+
+    /// The changes that turn `old` into `new`.
+    pub fn between(old: &Instance, new: &Instance) -> Changes {
+        let empty = BTreeSet::new();
+        let mut out = Changes::default();
+        for (rel, rows) in &new.rels {
+            let before = old.rels.get(rel).unwrap_or(&empty);
+            let added: Vec<Row> = rows.difference(before).cloned().collect();
+            if !added.is_empty() {
+                out.inserted.insert(*rel, added);
+            }
+        }
+        for (rel, rows) in &old.rels {
+            let after = new.rels.get(rel).unwrap_or(&empty);
+            let removed: Vec<Row> = rows.difference(after).cloned().collect();
+            if !removed.is_empty() {
+                out.deleted.insert(*rel, removed);
+            }
+        }
+        out
+    }
+
+    /// Applies the changes to `state`.
+    pub fn apply(&self, state: &mut Instance) {
+        for (rel, rows) in &self.deleted {
+            if let Some(set) = state.rels.get_mut(rel) {
+                for r in rows {
+                    set.remove(r);
+                }
+            }
+        }
+        for (rel, rows) in &self.inserted {
+            let set = state.rels.entry(*rel).or_default();
+            for r in rows {
+                set.insert(r.clone());
+            }
+        }
+        state.rels.retain(|_, rows| !rows.is_empty());
+    }
+}
+
+/// What one tick of a stateful executor reads: the tick's inputs, without the carried state (the executor keeps it).
+#[derive(Clone, Debug)]
+pub struct StepInput<'a> {
+    pub node: NodeId,
+    pub incarnation: u64,
+    pub tick: Tick,
+    pub now: Instant,
+    pub events: &'a [(RelId, Row)],
+    pub delivered: &'a [Delivery],
+    pub ingress: &'a [Ingress],
+}
+
+/// What one tick of a stateful executor produces.
+#[derive(Clone, Debug, Default)]
+pub struct StepOutput {
+    /// The changes to the carried state: what the next tick starts from, relative to what this one started from.
+    pub changes: Changes,
+    pub outbox: BTreeSet<Send>,
+    pub egress: BTreeSet<Egress>,
+    /// The final contents, at this tick, of the relations the caller asked to observe.
+    pub observed: BTreeMap<RelId, Vec<Row>>,
+}

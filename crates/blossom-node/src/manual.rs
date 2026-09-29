@@ -10,9 +10,9 @@ use blossom_value::time::{Instant, Tick};
 use crate::durable::DurableCodec;
 use crate::node::{Node, ReleasedTick, TickEffects};
 use crate::recovery::{KIND_DELTA, Opened};
-use crate::{Evaluator, NodeError};
+use crate::{Executor, NodeError};
 
-pub struct ManualDriver<'p, E: Evaluator> {
+pub struct ManualDriver<'p, E: Executor> {
     pub node: Node<E>,
     codec: DurableCodec<'p>,
     opened: Opened,
@@ -23,7 +23,7 @@ pub struct ManualDriver<'p, E: Evaluator> {
     checkpointed: Option<u64>,
 }
 
-impl<'p, E: Evaluator> ManualDriver<'p, E> {
+impl<'p, E: Executor> ManualDriver<'p, E> {
     pub fn new(
         node: Node<E>,
         program: &'p Program,

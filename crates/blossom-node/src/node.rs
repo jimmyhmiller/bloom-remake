@@ -24,11 +24,11 @@ use std::sync::Arc;
 use blossom_base::{RelId, RoleId, internal_error};
 use blossom_ir::ValidatedProgram;
 use blossom_ir::core::{EventSource, RelClass};
-use blossom_oracle::{Delivery, Egress, Ingress, Instance, Row, Send, TickInput};
+use blossom_ir::tick::{Delivery, Egress, Ingress, Instance, Row, Send, StepInput};
 use blossom_value::time::{Instant, NodeId, Tick};
 
 use crate::durable::{Delta, DurableImage, DurableSchema};
-use crate::eval::Evaluator;
+use crate::eval::Executor;
 use crate::timers::TimerTable;
 use crate::{NodeError, NodeFault};
 
@@ -147,8 +147,8 @@ enum Message {
     Ingress(Ingress),
 }
 
-pub struct Node<E: Evaluator> {
-    eval: E,
+pub struct Node<E: Executor> {
+    exec: E,
     cfg: NodeConfig,
     schema: DurableSchema,
     boot_rel: Option<RelId>,
@@ -162,8 +162,6 @@ pub struct Node<E: Evaluator> {
     reserving: bool,
     booted: bool,
     last_now: Instant,
-    /// Last tick's inductive heads.
-    carried: Instance,
     /// Whether the last tick staged a change (its inductive heads differ from the state it started with).
     staged: bool,
     /// The durable rows after the last computed tick.
@@ -182,9 +180,10 @@ pub struct Node<E: Evaluator> {
     state: NodeState,
 }
 
-impl<E: Evaluator> Node<E> {
-    /// Boots a node of `program` (the program the evaluator runs) from recovered state.
-    pub fn boot(cfg: NodeConfig, program: &ValidatedProgram, eval: E, boot: Boot) -> Result<Node<E>, NodeError> {
+impl<E: Executor> Node<E> {
+    /// Boots a node of `program` (the program the executor runs) from recovered state: the executor starts from the
+    /// durable rows (volatile state does not survive a restart).
+    pub fn boot(cfg: NodeConfig, program: &ValidatedProgram, mut exec: E, boot: Boot) -> Result<Node<E>, NodeError> {
         let p = program.get();
         let mut boot_rel = None;
         let mut recovered_rel = None;
@@ -214,12 +213,12 @@ impl<E: Evaluator> Node<E> {
             .into());
         }
         let schema = DurableSchema::of(p);
+        exec.reset(boot.image.instance())?;
         Ok(Node {
             timers: TimerTable::new(p, cfg.role, boot.now)?,
-            carried: boot.image.instance(),
             released_image: boot.image.clone(),
             image: boot.image,
-            eval,
+            exec,
             cfg,
             schema,
             boot_rel,
@@ -275,9 +274,9 @@ impl<E: Evaluator> Node<E> {
         self.released
     }
 
-    /// Last tick's carried state (for inspection and admission).
-    pub fn carried(&self) -> &Instance {
-        &self.carried
+    /// The carried rows of `rel` at the last computed tick.
+    pub fn carried_rows(&self, rel: RelId) -> Vec<Row> {
+        self.exec.carried_rows(rel)
     }
 
     /// The deployment's static rows.
@@ -301,7 +300,7 @@ impl<E: Evaluator> Node<E> {
                 || facts.rows(r).any(is)
                 || match self.released_image.rows.get(&r) {
                     Some(rows) => rows.iter().any(is),
-                    None => self.carried.rows(r).any(is),
+                    None => self.exec.carried_rows(r).iter().any(is),
                 }
         };
         acl.admit(rel, source, &principal_in).is_ok()
@@ -419,24 +418,38 @@ impl<E: Evaluator> Node<E> {
                 None => break,
             }
         }
-        let out = self.eval.tick(&TickInput {
-            node: self.cfg.node,
-            incarnation: self.incarnation,
-            tick,
-            now,
-            carried: &self.carried,
-            events: &events,
-            delivered: &delivered,
-            ingress: &ingress,
-            capture: false,
-        })?;
-        let next_image = DurableImage::of(&out.next, &self.schema);
-        let delta = self.image.delta(&next_image);
-        let halts = self.cfg.halt.is_some_and(|h| out.instance.rows(h).next().is_some());
+        let observe: Vec<RelId> = self.cfg.halt.into_iter().collect();
+        let out = self.exec.step(
+            &StepInput {
+                node: self.cfg.node,
+                incarnation: self.incarnation,
+                tick,
+                now,
+                events: &events,
+                delivered: &delivered,
+                ingress: &ingress,
+            },
+            &observe,
+        )?;
+        // The durable delta is the change to the durable relations.
+        let mut delta = Delta::default();
+        for (rel, rows) in &out.changes.inserted {
+            if self.schema.contains(*rel) && !rows.is_empty() {
+                delta.changes.entry(*rel).or_default().0.extend(rows.iter().cloned());
+            }
+        }
+        for (rel, rows) in &out.changes.deleted {
+            if self.schema.contains(*rel) && !rows.is_empty() {
+                delta.changes.entry(*rel).or_default().1.extend(rows.iter().cloned());
+            }
+        }
+        let halts = self
+            .cfg
+            .halt
+            .is_some_and(|h| out.observed.get(&h).is_some_and(|rows| !rows.is_empty()));
         let wal = !delta.is_empty();
-        self.staged = out.next != self.carried;
-        self.carried = out.next;
-        self.image = next_image;
+        self.staged = !out.changes.is_empty();
+        self.image.apply(&delta);
         self.booted = true;
         self.last_now = now;
         self.halting = halts;

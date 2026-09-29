@@ -11,7 +11,7 @@ use blossom_front::api::NodeSpec;
 use blossom_node::durable::DurableSchema;
 use blossom_node::manual::ManualDriver;
 use blossom_node::recovery::{self, StoreSpec};
-use blossom_node::{Node, NodeConfig, ReleasedTick};
+use blossom_node::{Executor, Node, NodeConfig, OracleExecutor, ReleasedTick};
 use blossom_oracle::{Ingress, Oracle};
 use blossom_store::{OpenMode, SimFs, StoreIdentity, Vfs, WriteFate};
 use blossom_value::Value;
@@ -81,7 +81,7 @@ impl Kvs {
     }
 
     /// Opens (recovers) the store on `fs` and boots the node.
-    fn boot<'a>(&'a self, fs: &SimFs, wall: i64) -> ManualDriver<'a, Arc<Oracle>> {
+    fn boot<'a>(&'a self, fs: &SimFs, wall: i64) -> ManualDriver<'a, Box<dyn Executor>> {
         // A clone of a `SimFs` is another handle on the same filesystem.
         let fs: Arc<dyn Vfs> = Arc::new(fs.clone());
         let opened = recovery::open(
@@ -99,7 +99,8 @@ impl Kvs {
         .unwrap();
         let mut cfg = NodeConfig::new(NodeId(0), self.artifact.roles.first().copied().flatten());
         cfg.halt = self.artifact.halt;
-        let node = Node::boot(cfg, &self.artifact.program, self.oracle.clone(), opened.boot.clone()).unwrap();
+        let exec: Box<dyn Executor> = Box::new(OracleExecutor::new(self.oracle.clone()));
+        let node = Node::boot(cfg, &self.artifact.program, exec, opened.boot.clone()).unwrap();
         ManualDriver::new(node, self.artifact.program.get(), &self.schema, self.names.clone(), opened)
     }
 
@@ -128,7 +129,7 @@ impl Kvs {
         }
     }
 
-    fn store(&self, d: &ManualDriver<'_, Arc<Oracle>>) -> Vec<(String, Vec<u8>)> {
+    fn store(&self, d: &ManualDriver<'_, Box<dyn Executor>>) -> Vec<(String, Vec<u8>)> {
         let rel = self.rel("store");
         d.node
             .released_image()
@@ -291,7 +292,8 @@ fn invariant_r_holds_under_random_sync_schedules() {
             )
             .unwrap();
             let cfg = NodeConfig::new(NodeId(0), k.artifact.roles.first().copied().flatten());
-            let mut node = Node::boot(cfg, &k.artifact.program, k.oracle.clone(), opened.boot).unwrap();
+            let exec: Box<dyn Executor> = Box::new(OracleExecutor::new(k.oracle.clone()));
+            let mut node = Node::boot(cfg, &k.artifact.program, exec, opened.boot).unwrap();
             let mut computed: Vec<(Tick, bool)> = Vec::new();
             let mut released: Vec<Tick> = Vec::new();
             let mut synced: Option<Tick> = None;
@@ -361,7 +363,7 @@ fn every_crash_point_keeps_every_acknowledged_put() {
     assert!(cuts.len() > 30, "only {} cuts", cuts.len());
     // The value of each key must be the last put acknowledged by the cut, or any later put to it (a put may be
     // durable before its reply is released).
-    let check = |d: &ManualDriver<'_, Arc<Oracle>>, c: usize, what: &str| {
+    let check = |d: &ManualDriver<'_, Box<dyn Executor>>, c: usize, what: &str| {
         let store: std::collections::BTreeMap<String, Vec<u8>> = k.store(d).into_iter().collect();
         for key in (0..4).map(|i| format!("k{i}")) {
             let last_acked = acked.iter().rfind(|(k2, _, at)| *k2 == key && *at <= c + 1);
