@@ -1018,6 +1018,78 @@ impl<'h> Lowerer<'h> {
         Ok(ups)
     }
 
+    // ------------------------------------------------------------------ invariants
+
+    /// `invariant name: never B;` lowers to `M::name$violation(x̄) :- B.`, a violation head (LANGUAGE §17.1): every
+    /// valuation of the body aborts the tick (BLSR003), the default action.
+    pub(crate) fn invariants(&mut self) -> Result<(), InternalError> {
+        for inv in &self.hir.invariants {
+            let module = self.hir.scope(inv.scope)?.module.clone();
+            let mut segs = module.segments().to_vec();
+            segs.push(inv.name);
+            let name = QualName::new(segs);
+            let id = self
+                .b
+                .declare_invariant(ir::InvariantDecl {
+                    id: blossom_base::InvariantId::from_raw(0),
+                    name: name.clone(),
+                    action: ir::ViolationAction::Abort,
+                    span: inv.span,
+                })
+                .map_err(ir)?;
+            let base = if module.segments().is_empty() {
+                inv.name.as_str().to_owned()
+            } else {
+                format!("{module}::{}", inv.name.as_str())
+            };
+            let mut names = Names {
+                module: module.clone(),
+                base: base.clone(),
+                stem: inv.name.as_str().to_owned(),
+                role: inv.role,
+                counter: 0,
+            };
+            let vars = binders(&inv.body);
+            let cols: Vec<ir::Column> = vars
+                .iter()
+                .map(|v| {
+                    Ok(column(
+                        self.hir.var(inv.scope, *v)?.name,
+                        self.var_ty(inv.scope, *v)?,
+                        false,
+                    ))
+                })
+                .collect::<Result<_, InternalError>>()?;
+            let construct = self
+                .b
+                .begin_construct(
+                    ConstructKind::Invariant { id },
+                    surface(&module, Some(inv.name), inv.span),
+                )
+                .map_err(ir)?;
+            let rel = self.generated(names.rel_segments("$violation"), cols, None, inv.role, false, inv.span)?;
+            for d in self.body(vec![Draft::new(inv.scope)], &inv.body, &[], &mut names)? {
+                let mut d = d;
+                let args = self.var_terms(&mut d, &vars)?;
+                let l = self.label(format!("{base}$violation"));
+                d.build(
+                    &mut self.b,
+                    RuleKind::Deductive,
+                    l,
+                    inv.span,
+                    Head {
+                        rel,
+                        args: args.into_iter().map(HeadArg::Term).collect(),
+                        mode: HeadMode::Violation { invariant: id },
+                    },
+                    inv.role,
+                )?;
+            }
+            self.b.end_construct(construct).map_err(ir)?;
+        }
+        Ok(())
+    }
+
     // ------------------------------------------------------------------ views
 
     pub(crate) fn views(&mut self) -> Result<(), InternalError> {

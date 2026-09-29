@@ -29,7 +29,7 @@ pub(crate) fn check_supported(p: &Program) -> Result<(), OracleError> {
         }
     }
     for rule in p.rules.iter() {
-        if !matches!(rule.head.mode, HeadMode::Insert) {
+        if matches!(rule.head.mode, HeadMode::ZAdd { .. }) {
             blossom_base::unimplemented_feature!("LANG-138", "weighted and violation heads in the oracle (WP M4.1)");
         }
         for a in &rule.head.args {
@@ -314,6 +314,7 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
         }
     }
     check_keys(program, &db.rows, input.tick)?;
+    check_invariants(program, &db.rows, input.tick)?;
     out.instance = Instance {
         rels: db.rows.into_iter().filter(|(_, rows)| !rows.is_empty()).collect(),
     };
@@ -767,6 +768,39 @@ fn check_keys(
                 });
             }
         }
+    }
+    Ok(())
+}
+
+/// LANG-200: a violation head that derives a row aborts the tick (BLSR003), the default action (`Record` and `Warn`
+/// need the runtime's violation sink, which this evaluator does not have).
+fn check_invariants(
+    program: &Program,
+    rows: &BTreeMap<RelId, BTreeSet<Row>>,
+    tick: blossom_value::time::Tick,
+) -> Result<(), OracleError> {
+    for rule in program.rules.iter() {
+        let HeadMode::Violation { invariant } = rule.head.mode else {
+            continue;
+        };
+        let Some(row) = rows.get(&rule.head.rel).and_then(|r| r.iter().next()) else {
+            continue;
+        };
+        let inv = program.invariants.get(invariant);
+        if let Some(inv) = inv
+            && inv.action != blossom_ir::core::ViolationAction::Abort
+        {
+            blossom_base::unimplemented_feature!("LANG-200", "the `{:?}` violation action in the oracle", inv.action);
+        }
+        let name = inv.map_or_else(|| format!("{invariant:?}"), |i| i.name.to_string());
+        return Err(OracleError::Program {
+            tick,
+            error: ProgramErrorRecord {
+                code: blossom_base::code!("BLSR003").as_str(),
+                rule: Some(rule.label.clone()),
+                detail: Arc::from(format!("invariant `{name}` is violated by {row:?}")),
+            },
+        });
     }
     Ok(())
 }

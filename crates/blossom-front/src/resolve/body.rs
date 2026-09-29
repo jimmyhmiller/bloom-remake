@@ -1977,6 +1977,20 @@ impl<'t> Resolver<'t, '_> {
         });
     }
 
+    /// `invariant name ["message"]: never BODY;` (LANGUAGE §17.1).
+    pub(crate) fn invariant(&mut self, s: ScopeIdx, inv: &'t ast::Invariant, placement: Option<HRoleId>) {
+        let mut cx = self.rule_cx(s, placement);
+        let body = self.body(&mut cx, &inv.body);
+        self.hir.invariants.push(HInvariant {
+            name: inv.name.name,
+            message: inv.message.clone(),
+            scope: cx.scope,
+            body,
+            role: placement,
+            span: inv.span,
+        });
+    }
+
     /// `fact r(…);` (LANGUAGE §8.4).
     pub(crate) fn fact(&mut self, s: ScopeIdx, f: &'t ast::Fact) {
         if f.at.is_some() || f.tick.is_some() {

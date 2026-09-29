@@ -289,6 +289,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 handlers: Vec::new(),
                 views: Vec::new(),
                 facts: Vec::new(),
+                invariants: Vec::new(),
                 scopes: Vec::new(),
                 var_types: Vec::new(),
             },
@@ -1000,7 +1001,15 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 ItemKind::Fact(f) => self.fact(s, f),
                 ItemKind::Interpose(ip) => self.interpose_rules(s, ip, placement),
                 ItemKind::Invariant(inv) => {
-                    self.unsupported("LANG-200", "runtime invariants", inv.span);
+                    if has_roles && placement.is_none() {
+                        self.error(
+                            code!("BLS0408"),
+                            inv.span,
+                            "in a module with roles, invariants go inside `at`",
+                        );
+                        continue;
+                    }
+                    self.invariant(s, inv, placement);
                 }
                 ItemKind::Spec(spec) => {
                     self.unsupported("TEST-020", "spec items inside a program", spec.span);

@@ -91,6 +91,7 @@ pub fn lower(hir: &Hir, deployment: &Deployment<'_>) -> Result<Lowered, Internal
     l.facts(deployment)?;
     l.handlers()?;
     l.views()?;
+    l.invariants()?;
     let rels = l.rels.clone();
     let mut surface = Vec::new();
     for i in 0..hir.rels.len() {
