@@ -60,6 +60,10 @@ pub struct Args {
     /// The repository root (default: the one containing xtask).
     #[arg(long)]
     pub root: Option<PathBuf>,
+    /// Run every `oracle` backend on the engine instead, checked against the oracle at every tick (the engine must
+    /// agree with the oracle on the whole corpus, not only on the cases that declare an `interp` backend).
+    #[arg(long)]
+    pub engine: bool,
 }
 
 /// What running one backend of one case found.
@@ -124,7 +128,8 @@ pub fn run(args: Args) -> ExitCode {
             // Wall-clock time only reports how long each case took; it never affects a result.
             #[allow(clippy::disallowed_methods)]
             let started = Instant::now();
-            let outcome = run_backend(&case, &manifest, backend, workers, args.max_runs);
+            let run_as = if args.engine && backend == "oracle" { "interp" } else { backend.as_str() };
+            let outcome = run_backend(&case, &manifest, run_as, workers, args.max_runs);
             let secs = started.elapsed().as_secs_f64();
             let features = strings(manifest.get("features"));
             let in_gate = gate_scope(&milestone, &args.area, &name, &features, backend);
@@ -326,7 +331,8 @@ fn run_backend(case: &Path, m: &toml::Table, backend: &str, workers: usize, max_
         files.extend(extra.iter().filter_map(toml::Value::as_str).map(|f| case.join(f)));
     }
     match backend {
-        "oracle" => oracle_backend(&files, m),
+        "oracle" => oracle_backend(&files, m, false),
+        "interp" => oracle_backend(&files, m, true),
         "ldfi" => ldfi_backend(&files, m, workers, max_runs),
         "compile" => ded_compile_backend(&files, m),
         other => Outcome::NotRunnable(format!("the `{other}` backend arrives with a later slice")),
@@ -379,7 +385,7 @@ fn strings(v: Option<&toml::Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn oracle_backend(files: &[PathBuf], m: &toml::Table) -> Outcome {
+fn oracle_backend(files: &[PathBuf], m: &toml::Table, engine: bool) -> Outcome {
     let nodes: Vec<String> = m
         .get("deploy")
         .and_then(|d| d.get("nodes"))
@@ -413,7 +419,19 @@ fn oracle_backend(files: &[PathBuf], m: &toml::Table) -> Outcome {
         Err(o) => return o,
     };
     // The synchronous harness follows CR-20 (a crashed node is frozen); Molly's view is LDFI's.
-    let run = match sim.run_with_view(Tick(last), &schedule, false, blossom_sim::CrashView::Frozen) {
+    let run = if engine {
+        let reference = sim.run_with_view(Tick(last), &schedule, false, blossom_sim::CrashView::Frozen);
+        let cfg = super::corpus_interp::engine_config(&artifact.roles, &artifact.nodes, artifact.seed);
+        let ev = blossom_node::EngineEvaluator::new(artifact.protocol.clone(), cfg);
+        let mine = sim.run_on(&ev, Tick(last), &schedule, false, blossom_sim::CrashView::Frozen);
+        if let Err(d) = super::corpus_interp::compare(&reference, &mine) {
+            return Outcome::Fail(format!("the engine differs from the oracle: {d}"));
+        }
+        mine
+    } else {
+        sim.run_with_view(Tick(last), &schedule, false, blossom_sim::CrashView::Frozen)
+    };
+    let run = match run {
         Ok(r) => r,
         Err(e) => return Outcome::Fail(e.to_string()),
     };
