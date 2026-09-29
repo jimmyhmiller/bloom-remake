@@ -56,8 +56,8 @@ pub struct Args {
     /// Worker threads for LDFI (default: the machine's parallelism).
     #[arg(long)]
     pub jobs: Option<usize>,
-    /// LDFI's run budget per case.
-    #[arg(long, default_value_t = 3_000_000)]
+    /// Runs the lineage-driven search may make per case before exhaustive certification decides.
+    #[arg(long, default_value_t = 20_000)]
     pub max_runs: u64,
     /// The repository root (default: the one containing xtask).
     #[arg(long)]
@@ -128,7 +128,7 @@ pub fn run(args: Args) -> ExitCode {
             let started = Instant::now();
             let outcome = run_backend(&case, &manifest, backend, workers, args.max_runs);
             let secs = started.elapsed().as_secs_f64();
-            let in_gate = gate_scope(&milestone, &args.area, backend);
+            let in_gate = gate_scope(&milestone, &args.area, &name, backend);
             match (&outcome, status) {
                 (Outcome::Pass(msg), "pass") => {
                     counts.0 += 1;
@@ -199,10 +199,13 @@ pub fn run(args: Args) -> ExitCode {
     }
 }
 
-/// Whether a backend of a case in `area` belongs to the current slice's gate (docs/design/SLICES.md).
-fn gate_scope(milestone: &str, area: &str, backend: &str) -> bool {
+/// Whether a backend of a case belongs to the current slice's gate (docs/design/SLICES.md).
+fn gate_scope(milestone: &str, area: &str, case: &str, backend: &str) -> bool {
     match milestone {
-        "S1" => area == "ldfi" && (backend == "oracle" || backend == "ldfi"),
+        // BENCH-133d (Flux 22/21/1) is excluded from S1's gate: SLICES.md, slice 1, "Exception".
+        "S1" => {
+            area == "ldfi" && (backend == "oracle" || backend == "ldfi") && !case.starts_with("BENCH-133d")
+        }
         _ => false,
     }
 }
@@ -510,7 +513,12 @@ fn ldfi_backend(files: &[PathBuf], m: &toml::Table, workers: usize, max_runs: u6
     if got != want {
         return Outcome::Fail(format!("verdict {got} after {} runs, expected {want}", report.runs));
     }
-    let mut note = format!("{got} in {} runs", report.runs);
+    let mut note = match report.method {
+        blossom_ldfi::Method::Lineage => format!("{got} in {} runs", report.runs),
+        blossom_ldfi::Method::Exhaustive { states, .. } => {
+            format!("{got} by exhaustive certification ({states} states) after {} runs", report.runs)
+        }
+    };
     if let Some(max) = int("runs_max") {
         note.push_str(&format!(" (published {max})"));
     }
