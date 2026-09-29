@@ -19,6 +19,8 @@ pub struct BlsArtifact {
     /// For every surface relation: the IR column of each declared column, in declaration order (a channel's
     /// destination is IR column 0, CR-14).
     pub surface: BTreeMap<RelId, Vec<usize>>,
+    /// The built-in `halt(kill: bool)` output, if the program writes it.
+    pub halt: Option<RelId>,
 }
 
 impl BlsArtifact {

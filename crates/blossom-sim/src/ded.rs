@@ -60,6 +60,18 @@ impl<'a> DedSim<'a> {
 
     /// Runs ticks `0..=last` under `faults` (Molly's crash view).
     pub fn run(&self, last: Tick, faults: &FaultSchedule, capture: bool) -> Result<SyncRun, SimError> {
+        self.run_with_view(last, faults, capture, CrashView::MollyContinue)
+    }
+
+    /// Runs ticks `0..=last` under `faults` with the given crash view (the synchronous test harness uses CR-20's
+    /// frozen view; Molly's is LDFI's).
+    pub fn run_with_view(
+        &self,
+        last: Tick,
+        faults: &FaultSchedule,
+        capture: bool,
+        crash_view: CrashView,
+    ) -> Result<SyncRun, SimError> {
         let nodes = u32::try_from(self.artifact.nodes.len()).map_err(|_| internal_error!("too many nodes"))?;
         let mut world = SyncWorld::new(&self.protocol, nodes);
         for f in &self.artifact.inputs {
@@ -70,9 +82,10 @@ impl<'a> DedSim<'a> {
                 // Molly's round k is tick k and there is no round 0 (CR-13): nothing runs at tick 0.
                 first: Tick(1),
                 last,
-                crash_view: CrashView::MollyContinue,
+                crash_view,
                 round: crate::sync::DED_ROUND,
                 capture,
+                halt: None,
             },
             faults,
         )

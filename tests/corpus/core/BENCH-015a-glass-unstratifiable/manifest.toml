@@ -13,9 +13,7 @@ witness. The handler is written on one line, so the expected line holds whicheve
 write) the implementation reports as the primary span."""
 
 [backend.compile]
-status = "unimplemented"
-unimplemented = ["SEM-020", "SEM-021", "SEM-022", "ANA-002", "LANG-082", "LANG-045", "LANG-040", "LANG-060", "LANG-190"]
-until = "M5"
+status = "pass"
 
 [[expect_diag]]
 code = "BLS0502"

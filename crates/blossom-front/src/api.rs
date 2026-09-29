@@ -70,7 +70,9 @@ pub fn compile(
             continue;
         }
         let role = match (&n.role, hir.roles.is_empty()) {
+            // A single-location program's only role is `Node` (LANGUAGE §7.7).
             (None, true) => None,
+            (Some(r), true) if r == "Node" => None,
             (Some(r), false) => {
                 match hir
                     .roles
@@ -148,6 +150,23 @@ pub fn compile(
     if names.is_empty() {
         diags.push(Diagnostic::new(code!("BLS0200"), "the deployment has no nodes"));
     }
+    // Node names written as strings in facts must name nodes of the deployment (LANGUAGE §2.4).
+    for f in &hir.facts {
+        for e in &f.row {
+            if let crate::hir::HExprKind::Value(blossom_value::Value::Str(name), _) = &e.kind
+                && matches!(
+                    e.ty.and_then(|t| hir.types.get(t)),
+                    Some(blossom_value::TypeDef::Node(_))
+                )
+                && !names.iter().any(|n| n.as_str() == &**name)
+            {
+                diags.push(
+                    Diagnostic::new(code!("BLS0200"), format!("`{name}` is not a node of the deployment"))
+                        .with_primary(e.span),
+                );
+            }
+        }
+    }
     if diags.has_errors() {
         return Err(BlsError::Rejected(diags));
     }
@@ -159,12 +178,18 @@ pub fn compile(
         },
     )?;
     let roles = roles.iter().map(|r| r.map(|r| RoleId::from_raw(r.0))).collect();
+    let halt = hir
+        .rels
+        .iter()
+        .position(|r| r.kind == crate::hir::HRelKind::Halt)
+        .and_then(|i| lowered.rels.get(i).copied());
     Ok((
         BlsArtifact {
             nodes: names,
             roles,
             program: lowered.program,
             surface: lowered.surface.into_iter().collect(),
+            halt,
         },
         diags,
     ))

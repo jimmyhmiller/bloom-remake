@@ -180,6 +180,8 @@ pub enum HRelKind {
     Boot,
     /// `localtick()`: a scratch written only with `next` to request another tick.
     LocalTick,
+    /// `halt(kill: bool)`: `emit halt(false);` stops the node at the end of the tick (LANGUAGE §7.15).
+    Halt,
     /// `R$members(n: Node<R>)`: a role's member set, a static relation filled from the deployment.
     Members(HRoleId),
 }

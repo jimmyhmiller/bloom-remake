@@ -465,6 +465,18 @@ impl Checker<'_> {
         let mut facts = std::mem::take(&mut hir.facts);
         for f in &mut facts {
             for (c, e) in f.row.iter_mut().enumerate() {
+                // A string in a `Node` column of a fact names a node of the deployment (LANGUAGE §2.4).
+                let col_ty = hir
+                    .rels
+                    .get(f.rel.index())
+                    .and_then(|r| r.cols.get(c))
+                    .and_then(|c| c.ty);
+                if let (HExprKind::Value(blossom_value::Value::Str(_), _), Some(ty)) = (&e.kind, col_ty)
+                    && matches!(hir.types.get(ty), Some(TypeDef::Node(_)))
+                {
+                    e.ty = Some(ty);
+                    continue;
+                }
                 let t = self.expr(hir, f.scope, e);
                 if !self.apply {
                     let ct = self.col_term(f.rel.index(), c);

@@ -14,12 +14,49 @@ use blossom_driver::render::{is_not_implemented, render};
 use blossom_front::api::{BlsError, NodeSpec};
 use blossom_oracle::OracleError;
 use blossom_sim::bls::{BlsSim, InputEvent};
-use blossom_sim::{FaultSchedule, SimError, SyncRun};
+use blossom_sim::{FaultSchedule, Omission, SimError, SyncRun};
 use blossom_value::time::{Duration, Instant, NodeId, Tick};
 use blossom_value::value::IntValue;
 use blossom_value::{TypeDef, TypeTable, Value};
 
 type Pattern = Vec<Option<Value>>;
+
+/// What the expectation checks need from a compiled case: node and relation names, and row decoding. Implemented
+/// for `.bls` artifacts here and for `.ded` artifacts in `corpus`.
+pub(super) trait Subject {
+    fn node(&self, name: &str) -> Option<NodeId>;
+    fn node_name(&self, n: NodeId) -> String;
+    fn node_count(&self) -> usize;
+    /// The relation holding `name`'s tuples at a node.
+    fn rel(&self, name: &str) -> Result<RelId, String>;
+    /// The relation whose messages carry `name`'s tuples.
+    fn channel(&self, name: &str) -> Result<RelId, String>;
+    /// A manifest row as an IR-ordered pattern (`None` for a column the manifest does not write).
+    fn row(&self, rel: RelId, v: &toml::Value) -> Result<Pattern, String>;
+}
+
+impl Subject for BlsArtifact {
+    fn node(&self, name: &str) -> Option<NodeId> {
+        self.node_id(name)
+    }
+    fn node_name(&self, n: NodeId) -> String {
+        self.nodes
+            .get(n.0 as usize)
+            .map_or_else(|| "?".to_owned(), |s| s.as_str().to_owned())
+    }
+    fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+    fn rel(&self, name: &str) -> Result<RelId, String> {
+        self.rel_named(name).ok_or_else(|| format!("no relation `{name}`"))
+    }
+    fn channel(&self, name: &str) -> Result<RelId, String> {
+        Subject::rel(self, name)
+    }
+    fn row(&self, rel: RelId, v: &toml::Value) -> Result<Pattern, String> {
+        row(self, rel, v)
+    }
+}
 
 use super::corpus::Outcome;
 
@@ -76,6 +113,47 @@ fn compile(root: &str, nodes: &[NodeSpec]) -> Result<BlsArtifact, Outcome> {
 }
 
 // ---------------------------------------------------------------------------------------------- values
+
+/// The scripted faults of `[[fault]]` (PLAN §5.1): `omit` and `crash`. Other kinds arrive with a later slice.
+pub(super) fn faults(a: &dyn Subject, m: &toml::Table) -> Result<FaultSchedule, Outcome> {
+    let mut out = FaultSchedule::default();
+    for f in m.get("fault").and_then(toml::Value::as_array).into_iter().flatten() {
+        let kind = f.get("kind").and_then(toml::Value::as_str).unwrap_or("");
+        let node = |k: &str| -> Result<NodeId, Outcome> {
+            let name = f
+                .get(k)
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| Outcome::Fail(format!("[[fault]] {kind} without `{k}`")))?;
+            a.node(name)
+                .ok_or_else(|| Outcome::Fail(format!("[[fault]] names unknown node `{name}`")))
+        };
+        let tick = |k: &str| -> Result<Tick, Outcome> {
+            f.get(k)
+                .and_then(toml::Value::as_integer)
+                .and_then(|t| u64::try_from(t).ok())
+                .map(Tick)
+                .ok_or_else(|| Outcome::Fail(format!("[[fault]] {kind} without `{k}`")))
+        };
+        match kind {
+            "omit" => {
+                out.omissions.insert(Omission {
+                    from: node("from")?,
+                    to: node("to")?,
+                    send: tick("send_tick")?,
+                });
+            }
+            "crash" => {
+                out.crashes.insert(node("node")?, tick("tick")?);
+            }
+            other => {
+                return Err(Outcome::NotRunnable(format!(
+                    "`{other}` faults in the synchronous harness arrive with a later slice"
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
 
 /// Decodes a manifest value by the column's type (PLAN §5.1).
 fn value(a: &BlsArtifact, types: &TypeTable, v: &toml::Value, ty: blossom_base::TypeId) -> Result<Value, String> {
@@ -202,13 +280,8 @@ fn matches_row(pattern: &[Option<Value>], row: &[Value]) -> bool {
     pattern.len() == row.len() && pattern.iter().zip(row).all(|(p, v)| p.as_ref().is_none_or(|p| p == v))
 }
 
-/// A relation by manifest name, among the program's user relations.
-fn rel(a: &BlsArtifact, name: &str) -> Result<RelId, String> {
-    a.rel_named(name).ok_or_else(|| format!("no relation `{name}`"))
-}
-
 /// `k`, `a..=b`, `a..` (to the last tick), `..=b` (from tick 0), `a..b`.
-fn ticks_of(range: &toml::Value, last: u64) -> Result<Vec<u64>, String> {
+pub(super) fn ticks_of(range: &toml::Value, last: u64) -> Result<Vec<u64>, String> {
     let text = match range {
         toml::Value::Integer(i) => return u64::try_from(*i).map(|t| vec![t]).map_err(|e| e.to_string()),
         toml::Value::String(s) => s.clone(),
@@ -250,9 +323,6 @@ fn oracle(root: &str, m: &toml::Table) -> Outcome {
     let Ok(last) = u64::try_from(ticks - 1) else {
         return Outcome::Fail("[run] ticks must be at least 1".into());
     };
-    if m.contains_key("fault") {
-        return Outcome::NotRunnable("scripted faults in the oracle harness arrive with a later slice".into());
-    }
     let artifact = match compile(root, &nodes) {
         Ok(a) => a,
         Err(o) => return o,
@@ -276,7 +346,7 @@ fn oracle(root: &str, m: &toml::Table) -> Outcome {
         let Some(node) = artifact.node_id(node) else {
             return Outcome::Fail(format!("[[input]] names unknown node `{node}`"));
         };
-        let r = match rel(&artifact, rname) {
+        let r = match Subject::rel(&artifact, rname) {
             Ok(r) => r,
             Err(e) => return Outcome::Fail(e),
         };
@@ -295,8 +365,12 @@ fn oracle(root: &str, m: &toml::Table) -> Outcome {
             }
         }
     }
+    let schedule = match faults(&artifact, m) {
+        Ok(f) => f,
+        Err(o) => return o,
+    };
     let round = Duration::from_nanos(1_000_000_000);
-    let run = sim.run(&inputs, Tick(last), round, &FaultSchedule::default(), false);
+    let run = sim.run(&inputs, Tick(last), round, &schedule, false);
     let expected_errors = m
         .get("expect_error")
         .and_then(toml::Value::as_array)
@@ -368,9 +442,9 @@ fn node_rows(run: &SyncRun, t: u64, node: NodeId, rel: RelId) -> Vec<Vec<Value>>
         .unwrap_or_default()
 }
 
-fn rows_of(a: &BlsArtifact, rel: RelId, v: Option<&toml::Value>) -> Result<Vec<Pattern>, String> {
+fn rows_of(a: &dyn Subject, rel: RelId, v: Option<&toml::Value>) -> Result<Vec<Pattern>, String> {
     let rows = v.and_then(toml::Value::as_array).ok_or("expected `rows`")?;
-    rows.iter().map(|r| row(a, rel, r)).collect()
+    rows.iter().map(|r| a.row(rel, r)).collect()
 }
 
 /// Whether the rows are exactly the patterns: every row matches one pattern and every pattern one row.
@@ -381,7 +455,7 @@ fn same_rows(have: &[Vec<Value>], want: &[Pattern]) -> bool {
 }
 
 /// One `[[expect]]` of the four shapes.
-fn expect(a: &BlsArtifact, run: &SyncRun, last: u64, x: &toml::Value) -> Result<(), String> {
+pub(super) fn expect(a: &dyn Subject, run: &SyncRun, last: u64, x: &toml::Value) -> Result<(), String> {
     if let Some(q) = x.get("quiescent_from") {
         let q = q
             .as_integer()
@@ -397,10 +471,8 @@ fn expect(a: &BlsArtifact, run: &SyncRun, last: u64, x: &toml::Value) -> Result<
         .get("rel")
         .and_then(toml::Value::as_str)
         .ok_or("an [[expect]] without `rel`")?;
-    let node = a
-        .node_id(node_name)
-        .ok_or_else(|| format!("unknown node `{node_name}`"))?;
-    let r = rel(a, rel_name)?;
+    let node = a.node(node_name).ok_or_else(|| format!("unknown node `{node_name}`"))?;
+    let r = a.rel(rel_name)?;
     if x.get("final").and_then(toml::Value::as_bool) == Some(true) {
         let want = rows_of(a, r, x.get("rows"))?;
         // The contents at the end of the run: the last tick the node ran.
@@ -425,8 +497,7 @@ fn expect(a: &BlsArtifact, run: &SyncRun, last: u64, x: &toml::Value) -> Result<
             Err(format!("{rel_name}@{node_name} tick {t}: have {have:?}, want {want:?}"))
         };
     }
-    let want = row(
-        a,
+    let want = a.row(
         r,
         x.get("row")
             .ok_or("an [[expect]] without `row`, `rows` or `quiescent_from`")?,
@@ -461,18 +532,18 @@ fn expect(a: &BlsArtifact, run: &SyncRun, last: u64, x: &toml::Value) -> Result<
 }
 
 /// From tick `q` on, on every node, no relation differs from the previous tick and no message is in flight.
-fn quiescent(a: &BlsArtifact, run: &SyncRun, q: u64, last: u64) -> Result<(), String> {
+fn quiescent(a: &dyn Subject, run: &SyncRun, q: u64, last: u64) -> Result<(), String> {
     if q == 0 || q > last {
         return Err(format!("quiescent_from = {q} is outside the run 1..={last}"));
     }
-    for n in 0..a.nodes.len() {
+    for n in 0..a.node_count() {
         let node = NodeId(u32::try_from(n).map_err(|e| e.to_string())?);
         for t in q..=last {
             let (Some(prev), Some(now)) = (run.node_tick(Tick(t - 1), node), run.node_tick(Tick(t), node)) else {
                 return Err(format!("no round {t}"));
             };
             if prev.instance != now.instance {
-                return Err(format!("node {} changes at tick {t}", node_name(a, node)));
+                return Err(format!("node {} changes at tick {t}", a.node_name(node)));
             }
         }
     }
@@ -485,22 +556,18 @@ fn quiescent(a: &BlsArtifact, run: &SyncRun, q: u64, last: u64) -> Result<(), St
     Ok(())
 }
 
-fn node_name(a: &BlsArtifact, n: NodeId) -> &str {
-    a.nodes.get(n.0 as usize).map_or("?", |s| s.as_str())
-}
-
 /// `[[expect_send]]`: from, to, channel, row; optional send tick and count.
-fn expect_send(a: &BlsArtifact, run: &SyncRun, x: &toml::Value) -> Result<(), String> {
+pub(super) fn expect_send(a: &dyn Subject, run: &SyncRun, x: &toml::Value) -> Result<(), String> {
     let get = |k: &str| {
         x.get(k)
             .and_then(toml::Value::as_str)
             .ok_or_else(|| format!("[[expect_send]] without `{k}`"))
     };
-    let from = a.node_id(get("from")?).ok_or("unknown `from` node")?;
-    let to = a.node_id(get("to")?).ok_or("unknown `to` node")?;
+    let from = a.node(get("from")?).ok_or("unknown `from` node")?;
+    let to = a.node(get("to")?).ok_or("unknown `to` node")?;
     let ch_name = get("channel")?;
-    let ch = rel(a, ch_name)?;
-    let want = row(a, ch, x.get("row").ok_or("[[expect_send]] without `row`")?)?;
+    let ch = a.channel(ch_name)?;
+    let want = a.row(ch, x.get("row").ok_or("[[expect_send]] without `row`")?)?;
     let tick = x
         .get("tick")
         .and_then(toml::Value::as_integer)
@@ -519,14 +586,14 @@ fn expect_send(a: &BlsArtifact, run: &SyncRun, x: &toml::Value) -> Result<(), St
     match x.get("count").and_then(toml::Value::as_integer) {
         Some(c) if usize::try_from(c).ok() != Some(count) => Err(format!(
             "{ch_name}{want:?} {}→{}: sent {count} time(s), want {c}",
-            node_name(a, from),
-            node_name(a, to)
+            a.node_name(from),
+            a.node_name(to)
         )),
         Some(_) => Ok(()),
         None if count == 0 => Err(format!(
             "{ch_name}{want:?} {}→{} was not sent{}",
-            node_name(a, from),
-            node_name(a, to),
+            a.node_name(from),
+            a.node_name(to),
             tick.map(|t| format!(" at tick {t}")).unwrap_or_default()
         )),
         None => Ok(()),
@@ -551,9 +618,14 @@ fn compile_backend(root: &str, m: &toml::Table) -> Outcome {
         let text: String = diags.iter().map(|x| render(x, &sources)).collect();
         return Outcome::NotRunnable(text);
     }
+    compare_diags(&diags, &sources, m)
+}
+
+/// Every reported diagnostic against `[[expect_diag]]`, exactly as a multiset (tests/corpus/README.md, Diagnostics).
+pub(super) fn compare_diags(diags: &[Diagnostic], sources: &SourceDb, m: &toml::Table) -> Outcome {
     let mut have: Vec<(String, Option<usize>, String)> = diags
         .iter()
-        .map(|d| (d.code.as_str().to_owned(), line_of(d, &sources), d.severity.to_string()))
+        .map(|d| (d.code.as_str().to_owned(), line_of(d, sources), d.severity.to_string()))
         .collect();
     let want = m
         .get("expect_diag")
@@ -584,7 +656,7 @@ fn compile_backend(root: &str, m: &toml::Table) -> Outcome {
     if missing.is_empty() && have.is_empty() {
         return Outcome::Pass(format!("{} diagnostic(s) as expected", want.len()));
     }
-    let text: String = diags.iter().map(|x| render(x, &sources)).collect();
+    let text: String = diags.iter().map(|x| render(x, sources)).collect();
     Outcome::Fail(format!(
         "missing {missing:?}; unexpected {:?}\n{text}",
         have.iter().map(|(c, l, _)| format!("{c}@{l:?}")).collect::<Vec<_>>()

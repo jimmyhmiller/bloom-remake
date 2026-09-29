@@ -152,6 +152,7 @@ pub(crate) struct Instance {
 pub(crate) enum BuiltinRel {
     Boot,
     LocalTick,
+    Halt,
 }
 
 pub(crate) struct Resolver<'t, 'd> {
@@ -277,11 +278,19 @@ impl<'t> Resolver<'t, '_> {
         let (name, kind) = match which {
             BuiltinRel::Boot => ("boot", HRelKind::Boot),
             BuiltinRel::LocalTick => ("localtick", HRelKind::LocalTick),
+            BuiltinRel::Halt => ("halt", HRelKind::Halt),
+        };
+        let cols = match which {
+            BuiltinRel::Halt => vec![HCol {
+                name: Symbol::intern("kill"),
+                ty: Some(self.intern_type(TypeDef::Bool, span)),
+            }],
+            _ => Vec::new(),
         };
         let id = self.add_rel(HRel {
             name: QualName::single(Symbol::intern(name)),
             kind,
-            cols: Vec::new(),
+            cols,
             key: None,
             durable: false,
             role: None,
@@ -1115,6 +1124,7 @@ impl<'t> Resolver<'t, '_> {
                 .or_else(|| match name.as_str() {
                     "boot" => Some(self.builtin(BuiltinRel::Boot, name.span)),
                     "localtick" => Some(self.builtin(BuiltinRel::LocalTick, name.span)),
+                    "halt" => Some(self.builtin(BuiltinRel::Halt, name.span)),
                     _ => None,
                 }),
             [inst, name] => self

@@ -302,7 +302,7 @@ impl<'t> Resolver<'t, '_> {
                     }
                 }
                 _ => {
-                    self.error(code!("BLS0100"), *span, "`not` applies to an atom, a guard or `{ … }`");
+                    self.error(code!("BLS0110"), *span, "`not` applies to an atom, a guard or `{ … }`");
                     None
                 }
             },
@@ -479,7 +479,7 @@ impl<'t> Resolver<'t, '_> {
                 match a {
                     Arg::Pos(e) => out.push(self.pattern(cx, e)?),
                     Arg::Star(s) => {
-                        self.error(code!("BLS0100"), *s, "`*` is not an atom argument");
+                        self.error(code!("BLS0302"), *s, "`*` is not an atom argument");
                         return None;
                     }
                     Arg::Named(..) | Arg::Rest(_) => return None,
@@ -511,7 +511,7 @@ impl<'t> Resolver<'t, '_> {
                     continue;
                 }
                 Arg::Star(s) => {
-                    self.error(code!("BLS0100"), *s, "`*` is not an atom argument");
+                    self.error(code!("BLS0302"), *s, "`*` is not an atom argument");
                     return None;
                 }
             };
@@ -894,7 +894,7 @@ impl<'t> Resolver<'t, '_> {
             ExprKind::Method { receiver, name, args } => return self.method(cx, receiver, *name, args, span),
             ExprKind::Bang { name, .. } => {
                 self.error(
-                    code!("BLS0100"),
+                    code!("BLS0202"),
                     span,
                     format!("`{}!` is allowed only as a head or view aggregate here", name.as_str()),
                 );
@@ -967,7 +967,10 @@ impl<'t> Resolver<'t, '_> {
             }
             ExprKind::If { cond, then, els } => {
                 let Some(els) = els else {
-                    self.error(code!("BLS0100"), span, "an `if` value needs an `else`");
+                    // The parser rejects an `if` value without `else` (BLS0109).
+                    self.bugs.push(blossom_base::internal_error!(
+                        "an `if` value without `else` passed the parser"
+                    ));
                     return None;
                 };
                 HExprKind::If {
@@ -1054,7 +1057,7 @@ impl<'t> Resolver<'t, '_> {
                 HExprKind::Struct { ty, fields: out }
             }
             ExprKind::Wildcard => {
-                self.error(code!("BLS0100"), span, "`_` is a pattern, not a value");
+                self.error(code!("BLS0500"), span, "`_` is a pattern, not a value");
                 return None;
             }
             ExprKind::SelfNode => HExprKind::SelfNode,
@@ -1068,7 +1071,7 @@ impl<'t> Resolver<'t, '_> {
             match a {
                 Arg::Pos(e) => pos.push(e),
                 other => {
-                    self.error(code!("BLS0100"), other.span(), "function arguments are positional");
+                    self.error(code!("BLS0302"), other.span(), "function arguments are positional");
                     return None;
                 }
             }
@@ -1448,7 +1451,8 @@ impl<'t> Resolver<'t, '_> {
                 .get(&name.name)
                 .copied()
                 .or_else(|| self.scope(cx.ms).rels.get(&name.name).copied())
-                .or_else(|| (name.as_str() == "localtick").then(|| self.builtin(super::BuiltinRel::LocalTick, span))),
+                .or_else(|| (name.as_str() == "localtick").then(|| self.builtin(super::BuiltinRel::LocalTick, span)))
+                .or_else(|| (name.as_str() == "halt").then(|| self.builtin(super::BuiltinRel::Halt, span))),
             [inst, name] => {
                 let found = self
                     .scope(cx.ms)
@@ -1506,6 +1510,7 @@ impl<'t> Resolver<'t, '_> {
             (HRelKind::LocalTick, v) if v != Verb::Next => {
                 Some((code!("BLS0400"), bad("`localtick()` is requested with `next`")))
             }
+            (HRelKind::Halt, v) if v != Verb::Emit => Some((code!("BLS0400"), bad("`halt` is written with `emit`"))),
             (HRelKind::Channel(_), v) if v != Verb::Send => None,
             (k, Verb::Delete | Verb::Upsert) if !k.is_table() => {
                 Some((code!("BLS0400"), bad("only tables accept `delete` and `upsert`")))
@@ -1554,7 +1559,7 @@ impl<'t> Resolver<'t, '_> {
             }
             for (i, a) in args.iter().enumerate() {
                 let Arg::Pos(e) = a else {
-                    self.error(code!("BLS0100"), a.span(), "unexpected argument form in a head");
+                    self.error(code!("BLS0303"), a.span(), "unexpected argument form in a head");
                     return None;
                 };
                 let v = self.head_arg(cx, e)?;
@@ -1581,7 +1586,7 @@ impl<'t> Resolver<'t, '_> {
                         }
                     },
                     _ => {
-                        self.error(code!("BLS0100"), a.span(), "unexpected argument form in a head");
+                        self.error(code!("BLS0303"), a.span(), "unexpected argument form in a head");
                         return None;
                     }
                 };
@@ -1652,7 +1657,7 @@ impl<'t> Resolver<'t, '_> {
             match c.keyword.as_str() {
                 "default" => {
                     let [d] = c.exprs.as_slice() else {
-                        self.error(code!("BLS0100"), c.span, "`default` takes one value");
+                        self.error(code!("BLS0301"), c.span, "`default` takes one value");
                         return None;
                     };
                     default = Some(self.expr(cx, d)?);
@@ -1677,7 +1682,7 @@ impl<'t> Resolver<'t, '_> {
             _ => {
                 for a in args {
                     let Arg::Pos(e) = a else {
-                        self.error(code!("BLS0100"), a.span(), "aggregate arguments are positional");
+                        self.error(code!("BLS0202"), a.span(), "aggregate arguments are positional");
                         return None;
                     };
                     exprs.push(self.expr(cx, e)?);
@@ -1774,7 +1779,7 @@ impl<'t> Resolver<'t, '_> {
                     Some(agg) => {
                         let ExprKind::Bang { name, args, clauses } = &agg.kind else {
                             self.error(
-                                code!("BLS0100"),
+                                code!("BLS0202"),
                                 agg.span,
                                 "a view column `name = …` is an aggregate `agg!(…)`",
                             );
@@ -1876,7 +1881,7 @@ impl<'t> Resolver<'t, '_> {
             match a {
                 HHeadArg::Expr(e) => row.push(e),
                 HHeadArg::Agg(g) => {
-                    self.error(code!("BLS0100"), g.span, "a fact holds values, not aggregates");
+                    self.error(code!("BLS0202"), g.span, "a fact holds values, not aggregates");
                     return;
                 }
             }

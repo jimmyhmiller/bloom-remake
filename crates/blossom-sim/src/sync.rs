@@ -102,6 +102,9 @@ pub struct SyncConfig {
     pub round: Duration,
     /// Whether to record every node's firings.
     pub capture: bool,
+    /// A relation that, holding at the end of a node's tick, stops the node: it runs no later tick (`halt`,
+    /// LANGUAGE §7.15).
+    pub halt: Option<RelId>,
 }
 
 /// A message and what became of it.
@@ -197,6 +200,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
             faults: faults.clone(),
         };
         let mut carried: Vec<Instance> = vec![Instance::default(); n];
+        let mut halted = vec![false; n];
         let mut inbox: Vec<Vec<Delivery>> = vec![Vec::new(); n];
         let empty: Vec<(RelId, Row)> = Vec::new();
         for t in 0..=config.last.0 {
@@ -210,6 +214,12 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
             let mut next_inbox: Vec<Vec<Delivery>> = vec![Vec::new(); n];
             for (i, (state, delivered)) in carried.iter().zip(inbox.iter()).enumerate() {
                 let node = NodeId(u32::try_from(i).map_err(|_| internal_error!("node index overflow"))?);
+                if halted.get(i).copied().unwrap_or(false) {
+                    // A halted node runs no tick and holds nothing.
+                    round.push(NodeTick::default());
+                    next_carried.push(Instance::default());
+                    continue;
+                }
                 let frozen = config.crash_view == CrashView::Frozen && faults.crashed(node, tick);
                 if frozen {
                     let previous = round_of(&run.rounds, t.checked_sub(1), i);
@@ -278,6 +288,11 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                         row: send.row.clone(),
                         fate,
                     });
+                }
+                if config.halt.is_some_and(|h| out.instance.rows(h).next().is_some())
+                    && let Some(slot) = halted.get_mut(i)
+                {
+                    *slot = true;
                 }
                 next_carried.push(out.next);
                 round.push(NodeTick {
@@ -370,6 +385,7 @@ mod tests {
             crash_view: view,
             round: DED_ROUND,
             capture: false,
+            halt: None,
         }
     }
 

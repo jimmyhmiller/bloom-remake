@@ -20,9 +20,7 @@ ticks = 6
 stop = "ticks"
 
 [backend.oracle]
-status = "unimplemented"
-unimplemented = ["LANG-040", "LANG-042", "LANG-043", "LANG-045", "LANG-060", "LANG-061", "LANG-062", "LANG-190"]
-until = "M5"
+status = "pass"
 
 [[expect]]
 node = "y"
