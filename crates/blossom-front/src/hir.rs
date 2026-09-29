@@ -51,6 +51,7 @@ pub struct Hir {
     pub handlers: Vec<HHandler>,
     pub views: Vec<HView>,
     pub facts: Vec<HFact>,
+    pub invariants: Vec<HInvariant>,
     /// Variable tables, one per rule scope.
     pub scopes: Vec<HScope>,
     /// Filled by type checking: the type of every variable of every scope.
@@ -335,6 +336,17 @@ pub enum HViewAggCol {
     Group(HVarId),
     /// An aggregate over the union scope's variables.
     Agg(HAgg),
+}
+
+/// `invariant name ["message"]: never BODY;` (LANGUAGE §17.1): every valuation of the body is a violation.
+#[derive(Clone, Debug)]
+pub struct HInvariant {
+    pub name: Symbol,
+    pub message: Option<String>,
+    pub scope: ScopeId,
+    pub body: HBody,
+    pub role: Option<HRoleId>,
+    pub span: Span,
 }
 
 /// `fact r(…);`

@@ -462,6 +462,11 @@ impl Checker<'_> {
             }
         }
         hir.views = views;
+        let mut invariants = std::mem::take(&mut hir.invariants);
+        for inv in &mut invariants {
+            self.body(hir, inv.scope, &mut inv.body, inv.role);
+        }
+        hir.invariants = invariants;
         let mut facts = std::mem::take(&mut hir.facts);
         for f in &mut facts {
             for (c, e) in f.row.iter_mut().enumerate() {
