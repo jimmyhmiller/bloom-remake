@@ -56,7 +56,12 @@ Molly's programs, run unchanged, through the whole LDFI pipeline, reproducing th
 
 - Every failure-free `.ded` case in `tests/corpus/ldfi` passes on the oracle backend.
 - Every `[backend.ldfi]` case in BENCH-130–134 and BENCH-137 gives the published verdict, and every case that states
-  `falsifiers` produces exactly that set of Appendix-B-minimal falsifiers.
+  `falsifiers` produces exactly that set of Appendix-B-minimal falsifiers. **Exception (amended at the slice gate):**
+  BENCH-133d, Flux at 22/21/1. No search here or in the reference checker decides it within reasonable resources
+  (the lineage-driven search does not converge within 30,000 runs of its 22-tick, 4-node program; exhaustive
+  certification's frontier exceeds 10 GB; the corpus README already records it as beyond the reference checker, its
+  verdict resting on Flux's safety argument). It stays `unimplemented` and moves to the verification slice
+  (inductive invariants, VER-010), where a proof, not a search, can certify it.
 - The demo: `blossom ldfi tests/corpus/ldfi/molly/BENCH-130a-simple-deliv-6-3-0/program.ded --eot 6 --eff 3
   --crashes 0 --nodes a,b,c` prints the counterexample `O(a,b,1)` and its lineage; the same command on
   retry-deliv certifies it.
