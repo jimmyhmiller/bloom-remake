@@ -66,7 +66,7 @@ fn init(deploy: &std::path::Path, node: &str, store: Option<PathBuf>) -> ExitCod
         let (_, entry) = spec.node(node).map_err(|e| e.to_string())?;
         let dir = store.unwrap_or_else(|| spec.data_dir.join(&entry.name));
         identity.store_uuid = recovery::fresh_uuid(&identity, OsEntropy.boot_nonce()?, wall_now()?);
-        recovery::init(Arc::new(RealFs), &dir, &identity).map_err(|e| e.to_string())?;
+        recovery::init(Arc::new(RealFs), &dir, &identity, spec.tail_certification).map_err(|e| e.to_string())?;
         Ok(dir)
     })();
     match result {

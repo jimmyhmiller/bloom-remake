@@ -18,7 +18,7 @@ use std::sync::Arc;
 use blossom_base::internal_error;
 use blossom_ir::core::Program;
 use blossom_store::{
-    CheckpointId, FileCheckpoints, FileWal, Lsn, MetaRecord, MetaStore, OpenMode, SegmentHeader, StoreError,
+    Certification, CheckpointId, FileCheckpoints, FileWal, Lsn, MetaRecord, MetaStore, OpenMode, SegmentHeader, StoreError,
     StoreIdentity, StoreLock, Vfs, WalScan, durable_dir,
 };
 use blossom_value::time::{Instant, Tick};
@@ -40,6 +40,8 @@ pub struct StoreSpec {
     /// The identity the deployment expects (`store_uuid` is ignored: it is the store's own).
     pub identity: StoreIdentity,
     pub mode: OpenMode,
+    /// How the WAL certifies its tail. A new store records it; an existing one must have been created with it.
+    pub certification: Certification,
 }
 
 /// An opened, recovered store.
@@ -91,7 +93,12 @@ fn catalog(schema: &DurableSchema) -> Vec<u8> {
 
 /// Creates a fresh store for `identity` at `dir`: the directory and a `META` that has never booted. Refuses when the
 /// directory already holds a store.
-pub fn init(fs: Arc<dyn Vfs>, dir: &Path, identity: &StoreIdentity) -> Result<(), NodeError> {
+pub fn init(
+    fs: Arc<dyn Vfs>,
+    dir: &Path,
+    identity: &StoreIdentity,
+    certification: Certification,
+) -> Result<(), NodeError> {
     durable_dir(&*fs, dir)?;
     let _lock = StoreLock::acquire(&*fs, dir)?;
     let meta = MetaStore::new(fs.clone(), dir);
@@ -100,13 +107,19 @@ pub fn init(fs: Arc<dyn Vfs>, dir: &Path, identity: &StoreIdentity) -> Result<()
             "{} already holds a node store; refusing to initialize over it",
             dir.display()
         ))),
-        Err(e) if not_found(&e) => write_fresh(&*fs, &meta, dir, identity),
+        Err(e) if not_found(&e) => write_fresh(&*fs, &meta, dir, identity, certification),
         Err(e) => Err(e.into()),
     }
 }
 
 /// Writes the `META` of a store that has never booted: restarts 0 means the first boot runs tick 0.
-fn write_fresh(fs: &dyn Vfs, meta: &MetaStore, dir: &Path, identity: &StoreIdentity) -> Result<(), NodeError> {
+fn write_fresh(
+    fs: &dyn Vfs,
+    meta: &MetaStore,
+    dir: &Path,
+    identity: &StoreIdentity,
+    certification: Certification,
+) -> Result<(), NodeError> {
     durable_dir(fs, &wal_dir(dir))?;
     meta.write(&MetaRecord {
         identity: identity.clone(),
@@ -117,6 +130,7 @@ fn write_fresh(fs: &dyn Vfs, meta: &MetaStore, dir: &Path, identity: &StoreIdent
         understood_version: 0,
         poison_deny_list: Vec::new(),
         clean_shutdown: false,
+        certification,
     })?;
     Ok(())
 }
@@ -149,13 +163,21 @@ pub fn open(
             OpenMode::InitFresh => {
                 let mut identity = spec.identity.clone();
                 identity.store_uuid = fresh_uuid(&identity, boot_nonce, wall);
-                write_fresh(&*fs, &meta, dir, &identity)?;
+                write_fresh(&*fs, &meta, dir, &identity, spec.certification)?;
                 meta.read()?
             }
         },
         Err(e) => return Err(e.into()),
     };
     check_identity(&record.identity, &spec.identity)?;
+    if record.certification != spec.certification {
+        return Err(NodeError::Store(format!(
+            "the store at {} was created with {:?} tail certification; the deployment asks for {:?}",
+            dir.display(),
+            record.certification,
+            spec.certification
+        )));
+    }
     let uuid = record.identity.store_uuid;
     let schema = DurableSchema::of(program);
     let codec = DurableCodec::new(program, &schema, names);
@@ -169,7 +191,7 @@ pub fn open(
     // 3. The WAL after it.
     let wdir = wal_dir(dir);
     durable_dir(&*fs, &wdir)?;
-    let scan = WalScan::scan(&*fs, &wdir, uuid, true)?;
+    let scan = WalScan::scan_certified(&*fs, &wdir, uuid, true, record.certification)?;
     let mut last_now = record.last_now;
     let mut last_tick: Option<u64> = checkpoint.map(|c| c.tick);
     let mut replayed = 0;
@@ -246,7 +268,8 @@ pub fn open(
             catalog: catalog(&schema),
         },
         base,
-    )?;
+    )?
+    .certified(record.certification);
     Ok(Opened {
         boot: Boot {
             image,

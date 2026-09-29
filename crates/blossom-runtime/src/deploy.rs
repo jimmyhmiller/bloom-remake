@@ -27,6 +27,7 @@
 //! [storage]
 //! data_dir = "data"               # each node's store is <data_dir>/<node name>, relative to this file
 //! checkpoint_wal_bytes = 67108864
+//! tail_certification = "strict"   # or "crc": one fsync per group commit, as etcd (see blossom_store::Certification)
 //! ```
 //!
 //! The architecture's node entry has no `client_addr`: it has one client listener per node, and so does this, at
@@ -97,6 +98,7 @@ struct RawSecurity {
 struct RawStorage {
     data_dir: PathBuf,
     checkpoint_wal_bytes: Option<u64>,
+    tail_certification: Option<String>,
 }
 
 /// A deploy-time parameter's value as the spec writes it (LANG-010): the compiler checks it against the declared type.
@@ -144,6 +146,8 @@ pub struct DeploymentSpec {
     pub security: SecurityMode,
     pub data_dir: PathBuf,
     pub checkpoint_wal_bytes: u64,
+    /// How new stores certify their WAL tail (an existing store keeps the one it was created with, and must match).
+    pub tail_certification: blossom_store::Certification,
 }
 
 fn invalid(key: &str, what: impl std::fmt::Display) -> RuntimeError {
@@ -180,6 +184,16 @@ impl DeploymentSpec {
                 .into());
             }
             other => return Err(invalid("security.mode", format!("unknown mode {other:?}"))),
+        };
+        let tail_certification = match raw.storage.tail_certification.as_deref() {
+            None | Some("strict") => blossom_store::Certification::Strict,
+            Some("crc") => blossom_store::Certification::Crc,
+            Some(other) => {
+                return Err(invalid(
+                    "storage.tail_certification",
+                    format!("unknown certification {other:?} (\"strict\" or \"crc\")"),
+                ));
+            }
         };
         if raw.nodes.is_empty() {
             return Err(invalid("node", "the deployment has no nodes"));
@@ -234,6 +248,7 @@ impl DeploymentSpec {
             security,
             data_dir: resolve(raw.storage.data_dir),
             checkpoint_wal_bytes: raw.storage.checkpoint_wal_bytes.unwrap_or(256 * 1024 * 1024),
+            tail_certification,
         })
     }
 

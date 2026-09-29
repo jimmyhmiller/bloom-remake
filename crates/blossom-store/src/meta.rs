@@ -25,6 +25,20 @@ pub enum OpenMode {
     Existing,
     InitFresh,
 }
+/// How a store's WAL certifies its acknowledged tail; fixed when the store is created.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Certification {
+    /// Each group commit syncs the data, then a sync marker, then an acknowledgement receipt (four syncs with the
+    /// receipt's directory): recovery tells damage to acknowledged records (corruption, an error) from a torn tail.
+    #[default]
+    Strict,
+    /// Each group commit syncs the data once, and records carry checksums (etcd's model): recovery truncates damage
+    /// in the newest batch, or at the start of the one after it, as a torn tail, so damage to the last acknowledged
+    /// batch is not told from a crash. Damage anywhere earlier is still an error.
+    Crc,
+}
+
 /// Opaque metadata; codecs and identity validation are added by M5.4.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,6 +51,9 @@ pub struct MetaRecord {
     pub understood_version: u64,
     pub poison_deny_list: Vec<u8>,
     pub clean_shutdown: bool,
+    /// How the WAL certifies its tail (absent in stores created before it existed: strict).
+    #[serde(default)]
+    pub certification: Certification,
 }
 /// Atomic checksummed META persistence.
 pub struct MetaStore {
