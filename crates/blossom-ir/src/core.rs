@@ -532,6 +532,7 @@ pub enum BuiltinFn {
     RoleOf,
     Size { role: RoleId },
     Len,
+    Concat, // `a ++ b` on String, Bytes or Vec (LANGUAGE §9.12)
     Contains,
     Keys,
     Values,

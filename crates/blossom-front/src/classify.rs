@@ -142,7 +142,7 @@ fn positive_rels(body: &HBody) -> Vec<HRelId> {
 fn why_standing(hir: &Hir, r: HRelId) -> Result<&'static str, InternalError> {
     Ok(match hir.rel(r)?.kind {
         HRelKind::Table => "a table",
-        HRelKind::Static | HRelKind::Members(_) => "a static relation",
+        HRelKind::Static | HRelKind::Members(_) | HRelKind::NodeDir => "a static relation",
         HRelKind::View => "a view with an alternative that has no event",
         HRelKind::Scratch | HRelKind::Output { .. } | HRelKind::Input { root: false } => {
             "written by a statement that is not event-driven, or by none"

@@ -1116,10 +1116,6 @@ impl<'t> Resolver<'t, '_> {
                     self.unsupported("LANG-092", "ranges as values", span);
                     return None;
                 }
-                if matches!(op, BinOp::Concat) {
-                    self.unsupported("LANG-084", "`++` concatenation", span);
-                    return None;
-                }
                 HExprKind::Binary {
                     op: *op,
                     lhs: Box::new(self.expr(cx, lhs)?),
@@ -1762,7 +1758,7 @@ impl<'t> Resolver<'t, '_> {
             (HRelKind::Input { root: false }, _) if !self.is_foreign_interface(cx, rel) => {
                 Some((code!("BLS0406"), bad("a module never writes its own input")))
             }
-            (HRelKind::Timer { .. } | HRelKind::Boot | HRelKind::Members(_), _) => {
+            (HRelKind::Timer { .. } | HRelKind::Boot | HRelKind::Members(_) | HRelKind::NodeDir, _) => {
                 Some((code!("BLS0400"), bad("this relation is fed by the runtime")))
             }
             (HRelKind::LocalTick, v) if v != Verb::Next => {

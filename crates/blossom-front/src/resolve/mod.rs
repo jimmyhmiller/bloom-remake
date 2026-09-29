@@ -234,6 +234,7 @@ pub(crate) enum BuiltinRel {
     Boot,
     LocalTick,
     Halt,
+    NodeDir,
 }
 
 /// Spec mode (LANGUAGE §17.3): the target's relations are read through trace relations, one per relation and time
@@ -426,12 +427,30 @@ impl<'t, 'd> Resolver<'t, 'd> {
             BuiltinRel::Boot => ("boot", HRelKind::Boot),
             BuiltinRel::LocalTick => ("localtick", HRelKind::LocalTick),
             BuiltinRel::Halt => ("halt", HRelKind::Halt),
+            BuiltinRel::NodeDir => ("node_dir", HRelKind::NodeDir),
         };
         let cols = match which {
             BuiltinRel::Halt => vec![HCol {
                 name: Symbol::intern("kill"),
                 ty: Some(self.intern_type(TypeDef::Bool, span)),
             }],
+            BuiltinRel::NodeDir => {
+                let node = self.node_type(None);
+                let string = self.intern_type(TypeDef::Str, span);
+                let principal = self.intern_type(TypeDef::Principal, span);
+                [
+                    ("node", node),
+                    ("addr", string),
+                    ("principal", principal),
+                    ("role", string),
+                ]
+                .into_iter()
+                .map(|(n, t)| HCol {
+                    name: Symbol::intern(n),
+                    ty: Some(t),
+                })
+                .collect()
+            }
             _ => Vec::new(),
         };
         let id = self.add_rel(HRel {
@@ -1439,6 +1458,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                     "boot" => Some(self.builtin(BuiltinRel::Boot, name.span)),
                     "localtick" => Some(self.builtin(BuiltinRel::LocalTick, name.span)),
                     "halt" => Some(self.builtin(BuiltinRel::Halt, name.span)),
+                    "node_dir" => Some(self.builtin(BuiltinRel::NodeDir, name.span)),
                     "crashed" if self.spec.is_some() => Some(self.crashed_oracle(name.span)),
                     _ => None,
                 }),
