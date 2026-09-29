@@ -28,11 +28,15 @@ builds it properly; everything else fails loudly with `Unimplemented` / BLS0908 
 ## Slice 1 results
 
 - Every failure-free `.ded` case (19) matches its literature rows.
-- **76 of the 77 `[backend.ldfi]` cases give the published verdict**; all 13 stated falsifier sets are exact; every
-  BENCH-136 run count is at most the published one except ack-deliv 8/7/1 (2,741; published 673).
+- **76 of the 77 `[backend.ldfi]` cases give the published verdict**; all 13 stated falsifier sets are exact; nine
+  of the twelve published run counts are met (BENCH-130q, Kafka 6/4/1 and ack-deliv 8/7/1 need the P1 search
+  reductions and stay `unimplemented`).
+- An adversarial review of the slice found seven ways to a wrong verdict outside the corpus (crash reads with times,
+  `pre` tuples that come back, aggregates over negated inputs, type and tick-0 issues); all are fixed, their
+  reproducers are regression tests, and 668 random programs agree with the reference checker's exhaustive verdict.
 - The one open case, BENCH-133d (Flux 22/21/1), is excluded from the gate (SLICES.md): neither search here nor the
   reference checker decides it; its verdict rests on Flux's safety argument and moves to the verification slice.
-- `tests/corpus/ldfi`: 95 backends ratcheted to `pass` (`cargo run -p xtask -- corpus --check --gate --area ldfi`).
+- `tests/corpus/ldfi`: 92 of 96 backends `pass` (`cargo run -p xtask -- corpus --check --gate --area ldfi`).
 
 Try it:
 
@@ -53,7 +57,8 @@ How LDFI decides (docs/plan/notes/S1.md has the full list of decisions and devia
 2. **tuple-level negative support** (the default): a negated read is falsified only if a matching tuple can appear
    (sound for supersets of the run's faults). It keeps every counterexample that needs negative support (3PC,
    Kafka) and turned Paxos 7/6/1 from >150,000 runs into 260;
-3. **exhaustive certification** when the lineage-driven search spends 20,000 runs without a verdict: every
+3. **exhaustive certification** when the lineage-driven search spends 20,000 runs without a verdict, or finds none
+   with an incomplete lineage: every
    admissible schedule, tick by tick, with equal states merged. Bully 10/9/1 and the larger Raft cases certify this
    way; the report says which search decided.
 
@@ -83,6 +88,4 @@ How LDFI decides (docs/plan/notes/S1.md has the full list of decisions and devia
 
 - Performance: exhaustive certification merges states in a `BTreeMap` of full instances; bully 10/9/1 takes about
   a minute and a half. Hash-consing states would speed it up.
-- The `.ded` profile keeps Molly's conjunctive aggregate encoding (ARCHITECTURE §8.3), which does not account for new
-  contributors appearing through upstream negation; both search modes share it.
 - No license chosen yet: every package is `publish = false`.
