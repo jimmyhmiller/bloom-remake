@@ -217,6 +217,7 @@ dependencies = [
  "blossom-sim",
  "blossom-value",
  "clap",
+ "serde_json",
  "thiserror",
 ]
 

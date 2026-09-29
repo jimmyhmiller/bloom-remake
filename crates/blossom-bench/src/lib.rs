@@ -6,5 +6,6 @@
 //! node running e01 ([`blossom_kv`]). The engine benchmarks are later slices.
 
 pub mod blossom_kv;
+pub mod etcd;
 pub mod kv;
 pub mod stopwatch;
