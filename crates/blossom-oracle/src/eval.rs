@@ -389,7 +389,7 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
             continue;
         }
         db.prepare(rule, plan);
-        for (row, firing) in derive(&scope, &db, rule, plan, input.capture).map_err(|e| fail(rule, e))? {
+        for (row, firing) in heads(&scope, &db, rule, plan, input.capture).map_err(|e| fail(rule, e))? {
             let set = out.next.rels.entry(rule.head.rel).or_default();
             insert_merged(&oracle.cells, set, rule.head.rel, row).map_err(|e| fail(rule, e.into()))?;
             firings.extend(firing);
@@ -401,7 +401,7 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
             continue;
         }
         db.prepare(rule, plan);
-        for (row, firing) in derive(&scope, &db, rule, plan, input.capture).map_err(|e| fail(rule, e))? {
+        for (row, firing) in heads(&scope, &db, rule, plan, input.capture).map_err(|e| fail(rule, e))? {
             let to = match row.first() {
                 Some(Value::Node(n)) => *n,
                 // A reply to a client session leaves the deployment (LANGUAGE §18.4).
@@ -713,6 +713,21 @@ fn head_value(scope: &Scope<'_>, env: &[Option<Value>], t: &Term) -> expr::ExprR
     expr::term(scope, env, t)
 }
 
+/// The head tuples of a rule evaluated once on the completed instance (inductive and async rules), aggregate or not.
+fn heads(
+    scope: &Scope<'_>,
+    db: &Db,
+    rule: &Rule,
+    plan: &RulePlan,
+    capture: bool,
+) -> expr::ExprResult<Vec<(Row, Option<FiringRecord>)>> {
+    if crate::strata::is_aggregate(rule) {
+        aggregate(scope, db, rule, plan, capture)
+    } else {
+        derive(scope, db, rule, plan, capture)
+    }
+}
+
 /// The head tuples of a non-aggregate rule, each with its firing when capturing.
 fn derive(
     scope: &Scope<'_>,
@@ -891,8 +906,16 @@ fn fold(func: AggFunc, set: &BTreeSet<Vec<Value>>) -> expr::ExprResult<Value> {
             };
             pick.ok_or_else(|| ExprError::Oracle(internal_error!("{func:?} over an empty group").into()))
         }
+        // The first component of each distinct tuple; the rest is the valuation it belongs to.
         AggFunc::Sum => {
-            let vals = set.iter().map(single).collect::<Result<Vec<_>, _>>()?;
+            let vals = set
+                .iter()
+                .map(|t| {
+                    t.first()
+                        .cloned()
+                        .ok_or_else(|| ExprError::Oracle(internal_error!("sum over an empty tuple").into()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             expr::int_sum(vals.iter())
         }
         other => Err(ExprError::Oracle(

@@ -711,6 +711,12 @@ fn agg_type(p: &Program, r: &Rule, a: &AggCall, ty: TypeId) -> bool {
         AggFunc::Count => {
             a.args.iter().all(|arg| !matches!(arg, Term::Wild)) && matches!(p.types.get(ty), Some(TypeDef::Int(_)))
         }
+        // `sum` adds its first argument once per distinct argument tuple: the rest name the valuation it varies
+        // over (LANGUAGE §10.1: `sum!(n)` adds `n` once per distinct valuation).
+        AggFunc::Sum => {
+            a.args.first().is_some_and(|t| term_type(p, r, t, ty))
+                && a.args.iter().all(|arg| !matches!(arg, Term::Wild))
+        }
         AggFunc::OlaCount => (1..=2).contains(&a.args.len()) && ola_result() && a.args.first().is_some_and(is_f64),
         AggFunc::BoolAnd | AggFunc::BoolOr => {
             a.args.len() == 1

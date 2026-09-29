@@ -9,6 +9,7 @@
 //! A HIR role id is the IR role id and a HIR type id is the IR type id: roles are declared in HIR order and the
 //! builder starts from the HIR's type table.
 
+mod choose;
 mod expr;
 pub(crate) mod lattice;
 mod rules;

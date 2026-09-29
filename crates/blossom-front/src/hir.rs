@@ -473,6 +473,9 @@ pub enum HLit {
         kind: RangeKind,
         span: Span,
     },
+    /// `choose!(Ȳ per X̄ [least c | most c] [sticky])` (LANGUAGE §10.4): the functional dependency X̄ → Ȳ over the
+    /// body's valuations in this tick.
+    Choose(Box<HChoose>),
     /// `pat in e` with an unbound variable over a value collection or a set-like lattice (LANGUAGE §9.4); type
     /// checking tells which.
     Gen {
@@ -512,6 +515,19 @@ pub enum RangeKind {
 }
 
 /// A positional atom.
+#[derive(Clone, Debug)]
+pub struct HChoose {
+    /// Ȳ: the chosen values.
+    pub chosen: Vec<HExpr>,
+    /// X̄: the group (empty: one group per tick).
+    pub per: Vec<HExpr>,
+    /// `least c` (`false`) or `most c` (`true`): the cost ordered first, then the seeded priority.
+    pub cost: Option<(HExpr, bool)>,
+    /// Keep last tick's choice while it is still a candidate (LANG-115).
+    pub sticky: bool,
+    pub span: Span,
+}
+
 #[derive(Clone, Debug)]
 pub struct HAtom {
     pub rel: HRelId,

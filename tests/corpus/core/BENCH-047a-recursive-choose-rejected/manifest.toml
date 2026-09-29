@@ -14,9 +14,7 @@ report the cycle as BLS0502; §13.4 gives choice and order sites on a same-tick 
 which is what this case pins. The triage WP decides if both are reported."""
 
 [backend.compile]
-status = "unimplemented"
-unimplemented = ["SEM-086", "ANA-002", "LANG-108", "LANG-045", "LANG-047", "LANG-043", "LANG-060", "LANG-190"]
-until = "M5"
+status = "pass"
 
 [[expect_diag]]
 code = "BLS0503"
