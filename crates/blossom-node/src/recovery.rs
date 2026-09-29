@@ -251,6 +251,7 @@ pub fn open(
             tick: Tick(boot_tick),
             reserved: Tick(reserved),
             now,
+            recovered: record.restarts > 1,
         },
         wal,
         checkpoints,

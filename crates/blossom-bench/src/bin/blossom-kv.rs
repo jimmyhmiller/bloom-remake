@@ -14,6 +14,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use blossom_bench::blossom_kv::E01Store;
+use blossom_bench::etcd::EtcdStore;
 use blossom_bench::kv::{self, KvStore, Outcome, Workload};
 use blossom_front::api::NodeSpec;
 use blossom_runtime::deploy::DeploymentSpec;
@@ -31,6 +32,17 @@ struct Cli {
 enum Command {
     /// Run the workload against a Blossom deployment's nodes.
     Load(Load),
+    /// Run the same workload against etcd (its v3 JSON gateway).
+    Etcd(Etcd),
+}
+
+#[derive(Debug, clap::Args)]
+struct Etcd {
+    /// Client URLs as `host:port`, comma-separated.
+    #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:2379")]
+    endpoints: Vec<std::net::SocketAddr>,
+    #[command(flatten)]
+    common: Common,
 }
 
 #[derive(Debug, clap::Args)]
@@ -139,14 +151,37 @@ fn report(name: &str, w: &Workload, o: &Outcome, check: bool) -> bool {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let Command::Load(args) = cli.command;
-    let w = match workload(&args.common) {
+    match cli.command {
+        Command::Load(args) => load(args),
+        Command::Etcd(args) => etcd(args),
+    }
+}
+
+fn run_and_report(name: &str, store: Arc<dyn KvStore>, common: &Common) -> ExitCode {
+    let w = match workload(common) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("{e}");
             return ExitCode::from(2);
         }
     };
+    let o = kv::run(store, &w, Arc::new(AtomicBool::new(false)));
+    if report(name, &w, &o, common.check) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(3)
+    }
+}
+
+fn etcd(args: Etcd) -> ExitCode {
+    let store: Arc<dyn KvStore> = Arc::new(EtcdStore {
+        endpoints: args.endpoints,
+        timeout: Duration::from_millis(args.common.timeout_ms),
+    });
+    run_and_report("etcd", store, &args.common)
+}
+
+fn load(args: Load) -> ExitCode {
     let spec = match DeploymentSpec::load(&args.deploy) {
         Ok(s) => s,
         Err(e) => {
@@ -177,10 +212,5 @@ fn main() -> ExitCode {
         principal: args.principal,
         timeout: Duration::from_millis(args.common.timeout_ms),
     });
-    let o = kv::run(store, &w, Arc::new(AtomicBool::new(false)));
-    if report("blossom", &w, &o, args.common.check) {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(3)
-    }
+    run_and_report("blossom", store, &args.common)
 }

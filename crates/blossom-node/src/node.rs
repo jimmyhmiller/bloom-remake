@@ -71,6 +71,9 @@ pub struct Boot {
     pub reserved: Tick,
     /// The boot instant: after every instant an earlier incarnation used.
     pub now: Instant,
+    /// Whether durable state was reloaded: every incarnation after the first. `recovered()` holds in the boot tick
+    /// iff this is set (LANGUAGE §8.4, SEM-071).
+    pub recovered: bool,
 }
 
 /// Whether the node is running.
@@ -126,6 +129,8 @@ pub struct Node<E: Evaluator> {
     cfg: NodeConfig,
     schema: DurableSchema,
     boot_rel: Option<RelId>,
+    recovered_rel: Option<RelId>,
+    recovered: bool,
     /// The next tick to run.
     tick: Tick,
     reserved: Tick,
@@ -157,10 +162,12 @@ impl<E: Evaluator> Node<E> {
     pub fn boot(cfg: NodeConfig, program: &ValidatedProgram, eval: E, boot: Boot) -> Result<Node<E>, NodeError> {
         let p = program.get();
         let mut boot_rel = None;
+        let mut recovered_rel = None;
         for (id, r) in p.rels.iter_enumerated() {
             if let RelClass::Event(src) = &r.class {
                 match src {
                     EventSource::Boot => boot_rel = Some(id),
+                    EventSource::Recovered => recovered_rel = Some(id),
                     EventSource::Timer(_) | EventSource::Input => {}
                     other => {
                         return Err(blossom_base::unimplemented_error!(
@@ -191,6 +198,8 @@ impl<E: Evaluator> Node<E> {
             cfg,
             schema,
             boot_rel,
+            recovered_rel,
+            recovered: boot.recovered,
             tick: boot.tick,
             reserved: boot.reserved,
             reserving: false,
@@ -337,10 +346,15 @@ impl<E: Evaluator> Node<E> {
         }
         let tick = self.tick;
         let mut events: Vec<(RelId, Row)> = self.cfg.statics.clone();
-        if !self.booted
-            && let Some(b) = self.boot_rel
-        {
-            events.push((b, Arc::from(Vec::new())));
+        if !self.booted {
+            if let Some(b) = self.boot_rel {
+                events.push((b, Arc::from(Vec::new())));
+            }
+            if self.recovered
+                && let Some(r) = self.recovered_rel
+            {
+                events.push((r, Arc::from(Vec::new())));
+            }
         }
         events.extend(self.timers.fire(now)?);
         events.append(&mut self.inputs);
