@@ -423,15 +423,18 @@ dependencies = [
 name = "blossom-node"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "blossom-artifact",
  "blossom-base",
  "blossom-engine",
  "blossom-ir",
+ "blossom-oracle",
  "blossom-schema",
  "blossom-store",
  "blossom-trace",
  "blossom-value",
  "blossom-wire",
+ "thiserror",
 ]
 
 [[package]]

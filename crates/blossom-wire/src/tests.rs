@@ -191,7 +191,10 @@ fn lattices_round_trip() {
     }
     let set = LatValue::Set(Arc::new(BTreeSet::from([Value::str("a"), Value::str("b")])));
     assert_eq!(roundtrip(&c, f.lset, &Value::Lattice(set.clone())), Value::Lattice(set));
-    let map = LatValue::Map(Arc::new(BTreeMap::from([(Value::str("k"), e(3)), (Value::str("z"), e(9))])));
+    let map = LatValue::Map(Arc::new(BTreeMap::from([
+        (Value::str("k"), e(3)),
+        (Value::str("z"), e(9)),
+    ])));
     assert_eq!(roundtrip(&c, f.lmap, &Value::Lattice(map.clone())), Value::Lattice(map));
 }
 
@@ -210,13 +213,19 @@ fn nodes_by_name_survive_renumbering() {
         NodeEncoding::ByName(Arc::from(vec![Arc::from("b"), Arc::from("c"), Arc::from("a")])),
         WireLimits::default(),
     );
-    assert_eq!(after.decode_value(f.node, &mut buf.as_slice()).unwrap(), Value::Node(NodeId(0)));
+    assert_eq!(
+        after.decode_value(f.node, &mut buf.as_slice()).unwrap(),
+        Value::Node(NodeId(0))
+    );
     let gone = Codec::new(
         &f.program,
         NodeEncoding::ByName(Arc::from(vec![Arc::from("a")])),
         WireLimits::default(),
     );
-    assert!(matches!(gone.decode_value(f.node, &mut buf.as_slice()), Err(WireError::Malformed(_))));
+    assert!(matches!(
+        gone.decode_value(f.node, &mut buf.as_slice()),
+        Err(WireError::Malformed(_))
+    ));
 }
 
 #[test]
@@ -234,15 +243,27 @@ fn rows_use_field_numbers_and_skip_unknown_fields() {
         hidden_dest: false,
     };
     // A newer sender has an extra field #7; the receiver's columns are #2 and #5, declared out of order.
-    let newer = [col("k", str_t, Some(5)), col("id", u64t, Some(2)), col("extra", u64t, Some(7))];
+    let newer = [
+        col("k", str_t, Some(5)),
+        col("id", u64t, Some(2)),
+        col("extra", u64t, Some(7)),
+    ];
     let older = [col("k", str_t, Some(5)), col("id", u64t, Some(2))];
-    let row = [Value::str("key"), Value::Int(IntValue::U64(4)), Value::Int(IntValue::U64(99))];
+    let row = [
+        Value::str("key"),
+        Value::Int(IntValue::U64(4)),
+        Value::Int(IntValue::U64(99)),
+    ];
     let mut buf = Vec::new();
     c.encode_row(&newer, &row, &mut buf).unwrap();
     let got = c.decode_row(&older, &mut buf.as_slice()).unwrap();
     assert_eq!(got, vec![Value::str("key"), Value::Int(IntValue::U64(4))]);
     // A missing field is an error, never a default this build does not have.
-    let wider = [col("k", str_t, Some(5)), col("id", u64t, Some(2)), col("new", u64t, Some(8))];
+    let wider = [
+        col("k", str_t, Some(5)),
+        col("id", u64t, Some(2)),
+        col("new", u64t, Some(8)),
+    ];
     assert!(c.decode_row(&wider, &mut buf.as_slice()).is_err());
 }
 
@@ -257,7 +278,14 @@ fn unknown_enum_variants_keep_their_bytes() {
     crate::codec::put_varint(&mut wire, 3);
     wire.extend_from_slice(&[1, 2, 3]);
     let v = c.decode_value(en, &mut wire.as_slice()).unwrap();
-    assert!(matches!(v, Value::UnknownVariant { variant: 9, wire_number: 12, .. }));
+    assert!(matches!(
+        v,
+        Value::UnknownVariant {
+            variant: 9,
+            wire_number: 12,
+            ..
+        }
+    ));
     let mut again = Vec::new();
     c.encode_value(en, &v, &mut again).unwrap();
     assert_eq!(again, wire);
@@ -274,7 +302,10 @@ fn limits_are_enforced() {
     let mut wire = Vec::new();
     crate::codec::put_varint(&mut wire, inner.len() as u64);
     wire.extend_from_slice(&inner);
-    assert!(matches!(c.decode_value(vec_t, &mut wire.as_slice()), Err(WireError::Limit(_))));
+    assert!(matches!(
+        c.decode_value(vec_t, &mut wire.as_slice()),
+        Err(WireError::Limit(_))
+    ));
 }
 
 #[test]

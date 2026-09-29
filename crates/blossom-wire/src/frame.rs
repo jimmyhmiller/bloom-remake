@@ -117,7 +117,9 @@ fn get_str(input: &mut &[u8]) -> Result<String, WireError> {
 }
 
 fn arr16(input: &mut &[u8], what: &'static str) -> Result<[u8; 16], WireError> {
-    take(input, 16, what)?.try_into().map_err(|_| WireError::Truncated(what))
+    take(input, 16, what)?
+        .try_into()
+        .map_err(|_| WireError::Truncated(what))
 }
 
 fn le<const N: usize>(input: &mut &[u8], what: &'static str) -> Result<[u8; N], WireError> {
@@ -286,7 +288,10 @@ impl Frame {
             other => return Err(WireError::Malformed(format!("frame type {other:#x}"))),
         };
         if !input.is_empty() {
-            return Err(WireError::Malformed(format!("{} trailing bytes in a frame", input.len())));
+            return Err(WireError::Malformed(format!(
+                "{} trailing bytes in a frame",
+                input.len()
+            )));
         }
         Ok(frame)
     }
@@ -305,7 +310,9 @@ impl Frame {
         }
         let mut buf = vec![0u8; len];
         r.read_exact(&mut buf).map_err(FrameIoError::Io)?;
-        let (&t, body) = buf.split_first().ok_or(FrameIoError::Wire(WireError::Truncated("frame type")))?;
+        let (&t, body) = buf
+            .split_first()
+            .ok_or(FrameIoError::Wire(WireError::Truncated("frame type")))?;
         Frame::decode(t, body, limits).map(Some).map_err(FrameIoError::Wire)
     }
 

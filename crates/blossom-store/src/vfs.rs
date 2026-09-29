@@ -162,7 +162,7 @@ pub(crate) fn read_path(fs: &dyn Vfs, path: &Path) -> Result<Vec<u8>, StoreError
 }
 
 /// Create a directory tree and persist every new directory entry up to the filesystem root.
-pub(crate) fn durable_dir(fs: &dyn Vfs, path: &Path) -> Result<(), StoreError> {
+pub fn durable_dir(fs: &dyn Vfs, path: &Path) -> Result<(), StoreError> {
     fs.create_dir_all(path)?;
     for ancestor in path.ancestors() {
         if let Some(parent) = ancestor.parent() {

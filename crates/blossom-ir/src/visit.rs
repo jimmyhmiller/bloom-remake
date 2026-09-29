@@ -1248,6 +1248,15 @@ impl Remap for WrapperKind {
         }
     }
 }
+impl Remap for AclExplicit {
+    fn remap(&self, m: &mut impl Mapper) -> Self {
+        Self {
+            roles: self.roles.remap(m),
+            external: self.external,
+            principal_in: self.principal_in.remap(m),
+        }
+    }
+}
 impl Remap for AclSpec {
     fn remap(&self, m: &mut impl Mapper) -> Self {
         match self {
