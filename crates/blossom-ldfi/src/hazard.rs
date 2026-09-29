@@ -704,6 +704,9 @@ impl<'a> Encoder<'a> {
             Space::Protocol => loc,
             Space::Spec => Loc::Global,
         };
+        // A positive atom with no matching tuple in the run must gain one: every new derivation needs it. Otherwise
+        // some body literal must change in the enabling direction.
+        let mut required = Vec::new();
         let mut options = Vec::new();
         for lit in &rule.body.lits {
             let (atom, negated) = match lit {
@@ -720,17 +723,58 @@ impl<'a> Encoder<'a> {
                     Term::Wild => None,
                 })
                 .collect();
+            if !negated && !aggregate && !self.exists(space, atom.rel, atom_loc, tick, &pat) {
+                let h = self.appear(space, atom.rel, atom_loc, tick, &pat)?;
+                if h == Hazard::False {
+                    return Ok(Hazard::False);
+                }
+                required.push(h);
+                continue;
+            }
             if !negated || aggregate {
                 options.push(self.appear(space, atom.rel, atom_loc, tick, &pat)?);
             }
             if negated || aggregate {
                 options.push(self.remove(space, atom.rel, atom_loc, tick, &pat)?);
             }
-            if options.last() == Some(&Hazard::True) || options.iter().rev().nth(1) == Some(&Hazard::True) {
-                return Ok(Hazard::True);
-            }
+        }
+        if !required.is_empty() {
+            return self.and(required);
         }
         self.or(options)
+    }
+
+    /// Whether the run holds some tuple of `rel` matching `pattern` at `loc` and `tick`. Unknown places (the crash
+    /// oracle's tuples, which are not goals) count as held, the conservative answer.
+    fn exists(&self, space: Space, rel: RelId, loc: Loc, tick: Tick, pattern: &[Option<Value>]) -> bool {
+        let Some(rules) = self.rules else { return true };
+        match rules.origin(space, rel) {
+            Origin::Crash => true,
+            Origin::Snapshot { protocol, tick: at } => {
+                let (node_loc, rest) = split_node(pattern);
+                self.exists(Space::Protocol, protocol, node_loc, at.unwrap_or(tick), rest)
+            }
+            Origin::Input | Origin::Rules { .. } => {
+                let nodes: Vec<Option<NodeId>> = match loc {
+                    Loc::Node(n) => vec![Some(n)],
+                    Loc::Global => vec![None],
+                    Loc::AnyNode => (0..rules.nodes()).map(|n| Some(NodeId(n))).collect(),
+                };
+                nodes.into_iter().any(|node| {
+                    self.graph.goals_at(space, rel, node, tick).iter().any(|g| {
+                        self.graph.get(*g).is_some_and(|goal| {
+                            goal.key.row.len() == pattern.len()
+                                && goal
+                                    .key
+                                    .row
+                                    .iter()
+                                    .zip(pattern)
+                                    .all(|(v, p)| p.as_ref().is_none_or(|p| p == v))
+                        })
+                    })
+                })
+            }
+        }
     }
 
     /// Whether faults can make the run lose some tuple of `rel` matching `pattern` at `loc` and `tick`: the
