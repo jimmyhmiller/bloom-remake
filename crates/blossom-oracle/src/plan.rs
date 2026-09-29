@@ -1,11 +1,13 @@
-//! Per-rule evaluation order: nested loops over the positive atoms, most-bound first, with every guard, binding and
-//! negation evaluated as soon as its variables are bound. The order changes only how fast a rule is evaluated,
-//! never its result.
+//! Per-rule evaluation order: nested loops over the positive atoms, most-bound first, then every other literal in
+//! body order once its variables are bound. Bindings, guards, lookups and generators run only for valuations of all
+//! the positive atoms, so a rule with no such valuation raises no runtime error (BLSR004) from an expression it would
+//! never have needed, and an earlier guard protects a later expression. The order of the atoms changes only how fast a
+//! rule is evaluated, never its result.
 
 use std::collections::BTreeSet;
 
 use blossom_base::{RelId, VarId, internal_error};
-use blossom_ir::core::{Atom, Expr, Literal, Pattern, Rule, Term};
+use blossom_ir::core::{Atom, Expr, GenSource, Literal, Pattern, Rule, Term};
 
 use crate::OracleError;
 
@@ -32,7 +34,6 @@ impl RulePlan {
         let mut done = vec![false; lits.len()];
         let mut steps = Vec::with_capacity(lits.len());
         loop {
-            flush(lits, &mut done, &mut bound, &mut steps)?;
             let best = lits
                 .iter()
                 .enumerate()
@@ -53,6 +54,7 @@ impl RulePlan {
             }
             bound.extend(atom_vars(atom));
         }
+        flush(lits, &mut done, &mut bound, &mut steps)?;
         if let Some(i) = done.iter().position(|d| !d) {
             let lit = lits.get(i);
             return Err(internal_error!(
@@ -68,7 +70,7 @@ impl RulePlan {
     }
 }
 
-/// Plans every non-positive literal that is evaluable now, in body order, until none is.
+/// Plans the non-positive literals in body order: each as soon as the ones before it that it depends on are planned.
 fn flush(
     lits: &[Literal],
     done: &mut [bool],
@@ -92,11 +94,41 @@ fn flush(
                     }
                     ready
                 }
-                Literal::Lookup { .. } => {
-                    blossom_base::unimplemented_feature!("LANG-280", "lattice lookups in the oracle (WP M4.1)")
+                Literal::Lookup { var, key, .. } => {
+                    let ready = key.iter().all(|t| match t {
+                        Term::Var(v) => bound.contains(v),
+                        Term::Const(_) => true,
+                        Term::Wild => false,
+                    });
+                    if ready {
+                        bound.insert(*var);
+                    }
+                    ready
                 }
-                Literal::Gen { .. } => {
-                    blossom_base::unimplemented_feature!("LANG-088", "generators in the oracle (WP M4.1)")
+                Literal::Gen { pat, src } => {
+                    let ready = match src {
+                        GenSource::Range {
+                            lo,
+                            hi,
+                            ring_bits: None,
+                            ..
+                        } => {
+                            let mut vs = expr_vars(lo)?;
+                            vs.extend(expr_vars(hi)?);
+                            vs.is_subset(bound)
+                        }
+                        GenSource::Range { ring_bits: Some(_), .. } => {
+                            blossom_base::unimplemented_feature!("LANG-026", "ring-interval generators in the oracle")
+                        }
+                        GenSource::Value(e) | GenSource::Lattice(e) => expr_vars(e)?.is_subset(bound),
+                        GenSource::TableFn { .. } => {
+                            blossom_base::unimplemented_feature!("LANG-183", "table-function generators in the oracle")
+                        }
+                    };
+                    if ready {
+                        pattern_vars(pat, bound)?;
+                    }
+                    ready
                 }
             };
             if ready {
@@ -113,22 +145,31 @@ fn flush(
     }
 }
 
+/// The columns of `a` whose values are known; a bound sender is the column after the last (the scan then ranges
+/// over rows extended with their sender).
 fn bound_columns(a: &Atom, bound: &BTreeSet<VarId>) -> Vec<usize> {
-    a.args
+    let known = |t: &Term| match t {
+        Term::Const(_) => true,
+        Term::Var(v) => bound.contains(v),
+        Term::Wild => false,
+    };
+    let mut cols: Vec<usize> = a
+        .args
         .iter()
         .enumerate()
-        .filter(|(_, t)| match t {
-            Term::Const(_) => true,
-            Term::Var(v) => bound.contains(v),
-            Term::Wild => false,
-        })
+        .filter(|(_, t)| known(t))
         .map(|(i, _)| i)
-        .collect()
+        .collect();
+    if a.sender.as_ref().is_some_and(known) {
+        cols.push(a.args.len());
+    }
+    cols
 }
 
 pub(crate) fn atom_vars(a: &Atom) -> BTreeSet<VarId> {
     a.args
         .iter()
+        .chain(a.sender.iter())
         .filter_map(|t| match t {
             Term::Var(v) => Some(*v),
             _ => None,
@@ -144,8 +185,17 @@ fn pattern_vars(p: &Pattern, bound: &mut BTreeSet<VarId>) -> Result<(), OracleEr
             Ok(())
         }
         Pattern::Wild | Pattern::Const(_) => Ok(()),
-        Pattern::Tuple(_) | Pattern::Variant { .. } | Pattern::Struct { .. } => {
-            blossom_base::unimplemented_feature!("LANG-088", "destructuring patterns in the oracle (WP M4.1)")
+        Pattern::Tuple(ps) | Pattern::Variant { fields: ps, .. } => {
+            for x in ps {
+                pattern_vars(x, bound)?;
+            }
+            Ok(())
+        }
+        Pattern::Struct { fields, .. } => {
+            for (_, x) in fields {
+                pattern_vars(x, bound)?;
+            }
+            Ok(())
         }
     }
 }
@@ -181,11 +231,16 @@ fn collect(e: &Expr, out: &mut BTreeSet<VarId>) -> Result<(), OracleError> {
         Expr::Field { base, .. } => collect(base, out)?,
         Expr::Match { scrut, arms } => {
             collect(scrut, out)?;
-            for (_, guard, body) in arms {
+            for (pat, guard, body) in arms {
+                // Variables the arm's pattern binds are not read from outside.
+                let mut own = BTreeSet::new();
+                pattern_vars(pat, &mut own)?;
+                let mut inner = BTreeSet::new();
                 if let Some(g) = guard {
-                    collect(g, out)?;
+                    collect(g, &mut inner)?;
                 }
-                collect(body, out)?;
+                collect(body, &mut inner)?;
+                out.extend(inner.difference(&own).copied());
             }
         }
         Expr::Lattice { args, .. } => {

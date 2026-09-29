@@ -1,0 +1,29 @@
+//! Slice 2 review: LDFI: a guard over a looked-up cell (`not (hi >= 10)`) is falsified by losing the cell's contribution: {O(A,B,1)}.
+
+pub module M {
+    static peer(n: Node);
+    input go(v: u64);
+    channel val(v: u64);
+    cell hi: LMax<u64>;
+    table low_seen();
+
+    start: on go(v) {
+        for peer(n) {
+            send val(v) to n;
+        }
+    }
+    recv: on val(v) {
+        emit hi(v);
+    }
+    view low() = not (hi >= 10);
+}
+
+spec L1 for M {
+    nodes A, B;
+    fact peer(B) @ A;
+    fact go(20) @ A at tick 1;
+    faults { eot: 4, eff: 3, crashes: 0, model: sync }
+    view pre() = go(_) @ A at tick 1;
+    view post() = go(_) @ A at tick 1, not low() @ B;
+    check ldfi expect fails;
+}

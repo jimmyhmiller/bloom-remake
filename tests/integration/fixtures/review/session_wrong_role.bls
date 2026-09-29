@@ -1,0 +1,42 @@
+//! Slice 2 review: A session message addressed to a node outside the channel's destination role is BLS0405.
+
+pub module M {
+    role App: external;
+    role Srv;
+    role Bak;
+    channel req(x: u64): App -> Srv;
+    channel fwd(x: u64): Srv -> Bak;
+    channel resp(x: u64): Srv -> App;
+
+    at Srv {
+        table seen(x: u64);
+        got: on req(x) from c {
+            emit seen(x);
+            send resp(x) to c;
+            for b in Bak {
+                send fwd(x) to b;
+            }
+        }
+    }
+    at Bak {
+        table copy(x: u64);
+        store: on fwd(x) {
+            emit copy(x);
+        }
+    }
+}
+
+spec Sc {
+    nodes S, K;
+    assign Srv = [S];
+    assign Bak = [K];
+    fact req(7) @ K from 1 at tick 2;
+}
+
+spec S1 for M {
+    include Sc;
+    faults { eot: 5, eff: 4, crashes: 1, model: sync }
+    view pre() = seen(7) @ S;
+    view post() = copy(7) @ K;
+    check ldfi expect fails;
+}

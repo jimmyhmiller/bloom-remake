@@ -184,11 +184,14 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
         for (col, lat) in &r.schema.lattice {
             valid &= matches!(r.schema.cols.get(col.index()).and_then(|c|p.types.get(c.ty)),Some(TypeDef::Lattice(l)) if l==lat);
         }
-        for col in r.schema.key.iter().chain(&r.schema.payload) {
-            valid &= !matches!(
-                r.schema.cols.get(col.index()).and_then(|c| p.types.get(c.ty)),
-                Some(TypeDef::Lattice(_))
-            );
+        // A generated relation holds valuations: a lattice value in it is plain data (compared exactly, never merged).
+        if !matches!(r.origin, Origin::Generated { .. }) {
+            for col in r.schema.key.iter().chain(&r.schema.payload) {
+                valid &= !matches!(
+                    r.schema.cols.get(col.index()).and_then(|c| p.types.get(c.ty)),
+                    Some(TypeDef::Lattice(_))
+                );
+            }
         }
         check(
             valid,
@@ -209,10 +212,13 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
                 "channel destination must be Node or Session".into(),
             );
             if let ChannelForm::Direction { dst, .. } = c.form {
+                // A channel to an external role replies to sessions (LANGUAGE §18.4).
+                let external = p.roles.get(dst).is_some_and(|r| r.kind == RoleKind::External);
                 check(
                     match r.schema.cols.first().and_then(|c| p.types.get(c.ty)) {
-                        Some(TypeDef::Node(None)) => true,
-                        Some(TypeDef::Node(Some(role))) => *role == dst,
+                        Some(TypeDef::Session) => external,
+                        Some(TypeDef::Node(None)) => !external,
+                        Some(TypeDef::Node(Some(role))) => *role == dst && !external,
                         _ => false,
                     },
                     4,
@@ -648,9 +654,29 @@ fn persist_exact(p: &Program, rel: &RelDecl, rule: &Rule, del: Option<RelId>, id
     };
     positive && negative && tag
 }
+/// Whether a value of type `actual` may stand where `expected` is required: equal types, or `Node<R>` where `Node`
+/// is expected (LANGUAGE §5.3: `Node<R>` is a subtype of `Node`).
+/// Whether a value of type `actual` may stand where `expected` is required: equal types, or `Node<R>` where `Node`
+/// is expected, also inside tuples, options and collections (values are immutable, so covariance is sound).
+fn assignable(p: &Program, actual: TypeId, expected: TypeId) -> bool {
+    if actual == expected {
+        return true;
+    }
+    match (p.types.get(actual), p.types.get(expected)) {
+        (Some(TypeDef::Node(Some(_))), Some(TypeDef::Node(None))) => true,
+        (Some(TypeDef::Tuple(a)), Some(TypeDef::Tuple(b))) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| assignable(p, *x, *y))
+        }
+        (Some(TypeDef::Option(a)), Some(TypeDef::Option(b)))
+        | (Some(TypeDef::Vec(a)), Some(TypeDef::Vec(b)))
+        | (Some(TypeDef::Set(a)), Some(TypeDef::Set(b))) => assignable(p, *a, *b),
+        (Some(TypeDef::Map(ka, va)), Some(TypeDef::Map(kb, vb))) => assignable(p, *ka, *kb) && assignable(p, *va, *vb),
+        _ => false,
+    }
+}
 fn term_type(p: &Program, r: &Rule, t: &Term, ty: TypeId) -> bool {
     match t {
-        Term::Var(id) => r.body.vars.get(*id).is_some_and(|v| v.ty == ty),
+        Term::Var(id) => r.body.vars.get(*id).is_some_and(|v| assignable(p, v.ty, ty)),
         Term::Const(id) => p.consts.get(*id).is_some_and(|v| p.types.check_value(ty, v).is_ok()),
         Term::Wild => true,
     }
@@ -684,10 +710,15 @@ fn agg_type(p: &Program, r: &Rule, a: &AggCall, ty: TypeId) -> bool {
     match &a.func {
         // A count may land in any integer column (checked on overflow, BLSR004): `u64` for Blossom's `count`, `i64` for
         // Molly's `count<X>` (LANGUAGE §21.1).
+        // The counted tuple may have any width (LANGUAGE §10.1: `count<(S, L, P)>` for `count!(*)`).
         AggFunc::Count => {
-            a.args.len() <= 1
+            a.args.iter().all(|arg| !matches!(arg, Term::Wild)) && matches!(p.types.get(ty), Some(TypeDef::Int(_)))
+        }
+        // `sum` adds its first argument once per distinct argument tuple: the rest name the valuation it varies
+        // over (LANGUAGE §10.1: `sum!(n)` adds `n` once per distinct valuation).
+        AggFunc::Sum => {
+            a.args.first().is_some_and(|t| term_type(p, r, t, ty))
                 && a.args.iter().all(|arg| !matches!(arg, Term::Wild))
-                && matches!(p.types.get(ty), Some(TypeDef::Int(_)))
         }
         AggFunc::OlaCount => (1..=2).contains(&a.args.len()) && ola_result() && a.args.first().is_some_and(is_f64),
         AggFunc::BoolAnd | AggFunc::BoolOr => {
@@ -815,7 +846,11 @@ fn check_literal(p: &Program, r: &Rule, l: &Literal) -> Result<(), String> {
 fn pattern_type(p: &Program, r: &Rule, pat: &Pattern, ty: TypeId) -> Result<(), String> {
     match pat {
         Pattern::Var(v) => {
-            if r.body.vars.get(*v).is_some_and(|x| x.ty == ty) {
+            if r.body
+                .vars
+                .get(*v)
+                .is_some_and(|x| x.ty == ty || assignable(p, ty, x.ty))
+            {
                 Ok(())
             } else {
                 Err("pattern variable type mismatch".into())
@@ -882,7 +917,7 @@ fn expr_matches_type(p: &Program, r: &Rule, e: &Expr, expected: TypeId) -> bool 
             .consts
             .get(*id)
             .is_some_and(|v| p.types.check_value(expected, v).is_ok()),
-        _ => expr_type(p, r, e).is_ok_and(|actual| actual == expected),
+        _ => expr_type(p, r, e).is_ok_and(|actual| assignable(p, actual, expected)),
     }
 }
 fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
@@ -911,7 +946,11 @@ fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
         Expr::Scalar(s) => match s {
             BuiltinScalar::Now => lookup(TypeDef::Instant),
             BuiltinScalar::Tick => lookup(TypeDef::Int(IntTy::U64)),
-            BuiltinScalar::SelfNode => lookup(TypeDef::Node(None)),
+            // A rule placed at role R runs on R's members: its `$self` is a `Node<R>` (LANGUAGE §6.10).
+            BuiltinScalar::SelfNode => match r.role.and_then(|role| p.types.lookup(&TypeDef::Node(Some(role)))) {
+                Some(t) => Ok(t),
+                None => lookup(TypeDef::Node(None)),
+            },
             BuiltinScalar::Incarnation => lookup(TypeDef::Int(IntTy::U64)),
             BuiltinScalar::Host => lookup(TypeDef::Node(None)),
         },
@@ -935,6 +974,13 @@ fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
         Expr::Binary { op, lhs, rhs } => {
             let a = expr_type(p, r, lhs)?;
             let b = expr_type(p, r, rhs)?;
+            // Time arithmetic (LANGUAGE §5.1): `Instant - Instant` is a `Duration`, `Instant ± Duration` an `Instant`.
+            match (op, p.types.get(a), p.types.get(b)) {
+                (BinOp::Sub, Some(TypeDef::Instant), Some(TypeDef::Instant)) => return lookup(TypeDef::Duration),
+                (BinOp::Add | BinOp::Sub, Some(TypeDef::Instant), Some(TypeDef::Duration)) => return Ok(a),
+                (BinOp::Add, Some(TypeDef::Duration), Some(TypeDef::Instant)) => return Ok(b),
+                _ => {}
+            }
             let a = if a != b && expr_matches_type(p, r, lhs, b) {
                 b
             } else {
@@ -1069,10 +1115,17 @@ fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
                 .iter()
                 .map(|e| expr_type(p, r, e))
                 .collect::<Result<Vec<_>, _>>()?;
-            let first = *types.first().ok_or("empty collection requires a type annotation")?;
-            if types.iter().any(|t| *t != first) {
-                return Err("collection element type mismatch".into());
-            }
+            // The element type is the one every element is assignable to (`[self, d]` with `d: Node<R>` is a
+            // `Vec<Node>`).
+            let missing = if types.is_empty() {
+                "empty collection requires a type annotation"
+            } else {
+                "collection element type mismatch"
+            };
+            let first = *types
+                .iter()
+                .find(|t| types.iter().all(|x| assignable(p, *x, **t)))
+                .ok_or(missing)?;
             match kind {
                 CollKind::Vec => lookup(TypeDef::Vec(first)),
                 CollKind::Set => lookup(TypeDef::Set(first)),
@@ -1099,7 +1152,7 @@ fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
                 return Err("lattice operation arity".into());
             }
             for (arg, (ty, _)) in args.iter().zip(&decl.params) {
-                if expr_type(p, r, arg)? != *ty {
+                if !assignable(p, expr_type(p, r, arg)?, *ty) {
                     return Err("lattice operation argument type".into());
                 }
             }
@@ -1237,6 +1290,22 @@ fn builtin_type(p: &Program, r: &Rule, b: &BuiltinFn, args: &[Expr]) -> Result<T
                 return Err("len expects a collection, String or Bytes".into());
             }
             lookup(TypeDef::Int(IntTy::U64))
+        }
+        BuiltinFn::Concat => {
+            arity(2)?;
+            let (a, b) = (
+                *types.first().ok_or("missing operand")?,
+                *types.get(1).ok_or("missing operand")?,
+            );
+            // The wider operand's type (`Vec<Node<R>> ++ Vec<Node>` is a `Vec<Node>`).
+            let ty = if assignable(p, a, b) { b } else { a };
+            if !assignable(p, a, ty)
+                || !assignable(p, b, ty)
+                || !matches!(p.types.get(ty), Some(TypeDef::Str | TypeDef::Bytes | TypeDef::Vec(_)))
+            {
+                return Err("concat expects two Strings, Bytes or Vecs of one type".into());
+            }
+            Ok(ty)
         }
         BuiltinFn::Contains => {
             arity(2)?;

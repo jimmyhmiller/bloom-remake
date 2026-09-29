@@ -10,9 +10,7 @@ expected_from = "literature"
 notes    = "The cell declaration on line 8 uses f64 as the LMax element; BLS0312 is reported there."
 
 [backend.compile]
-status = "unimplemented"
-unimplemented = ["LANG-120", "LANG-124", "ANA-005"]
-until = "M5"
+status = "pass"
 
 [[expect_diag]]
 code     = "BLS0312"

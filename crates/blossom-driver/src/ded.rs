@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use blossom_artifact::ded::DedArtifact;
+use blossom_artifact::sim::SimArtifact;
 use blossom_base::SourceDb;
 use blossom_front::ded::{self, DedError, DedLoader, LoadedFile};
 
@@ -33,7 +33,7 @@ impl DedLoader for FsLoader {
 
 /// Compiles the `.ded` files `roots` from disk for a deployment of `nodes`. The source database is returned either
 /// way, so diagnostics can be rendered.
-pub fn compile_files(roots: &[&str], nodes: &[&str]) -> (Result<DedArtifact, DedError>, SourceDb) {
+pub fn compile_files(roots: &[&str], nodes: &[&str]) -> (Result<SimArtifact, DedError>, SourceDb) {
     let mut sources = SourceDb::new();
     let result = ded::compile(roots, nodes, &mut FsLoader, &mut sources);
     (result, sources)

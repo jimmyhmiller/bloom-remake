@@ -279,6 +279,7 @@ pub enum Persistence {
 pub struct RelAttrs {
     pub nondet: Option<Arc<str>>,             // LANG-204 reason
     pub deterministic: bool,                  // `#[deterministic]` assertion (checked, BLS0603)
+    pub monotone: bool,                       // `monotone view` assertion (checked, BLS0702; ANA-020)
     pub final_output: bool,                   // LANG-212
     pub atomic: bool,                         // LANG-206
     pub handler: Option<Arc<str>>,            // LANG-186 host handler path
@@ -532,6 +533,7 @@ pub enum BuiltinFn {
     RoleOf,
     Size { role: RoleId },
     Len,
+    Concat, // `a ++ b` on String, Bytes or Vec (LANGUAGE §9.12)
     Contains,
     Keys,
     Values,
@@ -584,6 +586,9 @@ pub enum ConstructKind {
     Forall {
         fa: RelId,
         miss: RelId,
+        /// The domain is closed (a static relation or a role's members): the quantifier is then monotone in its body
+        /// (LANGUAGE §9.8), although its expansion negates.
+        closed: bool,
     },
     DeltaRead {
         rel: RelId,
@@ -595,6 +600,10 @@ pub enum ConstructKind {
     /// derivations or the generated input that carries its `@k` facts, with the rule that feeds it into `rel`.
     DedRelation {
         rel: RelId,
+    },
+    /// A role's member relation `R$members(N)` (LANGUAGE §6.10), whose rows come from the deployment.
+    Members {
+        role: RoleId,
     },
     Invariant {
         id: InvariantId,
@@ -1134,6 +1143,7 @@ impl ConstructKind {
             Self::Interpose => "Interpose",
             Self::Localize => "Localize",
             Self::DedRelation { .. } => "DedRelation",
+            Self::Members { .. } => "Members",
             Self::Invariant { .. } => "Invariant",
             Self::SpecOracle => "SpecOracle",
             Self::Service { .. } => "Service",

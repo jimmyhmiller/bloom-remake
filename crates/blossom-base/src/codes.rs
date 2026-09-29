@@ -175,7 +175,8 @@ pub static REGISTRY: &[CodeInfo] = &[
         "BLS0106",
         Error,
         "blossom-syntax",
-        &[],
+        // The parser checks clause repetition; the frontend checks a clause against the relation's kind (§12).
+        &["blossom-front"],
         CodeOrigin::Language,
         "a declaration clause given twice, or on a kind that does not take it",
     ),

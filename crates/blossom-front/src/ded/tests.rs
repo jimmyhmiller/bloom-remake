@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use blossom_artifact::ded::{DedArtifact, DedRelKind, SpecFeed};
+use blossom_artifact::sim::{LogicalKind, SimArtifact, SpecFeed};
 use blossom_base::{SourceDb, Symbol};
 use blossom_ir::core::RelClass;
 
@@ -41,7 +41,7 @@ impl DedLoader for FsLoader {
     }
 }
 
-fn compile_mem(files: &[(&'static str, &'static str)], nodes: &[&str]) -> Result<DedArtifact, DedError> {
+fn compile_mem(files: &[(&'static str, &'static str)], nodes: &[&str]) -> Result<SimArtifact, DedError> {
     let mut loader = MemLoader(files.iter().copied().collect());
     let root = files.first().map(|(n, _)| *n).unwrap();
     compile(&[root], nodes, &mut loader, &mut SourceDb::new())
@@ -68,7 +68,7 @@ pre(N, P) :- log(M, P), node(M, N), notin bcast(M, P)@1, notin crash(M, M, _);
 post(N, P) :- log(N, P);
 ";
 
-fn rel<'a>(a: &'a DedArtifact, name: &str) -> &'a blossom_artifact::ded::DedRel {
+fn rel<'a>(a: &'a SimArtifact, name: &str) -> &'a blossom_artifact::sim::LogicalRel {
     a.rels.iter().find(|r| r.name.as_str() == name).unwrap()
 }
 
@@ -79,7 +79,7 @@ fn simple_deliv_lowers_to_protocol_and_spec() {
     let p = a.protocol.get();
 
     let log = rel(&a, "log");
-    assert_eq!(log.kind, DedRelKind::Protocol);
+    assert_eq!(log.kind, LogicalKind::Protocol);
     let log_rel = &p.rels.get(log.protocol.unwrap()).unwrap();
     assert!(matches!(log_rel.class, RelClass::Idb));
     assert_eq!(log_rel.schema.cols.len(), 1, "the location column is implicit");
@@ -102,8 +102,8 @@ fn simple_deliv_lowers_to_protocol_and_spec() {
     assert_eq!(a.inputs.len(), 4);
     assert!(a.inputs.iter().all(|f| f.tick.0 == 1));
 
-    assert_eq!(rel(&a, "pre").kind, DedRelKind::Spec);
-    assert_eq!(rel(&a, "crash").kind, DedRelKind::Crash);
+    assert_eq!(rel(&a, "pre").kind, LogicalKind::Spec);
+    assert_eq!(rel(&a, "crash").kind, LogicalKind::Crash);
     let spec = a.spec.as_ref().unwrap();
     let feeds = &spec.feeds;
     assert!(feeds.iter().any(|f| matches!(f, SpecFeed::Crash { .. })));

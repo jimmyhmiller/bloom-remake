@@ -1,0 +1,72 @@
+//! E4 under LDFI: the two-phase commit of `e04_two_phase_commit.bls` with one coordinator and two workers, checked
+//! with Molly's atomic-commitment property (commit_spec.ded, R06 §12.2): once a participant prepared a transaction,
+//! at least two nodes decide it (termination), and the nodes that decided it decided alike (agreement).
+//!
+//! The `.ded` counterpart is Molly's `2pc` (tests/corpus/ldfi/molly): omissions before EFF only delay it (7/3/0,
+//! BENCH-131a), and one crash is a counterexample (6/3/1, BENCH-131b): the coordinator dies after asking for votes
+//! and the prepared participants block (LDFI §5.1.1, Figure 8). E4 retransmits `prepare` and `decide` on a timer and
+//! aborts on a timeout, which changes neither verdict: a participant never decides without the coordinator. The client
+//! is an application session (`role App: external`); its `begin` arrives as a session message.
+
+use e04_two_phase_commit::TwoPhaseCommit;
+
+/// The deployed protocol: application sessions, one coordinator, a worker cluster.
+pub module Commit {
+    role App: external;
+    role Coord;
+    role Worker: cluster;
+
+    import TwoPhaseCommit(TIMEOUT = 4s, RETRY = 1s) as tpc with (Client = App, Coordinator = Coord, Participant = Worker);
+
+    at Worker {
+        /// The local resource manager's refusals (none in these scenarios: every worker is willing).
+        input refuse(txn: u64);
+
+        refusal: on refuse(t) {
+            emit tpc.refuse(t);
+        }
+    }
+}
+
+/// The coordinator C and the workers A and B; session 1 begins transaction 1 at tick 1.
+spec Scenario {
+    nodes C, A, B;
+    assign Coord = [C];
+    assign Worker = [A, B];
+    fact tpc.begin(1) @ C from 1 at tick 1;
+}
+
+/// Molly's commit specification: termination and agreement, one `(property, transaction)` row each.
+spec Atomic {
+    view decision(n, x, d) {
+        tpc.decision(x, d) @ n;
+        tpc.decided(x, d) @ n;
+    }
+    view conflict(x) = decision(_, x, d1), decision(_, x, d2) where d1 != d2;
+    view pre(prop, x) {
+        tpc.prepared(x, _) @ _, let prop = "termination";
+        decision(_, x, _), let prop = "agreement";
+    }
+    view post(prop, x) {
+        decision(n1, x, _), decision(n2, x, _), let prop = "termination" where n1 != n2;
+        decision(_, x, _), not conflict(x), let prop = "agreement";
+    }
+}
+
+/// Lost messages before EFF only delay the protocol (2pc 7/3/0). E4's pipeline is three ticks longer than Molly's
+/// (the log, the decision and each participant's `decided` are written with `next`): with `prepare` lost until EFF,
+/// the last vote arrives at 5, the decision at 6 and the participants decide at 8, so EOT is 10.
+spec OmissionFaults for Commit {
+    include Scenario;
+    include Atomic;
+    faults { eot: 10, eff: 3, crashes: 0, model: sync, round: 1s }
+    check ldfi expect holds;
+}
+
+/// One crash blocks it (2pc 6/3/1): the coordinator fails after asking for votes.
+spec CrashFaults for Commit {
+    include Scenario;
+    include Atomic;
+    faults { eot: 10, eff: 3, crashes: 1, model: sync, round: 1s }
+    check ldfi expect fails;
+}

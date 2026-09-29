@@ -15,9 +15,7 @@ is safe and types p's third column, so the unsafe rule's range restriction is th
 annotates the column's type)."""
 
 [backend.compile]
-status = "unimplemented"
-unimplemented = ["ANA-001", "LANG-220"]
-until = "M5"
+status = "pass"
 
 [[expect_diag]]
 code = "BLS0500"

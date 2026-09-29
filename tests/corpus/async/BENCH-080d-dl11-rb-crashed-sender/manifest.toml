@@ -38,9 +38,7 @@ node = "a"
 tick = 2
 
 [backend.oracle]
-status = "unimplemented"
-unimplemented = ["LANG-065", "LANG-069", "LANG-220", "SEM-007"]
-until = "M5"
+status = "pass"
 
 [[expect]]
 node = "c"

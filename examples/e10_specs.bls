@@ -46,9 +46,14 @@ pub module AckRb {
 }
 
 /// Molly's delivery/deliv_assert.ded, as a reusable spec fragment (a spec with no target).
+///
+/// Blossom specs judge runs under CR-20: a crashed node is frozen, so a neighbor that crashes before a message
+/// reaches it never logs it. Molly's crash view lets a crashed node keep receiving and logging, which its
+/// `missing_log` relies on; here a crashed neighbor is not counted as missing, which gives Molly's verdicts under
+/// CR-20 (docs/DECISIONS.md, "Blossom specs and CR-20").
 spec DelivAssert {
-    /// Someone has the message in its log, but one of its neighbors does not.
-    view missing_log(a, p) = log(p) @ x, neighbor(a) @ x, not log(p) @ a;
+    /// Someone has the message in its log, but one of its live neighbors does not.
+    view missing_log(a, p) = log(p) @ x, neighbor(a) @ x, not log(p) @ a, not crashed(a);
     /// Precondition: a node other than the broadcaster logged the message and did not crash.
     view pre(x, p) = log(p) @ x, not bcast(p) @ x at tick 1, not crashed(x);
     /// Outcome: nobody who could have the message is missing it.

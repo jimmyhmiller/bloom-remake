@@ -1,7 +1,8 @@
 //! The oracle's own stratifier (ARCHITECTURE §11.2: it shares no code with `blossom-analysis`).
 //!
 //! Only the deductive rules must stratify (temporal stratification, SEM-020): a relation depends on every relation
-//! a deductive rule deriving it reads, strictly when the read is negated or the rule aggregates. The strongly
+//! a deductive rule deriving it reads, strictly when the read is negated, the rule aggregates, or a lattice read is
+//! not monotone (SEM-102). The strongly
 //! connected components of that graph, in dependency order, are the strata; a strict edge inside a component is a
 //! negation or aggregation through recursion, which is rejected.
 
@@ -35,23 +36,26 @@ pub(crate) fn stratify(p: &Program) -> Result<Vec<Stratum>, OracleError> {
     // Edges point from a relation to the relations it depends on.
     let mut graph = AdjacencyList::new(n);
     let mut strict: Vec<(usize, usize)> = Vec::new();
+    // Lattice reads that reach a use antitone or exact are points of order too (SEM-102).
+    let exact = blossom_ir::polarity::non_monotone_reads(p);
     for rule in p.rules.iter() {
         if rule.kind != RuleKind::Deductive {
             continue;
         }
         let head = rule.head.rel.index();
         let agg = is_aggregate(rule);
-        for lit in &rule.body.lits {
-            let (atom, negated) = match lit {
-                Literal::Pos(a) => (a, false),
-                Literal::Neg(a) => (a, true),
+        for (i, lit) in rule.body.lits.iter().enumerate() {
+            let (rel, negated) = match lit {
+                Literal::Pos(a) => (a.rel, false),
+                Literal::Neg(a) => (a.rel, true),
+                Literal::Lookup { rel, .. } => (*rel, false),
                 _ => continue,
             };
-            let body = atom.rel.index();
+            let body = rel.index();
             graph
                 .add_edge(head, body)
                 .map_err(|e| internal_error!("dependency graph: {e}"))?;
-            if negated || agg {
+            if negated || agg || exact.contains(&(rule.id, i)) {
                 strict.push((head, body));
             }
         }
@@ -94,6 +98,7 @@ pub(crate) fn stratify(p: &Program) -> Result<Vec<Stratum>, OracleError> {
             }
             recursive |= rule.body.lits.iter().any(|l| match l {
                 Literal::Pos(a) | Literal::Neg(a) => rels.contains(&a.rel),
+                Literal::Lookup { rel, .. } => rels.contains(rel),
                 _ => false,
             });
         }

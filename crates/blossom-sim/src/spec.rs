@@ -1,31 +1,36 @@
-//! The `.ded` profile (LANGUAGE §21.1, ARCHITECTURE §8.1): a compiled Molly program on the synchronous-round world
-//! under [`CrashView::MollyContinue`], and its outcome spec judged at EOT.
+//! A compiled program on the synchronous-round world, and its outcome spec judged at EOT (ARCHITECTURE §8.1),
+//! under the artifact's [`Profile`]:
 //!
-//! Molly's round `k` is tick `k` (CR-13): facts `p(…)@k` are input events of tick `k`, no node runs at tick 0, and the
-//! spec reads `pre` and `post` at EOT (TEST-022). The spec engine feeds the spec program with every node's tuples at
-//! EOT (each prefixed with its node), the snapshots at fixed ticks that `p(…)@k` atoms read, and the crash oracle
-//! `crash(Observer, Node, Time)`, in which every node observes every crash of the run.
+//! - Molly's (LANGUAGE §21.1): round `k` is tick `k` (CR-13), facts `p(…)@k` are input events of tick `k`, no node
+//!   runs at tick 0, and a crashed node keeps running without sending ([`CrashView::MollyContinue`]);
+//! - Blossom's: tick 0 is the boot tick, the runtime feeds `boot()` and timers ([`crate::runtime`]), and a crashed
+//!   node is frozen ([`CrashView::Frozen`], CR-20).
+//!
+//! The spec reads `pre` and `post` at EOT (TEST-022). The spec engine feeds the spec program with every node's tuples
+//! at EOT (each prefixed with its node), the snapshots at fixed ticks, and the crash oracle.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use blossom_artifact::ded::{DedArtifact, SpecFeed};
+use blossom_artifact::sim::{Profile, SimArtifact, SpecFeed};
 use blossom_base::{RelId, internal_error};
 use blossom_ir::obs::FiringRecord;
-use blossom_oracle::{Instance, Oracle, Row, TickInput};
+use blossom_oracle::{Ingress, Instance, Oracle, Row, TickInput};
 use blossom_value::{
     Value,
     time::{NodeId, Tick},
     value::IntValue,
 };
 
-use crate::sync::{CrashView, FaultSchedule, SimError, SyncConfig, SyncRun, SyncWorld};
+use crate::runtime::{Runtime, role_of};
+use crate::sync::{CrashView, FaultSchedule, SimError, SyncConfig, SyncRun, SyncWorld, now_at};
 
-/// A compiled `.ded` program ready to run: its protocol and spec oracles.
-pub struct DedSim<'a> {
-    artifact: &'a DedArtifact,
+/// A compiled program ready to run: its protocol and spec oracles.
+pub struct SpecSim<'a> {
+    artifact: &'a SimArtifact,
     protocol: Oracle,
     spec: Option<Oracle>,
+    runtime: Runtime,
 }
 
 /// The spec's verdict inputs for one run: `pre` and `post` at EOT.
@@ -40,41 +45,118 @@ pub struct Outcome {
     pub firings: Vec<FiringRecord>,
 }
 
-impl<'a> DedSim<'a> {
-    pub fn new(artifact: &'a DedArtifact) -> Result<DedSim<'a>, SimError> {
-        let protocol = Oracle::new(artifact.protocol.clone()).map_err(SimError::Load)?;
+impl<'a> SpecSim<'a> {
+    pub fn new(artifact: &'a SimArtifact) -> Result<SpecSim<'a>, SimError> {
+        let protocol = Oracle::new(artifact.protocol.clone())
+            .map_err(SimError::Load)?
+            .with_roles(artifact.roles.clone())
+            .with_seed(artifact.seed)
+            .map_err(SimError::Load)?;
+        let runtime = match artifact.profile {
+            Profile::Molly => Runtime::default(),
+            Profile::Blossom { .. } => Runtime::of(artifact.protocol.get())?,
+        };
         let spec = match &artifact.spec {
             Some(s) => Some(Oracle::new(s.program.clone()).map_err(SimError::Load)?),
             None => None,
         };
-        Ok(DedSim {
+        Ok(SpecSim {
             artifact,
             protocol,
             spec,
+            runtime,
         })
     }
 
-    pub fn artifact(&self) -> &DedArtifact {
+    pub fn artifact(&self) -> &SimArtifact {
         self.artifact
     }
 
-    /// Runs ticks `0..=last` under `faults` (Molly's crash view).
+    /// The crash view of the artifact's profile.
+    pub fn crash_view(&self) -> CrashView {
+        if self.artifact.profile.frozen() {
+            CrashView::Frozen
+        } else {
+            CrashView::MollyContinue
+        }
+    }
+
+    /// Runs ticks `0..=last` under `faults` in the artifact's profile.
     pub fn run(&self, last: Tick, faults: &FaultSchedule, capture: bool) -> Result<SyncRun, SimError> {
+        self.run_with_view(last, faults, capture, self.crash_view())
+    }
+
+    /// Runs ticks `0..=last` under `faults` with the given crash view (the synchronous test harness uses CR-20's
+    /// frozen view for every program; Molly's is LDFI's for `.ded` programs).
+    pub fn run_with_view(
+        &self,
+        last: Tick,
+        faults: &FaultSchedule,
+        capture: bool,
+        crash_view: CrashView,
+    ) -> Result<SyncRun, SimError> {
         let nodes = u32::try_from(self.artifact.nodes.len()).map_err(|_| internal_error!("too many nodes"))?;
         let mut world = SyncWorld::new(&self.protocol, nodes);
-        for f in &self.artifact.inputs {
-            world.input(f.node, f.tick, f.rel, Arc::from(f.row.clone()));
+        let profile = self.artifact.profile;
+        for t in profile.first_tick().0..=last.0 {
+            for n in 0..nodes {
+                for (rel, row) in self.events(NodeId(n), Tick(t))? {
+                    world.input(NodeId(n), Tick(t), rel, row);
+                }
+                for m in self.ingress(NodeId(n), Tick(t)) {
+                    world.ingress(NodeId(n), Tick(t), m);
+                }
+            }
         }
         world.run(
             &SyncConfig {
-                // Molly's round k is tick k and there is no round 0 (CR-13): nothing runs at tick 0.
-                first: Tick(1),
+                first: profile.first_tick(),
                 last,
-                crash_view: CrashView::MollyContinue,
+                crash_view,
+                round: profile.round(),
                 capture,
+                halt: self.artifact.halt,
             },
             faults,
         )
+    }
+
+    /// Every event of `node` at `tick`: its scheduled inputs, the runtime's (`boot`, timers) and its node statics.
+    pub fn events(&self, node: NodeId, tick: Tick) -> Result<Vec<(RelId, Row)>, SimError> {
+        let mut events: Vec<(RelId, Row)> = self
+            .artifact
+            .inputs
+            .iter()
+            .filter(|f| f.node == node && f.tick == tick)
+            .map(|f| (f.rel, Arc::from(f.row.clone())))
+            .collect();
+        events.extend(self.runtime.events_at(
+            role_of(&self.artifact.roles, node),
+            tick,
+            self.artifact.profile.round(),
+        )?);
+        events.extend(
+            self.artifact
+                .statics
+                .iter()
+                .filter(|s| s.node == node)
+                .map(|s| (s.rel, Arc::from(s.row.clone()))),
+        );
+        Ok(events)
+    }
+
+    /// The client sessions' messages to `node` at `tick`.
+    pub fn ingress(&self, node: NodeId, tick: Tick) -> Vec<Ingress> {
+        self.artifact
+            .ingress
+            .iter()
+            .filter(|f| f.node == node && f.tick == tick)
+            .map(|f| Ingress {
+                rel: f.rel,
+                session: f.session,
+                row: Arc::from(f.row.clone()),
+            })
+            .collect()
     }
 
     /// Evaluates the outcome spec on `run` at `eot`. Fails when the program has no spec (CR-30).
@@ -117,6 +199,13 @@ impl<'a> DedSim<'a> {
                         self.snapshot(instances(tick).as_deref(), rel, ded, &mut events)?;
                     }
                 }
+                SpecFeed::Crashed { spec: rel } => {
+                    for (node, at) in crashes {
+                        if *at <= eot {
+                            events.push((rel, Arc::from(vec![Value::Node(*node)])));
+                        }
+                    }
+                }
                 SpecFeed::Crash { spec: rel } => {
                     for observer in 0..self.artifact.nodes.len() {
                         let observer = node_id(observer)?;
@@ -139,9 +228,11 @@ impl<'a> DedSim<'a> {
             .tick(&TickInput {
                 node: NodeId(0),
                 tick: eot,
+                now: now_at(self.artifact.profile.round(), eot)?,
                 carried: &Instance::default(),
                 events: &events,
                 delivered: &[],
+                ingress: &[],
                 capture,
             })
             .map_err(|error| SimError::Node {
@@ -159,8 +250,7 @@ impl<'a> DedSim<'a> {
         })
     }
 
-    /// Runs one node's tick directly (for searches that step every node themselves): its input events at `tick`
-    /// come from the program's facts.
+    /// Runs one node's tick directly (for searches that step every node themselves), with its events at `tick`.
     pub fn step(
         &self,
         node: NodeId,
@@ -168,20 +258,17 @@ impl<'a> DedSim<'a> {
         carried: &Instance,
         delivered: &[blossom_oracle::Delivery],
     ) -> Result<blossom_oracle::TickOutput, SimError> {
-        let events: Vec<(RelId, Row)> = self
-            .artifact
-            .inputs
-            .iter()
-            .filter(|f| f.node == node && f.tick == tick)
-            .map(|f| (f.rel, Arc::from(f.row.clone())))
-            .collect();
+        let events = self.events(node, tick)?;
+        let ingress = self.ingress(node, tick);
         self.protocol
             .tick(&TickInput {
                 node,
                 tick,
+                now: now_at(self.artifact.profile.round(), tick)?,
                 carried,
                 events: &events,
                 delivered,
+                ingress: &ingress,
                 capture: false,
             })
             .map_err(|error| SimError::Node { node, tick, error })
@@ -192,7 +279,7 @@ impl<'a> DedSim<'a> {
         &self,
         instances: Option<&[&Instance]>,
         rel: RelId,
-        ded: blossom_artifact::ded::DedRelIdx,
+        ded: blossom_artifact::sim::LogicalIdx,
         out: &mut Vec<(RelId, Row)>,
     ) -> Result<(), SimError> {
         let protocol = self

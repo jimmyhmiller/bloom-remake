@@ -1,0 +1,15 @@
+//! Slice 2 review: `leq!` on two different LPoint values is false, not a conflict.
+
+pub module M {
+    input put(k: u64, v: u64);
+    table p(k: u64, x: LPoint<u64>);
+    table le(a: u64, b: u64);
+    f1: on put(k, v) { emit p(k, v); }
+    f2: on put(_, _), p(a, x), p(b, y) where x.leq!(y) { emit le(a, b); }
+}
+spec S for M {
+    nodes N;
+    fact put(1, 5) @ N at tick 1;
+    fact put(2, 6) @ N at tick 1;
+    faults { eot: 2, eff: 1, crashes: 0, model: sync }
+}

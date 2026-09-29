@@ -389,6 +389,7 @@ version = "0.1.0"
 dependencies = [
  "blossom-base",
  "blossom-value",
+ "thiserror",
 ]
 
 [[package]]
@@ -1955,11 +1956,14 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "blossom-analysis",
  "blossom-artifact",
  "blossom-base",
  "blossom-driver",
  "blossom-front",
+ "blossom-ir",
  "blossom-ldfi",
+ "blossom-oracle",
  "blossom-sim",
  "blossom-value",
  "clap",

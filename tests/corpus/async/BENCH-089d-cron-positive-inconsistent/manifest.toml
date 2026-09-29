@@ -17,9 +17,7 @@ ticks = 6
 stop = "ticks"
 
 [backend.oracle]
-status = "unimplemented"
-unimplemented = ["LANG-065", "LANG-069", "LANG-220", "ANA-022", "ANA-023", "ANA-024", "ANA-025", "ANA-029"]
-until = "M5"
+status = "pass"
 
 [backend.analysis]
 status = "unimplemented"

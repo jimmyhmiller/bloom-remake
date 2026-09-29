@@ -136,3 +136,78 @@ question tool, the user chose:
 - LDFI decides by the seeded lineage-driven search with tuple-level negative support, and hands over to exhaustive
   certification when it spends its run budget or its lineage was incomplete; the report names the deciding search.
 - The S1 gate excludes BENCH-133d (Flux 22/21/1), which no search here or in the reference checker decides.
+
+## Slice 2 decisions (made by Claude, 2026-09-29; details in docs/plan/notes/S2.md)
+
+- **Blossom specs and CR-20.** LDFI judges `.bls` programs under CR-20 (a crashed node is frozen from its crash tick,
+  ARCHITECTURE §8.1); Molly's view (crashed nodes keep receiving) stays the `.ded` profile. `examples/e10_specs.bls`
+  ported Molly's `deliv_assert` verbatim, whose `missing_log` counts a crashed neighbor that never received the
+  message; under CR-20 that makes `AckRbFaults` fail with `{C(B,2)}`. Its `DelivAssert` now excludes crashed
+  neighbors (`not crashed(a)`), which gives Molly's verdicts (SimpleLog fails with `{O(A,B,1)}`, AckRb holds).
+- **Frozen crashes in LDFI.** Firings get an `Alive` premise (a crash stops them), a crashed node's ticks are frozen
+  copies (`Support::Frozen`), and tuple-level negative support adds *frozen appearance*: a tuple a node held before
+  tick `c` stays if it crashes at `c`. Relation-level support under the frozen view is `Unimplemented`.
+- **`round` is required** in a spec's `faults` exactly when the target observes time (physical timers or `now()`);
+  ODD-16 names no default duration.
+- **Deployments.** A single-location program's only role is `Node` (LANGUAGE §7.7), so a manifest may assign it.
+  `.ded` programs without `--nodes` take their nodes from their location constants (tests/corpus/README.md).
+- **Sim artifact generalization.** `blossom-artifact::ded` became `::sim` (`SimArtifact`, `LogicalRel`, …) with a
+  `Profile` (Molly or Blossom), and `blossom-sim::ded` became `::spec` (`SpecSim`); LDFI runs both frontends'
+  programs through them.
+- **IR amendments (additive):** `IrBuilder::set_persistence` and `set_construct_kind` (expansions whose spec names
+  relations declared inside the construct), `ConstructKind::Members` (a role's `R$members`), `Node<R>` assignable
+  where `Node` is expected (LANGUAGE §5.3), and `count` over a tuple (LANGUAGE §10.1's `count<(S, L, P)>`).
+- **Lattices (slice 2 subset).** `LBool`, `LMax`, `LMin`, `LSet`, `LPSet`, `LMap`, `LPoint` with the operations of
+  LANGUAGE §11.5 that `blossom-lattice::Op` lists; each IR lattice's catalogue is generated from that list with
+  concrete types (catalogue names: `at_least`/`above`/`at_most`/`below` for the scalar thresholds so they do not
+  clash with the `lt!` method, `lift`/`lift_entries` for implicit lifts, `of` for constructors, `reveal_nonbot` for
+  the non-⊥ reveal). Other lattices, user-defined lattices, lattice folds and functions report BLS0908.
+- **Roles inside lattices are erased.** `LSet<Node<R>>` is interned as `LSet<Node>`: one lattice type keeps one
+  catalogue, and a `Node<R>` value is a `Node` value. Declared column types are instantiated afresh at each use in
+  type checking, so meeting `Node` with `Node<R>` at one use no longer refines the declared column (a latent bug
+  that also affected plain `Node` columns written with two different roles).
+- **Lattice polarity** (SEM-102) is computed on the IR by `blossom_ir::polarity`, shared by the analysis and the
+  oracle's own stratifier (the oracle still shares no code with `blossom-analysis`). It is conservative where the
+  language leaves room: a refutable pattern over a lattice-derived value is exact, and so is any plain operator
+  over one (a threshold's `bool` used as data).
+- **The oracle's lattice lookups** are recorded in firings as the cell's row (present) or a negation over its key
+  (absent); LDFI reads them as a premise on the cell's goal or a negated read.
+- **A negative number in an `LPSet`** is reported as BLSR004 (an out-of-range value), there being no dedicated code.
+- **IR amendments (additive, 2):** `assignable` is covariant through tuples, options and collections (`Map<Node<R>,
+  V>` stands for `Map<Node, V>`), and lattice operation arguments are checked with it.
+- **Relation-level `resolve`** (LANGUAGE §10.7) is implemented for `choose`, `choose_least(col)` and
+  `choose_most(col)` (a cost that is one column); `sticky`, `choose_rand`, costs over expressions and `upsert` into
+  a resolved table report BLS0908. `merge` is accepted when every non-key column is a lattice (it is then the
+  default). The expansion is `r$n`/`r$cand`/`r$ext`/`r$pmin` with the site `M::rel::resolve`.
+- **Run seeds.** `$prio` draws from σc = PRF(ρ, "choose"); a simulation's root seed ρ is `Seed::from_u64(n)` for
+  run seed `n`: `blossom sim --seed`, a corpus manifest's `[deploy] seed` (default 0), and 0 for a spec's runs until
+  `check sim { seed }` exists. An oracle given a seeded program but no seed fails with an internal error rather than
+  choosing one.
+- **External clients in specs** (LANGUAGE §18.4 had no spec form): `fact c(…) @ n from s at tick k` on a channel
+  from an external role is a message of session `s`, delivered to `n` at `k` like an input (not subject to
+  omission faults; a lineage leaf). Replies to sessions are recorded as the node's egress and dropped (a crashed
+  node's replies are lost). Specs name an instance's relations by path (`tpc.decided(x, d) @ n`).
+- **`examples/e04_two_phase_commit.bls`** now feeds the instance's `refuse` input from a root input at `Worker`: the
+  choreography's `on refuse(…)` handler read an instance input no statement wrote, which BLS0504 rightly rejects.
+- **e04 under LDFI** (`examples/e04_specs.bls`) uses EOT 10 where Molly's 2pc uses 7: E4 persists the transaction,
+  the decision and each participant's decision with `next`, so with `prepare` lost until EFF 3 the second decider
+  appears at tick 8. Verdicts match 2pc: omissions hold (lineage-driven, confirmed by exhaustive certification),
+  one crash fails with the coordinator crashing before its decision is persisted (Figure 8).
+- **Lattice lineage** (ARCHITECTURE §8.3): a cell's goal has one firing that needs every contribution and a group
+  premise per contributing rule (a new contribution changes the cell); stale firings (reads of a superseded value
+  within a growing stratum) are dropped; LDFI over lattice channels reports BLS0908 (LANG-137).
+- **IR amendments (additive, 3):** time arithmetic in the validator (`Instant - Instant: Duration`,
+  `Instant ± Duration: Instant`), a direction channel to an external role has a `Session` destination, and
+  `BuiltinFn::Concat` is `++` on `String`, `Bytes` and `Vec`.
+- **The S2 gate** is `xtask corpus --gate` under `docs/plan/MILESTONE = S2`: every `core/` and `async/` oracle or
+  compile case whose features all lie in `S2_SUBSET` (xtask/src/cmd/corpus.rs; analysis, test and verification ids
+  are other backends' concerns and do not exclude a case) must pass.
+- **`monotone view`** (ANA-020) is checked by `blossom_analysis::monotone` (BLS0702) over the view's rules and its
+  generated helpers, with the IR's `RelAttrs::monotone` carrying the assertion (additive). `monotone on`/`while`,
+  modules and choreographies still report BLS0908, as does ANA-141's confluence certificate.
+- **The simulated node directory:** `node_dir(node, addr, principal, role)` gives each node its deployment name as
+  address and principal.
+- **`$self` in the IR** is typed `Node<R>` in a rule placed at role R (when that type exists), and the validator
+  types collection literals and `++` by their widest operand, so role-refined values mix with plain `Node`s.
+- **Code registry:** `BLS0106` may also be constructed by `blossom-front` (a clause against the relation's kind is a
+  semantic check; ARCHITECTURE §13.1 gives the parser the syntactic part of BLS0100–0110).

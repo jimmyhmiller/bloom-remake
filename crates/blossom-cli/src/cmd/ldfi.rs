@@ -2,7 +2,9 @@
 //!
 //! Slice 1 (docs/design/SLICES.md) runs LDFI on Molly `.ded` programs, whose `pre` and `post` rules are the outcome
 //! spec: `blossom ldfi simplog.ded deliv_assert.ded --eot 4 --eff 2 --nodes a,b,c --crashes 0` is Molly's
-//! `SyncFTChecker` (LANGUAGE §21.1). `.bls` programs with `spec` blocks follow in slice 2.
+//! `SyncFTChecker` (LANGUAGE §21.1). For a Blossom program, `blossom ldfi specs.bls --spec AckRbFaults` checks the
+//! spec: its target, scenario, `faults` and `pre`/`post` (LANGUAGE §17), and compares the verdict with its
+//! `check ldfi expect …`.
 //!
 //! Exit codes: 0 when no counterexample exists within the failure spec, 3 when one does (verification failed), 1 for
 //! a program error, 7 for an unimplemented feature.
@@ -11,7 +13,7 @@ use std::process::ExitCode;
 
 use blossom_ldfi::report::{fault_labels, post_lineage, render};
 use blossom_ldfi::{FailureSpec, LdfiConfig, LdfiError, Verdict, falsifiers};
-use blossom_sim::ded::DedSim;
+use blossom_sim::spec::SpecSim;
 
 use crate::common::{Context, ded};
 use crate::exit::Exit;
@@ -19,21 +21,24 @@ use crate::exit::Exit;
 /// Arguments of `blossom ldfi`.
 #[derive(Debug, clap::Args)]
 pub struct Args {
-    /// The program's `.ded` files (their `include`s are loaded too).
+    /// The program's `.ded` files (their `include`s are loaded too), or one `.bls` file holding the spec.
     #[arg(required = true)]
     pub files: Vec<String>,
-    /// The deployment's nodes.
-    #[arg(long, value_delimiter = ',', required = true)]
+    /// The spec to check (`.bls` only).
+    #[arg(long)]
+    pub spec: Option<String>,
+    /// The deployment's nodes (`.ded` only: a spec names its own).
+    #[arg(long, value_delimiter = ',')]
     pub nodes: Vec<String>,
-    /// The end of time: the tick at which `pre` and `post` are read.
+    /// The end of time: the tick at which `pre` and `post` are read (`.ded` only: a spec has `faults`).
     #[arg(long)]
-    pub eot: u64,
-    /// The end of finite failures: messages sent before this tick may be lost.
+    pub eot: Option<u64>,
+    /// The end of finite failures: messages sent before this tick may be lost (`.ded` only).
     #[arg(long)]
-    pub eff: u64,
-    /// How many nodes may crash.
-    #[arg(long, default_value_t = 0)]
-    pub crashes: u32,
+    pub eff: Option<u64>,
+    /// How many nodes may crash (`.ded` only).
+    #[arg(long)]
+    pub crashes: Option<u32>,
     /// Report every counterexample, not only the first.
     #[arg(long)]
     pub find_all: bool,
@@ -71,19 +76,56 @@ pub struct Args {
 /// Runs the command.
 pub fn run(args: Args, cx: &Context) -> ExitCode {
     let _ = cx;
-    if !ded::all_ded(&args.files) {
-        eprintln!("`blossom ldfi` on `.bls` specs arrives with slice 2 (docs/design/SLICES.md)");
-        return crate::exit::not_implemented("TEST-029", "slice 2");
-    }
-    let artifact = match ded::compile(&args.files, &args.nodes) {
-        Ok(a) => a,
-        Err(code) => return code,
+    let (artifact, eot, eff, crashes, expect) = if ded::all_ded(&args.files) {
+        if args.spec.is_some() {
+            eprintln!("`--spec` names a spec of a `.bls` file");
+            return Exit::Usage.into();
+        }
+        let (Some(eot), Some(eff)) = (args.eot, args.eff) else {
+            eprintln!("a `.ded` program needs `--eot` and `--eff`");
+            return Exit::Usage.into();
+        };
+        if args.nodes.is_empty() {
+            eprintln!("a `.ded` program needs `--nodes`");
+            return Exit::Usage.into();
+        }
+        let artifact = match ded::compile(&args.files, &args.nodes) {
+            Ok(a) => a,
+            Err(code) => return code,
+        };
+        (artifact, eot, eff, args.crashes.unwrap_or(0), None)
+    } else {
+        let ([file], Some(name)) = (args.files.as_slice(), &args.spec) else {
+            eprintln!("a Blossom spec is checked with `blossom ldfi FILE.bls --spec NAME`");
+            return Exit::Usage.into();
+        };
+        if !args.nodes.is_empty() || args.eot.is_some() || args.eff.is_some() || args.crashes.is_some() {
+            eprintln!("a spec gives its own nodes and `faults`; drop `--nodes`, `--eot`, `--eff` and `--crashes`");
+            return Exit::Usage.into();
+        }
+        let spec = match crate::common::bls::compile_spec(file, name) {
+            Ok(s) => s,
+            Err(code) => return code,
+        };
+        for (what, _) in &spec.not_run {
+            eprintln!("note: {what} is not run: this build does not implement it");
+        }
+        let Some(faults) = spec.faults else {
+            eprintln!("spec `{name}` has no `faults`");
+            return Exit::UserError.into();
+        };
+        let expect = spec
+            .checks
+            .iter()
+            .find(|c| c.tool.as_str() == "ldfi")
+            .and_then(|c| c.expect);
+        (spec.artifact, faults.eot, faults.eff, faults.crashes, expect)
     };
     let nodes = match u32::try_from(artifact.nodes.len()) {
         Ok(n) => n,
         Err(_) => return Exit::UserError.into(),
     };
-    let spec = match FailureSpec::new(args.eot, args.eff, args.crashes, nodes) {
+    let spec = match FailureSpec::new(eot, eff, crashes, nodes) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{e}");
@@ -108,7 +150,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
     config.workers = args
         .jobs
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get));
-    let sim = match DedSim::new(&artifact) {
+    let sim = match SpecSim::new(&artifact) {
         Ok(s) => s,
         Err(e) => return fail(&LdfiError::Sim(e)),
     };
@@ -144,9 +186,20 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
                 println!("\nfailure-free lineage of `post`:");
                 print!("{}", post_lineage(&artifact, &report.failure_free_graph, &report));
             }
-            match report.verdict {
-                Verdict::NoCounterexample => Exit::Ok.into(),
-                Verdict::Counterexample => Exit::VerifyFailed.into(),
+            let holds = report.verdict == Verdict::NoCounterexample;
+            match expect {
+                Some(want) => {
+                    let word = if want { "holds" } else { "fails" };
+                    if want == holds {
+                        println!("check ldfi expect {word}: as expected");
+                        Exit::Ok.into()
+                    } else {
+                        println!("check ldfi expect {word}: NOT as expected");
+                        Exit::VerifyFailed.into()
+                    }
+                }
+                None if holds => Exit::Ok.into(),
+                None => Exit::VerifyFailed.into(),
             }
         }
         Err(e) => fail(&e),

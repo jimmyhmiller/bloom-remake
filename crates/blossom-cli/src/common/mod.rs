@@ -37,17 +37,107 @@ pub fn long_version() -> &'static str {
 }
 
 /// Compiling `.ded` programs for the commands that run them (`sim`, `ldfi`).
+pub mod bls {
+    use std::process::ExitCode;
+
+    use blossom_driver::{bls::compile_spec_file, render::render};
+    use blossom_front::api::BlsError;
+    use blossom_front::spec::CompiledSpec;
+
+    use crate::exit::Exit;
+
+    /// Compiles the program rooted at `file` for `nodes`, printing diagnostics; on failure, the exit code to return.
+    pub fn compile(
+        file: &str,
+        nodes: &[blossom_front::api::NodeSpec],
+    ) -> Result<blossom_artifact::bls::BlsArtifact, ExitCode> {
+        let (result, sources) = blossom_driver::bls::compile_file(file, nodes);
+        match result {
+            Ok((a, warnings)) => {
+                for d in warnings.iter() {
+                    eprint!("{}", render(d, &sources));
+                }
+                Ok(a)
+            }
+            Err(BlsError::Rejected(diags)) => {
+                for d in diags.iter() {
+                    eprint!("{}", render(d, &sources));
+                }
+                let unimplemented = diags.iter().any(blossom_driver::render::is_not_implemented);
+                Err(if unimplemented {
+                    Exit::Unimplemented
+                } else {
+                    Exit::UserError
+                }
+                .into())
+            }
+            Err(BlsError::Internal(e)) => {
+                eprintln!("{e}");
+                Err(Exit::Internal.into())
+            }
+        }
+    }
+
+    /// A duration written like a Blossom literal: `500ms`, `1s`, `2m`.
+    pub fn parse_duration(text: &str) -> Option<blossom_value::time::Duration> {
+        let split = text.find(|c: char| c.is_ascii_alphabetic())?;
+        let (num, unit) = text.split_at(split);
+        let n: i64 = num.parse().ok()?;
+        let scale: i64 = match unit {
+            "ns" => 1,
+            "us" => 1_000,
+            "ms" => 1_000_000,
+            "s" => 1_000_000_000,
+            "m" => 60_000_000_000,
+            "h" => 3_600_000_000_000,
+            _ => return None,
+        };
+        n.checked_mul(scale)
+            .filter(|n| *n > 0)
+            .map(blossom_value::time::Duration::from_nanos)
+    }
+
+    /// Compiles the spec `name` of `file`, printing diagnostics; on failure, the exit code to return.
+    pub fn compile_spec(file: &str, name: &str) -> Result<CompiledSpec, ExitCode> {
+        let (result, sources) = compile_spec_file(file, name);
+        match result {
+            Ok((spec, warnings)) => {
+                for d in warnings.iter() {
+                    eprint!("{}", render(d, &sources));
+                }
+                Ok(spec)
+            }
+            Err(BlsError::Rejected(diags)) => {
+                for d in diags.iter() {
+                    eprint!("{}", render(d, &sources));
+                }
+                let unimplemented = diags.iter().any(blossom_driver::render::is_not_implemented);
+                Err(if unimplemented {
+                    Exit::Unimplemented
+                } else {
+                    Exit::UserError
+                }
+                .into())
+            }
+            Err(BlsError::Internal(e)) => {
+                eprintln!("{e}");
+                Err(Exit::Internal.into())
+            }
+        }
+    }
+}
+
 pub mod ded {
     use std::process::ExitCode;
 
-    use blossom_artifact::ded::DedArtifact;
+    use blossom_artifact::sim::SimArtifact;
     use blossom_driver::{ded::compile_files, render::render};
     use blossom_front::ded::DedError;
 
     use crate::exit::Exit;
 
     /// Compiles `files` for `nodes`, printing diagnostics; on failure, the exit code to return.
-    pub fn compile(files: &[String], nodes: &[String]) -> Result<DedArtifact, ExitCode> {
+    pub fn compile(files: &[String], nodes: &[String]) -> Result<SimArtifact, ExitCode> {
         let files: Vec<&str> = files.iter().map(String::as_str).collect();
         let nodes: Vec<&str> = nodes.iter().map(String::as_str).collect();
         let (result, sources) = compile_files(&files, &nodes);

@@ -69,6 +69,9 @@ pub trait Rules {
     /// The source-level relation a relation implements, for relation-level support.
     fn logical(&self, space: Space, rel: RelId) -> Option<u32>;
     fn constant(&self, space: Space, id: ConstId) -> Option<&Value>;
+    /// The lattice columns of a lattice-valued relation (empty for a set relation): its rows are merged per key, so a
+    /// cell's row changes when a contribution is gained or lost (SEM-100).
+    fn lattice_cols(&self, space: Space, rel: RelId) -> Vec<usize>;
 }
 
 /// What a seeded enumeration looks for.
@@ -89,6 +92,9 @@ pub struct Setting<'a> {
     pub preds: &'a Preds,
     pub neg: NegSupport,
     pub rules: Option<&'a dyn Rules>,
+    /// The frozen crash view (CR-20): a crashed node keeps the state of the tick before its crash, so a crash can
+    /// also make a tuple appear (one that would have been deleted), which tuple-level support accounts for.
+    pub frozen: bool,
 }
 
 /// Where a relation's tuples come from.
@@ -106,6 +112,8 @@ pub enum Origin<'r> {
     Snapshot { protocol: RelId, tick: Option<Tick> },
     /// The crash oracle `crash(Observer, Node, Time)`.
     Crash,
+    /// The crash oracle `crashed(Node)` of a Blossom spec: every node that crashed.
+    Crashed,
 }
 
 type Pattern = Vec<Option<Value>>;
@@ -300,6 +308,7 @@ pub struct Encoder<'a> {
     low: usize,
     /// The run's own crashes: hypotheses extend them (a crash may only move earlier).
     seed_crashes: BTreeMap<NodeId, Tick>,
+    frozen: bool,
 }
 
 impl<'a> Encoder<'a> {
@@ -317,9 +326,11 @@ impl<'a> Encoder<'a> {
             preds,
             neg,
             rules,
+            frozen,
         } = setting;
         Encoder {
             seed_crashes: seed.crashes.clone(),
+            frozen,
             graph,
             spec,
             preds,
@@ -515,6 +526,8 @@ impl<'a> Encoder<'a> {
                 return Err(internal_error!("lineage: no derivation recorded for {:?}", g.key).into());
             }
             Support::Derived(f) => f,
+            // A frozen copy holds as long as the previous tick's tuple does (the crash itself only moves earlier).
+            Support::Frozen(prev) => return self.goal(*prev),
         };
         let mut children = Vec::with_capacity(firings.len());
         for f in firings {
@@ -568,6 +581,7 @@ impl<'a> Encoder<'a> {
                 }
             }
             Premise::CrashAbsent { node, time } => self.crash_appears_any(node, time),
+            Premise::Alive { node, tick } => self.vars.k(self.solver, self.spec, node, tick),
             Premise::CrashPresent { node, time } => self.crash_removed(node, time),
             Premise::Aggregate(id) => {
                 let graph = self.graph;
@@ -722,13 +736,73 @@ impl<'a> Encoder<'a> {
         let Some(rules) = self.rules else {
             return Err(internal_error!("tuple-level negative support without the program's rules").into());
         };
-        match rules.origin(space, rel)? {
+        let origin = rules.origin(space, rel)?;
+        // Under the frozen crash view, a tuple a node held before some tick stays if the node crashes at that tick.
+        let frozen = match (&origin, loc) {
+            (Origin::Input | Origin::Rules { .. }, Loc::Node(n)) if self.frozen && space == Space::Protocol => {
+                self.frozen_appear(rel, n, tick, pattern)?
+            }
+            _ => Hazard::False,
+        };
+        if frozen == Hazard::True {
+            return Ok(Hazard::True);
+        }
+        // A lattice cell's row is the join of its contributions: a new row for a key appears when a contribution is
+        // gained (with any value) or lost (the join shrinks).
+        let lattice = rules.lattice_cols(space, rel);
+        if !lattice.is_empty() {
+            let key = key_pattern(pattern, &lattice);
+            let gained = self.appear_origin(origin, space, rel, loc, tick, &key)?;
+            if gained == Hazard::True {
+                return Ok(Hazard::True);
+            }
+            let lost = self.remove(space, rel, loc, tick, &key)?;
+            return self.or(vec![frozen, gained, lost]);
+        }
+        let derived = self.appear_origin(origin, space, rel, loc, tick, pattern)?;
+        self.or(vec![frozen, derived])
+    }
+
+    /// A crash of `node` at some tick `c <= tick` whose previous tick held a matching tuple (the frozen view).
+    fn frozen_appear(
+        &mut self,
+        rel: RelId,
+        node: NodeId,
+        tick: Tick,
+        pattern: &[Option<Value>],
+    ) -> Result<Hazard, LdfiError> {
+        let mut options = Vec::new();
+        for c in self.spec.crash_ticks().filter(|c| *c <= tick) {
+            let Some(before) = c.prev() else { continue };
+            if self.exists(Space::Protocol, rel, Loc::Node(node), before, pattern)? {
+                options.push(self.crash_appears(node, Some(c))?);
+            }
+        }
+        self.or(options)
+    }
+
+    fn appear_origin(
+        &mut self,
+        origin: Origin<'_>,
+        space: Space,
+        rel: RelId,
+        loc: Loc,
+        tick: Tick,
+        pattern: &[Option<Value>],
+    ) -> Result<Hazard, LdfiError> {
+        let _ = rel;
+        let Some(rules) = self.rules else {
+            return Err(internal_error!("tuple-level negative support without the program's rules").into());
+        };
+        match origin {
             Origin::Input => Ok(Hazard::False),
             Origin::Crash => {
                 // A tuple crash(Observer, Node, Time) appears when that node crashes at that time.
                 let (node, time) = crash_pattern(pattern)?;
                 self.crash_appears_any(node, time)
             }
+            // A tuple crashed(Node) appears when that node crashes, at any time.
+            Origin::Crashed => self.crash_appears_any(crashed_node(pattern)?, None),
             Origin::Snapshot { protocol, tick: at } => {
                 let (node_loc, rest) = split_node(pattern);
                 self.appear(Space::Protocol, protocol, node_loc, at.unwrap_or(tick), rest)
@@ -847,11 +921,30 @@ impl<'a> Encoder<'a> {
         let mut required = Vec::new();
         let mut options = Vec::new();
         for lit in &rule.body.lits {
+            // A lookup reads a cell, which faults can grow or shrink (or make absent or present): either may enable
+            // the rule, depending on how its value is used.
+            if let Literal::Lookup { rel, key, .. } = lit {
+                let n = rules.lattice_cols(space, *rel).len() + key.len();
+                let mut pat: Pattern = key
+                    .iter()
+                    .map(|t| match t {
+                        Term::Const(c) => rules.constant(space, *c).cloned(),
+                        Term::Var(v) => sigma.get(v.index()).cloned().flatten(),
+                        Term::Wild => None,
+                    })
+                    .collect();
+                pat.resize(n, None);
+                let pat = lookup_pattern(rules, space, *rel, &pat);
+                options.push(self.appear(space, *rel, atom_loc, tick, &pat)?);
+                options.push(self.remove(space, *rel, atom_loc, tick, &pat)?);
+                continue;
+            }
             let (atom, negated) = match lit {
                 Literal::Pos(a) => (a, false),
                 Literal::Neg(a) => (a, true),
                 _ => continue,
             };
+            let lattice = rules.lattice_cols(space, atom.rel);
             let pat: Pattern = atom
                 .args
                 .iter()
@@ -861,6 +954,25 @@ impl<'a> Encoder<'a> {
                     Term::Wild => None,
                 })
                 .collect();
+            // A lattice cell matches by its key: its value can change either way.
+            let pat = if lattice.is_empty() {
+                pat
+            } else {
+                key_pattern(&pat, &lattice)
+            };
+            if !lattice.is_empty() && !negated {
+                if !self.exists(space, atom.rel, atom_loc, tick, &pat)? {
+                    let h = self.appear(space, atom.rel, atom_loc, tick, &pat)?;
+                    if h == Hazard::False {
+                        return Ok(Hazard::False);
+                    }
+                    required.push(h);
+                    continue;
+                }
+                options.push(self.appear(space, atom.rel, atom_loc, tick, &pat)?);
+                options.push(self.remove(space, atom.rel, atom_loc, tick, &pat)?);
+                continue;
+            }
             if !negated && !aggregate && !self.exists(space, atom.rel, atom_loc, tick, &pat)? {
                 let h = self.appear(space, atom.rel, atom_loc, tick, &pat)?;
                 if h == Hazard::False {
@@ -902,6 +1014,10 @@ impl<'a> Encoder<'a> {
                     .seed_crashes
                     .iter()
                     .any(|(n, c)| node.is_none_or(|m| m == *n) && time.is_none_or(|t| t == *c)))
+            }
+            Origin::Crashed => {
+                let node = crashed_node(pattern)?;
+                Ok(self.seed_crashes.keys().any(|n| node.is_none_or(|m| m == *n)))
             }
             Origin::Snapshot { protocol, tick: at } => {
                 let (node_loc, rest) = split_node(pattern);
@@ -963,6 +1079,8 @@ impl<'a> Encoder<'a> {
                 let (node_loc, rest) = split_node(pattern);
                 return self.remove(Space::Protocol, protocol, node_loc, at.unwrap_or(tick), rest);
             }
+            // A crashed node stays crashed in every superset of the run's faults.
+            Origin::Crashed => return Ok(Hazard::False),
             Origin::Input | Origin::Rules { .. } => {}
         }
         if loc == Loc::AnyNode {
@@ -1062,6 +1180,15 @@ impl<'a> Encoder<'a> {
             self.tick_memo.insert((src, tick), h);
         }
         Ok(h)
+    }
+}
+
+/// The node column of a pattern over `crashed(Node)`.
+fn crashed_node(pattern: &[Option<Value>]) -> Result<Option<NodeId>, LdfiError> {
+    match pattern.first() {
+        Some(Some(Value::Node(n))) => Ok(Some(*n)),
+        Some(None) | None => Ok(None),
+        Some(Some(other)) => Err(internal_error!("a crashed-oracle node column {other:?}").into()),
     }
 }
 
@@ -1192,4 +1319,29 @@ pub fn minimal_extensions(
         }
     }
     Ok(out)
+}
+
+/// `pattern` with the lattice columns open: a cell is identified by its key.
+fn key_pattern(pattern: &[Option<Value>], lattice: &[usize]) -> Pattern {
+    pattern
+        .iter()
+        .enumerate()
+        .map(|(i, v)| if lattice.contains(&i) { None } else { v.clone() })
+        .collect()
+}
+
+/// A lookup's key values placed at the relation's key columns (the columns that are not lattice columns, in order).
+fn lookup_pattern(rules: &dyn Rules, space: Space, rel: RelId, key: &[Option<Value>]) -> Pattern {
+    let lattice = rules.lattice_cols(space, rel);
+    let n = key.len();
+    let mut values = key.iter().cloned();
+    (0..n)
+        .map(|i| {
+            if lattice.contains(&i) {
+                None
+            } else {
+                values.next().flatten()
+            }
+        })
+        .collect()
 }

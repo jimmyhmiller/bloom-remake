@@ -48,7 +48,7 @@ deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-schema"]
 
 [crates.blossom-front]
 layer = "L1"
-# blossom-artifact: slice 1 (docs/design/SLICES.md) — the `.ded` frontend produces a DedArtifact.
+# blossom-artifact: slice 1 (docs/design/SLICES.md) — the `.ded` frontend produces a SimArtifact.
 deps = ["blossom-base", "blossom-value", "blossom-lattice", "blossom-std-src", "blossom-syntax", "blossom-ir", "blossom-schema", "blossom-artifact"]
 
 [crates.blossom-analysis]
