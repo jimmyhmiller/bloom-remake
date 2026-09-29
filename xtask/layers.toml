@@ -145,6 +145,8 @@ deps = ["blossom-base", "blossom-driver", "blossom-artifact", "blossom-codegen"]
 [crates.blossom-cli]
 layer = "L5"
 deps = ["blossom-base", "blossom-value", "blossom-lattice", "blossom-std-src", "blossom-syntax", "blossom-ir", "blossom-schema", "blossom-artifact", "blossom-front", "blossom-analysis", "blossom-rewrite", "blossom-plan", "blossom-oracle", "blossom-driver", "blossom-kernel", "blossom-engine", "blossom-prov", "blossom-codegen", "blossom-std-host", "blossom-wire", "blossom-store", "blossom-trace", "blossom-node", "blossom-runtime", "blossom-sim", "blossom-smt", "blossom-sat", "blossom-ldfi", "blossom-verify", "blossom-build", "blossom-lsp"]
+# blossom-bench: slice 3 (docs/design/SLICES.md) — the kill -9 test drives `blossom run` processes with the workload.
+dev_deps = ["blossom-bench"]
 
 [crates.blossom]
 layer = "L5"
@@ -152,7 +154,8 @@ deps = ["blossom-base", "blossom-value", "blossom-node", "blossom-runtime", "blo
 
 [crates.blossom-bench]
 layer = "L5"
-deps = ["blossom-base", "blossom-value", "blossom-kernel", "blossom-engine", "blossom-driver", "blossom-node", "blossom-sim"]
+# blossom-runtime: slice 3 (docs/design/SLICES.md) — the key-value workload drives real nodes over TCP.
+deps = ["blossom-base", "blossom-value", "blossom-kernel", "blossom-engine", "blossom-driver", "blossom-node", "blossom-sim", "blossom-runtime"]
 
 [crates.blossom-lsp]
 layer = "L5"

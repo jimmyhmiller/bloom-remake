@@ -8,6 +8,7 @@
 //! placeholder that exposes nothing (PLAN §4 D1).
 
 pub mod bls;
+pub mod linearize;
 pub mod runtime;
 pub mod spec;
 pub mod sync;

@@ -166,7 +166,8 @@ pub fn durable_dir(fs: &dyn Vfs, path: &Path) -> Result<(), StoreError> {
     fs.create_dir_all(path)?;
     for ancestor in path.ancestors() {
         if let Some(parent) = ancestor.parent() {
-            fs.sync_dir(parent)?;
+            // The parent of a relative path's first component is the empty path: the current directory.
+            fs.sync_dir(if parent.as_os_str().is_empty() { Path::new(".") } else { parent })?;
         }
     }
     Ok(())

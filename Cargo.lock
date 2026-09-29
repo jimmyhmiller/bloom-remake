@@ -205,13 +205,19 @@ dependencies = [
 name = "blossom-bench"
 version = "0.1.0"
 dependencies = [
+ "blossom-artifact",
  "blossom-base",
  "blossom-driver",
  "blossom-engine",
+ "blossom-front",
  "blossom-kernel",
  "blossom-node",
+ "blossom-oracle",
+ "blossom-runtime",
  "blossom-sim",
  "blossom-value",
+ "clap",
+ "thiserror",
 ]
 
 [[package]]
@@ -231,6 +237,7 @@ dependencies = [
  "blossom-analysis",
  "blossom-artifact",
  "blossom-base",
+ "blossom-bench",
  "blossom-build",
  "blossom-codegen",
  "blossom-driver",
@@ -485,6 +492,7 @@ dependencies = [
 name = "blossom-runtime"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "blossom-artifact",
  "blossom-base",
  "blossom-engine",
@@ -492,11 +500,15 @@ dependencies = [
  "blossom-kernel",
  "blossom-lattice",
  "blossom-node",
+ "blossom-oracle",
  "blossom-schema",
  "blossom-store",
  "blossom-trace",
  "blossom-value",
  "blossom-wire",
+ "serde",
+ "thiserror",
+ "toml",
 ]
 
 [[package]]
@@ -533,6 +545,7 @@ dependencies = [
  "blossom-trace",
  "blossom-value",
  "blossom-wire",
+ "proptest",
  "thiserror",
 ]
 
