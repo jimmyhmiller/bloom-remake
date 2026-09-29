@@ -26,9 +26,7 @@ ticks = 3
 stop = "ticks"
 
 [backend.oracle]
-status = "unimplemented"
-unimplemented = ["LANG-220", "LANG-005", "LANG-060", "SEM-004", "LANG-100", "LANG-101"]
-until = "M5"
+status = "pass"
 
 # 3 contributors to the first, 1 to the second
 [[expect]]

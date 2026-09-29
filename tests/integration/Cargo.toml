@@ -47,6 +47,7 @@ proptest.workspace = true
 [dev-dependencies]
 # The test kit is a dev-dependency only of integration-test crates (ARCHITECTURE §1.3).
 blossom-testkit.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true

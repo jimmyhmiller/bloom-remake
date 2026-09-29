@@ -35,3 +35,59 @@ pub fn long_version() -> &'static str {
         )
     })
 }
+
+/// Compiling `.ded` programs for the commands that run them (`sim`, `ldfi`).
+pub mod ded {
+    use std::process::ExitCode;
+
+    use blossom_artifact::ded::DedArtifact;
+    use blossom_driver::{ded::compile_files, render::render};
+    use blossom_front::ded::DedError;
+
+    use crate::exit::Exit;
+
+    /// Compiles `files` for `nodes`, printing diagnostics; on failure, the exit code to return.
+    pub fn compile(files: &[String], nodes: &[String]) -> Result<DedArtifact, ExitCode> {
+        let files: Vec<&str> = files.iter().map(String::as_str).collect();
+        let nodes: Vec<&str> = nodes.iter().map(String::as_str).collect();
+        let (result, sources) = compile_files(&files, &nodes);
+        match result {
+            Ok(a) => Ok(a),
+            Err(DedError::Rejected(diags)) => {
+                for d in diags.iter() {
+                    eprint!("{}", render(d, &sources));
+                }
+                let unimplemented = diags.iter().any(blossom_driver::render::is_not_implemented);
+                Err(if unimplemented {
+                    Exit::Unimplemented
+                } else {
+                    Exit::UserError
+                }
+                .into())
+            }
+            Err(DedError::Internal(e)) => {
+                eprintln!("{e}");
+                Err(Exit::Internal.into())
+            }
+        }
+    }
+
+    /// Whether every root is a `.ded` file.
+    pub fn all_ded(files: &[String]) -> bool {
+        !files.is_empty() && files.iter().all(|f| f.ends_with(".ded"))
+    }
+
+    /// Parses `a:b:1` (an omission) or `a:2` (a crash) into node names and a tick.
+    pub fn parse_fault(text: &str, parts: usize) -> Result<(Vec<String>, u64), String> {
+        let fields: Vec<&str> = text.split(':').collect();
+        if fields.len() != parts {
+            return Err(format!("`{text}`: expected {parts} fields separated by `:`"));
+        }
+        let (names, tick) = fields.split_at(parts - 1);
+        let tick = tick
+            .first()
+            .and_then(|t| t.parse::<u64>().ok())
+            .ok_or_else(|| format!("`{text}`: the last field is a tick"))?;
+        Ok((names.iter().map(|s| (*s).to_owned()).collect(), tick))
+    }
+}

@@ -304,6 +304,7 @@ dependencies = [
 name = "blossom-front"
 version = "0.1.0"
 dependencies = [
+ "blossom-artifact",
  "blossom-base",
  "blossom-ir",
  "blossom-lattice",
@@ -311,6 +312,8 @@ dependencies = [
  "blossom-std-src",
  "blossom-syntax",
  "blossom-value",
+ "thiserror",
+ "toml",
 ]
 
 [[package]]
@@ -352,6 +355,7 @@ dependencies = [
  "blossom-verify",
  "blossom-wire",
  "proptest",
+ "toml",
 ]
 
 [[package]]
@@ -395,11 +399,13 @@ dependencies = [
  "blossom-artifact",
  "blossom-base",
  "blossom-ir",
+ "blossom-oracle",
  "blossom-prov",
  "blossom-sat",
  "blossom-sim",
  "blossom-trace",
  "blossom-value",
+ "thiserror",
 ]
 
 [[package]]
@@ -435,6 +441,7 @@ dependencies = [
  "blossom-ir",
  "blossom-lattice",
  "blossom-value",
+ "thiserror",
 ]
 
 [[package]]
@@ -517,10 +524,12 @@ dependencies = [
  "blossom-engine",
  "blossom-ir",
  "blossom-node",
+ "blossom-oracle",
  "blossom-store",
  "blossom-trace",
  "blossom-value",
  "blossom-wire",
+ "thiserror",
 ]
 
 [[package]]
@@ -1946,7 +1955,13 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "blossom-artifact",
  "blossom-base",
+ "blossom-driver",
+ "blossom-front",
+ "blossom-ldfi",
+ "blossom-sim",
+ "blossom-value",
  "clap",
  "proc-macro2",
  "serde",

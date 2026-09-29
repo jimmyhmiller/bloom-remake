@@ -15,9 +15,7 @@ R10 T14: Molly's negative_support_test 'exercises why-not provenance (bad depend
 """
 
 [backend.ldfi]
-status = "unimplemented"
-unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-025"]
-until = "M8"
+status = "pass"
 
 [expect_ldfi]
 eot = 3

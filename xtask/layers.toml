@@ -48,7 +48,8 @@ deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-schema"]
 
 [crates.blossom-front]
 layer = "L1"
-deps = ["blossom-base", "blossom-value", "blossom-lattice", "blossom-std-src", "blossom-syntax", "blossom-ir", "blossom-schema"]
+# blossom-artifact: slice 1 (docs/design/SLICES.md) — the `.ded` frontend produces a DedArtifact.
+deps = ["blossom-base", "blossom-value", "blossom-lattice", "blossom-std-src", "blossom-syntax", "blossom-ir", "blossom-schema", "blossom-artifact"]
 
 [crates.blossom-analysis]
 layer = "L1"
@@ -112,7 +113,8 @@ deps = ["blossom-base", "blossom-value", "blossom-lattice", "blossom-ir", "bloss
 
 [crates.blossom-sim]
 layer = "L3"
-deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-artifact", "blossom-engine", "blossom-node", "blossom-store", "blossom-wire", "blossom-trace"]
+# blossom-oracle: slice 1 (docs/design/SLICES.md) — until the engine exists the oracle is the simulator's evaluator.
+deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-artifact", "blossom-engine", "blossom-node", "blossom-store", "blossom-wire", "blossom-trace", "blossom-oracle"]
 
 [crates.blossom-smt]
 layer = "L4"

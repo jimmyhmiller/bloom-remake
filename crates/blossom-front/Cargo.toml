@@ -14,6 +14,11 @@ blossom-std-src.workspace = true
 blossom-syntax.workspace = true
 blossom-ir.workspace = true
 blossom-schema.workspace = true
+blossom-artifact.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+toml.workspace = true

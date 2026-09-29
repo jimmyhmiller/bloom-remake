@@ -49,14 +49,19 @@ Molly's programs, run unchanged, through the whole LDFI pipeline, reproducing th
 | Synchronous-round world: nodes, message delivery at t+1, omissions, crashes under `CrashView::MollyContinue`, fault schedules | `blossom-sim` (minimal) | ARCHITECTURE §6, §8.1 |
 | Provenance graph from the firing and message logs | `blossom-prov` | ARCHITECTURE §8.2 |
 | Hazard encoding, Plaisted–Greenbaum CNF, crash order variables, crash budget totalizer, minimal enumeration, driver, Molly's oracle, reports | `blossom-ldfi` | ARCHITECTURE §8.3–§8.5, §8.7 |
-| `blossom run <file.ded> --nodes … --ticks n` (failure-free run, prints relations) and `blossom ldfi <files> --eot --eff --crashes --nodes` | `blossom-cli` | ARCHITECTURE §12 |
+| `blossom sim <file.ded> --nodes … --ticks n [--omit a:b:1] [--crash a:2]` (prints every node's relations tick by tick, and `pre`/`post`) and `blossom ldfi <files> --eot --eff --crashes --nodes` | `blossom-cli` | ARCHITECTURE §12 (`run` stays the production runtime's command) |
 | Corpus runner for `.ded` cases (`[backend.oracle]` failure-free and `[backend.ldfi]`), with the ratchet | `blossom-testkit`, `xtask corpus` | PLAN §5 |
 
 **Gate.**
 
 - Every failure-free `.ded` case in `tests/corpus/ldfi` passes on the oracle backend.
 - Every `[backend.ldfi]` case in BENCH-130–134 and BENCH-137 gives the published verdict, and every case that states
-  `falsifiers` produces exactly that set of Appendix-B-minimal falsifiers.
+  `falsifiers` produces exactly that set of Appendix-B-minimal falsifiers. **Exception (amended at the slice gate):**
+  BENCH-133d, Flux at 22/21/1. No search here or in the reference checker decides it within reasonable resources
+  (the lineage-driven search does not converge within 30,000 runs of its 22-tick, 4-node program; exhaustive
+  certification's frontier exceeds 10 GB; the corpus README already records it as beyond the reference checker, its
+  verdict resting on Flux's safety argument). It stays `unimplemented` and moves to the verification slice
+  (inductive invariants, VER-010), where a proof, not a search, can certify it.
 - The demo: `blossom ldfi tests/corpus/ldfi/molly/BENCH-130a-simple-deliv-6-3-0/program.ded --eot 6 --eff 3
   --crashes 0 --nodes a,b,c` prints the counterexample `O(a,b,1)` and its lineage; the same command on
   retry-deliv certifies it.
@@ -64,7 +69,9 @@ Molly's programs, run unchanged, through the whole LDFI pipeline, reproducing th
   expectation source; a disagreement is resolved from the literature).
 
 **Stretch (not gating).** BENCH-136 run counts at most the published ones; those need the P1 search reductions
-(TEST-030–032). Cases the gate cannot reach are listed with the reason in the slice notes.
+(TEST-030–032). Cases whose features list those reductions (BENCH-130q and BENCH-136a–i) are outside the gate:
+they pass, and are ratcheted, only when their lineage-driven run count is at most the published one. Cases the gate
+cannot reach are listed with the reason in the slice notes.
 
 Former work packages covered in part: M3.6, M4.1, M5.2, M5.7, M7.2, M8.1 (and the SAT layer from M2.4, now consumed).
 

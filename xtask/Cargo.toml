@@ -10,6 +10,12 @@ publish.workspace = true
 # it here as a recorded out-of-scope fix (PLAN §2.7); see docs/dev/CONVENTIONS.md.
 [dependencies]
 blossom-base.workspace = true
+blossom-value.workspace = true
+blossom-artifact.workspace = true
+blossom-front.workspace = true
+blossom-driver.workspace = true
+blossom-sim.workspace = true
+blossom-ldfi.workspace = true
 clap.workspace = true
 proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
 serde.workspace = true

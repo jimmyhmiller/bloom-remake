@@ -15,9 +15,7 @@ The contributors of BENCH-135j made observable (../lib/unit/agg_contributors_net
 """
 
 [backend.ldfi]
-status = "unimplemented"
-unimplemented = ["LANG-220", "LANG-005", "LANG-065", "TEST-020", "TEST-021", "TEST-022", "TEST-023", "TEST-026", "TEST-028", "TEST-029", "TEST-024", "LANG-100", "LANG-101"]
-until = "M8"
+status = "pass"
 
 [expect_ldfi]
 eot = 3
