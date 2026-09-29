@@ -154,12 +154,17 @@ pub enum Type {
         elems: Vec<Type>,
         span: Span,
     },
+    /// `unsafe T`: a type the compiler accepts only when spelled so (`unsafe DomPair<K, V>`, LANG-136).
+    Unsafe {
+        inner: Box<Type>,
+        span: Span,
+    },
 }
 
 impl Type {
     pub fn span(&self) -> Span {
         match self {
-            Type::Named { span, .. } | Type::Tuple { span, .. } => *span,
+            Type::Named { span, .. } | Type::Tuple { span, .. } | Type::Unsafe { span, .. } => *span,
         }
     }
 }
@@ -250,6 +255,8 @@ pub struct RelMods {
     pub zset: bool,
     pub bag: bool,
     pub final_: bool,
+    /// `cell name: L;`: a 0-ary lattice relation with the one column `value` (LANGUAGE §7.13).
+    pub cell: bool,
 }
 
 #[derive(Clone, Debug)]

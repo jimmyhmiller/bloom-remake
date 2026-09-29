@@ -8,6 +8,7 @@ use blossom_ir::core::{AggFunc, Atom, HeadArg, HeadMode, Literal, Program, RelCl
 use blossom_ir::obs::{FiringKind, FiringRecord, NegRead, PosRead, ProgramErrorRecord};
 use blossom_value::{Value, value::IntValue};
 
+use crate::cells::{CellInfo, insert_merged};
 use crate::expr::{self, ExprError, Scope};
 use crate::plan::{RulePlan, Step};
 use crate::{Instance, Oracle, OracleError, Row, Send, TickInput, TickOutput};
@@ -15,9 +16,6 @@ use crate::{Instance, Oracle, OracleError, Row, Send, TickInput, TickOutput};
 /// Rejects programs that use what the oracle does not evaluate yet.
 pub(crate) fn check_supported(p: &Program) -> Result<(), OracleError> {
     for r in p.rels.iter() {
-        if !r.schema.lattice.is_empty() {
-            blossom_base::unimplemented_feature!("SEM-100", "lattice-valued relations in the oracle (WP M4.1)");
-        }
         match r.class {
             RelClass::Weighted(_) => {
                 blossom_base::unimplemented_feature!("LANG-138", "weighted relations in the oracle (WP M4.1)")
@@ -29,6 +27,10 @@ pub(crate) fn check_supported(p: &Program) -> Result<(), OracleError> {
         }
     }
     for rule in p.rules.iter() {
+        let lattice_head = p.rels.get(rule.head.rel).is_some_and(|r| !r.schema.lattice.is_empty());
+        if lattice_head && rule.head.args.iter().any(|a| matches!(a, HeadArg::Agg(_))) {
+            blossom_base::unimplemented_feature!("LANG-100", "aggregates into a lattice-valued relation in the oracle");
+        }
         if matches!(rule.head.mode, HeadMode::ZAdd { .. }) {
             blossom_base::unimplemented_feature!("LANG-138", "weighted and violation heads in the oracle (WP M4.1)");
         }
@@ -86,20 +88,58 @@ pub(crate) fn statics(p: &Program) -> Result<Instance, OracleError> {
 type Index = BTreeMap<Vec<Value>, Vec<Row>>;
 
 /// The tick's database: rows by relation, with indexes on the column sets the rule plans probe. Received channel
-/// tuples are also kept with their sender as a trailing column (`sent`), for atoms that bind it (`from s`).
-#[derive(Default)]
-struct Db {
+/// tuples are also kept with their sender as a trailing column (`sent`), for atoms that bind it (`from s`). A
+/// lattice-valued relation holds one row per cell, the join of everything derived for it (SEM-100).
+struct Db<'o> {
     rows: BTreeMap<RelId, BTreeSet<Row>>,
     sent: BTreeMap<RelId, BTreeSet<Row>>,
     indexes: BTreeMap<(RelId, bool, Vec<usize>), Index>,
+    cells: &'o BTreeMap<RelId, CellInfo>,
+    /// Each lattice-valued relation's current row per cell.
+    current: BTreeMap<(RelId, bool), BTreeMap<Vec<Value>, Row>>,
 }
 
-impl Db {
-    fn insert(&mut self, rel: RelId, row: Row) -> bool {
+impl<'o> Db<'o> {
+    fn new(cells: &'o BTreeMap<RelId, CellInfo>) -> Db<'o> {
+        Db {
+            rows: BTreeMap::new(),
+            sent: BTreeMap::new(),
+            indexes: BTreeMap::new(),
+            cells,
+            current: BTreeMap::new(),
+        }
+    }
+
+    fn insert(&mut self, rel: RelId, row: Row) -> Result<bool, ExprError> {
         self.insert_in(rel, false, row)
     }
 
-    fn insert_in(&mut self, rel: RelId, sent: bool, row: Row) -> bool {
+    /// Adds a row, or merges it into its cell; whether the relation changed.
+    fn insert_in(&mut self, rel: RelId, sent: bool, row: Row) -> Result<bool, ExprError> {
+        let Some(info) = self.cells.get(&rel) else {
+            return Ok(self.add(rel, sent, row));
+        };
+        if info.is_bottom(&row).map_err(|e| ExprError::Oracle(e.into()))? {
+            return Ok(false);
+        }
+        let id = info.ident(&row, usize::from(sent));
+        let old = self.current.get(&(rel, sent)).and_then(|m| m.get(&id)).cloned();
+        let new = match old {
+            None => row,
+            Some(old) => {
+                let merged = info.merge(&old, &row)?;
+                if merged == old {
+                    return Ok(false);
+                }
+                self.remove(rel, sent, &old);
+                merged
+            }
+        };
+        self.current.entry((rel, sent)).or_default().insert(id, new.clone());
+        Ok(self.add(rel, sent, new))
+    }
+
+    fn add(&mut self, rel: RelId, sent: bool, row: Row) -> bool {
         let table = if sent { &mut self.sent } else { &mut self.rows };
         if !table.entry(rel).or_default().insert(row.clone()) {
             return false;
@@ -111,6 +151,22 @@ impl Db {
             index.entry(key(&row, cols)).or_default().push(row.clone());
         }
         true
+    }
+
+    /// Removes a row a merge superseded.
+    fn remove(&mut self, rel: RelId, sent: bool, row: &Row) {
+        let table = if sent { &mut self.sent } else { &mut self.rows };
+        if let Some(rows) = table.get_mut(&rel) {
+            rows.remove(row);
+        }
+        for ((r, s, cols), index) in self.indexes.range_mut((rel, sent, Vec::new())..) {
+            if *r != rel || *s != sent {
+                break;
+            }
+            if let Some(bucket) = index.get_mut(&key(row, cols)) {
+                bucket.retain(|x| x != row);
+            }
+        }
     }
 
     fn ensure_index(&mut self, rel: RelId, sent: bool, cols: &[usize]) {
@@ -133,13 +189,21 @@ impl Db {
                     let sent = matches!(rule.body.lits.get(*lit), Some(Literal::Pos(a)) if a.sender.is_some());
                     self.ensure_index(*rel, sent, bound);
                 }
-                Step::Check { lit } => {
-                    if let Some(Literal::Neg(a)) = rule.body.lits.get(*lit) {
-                        self.ensure_index(a.rel, false, &non_wild(a));
+                Step::Check { lit } => match rule.body.lits.get(*lit) {
+                    Some(Literal::Neg(a)) => self.ensure_index(a.rel, false, &non_wild(a)),
+                    Some(Literal::Lookup { rel, .. }) => {
+                        let cols = self.key_cols(*rel);
+                        self.ensure_index(*rel, false, &cols);
                     }
-                }
+                    _ => {}
+                },
             }
         }
+    }
+
+    /// The key columns of a lattice-valued relation (what a lookup `r[k̄]` names).
+    fn key_cols(&self, rel: RelId) -> Vec<usize> {
+        self.cells.get(&rel).map(|c| c.key.clone()).unwrap_or_default()
     }
 
     /// The rows of `rel` whose columns `cols` hold `values`.
@@ -191,20 +255,41 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
         now: input.now,
         oracle,
     };
-    let mut db = Db::default();
+    let mut db = Db::new(&oracle.cells);
+    let load = |e: ExprError| -> OracleError {
+        match e {
+            ExprError::Arithmetic(detail) => OracleError::Program {
+                tick: input.tick,
+                error: ProgramErrorRecord {
+                    code: expr::arithmetic_code(),
+                    rule: None,
+                    detail: Arc::from(detail),
+                },
+            },
+            ExprError::Conflict(detail) => OracleError::Program {
+                tick: input.tick,
+                error: ProgramErrorRecord {
+                    code: expr::conflict_code(),
+                    rule: None,
+                    detail: Arc::from(detail),
+                },
+            },
+            ExprError::Oracle(e) => e,
+        }
+    };
     for (rel, rows) in oracle.statics.rels.iter().chain(&input.carried.rels) {
         for row in rows {
-            db.insert(*rel, row.clone());
+            db.insert(*rel, row.clone()).map_err(load)?;
         }
     }
     for (rel, row) in input.events {
-        db.insert(*rel, row.clone());
+        db.insert(*rel, row.clone()).map_err(load)?;
     }
     for d in input.delivered {
-        db.insert(d.rel, d.row.clone());
+        db.insert(d.rel, d.row.clone()).map_err(load)?;
         let mut with_sender: Vec<Value> = d.row.to_vec();
         with_sender.push(Value::Node(d.from));
-        db.insert_in(d.rel, true, Arc::from(with_sender));
+        db.insert_in(d.rel, true, Arc::from(with_sender)).map_err(load)?;
     }
     // A firing is found once per evaluation of its rule, so only a recursive stratum, whose rules are evaluated
     // again every round, can find one twice.
@@ -215,6 +300,14 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
                 tick: input.tick,
                 error: ProgramErrorRecord {
                     code: expr::arithmetic_code(),
+                    rule: Some(rule.label.clone()),
+                    detail: Arc::from(detail),
+                },
+            },
+            ExprError::Conflict(detail) => OracleError::Program {
+                tick: input.tick,
+                error: ProgramErrorRecord {
+                    code: expr::conflict_code(),
                     rule: Some(rule.label.clone()),
                     detail: Arc::from(detail),
                 },
@@ -231,7 +324,7 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
             db.prepare(rule, plan);
             let rows = aggregate(&scope, &db, rule, plan, input.capture).map_err(|e| fail(rule, e))?;
             for (row, firing) in rows {
-                db.insert(rule.head.rel, row);
+                db.insert(rule.head.rel, row).map_err(|e| fail(rule, e))?;
                 firings.extend(firing);
             }
         }
@@ -247,7 +340,7 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
                 db.prepare(rule, plan);
                 let derived = derive(&scope, &db, rule, plan, input.capture).map_err(|e| fail(rule, e))?;
                 for (row, firing) in derived {
-                    changed |= db.insert(rule.head.rel, row);
+                    changed |= db.insert(rule.head.rel, row).map_err(|e| fail(rule, e))?;
                     if let Some(f) = firing {
                         if stratum.recursive {
                             recursive_firings.insert(f);
@@ -283,6 +376,7 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
         }
     }
     let mut out = TickOutput::default();
+    let mut outgoing: BTreeMap<(RelId, blossom_value::time::NodeId), BTreeSet<Row>> = BTreeMap::new();
     for &id in &oracle.inductive {
         let (rule, plan) = rule_and_plan(oracle, id)?;
         if !oracle.runs_on(rule, input.node) {
@@ -290,7 +384,8 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
         }
         db.prepare(rule, plan);
         for (row, firing) in derive(&scope, &db, rule, plan, input.capture).map_err(|e| fail(rule, e))? {
-            out.next.insert(rule.head.rel, row);
+            let set = out.next.rels.entry(rule.head.rel).or_default();
+            insert_merged(&oracle.cells, set, rule.head.rel, row).map_err(|e| fail(rule, e.into()))?;
             firings.extend(firing);
         }
     }
@@ -305,12 +400,15 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
                 Some(Value::Node(n)) => *n,
                 other => return Err(internal_error!("an async head's destination is {other:?}").into()),
             };
-            out.outbox.insert(Send {
-                rel: rule.head.rel,
-                to,
-                row,
-            });
+            // A lattice channel sends one message per destination and key: the join of the tick's values (§11.9).
+            let set = outgoing.entry((rule.head.rel, to)).or_default();
+            insert_merged(&oracle.cells, set, rule.head.rel, row).map_err(|e| fail(rule, e.into()))?;
             firings.extend(firing);
+        }
+    }
+    for ((rel, to), rows) in outgoing {
+        for row in rows {
+            out.outbox.insert(Send { rel, to, row });
         }
     }
     check_keys(program, &db.rows, input.tick)?;
@@ -356,9 +454,10 @@ fn search(
     let Some(s) = plan.steps.get(step) else {
         let mut pos = Vec::new();
         for (i, lit) in rule.body.lits.iter().enumerate() {
-            if let (Literal::Pos(a), Some(Some(row))) = (lit, reads.get(i)) {
+            if let (Literal::Pos(Atom { rel, .. }) | Literal::Lookup { rel, .. }, Some(Some(row))) = (lit, reads.get(i))
+            {
                 pos.push(PosRead {
-                    rel: a.rel,
+                    rel: *rel,
                     row: row.clone(),
                 });
             }
@@ -466,6 +565,64 @@ fn search(
                     if let Some(slot) = env.get_mut(i) {
                         *slot = None;
                     }
+                }
+                r
+            }
+            Some(Literal::Lookup { var, rel, key: terms }) => {
+                // The cell's value, ⊥ when absent (LANGUAGE §9.9). A present cell is read like an atom's row; an
+                // absent one like a negation over its key.
+                let cols = db.key_cols(*rel);
+                let values = terms
+                    .iter()
+                    .map(|t| expr::term(scope, env, t))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let info = db.cells.get(rel).ok_or_else(|| {
+                    ExprError::Oracle(internal_error!("a lookup on {rel:?}, which has no lattice column").into())
+                })?;
+                let [(col, kind)] = info.lattice.as_slice() else {
+                    return Err(ExprError::Oracle(
+                        internal_error!("a lookup needs exactly one lattice column").into(),
+                    ));
+                };
+                let row = db.lookup(*rel, false, &cols, &values).next().cloned();
+                let value = match &row {
+                    Some(r) => r
+                        .get(*col)
+                        .cloned()
+                        .ok_or_else(|| ExprError::Oracle(internal_error!("a cell row without its value").into()))?,
+                    None => Value::Lattice(kind.bottom()),
+                };
+                let slot = env
+                    .get_mut(var.index())
+                    .ok_or_else(|| ExprError::Oracle(internal_error!("variable {var:?} out of range").into()))?;
+                *slot = Some(value);
+                let r = match row {
+                    Some(row) => {
+                        if let Some(read) = reads.get_mut(*lit) {
+                            *read = Some(row);
+                        }
+                        let r = search(scope, db, rule, plan, step + 1, env, reads, negations, out);
+                        if let Some(read) = reads.get_mut(*lit) {
+                            *read = None;
+                        }
+                        r
+                    }
+                    None => {
+                        let arity = scope.program.rels.get(*rel).map_or(0, |r| r.schema.cols.len());
+                        let mut pattern = vec![None; arity];
+                        for (c, v) in cols.iter().zip(values) {
+                            if let Some(slot) = pattern.get_mut(*c) {
+                                *slot = Some(v);
+                            }
+                        }
+                        negations.push(NegRead { rel: *rel, pattern });
+                        let r = search(scope, db, rule, plan, step + 1, env, reads, negations, out);
+                        negations.pop();
+                        r
+                    }
+                };
+                if let Some(slot) = env.get_mut(var.index()) {
+                    *slot = None;
                 }
                 r
             }

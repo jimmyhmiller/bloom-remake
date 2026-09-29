@@ -3,8 +3,9 @@
 //! validity checker. Deliberately independent of the kernel, the engine, the planner and the analyses.
 //!
 //! See ARCHITECTURE §1.2 and §11.2. Implemented by slice 1 (docs/design/SLICES.md) for the constructs the `.ded`
-//! frontend produces; WP M4.1's remaining constructs (lattice columns, weighted relations, choices, lookups,
-//! generators) fail with `Unimplemented`.
+//! frontend produces and by slice 2 for the Blossom subset: lattice-valued relations over the core built-in lattices
+//! (merged per key, SEM-100), lookups, lattice operations, collections and generators. WP M4.1's remaining
+//! constructs (weighted relations, choices, the other lattices) fail with `Unimplemented`.
 //!
 //! The oracle is the executable definition of one node's tick (ARCHITECTURE §11.2):
 //!
@@ -17,6 +18,7 @@
 //! With capture on, every distinct rule firing is reported as a [`FiringRecord`] (Tier C with the literal profile,
 //! ARCHITECTURE §4.9): that is what provenance graphs and LDFI are built from.
 
+mod cells;
 mod eval;
 mod expr;
 mod plan;
@@ -153,6 +155,10 @@ pub struct Oracle {
     asynchronous: Vec<RuleId>,
     statics: Instance,
     limits: Limits,
+    /// The built-in lattice of each declared lattice, by id.
+    kinds: Vec<Option<blossom_lattice::Kind>>,
+    /// How the rows of each lattice-valued relation merge.
+    cells: BTreeMap<RelId, cells::CellInfo>,
     /// Each node's role, for the `$role(R)` guards of rules placed at a role (LANGUAGE §6.10). Empty for a
     /// role-free program.
     roles: Vec<Option<RoleId>>,
@@ -181,7 +187,11 @@ impl Oracle {
             }
         }
         let statics = eval::statics(program.get())?;
+        let kinds = cells::kinds(program.get());
+        let cells = cells::cells(program.get(), &kinds)?;
         Ok(Oracle {
+            kinds,
+            cells,
             program,
             strata,
             plans,

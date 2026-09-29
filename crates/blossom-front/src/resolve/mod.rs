@@ -19,7 +19,7 @@ mod types;
 
 pub(crate) use types::int_value;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use blossom_base::TypeId;
 use blossom_base::{Diagnostic, Diagnostics, InternalError, QualName, SourceDb, Span, Symbol, code};
@@ -158,6 +158,7 @@ pub fn resolve_spec_views(
 ) -> Result<Option<(Hir, SpecMode)>, InternalError> {
     let mut r = Resolver::new(tree, sources, diags, name, 1, 1);
     r.hir.types = target.types.clone();
+    r.hir.lattices = target.lattices.clone();
     r.hir.roles = target.roles.clone();
     r.spec = Some(mode);
     let root = r.new_scope(ModScope::empty(FileKey::Root));
@@ -199,6 +200,8 @@ pub(crate) struct ModScope<'t> {
     pub write_redirect: BTreeMap<HRelId, HRelId>,
     /// The module body's items, for module-local constants and types.
     pub own_items: Option<&'t [ast::Item]>,
+    /// Relations whose declaration failed (and was reported): uses of them are not reported again.
+    pub broken: BTreeSet<Symbol>,
 }
 
 impl ModScope<'_> {
@@ -215,6 +218,7 @@ impl ModScope<'_> {
             has_roles: false,
             write_redirect: BTreeMap::new(),
             own_items: None,
+            broken: BTreeSet::new(),
         }
     }
 }
@@ -284,6 +288,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 version,
                 edition,
                 types: TypeTable::new(),
+                lattices: Vec::new(),
                 roles: Vec::new(),
                 rels: Vec::new(),
                 handlers: Vec::new(),
@@ -435,6 +440,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             cols,
             key: None,
             durable: false,
+            cell: false,
             role: None,
             span,
         });
@@ -457,6 +463,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             }],
             key: None,
             durable: false,
+            cell: false,
             role: None,
             span,
         });
@@ -489,6 +496,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             cols: all,
             key: None,
             durable: false,
+            cell: false,
             role: None,
             span: name.span,
         });
@@ -518,6 +526,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             }],
             key: None,
             durable: false,
+            cell: false,
             role: None,
             span,
         });
@@ -699,8 +708,11 @@ impl<'t, 'd> Resolver<'t, 'd> {
                         continue;
                     }
                     let root = self.scope(s).prefix.is_empty();
-                    if let Some(id) = self.rel_decl(s, d, if shared { None } else { placement }, root) {
-                        self.bind_rel(s, d.name, id);
+                    match self.rel_decl(s, d, if shared { None } else { placement }, root) {
+                        Some(id) => self.bind_rel(s, d.name, id),
+                        None => {
+                            self.scope_mut(s).broken.insert(d.name.name);
+                        }
                     }
                 }
                 ItemKind::View(v) => {
@@ -726,6 +738,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                         cols,
                         key: None,
                         durable: false,
+                        cell: false,
                         role: placement,
                         span: v.name.span,
                     });
@@ -793,6 +806,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             ],
             key: None,
             durable: false,
+            cell: false,
             role: placement,
             span: t.name.span,
         }))
@@ -856,6 +870,14 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 );
             }
         }
+        let is_lattice = |r: &Self, c: &HCol| c.ty.is_some_and(|t| r.hir.lattice_of(t).is_some());
+        if d.mods.cell && !cols.first().is_some_and(|c| is_lattice(self, c)) {
+            self.error(
+                code!("BLS0300"),
+                d.span,
+                "a cell holds a lattice value: declare it `cell name: L`",
+            );
+        }
         let key = match &d.key {
             None => None,
             Some((names, span)) => {
@@ -865,6 +887,11 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 let mut idx = Vec::new();
                 for n in names {
                     match d.cols.iter().position(|c| c.name.name == n.name) {
+                        Some(i) if cols.get(i).is_some_and(|c| is_lattice(self, c)) => self.error(
+                            code!("BLS0304"),
+                            n.span,
+                            format!("`{}` is a lattice column and cannot be a key", n.as_str()),
+                        ),
                         Some(i) => idx.push(i),
                         None => self.error(
                             code!("BLS0302"),
@@ -924,6 +951,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             cols,
             key,
             durable: d.mods.durable,
+            cell: d.mods.cell,
             role: placement,
             span: d.name.span,
         }))
@@ -1091,6 +1119,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             has_roles: false,
             write_redirect: BTreeMap::new(),
             own_items: Some(&module.items),
+            broken: Default::default(),
         });
         // Value and relation parameters.
         let mut given: BTreeMap<Symbol, &'t ast::Expr> = BTreeMap::new();
@@ -1299,6 +1328,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             has_roles: false,
             write_redirect: BTreeMap::new(),
             own_items: Some(&p.items),
+            broken: Default::default(),
         });
         for item in &p.items {
             match &item.kind {

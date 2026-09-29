@@ -17,6 +17,7 @@ pub use program::{ProgramDigest, ValidatedProgram};
 
 pub mod obs;
 pub mod plan;
+pub mod polarity;
 pub mod spec;
 pub mod strata;
 

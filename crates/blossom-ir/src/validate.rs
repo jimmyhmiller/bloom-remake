@@ -650,12 +650,23 @@ fn persist_exact(p: &Program, rel: &RelDecl, rule: &Rule, del: Option<RelId>, id
 }
 /// Whether a value of type `actual` may stand where `expected` is required: equal types, or `Node<R>` where `Node`
 /// is expected (LANGUAGE §5.3: `Node<R>` is a subtype of `Node`).
+/// Whether a value of type `actual` may stand where `expected` is required: equal types, or `Node<R>` where `Node`
+/// is expected, also inside tuples, options and collections (values are immutable, so covariance is sound).
 fn assignable(p: &Program, actual: TypeId, expected: TypeId) -> bool {
-    actual == expected
-        || matches!(
-            (p.types.get(actual), p.types.get(expected)),
-            (Some(TypeDef::Node(Some(_))), Some(TypeDef::Node(None)))
-        )
+    if actual == expected {
+        return true;
+    }
+    match (p.types.get(actual), p.types.get(expected)) {
+        (Some(TypeDef::Node(Some(_))), Some(TypeDef::Node(None))) => true,
+        (Some(TypeDef::Tuple(a)), Some(TypeDef::Tuple(b))) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| assignable(p, *x, *y))
+        }
+        (Some(TypeDef::Option(a)), Some(TypeDef::Option(b)))
+        | (Some(TypeDef::Vec(a)), Some(TypeDef::Vec(b)))
+        | (Some(TypeDef::Set(a)), Some(TypeDef::Set(b))) => assignable(p, *a, *b),
+        (Some(TypeDef::Map(ka, va)), Some(TypeDef::Map(kb, vb))) => assignable(p, *ka, *kb) && assignable(p, *va, *vb),
+        _ => false,
+    }
 }
 fn term_type(p: &Program, r: &Rule, t: &Term, ty: TypeId) -> bool {
     match t {
@@ -1111,7 +1122,7 @@ fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
                 return Err("lattice operation arity".into());
             }
             for (arg, (ty, _)) in args.iter().zip(&decl.params) {
-                if expr_type(p, r, arg)? != *ty {
+                if !assignable(p, expr_type(p, r, arg)?, *ty) {
                     return Err("lattice operation argument type".into());
                 }
             }

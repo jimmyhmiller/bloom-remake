@@ -51,10 +51,7 @@ rel  = "do_send"
 rows = [[2]]
 
 [backend.oracle]
-status = "unimplemented"
-unimplemented = ["LANG-009", "LANG-042", "LANG-062", "LANG-122", "LANG-124", "LANG-128", "LANG-137", "LANG-280",
-                 "SEM-003", "SEM-104"]
-until = "M5"
+status = "pass"
 
 [backend.interp]
 status = "unimplemented"

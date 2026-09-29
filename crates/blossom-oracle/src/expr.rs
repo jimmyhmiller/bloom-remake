@@ -3,12 +3,13 @@
 
 use blossom_base::{code, internal_error};
 use blossom_ir::core::{
-    BinOp, BuiltinFn, BuiltinScalar, Expr, FnRef, GenSource, Pattern, Program, RangeKind, Term, UnOp,
+    BinOp, BuiltinFn, BuiltinScalar, CollKind, Expr, FnRef, GenSource, LatOpRef, Pattern, Program, RangeKind, Term,
+    UnOp,
 };
 use blossom_value::{
     TypeDef, Value,
     time::{Instant, NodeId, Tick},
-    value::IntValue,
+    value::{IntValue, LatValue},
 };
 
 use crate::{Oracle, OracleError};
@@ -27,7 +28,30 @@ pub(crate) struct Scope<'a> {
 pub(crate) enum ExprError {
     /// BLSR004: arithmetic overflow or division by zero.
     Arithmetic(String),
+    /// BLSR006: two different values merged into an `LPoint`.
+    Conflict(String),
     Oracle(OracleError),
+}
+
+impl From<blossom_lattice::LatticeError> for ExprError {
+    fn from(e: blossom_lattice::LatticeError) -> Self {
+        use blossom_lattice::LatticeError as L;
+        match e {
+            L::Conflict(..) => ExprError::Conflict(e.to_string()),
+            // A negative number in an `LPSet` is an out-of-range value, like an out-of-range cast.
+            L::Arithmetic(m) | L::Domain(m) => ExprError::Arithmetic(m),
+            L::Shape(m) => ExprError::Oracle(internal_error!("a lattice operation on the wrong values: {m}").into()),
+        }
+    }
+}
+
+impl From<crate::cells::MergeError> for ExprError {
+    fn from(e: crate::cells::MergeError) -> Self {
+        match e {
+            crate::cells::MergeError::Lattice(l) => l.into(),
+            crate::cells::MergeError::Internal(i) => ExprError::Oracle(i.into()),
+        }
+    }
 }
 
 impl From<OracleError> for ExprError {
@@ -151,20 +175,83 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
             f: FnRef::Builtin(BuiltinFn::Size { role }),
             ..
         } => Ok(Value::Int(IntValue::U64(scope.oracle.role_size(*role)))),
-        Expr::Call { .. } | Expr::Collection { .. } => Err(ExprError::Oracle(
-            blossom_base::unimplemented_error!(
-                "LANG-084",
-                "function calls and collection literals in the oracle (WP M4.1)"
-            )
-            .into(),
+        Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::Contains),
+            args,
+        } => {
+            let [c, x] = args.as_slice() else {
+                return Err(ExprError::Oracle(
+                    internal_error!("`contains` takes two arguments").into(),
+                ));
+            };
+            let (c, x) = (eval(scope, env, c)?, eval(scope, env, x)?);
+            Ok(Value::Bool(match &c {
+                Value::Set(s) => s.contains(&x),
+                Value::Vec(v) => v.contains(&x),
+                Value::Map(m) => m.contains_key(&x),
+                other => return Err(ExprError::Oracle(internal_error!("`contains` on {other:?}").into())),
+            }))
+        }
+        Expr::Call { .. } => Err(ExprError::Oracle(
+            blossom_base::unimplemented_error!("LANG-180", "function calls in the oracle (WP M4.1)").into(),
         )),
-        Expr::Lattice { .. } => Err(ExprError::Oracle(
-            blossom_base::unimplemented_error!("LANG-123", "lattice operations in the oracle (WP M4.1)").into(),
-        )),
+        Expr::Collection { kind, elems } => {
+            let mut vs = Vec::with_capacity(elems.len());
+            for x in elems {
+                vs.push(eval(scope, env, x)?);
+            }
+            Ok(match kind {
+                CollKind::Vec => Value::Vec(vs.into()),
+                CollKind::Set => Value::Set(std::sync::Arc::new(vs.into_iter().collect())),
+                CollKind::Map => {
+                    let mut m = std::collections::BTreeMap::new();
+                    for pair in vs {
+                        match pair {
+                            Value::Tuple(kv) => match &*kv {
+                                [k, v] => {
+                                    m.insert(k.clone(), v.clone());
+                                }
+                                _ => {
+                                    return Err(ExprError::Oracle(internal_error!("a map entry {kv:?}").into()));
+                                }
+                            },
+                            other => return Err(ExprError::Oracle(internal_error!("a map entry {other:?}").into())),
+                        }
+                    }
+                    Value::Map(std::sync::Arc::new(m))
+                }
+            })
+        }
+        Expr::Lattice { op, args } => {
+            let (kind, lop) = lattice_op(scope, op)?;
+            let mut vs = Vec::with_capacity(args.len());
+            for a in args {
+                vs.push(eval(scope, env, a)?);
+            }
+            Ok(kind.eval(lop, &vs)?)
+        }
         Expr::Let { .. } | Expr::Closure { .. } => Err(ExprError::Oracle(
             internal_error!("`let` and closures appear only in function bodies").into(),
         )),
     }
+}
+
+/// The lattice and operation an IR operation reference names.
+fn lattice_op<'s>(scope: &'s Scope<'_>, op: &LatOpRef) -> ExprResult<(&'s blossom_lattice::Kind, blossom_lattice::Op)> {
+    let kind = scope
+        .oracle
+        .kinds
+        .get(op.lattice.index())
+        .and_then(Option::as_ref)
+        .ok_or_else(|| {
+            ExprError::Oracle(
+                blossom_base::unimplemented_error!("LANG-124", "lattice {:?} in the oracle", op.lattice).into(),
+            )
+        })?;
+    let lop = blossom_lattice::Op::from_name(kind, op.op.as_str()).ok_or_else(|| {
+        ExprError::Oracle(internal_error!("lattice operation `{}` is not in {kind:?}'s catalogue", op.op).into())
+    })?;
+    Ok((kind, lop))
 }
 
 /// A constructed value of type `ty`.
@@ -294,6 +381,28 @@ pub(crate) fn generate(scope: &Scope<'_>, env: &[Option<Value>], src: &GenSource
             }
             Ok(out)
         }
+        GenSource::Value(e) => Ok(match eval(scope, env, e)? {
+            Value::Vec(v) => v.to_vec(),
+            Value::Set(s) => s.iter().cloned().collect(),
+            Value::Map(m) => m
+                .iter()
+                .map(|(k, v)| Value::Tuple(vec![k.clone(), v.clone()].into()))
+                .collect(),
+            other => return Err(ExprError::Oracle(internal_error!("a generator over {other:?}").into())),
+        }),
+        // A set-like lattice yields its elements, a map lattice its (key, value) pairs (LANG-123).
+        GenSource::Lattice(e) => Ok(match eval(scope, env, e)? {
+            Value::Lattice(LatValue::Set(s)) => s.iter().cloned().collect(),
+            Value::Lattice(LatValue::Map(m)) => m
+                .iter()
+                .map(|(k, v)| Value::Tuple(vec![k.clone(), Value::Lattice(v.clone())].into()))
+                .collect(),
+            other => {
+                return Err(ExprError::Oracle(
+                    internal_error!("a lattice generator over {other:?}").into(),
+                ));
+            }
+        }),
         _ => Err(ExprError::Oracle(
             blossom_base::unimplemented_error!("LANG-088", "this generator in the oracle").into(),
         )),
@@ -453,6 +562,11 @@ pub(crate) fn int_sum<'a>(mut values: impl Iterator<Item = &'a Value>) -> ExprRe
 /// BLSR004's code.
 pub(crate) fn arithmetic_code() -> &'static str {
     code!("BLSR004").as_str()
+}
+
+/// BLSR006's code.
+pub(crate) fn conflict_code() -> &'static str {
+    code!("BLSR006").as_str()
 }
 
 /// BLSR007's code.
