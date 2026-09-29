@@ -8,7 +8,7 @@ use blossom_prov::{Firing, GoalKey, Names, ProvGraph, Space};
 use blossom_sim::{Fate, FaultSchedule, SyncRun};
 use blossom_value::{Value, time::NodeId};
 
-use crate::driver::{Counterexample, LdfiReport, Verdict};
+use crate::driver::{Counterexample, LdfiReport, Method, Verdict};
 use crate::faults::labels;
 
 /// Names for a `.ded` program's goals.
@@ -98,16 +98,27 @@ pub fn fault_labels(artifact: &DedArtifact, faults: &FaultSchedule) -> Vec<Strin
 pub fn render(artifact: &DedArtifact, report: &LdfiReport) -> String {
     let names = DedNames { artifact };
     let mut out = String::new();
-    match report.verdict {
-        Verdict::NoCounterexample => {
+    match (report.verdict, report.method) {
+        (Verdict::NoCounterexample, Method::Lineage) => {
             let _ = writeln!(
                 out,
                 "no counterexample: every fault set the lineage suggested left the outcome correct ({} run(s))",
                 report.runs
             );
         }
-        Verdict::Counterexample => {
+        (Verdict::Counterexample, Method::Lineage) => {
             let _ = writeln!(out, "counterexample found after {} run(s)", report.runs);
+        }
+        (verdict, Method::Exhaustive { states, schedules }) => {
+            let what = match verdict {
+                Verdict::NoCounterexample => "no counterexample",
+                Verdict::Counterexample => "counterexample found",
+            };
+            let _ = writeln!(
+                out,
+                "{what} by exhaustive certification: {states} distinct state(s) over {schedules} crash schedule(s), after the lineage-driven search spent its {} run(s)",
+                report.runs
+            );
         }
     }
     let _ = writeln!(

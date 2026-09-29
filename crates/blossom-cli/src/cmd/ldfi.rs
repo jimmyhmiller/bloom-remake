@@ -50,9 +50,15 @@ pub struct Args {
     /// for non-monotone programs; for experiments).
     #[arg(long, default_value = "precise")]
     pub negative_support: String,
-    /// Give up after this many runs.
-    #[arg(long, default_value_t = 100_000)]
+    /// Runs the lineage-driven search may make before exhaustive certification decides.
+    #[arg(long, default_value_t = 20_000)]
     pub max_runs: u64,
+    /// States exhaustive certification may explore.
+    #[arg(long, default_value_t = 50_000_000)]
+    pub max_states: u64,
+    /// Report the lineage-driven search's budget error instead of certifying exhaustively.
+    #[arg(long)]
+    pub no_exhaustive: bool,
     /// Worker threads (default: the machine's parallelism). Results do not depend on it.
     #[arg(long)]
     pub jobs: Option<usize>,
@@ -96,6 +102,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
         }
     };
     config.max_runs = args.max_runs;
+    config.exhaustive_fallback = (!args.no_exhaustive).then_some(args.max_states);
     config.sat = args.sat.clone();
 
     config.workers = args

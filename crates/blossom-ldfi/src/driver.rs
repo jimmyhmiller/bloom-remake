@@ -31,6 +31,9 @@ pub struct LdfiConfig {
     /// Worker threads that process upcoming hypotheses speculatively; 1 runs everything on the calling thread.
     /// Results do not depend on it.
     pub workers: usize,
+    /// When the lineage-driven search exhausts `max_runs` without a verdict, decide by exhaustive certification
+    /// ([`crate::certify`]) within this many states; `None` reports the budget error instead.
+    pub exhaustive_fallback: Option<u64>,
 }
 
 impl LdfiConfig {
@@ -42,6 +45,7 @@ impl LdfiConfig {
             max_runs: 100_000,
             sat: "cadical-plain".into(),
             workers: 1,
+            exhaustive_fallback: Some(50_000_000),
         }
     }
 }
@@ -69,13 +73,24 @@ pub struct Counterexample {
 #[derive(Clone, Debug)]
 pub struct LdfiReport {
     pub verdict: Verdict,
+    /// How the verdict was reached.
+    pub method: Method,
     pub counterexamples: Vec<Counterexample>,
-    /// Concrete executions, the failure-free run included.
+    /// Concrete executions of the lineage-driven search, the failure-free run included.
     pub runs: u64,
     pub stats: SearchStats,
     pub failure_free: Outcome,
     pub failure_free_run: SyncRun,
     pub failure_free_graph: ProvGraph,
+}
+
+/// Which search reached a verdict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Method {
+    /// The lineage-driven search (ARCHITECTURE §8.5): it found a counterexample, or exhausted its hypotheses.
+    Lineage,
+    /// The lineage-driven search ran out of runs and exhaustive certification decided.
+    Exhaustive { states: u64, schedules: u64 },
 }
 
 /// How a search went.
@@ -236,13 +251,74 @@ impl<'s> Queue<'s> {
     }
 }
 
-/// LDFI on a compiled `.ded` program (ARCHITECTURE §8.5).
+/// LDFI on a compiled `.ded` program (ARCHITECTURE §8.5): the lineage-driven search, falling back on exhaustive
+/// certification when it runs out of runs (see [`LdfiConfig::exhaustive_fallback`]).
+pub fn run(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, LdfiError> {
+    match lineage_search(sim, config) {
+        Err(LdfiError::Budget(runs)) => match config.exhaustive_fallback {
+            Some(max_states) => certify_exhaustively(sim, config, runs, max_states),
+            None => Err(LdfiError::Budget(runs)),
+        },
+        other => other,
+    }
+}
+
+/// Exhaustive certification after the lineage-driven search spent `runs` runs.
+fn certify_exhaustively(
+    sim: &DedSim<'_>,
+    config: &LdfiConfig,
+    runs: u64,
+    max_states: u64,
+) -> Result<LdfiReport, LdfiError> {
+    let search = Search::new(sim, config)?;
+    let (ff_run, ff) = search.execute(&FaultSchedule::default())?;
+    let ff_graph = search.graph(&ff_run, &ff)?;
+    let cert = crate::certify::exhaustive(sim, &config.spec, &ff.post, config.workers.max(1), max_states)?;
+    let mut counterexamples = Vec::new();
+    if let Some(faults) = cert.counterexample {
+        let (run, outcome) = search.execute(&faults)?;
+        if is_good(&ff.post, &outcome) {
+            return Err(internal_error!("exhaustive certification's counterexample does not reproduce").into());
+        }
+        let violated = ff
+            .post
+            .iter()
+            .filter(|g| !outcome.post.contains(*g) && outcome.pre.contains(*g))
+            .cloned()
+            .collect();
+        counterexamples.push(Counterexample {
+            faults,
+            outcome,
+            run,
+            violated,
+        });
+    }
+    Ok(LdfiReport {
+        verdict: if counterexamples.is_empty() {
+            Verdict::NoCounterexample
+        } else {
+            Verdict::Counterexample
+        },
+        method: Method::Exhaustive {
+            states: cert.states,
+            schedules: cert.schedules,
+        },
+        counterexamples,
+        runs,
+        stats: SearchStats::default(),
+        failure_free: ff,
+        failure_free_run: ff_run,
+        failure_free_graph: ff_graph,
+    })
+}
+
+/// The lineage-driven search (ARCHITECTURE §8.5).
 ///
 /// Hypotheses are committed one at a time in queue order, exactly as the sequential algorithm does, so the verdict,
 /// the counterexamples and the run count never depend on thread timing. With `config.workers > 1`, worker threads
 /// process the next hypotheses in the queue speculatively (TEST-033: hypotheses run in parallel); a result is used
 /// when its hypothesis reaches the head of the queue.
-pub fn run(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, LdfiError> {
+fn lineage_search(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, LdfiError> {
     let search = Search::new(sim, config)?;
     let (ff_run, ff) = search.execute(&FaultSchedule::default())?;
     let ff_graph = search.graph(&ff_run, &ff)?;
@@ -349,6 +425,7 @@ pub fn run(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, LdfiErro
         } else {
             Verdict::Counterexample
         },
+        method: Method::Lineage,
         counterexamples,
         runs,
         stats,
