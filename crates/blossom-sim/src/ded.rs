@@ -71,6 +71,7 @@ impl<'a> DedSim<'a> {
                 first: Tick(1),
                 last,
                 crash_view: CrashView::MollyContinue,
+                round: crate::sync::DED_ROUND,
                 capture,
             },
             faults,
@@ -139,6 +140,7 @@ impl<'a> DedSim<'a> {
             .tick(&TickInput {
                 node: NodeId(0),
                 tick: eot,
+                now: crate::sync::now_at(crate::sync::DED_ROUND, eot)?,
                 carried: &Instance::default(),
                 events: &events,
                 delivered: &[],
@@ -179,6 +181,7 @@ impl<'a> DedSim<'a> {
             .tick(&TickInput {
                 node,
                 tick,
+                now: crate::sync::now_at(crate::sync::DED_ROUND, tick)?,
                 carried,
                 events: &events,
                 delivered,

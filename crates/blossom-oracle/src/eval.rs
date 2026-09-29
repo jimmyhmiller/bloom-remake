@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use blossom_base::{RelId, internal_error};
-use blossom_ir::core::{AggFunc, Atom, HeadArg, HeadMode, Literal, Pattern, Program, RelClass, Rule, Term};
+use blossom_ir::core::{AggFunc, Atom, HeadArg, HeadMode, Literal, Program, RelClass, Rule, Term};
 use blossom_ir::obs::{FiringKind, FiringRecord, NegRead, PosRead, ProgramErrorRecord};
 use blossom_value::{Value, value::IntValue};
 
@@ -34,9 +34,10 @@ pub(crate) fn check_supported(p: &Program) -> Result<(), OracleError> {
         }
         for a in &rule.head.args {
             if let HeadArg::Agg(agg) = a {
+                // A count may be over the empty tuple (`count!(*)` over a header that binds nothing).
                 let supported = matches!(agg.func, AggFunc::Count | AggFunc::Sum | AggFunc::Min | AggFunc::Max)
                     && agg.order.is_none()
-                    && !agg.args.is_empty();
+                    && (!agg.args.is_empty() || matches!(agg.func, AggFunc::Count));
                 if !supported {
                     blossom_base::unimplemented_feature!(
                         "LANG-100",
@@ -48,12 +49,14 @@ pub(crate) fn check_supported(p: &Program) -> Result<(), OracleError> {
         }
         for lit in &rule.body.lits {
             if let Literal::Pos(a) | Literal::Neg(a) = lit
-                && (a.sender.is_some() || a.principal.is_some() || a.weight.is_some())
+                && (a.principal.is_some() || a.weight.is_some())
             {
-                blossom_base::unimplemented_feature!(
-                    "LANG-241",
-                    "`from`, `principal` and weight bindings in the oracle (WP M4.1)"
-                );
+                blossom_base::unimplemented_feature!("LANG-241", "`principal` and weight bindings in the oracle");
+            }
+            if let Literal::Neg(a) = lit
+                && a.sender.is_some()
+            {
+                blossom_base::unimplemented_feature!("LANG-241", "`from` on a negated channel atom in the oracle");
             }
         }
     }
@@ -82,20 +85,27 @@ pub(crate) fn statics(p: &Program) -> Result<Instance, OracleError> {
 /// The rows of one relation by the values of some of their columns.
 type Index = BTreeMap<Vec<Value>, Vec<Row>>;
 
-/// The tick's database: rows by relation, with indexes on the column sets the rule plans probe.
+/// The tick's database: rows by relation, with indexes on the column sets the rule plans probe. Received channel
+/// tuples are also kept with their sender as a trailing column (`sent`), for atoms that bind it (`from s`).
 #[derive(Default)]
 struct Db {
     rows: BTreeMap<RelId, BTreeSet<Row>>,
-    indexes: BTreeMap<(RelId, Vec<usize>), Index>,
+    sent: BTreeMap<RelId, BTreeSet<Row>>,
+    indexes: BTreeMap<(RelId, bool, Vec<usize>), Index>,
 }
 
 impl Db {
     fn insert(&mut self, rel: RelId, row: Row) -> bool {
-        if !self.rows.entry(rel).or_default().insert(row.clone()) {
+        self.insert_in(rel, false, row)
+    }
+
+    fn insert_in(&mut self, rel: RelId, sent: bool, row: Row) -> bool {
+        let table = if sent { &mut self.sent } else { &mut self.rows };
+        if !table.entry(rel).or_default().insert(row.clone()) {
             return false;
         }
-        for ((r, cols), index) in self.indexes.range_mut((rel, Vec::new())..) {
-            if *r != rel {
+        for ((r, s, cols), index) in self.indexes.range_mut((rel, sent, Vec::new())..) {
+            if *r != rel || *s != sent {
                 break;
             }
             index.entry(key(&row, cols)).or_default().push(row.clone());
@@ -103,25 +113,29 @@ impl Db {
         true
     }
 
-    fn ensure_index(&mut self, rel: RelId, cols: &[usize]) {
-        if cols.is_empty() || self.indexes.contains_key(&(rel, cols.to_vec())) {
+    fn ensure_index(&mut self, rel: RelId, sent: bool, cols: &[usize]) {
+        if cols.is_empty() || self.indexes.contains_key(&(rel, sent, cols.to_vec())) {
             return;
         }
+        let table = if sent { &self.sent } else { &self.rows };
         let mut index = Index::new();
-        for row in self.rows.get(&rel).into_iter().flatten() {
+        for row in table.get(&rel).into_iter().flatten() {
             index.entry(key(row, cols)).or_default().push(row.clone());
         }
-        self.indexes.insert((rel, cols.to_vec()), index);
+        self.indexes.insert((rel, sent, cols.to_vec()), index);
     }
 
     /// Makes sure every index `plan` probes exists.
     fn prepare(&mut self, rule: &Rule, plan: &RulePlan) {
         for step in &plan.steps {
             match step {
-                Step::Scan { rel, bound, .. } => self.ensure_index(*rel, bound),
+                Step::Scan { lit, rel, bound } => {
+                    let sent = matches!(rule.body.lits.get(*lit), Some(Literal::Pos(a)) if a.sender.is_some());
+                    self.ensure_index(*rel, sent, bound);
+                }
                 Step::Check { lit } => {
                     if let Some(Literal::Neg(a)) = rule.body.lits.get(*lit) {
-                        self.ensure_index(a.rel, &non_wild(a));
+                        self.ensure_index(a.rel, false, &non_wild(a));
                     }
                 }
             }
@@ -129,13 +143,20 @@ impl Db {
     }
 
     /// The rows of `rel` whose columns `cols` hold `values`.
-    fn lookup<'a>(&'a self, rel: RelId, cols: &[usize], values: &[Value]) -> Box<dyn Iterator<Item = &'a Row> + 'a> {
+    fn lookup<'a>(
+        &'a self,
+        rel: RelId,
+        sent: bool,
+        cols: &[usize],
+        values: &[Value],
+    ) -> Box<dyn Iterator<Item = &'a Row> + 'a> {
+        let table = if sent { &self.sent } else { &self.rows };
         if cols.is_empty() {
-            return Box::new(self.rows.get(&rel).into_iter().flatten());
+            return Box::new(table.get(&rel).into_iter().flatten());
         }
         let found = self
             .indexes
-            .get(&(rel, cols.to_vec()))
+            .get(&(rel, sent, cols.to_vec()))
             .and_then(|index| index.get(values));
         Box::new(found.into_iter().flatten())
     }
@@ -167,6 +188,8 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
         program,
         node: input.node,
         tick: input.tick,
+        now: input.now,
+        oracle,
     };
     let mut db = Db::default();
     for (rel, rows) in oracle.statics.rels.iter().chain(&input.carried.rels) {
@@ -179,6 +202,9 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
     }
     for d in input.delivered {
         db.insert(d.rel, d.row.clone());
+        let mut with_sender: Vec<Value> = d.row.to_vec();
+        with_sender.push(Value::Node(d.from));
+        db.insert_in(d.rel, true, Arc::from(with_sender));
     }
     // A firing is found once per evaluation of its rule, so only a recursive stratum, whose rules are evaluated
     // again every round, can find one twice.
@@ -199,6 +225,9 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
     for stratum in &oracle.strata {
         for &id in &stratum.aggregates {
             let (rule, plan) = rule_and_plan(oracle, id)?;
+            if !oracle.runs_on(rule, input.node) {
+                continue;
+            }
             db.prepare(rule, plan);
             let rows = aggregate(&scope, &db, rule, plan, input.capture).map_err(|e| fail(rule, e))?;
             for (row, firing) in rows {
@@ -212,6 +241,9 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
             let mut changed = false;
             for &id in &stratum.rules {
                 let (rule, plan) = rule_and_plan(oracle, id)?;
+                if !oracle.runs_on(rule, input.node) {
+                    continue;
+                }
                 db.prepare(rule, plan);
                 let derived = derive(&scope, &db, rule, plan, input.capture).map_err(|e| fail(rule, e))?;
                 for (row, firing) in derived {
@@ -253,6 +285,9 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
     let mut out = TickOutput::default();
     for &id in &oracle.inductive {
         let (rule, plan) = rule_and_plan(oracle, id)?;
+        if !oracle.runs_on(rule, input.node) {
+            continue;
+        }
         db.prepare(rule, plan);
         for (row, firing) in derive(&scope, &db, rule, plan, input.capture).map_err(|e| fail(rule, e))? {
             out.next.insert(rule.head.rel, row);
@@ -261,6 +296,9 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
     }
     for &id in &oracle.asynchronous {
         let (rule, plan) = rule_and_plan(oracle, id)?;
+        if !oracle.runs_on(rule, input.node) {
+            continue;
+        }
         db.prepare(rule, plan);
         for (row, firing) in derive(&scope, &db, rule, plan, input.capture).map_err(|e| fail(rule, e))? {
             let to = match row.first() {
@@ -275,6 +313,7 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
             firings.extend(firing);
         }
     }
+    check_keys(program, &db.rows, input.tick)?;
     out.instance = Instance {
         rels: db.rows.into_iter().filter(|(_, rows)| !rows.is_empty()).collect(),
     };
@@ -337,21 +376,34 @@ fn search(
                     internal_error!("a scan step names a non-atom").into(),
                 ));
             };
+            let sent = atom.sender.is_some();
             let values = bound
                 .iter()
-                .map(|c| match atom.args.get(*c) {
-                    Some(t) => expr::term(scope, env, t),
-                    None => Err(ExprError::Oracle(
-                        internal_error!("a bound column is out of range").into(),
-                    )),
+                .map(|c| {
+                    let t = if *c == atom.args.len() {
+                        atom.sender.as_ref()
+                    } else {
+                        atom.args.get(*c)
+                    };
+                    match t {
+                        Some(t) => expr::term(scope, env, t),
+                        None => Err(ExprError::Oracle(
+                            internal_error!("a bound column is out of range").into(),
+                        )),
+                    }
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let mut bound_here: Vec<usize> = Vec::with_capacity(atom.args.len());
-            for row in db.lookup(*rel, bound, &values) {
+            let mut bound_here: Vec<usize> = Vec::with_capacity(atom.args.len() + 1);
+            for row in db.lookup(*rel, sent, bound, &values) {
                 let matched = unify(scope, env, atom, row, &mut bound_here)?;
                 if matched {
                     if let Some(slot) = reads.get_mut(*lit) {
-                        *slot = Some(row.clone());
+                        // Provenance reads the tuple itself, without its sender.
+                        *slot = Some(if sent {
+                            Arc::from(row.get(..atom.args.len()).unwrap_or(&[]).to_vec())
+                        } else {
+                            row.clone()
+                        });
                     }
                     search(scope, db, rule, plan, step + 1, env, reads, negations, out)?;
                     if let Some(slot) = reads.get_mut(*lit) {
@@ -379,7 +431,7 @@ fn search(
                         )),
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                if db.lookup(atom.rel, &cols, &values).next().is_some() {
+                if db.lookup(atom.rel, false, &cols, &values).next().is_some() {
                     return Ok(());
                 }
                 let mut pattern = vec![None; atom.args.len()];
@@ -402,39 +454,37 @@ fn search(
             }
             Some(Literal::Bind { pat, expr: e }) => {
                 let v = expr::eval(scope, env, e)?;
-                let mut newly_bound = None;
-                let ok = match pat {
-                    Pattern::Var(var) => match env.get_mut(var.index()) {
-                        Some(slot @ None) => {
-                            *slot = Some(v);
-                            newly_bound = Some(var.index());
-                            true
-                        }
-                        Some(Some(existing)) => *existing == v,
-                        None => {
-                            return Err(ExprError::Oracle(
-                                internal_error!("variable {var:?} out of range").into(),
-                            ));
-                        }
-                    },
-                    Pattern::Wild => true,
-                    Pattern::Const(c) => expr::term(scope, env, &Term::Const(*c))? == v,
-                    Pattern::Tuple(_) | Pattern::Variant { .. } | Pattern::Struct { .. } => {
-                        return Err(ExprError::Oracle(
-                            blossom_base::unimplemented_error!("LANG-088", "destructuring in the oracle (WP M4.1)")
-                                .into(),
-                        ));
-                    }
-                };
+                let mut newly = Vec::new();
+                let ok = expr::matches(scope, env, pat, &v, &mut newly)?;
                 let r = if ok {
                     search(scope, db, rule, plan, step + 1, env, reads, negations, out)
                 } else {
                     Ok(())
                 };
-                if let Some(slot) = newly_bound.and_then(|i| env.get_mut(i)) {
-                    *slot = None;
+                for i in newly {
+                    if let Some(slot) = env.get_mut(i) {
+                        *slot = None;
+                    }
                 }
                 r
+            }
+            Some(Literal::Gen { pat, src }) => {
+                for v in expr::generate(scope, env, src)? {
+                    let mut newly = Vec::new();
+                    let ok = expr::matches(scope, env, pat, &v, &mut newly)?;
+                    let r = if ok {
+                        search(scope, db, rule, plan, step + 1, env, reads, negations, out)
+                    } else {
+                        Ok(())
+                    };
+                    for i in newly {
+                        if let Some(slot) = env.get_mut(i) {
+                            *slot = None;
+                        }
+                    }
+                    r?;
+                }
+                Ok(())
             }
             other => Err(ExprError::Oracle(
                 internal_error!("a check step names {other:?}").into(),
@@ -452,10 +502,11 @@ fn unify(
     row: &[Value],
     bound_here: &mut Vec<usize>,
 ) -> expr::ExprResult<bool> {
-    if atom.args.len() != row.len() {
+    let arity = atom.args.len() + usize::from(atom.sender.is_some());
+    if arity != row.len() {
         return Err(ExprError::Oracle(internal_error!("a row of the wrong arity").into()));
     }
-    for (t, v) in atom.args.iter().zip(row) {
+    for (t, v) in atom.args.iter().chain(atom.sender.iter()).zip(row) {
         match t {
             Term::Wild => {}
             Term::Const(_) => {
@@ -674,4 +725,48 @@ fn fold(func: AggFunc, set: &BTreeSet<Vec<Value>>) -> expr::ExprResult<Value> {
             internal_error!("aggregate {other:?} passed the support check").into(),
         )),
     }
+}
+
+/// SEM-050 / SEM-051: two distinct tuples with one key in one tick are a runtime error (BLSR001; BLSR002 for the
+/// staging relation of an `upsert`, where it means two upserts gave one key different values).
+fn check_keys(
+    program: &Program,
+    rows: &BTreeMap<RelId, BTreeSet<Row>>,
+    tick: blossom_value::time::Tick,
+) -> Result<(), OracleError> {
+    use blossom_ir::core::ConstructKind;
+    for (rel, set) in rows {
+        let Some(decl) = program.rels.get(*rel) else { continue };
+        if decl.schema.payload.is_empty() || set.len() < 2 {
+            continue;
+        }
+        let cols: Vec<usize> = decl.schema.key.iter().map(|c| c.index()).collect();
+        let mut seen: BTreeMap<Vec<Value>, &Row> = BTreeMap::new();
+        for row in set {
+            let k = key(row, &cols);
+            if let Some(prev) = seen.insert(k.clone(), row) {
+                let upsert = program
+                    .constructs
+                    .iter()
+                    .any(|c| matches!(c.kind, ConstructKind::Upsert { staging, .. } if staging == *rel));
+                let code = if upsert {
+                    blossom_base::code!("BLSR002")
+                } else {
+                    blossom_base::code!("BLSR001")
+                };
+                return Err(OracleError::Program {
+                    tick,
+                    error: ProgramErrorRecord {
+                        code: code.as_str(),
+                        rule: None,
+                        detail: Arc::from(format!(
+                            "{}: two tuples with key {k:?} in one tick: {prev:?} and {row:?}",
+                            decl.name
+                        )),
+                    },
+                });
+            }
+        }
+    }
+    Ok(())
 }

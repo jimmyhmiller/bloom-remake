@@ -66,7 +66,7 @@ pub struct Args {
 
 /// What running one backend of one case found.
 #[derive(Debug)]
-enum Outcome {
+pub(super) enum Outcome {
     Pass(String),
     Fail(String),
     /// The build cannot run this backend for this case.
@@ -171,6 +171,8 @@ pub fn run(args: Args) -> ExitCode {
                 }
                 (Outcome::NotRunnable(why), _) => {
                     counts.2 += 1;
+                    let first = why.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                    println!("n/a   {name} [{backend}] {first}");
                     if args.gate && in_gate {
                         problems.push(format!(
                             "{name} [{backend}]: in the {milestone} gate but not runnable: {why}"
@@ -280,8 +282,16 @@ fn run_backend(case: &Path, m: &toml::Table, backend: &str, workers: usize, max_
     let Some(program) = m.get("program").and_then(toml::Value::as_str) else {
         return Outcome::NotRunnable("multi-program cases arrive with slice 2".into());
     };
+    if program.ends_with(".bls") {
+        if m.contains_key("include") || m.contains_key("spec") {
+            return Outcome::NotRunnable(
+                "`.bls` cases with extra sources or a spec file arrive with a later slice".into(),
+            );
+        }
+        return super::corpus_bls::run(case, m, program, backend);
+    }
     if !program.ends_with(".ded") {
-        return Outcome::NotRunnable("`.bls` programs arrive with slice 2".into());
+        return Outcome::Fail(format!("`{program}` is neither a `.bls` nor a `.ded` program"));
     }
     let mut files = vec![case.join(program)];
     if let Some(extra) = m.get("include").and_then(toml::Value::as_array) {

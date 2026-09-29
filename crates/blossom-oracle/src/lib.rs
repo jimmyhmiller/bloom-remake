@@ -28,12 +28,12 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use blossom_base::{InternalError, RelId, RuleId, Unimplemented};
+use blossom_base::{InternalError, RelId, RoleId, RuleId, Unimplemented};
 use blossom_ir::ValidatedProgram;
 use blossom_ir::obs::{FiringRecord, ProgramErrorRecord};
 use blossom_value::{
     Value,
-    time::{NodeId, Tick},
+    time::{Instant, NodeId, Tick},
 };
 
 pub use strata::Stratum;
@@ -91,6 +91,8 @@ pub struct TickInput<'a> {
     /// `$self`.
     pub node: NodeId,
     pub tick: Tick,
+    /// `$now`: the tick's clock sample.
+    pub now: Instant,
     /// Last tick's `@next` heads.
     pub carried: &'a Instance,
     /// The tick's input events.
@@ -151,6 +153,9 @@ pub struct Oracle {
     asynchronous: Vec<RuleId>,
     statics: Instance,
     limits: Limits,
+    /// Each node's role, for the `$role(R)` guards of rules placed at a role (LANGUAGE §6.10). Empty for a
+    /// role-free program.
+    roles: Vec<Option<RoleId>>,
 }
 
 impl Oracle {
@@ -184,7 +189,28 @@ impl Oracle {
             asynchronous,
             statics,
             limits,
+            roles: Vec::new(),
         })
+    }
+
+    /// Places the deployment's nodes: `roles[n]` is node `n`'s role. A rule placed at a role runs only on that
+    /// role's nodes.
+    pub fn with_roles(mut self, roles: Vec<Option<RoleId>>) -> Oracle {
+        self.roles = roles;
+        self
+    }
+
+    /// Whether `rule` runs on `node`: rules without a role guard run everywhere.
+    pub(crate) fn runs_on(&self, rule: &blossom_ir::core::Rule, node: NodeId) -> bool {
+        match rule.role {
+            None => true,
+            Some(r) => self.roles.get(node.0 as usize).copied().flatten() == Some(r),
+        }
+    }
+
+    /// The number of nodes in role `r`.
+    pub(crate) fn role_size(&self, r: RoleId) -> u64 {
+        self.roles.iter().filter(|x| **x == Some(r)).count() as u64
     }
 
     /// The program.

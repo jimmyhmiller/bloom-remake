@@ -121,6 +121,7 @@ fn run(oracle: &Oracle, events: &[(RelId, Row)]) -> Result<crate::TickOutput, Or
     oracle.tick(&TickInput {
         node: NodeId(0),
         tick: Tick(1),
+        now: blossom_value::time::Instant(0),
         carried: &Instance::default(),
         events,
         delivered: &[],
@@ -365,6 +366,7 @@ fn next_heads_carry_and_async_heads_send() {
         .tick(&TickInput {
             node: NodeId(0),
             tick: Tick(3),
+            now: blossom_value::time::Instant(0),
             carried: &carried,
             events: &events,
             delivered: &delivered,

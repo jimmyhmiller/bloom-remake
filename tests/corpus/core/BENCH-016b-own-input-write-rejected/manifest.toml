@@ -13,9 +13,7 @@ Judgement call: Bud's check is on host code; Blossom's host API cannot express a
 API's own guarantee is tested with the node's host API (LANG-067, M5.5)."""
 
 [backend.compile]
-status = "unimplemented"
-unimplemented = ["LANG-066", "LANG-067", "ANA-005", "LANG-043", "LANG-045", "LANG-060", "LANG-190"]
-until = "M5"
+status = "pass"
 
 [[expect_diag]]
 code = "BLS0406"

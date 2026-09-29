@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use blossom_base::{InternalError, RelId, internal_error};
 use blossom_ir::obs::FiringRecord;
 use blossom_oracle::{Delivery, Instance, Oracle, OracleError, Row, TickInput, TickOutput};
-use blossom_value::time::{NodeId, Tick};
+use blossom_value::time::{Duration, Instant, NodeId, Tick};
 
 /// Runs one node's tick.
 pub trait Evaluator {
@@ -97,6 +97,9 @@ pub struct SyncConfig {
     /// Rounds `first..=last` run.
     pub last: Tick,
     pub crash_view: CrashView,
+    /// The duration of a round: round `t` samples `now = t × round` (LANGUAGE §15.2: under LDFI, physical time is
+    /// mapped to rounds).
+    pub round: Duration,
     /// Whether to record every node's firings.
     pub capture: bool,
 }
@@ -225,6 +228,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                     .tick(&TickInput {
                         node,
                         tick,
+                        now: now_at(config.round, tick)?,
                         carried: state,
                         events,
                         delivered,
@@ -296,6 +300,18 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
     }
 }
 
+/// The clock sample of round `t`: `t × round` after the deployment epoch.
+pub fn now_at(round: Duration, t: Tick) -> Result<Instant, SimError> {
+    i64::try_from(t.0)
+        .ok()
+        .and_then(|t| round.as_nanos().checked_mul(t))
+        .map(Instant)
+        .ok_or_else(|| internal_error!("the clock overflows at round {}", t.0).into())
+}
+
+/// The round duration of the `.ded` profile: Molly's programs never read the clock.
+pub const DED_ROUND: Duration = Duration::from_nanos(1_000_000);
+
 fn round_of(rounds: &[Vec<NodeTick>], t: Option<u64>, node: usize) -> Instance {
     t.and_then(|t| usize::try_from(t).ok())
         .and_then(|t| rounds.get(t))
@@ -352,6 +368,7 @@ mod tests {
             first: Tick(1),
             last: Tick(3),
             crash_view: view,
+            round: DED_ROUND,
             capture: false,
         }
     }

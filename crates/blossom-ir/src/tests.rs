@@ -205,12 +205,19 @@ fn validator_v8_aggregate_signatures() {
     let mut p = good();
     let var = Term::Var(VarId::from_raw(0));
     let rule = p.rules.get_mut(RuleId::from_raw(0)).unwrap();
+    // A count over a tuple is accepted (LANGUAGE §10.1); a wildcard in the counted tuple is not.
     rule.head.args[0] = HeadArg::Agg(AggCall {
+        func: AggFunc::Count,
+        args: vec![var.clone(), Term::Wild],
+        order: None,
+    });
+    assert!(has(p.clone(), 8));
+    p.rules.get_mut(RuleId::from_raw(0)).unwrap().head.args[0] = HeadArg::Agg(AggCall {
         func: AggFunc::Count,
         args: vec![var.clone(), var.clone()],
         order: None,
     });
-    assert!(has(p.clone(), 8));
+    assert!(!has(p.clone(), 8));
     p.rules.get_mut(RuleId::from_raw(0)).unwrap().head.args[0] = HeadArg::Agg(AggCall {
         func: AggFunc::Count,
         args: vec![var.clone()],

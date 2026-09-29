@@ -1,0 +1,1651 @@
+//! CST → [`File`](super::File).
+//!
+//! The parser has already reported every syntax error; [`convert`] runs only on trees without errors, so a missing
+//! child here is a construct the grammar allows but this build does not represent. Each such construct is reported
+//! as BLS0908 (not implemented in this build) with its span, and replaced by a placeholder that later phases skip
+//! because the program is rejected anyway.
+
+use blossom_base::{Diagnostic, Diagnostics, FeatureId, FileId, Span, Symbol};
+use blossom_syntax::{SyntaxKind, SyntaxKind::*, SyntaxNode, SyntaxToken};
+
+use super::*;
+
+/// Converts a parsed file. Diagnostics go to `diags`.
+pub fn convert(file: FileId, root: &SyntaxNode, diags: &mut Diagnostics) -> File {
+    let mut cx = Cx { file, diags };
+    let header = root
+        .children()
+        .find(|n| n.kind() == PROGRAMHEADER)
+        .and_then(|h| cx.header(&h));
+    let items = cx.items(root);
+    File {
+        header,
+        items,
+        span: cx.span(root),
+    }
+}
+
+struct Cx<'d> {
+    file: FileId,
+    diags: &'d mut Diagnostics,
+}
+
+/// The non-trivia tokens that are direct children of `node`.
+fn tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> {
+    node.children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| !t.kind().is_trivia())
+}
+
+fn has_token(node: &SyntaxNode, kind: SyntaxKind) -> bool {
+    tokens(node).any(|t| t.kind() == kind)
+}
+
+fn has_word(node: &SyntaxNode, word: &str) -> bool {
+    tokens(node).any(|t| t.kind() == IDENT && t.text() == word)
+}
+
+fn children_of(node: &SyntaxNode, kind: SyntaxKind) -> impl Iterator<Item = SyntaxNode> {
+    node.children().filter(move |n| n.kind() == kind)
+}
+
+fn child_of(node: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxNode> {
+    children_of(node, kind).next()
+}
+
+fn is_expr(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        LITERALEXPR
+            | PATHEXPR
+            | CALLEXPR
+            | METHODCALLEXPR
+            | BANGCALLEXPR
+            | FIELDEXPR
+            | TUPLEINDEXEXPR
+            | INDEXEXPR
+            | BINARYEXPR
+            | PREFIXEXPR
+            | CASTEXPR
+            | PARENEXPR
+            | TUPLEEXPR
+            | VECEXPR
+            | SETEXPR
+            | MAPEXPR
+            | FOLDEXPR
+            | IFEXPR
+            | MATCHEXPR
+            | STRUCTLITEXPR
+            | CLOSUREEXPR
+            | WILDCARD
+            | SELFEXPR
+    )
+}
+
+fn expr_children(node: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> {
+    node.children().filter(|n| is_expr(n.kind()))
+}
+
+fn is_literal(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        NOTLIT
+            | LETLIT
+            | OUTERLIT
+            | INSERTEDLIT
+            | DELETEDLIT
+            | SEALEDLIT
+            | FINALLIT
+            | PERLIT
+            | ANYLIT
+            | FORALLLIT
+            | EVERLIT
+            | SENTLIT
+            | QUORUMLIT
+            | ATOMLIT
+    )
+}
+
+const LANG_002: FeatureId = FeatureId("LANG-002");
+
+impl Cx<'_> {
+    fn span(&self, node: &SyntaxNode) -> Span {
+        let r = node.text_range();
+        Span::new(self.file, r.start().into(), r.end().into())
+    }
+
+    fn token_span(&self, t: &SyntaxToken) -> Span {
+        let r = t.text_range();
+        Span::new(self.file, r.start().into(), r.end().into())
+    }
+
+    /// Reports a construct this build does not represent.
+    fn unsupported(&mut self, feature: &'static str, what: &str, span: Span) {
+        self.diags.push(
+            Diagnostic::not_implemented(FeatureId(feature), what, "the Blossom frontend (slice 2)").with_primary(span),
+        );
+    }
+
+    /// Reports a tree shape the converter did not expect (an error-free parse never produces one).
+    fn malformed(&mut self, what: &str, span: Span) {
+        self.diags.push(
+            Diagnostic::not_implemented(
+                LANG_002,
+                &format!("syntax shape: {what}"),
+                "the Blossom frontend (slice 2)",
+            )
+            .with_primary(span),
+        );
+    }
+
+    fn ident(&mut self, node: &SyntaxNode) -> Ident {
+        let span = self.span(node);
+        let text = tokens(node).next().map(|t| t.text().to_owned()).unwrap_or_default();
+        let text = text.strip_prefix("r#").unwrap_or(&text).to_owned();
+        Ident {
+            name: Symbol::intern(&text),
+            span,
+        }
+    }
+
+    fn names(&mut self, node: &SyntaxNode) -> Vec<Ident> {
+        children_of(node, NAME).map(|n| self.ident(&n)).collect()
+    }
+
+    fn first_name(&mut self, node: &SyntaxNode) -> Option<Ident> {
+        child_of(node, NAME).map(|n| self.ident(&n))
+    }
+
+    fn need_name(&mut self, node: &SyntaxNode) -> Ident {
+        match self.first_name(node) {
+            Some(n) => n,
+            None => {
+                let span = self.span(node);
+                self.malformed("a missing name", span);
+                Ident {
+                    name: Symbol::intern("<missing>"),
+                    span,
+                }
+            }
+        }
+    }
+
+    fn header(&mut self, node: &SyntaxNode) -> Option<ProgramHeader> {
+        let name = self.first_name(node)?;
+        let ints: Vec<SyntaxToken> = tokens(node).filter(|t| t.kind() == INT_LIT).collect();
+        let version = ints.first().and_then(|t| parse_int(t.text()).ok()).map(|(v, _)| v);
+        let edition = ints.get(1).and_then(|t| parse_int(t.text()).ok()).map(|(v, _)| v);
+        let span = self.span(node);
+        let Some(version) = version.and_then(|v| u32::try_from(v).ok()) else {
+            self.malformed("a program version that is not a u32", span);
+            return None;
+        };
+        let edition = match edition {
+            None => 1,
+            Some(e) => match u16::try_from(e) {
+                Ok(e) => e,
+                Err(_) => {
+                    self.malformed("an edition that is not a u16", span);
+                    1
+                }
+            },
+        };
+        Some(ProgramHeader {
+            name,
+            version,
+            edition,
+            span,
+        })
+    }
+
+    fn attrs(&mut self, node: &SyntaxNode) -> Vec<Attr> {
+        children_of(node, ATTR).map(|a| self.attr(&a)).collect()
+    }
+
+    fn attr(&mut self, node: &SyntaxNode) -> Attr {
+        let name = self.need_name(node);
+        let args = children_of(node, ARG).map(|a| self.arg(&a)).collect();
+        let value = expr_children(node).next().map(|e| self.expr(&e));
+        Attr {
+            name,
+            args,
+            value,
+            span: self.span(node),
+        }
+    }
+
+    fn items(&mut self, node: &SyntaxNode) -> Vec<Item> {
+        let mut out = Vec::new();
+        for child in node.children() {
+            if matches!(
+                child.kind(),
+                PROGRAMHEADER | INNERATTR | NAME | ATTR | GENERICS | MODPARAMS | TYPE | RELPATH | BLOCK | BODY
+            ) {
+                continue;
+            }
+            if let Some(item) = self.item(&child) {
+                out.push(item);
+            }
+        }
+        out
+    }
+
+    fn item(&mut self, node: &SyntaxNode) -> Option<Item> {
+        let span = self.span(node);
+        let attrs = self.attrs(node);
+        let is_pub = has_token(node, PUB_KW);
+        let kind = match node.kind() {
+            USEITEM => ItemKind::Use(self.use_item(node)),
+            IMPORTITEM => ItemKind::Import(self.import(node)),
+            INCLUDEITEM => ItemKind::Include(self.include(node)),
+            CONSTITEM => {
+                let name = self.need_name(node);
+                let ty = self.need_type(node);
+                let value = self.need_expr(node);
+                ItemKind::Const { name, ty, value }
+            }
+            PARAMITEM => {
+                let name = self.need_name(node);
+                let ty = self.need_type(node);
+                let default = expr_children(node).next().map(|e| self.expr(&e));
+                ItemKind::Param { name, ty, default }
+            }
+            TYPEALIAS => {
+                let name = self.need_name(node);
+                let generics = self.generics(node);
+                let ty = self.need_type(node);
+                ItemKind::TypeAlias { name, generics, ty }
+            }
+            STRUCTITEM => ItemKind::Struct(self.struct_item(node)),
+            ENUMITEM => ItemKind::Enum(self.enum_item(node)),
+            MODULEITEM => ItemKind::Module(self.module(node)),
+            PROTOCOLITEM => {
+                let name = self.need_name(node);
+                let generics = self.generics(node);
+                let items = self.items(node);
+                ItemKind::Protocol(ProtocolItem { name, generics, items })
+            }
+            ROLEITEM => {
+                let names = self.names(node);
+                let Some(name) = names.first().copied() else {
+                    self.malformed("a role without a name", span);
+                    return None;
+                };
+                ItemKind::Role {
+                    name,
+                    kind: names.get(1).copied(),
+                }
+            }
+            ATSECTION => {
+                let role = self.need_name(node);
+                let items = self.items(node);
+                ItemKind::At { role, items }
+            }
+            RELDECL => ItemKind::Rel(self.rel_decl(node)),
+            TIMERDECL => {
+                let name = self.need_name(node);
+                let words = tokens(node)
+                    .filter(|t| t.kind() == IDENT && t.text() != "timer")
+                    .map(|t| Ident {
+                        name: Symbol::intern(t.text()),
+                        span: self.token_span(&t),
+                    })
+                    .collect();
+                let exprs = expr_children(node).map(|e| self.expr(&e)).collect();
+                ItemKind::Timer(TimerDecl {
+                    name,
+                    words,
+                    exprs,
+                    span,
+                })
+            }
+            VIEWDECL => ItemKind::View(self.view(node)),
+            HANDLERITEM => ItemKind::Handler(self.handler(node)),
+            BOOTSTRAPITEM => {
+                let fresh = has_word(node, "fresh");
+                let block = self.need_block(node);
+                ItemKind::Bootstrap { fresh, block }
+            }
+            FACTITEM => ItemKind::Fact(self.fact(node)),
+            INVARIANTITEM => ItemKind::Invariant(self.invariant(node)),
+            INTERPOSEITEM => {
+                let target = child_of(node, RELPATH).map(|r| self.names(&r)).unwrap_or_default();
+                let names = self.names(node);
+                let (Some(outside), Some(inside)) = (names.first().copied(), names.get(1).copied()) else {
+                    self.malformed("an interposition without its two names", span);
+                    return None;
+                };
+                let items = self.items(node);
+                ItemKind::Interpose(Interpose {
+                    target,
+                    outside,
+                    inside,
+                    items,
+                })
+            }
+            SPECITEM => ItemKind::Spec(self.spec(node)),
+            FNITEM => self.unsupported_item("LANG-180", "functions", span),
+            EXTERNITEM => self.unsupported_item("LANG-181", "extern items", span),
+            IMPLITEM => self.unsupported_item("LANG-180", "impl blocks", span),
+            LATTICETYPEITEM => self.unsupported_item("LANG-135", "user-defined lattices", span),
+            AGGREGATEITEM => self.unsupported_item("LANG-105", "user-defined aggregates", span),
+            SERVICEITEM => self.unsupported_item("LANG-184", "async services", span),
+            BLOCKITEM => self.unsupported_item("LANG-007", "named blocks", span),
+            OVERRIDEITEM => self.unsupported_item("LANG-007", "override", span),
+            ACLITEM => self.unsupported_item("LANG-242", "ACL items", span),
+            CELLDECL => self.unsupported_item("LANG-120", "cells", span),
+            MIGRATEITEM => self.unsupported_item("LANG-262", "migrations", span),
+            TRANSLATEITEM => self.unsupported_item("LANG-263", "channel translations", span),
+            SNAPSHOTITEM => self.unsupported_item("LANG-139", "progressive snapshots", span),
+            other => {
+                self.malformed(&format!("item {other:?}"), span);
+                return None;
+            }
+        };
+        Some(Item {
+            attrs,
+            is_pub,
+            kind,
+            span,
+        })
+    }
+
+    fn unsupported_item(&mut self, feature: &'static str, what: &'static str, span: Span) -> ItemKind {
+        self.unsupported(feature, what, span);
+        ItemKind::Unsupported { what }
+    }
+
+    fn use_item(&mut self, node: &SyntaxNode) -> UseTree {
+        let mut paths = Vec::new();
+        if let Some(tree) = child_of(node, USETREE) {
+            self.use_tree(&tree, &mut Vec::new(), &mut paths);
+        }
+        UseTree { paths }
+    }
+
+    fn use_tree(&mut self, node: &SyntaxNode, prefix: &mut Vec<Ident>, out: &mut Vec<Vec<Ident>>) {
+        let names = self.names(node);
+        let depth = prefix.len();
+        prefix.extend(names);
+        let subtrees: Vec<SyntaxNode> = children_of(node, USETREE).collect();
+        if subtrees.is_empty() {
+            out.push(prefix.clone());
+        } else {
+            for s in subtrees {
+                self.use_tree(&s, prefix, out);
+            }
+        }
+        prefix.truncate(depth);
+    }
+
+    fn import(&mut self, node: &SyntaxNode) -> Import {
+        let mut module = Vec::new();
+        let mut alias = None;
+        let mut args = Vec::new();
+        let mut roles = Vec::new();
+        let mut type_args = Vec::new();
+        let mut after_as = false;
+        let mut after_with = false;
+        for e in node.children_with_tokens() {
+            if let Some(t) = e.as_token() {
+                if t.kind() == AS_KW {
+                    after_as = true;
+                } else if t.kind() == IDENT && t.text() == "with" {
+                    after_with = true;
+                }
+            }
+            if let Some(n) = e.into_node() {
+                match n.kind() {
+                    NAME if !after_as => module.push(self.ident(&n)),
+                    NAME => alias = Some(self.ident(&n)),
+                    GENERICARGS => type_args = self.generic_args(&n),
+                    ARG if after_with => {
+                        let span = self.span(&n);
+                        match self.arg(&n) {
+                            Arg::Named(role, value) => match &value.kind {
+                                ExprKind::Path(p, _) if p.len() == 1 => {
+                                    if let Some(target) = p.first() {
+                                        roles.push((role, *target));
+                                    }
+                                }
+                                _ => self.malformed("a role binding that is not `Role = Role`", span),
+                            },
+                            _ => self.malformed("a role binding that is not `Role = Role`", span),
+                        }
+                    }
+                    ARG => args.push(self.arg(&n)),
+                    _ => {}
+                }
+            }
+        }
+        let alias = alias.unwrap_or_else(|| {
+            let span = self.span(node);
+            self.malformed("an import without `as`", span);
+            Ident {
+                name: Symbol::intern("<missing>"),
+                span,
+            }
+        });
+        Import {
+            module,
+            type_args,
+            args,
+            alias,
+            roles,
+        }
+    }
+
+    fn include(&mut self, node: &SyntaxNode) -> IncludeTarget {
+        if let Some(s) = tokens(node).find(|t| t.kind() == STRING_LIT) {
+            let span = self.token_span(&s);
+            return IncludeTarget::File(self.string(s.text(), span));
+        }
+        IncludeTarget::Module(self.names(node))
+    }
+
+    fn generics(&mut self, node: &SyntaxNode) -> Vec<GenericParam> {
+        let Some(g) = child_of(node, GENERICS) else {
+            return Vec::new();
+        };
+        children_of(&g, GENERICPARAM)
+            .map(|p| GenericParam {
+                name: self.need_name(&p),
+                bounds: children_of(&p, TYPE).map(|t| self.ty(&t)).collect(),
+            })
+            .collect()
+    }
+
+    fn generic_args(&mut self, node: &SyntaxNode) -> Vec<Type> {
+        let mut out = Vec::new();
+        for a in children_of(node, GENERICARG) {
+            match child_of(&a, TYPE) {
+                Some(t) => out.push(self.ty(&t)),
+                None => {
+                    let span = self.span(&a);
+                    self.unsupported("LANG-021", "named generic arguments", span);
+                }
+            }
+        }
+        out
+    }
+
+    fn need_type(&mut self, node: &SyntaxNode) -> Type {
+        match child_of(node, TYPE) {
+            Some(t) => self.ty(&t),
+            None => {
+                let span = self.span(node);
+                self.malformed("a missing type", span);
+                Type::Tuple {
+                    elems: Vec::new(),
+                    span,
+                }
+            }
+        }
+    }
+
+    fn ty(&mut self, node: &SyntaxNode) -> Type {
+        let span = self.span(node);
+        let path = self.names(node);
+        if path.is_empty() {
+            let elems = children_of(node, TYPE).map(|t| self.ty(&t)).collect();
+            return Type::Tuple { elems, span };
+        }
+        let args = child_of(node, GENERICARGS)
+            .map(|g| self.generic_args(&g))
+            .unwrap_or_default();
+        Type::Named { path, args, span }
+    }
+
+    fn field_decls(&mut self, node: &SyntaxNode) -> (Vec<FieldDecl>, bool) {
+        let named: Vec<SyntaxNode> = children_of(node, FIELDDECL).collect();
+        if !named.is_empty() {
+            let fields = named
+                .iter()
+                .map(|f| FieldDecl {
+                    attrs: self.attrs(f),
+                    name: self.first_name(f),
+                    ty: self.need_type(f),
+                    span: self.span(f),
+                })
+                .collect();
+            return (fields, false);
+        }
+        let positional: Vec<FieldDecl> = children_of(node, TYPE)
+            .map(|t| {
+                let span = self.span(&t);
+                FieldDecl {
+                    attrs: Vec::new(),
+                    name: None,
+                    ty: self.ty(&t),
+                    span,
+                }
+            })
+            .collect();
+        let tuple = !positional.is_empty() || has_token(node, L_PAREN);
+        (positional, tuple)
+    }
+
+    fn struct_item(&mut self, node: &SyntaxNode) -> StructItem {
+        let name = self.need_name(node);
+        let generics = self.generics(node);
+        let (fields, tuple) = self.field_decls(node);
+        StructItem {
+            name,
+            generics,
+            fields,
+            tuple,
+        }
+    }
+
+    fn enum_item(&mut self, node: &SyntaxNode) -> EnumItem {
+        let name = self.need_name(node);
+        let generics = self.generics(node);
+        let variants = children_of(node, VARIANT)
+            .map(|v| {
+                let (fields, tuple) = self.field_decls(&v);
+                Variant {
+                    attrs: self.attrs(&v),
+                    name: self.need_name(&v),
+                    fields,
+                    tuple,
+                    span: self.span(&v),
+                }
+            })
+            .collect();
+        EnumItem {
+            name,
+            generics,
+            variants,
+        }
+    }
+
+    fn module(&mut self, node: &SyntaxNode) -> ModuleItem {
+        let name = self.need_name(node);
+        let choreography = has_token(node, CHOREOGRAPHY_KW);
+        let generics = self.generics(node);
+        let mut params = Vec::new();
+        if let Some(ps) = child_of(node, MODPARAMS) {
+            for p in children_of(&ps, MODPARAM) {
+                let span = self.span(&p);
+                let pname = self.need_name(&p);
+                let kind = if let Some(list) = child_of(&p, PARAMLIST) {
+                    let cols = children_of(&list, PARAM)
+                        .map(|c| (self.need_name(&c), self.need_type(&c)))
+                        .collect();
+                    ModParamKind::Rel { cols }
+                } else {
+                    ModParamKind::Value {
+                        ty: self.need_type(&p),
+                        default: expr_children(&p).next().map(|e| self.expr(&e)),
+                    }
+                };
+                params.push(ModParam {
+                    name: pname,
+                    kind,
+                    span,
+                });
+            }
+        }
+        let protocols = children_of(node, TYPE).map(|t| self.ty(&t)).collect();
+        let items = self.items(node);
+        ModuleItem {
+            name,
+            choreography,
+            generics,
+            params,
+            protocols,
+            items,
+        }
+    }
+
+    fn rel_decl(&mut self, node: &SyntaxNode) -> RelDecl {
+        let span = self.span(node);
+        let name = self.need_name(node);
+        let kind = tokens(node).find_map(|t| match t.kind() {
+            TABLE_KW => Some(RelKind::Table),
+            SCRATCH_KW => Some(RelKind::Scratch),
+            CHANNEL_KW => Some(RelKind::Channel),
+            INPUT_KW => Some(RelKind::Input),
+            OUTPUT_KW => Some(RelKind::Output),
+            STATIC_KW => Some(RelKind::Static),
+            LOOPBACK_KW => Some(RelKind::Loopback),
+            _ => None,
+        });
+        let kind = kind.unwrap_or_else(|| {
+            self.malformed("a relation declaration without a kind", span);
+            RelKind::Scratch
+        });
+        let mut mods = RelMods::default();
+        for t in tokens(node) {
+            match t.text() {
+                "durable" => mods.durable = true,
+                "soft" => mods.soft = true,
+                "sealed" => mods.sealed = true,
+                "zset" => mods.zset = true,
+                "bag" => mods.bag = true,
+                "final" => mods.final_ = true,
+                _ => {}
+            }
+        }
+        let cols = children_of(node, COLDECL)
+            .map(|c| ColDecl {
+                attrs: self.attrs(&c),
+                dest: has_token(&c, AT),
+                name: self.need_name(&c),
+                ty: self.need_type(&c),
+                default: expr_children(&c).next().map(|e| self.expr(&e)),
+                span: self.span(&c),
+            })
+            .collect();
+        let like = child_of(node, RELPATH).map(|r| self.names(&r));
+        let mut key = None;
+        let mut direction = None;
+        let mut other_clauses = Vec::new();
+        for c in node.children() {
+            let cspan = self.span(&c);
+            match c.kind() {
+                KEYCLAUSE => key = Some((self.names(&c), cspan)),
+                DIRECTIONCLAUSE => {
+                    let names = self.names(&c);
+                    match (names.first(), names.get(1)) {
+                        (Some(a), Some(b)) => direction = Some((*a, *b)),
+                        _ => self.malformed("a direction without two roles", cspan),
+                    }
+                }
+                TTLCLAUSE => other_clauses.push(("ttl", cspan)),
+                MAXCLAUSE => other_clauses.push(("max", cspan)),
+                RANGECLAUSE => other_clauses.push(("range", cspan)),
+                RESOLVECLAUSE => other_clauses.push(("resolve", cspan)),
+                PARTITIONCLAUSE => other_clauses.push(("partition by", cspan)),
+                SEALEDBYCLAUSE => other_clauses.push(("sealed by", cspan)),
+                EXACTLYONCECLAUSE => other_clauses.push(("exactly_once", cspan)),
+                _ => {}
+            }
+        }
+        RelDecl {
+            name,
+            kind,
+            mods,
+            cols,
+            like,
+            key,
+            direction,
+            other_clauses,
+            span,
+        }
+    }
+
+    fn view(&mut self, node: &SyntaxNode) -> ViewDecl {
+        let name = self.need_name(node);
+        let monotone = has_word(node, "monotone");
+        let cols = children_of(node, VIEWCOL)
+            .map(|c| ViewCol {
+                name: self.need_name(&c),
+                ty: child_of(&c, TYPE).map(|t| self.ty(&t)),
+                agg: expr_children(&c).next().map(|e| self.expr(&e)),
+                span: self.span(&c),
+            })
+            .collect();
+        let alternatives = children_of(node, BODY).map(|b| self.body(&b)).collect();
+        ViewDecl {
+            name,
+            monotone,
+            cols,
+            alternatives,
+            span: self.span(node),
+        }
+    }
+
+    fn handler(&mut self, node: &SyntaxNode) -> Handler {
+        let label = self.first_name(node);
+        let monotone = has_word(node, "monotone");
+        let trigger = if has_token(node, WHILE_KW) {
+            Trigger::While
+        } else {
+            Trigger::On
+        };
+        let header = match child_of(node, BODY) {
+            Some(b) => self.body(&b),
+            None => {
+                let span = self.span(node);
+                self.malformed("a handler without a header", span);
+                Body {
+                    lits: Vec::new(),
+                    guards: Vec::new(),
+                    span,
+                }
+            }
+        };
+        let block = self.need_block(node);
+        Handler {
+            label,
+            monotone,
+            trigger,
+            header,
+            block,
+            span: self.span(node),
+        }
+    }
+
+    fn need_block(&mut self, node: &SyntaxNode) -> Block {
+        match child_of(node, BLOCK) {
+            Some(b) => self.block(&b),
+            None => {
+                let span = self.span(node);
+                self.malformed("a missing block", span);
+                Block {
+                    stmts: Vec::new(),
+                    span,
+                }
+            }
+        }
+    }
+
+    fn block(&mut self, node: &SyntaxNode) -> Block {
+        let mut stmts = Vec::new();
+        for s in node.children() {
+            if let Some(stmt) = self.stmt(&s) {
+                stmts.push(stmt);
+            }
+        }
+        Block {
+            stmts,
+            span: self.span(node),
+        }
+    }
+
+    fn stmt(&mut self, node: &SyntaxNode) -> Option<Stmt> {
+        let span = self.span(node);
+        match node.kind() {
+            VERBSTMT => {
+                let verb = tokens(node).find_map(|t| match t.kind() {
+                    EMIT_KW => Some(Verb::Emit),
+                    NEXT_KW => Some(Verb::Next),
+                    SEND_KW => Some(Verb::Send),
+                    DELETE_KW => Some(Verb::Delete),
+                    UPSERT_KW => Some(Verb::Upsert),
+                    SEAL_KW => Some(Verb::Seal),
+                    _ => None,
+                });
+                let Some(verb) = verb else {
+                    self.malformed("a statement without a verb", span);
+                    return None;
+                };
+                let head = match child_of(node, HEAD) {
+                    Some(h) => self.head(&h),
+                    None => {
+                        self.malformed("a statement without a head", span);
+                        return None;
+                    }
+                };
+                let extra = expr_children(node).next().map(|e| self.expr(&e));
+                let (to, weight) = match verb {
+                    Verb::Send | Verb::Seal => (extra, None),
+                    _ => (None, extra),
+                };
+                let resolve = child_of(node, POLICY).map(|p| self.policy(&p));
+                Some(Stmt::Verb(Box::new(VerbStmt {
+                    attrs: self.attrs(node),
+                    verb,
+                    head,
+                    to,
+                    weight,
+                    resolve,
+                    span,
+                })))
+            }
+            IFSTMT => {
+                let cond = match child_of(node, BODY) {
+                    Some(b) => self.body(&b),
+                    None => {
+                        self.malformed("an `if` without a condition", span);
+                        return None;
+                    }
+                };
+                let blocks: Vec<SyntaxNode> = children_of(node, BLOCK).collect();
+                let Some(then) = blocks.first().map(|b| self.block(b)) else {
+                    self.malformed("an `if` without a block", span);
+                    return None;
+                };
+                let els = if let Some(b) = blocks.get(1) {
+                    Some(Box::new(Else::Block(self.block(b))))
+                } else if let Some(nested) = child_of(node, IFSTMT) {
+                    self.stmt(&nested).map(|s| Box::new(Else::If(Box::new(s))))
+                } else {
+                    None
+                };
+                Some(Stmt::If { cond, then, els, span })
+            }
+            FORSTMT => {
+                let cond = match child_of(node, BODY) {
+                    Some(b) => self.body(&b),
+                    None => {
+                        self.malformed("a `for` without a condition", span);
+                        return None;
+                    }
+                };
+                let block = self.need_block(node);
+                Some(Stmt::For { cond, block, span })
+            }
+            ATTR => None,
+            other => {
+                self.malformed(&format!("statement {other:?}"), span);
+                None
+            }
+        }
+    }
+
+    fn head(&mut self, node: &SyntaxNode) -> Head {
+        let rel = child_of(node, RELPATH).map(|r| self.names(&r)).unwrap_or_default();
+        let args = children_of(node, ARG).map(|a| self.arg(&a)).collect();
+        Head {
+            rel,
+            args,
+            span: self.span(node),
+        }
+    }
+
+    fn policy(&mut self, node: &SyntaxNode) -> Policy {
+        Policy {
+            name: self.need_name(node),
+            arg: expr_children(node).next().map(|e| self.expr(&e)),
+            span: self.span(node),
+        }
+    }
+
+    fn fact(&mut self, node: &SyntaxNode) -> Fact {
+        let span = self.span(node);
+        let head = match child_of(node, HEAD) {
+            Some(h) => self.head(&h),
+            None => {
+                self.malformed("a fact without a head", span);
+                Head {
+                    rel: Vec::new(),
+                    args: Vec::new(),
+                    span,
+                }
+            }
+        };
+        let mut exprs = expr_children(node);
+        let at = exprs.next().map(|e| self.expr(&e));
+        let tick = exprs.next().map(|e| self.expr(&e));
+        Fact { head, at, tick, span }
+    }
+
+    fn invariant(&mut self, node: &SyntaxNode) -> Invariant {
+        let span = self.span(node);
+        let message = tokens(node).find(|t| t.kind() == STRING_LIT).map(|t| {
+            let s = self.token_span(&t);
+            self.string(t.text(), s)
+        });
+        let body = match child_of(node, BODY) {
+            Some(b) => self.body(&b),
+            None => {
+                self.malformed("an invariant without a body", span);
+                Body {
+                    lits: Vec::new(),
+                    guards: Vec::new(),
+                    span,
+                }
+            }
+        };
+        Invariant {
+            name: self.need_name(node),
+            message,
+            body,
+            span,
+        }
+    }
+
+    fn body(&mut self, node: &SyntaxNode) -> Body {
+        let mut lits = Vec::new();
+        let mut guards = Vec::new();
+        for c in node.children() {
+            if is_literal(c.kind()) {
+                if let Some(l) = self.lit(&c) {
+                    lits.push(l);
+                }
+            } else if is_expr(c.kind()) {
+                guards.push(self.expr(&c));
+            }
+        }
+        Body {
+            lits,
+            guards,
+            span: self.span(node),
+        }
+    }
+
+    fn atom_lit_of(&mut self, node: &SyntaxNode) -> Option<AtomLit> {
+        match child_of(node, ATOMLIT) {
+            Some(a) => Some(self.atom_lit(&a)),
+            None => {
+                let span = self.span(node);
+                self.malformed("a literal without its atom", span);
+                None
+            }
+        }
+    }
+
+    fn lit(&mut self, node: &SyntaxNode) -> Option<Lit> {
+        let span = self.span(node);
+        Some(match node.kind() {
+            ATOMLIT => Lit::Plain(self.atom_lit(node)),
+            NOTLIT => {
+                if let Some(b) = child_of(node, BODY) {
+                    Lit::NotBody(self.body(&b), span)
+                } else {
+                    let inner = node.children().find(|c| is_literal(c.kind()));
+                    match inner {
+                        Some(i) => Lit::Not(Box::new(self.lit(&i)?), span),
+                        None => {
+                            self.malformed("`not` without an operand", span);
+                            return None;
+                        }
+                    }
+                }
+            }
+            LETLIT => {
+                let mut es = expr_children(node);
+                let (Some(p), Some(v)) = (es.next(), es.next()) else {
+                    self.malformed("`let` without a pattern and a value", span);
+                    return None;
+                };
+                Lit::Let {
+                    pat: self.expr(&p),
+                    value: self.expr(&v),
+                    span,
+                }
+            }
+            OUTERLIT => Lit::Outer(self.atom_lit_of(node)?),
+            INSERTEDLIT => Lit::Inserted(self.atom_lit_of(node)?),
+            DELETEDLIT => Lit::Deleted(self.atom_lit_of(node)?),
+            SEALEDLIT => Lit::Sealed(self.atom_lit_of(node)?),
+            FINALLIT => Lit::Final(self.atom_lit_of(node)?),
+            PERLIT => Lit::Per(self.atom_lit_of(node)?),
+            ANYLIT => Lit::Any(children_of(node, BODY).map(|b| self.body(&b)).collect(), span),
+            FORALLLIT => {
+                let domain = self.atom_lit_of(node)?;
+                let body = match child_of(node, BODY) {
+                    Some(b) => self.body(&b),
+                    None => {
+                        self.malformed("`forall` without a body", span);
+                        return None;
+                    }
+                };
+                Lit::Forall { domain, body, span }
+            }
+            EVERLIT => Lit::Spec(SpecLit::Ever(self.atom_lit_of(node)?)),
+            SENTLIT => Lit::Spec(SpecLit::Sent(self.atom_lit_of(node)?)),
+            QUORUMLIT => {
+                let var = self.need_name(node);
+                let role = child_of(node, RELPATH).map(|r| self.names(&r)).unwrap_or_default();
+                let body = match child_of(node, BODY) {
+                    Some(b) => self.body(&b),
+                    None => {
+                        self.malformed("`quorum` without a body", span);
+                        return None;
+                    }
+                };
+                Lit::Spec(SpecLit::Quorum { var, role, body, span })
+            }
+            other => {
+                self.malformed(&format!("literal {other:?}"), span);
+                return None;
+            }
+        })
+    }
+
+    fn atom_lit(&mut self, node: &SyntaxNode) -> AtomLit {
+        let span = self.span(node);
+        let expr = match expr_children(node).next() {
+            Some(e) => self.expr(&e),
+            None => {
+                self.malformed("a literal without an expression", span);
+                Expr {
+                    kind: ExprKind::Wildcard,
+                    span,
+                }
+            }
+        };
+        let mut lit = AtomLit {
+            expr,
+            from: None,
+            principal: None,
+            weight: None,
+            at: None,
+            at_tick: None,
+            span,
+        };
+        for s in node.children() {
+            let value = expr_children(&s).next().map(|e| self.expr(&e));
+            match s.kind() {
+                FROMSUFFIX => lit.from = value,
+                PRINCIPALSUFFIX => lit.principal = value,
+                WEIGHTSUFFIX => lit.weight = value,
+                ATSUFFIX => lit.at = value,
+                ATTICKSUFFIX => lit.at_tick = value,
+                _ => {}
+            }
+        }
+        lit
+    }
+
+    fn arg(&mut self, node: &SyntaxNode) -> Arg {
+        let span = self.span(node);
+        if has_token(node, RANGE) && expr_children(node).next().is_none() {
+            return Arg::Rest(span);
+        }
+        if has_token(node, STAR) && expr_children(node).next().is_none() {
+            return Arg::Star(span);
+        }
+        let name = self.first_name(node);
+        let value = expr_children(node).next().map(|e| self.expr(&e));
+        match (name, value) {
+            (Some(n), Some(v)) => Arg::Named(n, v),
+            (None, Some(v)) => Arg::Pos(v),
+            (Some(n), None) => Arg::Pos(Expr {
+                kind: ExprKind::Path(vec![n], Vec::new()),
+                span: n.span,
+            }),
+            (None, None) => {
+                self.malformed("an empty argument", span);
+                Arg::Rest(span)
+            }
+        }
+    }
+
+    fn args(&mut self, node: &SyntaxNode) -> Vec<Arg> {
+        children_of(node, ARG).map(|a| self.arg(&a)).collect()
+    }
+
+    fn need_expr(&mut self, node: &SyntaxNode) -> Expr {
+        match expr_children(node).next() {
+            Some(e) => self.expr(&e),
+            None => {
+                let span = self.span(node);
+                self.malformed("a missing expression", span);
+                Expr {
+                    kind: ExprKind::Wildcard,
+                    span,
+                }
+            }
+        }
+    }
+
+    fn expr(&mut self, node: &SyntaxNode) -> Expr {
+        let span = self.span(node);
+        let kind = self.expr_kind(node, span);
+        Expr { kind, span }
+    }
+
+    fn boxed(&mut self, node: Option<SyntaxNode>, span: Span) -> Box<Expr> {
+        Box::new(match node {
+            Some(n) => self.expr(&n),
+            None => {
+                self.malformed("a missing operand", span);
+                Expr {
+                    kind: ExprKind::Wildcard,
+                    span,
+                }
+            }
+        })
+    }
+
+    fn expr_kind(&mut self, node: &SyntaxNode, span: Span) -> ExprKind {
+        match node.kind() {
+            LITERALEXPR => match self.literal(node, span) {
+                Some(v) => ExprKind::Lit(v),
+                None => ExprKind::Wildcard,
+            },
+            PATHEXPR => {
+                let names = self.names(node);
+                let args = child_of(node, GENERICARGS)
+                    .map(|g| self.generic_args(&g))
+                    .unwrap_or_default();
+                ExprKind::Path(names, args)
+            }
+            CALLEXPR => {
+                let callee = expr_children(node).next();
+                ExprKind::Call {
+                    callee: self.boxed(callee, span),
+                    args: self.args(node),
+                }
+            }
+            METHODCALLEXPR => {
+                let receiver = expr_children(node).next();
+                let receiver = self.boxed(receiver, span);
+                // A banged method (`d.value!()`) keeps its `!` in the name.
+                let name = match tokens(node).find(|t| t.kind() == BANG_IDENT) {
+                    Some(t) => Ident {
+                        name: Symbol::intern(t.text()),
+                        span: self.token_span(&t),
+                    },
+                    None => self.need_name(node),
+                };
+                ExprKind::Method {
+                    receiver,
+                    name,
+                    args: self.args(node),
+                }
+            }
+            BANGCALLEXPR => {
+                let text = tokens(node)
+                    .find(|t| t.kind() == BANG_IDENT)
+                    .map(|t| (t.text().trim_end_matches('!').to_owned(), self.token_span(&t)));
+                let (text, nspan) = text.unwrap_or_else(|| (String::new(), span));
+                let name = Ident {
+                    name: Symbol::intern(&text),
+                    span: nspan,
+                };
+                let clauses = children_of(node, BANGCLAUSE).map(|c| self.bang_clause(&c)).collect();
+                ExprKind::Bang {
+                    name,
+                    args: self.args(node),
+                    clauses,
+                }
+            }
+            FIELDEXPR => {
+                let base = expr_children(node).next();
+                let base = self.boxed(base, span);
+                ExprKind::Field {
+                    base,
+                    name: self.need_name(node),
+                }
+            }
+            TUPLEINDEXEXPR => {
+                let base = expr_children(node).next();
+                let base = self.boxed(base, span);
+                let index = tokens(node)
+                    .find(|t| t.kind() == INT_LIT)
+                    .and_then(|t| t.text().parse::<u32>().ok());
+                match index {
+                    Some(index) => ExprKind::TupleIndex { base, index },
+                    None => {
+                        self.malformed("a tuple index that is not a number", span);
+                        ExprKind::Wildcard
+                    }
+                }
+            }
+            INDEXEXPR => {
+                let mut es = expr_children(node);
+                let (b, i) = (es.next(), es.next());
+                ExprKind::Index {
+                    base: self.boxed(b, span),
+                    index: self.boxed(i, span),
+                }
+            }
+            BINARYEXPR => {
+                let op = tokens(node).find_map(|t| bin_op(t.kind()));
+                let mut es = expr_children(node);
+                let (l, r) = (es.next(), es.next());
+                let lhs = self.boxed(l, span);
+                let rhs = self.boxed(r, span);
+                match op {
+                    Some(op) => ExprKind::Binary { op, lhs, rhs },
+                    None => {
+                        self.malformed("a binary expression without a known operator", span);
+                        ExprKind::Wildcard
+                    }
+                }
+            }
+            PREFIXEXPR => {
+                let op = tokens(node).find_map(|t| match t.kind() {
+                    NOT_KW => Some(PrefixOp::Not),
+                    MINUS => Some(PrefixOp::Neg),
+                    TILDE => Some(PrefixOp::BitNot),
+                    _ => None,
+                });
+                let arg = expr_children(node).next();
+                let arg = self.boxed(arg, span);
+                match op {
+                    Some(op) => ExprKind::Prefix { op, arg },
+                    None => {
+                        self.malformed("a prefix expression without a known operator", span);
+                        ExprKind::Wildcard
+                    }
+                }
+            }
+            CASTEXPR => {
+                let e = expr_children(node).next();
+                let expr = self.boxed(e, span);
+                ExprKind::Cast {
+                    expr,
+                    ty: self.need_type(node),
+                }
+            }
+            PARENEXPR => match expr_children(node).next() {
+                Some(e) => self.expr(&e).kind,
+                None => ExprKind::Tuple(Vec::new()),
+            },
+            TUPLEEXPR => ExprKind::Tuple(expr_children(node).map(|e| self.expr(&e)).collect()),
+            VECEXPR => ExprKind::Vec(expr_children(node).map(|e| self.expr(&e)).collect()),
+            SETEXPR => ExprKind::Set(expr_children(node).map(|e| self.expr(&e)).collect()),
+            MAPEXPR => {
+                let es: Vec<Expr> = expr_children(node).map(|e| self.expr(&e)).collect();
+                if !es.len().is_multiple_of(2) {
+                    self.malformed("a map literal with an odd number of expressions", span);
+                    return ExprKind::Wildcard;
+                }
+                let mut pairs = Vec::new();
+                let mut it = es.into_iter();
+                while let (Some(k), Some(v)) = (it.next(), it.next()) {
+                    pairs.push((k, v));
+                }
+                ExprKind::Map(pairs)
+            }
+            IFEXPR => {
+                let cond = expr_children(node).next();
+                let cond = self.boxed(cond, span);
+                let blocks: Vec<SyntaxNode> = children_of(node, BLOCKEXPR).collect();
+                let then = match blocks.first() {
+                    Some(b) => self.block_expr(b),
+                    None => {
+                        self.malformed("an `if` expression without a block", span);
+                        return ExprKind::Wildcard;
+                    }
+                };
+                let els = blocks.get(1).map(|b| self.block_expr(b));
+                ExprKind::If {
+                    cond,
+                    then: Box::new(then),
+                    els: els.map(Box::new),
+                }
+            }
+            MATCHEXPR => {
+                let scrut = expr_children(node).next();
+                let scrut = self.boxed(scrut, span);
+                let mut arms = Vec::new();
+                for a in children_of(node, MATCHARM) {
+                    let aspan = self.span(&a);
+                    let es: Vec<Expr> = expr_children(&a).map(|e| self.expr(&e)).collect();
+                    let mut it = es.into_iter();
+                    match (it.next(), it.next(), it.next()) {
+                        (Some(pat), Some(body), None) => arms.push(MatchArm { pat, guard: None, body }),
+                        (Some(pat), Some(guard), Some(body)) => arms.push(MatchArm {
+                            pat,
+                            guard: Some(guard),
+                            body,
+                        }),
+                        _ => self.malformed("a match arm without a pattern and a body", aspan),
+                    }
+                }
+                ExprKind::Match { scrut, arms }
+            }
+            STRUCTLITEXPR => {
+                let path = match child_of(node, PATHEXPR) {
+                    Some(p) => self.names(&p),
+                    None => self.names(node),
+                };
+                let mut fields = Vec::new();
+                for f in children_of(node, FIELDINIT) {
+                    let fspan = self.span(&f);
+                    if has_token(&f, RANGE) {
+                        self.unsupported("LANG-023", "struct update syntax `..base`", fspan);
+                        continue;
+                    }
+                    let name = self.first_name(&f);
+                    let value = expr_children(&f).next().map(|e| self.expr(&e));
+                    match name {
+                        Some(n) => fields.push((n, value)),
+                        None => self.malformed("a struct field without a name", fspan),
+                    }
+                }
+                ExprKind::StructLit { path, fields }
+            }
+            WILDCARD => ExprKind::Wildcard,
+            SELFEXPR => ExprKind::SelfNode,
+            FOLDEXPR => {
+                self.unsupported("LANG-123", "lattice folds in expressions", span);
+                ExprKind::Wildcard
+            }
+            CLOSUREEXPR => {
+                self.unsupported("LANG-002", "closures (allowed only in fn bodies)", span);
+                ExprKind::Wildcard
+            }
+            other => {
+                self.malformed(&format!("expression {other:?}"), span);
+                ExprKind::Wildcard
+            }
+        }
+    }
+
+    fn block_expr(&mut self, node: &SyntaxNode) -> Expr {
+        let span = self.span(node);
+        if child_of(node, LETLIT).is_some() {
+            self.unsupported("LANG-180", "`let` inside block expressions", span);
+        }
+        match expr_children(node).last() {
+            Some(e) => self.expr(&e),
+            None => Expr {
+                kind: ExprKind::Tuple(Vec::new()),
+                span,
+            },
+        }
+    }
+
+    fn bang_clause(&mut self, node: &SyntaxNode) -> BangClause {
+        let span = self.span(node);
+        let keyword = tokens(node)
+            .find(|t| t.kind() == IDENT)
+            .map(|t| Ident {
+                name: Symbol::intern(t.text()),
+                span: self.token_span(&t),
+            })
+            .unwrap_or(Ident {
+                name: Symbol::intern(""),
+                span,
+            });
+        let exprs = expr_children(node).map(|e| self.expr(&e)).collect();
+        let mut order = Vec::new();
+        if let Some(keys) = child_of(node, ORDERKEYS) {
+            for k in children_of(&keys, ORDERKEY) {
+                let desc = has_word(&k, "desc");
+                let kspan = self.span(&k);
+                match expr_children(&k).next() {
+                    Some(e) => order.push((self.expr(&e), desc)),
+                    None => self.malformed("an order key without an expression", kspan),
+                }
+            }
+        }
+        BangClause {
+            keyword,
+            exprs,
+            order,
+            span,
+        }
+    }
+
+    fn literal(&mut self, node: &SyntaxNode, span: Span) -> Option<LitValue> {
+        let t = tokens(node).next()?;
+        let text = t.text();
+        match t.kind() {
+            INT_LIT => match parse_int(text) {
+                Ok((value, suffix)) => Some(LitValue::Int {
+                    value,
+                    suffix: suffix.map(Symbol::intern),
+                }),
+                Err(e) => {
+                    self.malformed(&e, span);
+                    None
+                }
+            },
+            FLOAT_LIT => {
+                let digits: String = text.trim_end_matches("f64").chars().filter(|c| *c != '_').collect();
+                match digits.parse::<f64>() {
+                    Ok(f) => Some(LitValue::Float(f)),
+                    Err(_) => {
+                        self.malformed("a malformed float literal", span);
+                        None
+                    }
+                }
+            }
+            DURATION_LIT => match parse_duration(text) {
+                Some(ns) => Some(LitValue::Duration(ns)),
+                None => {
+                    self.malformed("a duration literal that does not fit", span);
+                    None
+                }
+            },
+            STRING_LIT => Some(LitValue::Str(self.string(text, span))),
+            RAW_STRING_LIT => Some(LitValue::Str(raw_string(text))),
+            BYTES_LIT => {
+                if text.starts_with("br") {
+                    Some(LitValue::Bytes(raw_string(text.trim_start_matches('b')).into_bytes()))
+                } else {
+                    let s = self.string(text.trim_start_matches('b'), span);
+                    Some(LitValue::Bytes(s.into_bytes()))
+                }
+            }
+            TRUE_KW => Some(LitValue::Bool(true)),
+            FALSE_KW => Some(LitValue::Bool(false)),
+            MOD_LIT => {
+                self.unsupported("LANG-026", "modular integer literals", span);
+                None
+            }
+            other => {
+                self.malformed(&format!("literal token {other:?}"), span);
+                None
+            }
+        }
+    }
+
+    /// The value of a (lexically valid) quoted string.
+    fn string(&mut self, text: &str, span: Span) -> String {
+        let inner = text.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(text);
+        let mut out = String::new();
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some('0') => out.push('\0'),
+                Some('\\') => out.push('\\'),
+                Some('"') => out.push('"'),
+                Some('\'') => out.push('\''),
+                Some('u') => {
+                    let hex: String = chars.by_ref().skip(1).take_while(|c| *c != '}').collect();
+                    match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                        Some(ch) => out.push(ch),
+                        None => self.malformed("an invalid Unicode escape", span),
+                    }
+                }
+                _ => self.malformed("an unknown string escape", span),
+            }
+        }
+        out
+    }
+}
+
+fn raw_string(text: &str) -> String {
+    let t = text.trim_start_matches('r');
+    let hashes = t.chars().take_while(|c| *c == '#').count();
+    let t = t.get(hashes..).unwrap_or("");
+    let t = t.strip_prefix('"').unwrap_or(t);
+    let end = t.len().saturating_sub(1 + hashes);
+    t.get(..end).unwrap_or("").to_owned()
+}
+
+fn bin_op(kind: SyntaxKind) -> Option<BinOp> {
+    Some(match kind {
+        PLUS => BinOp::Add,
+        MINUS => BinOp::Sub,
+        STAR => BinOp::Mul,
+        SLASH => BinOp::Div,
+        PERCENT => BinOp::Rem,
+        CONCAT => BinOp::Concat,
+        EQ2 => BinOp::Eq,
+        NEQ => BinOp::Ne,
+        LT => BinOp::Lt,
+        LE => BinOp::Le,
+        GT => BinOp::Gt,
+        GE => BinOp::Ge,
+        AND2 => BinOp::And,
+        OR2 => BinOp::Or,
+        AMP => BinOp::BitAnd,
+        PIPE => BinOp::BitOr,
+        CARET => BinOp::BitXor,
+        SHL => BinOp::Shl,
+        SHR => BinOp::Shr,
+        IN_KW => BinOp::In,
+        RANGE => BinOp::Range,
+        RANGE_EQ => BinOp::RangeEq,
+        OPEN_RANGE => BinOp::OpenRange,
+        OPEN_RANGE_EQ => BinOp::OpenRangeEq,
+        _ => return None,
+    })
+}
+
+const INT_SUFFIXES: [&str; 10] = ["u128", "u16", "u32", "u64", "u8", "i128", "i16", "i32", "i64", "i8"];
+
+/// An integer literal's value and suffix.
+fn parse_int(text: &str) -> Result<(u128, Option<&'static str>), String> {
+    let mut body = text;
+    let mut suffix = None;
+    for s in INT_SUFFIXES {
+        if let Some(b) = text.strip_suffix(s)
+            && !b.is_empty()
+        {
+            body = b;
+            suffix = Some(s);
+            break;
+        }
+    }
+    let digits: String = body.chars().filter(|c| *c != '_').collect();
+    let parsed = if let Some(h) = digits.strip_prefix("0x") {
+        u128::from_str_radix(h, 16)
+    } else if let Some(b) = digits.strip_prefix("0b") {
+        u128::from_str_radix(b, 2)
+    } else {
+        digits.parse::<u128>()
+    };
+    parsed
+        .map(|v| (v, suffix))
+        .map_err(|_| format!("an integer literal `{text}` that does not fit in 128 bits"))
+}
+
+/// A duration literal in nanoseconds.
+fn parse_duration(text: &str) -> Option<u128> {
+    let split = text.find(|c: char| c.is_ascii_alphabetic())?;
+    let (num, unit) = text.split_at(split);
+    let n: u128 = num.chars().filter(|c| *c != '_').collect::<String>().parse().ok()?;
+    let scale: u128 = match unit {
+        "ns" => 1,
+        "us" => 1_000,
+        "ms" => 1_000_000,
+        "s" => 1_000_000_000,
+        "m" => 60_000_000_000,
+        "h" => 3_600_000_000_000,
+        "d" => 86_400_000_000_000,
+        _ => return None,
+    };
+    n.checked_mul(scale)
+}
+
+impl Cx<'_> {
+    fn spec(&mut self, node: &SyntaxNode) -> SpecItem {
+        let span = self.span(node);
+        let names: Vec<Ident> = self.names(node);
+        let has_for = has_token(node, FOR_KW);
+        let name = names.first().copied();
+        let target = if has_for { names.get(1).map(|n| vec![*n]) } else { None };
+        let mut members = Vec::new();
+        for c in node.children() {
+            let cspan = self.span(&c);
+            let m = match c.kind() {
+                NAME => continue,
+                NODESMEMBER => SpecMember::Nodes(self.names(&c)),
+                ASSIGNMEMBER => {
+                    let names = self.names(&c);
+                    let Some((role, nodes)) = names.split_first() else {
+                        self.malformed("an `assign` without a role", cspan);
+                        continue;
+                    };
+                    SpecMember::Assign {
+                        role: *role,
+                        nodes: nodes.to_vec(),
+                        span: cspan,
+                    }
+                }
+                FAULTSMEMBER => SpecMember::Faults(self.opt_block(&c), cspan),
+                INCLUDEITEM => SpecMember::Include(self.names(&c), cspan),
+                CHECKMEMBER => {
+                    let names = self.names(&c);
+                    let Some(kind) = names.first().copied() else {
+                        self.malformed("a `check` without a kind", cspan);
+                        continue;
+                    };
+                    let expect = if has_word(&c, "expect") {
+                        names.last().copied().filter(|_| names.len() > 1)
+                    } else {
+                        None
+                    };
+                    SpecMember::Check {
+                        kind,
+                        options: self.opt_block(&c),
+                        expect,
+                        span: cspan,
+                    }
+                }
+                FACTITEM => SpecMember::Fact(self.fact(&c)),
+                VIEWDECL => SpecMember::View(self.view(&c)),
+                INVARIANTITEM => SpecMember::Invariant(self.invariant(&c)),
+                CONSTITEM => SpecMember::Const {
+                    name: self.need_name(&c),
+                    ty: self.need_type(&c),
+                    value: self.need_expr(&c),
+                },
+                LIVENESSMEMBER => {
+                    self.unsupported("TEST-021", "liveness properties", cspan);
+                    SpecMember::Unsupported {
+                        what: "liveness",
+                        span: cspan,
+                    }
+                }
+                PROVEMEMBER => {
+                    self.unsupported("VER-003", "`prove … by induction`", cspan);
+                    SpecMember::Unsupported {
+                        what: "prove",
+                        span: cspan,
+                    }
+                }
+                EXPECTMEMBER => {
+                    self.unsupported("TEST-020", "`expect` members", cspan);
+                    SpecMember::Unsupported {
+                        what: "expect",
+                        span: cspan,
+                    }
+                }
+                other => {
+                    self.malformed(&format!("spec member {other:?}"), cspan);
+                    continue;
+                }
+            };
+            members.push(m);
+        }
+        SpecItem {
+            name,
+            target,
+            members,
+            span,
+        }
+    }
+
+    fn opt_block(&mut self, node: &SyntaxNode) -> Vec<(Ident, Expr)> {
+        let Some(b) = child_of(node, OPTBLOCK) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for f in children_of(&b, OPTFIELD) {
+            let name = self.need_name(&f);
+            let value = self.need_expr(&f);
+            out.push((name, value));
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_duration, parse_int};
+
+    #[test]
+    fn integers() {
+        assert_eq!(parse_int("42"), Ok((42, None)));
+        assert_eq!(parse_int("1_000u64"), Ok((1000, Some("u64"))));
+        assert_eq!(parse_int("0xffu8"), Ok((255, Some("u8"))));
+        assert_eq!(parse_int("0b101"), Ok((5, None)));
+    }
+
+    #[test]
+    fn durations() {
+        assert_eq!(parse_duration("1s"), Some(1_000_000_000));
+        assert_eq!(parse_duration("500ms"), Some(500_000_000));
+        assert_eq!(parse_duration("2m"), Some(120_000_000_000));
+    }
+}
