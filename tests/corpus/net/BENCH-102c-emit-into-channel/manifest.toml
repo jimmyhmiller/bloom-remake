@@ -17,9 +17,7 @@ derived = false
 expected_from = "literature"
 
 [backend.compile]
-status = "unimplemented"
-unimplemented = ["LANG-042", "LANG-066", "ANA-005"]
-until = "M5"
+status = "pass"
 
 [[expect_diag]]
 code = "BLS0400"

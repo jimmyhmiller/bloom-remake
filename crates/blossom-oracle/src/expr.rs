@@ -18,6 +18,7 @@ use crate::{Oracle, OracleError};
 pub(crate) struct Scope<'a> {
     pub program: &'a Program,
     pub node: NodeId,
+    pub incarnation: u64,
     pub tick: Tick,
     pub now: Instant,
     pub oracle: &'a Oracle,
@@ -173,6 +174,39 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
             f: FnRef::Builtin(BuiltinFn::Size { role }),
             ..
         } => Ok(Value::Int(IntValue::U64(scope.oracle.role_size(*role)))),
+        Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::RandRange),
+            args,
+        } => {
+            let (Some(lo), Some(hi)) = (args.first(), args.get(1)) else {
+                return Err(ExprError::Oracle(internal_error!("`rand_range` takes lo, hi and a key").into()));
+            };
+            let (lo, hi) = (eval(scope, env, lo)?, eval(scope, env, hi)?);
+            let mut key = Vec::new();
+            for a in args.iter().skip(2) {
+                key.push(eval(scope, env, a)?);
+            }
+            rand_range(scope, &lo, &hi, &key)
+        }
+        Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::Majority { domain }),
+            args,
+        } => {
+            let [s] = args.as_slice() else {
+                return Err(ExprError::Oracle(internal_error!("`majority` takes one set").into()));
+            };
+            let blossom_ir::core::MajorityDomain::Role(role) = domain else {
+                return Err(ExprError::Oracle(
+                    blossom_base::unimplemented_error!("LANG-113", "`majority` over a relation in the oracle").into(),
+                ));
+            };
+            let members = match eval(scope, env, s)? {
+                Value::Lattice(blossom_value::LatValue::Set(xs)) | Value::Set(xs) => scope.oracle.role_members(*role, &xs),
+                Value::Lattice(blossom_value::LatValue::Bottom) => 0,
+                other => return Err(ExprError::Oracle(internal_error!("`majority` of {other:?}").into())),
+            };
+            Ok(Value::Bool(members > scope.oracle.role_size(*role) / 2))
+        }
         Expr::Call {
             f: FnRef::Builtin(BuiltinFn::Concat),
             args,
@@ -611,3 +645,71 @@ pub(crate) fn conflict_code() -> &'static str {
 pub(crate) fn fixpoint_code() -> &'static str {
     code!("BLSR007").as_str()
 }
+
+/// `rand_range(lo, hi, k…)` (LANGUAGE §15.1): `lo + PRF_σn("rand", fp(k̄), incarnation, tick, attempt) mod span`,
+/// rejecting draws from the incomplete last span so the result is unbiased.
+fn rand_range(scope: &Scope<'_>, lo: &Value, hi: &Value, key: &[Value]) -> Result<Value, ExprError> {
+    let seed = scope.oracle.node_seed(scope.node).map_err(ExprError::Oracle)?;
+    let fp = blossom_value::fp::fingerprint_row(key)
+        .map_err(|e| ExprError::Oracle(internal_error!("fingerprinting a rand key: {e}").into()))?;
+    let draw = |span: u128| {
+        blossom_value::prf::uniform_below(&seed, "rand", &[fp], &[scope.incarnation, scope.tick.0], span)
+            .map_err(|e| ExprError::Oracle(internal_error!("rand: {e}").into()))
+    };
+    let empty = |l: &dyn std::fmt::Display, h: &dyn std::fmt::Display| {
+        ExprError::Arithmetic(format!("rand_range: the range [{l}, {h}) is empty"))
+    };
+    match (lo, hi) {
+        // `u128` bounds may exceed `i128`: they draw in `u128`.
+        (Value::Int(IntValue::U128(l)), Value::Int(IntValue::U128(h))) => {
+            if h <= l {
+                return Err(empty(l, h));
+            }
+            Ok(Value::Int(IntValue::U128(l + draw(h - l)?)))
+        }
+        (Value::Duration(_), Value::Duration(_)) | (Value::Int(_), Value::Int(_)) => {
+            let bound = |v: &Value| match v {
+                Value::Duration(d) => Some(i128::from(d.as_nanos())),
+                Value::Int(i) => i.to_i128(),
+                _ => None,
+            };
+            let (Some(l), Some(h)) = (bound(lo), bound(hi)) else {
+                return Err(ExprError::Oracle(internal_error!("`rand_range` over {lo:?} and {hi:?}").into()));
+            };
+            if h <= l {
+                return Err(empty(&l, &h));
+            }
+            // The span of an `i128` range may exceed `i128::MAX`; in two's complement it is exact as a `u128`, and
+            // so is the result.
+            let span = h.cast_unsigned().wrapping_sub(l.cast_unsigned());
+            let v = l.cast_unsigned().wrapping_add(draw(span)?).cast_signed();
+            match lo {
+                Value::Duration(_) => Ok(Value::Duration(blossom_value::time::Duration::from_nanos(
+                    i64::try_from(v).map_err(|_| ExprError::Oracle(internal_error!("duration out of range").into()))?,
+                ))),
+                Value::Int(i) => IntValue::from_i128(int_ty_of(i), v)
+                    .map(Value::Int)
+                    .ok_or_else(|| ExprError::Oracle(internal_error!("rand_range result out of range").into())),
+                _ => Err(ExprError::Oracle(internal_error!("`rand_range` over {lo:?}").into())),
+            }
+        }
+        (a, b) => Err(ExprError::Oracle(internal_error!("`rand_range` over {a:?} and {b:?}").into())),
+    }
+}
+
+fn int_ty_of(v: &IntValue) -> blossom_value::types::IntTy {
+    use blossom_value::types::IntTy as T;
+    match v {
+        IntValue::U8(_) => T::U8,
+        IntValue::U16(_) => T::U16,
+        IntValue::U32(_) => T::U32,
+        IntValue::U64(_) => T::U64,
+        IntValue::U128(_) => T::U128,
+        IntValue::I8(_) => T::I8,
+        IntValue::I16(_) => T::I16,
+        IntValue::I32(_) => T::I32,
+        IntValue::I64(_) => T::I64,
+        IntValue::I128(_) => T::I128,
+    }
+}
+

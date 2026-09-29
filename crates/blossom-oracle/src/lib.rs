@@ -110,6 +110,8 @@ pub struct Egress {
 pub struct TickInput<'a> {
     /// `$self`.
     pub node: NodeId,
+    /// The node's incarnation (its restart count; 1 on the first boot): `rand` draws differ across incarnations.
+    pub incarnation: u64,
     pub tick: Tick,
     /// `$now`: the tick's clock sample.
     pub now: Instant,
@@ -186,6 +188,10 @@ pub struct Oracle {
     cells: BTreeMap<RelId, cells::CellInfo>,
     /// The choice seed σc every node shares (SEM-084), for seeded choices and resolution policies.
     choice: Option<blossom_value::Seed>,
+    /// The root seed, and each node's seed σn derived from it and the node's name (for `rand`, LANG-175).
+    root: Option<blossom_value::Seed>,
+    node_names: Vec<Arc<str>>,
+    node_seeds: Vec<blossom_value::Seed>,
     /// Each node's role, for the `$role(R)` guards of rules placed at a role (LANGUAGE §6.10). Empty for a
     /// role-free program.
     roles: Vec<Option<RoleId>>,
@@ -223,6 +229,9 @@ impl Oracle {
             kinds,
             cells,
             choice: None,
+            root: None,
+            node_names: Vec::new(),
+            node_seeds: Vec::new(),
             program,
             strata,
             plans,
@@ -275,7 +284,52 @@ impl Oracle {
         let seeds = blossom_value::Seeds::derive(root, "")
             .map_err(|e| blossom_base::internal_error!("deriving the choice seed: {e}"))?;
         self.choice = Some(seeds.choice);
+        self.root = Some(root);
+        self.derive_node_seeds()?;
         Ok(self)
+    }
+
+    /// Names the deployment's nodes (`names[n]` is node `n`): each node's seed σn is derived from its stable name,
+    /// so it does not depend on the numbering (ARCHITECTURE §4.7).
+    pub fn with_node_names(mut self, names: Vec<Arc<str>>) -> Result<Oracle, OracleError> {
+        self.node_names = names;
+        self.derive_node_seeds()?;
+        Ok(self)
+    }
+
+    fn derive_node_seeds(&mut self) -> Result<(), OracleError> {
+        let Some(root) = self.root else {
+            return Ok(());
+        };
+        let mut seeds = Vec::with_capacity(self.node_names.len());
+        for n in &self.node_names {
+            seeds.push(
+                blossom_value::Seeds::derive(root, n)
+                    .map_err(|e| blossom_base::internal_error!("deriving the seed of node {n}: {e}"))?
+                    .node,
+            );
+        }
+        self.node_seeds = seeds;
+        Ok(())
+    }
+
+    /// Node `n`'s seed σn.
+    pub(crate) fn node_seed(&self, n: NodeId) -> Result<blossom_value::Seed, OracleError> {
+        self.node_seeds.get(n.0 as usize).copied().ok_or_else(|| {
+            blossom_base::internal_error!(
+                "a `rand` draw on node {}, but the oracle was given no seed or no node names",
+                n.0
+            )
+            .into()
+        })
+    }
+
+    /// The number of nodes of role `r` among `nodes`.
+    pub(crate) fn role_members(&self, r: RoleId, nodes: &BTreeSet<Value>) -> u64 {
+        nodes
+            .iter()
+            .filter(|v| matches!(v, Value::Node(n) if self.roles.get(n.0 as usize).copied().flatten() == Some(r)))
+            .count() as u64
     }
 
     /// Whether `rule` runs on `node`: rules without a role guard run everywhere.

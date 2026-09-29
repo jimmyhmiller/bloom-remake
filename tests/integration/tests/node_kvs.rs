@@ -61,6 +61,8 @@ impl Kvs {
                 .unwrap()
                 .with_roles(artifact.roles.clone())
                 .with_seed(blossom_value::Seed([9; 16]))
+                .unwrap()
+                .with_node_names(artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect())
                 .unwrap(),
         );
         let schema = DurableSchema::of(artifact.program.get());
@@ -178,6 +180,26 @@ fn a_put_is_acknowledged_and_read_back() {
     assert_eq!(r[0].0, "get_resp");
     assert!(r[0].2.contains("120"), "the value b\"x\" (120) is returned: {}", r[0].2);
     assert_eq!(k.store(&d), [("a".to_string(), b"x".to_vec())]);
+}
+
+/// `recovered()` holds iff an earlier incarnation's boot became durable: a crash before the first boot tick's WAL
+/// record is synced leaves a store that boots fresh again (so `bootstrap fresh` runs), and one after it recovers.
+#[test]
+fn a_crash_before_the_first_boot_is_durable_boots_fresh_again() {
+    let k = Kvs::new();
+    let mut fs = SimFs::default();
+    let d = k.boot(&fs, 1_000);
+    assert!(!d.node.recovered());
+    d.crash_before_sync(Instant(1_000)).unwrap();
+    fs.crash(&mut |_| WriteFate::Lost).unwrap();
+    let mut d = k.boot(&fs, 2_000);
+    assert!(!d.node.recovered(), "the first boot never became durable");
+    assert_eq!(d.meta().restarts, 2);
+    let now = d.node.last_now();
+    d.run_until_quiescent(now).unwrap();
+    fs.crash(&mut |_| WriteFate::Lost).unwrap();
+    let d = k.boot(&fs, 3_000);
+    assert!(d.node.recovered(), "the second incarnation's boot was durable");
 }
 
 #[test]

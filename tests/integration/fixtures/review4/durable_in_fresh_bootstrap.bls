@@ -1,0 +1,12 @@
+//! S4 review: the same writes with the durable one in `bootstrap fresh` compile.
+program durable_in_fresh_bootstrap version 1;
+
+durable table term(t: u64) key();
+table scratchpad(t: u64) key();
+
+bootstrap fresh {
+    emit term(0);
+}
+bootstrap {
+    emit scratchpad(0);
+}

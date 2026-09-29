@@ -24,9 +24,7 @@ rel  = "edge_in"
 rows = [["a", "b", 1], ["b", "c", 2], ["c", "a", -4], ["a", "c", 5]]
 
 [backend.oracle]
-status = "unimplemented"
-unimplemented = ["LANG-121", "LANG-124", "SEM-032", "SEM-103", "ENG-047", "ENG-140"]
-until = "M6"
+status = "pass"
 
 [backend.interp]
 status = "unimplemented"

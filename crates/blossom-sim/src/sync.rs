@@ -243,6 +243,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                 let out = self
                     .eval
                     .tick(&TickInput {
+                        incarnation: 1,
                         node,
                         tick,
                         now: now_at(config.round, tick)?,

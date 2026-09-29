@@ -21,8 +21,17 @@ impl Loader for FsLoader {
 /// point of order (BLS0702) and its explicit ACLs must admit its own senders (BLS0800), all checked by
 /// `blossom-analysis`.
 pub fn compile_file(root: &str, nodes: &[NodeSpec]) -> (Result<(BlsArtifact, Diagnostics), BlsError>, SourceDb) {
+    compile_file_with(root, nodes, &std::collections::BTreeMap::new())
+}
+
+/// [`compile_file`] with the deployment's values of deploy-time parameters (LANG-010).
+pub fn compile_file_with(
+    root: &str,
+    nodes: &[NodeSpec],
+    params: &std::collections::BTreeMap<String, api::ParamBinding>,
+) -> (Result<(BlsArtifact, Diagnostics), BlsError>, SourceDb) {
     let mut sources = SourceDb::new();
-    let result = api::compile(root, nodes, &mut FsLoader, &mut sources).and_then(|(artifact, mut diags)| {
+    let result = api::compile_with(root, nodes, params, &mut FsLoader, &mut sources).and_then(|(artifact, mut diags)| {
         let found = analyses(artifact.program.get())?;
         let rejected = found.has_errors();
         for d in found.iter() {
@@ -68,10 +77,13 @@ pub fn compile_spec_file(
     (result, sources)
 }
 
-/// The analyses every compiled program passes: stratification (BLS0502), `monotone` assertions (BLS0702) and ACL
-/// consistency (BLS0800).
+/// The analyses every compiled program passes: stratification (BLS0502), the determinism lints (BLS0601), `monotone`
+/// assertions (BLS0702) and ACL consistency (BLS0800).
 fn analyses(p: &blossom_ir::core::Program) -> Result<Diagnostics, blossom_base::InternalError> {
     let mut out = blossom_analysis::strata::check(p)?;
+    for d in blossom_analysis::determinism::check(p).iter() {
+        out.push(d.clone());
+    }
     for d in blossom_analysis::monotone::check(p).iter() {
         out.push(d.clone());
     }

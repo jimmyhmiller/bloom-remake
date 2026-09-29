@@ -51,6 +51,7 @@ impl<'a> SpecSim<'a> {
             .map_err(SimError::Load)?
             .with_roles(artifact.roles.clone())
             .with_seed(artifact.seed)
+            .and_then(|o| o.with_node_names(artifact.nodes.iter().map(|n| std::sync::Arc::from(n.as_str())).collect()))
             .map_err(SimError::Load)?;
         let runtime = match artifact.profile {
             Profile::Molly => Runtime::default(),
@@ -226,6 +227,7 @@ impl<'a> SpecSim<'a> {
         }
         let out = oracle
             .tick(&TickInput {
+                incarnation: 1,
                 node: NodeId(0),
                 tick: eot,
                 now: now_at(self.artifact.profile.round(), eot)?,
@@ -262,6 +264,7 @@ impl<'a> SpecSim<'a> {
         let ingress = self.ingress(node, tick);
         self.protocol
             .tick(&TickInput {
+                incarnation: 1,
                 node,
                 tick,
                 now: now_at(self.artifact.profile.round(), tick)?,

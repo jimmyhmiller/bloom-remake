@@ -7,6 +7,12 @@
 //! record is synced before its sends leave), recovery from the store after a crash (unsynced writes lost or torn),
 //! incarnation-unique session ids, and replies to closed sessions dropped. Everything is a function of the seed, so a
 //! failing run replays exactly.
+//!
+//! The nemesis crashes nodes (restarting them at once or after a downtime; some crashes land between a tick's WAL
+//! append and its sync, so the unsynced record is lost or torn), partitions the network (one node isolated, an
+//! arbitrary split, or links cut one way only), and heals it; faults overlap. [`Observer`]s check invariants over
+//! every node's state after every step, and a directed test can script the faults itself ([`Cluster::step_until`],
+//! [`Cluster::partition`], [`Cluster::crash`] and the rest) instead of running the nemesis.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -19,7 +25,7 @@ use blossom_node::durable::DurableSchema;
 use blossom_node::manual::ManualDriver;
 use blossom_node::recovery::{self, StoreSpec};
 use blossom_node::{Node, NodeConfig, ReleasedTick};
-use blossom_oracle::{Delivery, Ingress, Oracle, Row};
+use blossom_oracle::{Delivery, Ingress, Instance, Oracle, Row};
 use blossom_store::{OpenMode, SimFs, StoreIdentity, Vfs, WriteFate};
 use blossom_value::Value;
 use blossom_value::time::{Instant, NodeId};
@@ -44,6 +50,21 @@ pub enum Reply {
     Redirect(Option<NodeId>),
 }
 
+/// An invariant over the cluster's state, checked after every step: `nodes[n]` is node `n`'s carried state (`None`
+/// while it is down). An error is a violation: the run stops there and reports it.
+pub trait Observer {
+    fn observe(&mut self, now: i64, nodes: &[Option<&Instance>]) -> Result<(), String>;
+}
+
+/// How a crash treats the node's unsynced writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CrashWrites {
+    /// Each is lost, survives or is torn, at random.
+    Random,
+    /// Every one is lost (power loss).
+    Lost,
+}
+
 /// The simulation's knobs.
 #[derive(Clone, Debug)]
 pub struct ClusterConfig {
@@ -65,6 +86,8 @@ pub struct ClusterConfig {
     /// Whether the nemesis may crash and restart nodes, and partition the network.
     pub crashes: bool,
     pub partitions: bool,
+    /// A crashed node stays down for up to this long, in nanoseconds (0: it restarts at once).
+    pub downtime: i64,
     /// How long the run lasts, in virtual nanoseconds.
     pub duration: i64,
     /// The principal clients claim.
@@ -85,6 +108,7 @@ impl Default for ClusterConfig {
             nemesis: 0,
             crashes: false,
             partitions: false,
+            downtime: 0,
             duration: 5_000_000_000,
             principal: "spiffe://sim/client".into(),
         }
@@ -102,6 +126,8 @@ pub struct ClusterRun {
     pub ticks: u64,
     /// The nemesis's actions, for a failure report.
     pub log: Vec<String>,
+    /// The first invariant an observer found violated (the run stopped there).
+    pub violation: Option<String>,
 }
 
 /// SplitMix64: the simulation's only randomness.
@@ -177,6 +203,8 @@ struct SimNode<'p> {
     next_session: u64,
     /// Open sessions: which client each is.
     sessions: BTreeMap<SessionId, usize>,
+    /// While the node is down: when it restarts (`i64::MAX`: when a script restarts it).
+    down_until: Option<i64>,
 }
 
 /// A simulated cluster of one program's nodes.
@@ -197,6 +225,10 @@ pub struct Cluster<'p> {
     cfg: ClusterConfig,
     run: ClusterRun,
     protocol: Box<dyn ClientProtocol + 'p>,
+    observers: Vec<Box<dyn Observer + 'p>>,
+    /// Whether clients hold off starting new operations (operations in flight continue).
+    clients_paused: bool,
+    nemesis_at: i64,
 }
 
 const EPOCH: i64 = 1_000_000_000_000_000_000;
@@ -235,6 +267,7 @@ impl<'p> Cluster<'p> {
                 .map_err(SimError::Load)?
                 .with_roles(artifact.roles.clone())
                 .with_seed(program_seed)
+                .and_then(|o| o.with_node_names(artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect()))
                 .map_err(SimError::Load)?,
         );
         let names: Arc<[Arc<str>]> = artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect();
@@ -254,8 +287,14 @@ impl<'p> Cluster<'p> {
             rng: Rng(cfg.seed),
             run: ClusterRun::default(),
             protocol,
+            observers: Vec::new(),
+            clients_paused: false,
+            nemesis_at: i64::MAX,
             cfg,
         };
+        if c.cfg.nemesis > 0 {
+            c.nemesis_at = c.now + c.rng.range(c.cfg.nemesis / 2, c.cfg.nemesis);
+        }
         for i in 0..artifact.nodes.len() {
             c.nodes.push(SimNode {
                 fs: SimFs::default(),
@@ -264,6 +303,7 @@ impl<'p> Cluster<'p> {
                 offset: 0,
                 next_session: 0,
                 sessions: BTreeMap::new(),
+                down_until: None,
             });
             c.boot(node_id(i)?, true)?;
         }
@@ -311,6 +351,7 @@ impl<'p> Cluster<'p> {
         slot.offset = opened.boot.now.0.saturating_sub(now).max(0);
         slot.next_session = 0;
         slot.sessions.clear();
+        slot.down_until = None;
         let mut cfg = NodeConfig::new(n, artifact.roles.get(n.0 as usize).copied().flatten());
         cfg.halt = artifact.halt;
         cfg.statics = statics;
@@ -326,31 +367,144 @@ impl<'p> Cluster<'p> {
         self.net.insert((self.now + delay.max(1), self.seq), e);
     }
 
-    /// Runs the workload to the end of the configured duration and returns the run.
+    /// Adds an invariant checked after every step.
+    pub fn observe(&mut self, o: Box<dyn Observer + 'p>) {
+        self.observers.push(o);
+    }
+
+    /// Runs the workload, with the nemesis if configured, to the end of the configured duration.
     pub fn run(mut self) -> Result<ClusterRun, SimError> {
         let end = EPOCH + self.cfg.duration;
-        let mut nemesis_at = if self.cfg.nemesis > 0 {
-            self.now + self.rng.range(self.cfg.nemesis / 2, self.cfg.nemesis)
-        } else {
-            i64::MAX
-        };
-        while self.now < end {
-            // Run every node that is ready now.
+        self.advance(end, true)?;
+        Ok(self.finish())
+    }
+
+    /// The run so far; operations still in flight never got an answer.
+    pub fn finish(mut self) -> ClusterRun {
+        for c in &mut self.clients {
+            if let Some(p) = c.pending.take() {
+                self.run.history.push(Operation {
+                    call: u64::try_from(p.call - EPOCH).unwrap_or(0),
+                    ret: None,
+                    input: p.op,
+                    output: None,
+                });
+            }
+        }
+        self.run
+    }
+
+    /// Runs the cluster without the nemesis until virtual time `at` (nanoseconds since the start), or until an
+    /// invariant is violated ([`Cluster::violation`]).
+    pub fn step_until(&mut self, at: i64) -> Result<(), SimError> {
+        self.advance(EPOCH.saturating_add(at), false)
+    }
+
+    /// Virtual time, in nanoseconds since the start.
+    pub fn now(&self) -> i64 {
+        self.now - EPOCH
+    }
+
+    pub fn violation(&self) -> Option<&str> {
+        self.run.violation.as_deref()
+    }
+
+    /// Node `n`'s carried state, or `None` while it is down.
+    pub fn state(&self, n: NodeId) -> Option<&Instance> {
+        self.nodes
+            .get(n.0 as usize)
+            .and_then(|s| s.driver.as_ref())
+            .map(|d| d.node.carried())
+    }
+
+    /// Partitions the network into `groups`: messages cross no group boundary (a node in no group is isolated).
+    /// Replaces any earlier partition.
+    pub fn partition(&mut self, groups: &[&[NodeId]]) -> Result<(), SimError> {
+        let group_of = |n: NodeId| groups.iter().position(|g| g.contains(&n));
+        self.blocked.clear();
+        for a in 0..self.nodes.len() {
+            for b in 0..self.nodes.len() {
+                let (a, b) = (node_id(a)?, node_id(b)?);
+                if a != b && (group_of(a).is_none() || group_of(a) != group_of(b)) {
+                    self.blocked.insert((a, b));
+                }
+            }
+        }
+        self.note(format!("partition {groups:?}"));
+        Ok(())
+    }
+
+    /// Cuts the link from `from` to `to` (one way).
+    pub fn cut(&mut self, from: NodeId, to: NodeId) {
+        self.blocked.insert((from, to));
+        self.note(format!("cut {} -> {}", from.0, to.0));
+    }
+
+    pub fn heal(&mut self) {
+        self.blocked.clear();
+        self.note("heal".into());
+    }
+
+    /// Crashes node `n`, applying `writes` to its unsynced writes; it stays down until [`Cluster::restart`].
+    pub fn crash(&mut self, n: NodeId, writes: CrashWrites) -> Result<(), SimError> {
+        self.crash_node(n, writes, i64::MAX, false)
+    }
+
+    /// Restarts a crashed node from its store.
+    pub fn restart(&mut self, n: NodeId) -> Result<(), SimError> {
+        if self.nodes.get(n.0 as usize).is_none_or(|s| s.driver.is_some()) {
+            return Err(internal_error!("node {} is not down", n.0).into());
+        }
+        self.note(format!("restart node {}", n.0));
+        self.boot(n, false)
+    }
+
+    /// Holds clients off new operations (`true`), or lets them go on.
+    pub fn pause_clients(&mut self, paused: bool) {
+        self.clients_paused = paused;
+    }
+
+    /// Points every client at node `n` for its next operation.
+    pub fn route_clients(&mut self, n: NodeId) {
+        for c in &mut self.clients {
+            c.target = n;
+            if c.pending.is_none() {
+                c.retry = None;
+            }
+        }
+    }
+
+    fn note(&mut self, what: String) {
+        self.run.log.push(format!("{}: {what}", self.now - EPOCH));
+    }
+
+    fn advance(&mut self, end: i64, nemesis: bool) -> Result<(), SimError> {
+        while self.now < end && self.run.violation.is_none() {
+            // Run every node that is ready now, then check the invariants.
             for i in 0..self.nodes.len() {
                 self.step_node(node_id(i)?)?;
             }
+            self.check()?;
+            if self.run.violation.is_some() {
+                break;
+            }
             // The next event.
-            let mut next = end.min(nemesis_at);
+            let mut next = if nemesis { end.min(self.nemesis_at) } else { end };
             if let Some(((t, _), _)) = self.net.first_key_value() {
                 next = next.min(*t);
             }
             for c in &self.clients {
-                next = next.min(c.wake);
+                if !(self.clients_paused && c.pending.is_none()) {
+                    next = next.min(c.wake);
+                }
                 if let Some(p) = &c.pending {
                     next = next.min(p.deadline);
                 }
             }
             for n in &self.nodes {
+                if let Some(t) = n.down_until {
+                    next = next.min(t);
+                }
                 if let Some(d) = &n.driver
                     && let Some(t) = d.node.next_deadline().map_err(|e| internal_error!("{e}"))?
                 {
@@ -366,26 +520,88 @@ impl<'p> Cluster<'p> {
                 let e = entry.remove();
                 self.deliver(e)?;
             }
-            if self.now >= nemesis_at {
+            // Restart the nodes whose downtime is over.
+            for i in 0..self.nodes.len() {
+                if self.nodes.get(i).and_then(|s| s.down_until).is_some_and(|t| t <= self.now) {
+                    let n = node_id(i)?;
+                    self.note(format!("restart node {}", n.0));
+                    self.boot(n, false)?;
+                }
+            }
+            if nemesis && self.now >= self.nemesis_at {
                 self.nemesis()?;
-                nemesis_at = self.now + self.rng.range(self.cfg.nemesis / 2, self.cfg.nemesis);
+                self.nemesis_at = self.now + self.rng.range(self.cfg.nemesis / 2, self.cfg.nemesis);
             }
             for c in 0..self.clients.len() {
                 self.client_step(c)?;
             }
         }
-        // Operations still in flight at the end never got an answer.
-        for c in &mut self.clients {
-            if let Some(p) = c.pending.take() {
-                self.run.history.push(Operation {
-                    call: u64::try_from(p.call - EPOCH).unwrap_or(0),
-                    ret: None,
-                    input: p.op,
-                    output: None,
-                });
+        Ok(())
+    }
+
+    fn check(&mut self) -> Result<(), SimError> {
+        if self.observers.is_empty() {
+            return Ok(());
+        }
+        let states: Vec<Option<&Instance>> = self
+            .nodes
+            .iter()
+            .map(|s| s.driver.as_ref().map(|d| d.node.carried()))
+            .collect();
+        let now = self.now - EPOCH;
+        let mut violation = None;
+        for o in &mut self.observers {
+            if let Err(e) = o.observe(now, &states) {
+                violation = Some(format!("{now}: {e}"));
+                break;
             }
         }
-        Ok(self.run)
+        if let Some(v) = violation {
+            self.run.log.push(format!("violation: {v}"));
+            self.run.violation = Some(v);
+        }
+        Ok(())
+    }
+
+    /// Crashes node `n`. With `mid_tick`, a ready node first runs one tick up to its WAL append, so the crash lands
+    /// between the append and the sync.
+    fn crash_node(&mut self, n: NodeId, writes: CrashWrites, down_until: i64, mid_tick: bool) -> Result<(), SimError> {
+        let seed = self.rng.next();
+        let now = self.now;
+        let slot = self
+            .nodes
+            .get_mut(n.0 as usize)
+            .ok_or_else(|| internal_error!("no node {}", n.0))?;
+        let mut interrupted = false;
+        if let Some(d) = slot.driver.take()
+            && mid_tick
+        {
+            let at = Instant(now.saturating_add(slot.offset));
+            if d.node.ready(at).map_err(|e| internal_error!("node {} failed: {e}", n.0))? {
+                d.crash_before_sync(at)
+                    .map_err(|e| SimError::Internal(internal_error!("node {} failed: {e}", n.0)))?;
+                interrupted = true;
+            }
+        }
+        let mut rng = Rng(seed);
+        slot.fs
+            .crash(&mut |_| match writes {
+                CrashWrites::Lost => WriteFate::Lost,
+                CrashWrites::Random => match rng.below(3) {
+                    0 => WriteFate::Lost,
+                    1 => WriteFate::Survive,
+                    _ => WriteFate::Torn { sectors: 1 },
+                },
+            })
+            .map_err(|e| internal_error!("crash: {e}"))?;
+        slot.down_until = Some(down_until);
+        self.run.crashes += 1;
+        self.note(format!(
+            "crash node {}{}",
+            n.0,
+            if interrupted { " between a WAL append and its sync" } else { "" }
+        ));
+        Ok(())
     }
 
     fn step_node(&mut self, n: NodeId) -> Result<(), SimError> {
@@ -601,7 +817,7 @@ impl<'p> Cluster<'p> {
             c.wake = wake;
             return Ok(());
         }
-        if now < c.wake {
+        if now < c.wake || (self.clients_paused && c.pending.is_none()) {
             return Ok(());
         }
         // A redirected operation is resent; otherwise start a new one.
@@ -665,13 +881,20 @@ impl<'p> Cluster<'p> {
 
     fn nemesis(&mut self) -> Result<(), SimError> {
         let n = self.nodes.len();
-        let mut actions: Vec<u8> = Vec::new();
+        #[derive(Clone, Copy)]
+        enum Action {
+            Crash,
+            Isolate,
+            Split,
+            OneWay,
+            Heal,
+        }
+        let mut actions: Vec<Action> = Vec::new();
         if self.cfg.crashes {
-            actions.push(0);
+            actions.push(Action::Crash);
         }
         if self.cfg.partitions {
-            actions.push(1);
-            actions.push(2);
+            actions.extend([Action::Isolate, Action::Split, Action::OneWay, Action::Heal]);
         }
         if actions.is_empty() || n == 0 {
             return Ok(());
@@ -679,49 +902,58 @@ impl<'p> Cluster<'p> {
         let pick = actions
             .get(usize::try_from(self.rng.below(actions.len() as u64)).unwrap_or(0))
             .copied()
-            .unwrap_or(0);
+            .unwrap_or(Action::Heal);
         let victim = node_id(usize::try_from(self.rng.below(n as u64)).unwrap_or(0))?;
         match pick {
-            0 => {
-                // Crash (losing or tearing unsynced writes) and restart at once: a kill -9 and a supervisor.
-                let slot = self
-                    .nodes
-                    .get_mut(victim.0 as usize)
-                    .ok_or_else(|| internal_error!("no node"))?;
-                slot.driver = None;
-                let mut rng = Rng(self.rng.next());
-                slot.fs
-                    .crash(&mut |_| match rng.below(3) {
-                        0 => WriteFate::Lost,
-                        1 => WriteFate::Survive,
-                        _ => WriteFate::Torn { sectors: 1 },
-                    })
-                    .map_err(|e| internal_error!("crash: {e}"))?;
-                self.run.crashes += 1;
-                self.run
-                    .log
-                    .push(format!("{}: crash and restart node {}", self.now - EPOCH, victim.0));
-                self.boot(victim, false)?;
+            Action::Crash => {
+                // A kill -9 (or power loss), sometimes between a tick's WAL append and its sync; the node restarts
+                // at once (a supervisor) or after a downtime. A down node is left alone.
+                if self.nodes.get(victim.0 as usize).is_some_and(|s| s.driver.is_none()) {
+                    return Ok(());
+                }
+                let mid_tick = self.rng.below(2) == 0;
+                let down = if self.cfg.downtime > 0 && self.rng.below(2) == 0 {
+                    self.now + self.rng.range(1, self.cfg.downtime)
+                } else {
+                    self.now
+                };
+                self.crash_node(victim, CrashWrites::Random, down, mid_tick)?;
+                if down <= self.now {
+                    self.note(format!("restart node {}", victim.0));
+                    self.boot(victim, false)?;
+                }
             }
-            1 => {
-                // Isolate one node from the others, both ways.
-                self.blocked.clear();
+            Action::Isolate => {
+                let others: Vec<NodeId> = (0..n).filter_map(|o| node_id(o).ok()).filter(|o| *o != victim).collect();
+                self.partition(&[&[victim], &others])?;
+                self.run.partitions += 1;
+            }
+            Action::Split => {
+                // Every node lands on one side at random (either side may hold a majority, or everyone).
+                let mut sides: [Vec<NodeId>; 2] = [Vec::new(), Vec::new()];
                 for o in 0..n {
-                    let o = node_id(o)?;
-                    if o != victim {
-                        self.blocked.insert((victim, o));
-                        self.blocked.insert((o, victim));
+                    let side = usize::from(self.rng.below(2) == 1);
+                    if let Some(g) = sides.get_mut(side) {
+                        g.push(node_id(o)?);
+                    }
+                }
+                let [a, b] = &sides;
+                self.partition(&[a, b])?;
+                self.run.partitions += 1;
+            }
+            Action::OneWay => {
+                // Cuts a few links one way, on top of what is already cut.
+                let cuts = 1 + self.rng.below(n as u64);
+                for _ in 0..cuts {
+                    let from = node_id(usize::try_from(self.rng.below(n as u64)).unwrap_or(0))?;
+                    let to = node_id(usize::try_from(self.rng.below(n as u64)).unwrap_or(0))?;
+                    if from != to {
+                        self.cut(from, to);
                     }
                 }
                 self.run.partitions += 1;
-                self.run
-                    .log
-                    .push(format!("{}: isolate node {}", self.now - EPOCH, victim.0));
             }
-            _ => {
-                self.blocked.clear();
-                self.run.log.push(format!("{}: heal", self.now - EPOCH));
-            }
+            Action::Heal => self.heal(),
         }
         Ok(())
     }

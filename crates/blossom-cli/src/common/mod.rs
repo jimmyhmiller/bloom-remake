@@ -51,7 +51,16 @@ pub mod bls {
         file: &str,
         nodes: &[blossom_front::api::NodeSpec],
     ) -> Result<blossom_artifact::bls::BlsArtifact, ExitCode> {
-        let (result, sources) = blossom_driver::bls::compile_file(file, nodes);
+        compile_with(file, nodes, &std::collections::BTreeMap::new())
+    }
+
+    /// [`compile`] with the deployment's values of deploy-time parameters.
+    pub fn compile_with(
+        file: &str,
+        nodes: &[blossom_front::api::NodeSpec],
+        params: &std::collections::BTreeMap<String, blossom_front::api::ParamBinding>,
+    ) -> Result<blossom_artifact::bls::BlsArtifact, ExitCode> {
+        let (result, sources) = blossom_driver::bls::compile_file_with(file, nodes, params);
         match result {
             Ok((a, warnings)) => {
                 for d in warnings.iter() {

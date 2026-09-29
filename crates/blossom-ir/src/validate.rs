@@ -880,6 +880,14 @@ fn pattern_type(p: &Program, r: &Rule, pat: &Pattern, ty: TypeId) -> Result<(), 
             if *t != ty {
                 return Err("variant pattern type mismatch".into());
             }
+            // `Option<T>` matches as the enum `None #0 | Some(T) #1`.
+            if let Some(TypeDef::Option(inner)) = p.types.get(ty) {
+                return match (number, fields.as_slice()) {
+                    (0, []) => Ok(()),
+                    (1, [x]) => pattern_type(p, r, x, *inner),
+                    _ => Err("an `Option` pattern is `None` or `Some(x)`".into()),
+                };
+            }
             let Some(TypeDef::Enum(e)) = p.types.get(ty) else {
                 return Err("variant pattern needs enum".into());
             };
