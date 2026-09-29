@@ -2,7 +2,6 @@
 //! client history must be linearizable: without faults, under message loss, network partitions and crash-restarts.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use blossom_artifact::bls::BlsArtifact;
 use blossom_base::RelId;
