@@ -36,7 +36,7 @@ use blossom_node::acl::{AclTable, Source};
 use blossom_node::durable::{DurableCodec, DurableSchema};
 use blossom_node::env::{Clock, Entropy};
 use blossom_node::recovery::{self, KIND_DELTA, StoreSpec};
-use blossom_node::{Node, NodeConfig, NodeState, ReleasedTick};
+use blossom_node::{Executor, Node, NodeConfig, NodeState, OracleExecutor, ReleasedTick};
 use blossom_oracle::{Delivery, Ingress, Oracle, Row};
 use blossom_store::{
     CheckpointWriter, FileCheckpoints, FileWal, MetaRecord, MetaStore, OpenMode, RealFs, StoreIdentity, StoreLock,
@@ -325,7 +325,8 @@ impl Server {
         ncfg.statics = spec.static_rows(program, &names)?;
         let inbox_cap = ncfg.max_batch.saturating_mul(4);
         let boot = opened.boot.clone();
-        let node = Node::boot(ncfg, &artifact.program, oracle.clone(), boot.clone())?;
+        let exec: Box<dyn Executor> = Box::new(OracleExecutor::new(oracle.clone()));
+        let node = Node::boot(ncfg, &artifact.program, exec, boot.clone())?;
         let restarts = opened.record.restarts;
         let last_checkpoint_lsn = opened.checkpoint.map_or(0, |c| c.lsn.0);
 
@@ -865,7 +866,7 @@ fn session(stream: TcpStream, ctx: &Accept) -> Result<(), RuntimeError> {
 }
 
 struct Engine {
-    node: Node<Arc<Oracle>>,
+    node: Node<Box<dyn Executor>>,
     artifact: Arc<BlsArtifact>,
     schema: DurableSchema,
     names: Arc<[Arc<str>]>,

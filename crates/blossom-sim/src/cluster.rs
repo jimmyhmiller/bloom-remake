@@ -18,7 +18,7 @@ use blossom_node::acl::{AclTable, Source};
 use blossom_node::durable::DurableSchema;
 use blossom_node::manual::ManualDriver;
 use blossom_node::recovery::{self, StoreSpec};
-use blossom_node::{Node, NodeConfig, ReleasedTick};
+use blossom_node::{Executor, Node, NodeConfig, OracleExecutor, ReleasedTick};
 use blossom_oracle::{Delivery, Ingress, Oracle, Row};
 use blossom_store::{OpenMode, SimFs, StoreIdentity, Vfs, WriteFate};
 use blossom_value::Value;
@@ -169,7 +169,7 @@ struct Client {
 
 struct SimNode<'p> {
     fs: SimFs,
-    driver: Option<ManualDriver<'p, Arc<Oracle>>>,
+    driver: Option<ManualDriver<'p, Box<dyn Executor>>>,
     restarts: u64,
     /// How far this incarnation's clock is ahead of virtual time: a restart boots after every instant the previous
     /// incarnation may have exposed, which can be ahead of the virtual clock (the real clock anchors the same way).
@@ -315,7 +315,8 @@ impl<'p> Cluster<'p> {
         let mut cfg = NodeConfig::new(n, artifact.roles.get(n.0 as usize).copied().flatten());
         cfg.halt = artifact.halt;
         cfg.statics = statics;
-        let node = Node::boot(cfg, &artifact.program, oracle, opened.boot.clone())
+        let exec: Box<dyn Executor> = Box::new(OracleExecutor::new(oracle));
+        let node = Node::boot(cfg, &artifact.program, exec, opened.boot.clone())
             .map_err(|e| SimError::Internal(internal_error!("node {} cannot boot: {e}", n.0)))?;
         slot.driver = Some(ManualDriver::new(node, artifact.program.get(), schema, names, opened));
         Ok(())
