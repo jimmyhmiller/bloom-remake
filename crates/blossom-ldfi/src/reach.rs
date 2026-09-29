@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use blossom_artifact::ded::{DedArtifact, DedRelIdx, DedRelKind, EdgeTime};
+use blossom_artifact::sim::{EdgeTime, LogicalIdx, LogicalKind, SimArtifact};
 
 /// For each relation `p`: the relations `q` it is reachable from, each with whether a purely deductive path exists.
 #[derive(Clone, Debug, Default)]
@@ -19,7 +19,7 @@ impl Preds {
     /// Reachability over a `.ded` program's rule graph. The crash oracle is not a source (faults cannot remove its
     /// facts, and the crash premises encode its own changes); the relations it reaches are recorded, since faults add
     /// crash facts.
-    pub fn of(artifact: &DedArtifact) -> Preds {
+    pub fn of(artifact: &SimArtifact) -> Preds {
         let mut edges: BTreeMap<u32, Vec<(u32, bool)>> = BTreeMap::new();
         for e in &artifact.edges {
             edges
@@ -30,7 +30,7 @@ impl Preds {
         let mut preds: BTreeMap<u32, BTreeMap<u32, bool>> = BTreeMap::new();
         let mut from_crash = BTreeSet::new();
         for (src, rel) in artifact.rels.iter().enumerate() {
-            if rel.kind == DedRelKind::Crash {
+            if rel.kind == LogicalKind::Crash {
                 let Ok(src) = u32::try_from(src) else { continue };
                 let mut work = vec![src];
                 while let Some(v) = work.pop() {
@@ -72,6 +72,6 @@ impl Preds {
 }
 
 /// The index of a relation as a logical relation id.
-pub fn logical(idx: DedRelIdx) -> u32 {
+pub fn logical(idx: LogicalIdx) -> u32 {
     idx.0
 }

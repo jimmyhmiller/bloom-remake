@@ -9,6 +9,7 @@
 //! (PLAN §4 D6).
 
 pub mod api;
+pub mod ast;
 pub mod bloom;
 pub mod classify;
 pub mod ded;
@@ -24,3 +25,6 @@ pub mod resolve;
 pub mod roles;
 pub mod spec;
 pub mod typeck;
+
+#[cfg(test)]
+mod tests;

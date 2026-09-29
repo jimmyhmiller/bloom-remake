@@ -10,9 +10,7 @@ expected_from = "literature"
 notes = "Compile-only: one BLS0400 per illegal statement."
 
 [backend.compile]
-status = "unimplemented"
-unimplemented = ["LANG-066", "ANA-005", "LANG-172", "LANG-063", "LANG-061", "LANG-045", "LANG-043", "LANG-060", "LANG-190"]
-until = "M5"
+status = "pass"
 
 [[expect_diag]]
 code = "BLS0400"

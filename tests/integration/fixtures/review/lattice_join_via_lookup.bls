@@ -1,0 +1,13 @@
+//! Slice 2 review: A lattice column bound to a looked-up value is a join on a lattice value: BLS0304.
+
+program f2 version 1;
+table a(k: u64, v: LMax<u64>);
+table b(k: u64, v: LMax<u64>);
+start: on boot() {
+    emit a(1, 5);
+    emit b(1, 5);
+}
+view eq(k) = b(k, _), let x = b[k], a(k, x);
+grow: while eq(k) {
+    emit a(k, 100);
+}

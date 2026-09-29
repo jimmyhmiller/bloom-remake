@@ -1,0 +1,2402 @@
+//! Rules: handlers, bootstraps, views and facts; their bodies, statements, patterns and expressions (LANGUAGE §8,
+//! §9).
+//!
+//! Bodies are unordered conjunctions, so a body is resolved in two phases. First every variable that a binding
+//! literal introduces is declared: the plain variables of positive atoms (and of `outer`, `inserted`, `deleted`,
+//! `per` atoms and `from` suffixes), the pattern variables of `let`, the variables bound by every alternative of an
+//! `any`, and then the variables of `x in e` generators that no other literal binds. Then every literal is resolved,
+//! and a name in any other position must already be a variable (BLS0500) or a constant.
+//!
+//! Scoping (ARCHITECTURE §13.4): an `if`/`for` block, `not { … }`, a `forall` and each alternative of `any` open a
+//! frame; the variables they introduce are local to it.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use blossom_base::TypeId;
+use blossom_base::{Span, Symbol, code};
+use blossom_value::{TypeDef, Value};
+
+use super::{Resolver, ScopeIdx};
+use crate::ast::{self, Arg, BinOp, ExprKind, Ident, Lit, LitValue, PrefixOp, Stmt, Verb};
+use crate::hir::*;
+
+/// The state of one rule scope being resolved.
+pub(crate) struct RuleCx {
+    pub ms: ScopeIdx,
+    pub scope: ScopeId,
+    frames: Vec<BTreeMap<Symbol, HVarId>>,
+    pub placement: Option<HRoleId>,
+    /// The interposition aliases `outside`/`inside` in effect, if any.
+    aliases: BTreeMap<Symbol, HRelId>,
+    /// Whether a choice literal may appear here: a labelled handler's header or a single-alternative view (BLS0600).
+    pub choice_allowed: bool,
+    /// The choice literals of the body being resolved.
+    pub choices: u32,
+}
+
+fn is_var_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') && name != "_"
+}
+
+impl<'t> Resolver<'t, '_> {
+    fn rule_cx(&mut self, ms: ScopeIdx, placement: Option<HRoleId>) -> RuleCx {
+        let module = self.module_path(ms);
+        self.hir.scopes.push(HScope {
+            vars: Vec::new(),
+            module,
+        });
+        RuleCx {
+            ms,
+            scope: ScopeId(u32::try_from(self.hir.scopes.len() - 1).unwrap_or(u32::MAX)),
+            frames: vec![BTreeMap::new()],
+            placement,
+            aliases: BTreeMap::new(),
+            choice_allowed: false,
+            choices: 0,
+        }
+    }
+
+    fn new_var(&mut self, cx: &mut RuleCx, name: Symbol, span: Span, generated: bool) -> HVarId {
+        let Some(scope) = self.hir.scopes.get_mut(cx.scope.index()) else {
+            self.bugs.push(blossom_base::internal_error!(
+                "rule scope {:?} does not exist",
+                cx.scope
+            ));
+            return HVarId(0);
+        };
+        let id = HVarId(u32::try_from(scope.vars.len()).unwrap_or(u32::MAX));
+        scope.vars.push(HVar { name, span, generated });
+        if !generated && let Some(f) = cx.frames.last_mut() {
+            f.insert(name, id);
+        }
+        id
+    }
+
+    fn lookup_var(cx: &RuleCx, name: Symbol) -> Option<HVarId> {
+        cx.frames.iter().rev().find_map(|f| f.get(&name).copied())
+    }
+
+    /// A relation named by an atom's callee: `r`, `a.r`, or an interposition alias.
+    fn callee_rel(&mut self, cx: &RuleCx, callee: &ast::Expr) -> Option<HRelId> {
+        match &callee.kind {
+            ExprKind::Path(path, targs) if targs.is_empty() => {
+                if let [name] = path.as_slice() {
+                    if Self::lookup_var(cx, name.name).is_some() {
+                        return None;
+                    }
+                    if let Some(r) = cx.aliases.get(&name.name) {
+                        return Some(*r);
+                    }
+                }
+                self.lookup_rel(cx.ms, path)
+            }
+            ExprKind::Field { base, name } => match &base.kind {
+                ExprKind::Path(p, targs) if targs.is_empty() && p.len() == 1 => {
+                    let inst = p.first()?;
+                    if Self::lookup_var(cx, inst.name).is_some() {
+                        return None;
+                    }
+                    self.lookup_rel(cx.ms, &[*inst, *name])
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The relation an atom literal reads, with its arguments (`None` for a bare relation name).
+    fn atom_parts<'e>(&mut self, cx: &RuleCx, e: &'e ast::Expr) -> Option<(HRelId, Option<&'e [Arg]>)> {
+        match &e.kind {
+            ExprKind::Call { callee, args } => self.callee_rel(cx, callee).map(|r| (r, Some(args.as_slice()))),
+            // `a.r(args)`, an instance interface, parses as a method call.
+            ExprKind::Method { receiver, name, args } => match &receiver.kind {
+                ExprKind::Path(p, targs) if targs.is_empty() && p.len() == 1 => {
+                    let inst = p.first()?;
+                    if Self::lookup_var(cx, inst.name).is_some() {
+                        return None;
+                    }
+                    self.lookup_rel(cx.ms, &[*inst, *name])
+                        .map(|r| (r, Some(args.as_slice())))
+                }
+                _ => None,
+            },
+            ExprKind::Path(..) | ExprKind::Field { .. } => self.callee_rel(cx, e).map(|r| (r, None)),
+            _ => None,
+        }
+    }
+
+    // ------------------------------------------------------------------ phase 1: declarations
+
+    /// Declares the variables of a pattern that are not bound yet.
+    fn declare_pattern(&mut self, cx: &mut RuleCx, e: &ast::Expr) {
+        match &e.kind {
+            ExprKind::Path(path, targs) if targs.is_empty() && path.len() == 1 => {
+                if let Some(name) = path.first()
+                    && is_var_name(name.as_str())
+                    && Self::lookup_var(cx, name.name).is_none()
+                    && !cx.aliases.contains_key(&name.name)
+                {
+                    self.new_var(cx, name.name, name.span, false);
+                }
+            }
+            ExprKind::Tuple(elems) => {
+                for el in elems {
+                    self.declare_pattern(cx, el);
+                }
+            }
+            ExprKind::Call { callee, args } if self.is_constructor(cx, callee) => {
+                for a in args {
+                    if let Arg::Pos(p) = a {
+                        self.declare_pattern(cx, p);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether a callee names a variant constructor (`Some`, `E::V`) rather than a relation.
+    fn is_constructor(&mut self, cx: &RuleCx, callee: &ast::Expr) -> bool {
+        match &callee.kind {
+            ExprKind::Path(path, _) => match path.as_slice() {
+                [n] => n.as_str() == "Some",
+                [e, _] => self.enum_named(cx.ms, *e).is_some(),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn declare_atom_args(&mut self, cx: &mut RuleCx, atom: &ast::AtomLit) {
+        // A spec atom `r(args) @ loc [at tick k]` binds its arguments and its location.
+        if self.spec.is_some()
+            && let Some(loc) = &atom.at
+        {
+            if let Some((_, Some(args))) = spec_rel_path(&atom.expr) {
+                for a in args {
+                    if let Arg::Pos(p) | Arg::Named(_, p) = a {
+                        self.declare_pattern(cx, p);
+                    }
+                }
+            }
+            self.declare_pattern(cx, loc);
+            return;
+        }
+        if let Some((_, Some(args))) = self.atom_parts(cx, &atom.expr) {
+            for a in args {
+                match a {
+                    Arg::Pos(p) | Arg::Named(_, p) => self.declare_pattern(cx, p),
+                    Arg::Rest(_) | Arg::Star(_) => {}
+                }
+            }
+        }
+        if let Some(f) = &atom.from {
+            self.declare_pattern(cx, f);
+        }
+    }
+
+    /// The names a body's binding literals bind (for `any`).
+    fn bound_names(&mut self, cx: &RuleCx, body: &ast::Body, out: &mut BTreeSet<Symbol>) {
+        fn pattern_names(e: &ast::Expr, out: &mut BTreeSet<Symbol>) {
+            match &e.kind {
+                ExprKind::Path(path, _) if path.len() == 1 => {
+                    if let Some(n) = path.first()
+                        && is_var_name(n.as_str())
+                    {
+                        out.insert(n.name);
+                    }
+                }
+                ExprKind::Tuple(es) => es.iter().for_each(|x| pattern_names(x, out)),
+                ExprKind::Call { args, .. } => {
+                    for a in args {
+                        if let Arg::Pos(p) | Arg::Named(_, p) = a {
+                            pattern_names(p, out);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for lit in &body.lits {
+            match lit {
+                Lit::Plain(a) | Lit::Outer(a) | Lit::Inserted(a) | Lit::Deleted(a) | Lit::Per(a) => {
+                    if self.atom_parts(cx, &a.expr).is_some() {
+                        pattern_names(&a.expr, out);
+                    } else if let ExprKind::Binary { op: BinOp::In, lhs, .. } = &a.expr.kind {
+                        pattern_names(lhs, out);
+                    }
+                    if let Some(f) = &a.from {
+                        pattern_names(f, out);
+                    }
+                }
+                Lit::Let { pat, .. } => pattern_names(pat, out),
+                _ => {}
+            }
+        }
+    }
+
+    /// Phase 1 for a body: declares its variables in the current frame. Returns the indexes of the `x in e`
+    /// literals that are generators.
+    fn declare_body(&mut self, cx: &mut RuleCx, body: &ast::Body) -> BTreeSet<usize> {
+        for lit in &body.lits {
+            match lit {
+                Lit::Plain(a) | Lit::Outer(a) | Lit::Inserted(a) | Lit::Deleted(a) | Lit::Per(a) => {
+                    self.declare_atom_args(cx, a);
+                }
+                Lit::Let { pat, .. } => self.declare_pattern(cx, pat),
+                Lit::Any(alts, _) => {
+                    let mut common: Option<BTreeSet<Symbol>> = None;
+                    for alt in alts {
+                        let mut names = BTreeSet::new();
+                        self.bound_names(cx, alt, &mut names);
+                        common = Some(match common {
+                            None => names,
+                            Some(c) => c.intersection(&names).copied().collect(),
+                        });
+                    }
+                    let mut common: Vec<Symbol> = common.unwrap_or_default().into_iter().collect();
+                    common.sort_by_key(|s| s.as_str());
+                    for name in common {
+                        if Self::lookup_var(cx, name).is_none() {
+                            self.new_var(cx, name, lit.span(), false);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut generators = BTreeSet::new();
+        for (i, lit) in body.lits.iter().enumerate() {
+            if let Lit::Plain(a) = lit
+                && let ExprKind::Binary { op: BinOp::In, lhs, .. } = &a.expr.kind
+                && self.atom_parts(cx, &a.expr).is_none()
+            {
+                let mut names = BTreeSet::new();
+                collect_pattern_names(lhs, &mut names);
+                let unbound = names.iter().any(|n| Self::lookup_var(cx, *n).is_none());
+                if unbound {
+                    self.declare_pattern(cx, lhs);
+                    generators.insert(i);
+                }
+            }
+        }
+        generators
+    }
+
+    // ------------------------------------------------------------------ phase 2: literals
+
+    /// Resolves a body in a new frame (for blocks, `not { … }` and alternatives).
+    fn body_in_frame(&mut self, cx: &mut RuleCx, body: &ast::Body) -> HBody {
+        cx.frames.push(BTreeMap::new());
+        let b = self.body(cx, body);
+        cx.frames.pop();
+        b
+    }
+
+    /// Resolves a body in the current frame.
+    pub(crate) fn body(&mut self, cx: &mut RuleCx, body: &ast::Body) -> HBody {
+        let generators = self.declare_body(cx, body);
+        let mut out = HBody {
+            lits: Vec::new(),
+            span: Some(body.span),
+        };
+        for (i, lit) in body.lits.iter().enumerate() {
+            if let Some(l) = self.lit(cx, lit, generators.contains(&i)) {
+                out.lits.push(l);
+            }
+        }
+        for g in &body.guards {
+            if let Some(e) = self.expr(cx, g) {
+                out.lits.push(HLit::Guard(e));
+            }
+        }
+        out
+    }
+
+    fn lit(&mut self, cx: &mut RuleCx, lit: &Lit, generator: bool) -> Option<HLit> {
+        match lit {
+            Lit::Plain(a) => self.plain(cx, a, generator),
+            Lit::Not(inner, span) => match inner.as_ref() {
+                Lit::Plain(a) => {
+                    if let Some(atom) = self.try_atom(cx, a)? {
+                        Some(HLit::Not(atom))
+                    } else {
+                        // `not` on a scalar guard is boolean negation (LANGUAGE §9.3).
+                        let e = self.expr(cx, &a.expr)?;
+                        Some(HLit::Guard(HExpr {
+                            ty: None,
+                            kind: HExprKind::Prefix {
+                                op: PrefixOp::Not,
+                                arg: Box::new(e),
+                            },
+                            span: *span,
+                        }))
+                    }
+                }
+                _ => {
+                    self.error(code!("BLS0110"), *span, "`not` applies to an atom, a guard or `{ … }`");
+                    None
+                }
+            },
+            Lit::NotBody(body, span) => {
+                let b = self.body_in_frame(cx, body);
+                Some(HLit::NotBody(b, *span))
+            }
+            Lit::Let { pat, value, span } => {
+                let expr = self.expr(cx, value)?;
+                let pat = self.pattern(cx, pat)?;
+                Some(HLit::Let { pat, expr, span: *span })
+            }
+            Lit::Outer(a) => Some(HLit::Outer(self.need_atom(cx, a)?)),
+            Lit::Inserted(a) => Some(HLit::Delta {
+                inserted: true,
+                atom: self.need_atom(cx, a)?,
+            }),
+            Lit::Deleted(a) => Some(HLit::Delta {
+                inserted: false,
+                atom: self.need_atom(cx, a)?,
+            }),
+            Lit::Per(a) => Some(HLit::Per(self.need_atom(cx, a)?)),
+            Lit::Any(alts, span) => {
+                let mut bodies = Vec::new();
+                for alt in alts {
+                    bodies.push(self.body_in_frame(cx, alt));
+                }
+                Some(HLit::Any(bodies, *span))
+            }
+            Lit::Forall { domain, body, span } => {
+                cx.frames.push(BTreeMap::new());
+                let domain_body = ast::Body {
+                    lits: vec![Lit::Plain(domain.clone())],
+                    guards: Vec::new(),
+                    span: domain.span,
+                };
+                let generators = self.declare_body(cx, &domain_body);
+                let d = self.plain(cx, domain, generators.contains(&0));
+                let b = self.body_in_frame(cx, body);
+                cx.frames.pop();
+                Some(HLit::Forall {
+                    domain: Box::new(d?),
+                    body: b,
+                    span: *span,
+                })
+            }
+            Lit::Sealed(a) => {
+                self.unsupported("LANG-207", "`sealed` tests", a.span);
+                None
+            }
+            Lit::Final(a) => {
+                self.unsupported("LANG-212", "`final` tests", a.span);
+                None
+            }
+            Lit::Spec(s) => {
+                self.error(code!("BLS0509"), s.span(), "this literal is allowed only in a spec");
+                None
+            }
+        }
+    }
+
+    /// An atom literal, or an error.
+    fn need_atom(&mut self, cx: &mut RuleCx, a: &ast::AtomLit) -> Option<HAtom> {
+        match self.try_atom(cx, a)? {
+            Some(atom) => Some(atom),
+            None => {
+                self.error(code!("BLS0202"), a.span, "expected a relation atom");
+                None
+            }
+        }
+    }
+
+    /// `Some(Some(atom))` if the literal reads a relation, `Some(None)` if it does not, `None` on an error.
+    /// The relation name an atom literal's expression names (`r` of `r(…)` or `r`), or a symbol that names none.
+    fn rel_name_of(&self, e: &ast::Expr) -> Symbol {
+        spec_rel_path(e).map_or(Symbol::intern(""), |(n, _)| n.name)
+    }
+
+    /// A spec atom `r(args) @ loc [at tick k]`: an atom of `r`'s trace relation at that time, the node first.
+    fn spec_atom(&mut self, cx: &mut RuleCx, a: &ast::AtomLit, loc: &ast::Expr) -> Option<HAtom> {
+        let Some((name, args)) = spec_rel_path(&a.expr) else {
+            self.error(
+                code!("BLS0200"),
+                a.span,
+                "`@ n` locates an atom of the target's relation",
+            );
+            return None;
+        };
+        let with_args = args.is_some();
+        let args = args.unwrap_or(&[]);
+        let time = match &a.at_tick {
+            None => None,
+            Some(k) => match self.const_value(cx.ms, k, None) {
+                Some((blossom_value::Value::Int(i), _)) => match i.to_i128().and_then(|v| u64::try_from(v).ok()) {
+                    Some(t) => Some(t),
+                    None => {
+                        self.error(code!("BLS0300"), k.span, "`at tick k` needs a non-negative tick");
+                        return None;
+                    }
+                },
+                _ => {
+                    self.error(code!("BLS0300"), k.span, "`at tick k` needs a constant tick");
+                    return None;
+                }
+            },
+        };
+        let Some(rel) = self.trace_rel(name, time) else {
+            self.error(
+                code!("BLS0200"),
+                name.span,
+                format!("`{}` is not a relation of the spec's target", name.as_str()),
+            );
+            return None;
+        };
+        let loc = self.pattern(cx, loc)?;
+        let r = self.rel_of(rel);
+        let cols: Vec<Symbol> = r.cols.iter().skip(1).map(|c| c.name).collect();
+        let mut out = vec![loc];
+        if with_args {
+            out.extend(self.args_for(cx, name.as_str(), &cols, args, a.span)?);
+        } else {
+            out.extend(cols.iter().map(|_| HPat::Wild(a.span)));
+        }
+        Some(HAtom {
+            rel,
+            args: out,
+            from: None,
+            span: a.span,
+        })
+    }
+
+    fn try_atom(&mut self, cx: &mut RuleCx, a: &ast::AtomLit) -> Option<Option<HAtom>> {
+        if self.spec.is_some()
+            && let Some(loc) = &a.at
+        {
+            return Some(Some(self.spec_atom(cx, a, loc)?));
+        }
+        let Some((rel, args)) = self.atom_parts(cx, &a.expr) else {
+            if a.from.is_some() {
+                self.error(code!("BLS0212"), a.span, "`from` applies only to channel atoms");
+            }
+            return Some(None);
+        };
+        if a.principal.is_some() {
+            self.unsupported("LANG-241", "`principal` bindings", a.span);
+            return None;
+        }
+        if a.weight.is_some() {
+            self.unsupported("LANG-138", "weight bindings", a.span);
+            return None;
+        }
+        if a.at.is_some() || a.at_tick.is_some() {
+            self.error(
+                code!("BLS0509"),
+                a.span,
+                "`@ n` and `at tick k` are allowed only in a spec",
+            );
+            return None;
+        }
+        if self
+            .spec
+            .as_ref()
+            .is_some_and(|s| s.targets.contains_key(&self.rel_name_of(&a.expr)))
+        {
+            self.error(
+                code!("BLS0509"),
+                a.span,
+                "an atom of the target's relation names its location with `@ n` (LANGUAGE §17.3)",
+            );
+            return None;
+        }
+        let args = match args {
+            Some(args) => self.atom_args(cx, rel, args, a.span)?,
+            None => (0..self.rel_of(rel).cols.len()).map(|_| HPat::Wild(a.span)).collect(),
+        };
+        let from = match &a.from {
+            None => None,
+            Some(f) => {
+                if !matches!(self.rel_of(rel).kind, HRelKind::Channel(_)) {
+                    self.error(
+                        code!("BLS0212"),
+                        f.span,
+                        "`from` applies only to channel and loopback atoms",
+                    );
+                    return None;
+                }
+                Some(self.pattern(cx, f)?)
+            }
+        };
+        self.check_readable(cx, rel, a.span);
+        Some(Some(HAtom {
+            rel,
+            args,
+            from,
+            span: a.span,
+        }))
+    }
+
+    /// An importer may read only the outputs of an instance (BLS0203); a channel is read at its destination role.
+    fn check_readable(&mut self, cx: &RuleCx, rel: HRelId, span: Span) {
+        let r = self.rel_of(rel).clone();
+        if let HRelKind::Input { root: false } = r.kind
+            && self.is_foreign_interface(cx, rel)
+        {
+            self.error(
+                code!("BLS0203"),
+                span,
+                format!("`{}` is an input of an instance: it can be written, not read", r.name),
+            );
+        }
+        if let HRelKind::Channel(ChannelInfo {
+            direction: Some((_, dst)),
+            ..
+        }) = r.kind
+            && let Some(here) = cx.placement
+            && here != dst
+        {
+            let name = r.name.clone();
+            let dst_name = self.role_of(dst).name.clone();
+            self.error(
+                code!("BLS0404"),
+                span,
+                format!("`{name}` is received at `{dst_name}`, so it can be read only there"),
+            );
+        }
+    }
+
+    /// Whether `rel` is an interface of an instance of the current scope (rather than a relation of the scope).
+    fn is_foreign_interface(&self, cx: &RuleCx, rel: HRelId) -> bool {
+        !self.scope(cx.ms).rels.values().any(|r| *r == rel) && !cx.aliases.values().any(|r| *r == rel)
+    }
+
+    /// Arguments of an atom, positional or named (LANGUAGE §9.2), one pattern per column.
+    fn atom_args(&mut self, cx: &mut RuleCx, rel: HRelId, args: &[Arg], span: Span) -> Option<Vec<HPat>> {
+        let r = self.rel_of(rel);
+        let cols: Vec<Symbol> = r.cols.iter().map(|c| c.name).collect();
+        self.args_for(cx, &r.name.to_string(), &cols, args, span)
+    }
+
+    /// Arguments over the columns `cols` of the relation `name`, positional or named, one pattern per column.
+    fn args_for(
+        &mut self,
+        cx: &mut RuleCx,
+        name: &str,
+        cols: &[Symbol],
+        args: &[Arg],
+        span: Span,
+    ) -> Option<Vec<HPat>> {
+        let named = args.iter().any(|a| matches!(a, Arg::Named(..) | Arg::Rest(_)));
+        if !named {
+            if args.len() != cols.len() {
+                self.error(
+                    code!("BLS0301"),
+                    span,
+                    format!("`{name}` has {} column(s), {} given", cols.len(), args.len()),
+                );
+                return None;
+            }
+            let mut out = Vec::new();
+            for a in args {
+                match a {
+                    Arg::Pos(e) => out.push(self.pattern(cx, e)?),
+                    Arg::Star(s) => {
+                        self.error(code!("BLS0302"), *s, "`*` is not an atom argument");
+                        return None;
+                    }
+                    Arg::Named(..) | Arg::Rest(_) => return None,
+                }
+            }
+            return Some(out);
+        }
+        let mut slots: Vec<Option<HPat>> = vec![None; cols.len()];
+        let mut rest = false;
+        for a in args {
+            let (field, value) = match a {
+                Arg::Named(f, v) => (*f, v.clone()),
+                Arg::Pos(e) => match &e.kind {
+                    ExprKind::Path(p, t) if t.is_empty() && p.len() == 1 => {
+                        let f = p.first().copied()?;
+                        (f, e.clone())
+                    }
+                    _ => {
+                        self.error(
+                            code!("BLS0302"),
+                            e.span,
+                            "in a named atom, every argument is `field: pattern` or a field name",
+                        );
+                        return None;
+                    }
+                },
+                Arg::Rest(_) => {
+                    rest = true;
+                    continue;
+                }
+                Arg::Star(s) => {
+                    self.error(code!("BLS0302"), *s, "`*` is not an atom argument");
+                    return None;
+                }
+            };
+            let Some(i) = cols.iter().position(|c| *c == field.name) else {
+                self.error(
+                    code!("BLS0302"),
+                    field.span,
+                    format!("`{name}` has no column `{}`", field.as_str()),
+                );
+                return None;
+            };
+            let p = self.pattern(cx, &value)?;
+            if slots.get_mut(i).and_then(|s| s.replace(p)).is_some() {
+                self.error(
+                    code!("BLS0302"),
+                    field.span,
+                    format!("column `{}` given twice", field.as_str()),
+                );
+                return None;
+            }
+        }
+        let mut out = Vec::new();
+        for (slot, col) in slots.into_iter().zip(cols) {
+            match slot {
+                Some(p) => out.push(p),
+                None if rest => out.push(HPat::Wild(span)),
+                None => {
+                    self.error(
+                        code!("BLS0302"),
+                        span,
+                        format!("column `{col}` of `{name}` is not given; write `..` to ignore the rest"),
+                    );
+                    return None;
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// A plain literal: an atom, a generator, a membership test, or a guard (LANGUAGE §9.1).
+    fn plain(&mut self, cx: &mut RuleCx, a: &ast::AtomLit, generator: bool) -> Option<HLit> {
+        if let Some(atom) = self.try_atom(cx, a)? {
+            return Some(HLit::Atom(atom));
+        }
+        match &a.expr.kind {
+            ExprKind::Binary {
+                op: BinOp::In,
+                lhs,
+                rhs,
+            } => self.membership(cx, lhs, rhs, generator, a.span),
+            ExprKind::Bang { name, args, clauses }
+                if matches!(name.as_str(), "choose" | "choose_least" | "choose_most") =>
+            {
+                self.choose(cx, *name, args, clauses, a.span)
+            }
+            ExprKind::Bang { name, .. } => {
+                self.unsupported(
+                    "LANG-108",
+                    &format!("`{}!` in a body (choice and order filters)", name.as_str()),
+                    a.span,
+                );
+                None
+            }
+            _ => Some(HLit::Guard(self.expr(cx, &a.expr)?)),
+        }
+    }
+
+    /// `choose!(Ȳ per X̄ [least c | most c] [sticky])`, `choose_least!(Ȳ per X̄)` (the cost is Ȳ) and
+    /// `choose_most!` (LANGUAGE §10.4).
+    fn choose(
+        &mut self,
+        cx: &mut RuleCx,
+        name: Ident,
+        args: &[Arg],
+        clauses: &[ast::BangClause],
+        span: Span,
+    ) -> Option<HLit> {
+        if !cx.choice_allowed {
+            self.error(
+                code!("BLS0600"),
+                span,
+                "a choice belongs to a labelled handler's header or a single-alternative view",
+            );
+            return None;
+        }
+        cx.choices += 1;
+        if cx.choices > 1 {
+            self.unsupported("LANG-116", "several choices in one body (a multi-FD site)", span);
+            return None;
+        }
+        let [Arg::Pos(y)] = args else {
+            self.error(
+                code!("BLS0301"),
+                span,
+                format!("`{}!` chooses one value or tuple", name.as_str()),
+            );
+            return None;
+        };
+        let parts = |e: &ast::Expr| -> Vec<ast::Expr> {
+            match &e.kind {
+                ExprKind::Tuple(es) if !es.is_empty() => es.clone(),
+                _ => vec![e.clone()],
+            }
+        };
+        let mut chosen = Vec::new();
+        for e in parts(y) {
+            chosen.push(self.expr(cx, &e)?);
+        }
+        let mut per = Vec::new();
+        let mut cost = match name.as_str() {
+            "choose_least" => Some((y.clone(), false)),
+            "choose_most" => Some((y.clone(), true)),
+            _ => None,
+        };
+        let mut sticky = false;
+        for c in clauses {
+            match c.keyword.as_str() {
+                "per" => {
+                    for e in &c.exprs {
+                        for p in parts(e) {
+                            per.push(self.expr(cx, &p)?);
+                        }
+                    }
+                }
+                "least" | "most" if name.as_str() == "choose" && cost.is_none() => {
+                    let [e] = c.exprs.as_slice() else {
+                        self.error(code!("BLS0301"), c.span, "a choice has one cost");
+                        return None;
+                    };
+                    cost = Some((e.clone(), c.keyword.as_str() == "most"));
+                }
+                "sticky" => sticky = true,
+                "durable" => {
+                    self.unsupported("LANG-115", "`sticky durable` choices", c.span);
+                    return None;
+                }
+                other => {
+                    self.error(
+                        code!("BLS0302"),
+                        c.span,
+                        format!("`{other}` is not a clause of `{}!`", name.as_str()),
+                    );
+                    return None;
+                }
+            }
+        }
+        let cost = match cost {
+            Some((e, most)) => Some((self.expr(cx, &e)?, most)),
+            None => None,
+        };
+        Some(HLit::Choose(Box::new(HChoose {
+            chosen,
+            per,
+            cost,
+            sticky,
+            span,
+        })))
+    }
+
+    /// `pat in e` (LANGUAGE §9.4).
+    fn membership(
+        &mut self,
+        cx: &mut RuleCx,
+        lhs: &ast::Expr,
+        rhs: &ast::Expr,
+        generator: bool,
+        span: Span,
+    ) -> Option<HLit> {
+        // A role.
+        if let ExprKind::Path(p, t) = &rhs.kind
+            && t.is_empty()
+            && let [name] = p.as_slice()
+            && let Some(role) = self.role_named(cx.ms, name.name)
+        {
+            let pat = self.pattern(cx, lhs)?;
+            let members = self.members_rel(role, name.span);
+            if generator {
+                return Some(HLit::RoleGen {
+                    pat,
+                    role,
+                    members,
+                    span,
+                });
+            }
+            return Some(HLit::Atom(HAtom {
+                rel: members,
+                args: vec![pat],
+                from: None,
+                span,
+            }));
+        }
+        // A unary relation (a cell is a lattice value, below).
+        if let Some((rel, None)) = self.atom_parts(cx, rhs)
+            && !self.rel_of(rel).cell
+        {
+            if self.rel_of(rel).cols.len() != 1 {
+                self.error(code!("BLS0301"), rhs.span, "`x in r` needs a relation with one column");
+                return None;
+            }
+            let pat = self.pattern(cx, lhs)?;
+            self.check_readable(cx, rel, span);
+            return Some(HLit::Atom(HAtom {
+                rel,
+                args: vec![pat],
+                from: None,
+                span,
+            }));
+        }
+        // A range.
+        if let ExprKind::Binary { op, lhs: lo, rhs: hi } = &rhs.kind
+            && let Some(kind) = range_kind(*op)
+        {
+            let lo = self.expr(cx, lo)?;
+            let hi = self.expr(cx, hi)?;
+            if generator {
+                let pat = self.pattern(cx, lhs)?;
+                return Some(HLit::RangeGen {
+                    pat,
+                    lo,
+                    hi,
+                    kind,
+                    span,
+                });
+            }
+            // A test on a bound value: lo ≤ x < hi and the other forms.
+            let x = self.expr(cx, lhs)?;
+            let (lo_op, hi_op) = match kind {
+                RangeKind::HalfOpen => (BinOp::Le, BinOp::Lt),
+                RangeKind::Closed => (BinOp::Le, BinOp::Le),
+                RangeKind::OpenOpen => (BinOp::Lt, BinOp::Lt),
+                RangeKind::OpenClosed => (BinOp::Lt, BinOp::Le),
+            };
+            let bin = |op, l: HExpr, r: HExpr| HExpr {
+                ty: None,
+                kind: HExprKind::Binary {
+                    op,
+                    lhs: Box::new(l),
+                    rhs: Box::new(r),
+                },
+                span,
+            };
+            return Some(HLit::Guard(bin(
+                BinOp::And,
+                bin(lo_op, lo, x.clone()),
+                bin(hi_op, x, hi),
+            )));
+        }
+        if generator {
+            let pat = self.pattern(cx, lhs)?;
+            let src = self.expr(cx, rhs)?;
+            return Some(HLit::Gen { pat, src, span });
+        }
+        // A membership test in a value: a set-like lattice (a threshold) or a collection; type checking decides.
+        let elem = self.expr(cx, lhs)?;
+        let coll = self.expr(cx, rhs)?;
+        Some(HLit::Guard(HExpr::new(
+            HExprKind::In {
+                elem: Box::new(elem),
+                coll: Box::new(coll),
+            },
+            span,
+        )))
+    }
+
+    // ------------------------------------------------------------------ patterns and expressions
+
+    /// A pattern in an atom argument, a `let`, a generator or a `from` suffix.
+    fn pattern(&mut self, cx: &mut RuleCx, e: &ast::Expr) -> Option<HPat> {
+        match &e.kind {
+            ExprKind::Wildcard => Some(HPat::Wild(e.span)),
+            ExprKind::Path(path, targs) if targs.is_empty() && path.len() == 1 => {
+                let name = path.first()?;
+                if is_var_name(name.as_str()) {
+                    return match Self::lookup_var(cx, name.name) {
+                        Some(v) => Some(HPat::Var(v, e.span)),
+                        None => {
+                            self.error(
+                                code!("BLS0500"),
+                                e.span,
+                                format!(
+                                    "`{}` is not bound by a positive literal of this body (range restriction)",
+                                    name.as_str()
+                                ),
+                            );
+                            None
+                        }
+                    };
+                }
+                if name.as_str() == "None" {
+                    return Some(HPat::Variant {
+                        ty: TypeRef::Option,
+                        variant: 0,
+                        fields: Vec::new(),
+                        span: e.span,
+                    });
+                }
+                Some(HPat::Expr(self.expr(cx, e)?))
+            }
+            ExprKind::Path(path, targs) if targs.is_empty() && path.len() == 2 => {
+                let (Some(en), Some(v)) = (path.first().copied(), path.get(1).copied()) else {
+                    return None;
+                };
+                let (ty, variant, arity) = self.variant(cx.ms, en, v)?;
+                if arity != 0 {
+                    self.error(code!("BLS0301"), e.span, format!("variant `{}` has fields", v.as_str()));
+                    return None;
+                }
+                Some(HPat::Variant {
+                    ty: TypeRef::Known(ty),
+                    variant,
+                    fields: Vec::new(),
+                    span: e.span,
+                })
+            }
+            ExprKind::Tuple(elems) => {
+                let mut ps = Vec::new();
+                for el in elems {
+                    ps.push(self.pattern(cx, el)?);
+                }
+                Some(HPat::Tuple(ps, e.span))
+            }
+            ExprKind::Call { callee, args } if self.is_constructor(cx, callee) => {
+                let (ty, variant, arity) = match &callee.kind {
+                    ExprKind::Path(p, _) if p.len() == 1 => (TypeRef::Option, 1, 1),
+                    ExprKind::Path(p, _) => {
+                        let (Some(en), Some(v)) = (p.first().copied(), p.get(1).copied()) else {
+                            return None;
+                        };
+                        let (t, n, a) = self.variant(cx.ms, en, v)?;
+                        (TypeRef::Known(t), n, a)
+                    }
+                    _ => return None,
+                };
+                if args.len() != arity {
+                    self.error(code!("BLS0301"), e.span, format!("the variant takes {arity} field(s)"));
+                    return None;
+                }
+                let mut fields = Vec::new();
+                for a in args {
+                    match a {
+                        Arg::Pos(p) => fields.push(self.pattern(cx, p)?),
+                        other => {
+                            self.unsupported("LANG-023", "named fields in variant patterns", other.span());
+                            return None;
+                        }
+                    }
+                }
+                Some(HPat::Variant {
+                    ty,
+                    variant,
+                    fields,
+                    span: e.span,
+                })
+            }
+            ExprKind::StructLit { .. } => {
+                self.unsupported("LANG-023", "struct patterns", e.span);
+                None
+            }
+            _ => Some(HPat::Expr(self.expr(cx, e)?)),
+        }
+    }
+
+    /// An enum variant `E::V`: its type, number and field count.
+    fn variant(&mut self, ms: ScopeIdx, en: Ident, v: Ident) -> Option<(TypeId, u32, usize)> {
+        let Some(ty) = self.enum_named(ms, en) else {
+            self.error(code!("BLS0200"), en.span, format!("unknown enum `{}`", en.as_str()));
+            return None;
+        };
+        let Some(TypeDef::Enum(def)) = self.hir.types.get(ty) else {
+            return None;
+        };
+        match def.variants.iter().find(|x| x.name == v.name) {
+            Some(x) => Some((ty, x.number, x.payload.len())),
+            None => {
+                self.error(
+                    code!("BLS0200"),
+                    v.span,
+                    format!("`{}` has no variant `{}`", en.as_str(), v.as_str()),
+                );
+                None
+            }
+        }
+    }
+
+    /// Resolves an expression.
+    pub(crate) fn expr(&mut self, cx: &mut RuleCx, e: &ast::Expr) -> Option<HExpr> {
+        let span = e.span;
+        let kind = match &e.kind {
+            ExprKind::Lit(l) => match l {
+                LitValue::Int { value, suffix: None } => HExprKind::IntLit(*value, false),
+                LitValue::Int {
+                    value,
+                    suffix: Some(sfx),
+                } => {
+                    let ty = blossom_value::types::IntTy::ALL
+                        .iter()
+                        .copied()
+                        .find(|t| t.name() == sfx.as_str())?;
+                    HExprKind::TypedInt(*value, ty, false)
+                }
+                LitValue::Float(_) => {
+                    self.unsupported("LANG-022", "floating-point values", span);
+                    return None;
+                }
+                _ => {
+                    let (v, t) = self.const_value(cx.ms, e, None)?;
+                    HExprKind::Value(v, t)
+                }
+            },
+            ExprKind::Prefix { op: PrefixOp::Neg, arg } if matches!(arg.kind, ExprKind::Lit(LitValue::Int { .. })) => {
+                match &arg.kind {
+                    ExprKind::Lit(LitValue::Int { value, suffix: None }) => HExprKind::IntLit(*value, true),
+                    ExprKind::Lit(LitValue::Int {
+                        value,
+                        suffix: Some(sfx),
+                    }) => {
+                        let ty = blossom_value::types::IntTy::ALL
+                            .iter()
+                            .copied()
+                            .find(|t| t.name() == sfx.as_str())?;
+                        HExprKind::TypedInt(*value, ty, true)
+                    }
+                    _ => return None,
+                }
+            }
+            ExprKind::Path(path, targs) => {
+                if !targs.is_empty() {
+                    self.unsupported("LANG-021", "explicit type arguments", span);
+                    return None;
+                }
+                match path.as_slice() {
+                    [name] => {
+                        if is_var_name(name.as_str()) {
+                            match Self::lookup_var(cx, name.name) {
+                                Some(v) => HExprKind::Var(v),
+                                None => {
+                                    if let Some(rel) = self.callee_rel(cx, e)
+                                        && self.rel_of(rel).cell
+                                    {
+                                        // A cell's name is its lookup `c[]` (LANGUAGE §7.13).
+                                        self.check_readable(cx, rel, span);
+                                        return Some(HExpr::new(HExprKind::Lookup { rel, key: Vec::new() }, span));
+                                    }
+                                    if self.callee_rel(cx, e).is_some() {
+                                        self.error(
+                                            code!("BLS0202"),
+                                            span,
+                                            format!("`{}` is a relation, used here as a value", name.as_str()),
+                                        );
+                                    } else {
+                                        self.error(
+                                            code!("BLS0500"),
+                                            span,
+                                            format!(
+                                                "`{}` is not bound by a positive literal of this body",
+                                                name.as_str()
+                                            ),
+                                        );
+                                    }
+                                    return None;
+                                }
+                            }
+                        } else if name.as_str() == "None" {
+                            HExprKind::Variant {
+                                ty: TypeRef::Option,
+                                variant: 0,
+                                fields: Vec::new(),
+                            }
+                        } else if let Some(i) = self.spec.as_ref().and_then(|s| s.nodes.get(&name.name)).copied() {
+                            let t = self.node_type(None);
+                            HExprKind::Value(Value::Node(blossom_value::time::NodeId(i)), t)
+                        } else if let Some((v, t)) = self.lookup_value(cx.ms, name.name) {
+                            HExprKind::Value(v, t)
+                        } else {
+                            self.error(code!("BLS0200"), span, format!("unknown name `{}`", name.as_str()));
+                            return None;
+                        }
+                    }
+                    [en, v] => {
+                        let (ty, variant, arity) = self.variant(cx.ms, *en, *v)?;
+                        if arity != 0 {
+                            self.error(code!("BLS0301"), span, format!("variant `{}` has fields", v.as_str()));
+                            return None;
+                        }
+                        HExprKind::Variant {
+                            ty: TypeRef::Known(ty),
+                            variant,
+                            fields: Vec::new(),
+                        }
+                    }
+                    _ => {
+                        self.unsupported("LANG-001", "long paths", span);
+                        return None;
+                    }
+                }
+            }
+            ExprKind::Call { callee, args } => return self.call(cx, callee, args, span),
+            ExprKind::Method { receiver, name, args } => return self.method(cx, receiver, *name, args, span),
+            // `reveal!(x)`: the exact read of a lattice value.
+            ExprKind::Bang { name, args, clauses } if name.as_str() == "reveal" && clauses.is_empty() => {
+                let [Arg::Pos(x)] = args.as_slice() else {
+                    self.error(code!("BLS0301"), span, "`reveal!` takes one value");
+                    return None;
+                };
+                HExprKind::Method {
+                    recv: Box::new(self.expr(cx, x)?),
+                    name: Symbol::intern("reveal"),
+                    banged: true,
+                    args: Vec::new(),
+                }
+            }
+            ExprKind::Bang { name, .. } => {
+                self.error(
+                    code!("BLS0202"),
+                    span,
+                    format!("`{}!` is allowed only as a head or view aggregate here", name.as_str()),
+                );
+                return None;
+            }
+            ExprKind::Field { base, name } => {
+                if self.callee_rel(cx, e).is_some() {
+                    self.error(code!("BLS0202"), span, "an instance relation used as a value");
+                    return None;
+                }
+                HExprKind::Field {
+                    base: Box::new(self.expr(cx, base)?),
+                    name: name.name,
+                    index: None,
+                }
+            }
+            ExprKind::TupleIndex { base, index } => HExprKind::TupleIndex {
+                base: Box::new(self.expr(cx, base)?),
+                index: *index,
+            },
+            ExprKind::Index { base, index } => {
+                let Some((rel, None)) = self.atom_parts(cx, base) else {
+                    self.unsupported(
+                        "LANG-091",
+                        "indexing values (only a relation's cell `r[k]` is read by index)",
+                        span,
+                    );
+                    return None;
+                };
+                let keys: Vec<&ast::Expr> = match &index.kind {
+                    ExprKind::Tuple(es) if !es.is_empty() => es.iter().collect(),
+                    ExprKind::Tuple(_) => Vec::new(),
+                    _ => vec![index.as_ref()],
+                };
+                let mut key = Vec::new();
+                for k in keys {
+                    key.push(self.expr(cx, k)?);
+                }
+                self.check_readable(cx, rel, span);
+                HExprKind::Lookup { rel, key }
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                if matches!(op, BinOp::In) {
+                    // A membership test in a value (LANGUAGE §9.4); roles and relations are tested as literals.
+                    let names_rel = self
+                        .atom_parts(cx, rhs)
+                        .is_some_and(|(r, a)| a.is_none() && !self.rel_of(r).cell);
+                    let names_role = matches!(&rhs.kind, ExprKind::Path(p, t) if t.is_empty()
+                        && p.len() == 1 && p.first().is_some_and(|n| self.role_named(cx.ms, n.name).is_some()));
+                    if names_rel
+                        || names_role
+                        || matches!(&rhs.kind, ExprKind::Binary { op, .. } if range_kind(*op).is_some())
+                    {
+                        self.unsupported(
+                            "LANG-088",
+                            "membership in a role, relation or range inside an expression (write it as a literal)",
+                            span,
+                        );
+                        return None;
+                    }
+                    let elem = self.expr(cx, lhs)?;
+                    let coll = self.expr(cx, rhs)?;
+                    return Some(HExpr::new(
+                        HExprKind::In {
+                            elem: Box::new(elem),
+                            coll: Box::new(coll),
+                        },
+                        span,
+                    ));
+                }
+                if range_kind(*op).is_some() {
+                    self.unsupported("LANG-092", "ranges as values", span);
+                    return None;
+                }
+                HExprKind::Binary {
+                    op: *op,
+                    lhs: Box::new(self.expr(cx, lhs)?),
+                    rhs: Box::new(self.expr(cx, rhs)?),
+                }
+            }
+            ExprKind::Prefix { op, arg } => HExprKind::Prefix {
+                op: *op,
+                arg: Box::new(self.expr(cx, arg)?),
+            },
+            ExprKind::Cast { expr, ty } => {
+                let ty = self.resolve_type(cx.ms, ty)?;
+                HExprKind::Cast {
+                    expr: Box::new(self.expr(cx, expr)?),
+                    ty,
+                }
+            }
+            ExprKind::Tuple(elems) => {
+                if elems.is_empty() {
+                    let t = self.intern_type(TypeDef::Unit, span);
+                    HExprKind::Value(Value::Unit, t)
+                } else {
+                    let mut es = Vec::new();
+                    for el in elems {
+                        es.push(self.expr(cx, el)?);
+                    }
+                    HExprKind::Tuple(es)
+                }
+            }
+            ExprKind::Vec(es) | ExprKind::Set(es) => {
+                let mut elems = Vec::new();
+                for x in es {
+                    elems.push(self.expr(cx, x)?);
+                }
+                HExprKind::Collection {
+                    kind: if matches!(&e.kind, ExprKind::Vec(_)) {
+                        CollectionKind::Vec
+                    } else {
+                        CollectionKind::Set
+                    },
+                    elems,
+                }
+            }
+            ExprKind::Map(pairs) => {
+                let mut elems = Vec::new();
+                for (k, v) in pairs {
+                    elems.push(self.expr(cx, k)?);
+                    elems.push(self.expr(cx, v)?);
+                }
+                HExprKind::Collection {
+                    kind: CollectionKind::Map,
+                    elems,
+                }
+            }
+            ExprKind::If { cond, then, els } => {
+                let Some(els) = els else {
+                    // The parser rejects an `if` value without `else` (BLS0109).
+                    self.bugs.push(blossom_base::internal_error!(
+                        "an `if` value without `else` passed the parser"
+                    ));
+                    return None;
+                };
+                HExprKind::If {
+                    cond: Box::new(self.expr(cx, cond)?),
+                    then: Box::new(self.expr(cx, then)?),
+                    els: Box::new(self.expr(cx, els)?),
+                }
+            }
+            ExprKind::Match { scrut, arms } => {
+                let scrut = self.expr(cx, scrut)?;
+                let mut out = Vec::new();
+                for arm in arms {
+                    cx.frames.push(BTreeMap::new());
+                    self.declare_pattern(cx, &arm.pat);
+                    let pat = self.pattern(cx, &arm.pat);
+                    let guard = arm.guard.as_ref().map(|g| self.expr(cx, g));
+                    let body = self.expr(cx, &arm.body);
+                    cx.frames.pop();
+                    let guard = match guard {
+                        Some(g) => Some(g?),
+                        None => None,
+                    };
+                    out.push((pat?, guard, body?));
+                }
+                HExprKind::Match {
+                    scrut: Box::new(scrut),
+                    arms: out,
+                }
+            }
+            ExprKind::StructLit { path, fields } => {
+                let [name] = path.as_slice() else {
+                    self.unsupported("LANG-023", "qualified struct names", span);
+                    return None;
+                };
+                let Some(ty) = self.struct_named(cx.ms, *name) else {
+                    self.error(
+                        code!("BLS0200"),
+                        name.span,
+                        format!("unknown struct `{}`", name.as_str()),
+                    );
+                    return None;
+                };
+                let Some(TypeDef::Struct(def)) = self.hir.types.get(ty).cloned() else {
+                    return None;
+                };
+                let mut slots: Vec<Option<HExpr>> = vec![None; def.fields.len()];
+                for (f, v) in fields {
+                    let Some(i) = def.fields.iter().position(|d| d.name == f.name) else {
+                        self.error(
+                            code!("BLS0302"),
+                            f.span,
+                            format!("`{}` has no field `{}`", name.as_str(), f.as_str()),
+                        );
+                        return None;
+                    };
+                    let value = match v {
+                        Some(v) => self.expr(cx, v)?,
+                        None => {
+                            let pun = ast::Expr {
+                                kind: ExprKind::Path(vec![*f], Vec::new()),
+                                span: f.span,
+                            };
+                            self.expr(cx, &pun)?
+                        }
+                    };
+                    if let Some(slot) = slots.get_mut(i) {
+                        *slot = Some(value);
+                    }
+                }
+                let mut out = Vec::new();
+                for (s, field) in slots.into_iter().zip(&def.fields) {
+                    match s {
+                        Some(v) => out.push(v),
+                        None => {
+                            self.error(
+                                code!("BLS0303"),
+                                span,
+                                format!("field `{}` of `{}` is not given", field.name, name.as_str()),
+                            );
+                            return None;
+                        }
+                    }
+                }
+                HExprKind::Struct { ty, fields: out }
+            }
+            ExprKind::Wildcard => {
+                self.error(code!("BLS0500"), span, "`_` is a pattern, not a value");
+                return None;
+            }
+            ExprKind::SelfNode => HExprKind::SelfNode,
+        };
+        Some(HExpr::new(kind, span))
+    }
+
+    fn call(&mut self, cx: &mut RuleCx, callee: &ast::Expr, args: &[Arg], span: Span) -> Option<HExpr> {
+        let mut pos = Vec::new();
+        for a in args {
+            match a {
+                Arg::Pos(e) => pos.push(e),
+                other => {
+                    self.error(code!("BLS0302"), other.span(), "function arguments are positional");
+                    return None;
+                }
+            }
+        }
+        if self.callee_rel(cx, callee).is_some() {
+            self.error(code!("BLS0202"), span, "a relation used as a function");
+            return None;
+        }
+        let ExprKind::Path(path, _) = &callee.kind else {
+            self.unsupported("LANG-180", "calls of computed functions", span);
+            return None;
+        };
+        match path.as_slice() {
+            [name] if name.as_str() == "Some" => {
+                if pos.len() != 1 {
+                    self.error(code!("BLS0301"), span, "`Some` takes one value");
+                    return None;
+                }
+                let v = self.expr(cx, pos.first()?)?;
+                Some(HExpr {
+                    ty: None,
+                    kind: HExprKind::Variant {
+                        ty: TypeRef::Option,
+                        variant: 1,
+                        fields: vec![v],
+                    },
+                    span,
+                })
+            }
+            [name] if name.as_str() == "now" && pos.is_empty() => Some(HExpr {
+                ty: None,
+                kind: HExprKind::Now,
+                span,
+            }),
+            [name] if name.as_str() == "tick" && pos.is_empty() => Some(HExpr {
+                ty: None,
+                kind: HExprKind::Tick,
+                span,
+            }),
+            [en, v] if self.enum_named(cx.ms, *en).is_some() => {
+                let (ty, variant, arity) = self.variant(cx.ms, *en, *v)?;
+                if pos.len() != arity {
+                    self.error(code!("BLS0301"), span, format!("the variant takes {arity} field(s)"));
+                    return None;
+                }
+                let mut fields = Vec::new();
+                for p in pos {
+                    fields.push(self.expr(cx, p)?);
+                }
+                Some(HExpr {
+                    ty: None,
+                    kind: HExprKind::Variant {
+                        ty: TypeRef::Known(ty),
+                        variant,
+                        fields,
+                    },
+                    span,
+                })
+            }
+            [l, f] if LatCtorKind::named(l.as_str()).is_some() && matches!(f.as_str(), "of" | "bot") => {
+                let kind = LatCtorKind::named(l.as_str())?;
+                let bot = f.as_str() == "bot";
+                let want = match (bot, kind) {
+                    (true, _) => 0,
+                    (false, LatCtorKind::Map) => 2,
+                    (false, _) => 1,
+                };
+                if pos.len() != want {
+                    self.error(
+                        code!("BLS0301"),
+                        span,
+                        format!("`{}::{}` takes {want} value(s)", l.as_str(), f.as_str()),
+                    );
+                    return None;
+                }
+                let mut xs = Vec::new();
+                for p in pos {
+                    xs.push(self.expr(cx, p)?);
+                }
+                Some(HExpr::new(HExprKind::LatCtor { kind, bot, args: xs }, span))
+            }
+            [name] if self.scope(cx.ms).broken.contains(&name.name) => None,
+            _ => {
+                let names: Vec<&str> = path.iter().map(Ident::as_str).collect();
+                self.unsupported("LANG-180", &format!("calls of `{}`", names.join("::")), span);
+                None
+            }
+        }
+    }
+
+    fn method(
+        &mut self,
+        cx: &mut RuleCx,
+        receiver: &ast::Expr,
+        name: Ident,
+        args: &[Arg],
+        span: Span,
+    ) -> Option<HExpr> {
+        // `R.size()`.
+        if let ExprKind::Path(p, t) = &receiver.kind
+            && t.is_empty()
+            && let [r] = p.as_slice()
+            && let Some(role) = self.role_named(cx.ms, r.name)
+        {
+            if name.as_str() == "size" && args.is_empty() {
+                return Some(HExpr {
+                    ty: None,
+                    kind: HExprKind::Builtin {
+                        f: Builtin::RoleSize(role),
+                        args: Vec::new(),
+                    },
+                    span,
+                });
+            }
+            self.unsupported("LANG-153", &format!("role method `{}`", name.as_str()), span);
+            return None;
+        }
+        match name.as_str() {
+            "len" if args.is_empty() => {
+                let r = self.expr(cx, receiver)?;
+                Some(HExpr {
+                    ty: None,
+                    kind: HExprKind::Builtin {
+                        f: Builtin::Len,
+                        args: vec![r],
+                    },
+                    span,
+                })
+            }
+            other => {
+                // Resolved by the receiver's type (lattice operations, LANGUAGE §11.5).
+                let (name, banged) = match other.strip_suffix('!') {
+                    Some(n) => (n, true),
+                    None => (other, false),
+                };
+                let recv = self.expr(cx, receiver)?;
+                let mut xs = Vec::new();
+                for a in args {
+                    let Arg::Pos(x) = a else {
+                        self.error(code!("BLS0302"), a.span(), "method arguments are positional");
+                        return None;
+                    };
+                    xs.push(self.expr(cx, x)?);
+                }
+                Some(HExpr::new(
+                    HExprKind::Method {
+                        recv: Box::new(recv),
+                        name: Symbol::intern(name),
+                        banged,
+                        args: xs,
+                    },
+                    span,
+                ))
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ rules
+
+    pub(crate) fn handler(
+        &mut self,
+        s: ScopeIdx,
+        h: &'t ast::Handler,
+        placement: Option<HRoleId>,
+        attrs: &[ast::Attr],
+    ) {
+        for a in attrs {
+            self.unsupported(
+                "LANG-202",
+                &format!("the attribute `#[{}]` on a handler", a.name.as_str()),
+                a.span,
+            );
+        }
+        if h.monotone {
+            self.unsupported("ANA-020", "`monotone` assertions", h.span);
+        }
+        let mut cx = self.rule_cx(s, placement);
+        cx.choice_allowed = h.label.is_some();
+        let header = self.body(&mut cx, &h.header);
+        cx.choice_allowed = false;
+        let stmts = self.stmts(&mut cx, &h.block.stmts);
+        let text = self.normalized(h.header.span);
+        self.hir.handlers.push(HHandler {
+            scope: cx.scope,
+            label: h.label.map(|l| l.name),
+            trigger: h.trigger,
+            kind: HandlerKind::Plain,
+            header,
+            stmts,
+            role: placement,
+            text,
+            span: h.span,
+        });
+    }
+
+    pub(crate) fn bootstrap(
+        &mut self,
+        s: ScopeIdx,
+        fresh: bool,
+        block: &'t ast::Block,
+        placement: Option<HRoleId>,
+        span: Span,
+    ) {
+        if fresh {
+            self.unsupported("SEM-071", "`bootstrap fresh` (restarts are not simulated yet)", span);
+            return;
+        }
+        let mut cx = self.rule_cx(s, placement);
+        let boot = self.builtin(super::BuiltinRel::Boot, span);
+        let header = HBody {
+            lits: vec![HLit::Atom(HAtom {
+                rel: boot,
+                args: Vec::new(),
+                from: None,
+                span,
+            })],
+            span: None,
+        };
+        let stmts = self.stmts(&mut cx, &block.stmts);
+        self.hir.handlers.push(HHandler {
+            scope: cx.scope,
+            label: None,
+            trigger: ast::Trigger::On,
+            kind: HandlerKind::Bootstrap,
+            header,
+            stmts,
+            role: placement,
+            text: String::new(),
+            span,
+        });
+    }
+
+    fn stmts(&mut self, cx: &mut RuleCx, stmts: &[Stmt]) -> Vec<HStmt> {
+        let mut out = Vec::new();
+        for st in stmts {
+            match st {
+                Stmt::Verb(v) => {
+                    if let Some(h) = self.verb_stmt(cx, v) {
+                        out.push(HStmt::Verb(h));
+                    }
+                }
+                Stmt::For { cond, block, span } => {
+                    cx.frames.push(BTreeMap::new());
+                    let c = self.body(cx, cond);
+                    let inner = self.stmts(cx, &block.stmts);
+                    cx.frames.pop();
+                    out.push(HStmt::Block {
+                        kind: BlockKind::For,
+                        cond: c,
+                        stmts: inner,
+                        text: self.normalized(cond.span),
+                        span: *span,
+                    });
+                }
+                Stmt::If { cond, then, els, span } => self.if_stmt(cx, cond, then, els.as_deref(), *span, &mut out),
+            }
+        }
+        out
+    }
+
+    fn if_stmt(
+        &mut self,
+        cx: &mut RuleCx,
+        cond: &ast::Body,
+        then: &ast::Block,
+        els: Option<&ast::Else>,
+        span: Span,
+        out: &mut Vec<HStmt>,
+    ) {
+        cx.frames.push(BTreeMap::new());
+        let c = self.body(cx, cond);
+        let inner = self.stmts(cx, &then.stmts);
+        cx.frames.pop();
+        let text = self.normalized(cond.span);
+        let guard = match (&c.lits.as_slice(), els) {
+            ([HLit::Guard(g)], Some(_)) => Some(g.clone()),
+            (_, Some(_)) => {
+                self.error(
+                    code!("BLS0409"),
+                    span,
+                    "`else` needs an `if` whose condition is a single scalar guard; write `if not r(x) { … }` for the relational case",
+                );
+                None
+            }
+            _ => None,
+        };
+        out.push(HStmt::Block {
+            kind: BlockKind::If,
+            cond: c,
+            stmts: inner,
+            text: text.clone(),
+            span,
+        });
+        let (Some(g), Some(els)) = (guard, els) else { return };
+        let negated = HBody {
+            lits: vec![HLit::Guard(HExpr {
+                ty: None,
+                span: g.span,
+                kind: HExprKind::Prefix {
+                    op: PrefixOp::Not,
+                    arg: Box::new(g),
+                },
+            })],
+            span: Some(cond.span),
+        };
+        let stmts = match els {
+            ast::Else::Block(b) => {
+                cx.frames.push(BTreeMap::new());
+                let s = self.stmts(cx, &b.stmts);
+                cx.frames.pop();
+                s
+            }
+            ast::Else::If(st) => self.stmts(cx, std::slice::from_ref(st.as_ref())),
+        };
+        out.push(HStmt::Block {
+            kind: BlockKind::Else,
+            cond: negated,
+            stmts,
+            text: format!("not ({text})"),
+            span,
+        });
+    }
+
+    fn verb_stmt(&mut self, cx: &mut RuleCx, v: &ast::VerbStmt) -> Option<HVerbStmt> {
+        let mut allow_self_negation = false;
+        for a in &v.attrs {
+            if a.name.as_str() == "allow"
+                && a.args.iter().all(|x| matches!(x, Arg::Pos(e) if matches!(&e.kind, ExprKind::Path(p, _) if p.len() == 1 && p.first().is_some_and(|n| n.as_str() == "self_negation"))))
+                && !a.args.is_empty()
+            {
+                allow_self_negation = true;
+            } else {
+                self.unsupported("LANG-202", &format!("the attribute `#[{}]` on a statement", a.name.as_str()), a.span);
+            }
+        }
+        if v.resolve.is_some() {
+            self.unsupported("LANG-117", "`resolve` policies on statements", v.span);
+            return None;
+        }
+        if v.weight.is_some() {
+            self.unsupported("LANG-138", "weighted statements", v.span);
+            return None;
+        }
+        let target = self.write_target(cx, &v.head.rel, v.verb, v.head.span)?;
+        let rel = self.rel_of(target).clone();
+        match v.verb {
+            Verb::Seal => {
+                self.unsupported("LANG-207", "`seal`", v.span);
+                return None;
+            }
+            Verb::Upsert if rel.key.is_none() => {
+                self.error(
+                    code!("BLS0400"),
+                    v.span,
+                    format!("`upsert` needs a keyed table; `{}` has no key", rel.name),
+                );
+                return None;
+            }
+            _ => {}
+        }
+        let args = self.head_args(cx, &rel, &v.head.args, v.head.span)?;
+        let to = match (&v.to, v.verb, &rel.kind) {
+            (Some(to), Verb::Send, HRelKind::Channel(ch)) => {
+                if ch.loopback || ch.dest_col.is_some() {
+                    self.error(
+                        code!("BLS0403"),
+                        to.span,
+                        "a loopback or column-form channel takes no `to`: the destination is self or the `@` column",
+                    );
+                    return None;
+                }
+                Some(self.expr(cx, to)?)
+            }
+            (None, Verb::Send, HRelKind::Channel(ch)) => {
+                if !ch.loopback && ch.dest_col.is_none() {
+                    self.error(
+                        code!("BLS0403"),
+                        v.span,
+                        "`send` into a direction-form channel needs `to d`",
+                    );
+                    return None;
+                }
+                None
+            }
+            (_, Verb::Send, _) => {
+                self.error(
+                    code!("BLS0400"),
+                    v.span,
+                    format!("`send` writes channels; `{}` is not one", rel.name),
+                );
+                return None;
+            }
+            (Some(to), _, _) => {
+                self.error(code!("BLS0403"), to.span, "only `send` takes `to`");
+                return None;
+            }
+            (None, _, HRelKind::Channel(_)) => {
+                self.error(
+                    code!("BLS0400"),
+                    v.span,
+                    format!("a channel is written only with `send`; `{}` is a channel", rel.name),
+                );
+                return None;
+            }
+            (None, _, _) => None,
+        };
+        Some(HVerbStmt {
+            verb: v.verb,
+            target,
+            args,
+            to,
+            allow_self_negation,
+            text: self.normalized(v.span),
+            span: v.span,
+        })
+    }
+
+    /// The relation a statement writes, after interposition, with the verb × collection legality (LANGUAGE §12).
+    fn write_target(&mut self, cx: &RuleCx, path: &[Ident], verb: Verb, span: Span) -> Option<HRelId> {
+        let found = match path {
+            [name] => cx
+                .aliases
+                .get(&name.name)
+                .copied()
+                .or_else(|| self.scope(cx.ms).rels.get(&name.name).copied())
+                .or_else(|| (name.as_str() == "localtick").then(|| self.builtin(super::BuiltinRel::LocalTick, span)))
+                .or_else(|| (name.as_str() == "halt").then(|| self.builtin(super::BuiltinRel::Halt, span))),
+            [inst, name] => {
+                let found = self
+                    .scope(cx.ms)
+                    .instances
+                    .get(&inst.name)
+                    .and_then(|i| i.interface.get(&name.name))
+                    .copied();
+                match found {
+                    Some((id, true)) => Some(id),
+                    Some((_, false)) => {
+                        self.error(
+                            code!("BLS0203"),
+                            span,
+                            format!(
+                                "`{}.{}` is an output of an instance: it can be read, not written",
+                                inst.as_str(),
+                                name.as_str()
+                            ),
+                        );
+                        return None;
+                    }
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+        let Some(mut rel) = found else {
+            if let [name] = path
+                && self.scope(cx.ms).broken.contains(&name.name)
+            {
+                return None;
+            }
+            let names: Vec<&str> = path.iter().map(Ident::as_str).collect();
+            self.error(
+                code!("BLS0200"),
+                span,
+                format!("unknown relation `{}`", names.join(".")),
+            );
+            return None;
+        };
+        // Writes outside the interposition block go to `$outside`.
+        if !cx.aliases.values().any(|a| *a == rel)
+            && let Some(outside) = self.scope(cx.ms).write_redirect.get(&rel)
+        {
+            rel = *outside;
+        }
+        let r = self.rel_of(rel);
+        let name = r.name.clone();
+        let bad = |what: &str| format!("`{}` into `{name}`: {what}", verb.as_str());
+        let err = match (&r.kind, verb) {
+            (HRelKind::View, _) => Some((code!("BLS0406"), bad("a view is closed; no statement may write it"))),
+            (HRelKind::Static, _) => Some((code!("BLS0400"), bad("a static relation gets its rows from facts"))),
+            (HRelKind::Input { root: true }, _) => Some((code!("BLS0406"), bad("a module never writes its own input"))),
+            (HRelKind::Input { root: false }, _) if !self.is_foreign_interface(cx, rel) => {
+                Some((code!("BLS0406"), bad("a module never writes its own input")))
+            }
+            (HRelKind::Timer { .. } | HRelKind::Boot | HRelKind::Members(_) | HRelKind::NodeDir, _) => {
+                Some((code!("BLS0400"), bad("this relation is fed by the runtime")))
+            }
+            (HRelKind::LocalTick, v) if v != Verb::Next => {
+                Some((code!("BLS0400"), bad("`localtick()` is requested with `next`")))
+            }
+            (HRelKind::Halt, v) if v != Verb::Emit => Some((code!("BLS0400"), bad("`halt` is written with `emit`"))),
+            (HRelKind::Channel(_), v) if v != Verb::Send => None,
+            (k, Verb::Delete | Verb::Upsert) if !k.is_table() => {
+                Some((code!("BLS0400"), bad("only tables accept `delete` and `upsert`")))
+            }
+            (_, Verb::Upsert) if r.resolve.is_some() => {
+                self.unsupported("LANG-117", "`upsert` into a relation with a `resolve` policy", span);
+                return None;
+            }
+            // A lattice only grows (LANG-284): it is reset by raising an epoch, never retracted.
+            (_, Verb::Delete | Verb::Upsert)
+                if r.cols
+                    .iter()
+                    .any(|c| c.ty.is_some_and(|t| self.hir.lattice_of(t).is_some())) =>
+            {
+                Some((
+                    code!("BLS0410"),
+                    bad(
+                        "a lattice-valued relation cannot be deleted from or upserted (raise an epoch with `Lex` instead)",
+                    ),
+                ))
+            }
+            _ => None,
+        };
+        if let Some((c, msg)) = err {
+            self.error(c, span, msg);
+            return None;
+        }
+        if let HRelKind::Channel(ChannelInfo {
+            direction: Some((src, _)),
+            ..
+        }) = r.kind
+            && let Some(here) = cx.placement
+            && here != src
+        {
+            let src_name = self.role_of(src).name.clone();
+            self.error(
+                code!("BLS0404"),
+                span,
+                format!("`{name}` is sent from `{src_name}`, so `send` must be placed there"),
+            );
+            return None;
+        }
+        Some(rel)
+    }
+
+    /// A head's arguments, one per column, positional or named (LANGUAGE §8.2).
+    fn head_args(&mut self, cx: &mut RuleCx, rel: &HRel, args: &[Arg], span: Span) -> Option<Vec<HHeadArg>> {
+        let cols: Vec<Symbol> = rel.cols.iter().map(|c| c.name).collect();
+        let named = args.iter().any(|a| matches!(a, Arg::Named(..)));
+        if args.iter().any(|a| matches!(a, Arg::Rest(_))) {
+            self.error(code!("BLS0303"), span, "`..` is not allowed in a head");
+            return None;
+        }
+        let mut slots: Vec<Option<HHeadArg>> = vec![None; cols.len()];
+        if !named {
+            if args.len() != cols.len() {
+                self.error(
+                    code!("BLS0301"),
+                    span,
+                    format!("`{}` has {} column(s), {} given", rel.name, cols.len(), args.len()),
+                );
+                return None;
+            }
+            for (i, a) in args.iter().enumerate() {
+                let Arg::Pos(e) = a else {
+                    self.error(code!("BLS0303"), a.span(), "unexpected argument form in a head");
+                    return None;
+                };
+                let v = self.head_arg(cx, e)?;
+                if let Some(slot) = slots.get_mut(i) {
+                    *slot = Some(v);
+                }
+            }
+        } else {
+            for a in args {
+                let (field, value) = match a {
+                    Arg::Named(f, v) => (*f, v.clone()),
+                    Arg::Pos(e) => match &e.kind {
+                        ExprKind::Path(p, t) if t.is_empty() && p.len() == 1 => {
+                            let f = p.first().copied()?;
+                            (f, e.clone())
+                        }
+                        _ => {
+                            self.error(
+                                code!("BLS0303"),
+                                e.span,
+                                "in a named head, every argument is `column: value`",
+                            );
+                            return None;
+                        }
+                    },
+                    _ => {
+                        self.error(code!("BLS0303"), a.span(), "unexpected argument form in a head");
+                        return None;
+                    }
+                };
+                let Some(i) = cols.iter().position(|c| *c == field.name) else {
+                    self.error(
+                        code!("BLS0302"),
+                        field.span,
+                        format!("`{}` has no column `{}`", rel.name, field.as_str()),
+                    );
+                    return None;
+                };
+                let v = self.head_arg(cx, &value)?;
+                if slots.get_mut(i).and_then(|s| s.replace(v)).is_some() {
+                    self.error(
+                        code!("BLS0303"),
+                        field.span,
+                        format!("column `{}` given twice", field.as_str()),
+                    );
+                    return None;
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for (s, col) in slots.into_iter().zip(&cols) {
+            match s {
+                Some(v) => out.push(v),
+                None => {
+                    self.error(
+                        code!("BLS0303"),
+                        span,
+                        format!("column `{col}` of `{}` has no default and is not given", rel.name),
+                    );
+                    return None;
+                }
+            }
+        }
+        Some(out)
+    }
+
+    fn head_arg(&mut self, cx: &mut RuleCx, e: &ast::Expr) -> Option<HHeadArg> {
+        if let ExprKind::Bang { name, args, clauses } = &e.kind {
+            return Some(HHeadArg::Agg(self.aggregate(cx, *name, args, clauses, e.span)?));
+        }
+        Some(HHeadArg::Expr(self.expr(cx, e)?))
+    }
+
+    /// A head aggregate (LANGUAGE §10.1).
+    fn aggregate(
+        &mut self,
+        cx: &mut RuleCx,
+        name: Ident,
+        args: &[Arg],
+        clauses: &[ast::BangClause],
+        span: Span,
+    ) -> Option<HAgg> {
+        let func = match name.as_str() {
+            "count" => AggKind::Count,
+            "sum" => AggKind::Sum,
+            "min" => AggKind::Min,
+            "max" => AggKind::Max,
+            other => {
+                self.unsupported("LANG-100", &format!("the aggregate `{other}!`"), span);
+                return None;
+            }
+        };
+        let mut default = None;
+        for c in clauses {
+            match c.keyword.as_str() {
+                "default" => {
+                    let [d] = c.exprs.as_slice() else {
+                        self.error(code!("BLS0301"), c.span, "`default` takes one value");
+                        return None;
+                    };
+                    default = Some(self.expr(cx, d)?);
+                }
+                other => {
+                    self.unsupported("LANG-100", &format!("the aggregate clause `{other}`"), c.span);
+                    return None;
+                }
+            }
+        }
+        let mut exprs = Vec::new();
+        match args {
+            [Arg::Star(_)] if func == AggKind::Count => {}
+            [] => {
+                self.error(
+                    code!("BLS0301"),
+                    span,
+                    format!("`{}!` needs an argument", name.as_str()),
+                );
+                return None;
+            }
+            _ => {
+                for a in args {
+                    let Arg::Pos(e) = a else {
+                        self.error(code!("BLS0202"), a.span(), "aggregate arguments are positional");
+                        return None;
+                    };
+                    exprs.push(self.expr(cx, e)?);
+                }
+                if exprs.len() != 1 {
+                    self.error(
+                        code!("BLS0301"),
+                        span,
+                        format!("`{}!` takes one argument", name.as_str()),
+                    );
+                    return None;
+                }
+            }
+        }
+        Some(HAgg {
+            func,
+            args: exprs,
+            default,
+            span,
+        })
+    }
+
+    /// A view's alternatives and columns (LANGUAGE §8.3).
+    pub(crate) fn view(&mut self, s: ScopeIdx, v: &'t ast::ViewDecl, rel: HRelId) {
+        let placement = self.rel_of(rel).role;
+        // Annotated columns are declared; the others are inferred (LANGUAGE §5.6).
+        for (i, c) in v.cols.iter().enumerate() {
+            let Some(ty) = &c.ty else { continue };
+            let Some(t) = self.resolve_type(s, ty) else { return };
+            match self.hir.rels.get_mut(rel.index()).and_then(|r| r.cols.get_mut(i)) {
+                Some(col) => col.ty = Some(t),
+                None => {
+                    self.bugs.push(blossom_base::internal_error!(
+                        "view column {i} of {rel:?} was not declared"
+                    ));
+                    return;
+                }
+            }
+        }
+        let has_agg = v.cols.iter().any(|c| c.agg.is_some());
+        let mut alternatives = Vec::new();
+        let mut cxs = Vec::new();
+        for alt in &v.alternatives {
+            let mut cx = self.rule_cx(s, placement);
+            cx.choice_allowed = v.alternatives.len() == 1;
+            let body = self.body(&mut cx, alt);
+            alternatives.push((cx.scope, body));
+            cxs.push(cx);
+        }
+        let shape = if !has_agg {
+            let mut cols = Vec::new();
+            for c in &v.cols {
+                let mut per_alt = Vec::new();
+                for (i, cx) in cxs.iter().enumerate() {
+                    match Self::lookup_var(cx, c.name.name) {
+                        Some(var) => per_alt.push(var),
+                        None => {
+                            self.error(
+                                code!("BLS0500"),
+                                v.alternatives.get(i).map_or(v.span, |a| a.span),
+                                format!("this alternative does not bind the column `{}`", c.name.as_str()),
+                            );
+                            return;
+                        }
+                    }
+                }
+                cols.push(per_alt);
+            }
+            HViewShape::Plain { cols }
+        } else {
+            // The variables that occur in every alternative, in the first alternative's order.
+            let Some(first) = alternatives.first() else { return };
+            let first_vars: Vec<(Symbol, bool)> = match self.hir.scope(first.0) {
+                Ok(sc) => sc.vars.iter().map(|x| (x.name, x.generated)).collect(),
+                Err(e) => {
+                    self.bugs.push(e);
+                    return;
+                }
+            };
+            let mut shared_names = Vec::new();
+            for (name, generated) in first_vars {
+                if generated || shared_names.contains(&name) {
+                    continue;
+                }
+                if cxs.iter().all(|cx| Self::lookup_var(cx, name).is_some()) {
+                    shared_names.push(name);
+                }
+            }
+            let mut ucx = self.rule_cx(s, placement);
+            for n in &shared_names {
+                self.new_var(&mut ucx, *n, v.span, false);
+            }
+            let shared: Vec<Vec<HVarId>> = cxs
+                .iter()
+                .map(|cx| shared_names.iter().filter_map(|n| Self::lookup_var(cx, *n)).collect())
+                .collect();
+            let mut cols = Vec::new();
+            for c in &v.cols {
+                match &c.agg {
+                    Some(agg) => {
+                        let ExprKind::Bang { name, args, clauses } = &agg.kind else {
+                            self.error(
+                                code!("BLS0202"),
+                                agg.span,
+                                "a view column `name = …` is an aggregate `agg!(…)`",
+                            );
+                            return;
+                        };
+                        let Some(a) = self.aggregate(&mut ucx, *name, args, clauses, agg.span) else {
+                            return;
+                        };
+                        cols.push(HViewAggCol::Agg(a));
+                    }
+                    None => match Self::lookup_var(&ucx, c.name.name) {
+                        Some(var) => cols.push(HViewAggCol::Group(var)),
+                        None => {
+                            self.error(
+                                code!("BLS0500"),
+                                c.span,
+                                format!(
+                                    "the grouping column `{}` is not bound by every alternative",
+                                    c.name.as_str()
+                                ),
+                            );
+                            return;
+                        }
+                    },
+                }
+            }
+            let mut driver = None;
+            let mut drivers = 0;
+            for (_, body) in &alternatives {
+                for l in &body.lits {
+                    if let HLit::Per(a) = l {
+                        drivers += 1;
+                        driver = Some(a.clone());
+                    }
+                }
+            }
+            if drivers > 0 && alternatives.len() != 1 {
+                self.error(
+                    code!("BLS0600"),
+                    v.span,
+                    "a view with a `per` driver has exactly one alternative",
+                );
+                return;
+            }
+            if drivers > 1 {
+                self.error(code!("BLS0511"), v.span, "a view has at most one `per` driver");
+                return;
+            }
+            HViewShape::Aggregate {
+                union: ucx.scope,
+                shared,
+                cols,
+                driver,
+            }
+        };
+        let texts = v.alternatives.iter().map(|a| self.normalized(a.span)).collect();
+        self.hir.views.push(HView {
+            rel,
+            alternatives,
+            texts,
+            shape,
+            monotone: v.monotone,
+            span: v.span,
+        });
+    }
+
+    /// `invariant name ["message"]: never BODY;` (LANGUAGE §17.1).
+    pub(crate) fn invariant(&mut self, s: ScopeIdx, inv: &'t ast::Invariant, placement: Option<HRoleId>) {
+        let mut cx = self.rule_cx(s, placement);
+        let body = self.body(&mut cx, &inv.body);
+        self.hir.invariants.push(HInvariant {
+            name: inv.name.name,
+            message: inv.message.clone(),
+            scope: cx.scope,
+            body,
+            role: placement,
+            span: inv.span,
+        });
+    }
+
+    /// `fact r(…);` (LANGUAGE §8.4).
+    pub(crate) fn fact(&mut self, s: ScopeIdx, f: &'t ast::Fact) {
+        if f.at.is_some() || f.tick.is_some() {
+            self.error(
+                code!("BLS0509"),
+                f.span,
+                "`fact … @ n [at tick k]` is allowed only in a spec",
+            );
+            return;
+        }
+        let Some(rel) = self.lookup_rel(s, &f.head.rel) else {
+            self.error(code!("BLS0200"), f.head.span, "unknown relation");
+            return;
+        };
+        let r = self.rel_of(rel);
+        if r.kind != HRelKind::Static {
+            self.error(
+                code!("BLS0405"),
+                f.span,
+                format!(
+                    "a fact asserts a row of a static relation; initial state of `{}` goes in `bootstrap`",
+                    r.name
+                ),
+            );
+            return;
+        }
+        let mut cx = self.rule_cx(s, None);
+        let r = self.rel_of(rel).clone();
+        let Some(args) = self.head_args(&mut cx, &r, &f.head.args, f.head.span) else {
+            return;
+        };
+        let mut row = Vec::new();
+        for a in args {
+            match a {
+                HHeadArg::Expr(e) => row.push(e),
+                HHeadArg::Agg(g) => {
+                    self.error(code!("BLS0202"), g.span, "a fact holds values, not aggregates");
+                    return;
+                }
+            }
+        }
+        self.hir.facts.push(HFact {
+            rel,
+            row,
+            scope: cx.scope,
+            span: f.span,
+        });
+    }
+
+    /// The rules inside `interpose a.i as (outside, inside) { … }`.
+    pub(crate) fn interpose_rules(&mut self, s: ScopeIdx, ip: &'t ast::Interpose, placement: Option<HRoleId>) {
+        let [inst, name] = ip.target.as_slice() else { return };
+        let Some(&(real, _)) = self
+            .scope(s)
+            .instances
+            .get(&inst.name)
+            .and_then(|i| i.interface.get(&name.name))
+        else {
+            return;
+        };
+        let Some(outside) = self.scope(s).write_redirect.get(&real).copied() else {
+            return;
+        };
+        for item in &ip.items {
+            match &item.kind {
+                ast::ItemKind::Handler(h) => {
+                    let mut aliases = BTreeMap::new();
+                    aliases.insert(ip.outside.name, outside);
+                    aliases.insert(ip.inside.name, real);
+                    self.handler_with_aliases(s, h, placement, aliases);
+                }
+                _ => self.error(code!("BLS0110"), item.span, "an interposition block holds handlers"),
+            }
+        }
+    }
+
+    fn handler_with_aliases(
+        &mut self,
+        s: ScopeIdx,
+        h: &'t ast::Handler,
+        placement: Option<HRoleId>,
+        aliases: BTreeMap<Symbol, HRelId>,
+    ) {
+        let mut cx = self.rule_cx(s, placement);
+        cx.aliases = aliases;
+        let header = self.body(&mut cx, &h.header);
+        let stmts = self.stmts(&mut cx, &h.block.stmts);
+        let text = self.normalized(h.header.span);
+        self.hir.handlers.push(HHandler {
+            scope: cx.scope,
+            label: h.label.map(|l| l.name),
+            trigger: h.trigger,
+            kind: HandlerKind::Plain,
+            header,
+            stmts,
+            role: placement,
+            text,
+            span: h.span,
+        });
+    }
+}
+
+fn collect_pattern_names(e: &ast::Expr, out: &mut BTreeSet<Symbol>) {
+    match &e.kind {
+        ExprKind::Path(path, _) if path.len() == 1 => {
+            if let Some(n) = path.first()
+                && is_var_name(n.as_str())
+            {
+                out.insert(n.name);
+            }
+        }
+        ExprKind::Tuple(es) => es.iter().for_each(|x| collect_pattern_names(x, out)),
+        _ => {}
+    }
+}
+
+fn range_kind(op: BinOp) -> Option<RangeKind> {
+    Some(match op {
+        BinOp::Range => RangeKind::HalfOpen,
+        BinOp::RangeEq => RangeKind::Closed,
+        BinOp::OpenRange => RangeKind::OpenOpen,
+        BinOp::OpenRangeEq => RangeKind::OpenClosed,
+        _ => return None,
+    })
+}
+
+/// The target relation a spec atom names, with its arguments (`None` for a bare name): `r(…)`, `r`, or an instance's
+/// relation `a.r(…)`, `a.r`, named `a.r` (LANGUAGE §17.3).
+fn spec_rel_path(e: &ast::Expr) -> Option<(Ident, Option<&[Arg]>)> {
+    let qualified = |inst: &Ident, name: &Ident| Ident {
+        name: Symbol::intern(&format!("{}.{}", inst.as_str(), name.as_str())),
+        span: name.span,
+    };
+    let single = |p: &[Ident]| match p {
+        [one] => Some(*one),
+        _ => None,
+    };
+    match &e.kind {
+        ExprKind::Call { callee, args } => match &callee.kind {
+            ExprKind::Path(p, t) if t.is_empty() => single(p).map(|n| (n, Some(args.as_slice()))),
+            ExprKind::Field { base, name } => match &base.kind {
+                ExprKind::Path(p, t) if t.is_empty() => single(p).map(|i| (qualified(&i, name), Some(args.as_slice()))),
+                _ => None,
+            },
+            _ => None,
+        },
+        ExprKind::Method { receiver, name, args } => match &receiver.kind {
+            ExprKind::Path(p, t) if t.is_empty() => single(p).map(|i| (qualified(&i, name), Some(args.as_slice()))),
+            _ => None,
+        },
+        ExprKind::Field { base, name } => match &base.kind {
+            ExprKind::Path(p, t) if t.is_empty() => single(p).map(|i| (qualified(&i, name), None)),
+            _ => None,
+        },
+        ExprKind::Path(p, t) if t.is_empty() => single(p).map(|n| (n, None)),
+        _ => None,
+    }
+}

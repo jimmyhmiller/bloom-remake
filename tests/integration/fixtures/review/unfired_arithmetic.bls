@@ -1,0 +1,11 @@
+//! Slice 2 review: A rule with no valuation of its atoms raises no runtime error from its expressions.
+
+pub module M {
+    input go(k: u64);
+    table out(k: u64, z: u64);
+    look: on go(k), let y = 5 as u64, let z = y - 100 { emit out(k, z); }
+}
+spec S for M {
+    nodes N;
+    faults { eot: 2, eff: 1, crashes: 0, model: sync }
+}

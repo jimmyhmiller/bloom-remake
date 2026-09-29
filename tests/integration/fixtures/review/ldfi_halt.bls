@@ -1,0 +1,38 @@
+//! Slice 2 review: LDFI over a program that can halt is refused until halting is a modelled hazard.
+
+pub module M {
+    static peer(n: Node);
+    input go();
+    input setup();
+    input check();
+    channel ping();
+    table got();
+    table ok();
+
+    start: on go() {
+        for peer(n) {
+            send ping() to n;
+        }
+    }
+    recv: on ping() {
+        emit got();
+    }
+    init: on setup() {
+        emit ok();
+    }
+    stop: on check(), not got() {
+        emit halt(false);
+    }
+}
+
+spec H1 for M {
+    nodes A, B;
+    fact peer(B) @ A;
+    fact go() @ A at tick 1;
+    fact setup() @ B at tick 1;
+    fact check() @ B at tick 3;
+    faults { eot: 5, eff: 3, crashes: 0, model: sync }
+    view pre() = go() @ A at tick 1;
+    view post() = ok() @ B;
+    check ldfi expect holds;
+}

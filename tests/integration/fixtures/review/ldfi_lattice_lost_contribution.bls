@@ -1,0 +1,30 @@
+//! Slice 2 review: LDFI: losing one contribution to a cell makes a smaller cell row appear: {O(C,B,1)}.
+
+pub module M {
+    static peer(n: Node);
+    input go(v: u64);
+    channel val(v: u64);
+    table hi(k: u64, v: LMax<u64>);
+
+    start: on go(v) {
+        for peer(n) {
+            send val(v) to n;
+        }
+    }
+    recv: on val(v) {
+        emit hi(0, v);
+    }
+    view small() = hi(0, v) where not (v >= 10);
+}
+
+spec L4 for M {
+    nodes A, B, C;
+    fact peer(B) @ A;
+    fact peer(B) @ C;
+    fact go(5) @ A at tick 1;
+    fact go(20) @ C at tick 1;
+    faults { eot: 4, eff: 3, crashes: 0, model: sync }
+    view pre() = go(_) @ A at tick 1;
+    view post() = go(_) @ A at tick 1, not small() @ B;
+    check ldfi expect fails;
+}

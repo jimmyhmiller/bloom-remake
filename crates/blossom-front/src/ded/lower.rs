@@ -15,8 +15,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use blossom_artifact::ded::{
-    DedArtifact, DedEdge, DedRel, DedRelIdx, DedRelKind, EdgeTime, InputFact, OutcomeSpec, SpecFeed,
+use blossom_artifact::sim::{
+    EdgeTime, InputFact, LogicalEdge, LogicalIdx, LogicalKind, LogicalRel, OutcomeSpec, SimArtifact, SpecFeed,
 };
 use blossom_base::{
     ConstId, ConstructId, Diagnostic, Diagnostics, InternalError, QualName, RelId, RuleLabel, Span, Symbol, TypeId,
@@ -79,11 +79,11 @@ pub(crate) fn lower(
     types: &Types,
     deployment: &Deployment,
     diags: &mut Diagnostics,
-) -> Result<DedArtifact, DedError> {
-    let mut rels: Vec<DedRel> = model
+) -> Result<SimArtifact, DedError> {
+    let mut rels: Vec<LogicalRel> = model
         .rels
         .iter()
-        .map(|r| DedRel {
+        .map(|r| LogicalRel {
             name: r.name,
             arity: r.arity,
             kind: r.kind,
@@ -145,7 +145,7 @@ pub(crate) fn lower(
         };
         for atom in body_atoms(rule) {
             if let Some(from) = model.index(atom.rel.text).and_then(idx) {
-                edges.push(DedEdge {
+                edges.push(LogicalEdge {
                     from,
                     to,
                     time,
@@ -157,18 +157,25 @@ pub(crate) fn lower(
     edges.sort();
     edges.dedup();
 
-    Ok(DedArtifact {
+    Ok(SimArtifact {
         nodes: deployment.names.clone(),
+        roles: Vec::new(),
+        profile: blossom_artifact::sim::Profile::Molly,
         protocol,
         inputs,
+        ingress: Vec::new(),
+        statics: Vec::new(),
+        halt: None,
         rels,
         edges,
         spec,
+        // Molly programs make no seeded choices; the seed is recorded for uniformity.
+        seed: blossom_value::Seed::from_u64(0),
     })
 }
 
-fn idx(i: usize) -> Option<DedRelIdx> {
-    u32::try_from(i).ok().map(DedRelIdx)
+fn idx(i: usize) -> Option<LogicalIdx> {
+    u32::try_from(i).ok().map(LogicalIdx)
 }
 
 fn ir_internal(e: IrError) -> InternalError {
@@ -235,7 +242,7 @@ impl Values<'_> {
 fn facts(
     program: &Program,
     model: &Model,
-    rels: &[DedRel],
+    rels: &[LogicalRel],
     values: &Values<'_>,
     diags: &mut Diagnostics,
 ) -> Vec<InputFact> {
@@ -381,9 +388,14 @@ impl Lowerer {
             .map_err(ir_internal)
     }
 
-    fn protocol_relations(&mut self, model: &Model, types: &Types, rels: &mut [DedRel]) -> Result<(), InternalError> {
+    fn protocol_relations(
+        &mut self,
+        model: &Model,
+        types: &Types,
+        rels: &mut [LogicalRel],
+    ) -> Result<(), InternalError> {
         for (i, info) in model.rels.iter().enumerate() {
-            if info.kind != DedRelKind::Protocol {
+            if info.kind != LogicalKind::Protocol {
                 continue;
             }
             let cols: Vec<(usize, ColTy)> = (1..info.arity)
@@ -494,7 +506,7 @@ impl Lowerer {
         program: &Program,
         model: &Model,
         types: &Types,
-        rels: &mut [DedRel],
+        rels: &mut [LogicalRel],
     ) -> Result<Vec<SpecFeed>, InternalError> {
         // What the spec reads: protocol relations now and at fixed times, and the crash oracle.
         let mut now: BTreeSet<usize> = BTreeSet::new();
@@ -507,7 +519,7 @@ impl Lowerer {
                 let Some(i) = model.index(a.rel.text) else { continue };
                 let kind = model.rels.get(i).map(|r| r.kind);
                 match (kind, a.time) {
-                    (Some(DedRelKind::Spec), _) => {}
+                    (Some(LogicalKind::Spec), _) => {}
                     (_, Some(k)) => {
                         at.insert((i, k));
                     }
@@ -527,7 +539,7 @@ impl Lowerer {
                 .ok_or_else(|| internal_error!("relation table out of step"))?;
             let ded_idx = idx(i).ok_or_else(|| internal_error!("too many relations"))?;
             match info.kind {
-                DedRelKind::Spec => {
+                LogicalKind::Spec => {
                     let rel = self.declare(
                         info.name.as_str(),
                         RelClass::Idb,
@@ -537,7 +549,7 @@ impl Lowerer {
                     )?;
                     entry.spec = Some(rel);
                 }
-                DedRelKind::Crash | DedRelKind::Protocol if now.contains(&i) => {
+                LogicalKind::Crash | LogicalKind::Protocol if now.contains(&i) => {
                     let rel = self.declare(
                         info.name.as_str(),
                         RelClass::Event(EventSource::Input),
@@ -546,7 +558,7 @@ impl Lowerer {
                         info.first,
                     )?;
                     entry.spec = Some(rel);
-                    feeds.push(if info.kind == DedRelKind::Crash {
+                    feeds.push(if info.kind == LogicalKind::Crash {
                         SpecFeed::Crash { spec: rel }
                     } else {
                         SpecFeed::AtEot {
@@ -555,7 +567,7 @@ impl Lowerer {
                         }
                     });
                 }
-                DedRelKind::Crash | DedRelKind::Protocol => {}
+                LogicalKind::Crash | LogicalKind::Protocol => {}
             }
             for &(_, k) in at.range((i, 0)..=(i, u64::MAX)) {
                 let rel = self.declare(
@@ -580,7 +592,7 @@ impl Lowerer {
         &mut self,
         rule: &ast::Rule,
         model: &Model,
-        rels: &[DedRel],
+        rels: &[LogicalRel],
         values: &Values<'_>,
         labels: &mut Labels,
         diags: &mut Diagnostics,
@@ -669,7 +681,7 @@ impl Lowerer {
         &mut self,
         rule: &ast::Rule,
         model: &Model,
-        rels: &[DedRel],
+        rels: &[LogicalRel],
         values: &Values<'_>,
         labels: &mut Labels,
         diags: &mut Diagnostics,
@@ -706,7 +718,7 @@ impl Lowerer {
                     let r = rels_of(model, rels, a.rel.text)?;
                     let rel = match a.time {
                         None => r.spec,
-                        Some(k) if r.kind == DedRelKind::Spec => {
+                        Some(k) if r.kind == LogicalKind::Spec => {
                             diags.push(super::model::not_yet(
                                 &format!("`{}@{k}`: reading a spec relation at a fixed time", a.rel.text),
                                 a.span,
@@ -946,6 +958,7 @@ fn attrs() -> RelAttrs {
     RelAttrs {
         nondet: None,
         deterministic: false,
+        monotone: false,
         final_output: false,
         atomic: false,
         handler: None,
@@ -973,7 +986,7 @@ fn col_ty(types: &Types, rel: usize, col: usize) -> Result<ColTy, InternalError>
         .ok_or_else(|| internal_error!("no inferred type for column {col} of relation {rel}"))
 }
 
-fn rels_of<'r>(model: &Model, rels: &'r [DedRel], name: Symbol) -> Result<&'r DedRel, InternalError> {
+fn rels_of<'r>(model: &Model, rels: &'r [LogicalRel], name: Symbol) -> Result<&'r LogicalRel, InternalError> {
     model
         .index(name)
         .and_then(|i| rels.get(i))

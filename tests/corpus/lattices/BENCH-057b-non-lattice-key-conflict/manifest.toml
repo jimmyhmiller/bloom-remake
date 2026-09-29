@@ -30,9 +30,7 @@ rel  = "claim"
 rows = [["a", "bob", 9]]
 
 [backend.oracle]
-status = "unimplemented"
-unimplemented = ["LANG-020", "LANG-121", "LANG-122", "LANG-124", "SEM-050", "SEM-100"]
-until = "M6"
+status = "pass"
 
 [backend.interp]
 status = "unimplemented"

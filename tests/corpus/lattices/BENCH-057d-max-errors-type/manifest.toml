@@ -10,9 +10,7 @@ expected_from = "literature"
 notes    = "The statement on line 11 merges a String into an LMax<i64>; the type checker rejects it with BLS0300."
 
 [backend.compile]
-status = "unimplemented"
-unimplemented = ["LANG-021", "LANG-120", "LANG-124", "ANA-005"]
-until = "M5"
+status = "pass"
 
 [[expect_diag]]
 code     = "BLS0300"

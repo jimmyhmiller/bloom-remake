@@ -30,9 +30,7 @@ rel  = "deposit"
 rows = [["a", 5, "x"], ["b", 1, "z"]]
 
 [backend.oracle]
-status = "unimplemented"
-unimplemented = ["LANG-020", "LANG-121", "LANG-122", "LANG-124", "SEM-030", "SEM-050", "SEM-100", "SEM-103"]
-until = "M6"
+status = "pass"
 
 [backend.interp]
 status = "unimplemented"

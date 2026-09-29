@@ -592,6 +592,7 @@ impl Remap for RelAttrs {
         Self {
             nondet: self.nondet.remap(m),
             deterministic: self.deterministic.remap(m),
+            monotone: self.monotone.remap(m),
             final_output: self.final_output.remap(m),
             atomic: self.atomic.remap(m),
             handler: self.handler.remap(m),
@@ -905,6 +906,7 @@ impl Remap for BuiltinFn {
             Self::RoleOf => Self::RoleOf,
             Self::Size { role } => Self::Size { role: role.remap(m) },
             Self::Len => Self::Len,
+            Self::Concat => Self::Concat,
             Self::Contains => Self::Contains,
             Self::Keys => Self::Keys,
             Self::Values => Self::Values,
@@ -951,9 +953,10 @@ impl Remap for ConstructKind {
             },
             Self::Outer => Self::Outer,
             Self::Any => Self::Any,
-            Self::Forall { fa, miss } => Self::Forall {
+            Self::Forall { fa, miss, closed } => Self::Forall {
                 fa: fa.remap(m),
                 miss: miss.remap(m),
+                closed: *closed,
             },
             Self::DeltaRead { rel, prev } => Self::DeltaRead {
                 rel: rel.remap(m),
@@ -962,6 +965,7 @@ impl Remap for ConstructKind {
             Self::Interpose => Self::Interpose,
             Self::Localize => Self::Localize,
             Self::DedRelation { rel } => Self::DedRelation { rel: rel.remap(m) },
+            Self::Members { role } => Self::Members { role: role.remap(m) },
             Self::Invariant { id } => Self::Invariant { id: id.remap(m) },
             Self::SpecOracle => Self::SpecOracle,
             Self::Service { id } => Self::Service { id: id.remap(m) },

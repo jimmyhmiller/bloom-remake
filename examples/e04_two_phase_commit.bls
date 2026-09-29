@@ -146,3 +146,13 @@ role Coord;
 role Worker: cluster;
 
 import TwoPhaseCommit(TIMEOUT = 2s) as tpc with (Client = App, Coordinator = Coord, Participant = Worker);
+
+at Worker {
+    /// The local resource manager's refusals, fed by the host: the instance's `refuse` input is written by its
+    /// importer (LANGUAGE §7.6).
+    input refuse(txn: u64);
+
+    refusal: on refuse(t) {
+        emit tpc.refuse(t);
+    }
+}

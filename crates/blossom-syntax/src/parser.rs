@@ -667,6 +667,9 @@ impl Parser<'_> {
             if self.eat(AT) {
                 self.expr(5);
             }
+            if self.eat_ctx("from") {
+                self.expr(5);
+            }
             if self.eat_ctx("at") {
                 self.expect_ctx("tick");
                 self.expr(5);

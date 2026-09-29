@@ -1,0 +1,99 @@
+//! E2 under LDFI: the reliable broadcast of `e02_reliable_broadcast.bls` in a three-node group, checked with Molly's
+//! delivery property, next to a configuration that never retries within the run.
+//!
+//! Only the origin retransmits (bud-sandbox's ReliableDelivery), so the `.ded` counterpart is Molly's `retry_deliv`
+//! (tests/corpus/ldfi/molly): no counterexample without crashes (6/3/0, BENCH-130c; 25/23/0, BENCH-130d), and with
+//! one crash the origin can die after a lost first send, leaving a member without the message that another member
+//! delivered (4/2/1, BENCH-130f: falsifiers {C(a,2), O(a,b,1)} and {C(a,2), O(a,c,1)}). Sending once, like
+//! `simple_deliv`, loses a message at 4/2/0 (BENCH-130b). This file is a library of modules and specs: it has no
+//! `program` header.
+
+use e02_reliable_broadcast::{ReliableBroadcast, MsgId};
+
+/// Every member runs one instance of the broadcast; `start` asks a node to broadcast.
+pub module Group {
+    static member(n: Node);
+    input start(id: MsgId, payload: String);
+    /// What each node delivered.
+    table log(origin: Node, id: MsgId, payload: String);
+
+    import ReliableBroadcast<String>(RETRY = 1s) as rb;
+
+    join: while member(n) {
+        emit rb.members(n);
+    }
+    go: on start(id, p) {
+        emit rb.bcast(id, p);
+    }
+    got: on rb.deliver(o, id, p) {
+        emit log(o, id, p);
+    }
+}
+
+/// The same group with a retry period far beyond the run: every message is sent once.
+pub module OneShotGroup {
+    static member(n: Node);
+    input start(id: MsgId, payload: String);
+    table log(origin: Node, id: MsgId, payload: String);
+
+    import ReliableBroadcast<String>(RETRY = 1h) as rb;
+
+    join: while member(n) {
+        emit rb.members(n);
+    }
+    go: on start(id, p) {
+        emit rb.bcast(id, p);
+    }
+    got: on rb.deliver(o, id, p) {
+        emit log(o, id, p);
+    }
+}
+
+/// Three members; A broadcasts at tick 1.
+spec Clique {
+    nodes A, B, C;
+    fact member(A);
+    fact member(B);
+    fact member(C);
+    fact start(1, "hello") @ A at tick 1;
+}
+
+/// Molly's delivery property (deliv_assert), under CR-20 (see e10's DelivAssert): if a node other than the
+/// broadcaster delivered a message and did not crash, every live member delivered it.
+spec Delivered {
+    view missing(a, o, id) = log(o, id, _) @ x, member(a) @ x, not log(o, id, _) @ a, not crashed(a);
+    view pre(x, o, id) = log(o, id, _) @ x, not start(id, _) @ x at tick 1, not crashed(x);
+    view post(x, o, id) = log(o, id, _) @ x, not missing(_, o, id);
+}
+
+/// Retransmitting every round until acknowledged survives any omissions before EFF (retry_deliv 6/3/0).
+spec RetryFaults for Group {
+    include Clique;
+    include Delivered;
+    faults { eot: 6, eff: 3, crashes: 0, model: sync, round: 1s }
+    check ldfi expect holds;
+}
+
+/// The same over a long run (retry_deliv 25/23/0).
+spec RetryLongFaults for Group {
+    include Clique;
+    include Delivered;
+    faults { eot: 25, eff: 23, crashes: 0, model: sync, round: 1s }
+    check ldfi expect holds;
+}
+
+/// One crash: the origin dies after losing its first send to one member (retry_deliv 4/2/1).
+spec RetryCrashFaults for Group {
+    include Clique;
+    include Delivered;
+    faults { eot: 4, eff: 2, crashes: 1, model: sync, round: 1s }
+    check ldfi expect fails;
+}
+
+/// Without retransmission, one lost message is a counterexample (simple_deliv 4/2/0).
+spec OneShotFaults for OneShotGroup {
+    include Clique;
+    include Delivered;
+    faults { eot: 4, eff: 2, crashes: 0, model: sync, round: 1s }
+    check ldfi expect fails;
+}

@@ -2,14 +2,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use blossom_artifact::ded::DedArtifact;
+use blossom_artifact::sim::SimArtifact;
 use blossom_base::internal_error;
 use blossom_oracle::Row;
 use blossom_prov::{GoalId, GoalKey, ProvGraph, Space};
 use blossom_sat::select_backend;
 use blossom_sim::FaultSchedule;
 use blossom_sim::SyncRun;
-use blossom_sim::ded::{DedSim, Outcome, is_good};
+use blossom_sim::spec::{Outcome, SpecSim, is_good};
 
 use crate::LdfiError;
 use crate::faults::{FailureSpec, order_key};
@@ -120,11 +120,11 @@ pub struct SearchStats {
 /// The read-only state every hypothesis is processed against. Processing a hypothesis is a pure function of its
 /// fault set, so workers can process hypotheses in any order and on any thread.
 struct Search<'a> {
-    sim: &'a DedSim<'a>,
-    artifact: &'a DedArtifact,
+    sim: &'a SpecSim<'a>,
+    artifact: &'a SimArtifact,
     config: &'a LdfiConfig,
     preds: Preds,
-    rules: lineage::DedRules<'a>,
+    rules: lineage::ArtifactRules<'a>,
 }
 
 /// What processing one hypothesis found.
@@ -135,8 +135,16 @@ enum Processed {
 }
 
 impl<'a> Search<'a> {
-    fn new(sim: &'a DedSim<'a>, config: &'a LdfiConfig) -> Result<Search<'a>, LdfiError> {
+    fn new(sim: &'a SpecSim<'a>, config: &'a LdfiConfig) -> Result<Search<'a>, LdfiError> {
         let artifact = sim.artifact();
+        if artifact.profile.frozen() && config.negative_support == crate::hazard::NegSupport::Conservative {
+            // Relation-level support does not account for the state a frozen crash preserves.
+            return Err(blossom_base::unimplemented_error!(
+                "TEST-025",
+                "relation-level negative support under the frozen crash view (use precise)"
+            )
+            .into());
+        }
         if artifact.spec.is_none() {
             return Err(LdfiError::NoSpec);
         }
@@ -152,7 +160,7 @@ impl<'a> Search<'a> {
             artifact,
             config,
             preds: Preds::of(artifact),
-            rules: lineage::DedRules::new(artifact)?,
+            rules: lineage::ArtifactRules::new(artifact)?,
         })
     }
 
@@ -165,7 +173,7 @@ impl<'a> Search<'a> {
     }
 
     fn graph(&self, run: &SyncRun, outcome: &Outcome) -> Result<ProvGraph, LdfiError> {
-        Ok(lineage::build(self.artifact, run, outcome)?)
+        lineage::build(self.artifact, run, outcome)
     }
 
     fn post_goal(&self, graph: &ProvGraph, row: &Row) -> Result<Option<GoalId>, LdfiError> {
@@ -209,6 +217,7 @@ impl<'a> Search<'a> {
             preds: &self.preds,
             neg: self.config.negative_support,
             rules: Some(&self.rules),
+            frozen: self.artifact.profile.frozen(),
         };
         let found = crate::hazard::minimal_extensions(graph, setting, solver.as_mut(), seed, &targets)?;
         let admitted = found
@@ -288,7 +297,7 @@ impl<'s> Queue<'s> {
 /// LDFI on a compiled `.ded` program (ARCHITECTURE §8.5): the lineage-driven search, falling back on exhaustive
 /// certification (see [`LdfiConfig::exhaustive_fallback`]) when it runs out of runs, or when it finds no
 /// counterexample but its lineage was incomplete, so that it cannot certify the program by itself.
-pub fn run(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, LdfiError> {
+pub fn run(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, LdfiError> {
     let (runs, why) = match lineage_search(sim, config) {
         Err(LdfiError::RunBudget(runs)) => (runs, Fallback::RunBudget),
         Err(LdfiError::Incomplete) => (0, Fallback::IncompleteLineage),
@@ -305,7 +314,7 @@ pub fn run(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, LdfiErro
 
 /// Exhaustive certification after the lineage-driven search gave up.
 fn certify_exhaustively(
-    sim: &DedSim<'_>,
+    sim: &SpecSim<'_>,
     config: &LdfiConfig,
     runs: u64,
     why: Fallback,
@@ -360,7 +369,7 @@ fn certify_exhaustively(
 /// the counterexamples and the run count never depend on thread timing. With `config.workers > 1`, worker threads
 /// process the next hypotheses in the queue speculatively (TEST-033: hypotheses run in parallel); a result is used
 /// when its hypothesis reaches the head of the queue.
-fn lineage_search(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, LdfiError> {
+fn lineage_search(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, LdfiError> {
     let search = Search::new(sim, config)?;
     let (ff_run, ff) = search.execute(&FaultSchedule::default())?;
     let ff_graph = search.graph(&ff_run, &ff)?;
@@ -489,7 +498,7 @@ fn lineage_search(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, L
 /// The Appendix-B-minimal falsifiers of the failure-free run's `post` goals, unioned over the goals (TEST-028): for
 /// each goal, the admissible fault sets after which it no longer holds at EOT, minimal by the clock facts they
 /// remove. Each goal is searched like LDFI does, with a concrete run confirming every candidate.
-pub fn falsifiers(sim: &DedSim<'_>, config: &LdfiConfig) -> Result<Vec<FaultSchedule>, LdfiError> {
+pub fn falsifiers(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<Vec<FaultSchedule>, LdfiError> {
     let search = Search::new(sim, config)?;
     let (ff_run, ff) = search.execute(&FaultSchedule::default())?;
     let ff_graph = search.graph(&ff_run, &ff)?;

@@ -59,6 +59,7 @@ fn extensions(g: &ProvGraph, spec: &FailureSpec, seed: FaultSchedule, target: Go
     let preds = Preds::default();
     let mut solver = select_backend("cadical-plain").unwrap();
     let setting = crate::hazard::Setting {
+        frozen: false,
         spec,
         preds: &preds,
         neg: crate::NegSupport::Conservative,

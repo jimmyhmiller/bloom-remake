@@ -14,20 +14,18 @@
 //! nothing is skipped. `--gate` fails every case of the slice's gate that does not pass: for S1, every `oracle` and
 //! `ldfi` backend of `tests/corpus/ldfi`.
 
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use blossom_artifact::ded::DedArtifact;
+use blossom_artifact::sim::SimArtifact;
 use blossom_driver::ded::compile_files;
 use blossom_driver::render::render;
 use blossom_front::ded::DedError;
 use blossom_ldfi::report::fault_labels;
 use blossom_ldfi::{FailureSpec, LdfiConfig, Verdict, falsifiers};
-use blossom_sim::FaultSchedule;
-use blossom_sim::ded::DedSim;
+use blossom_sim::spec::SpecSim;
 use blossom_value::time::Tick;
 use blossom_value::types::IntTy;
 use blossom_value::value::IntValue;
@@ -66,7 +64,7 @@ pub struct Args {
 
 /// What running one backend of one case found.
 #[derive(Debug)]
-enum Outcome {
+pub(super) enum Outcome {
     Pass(String),
     Fail(String),
     /// The build cannot run this backend for this case.
@@ -171,6 +169,8 @@ pub fn run(args: Args) -> ExitCode {
                 }
                 (Outcome::NotRunnable(why), _) => {
                     counts.2 += 1;
+                    let first = why.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                    println!("n/a   {name} [{backend}] {first}");
                     if args.gate && in_gate {
                         problems.push(format!(
                             "{name} [{backend}]: in the {milestone} gate but not runnable: {why}"
@@ -201,6 +201,24 @@ pub fn run(args: Args) -> ExitCode {
 }
 
 /// Whether a backend of a case belongs to the current slice's gate (docs/design/SLICES.md).
+/// Slice 2's Blossom subset (docs/design/SLICES.md, slice 2; docs/plan/notes/S2.md): the FEATURES ids the `.bls`
+/// frontend and the oracle implement. A `core/` or `async/` case whose language features all lie here is in the gate.
+const S2_SUBSET: &[&str] = &[
+    // Programs, declarations, handlers, views, statements, bodies, expressions, aggregates, facts and bootstrap.
+    "LANG-020", "LANG-023", "LANG-040", "LANG-041", "LANG-042", "LANG-043", "LANG-045", "LANG-046", "LANG-047",
+    "LANG-052", "LANG-060", "LANG-061", "LANG-062", "LANG-063", "LANG-064", "LANG-065", "LANG-066", "LANG-067",
+    "LANG-069", "LANG-080", "LANG-081", "LANG-082", "LANG-083", "LANG-084", "LANG-085", "LANG-086", "LANG-088",
+    "LANG-089", "LANG-090", "LANG-100", "LANG-101", "LANG-190",
+    // Lattices (the core built-ins), locations and roles, timers, invariants, `.ded` includes, the directory, senders.
+    "LANG-120", "LANG-121", "LANG-122", "LANG-123", "LANG-124", "LANG-125", "LANG-126", "LANG-127", "LANG-128",
+    "LANG-280", "LANG-150", "LANG-152", "LANG-153", "LANG-172", "LANG-200", "LANG-220", "LANG-240", "LANG-241",
+    // Semantics the oracle realizes.
+    "SEM-003", "SEM-004", "SEM-005", "SEM-006", "SEM-007", "SEM-008", "SEM-012", "SEM-013", "SEM-020", "SEM-021",
+    "SEM-022", "SEM-031", "SEM-050", "SEM-060", "SEM-061", "SEM-101", "SEM-103",
+    // The engine behaviors those cases pin (persistence, fixpoints, lattice evaluation, keys).
+    "ENG-003", "ENG-004", "ENG-041", "ENG-042", "ENG-043", "ENG-062", "ENG-067",
+];
+
 fn gate_scope(milestone: &str, area: &str, case: &str, features: &[String], backend: &str) -> bool {
     // The P1 search reductions behind Molly's published run counts (single-shot mode, vacuity pruning, symmetry)
     // are not built yet; cases that list them wait for them (SLICES.md, slice 1, "Stretch").
@@ -214,6 +232,18 @@ fn gate_scope(milestone: &str, area: &str, case: &str, features: &[String], back
                 && (backend == "oracle" || backend == "ldfi")
                 && !case.starts_with("BENCH-133d")
                 && !needs_p1_reductions
+        }
+        // Analyses (ANA) and verification tooling (TEST, VER) are other backends' concerns: the oracle case runs
+        // without them.
+        "S2" => {
+            (area == "core" || area == "async")
+                && (backend == "oracle" || backend == "compile")
+                && features.iter().all(|f| {
+                    f.starts_with("ANA-")
+                        || f.starts_with("TEST-")
+                        || f.starts_with("VER-")
+                        || S2_SUBSET.contains(&f.as_str())
+                })
         }
         _ => false,
     }
@@ -280,8 +310,16 @@ fn run_backend(case: &Path, m: &toml::Table, backend: &str, workers: usize, max_
     let Some(program) = m.get("program").and_then(toml::Value::as_str) else {
         return Outcome::NotRunnable("multi-program cases arrive with slice 2".into());
     };
+    if program.ends_with(".bls") {
+        if m.contains_key("include") || m.contains_key("spec") {
+            return Outcome::NotRunnable(
+                "`.bls` cases with extra sources or a spec file arrive with a later slice".into(),
+            );
+        }
+        return super::corpus_bls::run(case, m, program, backend);
+    }
     if !program.ends_with(".ded") {
-        return Outcome::NotRunnable("`.bls` programs arrive with slice 2".into());
+        return Outcome::Fail(format!("`{program}` is neither a `.bls` nor a `.ded` program"));
     }
     let mut files = vec![case.join(program)];
     if let Some(extra) = m.get("include").and_then(toml::Value::as_array) {
@@ -290,11 +328,12 @@ fn run_backend(case: &Path, m: &toml::Table, backend: &str, workers: usize, max_
     match backend {
         "oracle" => oracle_backend(&files, m),
         "ldfi" => ldfi_backend(&files, m, workers, max_runs),
+        "compile" => ded_compile_backend(&files, m),
         other => Outcome::NotRunnable(format!("the `{other}` backend arrives with a later slice")),
     }
 }
 
-fn compile(files: &[PathBuf], nodes: &[String]) -> Result<DedArtifact, Outcome> {
+fn compile(files: &[PathBuf], nodes: &[String]) -> Result<SimArtifact, Outcome> {
     let files: Vec<String> = files.iter().map(|f| f.to_string_lossy().into_owned()).collect();
     let file_refs: Vec<&str> = files.iter().map(String::as_str).collect();
     let node_refs: Vec<&str> = nodes.iter().map(String::as_str).collect();
@@ -312,6 +351,26 @@ fn compile(files: &[PathBuf], nodes: &[String]) -> Result<DedArtifact, Outcome> 
         }
         Err(e) => Err(Outcome::Fail(e.to_string())),
     }
+}
+
+/// The `.ded` frontend and the stratification check against `[[expect_diag]]`, exactly as a multiset.
+fn ded_compile_backend(files: &[PathBuf], m: &toml::Table) -> Outcome {
+    let files: Vec<String> = files.iter().map(|f| f.to_string_lossy().into_owned()).collect();
+    let file_refs: Vec<&str> = files.iter().map(String::as_str).collect();
+    let (result, sources) = compile_files(&file_refs, &[]);
+    let diags: Vec<blossom_base::Diagnostic> = match result {
+        Ok(a) => match blossom_analysis::strata::check(a.protocol.get()) {
+            Ok(d) => d.iter().cloned().collect(),
+            Err(e) => return Outcome::Fail(e.to_string()),
+        },
+        Err(DedError::Rejected(d)) => d.iter().cloned().collect(),
+        Err(e) => return Outcome::Fail(e.to_string()),
+    };
+    if diags.iter().any(blossom_driver::render::is_not_implemented) {
+        let text: String = diags.iter().map(|x| render(x, &sources)).collect();
+        return Outcome::NotRunnable(text);
+    }
+    super::corpus_bls::compare_diags(&diags, &sources, m)
 }
 
 fn strings(v: Option<&toml::Value>) -> Vec<String> {
@@ -345,97 +404,42 @@ fn oracle_backend(files: &[PathBuf], m: &toml::Table) -> Outcome {
         Ok(a) => a,
         Err(o) => return o,
     };
-    let sim = match DedSim::new(&artifact) {
+    let sim = match SpecSim::new(&artifact) {
         Ok(s) => s,
         Err(e) => return Outcome::Fail(e.to_string()),
     };
-    let run = match sim.run(Tick(last), &FaultSchedule::default(), false) {
+    let schedule = match super::corpus_bls::faults(&artifact, m) {
+        Ok(f) => f,
+        Err(o) => return o,
+    };
+    // The synchronous harness follows CR-20 (a crashed node is frozen); Molly's view is LDFI's.
+    let run = match sim.run_with_view(Tick(last), &schedule, false, blossom_sim::CrashView::Frozen) {
         Ok(r) => r,
         Err(e) => return Outcome::Fail(e.to_string()),
     };
     let mut bad = Vec::new();
     let mut checked = 0;
     for x in m.get("expect").and_then(toml::Value::as_array).into_iter().flatten() {
-        let (Some(node_name), Some(rel_name)) = (
-            x.get("node").and_then(toml::Value::as_str),
-            x.get("rel").and_then(toml::Value::as_str),
-        ) else {
-            continue;
-        };
-        let Some(node) = artifact.node_id(node_name) else {
-            return Outcome::Fail(format!("unknown node `{node_name}`"));
-        };
-        let Some(rel) = artifact
-            .rels
-            .iter()
-            .find(|r| r.name.as_str() == rel_name)
-            .and_then(|r| r.protocol)
-        else {
-            return Outcome::Fail(format!("`{rel_name}` is not a protocol relation"));
-        };
-        let program = artifact.protocol.get();
-        let types: Vec<TypeDef> = program
-            .rels
-            .get(rel)
-            .map(|d| {
-                d.schema
-                    .cols
-                    .iter()
-                    .filter_map(|c| program.types.get(c.ty).cloned())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let decode = |row: &toml::Value| -> Option<Vec<Value>> {
-            let items = row.as_array()?;
-            if items.len() != types.len() {
-                return None;
-            }
-            items
-                .iter()
-                .zip(&types)
-                .map(|(v, ty)| value(&artifact, v, ty))
-                .collect()
-        };
-        let at = |t: u64| -> BTreeSet<Vec<Value>> {
-            run.node_tick(Tick(t), node)
-                .map(|nt| nt.instance.rows(rel).map(|r| r.to_vec()).collect())
-                .unwrap_or_default()
-        };
         checked += 1;
-        if let Some(t) = x.get("tick").and_then(toml::Value::as_integer) {
-            let Ok(t) = u64::try_from(t) else { continue };
-            let want: Option<BTreeSet<Vec<Value>>> = x
-                .get("rows")
-                .and_then(toml::Value::as_array)
-                .map(|rows| rows.iter().map(decode).collect())
-                .unwrap_or(None);
-            match want {
-                Some(want) if at(t) == want => {}
-                Some(_) => bad.push(format!("{rel_name}@{node_name} tick {t}: rows differ")),
-                None => bad.push(format!(
-                    "{rel_name}@{node_name}: rows do not match the relation's columns"
-                )),
-            }
-            continue;
+        if let Err(e) = super::corpus_bls::expect(&artifact, &run, last, x) {
+            bad.push(e);
         }
-        let Some(row) = x.get("row").and_then(decode) else {
-            bad.push(format!(
-                "{rel_name}@{node_name}: row does not match the relation's columns"
-            ));
-            continue;
-        };
-        for (key, present) in [("holds", true), ("absent", false)] {
-            if let Some(range) = x.get(key) {
-                for t in ticks_of(range, last) {
-                    if at(t).contains(&row) != present {
-                        bad.push(format!(
-                            "{rel_name}{row:?}@{node_name} tick {t}: expected {}",
-                            if present { "present" } else { "absent" }
-                        ));
-                    }
-                }
-            }
+    }
+    for x in m
+        .get("expect_send")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        checked += 1;
+        if let Err(e) = super::corpus_bls::expect_send(&artifact, &run, x) {
+            bad.push(e);
         }
+    }
+    if m.contains_key("expect_error") {
+        bad.push(
+            "[[expect_error]] is not checked for `.ded` programs, whose runs have no runtime errors to expect".into(),
+        );
     }
     if bad.is_empty() {
         Outcome::Pass(format!("{checked} expectation(s) hold"))
@@ -444,8 +448,55 @@ fn oracle_backend(files: &[PathBuf], m: &toml::Table) -> Outcome {
     }
 }
 
+impl super::corpus_bls::Subject for SimArtifact {
+    fn node(&self, name: &str) -> Option<blossom_value::time::NodeId> {
+        self.node_id(name)
+    }
+    fn node_name(&self, n: blossom_value::time::NodeId) -> String {
+        self.nodes
+            .get(n.0 as usize)
+            .map_or_else(|| "?".to_owned(), |s| s.as_str().to_owned())
+    }
+    fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+    fn rel(&self, name: &str) -> Result<blossom_base::RelId, String> {
+        self.rels
+            .iter()
+            .find(|r| r.name.as_str() == name)
+            .and_then(|r| r.protocol)
+            .ok_or_else(|| format!("`{name}` is not a protocol relation"))
+    }
+    fn channel(&self, name: &str) -> Result<blossom_base::RelId, String> {
+        self.rels
+            .iter()
+            .find(|r| r.name.as_str() == name)
+            .and_then(|r| r.channel)
+            .ok_or_else(|| format!("`{name}` is not sent with `@async`"))
+    }
+    /// A row without Molly's location column; a channel's destination column (0) is left open.
+    fn row(&self, rel: blossom_base::RelId, v: &toml::Value) -> Result<Vec<Option<Value>>, String> {
+        let program = self.protocol.get();
+        let decl = program.rels.get(rel).ok_or("unknown relation")?;
+        let is_channel = self.rels.iter().any(|r| r.channel == Some(rel));
+        let items = v.as_array().ok_or_else(|| format!("row {v} is not an array"))?;
+        let skip = usize::from(is_channel);
+        if items.len() + skip != decl.schema.cols.len() {
+            return Err(format!("row {v} does not match the relation's columns"));
+        }
+        let mut out = vec![None; skip];
+        for (x, c) in items.iter().zip(decl.schema.cols.iter().skip(skip)) {
+            let ty = program.types.get(c.ty).ok_or("unknown type")?;
+            out.push(Some(
+                value(self, x, ty).ok_or_else(|| format!("{x} does not decode as {ty:?}"))?,
+            ));
+        }
+        Ok(out)
+    }
+}
+
 /// A manifest value decoded by the column's type (PLAN §5.1): strings in node columns name nodes.
-fn value(a: &DedArtifact, v: &toml::Value, ty: &TypeDef) -> Option<Value> {
+fn value(a: &SimArtifact, v: &toml::Value, ty: &TypeDef) -> Option<Value> {
     Some(match (v, ty) {
         (toml::Value::Integer(i), TypeDef::Int(IntTy::U64)) => Value::Int(IntValue::U64(u64::try_from(*i).ok()?)),
         (toml::Value::Integer(i), TypeDef::Int(IntTy::I64)) => Value::Int(IntValue::I64(*i)),
@@ -453,26 +504,6 @@ fn value(a: &DedArtifact, v: &toml::Value, ty: &TypeDef) -> Option<Value> {
         (toml::Value::String(s), TypeDef::Str) => Value::Str(s.as_str().into()),
         _ => return None,
     })
-}
-
-/// `k`, `a..=b`, `a..` (to the last tick) or `..=b` (from tick 0).
-fn ticks_of(range: &toml::Value, last: u64) -> Vec<u64> {
-    let text = match range {
-        toml::Value::Integer(i) => return u64::try_from(*i).map(|t| vec![t]).unwrap_or_default(),
-        toml::Value::String(s) => s.clone(),
-        _ => return Vec::new(),
-    };
-    match text.split_once("..") {
-        None => text.parse().map(|t| vec![t]).unwrap_or_default(),
-        Some((lo, hi)) => {
-            let lo = if lo.is_empty() { 0 } else { lo.parse().unwrap_or(0) };
-            let hi = match hi.strip_prefix('=') {
-                Some(h) => h.parse().unwrap_or(last),
-                None => last,
-            };
-            (lo..=hi).collect()
-        }
-    }
 }
 
 fn ldfi_backend(files: &[PathBuf], m: &toml::Table, workers: usize, max_runs: u64) -> Outcome {
@@ -507,7 +538,7 @@ fn ldfi_backend(files: &[PathBuf], m: &toml::Table, workers: usize, max_runs: u6
     let mut config = LdfiConfig::new(spec);
     config.workers = workers;
     config.max_runs = max_runs;
-    let sim = match DedSim::new(&artifact) {
+    let sim = match SpecSim::new(&artifact) {
         Ok(s) => s,
         Err(e) => return Outcome::Fail(e.to_string()),
     };

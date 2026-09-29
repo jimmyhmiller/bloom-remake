@@ -26,10 +26,7 @@ rows = [["a", "b", 20], ["a", "b", 21], ["b", "a", 5], ["b", "a", 8], ["b", "c",
         ["a", "c", 35], ["d", "a", 15], ["d", "b", 5]]
 
 [backend.oracle]
-status = "unimplemented"
-unimplemented = ["LANG-040", "LANG-121", "LANG-122", "LANG-124", "LANG-125", "LANG-128", "SEM-030", "SEM-031",
-                 "SEM-032", "SEM-103"]
-until = "M5"
+status = "pass"
 
 [backend.interp]
 status = "unimplemented"

@@ -3,8 +3,9 @@
 //! validity checker. Deliberately independent of the kernel, the engine, the planner and the analyses.
 //!
 //! See ARCHITECTURE §1.2 and §11.2. Implemented by slice 1 (docs/design/SLICES.md) for the constructs the `.ded`
-//! frontend produces; WP M4.1's remaining constructs (lattice columns, weighted relations, choices, lookups,
-//! generators) fail with `Unimplemented`.
+//! frontend produces and by slice 2 for the Blossom subset: lattice-valued relations over the core built-in lattices
+//! (merged per key, SEM-100), lookups, lattice operations, collections and generators. WP M4.1's remaining
+//! constructs (weighted relations, choices, the other lattices) fail with `Unimplemented`.
 //!
 //! The oracle is the executable definition of one node's tick (ARCHITECTURE §11.2):
 //!
@@ -17,6 +18,7 @@
 //! With capture on, every distinct rule firing is reported as a [`FiringRecord`] (Tier C with the literal profile,
 //! ARCHITECTURE §4.9): that is what provenance graphs and LDFI are built from.
 
+mod cells;
 mod eval;
 mod expr;
 mod plan;
@@ -28,12 +30,13 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use blossom_base::{InternalError, RelId, RuleId, Unimplemented};
+use blossom_base::{InternalError, RelId, RoleId, RuleId, Unimplemented};
 use blossom_ir::ValidatedProgram;
 use blossom_ir::obs::{FiringRecord, ProgramErrorRecord};
 use blossom_value::{
     Value,
-    time::{NodeId, Tick},
+    time::{Instant, NodeId, Tick},
+    value::SessionId,
 };
 
 pub use strata::Stratum;
@@ -85,18 +88,39 @@ pub struct Send {
     pub row: Row,
 }
 
+/// A message from an external client session on a channel whose source role is `external` (LANGUAGE §18.4).
+/// Column 0 of `row` is the destination, the node itself.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Ingress {
+    pub rel: RelId,
+    pub session: SessionId,
+    pub row: Row,
+}
+
+/// A reply to an external client session: column 0 of `row` is the session.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Egress {
+    pub rel: RelId,
+    pub session: SessionId,
+    pub row: Row,
+}
+
 /// Everything one tick of one node reads.
 #[derive(Clone, Debug)]
 pub struct TickInput<'a> {
     /// `$self`.
     pub node: NodeId,
     pub tick: Tick,
+    /// `$now`: the tick's clock sample.
+    pub now: Instant,
     /// Last tick's `@next` heads.
     pub carried: &'a Instance,
     /// The tick's input events.
     pub events: &'a [(RelId, Row)],
     /// The channel tuples delivered this tick.
     pub delivered: &'a [Delivery],
+    /// The messages client sessions sent this tick.
+    pub ingress: &'a [Ingress],
     /// Whether to report the tick's firings.
     pub capture: bool,
 }
@@ -108,8 +132,10 @@ pub struct TickOutput {
     pub instance: Instance,
     /// The inductive heads: next tick's carried state.
     pub next: Instance,
-    /// The async heads.
+    /// The async heads to nodes.
     pub outbox: BTreeSet<Send>,
+    /// The async heads to client sessions.
+    pub egress: BTreeSet<Egress>,
     /// The distinct firings of the tick, in evaluation order (deterministic); empty unless capture was requested.
     pub firings: Vec<FiringRecord>,
 }
@@ -151,6 +177,15 @@ pub struct Oracle {
     asynchronous: Vec<RuleId>,
     statics: Instance,
     limits: Limits,
+    /// The built-in lattice of each declared lattice, by id.
+    kinds: Vec<Option<blossom_lattice::Kind>>,
+    /// How the rows of each lattice-valued relation merge.
+    cells: BTreeMap<RelId, cells::CellInfo>,
+    /// The choice seed σc every node shares (SEM-084), for seeded choices and resolution policies.
+    choice: Option<blossom_value::Seed>,
+    /// Each node's role, for the `$role(R)` guards of rules placed at a role (LANGUAGE §6.10). Empty for a
+    /// role-free program.
+    roles: Vec<Option<RoleId>>,
 }
 
 impl Oracle {
@@ -176,7 +211,12 @@ impl Oracle {
             }
         }
         let statics = eval::statics(program.get())?;
+        let kinds = cells::kinds(program.get());
+        let cells = cells::cells(program.get(), &kinds)?;
         Ok(Oracle {
+            kinds,
+            cells,
+            choice: None,
             program,
             strata,
             plans,
@@ -184,7 +224,37 @@ impl Oracle {
             asynchronous,
             statics,
             limits,
+            roles: Vec::new(),
         })
+    }
+
+    /// Places the deployment's nodes: `roles[n]` is node `n`'s role. A rule placed at a role runs only on that
+    /// role's nodes.
+    pub fn with_roles(mut self, roles: Vec<Option<RoleId>>) -> Oracle {
+        self.roles = roles;
+        self
+    }
+
+    /// Seeds the run: σc = PRF(ρ, "choose") from the root seed ρ (the run seed in simulation), which seeded choices
+    /// and resolution policies need.
+    pub fn with_seed(mut self, root: blossom_value::Seed) -> Result<Oracle, OracleError> {
+        let seeds = blossom_value::Seeds::derive(root, "")
+            .map_err(|e| blossom_base::internal_error!("deriving the choice seed: {e}"))?;
+        self.choice = Some(seeds.choice);
+        Ok(self)
+    }
+
+    /// Whether `rule` runs on `node`: rules without a role guard run everywhere.
+    pub(crate) fn runs_on(&self, rule: &blossom_ir::core::Rule, node: NodeId) -> bool {
+        match rule.role {
+            None => true,
+            Some(r) => self.roles.get(node.0 as usize).copied().flatten() == Some(r),
+        }
+    }
+
+    /// The number of nodes in role `r`.
+    pub(crate) fn role_size(&self, r: RoleId) -> u64 {
+        self.roles.iter().filter(|x| **x == Some(r)).count() as u64
     }
 
     /// The program.

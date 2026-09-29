@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use blossom_base::{InternalError, RelId, internal_error};
 use blossom_ir::obs::FiringRecord;
-use blossom_oracle::{Delivery, Instance, Oracle, OracleError, Row, TickInput, TickOutput};
-use blossom_value::time::{NodeId, Tick};
+use blossom_oracle::{Delivery, Egress, Ingress, Instance, Oracle, OracleError, Row, TickInput, TickOutput};
+use blossom_value::time::{Duration, Instant, NodeId, Tick};
 
 /// Runs one node's tick.
 pub trait Evaluator {
@@ -97,8 +97,14 @@ pub struct SyncConfig {
     /// Rounds `first..=last` run.
     pub last: Tick,
     pub crash_view: CrashView,
+    /// The duration of a round: round `t` samples `now = t × round` (LANGUAGE §15.2: under LDFI, physical time is
+    /// mapped to rounds).
+    pub round: Duration,
     /// Whether to record every node's firings.
     pub capture: bool,
+    /// A relation that, holding at the end of a node's tick, stops the node: it runs no later tick (`halt`,
+    /// LANGUAGE §7.15).
+    pub halt: Option<RelId>,
 }
 
 /// A message and what became of it.
@@ -132,6 +138,10 @@ pub struct NodeTick {
     pub firings: Vec<FiringRecord>,
     /// The channel tuples delivered at the start of the round.
     pub delivered: Vec<Delivery>,
+    /// The client sessions' messages of the round.
+    pub ingress: Vec<Ingress>,
+    /// The replies to client sessions the node sent in the round.
+    pub egress: Vec<Egress>,
     /// Whether the node ran this round (a crashed node under [`CrashView::Frozen`] does not).
     pub ran: bool,
 }
@@ -169,6 +179,7 @@ pub struct SyncWorld<'a, E: Evaluator> {
     eval: &'a E,
     nodes: u32,
     inputs: BTreeMap<(Tick, NodeId), Vec<(RelId, Row)>>,
+    ingress: BTreeMap<(Tick, NodeId), Vec<Ingress>>,
 }
 
 impl<'a, E: Evaluator> SyncWorld<'a, E> {
@@ -177,7 +188,13 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
             eval,
             nodes,
             inputs: BTreeMap::new(),
+            ingress: BTreeMap::new(),
         }
+    }
+
+    /// Schedules a client session's message to `node` (LANGUAGE §18.4).
+    pub fn ingress(&mut self, node: NodeId, tick: Tick, message: Ingress) {
+        self.ingress.entry((tick, node)).or_default().push(message);
     }
 
     /// Schedules an input event.
@@ -194,8 +211,10 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
             faults: faults.clone(),
         };
         let mut carried: Vec<Instance> = vec![Instance::default(); n];
+        let mut halted = vec![false; n];
         let mut inbox: Vec<Vec<Delivery>> = vec![Vec::new(); n];
         let empty: Vec<(RelId, Row)> = Vec::new();
+        let no_ingress: Vec<Ingress> = Vec::new();
         for t in 0..=config.last.0 {
             let tick = Tick(t);
             if tick < config.first {
@@ -207,6 +226,12 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
             let mut next_inbox: Vec<Vec<Delivery>> = vec![Vec::new(); n];
             for (i, (state, delivered)) in carried.iter().zip(inbox.iter()).enumerate() {
                 let node = NodeId(u32::try_from(i).map_err(|_| internal_error!("node index overflow"))?);
+                if halted.get(i).copied().unwrap_or(false) {
+                    // A halted node runs no tick and holds nothing.
+                    round.push(NodeTick::default());
+                    next_carried.push(Instance::default());
+                    continue;
+                }
                 let frozen = config.crash_view == CrashView::Frozen && faults.crashed(node, tick);
                 if frozen {
                     let previous = round_of(&run.rounds, t.checked_sub(1), i);
@@ -214,20 +239,25 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                         instance: previous,
                         firings: Vec::new(),
                         delivered: delivered.clone(),
+                        ingress: Vec::new(),
+                        egress: Vec::new(),
                         ran: false,
                     });
                     next_carried.push(state.clone());
                     continue;
                 }
                 let events = self.inputs.get(&(tick, node)).unwrap_or(&empty);
+                let ingress = self.ingress.get(&(tick, node)).unwrap_or(&no_ingress);
                 let out = self
                     .eval
                     .tick(&TickInput {
                         node,
                         tick,
+                        now: now_at(config.round, tick)?,
                         carried: state,
                         events,
                         delivered,
+                        ingress,
                         capture: config.capture,
                     })
                     .map_err(|error| SimError::Node { node, tick, error })?;
@@ -275,11 +305,24 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                         fate,
                     });
                 }
+                if config.halt.is_some_and(|h| out.instance.rows(h).next().is_some())
+                    && let Some(slot) = halted.get_mut(i)
+                {
+                    *slot = true;
+                }
                 next_carried.push(out.next);
+                // A crashed node's replies are lost like its messages.
+                let egress = if faults.crashed(node, tick) {
+                    Vec::new()
+                } else {
+                    out.egress.into_iter().collect()
+                };
                 round.push(NodeTick {
                     instance: out.instance,
                     firings: out.firings,
                     delivered: delivered.clone(),
+                    ingress: ingress.clone(),
+                    egress,
                     ran: true,
                 });
             }
@@ -295,6 +338,18 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
         Ok(run)
     }
 }
+
+/// The clock sample of round `t`: `t × round` after the deployment epoch.
+pub fn now_at(round: Duration, t: Tick) -> Result<Instant, SimError> {
+    i64::try_from(t.0)
+        .ok()
+        .and_then(|t| round.as_nanos().checked_mul(t))
+        .map(Instant)
+        .ok_or_else(|| internal_error!("the clock overflows at round {}", t.0).into())
+}
+
+/// The round duration of the `.ded` profile: Molly's programs never read the clock.
+pub const DED_ROUND: Duration = Duration::from_nanos(1_000_000);
 
 fn round_of(rounds: &[Vec<NodeTick>], t: Option<u64>, node: usize) -> Instance {
     t.and_then(|t| usize::try_from(t).ok())
@@ -352,7 +407,9 @@ mod tests {
             first: Tick(1),
             last: Tick(3),
             crash_view: view,
+            round: DED_ROUND,
             capture: false,
+            halt: None,
         }
     }
 

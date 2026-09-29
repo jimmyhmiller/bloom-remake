@@ -3,7 +3,7 @@
 
 use std::fmt::Write;
 
-use blossom_artifact::ded::DedArtifact;
+use blossom_artifact::sim::SimArtifact;
 use blossom_prov::{Firing, GoalKey, Names, ProvGraph, Space};
 use blossom_sim::{Fate, FaultSchedule, SyncRun};
 use blossom_value::{Value, time::NodeId};
@@ -13,20 +13,159 @@ use crate::faults::labels;
 
 /// Names for a `.ded` program's goals.
 pub struct DedNames<'a> {
-    pub artifact: &'a DedArtifact,
+    pub artifact: &'a SimArtifact,
 }
 
 impl DedNames<'_> {
+    /// A value in source syntax, without its type (enum variants by number).
     pub fn value(&self, v: &Value) -> String {
-        match v {
-            Value::Node(n) => self.node(*n),
-            Value::Str(s) => format!("{s:?}"),
-            Value::Int(i) => format!("{i:?}")
+        self.typed(v, None, None)
+    }
+
+    /// A value of type `ty` in `program`'s type table, in source syntax: enum variants and struct fields by name,
+    /// lattice values by their elements (`⊥` for bottom), durations and instants in seconds.
+    pub fn typed(
+        &self,
+        v: &Value,
+        ty: Option<blossom_base::TypeId>,
+        program: Option<&blossom_ir::core::Program>,
+    ) -> String {
+        use blossom_value::TypeDef;
+        let def = ty.and_then(|t| program.and_then(|p| p.types.get(t)));
+        let list = |vs: &mut dyn Iterator<Item = String>| vs.collect::<Vec<_>>().join(", ");
+        match (v, def) {
+            (Value::Node(n), _) => self.node(*n),
+            (Value::Str(s), _) => format!("{s:?}"),
+            (Value::Bool(b), _) => b.to_string(),
+            (Value::Unit, _) => "()".to_owned(),
+            (Value::Int(i), _) => format!("{i:?}")
                 .split_once('(')
                 .and_then(|(_, rest)| rest.strip_suffix(')'))
                 .map_or_else(|| format!("{i:?}"), str::to_owned),
+            (Value::Duration(d), _) => seconds(d.as_nanos()),
+            (Value::Instant(t), _) => format!("@{}", seconds(t.0)),
+            (Value::Session(s), _) => format!("session {}", s.0),
+            (Value::Principal(p), _) => format!("principal {p:?}"),
+            (Value::Option(None), _) => "None".to_owned(),
+            (Value::Option(Some(x)), Some(TypeDef::Option(t))) => format!("Some({})", self.typed(x, Some(*t), program)),
+            (Value::Option(Some(x)), _) => format!("Some({})", self.typed(x, None, program)),
+            (Value::Tuple(xs), Some(TypeDef::Tuple(ts))) => format!(
+                "({})",
+                list(&mut xs.iter().zip(ts).map(|(x, t)| self.typed(x, Some(*t), program)))
+            ),
+            (Value::Tuple(xs), _) => format!("({})", list(&mut xs.iter().map(|x| self.typed(x, None, program)))),
+            (Value::Enum { variant, fields }, Some(TypeDef::Enum(e))) => {
+                let var = e.variants.iter().find(|x| x.number == *variant);
+                let name = var.map_or_else(|| format!("#{variant}"), |x| x.name.to_string());
+                if fields.is_empty() {
+                    name
+                } else {
+                    let tys: Vec<Option<blossom_base::TypeId>> = var
+                        .map(|x| x.payload.iter().map(|f| Some(f.ty)).collect())
+                        .unwrap_or_default();
+                    format!(
+                        "{name}({})",
+                        list(&mut fields.iter().enumerate().map(|(i, x)| self.typed(
+                            x,
+                            tys.get(i).copied().flatten(),
+                            program
+                        )))
+                    )
+                }
+            }
+            (Value::Struct(xs), Some(TypeDef::Struct(s))) => format!(
+                "{} {{ {} }}",
+                s.name,
+                list(&mut xs.iter().zip(&s.fields).map(|(x, f)| format!(
+                    "{}: {}",
+                    f.name,
+                    self.typed(x, Some(f.ty), program)
+                )))
+            ),
+            (Value::Vec(xs), Some(TypeDef::Vec(t))) => {
+                format!("[{}]", list(&mut xs.iter().map(|x| self.typed(x, Some(*t), program))))
+            }
+            (Value::Set(xs), Some(TypeDef::Set(t))) => {
+                format!(
+                    "set[{}]",
+                    list(&mut xs.iter().map(|x| self.typed(x, Some(*t), program)))
+                )
+            }
+            (Value::Map(m), Some(TypeDef::Map(k, t))) => format!(
+                "map[{}]",
+                list(&mut m.iter().map(|(a, b)| format!(
+                    "{} => {}",
+                    self.typed(a, Some(*k), program),
+                    self.typed(b, Some(*t), program)
+                )))
+            ),
+            (Value::Lattice(l), _) => {
+                let ctor = match def {
+                    Some(TypeDef::Lattice(id)) => program.and_then(|p| p.lattices.get(*id)).map(|d| d.ctor.clone()),
+                    _ => None,
+                };
+                self.lattice(l, ctor.as_ref(), program)
+            }
+            (other, _) => format!("{other:?}"),
+        }
+    }
+
+    fn lattice(
+        &self,
+        l: &blossom_value::value::LatValue,
+        ctor: Option<&blossom_ir::core::LatticeCtor>,
+        program: Option<&blossom_ir::core::Program>,
+    ) -> String {
+        use blossom_ir::core::LatticeCtor as C;
+        use blossom_value::value::LatValue as L;
+        let elem = match ctor {
+            Some(C::Max(t) | C::Min(t) | C::Point(t) | C::Set(t) | C::PSet(t)) => Some(*t),
+            _ => None,
+        };
+        match l {
+            L::Bottom => "⊥".to_owned(),
+            L::Top => "⊤".to_owned(),
+            L::Bool(b) => b.to_string(),
+            L::Elem(x) => self.typed(x, elem, program),
+            L::Set(xs) => format!(
+                "{{{}}}",
+                xs.iter()
+                    .map(|x| self.typed(x, elem, program))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            L::Map(m) => {
+                let (key, inner) = match ctor {
+                    Some(C::Map(k, inner)) => (
+                        Some(*k),
+                        program.and_then(|p| p.lattices.get(*inner)).map(|d| d.ctor.clone()),
+                    ),
+                    _ => (None, None),
+                };
+                format!(
+                    "{{{}}}",
+                    m.iter()
+                        .map(|(k, v)| format!(
+                            "{}: {}",
+                            self.typed(k, key, program),
+                            self.lattice(v, inner.as_ref(), program)
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
             other => format!("{other:?}"),
         }
+    }
+
+    /// A row of protocol relation `rel`, column by column.
+    pub fn row(&self, rel: blossom_base::RelId, row: &[Value]) -> Vec<String> {
+        let program = self.artifact.protocol.get();
+        let cols = program.rels.get(rel).map(|r| &r.schema.cols);
+        row.iter()
+            .enumerate()
+            .map(|(i, v)| self.typed(v, cols.and_then(|c| c.get(i)).map(|c| c.ty), Some(program)))
+            .collect()
     }
 
     fn rel_name(&self, space: Space, rel: blossom_base::RelId) -> String {
@@ -47,7 +186,19 @@ impl DedNames<'_> {
         if let (Some(n), false) = (key.node, channel) {
             cols.push(self.node(n));
         }
-        cols.extend(key.row.iter().map(|v| self.value(v)));
+        match key.space {
+            Space::Protocol => cols.extend(self.row(key.rel, &key.row)),
+            Space::Spec => {
+                let program = self.artifact.spec.as_ref().map(|s| s.program.get());
+                let tys = program.and_then(|p| p.rels.get(key.rel)).map(|r| &r.schema.cols);
+                cols.extend(
+                    key.row
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| self.typed(v, tys.and_then(|c| c.get(i)).map(|c| c.ty), program)),
+                );
+            }
+        }
         match name.strip_suffix("$async") {
             Some(base) => format!("{base}({})@{} arrives", cols.join(", "), key.tick.0),
             None => format!("{name}({})@{}", cols.join(", "), key.tick.0),
@@ -89,13 +240,13 @@ impl Names for DedNames<'_> {
 }
 
 /// The fault set in the corpus's notation: `{C(a,2), O(a,b,1)}`.
-pub fn fault_labels(artifact: &DedArtifact, faults: &FaultSchedule) -> Vec<String> {
+pub fn fault_labels(artifact: &SimArtifact, faults: &FaultSchedule) -> Vec<String> {
     let names = DedNames { artifact };
     labels(faults, &|n| names.node(n))
 }
 
 /// A human-readable report.
-pub fn render(artifact: &DedArtifact, report: &LdfiReport) -> String {
+pub fn render(artifact: &SimArtifact, report: &LdfiReport) -> String {
     let names = DedNames { artifact };
     let mut out = String::new();
     match (report.verdict, report.method) {
@@ -149,7 +300,7 @@ pub fn render(artifact: &DedArtifact, report: &LdfiReport) -> String {
 
 fn render_counterexample(
     out: &mut String,
-    artifact: &DedArtifact,
+    artifact: &SimArtifact,
     names: &DedNames<'_>,
     report: &LdfiReport,
     ce: &Counterexample,
@@ -202,7 +353,7 @@ pub fn timeline(names: &DedNames<'_>, run: &SyncRun) -> String {
             .map_or_else(|| format!("{:?}", m.rel), |r| r.name.to_string());
         let rel = rel.strip_suffix("$async").unwrap_or(&rel).to_owned();
         // Column 0 is the destination, shown by the arrow.
-        let args: Vec<String> = m.row.iter().skip(1).map(|v| names.value(v)).collect();
+        let args: Vec<String> = names.row(m.rel, &m.row).into_iter().skip(1).collect();
         let fate = match m.fate {
             Fate::Delivered(t) => format!("delivered at {}", t.0),
             Fate::Lost => "LOST".to_owned(),
@@ -220,7 +371,7 @@ pub fn timeline(names: &DedNames<'_>, run: &SyncRun) -> String {
 }
 
 /// The lineage of every `post` tuple of a run, for `blossom ldfi --lineage`.
-pub fn post_lineage(artifact: &DedArtifact, graph: &ProvGraph, report: &LdfiReport) -> String {
+pub fn post_lineage(artifact: &SimArtifact, graph: &ProvGraph, report: &LdfiReport) -> String {
     let names = DedNames { artifact };
     let mut out = String::new();
     let Some(spec) = &artifact.spec else { return out };
@@ -237,4 +388,16 @@ pub fn post_lineage(artifact: &DedArtifact, graph: &ProvGraph, report: &LdfiRepo
         }
     }
     out
+}
+
+/// Nanoseconds as seconds: `1s`, `1.5s`, `-2s`.
+fn seconds(nanos: i64) -> String {
+    let whole = nanos / 1_000_000_000;
+    let frac = (nanos % 1_000_000_000).unsigned_abs();
+    if frac == 0 {
+        format!("{whole}s")
+    } else {
+        let digits = format!("{frac:09}");
+        format!("{whole}.{}s", digits.trim_end_matches('0'))
+    }
 }

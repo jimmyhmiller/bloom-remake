@@ -1,0 +1,9 @@
+//! Slice 2 review: A relation with a `resolve` policy on a same-tick cycle is BLS0503 (SEM-086).
+
+program r4 version 1;
+input put(k: u64, v: u64);
+table reg(k: u64, v: u64) key(k) resolve choose_most(v);
+table other(k: u64, v: u64);
+w: on put(k, v) { emit other(k, v); }
+a: while other(k, v) { emit reg(k, v); }
+b: while reg(k, v) { emit other(k, v); }

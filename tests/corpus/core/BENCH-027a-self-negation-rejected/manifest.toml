@@ -12,9 +12,7 @@ Compile-only. The catalog relations of LANG-202 would expose the verdict to prog
 not fix their column schemas, so the corpus asserts the stratifier's verdict (BLS0502) directly."""
 
 [backend.compile]
-status = "unimplemented"
-unimplemented = ["ANA-002", "SEM-020", "SEM-022", "LANG-047", "LANG-082", "LANG-043", "LANG-060"]
-until = "M5"
+status = "pass"
 
 [[expect_diag]]
 code = "BLS0502"

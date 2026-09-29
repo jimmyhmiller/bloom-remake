@@ -10,9 +10,7 @@ expected_from = "literature"
 notes    = "The key clause on line 8 names the lattice column `v`; the error is reported there and nowhere else."
 
 [backend.compile]
-status = "unimplemented"
-unimplemented = ["LANG-020", "LANG-121", "ANA-005"]
-until = "M5"
+status = "pass"
 
 [[expect_diag]]
 code     = "BLS0304"
