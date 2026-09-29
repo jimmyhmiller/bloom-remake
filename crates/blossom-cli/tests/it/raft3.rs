@@ -281,10 +281,12 @@ fn three_processes_stay_linearizable_under_kill_9_and_partitions() {
         rng
     };
     // Faults overlap: a partition stays until a heal, and a killed server may stay down through the next actions.
-    // Kills go round a shuffled order, so every server is killed, the leader included whenever it is next.
+    // Kills go round a shuffled order, so every server is killed, the leader included whenever it is next. Rounds
+    // cycle a kill, a partition (isolation, split or one-way cut) and a random action, so every run has both.
     let mut kill_order: Vec<usize> = vec![0, 1, 2];
     let mut down: Option<(usize, u32)> = None;
     let mut log: Vec<String> = Vec::new();
+    let mut round = 0usize;
     while clock.elapsed() < Duration::from_secs(17) {
         if let Some((victim, rounds)) = down {
             if rounds == 0 {
@@ -295,7 +297,13 @@ fn three_processes_stay_linearizable_under_kill_9_and_partitions() {
                 down = Some((victim, rounds - 1));
             }
         }
-        match next() % 6 {
+        round += 1;
+        let pick = match round % 3 {
+            1 => 0,
+            2 => 2 + next() % 3,
+            _ => next() % 6,
+        };
+        match pick {
             0 | 1 if down.is_none() => {
                 if kill_order.is_empty() {
                     kill_order = vec![0, 1, 2];
