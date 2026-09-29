@@ -7,6 +7,7 @@
 //! compiled Molly program under a fault schedule and judging it with its outcome spec. Everything else is a
 //! placeholder that exposes nothing (PLAN §4 D1).
 
+pub mod bls;
 pub mod ded;
 pub mod sync;
 

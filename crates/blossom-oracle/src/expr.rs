@@ -2,20 +2,24 @@
 //! error BLSR004 (ARCHITECTURE §12.1). Division truncates toward zero.
 
 use blossom_base::{code, internal_error};
-use blossom_ir::core::{BinOp, BuiltinScalar, Expr, Program, Term, UnOp};
+use blossom_ir::core::{
+    BinOp, BuiltinFn, BuiltinScalar, Expr, FnRef, GenSource, Pattern, Program, RangeKind, Term, UnOp,
+};
 use blossom_value::{
-    Value,
-    time::{NodeId, Tick},
+    TypeDef, Value,
+    time::{Instant, NodeId, Tick},
     value::IntValue,
 };
 
-use crate::OracleError;
+use crate::{Oracle, OracleError};
 
 /// What an expression can read besides its variables.
 pub(crate) struct Scope<'a> {
     pub program: &'a Program,
     pub node: NodeId,
     pub tick: Tick,
+    pub now: Instant,
+    pub oracle: &'a Oracle,
 }
 
 /// A runtime hard error found while evaluating an expression, before it is attributed to a rule and tick.
@@ -56,11 +60,10 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
         Expr::Term(t) => term(scope, env, t),
         Expr::Scalar(BuiltinScalar::SelfNode) => Ok(Value::Node(scope.node)),
         Expr::Scalar(BuiltinScalar::Tick) => Ok(Value::Int(IntValue::U64(scope.tick.0))),
-        Expr::Scalar(s @ (BuiltinScalar::Now | BuiltinScalar::Incarnation | BuiltinScalar::Host)) => {
-            Err(ExprError::Oracle(
-                blossom_base::unimplemented_error!("LANG-180", "`${s:?}` in the oracle (WP M4.1)").into(),
-            ))
-        }
+        Expr::Scalar(BuiltinScalar::Now) => Ok(Value::Instant(scope.now)),
+        Expr::Scalar(s @ (BuiltinScalar::Incarnation | BuiltinScalar::Host)) => Err(ExprError::Oracle(
+            blossom_base::unimplemented_error!("LANG-180", "`${s:?}` in the oracle (WP M4.1)").into(),
+        )),
         Expr::Unary { op, arg } => {
             let v = eval(scope, env, arg)?;
             unary(op.clone(), v)
@@ -89,14 +92,69 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
         Expr::Param(_) => Err(ExprError::Oracle(
             blossom_base::unimplemented_error!("LANG-010", "deploy-time parameters in the oracle (WP M4.1)").into(),
         )),
-        Expr::Call { .. }
-        | Expr::Construct { .. }
-        | Expr::Field { .. }
-        | Expr::Match { .. }
-        | Expr::Collection { .. } => Err(ExprError::Oracle(
+        Expr::Construct { ty, variant, fields } => {
+            let mut vs = Vec::with_capacity(fields.len());
+            for f in fields {
+                vs.push(eval(scope, env, f)?);
+            }
+            construct(scope, *ty, *variant, vs)
+        }
+        Expr::Field { base, index } => {
+            let v = eval(scope, env, base)?;
+            let fields = match &v {
+                Value::Tuple(fs) | Value::Struct(fs) => fs,
+                other => {
+                    return Err(ExprError::Oracle(internal_error!("field {index} of {other:?}").into()));
+                }
+            };
+            fields
+                .get(*index as usize)
+                .cloned()
+                .ok_or_else(|| ExprError::Oracle(internal_error!("field {index} out of range").into()))
+        }
+        Expr::Match { scrut, arms } => {
+            let v = eval(scope, env, scrut)?;
+            // Arm bindings live in a copy of the environment: they are local to the arm.
+            for (pat, guard, body) in arms {
+                let mut local = env.to_vec();
+                let mut newly = Vec::new();
+                if !matches(scope, &mut local, pat, &v, &mut newly)? {
+                    continue;
+                }
+                if let Some(g) = guard
+                    && !truth(&eval(scope, &local, g)?)?
+                {
+                    continue;
+                }
+                return eval(scope, &local, body);
+            }
+            Err(ExprError::Oracle(internal_error!("no match arm matched {v:?}").into()))
+        }
+        Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::Len),
+            args,
+        } => {
+            let [a] = args.as_slice() else {
+                return Err(ExprError::Oracle(internal_error!("`len` takes one argument").into()));
+            };
+            let n = match eval(scope, env, a)? {
+                Value::Str(s) => s.len(),
+                Value::Bytes(b) => b.len(),
+                Value::Vec(v) => v.len(),
+                Value::Set(s) => s.len(),
+                Value::Map(m) => m.len(),
+                other => return Err(ExprError::Oracle(internal_error!("`len` of {other:?}").into())),
+            };
+            Ok(Value::Int(IntValue::U64(n as u64)))
+        }
+        Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::Size { role }),
+            ..
+        } => Ok(Value::Int(IntValue::U64(scope.oracle.role_size(*role)))),
+        Expr::Call { .. } | Expr::Collection { .. } => Err(ExprError::Oracle(
             blossom_base::unimplemented_error!(
                 "LANG-084",
-                "calls, constructors, fields, match and collection literals in the oracle (WP M4.1)"
+                "function calls and collection literals in the oracle (WP M4.1)"
             )
             .into(),
         )),
@@ -105,6 +163,139 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
         )),
         Expr::Let { .. } | Expr::Closure { .. } => Err(ExprError::Oracle(
             internal_error!("`let` and closures appear only in function bodies").into(),
+        )),
+    }
+}
+
+/// A constructed value of type `ty`.
+fn construct(scope: &Scope<'_>, ty: blossom_base::TypeId, variant: Option<u32>, vs: Vec<Value>) -> ExprResult<Value> {
+    match (scope.program.types.get(ty), variant) {
+        (Some(TypeDef::Option(_)), Some(1)) => match <[Value; 1]>::try_from(vs) {
+            Ok([v]) => Ok(Value::some(v)),
+            Err(_) => Err(ExprError::Oracle(internal_error!("`Some` takes one value").into())),
+        },
+        (Some(TypeDef::Option(_)), Some(0)) => Ok(Value::none()),
+        (Some(TypeDef::Tuple(_)), None) => Ok(Value::Tuple(vs.into())),
+        (Some(TypeDef::Struct(_)), None) => Ok(Value::Struct(vs.into())),
+        (Some(TypeDef::Enum(_)), Some(v)) => Ok(Value::Enum {
+            variant: v,
+            fields: vs.into(),
+        }),
+        (other, v) => Err(ExprError::Oracle(
+            internal_error!("constructing {other:?} variant {v:?}").into(),
+        )),
+    }
+}
+
+/// Matches `v` against `pat`, binding the pattern's unbound variables in `env` (recorded in `newly` so the caller
+/// can undo them). A bound variable is an equality test.
+pub(crate) fn matches(
+    scope: &Scope<'_>,
+    env: &mut [Option<Value>],
+    pat: &Pattern,
+    v: &Value,
+    newly: &mut Vec<usize>,
+) -> ExprResult<bool> {
+    match pat {
+        Pattern::Wild => Ok(true),
+        Pattern::Const(c) => Ok(term(scope, env, &Term::Const(*c))? == *v),
+        Pattern::Var(var) => match env.get_mut(var.index()) {
+            Some(slot @ None) => {
+                *slot = Some(v.clone());
+                newly.push(var.index());
+                Ok(true)
+            }
+            Some(Some(existing)) => Ok(existing == v),
+            None => Err(ExprError::Oracle(
+                internal_error!("variable {var:?} out of range").into(),
+            )),
+        },
+        Pattern::Tuple(ps) => {
+            let Value::Tuple(fs) = v else { return Ok(false) };
+            if fs.len() != ps.len() {
+                return Ok(false);
+            }
+            for (p, f) in ps.iter().zip(fs.iter()) {
+                if !matches(scope, env, p, f, newly)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        Pattern::Variant { ty, number, fields } => {
+            let payload: Vec<Value> = match (scope.program.types.get(*ty), v) {
+                (Some(TypeDef::Option(_)), Value::Option(o)) => match (number, o) {
+                    (1, Some(x)) => vec![(**x).clone()],
+                    (0, None) => Vec::new(),
+                    _ => return Ok(false),
+                },
+                (_, Value::Enum { variant, fields: fs }) => {
+                    if variant != number {
+                        return Ok(false);
+                    }
+                    fs.to_vec()
+                }
+                _ => return Ok(false),
+            };
+            if payload.len() != fields.len() {
+                return Ok(false);
+            }
+            for (p, f) in fields.iter().zip(&payload) {
+                if !matches(scope, env, p, f, newly)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        Pattern::Struct { fields, .. } => {
+            let Value::Struct(fs) = v else { return Ok(false) };
+            for (i, p) in fields {
+                let Some(f) = fs.get(*i as usize) else { return Ok(false) };
+                if !matches(scope, env, p, f, newly)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+    }
+}
+
+/// The values a generator ranges over, in canonical order.
+pub(crate) fn generate(scope: &Scope<'_>, env: &[Option<Value>], src: &GenSource) -> ExprResult<Vec<Value>> {
+    match src {
+        GenSource::Range {
+            lo,
+            hi,
+            kind,
+            ring_bits: None,
+        } => {
+            let (Value::Int(a), Value::Int(b)) = (eval(scope, env, lo)?, eval(scope, env, hi)?) else {
+                return Err(ExprError::Oracle(internal_error!("a range over non-integers").into()));
+            };
+            let ty = a.ty();
+            let (Some(a), Some(b)) = (a.to_i128(), b.to_i128()) else {
+                return Err(ExprError::Oracle(
+                    blossom_base::unimplemented_error!("LANG-092", "ranges beyond i128 in the oracle").into(),
+                ));
+            };
+            let (start, end) = match kind {
+                RangeKind::HalfOpen => (a, b),
+                RangeKind::Closed => (a, b.saturating_add(1)),
+                RangeKind::OpenOpen => (a.saturating_add(1), b),
+                RangeKind::OpenClosed => (a.saturating_add(1), b.saturating_add(1)),
+            };
+            let mut out = Vec::new();
+            let mut i = start;
+            while i < end {
+                let v = IntValue::from_i128(ty, i)
+                    .ok_or_else(|| ExprError::Oracle(internal_error!("a range value out of its type").into()))?;
+                out.push(Value::Int(v));
+                i += 1;
+            }
+            Ok(out)
+        }
+        _ => Err(ExprError::Oracle(
+            blossom_base::unimplemented_error!("LANG-088", "this generator in the oracle").into(),
         )),
     }
 }
@@ -137,13 +328,20 @@ fn binary(op: BinOp, l: Value, r: Value) -> ExprResult<Value> {
         CanonLt => Ok(Value::Bool(l < r)),
         CanonLe => Ok(Value::Bool(l <= r)),
         Lt | Le | Gt | Ge => {
-            let (Value::Int(a), Value::Int(b)) = (&l, &r) else {
-                return Err(ExprError::Oracle(internal_error!("ordering {l:?} {op:?} {r:?}").into()));
+            // Integers of one type, durations, instants, strings and bytes order by `Value`'s canonical order, which
+            // is numeric (lexicographic by bytes for strings) within one kind.
+            let same_kind = match (&l, &r) {
+                (Value::Int(a), Value::Int(b)) => a.ty() == b.ty(),
+                (Value::Duration(_), Value::Duration(_))
+                | (Value::Instant(_), Value::Instant(_))
+                | (Value::Str(_), Value::Str(_))
+                | (Value::Bytes(_), Value::Bytes(_))
+                | (Value::Node(_), Value::Node(_)) => true,
+                _ => false,
             };
-            if a.ty() != b.ty() {
-                return Err(ExprError::Oracle(internal_error!("comparing {a:?} with {b:?}").into()));
+            if !same_kind {
+                return Err(ExprError::Oracle(internal_error!("ordering {l:?} {op:?} {r:?}").into()));
             }
-            // Integers of one type order numerically under `Value`'s canonical order.
             Ok(Value::Bool(match op {
                 Lt => l < r,
                 Le => l <= r,
@@ -151,14 +349,30 @@ fn binary(op: BinOp, l: Value, r: Value) -> ExprResult<Value> {
                 _ => l >= r,
             }))
         }
-        Add | Sub | Mul | Div | Rem => {
-            let (Value::Int(a), Value::Int(b)) = (l, r) else {
-                return Err(ExprError::Oracle(
-                    internal_error!("arithmetic {op:?} on non-integers").into(),
-                ));
-            };
-            int_arith(op, a, b).map(Value::Int)
-        }
+        Add | Sub | Mul | Div | Rem => match (l, r) {
+            (Value::Int(a), Value::Int(b)) => int_arith(op, a, b).map(Value::Int),
+            (Value::Duration(a), Value::Duration(b)) if matches!(op, Add | Sub) => {
+                let r = if op == Add { a.checked_add(b) } else { a.checked_sub(b) };
+                r.map(Value::Duration)
+                    .ok_or_else(|| ExprError::Arithmetic(format!("{a:?} {} {b:?} overflows", op_text(op))))
+            }
+            (Value::Instant(a), Value::Duration(d)) if matches!(op, Add | Sub) => {
+                let r = if op == Add { a.checked_add(d) } else { a.checked_sub(d) };
+                r.map(Value::Instant)
+                    .ok_or_else(|| ExprError::Arithmetic(format!("{a:?} {} {d:?} overflows", op_text(op))))
+            }
+            (Value::Duration(d), Value::Instant(a)) if op == Add => a
+                .checked_add(d)
+                .map(Value::Instant)
+                .ok_or_else(|| ExprError::Arithmetic(format!("{d:?} + {a:?} overflows"))),
+            (Value::Instant(a), Value::Instant(b)) if op == Sub => a
+                .checked_since(b)
+                .map(Value::Duration)
+                .ok_or_else(|| ExprError::Arithmetic(format!("{a:?} - {b:?} overflows"))),
+            (l, r) => Err(ExprError::Oracle(
+                internal_error!("arithmetic {op:?} on {l:?} and {r:?}").into(),
+            )),
+        },
         And | Or => Err(ExprError::Oracle(
             internal_error!("`&&`/`||` reached the strict path").into(),
         )),

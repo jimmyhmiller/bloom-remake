@@ -66,6 +66,10 @@ impl IrBuilder {
     pub fn frontend(&self) -> FrontendKind {
         self.frontend
     }
+    /// The program built so far (read-only).
+    pub fn program(&self) -> &Program {
+        &self.program
+    }
     /// Structural type interning table.
     pub fn types(&mut self) -> &mut TypeTable {
         &mut self.program.types
@@ -155,6 +159,28 @@ impl IrBuilder {
                 .push(id);
         }
         Ok(id)
+    }
+    /// Sets a relation's persistence once the rule that realizes it exists (a table's frame rule, a lattice's
+    /// identity rule); the validator checks that the rule is the exact expansion.
+    pub fn set_persistence(&mut self, rel: RelId, persistence: Persistence) -> Result<(), IrError> {
+        let r = self
+            .program
+            .rels
+            .get_mut(rel)
+            .ok_or_else(|| IrError::builder("unknown relation"))?;
+        r.persistence = persistence;
+        Ok(())
+    }
+    /// Replaces a construct's specification: for expansions whose spec names relations declared inside the
+    /// construct (a table's `$del`).
+    pub fn set_construct_kind(&mut self, id: ConstructId, kind: ConstructKindInput) -> Result<(), IrError> {
+        let c = self
+            .program
+            .constructs
+            .get_mut(id)
+            .ok_or_else(|| IrError::builder("unknown construct"))?;
+        c.kind = kind;
+        Ok(())
     }
     /// Opens a grouping; nested groups own only their directly declared members.
     pub fn begin_construct(&mut self, kind: ConstructKindInput, surface: SurfaceRef) -> Result<ConstructId, IrError> {

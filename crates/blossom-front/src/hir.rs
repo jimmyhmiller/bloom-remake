@@ -1,4 +1,536 @@
-//! The HIR (ARCHITECTURE §13.8).
+//! The HIR (ARCHITECTURE §13.8): a resolved, instance-flattened program, independent of spelling.
 //!
-//! Implemented by WP M3.5. Empty until then: the module is declared here so the WPs that share this crate
-//! never edit `lib.rs` (PLAN §4 D6).
+//! [`crate::resolve`] builds it from the surface AST of the program root and every module it imports: names are
+//! resolved, instances are flattened (every relation of an instance `a` is `a.r`), constants and value parameters are
+//! folded to values, roles are placed, and every body literal is classified (LANGUAGE §9.1). Types are the
+//! [`TypeId`]s of the HIR's own [`TypeTable`], which lowering hands to the IR builder unchanged, so a HIR role id is
+//! the IR role id and a HIR type id is the IR type id.
+//!
+//! What is not known yet after resolution: the column types of views and the types of rule variables. Those come from
+//! [`crate::typeck`], which fills [`Hir::var_types`] and the view columns.
+
+use blossom_base::TypeId;
+use blossom_base::{InternalError, QualName, Span, Symbol, internal_error};
+use blossom_value::{TypeTable, Value, types::IntTy};
+
+use crate::ast::{BinOp, PrefixOp, Trigger, Verb};
+
+macro_rules! hir_id {
+    ($($(#[$m:meta])* $name:ident;)*) => {$(
+        $(#[$m])*
+        #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(pub u32);
+        impl $name {
+            pub const fn index(self) -> usize {
+                self.0 as usize
+            }
+        }
+    )*};
+}
+
+hir_id! {
+    /// A role; equal to the IR's `RoleId` of the same index.
+    HRoleId;
+    /// A relation (declared, a view, a timer, or a built-in).
+    HRelId;
+    /// A variable of one rule scope.
+    HVarId;
+    /// A rule scope: a handler, a view alternative, a fact or a spec view.
+    ScopeId;
+}
+
+/// A resolved program.
+#[derive(Clone, Debug)]
+pub struct Hir {
+    pub name: Symbol,
+    pub version: u32,
+    pub edition: u16,
+    pub types: TypeTable,
+    pub roles: Vec<HRole>,
+    pub rels: Vec<HRel>,
+    pub handlers: Vec<HHandler>,
+    pub views: Vec<HView>,
+    pub facts: Vec<HFact>,
+    /// Variable tables, one per rule scope.
+    pub scopes: Vec<HScope>,
+    /// Filled by type checking: the type of every variable of every scope.
+    pub var_types: Vec<Vec<TypeId>>,
+}
+
+impl Hir {
+    /// The relation `id`. Ids are minted by the resolver as positions in [`Hir::rels`]; a miss is a frontend bug.
+    pub fn rel(&self, id: HRelId) -> Result<&HRel, InternalError> {
+        self.rels
+            .get(id.index())
+            .ok_or_else(|| internal_error!("HIR relation {id:?} does not exist"))
+    }
+
+    /// The role `id`.
+    pub fn role(&self, id: HRoleId) -> Result<&HRole, InternalError> {
+        self.roles
+            .get(id.index())
+            .ok_or_else(|| internal_error!("HIR role {id:?} does not exist"))
+    }
+
+    /// The rule scope `id`.
+    pub fn scope(&self, id: ScopeId) -> Result<&HScope, InternalError> {
+        self.scopes
+            .get(id.index())
+            .ok_or_else(|| internal_error!("HIR scope {id:?} does not exist"))
+    }
+
+    /// Variable `v` of scope `s`.
+    pub fn var(&self, s: ScopeId, v: HVarId) -> Result<&HVar, InternalError> {
+        self.scope(s)?
+            .vars
+            .get(v.index())
+            .ok_or_else(|| internal_error!("HIR variable {v:?} is not in scope {s:?}"))
+    }
+}
+
+impl HRel {
+    /// Stands in for a relation a lookup failed to find, after the failure was recorded as an internal error (the
+    /// phase then fails, so the placeholder never reaches its output).
+    pub(crate) fn placeholder() -> HRel {
+        HRel {
+            name: QualName::single(Symbol::intern("<missing>")),
+            kind: HRelKind::Scratch,
+            cols: Vec::new(),
+            key: None,
+            durable: false,
+            role: None,
+            span: Span::point(blossom_base::FileId::from_raw(0), 0),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct HRole {
+    pub name: QualName,
+    pub kind: RoleKind,
+    pub span: Span,
+}
+
+impl HRole {
+    /// Stands in for a role a lookup failed to find (see [`HRel::placeholder`]).
+    pub(crate) fn placeholder() -> HRole {
+        HRole {
+            name: QualName::single(Symbol::intern("<missing>")),
+            kind: RoleKind::Process,
+            span: Span::point(blossom_base::FileId::from_raw(0), 0),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoleKind {
+    /// Exactly one node.
+    Process,
+    /// One or more nodes running the same projection.
+    Cluster,
+    /// Clients: sessions, not nodes.
+    External,
+}
+
+/// A relation.
+#[derive(Clone, Debug)]
+pub struct HRel {
+    pub name: QualName,
+    pub kind: HRelKind,
+    pub cols: Vec<HCol>,
+    /// Key columns; `None` means every column (a set relation).
+    pub key: Option<Vec<usize>>,
+    pub durable: bool,
+    /// Where the relation lives; `None` in a role-free program and for shared declarations.
+    pub role: Option<HRoleId>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct HCol {
+    pub name: Symbol,
+    /// `None` for a view column until type checking.
+    pub ty: Option<TypeId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HRelKind {
+    /// Persistent: frame rule and `$del`.
+    Table,
+    Scratch,
+    /// Closed, tick-local, defined by its alternatives.
+    View,
+    /// Rows from facts; holds at every tick.
+    Static,
+    /// `input`: `root` for a program root's input (fed by the host), otherwise an instance's input (written by the
+    /// importer).
+    Input {
+        root: bool,
+    },
+    /// `output`: `root` for a program root's output.
+    Output {
+        root: bool,
+    },
+    Channel(ChannelInfo),
+    /// A physical timer `name(count: u64, at: Instant)`.
+    Timer {
+        every: u128,
+    },
+    /// `boot()`.
+    Boot,
+    /// `localtick()`: a scratch written only with `next` to request another tick.
+    LocalTick,
+    /// `R$members(n: Node<R>)`: a role's member set, a static relation filled from the deployment.
+    Members(HRoleId),
+}
+
+impl HRelKind {
+    /// Whether rows written in a tick persist (tables).
+    pub fn is_table(&self) -> bool {
+        matches!(self, HRelKind::Table)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelInfo {
+    pub loopback: bool,
+    /// `: Src -> Dst` in a multi-role program.
+    pub direction: Option<(HRoleId, HRoleId)>,
+    /// The column-form destination column (`@dst`), among the declared columns.
+    pub dest_col: Option<usize>,
+}
+
+/// A rule scope's variables.
+#[derive(Clone, Debug)]
+pub struct HScope {
+    pub vars: Vec<HVar>,
+    /// The module path of the construct, for rule ids (`M` in LANGUAGE §4.3).
+    pub module: QualName,
+}
+
+#[derive(Clone, Debug)]
+pub struct HVar {
+    pub name: Symbol,
+    pub span: Span,
+    /// Generated by the resolver (an omitted column, a `_x` pattern); never a surface name that could clash.
+    pub generated: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandlerKind {
+    Plain,
+    Bootstrap,
+    BootstrapFresh,
+}
+
+/// A handler (or bootstrap): a header body and statements.
+#[derive(Clone, Debug)]
+pub struct HHandler {
+    pub scope: ScopeId,
+    pub label: Option<Symbol>,
+    pub trigger: Trigger,
+    pub kind: HandlerKind,
+    pub header: HBody,
+    pub stmts: Vec<HStmt>,
+    pub role: Option<HRoleId>,
+    /// The handler's normalized header text, hashed for an unlabelled handler's id.
+    pub text: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum HStmt {
+    Verb(HVerbStmt),
+    /// An `if`/`for`/`else` block: its condition conjoined to the enclosing one.
+    Block {
+        kind: BlockKind,
+        cond: HBody,
+        stmts: Vec<HStmt>,
+        /// Normalized condition text, hashed for the block's id.
+        text: String,
+        span: Span,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockKind {
+    If,
+    For,
+    Else,
+}
+
+#[derive(Clone, Debug)]
+pub struct HVerbStmt {
+    pub verb: Verb,
+    pub target: HRelId,
+    /// One argument per column, in column order.
+    pub args: Vec<HHeadArg>,
+    /// `send … to d`: the destination.
+    pub to: Option<HExpr>,
+    pub allow_self_negation: bool,
+    /// Normalized statement text, hashed when two statements share verb and target.
+    pub text: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum HHeadArg {
+    Expr(HExpr),
+    Agg(HAgg),
+}
+
+/// A head aggregate.
+#[derive(Clone, Debug)]
+pub struct HAgg {
+    pub func: AggKind,
+    /// The aggregated expressions; empty for `count!(*)`.
+    pub args: Vec<HExpr>,
+    /// `default e` (with a `per` driver or no grouping columns).
+    pub default: Option<HExpr>,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AggKind {
+    /// `count!(*)` when `args` is empty, `count!(e)` otherwise.
+    Count,
+    Sum,
+    Min,
+    Max,
+}
+
+/// A view: a closed relation defined by its alternatives.
+#[derive(Clone, Debug)]
+pub struct HView {
+    pub rel: HRelId,
+    /// One scope and body per alternative.
+    pub alternatives: Vec<(ScopeId, HBody)>,
+    /// Each alternative's normalized text, hashed for its rule id (LANGUAGE §4.3).
+    pub texts: Vec<String>,
+    pub shape: HViewShape,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum HViewShape {
+    /// No aggregate column: per column, the variable with the column's name in each alternative.
+    Plain { cols: Vec<Vec<HVarId>> },
+    /// Some column is an aggregate (LANGUAGE §8.3, §10.1–10.2): the alternatives are unioned into `v$u` over the
+    /// variables that occur in every alternative (`union`'s variables, in order), and aggregated once.
+    Aggregate {
+        union: ScopeId,
+        /// Per alternative: its variable for each variable of `union`.
+        shared: Vec<Vec<HVarId>>,
+        cols: Vec<HViewAggCol>,
+        /// `per r(…)` (single alternative only), in the first alternative's scope.
+        driver: Option<HAtom>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub enum HViewAggCol {
+    /// A grouping column: a variable of the union scope.
+    Group(HVarId),
+    /// An aggregate over the union scope's variables.
+    Agg(HAgg),
+}
+
+/// `fact r(…);`
+#[derive(Clone, Debug)]
+pub struct HFact {
+    pub rel: HRelId,
+    pub row: Vec<HExpr>,
+    pub scope: ScopeId,
+    pub span: Span,
+}
+
+/// A body: an unordered conjunction.
+#[derive(Clone, Debug, Default)]
+pub struct HBody {
+    pub lits: Vec<HLit>,
+    pub span: Option<Span>,
+}
+
+#[derive(Clone, Debug)]
+pub enum HLit {
+    Atom(HAtom),
+    Not(HAtom),
+    /// `not { B }`: variables first bound inside are local to it.
+    NotBody(HBody, Span),
+    Let {
+        pat: HPat,
+        expr: HExpr,
+        span: Span,
+    },
+    Guard(HExpr),
+    /// `pat in lo..hi` and the other range forms with an unbound variable: a generator.
+    RangeGen {
+        pat: HPat,
+        lo: HExpr,
+        hi: HExpr,
+        kind: RangeKind,
+        span: Span,
+    },
+    /// `p in R` with `p` unbound: the role's members.
+    RoleGen {
+        pat: HPat,
+        role: HRoleId,
+        /// The role's `R$members` relation.
+        members: HRelId,
+        span: Span,
+    },
+    Outer(HAtom),
+    Delta {
+        inserted: bool,
+        atom: HAtom,
+    },
+    Any(Vec<HBody>, Span),
+    Forall {
+        domain: Box<HLit>,
+        body: HBody,
+        span: Span,
+    },
+    /// `per r(…)`: an aggregate driver (views only).
+    Per(HAtom),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RangeKind {
+    HalfOpen,
+    Closed,
+    OpenOpen,
+    OpenClosed,
+}
+
+/// A positional atom.
+#[derive(Clone, Debug)]
+pub struct HAtom {
+    pub rel: HRelId,
+    /// One pattern per column.
+    pub args: Vec<HPat>,
+    /// `from s`: channels and loopbacks only.
+    pub from: Option<HPat>,
+    pub span: Span,
+}
+
+/// An argument pattern of an atom or a `let`.
+#[derive(Clone, Debug)]
+pub enum HPat {
+    /// A variable: binds if unbound, joins if bound.
+    Var(HVarId, Span),
+    Wild(Span),
+    /// An expression over bound variables, or a constant: an equality test.
+    Expr(HExpr),
+    Tuple(Vec<HPat>, Span),
+    /// An enum variant (including `Some`, whose `ty` is the `Option` type) with positional fields.
+    Variant {
+        ty: TypeRef,
+        variant: u32,
+        fields: Vec<HPat>,
+        span: Span,
+    },
+}
+
+impl HPat {
+    pub fn span(&self) -> Span {
+        match self {
+            HPat::Var(_, s) | HPat::Wild(s) | HPat::Tuple(_, s) | HPat::Variant { span: s, .. } => *s,
+            HPat::Expr(e) => e.span,
+        }
+    }
+}
+
+/// A type known at resolution (a declared enum or struct), or the `Option` constructor whose element type type
+/// checking infers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypeRef {
+    Known(TypeId),
+    Option,
+}
+
+#[derive(Clone, Debug)]
+pub struct HExpr {
+    pub kind: HExprKind,
+    pub span: Span,
+    /// The expression's type, filled by type checking.
+    pub ty: Option<TypeId>,
+}
+
+impl HExpr {
+    pub fn new(kind: HExprKind, span: Span) -> HExpr {
+        HExpr { kind, span, ty: None }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum HExprKind {
+    Var(HVarId),
+    /// A constant with a known type.
+    Value(Value, TypeId),
+    /// An unsuffixed integer literal: its type comes from context (i64 when nothing constrains it).
+    IntLit(u128, bool),
+    /// A suffixed integer literal.
+    TypedInt(u128, IntTy, bool),
+    Binary {
+        op: BinOp,
+        lhs: Box<HExpr>,
+        rhs: Box<HExpr>,
+    },
+    Prefix {
+        op: PrefixOp,
+        arg: Box<HExpr>,
+    },
+    Tuple(Vec<HExpr>),
+    /// An enum variant value (including `Some(e)` / `None`).
+    Variant {
+        ty: TypeRef,
+        variant: u32,
+        fields: Vec<HExpr>,
+    },
+    Struct {
+        ty: TypeId,
+        fields: Vec<HExpr>,
+    },
+    TupleIndex {
+        base: Box<HExpr>,
+        index: u32,
+    },
+    /// A struct field: its position is known once type checking has typed the base.
+    Field {
+        base: Box<HExpr>,
+        name: Symbol,
+        index: Option<u32>,
+    },
+    If {
+        cond: Box<HExpr>,
+        then: Box<HExpr>,
+        els: Box<HExpr>,
+    },
+    Match {
+        scrut: Box<HExpr>,
+        arms: Vec<(HPat, Option<HExpr>, HExpr)>,
+    },
+    Cast {
+        expr: Box<HExpr>,
+        ty: TypeId,
+    },
+    /// `self`.
+    SelfNode,
+    /// `now()`.
+    Now,
+    /// `tick()`.
+    Tick,
+    /// A built-in method or function.
+    Builtin {
+        f: Builtin,
+        args: Vec<HExpr>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Builtin {
+    /// `s.len()` on `String`, `Bytes`, `Vec`, `Set`, `Map`.
+    Len,
+    /// `R.size()`: a role's cardinality.
+    RoleSize(HRoleId),
+}

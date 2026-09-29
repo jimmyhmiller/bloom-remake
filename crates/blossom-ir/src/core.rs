@@ -596,6 +596,10 @@ pub enum ConstructKind {
     DedRelation {
         rel: RelId,
     },
+    /// A role's member relation `R$members(N)` (LANGUAGE §6.10), whose rows come from the deployment.
+    Members {
+        role: RoleId,
+    },
     Invariant {
         id: InvariantId,
     },
@@ -1134,6 +1138,7 @@ impl ConstructKind {
             Self::Interpose => "Interpose",
             Self::Localize => "Localize",
             Self::DedRelation { .. } => "DedRelation",
+            Self::Members { .. } => "Members",
             Self::Invariant { .. } => "Invariant",
             Self::SpecOracle => "SpecOracle",
             Self::Service { .. } => "Service",

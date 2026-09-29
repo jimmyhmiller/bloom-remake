@@ -648,9 +648,18 @@ fn persist_exact(p: &Program, rel: &RelDecl, rule: &Rule, del: Option<RelId>, id
     };
     positive && negative && tag
 }
+/// Whether a value of type `actual` may stand where `expected` is required: equal types, or `Node<R>` where `Node`
+/// is expected (LANGUAGE §5.3: `Node<R>` is a subtype of `Node`).
+fn assignable(p: &Program, actual: TypeId, expected: TypeId) -> bool {
+    actual == expected
+        || matches!(
+            (p.types.get(actual), p.types.get(expected)),
+            (Some(TypeDef::Node(Some(_))), Some(TypeDef::Node(None)))
+        )
+}
 fn term_type(p: &Program, r: &Rule, t: &Term, ty: TypeId) -> bool {
     match t {
-        Term::Var(id) => r.body.vars.get(*id).is_some_and(|v| v.ty == ty),
+        Term::Var(id) => r.body.vars.get(*id).is_some_and(|v| assignable(p, v.ty, ty)),
         Term::Const(id) => p.consts.get(*id).is_some_and(|v| p.types.check_value(ty, v).is_ok()),
         Term::Wild => true,
     }
@@ -684,9 +693,9 @@ fn agg_type(p: &Program, r: &Rule, a: &AggCall, ty: TypeId) -> bool {
     match &a.func {
         // A count may land in any integer column (checked on overflow, BLSR004): `u64` for Blossom's `count`, `i64` for
         // Molly's `count<X>` (LANGUAGE §21.1).
+        // The counted tuple may have any width (LANGUAGE §10.1: `count<(S, L, P)>` for `count!(*)`).
         AggFunc::Count => {
-            a.args.len() <= 1
-                && a.args.iter().all(|arg| !matches!(arg, Term::Wild))
+            a.args.iter().all(|arg| !matches!(arg, Term::Wild))
                 && matches!(p.types.get(ty), Some(TypeDef::Int(_)))
         }
         AggFunc::OlaCount => (1..=2).contains(&a.args.len()) && ola_result() && a.args.first().is_some_and(is_f64),
@@ -815,7 +824,11 @@ fn check_literal(p: &Program, r: &Rule, l: &Literal) -> Result<(), String> {
 fn pattern_type(p: &Program, r: &Rule, pat: &Pattern, ty: TypeId) -> Result<(), String> {
     match pat {
         Pattern::Var(v) => {
-            if r.body.vars.get(*v).is_some_and(|x| x.ty == ty) {
+            if r.body
+                .vars
+                .get(*v)
+                .is_some_and(|x| x.ty == ty || assignable(p, ty, x.ty))
+            {
                 Ok(())
             } else {
                 Err("pattern variable type mismatch".into())
@@ -882,7 +895,7 @@ fn expr_matches_type(p: &Program, r: &Rule, e: &Expr, expected: TypeId) -> bool 
             .consts
             .get(*id)
             .is_some_and(|v| p.types.check_value(expected, v).is_ok()),
-        _ => expr_type(p, r, e).is_ok_and(|actual| actual == expected),
+        _ => expr_type(p, r, e).is_ok_and(|actual| assignable(p, actual, expected)),
     }
 }
 fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
