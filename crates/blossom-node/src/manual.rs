@@ -73,6 +73,37 @@ impl<'p, E: Executor> ManualDriver<'p, E> {
         Ok(out)
     }
 
+    /// Fault injection: runs one tick at `now` up to its WAL append and stops before the sync, consuming the driver.
+    /// The store is left as a crash in that window leaves it (the record written but not durable) and nothing of
+    /// the tick was released; the caller crashes the filesystem next.
+    pub fn crash_before_sync(mut self, now: Instant) -> Result<(), NodeError> {
+        let fx = self.node.run_tick(now).map_err(|f| f.error)?;
+        if let Some(r) = fx.reserve {
+            self.opened.record.reserved_tick = r.ticks.0;
+            self.opened.record.last_now = self.opened.record.last_now.max(r.now.0);
+            MetaStore::write(&self.opened.meta, &self.opened.record)?;
+        }
+        if let Some(delta) = &fx.wal {
+            let rec = self.record(&fx, delta)?;
+            self.opened.wal.append(&rec)?;
+        }
+        Ok(())
+    }
+
+    fn record(&mut self, fx: &TickEffects, delta: &crate::durable::Delta) -> Result<WalRecordBuf, NodeError> {
+        self.batch = self
+            .batch
+            .checked_add(1)
+            .ok_or_else(|| internal_error!("the WAL batch counter overflows"))?;
+        Ok(WalRecordBuf {
+            batch: self.batch,
+            tick: fx.tick.0,
+            now: fx.now.0,
+            kind: KIND_DELTA,
+            payload: self.codec.encode_delta(delta)?,
+        })
+    }
+
     fn commit(&mut self, fx: &TickEffects, sink: &mut dyn FnMut(ReleasedTick)) -> Result<(), NodeError> {
         if let Some(r) = fx.reserve {
             self.opened.record.reserved_tick = r.ticks.0;
@@ -84,17 +115,7 @@ impl<'p, E: Executor> ManualDriver<'p, E> {
             self.node.release_ready().into_iter().for_each(&mut *sink);
             return Ok(());
         };
-        self.batch = self
-            .batch
-            .checked_add(1)
-            .ok_or_else(|| internal_error!("the WAL batch counter overflows"))?;
-        let rec = WalRecordBuf {
-            batch: self.batch,
-            tick: fx.tick.0,
-            now: fx.now.0,
-            kind: KIND_DELTA,
-            payload: self.codec.encode_delta(delta)?,
-        };
+        let rec = self.record(fx, delta)?;
         self.opened.wal.append(&rec)?;
         let synced = self.opened.wal.sync()?;
         let tick = synced

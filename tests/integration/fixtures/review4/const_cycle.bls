@@ -1,0 +1,4 @@
+//! S4 review: a constant defined in terms of itself is an error, not a crash or a silent default.
+program const_cycle version 1;
+const A: u64 = B + 1;
+const B: u64 = A + 1;

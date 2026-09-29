@@ -32,6 +32,8 @@ pub(crate) struct RuleCx {
     pub choice_allowed: bool,
     /// The choice literals of the body being resolved.
     pub choices: u32,
+    /// Whether the statements are a plain `bootstrap`'s (which may not write durable relations, BLS0402).
+    pub plain_bootstrap: bool,
 }
 
 fn is_var_name(name: &str) -> bool {
@@ -53,6 +55,7 @@ impl<'t> Resolver<'t, '_> {
             aliases: BTreeMap::new(),
             choice_allowed: false,
             choices: 0,
+            plain_bootstrap: false,
         }
     }
 
@@ -1511,7 +1514,8 @@ impl<'t> Resolver<'t, '_> {
                 Some(HExpr::new(HExprKind::LatCtor { kind, bot, args: xs }, span))
             }
             [name] if name.as_str() == "rand_range" => {
-                if pos.len() < 2 {
+                // The key makes the draw stable (the same value for the same key within a tick, LANG-175).
+                if pos.len() < 3 {
                     self.error(code!("BLS0301"), span, "`rand_range` takes `lo`, `hi` and a key");
                     return None;
                 }
@@ -1667,6 +1671,7 @@ impl<'t> Resolver<'t, '_> {
         span: Span,
     ) {
         let mut cx = self.rule_cx(s, placement);
+        cx.plain_bootstrap = !fresh;
         let boot = self.builtin(super::BuiltinRel::Boot, span);
         let mut lits = vec![HLit::Atom(HAtom {
             rel: boot,
@@ -1983,6 +1988,12 @@ impl<'t> Resolver<'t, '_> {
                     ),
                 ))
             }
+            // A plain bootstrap runs after every restart, where durable state was reloaded (LANGUAGE §8.4).
+            _ if cx.plain_bootstrap && r.durable => Some((
+                code!("BLS0402"),
+                bad("a plain `bootstrap` runs after every restart, over reloaded durable state; initial durable \
+                     values go in `bootstrap fresh`"),
+            )),
             _ => None,
         };
         if let Some((c, msg)) = err {

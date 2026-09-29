@@ -1837,44 +1837,115 @@ impl<'t, 'd> Resolver<'t, 'd> {
         self.scope_mut(s).write_redirect.insert(real, outside);
     }
 
-    /// Fold `const` items of the scope's module and file, then `param` items: a deploy-time parameter is a constant
-    /// of the deployment, its binding or else its default (LANG-010; the program is compiled per deployment).
+    /// Folds the `const` and `param` items of the scope's module and file, in dependency order: a constant may use
+    /// a parameter and a parameter's default a constant (LANGUAGE §6.4). A deploy-time parameter is a constant of
+    /// the deployment, its binding or else its default (LANG-010; the program is compiled per deployment). The
+    /// deployment binds the root program's parameters by name and a module's by its qualified name
+    /// (`module.NAME`), so a module's parameter never takes a binding meant for another's.
     fn fold_consts(&mut self, s: ScopeIdx, items: &'t [ast::Item]) {
-        self.fold_const_items(s, items);
-        for item in items {
-            let ItemKind::Param { name, ty, default } = &item.kind else {
-                continue;
-            };
-            self.params_declared.insert(name.as_str().to_owned());
-            let Some(t) = self.resolve_type(s, ty) else { continue };
-            let value = match self.param_bindings.get(name.as_str()).cloned() {
-                Some(b) => self.bound_param(name, t, &b),
-                None => match default {
-                    Some(e) => self.const_value(s, e, Some(t)),
-                    None => {
-                        self.error(
-                            code!("BLS0205"),
-                            name.span,
-                            format!(
-                                "the parameter `{}` has no default and the deployment does not bind it",
-                                name.as_str()
-                            ),
-                        );
-                        None
-                    }
-                },
-            };
-            if let Some(v) = value {
-                if self.scope(s).values.contains_key(&name.name) {
-                    self.error(
-                        code!("BLS0201"),
-                        name.span,
-                        format!("`{}` is defined twice", name.as_str()),
-                    );
+        let decls: Vec<&'t ast::Item> = items
+            .iter()
+            .filter(|i| matches!(i.kind, ItemKind::Const { .. } | ItemKind::Param { .. }))
+            .collect();
+        let name_of = |i: &ast::Item| match &i.kind {
+            ItemKind::Const { name, .. } | ItemKind::Param { name, .. } => Some(*name),
+            _ => None,
+        };
+        let index: BTreeMap<Symbol, usize> = decls
+            .iter()
+            .enumerate()
+            .filter_map(|(k, i)| name_of(i).map(|n| (n.name, k)))
+            .collect();
+        let deps: Vec<BTreeSet<usize>> = decls
+            .iter()
+            .map(|i| {
+                let mut names = BTreeSet::new();
+                match &i.kind {
+                    ItemKind::Const { value, .. } => const_deps(value, &mut names),
+                    ItemKind::Param { default: Some(e), .. } => const_deps(e, &mut names),
+                    _ => {}
                 }
-                self.scope_mut(s).values.insert(name.name, v);
+                names.iter().filter_map(|n| index.get(n).copied()).collect()
+            })
+            .collect();
+        let mut done = vec![false; decls.len()];
+        let mut order = Vec::new();
+        loop {
+            let ready: Vec<usize> = (0..decls.len())
+                .filter(|&k| !done.get(k).copied().unwrap_or(true))
+                .filter(|&k| deps.get(k).is_some_and(|d| d.iter().all(|&j| done.get(j).copied().unwrap_or(false))))
+                .collect();
+            if ready.is_empty() {
+                break;
+            }
+            for k in ready {
+                if let Some(d) = done.get_mut(k) {
+                    *d = true;
+                }
+                order.push(k);
             }
         }
+        for (k, item) in decls.iter().enumerate() {
+            if !done.get(k).copied().unwrap_or(true)
+                && let Some(name) = name_of(item)
+            {
+                self.error(
+                    code!("BLS0200"),
+                    name.span,
+                    format!("`{}` is defined in terms of itself", name.as_str()),
+                );
+            }
+        }
+        for k in order {
+            let Some(item) = decls.get(k) else { continue };
+            match &item.kind {
+                ItemKind::Const { name, ty, value } => {
+                    let Some(t) = self.resolve_type(s, ty) else { continue };
+                    if let Some(v) = self.const_value(s, value, Some(t)) {
+                        self.define_value(s, name, v);
+                    }
+                }
+                ItemKind::Param { name, ty, default } => {
+                    let prefix = self.module_path(s);
+                    let key = if prefix.segments().is_empty() {
+                        name.as_str().to_owned()
+                    } else {
+                        format!("{prefix}.{}", name.as_str())
+                    };
+                    self.params_declared.insert(key.clone());
+                    let Some(t) = self.resolve_type(s, ty) else { continue };
+                    let value = match self.param_bindings.get(&key).cloned() {
+                        Some(b) => self.bound_param(name, t, &b),
+                        None => match default {
+                            Some(e) => self.const_value(s, e, Some(t)),
+                            None => {
+                                self.error(
+                                    code!("BLS0205"),
+                                    name.span,
+                                    format!("the parameter `{key}` has no default and the deployment does not bind it"),
+                                );
+                                None
+                            }
+                        },
+                    };
+                    if let Some(v) = value {
+                        self.define_value(s, name, v);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn define_value(&mut self, s: ScopeIdx, name: &Ident, v: (Value, TypeId)) {
+        if self.scope(s).values.contains_key(&name.name) {
+            self.error(
+                code!("BLS0201"),
+                name.span,
+                format!("`{}` is defined twice", name.as_str()),
+            );
+        }
+        self.scope_mut(s).values.insert(name.name, v);
     }
 
     /// A deployment's binding of parameter `name` of type `t`.
@@ -1906,23 +1977,22 @@ impl<'t, 'd> Resolver<'t, 'd> {
         }
     }
 
-    /// Fold `const` items of the scope's module and file.
-    fn fold_const_items(&mut self, s: ScopeIdx, items: &'t [ast::Item]) {
-        for item in items {
-            if let ItemKind::Const { name, ty, value } = &item.kind {
-                let Some(t) = self.resolve_type(s, ty) else { continue };
-                if let Some(v) = self.const_value(s, value, Some(t)) {
-                    if self.scope(s).values.contains_key(&name.name) {
-                        self.error(
-                            code!("BLS0201"),
-                            name.span,
-                            format!("`{}` is defined twice", name.as_str()),
-                        );
-                    }
-                    self.scope_mut(s).values.insert(name.name, v);
-                }
+}
+
+/// The names a constant expression refers to (the forms `const_value` folds).
+fn const_deps(e: &ast::Expr, out: &mut BTreeSet<Symbol>) {
+    match &e.kind {
+        ast::ExprKind::Path(path, targs) if targs.is_empty() => {
+            if let [name] = path.as_slice() {
+                out.insert(name.name);
             }
         }
+        ast::ExprKind::Binary { lhs, rhs, .. } => {
+            const_deps(lhs, out);
+            const_deps(rhs, out);
+        }
+        ast::ExprKind::Prefix { arg, .. } => const_deps(arg, out),
+        _ => {}
     }
 }
 

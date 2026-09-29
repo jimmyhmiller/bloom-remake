@@ -44,7 +44,8 @@ pub enum ParamBinding {
 pub fn parse_duration(text: &str) -> Option<blossom_value::time::Duration> {
     let split = text.find(|c: char| c.is_ascii_alphabetic())?;
     let (num, unit) = text.split_at(split);
-    let n: i64 = num.trim().parse().ok()?;
+    // A duration binding is written like a duration literal: a non-negative count and a unit.
+    let n: i64 = num.trim().parse::<u64>().ok().and_then(|n| i64::try_from(n).ok())?;
     let scale: i64 = match unit {
         "ns" => 1,
         "us" => 1_000,

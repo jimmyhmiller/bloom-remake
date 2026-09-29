@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -31,8 +31,9 @@ fn free_addr() -> SocketAddr {
 #[cfg(test)]
 struct Proxy {
     addr: SocketAddr,
-    blocked: Arc<AtomicBool>,
-    open: Arc<Mutex<Vec<TcpStream>>>,
+    /// Whether the link is cut, and its open connections. One lock covers both, so a connection accepted as the
+    /// link is cut is either refused or registered and shut down with the others.
+    state: Arc<Mutex<(bool, Vec<TcpStream>)>>,
 }
 
 #[cfg(test)]
@@ -40,20 +41,23 @@ impl Proxy {
     fn start(upstream: SocketAddr) -> Proxy {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let blocked = Arc::new(AtomicBool::new(false));
-        let open: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
-        let (b, o) = (blocked.clone(), open.clone());
+        let state: Arc<Mutex<(bool, Vec<TcpStream>)>> = Arc::new(Mutex::new((false, Vec::new())));
+        let st = state.clone();
         std::thread::spawn(move || {
             for inbound in listener.incoming() {
                 let Ok(inbound) = inbound else { continue };
-                if b.load(Ordering::SeqCst) {
+                if st.lock().unwrap().0 {
                     drop(inbound);
                     continue;
                 }
                 let Ok(outbound) = TcpStream::connect(upstream) else { continue };
-                let mut reg = o.lock().unwrap();
-                reg.push(inbound.try_clone().unwrap());
-                reg.push(outbound.try_clone().unwrap());
+                let mut reg = st.lock().unwrap();
+                if reg.0 {
+                    // Cut while connecting.
+                    continue;
+                }
+                reg.1.push(inbound.try_clone().unwrap());
+                reg.1.push(outbound.try_clone().unwrap());
                 drop(reg);
                 let pipe = |mut from: TcpStream, mut to: TcpStream| {
                     std::thread::spawn(move || {
@@ -75,18 +79,19 @@ impl Proxy {
                 pipe(outbound, inbound);
             }
         });
-        Proxy { addr, blocked, open }
+        Proxy { addr, state }
     }
 
     fn block(&self) {
-        self.blocked.store(true, Ordering::SeqCst);
-        for c in self.open.lock().unwrap().drain(..) {
+        let mut st = self.state.lock().unwrap();
+        st.0 = true;
+        for c in st.1.drain(..) {
             let _ = c.shutdown(std::net::Shutdown::Both);
         }
     }
 
     fn heal(&self) {
-        self.blocked.store(false, Ordering::SeqCst);
+        self.state.lock().unwrap().0 = false;
     }
 }
 
@@ -188,6 +193,24 @@ impl Cluster {
         }
     }
 
+    /// Cuts every link between the two sides (a node on neither side is cut from everyone).
+    fn split(&self, side: &[usize]) {
+        for ((a, b), p) in &self.proxies {
+            if side.contains(a) != side.contains(b) {
+                p.block();
+            }
+        }
+    }
+
+    /// Cuts the link from `a` to `b` only.
+    fn cut(&self, a: usize, b: usize) {
+        for ((x, y), p) in &self.proxies {
+            if (*x, *y) == (a, b) {
+                p.block();
+            }
+        }
+    }
+
     fn heal(&self) {
         for (_, p) in &self.proxies {
             p.heal();
@@ -241,40 +264,90 @@ fn three_processes_stay_linearizable_under_kill_9_and_partitions() {
         let (store, w, stop) = (store.clone(), workload.clone(), stop.clone());
         std::thread::spawn(move || kv::run(store, &w, stop))
     };
-    // Let a leader emerge, then alternate kills and partitions.
+    // Let a leader emerge, then run the nemesis. Its seed is printed with any failure (and can be set with
+    // RAFT3_SEED to replay the same fault sequence; the processes' timing still varies).
     std::thread::sleep(Duration::from_secs(3));
+    let seed: u64 = std::env::var("RAFT3_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| u64::from(std::process::id()) | 1);
     let clock = Stopwatch::start();
     let (mut kills, mut partitions) = (0, 0);
-    let mut rng: u64 = 0x5eed_1234;
+    let mut rng: u64 = seed;
     let mut next = || {
         rng ^= rng << 13;
         rng ^= rng >> 7;
         rng ^= rng << 17;
         rng
     };
-    // Kills and partitions alternate. Kills pick a random server; partitions isolate each server in turn, so the
-    // leader is isolated too.
-    let mut isolate_next = 0usize;
+    // Faults overlap: a partition stays until a heal, and a killed server may stay down through the next actions.
+    // Kills go round a shuffled order, so every server is killed, the leader included whenever it is next.
+    let mut kill_order: Vec<usize> = vec![0, 1, 2];
+    let mut down: Option<(usize, u32)> = None;
+    let mut log: Vec<String> = Vec::new();
     while clock.elapsed() < Duration::from_secs(17) {
-        if (kills + partitions) % 2 == 0 {
-            let victim = (next() % 3) as usize;
-            cluster.kill(victim);
-            kills += 1;
-            std::thread::sleep(Duration::from_millis(300 + next() % 700));
-            cluster.start(victim, false);
-        } else {
-            let victim = isolate_next % 3;
-            isolate_next += 1;
-            cluster.isolate(victim);
-            partitions += 1;
-            std::thread::sleep(Duration::from_millis(1000 + next() % 1500));
-            cluster.heal();
+        if let Some((victim, rounds)) = down {
+            if rounds == 0 {
+                cluster.start(victim, false);
+                log.push(format!("restart s{}", victim + 1));
+                down = None;
+            } else {
+                down = Some((victim, rounds - 1));
+            }
+        }
+        match next() % 6 {
+            0 | 1 if down.is_none() => {
+                if kill_order.is_empty() {
+                    kill_order = vec![0, 1, 2];
+                }
+                let victim = kill_order.remove((next() % kill_order.len() as u64) as usize);
+                cluster.kill(victim);
+                kills += 1;
+                // Back after a short pause, or down for a few more actions.
+                let rounds = if next() % 2 == 0 { 0 } else { 1 + (next() % 2) as u32 };
+                log.push(format!("kill s{} (down {rounds} rounds)", victim + 1));
+                if rounds == 0 {
+                    std::thread::sleep(Duration::from_millis(300 + next() % 700));
+                    cluster.start(victim, false);
+                } else {
+                    down = Some((victim, rounds));
+                }
+            }
+            2 => {
+                let victim = (next() % 3) as usize;
+                cluster.isolate(victim);
+                partitions += 1;
+                log.push(format!("isolate s{}", victim + 1));
+            }
+            3 => {
+                let side: Vec<usize> = (0..3).filter(|_| next() % 2 == 0).collect();
+                cluster.split(&side);
+                partitions += 1;
+                log.push(format!("split {side:?}"));
+            }
+            4 => {
+                let (a, b) = ((next() % 3) as usize, (next() % 3) as usize);
+                if a != b {
+                    cluster.cut(a, b);
+                    partitions += 1;
+                    log.push(format!("cut s{} -> s{}", a + 1, b + 1));
+                }
+            }
+            _ => {
+                cluster.heal();
+                log.push("heal".into());
+            }
         }
         std::thread::sleep(Duration::from_millis(800 + next() % 1200));
     }
+    cluster.heal();
+    if let Some((victim, _)) = down {
+        cluster.start(victim, false);
+    }
     let outcome = run.join().unwrap();
-    assert!(outcome.protocol_errors.is_empty(), "protocol errors: {:?}", outcome.protocol_errors);
-    assert!(kills >= 2 && partitions >= 3, "{kills} kills, {partitions} partitions");
+    let context = format!("nemesis seed {seed}: {}", log.join(", "));
+    assert!(outcome.protocol_errors.is_empty(), "protocol errors: {:?}; {context}", outcome.protocol_errors);
+    assert!(kills >= 2 && partitions >= 2, "{kills} kills, {partitions} partitions; {context}");
     assert!(outcome.answered > 100, "only {} operations answered", outcome.answered);
     let (verdict, key) = check_partitioned(&KvModel, &outcome.history, |i| i.key().to_vec(), 50_000_000);
     let summary = match &verdict {
@@ -284,7 +357,7 @@ fn three_processes_stay_linearizable_under_kill_9_and_partitions() {
     };
     assert!(
         verdict == Verdict::Linearizable,
-        "{summary} at key {:?}; {} answered, {} unanswered, {kills} kills, {partitions} partitions",
+        "{summary} at key {:?}; {} answered, {} unanswered, {kills} kills, {partitions} partitions; {context}",
         key.map(|k| String::from_utf8_lossy(&k).into_owned()),
         outcome.answered,
         outcome.unanswered
