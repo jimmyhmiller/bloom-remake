@@ -1,7 +1,7 @@
-//! Slice 2: LDFI on Blossom programs, from source text. Each spec of `examples/e02_specs.bls` and
-//! `examples/e10_specs.bls` is compiled with its target and checked; the verdict must be the one its
-//! `check ldfi expect …` states, which is Molly's verdict for the `.ded` counterpart (retry_deliv, simple_deliv,
-//! simplog, ack_rb), and a counterexample must be a real one.
+//! Slice 2: LDFI on Blossom programs, from source text. Each spec of `examples/e02_specs.bls`,
+//! `examples/e04_specs.bls` and `examples/e10_specs.bls` is compiled with its target and checked; the verdict must be
+//! the one its `check ldfi expect …` states, which is Molly's verdict for the `.ded` counterpart (retry_deliv,
+//! simple_deliv, 2pc, simplog, ack_rb), and a counterexample must be a real one.
 
 use std::path::Path;
 
@@ -74,4 +74,17 @@ fn e02_one_shot_loses_a_message() {
 fn e10_simplog_is_molly_s_counterexample() {
     let (_, faults) = check("e10_specs.bls", "SimpleLogFaults");
     assert_eq!(faults, vec!["O(A,B,1)".to_owned()]);
+}
+
+#[test]
+fn e04_omissions_only_delay_the_commit() {
+    let (verdict, _) = check("e04_specs.bls", "OmissionFaults");
+    assert_eq!(verdict, Verdict::NoCounterexample);
+}
+
+#[test]
+fn e04_coordinator_crash_blocks_the_participants() {
+    let (_, faults) = check("e04_specs.bls", "CrashFaults");
+    // 2pc 6/3/1's falsifier shape (BENCH-131b, LDFI Figure 8): the coordinator crashes after asking for votes.
+    assert!(faults.iter().any(|f| f.starts_with("C(C,")), "{faults:?}");
 }

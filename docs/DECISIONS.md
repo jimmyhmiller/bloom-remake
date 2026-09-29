@@ -175,5 +175,28 @@ question tool, the user chose:
 - **A negative number in an `LPSet`** is reported as BLSR004 (an out-of-range value), there being no dedicated code.
 - **IR amendments (additive, 2):** `assignable` is covariant through tuples, options and collections (`Map<Node<R>,
   V>` stands for `Map<Node, V>`), and lattice operation arguments are checked with it.
+- **Relation-level `resolve`** (LANGUAGE §10.7) is implemented for `choose`, `choose_least(col)` and
+  `choose_most(col)` (a cost that is one column); `sticky`, `choose_rand`, costs over expressions and `upsert` into
+  a resolved table report BLS0908. `merge` is accepted when every non-key column is a lattice (it is then the
+  default). The expansion is `r$n`/`r$cand`/`r$ext`/`r$pmin` with the site `M::rel::resolve`.
+- **Run seeds.** `$prio` draws from σc = PRF(ρ, "choose"); a simulation's root seed ρ is `Seed::from_u64(n)` for
+  run seed `n`: `blossom sim --seed`, a corpus manifest's `[deploy] seed` (default 0), and 0 for a spec's runs until
+  `check sim { seed }` exists. An oracle given a seeded program but no seed fails with an internal error rather than
+  choosing one.
+- **External clients in specs** (LANGUAGE §18.4 had no spec form): `fact c(…) @ n from s at tick k` on a channel
+  from an external role is a message of session `s`, delivered to `n` at `k` like an input (not subject to
+  omission faults; a lineage leaf). Replies to sessions are recorded as the node's egress and dropped (a crashed
+  node's replies are lost). Specs name an instance's relations by path (`tpc.decided(x, d) @ n`).
+- **`examples/e04_two_phase_commit.bls`** now feeds the instance's `refuse` input from a root input at `Worker`: the
+  choreography's `on refuse(…)` handler read an instance input no statement wrote, which BLS0504 rightly rejects.
+- **e04 under LDFI** (`examples/e04_specs.bls`) uses EOT 10 where Molly's 2pc uses 7: E4 persists the transaction,
+  the decision and each participant's decision with `next`, so with `prepare` lost until EFF 3 the second decider
+  appears at tick 8. Verdicts match 2pc: omissions hold (lineage-driven, confirmed by exhaustive certification),
+  one crash fails with the coordinator crashing before its decision is persisted (Figure 8).
+- **Lattice lineage** (ARCHITECTURE §8.3): a cell's goal has one firing that needs every contribution and a group
+  premise per contributing rule (a new contribution changes the cell); stale firings (reads of a superseded value
+  within a growing stratum) are dropped; LDFI over lattice channels reports BLS0908 (LANG-137).
+- **IR amendments (additive, 3):** time arithmetic in the validator (`Instant - Instant: Duration`,
+  `Instant ± Duration: Instant`), and a direction channel to an external role has a `Session` destination.
 - **Code registry:** `BLS0106` may also be constructed by `blossom-front` (a clause against the relation's kind is a
   semantic check; ARCHITECTURE §13.1 gives the parser the syntactic part of BLS0100–0110).

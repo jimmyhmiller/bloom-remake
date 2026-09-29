@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use blossom_base::{InternalError, RelId, internal_error};
 use blossom_ir::obs::FiringRecord;
-use blossom_oracle::{Delivery, Instance, Oracle, OracleError, Row, TickInput, TickOutput};
+use blossom_oracle::{Delivery, Egress, Ingress, Instance, Oracle, OracleError, Row, TickInput, TickOutput};
 use blossom_value::time::{Duration, Instant, NodeId, Tick};
 
 /// Runs one node's tick.
@@ -138,6 +138,10 @@ pub struct NodeTick {
     pub firings: Vec<FiringRecord>,
     /// The channel tuples delivered at the start of the round.
     pub delivered: Vec<Delivery>,
+    /// The client sessions' messages of the round.
+    pub ingress: Vec<Ingress>,
+    /// The replies to client sessions the node sent in the round.
+    pub egress: Vec<Egress>,
     /// Whether the node ran this round (a crashed node under [`CrashView::Frozen`] does not).
     pub ran: bool,
 }
@@ -175,6 +179,7 @@ pub struct SyncWorld<'a, E: Evaluator> {
     eval: &'a E,
     nodes: u32,
     inputs: BTreeMap<(Tick, NodeId), Vec<(RelId, Row)>>,
+    ingress: BTreeMap<(Tick, NodeId), Vec<Ingress>>,
 }
 
 impl<'a, E: Evaluator> SyncWorld<'a, E> {
@@ -183,7 +188,13 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
             eval,
             nodes,
             inputs: BTreeMap::new(),
+            ingress: BTreeMap::new(),
         }
+    }
+
+    /// Schedules a client session's message to `node` (LANGUAGE §18.4).
+    pub fn ingress(&mut self, node: NodeId, tick: Tick, message: Ingress) {
+        self.ingress.entry((tick, node)).or_default().push(message);
     }
 
     /// Schedules an input event.
@@ -203,6 +214,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
         let mut halted = vec![false; n];
         let mut inbox: Vec<Vec<Delivery>> = vec![Vec::new(); n];
         let empty: Vec<(RelId, Row)> = Vec::new();
+        let no_ingress: Vec<Ingress> = Vec::new();
         for t in 0..=config.last.0 {
             let tick = Tick(t);
             if tick < config.first {
@@ -227,12 +239,15 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                         instance: previous,
                         firings: Vec::new(),
                         delivered: delivered.clone(),
+                        ingress: Vec::new(),
+                        egress: Vec::new(),
                         ran: false,
                     });
                     next_carried.push(state.clone());
                     continue;
                 }
                 let events = self.inputs.get(&(tick, node)).unwrap_or(&empty);
+                let ingress = self.ingress.get(&(tick, node)).unwrap_or(&no_ingress);
                 let out = self
                     .eval
                     .tick(&TickInput {
@@ -242,6 +257,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                         carried: state,
                         events,
                         delivered,
+                        ingress,
                         capture: config.capture,
                     })
                     .map_err(|error| SimError::Node { node, tick, error })?;
@@ -295,10 +311,18 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                     *slot = true;
                 }
                 next_carried.push(out.next);
+                // A crashed node's replies are lost like its messages.
+                let egress = if faults.crashed(node, tick) {
+                    Vec::new()
+                } else {
+                    out.egress.into_iter().collect()
+                };
                 round.push(NodeTick {
                     instance: out.instance,
                     firings: out.firings,
                     delivered: delivered.clone(),
+                    ingress: ingress.clone(),
+                    egress,
                     ran: true,
                 });
             }

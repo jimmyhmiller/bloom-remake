@@ -449,7 +449,7 @@ IfStmt          = "if" Body⁰ Block [ "else" ( IfStmt | Block ) ] ;
 ForStmt         = "for" Body⁰ Block ;
 Head            = RelPath "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 BootstrapItem   = "bootstrap" [ 'fresh' ] Block ;
-FactItem        = 'fact' Head [ "@" Expr ] [ 'at' 'tick' Expr ] ";" ;
+FactItem        = 'fact' Head [ "@" Expr ] [ 'from' Expr ] [ 'at' 'tick' Expr ] ";" ;
 InvariantItem   = "invariant" IDENT [ STRING_LIT ] ":" 'never' Body ";" ;
 
 (* ======================================================================== bodies *)
@@ -2551,7 +2551,7 @@ spec SimpleLogFaults for SimpleLog {
 | `nodes A, B, C;` | the scenario's node constants (SCREAMING_CASE, §2.6) |
 | `assign Role = [A, B];` | role membership for a multi-role target |
 | `faults { eot, eff, crashes, model, delay, round }` | the failure spec ⟨EOT, EFF, maxCrashes⟩ (TEST-020); an omission is allowed iff 1 ≤ send tick < EFF (CR-21); `model: sync` (delivery at t+1, the LDFI mode, TEST-006) or `async`; `delay` bounds async delivery; `round` maps physical time to rounds (ODD-16) |
-| `fact r(…) [@ n] [at tick k];` | scenario facts: into a `static` relation at node `n` (all `nodes` without `@`), or into an `input` at tick `k` (LANG-069) |
+| `fact r(…) [@ n] [at tick k];` | scenario facts: into a `static` relation at node `n` (all `nodes` without `@`), or into an `input` at tick `k` (LANG-069); `fact c(…) @ n from s at tick k` is a message of client session `s` (a number) on a channel `c` from an external role (§18.4). An instance's relations are named by path (`tpc.begin`), in facts and in located atoms |
 | `view …` | spec rules: views over global state; they may join across locations (LANG-201) |
 | `view pre(…)`, `view post(…)` | the LDFI outcome oracle: same schema, evaluated at EOT (TEST-022) |
 | `invariant name: never B;` | safety over every visited global state |

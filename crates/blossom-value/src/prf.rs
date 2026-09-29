@@ -27,6 +27,15 @@ impl fmt::Debug for Seed {
     }
 }
 
+impl Seed {
+    /// The root seed of a numbered run (`--seed N`, a manifest's `seed`): `N` little-endian, zero-extended.
+    pub fn from_u64(n: u64) -> Seed {
+        let mut bytes = [0; 16];
+        bytes[..8].copy_from_slice(&n.to_le_bytes());
+        Seed(bytes)
+    }
+}
+
 /// The seeds of one node (TickHeader::seeds, ARCHITECTURE §4.7).
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct Seeds {

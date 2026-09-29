@@ -125,6 +125,7 @@ fn run(oracle: &Oracle, events: &[(RelId, Row)]) -> Result<crate::TickOutput, Or
         carried: &Instance::default(),
         events,
         delivered: &[],
+        ingress: &[],
         capture: true,
     })
 }
@@ -370,6 +371,7 @@ fn next_heads_carry_and_async_heads_send() {
             carried: &carried,
             events: &events,
             delivered: &delivered,
+            ingress: &[],
             capture: false,
         })
         .unwrap();

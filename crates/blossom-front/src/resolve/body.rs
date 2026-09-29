@@ -166,7 +166,7 @@ impl<'t> Resolver<'t, '_> {
         if self.spec.is_some()
             && let Some(loc) = &atom.at
         {
-            if let ExprKind::Call { args, .. } = &atom.expr.kind {
+            if let Some((_, Some(args))) = spec_rel_path(&atom.expr) {
                 for a in args {
                     if let Arg::Pos(p) | Arg::Named(_, p) = a {
                         self.declare_pattern(cx, p);
@@ -404,37 +404,21 @@ impl<'t> Resolver<'t, '_> {
     /// `Some(Some(atom))` if the literal reads a relation, `Some(None)` if it does not, `None` on an error.
     /// The relation name an atom literal's expression names (`r` of `r(…)` or `r`), or a symbol that names none.
     fn rel_name_of(&self, e: &ast::Expr) -> Symbol {
-        match &e.kind {
-            ExprKind::Call { callee, .. } => self.rel_name_of(callee),
-            ExprKind::Path(p, _) if p.len() == 1 => p.first().map_or(Symbol::intern(""), |i| i.name),
-            _ => Symbol::intern(""),
-        }
+        spec_rel_path(e).map_or(Symbol::intern(""), |(n, _)| n.name)
     }
 
     /// A spec atom `r(args) @ loc [at tick k]`: an atom of `r`'s trace relation at that time, the node first.
     fn spec_atom(&mut self, cx: &mut RuleCx, a: &ast::AtomLit, loc: &ast::Expr) -> Option<HAtom> {
-        let (name, args) = match &a.expr.kind {
-            ExprKind::Call { callee, args } => match &callee.kind {
-                ExprKind::Path(p, _) if p.len() == 1 => (*p.first()?, args.as_slice()),
-                _ => {
-                    self.error(
-                        code!("BLS0200"),
-                        a.span,
-                        "`@ n` locates an atom of the target's relation",
-                    );
-                    return None;
-                }
-            },
-            ExprKind::Path(p, _) if p.len() == 1 => (*p.first()?, &[][..]),
-            _ => {
-                self.error(
-                    code!("BLS0200"),
-                    a.span,
-                    "`@ n` locates an atom of the target's relation",
-                );
-                return None;
-            }
+        let Some((name, args)) = spec_rel_path(&a.expr) else {
+            self.error(
+                code!("BLS0200"),
+                a.span,
+                "`@ n` locates an atom of the target's relation",
+            );
+            return None;
         };
+        let with_args = args.is_some();
+        let args = args.unwrap_or(&[]);
         let time = match &a.at_tick {
             None => None,
             Some(k) => match self.const_value(cx.ms, k, None) {
@@ -463,7 +447,7 @@ impl<'t> Resolver<'t, '_> {
         let r = self.rel_of(rel);
         let cols: Vec<Symbol> = r.cols.iter().skip(1).map(|c| c.name).collect();
         let mut out = vec![loc];
-        if matches!(&a.expr.kind, ExprKind::Call { .. }) {
+        if with_args {
             out.extend(self.args_for(cx, name.as_str(), &cols, args, a.span)?);
         } else {
             out.extend(cols.iter().map(|_| HPat::Wild(a.span)));
@@ -1789,6 +1773,10 @@ impl<'t> Resolver<'t, '_> {
             (k, Verb::Delete | Verb::Upsert) if !k.is_table() => {
                 Some((code!("BLS0400"), bad("only tables accept `delete` and `upsert`")))
             }
+            (_, Verb::Upsert) if r.resolve.is_some() => {
+                self.unsupported("LANG-117", "`upsert` into a relation with a `resolve` policy", span);
+                return None;
+            }
             // A lattice only grows (LANG-284): it is reset by raising an epoch, never retracted.
             (_, Verb::Delete | Verb::Upsert)
                 if r.cols
@@ -2278,4 +2266,37 @@ fn range_kind(op: BinOp) -> Option<RangeKind> {
         BinOp::OpenRangeEq => RangeKind::OpenClosed,
         _ => return None,
     })
+}
+
+/// The target relation a spec atom names, with its arguments (`None` for a bare name): `r(…)`, `r`, or an instance's
+/// relation `a.r(…)`, `a.r`, named `a.r` (LANGUAGE §17.3).
+fn spec_rel_path(e: &ast::Expr) -> Option<(Ident, Option<&[Arg]>)> {
+    let qualified = |inst: &Ident, name: &Ident| Ident {
+        name: Symbol::intern(&format!("{}.{}", inst.as_str(), name.as_str())),
+        span: name.span,
+    };
+    let single = |p: &[Ident]| match p {
+        [one] => Some(*one),
+        _ => None,
+    };
+    match &e.kind {
+        ExprKind::Call { callee, args } => match &callee.kind {
+            ExprKind::Path(p, t) if t.is_empty() => single(p).map(|n| (n, Some(args.as_slice()))),
+            ExprKind::Field { base, name } => match &base.kind {
+                ExprKind::Path(p, t) if t.is_empty() => single(p).map(|i| (qualified(&i, name), Some(args.as_slice()))),
+                _ => None,
+            },
+            _ => None,
+        },
+        ExprKind::Method { receiver, name, args } => match &receiver.kind {
+            ExprKind::Path(p, t) if t.is_empty() => single(p).map(|i| (qualified(&i, name), Some(args.as_slice()))),
+            _ => None,
+        },
+        ExprKind::Field { base, name } => match &base.kind {
+            ExprKind::Path(p, t) if t.is_empty() => single(p).map(|i| (qualified(&i, name), None)),
+            _ => None,
+        },
+        ExprKind::Path(p, t) if t.is_empty() => single(p).map(|n| (n, None)),
+        _ => None,
+    }
 }

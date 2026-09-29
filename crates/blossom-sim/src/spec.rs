@@ -15,7 +15,7 @@ use std::sync::Arc;
 use blossom_artifact::sim::{Profile, SimArtifact, SpecFeed};
 use blossom_base::{RelId, internal_error};
 use blossom_ir::obs::FiringRecord;
-use blossom_oracle::{Instance, Oracle, Row, TickInput};
+use blossom_oracle::{Ingress, Instance, Oracle, Row, TickInput};
 use blossom_value::{
     Value,
     time::{NodeId, Tick},
@@ -49,7 +49,9 @@ impl<'a> SpecSim<'a> {
     pub fn new(artifact: &'a SimArtifact) -> Result<SpecSim<'a>, SimError> {
         let protocol = Oracle::new(artifact.protocol.clone())
             .map_err(SimError::Load)?
-            .with_roles(artifact.roles.clone());
+            .with_roles(artifact.roles.clone())
+            .with_seed(artifact.seed)
+            .map_err(SimError::Load)?;
         let runtime = match artifact.profile {
             Profile::Molly => Runtime::default(),
             Profile::Blossom { .. } => Runtime::of(artifact.protocol.get())?,
@@ -101,6 +103,9 @@ impl<'a> SpecSim<'a> {
                 for (rel, row) in self.events(NodeId(n), Tick(t))? {
                     world.input(NodeId(n), Tick(t), rel, row);
                 }
+                for m in self.ingress(NodeId(n), Tick(t)) {
+                    world.ingress(NodeId(n), Tick(t), m);
+                }
             }
         }
         world.run(
@@ -138,6 +143,20 @@ impl<'a> SpecSim<'a> {
                 .map(|s| (s.rel, Arc::from(s.row.clone()))),
         );
         Ok(events)
+    }
+
+    /// The client sessions' messages to `node` at `tick`.
+    pub fn ingress(&self, node: NodeId, tick: Tick) -> Vec<Ingress> {
+        self.artifact
+            .ingress
+            .iter()
+            .filter(|f| f.node == node && f.tick == tick)
+            .map(|f| Ingress {
+                rel: f.rel,
+                session: f.session,
+                row: Arc::from(f.row.clone()),
+            })
+            .collect()
     }
 
     /// Evaluates the outcome spec on `run` at `eot`. Fails when the program has no spec (CR-30).
@@ -213,6 +232,7 @@ impl<'a> SpecSim<'a> {
                 carried: &Instance::default(),
                 events: &events,
                 delivered: &[],
+                ingress: &[],
                 capture,
             })
             .map_err(|error| SimError::Node {
@@ -239,6 +259,7 @@ impl<'a> SpecSim<'a> {
         delivered: &[blossom_oracle::Delivery],
     ) -> Result<blossom_oracle::TickOutput, SimError> {
         let events = self.events(node, tick)?;
+        let ingress = self.ingress(node, tick);
         self.protocol
             .tick(&TickInput {
                 node,
@@ -247,6 +268,7 @@ impl<'a> SpecSim<'a> {
                 carried,
                 events: &events,
                 delivered,
+                ingress: &ingress,
                 capture: false,
             })
             .map_err(|error| SimError::Node { node, tick, error })

@@ -656,6 +656,7 @@ impl Cx<'_> {
         let like = child_of(node, RELPATH).map(|r| self.names(&r));
         let mut key = None;
         let mut direction = None;
+        let mut resolve = None;
         let mut other_clauses = Vec::new();
         for c in node.children() {
             let cspan = self.span(&c);
@@ -671,7 +672,7 @@ impl Cx<'_> {
                 TTLCLAUSE => other_clauses.push(("ttl", cspan)),
                 MAXCLAUSE => other_clauses.push(("max", cspan)),
                 RANGECLAUSE => other_clauses.push(("range", cspan)),
-                RESOLVECLAUSE => other_clauses.push(("resolve", cspan)),
+                RESOLVECLAUSE => resolve = child_of(&c, POLICY).map(|p| (self.rel_policy(&p), cspan)),
                 PARTITIONCLAUSE => other_clauses.push(("partition by", cspan)),
                 SEALEDBYCLAUSE => other_clauses.push(("sealed by", cspan)),
                 EXACTLYONCECLAUSE => other_clauses.push(("exactly_once", cspan)),
@@ -686,8 +687,37 @@ impl Cx<'_> {
             like,
             key,
             direction,
+            resolve,
             other_clauses,
             span,
+        }
+    }
+
+    fn rel_policy(&mut self, node: &SyntaxNode) -> RelPolicy {
+        let sticky = has_word(node, "sticky");
+        let expr = || expr_children(node).next();
+        if has_word(node, "choose_rand") {
+            RelPolicy::ChooseRand { sticky }
+        } else if has_word(node, "choose_least") {
+            match expr() {
+                Some(e) => RelPolicy::Least(self.expr(&e)),
+                None => {
+                    self.malformed("`choose_least` without its cost", self.span(node));
+                    RelPolicy::Choose { sticky: false }
+                }
+            }
+        } else if has_word(node, "choose_most") {
+            match expr() {
+                Some(e) => RelPolicy::Most(self.expr(&e)),
+                None => {
+                    self.malformed("`choose_most` without its cost", self.span(node));
+                    RelPolicy::Choose { sticky: false }
+                }
+            }
+        } else if has_word(node, "merge") {
+            RelPolicy::Merge
+        } else {
+            RelPolicy::Choose { sticky }
         }
     }
 
@@ -724,6 +754,7 @@ impl Cx<'_> {
             like: None,
             key: None,
             direction: None,
+            resolve: None,
             other_clauses: Vec::new(),
             span,
         }
@@ -920,10 +951,39 @@ impl Cx<'_> {
                 }
             }
         };
-        let mut exprs = expr_children(node);
-        let at = exprs.next().map(|e| self.expr(&e));
-        let tick = exprs.next().map(|e| self.expr(&e));
-        Fact { head, at, tick, span }
+        // Each expression follows its keyword: `@ n`, `from s`, `at tick k`.
+        let (mut at, mut from, mut tick) = (None, None, None);
+        let mut slot = 0;
+        for e in node.children_with_tokens() {
+            if let Some(t) = e.as_token() {
+                if t.kind() == AT {
+                    slot = 1;
+                } else if t.kind() == IDENT && t.text() == "from" {
+                    slot = 2;
+                } else if t.kind() == IDENT && t.text() == "tick" {
+                    slot = 3;
+                }
+                continue;
+            }
+            let Some(n) = e.into_node() else { continue };
+            if !is_expr(n.kind()) {
+                continue;
+            }
+            let x = self.expr(&n);
+            match slot {
+                1 => at = Some(x),
+                2 => from = Some(x),
+                3 => tick = Some(x),
+                _ => self.malformed("an expression in a fact outside `@`, `from` and `at tick`", span),
+            }
+        }
+        Fact {
+            head,
+            at,
+            from,
+            tick,
+            span,
+        }
     }
 
     fn invariant(&mut self, node: &SyntaxNode) -> Invariant {

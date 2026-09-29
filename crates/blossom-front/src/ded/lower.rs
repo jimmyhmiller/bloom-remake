@@ -163,11 +163,14 @@ pub(crate) fn lower(
         profile: blossom_artifact::sim::Profile::Molly,
         protocol,
         inputs,
+        ingress: Vec::new(),
         statics: Vec::new(),
         halt: None,
         rels,
         edges,
         spec,
+        // Molly programs make no seeded choices; the seed is recorded for uniformity.
+        seed: blossom_value::Seed::from_u64(0),
     })
 }
 

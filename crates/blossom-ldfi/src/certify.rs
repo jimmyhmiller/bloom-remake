@@ -227,6 +227,7 @@ fn step_state(
                 instance: state.last.get(i).cloned().unwrap_or_default(),
                 next: carried.clone(),
                 outbox: BTreeSet::new(),
+                egress: BTreeSet::new(),
                 firings: Vec::new(),
             });
             continue;
