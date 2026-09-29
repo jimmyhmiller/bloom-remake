@@ -19,13 +19,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use blossom_artifact::ded::DedArtifact;
+use blossom_artifact::sim::SimArtifact;
 use blossom_driver::ded::compile_files;
 use blossom_driver::render::render;
 use blossom_front::ded::DedError;
 use blossom_ldfi::report::fault_labels;
 use blossom_ldfi::{FailureSpec, LdfiConfig, Verdict, falsifiers};
-use blossom_sim::ded::DedSim;
+use blossom_sim::spec::SpecSim;
 use blossom_value::time::Tick;
 use blossom_value::types::IntTy;
 use blossom_value::value::IntValue;
@@ -303,7 +303,7 @@ fn run_backend(case: &Path, m: &toml::Table, backend: &str, workers: usize, max_
     }
 }
 
-fn compile(files: &[PathBuf], nodes: &[String]) -> Result<DedArtifact, Outcome> {
+fn compile(files: &[PathBuf], nodes: &[String]) -> Result<SimArtifact, Outcome> {
     let files: Vec<String> = files.iter().map(|f| f.to_string_lossy().into_owned()).collect();
     let file_refs: Vec<&str> = files.iter().map(String::as_str).collect();
     let node_refs: Vec<&str> = nodes.iter().map(String::as_str).collect();
@@ -374,7 +374,7 @@ fn oracle_backend(files: &[PathBuf], m: &toml::Table) -> Outcome {
         Ok(a) => a,
         Err(o) => return o,
     };
-    let sim = match DedSim::new(&artifact) {
+    let sim = match SpecSim::new(&artifact) {
         Ok(s) => s,
         Err(e) => return Outcome::Fail(e.to_string()),
     };
@@ -418,7 +418,7 @@ fn oracle_backend(files: &[PathBuf], m: &toml::Table) -> Outcome {
     }
 }
 
-impl super::corpus_bls::Subject for DedArtifact {
+impl super::corpus_bls::Subject for SimArtifact {
     fn node(&self, name: &str) -> Option<blossom_value::time::NodeId> {
         self.node_id(name)
     }
@@ -466,7 +466,7 @@ impl super::corpus_bls::Subject for DedArtifact {
 }
 
 /// A manifest value decoded by the column's type (PLAN §5.1): strings in node columns name nodes.
-fn value(a: &DedArtifact, v: &toml::Value, ty: &TypeDef) -> Option<Value> {
+fn value(a: &SimArtifact, v: &toml::Value, ty: &TypeDef) -> Option<Value> {
     Some(match (v, ty) {
         (toml::Value::Integer(i), TypeDef::Int(IntTy::U64)) => Value::Int(IntValue::U64(u64::try_from(*i).ok()?)),
         (toml::Value::Integer(i), TypeDef::Int(IntTy::I64)) => Value::Int(IntValue::I64(*i)),
@@ -508,7 +508,7 @@ fn ldfi_backend(files: &[PathBuf], m: &toml::Table, workers: usize, max_runs: u6
     let mut config = LdfiConfig::new(spec);
     config.workers = workers;
     config.max_runs = max_runs;
-    let sim = match DedSim::new(&artifact) {
+    let sim = match SpecSim::new(&artifact) {
         Ok(s) => s,
         Err(e) => return Outcome::Fail(e.to_string()),
     };

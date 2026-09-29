@@ -1,6 +1,6 @@
 //! The Molly `.ded` frontend (LANG-220, LANGUAGE §21.1, ARCHITECTURE §8.1 and §13.12).
 //!
-//! [`compile`] turns a set of `.ded` root files and a deployment's node names into a [`DedArtifact`]:
+//! [`compile`] turns a set of `.ded` root files and a deployment's node names into a [`SimArtifact`]:
 //!
 //! 1. [`load`](load) parses the roots and everything they `include` (relative to the including file; a file
 //!    included twice is loaded once, as Molly concatenates files);
@@ -24,7 +24,7 @@ mod tests;
 
 use std::sync::Arc;
 
-use blossom_artifact::ded::DedArtifact;
+use blossom_artifact::sim::SimArtifact;
 use blossom_base::{Diagnostic, Diagnostics, InternalError, SourceDb, code};
 
 /// A source file handed to the frontend by a [`DedLoader`].
@@ -62,7 +62,7 @@ pub fn compile(
     nodes: &[&str],
     loader: &mut dyn DedLoader,
     sources: &mut SourceDb,
-) -> Result<DedArtifact, DedError> {
+) -> Result<SimArtifact, DedError> {
     let mut diags = Diagnostics::new();
     let program = load::load(roots, loader, sources, &mut diags);
     if diags.has_errors() {

@@ -57,6 +57,9 @@ pub enum Support {
     Leaf,
     /// The alternative firings that derived the goal.
     Derived(Vec<FiringId>),
+    /// A crashed node's frozen state (CR-20): the tuple it held at the previous tick, which holds as long as that one
+    /// does.
+    Frozen(GoalId),
 }
 
 /// A fact that held.
@@ -96,6 +99,8 @@ pub enum Premise {
     CrashAbsent { node: Option<NodeId>, time: Option<Tick> },
     /// A positive read of the crash oracle's tuple `crash(_, node, time)`: falsified if `node` crashes earlier.
     CrashPresent { node: NodeId, time: Tick },
+    /// The firing node was up (the frozen crash view, CR-20): falsified if `node` crashes at or before `tick`.
+    Alive { node: NodeId, tick: Tick },
     /// An aggregate firing's group, recorded in [`ProvGraph::aggregate`]: the firing's row changes when a
     /// contributor appears (a contributor lost is one of its read premises).
     Aggregate(AggId),
@@ -191,6 +196,13 @@ impl ProvGraph {
         self.index.get(key).copied()
     }
 
+    /// Marks a goal a frozen copy of `prev` (a crashed node's state, CR-20).
+    pub fn set_frozen(&mut self, goal: GoalId, prev: GoalId) {
+        if let Some(g) = self.goals.get_mut(goal.0 as usize) {
+            g.support = Support::Frozen(prev);
+        }
+    }
+
     /// Marks a goal a leaf.
     pub fn set_leaf(&mut self, goal: GoalId) {
         if let Some(g) = self.goals.get_mut(goal.0 as usize) {
@@ -206,7 +218,7 @@ impl ProvGraph {
             match &mut g.support {
                 Support::Derived(list) => list.push(id),
                 support @ Support::Unknown => *support = Support::Derived(vec![id]),
-                Support::Leaf => {}
+                Support::Leaf | Support::Frozen(_) => {}
             }
         }
         Ok(id)
@@ -302,6 +314,10 @@ impl ProvGraph {
             Support::Unknown => {
                 let _ = writeln!(out, "{indent}[{n}] {label}  (no recorded derivation)");
             }
+            Support::Frozen(prev) => {
+                let _ = writeln!(out, "{indent}[{n}] {label}  (frozen: its node has crashed)");
+                self.render_goal(*prev, depth + 1, names, shown, out);
+            }
             Support::Derived(firings) => {
                 let _ = writeln!(out, "{indent}[{n}] {label}");
                 let alternatives = firings.len();
@@ -355,6 +371,9 @@ impl ProvGraph {
                             }
                             Premise::Aggregate(_) => {
                                 let _ = writeln!(out, "{indent}    no new contributor joins the group");
+                            }
+                            Premise::Alive { node, tick } => {
+                                let _ = writeln!(out, "{indent}    {} is up at {}", names.node(*node), tick.0);
                             }
                         }
                     }

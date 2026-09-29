@@ -8,9 +8,9 @@
 use std::collections::BTreeSet;
 use std::process::ExitCode;
 
-use blossom_artifact::ded::{DedArtifact, DedRelKind};
+use blossom_artifact::sim::{LogicalKind, SimArtifact};
 use blossom_ldfi::report::{DedNames, timeline};
-use blossom_sim::ded::DedSim;
+use blossom_sim::spec::SpecSim;
 use blossom_sim::{FaultSchedule, Omission};
 use blossom_value::time::Tick;
 
@@ -64,7 +64,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
             return Exit::Usage.into();
         }
     };
-    let sim = match DedSim::new(&artifact) {
+    let sim = match SpecSim::new(&artifact) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{e}");
@@ -95,7 +95,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
             };
             let mut lines = Vec::new();
             for rel in &artifact.rels {
-                if rel.kind != DedRelKind::Protocol || (!shown.is_empty() && !shown.contains(rel.name.as_str())) {
+                if rel.kind != LogicalKind::Protocol || (!shown.is_empty() && !shown.contains(rel.name.as_str())) {
                     continue;
                 }
                 let Some(ir) = rel.protocol else { continue };
@@ -136,7 +136,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
     Exit::Ok.into()
 }
 
-fn faults(artifact: &DedArtifact, args: &Args) -> Result<FaultSchedule, String> {
+fn faults(artifact: &SimArtifact, args: &Args) -> Result<FaultSchedule, String> {
     let node = |name: &str| {
         artifact
             .node_id(name)

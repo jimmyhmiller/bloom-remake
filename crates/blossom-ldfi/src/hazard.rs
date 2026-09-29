@@ -106,6 +106,8 @@ pub enum Origin<'r> {
     Snapshot { protocol: RelId, tick: Option<Tick> },
     /// The crash oracle `crash(Observer, Node, Time)`.
     Crash,
+    /// The crash oracle `crashed(Node)` of a Blossom spec: every node that crashed.
+    Crashed,
 }
 
 type Pattern = Vec<Option<Value>>;
@@ -515,6 +517,8 @@ impl<'a> Encoder<'a> {
                 return Err(internal_error!("lineage: no derivation recorded for {:?}", g.key).into());
             }
             Support::Derived(f) => f,
+            // A frozen copy holds as long as the previous tick's tuple does (the crash itself only moves earlier).
+            Support::Frozen(prev) => return self.goal(*prev),
         };
         let mut children = Vec::with_capacity(firings.len());
         for f in firings {
@@ -568,6 +572,7 @@ impl<'a> Encoder<'a> {
                 }
             }
             Premise::CrashAbsent { node, time } => self.crash_appears_any(node, time),
+            Premise::Alive { node, tick } => self.vars.k(self.solver, self.spec, node, tick),
             Premise::CrashPresent { node, time } => self.crash_removed(node, time),
             Premise::Aggregate(id) => {
                 let graph = self.graph;
@@ -729,6 +734,8 @@ impl<'a> Encoder<'a> {
                 let (node, time) = crash_pattern(pattern)?;
                 self.crash_appears_any(node, time)
             }
+            // A tuple crashed(Node) appears when that node crashes, at any time.
+            Origin::Crashed => self.crash_appears_any(crashed_node(pattern)?, None),
             Origin::Snapshot { protocol, tick: at } => {
                 let (node_loc, rest) = split_node(pattern);
                 self.appear(Space::Protocol, protocol, node_loc, at.unwrap_or(tick), rest)
@@ -903,6 +910,10 @@ impl<'a> Encoder<'a> {
                     .iter()
                     .any(|(n, c)| node.is_none_or(|m| m == *n) && time.is_none_or(|t| t == *c)))
             }
+            Origin::Crashed => {
+                let node = crashed_node(pattern)?;
+                Ok(self.seed_crashes.keys().any(|n| node.is_none_or(|m| m == *n)))
+            }
             Origin::Snapshot { protocol, tick: at } => {
                 let (node_loc, rest) = split_node(pattern);
                 self.exists(Space::Protocol, protocol, node_loc, at.unwrap_or(tick), rest)
@@ -963,6 +974,8 @@ impl<'a> Encoder<'a> {
                 let (node_loc, rest) = split_node(pattern);
                 return self.remove(Space::Protocol, protocol, node_loc, at.unwrap_or(tick), rest);
             }
+            // A crashed node stays crashed in every superset of the run's faults.
+            Origin::Crashed => return Ok(Hazard::False),
             Origin::Input | Origin::Rules { .. } => {}
         }
         if loc == Loc::AnyNode {
@@ -1062,6 +1075,15 @@ impl<'a> Encoder<'a> {
             self.tick_memo.insert((src, tick), h);
         }
         Ok(h)
+    }
+}
+
+/// The node column of a pattern over `crashed(Node)`.
+fn crashed_node(pattern: &[Option<Value>]) -> Result<Option<NodeId>, LdfiError> {
+    match pattern.first() {
+        Some(Some(Value::Node(n))) => Ok(Some(*n)),
+        Some(None) | None => Ok(None),
+        Some(Some(other)) => Err(internal_error!("a crashed-oracle node column {other:?}").into()),
     }
 }
 

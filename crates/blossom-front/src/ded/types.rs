@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 
-use blossom_artifact::ded::DedRelKind;
+use blossom_artifact::sim::LogicalKind;
 use blossom_base::{Diagnostic, Diagnostics, Span, Symbol, code};
 use blossom_syntax::ded::{AggFunc, Arg, BodyItem, Expr, Rule, Term};
 
@@ -194,8 +194,8 @@ pub(crate) fn infer(program: &Program, model: &Model, diags: &mut Diagnostics) -
         let mut cols = Vec::with_capacity(rel.arity);
         for c in 0..rel.arity {
             let fixed = match (rel.kind, c) {
-                (DedRelKind::Protocol, 0) | (DedRelKind::Crash, 0 | 1) => Ty::Known(ColTy::Node),
-                (DedRelKind::Crash, 2) => Ty::Known(ColTy::I64),
+                (LogicalKind::Protocol, 0) | (LogicalKind::Crash, 0 | 1) => Ty::Known(ColTy::Node),
+                (LogicalKind::Crash, 2) => Ty::Known(ColTy::I64),
                 _ => Ty::Unknown,
             };
             let why = (fixed != Ty::Unknown).then_some(rel.first);

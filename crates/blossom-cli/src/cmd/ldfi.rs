@@ -11,7 +11,7 @@ use std::process::ExitCode;
 
 use blossom_ldfi::report::{fault_labels, post_lineage, render};
 use blossom_ldfi::{FailureSpec, LdfiConfig, LdfiError, Verdict, falsifiers};
-use blossom_sim::ded::DedSim;
+use blossom_sim::spec::SpecSim;
 
 use crate::common::{Context, ded};
 use crate::exit::Exit;
@@ -108,7 +108,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
     config.workers = args
         .jobs
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get));
-    let sim = match DedSim::new(&artifact) {
+    let sim = match SpecSim::new(&artifact) {
         Ok(s) => s,
         Err(e) => return fail(&LdfiError::Sim(e)),
     };
