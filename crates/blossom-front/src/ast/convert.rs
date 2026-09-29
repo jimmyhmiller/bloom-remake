@@ -109,9 +109,20 @@ fn is_literal(kind: SyntaxKind) -> bool {
 const LANG_002: FeatureId = FeatureId("LANG-002");
 
 impl Cx<'_> {
+    /// A node's span without its leading and trailing trivia (the parser attaches whitespace and comments to the
+    /// node that follows them).
     fn span(&self, node: &SyntaxNode) -> Span {
         let r = node.text_range();
-        Span::new(self.file, r.start().into(), r.end().into())
+        let mut tokens = node
+            .descendants_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| !t.kind().is_trivia());
+        let first = tokens.next();
+        let last = tokens.last().or_else(|| first.clone());
+        match (first, last) {
+            (Some(a), Some(b)) => Span::new(self.file, a.text_range().start().into(), b.text_range().end().into()),
+            _ => Span::new(self.file, r.start().into(), r.end().into()),
+        }
     }
 
     fn token_span(&self, t: &SyntaxToken) -> Span {

@@ -123,7 +123,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
                 }
                 let Some(ir) = rel.protocol else { continue };
                 for row in nt.instance.rows(ir) {
-                    let vals: Vec<String> = row.iter().map(|v| names.value(v)).collect();
+                    let vals = names.row(ir, row);
                     lines.push(format!("  {}({})", rel.name, vals.join(", ")));
                 }
             }
@@ -145,7 +145,20 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
                 println!("== outcome at tick {}", last.0);
                 for (label, rows) in [("pre", &outcome.pre), ("post", &outcome.post)] {
                     for row in rows {
-                        let vals: Vec<String> = row.iter().map(|v| names.value(v)).collect();
+                        let program = artifact.spec.as_ref().map(|s| s.program.get());
+                        let rel = artifact
+                            .spec
+                            .as_ref()
+                            .map(|s| if label == "pre" { s.pre } else { s.post });
+                        let cols = program
+                            .zip(rel)
+                            .and_then(|(p, r)| p.rels.get(r))
+                            .map(|r| &r.schema.cols);
+                        let vals: Vec<String> = row
+                            .iter()
+                            .enumerate()
+                            .map(|(i, v)| names.typed(v, cols.and_then(|c| c.get(i)).map(|c| c.ty), program))
+                            .collect();
                         println!("  {label}({})", vals.join(", "));
                     }
                 }
