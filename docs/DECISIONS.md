@@ -211,3 +211,10 @@ question tool, the user chose:
   types collection literals and `++` by their widest operand, so role-refined values mix with plain `Node`s.
 - **Code registry:** `BLS0106` may also be constructed by `blossom-front` (a clause against the relation's kind is a
   semantic check; ARCHITECTURE §13.1 gives the parser the syntactic part of BLS0100–0110).
+
+## The flagship goal (user decision, 2026-09-29)
+
+- The user chose (question tool) the flagship "real, fast, correct" program: **a linearizable Raft-replicated KV in
+  Blossom** over TCP, checked by LDFI and a linearizability history checker under `kill -9` and partitions.
+- Speed: "Since I only have an interpreter, I just want you to compare it against etcd" — no fixed target; run the
+  same workload against etcd on the same machine and report both. Recorded in docs/design/SLICES.md.
