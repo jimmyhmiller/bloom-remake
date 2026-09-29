@@ -77,10 +77,13 @@ pub fn compile_spec_file(
     (result, sources)
 }
 
-/// The analyses every compiled program passes: stratification (BLS0502), `monotone` assertions (BLS0702) and ACL
-/// consistency (BLS0800).
+/// The analyses every compiled program passes: stratification (BLS0502), the determinism lints (BLS0601), `monotone`
+/// assertions (BLS0702) and ACL consistency (BLS0800).
 fn analyses(p: &blossom_ir::core::Program) -> Result<Diagnostics, blossom_base::InternalError> {
     let mut out = blossom_analysis::strata::check(p)?;
+    for d in blossom_analysis::determinism::check(p).iter() {
+        out.push(d.clone());
+    }
     for d in blossom_analysis::monotone::check(p).iter() {
         out.push(d.clone());
     }
