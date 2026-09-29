@@ -263,6 +263,8 @@ pub enum HRelKind {
     },
     /// `boot()`.
     Boot,
+    /// `recovered()`: holds in the boot tick iff durable state was reloaded (LANGUAGE §8.4).
+    Recovered,
     /// `localtick()`: a scratch written only with `next` to request another tick.
     LocalTick,
     /// `halt(kill: bool)`: `emit halt(false);` stops the node at the end of the tick (LANGUAGE §7.15).
@@ -539,6 +541,9 @@ pub struct HChoose {
     pub cost: Option<(HExpr, bool)>,
     /// Keep last tick's choice while it is still a candidate (LANG-115).
     pub sticky: bool,
+    /// An order filter, `argmin!(c per X̄)` / `argmax!(c per X̄)` (LANGUAGE §10.3): every valuation whose cost is
+    /// least (greatest) in its group survives, every tie included; `chosen` is empty and no seed is involved.
+    pub ties: bool,
     pub span: Span,
 }
 
@@ -749,4 +754,9 @@ pub enum Builtin {
     RoleSize(HRoleId),
     /// `c.contains(x)` on a `Vec` or `Set` (an element) or a `Map` (a key); the receiver first.
     Contains,
+    /// `rand_range(lo, hi, k…)` (LANGUAGE §15.1): an unbiased value in `[lo, hi)`, the same for the same key within a
+    /// node's tick and incarnation. Arguments: `lo`, `hi`, then the key.
+    RandRange,
+    /// `majority(s, R)` (LANGUAGE §10.9): `|s ∩ R| > |R| / 2` for a set of nodes `s` and a role `R`.
+    Majority(HRoleId),
 }

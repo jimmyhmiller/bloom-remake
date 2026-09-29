@@ -303,7 +303,8 @@ impl Server {
         let oracle = Arc::new(
             Oracle::new(artifact.program.clone())?
                 .with_roles(artifact.roles.clone())
-                .with_seed(seed)?,
+                .with_seed(seed)?
+                .with_node_names(names.to_vec())?,
         );
         let nonce = OsEntropy.boot_nonce().map_err(RuntimeError::Config)?;
         let dir = cfg.dir.clone().unwrap_or_else(|| spec.data_dir.join(&entry.name));

@@ -686,6 +686,9 @@ impl<'t> Resolver<'t, '_> {
             {
                 self.choose(cx, *name, args, clauses, a.span)
             }
+            ExprKind::Bang { name, args, clauses } if matches!(name.as_str(), "argmin" | "argmax") => {
+                self.extreme(cx, *name, args, clauses, a.span)
+            }
             ExprKind::Bang { name, .. } => {
                 self.unsupported(
                     "LANG-108",
@@ -786,6 +789,52 @@ impl<'t> Resolver<'t, '_> {
             per,
             cost,
             sticky,
+            ties: false,
+            span,
+        })))
+    }
+
+    /// `argmin!(c [per X̄])` and `argmax!(c [per X̄])` (LANGUAGE §10.3): the valuations whose `c` is least
+    /// (greatest) within their group, every tie included. Deterministic, so allowed anywhere a literal is.
+    fn extreme(
+        &mut self,
+        cx: &mut RuleCx,
+        name: Ident,
+        args: &[Arg],
+        clauses: &[ast::BangClause],
+        span: Span,
+    ) -> Option<HLit> {
+        let [Arg::Pos(c)] = args else {
+            self.error(code!("BLS0301"), span, format!("`{}!` orders by one value", name.as_str()));
+            return None;
+        };
+        let cost = self.expr(cx, c)?;
+        let mut per = Vec::new();
+        for cl in clauses {
+            if cl.keyword.as_str() != "per" {
+                self.error(
+                    code!("BLS0302"),
+                    cl.span,
+                    format!("`{}` is not a clause of `{}!`", cl.keyword.as_str(), name.as_str()),
+                );
+                return None;
+            }
+            for e in &cl.exprs {
+                let parts = match &e.kind {
+                    ExprKind::Tuple(es) if !es.is_empty() => es.clone(),
+                    _ => vec![e.clone()],
+                };
+                for p in parts {
+                    per.push(self.expr(cx, &p)?);
+                }
+            }
+        }
+        Some(HLit::Choose(Box::new(HChoose {
+            chosen: Vec::new(),
+            per,
+            cost: Some((cost, name.as_str() == "argmax")),
+            sticky: false,
+            ties: true,
             span,
         })))
     }
@@ -1461,6 +1510,53 @@ impl<'t> Resolver<'t, '_> {
                 }
                 Some(HExpr::new(HExprKind::LatCtor { kind, bot, args: xs }, span))
             }
+            [name] if name.as_str() == "rand_range" => {
+                if pos.len() < 2 {
+                    self.error(code!("BLS0301"), span, "`rand_range` takes `lo`, `hi` and a key");
+                    return None;
+                }
+                let mut xs = Vec::new();
+                for p in pos {
+                    xs.push(self.expr(cx, p)?);
+                }
+                Some(HExpr::new(
+                    HExprKind::Builtin {
+                        f: Builtin::RandRange,
+                        args: xs,
+                    },
+                    span,
+                ))
+            }
+            [name] if name.as_str() == "majority" => {
+                let [set, domain] = pos.as_slice() else {
+                    self.error(code!("BLS0301"), span, "`majority` takes a set of nodes and a role");
+                    return None;
+                };
+                let ExprKind::Path(dp, dt) = &domain.kind else {
+                    self.error(code!("BLS0301"), domain.span, "the domain of `majority` is a role");
+                    return None;
+                };
+                let role = match dp.as_slice() {
+                    [r] if dt.is_empty() => self.role_named(cx.ms, r.name),
+                    _ => None,
+                };
+                let Some(role) = role else {
+                    self.unsupported(
+                        "LANG-113",
+                        "`majority` over a domain other than a role (a closed unary relation)",
+                        domain.span,
+                    );
+                    return None;
+                };
+                let s = self.expr(cx, set)?;
+                Some(HExpr::new(
+                    HExprKind::Builtin {
+                        f: Builtin::Majority(role),
+                        args: vec![s],
+                    },
+                    span,
+                ))
+            }
             [name] if self.scope(cx.ms).broken.contains(&name.name) => None,
             _ => {
                 let names: Vec<&str> = path.iter().map(Ident::as_str).collect();
@@ -1570,27 +1666,35 @@ impl<'t> Resolver<'t, '_> {
         placement: Option<HRoleId>,
         span: Span,
     ) {
-        if fresh {
-            self.unsupported("SEM-071", "`bootstrap fresh` (restarts are not simulated yet)", span);
-            return;
-        }
         let mut cx = self.rule_cx(s, placement);
         let boot = self.builtin(super::BuiltinRel::Boot, span);
-        let header = HBody {
-            lits: vec![HLit::Atom(HAtom {
-                rel: boot,
+        let mut lits = vec![HLit::Atom(HAtom {
+            rel: boot,
+            args: Vec::new(),
+            from: None,
+            span,
+        })];
+        // `bootstrap fresh` runs only on a node's very first start: its header is `boot(), not recovered()`.
+        if fresh {
+            let recovered = self.builtin(super::BuiltinRel::Recovered, span);
+            lits.push(HLit::Not(HAtom {
+                rel: recovered,
                 args: Vec::new(),
                 from: None,
                 span,
-            })],
-            span: None,
-        };
+            }));
+        }
+        let header = HBody { lits, span: None };
         let stmts = self.stmts(&mut cx, &block.stmts);
         self.hir.handlers.push(HHandler {
             scope: cx.scope,
             label: None,
             trigger: ast::Trigger::On,
-            kind: HandlerKind::Bootstrap,
+            kind: if fresh {
+                HandlerKind::BootstrapFresh
+            } else {
+                HandlerKind::Bootstrap
+            },
             header,
             stmts,
             role: placement,
@@ -1848,7 +1952,10 @@ impl<'t> Resolver<'t, '_> {
             (HRelKind::Input { root: false }, _) if !self.is_foreign_interface(cx, rel) => {
                 Some((code!("BLS0406"), bad("a module never writes its own input")))
             }
-            (HRelKind::Timer { .. } | HRelKind::Boot | HRelKind::Members(_) | HRelKind::NodeDir, _) => {
+            (
+                HRelKind::Timer { .. } | HRelKind::Boot | HRelKind::Recovered | HRelKind::Members(_) | HRelKind::NodeDir,
+                _,
+            ) => {
                 Some((code!("BLS0400"), bad("this relation is fed by the runtime")))
             }
             (HRelKind::LocalTick, v) if v != Verb::Next => {

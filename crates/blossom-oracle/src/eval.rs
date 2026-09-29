@@ -249,6 +249,7 @@ struct Valuation {
 pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput, OracleError> {
     let program = oracle.program.get();
     let scope = Scope {
+        incarnation: input.incarnation,
         program,
         node: input.node,
         tick: input.tick,

@@ -43,6 +43,7 @@ impl<'a> BlsSim<'a> {
             .map_err(SimError::Load)?
             .with_roles(artifact.roles.clone())
             .with_seed(seed)
+            .and_then(|o| o.with_node_names(artifact.nodes.iter().map(|n| std::sync::Arc::from(n.as_str())).collect()))
             .map_err(SimError::Load)?;
         let mut timers = Vec::new();
         for (id, r) in artifact.program.get().rels.iter_enumerated() {

@@ -120,6 +120,7 @@ fn head(rel: RelId, args: Vec<Term>) -> Head {
 
 fn run(oracle: &Oracle, events: &[(RelId, Row)]) -> Result<crate::TickOutput, OracleError> {
     oracle.tick(&TickInput {
+        incarnation: 1,
         node: NodeId(0),
         tick: Tick(1),
         now: blossom_value::time::Instant(0),
@@ -366,6 +367,7 @@ fn next_heads_carry_and_async_heads_send() {
     }];
     let out = oracle
         .tick(&TickInput {
+            incarnation: 1,
             node: NodeId(0),
             tick: Tick(3),
             now: blossom_value::time::Instant(0),

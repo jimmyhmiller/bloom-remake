@@ -255,6 +255,7 @@ pub fn open(
             time_reserved,
             now,
             recovered: record.restarts > 1,
+            incarnation: record.restarts,
         },
         wal,
         checkpoints,

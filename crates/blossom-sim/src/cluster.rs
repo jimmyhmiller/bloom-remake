@@ -235,6 +235,7 @@ impl<'p> Cluster<'p> {
                 .map_err(SimError::Load)?
                 .with_roles(artifact.roles.clone())
                 .with_seed(program_seed)
+                .and_then(|o| o.with_node_names(artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect()))
                 .map_err(SimError::Load)?,
         );
         let names: Arc<[Arc<str>]> = artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect();
