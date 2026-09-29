@@ -302,7 +302,7 @@ fn check_identity(found: &StoreIdentity, expected: &StoreIdentity) -> Result<(),
 }
 
 /// A store uuid: unique per initialization (the boot nonce is fresh entropy).
-fn fresh_uuid(identity: &StoreIdentity, nonce: u64, wall: Instant) -> [u8; 16] {
+pub fn fresh_uuid(identity: &StoreIdentity, nonce: u64, wall: Instant) -> [u8; 16] {
     let mut h = blake3::Hasher::new();
     h.update(b"blossom store uuid");
     h.update(&identity.deployment_id);
