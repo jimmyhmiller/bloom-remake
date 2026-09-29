@@ -192,6 +192,32 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
                 other => return Err(ExprError::Oracle(internal_error!("`contains` on {other:?}").into())),
             }))
         }
+        Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::Prio { site }),
+            args,
+        } => {
+            // $prio(site, X̄, Ȳ) = (PRF_σc(site, fp(X̄), fp(Ȳ)), Ȳ) (SEM-084).
+            let [x, y] = args.as_slice() else {
+                return Err(ExprError::Oracle(internal_error!("`$prio` takes two arguments").into()));
+            };
+            let (x, y) = (eval(scope, env, x)?, eval(scope, env, y)?);
+            let seed = scope.oracle.choice.as_ref().ok_or_else(|| {
+                ExprError::Oracle(internal_error!("a seeded choice, but the oracle was given no seed").into())
+            })?;
+            let key = scope
+                .program
+                .sites
+                .get(*site)
+                .map(|s| s.key)
+                .ok_or_else(|| ExprError::Oracle(internal_error!("unknown site {site:?}").into()))?;
+            let fp = |v: &Value| {
+                blossom_value::fp::fingerprint(v)
+                    .map_err(|e| ExprError::Oracle(internal_error!("fingerprinting {v:?}: {e}").into()))
+            };
+            let p = blossom_value::prf::prf(seed, "prio", &[fp(&x)?, fp(&y)?], &[key])
+                .map_err(|e| ExprError::Oracle(internal_error!("the PRF: {e}").into()))?;
+            Ok(Value::Tuple(vec![Value::Int(IntValue::U64(p)), y].into()))
+        }
         Expr::Call { .. } => Err(ExprError::Oracle(
             blossom_base::unimplemented_error!("LANG-180", "function calls in the oracle (WP M4.1)").into(),
         )),

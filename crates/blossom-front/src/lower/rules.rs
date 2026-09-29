@@ -901,6 +901,14 @@ impl<'h> Lowerer<'h> {
         }
         let kind = match v.verb {
             Verb::Emit => RuleKind::Deductive,
+            // A resolved table's `next` inserts are candidates for t+1, written this tick (LANGUAGE §10.7).
+            Verb::Next if self.resolved.contains_key(&v.target) => {
+                rel = *self
+                    .resolved
+                    .get(&v.target)
+                    .ok_or_else(|| internal_error!("a resolved table without `$n`"))?;
+                RuleKind::Deductive
+            }
             Verb::Next => RuleKind::Inductive,
             Verb::Send => {
                 let ch = match &target.kind {

@@ -163,6 +163,7 @@ impl HRel {
             key: None,
             durable: false,
             cell: false,
+            resolve: None,
             role: None,
             span: Span::point(blossom_base::FileId::from_raw(0), 0),
         }
@@ -208,9 +209,26 @@ pub struct HRel {
     pub durable: bool,
     /// A `cell`: read only by lookup, its name as an expression being `c[]` (LANGUAGE §7.13).
     pub cell: bool,
+    /// A relation-level resolution policy (LANGUAGE §10.7).
+    pub resolve: Option<HResolve>,
     /// Where the relation lives; `None` in a role-free program and for shared declarations.
     pub role: Option<HRoleId>,
     pub span: Span,
+}
+
+/// `key(…) resolve P`: which candidate for a key survives to the next tick.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HResolve {
+    pub policy: HPolicy,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HPolicy {
+    /// The least seeded priority.
+    Choose,
+    /// The least (`most: false`) or greatest value of a column, then the least seeded priority.
+    Extreme { col: usize, most: bool },
 }
 
 #[derive(Clone, Debug)]

@@ -16,7 +16,9 @@ mod rules;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use blossom_base::{ColIdx, InternalError, QualName, RelId, RoleId, RuleLabel, Span, Symbol, TypeId, internal_error};
+use blossom_base::{
+    ColIdx, InternalError, QualName, RelId, RoleId, RuleLabel, Span, Symbol, TypeId, VarId, internal_error,
+};
 use blossom_ir::build::{FrontendKind, IrBuilder};
 use blossom_ir::core::*;
 use blossom_ir::{IrError, ValidatedProgram};
@@ -72,6 +74,7 @@ pub fn lower(hir: &Hir, deployment: &Deployment<'_>) -> Result<Lowered, Internal
         del: BTreeMap::new(),
         prev: BTreeMap::new(),
         ups: BTreeMap::new(),
+        resolved: BTreeMap::new(),
         labels: BTreeSet::new(),
         rel_names: BTreeSet::new(),
     };
@@ -129,6 +132,8 @@ pub(crate) struct Lowerer<'h> {
     pub prev: BTreeMap<HRelId, RelId>,
     /// Each upserted table's `$ups` staging relation.
     pub ups: BTreeMap<HRelId, RelId>,
+    /// Each resolved table's `$n` relation, which its `next` statements write (LANGUAGE §10.7).
+    pub resolved: BTreeMap<HRelId, RelId>,
     labels: BTreeSet<String>,
     rel_names: BTreeSet<String>,
 }
@@ -499,6 +504,254 @@ impl Lowerer<'_> {
         Ok(())
     }
 
+    /// A table with a relation-level policy (LANGUAGE §10.7): the candidates for t+1 are the persisted tuples not
+    /// deleted and the `next` inserts (through `r$n`), and the policy keeps one per key. For `choose`:
+    ///
+    /// ```ir
+    /// r$cand(X̄) :- r(X̄), notin r$del(X̄).
+    /// r$cand(X̄) :- r$n(X̄).
+    /// r$pmin(K̄, min<P>) :- r$cand(X̄), P := $prio(site, (K̄), (V̄)).
+    /// r(X̄)@next :- r$cand(X̄), r$pmin(K̄, P), P == $prio(site, (K̄), (V̄)).
+    /// ```
+    ///
+    /// `choose_least(c)`/`choose_most(c)` first keep the candidates with the least/greatest `c` (`r$ext`).
+    fn resolved_table(&mut self, h: HRelId, r: &hir::HRel, res: &hir::HResolve) -> Result<(), InternalError> {
+        let rel = self.rel(h)?;
+        let (cols, key) = self.ir_columns(h)?;
+        let key = key.ok_or_else(|| internal_error!("the resolved table {} has no key", r.name))?;
+        let values: Vec<usize> = (0..cols.len()).filter(|c| !key.contains(c)).collect();
+        let (policy, extreme) = match res.policy {
+            hir::HPolicy::Choose => (ResolvePolicy::Choose, None),
+            hir::HPolicy::Extreme { col, most } => (
+                if most {
+                    ResolvePolicy::Most(col_idx(col))
+                } else {
+                    ResolvePolicy::Least(col_idx(col))
+                },
+                Some((col, most)),
+            ),
+        };
+        let spec = |candidates: RelId, site: Option<blossom_base::SiteId>| {
+            ConstructKind::Resolve(ResolveSpec {
+                rel,
+                candidates,
+                output: rel,
+                group: key.iter().map(|c| col_idx(*c)).collect(),
+                policy: policy.clone(),
+                site,
+            })
+        };
+        let construct = self
+            .b
+            .begin_construct(spec(rel, None), surface(&r.name, None, res.span))
+            .map_err(ir)?;
+        let site = self
+            .b
+            .declare_site(Arc::from(format!("{}::resolve", r.name)), SiteKind::Resolve)
+            .map_err(ir)?;
+        let del = self.generated(suffixed(&r.name, "$del"), cols.clone(), None, r.role, false, r.span)?;
+        let next = self.generated(suffixed(&r.name, "$n"), cols.clone(), None, r.role, false, r.span)?;
+        let cand = self.generated(suffixed(&r.name, "$cand"), cols.clone(), None, r.role, false, r.span)?;
+        self.b
+            .set_construct_kind(construct, spec(cand, Some(site)))
+            .map_err(ir)?;
+        let role = r.role.map(|x| RoleId::from_raw(x.0));
+        let tuple = |b: &mut IrBuilder, tys: Vec<TypeId>| {
+            b.types()
+                .insert(TypeDef::Tuple(tys))
+                .map_err(|e| internal_error!("interning a type: {e}"))
+        };
+        let key_ty = tuple(
+            &mut self.b,
+            key.iter().filter_map(|c| cols.get(*c).map(|x| x.ty)).collect(),
+        )?;
+        let val_ty = tuple(
+            &mut self.b,
+            values.iter().filter_map(|c| cols.get(*c).map(|x| x.ty)).collect(),
+        )?;
+        let u64t = self
+            .b
+            .types()
+            .insert(TypeDef::Int(blossom_value::types::IntTy::U64))
+            .map_err(|e| internal_error!("interning a type: {e}"))?;
+        let prio_ty = tuple(&mut self.b, vec![u64t, val_ty])?;
+        // $prio(site, (K̄), (V̄)) over the variables of a rule whose first variables are the columns.
+        let prio = |vars: &[VarId]| Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::Prio { site }),
+            args: vec![
+                Expr::Construct {
+                    ty: key_ty,
+                    variant: None,
+                    fields: key
+                        .iter()
+                        .filter_map(|c| vars.get(*c))
+                        .map(|v| Expr::Term(Term::Var(*v)))
+                        .collect(),
+                },
+                Expr::Construct {
+                    ty: val_ty,
+                    variant: None,
+                    fields: values
+                        .iter()
+                        .filter_map(|c| vars.get(*c))
+                        .map(|v| Expr::Term(Term::Var(*v)))
+                        .collect(),
+                },
+            ],
+        };
+        let col_vars = |rb: &mut blossom_ir::build::RuleBuilder<'_>| -> Result<Vec<VarId>, InternalError> {
+            let mut vars = Vec::new();
+            for (i, c) in cols.iter().enumerate() {
+                vars.push(rb.var(Symbol::intern(&format!("X{i}")), c.ty).map_err(ir)?);
+            }
+            Ok(vars)
+        };
+        let terms = |vars: &[VarId]| -> Vec<Term> { vars.iter().map(|v| Term::Var(*v)).collect() };
+        let head = |rel: RelId, args: Vec<Term>| Head {
+            rel,
+            args: args.into_iter().map(HeadArg::Term).collect(),
+            mode: HeadMode::Insert,
+        };
+        // The candidates.
+        let label = self.label(format!("{}$cand", r.name));
+        let mut rb = self.b.rule(RuleKind::Deductive, label, res.span);
+        let vars = col_vars(&mut rb)?;
+        rb.lit(Literal::Pos(atom(rel, terms(&vars), res.span)));
+        rb.lit(Literal::Neg(atom(del, terms(&vars), res.span)));
+        rb.head(head(cand, terms(&vars)), role).map_err(ir)?;
+        let label = self.label(format!("{}$cand#next", r.name));
+        let mut rb = self.b.rule(RuleKind::Deductive, label, res.span);
+        let vars = col_vars(&mut rb)?;
+        rb.lit(Literal::Pos(atom(next, terms(&vars), res.span)));
+        rb.head(head(cand, terms(&vars)), role).map_err(ir)?;
+        // The extreme cost per key, for `choose_least`/`choose_most`.
+        let key_cols: Vec<Column> = key.iter().filter_map(|c| cols.get(*c).cloned()).collect();
+        let ext = match extreme {
+            None => None,
+            Some((col, most)) => {
+                let cost = cols
+                    .get(col)
+                    .cloned()
+                    .ok_or_else(|| internal_error!("resolution cost column {col} out of range"))?;
+                let mut ext_cols = key_cols.clone();
+                ext_cols.push(cost);
+                let n = ext_cols.len();
+                let ext = self.generated(
+                    suffixed(&r.name, "$ext"),
+                    ext_cols,
+                    Some(&(0..n - 1).collect::<Vec<_>>()),
+                    r.role,
+                    false,
+                    r.span,
+                )?;
+                let label = self.label(format!("{}$ext", r.name));
+                let mut rb = self.b.rule(RuleKind::Deductive, label, res.span);
+                let vars = col_vars(&mut rb)?;
+                rb.lit(Literal::Pos(atom(cand, terms(&vars), res.span)));
+                let mut args: Vec<HeadArg> = key
+                    .iter()
+                    .filter_map(|c| vars.get(*c))
+                    .map(|v| HeadArg::Term(Term::Var(*v)))
+                    .collect();
+                let cost_var = *vars
+                    .get(col)
+                    .ok_or_else(|| internal_error!("cost column out of range"))?;
+                args.push(HeadArg::Agg(AggCall {
+                    func: if most { AggFunc::Max } else { AggFunc::Min },
+                    args: vec![Term::Var(cost_var)],
+                    order: None,
+                }));
+                rb.head(
+                    Head {
+                        rel: ext,
+                        args,
+                        mode: HeadMode::Insert,
+                    },
+                    role,
+                )
+                .map_err(ir)?;
+                Some((ext, col))
+            }
+        };
+        let ext_atom = |vars: &[VarId]| -> Option<Atom> {
+            ext.map(|(ext, col)| {
+                let mut args: Vec<Term> = key.iter().filter_map(|c| vars.get(*c)).map(|v| Term::Var(*v)).collect();
+                if let Some(v) = vars.get(col) {
+                    args.push(Term::Var(*v));
+                }
+                atom(ext, args, res.span)
+            })
+        };
+        // The least priority per key.
+        let mut pmin_cols = key_cols;
+        pmin_cols.push(column(Symbol::intern("prio"), prio_ty, false));
+        let n = pmin_cols.len();
+        let pmin = self.generated(
+            suffixed(&r.name, "$pmin"),
+            pmin_cols,
+            Some(&(0..n - 1).collect::<Vec<_>>()),
+            r.role,
+            false,
+            r.span,
+        )?;
+        let label = self.label(format!("{}$pmin", r.name));
+        let mut rb = self.b.rule(RuleKind::Deductive, label, res.span);
+        let vars = col_vars(&mut rb)?;
+        let p = rb.var(Symbol::intern("P"), prio_ty).map_err(ir)?;
+        rb.lit(Literal::Pos(atom(cand, terms(&vars), res.span)));
+        if let Some(a) = ext_atom(&vars) {
+            rb.lit(Literal::Pos(a));
+        }
+        rb.lit(Literal::Bind {
+            pat: Pattern::Var(p),
+            expr: prio(&vars),
+        });
+        let mut args: Vec<HeadArg> = key
+            .iter()
+            .filter_map(|c| vars.get(*c))
+            .map(|v| HeadArg::Term(Term::Var(*v)))
+            .collect();
+        args.push(HeadArg::Agg(AggCall {
+            func: AggFunc::Min,
+            args: vec![Term::Var(p)],
+            order: None,
+        }));
+        rb.head(
+            Head {
+                rel: pmin,
+                args,
+                mode: HeadMode::Insert,
+            },
+            role,
+        )
+        .map_err(ir)?;
+        // The survivor.
+        let label = self.label(format!("{}$resolve", r.name));
+        let mut rb = self.b.rule(RuleKind::Inductive, label, res.span);
+        let vars = col_vars(&mut rb)?;
+        let p = rb.var(Symbol::intern("P"), prio_ty).map_err(ir)?;
+        rb.lit(Literal::Pos(atom(cand, terms(&vars), res.span)));
+        if let Some(a) = ext_atom(&vars) {
+            rb.lit(Literal::Pos(a));
+        }
+        let mut pargs: Vec<Term> = key.iter().filter_map(|c| vars.get(*c)).map(|v| Term::Var(*v)).collect();
+        pargs.push(Term::Var(p));
+        rb.lit(Literal::Pos(atom(pmin, pargs, res.span)));
+        rb.lit(Literal::Guard(Expr::Binary {
+            op: BinOp::Eq,
+            lhs: Box::new(Expr::Term(Term::Var(p))),
+            rhs: Box::new(prio(&vars)),
+        }));
+        rb.head(head(rel, terms(&vars)), role).map_err(ir)?;
+        self.b.end_construct(construct).map_err(ir)?;
+        self.b
+            .set_persistence(rel, Persistence::Resolved { construct })
+            .map_err(ir)?;
+        self.del.insert(h, del);
+        self.resolved.insert(h, next);
+        Ok(())
+    }
+
     /// Every table's `$del` relation and frame rule (LANGUAGE §7.2), or a lattice table's identity rule.
     fn tables(&mut self) -> Result<(), InternalError> {
         for i in 0..self.hir.rels.len() {
@@ -509,6 +762,10 @@ impl Lowerer<'_> {
             }
             if self.is_lattice_rel(h)? {
                 self.lattice_table(h, &r)?;
+                continue;
+            }
+            if let Some(res) = &r.resolve {
+                self.resolved_table(h, &r, res)?;
                 continue;
             }
             let rel = self.rel(h)?;

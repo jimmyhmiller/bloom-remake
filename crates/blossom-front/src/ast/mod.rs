@@ -269,9 +269,21 @@ pub struct RelDecl {
     pub key: Option<(Vec<Ident>, Span)>,
     /// `: Src -> Dst`.
     pub direction: Option<(Ident, Ident)>,
+    /// `resolve P` (LANGUAGE §10.7).
+    pub resolve: Option<(RelPolicy, Span)>,
     /// Clauses this build does not implement yet, by name and span (reported by the resolver when used).
     pub other_clauses: Vec<(&'static str, Span)>,
     pub span: Span,
+}
+
+/// A relation-level resolution policy (LANGUAGE §10.7).
+#[derive(Clone, Debug)]
+pub enum RelPolicy {
+    Choose { sticky: bool },
+    ChooseRand { sticky: bool },
+    Least(Expr),
+    Most(Expr),
+    Merge,
 }
 
 #[derive(Clone, Debug)]
@@ -411,6 +423,8 @@ pub struct Policy {
 pub struct Fact {
     pub head: Head,
     pub at: Option<Expr>,
+    /// `from s`: the sender of a scenario message on a channel from an external role (a session number).
+    pub from: Option<Expr>,
     pub tick: Option<Expr>,
     pub span: Span,
 }

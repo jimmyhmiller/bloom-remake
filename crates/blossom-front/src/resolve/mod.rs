@@ -441,6 +441,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             key: None,
             durable: false,
             cell: false,
+            resolve: None,
             role: None,
             span,
         });
@@ -464,6 +465,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             key: None,
             durable: false,
             cell: false,
+            resolve: None,
             role: None,
             span,
         });
@@ -497,6 +499,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             key: None,
             durable: false,
             cell: false,
+            resolve: None,
             role: None,
             span: name.span,
         });
@@ -527,6 +530,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             key: None,
             durable: false,
             cell: false,
+            resolve: None,
             role: None,
             span,
         });
@@ -739,6 +743,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                         key: None,
                         durable: false,
                         cell: false,
+                        resolve: None,
                         role: placement,
                         span: v.name.span,
                     });
@@ -807,6 +812,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             key: None,
             durable: false,
             cell: false,
+            resolve: None,
             role: placement,
             span: t.name.span,
         }))
@@ -903,6 +909,10 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 Some(idx)
             }
         };
+        let resolve = match &d.resolve {
+            None => None,
+            Some((policy, span)) => self.resolve_policy(d, &cols, key.as_deref(), policy, *span),
+        };
         let kind = match d.kind {
             RelKind::Table => HRelKind::Table,
             RelKind::Scratch => HRelKind::Scratch,
@@ -952,9 +962,76 @@ impl<'t, 'd> Resolver<'t, 'd> {
             key,
             durable: d.mods.durable,
             cell: d.mods.cell,
+            resolve,
             role: placement,
             span: d.name.span,
         }))
+    }
+
+    /// A relation-level `resolve P` (LANGUAGE §10.7): only on a keyed table.
+    fn resolve_policy(
+        &mut self,
+        d: &ast::RelDecl,
+        cols: &[HCol],
+        key: Option<&[usize]>,
+        policy: &ast::RelPolicy,
+        span: Span,
+    ) -> Option<HResolve> {
+        let Some(key) = key else {
+            self.error(
+                code!("BLS0106"),
+                span,
+                "`resolve` chooses among tuples with one key: declare `key(…)`",
+            );
+            return None;
+        };
+        let is_lattice = |r: &Self, c: &HCol| c.ty.is_some_and(|t| r.hir.lattice_of(t).is_some());
+        let policy = match policy {
+            ast::RelPolicy::Choose { sticky: false } => HPolicy::Choose,
+            ast::RelPolicy::Choose { sticky: true } => {
+                self.unsupported("LANG-115", "`resolve choose sticky`", span);
+                return None;
+            }
+            ast::RelPolicy::ChooseRand { .. } => {
+                self.unsupported("LANG-117", "`resolve choose_rand`", span);
+                return None;
+            }
+            ast::RelPolicy::Merge => {
+                let all_lattice = cols
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !key.contains(i))
+                    .all(|(_, c)| is_lattice(self, c));
+                if !all_lattice {
+                    self.error(
+                        code!("BLS0106"),
+                        span,
+                        "`resolve merge` needs every non-key column to be a lattice",
+                    );
+                }
+                // Merging is what a lattice-valued relation does anyway.
+                return None;
+            }
+            ast::RelPolicy::Least(e) | ast::RelPolicy::Most(e) => {
+                let most = matches!(policy, ast::RelPolicy::Most(_));
+                let col = match &e.kind {
+                    ast::ExprKind::Path(p, t) if t.is_empty() && p.len() == 1 => p
+                        .first()
+                        .and_then(|n| d.cols.iter().position(|c| c.name.name == n.name)),
+                    _ => None,
+                };
+                let Some(col) = col else {
+                    self.unsupported("LANG-117", "a resolution cost other than one column", e.span);
+                    return None;
+                };
+                HPolicy::Extreme { col, most }
+            }
+        };
+        if cols.iter().any(|c| is_lattice(self, c)) {
+            self.unsupported("LANG-117", "`resolve` on a lattice-valued relation", span);
+            return None;
+        }
+        Some(HResolve { policy, span })
     }
 
     /// A channel endpoint: a role (`Some(Some(r))`) or `Node` (`Some(None)`).

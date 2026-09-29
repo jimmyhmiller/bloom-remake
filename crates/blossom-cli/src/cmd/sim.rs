@@ -46,6 +46,9 @@ pub struct Args {
     /// Crash a node at a tick: `node:tick` (repeatable).
     #[arg(long = "crash", value_name = "NODE:TICK")]
     pub crashes: Vec<String>,
+    /// The run seed (seeded choices and resolution policies draw from it; default 0).
+    #[arg(long)]
+    pub seed: Option<u64>,
     /// Show only these relations (repeatable; default: every protocol relation).
     #[arg(long = "rel")]
     pub rels: Vec<String>,
@@ -159,8 +162,8 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
 /// The artifact to run and the default last tick.
 fn load(args: &Args) -> Result<(SimArtifact, Option<u64>), ExitCode> {
     if ded::all_ded(&args.files) {
-        if args.spec.is_some() || args.round.is_some() {
-            eprintln!("`--spec` and `--round` apply to `.bls` files");
+        if args.spec.is_some() || args.round.is_some() || args.seed.is_some() {
+            eprintln!("`--spec`, `--round` and `--seed` apply to `.bls` files");
             return Err(Exit::Usage.into());
         }
         if args.nodes.is_empty() {
@@ -193,6 +196,9 @@ fn load(args: &Args) -> Result<(SimArtifact, Option<u64>), ExitCode> {
         if let Some(r) = round {
             artifact.profile = blossom_artifact::sim::Profile::Blossom { round: r };
         }
+        if let Some(s) = args.seed {
+            artifact.seed = blossom_value::Seed::from_u64(s);
+        }
         return Ok((artifact, spec.faults.map(|f| f.eot)));
     }
     if args.nodes.is_empty() {
@@ -215,7 +221,8 @@ fn load(args: &Args) -> Result<(SimArtifact, Option<u64>), ExitCode> {
         .collect();
     let bls = crate::common::bls::compile(file, &nodes)?;
     let round = round.unwrap_or(blossom_value::time::Duration::from_nanos(1_000_000_000));
-    Ok((blossom_front::spec::sim_artifact(bls, round), None))
+    let seed = blossom_value::Seed::from_u64(args.seed.unwrap_or(0));
+    Ok((blossom_front::spec::sim_artifact(bls, round, seed), None))
 }
 
 fn faults(artifact: &SimArtifact, args: &Args) -> Result<FaultSchedule, String> {

@@ -19,8 +19,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use blossom_artifact::sim::{
-    EdgeTime, InputFact, LogicalEdge, LogicalIdx, LogicalKind, LogicalRel, NodeStatic, OutcomeSpec, Profile,
-    SimArtifact, SpecFeed,
+    EdgeTime, IngressFact, InputFact, LogicalEdge, LogicalIdx, LogicalKind, LogicalRel, NodeStatic, OutcomeSpec,
+    Profile, SimArtifact, SpecFeed,
 };
 use blossom_base::{Diagnostic, Diagnostics, RelId, RoleId, SourceDb, Span, Symbol, code, internal_error};
 use blossom_ir::core::{BuiltinScalar, EventSource, Expr, Literal, Program, RelClass, RuleKind};
@@ -274,14 +274,15 @@ fn compile(
     let node_index: BTreeMap<Symbol, u32> = names.iter().enumerate().map(|(i, n)| (*n, i as u32)).collect();
 
     // The target's surface relations, for the spec's located atoms and facts.
+    // Instances' relations are named by their path, `a.r` (LANGUAGE §17.3).
     let mut targets: BTreeMap<Symbol, usize> = BTreeMap::new();
     for (i, r) in hir.rels.iter().enumerate() {
         let segs = r.name.segments();
-        if let [only] = segs
-            && !only.as_str().contains('$')
-        {
-            targets.insert(*only, i);
+        if segs.is_empty() || segs.iter().any(|s| s.as_str().contains('$')) {
+            continue;
         }
+        let name = segs.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(".");
+        targets.insert(Symbol::intern(&name), i);
     }
 
     // Faults.
@@ -325,21 +326,22 @@ fn compile(
 
     // Scenario facts.
     let mut inputs = Vec::new();
+    let mut ingress = Vec::new();
     let mut statics = Vec::new();
     for f in &m.facts {
-        let Some(rel_name) = f.head.rel.first().filter(|_| f.head.rel.len() == 1) else {
-            diags.push(
-                Diagnostic::new(code!("BLS0200"), "a spec fact names a relation of the target").with_primary(f.span),
-            );
-            continue;
-        };
-        let Some(&hi) = targets.get(&rel_name.name) else {
+        // A root relation by name, or an instance's channel from an external role by its path (`tpc.begin`).
+        let path: Vec<&str> = f.head.rel.iter().map(Ident::as_str).collect();
+        let found = targets.get(&Symbol::intern(&path.join("."))).copied();
+        let Some(hi) = found else {
             diags.push(
                 Diagnostic::new(
                     code!("BLS0200"),
-                    format!("`{}` is not a relation of the spec's target", rel_name.as_str()),
+                    format!(
+                        "`{}` is not a relation of the spec's target (or an instance channel from an external role)",
+                        path.join(".")
+                    ),
                 )
-                .with_primary(rel_name.span),
+                .with_primary(f.head.span),
             );
             continue;
         };
@@ -347,9 +349,61 @@ fn compile(
         let Some(&(ir, ref map)) = lowered.surface.get(hi) else {
             return Err(internal_error!("a target relation was not lowered").into());
         };
-        let Some(row) = fact_row(&hir, hrel, map, &f.head, &node_index, diags) else {
+        let arity = protocol
+            .get()
+            .rels
+            .get(ir)
+            .map(|r| r.schema.cols.len())
+            .ok_or_else(|| internal_error!("a target relation has no IR declaration"))?;
+        let Some(mut row) = fact_row(&hir, hrel, map, arity, &f.head, &node_index, diags) else {
             continue;
         };
+        if ingress_channel(&hir, hrel) {
+            // A client session's message (LANGUAGE §18.4): `fact c(…) @ n from s at tick k`.
+            let (Some(n), Some(k), Some(from)) = (&f.at, &f.tick, &f.from) else {
+                diags.push(
+                    Diagnostic::new(
+                        code!("BLS0405"),
+                        "a message from an external role names its node, session and tick: `@ n from s at tick k`",
+                    )
+                    .with_primary(f.span),
+                );
+                continue;
+            };
+            let (Some(node), Some(tick), Some(session)) = (node_const(n, &node_index), tick_const(k), tick_const(from))
+            else {
+                diags.push(
+                    Diagnostic::new(
+                        code!("BLS0300"),
+                        "`@ n` names a spec node, `from s` a session number and `at tick k` a tick",
+                    )
+                    .with_primary(f.span),
+                );
+                continue;
+            };
+            if let Some(dest) = row.first_mut() {
+                *dest = Value::Node(node);
+            }
+            ingress.push(IngressFact {
+                node,
+                tick: Tick(tick),
+                rel: ir,
+                session: blossom_value::value::SessionId(session),
+                row,
+            });
+            continue;
+        }
+        if let Some(from) = &f.from {
+            diags.push(
+                Diagnostic::new(
+                    code!("BLS0405"),
+                    "`from s` names the session of a message from an external role",
+                )
+                .with_primary(from.span),
+            );
+            continue;
+        }
+        let row = row;
         let at: Vec<NodeId> = match &f.at {
             None => (0..names.len() as u32).map(NodeId).collect(),
             Some(e) => match node_const(e, &node_index) {
@@ -592,6 +646,7 @@ fn compile(
         profile: Profile::Blossom { round },
         protocol,
         inputs,
+        ingress,
         statics,
         halt,
         rels,
@@ -602,6 +657,8 @@ fn compile(
             post,
             feeds,
         }),
+        // A spec's runs are seeded with run seed 0; `check sim { seed }` will choose others (TEST-001).
+        seed: blossom_value::Seed::from_u64(0),
     };
     let checks = m
         .checks
@@ -639,7 +696,11 @@ fn compile(
 }
 
 /// A compiled program root as the simulator runs it on its own: no spec, its IR relations as its logical relations.
-pub fn sim_artifact(bls: blossom_artifact::bls::BlsArtifact, round: Duration) -> SimArtifact {
+pub fn sim_artifact(
+    bls: blossom_artifact::bls::BlsArtifact,
+    round: Duration,
+    seed: blossom_value::Seed,
+) -> SimArtifact {
     let p = bls.program.get();
     let rels = p
         .rels
@@ -661,11 +722,13 @@ pub fn sim_artifact(bls: blossom_artifact::bls::BlsArtifact, round: Duration) ->
         profile: Profile::Blossom { round },
         protocol: bls.program.clone(),
         inputs: Vec::new(),
+        ingress: Vec::new(),
         statics: Vec::new(),
         halt: bls.halt,
         rels,
         edges: Vec::new(),
         spec: None,
+        seed,
     }
 }
 
@@ -835,10 +898,24 @@ fn node_const(e: &ast::Expr, nodes: &BTreeMap<Symbol, u32>) -> Option<NodeId> {
 }
 
 /// A fact's row, in IR column order, decoded by the target relation's column types.
+/// Whether `r` is a channel whose source role is `external`: its messages come from client sessions.
+fn ingress_channel(hir: &Hir, r: &crate::hir::HRel) -> bool {
+    match &r.kind {
+        HRelKind::Channel(ch) => ch
+            .direction
+            .and_then(|(src, _)| hir.roles.get(src.index()))
+            .is_some_and(|role| role.kind == crate::hir::RoleKind::External),
+        _ => false,
+    }
+}
+
+/// A fact's row in IR column order (`arity` columns; a column the surface lacks, a channel's destination, is `()`
+/// until filled).
 fn fact_row(
     hir: &Hir,
     rel: &crate::hir::HRel,
     map: &[usize],
+    arity: usize,
     head: &ast::Head,
     nodes: &BTreeMap<Symbol, u32>,
     diags: &mut Diagnostics,
@@ -861,7 +938,7 @@ fn fact_row(
         );
         return None;
     }
-    let mut row = vec![Value::Unit; map.len()];
+    let mut row = vec![Value::Unit; arity];
     for ((e, col), ir) in args.iter().zip(&rel.cols).zip(map) {
         let ty = col.ty?;
         let Some(v) = const_of(hir, e, ty, nodes) else {

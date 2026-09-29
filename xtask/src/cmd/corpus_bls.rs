@@ -365,7 +365,15 @@ fn oracle(root: &str, m: &toml::Table) -> Outcome {
         Ok(a) => a,
         Err(o) => return o,
     };
-    let sim = match BlsSim::new(&artifact) {
+    let seed = m
+        .get("deploy")
+        .and_then(|d| d.get("seed"))
+        .and_then(toml::Value::as_integer)
+        .map_or(Ok(0), u64::try_from);
+    let Ok(seed) = seed else {
+        return Outcome::Fail("[deploy] seed must be a non-negative integer".into());
+    };
+    let sim = match BlsSim::new(&artifact, blossom_value::Seed::from_u64(seed)) {
         Ok(s) => s,
         Err(SimError::Unimplemented(u)) => return Outcome::NotRunnable(u.to_string()),
         Err(SimError::Load(OracleError::Unimplemented(u))) => return Outcome::NotRunnable(u.to_string()),

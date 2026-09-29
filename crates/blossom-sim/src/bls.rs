@@ -37,11 +37,13 @@ pub struct BlsSim<'a> {
 }
 
 impl<'a> BlsSim<'a> {
-    /// Prepares the program (stratifies it and plans every rule).
-    pub fn new(artifact: &'a BlsArtifact) -> Result<BlsSim<'a>, SimError> {
+    /// Prepares the program (stratifies it and plans every rule) for a run seeded with `seed` (SEM-084).
+    pub fn new(artifact: &'a BlsArtifact, seed: blossom_value::Seed) -> Result<BlsSim<'a>, SimError> {
         let oracle = Oracle::new(artifact.program.clone())
             .map_err(SimError::Load)?
-            .with_roles(artifact.roles.clone());
+            .with_roles(artifact.roles.clone())
+            .with_seed(seed)
+            .map_err(SimError::Load)?;
         let mut timers = Vec::new();
         for (id, r) in artifact.program.get().rels.iter_enumerated() {
             if let RelClass::Event(EventSource::Timer(t)) = &r.class {

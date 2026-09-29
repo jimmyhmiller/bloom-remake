@@ -209,10 +209,13 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
                 "channel destination must be Node or Session".into(),
             );
             if let ChannelForm::Direction { dst, .. } = c.form {
+                // A channel to an external role replies to sessions (LANGUAGE §18.4).
+                let external = p.roles.get(dst).is_some_and(|r| r.kind == RoleKind::External);
                 check(
                     match r.schema.cols.first().and_then(|c| p.types.get(c.ty)) {
-                        Some(TypeDef::Node(None)) => true,
-                        Some(TypeDef::Node(Some(role))) => *role == dst,
+                        Some(TypeDef::Session) => external,
+                        Some(TypeDef::Node(None)) => !external,
+                        Some(TypeDef::Node(Some(role))) => *role == dst && !external,
                         _ => false,
                     },
                     4,
@@ -958,6 +961,13 @@ fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
         Expr::Binary { op, lhs, rhs } => {
             let a = expr_type(p, r, lhs)?;
             let b = expr_type(p, r, rhs)?;
+            // Time arithmetic (LANGUAGE §5.1): `Instant - Instant` is a `Duration`, `Instant ± Duration` an `Instant`.
+            match (op, p.types.get(a), p.types.get(b)) {
+                (BinOp::Sub, Some(TypeDef::Instant), Some(TypeDef::Instant)) => return lookup(TypeDef::Duration),
+                (BinOp::Add | BinOp::Sub, Some(TypeDef::Instant), Some(TypeDef::Duration)) => return Ok(a),
+                (BinOp::Add, Some(TypeDef::Duration), Some(TypeDef::Instant)) => return Ok(b),
+                _ => {}
+            }
             let a = if a != b && expr_matches_type(p, r, lhs, b) {
                 b
             } else {

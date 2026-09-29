@@ -32,6 +32,8 @@ pub struct SimArtifact {
     pub protocol: ValidatedProgram,
     /// Scheduled input events of the protocol (`.ded` `@k` facts, spec facts `@ n at tick k`).
     pub inputs: Vec<InputFact>,
+    /// Scheduled messages of client sessions.
+    pub ingress: Vec<IngressFact>,
     /// Rows of static relations that hold at one node only (spec facts `@ n` into a static relation, and deployment
     /// configuration, LANGUAGE §7.5): present at every tick of that node.
     pub statics: Vec<NodeStatic>,
@@ -43,6 +45,8 @@ pub struct SimArtifact {
     pub edges: Vec<LogicalEdge>,
     /// Present when the program defines `pre` and `post`.
     pub spec: Option<OutcomeSpec>,
+    /// The run's root seed (seeded choices and resolution policies draw from it, SEM-084).
+    pub seed: blossom_value::Seed,
 }
 
 /// An index into [`SimArtifact::rels`].
@@ -101,6 +105,19 @@ pub struct InputFact {
     /// The protocol's input relation (an `Event(Input)` relation).
     pub rel: RelId,
     /// The row without its location column.
+    pub row: Vec<Value>,
+}
+
+/// A client session's message (LANGUAGE §18.4): spec facts `fact c(…) @ n from s at tick k` on a channel whose
+/// source role is `external`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct IngressFact {
+    pub node: NodeId,
+    pub tick: Tick,
+    /// The protocol's channel.
+    pub rel: RelId,
+    pub session: blossom_value::value::SessionId,
+    /// The whole row: column 0 is the destination, `node`.
     pub row: Vec<Value>,
 }
 

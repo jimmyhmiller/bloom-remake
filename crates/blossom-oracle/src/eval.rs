@@ -11,7 +11,7 @@ use blossom_value::{Value, value::IntValue};
 use crate::cells::{CellInfo, insert_merged};
 use crate::expr::{self, ExprError, Scope};
 use crate::plan::{RulePlan, Step};
-use crate::{Instance, Oracle, OracleError, Row, Send, TickInput, TickOutput};
+use crate::{Egress, Instance, Oracle, OracleError, Row, Send, TickInput, TickOutput};
 
 /// Rejects programs that use what the oracle does not evaluate yet.
 pub(crate) fn check_supported(p: &Program) -> Result<(), OracleError> {
@@ -291,6 +291,12 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
         with_sender.push(Value::Node(d.from));
         db.insert_in(d.rel, true, Arc::from(with_sender)).map_err(load)?;
     }
+    for g in input.ingress {
+        db.insert(g.rel, g.row.clone()).map_err(load)?;
+        let mut with_sender: Vec<Value> = g.row.to_vec();
+        with_sender.push(Value::Session(g.session));
+        db.insert_in(g.rel, true, Arc::from(with_sender)).map_err(load)?;
+    }
     // A firing is found once per evaluation of its rule, so only a recursive stratum, whose rules are evaluated
     // again every round, can find one twice.
     let mut firings: Vec<FiringRecord> = Vec::new();
@@ -398,6 +404,16 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
         for (row, firing) in derive(&scope, &db, rule, plan, input.capture).map_err(|e| fail(rule, e))? {
             let to = match row.first() {
                 Some(Value::Node(n)) => *n,
+                // A reply to a client session leaves the deployment (LANGUAGE §18.4).
+                Some(Value::Session(s)) => {
+                    out.egress.insert(Egress {
+                        rel: rule.head.rel,
+                        session: *s,
+                        row,
+                    });
+                    firings.extend(firing);
+                    continue;
+                }
                 other => return Err(internal_error!("an async head's destination is {other:?}").into()),
             };
             // A lattice channel sends one message per destination and key: the join of the tick's values (§11.9).

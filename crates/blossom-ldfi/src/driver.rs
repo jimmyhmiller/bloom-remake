@@ -173,7 +173,7 @@ impl<'a> Search<'a> {
     }
 
     fn graph(&self, run: &SyncRun, outcome: &Outcome) -> Result<ProvGraph, LdfiError> {
-        Ok(lineage::build(self.artifact, run, outcome)?)
+        lineage::build(self.artifact, run, outcome)
     }
 
     fn post_goal(&self, graph: &ProvGraph, row: &Row) -> Result<Option<GoalId>, LdfiError> {
