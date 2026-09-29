@@ -132,3 +132,26 @@ fn replies_larger_than_a_frame_are_split() {
     }
     server.stop().unwrap();
 }
+
+/// e01's `#[accept(external, principal in admins)]` on `del`: a session whose principal is not in `admins` is
+/// refused at admission (its delete is dropped, an omission), and an admin's is answered.
+#[test]
+fn only_admins_may_delete() {
+    use std::sync::atomic::Ordering;
+    let (spec, artifact) = setup("acl");
+    let server = start(&spec, &artifact);
+    let id = identity(&spec, &artifact);
+    let addr = server.client_addr.unwrap();
+    let del_row = |id: u64| vec![Value::Int(IntValue::U64(id)), Value::Str("k".into())];
+    let mut other = Client::connect(addr, artifact.clone(), &id, "spiffe://test/kvs/client/other", Duration::from_secs(5)).unwrap();
+    let del = other.rel("del").unwrap();
+    other.send(del, &[del_row(1)]).unwrap();
+    assert!(other.recv(Some(Duration::from_millis(800))).unwrap().is_none(), "a non-admin's delete is answered");
+    assert!(server.stats.rejected_acl.load(Ordering::Relaxed) >= 1);
+    let mut admin = Client::connect(addr, artifact.clone(), &id, "spiffe://test/kvs/client/admin", Duration::from_secs(5)).unwrap();
+    admin.send(del, &[del_row(2)]).unwrap();
+    let (rel, row) = admin.recv(Some(Duration::from_secs(5))).unwrap().expect("the admin's delete is answered");
+    assert_eq!(rel, admin.rel("del_ok").unwrap());
+    assert_eq!(row.get(2), Some(&Value::Bool(false)));
+    server.stop().unwrap();
+}

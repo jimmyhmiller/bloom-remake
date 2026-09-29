@@ -18,7 +18,12 @@ pub fn convert(file: FileId, root: &SyntaxNode, diags: &mut Diagnostics) -> File
         .find(|n| n.kind() == PROGRAMHEADER)
         .and_then(|h| cx.header(&h));
     let items = cx.items(root);
+    let mut inner_attrs = Vec::new();
+    for a in children_of(root, INNERATTR) {
+        cx.attr(&a, &mut inner_attrs);
+    }
     File {
+        inner_attrs,
         header,
         items,
         span: cx.span(root),
@@ -210,24 +215,118 @@ impl Cx<'_> {
     }
 
     fn attrs(&mut self, node: &SyntaxNode) -> Vec<Attr> {
-        children_of(node, ATTR).map(|a| self.attr(&a)).collect()
+        let mut out = Vec::new();
+        for a in children_of(node, ATTR) {
+            self.attr(&a, &mut out);
+        }
+        out
     }
 
-    fn attr(&mut self, node: &SyntaxNode) -> Attr {
-        let name = self.need_name(node);
-        let mut args: Vec<Arg> = children_of(node, ARG).map(|a| self.arg(&a)).collect();
-        // `#[name(e, …)]` holds its arguments as expressions; `#[name = e]` has a value.
-        let (value, extra) = if has_token(node, EQ) {
-            (expr_children(node).next().map(|e| self.expr(&e)), Vec::new())
-        } else {
-            (None, expr_children(node).map(|e| Arg::Pos(self.expr(&e))).collect())
-        };
-        args.extend(extra);
-        Attr {
-            name,
-            args,
-            value,
-            span: self.span(node),
+    /// One `#[…]` or `#![…]`: each comma-separated body `path`, `path(args…)` or `path = e`, in order. Inside the
+    /// parentheses an argument is `name = e`, a keyword (kept as a one-segment path, `#[accept(external)]`), or an
+    /// expression.
+    fn attr(&mut self, node: &SyntaxNode, out: &mut Vec<Attr>) {
+        let span = self.span(node);
+        let elems: Vec<_> = node.children_with_tokens().filter(|e| !e.kind().is_trivia()).collect();
+        // Past the opening `#[` or `#![`.
+        let mut i = 1;
+        loop {
+            let mut path = Vec::new();
+            while let Some(e) = elems.get(i) {
+                match (e.kind(), e.as_node()) {
+                    (NAME, Some(n)) => path.push(self.ident(n)),
+                    (COLON2, _) => {}
+                    _ => break,
+                }
+                i += 1;
+            }
+            let (Some(first), Some(last)) = (path.first().copied(), path.last().copied()) else {
+                self.malformed("an attribute without a name", span);
+                return;
+            };
+            let name = if path.len() == 1 {
+                first
+            } else {
+                let text: Vec<&str> = path.iter().map(Ident::as_str).collect();
+                Ident {
+                    name: Symbol::intern(&text.join("::")),
+                    span: first.span.to(last.span).unwrap_or(first.span),
+                }
+            };
+            let mut end = last.span;
+            let mut args = Vec::new();
+            let mut value = None;
+            match elems.get(i).map(|e| e.kind()) {
+                Some(L_PAREN) => {
+                    i += 1;
+                    loop {
+                        let Some(e) = elems.get(i) else {
+                            self.malformed("an unclosed attribute argument list", span);
+                            return;
+                        };
+                        i += 1;
+                        match (e.kind(), e.as_node(), e.as_token()) {
+                            (R_PAREN, _, Some(t)) => {
+                                end = self.token_span(t);
+                                break;
+                            }
+                            (COMMA, _, _) => {}
+                            (NAME, Some(n), _) => {
+                                let n = self.ident(n);
+                                if elems.get(i).is_some_and(|e| e.kind() == EQ) {
+                                    match elems.get(i + 1).and_then(|e| e.as_node()).filter(|x| is_expr(x.kind())) {
+                                        Some(x) => args.push(Arg::Named(n, self.expr(x))),
+                                        None => {
+                                            self.malformed("an attribute argument `name =` without a value", n.span);
+                                            return;
+                                        }
+                                    }
+                                    i += 2;
+                                } else {
+                                    args.push(Arg::Pos(Expr {
+                                        kind: ExprKind::Path(vec![n], Vec::new()),
+                                        span: n.span,
+                                    }));
+                                }
+                            }
+                            (k, Some(x), _) if is_expr(k) => args.push(Arg::Pos(self.expr(x))),
+                            (k, _, _) => {
+                                self.malformed(&format!("attribute argument {k:?}"), span);
+                                return;
+                            }
+                        }
+                    }
+                }
+                Some(EQ) => {
+                    match elems.get(i + 1).and_then(|e| e.as_node()).filter(|x| is_expr(x.kind())) {
+                        Some(x) => {
+                            let e = self.expr(x);
+                            end = e.span;
+                            value = Some(e);
+                        }
+                        None => {
+                            self.malformed("an attribute `name =` without a value", span);
+                            return;
+                        }
+                    }
+                    i += 2;
+                }
+                _ => {}
+            }
+            out.push(Attr {
+                name,
+                args,
+                value,
+                span: first.span.to(end).unwrap_or(first.span),
+            });
+            match elems.get(i).map(|e| e.kind()) {
+                Some(COMMA) if elems.get(i + 1).is_some_and(|e| e.kind() != R_BRACK) => i += 1,
+                Some(COMMA | R_BRACK) => return,
+                other => {
+                    self.malformed(&format!("attribute continuation {other:?}"), span);
+                    return;
+                }
+            }
         }
     }
 
@@ -910,7 +1009,13 @@ impl Cx<'_> {
                 } else {
                     None
                 };
-                Some(Stmt::If { cond, then, els, span })
+                Some(Stmt::If {
+                    attrs: self.attrs(node),
+                    cond,
+                    then,
+                    els,
+                    span,
+                })
             }
             FORSTMT => {
                 let cond = match child_of(node, BODY) {
@@ -921,7 +1026,12 @@ impl Cx<'_> {
                     }
                 };
                 let block = self.need_block(node);
-                Some(Stmt::For { cond, block, span })
+                Some(Stmt::For {
+                    attrs: self.attrs(node),
+                    cond,
+                    block,
+                    span,
+                })
             }
             ATTR => None,
             other => {
@@ -1660,8 +1770,10 @@ impl Cx<'_> {
         let name = names.first().copied();
         let target = if has_for { names.get(1).map(|n| vec![*n]) } else { None };
         let mut members = Vec::new();
+        let mut member_attrs = Vec::new();
         for c in node.children() {
             let cspan = self.span(&c);
+            member_attrs.extend(self.attrs(&c));
             let m = match c.kind() {
                 NAME => continue,
                 NODESMEMBER => SpecMember::Nodes(self.names(&c)),
@@ -1729,6 +1841,7 @@ impl Cx<'_> {
             name,
             target,
             members,
+            member_attrs,
             span,
         }
     }

@@ -1539,20 +1539,7 @@ impl<'t> Resolver<'t, '_> {
 
     // ------------------------------------------------------------------ rules
 
-    pub(crate) fn handler(
-        &mut self,
-        s: ScopeIdx,
-        h: &'t ast::Handler,
-        placement: Option<HRoleId>,
-        attrs: &[ast::Attr],
-    ) {
-        for a in attrs {
-            self.unsupported(
-                "LANG-202",
-                &format!("the attribute `#[{}]` on a handler", a.name.as_str()),
-                a.span,
-            );
-        }
+    pub(crate) fn handler(&mut self, s: ScopeIdx, h: &'t ast::Handler, placement: Option<HRoleId>) {
         if h.monotone {
             self.unsupported("ANA-020", "`monotone` assertions", h.span);
         }
@@ -1621,7 +1608,7 @@ impl<'t> Resolver<'t, '_> {
                         out.push(HStmt::Verb(h));
                     }
                 }
-                Stmt::For { cond, block, span } => {
+                Stmt::For { cond, block, span, .. } => {
                     cx.frames.push(BTreeMap::new());
                     let c = self.body(cx, cond);
                     let inner = self.stmts(cx, &block.stmts);
@@ -1634,7 +1621,9 @@ impl<'t> Resolver<'t, '_> {
                         span: *span,
                     });
                 }
-                Stmt::If { cond, then, els, span } => self.if_stmt(cx, cond, then, els.as_deref(), *span, &mut out),
+                Stmt::If {
+                    cond, then, els, span, ..
+                } => self.if_stmt(cx, cond, then, els.as_deref(), *span, &mut out),
             }
         }
         out
@@ -1704,17 +1693,13 @@ impl<'t> Resolver<'t, '_> {
     }
 
     fn verb_stmt(&mut self, cx: &mut RuleCx, v: &ast::VerbStmt) -> Option<HVerbStmt> {
-        let mut allow_self_negation = false;
-        for a in &v.attrs {
-            if a.name.as_str() == "allow"
-                && a.args.iter().all(|x| matches!(x, Arg::Pos(e) if matches!(&e.kind, ExprKind::Path(p, _) if p.len() == 1 && p.first().is_some_and(|n| n.as_str() == "self_negation"))))
+        // Every other attribute of a statement was reported when the file was loaded (`ast::attrs`).
+        let allow_self_negation = v.attrs.iter().any(|a| {
+            a.name.as_str() == "allow"
+                && a.value.is_none()
                 && !a.args.is_empty()
-            {
-                allow_self_negation = true;
-            } else {
-                self.unsupported("LANG-202", &format!("the attribute `#[{}]` on a statement", a.name.as_str()), a.span);
-            }
-        }
+                && a.args.iter().all(|x| matches!(x, Arg::Pos(e) if matches!(&e.kind, ExprKind::Path(p, t) if t.is_empty() && p.len() == 1 && p.first().is_some_and(|n| n.as_str() == "self_negation"))))
+        });
         if v.resolve.is_some() {
             self.unsupported("LANG-117", "`resolve` policies on statements", v.span);
             return None;
