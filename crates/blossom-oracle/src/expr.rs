@@ -24,6 +24,20 @@ pub(crate) struct Scope<'a> {
     pub oracle: &'a Oracle,
     /// The step budget of the function evaluation in progress (BLSR012).
     pub fuel: Fuel,
+    /// The bytes of blobs created before this tick.
+    pub blobs: &'a dyn blossom_value::BlobSource,
+    /// The blobs this tick created (`Blob::of`), with their bytes.
+    pub new_blobs: std::cell::RefCell<std::collections::BTreeMap<blossom_value::BlobRef, std::sync::Arc<[u8]>>>,
+}
+
+impl Scope<'_> {
+    /// The bytes of `b`: created this tick, or before it.
+    pub(crate) fn blob(&self, b: &blossom_value::BlobRef) -> Option<std::sync::Arc<[u8]>> {
+        if let Some(x) = self.new_blobs.borrow().get(b) {
+            return Some(x.clone());
+        }
+        self.blobs.get(b)
+    }
 }
 
 /// How many function calls are open, and the steps the outermost one has left (`FN_STEP_BUDGET` at its start).
@@ -205,6 +219,7 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
             let n = match eval(scope, env, a)? {
                 Value::Str(s) => s.len(),
                 Value::Bytes(b) => b.len(),
+                Value::Blob(b) => usize::try_from(b.len).unwrap_or(usize::MAX),
                 Value::Vec(v) => v.len(),
                 Value::Set(s) => s.len(),
                 Value::Map(m) => m.len(),

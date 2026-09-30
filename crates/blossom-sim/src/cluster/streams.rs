@@ -611,15 +611,22 @@ impl<'p> Cluster<'p> {
         if host.is_empty() && retired.is_empty() {
             return Ok(());
         }
-        let streams = match self.nodes.get(n.0 as usize).and_then(|s| s.driver.as_ref()) {
-            Some(d) => d.node.streams().to_vec(),
+        let requests: Vec<HostRequest> = match self.nodes.get(n.0 as usize).and_then(|s| s.driver.as_ref()) {
+            Some(d) => {
+                let blobs = d.node.blobs();
+                host.iter()
+                    .map(|h| host_request(d.node.streams(), h, &blobs))
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| SimError::Internal(internal_error!("node {}: {e}", n.0)))?
+            }
             None => return Ok(()),
         };
         let mut writes = Vec::new();
         let mut closes = Vec::new();
         let mut dials = Vec::new();
-        for h in host {
-            match host_request(&streams, h).map_err(|e| SimError::Internal(internal_error!("node {}: {e}", n.0)))? {
+        let mut refused = Vec::new();
+        for r in requests {
+            match r {
                 HostRequest::Write {
                     stream,
                     conn,
@@ -627,7 +634,23 @@ impl<'p> Cluster<'p> {
                     bytes,
                 } => writes.push((conn, seq, stream, bytes)),
                 HostRequest::Close { stream, conn } => closes.push((stream, conn)),
+                HostRequest::Refused { stream, conn, why } => refused.push((stream, conn, why)),
                 HostRequest::Dial { stream, req, addr } => dials.push((stream, req, addr)),
+            }
+        }
+        // A refused write is a located runtime error: the connection closes with it, as for a bad `seq`.
+        for (stream, conn, why) in refused {
+            let Some(&(p, end)) = self.node_ends.get(&(n, conn)) else {
+                continue;
+            };
+            if self.through_its_stream(n, p, end, stream, conn, "write") {
+                self.run.stream_violations += 1;
+                self.run.log.push(format!(
+                    "{}: node {} stream violation: {why}",
+                    self.now - super::EPOCH,
+                    n.0
+                ));
+                self.host_close(p, end, &why);
             }
         }
         writes.sort_by_key(|w| (w.0, w.1));

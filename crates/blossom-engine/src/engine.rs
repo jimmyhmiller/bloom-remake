@@ -90,6 +90,8 @@ pub struct Engine {
     unsettled: BTreeSet<StoreKey>,
     /// Rows the atom probes returned since the engine was created: the join work, measured without a clock.
     examined: u64,
+    /// The blobs the current tick created (`Blob::of`), with their bytes.
+    new_blobs: std::cell::RefCell<BTreeMap<blossom_value::BlobRef, Arc<[u8]>>>,
 }
 
 fn kinds(p: &Program) -> Vec<Option<Kind>> {
@@ -310,6 +312,7 @@ impl Engine {
             poisoned: false,
             unsettled: BTreeSet::new(),
             examined: 0,
+            new_blobs: std::cell::RefCell::new(BTreeMap::new()),
             program,
         };
         engine.build_indexes()?;
@@ -526,6 +529,7 @@ impl Engine {
         self.pending = changes.clone();
         let mut out = StepOutput {
             changes,
+            blobs: self.new_blobs.take(),
             ..StepOutput::default()
         };
         for id in &self.asynchronous {
@@ -599,7 +603,7 @@ impl Engine {
             .unwrap_or_default()
     }
 
-    fn ctx<'a>(&'a self, p: &'a Program, input: &StepInput<'_>) -> Ctx<'a> {
+    fn ctx<'a>(&'a self, p: &'a Program, input: &StepInput<'a>) -> Ctx<'a> {
         Ctx {
             program: p,
             node: self.node,
@@ -608,6 +612,8 @@ impl Engine {
             now: input.now,
             shared: &self.shared,
             fuel: crate::expr::Fuel::default(),
+            blobs: input.blobs,
+            new_blobs: &self.new_blobs,
         }
     }
 
@@ -1091,6 +1097,7 @@ impl Engine {
                 events: input.events,
                 delivered: input.delivered,
                 ingress: input.ingress,
+                blobs: input.blobs,
             },
             &[],
         )?;
@@ -1109,7 +1116,19 @@ impl Engine {
             egress: step.egress,
             host: step.host,
             firings: Vec::new(),
+            blobs: step.blobs,
         })
+    }
+
+    /// Every blob a row of any store holds: derived rows keep theirs across ticks without re-creating them.
+    pub fn blobs_referenced(&self) -> std::collections::BTreeSet<blossom_value::BlobRef> {
+        let mut out = std::collections::BTreeSet::new();
+        for s in self.stores.values() {
+            for r in s.present() {
+                r.iter().for_each(|v| blossom_value::blobs_in(v, &mut out));
+            }
+        }
+        out
     }
 
     /// Rows the atom probes returned since the engine was created: the join work, measured without a clock.

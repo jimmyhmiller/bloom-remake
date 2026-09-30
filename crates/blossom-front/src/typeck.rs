@@ -1855,6 +1855,13 @@ impl Checker<'_> {
                             self.con(&mut hir.types, TypeDef::Bytes)
                         }
                         Builtin::Lib(LibFn::BytesEmpty) => self.con(&mut hir.types, TypeDef::Bytes),
+                        Builtin::Lib(LibFn::BlobOf) => {
+                            let b = self.con(&mut hir.types, TypeDef::Bytes);
+                            for a in &ats {
+                                self.unify(&hir.types, *a, b, span);
+                            }
+                            self.con(&mut hir.types, TypeDef::Blob)
+                        }
                         Builtin::Lib(LibFn::BytesJoin) => {
                             let b = self.con(&mut hir.types, TypeDef::Bytes);
                             let v = self.bound(Shape::Vec(b));
@@ -2427,8 +2434,8 @@ impl Checker<'_> {
                 match self.node(r) {
                     Node::Bound(Shape::Vec(_) | Shape::Set(_) | Shape::Map(..)) => true,
                     Node::Bound(Shape::Con(t)) => {
-                        if !matches!(hir.types.get(t), Some(TypeDef::Str | TypeDef::Bytes)) {
-                            self.error(span, "`.len()` needs a string, bytes or a collection".into());
+                        if !matches!(hir.types.get(t), Some(TypeDef::Str | TypeDef::Bytes | TypeDef::Blob)) {
+                            self.error(span, "`.len()` needs a string, bytes, a blob or a collection".into());
                         }
                         true
                     }
@@ -3089,6 +3096,7 @@ impl Checker<'_> {
             (_, Some(TypeDef::Str), "to_lowercase") => (Builtin::Lib(LibFn::StrToLowercase), None, 0),
             (_, Some(TypeDef::Str), "to_utf8") => (Builtin::Lib(LibFn::StrToUtf8), None, 0),
             (_, Some(TypeDef::Bytes), "from_utf8") => (Builtin::Lib(LibFn::BytesFromUtf8), None, 0),
+            (_, Some(TypeDef::Blob), "read") => (Builtin::Lib(LibFn::BlobRead), None, 2),
             (_, Some(TypeDef::Bytes), "uvarint_at") => (Builtin::Lib(LibFn::BytesUvarintAt), None, 1),
             (_, Some(TypeDef::Bytes), "varint_at") => (Builtin::Lib(LibFn::BytesVarintAt), None, 1),
             (_, Some(TypeDef::Bytes), _) => {
@@ -3276,6 +3284,13 @@ impl Checker<'_> {
                     self.unify(&hir.types, a, u64_t, span);
                 }
                 self.bound(Shape::Option(recv))
+            }
+            (_, Builtin::Lib(LibFn::BlobRead)) => {
+                for a in [a0, a1].into_iter().flatten() {
+                    self.unify(&hir.types, a, u64_t, span);
+                }
+                let b = self.con(&mut hir.types, TypeDef::Bytes);
+                self.bound(Shape::Option(b))
             }
             (_, Builtin::Lib(LibFn::BytesConcat)) => {
                 if let Some(x) = a0 {

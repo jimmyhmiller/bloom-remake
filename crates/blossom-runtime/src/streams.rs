@@ -203,6 +203,8 @@ pub struct StreamStats {
     pub seq_violations: AtomicU64,
     /// Writes and closes a program sent through a stream the connection does not belong to (refused, not done).
     pub wrong_stream: AtomicU64,
+    /// Connections closed for a write the host refused (a blob range outside the blob).
+    pub refused_writes: AtomicU64,
     /// Writes held behind a `seq` gap when their connection closed.
     pub dropped_held: AtomicU64,
     pub dials_failed: AtomicU64,
@@ -319,6 +321,30 @@ impl StreamConns {
             Some(h) => {
                 let _ = h.tx.send(WriterMsg::Close);
                 open.remove(&conn);
+            }
+        }
+    }
+
+    /// Closes `conn` for a located runtime error of the program (a write the host refuses): its `closed` event carries
+    /// `why`, which is also recorded, as for a bad `seq`.
+    pub fn refuse(&self, stream: usize, conn: ConnId, why: String) {
+        let Ok(mut open) = self.open.lock() else {
+            return;
+        };
+        match open.get(&conn) {
+            None => bump(&self.stats.dropped_closed, 1),
+            Some(h) if h.stream != stream => {
+                bump(&self.stats.wrong_stream, 1);
+            }
+            Some(h) => {
+                bump(&self.stats.refused_writes, 1);
+                if let Ok(mut w) = h.why.lock() {
+                    *w = Some(Arc::from(why.as_str()));
+                }
+                let _ = h.sock.shutdown(std::net::Shutdown::Both);
+                open.remove(&conn);
+                drop(open);
+                self.violation(why);
             }
         }
     }

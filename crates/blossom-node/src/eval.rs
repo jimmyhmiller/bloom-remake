@@ -51,6 +51,9 @@ pub trait Executor: Send {
     fn carried(&self) -> Instance;
     /// The join work done so far, in rows examined, if the executor measures it.
     fn rows_examined(&self) -> Option<u64>;
+    /// Every blob a row of the executor's state holds: blobs it may still copy into a durable row or a request
+    /// without creating them again (O(state)).
+    fn blobs_referenced(&self) -> std::collections::BTreeSet<blossom_value::BlobRef>;
 }
 
 /// Any [`Evaluator`] as an [`Executor`]: it keeps the carried state and diffs each tick's next state against it.
@@ -85,6 +88,7 @@ impl<E: Evaluator> Executor for OracleExecutor<E> {
             delivered: input.delivered,
             ingress: input.ingress,
             capture: false,
+            blobs: input.blobs,
         })?;
         let changes = Changes::between(&self.carried, &out.next);
         let observed: BTreeMap<RelId, Vec<Row>> = observe
@@ -98,6 +102,7 @@ impl<E: Evaluator> Executor for OracleExecutor<E> {
             egress: out.egress,
             host: out.host,
             observed,
+            blobs: out.blobs,
         })
     }
 
@@ -112,6 +117,18 @@ impl<E: Evaluator> Executor for OracleExecutor<E> {
     /// The reference evaluator does not count its work.
     fn rows_examined(&self) -> Option<u64> {
         None
+    }
+
+    /// The reference evaluator recomputes every derived row, and the blobs they hold, at every tick: only the
+    /// carried rows keep blobs across ticks.
+    fn blobs_referenced(&self) -> std::collections::BTreeSet<blossom_value::BlobRef> {
+        let mut out = std::collections::BTreeSet::new();
+        for rows in self.carried.rels.values() {
+            for r in rows {
+                r.iter().for_each(|v| blossom_value::blobs_in(v, &mut out));
+            }
+        }
+        out
     }
 }
 
@@ -135,6 +152,10 @@ impl<X: Executor + ?Sized> Executor for Box<X> {
     fn rows_examined(&self) -> Option<u64> {
         (**self).rows_examined()
     }
+
+    fn blobs_referenced(&self) -> std::collections::BTreeSet<blossom_value::BlobRef> {
+        (**self).blobs_referenced()
+    }
 }
 
 impl Executor for blossom_engine::Engine {
@@ -156,6 +177,10 @@ impl Executor for blossom_engine::Engine {
 
     fn rows_examined(&self) -> Option<u64> {
         Some(blossom_engine::Engine::rows_examined(self))
+    }
+
+    fn blobs_referenced(&self) -> std::collections::BTreeSet<blossom_value::BlobRef> {
+        blossom_engine::Engine::blobs_referenced(self)
     }
 }
 

@@ -360,6 +360,27 @@ pub(crate) fn lib(scope: &Scope<'_>, env: &[Option<Value>], f: LibFn, args: &[Ex
             Value::Bytes(uvarint_bytes(((x << 1) ^ (x >> 63)) as u64).into())
         }
         LibFn::BytesEmpty => Value::Bytes(Arc::from(&[][..])),
+        LibFn::BlobOf => {
+            let b = bytes_of(val(0)?)?;
+            let r = blossom_value::BlobRef::of(&b);
+            scope.new_blobs.borrow_mut().entry(r).or_insert_with(|| Arc::from(&b[..]));
+            Value::Blob(r)
+        }
+        LibFn::BlobRead => {
+            let Value::Blob(r) = val(0)? else {
+                return Err(bug("`read` of a non-Blob".into()));
+            };
+            let (lo, hi) = (u64_of(&val(1)?)?, u64_of(&val(2)?)?);
+            // A handle is only ever made from its bytes, so a missing blob is a host bug, never the program's.
+            let b = scope
+                .blob(&r)
+                .ok_or_else(|| bug(format!("the bytes of blob {} are not available", r.hex())))?;
+            let range = usize::try_from(lo).ok().zip(usize::try_from(hi).ok());
+            opt(range
+                .filter(|(lo, hi)| lo <= hi)
+                .and_then(|(lo, hi)| b.get(lo..hi))
+                .map(|s| Value::Bytes(s.into())))
+        }
         LibFn::BytesJoin => {
             let mut out = Vec::new();
             for x in vec_of(val(0)?)?.iter() {

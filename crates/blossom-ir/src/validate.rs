@@ -1566,6 +1566,18 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
             }
             Ok(acc)
         }
+        LibFn::BlobOf => {
+            arity(1)?;
+            same(ty(0)?, lookup(TypeDef::Bytes)?, "a blob is made of Bytes")?;
+            lookup(TypeDef::Blob)
+        }
+        LibFn::BlobRead => {
+            arity(3)?;
+            same(ty(0)?, lookup(TypeDef::Blob)?, "read of a Blob")?;
+            same(ty(1)?, u64t()?, "positions are u64")?;
+            same(ty(2)?, u64t()?, "positions are u64")?;
+            lookup(TypeDef::Option(lookup(TypeDef::Bytes)?))
+        }
         LibFn::OptIsSome | LibFn::OptIsNone => {
             arity(1)?;
             inner(ty(0)?)?;
@@ -1811,9 +1823,11 @@ fn builtin_type(p: &Program, r: Cx<'_>, b: &BuiltinFn, args: &[Expr]) -> Result<
             arity(1)?;
             if !matches!(
                 types.first().and_then(|t| p.types.get(*t)),
-                Some(TypeDef::Vec(_) | TypeDef::Set(_) | TypeDef::Map(..) | TypeDef::Str | TypeDef::Bytes)
+                Some(
+                    TypeDef::Vec(_) | TypeDef::Set(_) | TypeDef::Map(..) | TypeDef::Str | TypeDef::Bytes | TypeDef::Blob
+                )
             ) {
-                return Err("len expects a collection, String or Bytes".into());
+                return Err("len expects a collection, String, Bytes or a Blob".into());
             }
             lookup(TypeDef::Int(IntTy::U64))
         }

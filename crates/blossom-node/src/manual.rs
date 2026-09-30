@@ -84,6 +84,7 @@ impl<'p, E: Executor> ManualDriver<'p, E> {
             MetaStore::write(&self.opened.meta, &self.opened.record)?;
         }
         if let Some(delta) = &fx.wal {
+            self.opened.blobs.put_all(&fx.blobs)?;
             let rec = self.record(&fx, delta)?;
             self.opened.wal.append(&rec)?;
         }
@@ -115,6 +116,8 @@ impl<'p, E: Executor> ManualDriver<'p, E> {
             self.node.release_ready().into_iter().for_each(&mut *sink);
             return Ok(());
         };
+        // The record's blobs are durable before it syncs (FOREIGN-PROTOCOLS §5).
+        self.opened.blobs.put_all(&fx.blobs)?;
         let rec = self.record(fx, delta)?;
         self.opened.wal.append(&rec)?;
         let synced = self.opened.wal.sync()?;
@@ -140,11 +143,15 @@ impl<'p, E: Executor> ManualDriver<'p, E> {
             return Err(internal_error!("checkpoint with ticks still parked").into());
         }
         let snap = self.codec.encode_image(self.node.released_image())?;
+        let blobs = self.node.released_image_blobs();
         let id = self.opened.checkpoints.write(snap, covers)?;
         let token = self.opened.checkpoints.install(id)?;
         self.opened.wal.truncate_through(token)?;
         self.opened.checkpoints.prune()?;
         self.checkpointed = Some(covers.tick());
+        // Recovery starts from this checkpoint now: the blobs nothing can reach go.
+        let keep = self.node.blob_roots(Tick(covers.tick()), &blobs);
+        self.opened.blobs.collect(&keep)?;
         Ok(())
     }
 }

@@ -20,6 +20,7 @@
 
 #[cfg(feature = "arbitrary")]
 pub mod arbitrary;
+pub mod blob;
 pub mod class;
 pub mod digest;
 pub mod error;
@@ -41,6 +42,7 @@ mod serialize_value;
 #[cfg(test)]
 mod testgen;
 
+pub use blob::{BlobMap, BlobSource, NoBlobs, blobs_in};
 pub use class::{Claim, HeightClass, LatOpKind, LawStatus, MonoClass, ProofStatus};
 pub use digest::{Digest128, Digest256, SetElement};
 pub use error::ValueError;

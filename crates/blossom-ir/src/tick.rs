@@ -108,6 +108,8 @@ pub struct TickInput<'a> {
     pub ingress: &'a [Ingress],
     /// Whether to report the tick's firings.
     pub capture: bool,
+    /// The bytes of blobs created before this tick (FOREIGN-PROTOCOLS §5).
+    pub blobs: &'a dyn blossom_value::BlobSource,
 }
 
 /// Everything one tick of one node produces.
@@ -125,6 +127,9 @@ pub struct TickOutput {
     pub host: BTreeSet<HostOut>,
     /// The distinct firings of the tick, in evaluation order (deterministic); empty unless capture was requested.
     pub firings: Vec<FiringRecord>,
+    /// The blobs the tick created (`Blob::of`), with their bytes. An evaluator reports at least every blob it
+    /// evaluated a creation of; the host keeps those its rows and requests reference.
+    pub blobs: std::collections::BTreeMap<blossom_value::BlobRef, std::sync::Arc<[u8]>>,
 }
 
 /// Why an evaluator (the oracle or the engine) could not evaluate a tick.
@@ -211,6 +216,8 @@ pub struct StepInput<'a> {
     pub events: &'a [(RelId, Row)],
     pub delivered: &'a [Delivery],
     pub ingress: &'a [Ingress],
+    /// The bytes of blobs created before this tick.
+    pub blobs: &'a dyn blossom_value::BlobSource,
 }
 
 /// What one tick of a stateful executor produces.
@@ -223,6 +230,8 @@ pub struct StepOutput {
     pub host: BTreeSet<HostOut>,
     /// The final contents, at this tick, of the relations the caller asked to observe.
     pub observed: BTreeMap<RelId, Vec<Row>>,
+    /// The blobs the tick created, with their bytes (as [`TickOutput::blobs`]).
+    pub blobs: BTreeMap<blossom_value::BlobRef, std::sync::Arc<[u8]>>,
 }
 
 /// Checks that `registry` provides every host function `program` declares (`extern fn`), with the declared
