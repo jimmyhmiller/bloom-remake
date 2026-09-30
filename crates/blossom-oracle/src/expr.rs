@@ -250,6 +250,18 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
             ..
         } => Ok(Value::Int(IntValue::U64(scope.oracle.role_size(*role)))),
         Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::Error { .. }),
+            args,
+        } => {
+            let [m] = args.as_slice() else {
+                return Err(ExprError::Oracle(internal_error!("`error` takes one message").into()));
+            };
+            match eval(scope, env, m)? {
+                Value::Str(s) => Err(ExprError::Refused(s.to_string())),
+                other => Err(ExprError::Oracle(internal_error!("`error` of {other:?}").into())),
+            }
+        }
+        Expr::Call {
             f: FnRef::Builtin(BuiltinFn::Rand),
             args,
         } => {
@@ -396,6 +408,7 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
         Expr::Closure { .. } => Err(ExprError::Oracle(
             internal_error!("a closure evaluated outside a combinator's argument").into(),
         )),
+        Expr::Typed { expr, .. } => eval(scope, env, expr),
     }
 }
 

@@ -31,7 +31,9 @@ fn compile() -> BlsArtifact {
 fn run(artifact: &BlsArtifact, inputs: &[InputEvent], ticks: u64) -> SyncRun {
     let sim = BlsSim::new(artifact, blossom_value::Seed::from_u64(0)).unwrap();
     let round = Duration::from_nanos(1_000_000_000);
-    let reference = sim.run(inputs, Tick(ticks), round, &FaultSchedule::default(), false).unwrap();
+    let reference = sim
+        .run(inputs, Tick(ticks), round, &FaultSchedule::default(), false)
+        .unwrap();
     let cfg = blossom_engine::EngineConfig {
         roles: artifact.roles.clone(),
         node_names: artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect(),
@@ -39,10 +41,15 @@ fn run(artifact: &BlsArtifact, inputs: &[InputEvent], ticks: u64) -> SyncRun {
         ..blossom_engine::EngineConfig::default()
     };
     let engine = EngineEvaluator::new(artifact.program.clone(), cfg);
-    let mine = sim.run_on(&engine, inputs, Tick(ticks), round, &FaultSchedule::default(), false).unwrap();
+    let mine = sim
+        .run_on(&engine, inputs, Tick(ticks), round, &FaultSchedule::default(), false)
+        .unwrap();
     assert_eq!(reference.rounds.len(), mine.rounds.len());
     for (t, (a, b)) in reference.rounds.iter().zip(&mine.rounds).enumerate() {
-        assert_eq!(a[0].instance, b[0].instance, "tick {t}: the oracle and the engine differ");
+        assert_eq!(
+            a[0].instance, b[0].instance,
+            "tick {t}: the oracle and the engine differ"
+        );
     }
     reference
 }
@@ -129,9 +136,12 @@ fn rand_is_stable_per_key_and_tick() {
         rows(&artifact, &r, t, "draws")
             .into_iter()
             .map(|row| match row.as_slice() {
-                [_, Value::Int(IntValue::U64(a)), Value::Int(IntValue::U64(b)), Value::Int(IntValue::U64(c))] => {
-                    (*a, *b, *c)
-                }
+                [
+                    _,
+                    Value::Int(IntValue::U64(a)),
+                    Value::Int(IntValue::U64(b)),
+                    Value::Int(IntValue::U64(c)),
+                ] => (*a, *b, *c),
                 other => panic!("{other:?}"),
             })
             .collect()
@@ -144,4 +154,20 @@ fn rand_is_stable_per_key_and_tick() {
     }
     assert_ne!(one[0].0, one[1].0, "keys 5 and 6 draw differently");
     assert_ne!(one[0].0, two[0].0, "the next tick draws afresh");
+}
+
+#[test]
+fn empty_literals_take_their_context_type() {
+    let artifact = compile();
+    let r = run(&artifact, &[input(&artifact, 1, "lit", vec![u(4)])], 2);
+    let pair = |n: u64| Value::Tuple(vec![s("n"), u(n)].into());
+    assert_eq!(
+        rows(&artifact, &r, 1, "literals"),
+        vec![vec![
+            u(4),
+            strs(&[]),
+            Value::Vec(vec![pair(4), pair(5)].into()),
+            strs(&[])
+        ]]
+    );
 }

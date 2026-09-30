@@ -1799,6 +1799,14 @@ impl Checker<'_> {
                             self.con(&mut hir.types, TypeDef::Int(IntTy::U64))
                         }
                         Builtin::RoleSize(_) | Builtin::Rand => self.con(&mut hir.types, TypeDef::Int(IntTy::U64)),
+                        Builtin::Error => {
+                            // The message is a String; the call never returns, so it takes its context's type.
+                            if let Some(m) = ats.first() {
+                                let s = self.con(&mut hir.types, TypeDef::Str);
+                                self.unify(&hir.types, *m, s, span);
+                            }
+                            self.fresh(false)
+                        }
                         Builtin::RandRange => {
                             // `lo` and `hi` share a type that subtracts to itself: an integer or a duration.
                             match (ats.first().copied(), ats.get(1).copied()) {
@@ -2455,24 +2463,9 @@ impl Checker<'_> {
                     _ => false,
                 }
             }
-            Deferred::Ordered { t, span } => {
-                let Some(ty) = self.leaf(t) else {
-                    return !self.is_unbound(t);
-                };
-                if matches!(
-                    hir.types.get(ty),
-                    Some(TypeDef::Bool | TypeDef::Enum(_) | TypeDef::Struct(_))
-                ) {
-                    self.error(
-                        span,
-                        format!(
-                            "`<` compares numbers, strings, durations and instants, not {}",
-                            type_name(&hir.types, ty)
-                        ),
-                    );
-                }
-                true
-            }
+            // Every type has a canonical order (LANGUAGE §5.5), so `<` applies to any value; it waits only for its
+            // operands' type, which lowering needs to pick the numeric or the canonical order.
+            Deferred::Ordered { t, .. } => !self.is_unbound(t),
             Deferred::IntColumn { t, span } => {
                 if self.is_unbound(t) {
                     let r = self.find(t);

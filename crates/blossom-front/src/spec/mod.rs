@@ -826,7 +826,7 @@ fn reads_now(p: &Program) -> bool {
             Expr::Call { args, .. } | Expr::Construct { fields: args, .. } | Expr::Collection { elems: args, .. } => {
                 args.iter().any(expr)
             }
-            Expr::Field { base, .. } => expr(base),
+            Expr::Field { base, .. } | Expr::Typed { expr: base, .. } => expr(base),
             Expr::Match { scrut, arms } => {
                 expr(scrut) || arms.iter().any(|(_, g, b)| g.as_ref().is_some_and(expr) || expr(b))
             }

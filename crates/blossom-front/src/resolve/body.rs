@@ -2118,6 +2118,20 @@ impl<'t> Resolver<'t, '_> {
                     span,
                 ))
             }
+            [name] if name.as_str() == "error" => {
+                let [msg] = pos.as_slice() else {
+                    self.error(code!("BLS0301"), span, "`error` takes a message");
+                    return None;
+                };
+                let m = self.expr(cx, msg)?;
+                Some(HExpr::new(
+                    HExprKind::Builtin {
+                        f: Builtin::Error,
+                        args: vec![m],
+                    },
+                    span,
+                ))
+            }
             [name] if name.as_str() == "rand" => {
                 // The key makes the draw stable (the same value for the same key within a tick, LANG-175).
                 if pos.is_empty() {

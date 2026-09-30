@@ -77,9 +77,9 @@ can fall back.
 | Slice | APIs |
 |---|---|
 | S6 | ApiVersions (18), Metadata (3) |
-| S7 | Produce (0), Fetch (1), ListOffsets (2), CreateTopics (19), DeleteTopics (20), DescribeConfigs (32), for the admin tools |
+| S7 | Produce (0), Fetch (1), ListOffsets (2), CreateTopics (19), DeleteTopics (20), DescribeConfigs (32), for the admin tools; InitProducerId (22), since the Java 4.0 producer is idempotent by default and refuses a broker without it (moved from S9, 2026-09-30) |
 | S8 | the same APIs across a replicated cluster; Metadata reports placement, leaders and leader epochs; DescribeCluster (60) |
-| S9 | FindCoordinator (10), JoinGroup (11), Heartbeat (12), LeaveGroup (13), SyncGroup (14), OffsetCommit (8), OffsetFetch (9), ListGroups (16), DescribeGroups (15), InitProducerId (22) |
+| S9 | FindCoordinator (10), JoinGroup (11), Heartbeat (12), LeaveGroup (13), SyncGroup (14), OffsetCommit (8), OffsetFetch (9), ListGroups (16), DescribeGroups (15) |
 
 Unsupported APIs are left out of the ApiVersions response, so clients never call them. A request for an unsupported
 key or version gets Kafka's error response, never a silent default.

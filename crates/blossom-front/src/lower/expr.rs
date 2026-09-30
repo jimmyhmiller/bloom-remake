@@ -268,9 +268,36 @@ fn bin_op(op: BinOp) -> Result<ir::BinOp, InternalError> {
     })
 }
 
+/// Whether values of a type order numerically within their kind (the IR's `Lt`): integers, durations, instants,
+/// strings, bytes and nodes. Everything else orders by the canonical order.
+fn scalar_ordered(def: Option<&TypeDef>) -> bool {
+    matches!(
+        def,
+        Some(
+            TypeDef::Int(_) | TypeDef::Duration | TypeDef::Instant | TypeDef::Str | TypeDef::Bytes | TypeDef::Node(_)
+        )
+    )
+}
+
 impl Lowerer<'_> {
     pub fn konst(&mut self, v: Value) -> Result<Term, InternalError> {
         Ok(Term::Const(self.b.intern_const(v).map_err(ir_err)?))
+    }
+
+    /// A constant of type `ty` as an expression. The IR types an untyped constant by the first type its value fits,
+    /// which is not `ty` when the value does not decide it (an empty collection, `None`): it is then ascribed.
+    fn const_expr(&mut self, v: Value, ty: TypeId) -> Result<Expr, InternalError> {
+        let types = self.b.types();
+        let decided = types.iter().find(|(t, _)| types.check_value(*t, &v).is_ok()).map(|(t, _)| t);
+        let term = Expr::Term(self.konst(v)?);
+        Ok(if decided == Some(ty) {
+            term
+        } else {
+            Expr::Typed {
+                ty,
+                expr: Box::new(term),
+            }
+        })
     }
 
     /// An expression as a term: a variable, a constant, or a fresh variable bound to it.
@@ -293,7 +320,7 @@ impl Lowerer<'_> {
     /// Lowers an expression.
     pub fn expr(&mut self, d: &mut Draft, e: &HExpr) -> Result<Expr, InternalError> {
         if let Some(v) = try_const(self.hir, e) {
-            return Ok(Expr::Term(self.konst(v)?));
+            return self.const_expr(v, ty_of(e)?);
         }
         Ok(match &e.kind {
             HExprKind::Var(v) => Expr::Term(Term::Var(d.var(self.hir, *v)?)),
@@ -308,6 +335,23 @@ impl Lowerer<'_> {
                     return Ok(Expr::Call {
                         f: ir::FnRef::Builtin(ir::BuiltinFn::Concat),
                         args: vec![self.expr(d, lhs)?, self.expr(d, rhs)?],
+                    });
+                }
+                // `<` on values other than scalars of one kind is the canonical order (LANGUAGE §5.5).
+                if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+                    && !scalar_ordered(self.hir.types.get(ty_of(lhs)?))
+                {
+                    let (l, r) = (self.expr(d, lhs)?, self.expr(d, rhs)?);
+                    let (op, lhs, rhs) = match op {
+                        BinOp::Lt => (ir::BinOp::CanonLt, l, r),
+                        BinOp::Le => (ir::BinOp::CanonLe, l, r),
+                        BinOp::Gt => (ir::BinOp::CanonLt, r, l),
+                        _ => (ir::BinOp::CanonLe, r, l),
+                    };
+                    return Ok(Expr::Binary {
+                        op,
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
                     });
                 }
                 Expr::Binary {
@@ -609,6 +653,7 @@ impl Lowerer<'_> {
                     },
                     Builtin::RandRange => ir::BuiltinFn::RandRange,
                     Builtin::Rand => ir::BuiltinFn::Rand,
+                    Builtin::Error => ir::BuiltinFn::Error { ty: ty_of(e)? },
                     Builtin::Majority(r) => ir::BuiltinFn::Majority {
                         domain: ir::MajorityDomain::Role(RoleId::from_raw(r.0)),
                     },

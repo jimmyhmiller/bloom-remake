@@ -187,7 +187,8 @@ additions (byte streams, functions, byte primitives, the `extern fn` standard li
 - **`__consumer_offsets`,** with the coordinator on its partition leaders.
 - **The classic group protocol:** FindCoordinator, JoinGroup, SyncGroup, Heartbeat, LeaveGroup, OffsetCommit,
   OffsetFetch, ListGroups, DescribeGroups.
-- **InitProducerId** and per-partition producer state derived from the log (sequence de-duplication, epochs).
+- Idempotent producers across failover: the producer state (built on one broker in S7, where InitProducerId moved
+  because the Java 4.0 producer is idempotent by default) derived from the replicated log.
 
 **Gate: the Kafka goal's final gate** (`docs/design/KAFKA.md`, "What stock clients work means"):
 - `kcat -G`, the Java client (idempotent producer, group consumer) and franz-go work unmodified.

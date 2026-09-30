@@ -8,6 +8,7 @@ include "../../../../examples/kafka/apiversions.bls";
 include "../../../../examples/kafka/metadata.bls";
 include "../../../../examples/kafka/topics.bls";
 include "../../../../examples/kafka/records.bls";
+include "../../../../examples/kafka/produce.bls";
 include "../../../../examples/kafka/broker_fns.bls";
 include "../../../../examples/kafka/client_fns.bls";
 
@@ -27,6 +28,7 @@ role Client;
 at Broker {
     include "../../../../examples/kafka/broker_node.bls";
     include "../../../../examples/kafka/topics_node.bls";
+    include "../../../../examples/kafka/produce_node.bls";
 }
 
 at Client {

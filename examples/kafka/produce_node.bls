@@ -1,0 +1,135 @@
+//! The broker's partition logs, the Produce handler and idempotent producers (InitProducerId). Included after
+//! `topics_node.bls`, whose tick order this extends: the writer first, then the requests that read the topics, then
+//! the appends.
+//!
+//! Every Produce request at the head of its queue appends in the tick it is answered, unless one of its topics is
+//! being created or deleted in that tick (it then waits, so its partitions are the ones the tick ends with). The
+//! appends to one partition in a tick are sequenced in order of arrival, then connection, then position in the
+//! request: each gets the offsets after the ones before it, and an idempotent producer's batches are checked against
+//! its state in the partition as the appends before them left it. A batch is stored as a blob-backed durable row,
+//! and its answer leaves after the tick's record, and the blob, are durable (Invariant B).
+
+/// A partition's batches, by base offset: the last offset, the greatest timestamp, and the batch as stored (its
+/// `baseOffset` written).
+durable table batch(tid: Bytes, part: i32, base: i64, last: i64, max_ts: i64, bytes: Blob) key(tid, part, base);
+
+/// An idempotent producer's state in a partition: its epoch and its last batches (see `ProducerEntry`).
+durable table producer(tid: Bytes, part: i32, pid: i64, epoch: i16, recent: Vec<(i32, i32, i64, i64)>) key(tid, part, pid);
+
+/// The next producer id to hand out (no row: 0).
+durable table producer_ids(next: i64) key();
+
+view produce_head(c, i, seq, corr, fr, at, req) =
+    head(c, i, seq, key, _version, corr, fr, at), key == API_PRODUCE,
+    let Some(body) = request_body(fr), let Some(req) = decode_produce(body);
+
+view init_pid_head(c, i, seq, corr, fr, at, req) =
+    head(c, i, seq, key, _version, corr, fr, at), key == API_INIT_PRODUCER_ID,
+    let Some(body) = request_body(fr), let Some(req) = decode_init_producer_id(body);
+
+/// A Produce request that names a topic the writer creates or deletes waits for a later tick.
+view produce_waits(c) {
+    produce_head(c, _, _, _, _, _, req), e in produce_entries(req), let name = e.1, creating(_k, t) where t.name == name;
+    produce_head(c, _, _, _, _, _, req), e in produce_entries(req), deleting(_e, e.1, _id);
+}
+
+/// The partition entries of the Produce requests answered this tick, with their order among the tick's appends.
+view produce_entry(c, j, name, p, records, req, o) =
+    produce_head(c, _, _, _, _, at, req), not produce_waits(c), e in produce_entries(req),
+    let j = e.0, let name = e.1, let p = e.2, let records = e.3, let o = (at, c, j);
+
+/// The entries whose request may append and whose partition exists, with their records checked against the
+/// topic's `max.message.bytes`.
+view entry_check(c, j, tid, p, o, checked) =
+    produce_entry(c, j, name, p, records, req, o), produce_request_error(req) == None, topic(name, tid, parts, cfg),
+    p >= 0i32, p < parts, let checked = check_records(records, max_message_bytes(cfg));
+
+/// This tick's appends, per partition, in order: each one's order and batches.
+view appends(tid, p, xs = collect!((o, bs))) = entry_check(_c, _j, tid, p, o, ch), ch.error == NONE, let bs = ch.batches;
+
+/// The producer states of the partitions appended to this tick.
+view part_producers(tid, p, ps = collect!(ProducerEntry { pid: pid, epoch: epoch, recent: recent })) =
+    per appends(tid, p, _xs), producer(tid, p, pid, epoch, recent);
+
+/// Each partition's appends this tick, sequenced.
+view sequenced(tid, p, s) =
+    appends(tid, p, xs), log_end(tid, p, end), part_producers(tid, p, ps), let s = sequence_appends(xs, end, ps);
+
+store_batches: while sequenced(tid, p, s), pb in placed_all(s), let blob = Blob::of(pb.3) {
+    next batch(tid, p, pb.0, pb.1, pb.2, blob);
+}
+
+advance_end: while sequenced(tid, p, s), log_end(tid, p, end) where s.end > end {
+    upsert log_end(tid, p, s.end);
+}
+
+save_producers: while sequenced(tid, p, s), e in s.changed {
+    upsert producer(tid, p, e.pid, e.epoch, e.recent);
+}
+
+/// Each entry's answer.
+view entry_answer(c, j, a) {
+    produce_entry(c, j, _name, _p, _records, req, _o), let Some(err) = produce_request_error(req),
+        let a = PartitionAnswer { error: err.0, base_offset: -1i64, log_start: -1i64, message: Some(err.1), bad_batch: None };
+    produce_entry(c, j, name, _p, _records, req, _o), produce_request_error(req) == None, not topic(name, _, _, _),
+        let a = unknown_partition();
+    produce_entry(c, j, name, p, _records, req, _o), produce_request_error(req) == None, topic(name, _tid, parts, _cfg),
+        let a = unknown_partition() where p < 0i32 || p >= parts;
+    entry_check(c, j, _tid, _p, _o, ch), ch.error != NONE,
+        let a = PartitionAnswer { error: ch.error, base_offset: -1i64, log_start: -1i64, message: ch.message, bad_batch: ch.bad_batch };
+    entry_check(c, j, tid, p, o, ch), ch.error == NONE, sequenced(tid, p, s), log_start(tid, p, start),
+        let out = outcome_of(s, o),
+        let a = PartitionAnswer {
+            error: out.error,
+            base_offset: out.base,
+            log_start: if out.error == NONE { start } else { -1i64 },
+            message: out.message,
+            bad_batch: None,
+        };
+}
+
+/// Per Produce request answered this tick: its entries' answers.
+view produce_answers(c, xs = collect!((j, a))) = per produce_head(c, _, _, _, _, _, _req), entry_answer(c, j, a);
+
+/// With `acks` 0 there is no response; an error then closes the connection, so the producer refreshes its
+/// metadata, as Kafka does.
+answer_produce: while produce_head(c, i, seq, corr, fr, at, req), not waiting(c), produce_answers(c, xs) {
+    if req.acks == 0i16 {
+        upsert answering(c, i + 1, seq);
+        if produce_failed(xs) {
+            send kafka.close(c);
+        }
+    } else {
+        send kafka.write(c, seq, [Part::Bytes(encode_produce_response(corr, req, xs))]);
+        upsert answering(c, i + 1, seq + 1);
+    }
+    delete queued(c, i, fr, at);
+}
+
+// ---------------------------------------------------------------- InitProducerId
+
+/// The next producer id.
+view next_pid(n = max!(x default 0i64)) = producer_ids(x);
+
+/// An idempotent producer (no transactional id) gets a fresh producer id at epoch 0, as Kafka hands them out;
+/// allocating one is a change to the broker's state, so the request is a writer (`topics_node.bls`). A
+/// transactional id is refused: this broker authorizes none (transactions are out of scope, KAFKA.md K1).
+answer_init_pid: while init_pid_head(c, i, seq, corr, fr, at, req), writer(c), next_pid(n) {
+    if req.transactional_id.is_some() {
+        send kafka.write(c, seq, [Part::Bytes(encode_init_producer_id_response(corr, TRANSACTIONAL_ID_AUTHORIZATION_FAILED, -1i64, -1i16))]);
+    } else {
+        send kafka.write(c, seq, [Part::Bytes(encode_init_producer_id_response(corr, NONE, n, 0i16))]);
+        upsert producer_ids(n + 1i64);
+    }
+    upsert answering(c, i + 1, seq + 1);
+    delete queued(c, i, fr, at);
+}
+
+// ---------------------------------------------------------------- a deleted topic's logs
+
+remove_batches: while deleting(_e, _name, id), batch(id, p, b, l, t, blob) {
+    delete batch(id, p, b, l, t, blob);
+}
+remove_producers: while deleting(_e, _name, id), producer(id, p, pid, epoch, recent) {
+    delete producer(id, p, pid, epoch, recent);
+}

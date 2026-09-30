@@ -253,6 +253,7 @@ fn collect(e: &Expr, out: &mut BTreeSet<VarId>) -> Result<(), OracleError> {
             collect(body, out)?;
         }
         Expr::Closure { body, .. } => collect(body, out)?,
+        Expr::Typed { expr, .. } => collect(expr, out)?,
     }
     Ok(())
 }

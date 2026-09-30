@@ -5,6 +5,7 @@
 //! - `kafka-broker-api-versions.sh` (the Java client of Kafka 4.0) prints the versions it supports.
 //! - franz-go (a Go client) reads the metadata.
 //! - Slice 7, item 4: `kafka-topics.sh` creates, lists, describes and deletes topics, and `kcat -L` shows them.
+//! - Slice 7, item 5: the Java console producer (idempotent by default) produces.
 //!
 //! A test whose tool is not installed is skipped, and says so in its output. The tools are found on `PATH` (`kcat`,
 //! `go`), under `$KAFKA_HOME/bin`, or in the repository's `.tools/kafka_*/bin` (see the notes for how to get them).
@@ -293,5 +294,34 @@ fn kafka_topics_creates_describes_and_deletes_topics() {
     kafka_tool(&bin, "kafka-topics.sh", port, &["--delete", "--topic", "orders"]);
     let listed = kafka_tool(&bin, "kafka-topics.sh", port, &["--list"]);
     assert_eq!(listed.lines().collect::<Vec<_>>(), ["audit"], "{listed}");
+    server.stop().unwrap();
+}
+
+#[test]
+fn the_java_console_producer_produces_to_the_blossom_broker() {
+    let Some(bin) = kafka_bin() else {
+        skipped("no Kafka distribution (set KAFKA_HOME, or unpack one into .tools/)");
+        return;
+    };
+    let (server, port) = start_broker();
+    kafka_tool(&bin, "kafka-topics.sh", port, &["--create", "--topic", "orders", "--partitions", "2"]);
+    let mut child = Command::new(bin.join("kafka-console-producer.sh"))
+        .args(["--bootstrap-server", &format!("127.0.0.1:{port}"), "--topic", "orders"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().unwrap();
+        for i in 0..20 {
+            writeln!(stdin, "order {i}").unwrap();
+        }
+    }
+    let out = child.wait_with_output().unwrap();
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "the console producer failed:\n{text}");
+    assert!(!text.contains("ERROR"), "{text}");
     server.stop().unwrap();
 }
