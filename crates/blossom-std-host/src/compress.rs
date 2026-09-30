@@ -2,7 +2,9 @@
 //! frame format) and Zstandard, each a compressor and a bounded decompressor.
 //!
 //! A decompressor takes the largest output it may produce and returns `None` past it, or on any malformed input; it
-//! never allocates beyond that bound (plus the codec's own working state) and never panics. Compressors are
+//! never allocates beyond that bound plus the codec's own working state, and never panics. The working state is
+//! bounded whatever the input claims: LZ4's is its largest block size (4 MB) twice plus its 64 KB window; a Zstandard
+//! frame whose window is larger than both the bound and 8 MB is refused. Compressors are
 //! deterministic: the same input always gives the same bytes (gzip writes no timestamp).
 
 use std::io::{Read, Write};
@@ -61,18 +63,150 @@ fn lz4_compress(input: &[u8]) -> Result<Vec<u8>, ExternError> {
         .map_err(|e| ExternError::Failed(format!("lz4: {e}").into()))
 }
 
+/// Every LZ4 frame of `input`, concatenated, skipping skippable frames, as the frame format specifies. Each frame's
+/// extent is found from its block sizes first, so a frame is decoded from exactly its own bytes and anything after the
+/// last frame that is not a whole frame is malformed. The legacy format (a different format) is refused.
 fn lz4_decompress(input: &[u8], max: u64) -> Option<Vec<u8>> {
     if input.is_empty() {
         return None;
     }
-    bounded(lz4_flex::frame::FrameDecoder::new(input), max)
+    let mut src = input;
+    let mut out = Vec::new();
+    while !src.is_empty() {
+        let len = match lz4_frame(src)? {
+            Frame::Skippable(len) => len,
+            Frame::Data(len) => {
+                let room = max.checked_sub(out.len() as u64)?;
+                out.extend(bounded(lz4_flex::frame::FrameDecoder::new(src.get(..len)?), room)?);
+                len
+            }
+        };
+        src = src.get(len..)?;
+    }
+    Some(out)
+}
+
+/// A frame at the front of a buffer, and the bytes it takes.
+enum Frame {
+    Skippable(usize),
+    Data(usize),
+}
+
+/// A little-endian `u32` at `at`.
+fn le32(b: &[u8], at: usize) -> Option<u32> {
+    let x: [u8; 4] = b.get(at..at.checked_add(4)?)?.try_into().ok()?;
+    Some(u32::from_le_bytes(x))
+}
+
+/// Magic numbers of skippable frames, shared by LZ4 and Zstandard.
+const SKIPPABLE: std::ops::RangeInclusive<u32> = 0x184D_2A50..=0x184D_2A5F;
+
+/// A skippable frame's extent: the magic, a 4-byte length, and that many bytes.
+fn skippable(b: &[u8]) -> Option<Frame> {
+    let n = usize::try_from(le32(b, 4)?).ok()?;
+    let len = n.checked_add(8)?;
+    (len <= b.len()).then_some(Frame::Skippable(len))
+}
+
+/// The LZ4 frame at the front of `b` (the LZ4 frame format, v1.6.4): its header, then blocks each prefixed by a
+/// 4-byte size whose high bit marks a stored block, each followed by a checksum when the header says so, a zero
+/// end mark, and a content checksum when the header says so. Only the extent is found here; the decoder checks the
+/// rest.
+fn lz4_frame(b: &[u8]) -> Option<Frame> {
+    let magic = le32(b, 0)?;
+    if SKIPPABLE.contains(&magic) {
+        return skippable(b);
+    }
+    if magic != 0x184D_2204 {
+        return None;
+    }
+    let flg = *b.get(4)?;
+    let block_checksum = flg & 0x10 != 0;
+    let content_checksum = flg & 0x04 != 0;
+    // Magic, FLG, BD, the content size and dictionary id if present, and the header checksum.
+    let mut at = 7 + if flg & 0x08 != 0 { 8 } else { 0 } + if flg & 0x01 != 0 { 4 } else { 0 };
+    loop {
+        let size = le32(b, at)?;
+        at = at.checked_add(4)?;
+        if size == 0 {
+            break;
+        }
+        let data = usize::try_from(size & 0x7FFF_FFFF).ok()?;
+        at = at.checked_add(data)?.checked_add(if block_checksum { 4 } else { 0 })?;
+    }
+    let end = at.checked_add(if content_checksum { 4 } else { 0 })?;
+    (end <= b.len()).then_some(Frame::Data(end))
 }
 
 fn zstd_compress(input: &[u8]) -> Vec<u8> {
     ruzstd::encoding::compress_to_vec(input, ruzstd::encoding::CompressionLevel::Fastest)
 }
 
-/// Every Zstandard frame of `input`, concatenated.
+/// The largest window a Zstandard frame may ask for when it is larger than the output bound: the 8 MB RFC 8878
+/// recommends every decoder support. The decoder allocates the whole window up front, so without this a 20-byte
+/// frame could make it allocate 100 MB (the most `ruzstd` allows) whatever the bound.
+const ZSTD_WINDOW_FLOOR: u64 = 8 << 20;
+
+/// What a Zstandard frame header declares (RFC 8878 §3.1.1.1).
+struct ZstdHeader {
+    window: u64,
+    content: Option<u64>,
+    checksum: bool,
+}
+
+/// The Zstandard frame header at the front of `b`, or `None` if it is not a frame (the magic number is checked by
+/// the caller). The decoder parses the header again; this reads only what the bounds need.
+fn zstd_header(b: &[u8]) -> Option<ZstdHeader> {
+    let d = *b.get(4)?;
+    let (single, checksum) = (d & 0x20 != 0, d & 0x04 != 0);
+    let mut at = 5;
+    let window_descriptor = if single {
+        None
+    } else {
+        at += 1;
+        Some(*b.get(5)?)
+    };
+    at += match d & 0x03 {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        _ => 4,
+    };
+    let fcs_len = match (d >> 6, single) {
+        (0, false) => 0,
+        (0, true) => 1,
+        (1, _) => 2,
+        (2, _) => 4,
+        _ => 8,
+    };
+    let content = if fcs_len == 0 {
+        None
+    } else {
+        let v = b
+            .get(at..at + fcs_len)?
+            .iter()
+            .rev()
+            .fold(0u64, |v, x| v << 8 | u64::from(*x));
+        Some(if fcs_len == 2 { v + 256 } else { v })
+    };
+    let window = match window_descriptor {
+        Some(w) => {
+            let base = 1u64 << (10 + u32::from(w >> 3));
+            base + base / 8 * u64::from(w & 7)
+        }
+        // A single-segment frame's window is its content size, which it then always declares.
+        None => content?,
+    };
+    Some(ZstdHeader {
+        window,
+        content,
+        checksum,
+    })
+}
+
+/// Every Zstandard frame of `input`, concatenated, skipping skippable frames. A frame is refused when its window is
+/// larger than both `max` and 8 MB, when it declares a content size other than what it decodes to, and when its
+/// content checksum does not match.
 fn zstd_decompress(input: &[u8], max: u64) -> Option<Vec<u8>> {
     if input.is_empty() {
         return None;
@@ -80,11 +214,31 @@ fn zstd_decompress(input: &[u8], max: u64) -> Option<Vec<u8>> {
     let mut src = input;
     let mut out = Vec::new();
     while !src.is_empty() {
-        let before = src.len();
-        let dec = ruzstd::decoding::StreamingDecoder::new(&mut src).ok()?;
+        let magic = le32(src, 0)?;
+        if SKIPPABLE.contains(&magic) {
+            let Frame::Skippable(len) = skippable(src)? else {
+                return None;
+            };
+            src = src.get(len..)?;
+            continue;
+        }
+        if magic != 0xFD2F_B528 {
+            return None;
+        }
+        let header = zstd_header(src)?;
         let room = max.checked_sub(out.len() as u64)?;
-        dec.take(room.saturating_add(1)).read_to_end(&mut out).ok()?;
-        if out.len() as u64 > max || src.len() >= before {
+        if header.window > max.max(ZSTD_WINDOW_FLOOR) || header.content.is_some_and(|n| n > room) {
+            return None;
+        }
+        let (before, start) = (src.len(), out.len());
+        let mut dec = ruzstd::decoding::StreamingDecoder::new(&mut src).ok()?;
+        (&mut dec).take(room.saturating_add(1)).read_to_end(&mut out).ok()?;
+        let frame = dec.into_frame_decoder();
+        let produced = (out.len() - start) as u64;
+        let whole = frame.is_finished()
+            && header.content.is_none_or(|n| n == produced)
+            && (!header.checksum || frame.get_checksum_from_data() == frame.get_calculated_checksum());
+        if !whole || out.len() as u64 > max || src.len() >= before {
             return None;
         }
     }
@@ -275,5 +429,83 @@ mod tests {
             assert!(c.len() < zeros.len() / 10, "{name}");
             assert_eq!(decompress(&c, 1024), None, "{name}");
         }
+    }
+
+    /// A Zstandard frame by hand (RFC 8878): the magic, a frame header descriptor `fhd`, the header's other fields
+    /// `rest`, one last raw block holding `data`, and `checksum` if given.
+    fn zstd_raw(fhd: u8, rest: &[u8], data: &[u8], checksum: Option<u32>) -> Vec<u8> {
+        let mut f = 0xFD2F_B528u32.to_le_bytes().to_vec();
+        f.push(fhd);
+        f.extend(rest);
+        let block = 1u32 | (data.len() as u32) << 3;
+        f.extend(&block.to_le_bytes()[..3]);
+        f.extend(data);
+        if let Some(c) = checksum {
+            f.extend(c.to_le_bytes());
+        }
+        f
+    }
+
+    #[test]
+    fn a_zstd_window_larger_than_the_bound_and_8_mb_is_refused() {
+        let data = b"hello, window";
+        // Window descriptors: exponent 13 is 8 MB, exponent 16 is 64 MB.
+        let small = zstd_raw(0x00, &[13 << 3], data, None);
+        let large = zstd_raw(0x00, &[16 << 3], data, None);
+        assert_eq!(zstd_decompress(&small, 1024).as_deref(), Some(&data[..]));
+        assert_eq!(zstd_decompress(&large, 1024), None, "a 64 MB window for a 1 KB bound");
+        assert_eq!(zstd_decompress(&large, 64 << 20).as_deref(), Some(&data[..]));
+    }
+
+    #[test]
+    fn a_zstd_frame_must_decode_to_its_declared_size_and_checksum() {
+        let data = b"declared";
+        // Single segment with a 1-byte content size.
+        let right = zstd_raw(0x20, &[data.len() as u8], data, None);
+        let wrong = zstd_raw(0x20, &[data.len() as u8 + 2], data, None);
+        assert_eq!(zstd_decompress(&right, 1024).as_deref(), Some(&data[..]));
+        assert_eq!(zstd_decompress(&wrong, 1024), None, "a content size other than the content");
+        // A declared size over the bound is refused before decoding.
+        assert_eq!(zstd_decompress(&right, data.len() as u64 - 1), None);
+        // The checksum ruzstd computes for `data`, read back from a decode with a placeholder checksum.
+        let probe = zstd_raw(0x04, &[13 << 3], data, Some(0));
+        let mut src = &probe[..];
+        let mut dec = ruzstd::decoding::StreamingDecoder::new(&mut src).unwrap();
+        let mut sink = Vec::new();
+        dec.read_to_end(&mut sink).unwrap();
+        let sum = dec.into_frame_decoder().get_calculated_checksum().unwrap();
+        let good = zstd_raw(0x04, &[13 << 3], data, Some(sum));
+        let bad = zstd_raw(0x04, &[13 << 3], data, Some(sum ^ 1));
+        assert_eq!(zstd_decompress(&good, 1024).as_deref(), Some(&data[..]));
+        assert_eq!(zstd_decompress(&bad, 1024), None, "a checksum that does not match");
+    }
+
+    /// A skippable frame (LZ4 and Zstandard share the format) with `n` bytes of user data.
+    fn skip_frame(n: usize) -> Vec<u8> {
+        let mut f = 0x184D_2A53u32.to_le_bytes().to_vec();
+        f.extend((n as u32).to_le_bytes());
+        f.extend(std::iter::repeat_n(0xAB, n));
+        f
+    }
+
+    #[test]
+    fn frames_decode_whole_skippable_frames_are_skipped_and_trailing_bytes_refused() {
+        let (a, b) = (b"first frame ".repeat(20), b"second frame".repeat(30));
+        let whole = [a.clone(), b.clone()].concat();
+        for (name, compress, decompress) in codecs().into_iter().filter(|c| c.0 == "lz4" || c.0 == "zstd") {
+            let (ca, cb) = (compress(&a), compress(&b));
+            let two = [ca.clone(), cb.clone()].concat();
+            assert_eq!(decompress(&two, 1 << 20).as_ref(), Some(&whole), "{name}: two frames");
+            let skipping = [skip_frame(5), ca.clone(), skip_frame(0), cb.clone()].concat();
+            assert_eq!(decompress(&skipping, 1 << 20).as_ref(), Some(&whole), "{name}: skippable frames");
+            for tail in [&[0u8, 0, 0, 0][..], &[0x04, 0x22, 0x4D, 0x18][..], &[1, 2, 3, 4, 5, 6, 7][..], &cb[..cb.len() - 1]] {
+                let trailing = [ca.clone(), tail.to_vec()].concat();
+                assert_eq!(decompress(&trailing, 1 << 20), None, "{name}: trailing {tail:02x?}");
+            }
+            assert_eq!(decompress(&skip_frame(3)[..10], 1 << 20), None, "{name}: a cut skippable frame");
+        }
+        // The LZ4 legacy format is a different format.
+        let legacy = [0x184C_2102u32.to_le_bytes().to_vec(), vec![0; 8]].concat();
+        assert_eq!(lz4_decompress(&legacy, 1 << 20), None);
     }
 }
