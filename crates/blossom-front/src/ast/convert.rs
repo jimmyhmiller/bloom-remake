@@ -54,6 +54,9 @@ fn children_of(node: &SyntaxNode, kind: SyntaxKind) -> impl Iterator<Item = Synt
     node.children().filter(move |n| n.kind() == kind)
 }
 
+/// A function's name, its parameters with their types, and its result type.
+type FnSig = (Ident, Vec<(Ident, Type)>, Type);
+
 fn child_of(node: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxNode> {
     children_of(node, kind).next()
 }
@@ -441,7 +444,7 @@ impl Cx<'_> {
             }
             SPECITEM => ItemKind::Spec(self.spec(node)),
             FNITEM => ItemKind::Fn(self.fn_item(node, span)?),
-            EXTERNITEM => self.unsupported_item("LANG-181", "extern items", span),
+            EXTERNITEM => self.extern_item(node, span)?,
             IMPLITEM => self.unsupported_item("LANG-180", "impl blocks", span),
             LATTICETYPEITEM => self.unsupported_item("LANG-135", "user-defined lattices", span),
             AGGREGATEITEM => self.unsupported_item("LANG-105", "user-defined aggregates", span),
@@ -1602,8 +1605,35 @@ impl Cx<'_> {
         }
     }
 
-    /// `fn name(params) -> ret { body }`.
-    fn fn_item(&mut self, node: &SyntaxNode, span: Span) -> Option<FnItem> {
+    /// `extern fn name(params) -> ret = "path";` (LANGUAGE §16.2). Table functions, host types and host lattices
+    /// are not built yet.
+    fn extern_item(&mut self, node: &SyntaxNode, span: Span) -> Option<ItemKind> {
+        let kinds: Vec<SyntaxKind> = tokens(node).map(|t| t.kind()).collect();
+        if kinds.contains(&TABLE_KW) {
+            return Some(self.unsupported_item("LANG-183", "extern table functions", span));
+        }
+        if kinds.contains(&TYPE_KW) || kinds.contains(&LATTICE_KW) {
+            return Some(self.unsupported_item("LANG-027", "host types and lattices", span));
+        }
+        let (name, params, ret) = self.fn_signature(node, span)?;
+        let Some(path) = tokens(node).find(|t| t.kind() == STRING_LIT) else {
+            self.malformed("an extern function without its host path", span);
+            return None;
+        };
+        let path_span = self.token_span(&path);
+        let path = self.string(path.text(), path_span);
+        Some(ItemKind::ExternFn(ExternFnItem {
+            name,
+            params,
+            ret,
+            path,
+            path_span,
+            span,
+        }))
+    }
+
+    /// A function's name, parameters and result type (`fn` and `extern fn` items).
+    fn fn_signature(&mut self, node: &SyntaxNode, span: Span) -> Option<FnSig> {
         let Some(sig) = child_of(node, FNSIG) else {
             self.malformed("a function without a signature", span);
             return None;
@@ -1646,6 +1676,12 @@ impl Cx<'_> {
             self.malformed("a function without a return type", span);
             return None;
         };
+        Some((name, params, ret))
+    }
+
+    /// `fn name(params) -> ret { body }`.
+    fn fn_item(&mut self, node: &SyntaxNode, span: Span) -> Option<FnItem> {
+        let (name, params, ret) = self.fn_signature(node, span)?;
         let Some(body) = child_of(node, BLOCKEXPR).map(|b| self.block_expr(&b)) else {
             self.malformed("a function without a body", span);
             return None;

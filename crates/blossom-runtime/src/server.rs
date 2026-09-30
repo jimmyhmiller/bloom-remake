@@ -68,6 +68,8 @@ pub struct ServerConfig {
     pub dir: Option<PathBuf>,
     /// The evaluator the node runs.
     pub backend: Backend,
+    /// The host functions the program's `extern fn`s call (the standard library's, for `blossom run`).
+    pub externs: Arc<blossom_value::ExternRegistry>,
 }
 
 /// Counters of what the node did and dropped.
@@ -308,6 +310,7 @@ impl Server {
             artifact.roles.clone(),
             names.to_vec(),
             seed,
+            cfg.externs.clone(),
         )?;
         let oracle = executors.oracle().clone();
         let nonce = OsEntropy.boot_nonce().map_err(RuntimeError::Config)?;

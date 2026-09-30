@@ -612,3 +612,33 @@ fn byte_primitives_type_check_and_reject_unsupported_widths() {
     );
     assert_eq!(codes(arity), vec!["BLS0301"]);
 }
+
+#[test]
+fn extern_fns_are_checked_against_the_standard_catalog() {
+    let ok = with_head(
+        "extern fn crc32c(b: Bytes) -> u32 = \"blossom_std::checksum::crc32c\";\n\
+         extern fn unzstd(b: Bytes, max: u64) -> Option<Bytes> = \"blossom_std::compress::zstd_decompress\";\n\
+         fn check(b: Bytes) -> bool { crc32c(b) == 0 }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert_eq!(codes(ok), Vec::<String>::new());
+    let unknown = with_head(
+        "extern fn f(b: Bytes) -> u32 = \"blossom_std::checksum::adler32\";\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert_eq!(codes(unknown), vec!["BLS0216"]);
+    let wrong = with_head(
+        "extern fn crc(b: Bytes) -> u64 = \"blossom_std::checksum::crc32c\";\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert_eq!(codes(wrong), vec!["BLS0216"]);
+    let table = with_head(
+        "extern table fn lines(path: String) -> (n: u64, text: String) = \"blossom_std::io::lines\";\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert!(codes(table).contains(&"BLS0908".to_owned()), "{:?}", codes(table));
+}

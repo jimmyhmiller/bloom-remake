@@ -78,7 +78,14 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
             return Exit::Usage.into();
         }
     };
-    let sim = match SpecSim::new(&artifact) {
+    let externs = match crate::common::std_externs() {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("{e}");
+            return Exit::Internal.into();
+        }
+    };
+    let sim = match SpecSim::with_externs(&artifact, externs) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{e}");

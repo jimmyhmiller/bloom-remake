@@ -701,9 +701,12 @@ impl Checker<'_> {
                     self.unify(&hir.types, vt, pt, f.span);
                 }
             }
-            let t = self.expr(hir, f.scope, &mut f.body);
+            let HFnBody::Expr(body) = &mut f.body else {
+                continue;
+            };
+            let t = self.expr(hir, f.scope, body);
             let r = if self.apply { 0 } else { self.of_type(hir, f.ret) };
-            self.coerce_site(hir, &mut f.body, t, r);
+            self.coerce_site(hir, body, t, r);
         }
         hir.fns = fns;
     }

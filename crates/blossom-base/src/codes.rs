@@ -341,6 +341,14 @@ pub static REGISTRY: &[CodeInfo] = &[
         "a function body that reads a relation, `now()`, `tick()`, `self`, randomness or a role's members (§16.1)",
     ),
     info(
+        "BLS0216",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "an `extern fn` that names no host function of the standard library, or declares a different signature (§16.2)",
+    ),
+    info(
         "BLS0300",
         Error,
         "blossom-front",
@@ -1184,8 +1192,8 @@ mod tests {
     fn codes_registry_unique() {
         assert_eq!(
             REGISTRY.len(),
-            117,
-            "LANGUAGE §20 has 113 codes; ARCHITECTURE §0.3 adds 4"
+            118,
+            "LANGUAGE §20 has 114 codes; ARCHITECTURE §0.3 adds 4"
         );
         for (a, b) in REGISTRY.iter().zip(REGISTRY.iter().skip(1)) {
             assert!(

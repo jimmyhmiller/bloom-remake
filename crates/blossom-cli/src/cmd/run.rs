@@ -106,6 +106,13 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
         eprintln!("the deployment uses the plaintext development transport; pass `--insecure-dev` to allow it");
         return Exit::Refused.into();
     }
+    let externs = match crate::common::std_externs() {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("blossom run: {e}");
+            return Exit::Internal.into();
+        }
+    };
     let server = match Server::start(ServerConfig {
         spec,
         artifact,
@@ -117,6 +124,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
         },
         dir: args.store,
         backend: args.evaluator,
+        externs,
     }) {
         Ok(s) => s,
         Err(e) => {

@@ -50,6 +50,8 @@ pub struct EngineConfig {
     pub params: BTreeMap<ParamId, Value>,
     /// Rounds a recursive stratum may take before the tick fails with BLSR007.
     pub max_rounds: u32,
+    /// The host functions the program's `extern fn`s call (LANG-181); each is bound when the engine is built.
+    pub externs: Arc<blossom_value::ExternRegistry>,
 }
 
 /// The per-group state of an aggregate rule: per aggregate column, the support of each distinct argument tuple, and
@@ -206,6 +208,7 @@ impl Engine {
     /// creates and indexes every store.
     pub fn new(program: ValidatedProgram, node: NodeId, cfg: EngineConfig) -> Result<Engine, EvalError> {
         let p = program.get();
+        blossom_ir::tick::bind_externs(p, &cfg.externs)?;
         check_supported(p)?;
         let kinds = kinds(p);
         let (choice, node_seeds) = match cfg.seed {
@@ -287,6 +290,7 @@ impl Engine {
                 node_seeds,
                 roles: cfg.roles,
                 kinds,
+                externs: cfg.externs,
             },
             node,
             plans,
@@ -1208,6 +1212,7 @@ fn to_eval(e: ExprError, tick: Tick, rule: Option<&Rule>) -> EvalError {
     match e {
         ExprError::Arithmetic(d) => program_error(blossom_base::code!("BLSR004").as_str(), d),
         ExprError::Conflict(d) => program_error(blossom_base::code!("BLSR006").as_str(), d),
+        ExprError::Refused(d) => program_error(blossom_base::code!("BLSR010").as_str(), d),
         ExprError::Eval(e) => e,
     }
 }

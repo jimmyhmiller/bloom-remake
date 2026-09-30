@@ -114,6 +114,8 @@ pub enum ItemKind {
     Spec(SpecItem),
     /// `fn name(params) -> ret { body }` (LANGUAGE §16.1).
     Fn(FnItem),
+    /// `extern fn name(params) -> ret = "path";` (LANGUAGE §16.2).
+    ExternFn(ExternFnItem),
     /// A construct this build parses but does not accept yet; the converter has already reported it (BLS0908).
     Unsupported {
         what: &'static str,
@@ -127,6 +129,17 @@ pub struct FnItem {
     pub params: Vec<(Ident, Type)>,
     pub ret: Type,
     pub body: Expr,
+    pub span: Span,
+}
+
+/// A host function: pure by declaration, implemented in Rust at `path` (LANGUAGE §16.2).
+#[derive(Clone, Debug)]
+pub struct ExternFnItem {
+    pub name: Ident,
+    pub params: Vec<(Ident, Type)>,
+    pub ret: Type,
+    pub path: String,
+    pub path_span: Span,
     pub span: Span,
 }
 

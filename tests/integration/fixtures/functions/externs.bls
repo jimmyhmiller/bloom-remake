@@ -1,0 +1,38 @@
+//! Host functions of the standard library (FOREIGN-PROTOCOLS §4) through `extern fn`: checksums, every codec's round
+//! trip and its bound, a malformed stream, and hashes. `bls_functions.rs` checks the views directly.
+program externs version 1;
+
+extern fn crc32c(b: Bytes) -> u32 = "blossom_std::checksum::crc32c";
+extern fn crc32(b: Bytes) -> u32 = "blossom_std::checksum::crc32";
+extern fn gzip(b: Bytes, level: u8) -> Bytes = "blossom_std::compress::gzip_compress";
+extern fn gunzip(b: Bytes, max: u64) -> Option<Bytes> = "blossom_std::compress::gzip_decompress";
+extern fn snappy(b: Bytes) -> Bytes = "blossom_std::compress::snappy_compress";
+extern fn unsnappy(b: Bytes, max: u64) -> Option<Bytes> = "blossom_std::compress::snappy_decompress";
+extern fn lz4(b: Bytes) -> Bytes = "blossom_std::compress::lz4_compress";
+extern fn unlz4(b: Bytes, max: u64) -> Option<Bytes> = "blossom_std::compress::lz4_decompress";
+extern fn zstd(b: Bytes) -> Bytes = "blossom_std::compress::zstd_compress";
+extern fn unzstd(b: Bytes, max: u64) -> Option<Bytes> = "blossom_std::compress::zstd_decompress";
+extern fn sha256(b: Bytes) -> Bytes = "blossom_std::hash::sha256";
+extern fn blake3(b: Bytes) -> Bytes = "blossom_std::hash::blake3";
+
+input e(b: Bytes);
+input bad_level(l: u8);
+
+/// Each codec's round trip at the exact bound, and one byte under it.
+fn trips(b: Bytes) -> (bool, bool, bool, bool, bool) {
+    let n = b.len();
+    let exact = gunzip(gzip(b, 6), n) == Some(b)
+        && unsnappy(snappy(b), n) == Some(b)
+        && unlz4(lz4(b), n) == Some(b)
+        && unzstd(zstd(b), n) == Some(b);
+    let under = n > 0 && (gunzip(gzip(b, 1), n - 1).is_some() || unsnappy(snappy(b), n - 1).is_some()
+        || unlz4(lz4(b), n - 1).is_some() || unzstd(zstd(b), n - 1).is_some());
+    // The input as a compressed stream: random bytes are almost never a valid one, and never a panic.
+    let raw = (gunzip(b, 1024), unlz4(b, 1024), unzstd(b, 1024));
+    (exact, under, raw.0.is_none(), raw.1.is_none(), raw.2.is_none())
+}
+
+view v_crc(b, c, i) = e(b), let c = crc32c(b), let i = crc32(b);
+view v_trips(b, t) = e(b), let t = trips(b);
+view v_hash(b, s, k) = e(b), let s = sha256(b), let k = blake3(b);
+view v_bad(z) = bad_level(l), let z = gzip(Bytes::empty(), l);

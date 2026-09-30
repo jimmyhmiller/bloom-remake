@@ -31,6 +31,8 @@ pub(crate) enum ExprError {
     Arithmetic(String),
     /// BLSR006: two different values merged into an `LPoint`.
     Conflict(String),
+    /// BLSR010: a host function refused its input (or, later, `error("…")` in a function).
+    Refused(String),
     Oracle(OracleError),
 }
 
@@ -658,6 +660,11 @@ pub(crate) fn int_sum<'a>(mut values: impl Iterator<Item = &'a Value>) -> ExprRe
 /// BLSR004's code.
 pub(crate) fn arithmetic_code() -> &'static str {
     code!("BLSR004").as_str()
+}
+
+/// BLSR010's code.
+pub(crate) fn refused_code() -> &'static str {
+    code!("BLSR010").as_str()
 }
 
 /// BLSR006's code.

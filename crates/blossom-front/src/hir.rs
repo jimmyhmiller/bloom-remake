@@ -736,16 +736,23 @@ pub enum HExprKind {
     },
 }
 
-/// A pure function: total, non-recursive (LANGUAGE §16.1). Its variables live in `scope`: the parameters first, then
-/// every `let` and closure binding of its body.
+/// A pure function: total, non-recursive (LANGUAGE §16.1), or a host function (§16.2). Its variables live in
+/// `scope`: the parameters first, then every `let` and closure binding of its body.
 #[derive(Clone, Debug)]
 pub struct HFn {
     pub name: QualName,
     pub scope: ScopeId,
     pub params: Vec<(HVarId, TypeId)>,
     pub ret: TypeId,
-    pub body: HExpr,
+    pub body: HFnBody,
     pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum HFnBody {
+    Expr(HExpr),
+    /// An `extern fn`: the host function's path, checked against the standard catalog.
+    Extern(std::sync::Arc<str>),
 }
 
 /// The integer type a byte-access name spells (FOREIGN-PROTOCOLS §3): `u8`, `i8`, and the big-endian `u16_be` …

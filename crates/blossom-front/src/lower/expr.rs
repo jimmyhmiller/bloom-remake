@@ -635,7 +635,14 @@ impl Lowerer<'_> {
                     .ok_or_else(|| internal_error!("parameter {v:?} of `{}` was not declared", f.name))?;
                 params.push((name, *ty));
             }
-            let body = self.expr(&mut d, &f.body)?;
+            let body = match &f.body {
+                HFnBody::Expr(e) => ir::FnBody::Ir(self.expr(&mut d, e)?),
+                // Host functions are memoized per input per tick (LANGUAGE §16.2).
+                HFnBody::Extern(path) => ir::FnBody::Extern {
+                    path: path.clone(),
+                    memo: true,
+                },
+            };
             if !d.lits.is_empty() {
                 return Err(internal_error!(
                     "the body of `{}` lowered to rule literals (a relation read passed resolution)",
@@ -660,7 +667,7 @@ impl Lowerer<'_> {
                     params,
                     ret: f.ret,
                     vars,
-                    body: ir::FnBody::Ir(body),
+                    body,
                     props: ir::FnProps {
                         // Parameters are plain values (lattice-typed ones are rejected until function classes,
                         // LANG-182), and every function is monotone in a value under its discrete order.

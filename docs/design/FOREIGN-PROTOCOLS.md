@@ -144,6 +144,27 @@ The standard library holds generic functions only. Nothing protocol-specific goe
 | `std::compress::gzip_decompress(b) -> Option<Bytes>`, `gzip_compress(b, level: u8) -> Bytes` | and the same for `snappy`, `lz4` (the frame format), `zstd` |
 | `std::hash::sha256`, `std::hash::blake3` | as in LANGUAGE §16.2 |
 
+As built (S6 item 3):
+- **Paths and signatures.** Paths are `blossom_std::…`, as in LANGUAGE §16.2. The catalog, with exact signatures,
+  is `blossom_value::STD_EXTERNS`:
+  - `crc32c`, `crc32`;
+  - `gzip_compress(b, level: u8)`, then `snappy_compress`, `lz4_compress` and `zstd_compress` of `b`;
+  - `*_decompress(b, max: u64) -> Option<Bytes>` for each codec;
+  - `sha256`, `blake3`.
+- **Formats.**
+  - Snappy is the raw block format. Kafka's xerial framing is protocol code, written in Blossom on top of it.
+  - LZ4 is the frame format.
+  - gzip and zstd decode concatenated members and frames.
+- **Implementations are pure Rust** (flate2 with miniz_oxide, snap, lz4_flex, ruzstd, crc32c, crc32fast, sha2,
+  blake3). Compression is deterministic.
+- **Where each check happens.**
+  - *Compile time:* the frontend checks each `extern fn` against the catalog (BLS0216).
+  - *Load time:* the oracle and the engine bind every declared extern against the registry they are given, with its
+    signature (`EvalError::Externs`). `blossom run`, `blossom sim`, `blossom ldfi` and the corpus runner give them
+    `blossom_std_host::registry()`, which a test holds equal to the catalog.
+- **A host failure** (for example a gzip level above 9) aborts the tick with BLSR010.
+- **Memoization per input per tick** is not built yet. It is only an optimization, because the functions are pure.
+
 Two rules for these functions:
 - **Bounded output.** Decompression takes a maximum output size, and returns `None` past it or on malformed input. It
   never panics or aborts.

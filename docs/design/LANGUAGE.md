@@ -2791,6 +2791,7 @@ never truncated or defaulted).
 | BLS0213 | E | a recursive function (functions are total, §16.1) |
 | BLS0214 | E | a `let` block outside a function body, or a closure that is not a combinator's argument in one (§16.1) |
 | BLS0215 | E | a function body that reads a relation, `now()`, `tick()`, `self`, randomness or a role's members (§16.1) |
+| BLS0216 | E | an `extern fn` that names no host function of the standard library, or declares a different signature (§16.2) |
 
 **Types (BLS03xx)**
 

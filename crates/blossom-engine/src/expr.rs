@@ -23,6 +23,8 @@ pub(crate) enum ExprError {
     Arithmetic(String),
     /// BLSR006: an `LPoint` conflict.
     Conflict(String),
+    /// BLSR010: a host function refused its input.
+    Refused(String),
     /// Anything else: a missing feature or a bug.
     Eval(EvalError),
 }
@@ -33,6 +35,7 @@ impl ExprError {
         match self {
             ExprError::Arithmetic(m) => ExprError::Arithmetic(m.clone()),
             ExprError::Conflict(m) => ExprError::Conflict(m.clone()),
+            ExprError::Refused(m) => ExprError::Refused(m.clone()),
             ExprError::Eval(e) => bug(format!("an evaluator error repeated per valuation: {e}")),
         }
     }
@@ -81,6 +84,8 @@ pub(crate) struct Shared {
     pub roles: Vec<Option<RoleId>>,
     /// The built-in lattice of each declared lattice, by lattice id.
     pub kinds: Vec<Option<Kind>>,
+    /// The host functions of the program's `extern fn`s, bound when the engine was built.
+    pub externs: Arc<blossom_value::ExternRegistry>,
 }
 
 impl Shared {
