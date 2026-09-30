@@ -397,6 +397,7 @@ impl Cx<'_> {
                 .walk(value, Polarity::Exact)
                 .union(self.walk(body, Polarity::Exact)),
             Expr::Closure { body, .. } => self.walk(body, Polarity::Exact),
+            Expr::Typed { expr, .. } => self.walk(expr, p),
         }
     }
 }

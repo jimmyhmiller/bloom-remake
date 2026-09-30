@@ -1245,14 +1245,21 @@ fn expr_type(p: &Program, r: Cx<'_>, e: &Expr) -> Result<TypeId, String> {
             }
             let def = p.types.get(a).ok_or("unknown binary type")?;
             match op {
-                BinOp::Eq
-                | BinOp::Ne
-                | BinOp::Lt
-                | BinOp::Le
-                | BinOp::Gt
-                | BinOp::Ge
-                | BinOp::CanonLt
-                | BinOp::CanonLe => lookup(TypeDef::Bool),
+                BinOp::Eq | BinOp::Ne | BinOp::CanonLt | BinOp::CanonLe => lookup(TypeDef::Bool),
+                // The numeric orders are for scalars of one kind; any other value compares by `CanonLt`/`CanonLe`.
+                BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                    if matches!(
+                        def,
+                        TypeDef::Int(_)
+                            | TypeDef::Duration
+                            | TypeDef::Instant
+                            | TypeDef::Str
+                            | TypeDef::Bytes
+                            | TypeDef::Node(_)
+                    ) =>
+                {
+                    lookup(TypeDef::Bool)
+                }
                 BinOp::And | BinOp::Or if matches!(def, TypeDef::Bool) => Ok(a),
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
                     if matches!(
@@ -1434,6 +1441,13 @@ fn expr_type(p: &Program, r: Cx<'_>, e: &Expr) -> Result<TypeId, String> {
             expr_type(p, r, body)
         }
         Expr::Closure { .. } => Err("a closure outside a combinator's argument".into()),
+        Expr::Typed { ty, expr } => {
+            if expr_matches_type(p, r, expr, *ty) {
+                Ok(*ty)
+            } else {
+                Err("an ascribed expression does not have its type".into())
+            }
+        }
     }
 }
 
@@ -1453,7 +1467,11 @@ fn closure_type(p: &Program, r: Cx<'_>, e: &Expr, params: &[TypeId]) -> Result<T
     for (v, passed) in vs.iter().zip(params) {
         let have = r.vars.get(*v).ok_or("unknown closure parameter")?.ty;
         if !assignable(p, *passed, have) {
-            return Err("closure parameter type mismatch".into());
+            return Err(format!(
+                "closure parameter type mismatch: {:?} is passed where {:?} is expected",
+                p.types.get(*passed),
+                p.types.get(have)
+            ));
         }
     }
     expr_type(p, r, body)
@@ -1739,6 +1757,13 @@ fn builtin_type(p: &Program, r: Cx<'_>, b: &BuiltinFn, args: &[Expr]) -> Result<
             }
             lookup(TypeDef::F64)
         }
+        BuiltinFn::Error { ty } => {
+            arity(1)?;
+            if types.first() != Some(&lookup(TypeDef::Str)?) {
+                return Err("error takes a String message".into());
+            }
+            Ok(*ty)
+        }
         BuiltinFn::RandRange => {
             if types.len() < 3 {
                 return Err("rand_range needs lower, upper and a stable key".into());
@@ -1880,7 +1905,7 @@ fn builtin_type(p: &Program, r: Cx<'_>, b: &BuiltinFn, args: &[Expr]) -> Result<
             arity(1)?;
             lookup(TypeDef::Int(IntTy::U64))
         }
-        BuiltinFn::Unwrap { .. } | BuiltinFn::Entries | BuiltinFn::Error => {
+        BuiltinFn::Unwrap { .. } | BuiltinFn::Entries => {
             let mut candidates = p.fns.iter().filter(|f| matches!(&f.body,FnBody::Builtin(x) if x==b));
             let decl = candidates.next().ok_or("builtin signature is not declared")?;
             if candidates.next().is_some() {

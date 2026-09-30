@@ -307,6 +307,7 @@ pub(crate) fn eval(cx: &Ctx<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<
         }
         Expr::Let { pat, value, body } => crate::func::let_expr(cx, env, pat, value, body),
         Expr::Closure { .. } => Err(bug("a closure evaluated outside a combinator".into())),
+        Expr::Typed { expr, .. } => eval(cx, env, expr),
     }
 }
 
@@ -409,6 +410,10 @@ fn builtin(cx: &Ctx<'_>, env: &[Option<Value>], f: &BuiltinFn, args: &[Expr]) ->
                 .map_err(|e| bug(format!("the PRF: {e}")))?;
             Ok(Value::Tuple(vec![Value::Int(IntValue::U64(p)), y].into()))
         }
+        BuiltinFn::Error { .. } => match arg(0)? {
+            Value::Str(s) => Err(ExprError::Refused(s.to_string())),
+            other => Err(bug(format!("`error` of {other:?}"))),
+        },
         BuiltinFn::Rand => {
             let mut key = Vec::new();
             for i in 0..args.len() {
@@ -849,5 +854,6 @@ pub(crate) fn time_varying(e: &Expr) -> bool {
         Expr::Lattice { args, .. } => args.iter().any(time_varying),
         Expr::Let { value, body, .. } => time_varying(value) || time_varying(body),
         Expr::Closure { body, .. } => time_varying(body),
+        Expr::Typed { expr, .. } => time_varying(expr),
     }
 }

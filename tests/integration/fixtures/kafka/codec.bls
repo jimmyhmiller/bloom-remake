@@ -7,6 +7,8 @@ include "../../../../examples/kafka/headers.bls";
 include "../../../../examples/kafka/apiversions.bls";
 include "../../../../examples/kafka/metadata.bls";
 include "../../../../examples/kafka/topics.bls";
+include "../../../../examples/kafka/records.bls";
+include "../../../../examples/kafka/produce.bls";
 
 /// Read by the topic functions: the broker's id and the partition count a topic gets by default.
 param NODE_ID: i32 = 1;
@@ -26,6 +28,11 @@ input delete_resp(corr: i32, outcomes: Vec<(Option<String>, Bytes, i16, Option<S
 /// The resources of a DescribeConfigs response: type, name, the keys asked for, and the topic's configs if it
 /// exists.
 input describe_resp(corr: i32, resources: Vec<(i8, String, Option<Vec<String>>, Option<Vec<(String, String)>>)>);
+/// The answers of a Produce response to the request `frame`: per entry (in request order) its position, error, base
+/// offset, log start, message and bad batch.
+input produce_resp(corr: i32, frame: Bytes, answers: Vec<(u64, i16, i64, i64, Option<String>, Option<i32>)>);
+/// Batches appended to one partition one by one, from an empty log and no producer state.
+input seq_case(id: u64, batches: Vec<Bytes>);
 /// Bytes to split into frames.
 input stream_bytes(b: Bytes);
 /// Chunks to reassemble into frames, fed in order.
@@ -65,6 +72,42 @@ fn describe_of(b: Bytes) -> Option<Vec<ConfigResource>> {
     request_body(b).and_then(|c| decode_describe_configs(c))
 }
 
+fn produce_of(b: Bytes) -> Option<ProduceRequest> {
+    request_body(b).and_then(|c| decode_produce(c))
+}
+
+fn produce_bytes(corr: i32, frame: Bytes, answers: Vec<(u64, i16, i64, i64, Option<String>, Option<i32>)>) -> Option<Bytes> {
+    produce_of(frame).map(|req| encode_produce_response(corr, req, answers.map(|a| (a.0, PartitionAnswer {
+        error: a.1,
+        base_offset: a.2,
+        log_start: a.3,
+        message: a.4,
+        bad_batch: a.5,
+    }))))
+}
+
+fn init_pid_of(b: Bytes) -> Option<InitProducerIdRequest> {
+    request_body(b).and_then(|c| decode_init_producer_id(c))
+}
+
+fn produce_checks(r: ProduceRequest) -> Vec<(i16, Option<String>)> {
+    produce_entries(r).map(|e| {
+        let c = check_records(e.3, 1048588i64);
+        (c.error, c.message)
+    })
+}
+
+/// Each batch's outcome (error, base offset) when appended alone, in order.
+fn sequence_each(batches: Vec<Bytes>) -> Vec<(i16, i64)> {
+    let start: (Vec<(i16, i64)>, i64, Vec<ProducerEntry>) = ([], 0i64, []);
+    let end = batches.fold(start, |acc, b| {
+        let (outs, at, sts) = acc;
+        let (o, sts2) = sequence_one([b], at, sts);
+        (outs.push((o.error, o.base)), at + o.count, sts2)
+    });
+    end.0
+}
+
 fn request_body(b: Bytes) -> Option<Cur> {
     request_header(cur(b)).map(|p| p.1)
 }
@@ -95,6 +138,12 @@ view v_meta(f, r) = req(f), let r = meta_of(f);
 view v_apiv_resp(corr, u, b) = apiv_resp(corr, u), let b = apiv_bytes(corr, u);
 view v_meta_resp(corr, b) = meta_resp(corr, brokers, cluster, controller, topics, have), let b = meta_bytes(corr, brokers, cluster, controller, topics, have);
 view v_create(f, r) = req(f), let r = create_of(f);
+view v_produce(f, r) = req(f), let r = produce_of(f);
+view v_seq(id, outs) = seq_case(id, batches), let outs = sequence_each(batches);
+view v_init_pid(f, r) = req(f), let r = init_pid_of(f);
+/// Each entry's check of a Produce request (error, message), as the broker checks it.
+view v_produce_check(f, cs) = req(f), let Some(r) = produce_of(f), let cs = produce_checks(r);
+view v_produce_resp(corr, b) = produce_resp(corr, f, answers), let b = produce_bytes(corr, f, answers);
 view v_delete(f, r) = req(f), let r = delete_of(f);
 view v_describe(f, r) = req(f), let r = describe_of(f);
 view v_create_resp(corr, b) = create_resp(corr, outcomes), let b = create_bytes(corr, outcomes);

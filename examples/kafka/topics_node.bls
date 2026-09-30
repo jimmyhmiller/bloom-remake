@@ -49,13 +49,15 @@ view describe_head(c, i, seq, corr, fr, at, req) =
 
 // ---------------------------------------------------------------- the writer
 
-/// The requests at the heads of the queues that would change the topics, with their arrival: a CreateTopics that is
-/// not only validating, a DeleteTopics, and a Metadata request that would auto-create a topic.
+/// The requests at the heads of the queues that would change the broker's state, with their arrival: a CreateTopics
+/// that is not only validating, a DeleteTopics, a Metadata request that would auto-create a topic, and an
+/// InitProducerId (`produce_node.bls`), which allocates a producer id.
 view writes(c, at) {
     create_head(c, _, _, _, _, at, req), not req.validate_only;
     delete_head(c, _, _, _, _, at, _req);
     metadata_head(c, _, _, _, _, at, req), name in metadata_creates(req, AUTO_CREATE_TOPICS),
         not topic_key(collision_key(name), _);
+    init_pid_head(c, _, _, _, _, at, _req);
 }
 
 /// This tick's writer: the oldest writing request.
@@ -112,12 +114,14 @@ view topic_now(name, id, p, cfg) {
 /// The topics by collision key, after the writer's change.
 view topic_now_key(k, name) = topic_now(name, _, _, _), let k = collision_key(name);
 
-/// The requests that wait for a later tick: the writing requests other than the writer, and a Metadata request that
-/// would auto-create a topic once the writer's change is made (the writer deleted it).
+/// The requests that wait for a later tick: the writing requests other than the writer, a Metadata request that
+/// would auto-create a topic once the writer's change is made (the writer deleted it), and a Produce request naming a
+/// topic the writer changes (`produce_node.bls`).
 view waiting(c) {
     writes(c, _), not writer(c);
     metadata_head(c, _, _, _, _, _, req), name in metadata_creates(req, AUTO_CREATE_TOPICS),
         not topic_now_key(collision_key(name), _), not writer(c);
+    produce_waits(c);
 }
 
 // ---------------------------------------------------------------- CreateTopics

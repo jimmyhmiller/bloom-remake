@@ -13,3 +13,13 @@ view per_group(g, vs = collect!(v)) = per group(g), item(g, v, _w);
 view pairs(ps = collect!((g, v))) = item(g, v, _);
 /// Draws: the same key gives the same value within a tick, another key another.
 view draws(k, a, b, c) = key(k), let a = rand(k), let b = rand(k), let c = rand(k, 1u64);
+
+/// Empty literals take the type their context gives them, whatever other empty literals the program holds
+/// (`names([])` interns an empty `Vec<T>` first).
+struct T { name: String, ps: Vec<u64> }
+input lit(k: u64);
+fn names(xs: Vec<T>) -> Vec<String> { xs.fold([], |acc, t| acc.push(t.name)) }
+fn name_pairs(xs: Vec<T>) -> Vec<(String, u64)> { xs.fold([], |acc, t| acc.concat(t.ps.map(|p| (t.name, p)))) }
+fn firsts(xs: Vec<T>) -> Vec<String> { xs.first().map(|t| [t.name]).unwrap_or([]) }
+view literals(k, a, b, c) = lit(k), let a = names([]), let b = name_pairs([T { name: "n", ps: [k, k + 1] }]),
+    let c = firsts([]);

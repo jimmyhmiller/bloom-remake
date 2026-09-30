@@ -60,6 +60,10 @@ fn stateful_body_ok(key: i16, fr: Bytes) -> bool {
             decode_delete_topics(b).is_some()
         } else if key == API_DESCRIBE_CONFIGS {
             decode_describe_configs(b).is_some()
+        } else if key == API_PRODUCE {
+            decode_produce(b).is_some()
+        } else if key == API_INIT_PRODUCER_ID {
+            decode_init_producer_id(b).is_some()
         } else {
             false
         }

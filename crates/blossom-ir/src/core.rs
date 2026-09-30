@@ -561,6 +561,12 @@ pub enum Expr {
         params: Vec<VarId>,
         body: Box<Expr>,
     }, // only as an argument to built-in combinators, fn bodies only
+    /// `expr` at type `ty`: a literal whose value does not decide its type (an empty collection, `None`) carries the
+    /// type its context gave it. Evaluates to `expr`.
+    Typed {
+        ty: TypeId,
+        expr: Box<Expr>,
+    },
 }
 /// FnRef data in the Dedalus core IR.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -577,6 +583,11 @@ pub enum BuiltinFn {
     Rand,
     RandFloat,
     RandRange,                           // PRF_σnode("rand", incarnation, tick, fp(k̄)) (LANG-175)
+    /// `error("message")` (LANGUAGE Appendix B): a located hard error (BLSR010). `ty` is the type the call stands
+    /// in for; the call never returns.
+    Error {
+        ty: TypeId,
+    },
     Route { role: RoleId },              // rendezvous hashing over canonically ordered members (LANG-154)
     Majority { domain: MajorityDomain }, // |s ∩ R| > |R| / 2 (LANGUAGE §11.6); FOL: quorum sort (VER-008)
     ClusterVersionAtLeast(u32),          // threshold over the ClusterVersion event (SEM-092)
@@ -597,7 +608,6 @@ pub enum BuiltinFn {
     ToString,
     Hash64,
     Fingerprint,
-    Error, /* … Appendix B … */
 }
 
 /// The work one evaluation of a pure function may do (LANGUAGE §16.1, BLSR012): closure applications plus the
@@ -1274,6 +1284,7 @@ impl Expr {
             }
             Self::Let { value, body, .. } => value.time_varying() || body.time_varying(),
             Self::Closure { body, .. } => body.time_varying(),
+            Self::Typed { expr, .. } => expr.time_varying(),
             Self::Term(_) | Self::Param(_) | Self::Scalar(_) => false,
         }
     }

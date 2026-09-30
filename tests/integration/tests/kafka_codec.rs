@@ -27,6 +27,8 @@ use kafka_protocol::messages::create_topics_request::{CreatableReplicaAssignment
 use kafka_protocol::messages::delete_topics_request::DeleteTopicState;
 use kafka_protocol::messages::describe_configs_request::DescribeConfigsResource;
 use kafka_protocol::messages::metadata_request::MetadataRequestTopic;
+use kafka_protocol::messages::produce_request::{PartitionProduceData, TopicProduceData};
+use kafka_protocol::messages::{ProduceRequest, ProduceResponse};
 use kafka_protocol::messages::{
     ApiVersionsRequest, ApiVersionsResponse, BrokerId, CreateTopicsRequest, CreateTopicsResponse, DeleteTopicsRequest,
     DeleteTopicsResponse, DescribeConfigsRequest, DescribeConfigsResponse, MetadataRequest, MetadataResponse,
@@ -69,10 +71,12 @@ fn compile() -> BlsArtifact {
     result.unwrap_or_else(|e| panic!("codec.bls: {e:?}")).0
 }
 
-/// Runs the harness on the oracle and the engine (which must agree) and returns the oracle's run.
+/// Runs the harness on the oracle and the engine (which must agree), with the standard host functions, and returns
+/// the oracle's run.
 #[cfg(test)]
 fn run(artifact: &BlsArtifact, inputs: &[InputEvent]) -> SyncRun {
-    let sim = BlsSim::new(artifact, blossom_value::Seed::from_u64(0)).unwrap();
+    let externs = Arc::new(blossom_std_host::registry().unwrap());
+    let sim = BlsSim::with_externs(artifact, blossom_value::Seed::from_u64(0), externs.clone()).unwrap();
     let round = Duration::from_nanos(1_000_000_000);
     let reference = sim
         .run(inputs, Tick(1), round, &FaultSchedule::default(), false)
@@ -81,6 +85,7 @@ fn run(artifact: &BlsArtifact, inputs: &[InputEvent]) -> SyncRun {
         roles: artifact.roles.clone(),
         node_names: artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect(),
         seed: Some(blossom_value::Seed::from_u64(0)),
+        externs,
         ..blossom_engine::EngineConfig::default()
     };
     let engine = EngineEvaluator::new(artifact.program.clone(), cfg);
@@ -480,7 +485,7 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
         } else {
             assert_eq!(
                 (resp.error_code, keys, resp.throttle_time_ms),
-                (0, vec![(3, 13, 13), (18, 3, 4), (19, 7, 7), (20, 6, 6), (32, 4, 4)], 0)
+                (0, vec![(0, 10, 12), (3, 13, 13), (18, 3, 4), (19, 7, 7), (20, 6, 6), (22, 3, 5), (32, 4, 4)], 0)
             );
         }
     }
@@ -905,6 +910,217 @@ fn topic_responses_encoded_in_blossom_decode_in_the_rust_implementation() {
     }
 }
 
+#[cfg(test)]
+fn bytes_opt(rng: &mut Rng) -> Option<Vec<u8>> {
+    if rng.below(5) == 0 { None } else { Some((0..rng.below(40)).map(|_| rng.next() as u8).collect()) }
+}
+
+#[test]
+fn produce_requests_decode_and_produce_responses_encode() {
+    let artifact = compile();
+    let mut rng = Rng(17);
+    let mut inputs = Vec::new();
+    // Per request: its frame, the value Blossom should decode, and the answers given to it.
+    type Answer = (u64, i16, i64, i64, Option<String>, Option<i32>);
+    let mut cases: Vec<(i32, Vec<u8>, Value, Vec<Answer>)> = Vec::new();
+    for _ in 0..80 {
+        let corr = rng.next() as i32;
+        let version = 10 + rng.below(3) as i16;
+        let tid = if rng.below(4) == 0 { Some(rng.text()) } else { None };
+        let (acks, timeout) = ([-1i16, 0, 1, 5][rng.below(4) as usize], rng.next() as i32);
+        // Per topic: its name and each partition's index and records.
+        type Topic = (String, Vec<(i32, Option<Vec<u8>>)>);
+        let topics: Vec<Topic> = (0..rng.below(3))
+            .map(|_| (rng.text(), (0..rng.below(3)).map(|_| (rng.next() as i32, bytes_opt(&mut rng))).collect()))
+            .collect();
+        let req = ProduceRequest::default()
+            .with_transactional_id(tid.clone().map(|t| kafka_protocol::messages::TransactionalId(StrBytes::from_string(t))))
+            .with_acks(acks)
+            .with_timeout_ms(timeout)
+            .with_topic_data(
+                topics
+                    .iter()
+                    .map(|(n, ps)| {
+                        TopicProduceData::default().with_name(TopicName(StrBytes::from_string(n.clone()))).with_partition_data(
+                            ps.iter()
+                                .map(|(i, r)| {
+                                    PartitionProduceData::default().with_index(*i).with_records(r.clone().map(Bytes::from))
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            );
+        let frame = encode_request(0, version, corr, Some("p"), &req);
+        let want = opt(Some(strukt(vec![
+            opt(tid.as_deref().map(s)),
+            i16v(acks),
+            i32v(timeout),
+            Value::Vec(
+                topics
+                    .iter()
+                    .map(|(n, ps)| {
+                        strukt(vec![
+                            s(n),
+                            Value::Vec(
+                                ps.iter()
+                                    .map(|(i, r)| strukt(vec![i32v(*i), opt(r.as_deref().map(bytes))]))
+                                    .collect(),
+                            ),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ])));
+        let entries: usize = topics.iter().map(|t| t.1.len()).sum();
+        let answers: Vec<Answer> = (0..entries as u64)
+            .map(|k| {
+                let err = [0i16, 2, 3, 10, 87][rng.below(5) as usize];
+                let msg = (err != 0).then(|| rng.text());
+                let bad = (err == 87).then(|| rng.below(3) as i32);
+                (k, err, rng.next() as i64 >> 2, rng.next() as i64 >> 3, msg, bad)
+            })
+            .collect();
+        inputs.push(input(&artifact, "req", vec![bytes(&frame)]));
+        inputs.push(input(
+            &artifact,
+            "produce_resp",
+            vec![
+                i32v(corr),
+                bytes(&frame),
+                Value::Vec(
+                    answers
+                        .iter()
+                        .map(|(k, e, b, ls, m, bad)| {
+                            Value::Tuple(
+                                vec![
+                                    Value::Int(IntValue::U64(*k)),
+                                    i16v(*e),
+                                    Value::Int(IntValue::I64(*b)),
+                                    Value::Int(IntValue::I64(*ls)),
+                                    opt(m.as_deref().map(s)),
+                                    opt(bad.map(i32v)),
+                                ]
+                                .into(),
+                            )
+                        })
+                        .collect(),
+                ),
+            ],
+        ));
+        cases.push((corr, frame, want, answers));
+    }
+    let r = run(&artifact, &inputs);
+    let decoded = rows(&artifact, &r, "v_produce");
+    let encoded = rows(&artifact, &r, "v_produce_resp");
+    for (corr, frame, want, answers) in &cases {
+        let got = decoded.iter().find(|x| x[0] == bytes(frame)).unwrap();
+        assert_eq!(&got[1], want, "the decoded request {frame:02x?}");
+        let row = encoded.iter().find(|x| x[0] == i32v(*corr)).unwrap();
+        let Value::Option(Some(b)) = &row[1] else { panic!("{:?}", row[1]) };
+        let Value::Bytes(b) = &**b else { panic!("{b:?}") };
+        let mut buf = Bytes::copy_from_slice(&b[4..]);
+        let header = ResponseHeader::decode(&mut buf, ProduceResponse::header_version(12)).unwrap();
+        assert_eq!(header.correlation_id, *corr);
+        let m = ProduceResponse::decode(&mut buf, 12).unwrap();
+        assert!(buf.is_empty(), "trailing bytes after the Produce response");
+        let got: Vec<Answer> = m
+            .responses
+            .iter()
+            .flat_map(|t| t.partition_responses.iter())
+            .enumerate()
+            .map(|(k, p)| {
+                assert_eq!(p.log_append_time_ms, -1);
+                let bad = p.record_errors.first().map(|e| {
+                    assert_eq!(e.batch_index_error_message.as_ref().map(|x| x.to_string()), p.error_message.as_ref().map(|x| x.to_string()));
+                    e.batch_index
+                });
+                (k as u64, p.error_code, p.base_offset, p.log_start_offset, p.error_message.as_ref().map(|x| x.to_string()), bad)
+            })
+            .collect();
+        assert_eq!(&got, answers);
+    }
+}
+
+/// A one-record batch of producer `pid` at `epoch` and sequence `seq` (`pid` -1: no idempotence), taking `n` offsets.
+#[cfg(test)]
+fn producer_batch(pid: i64, epoch: i16, seq: i32, n: usize) -> Vec<u8> {
+    use kafka_protocol::records::{Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType};
+    let records: Vec<Record> = (0..n)
+        .map(|i| Record {
+            transactional: false,
+            control: false,
+            delete_horizon: false,
+            partition_leader_epoch: -1,
+            producer_id: pid,
+            producer_epoch: epoch,
+            timestamp_type: TimestampType::Creation,
+            offset: i as i64,
+            sequence: if pid == -1 { i as i32 - 1 } else { seq.wrapping_add(i as i32) },
+            timestamp: 1_700_000_000_000,
+            key: None,
+            value: Some(Bytes::from(format!("{pid}/{epoch}/{seq}/{i}"))),
+            headers: Default::default(),
+        })
+        .collect();
+    let mut buf = BytesMut::new();
+    RecordBatchEncoder::encode(&mut buf, &records, &RecordEncodeOptions { version: 2, compression: Compression::None })
+        .unwrap();
+    buf.to_vec()
+}
+
+/// Kafka's idempotent-producer rules (`ProducerAppendInfo`), batch by batch against one partition.
+#[test]
+fn idempotent_batches_follow_kafkas_sequence_rules() {
+    let artifact = compile();
+    let b = producer_batch;
+    // Each case: the batches in order, and each one's (error, base offset).
+    type Case = (Vec<Vec<u8>>, Vec<(i16, i64)>);
+    let cases: Vec<Case> = vec![
+        // In sequence, a resend of the last batch (its original offset), a gap, an older epoch, a new epoch that
+        // does not start at 0, and one that does.
+        (
+            vec![b(7, 0, 0, 2), b(7, 0, 0, 2), b(7, 0, 2, 1), b(7, 0, 5, 1), b(7, 1, 3, 1), b(7, 1, 0, 1), b(7, 0, 3, 1)],
+            vec![(0, 0), (0, 0), (0, 2), (45, -1), (45, -1), (0, 3), (47, -1)],
+        ),
+        // Only the last five batches are remembered: a resend of the sixth-last is out of order, of the fifth-last
+        // a duplicate.
+        (
+            (0..6).map(|q| b(9, 0, q, 1)).chain([b(9, 0, 0, 1), b(9, 0, 1, 1)]).collect(),
+            vec![(0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (45, -1), (0, 1)],
+        ),
+        // A producer the partition has no state for starts at any sequence; sequences wrap past i32::MAX to 0.
+        (
+            vec![b(3, 0, i32::MAX, 1), b(3, 0, 0, 1), b(3, 0, 5, 1)],
+            vec![(0, 0), (0, 1), (45, -1)],
+        ),
+        // Batches without idempotence take offsets between another producer's and change nothing for it: its
+        // resend of sequence 10 is still a duplicate of offset 0, and 12 continues it.
+        (
+            vec![b(4, 2, 10, 1), b(-1, -1, 0, 3), b(4, 2, 11, 1), b(4, 2, 10, 1), b(4, 2, 12, 1)],
+            vec![(0, 0), (0, 1), (0, 4), (0, 0), (0, 5)],
+        ),
+    ];
+    let inputs: Vec<InputEvent> = cases
+        .iter()
+        .enumerate()
+        .map(|(i, (bs, _))| {
+            input(&artifact, "seq_case", vec![Value::Int(IntValue::U64(i as u64)), Value::Vec(bs.iter().map(|x| bytes(x)).collect())])
+        })
+        .collect();
+    let r = run(&artifact, &inputs);
+    let got = rows(&artifact, &r, "v_seq");
+    for (i, (_, want)) in cases.iter().enumerate() {
+        let row = got.iter().find(|x| x[0] == Value::Int(IntValue::U64(i as u64))).unwrap();
+        let want = Value::Vec(
+            want.iter()
+                .map(|(e, o)| Value::Tuple(vec![i16v(*e), Value::Int(IntValue::I64(*o))].into()))
+                .collect(),
+        );
+        assert_eq!(row[1], want, "case {i}");
+    }
+}
+
 /// Every request frame of a capture file (without its size prefix), with its API key and version.
 #[cfg(test)]
 fn captured_requests(file: &str) -> Vec<(i16, i16, Vec<u8>)> {
@@ -959,6 +1175,9 @@ fn the_golden_captures_of_real_clients_decode() {
     let create = rows(&artifact, &r, "v_create");
     let delete = rows(&artifact, &r, "v_delete");
     let describe = rows(&artifact, &r, "v_describe");
+    let produce = rows(&artifact, &r, "v_produce");
+    let produce_check = rows(&artifact, &r, "v_produce_check");
+    let init_pid = rows(&artifact, &r, "v_init_pid");
     let find = |rs: &[Vec<Value>], f: &[u8]| rs.iter().find(|r| r[0] == bytes(f)).map(|r| r[1].clone());
     let mut clients = BTreeSet::new();
     for (file, key, version, frame) in &frames {
@@ -992,10 +1211,28 @@ fn the_golden_captures_of_real_clients_decode() {
             }
             // franz-go's first ApiVersions is v5, which the broker refuses without reading its body.
             (18, 5) => assert!(file.ends_with("franz.jsonl"), "{file}"),
-            // Produce, Fetch and ListOffsets (items 5 and 6), and the APIs the broker does not advertise: the Java
-            // admin's DescribeCluster, DescribeTopicPartitions and ListPartitionReassignments, and the Java producer's
-            // InitProducerId (slice 9). Only their headers are read here.
-            (0, 10..=12) | (1, 16 | 17) | (2, 7..=10) | (22, 5) | (46, 0) | (60, 2) | (75, 0) => {
+            (0, 10..=12) => {
+                let Some(Value::Option(Some(_))) = find(&produce, frame) else {
+                    panic!("{file}: a Produce v{version} body does not decode");
+                };
+                // Every batch a real client sent passes the broker's checks (the Java producer's are idempotent).
+                let Some(Value::Vec(checks)) = find(&produce_check, frame) else {
+                    panic!("{file}: a Produce v{version} request was not checked");
+                };
+                for c in checks.iter() {
+                    let Value::Tuple(c) = c else { panic!("{c:?}") };
+                    assert_eq!(c[0], i16v(0), "{file}: a Produce v{version} batch: {:?}", c[1]);
+                }
+            }
+            (22, 5) => {
+                let Some(Value::Option(Some(_))) = find(&init_pid, frame) else {
+                    panic!("{file}: an InitProducerId v5 body does not decode");
+                };
+            }
+            // Fetch and ListOffsets (item 6), and the APIs the broker does not advertise: the Java admin's
+            // DescribeCluster, DescribeTopicPartitions and ListPartitionReassignments. Only their headers are read
+            // here.
+            (1, 16 | 17) | (2, 7..=10) | (46, 0) | (60, 2) | (75, 0) => {
                 assert!(file.starts_with("s7-"), "{file}")
             }
             other => panic!("{file}: an unexpected request {other:?}"),

@@ -845,6 +845,8 @@ pub enum Builtin {
     /// `rand_range(lo, hi, k…)` (LANGUAGE §15.1): an unbiased value in `[lo, hi)`, the same for the same key within a
     /// node's tick and incarnation. Arguments: `lo`, `hi`, then the key.
     RandRange,
+    /// `error("message")` (Appendix B): a located hard error (BLSR010); its type is whatever its context needs.
+    Error,
     /// `rand(k…)` (LANGUAGE §15.1): a `u64` from the node's PRF, the same for the same key within a node's tick and
     /// incarnation. Arguments: the key.
     Rand,
