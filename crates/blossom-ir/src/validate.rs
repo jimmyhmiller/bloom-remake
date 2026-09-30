@@ -1293,7 +1293,7 @@ fn expr_type(p: &Program, r: Cx<'_>, e: &Expr) -> Result<TypeId, String> {
         }
         Expr::Match { scrut, arms } => {
             let scrut_ty = expr_type(p, r, scrut)?;
-            let mut ret = None;
+            let mut types = Vec::with_capacity(arms.len());
             for (pat, guard, body) in arms {
                 pattern_type(p, r, pat, scrut_ty)?;
                 if let Some(g) = guard {
@@ -1302,13 +1302,23 @@ fn expr_type(p: &Program, r: Cx<'_>, e: &Expr) -> Result<TypeId, String> {
                         return Err("match guard must be bool".into());
                     }
                 }
-                let t = expr_type(p, r, body)?;
-                if ret.is_some_and(|x| x != t) {
+                types.push(expr_type(p, r, body)?);
+            }
+            // A constant arm's type is ambiguous (an empty collection, `None`): the match has a non-constant arm's
+            // type, and every arm must fit it.
+            let ret = arms
+                .iter()
+                .zip(&types)
+                .find(|((_, _, body), _)| !matches!(body, Expr::Term(Term::Const(_))))
+                .or_else(|| arms.iter().zip(&types).next())
+                .map(|(_, t)| *t)
+                .ok_or("match has no arms")?;
+            for ((_, _, body), t) in arms.iter().zip(&types) {
+                if *t != ret && !expr_matches_type(p, r, body, ret) {
                     return Err("match arm type mismatch".into());
                 }
-                ret = Some(t)
             }
-            ret.ok_or("match has no arms".into())
+            Ok(ret)
         }
         Expr::Collection { kind, elems } => {
             let types = elems

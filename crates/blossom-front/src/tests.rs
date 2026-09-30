@@ -672,3 +672,75 @@ fn streams_declare_their_relations_and_check_how_they_are_used() {
     let not_emit = with_head("stream s: listen;\na: on s.opened(c, p, at) { emit s.close(c); }\n");
     assert!(codes(not_emit).contains(&"BLS0400".to_owned()), "{:?}", codes(not_emit));
 }
+
+/// Several in-memory files, by path; paths are joined to the including file's directory as given.
+struct Files(Vec<(&'static str, &'static str)>);
+
+impl Loader for Files {
+    fn load(&mut self, _from: Option<&str>, path: &str) -> Result<LoadedFile, String> {
+        self.0
+            .iter()
+            .find(|(p, _)| *p == path)
+            .map(|(p, text)| LoadedFile {
+                key: Arc::from(*p),
+                text: (*text).to_owned(),
+            })
+            .ok_or_else(|| format!("no file `{path}`"))
+    }
+}
+
+fn codes_of(files: Vec<(&'static str, &'static str)>) -> Vec<String> {
+    let mut sources = SourceDb::new();
+    let nodes = [NodeSpec {
+        name: "n1".to_owned(),
+        role: None,
+    }];
+    let root = files.first().map(|f| f.0).unwrap_or("main.bls");
+    match compile(root, &nodes, &mut Files(files), &mut sources) {
+        Ok((_, warnings)) => warnings.iter().map(|d| d.code.as_str().to_owned()).collect(),
+        Err(BlsError::Rejected(d)) => d.iter().map(|d| d.code.as_str().to_owned()).collect(),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+#[test]
+fn a_textual_include_brings_in_the_files_items_recursively() {
+    let files = vec![
+        ("main.bls", "program t version 1;\ninclude \"a.bls\";\ninput go(k: u64);\nview v(x) = go(k), let x = twice(inc(k));\n"),
+        ("a.bls", "include \"b.bls\";\nfn twice(n: u64) -> u64 { n * 2 }\n"),
+        ("b.bls", "fn inc(n: u64) -> u64 { n + 1 }\n"),
+    ];
+    assert_eq!(codes_of(files), Vec::<String>::new());
+}
+
+#[test]
+fn an_include_cycle_or_a_missing_file_is_bls0204_and_a_module_include_is_not_implemented() {
+    let cycle = vec![
+        ("main.bls", "program t version 1;\ninclude \"a.bls\";\n"),
+        ("a.bls", "include \"main.bls\";\n"),
+    ];
+    assert!(codes_of(cycle).contains(&"BLS0204".to_owned()));
+    let missing = vec![("main.bls", "program t version 1;\ninclude \"nope.bls\";\n")];
+    assert_eq!(codes_of(missing), vec!["BLS0204"]);
+    let module = vec![("main.bls", "program t version 1;\ninclude m;\n")];
+    assert_eq!(codes_of(module), vec!["BLS0908"]);
+}
+
+#[test]
+fn block_bodies_in_closures_and_match_arms_and_constant_arms_type_check() {
+    let src = with_head(
+        "fn f(o: Option<u64>) -> Vec<u64> {\n\
+             match o {\n\
+                 Some(n) => {\n\
+                     let m = n + 1;\n\
+                     range(0, m).map(|i| { let j = i * 2; j })\n\
+                 }\n\
+                 None => [],\n\
+             }\n\
+         }\n\
+         output out(k: u64);\n\
+         view w(x) = go(k, _), let x = f(Some(k));\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert_eq!(codes(src), Vec::<String>::new());
+}
