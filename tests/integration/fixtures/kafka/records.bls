@@ -1,0 +1,22 @@
+//! A harness around `examples/kafka/records.bls` for the Rust codec oracle (`kafka_records.rs`).
+program records version 1;
+
+include "../../../../examples/kafka/records.bls";
+
+/// A records field as a producer sends it.
+input field(id: u64, b: Bytes);
+/// A batch to assign offsets to.
+input assign(id: u64, b: Bytes, base: i64, epoch: i32);
+
+fn count(b: Bytes) -> Option<u64> {
+    split_batches(b).map(|bs| bs.len())
+}
+
+fn soundness(b: Bytes) -> Option<Vec<bool>> {
+    split_batches(b).map(|bs| bs.map(|x| batch_ok(x)))
+}
+
+view v_split(id, n) = field(id, b), let n = count(b);
+view v_ok(id, oks) = field(id, b), let oks = soundness(b);
+view v_header(id, h) = field(id, b), let h = batch_header(b);
+view v_assigned(id, out) = assign(id, b, base, epoch), let out = with_offsets(b, base, epoch);
