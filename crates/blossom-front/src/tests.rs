@@ -868,3 +868,12 @@ fn a_match_arm_in_a_function_binds_afresh_and_in_a_rule_may_not_rebind() {
     );
     assert_eq!(codes(src), vec!["BLS0501"]);
 }
+
+#[test]
+fn a_function_parameter_keeps_its_declared_node_type() {
+    // `a == b` meets `Node` with `Node<A>`; `b` is still any node to the function's callers.
+    let src = "program t version 1;\nrole A;\nrole B;\n\
+               fn same(a: Node<A>, b: Node) -> bool { a == b }\n\
+               at A {\n  input i(a: Node<A>, b: Node);\n  view v(x) = i(a, b), let x = same(a, b);\n}\n";
+    assert_eq!(diags_for(src, &role_nodes()), Vec::new());
+}
