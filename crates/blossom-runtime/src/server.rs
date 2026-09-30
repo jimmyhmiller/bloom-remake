@@ -134,10 +134,18 @@ enum Data {
 enum Control {
     Synced(SyncedTick),
     WalFailed(String),
-    CheckpointDone(Result<(), String>),
+    /// A checkpoint was installed; the shape of the chain it ends.
+    CheckpointDone(Result<Option<blossom_store::ChainInfo>, String>),
     /// Data was queued.
     Wake,
     Stop,
+}
+
+/// What the checkpoint thread writes (FOREIGN-PROTOCOLS §6): a delta layer (encoded on the engine thread: its cost
+/// follows the change), or a full image, encoded on the checkpoint thread so the engine only copies row handles.
+enum CheckpointJob {
+    Layer(Vec<u8>),
+    Full(blossom_node::durable::DurableImage),
 }
 
 enum Commit {
@@ -355,6 +363,7 @@ impl Server {
         let node = Node::boot(ncfg, &artifact.program, exec, boot.clone())?;
         let restarts = opened.record.restarts;
         let last_checkpoint_lsn = opened.checkpoint.map_or(0, |c| c.lsn.0);
+        let opened_chain = opened.checkpoints.chain()?;
 
         let peer_listener =
             TcpListener::bind(entry.addr).map_err(|e| RuntimeError::Net(format!("bind {}: {e}", entry.addr)))?;
@@ -420,7 +429,7 @@ impl Server {
             stop: stop.clone(),
         };
         let (commit_tx, commit_rx) = mpsc::channel::<Commit>();
-        let (ckpt_tx, ckpt_rx) = mpsc::channel::<(blossom_store::DurableSnapshot, SyncedTick)>();
+        let (ckpt_tx, ckpt_rx) = mpsc::channel::<(CheckpointJob, SyncedTick)>();
         let id = identity(spec, &artifact);
         let catalog = Arc::new(Catalog::of(program)?);
         let mut threads = Vec::new();
@@ -440,8 +449,9 @@ impl Server {
         }
         {
             let (tx, commit) = (ctl_tx.clone(), commit_tx.clone());
+            let (artifact, names) = (artifact.clone(), names.clone());
             threads.push(spawn("checkpoint", move || {
-                checkpointer(checkpoints, ckpt_rx, commit, tx)
+                checkpointer(checkpoints, &artifact, names, ckpt_rx, commit, tx)
             })?);
         }
         // Peer writers: one per other node.
@@ -514,6 +524,7 @@ impl Server {
                 checkpoint_bytes: spec.checkpoint_wal_bytes,
                 checkpoint_busy: false,
                 last_checkpoint_lsn,
+                chain: opened_chain,
                 meta,
                 record,
                 _lock: lock,
@@ -687,17 +698,28 @@ fn committer(
 /// The checkpoint thread: write, install, remove the older checkpoints, hand the truncation token to the committer.
 fn checkpointer(
     mut ckpt: FileCheckpoints,
-    rx: Receiver<(blossom_store::DurableSnapshot, SyncedTick)>,
+    artifact: &BlsArtifact,
+    names: Arc<[Arc<str>]>,
+    rx: Receiver<(CheckpointJob, SyncedTick)>,
     commit: Sender<Commit>,
     tx: Sender<Control>,
 ) {
-    while let Ok((snap, covers)) = rx.recv() {
-        let result = ckpt
-            .write(snap, covers)
-            .and_then(|id| ckpt.install(id))
-            .and_then(|token| ckpt.prune().map(|_| token))
-            .map_err(|e| e.to_string())
-            .and_then(|token| commit.send(Commit::Truncate(token)).map_err(|e| e.to_string()));
+    let program = artifact.program.get();
+    let schema = DurableSchema::of(program);
+    let codec = DurableCodec::new(program, &schema, names);
+    while let Ok((job, covers)) = rx.recv() {
+        let written = match job {
+            CheckpointJob::Layer(delta) => ckpt.write_layer(&delta, covers).map_err(|e| e.to_string()),
+            CheckpointJob::Full(image) => codec
+                .encode_image(&image)
+                .map_err(|e| e.to_string())
+                .and_then(|snap| ckpt.write(snap, covers).map_err(|e| e.to_string())),
+        };
+        let result = written
+            .and_then(|id| ckpt.install(id).map_err(|e| e.to_string()))
+            .and_then(|token| ckpt.prune().map(|_| token).map_err(|e| e.to_string()))
+            .and_then(|token| commit.send(Commit::Truncate(token)).map_err(|e| e.to_string()))
+            .and_then(|()| ckpt.chain().map_err(|e| e.to_string()));
         if tx.send(Control::CheckpointDone(result)).is_err() {
             return;
         }
@@ -989,7 +1011,9 @@ struct Engine {
     /// The most messages the node's inbox holds before the engine stops taking data.
     inbox_cap: usize,
     commit: Sender<Commit>,
-    checkpoint: Sender<(blossom_store::DurableSnapshot, SyncedTick)>,
+    checkpoint: Sender<(CheckpointJob, SyncedTick)>,
+    /// The shape of the installed checkpoint chain (`None` without one), from the last checkpoint.
+    chain: Option<blossom_store::ChainInfo>,
     checkpoint_bytes: u64,
     checkpoint_busy: bool,
     last_checkpoint_lsn: u64,
@@ -1182,7 +1206,7 @@ impl Engine {
             Control::WalFailed(e) => return Err(RuntimeError::Fault(e)),
             Control::CheckpointDone(r) => {
                 self.checkpoint_busy = false;
-                r.map_err(|e| RuntimeError::Fault(format!("checkpoint failed: {e}")))?;
+                self.chain = r.map_err(|e| RuntimeError::Fault(format!("checkpoint failed: {e}")))?;
                 bump(&self.stats.checkpoints, 1);
                 // The installed checkpoint is where recovery starts now: the blobs no recovery and no running rule
                 // can reach go (FOREIGN-PROTOCOLS §5).
@@ -1341,12 +1365,17 @@ impl Engine {
         if self.node.released_tick() < Some(Tick(t.tick())) {
             return Err(internal_error!("a synced tick is not released").into());
         }
-        let snap = durable.encode_image(self.node.released_image())?;
+        // A delta layer when the change since the installed checkpoint is known and the chain has room; otherwise a
+        // full image.
+        let job = match self.node.take_checkpoint_delta() {
+            Some(d) if blossom_node::durable::layer_fits(self.chain) => CheckpointJob::Layer(durable.encode_delta(&d)?),
+            _ => CheckpointJob::Full(self.node.released_image().clone()),
+        };
         self.checkpoint_blobs = Some((Tick(t.tick()), self.node.released_image_blobs()));
         self.checkpoint_busy = true;
         self.last_checkpoint_lsn = t.lsn().0;
         self.checkpoint
-            .send((snap, t))
+            .send((job, t))
             .map_err(|_| RuntimeError::Fault("the checkpoint thread stopped".into()))
     }
 }

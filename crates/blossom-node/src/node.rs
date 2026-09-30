@@ -105,6 +105,9 @@ pub struct Boot {
     pub recovered: bool,
     /// The node's durable blobs (FOREIGN-PROTOCOLS §5): where recovered rows' blobs are read from.
     pub blobs: Arc<dyn blossom_value::BlobSource>,
+    /// Whether the image is exactly the installed checkpoint's (recovery replayed no WAL record after it): only then
+    /// can the next checkpoint be a delta layer on it.
+    pub at_checkpoint: bool,
 }
 
 /// Whether the node is running.
@@ -203,6 +206,11 @@ pub struct Node<E: Executor> {
     durable_blobs: BTreeSet<blossom_value::BlobRef>,
     /// Where durable blobs are read.
     store_blobs: Arc<dyn blossom_value::BlobSource>,
+    /// The net change of the released durable rows since the last checkpoint: the next checkpoint's delta layer.
+    since_checkpoint: crate::durable::DeltaAcc,
+    /// Whether `since_checkpoint` is the whole change since the installed checkpoint (false after a recovery that
+    /// replayed WAL records, until the next full checkpoint).
+    layerable: bool,
     /// The blobs handed to the driver with each tick's WAL record since the last checkpoint: a recovery from that
     /// checkpoint may replay rows that hold them.
     recent_blobs: Vec<(Tick, blossom_value::BlobRef)>,
@@ -272,6 +280,8 @@ impl<E: Executor> Node<E> {
         }
         Ok(Node {
             blob_cache: BTreeMap::new(),
+            since_checkpoint: crate::durable::DeltaAcc::default(),
+            layerable: boot.at_checkpoint,
             recent_blobs: Vec::new(),
             store_blobs: boot.blobs.clone(),
             durable_blobs,
@@ -649,6 +659,16 @@ impl<E: Executor> Node<E> {
         self.blob_cache.retain(|b, _| live.contains(b));
     }
 
+    /// The net change of the released durable rows since the last checkpoint, for a delta-layer checkpoint of
+    /// [`Node::released_image`] (FOREIGN-PROTOCOLS §6); `None` when the change is not known (after a recovery that
+    /// replayed WAL records, or with no checkpoint yet): the checkpoint must then be full. Taking it starts the next
+    /// run: call it whenever a checkpoint of the released image is written, full or layered.
+    pub fn take_checkpoint_delta(&mut self) -> Option<crate::durable::Delta> {
+        let d = self.since_checkpoint.take();
+        let layerable = std::mem::replace(&mut self.layerable, true);
+        layerable.then_some(d)
+    }
+
     /// The blobs the released durable rows hold: what a checkpoint of [`Node::released_image`] references.
     pub fn released_image_blobs(&self) -> BTreeSet<blossom_value::BlobRef> {
         let mut out = BTreeSet::new();
@@ -721,6 +741,7 @@ impl<E: Executor> Node<E> {
                 break;
             };
             self.released_image.apply(&p.delta);
+            self.since_checkpoint.add(&p.delta);
             self.released = Some(p.tick);
             if p.halts {
                 self.state = NodeState::Halted;

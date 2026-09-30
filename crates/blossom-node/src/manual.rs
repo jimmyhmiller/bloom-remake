@@ -142,9 +142,20 @@ impl<'p, E: Executor> ManualDriver<'p, E> {
         if self.node.parked() != 0 {
             return Err(internal_error!("checkpoint with ticks still parked").into());
         }
-        let snap = self.codec.encode_image(self.node.released_image())?;
         let blobs = self.node.released_image_blobs();
-        let id = self.opened.checkpoints.write(snap, covers)?;
+        // A delta layer when the change since the installed checkpoint is known and the chain has room; otherwise a
+        // full image (FOREIGN-PROTOCOLS §6).
+        let delta = self.node.take_checkpoint_delta();
+        let id = match delta {
+            Some(d) if crate::durable::layer_fits(self.opened.checkpoints.chain()?) => {
+                let payload = self.codec.encode_delta(&d)?;
+                self.opened.checkpoints.write_layer(&payload, covers)?
+            }
+            _ => {
+                let snap = self.codec.encode_image(self.node.released_image())?;
+                self.opened.checkpoints.write(snap, covers)?
+            }
+        };
         let token = self.opened.checkpoints.install(id)?;
         self.opened.wal.truncate_through(token)?;
         self.opened.checkpoints.prune()?;
