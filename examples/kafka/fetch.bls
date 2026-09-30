@@ -1,0 +1,362 @@
+//! Fetch, versions 16 and 17 (flexible; v17 adds only a tagged field), and ListOffsets, versions 7 to 10 (flexible).
+//! Pure functions: the node (`fetch_node.bls`) finds the batches and answers.
+
+const OFFSET_OUT_OF_RANGE: i16 = 1;
+const FETCH_SESSION_ID_NOT_FOUND: i16 = 70;
+const INVALID_FETCH_SESSION_EPOCH: i16 = 71;
+const FENCED_LEADER_EPOCH: i16 = 74;
+const UNKNOWN_LEADER_EPOCH: i16 = 76;
+
+/// The most batches one partition's answer walks (its byte limit usually stops it first).
+const MAX_FETCH_BATCHES: u64 = 4096;
+
+/// Every partition is led by this broker at epoch 0.
+const LEADER_EPOCH: i32 = 0;
+
+// ---------------------------------------------------------------- Fetch v16–v17
+
+struct FetchPartition { partition: i32, leader_epoch: i32, fetch_offset: i64, max_bytes: i32 }
+
+struct FetchTopic { topic_id: Bytes, partitions: Vec<FetchPartition> }
+
+struct FetchRequest {
+    max_wait_ms: i32,
+    min_bytes: i32,
+    max_bytes: i32,
+    isolation_level: i8,
+    session_id: i32,
+    session_epoch: i32,
+    topics: Vec<FetchTopic>,
+}
+
+fn decode_fetch_partition(c: Cur) -> Option<(FetchPartition, Cur)> {
+    read_i32(c).and_then(|p| read_i32(p.1).and_then(|epoch| read_i64(epoch.1).and_then(|off| {
+        read_i32(off.1).and_then(|_last_epoch| read_i64(_last_epoch.1).and_then(|_log_start| {
+            read_i32(_log_start.1).and_then(|mb| skip_tags(mb.1).map(|end| {
+                (FetchPartition { partition: p.0, leader_epoch: epoch.0, fetch_offset: off.0, max_bytes: mb.0 }, end)
+            }))
+        }))
+    })))
+}
+
+fn decode_fetch_topic(c: Cur) -> Option<(FetchTopic, Cur)> {
+    read_uuid(c).and_then(|id| read_compact_len(id.1).and_then(|n| {
+        range(0, n.0)
+            .fold(Some(([], n.1)), |acc, _i| acc.and_then(|a| decode_fetch_partition(a.1).map(|p| (a.0.push(p.0), p.1))))
+            .and_then(|ps| skip_tags(ps.1).map(|end| (FetchTopic { topic_id: id.0, partitions: ps.0 }, end)))
+    }))
+}
+
+/// A forgotten topic (sessions only; this broker keeps none): its id and partitions, skipped.
+fn skip_forgotten(c: Cur) -> Option<Cur> {
+    read_uuid(c).and_then(|id| read_compact_i32s(id.1).and_then(|ps| skip_tags(ps.1)))
+}
+
+fn decode_fetch(c: Cur) -> Option<FetchRequest> {
+    read_i32(c).and_then(|wait| read_i32(wait.1).and_then(|minb| read_i32(minb.1).and_then(|maxb| {
+        read_i8(maxb.1).and_then(|iso| read_i32(iso.1).and_then(|sid| read_i32(sid.1).and_then(|sep| {
+            read_compact_len(sep.1).and_then(|nt| {
+                range(0, nt.0)
+                    .fold(Some(([], nt.1)), |acc, _i| acc.and_then(|a| decode_fetch_topic(a.1).map(|t| (a.0.push(t.0), t.1))))
+                    .and_then(|ts| read_compact_len(ts.1).and_then(|nf| {
+                        range(0, nf.0)
+                            .fold(Some(nf.1), |acc, _i| acc.and_then(|x| skip_forgotten(x)))
+                            .and_then(|after| read_compact_string(after).and_then(|_rack| skip_tags(_rack.1).map(|_end| {
+                                FetchRequest {
+                                    max_wait_ms: wait.0,
+                                    min_bytes: minb.0,
+                                    max_bytes: maxb.0,
+                                    isolation_level: iso.0,
+                                    session_id: sid.0,
+                                    session_epoch: sep.0,
+                                    topics: ts.0,
+                                }
+                            })))
+                    }))
+            })
+        })))
+    })))
+}
+
+/// A request's partitions, in request order: (entry, topic id, partition).
+fn fetch_entries(req: FetchRequest) -> Vec<(u64, Bytes, FetchPartition)> {
+    let flat = req.topics.fold([], |acc, t| acc.concat(t.partitions.map(|p| (t.topic_id, p))));
+    flat.enumerate().map(|e| (e.0, e.1.0, e.1.1))
+}
+
+/// A whole-request error: a fetch session this broker never created (it creates none: session id 0 with epoch 0
+/// or -1 is a sessionless full fetch, KIP-227).
+fn fetch_session_error(req: FetchRequest) -> Option<i16> {
+    if req.session_id != 0i32 {
+        Some(FETCH_SESSION_ID_NOT_FOUND)
+    } else if req.session_epoch != 0i32 && req.session_epoch != -1i32 {
+        Some(INVALID_FETCH_SESSION_EPOCH)
+    } else {
+        None
+    }
+}
+
+/// The error of a request's leader epoch against this broker's: -1 is unset; an older one is fenced, a newer one
+/// unknown.
+fn leader_epoch_error(requested: i32) -> Option<i16> {
+    if requested == -1i32 || requested == LEADER_EPOCH {
+        None
+    } else if requested < LEADER_EPOCH {
+        Some(FENCED_LEADER_EPOCH)
+    } else {
+        Some(UNKNOWN_LEADER_EPOCH)
+    }
+}
+
+/// One partition's answer: its error, high watermark, log start, and its batches (blob, size) in offset order.
+struct FetchAnswer { error: i16, high_watermark: i64, log_start: i64, batches: Vec<Blob> }
+
+fn fetch_failed(error: i16) -> FetchAnswer {
+    FetchAnswer { error: error, high_watermark: -1i64, log_start: -1i64, batches: [] }
+}
+
+/// The batches a partition keeps while they are trimmed: those kept, the bytes left for the partition and for the
+/// response, whether the response has data yet, and whether this partition stopped (a batch did not fit).
+struct Trim { kept: Vec<Blob>, room: i64, left: i64, any: bool, stopped: bool }
+
+fn trim_batch(t: Trim, b: Blob) -> Trim {
+    let size = b.len() as i64;
+    if t.stopped {
+        t
+    } else if not t.any || size <= t.room {
+        Trim { kept: t.kept.push(b), room: t.room - size, left: t.left - size, any: true, stopped: false }
+    } else {
+        Trim { kept: t.kept, room: t.room, left: t.left, any: t.any, stopped: true }
+    }
+}
+
+/// The answers trimmed to the byte limits, in request order: each partition takes its batches, in offset order,
+/// while they fit both its own limit and what is left of the response's, and stops at the first that does not; but
+/// the response's first batch is kept whatever its size, so a consumer can always make progress (KIP-74).
+/// `answers` holds each entry's answer with its partition's limit.
+fn trim_to(answers: Vec<(u64, FetchAnswer, i64)>, max_bytes: i64) -> Vec<(u64, FetchAnswer)> {
+    let start: (Vec<(u64, FetchAnswer)>, i64, bool) = ([], max_bytes, false);
+    let end = answers.fold(start, |acc, x| {
+        let (out, left, any) = acc;
+        let a = x.1;
+        let room = if x.2 < left { x.2 } else { left };
+        let t = a.batches.fold(Trim { kept: [], room: room, left: left, any: any, stopped: false }, |t, b| trim_batch(t, b));
+        let answer = FetchAnswer { error: a.error, high_watermark: a.high_watermark, log_start: a.log_start, batches: t.kept };
+        (out.push((x.0, answer)), t.left, t.any)
+    });
+    end.0
+}
+
+/// A partition's walked batches, in walk order.
+fn blobs_of(bs: Vec<(u64, Blob)>) -> Vec<Blob> {
+    bs.map(|x| x.1)
+}
+
+/// Whether a Fetch can be answered now: a partition failed, or its data reaches `min_bytes`.
+fn fetch_ready(answers: Vec<(u64, FetchAnswer)>, min_bytes: i64) -> bool {
+    answers.any(|x| x.1.error != NONE) || fetch_bytes(answers) >= min_bytes
+}
+
+/// The request without its partitions, for an answer that carries only a request-level error.
+fn without_topics(req: FetchRequest) -> FetchRequest {
+    FetchRequest {
+        max_wait_ms: req.max_wait_ms,
+        min_bytes: req.min_bytes,
+        max_bytes: req.max_bytes,
+        isolation_level: req.isolation_level,
+        session_id: req.session_id,
+        session_epoch: req.session_epoch,
+        topics: [],
+    }
+}
+
+/// How many bytes the answers' batches hold.
+fn fetch_bytes(answers: Vec<(u64, FetchAnswer)>) -> i64 {
+    answers.fold(0i64, |n, x| n + x.1.batches.fold(0i64, |m, b| m + b.len() as i64))
+}
+
+/// FetchResponse v16–v17 as the parts of one stream write: the header and each partition's fields as bytes, and
+/// its batches as blob ranges, so the stored batches are sent without being copied through the program.
+fn fetch_response_parts(correlation_id: i32, error: i16, req: FetchRequest, answers: Vec<(u64, FetchAnswer)>) -> Vec<Part> {
+    let starts = req.topics.fold(([], 0), |acc, t| (acc.0.push(acc.1), acc.1 + t.partitions.len()));
+    let topic_parts = req.topics.enumerate().map(|e| {
+        let (k, t) = e;
+        let first = match starts.0.get(k) {
+            Some(x) => x,
+            None => error("fetch_response_parts: a topic without a starting entry"),
+        };
+        let partitions = t.partitions.enumerate().map(|pe| {
+            match answers.filter(|a| a.0 == first + pe.0).first() {
+                Some(a) => fetch_partition_parts(pe.1.partition, a.1),
+                None => error("fetch_response_parts: a partition entry has no answer"),
+            }
+        });
+        [Part::Bytes(Bytes::join([t.topic_id, Bytes::uvarint(t.partitions.len() + 1)]))]
+            .concat(partitions.fold([], |acc, ps| acc.concat(ps)))
+            .push(Part::Bytes(no_tags()))
+    });
+    let body = [Part::Bytes(Bytes::join([
+        response_header_v1(correlation_id),
+        Bytes::from_i32_be(0i32),
+        Bytes::from_i16_be(error),
+        Bytes::from_i32_be(0i32),
+        Bytes::uvarint(req.topics.len() + 1),
+    ]))]
+        .concat(topic_parts.fold([], |acc, ps| acc.concat(ps)))
+        .push(Part::Bytes(no_tags()));
+    let size = body.fold(0, |n, p| n + part_len(p));
+    [Part::Bytes(Bytes::from_u32_be(size as u32))].concat(body)
+}
+
+/// The bytes a part sends.
+fn part_len(p: Part) -> u64 {
+    match p {
+        Part::Bytes(b) => b.len(),
+        Part::Blob(_b, lo, hi) => hi - lo,
+    }
+}
+
+fn fetch_partition_parts(index: i32, a: FetchAnswer) -> Vec<Part> {
+    let records = a.batches.fold(0, |n, b| n + b.len());
+    [Part::Bytes(Bytes::join([
+        Bytes::from_i32_be(index),
+        Bytes::from_i16_be(a.error),
+        Bytes::from_i64_be(a.high_watermark),
+        Bytes::from_i64_be(a.high_watermark),
+        Bytes::from_i64_be(a.log_start),
+        Bytes::uvarint(0),
+        Bytes::from_i32_be(-1i32),
+        Bytes::uvarint(records + 1),
+    ]))]
+        .concat(a.batches.map(|b| Part::Blob(b, 0, b.len())))
+        .push(Part::Bytes(no_tags()))
+}
+
+// ---------------------------------------------------------------- ListOffsets v7–v10
+
+const EARLIEST_TIMESTAMP: i64 = -2;
+const LATEST_TIMESTAMP: i64 = -1;
+const MAX_TIMESTAMP: i64 = -3;
+const EARLIEST_LOCAL_TIMESTAMP: i64 = -4;
+const LATEST_TIERED_TIMESTAMP: i64 = -5;
+
+struct ListOffsetsPartition { partition: i32, leader_epoch: i32, timestamp: i64 }
+
+struct ListOffsetsTopic { name: String, partitions: Vec<ListOffsetsPartition> }
+
+struct ListOffsetsRequest { isolation_level: i8, topics: Vec<ListOffsetsTopic> }
+
+fn decode_list_offsets_partition(c: Cur) -> Option<(ListOffsetsPartition, Cur)> {
+    read_i32(c).and_then(|p| read_i32(p.1).and_then(|e| read_i64(e.1).and_then(|t| {
+        skip_tags(t.1).map(|end| (ListOffsetsPartition { partition: p.0, leader_epoch: e.0, timestamp: t.0 }, end))
+    })))
+}
+
+fn decode_list_offsets_topic(c: Cur) -> Option<(ListOffsetsTopic, Cur)> {
+    read_compact_string(c).and_then(|name| read_compact_len(name.1).and_then(|n| {
+        range(0, n.0)
+            .fold(Some(([], n.1)), |acc, _i| {
+                acc.and_then(|a| decode_list_offsets_partition(a.1).map(|p| (a.0.push(p.0), p.1)))
+            })
+            .and_then(|ps| skip_tags(ps.1).map(|end| (ListOffsetsTopic { name: name.0, partitions: ps.0 }, end)))
+    }))
+}
+
+/// ListOffsets v7–v10: v10 adds a timeout after the topics.
+fn decode_list_offsets(c: Cur, version: i16) -> Option<ListOffsetsRequest> {
+    read_i32(c).and_then(|_replica| read_i8(_replica.1).and_then(|iso| read_compact_len(iso.1).and_then(|n| {
+        range(0, n.0)
+            .fold(Some(([], n.1)), |acc, _i| acc.and_then(|a| decode_list_offsets_topic(a.1).map(|t| (a.0.push(t.0), t.1))))
+            .and_then(|ts| {
+                let rest = if version >= 10i16 { read_i32(ts.1).map(|x| x.1) } else { Some(ts.1) };
+                rest.and_then(|r| skip_tags(r).map(|_end| ListOffsetsRequest { isolation_level: iso.0, topics: ts.0 }))
+            })
+    })))
+}
+
+/// A request's partitions, in request order: (entry, topic, partition).
+fn list_offsets_entries(req: ListOffsetsRequest) -> Vec<(u64, String, ListOffsetsPartition)> {
+    let flat = req.topics.fold([], |acc, t| acc.concat(t.partitions.map(|p| (t.name, p))));
+    flat.enumerate().map(|e| (e.0, e.1.0, e.1.1))
+}
+
+/// Whether entry `e` names a partition another entry of the request also names (Kafka refuses both).
+fn list_offsets_duplicate(req: ListOffsetsRequest, e: u64) -> bool {
+    let es = list_offsets_entries(req);
+    match es.get(e) {
+        Some(x) => es.any(|y| y.0 != e && y.1 == x.1 && y.2.partition == x.2.partition),
+        None => false,
+    }
+}
+
+/// One partition's answer: error, timestamp, offset, leader epoch.
+struct OffsetAnswer { error: i16, timestamp: i64, offset: i64, leader_epoch: i32 }
+
+fn offset_failed(error: i16) -> OffsetAnswer {
+    OffsetAnswer { error: error, timestamp: -1i64, offset: -1i64, leader_epoch: -1i32 }
+}
+
+/// No offset for the timestamp asked (Kafka answers -1 with no error).
+fn no_offset() -> OffsetAnswer {
+    OffsetAnswer { error: NONE, timestamp: -1i64, offset: -1i64, leader_epoch: -1i32 }
+}
+
+fn offset_at(timestamp: i64, offset: i64) -> OffsetAnswer {
+    OffsetAnswer { error: NONE, timestamp: timestamp, offset: offset, leader_epoch: LEADER_EPOCH }
+}
+
+fn encode_list_offsets_response(correlation_id: i32, req: ListOffsetsRequest, answers: Vec<(u64, OffsetAnswer)>) -> Bytes {
+    let starts = req.topics.fold(([], 0), |acc, t| (acc.0.push(acc.1), acc.1 + t.partitions.len()));
+    let topics = req.topics.enumerate().map(|e| {
+        let (k, t) = e;
+        let first = match starts.0.get(k) {
+            Some(x) => x,
+            None => error("encode_list_offsets_response: a topic without a starting entry"),
+        };
+        Bytes::join([
+            enc_compact_string(t.name),
+            enc_compact_array(t.partitions.enumerate().map(|pe| {
+                match answers.filter(|a| a.0 == first + pe.0).first() {
+                    Some(a) => Bytes::join([
+                        Bytes::from_i32_be(pe.1.partition),
+                        Bytes::from_i16_be(a.1.error),
+                        Bytes::from_i64_be(a.1.timestamp),
+                        Bytes::from_i64_be(a.1.offset),
+                        Bytes::from_i32_be(a.1.leader_epoch),
+                        no_tags(),
+                    ]),
+                    None => error("encode_list_offsets_response: a partition entry has no answer"),
+                }
+            })),
+            no_tags(),
+        ])
+    });
+    frame(Bytes::join([
+        response_header_v1(correlation_id),
+        Bytes::from_i32_be(0i32),
+        enc_compact_array(topics),
+        no_tags(),
+    ]))
+}
+
+/// The answer found in stored batch `stored` for timestamp `t`: with `exact`, the first record whose timestamp is
+/// `t` (the partition's greatest); otherwise the first at or after `t`. A batch whose records do not parse, or do
+/// not hold what its header promised, is reported corrupt (CORRUPT_MESSAGE), as Kafka fails such a read.
+fn timestamp_answer(stored: Option<Bytes>, t: i64, exact: bool) -> OffsetAnswer {
+    match stored {
+        None => error("timestamp_answer: a stored batch's blob cannot be read"),
+        Some(b) => {
+            if exact {
+                match offset_of_timestamp(b, t) {
+                    Some(Some(o)) => offset_at(t, o),
+                    _ => offset_failed(CORRUPT_MESSAGE),
+                }
+            } else {
+                match first_at_or_after(b, t) {
+                    Some(Some(x)) => offset_at(x.0, x.1),
+                    _ => offset_failed(CORRUPT_MESSAGE),
+                }
+            }
+        }
+    }
+}

@@ -386,3 +386,23 @@ fn encode_init_producer_id_response(correlation_id: i32, error: i16, producer_id
         no_tags(),
     ]))
 }
+
+// ---------------------------------------------------------------- the offset and time indexes
+
+/// Offsets per chunk of the chunk index.
+const CHUNK: i64 = 256;
+
+/// The chunks a batch covering offsets `base..=last` falls in.
+fn chunks_of(base: i64, last: i64) -> Vec<i64> {
+    range(0, (last / CHUNK - base / CHUNK + 1i64) as u64).map(|k| base / CHUNK + k as i64)
+}
+
+/// The time index rows the placed batches add, given the partition's greatest timestamp `m` before them: each batch
+/// whose greatest timestamp is above every earlier one's, with that timestamp and its base.
+fn time_marks(placed: Vec<(i64, i64, i64, Bytes)>, m: i64) -> Vec<(i64, i64)> {
+    let end = placed.fold(([], m), |acc, pb| {
+        let (marks, top) = acc;
+        if pb.2 > top { (marks.push((pb.2, pb.0)), pb.2) } else { (marks, top) }
+    });
+    end.0
+}

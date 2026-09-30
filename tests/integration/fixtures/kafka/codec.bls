@@ -9,6 +9,7 @@ include "../../../../examples/kafka/metadata.bls";
 include "../../../../examples/kafka/topics.bls";
 include "../../../../examples/kafka/records.bls";
 include "../../../../examples/kafka/produce.bls";
+include "../../../../examples/kafka/fetch.bls";
 
 /// Read by the topic functions: the broker's id and the partition count a topic gets by default.
 param NODE_ID: i32 = 1;
@@ -31,6 +32,12 @@ input describe_resp(corr: i32, resources: Vec<(i8, String, Option<Vec<String>>, 
 /// The answers of a Produce response to the request `frame`: per entry (in request order) its position, error, base
 /// offset, log start, message and bad batch.
 input produce_resp(corr: i32, frame: Bytes, answers: Vec<(u64, i16, i64, i64, Option<String>, Option<i32>)>);
+/// The answers of a Fetch response to request `frame`: the request-level error, and per entry its position, error,
+/// high watermark, log start and batches.
+input fetch_resp(corr: i32, frame: Bytes, err: i16, answers: Vec<(u64, i16, i64, i64, Vec<Bytes>)>);
+/// The answers of a ListOffsets response to request `frame`: per entry its position, error, timestamp, offset and
+/// leader epoch.
+input list_resp(corr: i32, frame: Bytes, answers: Vec<(u64, i16, i64, i64, i32)>);
 /// Batches appended to one partition one by one, from an empty log and no producer state.
 input seq_case(id: u64, batches: Vec<Bytes>);
 /// Bytes to split into frames.
@@ -108,6 +115,43 @@ fn sequence_each(batches: Vec<Bytes>) -> Vec<(i16, i64)> {
     end.0
 }
 
+fn fetch_of(b: Bytes) -> Option<FetchRequest> {
+    request_body(b).and_then(|c| decode_fetch(c))
+}
+
+fn list_of(b: Bytes) -> Option<ListOffsetsRequest> {
+    request_prefix(cur(b)).and_then(|p| request_body(b).and_then(|c| decode_list_offsets(c, p.1)))
+}
+
+/// The bytes a stream write of `parts` sends.
+fn render(parts: Vec<Part>) -> Bytes {
+    Bytes::join(parts.map(|p| match p {
+        Part::Bytes(b) => b,
+        Part::Blob(bl, lo, hi) => match bl.read(lo, hi) {
+            Some(x) => x,
+            None => error("render: a blob of this tick cannot be read"),
+        },
+    }))
+}
+
+fn fetch_bytes_of(corr: i32, frame: Bytes, err: i16, answers: Vec<(u64, i16, i64, i64, Vec<Bytes>)>) -> Option<Bytes> {
+    fetch_of(frame).map(|req| render(fetch_response_parts(corr, err, req, answers.map(|a| (a.0, FetchAnswer {
+        error: a.1,
+        high_watermark: a.2,
+        log_start: a.3,
+        batches: a.4.map(|b| Blob::of(b)),
+    })))))
+}
+
+fn list_bytes_of(corr: i32, frame: Bytes, answers: Vec<(u64, i16, i64, i64, i32)>) -> Option<Bytes> {
+    list_of(frame).map(|req| encode_list_offsets_response(corr, req, answers.map(|a| (a.0, OffsetAnswer {
+        error: a.1,
+        timestamp: a.2,
+        offset: a.3,
+        leader_epoch: a.4,
+    }))))
+}
+
 fn request_body(b: Bytes) -> Option<Cur> {
     request_header(cur(b)).map(|p| p.1)
 }
@@ -139,6 +183,10 @@ view v_apiv_resp(corr, u, b) = apiv_resp(corr, u), let b = apiv_bytes(corr, u);
 view v_meta_resp(corr, b) = meta_resp(corr, brokers, cluster, controller, topics, have), let b = meta_bytes(corr, brokers, cluster, controller, topics, have);
 view v_create(f, r) = req(f), let r = create_of(f);
 view v_produce(f, r) = req(f), let r = produce_of(f);
+view v_fetch(f, r) = req(f), let r = fetch_of(f);
+view v_list(f, r) = req(f), let r = list_of(f);
+view v_fetch_resp(corr, b) = fetch_resp(corr, f, err, answers), let b = fetch_bytes_of(corr, f, err, answers);
+view v_list_resp(corr, b) = list_resp(corr, f, answers), let b = list_bytes_of(corr, f, answers);
 view v_seq(id, outs) = seq_case(id, batches), let outs = sequence_each(batches);
 view v_init_pid(f, r) = req(f), let r = init_pid_of(f);
 /// Each entry's check of a Produce request (error, message), as the broker checks it.

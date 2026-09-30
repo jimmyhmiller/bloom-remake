@@ -47,6 +47,7 @@ pub fn check(hir: &mut Hir, diags: &mut Diagnostics) -> Result<(), InternalError
         conjunct_eq: false,
         placed: None,
         in_conjunction: true,
+        settle_duration: false,
         roles: BTreeMap::new(),
         free: BTreeSet::new(),
     };
@@ -252,6 +253,8 @@ struct Checker<'d> {
     /// Whether the body being walked is a conjunction the rule's valuations satisfy (not under `not`, `any` or
     /// `forall`).
     in_conjunction: bool,
+    /// Set while settling a `Duration` sum whose other operand nothing else decided: it is then a `Duration`.
+    settle_duration: bool,
     /// The solved role of each `Node` leaf's root, once roles are solved.
     roles: BTreeMap<T, Role>,
     /// `Node` leaves a flow created, whose role is only what flows in (nothing, for a `None`'s): the roots of classes
@@ -1872,6 +1875,13 @@ impl Checker<'_> {
                             self.con(&mut hir.types, TypeDef::Bytes)
                         }
                         Builtin::Lib(LibFn::BytesEmpty) => self.con(&mut hir.types, TypeDef::Bytes),
+                        Builtin::Lib(LibFn::DurationFromMillis) => {
+                            let i = self.con(&mut hir.types, TypeDef::Int(IntTy::I64));
+                            for a in &ats {
+                                self.unify(&hir.types, *a, i, span);
+                            }
+                            self.con(&mut hir.types, TypeDef::Duration)
+                        }
                         Builtin::Lib(LibFn::BlobOf) => {
                             let b = self.con(&mut hir.types, TypeDef::Bytes);
                             for a in &ats {
@@ -2247,6 +2257,31 @@ impl Checker<'_> {
                 self.settle_plain(hir, &d);
                 continue;
             }
+            // A sum or difference with a `Duration` whose other operand nothing decided: it is a duration too.
+            let sums: Vec<(usize, T, T)> = self
+                .deferred
+                .iter()
+                .enumerate()
+                .filter_map(|(i, d)| match d {
+                    Deferred::Arith { l, r, .. } => Some((i, *l, *r)),
+                    _ => None,
+                })
+                .collect();
+            let duration_sum = sums.into_iter().find(|&(_, l, r)| {
+                [l, r]
+                    .into_iter()
+                    .any(|t| self.leaf(t).is_some_and(|ty| matches!(hir.types.get(ty), Some(TypeDef::Duration))))
+            });
+            if let Some((i, _, _)) = duration_sum {
+                let d = self.deferred.remove(i);
+                self.settle_duration = true;
+                let done = self.try_deferred(hir, &d);
+                self.settle_duration = false;
+                if !done {
+                    return self.bugs.push(internal_error!("a Duration sum did not settle"));
+                }
+                continue;
+            }
             // A flow whose source is still unknown after everything else: nothing but the flow constrains it, so it
             // is settled as an equation (the source takes the target's shape).
             if let Some(i) = self.deferred.iter().position(|d| matches!(d, Deferred::Flow { .. })) {
@@ -2350,6 +2385,17 @@ impl Checker<'_> {
                         true
                     }
                     (Some(TypeDef::Duration), _) | (_, Some(TypeDef::Duration)) => {
+                        // `x + d` and `x - d` with `x` not yet known may be an `Instant` plus a duration: wait for
+                        // `x` (only `d - x` makes `x` a duration at once), and settle it as a duration only when
+                        // nothing else decides it.
+                        let open = match op {
+                            BinOp::Add => ld.is_none() || rd.is_none(),
+                            BinOp::Sub => ld.is_none(),
+                            _ => false,
+                        };
+                        if open && !self.settle_duration {
+                            return false;
+                        }
                         if matches!(op, BinOp::Add | BinOp::Sub) {
                             self.unify(&hir.types, l, r, span);
                             self.unify(&hir.types, l, res, span);
@@ -3098,6 +3144,7 @@ impl Checker<'_> {
             (_, Some(TypeDef::Str), "to_lowercase") => (Builtin::Lib(LibFn::StrToLowercase), None, 0),
             (_, Some(TypeDef::Str), "to_utf8") => (Builtin::Lib(LibFn::StrToUtf8), None, 0),
             (_, Some(TypeDef::Str), "parse_i64") => (Builtin::Lib(LibFn::StrParseI64), None, 0),
+            (_, Some(TypeDef::Duration), "as_millis") => (Builtin::Lib(LibFn::DurationAsMillis), None, 0),
             (_, Some(TypeDef::Bytes), "from_utf8") => (Builtin::Lib(LibFn::BytesFromUtf8), None, 0),
             (_, Some(TypeDef::Blob), "read") => (Builtin::Lib(LibFn::BlobRead), None, 2),
             (_, Some(TypeDef::Bytes), "uvarint_at") => (Builtin::Lib(LibFn::BytesUvarintAt), None, 1),
@@ -3304,6 +3351,7 @@ impl Checker<'_> {
             (_, Builtin::Lib(LibFn::StrSplitWhitespace)) => self.bound(Shape::Vec(recv)),
             (_, Builtin::Lib(LibFn::StrToLowercase)) => recv,
             (_, Builtin::Lib(LibFn::StrToUtf8)) => self.con(&mut hir.types, TypeDef::Bytes),
+            (_, Builtin::Lib(LibFn::DurationAsMillis)) => self.con(&mut hir.types, TypeDef::Int(IntTy::I64)),
             (_, Builtin::Lib(LibFn::StrParseI64)) => {
                 let i = self.con(&mut hir.types, TypeDef::Int(IntTy::I64));
                 self.bound(Shape::Option(i))

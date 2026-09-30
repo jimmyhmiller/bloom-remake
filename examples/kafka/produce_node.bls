@@ -13,6 +13,18 @@
 /// `baseOffset` written).
 durable table batch(tid: Bytes, part: i32, base: i64, last: i64, max_ts: i64, bytes: Blob) key(tid, part, base);
 
+/// The chunk index: every batch under each chunk of `CHUNK` offsets it covers, so the batch holding an offset is found
+/// among at most `CHUNK` rows whatever the log's length (Fetch after a seek).
+durable table batch_chunk(tid: Bytes, part: i32, chunk: i64, base: i64) key(tid, part, chunk, base);
+
+/// The time index: the batches that raised their partition's greatest timestamp, by that timestamp. Its rows grow in
+/// timestamp and offset together, so the first row at or after a timestamp is the first batch whose greatest
+/// timestamp reaches it (ListOffsets).
+durable table time_index(tid: Bytes, part: i32, ts: i64, base: i64) key(tid, part, ts);
+
+/// Per partition: its greatest timestamp and the first batch that has it.
+durable table max_time(tid: Bytes, part: i32, ts: i64, base: i64) key(tid, part);
+
 /// An idempotent producer's state in a partition: its epoch and its last batches (see `ProducerEntry`).
 durable table producer(tid: Bytes, part: i32, pid: i64, epoch: i16, recent: Vec<(i32, i32, i64, i64)>) key(tid, part, pid);
 
@@ -57,6 +69,21 @@ view sequenced(tid, p, s) =
 
 store_batches: while sequenced(tid, p, s), pb in placed_all(s), let blob = Blob::of(pb.3) {
     next batch(tid, p, pb.0, pb.1, pb.2, blob);
+}
+
+index_chunks: while sequenced(tid, p, s), pb in placed_all(s), ch in chunks_of(pb.0, pb.1) {
+    next batch_chunk(tid, p, ch, pb.0);
+}
+
+/// The greatest timestamp of each partition appended to this tick, before the appends (-1 for none).
+view part_max_time(tid, p, m = max!(ts default -1i64)) = per appends(tid, p, _xs), max_time(tid, p, ts, _b);
+
+index_times: while sequenced(tid, p, s), part_max_time(tid, p, m), mk in time_marks(placed_all(s), m) {
+    next time_index(tid, p, mk.0, mk.1);
+}
+
+raise_max_time: while sequenced(tid, p, s), part_max_time(tid, p, m), let Some(mk) = time_marks(placed_all(s), m).last() {
+    upsert max_time(tid, p, mk.0, mk.1);
 }
 
 advance_end: while sequenced(tid, p, s), log_end(tid, p, end) where s.end > end {
@@ -132,4 +159,13 @@ remove_batches: while deleting(_e, _name, id), batch(id, p, b, l, t, blob) {
 }
 remove_producers: while deleting(_e, _name, id), producer(id, p, pid, epoch, recent) {
     delete producer(id, p, pid, epoch, recent);
+}
+remove_chunks: while deleting(_e, _name, id), batch_chunk(id, p, ch, b) {
+    delete batch_chunk(id, p, ch, b);
+}
+remove_times: while deleting(_e, _name, id), time_index(id, p, ts, b) {
+    delete time_index(id, p, ts, b);
+}
+remove_max_time: while deleting(_e, _name, id), max_time(id, p, ts, b) {
+    delete max_time(id, p, ts, b);
 }

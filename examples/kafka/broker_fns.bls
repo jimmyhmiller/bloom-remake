@@ -64,6 +64,10 @@ fn stateful_body_ok(key: i16, fr: Bytes) -> bool {
             decode_produce(b).is_some()
         } else if key == API_INIT_PRODUCER_ID {
             decode_init_producer_id(b).is_some()
+        } else if key == API_FETCH {
+            decode_fetch(b).is_some()
+        } else if key == API_LIST_OFFSETS {
+            frame_prefix(fr).and_then(|p| decode_list_offsets(b, p.1)).is_some()
         } else {
             false
         }
