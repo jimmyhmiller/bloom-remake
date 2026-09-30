@@ -2788,6 +2788,9 @@ never truncated or defaulted).
 | BLS0210 | E | unknown attribute, or an attribute on an item that does not take it |
 | BLS0211 | E | a `const`, `param`, module value parameter or spec node name that is not SCREAMING_CASE |
 | BLS0212 | E | `from`/`principal` on an atom that is not a channel or loopback |
+| BLS0213 | E | a recursive function (functions are total, §16.1) |
+| BLS0214 | E | a `let` block outside a function body, or a closure that is not a combinator's argument in one (§16.1) |
+| BLS0215 | E | a function body that reads a relation, `now()`, `tick()`, `self`, randomness or a role's members (§16.1) |
 
 **Types (BLS03xx)**
 
@@ -3168,6 +3171,7 @@ All functions are pure. Methods on values use `.`; there are no closures outside
 | Strings | `len`, `++`, `split_whitespace() -> Vec<String>`, `split(sep)`, `to_lowercase`, `to_uppercase`, `trim`, `starts_with`, `ends_with`, `contains`, `replace`, `parse_u64() -> Option<u64>`, `parse_i64`, `to_string` (every type) |
 | Bytes | `len`, `slice(lo, hi)`, `concat`, `to_hex`, `from_utf8() -> Option<String>` |
 | Vec | `len`, `get(i) -> Option<T>`, `first`, `last`, `push`, `concat`, `contains`, `enumerate() -> Vec<(u64, T)>`, `sort`, `reverse`, `dedup`, `map`, `filter`, `filter_map`, `fold`, `all`, `any` (closures: function bodies only) |
+| Ranges | `range(lo: u64, hi: u64) -> Vec<u64>`: `lo` up to, not including, `hi`; a combinator over `range(…)` walks it without building it |
 | Set | `len`, `contains`, `insert`, `remove`, `union`, `intersection`, `difference`, `items() -> Vec<T>` |
 | Map | `len`, `get(k) -> Option<V>`, `contains_key`, `insert`, `remove`, `keys`, `values`, `entries() -> Vec<(K, V)>` |
 | Option | `is_some`, `is_none`, `unwrap_or(d)`, `map`, `and_then`; `Some`, `None` |

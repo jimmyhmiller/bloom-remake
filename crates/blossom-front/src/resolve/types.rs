@@ -135,6 +135,7 @@ impl<'t> Resolver<'t, '_> {
             write_redirect: Default::default(),
             own_items: None,
             broken: Default::default(),
+            fns: Default::default(),
         });
         ScopeIdx(self.scopes.len() - 1)
     }

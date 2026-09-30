@@ -209,8 +209,12 @@ pub(crate) fn eval(cx: &Ctx<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<
             }
             Err(bug(format!("no match arm matched {v:?}")))
         }
+        Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::Lib(f)),
+            args,
+        } => crate::func::library(cx, env, *f, args),
         Expr::Call { f: FnRef::Builtin(f), args } => builtin(cx, env, f, args),
-        Expr::Call { f: FnRef::Fn(_), .. } => Err(unimplemented!("LANG-180", "function calls")),
+        Expr::Call { f: FnRef::Fn(f), args } => crate::func::call(cx, env, *f, args),
         Expr::Collection { kind, elems } => {
             let mut vs = Vec::with_capacity(elems.len());
             for x in elems {
@@ -242,7 +246,8 @@ pub(crate) fn eval(cx: &Ctx<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<
             }
             Ok(kind.eval(lop, &vs)?)
         }
-        Expr::Let { .. } | Expr::Closure { .. } => Err(bug("`let` and closures belong to function bodies".into())),
+        Expr::Let { pat, value, body } => crate::func::let_expr(cx, env, pat, value, body),
+        Expr::Closure { .. } => Err(bug("a closure evaluated outside a combinator".into())),
     }
 }
 

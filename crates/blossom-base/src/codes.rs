@@ -317,6 +317,30 @@ pub static REGISTRY: &[CodeInfo] = &[
         "`from`/`principal` on an atom that is not a channel or loopback",
     ),
     info(
+        "BLS0213",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "a recursive function (functions are total, §16.1)",
+    ),
+    info(
+        "BLS0214",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "a `let` block outside a function body, or a closure that is not a combinator's argument in one (§16.1)",
+    ),
+    info(
+        "BLS0215",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "a function body that reads a relation, `now()`, `tick()`, `self`, randomness or a role's members (§16.1)",
+    ),
+    info(
         "BLS0300",
         Error,
         "blossom-front",
@@ -1160,8 +1184,8 @@ mod tests {
     fn codes_registry_unique() {
         assert_eq!(
             REGISTRY.len(),
-            114,
-            "LANGUAGE §20 has 110 codes; ARCHITECTURE §0.3 adds 4"
+            117,
+            "LANGUAGE §20 has 113 codes; ARCHITECTURE §0.3 adds 4"
         );
         for (a, b) in REGISTRY.iter().zip(REGISTRY.iter().skip(1)) {
             assert!(

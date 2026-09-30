@@ -37,6 +37,8 @@ hir_id! {
     HVarId;
     /// A rule scope: a handler, a view alternative, a fact or a spec view.
     ScopeId;
+    /// A pure function (LANGUAGE §16.1).
+    HFnId;
 }
 
 /// A resolved program.
@@ -54,7 +56,9 @@ pub struct Hir {
     pub views: Vec<HView>,
     pub facts: Vec<HFact>,
     pub invariants: Vec<HInvariant>,
-    /// Variable tables, one per rule scope.
+    /// Pure functions (LANGUAGE §16.1).
+    pub fns: Vec<HFn>,
+    /// Variable tables, one per rule scope (and one per function).
     pub scopes: Vec<HScope>,
     /// Filled by type checking: the type of every variable of every scope.
     pub var_types: Vec<Vec<TypeId>>,
@@ -713,6 +717,35 @@ pub enum HExprKind {
         expr: Box<HExpr>,
         lattice: TypeId,
     },
+    /// A call of a pure function.
+    Call {
+        f: HFnId,
+        args: Vec<HExpr>,
+    },
+    /// `let pat[: ty] = value; body` (function bodies only).
+    Let {
+        pat: Box<HPat>,
+        ty: Option<TypeId>,
+        value: Box<HExpr>,
+        body: Box<HExpr>,
+    },
+    /// `|a, b| body`: an argument of a built-in combinator (function bodies only).
+    Closure {
+        params: Vec<HVarId>,
+        body: Box<HExpr>,
+    },
+}
+
+/// A pure function: total, non-recursive (LANGUAGE §16.1). Its variables live in `scope`: the parameters first, then
+/// every `let` and closure binding of its body.
+#[derive(Clone, Debug)]
+pub struct HFn {
+    pub name: QualName,
+    pub scope: ScopeId,
+    pub params: Vec<(HVarId, TypeId)>,
+    pub ret: TypeId,
+    pub body: HExpr,
+    pub span: Span,
 }
 
 /// The built-in lattice named by a constructor path.
@@ -762,4 +795,6 @@ pub enum Builtin {
     RandRange,
     /// `majority(s, R)` (LANGUAGE §10.9): `|s ∩ R| > |R| / 2` for a set of nodes `s` and a role `R`.
     Majority(HRoleId),
+    /// A function or method of the built-in library (Appendix B); the receiver, if any, first.
+    Lib(blossom_ir::core::LibFn),
 }

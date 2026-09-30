@@ -218,6 +218,8 @@ pub(crate) struct ModScope<'t> {
     pub own_items: Option<&'t [ast::Item]>,
     /// Relations whose declaration failed (and was reported): uses of them are not reported again.
     pub broken: BTreeSet<Symbol>,
+    /// Pure functions declared in this module, by name (LANGUAGE §16.1).
+    pub fns: BTreeMap<Symbol, HFnId>,
 }
 
 impl ModScope<'_> {
@@ -235,6 +237,7 @@ impl ModScope<'_> {
             write_redirect: BTreeMap::new(),
             own_items: None,
             broken: BTreeSet::new(),
+            fns: BTreeMap::new(),
         }
     }
 }
@@ -318,6 +321,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 views: Vec::new(),
                 facts: Vec::new(),
                 invariants: Vec::new(),
+                fns: Vec::new(),
                 scopes: Vec::new(),
                 var_types: Vec::new(),
             },
@@ -625,6 +629,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
         self.declare(s, items, placement, has_roles, false);
         self.acls(s, items);
         self.imports(s, items, placement);
+        self.functions(s, items);
         self.rules(s, items, placement);
     }
 
@@ -1468,6 +1473,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 | ItemKind::Role { .. }
                 | ItemKind::Rel(_)
                 | ItemKind::Timer(_)
+                | ItemKind::Fn(_)
                 | ItemKind::Unsupported { .. } => {}
                 ItemKind::Param { .. } => {}
             }
@@ -1532,6 +1538,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             write_redirect: BTreeMap::new(),
             own_items: Some(&module.items),
             broken: Default::default(),
+            fns: BTreeMap::new(),
         });
         // Value and relation parameters.
         let mut given: BTreeMap<Symbol, &'t ast::Expr> = BTreeMap::new();
@@ -1741,6 +1748,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             write_redirect: BTreeMap::new(),
             own_items: Some(&p.items),
             broken: Default::default(),
+            fns: BTreeMap::new(),
         });
         for item in &p.items {
             match &item.kind {

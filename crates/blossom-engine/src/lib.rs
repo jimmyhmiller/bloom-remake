@@ -11,6 +11,7 @@
 
 mod engine;
 mod expr;
+mod func;
 mod rule;
 mod store;
 mod strata;

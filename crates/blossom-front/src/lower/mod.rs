@@ -92,6 +92,7 @@ pub fn lower(hir: &Hir, deployment: &Deployment<'_>) -> Result<Lowered, Internal
         let id = l.declare_hrel(HRelId(i as u32))?;
         l.rels.push(id);
     }
+    l.functions()?;
     l.acls()?;
     l.members(deployment)?;
     l.tables()?;

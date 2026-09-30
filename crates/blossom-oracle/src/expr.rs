@@ -282,8 +282,13 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
                 .map_err(|e| ExprError::Oracle(internal_error!("the PRF: {e}").into()))?;
             Ok(Value::Tuple(vec![Value::Int(IntValue::U64(p)), y].into()))
         }
-        Expr::Call { .. } => Err(ExprError::Oracle(
-            blossom_base::unimplemented_error!("LANG-180", "function calls in the oracle (WP M4.1)").into(),
+        Expr::Call { f: FnRef::Fn(id), args } => crate::library::call(scope, env, *id, args),
+        Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::Lib(f)),
+            args,
+        } => crate::library::lib(scope, env, *f, args),
+        Expr::Call { f: FnRef::Builtin(b), .. } => Err(ExprError::Oracle(
+            blossom_base::unimplemented_error!("LANG-180", "the built-in {b:?} in the oracle").into(),
         )),
         Expr::Collection { kind, elems } => {
             let mut vs = Vec::with_capacity(elems.len());
@@ -320,8 +325,9 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
             }
             Ok(kind.eval(lop, &vs)?)
         }
-        Expr::Let { .. } | Expr::Closure { .. } => Err(ExprError::Oracle(
-            internal_error!("`let` and closures appear only in function bodies").into(),
+        Expr::Let { pat, value, body } => crate::library::let_in(scope, env, pat, value, body),
+        Expr::Closure { .. } => Err(ExprError::Oracle(
+            internal_error!("a closure evaluated outside a combinator's argument").into(),
         )),
     }
 }
