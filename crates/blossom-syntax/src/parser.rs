@@ -1894,12 +1894,19 @@ impl Parser<'_> {
                         self.expr(0);
                     }
                     self.expect(FAT_ARROW);
-                    self.expr(0);
+                    // An arm's body is an expression, or a block of `let`s and a final expression; after a block the
+                    // comma is optional.
+                    let block = self.at(L_CURLY);
+                    if block {
+                        self.block_expr();
+                    } else {
+                        self.expr(0);
+                    }
                     self.complete(a, MATCHARM);
                     if old == self.pos {
                         self.bump();
                     }
-                    if !self.eat(COMMA) {
+                    if !self.eat(COMMA) && !block {
                         break;
                     }
                 }

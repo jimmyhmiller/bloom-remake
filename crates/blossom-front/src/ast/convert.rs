@@ -1508,7 +1508,11 @@ impl Cx<'_> {
                 let mut arms = Vec::new();
                 for a in children_of(node, MATCHARM) {
                     let aspan = self.span(&a);
-                    let es: Vec<Expr> = expr_children(&a).map(|e| self.expr(&e)).collect();
+                    let mut es: Vec<Expr> = expr_children(&a).map(|e| self.expr(&e)).collect();
+                    // A block body follows the pattern and guard.
+                    if let Some(block) = child_of(&a, BLOCKEXPR) {
+                        es.push(self.block_expr(&block));
+                    }
                     let mut it = es.into_iter();
                     match (it.next(), it.next(), it.next()) {
                         (Some(pat), Some(body), None) => arms.push(MatchArm { pat, guard: None, body }),

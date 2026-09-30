@@ -1,0 +1,77 @@
+//! Metadata (key 3), version 13 (flexible).
+
+/// A requested topic: by id, by name, or both.
+struct MetadataTopicRequest { topic_id: Bytes, name: Option<String> }
+
+/// MetadataRequest v13. `topics` is `None` for "all topics".
+struct MetadataRequest {
+    topics: Option<Vec<MetadataTopicRequest>>,
+    allow_auto_topic_creation: bool,
+    include_topic_authorized_operations: bool,
+}
+
+fn decode_metadata_topic(c: Cur) -> Option<(MetadataTopicRequest, Cur)> {
+    read_uuid(c).and_then(|id| read_compact_nullable_string(id.1).and_then(|name| {
+        skip_tags(name.1).map(|end| (MetadataTopicRequest { topic_id: id.0, name: name.0 }, end))
+    }))
+}
+
+fn decode_metadata_request(c: Cur) -> Option<MetadataRequest> {
+    read_compact_nullable_len(c).and_then(|len| {
+        let topics = match len.0 {
+            None => Some((None, len.1)),
+            Some(n) => range(0, n)
+                .fold(Some(([], len.1)), |acc, _i| acc.and_then(|a| decode_metadata_topic(a.1).map(|t| (a.0.push(t.0), t.1))))
+                .map(|a| (Some(a.0), a.1)),
+        };
+        topics.and_then(|t| read_bool(t.1).and_then(|auto| read_bool(auto.1).and_then(|ops| {
+            skip_tags(ops.1).map(|_end| MetadataRequest {
+                topics: t.0,
+                allow_auto_topic_creation: auto.0,
+                include_topic_authorized_operations: ops.0,
+            })
+        })))
+    })
+}
+
+/// A broker in a metadata response.
+struct BrokerInfo { node_id: i32, host: String, port: i32, rack: Option<String> }
+
+fn encode_broker(b: BrokerInfo) -> Bytes {
+    Bytes::join([
+        Bytes::from_i32_be(b.node_id), enc_compact_string(b.host), Bytes::from_i32_be(b.port),
+        enc_compact_nullable_string(b.rack), no_tags(),
+    ])
+}
+
+/// UNKNOWN_TOPIC_OR_PARTITION (3), for a requested topic this broker does not have.
+fn encode_unknown_topic(t: MetadataTopicRequest) -> Bytes {
+    Bytes::join([
+        Bytes::from_i16_be(3i16), enc_compact_nullable_string(t.name), t.topic_id, enc_bool(false),
+        enc_compact_array([]), Bytes::from_i32_be(-2147483648i32), no_tags(),
+    ])
+}
+
+/// MetadataResponse v13 for a cluster of `brokers` with no topics (S6): a requested topic is unknown.
+fn encode_metadata_response(
+    correlation_id: i32,
+    req: MetadataRequest,
+    brokers: Vec<BrokerInfo>,
+    cluster_id: String,
+    controller_id: i32,
+) -> Bytes {
+    let topics = match req.topics {
+        Some(ts) => ts.map(|t| encode_unknown_topic(t)),
+        None => [],
+    };
+    frame(Bytes::join([
+        response_header_v1(correlation_id),
+        Bytes::from_i32_be(0i32),
+        enc_compact_array(brokers.map(|b| encode_broker(b))),
+        enc_compact_nullable_string(Some(cluster_id)),
+        Bytes::from_i32_be(controller_id),
+        enc_compact_array(topics),
+        Bytes::from_i16_be(0i16),
+        no_tags(),
+    ]))
+}

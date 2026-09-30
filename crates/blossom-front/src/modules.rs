@@ -3,6 +3,10 @@
 //! Every file is a module. A module path `a::b` names `a/b.bls` (or `a/b/mod.bls`) relative to the directory of the
 //! program root. [`ModuleTree::load`] parses the root and, transitively, every file named by a `use` or `import`
 //! path, converting each to the owned AST. Loading goes through the [`Loader`] trait, so the frontend does no I/O.
+//!
+//! `include "file.bls";` is textual (LANGUAGE §6.7, LANG-005): the file, resolved relative to the including file, is
+//! parsed and its items take the `include`'s place, recursively; an include cycle is BLS0204. `include M;` (a
+//! module's items, flat) and `include "file.ded";` are not built yet (BLS0908).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -47,6 +51,7 @@ impl ModuleTree {
         };
         let root_key = file.key.clone();
         let root_ast = parse(&file, sources, diags)?;
+        let root_ast = expand_includes(root_ast, &root_key, loader, sources, diags, &mut vec![root_key.clone()])?;
         let mut tree = ModuleTree {
             root_key,
             root: root_ast,
@@ -92,11 +97,108 @@ impl ModuleTree {
             let Some(parsed) = parse(&f, sources, diags) else {
                 continue;
             };
+            let key = f.key.clone();
+            let Some(parsed) = expand_includes(parsed, &key, loader, sources, diags, &mut vec![key.clone()]) else {
+                continue;
+            };
             referenced(&parsed.items, &mut pending);
             tree.modules.insert(name, parsed);
         }
         Some(tree)
     }
+}
+
+/// Replaces every `include "file.bls";` of `file` (whose key is `key`), in its items, `at` sections and modules, by
+/// the included file's items. `stack` holds the files being expanded, to report a cycle.
+fn expand_includes(
+    mut file: ast::File,
+    key: &Arc<str>,
+    loader: &mut dyn Loader,
+    sources: &mut SourceDb,
+    diags: &mut Diagnostics,
+    stack: &mut Vec<Arc<str>>,
+) -> Option<ast::File> {
+    let before = diags.error_count();
+    file.items = expand_items(std::mem::take(&mut file.items), key, loader, sources, diags, stack);
+    (diags.error_count() == before).then_some(file)
+}
+
+fn expand_items(
+    items: Vec<ast::Item>,
+    key: &Arc<str>,
+    loader: &mut dyn Loader,
+    sources: &mut SourceDb,
+    diags: &mut Diagnostics,
+    stack: &mut Vec<Arc<str>>,
+) -> Vec<ast::Item> {
+    let mut out = Vec::with_capacity(items.len());
+    for mut item in items {
+        match item.kind {
+            ItemKind::Include(ast::IncludeTarget::File(path)) => {
+                if !path.ends_with(".bls") {
+                    diags.push(
+                        Diagnostic::not_implemented(
+                            blossom_base::FeatureId("LANG-220"),
+                            &format!("`include \"{path}\"` of a file other than a `.bls` file"),
+                            "the Blossom frontend (slice 2)",
+                        )
+                        .with_primary(item.span),
+                    );
+                    continue;
+                }
+                let loaded = match loader.load(Some(key), &path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        diags.push(
+                            Diagnostic::new(code!("BLS0204"), format!("cannot include `{path}`: {e}")).with_primary(item.span),
+                        );
+                        continue;
+                    }
+                };
+                if stack.contains(&loaded.key) {
+                    diags.push(
+                        Diagnostic::new(code!("BLS0204"), format!("`{path}` includes itself (through {})", stack.join(", ")))
+                            .with_primary(item.span),
+                    );
+                    continue;
+                }
+                let Some(parsed) = parse(&loaded, sources, diags) else {
+                    continue;
+                };
+                stack.push(loaded.key.clone());
+                let inner = expand_items(parsed.items, &loaded.key, loader, sources, diags, stack);
+                stack.pop();
+                out.extend(inner);
+            }
+            ItemKind::Include(ast::IncludeTarget::Module(_)) => {
+                diags.push(
+                    Diagnostic::not_implemented(
+                        blossom_base::FeatureId("LANG-005"),
+                        "`include M;` (a module's items, flat)",
+                        "the Blossom frontend (slice 2)",
+                    )
+                    .with_primary(item.span),
+                );
+            }
+            ItemKind::At { role, items } => {
+                item.kind = ItemKind::At {
+                    role,
+                    items: expand_items(items, key, loader, sources, diags, stack),
+                };
+                out.push(item);
+            }
+            ItemKind::Module(mut m) => {
+                m.items = expand_items(std::mem::take(&mut m.items), key, loader, sources, diags, stack);
+                item.kind = ItemKind::Module(m);
+                out.push(item);
+            }
+            other => {
+                item.kind = other;
+                out.push(item);
+            }
+        }
+    }
+    out
 }
 
 /// Whether `name` is an item of the root file (a local module, protocol or type), so no file is needed.

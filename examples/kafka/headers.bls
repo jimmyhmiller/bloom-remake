@@ -1,0 +1,44 @@
+//! Kafka request and response headers (RequestHeader v1–v2, ResponseHeader v0–v1).
+
+/// A request header. `client_id` is a legacy nullable string even in the flexible header v2.
+struct RequestHeader { api_key: i16, api_version: i16, correlation_id: i32, client_id: Option<String> }
+
+const API_METADATA: i16 = 3;
+const API_VERSIONS: i16 = 18;
+
+/// Whether a request of `api_key` at `version` uses the flexible encoding (compact types and tagged fields), which
+/// also puts it in header v2. Only the APIs this broker answers are listed.
+fn flexible(api_key: i16, version: i16) -> bool {
+    (api_key == API_VERSIONS && version >= 3i16) || (api_key == API_METADATA && version >= 9i16)
+}
+
+/// The fixed part of a request header: the API key, version and correlation id, which every version has. The rest
+/// depends on the API and version.
+fn request_prefix(c: Cur) -> Option<(i16, i16, i32, Cur)> {
+    read_i16(c).and_then(|k| read_i16(k.1).and_then(|v| read_i32(v.1).map(|id| (k.0, v.0, id.0, id.1))))
+}
+
+/// A whole request header, header v2 for a flexible request and v1 otherwise.
+fn request_header(c: Cur) -> Option<(RequestHeader, Cur)> {
+    request_prefix(c).and_then(|p| {
+        let (key, version, corr, rest) = p;
+        read_nullable_string(rest).and_then(|cid| {
+            let header = RequestHeader { api_key: key, api_version: version, correlation_id: corr, client_id: cid.0 };
+            if flexible(key, version) {
+                skip_tags(cid.1).map(|after| (header, after))
+            } else {
+                Some((header, cid.1))
+            }
+        })
+    })
+}
+
+/// Response header v0: the correlation id. (ApiVersions answers with header v0 at every version.)
+fn response_header_v0(correlation_id: i32) -> Bytes {
+    Bytes::from_i32_be(correlation_id)
+}
+
+/// Response header v1: the correlation id and tagged fields.
+fn response_header_v1(correlation_id: i32) -> Bytes {
+    Bytes::from_i32_be(correlation_id).concat(no_tags())
+}
