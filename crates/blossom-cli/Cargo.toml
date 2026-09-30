@@ -50,6 +50,10 @@ clap.workspace = true
 
 [dev-dependencies]
 blossom-bench.workspace = true
+# The Kafka broker's kill -9 test speaks the protocol through an independent implementation (decision K5).
+bytes.workspace = true
+kafka-protocol = { version = "0.18.0", default-features = false, features = ["client", "broker"] }
+uuid = "1.18"
 
 [lints]
 workspace = true

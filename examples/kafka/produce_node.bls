@@ -195,23 +195,23 @@ view retention_cut(tid, p, start) =
     retained(tid, p, ss), active_segment(tid, p, act), topic(_name, tid, _parts, cfg), log_start(tid, p, s0),
     let Some(start) = retention_start(ss, act, now().as_millis(), retention(cfg)) where start > s0;
 
-advance_start: while retention_cut(tid, p, start), log_start(tid, p, s0) {
+advance_start: on retention_cut(tid, p, start), log_start(tid, p, s0) {
     upsert log_start(tid, p, start);
 }
-expire_segments: while retention_cut(tid, p, start), segment(tid, p, b, by, mts, mb) where b < start {
+expire_segments: on retention_cut(tid, p, start), segment(tid, p, b, by, mts, mb) where b < start {
     delete segment(tid, p, b, by, mts, mb);
 }
-expire_batches: while retention_cut(tid, p, start), batch(tid, p, b, l, t, blob) where b < start {
+expire_batches: on retention_cut(tid, p, start), batch(tid, p, b, l, t, blob) where b < start {
     delete batch(tid, p, b, l, t, blob);
 }
-expire_chunks: while retention_cut(tid, p, start), batch_chunk(tid, p, ch, b) where ch <= start / CHUNK && b < start {
+expire_chunks: on retention_cut(tid, p, start), batch_chunk(tid, p, ch, b) where ch <= start / CHUNK && b < start {
     delete batch_chunk(tid, p, ch, b);
 }
-expire_times: while retention_cut(tid, p, start), time_index(tid, p, sg, ts, b) where sg < start {
+expire_times: on retention_cut(tid, p, start), time_index(tid, p, sg, ts, b) where sg < start {
     delete time_index(tid, p, sg, ts, b);
 }
 /// A producer whose batches are all below the new log start is forgotten, as Kafka's `truncateHead` does.
-expire_producers: while retention_cut(tid, p, start), producer(tid, p, pid, epoch, recent)
+expire_producers: on retention_cut(tid, p, start), producer(tid, p, pid, epoch, recent)
         where last_offset_of(recent) < start {
     delete producer(tid, p, pid, epoch, recent);
 }
