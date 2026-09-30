@@ -266,6 +266,11 @@ fn next_sequence(x: ProducerEntry) -> i32 {
     }
 }
 
+/// The last offset a producer's remembered batches reach (-1 for none).
+fn last_offset_of(recent: Vec<(i32, i32, i64, i64)>) -> i64 {
+    recent.last().map(|r| r.3).unwrap_or(-1i64)
+}
+
 /// The producer state after appending a batch at offsets `base..=last`.
 fn after_append(e: Option<ProducerEntry>, h: BatchHeader, base: i64, last: i64) -> ProducerEntry {
     let batch = (h.base_sequence, seq_add(h.base_sequence, h.last_offset_delta), base, last);
@@ -397,12 +402,77 @@ fn chunks_of(base: i64, last: i64) -> Vec<i64> {
     range(0, (last / CHUNK - base / CHUNK + 1i64) as u64).map(|k| base / CHUNK + k as i64)
 }
 
-/// The time index rows the placed batches add, given the partition's greatest timestamp `m` before them: each batch
-/// whose greatest timestamp is above every earlier one's, with that timestamp and its base.
-fn time_marks(placed: Vec<(i64, i64, i64, Bytes)>, m: i64) -> Vec<(i64, i64)> {
-    let end = placed.fold(([], m), |acc, pb| {
-        let (marks, top) = acc;
-        if pb.2 > top { (marks.push((pb.2, pb.0)), pb.2) } else { (marks, top) }
+// ---------------------------------------------------------------- segments and retention
+
+/// A segment of a partition's log, as Kafka keeps them: its first offset, its bytes, its greatest timestamp (-1 for
+/// none yet) and the first batch holding it. Retention deletes whole segments; the time index is per segment.
+struct Segment { base: i64, bytes: i64, max_ts: i64, max_base: i64 }
+
+/// What a tick's appends do to a partition's segments: the segments written (the active one, and any that filled
+/// and were rolled), the time index rows added (segment, timestamp, batch base), and the active segment after.
+struct SegmentChange { written: Vec<Segment>, marks: Vec<(i64, i64, i64)>, active: i64 }
+
+/// The placed batches added to the active segment `active`, rolling a new segment at a batch that would take a
+/// non-empty segment past `limit` bytes (the topic's `segment.bytes`), as Kafka rolls. A batch raising its
+/// segment's greatest timestamp gets a time index row.
+fn segment_appends(placed: Vec<(i64, i64, i64, Bytes)>, active: Segment, limit: i64) -> SegmentChange {
+    let start: (Vec<Segment>, Segment, Vec<(i64, i64, i64)>) = ([], active, []);
+    let end = placed.fold(start, |acc, pb| {
+        let (done, cur, marks) = acc;
+        let size = pb.3.len() as i64;
+        let roll = cur.bytes > 0i64 && cur.bytes + size > limit;
+        let seg = if roll { Segment { base: pb.0, bytes: 0i64, max_ts: -1i64, max_base: -1i64 } } else { cur };
+        let finished = if roll { done.push(cur) } else { done };
+        if pb.2 > seg.max_ts {
+            (finished, Segment { base: seg.base, bytes: seg.bytes + size, max_ts: pb.2, max_base: pb.0 }, marks.push((seg.base, pb.2, pb.0)))
+        } else {
+            (finished, Segment { base: seg.base, bytes: seg.bytes + size, max_ts: seg.max_ts, max_base: seg.max_base }, marks)
+        }
     });
-    end.0
+    SegmentChange { written: end.0.push(end.1), marks: end.2, active: end.1.base }
+}
+
+/// A topic's `segment.bytes`.
+fn segment_bytes(set: Vec<(String, String)>) -> i64 {
+    match config_value(set, "segment.bytes").parse_i64() {
+        Some(n) => n,
+        None => error("segment_bytes: a stored segment.bytes is not an integer"),
+    }
+}
+
+/// Where retention moves a partition's log start, if it deletes anything: `segments` in offset order (first offset,
+/// bytes, greatest timestamp), `active` the active segment (never deleted), `now_ms` the time, and the topic's
+/// `retention.ms` and `retention.bytes` (-1: unbounded). As Kafka does, segments are deleted from the front while
+/// their greatest timestamp is older than `retention.ms`, then while the log would still hold `retention.bytes`
+/// without the next one.
+fn retention_start(segments: Vec<(i64, i64, i64)>, active: i64, now_ms: i64, limits: (i64, i64)) -> Option<i64> {
+    let (ms, max_bytes) = limits;
+    let old = segments.filter(|x| x.0 != active);
+    let by_time = old.fold((0, true), |acc, x| {
+        if acc.1 && ms >= 0i64 && x.2 < now_ms - ms { (acc.0 + 1, true) } else { (acc.0, false) }
+    }).0;
+    let total = segments.fold(0i64, |n, x| n + x.1);
+    let after_time = old.enumerate().filter(|x| x.0 < by_time).fold(total, |n, x| n - x.1.1);
+    let by_size = old.enumerate().filter(|x| x.0 >= by_time).fold((0, after_time, true), |acc, x| {
+        let (k, left, going) = acc;
+        if going && max_bytes >= 0i64 && left - x.1.1 >= max_bytes { (k + 1, left - x.1.1, true) } else { (k, left, false) }
+    }).0;
+    let deleted = by_time + by_size;
+    if deleted == 0 {
+        None
+    } else {
+        match segments.get(deleted) {
+            Some(x) => Some(x.0),
+            None => error("retention_start: the active segment was deleted"),
+        }
+    }
+}
+
+/// The segment holding a partition's greatest timestamp, the first such on ties, as Kafka finds it: its greatest
+/// timestamp and the first batch holding it.
+fn max_segment(segments: Vec<(i64, i64, i64)>) -> Option<(i64, i64)> {
+    segments.fold(None, |acc, x| match acc {
+        Some(best) => if x.1 > best.0 { Some((x.1, x.2)) } else { Some(best) },
+        None => if x.1 >= 0i64 { Some((x.1, x.2)) } else { None },
+    })
 }

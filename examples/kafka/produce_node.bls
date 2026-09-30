@@ -17,13 +17,16 @@ durable table batch(tid: Bytes, part: i32, base: i64, last: i64, max_ts: i64, by
 /// among at most `CHUNK` rows whatever the log's length (Fetch after a seek).
 durable table batch_chunk(tid: Bytes, part: i32, chunk: i64, base: i64) key(tid, part, chunk, base);
 
-/// The time index: the batches that raised their partition's greatest timestamp, by that timestamp. Its rows grow in
-/// timestamp and offset together, so the first row at or after a timestamp is the first batch whose greatest
-/// timestamp reaches it (ListOffsets).
-durable table time_index(tid: Bytes, part: i32, ts: i64, base: i64) key(tid, part, ts);
+/// A partition's segments, as Kafka keeps them (see `Segment`): retention deletes whole segments.
+durable table segment(tid: Bytes, part: i32, base: i64, bytes: i64, max_ts: i64, max_base: i64) key(tid, part, base);
 
-/// Per partition: its greatest timestamp and the first batch that has it.
-durable table max_time(tid: Bytes, part: i32, ts: i64, base: i64) key(tid, part);
+/// Per partition: the segment appends go to (never deleted by retention).
+durable table active_segment(tid: Bytes, part: i32, base: i64) key(tid, part);
+
+/// The time index, per segment: the batches that raised their segment's greatest timestamp, by that timestamp. Its
+/// rows grow in timestamp and offset together, so a segment's first row at or after a timestamp is its first batch
+/// whose greatest timestamp reaches it (ListOffsets).
+durable table time_index(tid: Bytes, part: i32, seg: i64, ts: i64, base: i64) key(tid, part, seg, ts);
 
 /// An idempotent producer's state in a partition: its epoch and its last batches (see `ProducerEntry`).
 durable table producer(tid: Bytes, part: i32, pid: i64, epoch: i16, recent: Vec<(i32, i32, i64, i64)>) key(tid, part, pid);
@@ -75,15 +78,21 @@ index_chunks: while sequenced(tid, p, s), pb in placed_all(s), ch in chunks_of(p
     next batch_chunk(tid, p, ch, pb.0);
 }
 
-/// The greatest timestamp of each partition appended to this tick, before the appends (-1 for none).
-view part_max_time(tid, p, m = max!(ts default -1i64)) = per appends(tid, p, _xs), max_time(tid, p, ts, _b);
+/// What each partition's appends this tick do to its segments.
+view segment_change(tid, p, ch) =
+    sequenced(tid, p, s), active_segment(tid, p, a), segment(tid, p, a, bytes, mts, mb), topic(_name, tid, _parts, cfg),
+    let ch = segment_appends(placed_all(s), Segment { base: a, bytes: bytes, max_ts: mts, max_base: mb }, segment_bytes(cfg));
 
-index_times: while sequenced(tid, p, s), part_max_time(tid, p, m), mk in time_marks(placed_all(s), m) {
-    next time_index(tid, p, mk.0, mk.1);
+write_segments: while segment_change(tid, p, ch), sg in ch.written {
+    upsert segment(tid, p, sg.base, sg.bytes, sg.max_ts, sg.max_base);
 }
 
-raise_max_time: while sequenced(tid, p, s), part_max_time(tid, p, m), let Some(mk) = time_marks(placed_all(s), m).last() {
-    upsert max_time(tid, p, mk.0, mk.1);
+move_active: while segment_change(tid, p, ch) {
+    upsert active_segment(tid, p, ch.active);
+}
+
+index_times: while segment_change(tid, p, ch), mk in ch.marks {
+    next time_index(tid, p, mk.0, mk.1, mk.2);
 }
 
 advance_end: while sequenced(tid, p, s), log_end(tid, p, end) where s.end > end {
@@ -163,9 +172,46 @@ remove_producers: while deleting(_e, _name, id), producer(id, p, pid, epoch, rec
 remove_chunks: while deleting(_e, _name, id), batch_chunk(id, p, ch, b) {
     delete batch_chunk(id, p, ch, b);
 }
-remove_times: while deleting(_e, _name, id), time_index(id, p, ts, b) {
-    delete time_index(id, p, ts, b);
+remove_times: while deleting(_e, _name, id), time_index(id, p, sg, ts, b) {
+    delete time_index(id, p, sg, ts, b);
 }
-remove_max_time: while deleting(_e, _name, id), max_time(id, p, ts, b) {
-    delete max_time(id, p, ts, b);
+remove_segments: while deleting(_e, _name, id), segment(id, p, b, by, mts, mb) {
+    delete segment(id, p, b, by, mts, mb);
+}
+remove_active: while deleting(_e, _name, id), active_segment(id, p, b) {
+    delete active_segment(id, p, b);
+}
+
+// ---------------------------------------------------------------- retention
+
+/// Checks retention, as Kafka's `log.retention.check.interval.ms` does.
+timer retention_check every RETENTION_CHECK;
+
+/// Per partition, at a retention check: its segments in offset order (first offset, bytes, greatest timestamp).
+view retained(tid, p, ss = collect!((b, bytes, mts))) = retention_check(_n, _at), segment(tid, p, b, bytes, mts, _mb);
+
+/// Where retention moves each partition's log start this check, if it deletes anything.
+view retention_cut(tid, p, start) =
+    retained(tid, p, ss), active_segment(tid, p, act), topic(_name, tid, _parts, cfg), log_start(tid, p, s0),
+    let Some(start) = retention_start(ss, act, now().as_millis(), retention(cfg)) where start > s0;
+
+advance_start: while retention_cut(tid, p, start), log_start(tid, p, s0) {
+    upsert log_start(tid, p, start);
+}
+expire_segments: while retention_cut(tid, p, start), segment(tid, p, b, by, mts, mb) where b < start {
+    delete segment(tid, p, b, by, mts, mb);
+}
+expire_batches: while retention_cut(tid, p, start), batch(tid, p, b, l, t, blob) where b < start {
+    delete batch(tid, p, b, l, t, blob);
+}
+expire_chunks: while retention_cut(tid, p, start), batch_chunk(tid, p, ch, b) where ch <= start / CHUNK && b < start {
+    delete batch_chunk(tid, p, ch, b);
+}
+expire_times: while retention_cut(tid, p, start), time_index(tid, p, sg, ts, b) where sg < start {
+    delete time_index(tid, p, sg, ts, b);
+}
+/// A producer whose batches are all below the new log start is forgotten, as Kafka's `truncateHead` does.
+expire_producers: while retention_cut(tid, p, start), producer(tid, p, pid, epoch, recent)
+        where last_offset_of(recent) < start {
+    delete producer(tid, p, pid, epoch, recent);
 }

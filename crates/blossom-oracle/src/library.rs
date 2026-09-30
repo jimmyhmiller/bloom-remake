@@ -372,6 +372,10 @@ pub(crate) fn lib(scope: &Scope<'_>, env: &[Option<Value>], f: LibFn, args: &[Ex
             Value::Duration(d) => Value::Int(IntValue::I64(d.0 / 1_000_000)),
             other => return Err(bug(format!("`as_millis` of {other:?}"))),
         },
+        LibFn::InstantAsMillis => match val(0)? {
+            Value::Instant(t) => Value::Int(IntValue::I64(t.0 / 1_000_000)),
+            other => return Err(bug(format!("`as_millis` of {other:?}"))),
+        },
         LibFn::BlobOf => {
             let b = bytes_of(val(0)?)?;
             let r = blossom_value::BlobRef::of(&b);

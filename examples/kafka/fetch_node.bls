@@ -112,9 +112,18 @@ view offsets_part(c, j, tid, p, t, end, start) =
     let p = lp.partition, p >= 0i32, p < parts, leader_epoch_error(lp.leader_epoch) == None,
     log_end(tid, p, end), log_start(tid, p, start), let t = lp.timestamp;
 
-/// A search by timestamp: the first batch whose greatest timestamp reaches it, through the time index.
+/// A search by timestamp, as Kafka looks: the first segment whose greatest timestamp reaches it, then that
+/// segment's first time index row at or after it.
+view offsets_segment(c, j, seg = min!(b)) =
+    offsets_part(c, j, tid, p, t, _end, _start), segment(tid, p, b, _bytes, mts, _mb) where t >= 0i64 && mts >= t;
 view offsets_search(c, j, base = min!(b)) =
-    offsets_part(c, j, tid, p, t, _end, _start), time_index(tid, p, ts, b) where t >= 0i64 && ts >= t;
+    offsets_segment(c, j, seg), offsets_part(c, j, tid, p, t, _end, _start), time_index(tid, p, seg, ts, b) where ts >= t;
+
+/// For the greatest timestamp: the segment holding it (the first such), its timestamp and first batch holding it.
+view offsets_max(c, j, best) =
+    offsets_segments(c, j, ss), let Some(best) = max_segment(ss);
+view offsets_segments(c, j, ss = collect!((b, mts, mb))) =
+    offsets_part(c, j, tid, p, t, _end, _start), segment(tid, p, b, _bytes, mts, mb) where t == MAX_TIMESTAMP;
 
 view offsets_answer(c, j, a) {
     offsets_entry(c, j, _name, _lp, req), let a = offset_failed(INVALID_REQUEST) where list_offsets_duplicate(req, j);
@@ -131,9 +140,9 @@ view offsets_answer(c, j, a) {
         where t == EARLIEST_TIMESTAMP || t == EARLIEST_LOCAL_TIMESTAMP;
     offsets_part(c, j, _tid, _p, t, _end, _start), let a = no_offset() where t == LATEST_TIERED_TIMESTAMP;
     // The greatest timestamp: the first record that has it.
-    offsets_part(c, j, tid, p, t, _end, _start), not max_time(tid, p, _, _), let a = no_offset() where t == MAX_TIMESTAMP;
-    offsets_part(c, j, tid, p, t, _end, _start), max_time(tid, p, ts, b), batch(tid, p, b, _l, _mt, blob),
-        let a = timestamp_answer(blob.read(0, blob.len()), ts, true) where t == MAX_TIMESTAMP;
+    offsets_part(c, j, _tid, _p, t, _end, _start), not offsets_max(c, j, _), let a = no_offset() where t == MAX_TIMESTAMP;
+    offsets_part(c, j, tid, p, t, _end, _start), offsets_max(c, j, best), batch(tid, p, best.1, _l, _mt, blob),
+        let a = timestamp_answer(blob.read(0, blob.len()), best.0, true) where t == MAX_TIMESTAMP;
     // A timestamp: the first record at or after it.
     offsets_part(c, j, _tid, _p, t, _end, _start), not offsets_search(c, j, _), let a = no_offset() where t >= 0i64;
     offsets_part(c, j, tid, p, t, _end, _start), offsets_search(c, j, b), batch(tid, p, b, _l, _mt, blob),

@@ -361,6 +361,10 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &[Option<Value>], f: LibFn, args: &[Exp
             Value::Duration(d) => Ok(Value::Int(IntValue::I64(d.0 / 1_000_000))),
             other => Err(bug(format!("`as_millis` of {other:?}"))),
         },
+        LibFn::InstantAsMillis => match value(0)? {
+            Value::Instant(t) => Ok(Value::Int(IntValue::I64(t.0 / 1_000_000))),
+            other => Err(bug(format!("`as_millis` of {other:?}"))),
+        },
         LibFn::StrParseI64 => match value(0)? {
             Value::Str(s) => Ok(some_or_none(s.parse::<i64>().ok().map(|n| Value::Int(IntValue::I64(n))))),
             other => Err(bug(format!("`parse_i64` of {other:?}"))),
