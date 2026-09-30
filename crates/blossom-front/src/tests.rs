@@ -664,7 +664,7 @@ fn streams_declare_their_relations_and_check_how_they_are_used() {
     let to = with_head("stream s: listen;\na: on s.opened(c, p, at) { send s.close(c) to c; }\n");
     assert_eq!(codes(to), vec!["BLS0403"]);
     let kind = with_head("stream s: accept;\n");
-    assert_eq!(codes(kind), vec!["BLS0100"]);
+    assert_eq!(codes(kind), vec!["BLS0200"]);
     let twice = with_head("stream s: listen;\nstream s: connect;\n");
     assert_eq!(codes(twice), vec!["BLS0201"]);
     let not_emit = with_head("stream s: listen;\na: on s.opened(c, p, at) { emit s.close(c); }\n");
