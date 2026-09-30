@@ -24,6 +24,10 @@ param AUTO_CREATE_TOPICS: bool = true;
 param RETENTION_CHECK: Duration = 300s;
 param CLUSTER_ID: String = "blossom-sim";
 param BROKER_ADDR: String = "sim://b1/kafka";
+/// How many batches the Blossom client produces to `CLIENT_TOPIC` and reads back (0: it only asks for versions and
+/// metadata, as in slice 6).
+param CLIENT_BATCHES: u64 = 0;
+param CLIENT_TOPIC: String = "logs";
 
 role Broker;
 role Client;

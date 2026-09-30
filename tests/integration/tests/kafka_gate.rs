@@ -5,6 +5,7 @@
 //! - `kafka-broker-api-versions.sh` (the Java client of Kafka 4.0) prints the versions it supports.
 //! - franz-go (a Go client) reads the metadata.
 //! - Slice 7, item 4: `kafka-topics.sh` creates, lists, describes and deletes topics, and `kcat -L` shows them.
+//! - Slice 7, item 8: franz-go (idempotent by default) produces to three partitions and reads them back.
 //! - Slice 7, items 5 and 6: `kcat -P` produces and `kcat -C` reads it back; the Java console producer (idempotent
 //!   by default) produces, the Java console consumer reads each partition from the earliest offset, and
 //!   `kafka-get-offsets.sh` counts them.
@@ -403,5 +404,28 @@ fn the_java_console_tools_produce_and_consume() {
     let mut want = messages.clone();
     want.sort();
     assert_eq!(read, want);
+    server.stop().unwrap();
+}
+
+#[test]
+fn franz_go_produces_and_consumes() {
+    let Some(go) = on_path("go") else {
+        skipped("Go is not installed");
+        return;
+    };
+    let (server, port) = start_broker();
+    let dir = repo().join("tests/integration/fixtures/kafka/franz");
+    let out = Command::new(go)
+        .args(["run", ".", "produce-consume", &format!("127.0.0.1:{port}")])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "franz-go failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("ok 300 records"), "{stdout}");
     server.stop().unwrap();
 }

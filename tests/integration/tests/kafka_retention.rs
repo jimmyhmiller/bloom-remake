@@ -487,12 +487,7 @@ fn retention_deletes_whole_segments_from_the_front() {
             let start = o.batches[t][first].0;
             assert!(segs.len() > 2, "seed {seed}: only {} segments", segs.len());
             assert_eq!(o.earliest[t], Some(start), "seed {seed}: {}'s log start", name);
-            assert_eq!(
-                o.below[t],
-                Some(1),
-                "seed {seed}: {}'s fetch below the start",
-                name
-            );
+            assert_eq!(o.below[t], Some(1), "seed {seed}: {}'s fetch below the start", name);
             let rest: Vec<u8> = o.batches[t][first..]
                 .iter()
                 .flat_map(|(base, b)| stamped(b, *base))

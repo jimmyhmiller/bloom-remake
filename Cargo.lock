@@ -282,7 +282,10 @@ dependencies = [
  "blossom-value",
  "blossom-verify",
  "blossom-wire",
+ "bytes",
  "clap",
+ "kafka-protocol",
+ "uuid",
 ]
 
 [[package]]
