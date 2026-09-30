@@ -748,6 +748,22 @@ pub struct HFn {
     pub span: Span,
 }
 
+/// The integer type a byte-access name spells (FOREIGN-PROTOCOLS §3): `u8`, `i8`, and the big-endian `u16_be` …
+/// `i64_be`, as in `b.u16_be_at(p)`, `b.put_u16_be(p, x)` and `Bytes::from_u16_be(x)`.
+pub fn byte_int(name: &str) -> Option<IntTy> {
+    Some(match name {
+        "u8" => IntTy::U8,
+        "i8" => IntTy::I8,
+        "u16_be" => IntTy::U16,
+        "i16_be" => IntTy::I16,
+        "u32_be" => IntTy::U32,
+        "i32_be" => IntTy::I32,
+        "u64_be" => IntTy::U64,
+        "i64_be" => IntTy::I64,
+        _ => return None,
+    })
+}
+
 /// The built-in lattice named by a constructor path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LatCtorKind {

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use blossom_base::FnId;
 use blossom_base::internal_error;
 use blossom_ir::core::{BuiltinFn, Expr, FnBody, FnRef, LibFn, Pattern};
-use blossom_value::{Value, value::IntValue};
+use blossom_value::{Value, types::IntTy, value::IntValue};
 
 use crate::expr::{ExprError, ExprResult, Scope, eval, truth};
 
@@ -292,5 +292,131 @@ pub(crate) fn lib(scope: &Scope<'_>, env: &[Option<Value>], f: LibFn, args: &[Ex
                 .collect(),
         ),
         LibFn::StrToLowercase => Value::Str(str_of(val(0)?)?.to_lowercase().into()),
+        LibFn::StrToUtf8 => Value::Bytes(str_of(val(0)?)?.as_bytes().into()),
+        LibFn::BytesFromUtf8 => {
+            let b = bytes_of(val(0)?)?;
+            opt(std::str::from_utf8(&b).ok().map(|s| Value::Str(s.into())))
+        }
+        LibFn::BytesRead(it) => {
+            let b = bytes_of(val(0)?)?;
+            let pos = u64_of(&val(1)?)?;
+            opt(read_int(&b, pos, it)?)
+        }
+        LibFn::BytesPut(it) => {
+            let b = bytes_of(val(0)?)?;
+            let pos = u64_of(&val(1)?)?;
+            let enc = int_bytes(it, &val(2)?)?;
+            let at = usize::try_from(pos).ok();
+            let end = at.and_then(|a| a.checked_add(enc.len())).filter(|e| *e <= b.len());
+            opt(at.zip(end).map(|(a, e)| {
+                let mut out = b.to_vec();
+                if let Some(dst) = out.get_mut(a..e) {
+                    dst.copy_from_slice(&enc);
+                }
+                Value::Bytes(out.into())
+            }))
+        }
+        LibFn::BytesFrom(it) => Value::Bytes(int_bytes(it, &val(0)?)?.into()),
+        LibFn::BytesUvarintAt | LibFn::BytesVarintAt => {
+            let b = bytes_of(val(0)?)?;
+            let pos = u64_of(&val(1)?)?;
+            let got = usize::try_from(pos).ok().and_then(|p| uvarint(&b, p));
+            opt(got.map(|(n, next)| {
+                let v = if f == LibFn::BytesUvarintAt {
+                    Value::Int(IntValue::U64(n))
+                } else {
+                    Value::Int(IntValue::I64(((n >> 1) as i64) ^ -((n & 1) as i64)))
+                };
+                Value::Tuple(vec![v, Value::Int(IntValue::U64(next as u64))].into())
+            }))
+        }
+        LibFn::BytesUvarint => Value::Bytes(uvarint_bytes(u64_of(&val(0)?)?).into()),
+        LibFn::BytesVarint => {
+            let x = match val(0)? {
+                Value::Int(IntValue::I64(x)) => x,
+                other => return Err(bug(format!("`Bytes::varint` of {other:?}"))),
+            };
+            Value::Bytes(uvarint_bytes(((x << 1) ^ (x >> 63)) as u64).into())
+        }
+        LibFn::BytesEmpty => Value::Bytes(Arc::from(&[][..])),
+        LibFn::BytesJoin => {
+            let mut out = Vec::new();
+            for x in vec_of(val(0)?)?.iter() {
+                match x {
+                    Value::Bytes(b) => out.extend_from_slice(b),
+                    other => return Err(bug(format!("`Bytes::join` of {other:?}"))),
+                }
+            }
+            Value::Bytes(out.into())
+        }
     })
+}
+
+/// The byte width of an integer type byte access supports.
+fn width(it: IntTy) -> ExprResult<usize> {
+    match it.bits() {
+        8 | 16 | 32 | 64 => Ok(it.bits() as usize / 8),
+        _ => Err(bug(format!("byte access of {}", it.name()))),
+    }
+}
+
+/// The big-endian integer of type `it` at `pos`, if it lies inside `b`.
+fn read_int(b: &[u8], pos: u64, it: IntTy) -> ExprResult<Option<Value>> {
+    let w = width(it)?;
+    let Some(bytes) = usize::try_from(pos).ok().and_then(|p| b.get(p..p.checked_add(w)?)) else {
+        return Ok(None);
+    };
+    let raw = bytes.iter().fold(0u128, |acc, x| (acc << 8) | u128::from(*x));
+    let bits = it.bits();
+    let v = if it.is_signed() && raw >> (bits - 1) == 1 {
+        raw as i128 - (1i128 << bits)
+    } else {
+        raw as i128
+    };
+    IntValue::from_i128(it, v)
+        .map(|i| Some(Value::Int(i)))
+        .ok_or_else(|| bug(format!("{v} read as {}", it.name())))
+}
+
+/// The big-endian bytes of the integer `v` of type `it`.
+fn int_bytes(it: IntTy, v: &Value) -> ExprResult<Vec<u8>> {
+    let w = width(it)?;
+    let x = match v {
+        Value::Int(i) if i.ty() == it => i.to_i128().ok_or_else(|| bug(format!("{i:?} as i128")))?,
+        other => return Err(bug(format!("{} bytes of {other:?}", it.name()))),
+    };
+    let all = (x as u128).to_be_bytes();
+    all.get(16 - w..)
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| bug(format!("a {w}-byte integer")))
+}
+
+/// An unsigned LEB128 varint at `pos` and the position after it.
+fn uvarint(b: &[u8], pos: usize) -> Option<(u64, usize)> {
+    let mut v: u64 = 0;
+    for i in 0..10 {
+        let byte = *b.get(pos.checked_add(i)?)?;
+        // The tenth byte holds bit 63 only: anything more overflows a u64, or continues past ten bytes.
+        if i == 9 && byte > 1 {
+            return None;
+        }
+        v |= u64::from(byte & 0x7f) << (7 * i);
+        if byte & 0x80 == 0 {
+            return Some((v, pos + i + 1));
+        }
+    }
+    None
+}
+
+fn uvarint_bytes(mut n: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let low = (n & 0x7f) as u8;
+        n >>= 7;
+        if n == 0 {
+            out.push(low);
+            return out;
+        }
+        out.push(low | 0x80);
+    }
 }

@@ -1,0 +1,51 @@
+//! Byte primitives (FOREIGN-PROTOCOLS §3): big-endian reads, writes and patches of every 8- to 64-bit integer type,
+//! LEB128 and zigzag varints, UTF-8, `Bytes::empty` and `Bytes::join`. `bls_functions.rs` computes each view directly.
+program bytes version 1;
+
+input e(b: Bytes, p: u64, a: u8, c: i8, d: u16, g: i16, h: u32, i: i32, j: u64, k: i64);
+input s(t: String);
+
+fn reads(b: Bytes, p: u64) -> (Option<u8>, Option<i8>, Option<u16>, Option<i16>, Option<u32>, Option<i32>, Option<u64>, Option<i64>) {
+    (b.u8_at(p), b.i8_at(p), b.u16_be_at(p), b.i16_be_at(p), b.u32_be_at(p), b.i32_be_at(p), b.u64_be_at(p), b.i64_be_at(p))
+}
+
+fn encoded(a: u8, c: i8, d: u16, g: i16, h: u32, i: i32, j: u64, k: i64) -> Bytes {
+    Bytes::join([
+        Bytes::from_u8(a), Bytes::from_i8(c), Bytes::from_u16_be(d), Bytes::from_i16_be(g),
+        Bytes::from_u32_be(h), Bytes::from_i32_be(i), Bytes::from_u64_be(j), Bytes::from_i64_be(k),
+    ])
+}
+
+/// Decodes what `encoded` wrote: a cursor walks it field by field.
+fn decoded(x: Bytes) -> Option<(u8, i8, u16, i16, u32, i32, u64, i64)> {
+    x.u8_at(0).and_then(|a| x.i8_at(1).and_then(|c| x.u16_be_at(2).and_then(|d| x.i16_be_at(4).and_then(|g|
+        x.u32_be_at(6).and_then(|h| x.i32_be_at(10).and_then(|i| x.u64_be_at(14).and_then(|j|
+            x.i64_be_at(22).map(|k| (a, c, d, g, h, i, j, k)))))))))
+}
+
+fn puts(b: Bytes, p: u64, a: u8, g: i16, h: u32, k: i64) -> (Option<Bytes>, Option<Bytes>, Option<Bytes>, Option<Bytes>) {
+    (b.put_u8(p, a), b.put_i16_be(p, g), b.put_u32_be(p, h), b.put_i64_be(p, k))
+}
+
+fn varints(b: Bytes, p: u64) -> (Option<(u64, u64)>, Option<(i64, u64)>) {
+    (b.uvarint_at(p), b.varint_at(p))
+}
+
+/// Two varints back to back, read back through the position each read returns.
+fn varint_trip(j: u64, k: i64) -> Option<(u64, i64, u64)> {
+    let x = Bytes::uvarint(j).concat(Bytes::varint(k));
+    x.uvarint_at(0).and_then(|u| x.varint_at(u.1).map(|v| (u.0, v.0, v.1)))
+}
+
+view v_reads(b, p, x) = e(b, p, _, _, _, _, _, _, _, _), let x = reads(b, p);
+view v_encoded(x) = e(_, _, a, c, d, g, h, i, j, k), let x = encoded(a, c, d, g, h, i, j, k);
+view v_decoded(x) = e(_, _, a, c, d, g, h, i, j, k), let x = decoded(encoded(a, c, d, g, h, i, j, k));
+view v_puts(b, p, x) = e(b, p, a, _, _, g, h, _, _, k), let x = puts(b, p, a, g, h, k);
+view v_varints(b, p, x) = e(b, p, _, _, _, _, _, _, _, _), let x = varints(b, p);
+view v_uvarint(j, x) = e(_, _, _, _, _, _, _, _, j, _), let x = Bytes::uvarint(j);
+view v_varint(k, x) = e(_, _, _, _, _, _, _, _, _, k), let x = Bytes::varint(k);
+view v_trip(j, k, x) = e(_, _, _, _, _, _, _, _, j, k), let x = varint_trip(j, k);
+view v_utf8(b, x) = e(b, _, _, _, _, _, _, _, _, _), let x = b.from_utf8();
+view v_text(t, x) = s(t), let x = t.to_utf8();
+view v_text_trip(t, x) = s(t), let x = t.to_utf8().from_utf8();
+view v_empty(n) = s(_), let n = Bytes::empty().len();

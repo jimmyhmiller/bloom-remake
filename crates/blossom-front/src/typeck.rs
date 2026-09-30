@@ -1383,8 +1383,33 @@ impl Checker<'_> {
                             }
                             self.bound(Shape::Vec(u))
                         }
+                        Builtin::Lib(LibFn::BytesFrom(it)) => {
+                            let t = self.con(&mut hir.types, TypeDef::Int(it));
+                            for a in &ats {
+                                self.unify(&hir.types, *a, t, span);
+                            }
+                            self.con(&mut hir.types, TypeDef::Bytes)
+                        }
+                        Builtin::Lib(LibFn::BytesUvarint | LibFn::BytesVarint) => {
+                            let it = if f == Builtin::Lib(LibFn::BytesUvarint) { IntTy::U64 } else { IntTy::I64 };
+                            let t = self.con(&mut hir.types, TypeDef::Int(it));
+                            for a in &ats {
+                                self.unify(&hir.types, *a, t, span);
+                            }
+                            self.con(&mut hir.types, TypeDef::Bytes)
+                        }
+                        Builtin::Lib(LibFn::BytesEmpty) => self.con(&mut hir.types, TypeDef::Bytes),
+                        Builtin::Lib(LibFn::BytesJoin) => {
+                            let b = self.con(&mut hir.types, TypeDef::Bytes);
+                            let v = self.bound(Shape::Vec(b));
+                            for a in &ats {
+                                self.unify(&hir.types, *a, v, span);
+                            }
+                            b
+                        }
                         Builtin::Lib(other) => {
-                            // Library methods are resolved from `Method` by the solver; only `range` is a call.
+                            // Library methods are resolved from `Method` by the solver; only `range` and the
+                            // `Bytes::…` constructors are calls.
                             self.bugs
                                 .push(internal_error!("the library method {other:?} reached type checking resolved"));
                             0
@@ -2542,6 +2567,19 @@ impl Checker<'_> {
             (_, Some(TypeDef::Bytes), "concat") => (Builtin::Lib(LibFn::BytesConcat), None, 1),
             (_, Some(TypeDef::Str), "split_whitespace") => (Builtin::Lib(LibFn::StrSplitWhitespace), None, 0),
             (_, Some(TypeDef::Str), "to_lowercase") => (Builtin::Lib(LibFn::StrToLowercase), None, 0),
+            (_, Some(TypeDef::Str), "to_utf8") => (Builtin::Lib(LibFn::StrToUtf8), None, 0),
+            (_, Some(TypeDef::Bytes), "from_utf8") => (Builtin::Lib(LibFn::BytesFromUtf8), None, 0),
+            (_, Some(TypeDef::Bytes), "uvarint_at") => (Builtin::Lib(LibFn::BytesUvarintAt), None, 1),
+            (_, Some(TypeDef::Bytes), "varint_at") => (Builtin::Lib(LibFn::BytesVarintAt), None, 1),
+            (_, Some(TypeDef::Bytes), _) => {
+                if let Some(it) = n.strip_suffix("_at").and_then(byte_int) {
+                    (Builtin::Lib(LibFn::BytesRead(it)), None, 1)
+                } else if let Some(it) = n.strip_prefix("put_").and_then(byte_int) {
+                    (Builtin::Lib(LibFn::BytesPut(it)), None, 2)
+                } else {
+                    return None;
+                }
+            }
             _ => return None,
         };
         if args.len() != arity {
@@ -2695,6 +2733,40 @@ impl Checker<'_> {
             }
             (_, Builtin::Lib(LibFn::StrSplitWhitespace)) => self.bound(Shape::Vec(recv)),
             (_, Builtin::Lib(LibFn::StrToLowercase)) => recv,
+            (_, Builtin::Lib(LibFn::StrToUtf8)) => self.con(&mut hir.types, TypeDef::Bytes),
+            (_, Builtin::Lib(LibFn::BytesFromUtf8)) => {
+                let st = self.con(&mut hir.types, TypeDef::Str);
+                self.bound(Shape::Option(st))
+            }
+            (_, Builtin::Lib(f @ (LibFn::BytesUvarintAt | LibFn::BytesVarintAt))) => {
+                if let Some(p) = a0 {
+                    self.unify(&hir.types, p, u64_t, span);
+                }
+                let v = if f == LibFn::BytesUvarintAt {
+                    u64_t
+                } else {
+                    self.con(&mut hir.types, TypeDef::Int(IntTy::I64))
+                };
+                let pair = self.bound(Shape::Tuple(vec![v, u64_t]));
+                self.bound(Shape::Option(pair))
+            }
+            (_, Builtin::Lib(LibFn::BytesRead(it))) => {
+                if let Some(p) = a0 {
+                    self.unify(&hir.types, p, u64_t, span);
+                }
+                let t = self.con(&mut hir.types, TypeDef::Int(it));
+                self.bound(Shape::Option(t))
+            }
+            (_, Builtin::Lib(LibFn::BytesPut(it))) => {
+                if let Some(p) = a0 {
+                    self.unify(&hir.types, p, u64_t, span);
+                }
+                if let Some(x) = a1 {
+                    let t = self.con(&mut hir.types, TypeDef::Int(it));
+                    self.unify(&hir.types, x, t, span);
+                }
+                self.bound(Shape::Option(recv))
+            }
             (_, other) => {
                 self.bugs.push(internal_error!("{other:?} dispatched on a plain value"));
                 return Some(true);

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use blossom_base::FnId;
 use blossom_ir::core::{BuiltinFn, Expr, FnBody, FnRef, LibFn, Pattern};
 use blossom_value::Value;
+use blossom_value::types::IntTy;
 use blossom_value::value::IntValue;
 
 use crate::expr::{Ctx, ExprError, ExprResult, bug, eval, truth};
@@ -317,5 +318,168 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &[Option<Value>], f: LibFn, args: &[Exp
             Value::Str(s) => Ok(Value::Str(Arc::from(s.to_lowercase()))),
             other => Err(bug(format!("`to_lowercase` of {other:?}"))),
         },
+        LibFn::StrToUtf8 => match value(0)? {
+            Value::Str(s) => Ok(Value::Bytes(Arc::from(s.as_bytes()))),
+            other => Err(bug(format!("`to_utf8` of {other:?}"))),
+        },
+        LibFn::BytesFromUtf8 => match value(0)? {
+            Value::Bytes(b) => Ok(some_or_none(
+                String::from_utf8(b.to_vec()).ok().map(|s| Value::Str(Arc::from(s))),
+            )),
+            other => Err(bug(format!("`from_utf8` of {other:?}"))),
+        },
+        LibFn::BytesRead(it) => {
+            let b = bytes_arg(value(0)?)?;
+            let at = as_u64(value(1)?)?;
+            Ok(some_or_none(read_be(&b, at, it)?))
+        }
+        LibFn::BytesPut(it) => {
+            let b = bytes_arg(value(0)?)?;
+            let at = as_u64(value(1)?)?;
+            let enc = be_bytes(it, &value(2)?)?;
+            let Ok(start) = usize::try_from(at) else {
+                return Ok(Value::Option(None));
+            };
+            if start > b.len() || b.len() - start < enc.len() {
+                return Ok(Value::Option(None));
+            }
+            let mut out = Vec::with_capacity(b.len());
+            out.extend(b.iter().take(start));
+            out.extend_from_slice(&enc);
+            out.extend(b.iter().skip(start + enc.len()));
+            Ok(Value::Option(Some(Arc::new(Value::Bytes(out.into())))))
+        }
+        LibFn::BytesFrom(it) => Ok(Value::Bytes(be_bytes(it, &value(0)?)?.into())),
+        LibFn::BytesUvarintAt | LibFn::BytesVarintAt => {
+            let b = bytes_arg(value(0)?)?;
+            let at = as_u64(value(1)?)?;
+            let Some((raw, next)) = usize::try_from(at).ok().and_then(|s| read_uvarint(&b, s)) else {
+                return Ok(Value::Option(None));
+            };
+            let decoded = if f == LibFn::BytesVarintAt {
+                // Zigzag: 0, -1, 1, -2, … are 0, 1, 2, 3, …
+                let magnitude = (raw >> 1) as i64;
+                Value::Int(IntValue::I64(if raw & 1 == 0 { magnitude } else { !magnitude }))
+            } else {
+                Value::Int(IntValue::U64(raw))
+            };
+            let next = u64::try_from(next).map_err(|_| bug("a position beyond u64".into()))?;
+            Ok(Value::Option(Some(Arc::new(Value::Tuple(Arc::from([
+                decoded,
+                Value::Int(IntValue::U64(next)),
+            ]))))))
+        }
+        LibFn::BytesUvarint => Ok(Value::Bytes(write_uvarint(as_u64(value(0)?)?).into())),
+        LibFn::BytesVarint => match value(0)? {
+            Value::Int(IntValue::I64(x)) => {
+                let zz = if x >= 0 {
+                    (x as u64) << 1
+                } else {
+                    ((!x as u64) << 1) | 1
+                };
+                Ok(Value::Bytes(write_uvarint(zz).into()))
+            }
+            other => Err(bug(format!("`Bytes::varint` of {other:?}"))),
+        },
+        LibFn::BytesEmpty => Ok(Value::Bytes(Arc::from(Vec::new()))),
+        LibFn::BytesJoin => {
+            let parts = vector(0)?;
+            let mut out = Vec::new();
+            for p in parts.iter() {
+                let Value::Bytes(b) = p else {
+                    return Err(bug(format!("`Bytes::join` of {p:?}")));
+                };
+                out.extend_from_slice(b);
+            }
+            Ok(Value::Bytes(out.into()))
+        }
     }
+}
+
+fn bytes_arg(v: Value) -> ExprResult<Arc<[u8]>> {
+    match v {
+        Value::Bytes(b) => Ok(b),
+        other => Err(bug(format!("Bytes expected, found {other:?}"))),
+    }
+}
+
+/// The big-endian integer of type `it` starting at byte `at`, or `None` if it runs past the end.
+fn read_be(b: &[u8], at: u64, it: IntTy) -> ExprResult<Option<Value>> {
+    let n = match it {
+        IntTy::U8 | IntTy::I8 => 1,
+        IntTy::U16 | IntTy::I16 => 2,
+        IntTy::U32 | IntTy::I32 => 4,
+        IntTy::U64 | IntTy::I64 => 8,
+        other => return Err(bug(format!("a byte read of {}", other.name()))),
+    };
+    let Ok(start) = usize::try_from(at) else {
+        return Ok(None);
+    };
+    if start > b.len() || b.len() - start < n {
+        return Ok(None);
+    }
+    let mut word = [0u8; 8];
+    for (dst, src) in word.iter_mut().skip(8 - n).zip(b.iter().skip(start)) {
+        *dst = *src;
+    }
+    let u = u64::from_be_bytes(word);
+    Ok(Some(Value::Int(match it {
+        IntTy::U8 => IntValue::U8(u as u8),
+        IntTy::I8 => IntValue::I8(u as u8 as i8),
+        IntTy::U16 => IntValue::U16(u as u16),
+        IntTy::I16 => IntValue::I16(u as u16 as i16),
+        IntTy::U32 => IntValue::U32(u as u32),
+        IntTy::I32 => IntValue::I32(u as u32 as i32),
+        IntTy::U64 => IntValue::U64(u),
+        _ => IntValue::I64(u as i64),
+    })))
+}
+
+/// The big-endian bytes of `v`, which must be an integer of type `it`.
+fn be_bytes(it: IntTy, v: &Value) -> ExprResult<Vec<u8>> {
+    Ok(match (it, v) {
+        (IntTy::U8, Value::Int(IntValue::U8(x))) => x.to_be_bytes().to_vec(),
+        (IntTy::I8, Value::Int(IntValue::I8(x))) => x.to_be_bytes().to_vec(),
+        (IntTy::U16, Value::Int(IntValue::U16(x))) => x.to_be_bytes().to_vec(),
+        (IntTy::I16, Value::Int(IntValue::I16(x))) => x.to_be_bytes().to_vec(),
+        (IntTy::U32, Value::Int(IntValue::U32(x))) => x.to_be_bytes().to_vec(),
+        (IntTy::I32, Value::Int(IntValue::I32(x))) => x.to_be_bytes().to_vec(),
+        (IntTy::U64, Value::Int(IntValue::U64(x))) => x.to_be_bytes().to_vec(),
+        (IntTy::I64, Value::Int(IntValue::I64(x))) => x.to_be_bytes().to_vec(),
+        (it, v) => return Err(bug(format!("{} bytes of {v:?}", it.name()))),
+    })
+}
+
+/// An unsigned LEB128 varint starting at `start`: its value and the index after it.
+fn read_uvarint(b: &[u8], start: usize) -> Option<(u64, usize)> {
+    let mut value: u64 = 0;
+    let mut shift = 0u32;
+    let mut at = start;
+    loop {
+        let byte = *b.get(at)?;
+        at += 1;
+        let chunk = u64::from(byte & 0x7f);
+        // At shift 63 only one bit is left in a u64.
+        if shift == 63 && chunk > 1 {
+            return None;
+        }
+        value |= chunk << shift;
+        if byte & 0x80 == 0 {
+            return Some((value, at));
+        }
+        shift += 7;
+        if shift > 63 {
+            return None;
+        }
+    }
+}
+
+fn write_uvarint(mut n: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(10);
+    while n >= 0x80 {
+        out.push((n as u8) | 0x80);
+        n >>= 7;
+    }
+    out.push(n as u8);
+    out
 }
