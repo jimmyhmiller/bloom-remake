@@ -414,6 +414,29 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &[Option<Value>], f: LibFn, args: &[Exp
             other => Err(bug(format!("`Bytes::varint` of {other:?}"))),
         },
         LibFn::BytesEmpty => Ok(Value::Bytes(Arc::from(Vec::new()))),
+        LibFn::BlobOf => {
+            let Value::Bytes(b) = value(0)? else {
+                return Err(bug("`Blob::of` of a non-Bytes value".into()));
+            };
+            let r = blossom_value::BlobRef::of(&b);
+            cx.new_blobs.borrow_mut().entry(r).or_insert(b);
+            Ok(Value::Blob(r))
+        }
+        LibFn::BlobRead => {
+            let Value::Blob(r) = value(0)? else {
+                return Err(bug("`read` of a non-Blob value".into()));
+            };
+            let (lo, hi) = (as_u64(value(1)?)?, as_u64(value(2)?)?);
+            // Handles are made only from their bytes: a missing blob is a host bug.
+            let b = cx
+                .blob(&r)
+                .ok_or_else(|| bug(format!("the bytes of blob {} are not available", r.hex())))?;
+            if lo > hi || hi > b.len() as u64 {
+                return Ok(Value::Option(None));
+            }
+            let (lo, hi) = (lo as usize, hi as usize);
+            Ok(some_or_none(b.get(lo..hi).map(|s| Value::Bytes(Arc::from(s)))))
+        }
         LibFn::BytesJoin => {
             let parts = vector(0)?;
             let mut out = Vec::new();

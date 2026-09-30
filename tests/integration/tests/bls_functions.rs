@@ -171,7 +171,10 @@ fn expected(view: &str, n: u64, s: &str, b: &[u8]) -> (Value, Value) {
         "v_range" => (u(n), u(n + 1)),
         "v_arms" => (
             u(n),
-            tuple(vec![u(if n.is_multiple_of(2) { 2 * n } else { 7 + n }), vec_u([n, n + 1, 0, 0])]),
+            tuple(vec![
+                u(if n.is_multiple_of(2) { 2 * n } else { 7 + n }),
+                vec_u([n, n + 1, 0, 0]),
+            ]),
         ),
         other => panic!("no expectation for {other}"),
     }
@@ -874,4 +877,55 @@ fn a_shift_outside_the_width_is_blsr004_on_both_evaluators() {
         differential_hosted(&artifact, &[at(1, 31), at(2, 32)], 3),
         Hosted::Failed(Tick(2), code) if code == "BLSR004"
     ));
+}
+
+#[test]
+fn blobs_are_made_measured_and_read_on_both_evaluators() {
+    let artifact = compile("blobs.bls");
+    let e = artifact.rel_named("e").unwrap();
+    let inputs_by_tick: Vec<Vec<Vec<u8>>> = vec![
+        vec![],
+        vec![b"hello".to_vec(), b"".to_vec()],
+        vec![b"x".to_vec(), b"blob of bytes".to_vec()],
+        vec![],
+    ];
+    let mut inputs = Vec::new();
+    for (t, bs) in inputs_by_tick.iter().enumerate() {
+        for b in bs {
+            inputs.push(InputEvent {
+                node: NodeId(0),
+                tick: Tick(t as u64),
+                rel: e,
+                row: Arc::from(vec![bytes(b)]),
+            });
+        }
+    }
+    let run = differential(&artifact, &inputs, 3);
+    let rows = |t: u64, v: &str| -> BTreeSet<Vec<Value>> {
+        run.node_tick(Tick(t), NodeId(0))
+            .unwrap()
+            .instance
+            .rows(artifact.rel_named(v).unwrap())
+            .map(|r| r.to_vec())
+            .collect()
+    };
+    for (t, bs) in inputs_by_tick.iter().enumerate() {
+        let t = t as u64;
+        let want =
+            |f: &dyn Fn(&[u8]) -> Value| -> BTreeSet<Vec<Value>> { bs.iter().map(|b| vec![bytes(b), f(b)]).collect() };
+        assert_eq!(rows(t, "v_len"), want(&|b| u(b.len() as u64)), "tick {t}");
+        assert_eq!(rows(t, "v_read"), want(&|b| opt(b.get(1..3).map(bytes))), "tick {t}");
+        assert_eq!(
+            rows(t, "v_bytewise"),
+            want(&|b| Value::Vec(b.iter().map(|x| opt(Some(bytes(&[*x])))).collect())),
+            "tick {t}"
+        );
+    }
+    // At tick 3 (no input), every blob made earlier is still read whole.
+    let kept: BTreeSet<Vec<Value>> = inputs_by_tick
+        .iter()
+        .flatten()
+        .map(|b| vec![Value::Blob(blossom_value::BlobRef::of(b)), opt(Some(bytes(b)))])
+        .collect();
+    assert_eq!(rows(3, "v_kept"), kept);
 }

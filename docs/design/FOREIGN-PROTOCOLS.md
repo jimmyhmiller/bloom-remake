@@ -245,6 +245,28 @@ hash plus a length (`Value::Blob` already exists).
 For Kafka, a partition log row is `(offset, count, max_timestamp, producer…, batch: Blob)`. Fetch responses are
 composed of encoded headers (`Part::Bytes`) and batch ranges (`Part::Blob`).
 
+### 5a. As built (S7 item 1)
+
+- **Surface.** `Blob::of(b: Bytes) -> Blob`, `blob.len() -> u64`, `blob.read(lo, hi) -> Option<Bytes>` (`None` unless
+  `lo <= hi <= len`), and `Part::Blob(b, lo, hi)` in a stream write. All are pure: a handle is a function of its
+  bytes, and a handle is only ever made from them.
+- **Evaluators.** Both evaluators get the node's blobs through a `BlobSource` (`TickInput::blobs` /
+  `StepInput::blobs`), and report every blob a tick created, with its bytes (`TickOutput::blobs`). A read looks at
+  the tick's new blobs, then the source. A missing blob is a host bug, reported as an internal error.
+- **Node.**
+  - It caches created blobs until a durable row references one. That tick's effects then carry the blob
+    (`TickEffects::blobs`), and the driver makes it durable before the record syncs: `ManualDriver` and the
+    runtime's committer call `BlobStore::put_all` before the WAL append.
+  - When the cache passes its budget (`NodeConfig::blob_cache_bytes`), blobs that no row of the executor's state and
+    no parked output holds are dropped.
+- **Store.** `blossom_store::BlobStore` keeps one file per blob under `<store>/blobs/`, named by hash and length. Each
+  is written to a temporary file, synced, and renamed; the directory is synced once per batch. Reads check the hash.
+  Recovery opens the store, and `Boot::blobs` gives the node the recovered rows' blobs.
+- **Collection.** After a checkpoint is installed, the store deletes every blob outside `Node::blob_roots`: the
+  checkpoint's rows, those of every WAL record after it, the running node's rows, cache and parked output.
+- **Not yet (BLS0908, LANG-028).** A `Blob` in a channel or a host input: its bytes do not leave its node. S8's
+  replication needs this.
+
 ## 6. Storage that follows change (store work, S7)
 
 Two changes to the store.

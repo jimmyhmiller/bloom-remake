@@ -57,6 +57,8 @@ pub struct Opened {
     pub checkpoint: Option<CheckpointId>,
     /// How many WAL records recovery replayed.
     pub replayed: usize,
+    /// The node's durable blobs (FOREIGN-PROTOCOLS §5).
+    pub blobs: Arc<blossom_store::BlobStore>,
 }
 
 impl std::fmt::Debug for Opened {
@@ -218,6 +220,8 @@ pub fn open(
         last_now = last_now.max(rec.now);
         replayed += 1;
     }
+    // The blobs the recovered rows hold were made durable before their records synced.
+    let blobs = Arc::new(blossom_store::BlobStore::open(fs.clone(), dir)?);
     // 4. Reserve ticks.
     let boot_tick = if record.restarts == 0 {
         0
@@ -281,6 +285,7 @@ pub fn open(
             // leaves a WAL record, which a checkpoint may since cover): a crash before that boots fresh again.
             recovered: checkpoint.is_some() || replayed > 0,
             incarnation: record.restarts,
+            blobs: blobs.clone(),
         },
         wal,
         checkpoints,
@@ -289,6 +294,7 @@ pub fn open(
         lock,
         checkpoint,
         replayed,
+        blobs,
     })
 }
 

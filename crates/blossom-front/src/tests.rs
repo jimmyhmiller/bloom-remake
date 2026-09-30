@@ -1018,3 +1018,13 @@ fn node_roles_join_at_merges_and_meet_only_in_conjunctions() {
         assert_eq!(&role_program_codes(src), want, "{defs}\n{body}");
     }
 }
+
+#[test]
+fn a_blob_does_not_leave_its_node_yet() {
+    let src = "program t version 1;\nrole A;\nrole B;\n\
+               channel carry(b: Blob): A -> B;\n\
+               at A {\n  input hand(x: Option<Blob>);\n  durable table keep(b: Blob);\n}\n";
+    let got = diags_for(src, &role_nodes());
+    let codes: Vec<&str> = got.iter().map(|d| d.0.as_str()).collect();
+    assert_eq!(codes, vec!["BLS0908", "BLS0908"], "{got:?}");
+}

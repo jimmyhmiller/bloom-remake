@@ -1,0 +1,19 @@
+//! Blobs in durable rows (FOREIGN-PROTOCOLS §5): every chunk read from the stream is stored as a blob in a durable
+//! table and acknowledged by writing the blob back (`Part::Blob`), released only after the tick is synced. A chunk
+//! can be forgotten, which deletes its row; after a checkpoint its blob is collected.
+program blob_store version 1;
+
+stream s: listen;
+
+input forget(key: Bytes);
+
+durable table stored(key: Bytes, blob: Blob) key(key);
+
+ack: on s.data(c, seq, b), let blob = Blob::of(b) {
+    upsert stored(b, blob);
+    send s.write(c, seq, [Part::Blob(blob, 0, blob.len())]);
+}
+
+drop: on forget(k), stored(k, blob) {
+    delete stored(k, blob);
+}

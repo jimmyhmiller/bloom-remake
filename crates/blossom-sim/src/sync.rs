@@ -206,6 +206,8 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
         };
         let mut carried: Vec<Instance> = vec![Instance::default(); n];
         let mut halted = vec![false; n];
+        // Each node's blobs, kept for the whole run (a simulation is short): what its later ticks read.
+        let mut blobs: Vec<blossom_value::BlobMap> = vec![blossom_value::BlobMap::default(); n];
         let mut inbox: Vec<Vec<Delivery>> = vec![Vec::new(); n];
         let empty: Vec<(RelId, Row)> = Vec::new();
         let no_ingress: Vec<Ingress> = Vec::new();
@@ -243,6 +245,8 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                 }
                 let events = self.inputs.get(&(tick, node)).unwrap_or(&empty);
                 let ingress = self.ingress.get(&(tick, node)).unwrap_or(&no_ingress);
+                let no_blobs = blossom_value::BlobMap::default();
+                let node_blobs = blobs.get(i).unwrap_or(&no_blobs);
                 let out = self
                     .eval
                     .tick(&TickInput {
@@ -255,8 +259,12 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                         delivered,
                         ingress,
                         capture: config.capture,
+                        blobs: node_blobs,
                     })
                     .map_err(|error| SimError::Node { node, tick, error })?;
+                if let Some(b) = blobs.get_mut(i) {
+                    b.0.extend(out.blobs.iter().map(|(k, v)| (*k, v.clone())));
+                }
                 for send in &out.outbox {
                     if send.to.0 >= self.nodes {
                         return Err(SimError::UnknownDestination {

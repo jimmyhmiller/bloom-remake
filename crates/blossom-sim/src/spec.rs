@@ -259,6 +259,7 @@ impl<'a> SpecSim<'a> {
                 delivered: &[],
                 ingress: &[],
                 capture,
+                blobs: &blossom_value::NoBlobs,
             })
             .map_err(|error| SimError::Node {
                 node: NodeId(0),
@@ -296,6 +297,7 @@ impl<'a> SpecSim<'a> {
                 delivered,
                 ingress: &ingress,
                 capture: false,
+                blobs: &blossom_value::NoBlobs,
             })
             .map_err(|error| SimError::Node { node, tick, error })
     }

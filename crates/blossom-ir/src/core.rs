@@ -676,6 +676,11 @@ pub enum LibFn {
     BytesEmpty,
     /// `Bytes::join(v: Vec<Bytes>)`: the concatenation, in order.
     BytesJoin,
+    /// `Blob::of(b: Bytes) -> Blob`: the handle of `b` (its BLAKE3 hash and length); the evaluator hands the bytes to
+    /// the host with the tick's output (FOREIGN-PROTOCOLS §5).
+    BlobOf,
+    /// `blob.read(lo, hi) -> Option<Bytes>`: bytes `lo..hi` of the blob, `None` unless `lo <= hi <= len`.
+    BlobRead,
 }
 
 /// Construct data in the Dedalus core IR.

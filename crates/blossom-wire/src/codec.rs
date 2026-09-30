@@ -197,7 +197,7 @@ impl<'p> Codec<'p> {
             TypeDef::Int(_) => WT_BYTES,
             TypeDef::Duration | TypeDef::Instant => WT_ZZ,
             TypeDef::F64 => WT_FIXED64,
-            TypeDef::Str | TypeDef::Bytes | TypeDef::Principal => WT_BYTES,
+            TypeDef::Str | TypeDef::Bytes | TypeDef::Principal | TypeDef::Blob => WT_BYTES,
             TypeDef::Node(_) => match self.nodes {
                 NodeEncoding::Dense => WT_VARINT,
                 NodeEncoding::ByName(_) => WT_BYTES,
@@ -240,6 +240,12 @@ impl<'p> Codec<'p> {
             (TypeDef::Principal, Value::Principal(p)) => put_bytes(out, p.as_bytes()),
             (TypeDef::Session, Value::Session(s)) => put_varint(out, s.0),
             (TypeDef::Conn, Value::Conn(c)) => put_varint(out, c.0),
+            // A blob handle, not its bytes: the hash, then the length (little-endian).
+            (TypeDef::Blob, Value::Blob(b)) => {
+                let mut h = b.hash.to_vec();
+                h.extend_from_slice(&b.len.to_le_bytes());
+                put_bytes(out, &h);
+            }
             (TypeDef::Node(_), Value::Node(n)) => match &self.nodes {
                 NodeEncoding::Dense => put_varint(out, u64::from(n.0)),
                 NodeEncoding::ByName(names) => {
@@ -437,6 +443,17 @@ impl<'p> Codec<'p> {
             TypeDef::Principal => Value::Principal(Arc::from(utf8(get_bytes(input, "a principal")?)?)),
             TypeDef::Session => Value::Session(SessionId(get_varint(input)?)),
             TypeDef::Conn => Value::Conn(ConnId(get_varint(input)?)),
+            TypeDef::Blob => {
+                let b = get_bytes(input, "a blob handle")?;
+                let (hash, len) = (b.get(..32), b.get(32..));
+                match (hash, len) {
+                    (Some(h), Some(l)) if l.len() == 8 => Value::Blob(blossom_value::value::BlobRef {
+                        hash: h.try_into().map_err(|_| WireError::Malformed("a blob hash".into()))?,
+                        len: u64::from_le_bytes(l.try_into().map_err(|_| WireError::Malformed("a blob length".into()))?),
+                    }),
+                    _ => return Err(WireError::Malformed("a blob handle is 40 bytes".into())),
+                }
+            }
             TypeDef::Node(_) => match &self.nodes {
                 NodeEncoding::Dense => Value::Node(NodeId(
                     u32::try_from(get_varint(input)?).map_err(|_| WireError::Malformed("node id".into()))?,

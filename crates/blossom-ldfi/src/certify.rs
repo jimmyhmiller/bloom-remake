@@ -230,6 +230,7 @@ fn step_state(
                 egress: BTreeSet::new(),
                 host: BTreeSet::new(),
                 firings: Vec::new(),
+                blobs: std::collections::BTreeMap::new(),
             });
             continue;
         }

@@ -129,6 +129,7 @@ fn run(oracle: &Oracle, events: &[(RelId, Row)]) -> Result<crate::TickOutput, Or
         delivered: &[],
         ingress: &[],
         capture: true,
+        blobs: &blossom_value::NoBlobs,
     })
 }
 
@@ -376,6 +377,7 @@ fn next_heads_carry_and_async_heads_send() {
             delivered: &delivered,
             ingress: &[],
             capture: false,
+        blobs: &blossom_value::NoBlobs,
         })
         .unwrap();
     assert!(out.next.contains(counter, &[int(5)]));

@@ -2065,6 +2065,23 @@ impl<'t> Resolver<'t, '_> {
                 cx.calls.insert(f);
                 Some(HExpr::new(HExprKind::Call { f, args: xs }, span))
             }
+            [ty, f] if ty.as_str() == "Blob" && f.as_str() == "of" => {
+                if pos.len() != 1 {
+                    self.error(code!("BLS0301"), span, format!("`Blob::of` takes 1 argument, {} given", pos.len()));
+                    return None;
+                }
+                let mut xs = Vec::new();
+                for p in pos {
+                    xs.push(self.expr(cx, p)?);
+                }
+                Some(HExpr::new(
+                    HExprKind::Builtin {
+                        f: Builtin::Lib(blossom_ir::core::LibFn::BlobOf),
+                        args: xs,
+                    },
+                    span,
+                ))
+            }
             [ty, f] if ty.as_str() == "Bytes" => {
                 use blossom_ir::core::LibFn;
                 let n = f.as_str();

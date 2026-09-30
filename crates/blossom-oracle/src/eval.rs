@@ -256,6 +256,8 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
         now: input.now,
         oracle,
         fuel: expr::Fuel::default(),
+        blobs: input.blobs,
+        new_blobs: std::cell::RefCell::new(BTreeMap::new()),
     };
     let mut db = Db::new(&oracle.cells);
     let load = |e: ExprError| -> OracleError {
@@ -497,6 +499,7 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
         rels: db.rows.into_iter().filter(|(_, rows)| !rows.is_empty()).collect(),
     };
     out.firings = firings;
+    out.blobs = scope.new_blobs.take();
     Ok(out)
 }
 

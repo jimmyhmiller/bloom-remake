@@ -195,6 +195,7 @@ impl<'t> Resolver<'t, '_> {
             "f64" => Some(TypeDef::F64),
             "String" => Some(TypeDef::Str),
             "Bytes" => Some(TypeDef::Bytes),
+            "Blob" => Some(TypeDef::Blob),
             "Duration" => Some(TypeDef::Duration),
             "Instant" => Some(TypeDef::Instant),
             "Session" => Some(TypeDef::Session),
@@ -407,15 +408,30 @@ impl<'t> Resolver<'t, '_> {
     /// bytes; blob ranges come with blobs (§5).
     pub fn part_type(&mut self, span: Span) -> TypeId {
         let bytes = self.intern_type(TypeDef::Bytes, span);
+        let blob = self.intern_type(TypeDef::Blob, span);
+        let u64t = self.intern_type(TypeDef::Int(blossom_value::types::IntTy::U64), span);
         self.intern_type(
             TypeDef::Enum(EnumDef {
                 name: QualName::single(Symbol::intern(blossom_ir::PART_TYPE)),
-                variants: vec![VariantDef {
-                    name: Symbol::intern("Bytes"),
-                    number: 0,
-                    payload: vec![field(Symbol::intern("0"), bytes)],
-                    since: None,
-                }],
+                variants: vec![
+                    VariantDef {
+                        name: Symbol::intern("Bytes"),
+                        number: 0,
+                        payload: vec![field(Symbol::intern("0"), bytes)],
+                        since: None,
+                    },
+                    // Bytes `lo..hi` of a stored blob, sent without passing through the engine (FOREIGN-PROTOCOLS §5).
+                    VariantDef {
+                        name: Symbol::intern("Blob"),
+                        number: 1,
+                        payload: vec![
+                            field(Symbol::intern("0"), blob),
+                            field(Symbol::intern("1"), u64t),
+                            field(Symbol::intern("2"), u64t),
+                        ],
+                        since: None,
+                    },
+                ],
                 unknown: None,
                 reserved: Vec::new(),
             }),

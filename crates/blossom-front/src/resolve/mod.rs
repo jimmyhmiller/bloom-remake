@@ -378,6 +378,26 @@ impl<'t, 'd> Resolver<'t, 'd> {
         for (span, msg) in bad {
             self.error(code!("BLS0315"), span, msg);
         }
+        // A blob's bytes live in its node's store: a channel would carry the handle without them, and a host input
+        // would name bytes the store never got. Neither is built yet (LANG-028).
+        let mut blobs = Vec::new();
+        for rel in &self.hir.rels {
+            let what = match rel.kind {
+                HRelKind::Channel(_) => "a channel",
+                HRelKind::Input { root: true } => "a host input",
+                _ => continue,
+            };
+            if rel
+                .cols
+                .iter()
+                .any(|c| c.ty.is_some_and(|t| holds(&self.hir.types, t, &|d| matches!(d, TypeDef::Blob), &mut BTreeSet::new())))
+            {
+                blobs.push((rel.span, format!("a `Blob` in {what} (`{}`): blobs do not leave their node", rel.name)));
+            }
+        }
+        for (span, what) in blobs {
+            self.unsupported("LANG-028", &what, span);
+        }
     }
 
     pub fn error(&mut self, code: blossom_base::Code, span: Span, msg: impl Into<String>) {
@@ -2204,19 +2224,29 @@ fn strip_comment(line: &str) -> &str {
 
 /// Whether a value of type `t` can contain a `Conn`.
 fn holds_conn(types: &blossom_value::TypeTable, t: TypeId, seen: &mut BTreeSet<TypeId>) -> bool {
+    holds(types, t, &|d| matches!(d, TypeDef::Conn), seen)
+}
+
+/// Whether a value of type `t` can contain a value of a type `leaf` accepts.
+fn holds(
+    types: &blossom_value::TypeTable,
+    t: TypeId,
+    leaf: &dyn Fn(&TypeDef) -> bool,
+    seen: &mut BTreeSet<TypeId>,
+) -> bool {
     if !seen.insert(t) {
         return false;
     }
     match types.get(t) {
-        Some(TypeDef::Conn) => true,
-        Some(TypeDef::Tuple(ts)) => ts.iter().any(|x| holds_conn(types, *x, seen)),
-        Some(TypeDef::Option(x) | TypeDef::Vec(x) | TypeDef::Set(x)) => holds_conn(types, *x, seen),
-        Some(TypeDef::Map(k, v)) => holds_conn(types, *k, seen) || holds_conn(types, *v, seen),
-        Some(TypeDef::Struct(d)) => d.fields.iter().any(|f| holds_conn(types, f.ty, seen)),
+        Some(d) if leaf(d) => true,
+        Some(TypeDef::Tuple(ts)) => ts.iter().any(|x| holds(types, *x, leaf, seen)),
+        Some(TypeDef::Option(x) | TypeDef::Vec(x) | TypeDef::Set(x)) => holds(types, *x, leaf, seen),
+        Some(TypeDef::Map(k, v)) => holds(types, *k, leaf, seen) || holds(types, *v, leaf, seen),
+        Some(TypeDef::Struct(d)) => d.fields.iter().any(|f| holds(types, f.ty, leaf, seen)),
         Some(TypeDef::Enum(d)) => d
             .variants
             .iter()
-            .any(|v| v.payload.iter().any(|f| holds_conn(types, f.ty, seen))),
+            .any(|v| v.payload.iter().any(|f| holds(types, f.ty, leaf, seen))),
         _ => false,
     }
 }

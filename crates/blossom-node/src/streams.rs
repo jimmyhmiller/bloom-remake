@@ -343,6 +343,13 @@ pub enum HostRequest {
         stream: usize,
         conn: ConnId,
     },
+    /// A write the host must refuse, a located runtime error of the program (a blob range outside the blob): the
+    /// connection closes and its `closed` event carries `why`, as for a bad `seq`.
+    Refused {
+        stream: usize,
+        conn: ConnId,
+        why: String,
+    },
     Dial {
         stream: usize,
         req: u64,
@@ -351,7 +358,11 @@ pub enum HostRequest {
 }
 
 /// Decodes a released host row against the node's streams.
-pub fn host_request(streams: &[NodeStream], h: &HostOut) -> Result<HostRequest, NodeError> {
+pub fn host_request(
+    streams: &[NodeStream],
+    h: &HostOut,
+    blobs: &dyn blossom_value::BlobSource,
+) -> Result<HostRequest, NodeError> {
     let (i, st) = streams
         .iter()
         .enumerate()
@@ -376,6 +387,31 @@ pub fn host_request(streams: &[NodeStream], h: &HostOut) -> Result<HostRequest, 
                     // `Part::Bytes(b)` (variant 0 of the built-in `Part`).
                     Value::Enum { variant: 0, fields } => match &**fields {
                         [Value::Bytes(b)] => bytes.extend_from_slice(b),
+                        _ => return Err(bad().into()),
+                    },
+                    // `Part::Blob(b, lo, hi)`: bytes of a stored blob. A range outside it is the program's error,
+                    // refused like a bad `seq`; a missing blob is a host bug.
+                    Value::Enum { variant: 1, fields } => match &**fields {
+                        [Value::Blob(r), Value::Int(IntValue::U64(lo)), Value::Int(IntValue::U64(hi))] => {
+                            let b = blobs
+                                .get(r)
+                                .ok_or_else(|| internal_error!("the bytes of blob {} are not available", r.hex()))?;
+                            let part = usize::try_from(*lo)
+                                .ok()
+                                .zip(usize::try_from(*hi).ok())
+                                .filter(|(lo, hi)| lo <= hi)
+                                .and_then(|(lo, hi)| b.get(lo..hi));
+                            match part {
+                                Some(p) => bytes.extend_from_slice(p),
+                                None => {
+                                    return Ok(HostRequest::Refused {
+                                        stream: i,
+                                        conn: *conn,
+                                        why: format!("a write of bytes {lo}..{hi} of a {}-byte blob", b.len()),
+                                    });
+                                }
+                            }
+                        }
                         _ => return Err(bad().into()),
                     },
                     _ => return Err(bad().into()),

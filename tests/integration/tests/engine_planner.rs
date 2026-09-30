@@ -275,6 +275,7 @@ fn a_lattice_reply_merges_per_session_and_key() {
         delivered: &[],
         ingress: &ingress,
         capture: false,
+        blobs: &blossom_value::NoBlobs,
     };
     let o = oracle.tick(&tick).unwrap();
     let e = engine.tick(&tick).unwrap();
