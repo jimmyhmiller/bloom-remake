@@ -10,8 +10,14 @@
 //! - A program's `close`: the other end learns after the bytes in flight, and the node end gets its own `closed`.
 //! - A node end retires when the tick that delivered its `closed` is released; the other end then learns, after the
 //!   bytes in flight.
+//! - A node end writing a bad `seq`, as in the runtime: the host closes it; the other end learns after the bytes in
+//!   flight, and the node end's `closed` carries the error.
 //! - A reset tells both ends at once and drops what is in flight: a crash of a node end's node, a partition between
-//!   its two nodes, the nemesis, or a node end writing a bad `seq`.
+//!   its two nodes (also one that begins while a connection is being made or carries bytes), or the nemesis. A
+//!   connecting end that was not yet told the connection opened learns that it failed.
+//! - A connection's opening is ordered with what follows it: the accepting end gets it before the connecting end's
+//!   bytes and close, and the connecting end learns it opened before the accepting end's bytes and close.
+//! - A request through a stream the connection does not belong to is refused and counted as a violation.
 //!
 //! Every choice is drawn from the simulation's seeded generator, so a run replays exactly.
 
@@ -83,6 +89,8 @@ pub(super) enum End {
         node: NodeId,
         stream: usize,
     },
+    /// A connection attempt that reached no listener: it is refused.
+    Nowhere,
 }
 
 #[derive(Debug)]
@@ -98,6 +106,11 @@ pub(super) struct Pipe {
     told: [bool; 2],
     /// A dialed pipe: the dialing node end is end 0, with its stream and request id.
     dial: Option<(usize, u64)>,
+    /// Whether end 0 (the connecting end) was told the connection is open. Until then a reset is, to it, a failed
+    /// connection attempt, not the close of a connection it has.
+    opened: bool,
+    /// The listen stream of the accepting node end, once accepted.
+    accepted: Option<usize>,
 }
 
 impl Pipe {
@@ -109,6 +122,17 @@ impl Pipe {
             recv: [true, true],
             told: [false, false],
             dial,
+            opened: false,
+            accepted: None,
+        }
+    }
+
+    /// The stream of node end `end`: the dialing stream of end 0, the listen stream of end 1.
+    fn stream_of(&self, end: usize) -> Option<usize> {
+        if end == 0 {
+            self.dial.map(|d| d.0)
+        } else {
+            self.accepted
         }
     }
 
@@ -205,22 +229,37 @@ impl<'p> Cluster<'p> {
     }
 
     fn client_connect(&mut self, i: usize, node: NodeId, stream: &str) -> Result<(), SimError> {
-        let Some(s) = self.listen_stream(node, stream) else {
-            // Nothing listens there (the node is down, or runs no such stream): refused.
-            let why = format!("node {} does not accept on `{stream}`", node.0);
-            return self.client_event(i, StreamEvent::Closed(&why));
-        };
         let p = self.pipes.len();
-        self.pipes.push(Pipe::new(
-            [End::Client(i), End::Pending { node, stream: s }],
-            self.now,
-            None,
-        ));
+        let target = self.listen_stream(node, stream);
+        let far = match target {
+            Some(s) => End::Pending { node, stream: s },
+            None => End::Nowhere,
+        };
+        self.pipes.push(Pipe::new([End::Client(i), far], self.now, None));
         if let Some(c) = self.stream_clients.get_mut(i) {
             c.pipe = Some(p);
         }
-        let delay = self.rng.range(self.cfg.latency.0, self.cfg.latency.1);
-        self.schedule(delay, Envelope::PipeConnect { pipe: p });
+        if target.is_none() {
+            // Nothing listens there (the node is down, or runs no such stream): refused, after the way there and
+            // back, as a TCP reset comes. Bytes the client sends meanwhile go nowhere.
+            if let Some(x) = self.pipes.get_mut(p) {
+                x.told[1] = true;
+                x.recv[1] = false;
+            }
+            let why = format!("node {} does not accept on `{stream}`", node.0);
+            self.towards(
+                p,
+                0,
+                Envelope::PipeClosed {
+                    pipe: p,
+                    to: 0,
+                    reason: Arc::from(why),
+                },
+            );
+            return Ok(());
+        }
+        // Ordered towards the accepting end, so bytes and a close the client sends after it arrive after it.
+        self.towards(p, 1, Envelope::PipeConnect { pipe: p });
         Ok(())
     }
 
@@ -254,8 +293,7 @@ impl<'p> Cluster<'p> {
             Some((stream, req)),
         ));
         self.node_ends.insert((from, conn), (p, 0));
-        let delay = self.rng.range(self.cfg.latency.0, self.cfg.latency.1);
-        self.schedule(delay, Envelope::PipeConnect { pipe: p });
+        self.towards(p, 1, Envelope::PipeConnect { pipe: p });
         Ok(())
     }
 
@@ -315,10 +353,16 @@ impl<'p> Cluster<'p> {
         if self.listen_stream_index_ok(node, stream).is_none() {
             return self.refuse(p, format!("node {} is down", node.0));
         }
+        if let End::Node { node: from, .. } = pipe.ends[0]
+            && self.partitioned(from, node)
+        {
+            return self.refuse(p, format!("node {} is unreachable (partitioned)", node.0));
+        }
         let restarts = self.nodes.get(node.0 as usize).map_or(0, |s| s.restarts);
         let conn = self.allocate_conn(node)?;
         if let Some(pipe) = self.pipes.get_mut(p) {
             pipe.ends[1] = End::Node { node, restarts, conn };
+            pipe.accepted = Some(stream);
         }
         self.node_ends.insert((node, conn), (p, 1));
         let at = self.node_now(node);
@@ -333,10 +377,13 @@ impl<'p> Cluster<'p> {
             },
         )?;
         self.run.stream_connections += 1;
-        // The connecting end learns it is open after the way back.
-        let delay = self.rng.range(self.cfg.latency.0, self.cfg.latency.1);
-        self.schedule(delay, Envelope::PipeOpened { pipe: p });
+        // The connecting end learns it is open after the way back, before anything the accepting end sends.
+        self.towards(p, 0, Envelope::PipeOpened { pipe: p });
         Ok(())
+    }
+
+    fn partitioned(&self, a: NodeId, b: NodeId) -> bool {
+        self.blocked.contains(&(a, b)) || self.blocked.contains(&(b, a))
     }
 
     /// Whether `node` is up (its stream `stream` then exists: stream indexes are the program's).
@@ -354,6 +401,12 @@ impl<'p> Cluster<'p> {
             return Ok(());
         }
         let dial = pipe.dial;
+        if let Some(x) = self.pipes.get_mut(p) {
+            x.opened = true;
+        }
+        let Some(pipe) = self.pipes.get(p) else {
+            return Err(internal_error!("no pipe {p}").into());
+        };
         match pipe.ends[0].clone() {
             End::Client(i) => self.client_event(i, StreamEvent::Opened),
             End::Node { node, restarts, conn } => {
@@ -373,7 +426,9 @@ impl<'p> Cluster<'p> {
                     },
                 )
             }
-            End::Pending { .. } => Err(internal_error!("pipe {p}'s connecting end is pending").into()),
+            End::Pending { .. } | End::Nowhere => {
+                Err(internal_error!("pipe {p}'s connecting end is not a client or a node").into())
+            }
         }
     }
 
@@ -401,7 +456,7 @@ impl<'p> Cluster<'p> {
                     _ => Ok(()),
                 }
             }
-            End::Pending { .. } => Ok(()),
+            End::Pending { .. } | End::Nowhere => Ok(()),
         }
     }
 
@@ -446,6 +501,11 @@ impl<'p> Cluster<'p> {
         if !*side(&pipe.recv, to) || *side(&pipe.told, to) {
             return Ok(());
         }
+        if let (End::Node { node: a, .. }, End::Node { node: b, .. }) = (&pipe.ends[0], &pipe.ends[1])
+            && self.partitioned(*a, *b)
+        {
+            return self.reset(p, "partitioned");
+        }
         match side(&pipe.ends, to).clone() {
             End::Client(i) => self.client_event(i, StreamEvent::Received(&bytes)),
             End::Node { node, restarts, conn } => {
@@ -454,7 +514,9 @@ impl<'p> Cluster<'p> {
                 }
                 self.observe_at(node, Observed::Bytes { conn, bytes })
             }
-            End::Pending { .. } => Err(internal_error!("bytes to a pending end of pipe {p}").into()),
+            End::Pending { .. } | End::Nowhere => {
+                Err(internal_error!("bytes to an end of pipe {p} that is not connected").into())
+            }
         }
     }
 
@@ -504,7 +566,7 @@ impl<'p> Cluster<'p> {
                     reason: Arc::from(reason),
                 },
             ),
-            End::Node { .. } | End::Pending { .. } => Ok(()),
+            End::Node { .. } | End::Pending { .. } | End::Nowhere => Ok(()),
         }
     }
 
@@ -516,11 +578,23 @@ impl<'p> Cluster<'p> {
         let told = pipe.told;
         pipe.told = [true, true];
         pipe.recv = [false, false];
-        let ends = pipe.ends.clone();
+        let (ends, opened, dial) = (pipe.ends.clone(), pipe.opened, pipe.dial);
         self.run.stream_resets += 1;
-        for (end, was_told) in ends.iter().zip(told) {
-            if !was_told {
-                self.tell_closed(end, why)?;
+        for (i, (end, was_told)) in ends.iter().zip(told).enumerate() {
+            if was_told {
+                continue;
+            }
+            match end {
+                // The connecting node was never told the connection opened: to it, the dial failed.
+                End::Node { node, restarts, conn } if i == 0 && !opened => {
+                    self.node_ends.remove(&(*node, *conn));
+                    if let Some((stream, req)) = dial
+                        && self.end_alive(*node, *restarts)
+                    {
+                        self.stream_dial_failed(*node, stream, req, why.to_owned())?;
+                    }
+                }
+                _ => self.tell_closed(end, why)?,
             }
         }
         Ok(())
@@ -546,17 +620,25 @@ impl<'p> Cluster<'p> {
         let mut dials = Vec::new();
         for h in host {
             match host_request(&streams, h).map_err(|e| SimError::Internal(internal_error!("node {}: {e}", n.0)))? {
-                HostRequest::Write { conn, seq, bytes } => writes.push((conn, seq, bytes)),
-                HostRequest::Close { conn } => closes.push(conn),
+                HostRequest::Write {
+                    stream,
+                    conn,
+                    seq,
+                    bytes,
+                } => writes.push((conn, seq, stream, bytes)),
+                HostRequest::Close { stream, conn } => closes.push((stream, conn)),
                 HostRequest::Dial { stream, req, addr } => dials.push((stream, req, addr)),
             }
         }
         writes.sort_by_key(|w| (w.0, w.1));
-        for (conn, seq, bytes) in writes {
+        for (conn, seq, stream, bytes) in writes {
             let Some(&(p, end)) = self.node_ends.get(&(n, conn)) else {
                 self.run.dropped += 1;
                 continue;
             };
+            if !self.through_its_stream(n, p, end, stream, conn, "write") {
+                continue;
+            }
             let accepted = match self.pipes.get_mut(p) {
                 Some(x) if x.live() => side_mut(&mut x.writers, end).accept(seq, bytes),
                 _ => {
@@ -571,35 +653,25 @@ impl<'p> Cluster<'p> {
                     }
                 }
                 Err(why) => {
+                    // A located runtime error, as in the runtime: the connection closes (the peer learns after the
+                    // bytes already sent) and the program's `closed` event carries the error.
                     self.run.stream_violations += 1;
                     self.run.log.push(format!(
                         "{}: node {} stream violation: {why}",
                         self.now - super::EPOCH,
                         n.0
                     ));
-                    self.reset(p, &why)?;
+                    self.host_close(p, end, &why);
                 }
             }
         }
         // A program's close: the other end learns after the bytes sent, and the node end gets its own `closed`.
-        for conn in closes {
+        for (stream, conn) in closes {
             let Some(&(p, end)) = self.node_ends.get(&(n, conn)) else {
                 continue;
             };
-            self.half_close(p, end);
-            if let Some(x) = self.pipes.get_mut(p) {
-                *side_mut(&mut x.recv, end) = false;
-            }
-            if self.pipes.get(p).is_some_and(|x| !*side(&x.told, end)) {
-                let delay = self.rng.range(self.cfg.latency.0, self.cfg.latency.1);
-                self.schedule(
-                    delay,
-                    Envelope::PipeClosed {
-                        pipe: p,
-                        to: end,
-                        reason: Arc::from("closed by the program"),
-                    },
-                );
+            if self.through_its_stream(n, p, end, stream, conn, "close") {
+                self.host_close(p, end, "closed by the program");
             }
         }
         // The runtime closes a connection once the tick that delivered its `closed` is released.
@@ -612,6 +684,43 @@ impl<'p> Cluster<'p> {
             self.node_dial(n, stream, req, &addr)?;
         }
         Ok(())
+    }
+
+    /// Whether a request through `stream` names a connection of that stream; otherwise the request is refused, as a
+    /// located runtime error the run counts and logs (FOREIGN-PROTOCOLS §1.2).
+    fn through_its_stream(&mut self, n: NodeId, p: usize, end: usize, stream: usize, conn: ConnId, what: &str) -> bool {
+        let belongs = self.pipes.get(p).and_then(|x| x.stream_of(end));
+        if belongs == Some(stream) {
+            return true;
+        }
+        self.run.stream_violations += 1;
+        self.run.log.push(format!(
+            "{}: node {} stream violation: a {what} through stream {stream} to connection {} of stream {belongs:?}",
+            self.now - super::EPOCH,
+            n.0,
+            conn.0
+        ));
+        false
+    }
+
+    /// The host closes node end `end` of pipe `p`: the other end learns after the bytes sent, the node end gets its
+    /// own `closed` with `reason`, and nothing more reaches it.
+    fn host_close(&mut self, p: usize, end: usize, reason: &str) {
+        self.half_close(p, end);
+        if let Some(x) = self.pipes.get_mut(p) {
+            *side_mut(&mut x.recv, end) = false;
+        }
+        if self.pipes.get(p).is_some_and(|x| !*side(&x.told, end)) {
+            let delay = self.rng.range(self.cfg.latency.0, self.cfg.latency.1);
+            self.schedule(
+                delay,
+                Envelope::PipeClosed {
+                    pipe: p,
+                    to: end,
+                    reason: Arc::from(reason),
+                },
+            );
+        }
     }
 
     /// A node went down: every pipe with an end in that incarnation resets.
@@ -640,8 +749,8 @@ impl<'p> Cluster<'p> {
                 self.pipes.get(*p).is_some_and(|x| {
                     x.live()
                         && match (&x.ends[0], &x.ends[1]) {
-                            (End::Node { node: a, .. }, End::Node { node: b, .. }) => {
-                                self.blocked.contains(&(*a, *b)) || self.blocked.contains(&(*b, *a))
+                            (End::Node { node: a, .. }, End::Node { node: b, .. } | End::Pending { node: b, .. }) => {
+                                self.partitioned(*a, *b)
                             }
                             _ => false,
                         }

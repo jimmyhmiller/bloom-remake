@@ -1531,7 +1531,10 @@ M::h$when(T) :- vote(T, _ | _, _).
 ```
 
 Scalar conditional *values* are `if c { a } else { b }` and `match`, which are pure expressions (IR `ite`) and need
-no rule split.
+no rule split. A `match` must cover every value of its scrutinee (BLS0314, naming a value no arm takes); an arm with
+a guard covers nothing. The names in an arm's pattern are the arm's own: in a function body they bind afresh,
+shadowing outer ones, as `let` does there; in a rule a name the rule already binds is BLS0501, since comparing and
+rebinding would both be plausible readings (name the arm's variable differently and compare in a guard).
 
 ### 9.8 `forall` (universal quantification)
 
@@ -2815,6 +2818,7 @@ never truncated or defaulted).
 | BLS0312 | E | `f64` as the element of `LMax`/`LMin` |
 | BLS0313 | E | a possibly negative contribution into a `bag` |
 | BLS0314 | E | a `match` that does not cover every value of its scrutinee |
+| BLS0315 | E | a `Conn` in a channel or a durable relation |
 
 **Legality (BLS04xx)**
 
@@ -2824,7 +2828,7 @@ never truncated or defaulted).
 | BLS0401 | E | a write into a `sealed table` outside bootstrap |
 | BLS0402 | E | a durable relation written in a plain `bootstrap` (use `bootstrap fresh`) |
 | BLS0403 | E | `send` destination: missing `to`, `to` on a loopback, on a column-form channel or on a partitioned channel |
-| BLS0404 | E | a send or receive placed at the wrong role |
+| BLS0404 | E | a send, receive, read or write placed at a role the relation does not live at |
 | BLS0405 | E | `fact` into a non-`static` relation (or, in a spec, into an input without `at tick`) |
 | BLS0406 | E | a write into an own `input`, an instance `output`, a relation parameter or a `view` |
 | BLS0407 | E | `seal` of a relation without `sealed by`, or naming other than exactly its seal key |
@@ -2837,7 +2841,7 @@ never truncated or defaulted).
 | Code | Sev | Meaning |
 |---|---|---|
 | BLS0500 | E | range restriction: a variable of a head, negation, guard, `to` or `weight` is not bound (ANA-001) |
-| BLS0501 | E | `let` re-binds a variable: write `x == e` |
+| BLS0501 | E | `let` re-binds a variable: write `x == e`; a match arm in a rule re-binds a rule variable |
 | BLS0502 | E | a negative edge on a same-tick cycle, with the cycle as a path of surface constructs (ANA-002) |
 | BLS0503 | E | a choice or order-sensitive site on a same-tick recursive cycle (SEM-086) |
 | BLS0504 | E | `on` without a positive event literal, with the chain that makes the header standing |

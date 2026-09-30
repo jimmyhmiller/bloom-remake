@@ -331,9 +331,23 @@ impl SeqWriter {
 /// A request to the host, decoded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostRequest {
-    Write { conn: ConnId, seq: u64, bytes: Vec<u8> },
-    Close { conn: ConnId },
-    Dial { stream: usize, req: u64, addr: Arc<str> },
+    /// A write, through the node's stream `stream` (the host refuses it if `conn` is another stream's).
+    Write {
+        stream: usize,
+        conn: ConnId,
+        seq: u64,
+        bytes: Vec<u8>,
+    },
+    /// A close, through the node's stream `stream`.
+    Close {
+        stream: usize,
+        conn: ConnId,
+    },
+    Dial {
+        stream: usize,
+        req: u64,
+        addr: Arc<str>,
+    },
 }
 
 /// Decodes a released host row against the node's streams.
@@ -368,6 +382,7 @@ pub fn host_request(streams: &[NodeStream], h: &HostOut) -> Result<HostRequest, 
                 }
             }
             HostRequest::Write {
+                stream: i,
                 conn: *conn,
                 seq: *seq,
                 bytes,
@@ -377,7 +392,7 @@ pub fn host_request(streams: &[NodeStream], h: &HostOut) -> Result<HostRequest, 
             let [Value::Conn(conn)] = &*h.row else {
                 return Err(bad().into());
             };
-            HostRequest::Close { conn: *conn }
+            HostRequest::Close { stream: i, conn: *conn }
         }
         HostOp::Dial => {
             let [Value::Int(IntValue::U64(req)), Value::Str(addr)] = &*h.row else {

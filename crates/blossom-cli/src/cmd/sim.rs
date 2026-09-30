@@ -153,7 +153,13 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
             }
             // What the node asked of the host this tick: stream writes, closes, dials.
             for h in &nt.host {
-                let rel = artifact.protocol.get().rels.get(h.rel).map(|r| r.name.to_string()).unwrap_or_default();
+                let rel = artifact
+                    .protocol
+                    .get()
+                    .rels
+                    .get(h.rel)
+                    .map(|r| r.name.to_string())
+                    .unwrap_or_default();
                 lines.push(format!("  => {rel}({})", names.row(h.rel, &h.row).join(", ")));
             }
             if !lines.is_empty() {
@@ -326,7 +332,25 @@ fn scripted(artifact: &SimArtifact, text: &str, with_text: bool) -> Result<(Scri
         .iter()
         .position(|s| s.name.to_string() == *stream)
         .ok_or_else(|| format!("`{text}`: the program has no stream `{stream}`"))?;
+    let st = artifact
+        .protocol
+        .get()
+        .streams
+        .get(stream)
+        .ok_or_else(|| format!("`{text}`: no stream {stream}"))?;
+    if let blossom_ir::core::Placement::Role(r) = st.placement
+        && artifact.roles.get(node.0 as usize).copied().flatten() != Some(r)
+    {
+        return Err(format!(
+            "`{text}`: node `{}` does not run the stream `{}`",
+            parts.first().copied().unwrap_or(""),
+            st.name
+        ));
+    }
     let conn: u64 = conn.parse().map_err(|_| bad())?;
+    if conn > u64::from(u32::MAX) {
+        return Err(format!("`{text}`: a connection number is at most {}", u32::MAX));
+    }
     let tick: u64 = tick.parse().map_err(|_| bad())?;
     let body = match (with_text, parts.get(4)) {
         (true, Some(t)) => Some(unescape(t).ok_or_else(|| format!("`{text}`: a bad escape in the text"))?),
@@ -411,16 +435,23 @@ fn scripted_streams(artifact: &mut SimArtifact, args: &Args) -> Result<(), Strin
     for (key @ (node, stream, conn), open_tick) in &opened {
         let st = program.streams.get(*stream).ok_or("no such stream")?;
         let node = blossom_value::time::NodeId(*node);
-        let c = Value::Conn(ConnId(*conn));
+        // Connection numbers are per stream: the stream is the high half of the `Conn`.
+        let c = Value::Conn(ConnId((*stream as u64) << 32 | *conn));
         facts.push(InputFact {
             node,
             tick: Tick(*open_tick),
             rel: st.opened,
-            row: vec![c.clone(), Value::Str("script".into()), Value::Instant(blossom_value::time::Instant(0))],
+            row: vec![
+                c.clone(),
+                Value::Str("script".into()),
+                Value::Instant(blossom_value::time::Instant(0)),
+            ],
         });
         let per = chunks.remove(key).unwrap_or_default();
         if per.keys().next().is_some_and(|t| t <= open_tick) {
-            return Err(format!("connection {conn}: a chunk in or before its opening tick {open_tick}"));
+            return Err(format!(
+                "connection {conn}: a chunk in or before its opening tick {open_tick}"
+            ));
         }
         let last = per.keys().next_back().copied();
         for (seq, (tick, bytes)) in per.into_iter().enumerate() {
@@ -428,7 +459,11 @@ fn scripted_streams(artifact: &mut SimArtifact, args: &Args) -> Result<(), Strin
                 node,
                 tick: Tick(tick),
                 rel: st.data,
-                row: vec![c.clone(), Value::Int(IntValue::U64(seq as u64)), Value::Bytes(bytes.into())],
+                row: vec![
+                    c.clone(),
+                    Value::Int(IntValue::U64(seq as u64)),
+                    Value::Bytes(bytes.into()),
+                ],
             });
         }
         if let Some(close_tick) = closed.remove(key) {
@@ -452,4 +487,3 @@ fn scripted_streams(artifact: &mut SimArtifact, args: &Args) -> Result<(), Strin
     artifact.inputs.extend(facts);
     Ok(())
 }
-

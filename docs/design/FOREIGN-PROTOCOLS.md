@@ -33,7 +33,11 @@ A stream declaration introduces:
 | `send upstream.dial(req: u64, addr: String)` | channel to the host | `connect` streams only: open a connection; it is reported as `upstream.opened` or `upstream.failed(req, reason)` |
 
 - `Conn` is a built-in opaque type, like `Session`. It is unique across incarnations: it carries the incarnation, so a
-  restarted node never confuses an old connection with a new one.
+  restarted node never confuses an old connection with a new one. It names a connection of one node's incarnation
+  only, so a channel or a durable relation that can hold one is BLS0315: a `Conn` never reaches another node, where
+  it would name a different client's connection.
+- A stream's relations live where the stream is declared: a rule placed at another role that reads or writes them is
+  BLS0404, as for any relation placed at a role.
 - `Part` is `enum Part { Bytes(Bytes), Blob(Blob, u64, u64) }`: literal bytes, or a range of a stored blob (§5). A
   blob part is sent without passing its bytes through the engine.
 
@@ -53,9 +57,18 @@ A stream declaration introduces:
   durable.
 - **Crashes.** Every connection closes at a crash; clients see a reset. Connection state lives in volatile relations,
   so a restart begins with no connections.
-- **Backpressure.** Each connection has a byte budget per tick (`max_stream_bytes`, from the deployment).
-  - Beyond it the runtime stops reading that connection until the next tick.
-  - A connection whose unsent writes exceed a limit is closed, with a counter.
+- **Backpressure**, in bytes, from the deployment's `[stream_limits]` (defaults in brackets):
+  - a connection's `data` carries at most `max_stream_bytes` a tick [1 MiB];
+  - a connection's reader stops reading while `read_ahead_bytes` it read wait for the engine [1 MiB], so the peer's
+    TCP window fills and the peer waits;
+  - all readers stop while `queue_bytes` wait for the engine [64 MiB];
+  - the engine takes no stream bytes while the node holds `backlog_bytes` it has not delivered [16 MiB];
+  - a connection whose unsent writes (held writes included) pass `write_queue_bytes` is closed, with a counter
+    [64 MiB].
+  Stream reports reach the engine on their own queue, so stream bytes never hold up peers' messages or clients'
+  requests.
+- **Requests through the wrong stream.** A write or close through stream `s` of a connection of another stream is
+  refused, counted and recorded as a located runtime error; nothing is written.
 - **Deployment.** A node's `[[node]]` entry maps stream names to addresses: `streams = { kafka = "0.0.0.0:9092" }`.
   A `listen` stream without an address is a configuration error: the node refuses to start.
 
@@ -91,7 +104,10 @@ A stream declaration introduces:
     released (after that tick's writes), or when its writes back up past the queue.
   - A reader never closes a connection: a peer that half-closed still reads its replies.
   - A write `seq` more than 4096 past the next expected one is a violation, like a duplicate. It closes the
-    connection with the reason recorded (`StreamStats::last_violation`).
+    connection: the peer gets what was already written, then the close; the program's `closed` event carries the
+    violation, which is also recorded (`StreamStats::last_violation`). The simulator does the same.
+  - A dial tries every address its name resolves to, in order, as a TCP client does.
+  - A node that halts or faults stops accepting and closes its connections.
 
 ### 1.3 IR, oracle and engine
 
@@ -105,7 +121,12 @@ A stream declaration introduces:
 - **Cluster simulator.** Streams become simulated byte pipes between programs, or between a program and a Rust test
   client.
   - Chunks are split at random byte boundaries, which tests reassembly.
-  - The nemesis can drop connections.
+  - The nemesis can drop connections; crashes and partitions reset them (a partition also stops a connection being
+    made across it, and resets one that carries bytes across it).
+  - A connection's opening is ordered with what follows: the accepting end gets it before the connecting end's
+    bytes and close, and the connecting end learns it opened before the accepting end's bytes and close. A reset
+    before the connecting end learned it opened is, to that end, a failed dial.
+  - A refused connection is refused after a round trip, as a TCP reset comes.
   - Everything is deterministic under the seed.
 - **Synchronous simulator (`blossom sim`).** It takes scripted chunks as inputs.
 

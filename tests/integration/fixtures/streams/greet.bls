@@ -1,0 +1,40 @@
+//! A server that greets every connection in its `opened` rule, and a client that dials it, hangs up as soon as it
+//! hears anything, and dials again at once, over and over: connections open, carry bytes and close all the time,
+//! which is what the cluster simulator's ordering of a connection's opening, bytes, closes and resets must survive.
+//! The server's second stream, `side`, is written with the greeted connection: a request through the wrong stream.
+program greet version 1;
+
+role Server;
+role Client;
+
+at Server {
+    stream hello: listen;
+    stream side: listen;
+    greet: on hello.opened(c, _peer, _at) {
+        send hello.write(c, 0, [Part::Bytes("hi\n".to_utf8())]);
+    }
+    wrong: on hello.data(c, _seq, _b) {
+        send side.write(c, 0, [Part::Bytes("not yours\n".to_utf8())]);
+    }
+}
+
+at Client {
+    stream up: connect;
+    /// Every chunk heard.
+    table heard(b: Bytes);
+
+    start: on boot() {
+        send up.dial(0, "sim://srv/hello");
+    }
+    got: on up.data(c, _seq, b) {
+        emit heard(b);
+        send up.write(c, 0, [Part::Bytes("bye\n".to_utf8())]);
+        send up.close(c);
+    }
+    again: on up.closed(_c, _why) {
+        send up.dial(1, "sim://srv/hello");
+    }
+    retry: on up.failed(req, _why) {
+        send up.dial(req + 1, "sim://srv/hello");
+    }
+}
