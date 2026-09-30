@@ -80,6 +80,14 @@ pub struct Egress {
     pub row: Row,
 }
 
+/// A request to the host: a row of a stream's `write`, `close` or `dial` (FOREIGN-PROTOCOLS §1). Like egress, it
+/// leaves only after the tick's durable writes are synced.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HostOut {
+    pub rel: RelId,
+    pub row: Row,
+}
+
 /// Everything one tick of one node reads.
 #[derive(Clone, Debug)]
 pub struct TickInput<'a> {
@@ -113,6 +121,8 @@ pub struct TickOutput {
     pub outbox: BTreeSet<Send>,
     /// The async heads to client sessions.
     pub egress: BTreeSet<Egress>,
+    /// The async heads to the host (stream writes, closes and dials).
+    pub host: BTreeSet<HostOut>,
     /// The distinct firings of the tick, in evaluation order (deterministic); empty unless capture was requested.
     pub firings: Vec<FiringRecord>,
 }
@@ -210,6 +220,7 @@ pub struct StepOutput {
     pub changes: Changes,
     pub outbox: BTreeSet<Send>,
     pub egress: BTreeSet<Egress>,
+    pub host: BTreeSet<HostOut>,
     /// The final contents, at this tick, of the relations the caller asked to observe.
     pub observed: BTreeMap<RelId, Vec<Row>>,
 }

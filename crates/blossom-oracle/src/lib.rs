@@ -40,7 +40,7 @@ use blossom_value::{
 
 pub use strata::Stratum;
 
-pub use blossom_ir::tick::{Delivery, Egress, Ingress, Instance, Row, Send, TickInput, TickOutput};
+pub use blossom_ir::tick::{Delivery, Egress, HostOut, Ingress, Instance, Row, Send, TickInput, TickOutput};
 
 /// Why the oracle could not evaluate: the evaluators' shared error.
 pub type OracleError = blossom_ir::tick::EvalError;

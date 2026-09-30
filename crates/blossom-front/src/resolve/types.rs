@@ -198,6 +198,7 @@ impl<'t> Resolver<'t, '_> {
             "Duration" => Some(TypeDef::Duration),
             "Instant" => Some(TypeDef::Instant),
             "Session" => Some(TypeDef::Session),
+            "Conn" => Some(TypeDef::Conn),
             "Principal" => Some(TypeDef::Principal),
             _ => IntTy::ALL.iter().find(|t| t.name() == text).map(|t| TypeDef::Int(*t)),
         };
@@ -208,6 +209,12 @@ impl<'t> Resolver<'t, '_> {
             return Some(self.intern_type(def, span));
         }
         match text {
+            "Part" if self.find_def(s, name.name).is_none() => {
+                if !arity(self, 0) {
+                    return None;
+                }
+                return Some(self.part_type(span));
+            }
             "Node" => {
                 if args.is_empty() {
                     return Some(self.node_type(None));
@@ -396,7 +403,30 @@ impl<'t> Resolver<'t, '_> {
     }
 
     /// An enum type named `name` in scope, for variant paths `E::V`.
+    /// The built-in `Part` enum (FOREIGN-PROTOCOLS §1.1): what a stream write sends. `Part::Bytes(b)` is literal
+    /// bytes; blob ranges come with blobs (§5).
+    pub fn part_type(&mut self, span: Span) -> TypeId {
+        let bytes = self.intern_type(TypeDef::Bytes, span);
+        self.intern_type(
+            TypeDef::Enum(EnumDef {
+                name: QualName::single(Symbol::intern(blossom_ir::PART_TYPE)),
+                variants: vec![VariantDef {
+                    name: Symbol::intern("Bytes"),
+                    number: 0,
+                    payload: vec![field(Symbol::intern("0"), bytes)],
+                    since: None,
+                }],
+                unknown: None,
+                reserved: Vec::new(),
+            }),
+            span,
+        )
+    }
+
     pub fn enum_named(&mut self, s: ScopeIdx, name: Ident) -> Option<TypeId> {
+        if name.as_str() == "Part" && self.find_def(s, name.name).is_none() {
+            return Some(self.part_type(name.span));
+        }
         match self.find_def(s, name.name) {
             Some(Def::Enum(en, file)) if en.generics.is_empty() => self.enum_type(en, file),
             Some(Def::Alias(..)) => {

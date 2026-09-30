@@ -68,7 +68,12 @@ pub(crate) fn classify(hir: &Hir) -> Result<BTreeSet<HRelId>, InternalError> {
     for (i, r) in hir.rels.iter().enumerate() {
         let id = HRelId(i as u32);
         match r.kind {
-            HRelKind::Channel(_) | HRelKind::Input { root: true } | HRelKind::Timer { .. } | HRelKind::Boot | HRelKind::Recovered => {
+            HRelKind::Channel(_)
+            | HRelKind::Input { root: true }
+            | HRelKind::Timer { .. }
+            | HRelKind::Boot
+            | HRelKind::Recovered
+            | HRelKind::Stream(crate::hir::HStreamRel::Event(_)) => {
                 events.insert(id);
             }
             HRelKind::View | HRelKind::Scratch | HRelKind::Output { .. } | HRelKind::Input { root: false } => {

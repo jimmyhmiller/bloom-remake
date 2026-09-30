@@ -3,7 +3,7 @@ use crate::bounded::DepthGuard;
 use crate::serde_util;
 use crate::time::{Duration, Instant, NodeId};
 use crate::types::ExternCodecId;
-use crate::value::{BlobRef, GroupValue, IntValue, LatValue, ModValue, SessionId, Value};
+use crate::value::{BlobRef, ConnId, GroupValue, IntValue, LatValue, ModValue, SessionId, Value};
 use serde::{Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -43,6 +43,7 @@ enum ValueRef<'a> {
         codec: &'a ExternCodecId,
         bytes: &'a Arc<[u8]>,
     },
+    Conn(&'a ConnId),
 }
 mod set_ref {
     use super::*;
@@ -91,6 +92,7 @@ impl<'a> From<&'a Value> for ValueRef<'a> {
             Value::Lattice(v) => Self::Lattice(v),
             Value::Group(v) => Self::Group(v),
             Value::Extern { codec, bytes } => Self::Extern { codec, bytes },
+            Value::Conn(v) => Self::Conn(v),
         }
     }
 }

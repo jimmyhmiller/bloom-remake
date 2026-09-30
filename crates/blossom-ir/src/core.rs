@@ -120,6 +120,53 @@ pub struct ServiceDecl {
     pub result: RelId,
 }
 
+/// A byte stream (FOREIGN-PROTOCOLS §1): a TCP endpoint the program owns at the byte level. The runtime feeds its
+/// event relations and carries out the rows of its host relations after the tick's durable writes are synced.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamDecl {
+    pub name: QualName,
+    pub kind: StreamKind,
+    pub placement: Placement,
+    /// `opened(c: Conn, peer: String, at: Instant)`; a connect stream's is `opened(c: Conn, req: u64, peer: String,
+    /// at: Instant)`, naming the dial request it answers.
+    pub opened: RelId,
+    /// `data(c: Conn, seq: u64, bytes: Bytes)`: the next chunk read from `c`; `seq` counts from 0 per connection.
+    pub data: RelId,
+    /// `closed(c: Conn, reason: String)`.
+    pub closed: RelId,
+    /// A connect stream's `failed(req: u64, reason: String)`: a dial that did not connect.
+    pub failed: Option<RelId>,
+    /// `write(c: Conn, seq: u64, parts: Vec<Part>)`, to the host: written in `seq` order per connection.
+    pub write: RelId,
+    /// `close(c: Conn)`, to the host: close after the writes already sent.
+    pub close: RelId,
+    /// A connect stream's `dial(req: u64, addr: String)`, to the host.
+    pub dial: Option<RelId>,
+}
+/// StreamKind data in the Dedalus core IR.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StreamKind {
+    /// Accepts connections on the address the deployment gives it.
+    Listen,
+    /// Opens connections on request (`dial`).
+    Connect,
+}
+/// A stream event relation's role (FOREIGN-PROTOCOLS §1.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum StreamEvent {
+    Opened,
+    Data,
+    Closed,
+    Failed,
+}
+/// A request a program makes of the host through a stream (FOREIGN-PROTOCOLS §1.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum HostOp {
+    Write,
+    Close,
+    Dial,
+}
+
 /// Program data in the Dedalus core IR.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 // FEATURE: ENG-001
@@ -133,6 +180,7 @@ pub struct Program {
     pub fns: IndexVec<FnId, FnDecl>,
     pub udas: IndexVec<UdaId, UdaDecl>,
     pub services: IndexVec<ServiceId, ServiceDecl>,
+    pub streams: Vec<StreamDecl>, // byte streams (FOREIGN-PROTOCOLS §1), in declaration order
     pub roles: IndexVec<RoleId, RoleDecl>,
     pub rels: IndexVec<RelId, RelDecl>,
     pub rules: IndexVec<RuleId, Rule>,
@@ -199,6 +247,9 @@ pub enum RelClass {
     Weighted(WeightKind),
     /// `#[readonly] table`: host-maintained and persistent; the host writes it between ticks; rules only read it (LANG-051).
     HostTable,
+    /// Requests to the host (a stream's `write`, `close`, `dial`): written by async rules, never read; each tick's rows
+    /// leave with the tick's output, released after its durable writes are synced (FOREIGN-PROTOCOLS §1.2).
+    HostOut(HostOp),
 }
 /// EventSource data in the Dedalus core IR.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,6 +264,7 @@ pub enum EventSource {
     SessionClosed,
     ServiceResult(ServiceId),
     ClusterVersion, // LANG-264: LMax<u32>, sampled per tick, recorded
+    Stream(StreamEvent), // FOREIGN-PROTOCOLS §1: a stream's `opened`, `data`, `closed`, `failed`
 }
 /// TimerDecl data in the Dedalus core IR.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

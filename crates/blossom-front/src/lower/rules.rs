@@ -943,6 +943,8 @@ impl<'h> Lowerer<'h> {
                 RuleKind::Deductive
             }
             Verb::Next => RuleKind::Inductive,
+            // A request to the host (a stream's write, close or dial) has no destination column.
+            Verb::Send if matches!(target.kind, HRelKind::Stream(HStreamRel::Host(_))) => RuleKind::Async,
             Verb::Send => {
                 let ch = match &target.kind {
                     HRelKind::Channel(ch) => ch.clone(),

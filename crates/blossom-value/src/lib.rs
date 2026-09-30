@@ -56,7 +56,7 @@ pub use time::{Duration, Incarnation, Instant, NodeId, Tick};
 pub use types::{
     EnumDef, ExternCodecId, ExternTypeDef, FieldDef, FieldNo, IntTy, StructDef, TypeDef, TypeTable, VariantDef,
 };
-pub use value::{BlobRef, GroupValue, IntValue, LatValue, ModValue, SessionId, Value};
+pub use value::{BlobRef, ConnId, GroupValue, IntValue, LatValue, ModValue, SessionId, Value};
 pub use word::{BytesWord, ColEncTag, Lane, NicheScalar, ScalarKind, StrWord, Word};
 
 /// The version of this crate's public API (ARCHITECTURE §1.6).

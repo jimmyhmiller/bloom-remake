@@ -14,6 +14,7 @@ mod validate;
 mod visit;
 pub use error::IrError;
 pub use program::{ProgramDigest, ValidatedProgram};
+pub use validate::PART_TYPE;
 
 pub mod obs;
 pub mod plan;

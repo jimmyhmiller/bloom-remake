@@ -58,6 +58,8 @@ pub struct Hir {
     pub invariants: Vec<HInvariant>,
     /// Pure functions (LANGUAGE §16.1).
     pub fns: Vec<HFn>,
+    /// Byte streams (FOREIGN-PROTOCOLS §1), in declaration order.
+    pub streams: Vec<HStream>,
     /// Variable tables, one per rule scope (and one per function).
     pub scopes: Vec<HScope>,
     /// Filled by type checking: the type of every variable of every scope.
@@ -277,6 +279,31 @@ pub enum HRelKind {
     Members(HRoleId),
     /// The node directory `node_dir(node, addr, principal, role)`, from the deployment (LANGUAGE §7.15).
     NodeDir,
+    /// One of a byte stream's relations (FOREIGN-PROTOCOLS §1): an event the runtime feeds, or a request to the
+    /// host, written with `send`.
+    Stream(HStreamRel),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HStreamRel {
+    Event(blossom_ir::core::StreamEvent),
+    Host(blossom_ir::core::HostOp),
+}
+
+/// A byte stream and its relations (FOREIGN-PROTOCOLS §1.1).
+#[derive(Clone, Debug)]
+pub struct HStream {
+    pub name: QualName,
+    pub kind: blossom_ir::core::StreamKind,
+    pub role: Option<HRoleId>,
+    pub opened: HRelId,
+    pub data: HRelId,
+    pub closed: HRelId,
+    pub failed: Option<HRelId>,
+    pub write: HRelId,
+    pub close: HRelId,
+    pub dial: Option<HRelId>,
+    pub span: Span,
 }
 
 impl HRelKind {

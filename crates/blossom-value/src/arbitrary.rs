@@ -2,7 +2,7 @@
 use crate::error::ValueError;
 use crate::time::{Duration, Instant, NodeId};
 use crate::types::{IntTy, TypeDef, TypeTable};
-use crate::value::{BlobRef, GroupValue, IntValue, LatValue, ModValue, SessionId, Value};
+use crate::value::{BlobRef, ConnId, GroupValue, IntValue, LatValue, ModValue, SessionId, Value};
 use blossom_base::TypeId;
 use proptest::prelude::*;
 use proptest::strategy::Union;
@@ -106,6 +106,7 @@ pub fn value_for(types: &TypeTable, ty: TypeId) -> Result<BoxedStrategy<Value>, 
             .prop_map(|(hash, len)| Value::Blob(BlobRef { hash, len }))
             .boxed(),
         TypeDef::Session => any::<u64>().prop_map(|n| Value::Session(SessionId(n))).boxed(),
+        TypeDef::Conn => any::<u64>().prop_map(|n| Value::Conn(ConnId(n))).boxed(),
         TypeDef::Principal => "[a-z]{1,12}".prop_map(|s| Value::Principal(s.into())).boxed(),
         TypeDef::Node(_) => any::<u32>().prop_map(|n| Value::Node(NodeId(n))).boxed(),
         TypeDef::Tuple(items) => fields(types, items)?.prop_map(Value::tuple).boxed(),

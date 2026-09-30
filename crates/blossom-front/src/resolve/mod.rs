@@ -322,6 +322,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 facts: Vec::new(),
                 invariants: Vec::new(),
                 fns: Vec::new(),
+                streams: Vec::new(),
                 scopes: Vec::new(),
                 var_types: Vec::new(),
             },
@@ -812,6 +813,17 @@ impl<'t, 'd> Resolver<'t, 'd> {
                         self.bind_rel(s, t.name, id);
                     }
                 }
+                ItemKind::Stream { name, kind } => {
+                    if has_roles && !in_at {
+                        self.error(
+                            code!("BLS0408"),
+                            name.span,
+                            "in a module with roles, streams go inside `at`",
+                        );
+                        continue;
+                    }
+                    self.stream(s, *name, *kind, placement, item.span);
+                }
                 ItemKind::Interpose(_) => {
                     // Declared in `imports`, once the instance exists.
                 }
@@ -1112,6 +1124,107 @@ impl<'t, 'd> Resolver<'t, 'd> {
     }
 
     /// A timer: `timer name every d;` declares the event relation `name(count: u64, at: Instant)` (LANGUAGE §7.14).
+    /// `stream name: listen|connect;` (FOREIGN-PROTOCOLS §1.1): its relations, read and written as `name.rel` like an
+    /// instance's interface — the events (`opened`, `data`, `closed`, a connect stream's `failed`) are read, the
+    /// requests to the host (`write`, `close`, a connect stream's `dial`) are sent.
+    fn stream(&mut self, s: ScopeIdx, name: Ident, kind: Ident, placement: Option<HRoleId>, span: Span) {
+        use blossom_ir::core::{HostOp, StreamEvent, StreamKind};
+        let kind = match kind.as_str() {
+            "listen" => StreamKind::Listen,
+            "connect" => StreamKind::Connect,
+            other => {
+                self.error(
+                    code!("BLS0100"),
+                    kind.span,
+                    format!("a stream is `listen` or `connect`, not `{other}`"),
+                );
+                return;
+            }
+        };
+        let taken = self.scope(s).instances.contains_key(&name.name)
+            || self.scope(s).rels.contains_key(&name.name)
+            || self.scope(s).fns.contains_key(&name.name);
+        if taken {
+            self.error(code!("BLS0201"), name.span, format!("`{}` is declared twice", name.as_str()));
+            return;
+        }
+        let t = |r: &mut Self, d: TypeDef| r.intern_type(d, span);
+        let conn = t(self, TypeDef::Conn);
+        let u64t = t(self, TypeDef::Int(blossom_value::types::IntTy::U64));
+        let text = t(self, TypeDef::Str);
+        let instant = t(self, TypeDef::Instant);
+        let bytes = t(self, TypeDef::Bytes);
+        let part = self.part_type(span);
+        let parts = t(self, TypeDef::Vec(part));
+        let mut interface = BTreeMap::new();
+        let mut make = |r: &mut Self, rel: &str, what: HStreamRel, cols: &[(&str, TypeId)]| -> HRelId {
+            let mut segs = r.scope(s).prefix.clone();
+            segs.push(name.name);
+            segs.push(Symbol::intern(rel));
+            let id = r.add_rel(HRel {
+                name: QualName::new(segs),
+                kind: HRelKind::Stream(what),
+                cols: cols
+                    .iter()
+                    .map(|(n, ty)| HCol {
+                        name: Symbol::intern(n),
+                        ty: Some(*ty),
+                    })
+                    .collect(),
+                key: None,
+                durable: false,
+                cell: false,
+                resolve: None,
+                role: placement,
+                span,
+            });
+            r.rel_spans.insert(id, span);
+            // An instance interface's flag is `true` for what the importer writes.
+            interface.insert(Symbol::intern(rel), (id, matches!(what, HStreamRel::Host(_))));
+            id
+        };
+        let opened_cols: Vec<(&str, TypeId)> = match kind {
+            StreamKind::Listen => vec![("c", conn), ("peer", text), ("at", instant)],
+            StreamKind::Connect => vec![("c", conn), ("req", u64t), ("peer", text), ("at", instant)],
+        };
+        let opened = make(self, "opened", HStreamRel::Event(StreamEvent::Opened), &opened_cols);
+        let data = make(
+            self,
+            "data",
+            HStreamRel::Event(StreamEvent::Data),
+            &[("c", conn), ("seq", u64t), ("bytes", bytes)],
+        );
+        let closed = make(self, "closed", HStreamRel::Event(StreamEvent::Closed), &[("c", conn), ("reason", text)]);
+        let write = make(
+            self,
+            "write",
+            HStreamRel::Host(HostOp::Write),
+            &[("c", conn), ("seq", u64t), ("parts", parts)],
+        );
+        let close = make(self, "close", HStreamRel::Host(HostOp::Close), &[("c", conn)]);
+        let (failed, dial) = match kind {
+            StreamKind::Listen => (None, None),
+            StreamKind::Connect => (
+                Some(make(self, "failed", HStreamRel::Event(StreamEvent::Failed), &[("req", u64t), ("reason", text)])),
+                Some(make(self, "dial", HStreamRel::Host(HostOp::Dial), &[("req", u64t), ("addr", text)])),
+            ),
+        };
+        self.scope_mut(s).instances.insert(name.name, Instance { interface });
+        self.hir.streams.push(HStream {
+            name: self.qual(s, name.name),
+            kind,
+            role: placement,
+            opened,
+            data,
+            closed,
+            failed,
+            write,
+            close,
+            dial,
+            span,
+        });
+    }
+
     fn timer(&mut self, s: ScopeIdx, t: &'t ast::TimerDecl, placement: Option<HRoleId>) -> Option<HRelId> {
         let words: Vec<&str> = t.words.iter().map(Ident::as_str).collect();
         if words != ["every"] || t.exprs.len() != 1 {
@@ -1475,6 +1588,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 | ItemKind::Timer(_)
                 | ItemKind::Fn(_)
                 | ItemKind::ExternFn(_)
+                | ItemKind::Stream { .. }
                 | ItemKind::Unsupported { .. } => {}
                 ItemKind::Param { .. } => {}
             }

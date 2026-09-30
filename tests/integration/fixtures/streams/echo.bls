@@ -1,0 +1,36 @@
+//! A line echo server over a byte stream (FOREIGN-PROTOCOLS §1): chunks arrive at arbitrary boundaries, the server
+//! keeps each connection's unconsumed bytes, and writes back every complete line (up to and including `\n`) in order.
+program echo version 1;
+
+stream echo: listen;
+
+/// Per connection: the bytes not yet consumed, and the next write's sequence number.
+table buf(c: Conn, pending: Bytes, next_seq: u64) key(c);
+
+/// Splits `b` after its last newline: the complete lines, and the rest.
+fn split(b: Bytes) -> (Bytes, Bytes) {
+    let last = range(0, b.len()).filter(|i| b.u8_at(i) == Some(10u8)).last();
+    match last {
+        Some(i) => (b.slice(0, i + 1).unwrap_or(Bytes::empty()), b.slice(i + 1, b.len()).unwrap_or(Bytes::empty())),
+        None => (Bytes::empty(), b),
+    }
+}
+
+accept: on echo.opened(c, _peer, _at) {
+    emit buf(c, Bytes::empty(), 0);
+}
+
+/// A connection's chunks come one per tick, after its `opened` tick: the state read here is always current.
+recv: on echo.data(c, _seq, bytes), buf(c, pending, n), let (lines, rest) = split(pending.concat(bytes)) {
+    if lines.len() > 0 {
+        send echo.write(c, n, [Part::Bytes(lines)]);
+        upsert buf(c, rest, n + 1);
+    }
+    if lines.len() == 0 {
+        upsert buf(c, rest, n);
+    }
+}
+
+forget: on echo.closed(c, _reason), buf(c, p, n) {
+    delete buf(c, p, n);
+}

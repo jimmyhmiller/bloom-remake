@@ -18,6 +18,7 @@ fn type_name(p: &Program, id: TypeId) -> String {
         Some(TypeDef::Mod { bits }) => format!("Mod<{bits}>"),
         Some(TypeDef::Blob) => "Blob".into(),
         Some(TypeDef::Session) => "Session".into(),
+        Some(TypeDef::Conn) => "Conn".into(),
         Some(TypeDef::Principal) => "Principal".into(),
         Some(TypeDef::Node(role)) => role
             .and_then(|r| p.roles.get(r))
@@ -370,6 +371,7 @@ pub fn print(p: &Program) -> String {
             RelClass::Weighted(WeightKind::ZSet) => "zset",
             RelClass::Weighted(WeightKind::Bag) => "bag",
             RelClass::HostTable => "host table",
+            RelClass::HostOut(_) => "host out",
         };
         let col_name = |i: ColIdx| {
             r.schema.cols.get(i.index()).map_or(format!("<col:{}>", i.raw()), |c| {

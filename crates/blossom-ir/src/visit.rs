@@ -419,6 +419,22 @@ impl Remap for ServiceDecl {
         }
     }
 }
+impl Remap for StreamDecl {
+    fn remap(&self, m: &mut impl Mapper) -> Self {
+        Self {
+            name: self.name.remap(m),
+            kind: self.kind,
+            placement: self.placement.remap(m),
+            opened: self.opened.remap(m),
+            data: self.data.remap(m),
+            closed: self.closed.remap(m),
+            failed: self.failed.remap(m),
+            write: self.write.remap(m),
+            close: self.close.remap(m),
+            dial: self.dial.remap(m),
+        }
+    }
+}
 impl Remap for Program {
     fn remap(&self, m: &mut impl Mapper) -> Self {
         Self {
@@ -431,6 +447,7 @@ impl Remap for Program {
             fns: self.fns.remap(m),
             udas: self.udas.remap(m),
             services: self.services.remap(m),
+            streams: self.streams.remap(m),
             roles: self.roles.remap(m),
             rels: self.rels.remap(m),
             rules: self.rules.remap(m),
@@ -500,6 +517,7 @@ impl Remap for RelClass {
             Self::Channel(v0) => Self::Channel(v0.remap(m)),
             Self::Weighted(v0) => Self::Weighted(v0.remap(m)),
             Self::HostTable => Self::HostTable,
+            Self::HostOut(op) => Self::HostOut(*op),
         }
     }
 }
@@ -515,6 +533,7 @@ impl Remap for EventSource {
             Self::SessionOpen => Self::SessionOpen,
             Self::SessionClosed => Self::SessionClosed,
             Self::ServiceResult(v0) => Self::ServiceResult(v0.remap(m)),
+            Self::Stream(e) => Self::Stream(*e),
             Self::ClusterVersion => Self::ClusterVersion,
         }
     }

@@ -91,6 +91,8 @@ pub enum Value {
         /// The encoded value.
         bytes: Arc<[u8]>,
     },
+    /// `Conn`: one connection of a byte stream (FOREIGN-PROTOCOLS §1).
+    Conn(ConnId),
 }
 
 /// An integer with its type. Integers of different types are never compared by programs (a type error); the
@@ -410,6 +412,11 @@ pub struct BlobRef {
 /// (LANG-243, DIST-065).
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct SessionId(pub u64);
+
+/// The identity of one byte-stream connection (FOREIGN-PROTOCOLS §1), allocated by the runtime. It carries the
+/// node's incarnation, so a restarted node never mistakes an old connection for a new one.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+pub struct ConnId(pub u64);
 
 /// A lattice value as data, in canonical form (LANGUAGE §11.5). Which shapes are valid for which lattice type,
 /// and every operation on them, is defined by `blossom-lattice`; this type only stores and orders them.
