@@ -11,6 +11,7 @@
 
 mod choose;
 mod expr;
+pub(crate) use expr::try_const;
 pub(crate) mod lattice;
 mod rules;
 
