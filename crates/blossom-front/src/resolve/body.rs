@@ -1885,6 +1885,42 @@ impl<'t> Resolver<'t, '_> {
                 cx.calls.insert(f);
                 Some(HExpr::new(HExprKind::Call { f, args: xs }, span))
             }
+            [ty, f] if ty.as_str() == "Bytes" => {
+                use blossom_ir::core::LibFn;
+                let n = f.as_str();
+                let (lib, arity) = match n {
+                    "uvarint" => (LibFn::BytesUvarint, 1),
+                    "varint" => (LibFn::BytesVarint, 1),
+                    "empty" => (LibFn::BytesEmpty, 0),
+                    "join" => (LibFn::BytesJoin, 1),
+                    _ => match n.strip_prefix("from_").and_then(byte_int) {
+                        Some(it) => (LibFn::BytesFrom(it), 1),
+                        None => {
+                            self.unsupported("LANG-180", &format!("`Bytes::{n}`"), span);
+                            return None;
+                        }
+                    },
+                };
+                if pos.len() != arity {
+                    self.error(
+                        code!("BLS0301"),
+                        span,
+                        format!("`Bytes::{n}` takes {arity} argument(s), {} given", pos.len()),
+                    );
+                    return None;
+                }
+                let mut xs = Vec::new();
+                for p in pos {
+                    xs.push(self.expr(cx, p)?);
+                }
+                Some(HExpr::new(
+                    HExprKind::Builtin {
+                        f: Builtin::Lib(lib),
+                        args: xs,
+                    },
+                    span,
+                ))
+            }
             [name] if name.as_str() == "rand_range" => {
                 // The key makes the draw stable (the same value for the same key within a tick, LANG-175).
                 if pos.len() < 3 {

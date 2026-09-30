@@ -1453,6 +1453,69 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
             same(ty(0)?, st, "to_lowercase of a String")?;
             Ok(st)
         }
+        LibFn::StrToUtf8 => {
+            arity(1)?;
+            same(ty(0)?, lookup(TypeDef::Str)?, "to_utf8 of a String")?;
+            lookup(TypeDef::Bytes)
+        }
+        LibFn::BytesFromUtf8 => {
+            arity(1)?;
+            same(ty(0)?, lookup(TypeDef::Bytes)?, "from_utf8 of Bytes")?;
+            lookup(TypeDef::Option(lookup(TypeDef::Str)?))
+        }
+        LibFn::BytesRead(it) | LibFn::BytesPut(it) | LibFn::BytesFrom(it) if !matches!(it.bits(), 8 | 16 | 32 | 64) => {
+            Err(format!("{f:?}: byte access is for 8- to 64-bit integers"))
+        }
+        LibFn::BytesRead(it) => {
+            arity(2)?;
+            same(ty(0)?, lookup(TypeDef::Bytes)?, "reads from Bytes")?;
+            same(ty(1)?, u64t()?, "a position is u64")?;
+            lookup(TypeDef::Option(lookup(TypeDef::Int(it))?))
+        }
+        LibFn::BytesPut(it) => {
+            arity(3)?;
+            let b = lookup(TypeDef::Bytes)?;
+            same(ty(0)?, b, "writes into Bytes")?;
+            same(ty(1)?, u64t()?, "a position is u64")?;
+            same(ty(2)?, lookup(TypeDef::Int(it))?, "the written integer has the method's type")?;
+            lookup(TypeDef::Option(b))
+        }
+        LibFn::BytesFrom(it) => {
+            arity(1)?;
+            same(ty(0)?, lookup(TypeDef::Int(it))?, "the integer has the constructor's type")?;
+            lookup(TypeDef::Bytes)
+        }
+        LibFn::BytesUvarintAt | LibFn::BytesVarintAt => {
+            arity(2)?;
+            same(ty(0)?, lookup(TypeDef::Bytes)?, "reads from Bytes")?;
+            same(ty(1)?, u64t()?, "a position is u64")?;
+            let v = if f == LibFn::BytesUvarintAt {
+                u64t()?
+            } else {
+                lookup(TypeDef::Int(IntTy::I64))?
+            };
+            lookup(TypeDef::Option(lookup(TypeDef::Tuple(vec![v, u64t()?]))?))
+        }
+        LibFn::BytesUvarint | LibFn::BytesVarint => {
+            arity(1)?;
+            let v = if f == LibFn::BytesUvarint {
+                u64t()?
+            } else {
+                lookup(TypeDef::Int(IntTy::I64))?
+            };
+            same(ty(0)?, v, "a varint's value")?;
+            lookup(TypeDef::Bytes)
+        }
+        LibFn::BytesEmpty => {
+            arity(0)?;
+            lookup(TypeDef::Bytes)
+        }
+        LibFn::BytesJoin => {
+            arity(1)?;
+            let b = lookup(TypeDef::Bytes)?;
+            same(ty(0)?, lookup(TypeDef::Vec(b))?, "join of a Vec<Bytes>")?;
+            Ok(b)
+        }
     }
 }
 

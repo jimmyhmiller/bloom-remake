@@ -592,6 +592,31 @@ pub enum LibFn {
     StrSplitWhitespace,
     /// `s.to_lowercase()`: Unicode lowercase mapping.
     StrToLowercase,
+    /// `s.to_utf8() -> Bytes`.
+    StrToUtf8,
+    /// `b.from_utf8() -> Option<String>`: `None` unless `b` is valid UTF-8.
+    BytesFromUtf8,
+    /// `b.u8_at(pos)`, `b.i8_at(pos)`, `b.u16_be_at(pos)`, … `b.i64_be_at(pos) -> Option<T>`: the big-endian integer
+    /// of type `T` at `pos`, `None` past the end. `T` is one of the 8-, 16-, 32- and 64-bit integer types.
+    BytesRead(blossom_value::types::IntTy),
+    /// `b.put_u8(pos, x)`, … `b.put_i64_be(pos, x) -> Option<Bytes>`: a copy with the big-endian `x` written at
+    /// `pos`, `None` unless it fits inside `b`.
+    BytesPut(blossom_value::types::IntTy),
+    /// `Bytes::from_u8(x)`, … `Bytes::from_i64_be(x)`: the big-endian bytes of `x`.
+    BytesFrom(blossom_value::types::IntTy),
+    /// `b.uvarint_at(pos) -> Option<(u64, u64)>`: an unsigned LEB128 varint and the position after it; `None` when it
+    /// is truncated, longer than 10 bytes, or does not fit a `u64`.
+    BytesUvarintAt,
+    /// `b.varint_at(pos) -> Option<(i64, u64)>`: a zigzag varint (as `uvarint_at`, then zigzag-decoded).
+    BytesVarintAt,
+    /// `Bytes::uvarint(x: u64)`: the shortest unsigned LEB128 encoding.
+    BytesUvarint,
+    /// `Bytes::varint(x: i64)`: the shortest zigzag LEB128 encoding.
+    BytesVarint,
+    /// `Bytes::empty()`.
+    BytesEmpty,
+    /// `Bytes::join(v: Vec<Bytes>)`: the concatenation, in order.
+    BytesJoin,
 }
 
 /// Construct data in the Dedalus core IR.

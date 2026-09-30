@@ -3169,7 +3169,7 @@ All functions are pure. Methods on values use `.`; there are no closures outside
 | Arithmetic | `+ - * / % **` (checked); `abs`, `min(a, b)`, `max(a, b)`, `clamp`, `wrapping_add`, `wrapping_sub`, `wrapping_mul`, `saturating_add`, `pow`, `sqrt` (`f64`) |
 | Bits | `& \| ^ ~ << >>`, `count_ones`, `leading_zeros` |
 | Strings | `len`, `++`, `split_whitespace() -> Vec<String>`, `split(sep)`, `to_lowercase`, `to_uppercase`, `trim`, `starts_with`, `ends_with`, `contains`, `replace`, `parse_u64() -> Option<u64>`, `parse_i64`, `to_string` (every type) |
-| Bytes | `len`, `slice(lo, hi)`, `concat`, `to_hex`, `from_utf8() -> Option<String>` |
+| Bytes | `len`, `slice(lo, hi) -> Option<Bytes>`, `concat`, `to_hex`, `from_utf8() -> Option<String>`; big-endian reads `u8_at(p)`, `i8_at(p)`, `u16_be_at(p)` … `i64_be_at(p) -> Option<T>`; patches `put_u8(p, x)` … `put_i64_be(p, x) -> Option<Bytes>`; varints `uvarint_at(p) -> Option<(u64, u64)>`, `varint_at(p) -> Option<(i64, u64)>` (value and next position; `None` when truncated, longer than 10 bytes or past `u64`); `Bytes::from_u8(x)` … `Bytes::from_i64_be(x)`, `Bytes::uvarint(x)`, `Bytes::varint(x)`, `Bytes::empty()`, `Bytes::join(v)`; `s.to_utf8()` on strings |
 | Vec | `len`, `get(i) -> Option<T>`, `first`, `last`, `push`, `concat`, `contains`, `enumerate() -> Vec<(u64, T)>`, `sort`, `reverse`, `dedup`, `map`, `filter`, `filter_map`, `fold`, `all`, `any` (closures: function bodies only) |
 | Ranges | `range(lo: u64, hi: u64) -> Vec<u64>`: `lo` up to, not including, `hi`; a combinator over `range(…)` walks it without building it |
 | Set | `len`, `contains`, `insert`, `remove`, `union`, `intersection`, `difference`, `items() -> Vec<T>` |

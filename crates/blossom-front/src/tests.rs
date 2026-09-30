@@ -581,3 +581,34 @@ fn a_function_passed_as_a_value_is_not_implemented() {
     );
     assert!(codes(src).contains(&"BLS0908".to_owned()), "{:?}", codes(src));
 }
+
+#[test]
+fn byte_primitives_type_check_and_reject_unsupported_widths() {
+    let ok = with_head(
+        "fn hdr(b: Bytes) -> Option<(i16, i32, u64)> {\n\
+             b.i16_be_at(0).and_then(|k| b.i32_be_at(2).and_then(|c| b.uvarint_at(6).map(|v| (k, c, v.0))))\n\
+         }\n\
+         fn frame(body: Bytes) -> Bytes { Bytes::join([Bytes::from_i32_be(4), body, Bytes::varint(0 - 1)]) }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert_eq!(codes(ok), Vec::<String>::new());
+    let wide = with_head(
+        "fn f(b: Bytes) -> Option<u128> { b.u128_be_at(0) }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert!(codes(wide).contains(&"BLS0908".to_owned()), "{:?}", codes(wide));
+    let ctor = with_head(
+        "fn f(x: u64) -> Bytes { Bytes::from_u64_le(x) }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert!(codes(ctor).contains(&"BLS0908".to_owned()), "{:?}", codes(ctor));
+    let arity = with_head(
+        "fn f(b: Bytes) -> Option<Bytes> { b.put_u16_be(0) }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert_eq!(codes(arity), vec!["BLS0301"]);
+}

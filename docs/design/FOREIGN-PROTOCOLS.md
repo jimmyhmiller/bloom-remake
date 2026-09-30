@@ -120,6 +120,14 @@ them.
 
 Integer reads are exact: a value that doesn't fit its type is an error, never a silent wrap.
 
+As built (S6 item 2; LANGUAGE Appendix B has the list):
+- The 8-bit forms have no `_be`: `u8_at`, `i8_at`, `put_u8`, `put_i8`, `from_u8`, `from_i8`.
+- Varint reads return the value and the position after it.
+- A non-minimal varint (`80 00`) decodes. `None` means truncated, longer than 10 bytes, or not fitting a `u64`.
+  Protocol code range-checks Kafka's 32-bit varints itself.
+- Both evaluators implement every primitive independently (`blossom-oracle/src/library.rs`,
+  `blossom-engine/src/func.rs`).
+
 ## 4. The `extern fn` standard library (LANGUAGE §16.2)
 
 `extern fn` binds a declaration to a registered Rust function (in `blossom-std-host`).
