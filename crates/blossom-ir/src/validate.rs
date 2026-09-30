@@ -867,6 +867,52 @@ fn assignable(p: &Program, actual: TypeId, expected: TypeId) -> bool {
         _ => false,
     }
 }
+/// The least type both `a` and `b` are assignable to (LANGUAGE §5.3): what a merge of the two holds (`if` branches,
+/// `match` arms, a collection's elements, `push`, a fold's accumulator). `None` when they differ in more than roles,
+/// or when the frontend did not intern the join (it interns every join it types).
+fn join(p: &Program, a: TypeId, b: TypeId) -> Option<TypeId> {
+    if assignable(p, a, b) {
+        return Some(b);
+    }
+    if assignable(p, b, a) {
+        return Some(a);
+    }
+    let def = match (p.types.get(a)?, p.types.get(b)?) {
+        (TypeDef::Node(_), TypeDef::Node(_)) => TypeDef::Node(None),
+        (TypeDef::Tuple(xs), TypeDef::Tuple(ys)) if xs.len() == ys.len() => {
+            let mut out = Vec::new();
+            for (x, y) in xs.iter().zip(ys) {
+                out.push(join(p, *x, *y)?);
+            }
+            TypeDef::Tuple(out)
+        }
+        (TypeDef::Option(x), TypeDef::Option(y)) => TypeDef::Option(join(p, *x, *y)?),
+        (TypeDef::Vec(x), TypeDef::Vec(y)) => TypeDef::Vec(join(p, *x, *y)?),
+        (TypeDef::Set(x), TypeDef::Set(y)) => TypeDef::Set(join(p, *x, *y)?),
+        (TypeDef::Map(k1, v1), TypeDef::Map(k2, v2)) => TypeDef::Map(join(p, *k1, *k2)?, join(p, *v1, *v2)?),
+        _ => return None,
+    };
+    p.types.lookup(&def)
+}
+/// Whether `a` and `b` are the same type but for the roles of their `Node`s.
+fn same_but_roles(p: &Program, a: TypeId, b: TypeId) -> bool {
+    if a == b {
+        return true;
+    }
+    match (p.types.get(a), p.types.get(b)) {
+        (Some(TypeDef::Node(_)), Some(TypeDef::Node(_))) => true,
+        (Some(TypeDef::Tuple(xs)), Some(TypeDef::Tuple(ys))) => {
+            xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| same_but_roles(p, *x, *y))
+        }
+        (Some(TypeDef::Option(x)), Some(TypeDef::Option(y)))
+        | (Some(TypeDef::Vec(x)), Some(TypeDef::Vec(y)))
+        | (Some(TypeDef::Set(x)), Some(TypeDef::Set(y))) => same_but_roles(p, *x, *y),
+        (Some(TypeDef::Map(k1, v1)), Some(TypeDef::Map(k2, v2))) => {
+            same_but_roles(p, *k1, *k2) && same_but_roles(p, *v1, *v2)
+        }
+        _ => false,
+    }
+}
 fn term_type(p: &Program, r: Cx<'_>, t: &Term, ty: TypeId) -> bool {
     match t {
         Term::Var(id) => r.vars.get(*id).is_some_and(|v| assignable(p, v.ty, ty)),
@@ -950,6 +996,11 @@ fn check_literal(p: &Program, r: Cx<'_>, l: &Literal) -> Result<(), String> {
             if let Pattern::Var(id) = pat {
                 let expected = r.vars.get(*id).ok_or("unknown binding variable")?.ty;
                 if expr_matches_type(p, r, expr, expected) {
+                    return Ok(());
+                }
+                // A rule variable's role may be narrower than the value bound to it: the body is a conjunction, and
+                // another literal (an atom, an `==`) narrows it (LANGUAGE §5.3). The shapes must agree.
+                if expr_type(p, r, expr).is_ok_and(|ty| same_but_roles(p, ty, expected)) {
                     return Ok(());
                 }
             }
@@ -1281,15 +1332,17 @@ fn expr_type(p: &Program, r: Cx<'_>, e: &Expr) -> Result<TypeId, String> {
             }
             let a = expr_type(p, r, then)?;
             let b = expr_type(p, r, els)?;
-            let a = if a != b && expr_matches_type(p, r, then, b) {
-                b
-            } else {
-                a
-            };
-            if a != b && !expr_matches_type(p, r, els, a) {
-                return Err("if branch type mismatch".into());
+            if a == b {
+                return Ok(a);
             }
-            Ok(a)
+            // A constant branch fits the other's type; otherwise the value is the branches' join.
+            if matches!(**then, Expr::Term(Term::Const(_))) && expr_matches_type(p, r, then, b) {
+                return Ok(b);
+            }
+            if matches!(**els, Expr::Term(Term::Const(_))) && expr_matches_type(p, r, els, a) {
+                return Ok(a);
+            }
+            join(p, a, b).ok_or("if branch type mismatch".into())
         }
         Expr::Match { scrut, arms } => {
             let scrut_ty = expr_type(p, r, scrut)?;
@@ -1313,10 +1366,13 @@ fn expr_type(p: &Program, r: Cx<'_>, e: &Expr) -> Result<TypeId, String> {
                 .or_else(|| arms.iter().zip(&types).next())
                 .map(|(_, t)| *t)
                 .ok_or("match has no arms")?;
+            // The value is the arms' join; a constant arm only has to fit it.
+            let mut ret = ret;
             for ((_, _, body), t) in arms.iter().zip(&types) {
-                if *t != ret && !expr_matches_type(p, r, body, ret) {
-                    return Err("match arm type mismatch".into());
+                if *t == ret || (matches!(body, Expr::Term(Term::Const(_))) && expr_matches_type(p, r, body, ret)) {
+                    continue;
                 }
+                ret = join(p, ret, *t).ok_or("match arm type mismatch")?;
             }
             Ok(ret)
         }
@@ -1332,10 +1388,10 @@ fn expr_type(p: &Program, r: Cx<'_>, e: &Expr) -> Result<TypeId, String> {
             } else {
                 "collection element type mismatch"
             };
-            let first = *types
-                .iter()
-                .find(|t| types.iter().all(|x| assignable(p, *x, **t)))
-                .ok_or(missing)?;
+            let mut first = *types.first().ok_or(missing)?;
+            for t in &types {
+                first = join(p, first, *t).ok_or(missing)?;
+            }
             match kind {
                 CollKind::Vec => lookup(TypeDef::Vec(first)),
                 CollKind::Set => lookup(TypeDef::Set(first)),
@@ -1390,9 +1446,10 @@ fn closure_type(p: &Program, r: Cx<'_>, e: &Expr, params: &[TypeId]) -> Result<T
     if vs.len() != params.len() {
         return Err("closure arity mismatch".into());
     }
-    for (v, want) in vs.iter().zip(params) {
+    // A parameter may be wider than what is passed (a fold's accumulator holds the initial value and every step's).
+    for (v, passed) in vs.iter().zip(params) {
         let have = r.vars.get(*v).ok_or("unknown closure parameter")?.ty;
-        if have != *want {
+        if !assignable(p, *passed, have) {
             return Err("closure parameter type mismatch".into());
         }
     }
@@ -1444,16 +1501,14 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
         }
         LibFn::VecPush => {
             arity(2)?;
-            let v = ty(0)?;
-            same(ty(1)?, elem(v)?, "push an element of the vector's type")?;
-            Ok(v)
+            let e = join(p, elem(ty(0)?)?, ty(1)?).ok_or(format!("{f:?}: push an element of the vector's type"))?;
+            lookup(TypeDef::Vec(e))
         }
         LibFn::VecConcat => {
             arity(2)?;
-            let v = ty(0)?;
-            elem(v)?;
-            same(ty(1)?, v, "concatenate vectors of one type")?;
-            Ok(v)
+            let (a, b) = (ty(0)?, ty(1)?);
+            let e = join(p, elem(a)?, elem(b)?).ok_or(format!("{f:?}: concatenate vectors of one type"))?;
+            lookup(TypeDef::Vec(e))
         }
         LibFn::VecIsEmpty => {
             arity(1)?;
@@ -1494,8 +1549,21 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
         LibFn::VecFold => {
             arity(3)?;
             let e = elem(ty(0)?)?;
-            let acc = ty(1)?;
-            same(closure_type(p, r, args.get(2).ok_or("missing closure")?, &[acc, e])?, acc, "a fold step returns its accumulator")?;
+            let init = ty(1)?;
+            // The accumulator is the closure's first parameter: it holds the initial value and every step's result.
+            let closure = args.get(2).ok_or("missing closure")?;
+            let acc = match closure {
+                Expr::Closure { params, .. } => params
+                    .first()
+                    .and_then(|v| r.vars.get(*v))
+                    .map(|v| v.ty)
+                    .ok_or("a fold's closure takes the accumulator")?,
+                _ => return Err("a combinator's last argument must be a closure".into()),
+            };
+            let step = closure_type(p, r, closure, &[init, e])?;
+            if !assignable(p, step, acc) {
+                return Err(format!("{f:?}: a fold step returns its accumulator"));
+            }
             Ok(acc)
         }
         LibFn::OptIsSome | LibFn::OptIsNone => {
@@ -1506,8 +1574,7 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
         LibFn::OptUnwrapOr => {
             arity(2)?;
             let e = inner(ty(0)?)?;
-            same(ty(1)?, e, "the default has the option's type")?;
-            Ok(e)
+            join(p, e, ty(1)?).ok_or(format!("{f:?}: the default has the option's type"))
         }
         LibFn::OptMap => {
             arity(2)?;

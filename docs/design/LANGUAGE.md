@@ -733,6 +733,21 @@ only by membership (`n in R` binds `n: Node<R>`). A channel's direction fixes th
 it is the identity of one external client connection, valid only for replies (§18.4). `Principal` is distinct from
 both (LANG-240).
 
+How roles are inferred (subtyping as in MLsub, Dolan and Mycroft, POPL 2017; joins and meets as in TAPL §16.3):
+- **Merges take the join.** The value of `if`/`match`, a collection's elements, `push`/`concat`, `unwrap_or` and a
+  fold's accumulator is one of several values, so its type is their least upper bound: `if c { a } else { b }`
+  with `a: Node<R>` and `b: Node` is a `Node`, and `Node<R>` with `Node<S>` joins to `Node`. Collections are
+  covariant (values are immutable): `Vec<Node<R>>` is a subtype of `Vec<Node>`.
+- **Conjunctions take the meet.** A rule body is a conjunction, so a rule variable is in every column that binds it
+  and equal to what `let` binds it to: its type is the greatest lower bound of those. `==` as a conjunct of a rule
+  body (not under `not`, `any` or `forall`, and not inside an expression) makes its two sides one value, so it
+  narrows both. Nothing else narrows: a negated atom says nothing of the variables it tests, and in a function
+  `a == b` is a comparison (there is no flow typing: `b` stays `Node` in the branch where `a == b` holds).
+- **Requirements are checked, never inferred from.** A column written, a channel's `to` expression, a function's
+  parameters and result, a struct field or variant payload and a `let x: T` annotation each require their declared
+  type: a `Node` where a `Node<R>` is required is BLS0300. A function's parameters have exactly their declared types.
+- **An inferred view column** holds the join of what its alternatives and writers put there.
+
 ### 5.4 Lattice, weighted and group types
 
 Lattice types are ordinary types whose values carry a join: the built-in catalog is in §11.5 and user lattices in
