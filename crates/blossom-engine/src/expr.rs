@@ -25,6 +25,8 @@ pub(crate) enum ExprError {
     Conflict(String),
     /// BLSR010: a host function refused its input.
     Refused(String),
+    /// BLSR012: a pure function's evaluation exceeds its step budget.
+    Budget(String),
     /// Anything else: a missing feature or a bug.
     Eval(EvalError),
 }
@@ -36,6 +38,7 @@ impl ExprError {
             ExprError::Arithmetic(m) => ExprError::Arithmetic(m.clone()),
             ExprError::Conflict(m) => ExprError::Conflict(m.clone()),
             ExprError::Refused(m) => ExprError::Refused(m.clone()),
+            ExprError::Budget(m) => ExprError::Budget(m.clone()),
             ExprError::Eval(e) => bug(format!("an evaluator error repeated per valuation: {e}")),
         }
     }
@@ -71,6 +74,43 @@ pub(crate) struct Ctx<'a> {
     pub tick: Tick,
     pub now: Instant,
     pub shared: &'a Shared,
+    /// The step budget of the function evaluation in progress (BLSR012).
+    pub fuel: Fuel,
+}
+
+/// How many function calls are open, and the steps the outermost one has left (`FN_STEP_BUDGET` at its start).
+/// The count is the reference's: one step per closure application and per element of a `range` built as a vector.
+#[derive(Default)]
+pub(crate) struct Fuel(std::cell::Cell<(u32, u64)>);
+
+impl Fuel {
+    /// Enters a call of a pure function; the outermost call starts a fresh budget.
+    pub(crate) fn enter(&self) {
+        let (depth, left) = self.0.get();
+        let left = if depth == 0 { blossom_ir::core::FN_STEP_BUDGET } else { left };
+        self.0.set((depth.saturating_add(1), left));
+    }
+
+    pub(crate) fn exit(&self) {
+        let (depth, left) = self.0.get();
+        self.0.set((depth.saturating_sub(1), left));
+    }
+
+    /// Spends `n` steps; outside any function, a single `range` has the whole budget to itself.
+    pub(crate) fn spend(&self, n: u64) -> ExprResult<()> {
+        let (depth, left) = self.0.get();
+        let have = if depth == 0 { blossom_ir::core::FN_STEP_BUDGET } else { left };
+        let Some(rest) = have.checked_sub(n) else {
+            return Err(ExprError::Budget(format!(
+                "a function evaluation exceeds its step budget of {} steps",
+                blossom_ir::core::FN_STEP_BUDGET
+            )));
+        };
+        if depth > 0 {
+            self.0.set((depth, rest));
+        }
+        Ok(())
+    }
 }
 
 /// Per-program facts every tick's expressions read.

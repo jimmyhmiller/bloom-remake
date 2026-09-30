@@ -255,6 +255,7 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
         tick: input.tick,
         now: input.now,
         oracle,
+        fuel: expr::Fuel::default(),
     };
     let mut db = Db::new(&oracle.cells);
     let load = |e: ExprError| -> OracleError {
@@ -279,6 +280,14 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
                 tick: input.tick,
                 error: ProgramErrorRecord {
                     code: expr::refused_code(),
+                    rule: None,
+                    detail: Arc::from(detail),
+                },
+            },
+            ExprError::Budget(detail) => OracleError::Program {
+                tick: input.tick,
+                error: ProgramErrorRecord {
+                    code: expr::budget_code(),
                     rule: None,
                     detail: Arc::from(detail),
                 },
@@ -335,6 +344,14 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
                     detail: Arc::from(detail),
                 },
             },
+            ExprError::Budget(detail) => OracleError::Program {
+                tick: input.tick,
+                error: ProgramErrorRecord {
+                    code: expr::budget_code(),
+                    rule: Some(rule.label.clone()),
+                    detail: Arc::from(detail),
+                },
+            },
             ExprError::Oracle(e) => e,
         }
     };
@@ -367,7 +384,13 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
                 db.prepare(rule, plan);
                 let derived = match derive(&scope, &db, rule, plan, input.capture) {
                     Ok(rows) => rows,
-                    Err(ExprError::Arithmetic(_) | ExprError::Conflict(_)) if !strict => continue,
+                    // A program error counts only at the fixpoint (a value it depends on may still change).
+                    Err(
+                        ExprError::Arithmetic(_)
+                        | ExprError::Conflict(_)
+                        | ExprError::Refused(_)
+                        | ExprError::Budget(_),
+                    ) if !strict => continue,
                     Err(e) => return Err(fail(rule, e)),
                 };
                 for (row, firing) in derived {

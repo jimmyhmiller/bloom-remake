@@ -22,6 +22,44 @@ pub(crate) struct Scope<'a> {
     pub tick: Tick,
     pub now: Instant,
     pub oracle: &'a Oracle,
+    /// The step budget of the function evaluation in progress (BLSR012).
+    pub fuel: Fuel,
+}
+
+/// How many function calls are open, and the steps the outermost one has left (`FN_STEP_BUDGET` at its start).
+#[derive(Default)]
+pub(crate) struct Fuel(std::cell::Cell<(u32, u64)>);
+
+impl Fuel {
+    /// Enters a call of a pure function; the outermost call starts a fresh budget.
+    pub(crate) fn enter(&self) {
+        let (depth, left) = self.0.get();
+        let left = if depth == 0 { blossom_ir::core::FN_STEP_BUDGET } else { left };
+        self.0.set((depth.saturating_add(1), left));
+    }
+
+    pub(crate) fn exit(&self) {
+        let (depth, left) = self.0.get();
+        self.0.set((depth.saturating_sub(1), left));
+    }
+
+    /// Spends `n` steps: outside any function a single `range` has the whole budget to itself.
+    pub(crate) fn spend(&self, n: u64) -> ExprResult<()> {
+        let (depth, left) = self.0.get();
+        let have = if depth == 0 { blossom_ir::core::FN_STEP_BUDGET } else { left };
+        match have.checked_sub(n) {
+            Some(rest) => {
+                if depth > 0 {
+                    self.0.set((depth, rest));
+                }
+                Ok(())
+            }
+            None => Err(ExprError::Budget(format!(
+                "a function evaluation exceeds its step budget of {} (closure applications and range elements)",
+                blossom_ir::core::FN_STEP_BUDGET
+            ))),
+        }
+    }
 }
 
 /// A runtime hard error found while evaluating an expression, before it is attributed to a rule and tick.
@@ -33,6 +71,8 @@ pub(crate) enum ExprError {
     Conflict(String),
     /// BLSR010: a host function refused its input (or, later, `error("…")` in a function).
     Refused(String),
+    /// BLSR012: a pure function's evaluation exceeds its step budget.
+    Budget(String),
     Oracle(OracleError),
 }
 
@@ -709,6 +749,11 @@ pub(crate) fn arithmetic_code() -> &'static str {
 /// BLSR010's code.
 pub(crate) fn refused_code() -> &'static str {
     code!("BLSR010").as_str()
+}
+
+/// BLSR012's code.
+pub(crate) fn budget_code() -> &'static str {
+    code!("BLSR012").as_str()
 }
 
 /// BLSR006's code.

@@ -1036,6 +1036,14 @@ pub static REGISTRY: &[CodeInfo] = &[
         CodeOrigin::Amendment("L1"),
         "an exactly-once dot reused with a different payload",
     ),
+    info(
+        "BLSR012",
+        Runtime,
+        "blossom-engine",
+        &["blossom-oracle"],
+        CodeOrigin::Language,
+        "a pure function's evaluation exceeds its step budget",
+    ),
 ];
 
 /// A registered diagnostic code. Only codes in [`REGISTRY`] can be represented.

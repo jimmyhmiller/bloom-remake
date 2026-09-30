@@ -58,7 +58,10 @@ pub(crate) fn call(scope: &Scope<'_>, env: &[Option<Value>], id: FnId, args: &[E
     for (slot, a) in local.iter_mut().zip(args) {
         *slot = Some(eval(scope, env, a)?);
     }
-    eval(scope, &local, body)
+    scope.fuel.enter();
+    let out = eval(scope, &local, body);
+    scope.fuel.exit();
+    out
 }
 
 /// `let pat = value; body`.
@@ -108,6 +111,7 @@ fn apply(scope: &Scope<'_>, env: &[Option<Value>], closure: &Expr, args: Vec<Val
             args.len()
         )));
     }
+    scope.fuel.spend(1)?;
     let mut local = env.to_vec();
     for (p, a) in params.iter().zip(args) {
         let slot = local
@@ -193,6 +197,7 @@ pub(crate) fn lib(scope: &Scope<'_>, env: &[Option<Value>], f: LibFn, args: &[Ex
     Ok(match f {
         LibFn::Range => {
             let (lo, hi) = (u64_of(&val(0)?)?, u64_of(&val(1)?)?);
+            scope.fuel.spend(hi.saturating_sub(lo))?;
             Value::Vec((lo..hi).map(|i| Value::Int(IntValue::U64(i))).collect())
         }
         LibFn::VecGet => {
