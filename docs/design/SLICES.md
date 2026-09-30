@@ -122,10 +122,86 @@ and survives leader `kill -9`.
 
 Former work packages covered in part: M8.3, M9.1, M8.2.
 
-### Slice 5 onward (order to be set when slice 4 closes)
+### Slice 5: the fast engine (merged, `b69c573`)
 
-- **The fast engine.** Semi-naive, indexed, the planner; differential tests oracle ⇄ interpreter under plan
-  perturbation on the whole passing corpus (M4.3, M5.1, M6.1, M6.2, M7.1, M7.3).
+The incremental, indexed engine runs nodes by default and agrees with the oracle on every runnable corpus case. The
+etcd comparison: `docs/plan/notes/etcd-comparison.md`. Notes and review: `docs/plan/notes/S5.md`.
+
+### The Kafka goal (user decision, 2026-09-29)
+
+**A Kafka-compatible broker written entirely in Blossom.** Stock clients (`kcat`, the Java client, franz-go) connect
+and use it without modification. No Rust translation layer: the wire protocol and all broker logic are Blossom. The
+design, the decisions (K1–K7) and the test strategy are in `docs/design/KAFKA.md`. The generic language and runtime
+additions (byte streams, functions, byte primitives, the `extern fn` standard library, blobs) are in
+`docs/design/FOREIGN-PROTOCOLS.md`.
+
+### Slice 6: foreign protocols in Blossom
+
+- **Byte streams.** Listen and connect, with ordered writes released after the tick's sync, in the runtime and both
+  simulators.
+- **Functions** (LANG-180) in the frontend, oracle and engine, with ranges and recoverable failure.
+- **Byte primitives:** big-endian integers, varints, patching.
+- **`extern fn`** and the standard library: CRC32C, CRC32, the gzip, snappy, lz4 and zstd codecs, and hashes.
+- **Kafka protocol library in Blossom:** request and response headers, flexible versions (compact types, tagged
+  fields), ApiVersions (including its v0 fallback) and Metadata, for a single broker with no topics.
+- **Rust codec oracle** (test-only) and a **Blossom Kafka client** for simulator workloads.
+
+**Gate.**
+- `kcat -L` and `kafka-broker-api-versions.sh` (a current Kafka) list the Blossom broker.
+- The codec oracle agrees with the Blossom encoders and decoders on randomized and captured requests.
+- Corpus cases for functions, bytes and streams pass on both evaluators.
+- Stream writes are released only after sync, mutation-checked.
+
+### Slice 7: a single-node broker
+
+- **Topics:** CreateTopics, DeleteTopics, DescribeConfigs.
+- **Partition logs** as blob-backed durable relations.
+- **Produce:** offset assignment by patching the batch header, and CRC32C validation.
+- **Fetch,** with long polls and fetch sessions disabled; **ListOffsets.**
+- **Retention.**
+- **Store work:** incremental checkpoints, deletion at scale, blob durability and collection.
+
+**Gate.**
+- `kcat` and the Java console producer and consumer round-trip messages with explicit partitions and offsets, and
+  franz-go produces and fetches.
+- kill -9 of the broker loses no acknowledged record; the log checker validates each run.
+
+### Slice 8: replication and placement
+
+- **Metadata Raft group (controller):** broker registration, topics with a replication factor, partition assignment,
+  the producer-id allocator.
+- **One Raft group per partition** over its replica set: dynamic membership, elections over a relation.
+- **Leader epochs** (KIP-320) and fencing.
+- **acks** 0, 1 and all.
+- **Reassignment** by membership change.
+- Metadata and DescribeCluster report placement and leaders.
+
+**Gate.**
+- Three to five brokers under the S4 nemesis (kill -9 with downtime, crashes between append and sync, splits, one-way
+  cuts) plus reassignment under load.
+- The log checker and per-group safety observers find nothing; the directed scenarios are mutation-checked.
+- Real clients follow leaders across failovers.
+
+### Slice 9: consumer groups and idempotent producers
+
+- **`__consumer_offsets`,** with the coordinator on its partition leaders.
+- **The classic group protocol:** FindCoordinator, JoinGroup, SyncGroup, Heartbeat, LeaveGroup, OffsetCommit,
+  OffsetFetch, ListGroups, DescribeGroups.
+- **InitProducerId** and per-partition producer state derived from the log (sequence de-duplication, epochs).
+
+**Gate: the Kafka goal's final gate** (`docs/design/KAFKA.md`, "What stock clients work means"):
+- `kcat -G`, the Java client (idempotent producer, group consumer) and franz-go work unmodified.
+- Groups rebalance across joins, leaves and deaths; committed offsets survive coordinator failover.
+- No duplicates across producer retries and failovers.
+
+### Slice 10: the Kafka comparison
+
+The same workload against Apache Kafka (KRaft mode) and Redpanda on the same machine, with the same client and
+durability settings. The numbers are reported honestly, as in the etcd comparison.
+
+### Later (order to be set when the Kafka goal closes)
+
+- **The rest of the engine.** Plan perturbation tests, the word-level kernel (M4.3, M5.1, M6.1, M6.2, M7.1, M7.3).
 - **Lattices and analyses.** Bloom^L lattices, CALM certificates, Blazes, Edelweiss (M3.1, M4.6, M5.6, M6.6, M7.5).
 - **Verification.** BMC, SMT inductive invariants, Paxos Made EPR (M9.5, M10.4).
 - **Code generation** equal to the interpreter (M8.5).
