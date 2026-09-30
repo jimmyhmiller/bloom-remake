@@ -2902,6 +2902,16 @@ impl Checker<'_> {
             }
             var_types.push(tys);
         }
+        // A function's parameter has exactly its declared type. Unification may have met `Node` with `Node<R>` (an
+        // equality with a role-typed value), which is sound for a rule variable after the join but not for a
+        // parameter, whose callers pass any value of the declared type.
+        for f in &hir.fns {
+            for (v, ty) in &f.params {
+                if let Some(slot) = var_types.get_mut(f.scope.index()).and_then(|tys| tys.get_mut(v.index())) {
+                    *slot = *ty;
+                }
+            }
+        }
         hir.var_types = var_types;
         let view_terms = self.view_terms.clone();
         for (r, cols) in view_terms.into_iter().enumerate() {
