@@ -421,7 +421,7 @@ fn lineage_search(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, 
             for _ in 0..workers {
                 let task_rx = std::sync::Arc::clone(&task_rx);
                 let result_tx = result_tx.clone();
-                scope.spawn(move || {
+                let spawned = std::thread::Builder::new().stack_size(blossom_ir::depth::EVAL_STACK_BYTES).spawn_scoped(scope, move || {
                     loop {
                         let next = match task_rx.lock() {
                             Ok(rx) => rx.recv(),
@@ -437,6 +437,9 @@ fn lineage_search(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, 
                         }
                     }
                 });
+                if let Err(e) = spawned {
+                    return Err(internal_error!("an LDFI worker could not start: {e}").into());
+                }
             }
             drop(result_tx);
             let mut dispatched: BTreeSet<FaultSchedule> = BTreeSet::new();

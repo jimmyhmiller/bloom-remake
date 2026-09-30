@@ -1,5 +1,6 @@
 # Test threads run the evaluators (in the simulators and the codec harnesses), whose recursion in debug builds needs
 # more than Rust's default 2 MiB thread stack. The runtime sizes its evaluation thread itself
-# (`blossom_node::EVAL_STACK_BYTES`); this gives test threads the same.
+# (`blossom_ir::depth::EVAL_STACK_BYTES`, sized for the compile-time evaluation depth bound, BLS0217); this gives
+# test threads the same.
 [env]
 RUST_MIN_STACK = "67108864"

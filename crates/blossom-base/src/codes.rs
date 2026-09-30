@@ -349,6 +349,14 @@ pub static REGISTRY: &[CodeInfo] = &[
         "an `extern fn` that names no host function of the standard library, or declares a different signature (§16.2)",
     ),
     info(
+        "BLS0217",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "an evaluation deeper than the bound the evaluators' stacks are sized for (§16.1)",
+    ),
+    info(
         "BLS0300",
         Error,
         "blossom-front",
@@ -1216,8 +1224,8 @@ mod tests {
     fn codes_registry_unique() {
         assert_eq!(
             REGISTRY.len(),
-            121,
-            "LANGUAGE §20 has 117 codes; ARCHITECTURE §0.3 adds 4"
+            122,
+            "LANGUAGE §20 has 118 codes; ARCHITECTURE §0.3 adds 4"
         );
         for (a, b) in REGISTRY.iter().zip(REGISTRY.iter().skip(1)) {
             assert!(

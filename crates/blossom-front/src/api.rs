@@ -105,6 +105,37 @@ pub fn compile_with(
             roles: &roles,
         },
     )?;
+    // No evaluation may be deeper than the stack a tick runs on (LANGUAGE §16.1).
+    if let Some((depth, site)) = blossom_ir::depth::deepest(lowered.program.get())
+        && depth > blossom_ir::depth::MAX_EVAL_DEPTH
+    {
+        let (what, span) = match site {
+            blossom_ir::depth::DepthSite::Fn(id) => {
+                let f = hir.fns.get(id.index());
+                (format!("function `{}`", f.map(|f| f.name.to_string()).unwrap_or_default()), f.map(|f| f.span))
+            }
+            blossom_ir::depth::DepthSite::Rule(id) => {
+                let r = lowered.program.get().rules.get(id);
+                (format!("rule `{}`", r.map(|r| r.label.to_string()).unwrap_or_default()), r.map(|r| r.span))
+            }
+            blossom_ir::depth::DepthSite::Partition(id) => {
+                let r = lowered.program.get().rels.get(id);
+                (format!("the partition key of `{}`", r.map(|r| r.name.to_string()).unwrap_or_default()), None)
+            }
+        };
+        let mut d = Diagnostic::new(
+            blossom_base::code!("BLS0217"),
+            format!(
+                "{what} evaluates {depth} levels deep, past the bound of {} (§16.1): split its nesting or its chain of calls",
+                blossom_ir::depth::MAX_EVAL_DEPTH
+            ),
+        );
+        if let Some(s) = span {
+            d = d.with_primary(s);
+        }
+        diags.push(d);
+        return Err(BlsError::Rejected(diags));
+    }
     let roles = roles.iter().map(|r| r.map(|r| RoleId::from_raw(r.0))).collect();
     let halt = hir
         .rels
