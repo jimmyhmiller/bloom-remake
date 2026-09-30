@@ -659,9 +659,7 @@ fn streams_declare_their_relations_and_check_how_they_are_used() {
     assert_eq!(codes(ok), Vec::<String>::new());
     let fed = with_head("stream s: listen;\na: on go(k, v) { emit s.closed(Bytes::empty(), \"x\"); }\n");
     assert!(codes(fed).contains(&"BLS0400".to_owned()), "{:?}", codes(fed));
-    let read = with_head(
-        "stream s: listen;\ntable t(c: Conn);\na: on go(k, v), s.close(c) { emit t(c); }\n",
-    );
+    let read = with_head("stream s: listen;\ntable t(c: Conn);\na: on go(k, v), s.close(c) { emit t(c); }\n");
     assert!(codes(read).contains(&"BLS0203".to_owned()), "{:?}", codes(read));
     let to = with_head("stream s: listen;\na: on s.opened(c, p, at) { send s.close(c) to c; }\n");
     assert_eq!(codes(to), vec!["BLS0403"]);
@@ -706,7 +704,10 @@ fn codes_of(files: Vec<(&'static str, &'static str)>) -> Vec<String> {
 #[test]
 fn a_textual_include_brings_in_the_files_items_recursively() {
     let files = vec![
-        ("main.bls", "program t version 1;\ninclude \"a.bls\";\ninput go(k: u64);\nview v(x) = go(k), let x = twice(inc(k));\n"),
+        (
+            "main.bls",
+            "program t version 1;\ninclude \"a.bls\";\ninput go(k: u64);\nview v(x) = go(k), let x = twice(inc(k));\n",
+        ),
         ("a.bls", "include \"b.bls\";\nfn twice(n: u64) -> u64 { n * 2 }\n"),
         ("b.bls", "fn inc(n: u64) -> u64 { n + 1 }\n"),
     ];
@@ -777,4 +778,93 @@ fn a_computed_fact_value_is_bls0908_not_an_internal_error() {
          fact s(4);\n",
     );
     assert_eq!(codes(src), vec!["BLS0908", "BLS0908"]);
+}
+
+/// The diagnostics compiling `src` reports, as (code, message).
+fn messages(src: &'static str) -> Vec<(String, String)> {
+    let mut sources = SourceDb::new();
+    let nodes = [NodeSpec {
+        name: "n1".to_owned(),
+        role: None,
+    }];
+    match compile("test.bls", &nodes, &mut One(src), &mut sources) {
+        Ok((_, warnings)) => warnings
+            .iter()
+            .map(|d| (d.code.as_str().to_owned(), d.message.to_string()))
+            .collect(),
+        Err(BlsError::Rejected(d)) => d
+            .iter()
+            .map(|d| (d.code.as_str().to_owned(), d.message.to_string()))
+            .collect(),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+#[test]
+fn a_match_that_misses_a_value_is_bls0314_naming_it() {
+    let cases = [
+        ("fn f(o: Option<u64>) -> u64 { match o { Some(x) => x } }", Some("None")),
+        ("fn f(o: Option<u64>) -> u64 { match o { None => 0 } }", Some("Some _")),
+        (
+            "fn f(o: Option<u64>) -> u64 { match o { Some(x) => x, None => 0 } }",
+            None,
+        ),
+        ("fn f(n: u64) -> u64 { match n { 0 => 1, 1 => 2 } }", Some("_")),
+        ("fn f(n: u64) -> u64 { match n { 0 => 1, _ => 2 } }", None),
+        ("fn f(b: bool) -> u64 { match b { true => 1, false => 0 } }", None),
+        ("fn f(b: bool) -> u64 { match b { true => 1 } }", Some("false")),
+        (
+            "fn f(p: (bool, Option<u64>)) -> u64 { match p { (true, _) => 1, (false, Some(x)) => x } }",
+            Some("(…) false None"),
+        ),
+        (
+            "fn f(p: (bool, Option<u64>)) -> u64 { match p { (true, _) => 1, (false, Some(x)) => x, (_, None) => 0 } }",
+            None,
+        ),
+        (
+            "fn f(o: Option<u64>) -> u64 { match o { Some(x) if x > 1 => x, None => 0 } }",
+            Some("Some _"),
+        ),
+        (
+            "enum E { A, B(u64), C }\nfn f(e: E) -> u64 { match e { E::A => 0, E::B(n) => n } }",
+            Some("C"),
+        ),
+        (
+            "enum E { A, B(u64), C }\nfn f(e: E) -> u64 { match e { E::A => 0, E::B(n) => n, E::C => 2 } }",
+            None,
+        ),
+        (
+            "fn f(o: Option<Option<u64>>) -> u64 { match o { Some(Some(x)) => x, None => 0 } }",
+            Some("Some None"),
+        ),
+    ];
+    for (body, missing) in cases {
+        let src = with_head(&format!("{body}\noutput out(x: u64);\n"));
+        let got = messages(src);
+        match missing {
+            Some(m) => {
+                assert_eq!(got.len(), 1, "{body}: {got:?}");
+                assert_eq!(got[0].0, "BLS0314", "{body}");
+                assert!(got[0].1.contains(&format!("`{m}`")), "{body}: {}", got[0].1);
+            }
+            None => assert!(got.is_empty(), "{body}: {got:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_match_arm_in_a_function_binds_afresh_and_in_a_rule_may_not_rebind() {
+    // In a function, `y` in the arm is a new variable (shadowing the parameter), so the arm matches everything.
+    let src = with_head(
+        "fn g(x: u64, y: u64) -> u64 { match x { y => y + 1 } }\n\
+         output out(x: u64);\n\
+         a: on go(k, v) { emit out(g(k, v)); }\n",
+    );
+    assert_eq!(codes(src), Vec::<String>::new());
+    // In a rule, an arm naming a variable the rule binds is ambiguous.
+    let src = with_head(
+        "output out(x: u64);\n\
+         a: on go(k, v) { emit out(match Some(v) { Some(k) => k, None => 0 }); }\n",
+    );
+    assert_eq!(codes(src), vec!["BLS0501"]);
 }

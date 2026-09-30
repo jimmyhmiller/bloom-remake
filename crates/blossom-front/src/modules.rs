@@ -150,15 +150,19 @@ fn expand_items(
                     Ok(f) => f,
                     Err(e) => {
                         diags.push(
-                            Diagnostic::new(code!("BLS0204"), format!("cannot include `{path}`: {e}")).with_primary(item.span),
+                            Diagnostic::new(code!("BLS0204"), format!("cannot include `{path}`: {e}"))
+                                .with_primary(item.span),
                         );
                         continue;
                     }
                 };
                 if stack.contains(&loaded.key) {
                     diags.push(
-                        Diagnostic::new(code!("BLS0204"), format!("`{path}` includes itself (through {})", stack.join(", ")))
-                            .with_primary(item.span),
+                        Diagnostic::new(
+                            code!("BLS0204"),
+                            format!("`{path}` includes itself (through {})", stack.join(", ")),
+                        )
+                        .with_primary(item.span),
                     );
                     continue;
                 }

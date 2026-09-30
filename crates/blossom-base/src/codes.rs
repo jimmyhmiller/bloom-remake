@@ -461,6 +461,14 @@ pub static REGISTRY: &[CodeInfo] = &[
         "a possibly negative contribution into a `bag`",
     ),
     info(
+        "BLS0314",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "a `match` that does not cover every value of its scrutinee",
+    ),
+    info(
         "BLS0400",
         Error,
         "blossom-front",

@@ -1145,7 +1145,11 @@ impl<'t, 'd> Resolver<'t, 'd> {
             || self.scope(s).rels.contains_key(&name.name)
             || self.scope(s).fns.contains_key(&name.name);
         if taken {
-            self.error(code!("BLS0201"), name.span, format!("`{}` is declared twice", name.as_str()));
+            self.error(
+                code!("BLS0201"),
+                name.span,
+                format!("`{}` is declared twice", name.as_str()),
+            );
             return;
         }
         let t = |r: &mut Self, d: TypeDef| r.intern_type(d, span);
@@ -1194,7 +1198,12 @@ impl<'t, 'd> Resolver<'t, 'd> {
             HStreamRel::Event(StreamEvent::Data),
             &[("c", conn), ("seq", u64t), ("bytes", bytes)],
         );
-        let closed = make(self, "closed", HStreamRel::Event(StreamEvent::Closed), &[("c", conn), ("reason", text)]);
+        let closed = make(
+            self,
+            "closed",
+            HStreamRel::Event(StreamEvent::Closed),
+            &[("c", conn), ("reason", text)],
+        );
         let write = make(
             self,
             "write",
@@ -1205,8 +1214,18 @@ impl<'t, 'd> Resolver<'t, 'd> {
         let (failed, dial) = match kind {
             StreamKind::Listen => (None, None),
             StreamKind::Connect => (
-                Some(make(self, "failed", HStreamRel::Event(StreamEvent::Failed), &[("req", u64t), ("reason", text)])),
-                Some(make(self, "dial", HStreamRel::Host(HostOp::Dial), &[("req", u64t), ("addr", text)])),
+                Some(make(
+                    self,
+                    "failed",
+                    HStreamRel::Event(StreamEvent::Failed),
+                    &[("req", u64t), ("reason", text)],
+                )),
+                Some(make(
+                    self,
+                    "dial",
+                    HStreamRel::Host(HostOp::Dial),
+                    &[("req", u64t), ("addr", text)],
+                )),
             ),
         };
         self.scope_mut(s).instances.insert(name.name, Instance { interface });
@@ -1996,7 +2015,10 @@ impl<'t, 'd> Resolver<'t, 'd> {
         loop {
             let ready: Vec<usize> = (0..decls.len())
                 .filter(|&k| !done.get(k).copied().unwrap_or(true))
-                .filter(|&k| deps.get(k).is_some_and(|d| d.iter().all(|&j| done.get(j).copied().unwrap_or(false))))
+                .filter(|&k| {
+                    deps.get(k)
+                        .is_some_and(|d| d.iter().all(|&j| done.get(j).copied().unwrap_or(false)))
+                })
                 .collect();
             if ready.is_empty() {
                 break;
@@ -2099,7 +2121,6 @@ impl<'t, 'd> Resolver<'t, 'd> {
             }
         }
     }
-
 }
 
 /// The names a constant expression refers to (the forms `const_value` folds).

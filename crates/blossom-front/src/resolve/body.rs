@@ -104,7 +104,8 @@ impl<'t> Resolver<'t, '_> {
             let (scope, params) = match self.hir.fns.get(id.index()) {
                 Some(h) => (h.scope, h.params.clone()),
                 None => {
-                    self.bugs.push(blossom_base::internal_error!("function {id:?} was not declared"));
+                    self.bugs
+                        .push(blossom_base::internal_error!("function {id:?} was not declared"));
                     continue;
                 }
             };
@@ -189,7 +190,12 @@ impl<'t> Resolver<'t, '_> {
             self.error(
                 code!("BLS0216"),
                 f.span,
-                format!("`{}` is `fn({}) -> {}`; declare it with that signature", f.path, host.join(", "), std.ret),
+                format!(
+                    "`{}` is `fn({}) -> {}`; declare it with that signature",
+                    f.path,
+                    host.join(", "),
+                    std.ret
+                ),
             );
         }
     }
@@ -472,6 +478,47 @@ impl<'t> Resolver<'t, '_> {
                 for a in args {
                     if let Arg::Pos(p) = a {
                         self.declare_pattern(cx, p);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Declares the variables of a match arm's pattern, in the arm's own frame. In a function body a name always
+    /// binds a new variable, shadowing any outer one, as `let` and closure parameters do there. In a rule body a
+    /// name the rule already binds is BLS0501: whether the arm should compare with it or bind afresh is ambiguous
+    /// there, so the rule names the arm's variable differently and compares in a guard.
+    fn declare_arm_pattern(&mut self, cx: &mut RuleCx, e: &ast::Expr) {
+        match &e.kind {
+            ExprKind::Path(path, targs) if targs.is_empty() && path.len() == 1 => {
+                if let Some(name) = path.first()
+                    && is_var_name(name.as_str())
+                    && !cx.aliases.contains_key(&name.name)
+                {
+                    if !cx.in_fn && Self::lookup_var(cx, name.name).is_some() {
+                        self.error(
+                            code!("BLS0501"),
+                            name.span,
+                            format!(
+                                "this match arm re-binds `{0}`, which the rule binds: name the arm's variable \
+                                 differently and compare in a guard (`{0}2 if {0}2 == {0}`)",
+                                name.as_str()
+                            ),
+                        );
+                    }
+                    self.new_var(cx, name.name, name.span, false);
+                }
+            }
+            ExprKind::Tuple(elems) => {
+                for el in elems {
+                    self.declare_arm_pattern(cx, el);
+                }
+            }
+            ExprKind::Call { callee, args } if self.is_constructor(cx, callee) => {
+                for a in args {
+                    if let Arg::Pos(p) = a {
+                        self.declare_arm_pattern(cx, p);
                     }
                 }
             }
@@ -1143,7 +1190,11 @@ impl<'t> Resolver<'t, '_> {
         span: Span,
     ) -> Option<HLit> {
         let [Arg::Pos(c)] = args else {
-            self.error(code!("BLS0301"), span, format!("`{}!` orders by one value", name.as_str()));
+            self.error(
+                code!("BLS0301"),
+                span,
+                format!("`{}!` orders by one value", name.as_str()),
+            );
             return None;
         };
         let cost = self.expr(cx, c)?;
@@ -1696,7 +1747,7 @@ impl<'t> Resolver<'t, '_> {
                 let mut out = Vec::new();
                 for arm in arms {
                     cx.frames.push(BTreeMap::new());
-                    self.declare_pattern(cx, &arm.pat);
+                    self.declare_arm_pattern(cx, &arm.pat);
                     let pat = self.pattern(cx, &arm.pat);
                     let guard = arm.guard.as_ref().map(|g| self.expr(cx, g));
                     let body = self.expr(cx, &arm.body);
@@ -1894,7 +1945,11 @@ impl<'t> Resolver<'t, '_> {
                 Some(HExpr::new(HExprKind::LatCtor { kind, bot, args: xs }, span))
             }
             [name] if matches!(name.as_str(), "rand_range" | "majority") && cx.in_fn => {
-                let what = if name.as_str() == "majority" { "a role's members" } else { "randomness" };
+                let what = if name.as_str() == "majority" {
+                    "a role's members"
+                } else {
+                    "randomness"
+                };
                 self.impure(cx, span, what);
                 None
             }
@@ -2431,11 +2486,13 @@ impl<'t> Resolver<'t, '_> {
                 Some((code!("BLS0406"), bad("a module never writes its own input")))
             }
             (
-                HRelKind::Timer { .. } | HRelKind::Boot | HRelKind::Recovered | HRelKind::Members(_) | HRelKind::NodeDir,
+                HRelKind::Timer { .. }
+                | HRelKind::Boot
+                | HRelKind::Recovered
+                | HRelKind::Members(_)
+                | HRelKind::NodeDir,
                 _,
-            ) => {
-                Some((code!("BLS0400"), bad("this relation is fed by the runtime")))
-            }
+            ) => Some((code!("BLS0400"), bad("this relation is fed by the runtime"))),
             (HRelKind::LocalTick, v) if v != Verb::Next => {
                 Some((code!("BLS0400"), bad("`localtick()` is requested with `next`")))
             }
@@ -2470,8 +2527,10 @@ impl<'t> Resolver<'t, '_> {
             // A plain bootstrap runs after every restart, where durable state was reloaded (LANGUAGE §8.4).
             _ if cx.plain_bootstrap && r.durable => Some((
                 code!("BLS0402"),
-                bad("a plain `bootstrap` runs after every restart, over reloaded durable state; initial durable \
-                     values go in `bootstrap fresh`"),
+                bad(
+                    "a plain `bootstrap` runs after every restart, over reloaded durable state; initial durable \
+                     values go in `bootstrap fresh`",
+                ),
             )),
             _ => None,
         };
@@ -2587,7 +2646,11 @@ impl<'t> Resolver<'t, '_> {
     fn head_arg(&mut self, cx: &mut RuleCx, e: &ast::Expr) -> Option<HHeadArg> {
         if let ExprKind::Bang { name, args, clauses } = &e.kind {
             if name.as_str() == "index" {
-                self.unsupported("LANG-097", "`index!` in a statement head (write it as a view column)", e.span);
+                self.unsupported(
+                    "LANG-097",
+                    "`index!` in a statement head (write it as a view column)",
+                    e.span,
+                );
                 return None;
             }
             return Some(HHeadArg::Agg(self.aggregate(cx, *name, args, clauses, e.span)?));

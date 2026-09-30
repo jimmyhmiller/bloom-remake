@@ -87,6 +87,15 @@ fn classify(n: u64) -> String {
     }
 }
 
+/// Match arms bind afresh, shadowing the function's `x` (LANGUAGE §16.1), in a closure too.
+fn arms(n: u64) -> (u64, Vec<u64>) {
+    let x = 7;
+    let o = if n % 2 == 0 { Some(n) } else { None };
+    let a = match o { Some(x) => x, None => x };
+    let v = range(0, 4).map(|i| if i < 2 { Some(i + n) } else { None }).map(|p| match p { Some(x) => x, None => 0 });
+    (match n { x => a + x }, v)
+}
+
 view v_sum(n, x) = e(n, _, _), let x = sum_below(n);
 view v_evens(n, x) = e(n, _, _), let x = evens(n);
 view v_scaled(n, x) = e(n, _, _), let x = scaled(n, n);
@@ -103,3 +112,4 @@ view v_doubled(b, x) = e(_, _, b), let x = doubled(b);
 view v_defaults(n, x) = e(n, _, _), let x = defaults(n);
 view v_classify(n, x) = e(n, _, _), let x = classify(n);
 view v_range(n, x) = e(n, _, _), let x = range(n, 2 * n + 1).len();
+view v_arms(n, x) = e(n, _, _), let x = arms(n);
