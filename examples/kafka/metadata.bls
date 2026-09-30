@@ -75,3 +75,70 @@ fn encode_metadata_response(
         no_tags(),
     ]))
 }
+
+/// MetadataRequest v13, framed, from a client: `None` for all topics.
+fn encode_metadata_request(correlation_id: i32, client_id: String, topics: Option<Vec<String>>) -> Bytes {
+    let ts = match topics {
+        Some(names) => enc_compact_array(names.map(|n| Bytes::join([
+            Bytes::join(range(0, 16).map(|_i| Bytes::from_u8(0u8))), enc_compact_nullable_string(Some(n)), no_tags(),
+        ]))),
+        None => Bytes::uvarint(0),
+    };
+    frame(Bytes::join([
+        request_header_v2(API_METADATA, 13i16, correlation_id, client_id),
+        ts, enc_bool(true), enc_bool(false), no_tags(),
+    ]))
+}
+
+/// What a client keeps of a metadata answer: the brokers, cluster id, controller and each topic's error and name.
+struct MetadataAnswer { brokers: Vec<BrokerInfo>, cluster_id: Option<String>, controller_id: i32, topics: Vec<(i16, Option<String>)>, error: i16 }
+
+fn decode_broker(c: Cur) -> Option<(BrokerInfo, Cur)> {
+    read_i32(c).and_then(|id| read_compact_string(id.1).and_then(|host| read_i32(host.1).and_then(|port| {
+        read_compact_nullable_string(port.1).and_then(|rack| skip_tags(rack.1).map(|end| {
+            (BrokerInfo { node_id: id.0, host: host.0, port: port.0, rack: rack.0 }, end)
+        }))
+    })))
+}
+
+/// Skips a compact array of int32s.
+fn skip_i32s(c: Cur) -> Option<Cur> {
+    read_compact_len(c).and_then(|n| read_bytes(n.1, n.0 * 4).map(|b| b.1))
+}
+
+fn skip_partition(c: Cur) -> Option<Cur> {
+    read_bytes(c, 2 + 4 + 4 + 4).and_then(|fixed| {
+        skip_i32s(fixed.1).and_then(|r| skip_i32s(r).and_then(|i| skip_i32s(i).and_then(|o| skip_tags(o))))
+    })
+}
+
+fn decode_topic(c: Cur) -> Option<((i16, Option<String>), Cur)> {
+    read_i16(c).and_then(|e| read_compact_nullable_string(e.1).and_then(|name| read_uuid(name.1).and_then(|id| {
+        read_bool(id.1).and_then(|internal| read_compact_len(internal.1).and_then(|np| {
+            range(0, np.0)
+                .fold(Some(np.1), |acc, _i| acc.and_then(|x| skip_partition(x)))
+                .and_then(|after| read_i32(after).and_then(|ops| skip_tags(ops.1).map(|end| ((e.0, name.0), end))))
+        }))
+    })))
+}
+
+/// MetadataResponse v13 after its header.
+fn decode_metadata_response(c: Cur) -> Option<MetadataAnswer> {
+    read_i32(c).and_then(|throttle| read_compact_len(throttle.1).and_then(|nb| {
+        range(0, nb.0)
+            .fold(Some(([], nb.1)), |acc, _i| acc.and_then(|a| decode_broker(a.1).map(|b| (a.0.push(b.0), b.1))))
+            .and_then(|bs| read_compact_nullable_string(bs.1).and_then(|cluster| read_i32(cluster.1).and_then(|ctl| {
+                read_compact_len(ctl.1).and_then(|nt| {
+                    range(0, nt.0)
+                        .fold(Some(([], nt.1)), |acc, _i| acc.and_then(|a| decode_topic(a.1).map(|t| (a.0.push(t.0), t.1))))
+                        .and_then(|ts| read_i16(ts.1).and_then(|err| skip_tags(err.1).map(|_end| MetadataAnswer {
+                            brokers: bs.0,
+                            cluster_id: cluster.0,
+                            controller_id: ctl.0,
+                            topics: ts.0,
+                            error: err.0,
+                        })))
+                })
+            })))
+    }))
+}

@@ -474,6 +474,17 @@ impl<'p> Cluster<'p> {
         self.run
     }
 
+    /// Runs the cluster with the nemesis (if configured) until virtual time `at` (nanoseconds since the start), or
+    /// until an invariant is violated; the cluster stays available for inspection ([`Cluster::state`]).
+    pub fn run_until(&mut self, at: i64) -> Result<(), SimError> {
+        self.advance(EPOCH.saturating_add(at), true)
+    }
+
+    /// The counters and log of the run so far.
+    pub fn run_so_far(&self) -> &ClusterRun {
+        &self.run
+    }
+
     /// Runs the cluster without the nemesis until virtual time `at` (nanoseconds since the start), or until an
     /// invariant is violated ([`Cluster::violation`]).
     pub fn step_until(&mut self, at: i64) -> Result<(), SimError> {

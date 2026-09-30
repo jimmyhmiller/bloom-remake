@@ -1,0 +1,42 @@
+//! The broker's request handling: the answer to each request frame (pure functions; `broker.bls` has the node).
+
+fn brokers() -> Vec<BrokerInfo> {
+    [BrokerInfo { node_id: NODE_ID, host: ADVERTISED_HOST, port: ADVERTISED_PORT, rack: None }]
+}
+
+/// The response to one request frame, or `None` to close the connection.
+fn answer(req: Bytes) -> Option<Bytes> {
+    let c = cur(req);
+    request_prefix(c).and_then(|p| {
+        let (key, version, corr, _rest) = p;
+        if key == API_VERSIONS && not supports(key, version) {
+            // Any version this broker does not know, even one whose header it cannot read (KIP-511).
+            Some(encode_api_versions_unsupported(corr))
+        } else if not supports(key, version) {
+            None
+        } else {
+            request_header(c).and_then(|h| {
+                let body = h.1;
+                if key == API_VERSIONS {
+                    decode_api_versions_request(body).map(|_r| encode_api_versions_response(corr))
+                } else {
+                    decode_metadata_request(body).map(|r| encode_metadata_response(corr, r, brokers(), CLUSTER_ID, NODE_ID))
+                }
+            })
+        }
+    })
+}
+
+/// The answers to `frames`, in order, and whether one could not be answered (the rest are then dropped).
+fn answer_all(frames: Vec<Bytes>) -> (Bytes, bool) {
+    frames.fold((Bytes::empty(), false), |acc, f| {
+        if acc.1 {
+            acc
+        } else {
+            match answer(f) {
+                Some(r) => (acc.0.concat(r), false),
+                None => (acc.0, true),
+            }
+        }
+    })
+}

@@ -1,0 +1,34 @@
+//! The broker's node: its `kafka` stream, per-connection state and handlers. Included by `broker.bls`, and by a
+//! test cluster that places it at a role.
+
+stream kafka: listen;
+
+/// Per connection: the bytes not yet consumed, and the next write's sequence number.
+table conn(c: Conn, pending: Bytes, next_seq: u64) key(c);
+
+accept: on kafka.opened(c, _peer, _at) {
+    emit conn(c, Bytes::empty(), 0);
+}
+
+/// A connection's chunks come one per tick, after its `opened` tick, so the state read here is current.
+serve: on kafka.data(c, _seq, bytes), conn(c, pending, n),
+        let all = pending.concat(bytes),
+        let (frames, used, bad) = split_frames(all),
+        let (replies, refused) = answer_all(frames) {
+    if replies.len() > 0 {
+        send kafka.write(c, n, [Part::Bytes(replies)]);
+    }
+    if bad || refused {
+        send kafka.close(c);
+    }
+    if replies.len() > 0 {
+        upsert conn(c, all.slice(used, all.len()).unwrap_or(Bytes::empty()), n + 1);
+    }
+    if replies.len() == 0 {
+        upsert conn(c, all.slice(used, all.len()).unwrap_or(Bytes::empty()), n);
+    }
+}
+
+forget: on kafka.closed(c, _reason), conn(c, p, n) {
+    delete conn(c, p, n);
+}

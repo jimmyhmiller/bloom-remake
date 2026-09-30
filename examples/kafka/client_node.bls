@@ -1,0 +1,55 @@
+//! A Kafka client in Blossom (slice 6, item 8): on a connect stream it dials the broker at `BROKER_ADDR`, sends
+//! ApiVersions (v4) and Metadata (v13, all topics), and records the answers. It redials when the connection closes or
+//! a dial fails, and asks again, so every connection it gets answered records the same answers.
+
+stream up: connect;
+
+/// Per connection: the bytes not yet consumed.
+table session(c: Conn, pending: Bytes) key(c);
+
+/// The answers: ApiVersions' error and ranges, and each metadata answer.
+table versions_seen(error: i16, ranges: Vec<ApiRange>);
+table metadata_seen(answer: MetadataAnswer);
+
+
+start: on boot() {
+    send up.dial(0, BROKER_ADDR);
+}
+
+redial_after_failure: on up.failed(req, _why) {
+    send up.dial(req + 1, BROKER_ADDR);
+}
+
+redial_after_close: on up.closed(c, _why), session(c, p) {
+    delete session(c, p);
+    send up.dial(0, BROKER_ADDR);
+}
+
+ask: on up.opened(c, _req, _peer, _at) {
+    emit session(c, Bytes::empty());
+    send up.write(c, 0, [
+        Part::Bytes(encode_api_versions_request(CORR_VERSIONS, "blossom", "blossom-kafka-client", "0.1")),
+        Part::Bytes(encode_metadata_request(CORR_METADATA, "blossom", None)),
+    ]);
+}
+
+/// A connection's chunks come one per tick after its `opened` tick; each complete response frame is recorded.
+recv: on up.data(c, _seq, bytes), session(c, pending),
+        let all = pending.concat(bytes),
+        let (frames, used, _bad) = split_frames(all) {
+    upsert session(c, all.slice(used, all.len()).unwrap_or(Bytes::empty()));
+}
+
+record_versions: on up.data(c, _seq, bytes), session(c, pending),
+        let (frames, _used, _bad) = split_frames(pending.concat(bytes)),
+        f in frames,
+        let Some(v) = versions_answer(f) {
+    emit versions_seen(v.0, v.1);
+}
+
+record_metadata: on up.data(c, _seq, bytes), session(c, pending),
+        let (frames, _used, _bad) = split_frames(pending.concat(bytes)),
+        f in frames,
+        let Some(m) = metadata_answer(f) {
+    emit metadata_seen(m);
+}
