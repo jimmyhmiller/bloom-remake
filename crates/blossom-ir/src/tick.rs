@@ -126,6 +126,10 @@ pub enum EvalError {
     /// A deploy-time parameter without a default that the deployment does not bind.
     #[error("the deployment does not bind the parameter `{0}`, which has no default")]
     Unbound(String),
+    /// Host functions the program declares that the evaluator's registry does not provide with that signature
+    /// (checked when the program is loaded, LANG-181).
+    #[error("unbound host functions: {}", .0.join("; "))]
+    Externs(Vec<String>),
     /// A runtime hard error of the program at this tick (BLSRnnn, ARCHITECTURE §6.6).
     #[error("{} at tick {}: {}", .error.code, .tick.0, .error.detail)]
     Program { tick: Tick, error: ProgramErrorRecord },
@@ -208,4 +212,27 @@ pub struct StepOutput {
     pub egress: BTreeSet<Egress>,
     /// The final contents, at this tick, of the relations the caller asked to observe.
     pub observed: BTreeMap<RelId, Vec<Row>>,
+}
+
+/// Checks that `registry` provides every host function `program` declares (`extern fn`), with the declared
+/// signature. The error lists every one that is missing or differs, so a program never loads with a host call that
+/// cannot run.
+pub fn bind_externs(
+    program: &crate::core::Program,
+    registry: &blossom_value::ExternRegistry,
+) -> Result<(), EvalError> {
+    let mut problems = Vec::new();
+    for f in program.fns.iter() {
+        if let crate::core::FnBody::Extern { path, .. } = &f.body {
+            let params: Vec<blossom_base::TypeId> = f.params.iter().map(|p| p.1).collect();
+            if let Err(e) = registry.bind(path, &program.types, &params, &[f.ret], false) {
+                problems.push(format!("`{}` ({path}): {e}", f.name));
+            }
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(EvalError::Externs(problems))
+    }
 }

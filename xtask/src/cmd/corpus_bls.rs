@@ -376,7 +376,11 @@ pub(super) fn oracle(root: &str, m: &toml::Table, engine: bool) -> Outcome {
     let Ok(seed) = seed else {
         return Outcome::Fail("[deploy] seed must be a non-negative integer".into());
     };
-    let sim = match BlsSim::new(&artifact, blossom_value::Seed::from_u64(seed)) {
+    let externs = match super::corpus_interp::std_externs() {
+        Ok(x) => x,
+        Err(e) => return Outcome::Fail(e),
+    };
+    let sim = match BlsSim::with_externs(&artifact, blossom_value::Seed::from_u64(seed), externs.clone()) {
         Ok(s) => s,
         Err(SimError::Unimplemented(u)) => return Outcome::NotRunnable(u.to_string()),
         Err(SimError::Load(OracleError::Unimplemented(u))) => return Outcome::NotRunnable(u.to_string()),
@@ -428,7 +432,12 @@ pub(super) fn oracle(root: &str, m: &toml::Table, engine: bool) -> Outcome {
         {
             return Outcome::NotRunnable(format!("the oracle does not run it: {u}"));
         }
-        let cfg = super::corpus_interp::engine_config(&artifact.roles, &artifact.nodes, blossom_value::Seed::from_u64(seed));
+        let cfg = super::corpus_interp::engine_config(
+            &artifact.roles,
+            &artifact.nodes,
+            blossom_value::Seed::from_u64(seed),
+            externs.clone(),
+        );
         let ev = blossom_node::EngineEvaluator::new(artifact.program.clone(), cfg);
         let mine = sim.run_on(&ev, &inputs, Tick(last), round, &schedule, false);
         if let Err(d) = super::corpus_interp::compare(&reference, &mine) {

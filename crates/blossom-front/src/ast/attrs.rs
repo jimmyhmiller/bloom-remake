@@ -378,7 +378,7 @@ impl Cx<'_> {
                 Site::Item("bootstrap")
             }
             ItemKind::Fact(_) => Site::Item("fact"),
-            ItemKind::Fn(_) => Site::Item("fn"),
+            ItemKind::Fn(_) | ItemKind::ExternFn(_) => Site::Item("fn"),
             ItemKind::Invariant(_) => Site::Invariant,
             ItemKind::Interpose(_) => Site::Item("interpose"),
             ItemKind::Spec(s) => {

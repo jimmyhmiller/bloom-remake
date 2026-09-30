@@ -88,10 +88,12 @@ impl<'t> Resolver<'t, '_> {
             for item in items {
                 match &item.kind {
                     ast::ItemKind::Fn(f) => {
-                        if let Some(id) = self.declare_fn(s, f) {
+                        let body = HFnBody::Expr(HExpr::new(HExprKind::Tuple(Vec::new()), f.body.span));
+                        if let Some(id) = self.declare_fn(s, f.name, &f.params, &f.ret, f.span, body) {
                             fns.push((f, id));
                         }
                     }
+                    ast::ItemKind::ExternFn(f) => self.extern_fn(s, f),
                     ast::ItemKind::At { items, .. } => stack.push(items),
                     _ => {}
                 }
@@ -126,7 +128,7 @@ impl<'t> Resolver<'t, '_> {
             match self.expr(&mut cx, &f.body) {
                 Some(body) => {
                     if let Some(h) = self.hir.fns.get_mut(id.index()) {
-                        h.body = body;
+                        h.body = HFnBody::Expr(body);
                     }
                 }
                 None if !self.diags.has_errors() => self.bugs.push(blossom_base::internal_error!(
@@ -163,9 +165,45 @@ impl<'t> Resolver<'t, '_> {
         }
     }
 
-    /// Declares a function's signature: its scope, parameter variables and types. The body is resolved later.
-    fn declare_fn(&mut self, s: ScopeIdx, f: &'t ast::FnItem) -> Option<HFnId> {
-        let name = f.name;
+    /// `extern fn name(…) -> T = "path";`: a host function of the standard catalog (LANGUAGE §16.2), declared with
+    /// exactly the catalog's signature. Anything else is BLS0216.
+    fn extern_fn(&mut self, s: ScopeIdx, f: &'t ast::ExternFnItem) {
+        let Some(std) = blossom_value::std_extern(&f.path) else {
+            self.error(
+                code!("BLS0216"),
+                f.path_span,
+                format!("`{}` is not a host function of the standard library", f.path),
+            );
+            return;
+        };
+        let body = HFnBody::Extern(std::sync::Arc::from(f.path.as_str()));
+        let Some(id) = self.declare_fn(s, f.name, &f.params, &f.ret, f.span, body) else {
+            return;
+        };
+        let Some(h) = self.hir.fns.get(id.index()) else {
+            return;
+        };
+        let params: Vec<TypeId> = h.params.iter().map(|p| p.1).collect();
+        if !std.signature().matches(&self.hir.types, &params, &[h.ret]) {
+            let host: Vec<String> = std.params.iter().map(ToString::to_string).collect();
+            self.error(
+                code!("BLS0216"),
+                f.span,
+                format!("`{}` is `fn({}) -> {}`; declare it with that signature", f.path, host.join(", "), std.ret),
+            );
+        }
+    }
+
+    /// Declares a function's signature: its scope, parameter variables and types. A body is resolved later.
+    fn declare_fn(
+        &mut self,
+        s: ScopeIdx,
+        name: Ident,
+        fparams: &'t [(Ident, ast::Type)],
+        fret: &'t ast::Type,
+        span: Span,
+        body: HFnBody,
+    ) -> Option<HFnId> {
         if self.scope(s).fns.contains_key(&name.name) || self.scope(s).rels.contains_key(&name.name) {
             self.error(
                 code!("BLS0201"),
@@ -178,7 +216,7 @@ impl<'t> Resolver<'t, '_> {
         let mut params = Vec::new();
         let mut seen = BTreeSet::new();
         let mut ok = true;
-        for (p, ty) in &f.params {
+        for (p, ty) in fparams {
             if !seen.insert(p.name) {
                 self.error(
                     code!("BLS0201"),
@@ -204,14 +242,14 @@ impl<'t> Resolver<'t, '_> {
                 None => ok = false,
             }
         }
-        let ret = self.resolve_type(s, &f.ret);
+        let ret = self.resolve_type(s, fret);
         if let Some(r) = ret
             && holds_lattice(&self.hir.types, r)
         {
             self.unsupported(
                 "LANG-182",
                 "lattice-typed function results (they need a monotonicity class, `monotone fn` …)",
-                f.ret.span(),
+                fret.span(),
             );
             ok = false;
         }
@@ -225,10 +263,10 @@ impl<'t> Resolver<'t, '_> {
             scope: cx.scope,
             params,
             ret,
-            // Replaced by the resolved body; a failure to resolve it is always reported, so this never reaches
-            // type checking.
-            body: HExpr::new(HExprKind::Tuple(Vec::new()), f.body.span),
-            span: f.span,
+            // An expression body is a placeholder until it is resolved; a failure to resolve it is always
+            // reported, so the placeholder never reaches type checking.
+            body,
+            span,
         });
         self.scope_mut(s).fns.insert(name.name, id);
         Some(id)

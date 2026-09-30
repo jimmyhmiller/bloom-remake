@@ -5,16 +5,25 @@
 use blossom_oracle::OracleError;
 use blossom_sim::{SimError, SyncRun};
 
-/// The engine's configuration for a deployment: its roles, node names and root seed.
+/// The standard library's host functions (FOREIGN-PROTOCOLS §4), which every backend binds.
+pub(super) fn std_externs() -> Result<std::sync::Arc<blossom_value::ExternRegistry>, String> {
+    blossom_std_host::registry()
+        .map(std::sync::Arc::new)
+        .map_err(|e| format!("the standard host functions: {e}"))
+}
+
+/// The engine's configuration for a deployment: its roles, node names, root seed and host functions.
 pub(super) fn engine_config(
     roles: &[Option<blossom_base::RoleId>],
     names: &[blossom_base::Symbol],
     seed: blossom_value::Seed,
+    externs: std::sync::Arc<blossom_value::ExternRegistry>,
 ) -> blossom_engine::EngineConfig {
     blossom_engine::EngineConfig {
         roles: roles.to_vec(),
         node_names: names.iter().map(|n| std::sync::Arc::from(n.as_str())).collect(),
         seed: Some(seed),
+        externs,
         ..blossom_engine::EngineConfig::default()
     }
 }

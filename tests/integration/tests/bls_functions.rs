@@ -563,3 +563,215 @@ fn byte_primitives_round_trip_and_agree_on_both_evaluators() {
     }
     assert!(checked > 1500, "only {checked} rows checked");
 }
+
+// ---------------------------------------------------------------- host functions (FOREIGN-PROTOCOLS §4)
+
+#[cfg(test)]
+fn std_externs() -> Arc<blossom_value::ExternRegistry> {
+    Arc::new(blossom_std_host::registry().unwrap())
+}
+
+/// Runs `artifact` with the standard host functions on the oracle and on the engine. They must agree: every tick
+/// the same instance, or the same program error at the same tick. Returns the oracle's result.
+#[cfg(test)]
+enum Hosted {
+    Ran(SyncRun),
+    Failed(Tick, String),
+}
+
+#[cfg(test)]
+fn differential_hosted(artifact: &BlsArtifact, inputs: &[InputEvent], last: u64) -> Hosted {
+    let externs = std_externs();
+    let sim = BlsSim::with_externs(artifact, blossom_value::Seed::from_u64(0), externs.clone()).unwrap();
+    let round = Duration::from_nanos(1_000_000_000);
+    let reference = sim.run(inputs, Tick(last), round, &FaultSchedule::default(), false);
+    let cfg = blossom_engine::EngineConfig {
+        roles: artifact.roles.clone(),
+        node_names: artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect(),
+        seed: Some(blossom_value::Seed::from_u64(0)),
+        externs,
+        ..blossom_engine::EngineConfig::default()
+    };
+    let engine = EngineEvaluator::new(artifact.program.clone(), cfg);
+    let mine = sim.run_on(&engine, inputs, Tick(last), round, &FaultSchedule::default(), false);
+    let failure = |r: &Result<SyncRun, blossom_sim::sync::SimError>| match r {
+        Ok(_) => None,
+        Err(blossom_sim::sync::SimError::Node {
+            tick,
+            error: blossom_oracle::OracleError::Program { error, .. },
+            ..
+        }) => Some((*tick, error.code.to_string())),
+        Err(e) => panic!("not a program error: {e}"),
+    };
+    assert_eq!(
+        failure(&reference),
+        failure(&mine),
+        "the oracle and the engine fail differently"
+    );
+    if let (Ok(a), Ok(b)) = (&reference, &mine) {
+        assert_eq!(a.rounds.len(), b.rounds.len());
+        for (t, (ra, rb)) in a.rounds.iter().zip(&b.rounds).enumerate() {
+            for (x, y) in ra.iter().zip(rb) {
+                assert_eq!(x.instance, y.instance, "tick {t}: the oracle and the engine differ");
+            }
+        }
+    }
+    match failure(&reference) {
+        Some((tick, code)) => Hosted::Failed(tick, code),
+        None => Hosted::Ran(reference.unwrap()),
+    }
+}
+
+#[test]
+fn host_functions_run_on_both_evaluators_with_known_answers() {
+    let artifact = compile("externs.bls");
+    let e = artifact.rel_named("e").unwrap();
+    let mut rng = Rng(3);
+    let mut inputs = Vec::new();
+    let mut sent: Vec<Vec<Vec<u8>>> = vec![Vec::new(); 8];
+    for t in 1..7u64 {
+        let mut rows: Vec<Vec<u8>> = Vec::new();
+        if t == 1 {
+            rows.push(b"123456789".to_vec());
+            rows.push(b"abc".to_vec());
+            rows.push(Vec::new());
+        }
+        for _ in 0..3 {
+            let n = rng.below(3000) as usize;
+            // Compressible: runs of a few symbols.
+            let mut b = Vec::with_capacity(n);
+            while b.len() < n {
+                let byte = if rng.below(5) == 0 {
+                    rng.next() as u8
+                } else {
+                    b'x' + rng.below(3) as u8
+                };
+                b.extend(std::iter::repeat_n(byte, 1 + rng.below(12) as usize));
+            }
+            b.truncate(n);
+            rows.push(b);
+        }
+        for b in rows {
+            inputs.push(InputEvent {
+                node: NodeId(0),
+                tick: Tick(t),
+                rel: e,
+                row: Arc::from(vec![bytes(&b)]),
+            });
+            sent[t as usize].push(b);
+        }
+    }
+    let Hosted::Ran(run) = differential_hosted(&artifact, &inputs, 7) else {
+        panic!("the host functions failed");
+    };
+    let hex = |v: &Value| match v {
+        Value::Bytes(x) => x.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+        other => panic!("{other:?}"),
+    };
+    let mut checked = 0;
+    for (t, rows) in sent.iter().enumerate() {
+        let instance = &run.node_tick(Tick(t as u64), NodeId(0)).unwrap().instance;
+        let rows_of = |name: &str| -> Vec<Vec<Value>> {
+            instance
+                .rows(artifact.rel_named(name).unwrap())
+                .map(|r| r.to_vec())
+                .collect()
+        };
+        let trips = rows_of("v_trips");
+        assert_eq!(trips.len(), rows.iter().collect::<BTreeSet<_>>().len(), "tick {t}");
+        for r in &trips {
+            let Value::Bytes(b) = &r[0] else { panic!() };
+            // Every codec round-trips at the exact bound and refuses one byte less; the input itself is no valid
+            // compressed stream.
+            let want = tuple(vec![
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+            ]);
+            assert_eq!(r[1], want, "tick {t}: {} bytes", b.len());
+            checked += 1;
+        }
+        for r in rows_of("v_crc") {
+            if r[0] == bytes(b"123456789") {
+                assert_eq!(r[1], iv(IntValue::U32, 0xe306_9283));
+                assert_eq!(r[2], iv(IntValue::U32, 0xcbf4_3926));
+                checked += 1;
+            }
+        }
+        for r in rows_of("v_hash") {
+            if r[0] == bytes(b"abc") {
+                assert_eq!(
+                    hex(&r[1]),
+                    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                );
+                checked += 1;
+            }
+            if r[0] == bytes(b"") {
+                assert_eq!(
+                    hex(&r[2]),
+                    "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked >= 20, "only {checked} checks");
+}
+
+#[test]
+fn a_host_function_that_refuses_its_input_is_blsr010_on_both_evaluators() {
+    let artifact = compile("externs.bls");
+    let bad = artifact.rel_named("bad_level").unwrap();
+    let level = |t: u64, l: u8| InputEvent {
+        node: NodeId(0),
+        tick: Tick(t),
+        rel: bad,
+        row: Arc::from(vec![iv(IntValue::U8, l)]),
+    };
+    assert!(
+        matches!(differential_hosted(&artifact, &[level(1, 9)], 3), Hosted::Ran(_)),
+        "level 9 is valid"
+    );
+    assert!(matches!(
+        differential_hosted(&artifact, &[level(1, 9), level(2, 10)], 3),
+        Hosted::Failed(Tick(2), code) if code == "BLSR010"
+    ));
+}
+
+#[test]
+fn a_program_whose_host_functions_are_not_registered_does_not_load() {
+    let artifact = compile("externs.bls");
+    let listed = |e: &blossom_oracle::OracleError| match e {
+        blossom_oracle::OracleError::Externs(problems) => problems.len(),
+        other => panic!("expected the unbound host functions, got {other}"),
+    };
+    match BlsSim::new(&artifact, blossom_value::Seed::from_u64(0)) {
+        Err(blossom_sim::sync::SimError::Load(e)) => assert_eq!(listed(&e), 12),
+        Err(e) => panic!("{e}"),
+        Ok(_) => panic!("the oracle loaded a program with unbound host functions"),
+    }
+    match blossom_engine::Engine::new(
+        artifact.program.clone(),
+        NodeId(0),
+        blossom_engine::EngineConfig::default(),
+    ) {
+        Err(e) => assert_eq!(listed(&e), 12),
+        Ok(_) => panic!("the engine loaded a program with unbound host functions"),
+    }
+    // A registry that has the paths under other signatures is refused as well.
+    let mut wrong = blossom_value::ExternRegistry::new();
+    for x in blossom_value::STD_EXTERNS {
+        wrong
+            .register_typed_fn(x.path, vec![blossom_value::HostType::Str], x.ret, |_: &[Value]| {
+                Ok(Value::Unit)
+            })
+            .unwrap();
+    }
+    match BlsSim::with_externs(&artifact, blossom_value::Seed::from_u64(0), Arc::new(wrong)) {
+        Err(blossom_sim::sync::SimError::Load(e)) => assert_eq!(listed(&e), 12),
+        Err(e) => panic!("{e}"),
+        Ok(_) => panic!("loaded against mismatched host signatures"),
+    }
+}

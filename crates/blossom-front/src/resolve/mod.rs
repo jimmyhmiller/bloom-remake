@@ -1474,6 +1474,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 | ItemKind::Rel(_)
                 | ItemKind::Timer(_)
                 | ItemKind::Fn(_)
+                | ItemKind::ExternFn(_)
                 | ItemKind::Unsupported { .. } => {}
                 ItemKind::Param { .. } => {}
             }

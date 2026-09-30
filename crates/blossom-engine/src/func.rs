@@ -21,9 +21,28 @@ pub(crate) fn call(cx: &Ctx<'_>, env: &[Option<Value>], f: FnId, args: &[Expr]) 
     };
     let body = match &decl.body {
         FnBody::Ir(body) => body,
-        _ => {
+        FnBody::Extern { path, .. } => {
+            let Some(host) = cx.shared.externs.lookup_fn(path) else {
+                return Err(bug(format!(
+                    "host function {path} was not bound when the engine was built"
+                )));
+            };
+            let mut vs = Vec::with_capacity(args.len());
+            for a in args {
+                vs.push(eval(cx, env, a)?);
+            }
+            return host.call(&vs).map_err(|e| match e {
+                blossom_value::ExternError::Failed(m) => ExprError::Refused(format!("{}: {m}", decl.name)),
+                blossom_value::ExternError::InvalidArguments(m) => {
+                    bug(format!("{} was called with the wrong arguments: {m}", decl.name))
+                }
+                blossom_value::ExternError::Unimplemented(u) => ExprError::Eval(u.into()),
+            });
+        }
+        other => {
             return Err(ExprError::Eval(
-                blossom_base::unimplemented_error!("LANG-181", "calls of `{}` in the engine", decl.name).into(),
+                blossom_base::unimplemented_error!("LANG-183", "calls of `{}` ({other:?}) in the engine", decl.name)
+                    .into(),
             ));
         }
     };

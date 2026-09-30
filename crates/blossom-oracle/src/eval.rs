@@ -275,6 +275,14 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
                     detail: Arc::from(detail),
                 },
             },
+            ExprError::Refused(detail) => OracleError::Program {
+                tick: input.tick,
+                error: ProgramErrorRecord {
+                    code: expr::refused_code(),
+                    rule: None,
+                    detail: Arc::from(detail),
+                },
+            },
             ExprError::Oracle(e) => e,
         }
     };
@@ -315,6 +323,14 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
                 tick: input.tick,
                 error: ProgramErrorRecord {
                     code: expr::conflict_code(),
+                    rule: Some(rule.label.clone()),
+                    detail: Arc::from(detail),
+                },
+            },
+            ExprError::Refused(detail) => OracleError::Program {
+                tick: input.tick,
+                error: ProgramErrorRecord {
+                    code: expr::refused_code(),
                     rule: Some(rule.label.clone()),
                     detail: Arc::from(detail),
                 },

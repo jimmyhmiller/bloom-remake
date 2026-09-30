@@ -25,19 +25,35 @@ pub(crate) fn call(scope: &Scope<'_>, env: &[Option<Value>], id: FnId, args: &[E
         .fns
         .get(id)
         .ok_or_else(|| bug(format!("unknown function {id:?}")))?;
-    let FnBody::Ir(body) = &decl.body else {
-        return Err(ExprError::Oracle(
-            blossom_base::unimplemented_error!(
-                "LANG-181",
-                "calls of `{}` (not an IR function) in the oracle",
-                decl.name
-            )
-            .into(),
-        ));
-    };
     if args.len() != decl.params.len() {
         return Err(bug(format!("`{}` called with {} arguments", decl.name, args.len())));
     }
+    let body = match &decl.body {
+        FnBody::Ir(body) => body,
+        FnBody::Extern { path, .. } => {
+            let f = scope
+                .oracle
+                .host_fn(path)
+                .ok_or_else(|| bug(format!("host function {path} was not bound")))?;
+            let mut vs = Vec::with_capacity(args.len());
+            for a in args {
+                vs.push(eval(scope, env, a)?);
+            }
+            return f.call(&vs).map_err(|e| match e {
+                blossom_value::ExternError::Failed(m) => ExprError::Refused(format!("{}: {m}", decl.name)),
+                blossom_value::ExternError::InvalidArguments(m) => {
+                    bug(format!("{} called with the wrong arguments: {m}", decl.name))
+                }
+                blossom_value::ExternError::Unimplemented(u) => ExprError::Oracle(u.into()),
+            });
+        }
+        other => {
+            return Err(ExprError::Oracle(
+                blossom_base::unimplemented_error!("LANG-183", "calls of `{}` ({other:?}) in the oracle", decl.name)
+                    .into(),
+            ));
+        }
+    };
     let mut local: Vec<Option<Value>> = vec![None; decl.vars.len()];
     for (slot, a) in local.iter_mut().zip(args) {
         *slot = Some(eval(scope, env, a)?);

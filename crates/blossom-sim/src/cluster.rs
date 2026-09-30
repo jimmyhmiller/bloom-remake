@@ -96,6 +96,8 @@ pub struct ClusterConfig {
     pub backend: Backend,
     /// How the nodes' stores certify their WAL tails.
     pub certification: blossom_store::Certification,
+    /// The host functions the program's `extern fn`s call.
+    pub externs: Arc<blossom_value::ExternRegistry>,
 }
 
 impl Default for ClusterConfig {
@@ -117,6 +119,7 @@ impl Default for ClusterConfig {
             principal: "spiffe://sim/client".into(),
             backend: Backend::default(),
             certification: blossom_store::Certification::default(),
+            externs: Arc::new(blossom_value::ExternRegistry::new()),
         }
     }
 }
@@ -276,6 +279,7 @@ impl<'p> Cluster<'p> {
             artifact.roles.clone(),
             artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect(),
             program_seed,
+            cfg.externs.clone(),
         )
         .map_err(SimError::Load)?;
         let names: Arc<[Arc<str>]> = artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect();

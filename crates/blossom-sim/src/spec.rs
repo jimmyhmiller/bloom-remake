@@ -46,8 +46,19 @@ pub struct Outcome {
 }
 
 impl<'a> SpecSim<'a> {
+    /// A simulator for `artifact`, whose programs may declare no host functions; [`SpecSim::with_externs`] binds
+    /// them.
     pub fn new(artifact: &'a SimArtifact) -> Result<SpecSim<'a>, SimError> {
-        let protocol = Oracle::new(artifact.protocol.clone())
+        SpecSim::with_externs(artifact, std::sync::Arc::new(blossom_value::ExternRegistry::new()))
+    }
+
+    /// [`SpecSim::new`] with the host functions the protocol's and the spec's `extern fn`s call.
+    pub fn with_externs(
+        artifact: &'a SimArtifact,
+        externs: std::sync::Arc<blossom_value::ExternRegistry>,
+    ) -> Result<SpecSim<'a>, SimError> {
+        let limits = blossom_oracle::Limits::default();
+        let protocol = Oracle::with_externs(artifact.protocol.clone(), limits, externs.clone())
             .map_err(SimError::Load)?
             .with_roles(artifact.roles.clone())
             .with_seed(artifact.seed)
@@ -58,7 +69,7 @@ impl<'a> SpecSim<'a> {
             Profile::Blossom { .. } => Runtime::of(artifact.protocol.get())?,
         };
         let spec = match &artifact.spec {
-            Some(s) => Some(Oracle::new(s.program.clone()).map_err(SimError::Load)?),
+            Some(s) => Some(Oracle::with_externs(s.program.clone(), limits, externs).map_err(SimError::Load)?),
             None => None,
         };
         Ok(SpecSim {
