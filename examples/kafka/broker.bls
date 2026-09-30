@@ -12,12 +12,19 @@ include "protocol.bls";
 include "headers.bls";
 include "apiversions.bls";
 include "metadata.bls";
+include "topics.bls";
+include "records.bls";
 include "broker_fns.bls";
 
 /// This broker's id, the address it advertises, and its cluster id.
 param NODE_ID: i32 = 1;
 param ADVERTISED_HOST: String = "localhost";
 param ADVERTISED_PORT: i32 = 9092;
+/// The partition count of a topic created without one (Kafka's `num.partitions`), and whether a Metadata request
+/// may create the topics it names (`auto.create.topics.enable`).
+param DEFAULT_PARTITIONS: i32 = 1;
+param AUTO_CREATE_TOPICS: bool = true;
 param CLUSTER_ID: String = "blossom-kafka";
 
 include "broker_node.bls";
+include "topics_node.bls";

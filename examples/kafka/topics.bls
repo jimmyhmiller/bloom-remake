@@ -1,0 +1,462 @@
+//! Topics: CreateTopics v7, DeleteTopics v6 and DescribeConfigs v4 (all flexible), and the topic configurations this
+//! broker knows. Pure functions: the node (`broker_node.bls`) decides with the broker's state and emits the changes.
+
+const TOPIC_ALREADY_EXISTS: i16 = 36;
+const INVALID_PARTITIONS: i16 = 37;
+const INVALID_REPLICATION_FACTOR: i16 = 38;
+const INVALID_REPLICA_ASSIGNMENT: i16 = 39;
+const INVALID_CONFIG: i16 = 40;
+const INVALID_REQUEST: i16 = 42;
+const INVALID_TOPIC_EXCEPTION: i16 = 17;
+
+/// DescribeConfigs resource types.
+const CONFIG_TOPIC: i8 = 2;
+const CONFIG_BROKER: i8 = 4;
+
+/// The most partitions one topic may have: a request cannot make the broker create millions of rows.
+const MAX_PARTITIONS: i32 = 10000;
+
+// ---------------------------------------------------------------- configurations
+
+/// A topic configuration this broker knows: its name, its default, and its Kafka type (`ConfigType`: 1 boolean,
+/// 2 string, 3 int, 5 long).
+struct ConfigKey { name: String, default: String, kind: i8 }
+
+fn topic_configs() -> Vec<ConfigKey> {
+    [
+        ConfigKey { name: "cleanup.policy", default: "delete", kind: 2i8 },
+        ConfigKey { name: "compression.type", default: "producer", kind: 2i8 },
+        ConfigKey { name: "max.message.bytes", default: "1048588", kind: 3i8 },
+        ConfigKey { name: "message.timestamp.type", default: "CreateTime", kind: 2i8 },
+        ConfigKey { name: "min.insync.replicas", default: "1", kind: 3i8 },
+        ConfigKey { name: "retention.bytes", default: "-1", kind: 5i8 },
+        ConfigKey { name: "retention.ms", default: "604800000", kind: 5i8 },
+        ConfigKey { name: "segment.bytes", default: "1073741824", kind: 3i8 },
+    ]
+}
+
+/// Whether `value` is a value this broker supports for configuration `name` (`None` if `name` is unknown).
+fn config_value_ok(name: String, value: String) -> Option<bool> {
+    let nonneg_int = value.parse_i64().map(|n| n >= 0 && n <= 2147483647).unwrap_or(false);
+    let at_least_minus_one = value.parse_i64().map(|n| n >= -1).unwrap_or(false);
+    if name == "cleanup.policy" {
+        // Compaction is out of scope (KAFKA.md).
+        Some(value == "delete")
+    } else if name == "compression.type" {
+        // The broker keeps batches as produced: it never recompresses.
+        Some(value == "producer")
+    } else if name == "message.timestamp.type" {
+        // LogAppendTime would rewrite the batch inside its CRC (out of scope).
+        Some(value == "CreateTime")
+    } else if name == "retention.ms" || name == "retention.bytes" {
+        Some(at_least_minus_one)
+    } else if name == "max.message.bytes" || name == "min.insync.replicas" || name == "segment.bytes" {
+        Some(nonneg_int)
+    } else {
+        None
+    }
+}
+
+/// The value of configuration `name` among `set` (the ones given at creation), or its default.
+fn config_value(set: Vec<(String, String)>, name: String) -> String {
+    let given = set.filter(|kv| kv.0 == name).first().map(|kv| kv.1);
+    let default = topic_configs().filter(|k| k.name == name).first().map(|k| k.default);
+    given.unwrap_or(default.unwrap_or(""))
+}
+
+/// A topic's retention: milliseconds and bytes (-1 for unbounded).
+fn retention(set: Vec<(String, String)>) -> (i64, i64) {
+    (
+        config_value(set, "retention.ms").parse_i64().unwrap_or(604800000i64),
+        config_value(set, "retention.bytes").parse_i64().unwrap_or(-1i64),
+    )
+}
+
+// ---------------------------------------------------------------- CreateTopics v7
+
+struct CreatableTopic {
+    name: String,
+    partitions: i32,
+    replication: i16,
+    assignments: Vec<(i32, Vec<i32>)>,
+    configs: Vec<(String, Option<String>)>,
+}
+
+struct CreateTopicsRequest { topics: Vec<CreatableTopic>, timeout_ms: i32, validate_only: bool }
+
+fn decode_assignment(c: Cur) -> Option<((i32, Vec<i32>), Cur)> {
+    read_i32(c).and_then(|p| read_compact_i32s(p.1).and_then(|b| skip_tags(b.1).map(|end| ((p.0, b.0), end))))
+}
+
+fn decode_creatable_config(c: Cur) -> Option<((String, Option<String>), Cur)> {
+    read_compact_string(c).and_then(|n| read_compact_nullable_string(n.1).and_then(|v| {
+        skip_tags(v.1).map(|end| ((n.0, v.0), end))
+    }))
+}
+
+fn decode_creatable_topic(c: Cur) -> Option<(CreatableTopic, Cur)> {
+    read_compact_string(c).and_then(|name| read_i32(name.1).and_then(|parts| read_i16(parts.1).and_then(|rf| {
+        read_compact_len(rf.1).and_then(|na| {
+            range(0, na.0)
+                .fold(Some(([], na.1)), |acc, _i| acc.and_then(|a| decode_assignment(a.1).map(|x| (a.0.push(x.0), x.1))))
+                .and_then(|asg| read_compact_len(asg.1).and_then(|nc| {
+                    range(0, nc.0)
+                        .fold(Some(([], nc.1)), |acc, _i| {
+                            acc.and_then(|a| decode_creatable_config(a.1).map(|x| (a.0.push(x.0), x.1)))
+                        })
+                        .and_then(|cfg| skip_tags(cfg.1).map(|end| {
+                            (CreatableTopic { name: name.0, partitions: parts.0, replication: rf.0, assignments: asg.0, configs: cfg.0 }, end)
+                        }))
+                }))
+        })
+    })))
+}
+
+fn decode_create_topics(c: Cur) -> Option<CreateTopicsRequest> {
+    read_compact_len(c).and_then(|n| {
+        range(0, n.0)
+            .fold(Some(([], n.1)), |acc, _i| acc.and_then(|a| decode_creatable_topic(a.1).map(|t| (a.0.push(t.0), t.1))))
+            .and_then(|ts| read_i32(ts.1).and_then(|timeout| read_bool(timeout.1).and_then(|vo| {
+                skip_tags(vo.1).map(|_end| CreateTopicsRequest { topics: ts.0, timeout_ms: timeout.0, validate_only: vo.0 })
+            })))
+    })
+}
+
+/// Whether `name` is a legal topic name: 1 to 249 of `[a-zA-Z0-9._-]`, and not `.` or `..`.
+fn topic_name_ok(name: String) -> bool {
+    let b = name.to_utf8();
+    b.len() >= 1 && b.len() <= 249 && name != "." && name != ".." && range(0, b.len()).all(|i| {
+        match b.u8_at(i) {
+            Some(x) => (x >= 97u8 && x <= 122u8) || (x >= 65u8 && x <= 90u8) || (x >= 48u8 && x <= 57u8)
+                || x == 46u8 || x == 95u8 || x == 45u8,
+            None => false,
+        }
+    })
+}
+
+/// A topic name with `.` replaced by `_`: Kafka refuses a topic whose name collides with another's this way,
+/// because the two names give metrics the same name. (A name that is not a legal topic name is its own key.)
+fn collision_key(name: String) -> String {
+    let b = name.to_utf8();
+    let swapped = Bytes::join(range(0, b.len()).map(|i| {
+        let x = b.u8_at(i).unwrap_or(0u8);
+        Bytes::from_u8(if x == 46u8 { 95u8 } else { x })
+    }));
+    swapped.from_utf8().unwrap_or(name)
+}
+
+/// A topic id from two random words. Kafka's `Uuid.randomUuid` redraws the zero id, the reserved metadata topic id
+/// (0, 1) and any id whose base64 form starts with `-` (first six bits 111110); this clears the top bit, so the last
+/// cannot occur, and moves the two reserved ids to (0, 2) and (0, 3). Ids stay unpredictable 127-bit values.
+fn topic_id(hi: u64, lo: u64) -> Bytes {
+    let h = hi % 9223372036854775808u64;
+    let l = if h == 0u64 && lo < 2u64 { lo + 2u64 } else { lo };
+    Bytes::join([Bytes::from_u64_be(h), Bytes::from_u64_be(l)])
+}
+
+/// A topic a CreateTopics request asks for, as the broker will make it: its name, id, partition count and configs.
+struct NewTopic { name: String, id: Bytes, partitions: i32, configs: Vec<(String, String)> }
+
+/// One requested topic's outcome: its error and message (`NONE` and `None` when it is (or, validating, would be)
+/// created) and the topic.
+struct CreateOutcome { error: i16, message: Option<String>, topic: NewTopic }
+
+/// Decides one requested topic. `names` is every name the request asks for (a topic named twice is refused, and so
+/// are topics whose names collide), `taken` the names that exist or that other connections create first this tick
+/// (whether equal to the topic's name or colliding with it), `id` the id it gets.
+fn create_outcome(t: CreatableTopic, names: Vec<String>, taken: Vec<String>, id: Bytes, default_partitions: i32) -> CreateOutcome {
+    let dup = names.filter(|n| n == t.name).len() > 1;
+    let key = collision_key(t.name);
+    let collides_within = names.any(|n| n != t.name && collision_key(n) == key);
+    let partitions = if t.assignments.is_empty() { if t.partitions == -1i32 { default_partitions } else { t.partitions } } else { t.assignments.len() as i32 };
+    let bad_assignment = not t.assignments.is_empty() && (
+        t.partitions != -1i32 || t.replication != -1i16
+    );
+    let assignment_nodes_ok = t.assignments.enumerate().all(|e| {
+        let (i, a) = e;
+        let (p, brokers) = a;
+        p == i as i32 && brokers == [NODE_ID]
+    });
+    let bad_config = t.configs.any(|kv| match kv.1 {
+        Some(v) => config_value_ok(kv.0, v) != Some(true),
+        None => true,
+    });
+    let configs = t.configs.filter_map(|kv| kv.1.map(|v| (kv.0, v)));
+    if dup {
+        create_failed(t.name, INVALID_REQUEST, "the request names this topic more than once")
+    } else if not topic_name_ok(t.name) {
+        create_failed(t.name, INVALID_TOPIC_EXCEPTION, "a topic name is 1 to 249 characters of [a-zA-Z0-9._-], not . or ..")
+    } else if collides_within {
+        create_failed(t.name, INVALID_TOPIC_EXCEPTION, "the request names topics whose names collide ('.' against '_')")
+    } else if taken.any(|n| n == t.name) {
+        create_failed(t.name, TOPIC_ALREADY_EXISTS, "the topic already exists")
+    } else if taken.any(|n| collision_key(n) == key) {
+        create_failed(t.name, INVALID_TOPIC_EXCEPTION, "the name collides with an existing topic's ('.' against '_')")
+    } else if bad_assignment {
+        create_failed(t.name, INVALID_REQUEST, "a manual assignment needs the partition count and replication factor to be -1")
+    } else if not assignment_nodes_ok {
+        create_failed(t.name, INVALID_REPLICA_ASSIGNMENT, "every partition must be assigned, in order, to this broker alone")
+    } else if partitions < 1i32 || partitions > MAX_PARTITIONS {
+        create_failed(t.name, INVALID_PARTITIONS, "the partition count must be between 1 and 10000")
+    } else if t.replication != -1i16 && t.replication != 1i16 {
+        create_failed(t.name, INVALID_REPLICATION_FACTOR, "the replication factor must be 1 (one broker)")
+    } else if bad_config {
+        create_failed(t.name, INVALID_CONFIG, "a configuration is unknown, null, or has a value this broker does not support")
+    } else {
+        CreateOutcome { error: NONE, message: None, topic: NewTopic { name: t.name, id: id, partitions: partitions, configs: configs } }
+    }
+}
+
+fn create_failed(name: String, code: i16, why: String) -> CreateOutcome {
+    CreateOutcome { error: code, message: Some(why), topic: NewTopic { name: name, id: zero_uuid(), partitions: -1i32, configs: [] } }
+}
+
+fn create_names(req: CreateTopicsRequest) -> Vec<String> {
+    req.topics.map(|t| t.name)
+}
+
+/// The topic entry `t` of `req` creates if nothing is taken, with id `id`; `None` if it is invalid, or `req` only
+/// validates.
+fn create_candidate(req: CreateTopicsRequest, t: CreatableTopic, id: Bytes) -> Option<NewTopic> {
+    let o = create_outcome(t, create_names(req), [], id, DEFAULT_PARTITIONS);
+    if req.validate_only || o.error != NONE { None } else { Some(o.topic) }
+}
+
+/// Every entry's outcome. `taken` is as for `create_outcome`; `ids` the ids of the topics this request creates.
+/// A validating request's topics get the zero id, as Kafka's do.
+fn create_outcomes(req: CreateTopicsRequest, taken: Vec<String>, ids: Vec<(String, Bytes)>) -> Vec<CreateOutcome> {
+    let names = create_names(req);
+    req.topics.map(|t| {
+        let id = ids.filter(|x| x.0 == t.name).first().map(|x| x.1).unwrap_or(zero_uuid());
+        create_outcome(t, names, taken, id, DEFAULT_PARTITIONS)
+    })
+}
+
+fn encode_created_config(name: String, value: String, set: bool) -> Bytes {
+    // ConfigSource: 1 a topic's own configuration, 5 the default.
+    Bytes::join([
+        enc_compact_string(name), enc_compact_nullable_string(Some(value)), enc_bool(false),
+        Bytes::from_i8(if set { 1i8 } else { 5i8 }), enc_bool(false), no_tags(),
+    ])
+}
+
+/// A topic's full configuration, in `topic_configs` order: what CreateTopics v5+ returns for a created topic.
+fn encode_topic_configs(set: Vec<(String, String)>) -> Vec<Bytes> {
+    topic_configs().map(|k| encode_created_config(k.name, config_value(set, k.name), set.any(|kv| kv.0 == k.name)))
+}
+
+fn encode_create_outcome(o: CreateOutcome) -> Bytes {
+    let ok = o.error == NONE;
+    Bytes::join([
+        enc_compact_string(o.topic.name),
+        o.topic.id,
+        Bytes::from_i16_be(o.error),
+        enc_compact_nullable_string(o.message),
+        Bytes::from_i32_be(if ok { o.topic.partitions } else { -1i32 }),
+        Bytes::from_i16_be(if ok { 1i16 } else { -1i16 }),
+        enc_compact_nullable_array(if ok { Some(encode_topic_configs(o.topic.configs)) } else { None }),
+        no_tags(),
+    ])
+}
+
+fn encode_create_topics_response(correlation_id: i32, outcomes: Vec<CreateOutcome>) -> Bytes {
+    frame(Bytes::join([
+        response_header_v1(correlation_id),
+        Bytes::from_i32_be(0i32),
+        enc_compact_array(outcomes.map(|o| encode_create_outcome(o))),
+        no_tags(),
+    ]))
+}
+
+// ---------------------------------------------------------------- DeleteTopics v6
+
+/// A topic to delete: by name, or by id (a zero id means "by name").
+struct DeleteTopicState { name: Option<String>, id: Bytes }
+
+fn decode_delete_topic_state(c: Cur) -> Option<(DeleteTopicState, Cur)> {
+    read_compact_nullable_string(c).and_then(|n| read_uuid(n.1).and_then(|id| {
+        skip_tags(id.1).map(|end| (DeleteTopicState { name: n.0, id: id.0 }, end))
+    }))
+}
+
+fn decode_delete_topics(c: Cur) -> Option<(Vec<DeleteTopicState>, i32)> {
+    read_compact_len(c).and_then(|n| {
+        range(0, n.0)
+            .fold(Some(([], n.1)), |acc, _i| acc.and_then(|a| decode_delete_topic_state(a.1).map(|t| (a.0.push(t.0), t.1))))
+            .and_then(|ts| read_i32(ts.1).and_then(|timeout| skip_tags(timeout.1).map(|_end| (ts.0, timeout.0))))
+    })
+}
+
+/// Whether entry `e` of a DeleteTopics request is well formed: it names a topic by name or by id, not both, and
+/// no other entry names the same topic the same way.
+fn delete_entry_ok(req: Vec<DeleteTopicState>, e: u64) -> bool {
+    match req.get(e) {
+        Some(s) => {
+            let by_id = s.id != zero_uuid();
+            let others = req.enumerate().filter(|x| x.0 != e).map(|x| x.1);
+            if by_id {
+                s.name.is_none() && not others.any(|o| o.id == s.id)
+            } else {
+                match s.name {
+                    Some(n) => not others.any(|o| o.id == zero_uuid() && o.name == Some(n)),
+                    None => true,
+                }
+            }
+        }
+        None => false,
+    }
+}
+
+/// The name entry `e` deletes the topic of, if it is a well-formed entry by name.
+fn delete_by_name(req: Vec<DeleteTopicState>, e: u64) -> Option<String> {
+    if delete_entry_ok(req, e) {
+        req.get(e).and_then(|s| if s.id == zero_uuid() { s.name } else { None })
+    } else {
+        None
+    }
+}
+
+/// The id entry `e` deletes the topic of, if it is a well-formed entry by id.
+fn delete_by_id(req: Vec<DeleteTopicState>, e: u64) -> Option<Bytes> {
+    if delete_entry_ok(req, e) {
+        req.get(e).and_then(|s| if s.id != zero_uuid() { Some(s.id) } else { None })
+    } else {
+        None
+    }
+}
+
+/// Whether an entry of the request names topic `id` by id: an entry by name that finds this topic is then refused,
+/// as Kafka refuses a name that maps to an id the request already gives.
+fn id_supplied(req: Vec<DeleteTopicState>, id: Bytes) -> bool {
+    id != zero_uuid() && req.any(|s| s.id == id)
+}
+
+/// One deletion's result: the topic's name and id as the entry gave them (both when it is deleted), the error and
+/// its message.
+struct DeleteOutcome { name: Option<String>, id: Bytes, error: i16, message: Option<String> }
+
+/// Every entry's outcome. `won` holds the entries this request deletes: (entry, name, id); `clash` the entries by
+/// name whose topic another entry names by id.
+fn delete_outcomes(req: Vec<DeleteTopicState>, won: Vec<(u64, String, Bytes)>, clash: Vec<u64>) -> Vec<DeleteOutcome> {
+    req.enumerate().map(|x| {
+        let (e, s) = x;
+        match won.filter(|w| w.0 == e).first() {
+            Some(w) => DeleteOutcome { name: Some(w.1), id: w.2, error: NONE, message: None },
+            None => {
+                if clash.contains(e) {
+                    DeleteOutcome {
+                        name: s.name, id: s.id, error: INVALID_REQUEST,
+                        message: Some("the topic name maps to an id the request also gives"),
+                    }
+                } else if not delete_entry_ok(req, e) {
+                    DeleteOutcome {
+                        name: s.name, id: s.id, error: INVALID_REQUEST,
+                        message: Some("an entry names a topic by name or by id, not both, and only once"),
+                    }
+                } else if s.id != zero_uuid() {
+                    DeleteOutcome { name: None, id: s.id, error: UNKNOWN_TOPIC_ID, message: Some("the topic id does not exist") }
+                } else {
+                    DeleteOutcome { name: s.name, id: zero_uuid(), error: UNKNOWN_TOPIC_OR_PARTITION, message: Some("the topic does not exist") }
+                }
+            }
+        }
+    })
+}
+
+fn encode_delete_outcome(o: DeleteOutcome) -> Bytes {
+    Bytes::join([
+        enc_compact_nullable_string(o.name), o.id, Bytes::from_i16_be(o.error), enc_compact_nullable_string(o.message),
+        no_tags(),
+    ])
+}
+
+fn encode_delete_topics_response(correlation_id: i32, outcomes: Vec<DeleteOutcome>) -> Bytes {
+    frame(Bytes::join([
+        response_header_v1(correlation_id),
+        Bytes::from_i32_be(0i32),
+        enc_compact_array(outcomes.map(|o| encode_delete_outcome(o))),
+        no_tags(),
+    ]))
+}
+
+// ---------------------------------------------------------------- DescribeConfigs v4
+
+/// A resource whose configuration is asked for: its type (2 a topic, 4 a broker), name and the keys wanted (`None`,
+/// or empty, for all).
+struct ConfigResource { kind: i8, name: String, keys: Option<Vec<String>> }
+
+fn decode_config_resource(c: Cur) -> Option<(ConfigResource, Cur)> {
+    read_i8(c).and_then(|k| read_compact_string(k.1).and_then(|n| read_compact_nullable_strings(n.1).and_then(|keys| {
+        skip_tags(keys.1).map(|end| (ConfigResource { kind: k.0, name: n.0, keys: keys.0 }, end))
+    })))
+}
+
+fn decode_describe_configs(c: Cur) -> Option<Vec<ConfigResource>> {
+    read_compact_len(c).and_then(|n| {
+        range(0, n.0)
+            .fold(Some(([], n.1)), |acc, _i| acc.and_then(|a| decode_config_resource(a.1).map(|r| (a.0.push(r.0), r.1))))
+            .and_then(|rs| read_bool(rs.1).and_then(|syn| read_bool(syn.1).and_then(|doc| skip_tags(doc.1).map(|_end| rs.0))))
+    })
+}
+
+fn encode_described_config(k: ConfigKey, set: Vec<(String, String)>) -> Bytes {
+    let own = set.any(|kv| kv.0 == k.name);
+    Bytes::join([
+        enc_compact_string(k.name),
+        enc_compact_nullable_string(Some(config_value(set, k.name))),
+        enc_bool(false),
+        Bytes::from_i8(if own { 1i8 } else { 5i8 }),
+        enc_bool(false),
+        enc_compact_array([]),
+        Bytes::from_i8(k.kind),
+        enc_compact_nullable_string(None),
+        no_tags(),
+    ])
+}
+
+/// One resource's result. `set` is the topic's own configs when it exists (`None`: unknown topic).
+fn encode_config_result(r: ConfigResource, set: Option<Vec<(String, String)>>) -> Bytes {
+    let (error, message, configs) = if r.kind == CONFIG_BROKER {
+        // A broker: no configuration is described.
+        (NONE, None, [])
+    } else if r.kind != CONFIG_TOPIC {
+        (INVALID_REQUEST, Some("only topics and brokers are described"), [])
+    } else {
+        match set {
+            Some(s) => {
+                // As Kafka does, an empty list of keys asks for every configuration, as a null one does.
+                let wanted = topic_configs().filter(|k| match r.keys {
+                    Some(ks) => ks.is_empty() || ks.any(|x| x == k.name),
+                    None => true,
+                });
+                (NONE, None, wanted.map(|k| encode_described_config(k, s)))
+            }
+            None => (UNKNOWN_TOPIC_OR_PARTITION, Some("the topic does not exist"), []),
+        }
+    };
+    Bytes::join([
+        Bytes::from_i16_be(error),
+        enc_compact_nullable_string(message),
+        Bytes::from_i8(r.kind),
+        enc_compact_string(r.name),
+        enc_compact_array(configs),
+        no_tags(),
+    ])
+}
+
+fn encode_describe_configs_response(correlation_id: i32, results: Vec<Bytes>) -> Bytes {
+    frame(Bytes::join([
+        response_header_v1(correlation_id),
+        Bytes::from_i32_be(0i32),
+        enc_compact_array(results),
+        no_tags(),
+    ]))
+}
+
+/// Every resource's result. `sets` holds the configurations of the named topics that exist.
+fn describe_results(req: Vec<ConfigResource>, sets: Vec<(String, Vec<(String, String)>)>) -> Vec<Bytes> {
+    req.map(|r| {
+        let set = if r.kind == CONFIG_TOPIC { sets.filter(|x| x.0 == r.name).first().map(|x| x.1) } else { None };
+        encode_config_result(r, set)
+    })
+}

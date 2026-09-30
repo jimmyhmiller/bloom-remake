@@ -4,6 +4,7 @@
 //! - `kcat -L` (librdkafka) lists the broker.
 //! - `kafka-broker-api-versions.sh` (the Java client of Kafka 4.0) prints the versions it supports.
 //! - franz-go (a Go client) reads the metadata.
+//! - Slice 7, item 4: `kafka-topics.sh` creates, lists, describes and deletes topics, and `kcat -L` shows them.
 //!
 //! A test whose tool is not installed is skipped, and says so in its output. The tools are found on `PATH` (`kcat`,
 //! `go`), under `$KAFKA_HOME/bin`, or in the repository's `.tools/kafka_*/bin` (see the notes for how to get them).
@@ -217,5 +218,80 @@ fn franz_go_reads_the_metadata() {
     );
     assert!(stdout.contains(&format!("broker 1 at 127.0.0.1:{port}")), "{stdout}");
     assert!(stdout.contains("0 topics"), "{stdout}");
+    server.stop().unwrap();
+}
+
+/// Runs a Kafka tool against the broker and returns its standard output, failing the test if it fails.
+#[cfg(test)]
+fn kafka_tool(bin: &Path, tool: &str, port: u16, args: &[&str]) -> String {
+    let out = Command::new(bin.join(tool))
+        .args(["--bootstrap-server", &format!("127.0.0.1:{port}")])
+        .args(args)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{tool} {args:?} failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    stdout
+}
+
+#[test]
+fn kafka_topics_creates_describes_and_deletes_topics() {
+    let Some(bin) = kafka_bin() else {
+        skipped("no Kafka distribution (set KAFKA_HOME, or unpack one into .tools/)");
+        return;
+    };
+    let (server, port) = start_broker();
+    let created = kafka_tool(
+        &bin,
+        "kafka-topics.sh",
+        port,
+        &["--create", "--topic", "orders", "--partitions", "3", "--config", "retention.ms=60000"],
+    );
+    assert!(created.contains("Created topic orders."), "{created}");
+    kafka_tool(&bin, "kafka-topics.sh", port, &["--create", "--topic", "audit"]);
+    // A second creation is refused, as Kafka refuses it.
+    let again = Command::new(bin.join("kafka-topics.sh"))
+        .args(["--bootstrap-server", &format!("127.0.0.1:{port}"), "--create", "--topic", "orders"])
+        .output()
+        .unwrap();
+    let text = format!("{}{}", String::from_utf8_lossy(&again.stdout), String::from_utf8_lossy(&again.stderr));
+    assert!(text.contains("already exists"), "{text}");
+    let listed = kafka_tool(&bin, "kafka-topics.sh", port, &["--list"]);
+    assert_eq!(listed.lines().collect::<Vec<_>>(), ["audit", "orders"], "{listed}");
+    let described = kafka_tool(&bin, "kafka-topics.sh", port, &["--describe", "--topic", "orders"]);
+    assert!(described.contains("Topic: orders"), "{described}");
+    assert!(described.contains("PartitionCount: 3"), "{described}");
+    assert!(described.contains("ReplicationFactor: 1"), "{described}");
+    assert!(described.contains("Configs: retention.ms=60000"), "{described}");
+    for p in 0..3 {
+        assert!(
+            described.contains(&format!("Partition: {p}\tLeader: 1\tReplicas: 1\tIsr: 1")),
+            "{described}"
+        );
+    }
+    let configs = kafka_tool(
+        &bin,
+        "kafka-configs.sh",
+        port,
+        &["--describe", "--entity-type", "topics", "--entity-name", "orders"],
+    );
+    assert!(configs.contains("retention.ms=60000"), "{configs}");
+    if let Some(kcat) = on_path("kcat") {
+        let out = Command::new(kcat)
+            .args(["-L", "-b", &format!("127.0.0.1:{port}"), "-m", "10"])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("2 topics:"), "{stdout}");
+        assert!(stdout.contains("topic \"orders\" with 3 partitions:"), "{stdout}");
+        assert!(stdout.contains("topic \"audit\" with 1 partitions:"), "{stdout}");
+    }
+    kafka_tool(&bin, "kafka-topics.sh", port, &["--delete", "--topic", "orders"]);
+    let listed = kafka_tool(&bin, "kafka-topics.sh", port, &["--list"]);
+    assert_eq!(listed.lines().collect::<Vec<_>>(), ["audit"], "{listed}");
     server.stop().unwrap();
 }

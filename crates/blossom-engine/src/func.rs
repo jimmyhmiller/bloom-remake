@@ -350,6 +350,10 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &[Option<Value>], f: LibFn, args: &[Exp
             Value::Str(s) => Ok(Value::Str(Arc::from(s.to_lowercase()))),
             other => Err(bug(format!("`to_lowercase` of {other:?}"))),
         },
+        LibFn::StrParseI64 => match value(0)? {
+            Value::Str(s) => Ok(some_or_none(s.parse::<i64>().ok().map(|n| Value::Int(IntValue::I64(n))))),
+            other => Err(bug(format!("`parse_i64` of {other:?}"))),
+        },
         LibFn::StrToUtf8 => match value(0)? {
             Value::Str(s) => Ok(Value::Bytes(Arc::from(s.as_bytes()))),
             other => Err(bug(format!("`to_utf8` of {other:?}"))),

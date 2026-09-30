@@ -97,6 +97,17 @@ fn read_compact_string(c: Cur) -> Option<(String, Cur)> {
     read_compact_nullable_string(c).and_then(|p| p.0.map(|s| (s, p.1)))
 }
 
+/// Compact nullable bytes (a records field): an unsigned varint length + 1, 0 for null.
+fn read_compact_nullable_bytes(c: Cur) -> Option<(Option<Bytes>, Cur)> {
+    read_uvarint(c).and_then(|p| {
+        if p.0 == 0 {
+            Some((None, p.1))
+        } else {
+            read_bytes(p.1, p.0 - 1).map(|q| (Some(q.0), q.1))
+        }
+    })
+}
+
 // ---------------------------------------------------------------- arrays and tagged fields
 
 /// A compact array's length: an unsigned varint count + 1; `None` for null or for more elements than bytes left (no
@@ -115,6 +126,30 @@ fn read_compact_nullable_len(c: Cur) -> Option<(Option<u64>, Cur)> {
         } else {
             Some((Some(p.0 - 1), p.1))
         }
+    })
+}
+
+/// A compact array of compact strings.
+fn read_compact_strings(c: Cur) -> Option<(Vec<String>, Cur)> {
+    read_compact_len(c).and_then(|n| {
+        range(0, n.0).fold(Some(([], n.1)), |acc, _i| acc.and_then(|a| read_compact_string(a.1).map(|s| (a.0.push(s.0), s.1))))
+    })
+}
+
+/// A compact nullable array of compact strings: `None` for null.
+fn read_compact_nullable_strings(c: Cur) -> Option<(Option<Vec<String>>, Cur)> {
+    read_compact_nullable_len(c).and_then(|n| match n.0 {
+        None => Some((None, n.1)),
+        Some(k) => range(0, k)
+            .fold(Some(([], n.1)), |acc, _i| acc.and_then(|a| read_compact_string(a.1).map(|s| (a.0.push(s.0), s.1))))
+            .map(|a| (Some(a.0), a.1)),
+    })
+}
+
+/// A compact array of int32s.
+fn read_compact_i32s(c: Cur) -> Option<(Vec<i32>, Cur)> {
+    read_compact_len(c).and_then(|n| {
+        range(0, n.0).fold(Some(([], n.1)), |acc, _i| acc.and_then(|a| read_i32(a.1).map(|x| (a.0.push(x.0), x.1))))
     })
 }
 
@@ -162,6 +197,22 @@ fn enc_compact_array(items: Vec<Bytes>) -> Bytes {
 
 fn enc_compact_i32s(xs: Vec<i32>) -> Bytes {
     enc_compact_array(xs.map(|x| Bytes::from_i32_be(x)))
+}
+
+/// A compact nullable array: `None` for null.
+fn enc_compact_nullable_array(items: Option<Vec<Bytes>>) -> Bytes {
+    match items {
+        Some(xs) => enc_compact_array(xs),
+        None => Bytes::uvarint(0),
+    }
+}
+
+/// Compact nullable bytes.
+fn enc_compact_nullable_bytes(b: Option<Bytes>) -> Bytes {
+    match b {
+        Some(x) => Bytes::uvarint(x.len() + 1).concat(x),
+        None => Bytes::uvarint(0),
+    }
 }
 
 // ---------------------------------------------------------------- frames

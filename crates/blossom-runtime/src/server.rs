@@ -534,6 +534,7 @@ impl Server {
             let (data, env) = (data.clone(), stream_env.clone());
             std::thread::Builder::new()
                 .name("engine".into())
+                .stack_size(blossom_node::EVAL_STACK_BYTES)
                 .spawn(move || {
                     let r = e.run(ctl_rx).map_err(as_fault);
                     // Readers blocked on a full queue give up, and the streams stop taking connections: a halted or

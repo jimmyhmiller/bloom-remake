@@ -5,11 +5,19 @@ struct RequestHeader { api_key: i16, api_version: i16, correlation_id: i32, clie
 
 const API_METADATA: i16 = 3;
 const API_VERSIONS: i16 = 18;
+const API_CREATE_TOPICS: i16 = 19;
+const API_DELETE_TOPICS: i16 = 20;
+const API_DESCRIBE_CONFIGS: i16 = 32;
+
+/// The error code for no error.
+const NONE: i16 = 0;
 
 /// Whether a request of `api_key` at `version` uses the flexible encoding (compact types and tagged fields), which
 /// also puts it in header v2. Only the APIs this broker answers are listed.
 fn flexible(api_key: i16, version: i16) -> bool {
     (api_key == API_VERSIONS && version >= 3i16) || (api_key == API_METADATA && version >= 9i16)
+        || (api_key == API_CREATE_TOPICS && version >= 5i16) || (api_key == API_DELETE_TOPICS && version >= 4i16)
+        || (api_key == API_DESCRIBE_CONFIGS && version >= 4i16)
 }
 
 /// The fixed part of a request header: the API key, version and correlation id, which every version has. The rest

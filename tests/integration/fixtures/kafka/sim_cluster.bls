@@ -6,12 +6,18 @@ include "../../../../examples/kafka/protocol.bls";
 include "../../../../examples/kafka/headers.bls";
 include "../../../../examples/kafka/apiversions.bls";
 include "../../../../examples/kafka/metadata.bls";
+include "../../../../examples/kafka/topics.bls";
+include "../../../../examples/kafka/records.bls";
 include "../../../../examples/kafka/broker_fns.bls";
 include "../../../../examples/kafka/client_fns.bls";
 
 param NODE_ID: i32 = 1;
 param ADVERTISED_HOST: String = "b1.sim";
 param ADVERTISED_PORT: i32 = 9092;
+/// The partition count of a topic created without one (Kafka's `num.partitions`), and whether a Metadata request
+/// may create the topics it names (`auto.create.topics.enable`).
+param DEFAULT_PARTITIONS: i32 = 1;
+param AUTO_CREATE_TOPICS: bool = true;
 param CLUSTER_ID: String = "blossom-sim";
 param BROKER_ADDR: String = "sim://b1/kafka";
 
@@ -20,6 +26,7 @@ role Client;
 
 at Broker {
     include "../../../../examples/kafka/broker_node.bls";
+    include "../../../../examples/kafka/topics_node.bls";
 }
 
 at Client {

@@ -250,6 +250,16 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
             ..
         } => Ok(Value::Int(IntValue::U64(scope.oracle.role_size(*role)))),
         Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::Rand),
+            args,
+        } => {
+            let mut key = Vec::new();
+            for a in args {
+                key.push(eval(scope, env, a)?);
+            }
+            rand(scope, &key)
+        }
+        Expr::Call {
             f: FnRef::Builtin(BuiltinFn::RandRange),
             args,
         } => {
@@ -779,6 +789,16 @@ pub(crate) fn conflict_code() -> &'static str {
 /// BLSR007's code.
 pub(crate) fn fixpoint_code() -> &'static str {
     code!("BLSR007").as_str()
+}
+
+/// `rand(k…)` (LANGUAGE §15.1): `PRF_σn("rand", fp(k̄), incarnation, tick)`.
+fn rand(scope: &Scope<'_>, key: &[Value]) -> Result<Value, ExprError> {
+    let seed = scope.oracle.node_seed(scope.node).map_err(ExprError::Oracle)?;
+    let fp = blossom_value::fp::fingerprint_row(key)
+        .map_err(|e| ExprError::Oracle(internal_error!("fingerprinting a rand key: {e}").into()))?;
+    let x = blossom_value::prf::prf(&seed, "rand", &[fp], &[scope.incarnation, scope.tick.0])
+        .map_err(|e| ExprError::Oracle(internal_error!("rand: {e}").into()))?;
+    Ok(Value::Int(IntValue::U64(x)))
 }
 
 /// `rand_range(lo, hi, k…)` (LANGUAGE §15.1): `lo + PRF_σn("rand", fp(k̄), incarnation, tick, attempt) mod span`,

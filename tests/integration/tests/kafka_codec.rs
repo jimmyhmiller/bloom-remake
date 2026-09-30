@@ -23,10 +23,14 @@ use blossom_value::Value;
 use blossom_value::time::{Duration, NodeId, Tick};
 use blossom_value::value::IntValue;
 use bytes::{Bytes, BytesMut};
+use kafka_protocol::messages::create_topics_request::{CreatableReplicaAssignment, CreatableTopic, CreatableTopicConfig};
+use kafka_protocol::messages::delete_topics_request::DeleteTopicState;
+use kafka_protocol::messages::describe_configs_request::DescribeConfigsResource;
 use kafka_protocol::messages::metadata_request::MetadataRequestTopic;
 use kafka_protocol::messages::{
-    ApiVersionsRequest, ApiVersionsResponse, BrokerId, MetadataRequest, MetadataResponse, RequestHeader,
-    ResponseHeader, TopicName,
+    ApiVersionsRequest, ApiVersionsResponse, BrokerId, CreateTopicsRequest, CreateTopicsResponse, DeleteTopicsRequest,
+    DeleteTopicsResponse, DescribeConfigsRequest, DescribeConfigsResponse, MetadataRequest, MetadataResponse,
+    RequestHeader, ResponseHeader, TopicName,
 };
 use kafka_protocol::protocol::{Decodable, Encodable, HeaderVersion, StrBytes};
 
@@ -114,6 +118,10 @@ fn rows(artifact: &BlsArtifact, run: &SyncRun, name: &str) -> Vec<Vec<Value>> {
 }
 
 #[cfg(test)]
+fn i8v(x: i8) -> Value {
+    Value::Int(IntValue::I8(x))
+}
+#[cfg(test)]
 fn i16v(x: i16) -> Value {
     Value::Int(IntValue::I16(x))
 }
@@ -136,6 +144,15 @@ fn bytes(b: &[u8]) -> Value {
 #[cfg(test)]
 fn strukt(fields: Vec<Value>) -> Value {
     Value::Struct(fields.into())
+}
+
+/// Kafka's topic name rule: 1 to 249 characters of `[a-zA-Z0-9._-]`, not `.` or `..`.
+#[cfg(test)]
+fn legal_topic_name(n: &str) -> bool {
+    (1..=249).contains(&n.len())
+        && n != "."
+        && n != ".."
+        && n.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// A request encoded by the Rust implementation: header then body, without the size prefix.
@@ -260,9 +277,10 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
     let mut rng = Rng(9);
     let mut inputs = Vec::new();
     type Broker = (i32, String, i32, Option<String>);
-    // Per response: its correlation id, brokers, cluster id, controller and requested topics.
+    // Per response: its correlation id, brokers, cluster id, controller, requested topics and the broker's topics.
     type Topic = ([u8; 16], Option<String>);
-    type Meta = (i32, Vec<Broker>, String, i32, Option<Vec<Topic>>);
+    type Have = (String, [u8; 16], i32);
+    type Meta = (i32, Vec<Broker>, String, i32, Option<Vec<Topic>>, Vec<Have>);
     let mut metas: Vec<Meta> = Vec::new();
     for _ in 0..60 {
         let corr = rng.next() as i32;
@@ -272,7 +290,15 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
                 (rng.next() as i32, rng.text(), rng.below(65536) as i32, rack)
             })
             .collect();
-        // Topics by name; in some requests, some also by id.
+        // The broker's topics (distinct names and ids), and topics asked for by name or id, some of them the
+        // broker's.
+        let mut have: Vec<Have> = Vec::new();
+        for _ in 0..rng.below(4) {
+            let name = rng.text();
+            if !have.iter().any(|h| h.0 == name) {
+                have.push((name, (u128::from(rng.next()) << 64 | u128::from(rng.next()) | 1).to_be_bytes(), rng.below(4) as i32));
+            }
+        }
         let by_id = rng.below(3) == 0;
         let topics = if rng.below(3) == 0 {
             None
@@ -280,12 +306,21 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
             Some(
                 (0..rng.below(4))
                     .map(|_| {
+                        let theirs = (!have.is_empty() && rng.below(2) == 0)
+                            .then(|| have[rng.below(have.len() as u64) as usize].clone());
                         let id = if by_id && rng.below(2) == 0 {
-                            (u128::from(rng.next()) << 64 | u128::from(rng.next()) | 1).to_be_bytes()
+                            match &theirs {
+                                Some(h) => h.1,
+                                None => (u128::from(rng.next()) << 64 | u128::from(rng.next()) | 1).to_be_bytes(),
+                            }
                         } else {
                             [0; 16]
                         };
-                        let name = if id != [0; 16] && rng.below(2) == 0 { None } else { Some(rng.text()) };
+                        let name = if id != [0; 16] && rng.below(2) == 0 {
+                            None
+                        } else {
+                            Some(theirs.map(|h| h.0).unwrap_or_else(|| rng.text()))
+                        };
                         (id, name)
                     })
                     .collect::<Vec<_>>(),
@@ -311,9 +346,14 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
                         .collect(),
                 )
             })),
+            Value::Vec(
+                have.iter()
+                    .map(|(n, id, p)| Value::Tuple(vec![s(n), bytes(id), i32v(*p)].into()))
+                    .collect(),
+            ),
         ];
         inputs.push(input(&artifact, "meta_resp", row));
-        metas.push((corr, brokers, cluster, controller, topics));
+        metas.push((corr, brokers, cluster, controller, topics, have));
     }
     let corrs: Vec<i32> = (0..20).map(|_| rng.next() as i32).collect();
     for (i, corr) in corrs.iter().enumerate() {
@@ -333,7 +373,7 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
     };
     let meta_rows = rows(&artifact, &r, "v_meta_resp");
     assert_eq!(meta_rows.len(), metas.len());
-    for (corr, brokers, cluster, controller, topics) in &metas {
+    for (corr, brokers, cluster, controller, topics, have) in &metas {
         let row = meta_rows.iter().find(|r| r[0] == i32v(*corr)).unwrap();
         let mut buf = unframe(&row[1]);
         let header = ResponseHeader::decode(&mut buf, MetadataResponse::header_version(13)).unwrap();
@@ -358,24 +398,60 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
             })
             .collect();
         assert_eq!(&got, brokers);
-        // Every requested topic is unknown (this cluster has none), with no partitions: by id when any topic is
-        // asked for by id (UNKNOWN_TOPIC_ID, no name), else by name (UNKNOWN_TOPIC_OR_PARTITION), as Kafka answers.
-        let asked: Vec<Topic> = topics.clone().unwrap_or_default();
-        let ids: Vec<[u8; 16]> = asked.iter().map(|t| t.0).filter(|id| *id != [0; 16]).collect();
-        let want: Vec<(i16, Option<String>, [u8; 16], usize)> = if ids.is_empty() {
-            asked.iter().map(|(_, n)| (3, n.clone(), [0; 16], 0)).collect()
-        } else {
-            ids.iter().map(|id| (100, None, *id, 0)).collect()
+        // As Kafka answers: by id when any topic is asked for by id (a known one, or UNKNOWN_TOPIC_ID with no name),
+        // else by name (a known one, INVALID_TOPIC_EXCEPTION for an illegal name, else UNKNOWN_TOPIC_OR_PARTITION);
+        // every topic when none is asked for. A known topic's partitions are all led by the controller.
+        type Seen = (i16, Option<String>, [u8; 16], Vec<(i32, i32, i32, Vec<i32>, Vec<i32>)>);
+        let known = |h: &Have| -> Seen {
+            let parts = (0..h.2).map(|p| (p, *controller, 0, vec![*controller], vec![*controller])).collect();
+            (0, Some(h.0.clone()), h.1, parts)
         };
-        let got: Vec<(i16, Option<String>, [u8; 16], usize)> = m
+        let want: Vec<Seen> = match topics {
+            None => have.iter().map(known).collect(),
+            Some(asked) => {
+                let ids: Vec<[u8; 16]> = asked.iter().map(|t| t.0).filter(|id| *id != [0; 16]).collect();
+                if ids.is_empty() {
+                    asked
+                        .iter()
+                        .map(|(_, n)| match have.iter().find(|h| Some(&h.0) == n.as_ref()) {
+                            Some(h) => known(h),
+                            None => {
+                                let code = if n.as_deref().is_some_and(legal_topic_name) { 3 } else { 17 };
+                                (if n.is_none() { 3 } else { code }, n.clone(), [0; 16], Vec::new())
+                            }
+                        })
+                        .collect()
+                } else {
+                    ids.iter()
+                        .map(|id| match have.iter().find(|h| h.1 == *id) {
+                            Some(h) => known(h),
+                            None => (100, None, *id, Vec::new()),
+                        })
+                        .collect()
+                }
+            }
+        };
+        let got: Vec<Seen> = m
             .topics
             .iter()
             .map(|t| {
+                assert!(t.partitions.iter().all(|p| p.error_code == 0 && p.offline_replicas.is_empty()));
                 (
                     t.error_code,
                     t.name.as_ref().map(|n| n.0.to_string()),
                     *t.topic_id.as_bytes(),
-                    t.partitions.len(),
+                    t.partitions
+                        .iter()
+                        .map(|p| {
+                            (
+                                p.partition_index,
+                                p.leader_id.0,
+                                p.leader_epoch,
+                                p.replica_nodes.iter().map(|b| b.0).collect(),
+                                p.isr_nodes.iter().map(|b| b.0).collect(),
+                            )
+                        })
+                        .collect(),
                 )
             })
             .collect();
@@ -404,8 +480,427 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
         } else {
             assert_eq!(
                 (resp.error_code, keys, resp.throttle_time_ms),
-                (0, vec![(3, 13, 13), (18, 3, 4)], 0)
+                (0, vec![(3, 13, 13), (18, 3, 4), (19, 7, 7), (20, 6, 6), (32, 4, 4)], 0)
             );
+        }
+    }
+}
+
+#[cfg(test)]
+fn uuid_of(rng: &mut Rng) -> uuid::Uuid {
+    if rng.below(3) == 0 {
+        uuid::Uuid::nil()
+    } else {
+        uuid::Uuid::from_u128(u128::from(rng.next()) << 64 | u128::from(rng.next()))
+    }
+}
+
+#[test]
+fn topic_requests_encoded_by_the_rust_implementation_decode_in_blossom() {
+    let artifact = compile();
+    let mut rng = Rng(11);
+    let mut inputs = Vec::new();
+    // Per request frame: the view that decodes it and the value it should decode to.
+    let mut expected: Vec<(Vec<u8>, &str, Value)> = Vec::new();
+    for i in 0..150 {
+        let corr = rng.next() as i32;
+        let client = Some(rng.text());
+        let (frame, view, want) = match i % 3 {
+            0 => {
+                let mut topics = Vec::new();
+                let mut want_topics = Vec::new();
+                for _ in 0..rng.below(4) {
+                    let name = rng.text();
+                    let (parts, rf) = (rng.next() as i32 % 20, rng.next() as i16 % 4);
+                    let assignments: Vec<(i32, Vec<i32>)> = (0..rng.below(3))
+                        .map(|p| (p as i32, (0..rng.below(3)).map(|_| rng.next() as i32).collect()))
+                        .collect();
+                    let configs: Vec<(String, Option<String>)> = (0..rng.below(3))
+                        .map(|_| (rng.text(), if rng.below(4) == 0 { None } else { Some(rng.text()) }))
+                        .collect();
+                    topics.push(
+                        CreatableTopic::default()
+                            .with_name(TopicName(StrBytes::from_string(name.clone())))
+                            .with_num_partitions(parts)
+                            .with_replication_factor(rf)
+                            .with_assignments(
+                                assignments
+                                    .iter()
+                                    .map(|(p, bs)| {
+                                        CreatableReplicaAssignment::default()
+                                            .with_partition_index(*p)
+                                            .with_broker_ids(bs.iter().map(|b| BrokerId(*b)).collect())
+                                    })
+                                    .collect(),
+                            )
+                            .with_configs(
+                                configs
+                                    .iter()
+                                    .map(|(k, v)| {
+                                        CreatableTopicConfig::default()
+                                            .with_name(StrBytes::from_string(k.clone()))
+                                            .with_value(v.clone().map(StrBytes::from_string))
+                                    })
+                                    .collect(),
+                            ),
+                    );
+                    want_topics.push(strukt(vec![
+                        s(&name),
+                        i32v(parts),
+                        i16v(rf),
+                        Value::Vec(
+                            assignments
+                                .iter()
+                                .map(|(p, bs)| {
+                                    Value::Tuple(vec![i32v(*p), Value::Vec(bs.iter().map(|b| i32v(*b)).collect())].into())
+                                })
+                                .collect(),
+                        ),
+                        Value::Vec(
+                            configs
+                                .iter()
+                                .map(|(k, v)| Value::Tuple(vec![s(k), opt(v.as_deref().map(s))].into()))
+                                .collect(),
+                        ),
+                    ]));
+                }
+                let (timeout, validate) = (rng.next() as i32, rng.below(2) == 0);
+                let req = CreateTopicsRequest::default()
+                    .with_topics(topics)
+                    .with_timeout_ms(timeout)
+                    .with_validate_only(validate);
+                let want = opt(Some(strukt(vec![Value::Vec(want_topics.into()), i32v(timeout), Value::Bool(validate)])));
+                (encode_request(19, 7, corr, client.as_deref(), &req), "v_create", want)
+            }
+            1 => {
+                let states: Vec<(Option<String>, uuid::Uuid)> = (0..rng.below(4))
+                    .map(|_| (if rng.below(3) == 0 { None } else { Some(rng.text()) }, uuid_of(&mut rng)))
+                    .collect();
+                let timeout = rng.next() as i32;
+                let req = DeleteTopicsRequest::default()
+                    .with_topics(
+                        states
+                            .iter()
+                            .map(|(n, id)| {
+                                DeleteTopicState::default()
+                                    .with_name(n.clone().map(|n| TopicName(StrBytes::from_string(n))))
+                                    .with_topic_id(*id)
+                            })
+                            .collect(),
+                    )
+                    .with_timeout_ms(timeout);
+                let want = opt(Some(Value::Tuple(
+                    vec![
+                        Value::Vec(
+                            states
+                                .iter()
+                                .map(|(n, id)| strukt(vec![opt(n.as_deref().map(s)), bytes(id.as_bytes())]))
+                                .collect(),
+                        ),
+                        i32v(timeout),
+                    ]
+                    .into(),
+                )));
+                (encode_request(20, 6, corr, client.as_deref(), &req), "v_delete", want)
+            }
+            _ => {
+                let resources: Vec<(i8, String, Option<Vec<String>>)> = (0..rng.below(4))
+                    .map(|_| {
+                        let keys = if rng.below(3) == 0 { None } else { Some((0..rng.below(3)).map(|_| rng.text()).collect()) };
+                        ([2i8, 4, 8][rng.below(3) as usize], rng.text(), keys)
+                    })
+                    .collect();
+                let req = DescribeConfigsRequest::default()
+                    .with_resources(
+                        resources
+                            .iter()
+                            .map(|(k, n, keys)| {
+                                DescribeConfigsResource::default()
+                                    .with_resource_type(*k)
+                                    .with_resource_name(StrBytes::from_string(n.clone()))
+                                    .with_configuration_keys(
+                                        keys.as_ref().map(|ks| ks.iter().map(|x| StrBytes::from_string(x.clone())).collect()),
+                                    )
+                            })
+                            .collect(),
+                    )
+                    .with_include_synonyms(rng.below(2) == 0)
+                    .with_include_documentation(rng.below(2) == 0);
+                let want = opt(Some(Value::Vec(
+                    resources
+                        .iter()
+                        .map(|(k, n, keys)| {
+                            strukt(vec![
+                                i8v(*k),
+                                s(n),
+                                opt(keys.as_ref().map(|ks| Value::Vec(ks.iter().map(|x| s(x)).collect()))),
+                            ])
+                        })
+                        .collect(),
+                )));
+                (encode_request(32, 4, corr, client.as_deref(), &req), "v_describe", want)
+            }
+        };
+        inputs.push(input(&artifact, "req", vec![bytes(&frame)]));
+        expected.push((frame, view, want));
+    }
+    let r = run(&artifact, &inputs);
+    let decoded: Vec<(&str, BTreeSet<Vec<Value>>)> = ["v_create", "v_delete", "v_describe"]
+        .into_iter()
+        .map(|v| (v, rows(&artifact, &r, v).into_iter().collect()))
+        .collect();
+    for (frame, view, want) in &expected {
+        let got = &decoded.iter().find(|d| d.0 == *view).unwrap().1;
+        let row = got.iter().find(|r| r[0] == bytes(frame)).unwrap();
+        assert_eq!(&row[1], want, "{view} of {frame:02x?}");
+    }
+}
+
+/// The configurations the broker knows, with their defaults and Kafka types, in the order it lists them.
+#[cfg(test)]
+const TOPIC_CONFIGS: [(&str, &str, i8); 8] = [
+    ("cleanup.policy", "delete", 2),
+    ("compression.type", "producer", 2),
+    ("max.message.bytes", "1048588", 3),
+    ("message.timestamp.type", "CreateTime", 2),
+    ("min.insync.replicas", "1", 3),
+    ("retention.bytes", "-1", 5),
+    ("retention.ms", "604800000", 5),
+    ("segment.bytes", "1073741824", 3),
+];
+
+#[test]
+fn topic_responses_encoded_in_blossom_decode_in_the_rust_implementation() {
+    let artifact = compile();
+    let mut rng = Rng(13);
+    let mut inputs = Vec::new();
+    // A topic's own configurations: some of the known ones, with random values.
+    let own = |rng: &mut Rng| -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for (k, _, _) in TOPIC_CONFIGS {
+            if rng.below(3) == 0 {
+                out.push((k.to_string(), rng.text()));
+            }
+        }
+        out
+    };
+    type Created = (String, [u8; 16], i16, Option<String>, i32, Vec<(String, String)>);
+    let mut creates: Vec<(i32, Vec<Created>)> = Vec::new();
+    type Deleted = (Option<String>, [u8; 16], i16, Option<String>);
+    let mut deletes: Vec<(i32, Vec<Deleted>)> = Vec::new();
+    type Described = (i8, String, Option<Vec<String>>, Option<Vec<(String, String)>>);
+    let mut describes: Vec<(i32, Vec<Described>)> = Vec::new();
+    for _ in 0..40 {
+        let corr = rng.next() as i32;
+        let outcomes: Vec<Created> = (0..rng.below(4))
+            .map(|_| {
+                let ok = rng.below(2) == 0;
+                let id = uuid_of(&mut rng).into_bytes();
+                if ok {
+                    (rng.text(), id, 0, None, 1 + rng.below(8) as i32, own(&mut rng))
+                } else {
+                    (rng.text(), [0; 16], [36i16, 37, 40, 42][rng.below(4) as usize], Some(rng.text()), -1, Vec::new())
+                }
+            })
+            .collect();
+        let pairs = |cs: &[(String, String)]| {
+            Value::Vec(cs.iter().map(|(k, v)| Value::Tuple(vec![s(k), s(v)].into())).collect())
+        };
+        inputs.push(input(
+            &artifact,
+            "create_resp",
+            vec![
+                i32v(corr),
+                Value::Vec(
+                    outcomes
+                        .iter()
+                        .map(|(n, id, e, m, p, cs)| {
+                            Value::Tuple(vec![s(n), bytes(id), i16v(*e), opt(m.as_deref().map(s)), i32v(*p), pairs(cs)].into())
+                        })
+                        .collect(),
+                ),
+            ],
+        ));
+        creates.push((corr, outcomes));
+        let corr = rng.next() as i32;
+        let outcomes: Vec<Deleted> = (0..rng.below(4))
+            .map(|_| {
+                let name = if rng.below(3) == 0 { None } else { Some(rng.text()) };
+                let err = [0i16, 3, 100, 42][rng.below(4) as usize];
+                (name, uuid_of(&mut rng).into_bytes(), err, (err != 0).then(|| rng.text()))
+            })
+            .collect();
+        inputs.push(input(
+            &artifact,
+            "delete_resp",
+            vec![
+                i32v(corr),
+                Value::Vec(
+                    outcomes
+                        .iter()
+                        .map(|(n, id, e, m)| {
+                            Value::Tuple(vec![opt(n.as_deref().map(s)), bytes(id), i16v(*e), opt(m.as_deref().map(s))].into())
+                        })
+                        .collect(),
+                ),
+            ],
+        ));
+        deletes.push((corr, outcomes));
+        let corr = rng.next() as i32;
+        let resources: Vec<Described> = (0..rng.below(4))
+            .map(|_| {
+                let kind = [2i8, 2, 4, 8][rng.below(4) as usize];
+                let keys = if rng.below(2) == 0 {
+                    None
+                } else {
+                    let mut ks: Vec<String> =
+                        TOPIC_CONFIGS.iter().filter(|_| rng.below(2) == 0).map(|c| c.0.to_string()).collect();
+                    if rng.below(3) == 0 {
+                        ks.push(rng.text());
+                    }
+                    Some(ks)
+                };
+                let set = (rng.below(3) != 0).then(|| own(&mut rng));
+                (kind, rng.text(), keys, set)
+            })
+            .collect();
+        inputs.push(input(
+            &artifact,
+            "describe_resp",
+            vec![
+                i32v(corr),
+                Value::Vec(
+                    resources
+                        .iter()
+                        .map(|(k, n, keys, set)| {
+                            Value::Tuple(
+                                vec![
+                                    i8v(*k),
+                                    s(n),
+                                    opt(keys.as_ref().map(|ks| Value::Vec(ks.iter().map(|x| s(x)).collect()))),
+                                    opt(set.as_ref().map(|cs| pairs(cs))),
+                                ]
+                                .into(),
+                            )
+                        })
+                        .collect(),
+                ),
+            ],
+        ));
+        describes.push((corr, resources));
+    }
+    let r = run(&artifact, &inputs);
+    let unframe = |b: &Value| -> Bytes {
+        let Value::Bytes(b) = b else { panic!("{b:?}") };
+        let n = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize;
+        assert_eq!(n, b.len() - 4, "the size prefix is the frame's size");
+        Bytes::copy_from_slice(&b[4..])
+    };
+    // A configuration's value and source (1: the topic's own, 5: the default).
+    let value_of = |set: &[(String, String)], k: &str, default: &str| -> (String, i8) {
+        match set.iter().find(|c| c.0 == k) {
+            Some(c) => (c.1.clone(), 1),
+            None => (default.to_owned(), 5),
+        }
+    };
+    let create_rows = rows(&artifact, &r, "v_create_resp");
+    for (corr, outcomes) in &creates {
+        let row = create_rows.iter().find(|r| r[0] == i32v(*corr)).unwrap();
+        let mut buf = unframe(&row[1]);
+        let header = ResponseHeader::decode(&mut buf, CreateTopicsResponse::header_version(7)).unwrap();
+        assert_eq!(header.correlation_id, *corr);
+        let m = CreateTopicsResponse::decode(&mut buf, 7).unwrap();
+        assert!(buf.is_empty(), "trailing bytes after the CreateTopics response");
+        assert_eq!(m.throttle_time_ms, 0);
+        assert_eq!(m.topics.len(), outcomes.len());
+        for (t, (name, id, err, msg, parts, set)) in m.topics.iter().zip(outcomes) {
+            let ok = *err == 0;
+            assert_eq!(t.name.0.to_string(), *name);
+            assert_eq!(*t.topic_id.as_bytes(), *id);
+            assert_eq!((t.error_code, t.error_message.as_ref().map(|x| x.to_string())), (*err, msg.clone()));
+            assert_eq!(t.topic_config_error_code, 0);
+            assert_eq!((t.num_partitions, t.replication_factor), if ok { (*parts, 1) } else { (-1, -1) });
+            let configs = t.configs.as_ref().map(|cs| {
+                cs.iter()
+                    .map(|c| {
+                        assert!(!c.read_only && !c.is_sensitive);
+                        (c.name.to_string(), c.value.as_ref().map(|v| v.to_string()), c.config_source)
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let want = ok.then(|| {
+                TOPIC_CONFIGS
+                    .iter()
+                    .map(|(k, d, _)| {
+                        let (v, src) = value_of(set, k, d);
+                        (k.to_string(), Some(v), src)
+                    })
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(configs, want);
+        }
+    }
+    let delete_rows = rows(&artifact, &r, "v_delete_resp");
+    for (corr, outcomes) in &deletes {
+        let row = delete_rows.iter().find(|r| r[0] == i32v(*corr)).unwrap();
+        let mut buf = unframe(&row[1]);
+        let header = ResponseHeader::decode(&mut buf, DeleteTopicsResponse::header_version(6)).unwrap();
+        assert_eq!(header.correlation_id, *corr);
+        let m = DeleteTopicsResponse::decode(&mut buf, 6).unwrap();
+        assert!(buf.is_empty(), "trailing bytes after the DeleteTopics response");
+        let got: Vec<Deleted> = m
+            .responses
+            .iter()
+            .map(|t| {
+                (
+                    t.name.as_ref().map(|n| n.0.to_string()),
+                    *t.topic_id.as_bytes(),
+                    t.error_code,
+                    t.error_message.as_ref().map(|x| x.to_string()),
+                )
+            })
+            .collect();
+        assert_eq!((m.throttle_time_ms, &got), (0, outcomes));
+    }
+    let describe_rows = rows(&artifact, &r, "v_describe_resp");
+    for (corr, resources) in &describes {
+        let row = describe_rows.iter().find(|r| r[0] == i32v(*corr)).unwrap();
+        let mut buf = unframe(&row[1]);
+        let header = ResponseHeader::decode(&mut buf, DescribeConfigsResponse::header_version(4)).unwrap();
+        assert_eq!(header.correlation_id, *corr);
+        let m = DescribeConfigsResponse::decode(&mut buf, 4).unwrap();
+        assert!(buf.is_empty(), "trailing bytes after the DescribeConfigs response");
+        assert_eq!((m.throttle_time_ms, m.results.len()), (0, resources.len()));
+        for (res, (kind, name, keys, set)) in m.results.iter().zip(resources) {
+            assert_eq!((res.resource_type, res.resource_name.to_string()), (*kind, name.clone()));
+            // A topic is described (or unknown); a broker has no configuration described; other types are refused.
+            let (err, configs): (i16, Vec<(String, String, i8, i8)>) = match (kind, set) {
+                (2, Some(set)) => (
+                    0,
+                    TOPIC_CONFIGS
+                        .iter()
+                        .filter(|(k, _, _)| keys.as_ref().is_none_or(|ks| ks.is_empty() || ks.iter().any(|x| x == k)))
+                        .map(|(k, d, ty)| {
+                            let (v, src) = value_of(set, k, d);
+                            (k.to_string(), v, src, *ty)
+                        })
+                        .collect(),
+                ),
+                (2, None) => (3, Vec::new()),
+                (4, _) => (0, Vec::new()),
+                _ => (42, Vec::new()),
+            };
+            assert_eq!(res.error_code, err);
+            assert_eq!(res.error_message.is_some(), err != 0);
+            let got: Vec<(String, String, i8, i8)> = res
+                .configs
+                .iter()
+                .map(|c| {
+                    assert!(!c.read_only && !c.is_sensitive && c.synonyms.is_empty() && c.documentation.is_none());
+                    (c.name.to_string(), c.value.as_ref().unwrap().to_string(), c.config_source, c.config_type)
+                })
+                .collect();
+            assert_eq!(got, configs);
         }
     }
 }
@@ -445,6 +940,12 @@ fn the_golden_captures_of_real_clients_decode() {
         "java-apiversions.jsonl",
         "java-topics.jsonl",
         "franz.jsonl",
+        "s7-java-admin.jsonl",
+        "s7-java-producer.jsonl",
+        "s7-java-consumer.jsonl",
+        "s7-java-get-offsets.jsonl",
+        "s7-kcat.jsonl",
+        "s7-franz.jsonl",
     ] {
         for (key, version, frame) in captured_requests(file) {
             inputs.push(input(&artifact, "req", vec![bytes(&frame)]));
@@ -455,6 +956,9 @@ fn the_golden_captures_of_real_clients_decode() {
     let headers = rows(&artifact, &r, "v_header");
     let apiv = rows(&artifact, &r, "v_apiv");
     let meta = rows(&artifact, &r, "v_meta");
+    let create = rows(&artifact, &r, "v_create");
+    let delete = rows(&artifact, &r, "v_delete");
+    let describe = rows(&artifact, &r, "v_describe");
     let find = |rs: &[Vec<Value>], f: &[u8]| rs.iter().find(|r| r[0] == bytes(f)).map(|r| r[1].clone());
     let mut clients = BTreeSet::new();
     for (file, key, version, frame) in &frames {
@@ -472,13 +976,28 @@ fn the_golden_captures_of_real_clients_decode() {
                 clients.insert(format!("{:?}", b[0]));
             }
             (3, 13) => {
-                // Every client asked for all topics (a null topic list) or none.
                 let Some(Value::Option(Some(_))) = find(&meta, frame) else {
                     panic!("{file}: a Metadata v13 body does not decode");
                 };
             }
+            (19, 7) | (20, 6) | (32, 4) => {
+                let (rs, what) = match key {
+                    19 => (&create, "CreateTopics"),
+                    20 => (&delete, "DeleteTopics"),
+                    _ => (&describe, "DescribeConfigs"),
+                };
+                let Some(Value::Option(Some(_))) = find(rs, frame) else {
+                    panic!("{file}: a {what} v{version} body does not decode");
+                };
+            }
             // franz-go's first ApiVersions is v5, which the broker refuses without reading its body.
-            (18, 5) => assert_eq!(*file, "franz.jsonl"),
+            (18, 5) => assert!(file.ends_with("franz.jsonl"), "{file}"),
+            // Produce, Fetch and ListOffsets (items 5 and 6), and the APIs the broker does not advertise: the Java
+            // admin's DescribeCluster, DescribeTopicPartitions and ListPartitionReassignments, and the Java producer's
+            // InitProducerId (slice 9). Only their headers are read here.
+            (0, 10..=12) | (1, 16 | 17) | (2, 7..=10) | (22, 5) | (46, 0) | (60, 2) | (75, 0) => {
+                assert!(file.starts_with("s7-"), "{file}")
+            }
             other => panic!("{file}: an unexpected request {other:?}"),
         }
     }

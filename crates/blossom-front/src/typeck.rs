@@ -1175,6 +1175,15 @@ impl Checker<'_> {
                 let u64t = self.con(&mut hir.types, TypeDef::Int(IntTy::U64));
                 self.unify(&hir.types, col, u64t, agg.span);
             }
+            AggKind::Collect => {
+                // The group's values merge into one vector: each flows into its element type (LANGUAGE §5.3).
+                let el = self.fresh(false);
+                if let Some(a) = arg_terms.first() {
+                    self.flow(*a, el, false, agg.span);
+                }
+                let v = self.bound(Shape::Vec(el));
+                self.unify(&hir.types, v, col, agg.span);
+            }
             AggKind::Sum | AggKind::Min | AggKind::Max => {
                 if let Some(a) = arg_terms.first() {
                     self.unify(&hir.types, *a, col, agg.span);
@@ -1789,7 +1798,7 @@ impl Checker<'_> {
                             }
                             self.con(&mut hir.types, TypeDef::Int(IntTy::U64))
                         }
-                        Builtin::RoleSize(_) => self.con(&mut hir.types, TypeDef::Int(IntTy::U64)),
+                        Builtin::RoleSize(_) | Builtin::Rand => self.con(&mut hir.types, TypeDef::Int(IntTy::U64)),
                         Builtin::RandRange => {
                             // `lo` and `hi` share a type that subtracts to itself: an integer or a duration.
                             match (ats.first().copied(), ats.get(1).copied()) {
@@ -3095,6 +3104,7 @@ impl Checker<'_> {
             (_, Some(TypeDef::Str), "split_whitespace") => (Builtin::Lib(LibFn::StrSplitWhitespace), None, 0),
             (_, Some(TypeDef::Str), "to_lowercase") => (Builtin::Lib(LibFn::StrToLowercase), None, 0),
             (_, Some(TypeDef::Str), "to_utf8") => (Builtin::Lib(LibFn::StrToUtf8), None, 0),
+            (_, Some(TypeDef::Str), "parse_i64") => (Builtin::Lib(LibFn::StrParseI64), None, 0),
             (_, Some(TypeDef::Bytes), "from_utf8") => (Builtin::Lib(LibFn::BytesFromUtf8), None, 0),
             (_, Some(TypeDef::Blob), "read") => (Builtin::Lib(LibFn::BlobRead), None, 2),
             (_, Some(TypeDef::Bytes), "uvarint_at") => (Builtin::Lib(LibFn::BytesUvarintAt), None, 1),
@@ -3301,6 +3311,10 @@ impl Checker<'_> {
             (_, Builtin::Lib(LibFn::StrSplitWhitespace)) => self.bound(Shape::Vec(recv)),
             (_, Builtin::Lib(LibFn::StrToLowercase)) => recv,
             (_, Builtin::Lib(LibFn::StrToUtf8)) => self.con(&mut hir.types, TypeDef::Bytes),
+            (_, Builtin::Lib(LibFn::StrParseI64)) => {
+                let i = self.con(&mut hir.types, TypeDef::Int(IntTy::I64));
+                self.bound(Shape::Option(i))
+            }
             (_, Builtin::Lib(LibFn::BytesFromUtf8)) => {
                 let st = self.con(&mut hir.types, TypeDef::Str);
                 self.bound(Shape::Option(st))

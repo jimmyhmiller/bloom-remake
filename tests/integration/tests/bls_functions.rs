@@ -169,6 +169,13 @@ fn expected(view: &str, n: u64, s: &str, b: &[u8]) -> (Value, Value) {
             ),
         ),
         "v_range" => (u(n), u(n + 1)),
+        "v_parse" => (
+            Value::Str(s.into()),
+            tuple(vec![
+                opt(s.parse::<i64>().ok().map(|x| Value::Int(IntValue::I64(x)))),
+                opt(s.to_lowercase().parse::<i64>().ok().map(|x| Value::Int(IntValue::I64(x)))),
+            ]),
+        ),
         "v_arms" => (
             u(n),
             tuple(vec![
@@ -199,13 +206,14 @@ const VIEWS: &[&str] = &[
     "v_classify",
     "v_range",
     "v_arms",
+    "v_parse",
 ];
 
 #[test]
 fn every_library_function_agrees_on_both_evaluators_and_with_its_definition() {
     let artifact = compile("library.bls");
     let e = artifact.rel_named("e").unwrap();
-    let words = ["Foo", "bar", "BAZ", "qUx", "ümlaut", "ΣΙΣΥΦΟΣ"];
+    let words = ["Foo", "bar", "BAZ", "qUx", "ümlaut", "ΣΙΣΥΦΟΣ", "42", "-7", "+3", "99999999999999999999"];
     let spaces = [" ", "  ", "\t", "\n ", ""];
     let mut checked = 0;
     for seed in 0..8u64 {
