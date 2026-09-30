@@ -85,6 +85,8 @@ struct RawNode {
     principal: String,
     #[serde(default)]
     dial: BTreeMap<String, SocketAddr>,
+    #[serde(default)]
+    streams: BTreeMap<String, SocketAddr>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -127,6 +129,9 @@ pub struct NodeEntry {
     pub principal: String,
     /// Where this node dials other nodes when it is not their `addr` (a proxy, a NAT), by node name.
     pub dial: BTreeMap<String, SocketAddr>,
+    /// The address each `listen` stream of the program accepts connections on, by stream name
+    /// (FOREIGN-PROTOCOLS §1.2): `streams = { kafka = "0.0.0.0:9092" }`.
+    pub streams: BTreeMap<String, SocketAddr>,
 }
 
 /// A validated deployment spec.
@@ -208,6 +213,7 @@ impl DeploymentSpec {
                 client_addr: n.client_addr,
                 principal: n.principal,
                 dial: n.dial,
+                streams: n.streams,
             })
             .collect();
         nodes.sort_by(|a, b| a.name.cmp(&b.name));

@@ -406,6 +406,17 @@ fn bytes_expected(view: &str, r: &Row) -> Vec<Value> {
                 opt(Some(tuple(vec![u(r.j), iv(IntValue::I64, r.k), u(len as u64)]))),
             ]
         }
+        "v_bits" => vec![tuple(vec![
+            iv(IntValue::U8, r.a & 15),
+            iv(IntValue::I8, r.c | 1),
+            iv(IntValue::U16, r.d ^ 0xffff),
+            iv(IntValue::I16, r.g >> 3),
+            iv(IntValue::U32, r.h << 5),
+            iv(IntValue::I32, r.i >> 31),
+            iv(IntValue::U64, r.j >> 63),
+            iv(IntValue::I64, !r.k),
+            iv(IntValue::I64, (r.k << 1) ^ (r.k >> 63)),
+        ])],
         "v_utf8" => vec![bytes(b), opt(std::str::from_utf8(b).ok().map(|s| Value::Str(s.into())))],
         other => panic!("no expectation for {other}"),
     }
@@ -413,6 +424,7 @@ fn bytes_expected(view: &str, r: &Row) -> Vec<Value> {
 
 #[cfg(test)]
 const BYTE_VIEWS: &[&str] = &[
+    "v_bits",
     "v_reads",
     "v_encoded",
     "v_decoded",
@@ -774,4 +786,32 @@ fn a_program_whose_host_functions_are_not_registered_does_not_load() {
         Err(e) => panic!("{e}"),
         Ok(_) => panic!("loaded against mismatched host signatures"),
     }
+}
+
+#[test]
+fn a_shift_outside_the_width_is_blsr004_on_both_evaluators() {
+    let artifact = compile("shift.bls");
+    let e = artifact.rel_named("e").unwrap();
+    let at = |t: u64, n: u32| InputEvent {
+        node: NodeId(0),
+        tick: Tick(t),
+        rel: e,
+        row: Arc::from(vec![iv(IntValue::U32, n)]),
+    };
+    let Hosted::Ran(run) = differential_hosted(&artifact, &[at(1, 31)], 2) else {
+        panic!("a shift by 31 of a u32 is in range");
+    };
+    let v = artifact.rel_named("v").unwrap();
+    let rows: Vec<Vec<Value>> = run
+        .node_tick(Tick(1), NodeId(0))
+        .unwrap()
+        .instance
+        .rows(v)
+        .map(|r| r.to_vec())
+        .collect();
+    assert_eq!(rows, vec![vec![iv(IntValue::U32, 1 << 31)]]);
+    assert!(matches!(
+        differential_hosted(&artifact, &[at(1, 31), at(2, 32)], 3),
+        Hosted::Failed(Tick(2), code) if code == "BLSR004"
+    ));
 }

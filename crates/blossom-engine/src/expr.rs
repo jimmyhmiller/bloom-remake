@@ -140,7 +140,7 @@ pub(crate) fn eval(cx: &Ctx<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<
             match (op, v) {
                 (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
                 (UnOp::Neg, Value::Int(i)) => negate(i).map(Value::Int),
-                (UnOp::BitNot, _) => Err(unimplemented!("LANG-084", "bit operations")),
+                (UnOp::BitNot, Value::Int(i)) => Ok(Value::Int(from_bits(i.ty(), !to_bits(i)))),
                 (op, v) => Err(bug(format!("{op:?} applied to {v:?}"))),
             }
         }
@@ -482,8 +482,73 @@ fn binary(op: &BinOp, l: Value, r: Value) -> ExprResult<Value> {
         }
         Add | Sub | Mul | Div | Rem => arithmetic(op, l, r),
         And | Or => Err(bug("`&&`/`||` evaluated strictly".into())),
-        BitAnd | BitOr | BitXor | Shl | Shr => Err(unimplemented!("LANG-084", "bit operations")),
+        BitAnd | BitOr | BitXor | Shl | Shr => match (l, r) {
+            (Value::Int(a), Value::Int(b)) if a.ty() == b.ty() => bitwise(op, a, b).map(Value::Int),
+            (l, r) => Err(bug(format!("{l:?} {op:?} {r:?}"))),
+        },
     }
+}
+
+/// An integer as its bit pattern: two's complement over the type's width, in the low bits of a `u128`.
+fn to_bits(i: IntValue) -> u128 {
+    match i {
+        IntValue::U8(x) => u128::from(x),
+        IntValue::U16(x) => u128::from(x),
+        IntValue::U32(x) => u128::from(x),
+        IntValue::U64(x) => u128::from(x),
+        IntValue::U128(x) => x,
+        IntValue::I8(x) => u128::from(x as u8),
+        IntValue::I16(x) => u128::from(x as u16),
+        IntValue::I32(x) => u128::from(x as u32),
+        IntValue::I64(x) => u128::from(x as u64),
+        IntValue::I128(x) => x as u128,
+    }
+}
+
+/// The integer of type `ty` whose bit pattern is the low bits of `b`.
+fn from_bits(ty: blossom_value::types::IntTy, b: u128) -> IntValue {
+    use blossom_value::types::IntTy as T;
+    match ty {
+        T::U8 => IntValue::U8(b as u8),
+        T::U16 => IntValue::U16(b as u16),
+        T::U32 => IntValue::U32(b as u32),
+        T::U64 => IntValue::U64(b as u64),
+        T::U128 => IntValue::U128(b),
+        T::I8 => IntValue::I8(b as u8 as i8),
+        T::I16 => IntValue::I16(b as u16 as i16),
+        T::I32 => IntValue::I32(b as u32 as i32),
+        T::I64 => IntValue::I64(b as u64 as i64),
+        T::I128 => IntValue::I128(b as i128),
+    }
+}
+
+/// Bitwise operators and shifts (LANGUAGE §9.12): `>>` is arithmetic on signed types; a shift count at or beyond
+/// the width, or negative, is BLSR004.
+fn bitwise(op: &BinOp, a: IntValue, b: IntValue) -> ExprResult<IntValue> {
+    let ty = a.ty();
+    let (x, y) = (to_bits(a), to_bits(b));
+    let width = ty.bits();
+    let count = || -> ExprResult<u32> {
+        let n = b.to_i128().filter(|n| (0..i128::from(width)).contains(n));
+        n.map(|n| n as u32)
+            .ok_or_else(|| ExprError::Arithmetic(format!("a shift by {b:?} of a {}-bit integer", width)))
+    };
+    Ok(match op {
+        BinOp::BitAnd => from_bits(ty, x & y),
+        BinOp::BitOr => from_bits(ty, x | y),
+        BinOp::BitXor => from_bits(ty, x ^ y),
+        BinOp::Shl => from_bits(ty, x << count()?),
+        _ => {
+            let n = count()?;
+            if ty.is_signed() {
+                // Sign-extend to 128 bits, shift arithmetically, keep the low bits.
+                let widened = if width < 128 && (x >> (width - 1)) & 1 == 1 { x | (!0u128 << width) } else { x };
+                from_bits(ty, ((widened as i128) >> n) as u128)
+            } else {
+                from_bits(ty, x >> n)
+            }
+        }
+    })
 }
 
 /// An arithmetic operator as written.

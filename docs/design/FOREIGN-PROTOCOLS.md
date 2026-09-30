@@ -86,6 +86,13 @@ A stream declaration introduces:
   - Each tick's requests leave as `TickOutput::host` and, in the node, are released with the tick's other output
     after its durable writes are synced.
 
+- **Runtime (S6 item 4b).**
+  - The host closes a connection when the program sends `close`, when the tick that delivered its `closed` event is
+    released (after that tick's writes), or when its writes back up past the queue.
+  - A reader never closes a connection: a peer that half-closed still reads its replies.
+  - A write `seq` more than 4096 past the next expected one is a violation, like a duplicate. It closes the
+    connection with the reason recorded (`StreamStats::last_violation`).
+
 ### 1.3 IR, oracle and engine
 
 - **IR.** Streams lower to event relations of a new source (`EventSource::Stream { stream, part }`) and to async heads

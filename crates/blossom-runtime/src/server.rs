@@ -51,10 +51,14 @@ use crate::RuntimeError;
 use crate::clock::{OsEntropy, SystemClock, wall_now};
 use crate::deploy::DeploymentSpec;
 use crate::net::{self, Catalog, Conn, Identity};
+use crate::streams::{Push, StreamConns, StreamData, StreamStats};
+use blossom_node::streams::{HostRequest, Observed, host_request};
 
 /// How long a new connection has to complete its handshake, and a peer writer to write a frame.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// The stream bytes waiting for ticks past which the engine takes no more data.
+const STREAM_BACKLOG: usize = 16 * 1024 * 1024;
 
 /// How to start a node.
 #[derive(Clone)]
@@ -124,6 +128,8 @@ enum Data {
         rel: RelId,
         row: Row,
     },
+    /// What a byte stream's threads observed (FOREIGN-PROTOCOLS §1).
+    Stream(StreamData),
 }
 
 /// What else reaches the engine thread.
@@ -243,6 +249,10 @@ pub struct Server {
     pub node: NodeId,
     pub peer_addr: SocketAddr,
     pub client_addr: Option<SocketAddr>,
+    /// The address each `listen` stream accepts on, by stream name.
+    pub stream_addrs: BTreeMap<String, SocketAddr>,
+    pub stream_stats: Arc<StreamStats>,
+    streams: Arc<StreamConns>,
     /// The tick this incarnation booted at, and its restart count.
     pub boot_tick: Tick,
     pub restarts: u64,
@@ -350,6 +360,30 @@ impl Server {
             None => None,
         };
 
+        // Every `listen` stream at this node has an address in the deployment, and every address names one.
+        let mut stream_listeners = Vec::new();
+        let mut stream_addrs = BTreeMap::new();
+        for (i, st) in node.streams().iter().enumerate() {
+            if st.kind != blossom_ir::core::StreamKind::Listen {
+                continue;
+            }
+            let Some(addr) = entry.streams.get(&*st.name) else {
+                return Err(RuntimeError::Config(format!(
+                    "node {}: the listen stream `{}` has no address (`streams = {{ {} = \"host:port\" }}`)",
+                    entry.name, st.name, st.name
+                )));
+            };
+            let l = TcpListener::bind(addr).map_err(|e| RuntimeError::Net(format!("bind {addr}: {e}")))?;
+            stream_addrs.insert(st.name.to_string(), l.local_addr().map_err(RuntimeError::Io)?);
+            stream_listeners.push((i, l));
+        }
+        if let Some(name) = entry.streams.keys().find(|n| !stream_addrs.contains_key(*n)) {
+            return Err(RuntimeError::Config(format!(
+                "node {}: `streams` names `{name}`, which is not a listen stream of this node",
+                entry.name
+            )));
+        }
+
         let stats = Arc::new(Stats::default());
         let stop = Arc::new(AtomicBool::new(false));
         let conns = Arc::new(Conns::default());
@@ -363,6 +397,12 @@ impl Server {
             wake_pending: AtomicBool::new(false),
             control: ctl_tx.clone(),
         });
+        let stream_stats = Arc::new(StreamStats::default());
+        let streams = Arc::new(StreamConns::new(restarts, stream_stats.clone()));
+        let push: Push = {
+            let data = data.clone();
+            Arc::new(move |d| data.push(Data::Stream(d)))
+        };
         let (commit_tx, commit_rx) = mpsc::channel::<Commit>();
         let (ckpt_tx, ckpt_rx) = mpsc::channel::<(blossom_store::DurableSnapshot, SyncedTick)>();
         let id = identity(spec, &artifact);
@@ -426,8 +466,17 @@ impl Server {
                 threads.push(spawn("client-listener", move || accept_loop(l, ctx, true))?);
             }
         }
+        for (i, l) in stream_listeners {
+            let (streams, push, stop) = (streams.clone(), push.clone(), stop.clone());
+            threads.push(spawn("stream-listener", move || {
+                crate::streams::listen_loop(l, i, streams, push, stop)
+            })?);
+        }
         let engine = {
             let e = Engine {
+                streams: streams.clone(),
+                push: push.clone(),
+                stop: stop.clone(),
                 node,
                 artifact: artifact.clone(),
                 schema: DurableSchema::of(program),
@@ -475,6 +524,9 @@ impl Server {
             node: me,
             peer_addr,
             client_addr,
+            stream_addrs,
+            stream_stats,
+            streams,
             boot_tick: boot.tick,
             restarts,
         })
@@ -508,6 +560,7 @@ impl Server {
         self.stop.store(true, Ordering::SeqCst);
         self.data.close();
         self.conns.close_all();
+        self.streams.close_all();
         for t in self.threads.drain(..) {
             // A thread that panicked has already reported through its connection; joining just reaps it.
             let _ = t.join();
@@ -875,6 +928,9 @@ fn session(stream: TcpStream, ctx: &Accept) -> Result<(), RuntimeError> {
 
 struct Engine {
     node: Node<Box<dyn Executor>>,
+    streams: Arc<StreamConns>,
+    push: Push,
+    stop: Arc<AtomicBool>,
     artifact: Arc<BlsArtifact>,
     schema: DurableSchema,
     names: Arc<[Arc<str>]>,
@@ -910,7 +966,7 @@ impl Engine {
         loop {
             // Wait for something to do: control, data the inbox has room for, or the next timer.
             let now = self.clock.now();
-            let room = self.inbox_cap.saturating_sub(self.node.inbox_len());
+            let room = self.data_room();
             let wait = if self.node.ready(now)? || (room > 0 && self.data.len() > 0) {
                 Duration::ZERO
             } else if self.node.waiting() {
@@ -988,15 +1044,39 @@ impl Engine {
                 return Ok(Some(stopped));
             }
         }
-        let room = self.inbox_cap.saturating_sub(self.node.inbox_len());
+        let room = self.data_room();
         for d in self.data.take(room) {
-            self.admit_and_offer(d);
+            self.admit_and_offer(d)?;
         }
         Ok(None)
     }
 
-    fn admit_and_offer(&mut self, d: Data) {
+    /// How much data the engine takes now: what the node's inbox has room for, and nothing while more stream bytes
+    /// wait for ticks than the node delivers in a few (the readers then block, pushing back on the peers' TCP).
+    fn data_room(&self) -> usize {
+        if self.node.stream_backlog() > STREAM_BACKLOG {
+            return 0;
+        }
+        self.inbox_cap.saturating_sub(self.node.inbox_len())
+    }
+
+    fn admit_and_offer(&mut self, d: Data) -> Result<(), RuntimeError> {
         match d {
+            Data::Stream(sd) => {
+                let o = match sd {
+                    StreamData::Opened { stream, conn, peer, req } => Observed::Opened {
+                        stream,
+                        conn,
+                        peer,
+                        req,
+                        at: self.clock.now(),
+                    },
+                    StreamData::Bytes { conn, bytes } => Observed::Bytes { conn, bytes },
+                    StreamData::Closed { conn, reason } => Observed::Closed { conn, reason },
+                    StreamData::Failed { stream, req, reason } => Observed::Failed { stream, req, reason },
+                };
+                self.node.observe_stream(o).map_err(|e| RuntimeError::Fault(e.to_string()))?;
+            }
             Data::Deliver { from, rel, row } => {
                 let principal = self
                     .principals
@@ -1024,6 +1104,7 @@ impl Engine {
                 }
             }
         }
+        Ok(())
     }
 
     fn control(
@@ -1101,6 +1182,7 @@ impl Engine {
                     }
                 }
             }
+            self.dispatch_streams(&t)?;
             let mut to_sessions: BTreeMap<(SessionId, RelId), Vec<&Row>> = BTreeMap::new();
             for e in &t.egress {
                 to_sessions.entry((e.session, e.rel)).or_default().push(&e.row);
@@ -1132,6 +1214,32 @@ impl Engine {
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// A released tick's requests to the host (FOREIGN-PROTOCOLS §1.2): its writes, in connection and `seq` order,
+    /// then its closes, then the connections whose `closed` event it delivered, then its dials.
+    fn dispatch_streams(&mut self, t: &ReleasedTick) -> Result<(), RuntimeError> {
+        let mut writes = Vec::new();
+        let mut closes = Vec::new();
+        let mut dials = Vec::new();
+        for h in &t.host {
+            match host_request(self.node.streams(), h).map_err(|e| RuntimeError::Fault(e.to_string()))? {
+                HostRequest::Write { conn, seq, bytes } => writes.push((conn, seq, bytes)),
+                HostRequest::Close { conn } => closes.push(conn),
+                HostRequest::Dial { stream, req, addr } => dials.push((stream, req, addr)),
+            }
+        }
+        writes.sort_by_key(|w| (w.0, w.1));
+        for (conn, seq, bytes) in writes {
+            self.streams.write(conn, seq, bytes);
+        }
+        for conn in closes.into_iter().chain(t.retired.iter().copied()) {
+            self.streams.close(conn);
+        }
+        for (stream, req, addr) in dials {
+            crate::streams::dial(stream, req, addr, self.streams.clone(), self.push.clone(), self.stop.clone());
         }
         Ok(())
     }
