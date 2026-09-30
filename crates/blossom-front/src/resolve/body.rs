@@ -41,6 +41,10 @@ pub(crate) struct RuleCx {
     pub calls: BTreeSet<HFnId>,
 }
 
+/// The functions a call resolves to before any declared one (LANGUAGE §9.12, §15, §16.1, Appendix B); a `fn` may not
+/// take one of these names, which a call would never reach.
+const BUILTIN_FNS: &[&str] = &["now", "tick", "random", "rand", "rand_range", "majority", "range", "error"];
+
 fn is_var_name(name: &str) -> bool {
     name.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') && name != "_"
 }
@@ -210,7 +214,18 @@ impl<'t> Resolver<'t, '_> {
         span: Span,
         body: HFnBody,
     ) -> Option<HFnId> {
-        if self.scope(s).fns.contains_key(&name.name) || self.scope(s).rels.contains_key(&name.name) {
+        if BUILTIN_FNS.contains(&name.as_str()) {
+            self.error(
+                code!("BLS0201"),
+                name.span,
+                format!("`{}` is a built-in function; name this one differently", name.as_str()),
+            );
+            return None;
+        }
+        if self.scope(s).fns.contains_key(&name.name)
+            || self.scope(s).rels.contains_key(&name.name)
+            || self.scope(s).instances.contains_key(&name.name)
+        {
             self.error(
                 code!("BLS0201"),
                 name.span,
@@ -325,7 +340,17 @@ impl<'t> Resolver<'t, '_> {
                 Some(t) => self.resolve_type(cx.ms, t).map(Some),
                 None => Some(None),
             };
-            let pat = self.let_pattern(cx, &l.pat);
+            let pat = match first_duplicate(&l.pat, &mut BTreeSet::new()) {
+                Some(dup) => {
+                    self.error(
+                        code!("BLS0201"),
+                        dup.span,
+                        format!("`{}` is bound twice by this pattern", dup.as_str()),
+                    );
+                    None
+                }
+                None => self.let_pattern(cx, &l.pat),
+            };
             if pat.is_none() {
                 // Declare the names the rejected pattern meant to bind, so their uses are not reported again.
                 let mut names = BTreeSet::new();
@@ -372,11 +397,36 @@ impl<'t> Resolver<'t, '_> {
         }
         cx.frames.push(BTreeMap::new());
         let mut vs = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut ok = true;
         for p in params {
+            if p.as_str() == "_" {
+                // An ignored parameter: a variable nothing can name.
+                vs.push(self.new_var(cx, p.name, p.span, true));
+                continue;
+            }
+            if !is_var_name(p.as_str()) {
+                self.error(
+                    code!("BLS0301"),
+                    p.span,
+                    format!("a closure parameter is a lowercase name or `_`, not `{}`", p.as_str()),
+                );
+                ok = false;
+            } else if !seen.insert(p.name) {
+                self.error(
+                    code!("BLS0201"),
+                    p.span,
+                    format!("closure parameter `{}` is declared twice", p.as_str()),
+                );
+                ok = false;
+            }
             vs.push(self.new_var(cx, p.name, p.span, false));
         }
         let body = self.expr(cx, body);
         cx.frames.pop();
+        if !ok {
+            return None;
+        }
         Some(HExpr::new(
             HExprKind::Closure {
                 params: vs,
@@ -1747,6 +1797,13 @@ impl<'t> Resolver<'t, '_> {
                 let mut out = Vec::new();
                 for arm in arms {
                     cx.frames.push(BTreeMap::new());
+                    if let Some(dup) = first_duplicate(&arm.pat, &mut BTreeSet::new()) {
+                        self.error(
+                            code!("BLS0201"),
+                            dup.span,
+                            format!("`{}` is bound twice by this pattern", dup.as_str()),
+                        );
+                    }
                     self.declare_arm_pattern(cx, &arm.pat);
                     let pat = self.pattern(cx, &arm.pat);
                     let guard = arm.guard.as_ref().map(|g| self.expr(cx, g));
@@ -3054,6 +3111,22 @@ fn refutable_pattern_names(e: &ast::Expr, out: &mut BTreeSet<Symbol>) {
         }
         ExprKind::Tuple(es) => es.iter().for_each(|x| refutable_pattern_names(x, out)),
         _ => collect_pattern_names(e, out),
+    }
+}
+
+/// The first name a pattern binds twice (in its tuples and variant arguments).
+fn first_duplicate(e: &ast::Expr, seen: &mut BTreeSet<Symbol>) -> Option<Ident> {
+    match &e.kind {
+        ExprKind::Path(path, targs) if targs.is_empty() && path.len() == 1 => {
+            let n = path.first()?;
+            (is_var_name(n.as_str()) && !seen.insert(n.name)).then_some(*n)
+        }
+        ExprKind::Tuple(es) => es.iter().find_map(|x| first_duplicate(x, seen)),
+        ExprKind::Call { args, .. } => args.iter().find_map(|a| match a {
+            Arg::Pos(x) => first_duplicate(x, seen),
+            _ => None,
+        }),
+        _ => None,
     }
 }
 

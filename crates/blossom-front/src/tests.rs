@@ -890,3 +890,39 @@ fn a_closure_passed_to_a_lattice_method_is_bls0300() {
     assert_eq!(got[0].0, "BLS0300");
     assert!(got[0].1.contains("does not take a closure"), "{}", got[0].1);
 }
+
+#[test]
+fn an_included_file_with_a_program_header_is_bls0201() {
+    let files = vec![
+        ("main.bls", "program t version 1;\ninclude \"a.bls\";\n"),
+        ("a.bls", "program other version 9;\nfn inc(n: u64) -> u64 { n + 1 }\n"),
+    ];
+    assert_eq!(codes_of(files), vec!["BLS0201"]);
+}
+
+#[test]
+fn function_names_and_bindings_are_checked() {
+    // A function may not take a built-in's name, nor a stream's.
+    for body in [
+        "fn range(n: u64) -> u64 { n }\n",
+        "fn now() -> u64 { 1 }\n",
+        "fn error(n: u64) -> u64 { n }\n",
+        "stream s: listen;\nfn s(n: u64) -> u64 { n }\n",
+    ] {
+        assert_eq!(codes(with_head(body)), vec!["BLS0201"], "{body}");
+    }
+    // A closure's parameters and a `let` pattern bind each name once; a closure parameter is a lowercase name.
+    for (body, code) in [
+        ("fn f(n: u64) -> u64 { range(0, n).fold(0, |a, a| a) }\n", "BLS0201"),
+        ("fn f(n: u64) -> u64 { let (b, b) = (1, n); b }\n", "BLS0201"),
+        ("fn f(o: Option<(u64, u64)>) -> u64 { match o { Some((x, x)) => x, None => 0 } }\n", "BLS0201"),
+        ("const K: u64 = 3;\nfn f(n: u64) -> Vec<u64> { range(0, n).map(|K| K) }\n", "BLS0301"),
+    ] {
+        assert_eq!(codes(with_head(body)), vec![code], "{body}");
+    }
+    // `_` ignores a closure parameter.
+    assert_eq!(
+        codes(with_head("fn f(n: u64) -> u64 { range(0, n).fold(0, |a, _| a + 1) }\n")),
+        Vec::<String>::new()
+    );
+}

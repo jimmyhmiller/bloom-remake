@@ -169,6 +169,17 @@ fn expand_items(
                 let Some(parsed) = parse(&loaded, sources, diags) else {
                     continue;
                 };
+                if let Some(h) = &parsed.header {
+                    // The include is textual, so the header would be a second `program` declaration.
+                    diags.push(
+                        Diagnostic::new(
+                            code!("BLS0201"),
+                            format!("`{path}` declares `program`: only the root file does, an included file is items"),
+                        )
+                        .with_primary(h.span)
+                        .with_label(item.span, "included here"),
+                    );
+                }
                 stack.push(loaded.key.clone());
                 let inner = expand_items(parsed.items, &loaded.key, loader, sources, diags, stack);
                 stack.pop();
