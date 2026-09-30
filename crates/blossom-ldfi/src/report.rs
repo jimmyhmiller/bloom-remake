@@ -45,6 +45,9 @@ impl DedNames<'_> {
             (Value::Duration(d), _) => seconds(d.as_nanos()),
             (Value::Instant(t), _) => format!("@{}", seconds(t.0)),
             (Value::Session(s), _) => format!("session {}", s.0),
+            (Value::Conn(c), _) => format!("conn#{}", c.0),
+            // Bytes as a byte string: printable ASCII as is, the rest escaped.
+            (Value::Bytes(b), _) => format!("b\"{}\"", b.escape_ascii()),
             (Value::Principal(p), _) => format!("principal {p:?}"),
             (Value::Option(None), _) => "None".to_owned(),
             (Value::Option(Some(x)), Some(TypeDef::Option(t))) => format!("Some({})", self.typed(x, Some(*t), program)),

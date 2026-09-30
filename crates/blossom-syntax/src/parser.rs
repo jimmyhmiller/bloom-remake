@@ -640,6 +640,14 @@ impl Parser<'_> {
             self.cell();
             return CELLDECL;
         }
+        if self.ctx("stream") && self.nth(1) == IDENT && self.nth(2) == COLON {
+            self.bump();
+            self.name(false);
+            self.expect(COLON);
+            self.name(false);
+            self.expect(SEMI);
+            return STREAMITEM;
+        }
         if self.ctx("role") && self.nth(1) == IDENT {
             self.bump();
             self.name(false);
@@ -1762,7 +1770,12 @@ impl Parser<'_> {
                 }
             }
             self.expect(PIPE);
-            self.expr(0);
+            // A closure's body is an expression, or a block of `let`s and a final expression.
+            if self.at(L_CURLY) {
+                self.block_expr();
+            } else {
+                self.expr(0);
+            }
             return self.complete(m, CLOSUREEXPR);
         }
         let mut lhs = self.primary(m);
@@ -1881,12 +1894,19 @@ impl Parser<'_> {
                         self.expr(0);
                     }
                     self.expect(FAT_ARROW);
-                    self.expr(0);
+                    // An arm's body is an expression, or a block of `let`s and a final expression; after a block the
+                    // comma is optional.
+                    let block = self.at(L_CURLY);
+                    if block {
+                        self.block_expr();
+                    } else {
+                        self.expr(0);
+                    }
                     self.complete(a, MATCHARM);
                     if old == self.pos {
                         self.bump();
                     }
-                    if !self.eat(COMMA) {
+                    if !self.eat(COMMA) && !block {
                         break;
                     }
                 }

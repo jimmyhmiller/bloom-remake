@@ -37,6 +37,8 @@ hir_id! {
     HVarId;
     /// A rule scope: a handler, a view alternative, a fact or a spec view.
     ScopeId;
+    /// A pure function (LANGUAGE §16.1).
+    HFnId;
 }
 
 /// A resolved program.
@@ -54,7 +56,11 @@ pub struct Hir {
     pub views: Vec<HView>,
     pub facts: Vec<HFact>,
     pub invariants: Vec<HInvariant>,
-    /// Variable tables, one per rule scope.
+    /// Pure functions (LANGUAGE §16.1).
+    pub fns: Vec<HFn>,
+    /// Byte streams (FOREIGN-PROTOCOLS §1), in declaration order.
+    pub streams: Vec<HStream>,
+    /// Variable tables, one per rule scope (and one per function).
     pub scopes: Vec<HScope>,
     /// Filled by type checking: the type of every variable of every scope.
     pub var_types: Vec<Vec<TypeId>>,
@@ -273,6 +279,31 @@ pub enum HRelKind {
     Members(HRoleId),
     /// The node directory `node_dir(node, addr, principal, role)`, from the deployment (LANGUAGE §7.15).
     NodeDir,
+    /// One of a byte stream's relations (FOREIGN-PROTOCOLS §1): an event the runtime feeds, or a request to the
+    /// host, written with `send`.
+    Stream(HStreamRel),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HStreamRel {
+    Event(blossom_ir::core::StreamEvent),
+    Host(blossom_ir::core::HostOp),
+}
+
+/// A byte stream and its relations (FOREIGN-PROTOCOLS §1.1).
+#[derive(Clone, Debug)]
+pub struct HStream {
+    pub name: QualName,
+    pub kind: blossom_ir::core::StreamKind,
+    pub role: Option<HRoleId>,
+    pub opened: HRelId,
+    pub data: HRelId,
+    pub closed: HRelId,
+    pub failed: Option<HRelId>,
+    pub write: HRelId,
+    pub close: HRelId,
+    pub dial: Option<HRelId>,
+    pub span: Span,
 }
 
 impl HRelKind {
@@ -713,6 +744,58 @@ pub enum HExprKind {
         expr: Box<HExpr>,
         lattice: TypeId,
     },
+    /// A call of a pure function.
+    Call {
+        f: HFnId,
+        args: Vec<HExpr>,
+    },
+    /// `let pat[: ty] = value; body` (function bodies only).
+    Let {
+        pat: Box<HPat>,
+        ty: Option<TypeId>,
+        value: Box<HExpr>,
+        body: Box<HExpr>,
+    },
+    /// `|a, b| body`: an argument of a built-in combinator (function bodies only).
+    Closure {
+        params: Vec<HVarId>,
+        body: Box<HExpr>,
+    },
+}
+
+/// A pure function: total, non-recursive (LANGUAGE §16.1), or a host function (§16.2). Its variables live in
+/// `scope`: the parameters first, then every `let` and closure binding of its body.
+#[derive(Clone, Debug)]
+pub struct HFn {
+    pub name: QualName,
+    pub scope: ScopeId,
+    pub params: Vec<(HVarId, TypeId)>,
+    pub ret: TypeId,
+    pub body: HFnBody,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum HFnBody {
+    Expr(HExpr),
+    /// An `extern fn`: the host function's path, checked against the standard catalog.
+    Extern(std::sync::Arc<str>),
+}
+
+/// The integer type a byte-access name spells (FOREIGN-PROTOCOLS §3): `u8`, `i8`, and the big-endian `u16_be` …
+/// `i64_be`, as in `b.u16_be_at(p)`, `b.put_u16_be(p, x)` and `Bytes::from_u16_be(x)`.
+pub fn byte_int(name: &str) -> Option<IntTy> {
+    Some(match name {
+        "u8" => IntTy::U8,
+        "i8" => IntTy::I8,
+        "u16_be" => IntTy::U16,
+        "i16_be" => IntTy::I16,
+        "u32_be" => IntTy::U32,
+        "i32_be" => IntTy::I32,
+        "u64_be" => IntTy::U64,
+        "i64_be" => IntTy::I64,
+        _ => return None,
+    })
 }
 
 /// The built-in lattice named by a constructor path.
@@ -762,4 +845,6 @@ pub enum Builtin {
     RandRange,
     /// `majority(s, R)` (LANGUAGE §10.9): `|s ∩ R| > |R| / 2` for a set of nodes `s` and a role `R`.
     Majority(HRoleId),
+    /// A function or method of the built-in library (Appendix B); the receiver, if any, first.
+    Lib(blossom_ir::core::LibFn),
 }

@@ -228,6 +228,7 @@ fn step_state(
                 next: carried.clone(),
                 outbox: BTreeSet::new(),
                 egress: BTreeSet::new(),
+                host: BTreeSet::new(),
                 firings: Vec::new(),
             });
             continue;

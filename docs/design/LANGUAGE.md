@@ -1531,7 +1531,10 @@ M::h$when(T) :- vote(T, _ | _, _).
 ```
 
 Scalar conditional *values* are `if c { a } else { b }` and `match`, which are pure expressions (IR `ite`) and need
-no rule split.
+no rule split. A `match` must cover every value of its scrutinee (BLS0314, naming a value no arm takes); an arm with
+a guard covers nothing. The names in an arm's pattern are the arm's own: in a function body they bind afresh,
+shadowing outer ones, as `let` does there; in a rule a name the rule already binds is BLS0501, since comparing and
+rebinding would both be plausible readings (name the arm's variable differently and compare in a guard).
 
 ### 9.8 `forall` (universal quantification)
 
@@ -2458,7 +2461,10 @@ fn slot_key(term: u64, idx: u64) -> (u64, u64) { (term, idx) }
 A `fn` body is a block of `let`s and a final expression, in a total, pure sublanguage: no recursion, no relation
 access, no `now()`, `tick()` or `rand`, immutable values, closures only as arguments to the built-in collection
 combinators (`map`, `filter`, `filter_map`, `fold`, `all`, `any`, …). `error("message")` aborts the tick with a
-located hard error (BLSR010): it is how a function refuses an impossible input, never a silent default. Algebraic
+located hard error (BLSR010): it is how a function refuses an impossible input, never a silent default. Totality is
+enforced by a step budget: an evaluation, from a call made outside any function to its return, may apply closures
+and build `range` elements at most `FN_STEP_BUDGET` (10⁷) times in all; past it the tick aborts with BLSR012, the
+same in both evaluators. Algebraic
 properties are attributes (`#[injective]`, `#[commutative]`, `#[associative]`, `#[idempotent]`) checked by TEST-087
 and used by ANA-043, ANA-080 and fold legality. A function with a lattice-typed parameter declares its monotonicity
 class with a prefix (`monotone fn`, `morphism fn`, `antitone fn`, `threshold fn`); without one it is NM and is called
@@ -2788,6 +2794,10 @@ never truncated or defaulted).
 | BLS0210 | E | unknown attribute, or an attribute on an item that does not take it |
 | BLS0211 | E | a `const`, `param`, module value parameter or spec node name that is not SCREAMING_CASE |
 | BLS0212 | E | `from`/`principal` on an atom that is not a channel or loopback |
+| BLS0213 | E | a recursive function (functions are total, §16.1) |
+| BLS0214 | E | a `let` block outside a function body, or a closure that is not a combinator's argument in one (§16.1) |
+| BLS0215 | E | a function body that reads a relation, `now()`, `tick()`, `self`, randomness or a role's members (§16.1) |
+| BLS0216 | E | an `extern fn` that names no host function of the standard library, or declares a different signature (§16.2) |
 
 **Types (BLS03xx)**
 
@@ -2807,6 +2817,8 @@ never truncated or defaulted).
 | BLS0311 | E | a lattice lift with no expected lattice type |
 | BLS0312 | E | `f64` as the element of `LMax`/`LMin` |
 | BLS0313 | E | a possibly negative contribution into a `bag` |
+| BLS0314 | E | a `match` that does not cover every value of its scrutinee |
+| BLS0315 | E | a `Conn` in a channel or a durable relation |
 
 **Legality (BLS04xx)**
 
@@ -2816,7 +2828,7 @@ never truncated or defaulted).
 | BLS0401 | E | a write into a `sealed table` outside bootstrap |
 | BLS0402 | E | a durable relation written in a plain `bootstrap` (use `bootstrap fresh`) |
 | BLS0403 | E | `send` destination: missing `to`, `to` on a loopback, on a column-form channel or on a partitioned channel |
-| BLS0404 | E | a send or receive placed at the wrong role |
+| BLS0404 | E | a send, receive, read or write placed at a role the relation does not live at |
 | BLS0405 | E | `fact` into a non-`static` relation (or, in a spec, into an input without `at tick`) |
 | BLS0406 | E | a write into an own `input`, an instance `output`, a relation parameter or a `view` |
 | BLS0407 | E | `seal` of a relation without `sealed by`, or naming other than exactly its seal key |
@@ -2829,7 +2841,7 @@ never truncated or defaulted).
 | Code | Sev | Meaning |
 |---|---|---|
 | BLS0500 | E | range restriction: a variable of a head, negation, guard, `to` or `weight` is not bound (ANA-001) |
-| BLS0501 | E | `let` re-binds a variable: write `x == e` |
+| BLS0501 | E | `let` re-binds a variable: write `x == e`; a match arm in a rule re-binds a rule variable |
 | BLS0502 | E | a negative edge on a same-tick cycle, with the cycle as a path of surface constructs (ANA-002) |
 | BLS0503 | E | a choice or order-sensitive site on a same-tick recursive cycle (SEM-086) |
 | BLS0504 | E | `on` without a positive event literal, with the chain that makes the header standing |
@@ -2896,7 +2908,8 @@ TTL shorter than a body's (ANA-006); BLS1008 `if` that binds variables or `for` 
 (SEM-051), naming both statements; BLSR003 an invariant with `abort`; BLSR004 arithmetic overflow, division by zero,
 out-of-range cast, weight overflow; BLSR005 `collect_map!` duplicate key; BLSR006 `LPoint` conflict; BLSR007 an
 in-tick fixpoint that does not converge (CR-53); BLSR008 a write at a non-owner of a partitioned table; BLSR009 a host
-insert into a sealed input key; BLSR010 `error("…")` in a function.
+insert into a sealed input key; BLSR010 `error("…")` in a function; BLSR012 a pure function's evaluation exceeds its
+step budget.
 
 ---
 
@@ -3166,8 +3179,9 @@ All functions are pure. Methods on values use `.`; there are no closures outside
 | Arithmetic | `+ - * / % **` (checked); `abs`, `min(a, b)`, `max(a, b)`, `clamp`, `wrapping_add`, `wrapping_sub`, `wrapping_mul`, `saturating_add`, `pow`, `sqrt` (`f64`) |
 | Bits | `& \| ^ ~ << >>`, `count_ones`, `leading_zeros` |
 | Strings | `len`, `++`, `split_whitespace() -> Vec<String>`, `split(sep)`, `to_lowercase`, `to_uppercase`, `trim`, `starts_with`, `ends_with`, `contains`, `replace`, `parse_u64() -> Option<u64>`, `parse_i64`, `to_string` (every type) |
-| Bytes | `len`, `slice(lo, hi)`, `concat`, `to_hex`, `from_utf8() -> Option<String>` |
+| Bytes | `len`, `slice(lo, hi) -> Option<Bytes>`, `concat`, `to_hex`, `from_utf8() -> Option<String>`; big-endian reads `u8_at(p)`, `i8_at(p)`, `u16_be_at(p)` … `i64_be_at(p) -> Option<T>`; patches `put_u8(p, x)` … `put_i64_be(p, x) -> Option<Bytes>`; varints `uvarint_at(p) -> Option<(u64, u64)>`, `varint_at(p) -> Option<(i64, u64)>` (value and next position; `None` when truncated, longer than 10 bytes or past `u64`); `Bytes::from_u8(x)` … `Bytes::from_i64_be(x)`, `Bytes::uvarint(x)`, `Bytes::varint(x)`, `Bytes::empty()`, `Bytes::join(v)`; `s.to_utf8()` on strings |
 | Vec | `len`, `get(i) -> Option<T>`, `first`, `last`, `push`, `concat`, `contains`, `enumerate() -> Vec<(u64, T)>`, `sort`, `reverse`, `dedup`, `map`, `filter`, `filter_map`, `fold`, `all`, `any` (closures: function bodies only) |
+| Ranges | `range(lo: u64, hi: u64) -> Vec<u64>`: `lo` up to, not including, `hi`; a combinator over `range(…)` walks it without building it |
 | Set | `len`, `contains`, `insert`, `remove`, `union`, `intersection`, `difference`, `items() -> Vec<T>` |
 | Map | `len`, `get(k) -> Option<V>`, `contains_key`, `insert`, `remove`, `keys`, `values`, `entries() -> Vec<(K, V)>` |
 | Option | `is_some`, `is_none`, `unwrap_or(d)`, `map`, `and_then`; `Some`, `None` |

@@ -12,6 +12,7 @@ pub mod clock;
 pub mod deploy;
 pub mod net;
 pub mod server;
+pub mod streams;
 
 use blossom_base::{InternalError, Unimplemented};
 

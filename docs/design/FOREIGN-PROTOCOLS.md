@@ -33,7 +33,11 @@ A stream declaration introduces:
 | `send upstream.dial(req: u64, addr: String)` | channel to the host | `connect` streams only: open a connection; it is reported as `upstream.opened` or `upstream.failed(req, reason)` |
 
 - `Conn` is a built-in opaque type, like `Session`. It is unique across incarnations: it carries the incarnation, so a
-  restarted node never confuses an old connection with a new one.
+  restarted node never confuses an old connection with a new one. It names a connection of one node's incarnation
+  only, so a channel or a durable relation that can hold one is BLS0315: a `Conn` never reaches another node, where
+  it would name a different client's connection.
+- A stream's relations live where the stream is declared: a rule placed at another role that reads or writes them is
+  BLS0404, as for any relation placed at a role.
 - `Part` is `enum Part { Bytes(Bytes), Blob(Blob, u64, u64) }`: literal bytes, or a range of a stored blob (§5). A
   blob part is sent without passing its bytes through the engine.
 
@@ -53,11 +57,57 @@ A stream declaration introduces:
   durable.
 - **Crashes.** Every connection closes at a crash; clients see a reset. Connection state lives in volatile relations,
   so a restart begins with no connections.
-- **Backpressure.** Each connection has a byte budget per tick (`max_stream_bytes`, from the deployment).
-  - Beyond it the runtime stops reading that connection until the next tick.
-  - A connection whose unsent writes exceed a limit is closed, with a counter.
+- **Backpressure**, in bytes, from the deployment's `[stream_limits]` (defaults in brackets):
+  - a connection's `data` carries at most `max_stream_bytes` a tick [1 MiB];
+  - a connection's reader stops reading while `read_ahead_bytes` it read wait for the engine [1 MiB], so the peer's
+    TCP window fills and the peer waits;
+  - all readers stop while `queue_bytes` wait for the engine [64 MiB];
+  - the engine takes no stream bytes while the node holds `backlog_bytes` it has not delivered [16 MiB];
+  - a connection whose unsent writes (held writes included) pass `write_queue_bytes` is closed, with a counter
+    [64 MiB].
+  Stream reports reach the engine on their own queue, so stream bytes never hold up peers' messages or clients'
+  requests.
+- **Requests through the wrong stream.** A write or close through stream `s` of a connection of another stream is
+  refused, counted and recorded as a located runtime error; nothing is written.
 - **Deployment.** A node's `[[node]]` entry maps stream names to addresses: `streams = { kafka = "0.0.0.0:9092" }`.
   A `listen` stream without an address is a configuration error: the node refuses to start.
+
+### 1.2a As built (S6 item 4)
+
+- **One chunk per connection per tick.** The runtime delivers at most one `data` event per connection per tick:
+  everything read from it since the previous tick, up to the budget. This decision was taken because `fold!`
+  aggregates do not exist yet, and so that a program needs no in-tick reassembly. `seq` still counts chunks, so a
+  program can check it.
+- **Event order across ticks.**
+  - A connection's `opened` is in an earlier tick than any of its `data`.
+  - Its `closed` is in a later tick than its last `data`.
+  - So state a program emits in `opened` is current when the data arrives, and state it updates with `upsert` (at
+    t+1) is current for the next chunk.
+- **A connect stream's `opened`** carries the dial request it answers: `opened(c: Conn, req: u64, peer: String,
+  at: Instant)`. `failed(req, reason)` reports a dial that did not connect.
+- **`Part`** is a built-in enum with one variant for now, `Part::Bytes(b)`. `Part::Blob(…)` comes with blobs (§5).
+  Adding a variant does not break programs that build `Part::Bytes`.
+- **Surface.**
+  - A stream's relations are named like an instance's interface: `s.opened`, `s.data`, `s.closed`, `s.failed` are
+    read.
+  - `s.write`, `s.close`, `s.dial` are written with `send` and no `to`. Reading them is BLS0203; writing an event is
+    BLS0400.
+- **IR.**
+  - `Program.streams` holds each `StreamDecl`, naming its relations.
+  - The events are `RelClass::Event(EventSource::Stream(e))`.
+  - The requests are `RelClass::HostOut(op)`, written only by async rules and never read.
+  - Each tick's requests leave as `TickOutput::host` and, in the node, are released with the tick's other output
+    after its durable writes are synced.
+
+- **Runtime (S6 item 4b).**
+  - The host closes a connection when the program sends `close`, when the tick that delivered its `closed` event is
+    released (after that tick's writes), or when its writes back up past the queue.
+  - A reader never closes a connection: a peer that half-closed still reads its replies.
+  - A write `seq` more than 4096 past the next expected one is a violation, like a duplicate. It closes the
+    connection: the peer gets what was already written, then the close; the program's `closed` event carries the
+    violation, which is also recorded (`StreamStats::last_violation`). The simulator does the same.
+  - A dial tries every address its name resolves to, in order, as a TCP client does.
+  - A node that halts or faults stops accepting and closes its connections.
 
 ### 1.3 IR, oracle and engine
 
@@ -71,7 +121,12 @@ A stream declaration introduces:
 - **Cluster simulator.** Streams become simulated byte pipes between programs, or between a program and a Rust test
   client.
   - Chunks are split at random byte boundaries, which tests reassembly.
-  - The nemesis can drop connections.
+  - The nemesis can drop connections; crashes and partitions reset them (a partition also stops a connection being
+    made across it, and resets one that carries bytes across it).
+  - A connection's opening is ordered with what follows: the accepting end gets it before the connecting end's
+    bytes and close, and the connecting end learns it opened before the accepting end's bytes and close. A reset
+    before the connecting end learned it opened is, to that end, a failed dial.
+  - A refused connection is refused after a round trip, as a TCP reset comes.
   - Everything is deterministic under the seed.
 - **Synchronous simulator (`blossom sim`).** It takes scripted chunks as inputs.
 
@@ -120,6 +175,14 @@ them.
 
 Integer reads are exact: a value that doesn't fit its type is an error, never a silent wrap.
 
+As built (S6 item 2; LANGUAGE Appendix B has the list):
+- The 8-bit forms have no `_be`: `u8_at`, `i8_at`, `put_u8`, `put_i8`, `from_u8`, `from_i8`.
+- Varint reads return the value and the position after it.
+- A non-minimal varint (`80 00`) decodes. `None` means truncated, longer than 10 bytes, or not fitting a `u64`.
+  Protocol code range-checks Kafka's 32-bit varints itself.
+- Both evaluators implement every primitive independently (`blossom-oracle/src/library.rs`,
+  `blossom-engine/src/func.rs`).
+
 ## 4. The `extern fn` standard library (LANGUAGE §16.2)
 
 `extern fn` binds a declaration to a registered Rust function (in `blossom-std-host`).
@@ -135,6 +198,27 @@ The standard library holds generic functions only. Nothing protocol-specific goe
 | `std::checksum::crc32(b: Bytes) -> u32` | IEEE |
 | `std::compress::gzip_decompress(b) -> Option<Bytes>`, `gzip_compress(b, level: u8) -> Bytes` | and the same for `snappy`, `lz4` (the frame format), `zstd` |
 | `std::hash::sha256`, `std::hash::blake3` | as in LANGUAGE §16.2 |
+
+As built (S6 item 3):
+- **Paths and signatures.** Paths are `blossom_std::…`, as in LANGUAGE §16.2. The catalog, with exact signatures,
+  is `blossom_value::STD_EXTERNS`:
+  - `crc32c`, `crc32`;
+  - `gzip_compress(b, level: u8)`, then `snappy_compress`, `lz4_compress` and `zstd_compress` of `b`;
+  - `*_decompress(b, max: u64) -> Option<Bytes>` for each codec;
+  - `sha256`, `blake3`.
+- **Formats.**
+  - Snappy is the raw block format. Kafka's xerial framing is protocol code, written in Blossom on top of it.
+  - LZ4 is the frame format.
+  - gzip and zstd decode concatenated members and frames.
+- **Implementations are pure Rust** (flate2 with miniz_oxide, snap, lz4_flex, ruzstd, crc32c, crc32fast, sha2,
+  blake3). Compression is deterministic.
+- **Where each check happens.**
+  - *Compile time:* the frontend checks each `extern fn` against the catalog (BLS0216).
+  - *Load time:* the oracle and the engine bind every declared extern against the registry they are given, with its
+    signature (`EvalError::Externs`). `blossom run`, `blossom sim`, `blossom ldfi` and the corpus runner give them
+    `blossom_std_host::registry()`, which a test holds equal to the catalog.
+- **A host failure** (for example a gzip level above 9) aborts the tick with BLSR010.
+- **Memoization per input per tick** is not built yet. It is only an optimization, because the functions are pure.
 
 Two rules for these functions:
 - **Bounded output.** Decompression takes a maximum output size, and returns `None` past it or on malformed input. It

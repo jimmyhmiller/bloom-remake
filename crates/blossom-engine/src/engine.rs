@@ -50,6 +50,8 @@ pub struct EngineConfig {
     pub params: BTreeMap<ParamId, Value>,
     /// Rounds a recursive stratum may take before the tick fails with BLSR007.
     pub max_rounds: u32,
+    /// The host functions the program's `extern fn`s call (LANG-181); each is bound when the engine is built.
+    pub externs: Arc<blossom_value::ExternRegistry>,
 }
 
 /// The per-group state of an aggregate rule: per aggregate column, the support of each distinct argument tuple, and
@@ -206,6 +208,7 @@ impl Engine {
     /// creates and indexes every store.
     pub fn new(program: ValidatedProgram, node: NodeId, cfg: EngineConfig) -> Result<Engine, EvalError> {
         let p = program.get();
+        blossom_ir::tick::bind_externs(p, &cfg.externs)?;
         check_supported(p)?;
         let kinds = kinds(p);
         let (choice, node_seeds) = match cfg.seed {
@@ -287,6 +290,7 @@ impl Engine {
                 node_seeds,
                 roles: cfg.roles,
                 kinds,
+                externs: cfg.externs,
             },
             node,
             plans,
@@ -528,7 +532,12 @@ impl Engine {
             let Some(plan) = self.plans.get(id) else { continue };
             let StoreKey::Async(rel) = plan.head else { continue };
             let s = self.stores.get(&plan.head).ok_or_else(|| internal_error!("no async store"))?;
+            let to_host = matches!(self.program.get().rels.get(rel).map(|r| &r.class), Some(RelClass::HostOut(_)));
             for row in s.present() {
+                if to_host {
+                    out.host.insert(blossom_ir::tick::HostOut { rel, row: row.clone() });
+                    continue;
+                }
                 match row.first() {
                     Some(Value::Node(to)) => {
                         out.outbox.insert(Send {
@@ -598,6 +607,7 @@ impl Engine {
             tick: input.tick,
             now: input.now,
             shared: &self.shared,
+            fuel: crate::expr::Fuel::default(),
         }
     }
 
@@ -1097,6 +1107,7 @@ impl Engine {
             next: self.next_instance()?,
             outbox: step.outbox,
             egress: step.egress,
+            host: step.host,
             firings: Vec::new(),
         })
     }
@@ -1208,6 +1219,8 @@ fn to_eval(e: ExprError, tick: Tick, rule: Option<&Rule>) -> EvalError {
     match e {
         ExprError::Arithmetic(d) => program_error(blossom_base::code!("BLSR004").as_str(), d),
         ExprError::Conflict(d) => program_error(blossom_base::code!("BLSR006").as_str(), d),
+        ExprError::Refused(d) => program_error(blossom_base::code!("BLSR010").as_str(), d),
+        ExprError::Budget(d) => program_error(blossom_base::code!("BLSR012").as_str(), d),
         ExprError::Eval(e) => e,
     }
 }

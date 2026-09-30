@@ -13,6 +13,7 @@ pub mod ast;
 pub mod bloom;
 pub mod classify;
 pub mod ded;
+pub(crate) mod exhaustive;
 pub mod hir;
 pub mod hydro;
 pub mod instantiate;

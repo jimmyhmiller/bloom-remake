@@ -1,0 +1,24 @@
+//! A connect stream (FOREIGN-PROTOCOLS §1): at boot the node dials TARGET; if that fails it dials FALLBACK. Once
+//! connected it says hello, and writes back every chunk it receives.
+program client version 1;
+
+param TARGET: String = "127.0.0.1:1";
+param FALLBACK: String = "127.0.0.1:1";
+
+stream up: connect;
+
+start: on boot() {
+    send up.dial(1, TARGET);
+}
+
+retry: on up.failed(1, _why) {
+    send up.dial(2, FALLBACK);
+}
+
+hello: on up.opened(c, _req, _peer, _at) {
+    send up.write(c, 0, [Part::Bytes("hello\n".to_utf8())]);
+}
+
+back: on up.data(c, seq, b) {
+    send up.write(c, seq + 1, [Part::Bytes(b)]);
+}

@@ -1,0 +1,16 @@
+//! The Blossom Kafka client's correlation ids and response decoding (`client_node.bls` has the node).
+
+const CORR_VERSIONS: i32 = 1;
+const CORR_METADATA: i32 = 2;
+
+/// A response frame's ApiVersions answer, if it is the answer to `CORR_VERSIONS`.
+fn versions_answer(f: Bytes) -> Option<(i16, Vec<ApiRange>)> {
+    response_correlation(cur(f)).and_then(|p| if p.0 == CORR_VERSIONS { decode_api_versions_response(p.1) } else { None })
+}
+
+/// A response frame's Metadata answer, if it is the answer to `CORR_METADATA` (after response header v1's tags).
+fn metadata_answer(f: Bytes) -> Option<MetadataAnswer> {
+    response_correlation(cur(f)).and_then(|p| {
+        if p.0 == CORR_METADATA { skip_tags(p.1).and_then(|body| decode_metadata_response(body)) } else { None }
+    })
+}

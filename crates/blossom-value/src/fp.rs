@@ -81,6 +81,7 @@ pub fn fingerprint(value: &Value) -> Result<Fingerprint, ValueError> {
         Value::Lattice(v) => lattice_fp(v),
         Value::Group(v) => group_fp(v),
         Value::Extern { codec, bytes } => children(26, [primitive(27, codec), Ok(hash(28, bytes))]),
+        Value::Conn(v) => primitive(60, v),
     }
 }
 fn lattice_fp(value: &LatValue) -> Result<Fingerprint, ValueError> {

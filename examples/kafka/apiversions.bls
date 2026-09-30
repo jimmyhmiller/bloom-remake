@@ -1,0 +1,75 @@
+//! ApiVersions (key 18), versions 3 and 4 (flexible; identical schemas), and the version-0 answer to a version this
+//! broker does not support, which Kafka clients use to fall back (KIP-511).
+
+/// ApiVersionsRequest v3–v4.
+struct ApiVersionsRequest { client_software_name: String, client_software_version: String }
+
+fn decode_api_versions_request(c: Cur) -> Option<ApiVersionsRequest> {
+    read_compact_string(c).and_then(|name| read_compact_string(name.1).and_then(|version| {
+        skip_tags(version.1).map(|_end| ApiVersionsRequest { client_software_name: name.0, client_software_version: version.0 })
+    }))
+}
+
+/// One supported API: its key and version range.
+struct ApiRange { key: i16, min: i16, max: i16 }
+
+/// What this broker answers (S6): ApiVersions 3–4 and Metadata 13.
+fn supported() -> Vec<ApiRange> {
+    [
+        ApiRange { key: API_METADATA, min: 13i16, max: 13i16 },
+        ApiRange { key: API_VERSIONS, min: 3i16, max: 4i16 },
+    ]
+}
+
+fn supports(api_key: i16, version: i16) -> bool {
+    supported().any(|r| r.key == api_key && version >= r.min && version <= r.max)
+}
+
+/// ApiVersionsResponse v3–v4 with no error: every supported API, no throttle, and no feature tags.
+fn encode_api_versions_response(correlation_id: i32) -> Bytes {
+    let keys = supported().map(|r| Bytes::join([
+        Bytes::from_i16_be(r.key), Bytes::from_i16_be(r.min), Bytes::from_i16_be(r.max), no_tags(),
+    ]));
+    frame(Bytes::join([
+        response_header_v0(correlation_id),
+        Bytes::from_i16_be(0i16),
+        enc_compact_array(keys),
+        Bytes::from_i32_be(0i32),
+        no_tags(),
+    ]))
+}
+
+/// UNSUPPORTED_VERSION (35), answered in the version-0 layout, whatever the version asked, listing the ApiVersions
+/// range: a client that sent a version it may not reads this and retries with a supported one.
+fn encode_api_versions_unsupported(correlation_id: i32) -> Bytes {
+    let own = supported().filter(|r| r.key == API_VERSIONS).map(|r| Bytes::join([
+        Bytes::from_i16_be(r.key), Bytes::from_i16_be(r.min), Bytes::from_i16_be(r.max),
+    ]));
+    frame(Bytes::join([
+        response_header_v0(correlation_id),
+        Bytes::from_i16_be(35i16),
+        Bytes::from_i32_be(own.len() as i32),
+        Bytes::join(own),
+    ]))
+}
+
+/// ApiVersionsRequest v4, framed, from a client.
+fn encode_api_versions_request(correlation_id: i32, client_id: String, software: String, software_version: String) -> Bytes {
+    frame(Bytes::join([
+        request_header_v2(API_VERSIONS, 4i16, correlation_id, client_id),
+        enc_compact_string(software), enc_compact_string(software_version), no_tags(),
+    ]))
+}
+
+/// ApiVersionsResponse v3–v4 after its header: the error code and the supported ranges (tagged fields skipped).
+fn decode_api_versions_response(c: Cur) -> Option<(i16, Vec<ApiRange>)> {
+    read_i16(c).and_then(|e| read_compact_len(e.1).and_then(|len| {
+        range(0, len.0)
+            .fold(Some(([], len.1)), |acc, _i| acc.and_then(|a| {
+                read_i16(a.1).and_then(|k| read_i16(k.1).and_then(|lo| read_i16(lo.1).and_then(|hi| {
+                    skip_tags(hi.1).map(|end| (a.0.push(ApiRange { key: k.0, min: lo.0, max: hi.0 }), end))
+                })))
+            }))
+            .and_then(|a| read_i32(a.1).and_then(|_throttle| skip_tags(_throttle.1).map(|_end| (e.0, a.0))))
+    }))
+}

@@ -317,6 +317,38 @@ pub static REGISTRY: &[CodeInfo] = &[
         "`from`/`principal` on an atom that is not a channel or loopback",
     ),
     info(
+        "BLS0213",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "a recursive function (functions are total, §16.1)",
+    ),
+    info(
+        "BLS0214",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "a `let` block outside a function body, or a closure that is not a combinator's argument in one (§16.1)",
+    ),
+    info(
+        "BLS0215",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "a function body that reads a relation, `now()`, `tick()`, `self`, randomness or a role's members (§16.1)",
+    ),
+    info(
+        "BLS0216",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "an `extern fn` that names no host function of the standard library, or declares a different signature (§16.2)",
+    ),
+    info(
         "BLS0300",
         Error,
         "blossom-front",
@@ -429,6 +461,22 @@ pub static REGISTRY: &[CodeInfo] = &[
         "a possibly negative contribution into a `bag`",
     ),
     info(
+        "BLS0314",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "a `match` that does not cover every value of its scrutinee",
+    ),
+    info(
+        "BLS0315",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "a `Conn` in a channel or a durable relation",
+    ),
+    info(
         "BLS0400",
         Error,
         "blossom-front",
@@ -466,7 +514,7 @@ pub static REGISTRY: &[CodeInfo] = &[
         "blossom-front",
         &[],
         CodeOrigin::Language,
-        "a send or receive placed at the wrong role",
+        "a send, receive, read or write placed at a role the relation does not live at",
     ),
     info(
         "BLS0405",
@@ -530,7 +578,7 @@ pub static REGISTRY: &[CodeInfo] = &[
         "blossom-front",
         &[],
         CodeOrigin::Language,
-        "`let` re-binds a variable: write `x == e`",
+        "`let` re-binds a variable: write `x == e`; a match arm in a rule re-binds a rule variable",
     ),
     info(
         "BLS0502",
@@ -996,6 +1044,14 @@ pub static REGISTRY: &[CodeInfo] = &[
         CodeOrigin::Amendment("L1"),
         "an exactly-once dot reused with a different payload",
     ),
+    info(
+        "BLSR012",
+        Runtime,
+        "blossom-engine",
+        &["blossom-oracle"],
+        CodeOrigin::Language,
+        "a pure function's evaluation exceeds its step budget",
+    ),
 ];
 
 /// A registered diagnostic code. Only codes in [`REGISTRY`] can be represented.
@@ -1160,8 +1216,8 @@ mod tests {
     fn codes_registry_unique() {
         assert_eq!(
             REGISTRY.len(),
-            114,
-            "LANGUAGE §20 has 110 codes; ARCHITECTURE §0.3 adds 4"
+            121,
+            "LANGUAGE §20 has 117 codes; ARCHITECTURE §0.3 adds 4"
         );
         for (a, b) in REGISTRY.iter().zip(REGISTRY.iter().skip(1)) {
             assert!(

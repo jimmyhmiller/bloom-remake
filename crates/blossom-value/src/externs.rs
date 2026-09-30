@@ -13,6 +13,7 @@ use std::sync::Arc;
 use blossom_base::{TypeId, Unimplemented};
 
 use crate::error::ValueError;
+use crate::types::{IntTy, TypeDef, TypeTable};
 use crate::value::Value;
 
 /// A host function's failure. Inside a tick it aborts the tick with a located error (BLSR010).
@@ -64,14 +65,130 @@ where
     }
 }
 
-/// The value-level signature supplied by a host registration and compared to a source `FnDecl`.
-/// The IR owns `FnDecl`; this type keeps the value crate independent of the IR.
+/// A host function's parameter or result type, independent of any program's type table (a `TypeId` names a type
+/// only within one table). [`HostType::matches`] compares it with a program's type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostType {
+    Bool,
+    Int(IntTy),
+    Str,
+    Bytes,
+    Unit,
+    Option(&'static HostType),
+    Vec(&'static HostType),
+    Tuple(&'static [HostType]),
+}
+
+impl HostType {
+    /// Whether `ty` in `types` is this type.
+    pub fn matches(&self, types: &TypeTable, ty: TypeId) -> bool {
+        match (self, types.get(ty)) {
+            (HostType::Bool, Some(TypeDef::Bool))
+            | (HostType::Str, Some(TypeDef::Str))
+            | (HostType::Bytes, Some(TypeDef::Bytes))
+            | (HostType::Unit, Some(TypeDef::Unit)) => true,
+            (HostType::Int(a), Some(TypeDef::Int(b))) => a == b,
+            (HostType::Option(a), Some(TypeDef::Option(b))) | (HostType::Vec(a), Some(TypeDef::Vec(b))) => {
+                a.matches(types, *b)
+            }
+            (HostType::Tuple(a), Some(TypeDef::Tuple(b))) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.matches(types, *y))
+            }
+            _ => false,
+        }
+    }
+}
+
+impl fmt::Display for HostType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HostType::Bool => write!(f, "bool"),
+            HostType::Int(t) => write!(f, "{}", t.name()),
+            HostType::Str => write!(f, "String"),
+            HostType::Bytes => write!(f, "Bytes"),
+            HostType::Unit => write!(f, "()"),
+            HostType::Option(t) => write!(f, "Option<{t}>"),
+            HostType::Vec(t) => write!(f, "Vec<{t}>"),
+            HostType::Tuple(ts) => {
+                write!(f, "(")?;
+                for (i, t) in ts.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{t}")?;
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
+
+/// The signature of a host registration, compared with a program's `extern` declaration when the program is bound.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExternSignature {
-    pub params: Vec<TypeId>,
+    pub params: Vec<HostType>,
     /// One scalar return for `extern fn`, or columns for `extern table fn`.
-    pub outputs: Vec<TypeId>,
+    pub outputs: Vec<HostType>,
     pub table: bool,
+}
+
+impl ExternSignature {
+    /// Whether a declaration with parameter types `params` and output types `outputs` (in `types`) has this
+    /// signature.
+    pub fn matches(&self, types: &TypeTable, params: &[TypeId], outputs: &[TypeId]) -> bool {
+        self.params.len() == params.len()
+            && self.outputs.len() == outputs.len()
+            && self.params.iter().zip(params).all(|(h, t)| h.matches(types, *t))
+            && self.outputs.iter().zip(outputs).all(|(h, t)| h.matches(types, *t))
+    }
+}
+
+/// One host function of the standard library (FOREIGN-PROTOCOLS §4): its path and signature. `blossom-std-host`
+/// implements exactly these; the compiler checks a program's `extern fn` declarations against them, so an extern
+/// that names anything else is a compile error.
+#[derive(Clone, Copy, Debug)]
+pub struct StdExtern {
+    pub path: &'static str,
+    pub params: &'static [HostType],
+    pub ret: HostType,
+}
+
+impl StdExtern {
+    pub fn signature(&self) -> ExternSignature {
+        ExternSignature {
+            params: self.params.to_vec(),
+            outputs: vec![self.ret],
+            table: false,
+        }
+    }
+}
+
+const BYTES: HostType = HostType::Bytes;
+const OPT_BYTES: HostType = HostType::Option(&HostType::Bytes);
+const U8: HostType = HostType::Int(IntTy::U8);
+const U32: HostType = HostType::Int(IntTy::U32);
+const U64: HostType = HostType::Int(IntTy::U64);
+
+/// The standard library's host functions. Decompression takes the largest output it may produce, and is `None`
+/// past it or on malformed input.
+pub const STD_EXTERNS: &[StdExtern] = &[
+    StdExtern { path: "blossom_std::checksum::crc32c", params: &[BYTES], ret: U32 },
+    StdExtern { path: "blossom_std::checksum::crc32", params: &[BYTES], ret: U32 },
+    StdExtern { path: "blossom_std::compress::gzip_compress", params: &[BYTES, U8], ret: BYTES },
+    StdExtern { path: "blossom_std::compress::gzip_decompress", params: &[BYTES, U64], ret: OPT_BYTES },
+    StdExtern { path: "blossom_std::compress::snappy_compress", params: &[BYTES], ret: BYTES },
+    StdExtern { path: "blossom_std::compress::snappy_decompress", params: &[BYTES, U64], ret: OPT_BYTES },
+    StdExtern { path: "blossom_std::compress::lz4_compress", params: &[BYTES], ret: BYTES },
+    StdExtern { path: "blossom_std::compress::lz4_decompress", params: &[BYTES, U64], ret: OPT_BYTES },
+    StdExtern { path: "blossom_std::compress::zstd_compress", params: &[BYTES], ret: BYTES },
+    StdExtern { path: "blossom_std::compress::zstd_decompress", params: &[BYTES, U64], ret: OPT_BYTES },
+    StdExtern { path: "blossom_std::hash::sha256", params: &[BYTES], ret: BYTES },
+    StdExtern { path: "blossom_std::hash::blake3", params: &[BYTES], ret: BYTES },
+];
+
+/// The standard host function at `path`.
+pub fn std_extern(path: &str) -> Option<&'static StdExtern> {
+    STD_EXTERNS.iter().find(|e| e.path == path)
 }
 
 /// Host function implementations by path (for example `blossom_std::hash::sha256`).
@@ -112,8 +229,8 @@ impl ExternRegistry {
     pub fn register_typed_fn(
         &mut self,
         path: impl Into<Arc<str>>,
-        params: Vec<TypeId>,
-        ret: TypeId,
+        params: Vec<HostType>,
+        ret: HostType,
         f: impl ExternFn + 'static,
     ) -> Result<(), ValueError> {
         let path = path.into();
@@ -132,8 +249,8 @@ impl ExternRegistry {
     pub fn register_typed_table_fn(
         &mut self,
         path: impl Into<Arc<str>>,
-        params: Vec<TypeId>,
-        outputs: Vec<TypeId>,
+        params: Vec<HostType>,
+        outputs: Vec<HostType>,
         f: impl ExternTableFn + 'static,
     ) -> Result<(), ValueError> {
         let path = path.into();
@@ -148,9 +265,17 @@ impl ExternRegistry {
         );
         Ok(())
     }
-    /// Checks a compiled declaration against the registered implementation before loading it.
-    /// Untyped registrations are useful for direct tests but cannot be bound to source programs.
-    pub fn bind(&self, path: &str, declared: &ExternSignature) -> Result<(), ValueError> {
+    /// Checks a program's declaration of `path` (parameter and output types in `types`) against the registered
+    /// implementation before the program is loaded. Untyped registrations are useful for direct tests but cannot be
+    /// bound to source programs.
+    pub fn bind(
+        &self,
+        path: &str,
+        types: &TypeTable,
+        params: &[TypeId],
+        outputs: &[TypeId],
+        table: bool,
+    ) -> Result<(), ValueError> {
         if !self.contains(path) {
             return Err(ValueError::ExternSignature {
                 path: path.into(),
@@ -161,13 +286,18 @@ impl ExternRegistry {
             path: path.into(),
             reason: "host registration has no declared signature".into(),
         })?;
-        if actual != declared {
+        if actual.table != table || !actual.matches(types, params, outputs) {
             return Err(ValueError::ExternSignature {
                 path: path.into(),
-                reason: format!("declared {declared:?}, host provides {actual:?}"),
+                reason: format!("the program's declaration differs from the host's {actual:?}"),
             });
         }
         Ok(())
+    }
+
+    /// The signature registered at `path`, if it was registered with one.
+    pub fn signature(&self, path: &str) -> Option<&ExternSignature> {
+        self.signatures.get(path)
     }
 
     fn check_free(&self, path: &Arc<str>) -> Result<(), ValueError> {
@@ -307,33 +437,44 @@ mod m2_tests {
     use super::*;
     #[test]
     fn extern_signature_binding_is_exact() {
-        let a = TypeId::from_raw(1);
-        let b = TypeId::from_raw(2);
+        let mut types = TypeTable::new();
+        let a = types.insert(TypeDef::Int(IntTy::U64)).unwrap();
+        let b = types.insert(TypeDef::Bytes).unwrap();
+        let ob = types.insert(TypeDef::Option(b)).unwrap();
         let mut reg = ExternRegistry::new();
-        reg.register_typed_fn("math::double", vec![a], b, |_: &[Value]| Ok(Value::u64(2)))
-            .unwrap();
-        let sig = ExternSignature {
-            params: vec![a],
-            outputs: vec![b],
-            table: false,
-        };
-        assert!(reg.bind("math::double", &sig).is_ok());
-        let bad = ExternSignature {
-            params: vec![b],
-            ..sig.clone()
-        };
+        reg.register_typed_fn(
+            "math::f",
+            vec![HostType::Int(IntTy::U64)],
+            HostType::Option(&HostType::Bytes),
+            |_: &[Value]| Ok(Value::Unit),
+        )
+        .unwrap();
+        assert!(reg.bind("math::f", &types, &[a], &[ob], false).is_ok());
+        for (params, outputs, table) in [(vec![b], vec![ob], false), (vec![a], vec![b], false), (vec![a], vec![ob], true)] {
+            assert!(matches!(
+                reg.bind("math::f", &types, &params, &outputs, table),
+                Err(ValueError::ExternSignature { .. })
+            ));
+        }
         assert!(matches!(
-            reg.bind("math::double", &bad),
-            Err(ValueError::ExternSignature { .. })
-        ));
-        assert!(matches!(
-            reg.bind("missing", &sig),
+            reg.bind("missing", &types, &[a], &[ob], false),
             Err(ValueError::ExternSignature { .. })
         ));
         reg.register_fn("untyped", |_: &[Value]| Ok(Value::Unit)).unwrap();
         assert!(matches!(
-            reg.bind("untyped", &sig),
+            reg.bind("untyped", &types, &[a], &[ob], false),
             Err(ValueError::ExternSignature { .. })
         ));
+    }
+
+    #[test]
+    fn the_std_catalog_has_unique_paths_under_blossom_std() {
+        let mut paths: Vec<&str> = STD_EXTERNS.iter().map(|e| e.path).collect();
+        assert!(paths.iter().all(|p| p.starts_with("blossom_std::")));
+        paths.sort_unstable();
+        let n = paths.len();
+        paths.dedup();
+        assert_eq!(paths.len(), n);
+        assert_eq!(std_extern("blossom_std::checksum::crc32c").map(|e| e.ret), Some(HostType::Int(IntTy::U32)));
     }
 }

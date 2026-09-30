@@ -36,6 +36,14 @@ pub fn long_version() -> &'static str {
     })
 }
 
+/// The standard library's host functions (FOREIGN-PROTOCOLS §4), bound by every command that runs a program.
+/// Building the registry fails only if two areas register one path, a bug the host library's tests rule out.
+pub fn std_externs() -> Result<std::sync::Arc<blossom_value::ExternRegistry>, String> {
+    blossom_std_host::registry()
+        .map(std::sync::Arc::new)
+        .map_err(|e| format!("the standard host functions: {e}"))
+}
+
 /// Compiling `.ded` programs for the commands that run them (`sim`, `ldfi`).
 pub mod bls {
     use std::process::ExitCode;

@@ -1,0 +1,55 @@
+//! A length-prefixed framing server over a byte stream (FOREIGN-PROTOCOLS §1): each request is a 4-byte big-endian
+//! length and that many bytes; the reply to each is the same framing around the payload reversed. A chunk may hold
+//! part of a frame or several frames; the server decodes every complete one with a fold, the way a protocol decoder
+//! walks a buffer, and keeps the rest.
+program frames version 1;
+
+stream frames: listen;
+
+table buf(c: Conn, pending: Bytes, next_seq: u64) key(c);
+
+/// Every complete frame at the front of `b`, and how many bytes they take.
+fn decode(b: Bytes) -> (Vec<Bytes>, u64) {
+    range(0, b.len()).fold(([], 0), |acc, _i| {
+        let pos = acc.1;
+        match b.u32_be_at(pos) {
+            Some(len) => match b.slice(pos + 4, pos + 4 + len as u64) {
+                Some(payload) => (acc.0.push(payload), pos + 4 + len as u64),
+                None => acc,
+            },
+            None => acc,
+        }
+    })
+}
+
+fn reversed(b: Bytes) -> Bytes {
+    let n = b.len();
+    Bytes::join(range(0, n).map(|i| Bytes::from_u8(b.u8_at(n - 1 - i).unwrap_or(0u8))))
+}
+
+fn frame(payload: Bytes) -> Bytes {
+    Bytes::from_u32_be(payload.len() as u32).concat(payload)
+}
+
+fn replies(frames: Vec<Bytes>) -> Bytes {
+    Bytes::join(frames.map(|p| frame(reversed(p))))
+}
+
+accept: on frames.opened(c, _peer, _at) {
+    emit buf(c, Bytes::empty(), 0);
+}
+
+recv: on frames.data(c, _seq, bytes), buf(c, pending, n),
+        let all = pending.concat(bytes), let (got, used) = decode(all) {
+    if got.len() > 0 {
+        send frames.write(c, n, [Part::Bytes(replies(got))]);
+        upsert buf(c, all.slice(used, all.len()).unwrap_or(Bytes::empty()), n + 1);
+    }
+    if got.len() == 0 {
+        upsert buf(c, all, n);
+    }
+}
+
+forget: on frames.closed(c, _reason), buf(c, p, n) {
+    delete buf(c, p, n);
+}

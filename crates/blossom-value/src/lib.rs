@@ -44,7 +44,10 @@ mod testgen;
 pub use class::{Claim, HeightClass, LatOpKind, LawStatus, MonoClass, ProofStatus};
 pub use digest::{Digest128, Digest256, SetElement};
 pub use error::ValueError;
-pub use externs::{ExternError, ExternFn, ExternRegistry, ExternSignature, ExternTableFn, TableFn};
+pub use externs::{
+    ExternError, ExternFn, ExternRegistry, ExternSignature, ExternTableFn, HostType, STD_EXTERNS, StdExtern, TableFn,
+    std_extern,
+};
 pub use fp::{ENCODING_VERSION, Fingerprint};
 pub use prf::{PRF_VERSION, PrfStream, Seed, Seeds};
 pub use sink::{IngestSlot, RowMeta, RowSender, WordSink};
@@ -53,7 +56,7 @@ pub use time::{Duration, Incarnation, Instant, NodeId, Tick};
 pub use types::{
     EnumDef, ExternCodecId, ExternTypeDef, FieldDef, FieldNo, IntTy, StructDef, TypeDef, TypeTable, VariantDef,
 };
-pub use value::{BlobRef, GroupValue, IntValue, LatValue, ModValue, SessionId, Value};
+pub use value::{BlobRef, ConnId, GroupValue, IntValue, LatValue, ModValue, SessionId, Value};
 pub use word::{BytesWord, ColEncTag, Lane, NicheScalar, ScalarKind, StrWord, Word};
 
 /// The version of this crate's public API (ARCHITECTURE §1.6).

@@ -37,9 +37,19 @@ pub struct BlsSim<'a> {
 }
 
 impl<'a> BlsSim<'a> {
-    /// Prepares the program (stratifies it and plans every rule) for a run seeded with `seed` (SEM-084).
+    /// Prepares the program (stratifies it and plans every rule) for a run seeded with `seed` (SEM-084). The
+    /// program may declare no host functions; [`BlsSim::with_externs`] binds them.
     pub fn new(artifact: &'a BlsArtifact, seed: blossom_value::Seed) -> Result<BlsSim<'a>, SimError> {
-        let oracle = Oracle::new(artifact.program.clone())
+        BlsSim::with_externs(artifact, seed, std::sync::Arc::new(blossom_value::ExternRegistry::new()))
+    }
+
+    /// [`BlsSim::new`] with the host functions the program's `extern fn`s call.
+    pub fn with_externs(
+        artifact: &'a BlsArtifact,
+        seed: blossom_value::Seed,
+        externs: std::sync::Arc<blossom_value::ExternRegistry>,
+    ) -> Result<BlsSim<'a>, SimError> {
+        let oracle = Oracle::with_externs(artifact.program.clone(), blossom_oracle::Limits::default(), externs)
             .map_err(SimError::Load)?
             .with_roles(artifact.roles.clone())
             .with_seed(seed)

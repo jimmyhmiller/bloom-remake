@@ -1,0 +1,9 @@
+//! Writes out of `seq` order (FOREIGN-PROTOCOLS §1.2): chunk k is written with seq k xor 1, so each pair's second
+//! chunk goes first; the host holds the gap and sends the bytes in `seq` order.
+program order version 1;
+
+stream s: listen;
+
+swap: on s.data(c, seq, b) {
+    send s.write(c, seq ^ 1, [Part::Bytes(b)]);
+}

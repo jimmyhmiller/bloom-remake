@@ -54,6 +54,9 @@ fn children_of(node: &SyntaxNode, kind: SyntaxKind) -> impl Iterator<Item = Synt
     node.children().filter(move |n| n.kind() == kind)
 }
 
+/// A function's name, its parameters with their types, and its result type.
+type FnSig = (Ident, Vec<(Ident, Type)>, Type);
+
 fn child_of(node: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxNode> {
     children_of(node, kind).next()
 }
@@ -143,6 +146,23 @@ impl Cx<'_> {
     }
 
     /// Reports a tree shape the converter did not expect (an error-free parse never produces one).
+    /// A closure's parameters: names, or `_` for one it ignores.
+    fn closure_params(&mut self, params: &[SyntaxNode]) -> Vec<Ident> {
+        let mut names = Vec::new();
+        for p in params {
+            let span = self.span(p);
+            match self.expr(p).kind {
+                ExprKind::Path(path, targs) if targs.is_empty() && path.len() == 1 => names.extend(path),
+                ExprKind::Wildcard => names.push(Ident {
+                    name: Symbol::intern("_"),
+                    span,
+                }),
+                _ => self.malformed("a closure parameter that is not a name", span),
+            }
+        }
+        names
+    }
+
     fn malformed(&mut self, what: &str, span: Span) {
         self.diags.push(
             Diagnostic::not_implemented(
@@ -381,6 +401,14 @@ impl Cx<'_> {
                 let items = self.items(node);
                 ItemKind::Protocol(ProtocolItem { name, generics, items })
             }
+            STREAMITEM => {
+                let names = self.names(node);
+                let (Some(name), Some(kind)) = (names.first().copied(), names.get(1).copied()) else {
+                    self.malformed("a stream without a name or a kind", span);
+                    return None;
+                };
+                ItemKind::Stream { name, kind }
+            }
             ROLEITEM => {
                 let names = self.names(node);
                 let Some(name) = names.first().copied() else {
@@ -440,8 +468,8 @@ impl Cx<'_> {
                 })
             }
             SPECITEM => ItemKind::Spec(self.spec(node)),
-            FNITEM => self.unsupported_item("LANG-180", "functions", span),
-            EXTERNITEM => self.unsupported_item("LANG-181", "extern items", span),
+            FNITEM => ItemKind::Fn(self.fn_item(node, span)?),
+            EXTERNITEM => self.extern_item(node, span)?,
             IMPLITEM => self.unsupported_item("LANG-180", "impl blocks", span),
             LATTICETYPEITEM => self.unsupported_item("LANG-135", "user-defined lattices", span),
             AGGREGATEITEM => self.unsupported_item("LANG-105", "user-defined aggregates", span),
@@ -1480,7 +1508,11 @@ impl Cx<'_> {
                         return ExprKind::Wildcard;
                     }
                 };
-                let els = blocks.get(1).map(|b| self.block_expr(b));
+                // `else { … }` is a second block; `else if …` is a nested `if` expression after the condition.
+                let els = match blocks.get(1) {
+                    Some(b) => Some(self.block_expr(b)),
+                    None => expr_children(node).nth(1).map(|e| self.expr(&e)),
+                };
                 ExprKind::If {
                     cond,
                     then: Box::new(then),
@@ -1493,7 +1525,11 @@ impl Cx<'_> {
                 let mut arms = Vec::new();
                 for a in children_of(node, MATCHARM) {
                     let aspan = self.span(&a);
-                    let es: Vec<Expr> = expr_children(&a).map(|e| self.expr(&e)).collect();
+                    let mut es: Vec<Expr> = expr_children(&a).map(|e| self.expr(&e)).collect();
+                    // A block body follows the pattern and guard.
+                    if let Some(block) = child_of(&a, BLOCKEXPR) {
+                        es.push(self.block_expr(&block));
+                    }
                     let mut it = es.into_iter();
                     match (it.next(), it.next(), it.next()) {
                         (Some(pat), Some(body), None) => arms.push(MatchArm { pat, guard: None, body }),
@@ -1535,8 +1571,24 @@ impl Cx<'_> {
                 ExprKind::Wildcard
             }
             CLOSUREEXPR => {
-                self.unsupported("LANG-002", "closures (allowed only in fn bodies)", span);
-                ExprKind::Wildcard
+                // `|a, b| body`: the parameters are path expressions; the body is a block, or else the last expression.
+                let es: Vec<SyntaxNode> = expr_children(node).collect();
+                if let Some(block) = child_of(node, BLOCKEXPR) {
+                    let names = self.closure_params(&es);
+                    return ExprKind::Closure {
+                        params: names,
+                        body: Box::new(self.block_expr(&block)),
+                    };
+                }
+                let Some((body, params)) = es.split_last() else {
+                    self.malformed("a closure without a body", span);
+                    return ExprKind::Wildcard;
+                };
+                let names = self.closure_params(params);
+                ExprKind::Closure {
+                    params: names,
+                    body: Box::new(self.expr(body)),
+                }
             }
             other => {
                 self.malformed(&format!("expression {other:?}"), span);
@@ -1547,16 +1599,128 @@ impl Cx<'_> {
 
     fn block_expr(&mut self, node: &SyntaxNode) -> Expr {
         let span = self.span(node);
-        if child_of(node, LETLIT).is_some() {
-            self.unsupported("LANG-180", "`let` inside block expressions", span);
+        let mut lets = Vec::new();
+        for l in children_of(node, LETLIT) {
+            let lspan = self.span(&l);
+            let es: Vec<SyntaxNode> = expr_children(&l).collect();
+            let ty = child_of(&l, TYPE).map(|t| self.ty(&t));
+            match es.as_slice() {
+                [pat, value] => lets.push(BlockLet {
+                    pat: self.expr(pat),
+                    ty,
+                    value: self.expr(value),
+                    span: lspan,
+                }),
+                _ => self.malformed("a `let` without a pattern and a value", lspan),
+            }
         }
-        match expr_children(node).last() {
+        let result = match expr_children(node).last() {
             Some(e) => self.expr(&e),
             None => Expr {
                 kind: ExprKind::Tuple(Vec::new()),
                 span,
             },
+        };
+        if lets.is_empty() {
+            return result;
         }
+        Expr {
+            kind: ExprKind::Block {
+                lets,
+                result: Box::new(result),
+            },
+            span,
+        }
+    }
+
+    /// `extern fn name(params) -> ret = "path";` (LANGUAGE §16.2). Table functions, host types and host lattices
+    /// are not built yet.
+    fn extern_item(&mut self, node: &SyntaxNode, span: Span) -> Option<ItemKind> {
+        let kinds: Vec<SyntaxKind> = tokens(node).map(|t| t.kind()).collect();
+        if kinds.contains(&TABLE_KW) {
+            return Some(self.unsupported_item("LANG-183", "extern table functions", span));
+        }
+        if kinds.contains(&TYPE_KW) || kinds.contains(&LATTICE_KW) {
+            return Some(self.unsupported_item("LANG-027", "host types and lattices", span));
+        }
+        let (name, params, ret) = self.fn_signature(node, span)?;
+        let Some(path) = tokens(node).find(|t| t.kind() == STRING_LIT) else {
+            self.malformed("an extern function without its host path", span);
+            return None;
+        };
+        let path_span = self.token_span(&path);
+        let path = self.string(path.text(), path_span);
+        Some(ItemKind::ExternFn(ExternFnItem {
+            name,
+            params,
+            ret,
+            path,
+            path_span,
+            span,
+        }))
+    }
+
+    /// A function's name, parameters and result type (`fn` and `extern fn` items).
+    fn fn_signature(&mut self, node: &SyntaxNode, span: Span) -> Option<FnSig> {
+        let Some(sig) = child_of(node, FNSIG) else {
+            self.malformed("a function without a signature", span);
+            return None;
+        };
+        if child_of(&sig, GENERICS).is_some() {
+            self.unsupported("LANG-180", "generic functions", span);
+            return None;
+        }
+        // A class prefix (`monotone fn`, `threshold fn`, …) is a direct token of the item (LANGUAGE §16.1).
+        if let Some(class) = tokens(node).find(|t| t.kind() == IDENT) {
+            self.unsupported(
+                "LANG-182",
+                &format!("function classes (`{} fn`)", class.text()),
+                self.token_span(&class),
+            );
+            return None;
+        }
+        let name = self.need_name(&sig);
+        let mut params = Vec::new();
+        for p in children_of(&sig, FNPARAM) {
+            let pspan = self.span(&p);
+            let pat = expr_children(&p).next().map(|e| self.expr(&e));
+            let ty = child_of(&p, TYPE).map(|t| self.ty(&t));
+            match (pat.map(|e| e.kind), ty) {
+                (Some(ExprKind::Path(path, targs)), Some(ty)) if targs.is_empty() && path.len() == 1 => {
+                    params.extend(path.into_iter().map(|n| (n, ty.clone())));
+                }
+                (None, None) => {
+                    self.unsupported("LANG-180", "methods (`self` parameters)", pspan);
+                    return None;
+                }
+                _ => {
+                    self.malformed("a function parameter that is not `name: Type`", pspan);
+                    return None;
+                }
+            }
+        }
+        // The return type is the signature's last direct type child.
+        let Some(ret) = children_of(&sig, TYPE).last().map(|t| self.ty(&t)) else {
+            self.malformed("a function without a return type", span);
+            return None;
+        };
+        Some((name, params, ret))
+    }
+
+    /// `fn name(params) -> ret { body }`.
+    fn fn_item(&mut self, node: &SyntaxNode, span: Span) -> Option<FnItem> {
+        let (name, params, ret) = self.fn_signature(node, span)?;
+        let Some(body) = child_of(node, BLOCKEXPR).map(|b| self.block_expr(&b)) else {
+            self.malformed("a function without a body", span);
+            return None;
+        };
+        Some(FnItem {
+            name,
+            params,
+            ret,
+            body,
+            span,
+        })
     }
 
     fn bang_clause(&mut self, node: &SyntaxNode) -> BangClause {

@@ -1,0 +1,27 @@
+//! The Blossom Kafka broker and the Blossom Kafka client (`examples/kafka/`) as two roles of one program, for the
+//! cluster simulator (slice 6, item 8): the client dials the broker at `sim://b1/kafka`.
+program kafka_sim version 1;
+
+include "../../../../examples/kafka/protocol.bls";
+include "../../../../examples/kafka/headers.bls";
+include "../../../../examples/kafka/apiversions.bls";
+include "../../../../examples/kafka/metadata.bls";
+include "../../../../examples/kafka/broker_fns.bls";
+include "../../../../examples/kafka/client_fns.bls";
+
+param NODE_ID: i32 = 1;
+param ADVERTISED_HOST: String = "b1.sim";
+param ADVERTISED_PORT: i32 = 9092;
+param CLUSTER_ID: String = "blossom-sim";
+param BROKER_ADDR: String = "sim://b1/kafka";
+
+role Broker;
+role Client;
+
+at Broker {
+    include "../../../../examples/kafka/broker_node.bls";
+}
+
+at Client {
+    include "../../../../examples/kafka/client_node.bls";
+}
