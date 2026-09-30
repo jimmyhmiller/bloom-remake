@@ -877,3 +877,16 @@ fn a_function_parameter_keeps_its_declared_node_type() {
                at A {\n  input i(a: Node<A>, b: Node);\n  view v(x) = i(a, b), let x = same(a, b);\n}\n";
     assert_eq!(diags_for(src, &role_nodes()), Vec::new());
 }
+
+#[test]
+fn a_closure_passed_to_a_lattice_method_is_bls0300() {
+    let src = with_head(
+        "fn f(n: u64) -> bool { let s = LSet::of(n); s.contains(|x| x + 1u64) }\n\
+         output out(b: bool);\n\
+         a: on go(k, v) { emit out(f(k)); }\n",
+    );
+    let got = messages(src);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].0, "BLS0300");
+    assert!(got[0].1.contains("does not take a closure"), "{}", got[0].1);
+}

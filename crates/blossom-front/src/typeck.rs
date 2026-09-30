@@ -2420,6 +2420,14 @@ impl Checker<'_> {
         let Some(kind) = self.lat_kind(recv) else {
             return false;
         };
+        // A closure is an argument only of the collection combinators (LANGUAGE §16.1), never of a lattice method.
+        if args.iter().any(|a| self.closures.contains_key(a)) {
+            self.error(
+                span,
+                format!("`{}` does not take a closure: only the collection combinators do", name.as_str()),
+            );
+            return true;
+        }
         let op = if name.as_str() == "reveal" {
             if nonbot && matches!(kind, Kind::Max | Kind::Min | Kind::Point) {
                 Op::RevealNonBot

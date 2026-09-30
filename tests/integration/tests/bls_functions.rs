@@ -758,6 +758,22 @@ fn a_host_function_that_refuses_its_input_is_blsr010_on_both_evaluators() {
 }
 
 #[test]
+fn a_fold_evaluates_its_receiver_before_its_initial_value_on_both_evaluators() {
+    let artifact = compile("externs.bls");
+    let rel = artifact.rel_named("fold_order").unwrap();
+    let input = InputEvent {
+        node: NodeId(0),
+        tick: Tick(1),
+        rel,
+        row: Arc::from(vec![u(5)]),
+    };
+    assert!(matches!(
+        differential_hosted(&artifact, &[input], 2),
+        Hosted::Failed(Tick(1), code) if code == "BLSR004"
+    ));
+}
+
+#[test]
 fn a_program_whose_host_functions_are_not_registered_does_not_load() {
     let artifact = compile("externs.bls");
     let listed = |e: &blossom_oracle::OracleError| match e {

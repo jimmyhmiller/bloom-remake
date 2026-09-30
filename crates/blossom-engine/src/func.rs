@@ -280,14 +280,22 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &[Option<Value>], f: LibFn, args: &[Exp
             Ok(Value::Bool(any))
         }
         LibFn::VecFold => {
+            // Arguments evaluate left to right, the receiver first: the initial value is evaluated after the
+            // receiver's bounds (at the first element, or after an empty receiver), as the reference does.
             let c = Closure::of(expr(2)?)?;
-            let mut acc = Some(value(1)?);
+            let mut acc: Option<Value> = None;
             each(cx, env, expr(0)?, |x| {
-                let prev = acc.take().ok_or_else(|| bug("a fold lost its accumulator".into()))?;
+                let prev = match acc.take() {
+                    Some(a) => a,
+                    None => value(1)?,
+                };
                 acc = Some(c.call(cx, env, &[prev, x])?);
                 Ok(true)
             })?;
-            acc.ok_or_else(|| bug("a fold lost its accumulator".into()))
+            match acc {
+                Some(a) => Ok(a),
+                None => value(1),
+            }
         }
         LibFn::OptIsSome => Ok(Value::Bool(optional(value(0)?)?.is_some())),
         LibFn::OptIsNone => Ok(Value::Bool(optional(value(0)?)?.is_none())),
