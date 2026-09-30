@@ -28,8 +28,9 @@ fn read_i8(c: Cur) -> Option<(i8, Cur)> {
     c.buf.i8_at(c.pos).map(|v| (v, at(c, c.pos + 1)))
 }
 
+/// A boolean: any nonzero byte is true, as Kafka reads it.
 fn read_bool(c: Cur) -> Option<(bool, Cur)> {
-    c.buf.u8_at(c.pos).and_then(|v| if v > 1u8 { None } else { Some((v == 1u8, at(c, c.pos + 1))) })
+    c.buf.u8_at(c.pos).map(|v| (v != 0u8, at(c, c.pos + 1)))
 }
 
 fn read_i16(c: Cur) -> Option<(i16, Cur)> {
@@ -44,6 +45,11 @@ fn read_i64(c: Cur) -> Option<(i64, Cur)> {
     c.buf.i64_be_at(c.pos).map(|v| (v, at(c, c.pos + 8)))
 }
 
+/// The all-zero UUID, which Kafka uses for "no topic id".
+fn zero_uuid() -> Bytes {
+    Bytes::join(range(0, 16).map(|_i| Bytes::from_u8(0u8)))
+}
+
 /// A 16-byte UUID, as bytes.
 fn read_uuid(c: Cur) -> Option<(Bytes, Cur)> {
     read_bytes(c, 16)
@@ -53,9 +59,10 @@ fn read_uvarint(c: Cur) -> Option<(u64, Cur)> {
     c.buf.uvarint_at(c.pos).map(|p| (p.0, at(c, p.1)))
 }
 
-/// The next `n` bytes.
+/// The next `n` bytes. `n` often comes from the wire, so it is checked against the bytes left before any arithmetic:
+/// `c.pos + n` never overflows.
 fn read_bytes(c: Cur, n: u64) -> Option<(Bytes, Cur)> {
-    c.buf.slice(c.pos, c.pos + n).map(|b| (b, at(c, c.pos + n)))
+    if n > left(c) { None } else { c.buf.slice(c.pos, c.pos + n).map(|b| (b, at(c, c.pos + n))) }
 }
 
 // ---------------------------------------------------------------- strings
@@ -168,9 +175,11 @@ fn frame(body: Bytes) -> Bytes {
 }
 
 /// Every complete frame at the front of `b` (without their size prefixes), the bytes they take, and whether a
-/// declared size is invalid (negative or over `MAX_FRAME`): then the connection must close.
-fn split_frames(b: Bytes) -> (Vec<Bytes>, u64, bool) {
-    range(0, b.len() / 4).fold(([], 0, false), |acc, _i| {
+/// declared size is invalid (negative or over `MAX_FRAME`): then the connection must close. At most `most` frames
+/// are looked for; a caller that knows how many frames `b` can hold passes that, so a long buffer holding one big
+/// frame costs one step, not one per four bytes.
+fn split_frames(b: Bytes, most: u64) -> (Vec<Bytes>, u64, bool) {
+    range(0, most).fold(([], 0, false), |acc, _i| {
         let (frames, pos, bad) = acc;
         if bad {
             acc
@@ -190,4 +199,61 @@ fn split_frames(b: Bytes) -> (Vec<Bytes>, u64, bool) {
             }
         }
     })
+}
+
+// ---------------------------------------------------------------- reassembly
+
+/// A connection's unconsumed bytes, kept so that reassembling a frame costs time linear in its size (up to a log
+/// factor) however it is chunked.
+///
+/// - `parts` are the bytes in order, not yet joined. Each part is more than twice the size of the next, so there are
+///   at most about 64 of them, and a byte is copied only when its part merges into one at least 1.5 times as big.
+/// - `have` is their total size.
+/// - `need` is the size at which the front frame can be complete: 4 until the size prefix is known, then 4 plus the
+///   size. Below it, a chunk is only stored; the parts are joined and parsed once, when `need` is reached.
+/// - Invariant: the parts hold no complete frame.
+struct Framer { parts: Vec<Bytes>, have: u64, need: u64 }
+
+fn framer() -> Framer {
+    Framer { parts: [], have: 0, need: 4 }
+}
+
+/// What one chunk yields: the frames it completes, whether a size was invalid (close the connection), and the state
+/// after it.
+struct Fed { frames: Vec<Bytes>, bad: bool, next: Framer }
+
+/// `parts` with `b` appended, merging from the newest part back while a part is at most twice the size of what
+/// follows it (the invariant of `Framer.parts`).
+fn push_part(parts: Vec<Bytes>, b: Bytes) -> Vec<Bytes> {
+    let (take, _size, _open) = parts.reverse().fold((0, b.len(), true), |acc, p| {
+        let (take, size, open) = acc;
+        if open && p.len() <= 2 * size { (take + 1, size + p.len(), true) } else { (take, size, false) }
+    });
+    let keep = parts.len() - take;
+    let kept = parts.enumerate().filter(|e| e.0 < keep).map(|e| e.1);
+    let merged = Bytes::join(parts.enumerate().filter(|e| e.0 >= keep).map(|e| e.1).push(b));
+    kept.push(merged)
+}
+
+/// The size at which the front frame of `rest` (holding no complete frame) can be complete.
+fn need_of(rest: Bytes) -> u64 {
+    match rest.i32_be_at(0) {
+        Some(n) => if n < 0i32 { 4 } else { 4 + n as u64 },
+        None => 4,
+    }
+}
+
+/// Feeds one chunk. The frames it completes all start in the chunk, except the front one (the parts hold no complete
+/// frame), and each takes at least 4 bytes; so at most `2 + chunk / 4` are looked for.
+fn feed(f: Framer, bytes: Bytes) -> Fed {
+    if f.have + bytes.len() < f.need {
+        Fed { frames: [], bad: false, next: Framer { parts: push_part(f.parts, bytes), have: f.have + bytes.len(), need: f.need } }
+    } else {
+        let all = Bytes::join(f.parts.push(bytes));
+        let (frames, used, bad) = split_frames(all, 2 + bytes.len() / 4);
+        // `used` never passes the end (`split_frames` only steps over whole frames), so the slice is always `Some`.
+        let rest = all.slice(used, all.len()).unwrap_or(Bytes::empty());
+        let parts = if rest.len() == 0 { [] } else { [rest] };
+        Fed { frames: frames, bad: bad, next: Framer { parts: parts, have: rest.len(), need: need_of(rest) } }
+    }
 }

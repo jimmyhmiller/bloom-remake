@@ -44,12 +44,30 @@ fn encode_broker(b: BrokerInfo) -> Bytes {
     ])
 }
 
-/// UNKNOWN_TOPIC_OR_PARTITION (3), for a requested topic this broker does not have.
-fn encode_unknown_topic(t: MetadataTopicRequest) -> Bytes {
+/// A topic this broker does not have, with `error`, `name` and `topic_id`, no partitions and no authorized operations.
+fn encode_unknown_topic(error: i16, name: Option<String>, topic_id: Bytes) -> Bytes {
     Bytes::join([
-        Bytes::from_i16_be(3i16), enc_compact_nullable_string(t.name), t.topic_id, enc_bool(false),
+        Bytes::from_i16_be(error), enc_compact_nullable_string(name), topic_id, enc_bool(false),
         enc_compact_array([]), Bytes::from_i32_be(-2147483648i32), no_tags(),
     ])
+}
+
+const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
+const UNKNOWN_TOPIC_ID: i16 = 100;
+
+/// The topics part of the answer when every requested topic is unknown. As Kafka does, a request naming any topic by
+/// id is answered by id: each requested nonzero id is UNKNOWN_TOPIC_ID with a null name, and the entries that give
+/// only a name are ignored. Otherwise each requested name is UNKNOWN_TOPIC_OR_PARTITION.
+///
+/// Kafka also drops duplicate ids and names (it collects them into sets); this answers each requested entry,
+/// duplicates included, which only a client that repeats a topic in one request can see.
+fn unknown_topics(ts: Vec<MetadataTopicRequest>) -> Vec<Bytes> {
+    let by_id = ts.filter(|t| t.topic_id != zero_uuid());
+    if by_id.is_empty() {
+        ts.map(|t| encode_unknown_topic(UNKNOWN_TOPIC_OR_PARTITION, t.name, zero_uuid()))
+    } else {
+        by_id.map(|t| encode_unknown_topic(UNKNOWN_TOPIC_ID, None, t.topic_id))
+    }
 }
 
 /// MetadataResponse v13 for a cluster of `brokers` with no topics (S6): a requested topic is unknown.
@@ -61,7 +79,7 @@ fn encode_metadata_response(
     controller_id: i32,
 ) -> Bytes {
     let topics = match req.topics {
-        Some(ts) => ts.map(|t| encode_unknown_topic(t)),
+        Some(ts) => unknown_topics(ts),
         None => [],
     };
     frame(Bytes::join([
@@ -80,7 +98,7 @@ fn encode_metadata_response(
 fn encode_metadata_request(correlation_id: i32, client_id: String, topics: Option<Vec<String>>) -> Bytes {
     let ts = match topics {
         Some(names) => enc_compact_array(names.map(|n| Bytes::join([
-            Bytes::join(range(0, 16).map(|_i| Bytes::from_u8(0u8))), enc_compact_nullable_string(Some(n)), no_tags(),
+            zero_uuid(), enc_compact_nullable_string(Some(n)), no_tags(),
         ]))),
         None => Bytes::uvarint(0),
     };
