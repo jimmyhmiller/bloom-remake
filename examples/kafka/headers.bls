@@ -42,3 +42,17 @@ fn response_header_v0(correlation_id: i32) -> Bytes {
 fn response_header_v1(correlation_id: i32) -> Bytes {
     Bytes::from_i32_be(correlation_id).concat(no_tags())
 }
+
+/// A request header v2 (for a flexible request): key, version, correlation id, client id, no tags.
+fn request_header_v2(api_key: i16, version: i16, correlation_id: i32, client_id: String) -> Bytes {
+    let id = client_id.to_utf8();
+    Bytes::join([
+        Bytes::from_i16_be(api_key), Bytes::from_i16_be(version), Bytes::from_i32_be(correlation_id),
+        Bytes::from_i16_be(id.len() as i16), id, no_tags(),
+    ])
+}
+
+/// The correlation id at the front of a response (every response header version starts with it).
+fn response_correlation(c: Cur) -> Option<(i32, Cur)> {
+    read_i32(c)
+}

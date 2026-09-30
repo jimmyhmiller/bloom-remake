@@ -12,6 +12,7 @@ include "protocol.bls";
 include "headers.bls";
 include "apiversions.bls";
 include "metadata.bls";
+include "broker_fns.bls";
 
 /// This broker's id, the address it advertises, and its cluster id.
 param NODE_ID: i32 = 1;
@@ -19,75 +20,4 @@ param ADVERTISED_HOST: String = "localhost";
 param ADVERTISED_PORT: i32 = 9092;
 param CLUSTER_ID: String = "blossom-kafka";
 
-stream kafka: listen;
-
-/// Per connection: the bytes not yet consumed, and the next write's sequence number.
-table conn(c: Conn, pending: Bytes, next_seq: u64) key(c);
-
-fn brokers() -> Vec<BrokerInfo> {
-    [BrokerInfo { node_id: NODE_ID, host: ADVERTISED_HOST, port: ADVERTISED_PORT, rack: None }]
-}
-
-/// The response to one request frame, or `None` to close the connection.
-fn answer(req: Bytes) -> Option<Bytes> {
-    let c = cur(req);
-    request_prefix(c).and_then(|p| {
-        let (key, version, corr, _rest) = p;
-        if key == API_VERSIONS && not supports(key, version) {
-            // Any version this broker does not know, even one whose header it cannot read (KIP-511).
-            Some(encode_api_versions_unsupported(corr))
-        } else if not supports(key, version) {
-            None
-        } else {
-            request_header(c).and_then(|h| {
-                let body = h.1;
-                if key == API_VERSIONS {
-                    decode_api_versions_request(body).map(|_r| encode_api_versions_response(corr))
-                } else {
-                    decode_metadata_request(body).map(|r| encode_metadata_response(corr, r, brokers(), CLUSTER_ID, NODE_ID))
-                }
-            })
-        }
-    })
-}
-
-/// The answers to `frames`, in order, and whether one could not be answered (the rest are then dropped).
-fn answer_all(frames: Vec<Bytes>) -> (Bytes, bool) {
-    frames.fold((Bytes::empty(), false), |acc, f| {
-        if acc.1 {
-            acc
-        } else {
-            match answer(f) {
-                Some(r) => (acc.0.concat(r), false),
-                None => (acc.0, true),
-            }
-        }
-    })
-}
-
-accept: on kafka.opened(c, _peer, _at) {
-    emit conn(c, Bytes::empty(), 0);
-}
-
-/// A connection's chunks come one per tick, after its `opened` tick, so the state read here is current.
-serve: on kafka.data(c, _seq, bytes), conn(c, pending, n),
-        let all = pending.concat(bytes),
-        let (frames, used, bad) = split_frames(all),
-        let (replies, refused) = answer_all(frames) {
-    if replies.len() > 0 {
-        send kafka.write(c, n, [Part::Bytes(replies)]);
-    }
-    if bad || refused {
-        send kafka.close(c);
-    }
-    if replies.len() > 0 {
-        upsert conn(c, all.slice(used, all.len()).unwrap_or(Bytes::empty()), n + 1);
-    }
-    if replies.len() == 0 {
-        upsert conn(c, all.slice(used, all.len()).unwrap_or(Bytes::empty()), n);
-    }
-}
-
-forget: on kafka.closed(c, _reason), conn(c, p, n) {
-    delete conn(c, p, n);
-}
+include "broker_node.bls";
