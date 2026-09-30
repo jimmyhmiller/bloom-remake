@@ -93,6 +93,8 @@ make_topic: while creating(_k, t) {
 make_partitions: while creating(_k, t), p in range(0, t.partitions as u64) {
     next log_end(t.id, p as i32, 0i64);
     next log_start(t.id, p as i32, 0i64);
+    next segment(t.id, p as i32, 0i64, 0i64, -1i64, -1i64);
+    next active_segment(t.id, p as i32, 0i64);
 }
 
 remove_topic: while deleting(_e, name, id), topic(name, id, p, cfg) {

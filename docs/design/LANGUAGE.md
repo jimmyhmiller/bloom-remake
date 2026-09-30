@@ -3200,7 +3200,7 @@ All functions are pure. Methods on values use `.`; there are no closures outside
 | Set | `len`, `contains`, `insert`, `remove`, `union`, `intersection`, `difference`, `items() -> Vec<T>` |
 | Map | `len`, `get(k) -> Option<V>`, `contains_key`, `insert`, `remove`, `keys`, `values`, `entries() -> Vec<(K, V)>` |
 | Option | `is_some`, `is_none`, `unwrap_or(d)`, `map`, `and_then`; `Some`, `None` |
-| Time | `now()`, `tick()`; `Duration::from_millis`, `.as_millis()`, `Instant - Instant`, `Instant ± Duration` |
+| Time | `now()`, `tick()`; `Duration::from_millis`, `.as_millis()` (a `Duration`'s, or an `Instant`'s since the deployment epoch, which is the Unix epoch in a deployment), `Instant - Instant`, `Instant ± Duration` |
 | Randomness | `random()`, `rand(k…)`, `rand_float(k…)`, `rand_range(lo, hi, k…)` (§15.1) |
 | Hashing and ids | `hash64(x)` (canonical fingerprint, stable across versions), `fingerprint(x)`; `std::hash::sha256` |
 | Locations | `self`, `R.size()`, `R.route(k)`, `c.owner(k)`, `principal_of(n)`, `role_of(n)` |

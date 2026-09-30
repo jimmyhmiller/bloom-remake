@@ -670,6 +670,9 @@ pub enum LibFn {
     DurationFromMillis,
     /// `d.as_millis() -> i64`: whole milliseconds, truncated toward zero.
     DurationAsMillis,
+    /// `t.as_millis() -> i64` on an `Instant`: whole milliseconds since the deployment epoch (the Unix epoch in a
+    /// deployment), truncated toward zero.
+    InstantAsMillis,
     /// `b.from_utf8() -> Option<String>`: `None` unless `b` is valid UTF-8.
     BytesFromUtf8,
     /// `b.u8_at(pos)`, `b.i8_at(pos)`, `b.u16_be_at(pos)`, … `b.i64_be_at(pos) -> Option<T>`: the big-endian integer

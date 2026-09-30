@@ -26,6 +26,8 @@ param ADVERTISED_PORT: i32 = 9092;
 /// may create the topics it names (`auto.create.topics.enable`).
 param DEFAULT_PARTITIONS: i32 = 1;
 param AUTO_CREATE_TOPICS: bool = true;
+/// How often retention is checked (Kafka's `log.retention.check.interval.ms`, 5 minutes by default).
+param RETENTION_CHECK: Duration = 300s;
 param CLUSTER_ID: String = "blossom-kafka";
 
 include "broker_node.bls";

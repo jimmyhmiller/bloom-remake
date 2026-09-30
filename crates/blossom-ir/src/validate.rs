@@ -1597,6 +1597,11 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
             same(ty(0)?, lookup(TypeDef::Duration)?, "as_millis of a Duration")?;
             lookup(TypeDef::Int(IntTy::I64))
         }
+        LibFn::InstantAsMillis => {
+            arity(1)?;
+            same(ty(0)?, lookup(TypeDef::Instant)?, "as_millis of an Instant")?;
+            lookup(TypeDef::Int(IntTy::I64))
+        }
         LibFn::BlobOf => {
             arity(1)?;
             same(ty(0)?, lookup(TypeDef::Bytes)?, "a blob is made of Bytes")?;

@@ -3145,6 +3145,7 @@ impl Checker<'_> {
             (_, Some(TypeDef::Str), "to_utf8") => (Builtin::Lib(LibFn::StrToUtf8), None, 0),
             (_, Some(TypeDef::Str), "parse_i64") => (Builtin::Lib(LibFn::StrParseI64), None, 0),
             (_, Some(TypeDef::Duration), "as_millis") => (Builtin::Lib(LibFn::DurationAsMillis), None, 0),
+            (_, Some(TypeDef::Instant), "as_millis") => (Builtin::Lib(LibFn::InstantAsMillis), None, 0),
             (_, Some(TypeDef::Bytes), "from_utf8") => (Builtin::Lib(LibFn::BytesFromUtf8), None, 0),
             (_, Some(TypeDef::Blob), "read") => (Builtin::Lib(LibFn::BlobRead), None, 2),
             (_, Some(TypeDef::Bytes), "uvarint_at") => (Builtin::Lib(LibFn::BytesUvarintAt), None, 1),
@@ -3351,7 +3352,9 @@ impl Checker<'_> {
             (_, Builtin::Lib(LibFn::StrSplitWhitespace)) => self.bound(Shape::Vec(recv)),
             (_, Builtin::Lib(LibFn::StrToLowercase)) => recv,
             (_, Builtin::Lib(LibFn::StrToUtf8)) => self.con(&mut hir.types, TypeDef::Bytes),
-            (_, Builtin::Lib(LibFn::DurationAsMillis)) => self.con(&mut hir.types, TypeDef::Int(IntTy::I64)),
+            (_, Builtin::Lib(LibFn::DurationAsMillis | LibFn::InstantAsMillis)) => {
+                self.con(&mut hir.types, TypeDef::Int(IntTy::I64))
+            }
             (_, Builtin::Lib(LibFn::StrParseI64)) => {
                 let i = self.con(&mut hir.types, TypeDef::Int(IntTy::I64));
                 self.bound(Shape::Option(i))
