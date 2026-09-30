@@ -593,6 +593,7 @@ impl Checker<'_> {
         self.walk(hir);
         self.finish(hir);
         lattice_keys(hir, self.diags);
+        constant_facts(hir, self.diags);
     }
 
     fn walk(&mut self, hir: &mut Hir) {
@@ -1651,11 +1652,28 @@ impl Checker<'_> {
         };
         if self.apply {
             match self.solved(hir, t) {
-                Some(ty) => e.ty = Some(ty),
+                Some(ty) => {
+                    e.ty = Some(ty);
+                    self.literal_fits(hir, e);
+                }
                 None => self.error(span, "cannot infer the type of this expression".into()),
             }
         }
         t
+    }
+
+    /// An integer literal must fit the type it was given (an unsuffixed literal's type is inferred, so this is known
+    /// only now): `Bytes::from_u8(300)` is BLS0300.
+    fn literal_fits(&mut self, hir: &Hir, e: &HExpr) {
+        let (HExprKind::IntLit(n, neg) | HExprKind::TypedInt(n, _, neg)) = e.kind else {
+            return;
+        };
+        if let Some(TypeDef::Int(ity)) = e.ty.and_then(|t| hir.types.get(t))
+            && crate::resolve::int_value(n, *ity, neg).is_none()
+        {
+            let sign = if neg { "-" } else { "" };
+            self.error(e.span, format!("{sign}{n} does not fit in {}", ity.name()));
+        }
     }
 
     /// A coercion site: `e`, of term `from`, where a value of term `to` is expected (a head column, a `let`
@@ -3110,6 +3128,26 @@ fn check_lattice_keys(hir: &Hir, bodies: &[&HBody], diags: &mut Diagnostics) {
                         ),
                     )
                     .with_primary(span),
+                );
+            }
+        }
+    }
+}
+
+/// A fact's row is folded at compile time. Literals, constants and constructors over them fold; an operator or a
+/// function call in a fact is not evaluated by this build (LANG-010), and says so rather than failing in lowering.
+fn constant_facts(hir: &Hir, diags: &mut Diagnostics) {
+    for f in &hir.facts {
+        for e in &f.row {
+            if crate::lower::try_const(hir, e).is_none() {
+                diags.push(
+                    Diagnostic::not_implemented(
+                        blossom_base::FeatureId("LANG-010"),
+                        "a computed value in a fact (an operator or a function call): a fact's values must be \
+                         literals, constants or constructors over them",
+                        "the Blossom frontend (slice 6)",
+                    )
+                    .with_primary(e.span),
                 );
             }
         }

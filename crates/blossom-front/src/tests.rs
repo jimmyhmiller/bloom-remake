@@ -744,3 +744,37 @@ fn block_bodies_in_closures_and_match_arms_and_constant_arms_type_check() {
     );
     assert_eq!(codes(src), Vec::<String>::new());
 }
+
+#[test]
+fn an_integer_literal_that_does_not_fit_its_inferred_type_is_bls0300() {
+    let src = with_head(
+        "fn f(n: u64) -> Bytes { Bytes::from_u8(300) }\n\
+         output out(b: Bytes);\n\
+         a: on go(k, v) { emit out(f(k)); }\n",
+    );
+    assert_eq!(codes(src), vec!["BLS0300"]);
+    let src = with_head(
+        "input small(x: u8);\n\
+         output out(x: u8);\n\
+         a: on small(x) { emit out(x + 256); }\n",
+    );
+    assert_eq!(codes(src), vec!["BLS0300"]);
+    let src = with_head(
+        "input small(x: u8);\n\
+         output out(x: u8);\n\
+         a: on small(x) { emit out(x + 255); }\n",
+    );
+    assert_eq!(codes(src), Vec::<String>::new());
+}
+
+#[test]
+fn a_computed_fact_value_is_bls0908_not_an_internal_error() {
+    let src = with_head(
+        "fn double(n: u64) -> u64 { n * 2 }\n\
+         static s(x: u64);\n\
+         fact s(double(3));\n\
+         fact s(1 + 2);\n\
+         fact s(4);\n",
+    );
+    assert_eq!(codes(src), vec!["BLS0908", "BLS0908"]);
+}
