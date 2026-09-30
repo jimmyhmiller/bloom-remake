@@ -600,6 +600,13 @@ pub enum BuiltinFn {
     Error, /* … Appendix B … */
 }
 
+/// The work one evaluation of a pure function may do (LANGUAGE §16.1, BLSR012): closure applications plus the
+/// elements of every `range` built as a vector, counted from a call made outside any function to its return (a
+/// `range` built outside a function counts alone). Functions have no recursion, but a fold over `range(0, u64::MAX)`
+/// would still never end; past this budget the evaluation is a located hard error. Both evaluators count the same
+/// steps, so they fail at the same valuation.
+pub const FN_STEP_BUDGET: u64 = 10_000_000;
+
 /// A function or method of the built-in library (LANGUAGE Appendix B). The receiver, if any, is the first argument;
 /// a combinator's closure is the last. Every one is total: a position past the end is `None`, never an error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

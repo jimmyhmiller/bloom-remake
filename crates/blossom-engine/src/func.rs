@@ -59,7 +59,10 @@ pub(crate) fn call(cx: &Ctx<'_>, env: &[Option<Value>], f: FnId, args: &[Expr]) 
         )));
     }
     frame.resize(decl.vars.len(), None);
-    eval(cx, &frame, body)
+    cx.fuel.enter();
+    let out = eval(cx, &frame, body);
+    cx.fuel.exit();
+    out
 }
 
 pub(crate) fn let_expr(
@@ -121,6 +124,7 @@ impl<'e> Closure<'e> {
                 args.len()
             )));
         }
+        cx.fuel.spend(1)?;
         let mut frame = env.to_vec();
         for (p, a) in self.params.iter().zip(args) {
             let Some(slot) = frame.get_mut(p.index()) else {
@@ -198,6 +202,7 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &[Option<Value>], f: LibFn, args: &[Exp
         LibFn::Range => {
             let (lo, hi) = (as_u64(value(0)?)?, as_u64(value(1)?)?);
             let n = hi.saturating_sub(lo);
+            cx.fuel.spend(n)?;
             let mut out = Vec::with_capacity(usize::try_from(n).unwrap_or(0).min(1 << 16));
             let mut i = lo;
             while i < hi {

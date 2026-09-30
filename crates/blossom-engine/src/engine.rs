@@ -607,6 +607,7 @@ impl Engine {
             tick: input.tick,
             now: input.now,
             shared: &self.shared,
+            fuel: crate::expr::Fuel::default(),
         }
     }
 
@@ -1219,6 +1220,7 @@ fn to_eval(e: ExprError, tick: Tick, rule: Option<&Rule>) -> EvalError {
         ExprError::Arithmetic(d) => program_error(blossom_base::code!("BLSR004").as_str(), d),
         ExprError::Conflict(d) => program_error(blossom_base::code!("BLSR006").as_str(), d),
         ExprError::Refused(d) => program_error(blossom_base::code!("BLSR010").as_str(), d),
+        ExprError::Budget(d) => program_error(blossom_base::code!("BLSR012").as_str(), d),
         ExprError::Eval(e) => e,
     }
 }

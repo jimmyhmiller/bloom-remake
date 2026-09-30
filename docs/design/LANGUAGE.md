@@ -2458,7 +2458,10 @@ fn slot_key(term: u64, idx: u64) -> (u64, u64) { (term, idx) }
 A `fn` body is a block of `let`s and a final expression, in a total, pure sublanguage: no recursion, no relation
 access, no `now()`, `tick()` or `rand`, immutable values, closures only as arguments to the built-in collection
 combinators (`map`, `filter`, `filter_map`, `fold`, `all`, `any`, …). `error("message")` aborts the tick with a
-located hard error (BLSR010): it is how a function refuses an impossible input, never a silent default. Algebraic
+located hard error (BLSR010): it is how a function refuses an impossible input, never a silent default. Totality is
+enforced by a step budget: an evaluation, from a call made outside any function to its return, may apply closures
+and build `range` elements at most `FN_STEP_BUDGET` (10⁷) times in all; past it the tick aborts with BLSR012, the
+same in both evaluators. Algebraic
 properties are attributes (`#[injective]`, `#[commutative]`, `#[associative]`, `#[idempotent]`) checked by TEST-087
 and used by ANA-043, ANA-080 and fold legality. A function with a lattice-typed parameter declares its monotonicity
 class with a prefix (`monotone fn`, `morphism fn`, `antitone fn`, `threshold fn`); without one it is NM and is called
@@ -2901,7 +2904,8 @@ TTL shorter than a body's (ANA-006); BLS1008 `if` that binds variables or `for` 
 (SEM-051), naming both statements; BLSR003 an invariant with `abort`; BLSR004 arithmetic overflow, division by zero,
 out-of-range cast, weight overflow; BLSR005 `collect_map!` duplicate key; BLSR006 `LPoint` conflict; BLSR007 an
 in-tick fixpoint that does not converge (CR-53); BLSR008 a write at a non-owner of a partitioned table; BLSR009 a host
-insert into a sealed input key; BLSR010 `error("…")` in a function.
+insert into a sealed input key; BLSR010 `error("…")` in a function; BLSR012 a pure function's evaluation exceeds its
+step budget.
 
 ---
 

@@ -774,6 +774,45 @@ fn a_fold_evaluates_its_receiver_before_its_initial_value_on_both_evaluators() {
 }
 
 #[test]
+fn a_function_past_its_step_budget_is_blsr012_on_both_evaluators() {
+    let artifact = compile("budget.bls");
+    let at = |rel: &str, t: u64, n: u64| InputEvent {
+        node: NodeId(0),
+        tick: Tick(t),
+        rel: artifact.rel_named(rel).unwrap(),
+        row: Arc::from(vec![u(n)]),
+    };
+    let budget = blossom_ir::core::FN_STEP_BUDGET;
+    // Within the budget: exactly at it, and a nested evaluation just under it.
+    match differential_hosted(
+        &artifact,
+        &[at("spin", 1, budget), at("big", 1, budget), at("nest", 1, 3000)],
+        2,
+    ) {
+        Hosted::Ran(run) => {
+            let instance = &run.node_tick(Tick(1), NodeId(0)).unwrap().instance;
+            let rows = |v: &str| -> Vec<Vec<Value>> {
+                instance
+                    .rows(artifact.rel_named(v).unwrap())
+                    .map(|r| r.to_vec())
+                    .collect()
+            };
+            assert_eq!(rows("v_spin"), vec![vec![u(budget), u(budget)]]);
+            assert_eq!(rows("v_big"), vec![vec![u(budget), u(budget)]]);
+            assert_eq!(rows("v_nest"), vec![vec![u(3000), u(3000)]]);
+        }
+        Hosted::Failed(t, code) => panic!("within the budget, yet {code} at {t:?}"),
+    }
+    // One step over, a range of 2⁶² elements (never allocated), and a nested evaluation over it.
+    for input in [at("spin", 1, budget + 1), at("big", 1, 1 << 62), at("nest", 1, 4000)] {
+        assert!(matches!(
+            differential_hosted(&artifact, &[input], 2),
+            Hosted::Failed(Tick(1), code) if code == "BLSR012"
+        ));
+    }
+}
+
+#[test]
 fn a_program_whose_host_functions_are_not_registered_does_not_load() {
     let artifact = compile("externs.bls");
     let listed = |e: &blossom_oracle::OracleError| match e {
