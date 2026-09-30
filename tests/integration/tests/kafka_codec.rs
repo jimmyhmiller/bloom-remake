@@ -261,7 +261,8 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
     let mut inputs = Vec::new();
     type Broker = (i32, String, i32, Option<String>);
     // Per response: its correlation id, brokers, cluster id, controller and requested topics.
-    type Meta = (i32, Vec<Broker>, String, i32, Option<Vec<String>>);
+    type Topic = ([u8; 16], Option<String>);
+    type Meta = (i32, Vec<Broker>, String, i32, Option<Vec<Topic>>);
     let mut metas: Vec<Meta> = Vec::new();
     for _ in 0..60 {
         let corr = rng.next() as i32;
@@ -271,10 +272,24 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
                 (rng.next() as i32, rng.text(), rng.below(65536) as i32, rack)
             })
             .collect();
+        // Topics by name; in some requests, some also by id.
+        let by_id = rng.below(3) == 0;
         let topics = if rng.below(3) == 0 {
             None
         } else {
-            Some((0..rng.below(4)).map(|_| rng.text()).collect::<Vec<_>>())
+            Some(
+                (0..rng.below(4))
+                    .map(|_| {
+                        let id = if by_id && rng.below(2) == 0 {
+                            (u128::from(rng.next()) << 64 | u128::from(rng.next()) | 1).to_be_bytes()
+                        } else {
+                            [0; 16]
+                        };
+                        let name = if id != [0; 16] && rng.below(2) == 0 { None } else { Some(rng.text()) };
+                        (id, name)
+                    })
+                    .collect::<Vec<_>>(),
+            )
         };
         let (cluster, controller) = (rng.text(), rng.next() as i32);
         let row = vec![
@@ -289,7 +304,13 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
             ),
             s(&cluster),
             i32v(controller),
-            opt(topics.as_ref().map(|ts| Value::Vec(ts.iter().map(|t| s(t)).collect()))),
+            opt(topics.as_ref().map(|ts| {
+                Value::Vec(
+                    ts.iter()
+                        .map(|(id, name)| Value::Tuple(vec![bytes(id), opt(name.as_deref().map(s))].into()))
+                        .collect(),
+                )
+            })),
         ];
         inputs.push(input(&artifact, "meta_resp", row));
         metas.push((corr, brokers, cluster, controller, topics));
@@ -337,20 +358,28 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
             })
             .collect();
         assert_eq!(&got, brokers);
-        // Every requested topic is unknown (this cluster has none), by name, with no partitions.
-        let want: Vec<String> = topics.clone().unwrap_or_default();
-        let got: Vec<(i16, Option<String>, usize)> = m
+        // Every requested topic is unknown (this cluster has none), with no partitions: by id when any topic is
+        // asked for by id (UNKNOWN_TOPIC_ID, no name), else by name (UNKNOWN_TOPIC_OR_PARTITION), as Kafka answers.
+        let asked: Vec<Topic> = topics.clone().unwrap_or_default();
+        let ids: Vec<[u8; 16]> = asked.iter().map(|t| t.0).filter(|id| *id != [0; 16]).collect();
+        let want: Vec<(i16, Option<String>, [u8; 16], usize)> = if ids.is_empty() {
+            asked.iter().map(|(_, n)| (3, n.clone(), [0; 16], 0)).collect()
+        } else {
+            ids.iter().map(|id| (100, None, *id, 0)).collect()
+        };
+        let got: Vec<(i16, Option<String>, [u8; 16], usize)> = m
             .topics
             .iter()
             .map(|t| {
                 (
                     t.error_code,
                     t.name.as_ref().map(|n| n.0.to_string()),
+                    *t.topic_id.as_bytes(),
                     t.partitions.len(),
                 )
             })
             .collect();
-        assert_eq!(got, want.iter().map(|n| (3, Some(n.clone()), 0)).collect::<Vec<_>>());
+        assert_eq!(got, want);
     }
     let apiv_rows = rows(&artifact, &r, "v_apiv_resp");
     for (i, corr) in corrs.iter().enumerate() {
@@ -501,4 +530,129 @@ fn frame_splitting_finds_exactly_the_complete_frames() {
         );
         assert_eq!(row[1], want, "{stream:02x?}");
     }
+}
+
+/// Frames fed in chunks, split at random, are reassembled exactly; so is one large frame fed in small chunks, which
+/// finishes only because reassembly is linear (up to a log factor) in the bytes, not quadratic.
+#[test]
+fn reassembly_finds_exactly_the_frames_however_they_are_chunked() {
+    let artifact = compile();
+    let mut rng = Rng(11);
+    let mut inputs = Vec::new();
+    let mut expected = Vec::new();
+    let chunked = |rng: &mut Rng, stream: &[u8], most: u64| -> Value {
+        let mut cs = Vec::new();
+        let mut at = 0;
+        while at < stream.len() {
+            let n = (1 + rng.below(most) as usize).min(stream.len() - at);
+            cs.push(bytes(&stream[at..at + n]));
+            at += n;
+        }
+        Value::Vec(cs.into())
+    };
+    for id in 0..100u64 {
+        let mut stream = Vec::new();
+        let mut frames = Vec::new();
+        for _ in 0..rng.below(6) {
+            let body: Vec<u8> = (0..rng.below(40)).map(|_| rng.next() as u8).collect();
+            stream.extend((body.len() as u32).to_be_bytes());
+            stream.extend(&body);
+            frames.push(body);
+        }
+        let used = stream.len();
+        let bad = rng.below(6) == 0;
+        if bad {
+            stream.extend((-5i32).to_be_bytes());
+        } else {
+            let tail: Vec<u8> = (0..rng.below(4)).map(|_| rng.next() as u8 & 0x0f).collect();
+            stream.extend(tail);
+        }
+        let most = 1 + rng.below(12);
+        let cs = chunked(&mut rng, &stream, most);
+        inputs.push(input(&artifact, "chunks", vec![Value::Int(IntValue::U64(id)), cs]));
+        // After a bad size nothing more is read; otherwise the leftover is the partial tail.
+        let left = if bad { None } else { Some((stream.len() - used) as u64) };
+        expected.push((id, frames, bad, left));
+    }
+    // One 1 MiB frame, then a small one, in chunks of at most 256 bytes.
+    let big: Vec<u8> = (0..1 << 20).map(|i: u32| (i * 7) as u8).collect();
+    let mut stream = (big.len() as u32).to_be_bytes().to_vec();
+    stream.extend(&big);
+    stream.extend(3u32.to_be_bytes());
+    stream.extend([1, 2, 3]);
+    let cs = chunked(&mut rng, &stream, 256);
+    inputs.push(input(&artifact, "chunks", vec![Value::Int(IntValue::U64(1000)), cs]));
+    expected.push((1000, vec![big, vec![1, 2, 3]], false, Some(0)));
+    let r = run(&artifact, &inputs);
+    let got = rows(&artifact, &r, "v_feed");
+    for (id, frames, bad, left) in expected {
+        let row = got
+            .iter()
+            .find(|r| r[0] == Value::Int(IntValue::U64(id)))
+            .unwrap();
+        let fields = match &row[1] {
+            Value::Tuple(f) => f.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            fields[0],
+            Value::Vec(frames.iter().map(|f| bytes(f)).collect()),
+            "chunks {id}: frames"
+        );
+        assert_eq!(fields[1], Value::Bool(bad), "chunks {id}: bad");
+        if let Some(left) = left {
+            assert_eq!(fields[2], Value::Int(IntValue::U64(left)), "chunks {id}: left over");
+        }
+    }
+}
+
+/// Lengths a client controls (tagged-field sizes, compact string lengths) as large as a varint holds make the request
+/// malformed (`None`), never a fault of the tick; a boolean byte other than 0 and 1 reads as true, as in Kafka.
+#[test]
+fn hostile_lengths_are_malformed_requests_not_faults() {
+    let artifact = compile();
+    let max_varint = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01];
+    // ApiVersions v3 header: key, version, correlation id, client id "c".
+    let head = |key: i16, version: i16| -> Vec<u8> {
+        let mut h = Vec::new();
+        h.extend(key.to_be_bytes());
+        h.extend(version.to_be_bytes());
+        h.extend(7i32.to_be_bytes());
+        h.extend(1i16.to_be_bytes());
+        h.push(b'c');
+        h
+    };
+    // One tagged field whose size is the largest varint.
+    let mut huge_tag = head(18, 3);
+    huge_tag.push(1);
+    huge_tag.push(0);
+    huge_tag.extend(max_varint);
+    huge_tag.push(0);
+    // A compact string (the client software name) whose length is the largest varint.
+    let mut huge_string = head(18, 3);
+    huge_string.push(0);
+    huge_string.extend(max_varint);
+    huge_string.extend(b"abc");
+    // Metadata v13 with a null topic list and the booleans 7 and 1.
+    let mut bools = head(3, 13);
+    bools.push(0);
+    bools.push(0);
+    bools.extend([7, 1, 0]);
+    let inputs: Vec<InputEvent> = [&huge_tag, &huge_string, &bools]
+        .iter()
+        .map(|f| input(&artifact, "req", vec![bytes(f)]))
+        .collect();
+    let r = run(&artifact, &inputs);
+    let headers = rows(&artifact, &r, "v_header");
+    let header_of = |f: &[u8]| headers.iter().find(|r| r[0] == bytes(f)).unwrap()[1].clone();
+    assert_eq!(header_of(&huge_tag), opt(None), "a tagged field larger than the request");
+    let apiv = rows(&artifact, &r, "v_apiv");
+    let apiv_of = |f: &[u8]| apiv.iter().find(|r| r[0] == bytes(f)).unwrap()[1].clone();
+    assert_eq!(apiv_of(&huge_string), opt(None), "a string longer than the request");
+    let meta = rows(&artifact, &r, "v_meta");
+    let meta_of = |f: &[u8]| meta.iter().find(|r| r[0] == bytes(f)).unwrap()[1].clone();
+    assert_eq!(
+        meta_of(&bools),
+        opt(Some(strukt(vec![opt(None), Value::Bool(true), Value::Bool(true)])))
+    );
 }

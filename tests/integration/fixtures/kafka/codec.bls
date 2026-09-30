@@ -11,10 +11,13 @@ include "../../../../examples/kafka/metadata.bls";
 input req(frame: Bytes);
 /// The fields of an ApiVersions response (`unsupported`: the v0-layout refusal).
 input apiv_resp(corr: i32, unsupported: bool);
-/// The fields of a Metadata response: brokers (id, host, port, rack), cluster id, controller, requested topics.
-input meta_resp(corr: i32, brokers: Vec<(i32, String, i32, Option<String>)>, cluster: String, controller: i32, topics: Option<Vec<String>>);
+/// The fields of a Metadata response: brokers (id, host, port, rack), cluster id, controller, requested topics (id,
+/// name).
+input meta_resp(corr: i32, brokers: Vec<(i32, String, i32, Option<String>)>, cluster: String, controller: i32, topics: Option<Vec<(Bytes, Option<String>)>>);
 /// Bytes to split into frames.
 input stream_bytes(b: Bytes);
+/// Chunks to reassemble into frames, fed in order.
+input chunks(id: u64, cs: Vec<Bytes>);
 
 fn header_of(b: Bytes) -> Option<RequestHeader> {
     request_header(cur(b)).map(|p| p.0)
@@ -28,13 +31,9 @@ fn meta_of(b: Bytes) -> Option<MetadataRequest> {
     request_header(cur(b)).and_then(|p| decode_metadata_request(p.1))
 }
 
-fn zero_uuid() -> Bytes {
-    Bytes::join(range(0, 16).map(|_i| Bytes::from_u8(0u8)))
-}
-
-fn meta_bytes(corr: i32, brokers: Vec<(i32, String, i32, Option<String>)>, cluster: String, controller: i32, topics: Option<Vec<String>>) -> Bytes {
+fn meta_bytes(corr: i32, brokers: Vec<(i32, String, i32, Option<String>)>, cluster: String, controller: i32, topics: Option<Vec<(Bytes, Option<String>)>>) -> Bytes {
     let req = MetadataRequest {
-        topics: topics.map(|ns| ns.map(|n| MetadataTopicRequest { topic_id: zero_uuid(), name: Some(n) })),
+        topics: topics.map(|ts| ts.map(|t| MetadataTopicRequest { topic_id: t.0, name: t.1 })),
         allow_auto_topic_creation: true,
         include_topic_authorized_operations: false,
     };
@@ -51,4 +50,20 @@ view v_apiv(f, r) = req(f), let r = apiv_of(f);
 view v_meta(f, r) = req(f), let r = meta_of(f);
 view v_apiv_resp(corr, u, b) = apiv_resp(corr, u), let b = apiv_bytes(corr, u);
 view v_meta_resp(corr, b) = meta_resp(corr, brokers, cluster, controller, topics), let b = meta_bytes(corr, brokers, cluster, controller, topics);
-view v_split(b, x) = stream_bytes(b), let x = split_frames(b);
+/// All frames `b` holds (a frame takes at least 4 bytes).
+view v_split(b, x) = stream_bytes(b), let x = split_frames(b, b.len() / 4);
+
+/// The frames the chunks complete, fed one by one, whether a size was invalid, and the bytes left over.
+fn feed_all(cs: Vec<Bytes>) -> (Vec<Bytes>, bool, u64) {
+    let end = cs.fold((framer(), [], false), |acc, c| {
+        let (f, frames, bad) = acc;
+        if bad {
+            acc
+        } else {
+            let fed = feed(f, c);
+            (fed.next, frames.concat(fed.frames), fed.bad)
+        }
+    });
+    (end.1, end.2, end.0.have)
+}
+view v_feed(id, x) = chunks(id, cs), let x = feed_all(cs);

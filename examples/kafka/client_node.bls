@@ -5,7 +5,7 @@
 stream up: connect;
 
 /// Per connection: the bytes not yet consumed.
-table session(c: Conn, pending: Bytes) key(c);
+table session(c: Conn, bytes: Framer) key(c);
 
 /// The answers: ApiVersions' error and ranges, and each metadata answer.
 table versions_seen(error: i16, ranges: Vec<ApiRange>);
@@ -26,7 +26,7 @@ redial_after_close: on up.closed(c, _why), session(c, p) {
 }
 
 ask: on up.opened(c, _req, _peer, _at) {
-    emit session(c, Bytes::empty());
+    emit session(c, framer());
     send up.write(c, 0, [
         Part::Bytes(encode_api_versions_request(CORR_VERSIONS, "blossom", "blossom-kafka-client", "0.1")),
         Part::Bytes(encode_metadata_request(CORR_METADATA, "blossom", None)),
@@ -34,22 +34,18 @@ ask: on up.opened(c, _req, _peer, _at) {
 }
 
 /// A connection's chunks come one per tick after its `opened` tick; each complete response frame is recorded.
-recv: on up.data(c, _seq, bytes), session(c, pending),
-        let all = pending.concat(bytes),
-        let (frames, used, _bad) = split_frames(all) {
-    upsert session(c, all.slice(used, all.len()).unwrap_or(Bytes::empty()));
+recv: on up.data(c, _seq, bytes), session(c, f) {
+    upsert session(c, feed(f, bytes).next);
 }
 
-record_versions: on up.data(c, _seq, bytes), session(c, pending),
-        let (frames, _used, _bad) = split_frames(pending.concat(bytes)),
-        f in frames,
-        let Some(v) = versions_answer(f) {
+record_versions: on up.data(c, _seq, bytes), session(c, f),
+        fr in feed(f, bytes).frames,
+        let Some(v) = versions_answer(fr) {
     emit versions_seen(v.0, v.1);
 }
 
-record_metadata: on up.data(c, _seq, bytes), session(c, pending),
-        let (frames, _used, _bad) = split_frames(pending.concat(bytes)),
-        f in frames,
-        let Some(m) = metadata_answer(f) {
+record_metadata: on up.data(c, _seq, bytes), session(c, f),
+        fr in feed(f, bytes).frames,
+        let Some(m) = metadata_answer(fr) {
     emit metadata_seen(m);
 }
