@@ -34,6 +34,9 @@ use blossom_value::value::SessionId;
 use crate::linearize::{KvInput, KvOutput, Operation};
 use crate::sync::SimError;
 
+mod streams;
+pub use streams::{StreamAction, StreamClient, StreamEvent};
+
 /// How a key-value workload speaks a program's client protocol.
 pub trait ClientProtocol {
     /// The channel and columns (after the destination) of request `id` for `op`.
@@ -98,6 +101,10 @@ pub struct ClusterConfig {
     pub certification: blossom_store::Certification,
     /// The host functions the program's `extern fn`s call.
     pub externs: Arc<blossom_value::ExternRegistry>,
+    /// The largest chunk a byte stream's bytes are split into (FOREIGN-PROTOCOLS §1.4).
+    pub chunk_max: usize,
+    /// Whether the nemesis also resets byte-stream connections.
+    pub stream_drops: bool,
 }
 
 impl Default for ClusterConfig {
@@ -120,6 +127,8 @@ impl Default for ClusterConfig {
             backend: Backend::default(),
             certification: blossom_store::Certification::default(),
             externs: Arc::new(blossom_value::ExternRegistry::new()),
+            chunk_max: 16,
+            stream_drops: false,
         }
     }
 }
@@ -139,6 +148,11 @@ pub struct ClusterRun {
     pub violation: Option<String>,
     /// The nodes' join work, in rows examined, when their executors measure it.
     pub rows_examined: Option<u64>,
+    /// Byte-stream connections accepted, bytes carried, connections reset, and bad write `seq`s.
+    pub stream_connections: u64,
+    pub stream_bytes: u64,
+    pub stream_resets: u64,
+    pub stream_violations: u64,
 }
 
 /// SplitMix64: the simulation's only randomness.
@@ -182,6 +196,24 @@ enum Envelope {
         rel: RelId,
         row: Row,
     },
+    /// A byte-stream connection attempt reaches its node.
+    PipeConnect {
+        pipe: usize,
+    },
+    /// The connecting end learns its connection is established.
+    PipeOpened {
+        pipe: usize,
+    },
+    PipeBytes {
+        pipe: usize,
+        to: usize,
+        bytes: Vec<u8>,
+    },
+    PipeClosed {
+        pipe: usize,
+        to: usize,
+        reason: Arc<str>,
+    },
 }
 
 struct Pending {
@@ -212,10 +244,25 @@ struct SimNode<'p> {
     /// incarnation may have exposed, which can be ahead of the virtual clock (the real clock anchors the same way).
     offset: i64,
     next_session: u64,
+    next_conn: u64,
     /// Open sessions: which client each is.
     sessions: BTreeMap<SessionId, usize>,
     /// While the node is down: when it restarts (`i64::MAX`: when a script restarts it).
     down_until: Option<i64>,
+}
+
+/// The protocol of a cluster without key-value clients (`clients = 0`), for runs driven by stream clients or a
+/// script: it refuses every request, so a misconfigured run fails loudly.
+pub struct NoKvClients;
+
+impl ClientProtocol for NoKvClients {
+    fn request(&self, _op: &KvInput, _id: u64) -> Result<(RelId, Vec<Value>), String> {
+        Err("this cluster has no key-value clients (NoKvClients)".into())
+    }
+
+    fn reply(&self, _rel: RelId, _row: &Row) -> Option<(u64, Reply)> {
+        None
+    }
 }
 
 /// A simulated cluster of one program's nodes.
@@ -240,6 +287,10 @@ pub struct Cluster<'p> {
     /// Whether clients hold off starting new operations (operations in flight continue).
     clients_paused: bool,
     nemesis_at: i64,
+    /// Byte-stream connections, stream clients, and each node connection's pipe and end.
+    pipes: Vec<streams::Pipe>,
+    stream_clients: Vec<streams::ClientSlot<'p>>,
+    node_ends: BTreeMap<(NodeId, blossom_value::value::ConnId), (usize, usize)>,
 }
 
 const EPOCH: i64 = 1_000_000_000_000_000_000;
@@ -302,6 +353,9 @@ impl<'p> Cluster<'p> {
             observers: Vec::new(),
             clients_paused: false,
             nemesis_at: i64::MAX,
+            pipes: Vec::new(),
+            stream_clients: Vec::new(),
+            node_ends: BTreeMap::new(),
             cfg,
         };
         if c.cfg.nemesis > 0 {
@@ -314,6 +368,7 @@ impl<'p> Cluster<'p> {
                 restarts: 0,
                 offset: 0,
                 next_session: 0,
+                next_conn: 0,
                 sessions: BTreeMap::new(),
                 down_until: None,
             });
@@ -363,6 +418,7 @@ impl<'p> Cluster<'p> {
         slot.restarts = opened.record.restarts;
         slot.offset = opened.boot.now.0.saturating_sub(now).max(0);
         slot.next_session = 0;
+        slot.next_conn = 0;
         slot.sessions.clear();
         slot.down_until = None;
         let mut cfg = NodeConfig::new(n, artifact.roles.get(n.0 as usize).copied().flatten());
@@ -379,9 +435,13 @@ impl<'p> Cluster<'p> {
     }
 
     fn schedule(&mut self, delay: i64, e: Envelope) {
+        self.schedule_at(self.now + delay.max(1), e);
+    }
+
+    fn schedule_at(&mut self, at: i64, e: Envelope) {
         self.seq += 1;
         self.run.messages += 1;
-        self.net.insert((self.now + delay.max(1), self.seq), e);
+        self.net.insert((at.max(self.now + 1), self.seq), e);
     }
 
     /// Adds an invariant checked after every step.
@@ -451,13 +511,14 @@ impl<'p> Cluster<'p> {
             }
         }
         self.note(format!("partition {groups:?}"));
-        Ok(())
+        self.streams_partitioned()
     }
 
-    /// Cuts the link from `from` to `to` (one way).
-    pub fn cut(&mut self, from: NodeId, to: NodeId) {
+    /// Cuts the link from `from` to `to` (one way). A byte-stream connection between them resets.
+    pub fn cut(&mut self, from: NodeId, to: NodeId) -> Result<(), SimError> {
         self.blocked.insert((from, to));
         self.note(format!("cut {} -> {}", from.0, to.0));
+        self.streams_partitioned()
     }
 
     pub fn heal(&mut self) {
@@ -533,6 +594,9 @@ impl<'p> Cluster<'p> {
                     next = next.min(p.deadline);
                 }
             }
+            if let Some(w) = self.stream_wake() {
+                next = next.min(w);
+            }
             for n in &self.nodes {
                 if let Some(t) = n.down_until {
                     next = next.min(t);
@@ -567,6 +631,7 @@ impl<'p> Cluster<'p> {
             for c in 0..self.clients.len() {
                 self.client_step(c)?;
             }
+            self.stream_clients_step()?;
         }
         Ok(())
     }
@@ -630,6 +695,7 @@ impl<'p> Cluster<'p> {
             .map_err(|e| internal_error!("crash: {e}"))?;
         slot.down_until = Some(down_until);
         self.run.crashes += 1;
+        self.streams_node_down(n)?;
         self.note(format!(
             "crash node {}{}",
             n.0,
@@ -660,7 +726,10 @@ impl<'p> Cluster<'p> {
         }
         let sessions = slot.sessions.clone();
         let mut local: Vec<Delivery> = Vec::new();
-        for t in released {
+        for mut t in released {
+            let host = std::mem::take(&mut t.host);
+            let retired = std::mem::take(&mut t.retired);
+            self.stream_released(n, &host, &retired)?;
             for s in t.sends {
                 if s.to == n {
                     local.push(Delivery {
@@ -771,6 +840,10 @@ impl<'p> Cluster<'p> {
                 }
             }
             Envelope::ToClient { client, rel, row } => self.client_reply(client, rel, &row)?,
+            Envelope::PipeConnect { pipe } => self.pipe_connect(pipe)?,
+            Envelope::PipeOpened { pipe } => self.pipe_opened(pipe)?,
+            Envelope::PipeBytes { pipe, to, bytes } => self.pipe_bytes(pipe, to, bytes)?,
+            Envelope::PipeClosed { pipe, to, reason } => self.pipe_closed(pipe, to, &reason)?,
         }
         Ok(())
     }
@@ -922,6 +995,7 @@ impl<'p> Cluster<'p> {
             Split,
             OneWay,
             Heal,
+            DropStream,
         }
         let mut actions: Vec<Action> = Vec::new();
         if self.cfg.crashes {
@@ -929,6 +1003,9 @@ impl<'p> Cluster<'p> {
         }
         if self.cfg.partitions {
             actions.extend([Action::Isolate, Action::Split, Action::OneWay, Action::Heal]);
+        }
+        if self.cfg.stream_drops {
+            actions.push(Action::DropStream);
         }
         if actions.is_empty() || n == 0 {
             return Ok(());
@@ -982,12 +1059,13 @@ impl<'p> Cluster<'p> {
                     let from = node_id(usize::try_from(self.rng.below(n as u64)).unwrap_or(0))?;
                     let to = node_id(usize::try_from(self.rng.below(n as u64)).unwrap_or(0))?;
                     if from != to {
-                        self.cut(from, to);
+                        self.cut(from, to)?;
                     }
                 }
                 self.run.partitions += 1;
             }
             Action::Heal => self.heal(),
+            Action::DropStream => self.stream_drop()?,
         }
         Ok(())
     }

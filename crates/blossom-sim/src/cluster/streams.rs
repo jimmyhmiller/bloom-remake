@@ -1,0 +1,674 @@
+//! Byte streams in the cluster simulator (FOREIGN-PROTOCOLS §1.4): simulated TCP connections ("pipes") between a
+//! node's stream and a Rust test client, or between two nodes (a connect stream dialing `sim://NODE/STREAM`).
+//!
+//! A pipe carries bytes in order in each direction. Whatever an end sends is split at random byte boundaries and
+//! each chunk arrives after a random latency, never before the chunk sent ahead of it, so programs see arbitrary
+//! chunking. A node end writes through [`SeqWriter`], as the runtime does, and its writes leave only when their tick
+//! is released. Closing follows the runtime:
+//! - A client's close is a half-close: the node end learns after the bytes in flight, and the client still reads
+//!   what the node writes until the node end retires.
+//! - A program's `close`: the other end learns after the bytes in flight, and the node end gets its own `closed`.
+//! - A node end retires when the tick that delivered its `closed` is released; the other end then learns, after the
+//!   bytes in flight.
+//! - A reset tells both ends at once and drops what is in flight: a crash of a node end's node, a partition between
+//!   its two nodes, the nemesis, or a node end writing a bad `seq`.
+//!
+//! Every choice is drawn from the simulation's seeded generator, so a run replays exactly.
+
+use std::sync::Arc;
+
+use blossom_base::internal_error;
+use blossom_node::streams::{HostRequest, Observed, SeqWriter, host_request};
+use blossom_value::time::{Instant, NodeId};
+use blossom_value::value::ConnId;
+
+use super::{Cluster, Envelope, node_id};
+use crate::sync::SimError;
+
+/// What happens to a simulated stream client.
+#[derive(Debug)]
+pub enum StreamEvent<'a> {
+    /// Its wake-up time came (or it just joined).
+    Wake,
+    /// Its connection was established.
+    Opened,
+    /// Bytes arrived on its connection.
+    Received(&'a [u8]),
+    /// Its connection closed or could not be established, with why.
+    Closed(&'a str),
+}
+
+/// What a stream client does in answer to an event.
+#[derive(Debug, Default)]
+pub struct StreamAction {
+    /// Connect to this node's listen stream (when not connected).
+    pub connect: Option<(NodeId, Arc<str>)>,
+    /// Bytes to send on its connection.
+    pub send: Vec<u8>,
+    /// Close its connection (after `send`).
+    pub close: bool,
+    /// When to wake it next (virtual nanoseconds since the start).
+    pub wake: Option<i64>,
+}
+
+/// A simulated peer of a node's byte stream: a Rust test client, driven by the simulator.
+pub trait StreamClient {
+    /// Handles an event at virtual time `now` (nanoseconds since the start). An error is an invariant violation:
+    /// the run stops there.
+    fn on(&mut self, now: i64, e: StreamEvent<'_>) -> Result<StreamAction, String>;
+}
+
+/// End `i` (0 or 1) of a pipe's per-end pair.
+fn side<T>(pair: &[T; 2], i: usize) -> &T {
+    let [a, b] = pair;
+    if i == 0 { a } else { b }
+}
+
+fn side_mut<T>(pair: &mut [T; 2], i: usize) -> &mut T {
+    let [a, b] = pair;
+    if i == 0 { a } else { b }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum End {
+    Client(usize),
+    /// A node's connection, in one incarnation of the node.
+    Node {
+        node: NodeId,
+        restarts: u64,
+        conn: ConnId,
+    },
+    /// A node end not yet accepted: the target node and its listen stream.
+    Pending {
+        node: NodeId,
+        stream: usize,
+    },
+}
+
+#[derive(Debug)]
+pub(super) struct Pipe {
+    ends: [End; 2],
+    /// Each node end's writes in `seq` order.
+    writers: [SeqWriter; 2],
+    /// When the last delivery towards each end is due: the next arrives no earlier.
+    due: [i64; 2],
+    /// Whether each end still takes bytes.
+    recv: [bool; 2],
+    /// Whether each end was told the connection closed (it gets no more events).
+    told: [bool; 2],
+    /// A dialed pipe: the dialing node end is end 0, with its stream and request id.
+    dial: Option<(usize, u64)>,
+}
+
+impl Pipe {
+    fn new(ends: [End; 2], now: i64, dial: Option<(usize, u64)>) -> Pipe {
+        Pipe {
+            ends,
+            writers: [SeqWriter::default(), SeqWriter::default()],
+            due: [now, now],
+            recv: [true, true],
+            told: [false, false],
+            dial,
+        }
+    }
+
+    fn live(&self) -> bool {
+        !(self.told[0] && self.told[1])
+    }
+}
+
+pub(super) struct ClientSlot<'p> {
+    client: Box<dyn StreamClient + 'p>,
+    pipe: Option<usize>,
+    wake: i64,
+}
+
+impl<'p> Cluster<'p> {
+    /// Adds a stream client; it gets its first event (`Wake`) at once.
+    pub fn stream_client(&mut self, c: Box<dyn StreamClient + 'p>) {
+        self.stream_clients.push(ClientSlot {
+            client: c,
+            pipe: None,
+            wake: self.now,
+        });
+    }
+
+    /// The earliest wake-up of a stream client.
+    pub(super) fn stream_wake(&self) -> Option<i64> {
+        self.stream_clients.iter().map(|c| c.wake).min()
+    }
+
+    /// Wakes the stream clients that are due.
+    pub(super) fn stream_clients_step(&mut self) -> Result<(), SimError> {
+        for i in 0..self.stream_clients.len() {
+            if self.stream_clients.get(i).is_some_and(|c| c.wake <= self.now) {
+                if let Some(c) = self.stream_clients.get_mut(i) {
+                    c.wake = i64::MAX;
+                }
+                self.client_event(i, StreamEvent::Wake)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn client_event(&mut self, i: usize, e: StreamEvent<'_>) -> Result<(), SimError> {
+        if self.run.violation.is_some() {
+            return Ok(());
+        }
+        let now = self.now - super::EPOCH;
+        let slot = self
+            .stream_clients
+            .get_mut(i)
+            .ok_or_else(|| internal_error!("no stream client {i}"))?;
+        let action = match slot.client.on(now, e) {
+            Ok(a) => a,
+            Err(v) => {
+                let v = format!("{now}: stream client {i}: {v}");
+                self.run.log.push(format!("violation: {v}"));
+                self.run.violation = Some(v);
+                return Ok(());
+            }
+        };
+        if let Some(w) = action.wake {
+            slot.wake = super::EPOCH.saturating_add(w).max(self.now + 1);
+        }
+        match (slot.pipe, action.connect) {
+            (None, Some((node, stream))) => self.client_connect(i, node, &stream)?,
+            (Some(_), Some(_)) => return Err(internal_error!("stream client {i} connects while connected").into()),
+            _ => {}
+        }
+        let pipe = self.stream_clients.get(i).and_then(|c| c.pipe);
+        match pipe {
+            Some(p) => {
+                if !action.send.is_empty() {
+                    self.send_bytes(p, 0, action.send);
+                }
+                if action.close {
+                    self.half_close(p, 0);
+                }
+            }
+            None if !action.send.is_empty() || action.close => {
+                return Err(internal_error!("stream client {i} sends without a connection").into());
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
+    /// The index of `node`'s stream named `name`, if the node is up, runs it and it listens.
+    fn listen_stream(&self, node: NodeId, name: &str) -> Option<usize> {
+        let d = self.nodes.get(node.0 as usize)?.driver.as_ref()?;
+        d.node
+            .streams()
+            .iter()
+            .position(|s| &*s.name == name && s.kind == blossom_ir::core::StreamKind::Listen)
+    }
+
+    fn client_connect(&mut self, i: usize, node: NodeId, stream: &str) -> Result<(), SimError> {
+        let Some(s) = self.listen_stream(node, stream) else {
+            // Nothing listens there (the node is down, or runs no such stream): refused.
+            let why = format!("node {} does not accept on `{stream}`", node.0);
+            return self.client_event(i, StreamEvent::Closed(&why));
+        };
+        let p = self.pipes.len();
+        self.pipes.push(Pipe::new(
+            [End::Client(i), End::Pending { node, stream: s }],
+            self.now,
+            None,
+        ));
+        if let Some(c) = self.stream_clients.get_mut(i) {
+            c.pipe = Some(p);
+        }
+        let delay = self.rng.range(self.cfg.latency.0, self.cfg.latency.1);
+        self.schedule(delay, Envelope::PipeConnect { pipe: p });
+        Ok(())
+    }
+
+    /// A dial by a node's connect stream: `sim://NODE/STREAM` names a node of the deployment and its listen stream.
+    fn node_dial(&mut self, from: NodeId, stream: usize, req: u64, addr: &str) -> Result<(), SimError> {
+        let target = addr.strip_prefix("sim://").and_then(|rest| rest.split_once('/'));
+        let found = target.and_then(|(name, s)| {
+            let n = self.names.iter().position(|x| &**x == name)?;
+            let n = node_id(n).ok()?;
+            Some((n, self.listen_stream(n, s)?))
+        });
+        let Some((to, s)) = found else {
+            return self.stream_dial_failed(from, stream, req, format!("cannot reach `{addr}`"));
+        };
+        if self.blocked.contains(&(from, to)) || self.blocked.contains(&(to, from)) {
+            return self.stream_dial_failed(from, stream, req, format!("`{addr}` is unreachable (partitioned)"));
+        }
+        let restarts = self.nodes.get(from.0 as usize).map_or(0, |s| s.restarts);
+        let conn = self.allocate_conn(from)?;
+        let p = self.pipes.len();
+        self.pipes.push(Pipe::new(
+            [
+                End::Node {
+                    node: from,
+                    restarts,
+                    conn,
+                },
+                End::Pending { node: to, stream: s },
+            ],
+            self.now,
+            Some((stream, req)),
+        ));
+        self.node_ends.insert((from, conn), (p, 0));
+        let delay = self.rng.range(self.cfg.latency.0, self.cfg.latency.1);
+        self.schedule(delay, Envelope::PipeConnect { pipe: p });
+        Ok(())
+    }
+
+    fn stream_dial_failed(&mut self, node: NodeId, stream: usize, req: u64, why: String) -> Result<(), SimError> {
+        self.observe_at(
+            node,
+            Observed::Failed {
+                stream,
+                req,
+                reason: Arc::from(why),
+            },
+        )
+    }
+
+    /// Tells a node what its host observed on a stream (nothing if the node is down).
+    fn observe_at(&mut self, node: NodeId, o: Observed) -> Result<(), SimError> {
+        if let Some(d) = self.nodes.get_mut(node.0 as usize).and_then(|s| s.driver.as_mut()) {
+            d.node
+                .observe_stream(o)
+                .map_err(|e| SimError::Internal(internal_error!("node {}: {e}", node.0)))?;
+        }
+        Ok(())
+    }
+
+    fn allocate_conn(&mut self, n: NodeId) -> Result<ConnId, SimError> {
+        let slot = self
+            .nodes
+            .get_mut(n.0 as usize)
+            .ok_or_else(|| internal_error!("no node {}", n.0))?;
+        let c = ConnId(slot.restarts << 32 | slot.next_conn);
+        slot.next_conn += 1;
+        Ok(c)
+    }
+
+    fn node_now(&self, n: NodeId) -> Instant {
+        let offset = self.nodes.get(n.0 as usize).map_or(0, |s| s.offset);
+        Instant(self.now.saturating_add(offset))
+    }
+
+    fn end_alive(&self, node: NodeId, restarts: u64) -> bool {
+        self.nodes
+            .get(node.0 as usize)
+            .is_some_and(|s| s.driver.is_some() && s.restarts == restarts)
+    }
+
+    /// A connection attempt arrives at its target node.
+    pub(super) fn pipe_connect(&mut self, p: usize) -> Result<(), SimError> {
+        let Some(pipe) = self.pipes.get(p) else {
+            return Err(internal_error!("no pipe {p}").into());
+        };
+        let End::Pending { node, stream } = pipe.ends[1].clone() else {
+            return Err(internal_error!("pipe {p} connects twice").into());
+        };
+        if pipe.told[0] {
+            return Ok(());
+        }
+        if self.listen_stream_index_ok(node, stream).is_none() {
+            return self.refuse(p, format!("node {} is down", node.0));
+        }
+        let restarts = self.nodes.get(node.0 as usize).map_or(0, |s| s.restarts);
+        let conn = self.allocate_conn(node)?;
+        if let Some(pipe) = self.pipes.get_mut(p) {
+            pipe.ends[1] = End::Node { node, restarts, conn };
+        }
+        self.node_ends.insert((node, conn), (p, 1));
+        let at = self.node_now(node);
+        self.observe_at(
+            node,
+            Observed::Opened {
+                stream,
+                conn,
+                peer: Arc::from(format!("sim-pipe-{p}")),
+                req: None,
+                at,
+            },
+        )?;
+        self.run.stream_connections += 1;
+        // The connecting end learns it is open after the way back.
+        let delay = self.rng.range(self.cfg.latency.0, self.cfg.latency.1);
+        self.schedule(delay, Envelope::PipeOpened { pipe: p });
+        Ok(())
+    }
+
+    /// Whether `node` is up (its stream `stream` then exists: stream indexes are the program's).
+    fn listen_stream_index_ok(&self, node: NodeId, stream: usize) -> Option<()> {
+        let d = self.nodes.get(node.0 as usize)?.driver.as_ref()?;
+        d.node.streams().get(stream).map(|_| ())
+    }
+
+    /// The connecting end learns the connection is established.
+    pub(super) fn pipe_opened(&mut self, p: usize) -> Result<(), SimError> {
+        let Some(pipe) = self.pipes.get(p) else {
+            return Err(internal_error!("no pipe {p}").into());
+        };
+        if pipe.told[0] {
+            return Ok(());
+        }
+        let dial = pipe.dial;
+        match pipe.ends[0].clone() {
+            End::Client(i) => self.client_event(i, StreamEvent::Opened),
+            End::Node { node, restarts, conn } => {
+                if !self.end_alive(node, restarts) {
+                    return Ok(());
+                }
+                let (stream, req) = dial.ok_or_else(|| internal_error!("a node's pipe {p} that it did not dial"))?;
+                let at = self.node_now(node);
+                self.observe_at(
+                    node,
+                    Observed::Opened {
+                        stream,
+                        conn,
+                        peer: Arc::from(format!("sim-pipe-{p}")),
+                        req: Some(req),
+                        at,
+                    },
+                )
+            }
+            End::Pending { .. } => Err(internal_error!("pipe {p}'s connecting end is pending").into()),
+        }
+    }
+
+    /// A connection that could not be established: the connecting end learns at once.
+    fn refuse(&mut self, p: usize, why: String) -> Result<(), SimError> {
+        let Some(pipe) = self.pipes.get_mut(p) else {
+            return Ok(());
+        };
+        pipe.told = [true, true];
+        pipe.recv = [false, false];
+        let (end, dial) = (pipe.ends[0].clone(), pipe.dial);
+        match end {
+            End::Client(i) => {
+                if let Some(c) = self.stream_clients.get_mut(i) {
+                    c.pipe = None;
+                }
+                self.client_event(i, StreamEvent::Closed(&why))
+            }
+            End::Node { node, restarts, conn } => {
+                self.node_ends.remove(&(node, conn));
+                match dial {
+                    Some((stream, req)) if self.end_alive(node, restarts) => {
+                        self.stream_dial_failed(node, stream, req, why)
+                    }
+                    _ => Ok(()),
+                }
+            }
+            End::Pending { .. } => Ok(()),
+        }
+    }
+
+    /// Schedules a delivery towards end `to` of pipe `p`, after a random latency and after the one ahead of it.
+    fn towards(&mut self, p: usize, to: usize, e: Envelope) {
+        let latency = self.rng.range(self.cfg.latency.0, self.cfg.latency.1);
+        let Some(pipe) = self.pipes.get_mut(p) else {
+            return;
+        };
+        let at = (self.now + latency.max(1)).max(*side(&pipe.due, to) + 1);
+        *side_mut(&mut pipe.due, to) = at;
+        self.schedule_at(at, e);
+    }
+
+    /// Sends `bytes` from end `from` of pipe `p`, split at random byte boundaries.
+    fn send_bytes(&mut self, p: usize, from: usize, bytes: Vec<u8>) {
+        let to = 1 - from;
+        let mut rest = bytes.as_slice();
+        while !rest.is_empty() {
+            let max = self.cfg.chunk_max.max(1) as u64;
+            let n = (1 + self.rng.below(max) as usize).min(rest.len());
+            let (chunk, tail) = rest.split_at(n);
+            rest = tail;
+            self.run.stream_bytes += chunk.len() as u64;
+            self.towards(
+                p,
+                to,
+                Envelope::PipeBytes {
+                    pipe: p,
+                    to,
+                    bytes: chunk.to_vec(),
+                },
+            );
+        }
+    }
+
+    /// Bytes arrive at end `to` of pipe `p`.
+    pub(super) fn pipe_bytes(&mut self, p: usize, to: usize, bytes: Vec<u8>) -> Result<(), SimError> {
+        let Some(pipe) = self.pipes.get(p) else {
+            return Err(internal_error!("no pipe {p}").into());
+        };
+        if !*side(&pipe.recv, to) || *side(&pipe.told, to) {
+            return Ok(());
+        }
+        match side(&pipe.ends, to).clone() {
+            End::Client(i) => self.client_event(i, StreamEvent::Received(&bytes)),
+            End::Node { node, restarts, conn } => {
+                if !self.end_alive(node, restarts) {
+                    return Ok(());
+                }
+                self.observe_at(node, Observed::Bytes { conn, bytes })
+            }
+            End::Pending { .. } => Err(internal_error!("bytes to a pending end of pipe {p}").into()),
+        }
+    }
+
+    /// End `from` sends no more (a client's half-close): the other end learns after the bytes in flight.
+    fn half_close(&mut self, p: usize, from: usize) {
+        let to = 1 - from;
+        if self.pipes.get(p).is_none_or(|x| *side(&x.told, to)) {
+            return;
+        }
+        self.towards(
+            p,
+            to,
+            Envelope::PipeClosed {
+                pipe: p,
+                to,
+                reason: Arc::from("closed by the peer"),
+            },
+        );
+    }
+
+    /// End `to` of pipe `p` learns the connection closed.
+    pub(super) fn pipe_closed(&mut self, p: usize, to: usize, reason: &str) -> Result<(), SimError> {
+        let Some(pipe) = self.pipes.get_mut(p) else {
+            return Err(internal_error!("no pipe {p}").into());
+        };
+        if *side(&pipe.told, to) {
+            return Ok(());
+        }
+        *side_mut(&mut pipe.told, to) = true;
+        *side_mut(&mut pipe.recv, to) = false;
+        let end = side(&pipe.ends, to).clone();
+        self.tell_closed(&end, reason)
+    }
+
+    fn tell_closed(&mut self, end: &End, reason: &str) -> Result<(), SimError> {
+        match end {
+            End::Client(i) => {
+                if let Some(c) = self.stream_clients.get_mut(*i) {
+                    c.pipe = None;
+                }
+                self.client_event(*i, StreamEvent::Closed(reason))
+            }
+            End::Node { node, restarts, conn } if self.end_alive(*node, *restarts) => self.observe_at(
+                *node,
+                Observed::Closed {
+                    conn: *conn,
+                    reason: Arc::from(reason),
+                },
+            ),
+            End::Node { .. } | End::Pending { .. } => Ok(()),
+        }
+    }
+
+    /// Resets pipe `p`: both ends learn at once and nothing in flight arrives.
+    fn reset(&mut self, p: usize, why: &str) -> Result<(), SimError> {
+        let Some(pipe) = self.pipes.get_mut(p) else {
+            return Ok(());
+        };
+        let told = pipe.told;
+        pipe.told = [true, true];
+        pipe.recv = [false, false];
+        let ends = pipe.ends.clone();
+        self.run.stream_resets += 1;
+        for (end, was_told) in ends.iter().zip(told) {
+            if !was_told {
+                self.tell_closed(end, why)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A node's released tick: its stream writes (in connection and `seq` order), its closes, the connections whose
+    /// `closed` it delivered, then its dials.
+    pub(super) fn stream_released(
+        &mut self,
+        n: NodeId,
+        host: &[blossom_ir::tick::HostOut],
+        retired: &[ConnId],
+    ) -> Result<(), SimError> {
+        if host.is_empty() && retired.is_empty() {
+            return Ok(());
+        }
+        let streams = match self.nodes.get(n.0 as usize).and_then(|s| s.driver.as_ref()) {
+            Some(d) => d.node.streams().to_vec(),
+            None => return Ok(()),
+        };
+        let mut writes = Vec::new();
+        let mut closes = Vec::new();
+        let mut dials = Vec::new();
+        for h in host {
+            match host_request(&streams, h).map_err(|e| SimError::Internal(internal_error!("node {}: {e}", n.0)))? {
+                HostRequest::Write { conn, seq, bytes } => writes.push((conn, seq, bytes)),
+                HostRequest::Close { conn } => closes.push(conn),
+                HostRequest::Dial { stream, req, addr } => dials.push((stream, req, addr)),
+            }
+        }
+        writes.sort_by_key(|w| (w.0, w.1));
+        for (conn, seq, bytes) in writes {
+            let Some(&(p, end)) = self.node_ends.get(&(n, conn)) else {
+                self.run.dropped += 1;
+                continue;
+            };
+            let accepted = match self.pipes.get_mut(p) {
+                Some(x) if x.live() => side_mut(&mut x.writers, end).accept(seq, bytes),
+                _ => {
+                    self.run.dropped += 1;
+                    continue;
+                }
+            };
+            match accepted {
+                Ok(ready) => {
+                    for b in ready {
+                        self.send_bytes(p, end, b);
+                    }
+                }
+                Err(why) => {
+                    self.run.stream_violations += 1;
+                    self.run.log.push(format!(
+                        "{}: node {} stream violation: {why}",
+                        self.now - super::EPOCH,
+                        n.0
+                    ));
+                    self.reset(p, &why)?;
+                }
+            }
+        }
+        // A program's close: the other end learns after the bytes sent, and the node end gets its own `closed`.
+        for conn in closes {
+            let Some(&(p, end)) = self.node_ends.get(&(n, conn)) else {
+                continue;
+            };
+            self.half_close(p, end);
+            if let Some(x) = self.pipes.get_mut(p) {
+                *side_mut(&mut x.recv, end) = false;
+            }
+            if self.pipes.get(p).is_some_and(|x| !*side(&x.told, end)) {
+                let delay = self.rng.range(self.cfg.latency.0, self.cfg.latency.1);
+                self.schedule(
+                    delay,
+                    Envelope::PipeClosed {
+                        pipe: p,
+                        to: end,
+                        reason: Arc::from("closed by the program"),
+                    },
+                );
+            }
+        }
+        // The runtime closes a connection once the tick that delivered its `closed` is released.
+        for conn in retired {
+            if let Some((p, end)) = self.node_ends.remove(&(n, *conn)) {
+                self.half_close(p, end);
+            }
+        }
+        for (stream, req, addr) in dials {
+            self.node_dial(n, stream, req, &addr)?;
+        }
+        Ok(())
+    }
+
+    /// A node went down: every pipe with an end in that incarnation resets.
+    pub(super) fn streams_node_down(&mut self, n: NodeId) -> Result<(), SimError> {
+        let pipes: Vec<usize> = (0..self.pipes.len())
+            .filter(|p| {
+                self.pipes.get(*p).is_some_and(|x| {
+                    x.live()
+                        && x.ends
+                            .iter()
+                            .any(|e| matches!(e, End::Node { node, .. } | End::Pending { node, .. } if *node == n))
+                })
+            })
+            .collect();
+        for p in pipes {
+            self.reset(p, "the node crashed")?;
+        }
+        self.node_ends.retain(|(node, _), _| *node != n);
+        Ok(())
+    }
+
+    /// A partition resets the pipes between the nodes it separates.
+    pub(super) fn streams_partitioned(&mut self) -> Result<(), SimError> {
+        let pipes: Vec<usize> = (0..self.pipes.len())
+            .filter(|p| {
+                self.pipes.get(*p).is_some_and(|x| {
+                    x.live()
+                        && match (&x.ends[0], &x.ends[1]) {
+                            (End::Node { node: a, .. }, End::Node { node: b, .. }) => {
+                                self.blocked.contains(&(*a, *b)) || self.blocked.contains(&(*b, *a))
+                            }
+                            _ => false,
+                        }
+                })
+            })
+            .collect();
+        for p in pipes {
+            self.reset(p, "partitioned")?;
+        }
+        Ok(())
+    }
+
+    /// The nemesis resets a random live connection.
+    pub(super) fn stream_drop(&mut self) -> Result<(), SimError> {
+        let live: Vec<usize> = (0..self.pipes.len())
+            .filter(|p| self.pipes.get(*p).is_some_and(|x| !x.told[0] && !x.told[1]))
+            .collect();
+        if live.is_empty() {
+            return Ok(());
+        }
+        let pick = self.rng.below(live.len() as u64) as usize;
+        if let Some(&p) = live.get(pick) {
+            self.run
+                .log
+                .push(format!("{}: reset stream connection {p}", self.now - super::EPOCH));
+            self.reset(p, "connection reset")?;
+        }
+        Ok(())
+    }
+}
