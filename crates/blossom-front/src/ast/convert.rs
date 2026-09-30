@@ -146,6 +146,23 @@ impl Cx<'_> {
     }
 
     /// Reports a tree shape the converter did not expect (an error-free parse never produces one).
+    /// A closure's parameters: names, or `_` for one it ignores.
+    fn closure_params(&mut self, params: &[SyntaxNode]) -> Vec<Ident> {
+        let mut names = Vec::new();
+        for p in params {
+            let span = self.span(p);
+            match self.expr(p).kind {
+                ExprKind::Path(path, targs) if targs.is_empty() && path.len() == 1 => names.extend(path),
+                ExprKind::Wildcard => names.push(Ident {
+                    name: Symbol::intern("_"),
+                    span,
+                }),
+                _ => self.malformed("a closure parameter that is not a name", span),
+            }
+        }
+        names
+    }
+
     fn malformed(&mut self, what: &str, span: Span) {
         self.diags.push(
             Diagnostic::not_implemented(
@@ -1557,13 +1574,7 @@ impl Cx<'_> {
                 // `|a, b| body`: the parameters are path expressions; the body is a block, or else the last expression.
                 let es: Vec<SyntaxNode> = expr_children(node).collect();
                 if let Some(block) = child_of(node, BLOCKEXPR) {
-                    let mut names = Vec::new();
-                    for p in &es {
-                        match self.expr(p).kind {
-                            ExprKind::Path(path, targs) if targs.is_empty() && path.len() == 1 => names.extend(path),
-                            _ => self.malformed("a closure parameter that is not a name", self.span(p)),
-                        }
-                    }
+                    let names = self.closure_params(&es);
                     return ExprKind::Closure {
                         params: names,
                         body: Box::new(self.block_expr(&block)),
@@ -1573,15 +1584,7 @@ impl Cx<'_> {
                     self.malformed("a closure without a body", span);
                     return ExprKind::Wildcard;
                 };
-                let mut names = Vec::new();
-                for p in params {
-                    match self.expr(p).kind {
-                        ExprKind::Path(path, targs) if targs.is_empty() && path.len() == 1 => {
-                            names.extend(path);
-                        }
-                        _ => self.malformed("a closure parameter that is not a name", self.span(p)),
-                    }
-                }
+                let names = self.closure_params(params);
                 ExprKind::Closure {
                     params: names,
                     body: Box::new(self.expr(body)),
