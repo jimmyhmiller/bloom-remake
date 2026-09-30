@@ -218,7 +218,7 @@ fn scenario(name: &str, artifact: &BlsArtifact, seed: u64) -> usize {
 }
 
 /// Examples that need a feature this build does not implement (BLS0908): user-defined lattices and impl blocks (e05),
-/// functions (e06), soft tables (e08).
+/// reliable channels, seals, partitioning and final outputs (e06), soft tables (e08).
 #[cfg(test)]
 const SKIPPED: &[&str] = &["e05_lattices.bls", "e06_wordcount.bls", "e08_failure_detector.bls"];
 

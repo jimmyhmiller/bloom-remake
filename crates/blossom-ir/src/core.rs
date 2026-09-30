@@ -67,6 +67,9 @@ pub struct FnDecl {
     pub name: QualName,
     pub params: Vec<(Symbol, TypeId)>,
     pub ret: TypeId,
+    /// An `Ir` body's variables: the parameters first (in order), then every `let` and closure binding. Empty for
+    /// other bodies.
+    pub vars: IndexVec<VarId, VarDecl>,
     pub body: FnBody,
     pub props: FnProps,
 }
@@ -534,6 +537,7 @@ pub enum BuiltinFn {
     Size { role: RoleId },
     Len,
     IntCast(blossom_value::types::IntTy), // `x as T` between integer types: out of range is BLSR004 (LANGUAGE §5.2)
+    Lib(LibFn), // the built-in library (LANGUAGE Appendix B); the receiver, if any, first
     Concat, // `a ++ b` on String, Bytes or Vec (LANGUAGE §9.12)
     Contains,
     Keys,
@@ -542,6 +546,52 @@ pub enum BuiltinFn {
     Hash64,
     Fingerprint,
     Error, /* … Appendix B … */
+}
+
+/// A function or method of the built-in library (LANGUAGE Appendix B). The receiver, if any, is the first argument;
+/// a combinator's closure is the last. Every one is total: a position past the end is `None`, never an error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum LibFn {
+    /// `range(lo, hi)`: the `u64`s from `lo` up to, not including, `hi` (empty when `hi <= lo`).
+    Range,
+    /// `v.get(i) -> Option<T>`.
+    VecGet,
+    /// `v.first()`, `v.last() -> Option<T>`.
+    VecFirst,
+    VecLast,
+    /// `v.push(x)`: a copy with `x` appended.
+    VecPush,
+    /// `v.concat(w)`.
+    VecConcat,
+    /// `v.is_empty()`.
+    VecIsEmpty,
+    /// `v.reverse()`.
+    VecReverse,
+    /// `v.enumerate() -> Vec<(u64, T)>`.
+    VecEnumerate,
+    /// `v.map(|x| e)`, `v.filter(|x| b)`, `v.filter_map(|x| o)`, `v.all(|x| b)`, `v.any(|x| b)`.
+    VecMap,
+    VecFilter,
+    VecFilterMap,
+    VecAll,
+    VecAny,
+    /// `v.fold(init, |acc, x| e)`: left to right.
+    VecFold,
+    /// `o.is_some()`, `o.is_none()`, `o.unwrap_or(d)`.
+    OptIsSome,
+    OptIsNone,
+    OptUnwrapOr,
+    /// `o.map(|x| e)`, `o.and_then(|x| o2)`.
+    OptMap,
+    OptAndThen,
+    /// `b.slice(lo, hi) -> Option<Bytes>`: `None` unless `lo <= hi <= len`.
+    BytesSlice,
+    /// `b.concat(c)`.
+    BytesConcat,
+    /// `s.split_whitespace() -> Vec<String>`: the non-empty runs between Unicode whitespace.
+    StrSplitWhitespace,
+    /// `s.to_lowercase()`: Unicode lowercase mapping.
+    StrToLowercase,
 }
 
 /// Construct data in the Dedalus core IR.

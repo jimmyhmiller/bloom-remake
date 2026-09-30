@@ -112,10 +112,22 @@ pub enum ItemKind {
     Invariant(Invariant),
     Interpose(Interpose),
     Spec(SpecItem),
+    /// `fn name(params) -> ret { body }` (LANGUAGE §16.1).
+    Fn(FnItem),
     /// A construct this build parses but does not accept yet; the converter has already reported it (BLS0908).
     Unsupported {
         what: &'static str,
     },
+}
+
+/// A pure function: total, non-recursive, its body a block of `let`s and a final expression (LANGUAGE §16.1).
+#[derive(Clone, Debug)]
+pub struct FnItem {
+    pub name: Ident,
+    pub params: Vec<(Ident, Type)>,
+    pub ret: Type,
+    pub body: Expr,
+    pub span: Span,
 }
 
 /// `use a::b::{C, D};`: every imported path, with its last segment as the local name.
@@ -680,6 +692,25 @@ pub enum ExprKind {
     },
     Wildcard,
     SelfNode,
+    /// `{ let p = e; …; result }`: `let`s bind in order (function bodies only, LANGUAGE §16.1).
+    Block {
+        lets: Vec<BlockLet>,
+        result: Box<Expr>,
+    },
+    /// `|a, b| body`: only as an argument of a built-in combinator, in function bodies (LANGUAGE §16.1).
+    Closure {
+        params: Vec<Ident>,
+        body: Box<Expr>,
+    },
+}
+
+/// `let pat [: T] = value;` in a block.
+#[derive(Clone, Debug)]
+pub struct BlockLet {
+    pub pat: Expr,
+    pub ty: Option<Type>,
+    pub value: Expr,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug)]

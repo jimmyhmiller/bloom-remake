@@ -34,6 +34,11 @@ pub(crate) struct RuleCx {
     pub choices: u32,
     /// Whether the statements are a plain `bootstrap`'s (which may not write durable relations, BLS0402).
     pub plain_bootstrap: bool,
+    /// Whether this is a function body (LANGUAGE §16.1): `let` blocks and closures are allowed, and relations,
+    /// `now()`, `tick()`, `self`, randomness and role members are not (BLS0215).
+    pub in_fn: bool,
+    /// The functions this scope calls, for the recursion check (BLS0213).
+    pub calls: BTreeSet<HFnId>,
 }
 
 fn is_var_name(name: &str) -> bool {
@@ -56,7 +61,285 @@ impl<'t> Resolver<'t, '_> {
             choice_allowed: false,
             choices: 0,
             plain_bootstrap: false,
+            in_fn: false,
+            calls: BTreeSet::new(),
         }
+    }
+
+    /// Reports a read a function body may not make (BLS0215); true if `cx` is a function body.
+    fn impure(&mut self, cx: &RuleCx, span: Span, what: &str) -> bool {
+        if cx.in_fn {
+            self.error(
+                code!("BLS0215"),
+                span,
+                format!("a function is pure: its body cannot read {what} (LANGUAGE §16.1)"),
+            );
+        }
+        cx.in_fn
+    }
+
+    /// Pure functions (LANGUAGE §16.1): every signature in the module is declared first, so bodies may call functions
+    /// declared after them; then the bodies are resolved, each in its own scope with the parameters as its first
+    /// variables; then calls that form a cycle are reported (BLS0213).
+    pub(crate) fn functions(&mut self, s: ScopeIdx, items: &'t [ast::Item]) {
+        let mut fns: Vec<(&'t ast::FnItem, HFnId)> = Vec::new();
+        let mut stack = vec![items];
+        while let Some(items) = stack.pop() {
+            for item in items {
+                match &item.kind {
+                    ast::ItemKind::Fn(f) => {
+                        if let Some(id) = self.declare_fn(s, f) {
+                            fns.push((f, id));
+                        }
+                    }
+                    ast::ItemKind::At { items, .. } => stack.push(items),
+                    _ => {}
+                }
+            }
+        }
+        let mut calls: BTreeMap<HFnId, BTreeSet<HFnId>> = BTreeMap::new();
+        for (f, id) in fns {
+            let (scope, params) = match self.hir.fns.get(id.index()) {
+                Some(h) => (h.scope, h.params.clone()),
+                None => {
+                    self.bugs.push(blossom_base::internal_error!("function {id:?} was not declared"));
+                    continue;
+                }
+            };
+            let mut cx = RuleCx {
+                ms: s,
+                scope,
+                frames: vec![BTreeMap::new()],
+                placement: None,
+                aliases: BTreeMap::new(),
+                choice_allowed: false,
+                choices: 0,
+                plain_bootstrap: false,
+                in_fn: true,
+                calls: BTreeSet::new(),
+            };
+            for ((name, _), (v, _)) in f.params.iter().zip(&params) {
+                if let Some(frame) = cx.frames.last_mut() {
+                    frame.insert(name.name, *v);
+                }
+            }
+            match self.expr(&mut cx, &f.body) {
+                Some(body) => {
+                    if let Some(h) = self.hir.fns.get_mut(id.index()) {
+                        h.body = body;
+                    }
+                }
+                None if !self.diags.has_errors() => self.bugs.push(blossom_base::internal_error!(
+                    "the body of function `{}` failed to resolve without a diagnostic",
+                    f.name.as_str()
+                )),
+                None => {}
+            }
+            calls.insert(id, cx.calls);
+        }
+        // A function is total when everything it calls is: peel those off until nothing changes; what remains calls
+        // itself, directly or through others.
+        let mut total: BTreeSet<HFnId> = BTreeSet::new();
+        loop {
+            let before = total.len();
+            for (id, cs) in &calls {
+                if !total.contains(id) && cs.iter().all(|c| total.contains(c) || !calls.contains_key(c)) {
+                    total.insert(*id);
+                }
+            }
+            if total.len() == before {
+                break;
+            }
+        }
+        for id in calls.keys().filter(|id| !total.contains(id)) {
+            if let Some(h) = self.hir.fns.get(id.index()) {
+                let (name, span) = (h.name.clone(), h.span);
+                self.error(
+                    code!("BLS0213"),
+                    span,
+                    format!("function `{name}` is recursive; functions are total (LANGUAGE §16.1)"),
+                );
+            }
+        }
+    }
+
+    /// Declares a function's signature: its scope, parameter variables and types. The body is resolved later.
+    fn declare_fn(&mut self, s: ScopeIdx, f: &'t ast::FnItem) -> Option<HFnId> {
+        let name = f.name;
+        if self.scope(s).fns.contains_key(&name.name) || self.scope(s).rels.contains_key(&name.name) {
+            self.error(
+                code!("BLS0201"),
+                name.span,
+                format!("`{}` is declared twice", name.as_str()),
+            );
+            return None;
+        }
+        let mut cx = self.rule_cx(s, None);
+        let mut params = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut ok = true;
+        for (p, ty) in &f.params {
+            if !seen.insert(p.name) {
+                self.error(
+                    code!("BLS0201"),
+                    p.span,
+                    format!("parameter `{}` is declared twice", p.as_str()),
+                );
+                ok = false;
+            }
+            let t = self.resolve_type(s, ty);
+            if let Some(t) = t
+                && holds_lattice(&self.hir.types, t)
+            {
+                self.unsupported(
+                    "LANG-182",
+                    "lattice-typed function parameters (they need a monotonicity class, `monotone fn` …)",
+                    p.span,
+                );
+                ok = false;
+            }
+            let v = self.new_var(&mut cx, p.name, p.span, false);
+            match t {
+                Some(t) => params.push((v, t)),
+                None => ok = false,
+            }
+        }
+        let ret = self.resolve_type(s, &f.ret);
+        if let Some(r) = ret
+            && holds_lattice(&self.hir.types, r)
+        {
+            self.unsupported(
+                "LANG-182",
+                "lattice-typed function results (they need a monotonicity class, `monotone fn` …)",
+                f.ret.span(),
+            );
+            ok = false;
+        }
+        let (Some(ret), true) = (ret, ok) else {
+            return None;
+        };
+        let id = HFnId(u32::try_from(self.hir.fns.len()).unwrap_or(u32::MAX));
+        let qual = self.qual(s, name.name);
+        self.hir.fns.push(HFn {
+            name: qual,
+            scope: cx.scope,
+            params,
+            ret,
+            // Replaced by the resolved body; a failure to resolve it is always reported, so this never reaches
+            // type checking.
+            body: HExpr::new(HExprKind::Tuple(Vec::new()), f.body.span),
+            span: f.span,
+        });
+        self.scope_mut(s).fns.insert(name.name, id);
+        Some(id)
+    }
+
+    /// A `let` pattern in a function body: a name (always a new variable, shadowing any earlier one), `_`, or a
+    /// tuple of those. A refutable pattern belongs in a `match`.
+    fn let_pattern(&mut self, cx: &mut RuleCx, e: &ast::Expr) -> Option<HPat> {
+        match &e.kind {
+            ExprKind::Wildcard => Some(HPat::Wild(e.span)),
+            ExprKind::Path(path, targs) if targs.is_empty() && path.len() == 1 => {
+                let name = path.first()?;
+                if !is_var_name(name.as_str()) {
+                    self.error(
+                        code!("BLS0301"),
+                        e.span,
+                        "a `let` binds names, `_` and tuples of them; match other patterns with `match`",
+                    );
+                    return None;
+                }
+                Some(HPat::Var(self.new_var(cx, name.name, name.span, false), e.span))
+            }
+            ExprKind::Tuple(elems) if !elems.is_empty() => {
+                let mut ps = Vec::new();
+                for el in elems {
+                    ps.push(self.let_pattern(cx, el)?);
+                }
+                Some(HPat::Tuple(ps, e.span))
+            }
+            _ => {
+                self.error(
+                    code!("BLS0301"),
+                    e.span,
+                    "a `let` binds names, `_` and tuples of them; match other patterns with `match`",
+                );
+                None
+            }
+        }
+    }
+
+    /// `{ let p = e; …; result }` in a function body: nested `Let`s, each binding visible to the ones after it.
+    fn let_block(&mut self, cx: &mut RuleCx, lets: &[ast::BlockLet], result: &ast::Expr) -> Option<HExpr> {
+        cx.frames.push(BTreeMap::new());
+        let mut bound = Vec::new();
+        let mut failed = false;
+        for l in lets {
+            // The value is resolved before the pattern binds, so `let x = x + 1` reads the earlier `x`.
+            let value = self.expr(cx, &l.value);
+            let ty = match &l.ty {
+                Some(t) => self.resolve_type(cx.ms, t).map(Some),
+                None => Some(None),
+            };
+            let pat = self.let_pattern(cx, &l.pat);
+            if pat.is_none() {
+                // Declare the names the rejected pattern meant to bind, so their uses are not reported again.
+                let mut names = BTreeSet::new();
+                refutable_pattern_names(&l.pat, &mut names);
+                for n in names {
+                    self.new_var(cx, n, l.pat.span, false);
+                }
+            }
+            match (pat, ty, value) {
+                (Some(p), Some(t), Some(v)) => bound.push((p, t, v, l.span)),
+                _ => failed = true,
+            }
+        }
+        let result = self.expr(cx, result);
+        cx.frames.pop();
+        if failed {
+            return None;
+        }
+        let mut out = result?;
+        for (pat, ty, value, span) in bound.into_iter().rev() {
+            let span = span.to(out.span).unwrap_or(span);
+            out = HExpr::new(
+                HExprKind::Let {
+                    pat: Box::new(pat),
+                    ty,
+                    value: Box::new(value),
+                    body: Box::new(out),
+                },
+                span,
+            );
+        }
+        Some(out)
+    }
+
+    /// A closure argument of a built-in combinator, in a function body: its parameters are new variables.
+    fn closure(&mut self, cx: &mut RuleCx, params: &[Ident], body: &ast::Expr, span: Span) -> Option<HExpr> {
+        if !cx.in_fn {
+            self.error(
+                code!("BLS0214"),
+                span,
+                "closures are allowed only as combinator arguments in function bodies (LANGUAGE §16.1)",
+            );
+            return None;
+        }
+        cx.frames.push(BTreeMap::new());
+        let mut vs = Vec::new();
+        for p in params {
+            vs.push(self.new_var(cx, p.name, p.span, false));
+        }
+        let body = self.expr(cx, body);
+        cx.frames.pop();
+        Some(HExpr::new(
+            HExprKind::Closure {
+                params: vs,
+                body: Box::new(body?),
+            },
+            span,
+        ))
     }
 
     fn new_var(&mut self, cx: &mut RuleCx, name: Symbol, span: Span, generated: bool) -> HVarId {
@@ -1129,11 +1412,25 @@ impl<'t> Resolver<'t, '_> {
                                     if let Some(rel) = self.callee_rel(cx, e)
                                         && self.rel_of(rel).cell
                                     {
+                                        if self.impure(cx, span, "a relation") {
+                                            return None;
+                                        }
                                         // A cell's name is its lookup `c[]` (LANGUAGE §7.13).
                                         self.check_readable(cx, rel, span);
                                         return Some(HExpr::new(HExprKind::Lookup { rel, key: Vec::new() }, span));
                                     }
-                                    if self.callee_rel(cx, e).is_some() {
+                                    if self.scope(cx.ms).fns.contains_key(&name.name) {
+                                        // A function as a value is the argument of a lattice operation
+                                        // (`s.map(f)`, `s.filter(p)`, LANGUAGE §11.5).
+                                        self.unsupported(
+                                            "LANG-124",
+                                            &format!(
+                                                "functions passed as values (`{}`), as lattice operations take them",
+                                                name.as_str()
+                                            ),
+                                            span,
+                                        );
+                                    } else if self.callee_rel(cx, e).is_some() {
                                         self.error(
                                             code!("BLS0202"),
                                             span,
@@ -1238,6 +1535,9 @@ impl<'t> Resolver<'t, '_> {
                     ExprKind::Tuple(_) => Vec::new(),
                     _ => vec![index.as_ref()],
                 };
+                if self.impure(cx, span, "a relation") {
+                    return None;
+                }
                 let mut key = Vec::new();
                 for k in keys {
                     key.push(self.expr(cx, k)?);
@@ -1427,7 +1727,31 @@ impl<'t> Resolver<'t, '_> {
                 self.error(code!("BLS0500"), span, "`_` is a pattern, not a value");
                 return None;
             }
-            ExprKind::SelfNode => HExprKind::SelfNode,
+            ExprKind::SelfNode => {
+                if self.impure(cx, span, "`self`") {
+                    return None;
+                }
+                HExprKind::SelfNode
+            }
+            ExprKind::Block { lets, result } => {
+                if !cx.in_fn {
+                    self.error(
+                        code!("BLS0214"),
+                        span,
+                        "a block with `let`s is allowed only in a function body (LANGUAGE §16.1)",
+                    );
+                    return None;
+                }
+                return self.let_block(cx, lets, result);
+            }
+            ExprKind::Closure { .. } => {
+                self.error(
+                    code!("BLS0214"),
+                    span,
+                    "a closure is allowed only as a combinator's argument in a function body (LANGUAGE §16.1)",
+                );
+                return None;
+            }
         };
         Some(HExpr::new(kind, span))
     }
@@ -1467,6 +1791,10 @@ impl<'t> Resolver<'t, '_> {
                     },
                     span,
                 })
+            }
+            [name] if matches!(name.as_str(), "now" | "tick") && pos.is_empty() && cx.in_fn => {
+                self.impure(cx, span, &format!("`{}()`", name.as_str()));
+                None
             }
             [name] if name.as_str() == "now" && pos.is_empty() => Some(HExpr {
                 ty: None,
@@ -1519,6 +1847,43 @@ impl<'t> Resolver<'t, '_> {
                     xs.push(self.expr(cx, p)?);
                 }
                 Some(HExpr::new(HExprKind::LatCtor { kind, bot, args: xs }, span))
+            }
+            [name] if matches!(name.as_str(), "rand_range" | "majority") && cx.in_fn => {
+                let what = if name.as_str() == "majority" { "a role's members" } else { "randomness" };
+                self.impure(cx, span, what);
+                None
+            }
+            [name] if name.as_str() == "range" => {
+                let [lo, hi] = pos.as_slice() else {
+                    self.error(code!("BLS0301"), span, "`range` takes `lo` and `hi`");
+                    return None;
+                };
+                let lo = self.expr(cx, lo);
+                let hi = self.expr(cx, hi);
+                Some(HExpr::new(
+                    HExprKind::Builtin {
+                        f: Builtin::Lib(blossom_ir::core::LibFn::Range),
+                        args: vec![lo?, hi?],
+                    },
+                    span,
+                ))
+            }
+            [name] if let Some(f) = self.scope(cx.ms).fns.get(&name.name).copied() => {
+                let arity = self.hir.fns.get(f.index()).map_or(0, |h| h.params.len());
+                if pos.len() != arity {
+                    self.error(
+                        code!("BLS0301"),
+                        span,
+                        format!("`{}` takes {arity} argument(s), {} given", name.as_str(), pos.len()),
+                    );
+                    return None;
+                }
+                let mut xs = Vec::new();
+                for p in pos {
+                    xs.push(self.expr(cx, p)?);
+                }
+                cx.calls.insert(f);
+                Some(HExpr::new(HExprKind::Call { f, args: xs }, span))
             }
             [name] if name.as_str() == "rand_range" => {
                 // The key makes the draw stable (the same value for the same key within a tick, LANG-175).
@@ -1591,6 +1956,9 @@ impl<'t> Resolver<'t, '_> {
             && let [r] = p.as_slice()
             && let Some(role) = self.role_named(cx.ms, r.name)
         {
+            if self.impure(cx, span, "a role's members") {
+                return None;
+            }
             if name.as_str() == "size" && args.is_empty() {
                 return Some(HExpr {
                     ty: None,
@@ -1629,7 +1997,11 @@ impl<'t> Resolver<'t, '_> {
                         self.error(code!("BLS0302"), a.span(), "method arguments are positional");
                         return None;
                     };
-                    xs.push(self.expr(cx, x)?);
+                    // A closure is a combinator's argument (LANGUAGE §16.1); type checking checks the method takes one.
+                    match &x.kind {
+                        ExprKind::Closure { params, body } => xs.push(self.closure(cx, params, body, x.span)?),
+                        _ => xs.push(self.expr(cx, x)?),
+                    }
                 }
                 Some(HExpr::new(
                     HExprKind::Method {
@@ -2485,6 +2857,42 @@ impl<'t> Resolver<'t, '_> {
             text,
             span: h.span,
         });
+    }
+}
+
+/// Whether a value of type `ty` holds a lattice or group value anywhere inside it.
+fn holds_lattice(types: &blossom_value::TypeTable, ty: TypeId) -> bool {
+    let mut seen = BTreeSet::new();
+    let mut stack = vec![ty];
+    while let Some(t) = stack.pop() {
+        if !seen.insert(t) {
+            continue;
+        }
+        match types.get(t) {
+            Some(TypeDef::Lattice(_) | TypeDef::Group(_)) => return true,
+            Some(TypeDef::Tuple(ts)) => stack.extend(ts.iter().copied()),
+            Some(TypeDef::Vec(e) | TypeDef::Set(e) | TypeDef::Option(e)) => stack.push(*e),
+            Some(TypeDef::Map(k, v)) => stack.extend([*k, *v]),
+            Some(TypeDef::Struct(d)) => stack.extend(d.fields.iter().map(|f| f.ty)),
+            Some(TypeDef::Enum(d)) => stack.extend(d.variants.iter().flat_map(|v| v.payload.iter().map(|f| f.ty))),
+            _ => {}
+        }
+    }
+    false
+}
+
+/// The names a pattern binds, variants' fields included.
+fn refutable_pattern_names(e: &ast::Expr, out: &mut BTreeSet<Symbol>) {
+    match &e.kind {
+        ExprKind::Call { args, .. } => {
+            for a in args {
+                if let Arg::Pos(x) = a {
+                    refutable_pattern_names(x, out);
+                }
+            }
+        }
+        ExprKind::Tuple(es) => es.iter().for_each(|x| refutable_pattern_names(x, out)),
+        _ => collect_pattern_names(e, out),
     }
 }
 

@@ -347,6 +347,7 @@ fn validator_v8_polymorphic_builtin_requires_monomorphic_signature() {
             name: name("error_u64"),
             params: vec![(s("message"), str_ty)],
             ret: u,
+            vars: IndexVec::new(),
             body: FnBody::Builtin(BuiltinFn::Error),
             props: FnProps {
                 classes: vec![],
@@ -860,7 +861,8 @@ fn assert_digest_permutation(flags: [bool; 15]) {
                 name: name(n),
                 params: vec![],
                 ret: u,
-                body: FnBody::Builtin(BuiltinFn::Rand),
+                vars: IndexVec::new(),
+            body: FnBody::Builtin(BuiltinFn::Rand),
                 props: props.clone(),
             })
             .unwrap();
@@ -1283,6 +1285,7 @@ fn project_role_prunes_unreferenced_shared_items() {
             name: name("unused_fn"),
             params: vec![],
             ret: ty,
+            vars: IndexVec::new(),
             body: FnBody::Builtin(BuiltinFn::ZWeight {
                 rel: RelId::from_raw(2),
             }),

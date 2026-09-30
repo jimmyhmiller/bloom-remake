@@ -106,9 +106,10 @@ fn evolution(s: Site) -> bool {
     matches!(s, Site::Column | Site::Field | Site::Variant | Site::Rel(_))
 }
 
-fn algebraic(_: Site) -> bool {
-    // Functions and aggregates: items this build rejects before their attributes are looked at.
-    false
+fn algebraic(s: Site) -> bool {
+    // Functions and aggregates. Their claims are checked by TEST-087's harness, not built yet: the attributes are
+    // accepted by the grammar and reported as not implemented.
+    matches!(s, Site::Item("fn") | Site::Item("aggregate"))
 }
 
 const BUILTINS: &[Builtin] = &[
@@ -263,25 +264,25 @@ const BUILTINS: &[Builtin] = &[
     },
     Builtin {
         name: "injective",
-        feature: "LANG-180",
+        feature: "TEST-087",
         on: algebraic,
         on_words: "functions and aggregates",
     },
     Builtin {
         name: "commutative",
-        feature: "LANG-180",
+        feature: "TEST-087",
         on: algebraic,
         on_words: "functions and aggregates",
     },
     Builtin {
         name: "associative",
-        feature: "LANG-180",
+        feature: "TEST-087",
         on: algebraic,
         on_words: "functions and aggregates",
     },
     Builtin {
         name: "idempotent",
-        feature: "LANG-180",
+        feature: "TEST-087",
         on: algebraic,
         on_words: "functions and aggregates",
     },
@@ -377,6 +378,7 @@ impl Cx<'_> {
                 Site::Item("bootstrap")
             }
             ItemKind::Fact(_) => Site::Item("fact"),
+            ItemKind::Fn(_) => Site::Item("fn"),
             ItemKind::Invariant(_) => Site::Invariant,
             ItemKind::Interpose(_) => Site::Item("interpose"),
             ItemKind::Spec(s) => {

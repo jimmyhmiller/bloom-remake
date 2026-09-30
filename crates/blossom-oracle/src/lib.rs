@@ -21,6 +21,7 @@
 mod cells;
 mod eval;
 mod expr;
+mod library;
 mod plan;
 mod strata;
 

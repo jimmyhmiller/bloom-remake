@@ -105,6 +105,7 @@ fn builtin_name(p: &Program, f: &BuiltinFn) -> String {
         ),
         BuiltinFn::Len => "$len".into(),
         BuiltinFn::IntCast(t) => format!("$as_{}", t.name()),
+        BuiltinFn::Lib(f) => format!("$lib_{f:?}"),
         BuiltinFn::Concat => "$concat".into(),
         BuiltinFn::Contains => "$contains".into(),
         BuiltinFn::Keys => "$keys".into(),
