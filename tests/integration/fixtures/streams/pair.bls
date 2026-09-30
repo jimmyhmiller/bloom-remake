@@ -1,0 +1,54 @@
+//! Two roles over a byte stream: the Server echoes lines on a listen stream; the Client dials it
+//! (`sim://srv/echo` in the cluster simulator), says `ping`, and records every chunk that comes back.
+program pair version 1;
+
+role Server;
+role Client;
+
+fn split(b: Bytes) -> (Bytes, Bytes) {
+    let last = range(0, b.len()).filter(|i| b.u8_at(i) == Some(10u8)).last();
+    match last {
+        Some(i) => (b.slice(0, i + 1).unwrap_or(Bytes::empty()), b.slice(i + 1, b.len()).unwrap_or(Bytes::empty())),
+        None => (Bytes::empty(), b),
+    }
+}
+
+at Server {
+    stream echo: listen;
+    table buf(c: Conn, pending: Bytes, next_seq: u64) key(c);
+
+    accept: on echo.opened(c, _peer, _at) {
+        emit buf(c, Bytes::empty(), 0);
+    }
+    recv: on echo.data(c, _seq, bytes), buf(c, pending, n), let (lines, rest) = split(pending.concat(bytes)) {
+        if lines.len() > 0 {
+            send echo.write(c, n, [Part::Bytes(lines)]);
+            upsert buf(c, rest, n + 1);
+        }
+        if lines.len() == 0 {
+            upsert buf(c, rest, n);
+        }
+    }
+    forget: on echo.closed(c, _reason), buf(c, p, n) {
+        delete buf(c, p, n);
+    }
+}
+
+at Client {
+    stream up: connect;
+    table got(seq: u64, b: Bytes);
+    table failures(req: u64);
+
+    start: on boot() {
+        send up.dial(1, "sim://srv/echo");
+    }
+    hello: on up.opened(c, _req, _peer, _at) {
+        send up.write(c, 0, [Part::Bytes("ping\n".to_utf8())]);
+    }
+    back: on up.data(_c, seq, b) {
+        emit got(seq, b);
+    }
+    failed: on up.failed(req, _why) {
+        emit failures(req);
+    }
+}
