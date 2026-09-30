@@ -1,0 +1,22 @@
+//! Deletion at scale (FOREIGN-PROTOCOLS §6): rows are added one by one, then deleted by key or, as retention does,
+//! every row below a bound. The cost of a tick that deletes must follow the rows deleted, not the rows kept.
+program deletes version 1;
+
+input add(k: u64);
+input drop(k: u64);
+input drop_below(n: u64);
+
+durable table t(k: u64) key(k);
+
+put: on add(k) {
+    emit t(k);
+}
+
+by_key: on drop(k), t(k) {
+    delete t(k);
+}
+
+/// A retention sweep: the rows below `n`, read through an ordered range probe.
+below: on drop_below(n), t(k) where k < n {
+    delete t(k);
+}

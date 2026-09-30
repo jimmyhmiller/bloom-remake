@@ -278,6 +278,23 @@ Two changes to the store.
 - **Deletion at scale.** Retention deletes many rows at once. Deletions must cost in proportion to the rows deleted,
   including the index maintenance in the engine's stores.
 
+### 6a. As built (S7 item 2)
+
+- **Delta-layer checkpoints.** A checkpoint is a full image followed by delta layers. Each layer is the net change
+  since the checkpoint before it, in the WAL's delta encoding (`FileCheckpoints::write_layer`). Recovery decodes
+  the image, applies the layers in order, then replays the WAL after the last layer.
+  - The node accumulates the released deltas since the last checkpoint (`DeltaAcc`). A row inserted then deleted
+    leaves no trace.
+  - A checkpoint is a layer when that change is known and the chain has room (`layer_fits`): fewer than
+    `MAX_CHECKPOINT_LAYERS` layers, and layer bytes still under the image's. Otherwise it is a full image. The
+    compaction rule keeps the total checkpoint work proportional to the change, as in a log-structured merge.
+  - After a recovery that replayed WAL records, the change since the installed checkpoint is not known, so the next
+    checkpoint is full.
+  - The runtime encodes a layer on the engine thread, where its cost follows the change. A full image is encoded on
+    the checkpoint thread from a copy of the image's row handles.
+- **Deletion.** The engine already deletes in proportion to the rows deleted, by key and by an ordered range sweep:
+  its stores keep ordered indexes and never rescan. S7 pins this with a test rather than changing it.
+
 ## 7. Crate by crate
 
 | Crate | Work |

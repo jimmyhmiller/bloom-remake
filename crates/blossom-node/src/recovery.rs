@@ -187,7 +187,14 @@ pub fn open(
     let checkpoints = FileCheckpoints::new(fs.clone(), dir)?;
     let checkpoint = checkpoints.current()?;
     let mut image = match checkpoint {
-        Some(id) => codec.decode_image(&checkpoints.read(id)?)?,
+        Some(id) => {
+            let mut image = codec.decode_image(&checkpoints.read(id)?)?;
+            // A checkpoint is its full image and the delta layers after it, applied in order.
+            for layer in checkpoints.read_layers(id)? {
+                image.apply(&codec.decode_delta(&layer)?);
+            }
+            image
+        }
         None => DurableImage::default(),
     };
     // 3. The WAL after it.
@@ -286,6 +293,7 @@ pub fn open(
             recovered: checkpoint.is_some() || replayed > 0,
             incarnation: record.restarts,
             blobs: blobs.clone(),
+            at_checkpoint: checkpoint.is_some() && replayed == 0,
         },
         wal,
         checkpoints,
