@@ -288,7 +288,13 @@ fn a_duplicate_write_seq_closes_the_connection() {
             .load(std::sync::atomic::Ordering::Relaxed),
         1
     );
-    let why = server.stream_stats.last_violation.lock().unwrap().clone().unwrap_or_default();
+    let why = server
+        .stream_stats
+        .last_violation
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_default();
     assert!(why.contains("already written"), "{why}");
     server.stop().unwrap();
 }
@@ -318,6 +324,65 @@ fn a_connect_stream_dials_falls_back_on_failure_and_talks() {
             .dials_failed
             .load(std::sync::atomic::Ordering::Relaxed),
         1
+    );
+    server.stop().unwrap();
+}
+
+#[test]
+fn a_write_through_the_wrong_stream_is_refused_and_counted() {
+    let server = start(
+        "wrong.bls",
+        "wrong",
+        "a",
+        Some("streams = { a = \"127.0.0.1:0\", b = \"127.0.0.1:0\" }".to_owned()),
+    )
+    .unwrap();
+    let mut s = TcpStream::connect(addr(&server, "a")).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    send_alone(&mut s, b"secret");
+    // Only the right write arrives.
+    assert_eq!(read_exactly(&mut s, 3), b"ok\n");
+    assert_eq!(
+        server
+            .stream_stats
+            .wrong_stream
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    let why = server
+        .stream_stats
+        .last_violation
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_default();
+    assert!(why.contains("through stream 1"), "{why}");
+    server.stop().unwrap();
+}
+
+#[test]
+fn a_dial_tries_every_address_its_name_resolves_to() {
+    // `localhost` may resolve to `::1` before `127.0.0.1`; the listener is on the IPv4 address only.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let target = format!("localhost:{port}");
+    let server = start_with(
+        "client.bls",
+        "client",
+        "up",
+        Some(String::new()),
+        &[("TARGET", target.clone()), ("FALLBACK", target)],
+    )
+    .unwrap();
+    listener.set_nonblocking(false).unwrap();
+    let (mut s, _) = listener.accept().unwrap();
+    assert_eq!(read_exactly(&mut s, 6), b"hello\n");
+    assert_eq!(
+        server
+            .stream_stats
+            .dials_failed
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
     );
     server.stop().unwrap();
 }

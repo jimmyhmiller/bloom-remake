@@ -28,6 +28,13 @@
 //! data_dir = "data"               # each node's store is <data_dir>/<node name>, relative to this file
 //! checkpoint_wal_bytes = 67108864
 //! tail_certification = "strict"   # or "crc": one fsync per group commit, as etcd (see blossom_store::Certification)
+//!
+//! [stream_limits]                 # optional, in bytes (FOREIGN-PROTOCOLS §1.2; defaults in streams::StreamLimits)
+//! max_stream_bytes = 1048576      # one connection's `data` in one tick
+//! read_ahead_bytes = 1048576      # one connection's reads queued ahead of the engine
+//! queue_bytes = 67108864          # all connections' reads queued ahead of the engine
+//! backlog_bytes = 16777216        # undelivered stream bytes the node holds
+//! write_queue_bytes = 67108864    # one connection's unsent writes, past which it is closed
 //! ```
 //!
 //! The architecture's node entry has no `client_addr`: it has one client listener per node, and so does this, at
@@ -63,6 +70,19 @@ struct RawSpec {
     params: BTreeMap<String, toml::Value>,
     security: RawSecurity,
     storage: RawStorage,
+    #[serde(default)]
+    stream_limits: RawStreamLimits,
+}
+
+/// `[stream_limits]`: the byte limits of the nodes' streams; each defaults to [`StreamLimits::default`]'s.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawStreamLimits {
+    max_stream_bytes: Option<u64>,
+    read_ahead_bytes: Option<u64>,
+    queue_bytes: Option<u64>,
+    backlog_bytes: Option<u64>,
+    write_queue_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -151,6 +171,8 @@ pub struct DeploymentSpec {
     pub security: SecurityMode,
     pub data_dir: PathBuf,
     pub checkpoint_wal_bytes: u64,
+    /// The byte limits of the nodes' streams (`[stream_limits]`).
+    pub stream_limits: crate::streams::StreamLimits,
     /// How new stores certify their WAL tail (an existing store keeps the one it was created with, and must match).
     pub tail_certification: blossom_store::Certification,
 }
@@ -238,10 +260,36 @@ impl DeploymentSpec {
                 toml::Value::Integer(n) => ParamValue::Int(i128::from(n)),
                 toml::Value::Boolean(b) => ParamValue::Bool(b),
                 toml::Value::String(s) => ParamValue::Text(s),
-                other => return Err(invalid(&format!("params.{name}"), format!("{other} is not an integer, bool or string"))),
+                other => {
+                    return Err(invalid(
+                        &format!("params.{name}"),
+                        format!("{other} is not an integer, bool or string"),
+                    ));
+                }
             };
             params.insert(name, value);
         }
+        let d = crate::streams::StreamLimits::default();
+        let l = &raw.stream_limits;
+        let positive = |name: &str, v: Option<u64>, default: u64| -> Result<u64, RuntimeError> {
+            match v {
+                Some(0) => Err(invalid(
+                    &format!("stream_limits.{name}"),
+                    "must be at least 1".to_owned(),
+                )),
+                Some(n) => Ok(n),
+                None => Ok(default),
+            }
+        };
+        let max_stream_bytes = positive("max_stream_bytes", l.max_stream_bytes, d.max_stream_bytes as u64)?;
+        let stream_limits = crate::streams::StreamLimits {
+            max_stream_bytes: usize::try_from(max_stream_bytes)
+                .map_err(|_| invalid("stream_limits.max_stream_bytes", "is too large".to_owned()))?,
+            read_ahead_bytes: positive("read_ahead_bytes", l.read_ahead_bytes, d.read_ahead_bytes)?,
+            queue_bytes: positive("queue_bytes", l.queue_bytes, d.queue_bytes)?,
+            backlog_bytes: positive("backlog_bytes", l.backlog_bytes, d.backlog_bytes)?,
+            write_queue_bytes: positive("write_queue_bytes", l.write_queue_bytes, d.write_queue_bytes)?,
+        };
         Ok(DeploymentSpec {
             id: raw.deployment.id,
             program: raw.deployment.program,
@@ -255,6 +303,7 @@ impl DeploymentSpec {
             data_dir: resolve(raw.storage.data_dir),
             checkpoint_wal_bytes: raw.storage.checkpoint_wal_bytes.unwrap_or(256 * 1024 * 1024),
             tail_certification,
+            stream_limits,
         })
     }
 

@@ -43,7 +43,16 @@ pub(crate) struct RuleCx {
 
 /// The functions a call resolves to before any declared one (LANGUAGE §9.12, §15, §16.1, Appendix B); a `fn` may not
 /// take one of these names, which a call would never reach.
-const BUILTIN_FNS: &[&str] = &["now", "tick", "random", "rand", "rand_range", "majority", "range", "error"];
+const BUILTIN_FNS: &[&str] = &[
+    "now",
+    "tick",
+    "random",
+    "rand",
+    "rand_range",
+    "majority",
+    "range",
+    "error",
+];
 
 fn is_var_name(name: &str) -> bool {
     name.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') && name != "_"
@@ -971,6 +980,20 @@ impl<'t> Resolver<'t, '_> {
                 code!("BLS0203"),
                 span,
                 format!("`{}` is an input of an instance: it can be written, not read", r.name),
+            );
+        }
+        if let Some(there) = r.role
+            && let Some(here) = cx.placement
+            && here != there
+        {
+            let there_name = self.role_of(there).name.clone();
+            self.error(
+                code!("BLS0404"),
+                span,
+                format!(
+                    "`{}` lives at `{there_name}`, so only rules placed there read it",
+                    r.name
+                ),
             );
         }
         if let HRelKind::Channel(ChannelInfo {
@@ -2607,6 +2630,18 @@ impl<'t> Resolver<'t, '_> {
                 code!("BLS0404"),
                 span,
                 format!("`{name}` is sent from `{src_name}`, so `send` must be placed there"),
+            );
+            return None;
+        }
+        if let Some(there) = r.role
+            && let Some(here) = cx.placement
+            && here != there
+        {
+            let there_name = self.role_of(there).name.clone();
+            self.error(
+                code!("BLS0404"),
+                span,
+                format!("`{name}` lives at `{there_name}`, so only rules placed there write it"),
             );
             return None;
         }

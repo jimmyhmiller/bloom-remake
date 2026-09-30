@@ -340,7 +340,8 @@ impl<'t, 'd> Resolver<'t, 'd> {
     }
 
     /// The HIR, unless a bug or an error was reported.
-    pub(crate) fn finish(self) -> Result<Option<Hir>, InternalError> {
+    pub(crate) fn finish(mut self) -> Result<Option<Hir>, InternalError> {
+        self.node_local_conns();
         if let Some(bug) = self.bugs.into_iter().next() {
             return Err(bug);
         }
@@ -348,6 +349,35 @@ impl<'t, 'd> Resolver<'t, 'd> {
             return Ok(None);
         }
         Ok(Some(self.hir))
+    }
+
+    /// A `Conn` names a connection of one node's incarnation (FOREIGN-PROTOCOLS §1.1), so it may not reach another
+    /// node or outlive the incarnation: a channel or a durable relation that holds one is BLS0315.
+    fn node_local_conns(&mut self) {
+        let mut bad = Vec::new();
+        for rel in &self.hir.rels {
+            let crosses = matches!(rel.kind, HRelKind::Channel(_));
+            if !(crosses || rel.durable) {
+                continue;
+            }
+            if let Some(c) = rel.cols.iter().find(|c| {
+                c.ty.is_some_and(|t| holds_conn(&self.hir.types, t, &mut BTreeSet::new()))
+            }) {
+                let what = if crosses { "a channel" } else { "a durable relation" };
+                bad.push((
+                    rel.span,
+                    format!(
+                        "column `{}` of {what} `{}` holds a `Conn`, which names a connection of this node's \
+                         incarnation only",
+                        c.name.as_str(),
+                        rel.name
+                    ),
+                ));
+            }
+        }
+        for (span, msg) in bad {
+            self.error(code!("BLS0315"), span, msg);
+        }
     }
 
     pub fn error(&mut self, code: blossom_base::Code, span: Span, msg: impl Into<String>) {
@@ -1134,9 +1164,9 @@ impl<'t, 'd> Resolver<'t, 'd> {
             "connect" => StreamKind::Connect,
             other => {
                 self.error(
-                    code!("BLS0100"),
+                    code!("BLS0200"),
                     kind.span,
-                    format!("a stream is `listen` or `connect`, not `{other}`"),
+                    format!("unknown stream kind `{other}`: a stream is `listen` or `connect`"),
                 );
                 return;
             }
@@ -2170,4 +2200,23 @@ fn strip_comment(line: &str) -> &str {
         }
     }
     line
+}
+
+/// Whether a value of type `t` can contain a `Conn`.
+fn holds_conn(types: &blossom_value::TypeTable, t: TypeId, seen: &mut BTreeSet<TypeId>) -> bool {
+    if !seen.insert(t) {
+        return false;
+    }
+    match types.get(t) {
+        Some(TypeDef::Conn) => true,
+        Some(TypeDef::Tuple(ts)) => ts.iter().any(|x| holds_conn(types, *x, seen)),
+        Some(TypeDef::Option(x) | TypeDef::Vec(x) | TypeDef::Set(x)) => holds_conn(types, *x, seen),
+        Some(TypeDef::Map(k, v)) => holds_conn(types, *k, seen) || holds_conn(types, *v, seen),
+        Some(TypeDef::Struct(d)) => d.fields.iter().any(|f| holds_conn(types, f.ty, seen)),
+        Some(TypeDef::Enum(d)) => d
+            .variants
+            .iter()
+            .any(|v| v.payload.iter().any(|f| holds_conn(types, f.ty, seen))),
+        _ => false,
+    }
 }

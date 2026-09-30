@@ -915,8 +915,14 @@ fn function_names_and_bindings_are_checked() {
     for (body, code) in [
         ("fn f(n: u64) -> u64 { range(0, n).fold(0, |a, a| a) }\n", "BLS0201"),
         ("fn f(n: u64) -> u64 { let (b, b) = (1, n); b }\n", "BLS0201"),
-        ("fn f(o: Option<(u64, u64)>) -> u64 { match o { Some((x, x)) => x, None => 0 } }\n", "BLS0201"),
-        ("const K: u64 = 3;\nfn f(n: u64) -> Vec<u64> { range(0, n).map(|K| K) }\n", "BLS0301"),
+        (
+            "fn f(o: Option<(u64, u64)>) -> u64 { match o { Some((x, x)) => x, None => 0 } }\n",
+            "BLS0201",
+        ),
+        (
+            "const K: u64 = 3;\nfn f(n: u64) -> Vec<u64> { range(0, n).map(|K| K) }\n",
+            "BLS0301",
+        ),
     ] {
         assert_eq!(codes(with_head(body)), vec![code], "{body}");
     }
@@ -925,4 +931,27 @@ fn function_names_and_bindings_are_checked() {
         codes(with_head("fn f(n: u64) -> u64 { range(0, n).fold(0, |a, _| a + 1) }\n")),
         Vec::<String>::new()
     );
+}
+
+#[test]
+fn a_conn_may_not_cross_nodes_or_be_stored_durably() {
+    let src = "program t version 1;\nrole A;\nrole B;\n\
+               channel pass(c: Conn, b: Bytes): A -> B;\n\
+               channel nested(x: Option<(u64, Conn)>): A -> B;\n\
+               at A {\n  durable table keep(c: Conn);\n  table ok(c: Conn);\n}\n";
+    let got = diags_for(src, &role_nodes());
+    let codes: Vec<&str> = got.iter().map(|d| d.0.as_str()).collect();
+    assert_eq!(codes, vec!["BLS0315", "BLS0315", "BLS0315"], "{got:?}");
+}
+
+#[test]
+fn a_rule_reads_and_writes_only_relations_placed_at_its_role() {
+    let src = "program t version 1;\nrole A;\nrole B;\n\
+               at A {\n  stream s: listen;\n  table t(x: u64);\n}\n\
+               at B {\n  stream up: connect;\n\
+                 on up.opened(c, _r, _p, _at) { send s.write(c, 0, []); }\n\
+                 view v(x) = t(x);\n}\n";
+    let got = diags_for(src, &role_nodes());
+    let codes: Vec<&str> = got.iter().map(|d| d.0.as_str()).collect();
+    assert_eq!(codes, vec!["BLS0404", "BLS0404"], "{got:?}");
 }

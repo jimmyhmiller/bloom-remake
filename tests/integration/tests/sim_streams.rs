@@ -374,3 +374,167 @@ fn a_node_dials_another_nodes_stream_in_the_simulator() {
         );
     }
 }
+
+#[cfg(test)]
+fn greet_artifact() -> BlsArtifact {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/streams/greet.bls");
+    let nodes = [
+        NodeSpec {
+            name: "cli".to_owned(),
+            role: Some("Client".to_owned()),
+        },
+        NodeSpec {
+            name: "srv".to_owned(),
+            role: Some("Server".to_owned()),
+        },
+    ];
+    let (result, _) = compile_file(path.to_str().unwrap(), &nodes);
+    result.unwrap_or_else(|e| panic!("greet.bls: {e:?}")).0
+}
+
+/// A server that writes as soon as a connection opens, a client that redials without pause, and every fault the
+/// nemesis has (crashes, partitions, connection resets): the dialing node never hears of a connection before it
+/// has it, a partition carries nothing across, and every byte heard is the greeting's. A write through the wrong
+/// stream is refused and counted, never sent.
+#[test]
+fn connections_that_open_and_close_constantly_survive_every_fault() {
+    let artifact = greet_artifact();
+    let schema = DurableSchema::of(artifact.program.get());
+    let faults: [(&str, bool, bool, bool); 3] = [
+        ("crashes", true, false, false),
+        ("partitions", false, true, false),
+        ("resets", false, false, true),
+    ];
+    for (what, crashes, partitions, stream_drops) in faults {
+        let mut greeted = 0;
+        for seed in 1..=12u64 {
+            let cfg = ClusterConfig {
+                seed,
+                clients: 0,
+                chunk_max: 1 + (seed as usize % 3),
+                nemesis: 20_000_000,
+                crashes,
+                partitions,
+                stream_drops,
+                downtime: 10_000_000,
+                duration: 400_000_000,
+                ..ClusterConfig::default()
+            };
+            let mut cluster = Cluster::new(
+                &artifact,
+                &schema,
+                blossom_value::Seed::from_u64(seed),
+                Vec::new(),
+                Box::new(NoKvClients),
+                cfg,
+            )
+            .unwrap();
+            cluster
+                .run_until(400_000_000)
+                .unwrap_or_else(|e| panic!("{what}, seed {seed}: {e}"));
+            let run = cluster.run_so_far();
+            assert!(run.violation.is_none(), "{what}, seed {seed}: {:?}", run.violation);
+            assert!(
+                run.stream_violations > 0,
+                "{what}, seed {seed}: the wrong-stream write was not refused"
+            );
+            assert!(
+                run.log
+                    .iter()
+                    .all(|l| !l.contains("violation") || l.contains("through stream 1")),
+                "{what}, seed {seed}: {:?}",
+                run.log.iter().filter(|l| l.contains("violation")).collect::<Vec<_>>()
+            );
+            let cli = artifact.nodes.iter().position(|n| n.as_str() == "cli").unwrap();
+            if let Some(state) = cluster.state(NodeId(cli as u32)) {
+                for r in state.rows(artifact.rel_named("heard").unwrap()) {
+                    let blossom_value::Value::Bytes(b) = &r[0] else {
+                        panic!("{r:?}")
+                    };
+                    assert!(
+                        b"hi\n".windows(b.len()).any(|w| w == &b[..]),
+                        "{what}, seed {seed}: heard {b:?}"
+                    );
+                    greeted += 1;
+                }
+            }
+        }
+        assert!(greeted > 0, "{what}: no greeting was ever heard");
+    }
+}
+
+/// A client that sends and closes in the same action as its connect, and one that reconnects at once to a node
+/// that refuses it: the bytes and the close reach the node after the connection, and the refusals never recurse.
+#[test]
+fn a_client_may_send_and_close_with_its_connect_and_reconnect_on_refusal() {
+    struct Eager {
+        opened: Rc<RefCell<u64>>,
+        closed: Rc<RefCell<u64>>,
+        target: &'static str,
+        tries: u64,
+    }
+    impl StreamClient for Eager {
+        fn on(&mut self, _now: i64, e: StreamEvent<'_>) -> Result<StreamAction, String> {
+            let mut a = StreamAction::default();
+            match e {
+                StreamEvent::Wake | StreamEvent::Closed(_) if self.tries > 0 => {
+                    self.tries -= 1;
+                    if matches!(e, StreamEvent::Closed(_)) {
+                        *self.closed.borrow_mut() += 1;
+                    }
+                    a.connect = Some((NodeId(1), Arc::from(self.target)));
+                    a.send = b"x\n".to_vec();
+                    a.close = true;
+                }
+                StreamEvent::Opened => *self.opened.borrow_mut() += 1,
+                StreamEvent::Closed(_) => *self.closed.borrow_mut() += 1,
+                _ => {}
+            }
+            Ok(a)
+        }
+    }
+    let artifact = greet_artifact();
+    let schema = DurableSchema::of(artifact.program.get());
+    for seed in 1..=10u64 {
+        let cfg = ClusterConfig {
+            seed,
+            clients: 0,
+            chunk_max: 1,
+            duration: 2_000_000_000,
+            ..ClusterConfig::default()
+        };
+        let mut cluster = Cluster::new(
+            &artifact,
+            &schema,
+            blossom_value::Seed::from_u64(seed),
+            Vec::new(),
+            Box::new(NoKvClients),
+            cfg,
+        )
+        .unwrap();
+        let (opened, closed) = (Rc::new(RefCell::new(0)), Rc::new(RefCell::new(0)));
+        cluster.stream_client(Box::new(Eager {
+            opened: opened.clone(),
+            closed: closed.clone(),
+            target: "hello",
+            tries: 20,
+        }));
+        // `nope` is no stream of the server: every attempt is refused, and the client tries again at once.
+        let refused = Rc::new(RefCell::new(0));
+        cluster.stream_client(Box::new(Eager {
+            opened: Rc::new(RefCell::new(0)),
+            closed: refused.clone(),
+            target: "nope",
+            tries: 10_000,
+        }));
+        cluster
+            .run_until(2_000_000_000)
+            .unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+        let run = cluster.run_so_far();
+        assert!(run.violation.is_none(), "seed {seed}: {:?}", run.violation);
+        assert_eq!(*opened.borrow(), 20, "seed {seed}: every eager connection opened");
+        assert_eq!(*closed.borrow(), 20, "seed {seed}: and closed");
+        // Each refusal takes a round trip of virtual time, so the run ends with the client still trying.
+        assert!(*refused.borrow() > 1000, "seed {seed}: {} refusals", refused.borrow());
+    }
+}

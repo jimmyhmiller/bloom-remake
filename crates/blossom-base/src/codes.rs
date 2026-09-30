@@ -469,6 +469,14 @@ pub static REGISTRY: &[CodeInfo] = &[
         "a `match` that does not cover every value of its scrutinee",
     ),
     info(
+        "BLS0315",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "a `Conn` in a channel or a durable relation",
+    ),
+    info(
         "BLS0400",
         Error,
         "blossom-front",
@@ -506,7 +514,7 @@ pub static REGISTRY: &[CodeInfo] = &[
         "blossom-front",
         &[],
         CodeOrigin::Language,
-        "a send or receive placed at the wrong role",
+        "a send, receive, read or write placed at a role the relation does not live at",
     ),
     info(
         "BLS0405",
@@ -570,7 +578,7 @@ pub static REGISTRY: &[CodeInfo] = &[
         "blossom-front",
         &[],
         CodeOrigin::Language,
-        "`let` re-binds a variable: write `x == e`",
+        "`let` re-binds a variable: write `x == e`; a match arm in a rule re-binds a rule variable",
     ),
     info(
         "BLS0502",
