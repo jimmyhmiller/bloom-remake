@@ -218,6 +218,8 @@ pub(crate) struct ModScope<'t> {
     pub own_items: Option<&'t [ast::Item]>,
     /// Relations whose declaration failed (and was reported): uses of them are not reported again.
     pub broken: BTreeSet<Symbol>,
+    /// Pure functions declared in this module, by name (LANGUAGE §16.1).
+    pub fns: BTreeMap<Symbol, HFnId>,
 }
 
 impl ModScope<'_> {
@@ -235,6 +237,7 @@ impl ModScope<'_> {
             write_redirect: BTreeMap::new(),
             own_items: None,
             broken: BTreeSet::new(),
+            fns: BTreeMap::new(),
         }
     }
 }
@@ -318,6 +321,8 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 views: Vec::new(),
                 facts: Vec::new(),
                 invariants: Vec::new(),
+                fns: Vec::new(),
+                streams: Vec::new(),
                 scopes: Vec::new(),
                 var_types: Vec::new(),
             },
@@ -335,7 +340,8 @@ impl<'t, 'd> Resolver<'t, 'd> {
     }
 
     /// The HIR, unless a bug or an error was reported.
-    pub(crate) fn finish(self) -> Result<Option<Hir>, InternalError> {
+    pub(crate) fn finish(mut self) -> Result<Option<Hir>, InternalError> {
+        self.node_local_conns();
         if let Some(bug) = self.bugs.into_iter().next() {
             return Err(bug);
         }
@@ -343,6 +349,35 @@ impl<'t, 'd> Resolver<'t, 'd> {
             return Ok(None);
         }
         Ok(Some(self.hir))
+    }
+
+    /// A `Conn` names a connection of one node's incarnation (FOREIGN-PROTOCOLS §1.1), so it may not reach another
+    /// node or outlive the incarnation: a channel or a durable relation that holds one is BLS0315.
+    fn node_local_conns(&mut self) {
+        let mut bad = Vec::new();
+        for rel in &self.hir.rels {
+            let crosses = matches!(rel.kind, HRelKind::Channel(_));
+            if !(crosses || rel.durable) {
+                continue;
+            }
+            if let Some(c) = rel.cols.iter().find(|c| {
+                c.ty.is_some_and(|t| holds_conn(&self.hir.types, t, &mut BTreeSet::new()))
+            }) {
+                let what = if crosses { "a channel" } else { "a durable relation" };
+                bad.push((
+                    rel.span,
+                    format!(
+                        "column `{}` of {what} `{}` holds a `Conn`, which names a connection of this node's \
+                         incarnation only",
+                        c.name.as_str(),
+                        rel.name
+                    ),
+                ));
+            }
+        }
+        for (span, msg) in bad {
+            self.error(code!("BLS0315"), span, msg);
+        }
     }
 
     pub fn error(&mut self, code: blossom_base::Code, span: Span, msg: impl Into<String>) {
@@ -625,6 +660,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
         self.declare(s, items, placement, has_roles, false);
         self.acls(s, items);
         self.imports(s, items, placement);
+        self.functions(s, items);
         self.rules(s, items, placement);
     }
 
@@ -806,6 +842,17 @@ impl<'t, 'd> Resolver<'t, 'd> {
                     if let Some(id) = self.timer(s, t, placement) {
                         self.bind_rel(s, t.name, id);
                     }
+                }
+                ItemKind::Stream { name, kind } => {
+                    if has_roles && !in_at {
+                        self.error(
+                            code!("BLS0408"),
+                            name.span,
+                            "in a module with roles, streams go inside `at`",
+                        );
+                        continue;
+                    }
+                    self.stream(s, *name, *kind, placement, item.span);
                 }
                 ItemKind::Interpose(_) => {
                     // Declared in `imports`, once the instance exists.
@@ -1107,6 +1154,126 @@ impl<'t, 'd> Resolver<'t, 'd> {
     }
 
     /// A timer: `timer name every d;` declares the event relation `name(count: u64, at: Instant)` (LANGUAGE §7.14).
+    /// `stream name: listen|connect;` (FOREIGN-PROTOCOLS §1.1): its relations, read and written as `name.rel` like an
+    /// instance's interface — the events (`opened`, `data`, `closed`, a connect stream's `failed`) are read, the
+    /// requests to the host (`write`, `close`, a connect stream's `dial`) are sent.
+    fn stream(&mut self, s: ScopeIdx, name: Ident, kind: Ident, placement: Option<HRoleId>, span: Span) {
+        use blossom_ir::core::{HostOp, StreamEvent, StreamKind};
+        let kind = match kind.as_str() {
+            "listen" => StreamKind::Listen,
+            "connect" => StreamKind::Connect,
+            other => {
+                self.error(
+                    code!("BLS0200"),
+                    kind.span,
+                    format!("unknown stream kind `{other}`: a stream is `listen` or `connect`"),
+                );
+                return;
+            }
+        };
+        let taken = self.scope(s).instances.contains_key(&name.name)
+            || self.scope(s).rels.contains_key(&name.name)
+            || self.scope(s).fns.contains_key(&name.name);
+        if taken {
+            self.error(
+                code!("BLS0201"),
+                name.span,
+                format!("`{}` is declared twice", name.as_str()),
+            );
+            return;
+        }
+        let t = |r: &mut Self, d: TypeDef| r.intern_type(d, span);
+        let conn = t(self, TypeDef::Conn);
+        let u64t = t(self, TypeDef::Int(blossom_value::types::IntTy::U64));
+        let text = t(self, TypeDef::Str);
+        let instant = t(self, TypeDef::Instant);
+        let bytes = t(self, TypeDef::Bytes);
+        let part = self.part_type(span);
+        let parts = t(self, TypeDef::Vec(part));
+        let mut interface = BTreeMap::new();
+        let mut make = |r: &mut Self, rel: &str, what: HStreamRel, cols: &[(&str, TypeId)]| -> HRelId {
+            let mut segs = r.scope(s).prefix.clone();
+            segs.push(name.name);
+            segs.push(Symbol::intern(rel));
+            let id = r.add_rel(HRel {
+                name: QualName::new(segs),
+                kind: HRelKind::Stream(what),
+                cols: cols
+                    .iter()
+                    .map(|(n, ty)| HCol {
+                        name: Symbol::intern(n),
+                        ty: Some(*ty),
+                    })
+                    .collect(),
+                key: None,
+                durable: false,
+                cell: false,
+                resolve: None,
+                role: placement,
+                span,
+            });
+            r.rel_spans.insert(id, span);
+            // An instance interface's flag is `true` for what the importer writes.
+            interface.insert(Symbol::intern(rel), (id, matches!(what, HStreamRel::Host(_))));
+            id
+        };
+        let opened_cols: Vec<(&str, TypeId)> = match kind {
+            StreamKind::Listen => vec![("c", conn), ("peer", text), ("at", instant)],
+            StreamKind::Connect => vec![("c", conn), ("req", u64t), ("peer", text), ("at", instant)],
+        };
+        let opened = make(self, "opened", HStreamRel::Event(StreamEvent::Opened), &opened_cols);
+        let data = make(
+            self,
+            "data",
+            HStreamRel::Event(StreamEvent::Data),
+            &[("c", conn), ("seq", u64t), ("bytes", bytes)],
+        );
+        let closed = make(
+            self,
+            "closed",
+            HStreamRel::Event(StreamEvent::Closed),
+            &[("c", conn), ("reason", text)],
+        );
+        let write = make(
+            self,
+            "write",
+            HStreamRel::Host(HostOp::Write),
+            &[("c", conn), ("seq", u64t), ("parts", parts)],
+        );
+        let close = make(self, "close", HStreamRel::Host(HostOp::Close), &[("c", conn)]);
+        let (failed, dial) = match kind {
+            StreamKind::Listen => (None, None),
+            StreamKind::Connect => (
+                Some(make(
+                    self,
+                    "failed",
+                    HStreamRel::Event(StreamEvent::Failed),
+                    &[("req", u64t), ("reason", text)],
+                )),
+                Some(make(
+                    self,
+                    "dial",
+                    HStreamRel::Host(HostOp::Dial),
+                    &[("req", u64t), ("addr", text)],
+                )),
+            ),
+        };
+        self.scope_mut(s).instances.insert(name.name, Instance { interface });
+        self.hir.streams.push(HStream {
+            name: self.qual(s, name.name),
+            kind,
+            role: placement,
+            opened,
+            data,
+            closed,
+            failed,
+            write,
+            close,
+            dial,
+            span,
+        });
+    }
+
     fn timer(&mut self, s: ScopeIdx, t: &'t ast::TimerDecl, placement: Option<HRoleId>) -> Option<HRelId> {
         let words: Vec<&str> = t.words.iter().map(Ident::as_str).collect();
         if words != ["every"] || t.exprs.len() != 1 {
@@ -1468,6 +1635,9 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 | ItemKind::Role { .. }
                 | ItemKind::Rel(_)
                 | ItemKind::Timer(_)
+                | ItemKind::Fn(_)
+                | ItemKind::ExternFn(_)
+                | ItemKind::Stream { .. }
                 | ItemKind::Unsupported { .. } => {}
                 ItemKind::Param { .. } => {}
             }
@@ -1532,6 +1702,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             write_redirect: BTreeMap::new(),
             own_items: Some(&module.items),
             broken: Default::default(),
+            fns: BTreeMap::new(),
         });
         // Value and relation parameters.
         let mut given: BTreeMap<Symbol, &'t ast::Expr> = BTreeMap::new();
@@ -1741,6 +1912,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             write_redirect: BTreeMap::new(),
             own_items: Some(&p.items),
             broken: Default::default(),
+            fns: BTreeMap::new(),
         });
         for item in &p.items {
             match &item.kind {
@@ -1873,7 +2045,10 @@ impl<'t, 'd> Resolver<'t, 'd> {
         loop {
             let ready: Vec<usize> = (0..decls.len())
                 .filter(|&k| !done.get(k).copied().unwrap_or(true))
-                .filter(|&k| deps.get(k).is_some_and(|d| d.iter().all(|&j| done.get(j).copied().unwrap_or(false))))
+                .filter(|&k| {
+                    deps.get(k)
+                        .is_some_and(|d| d.iter().all(|&j| done.get(j).copied().unwrap_or(false)))
+                })
                 .collect();
             if ready.is_empty() {
                 break;
@@ -1976,7 +2151,6 @@ impl<'t, 'd> Resolver<'t, 'd> {
             }
         }
     }
-
 }
 
 /// The names a constant expression refers to (the forms `const_value` folds).
@@ -2026,4 +2200,23 @@ fn strip_comment(line: &str) -> &str {
         }
     }
     line
+}
+
+/// Whether a value of type `t` can contain a `Conn`.
+fn holds_conn(types: &blossom_value::TypeTable, t: TypeId, seen: &mut BTreeSet<TypeId>) -> bool {
+    if !seen.insert(t) {
+        return false;
+    }
+    match types.get(t) {
+        Some(TypeDef::Conn) => true,
+        Some(TypeDef::Tuple(ts)) => ts.iter().any(|x| holds_conn(types, *x, seen)),
+        Some(TypeDef::Option(x) | TypeDef::Vec(x) | TypeDef::Set(x)) => holds_conn(types, *x, seen),
+        Some(TypeDef::Map(k, v)) => holds_conn(types, *k, seen) || holds_conn(types, *v, seen),
+        Some(TypeDef::Struct(d)) => d.fields.iter().any(|f| holds_conn(types, f.ty, seen)),
+        Some(TypeDef::Enum(d)) => d
+            .variants
+            .iter()
+            .any(|v| v.payload.iter().any(|f| holds_conn(types, f.ty, seen))),
+        _ => false,
+    }
 }

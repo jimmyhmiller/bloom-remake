@@ -82,6 +82,7 @@ fn start(spec: &DeploymentSpec, artifact: &Arc<BlsArtifact>) -> Server {
         mode: OpenMode::InitFresh,
         dir: None,
         backend: blossom_node::Backend::Engine,
+        externs: Arc::new(blossom_std_host::registry().unwrap()),
     })
     .unwrap()
 }

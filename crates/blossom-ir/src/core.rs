@@ -67,6 +67,9 @@ pub struct FnDecl {
     pub name: QualName,
     pub params: Vec<(Symbol, TypeId)>,
     pub ret: TypeId,
+    /// An `Ir` body's variables: the parameters first (in order), then every `let` and closure binding. Empty for
+    /// other bodies.
+    pub vars: IndexVec<VarId, VarDecl>,
     pub body: FnBody,
     pub props: FnProps,
 }
@@ -117,6 +120,53 @@ pub struct ServiceDecl {
     pub result: RelId,
 }
 
+/// A byte stream (FOREIGN-PROTOCOLS §1): a TCP endpoint the program owns at the byte level. The runtime feeds its
+/// event relations and carries out the rows of its host relations after the tick's durable writes are synced.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamDecl {
+    pub name: QualName,
+    pub kind: StreamKind,
+    pub placement: Placement,
+    /// `opened(c: Conn, peer: String, at: Instant)`; a connect stream's is `opened(c: Conn, req: u64, peer: String,
+    /// at: Instant)`, naming the dial request it answers.
+    pub opened: RelId,
+    /// `data(c: Conn, seq: u64, bytes: Bytes)`: the next chunk read from `c`; `seq` counts from 0 per connection.
+    pub data: RelId,
+    /// `closed(c: Conn, reason: String)`.
+    pub closed: RelId,
+    /// A connect stream's `failed(req: u64, reason: String)`: a dial that did not connect.
+    pub failed: Option<RelId>,
+    /// `write(c: Conn, seq: u64, parts: Vec<Part>)`, to the host: written in `seq` order per connection.
+    pub write: RelId,
+    /// `close(c: Conn)`, to the host: close after the writes already sent.
+    pub close: RelId,
+    /// A connect stream's `dial(req: u64, addr: String)`, to the host.
+    pub dial: Option<RelId>,
+}
+/// StreamKind data in the Dedalus core IR.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StreamKind {
+    /// Accepts connections on the address the deployment gives it.
+    Listen,
+    /// Opens connections on request (`dial`).
+    Connect,
+}
+/// A stream event relation's role (FOREIGN-PROTOCOLS §1.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum StreamEvent {
+    Opened,
+    Data,
+    Closed,
+    Failed,
+}
+/// A request a program makes of the host through a stream (FOREIGN-PROTOCOLS §1.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum HostOp {
+    Write,
+    Close,
+    Dial,
+}
+
 /// Program data in the Dedalus core IR.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 // FEATURE: ENG-001
@@ -130,6 +180,7 @@ pub struct Program {
     pub fns: IndexVec<FnId, FnDecl>,
     pub udas: IndexVec<UdaId, UdaDecl>,
     pub services: IndexVec<ServiceId, ServiceDecl>,
+    pub streams: Vec<StreamDecl>, // byte streams (FOREIGN-PROTOCOLS §1), in declaration order
     pub roles: IndexVec<RoleId, RoleDecl>,
     pub rels: IndexVec<RelId, RelDecl>,
     pub rules: IndexVec<RuleId, Rule>,
@@ -196,6 +247,9 @@ pub enum RelClass {
     Weighted(WeightKind),
     /// `#[readonly] table`: host-maintained and persistent; the host writes it between ticks; rules only read it (LANG-051).
     HostTable,
+    /// Requests to the host (a stream's `write`, `close`, `dial`): written by async rules, never read; each tick's rows
+    /// leave with the tick's output, released after its durable writes are synced (FOREIGN-PROTOCOLS §1.2).
+    HostOut(HostOp),
 }
 /// EventSource data in the Dedalus core IR.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,6 +264,7 @@ pub enum EventSource {
     SessionClosed,
     ServiceResult(ServiceId),
     ClusterVersion, // LANG-264: LMax<u32>, sampled per tick, recorded
+    Stream(StreamEvent), // FOREIGN-PROTOCOLS §1: a stream's `opened`, `data`, `closed`, `failed`
 }
 /// TimerDecl data in the Dedalus core IR.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -534,6 +589,7 @@ pub enum BuiltinFn {
     Size { role: RoleId },
     Len,
     IntCast(blossom_value::types::IntTy), // `x as T` between integer types: out of range is BLSR004 (LANGUAGE §5.2)
+    Lib(LibFn), // the built-in library (LANGUAGE Appendix B); the receiver, if any, first
     Concat, // `a ++ b` on String, Bytes or Vec (LANGUAGE §9.12)
     Contains,
     Keys,
@@ -542,6 +598,84 @@ pub enum BuiltinFn {
     Hash64,
     Fingerprint,
     Error, /* … Appendix B … */
+}
+
+/// The work one evaluation of a pure function may do (LANGUAGE §16.1, BLSR012): closure applications plus the
+/// elements of every `range` built as a vector, counted from a call made outside any function to its return (a
+/// `range` built outside a function counts alone). Functions have no recursion, but a fold over `range(0, u64::MAX)`
+/// would still never end; past this budget the evaluation is a located hard error. Both evaluators count the same
+/// steps, so they fail at the same valuation.
+pub const FN_STEP_BUDGET: u64 = 10_000_000;
+
+/// A function or method of the built-in library (LANGUAGE Appendix B). The receiver, if any, is the first argument;
+/// a combinator's closure is the last. Every one is total: a position past the end is `None`, never an error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum LibFn {
+    /// `range(lo, hi)`: the `u64`s from `lo` up to, not including, `hi` (empty when `hi <= lo`).
+    Range,
+    /// `v.get(i) -> Option<T>`.
+    VecGet,
+    /// `v.first()`, `v.last() -> Option<T>`.
+    VecFirst,
+    VecLast,
+    /// `v.push(x)`: a copy with `x` appended.
+    VecPush,
+    /// `v.concat(w)`.
+    VecConcat,
+    /// `v.is_empty()`.
+    VecIsEmpty,
+    /// `v.reverse()`.
+    VecReverse,
+    /// `v.enumerate() -> Vec<(u64, T)>`.
+    VecEnumerate,
+    /// `v.map(|x| e)`, `v.filter(|x| b)`, `v.filter_map(|x| o)`, `v.all(|x| b)`, `v.any(|x| b)`.
+    VecMap,
+    VecFilter,
+    VecFilterMap,
+    VecAll,
+    VecAny,
+    /// `v.fold(init, |acc, x| e)`: left to right.
+    VecFold,
+    /// `o.is_some()`, `o.is_none()`, `o.unwrap_or(d)`.
+    OptIsSome,
+    OptIsNone,
+    OptUnwrapOr,
+    /// `o.map(|x| e)`, `o.and_then(|x| o2)`.
+    OptMap,
+    OptAndThen,
+    /// `b.slice(lo, hi) -> Option<Bytes>`: `None` unless `lo <= hi <= len`.
+    BytesSlice,
+    /// `b.concat(c)`.
+    BytesConcat,
+    /// `s.split_whitespace() -> Vec<String>`: the non-empty runs between Unicode whitespace.
+    StrSplitWhitespace,
+    /// `s.to_lowercase()`: Unicode lowercase mapping.
+    StrToLowercase,
+    /// `s.to_utf8() -> Bytes`.
+    StrToUtf8,
+    /// `b.from_utf8() -> Option<String>`: `None` unless `b` is valid UTF-8.
+    BytesFromUtf8,
+    /// `b.u8_at(pos)`, `b.i8_at(pos)`, `b.u16_be_at(pos)`, … `b.i64_be_at(pos) -> Option<T>`: the big-endian integer
+    /// of type `T` at `pos`, `None` past the end. `T` is one of the 8-, 16-, 32- and 64-bit integer types.
+    BytesRead(blossom_value::types::IntTy),
+    /// `b.put_u8(pos, x)`, … `b.put_i64_be(pos, x) -> Option<Bytes>`: a copy with the big-endian `x` written at
+    /// `pos`, `None` unless it fits inside `b`.
+    BytesPut(blossom_value::types::IntTy),
+    /// `Bytes::from_u8(x)`, … `Bytes::from_i64_be(x)`: the big-endian bytes of `x`.
+    BytesFrom(blossom_value::types::IntTy),
+    /// `b.uvarint_at(pos) -> Option<(u64, u64)>`: an unsigned LEB128 varint and the position after it; `None` when it
+    /// is truncated, longer than 10 bytes, or does not fit a `u64`.
+    BytesUvarintAt,
+    /// `b.varint_at(pos) -> Option<(i64, u64)>`: a zigzag varint (as `uvarint_at`, then zigzag-decoded).
+    BytesVarintAt,
+    /// `Bytes::uvarint(x: u64)`: the shortest unsigned LEB128 encoding.
+    BytesUvarint,
+    /// `Bytes::varint(x: i64)`: the shortest zigzag LEB128 encoding.
+    BytesVarint,
+    /// `Bytes::empty()`.
+    BytesEmpty,
+    /// `Bytes::join(v: Vec<Bytes>)`: the concatenation, in order.
+    BytesJoin,
 }
 
 /// Construct data in the Dedalus core IR.

@@ -495,6 +495,8 @@ pub enum SyntaxKind {
     NAME,
     /// relpath.
     RELPATH,
+    /// streamitem: `stream NAME: listen;` or `stream NAME: connect;` (FOREIGN-PROTOCOLS §1).
+    STREAMITEM,
 }
 impl SyntaxKind {
     /// All kinds, in their wire/discriminant order.
@@ -745,6 +747,7 @@ impl SyntaxKind {
         Self::OPTFIELD,
         Self::NAME,
         Self::RELPATH,
+        Self::STREAMITEM,
     ];
     /// Whether this token is trivia.
     pub fn is_trivia(self) -> bool {

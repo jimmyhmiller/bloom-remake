@@ -1,0 +1,9 @@
+//! A duplicate write `seq` (FOREIGN-PROTOCOLS §1.2): every chunk is written with seq 0, so the second is a duplicate
+//! and the host closes the connection.
+program dup version 1;
+
+stream s: listen;
+
+again: on s.data(c, _seq, b) {
+    send s.write(c, 0, [Part::Bytes(b)]);
+}

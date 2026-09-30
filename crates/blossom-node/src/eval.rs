@@ -96,6 +96,7 @@ impl<E: Evaluator> Executor for OracleExecutor<E> {
             changes,
             outbox: out.outbox,
             egress: out.egress,
+            host: out.host,
             observed,
         })
     }
@@ -245,9 +246,10 @@ impl Executors {
         roles: Vec<Option<blossom_base::RoleId>>,
         names: Vec<std::sync::Arc<str>>,
         seed: blossom_value::Seed,
+        externs: std::sync::Arc<blossom_value::ExternRegistry>,
     ) -> Result<Executors, EvalError> {
         let oracle = std::sync::Arc::new(
-            Oracle::new(program.clone())?
+            Oracle::with_externs(program.clone(), blossom_oracle::Limits::default(), externs.clone())?
                 .with_roles(roles.clone())
                 .with_seed(seed)?
                 .with_node_names(names.clone())?,
@@ -256,6 +258,7 @@ impl Executors {
             roles,
             node_names: names,
             seed: Some(seed),
+            externs,
             ..blossom_engine::EngineConfig::default()
         };
         Ok(Executors {

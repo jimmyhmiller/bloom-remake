@@ -1,0 +1,23 @@
+//! A Kafka broker in Blossom (docs/design/KAFKA.md; slice 6): one node that answers ApiVersions and Metadata on its
+//! `kafka` stream, for a one-broker cluster with no topics. Stock clients (kcat, the Java tools, franz-go) connect,
+//! negotiate versions and read the cluster's metadata.
+//!
+//! The connection layer keeps each connection's unconsumed bytes and next write `seq`. Every complete frame of a chunk
+//! is answered, in order, in one write. A request this broker cannot answer (an API it does not advertise, a
+//! malformed frame) closes the connection, as a Kafka broker does for an unknown API.
+
+program kafka version 1;
+
+include "protocol.bls";
+include "headers.bls";
+include "apiversions.bls";
+include "metadata.bls";
+include "broker_fns.bls";
+
+/// This broker's id, the address it advertises, and its cluster id.
+param NODE_ID: i32 = 1;
+param ADVERTISED_HOST: String = "localhost";
+param ADVERTISED_PORT: i32 = 9092;
+param CLUSTER_ID: String = "blossom-kafka";
+
+include "broker_node.bls";

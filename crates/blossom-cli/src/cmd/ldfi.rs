@@ -150,7 +150,14 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
     config.workers = args
         .jobs
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get));
-    let sim = match SpecSim::new(&artifact) {
+    let externs = match crate::common::std_externs() {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("{e}");
+            return Exit::Internal.into();
+        }
+    };
+    let sim = match SpecSim::with_externs(&artifact, externs) {
         Ok(s) => s,
         Err(e) => return fail(&LdfiError::Sim(e)),
     };

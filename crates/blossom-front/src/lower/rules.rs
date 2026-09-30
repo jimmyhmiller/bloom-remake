@@ -170,6 +170,16 @@ fn mentioned_expr(e: &HExpr, out: &mut BTreeSet<HVarId>) {
                 mentioned_expr(b, out);
             }
         }
+        HExprKind::Call { args, .. } => args.iter().for_each(|x| mentioned_expr(x, out)),
+        HExprKind::Let { pat, value, body, .. } => {
+            mentioned_pat(pat, out);
+            mentioned_expr(value, out);
+            mentioned_expr(body, out);
+        }
+        HExprKind::Closure { params, body } => {
+            out.extend(params.iter().copied());
+            mentioned_expr(body, out);
+        }
         HExprKind::Value(..)
         | HExprKind::IntLit(..)
         | HExprKind::TypedInt(..)
@@ -933,6 +943,8 @@ impl<'h> Lowerer<'h> {
                 RuleKind::Deductive
             }
             Verb::Next => RuleKind::Inductive,
+            // A request to the host (a stream's write, close or dial) has no destination column.
+            Verb::Send if matches!(target.kind, HRelKind::Stream(HStreamRel::Host(_))) => RuleKind::Async,
             Verb::Send => {
                 let ch = match &target.kind {
                     HRelKind::Channel(ch) => ch.clone(),
@@ -1503,7 +1515,10 @@ impl<'h> Lowerer<'h> {
                 )?;
             }
         }
-        if cols.iter().any(|c| matches!(c, HViewAggCol::Agg(a) if a.func == AggKind::Index)) {
+        if cols
+            .iter()
+            .any(|c| matches!(c, HViewAggCol::Agg(a) if a.func == AggKind::Index))
+        {
             return self.index_view(v, rel, r, union, u, &union_vars, cols, names);
         }
         // Defaults: explicit `default e`, or the identity of count and sum under a driver.

@@ -1,0 +1,13 @@
+//! A durable acknowledgement server over a byte stream: every chunk is recorded in a durable table and echoed back as
+//! its acknowledgement. The echo is a stream write, released only after the tick that recorded the chunk is synced
+//! (FOREIGN-PROTOCOLS §1.2), so an acknowledged chunk survives any crash.
+program store version 1;
+
+stream s: listen;
+
+durable table seen(key: Bytes);
+
+ack: on s.data(c, seq, b) {
+    emit seen(b);
+    send s.write(c, seq, [Part::Bytes(b)]);
+}

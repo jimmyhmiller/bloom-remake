@@ -1,0 +1,259 @@
+//! The Kafka wire protocol's primitives, in Blossom (docs/design/KAFKA.md, FOREIGN-PROTOCOLS §2.2).
+//!
+//! Decoding walks a cursor: every primitive read takes a `Cur` and returns the value and the cursor after it, or
+//! `None` when the bytes run out or are malformed. Nothing here ever fails the tick on client input: a bad request is
+//! a `None`, which the broker answers by closing the connection. A count read from the wire is checked against the
+//! bytes left before anything iterates over it, so a hostile count costs nothing.
+//!
+//! Encoding builds `Bytes` by concatenation; a frame's size is computed from the finished body.
+
+/// A decoding position in a buffer.
+struct Cur { buf: Bytes, pos: u64 }
+
+fn cur(b: Bytes) -> Cur {
+    Cur { buf: b, pos: 0 }
+}
+
+fn left(c: Cur) -> u64 {
+    if c.pos > c.buf.len() { 0 } else { c.buf.len() - c.pos }
+}
+
+fn at(c: Cur, pos: u64) -> Cur {
+    Cur { buf: c.buf, pos: pos }
+}
+
+// ---------------------------------------------------------------- fixed-width reads
+
+fn read_i8(c: Cur) -> Option<(i8, Cur)> {
+    c.buf.i8_at(c.pos).map(|v| (v, at(c, c.pos + 1)))
+}
+
+/// A boolean: any nonzero byte is true, as Kafka reads it.
+fn read_bool(c: Cur) -> Option<(bool, Cur)> {
+    c.buf.u8_at(c.pos).map(|v| (v != 0u8, at(c, c.pos + 1)))
+}
+
+fn read_i16(c: Cur) -> Option<(i16, Cur)> {
+    c.buf.i16_be_at(c.pos).map(|v| (v, at(c, c.pos + 2)))
+}
+
+fn read_i32(c: Cur) -> Option<(i32, Cur)> {
+    c.buf.i32_be_at(c.pos).map(|v| (v, at(c, c.pos + 4)))
+}
+
+fn read_i64(c: Cur) -> Option<(i64, Cur)> {
+    c.buf.i64_be_at(c.pos).map(|v| (v, at(c, c.pos + 8)))
+}
+
+/// The all-zero UUID, which Kafka uses for "no topic id".
+fn zero_uuid() -> Bytes {
+    Bytes::join(range(0, 16).map(|_i| Bytes::from_u8(0u8)))
+}
+
+/// A 16-byte UUID, as bytes.
+fn read_uuid(c: Cur) -> Option<(Bytes, Cur)> {
+    read_bytes(c, 16)
+}
+
+fn read_uvarint(c: Cur) -> Option<(u64, Cur)> {
+    c.buf.uvarint_at(c.pos).map(|p| (p.0, at(c, p.1)))
+}
+
+/// The next `n` bytes. `n` often comes from the wire, so it is checked against the bytes left before any arithmetic:
+/// `c.pos + n` never overflows.
+fn read_bytes(c: Cur, n: u64) -> Option<(Bytes, Cur)> {
+    if n > left(c) { None } else { c.buf.slice(c.pos, c.pos + n).map(|b| (b, at(c, c.pos + n))) }
+}
+
+// ---------------------------------------------------------------- strings
+
+/// A legacy (non-flexible) nullable string: an int16 length, -1 for null.
+fn read_nullable_string(c: Cur) -> Option<(Option<String>, Cur)> {
+    read_i16(c).and_then(|p| {
+        let n = p.0;
+        if n == -1i16 {
+            Some((None, p.1))
+        } else if n < 0i16 {
+            None
+        } else {
+            read_bytes(p.1, n as u64).and_then(|q| q.0.from_utf8().map(|s| (Some(s), q.1)))
+        }
+    })
+}
+
+/// A compact nullable string: an unsigned varint length + 1, 0 for null.
+fn read_compact_nullable_string(c: Cur) -> Option<(Option<String>, Cur)> {
+    read_uvarint(c).and_then(|p| {
+        if p.0 == 0 {
+            Some((None, p.1))
+        } else {
+            read_bytes(p.1, p.0 - 1).and_then(|q| q.0.from_utf8().map(|s| (Some(s), q.1)))
+        }
+    })
+}
+
+/// A compact string (never null).
+fn read_compact_string(c: Cur) -> Option<(String, Cur)> {
+    read_compact_nullable_string(c).and_then(|p| p.0.map(|s| (s, p.1)))
+}
+
+// ---------------------------------------------------------------- arrays and tagged fields
+
+/// A compact array's length: an unsigned varint count + 1; `None` for null or for more elements than bytes left (no
+/// element takes fewer than one byte).
+fn read_compact_len(c: Cur) -> Option<(u64, Cur)> {
+    read_uvarint(c).and_then(|p| if p.0 == 0 || p.0 - 1 > left(p.1) { None } else { Some((p.0 - 1, p.1)) })
+}
+
+/// A compact nullable array's length: `Some(None)` for null.
+fn read_compact_nullable_len(c: Cur) -> Option<(Option<u64>, Cur)> {
+    read_uvarint(c).and_then(|p| {
+        if p.0 == 0 {
+            Some((None, p.1))
+        } else if p.0 - 1 > left(p.1) {
+            None
+        } else {
+            Some((Some(p.0 - 1), p.1))
+        }
+    })
+}
+
+/// Skips a flexible version's tagged fields: a count, then per field its tag, size and bytes (unknown tags are
+/// ignored, as the protocol requires).
+fn skip_tags(c: Cur) -> Option<Cur> {
+    read_uvarint(c).and_then(|p| {
+        if p.0 > left(p.1) {
+            None
+        } else {
+            range(0, p.0).fold(Some(p.1), |acc, _i| {
+                acc.and_then(|x| read_uvarint(x).and_then(|t| read_uvarint(t.1).and_then(|n| read_bytes(n.1, n.0).map(|b| b.1))))
+            })
+        }
+    })
+}
+
+// ---------------------------------------------------------------- encoding
+
+fn enc_bool(b: bool) -> Bytes {
+    Bytes::from_u8(if b { 1u8 } else { 0u8 })
+}
+
+/// An empty set of tagged fields.
+fn no_tags() -> Bytes {
+    Bytes::uvarint(0)
+}
+
+fn enc_compact_string(s: String) -> Bytes {
+    let b = s.to_utf8();
+    Bytes::uvarint(b.len() + 1).concat(b)
+}
+
+fn enc_compact_nullable_string(o: Option<String>) -> Bytes {
+    match o {
+        Some(s) => enc_compact_string(s),
+        None => Bytes::uvarint(0),
+    }
+}
+
+/// A compact array of already-encoded elements.
+fn enc_compact_array(items: Vec<Bytes>) -> Bytes {
+    Bytes::uvarint(items.len() + 1).concat(Bytes::join(items))
+}
+
+fn enc_compact_i32s(xs: Vec<i32>) -> Bytes {
+    enc_compact_array(xs.map(|x| Bytes::from_i32_be(x)))
+}
+
+// ---------------------------------------------------------------- frames
+
+/// The most bytes one request may take (Kafka's `socket.request.max.bytes` default).
+const MAX_FRAME: u64 = 104857600;
+
+/// A size-prefixed frame around `body`.
+fn frame(body: Bytes) -> Bytes {
+    Bytes::from_i32_be(body.len() as i32).concat(body)
+}
+
+/// Every complete frame at the front of `b` (without their size prefixes), the bytes they take, and whether a
+/// declared size is invalid (negative or over `MAX_FRAME`): then the connection must close. At most `most` frames
+/// are looked for; a caller that knows how many frames `b` can hold passes that, so a long buffer holding one big
+/// frame costs one step, not one per four bytes.
+fn split_frames(b: Bytes, most: u64) -> (Vec<Bytes>, u64, bool) {
+    range(0, most).fold(([], 0, false), |acc, _i| {
+        let (frames, pos, bad) = acc;
+        if bad {
+            acc
+        } else {
+            match b.i32_be_at(pos) {
+                Some(n) => {
+                    if n < 0i32 || n as u64 > MAX_FRAME {
+                        (frames, pos, true)
+                    } else {
+                        match b.slice(pos + 4, pos + 4 + n as u64) {
+                            Some(body) => (frames.push(body), pos + 4 + n as u64, false),
+                            None => acc,
+                        }
+                    }
+                }
+                None => acc,
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------- reassembly
+
+/// A connection's unconsumed bytes, kept so that reassembling a frame costs time linear in its size (up to a log
+/// factor) however it is chunked.
+///
+/// - `parts` are the bytes in order, not yet joined. Each part is more than twice the size of the next, so there are
+///   at most about 64 of them, and a byte is copied only when its part merges into one at least 1.5 times as big.
+/// - `have` is their total size.
+/// - `need` is the size at which the front frame can be complete: 4 until the size prefix is known, then 4 plus the
+///   size. Below it, a chunk is only stored; the parts are joined and parsed once, when `need` is reached.
+/// - Invariant: the parts hold no complete frame.
+struct Framer { parts: Vec<Bytes>, have: u64, need: u64 }
+
+fn framer() -> Framer {
+    Framer { parts: [], have: 0, need: 4 }
+}
+
+/// What one chunk yields: the frames it completes, whether a size was invalid (close the connection), and the state
+/// after it.
+struct Fed { frames: Vec<Bytes>, bad: bool, next: Framer }
+
+/// `parts` with `b` appended, merging from the newest part back while a part is at most twice the size of what
+/// follows it (the invariant of `Framer.parts`).
+fn push_part(parts: Vec<Bytes>, b: Bytes) -> Vec<Bytes> {
+    let (take, _size, _open) = parts.reverse().fold((0, b.len(), true), |acc, p| {
+        let (take, size, open) = acc;
+        if open && p.len() <= 2 * size { (take + 1, size + p.len(), true) } else { (take, size, false) }
+    });
+    let keep = parts.len() - take;
+    let kept = parts.enumerate().filter(|e| e.0 < keep).map(|e| e.1);
+    let merged = Bytes::join(parts.enumerate().filter(|e| e.0 >= keep).map(|e| e.1).push(b));
+    kept.push(merged)
+}
+
+/// The size at which the front frame of `rest` (holding no complete frame) can be complete.
+fn need_of(rest: Bytes) -> u64 {
+    match rest.i32_be_at(0) {
+        Some(n) => if n < 0i32 { 4 } else { 4 + n as u64 },
+        None => 4,
+    }
+}
+
+/// Feeds one chunk. The frames it completes all start in the chunk, except the front one (the parts hold no complete
+/// frame), and each takes at least 4 bytes; so at most `2 + chunk / 4` are looked for.
+fn feed(f: Framer, bytes: Bytes) -> Fed {
+    if f.have + bytes.len() < f.need {
+        Fed { frames: [], bad: false, next: Framer { parts: push_part(f.parts, bytes), have: f.have + bytes.len(), need: f.need } }
+    } else {
+        let all = Bytes::join(f.parts.push(bytes));
+        let (frames, used, bad) = split_frames(all, 2 + bytes.len() / 4);
+        // `used` never passes the end (`split_frames` only steps over whole frames), so the slice is always `Some`.
+        let rest = all.slice(used, all.len()).unwrap_or(Bytes::empty());
+        let parts = if rest.len() == 0 { [] } else { [rest] };
+        Fed { frames: frames, bad: bad, next: Framer { parts: parts, have: rest.len(), need: need_of(rest) } }
+    }
+}

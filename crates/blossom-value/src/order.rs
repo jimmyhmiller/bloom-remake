@@ -54,6 +54,7 @@ impl Value {
             Value::Lattice(_) => 20,
             Value::Group(_) => 21,
             Value::Extern { .. } => 22,
+            Value::Conn(_) => 23,
         }
     }
 
@@ -88,6 +89,7 @@ impl Ord for Value {
             (V::Mod(a), V::Mod(b)) => a.cmp(b),
             (V::Blob(a), V::Blob(b)) => a.cmp(b),
             (V::Session(a), V::Session(b)) => a.cmp(b),
+            (V::Conn(a), V::Conn(b)) => a.cmp(b),
             (V::Principal(a), V::Principal(b)) => cmp_shared(a, b),
             (V::Node(a), V::Node(b)) => a.cmp(b),
             (V::Tuple(a), V::Tuple(b)) | (V::Struct(a), V::Struct(b)) | (V::Vec(a), V::Vec(b)) => cmp_shared(a, b),
@@ -163,6 +165,7 @@ impl Hash for Value {
             Value::Mod(m) => m.hash(state),
             Value::Blob(b) => b.hash(state),
             Value::Session(s) => s.hash(state),
+            Value::Conn(c) => c.hash(state),
             Value::Node(n) => n.hash(state),
             Value::Tuple(items) | Value::Struct(items) | Value::Vec(items) => items.hash(state),
             Value::Enum { variant, fields } => {

@@ -1,0 +1,115 @@
+//! Pure functions (LANGUAGE §16.1) and the built-in library (Appendix B): every library function and combinator, in
+//! function bodies with `let`s, shadowing, nested closures that read enclosing variables, calls between functions and
+//! a cursor-style decoder that returns `Option`. `bls_functions.rs` computes each view independently in Rust.
+program library version 1;
+
+struct Cur { buf: Bytes, pos: u64 }
+
+input e(n: u64, s: String, b: Bytes);
+
+fn sum_below(n: u64) -> u64 {
+    range(0, n).fold(0, |acc, i| acc + i)
+}
+
+fn evens(n: u64) -> Vec<u64> {
+    range(0, n).filter(|i| i % 2 == 0)
+}
+
+fn scaled(n: u64, k: u64) -> Vec<u64> {
+    range(0, n).map(|i| i * k)
+}
+
+fn thirds(n: u64) -> Vec<u64> {
+    range(0, n).filter_map(|i| if i % 3 == 0 { Some(i / 3) } else { None })
+}
+
+fn triangle(n: u64) -> Vec<u64> {
+    // A closure inside a closure, reading the outer one's parameter.
+    range(0, n).map(|i| range(0, i).fold(i, |a, j| a + j))
+}
+
+fn quantifiers(n: u64) -> (bool, bool, bool) {
+    let small = range(0, n).all(|i| i < 5);
+    let seven = range(0, n).any(|i| i == 7);
+    let none = evens(n).map(|x| x + 1).any(|x| x % 2 == 0);
+    (small, seven, none)
+}
+
+fn ends(n: u64) -> (Option<u64>, Option<u64>, Option<u64>) {
+    let v = evens(n);
+    (v.first(), v.last(), v.get(2))
+}
+
+fn reshaped(n: u64) -> Vec<u64> {
+    evens(n).push(n).concat(scaled(2, 10)).reverse()
+}
+
+fn shadowed(n: u64) -> u64 {
+    let x = n + 1;
+    let x = x * 2;
+    let (a, b) = (x, n);
+    let _ = a;
+    a + b
+}
+
+fn words(s: String) -> Vec<(u64, String)> {
+    s.split_whitespace().map(|w| w.to_lowercase()).enumerate()
+}
+
+fn blank(s: String) -> bool {
+    s.split_whitespace().is_empty()
+}
+
+fn take(c: Cur, k: u64) -> Option<(Bytes, Cur)> {
+    c.buf.slice(c.pos, c.pos + k).map(|x| (x, Cur { buf: c.buf, pos: c.pos + k }))
+}
+
+/// A one-byte field then a two-byte field; `None` when the input is too short.
+fn two_fields(b: Bytes) -> Option<(Bytes, Bytes)> {
+    let c = Cur { buf: b, pos: 0 };
+    take(c, 1).and_then(|p| take(p.1, 2).map(|q| (p.0, q.0)))
+}
+
+fn doubled(b: Bytes) -> Bytes {
+    b.concat(b)
+}
+
+fn defaults(n: u64) -> (u64, bool, bool) {
+    let o = scaled(4, 3).get(n);
+    (o.unwrap_or(100), o.is_some(), o.is_none())
+}
+
+fn classify(n: u64) -> String {
+    let (q, r) = (n / 10, n % 10);
+    match q {
+        0 => "small",
+        _ => if r == 0 { "round" } else { "big" },
+    }
+}
+
+/// Match arms bind afresh, shadowing the function's `x` (LANGUAGE §16.1), in a closure too.
+fn arms(n: u64) -> (u64, Vec<u64>) {
+    let x = 7;
+    let o = if n % 2 == 0 { Some(n) } else { None };
+    let a = match o { Some(x) => x, None => x };
+    let v = range(0, 4).map(|i| if i < 2 { Some(i + n) } else { None }).map(|p| match p { Some(x) => x, None => 0 });
+    (match n { x => a + x }, v)
+}
+
+view v_sum(n, x) = e(n, _, _), let x = sum_below(n);
+view v_evens(n, x) = e(n, _, _), let x = evens(n);
+view v_scaled(n, x) = e(n, _, _), let x = scaled(n, n);
+view v_thirds(n, x) = e(n, _, _), let x = thirds(n);
+view v_triangle(n, x) = e(n, _, _), let x = triangle(n);
+view v_quant(n, x) = e(n, _, _), let x = quantifiers(n);
+view v_ends(n, x) = e(n, _, _), let x = ends(n);
+view v_reshaped(n, x) = e(n, _, _), let x = reshaped(n);
+view v_shadowed(n, x) = e(n, _, _), let x = shadowed(n);
+view v_words(s, x) = e(_, s, _), let x = words(s);
+view v_blank(s, x) = e(_, s, _), let x = blank(s);
+view v_fields(b, x) = e(_, _, b), let x = two_fields(b);
+view v_doubled(b, x) = e(_, _, b), let x = doubled(b);
+view v_defaults(n, x) = e(n, _, _), let x = defaults(n);
+view v_classify(n, x) = e(n, _, _), let x = classify(n);
+view v_range(n, x) = e(n, _, _), let x = range(n, 2 * n + 1).len();
+view v_arms(n, x) = e(n, _, _), let x = arms(n);

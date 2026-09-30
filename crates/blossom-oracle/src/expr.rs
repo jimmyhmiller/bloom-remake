@@ -22,6 +22,44 @@ pub(crate) struct Scope<'a> {
     pub tick: Tick,
     pub now: Instant,
     pub oracle: &'a Oracle,
+    /// The step budget of the function evaluation in progress (BLSR012).
+    pub fuel: Fuel,
+}
+
+/// How many function calls are open, and the steps the outermost one has left (`FN_STEP_BUDGET` at its start).
+#[derive(Default)]
+pub(crate) struct Fuel(std::cell::Cell<(u32, u64)>);
+
+impl Fuel {
+    /// Enters a call of a pure function; the outermost call starts a fresh budget.
+    pub(crate) fn enter(&self) {
+        let (depth, left) = self.0.get();
+        let left = if depth == 0 { blossom_ir::core::FN_STEP_BUDGET } else { left };
+        self.0.set((depth.saturating_add(1), left));
+    }
+
+    pub(crate) fn exit(&self) {
+        let (depth, left) = self.0.get();
+        self.0.set((depth.saturating_sub(1), left));
+    }
+
+    /// Spends `n` steps: outside any function a single `range` has the whole budget to itself.
+    pub(crate) fn spend(&self, n: u64) -> ExprResult<()> {
+        let (depth, left) = self.0.get();
+        let have = if depth == 0 { blossom_ir::core::FN_STEP_BUDGET } else { left };
+        match have.checked_sub(n) {
+            Some(rest) => {
+                if depth > 0 {
+                    self.0.set((depth, rest));
+                }
+                Ok(())
+            }
+            None => Err(ExprError::Budget(format!(
+                "a function evaluation exceeds its step budget of {} (closure applications and range elements)",
+                blossom_ir::core::FN_STEP_BUDGET
+            ))),
+        }
+    }
 }
 
 /// A runtime hard error found while evaluating an expression, before it is attributed to a rule and tick.
@@ -31,6 +69,10 @@ pub(crate) enum ExprError {
     Arithmetic(String),
     /// BLSR006: two different values merged into an `LPoint`.
     Conflict(String),
+    /// BLSR010: a host function refused its input (or, later, `error("…")` in a function).
+    Refused(String),
+    /// BLSR012: a pure function's evaluation exceeds its step budget.
+    Budget(String),
     Oracle(OracleError),
 }
 
@@ -282,8 +324,13 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
                 .map_err(|e| ExprError::Oracle(internal_error!("the PRF: {e}").into()))?;
             Ok(Value::Tuple(vec![Value::Int(IntValue::U64(p)), y].into()))
         }
-        Expr::Call { .. } => Err(ExprError::Oracle(
-            blossom_base::unimplemented_error!("LANG-180", "function calls in the oracle (WP M4.1)").into(),
+        Expr::Call { f: FnRef::Fn(id), args } => crate::library::call(scope, env, *id, args),
+        Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::Lib(f)),
+            args,
+        } => crate::library::lib(scope, env, *f, args),
+        Expr::Call { f: FnRef::Builtin(b), .. } => Err(ExprError::Oracle(
+            blossom_base::unimplemented_error!("LANG-180", "the built-in {b:?} in the oracle").into(),
         )),
         Expr::Collection { kind, elems } => {
             let mut vs = Vec::with_capacity(elems.len());
@@ -320,8 +367,9 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
             }
             Ok(kind.eval(lop, &vs)?)
         }
-        Expr::Let { .. } | Expr::Closure { .. } => Err(ExprError::Oracle(
-            internal_error!("`let` and closures appear only in function bodies").into(),
+        Expr::Let { pat, value, body } => crate::library::let_in(scope, env, pat, value, body),
+        Expr::Closure { .. } => Err(ExprError::Oracle(
+            internal_error!("a closure evaluated outside a combinator's argument").into(),
         )),
     }
 }
@@ -512,9 +560,7 @@ fn unary(op: UnOp, v: Value) -> ExprResult<Value> {
     match (op, v) {
         (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
         (UnOp::Neg, Value::Int(i)) => int_neg(i).map(Value::Int),
-        (UnOp::BitNot, _) => Err(ExprError::Oracle(
-            blossom_base::unimplemented_error!("LANG-084", "bit operations in the oracle (WP M4.1)").into(),
-        )),
+        (UnOp::BitNot, Value::Int(i)) => Ok(Value::Int(int_not(i))),
         (op, v) => Err(ExprError::Oracle(internal_error!("{op:?} applied to {v:?}").into())),
     }
 }
@@ -575,9 +621,55 @@ fn binary(op: BinOp, l: Value, r: Value) -> ExprResult<Value> {
         And | Or => Err(ExprError::Oracle(
             internal_error!("`&&`/`||` reached the strict path").into(),
         )),
-        BitAnd | BitOr | BitXor | Shl | Shr => Err(ExprError::Oracle(
-            blossom_base::unimplemented_error!("LANG-084", "bit operations in the oracle (WP M4.1)").into(),
-        )),
+        BitAnd | BitOr | BitXor | Shl | Shr => match (l, r) {
+            (Value::Int(a), Value::Int(b)) => int_bits(op, a, b).map(Value::Int),
+            (l, r) => Err(ExprError::Oracle(internal_error!("bit operation {op:?} on {l:?} and {r:?}").into())),
+        },
+    }
+}
+
+macro_rules! bit_ops {
+    ($op:expr, $a:expr, $b:expr, $($variant:ident),*) => {
+        match ($a, $b) {
+            $((IntValue::$variant(x), IntValue::$variant(y)) => {
+                // A shift moves bits out freely, but by a count outside the type's width it is BLSR004.
+                let r = match $op {
+                    BinOp::BitAnd => Some(x & y),
+                    BinOp::BitOr => Some(x | y),
+                    BinOp::BitXor => Some(x ^ y),
+                    BinOp::Shl => u32::try_from(y).ok().and_then(|n| x.checked_shl(n)),
+                    _ => u32::try_from(y).ok().and_then(|n| x.checked_shr(n)),
+                };
+                r.map(IntValue::$variant)
+            })*
+            _ => None,
+        }
+    };
+}
+
+/// `a & b`, `a | b`, `a ^ b`, `a << b`, `a >> b` (arithmetic for signed types) on integers of one type.
+fn int_bits(op: BinOp, a: IntValue, b: IntValue) -> ExprResult<IntValue> {
+    if a.ty() != b.ty() {
+        return Err(ExprError::Oracle(internal_error!("bit operation on {a:?} and {b:?}").into()));
+    }
+    bit_ops!(op, a, b, U8, U16, U32, U64, U128, I8, I16, I32, I64, I128).ok_or_else(|| {
+        ExprError::Arithmetic(format!("{a:?} {op:?} {b:?}: the shift count is outside the type's width"))
+    })
+}
+
+/// `~a`.
+fn int_not(a: IntValue) -> IntValue {
+    match a {
+        IntValue::U8(x) => IntValue::U8(!x),
+        IntValue::U16(x) => IntValue::U16(!x),
+        IntValue::U32(x) => IntValue::U32(!x),
+        IntValue::U64(x) => IntValue::U64(!x),
+        IntValue::U128(x) => IntValue::U128(!x),
+        IntValue::I8(x) => IntValue::I8(!x),
+        IntValue::I16(x) => IntValue::I16(!x),
+        IntValue::I32(x) => IntValue::I32(!x),
+        IntValue::I64(x) => IntValue::I64(!x),
+        IntValue::I128(x) => IntValue::I128(!x),
     }
 }
 
@@ -652,6 +744,16 @@ pub(crate) fn int_sum<'a>(mut values: impl Iterator<Item = &'a Value>) -> ExprRe
 /// BLSR004's code.
 pub(crate) fn arithmetic_code() -> &'static str {
     code!("BLSR004").as_str()
+}
+
+/// BLSR010's code.
+pub(crate) fn refused_code() -> &'static str {
+    code!("BLSR010").as_str()
+}
+
+/// BLSR012's code.
+pub(crate) fn budget_code() -> &'static str {
+    code!("BLSR012").as_str()
 }
 
 /// BLSR006's code.

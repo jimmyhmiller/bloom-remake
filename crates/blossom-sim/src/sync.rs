@@ -134,6 +134,8 @@ pub struct NodeTick {
     pub ingress: Vec<Ingress>,
     /// The replies to client sessions the node sent in the round.
     pub egress: Vec<Egress>,
+    /// The requests to the host (stream writes, closes, dials) the node made in the round.
+    pub host: Vec<blossom_ir::tick::HostOut>,
     /// Whether the node ran this round (a crashed node under [`CrashView::Frozen`] does not).
     pub ran: bool,
 }
@@ -233,6 +235,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                         delivered: delivered.clone(),
                         ingress: Vec::new(),
                         egress: Vec::new(),
+                        host: Vec::new(),
                         ran: false,
                     });
                     next_carried.push(state.clone());
@@ -304,11 +307,11 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                     *slot = true;
                 }
                 next_carried.push(out.next);
-                // A crashed node's replies are lost like its messages.
-                let egress = if faults.crashed(node, tick) {
-                    Vec::new()
+                // A crashed node's replies and host requests are lost like its messages.
+                let (egress, host) = if faults.crashed(node, tick) {
+                    (Vec::new(), Vec::new())
                 } else {
-                    out.egress.into_iter().collect()
+                    (out.egress.into_iter().collect(), out.host.into_iter().collect())
                 };
                 round.push(NodeTick {
                     instance: out.instance,
@@ -316,6 +319,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                     delivered: delivered.clone(),
                     ingress: ingress.clone(),
                     egress,
+                    host,
                     ran: true,
                 });
             }

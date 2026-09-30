@@ -79,3 +79,33 @@ fn cli_usage_errors_exit_2_and_help_lists_exit_codes() {
     assert_eq!(version.status.code(), Some(0));
     assert!(String::from_utf8(version.stdout).unwrap().starts_with("blossom "));
 }
+
+/// `blossom sim` feeds a Blossom program's byte streams scripted connections and chunks, prints each tick's requests
+/// to the host, and refuses a script that breaks the runtime's order (a chunk in its connection's opening tick).
+#[test]
+fn sim_scripts_stream_chunks_and_prints_the_writes() {
+    let echo = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/integration/fixtures/streams/echo.bls");
+    let out = blossom(&[
+        "sim",
+        echo,
+        "--nodes",
+        "n1",
+        "--ticks",
+        "4",
+        "--open",
+        "n1:echo:1:1",
+        "--chunk",
+        "n1:echo:1:2:hel",
+        "--chunk",
+        "n1:echo:1:3:lo\\nwor",
+        "--chunk",
+        "n1:echo:1:4:ld\\n",
+    ]);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{stdout}{}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("=> echo.write(conn#1, 0, [Bytes(b\"hello\\n\")])"), "{stdout}");
+    assert!(stdout.contains("=> echo.write(conn#1, 1, [Bytes(b\"world\\n\")])"), "{stdout}");
+    let bad = blossom(&["sim", echo, "--nodes", "n1", "--ticks", "3", "--open", "n1:echo:1:2", "--chunk", "n1:echo:1:2:x"]);
+    assert_eq!(bad.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("opening tick"));
+}

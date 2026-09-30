@@ -41,6 +41,7 @@ impl Program {
             fns: IndexVec::new(),
             udas: IndexVec::new(),
             services: IndexVec::new(),
+            streams: Vec::new(),
             roles: IndexVec::new(),
             rels: IndexVec::new(),
             rules: IndexVec::new(),
@@ -110,6 +111,14 @@ impl IrBuilder {
             .lattices
             .push(def)
             .map_err(|e| IrError::builder(e.to_string()))
+    }
+    /// Declares a byte stream (FOREIGN-PROTOCOLS §1); its relations are declared first.
+    pub fn declare_stream(&mut self, s: StreamDecl) -> Result<(), IrError> {
+        if self.program.streams.iter().any(|x| x.name == s.name) {
+            return Err(IrError::builder("duplicate stream"));
+        }
+        self.program.streams.push(s);
+        Ok(())
     }
     /// Declares a pure function.
     pub fn declare_fn(&mut self, mut f: FnDeclInput) -> Result<FnId, IrError> {

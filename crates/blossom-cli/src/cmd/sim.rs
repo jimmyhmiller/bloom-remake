@@ -6,7 +6,9 @@
 //! - `blossom sim prog.ded --nodes a,b,c --ticks 6`: a Molly program under Molly's crash view;
 //! - `blossom sim specs.bls --spec NAME`: a Blossom spec's target in its scenario (nodes, facts, `round`), to EOT
 //!   unless `--ticks` says otherwise, under CR-20;
-//! - `blossom sim prog.bls --nodes a,b=Role --ticks 6`: a Blossom program root on its own.
+//! - `blossom sim prog.bls --nodes a,b=Role --ticks 6`: a Blossom program root on its own; its byte streams take
+//!   scripted connections and chunks (`--open`, `--chunk`, `--close`), and each tick's requests to the host (stream
+//!   writes, closes, dials) are printed after its relations.
 //!
 //! Traces, replay and the seeded asynchronous simulator are WP M7.2's (TEST-001).
 
@@ -58,6 +60,16 @@ pub struct Args {
     /// Also print the messages sent between nodes.
     #[arg(long)]
     pub messages: bool,
+    /// A connection accepted on a `listen` stream: `node:stream:conn:tick` (repeatable).
+    #[arg(long = "open", value_name = "NODE:STREAM:CONN:TICK")]
+    pub opens: Vec<String>,
+    /// A chunk read from a connection: `node:stream:conn:tick:text`, with `\\n`, `\\t`, `\\\\` and `\\xHH`
+    /// escapes (repeatable; chunks of one connection are numbered in tick order).
+    #[arg(long = "chunk", value_name = "NODE:STREAM:CONN:TICK:TEXT")]
+    pub chunks: Vec<String>,
+    /// A connection the peer closed: `node:stream:conn:tick` (repeatable).
+    #[arg(long = "close", value_name = "NODE:STREAM:CONN:TICK")]
+    pub closes: Vec<String>,
 }
 
 /// Runs the command.
@@ -71,6 +83,11 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
         eprintln!("give `--ticks`");
         return Exit::Usage.into();
     };
+    let mut artifact = artifact;
+    if let Err(message) = scripted_streams(&mut artifact, &args) {
+        eprintln!("{message}");
+        return Exit::Usage.into();
+    }
     let faults = match faults(&artifact, &args) {
         Ok(f) => f,
         Err(message) => {
@@ -78,7 +95,14 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
             return Exit::Usage.into();
         }
     };
-    let sim = match SpecSim::new(&artifact) {
+    let externs = match crate::common::std_externs() {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("{e}");
+            return Exit::Internal.into();
+        }
+    };
+    let sim = match SpecSim::with_externs(&artifact, externs) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{e}");
@@ -126,6 +150,17 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
                     let vals = names.row(ir, row);
                     lines.push(format!("  {}({})", rel.name, vals.join(", ")));
                 }
+            }
+            // What the node asked of the host this tick: stream writes, closes, dials.
+            for h in &nt.host {
+                let rel = artifact
+                    .protocol
+                    .get()
+                    .rels
+                    .get(h.rel)
+                    .map(|r| r.name.to_string())
+                    .unwrap_or_default();
+                lines.push(format!("  => {rel}({})", names.row(h.rel, &h.row).join(", ")));
             }
             if !lines.is_empty() {
                 println!("{name}");
@@ -264,4 +299,191 @@ fn faults(artifact: &SimArtifact, args: &Args) -> Result<FaultSchedule, String> 
         out.crashes.insert(node(n)?, Tick(tick));
     }
     Ok(out)
+}
+
+/// One scripted stream event: its node, stream, connection and tick.
+struct Scripted {
+    node: blossom_value::time::NodeId,
+    stream: usize,
+    conn: u64,
+    tick: u64,
+}
+
+/// Parses `node:stream:conn:tick[:text]`.
+fn scripted(artifact: &SimArtifact, text: &str, with_text: bool) -> Result<(Scripted, Option<Vec<u8>>), String> {
+    let parts: Vec<&str> = text.splitn(if with_text { 5 } else { 4 }, ':').collect();
+    let bad = || {
+        format!(
+            "`{text}`: expected NODE:STREAM:CONN:TICK{}",
+            if with_text { ":TEXT" } else { "" }
+        )
+    };
+    let (Some(node), Some(stream), Some(conn), Some(tick)) = (parts.first(), parts.get(1), parts.get(2), parts.get(3))
+    else {
+        return Err(bad());
+    };
+    let node = artifact
+        .node_id(node)
+        .ok_or_else(|| format!("`{text}`: `{node}` is not one of the nodes"))?;
+    let stream = artifact
+        .protocol
+        .get()
+        .streams
+        .iter()
+        .position(|s| s.name.to_string() == *stream)
+        .ok_or_else(|| format!("`{text}`: the program has no stream `{stream}`"))?;
+    let st = artifact
+        .protocol
+        .get()
+        .streams
+        .get(stream)
+        .ok_or_else(|| format!("`{text}`: no stream {stream}"))?;
+    if let blossom_ir::core::Placement::Role(r) = st.placement
+        && artifact.roles.get(node.0 as usize).copied().flatten() != Some(r)
+    {
+        return Err(format!(
+            "`{text}`: node `{}` does not run the stream `{}`",
+            parts.first().copied().unwrap_or(""),
+            st.name
+        ));
+    }
+    let conn: u64 = conn.parse().map_err(|_| bad())?;
+    if conn > u64::from(u32::MAX) {
+        return Err(format!("`{text}`: a connection number is at most {}", u32::MAX));
+    }
+    let tick: u64 = tick.parse().map_err(|_| bad())?;
+    let body = match (with_text, parts.get(4)) {
+        (true, Some(t)) => Some(unescape(t).ok_or_else(|| format!("`{text}`: a bad escape in the text"))?),
+        (true, None) => return Err(bad()),
+        (false, _) => None,
+    };
+    Ok((
+        Scripted {
+            node,
+            stream,
+            conn,
+            tick,
+        },
+        body,
+    ))
+}
+
+/// `\\n`, `\\t`, `\\\\` and `\\xHH`.
+fn unescape(t: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut chars = t.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            continue;
+        }
+        match chars.next()? {
+            'n' => out.push(b'\n'),
+            't' => out.push(b'\t'),
+            '\\' => out.push(b'\\'),
+            'x' => {
+                let hex: String = [chars.next()?, chars.next()?].iter().collect();
+                out.push(u8::from_str_radix(&hex, 16).ok()?);
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Adds the scripted connections and chunks to the run's inputs, checking the order the runtime guarantees
+/// (FOREIGN-PROTOCOLS §1.2a): a connection opens in an earlier tick than its first chunk, has at most one chunk per
+/// tick, and closes in a later tick than its last chunk.
+fn scripted_streams(artifact: &mut SimArtifact, args: &Args) -> Result<(), String> {
+    use blossom_artifact::sim::InputFact;
+    use blossom_value::Value;
+    use blossom_value::value::{ConnId, IntValue};
+    use std::collections::BTreeMap;
+    if args.opens.is_empty() && args.chunks.is_empty() && args.closes.is_empty() {
+        return Ok(());
+    }
+    type Key = (u32, usize, u64);
+    let mut opened: BTreeMap<Key, u64> = BTreeMap::new();
+    let mut chunks: BTreeMap<Key, BTreeMap<u64, Vec<u8>>> = BTreeMap::new();
+    let mut closed: BTreeMap<Key, u64> = BTreeMap::new();
+    for o in &args.opens {
+        let (s, _) = scripted(artifact, o, false)?;
+        let st = artifact.protocol.get().streams.get(s.stream).ok_or("no such stream")?;
+        if st.kind != blossom_ir::core::StreamKind::Listen {
+            return Err(format!("`{o}`: `--open` accepts on listen streams only"));
+        }
+        if opened.insert((s.node.0, s.stream, s.conn), s.tick).is_some() {
+            return Err(format!("`{o}`: the connection opens twice"));
+        }
+    }
+    for c in &args.chunks {
+        let (s, body) = scripted(artifact, c, true)?;
+        let per = chunks.entry((s.node.0, s.stream, s.conn)).or_default();
+        if per.insert(s.tick, body.unwrap_or_default()).is_some() {
+            return Err(format!("`{c}`: a connection has at most one chunk per tick"));
+        }
+    }
+    for c in &args.closes {
+        let (s, _) = scripted(artifact, c, false)?;
+        if closed.insert((s.node.0, s.stream, s.conn), s.tick).is_some() {
+            return Err(format!("`{c}`: the connection closes twice"));
+        }
+    }
+    let program = artifact.protocol.get().clone();
+    let mut facts = Vec::new();
+    for (key @ (node, stream, conn), open_tick) in &opened {
+        let st = program.streams.get(*stream).ok_or("no such stream")?;
+        let node = blossom_value::time::NodeId(*node);
+        // Connection numbers are per stream: the stream is the high half of the `Conn`.
+        let c = Value::Conn(ConnId((*stream as u64) << 32 | *conn));
+        facts.push(InputFact {
+            node,
+            tick: Tick(*open_tick),
+            rel: st.opened,
+            row: vec![
+                c.clone(),
+                Value::Str("script".into()),
+                Value::Instant(blossom_value::time::Instant(0)),
+            ],
+        });
+        let per = chunks.remove(key).unwrap_or_default();
+        if per.keys().next().is_some_and(|t| t <= open_tick) {
+            return Err(format!(
+                "connection {conn}: a chunk in or before its opening tick {open_tick}"
+            ));
+        }
+        let last = per.keys().next_back().copied();
+        for (seq, (tick, bytes)) in per.into_iter().enumerate() {
+            facts.push(InputFact {
+                node,
+                tick: Tick(tick),
+                rel: st.data,
+                row: vec![
+                    c.clone(),
+                    Value::Int(IntValue::U64(seq as u64)),
+                    Value::Bytes(bytes.into()),
+                ],
+            });
+        }
+        if let Some(close_tick) = closed.remove(key) {
+            if close_tick <= last.unwrap_or(*open_tick) {
+                return Err(format!("connection {conn}: closes in or before its last chunk's tick"));
+            }
+            facts.push(InputFact {
+                node,
+                tick: Tick(close_tick),
+                rel: st.closed,
+                row: vec![c, Value::Str("closed by the script".into())],
+            });
+        }
+    }
+    if let Some(((_, _, conn), _)) = chunks.iter().next().or(None) {
+        return Err(format!("connection {conn} has chunks but no `--open`"));
+    }
+    if let Some(((_, _, conn), _)) = closed.iter().next() {
+        return Err(format!("connection {conn} closes but has no `--open`"));
+    }
+    artifact.inputs.extend(facts);
+    Ok(())
 }

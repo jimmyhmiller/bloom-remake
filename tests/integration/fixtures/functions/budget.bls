@@ -1,0 +1,22 @@
+//! The step budget of pure functions (LANGUAGE §16.1, BLSR012): closure applications and built `range` elements are
+//! counted from an outermost call to its return, and past `FN_STEP_BUDGET` (10⁷) the tick aborts on both evaluators.
+program budget version 1;
+
+input spin(n: u64);
+input big(n: u64);
+input nest(n: u64);
+
+/// `n` closure applications.
+fn count(n: u64) -> u64 {
+    range(0, n).fold(0, |a, _i| a + 1)
+}
+
+/// `n + n²` closure applications: the budget is shared by nested combinators and by the functions a call calls.
+fn nested(n: u64) -> u64 {
+    range(0, n).map(|i| count(n) + i).len()
+}
+
+view v_spin(n, x) = spin(n), let x = count(n);
+/// A `range` built outside any function: `n` elements.
+view v_big(n, x) = big(n), let x = range(0, n).len();
+view v_nest(n, x) = nest(n), let x = nested(n);

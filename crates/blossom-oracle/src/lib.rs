@@ -21,6 +21,7 @@
 mod cells;
 mod eval;
 mod expr;
+mod library;
 mod plan;
 mod strata;
 
@@ -39,7 +40,7 @@ use blossom_value::{
 
 pub use strata::Stratum;
 
-pub use blossom_ir::tick::{Delivery, Egress, Ingress, Instance, Row, Send, TickInput, TickOutput};
+pub use blossom_ir::tick::{Delivery, Egress, HostOut, Ingress, Instance, Row, Send, TickInput, TickOutput};
 
 /// Why the oracle could not evaluate: the evaluators' shared error.
 pub type OracleError = blossom_ir::tick::EvalError;
@@ -82,6 +83,8 @@ pub struct Oracle {
     /// The deployment's values of deploy-time parameters (LANG-010); a parameter it does not bind takes its
     /// declared default.
     params: BTreeMap<blossom_base::ParamId, Value>,
+    /// The host functions the program's `extern fn`s call, bound when the oracle was built.
+    externs: Arc<blossom_value::ExternRegistry>,
 }
 
 impl Oracle {
@@ -93,6 +96,17 @@ impl Oracle {
 
     /// [`Oracle::new`] with explicit limits.
     pub fn with_limits(program: ValidatedProgram, limits: Limits) -> Result<Oracle, OracleError> {
+        Oracle::with_externs(program, limits, Arc::new(blossom_value::ExternRegistry::new()))
+    }
+
+    /// [`Oracle::with_limits`] with the host functions the program's `extern fn`s call. Every one must be in
+    /// `externs` with its declared signature (LANG-181); a program that declares none needs none.
+    pub fn with_externs(
+        program: ValidatedProgram,
+        limits: Limits,
+        externs: Arc<blossom_value::ExternRegistry>,
+    ) -> Result<Oracle, OracleError> {
+        blossom_ir::tick::bind_externs(program.get(), &externs)?;
         eval::check_supported(program.get())?;
         let strata = strata::stratify(program.get())?;
         let mut plans = BTreeMap::new();
@@ -125,7 +139,13 @@ impl Oracle {
             limits,
             roles: Vec::new(),
             params: BTreeMap::new(),
+            externs,
         })
+    }
+
+    /// The host function registered at `path` (bound when the oracle was built).
+    pub(crate) fn host_fn(&self, path: &str) -> Option<&Arc<dyn blossom_value::ExternFn>> {
+        self.externs.lookup_fn(path)
     }
 
     /// Places the deployment's nodes: `roles[n]` is node `n`'s role. A rule placed at a role runs only on that

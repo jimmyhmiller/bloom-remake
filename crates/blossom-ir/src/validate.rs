@@ -22,6 +22,33 @@ impl Mapper for Refs {
         id
     }
 }
+/// What expression typing reads of where the expression is: the variables' types, the placement (for `$self`), and
+/// whether it is a function body (which reads no scalar: functions are pure, LANGUAGE §16.1).
+#[derive(Clone, Copy)]
+struct Cx<'a> {
+    vars: &'a IndexVec<VarId, VarDecl>,
+    role: Option<RoleId>,
+    in_fn: bool,
+}
+
+impl<'a> Cx<'a> {
+    fn rule(r: &'a Rule) -> Cx<'a> {
+        Cx {
+            vars: &r.body.vars,
+            role: r.role,
+            in_fn: false,
+        }
+    }
+
+    fn function(f: &'a FnDecl) -> Cx<'a> {
+        Cx {
+            vars: &f.vars,
+            role: None,
+            in_fn: true,
+        }
+    }
+}
+
 fn vars(x: &impl Remap) -> BTreeSet<VarId> {
     let mut r = Refs::default();
     x.remap(&mut r);
@@ -58,6 +85,155 @@ fn bound_vars(rule: &Rule) -> BTreeSet<VarId> {
     }
     bound
 }
+/// The identifiers an IR fragment references, of the kinds function checks need.
+#[derive(Default)]
+struct Mentions {
+    fns: BTreeSet<FnId>,
+    vars: BTreeSet<VarId>,
+}
+impl Mapper for Mentions {
+    fn fnid(&mut self, id: FnId) -> FnId {
+        self.fns.insert(id);
+        id
+    }
+    fn varid(&mut self, id: VarId) -> VarId {
+        self.vars.insert(id);
+        id
+    }
+}
+
+/// A function with an IR body (LANGUAGE §16.1): its first variables are its parameters, its variables are its own,
+/// and its body has its declared result type.
+fn check_function(p: &Program, f: &FnDecl, body: &Expr) -> Result<(), String> {
+    let name = &f.name;
+    if f.vars.len() < f.params.len() {
+        return Err(format!("function {name}: fewer variables than parameters"));
+    }
+    for ((_, ty), var) in f.params.iter().zip(f.vars.iter()) {
+        if var.ty != *ty {
+            return Err(format!("function {name}: a parameter variable's type differs from the parameter's"));
+        }
+    }
+    let mut m = Mentions::default();
+    body.remap(&mut m);
+    if let Some(v) = m.vars.iter().find(|v| f.vars.get(**v).is_none()) {
+        return Err(format!("function {name}: unknown variable {v:?}"));
+    }
+    let ty = expr_type(p, Cx::function(f), body).map_err(|e| format!("function {name}: {e}"))?;
+    if !assignable(p, ty, f.ret) {
+        return Err(format!("function {name}: the body's type is not the declared result type"));
+    }
+    Ok(())
+}
+
+/// The qualified name of the built-in `Part` enum (FOREIGN-PROTOCOLS §1.1): `$` never begins a source identifier,
+/// so no program's own type can take it.
+pub const PART_TYPE: &str = "$builtin::Part";
+
+/// A stream's relations (FOREIGN-PROTOCOLS §1.1): each exists with its class and schema, the connect-only ones
+/// exactly for a connect stream, and each belongs to one stream.
+fn check_stream(p: &Program, st: &StreamDecl) -> Result<(), String> {
+    let name = &st.name;
+    let ty = |d: TypeDef| p.types.lookup(&d).ok_or_else(|| format!("stream {name}: type {d:?} is not interned"));
+    let conn = ty(TypeDef::Conn)?;
+    let u64t = ty(TypeDef::Int(IntTy::U64))?;
+    let text = ty(TypeDef::Str)?;
+    let rel = |id: RelId, class: RelClass, cols: Vec<TypeId>, what: &str| -> Result<(), String> {
+        let r = p.rels.get(id).ok_or_else(|| format!("stream {name}: `{what}` is not a relation"))?;
+        if r.class != class {
+            return Err(format!("stream {name}: `{what}` has class {:?}", r.class));
+        }
+        if r.placement != st.placement {
+            return Err(format!("stream {name}: `{what}` is placed elsewhere than its stream"));
+        }
+        let have: Vec<TypeId> = r.schema.cols.iter().map(|c| c.ty).collect();
+        if have != cols {
+            return Err(format!("stream {name}: `{what}` has the wrong columns"));
+        }
+        Ok(())
+    };
+    let ev = |e: StreamEvent| RelClass::Event(EventSource::Stream(e));
+    let instant = ty(TypeDef::Instant)?;
+    let opened = match st.kind {
+        StreamKind::Listen => vec![conn, text, instant],
+        StreamKind::Connect => vec![conn, u64t, text, instant],
+    };
+    rel(st.opened, ev(StreamEvent::Opened), opened, "opened")?;
+    rel(st.data, ev(StreamEvent::Data), vec![conn, u64t, ty(TypeDef::Bytes)?], "data")?;
+    rel(st.closed, ev(StreamEvent::Closed), vec![conn, text], "closed")?;
+    rel(st.close, RelClass::HostOut(HostOp::Close), vec![conn], "close")?;
+    // `write(c, seq, parts: Vec<Part>)`: `Part` is the built-in enum whose variant 0 is `Bytes(Bytes)`.
+    let w = p.rels.get(st.write).ok_or_else(|| format!("stream {name}: `write` is not a relation"))?;
+    let parts = w.schema.cols.get(2).map(|c| c.ty).ok_or_else(|| format!("stream {name}: `write` has no parts"))?;
+    let part_ok = match p.types.get(parts) {
+        Some(TypeDef::Vec(part)) => match p.types.get(*part) {
+            Some(TypeDef::Enum(e)) => {
+                e.name.to_string() == PART_TYPE
+                    && e.variants.iter().any(|v| {
+                        v.number == 0
+                            && v.payload.len() == 1
+                            && v.payload.first().is_some_and(|f| p.types.get(f.ty) == Some(&TypeDef::Bytes))
+                    })
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    if !part_ok {
+        return Err(format!("stream {name}: `write`'s parts are not a Vec<Part>"));
+    }
+    rel(st.write, RelClass::HostOut(HostOp::Write), vec![conn, u64t, parts], "write")?;
+    match (st.kind, st.failed, st.dial) {
+        (StreamKind::Listen, None, None) => {}
+        (StreamKind::Connect, Some(failed), Some(dial)) => {
+            rel(failed, ev(StreamEvent::Failed), vec![u64t, text], "failed")?;
+            rel(dial, RelClass::HostOut(HostOp::Dial), vec![u64t, text], "dial")?;
+        }
+        _ => return Err(format!("stream {name}: `failed` and `dial` belong exactly to connect streams")),
+    }
+    let mine = [Some(st.opened), Some(st.data), Some(st.closed), st.failed, Some(st.write), Some(st.close), st.dial];
+    for other in p.streams.iter().filter(|o| o.name != st.name) {
+        let theirs = [Some(other.opened), Some(other.data), Some(other.closed), other.failed, Some(other.write), Some(other.close), other.dial];
+        if mine.iter().flatten().any(|r| theirs.iter().flatten().any(|o| o == r)) {
+            return Err(format!("stream {name} shares a relation with stream {}", other.name));
+        }
+    }
+    Ok(())
+}
+
+/// A cycle of calls among IR-bodied functions, which LANGUAGE §16.1 forbids (functions are total).
+fn function_cycle(p: &Program) -> Option<String> {
+    let callees: Vec<(FnId, BTreeSet<FnId>)> = p
+        .fns
+        .iter()
+        .map(|f| match &f.body {
+            FnBody::Ir(body) => {
+                let mut m = Mentions::default();
+                body.remap(&mut m);
+                (f.id, m.fns)
+            }
+            _ => (f.id, BTreeSet::new()),
+        })
+        .collect();
+    // Kahn's algorithm: a function whose callees are all done is done; what remains lies on or reaches a cycle.
+    let mut done: BTreeSet<FnId> = BTreeSet::new();
+    loop {
+        let before = done.len();
+        for (id, cs) in &callees {
+            if !done.contains(id) && cs.iter().all(|c| done.contains(c)) {
+                done.insert(*id);
+            }
+        }
+        if done.len() == before {
+            break;
+        }
+    }
+    p.fns
+        .iter()
+        .find(|f| !done.contains(&f.id))
+        .map(|f| format!("function {} is recursive (LANGUAGE §16.1)", f.name))
+}
+
 struct Bounds<'a> {
     p: &'a Program,
     errors: Vec<String>,
@@ -123,7 +299,17 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
             None,
             "function id is not its table position".into(),
         );
+        if let FnBody::Ir(body) = &f.body {
+            let result = check_function(p, f, body);
+            check(result.is_ok(), 8, None, None, result.err().unwrap_or_default());
+        }
     }
+    for st in &p.streams {
+        let result = check_stream(p, st);
+        check(result.is_ok(), 8, None, None, result.err().unwrap_or_default());
+    }
+    let recursion = function_cycle(p);
+    check(recursion.is_none(), 8, None, None, recursion.unwrap_or_default());
     for (id, param) in p.params.iter_enumerated() {
         check(
             id == param.id,
@@ -339,7 +525,7 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
         );
         if let Some(rel) = p.rels.get(rule.head.rel) {
             let legal = match rule.kind {
-                RuleKind::Async => matches!(rel.class, RelClass::Channel(_)),
+                RuleKind::Async => matches!(rel.class, RelClass::Channel(_) | RelClass::HostOut(_)),
                 RuleKind::Deductive | RuleKind::Inductive => matches!(rel.class, RelClass::Idb | RelClass::Weighted(_)),
             };
             let mode = match rule.head.mode {
@@ -365,8 +551,8 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
             );
             for (arg, col) in rule.head.args.iter().zip(&rel.schema.cols) {
                 let compatible = match arg {
-                    HeadArg::Term(t) => !matches!(t, Term::Wild) && term_type(p, rule, t, col.ty),
-                    HeadArg::Agg(a) => agg_type(p, rule, a, col.ty),
+                    HeadArg::Term(t) => !matches!(t, Term::Wild) && term_type(p, Cx::rule(rule), t, col.ty),
+                    HeadArg::Agg(a) => agg_type(p, Cx::rule(rule), a, col.ty),
                 };
                 check(
                     compatible,
@@ -378,7 +564,7 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
             }
             if let HeadMode::ZAdd { weight } = &rule.head.mode {
                 check(
-                    !matches!(weight, Term::Wild) && term_matches(p, rule, weight, &TypeDef::Int(IntTy::I64)),
+                    !matches!(weight, Term::Wild) && term_matches(p, Cx::rule(rule), weight, &TypeDef::Int(IntTy::I64)),
                     8,
                     Some(rule),
                     None,
@@ -430,7 +616,7 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
                 );
                 for (t, c) in atom.args.iter().zip(&rel.schema.cols) {
                     check(
-                        term_type(p, rule, t, c.ty),
+                        term_type(p, Cx::rule(rule), t, c.ty),
                         8,
                         Some(rule),
                         Some(atom.span),
@@ -446,6 +632,13 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
                     }
                 }
                 check(
+                    !matches!(rel.class, RelClass::HostOut(_)),
+                    2,
+                    Some(rule),
+                    Some(atom.span),
+                    "a request to the host (a stream's write, close or dial) is never read".into(),
+                );
+                check(
                     (atom.sender.is_none() && atom.principal.is_none()) || matches!(rel.class, RelClass::Channel(_)),
                     2,
                     Some(rule),
@@ -454,7 +647,7 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
                 );
                 if let Some(t) = &atom.sender {
                     check(
-                        term_matches(p, rule, t, &TypeDef::Node(None)) || term_matches(p, rule, t, &TypeDef::Session),
+                        term_matches(p, Cx::rule(rule), t, &TypeDef::Node(None)) || term_matches(p, Cx::rule(rule), t, &TypeDef::Session),
                         8,
                         Some(rule),
                         Some(atom.span),
@@ -463,7 +656,7 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
                 }
                 if let Some(t) = &atom.principal {
                     check(
-                        term_matches(p, rule, t, &TypeDef::Principal),
+                        term_matches(p, Cx::rule(rule), t, &TypeDef::Principal),
                         8,
                         Some(rule),
                         Some(atom.span),
@@ -479,7 +672,7 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
                 );
                 if let Some(t) = &atom.weight {
                     check(
-                        term_matches(p, rule, t, &TypeDef::Int(IntTy::I64)),
+                        term_matches(p, Cx::rule(rule), t, &TypeDef::Int(IntTy::I64)),
                         8,
                         Some(rule),
                         Some(atom.span),
@@ -496,7 +689,7 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
             "a lattice column is used as a join key".into(),
         );
         for lit in &rule.body.lits {
-            let result = check_literal(p, rule, lit);
+            let result = check_literal(p, Cx::rule(rule), lit);
             check(result.is_ok(), 8, Some(rule), None, result.err().unwrap_or_default());
         }
         let owners = p.constructs.iter().filter(|c| c.rules.contains(&id)).count();
@@ -674,17 +867,16 @@ fn assignable(p: &Program, actual: TypeId, expected: TypeId) -> bool {
         _ => false,
     }
 }
-fn term_type(p: &Program, r: &Rule, t: &Term, ty: TypeId) -> bool {
+fn term_type(p: &Program, r: Cx<'_>, t: &Term, ty: TypeId) -> bool {
     match t {
-        Term::Var(id) => r.body.vars.get(*id).is_some_and(|v| assignable(p, v.ty, ty)),
+        Term::Var(id) => r.vars.get(*id).is_some_and(|v| assignable(p, v.ty, ty)),
         Term::Const(id) => p.consts.get(*id).is_some_and(|v| p.types.check_value(ty, v).is_ok()),
         Term::Wild => true,
     }
 }
-fn term_matches(p: &Program, r: &Rule, t: &Term, ty: &TypeDef) -> bool {
+fn term_matches(p: &Program, r: Cx<'_>, t: &Term, ty: &TypeDef) -> bool {
     match t {
         Term::Var(id) => r
-            .body
             .vars
             .get(*id)
             .and_then(|v| p.types.get(v.ty))
@@ -696,7 +888,7 @@ fn term_matches(p: &Program, r: &Rule, t: &Term, ty: &TypeDef) -> bool {
         Term::Wild => true,
     }
 }
-fn agg_type(p: &Program, r: &Rule, a: &AggCall, ty: TypeId) -> bool {
+fn agg_type(p: &Program, r: Cx<'_>, a: &AggCall, ty: TypeId) -> bool {
     let is_numeric = |arg: &Term| {
         !matches!(arg, Term::Wild)
             && p.types
@@ -752,11 +944,11 @@ fn agg_type(p: &Program, r: &Rule, a: &AggCall, ty: TypeId) -> bool {
         _ => a.args.len() == 1 && a.args.first().is_some_and(|t| term_type(p, r, t, ty)),
     }
 }
-fn check_literal(p: &Program, r: &Rule, l: &Literal) -> Result<(), String> {
+fn check_literal(p: &Program, r: Cx<'_>, l: &Literal) -> Result<(), String> {
     match l {
         Literal::Bind { pat, expr } => {
             if let Pattern::Var(id) = pat {
-                let expected = r.body.vars.get(*id).ok_or("unknown binding variable")?.ty;
+                let expected = r.vars.get(*id).ok_or("unknown binding variable")?.ty;
                 if expr_matches_type(p, r, expr, expected) {
                     return Ok(());
                 }
@@ -783,7 +975,7 @@ fn check_literal(p: &Program, r: &Rule, l: &Literal) -> Result<(), String> {
                 }
                 let valcol = decl.schema.lattice.first().ok_or("missing lattice column")?.0;
                 let col = decl.schema.cols.get(valcol.index()).ok_or("missing lattice column")?;
-                if r.body.vars.get(*var).is_some_and(|v| v.ty == col.ty) {
+                if r.vars.get(*var).is_some_and(|v| v.ty == col.ty) {
                     Ok(())
                 } else {
                     Err("lookup output type mismatch".into())
@@ -843,10 +1035,10 @@ fn check_literal(p: &Program, r: &Rule, l: &Literal) -> Result<(), String> {
         Literal::Pos(_) | Literal::Neg(_) => Ok(()),
     }
 }
-fn pattern_type(p: &Program, r: &Rule, pat: &Pattern, ty: TypeId) -> Result<(), String> {
+fn pattern_type(p: &Program, r: Cx<'_>, pat: &Pattern, ty: TypeId) -> Result<(), String> {
     match pat {
         Pattern::Var(v) => {
-            if r.body
+            if r
                 .vars
                 .get(*v)
                 .is_some_and(|x| x.ty == ty || assignable(p, ty, x.ty))
@@ -919,7 +1111,7 @@ fn pattern_type(p: &Program, r: &Rule, pat: &Pattern, ty: TypeId) -> Result<(), 
         }
     }
 }
-fn expr_matches_type(p: &Program, r: &Rule, e: &Expr, expected: TypeId) -> bool {
+fn expr_matches_type(p: &Program, r: Cx<'_>, e: &Expr, expected: TypeId) -> bool {
     match e {
         Expr::Term(Term::Const(id)) => p
             .consts
@@ -928,7 +1120,7 @@ fn expr_matches_type(p: &Program, r: &Rule, e: &Expr, expected: TypeId) -> bool 
         _ => expr_type(p, r, e).is_ok_and(|actual| assignable(p, actual, expected)),
     }
 }
-fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
+fn expr_type(p: &Program, r: Cx<'_>, e: &Expr) -> Result<TypeId, String> {
     let lookup = |d: TypeDef| {
         p.types
             .lookup(&d)
@@ -936,7 +1128,6 @@ fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
     };
     match e {
         Expr::Term(Term::Var(v)) => r
-            .body
             .vars
             .get(*v)
             .map(|v| v.ty)
@@ -951,6 +1142,7 @@ fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
         }
         Expr::Term(Term::Wild) => Err("wildcard is not an expression".into()),
         Expr::Param(id) => p.params.get(*id).map(|d| d.ty).ok_or("unknown parameter".into()),
+        Expr::Scalar(_) if r.in_fn => Err("a function reads no scalar (`now()`, `tick()`, `self`)".into()),
         Expr::Scalar(s) => match s {
             BuiltinScalar::Now => lookup(TypeDef::Instant),
             BuiltinScalar::Tick => lookup(TypeDef::Int(IntTy::U64)),
@@ -1101,7 +1293,7 @@ fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
         }
         Expr::Match { scrut, arms } => {
             let scrut_ty = expr_type(p, r, scrut)?;
-            let mut ret = None;
+            let mut types = Vec::with_capacity(arms.len());
             for (pat, guard, body) in arms {
                 pattern_type(p, r, pat, scrut_ty)?;
                 if let Some(g) = guard {
@@ -1110,13 +1302,23 @@ fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
                         return Err("match guard must be bool".into());
                     }
                 }
-                let t = expr_type(p, r, body)?;
-                if ret.is_some_and(|x| x != t) {
+                types.push(expr_type(p, r, body)?);
+            }
+            // A constant arm's type is ambiguous (an empty collection, `None`): the match has a non-constant arm's
+            // type, and every arm must fit it.
+            let ret = arms
+                .iter()
+                .zip(&types)
+                .find(|((_, _, body), _)| !matches!(body, Expr::Term(Term::Const(_))))
+                .or_else(|| arms.iter().zip(&types).next())
+                .map(|(_, t)| *t)
+                .ok_or("match has no arms")?;
+            for ((_, _, body), t) in arms.iter().zip(&types) {
+                if *t != ret && !expr_matches_type(p, r, body, ret) {
                     return Err("match arm type mismatch".into());
                 }
-                ret = Some(t)
             }
-            ret.ok_or("match has no arms".into())
+            Ok(ret)
         }
         Expr::Collection { kind, elems } => {
             let types = elems
@@ -1166,16 +1368,254 @@ fn expr_type(p: &Program, r: &Rule, e: &Expr) -> Result<TypeId, String> {
             }
             Ok(decl.ret)
         }
+        Expr::Let { .. } if !r.in_fn => Err("a `let` outside a function body".into()),
         Expr::Let { pat, value, body } => {
             let t = expr_type(p, r, value)?;
             pattern_type(p, r, pat, t)?;
             expr_type(p, r, body)
         }
-        Expr::Closure { .. } => Err("closure requires a builtin combinator signature".into()),
+        Expr::Closure { .. } => Err("a closure outside a combinator's argument".into()),
     }
 }
 
-fn builtin_type(p: &Program, r: &Rule, b: &BuiltinFn, args: &[Expr]) -> Result<TypeId, String> {
+/// A closure argument's parameters (whose types must be `params`) and its body's type. Closures appear only in
+/// function bodies, so their parameters are variables of the function.
+fn closure_type(p: &Program, r: Cx<'_>, e: &Expr, params: &[TypeId]) -> Result<TypeId, String> {
+    let Expr::Closure { params: vs, body } = e else {
+        return Err("a combinator's last argument must be a closure".into());
+    };
+    if !r.in_fn {
+        return Err("a closure outside a function body".into());
+    }
+    if vs.len() != params.len() {
+        return Err("closure arity mismatch".into());
+    }
+    for (v, want) in vs.iter().zip(params) {
+        let have = r.vars.get(*v).ok_or("unknown closure parameter")?.ty;
+        if have != *want {
+            return Err("closure parameter type mismatch".into());
+        }
+    }
+    expr_type(p, r, body)
+}
+
+/// The type of a library call (LANGUAGE Appendix B), checking its arguments.
+fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, String> {
+    let lookup = |d: TypeDef| p.types.lookup(&d).ok_or(format!("library result type {d:?} is not interned"));
+    let ty = |i: usize| -> Result<TypeId, String> {
+        expr_type(p, r, args.get(i).ok_or(format!("{f:?}: missing argument {i}"))?)
+    };
+    let def = |t: TypeId| p.types.get(t).cloned().ok_or_else(|| "unknown type".to_string());
+    let arity = |n: usize| {
+        if args.len() == n {
+            Ok(())
+        } else {
+            Err(format!("{f:?} expects {n} arguments, got {}", args.len()))
+        }
+    };
+    let elem = |t: TypeId| match def(t)? {
+        TypeDef::Vec(e) => Ok(e),
+        other => Err(format!("{f:?} expects a Vec, got {other:?}")),
+    };
+    let inner = |t: TypeId| match def(t)? {
+        TypeDef::Option(e) => Ok(e),
+        other => Err(format!("{f:?} expects an Option, got {other:?}")),
+    };
+    let u64t = || lookup(TypeDef::Int(IntTy::U64));
+    let boolt = || lookup(TypeDef::Bool);
+    let same = |a: TypeId, b: TypeId, what: &str| if a == b { Ok(()) } else { Err(format!("{f:?}: {what}")) };
+    match f {
+        LibFn::Range => {
+            arity(2)?;
+            let u = u64t()?;
+            same(ty(0)?, u, "range bounds are u64")?;
+            same(ty(1)?, u, "range bounds are u64")?;
+            lookup(TypeDef::Vec(u))
+        }
+        LibFn::VecGet => {
+            arity(2)?;
+            let v = ty(0)?;
+            same(ty(1)?, u64t()?, "an index is u64")?;
+            lookup(TypeDef::Option(elem(v)?))
+        }
+        LibFn::VecFirst | LibFn::VecLast => {
+            arity(1)?;
+            lookup(TypeDef::Option(elem(ty(0)?)?))
+        }
+        LibFn::VecPush => {
+            arity(2)?;
+            let v = ty(0)?;
+            same(ty(1)?, elem(v)?, "push an element of the vector's type")?;
+            Ok(v)
+        }
+        LibFn::VecConcat => {
+            arity(2)?;
+            let v = ty(0)?;
+            elem(v)?;
+            same(ty(1)?, v, "concatenate vectors of one type")?;
+            Ok(v)
+        }
+        LibFn::VecIsEmpty => {
+            arity(1)?;
+            elem(ty(0)?)?;
+            boolt()
+        }
+        LibFn::VecReverse => {
+            arity(1)?;
+            let v = ty(0)?;
+            elem(v)?;
+            Ok(v)
+        }
+        LibFn::VecEnumerate => {
+            arity(1)?;
+            let e = elem(ty(0)?)?;
+            let pair = lookup(TypeDef::Tuple(vec![u64t()?, e]))?;
+            lookup(TypeDef::Vec(pair))
+        }
+        LibFn::VecMap => {
+            arity(2)?;
+            let e = elem(ty(0)?)?;
+            let out = closure_type(p, r, args.get(1).ok_or("missing closure")?, &[e])?;
+            lookup(TypeDef::Vec(out))
+        }
+        LibFn::VecFilter | LibFn::VecAll | LibFn::VecAny => {
+            arity(2)?;
+            let v = ty(0)?;
+            let e = elem(v)?;
+            same(closure_type(p, r, args.get(1).ok_or("missing closure")?, &[e])?, boolt()?, "a predicate returns bool")?;
+            if f == LibFn::VecFilter { Ok(v) } else { boolt() }
+        }
+        LibFn::VecFilterMap => {
+            arity(2)?;
+            let e = elem(ty(0)?)?;
+            let out = closure_type(p, r, args.get(1).ok_or("missing closure")?, &[e])?;
+            lookup(TypeDef::Vec(inner(out)?))
+        }
+        LibFn::VecFold => {
+            arity(3)?;
+            let e = elem(ty(0)?)?;
+            let acc = ty(1)?;
+            same(closure_type(p, r, args.get(2).ok_or("missing closure")?, &[acc, e])?, acc, "a fold step returns its accumulator")?;
+            Ok(acc)
+        }
+        LibFn::OptIsSome | LibFn::OptIsNone => {
+            arity(1)?;
+            inner(ty(0)?)?;
+            boolt()
+        }
+        LibFn::OptUnwrapOr => {
+            arity(2)?;
+            let e = inner(ty(0)?)?;
+            same(ty(1)?, e, "the default has the option's type")?;
+            Ok(e)
+        }
+        LibFn::OptMap => {
+            arity(2)?;
+            let e = inner(ty(0)?)?;
+            let out = closure_type(p, r, args.get(1).ok_or("missing closure")?, &[e])?;
+            lookup(TypeDef::Option(out))
+        }
+        LibFn::OptAndThen => {
+            arity(2)?;
+            let e = inner(ty(0)?)?;
+            let out = closure_type(p, r, args.get(1).ok_or("missing closure")?, &[e])?;
+            inner(out)?;
+            Ok(out)
+        }
+        LibFn::BytesSlice => {
+            arity(3)?;
+            let b = lookup(TypeDef::Bytes)?;
+            same(ty(0)?, b, "slice of Bytes")?;
+            same(ty(1)?, u64t()?, "positions are u64")?;
+            same(ty(2)?, u64t()?, "positions are u64")?;
+            lookup(TypeDef::Option(b))
+        }
+        LibFn::BytesConcat => {
+            arity(2)?;
+            let b = lookup(TypeDef::Bytes)?;
+            same(ty(0)?, b, "concat of Bytes")?;
+            same(ty(1)?, b, "concat of Bytes")?;
+            Ok(b)
+        }
+        LibFn::StrSplitWhitespace => {
+            arity(1)?;
+            let st = lookup(TypeDef::Str)?;
+            same(ty(0)?, st, "split_whitespace of a String")?;
+            lookup(TypeDef::Vec(st))
+        }
+        LibFn::StrToLowercase => {
+            arity(1)?;
+            let st = lookup(TypeDef::Str)?;
+            same(ty(0)?, st, "to_lowercase of a String")?;
+            Ok(st)
+        }
+        LibFn::StrToUtf8 => {
+            arity(1)?;
+            same(ty(0)?, lookup(TypeDef::Str)?, "to_utf8 of a String")?;
+            lookup(TypeDef::Bytes)
+        }
+        LibFn::BytesFromUtf8 => {
+            arity(1)?;
+            same(ty(0)?, lookup(TypeDef::Bytes)?, "from_utf8 of Bytes")?;
+            lookup(TypeDef::Option(lookup(TypeDef::Str)?))
+        }
+        LibFn::BytesRead(it) | LibFn::BytesPut(it) | LibFn::BytesFrom(it) if !matches!(it.bits(), 8 | 16 | 32 | 64) => {
+            Err(format!("{f:?}: byte access is for 8- to 64-bit integers"))
+        }
+        LibFn::BytesRead(it) => {
+            arity(2)?;
+            same(ty(0)?, lookup(TypeDef::Bytes)?, "reads from Bytes")?;
+            same(ty(1)?, u64t()?, "a position is u64")?;
+            lookup(TypeDef::Option(lookup(TypeDef::Int(it))?))
+        }
+        LibFn::BytesPut(it) => {
+            arity(3)?;
+            let b = lookup(TypeDef::Bytes)?;
+            same(ty(0)?, b, "writes into Bytes")?;
+            same(ty(1)?, u64t()?, "a position is u64")?;
+            same(ty(2)?, lookup(TypeDef::Int(it))?, "the written integer has the method's type")?;
+            lookup(TypeDef::Option(b))
+        }
+        LibFn::BytesFrom(it) => {
+            arity(1)?;
+            same(ty(0)?, lookup(TypeDef::Int(it))?, "the integer has the constructor's type")?;
+            lookup(TypeDef::Bytes)
+        }
+        LibFn::BytesUvarintAt | LibFn::BytesVarintAt => {
+            arity(2)?;
+            same(ty(0)?, lookup(TypeDef::Bytes)?, "reads from Bytes")?;
+            same(ty(1)?, u64t()?, "a position is u64")?;
+            let v = if f == LibFn::BytesUvarintAt {
+                u64t()?
+            } else {
+                lookup(TypeDef::Int(IntTy::I64))?
+            };
+            lookup(TypeDef::Option(lookup(TypeDef::Tuple(vec![v, u64t()?]))?))
+        }
+        LibFn::BytesUvarint | LibFn::BytesVarint => {
+            arity(1)?;
+            let v = if f == LibFn::BytesUvarint {
+                u64t()?
+            } else {
+                lookup(TypeDef::Int(IntTy::I64))?
+            };
+            same(ty(0)?, v, "a varint's value")?;
+            lookup(TypeDef::Bytes)
+        }
+        LibFn::BytesEmpty => {
+            arity(0)?;
+            lookup(TypeDef::Bytes)
+        }
+        LibFn::BytesJoin => {
+            arity(1)?;
+            let b = lookup(TypeDef::Bytes)?;
+            same(ty(0)?, lookup(TypeDef::Vec(b))?, "join of a Vec<Bytes>")?;
+            Ok(b)
+        }
+    }
+}
+
+fn builtin_type(p: &Program, r: Cx<'_>, b: &BuiltinFn, args: &[Expr]) -> Result<TypeId, String> {
     let arity = |n: usize| {
         if args.len() == n {
             Ok(())
@@ -1188,8 +1628,12 @@ fn builtin_type(p: &Program, r: &Rule, b: &BuiltinFn, args: &[Expr]) -> Result<T
             .lookup(&d)
             .ok_or(format!("builtin return type {d:?} is not interned"))
     };
+    if let BuiltinFn::Lib(f) = b {
+        return lib_type(p, r, *f, args);
+    }
     let types = args.iter().map(|e| expr_type(p, r, e)).collect::<Result<Vec<_>, _>>()?;
     match b {
+        BuiltinFn::Lib(_) => Err("the library is typed by lib_type".into()),
         BuiltinFn::Prio { .. } | BuiltinFn::RandPrio { .. } => {
             arity(2)?;
             let choice = *types.get(1).ok_or("missing choice argument")?;

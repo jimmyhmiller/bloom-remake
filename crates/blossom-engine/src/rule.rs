@@ -911,14 +911,13 @@ impl Search<'_, '_> {
             let t = terms
                 .get(*c)
                 .ok_or_else(|| internal_error!("a bound column is out of range"))?;
-            match expr::term(self.cx, env, t) {
-                Ok(v) => values.push(v),
-                Err(_) if failed.is_some() => {
-                    probe = false;
-                    break;
-                }
-                Err(e) => return Err(fatal(e)),
+            // Only after a failed check can a planned column's variable be unbound (the check would have bound it).
+            let unbound = matches!(t, Term::Var(v) if env.get(v.index()).is_none_or(Option::is_none));
+            if unbound && failed.is_some() {
+                probe = false;
+                break;
             }
+            values.push(expr::term(self.cx, env, t).map_err(fatal)?);
         }
         let store = self.store(atom_store(a))?;
         let old = (self.old)(lit);

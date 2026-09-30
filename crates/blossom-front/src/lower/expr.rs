@@ -379,13 +379,24 @@ impl Lowerer<'_> {
                 for (p, g, body) in arms {
                     let mut post = Vec::new();
                     let pat = self.pattern(d, p, &mut post)?;
-                    if !post.is_empty() {
-                        return Err(internal_error!("a match pattern with a computed test"));
-                    }
                     let g = match g {
                         Some(g) => Some(self.expr(d, g)?),
                         None => None,
                     };
+                    // A pattern's equality tests (a bound variable or a computed value in it) run after it binds,
+                    // before the arm's own guard.
+                    let mut tests = Vec::new();
+                    for l in post {
+                        match l {
+                            Literal::Guard(t) => tests.push(t),
+                            other => return Err(internal_error!("a match pattern test {other:?} is not a guard")),
+                        }
+                    }
+                    let g = tests.into_iter().chain(g).reduce(|a, b| Expr::Binary {
+                        op: ir::BinOp::And,
+                        lhs: Box::new(a),
+                        rhs: Box::new(b),
+                    });
                     out.push((pat, g, self.expr(d, body)?));
                 }
                 Expr::Match {
@@ -466,7 +477,8 @@ impl Lowerer<'_> {
                         // known here: intern the literal's type for every role.
                         if matches!(x.kind, HExprKind::SelfNode) {
                             for r in 0..self.hir.roles.len() {
-                                let role = RoleId::from_raw(u32::try_from(r).map_err(|_| internal_error!("too many roles"))?);
+                                let role =
+                                    RoleId::from_raw(u32::try_from(r).map_err(|_| internal_error!("too many roles"))?);
                                 candidates.push(
                                     self.b
                                         .types()
@@ -551,6 +563,39 @@ impl Lowerer<'_> {
                     name.as_str()
                 ));
             }
+            HExprKind::Call { f, args } => {
+                let mut xs = Vec::new();
+                for a in args {
+                    xs.push(self.expr(d, a)?);
+                }
+                Expr::Call {
+                    f: ir::FnRef::Fn(blossom_base::FnId::from_raw(f.0)),
+                    args: xs,
+                }
+            }
+            HExprKind::Let { pat, value, body, .. } => {
+                let v = self.expr(d, value)?;
+                let mut post = Vec::new();
+                let p = self.pattern(d, pat, &mut post)?;
+                if !post.is_empty() {
+                    return Err(internal_error!("a `let` pattern with a computed test"));
+                }
+                Expr::Let {
+                    pat: p,
+                    value: Box::new(v),
+                    body: Box::new(self.expr(d, body)?),
+                }
+            }
+            HExprKind::Closure { params, body } => {
+                let mut vs = Vec::new();
+                for v in params {
+                    vs.push(d.var(self.hir, *v)?);
+                }
+                Expr::Closure {
+                    params: vs,
+                    body: Box::new(self.expr(d, body)?),
+                }
+            }
             HExprKind::Builtin { f, args } => {
                 let mut xs = Vec::new();
                 for a in args {
@@ -566,6 +611,7 @@ impl Lowerer<'_> {
                     Builtin::Majority(r) => ir::BuiltinFn::Majority {
                         domain: ir::MajorityDomain::Role(RoleId::from_raw(r.0)),
                     },
+                    Builtin::Lib(f) => ir::BuiltinFn::Lib(*f),
                 };
                 Expr::Call {
                     f: ir::FnRef::Builtin(f),
@@ -573,6 +619,73 @@ impl Lowerer<'_> {
                 }
             }
         })
+    }
+
+    /// The pure functions (LANGUAGE §16.1), declared in HIR order so each `HFnId` is its IR `FnId`. A body is one
+    /// expression over the function's own variables, the parameters first.
+    pub fn functions(&mut self) -> Result<(), InternalError> {
+        for (i, f) in self.hir.fns.iter().enumerate() {
+            let mut d = Draft::new(f.scope);
+            let mut params = Vec::new();
+            for (v, ty) in &f.params {
+                let id = d.var(self.hir, *v)?;
+                let name = d
+                    .vars
+                    .get(id.index())
+                    .map(|x| x.0)
+                    .ok_or_else(|| internal_error!("parameter {v:?} of `{}` was not declared", f.name))?;
+                params.push((name, *ty));
+            }
+            let body = match &f.body {
+                HFnBody::Expr(e) => ir::FnBody::Ir(self.expr(&mut d, e)?),
+                // Host functions are memoized per input per tick (LANGUAGE §16.2).
+                HFnBody::Extern(path) => ir::FnBody::Extern {
+                    path: path.clone(),
+                    memo: true,
+                },
+            };
+            if !d.lits.is_empty() {
+                return Err(internal_error!(
+                    "the body of `{}` lowered to rule literals (a relation read passed resolution)",
+                    f.name
+                ));
+            }
+            let mut vars = blossom_base::IndexVec::new();
+            for (name, ty) in &d.vars {
+                vars.push(ir::VarDecl {
+                    name: *name,
+                    ty: *ty,
+                    non_bottom: false,
+                })
+                .map_err(|e| internal_error!("too many variables in `{}`: {e}", f.name))?;
+            }
+            let n = params.len();
+            let id = self
+                .b
+                .declare_fn(ir::FnDecl {
+                    id: blossom_base::FnId::from_raw(0),
+                    name: f.name.clone(),
+                    params,
+                    ret: f.ret,
+                    vars,
+                    body,
+                    props: ir::FnProps {
+                        // Parameters are plain values (lattice-typed ones are rejected until function classes,
+                        // LANG-182), and every function is monotone in a value under its discrete order.
+                        classes: vec![blossom_value::MonoClass::Monotone; n],
+                        injective: blossom_value::Claim::Absent,
+                        commutative: blossom_value::Claim::Absent,
+                        associative: blossom_value::Claim::Absent,
+                        idempotent: blossom_value::Claim::Absent,
+                        stable_after: None,
+                    },
+                })
+                .map_err(ir_err)?;
+            if id.index() != i {
+                return Err(internal_error!("function `{}` is IR function {id:?}, not {i}", f.name));
+            }
+        }
+        Ok(())
     }
 
     /// The IR lattice of a lattice type.

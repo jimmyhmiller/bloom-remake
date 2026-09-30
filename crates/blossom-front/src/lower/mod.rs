@@ -11,6 +11,7 @@
 
 mod choose;
 mod expr;
+pub(crate) use expr::try_const;
 pub(crate) mod lattice;
 mod rules;
 
@@ -92,6 +93,8 @@ pub fn lower(hir: &Hir, deployment: &Deployment<'_>) -> Result<Lowered, Internal
         let id = l.declare_hrel(HRelId(i as u32))?;
         l.rels.push(id);
     }
+    l.streams()?;
+    l.functions()?;
     l.acls()?;
     l.members(deployment)?;
     l.tables()?;
@@ -371,6 +374,8 @@ impl Lowerer<'_> {
                     None,
                 )
             }
+            HRelKind::Stream(hir::HStreamRel::Event(e)) => (RelClass::Event(EventSource::Stream(*e)), None),
+            HRelKind::Stream(hir::HStreamRel::Host(op)) => (RelClass::HostOut(*op), None),
         };
         let placement = match &r.kind {
             HRelKind::Channel(_)
@@ -428,6 +433,26 @@ impl Lowerer<'_> {
             self.b.end_construct(c).map_err(ir)?;
         }
         Ok(id)
+    }
+
+    /// The byte streams (FOREIGN-PROTOCOLS §1), once their relations are declared.
+    fn streams(&mut self) -> Result<(), InternalError> {
+        for st in &self.hir.streams {
+            let decl = blossom_ir::core::StreamDecl {
+                name: st.name.clone(),
+                kind: st.kind,
+                placement: Self::placement(st.role),
+                opened: self.rel(st.opened)?,
+                data: self.rel(st.data)?,
+                closed: self.rel(st.closed)?,
+                failed: st.failed.map(|r| self.rel(r)).transpose()?,
+                write: self.rel(st.write)?,
+                close: self.rel(st.close)?,
+                dial: st.dial.map(|r| self.rel(r)).transpose()?,
+            };
+            self.b.declare_stream(decl).map_err(ir)?;
+        }
+        Ok(())
     }
 
     /// Every channel's explicit ACL (LANGUAGE §18.3), once the relations it names are declared.

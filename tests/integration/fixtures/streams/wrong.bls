@@ -1,0 +1,14 @@
+//! A write through the wrong stream (FOREIGN-PROTOCOLS §1.2): a chunk read on `a` is written back through `b`
+//! with `a`'s connection. The host refuses it and counts it; the right write, through `a`, follows.
+program wrong version 1;
+
+stream a: listen;
+stream b: listen;
+
+misroute: on a.data(c, seq, bytes) {
+    send b.write(c, seq, [Part::Bytes(bytes)]);
+}
+
+right: on a.data(c, seq, _bytes) {
+    send a.write(c, seq, [Part::Bytes("ok\n".to_utf8())]);
+}

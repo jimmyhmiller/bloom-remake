@@ -13,3 +13,4 @@
 /fuzz/coverage
 # Python bytecode caches of the corpus tools.
 __pycache__/
+.tools/

@@ -415,7 +415,11 @@ fn oracle_backend(files: &[PathBuf], m: &toml::Table, engine: bool) -> Outcome {
         Ok(a) => a,
         Err(o) => return o,
     };
-    let sim = match SpecSim::new(&artifact) {
+    let externs = match super::corpus_interp::std_externs() {
+        Ok(x) => x,
+        Err(e) => return Outcome::Fail(e),
+    };
+    let sim = match SpecSim::with_externs(&artifact, externs.clone()) {
         Ok(s) => s,
         Err(e) => return Outcome::Fail(e.to_string()),
     };
@@ -426,7 +430,7 @@ fn oracle_backend(files: &[PathBuf], m: &toml::Table, engine: bool) -> Outcome {
     // The synchronous harness follows CR-20 (a crashed node is frozen); Molly's view is LDFI's.
     let run = if engine {
         let reference = sim.run_with_view(Tick(last), &schedule, false, blossom_sim::CrashView::Frozen);
-        let cfg = super::corpus_interp::engine_config(&artifact.roles, &artifact.nodes, artifact.seed);
+        let cfg = super::corpus_interp::engine_config(&artifact.roles, &artifact.nodes, artifact.seed, externs.clone());
         let ev = blossom_node::EngineEvaluator::new(artifact.protocol.clone(), cfg);
         let mine = sim.run_on(&ev, Tick(last), &schedule, false, blossom_sim::CrashView::Frozen);
         if let Err(d) = super::corpus_interp::compare(&reference, &mine) {
@@ -564,7 +568,11 @@ fn ldfi_backend(files: &[PathBuf], m: &toml::Table, workers: usize, max_runs: u6
     let mut config = LdfiConfig::new(spec.clone());
     config.workers = workers;
     config.max_runs = max_runs;
-    let sim = match SpecSim::new(&artifact) {
+    let externs = match super::corpus_interp::std_externs() {
+        Ok(x) => x,
+        Err(e) => return Outcome::Fail(e),
+    };
+    let sim = match SpecSim::with_externs(&artifact, externs.clone()) {
         Ok(s) => s,
         Err(e) => return Outcome::Fail(e.to_string()),
     };
@@ -674,7 +682,8 @@ fn ldfi_engine_differential(
         }
         schedules.push(f);
     }
-    let cfg = super::corpus_interp::engine_config(&artifact.roles, &artifact.nodes, artifact.seed);
+    let externs = super::corpus_interp::std_externs()?;
+    let cfg = super::corpus_interp::engine_config(&artifact.roles, &artifact.nodes, artifact.seed, externs);
     let view = sim.crash_view();
     for (i, f) in schedules.iter().enumerate() {
         // A fresh engine per schedule: each run starts from the program's initial state.

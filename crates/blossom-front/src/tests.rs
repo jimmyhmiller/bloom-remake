@@ -390,3 +390,568 @@ fn handled_attributes_pass() {
     assert_eq!(role_codes("", "#[fault(lossy)]", ""), Vec::<String>::new());
     assert_eq!(role_codes("", "", "enum E { #[unknown] U, V }"), Vec::<String>::new());
 }
+
+// ---------------------------------------------------------------- pure functions (LANGUAGE §16.1)
+
+#[test]
+fn functions_with_lets_closures_and_the_library_compile() {
+    let src = with_head(
+        "struct Cur { buf: Bytes, pos: u64 }\n\
+         fn take(c: Cur, k: u64) -> Option<(Bytes, Cur)> {\n\
+             c.buf.slice(c.pos, c.pos + k).map(|x| (x, Cur { buf: c.buf, pos: c.pos + k }))\n\
+         }\n\
+         fn total(n: u64) -> u64 {\n\
+             let xs = range(0, n);\n\
+             let ys = xs.map(|x| x * 2).filter(|y| y > 3);\n\
+             ys.fold(0, |acc, y| acc + y)\n\
+         }\n\
+         fn first_two(b: Bytes) -> Option<Bytes> {\n\
+             take(Cur { buf: b, pos: 0 }, 2).map(|p| p.0)\n\
+         }\n\
+         output out(k: u64, t: u64);\n\
+         a: on go(k, v) { emit out(k, total(v)); }\n",
+    );
+    assert_eq!(codes(src), Vec::<String>::new());
+}
+
+#[test]
+fn a_recursive_function_is_bls0213() {
+    let src = with_head(
+        "fn f(n: u64) -> u64 { if n == 0 { 0 } else { f(n - 1) } }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(f(k)); }\n",
+    );
+    assert_eq!(codes(src), vec!["BLS0213"]);
+}
+
+#[test]
+fn mutually_recursive_functions_are_bls0213_each() {
+    let src = with_head(
+        "fn f(n: u64) -> u64 { g(n) }\n\
+         fn g(n: u64) -> u64 { f(n) }\n\
+         fn h(n: u64) -> u64 { n }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(h(k)); }\n",
+    );
+    assert_eq!(codes(src), vec!["BLS0213", "BLS0213"]);
+}
+
+#[test]
+fn a_function_calling_one_declared_after_it_compiles() {
+    let src = with_head(
+        "fn f(n: u64) -> u64 { g(n) + 1 }\n\
+         fn g(n: u64) -> u64 { n * 2 }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(f(k)); }\n",
+    );
+    assert_eq!(codes(src), Vec::<String>::new());
+}
+
+#[test]
+fn a_let_block_outside_a_function_is_bls0214() {
+    let src = with_head(
+        "output out(k: u64);\n\
+         view w(x) = go(k, _), let x = if k > 0 { let y = k; y } else { k };\n",
+    );
+    assert_eq!(codes(src), vec!["BLS0214"]);
+}
+
+#[test]
+fn a_closure_outside_a_function_is_bls0214() {
+    let src = with_head(
+        "output out(k: u64);\n\
+         a: on go(k, v), let w = [k, v].map(|x| x + 1) { emit out(k); }\n",
+    );
+    assert_eq!(codes(src), vec!["BLS0214"]);
+}
+
+#[test]
+fn a_function_reading_a_relation_or_the_clock_is_bls0215() {
+    for body in ["now()", "tick()", "self", "c", "rand_range(0, 3, n)"] {
+        let src = with_head(Box::leak(
+            format!(
+                "cell c: LMax<u64>;\n\
+                 fn f(n: u64) -> u64 {{ let x = {body}; n }}\n\
+                 output out(k: u64);\n\
+                 a: on go(k, v) {{ emit out(f(k)); }}\n"
+            )
+            .into_boxed_str(),
+        ));
+        assert_eq!(codes(src), vec!["BLS0215"], "{body}");
+    }
+}
+
+#[test]
+fn function_classes_and_lattice_parameters_are_not_implemented() {
+    let class = with_head(
+        "monotone fn f(n: u64) -> u64 { n }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(f(k)); }\n",
+    );
+    assert!(codes(class).contains(&"BLS0908".to_owned()), "{:?}", codes(class));
+    let lattice = with_head(
+        "fn f(n: LMax<u64>) -> bool { n >= 3 }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert!(codes(lattice).contains(&"BLS0908".to_owned()), "{:?}", codes(lattice));
+}
+
+#[test]
+fn a_call_with_the_wrong_arity_is_bls0301() {
+    let src = with_head(
+        "fn f(a: u64, b: u64) -> u64 { a + b }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(f(k)); }\n",
+    );
+    assert_eq!(codes(src), vec!["BLS0301"]);
+}
+
+#[test]
+fn a_body_of_the_wrong_type_is_bls0300() {
+    let src = with_head(
+        "fn f(a: u64) -> String { a }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert_eq!(codes(src), vec!["BLS0300"]);
+}
+
+#[test]
+fn a_combinator_needs_a_closure_and_a_plain_method_takes_none() {
+    let no_closure = with_head(
+        "fn f(n: u64) -> Vec<u64> { range(0, n).map(n) }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert_eq!(codes(no_closure), vec!["BLS0300"]);
+    let stray = with_head(
+        "fn f(n: u64) -> Option<u64> { range(0, n).get(|x| x) }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert_eq!(codes(stray), vec!["BLS0300"]);
+    let arity = with_head(
+        "fn f(n: u64) -> u64 { range(0, n).fold(0, |acc| acc) }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert_eq!(codes(arity), vec!["BLS0301"]);
+}
+
+#[test]
+fn a_function_named_like_a_relation_is_bls0201() {
+    let src = with_head(
+        "fn go(n: u64) -> u64 { n }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert_eq!(codes(src), vec!["BLS0201"]);
+}
+
+#[test]
+fn a_refutable_let_pattern_is_bls0301() {
+    let src = with_head(
+        "fn f(n: Option<u64>) -> u64 { let Some(x) = n; x }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert_eq!(codes(src), vec!["BLS0301"]);
+}
+
+#[test]
+fn an_else_if_chain_keeps_its_last_branch() {
+    // The S6 functions work found `else if` dropped its `else` (an internal error, "an `if` value without `else`").
+    let src = with_head(
+        "fn sign(n: i64) -> i64 { if n > 0 { 1 } else if n < 0 { 0 - 1 } else { 0 } }\n\
+         output out(k: u64);\n\
+         view w(x) = go(k, _), let x = if k > 5 { 2 } else if k > 2 { 1 } else { 0 };\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert_eq!(codes(src), Vec::<String>::new());
+}
+
+#[test]
+fn a_function_passed_as_a_value_is_not_implemented() {
+    let src = with_head(
+        "fn keep(x: u64) -> bool { x > 1 }\n\
+         cell s: LSet<u64>;\n\
+         output out(k: u64);\n\
+         a: while let t = s.filter(keep) { emit out(0); }\n",
+    );
+    assert!(codes(src).contains(&"BLS0908".to_owned()), "{:?}", codes(src));
+}
+
+#[test]
+fn byte_primitives_type_check_and_reject_unsupported_widths() {
+    let ok = with_head(
+        "fn hdr(b: Bytes) -> Option<(i16, i32, u64)> {\n\
+             b.i16_be_at(0).and_then(|k| b.i32_be_at(2).and_then(|c| b.uvarint_at(6).map(|v| (k, c, v.0))))\n\
+         }\n\
+         fn frame(body: Bytes) -> Bytes { Bytes::join([Bytes::from_i32_be(4), body, Bytes::varint(0 - 1)]) }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert_eq!(codes(ok), Vec::<String>::new());
+    let wide = with_head(
+        "fn f(b: Bytes) -> Option<u128> { b.u128_be_at(0) }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert!(codes(wide).contains(&"BLS0908".to_owned()), "{:?}", codes(wide));
+    let ctor = with_head(
+        "fn f(x: u64) -> Bytes { Bytes::from_u64_le(x) }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert!(codes(ctor).contains(&"BLS0908".to_owned()), "{:?}", codes(ctor));
+    let arity = with_head(
+        "fn f(b: Bytes) -> Option<Bytes> { b.put_u16_be(0) }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert_eq!(codes(arity), vec!["BLS0301"]);
+}
+
+#[test]
+fn extern_fns_are_checked_against_the_standard_catalog() {
+    let ok = with_head(
+        "extern fn crc32c(b: Bytes) -> u32 = \"blossom_std::checksum::crc32c\";\n\
+         extern fn unzstd(b: Bytes, max: u64) -> Option<Bytes> = \"blossom_std::compress::zstd_decompress\";\n\
+         fn check(b: Bytes) -> bool { crc32c(b) == 0 }\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert_eq!(codes(ok), Vec::<String>::new());
+    let unknown = with_head(
+        "extern fn f(b: Bytes) -> u32 = \"blossom_std::checksum::adler32\";\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert_eq!(codes(unknown), vec!["BLS0216"]);
+    let wrong = with_head(
+        "extern fn crc(b: Bytes) -> u64 = \"blossom_std::checksum::crc32c\";\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert_eq!(codes(wrong), vec!["BLS0216"]);
+    let table = with_head(
+        "extern table fn lines(path: String) -> (n: u64, text: String) = \"blossom_std::io::lines\";\n\
+         output out(k: u64);\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert!(codes(table).contains(&"BLS0908".to_owned()), "{:?}", codes(table));
+}
+
+#[test]
+fn streams_declare_their_relations_and_check_how_they_are_used() {
+    let ok = with_head(
+        "stream s: listen;\n\
+         stream up: connect;\n\
+         table last(c: Conn, n: u64) key(c);\n\
+         a: on s.data(c, seq, b) { send s.write(c, seq, [Part::Bytes(b)]); upsert last(c, seq); }\n\
+         b: on s.closed(c, why) { send s.close(c); }\n\
+         d: on go(k, v) { send up.dial(k, \"127.0.0.1:9\"); }\n\
+         e: on up.opened(c, req, peer, at) { send up.write(c, 0, [Part::Bytes(Bytes::empty())]); }\n\
+         f: on up.failed(req, why) { emit last2(req); }\n\
+         table last2(r: u64);\n",
+    );
+    assert_eq!(codes(ok), Vec::<String>::new());
+    let fed = with_head("stream s: listen;\na: on go(k, v) { emit s.closed(Bytes::empty(), \"x\"); }\n");
+    assert!(codes(fed).contains(&"BLS0400".to_owned()), "{:?}", codes(fed));
+    let read = with_head("stream s: listen;\ntable t(c: Conn);\na: on go(k, v), s.close(c) { emit t(c); }\n");
+    assert!(codes(read).contains(&"BLS0203".to_owned()), "{:?}", codes(read));
+    let to = with_head("stream s: listen;\na: on s.opened(c, p, at) { send s.close(c) to c; }\n");
+    assert_eq!(codes(to), vec!["BLS0403"]);
+    let kind = with_head("stream s: accept;\n");
+    assert_eq!(codes(kind), vec!["BLS0200"]);
+    let twice = with_head("stream s: listen;\nstream s: connect;\n");
+    assert_eq!(codes(twice), vec!["BLS0201"]);
+    let not_emit = with_head("stream s: listen;\na: on s.opened(c, p, at) { emit s.close(c); }\n");
+    assert!(codes(not_emit).contains(&"BLS0400".to_owned()), "{:?}", codes(not_emit));
+}
+
+/// Several in-memory files, by path; paths are joined to the including file's directory as given.
+struct Files(Vec<(&'static str, &'static str)>);
+
+impl Loader for Files {
+    fn load(&mut self, _from: Option<&str>, path: &str) -> Result<LoadedFile, String> {
+        self.0
+            .iter()
+            .find(|(p, _)| *p == path)
+            .map(|(p, text)| LoadedFile {
+                key: Arc::from(*p),
+                text: (*text).to_owned(),
+            })
+            .ok_or_else(|| format!("no file `{path}`"))
+    }
+}
+
+fn codes_of(files: Vec<(&'static str, &'static str)>) -> Vec<String> {
+    let mut sources = SourceDb::new();
+    let nodes = [NodeSpec {
+        name: "n1".to_owned(),
+        role: None,
+    }];
+    let root = files.first().map(|f| f.0).unwrap_or("main.bls");
+    match compile(root, &nodes, &mut Files(files), &mut sources) {
+        Ok((_, warnings)) => warnings.iter().map(|d| d.code.as_str().to_owned()).collect(),
+        Err(BlsError::Rejected(d)) => d.iter().map(|d| d.code.as_str().to_owned()).collect(),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+#[test]
+fn a_textual_include_brings_in_the_files_items_recursively() {
+    let files = vec![
+        (
+            "main.bls",
+            "program t version 1;\ninclude \"a.bls\";\ninput go(k: u64);\nview v(x) = go(k), let x = twice(inc(k));\n",
+        ),
+        ("a.bls", "include \"b.bls\";\nfn twice(n: u64) -> u64 { n * 2 }\n"),
+        ("b.bls", "fn inc(n: u64) -> u64 { n + 1 }\n"),
+    ];
+    assert_eq!(codes_of(files), Vec::<String>::new());
+}
+
+#[test]
+fn an_include_cycle_or_a_missing_file_is_bls0204_and_a_module_include_is_not_implemented() {
+    let cycle = vec![
+        ("main.bls", "program t version 1;\ninclude \"a.bls\";\n"),
+        ("a.bls", "include \"main.bls\";\n"),
+    ];
+    assert!(codes_of(cycle).contains(&"BLS0204".to_owned()));
+    let missing = vec![("main.bls", "program t version 1;\ninclude \"nope.bls\";\n")];
+    assert_eq!(codes_of(missing), vec!["BLS0204"]);
+    let module = vec![("main.bls", "program t version 1;\ninclude m;\n")];
+    assert_eq!(codes_of(module), vec!["BLS0908"]);
+}
+
+#[test]
+fn block_bodies_in_closures_and_match_arms_and_constant_arms_type_check() {
+    let src = with_head(
+        "fn f(o: Option<u64>) -> Vec<u64> {\n\
+             match o {\n\
+                 Some(n) => {\n\
+                     let m = n + 1;\n\
+                     range(0, m).map(|i| { let j = i * 2; j })\n\
+                 }\n\
+                 None => [],\n\
+             }\n\
+         }\n\
+         output out(k: u64);\n\
+         view w(x) = go(k, _), let x = f(Some(k));\n\
+         a: on go(k, v) { emit out(k); }\n",
+    );
+    assert_eq!(codes(src), Vec::<String>::new());
+}
+
+#[test]
+fn an_integer_literal_that_does_not_fit_its_inferred_type_is_bls0300() {
+    let src = with_head(
+        "fn f(n: u64) -> Bytes { Bytes::from_u8(300) }\n\
+         output out(b: Bytes);\n\
+         a: on go(k, v) { emit out(f(k)); }\n",
+    );
+    assert_eq!(codes(src), vec!["BLS0300"]);
+    let src = with_head(
+        "input small(x: u8);\n\
+         output out(x: u8);\n\
+         a: on small(x) { emit out(x + 256); }\n",
+    );
+    assert_eq!(codes(src), vec!["BLS0300"]);
+    let src = with_head(
+        "input small(x: u8);\n\
+         output out(x: u8);\n\
+         a: on small(x) { emit out(x + 255); }\n",
+    );
+    assert_eq!(codes(src), Vec::<String>::new());
+}
+
+#[test]
+fn a_computed_fact_value_is_bls0908_not_an_internal_error() {
+    let src = with_head(
+        "fn double(n: u64) -> u64 { n * 2 }\n\
+         static s(x: u64);\n\
+         fact s(double(3));\n\
+         fact s(1 + 2);\n\
+         fact s(4);\n",
+    );
+    assert_eq!(codes(src), vec!["BLS0908", "BLS0908"]);
+}
+
+/// The diagnostics compiling `src` reports, as (code, message).
+fn messages(src: &'static str) -> Vec<(String, String)> {
+    let mut sources = SourceDb::new();
+    let nodes = [NodeSpec {
+        name: "n1".to_owned(),
+        role: None,
+    }];
+    match compile("test.bls", &nodes, &mut One(src), &mut sources) {
+        Ok((_, warnings)) => warnings
+            .iter()
+            .map(|d| (d.code.as_str().to_owned(), d.message.to_string()))
+            .collect(),
+        Err(BlsError::Rejected(d)) => d
+            .iter()
+            .map(|d| (d.code.as_str().to_owned(), d.message.to_string()))
+            .collect(),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+#[test]
+fn a_match_that_misses_a_value_is_bls0314_naming_it() {
+    let cases = [
+        ("fn f(o: Option<u64>) -> u64 { match o { Some(x) => x } }", Some("None")),
+        ("fn f(o: Option<u64>) -> u64 { match o { None => 0 } }", Some("Some _")),
+        (
+            "fn f(o: Option<u64>) -> u64 { match o { Some(x) => x, None => 0 } }",
+            None,
+        ),
+        ("fn f(n: u64) -> u64 { match n { 0 => 1, 1 => 2 } }", Some("_")),
+        ("fn f(n: u64) -> u64 { match n { 0 => 1, _ => 2 } }", None),
+        ("fn f(b: bool) -> u64 { match b { true => 1, false => 0 } }", None),
+        ("fn f(b: bool) -> u64 { match b { true => 1 } }", Some("false")),
+        (
+            "fn f(p: (bool, Option<u64>)) -> u64 { match p { (true, _) => 1, (false, Some(x)) => x } }",
+            Some("(…) false None"),
+        ),
+        (
+            "fn f(p: (bool, Option<u64>)) -> u64 { match p { (true, _) => 1, (false, Some(x)) => x, (_, None) => 0 } }",
+            None,
+        ),
+        (
+            "fn f(o: Option<u64>) -> u64 { match o { Some(x) if x > 1 => x, None => 0 } }",
+            Some("Some _"),
+        ),
+        (
+            "enum E { A, B(u64), C }\nfn f(e: E) -> u64 { match e { E::A => 0, E::B(n) => n } }",
+            Some("C"),
+        ),
+        (
+            "enum E { A, B(u64), C }\nfn f(e: E) -> u64 { match e { E::A => 0, E::B(n) => n, E::C => 2 } }",
+            None,
+        ),
+        (
+            "fn f(o: Option<Option<u64>>) -> u64 { match o { Some(Some(x)) => x, None => 0 } }",
+            Some("Some None"),
+        ),
+    ];
+    for (body, missing) in cases {
+        let src = with_head(&format!("{body}\noutput out(x: u64);\n"));
+        let got = messages(src);
+        match missing {
+            Some(m) => {
+                assert_eq!(got.len(), 1, "{body}: {got:?}");
+                assert_eq!(got[0].0, "BLS0314", "{body}");
+                assert!(got[0].1.contains(&format!("`{m}`")), "{body}: {}", got[0].1);
+            }
+            None => assert!(got.is_empty(), "{body}: {got:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_match_arm_in_a_function_binds_afresh_and_in_a_rule_may_not_rebind() {
+    // In a function, `y` in the arm is a new variable (shadowing the parameter), so the arm matches everything.
+    let src = with_head(
+        "fn g(x: u64, y: u64) -> u64 { match x { y => y + 1 } }\n\
+         output out(x: u64);\n\
+         a: on go(k, v) { emit out(g(k, v)); }\n",
+    );
+    assert_eq!(codes(src), Vec::<String>::new());
+    // In a rule, an arm naming a variable the rule binds is ambiguous.
+    let src = with_head(
+        "output out(x: u64);\n\
+         a: on go(k, v) { emit out(match Some(v) { Some(k) => k, None => 0 }); }\n",
+    );
+    assert_eq!(codes(src), vec!["BLS0501"]);
+}
+
+#[test]
+fn a_function_parameter_keeps_its_declared_node_type() {
+    // `a == b` meets `Node` with `Node<A>`; `b` is still any node to the function's callers.
+    let src = "program t version 1;\nrole A;\nrole B;\n\
+               fn same(a: Node<A>, b: Node) -> bool { a == b }\n\
+               at A {\n  input i(a: Node<A>, b: Node);\n  view v(x) = i(a, b), let x = same(a, b);\n}\n";
+    assert_eq!(diags_for(src, &role_nodes()), Vec::new());
+}
+
+#[test]
+fn a_closure_passed_to_a_lattice_method_is_bls0300() {
+    let src = with_head(
+        "fn f(n: u64) -> bool { let s = LSet::of(n); s.contains(|x| x + 1u64) }\n\
+         output out(b: bool);\n\
+         a: on go(k, v) { emit out(f(k)); }\n",
+    );
+    let got = messages(src);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].0, "BLS0300");
+    assert!(got[0].1.contains("does not take a closure"), "{}", got[0].1);
+}
+
+#[test]
+fn an_included_file_with_a_program_header_is_bls0201() {
+    let files = vec![
+        ("main.bls", "program t version 1;\ninclude \"a.bls\";\n"),
+        ("a.bls", "program other version 9;\nfn inc(n: u64) -> u64 { n + 1 }\n"),
+    ];
+    assert_eq!(codes_of(files), vec!["BLS0201"]);
+}
+
+#[test]
+fn function_names_and_bindings_are_checked() {
+    // A function may not take a built-in's name, nor a stream's.
+    for body in [
+        "fn range(n: u64) -> u64 { n }\n",
+        "fn now() -> u64 { 1 }\n",
+        "fn error(n: u64) -> u64 { n }\n",
+        "stream s: listen;\nfn s(n: u64) -> u64 { n }\n",
+    ] {
+        assert_eq!(codes(with_head(body)), vec!["BLS0201"], "{body}");
+    }
+    // A closure's parameters and a `let` pattern bind each name once; a closure parameter is a lowercase name.
+    for (body, code) in [
+        ("fn f(n: u64) -> u64 { range(0, n).fold(0, |a, a| a) }\n", "BLS0201"),
+        ("fn f(n: u64) -> u64 { let (b, b) = (1, n); b }\n", "BLS0201"),
+        (
+            "fn f(o: Option<(u64, u64)>) -> u64 { match o { Some((x, x)) => x, None => 0 } }\n",
+            "BLS0201",
+        ),
+        (
+            "const K: u64 = 3;\nfn f(n: u64) -> Vec<u64> { range(0, n).map(|K| K) }\n",
+            "BLS0301",
+        ),
+    ] {
+        assert_eq!(codes(with_head(body)), vec![code], "{body}");
+    }
+    // `_` ignores a closure parameter.
+    assert_eq!(
+        codes(with_head("fn f(n: u64) -> u64 { range(0, n).fold(0, |a, _| a + 1) }\n")),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_conn_may_not_cross_nodes_or_be_stored_durably() {
+    let src = "program t version 1;\nrole A;\nrole B;\n\
+               channel pass(c: Conn, b: Bytes): A -> B;\n\
+               channel nested(x: Option<(u64, Conn)>): A -> B;\n\
+               at A {\n  durable table keep(c: Conn);\n  table ok(c: Conn);\n}\n";
+    let got = diags_for(src, &role_nodes());
+    let codes: Vec<&str> = got.iter().map(|d| d.0.as_str()).collect();
+    assert_eq!(codes, vec!["BLS0315", "BLS0315", "BLS0315"], "{got:?}");
+}
+
+#[test]
+fn a_rule_reads_and_writes_only_relations_placed_at_its_role() {
+    let src = "program t version 1;\nrole A;\nrole B;\n\
+               at A {\n  stream s: listen;\n  table t(x: u64);\n}\n\
+               at B {\n  stream up: connect;\n\
+                 on up.opened(c, _r, _p, _at) { send s.write(c, 0, []); }\n\
+                 view v(x) = t(x);\n}\n";
+    let got = diags_for(src, &role_nodes());
+    let codes: Vec<&str> = got.iter().map(|d| d.0.as_str()).collect();
+    assert_eq!(codes, vec!["BLS0404", "BLS0404"], "{got:?}");
+}

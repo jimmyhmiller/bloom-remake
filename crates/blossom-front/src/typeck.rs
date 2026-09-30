@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use blossom_base::{Diagnostic, Diagnostics, InternalError, RoleId, Span, Symbol, TypeId, code, internal_error};
-use blossom_ir::core::LatticeCtor;
+use blossom_ir::core::{LatticeCtor, LibFn};
 use blossom_lattice::{Kind, Op};
 use blossom_value::{TypeDef, TypeTable, types::IntTy};
 
@@ -41,6 +41,8 @@ pub fn check(hir: &mut Hir, diags: &mut Diagnostics) -> Result<(), InternalError
         methods: Vec::new(),
         method_cursor: 0,
         bindings: BTreeMap::new(),
+        closures: BTreeMap::new(),
+        fn_sigs: Vec::new(),
     };
     cx.errors_before = cx.diags.error_count();
     cx.run(hir);
@@ -213,6 +215,11 @@ struct Checker<'d> {
     /// Every binding occurrence of each variable (per scope): the relation and column of a positive atom that binds it
     /// directly, or `None` for any other binding (a `let`, a generator, a nested pattern, `outer`).
     bindings: BTreeMap<(u32, u32), Vec<Binding>>,
+    /// Each closure's term (never bound: a closure is not a value) with its parameters' and body's terms. A
+    /// combinator's resolution types the closure through this (LANGUAGE §16.1).
+    closures: BTreeMap<T, (Vec<T>, T)>,
+    /// Each function's parameter and result types, by `HFnId`.
+    fn_sigs: Vec<(Vec<TypeId>, TypeId)>,
 }
 
 impl Checker<'_> {
@@ -569,6 +576,11 @@ impl Checker<'_> {
             view_terms.push(cols);
         }
         self.view_terms = view_terms;
+        self.fn_sigs = hir
+            .fns
+            .iter()
+            .map(|f| (f.params.iter().map(|p| p.1).collect(), f.ret))
+            .collect();
         self.walk(hir);
         self.solve(hir);
         if self.diags.error_count() > self.errors_before {
@@ -581,6 +593,7 @@ impl Checker<'_> {
         self.walk(hir);
         self.finish(hir);
         lattice_keys(hir, self.diags);
+        constant_facts(hir, self.diags);
     }
 
     fn walk(&mut self, hir: &mut Hir) {
@@ -680,6 +693,23 @@ impl Checker<'_> {
             }
         }
         hir.facts = facts;
+        let mut fns = std::mem::take(&mut hir.fns);
+        for f in &mut fns {
+            if !self.apply {
+                for (v, ty) in &f.params {
+                    let vt = self.var_term(f.scope, *v);
+                    let pt = self.of_type(hir, *ty);
+                    self.unify(&hir.types, vt, pt, f.span);
+                }
+            }
+            let HFnBody::Expr(body) = &mut f.body else {
+                continue;
+            };
+            let t = self.expr(hir, f.scope, body);
+            let r = if self.apply { 0 } else { self.of_type(hir, f.ret) };
+            self.coerce_site(hir, body, t, r);
+        }
+        hir.fns = fns;
     }
 
     fn stmts(&mut self, hir: &mut Hir, scope: ScopeId, stmts: &mut [HStmt], role: Option<HRoleId>) {
@@ -1258,7 +1288,21 @@ impl Checker<'_> {
                         self.unify(&hir.types, bt, res, span);
                     }
                 }
-                if self.apply { self.next_term() } else { self.record(res) }
+                if self.apply {
+                    if let Some(value) = crate::exhaustive::uncovered(hir, arms) {
+                        self.diags.push(
+                            Diagnostic::new(
+                                code!("BLS0314"),
+                                format!("this `match` does not cover every value: `{value}` reaches no arm"),
+                            )
+                            .with_primary(span)
+                            .with_note("add an arm for it, or a final `_ => …`; an arm with a guard covers nothing"),
+                        );
+                    }
+                    self.next_term()
+                } else {
+                    self.record(res)
+                }
             }
             HExprKind::Cast { expr, ty } => {
                 let ty = *ty;
@@ -1349,6 +1393,49 @@ impl Checker<'_> {
                                 });
                             }
                             self.con(&mut hir.types, TypeDef::Bool)
+                        }
+                        Builtin::Lib(LibFn::Range) => {
+                            let u = self.con(&mut hir.types, TypeDef::Int(IntTy::U64));
+                            for a in &ats {
+                                self.unify(&hir.types, *a, u, span);
+                            }
+                            self.bound(Shape::Vec(u))
+                        }
+                        Builtin::Lib(LibFn::BytesFrom(it)) => {
+                            let t = self.con(&mut hir.types, TypeDef::Int(it));
+                            for a in &ats {
+                                self.unify(&hir.types, *a, t, span);
+                            }
+                            self.con(&mut hir.types, TypeDef::Bytes)
+                        }
+                        Builtin::Lib(LibFn::BytesUvarint | LibFn::BytesVarint) => {
+                            let it = if f == Builtin::Lib(LibFn::BytesUvarint) {
+                                IntTy::U64
+                            } else {
+                                IntTy::I64
+                            };
+                            let t = self.con(&mut hir.types, TypeDef::Int(it));
+                            for a in &ats {
+                                self.unify(&hir.types, *a, t, span);
+                            }
+                            self.con(&mut hir.types, TypeDef::Bytes)
+                        }
+                        Builtin::Lib(LibFn::BytesEmpty) => self.con(&mut hir.types, TypeDef::Bytes),
+                        Builtin::Lib(LibFn::BytesJoin) => {
+                            let b = self.con(&mut hir.types, TypeDef::Bytes);
+                            let v = self.bound(Shape::Vec(b));
+                            for a in &ats {
+                                self.unify(&hir.types, *a, v, span);
+                            }
+                            b
+                        }
+                        Builtin::Lib(other) => {
+                            // Library methods are resolved from `Method` by the solver; only `range` and the
+                            // `Bytes::…` constructors are calls.
+                            self.bugs.push(internal_error!(
+                                "the library method {other:?} reached type checking resolved"
+                            ));
+                            0
                         }
                     };
                     self.record(t)
@@ -1533,14 +1620,79 @@ impl Checker<'_> {
                     .push(internal_error!("a resolved lattice operation reached type checking"));
                 0
             }
+            HExprKind::Call { f, args } => {
+                let Some((params, ret)) = self.fn_sigs.get(f.index()).cloned() else {
+                    self.bugs.push(internal_error!("call of an undeclared function {f:?}"));
+                    return 0;
+                };
+                let mut ts = Vec::new();
+                for a in args.iter_mut() {
+                    ts.push(self.expr(hir, scope, a));
+                }
+                if self.apply {
+                    self.next_term()
+                } else {
+                    for (a, ty) in ts.iter().zip(&params) {
+                        let pt = self.of_type(hir, *ty);
+                        self.unify(&hir.types, *a, pt, span);
+                    }
+                    let r = self.of_type(hir, ret);
+                    self.record(r)
+                }
+            }
+            HExprKind::Let { pat, ty, value, body } => {
+                let ty = *ty;
+                if !self.apply {
+                    self.other_bindings(scope, pat);
+                }
+                let v = self.expr(hir, scope, value);
+                let p = self.pat(hir, scope, pat);
+                if !self.apply {
+                    self.unify(&hir.types, p, v, span);
+                    if let Some(ty) = ty {
+                        let a = self.of_type(hir, ty);
+                        self.unify(&hir.types, p, a, span);
+                    }
+                }
+                let b = self.expr(hir, scope, body);
+                self.record(b)
+            }
+            HExprKind::Closure { params, body } => {
+                let ps: Vec<T> = params.iter().map(|v| self.var_term(scope, *v)).collect();
+                let b = self.expr(hir, scope, body);
+                if self.apply {
+                    // A closure is not a value: it has no type of its own, only its parameters and body do.
+                    return self.next_term();
+                }
+                let t = self.fresh(false);
+                self.closures.insert(t, (ps, b));
+                return self.record(t);
+            }
         };
         if self.apply {
             match self.solved(hir, t) {
-                Some(ty) => e.ty = Some(ty),
+                Some(ty) => {
+                    e.ty = Some(ty);
+                    self.literal_fits(hir, e);
+                }
                 None => self.error(span, "cannot infer the type of this expression".into()),
             }
         }
         t
+    }
+
+    /// An integer literal must fit the type it was given (an unsuffixed literal's type is inferred, so this is known
+    /// only now): `Bytes::from_u8(300)` is BLS0300.
+    fn literal_fits(&mut self, hir: &Hir, e: &HExpr) {
+        let (HExprKind::IntLit(n, neg) | HExprKind::TypedInt(n, _, neg)) = e.kind else {
+            return;
+        };
+        if let Some(TypeDef::Int(ity)) = e.ty.and_then(|t| hir.types.get(t))
+            && crate::resolve::int_value(n, *ity, neg).is_none()
+        {
+            let sign = if neg { "-" } else { "" };
+            self.error(e.span, format!("{sign}{n} does not fit in {}", ity.name()));
+        }
     }
 
     /// A coercion site: `e`, of term `from`, where a value of term `to` is expected (a head column, a `let`
@@ -2251,22 +2403,8 @@ impl Checker<'_> {
                 return false;
             }
             // Methods of plain values are the standard library's (Appendix B).
-            let rr = self.find(recv);
-            let elem = match self.node(rr) {
-                Node::Bound(Shape::Vec(e) | Shape::Set(e) | Shape::Map(e, _)) => Some(e),
-                _ => None,
-            };
-            if let (Some(e), "contains", false, [x]) = (elem, name.as_str(), banged, args) {
-                self.unify(&hir.types, *x, e, span);
-                let b = self.con(&mut hir.types, TypeDef::Bool);
-                self.unify(&hir.types, res, b, span);
-                if let Some(m) = self.methods.get_mut(slot) {
-                    *m = Some(MethodRes {
-                        target: MethodTarget::Plain(Builtin::Contains),
-                        lifts: vec![None],
-                    });
-                }
-                return true;
+            if !banged && let Some(done) = self.plain_method(hir, slot, recv, name, args, res, span) {
+                return done;
             }
             let d = self.describe(&hir.types, recv);
             self.diags.push(
@@ -2282,6 +2420,14 @@ impl Checker<'_> {
         let Some(kind) = self.lat_kind(recv) else {
             return false;
         };
+        // A closure is an argument only of the collection combinators (LANGUAGE §16.1), never of a lattice method.
+        if args.iter().any(|a| self.closures.contains_key(a)) {
+            self.error(
+                span,
+                format!("`{}` does not take a closure: only the collection combinators do", name.as_str()),
+            );
+            return true;
+        }
         let op = if name.as_str() == "reveal" {
             if nonbot && matches!(kind, Kind::Max | Kind::Min | Kind::Point) {
                 Op::RevealNonBot
@@ -2421,6 +2567,295 @@ impl Checker<'_> {
         true
     }
 
+    /// A method of a plain value (LANGUAGE Appendix B), by the receiver's shape: `Some(true)` when resolved (or
+    /// reported), `None` when the receiver has no such method.
+    #[allow(clippy::too_many_arguments)]
+    fn plain_method(
+        &mut self,
+        hir: &mut Hir,
+        slot: usize,
+        recv: T,
+        name: Symbol,
+        args: &[T],
+        res: T,
+        span: Span,
+    ) -> Option<bool> {
+        let rr = self.find(recv);
+        let Node::Bound(shape) = self.node(rr) else {
+            return None;
+        };
+        let leaf = match &shape {
+            Shape::Con(id) => hir.types.get(*id).cloned(),
+            _ => None,
+        };
+        let n = name.as_str();
+        // Which argument positions hold a closure, and how many arguments there are.
+        let (target, closure_at, arity): (Builtin, Option<usize>, usize) = match (&shape, &leaf, n) {
+            (Shape::Vec(_) | Shape::Set(_) | Shape::Map(..), _, "contains") => (Builtin::Contains, None, 1),
+            (Shape::Vec(_), _, "get") => (Builtin::Lib(LibFn::VecGet), None, 1),
+            (Shape::Vec(_), _, "first") => (Builtin::Lib(LibFn::VecFirst), None, 0),
+            (Shape::Vec(_), _, "last") => (Builtin::Lib(LibFn::VecLast), None, 0),
+            (Shape::Vec(_), _, "push") => (Builtin::Lib(LibFn::VecPush), None, 1),
+            (Shape::Vec(_), _, "concat") => (Builtin::Lib(LibFn::VecConcat), None, 1),
+            (Shape::Vec(_), _, "is_empty") => (Builtin::Lib(LibFn::VecIsEmpty), None, 0),
+            (Shape::Vec(_), _, "reverse") => (Builtin::Lib(LibFn::VecReverse), None, 0),
+            (Shape::Vec(_), _, "enumerate") => (Builtin::Lib(LibFn::VecEnumerate), None, 0),
+            (Shape::Vec(_), _, "map") => (Builtin::Lib(LibFn::VecMap), Some(0), 1),
+            (Shape::Vec(_), _, "filter") => (Builtin::Lib(LibFn::VecFilter), Some(0), 1),
+            (Shape::Vec(_), _, "filter_map") => (Builtin::Lib(LibFn::VecFilterMap), Some(0), 1),
+            (Shape::Vec(_), _, "all") => (Builtin::Lib(LibFn::VecAll), Some(0), 1),
+            (Shape::Vec(_), _, "any") => (Builtin::Lib(LibFn::VecAny), Some(0), 1),
+            (Shape::Vec(_), _, "fold") => (Builtin::Lib(LibFn::VecFold), Some(1), 2),
+            (Shape::Option(_), _, "is_some") => (Builtin::Lib(LibFn::OptIsSome), None, 0),
+            (Shape::Option(_), _, "is_none") => (Builtin::Lib(LibFn::OptIsNone), None, 0),
+            (Shape::Option(_), _, "unwrap_or") => (Builtin::Lib(LibFn::OptUnwrapOr), None, 1),
+            (Shape::Option(_), _, "map") => (Builtin::Lib(LibFn::OptMap), Some(0), 1),
+            (Shape::Option(_), _, "and_then") => (Builtin::Lib(LibFn::OptAndThen), Some(0), 1),
+            (_, Some(TypeDef::Bytes), "slice") => (Builtin::Lib(LibFn::BytesSlice), None, 2),
+            (_, Some(TypeDef::Bytes), "concat") => (Builtin::Lib(LibFn::BytesConcat), None, 1),
+            (_, Some(TypeDef::Str), "split_whitespace") => (Builtin::Lib(LibFn::StrSplitWhitespace), None, 0),
+            (_, Some(TypeDef::Str), "to_lowercase") => (Builtin::Lib(LibFn::StrToLowercase), None, 0),
+            (_, Some(TypeDef::Str), "to_utf8") => (Builtin::Lib(LibFn::StrToUtf8), None, 0),
+            (_, Some(TypeDef::Bytes), "from_utf8") => (Builtin::Lib(LibFn::BytesFromUtf8), None, 0),
+            (_, Some(TypeDef::Bytes), "uvarint_at") => (Builtin::Lib(LibFn::BytesUvarintAt), None, 1),
+            (_, Some(TypeDef::Bytes), "varint_at") => (Builtin::Lib(LibFn::BytesVarintAt), None, 1),
+            (_, Some(TypeDef::Bytes), _) => {
+                if let Some(it) = n.strip_suffix("_at").and_then(byte_int) {
+                    (Builtin::Lib(LibFn::BytesRead(it)), None, 1)
+                } else if let Some(it) = n.strip_prefix("put_").and_then(byte_int) {
+                    (Builtin::Lib(LibFn::BytesPut(it)), None, 2)
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        };
+        if args.len() != arity {
+            self.diags.push(
+                Diagnostic::new(
+                    code!("BLS0301"),
+                    format!("`{n}` takes {arity} argument(s), {} given", args.len()),
+                )
+                .with_primary(span),
+            );
+            return Some(true);
+        }
+        for (i, a) in args.iter().enumerate() {
+            let is_closure = self.closures.contains_key(a);
+            if is_closure != (closure_at == Some(i)) {
+                let msg = if is_closure {
+                    format!("`{n}` does not take a closure here")
+                } else {
+                    format!("`{n}` takes a closure here")
+                };
+                self.diags
+                    .push(Diagnostic::new(code!("BLS0300"), msg).with_primary(span));
+                return Some(true);
+            }
+        }
+        // The closure's parameter and body terms, checked against the arity the combinator calls it with.
+        let closure = |me: &mut Self, want: usize| -> Option<(Vec<T>, T)> {
+            let c = closure_at
+                .and_then(|i| args.get(i))
+                .and_then(|a| me.closures.get(a))
+                .cloned()?;
+            if c.0.len() != want {
+                me.diags.push(
+                    Diagnostic::new(
+                        code!("BLS0301"),
+                        format!(
+                            "`{n}` calls its closure with {want} argument(s); it takes {}",
+                            c.0.len()
+                        ),
+                    )
+                    .with_primary(span),
+                );
+                return None;
+            }
+            Some(c)
+        };
+        let bool_t = self.con(&mut hir.types, TypeDef::Bool);
+        let u64_t = self.con(&mut hir.types, TypeDef::Int(IntTy::U64));
+        let a0 = args.first().copied();
+        let a1 = args.get(1).copied();
+        let result = match (&shape, target) {
+            (Shape::Vec(e) | Shape::Set(e) | Shape::Map(e, _), Builtin::Contains) => {
+                if let Some(x) = a0 {
+                    self.unify(&hir.types, x, *e, span);
+                }
+                bool_t
+            }
+            (Shape::Vec(e), Builtin::Lib(f)) => {
+                let e = *e;
+                match f {
+                    LibFn::VecGet => {
+                        if let Some(i) = a0 {
+                            self.unify(&hir.types, i, u64_t, span);
+                        }
+                        self.bound(Shape::Option(e))
+                    }
+                    LibFn::VecFirst | LibFn::VecLast => self.bound(Shape::Option(e)),
+                    LibFn::VecPush => {
+                        if let Some(x) = a0 {
+                            self.unify(&hir.types, x, e, span);
+                        }
+                        recv
+                    }
+                    LibFn::VecConcat => {
+                        if let Some(x) = a0 {
+                            self.unify(&hir.types, x, recv, span);
+                        }
+                        recv
+                    }
+                    LibFn::VecIsEmpty => bool_t,
+                    LibFn::VecReverse => recv,
+                    LibFn::VecEnumerate => {
+                        let pair = self.bound(Shape::Tuple(vec![u64_t, e]));
+                        self.bound(Shape::Vec(pair))
+                    }
+                    LibFn::VecMap => {
+                        let Some((ps, b)) = closure(self, 1) else {
+                            return Some(true);
+                        };
+                        self.unify_params(hir, &ps, &[e], span);
+                        self.bound(Shape::Vec(b))
+                    }
+                    LibFn::VecFilter | LibFn::VecAll | LibFn::VecAny => {
+                        let Some((ps, b)) = closure(self, 1) else {
+                            return Some(true);
+                        };
+                        self.unify_params(hir, &ps, &[e], span);
+                        self.unify(&hir.types, b, bool_t, span);
+                        if f == LibFn::VecFilter { recv } else { bool_t }
+                    }
+                    LibFn::VecFilterMap => {
+                        let Some((ps, b)) = closure(self, 1) else {
+                            return Some(true);
+                        };
+                        self.unify_params(hir, &ps, &[e], span);
+                        let out = self.fresh(false);
+                        let opt = self.bound(Shape::Option(out));
+                        self.unify(&hir.types, b, opt, span);
+                        self.bound(Shape::Vec(out))
+                    }
+                    LibFn::VecFold => {
+                        let Some((ps, b)) = closure(self, 2) else {
+                            return Some(true);
+                        };
+                        let Some(init) = a0 else { return Some(true) };
+                        self.unify_params(hir, &ps, &[init, e], span);
+                        self.unify(&hir.types, b, init, span);
+                        init
+                    }
+                    other => {
+                        self.bugs.push(internal_error!("{other:?} dispatched on a vector"));
+                        return Some(true);
+                    }
+                }
+            }
+            (Shape::Option(e), Builtin::Lib(f)) => {
+                let e = *e;
+                match f {
+                    LibFn::OptIsSome | LibFn::OptIsNone => bool_t,
+                    LibFn::OptUnwrapOr => {
+                        if let Some(d) = a0 {
+                            self.unify(&hir.types, d, e, span);
+                        }
+                        e
+                    }
+                    LibFn::OptMap => {
+                        let Some((ps, b)) = closure(self, 1) else {
+                            return Some(true);
+                        };
+                        self.unify_params(hir, &ps, &[e], span);
+                        self.bound(Shape::Option(b))
+                    }
+                    LibFn::OptAndThen => {
+                        let Some((ps, b)) = closure(self, 1) else {
+                            return Some(true);
+                        };
+                        self.unify_params(hir, &ps, &[e], span);
+                        let out = self.fresh(false);
+                        let opt = self.bound(Shape::Option(out));
+                        self.unify(&hir.types, b, opt, span);
+                        b
+                    }
+                    other => {
+                        self.bugs.push(internal_error!("{other:?} dispatched on an option"));
+                        return Some(true);
+                    }
+                }
+            }
+            (_, Builtin::Lib(LibFn::BytesSlice)) => {
+                for a in [a0, a1].into_iter().flatten() {
+                    self.unify(&hir.types, a, u64_t, span);
+                }
+                self.bound(Shape::Option(recv))
+            }
+            (_, Builtin::Lib(LibFn::BytesConcat)) => {
+                if let Some(x) = a0 {
+                    self.unify(&hir.types, x, recv, span);
+                }
+                recv
+            }
+            (_, Builtin::Lib(LibFn::StrSplitWhitespace)) => self.bound(Shape::Vec(recv)),
+            (_, Builtin::Lib(LibFn::StrToLowercase)) => recv,
+            (_, Builtin::Lib(LibFn::StrToUtf8)) => self.con(&mut hir.types, TypeDef::Bytes),
+            (_, Builtin::Lib(LibFn::BytesFromUtf8)) => {
+                let st = self.con(&mut hir.types, TypeDef::Str);
+                self.bound(Shape::Option(st))
+            }
+            (_, Builtin::Lib(f @ (LibFn::BytesUvarintAt | LibFn::BytesVarintAt))) => {
+                if let Some(p) = a0 {
+                    self.unify(&hir.types, p, u64_t, span);
+                }
+                let v = if f == LibFn::BytesUvarintAt {
+                    u64_t
+                } else {
+                    self.con(&mut hir.types, TypeDef::Int(IntTy::I64))
+                };
+                let pair = self.bound(Shape::Tuple(vec![v, u64_t]));
+                self.bound(Shape::Option(pair))
+            }
+            (_, Builtin::Lib(LibFn::BytesRead(it))) => {
+                if let Some(p) = a0 {
+                    self.unify(&hir.types, p, u64_t, span);
+                }
+                let t = self.con(&mut hir.types, TypeDef::Int(it));
+                self.bound(Shape::Option(t))
+            }
+            (_, Builtin::Lib(LibFn::BytesPut(it))) => {
+                if let Some(p) = a0 {
+                    self.unify(&hir.types, p, u64_t, span);
+                }
+                if let Some(x) = a1 {
+                    let t = self.con(&mut hir.types, TypeDef::Int(it));
+                    self.unify(&hir.types, x, t, span);
+                }
+                self.bound(Shape::Option(recv))
+            }
+            (_, other) => {
+                self.bugs.push(internal_error!("{other:?} dispatched on a plain value"));
+                return Some(true);
+            }
+        };
+        self.unify(&hir.types, res, result, span);
+        if let Some(m) = self.methods.get_mut(slot) {
+            *m = Some(MethodRes {
+                target: MethodTarget::Plain(target),
+                lifts: vec![None; args.len()],
+            });
+        }
+        Some(true)
+    }
+
+    /// A closure's parameters against the values a combinator passes it.
+    fn unify_params(&mut self, hir: &Hir, params: &[T], values: &[T], span: Span) {
+        for (p, v) in params.iter().zip(values) {
+            self.unify(&hir.types, *p, *v, span);
+        }
+    }
+
     /// The type of `reveal!` of a lattice value (LANGUAGE §11.4): deep, `Option<T>` for a possibly-⊥ chain or point.
     fn reveal_term(&mut self, hir: &mut Hir, lat: &LatS, nonbot: bool) -> T {
         match lat {
@@ -2474,6 +2909,16 @@ impl Checker<'_> {
                 }
             }
             var_types.push(tys);
+        }
+        // A function's parameter has exactly its declared type. Unification may have met `Node` with `Node<R>` (an
+        // equality with a role-typed value), which is sound for a rule variable after the join but not for a
+        // parameter, whose callers pass any value of the declared type.
+        for f in &hir.fns {
+            for (v, ty) in &f.params {
+                if let Some(slot) = var_types.get_mut(f.scope.index()).and_then(|tys| tys.get_mut(v.index())) {
+                    *slot = *ty;
+                }
+            }
         }
         hir.var_types = var_types;
         let view_terms = self.view_terms.clone();
@@ -2739,6 +3184,26 @@ fn check_lattice_keys(hir: &Hir, bodies: &[&HBody], diags: &mut Diagnostics) {
                         ),
                     )
                     .with_primary(span),
+                );
+            }
+        }
+    }
+}
+
+/// A fact's row is folded at compile time. Literals, constants and constructors over them fold; an operator or a
+/// function call in a fact is not evaluated by this build (LANG-010), and says so rather than failing in lowering.
+fn constant_facts(hir: &Hir, diags: &mut Diagnostics) {
+    for f in &hir.facts {
+        for e in &f.row {
+            if crate::lower::try_const(hir, e).is_none() {
+                diags.push(
+                    Diagnostic::not_implemented(
+                        blossom_base::FeatureId("LANG-010"),
+                        "a computed value in a fact (an operator or a function call): a fact's values must be \
+                         literals, constants or constructors over them",
+                        "the Blossom frontend (slice 6)",
+                    )
+                    .with_primary(e.span),
                 );
             }
         }
