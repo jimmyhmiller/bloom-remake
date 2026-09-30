@@ -477,7 +477,8 @@ impl Lowerer<'_> {
                         // known here: intern the literal's type for every role.
                         if matches!(x.kind, HExprKind::SelfNode) {
                             for r in 0..self.hir.roles.len() {
-                                let role = RoleId::from_raw(u32::try_from(r).map_err(|_| internal_error!("too many roles"))?);
+                                let role =
+                                    RoleId::from_raw(u32::try_from(r).map_err(|_| internal_error!("too many roles"))?);
                                 candidates.push(
                                     self.b
                                         .types()

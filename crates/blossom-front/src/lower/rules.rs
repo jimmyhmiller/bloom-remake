@@ -1515,7 +1515,10 @@ impl<'h> Lowerer<'h> {
                 )?;
             }
         }
-        if cols.iter().any(|c| matches!(c, HViewAggCol::Agg(a) if a.func == AggKind::Index)) {
+        if cols
+            .iter()
+            .any(|c| matches!(c, HViewAggCol::Agg(a) if a.func == AggKind::Index))
+        {
             return self.index_view(v, rel, r, union, u, &union_vars, cols, names);
         }
         // Defaults: explicit `default e`, or the identity of count and sum under a driver.

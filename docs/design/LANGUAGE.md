@@ -2811,6 +2811,7 @@ never truncated or defaulted).
 | BLS0311 | E | a lattice lift with no expected lattice type |
 | BLS0312 | E | `f64` as the element of `LMax`/`LMin` |
 | BLS0313 | E | a possibly negative contribution into a `bag` |
+| BLS0314 | E | a `match` that does not cover every value of its scrutinee |
 
 **Legality (BLS04xx)**
 

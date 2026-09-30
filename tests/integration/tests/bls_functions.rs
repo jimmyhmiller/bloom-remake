@@ -169,6 +169,10 @@ fn expected(view: &str, n: u64, s: &str, b: &[u8]) -> (Value, Value) {
             ),
         ),
         "v_range" => (u(n), u(n + 1)),
+        "v_arms" => (
+            u(n),
+            tuple(vec![u(if n % 2 == 0 { 2 * n } else { 7 + n }), vec_u([n, n + 1, 0, 0])]),
+        ),
         other => panic!("no expectation for {other}"),
     }
 }
@@ -191,6 +195,7 @@ const VIEWS: &[&str] = &[
     "v_defaults",
     "v_classify",
     "v_range",
+    "v_arms",
 ];
 
 #[test]

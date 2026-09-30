@@ -59,8 +59,22 @@ impl Lowerer<'_> {
         cols.push(col("cost".into(), ct));
         let nx = x.len();
         let group: Vec<usize> = (0..nx).collect();
-        let cand = self.generated(names.rel_segments(&format!("{tag}$cand")), cols.clone(), None, role, false, span)?;
-        let ext = self.generated(names.rel_segments(&format!("{tag}$ext")), cols, Some(&group), role, false, span)?;
+        let cand = self.generated(
+            names.rel_segments(&format!("{tag}$cand")),
+            cols.clone(),
+            None,
+            role,
+            false,
+            span,
+        )?;
+        let ext = self.generated(
+            names.rel_segments(&format!("{tag}$ext")),
+            cols,
+            Some(&group),
+            role,
+            false,
+            span,
+        )?;
         let mut args: Vec<Term> = x.clone();
         args.push(cost.clone());
         let label = self.label(format!("{}{tag}$cand", names.base));
@@ -83,9 +97,16 @@ impl Lowerer<'_> {
         for (i, t) in xt.iter().chain(std::iter::once(&ct)).enumerate() {
             vs.push(rb.var(Symbol::intern(&format!("V{i}")), *t).map_err(ir)?);
         }
-        rb.lit(Literal::Pos(atom(cand, vs.iter().map(|v| Term::Var(*v)).collect(), span)));
+        rb.lit(Literal::Pos(atom(
+            cand,
+            vs.iter().map(|v| Term::Var(*v)).collect(),
+            span,
+        )));
         let mut hargs: Vec<HeadArg> = vs.iter().take(nx).map(|v| HeadArg::Term(Term::Var(*v))).collect();
-        let cv = vs.get(nx).copied().ok_or_else(|| internal_error!("an order filter without its cost variable"))?;
+        let cv = vs
+            .get(nx)
+            .copied()
+            .ok_or_else(|| internal_error!("an order filter without its cost variable"))?;
         hargs.push(HeadArg::Agg(AggCall {
             func: if *most { AggFunc::Max } else { AggFunc::Min },
             args: vec![Term::Var(cv)],

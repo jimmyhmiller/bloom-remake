@@ -1288,7 +1288,21 @@ impl Checker<'_> {
                         self.unify(&hir.types, bt, res, span);
                     }
                 }
-                if self.apply { self.next_term() } else { self.record(res) }
+                if self.apply {
+                    if let Some(value) = crate::exhaustive::uncovered(hir, arms) {
+                        self.diags.push(
+                            Diagnostic::new(
+                                code!("BLS0314"),
+                                format!("this `match` does not cover every value: `{value}` reaches no arm"),
+                            )
+                            .with_primary(span)
+                            .with_note("add an arm for it, or a final `_ => …`; an arm with a guard covers nothing"),
+                        );
+                    }
+                    self.next_term()
+                } else {
+                    self.record(res)
+                }
             }
             HExprKind::Cast { expr, ty } => {
                 let ty = *ty;
@@ -1395,7 +1409,11 @@ impl Checker<'_> {
                             self.con(&mut hir.types, TypeDef::Bytes)
                         }
                         Builtin::Lib(LibFn::BytesUvarint | LibFn::BytesVarint) => {
-                            let it = if f == Builtin::Lib(LibFn::BytesUvarint) { IntTy::U64 } else { IntTy::I64 };
+                            let it = if f == Builtin::Lib(LibFn::BytesUvarint) {
+                                IntTy::U64
+                            } else {
+                                IntTy::I64
+                            };
                             let t = self.con(&mut hir.types, TypeDef::Int(it));
                             for a in &ats {
                                 self.unify(&hir.types, *a, t, span);
@@ -1414,8 +1432,9 @@ impl Checker<'_> {
                         Builtin::Lib(other) => {
                             // Library methods are resolved from `Method` by the solver; only `range` and the
                             // `Bytes::…` constructors are calls.
-                            self.bugs
-                                .push(internal_error!("the library method {other:?} reached type checking resolved"));
+                            self.bugs.push(internal_error!(
+                                "the library method {other:?} reached type checking resolved"
+                            ));
                             0
                         }
                     };
@@ -2621,18 +2640,25 @@ impl Checker<'_> {
                 } else {
                     format!("`{n}` takes a closure here")
                 };
-                self.diags.push(Diagnostic::new(code!("BLS0300"), msg).with_primary(span));
+                self.diags
+                    .push(Diagnostic::new(code!("BLS0300"), msg).with_primary(span));
                 return Some(true);
             }
         }
         // The closure's parameter and body terms, checked against the arity the combinator calls it with.
         let closure = |me: &mut Self, want: usize| -> Option<(Vec<T>, T)> {
-            let c = closure_at.and_then(|i| args.get(i)).and_then(|a| me.closures.get(a)).cloned()?;
+            let c = closure_at
+                .and_then(|i| args.get(i))
+                .and_then(|a| me.closures.get(a))
+                .cloned()?;
             if c.0.len() != want {
                 me.diags.push(
                     Diagnostic::new(
                         code!("BLS0301"),
-                        format!("`{n}` calls its closure with {want} argument(s); it takes {}", c.0.len()),
+                        format!(
+                            "`{n}` calls its closure with {want} argument(s); it takes {}",
+                            c.0.len()
+                        ),
                     )
                     .with_primary(span),
                 );
@@ -2680,18 +2706,24 @@ impl Checker<'_> {
                         self.bound(Shape::Vec(pair))
                     }
                     LibFn::VecMap => {
-                        let Some((ps, b)) = closure(self, 1) else { return Some(true) };
+                        let Some((ps, b)) = closure(self, 1) else {
+                            return Some(true);
+                        };
                         self.unify_params(hir, &ps, &[e], span);
                         self.bound(Shape::Vec(b))
                     }
                     LibFn::VecFilter | LibFn::VecAll | LibFn::VecAny => {
-                        let Some((ps, b)) = closure(self, 1) else { return Some(true) };
+                        let Some((ps, b)) = closure(self, 1) else {
+                            return Some(true);
+                        };
                         self.unify_params(hir, &ps, &[e], span);
                         self.unify(&hir.types, b, bool_t, span);
                         if f == LibFn::VecFilter { recv } else { bool_t }
                     }
                     LibFn::VecFilterMap => {
-                        let Some((ps, b)) = closure(self, 1) else { return Some(true) };
+                        let Some((ps, b)) = closure(self, 1) else {
+                            return Some(true);
+                        };
                         self.unify_params(hir, &ps, &[e], span);
                         let out = self.fresh(false);
                         let opt = self.bound(Shape::Option(out));
@@ -2699,7 +2731,9 @@ impl Checker<'_> {
                         self.bound(Shape::Vec(out))
                     }
                     LibFn::VecFold => {
-                        let Some((ps, b)) = closure(self, 2) else { return Some(true) };
+                        let Some((ps, b)) = closure(self, 2) else {
+                            return Some(true);
+                        };
                         let Some(init) = a0 else { return Some(true) };
                         self.unify_params(hir, &ps, &[init, e], span);
                         self.unify(&hir.types, b, init, span);
@@ -2722,12 +2756,16 @@ impl Checker<'_> {
                         e
                     }
                     LibFn::OptMap => {
-                        let Some((ps, b)) = closure(self, 1) else { return Some(true) };
+                        let Some((ps, b)) = closure(self, 1) else {
+                            return Some(true);
+                        };
                         self.unify_params(hir, &ps, &[e], span);
                         self.bound(Shape::Option(b))
                     }
                     LibFn::OptAndThen => {
-                        let Some((ps, b)) = closure(self, 1) else { return Some(true) };
+                        let Some((ps, b)) = closure(self, 1) else {
+                            return Some(true);
+                        };
                         self.unify_params(hir, &ps, &[e], span);
                         let out = self.fresh(false);
                         let opt = self.bound(Shape::Option(out));

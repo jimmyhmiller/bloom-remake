@@ -117,7 +117,10 @@ pub enum ItemKind {
     /// `extern fn name(params) -> ret = "path";` (LANGUAGE §16.2).
     ExternFn(ExternFnItem),
     /// `stream name: listen;` or `stream name: connect;` (FOREIGN-PROTOCOLS §1).
-    Stream { name: Ident, kind: Ident },
+    Stream {
+        name: Ident,
+        kind: Ident,
+    },
     /// A construct this build parses but does not accept yet; the converter has already reported it (BLS0908).
     Unsupported {
         what: &'static str,
