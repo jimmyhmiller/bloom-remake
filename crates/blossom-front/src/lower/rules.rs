@@ -1009,6 +1009,7 @@ impl<'h> Lowerer<'h> {
             AggKind::Sum => AggFunc::Sum,
             AggKind::Min => AggFunc::Min,
             AggKind::Max => AggFunc::Max,
+            AggKind::Collect => AggFunc::CollectVec,
             AggKind::Index => return Err(internal_error!("`index!` reached a plain aggregate")),
         };
         let args = if g.args.is_empty() {
@@ -1018,8 +1019,9 @@ impl<'h> Lowerer<'h> {
             for e in &g.args {
                 out.push(self.term(d, e)?);
             }
-            // `sum!(e)` adds `e` once per distinct valuation of the group (LANGUAGE §10.1), not per distinct value.
-            if g.func == AggKind::Sum {
+            // `sum!(e)` adds `e` once per distinct valuation of the group (LANGUAGE §10.1), not per distinct value,
+            // and `collect!(e)` holds `e` once per valuation.
+            if matches!(g.func, AggKind::Sum | AggKind::Collect) {
                 out.extend(self.var_terms(d, over)?);
             }
             out
@@ -1548,6 +1550,8 @@ impl<'h> Lowerer<'h> {
                             int_zero(&self.hir.types, col_ty)
                                 .ok_or_else(|| internal_error!("a count or sum column that is not an integer"))?,
                         ),
+                        // An empty group collects the empty vector (§10.2).
+                        None if driver.is_some() && a.func == AggKind::Collect => Some(Value::Vec(Vec::new().into())),
                         None => None,
                     }
                 }

@@ -13,11 +13,14 @@ fn decode_api_versions_request(c: Cur) -> Option<ApiVersionsRequest> {
 /// One supported API: its key and version range.
 struct ApiRange { key: i16, min: i16, max: i16 }
 
-/// What this broker answers (S6): ApiVersions 3–4 and Metadata 13.
+/// What this broker answers: ApiVersions 3–4, Metadata 13, CreateTopics 7, DeleteTopics 6 and DescribeConfigs 4.
 fn supported() -> Vec<ApiRange> {
     [
         ApiRange { key: API_METADATA, min: 13i16, max: 13i16 },
         ApiRange { key: API_VERSIONS, min: 3i16, max: 4i16 },
+        ApiRange { key: API_CREATE_TOPICS, min: 7i16, max: 7i16 },
+        ApiRange { key: API_DELETE_TOPICS, min: 6i16, max: 6i16 },
+        ApiRange { key: API_DESCRIBE_CONFIGS, min: 4i16, max: 4i16 },
     ]
 }
 

@@ -653,6 +653,9 @@ pub enum LibFn {
     StrToLowercase,
     /// `s.to_utf8() -> Bytes`.
     StrToUtf8,
+    /// `s.parse_i64() -> Option<i64>`: the decimal integer `s` spells (an optional sign, then digits), `None` for
+    /// anything else or a value outside `i64`.
+    StrParseI64,
     /// `b.from_utf8() -> Option<String>`: `None` unless `b` is valid UTF-8.
     BytesFromUtf8,
     /// `b.u8_at(pos)`, `b.i8_at(pos)`, `b.u16_be_at(pos)`, … `b.i64_be_at(pos) -> Option<T>`: the big-endian integer

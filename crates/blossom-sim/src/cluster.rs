@@ -688,8 +688,8 @@ impl<'p> Cluster<'p> {
         {
             let at = Instant(now.saturating_add(slot.offset));
             if d.node.ready(at).map_err(|e| internal_error!("node {} failed: {e}", n.0))? {
-                d.crash_before_sync(at)
-                    .map_err(|e| SimError::Internal(internal_error!("node {} failed: {e}", n.0)))?;
+                let tick = d.node.next_tick();
+                d.crash_before_sync(at).map_err(|e| node_failure(n, tick, e))?;
                 interrupted = true;
             }
         }
@@ -727,7 +727,7 @@ impl<'p> Cluster<'p> {
         let before = driver.node.next_tick();
         driver
             .run_until_quiescent_with(now, &mut |t| released.push(t))
-            .map_err(|e| SimError::Internal(internal_error!("node {} failed: {e}", n.0)))?;
+            .map_err(|e| node_failure(n, driver.node.next_tick(), e))?;
         self.run.ticks += driver.node.next_tick().0.saturating_sub(before.0);
         // Occasionally checkpoint, to exercise recovery from checkpoints.
         if self.rng.below(50) == 0 {
@@ -1079,5 +1079,15 @@ impl<'p> Cluster<'p> {
             Action::DropStream => self.stream_drop()?,
         }
         Ok(())
+    }
+}
+
+/// A node's failed tick as the run's error: the program's own error (BLSRnnn, or an evaluator error) is reported as
+/// the node's, like the runtime halting the node; only a failure of the node machinery is a bug in Blossom.
+fn node_failure(n: NodeId, tick: blossom_value::time::Tick, e: blossom_node::NodeError) -> SimError {
+    match e {
+        blossom_node::NodeError::Eval(error) => SimError::Node { node: n, tick, error },
+        blossom_node::NodeError::Unimplemented(u) => SimError::Unimplemented(u),
+        other => SimError::Internal(internal_error!("node {} failed: {other}", n.0)),
     }
 }

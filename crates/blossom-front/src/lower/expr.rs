@@ -608,6 +608,7 @@ impl Lowerer<'_> {
                         role: RoleId::from_raw(r.0),
                     },
                     Builtin::RandRange => ir::BuiltinFn::RandRange,
+                    Builtin::Rand => ir::BuiltinFn::Rand,
                     Builtin::Majority(r) => ir::BuiltinFn::Majority {
                         domain: ir::MajorityDomain::Role(RoleId::from_raw(r.0)),
                     },

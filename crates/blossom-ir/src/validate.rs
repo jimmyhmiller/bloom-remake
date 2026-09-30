@@ -978,8 +978,11 @@ fn agg_type(p: &Program, r: Cx<'_>, a: &AggCall, ty: TypeId) -> bool {
             .get(*id)
             .and_then(|u| p.fns.get(u.finish))
             .is_some_and(|f| f.ret == ty && a.args.len() == 1),
+        // `collect` holds its first argument once per distinct argument tuple: the rest name the valuation, as for
+        // `sum`.
         AggFunc::CollectVec => {
-            matches!(p.types.get(ty),Some(TypeDef::Vec(t)) if a.args.len()==1&&a.args.first().is_some_and(|arg|term_type(p,r,arg,*t)))
+            matches!(p.types.get(ty), Some(TypeDef::Vec(t)) if a.args.first().is_some_and(|arg| term_type(p, r, arg, *t)))
+                && a.args.iter().all(|arg| !matches!(arg, Term::Wild))
         }
         AggFunc::CollectSet => {
             matches!(p.types.get(ty),Some(TypeDef::Set(t)) if a.args.len()==1&&a.args.first().is_some_and(|arg|term_type(p,r,arg,*t)))
@@ -1627,6 +1630,11 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
             let st = lookup(TypeDef::Str)?;
             same(ty(0)?, st, "to_lowercase of a String")?;
             Ok(st)
+        }
+        LibFn::StrParseI64 => {
+            arity(1)?;
+            same(ty(0)?, lookup(TypeDef::Str)?, "parse_i64 of a String")?;
+            lookup(TypeDef::Option(lookup(TypeDef::Int(IntTy::I64))?))
         }
         LibFn::StrToUtf8 => {
             arity(1)?;

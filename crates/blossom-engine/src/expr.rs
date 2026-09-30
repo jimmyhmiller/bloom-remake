@@ -409,6 +409,13 @@ fn builtin(cx: &Ctx<'_>, env: &[Option<Value>], f: &BuiltinFn, args: &[Expr]) ->
                 .map_err(|e| bug(format!("the PRF: {e}")))?;
             Ok(Value::Tuple(vec![Value::Int(IntValue::U64(p)), y].into()))
         }
+        BuiltinFn::Rand => {
+            let mut key = Vec::new();
+            for i in 0..args.len() {
+                key.push(arg(i)?);
+            }
+            rand(cx, &key)
+        }
         BuiltinFn::RandRange => {
             let (lo, hi) = (arg(0)?, arg(1)?);
             let mut key = Vec::new();
@@ -439,6 +446,20 @@ fn builtin(cx: &Ctx<'_>, env: &[Option<Value>], f: &BuiltinFn, args: &[Expr]) ->
 
 fn fingerprint(v: &Value) -> ExprResult<blossom_value::fp::Fingerprint> {
     blossom_value::fp::fingerprint(v).map_err(|e| bug(format!("fingerprinting {v:?}: {e}")))
+}
+
+/// `rand(k…)`: `PRF_σn("rand", fp(k̄), incarnation, tick)` (LANGUAGE §15.1).
+fn rand(cx: &Ctx<'_>, key: &[Value]) -> ExprResult<Value> {
+    let seed = cx
+        .shared
+        .node_seeds
+        .get(cx.node.0 as usize)
+        .copied()
+        .ok_or_else(|| bug(format!("a `rand` draw on node {}, which has no seed", cx.node.0)))?;
+    let fp = blossom_value::fp::fingerprint_row(key).map_err(|e| bug(format!("fingerprinting a rand key: {e}")))?;
+    let x = blossom_value::prf::prf(&seed, "rand", &[fp], &[cx.incarnation, cx.tick.0])
+        .map_err(|e| bug(format!("rand: {e}")))?;
+    Ok(Value::Int(IntValue::U64(x)))
 }
 
 /// `lo + PRF_σn("rand", fp(k̄), incarnation, tick, attempt) mod span`, redrawing from the incomplete last span so the

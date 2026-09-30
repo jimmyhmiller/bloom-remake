@@ -2024,7 +2024,7 @@ impl<'t> Resolver<'t, '_> {
                 }
                 Some(HExpr::new(HExprKind::LatCtor { kind, bot, args: xs }, span))
             }
-            [name] if matches!(name.as_str(), "rand_range" | "majority") && cx.in_fn => {
+            [name] if matches!(name.as_str(), "rand" | "rand_range" | "majority") && cx.in_fn => {
                 let what = if name.as_str() == "majority" {
                     "a role's members"
                 } else {
@@ -2113,6 +2113,24 @@ impl<'t> Resolver<'t, '_> {
                 Some(HExpr::new(
                     HExprKind::Builtin {
                         f: Builtin::Lib(lib),
+                        args: xs,
+                    },
+                    span,
+                ))
+            }
+            [name] if name.as_str() == "rand" => {
+                // The key makes the draw stable (the same value for the same key within a tick, LANG-175).
+                if pos.is_empty() {
+                    self.error(code!("BLS0301"), span, "`rand` takes a key");
+                    return None;
+                }
+                let mut xs = Vec::new();
+                for p in pos {
+                    xs.push(self.expr(cx, p)?);
+                }
+                Some(HExpr::new(
+                    HExprKind::Builtin {
+                        f: Builtin::Rand,
                         args: xs,
                     },
                     span,
@@ -2781,6 +2799,7 @@ impl<'t> Resolver<'t, '_> {
             "sum" => AggKind::Sum,
             "min" => AggKind::Min,
             "max" => AggKind::Max,
+            "collect" => AggKind::Collect,
             "index" => {
                 if let Some(c) = clauses.first() {
                     self.unsupported("LANG-097", &format!("`index!` with `{}`", c.keyword.as_str()), c.span);

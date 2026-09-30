@@ -314,6 +314,7 @@ pub(crate) fn lib(scope: &Scope<'_>, env: &[Option<Value>], f: LibFn, args: &[Ex
         ),
         LibFn::StrToLowercase => Value::Str(str_of(val(0)?)?.to_lowercase().into()),
         LibFn::StrToUtf8 => Value::Bytes(str_of(val(0)?)?.as_bytes().into()),
+        LibFn::StrParseI64 => opt(str_of(val(0)?)?.parse::<i64>().ok().map(|n| Value::Int(IntValue::I64(n)))),
         LibFn::BytesFromUtf8 => {
             let b = bytes_of(val(0)?)?;
             opt(std::str::from_utf8(&b).ok().map(|s| Value::Str(s.into())))

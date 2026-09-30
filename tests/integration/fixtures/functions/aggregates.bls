@@ -1,0 +1,15 @@
+//! `collect!` (LANGUAGE §10.1–10.2) and `rand(k…)` (§15.1), for `bls_aggregates.rs`, on the oracle and the engine.
+program aggregates version 1;
+
+input item(g: u64, v: String, w: u64);
+input group(g: u64);
+input key(k: u64);
+
+/// Each group's `v` over its valuations `(g, v, _w)`, in canonical order: a `v` of two valuations appears twice.
+view grouped(g, vs = collect!(v)) = item(g, v, _w);
+/// The same per `group` row, with the empty vector for a group with no items.
+view per_group(g, vs = collect!(v)) = per group(g), item(g, v, _w);
+/// Over every valuation `(g, v)` (the wildcard is not a variable): each pair once.
+view pairs(ps = collect!((g, v))) = item(g, v, _);
+/// Draws: the same key gives the same value within a tick, another key another.
+view draws(k, a, b, c) = key(k), let a = rand(k), let b = rand(k), let c = rand(k, 1u64);

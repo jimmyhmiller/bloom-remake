@@ -37,7 +37,10 @@ pub(crate) fn check_supported(p: &Program) -> Result<(), OracleError> {
         for a in &rule.head.args {
             if let HeadArg::Agg(agg) = a {
                 // A count may be over the empty tuple (`count!(*)` over a header that binds nothing).
-                let supported = matches!(agg.func, AggFunc::Count | AggFunc::Sum | AggFunc::Min | AggFunc::Max)
+                let supported = matches!(
+                    agg.func,
+                    AggFunc::Count | AggFunc::Sum | AggFunc::Min | AggFunc::Max | AggFunc::CollectVec
+                )
                     && agg.order.is_none()
                     && (!agg.args.is_empty() || matches!(agg.func, AggFunc::Count));
                 if !supported {
@@ -984,6 +987,18 @@ fn fold(func: AggFunc, set: &BTreeSet<Vec<Value>>) -> expr::ExprResult<Value> {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             expr::int_sum(vals.iter())
+        }
+        // The first component of each distinct tuple, in the set's (canonical) order.
+        AggFunc::CollectVec => {
+            let vals = set
+                .iter()
+                .map(|t| {
+                    t.first()
+                        .cloned()
+                        .ok_or_else(|| ExprError::Oracle(internal_error!("collect over an empty tuple").into()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::Vec(vals.into()))
         }
         other => Err(ExprError::Oracle(
             internal_error!("aggregate {other:?} passed the support check").into(),

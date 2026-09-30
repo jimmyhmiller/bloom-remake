@@ -140,7 +140,10 @@ fn check_supported(p: &Program) -> Result<(), EvalError> {
         }
         for a in &rule.head.args {
             if let HeadArg::Agg(agg) = a {
-                let ok = matches!(agg.func, AggFunc::Count | AggFunc::Sum | AggFunc::Min | AggFunc::Max)
+                let ok = matches!(
+                    agg.func,
+                    AggFunc::Count | AggFunc::Sum | AggFunc::Min | AggFunc::Max | AggFunc::CollectVec
+                )
                     && agg.order.is_none()
                     && (!agg.args.is_empty() || matches!(agg.func, AggFunc::Count));
                 if !ok {
@@ -1220,6 +1223,14 @@ fn fold(p: &Program, rule: &Rule, col: usize, func: &AggFunc, set: &BTreeMap<Vec
                 .map(|t| t.first().cloned().ok_or_else(|| bug("a sum over an empty tuple".into())))
                 .collect::<Result<Vec<_>, _>>()?;
             expr::int_sum(vals.iter())
+        }
+        // The first component of each distinct tuple, in the set's (canonical) order.
+        AggFunc::CollectVec => {
+            let vals = set
+                .keys()
+                .map(|t| t.first().cloned().ok_or_else(|| bug("a collect over an empty tuple".into())))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::Vec(vals.into()))
         }
         other => Err(bug(format!("the aggregate {other:?} passed the support check"))),
     }

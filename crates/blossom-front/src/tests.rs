@@ -467,7 +467,7 @@ fn a_closure_outside_a_function_is_bls0214() {
 
 #[test]
 fn a_function_reading_a_relation_or_the_clock_is_bls0215() {
-    for body in ["now()", "tick()", "self", "c", "rand_range(0, 3, n)"] {
+    for body in ["now()", "tick()", "self", "c", "rand_range(0, 3, n)", "rand(n)"] {
         let src = with_head(Box::leak(
             format!(
                 "cell c: LMax<u64>;\n\

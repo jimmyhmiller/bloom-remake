@@ -195,7 +195,7 @@ fn the_blossom_client_and_a_rust_client_see_the_same_answers() {
     let (result, _) = compile_file(path.to_str().unwrap(), &nodes);
     let artifact: BlsArtifact = result.unwrap_or_else(|e| panic!("sim_cluster.bls: {e:?}")).0;
     let schema = DurableSchema::of(artifact.program.get());
-    let expected_versions: Versions = (0, vec![(3, 13, 13), (18, 3, 4)]);
+    let expected_versions: Versions = (0, vec![(3, 13, 13), (18, 3, 4), (19, 7, 7), (20, 6, 6), (32, 4, 4)]);
     let expected_metadata: Metadata = (
         vec![(1, "b1.sim".into(), 9092, None)],
         Some("blossom-sim".into()),
@@ -213,6 +213,7 @@ fn the_blossom_client_and_a_rust_client_see_the_same_answers() {
             downtime: 40_000_000,
             stream_drops: true,
             duration: 2_000_000_000,
+            externs: Arc::new(blossom_std_host::registry().unwrap()),
             ..ClusterConfig::default()
         };
         let mut cluster = Cluster::new(
