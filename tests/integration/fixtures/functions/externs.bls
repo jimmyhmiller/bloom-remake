@@ -36,3 +36,11 @@ view v_crc(b, c, i) = e(b), let c = crc32c(b), let i = crc32(b);
 view v_trips(b, t) = e(b), let t = trips(b);
 view v_hash(b, s, k) = e(b), let s = sha256(b), let k = blake3(b);
 view v_bad(z) = bad_level(l), let z = gzip(Bytes::empty(), l);
+
+/// A fold whose receiver faults (`n - 10` underflows for `n < 10`) and whose initial value is refused by the host:
+/// arguments evaluate left to right, receiver first, so both evaluators report the receiver's fault.
+input fold_order(n: u64);
+fn folded(n: u64) -> u64 {
+    range(0, n - 10).fold(gzip(Bytes::empty(), 10u8).len(), |a, i| a + i)
+}
+view v_fold(x) = fold_order(n), let x = folded(n);
