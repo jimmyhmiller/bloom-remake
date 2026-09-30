@@ -171,3 +171,13 @@ fn empty_literals_take_their_context_type() {
         ]]
     );
 }
+
+#[test]
+fn an_instant_plus_a_duration_is_an_instant() {
+    let artifact = compile();
+    let r = run(&artifact, &[input(&artifact, 1, "lit", vec![u(4)])], 2);
+    let rows = rows(&artifact, &r, 1, "later");
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(rows[0][1], Value::Instant(_)), "{:?}", rows[0][1]);
+    assert_eq!(rows[0][2], Value::Int(IntValue::I64(5)));
+}

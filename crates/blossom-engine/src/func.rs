@@ -350,6 +350,17 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &[Option<Value>], f: LibFn, args: &[Exp
             Value::Str(s) => Ok(Value::Str(Arc::from(s.to_lowercase()))),
             other => Err(bug(format!("`to_lowercase` of {other:?}"))),
         },
+        LibFn::DurationFromMillis => match value(0)? {
+            Value::Int(IntValue::I64(n)) => n
+                .checked_mul(1_000_000)
+                .map(|x| Value::Duration(blossom_value::time::Duration(x)))
+                .ok_or_else(|| ExprError::Arithmetic(format!("Duration::from_millis({n}) overflows"))),
+            other => Err(bug(format!("`from_millis` of {other:?}"))),
+        },
+        LibFn::DurationAsMillis => match value(0)? {
+            Value::Duration(d) => Ok(Value::Int(IntValue::I64(d.0 / 1_000_000))),
+            other => Err(bug(format!("`as_millis` of {other:?}"))),
+        },
         LibFn::StrParseI64 => match value(0)? {
             Value::Str(s) => Ok(some_or_none(s.parse::<i64>().ok().map(|n| Value::Int(IntValue::I64(n))))),
             other => Err(bug(format!("`parse_i64` of {other:?}"))),

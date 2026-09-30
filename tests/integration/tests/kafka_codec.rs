@@ -485,7 +485,7 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
         } else {
             assert_eq!(
                 (resp.error_code, keys, resp.throttle_time_ms),
-                (0, vec![(0, 10, 12), (3, 13, 13), (18, 3, 4), (19, 7, 7), (20, 6, 6), (22, 3, 5), (32, 4, 4)], 0)
+                (0, vec![(0, 10, 12), (1, 16, 17), (2, 7, 10), (3, 13, 13), (18, 3, 4), (19, 7, 7), (20, 6, 6), (22, 3, 5), (32, 4, 4)], 0)
             );
         }
     }
@@ -1042,6 +1042,266 @@ fn produce_requests_decode_and_produce_responses_encode() {
     }
 }
 
+#[test]
+fn fetch_and_list_offsets_decode_and_answers_encode() {
+    use kafka_protocol::messages::fetch_request::{FetchPartition, FetchTopic};
+    use kafka_protocol::messages::list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic};
+    use kafka_protocol::messages::{FetchRequest, FetchResponse, ListOffsetsRequest, ListOffsetsResponse};
+    let artifact = compile();
+    let mut rng = Rng(19);
+    let mut inputs = Vec::new();
+    type FetchAns = (u64, i16, i64, i64, Vec<Vec<u8>>);
+    type ListAns = (u64, i16, i64, i64, i32);
+    // Per request: its correlation id, frame, decoded value, (request-level error,) and answers.
+    type FetchCase = (i32, Vec<u8>, Value, i16, Vec<FetchAns>);
+    type ListCase = (i32, Vec<u8>, Value, Vec<ListAns>);
+    type FetchTopicCase = ([u8; 16], Vec<(i32, i32, i64, i32)>);
+    type ListTopicCase = (String, Vec<(i32, i32, i64)>);
+    let mut fetches: Vec<FetchCase> = Vec::new();
+    let mut lists: Vec<ListCase> = Vec::new();
+    for _ in 0..40 {
+        // A Fetch: random topics by id, partitions, offsets and limits.
+        let corr = rng.next() as i32;
+        let version = 16 + rng.below(2) as i16;
+        let topics: Vec<FetchTopicCase> = (0..rng.below(3))
+            .map(|_| {
+                let id = uuid_of(&mut rng).into_bytes();
+                let ps = (0..rng.below(3))
+                    .map(|_| (rng.next() as i32, rng.next() as i32 >> 20, rng.next() as i64 >> 2, rng.next() as i32 >> 8))
+                    .collect();
+                (id, ps)
+            })
+            .collect();
+        let (wait, minb, maxb, iso, sid, sep) =
+            (rng.next() as i32, rng.next() as i32, rng.next() as i32, rng.below(2) as i8, rng.below(3) as i32, rng.next() as i32);
+        let req = FetchRequest::default()
+            .with_max_wait_ms(wait)
+            .with_min_bytes(minb)
+            .with_max_bytes(maxb)
+            .with_isolation_level(iso)
+            .with_session_id(sid)
+            .with_session_epoch(sep)
+            .with_topics(
+                topics
+                    .iter()
+                    .map(|(id, ps)| {
+                        FetchTopic::default().with_topic_id(uuid::Uuid::from_bytes(*id)).with_partitions(
+                            ps.iter()
+                                .map(|(p, e, o, m)| {
+                                    FetchPartition::default()
+                                        .with_partition(*p)
+                                        .with_current_leader_epoch(*e)
+                                        .with_fetch_offset(*o)
+                                        .with_partition_max_bytes(*m)
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            )
+            .with_rack_id(StrBytes::from_string(rng.text()));
+        let frame = encode_request(1, version, corr, Some("c"), &req);
+        let want = opt(Some(strukt(vec![
+            i32v(wait),
+            i32v(minb),
+            i32v(maxb),
+            i8v(iso),
+            i32v(sid),
+            i32v(sep),
+            Value::Vec(
+                topics
+                    .iter()
+                    .map(|(id, ps)| {
+                        strukt(vec![
+                            bytes(id),
+                            Value::Vec(
+                                ps.iter()
+                                    .map(|(p, e, o, m)| strukt(vec![i32v(*p), i32v(*e), Value::Int(IntValue::I64(*o)), i32v(*m)]))
+                                    .collect(),
+                            ),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ])));
+        let err = [0i16, 0, 70, 71][rng.below(4) as usize];
+        let entries: usize = topics.iter().map(|t| t.1.len()).sum();
+        let answers: Vec<FetchAns> = (0..entries as u64)
+            .map(|k| {
+                let e = [0i16, 0, 1, 3, 100][rng.below(5) as usize];
+                let bs = (0..rng.below(3)).map(|_| (0..1 + rng.below(30)).map(|_| rng.next() as u8).collect()).collect();
+                (k, e, rng.next() as i64 >> 2, rng.next() as i64 >> 3, bs)
+            })
+            .collect();
+        inputs.push(input(&artifact, "req", vec![bytes(&frame)]));
+        inputs.push(input(
+            &artifact,
+            "fetch_resp",
+            vec![
+                i32v(corr),
+                bytes(&frame),
+                i16v(err),
+                Value::Vec(
+                    answers
+                        .iter()
+                        .map(|(k, e, hw, ls, bs)| {
+                            Value::Tuple(
+                                vec![
+                                    Value::Int(IntValue::U64(*k)),
+                                    i16v(*e),
+                                    Value::Int(IntValue::I64(*hw)),
+                                    Value::Int(IntValue::I64(*ls)),
+                                    Value::Vec(bs.iter().map(|b| bytes(b)).collect()),
+                                ]
+                                .into(),
+                            )
+                        })
+                        .collect(),
+                ),
+            ],
+        ));
+        fetches.push((corr, frame, want, err, answers));
+        // A ListOffsets: random topics by name, partitions, epochs and timestamps.
+        let corr = rng.next() as i32;
+        let version = 7 + rng.below(4) as i16;
+        let ltopics: Vec<ListTopicCase> = (0..rng.below(3))
+            .map(|_| {
+                let ps = (0..rng.below(3)).map(|_| (rng.next() as i32, rng.next() as i32 >> 20, rng.next() as i64 >> 1)).collect();
+                (rng.text(), ps)
+            })
+            .collect();
+        let iso = rng.below(2) as i8;
+        let req = ListOffsetsRequest::default()
+            .with_replica_id(BrokerId(-1))
+            .with_isolation_level(iso)
+            .with_topics(
+                ltopics
+                    .iter()
+                    .map(|(n, ps)| {
+                        ListOffsetsTopic::default().with_name(TopicName(StrBytes::from_string(n.clone()))).with_partitions(
+                            ps.iter()
+                                .map(|(p, e, t)| {
+                                    ListOffsetsPartition::default()
+                                        .with_partition_index(*p)
+                                        .with_current_leader_epoch(*e)
+                                        .with_timestamp(*t)
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            )
+            .with_timeout_ms(rng.next() as i32);
+        let frame = encode_request(2, version, corr, Some("c"), &req);
+        let want = opt(Some(strukt(vec![
+            i8v(iso),
+            Value::Vec(
+                ltopics
+                    .iter()
+                    .map(|(n, ps)| {
+                        strukt(vec![
+                            s(n),
+                            Value::Vec(
+                                ps.iter()
+                                    .map(|(p, e, t)| strukt(vec![i32v(*p), i32v(*e), Value::Int(IntValue::I64(*t))]))
+                                    .collect(),
+                            ),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ])));
+        let entries: usize = ltopics.iter().map(|t| t.1.len()).sum();
+        let answers: Vec<ListAns> = (0..entries as u64)
+            .map(|k| (k, [0i16, 3, 42, 74][rng.below(4) as usize], rng.next() as i64 >> 2, rng.next() as i64 >> 2, rng.next() as i32))
+            .collect();
+        inputs.push(input(&artifact, "req", vec![bytes(&frame)]));
+        inputs.push(input(
+            &artifact,
+            "list_resp",
+            vec![
+                i32v(corr),
+                bytes(&frame),
+                Value::Vec(
+                    answers
+                        .iter()
+                        .map(|(k, e, t, o, ep)| {
+                            Value::Tuple(
+                                vec![
+                                    Value::Int(IntValue::U64(*k)),
+                                    i16v(*e),
+                                    Value::Int(IntValue::I64(*t)),
+                                    Value::Int(IntValue::I64(*o)),
+                                    i32v(*ep),
+                                ]
+                                .into(),
+                            )
+                        })
+                        .collect(),
+                ),
+            ],
+        ));
+        lists.push((corr, frame, want, answers));
+    }
+    let r = run(&artifact, &inputs);
+    let decoded_fetch = rows(&artifact, &r, "v_fetch");
+    let decoded_list = rows(&artifact, &r, "v_list");
+    let fetch_out = rows(&artifact, &r, "v_fetch_resp");
+    let list_out = rows(&artifact, &r, "v_list_resp");
+    let body = |v: &Value| -> Bytes {
+        let Value::Option(Some(b)) = v else { panic!("{v:?}") };
+        let Value::Bytes(b) = &**b else { panic!("{b:?}") };
+        let n = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize;
+        assert_eq!(n, b.len() - 4, "the size prefix is the frame's size");
+        Bytes::copy_from_slice(&b[4..])
+    };
+    for (corr, frame, want, err, answers) in &fetches {
+        let got = decoded_fetch.iter().find(|x| x[0] == bytes(frame)).unwrap();
+        assert_eq!(&got[1], want, "the decoded Fetch {frame:02x?}");
+        let row = fetch_out.iter().find(|x| x[0] == i32v(*corr)).unwrap();
+        let mut buf = body(&row[1]);
+        let header = ResponseHeader::decode(&mut buf, FetchResponse::header_version(17)).unwrap();
+        assert_eq!(header.correlation_id, *corr);
+        let m = FetchResponse::decode(&mut buf, 17).unwrap();
+        assert!(buf.is_empty(), "trailing bytes after the Fetch response");
+        assert_eq!((m.throttle_time_ms, m.error_code, m.session_id), (0, *err, 0));
+        let got: Vec<FetchAns> = m
+            .responses
+            .iter()
+            .flat_map(|t| t.partitions.iter())
+            .enumerate()
+            .map(|(k, p)| {
+                assert_eq!(p.last_stable_offset, p.high_watermark);
+                assert_eq!(p.preferred_read_replica.0, -1);
+                assert!(p.aborted_transactions.as_ref().is_none_or(|a| a.is_empty()));
+                let records = p.records.clone().unwrap_or_default().to_vec();
+                (k as u64, p.error_code, p.high_watermark, p.log_start_offset, vec![records])
+            })
+            .collect();
+        let want: Vec<FetchAns> =
+            answers.iter().map(|(k, e, hw, ls, bs)| (*k, *e, *hw, *ls, vec![bs.concat()])).collect();
+        assert_eq!(got, want);
+    }
+    for (corr, frame, want, answers) in &lists {
+        let got = decoded_list.iter().find(|x| x[0] == bytes(frame)).unwrap();
+        assert_eq!(&got[1], want, "the decoded ListOffsets {frame:02x?}");
+        let row = list_out.iter().find(|x| x[0] == i32v(*corr)).unwrap();
+        let mut buf = body(&row[1]);
+        let header = ResponseHeader::decode(&mut buf, ListOffsetsResponse::header_version(10)).unwrap();
+        assert_eq!(header.correlation_id, *corr);
+        let m = ListOffsetsResponse::decode(&mut buf, 10).unwrap();
+        assert!(buf.is_empty(), "trailing bytes after the ListOffsets response");
+        let got: Vec<ListAns> = m
+            .topics
+            .iter()
+            .flat_map(|t| t.partitions.iter())
+            .enumerate()
+            .map(|(k, p)| (k as u64, p.error_code, p.timestamp, p.offset, p.leader_epoch))
+            .collect();
+        assert_eq!(&got, answers);
+    }
+}
+
 /// A one-record batch of producer `pid` at `epoch` and sequence `seq` (`pid` -1: no idempotence), taking `n` offsets.
 #[cfg(test)]
 fn producer_batch(pid: i64, epoch: i16, seq: i32, n: usize) -> Vec<u8> {
@@ -1178,6 +1438,8 @@ fn the_golden_captures_of_real_clients_decode() {
     let produce = rows(&artifact, &r, "v_produce");
     let produce_check = rows(&artifact, &r, "v_produce_check");
     let init_pid = rows(&artifact, &r, "v_init_pid");
+    let fetch = rows(&artifact, &r, "v_fetch");
+    let list = rows(&artifact, &r, "v_list");
     let find = |rs: &[Vec<Value>], f: &[u8]| rs.iter().find(|r| r[0] == bytes(f)).map(|r| r[1].clone());
     let mut clients = BTreeSet::new();
     for (file, key, version, frame) in &frames {
@@ -1229,10 +1491,19 @@ fn the_golden_captures_of_real_clients_decode() {
                     panic!("{file}: an InitProducerId v5 body does not decode");
                 };
             }
-            // Fetch and ListOffsets (item 6), and the APIs the broker does not advertise: the Java admin's
-            // DescribeCluster, DescribeTopicPartitions and ListPartitionReassignments. Only their headers are read
-            // here.
-            (1, 16 | 17) | (2, 7..=10) | (46, 0) | (60, 2) | (75, 0) => {
+            // The APIs the broker does not advertise: the Java admin's DescribeCluster, DescribeTopicPartitions and
+            // ListPartitionReassignments. Only their headers are read here.
+            (1, 16 | 17) => {
+                let Some(Value::Option(Some(_))) = find(&fetch, frame) else {
+                    panic!("{file}: a Fetch v{version} body does not decode");
+                };
+            }
+            (2, 7..=10) => {
+                let Some(Value::Option(Some(_))) = find(&list, frame) else {
+                    panic!("{file}: a ListOffsets v{version} body does not decode");
+                };
+            }
+            (46, 0) | (60, 2) | (75, 0) => {
                 assert!(file.starts_with("s7-"), "{file}")
             }
             other => panic!("{file}: an unexpected request {other:?}"),

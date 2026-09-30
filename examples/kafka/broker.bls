@@ -15,6 +15,7 @@ include "metadata.bls";
 include "topics.bls";
 include "records.bls";
 include "produce.bls";
+include "fetch.bls";
 include "broker_fns.bls";
 
 /// This broker's id, the address it advertises, and its cluster id.
@@ -30,3 +31,4 @@ param CLUSTER_ID: String = "blossom-kafka";
 include "broker_node.bls";
 include "topics_node.bls";
 include "produce_node.bls";
+include "fetch_node.bls";

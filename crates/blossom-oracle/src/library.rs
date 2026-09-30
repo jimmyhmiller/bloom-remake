@@ -361,6 +361,17 @@ pub(crate) fn lib(scope: &Scope<'_>, env: &[Option<Value>], f: LibFn, args: &[Ex
             Value::Bytes(uvarint_bytes(((x << 1) ^ (x >> 63)) as u64).into())
         }
         LibFn::BytesEmpty => Value::Bytes(Arc::from(&[][..])),
+        LibFn::DurationFromMillis => match val(0)? {
+            Value::Int(IntValue::I64(n)) => Value::Duration(blossom_value::time::Duration(
+                n.checked_mul(1_000_000)
+                    .ok_or_else(|| ExprError::Arithmetic(format!("Duration::from_millis({n}) overflows")))?,
+            )),
+            other => return Err(bug(format!("`from_millis` of {other:?}"))),
+        },
+        LibFn::DurationAsMillis => match val(0)? {
+            Value::Duration(d) => Value::Int(IntValue::I64(d.0 / 1_000_000)),
+            other => return Err(bug(format!("`as_millis` of {other:?}"))),
+        },
         LibFn::BlobOf => {
             let b = bytes_of(val(0)?)?;
             let r = blossom_value::BlobRef::of(&b);

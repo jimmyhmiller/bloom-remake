@@ -114,3 +114,95 @@ fn with_offsets(b: Bytes, base: i64, epoch: i32) -> Option<Bytes> {
 fn offsets_taken(h: BatchHeader) -> i64 {
     h.last_offset_delta as i64 + 1
 }
+
+// ---------------------------------------------------------------- records inside a batch
+
+extern fn gzip_decompress(b: Bytes, max: u64) -> Option<Bytes> = "blossom_std::compress::gzip_decompress";
+extern fn snappy_block(b: Bytes, max: u64) -> Option<Bytes> = "blossom_std::compress::snappy_decompress";
+extern fn lz4_decompress(b: Bytes, max: u64) -> Option<Bytes> = "blossom_std::compress::lz4_decompress";
+extern fn zstd_decompress(b: Bytes, max: u64) -> Option<Bytes> = "blossom_std::compress::zstd_decompress";
+
+/// The most a batch's records may decompress to. A batch is at most `max.message.bytes` compressed; this bounds
+/// what a decompression bomb can make the broker allocate.
+const MAX_RECORDS_BYTES: u64 = 67108864;
+
+/// The magic that starts snappy in the xerial framing Kafka's Java client writes: `0x82 SNAPPY 0`.
+fn xerial_magic() -> Bytes {
+    Bytes::join([Bytes::from_u8(130u8), "SNAPPY".to_utf8(), Bytes::from_u8(0u8)])
+}
+
+/// Kafka's snappy: the xerial framing (the magic, a version and a compatibility word, then chunks of a 4-byte length
+/// and a raw block), or, from other clients, one raw block.
+fn kafka_snappy(b: Bytes, max: u64) -> Option<Bytes> {
+    let framed = b.slice(0, 8).map(|m| m == xerial_magic()).unwrap_or(false);
+    if not framed {
+        snappy_block(b, max)
+    } else {
+        // At most one chunk per 5 bytes (a length and a byte).
+        let end = range(0, b.len() / 5 + 1).fold(Some(([], 16)), |acc, _i| acc.and_then(|a| {
+            let (out, pos) = a;
+            if pos == b.len() {
+                Some((out, pos))
+            } else {
+                b.u32_be_at(pos).and_then(|n| b.slice(pos + 4, pos + 4 + n as u64).and_then(|chunk| {
+                    snappy_block(chunk, max).map(|x| (out.push(x), pos + 4 + n as u64))
+                }))
+            }
+        }));
+        end.and_then(|e| {
+            let all = Bytes::join(e.0);
+            if e.1 == b.len() && all.len() <= max { Some(all) } else { None }
+        })
+    }
+}
+
+/// A batch's records section, decompressed: codec 0 none, 1 gzip, 2 snappy, 3 LZ4 (frame), 4 zstd.
+fn batch_records(b: Bytes, h: BatchHeader) -> Option<Bytes> {
+    b.slice(BATCH_HEADER, b.len()).and_then(|r| {
+        let codec = h.attributes & 7i16;
+        if codec == 0i16 {
+            Some(r)
+        } else if codec == 1i16 {
+            gzip_decompress(r, MAX_RECORDS_BYTES)
+        } else if codec == 2i16 {
+            kafka_snappy(r, MAX_RECORDS_BYTES)
+        } else if codec == 3i16 {
+            lz4_decompress(r, MAX_RECORDS_BYTES)
+        } else if codec == 4i16 {
+            zstd_decompress(r, MAX_RECORDS_BYTES)
+        } else {
+            None
+        }
+    })
+}
+
+/// Each record's offset and timestamp, in order (a record: its length, attributes, timestamp delta, offset delta,
+/// then key, value and headers, which are skipped by the length). `None` if the records do not parse.
+fn record_times(b: Bytes) -> Option<Vec<(i64, i64)>> {
+    batch_header(b).and_then(|h| batch_records(b, h).and_then(|r| {
+        let n = if h.record_count < 0i32 { 0 } else { h.record_count as u64 };
+        let end = range(0, n).fold(Some(([], 0)), |acc, _i| acc.and_then(|a| {
+            let (out, pos) = a;
+            r.varint_at(pos).and_then(|len| r.varint_at(len.1 + 1).and_then(|td| r.varint_at(td.1).and_then(|od| {
+                if len.0 < 0i64 {
+                    None
+                } else {
+                    Some((out.push((h.base_offset + od.0, h.base_timestamp + td.0)), len.1 + len.0 as u64))
+                }
+            })))
+        }));
+        end.and_then(|e| if e.1 == r.len() { Some(e.0) } else { None })
+    }))
+}
+
+/// The first record at or after timestamp `t` in batch `b`: `Some(Some((timestamp, offset)))`, `Some(None)` if no
+/// record is, and `None` if the batch's records do not parse (the broker never decompresses at produce time, so a
+/// client could store such a batch; the caller reports it corrupt).
+fn first_at_or_after(b: Bytes, t: i64) -> Option<Option<(i64, i64)>> {
+    record_times(b).map(|rs| rs.filter(|x| x.1 >= t).first().map(|x| (x.1, x.0)))
+}
+
+/// The offset of the first record of batch `b` whose timestamp is `t`; `None` as for `first_at_or_after`.
+fn offset_of_timestamp(b: Bytes, t: i64) -> Option<Option<i64>> {
+    record_times(b).map(|rs| rs.filter(|x| x.1 == t).first().map(|x| x.0))
+}

@@ -23,3 +23,8 @@ fn name_pairs(xs: Vec<T>) -> Vec<(String, u64)> { xs.fold([], |acc, t| acc.conca
 fn firsts(xs: Vec<T>) -> Vec<String> { xs.first().map(|t| [t.name]).unwrap_or([]) }
 view literals(k, a, b, c) = lit(k), let a = names([]), let b = name_pairs([T { name: "n", ps: [k, k + 1] }]),
     let c = firsts([]);
+
+/// An `Instant` from another view's column plus a `Duration`: the sum waits for the column's type (it is not
+/// settled as a duration sum), and `as_millis` reads the difference back.
+view later(k, d, ms) = stamped(k, t), let d = t + Duration::from_millis(5i64), let ms = (d - t).as_millis();
+view stamped(k, t) = lit(k), let t = now();

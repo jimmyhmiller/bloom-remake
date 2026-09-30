@@ -122,6 +122,8 @@ view waiting(c) {
     metadata_head(c, _, _, _, _, _, req), name in metadata_creates(req, AUTO_CREATE_TOPICS),
         not topic_now_key(collision_key(name), _), not writer(c);
     produce_waits(c);
+    fetch_waits(c);
+    list_offsets_waits(c);
 }
 
 // ---------------------------------------------------------------- CreateTopics
