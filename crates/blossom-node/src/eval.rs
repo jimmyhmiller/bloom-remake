@@ -96,6 +96,7 @@ impl<E: Evaluator> Executor for OracleExecutor<E> {
             changes,
             outbox: out.outbox,
             egress: out.egress,
+            host: out.host,
             observed,
         })
     }

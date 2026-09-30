@@ -379,6 +379,7 @@ impl Cx<'_> {
             }
             ItemKind::Fact(_) => Site::Item("fact"),
             ItemKind::Fn(_) | ItemKind::ExternFn(_) => Site::Item("fn"),
+            ItemKind::Stream { .. } => Site::Item("stream"),
             ItemKind::Invariant(_) => Site::Invariant,
             ItemKind::Interpose(_) => Site::Item("interpose"),
             ItemKind::Spec(s) => {

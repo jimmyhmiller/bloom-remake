@@ -126,6 +126,81 @@ fn check_function(p: &Program, f: &FnDecl, body: &Expr) -> Result<(), String> {
     Ok(())
 }
 
+/// The qualified name of the built-in `Part` enum (FOREIGN-PROTOCOLS §1.1): `$` never begins a source identifier,
+/// so no program's own type can take it.
+pub const PART_TYPE: &str = "$builtin::Part";
+
+/// A stream's relations (FOREIGN-PROTOCOLS §1.1): each exists with its class and schema, the connect-only ones
+/// exactly for a connect stream, and each belongs to one stream.
+fn check_stream(p: &Program, st: &StreamDecl) -> Result<(), String> {
+    let name = &st.name;
+    let ty = |d: TypeDef| p.types.lookup(&d).ok_or_else(|| format!("stream {name}: type {d:?} is not interned"));
+    let conn = ty(TypeDef::Conn)?;
+    let u64t = ty(TypeDef::Int(IntTy::U64))?;
+    let text = ty(TypeDef::Str)?;
+    let rel = |id: RelId, class: RelClass, cols: Vec<TypeId>, what: &str| -> Result<(), String> {
+        let r = p.rels.get(id).ok_or_else(|| format!("stream {name}: `{what}` is not a relation"))?;
+        if r.class != class {
+            return Err(format!("stream {name}: `{what}` has class {:?}", r.class));
+        }
+        if r.placement != st.placement {
+            return Err(format!("stream {name}: `{what}` is placed elsewhere than its stream"));
+        }
+        let have: Vec<TypeId> = r.schema.cols.iter().map(|c| c.ty).collect();
+        if have != cols {
+            return Err(format!("stream {name}: `{what}` has the wrong columns"));
+        }
+        Ok(())
+    };
+    let ev = |e: StreamEvent| RelClass::Event(EventSource::Stream(e));
+    let instant = ty(TypeDef::Instant)?;
+    let opened = match st.kind {
+        StreamKind::Listen => vec![conn, text, instant],
+        StreamKind::Connect => vec![conn, u64t, text, instant],
+    };
+    rel(st.opened, ev(StreamEvent::Opened), opened, "opened")?;
+    rel(st.data, ev(StreamEvent::Data), vec![conn, u64t, ty(TypeDef::Bytes)?], "data")?;
+    rel(st.closed, ev(StreamEvent::Closed), vec![conn, text], "closed")?;
+    rel(st.close, RelClass::HostOut(HostOp::Close), vec![conn], "close")?;
+    // `write(c, seq, parts: Vec<Part>)`: `Part` is the built-in enum whose variant 0 is `Bytes(Bytes)`.
+    let w = p.rels.get(st.write).ok_or_else(|| format!("stream {name}: `write` is not a relation"))?;
+    let parts = w.schema.cols.get(2).map(|c| c.ty).ok_or_else(|| format!("stream {name}: `write` has no parts"))?;
+    let part_ok = match p.types.get(parts) {
+        Some(TypeDef::Vec(part)) => match p.types.get(*part) {
+            Some(TypeDef::Enum(e)) => {
+                e.name.to_string() == PART_TYPE
+                    && e.variants.iter().any(|v| {
+                        v.number == 0
+                            && v.payload.len() == 1
+                            && v.payload.first().is_some_and(|f| p.types.get(f.ty) == Some(&TypeDef::Bytes))
+                    })
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    if !part_ok {
+        return Err(format!("stream {name}: `write`'s parts are not a Vec<Part>"));
+    }
+    rel(st.write, RelClass::HostOut(HostOp::Write), vec![conn, u64t, parts], "write")?;
+    match (st.kind, st.failed, st.dial) {
+        (StreamKind::Listen, None, None) => {}
+        (StreamKind::Connect, Some(failed), Some(dial)) => {
+            rel(failed, ev(StreamEvent::Failed), vec![u64t, text], "failed")?;
+            rel(dial, RelClass::HostOut(HostOp::Dial), vec![u64t, text], "dial")?;
+        }
+        _ => return Err(format!("stream {name}: `failed` and `dial` belong exactly to connect streams")),
+    }
+    let mine = [Some(st.opened), Some(st.data), Some(st.closed), st.failed, Some(st.write), Some(st.close), st.dial];
+    for other in p.streams.iter().filter(|o| o.name != st.name) {
+        let theirs = [Some(other.opened), Some(other.data), Some(other.closed), other.failed, Some(other.write), Some(other.close), other.dial];
+        if mine.iter().flatten().any(|r| theirs.iter().flatten().any(|o| o == r)) {
+            return Err(format!("stream {name} shares a relation with stream {}", other.name));
+        }
+    }
+    Ok(())
+}
+
 /// A cycle of calls among IR-bodied functions, which LANGUAGE §16.1 forbids (functions are total).
 fn function_cycle(p: &Program) -> Option<String> {
     let callees: Vec<(FnId, BTreeSet<FnId>)> = p
@@ -228,6 +303,10 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
             let result = check_function(p, f, body);
             check(result.is_ok(), 8, None, None, result.err().unwrap_or_default());
         }
+    }
+    for st in &p.streams {
+        let result = check_stream(p, st);
+        check(result.is_ok(), 8, None, None, result.err().unwrap_or_default());
     }
     let recursion = function_cycle(p);
     check(recursion.is_none(), 8, None, None, recursion.unwrap_or_default());
@@ -446,7 +525,7 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
         );
         if let Some(rel) = p.rels.get(rule.head.rel) {
             let legal = match rule.kind {
-                RuleKind::Async => matches!(rel.class, RelClass::Channel(_)),
+                RuleKind::Async => matches!(rel.class, RelClass::Channel(_) | RelClass::HostOut(_)),
                 RuleKind::Deductive | RuleKind::Inductive => matches!(rel.class, RelClass::Idb | RelClass::Weighted(_)),
             };
             let mode = match rule.head.mode {
@@ -552,6 +631,13 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
                         lattice_vars.insert(*v);
                     }
                 }
+                check(
+                    !matches!(rel.class, RelClass::HostOut(_)),
+                    2,
+                    Some(rule),
+                    Some(atom.span),
+                    "a request to the host (a stream's write, close or dial) is never read".into(),
+                );
                 check(
                     (atom.sender.is_none() && atom.principal.is_none()) || matches!(rel.class, RelClass::Channel(_)),
                     2,

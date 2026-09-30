@@ -26,7 +26,7 @@ use blossom_base::{LatticeTypeId, TypeId};
 use blossom_ir::core::{Column, LatticeCtor, Program};
 use blossom_value::time::{Duration, Instant, NodeId};
 use blossom_value::types::IntTy;
-use blossom_value::value::{IntValue, LatValue, SessionId};
+use blossom_value::value::{ConnId, IntValue, LatValue, SessionId};
 use blossom_value::{TypeDef, Value};
 
 /// Why bytes did not encode or decode.
@@ -191,7 +191,7 @@ impl<'p> Codec<'p> {
     /// The wire type of values of `ty`.
     fn wire_type(&self, ty: TypeId) -> Result<u8, WireError> {
         Ok(match self.def(ty)? {
-            TypeDef::Bool | TypeDef::Session | TypeDef::Unit => WT_VARINT,
+            TypeDef::Bool | TypeDef::Session | TypeDef::Conn | TypeDef::Unit => WT_VARINT,
             TypeDef::Int(t) if !signed(*t) && !matches!(t, IntTy::U128) => WT_VARINT,
             TypeDef::Int(t) if signed(*t) && !matches!(t, IntTy::I128) => WT_ZZ,
             TypeDef::Int(_) => WT_BYTES,
@@ -239,6 +239,7 @@ impl<'p> Codec<'p> {
             (TypeDef::Bytes, Value::Bytes(b)) => put_bytes(out, b),
             (TypeDef::Principal, Value::Principal(p)) => put_bytes(out, p.as_bytes()),
             (TypeDef::Session, Value::Session(s)) => put_varint(out, s.0),
+            (TypeDef::Conn, Value::Conn(c)) => put_varint(out, c.0),
             (TypeDef::Node(_), Value::Node(n)) => match &self.nodes {
                 NodeEncoding::Dense => put_varint(out, u64::from(n.0)),
                 NodeEncoding::ByName(names) => {
@@ -435,6 +436,7 @@ impl<'p> Codec<'p> {
             TypeDef::Bytes => Value::Bytes(Arc::from(get_bytes(input, "bytes")?)),
             TypeDef::Principal => Value::Principal(Arc::from(utf8(get_bytes(input, "a principal")?)?)),
             TypeDef::Session => Value::Session(SessionId(get_varint(input)?)),
+            TypeDef::Conn => Value::Conn(ConnId(get_varint(input)?)),
             TypeDef::Node(_) => match &self.nodes {
                 NodeEncoding::Dense => Value::Node(NodeId(
                     u32::try_from(get_varint(input)?).map_err(|_| WireError::Malformed("node id".into()))?,

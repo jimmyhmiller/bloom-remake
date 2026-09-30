@@ -23,7 +23,7 @@ pub(crate) fn check_supported(p: &Program) -> Result<(), OracleError> {
             RelClass::HostTable => {
                 blossom_base::unimplemented_feature!("LANG-051", "host-maintained tables in the oracle (WP M4.1)")
             }
-            RelClass::Idb | RelClass::Static | RelClass::Event(_) | RelClass::Channel(_) => {}
+            RelClass::Idb | RelClass::Static | RelClass::Event(_) | RelClass::Channel(_) | RelClass::HostOut(_) => {}
         }
     }
     for rule in p.rules.iter() {
@@ -429,7 +429,17 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
             continue;
         }
         db.prepare(rule, plan);
+        let to_host = matches!(program.rels.get(rule.head.rel).map(|r| &r.class), Some(RelClass::HostOut(_)));
         for (row, firing) in heads(&scope, &db, rule, plan, input.capture).map_err(|e| fail(rule, e))? {
+            // A request to the host (a stream's write, close or dial) leaves with the tick (FOREIGN-PROTOCOLS §1).
+            if to_host {
+                out.host.insert(crate::HostOut {
+                    rel: rule.head.rel,
+                    row,
+                });
+                firings.extend(firing);
+                continue;
+            }
             let to = match row.first() {
                 Some(Value::Node(n)) => *n,
                 // A reply to a client session leaves the deployment (LANGUAGE §18.4); a session is a destination

@@ -384,6 +384,14 @@ impl Cx<'_> {
                 let items = self.items(node);
                 ItemKind::Protocol(ProtocolItem { name, generics, items })
             }
+            STREAMITEM => {
+                let names = self.names(node);
+                let (Some(name), Some(kind)) = (names.first().copied(), names.get(1).copied()) else {
+                    self.malformed("a stream without a name or a kind", span);
+                    return None;
+                };
+                ItemKind::Stream { name, kind }
+            }
             ROLEITEM => {
                 let names = self.names(node);
                 let Some(name) = names.first().copied() else {

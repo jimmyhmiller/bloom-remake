@@ -4,7 +4,7 @@ use crate::bounded::DepthGuard;
 use crate::serde_util;
 use crate::time::{Duration, Instant, NodeId};
 use crate::types::ExternCodecId;
-use crate::value::{BlobRef, GroupValue, IntValue, LatValue, ModValue, SessionId, Value};
+use crate::value::{BlobRef, ConnId, GroupValue, IntValue, LatValue, ModValue, SessionId, Value};
 use serde::{Deserialize, Deserializer};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -45,6 +45,7 @@ enum ValueRepr {
         codec: ExternCodecId,
         bytes: Arc<[u8]>,
     },
+    Conn(ConnId),
 }
 impl From<ValueRepr> for Value {
     fn from(v: ValueRepr) -> Self {
@@ -60,6 +61,7 @@ impl From<ValueRepr> for Value {
             ValueRepr::Mod(v) => Self::Mod(v),
             ValueRepr::Blob(v) => Self::Blob(v),
             ValueRepr::Session(v) => Self::Session(v),
+            ValueRepr::Conn(v) => Self::Conn(v),
             ValueRepr::Principal(v) => Self::Principal(v),
             ValueRepr::Node(v) => Self::Node(v),
             ValueRepr::Tuple(v) => Self::Tuple(v),

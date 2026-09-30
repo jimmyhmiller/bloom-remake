@@ -59,6 +59,33 @@ A stream declaration introduces:
 - **Deployment.** A node's `[[node]]` entry maps stream names to addresses: `streams = { kafka = "0.0.0.0:9092" }`.
   A `listen` stream without an address is a configuration error: the node refuses to start.
 
+### 1.2a As built (S6 item 4)
+
+- **One chunk per connection per tick.** The runtime delivers at most one `data` event per connection per tick:
+  everything read from it since the previous tick, up to the budget. This decision was taken because `fold!`
+  aggregates do not exist yet, and so that a program needs no in-tick reassembly. `seq` still counts chunks, so a
+  program can check it.
+- **Event order across ticks.**
+  - A connection's `opened` is in an earlier tick than any of its `data`.
+  - Its `closed` is in a later tick than its last `data`.
+  - So state a program emits in `opened` is current when the data arrives, and state it updates with `upsert` (at
+    t+1) is current for the next chunk.
+- **A connect stream's `opened`** carries the dial request it answers: `opened(c: Conn, req: u64, peer: String,
+  at: Instant)`. `failed(req, reason)` reports a dial that did not connect.
+- **`Part`** is a built-in enum with one variant for now, `Part::Bytes(b)`. `Part::Blob(…)` comes with blobs (§5).
+  Adding a variant does not break programs that build `Part::Bytes`.
+- **Surface.**
+  - A stream's relations are named like an instance's interface: `s.opened`, `s.data`, `s.closed`, `s.failed` are
+    read.
+  - `s.write`, `s.close`, `s.dial` are written with `send` and no `to`. Reading them is BLS0203; writing an event is
+    BLS0400.
+- **IR.**
+  - `Program.streams` holds each `StreamDecl`, naming its relations.
+  - The events are `RelClass::Event(EventSource::Stream(e))`.
+  - The requests are `RelClass::HostOut(op)`, written only by async rules and never read.
+  - Each tick's requests leave as `TickOutput::host` and, in the node, are released with the tick's other output
+    after its durable writes are synced.
+
 ### 1.3 IR, oracle and engine
 
 - **IR.** Streams lower to event relations of a new source (`EventSource::Stream { stream, part }`) and to async heads

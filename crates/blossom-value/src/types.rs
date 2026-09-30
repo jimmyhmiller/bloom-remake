@@ -44,6 +44,8 @@ pub enum TypeDef {
     Blob,
     /// `Session` (LANG-243).
     Session,
+    /// `Conn`: a byte-stream connection (FOREIGN-PROTOCOLS §1).
+    Conn,
     /// `Principal` (LANG-240).
     Principal,
     /// `Node` (`None`) or `Node<R>`.
@@ -303,6 +305,7 @@ impl TypeTable {
             | TypeDef::Instant
             | TypeDef::Blob
             | TypeDef::Session
+            | TypeDef::Conn
             | TypeDef::Principal
             | TypeDef::Node(_)
             | TypeDef::Lattice(_)
@@ -421,6 +424,7 @@ impl TypeTable {
             | (TypeDef::Instant, Value::Instant(_))
             | (TypeDef::Blob, Value::Blob(_))
             | (TypeDef::Session, Value::Session(_))
+            | (TypeDef::Conn, Value::Conn(_))
             | (TypeDef::Principal, Value::Principal(_))
             | (TypeDef::Node(_), Value::Node(_))
             | (TypeDef::Lattice(_), Value::Lattice(_))
@@ -507,6 +511,7 @@ fn def_kind(def: &TypeDef) -> &'static str {
         TypeDef::Mod { .. } => "Mod",
         TypeDef::Blob => "Blob",
         TypeDef::Session => "Session",
+        TypeDef::Conn => "Conn",
         TypeDef::Principal => "Principal",
         TypeDef::Node(_) => "Node",
         TypeDef::Tuple(_) => "a tuple",
@@ -535,6 +540,7 @@ fn value_kind(value: &Value) -> &'static str {
         Value::Mod(_) => "Mod",
         Value::Blob(_) => "Blob",
         Value::Session(_) => "Session",
+        Value::Conn(_) => "Conn",
         Value::Principal(_) => "Principal",
         Value::Node(_) => "Node",
         Value::Tuple(_) => "a tuple",

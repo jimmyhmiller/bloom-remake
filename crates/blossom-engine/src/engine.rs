@@ -532,7 +532,12 @@ impl Engine {
             let Some(plan) = self.plans.get(id) else { continue };
             let StoreKey::Async(rel) = plan.head else { continue };
             let s = self.stores.get(&plan.head).ok_or_else(|| internal_error!("no async store"))?;
+            let to_host = matches!(self.program.get().rels.get(rel).map(|r| &r.class), Some(RelClass::HostOut(_)));
             for row in s.present() {
+                if to_host {
+                    out.host.insert(blossom_ir::tick::HostOut { rel, row: row.clone() });
+                    continue;
+                }
                 match row.first() {
                     Some(Value::Node(to)) => {
                         out.outbox.insert(Send {
@@ -1101,6 +1106,7 @@ impl Engine {
             next: self.next_instance()?,
             outbox: step.outbox,
             egress: step.egress,
+            host: step.host,
             firings: Vec::new(),
         })
     }

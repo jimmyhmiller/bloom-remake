@@ -860,6 +860,13 @@ impl<'t> Resolver<'t, '_> {
     /// An importer may read only the outputs of an instance (BLS0203); a channel is read at its destination role.
     fn check_readable(&mut self, cx: &RuleCx, rel: HRelId, span: Span) {
         let r = self.rel_of(rel).clone();
+        if let HRelKind::Stream(HStreamRel::Host(_)) = r.kind {
+            self.error(
+                code!("BLS0203"),
+                span,
+                format!("`{}` is a request to the host: it can be sent, not read", r.name),
+            );
+        }
         if let HRelKind::Input { root: false } = r.kind
             && self.is_foreign_interface(cx, rel)
         {
@@ -2311,6 +2318,15 @@ impl<'t> Resolver<'t, '_> {
                 }
                 None
             }
+            (Some(to), Verb::Send, HRelKind::Stream(_)) => {
+                self.error(
+                    code!("BLS0403"),
+                    to.span,
+                    "a request to the host takes no `to`: the connection is its first column",
+                );
+                return None;
+            }
+            (None, Verb::Send, HRelKind::Stream(HStreamRel::Host(_))) => None,
             (_, Verb::Send, _) => {
                 self.error(
                     code!("BLS0400"),
@@ -2363,6 +2379,8 @@ impl<'t> Resolver<'t, '_> {
                     .copied();
                 match found {
                     Some((id, true)) => Some(id),
+                    // A stream's events: the write is refused below, with the stream's reason.
+                    Some((id, false)) if matches!(self.rel_of(id).kind, HRelKind::Stream(_)) => Some(id),
                     Some((_, false)) => {
                         self.error(
                             code!("BLS0203"),
@@ -2423,6 +2441,12 @@ impl<'t> Resolver<'t, '_> {
             }
             (HRelKind::Halt, v) if v != Verb::Emit => Some((code!("BLS0400"), bad("`halt` is written with `emit`"))),
             (HRelKind::Channel(_), v) if v != Verb::Send => None,
+            (HRelKind::Stream(HStreamRel::Event(_)), _) => {
+                Some((code!("BLS0400"), bad("a stream's events are fed by the runtime")))
+            }
+            (HRelKind::Stream(HStreamRel::Host(_)), v) if v != Verb::Send => {
+                Some((code!("BLS0400"), bad("a request to the host is written with `send`")))
+            }
             (k, Verb::Delete | Verb::Upsert) if !k.is_table() => {
                 Some((code!("BLS0400"), bad("only tables accept `delete` and `upsert`")))
             }

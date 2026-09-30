@@ -642,3 +642,33 @@ fn extern_fns_are_checked_against_the_standard_catalog() {
     );
     assert!(codes(table).contains(&"BLS0908".to_owned()), "{:?}", codes(table));
 }
+
+#[test]
+fn streams_declare_their_relations_and_check_how_they_are_used() {
+    let ok = with_head(
+        "stream s: listen;\n\
+         stream up: connect;\n\
+         table last(c: Conn, n: u64) key(c);\n\
+         a: on s.data(c, seq, b) { send s.write(c, seq, [Part::Bytes(b)]); upsert last(c, seq); }\n\
+         b: on s.closed(c, why) { send s.close(c); }\n\
+         d: on go(k, v) { send up.dial(k, \"127.0.0.1:9\"); }\n\
+         e: on up.opened(c, req, peer, at) { send up.write(c, 0, [Part::Bytes(Bytes::empty())]); }\n\
+         f: on up.failed(req, why) { emit last2(req); }\n\
+         table last2(r: u64);\n",
+    );
+    assert_eq!(codes(ok), Vec::<String>::new());
+    let fed = with_head("stream s: listen;\na: on go(k, v) { emit s.closed(Bytes::empty(), \"x\"); }\n");
+    assert!(codes(fed).contains(&"BLS0400".to_owned()), "{:?}", codes(fed));
+    let read = with_head(
+        "stream s: listen;\ntable t(c: Conn);\na: on go(k, v), s.close(c) { emit t(c); }\n",
+    );
+    assert!(codes(read).contains(&"BLS0203".to_owned()), "{:?}", codes(read));
+    let to = with_head("stream s: listen;\na: on s.opened(c, p, at) { send s.close(c) to c; }\n");
+    assert_eq!(codes(to), vec!["BLS0403"]);
+    let kind = with_head("stream s: accept;\n");
+    assert_eq!(codes(kind), vec!["BLS0100"]);
+    let twice = with_head("stream s: listen;\nstream s: connect;\n");
+    assert_eq!(codes(twice), vec!["BLS0201"]);
+    let not_emit = with_head("stream s: listen;\na: on s.opened(c, p, at) { emit s.close(c); }\n");
+    assert!(codes(not_emit).contains(&"BLS0400".to_owned()), "{:?}", codes(not_emit));
+}

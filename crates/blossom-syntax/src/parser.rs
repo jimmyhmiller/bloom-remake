@@ -640,6 +640,14 @@ impl Parser<'_> {
             self.cell();
             return CELLDECL;
         }
+        if self.ctx("stream") && self.nth(1) == IDENT && self.nth(2) == COLON {
+            self.bump();
+            self.name(false);
+            self.expect(COLON);
+            self.name(false);
+            self.expect(SEMI);
+            return STREAMITEM;
+        }
         if self.ctx("role") && self.nth(1) == IDENT {
             self.bump();
             self.name(false);
