@@ -1,0 +1,6 @@
+//! A shift by a count outside the type's width is the arithmetic hard error BLSR004 (LANGUAGE §9.12).
+program shift version 1;
+
+input e(n: u32);
+
+view v(x) = e(n), let x = 1u32 << n;

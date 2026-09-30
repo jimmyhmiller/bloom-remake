@@ -1550,8 +1550,21 @@ impl Cx<'_> {
                 ExprKind::Wildcard
             }
             CLOSUREEXPR => {
-                // `|a, b| body`: the parameters are path expressions, the body is the last expression.
+                // `|a, b| body`: the parameters are path expressions; the body is a block, or else the last expression.
                 let es: Vec<SyntaxNode> = expr_children(node).collect();
+                if let Some(block) = child_of(node, BLOCKEXPR) {
+                    let mut names = Vec::new();
+                    for p in &es {
+                        match self.expr(p).kind {
+                            ExprKind::Path(path, targs) if targs.is_empty() && path.len() == 1 => names.extend(path),
+                            _ => self.malformed("a closure parameter that is not a name", self.span(p)),
+                        }
+                    }
+                    return ExprKind::Closure {
+                        params: names,
+                        body: Box::new(self.block_expr(&block)),
+                    };
+                }
                 let Some((body, params)) = es.split_last() else {
                     self.malformed("a closure without a body", span);
                     return ExprKind::Wildcard;

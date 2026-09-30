@@ -37,6 +37,12 @@ fn varint_trip(j: u64, k: i64) -> Option<(u64, i64, u64)> {
     x.uvarint_at(0).and_then(|u| x.varint_at(u.1).map(|v| (u.0, v.0, v.1)))
 }
 
+/// Bitwise operators and shifts on every width: `>>` is arithmetic on signed types.
+fn bits(a: u8, c: i8, d: u16, g: i16, h: u32, i: i32, j: u64, k: i64) -> (u8, i8, u16, i16, u32, i32, u64, i64, i64) {
+    (a & 15u8, c | 1i8, d ^ 65535u16, g >> 3i16, h << 5u32, i >> 31i32, j >> 63u64, ~k, (k << 1i64) ^ (k >> 63i64))
+}
+
+view v_bits(x) = e(_, _, a, c, d, g, h, i, j, k), let x = bits(a, c, d, g, h, i, j, k);
 view v_reads(b, p, x) = e(b, p, _, _, _, _, _, _, _, _), let x = reads(b, p);
 view v_encoded(x) = e(_, _, a, c, d, g, h, i, j, k), let x = encoded(a, c, d, g, h, i, j, k);
 view v_decoded(x) = e(_, _, a, c, d, g, h, i, j, k), let x = decoded(encoded(a, c, d, g, h, i, j, k));

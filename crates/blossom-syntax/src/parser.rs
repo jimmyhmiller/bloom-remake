@@ -1770,7 +1770,12 @@ impl Parser<'_> {
                 }
             }
             self.expect(PIPE);
-            self.expr(0);
+            // A closure's body is an expression, or a block of `let`s and a final expression.
+            if self.at(L_CURLY) {
+                self.block_expr();
+            } else {
+                self.expr(0);
+            }
             return self.complete(m, CLOSUREEXPR);
         }
         let mut lhs = self.primary(m);

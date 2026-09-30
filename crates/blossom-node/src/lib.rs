@@ -15,6 +15,7 @@ pub mod eval;
 pub mod manual;
 pub mod node;
 pub mod recovery;
+pub mod streams;
 pub mod timers;
 
 use blossom_base::{InternalError, Unimplemented};

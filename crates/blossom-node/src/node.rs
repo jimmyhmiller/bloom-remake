@@ -24,11 +24,12 @@ use std::sync::Arc;
 use blossom_base::{RelId, RoleId, internal_error};
 use blossom_ir::ValidatedProgram;
 use blossom_ir::core::{EventSource, RelClass};
-use blossom_ir::tick::{Delivery, Egress, Ingress, Instance, Row, Send, StepInput};
+use blossom_ir::tick::{Delivery, Egress, HostOut, Ingress, Instance, Row, Send, StepInput};
 use blossom_value::time::{Instant, NodeId, Tick};
 
 use crate::durable::{Delta, DurableImage, DurableSchema};
 use crate::eval::Executor;
+use crate::streams::{NodeStream, Observed, StreamInbox, node_streams};
 use crate::timers::TimerTable;
 use crate::{NodeError, NodeFault};
 
@@ -62,6 +63,8 @@ pub struct NodeConfig {
     pub max_batch_bytes: usize,
     /// The most ticks parked awaiting their WAL sync before the node stops taking new work (backpressure).
     pub max_inflight: usize,
+    /// The most bytes one connection's `data` event carries in one tick (FOREIGN-PROTOCOLS §1.2).
+    pub max_stream_bytes: usize,
 }
 
 impl NodeConfig {
@@ -74,6 +77,7 @@ impl NodeConfig {
             max_batch: 4096,
             max_batch_bytes: 8 * 1024 * 1024,
             max_inflight: 64,
+            max_stream_bytes: 1024 * 1024,
         }
     }
 }
@@ -125,6 +129,10 @@ pub struct ReleasedTick {
     pub tick: Tick,
     pub sends: Vec<Send>,
     pub egress: Vec<Egress>,
+    /// Requests to the host: stream writes, closes and dials (FOREIGN-PROTOCOLS §1.2).
+    pub host: Vec<HostOut>,
+    /// The connections whose `closed` event this tick delivered: the host closes them after the tick's writes.
+    pub retired: Vec<blossom_value::value::ConnId>,
 }
 
 /// A computed tick waiting for release.
@@ -136,6 +144,8 @@ struct Parked {
     delta: Delta,
     sends: Vec<Send>,
     egress: Vec<Egress>,
+    host: Vec<HostOut>,
+    retired: Vec<blossom_value::value::ConnId>,
     halts: bool,
     now: Instant,
 }
@@ -171,6 +181,7 @@ pub struct Node<E: Executor> {
     timers: TimerTable,
     inbox: VecDeque<Message>,
     inputs: Vec<(RelId, Row)>,
+    streams: StreamInbox,
     parked: VecDeque<Parked>,
     /// The latest tick whose WAL record was reported synced.
     synced: Option<Tick>,
@@ -192,7 +203,7 @@ impl<E: Executor> Node<E> {
                 match src {
                     EventSource::Boot => boot_rel = Some(id),
                     EventSource::Recovered => recovered_rel = Some(id),
-                    EventSource::Timer(_) | EventSource::Input => {}
+                    EventSource::Timer(_) | EventSource::Input | EventSource::Stream(_) => {}
                     other => {
                         return Err(blossom_base::unimplemented_error!(
                             "DIST-040",
@@ -213,6 +224,7 @@ impl<E: Executor> Node<E> {
             .into());
         }
         let schema = DurableSchema::of(p);
+        let streams = StreamInbox::new(node_streams(p, cfg.role), cfg.max_stream_bytes);
         exec.reset(boot.image.instance())?;
         Ok(Node {
             timers: TimerTable::new(p, cfg.role, boot.now)?,
@@ -234,6 +246,7 @@ impl<E: Executor> Node<E> {
             staged: false,
             inbox: VecDeque::new(),
             inputs: Vec::new(),
+            streams,
             parked: VecDeque::new(),
             synced: None,
             released: None,
@@ -337,6 +350,21 @@ impl<E: Executor> Node<E> {
         self.inputs.push((rel, row));
     }
 
+    /// What the host observed on one of the node's streams; it becomes stream events of later ticks.
+    pub fn observe_stream(&mut self, o: Observed) -> Result<(), NodeError> {
+        self.streams.observe(o)
+    }
+
+    /// The node's streams (their relations, by index).
+    pub fn streams(&self) -> &[NodeStream] {
+        self.streams.streams()
+    }
+
+    /// The bytes read from connections but not yet delivered (the host stops reading past a limit).
+    pub fn stream_backlog(&self) -> usize {
+        self.streams.backlog()
+    }
+
     /// The number of messages waiting for a tick.
     pub fn inbox_len(&self) -> usize {
         self.inbox.len()
@@ -368,6 +396,7 @@ impl<E: Executor> Node<E> {
             || self.staged
             || !self.inbox.is_empty()
             || !self.inputs.is_empty()
+            || self.streams.has_events(self.tick.0)
             || self.timers.any_due(now)?)
     }
 
@@ -415,6 +444,8 @@ impl<E: Executor> Node<E> {
         }
         events.extend(self.timers.fire(now)?);
         events.append(&mut self.inputs);
+        events.extend(self.streams.take(tick.0)?);
+        let retired = self.streams.take_retired();
         let mut delivered = Vec::new();
         let mut ingress = Vec::new();
         let mut bytes = 0usize;
@@ -483,6 +514,8 @@ impl<E: Executor> Node<E> {
             delta: delta.clone(),
             sends: out.outbox.into_iter().collect(),
             egress: out.egress.into_iter().collect(),
+            host: out.host.into_iter().collect(),
+            retired,
             halts,
             now,
         });
@@ -559,6 +592,8 @@ impl<E: Executor> Node<E> {
                 tick: p.tick,
                 sends: p.sends,
                 egress: p.egress,
+                host: p.host,
+                retired: p.retired,
             });
         }
         out

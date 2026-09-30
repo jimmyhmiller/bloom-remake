@@ -520,9 +520,7 @@ fn unary(op: UnOp, v: Value) -> ExprResult<Value> {
     match (op, v) {
         (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
         (UnOp::Neg, Value::Int(i)) => int_neg(i).map(Value::Int),
-        (UnOp::BitNot, _) => Err(ExprError::Oracle(
-            blossom_base::unimplemented_error!("LANG-084", "bit operations in the oracle (WP M4.1)").into(),
-        )),
+        (UnOp::BitNot, Value::Int(i)) => Ok(Value::Int(int_not(i))),
         (op, v) => Err(ExprError::Oracle(internal_error!("{op:?} applied to {v:?}").into())),
     }
 }
@@ -583,9 +581,55 @@ fn binary(op: BinOp, l: Value, r: Value) -> ExprResult<Value> {
         And | Or => Err(ExprError::Oracle(
             internal_error!("`&&`/`||` reached the strict path").into(),
         )),
-        BitAnd | BitOr | BitXor | Shl | Shr => Err(ExprError::Oracle(
-            blossom_base::unimplemented_error!("LANG-084", "bit operations in the oracle (WP M4.1)").into(),
-        )),
+        BitAnd | BitOr | BitXor | Shl | Shr => match (l, r) {
+            (Value::Int(a), Value::Int(b)) => int_bits(op, a, b).map(Value::Int),
+            (l, r) => Err(ExprError::Oracle(internal_error!("bit operation {op:?} on {l:?} and {r:?}").into())),
+        },
+    }
+}
+
+macro_rules! bit_ops {
+    ($op:expr, $a:expr, $b:expr, $($variant:ident),*) => {
+        match ($a, $b) {
+            $((IntValue::$variant(x), IntValue::$variant(y)) => {
+                // A shift moves bits out freely, but by a count outside the type's width it is BLSR004.
+                let r = match $op {
+                    BinOp::BitAnd => Some(x & y),
+                    BinOp::BitOr => Some(x | y),
+                    BinOp::BitXor => Some(x ^ y),
+                    BinOp::Shl => u32::try_from(y).ok().and_then(|n| x.checked_shl(n)),
+                    _ => u32::try_from(y).ok().and_then(|n| x.checked_shr(n)),
+                };
+                r.map(IntValue::$variant)
+            })*
+            _ => None,
+        }
+    };
+}
+
+/// `a & b`, `a | b`, `a ^ b`, `a << b`, `a >> b` (arithmetic for signed types) on integers of one type.
+fn int_bits(op: BinOp, a: IntValue, b: IntValue) -> ExprResult<IntValue> {
+    if a.ty() != b.ty() {
+        return Err(ExprError::Oracle(internal_error!("bit operation on {a:?} and {b:?}").into()));
+    }
+    bit_ops!(op, a, b, U8, U16, U32, U64, U128, I8, I16, I32, I64, I128).ok_or_else(|| {
+        ExprError::Arithmetic(format!("{a:?} {op:?} {b:?}: the shift count is outside the type's width"))
+    })
+}
+
+/// `~a`.
+fn int_not(a: IntValue) -> IntValue {
+    match a {
+        IntValue::U8(x) => IntValue::U8(!x),
+        IntValue::U16(x) => IntValue::U16(!x),
+        IntValue::U32(x) => IntValue::U32(!x),
+        IntValue::U64(x) => IntValue::U64(!x),
+        IntValue::U128(x) => IntValue::U128(!x),
+        IntValue::I8(x) => IntValue::I8(!x),
+        IntValue::I16(x) => IntValue::I16(!x),
+        IntValue::I32(x) => IntValue::I32(!x),
+        IntValue::I64(x) => IntValue::I64(!x),
+        IntValue::I128(x) => IntValue::I128(!x),
     }
 }
 
