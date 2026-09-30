@@ -27,10 +27,6 @@ use blossom_wire::codec::WireError;
 pub use eval::{Backend, EngineEvaluator, Evaluator, Executor, Executors, OracleExecutor};
 pub use node::{Boot, Node, NodeConfig, NodeState, ReleasedTick, TickEffects};
 
-/// The stack a thread that runs ticks gets. The evaluators recurse over expressions and calls; Blossom has no
-/// recursion, so a program's depth is bounded by its text, but a debug build's frames are large and Rust's default
-/// 2 MiB thread stack is too small for ordinary protocol decoders. Only the pages a tick touches are committed.
-pub const EVAL_STACK_BYTES: usize = 64 * 1024 * 1024;
 
 /// Why a node operation failed.
 #[derive(Debug, thiserror::Error)]

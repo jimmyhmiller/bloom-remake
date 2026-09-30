@@ -78,8 +78,28 @@ enum Commands {
     Lsp(cmd::lsp::Args),
 }
 
+/// Runs the command on a thread with the stack evaluation needs (`EVAL_STACK_BYTES`, sized for the compile-time
+/// evaluation depth bound), since the main thread's is smaller.
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let spawned = std::thread::Builder::new()
+        .name("blossom".into())
+        .stack_size(blossom_ir::depth::EVAL_STACK_BYTES)
+        .spawn(move || dispatch(cli));
+    match spawned {
+        Ok(h) => match h.join() {
+            Ok(code) => code,
+            Err(panic) => std::panic::resume_unwind(panic),
+        },
+        Err(e) => {
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(), "error: the command's thread could not start: {e}");
+            exit::Exit::Internal.into()
+        }
+    }
+}
+
+fn dispatch(cli: Cli) -> ExitCode {
     let cx = match common::init(&cli.global) {
         Ok(cx) => cx,
         Err(code) => return code,

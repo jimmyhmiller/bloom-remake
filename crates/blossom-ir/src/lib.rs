@@ -8,6 +8,7 @@
 pub mod core;
 
 pub mod build;
+pub mod depth;
 pub mod error;
 mod program;
 mod validate;

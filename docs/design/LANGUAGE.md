@@ -2479,7 +2479,10 @@ combinators (`map`, `filter`, `filter_map`, `fold`, `all`, `any`, …). `error("
 located hard error (BLSR010): it is how a function refuses an impossible input, never a silent default. Totality is
 enforced by a step budget: an evaluation, from a call made outside any function to its return, may apply closures
 and build `range` elements at most `FN_STEP_BUDGET` (10⁷) times in all; past it the tick aborts with BLSR012, the
-same in both evaluators. Algebraic
+same in both evaluators. Evaluation depth is bounded too: since functions do not recurse, the deepest evaluation a
+program can make (an expression's nesting, plus the bodies of the functions it calls and the closures a combinator
+applies) is computed at compile time, and a program deeper than `MAX_EVAL_DEPTH` (1024 levels) is BLS0217, so no
+evaluation can overflow the stack a tick runs on. Algebraic
 properties are attributes (`#[injective]`, `#[commutative]`, `#[associative]`, `#[idempotent]`) checked by TEST-087
 and used by ANA-043, ANA-080 and fold legality. A function with a lattice-typed parameter declares its monotonicity
 class with a prefix (`monotone fn`, `morphism fn`, `antitone fn`, `threshold fn`); without one it is NM and is called
@@ -2813,6 +2816,7 @@ never truncated or defaulted).
 | BLS0214 | E | a `let` block outside a function body, or a closure that is not a combinator's argument in one (§16.1) |
 | BLS0215 | E | a function body that reads a relation, `now()`, `tick()`, `self`, randomness or a role's members (§16.1) |
 | BLS0216 | E | an `extern fn` that names no host function of the standard library, or declares a different signature (§16.2) |
+| BLS0217 | E | an evaluation deeper than the bound the evaluators' stacks are sized for (§16.1) |
 
 **Types (BLS03xx)**
 
