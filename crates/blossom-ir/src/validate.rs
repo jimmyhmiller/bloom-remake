@@ -60,6 +60,83 @@ fn atoms(rule: &Rule) -> impl Iterator<Item = &Atom> {
         _ => None,
     })
 }
+/// The variables an expression binds for a part of itself only: a `match` arm's pattern (for its guard and body), a
+/// `let`'s pattern (for its body), a closure's parameters. They are not free in the expression, so a rule needs
+/// nothing else to bind them.
+fn scoped_vars(e: &Expr, out: &mut BTreeSet<VarId>) {
+    match e {
+        Expr::Term(_) | Expr::Param(_) | Expr::Scalar(_) => {}
+        Expr::Unary { arg, .. } => scoped_vars(arg, out),
+        Expr::Binary { lhs, rhs, .. } => {
+            scoped_vars(lhs, out);
+            scoped_vars(rhs, out);
+        }
+        Expr::Call { args, .. } | Expr::Lattice { args, .. } => args.iter().for_each(|a| scoped_vars(a, out)),
+        Expr::Construct { fields, .. } => fields.iter().for_each(|a| scoped_vars(a, out)),
+        Expr::Collection { elems, .. } => elems.iter().for_each(|a| scoped_vars(a, out)),
+        Expr::Field { base, .. } => scoped_vars(base, out),
+        Expr::If { cond, then, els } => {
+            scoped_vars(cond, out);
+            scoped_vars(then, out);
+            scoped_vars(els, out);
+        }
+        Expr::Match { scrut, arms } => {
+            scoped_vars(scrut, out);
+            for (pat, guard, body) in arms {
+                out.extend(vars(pat));
+                if let Some(g) = guard {
+                    scoped_vars(g, out);
+                }
+                scoped_vars(body, out);
+            }
+        }
+        Expr::Let { pat, value, body } => {
+            out.extend(vars(pat));
+            scoped_vars(value, out);
+            scoped_vars(body, out);
+        }
+        Expr::Closure { params, body } => {
+            out.extend(params.iter().copied());
+            scoped_vars(body, out);
+        }
+        Expr::Typed { expr, .. } => scoped_vars(expr, out),
+    }
+}
+fn source_scoped_vars(src: &GenSource, out: &mut BTreeSet<VarId>) {
+    match src {
+        GenSource::Value(e) | GenSource::Lattice(e) => scoped_vars(e, out),
+        GenSource::Range { lo, hi, .. } => {
+            scoped_vars(lo, out);
+            scoped_vars(hi, out);
+        }
+        GenSource::TableFn { .. } => {}
+    }
+}
+/// The variables a literal's expressions bind for parts of themselves only (`scoped_vars`).
+fn lit_scoped_vars(l: &Literal) -> BTreeSet<VarId> {
+    let mut out = BTreeSet::new();
+    match l {
+        Literal::Bind { expr, .. } | Literal::Guard(expr) => scoped_vars(expr, &mut out),
+        Literal::Gen { src, .. } => source_scoped_vars(src, &mut out),
+        Literal::Pos(_) | Literal::Neg(_) | Literal::Lookup { .. } => {}
+    }
+    out
+}
+fn source_free_vars(src: &GenSource) -> BTreeSet<VarId> {
+    let mut scoped = BTreeSet::new();
+    source_scoped_vars(src, &mut scoped);
+    vars(src).into_iter().filter(|v| !scoped.contains(v)).collect()
+}
+/// The variables a literal mentions that the rule must bind: all of them but those its expressions scope.
+fn lit_vars(l: &Literal) -> BTreeSet<VarId> {
+    let scoped = lit_scoped_vars(l);
+    vars(l).into_iter().filter(|v| !scoped.contains(v)).collect()
+}
+fn free_vars(e: &Expr) -> BTreeSet<VarId> {
+    let mut scoped = BTreeSet::new();
+    scoped_vars(e, &mut scoped);
+    vars(e).into_iter().filter(|v| !scoped.contains(v)).collect()
+}
 fn bound_vars(rule: &Rule) -> BTreeSet<VarId> {
     let mut bound = BTreeSet::new();
     for l in &rule.body.lits {
@@ -71,11 +148,11 @@ fn bound_vars(rule: &Rule) -> BTreeSet<VarId> {
         let old = bound.len();
         for l in &rule.body.lits {
             match l {
-                Literal::Bind { pat, expr } if vars(expr).is_subset(&bound) => bound.extend(vars(pat)),
+                Literal::Bind { pat, expr } if free_vars(expr).is_subset(&bound) => bound.extend(vars(pat)),
                 Literal::Lookup { var, key, .. } if vars(key).is_subset(&bound) => {
                     bound.insert(*var);
                 }
-                Literal::Gen { pat, src } if vars(src).is_subset(&bound) => bound.extend(vars(pat)),
+                Literal::Gen { pat, src } if source_free_vars(src).is_subset(&bound) => bound.extend(vars(pat)),
                 _ => {}
             }
         }
@@ -519,7 +596,7 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
         let bound = bound_vars(rule);
         let all = vars(&rule.head)
             .into_iter()
-            .chain(rule.body.lits.iter().flat_map(vars))
+            .chain(rule.body.lits.iter().flat_map(lit_vars))
             .collect::<BTreeSet<_>>();
         check(
             all.is_subset(&bound),

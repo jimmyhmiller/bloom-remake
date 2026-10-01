@@ -359,12 +359,20 @@ fn decode_delete_topics(c: Cur) -> Option<(Vec<DeleteTopicState>, i32)> {
 /// What judging one entry of a DeleteTopics request needs to know of the whole request, computed once for it: the
 /// ids its entries by id give more than once, the names its entries by name give more than once, and every id it
 /// gives.
-struct DeleteContext { repeated_ids: Set<Bytes>, repeated_names: Set<String>, ids: Set<Bytes> }
+struct DeleteContext { repeated_ids: Set<Bytes>, repeated_names: Set<String> }
 
 fn delete_context(req: Vec<DeleteTopicState>) -> DeleteContext {
     let ids = req.filter(|s| s.id != zero_uuid()).map(|s| s.id);
     let names = req.filter_map(|s| if s.id == zero_uuid() { s.name } else { None });
-    DeleteContext { repeated_ids: repeated_ids(ids), repeated_names: repeated_names(names), ids: ids.to_set() }
+    DeleteContext { repeated_ids: repeated_ids(ids), repeated_names: repeated_names(names) }
+}
+
+/// The name an entry deletes by, or "" for an entry by id (or with neither).
+fn delete_name(s: DeleteTopicState) -> String {
+    match s.name {
+        Some(n) => if s.id == zero_uuid() { n } else { "" },
+        None => "",
+    }
 }
 
 /// Whether entry `s` of a DeleteTopics request (whose context is `ctx`) is well formed: it names a topic by name or
@@ -380,55 +388,34 @@ fn delete_entry_ok(ctx: DeleteContext, s: DeleteTopicState) -> bool {
     }
 }
 
-/// The name entry `s` deletes the topic of, if it is a well-formed entry by name.
-fn delete_by_name(ctx: DeleteContext, s: DeleteTopicState) -> Option<String> {
-    if delete_entry_ok(ctx, s) && s.id == zero_uuid() { s.name } else { None }
-}
-
-/// The id entry `s` deletes the topic of, if it is a well-formed entry by id.
-fn delete_by_id(ctx: DeleteContext, s: DeleteTopicState) -> Option<Bytes> {
-    if delete_entry_ok(ctx, s) && s.id != zero_uuid() { Some(s.id) } else { None }
-}
-
-/// Whether an entry of the request names topic `id` by id: an entry by name that finds this topic is then refused,
-/// as Kafka refuses a name that maps to an id the request already gives.
-fn id_supplied(ctx: DeleteContext, id: Bytes) -> bool {
-    ctx.ids.contains(id)
-}
-
 /// One deletion's result: the topic's name and id as the entry gave them (both when it is deleted), the error and
 /// its message.
 struct DeleteOutcome { name: Option<String>, id: Bytes, error: i16, message: Option<String> }
 
-/// An entry's outcome decided at the broker it reached, before any command: a malformed entry, a name that maps to
-/// an id the request also gives, a name no topic has.
+/// An entry's outcome decided without the controller: a malformed entry, or one whose deletion did not apply in time.
 fn delete_refused(s: DeleteTopicState, error: i16) -> DeleteOutcome {
-    if error == UNKNOWN_TOPIC_OR_PARTITION {
-        DeleteOutcome { name: s.name, id: zero_uuid(), error: error, message: Some("the topic does not exist") }
-    } else if error == REQUEST_TIMED_OUT {
+    if error == REQUEST_TIMED_OUT {
         DeleteOutcome { name: s.name, id: s.id, error: error, message: Some("the controller did not apply the deletion in time") }
     } else {
-        DeleteOutcome { name: s.name, id: s.id, error: INVALID_REQUEST, message: Some(if error == INVALID_REQUEST {
-            "an entry names a topic by name or by id, not both, and only once"
-        } else {
-            "the topic name maps to an id the request also gives"
-        }) }
+        DeleteOutcome { name: s.name, id: s.id, error: INVALID_REQUEST, message: Some("an entry names a topic by name or by id, not both, and only once") }
     }
 }
 
-/// Entry `s`'s outcome once the controller applied its deletion of topic `id` (named `name` there): gone already
-/// (another request deleted it first), it is unknown as the entry named it, by name or by id.
+/// Entry `s`'s outcome as the controller applied it: the topic (`id`, named `name`) deleted; a name or an id no topic
+/// has; or a name whose topic another entry gives by id.
 fn delete_applied(s: DeleteTopicState, id: Bytes, name: String, error: i16) -> DeleteOutcome {
     if error == NONE {
         DeleteOutcome { name: Some(name), id: id, error: NONE, message: None }
-    } else if s.id == zero_uuid() {
-        DeleteOutcome { name: s.name, id: zero_uuid(), error: UNKNOWN_TOPIC_OR_PARTITION, message: Some("the topic does not exist") }
+    } else if error == DELETE_CLASH {
+        DeleteOutcome { name: s.name, id: s.id, error: INVALID_REQUEST, message: Some("the topic name maps to an id the request also gives") }
+    } else if error == UNKNOWN_TOPIC_OR_PARTITION {
+        DeleteOutcome { name: s.name, id: zero_uuid(), error: error, message: Some("the topic does not exist") }
     } else {
-        DeleteOutcome { name: None, id: id, error: UNKNOWN_TOPIC_ID, message: Some("the topic id does not exist") }
+        DeleteOutcome { name: None, id: s.id, error: UNKNOWN_TOPIC_ID, message: Some("the topic id does not exist") }
     }
 }
 
-/// Marks a name entry whose topic another entry names by id (not a Kafka error code: `delete_refused` maps it).
+/// Marks a name entry whose topic another entry names by id (not a Kafka error code: `delete_applied` maps it).
 const DELETE_CLASH: i16 = -2;
 
 fn encode_delete_outcome(o: DeleteOutcome) -> Bytes {

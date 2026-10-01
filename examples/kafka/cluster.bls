@@ -6,7 +6,7 @@
 //! `CMD_RESEND` until it sees the command applied: a command reaches the log at least once, and is applied once,
 //! since applying skips a command whose (origin, tag) is already applied. Every broker applies the committed
 //! commands in log order, one per tick, so every broker decides the same outcomes (a name already taken, an id that
-//! is gone) and holds the same metadata. The applied metadata is volatile: a restarted broker applies the log again.
+//! is gone) and holds the same metadata. The applied metadata is durable, with the index applied.
 //!
 //! Each topic partition is a group of its own, whose members are its replica set. A partition leader announces the
 //! groups it leads, with their epochs, to every broker at each heartbeat (D7), so any broker can answer Metadata.
@@ -20,11 +20,14 @@ fn controller() -> Group {
 const OP_CREATE: i8 = 1;
 const OP_DELETE: i8 = 2;
 const OP_PIDS: i8 = 3;
+/// A creation that only validates: decided as a creation is, against the metadata when applied, with no effect.
+const OP_VALIDATE: i8 = 4;
 
 /// One topic of a command: for a creation, the error the broker found after the checks that come before a taken name
 /// (the partition count, the replication factor, ...; it applies only if the name is not taken), the topic's name,
-/// id, replica assignment (one replica list per partition) and configurations; for a deletion, the topic id alone.
-/// `slot` is the topic's entry in its request, which names its outcome.
+/// id, replica assignment (one replica list per partition) and configurations; for a deletion, the topic's name or
+/// its id (the other empty), resolved when the command is applied. `slot` is the topic's entry in its request, which
+/// names its outcome.
 struct Item { slot: u64, err: i16, name: String, id: Bytes, assignment: Vec<Vec<i32>>, configs: Vec<(String, String)> }
 
 /// A command to the controller. `origin` and `tag` name the request that asked for it (the origin broker's id, and
@@ -37,12 +40,16 @@ fn create_item(slot: u64, err: i16, name: String, id: Bytes, assignment: Vec<Vec
     Item { slot: slot, err: err, name: name, id: id, assignment: assignment, configs: configs }
 }
 
-fn delete_item(slot: u64, id: Bytes) -> Item {
-    Item { slot: slot, err: NONE, name: "", id: id, assignment: [], configs: [] }
+fn delete_item(slot: u64, name: String, id: Bytes) -> Item {
+    Item { slot: slot, err: NONE, name: name, id: id, assignment: [], configs: [] }
 }
 
 fn create_cmd(origin: i32, tag: u64, items: Vec<Item>) -> Cmd {
     Cmd { op: OP_CREATE, origin: origin, tag: tag, items: items }
+}
+
+fn validate_cmd(origin: i32, tag: u64, items: Vec<Item>) -> Cmd {
+    Cmd { op: OP_VALIDATE, origin: origin, tag: tag, items: items }
 }
 
 fn delete_cmd(origin: i32, tag: u64, items: Vec<Item>) -> Cmd {
@@ -151,12 +158,13 @@ fn decode_cmd(b: Bytes) -> Option<Cmd> {
     })))
 }
 
-/// The creations a Metadata request on connection `c` (its `i`th request) asks for, one per name: ids and placements
-/// that are functions of the request, so the command sent again is the same command.
-fn metadata_items(c: Conn, i: u64, names: Vec<String>, ids: Vec<i32>, partitions: i32, rf: i16) -> Vec<Item> {
+/// The creations a Metadata request on broker `me`'s connection `c` (its `i`th request) asks for, one per name: ids
+/// and placements that are functions of the request, so the command sent again is the same command. A connection id
+/// is unique on its broker only, so the broker is part of the id.
+fn metadata_items(me: i32, c: Conn, i: u64, names: Vec<String>, ids: Vec<i32>, partitions: i32, rf: i16) -> Vec<Item> {
     names.enumerate().map(|x| create_item(x.0, NONE, x.1,
-        topic_id(hash64(("id", c, i, x.1, 0u64)), hash64(("id", c, i, x.1, 1u64))),
-        assign(ids, partitions, rf, hash64(("start", c, i, x.1))), []))
+        topic_id(hash64(("id", me, c, i, x.1, 0u64)), hash64(("id", me, c, i, x.1, 1u64))),
+        assign(ids, partitions, rf, hash64(("start", me, c, i, x.1))), []))
 }
 
 /// The bytes of a stored entry (a blob only ever holds its whole bytes).
@@ -199,38 +207,40 @@ at Broker {
         massign(tid, p, rs), broker(n, id, _, _), let g = (tid, p) where rs.first() == Some(id);
     }
 
-    // ---- the applied metadata (volatile: a restarted broker applies the controller's log again)
+    // ---- the applied metadata, durable with the index applied (as a Kafka broker keeps its metadata log and
+    // snapshot): a restarted broker resumes from what it applied, and never answers from an older state
 
     /// The highest controller entry applied.
-    table applied_m(i: u64) key() resolve choose_most(i);
+    durable table applied_m(i: u64) key() resolve choose_most(i);
     /// The topics, by name: id, partition count, the configurations given at creation.
-    table mtopic(name: String, id: Bytes, partitions: i32, configs: Vec<(String, String)>) key(name);
+    durable table mtopic(name: String, id: Bytes, partitions: i32, configs: Vec<(String, String)>) key(name);
     /// Each partition's replicas, by broker id; the first is the preferred leader.
-    table massign(tid: Bytes, part: i32, replicas: Vec<i32>) key(tid, part);
+    durable table massign(tid: Bytes, part: i32, replicas: Vec<i32>) key(tid, part);
     /// The ids of the topics deleted: their partitions' data goes.
-    table mdeleted(tid: Bytes) key(tid);
+    durable table mdeleted(tid: Bytes) key(tid);
     /// The commands applied, by request.
-    table done(origin: i32, tag: u64) key(origin, tag);
+    durable table done(origin: i32, tag: u64) key(origin, tag);
     /// Each applied item's outcome, by its request and entry: the error (NONE when it took effect), the topic id and
     /// name (a creation's, or the deleted topic's), or the allocated producer id (a producer-id allocation's, slot 0).
-    table outcome(origin: i32, tag: u64, slot: u64, error: i16, id: Bytes, pid: i64, name: String) key(origin, tag, slot);
+    durable table outcome(origin: i32, tag: u64, slot: u64, error: i16, id: Bytes, pid: i64, name: String) key(origin, tag, slot);
     /// The next producer id.
-    table next_pid(n: i64) key() resolve choose_most(n);
+    durable table next_pid(n: i64) key() resolve choose_most(n);
 
-    bootstrap {
+    bootstrap fresh {
         emit applied_m(0);
         emit next_pid(PID_START);
     }
 
     view topic_keys(k, name) = mtopic(name, _, _, _), let k = collision_key(name);
 
-    /// Whether this broker's metadata is current: once it has applied the controller's log up to a commit index it
-    /// learned in this incarnation. Until then (after a restart, while it replays the log) its requests other than
-    /// ApiVersions wait, as Kafka keeps a broker fenced until it has caught up with the metadata. It is a latch: once
-    /// caught up, a broker answers from what it has applied, as a Kafka broker answers from its metadata cache (a
-    /// request is not held back each time the controller commits ahead of what this broker applied).
+    /// Whether this broker's metadata is current: once it has applied the controller's log up to the commit index
+    /// its leader announced in this incarnation (or its own, leading). Until then (a new broker, or one that was down
+    /// while the controller moved on) its requests other than ApiVersions wait, as Kafka keeps a broker fenced until
+    /// it has caught up with the controller's high watermark. It is a latch: once caught up, a broker answers from
+    /// what it has applied, as a Kafka broker answers from its metadata cache (a request is not held back each time
+    /// the controller commits ahead of what this broker applied).
     table synced(at: u64) key();
-    latch_synced: while applied_m(a), commit(g, c), let g = controller(), not synced(_) where a >= c {
+    latch_synced: while applied_m(a), known_commit(g, c), let g = controller(), not synced(_) where a >= c {
         upsert synced(a);
     }
     view caught_up() = synced(_);
@@ -255,9 +265,12 @@ at Broker {
         fresh(op, origin, tag, items), it in items, let slot = it.slot, let err = it.err, let name = it.name,
         let id = it.id, let asg = it.assignment, let cfg = it.configs;
 
-    /// A creation: refused for a name taken (by that name, or one colliding with it), else as the broker decided.
+    /// A creation (or a validation): refused for a name taken (by that name, or one colliding with it), else as the
+    /// broker decided. Only a creation takes effect.
     view cmd_create(origin, tag, slot, err, name, id, asg, cfg, k) =
-        fresh_item(op, origin, tag, slot, err, name, id, asg, cfg), let k = collision_key(name) where op == OP_CREATE;
+        fresh_item(op, origin, tag, slot, err, name, id, asg, cfg), let k = collision_key(name)
+        where op == OP_CREATE || op == OP_VALIDATE;
+    view cmd_creates(origin, tag) = fresh(op, origin, tag, _) where op == OP_CREATE;
     apply_create: while cmd_create(origin, tag, slot, err, name, id, asg, cfg, k) {
         if mtopic(name, _, _, _) {
             upsert outcome(origin, tag, slot, TOPIC_ALREADY_EXISTS, zero_uuid(), -1i64, name);
@@ -269,28 +282,46 @@ at Broker {
             upsert outcome(origin, tag, slot, err, zero_uuid(), -1i64, name);
         }
         if not mtopic(name, _, _, _), not topic_keys(k, _) where err == NONE {
-            upsert mtopic(name, id, asg.len() as i32, cfg);
             upsert outcome(origin, tag, slot, NONE, id, -1i64, name);
         }
+        if not mtopic(name, _, _, _), not topic_keys(k, _), cmd_creates(origin, tag) where err == NONE {
+            upsert mtopic(name, id, asg.len() as i32, cfg);
+        }
     }
-    apply_assign: while cmd_create(_, _, _, err, name, id, asg, _, k), not mtopic(name, _, _, _), not topic_keys(k, _),
-        (p, rs) in asg.enumerate() where err == NONE {
+    apply_assign: while cmd_create(origin, tag, _, err, name, id, asg, _, k), cmd_creates(origin, tag),
+        not mtopic(name, _, _, _), not topic_keys(k, _), (p, rs) in asg.enumerate() where err == NONE {
         upsert massign(id, p as i32, rs);
     }
 
-    view cmd_delete(origin, tag, slot, id) = fresh_item(op, origin, tag, slot, _, _, id, _, _) where op == OP_DELETE;
-    apply_delete: while cmd_delete(origin, tag, slot, id) {
-        if mtopic(name, id, parts, cfg) {
-            delete mtopic(name, id, parts, cfg);
-            upsert mdeleted(id);
-            upsert outcome(origin, tag, slot, NONE, id, -1i64, name);
+    /// A deletion's items, resolved against the metadata before the command: an item by id deletes that topic; an
+    /// item by name deletes the topic of that name, unless another item of the request names the same topic by id
+    /// (Kafka refuses such a name: DELETE_CLASH). Well-formed requests name each topic once each way, so no topic is
+    /// deleted twice.
+    view cmd_delete_item(origin, tag, slot, name, id) = fresh_item(op, origin, tag, slot, _, name, id, _, _) where op == OP_DELETE;
+    view cmd_delete_ids(origin, tag, id) = cmd_delete_item(origin, tag, _, _, id) where id != zero_uuid();
+    view cmd_delete(origin, tag, slot, tid) {
+        cmd_delete_item(origin, tag, slot, _name, tid), mtopic(_n, tid, _, _) where tid != zero_uuid();
+        cmd_delete_item(origin, tag, slot, name, id), mtopic(name, tid, _, _), not cmd_delete_ids(origin, tag, tid)
+            where id == zero_uuid();
+    }
+    apply_delete: while cmd_delete_item(origin, tag, slot, name, id) {
+        if cmd_delete(origin, tag, slot, tid), mtopic(n, tid, parts, cfg) {
+            delete mtopic(n, tid, parts, cfg);
+            upsert mdeleted(tid);
+            upsert outcome(origin, tag, slot, NONE, tid, -1i64, n);
         }
-        if not mtopic(_, id, _, _) {
+        if not mtopic(_, id, _, _) where id != zero_uuid() {
             upsert outcome(origin, tag, slot, UNKNOWN_TOPIC_ID, id, -1i64, "");
         }
+        if not mtopic(name, _, _, _) where id == zero_uuid() {
+            upsert outcome(origin, tag, slot, UNKNOWN_TOPIC_OR_PARTITION, zero_uuid(), -1i64, name);
+        }
+        if mtopic(name, tid, _, _), cmd_delete_ids(origin, tag, tid) where id == zero_uuid() {
+            upsert outcome(origin, tag, slot, DELETE_CLASH, zero_uuid(), -1i64, name);
+        }
     }
-    apply_unassign: while cmd_delete(_, _, _, id), massign(id, p, rs) {
-        delete massign(id, p, rs);
+    apply_unassign: while cmd_delete(_, _, _, tid), massign(tid, p, rs) {
+        delete massign(tid, p, rs);
     }
     apply_pids: while fresh(op, origin, tag, _), next_pid(n) where op == OP_PIDS {
         upsert outcome(origin, tag, 0u64, NONE, zero_uuid(), n, "");
