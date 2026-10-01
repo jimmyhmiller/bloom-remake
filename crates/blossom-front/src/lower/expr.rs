@@ -24,6 +24,8 @@ pub(crate) struct Draft {
     pub vars: Vec<(Symbol, TypeId)>,
     pub lits: Vec<Literal>,
     pub map: BTreeMap<HVarId, VarId>,
+    /// Variables whose type in this rule is not their scope's: inside a handler block, what its condition refines.
+    pub refined: BTreeMap<HVarId, TypeId>,
     names: BTreeSet<Symbol>,
     fresh: u32,
 }
@@ -35,8 +37,17 @@ impl Draft {
             vars: Vec::new(),
             lits: Vec::new(),
             map: BTreeMap::new(),
+            refined: BTreeMap::new(),
             names: BTreeSet::new(),
             fresh: 0,
+        }
+    }
+
+    /// A draft for a rule inside handler blocks, whose variables `refined` have those types.
+    pub fn refined(scope: ScopeId, refined: BTreeMap<HVarId, TypeId>) -> Draft {
+        Draft {
+            refined,
+            ..Draft::new(scope)
         }
     }
 
@@ -70,12 +81,15 @@ impl Draft {
             .get(v.index())
             .map(|x| x.name)
             .ok_or_else(|| internal_error!("variable {v:?} is not in its scope"))?;
-        let ty = hir
-            .var_types
-            .get(self.scope.index())
-            .and_then(|t| t.get(v.index()))
-            .copied()
-            .ok_or_else(|| internal_error!("variable {} has no type", name.as_str()))?;
+        let ty = match self.refined.get(&v) {
+            Some(ty) => *ty,
+            None => hir
+                .var_types
+                .get(self.scope.index())
+                .and_then(|t| t.get(v.index()))
+                .copied()
+                .ok_or_else(|| internal_error!("variable {} has no type", name.as_str()))?,
+        };
         let id = self.declare(name, ty);
         self.map.insert(v, id);
         Ok(id)
@@ -337,21 +351,30 @@ impl Lowerer<'_> {
                         args: vec![self.expr(d, lhs)?, self.expr(d, rhs)?],
                     });
                 }
-                // `<` on values other than scalars of one kind is the canonical order (LANGUAGE §5.5).
+                // `<` on values other than scalars of one kind is the canonical order (LANGUAGE §5.5). It is total,
+                // so `a > b` is `!(a <= b)`: the operands keep their order, and so does their evaluation.
                 if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
                     && !scalar_ordered(self.hir.types.get(ty_of(lhs)?))
                 {
-                    let (l, r) = (self.expr(d, lhs)?, self.expr(d, rhs)?);
-                    let (op, lhs, rhs) = match op {
-                        BinOp::Lt => (ir::BinOp::CanonLt, l, r),
-                        BinOp::Le => (ir::BinOp::CanonLe, l, r),
-                        BinOp::Gt => (ir::BinOp::CanonLt, r, l),
-                        _ => (ir::BinOp::CanonLe, r, l),
+                    let (l, r) = (Box::new(self.expr(d, lhs)?), Box::new(self.expr(d, rhs)?));
+                    let (canon, negated) = match op {
+                        BinOp::Lt => (ir::BinOp::CanonLt, false),
+                        BinOp::Le => (ir::BinOp::CanonLe, false),
+                        BinOp::Gt => (ir::BinOp::CanonLe, true),
+                        _ => (ir::BinOp::CanonLt, true),
                     };
-                    return Ok(Expr::Binary {
-                        op,
-                        lhs: Box::new(lhs),
-                        rhs: Box::new(rhs),
+                    let cmp = Expr::Binary {
+                        op: canon,
+                        lhs: l,
+                        rhs: r,
+                    };
+                    return Ok(if negated {
+                        Expr::Unary {
+                            op: ir::UnOp::Not,
+                            arg: Box::new(cmp),
+                        }
+                    } else {
+                        cmp
                     });
                 }
                 Expr::Binary {
@@ -494,16 +517,20 @@ impl Lowerer<'_> {
             HExprKind::Collection { kind, elems } => {
                 let mut xs = Vec::new();
                 if *kind == CollectionKind::Map {
-                    // The IR's map literal holds (key, value) pairs.
+                    // The IR's map literal holds (key, value) pairs, each typed as the map's entry (a key or value
+                    // may be narrower in its roles than the map's, as `self` is).
+                    let Some(TypeDef::Map(kt, vt)) = self.b.types().get(ty_of(e)?).cloned() else {
+                        return Err(internal_error!("a map literal whose type is not a map"));
+                    };
+                    let ty = self
+                        .b
+                        .types()
+                        .insert(TypeDef::Tuple(vec![kt, vt]))
+                        .map_err(|e| internal_error!("interning a type: {e}"))?;
                     for pair in elems.chunks(2) {
                         let [k, v] = pair else {
                             return Err(internal_error!("a map literal with a dangling key"));
                         };
-                        let ty = self
-                            .b
-                            .types()
-                            .insert(TypeDef::Tuple(vec![ty_of(k)?, ty_of(v)?]))
-                            .map_err(|e| internal_error!("interning a type: {e}"))?;
                         xs.push(Expr::Construct {
                             ty,
                             variant: None,

@@ -34,6 +34,8 @@ pub struct NodeStream {
     pub failed: Option<RelId>,
     pub write: RelId,
     pub close: RelId,
+    pub pause: RelId,
+    pub resume: RelId,
     pub dial: Option<RelId>,
 }
 
@@ -55,6 +57,8 @@ pub fn node_streams(program: &Program, role: Option<RoleId>) -> Vec<NodeStream> 
             failed: s.failed,
             write: s.write,
             close: s.close,
+            pause: s.pause,
+            resume: s.resume,
             dial: s.dial,
         })
         .collect()
@@ -343,6 +347,12 @@ pub enum HostRequest {
         stream: usize,
         conn: ConnId,
     },
+    /// Stop reading `conn` (`paused`), or read it again, through the node's stream `stream`.
+    Pause {
+        stream: usize,
+        conn: ConnId,
+        paused: bool,
+    },
     /// A write the host must refuse, a located runtime error of the program (a blob range outside the blob): the
     /// connection closes and its `closed` event carries `why`, as for a bad `seq`.
     Refused {
@@ -366,12 +376,18 @@ pub fn host_request(
     let (i, st) = streams
         .iter()
         .enumerate()
-        .find(|(_, s)| s.write == h.rel || s.close == h.rel || s.dial == Some(h.rel))
+        .find(|(_, s)| {
+            s.write == h.rel || s.close == h.rel || s.pause == h.rel || s.resume == h.rel || s.dial == Some(h.rel)
+        })
         .ok_or_else(|| internal_error!("a host request {:?} of no stream of this node", h.rel))?;
     let op = if st.write == h.rel {
         HostOp::Write
     } else if st.close == h.rel {
         HostOp::Close
+    } else if st.pause == h.rel {
+        HostOp::Pause
+    } else if st.resume == h.rel {
+        HostOp::Resume
     } else {
         HostOp::Dial
     };
@@ -430,6 +446,16 @@ pub fn host_request(
             };
             HostRequest::Close { stream: i, conn: *conn }
         }
+        HostOp::Pause | HostOp::Resume => {
+            let [Value::Conn(conn)] = &*h.row else {
+                return Err(bad().into());
+            };
+            HostRequest::Pause {
+                stream: i,
+                conn: *conn,
+                paused: op == HostOp::Pause,
+            }
+        }
         HostOp::Dial => {
             let [Value::Int(IntValue::U64(req)), Value::Str(addr)] = &*h.row else {
                 return Err(bad().into());
@@ -457,6 +483,8 @@ mod tests {
             failed: None,
             write: RelId::from_raw(3),
             close: RelId::from_raw(4),
+            pause: RelId::from_raw(5),
+            resume: RelId::from_raw(6),
             dial: None,
         }
     }

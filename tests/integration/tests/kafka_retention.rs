@@ -2,10 +2,11 @@
 //!
 //! A scripted client (requests encoded and answers decoded by `kafka-protocol`) creates two topics with small
 //! segments: one kept by time (`retention.ms`), one by size (`retention.bytes`), and produces batches to each. Then:
-//! - by time: once every batch is older than `retention.ms`, the log start is the active segment's first offset
-//!   (Kafka never deletes the active segment);
+//! - by time: once every batch is older than `retention.ms`, everything is deleted, the active segment too, and the
+//!   log start is the log end (Kafka's `deleteOldSegments` rolls a new active segment there);
 //! - by size: the log start is where an independent model of Kafka's rule puts it (whole segments from the front,
-//!   while the log still holds `retention.bytes` without them), with segments rolled at `segment.bytes`;
+//!   the last too unless it is empty, while the log still holds `retention.bytes` without them), with segments rolled
+//!   at `segment.bytes`;
 //! - a Fetch below the log start is OFFSET_OUT_OF_RANGE, and one from it reads the rest byte for byte;
 //! - the broker's rows hold nothing below the log start: no batch, chunk, time index or segment row.
 
@@ -85,6 +86,12 @@ fn batch(tag: &str, n: usize, ts_ms: i64) -> Vec<u8> {
     buf.to_vec()
 }
 
+/// How many offsets a batch takes: `lastOffsetDelta + 1`.
+#[cfg(test)]
+fn offsets_of(b: &[u8]) -> i64 {
+    i64::from(i32::from_be_bytes([b[23], b[24], b[25], b[26]])) + 1
+}
+
 #[cfg(test)]
 fn stamped(b: &[u8], base: i64) -> Vec<u8> {
     let mut out = b.to_vec();
@@ -128,19 +135,19 @@ fn segments(sizes: &[i64]) -> Vec<(usize, i64)> {
     out
 }
 
-/// Kafka's size retention: whole segments from the front (never the last, active one) while the log still holds
-/// `RETENTION_BYTES` without them; the first batch kept.
+/// Kafka's size retention: whole segments from the front (the last too, unless it is empty) while the log still holds
+/// `RETENTION_BYTES` without them; the first batch kept (the batch count if every one is deleted).
 #[cfg(test)]
 fn size_start(sizes: &[i64]) -> usize {
     let segs = segments(sizes);
     let mut total: i64 = sizes.iter().sum();
     let mut first = 0;
     for (k, (_, bytes)) in segs.iter().enumerate() {
-        if k + 1 == segs.len() || total - bytes < RETENTION_BYTES {
+        if (k + 1 == segs.len() && *bytes == 0) || total - bytes < RETENTION_BYTES {
             break;
         }
         total -= bytes;
-        first = segs[k + 1].0;
+        first = segs.get(k + 1).map(|s| s.0).unwrap_or(sizes.len());
     }
     first
 }
@@ -478,13 +485,11 @@ fn retention_deletes_whole_segments_from_the_front() {
         for (t, name) in TOPICS.iter().enumerate() {
             let sizes: Vec<i64> = o.batches[t].iter().map(|b| b.1.len() as i64).collect();
             let segs = segments(&sizes);
-            // By time, every batch expired: only the active (last) segment is left. By size, the model's start.
-            let first = if t == 0 {
-                segs.last().unwrap().0
-            } else {
-                size_start(&sizes)
-            };
-            let start = o.batches[t][first].0;
+            // By time, every batch expired: everything is deleted, the active segment too (a new one is rolled at
+            // the log end), as Kafka deletes it. By size, the model's start.
+            let first = if t == 0 { sizes.len() } else { size_start(&sizes) };
+            let end = o.batches[t].last().map(|(b, bytes)| b + offsets_of(bytes)).unwrap();
+            let start = o.batches[t].get(first).map(|b| b.0).unwrap_or(end);
             assert!(segs.len() > 2, "seed {seed}: only {} segments", segs.len());
             assert_eq!(o.earliest[t], Some(start), "seed {seed}: {}'s log start", name);
             assert_eq!(o.below[t], Some(1), "seed {seed}: {}'s fetch below the start", name);

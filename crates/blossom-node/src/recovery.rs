@@ -227,8 +227,26 @@ pub fn open(
         last_now = last_now.max(rec.now);
         replayed += 1;
     }
-    // The blobs the recovered rows hold were made durable before their records synced.
+    // The blobs the recovered rows hold were made durable before their records synced: check it, so a store that
+    // lost one refuses to start rather than failing a later tick that reads it.
     let blobs = Arc::new(blossom_store::BlobStore::open(fs.clone(), dir)?);
+    let mut referenced = std::collections::BTreeSet::new();
+    for rows in image.rows.values() {
+        for r in rows {
+            for v in r.iter() {
+                blossom_value::blobs_in(v, &mut referenced);
+            }
+        }
+    }
+    // Every blob the store holds is durable; those no recovered row holds (a crash between a blob's write and its
+    // record's sync, or rows a replayed record deleted) are the node's first candidates for collection.
+    let stored: std::collections::BTreeSet<blossom_value::BlobRef> = blobs.list()?.into_iter().collect();
+    if let Some(missing) = referenced.iter().find(|b| !stored.contains(b)) {
+        return Err(NodeError::Store(format!(
+            "a recovered row holds blob {}, which the blob store does not have",
+            missing.hex()
+        )));
+    }
     // 4. Reserve ticks.
     let boot_tick = if record.restarts == 0 {
         0
@@ -293,6 +311,7 @@ pub fn open(
             recovered: checkpoint.is_some() || replayed > 0,
             incarnation: record.restarts,
             blobs: blobs.clone(),
+            stored,
             at_checkpoint: checkpoint.is_some() && replayed == 0,
         },
         wal,

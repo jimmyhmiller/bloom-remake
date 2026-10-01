@@ -317,8 +317,34 @@ impl CheckpointWriter for FileCheckpoints {
         Ok(id)
     }
     fn install(&mut self, id: CheckpointId) -> Result<TruncateToken, StoreError> {
-        self.read(id)?;
-        self.read_layers(id)?;
+        // Verified before it becomes current, in proportion to what was written: a full image is read whole; a delta
+        // layer's base and earlier layers were verified when they were installed, so only its manifest, its base's
+        // manifest and its own layer are (so a checkpoint's cost follows the change, FOREIGN-PROTOCOLS §6).
+        let m = self.manifest(id)?;
+        match m.base {
+            None => {
+                self.read(id)?;
+            }
+            Some(base) => {
+                self.manifest_at(base)?;
+                let (tick, digest, _) = m
+                    .layers
+                    .last()
+                    .ok_or_else(|| invalid("a checkpoint built on a base has no delta layer"))?;
+                if *tick != id.tick {
+                    return Err(invalid("a delta layer's manifest does not end with its own layer"));
+                }
+                let path = self.path(*tick).join("delta.dat");
+                let body = read_path(&*self.fs, &path)?;
+                if blake3::hash(&body).as_bytes() != digest {
+                    return Err(StoreError::Corruption {
+                        path,
+                        offset: 0,
+                        reason: "delta layer checksum".into(),
+                    });
+                }
+            }
+        }
         if self
             .current()?
             .is_some_and(|current| current.tick > id.tick || current.lsn > id.lsn)

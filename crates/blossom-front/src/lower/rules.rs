@@ -814,27 +814,33 @@ impl<'h> Lowerer<'h> {
         // Statements that share verb and target get a hash suffix (LANGUAGE §4.3).
         let mut counts: BTreeMap<(Verb, HRelId), u32> = BTreeMap::new();
         count_targets(&h.stmts, &mut counts);
-        self.stmts(&h.stmts, h.scope, (when, vars), &mut names, &counts)
+        self.stmts(&h.stmts, h.scope, (when, vars), &BTreeMap::new(), &mut names, &counts)
     }
 
+    /// A handler's statements under `parent` (its header's or enclosing block's relation), whose variables `refined`
+    /// have those types there.
     fn stmts(
         &mut self,
         stmts: &'h [HStmt],
         scope: ScopeId,
         parent: (RelId, Vec<HVarId>),
+        refined: &BTreeMap<HVarId, TypeId>,
         names: &mut Names,
         counts: &BTreeMap<(Verb, HRelId), u32>,
     ) -> Result<(), InternalError> {
         for s in stmts {
             match s {
-                HStmt::Verb(v) => self.verb(v, scope, &parent, names, counts)?,
+                HStmt::Verb(v) => self.verb(v, scope, &parent, refined, names, counts)?,
                 HStmt::Block {
                     kind,
                     cond,
                     stmts: inner,
                     text,
                     span,
+                    refined: here,
                 } => {
+                    let mut inside = refined.clone();
+                    inside.extend(here.iter().copied());
                     let word = match kind {
                         BlockKind::If | BlockKind::Else => "if",
                         BlockKind::For => "for",
@@ -850,7 +856,11 @@ impl<'h> Lowerer<'h> {
                         .iter()
                         .map(|v| {
                             let name = self.hir.var(scope, *v)?.name;
-                            Ok(column(name, self.var_ty(scope, *v)?, false))
+                            let ty = match inside.get(v) {
+                                Some(ty) => *ty,
+                                None => self.var_ty(scope, *v)?,
+                            };
+                            Ok(column(name, ty, false))
                         })
                         .collect::<Result<_, InternalError>>()?;
                     let module = names.module.clone();
@@ -872,7 +882,7 @@ impl<'h> Lowerer<'h> {
                         vars: parent.1.clone(),
                         span: *span,
                     }];
-                    let seed = self.given(vec![Draft::new(scope)], &given, names)?;
+                    let seed = self.given(vec![Draft::refined(scope, inside.clone())], &given, names)?;
                     for d in self.body(seed, cond, &given, names)? {
                         let mut d = d;
                         let args = self.var_terms(&mut d, &vars)?;
@@ -891,7 +901,7 @@ impl<'h> Lowerer<'h> {
                         )?;
                     }
                     self.b.end_construct(construct).map_err(ir)?;
-                    self.stmts(inner, scope, (rel, vars), names, counts)?;
+                    self.stmts(inner, scope, (rel, vars), &inside, names, counts)?;
                 }
             }
         }
@@ -904,6 +914,7 @@ impl<'h> Lowerer<'h> {
         v: &'h HVerbStmt,
         scope: ScopeId,
         parent: &(RelId, Vec<HVarId>),
+        refined: &BTreeMap<HVarId, TypeId>,
         names: &mut Names,
         counts: &BTreeMap<(Verb, HRelId), u32>,
     ) -> Result<(), InternalError> {
@@ -915,7 +926,7 @@ impl<'h> Lowerer<'h> {
             text.push_str(&stable_hash_hex8(v.text.as_bytes()));
         }
         let label = self.label(text);
-        let mut d = Draft::new(scope);
+        let mut d = Draft::refined(scope, refined.clone());
         let pargs = self.var_terms(&mut d, &parent.1)?;
         d.lits.push(Literal::Pos(ir_atom(parent.0, pargs, v.span)));
         // Head columns, in IR order.

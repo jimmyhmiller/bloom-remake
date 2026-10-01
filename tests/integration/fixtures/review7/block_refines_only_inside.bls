@@ -1,0 +1,13 @@
+//! S7 review: a handler block's condition refined a variable for the whole handler, so a send outside the block to a
+//! node the condition checked only inside it type-checked.
+program block_refines_only_inside version 1;
+role A: process;
+channel ping(k: u64): A -> A;
+at A {
+    table a_peer(n: Node<A>);
+    input poke(n: Node, k: u64);
+    on poke(n, k) {
+        if a_peer(n) { send ping(k) to n; }
+        send ping(k) to n;
+    }
+}

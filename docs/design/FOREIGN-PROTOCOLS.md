@@ -30,6 +30,7 @@ A stream declaration introduces:
 | `kafka.closed(c: Conn, reason: String)` | event | the peer closed, a read or write failed, or the program closed `c` |
 | `send kafka.write(c: Conn, seq: u64, parts: Vec<Part>)` | channel to the host | bytes to send on `c`; the runtime writes in `seq` order per connection |
 | `send kafka.close(c: Conn)` | channel to the host | close `c` after the writes already sent |
+| `send kafka.pause(c: Conn)`, `send kafka.resume(c: Conn)` | channel to the host | stop reading `c`, and read it again (§1.2, backpressure) |
 | `send upstream.dial(req: u64, addr: String)` | channel to the host | `connect` streams only: open a connection; it is reported as `upstream.opened` or `upstream.failed(req, reason)` |
 
 - `Conn` is a built-in opaque type, like `Session`. It is unique across incarnations: it carries the incarnation, so a
@@ -64,7 +65,12 @@ A stream declaration introduces:
   - all readers stop while `queue_bytes` wait for the engine [64 MiB];
   - the engine takes no stream bytes while the node holds `backlog_bytes` it has not delivered [16 MiB];
   - a connection whose unsent writes (held writes included) pass `write_queue_bytes` is closed, with a counter
-    [64 MiB].
+    [64 MiB];
+  - a program bounds what it holds itself with `pause(c)`: the host stops reading `c`, so the peer's sends wait in
+    its TCP window, until `resume(c)`. The chunks already read (at most `read_ahead_bytes`, and what the engine
+    took this tick) still arrive; a peer's close or a reset is learned only when the connection is read again. A
+    tick that both pauses and resumes a connection reads it. Like writes, pauses and resumes take effect when their
+    tick is released. (Kafka's broker does the same: it mutes a connection while a request of it is in flight.)
   Stream reports reach the engine on their own queue, so stream bytes never hold up peers' messages or clients'
   requests.
 - **Requests through the wrong stream.** A write or close through stream `s` of a connection of another stream is

@@ -658,7 +658,7 @@ pub static REGISTRY: &[CodeInfo] = &[
         "blossom-front",
         &[],
         CodeOrigin::Language,
-        "a `default` with grouping columns but no `per` driver, or a driver that does not determine the group",
+        "a `default` with grouping columns but no `per` driver, a driver that does not determine the group, or, with a driver, an aggregate with no identity (`min!`, `max!`, `index!`) and no `default`",
     ),
     info(
         "BLS0600",

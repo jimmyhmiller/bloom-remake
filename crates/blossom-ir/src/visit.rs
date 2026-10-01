@@ -431,6 +431,8 @@ impl Remap for StreamDecl {
             failed: self.failed.remap(m),
             write: self.write.remap(m),
             close: self.close.remap(m),
+            pause: self.pause.remap(m),
+            resume: self.resume.remap(m),
             dial: self.dial.remap(m),
         }
     }

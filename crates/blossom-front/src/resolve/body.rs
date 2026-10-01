@@ -2386,6 +2386,7 @@ impl<'t> Resolver<'t, '_> {
                         stmts: inner,
                         text: self.normalized(cond.span),
                         span: *span,
+                        refined: Vec::new(),
                     });
                 }
                 Stmt::If {
@@ -2428,6 +2429,7 @@ impl<'t> Resolver<'t, '_> {
             stmts: inner,
             text: text.clone(),
             span,
+            refined: Vec::new(),
         });
         let (Some(g), Some(els)) = (guard, els) else { return };
         let negated = HBody {
@@ -2456,6 +2458,7 @@ impl<'t> Resolver<'t, '_> {
             stmts,
             text: format!("not ({text})"),
             span,
+            refined: Vec::new(),
         });
     }
 
@@ -3042,6 +3045,34 @@ impl<'t> Resolver<'t, '_> {
             if drivers > 1 {
                 self.error(code!("BLS0511"), v.span, "a view has at most one `per` driver");
                 return;
+            }
+            // A driver's group may be empty: an aggregate with no identity for it needs a `default` (§10.2).
+            if driver.is_some() {
+                let mut missing = false;
+                for c in &cols {
+                    if let HViewAggCol::Agg(a) = c
+                        && a.default.is_none()
+                        && !matches!(a.func, AggKind::Count | AggKind::Sum | AggKind::Collect)
+                    {
+                        let name = match a.func {
+                            AggKind::Min => "min!",
+                            AggKind::Max => "max!",
+                            _ => "index!",
+                        };
+                        self.error(
+                            code!("BLS0511"),
+                            a.span,
+                            format!(
+                                "with a `per` driver a group may be empty, and `{name}` has no value for it: write \
+                                 `default e` inside its parentheses"
+                            ),
+                        );
+                        missing = true;
+                    }
+                }
+                if missing {
+                    return;
+                }
             }
             HViewShape::Aggregate {
                 union: ucx.scope,

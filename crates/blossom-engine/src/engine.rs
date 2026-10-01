@@ -178,6 +178,34 @@ fn check_supported(p: &Program) -> Result<(), EvalError> {
     Ok(())
 }
 
+/// Whether a value of type `ty` can hold a blob (a lattice is assumed to, as its elements are not traced here).
+fn holds_blobs(p: &Program, ty: blossom_base::TypeId, depth: u32) -> bool {
+    use blossom_value::TypeDef as D;
+    // Types are acyclic; the depth guards a malformed table.
+    if depth > 64 {
+        return true;
+    }
+    match p.types.get(ty) {
+        Some(D::Blob | D::Lattice(_)) | None => true,
+        Some(D::Tuple(xs)) => xs.iter().any(|x| holds_blobs(p, *x, depth + 1)),
+        Some(D::Struct(s)) => s.fields.iter().any(|f| holds_blobs(p, f.ty, depth + 1)),
+        Some(D::Enum(e)) => e
+            .variants
+            .iter()
+            .any(|v| v.payload.iter().any(|f| holds_blobs(p, f.ty, depth + 1))),
+        Some(D::Vec(x) | D::Set(x) | D::Option(x)) => holds_blobs(p, *x, depth + 1),
+        Some(D::Map(k, v)) => holds_blobs(p, *k, depth + 1) || holds_blobs(p, *v, depth + 1),
+        Some(_) => false,
+    }
+}
+
+/// Whether rows of `rel` can hold blobs.
+fn rel_holds_blobs(p: &Program, rel: RelId) -> bool {
+    p.rels
+        .get(rel)
+        .is_none_or(|r| r.schema.cols.iter().any(|c| holds_blobs(p, c.ty, 0)))
+}
+
 fn cell_spec(p: &Program, kinds: &[Option<Kind>], rel: RelId, extra: usize) -> Result<Option<CellSpec>, EvalError> {
     let decl = p.rels.get(rel).ok_or_else(|| internal_error!("relation {rel:?} is not declared"))?;
     if decl.schema.lattice.is_empty() {
@@ -257,9 +285,10 @@ impl Engine {
         strata_list.retain(|s| !s.aggregates.is_empty() || !s.rules.is_empty());
         let mut stores: BTreeMap<StoreKey, Store> = BTreeMap::new();
         for (id, r) in p.rels.iter_enumerated() {
-            stores.insert(StoreKey::Main(id), Store::new(cell_spec(p, &kinds, id, 0)?));
+            let blobs = rel_holds_blobs(p, id);
+            stores.insert(StoreKey::Main(id), Store::new(cell_spec(p, &kinds, id, 0)?, blobs));
             if matches!(r.class, RelClass::Channel(_)) {
-                stores.insert(StoreKey::Sent(id), Store::new(cell_spec(p, &kinds, id, 1)?));
+                stores.insert(StoreKey::Sent(id), Store::new(cell_spec(p, &kinds, id, 1)?, blobs));
             }
         }
         for id in inductive.iter().chain(&asynchronous) {
@@ -267,7 +296,7 @@ impl Engine {
                 let rel = p.rules.get(*id).map(|r| r.head.rel).ok_or_else(|| internal_error!("rule {id:?}"))?;
                 stores
                     .entry(plan.head)
-                    .or_insert(Store::new(cell_spec(p, &kinds, rel, 0)?));
+                    .or_insert(Store::new(cell_spec(p, &kinds, rel, 0)?, rel_holds_blobs(p, rel)));
             }
         }
         let mut keyed = Vec::new();
@@ -360,7 +389,7 @@ impl Engine {
     /// sees the carried state, the facts and its inputs as new.
     pub fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
         for s in self.stores.values_mut() {
-            *s = Store::new(s.cell.clone());
+            *s = Store::new(s.cell.clone(), s.counts_blobs());
         }
         self.prev.clear();
         self.groups.clear();
@@ -1123,15 +1152,10 @@ impl Engine {
         })
     }
 
-    /// Every blob a row of any store holds: derived rows keep theirs across ticks without re-creating them.
-    pub fn blobs_referenced(&self) -> std::collections::BTreeSet<blossom_value::BlobRef> {
-        let mut out = std::collections::BTreeSet::new();
-        for s in self.stores.values() {
-            for r in s.present() {
-                r.iter().for_each(|v| blossom_value::blobs_in(v, &mut out));
-            }
-        }
-        out
+    /// Whether a row of any store holds `b`: derived rows keep their blobs across ticks without re-creating them.
+    /// Each store counts its rows' blobs as they change, so this is a lookup per store that can hold blobs.
+    pub fn holds_blob(&self, b: &blossom_value::BlobRef) -> bool {
+        self.stores.values().any(|s| s.holds_blob(b))
     }
 
     /// Rows the atom probes returned since the engine was created: the join work, measured without a clock.

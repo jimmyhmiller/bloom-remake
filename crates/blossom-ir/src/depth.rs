@@ -7,7 +7,8 @@
 //! A unit of depth is one expression node on the evaluation path: a node is one level deeper than its deepest
 //! operand; a call of a declared function is one level deeper than the function's body; a closure is one level
 //! deeper than its body, and a combinator one level deeper than its arguments, closures included, so a closure a
-//! combinator applies counts under it.
+//! combinator applies counts under it. A rule's evaluation is one level per body literal, plus its head, above the
+//! deepest of its literals' expressions.
 
 use blossom_base::{FnId, RelId, RuleId};
 
@@ -45,6 +46,9 @@ pub fn deepest(p: &Program) -> Option<(u32, DepthSite)> {
         consider(d, DepthSite::Fn(id), &mut best);
     }
     for (id, r) in p.rules.iter_enumerated() {
+        // Both evaluators recurse once per body literal (the oracle's search, the engine's join), in an order the
+        // planner picks: any literal's expression may be evaluated below all the others, and the head below them.
+        let lits = u32::try_from(r.body.lits.len()).unwrap_or(u32::MAX);
         let mut d = 0;
         for l in &r.body.lits {
             let here = match l {
@@ -58,7 +62,7 @@ pub fn deepest(p: &Program) -> Option<(u32, DepthSite)> {
             };
             d = d.max(here);
         }
-        consider(d, DepthSite::Rule(id), &mut best);
+        consider(lits.saturating_add(1).saturating_add(d), DepthSite::Rule(id), &mut best);
     }
     for (id, r) in p.rels.iter_enumerated() {
         let channel = match &r.class {

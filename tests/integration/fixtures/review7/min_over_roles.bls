@@ -1,0 +1,10 @@
+//! S7 review: `min!` unified its argument with the view column, so a view whose alternatives aggregate nodes of
+//! different roles was a type mismatch; each alternative's values flow into the column, which holds their join.
+program min_over_roles version 1;
+role A: process;
+role B: process;
+at A {
+    table a_node(n: Node<A>);
+    table b_node(n: Node<B>);
+    view least(m = min!(n)) { a_node(n); b_node(n); }
+}

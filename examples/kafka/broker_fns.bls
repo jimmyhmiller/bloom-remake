@@ -20,8 +20,7 @@ fn answer(req: Bytes) -> Option<Bytes> {
                 if key == API_VERSIONS {
                     decode_api_versions_request(body).map(|_r| encode_api_versions_response(corr))
                 } else {
-                    // Every other supported API reads the broker's state: `pure_request` sends it elsewhere.
-                    None
+                    error("answer: a request that reads the broker's state reached the pure answers")
                 }
             })
         }
@@ -69,7 +68,7 @@ fn stateful_body_ok(key: i16, fr: Bytes) -> bool {
         } else if key == API_LIST_OFFSETS {
             frame_prefix(fr).and_then(|p| decode_list_offsets(b, p.1)).is_some()
         } else {
-            false
+            error("stateful_body_ok: a supported API with no decoder here")
         }
     }).unwrap_or(false)
 }

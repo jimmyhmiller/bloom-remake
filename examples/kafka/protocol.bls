@@ -230,26 +230,42 @@ fn frame(body: Bytes) -> Bytes {
 /// are looked for; a caller that knows how many frames `b` can hold passes that, so a long buffer holding one big
 /// frame costs one step, not one per four bytes.
 fn split_frames(b: Bytes, most: u64) -> (Vec<Bytes>, u64, bool) {
-    range(0, most).fold(([], 0, false), |acc, _i| {
-        let (frames, pos, bad) = acc;
+    // One step per frame looked for: the position after it, the frame it cut (none once the front frame is
+    // incomplete or a size is invalid), and whether a size was invalid.
+    let steps = range(0, most).scan((0, None, false), |acc, _i| {
+        let (pos, _cut, bad) = acc;
         if bad {
-            acc
+            (pos, None, true)
         } else {
             match b.i32_be_at(pos) {
                 Some(n) => {
                     if n < 0i32 || n as u64 > MAX_FRAME {
-                        (frames, pos, true)
+                        (pos, None, true)
                     } else {
                         match b.slice(pos + 4, pos + 4 + n as u64) {
-                            Some(body) => (frames.push(body), pos + 4 + n as u64, false),
-                            None => acc,
+                            Some(body) => (pos + 4 + n as u64, Some(body), false),
+                            None => (pos, None, false),
                         }
                     }
                 }
-                None => acc,
+                None => (pos, None, false),
             }
         }
-    })
+    });
+    match steps.last() {
+        Some(s) => (steps.filter_map(|x| x.1), s.0, s.2),
+        None => ([], 0, false),
+    }
+}
+
+/// How many bytes `frames` hold.
+fn frames_bytes(frames: Vec<Bytes>) -> u64 {
+    frames.fold(0, |t, fr| t + fr.len())
+}
+
+/// `frames` with where each starts, counting from `from` bytes: (start, frame).
+fn with_starts(from: u64, frames: Vec<Bytes>) -> Vec<(u64, Bytes)> {
+    frames.scan((from, from, Bytes::empty()), |acc, fr| (acc.0 + fr.len(), acc.0, fr)).map(|x| (x.1, x.2))
 }
 
 // ---------------------------------------------------------------- reassembly

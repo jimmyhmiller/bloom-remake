@@ -2481,8 +2481,9 @@ enforced by a step budget: an evaluation, from a call made outside any function 
 and build `range` elements at most `FN_STEP_BUDGET` (10⁷) times in all; past it the tick aborts with BLSR012, the
 same in both evaluators. Evaluation depth is bounded too: since functions do not recurse, the deepest evaluation a
 program can make (an expression's nesting, plus the bodies of the functions it calls and the closures a combinator
-applies) is computed at compile time, and a program deeper than `MAX_EVAL_DEPTH` (1024 levels) is BLS0217, so no
-evaluation can overflow the stack a tick runs on. Algebraic
+applies, plus one level per literal of the rule it is in) is computed at compile time, and a program deeper than
+`MAX_EVAL_DEPTH` (1024 levels) is BLS0217, so no evaluation can overflow the stack a tick runs on. An expression
+higher than 1024 (a long chain of operators or calls) is refused by the parser already (BLS0100). Algebraic
 properties are attributes (`#[injective]`, `#[commutative]`, `#[associative]`, `#[idempotent]`) checked by TEST-087
 and used by ANA-043, ANA-080 and fold legality. A function with a lattice-typed parameter declares its monotonicity
 class with a prefix (`monotone fn`, `morphism fn`, `antitone fn`, `threshold fn`); without one it is NM and is called
@@ -2869,7 +2870,7 @@ never truncated or defaulted).
 | BLS0507 | E | a relation atom after `where` |
 | BLS0508 | E | a body atom at another location without `#[localize]` (ANA-004) |
 | BLS0509 | E | a spec-only oracle or trace relation in a program rule (ANA-010) |
-| BLS0511 | E | a `default` with grouping columns but no `per` driver, or a driver that does not determine the group |
+| BLS0511 | E | a `default` with grouping columns but no `per` driver, a driver that does not determine the group, or, with a driver, an aggregate with no identity (`min!`, `max!`, `index!`) and no `default` |
 
 **Choice and determinism (BLS06xx)**
 
@@ -3199,10 +3200,10 @@ All functions are pure. Methods on values use `.`; there are no closures outside
 | Bits | `& \| ^ ~ << >>`, `count_ones`, `leading_zeros` |
 | Strings | `len`, `++`, `split_whitespace() -> Vec<String>`, `split(sep)`, `to_lowercase`, `to_uppercase`, `trim`, `starts_with`, `ends_with`, `contains`, `replace`, `parse_u64() -> Option<u64>`, `parse_i64`, `to_string` (every type) |
 | Bytes | `len`, `slice(lo, hi) -> Option<Bytes>`, `concat`, `to_hex`, `from_utf8() -> Option<String>`; big-endian reads `u8_at(p)`, `i8_at(p)`, `u16_be_at(p)` … `i64_be_at(p) -> Option<T>`; patches `put_u8(p, x)` … `put_i64_be(p, x) -> Option<Bytes>`; varints `uvarint_at(p) -> Option<(u64, u64)>`, `varint_at(p) -> Option<(i64, u64)>` (value and next position; `None` when truncated, longer than 10 bytes or past `u64`); `Bytes::from_u8(x)` … `Bytes::from_i64_be(x)`, `Bytes::uvarint(x)`, `Bytes::varint(x)`, `Bytes::empty()`, `Bytes::join(v)`; `s.to_utf8()` on strings |
-| Vec | `len`, `get(i) -> Option<T>`, `first`, `last`, `push`, `concat`, `contains`, `enumerate() -> Vec<(u64, T)>`, `sort`, `reverse`, `dedup`, `map`, `filter`, `filter_map`, `fold`, `all`, `any` (closures: function bodies only) |
+| Vec | `len`, `get(i) -> Option<T>`, `first`, `last`, `push`, `concat`, `contains`, `enumerate() -> Vec<(u64, T)>`, `sort`, `reverse`, `flatten()` (on a `Vec<Vec<T>>`), `dedup`, `map`, `filter`, `filter_map`, `fold`, `scan(init, |acc, x| e) -> Vec<A>` (the accumulator after each element), `all`, `any` (closures: function bodies only); `to_set() -> Set<T>`, `to_map() -> Map<K, V>` (on a `Vec<(K, V)>`: a repeated key keeps its last value) |
 | Ranges | `range(lo: u64, hi: u64) -> Vec<u64>`: `lo` up to, not including, `hi`; a combinator over `range(…)` walks it without building it |
 | Set | `len`, `contains`, `insert`, `remove`, `union`, `intersection`, `difference`, `items() -> Vec<T>` |
-| Map | `len`, `get(k) -> Option<V>`, `contains_key`, `insert`, `remove`, `keys`, `values`, `entries() -> Vec<(K, V)>` |
+| Map | `len`, `get(k) -> Option<V>`, `contains(k)`, `contains_key`, `insert`, `remove`, `keys`, `values`, `entries() -> Vec<(K, V)>` |
 | Option | `is_some`, `is_none`, `unwrap_or(d)`, `map`, `and_then`; `Some`, `None` |
 | Time | `now()`, `tick()`; `Duration::from_millis`, `.as_millis()` (a `Duration`'s, or an `Instant`'s since the deployment epoch, which is the Unix epoch in a deployment), `Instant - Instant`, `Instant ± Duration` |
 | Randomness | `random()`, `rand(k…)`, `rand_float(k…)`, `rand_range(lo, hi, k…)` (§15.1) |

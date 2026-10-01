@@ -289,7 +289,7 @@ fn a_torn_tail_loses_only_the_unacknowledged_tick() {
         d.node.offer_ingress(k.put(1, 2, "b", b"unacked"));
         let fx = d.node.run_tick(Instant(2)).unwrap();
         assert!(fx.wal.is_some());
-        assert!(d.node.release_ready().is_empty(), "a tick with a WAL record waits for its sync");
+        assert!(d.node.release_ready().unwrap().is_empty(), "a tick with a WAL record waits for its sync");
     }
     // Even a torn partial write of anything unsynced leaves the acknowledged state.
     fs.crash(&mut |_| WriteFate::Torn { sectors: 1 }).unwrap();
@@ -334,7 +334,7 @@ fn invariant_r_holds_under_random_sync_schedules() {
                     // Report a sync of everything computed so far with a record.
                     if let Some(t) = computed.iter().rev().find(|(_, w)| *w).map(|(t, _)| *t) {
                         synced = Some(t);
-                        released.extend(node.wal_synced(t).iter().map(|r| r.tick));
+                        released.extend(node.wal_synced(t).unwrap().iter().map(|r| r.tick));
                     }
                 } else {
                     match kind {
@@ -343,7 +343,7 @@ fn invariant_r_holds_under_random_sync_schedules() {
                     }
                     let fx = node.run_tick(Instant(now)).unwrap();
                     computed.push((fx.tick, fx.wal.is_some()));
-                    released.extend(node.release_ready().iter().map(|r| r.tick));
+                    released.extend(node.release_ready().unwrap().iter().map(|r| r.tick));
                 }
                 // The released ticks are exactly the longest prefix allowed by Invariant R.
                 let allowed: Vec<Tick> = computed

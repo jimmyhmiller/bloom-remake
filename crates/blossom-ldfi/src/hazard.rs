@@ -894,6 +894,11 @@ impl<'a> Encoder<'a> {
                 if sigma.get(v.index()).is_some_and(Option::is_some) {
                     continue;
                 }
+                // An ascription (an untyped constant's type) does not change the value.
+                let mut expr = expr;
+                while let Expr::Typed { expr: inner, .. } = expr {
+                    expr = inner;
+                }
                 let value = match expr {
                     Expr::Scalar(blossom_ir::core::BuiltinScalar::SelfNode) => match loc {
                         Loc::Node(n) => Some(Value::Node(n)),

@@ -1077,7 +1077,7 @@ impl Engine {
                     self.record.reserved_tick = r.ticks.0;
                     self.record.last_now = self.record.last_now.max(r.now.0);
                     self.meta.write(&self.record)?;
-                    let released = self.node.reserved(r);
+                    let released = self.node.reserved(r)?;
                     self.dispatch(released, &codec)?;
                 }
                 match fx.wal {
@@ -1093,7 +1093,7 @@ impl Engine {
                             .map_err(|_| RuntimeError::Fault("the committer stopped".into()))?;
                     }
                     None => {
-                        let released = self.node.release_ready();
+                        let released = self.node.release_ready()?;
                         self.dispatch(released, &codec)?;
                     }
                 }
@@ -1200,7 +1200,7 @@ impl Engine {
     ) -> Result<Option<Stopped>, RuntimeError> {
         match m {
             Control::Synced(t) => {
-                let released = self.node.wal_synced(Tick(t.tick()));
+                let released = self.node.wal_synced(Tick(t.tick()))?;
                 self.dispatch(released, codec)?;
                 self.maybe_checkpoint(t, durable)?;
             }
@@ -1211,9 +1211,9 @@ impl Engine {
                 bump(&self.stats.checkpoints, 1);
                 // The installed checkpoint is where recovery starts now: the blobs no recovery and no running rule
                 // can reach go (FOREIGN-PROTOCOLS §5).
-                if let Some((tick, blobs)) = self.checkpoint_blobs.take() {
-                    let keep = self.node.blob_roots(tick, &blobs);
-                    let deleted = self.blob_store.collect(&keep)?;
+                if let Some((tick, outside)) = self.checkpoint_blobs.take() {
+                    let gone = self.node.blob_garbage(tick, &outside);
+                    let deleted = self.blob_store.delete(&gone)?;
                     bump(&self.stats.blobs_collected, deleted as u64);
                 }
             }
@@ -1311,10 +1311,12 @@ impl Engine {
     }
 
     /// A released tick's requests to the host (FOREIGN-PROTOCOLS §1.2): its writes, in connection and `seq` order,
-    /// then its closes, then the connections whose `closed` event it delivered, then its dials.
+    /// then its pauses, then its resumes, then its closes, then the connections whose `closed` event it delivered,
+    /// then its dials.
     fn dispatch_streams(&mut self, t: &ReleasedTick) -> Result<(), RuntimeError> {
         let mut writes = Vec::new();
         let mut closes = Vec::new();
+        let mut pauses = Vec::new();
         let mut dials = Vec::new();
         let mut refused = Vec::new();
         let requests: Vec<HostRequest> = {
@@ -1334,6 +1336,7 @@ impl Engine {
                     bytes,
                 } => writes.push((conn, seq, stream, bytes)),
                 HostRequest::Close { stream, conn } => closes.push((stream, conn)),
+                HostRequest::Pause { stream, conn, paused } => pauses.push((!paused, conn, stream)),
                 HostRequest::Refused { stream, conn, why } => refused.push((stream, conn, why)),
                 HostRequest::Dial { stream, req, addr } => dials.push((stream, req, addr)),
             }
@@ -1344,6 +1347,11 @@ impl Engine {
         writes.sort_by_key(|w| (w.0, w.1));
         for (conn, seq, stream, bytes) in writes {
             self.streams.conns.write(stream, conn, seq, bytes);
+        }
+        // Pauses before resumes: a tick that asks both reads the connection.
+        pauses.sort();
+        for (resume, conn, stream) in pauses {
+            self.streams.conns.pause(stream, conn, !resume);
         }
         for (stream, conn) in closes {
             self.streams.conns.close(stream, conn);
@@ -1372,7 +1380,7 @@ impl Engine {
             Some(d) if blossom_node::durable::layer_fits(self.chain) => CheckpointJob::Layer(durable.encode_delta(&d)?),
             _ => CheckpointJob::Full(self.node.released_image().clone()),
         };
-        self.checkpoint_blobs = Some((Tick(t.tick()), self.node.released_image_blobs()));
+        self.checkpoint_blobs = Some((Tick(t.tick()), self.node.checkpoint_candidates()));
         self.checkpoint_busy = true;
         self.last_checkpoint_lsn = t.lsn().0;
         self.checkpoint

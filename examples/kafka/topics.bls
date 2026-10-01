@@ -50,7 +50,10 @@ fn config_value_ok(name: String, value: String) -> Option<bool> {
         Some(value == "CreateTime")
     } else if name == "retention.ms" || name == "retention.bytes" {
         Some(at_least_minus_one)
-    } else if name == "max.message.bytes" || name == "min.insync.replicas" || name == "segment.bytes" {
+    } else if name == "min.insync.replicas" {
+        // Kafka's `atLeast(1)`.
+        Some(value.parse_i64().map(|n| n >= 1 && n <= 2147483647).unwrap_or(false))
+    } else if name == "max.message.bytes" || name == "segment.bytes" {
         Some(nonneg_int)
     } else {
         None
@@ -59,17 +62,26 @@ fn config_value_ok(name: String, value: String) -> Option<bool> {
 
 /// The value of configuration `name` among `set` (the ones given at creation), or its default.
 fn config_value(set: Vec<(String, String)>, name: String) -> String {
-    let given = set.filter(|kv| kv.0 == name).first().map(|kv| kv.1);
-    let default = topic_configs().filter(|k| k.name == name).first().map(|k| k.default);
-    given.unwrap_or(default.unwrap_or(""))
+    match set.filter(|kv| kv.0 == name).first() {
+        Some(kv) => kv.1,
+        None => match topic_configs().filter(|k| k.name == name).first() {
+            Some(k) => k.default,
+            None => error("config_value: a configuration this broker does not know"),
+        },
+    }
+}
+
+/// An integer configuration's value (they are checked integers when the topic is created).
+fn config_int(set: Vec<(String, String)>, name: String) -> i64 {
+    match config_value(set, name).parse_i64() {
+        Some(n) => n,
+        None => error("config_int: a stored integer configuration is not an integer"),
+    }
 }
 
 /// A topic's retention: milliseconds and bytes (-1 for unbounded).
 fn retention(set: Vec<(String, String)>) -> (i64, i64) {
-    (
-        config_value(set, "retention.ms").parse_i64().unwrap_or(604800000i64),
-        config_value(set, "retention.bytes").parse_i64().unwrap_or(-1i64),
-    )
+    (config_int(set, "retention.ms"), config_int(set, "retention.bytes"))
 }
 
 // ---------------------------------------------------------------- CreateTopics v7
@@ -138,11 +150,15 @@ fn topic_name_ok(name: String) -> bool {
 /// because the two names give metrics the same name. (A name that is not a legal topic name is its own key.)
 fn collision_key(name: String) -> String {
     let b = name.to_utf8();
-    let swapped = Bytes::join(range(0, b.len()).map(|i| {
-        let x = b.u8_at(i).unwrap_or(0u8);
-        Bytes::from_u8(if x == 46u8 { 95u8 } else { x })
+    let swapped = Bytes::join(range(0, b.len()).map(|i| match b.u8_at(i) {
+        Some(x) => Bytes::from_u8(if x == 46u8 { 95u8 } else { x }),
+        None => error("collision_key: a position inside the name is out of range"),
     }));
-    swapped.from_utf8().unwrap_or(name)
+    // Swapping one ASCII byte for another keeps the text UTF-8.
+    match swapped.from_utf8() {
+        Some(k) => k,
+        None => error("collision_key: the swapped name is not UTF-8"),
+    }
 }
 
 /// A topic id from two random words. Kafka's `Uuid.randomUuid` redraws the zero id, the reserved metadata topic id
@@ -161,13 +177,49 @@ struct NewTopic { name: String, id: Bytes, partitions: i32, configs: Vec<(String
 /// created) and the topic.
 struct CreateOutcome { error: i16, message: Option<String>, topic: NewTopic }
 
-/// Decides one requested topic. `names` is every name the request asks for (a topic named twice is refused, and so
-/// are topics whose names collide), `taken` the names that exist or that other connections create first this tick
-/// (whether equal to the topic's name or colliding with it), `id` the id it gets.
-fn create_outcome(t: CreatableTopic, names: Vec<String>, taken: Vec<String>, id: Bytes, default_partitions: i32) -> CreateOutcome {
-    let dup = names.filter(|n| n == t.name).len() > 1;
+/// The names that occur more than once in `xs`.
+fn repeated_names(xs: Vec<String>) -> Set<String> {
+    // Each name's first position (a later pair overwrites an earlier one, so the pairs go in reverse).
+    let first = xs.enumerate().reverse().map(|e| (e.1, e.0)).to_map();
+    xs.enumerate().filter(|e| first.get(e.1) != Some(e.0)).map(|e| e.1).to_set()
+}
+
+/// The ids that occur more than once in `xs`.
+fn repeated_ids(xs: Vec<Bytes>) -> Set<Bytes> {
+    let first = xs.enumerate().reverse().map(|e| (e.1, e.0)).to_map();
+    xs.enumerate().filter(|e| first.get(e.1) != Some(e.0)).map(|e| e.1).to_set()
+}
+
+/// The collision keys that two different names of `keyed` (key, name) share.
+fn colliding_keys(keyed: Vec<(String, String)>) -> Set<String> {
+    // Each key's first name: a key collides when another name has it.
+    let first = keyed.reverse().to_map();
+    keyed.filter(|kn| first.get(kn.0) != Some(kn.1)).map(|kn| kn.0).to_set()
+}
+
+/// What deciding one entry of a CreateTopics request needs to know of the whole request, computed once for it: the
+/// names it gives more than once, the collision keys two of its names share, and the names that are taken and their
+/// keys.
+struct CreateContext { repeated: Set<String>, colliding: Set<String>, taken: Set<String>, taken_keys: Set<String> }
+
+/// `names` is every name the request asks for, `taken` the names that exist or that other connections create first
+/// this tick.
+fn create_context(names: Vec<String>, taken: Vec<String>) -> CreateContext {
+    CreateContext {
+        repeated: repeated_names(names),
+        colliding: colliding_keys(names.map(|n| (collision_key(n), n))),
+        taken: taken.to_set(),
+        taken_keys: taken.map(|n| collision_key(n)).to_set(),
+    }
+}
+
+/// Decides one requested topic: a topic named twice in the request is refused, and so are topics whose names
+/// collide, and a topic whose name is taken (equal to the topic's name or colliding with it); `id` is the id it
+/// gets.
+fn create_outcome(t: CreatableTopic, ctx: CreateContext, id: Bytes, default_partitions: i32) -> CreateOutcome {
+    let dup = ctx.repeated.contains(t.name);
     let key = collision_key(t.name);
-    let collides_within = names.any(|n| n != t.name && collision_key(n) == key);
+    let collides_within = ctx.colliding.contains(key);
     let partitions = if t.assignments.is_empty() { if t.partitions == -1i32 { default_partitions } else { t.partitions } } else { t.assignments.len() as i32 };
     let bad_assignment = not t.assignments.is_empty() && (
         t.partitions != -1i32 || t.replication != -1i16
@@ -188,9 +240,9 @@ fn create_outcome(t: CreatableTopic, names: Vec<String>, taken: Vec<String>, id:
         create_failed(t.name, INVALID_TOPIC_EXCEPTION, "a topic name is 1 to 249 characters of [a-zA-Z0-9._-], not . or ..")
     } else if collides_within {
         create_failed(t.name, INVALID_TOPIC_EXCEPTION, "the request names topics whose names collide ('.' against '_')")
-    } else if taken.any(|n| n == t.name) {
+    } else if ctx.taken.contains(t.name) {
         create_failed(t.name, TOPIC_ALREADY_EXISTS, "the topic already exists")
-    } else if taken.any(|n| collision_key(n) == key) {
+    } else if ctx.taken_keys.contains(key) {
         create_failed(t.name, INVALID_TOPIC_EXCEPTION, "the name collides with an existing topic's ('.' against '_')")
     } else if bad_assignment {
         create_failed(t.name, INVALID_REQUEST, "a manual assignment needs the partition count and replication factor to be -1")
@@ -216,19 +268,25 @@ fn create_names(req: CreateTopicsRequest) -> Vec<String> {
 }
 
 /// The topic entry `t` of `req` creates if nothing is taken, with id `id`; `None` if it is invalid, or `req` only
-/// validates.
-fn create_candidate(req: CreateTopicsRequest, t: CreatableTopic, id: Bytes) -> Option<NewTopic> {
-    let o = create_outcome(t, create_names(req), [], id, DEFAULT_PARTITIONS);
+/// validates. `ctx` is `req`'s context with nothing taken.
+fn create_candidate(req: CreateTopicsRequest, ctx: CreateContext, t: CreatableTopic, id: Bytes) -> Option<NewTopic> {
+    let o = create_outcome(t, ctx, id, DEFAULT_PARTITIONS);
     if req.validate_only || o.error != NONE { None } else { Some(o.topic) }
 }
 
-/// Every entry's outcome. `taken` is as for `create_outcome`; `ids` the ids of the topics this request creates.
+/// Every entry's outcome. `taken` is as for `create_context`; `ids` the ids of the topics this request creates.
 /// A validating request's topics get the zero id, as Kafka's do.
 fn create_outcomes(req: CreateTopicsRequest, taken: Vec<String>, ids: Vec<(String, Bytes)>) -> Vec<CreateOutcome> {
-    let names = create_names(req);
+    let ctx = create_context(create_names(req), taken);
+    let id_of = ids.to_map();
     req.topics.map(|t| {
-        let id = ids.filter(|x| x.0 == t.name).first().map(|x| x.1).unwrap_or(zero_uuid());
-        create_outcome(t, names, taken, id, DEFAULT_PARTITIONS)
+        let id = id_of.get(t.name);
+        let o = create_outcome(t, ctx, id.unwrap_or(zero_uuid()), DEFAULT_PARTITIONS);
+        if o.error == NONE && not req.validate_only && id.is_none() {
+            error("create_outcomes: a topic this request creates has no id")
+        } else {
+            o
+        }
     })
 }
 
@@ -287,48 +345,44 @@ fn decode_delete_topics(c: Cur) -> Option<(Vec<DeleteTopicState>, i32)> {
     })
 }
 
-/// Whether entry `e` of a DeleteTopics request is well formed: it names a topic by name or by id, not both, and
-/// no other entry names the same topic the same way.
-fn delete_entry_ok(req: Vec<DeleteTopicState>, e: u64) -> bool {
-    match req.get(e) {
-        Some(s) => {
-            let by_id = s.id != zero_uuid();
-            let others = req.enumerate().filter(|x| x.0 != e).map(|x| x.1);
-            if by_id {
-                s.name.is_none() && not others.any(|o| o.id == s.id)
-            } else {
-                match s.name {
-                    Some(n) => not others.any(|o| o.id == zero_uuid() && o.name == Some(n)),
-                    None => true,
-                }
-            }
+/// What judging one entry of a DeleteTopics request needs to know of the whole request, computed once for it: the
+/// ids its entries by id give more than once, the names its entries by name give more than once, and every id it
+/// gives.
+struct DeleteContext { repeated_ids: Set<Bytes>, repeated_names: Set<String>, ids: Set<Bytes> }
+
+fn delete_context(req: Vec<DeleteTopicState>) -> DeleteContext {
+    let ids = req.filter(|s| s.id != zero_uuid()).map(|s| s.id);
+    let names = req.filter_map(|s| if s.id == zero_uuid() { s.name } else { None });
+    DeleteContext { repeated_ids: repeated_ids(ids), repeated_names: repeated_names(names), ids: ids.to_set() }
+}
+
+/// Whether entry `s` of a DeleteTopics request (whose context is `ctx`) is well formed: it names a topic by name or
+/// by id, not both, and no other entry names the same topic the same way.
+fn delete_entry_ok(ctx: DeleteContext, s: DeleteTopicState) -> bool {
+    if s.id != zero_uuid() {
+        s.name.is_none() && not ctx.repeated_ids.contains(s.id)
+    } else {
+        match s.name {
+            Some(n) => not ctx.repeated_names.contains(n),
+            None => true,
         }
-        None => false,
     }
 }
 
-/// The name entry `e` deletes the topic of, if it is a well-formed entry by name.
-fn delete_by_name(req: Vec<DeleteTopicState>, e: u64) -> Option<String> {
-    if delete_entry_ok(req, e) {
-        req.get(e).and_then(|s| if s.id == zero_uuid() { s.name } else { None })
-    } else {
-        None
-    }
+/// The name entry `s` deletes the topic of, if it is a well-formed entry by name.
+fn delete_by_name(ctx: DeleteContext, s: DeleteTopicState) -> Option<String> {
+    if delete_entry_ok(ctx, s) && s.id == zero_uuid() { s.name } else { None }
 }
 
-/// The id entry `e` deletes the topic of, if it is a well-formed entry by id.
-fn delete_by_id(req: Vec<DeleteTopicState>, e: u64) -> Option<Bytes> {
-    if delete_entry_ok(req, e) {
-        req.get(e).and_then(|s| if s.id != zero_uuid() { Some(s.id) } else { None })
-    } else {
-        None
-    }
+/// The id entry `s` deletes the topic of, if it is a well-formed entry by id.
+fn delete_by_id(ctx: DeleteContext, s: DeleteTopicState) -> Option<Bytes> {
+    if delete_entry_ok(ctx, s) && s.id != zero_uuid() { Some(s.id) } else { None }
 }
 
 /// Whether an entry of the request names topic `id` by id: an entry by name that finds this topic is then refused,
 /// as Kafka refuses a name that maps to an id the request already gives.
-fn id_supplied(req: Vec<DeleteTopicState>, id: Bytes) -> bool {
-    id != zero_uuid() && req.any(|s| s.id == id)
+fn id_supplied(ctx: DeleteContext, id: Bytes) -> bool {
+    ctx.ids.contains(id)
 }
 
 /// One deletion's result: the topic's name and id as the entry gave them (both when it is deleted), the error and
@@ -338,17 +392,20 @@ struct DeleteOutcome { name: Option<String>, id: Bytes, error: i16, message: Opt
 /// Every entry's outcome. `won` holds the entries this request deletes: (entry, name, id); `clash` the entries by
 /// name whose topic another entry names by id.
 fn delete_outcomes(req: Vec<DeleteTopicState>, won: Vec<(u64, String, Bytes)>, clash: Vec<u64>) -> Vec<DeleteOutcome> {
+    let ctx = delete_context(req);
+    let won_by_entry = won.map(|w| (w.0, (w.1, w.2))).to_map();
+    let clashes = clash.to_set();
     req.enumerate().map(|x| {
         let (e, s) = x;
-        match won.filter(|w| w.0 == e).first() {
-            Some(w) => DeleteOutcome { name: Some(w.1), id: w.2, error: NONE, message: None },
+        match won_by_entry.get(e) {
+            Some(w) => DeleteOutcome { name: Some(w.0), id: w.1, error: NONE, message: None },
             None => {
-                if clash.contains(e) {
+                if clashes.contains(e) {
                     DeleteOutcome {
                         name: s.name, id: s.id, error: INVALID_REQUEST,
                         message: Some("the topic name maps to an id the request also gives"),
                     }
-                } else if not delete_entry_ok(req, e) {
+                } else if not delete_entry_ok(ctx, s) {
                     DeleteOutcome {
                         name: s.name, id: s.id, error: INVALID_REQUEST,
                         message: Some("an entry names a topic by name or by id, not both, and only once"),
@@ -455,8 +512,9 @@ fn encode_describe_configs_response(correlation_id: i32, results: Vec<Bytes>) ->
 
 /// Every resource's result. `sets` holds the configurations of the named topics that exist.
 fn describe_results(req: Vec<ConfigResource>, sets: Vec<(String, Vec<(String, String)>)>) -> Vec<Bytes> {
+    let set_of = sets.to_map();
     req.map(|r| {
-        let set = if r.kind == CONFIG_TOPIC { sets.filter(|x| x.0 == r.name).first().map(|x| x.1) } else { None };
+        let set = if r.kind == CONFIG_TOPIC { set_of.get(r.name) } else { None };
         encode_config_result(r, set)
     })
 }
