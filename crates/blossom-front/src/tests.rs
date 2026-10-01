@@ -1194,12 +1194,8 @@ fn persistence_conditions_compile_and_their_misuses_are_reported() {
     );
     assert_eq!(codes(src), Vec::<&str>::new());
     for (decl, code) in [
-        // Not a table; a `resolve` policy or lattice values (not implemented); an unbound name in the condition.
+        // Not a table; lattice values (not implemented); an unbound name in the condition.
         ("scratch t(k: u64, v: u64) while go(k, v);", "BLS0106"),
-        (
-            "table t(k: u64, v: u64) key(k) resolve choose while go(k, v);",
-            "BLS0908",
-        ),
         ("table t(k: u64, v: LMax<u64>) key(k) while go(k, _);", "BLS0908"),
         ("table t(k: u64, v: u64) while go(k, v) where q > 1;", "BLS0500"),
     ] {

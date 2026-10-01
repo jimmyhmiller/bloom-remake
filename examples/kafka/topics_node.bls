@@ -182,7 +182,7 @@ view topic_info(name, id, ps = collect!(pi)) = mtopic(name, id, _, _), part_info
 /// first at the head; else none. They are pinned then, so the request's command stays the same while topics come and
 /// go. The controller creates those still free when it applies the command, and the request is answered from the
 /// metadata just after: the request takes effect at that point, so a name freed meanwhile is created too.
-table metadata_pinned(c: Conn, i: u64, names: Vec<String>) key(c, i);
+table metadata_pinned(c: Conn, i: u64, names: Vec<String>) key(c, i) while queued(c, i, _, _);
 view metadata_free(c, i) = metadata_head(c, i, _, _, _, _, req), n in metadata_creates(req, AUTO_CREATE_TOPICS),
     let k = collision_key(n), not topic_keys(k, _);
 pin_metadata: while metadata_head(c, i, _, _, _, _, req), not metadata_pinned(c, i, _) {
@@ -192,9 +192,6 @@ pin_metadata: while metadata_head(c, i, _, _, _, _, req), not metadata_pinned(c,
     if not metadata_free(c, i) {
         upsert metadata_pinned(c, i, []);
     }
-}
-forget_metadata_pinned: while metadata_pinned(c, i, names), not queued(c, i, _, _) {
-    delete metadata_pinned(c, i, names);
 }
 view metadata_cmd_of(c, i, tag, cmd) =
     metadata_pinned(c, i, names), broker_ids(ids), my_id(me), let tag = hash64(("auto", c, i)),

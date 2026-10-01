@@ -1064,8 +1064,9 @@ other variables are existential. A row persists from tick t to t+1 only if the c
 whose condition fails is visible in that tick and gone in the next, exactly as with `while p(x̄), not <condition>
 { delete p(x̄); }`, which it replaces. Writes (`emit`, `next`, `upsert`, `delete`) are unchanged. The condition may
 read the table itself, and is stratified like any rule body. `while` comes last among the declaration's clauses
-(its body runs to the `;`), applies to tables only (BLS0106), and is not implemented on tables with a `resolve`
-policy or lattice values. A `durable` table may have one: the condition is evaluated every tick, so a row whose
+(its body runs to the `;`), applies to tables only (BLS0106), and is not implemented on tables of lattice values.
+On a table with a `resolve` policy (§10.7) it keeps a persisted row from being a candidate for the next tick. A
+`durable` table may have one: the condition is evaluated every tick, so a row whose
 owner is gone does not survive a restart either. Lowering — the frame rule gains a guard relation of the same
 construct:
 
@@ -2700,13 +2701,15 @@ Elements (parameters in parentheses; every element is a name or a call):
 | `array(L, bias, E)` | `Vec` of `E`'s | a count `n + bias` written as `L`, then `n` elements |
 | `nullable(P)` | `Option` of `P`'s | a prefixed value or array whose length may be the bias less one: `None` |
 | `constant(E, v)` | none | `E` with value `v`: written on encode, checked on decode |
+| `ignored(E, v)` | none | `E`, read past and dropped on decode; `v` written on encode |
+| `(E1, E2, …)` | the tuple of the valued ones (the value itself, if only one) | the elements in order |
 | `tags` | none | a tagged-field section: a `uvarint` count of (tag, size, bytes); written empty, read and skipped |
 | `Name(args)` | the record | another record format, with its arguments |
 | `name(args)` | the alias's | an alias, its parameters replaced |
 
 A field is `name: element`, optionally `if cond` (an expression over the format's parameters and earlier fields; an
 absent field writes nothing and decodes to its type's zero, or to `= default`, which a nested record requires); an
-element with no value (`constant`, `tags`) has no name. Element arguments read the parameters. Aliases and records
+element with no value (`constant`, `ignored`, `tags`) has no name. Element arguments read the parameters. Aliases and records
 live in a file or module (BLS0110 in an `at` section) and may be declared after their use; misuse is BLS0301 (an
 unknown element, a wrong arity, `nullable` over something else or over an unsigned length with bias 0, a field name
 on a valueless element, an alias that expands into itself) or BLS0201 (two formats of one name). Lowering: none — a

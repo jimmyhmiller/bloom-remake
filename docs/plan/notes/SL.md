@@ -4,8 +4,8 @@ Design: `docs/design/EXTENSIONS.md`. Branch `slice-lang`, worktree `.worktrees/s
 
 ## Resume here
 
-- **State (2026-10-01):** items 1–6 done (`?`, generic functions, `while` tables, `resolve prefer`, the order of
-  checks, formats). Next: item 7, the Kafka rewrite, measured.
+- **State (2026-10-01):** items 1–6 done; item 7 (the Kafka rewrite) in progress: 3,388 code lines (from 4,066),
+  every Kafka/Raft suite green at that point. Next: a shared `reply` for the answer handlers, then measure again.
 - Update this section whenever work stops.
 
 ## Baseline (S8, merged at 69b630c)
@@ -62,7 +62,8 @@ Design: `docs/design/EXTENSIONS.md`. Branch `slice-lang`, worktree `.worktrees/s
 
 - Syntax: a `while BODY` relation clause (`WHILECLAUSE`, last: its body runs to `;`), tables only (BLS0106).
 - Resolve: the condition is resolved as the body `p(c̄), BODY` (columns by name) into `Hir::guards`; type checking
-  walks it like an invariant. Not implemented (BLS0908): with a `resolve` policy, on lattice values.
+  walks it like an invariant. Not implemented (BLS0908): on lattice values. On a resolved table the guard joins the
+  persisted rows' candidate rule (`r$cand :- r, notin r$del, r$keep`).
 - IR: `Persistence::Frame { guard: Option<RelId> }` (serde-skipped when absent, so artifacts without guards are
   unchanged); the guard `p$keep` is a relation of the Persist construct, derived by `p$keep(x̄) :- p(x̄), BODY`;
   the validator checks the frame rule's extra literal and the guard's ownership. LDFI's `is_frame` now names the
@@ -118,6 +119,21 @@ Design: `docs/design/EXTENSIONS.md`. Branch `slice-lang`, worktree `.worktrees/s
   decoded fields, used bytes and re-encoding equal; 180 truncations and a 2^40 count decode to nothing; both
   evaluators; mutation: inverting `bool`'s encoding fails it), `blossom-front` (11 misuses, `at`, a record used from
   a rule).
+
+### Item 7: the Kafka rewrite (in progress)
+
+- Every codec is a format now (requests, responses, the controller's commands, batch headers, records); the
+  function names the nodes and test harnesses call are kept, so harness glue is unchanged. Formats grew two generic
+  elements the rewrite needed: tuples `(E1, E2, …)` (Kafka's anonymous structs, which the harness compares as
+  tuples) and `ignored(E, v)` (fields a broker reads past). `by_topic<T>` regroups per-entry answers by topic for
+  Produce, Fetch and ListOffsets; `repeated<T>` replaces two per-type copies.
+- `while` tables replace the clean-up rules: partition storage `while replica(tid, part)` (both deletion and moving
+  away), per-connection state `while not kafka.closed(c, _)`, per-request records `while queued(c, i, _, _)`.
+- `while` on resolved tables implemented (the guard joins the persisted rows' candidate rule); mutation-checked.
+- The Raft groups' clean-up (`forget_deleted_raft`, `drop_unhosted_*`) stays: `raft.bls` is shared with the
+  `raft/groups` fixture, which would have to define a new hook.
+- Checked at 3,388 lines: kafka_cluster (6), kafka_codec (13), kafka_fetch, kafka_log, kafka_produce (3),
+  kafka_records, kafka_retention, kafka_sim (2), kafka_topics (3), raft_groups (3) — all pass.
 
 ### Open observations
 

@@ -3425,10 +3425,6 @@ impl<'t> Resolver<'t, '_> {
             self.error(code!("BLS0106"), guard.span, "`while` applies to tables");
             return;
         }
-        if r.resolve.is_some() {
-            self.unsupported("LANG-117", "`while` on a table with a `resolve` policy", guard.span);
-            return;
-        }
         if r.cols
             .iter()
             .any(|c| c.ty.is_some_and(|t| holds_lattice(&self.hir.types, t)))
