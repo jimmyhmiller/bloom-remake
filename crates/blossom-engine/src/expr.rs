@@ -76,6 +76,20 @@ pub(crate) struct Ctx<'a> {
     pub shared: &'a Shared,
     /// The step budget of the function evaluation in progress (BLSR012).
     pub fuel: Fuel,
+    /// The bytes of blobs created before this tick.
+    pub blobs: &'a dyn blossom_value::BlobSource,
+    /// The blobs this tick created, with their bytes.
+    pub new_blobs: &'a std::cell::RefCell<BTreeMap<blossom_value::BlobRef, std::sync::Arc<[u8]>>>,
+}
+
+impl Ctx<'_> {
+    /// The bytes of `b`: created this tick, or before it.
+    pub(crate) fn blob(&self, b: &blossom_value::BlobRef) -> Option<std::sync::Arc<[u8]>> {
+        if let Some(x) = self.new_blobs.borrow().get(b) {
+            return Some(x.clone());
+        }
+        self.blobs.get(b)
+    }
 }
 
 /// How many function calls are open, and the steps the outermost one has left (`FN_STEP_BUDGET` at its start).
@@ -293,6 +307,7 @@ pub(crate) fn eval(cx: &Ctx<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<
         }
         Expr::Let { pat, value, body } => crate::func::let_expr(cx, env, pat, value, body),
         Expr::Closure { .. } => Err(bug("a closure evaluated outside a combinator".into())),
+        Expr::Typed { expr, .. } => eval(cx, env, expr),
     }
 }
 
@@ -337,6 +352,7 @@ fn builtin(cx: &Ctx<'_>, env: &[Option<Value>], f: &BuiltinFn, args: &[Expr]) ->
             let n = match arg(0)? {
                 Value::Str(s) => s.len(),
                 Value::Bytes(b) => b.len(),
+                Value::Blob(b) => usize::try_from(b.len).unwrap_or(usize::MAX),
                 Value::Vec(v) => v.len(),
                 Value::Set(s) => s.len(),
                 Value::Map(m) => m.len(),
@@ -394,6 +410,17 @@ fn builtin(cx: &Ctx<'_>, env: &[Option<Value>], f: &BuiltinFn, args: &[Expr]) ->
                 .map_err(|e| bug(format!("the PRF: {e}")))?;
             Ok(Value::Tuple(vec![Value::Int(IntValue::U64(p)), y].into()))
         }
+        BuiltinFn::Error { .. } => match arg(0)? {
+            Value::Str(s) => Err(ExprError::Refused(s.to_string())),
+            other => Err(bug(format!("`error` of {other:?}"))),
+        },
+        BuiltinFn::Rand => {
+            let mut key = Vec::new();
+            for i in 0..args.len() {
+                key.push(arg(i)?);
+            }
+            rand(cx, &key)
+        }
         BuiltinFn::RandRange => {
             let (lo, hi) = (arg(0)?, arg(1)?);
             let mut key = Vec::new();
@@ -424,6 +451,20 @@ fn builtin(cx: &Ctx<'_>, env: &[Option<Value>], f: &BuiltinFn, args: &[Expr]) ->
 
 fn fingerprint(v: &Value) -> ExprResult<blossom_value::fp::Fingerprint> {
     blossom_value::fp::fingerprint(v).map_err(|e| bug(format!("fingerprinting {v:?}: {e}")))
+}
+
+/// `rand(k…)`: `PRF_σn("rand", fp(k̄), incarnation, tick)` (LANGUAGE §15.1).
+fn rand(cx: &Ctx<'_>, key: &[Value]) -> ExprResult<Value> {
+    let seed = cx
+        .shared
+        .node_seeds
+        .get(cx.node.0 as usize)
+        .copied()
+        .ok_or_else(|| bug(format!("a `rand` draw on node {}, which has no seed", cx.node.0)))?;
+    let fp = blossom_value::fp::fingerprint_row(key).map_err(|e| bug(format!("fingerprinting a rand key: {e}")))?;
+    let x = blossom_value::prf::prf(&seed, "rand", &[fp], &[cx.incarnation, cx.tick.0])
+        .map_err(|e| bug(format!("rand: {e}")))?;
+    Ok(Value::Int(IntValue::U64(x)))
 }
 
 /// `lo + PRF_σn("rand", fp(k̄), incarnation, tick, attempt) mod span`, redrawing from the incomplete last span so the
@@ -813,5 +854,6 @@ pub(crate) fn time_varying(e: &Expr) -> bool {
         Expr::Lattice { args, .. } => args.iter().any(time_varying),
         Expr::Let { value, body, .. } => time_varying(value) || time_varying(body),
         Expr::Closure { body, .. } => time_varying(body),
+        Expr::Typed { expr, .. } => time_varying(expr),
     }
 }

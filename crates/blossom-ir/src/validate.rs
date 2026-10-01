@@ -162,6 +162,8 @@ fn check_stream(p: &Program, st: &StreamDecl) -> Result<(), String> {
     rel(st.data, ev(StreamEvent::Data), vec![conn, u64t, ty(TypeDef::Bytes)?], "data")?;
     rel(st.closed, ev(StreamEvent::Closed), vec![conn, text], "closed")?;
     rel(st.close, RelClass::HostOut(HostOp::Close), vec![conn], "close")?;
+    rel(st.pause, RelClass::HostOut(HostOp::Pause), vec![conn], "pause")?;
+    rel(st.resume, RelClass::HostOut(HostOp::Resume), vec![conn], "resume")?;
     // `write(c, seq, parts: Vec<Part>)`: `Part` is the built-in enum whose variant 0 is `Bytes(Bytes)`.
     let w = p.rels.get(st.write).ok_or_else(|| format!("stream {name}: `write` is not a relation"))?;
     let parts = w.schema.cols.get(2).map(|c| c.ty).ok_or_else(|| format!("stream {name}: `write` has no parts"))?;
@@ -191,7 +193,17 @@ fn check_stream(p: &Program, st: &StreamDecl) -> Result<(), String> {
         }
         _ => return Err(format!("stream {name}: `failed` and `dial` belong exactly to connect streams")),
     }
-    let mine = [Some(st.opened), Some(st.data), Some(st.closed), st.failed, Some(st.write), Some(st.close), st.dial];
+    let mine = [
+        Some(st.opened),
+        Some(st.data),
+        Some(st.closed),
+        st.failed,
+        Some(st.write),
+        Some(st.close),
+        Some(st.pause),
+        Some(st.resume),
+        st.dial,
+    ];
     for other in p.streams.iter().filter(|o| o.name != st.name) {
         let theirs = [Some(other.opened), Some(other.data), Some(other.closed), other.failed, Some(other.write), Some(other.close), other.dial];
         if mine.iter().flatten().any(|r| theirs.iter().flatten().any(|o| o == r)) {
@@ -848,9 +860,9 @@ fn persist_exact(p: &Program, rel: &RelDecl, rule: &Rule, del: Option<RelId>, id
     positive && negative && tag
 }
 /// Whether a value of type `actual` may stand where `expected` is required: equal types, or `Node<R>` where `Node`
-/// is expected (LANGUAGE §5.3: `Node<R>` is a subtype of `Node`).
-/// Whether a value of type `actual` may stand where `expected` is required: equal types, or `Node<R>` where `Node`
-/// is expected, also inside tuples, options and collections (values are immutable, so covariance is sound).
+/// is expected (LANGUAGE §5.3: `Node<R>` is a subtype of `Node`), also inside tuples, options and collections
+/// (values are immutable, so covariance is sound). A lattice type carries no roles (the frontend interns
+/// `LSet<Node<R>>` as `LSet<Node>`), so lattice types are assignable only when equal.
 fn assignable(p: &Program, actual: TypeId, expected: TypeId) -> bool {
     if actual == expected {
         return true;
@@ -864,6 +876,52 @@ fn assignable(p: &Program, actual: TypeId, expected: TypeId) -> bool {
         | (Some(TypeDef::Vec(a)), Some(TypeDef::Vec(b)))
         | (Some(TypeDef::Set(a)), Some(TypeDef::Set(b))) => assignable(p, *a, *b),
         (Some(TypeDef::Map(ka, va)), Some(TypeDef::Map(kb, vb))) => assignable(p, *ka, *kb) && assignable(p, *va, *vb),
+        _ => false,
+    }
+}
+/// The least type both `a` and `b` are assignable to (LANGUAGE §5.3): what a merge of the two holds (`if` branches,
+/// `match` arms, a collection's elements, `push`, a fold's accumulator). `None` when they differ in more than roles,
+/// or when the frontend did not intern the join (it interns every join it types).
+fn join(p: &Program, a: TypeId, b: TypeId) -> Option<TypeId> {
+    if assignable(p, a, b) {
+        return Some(b);
+    }
+    if assignable(p, b, a) {
+        return Some(a);
+    }
+    let def = match (p.types.get(a)?, p.types.get(b)?) {
+        (TypeDef::Node(_), TypeDef::Node(_)) => TypeDef::Node(None),
+        (TypeDef::Tuple(xs), TypeDef::Tuple(ys)) if xs.len() == ys.len() => {
+            let mut out = Vec::new();
+            for (x, y) in xs.iter().zip(ys) {
+                out.push(join(p, *x, *y)?);
+            }
+            TypeDef::Tuple(out)
+        }
+        (TypeDef::Option(x), TypeDef::Option(y)) => TypeDef::Option(join(p, *x, *y)?),
+        (TypeDef::Vec(x), TypeDef::Vec(y)) => TypeDef::Vec(join(p, *x, *y)?),
+        (TypeDef::Set(x), TypeDef::Set(y)) => TypeDef::Set(join(p, *x, *y)?),
+        (TypeDef::Map(k1, v1), TypeDef::Map(k2, v2)) => TypeDef::Map(join(p, *k1, *k2)?, join(p, *v1, *v2)?),
+        _ => return None,
+    };
+    p.types.lookup(&def)
+}
+/// Whether `a` and `b` are the same type but for the roles of their `Node`s.
+fn same_but_roles(p: &Program, a: TypeId, b: TypeId) -> bool {
+    if a == b {
+        return true;
+    }
+    match (p.types.get(a), p.types.get(b)) {
+        (Some(TypeDef::Node(_)), Some(TypeDef::Node(_))) => true,
+        (Some(TypeDef::Tuple(xs)), Some(TypeDef::Tuple(ys))) => {
+            xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| same_but_roles(p, *x, *y))
+        }
+        (Some(TypeDef::Option(x)), Some(TypeDef::Option(y)))
+        | (Some(TypeDef::Vec(x)), Some(TypeDef::Vec(y)))
+        | (Some(TypeDef::Set(x)), Some(TypeDef::Set(y))) => same_but_roles(p, *x, *y),
+        (Some(TypeDef::Map(k1, v1)), Some(TypeDef::Map(k2, v2))) => {
+            same_but_roles(p, *k1, *k2) && same_but_roles(p, *v1, *v2)
+        }
         _ => false,
     }
 }
@@ -932,8 +990,11 @@ fn agg_type(p: &Program, r: Cx<'_>, a: &AggCall, ty: TypeId) -> bool {
             .get(*id)
             .and_then(|u| p.fns.get(u.finish))
             .is_some_and(|f| f.ret == ty && a.args.len() == 1),
+        // `collect` holds its first argument once per distinct argument tuple: the rest name the valuation, as for
+        // `sum`.
         AggFunc::CollectVec => {
-            matches!(p.types.get(ty),Some(TypeDef::Vec(t)) if a.args.len()==1&&a.args.first().is_some_and(|arg|term_type(p,r,arg,*t)))
+            matches!(p.types.get(ty), Some(TypeDef::Vec(t)) if a.args.first().is_some_and(|arg| term_type(p, r, arg, *t)))
+                && a.args.iter().all(|arg| !matches!(arg, Term::Wild))
         }
         AggFunc::CollectSet => {
             matches!(p.types.get(ty),Some(TypeDef::Set(t)) if a.args.len()==1&&a.args.first().is_some_and(|arg|term_type(p,r,arg,*t)))
@@ -950,6 +1011,11 @@ fn check_literal(p: &Program, r: Cx<'_>, l: &Literal) -> Result<(), String> {
             if let Pattern::Var(id) = pat {
                 let expected = r.vars.get(*id).ok_or("unknown binding variable")?.ty;
                 if expr_matches_type(p, r, expr, expected) {
+                    return Ok(());
+                }
+                // A rule variable's role may be narrower than the value bound to it: the body is a conjunction, and
+                // another literal (an atom, an `==`) narrows it (LANGUAGE §5.3). The shapes must agree.
+                if expr_type(p, r, expr).is_ok_and(|ty| same_but_roles(p, ty, expected)) {
                     return Ok(());
                 }
             }
@@ -1181,6 +1247,18 @@ fn expr_type(p: &Program, r: Cx<'_>, e: &Expr) -> Result<TypeId, String> {
                 (BinOp::Add, Some(TypeDef::Duration), Some(TypeDef::Instant)) => return Ok(b),
                 _ => {}
             }
+            // A comparison relates values whose types may differ in roles (`Node<R> == Node`, `Node<R> < Node<S>`).
+            if a != b && same_but_roles(p, a, b) {
+                match op {
+                    BinOp::Eq | BinOp::Ne | BinOp::CanonLt | BinOp::CanonLe => return lookup(TypeDef::Bool),
+                    BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                        if matches!(p.types.get(a), Some(TypeDef::Node(_))) =>
+                    {
+                        return lookup(TypeDef::Bool);
+                    }
+                    _ => {}
+                }
+            }
             let a = if a != b && expr_matches_type(p, r, lhs, b) {
                 b
             } else {
@@ -1191,14 +1269,21 @@ fn expr_type(p: &Program, r: Cx<'_>, e: &Expr) -> Result<TypeId, String> {
             }
             let def = p.types.get(a).ok_or("unknown binary type")?;
             match op {
-                BinOp::Eq
-                | BinOp::Ne
-                | BinOp::Lt
-                | BinOp::Le
-                | BinOp::Gt
-                | BinOp::Ge
-                | BinOp::CanonLt
-                | BinOp::CanonLe => lookup(TypeDef::Bool),
+                BinOp::Eq | BinOp::Ne | BinOp::CanonLt | BinOp::CanonLe => lookup(TypeDef::Bool),
+                // The numeric orders are for scalars of one kind; any other value compares by `CanonLt`/`CanonLe`.
+                BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                    if matches!(
+                        def,
+                        TypeDef::Int(_)
+                            | TypeDef::Duration
+                            | TypeDef::Instant
+                            | TypeDef::Str
+                            | TypeDef::Bytes
+                            | TypeDef::Node(_)
+                    ) =>
+                {
+                    lookup(TypeDef::Bool)
+                }
                 BinOp::And | BinOp::Or if matches!(def, TypeDef::Bool) => Ok(a),
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
                     if matches!(
@@ -1281,15 +1366,17 @@ fn expr_type(p: &Program, r: Cx<'_>, e: &Expr) -> Result<TypeId, String> {
             }
             let a = expr_type(p, r, then)?;
             let b = expr_type(p, r, els)?;
-            let a = if a != b && expr_matches_type(p, r, then, b) {
-                b
-            } else {
-                a
-            };
-            if a != b && !expr_matches_type(p, r, els, a) {
-                return Err("if branch type mismatch".into());
+            if a == b {
+                return Ok(a);
             }
-            Ok(a)
+            // A constant branch fits the other's type; otherwise the value is the branches' join.
+            if matches!(**then, Expr::Term(Term::Const(_))) && expr_matches_type(p, r, then, b) {
+                return Ok(b);
+            }
+            if matches!(**els, Expr::Term(Term::Const(_))) && expr_matches_type(p, r, els, a) {
+                return Ok(a);
+            }
+            join(p, a, b).ok_or("if branch type mismatch".into())
         }
         Expr::Match { scrut, arms } => {
             let scrut_ty = expr_type(p, r, scrut)?;
@@ -1313,10 +1400,13 @@ fn expr_type(p: &Program, r: Cx<'_>, e: &Expr) -> Result<TypeId, String> {
                 .or_else(|| arms.iter().zip(&types).next())
                 .map(|(_, t)| *t)
                 .ok_or("match has no arms")?;
+            // The value is the arms' join; a constant arm only has to fit it.
+            let mut ret = ret;
             for ((_, _, body), t) in arms.iter().zip(&types) {
-                if *t != ret && !expr_matches_type(p, r, body, ret) {
-                    return Err("match arm type mismatch".into());
+                if *t == ret || (matches!(body, Expr::Term(Term::Const(_))) && expr_matches_type(p, r, body, ret)) {
+                    continue;
                 }
+                ret = join(p, ret, *t).ok_or("match arm type mismatch")?;
             }
             Ok(ret)
         }
@@ -1332,10 +1422,10 @@ fn expr_type(p: &Program, r: Cx<'_>, e: &Expr) -> Result<TypeId, String> {
             } else {
                 "collection element type mismatch"
             };
-            let first = *types
-                .iter()
-                .find(|t| types.iter().all(|x| assignable(p, *x, **t)))
-                .ok_or(missing)?;
+            let mut first = *types.first().ok_or(missing)?;
+            for t in &types {
+                first = join(p, first, *t).ok_or(missing)?;
+            }
             match kind {
                 CollKind::Vec => lookup(TypeDef::Vec(first)),
                 CollKind::Set => lookup(TypeDef::Set(first)),
@@ -1375,6 +1465,13 @@ fn expr_type(p: &Program, r: Cx<'_>, e: &Expr) -> Result<TypeId, String> {
             expr_type(p, r, body)
         }
         Expr::Closure { .. } => Err("a closure outside a combinator's argument".into()),
+        Expr::Typed { ty, expr } => {
+            if expr_matches_type(p, r, expr, *ty) {
+                Ok(*ty)
+            } else {
+                Err("an ascribed expression does not have its type".into())
+            }
+        }
     }
 }
 
@@ -1390,10 +1487,15 @@ fn closure_type(p: &Program, r: Cx<'_>, e: &Expr, params: &[TypeId]) -> Result<T
     if vs.len() != params.len() {
         return Err("closure arity mismatch".into());
     }
-    for (v, want) in vs.iter().zip(params) {
+    // A parameter may be wider than what is passed (a fold's accumulator holds the initial value and every step's).
+    for (v, passed) in vs.iter().zip(params) {
         let have = r.vars.get(*v).ok_or("unknown closure parameter")?.ty;
-        if have != *want {
-            return Err("closure parameter type mismatch".into());
+        if !assignable(p, *passed, have) {
+            return Err(format!(
+                "closure parameter type mismatch: {:?} is passed where {:?} is expected",
+                p.types.get(*passed),
+                p.types.get(have)
+            ));
         }
     }
     expr_type(p, r, body)
@@ -1444,16 +1546,14 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
         }
         LibFn::VecPush => {
             arity(2)?;
-            let v = ty(0)?;
-            same(ty(1)?, elem(v)?, "push an element of the vector's type")?;
-            Ok(v)
+            let e = join(p, elem(ty(0)?)?, ty(1)?).ok_or(format!("{f:?}: push an element of the vector's type"))?;
+            lookup(TypeDef::Vec(e))
         }
         LibFn::VecConcat => {
             arity(2)?;
-            let v = ty(0)?;
-            elem(v)?;
-            same(ty(1)?, v, "concatenate vectors of one type")?;
-            Ok(v)
+            let (a, b) = (ty(0)?, ty(1)?);
+            let e = join(p, elem(a)?, elem(b)?).ok_or(format!("{f:?}: concatenate vectors of one type"))?;
+            lookup(TypeDef::Vec(e))
         }
         LibFn::VecIsEmpty => {
             arity(1)?;
@@ -1465,6 +1565,12 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
             let v = ty(0)?;
             elem(v)?;
             Ok(v)
+        }
+        LibFn::VecFlatten => {
+            arity(1)?;
+            let inner = elem(ty(0)?)?;
+            elem(inner)?;
+            Ok(inner)
         }
         LibFn::VecEnumerate => {
             arity(1)?;
@@ -1491,12 +1597,98 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
             let out = closure_type(p, r, args.get(1).ok_or("missing closure")?, &[e])?;
             lookup(TypeDef::Vec(inner(out)?))
         }
+        LibFn::VecScan => {
+            arity(3)?;
+            let e = elem(ty(0)?)?;
+            let init = ty(1)?;
+            let closure = args.get(2).ok_or("missing closure")?;
+            let acc = match closure {
+                Expr::Closure { params, .. } => params
+                    .first()
+                    .and_then(|v| r.vars.get(*v))
+                    .map(|v| v.ty)
+                    .ok_or("a scan's closure takes the accumulator")?,
+                _ => return Err("a combinator's last argument must be a closure".into()),
+            };
+            let step = closure_type(p, r, closure, &[init, e])?;
+            if !assignable(p, step, acc) || !assignable(p, init, acc) {
+                return Err(format!("{f:?}: a scan step returns its accumulator"));
+            }
+            lookup(TypeDef::Vec(acc))
+        }
+        LibFn::VecToSet => {
+            arity(1)?;
+            let e = elem(ty(0)?)?;
+            lookup(TypeDef::Set(e))
+        }
+        LibFn::VecToMap => {
+            arity(1)?;
+            let e = elem(ty(0)?)?;
+            match def(e)? {
+                TypeDef::Tuple(kv) if kv.len() == 2 => match (kv.first(), kv.get(1)) {
+                    (Some(k), Some(v)) => lookup(TypeDef::Map(*k, *v)),
+                    _ => Err(format!("{f:?}: a vector of (key, value) pairs")),
+                },
+                _ => Err(format!("{f:?}: a vector of (key, value) pairs")),
+            }
+        }
+        LibFn::MapGet => {
+            arity(2)?;
+            let (k, v) = match def(ty(0)?)? {
+                TypeDef::Map(k, v) => (k, v),
+                _ => return Err(format!("{f:?}: get on a map")),
+            };
+            if !same_but_roles(p, k, ty(1)?) {
+                return Err(format!("{f:?}: a key of the map's key type"));
+            }
+            lookup(TypeDef::Option(v))
+        }
         LibFn::VecFold => {
             arity(3)?;
             let e = elem(ty(0)?)?;
-            let acc = ty(1)?;
-            same(closure_type(p, r, args.get(2).ok_or("missing closure")?, &[acc, e])?, acc, "a fold step returns its accumulator")?;
+            let init = ty(1)?;
+            // The accumulator is the closure's first parameter: it holds the initial value and every step's result.
+            let closure = args.get(2).ok_or("missing closure")?;
+            let acc = match closure {
+                Expr::Closure { params, .. } => params
+                    .first()
+                    .and_then(|v| r.vars.get(*v))
+                    .map(|v| v.ty)
+                    .ok_or("a fold's closure takes the accumulator")?,
+                _ => return Err("a combinator's last argument must be a closure".into()),
+            };
+            let step = closure_type(p, r, closure, &[init, e])?;
+            if !assignable(p, step, acc) {
+                return Err(format!("{f:?}: a fold step returns its accumulator"));
+            }
             Ok(acc)
+        }
+        LibFn::DurationFromMillis => {
+            arity(1)?;
+            same(ty(0)?, lookup(TypeDef::Int(IntTy::I64))?, "from_millis of an i64")?;
+            lookup(TypeDef::Duration)
+        }
+        LibFn::DurationAsMillis => {
+            arity(1)?;
+            same(ty(0)?, lookup(TypeDef::Duration)?, "as_millis of a Duration")?;
+            lookup(TypeDef::Int(IntTy::I64))
+        }
+        LibFn::InstantAsMillis => {
+            arity(1)?;
+            same(ty(0)?, lookup(TypeDef::Instant)?, "as_millis of an Instant")?;
+            lookup(TypeDef::Int(IntTy::I64))
+        }
+        LibFn::BlobOf => {
+            arity(1)?;
+            same(ty(0)?, lookup(TypeDef::Bytes)?, "a blob is made of Bytes")?;
+            lookup(TypeDef::Blob)
+        }
+        LibFn::BlobRead => {
+            arity(3)?;
+            same(ty(0)?, lookup(TypeDef::Blob)?, "read of a Blob")?;
+            same(ty(1)?, u64t()?, "positions are u64")?;
+            same(ty(2)?, u64t()?, "positions are u64")?;
+            lookup(TypeDef::Option(lookup(TypeDef::Bytes)?))
         }
         LibFn::OptIsSome | LibFn::OptIsNone => {
             arity(1)?;
@@ -1506,8 +1698,7 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
         LibFn::OptUnwrapOr => {
             arity(2)?;
             let e = inner(ty(0)?)?;
-            same(ty(1)?, e, "the default has the option's type")?;
-            Ok(e)
+            join(p, e, ty(1)?).ok_or(format!("{f:?}: the default has the option's type"))
         }
         LibFn::OptMap => {
             arity(2)?;
@@ -1548,6 +1739,11 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
             let st = lookup(TypeDef::Str)?;
             same(ty(0)?, st, "to_lowercase of a String")?;
             Ok(st)
+        }
+        LibFn::StrParseI64 => {
+            arity(1)?;
+            same(ty(0)?, lookup(TypeDef::Str)?, "parse_i64 of a String")?;
+            lookup(TypeDef::Option(lookup(TypeDef::Int(IntTy::I64))?))
         }
         LibFn::StrToUtf8 => {
             arity(1)?;
@@ -1652,6 +1848,13 @@ fn builtin_type(p: &Program, r: Cx<'_>, b: &BuiltinFn, args: &[Expr]) -> Result<
             }
             lookup(TypeDef::F64)
         }
+        BuiltinFn::Error { ty } => {
+            arity(1)?;
+            if types.first() != Some(&lookup(TypeDef::Str)?) {
+                return Err("error takes a String message".into());
+            }
+            Ok(*ty)
+        }
         BuiltinFn::RandRange => {
             if types.len() < 3 {
                 return Err("rand_range needs lower, upper and a stable key".into());
@@ -1744,9 +1947,11 @@ fn builtin_type(p: &Program, r: Cx<'_>, b: &BuiltinFn, args: &[Expr]) -> Result<
             arity(1)?;
             if !matches!(
                 types.first().and_then(|t| p.types.get(*t)),
-                Some(TypeDef::Vec(_) | TypeDef::Set(_) | TypeDef::Map(..) | TypeDef::Str | TypeDef::Bytes)
+                Some(
+                    TypeDef::Vec(_) | TypeDef::Set(_) | TypeDef::Map(..) | TypeDef::Str | TypeDef::Bytes | TypeDef::Blob
+                )
             ) {
-                return Err("len expects a collection, String or Bytes".into());
+                return Err("len expects a collection, String, Bytes or a Blob".into());
             }
             lookup(TypeDef::Int(IntTy::U64))
         }
@@ -1756,21 +1961,19 @@ fn builtin_type(p: &Program, r: Cx<'_>, b: &BuiltinFn, args: &[Expr]) -> Result<
                 *types.first().ok_or("missing operand")?,
                 *types.get(1).ok_or("missing operand")?,
             );
-            // The wider operand's type (`Vec<Node<R>> ++ Vec<Node>` is a `Vec<Node>`).
-            let ty = if assignable(p, a, b) { b } else { a };
-            if !assignable(p, a, ty)
-                || !assignable(p, b, ty)
-                || !matches!(p.types.get(ty), Some(TypeDef::Str | TypeDef::Bytes | TypeDef::Vec(_)))
-            {
-                return Err("concat expects two Strings, Bytes or Vecs of one type".into());
+            // The join of the operands (`Vec<Node<R>> ++ Vec<Node<S>>` is a `Vec<Node>`).
+            match join(p, a, b) {
+                Some(ty) if matches!(p.types.get(ty), Some(TypeDef::Str | TypeDef::Bytes | TypeDef::Vec(_))) => Ok(ty),
+                _ => Err("concat expects two Strings, Bytes or Vecs of one type".into()),
             }
-            Ok(ty)
         }
         BuiltinFn::Contains => {
             arity(2)?;
             let container = types.first().and_then(|t| p.types.get(*t)).ok_or("missing container")?;
             let needle = *types.get(1).ok_or("missing needle")?;
-            if !matches!(container,TypeDef::Vec(t)|TypeDef::Set(t) if *t==needle) {
+            // A membership test compares the needle with the elements (a map's keys): the types may differ in roles.
+            if !matches!(container, TypeDef::Vec(t) | TypeDef::Set(t) | TypeDef::Map(t, _) if same_but_roles(p, *t, needle))
+            {
                 return Err("contains element type mismatch".into());
             }
             lookup(TypeDef::Bool)
@@ -1791,7 +1994,7 @@ fn builtin_type(p: &Program, r: Cx<'_>, b: &BuiltinFn, args: &[Expr]) -> Result<
             arity(1)?;
             lookup(TypeDef::Int(IntTy::U64))
         }
-        BuiltinFn::Unwrap { .. } | BuiltinFn::Entries | BuiltinFn::Error => {
+        BuiltinFn::Unwrap { .. } | BuiltinFn::Entries => {
             let mut candidates = p.fns.iter().filter(|f| matches!(&f.body,FnBody::Builtin(x) if x==b));
             let decl = candidates.next().ok_or("builtin signature is not declared")?;
             if candidates.next().is_some() {

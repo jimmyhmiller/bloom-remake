@@ -1,0 +1,11 @@
+//! S7 review: a generator unified its pattern with the source's element type, so a variable the pattern binds and
+//! that another atom refines narrowed the element type for every other use of the source.
+program gen_copies_element version 1;
+role A: process;
+role B: process;
+at A {
+    table peers(s: Set<Node>);
+    table a_node(n: Node<A>);
+    table b_node(n: Node<B>);
+    view both(x, y) = peers(s), x in s, a_node(x), y in s, b_node(y);
+}

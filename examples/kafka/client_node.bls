@@ -49,3 +49,88 @@ record_metadata: on up.data(c, _seq, bytes), session(c, f),
         let Some(m) = metadata_answer(fr) {
     emit metadata_seen(m);
 }
+
+// ---------------------------------------------------------------- producing and reading back (slice 7, item 8)
+//
+// With `CLIENT_BATCHES` above 0 the client also produces that many batches to `CLIENT_TOPIC` (auto-created through
+// Metadata), one at a time with acks -1, then reads every partition back from offset 0 to its high watermark. Its
+// progress is durable, so a crash of the client resumes it; a produce whose connection closed unanswered is not
+// sent again (it may or may not be in the log).
+
+/// The topic, once Metadata has named it: its id and partition count.
+durable table topic_seen(id: Bytes, partitions: u64) key();
+/// The next batch to send (no row: 0), the batches sent, and the answers.
+durable table produced_next(k: u64) key();
+durable table sent(k: u64) key(k);
+durable table acked(k: u64, partition: i32, base: i64, error: i16) key(k);
+/// Where the read is (no row: partition 0, offset 0), whether it is done, and what it read.
+durable table reading(partition: i32, next: i64) key();
+durable table read_done(done: bool) key();
+durable table consumed(partition: i32, offset: i64, value: Bytes) key(partition, offset);
+
+/// Per connection: the next write's `seq` (writes are numbered from 0 on each connection; the first two are sent
+/// when it opens). One request is in flight at a time, so a connection writes at most once a tick after that.
+table wseq(c: Conn, next: u64) key(c);
+
+view progress(k = max!(x default 0u64)) = produced_next(x);
+view read_at(p = max!(x default 0i32), off = max!(y default 0i64)) = reading(x, y);
+
+/// The response frames that arrive this tick, per connection.
+view frames(c, fr) = up.data(c, _seq, bytes), session(c, f), fr in feed(f, bytes).frames;
+
+ask_topic: on up.opened(c, _req, _peer, _at) where CLIENT_BATCHES > 0u64 {
+    send up.write(c, 1, [Part::Bytes(encode_metadata_request(CORR_TOPIC, "blossom", Some([CLIENT_TOPIC])))]);
+    emit wseq(c, 2);
+}
+
+forget_wseq: on up.closed(c, _why), wseq(c, n) {
+    delete wseq(c, n);
+}
+
+/// Once the topic is known (on every connection): resume producing, or reading.
+learn_topic: on frames(c, fr), let Some(t) = topic_answer(fr) {
+    upsert topic_seen(t.0, t.1);
+}
+
+resume_produce: on frames(c, fr), let Some(t) = topic_answer(fr), progress(k), wseq(c, n) where k < CLIENT_BATCHES {
+    send up.write(c, n, [Part::Bytes(produce_frame(k, t.1))]);
+    upsert wseq(c, n + 1u64);
+    upsert produced_next(k + 1u64);
+    emit sent(k);
+}
+
+resume_read: on frames(c, fr), let Some(t) = topic_answer(fr), progress(k), read_at(p, off), not read_done(_), wseq(c, n)
+        where k >= CLIENT_BATCHES && CLIENT_BATCHES > 0u64 {
+    send up.write(c, n, [Part::Bytes(encode_fetch_request(CORR_FETCH, "blossom", t.0, p, off))]);
+    upsert wseq(c, n + 1u64);
+}
+
+/// A produce answered: record it, then send the next batch, or start reading.
+after_produce: on frames(c, fr), let Some(a) = produce_answer(fr), topic_seen(id, parts), wseq(c, n) {
+    emit acked(a.0, (a.0 % parts) as i32, a.2, a.1);
+    upsert wseq(c, n + 1u64);
+    if a.0 + 1u64 < CLIENT_BATCHES {
+        send up.write(c, n, [Part::Bytes(produce_frame(a.0 + 1u64, parts))]);
+        upsert produced_next(a.0 + 2u64);
+        emit sent(a.0 + 1u64);
+    } else {
+        send up.write(c, n, [Part::Bytes(encode_fetch_request(CORR_FETCH, "blossom", id, 0i32, 0i64))]);
+    }
+}
+
+/// A fetch answered: record its records, then read on or finish.
+record_fetch: on frames(_c, fr), let Some(r) = fetched_answer(fr), read_at(p, _off), rec in r.2 {
+    emit consumed(p, rec.0, rec.1);
+}
+
+after_fetch: on frames(c, fr), let Some(r) = fetched_answer(fr), read_at(p, off), topic_seen(id, parts), wseq(c, w),
+        let Some(n) = next_read(p, off, parts, r.0, r.1, r.2) {
+    upsert reading(n.0, n.1);
+    send up.write(c, w, [Part::Bytes(encode_fetch_request(CORR_FETCH, "blossom", id, n.0, n.1))]);
+    upsert wseq(c, w + 1u64);
+}
+
+finish_read: on frames(_c, fr), let Some(r) = fetched_answer(fr), read_at(p, off), topic_seen(_id, parts)
+        where next_read(p, off, parts, r.0, r.1, r.2) == None {
+    emit read_done(true);
+}

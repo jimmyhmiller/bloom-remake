@@ -448,6 +448,8 @@ impl Lowerer<'_> {
                 failed: st.failed.map(|r| self.rel(r)).transpose()?,
                 write: self.rel(st.write)?,
                 close: self.rel(st.close)?,
+                pause: self.rel(st.pause)?,
+                resume: self.rel(st.resume)?,
                 dial: st.dial.map(|r| self.rel(r)).transpose()?,
             };
             self.b.declare_stream(decl).map_err(ir)?;

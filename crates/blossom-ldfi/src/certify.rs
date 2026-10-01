@@ -188,13 +188,19 @@ fn step_all(
     let results: Vec<Result<Vec<Stepped>, LdfiError>> = std::thread::scope(|scope| {
         let handles: Vec<_> = items
             .chunks(chunk)
-            .map(|part| scope.spawn(move || part.iter().map(one).collect::<Result<Vec<_>, _>>()))
+            .map(|part| {
+                std::thread::Builder::new()
+                    .stack_size(blossom_ir::depth::EVAL_STACK_BYTES)
+                    .spawn_scoped(scope, move || part.iter().map(one).collect::<Result<Vec<_>, _>>())
+            })
             .collect();
         handles
             .into_iter()
-            .map(|h| {
-                h.join()
-                    .unwrap_or_else(|_| Err(internal_error!("a certification worker panicked").into()))
+            .map(|h| match h {
+                Ok(h) => h
+                    .join()
+                    .unwrap_or_else(|_| Err(internal_error!("a certification worker panicked").into())),
+                Err(e) => Err(internal_error!("a certification worker could not start: {e}").into()),
             })
             .collect()
     });
@@ -230,6 +236,7 @@ fn step_state(
                 egress: BTreeSet::new(),
                 host: BTreeSet::new(),
                 firings: Vec::new(),
+                blobs: std::collections::BTreeMap::new(),
             });
             continue;
         }

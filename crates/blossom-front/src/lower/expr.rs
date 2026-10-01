@@ -24,6 +24,8 @@ pub(crate) struct Draft {
     pub vars: Vec<(Symbol, TypeId)>,
     pub lits: Vec<Literal>,
     pub map: BTreeMap<HVarId, VarId>,
+    /// Variables whose type in this rule is not their scope's: inside a handler block, what its condition refines.
+    pub refined: BTreeMap<HVarId, TypeId>,
     names: BTreeSet<Symbol>,
     fresh: u32,
 }
@@ -35,8 +37,17 @@ impl Draft {
             vars: Vec::new(),
             lits: Vec::new(),
             map: BTreeMap::new(),
+            refined: BTreeMap::new(),
             names: BTreeSet::new(),
             fresh: 0,
+        }
+    }
+
+    /// A draft for a rule inside handler blocks, whose variables `refined` have those types.
+    pub fn refined(scope: ScopeId, refined: BTreeMap<HVarId, TypeId>) -> Draft {
+        Draft {
+            refined,
+            ..Draft::new(scope)
         }
     }
 
@@ -70,12 +81,15 @@ impl Draft {
             .get(v.index())
             .map(|x| x.name)
             .ok_or_else(|| internal_error!("variable {v:?} is not in its scope"))?;
-        let ty = hir
-            .var_types
-            .get(self.scope.index())
-            .and_then(|t| t.get(v.index()))
-            .copied()
-            .ok_or_else(|| internal_error!("variable {} has no type", name.as_str()))?;
+        let ty = match self.refined.get(&v) {
+            Some(ty) => *ty,
+            None => hir
+                .var_types
+                .get(self.scope.index())
+                .and_then(|t| t.get(v.index()))
+                .copied()
+                .ok_or_else(|| internal_error!("variable {} has no type", name.as_str()))?,
+        };
         let id = self.declare(name, ty);
         self.map.insert(v, id);
         Ok(id)
@@ -268,9 +282,36 @@ fn bin_op(op: BinOp) -> Result<ir::BinOp, InternalError> {
     })
 }
 
+/// Whether values of a type order numerically within their kind (the IR's `Lt`): integers, durations, instants,
+/// strings, bytes and nodes. Everything else orders by the canonical order.
+fn scalar_ordered(def: Option<&TypeDef>) -> bool {
+    matches!(
+        def,
+        Some(
+            TypeDef::Int(_) | TypeDef::Duration | TypeDef::Instant | TypeDef::Str | TypeDef::Bytes | TypeDef::Node(_)
+        )
+    )
+}
+
 impl Lowerer<'_> {
     pub fn konst(&mut self, v: Value) -> Result<Term, InternalError> {
         Ok(Term::Const(self.b.intern_const(v).map_err(ir_err)?))
+    }
+
+    /// A constant of type `ty` as an expression. The IR types an untyped constant by the first type its value fits,
+    /// which is not `ty` when the value does not decide it (an empty collection, `None`): it is then ascribed.
+    fn const_expr(&mut self, v: Value, ty: TypeId) -> Result<Expr, InternalError> {
+        let types = self.b.types();
+        let decided = types.iter().find(|(t, _)| types.check_value(*t, &v).is_ok()).map(|(t, _)| t);
+        let term = Expr::Term(self.konst(v)?);
+        Ok(if decided == Some(ty) {
+            term
+        } else {
+            Expr::Typed {
+                ty,
+                expr: Box::new(term),
+            }
+        })
     }
 
     /// An expression as a term: a variable, a constant, or a fresh variable bound to it.
@@ -293,7 +334,7 @@ impl Lowerer<'_> {
     /// Lowers an expression.
     pub fn expr(&mut self, d: &mut Draft, e: &HExpr) -> Result<Expr, InternalError> {
         if let Some(v) = try_const(self.hir, e) {
-            return Ok(Expr::Term(self.konst(v)?));
+            return self.const_expr(v, ty_of(e)?);
         }
         Ok(match &e.kind {
             HExprKind::Var(v) => Expr::Term(Term::Var(d.var(self.hir, *v)?)),
@@ -308,6 +349,32 @@ impl Lowerer<'_> {
                     return Ok(Expr::Call {
                         f: ir::FnRef::Builtin(ir::BuiltinFn::Concat),
                         args: vec![self.expr(d, lhs)?, self.expr(d, rhs)?],
+                    });
+                }
+                // `<` on values other than scalars of one kind is the canonical order (LANGUAGE §5.5). It is total,
+                // so `a > b` is `!(a <= b)`: the operands keep their order, and so does their evaluation.
+                if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+                    && !scalar_ordered(self.hir.types.get(ty_of(lhs)?))
+                {
+                    let (l, r) = (Box::new(self.expr(d, lhs)?), Box::new(self.expr(d, rhs)?));
+                    let (canon, negated) = match op {
+                        BinOp::Lt => (ir::BinOp::CanonLt, false),
+                        BinOp::Le => (ir::BinOp::CanonLe, false),
+                        BinOp::Gt => (ir::BinOp::CanonLe, true),
+                        _ => (ir::BinOp::CanonLt, true),
+                    };
+                    let cmp = Expr::Binary {
+                        op: canon,
+                        lhs: l,
+                        rhs: r,
+                    };
+                    return Ok(if negated {
+                        Expr::Unary {
+                            op: ir::UnOp::Not,
+                            arg: Box::new(cmp),
+                        }
+                    } else {
+                        cmp
                     });
                 }
                 Expr::Binary {
@@ -450,16 +517,20 @@ impl Lowerer<'_> {
             HExprKind::Collection { kind, elems } => {
                 let mut xs = Vec::new();
                 if *kind == CollectionKind::Map {
-                    // The IR's map literal holds (key, value) pairs.
+                    // The IR's map literal holds (key, value) pairs, each typed as the map's entry (a key or value
+                    // may be narrower in its roles than the map's, as `self` is).
+                    let Some(TypeDef::Map(kt, vt)) = self.b.types().get(ty_of(e)?).cloned() else {
+                        return Err(internal_error!("a map literal whose type is not a map"));
+                    };
+                    let ty = self
+                        .b
+                        .types()
+                        .insert(TypeDef::Tuple(vec![kt, vt]))
+                        .map_err(|e| internal_error!("interning a type: {e}"))?;
                     for pair in elems.chunks(2) {
                         let [k, v] = pair else {
                             return Err(internal_error!("a map literal with a dangling key"));
                         };
-                        let ty = self
-                            .b
-                            .types()
-                            .insert(TypeDef::Tuple(vec![ty_of(k)?, ty_of(v)?]))
-                            .map_err(|e| internal_error!("interning a type: {e}"))?;
                         xs.push(Expr::Construct {
                             ty,
                             variant: None,
@@ -608,6 +679,8 @@ impl Lowerer<'_> {
                         role: RoleId::from_raw(r.0),
                     },
                     Builtin::RandRange => ir::BuiltinFn::RandRange,
+                    Builtin::Rand => ir::BuiltinFn::Rand,
+                    Builtin::Error => ir::BuiltinFn::Error { ty: ty_of(e)? },
                     Builtin::Majority(r) => ir::BuiltinFn::Majority {
                         domain: ir::MajorityDomain::Role(RoleId::from_raw(r.0)),
                     },

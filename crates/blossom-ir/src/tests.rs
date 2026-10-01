@@ -336,7 +336,7 @@ fn validator_v8_polymorphic_builtin_requires_monomorphic_signature() {
         .push(Literal::Bind {
             pat: Pattern::Var(VarId::from_raw(0)),
             expr: Expr::Call {
-                f: FnRef::Builtin(BuiltinFn::Error),
+                f: FnRef::Builtin(BuiltinFn::Entries),
                 args: vec![Expr::Term(Term::Const(message))],
             },
         });
@@ -344,11 +344,11 @@ fn validator_v8_polymorphic_builtin_requires_monomorphic_signature() {
     p.fns
         .push(FnDecl {
             id: FnId::from_raw(0),
-            name: name("error_u64"),
+            name: name("entries_u64"),
             params: vec![(s("message"), str_ty)],
             ret: u,
             vars: IndexVec::new(),
-            body: FnBody::Builtin(BuiltinFn::Error),
+            body: FnBody::Builtin(BuiltinFn::Entries),
             props: FnProps {
                 classes: vec![],
                 injective: Claim::Absent,

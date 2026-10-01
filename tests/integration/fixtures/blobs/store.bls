@@ -1,0 +1,47 @@
+//! Blobs in durable rows (FOREIGN-PROTOCOLS §5): every chunk read from the stream is stored as a blob in a durable
+//! table and acknowledged by writing the blob back (`Part::Blob`), released only after the tick is synced. A chunk
+//! can be forgotten, which deletes its row; after a checkpoint its blob is collected.
+program blob_store version 1;
+
+stream s: listen;
+
+input forget(key: Bytes);
+
+durable table stored(key: Bytes, blob: Blob) key(key);
+
+ack: on s.data(c, seq, b), let blob = Blob::of(b) {
+    upsert stored(b, blob);
+    send s.write(c, seq, [Part::Blob(blob, 0, blob.len())]);
+}
+
+drop: on forget(k), stored(k, blob) {
+    delete stored(k, blob);
+}
+
+/// Stores a key directly (its blob is the key's bytes), and reads a stored blob back into `peeked`.
+input put(key: Bytes);
+input peek(key: Bytes);
+durable table peeked(key: Bytes, bytes: Bytes) key(key);
+
+put_now: on put(k), let blob = Blob::of(k) {
+    emit stored(k, blob);
+}
+
+read_back: on peek(k), stored(k, blob), let Some(b) = blob.read(0, blob.len()) {
+    emit peeked(k, b);
+}
+
+/// A key kept as bytes, and a view deriving its blob: the view's row outlives the tick that made the blob (the
+/// engine keeps derived rows across ticks), and a later tick copies the blob into a durable row.
+input keep(key: Bytes);
+input commit_kept(key: Bytes);
+table kept(key: Bytes) key(key);
+view kept_blob(k, blob) = kept(k), let blob = Blob::of(k);
+
+keep_it: on keep(k) {
+    emit kept(k);
+}
+
+commit_it: on commit_kept(k), kept_blob(k, blob) {
+    emit stored(k, blob);
+}

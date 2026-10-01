@@ -1,0 +1,201 @@
+//! The broker's topics: the `topic` table and each partition's offsets, and the handlers of Metadata, CreateTopics,
+//! DeleteTopics and DescribeConfigs. Included next to `broker_node.bls`, whose `head` view gives each connection's
+//! next request.
+//!
+//! Requests from several connections are answered in one tick, and their answers must fit one sequential order.
+//! So a tick changes the topics for one request at most, the **writer**: the oldest request (by arrival, then
+//! connection) that creates or deletes topics, a Metadata request that auto-creates one included. The other such
+//! requests wait for a later tick at the head of their queues. The writer sees the topics as the tick found them;
+//! every other request answered in the tick (Metadata, DescribeConfigs, a CreateTopics that only validates) sees them
+//! after the writer's change. The tick's order is therefore the writer, then the rest. A change is durable before
+//! any answer that reveals it leaves, since a tick's writes leave only after its record syncs.
+//!
+//! (Letting several writers change different topics in one tick is not enough: a DeleteTopics that misses a topic
+//! another request creates, and a Metadata request that sees both that topic and one the deletion removes, admit no
+//! order.)
+
+/// The topics, by name: each one's id, partition count and the configurations given at its creation.
+durable table topic(name: String, id: Bytes, partitions: i32, configs: Vec<(String, String)>) key(name);
+/// Per partition (by topic id): the offset the next appended record gets.
+durable table log_end(tid: Bytes, part: i32, next: i64) key(tid, part);
+/// Per partition (by topic id): the first offset still held.
+durable table log_start(tid: Bytes, part: i32, start: i64) key(tid, part);
+
+/// The topics by collision key, as the tick found them: two topics whose names differ only in `.` against `_` may
+/// not both exist.
+view topic_key(k, name) = topic(name, _, _, _), let k = collision_key(name);
+
+/// A supported request whose body this broker cannot decode closes the connection.
+undecodable: while head(c, i, _seq, key, version, _corr, fr, at) where not pure_request(key, version) && not stateful_body_ok(key, fr) {
+    send kafka.close(c);
+    delete queued(c, i, fr, at);
+}
+
+view create_head(c, i, seq, corr, fr, at, req) =
+    head(c, i, seq, key, _version, corr, fr, at), key == API_CREATE_TOPICS,
+    let Some(body) = request_body(fr), let Some(req) = decode_create_topics(body);
+
+view delete_head(c, i, seq, corr, fr, at, req) =
+    head(c, i, seq, key, _version, corr, fr, at), key == API_DELETE_TOPICS,
+    let Some(body) = request_body(fr), let Some(d) = decode_delete_topics(body), let req = d.0;
+
+view metadata_head(c, i, seq, corr, fr, at, req) =
+    head(c, i, seq, key, _version, corr, fr, at), key == API_METADATA,
+    let Some(body) = request_body(fr), let Some(req) = decode_metadata_request(body);
+
+/// Each CreateTopics request's context with nothing taken (what the writer's candidates are decided by), and each
+/// DeleteTopics request's: computed once per request, so an entry's decision is a lookup.
+view create_context_of(c, ctx) = create_head(c, _, _, _, _, _, req), let ctx = create_context(create_names(req), []);
+view delete_context_of(c, ctx) = delete_head(c, _, _, _, _, _, req), let ctx = delete_context(req);
+
+view describe_head(c, i, seq, corr, fr, at, req) =
+    head(c, i, seq, key, _version, corr, fr, at), key == API_DESCRIBE_CONFIGS,
+    let Some(body) = request_body(fr), let Some(req) = decode_describe_configs(body);
+
+// ---------------------------------------------------------------- the writer
+
+/// The requests at the heads of the queues that would change the broker's state, with their arrival: a CreateTopics
+/// that is not only validating, a DeleteTopics, a Metadata request that would auto-create a topic, and an
+/// InitProducerId (`produce_node.bls`), which allocates a producer id.
+view writes(c, at) {
+    create_head(c, _, _, _, _, at, req), not req.validate_only;
+    delete_head(c, _, _, _, _, at, _req);
+    metadata_head(c, _, _, _, _, at, req), name in metadata_creates(req, AUTO_CREATE_TOPICS),
+        not topic_key(collision_key(name), _);
+    init_pid_head(c, _, _, _, _, at, _req);
+}
+
+/// This tick's writer: the oldest writing request.
+view writer(c) = writes(c, at), let order = (at, c), argmin!(order);
+
+
+// ---------------------------------------------------------------- the writer's change
+
+/// The topics the writer creates, by collision key: the valid entries of its CreateTopics, or the names its Metadata
+/// request auto-creates. None collides with a topic that exists (the entries that would are refused).
+view creating(k, t) {
+    writer(c), create_head(c, _, _, _, _, _, req), create_context_of(c, ctx), u in req.topics,
+        let Some(t) = create_candidate(req, ctx, u, topic_id(rand(u.name, 0), rand(u.name, 1))), let k = collision_key(t.name),
+        not topic_key(k, _);
+    writer(c), metadata_head(c, _, _, _, _, _, req), name in metadata_creates(req, AUTO_CREATE_TOPICS),
+        let k = collision_key(name), not topic_key(k, _),
+        let t = NewTopic { name: name, id: topic_id(rand(name, 0), rand(name, 1)), partitions: DEFAULT_PARTITIONS, configs: [] };
+}
+
+/// The topics the writer's DeleteTopics finds, by entry: an entry names one topic (by name or by id), no other entry
+/// of its request names it again the same way, and an entry by name finds a topic no entry names by id.
+view deleting(e, name, id) {
+    writer(c), delete_head(c, _, _, _, _, _, req), delete_context_of(c, ctx), (e, s) in req.enumerate(),
+        let Some(name) = delete_by_name(ctx, s), topic(name, id, _, _) where not id_supplied(ctx, id);
+    writer(c), delete_head(c, _, _, _, _, _, req), delete_context_of(c, ctx), (e, s) in req.enumerate(),
+        let Some(id) = delete_by_id(ctx, s), topic(name, id, _, _);
+}
+
+make_topic: while creating(_k, t) {
+    next topic(t.name, t.id, t.partitions, t.configs);
+}
+
+make_partitions: while creating(_k, t), p in range(0, t.partitions as u64) {
+    next log_end(t.id, p as i32, 0i64);
+    next log_start(t.id, p as i32, 0i64);
+    next segment(t.id, p as i32, 0i64, 0i64, -1i64, -1i64, now().as_millis());
+    next active_segment(t.id, p as i32, 0i64);
+}
+
+remove_topic: while deleting(_e, name, id), topic(name, id, p, cfg) {
+    delete topic(name, id, p, cfg);
+}
+remove_log_end: while deleting(_e, _name, id), log_end(id, p, n) {
+    delete log_end(id, p, n);
+}
+remove_log_start: while deleting(_e, _name, id), log_start(id, p, n) {
+    delete log_start(id, p, n);
+}
+
+/// The topics as the rest of the tick sees them: after the writer's change.
+view topic_now(name, id, p, cfg) {
+    topic(name, id, p, cfg), not deleting(_, name, id);
+    creating(_k, t), let name = t.name, let id = t.id, let p = t.partitions, let cfg = t.configs;
+}
+
+/// The topics by collision key, after the writer's change.
+view topic_now_key(k, name) = topic_now(name, _, _, _), let k = collision_key(name);
+
+/// The requests that wait for a later tick: the writing requests other than the writer, a Metadata request that
+/// would auto-create a topic once the writer's change is made (the writer deleted it), and a Produce request naming a
+/// topic the writer changes (`produce_node.bls`).
+view waiting(c) {
+    writes(c, _), not writer(c);
+    metadata_head(c, _, _, _, _, _, req), name in metadata_creates(req, AUTO_CREATE_TOPICS),
+        not topic_now_key(collision_key(name), _), not writer(c);
+    produce_waits(c);
+    fetch_waits(c);
+    list_offsets_waits(c);
+}
+
+// ---------------------------------------------------------------- CreateTopics
+
+/// Per CreateTopics request that creates: the names of the existing topics its entries collide with (their own
+/// names included), as the tick found them (it is the writer, when it is answered).
+view create_taken(c, names = collect!(n)) = per create_head(c, _, _, _, _, _, req), u in req.topics,
+    topic_key(collision_key(u.name), n);
+
+/// Per CreateTopics request that only validates: the same, after the writer's change.
+view validate_taken(c, names = collect!(n)) = per create_head(c, _, _, _, _, _, req), u in req.topics,
+    topic_now_key(collision_key(u.name), n);
+
+/// Per CreateTopics request: the ids of the topics it creates (none unless it is the writer).
+view create_ids(c, ids = collect!((n, id))) = per create_head(c, _, _, _, _, _, _req), writer(c), creating(_k, t),
+    let n = t.name, let id = t.id;
+
+answer_create: while create_head(c, i, seq, corr, fr, at, req), writer(c), create_taken(c, taken), create_ids(c, ids) {
+    send kafka.write(c, seq, [Part::Bytes(encode_create_topics_response(corr, create_outcomes(req, taken, ids)))]);
+    upsert answering(c, i + 1, seq + 1);
+    delete queued(c, i, fr, at);
+}
+
+answer_validate: while create_head(c, i, seq, corr, fr, at, req), validate_taken(c, taken) where req.validate_only {
+    send kafka.write(c, seq, [Part::Bytes(encode_create_topics_response(corr, create_outcomes(req, taken, [])))]);
+    upsert answering(c, i + 1, seq + 1);
+    delete queued(c, i, fr, at);
+}
+
+// ---------------------------------------------------------------- DeleteTopics
+
+/// Per DeleteTopics request: the entries it deletes (entry, name, id); none unless it is the writer.
+view delete_found(c, found = collect!((e, n, id))) = per delete_head(c, _, _, _, _, _, _req), writer(c),
+    deleting(e, n, id);
+
+/// Per DeleteTopics request: its entries by name whose topic another entry names by id.
+view delete_clash(c, es = collect!(e)) = per delete_head(c, _, _, _, _, _, req), delete_context_of(c, ctx),
+    (e, s) in req.enumerate(), let Some(name) = delete_by_name(ctx, s), topic(name, id, _, _) where id_supplied(ctx, id);
+
+answer_delete: while delete_head(c, i, seq, corr, fr, at, req), writer(c), delete_found(c, found), delete_clash(c, clash) {
+    send kafka.write(c, seq, [Part::Bytes(encode_delete_topics_response(corr, delete_outcomes(req, found, clash)))]);
+    upsert answering(c, i + 1, seq + 1);
+    delete queued(c, i, fr, at);
+}
+
+// ---------------------------------------------------------------- Metadata
+
+/// Per Metadata request: the topics it sees, after the writer's change (which may be its own auto-creation).
+view metadata_known(c, ts = collect!(TopicInfo { name: n, id: id, partitions: p })) =
+    per metadata_head(c, _, _, _, _, _, _req), topic_now(n, id, p, _);
+
+answer_metadata: while metadata_head(c, i, seq, corr, fr, at, req), not waiting(c), metadata_known(c, known) {
+    send kafka.write(c, seq, [Part::Bytes(encode_metadata_response(corr, req, brokers(), CLUSTER_ID, NODE_ID, known))]);
+    upsert answering(c, i + 1, seq + 1);
+    delete queued(c, i, fr, at);
+}
+
+// ---------------------------------------------------------------- DescribeConfigs
+
+/// Per DescribeConfigs request: the configurations of the topics it names that exist, after the writer's change.
+view describe_found(c, sets = collect!((n, cfg))) = per describe_head(c, _, _, _, _, _, req), r in req,
+    r.kind == CONFIG_TOPIC, let n = r.name, topic_now(n, _, _, cfg);
+
+answer_describe: while describe_head(c, i, seq, corr, fr, at, req), describe_found(c, sets) {
+    send kafka.write(c, seq, [Part::Bytes(encode_describe_configs_response(corr, describe_results(req, sets)))]);
+    upsert answering(c, i + 1, seq + 1);
+    delete queued(c, i, fr, at);
+}

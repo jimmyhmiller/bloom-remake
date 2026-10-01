@@ -1,33 +1,108 @@
 //! The broker's node: its `kafka` stream, per-connection state and handlers. Included by `broker.bls`, and by a
 //! test cluster that places it at a role.
+//!
+//! Kafka answers a connection's requests one at a time, in order: a request's response is written before the next
+//! request is looked at. So each connection has a queue. `serve` cuts a chunk's complete frames into it, and the
+//! request at its head is answered by the handler for its API, at most one per connection per tick. A request
+//! whose answer depends on the broker's state (topics, logs) reads that state in the tick it is answered. A full
+//! queue stops the connection being read until it is shorter (`throttle`), so a pipelining client cannot make the
+//! broker hold more than a bounded amount.
 
 stream kafka: listen;
 
-/// Per connection: the bytes not yet consumed, and the next write's sequence number.
-table conn(c: Conn, bytes: Framer, next_seq: u64) key(c);
+/// Per connection: its reassembly state (written by `serve` only).
+table reassembly(c: Conn, bytes: Framer) key(c);
+/// Per connection: how many requests have arrived (the next one's index), and their bytes (written by `serve` only).
+table received(c: Conn, n: u64, bytes: u64) key(c);
+/// Per connection: the index of the next request to answer, and the next write's `seq` (written by the answers).
+table answering(c: Conn, next: u64, seq: u64) key(c);
+/// The requests waiting their turn, by connection and arrival index, with their arrival time.
+table queued(c: Conn, i: u64, frame: Bytes, at: Instant) key(c, i);
+/// Where each request not yet answered starts in its connection's request bytes: the bytes of the requests before it.
+table frame_start(c: Conn, i: u64, start: u64) key(c, i);
+/// The connections the broker stopped reading, because their queues are full.
+table paused(c: Conn) key(c);
 
 accept: on kafka.opened(c, _peer, _at) {
-    emit conn(c, framer(), 0);
+    emit reassembly(c, framer());
+    emit received(c, 0, 0);
+    emit answering(c, 0, 0);
 }
 
-/// A connection's chunks come one per tick, after its `opened` tick, so the state read here is current.
-serve: on kafka.data(c, _seq, bytes), conn(c, f, n),
-        let fed = feed(f, bytes),
-        let (replies, refused) = answer_all(fed.frames) {
-    if replies.len() > 0 {
-        send kafka.write(c, n, [Part::Bytes(replies)]);
-    }
-    if fed.bad || refused {
+/// A connection's chunks come one per tick, after its `opened` tick, so the state read here is current. A frame
+/// whose size is invalid closes the connection.
+serve: on kafka.data(c, _seq, bytes), reassembly(c, f), received(c, n, b), let fed = feed(f, bytes) {
+    upsert reassembly(c, fed.next);
+    upsert received(c, n + fed.frames.len(), b + frames_bytes(fed.frames));
+    if fed.bad {
         send kafka.close(c);
     }
-    if replies.len() > 0 {
-        upsert conn(c, fed.next, n + 1);
-    }
-    if replies.len() == 0 {
-        upsert conn(c, fed.next, n);
-    }
 }
 
-forget: on kafka.closed(c, _reason), conn(c, f, n) {
-    delete conn(c, f, n);
+enqueue: on kafka.data(c, _seq, bytes), reassembly(c, f), received(c, n, b), let fed = feed(f, bytes),
+        (k, x) in with_starts(b, fed.frames).enumerate() {
+    emit queued(c, n + k, x.1, now());
+    emit frame_start(c, n + k, x.0);
+}
+
+/// An answered request's start is forgotten.
+forget_start: while frame_start(c, i, s), answering(c, head, _) where i < head {
+    delete frame_start(c, i, s);
+}
+
+/// Each connection whose queue holds as many requests, or as many bytes, as it may: the requests from its head on.
+view queue_full(c) = received(c, n, b), answering(c, i, _), frame_start(c, i, s)
+    where n - i >= MAX_QUEUED_REQUESTS || b - s >= MAX_QUEUED_BYTES;
+
+/// A full queue stops the connection being read; the chunks the host already read still arrive, so the queue can
+/// pass the bound by what the host read ahead. The head is answered without more of the connection's bytes, so the
+/// queue always gets shorter and the connection is read again.
+throttle: while queue_full(c), not paused(c) {
+    send kafka.pause(c);
+    upsert paused(c);
+}
+unthrottle: while paused(c), not queue_full(c) {
+    send kafka.resume(c);
+    delete paused(c);
+}
+
+/// The request at the head of each connection's queue, with its API key, version and correlation id.
+view head(c, i, seq, key, version, corr, fr, at) =
+    queued(c, i, fr, at), answering(c, i, seq), let Some(p) = frame_prefix(fr), let (key, version, corr) = p;
+
+/// A frame too short for a request header closes the connection.
+malformed: while queued(c, i, fr, at), answering(c, i, _), not frame_readable(fr) {
+    send kafka.close(c);
+    delete queued(c, i, fr, at);
+}
+
+/// A request answered from the request alone (ApiVersions, and the requests this broker refuses by closing).
+answer_pure: while head(c, i, seq, key, version, _corr, fr, at) where pure_request(key, version) {
+    if let Some(r) = answer(fr) {
+        send kafka.write(c, seq, [Part::Bytes(r)]);
+        upsert answering(c, i + 1, seq + 1);
+    }
+    if not answered(fr) {
+        send kafka.close(c);
+    }
+    delete queued(c, i, fr, at);
+}
+
+forget_reassembly: on kafka.closed(c, _reason), reassembly(c, f) {
+    delete reassembly(c, f);
+}
+forget_received: on kafka.closed(c, _reason), received(c, n, b) {
+    delete received(c, n, b);
+}
+forget_starts: on kafka.closed(c, _reason), frame_start(c, i, s) {
+    delete frame_start(c, i, s);
+}
+forget_paused: on kafka.closed(c, _reason), paused(c) {
+    delete paused(c);
+}
+forget_answering: on kafka.closed(c, _reason), answering(c, i, s) {
+    delete answering(c, i, s);
+}
+forget_queued: on kafka.closed(c, _reason), queued(c, i, fr, at) {
+    delete queued(c, i, fr, at);
 }

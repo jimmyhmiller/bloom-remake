@@ -18,7 +18,7 @@
 //! bound (`META.last_now`), which the node asks the driver to extend ahead of need, and a restart boots after the
 //! bound. So no instant a released tick exposed can be sampled again after a crash, whatever the wall clock does.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use blossom_base::{RelId, RoleId, internal_error};
@@ -65,6 +65,8 @@ pub struct NodeConfig {
     pub max_inflight: usize,
     /// The most bytes one connection's `data` event carries in one tick (FOREIGN-PROTOCOLS §1.2).
     pub max_stream_bytes: usize,
+    /// The most bytes of blobs the node keeps in memory before it drops those nothing references any more.
+    pub blob_cache_bytes: u64,
 }
 
 impl NodeConfig {
@@ -78,6 +80,7 @@ impl NodeConfig {
             max_batch_bytes: 8 * 1024 * 1024,
             max_inflight: 64,
             max_stream_bytes: 1024 * 1024,
+            blob_cache_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -100,6 +103,13 @@ pub struct Boot {
     /// Whether durable state was reloaded: every incarnation after the first. `recovered()` holds in the boot tick
     /// iff this is set (LANGUAGE §8.4, SEM-071).
     pub recovered: bool,
+    /// The node's durable blobs (FOREIGN-PROTOCOLS §5): where recovered rows' blobs are read from.
+    pub blobs: Arc<dyn blossom_value::BlobSource>,
+    /// The blobs the store holds: every recovered row's, and any no row holds, which a collection may delete.
+    pub stored: BTreeSet<blossom_value::BlobRef>,
+    /// Whether the image is exactly the installed checkpoint's (recovery replayed no WAL record after it): only then
+    /// can the next checkpoint be a delta layer on it.
+    pub at_checkpoint: bool,
 }
 
 /// Whether the node is running.
@@ -121,6 +131,9 @@ pub struct TickEffects {
     pub wal: Option<Delta>,
     /// Extend the reservation to these bounds (write them to `META`, then call [`Node::reserved`]).
     pub reserve: Option<Reservation>,
+    /// Blobs the WAL record references that are not durable yet: make each durable before the record's sync
+    /// (FOREIGN-PROTOCOLS §5), so recovery never finds a row whose blob is missing.
+    pub blobs: Vec<(blossom_value::BlobRef, Arc<[u8]>)>,
 }
 
 /// A released tick's externally visible effects.
@@ -189,6 +202,98 @@ pub struct Node<E: Executor> {
     released: Option<Tick>,
     halting: bool,
     state: NodeState,
+    /// Blobs created by earlier ticks that are not (known) durable, with their bytes.
+    blob_cache: BTreeMap<blossom_value::BlobRef, Arc<[u8]>>,
+    /// Blobs made durable (recovered with the image, or handed to the driver with a WAL record).
+    durable_blobs: BTreeSet<blossom_value::BlobRef>,
+    /// Where durable blobs are read.
+    store_blobs: Arc<dyn blossom_value::BlobSource>,
+    /// The net change of the released durable rows since the last checkpoint: the next checkpoint's delta layer.
+    since_checkpoint: crate::durable::DeltaAcc,
+    /// Whether `since_checkpoint` is the whole change since the installed checkpoint (false after a recovery that
+    /// replayed WAL records, until the next full checkpoint).
+    layerable: bool,
+    /// The blobs the WAL records since the last checkpoint reference (in their inserted rows, new or already
+    /// durable), each with the latest such record's tick: a recovery from that checkpoint may replay rows that hold
+    /// them.
+    recent_blobs: BTreeMap<blossom_value::BlobRef, Tick>,
+    /// How many rows of the executor's carried state (every relation it carries, durable or not) hold each blob.
+    carried_refs: BTreeMap<blossom_value::BlobRef, u64>,
+    /// How many rows of the released durable image hold each blob.
+    released_refs: BTreeMap<blossom_value::BlobRef, u64>,
+    /// The durable blobs no carried row holds: the only ones a collection looks at, so its work follows the change
+    /// rather than the state (FOREIGN-PROTOCOLS §5).
+    candidates: BTreeSet<blossom_value::BlobRef>,
+    /// The cached blobs' bytes, and the size past which the cache is next trimmed: twice what the last trim kept (at
+    /// least the budget), so a trim's work is paid for by the blobs cached since the last one.
+    cache_bytes: u64,
+    cache_trim_at: u64,
+    /// Blobs handed to the driver with a WAL record not known to be synced yet, with the record's tick: the driver
+    /// writes them before the record syncs, so until then a later tick reads their bytes here.
+    unsynced_blobs: BTreeMap<blossom_value::BlobRef, (Tick, Arc<[u8]>)>,
+}
+
+/// A node's blobs as its evaluator reads them: those created by earlier ticks, those handed to the driver whose
+/// record may not be synced yet, then the durable ones.
+#[derive(Debug)]
+pub struct NodeBlobs<'a> {
+    cache: &'a BTreeMap<blossom_value::BlobRef, Arc<[u8]>>,
+    unsynced: &'a BTreeMap<blossom_value::BlobRef, (Tick, Arc<[u8]>)>,
+    durable: &'a dyn blossom_value::BlobSource,
+}
+
+impl blossom_value::BlobSource for NodeBlobs<'_> {
+    fn get(&self, b: &blossom_value::BlobRef) -> Option<Arc<[u8]>> {
+        self.cache
+            .get(b)
+            .cloned()
+            .or_else(|| self.unsynced.get(b).map(|x| x.1.clone()))
+            .or_else(|| self.durable.get(b))
+    }
+}
+
+/// The blobs the rows hold.
+fn row_blobs<'r>(rows: impl IntoIterator<Item = &'r Row>, out: &mut BTreeSet<blossom_value::BlobRef>) {
+    for r in rows {
+        for v in r.iter() {
+            blossom_value::blobs_in(v, out);
+        }
+    }
+}
+
+/// Counts, in `refs`, each blob of each of `rows` once per row: up for rows added, down for rows removed. Returns
+/// the blobs whose count went from 0 to 1 (`added`) or from 1 to 0 (removed).
+fn count_blobs<'r>(
+    refs: &mut BTreeMap<blossom_value::BlobRef, u64>,
+    rows: impl IntoIterator<Item = &'r Row>,
+    added: bool,
+) -> Result<Vec<blossom_value::BlobRef>, NodeError> {
+    let mut changed = Vec::new();
+    for r in rows {
+        let mut bs = BTreeSet::new();
+        row_blobs(std::iter::once(r), &mut bs);
+        for b in bs {
+            if added {
+                let n = refs.entry(b).or_insert(0);
+                *n += 1;
+                if *n == 1 {
+                    changed.push(b);
+                }
+            } else {
+                match refs.get_mut(&b) {
+                    Some(n) if *n > 1 => *n -= 1,
+                    Some(_) => {
+                        refs.remove(&b);
+                        changed.push(b);
+                    }
+                    None => {
+                        return Err(internal_error!("a removed row holds blob {}, which no row held", b.hex()).into());
+                    }
+                }
+            }
+        }
+    }
+    Ok(changed)
 }
 
 impl<E: Executor> Node<E> {
@@ -226,7 +331,32 @@ impl<E: Executor> Node<E> {
         let schema = DurableSchema::of(p);
         let streams = StreamInbox::new(node_streams(p, cfg.role), cfg.max_stream_bytes);
         exec.reset(boot.image.instance())?;
+        // The executor starts from the recovered rows, which are also the released image. Every blob the store
+        // holds is durable; those no row holds are candidates for collection.
+        let mut carried_refs = BTreeMap::new();
+        for rows in boot.image.rows.values() {
+            count_blobs(&mut carried_refs, rows, true)?;
+        }
+        let released_refs = carried_refs.clone();
+        let candidates = boot
+            .stored
+            .iter()
+            .filter(|b| !carried_refs.contains_key(*b))
+            .copied()
+            .collect();
         Ok(Node {
+            blob_cache: BTreeMap::new(),
+            since_checkpoint: crate::durable::DeltaAcc::default(),
+            layerable: boot.at_checkpoint,
+            recent_blobs: BTreeMap::new(),
+            carried_refs,
+            released_refs,
+            candidates,
+            cache_bytes: 0,
+            cache_trim_at: cfg.blob_cache_bytes,
+            unsynced_blobs: BTreeMap::new(),
+            store_blobs: boot.blobs.clone(),
+            durable_blobs: boot.stored,
             timers: TimerTable::new(p, cfg.role, boot.now)?,
             released_image: boot.image.clone(),
             image: boot.image,
@@ -466,7 +596,12 @@ impl<E: Executor> Node<E> {
             }
         }
         let observe: Vec<RelId> = self.cfg.halt.into_iter().collect();
-        let out = self.exec.step(
+        let blobs = NodeBlobs {
+            cache: &self.blob_cache,
+            unsynced: &self.unsynced_blobs,
+            durable: self.store_blobs.as_ref(),
+        };
+        let mut out = self.exec.step(
             &StepInput {
                 node: self.cfg.node,
                 incarnation: self.incarnation,
@@ -475,9 +610,31 @@ impl<E: Executor> Node<E> {
                 events: &events,
                 delivered: &delivered,
                 ingress: &ingress,
+                blobs: &blobs,
             },
             &observe,
         )?;
+        for (b, bytes) in std::mem::take(&mut out.blobs) {
+            if !self.durable_blobs.contains(&b)
+                && let std::collections::btree_map::Entry::Vacant(e) = self.blob_cache.entry(b)
+            {
+                self.cache_bytes += bytes.len() as u64;
+                e.insert(bytes);
+            }
+        }
+        // The carried rows' blobs: a durable blob no carried row holds may be garbage; one a row holds again is not.
+        for rows in out.changes.inserted.values() {
+            for b in count_blobs(&mut self.carried_refs, rows, true)? {
+                self.candidates.remove(&b);
+            }
+        }
+        for rows in out.changes.deleted.values() {
+            for b in count_blobs(&mut self.carried_refs, rows, false)? {
+                if self.durable_blobs.contains(&b) {
+                    self.candidates.insert(b);
+                }
+            }
+        }
         // The durable delta is the change to the durable relations.
         let mut delta = Delta::default();
         for (rel, rows) in &out.changes.inserted {
@@ -498,6 +655,27 @@ impl<E: Executor> Node<E> {
         // a boot that happened, so a restart knows it recovers (`recovered()`). Until that record is durable the
         // boot did not happen: nothing of it is released, and a crash before the sync boots fresh again.
         let wal = !delta.is_empty() || (!self.booted && !self.recovered);
+        // The blobs the record's new rows reference and that are not durable yet: the driver makes them durable
+        // before the record syncs.
+        let mut referenced = BTreeSet::new();
+        for (inserted, _) in delta.changes.values() {
+            row_blobs(inserted, &mut referenced);
+        }
+        let mut new_blobs = Vec::new();
+        for b in referenced {
+            // Every blob the record references is a root while a recovery may replay it, new or not.
+            self.recent_blobs.insert(b, tick);
+            if self.durable_blobs.contains(&b) {
+                continue;
+            }
+            let bytes = self.blob_cache.remove(&b).ok_or_else(|| {
+                internal_error!("tick {} writes a durable row with blob {}, whose bytes are gone", tick.0, b.hex())
+            })?;
+            self.cache_bytes = self.cache_bytes.saturating_sub(bytes.len() as u64);
+            self.durable_blobs.insert(b);
+            self.unsynced_blobs.insert(b, (tick, bytes.clone()));
+            new_blobs.push((b, bytes));
+        }
         self.staged = !out.changes.is_empty();
         self.image.apply(&delta);
         self.booted = true;
@@ -539,16 +717,112 @@ impl<E: Executor> Node<E> {
         } else {
             None
         };
+        self.collect_blobs();
         Ok(TickEffects {
             tick,
             now,
             wal: wal.then_some(delta),
             reserve,
+            blobs: new_blobs,
         })
     }
 
+    /// The node's blobs, as its evaluator reads them (for a driver resolving a stream write's `Part::Blob`).
+    pub fn blobs(&self) -> NodeBlobs<'_> {
+        NodeBlobs {
+            cache: &self.blob_cache,
+            unsynced: &self.unsynced_blobs,
+            durable: self.store_blobs.as_ref(),
+        }
+    }
+
+    /// The blobs the parked ticks' output holds (what a released tick still sends or writes).
+    fn parked_blobs(&self) -> BTreeSet<blossom_value::BlobRef> {
+        let mut out = BTreeSet::new();
+        for p in &self.parked {
+            row_blobs(p.host.iter().map(|h| &h.row), &mut out);
+            row_blobs(p.sends.iter().map(|s| &s.row), &mut out);
+            row_blobs(p.egress.iter().map(|e| &e.row), &mut out);
+        }
+        out
+    }
+
+    /// Drops the cached blobs nothing references any more, once the cache passes its trim size: a blob a carried
+    /// row, a row the executor derived, or a parked output holds may still be written durably or sent, so it stays.
+    fn collect_blobs(&mut self) {
+        if self.cache_bytes <= self.cache_trim_at {
+            return;
+        }
+        let parked = self.parked_blobs();
+        let (refs, exec) = (&self.carried_refs, &self.exec);
+        let mut kept = 0u64;
+        self.blob_cache.retain(|b, bytes| {
+            let live = refs.contains_key(b) || exec.holds_blob(b) || parked.contains(b);
+            if live {
+                kept += bytes.len() as u64;
+            }
+            live
+        });
+        self.cache_bytes = kept;
+        self.cache_trim_at = kept.saturating_mul(2).max(self.cfg.blob_cache_bytes);
+    }
+
+    /// The net change of the released durable rows since the last checkpoint, for a delta-layer checkpoint of
+    /// [`Node::released_image`] (FOREIGN-PROTOCOLS §6); `None` when the change is not known (after a recovery that
+    /// replayed WAL records, or with no checkpoint yet): the checkpoint must then be full. Taking it starts the next
+    /// run: call it whenever a checkpoint of the released image is written, full or layered.
+    /// A checkpoint whose change was taken (`take_checkpoint_delta`) failed to be written or installed: the change
+    /// is lost to the next layer, so the next checkpoint must be a full image.
+    pub fn checkpoint_failed(&mut self) {
+        self.layerable = false;
+    }
+
+    pub fn take_checkpoint_delta(&mut self) -> Option<crate::durable::Delta> {
+        let d = self.since_checkpoint.take();
+        let layerable = std::mem::replace(&mut self.layerable, true);
+        layerable.then_some(d)
+    }
+
+    /// The candidate blobs a checkpoint of [`Node::released_image`] does not hold: the ones its installation may
+    /// let go. Taken when the checkpoint is; its work is the candidates', not the image's.
+    pub fn checkpoint_candidates(&self) -> BTreeSet<blossom_value::BlobRef> {
+        self.candidates
+            .iter()
+            .filter(|b| !self.released_refs.contains_key(*b))
+            .copied()
+            .collect()
+    }
+
+    /// The blobs the store may delete once a checkpoint at `checkpoint` is installed, of `outside` (the
+    /// [`Node::checkpoint_candidates`] taken with it): those no recovery can reach (the checkpoint does not hold
+    /// them, no WAL record after it references them) and the running node may not write or send (no carried row,
+    /// derived row, parked output or unsynced record holds them). They stop being durable here: a row that needs one later
+    /// writes it again.
+    pub fn blob_garbage(
+        &mut self,
+        checkpoint: Tick,
+        outside: &BTreeSet<blossom_value::BlobRef>,
+    ) -> Vec<blossom_value::BlobRef> {
+        // Recovery starts from the checkpoint now: only the records after it are replayed.
+        self.recent_blobs.retain(|_, t| *t > checkpoint);
+        let parked = self.parked_blobs();
+        let mut gone = Vec::new();
+        for b in outside {
+            let held = self.carried_refs.contains_key(b)
+                || self.exec.holds_blob(b)
+                || self.recent_blobs.contains_key(b)
+                || self.unsynced_blobs.contains_key(b)
+                || parked.contains(b);
+            if !held && self.candidates.remove(b) {
+                self.durable_blobs.remove(b);
+                gone.push(*b);
+            }
+        }
+        gone
+    }
+
     /// The driver made the reservation `r` durable. Returns the ticks that it makes releasable.
-    pub fn reserved(&mut self, r: Reservation) -> Vec<ReleasedTick> {
+    pub fn reserved(&mut self, r: Reservation) -> Result<Vec<ReleasedTick>, NodeError> {
         if r.ticks > self.reserved {
             self.reserved = r.ticks;
         }
@@ -561,16 +835,18 @@ impl<E: Executor> Node<E> {
 
     /// The driver reports that every WAL record of a tick `≤ upto` is durable. Returns every tick that is now
     /// releasable, in tick order.
-    pub fn wal_synced(&mut self, upto: Tick) -> Vec<ReleasedTick> {
+    pub fn wal_synced(&mut self, upto: Tick) -> Result<Vec<ReleasedTick>, NodeError> {
         if self.synced.is_none_or(|s| upto > s) {
             self.synced = Some(upto);
         }
+        // The blobs of the synced records are in the store now (written before their records synced).
+        self.unsynced_blobs.retain(|_, (t, _)| *t > upto);
         self.release()
     }
 
     /// Releases the parked ticks that Invariant R allows. A faulted node still releases the ticks computed before
     /// its fault once they are synced: their records are durable, so releasing them is faithful.
-    fn release(&mut self) -> Vec<ReleasedTick> {
+    fn release(&mut self) -> Result<Vec<ReleasedTick>, NodeError> {
         let mut out = Vec::new();
         while let Some(p) = self.parked.front() {
             if p.wal && self.synced.is_none_or(|s| p.tick > s) {
@@ -584,6 +860,11 @@ impl<E: Executor> Node<E> {
                 break;
             };
             self.released_image.apply(&p.delta);
+            for (inserted, deleted) in p.delta.changes.values() {
+                count_blobs(&mut self.released_refs, inserted, true)?;
+                count_blobs(&mut self.released_refs, deleted, false)?;
+            }
+            self.since_checkpoint.add(&p.delta);
             self.released = Some(p.tick);
             if p.halts {
                 self.state = NodeState::Halted;
@@ -596,12 +877,12 @@ impl<E: Executor> Node<E> {
                 retired: p.retired,
             });
         }
-        out
+        Ok(out)
     }
 
     /// Releases ticks without WAL records at the front of the queue (a tick with no durable change needs no sync).
     /// The driver calls this after each tick; `wal_synced` does it too.
-    pub fn release_ready(&mut self) -> Vec<ReleasedTick> {
+    pub fn release_ready(&mut self) -> Result<Vec<ReleasedTick>, NodeError> {
         self.release()
     }
 }

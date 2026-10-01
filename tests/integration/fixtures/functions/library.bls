@@ -113,3 +113,5 @@ view v_defaults(n, x) = e(n, _, _), let x = defaults(n);
 view v_classify(n, x) = e(n, _, _), let x = classify(n);
 view v_range(n, x) = e(n, _, _), let x = range(n, 2 * n + 1).len();
 view v_arms(n, x) = e(n, _, _), let x = arms(n);
+/// Decimal parsing, of the words and of the number as text.
+view v_parse(s, x) = e(n, s, _), let x = (s.parse_i64(), s.to_lowercase().parse_i64());

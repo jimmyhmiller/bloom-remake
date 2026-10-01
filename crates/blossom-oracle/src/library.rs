@@ -218,6 +218,13 @@ pub(crate) fn lib(scope: &Scope<'_>, env: &[Option<Value>], f: LibFn, args: &[Ex
         }
         LibFn::VecIsEmpty => Value::Bool(vec_of(val(0)?)?.is_empty()),
         LibFn::VecReverse => Value::Vec(vec_of(val(0)?)?.iter().rev().cloned().collect()),
+        LibFn::VecFlatten => {
+            let mut out = Vec::new();
+            for inner in vec_of(val(0)?)?.iter() {
+                out.extend(vec_of(inner.clone())?.iter().cloned());
+            }
+            Value::Vec(out.into())
+        }
         LibFn::VecEnumerate => Value::Vec(
             vec_of(val(0)?)?
                 .iter()
@@ -279,6 +286,36 @@ pub(crate) fn lib(scope: &Scope<'_>, env: &[Option<Value>], f: LibFn, args: &[Ex
             }
             acc
         }
+        LibFn::VecScan => {
+            let s = seq(scope, env, arg(0)?)?;
+            let mut acc = val(1)?;
+            let c = arg(2)?;
+            let mut out = Vec::new();
+            for x in s.iter() {
+                acc = apply(scope, env, c, vec![acc, x])?;
+                out.push(acc.clone());
+            }
+            Value::Vec(out.into())
+        }
+        LibFn::VecToSet => Value::Set(Arc::new(vec_of(val(0)?)?.iter().cloned().collect())),
+        LibFn::VecToMap => {
+            let mut m = std::collections::BTreeMap::new();
+            for pair in vec_of(val(0)?)?.iter() {
+                match pair {
+                    Value::Tuple(kv) if kv.len() == 2 => {
+                        if let (Some(k), Some(v)) = (kv.first(), kv.get(1)) {
+                            m.insert(k.clone(), v.clone());
+                        }
+                    }
+                    other => return Err(bug(format!("`to_map` of a vector holding {other:?}"))),
+                }
+            }
+            Value::Map(Arc::new(m))
+        }
+        LibFn::MapGet => match val(0)? {
+            Value::Map(m) => opt(m.get(&val(1)?).cloned()),
+            other => return Err(bug(format!("`get` on {other:?}"))),
+        },
         LibFn::OptIsSome => Value::Bool(option(val(0)?)?.is_some()),
         LibFn::OptIsNone => Value::Bool(option(val(0)?)?.is_none()),
         LibFn::OptUnwrapOr => match option(val(0)?)? {
@@ -314,6 +351,7 @@ pub(crate) fn lib(scope: &Scope<'_>, env: &[Option<Value>], f: LibFn, args: &[Ex
         ),
         LibFn::StrToLowercase => Value::Str(str_of(val(0)?)?.to_lowercase().into()),
         LibFn::StrToUtf8 => Value::Bytes(str_of(val(0)?)?.as_bytes().into()),
+        LibFn::StrParseI64 => opt(str_of(val(0)?)?.parse::<i64>().ok().map(|n| Value::Int(IntValue::I64(n)))),
         LibFn::BytesFromUtf8 => {
             let b = bytes_of(val(0)?)?;
             opt(std::str::from_utf8(&b).ok().map(|s| Value::Str(s.into())))
@@ -360,6 +398,42 @@ pub(crate) fn lib(scope: &Scope<'_>, env: &[Option<Value>], f: LibFn, args: &[Ex
             Value::Bytes(uvarint_bytes(((x << 1) ^ (x >> 63)) as u64).into())
         }
         LibFn::BytesEmpty => Value::Bytes(Arc::from(&[][..])),
+        LibFn::DurationFromMillis => match val(0)? {
+            Value::Int(IntValue::I64(n)) => Value::Duration(blossom_value::time::Duration(
+                n.checked_mul(1_000_000)
+                    .ok_or_else(|| ExprError::Arithmetic(format!("Duration::from_millis({n}) overflows")))?,
+            )),
+            other => return Err(bug(format!("`from_millis` of {other:?}"))),
+        },
+        LibFn::DurationAsMillis => match val(0)? {
+            Value::Duration(d) => Value::Int(IntValue::I64(d.0 / 1_000_000)),
+            other => return Err(bug(format!("`as_millis` of {other:?}"))),
+        },
+        LibFn::InstantAsMillis => match val(0)? {
+            Value::Instant(t) => Value::Int(IntValue::I64(t.0 / 1_000_000)),
+            other => return Err(bug(format!("`as_millis` of {other:?}"))),
+        },
+        LibFn::BlobOf => {
+            let b = bytes_of(val(0)?)?;
+            let r = blossom_value::BlobRef::of(&b);
+            scope.new_blobs.borrow_mut().entry(r).or_insert_with(|| Arc::from(&b[..]));
+            Value::Blob(r)
+        }
+        LibFn::BlobRead => {
+            let Value::Blob(r) = val(0)? else {
+                return Err(bug("`read` of a non-Blob".into()));
+            };
+            let (lo, hi) = (u64_of(&val(1)?)?, u64_of(&val(2)?)?);
+            // A handle is only ever made from its bytes, so a missing blob is a host bug, never the program's.
+            let b = scope
+                .blob(&r)
+                .ok_or_else(|| bug(format!("the bytes of blob {} are not available", r.hex())))?;
+            let range = usize::try_from(lo).ok().zip(usize::try_from(hi).ok());
+            opt(range
+                .filter(|(lo, hi)| lo <= hi)
+                .and_then(|(lo, hi)| b.get(lo..hi))
+                .map(|s| Value::Bytes(s.into())))
+        }
         LibFn::BytesJoin => {
             let mut out = Vec::new();
             for x in vec_of(val(0)?)?.iter() {

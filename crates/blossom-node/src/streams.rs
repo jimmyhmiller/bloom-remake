@@ -34,6 +34,8 @@ pub struct NodeStream {
     pub failed: Option<RelId>,
     pub write: RelId,
     pub close: RelId,
+    pub pause: RelId,
+    pub resume: RelId,
     pub dial: Option<RelId>,
 }
 
@@ -55,6 +57,8 @@ pub fn node_streams(program: &Program, role: Option<RoleId>) -> Vec<NodeStream> 
             failed: s.failed,
             write: s.write,
             close: s.close,
+            pause: s.pause,
+            resume: s.resume,
             dial: s.dial,
         })
         .collect()
@@ -343,6 +347,19 @@ pub enum HostRequest {
         stream: usize,
         conn: ConnId,
     },
+    /// Stop reading `conn` (`paused`), or read it again, through the node's stream `stream`.
+    Pause {
+        stream: usize,
+        conn: ConnId,
+        paused: bool,
+    },
+    /// A write the host must refuse, a located runtime error of the program (a blob range outside the blob): the
+    /// connection closes and its `closed` event carries `why`, as for a bad `seq`.
+    Refused {
+        stream: usize,
+        conn: ConnId,
+        why: String,
+    },
     Dial {
         stream: usize,
         req: u64,
@@ -351,16 +368,26 @@ pub enum HostRequest {
 }
 
 /// Decodes a released host row against the node's streams.
-pub fn host_request(streams: &[NodeStream], h: &HostOut) -> Result<HostRequest, NodeError> {
+pub fn host_request(
+    streams: &[NodeStream],
+    h: &HostOut,
+    blobs: &dyn blossom_value::BlobSource,
+) -> Result<HostRequest, NodeError> {
     let (i, st) = streams
         .iter()
         .enumerate()
-        .find(|(_, s)| s.write == h.rel || s.close == h.rel || s.dial == Some(h.rel))
+        .find(|(_, s)| {
+            s.write == h.rel || s.close == h.rel || s.pause == h.rel || s.resume == h.rel || s.dial == Some(h.rel)
+        })
         .ok_or_else(|| internal_error!("a host request {:?} of no stream of this node", h.rel))?;
     let op = if st.write == h.rel {
         HostOp::Write
     } else if st.close == h.rel {
         HostOp::Close
+    } else if st.pause == h.rel {
+        HostOp::Pause
+    } else if st.resume == h.rel {
+        HostOp::Resume
     } else {
         HostOp::Dial
     };
@@ -378,6 +405,31 @@ pub fn host_request(streams: &[NodeStream], h: &HostOut) -> Result<HostRequest, 
                         [Value::Bytes(b)] => bytes.extend_from_slice(b),
                         _ => return Err(bad().into()),
                     },
+                    // `Part::Blob(b, lo, hi)`: bytes of a stored blob. A range outside it is the program's error,
+                    // refused like a bad `seq`; a missing blob is a host bug.
+                    Value::Enum { variant: 1, fields } => match &**fields {
+                        [Value::Blob(r), Value::Int(IntValue::U64(lo)), Value::Int(IntValue::U64(hi))] => {
+                            let b = blobs
+                                .get(r)
+                                .ok_or_else(|| internal_error!("the bytes of blob {} are not available", r.hex()))?;
+                            let part = usize::try_from(*lo)
+                                .ok()
+                                .zip(usize::try_from(*hi).ok())
+                                .filter(|(lo, hi)| lo <= hi)
+                                .and_then(|(lo, hi)| b.get(lo..hi));
+                            match part {
+                                Some(p) => bytes.extend_from_slice(p),
+                                None => {
+                                    return Ok(HostRequest::Refused {
+                                        stream: i,
+                                        conn: *conn,
+                                        why: format!("a write of bytes {lo}..{hi} of a {}-byte blob", b.len()),
+                                    });
+                                }
+                            }
+                        }
+                        _ => return Err(bad().into()),
+                    },
                     _ => return Err(bad().into()),
                 }
             }
@@ -393,6 +445,16 @@ pub fn host_request(streams: &[NodeStream], h: &HostOut) -> Result<HostRequest, 
                 return Err(bad().into());
             };
             HostRequest::Close { stream: i, conn: *conn }
+        }
+        HostOp::Pause | HostOp::Resume => {
+            let [Value::Conn(conn)] = &*h.row else {
+                return Err(bad().into());
+            };
+            HostRequest::Pause {
+                stream: i,
+                conn: *conn,
+                paused: op == HostOp::Pause,
+            }
         }
         HostOp::Dial => {
             let [Value::Int(IntValue::U64(req)), Value::Str(addr)] = &*h.row else {
@@ -421,6 +483,8 @@ mod tests {
             failed: None,
             write: RelId::from_raw(3),
             close: RelId::from_raw(4),
+            pause: RelId::from_raw(5),
+            resume: RelId::from_raw(6),
             dial: None,
         }
     }

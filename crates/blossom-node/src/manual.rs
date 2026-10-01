@@ -84,6 +84,7 @@ impl<'p, E: Executor> ManualDriver<'p, E> {
             MetaStore::write(&self.opened.meta, &self.opened.record)?;
         }
         if let Some(delta) = &fx.wal {
+            self.opened.blobs.put_all(&fx.blobs)?;
             let rec = self.record(&fx, delta)?;
             self.opened.wal.append(&rec)?;
         }
@@ -109,12 +110,14 @@ impl<'p, E: Executor> ManualDriver<'p, E> {
             self.opened.record.reserved_tick = r.ticks.0;
             self.opened.record.last_now = self.opened.record.last_now.max(r.now.0);
             MetaStore::write(&self.opened.meta, &self.opened.record)?;
-            self.node.reserved(r).into_iter().for_each(&mut *sink);
+            self.node.reserved(r)?.into_iter().for_each(&mut *sink);
         }
         let Some(delta) = &fx.wal else {
-            self.node.release_ready().into_iter().for_each(&mut *sink);
+            self.node.release_ready()?.into_iter().for_each(&mut *sink);
             return Ok(());
         };
+        // The record's blobs are durable before it syncs (FOREIGN-PROTOCOLS §5).
+        self.opened.blobs.put_all(&fx.blobs)?;
         let rec = self.record(fx, delta)?;
         self.opened.wal.append(&rec)?;
         let synced = self.opened.wal.sync()?;
@@ -122,7 +125,7 @@ impl<'p, E: Executor> ManualDriver<'p, E> {
             .synced_tick()
             .ok_or_else(|| internal_error!("a sync after an append covers no tick"))?;
         self.synced = Some(tick);
-        self.node.wal_synced(Tick(tick.tick())).into_iter().for_each(&mut *sink);
+        self.node.wal_synced(Tick(tick.tick()))?.into_iter().for_each(&mut *sink);
         Ok(())
     }
 
@@ -139,12 +142,31 @@ impl<'p, E: Executor> ManualDriver<'p, E> {
         if self.node.parked() != 0 {
             return Err(internal_error!("checkpoint with ticks still parked").into());
         }
-        let snap = self.codec.encode_image(self.node.released_image())?;
-        let id = self.opened.checkpoints.write(snap, covers)?;
-        let token = self.opened.checkpoints.install(id)?;
+        let outside = self.node.checkpoint_candidates();
+        // A delta layer when the change since the installed checkpoint is known and the chain has room; otherwise a
+        // full image (FOREIGN-PROTOCOLS §6).
+        let delta = self.node.take_checkpoint_delta();
+        let written = (|| -> Result<_, NodeError> {
+            let id = match delta {
+                Some(d) if crate::durable::layer_fits(self.opened.checkpoints.chain()?) => {
+                    let payload = self.codec.encode_delta(&d)?;
+                    self.opened.checkpoints.write_layer(&payload, covers)?
+                }
+                _ => {
+                    let snap = self.codec.encode_image(self.node.released_image())?;
+                    self.opened.checkpoints.write(snap, covers)?
+                }
+            };
+            Ok(self.opened.checkpoints.install(id)?)
+        })();
+        // The change was taken: if it did not become a checkpoint, the next one must be full.
+        let token = written.inspect_err(|_| self.node.checkpoint_failed())?;
         self.opened.wal.truncate_through(token)?;
         self.opened.checkpoints.prune()?;
         self.checkpointed = Some(covers.tick());
+        // Recovery starts from this checkpoint now: the blobs nothing can reach go.
+        let gone = self.node.blob_garbage(Tick(covers.tick()), &outside);
+        self.opened.blobs.delete(&gone)?;
         Ok(())
     }
 }

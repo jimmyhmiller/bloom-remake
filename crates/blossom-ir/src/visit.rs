@@ -431,6 +431,8 @@ impl Remap for StreamDecl {
             failed: self.failed.remap(m),
             write: self.write.remap(m),
             close: self.close.remap(m),
+            pause: self.pause.remap(m),
+            resume: self.resume.remap(m),
             dial: self.dial.remap(m),
         }
     }
@@ -894,6 +896,10 @@ impl Remap for Expr {
                 params: params.remap(m),
                 body: body.remap(m),
             },
+            Self::Typed { ty, expr } => Self::Typed {
+                ty: ty.remap(m),
+                expr: expr.remap(m),
+            },
         }
     }
 }
@@ -913,6 +919,7 @@ impl Remap for BuiltinFn {
             Self::Rand => Self::Rand,
             Self::RandFloat => Self::RandFloat,
             Self::RandRange => Self::RandRange,
+            Self::Error { ty } => Self::Error { ty: ty.remap(m) },
             Self::Route { role } => Self::Route { role: role.remap(m) },
             Self::Majority { domain } => Self::Majority {
                 domain: domain.remap(m),
@@ -935,7 +942,6 @@ impl Remap for BuiltinFn {
             Self::ToString => Self::ToString,
             Self::Hash64 => Self::Hash64,
             Self::Fingerprint => Self::Fingerprint,
-            Self::Error => Self::Error,
         }
     }
 }

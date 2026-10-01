@@ -31,6 +31,7 @@ pub fn check(hir: &mut Hir, diags: &mut Diagnostics) -> Result<(), InternalError
         deferred: Vec::new(),
         diags,
         var_terms: Vec::new(),
+        block_terms: Vec::new(),
         view_terms: Vec::new(),
         expr_terms: Vec::new(),
         cursor: 0,
@@ -43,6 +44,13 @@ pub fn check(hir: &mut Hir, diags: &mut Diagnostics) -> Result<(), InternalError
         bindings: BTreeMap::new(),
         closures: BTreeMap::new(),
         fn_sigs: Vec::new(),
+        role_edges: Vec::new(),
+        conjunct_eq: false,
+        placed: None,
+        in_conjunction: true,
+        settle_duration: false,
+        roles: BTreeMap::new(),
+        free: BTreeSet::new(),
     };
     cx.errors_before = cx.diags.error_count();
     cx.run(hir);
@@ -137,6 +145,16 @@ enum MethodTarget {
 
 #[derive(Clone, Debug)]
 enum Deferred {
+    /// Values of `from` flow into `to` (LANGUAGE §5.3): one shape, but a `Node` position of `to` is only as precise
+    /// as what flows into it. With `check`, `to` is a requirement (a column written, a parameter, a result) and a
+    /// value less precise than it is an error. With `relate`, the two are only compared (`==`): one shape, no flow.
+    Flow {
+        from: T,
+        to: T,
+        check: bool,
+        relate: bool,
+        span: Span,
+    },
     /// `res = l op r` for arithmetic operators.
     Arith { op: BinOp, l: T, r: T, res: T, span: Span },
     /// `res = base.field`.
@@ -159,7 +177,14 @@ enum Deferred {
     /// `a ++ b`: strings, bytes or vectors.
     Concat { t: T, span: Span },
     /// A value of term `from` where `to` is expected: lifted when `to` is a lattice and `from` is not (LANGUAGE §5.6).
-    Coerce { slot: usize, from: T, to: T, span: Span },
+    Coerce {
+        slot: usize,
+        from: T,
+        to: T,
+        /// `to` is a requirement (a column written, a result), not a variable the value defines.
+        check: bool,
+        span: Span,
+    },
     /// `l op r` for `<`, `<=`, `>`, `>=`: plain operands, or a lattice threshold against a scalar (§11.4).
     Compare { op: BinOp, l: T, r: T, span: Span },
     /// `r[k̄]` on a lattice-valued relation.
@@ -199,6 +224,8 @@ struct Checker<'d> {
     diags: &'d mut Diagnostics,
     /// Per scope, per variable: its term.
     var_terms: Vec<Vec<T>>,
+    /// Per handler block, in walk order: the terms of the variables bound outside it, inside it.
+    block_terms: Vec<Vec<(HVarId, T)>>,
     /// Per relation, per column: its term.
     view_terms: Vec<Vec<T>>,
     /// Terms of expressions and `Option` patterns, in walk order.
@@ -220,6 +247,62 @@ struct Checker<'d> {
     closures: BTreeMap<T, (Vec<T>, T)>,
     /// Each function's parameter and result types, by `HFnId`.
     fn_sigs: Vec<(Vec<TypeId>, TypeId)>,
+    /// Flows between `Node` leaves: `(from, to, check, span)`. Roles are solved over them once shapes are known.
+    role_edges: Vec<(T, T, bool, Span)>,
+    /// The role the rule being walked is placed at, if any.
+    placed: Option<HRoleId>,
+    /// Set just before typing a guard that is a conjunct of a rule body: its `==` is an equation.
+    conjunct_eq: bool,
+    /// Whether the body being walked is a conjunction the rule's valuations satisfy (not under `not`, `any` or
+    /// `forall`).
+    in_conjunction: bool,
+    /// Set while settling a `Duration` sum whose other operand nothing else decided: it is then a `Duration`.
+    settle_duration: bool,
+    /// The solved role of each `Node` leaf's root, once roles are solved.
+    roles: BTreeMap<T, Role>,
+    /// `Node` leaves a flow created, whose role is only what flows in (nothing, for a `None`'s): the roots of classes
+    /// that no declared type joined.
+    free: BTreeSet<T>,
+}
+
+/// A `Node` position's role, as solved: no value reaches it (`Bot`), members of one role, or any node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+    Bot,
+    Of(RoleId),
+    Any,
+}
+
+impl Role {
+    fn of(def: Option<&TypeDef>) -> Option<Role> {
+        match def {
+            Some(TypeDef::Node(Some(r))) => Some(Role::Of(*r)),
+            Some(TypeDef::Node(None)) => Some(Role::Any),
+            _ => None,
+        }
+    }
+
+    /// The least role both fit in: what a merge of the two holds.
+    fn lub(self, o: Role) -> Role {
+        match (self, o) {
+            (Role::Bot, x) | (x, Role::Bot) => x,
+            (Role::Of(a), Role::Of(b)) if a == b => Role::Of(a),
+            _ => Role::Any,
+        }
+    }
+
+    /// The greatest role within both: what a value that is both holds.
+    fn glb(self, o: Role) -> Role {
+        match (self, o) {
+            (Role::Any, x) | (x, Role::Any) => x,
+            (Role::Of(a), Role::Of(b)) if a == b => Role::Of(a),
+            _ => Role::Bot,
+        }
+    }
+
+    fn within(self, o: Role) -> bool {
+        self.glb(o) == self
+    }
 }
 
 impl Checker<'_> {
@@ -468,12 +551,307 @@ impl Checker<'_> {
                     let ra2 = self.find(ra);
                     if ra2 != rb2 {
                         self.set(rb2, Node::Link(ra2));
+                        // The class is free only if both were: a declared type makes it a source.
+                        if !(self.free.contains(&ra2) && self.free.contains(&rb2)) {
+                            self.free.remove(&ra2);
+                        }
                     }
                 }
                 ok
             }
             _ => false,
         }
+    }
+
+    /// Values of `from` flow into `to` (a merge, or a requirement with `check`).
+    fn flow(&mut self, from: T, to: T, check: bool, span: Span) {
+        self.deferred.push(Deferred::Flow {
+            from,
+            to,
+            check,
+            relate: false,
+            span,
+        });
+    }
+
+    /// `x` is a value of `of` (a copy of it, so `of` is not narrowed by `x`'s other equations): `x ∈ of`, or `x = of`.
+    fn member(&mut self, of: T, x: T, span: Span) {
+        let copy = self.fresh(false);
+        self.flow(of, copy, false, span);
+        // `copy` is fresh and unconstrained, so it can always join `x`'s class.
+        let rx = self.find(x);
+        self.set(copy, Node::Link(rx));
+    }
+
+    /// A plain value where a requirement (`check`) or a variable it defines is expected.
+    fn coerce_plain(&mut self, from: T, to: T, check: bool, span: Span) {
+        if check {
+            self.flow(from, to, true, span);
+        } else {
+            self.member(from, to, span);
+        }
+    }
+
+    /// `a` and `b` are compared: they must have one shape, and neither makes the other more precise.
+    fn relate(&mut self, a: T, b: T, span: Span) {
+        self.deferred.push(Deferred::Flow {
+            from: a,
+            to: b,
+            check: false,
+            relate: true,
+            span,
+        });
+    }
+
+    /// One step of a flow: `true` once it is decided (shapes matched, errors reported), `false` while a side is not
+    /// known well enough. A side that is unknown takes the other's shape with fresh positions, so the two never share
+    /// a `Node` position; `force` settles a flow whose source is still unknown by linking the two, as an equation.
+    #[allow(clippy::too_many_arguments)]
+    fn flow_step(&mut self, types: &TypeTable, from: T, to: T, check: bool, relate: bool, span: Span, force: bool) -> bool {
+        let (rf, rt) = (self.find(from), self.find(to));
+        if rf == rt {
+            return true;
+        }
+        // An integer has no `Node` in it, so a flow of one is an equation (as a literal's type must be decided
+        // together with where it goes).
+        if matches!(self.node(rf), Node::Unbound { int: true }) || matches!(self.node(rt), Node::Unbound { int: true }) {
+            self.unify(types, from, to, span);
+            return true;
+        }
+        match (self.node(rf), self.node(rt)) {
+            (Node::Unbound { .. }, Node::Unbound { .. }) => {
+                if force {
+                    self.unify(types, from, to, span);
+                }
+                force
+            }
+            (Node::Bound(s), Node::Unbound { int }) => {
+                if int && !is_int_shape(types, &s) {
+                    let d = self.describe(types, from);
+                    self.error(span, format!("type mismatch: {d} and an integer"));
+                    return true;
+                }
+                self.copy_shape(types, rf, &s, rt, true, check, relate, span);
+                true
+            }
+            (Node::Unbound { int }, Node::Bound(s)) => {
+                // A requirement gives an unknown source its shape at once (a lattice target decides a lift); the
+                // source's roles still come from its own values, and the requirement checks them.
+                if !(relate || force || check) {
+                    return false;
+                }
+                if !relate && !check {
+                    // Nothing but this flow says what the source is (a `None`, an empty collection): it is what the
+                    // target is.
+                    self.unify(types, from, to, span);
+                    return true;
+                }
+                if int && !is_int_shape(types, &s) {
+                    let d = self.describe(types, to);
+                    self.error(span, format!("type mismatch: an integer and {d}"));
+                    return true;
+                }
+                self.copy_shape(types, rt, &s, rf, false, check, relate, span);
+                true
+            }
+            (Node::Bound(a), Node::Bound(b)) => {
+                let pairs: Option<Vec<(T, T)>> = match (&a, &b) {
+                    (Shape::Con(x), Shape::Con(y)) => {
+                        match (Role::of(types.get(*x)), Role::of(types.get(*y))) {
+                            (Some(_), Some(_)) => {
+                                if !relate {
+                                    self.role_edges.push((rf, rt, check, span));
+                                }
+                                Some(Vec::new())
+                            }
+                            _ => (x == y).then(Vec::new),
+                        }
+                    }
+                    (Shape::Tuple(xs), Shape::Tuple(ys)) if xs.len() == ys.len() => {
+                        Some(xs.iter().copied().zip(ys.iter().copied()).collect())
+                    }
+                    (Shape::Option(x), Shape::Option(y))
+                    | (Shape::Vec(x), Shape::Vec(y))
+                    | (Shape::Set(x), Shape::Set(y)) => Some(vec![(*x, *y)]),
+                    (Shape::Map(k1, v1), Shape::Map(k2, v2)) => Some(vec![(*k1, *k2), (*v1, *v2)]),
+                    (Shape::Lat(x), Shape::Lat(y)) if x.name() == y.name() && x.args().len() == y.args().len() => {
+                        Some(x.args().into_iter().zip(y.args()).collect())
+                    }
+                    _ => None,
+                };
+                match pairs {
+                    Some(ps) => {
+                        for (x, y) in ps {
+                            self.sub_flow(types, x, y, check, relate, span);
+                        }
+                    }
+                    None => {
+                        let (da, db) = (self.describe(types, from), self.describe(types, to));
+                        self.error(span, format!("type mismatch: {da} and {db}"));
+                    }
+                }
+                true
+            }
+            _ => true,
+        }
+    }
+
+    /// A flow between two positions of a flow: decided now if it can be, else deferred.
+    fn sub_flow(&mut self, types: &TypeTable, from: T, to: T, check: bool, relate: bool, span: Span) {
+        if !self.flow_step(types, from, to, check, relate, span, false) {
+            self.deferred.push(Deferred::Flow {
+                from,
+                to,
+                check,
+                relate,
+                span,
+            });
+        }
+    }
+
+    /// Gives the unknown term `target` the shape `s` with fresh positions, each flowing from (`s_is_from`) or into the
+    /// matching position of `s`. A `Node` leaf becomes a fresh `Node` whose role the flows decide.
+    #[allow(clippy::too_many_arguments)]
+    fn copy_shape(
+        &mut self,
+        types: &TypeTable,
+        src: T,
+        s: &Shape,
+        target: T,
+        s_is_from: bool,
+        check: bool,
+        relate: bool,
+        span: Span,
+    ) {
+        let mut pairs = Vec::new();
+        let mut fresh = |me: &mut Self, t: T| {
+            let n = me.fresh(false);
+            pairs.push((t, n));
+            n
+        };
+        let shape = match s {
+            Shape::Con(ty) => {
+                if Role::of(types.get(*ty)).is_some() {
+                    // A fresh `Node` position: its role is what flows into it (or, as a source, what it is).
+                    let any = types.lookup(&TypeDef::Node(None)).unwrap_or(*ty);
+                    self.set(target, Node::Bound(Shape::Con(any)));
+                    self.free.insert(target);
+                    if !relate {
+                        let edge = if s_is_from { (src, target) } else { (target, src) };
+                        self.role_edges.push((edge.0, edge.1, check, span));
+                    }
+                    return;
+                }
+                Shape::Con(*ty)
+            }
+            Shape::Tuple(ts) => Shape::Tuple(ts.iter().map(|t| fresh(self, *t)).collect()),
+            Shape::Option(t) => Shape::Option(fresh(self, *t)),
+            Shape::Vec(t) => Shape::Vec(fresh(self, *t)),
+            Shape::Set(t) => Shape::Set(fresh(self, *t)),
+            Shape::Map(k, v) => {
+                let k = fresh(self, *k);
+                Shape::Map(k, fresh(self, *v))
+            }
+            Shape::Lat(l) => Shape::Lat(match l {
+                LatS::Bool => LatS::Bool,
+                LatS::Max(e) => LatS::Max(fresh(self, *e)),
+                LatS::Min(e) => LatS::Min(fresh(self, *e)),
+                LatS::Set(e) => LatS::Set(fresh(self, *e)),
+                LatS::PSet(e) => LatS::PSet(fresh(self, *e)),
+                LatS::Point(e) => LatS::Point(fresh(self, *e)),
+                LatS::Map(k, v) => {
+                    let k = fresh(self, *k);
+                    LatS::Map(k, fresh(self, *v))
+                }
+            }),
+        };
+        self.set(target, Node::Bound(shape));
+        for (old, new) in pairs {
+            if s_is_from {
+                self.sub_flow(types, old, new, check, relate, span);
+            } else {
+                self.sub_flow(types, new, old, check, relate, span);
+            }
+        }
+    }
+
+    /// Solves the roles of `Node` positions over the flows between them (LANGUAGE §5.3). A position holds what its own
+    /// type says (a column read, a parameter, `self`), narrowed by equations with other positions (a rule variable in
+    /// several atoms, `==` in a rule body), and, when values flow into it (a merge: `if`, `match`, a collection, a
+    /// fold), only what flows in: the least role of those, within its own. The least solution is found by iterating
+    /// from "nothing flows in". A requirement (`check`) then holds when what flows out fits the target's own type.
+    fn solve_roles(&mut self, hir: &mut Hir) {
+        let edges: Vec<(T, T, bool, Span)> = self
+            .role_edges
+            .clone()
+            .into_iter()
+            .map(|(f, t, c, s)| (self.find(f), self.find(t), c, s))
+            .collect();
+        let mut base: BTreeMap<T, Role> = BTreeMap::new();
+        for &(f, t, _, _) in &edges {
+            for r in [f, t] {
+                if let Node::Bound(Shape::Con(ty)) = self.node(r)
+                    && let Some(role) = Role::of(hir.types.get(ty))
+                {
+                    base.insert(r, role);
+                }
+            }
+        }
+        let mut incoming: BTreeMap<T, Vec<T>> = BTreeMap::new();
+        for &(f, t, _, _) in &edges {
+            incoming.entry(t).or_default().push(f);
+        }
+        // A free position nothing flows into holds no value (a `None`'s): it fits any requirement.
+        let mut role: BTreeMap<T, Role> = base
+            .iter()
+            .map(|(r, b)| {
+                let start = if incoming.contains_key(r) || self.free.contains(r) { Role::Bot } else { *b };
+                (*r, start)
+            })
+            .collect();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (t, froms) in &incoming {
+                let flowed = froms
+                    .iter()
+                    .fold(Role::Bot, |acc, f| acc.lub(role.get(f).copied().unwrap_or(Role::Any)));
+                let own = if self.free.contains(t) {
+                    Role::Any
+                } else {
+                    base.get(t).copied().unwrap_or(Role::Any)
+                };
+                let next = own.glb(flowed);
+                if role.get(t) != Some(&next) {
+                    role.insert(*t, next);
+                    changed = true;
+                }
+            }
+        }
+        for &(f, t, check, span) in &edges {
+            let got = role.get(&f).copied().unwrap_or(Role::Any);
+            let own = base.get(&t).copied().unwrap_or(Role::Any);
+            let name = |r: Role| match r {
+                Role::Of(x) => match hir.roles.get(x.index()) {
+                    Some(role) => format!("Node<{}>", role.name),
+                    None => format!("Node<role {}>", x.index()),
+                },
+                _ => "Node".to_owned(),
+            };
+            if check && got != Role::Bot && !got.within(own) {
+                let msg = format!("a value of type {} where {} is expected", name(got), name(own));
+                self.error(span, msg);
+            }
+            if !check && got != Role::Bot && own != Role::Any && role.get(&t) == Some(&Role::Bot) {
+                let msg = format!("a value of type {} can never be a {}", name(got), name(own));
+                self.error(span, msg);
+            }
+        }
+        // A position nothing reaches (a cycle of merges with no source) holds any node.
+        self.roles = role
+            .into_iter()
+            .map(|(r, x)| (r, if x == Role::Bot { Role::Any } else { x }))
+            .collect();
     }
 
     /// The leaf type of a solved term, if it is a leaf.
@@ -526,7 +904,16 @@ impl Checker<'_> {
             _ => return None,
         };
         Some(match shape {
-            Shape::Con(ty) => ty,
+            Shape::Con(ty) => match (Role::of(hir.types.get(ty)), self.roles.get(&r)) {
+                (Some(_), Some(role)) => {
+                    let def = match role {
+                        Role::Of(x) => TypeDef::Node(Some(*x)),
+                        Role::Bot | Role::Any => TypeDef::Node(None),
+                    };
+                    intern(&mut hir.types, def)
+                }
+                _ => ty,
+            },
             Shape::Lat(_) => return None,
             Shape::Tuple(ts) => {
                 let mut ids = Vec::new();
@@ -581,8 +968,14 @@ impl Checker<'_> {
             .iter()
             .map(|f| (f.params.iter().map(|p| p.1).collect(), f.ret))
             .collect();
+        // A fresh `Node` position starts as `Node` (any node), so that type must exist.
+        intern(&mut hir.types, TypeDef::Node(None));
         self.walk(hir);
         self.solve(hir);
+        if self.diags.error_count() > self.errors_before {
+            return;
+        }
+        self.solve_roles(hir);
         if self.diags.error_count() > self.errors_before {
             return;
         }
@@ -599,13 +992,17 @@ impl Checker<'_> {
     fn walk(&mut self, hir: &mut Hir) {
         let mut handlers = std::mem::take(&mut hir.handlers);
         for h in &mut handlers {
+            self.placed = h.role;
             self.body(hir, h.scope, &mut h.header, h.role);
-            self.stmts(hir, h.scope, &mut h.stmts, h.role);
+            let mut outer = BTreeSet::new();
+            Self::positively_bound(&h.header, &mut outer);
+            self.stmts(hir, h.scope, &mut h.stmts, h.role, &outer);
         }
         hir.handlers = handlers;
         let mut views = std::mem::take(&mut hir.views);
         for v in &mut views {
             let role = self.rel_of(hir, v.rel).role;
+            self.placed = role;
             for (scope, body) in &mut v.alternatives {
                 self.body(hir, *scope, body, role);
             }
@@ -622,7 +1019,9 @@ impl Checker<'_> {
                             };
                             let vt = self.var_term(scope, *var);
                             let ct = self.col_term(hir, rel, c);
-                            self.unify(&hir.types, vt, ct, v.span);
+                            // A view's column holds what its alternatives put there.
+                            let declared = hir.rels.get(rel).and_then(|r| r.cols.get(c)).is_some_and(|c| c.ty.is_some());
+                            self.flow(vt, ct, declared, v.span);
                         }
                     }
                 }
@@ -644,10 +1043,12 @@ impl Checker<'_> {
                         let Some(scope) = v.alternatives.get(alt).map(|a| a.0) else {
                             continue;
                         };
+                        // The union holds every alternative's valuations: each flows into it (a merge, whose
+                        // roles are the join of the alternatives').
                         for (i, var) in vars.iter().enumerate() {
                             let a = self.var_term(scope, *var);
                             let u = self.var_term(union, HVarId(i as u32));
-                            self.unify(&hir.types, a, u, v.span);
+                            self.flow(a, u, false, v.span);
                         }
                     }
                 }
@@ -657,7 +1058,9 @@ impl Checker<'_> {
                         HViewAggCol::Group(var) => {
                             if !self.apply {
                                 let u = self.var_term(union, *var);
-                                self.unify(&hir.types, u, ct, v.span);
+                                let declared =
+                                    hir.rels.get(rel).and_then(|r| r.cols.get(c)).is_some_and(|c| c.ty.is_some());
+                                self.flow(u, ct, declared, v.span);
                             }
                         }
                         HViewAggCol::Agg(agg) => self.agg(hir, union, agg, ct),
@@ -669,9 +1072,11 @@ impl Checker<'_> {
         hir.views = views;
         let mut invariants = std::mem::take(&mut hir.invariants);
         for inv in &mut invariants {
+            self.placed = inv.role;
             self.body(hir, inv.scope, &mut inv.body, inv.role);
         }
         hir.invariants = invariants;
+        self.placed = None;
         let mut facts = std::mem::take(&mut hir.facts);
         for f in &mut facts {
             for (c, e) in f.row.iter_mut().enumerate() {
@@ -689,7 +1094,7 @@ impl Checker<'_> {
                 }
                 let t = self.expr(hir, f.scope, e);
                 let ct = self.col_term(hir, f.rel.index(), c);
-                self.coerce_site(hir, e, t, ct);
+                self.coerce_site(hir, e, t, ct, true);
             }
         }
         hir.facts = facts;
@@ -707,20 +1112,81 @@ impl Checker<'_> {
             };
             let t = self.expr(hir, f.scope, body);
             let r = if self.apply { 0 } else { self.of_type(hir, f.ret) };
-            self.coerce_site(hir, body, t, r);
+            self.coerce_site(hir, body, t, r, true);
         }
         hir.fns = fns;
     }
 
-    fn stmts(&mut self, hir: &mut Hir, scope: ScopeId, stmts: &mut [HStmt], role: Option<HRoleId>) {
+    /// A handler's statements; `outer` holds the variables bound outside them (by the header and enclosing blocks).
+    fn stmts(
+        &mut self,
+        hir: &mut Hir,
+        scope: ScopeId,
+        stmts: &mut [HStmt],
+        role: Option<HRoleId>,
+        outer: &BTreeSet<HVarId>,
+    ) {
         for s in stmts {
             match s {
                 HStmt::Verb(v) => self.verb(hir, scope, v),
-                HStmt::Block { cond, stmts, .. } => {
+                HStmt::Block { cond, stmts, span, .. } => {
+                    // A block's condition holds only inside it, so what it says of a variable bound outside refines
+                    // the variable there and not in the handler's other statements: inside, the variable is a copy
+                    // the outer one flows into, whose roles are the meet of the outer ones and the condition's.
+                    let saved = if self.apply {
+                        Vec::new()
+                    } else {
+                        let saved = self.refine(scope, outer, *span);
+                        let inside = saved.iter().map(|(v, _)| (*v, self.var_term(scope, *v))).collect();
+                        self.block_terms.push(inside);
+                        saved
+                    };
                     self.body(hir, scope, cond, role);
-                    self.stmts(hir, scope, stmts, role);
+                    let mut inner = outer.clone();
+                    Self::positively_bound(cond, &mut inner);
+                    self.stmts(hir, scope, stmts, role, &inner);
+                    for (v, t) in saved {
+                        self.set_var_term(scope, v, t);
+                    }
                 }
             }
+        }
+    }
+
+    /// Writes each block's refined variable types (the solved terms of `block_terms`, from `next` on).
+    fn refined_blocks(&mut self, hir: &mut Hir, stmts: &mut [HStmt], next: &mut usize) {
+        for s in stmts {
+            if let HStmt::Block { stmts, refined, .. } = s {
+                let terms = self.block_terms.get(*next).cloned().unwrap_or_default();
+                *next += 1;
+                refined.clear();
+                for (v, t) in terms {
+                    // An unsolved term is reported for the variable itself (its outer term flows into this one).
+                    if let Some(ty) = self.solved(hir, t) {
+                        refined.push((v, ty));
+                    }
+                }
+                self.refined_blocks(hir, stmts, next);
+            }
+        }
+    }
+
+    /// Gives each variable of `vars` a copy of its term for a block, returning the terms it had.
+    fn refine(&mut self, scope: ScopeId, vars: &BTreeSet<HVarId>, span: Span) -> Vec<(HVarId, T)> {
+        let mut saved = Vec::new();
+        for v in vars {
+            let old = self.var_term(scope, *v);
+            let copy = self.fresh(false);
+            self.flow(old, copy, false, span);
+            self.set_var_term(scope, *v, copy);
+            saved.push((*v, old));
+        }
+        saved
+    }
+
+    fn set_var_term(&mut self, scope: ScopeId, v: HVarId, t: T) {
+        if let Some(slot) = self.var_terms.get_mut(scope.index()).and_then(|s| s.get_mut(v.index())) {
+            *slot = t;
         }
     }
 
@@ -731,7 +1197,8 @@ impl Checker<'_> {
             match a {
                 HHeadArg::Expr(e) => {
                     let t = self.expr(hir, scope, e);
-                    self.coerce_site(hir, e, t, ct);
+                    let declared = hir.rels.get(rel).and_then(|r| r.cols.get(c)).is_some_and(|c| c.ty.is_some());
+                    self.coerce_site(hir, e, t, ct, declared);
                 }
                 HHeadArg::Agg(agg) => self.agg(hir, scope, agg, ct),
             }
@@ -750,12 +1217,13 @@ impl Checker<'_> {
                     if self.role_kind(hir, dst) == RoleKind::External {
                         self.con(&mut hir.types, TypeDef::Session)
                     } else {
-                        self.con(&mut hir.types, TypeDef::Node(None))
+                        // A channel to role R is sent to one of R's members.
+                        self.con(&mut hir.types, TypeDef::Node(Some(RoleId::from_raw(dst.0))))
                     }
                 } else {
                     self.con(&mut hir.types, TypeDef::Node(None))
                 };
-                self.unify(&hir.types, t, want, to.span);
+                self.flow(t, want, true, to.span);
             }
         }
     }
@@ -778,9 +1246,21 @@ impl Checker<'_> {
                 let u64t = self.con(&mut hir.types, TypeDef::Int(IntTy::U64));
                 self.unify(&hir.types, col, u64t, agg.span);
             }
-            AggKind::Sum | AggKind::Min | AggKind::Max => {
+            AggKind::Collect => {
+                // The group's values merge into one vector: each flows into its element type (LANGUAGE §5.3), and
+                // must fit a declared one.
+                let el = self.fresh(false);
                 if let Some(a) = arg_terms.first() {
-                    self.unify(&hir.types, *a, col, agg.span);
+                    self.flow(*a, el, true, agg.span);
+                }
+                let v = self.bound(Shape::Vec(el));
+                self.unify(&hir.types, v, col, agg.span);
+            }
+            AggKind::Sum | AggKind::Min | AggKind::Max => {
+                // The aggregate is one of the group's values (a sum is an integer), which goes into the column: a
+                // flow that must fit the column's type, so neither narrows the other.
+                if let Some(a) = arg_terms.first() {
+                    self.flow(*a, col, true, agg.span);
                 }
                 if agg.func == AggKind::Sum {
                     self.deferred.push(Deferred::Arith {
@@ -796,7 +1276,7 @@ impl Checker<'_> {
             }
         }
         if let Some(d) = default {
-            self.unify(&hir.types, d, col, agg.span);
+            self.flow(d, col, true, agg.span);
         }
     }
 
@@ -848,18 +1328,22 @@ impl Checker<'_> {
                         }
                     }
                 }
-                self.atom(hir, scope, a, None);
+                self.atom(hir, scope, a, None, false);
             }
-            HLit::Not(a) => self.atom(hir, scope, a, None),
+            HLit::Not(a) => self.atom(hir, scope, a, None, true),
             HLit::Outer(a) => {
                 if !self.apply {
                     for p in &a.args {
                         self.other_bindings(scope, p);
                     }
                 }
-                self.atom(hir, scope, a, Some(bound))
+                self.atom(hir, scope, a, Some(bound), false)
             }
-            HLit::NotBody(b, _) => self.body(hir, scope, b, role),
+            HLit::NotBody(b, _) => {
+                let was = std::mem::replace(&mut self.in_conjunction, false);
+                self.body(hir, scope, b, role);
+                self.in_conjunction = was;
+            }
             HLit::Let { pat, expr, span } => {
                 if !self.apply {
                     self.other_bindings(scope, pat);
@@ -868,7 +1352,7 @@ impl Checker<'_> {
                 let p = self.pat(hir, scope, pat);
                 if matches!(pat, HPat::Var(..)) {
                     // `let x = e` where `x` is a lattice (a lattice view column, say) lifts `e` (LANGUAGE §5.6).
-                    self.coerce_site(hir, expr, t, p);
+                    self.coerce_site(hir, expr, t, p, false);
                 } else if !self.apply {
                     self.unify(&hir.types, p, t, *span);
                 }
@@ -899,6 +1383,7 @@ impl Checker<'_> {
                 }
             }
             HLit::Guard(e) => {
+                self.conjunct_eq = self.in_conjunction && !self.apply;
                 let t = self.expr(hir, scope, e);
                 if !self.apply {
                     let b = self.con(&mut hir.types, TypeDef::Bool);
@@ -923,20 +1408,24 @@ impl Checker<'_> {
                 }
             }
             HLit::Any(bodies, _) => {
+                let was = std::mem::replace(&mut self.in_conjunction, false);
                 for b in bodies {
                     self.body(hir, scope, b, role);
                 }
+                self.in_conjunction = was;
             }
             HLit::Forall { domain, body, .. } => {
+                let was = std::mem::replace(&mut self.in_conjunction, false);
                 let empty = BTreeSet::new();
                 self.lit(hir, scope, domain, role, &empty);
                 self.body(hir, scope, body, role);
+                self.in_conjunction = was;
             }
         }
     }
 
     /// An atom: each argument against its column. For `outer`, variables not bound elsewhere are options.
-    fn atom(&mut self, hir: &mut Hir, scope: ScopeId, a: &mut HAtom, outer: Option<&BTreeSet<HVarId>>) {
+    fn atom(&mut self, hir: &mut Hir, scope: ScopeId, a: &mut HAtom, outer: Option<&BTreeSet<HVarId>>, negated: bool) {
         let rel = a.rel.index();
         for (c, p) in a.args.iter_mut().enumerate() {
             let ct = self.col_term(hir, rel, c);
@@ -944,11 +1433,18 @@ impl Checker<'_> {
             if self.apply {
                 continue;
             }
+            let inferred = hir.rels.get(rel).and_then(|r| r.cols.get(c)).is_some_and(|c| c.ty.is_none());
             match (outer, &*p) {
                 (Some(bound), HPat::Var(v, span)) if !bound.contains(v) => {
                     let opt = self.bound(Shape::Option(ct));
                     self.unify(&hir.types, pt, opt, *span);
                 }
+                // A negated atom, or one under `not`, `any` or `forall`, does not bind what it tests: its columns
+                // say nothing of the rule's variables.
+                _ if negated || !self.in_conjunction => self.relate(pt, ct, p.span()),
+                // An inferred view column's term is shared by every use: a read takes a copy of what it holds, so
+                // the reading rule's own equations stay its own.
+                _ if inferred => self.member(ct, pt, p.span()),
                 _ => self.unify(&hir.types, pt, ct, p.span()),
             }
         }
@@ -1001,13 +1497,13 @@ impl Checker<'_> {
                 for f in fields.iter_mut() {
                     fts.push(self.pat(hir, scope, f));
                 }
-                self.variant(hir, ty, *variant, &fts, *span)
+                self.variant(hir, ty, *variant, &fts, *span, true)
             }
         }
     }
 
     /// The term of a variant constructor or pattern; in the apply walk, resolves `Option` to its type.
-    fn variant(&mut self, hir: &mut Hir, ty: &mut TypeRef, variant: u32, fields: &[T], span: Span) -> T {
+    fn variant(&mut self, hir: &mut Hir, ty: &mut TypeRef, variant: u32, fields: &[T], span: Span, pattern: bool) -> T {
         if self.apply {
             let t = self.next_term();
             if *ty == TypeRef::Option {
@@ -1040,7 +1536,13 @@ impl Checker<'_> {
                 };
                 for (f, pty) in fields.iter().zip(payload) {
                     let pt = self.of_type(hir, pty);
-                    self.unify(&hir.types, *f, pt, span);
+                    if pattern {
+                        // A pattern's field is the payload.
+                        self.unify(&hir.types, *f, pt, span);
+                    } else {
+                        // A constructor's argument must fit the payload's declared type.
+                        self.flow(*f, pt, true, span);
+                    }
                 }
                 self.bound(Shape::Con(id))
             }
@@ -1058,6 +1560,8 @@ impl Checker<'_> {
     /// An expression's term. In the apply walk, writes the solved type into the expression.
     fn expr(&mut self, hir: &mut Hir, scope: ScopeId, e: &mut HExpr) -> T {
         let span = e.span;
+        // Only the guard expression itself, not its subexpressions, is a conjunct.
+        let meet = std::mem::take(&mut self.conjunct_eq);
         let t = match &mut e.kind {
             HExprKind::Var(v) => {
                 let t = self.var_term(scope, *v);
@@ -1107,8 +1611,14 @@ impl Checker<'_> {
                     self.next_term()
                 } else {
                     let t = match op {
-                        BinOp::Eq | BinOp::Ne => {
+                        // A comparison relates its operands; only `==` as a conjunct of a rule body makes them one
+                        // value, so there it is an equation (LANGUAGE §9.1).
+                        BinOp::Eq if meet => {
                             self.unify(&hir.types, a, b, span);
+                            self.con(&mut hir.types, TypeDef::Bool)
+                        }
+                        BinOp::Eq | BinOp::Ne => {
+                            self.relate(a, b, span);
                             self.con(&mut hir.types, TypeDef::Bool)
                         }
                         BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
@@ -1133,9 +1643,11 @@ impl Checker<'_> {
                             res
                         }
                         BinOp::Concat => {
-                            self.unify(&hir.types, a, b, span);
-                            self.deferred.push(Deferred::Concat { t: a, span });
-                            a
+                            let res = self.fresh(false);
+                            self.flow(a, res, false, span);
+                            self.flow(b, res, false, span);
+                            self.deferred.push(Deferred::Concat { t: res, span });
+                            res
                         }
                         BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
                             self.unify(&hir.types, a, b, span);
@@ -1199,7 +1711,7 @@ impl Checker<'_> {
                     fts.push(self.expr(hir, scope, f));
                 }
                 let mut tyref = *ty;
-                let t = self.variant(hir, &mut tyref, variant, &fts, span);
+                let t = self.variant(hir, &mut tyref, variant, &fts, span, false);
                 *ty = tyref;
                 t
             }
@@ -1213,7 +1725,7 @@ impl Checker<'_> {
                     let ft = self.expr(hir, scope, f);
                     if !self.apply {
                         let want = self.of_type(hir, fty);
-                        self.unify(&hir.types, ft, want, f.span);
+                        self.flow(ft, want, true, f.span);
                     }
                 }
                 if self.apply {
@@ -1268,8 +1780,11 @@ impl Checker<'_> {
                 } else {
                     let bt = self.con(&mut hir.types, TypeDef::Bool);
                     self.unify(&hir.types, c, bt, span);
-                    self.unify(&hir.types, a, b, span);
-                    self.record(a)
+                    // The branches merge: the value is one of them.
+                    let res = self.fresh(false);
+                    self.flow(a, res, false, span);
+                    self.flow(b, res, false, span);
+                    self.record(res)
                 }
             }
             HExprKind::Match { scrut, arms } => {
@@ -1285,7 +1800,7 @@ impl Checker<'_> {
                             let b = self.con(&mut hir.types, TypeDef::Bool);
                             self.unify(&hir.types, gt, b, span);
                         }
-                        self.unify(&hir.types, bt, res, span);
+                        self.flow(bt, res, false, span);
                     }
                 }
                 if self.apply {
@@ -1319,7 +1834,9 @@ impl Checker<'_> {
                 if self.apply {
                     self.next_term()
                 } else {
-                    let t = self.con(&mut hir.types, TypeDef::Node(None));
+                    // A rule placed at role R runs on R's members: its `self` is a `Node<R>` (LANGUAGE §6.10).
+                    let role = self.placed.map(|r| RoleId::from_raw(r.0));
+                    let t = self.con(&mut hir.types, TypeDef::Node(role));
                     self.record(t)
                 }
             }
@@ -1355,7 +1872,15 @@ impl Checker<'_> {
                             }
                             self.con(&mut hir.types, TypeDef::Int(IntTy::U64))
                         }
-                        Builtin::RoleSize(_) => self.con(&mut hir.types, TypeDef::Int(IntTy::U64)),
+                        Builtin::RoleSize(_) | Builtin::Rand => self.con(&mut hir.types, TypeDef::Int(IntTy::U64)),
+                        Builtin::Error => {
+                            // The message is a String; the call never returns, so it takes its context's type.
+                            if let Some(m) = ats.first() {
+                                let s = self.con(&mut hir.types, TypeDef::Str);
+                                self.unify(&hir.types, *m, s, span);
+                            }
+                            self.fresh(false)
+                        }
                         Builtin::RandRange => {
                             // `lo` and `hi` share a type that subtracts to itself: an integer or a duration.
                             match (ats.first().copied(), ats.get(1).copied()) {
@@ -1421,6 +1946,20 @@ impl Checker<'_> {
                             self.con(&mut hir.types, TypeDef::Bytes)
                         }
                         Builtin::Lib(LibFn::BytesEmpty) => self.con(&mut hir.types, TypeDef::Bytes),
+                        Builtin::Lib(LibFn::DurationFromMillis) => {
+                            let i = self.con(&mut hir.types, TypeDef::Int(IntTy::I64));
+                            for a in &ats {
+                                self.unify(&hir.types, *a, i, span);
+                            }
+                            self.con(&mut hir.types, TypeDef::Duration)
+                        }
+                        Builtin::Lib(LibFn::BlobOf) => {
+                            let b = self.con(&mut hir.types, TypeDef::Bytes);
+                            for a in &ats {
+                                self.unify(&hir.types, *a, b, span);
+                            }
+                            self.con(&mut hir.types, TypeDef::Blob)
+                        }
                         Builtin::Lib(LibFn::BytesJoin) => {
                             let b = self.con(&mut hir.types, TypeDef::Bytes);
                             let v = self.bound(Shape::Vec(b));
@@ -1479,7 +2018,7 @@ impl Checker<'_> {
                         CollectionKind::Vec | CollectionKind::Set => {
                             let el = self.fresh(false);
                             for x in &ts {
-                                self.unify(&hir.types, *x, el, span);
+                                self.flow(*x, el, false, span);
                             }
                             self.bound(if kind == CollectionKind::Vec {
                                 Shape::Vec(el)
@@ -1490,7 +2029,7 @@ impl Checker<'_> {
                         CollectionKind::Map => {
                             let (k, v) = (self.fresh(false), self.fresh(false));
                             for (i, x) in ts.iter().enumerate() {
-                                self.unify(&hir.types, *x, if i % 2 == 0 { k } else { v }, span);
+                                self.flow(*x, if i % 2 == 0 { k } else { v }, false, span);
                             }
                             self.bound(Shape::Map(k, v))
                         }
@@ -1510,7 +2049,7 @@ impl Checker<'_> {
                         let (Some(v), Some(vt)) = (args.get_mut(1), ts.get(1)) else {
                             return self.next_term();
                         };
-                        self.coerce_site(hir, v, *vt, 0);
+                        self.coerce_site(hir, v, *vt, 0, false);
                     }
                     self.next_term()
                 } else {
@@ -1543,7 +2082,7 @@ impl Checker<'_> {
                             if let (Some(x), Some(y), Some(value)) = (ts.first(), ts.get(1), args.get_mut(1)) {
                                 self.unify(&hir.types, *x, *k, span);
                                 let (y, v) = (*y, *v);
-                                self.coerce_site(hir, value, y, v);
+                                self.coerce_site(hir, value, y, v, false);
                             }
                         }
                         _ => {}
@@ -1634,7 +2173,7 @@ impl Checker<'_> {
                 } else {
                     for (a, ty) in ts.iter().zip(&params) {
                         let pt = self.of_type(hir, *ty);
-                        self.unify(&hir.types, *a, pt, span);
+                        self.flow(*a, pt, true, span);
                     }
                     let r = self.of_type(hir, ret);
                     self.record(r)
@@ -1648,10 +2187,14 @@ impl Checker<'_> {
                 let v = self.expr(hir, scope, value);
                 let p = self.pat(hir, scope, pat);
                 if !self.apply {
-                    self.unify(&hir.types, p, v, span);
-                    if let Some(ty) = ty {
-                        let a = self.of_type(hir, ty);
-                        self.unify(&hir.types, p, a, span);
+                    match ty {
+                        // `let x: T = v`: `x` is a `T`, and `v` must fit it.
+                        Some(ty) => {
+                            let a = self.of_type(hir, ty);
+                            self.unify(&hir.types, p, a, span);
+                            self.flow(v, a, true, span);
+                        }
+                        None => self.unify(&hir.types, p, v, span),
                     }
                 }
                 let b = self.expr(hir, scope, body);
@@ -1698,7 +2241,7 @@ impl Checker<'_> {
     /// A coercion site: `e`, of term `from`, where a value of term `to` is expected (a head column, a `let`
     /// variable, a constructor argument). The solver decides whether `e` is lifted into a lattice (LANGUAGE §5.6); the
     /// apply walk then wraps it. Both walks call this once per site, in the same order.
-    fn coerce_site(&mut self, hir: &mut Hir, e: &mut HExpr, from: T, to: T) {
+    fn coerce_site(&mut self, hir: &mut Hir, e: &mut HExpr, from: T, to: T, check: bool) {
         if !self.apply {
             let slot = self.lifts.len();
             self.lifts.push((false, to));
@@ -1706,6 +2249,7 @@ impl Checker<'_> {
                 slot,
                 from,
                 to,
+                check,
                 span: e.span,
             });
             return;
@@ -1781,7 +2325,47 @@ impl Checker<'_> {
                 .position(|d| matches!(d, Deferred::Coerce { .. } | Deferred::Compare { .. }))
             {
                 let d = self.deferred.remove(i);
-                self.settle_plain(hir, &d);
+                self.settle_plain(&d);
+                continue;
+            }
+            // A sum or difference with a `Duration` whose other operand nothing decided: it is a duration too.
+            let sums: Vec<(usize, T, T)> = self
+                .deferred
+                .iter()
+                .enumerate()
+                .filter_map(|(i, d)| match d {
+                    Deferred::Arith { l, r, .. } => Some((i, *l, *r)),
+                    _ => None,
+                })
+                .collect();
+            let duration_sum = sums.into_iter().find(|&(_, l, r)| {
+                [l, r]
+                    .into_iter()
+                    .any(|t| self.leaf(t).is_some_and(|ty| matches!(hir.types.get(ty), Some(TypeDef::Duration))))
+            });
+            if let Some((i, _, _)) = duration_sum {
+                let d = self.deferred.remove(i);
+                self.settle_duration = true;
+                let done = self.try_deferred(hir, &d);
+                self.settle_duration = false;
+                if !done {
+                    return self.bugs.push(internal_error!("a Duration sum did not settle"));
+                }
+                continue;
+            }
+            // A flow whose source is still unknown after everything else: nothing but the flow constrains it, so it
+            // is settled as an equation (the source takes the target's shape).
+            if let Some(i) = self.deferred.iter().position(|d| matches!(d, Deferred::Flow { .. })) {
+                if let Deferred::Flow {
+                    from,
+                    to,
+                    check,
+                    relate,
+                    span,
+                } = self.deferred.remove(i)
+                {
+                    self.flow_step(&hir.types, from, to, check, relate, span, true);
+                }
                 continue;
             }
             if self.deferred.is_empty() && defaulted {
@@ -1809,7 +2393,8 @@ impl Checker<'_> {
         let pending = std::mem::take(&mut self.deferred);
         for d in pending {
             let span = match d {
-                Deferred::Arith { span, .. }
+                Deferred::Flow { span, .. }
+                | Deferred::Arith { span, .. }
                 | Deferred::Field { span, .. }
                 | Deferred::TupleIndex { span, .. }
                 | Deferred::Cast { span, .. }
@@ -1832,6 +2417,13 @@ impl Checker<'_> {
     /// Tries a deferred constraint; `true` when it was discharged (successfully or with an error).
     fn try_deferred(&mut self, hir: &mut Hir, d: &Deferred) -> bool {
         match *d {
+            Deferred::Flow {
+                from,
+                to,
+                check,
+                relate,
+                span,
+            } => self.flow_step(&hir.types, from, to, check, relate, span, false),
             Deferred::Arith { op, l, r, res, span } => {
                 if let Some(done) = self.lattice_arith(hir, op, l, r, res, span) {
                     return done;
@@ -1864,6 +2456,17 @@ impl Checker<'_> {
                         true
                     }
                     (Some(TypeDef::Duration), _) | (_, Some(TypeDef::Duration)) => {
+                        // `x + d` and `x - d` with `x` not yet known may be an `Instant` plus a duration: wait for
+                        // `x` (only `d - x` makes `x` a duration at once), and settle it as a duration only when
+                        // nothing else decides it.
+                        let open = match op {
+                            BinOp::Add => ld.is_none() || rd.is_none(),
+                            BinOp::Sub => ld.is_none(),
+                            _ => false,
+                        };
+                        if open && !self.settle_duration {
+                            return false;
+                        }
                         if matches!(op, BinOp::Add | BinOp::Sub) {
                             self.unify(&hir.types, l, r, span);
                             self.unify(&hir.types, l, res, span);
@@ -1965,8 +2568,8 @@ impl Checker<'_> {
                 match self.node(r) {
                     Node::Bound(Shape::Vec(_) | Shape::Set(_) | Shape::Map(..)) => true,
                     Node::Bound(Shape::Con(t)) => {
-                        if !matches!(hir.types.get(t), Some(TypeDef::Str | TypeDef::Bytes)) {
-                            self.error(span, "`.len()` needs a string, bytes or a collection".into());
+                        if !matches!(hir.types.get(t), Some(TypeDef::Str | TypeDef::Bytes | TypeDef::Blob)) {
+                            self.error(span, "`.len()` needs a string, bytes, a blob or a collection".into());
                         }
                         true
                     }
@@ -1977,24 +2580,9 @@ impl Checker<'_> {
                     _ => false,
                 }
             }
-            Deferred::Ordered { t, span } => {
-                let Some(ty) = self.leaf(t) else {
-                    return !self.is_unbound(t);
-                };
-                if matches!(
-                    hir.types.get(ty),
-                    Some(TypeDef::Bool | TypeDef::Enum(_) | TypeDef::Struct(_))
-                ) {
-                    self.error(
-                        span,
-                        format!(
-                            "`<` compares numbers, strings, durations and instants, not {}",
-                            type_name(&hir.types, ty)
-                        ),
-                    );
-                }
-                true
-            }
+            // Every type has a canonical order (LANGUAGE §5.5), so `<` applies to any value; it waits only for its
+            // operands' type, which lowering needs to pick the numeric or the canonical order.
+            Deferred::Ordered { t, .. } => !self.is_unbound(t),
             Deferred::IntColumn { t, span } => {
                 if self.is_unbound(t) {
                     let r = self.find(t);
@@ -2024,13 +2612,19 @@ impl Checker<'_> {
                 }
                 true
             }
-            Deferred::Coerce { slot, from, to, span } => {
+            Deferred::Coerce {
+                slot,
+                from,
+                to,
+                check,
+                span,
+            } => {
                 let to_lat = self.lat(to);
                 if to_lat.is_none() {
                     if self.is_unbound(to) {
                         return false;
                     }
-                    self.unify(&hir.types, from, to, span);
+                    self.coerce_plain(from, to, check, span);
                     return true;
                 }
                 if self.lat(from).is_some() {
@@ -2054,7 +2648,7 @@ impl Checker<'_> {
                     if self.is_unbound(l) || self.is_unbound(r) {
                         return false;
                     }
-                    self.settle_plain(hir, d);
+                    self.settle_plain(d);
                     return true;
                 }
                 // A threshold: the lattice on the left after flipping `c <= x` into `x >= c`.
@@ -2160,8 +2754,9 @@ impl Checker<'_> {
             Deferred::In { elem, coll, span } => {
                 let rc = self.find(coll);
                 match self.node(rc) {
+                    // A membership test compares `elem` with the elements: neither narrows the other.
                     Node::Bound(Shape::Lat(LatS::Set(e) | LatS::PSet(e)) | Shape::Set(e) | Shape::Vec(e)) => {
-                        self.unify(&hir.types, elem, e, span);
+                        self.relate(elem, e, span);
                     }
                     Node::Bound(_) => {
                         let d = self.describe(&hir.types, coll);
@@ -2197,12 +2792,14 @@ impl Checker<'_> {
             Deferred::Gen { pat, src, span } => {
                 let rc = self.find(src);
                 match self.node(rc) {
+                    // The pattern binds a copy of each element, so what else constrains its variables does not
+                    // narrow the source's element type.
                     Node::Bound(Shape::Lat(LatS::Set(e) | LatS::PSet(e)) | Shape::Set(e) | Shape::Vec(e)) => {
-                        self.unify(&hir.types, pat, e, span);
+                        self.member(e, pat, span);
                     }
                     Node::Bound(Shape::Lat(LatS::Map(k, v)) | Shape::Map(k, v)) => {
                         let pair = self.bound(Shape::Tuple(vec![k, v]));
-                        self.unify(&hir.types, pat, pair, span);
+                        self.member(pair, pat, span);
                     }
                     Node::Bound(_) => {
                         let d = self.describe(&hir.types, src);
@@ -2290,12 +2887,14 @@ impl Checker<'_> {
         })
     }
 
-    /// Settles a coercion or comparison that no lattice reached: plain unification.
-    fn settle_plain(&mut self, hir: &mut Hir, d: &Deferred) {
+    /// Settles a coercion or comparison that no lattice reached: a plain flow, or a comparison's relation.
+    fn settle_plain(&mut self, d: &Deferred) {
         match *d {
-            Deferred::Coerce { from, to, span, .. } => self.unify(&hir.types, from, to, span),
+            Deferred::Coerce {
+                from, to, check, span, ..
+            } => self.coerce_plain(from, to, check, span),
             Deferred::Compare { l, r, span, .. } => {
-                self.unify(&hir.types, l, r, span);
+                self.relate(l, r, span);
                 self.deferred.push(Deferred::Ordered { t: l, span });
             }
             _ => {}
@@ -2332,6 +2931,7 @@ impl Checker<'_> {
                     slot,
                     from: fv,
                     to: v,
+                    check: false,
                     span,
                 });
             }
@@ -2492,6 +3092,7 @@ impl Checker<'_> {
                         slot: s,
                         from: a,
                         to: recv,
+                        check: false,
                         span,
                     });
                     if let Some(l) = lifts.first_mut() {
@@ -2599,6 +3200,7 @@ impl Checker<'_> {
             (Shape::Vec(_), _, "concat") => (Builtin::Lib(LibFn::VecConcat), None, 1),
             (Shape::Vec(_), _, "is_empty") => (Builtin::Lib(LibFn::VecIsEmpty), None, 0),
             (Shape::Vec(_), _, "reverse") => (Builtin::Lib(LibFn::VecReverse), None, 0),
+            (Shape::Vec(_), _, "flatten") => (Builtin::Lib(LibFn::VecFlatten), None, 0),
             (Shape::Vec(_), _, "enumerate") => (Builtin::Lib(LibFn::VecEnumerate), None, 0),
             (Shape::Vec(_), _, "map") => (Builtin::Lib(LibFn::VecMap), Some(0), 1),
             (Shape::Vec(_), _, "filter") => (Builtin::Lib(LibFn::VecFilter), Some(0), 1),
@@ -2606,6 +3208,10 @@ impl Checker<'_> {
             (Shape::Vec(_), _, "all") => (Builtin::Lib(LibFn::VecAll), Some(0), 1),
             (Shape::Vec(_), _, "any") => (Builtin::Lib(LibFn::VecAny), Some(0), 1),
             (Shape::Vec(_), _, "fold") => (Builtin::Lib(LibFn::VecFold), Some(1), 2),
+            (Shape::Vec(_), _, "scan") => (Builtin::Lib(LibFn::VecScan), Some(1), 2),
+            (Shape::Vec(_), _, "to_set") => (Builtin::Lib(LibFn::VecToSet), None, 0),
+            (Shape::Vec(_), _, "to_map") => (Builtin::Lib(LibFn::VecToMap), None, 0),
+            (Shape::Map(..), _, "get") => (Builtin::Lib(LibFn::MapGet), None, 1),
             (Shape::Option(_), _, "is_some") => (Builtin::Lib(LibFn::OptIsSome), None, 0),
             (Shape::Option(_), _, "is_none") => (Builtin::Lib(LibFn::OptIsNone), None, 0),
             (Shape::Option(_), _, "unwrap_or") => (Builtin::Lib(LibFn::OptUnwrapOr), None, 1),
@@ -2616,7 +3222,11 @@ impl Checker<'_> {
             (_, Some(TypeDef::Str), "split_whitespace") => (Builtin::Lib(LibFn::StrSplitWhitespace), None, 0),
             (_, Some(TypeDef::Str), "to_lowercase") => (Builtin::Lib(LibFn::StrToLowercase), None, 0),
             (_, Some(TypeDef::Str), "to_utf8") => (Builtin::Lib(LibFn::StrToUtf8), None, 0),
+            (_, Some(TypeDef::Str), "parse_i64") => (Builtin::Lib(LibFn::StrParseI64), None, 0),
+            (_, Some(TypeDef::Duration), "as_millis") => (Builtin::Lib(LibFn::DurationAsMillis), None, 0),
+            (_, Some(TypeDef::Instant), "as_millis") => (Builtin::Lib(LibFn::InstantAsMillis), None, 0),
             (_, Some(TypeDef::Bytes), "from_utf8") => (Builtin::Lib(LibFn::BytesFromUtf8), None, 0),
+            (_, Some(TypeDef::Blob), "read") => (Builtin::Lib(LibFn::BlobRead), None, 2),
             (_, Some(TypeDef::Bytes), "uvarint_at") => (Builtin::Lib(LibFn::BytesUvarintAt), None, 1),
             (_, Some(TypeDef::Bytes), "varint_at") => (Builtin::Lib(LibFn::BytesVarintAt), None, 1),
             (_, Some(TypeDef::Bytes), _) => {
@@ -2681,7 +3291,7 @@ impl Checker<'_> {
         let result = match (&shape, target) {
             (Shape::Vec(e) | Shape::Set(e) | Shape::Map(e, _), Builtin::Contains) => {
                 if let Some(x) = a0 {
-                    self.unify(&hir.types, x, *e, span);
+                    self.relate(x, *e, span);
                 }
                 bool_t
             }
@@ -2695,20 +3305,35 @@ impl Checker<'_> {
                         self.bound(Shape::Option(e))
                     }
                     LibFn::VecFirst | LibFn::VecLast => self.bound(Shape::Option(e)),
+                    // The result's elements merge the receiver's and the new ones (LANGUAGE §5.3).
                     LibFn::VecPush => {
+                        let out = self.fresh(false);
+                        self.flow(e, out, false, span);
                         if let Some(x) = a0 {
-                            self.unify(&hir.types, x, e, span);
+                            self.flow(x, out, false, span);
                         }
-                        recv
+                        self.bound(Shape::Vec(out))
                     }
                     LibFn::VecConcat => {
+                        let out = self.fresh(false);
+                        self.flow(e, out, false, span);
                         if let Some(x) = a0 {
-                            self.unify(&hir.types, x, recv, span);
+                            let xe = self.fresh(false);
+                            let xv = self.bound(Shape::Vec(xe));
+                            self.unify(&hir.types, x, xv, span);
+                            self.flow(xe, out, false, span);
                         }
-                        recv
+                        self.bound(Shape::Vec(out))
                     }
                     LibFn::VecIsEmpty => bool_t,
                     LibFn::VecReverse => recv,
+                    // The elements are vectors, and the result is one of their type.
+                    LibFn::VecFlatten => {
+                        let x = self.fresh(false);
+                        let inner = self.bound(Shape::Vec(x));
+                        self.unify(&hir.types, e, inner, span);
+                        inner
+                    }
                     LibFn::VecEnumerate => {
                         let pair = self.bound(Shape::Tuple(vec![u64_t, e]));
                         self.bound(Shape::Vec(pair))
@@ -2743,9 +3368,31 @@ impl Checker<'_> {
                             return Some(true);
                         };
                         let Some(init) = a0 else { return Some(true) };
-                        self.unify_params(hir, &ps, &[init, e], span);
-                        self.unify(&hir.types, b, init, span);
-                        init
+                        // The accumulator holds the initial value and every step's result.
+                        let acc = self.fresh(false);
+                        self.flow(init, acc, false, span);
+                        self.flow(b, acc, false, span);
+                        self.unify_params(hir, &ps, &[acc, e], span);
+                        acc
+                    }
+                    LibFn::VecScan => {
+                        let Some((ps, b)) = closure(self, 2) else {
+                            return Some(true);
+                        };
+                        let Some(init) = a0 else { return Some(true) };
+                        // As a fold's: the accumulator holds the initial value and every step's result.
+                        let acc = self.fresh(false);
+                        self.flow(init, acc, false, span);
+                        self.flow(b, acc, false, span);
+                        self.unify_params(hir, &ps, &[acc, e], span);
+                        self.bound(Shape::Vec(acc))
+                    }
+                    LibFn::VecToSet => self.bound(Shape::Set(e)),
+                    LibFn::VecToMap => {
+                        let (k, v) = (self.fresh(false), self.fresh(false));
+                        let pair = self.bound(Shape::Tuple(vec![k, v]));
+                        self.unify(&hir.types, e, pair, span);
+                        self.bound(Shape::Map(k, v))
                     }
                     other => {
                         self.bugs.push(internal_error!("{other:?} dispatched on a vector"));
@@ -2758,10 +3405,12 @@ impl Checker<'_> {
                 match f {
                     LibFn::OptIsSome | LibFn::OptIsNone => bool_t,
                     LibFn::OptUnwrapOr => {
+                        let out = self.fresh(false);
+                        self.flow(e, out, false, span);
                         if let Some(d) = a0 {
-                            self.unify(&hir.types, d, e, span);
+                            self.flow(d, out, false, span);
                         }
-                        e
+                        out
                     }
                     LibFn::OptMap => {
                         let Some((ps, b)) = closure(self, 1) else {
@@ -2786,11 +3435,25 @@ impl Checker<'_> {
                     }
                 }
             }
+            (Shape::Map(k, v), Builtin::Lib(LibFn::MapGet)) => {
+                // A lookup compares the key with the map's keys.
+                if let Some(x) = a0 {
+                    self.relate(x, *k, span);
+                }
+                self.bound(Shape::Option(*v))
+            }
             (_, Builtin::Lib(LibFn::BytesSlice)) => {
                 for a in [a0, a1].into_iter().flatten() {
                     self.unify(&hir.types, a, u64_t, span);
                 }
                 self.bound(Shape::Option(recv))
+            }
+            (_, Builtin::Lib(LibFn::BlobRead)) => {
+                for a in [a0, a1].into_iter().flatten() {
+                    self.unify(&hir.types, a, u64_t, span);
+                }
+                let b = self.con(&mut hir.types, TypeDef::Bytes);
+                self.bound(Shape::Option(b))
             }
             (_, Builtin::Lib(LibFn::BytesConcat)) => {
                 if let Some(x) = a0 {
@@ -2801,6 +3464,13 @@ impl Checker<'_> {
             (_, Builtin::Lib(LibFn::StrSplitWhitespace)) => self.bound(Shape::Vec(recv)),
             (_, Builtin::Lib(LibFn::StrToLowercase)) => recv,
             (_, Builtin::Lib(LibFn::StrToUtf8)) => self.con(&mut hir.types, TypeDef::Bytes),
+            (_, Builtin::Lib(LibFn::DurationAsMillis | LibFn::InstantAsMillis)) => {
+                self.con(&mut hir.types, TypeDef::Int(IntTy::I64))
+            }
+            (_, Builtin::Lib(LibFn::StrParseI64)) => {
+                let i = self.con(&mut hir.types, TypeDef::Int(IntTy::I64));
+                self.bound(Shape::Option(i))
+            }
             (_, Builtin::Lib(LibFn::BytesFromUtf8)) => {
                 let st = self.con(&mut hir.types, TypeDef::Str);
                 self.bound(Shape::Option(st))
@@ -2891,6 +3561,13 @@ impl Checker<'_> {
 
     /// Writes variable and view column types.
     fn finish(&mut self, hir: &mut Hir) {
+        // The types of variables inside the blocks that refine them, in the walk's order of blocks.
+        let mut handlers = std::mem::take(&mut hir.handlers);
+        let mut next = 0;
+        for h in &mut handlers {
+            self.refined_blocks(hir, &mut h.stmts, &mut next);
+        }
+        hir.handlers = handlers;
         let mut var_types = Vec::new();
         let scopes: Vec<Vec<(Span, Symbol)>> = hir
             .scopes

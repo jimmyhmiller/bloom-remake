@@ -302,6 +302,8 @@ pub struct HStream {
     pub failed: Option<HRelId>,
     pub write: HRelId,
     pub close: HRelId,
+    pub pause: HRelId,
+    pub resume: HRelId,
     pub dial: Option<HRelId>,
     pub span: Span,
 }
@@ -385,6 +387,10 @@ pub enum HStmt {
         /// Normalized condition text, hashed for the block's id.
         text: String,
         span: Span,
+        /// The types inside the block of the variables bound outside it (set by type checking): the condition holds
+        /// here, so what it says of them refines their roles (a `Node` the condition finds in a `Node<R>` column is
+        /// a `Node<R>` inside), and the block's rules type them so.
+        refined: Vec<(HVarId, TypeId)>,
     },
 }
 
@@ -433,6 +439,8 @@ pub enum AggKind {
     Sum,
     Min,
     Max,
+    /// `collect!(e)` (LANGUAGE §10.1): a `Vec` of `e` over the group's valuations, in canonical order.
+    Collect,
     /// `index!()` (LANGUAGE §10.5): the dense 0-based rank of each head tuple in canonical order, per tick. A view
     /// column only.
     Index,
@@ -843,6 +851,11 @@ pub enum Builtin {
     /// `rand_range(lo, hi, k…)` (LANGUAGE §15.1): an unbiased value in `[lo, hi)`, the same for the same key within a
     /// node's tick and incarnation. Arguments: `lo`, `hi`, then the key.
     RandRange,
+    /// `error("message")` (Appendix B): a located hard error (BLSR010); its type is whatever its context needs.
+    Error,
+    /// `rand(k…)` (LANGUAGE §15.1): a `u64` from the node's PRF, the same for the same key within a node's tick and
+    /// incarnation. Arguments: the key.
+    Rand,
     /// `majority(s, R)` (LANGUAGE §10.9): `|s ∩ R| > |R| / 2` for a set of nodes `s` and a role `R`.
     Majority(HRoleId),
     /// A function or method of the built-in library (Appendix B); the receiver, if any, first.

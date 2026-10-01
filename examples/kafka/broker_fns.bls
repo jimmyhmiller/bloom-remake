@@ -20,23 +20,60 @@ fn answer(req: Bytes) -> Option<Bytes> {
                 if key == API_VERSIONS {
                     decode_api_versions_request(body).map(|_r| encode_api_versions_response(corr))
                 } else {
-                    decode_metadata_request(body).map(|r| encode_metadata_response(corr, r, brokers(), CLUSTER_ID, NODE_ID))
+                    error("answer: a request that reads the broker's state reached the pure answers")
                 }
             })
         }
     })
 }
 
-/// The answers to `frames`, in order, and whether one could not be answered (the rest are then dropped).
-fn answer_all(frames: Vec<Bytes>) -> (Bytes, bool) {
-    frames.fold((Bytes::empty(), false), |acc, f| {
-        if acc.1 {
-            acc
+/// A request frame's API key, version and correlation id, if it holds a request header's fixed part.
+fn frame_prefix(fr: Bytes) -> Option<(i16, i16, i32)> {
+    request_prefix(cur(fr)).map(|p| (p.0, p.1, p.2))
+}
+
+fn frame_readable(fr: Bytes) -> bool {
+    frame_prefix(fr).is_some()
+}
+
+/// Whether a request is answered from its bytes alone: ApiVersions, and anything unsupported (which closes the
+/// connection).
+fn pure_request(key: i16, version: i16) -> bool {
+    key == API_VERSIONS || not supports(key, version)
+}
+
+/// A request frame's body: what follows its header.
+fn request_body(fr: Bytes) -> Option<Cur> {
+    request_header(cur(fr)).map(|h| h.1)
+}
+
+/// Whether a request that reads the broker's state has a body this broker can decode (otherwise the connection
+/// closes, as Kafka closes it on a request it cannot parse).
+fn stateful_body_ok(key: i16, fr: Bytes) -> bool {
+    request_body(fr).map(|b| {
+        if key == API_METADATA {
+            decode_metadata_request(b).is_some()
+        } else if key == API_CREATE_TOPICS {
+            decode_create_topics(b).is_some()
+        } else if key == API_DELETE_TOPICS {
+            decode_delete_topics(b).is_some()
+        } else if key == API_DESCRIBE_CONFIGS {
+            decode_describe_configs(b).is_some()
+        } else if key == API_PRODUCE {
+            decode_produce(b).is_some()
+        } else if key == API_INIT_PRODUCER_ID {
+            decode_init_producer_id(b).is_some()
+        } else if key == API_FETCH {
+            decode_fetch(b).is_some()
+        } else if key == API_LIST_OFFSETS {
+            frame_prefix(fr).and_then(|p| decode_list_offsets(b, p.1)).is_some()
         } else {
-            match answer(f) {
-                Some(r) => (acc.0.concat(r), false),
-                None => (acc.0, true),
-            }
+            error("stateful_body_ok: a supported API with no decoder here")
         }
-    })
+    }).unwrap_or(false)
+}
+
+/// Whether `answer` answers the frame (otherwise the connection closes).
+fn answered(fr: Bytes) -> bool {
+    answer(fr).is_some()
 }

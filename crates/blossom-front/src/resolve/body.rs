@@ -2024,7 +2024,7 @@ impl<'t> Resolver<'t, '_> {
                 }
                 Some(HExpr::new(HExprKind::LatCtor { kind, bot, args: xs }, span))
             }
-            [name] if matches!(name.as_str(), "rand_range" | "majority") && cx.in_fn => {
+            [name] if matches!(name.as_str(), "rand" | "rand_range" | "majority") && cx.in_fn => {
                 let what = if name.as_str() == "majority" {
                     "a role's members"
                 } else {
@@ -2065,6 +2065,37 @@ impl<'t> Resolver<'t, '_> {
                 cx.calls.insert(f);
                 Some(HExpr::new(HExprKind::Call { f, args: xs }, span))
             }
+            [ty, f] if ty.as_str() == "Duration" && f.as_str() == "from_millis" => {
+                let [n] = pos.as_slice() else {
+                    self.error(code!("BLS0301"), span, "`Duration::from_millis` takes 1 argument");
+                    return None;
+                };
+                let x = self.expr(cx, n)?;
+                Some(HExpr::new(
+                    HExprKind::Builtin {
+                        f: Builtin::Lib(blossom_ir::core::LibFn::DurationFromMillis),
+                        args: vec![x],
+                    },
+                    span,
+                ))
+            }
+            [ty, f] if ty.as_str() == "Blob" && f.as_str() == "of" => {
+                if pos.len() != 1 {
+                    self.error(code!("BLS0301"), span, format!("`Blob::of` takes 1 argument, {} given", pos.len()));
+                    return None;
+                }
+                let mut xs = Vec::new();
+                for p in pos {
+                    xs.push(self.expr(cx, p)?);
+                }
+                Some(HExpr::new(
+                    HExprKind::Builtin {
+                        f: Builtin::Lib(blossom_ir::core::LibFn::BlobOf),
+                        args: xs,
+                    },
+                    span,
+                ))
+            }
             [ty, f] if ty.as_str() == "Bytes" => {
                 use blossom_ir::core::LibFn;
                 let n = f.as_str();
@@ -2096,6 +2127,38 @@ impl<'t> Resolver<'t, '_> {
                 Some(HExpr::new(
                     HExprKind::Builtin {
                         f: Builtin::Lib(lib),
+                        args: xs,
+                    },
+                    span,
+                ))
+            }
+            [name] if name.as_str() == "error" => {
+                let [msg] = pos.as_slice() else {
+                    self.error(code!("BLS0301"), span, "`error` takes a message");
+                    return None;
+                };
+                let m = self.expr(cx, msg)?;
+                Some(HExpr::new(
+                    HExprKind::Builtin {
+                        f: Builtin::Error,
+                        args: vec![m],
+                    },
+                    span,
+                ))
+            }
+            [name] if name.as_str() == "rand" => {
+                // The key makes the draw stable (the same value for the same key within a tick, LANG-175).
+                if pos.is_empty() {
+                    self.error(code!("BLS0301"), span, "`rand` takes a key");
+                    return None;
+                }
+                let mut xs = Vec::new();
+                for p in pos {
+                    xs.push(self.expr(cx, p)?);
+                }
+                Some(HExpr::new(
+                    HExprKind::Builtin {
+                        f: Builtin::Rand,
                         args: xs,
                     },
                     span,
@@ -2323,6 +2386,7 @@ impl<'t> Resolver<'t, '_> {
                         stmts: inner,
                         text: self.normalized(cond.span),
                         span: *span,
+                        refined: Vec::new(),
                     });
                 }
                 Stmt::If {
@@ -2365,6 +2429,7 @@ impl<'t> Resolver<'t, '_> {
             stmts: inner,
             text: text.clone(),
             span,
+            refined: Vec::new(),
         });
         let (Some(g), Some(els)) = (guard, els) else { return };
         let negated = HBody {
@@ -2393,6 +2458,7 @@ impl<'t> Resolver<'t, '_> {
             stmts,
             text: format!("not ({text})"),
             span,
+            refined: Vec::new(),
         });
     }
 
@@ -2764,6 +2830,7 @@ impl<'t> Resolver<'t, '_> {
             "sum" => AggKind::Sum,
             "min" => AggKind::Min,
             "max" => AggKind::Max,
+            "collect" => AggKind::Collect,
             "index" => {
                 if let Some(c) = clauses.first() {
                     self.unsupported("LANG-097", &format!("`index!` with `{}`", c.keyword.as_str()), c.span);
@@ -2978,6 +3045,34 @@ impl<'t> Resolver<'t, '_> {
             if drivers > 1 {
                 self.error(code!("BLS0511"), v.span, "a view has at most one `per` driver");
                 return;
+            }
+            // A driver's group may be empty: an aggregate with no identity for it needs a `default` (§10.2).
+            if driver.is_some() {
+                let mut missing = false;
+                for c in &cols {
+                    if let HViewAggCol::Agg(a) = c
+                        && a.default.is_none()
+                        && !matches!(a.func, AggKind::Count | AggKind::Sum | AggKind::Collect)
+                    {
+                        let name = match a.func {
+                            AggKind::Min => "min!",
+                            AggKind::Max => "max!",
+                            _ => "index!",
+                        };
+                        self.error(
+                            code!("BLS0511"),
+                            a.span,
+                            format!(
+                                "with a `per` driver a group may be empty, and `{name}` has no value for it: write \
+                                 `default e` inside its parentheses"
+                            ),
+                        );
+                        missing = true;
+                    }
+                }
+                if missing {
+                    return;
+                }
             }
             HViewShape::Aggregate {
                 union: ucx.scope,

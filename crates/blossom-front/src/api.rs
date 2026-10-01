@@ -105,6 +105,15 @@ pub fn compile_with(
             roles: &roles,
         },
     )?;
+    // No evaluation may be deeper than the stack a tick runs on (LANGUAGE §16.1).
+    if let Some(d) = too_deep(lowered.program.get(), |id| {
+        hir.fns
+            .get(id.index())
+            .map(|f| (format!("function `{}`", f.name), f.span))
+    }) {
+        diags.push(d);
+        return Err(BlsError::Rejected(diags));
+    }
     let roles = roles.iter().map(|r| r.map(|r| RoleId::from_raw(r.0))).collect();
     let halt = hir
         .rels
@@ -242,4 +251,48 @@ pub(crate) fn deployment(
         }
     }
     (names, roles)
+}
+
+/// BLS0217 (LANGUAGE §16.1) when `program`'s deepest evaluation is past the bound the evaluators' stack is sized for.
+/// `function` names a declared function and gives its span.
+pub(crate) fn too_deep(
+    program: &blossom_ir::core::Program,
+    function: impl Fn(blossom_base::FnId) -> Option<(String, blossom_base::Span)>,
+) -> Option<Diagnostic> {
+    use blossom_ir::depth::{DepthSite, MAX_EVAL_DEPTH, deepest};
+    let (depth, site) = deepest(program)?;
+    if depth <= MAX_EVAL_DEPTH {
+        return None;
+    }
+    let (what, span) = match site {
+        DepthSite::Fn(id) => match function(id) {
+            Some((what, span)) => (what, Some(span)),
+            None => ("a function".to_owned(), None),
+        },
+        DepthSite::Rule(id) => {
+            let r = program.rules.get(id);
+            (
+                format!("rule `{}`", r.map(|r| r.label.to_string()).unwrap_or_default()),
+                r.map(|r| r.span),
+            )
+        }
+        DepthSite::Partition(id) => {
+            let r = program.rels.get(id);
+            (
+                format!("the partition key of `{}`", r.map(|r| r.name.to_string()).unwrap_or_default()),
+                None,
+            )
+        }
+    };
+    let mut d = Diagnostic::new(
+        code!("BLS0217"),
+        format!(
+            "{what} evaluates {depth} levels deep, past the bound of {MAX_EVAL_DEPTH} (§16.1): split its nesting or \
+             its chain of calls"
+        ),
+    );
+    if let Some(s) = span {
+        d = d.with_primary(s);
+    }
+    Some(d)
 }

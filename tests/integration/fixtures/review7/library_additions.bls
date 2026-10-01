@@ -1,0 +1,17 @@
+//! S7 review: the library functions that make a request's work linear (`flatten`, `scan`, `to_set`, `to_map`,
+//! `Map::get`), on both evaluators.
+program library_additions version 1;
+input go(k: u64);
+fn flat(k: u64) -> Vec<u64> { [[k], [], [k + 1u64, k + 2u64]].flatten() }
+fn prefix(k: u64) -> Vec<u64> { [1u64, 2u64, 3u64].scan(k, |acc, x| acc + x) }
+fn empty_scan(k: u64) -> Vec<u64> { range(0u64, 0u64).scan(k, |acc, x| acc + x) }
+fn distinct(k: u64) -> u64 { [k, k, 3u64].to_set().len() }
+fn lookup(k: u64) -> Option<String> { [(k, "a"), (2u64, "b"), (k, "c")].to_map().get(k) }
+fn missing(k: u64) -> Option<String> { [(1u64, "a")].to_map().get(k) }
+view out(a, b, c, d, e, f) = go(k),
+    let a = flat(k),
+    let b = prefix(k),
+    let c = empty_scan(k),
+    let d = distinct(k),
+    let e = lookup(k),
+    let f = missing(k);

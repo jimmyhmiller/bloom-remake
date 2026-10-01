@@ -1,6 +1,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 //! Durable opaque bytes, deterministic filesystem simulation, WAL and checkpoints (M2.6).
 // FEATURE: DIST-020
+mod blob;
 mod ckpt;
 pub mod conformance;
 pub mod crash;
@@ -8,6 +9,7 @@ mod meta;
 mod simfs;
 mod vfs;
 mod wal;
+pub use blob::*;
 pub use ckpt::*;
 pub use meta::*;
 pub use simfs::*;

@@ -814,27 +814,33 @@ impl<'h> Lowerer<'h> {
         // Statements that share verb and target get a hash suffix (LANGUAGE §4.3).
         let mut counts: BTreeMap<(Verb, HRelId), u32> = BTreeMap::new();
         count_targets(&h.stmts, &mut counts);
-        self.stmts(&h.stmts, h.scope, (when, vars), &mut names, &counts)
+        self.stmts(&h.stmts, h.scope, (when, vars), &BTreeMap::new(), &mut names, &counts)
     }
 
+    /// A handler's statements under `parent` (its header's or enclosing block's relation), whose variables `refined`
+    /// have those types there.
     fn stmts(
         &mut self,
         stmts: &'h [HStmt],
         scope: ScopeId,
         parent: (RelId, Vec<HVarId>),
+        refined: &BTreeMap<HVarId, TypeId>,
         names: &mut Names,
         counts: &BTreeMap<(Verb, HRelId), u32>,
     ) -> Result<(), InternalError> {
         for s in stmts {
             match s {
-                HStmt::Verb(v) => self.verb(v, scope, &parent, names, counts)?,
+                HStmt::Verb(v) => self.verb(v, scope, &parent, refined, names, counts)?,
                 HStmt::Block {
                     kind,
                     cond,
                     stmts: inner,
                     text,
                     span,
+                    refined: here,
                 } => {
+                    let mut inside = refined.clone();
+                    inside.extend(here.iter().copied());
                     let word = match kind {
                         BlockKind::If | BlockKind::Else => "if",
                         BlockKind::For => "for",
@@ -850,7 +856,11 @@ impl<'h> Lowerer<'h> {
                         .iter()
                         .map(|v| {
                             let name = self.hir.var(scope, *v)?.name;
-                            Ok(column(name, self.var_ty(scope, *v)?, false))
+                            let ty = match inside.get(v) {
+                                Some(ty) => *ty,
+                                None => self.var_ty(scope, *v)?,
+                            };
+                            Ok(column(name, ty, false))
                         })
                         .collect::<Result<_, InternalError>>()?;
                     let module = names.module.clone();
@@ -872,7 +882,7 @@ impl<'h> Lowerer<'h> {
                         vars: parent.1.clone(),
                         span: *span,
                     }];
-                    let seed = self.given(vec![Draft::new(scope)], &given, names)?;
+                    let seed = self.given(vec![Draft::refined(scope, inside.clone())], &given, names)?;
                     for d in self.body(seed, cond, &given, names)? {
                         let mut d = d;
                         let args = self.var_terms(&mut d, &vars)?;
@@ -891,7 +901,7 @@ impl<'h> Lowerer<'h> {
                         )?;
                     }
                     self.b.end_construct(construct).map_err(ir)?;
-                    self.stmts(inner, scope, (rel, vars), names, counts)?;
+                    self.stmts(inner, scope, (rel, vars), &inside, names, counts)?;
                 }
             }
         }
@@ -904,6 +914,7 @@ impl<'h> Lowerer<'h> {
         v: &'h HVerbStmt,
         scope: ScopeId,
         parent: &(RelId, Vec<HVarId>),
+        refined: &BTreeMap<HVarId, TypeId>,
         names: &mut Names,
         counts: &BTreeMap<(Verb, HRelId), u32>,
     ) -> Result<(), InternalError> {
@@ -915,7 +926,7 @@ impl<'h> Lowerer<'h> {
             text.push_str(&stable_hash_hex8(v.text.as_bytes()));
         }
         let label = self.label(text);
-        let mut d = Draft::new(scope);
+        let mut d = Draft::refined(scope, refined.clone());
         let pargs = self.var_terms(&mut d, &parent.1)?;
         d.lits.push(Literal::Pos(ir_atom(parent.0, pargs, v.span)));
         // Head columns, in IR order.
@@ -1009,6 +1020,7 @@ impl<'h> Lowerer<'h> {
             AggKind::Sum => AggFunc::Sum,
             AggKind::Min => AggFunc::Min,
             AggKind::Max => AggFunc::Max,
+            AggKind::Collect => AggFunc::CollectVec,
             AggKind::Index => return Err(internal_error!("`index!` reached a plain aggregate")),
         };
         let args = if g.args.is_empty() {
@@ -1018,8 +1030,9 @@ impl<'h> Lowerer<'h> {
             for e in &g.args {
                 out.push(self.term(d, e)?);
             }
-            // `sum!(e)` adds `e` once per distinct valuation of the group (LANGUAGE §10.1), not per distinct value.
-            if g.func == AggKind::Sum {
+            // `sum!(e)` adds `e` once per distinct valuation of the group (LANGUAGE §10.1), not per distinct value,
+            // and `collect!(e)` holds `e` once per valuation.
+            if matches!(g.func, AggKind::Sum | AggKind::Collect) {
                 out.extend(self.var_terms(d, over)?);
             }
             out
@@ -1548,6 +1561,8 @@ impl<'h> Lowerer<'h> {
                             int_zero(&self.hir.types, col_ty)
                                 .ok_or_else(|| internal_error!("a count or sum column that is not an integer"))?,
                         ),
+                        // An empty group collects the empty vector (§10.2).
+                        None if driver.is_some() && a.func == AggKind::Collect => Some(Value::Vec(Vec::new().into())),
                         None => None,
                     }
                 }

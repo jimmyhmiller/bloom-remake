@@ -467,7 +467,7 @@ fn a_closure_outside_a_function_is_bls0214() {
 
 #[test]
 fn a_function_reading_a_relation_or_the_clock_is_bls0215() {
-    for body in ["now()", "tick()", "self", "c", "rand_range(0, 3, n)"] {
+    for body in ["now()", "tick()", "self", "c", "rand_range(0, 3, n)", "rand(n)"] {
         let src = with_head(Box::leak(
             format!(
                 "cell c: LMax<u64>;\n\
@@ -954,4 +954,77 @@ fn a_rule_reads_and_writes_only_relations_placed_at_its_role() {
     let got = diags_for(src, &role_nodes());
     let codes: Vec<&str> = got.iter().map(|d| d.0.as_str()).collect();
     assert_eq!(codes, vec!["BLS0404", "BLS0404"], "{got:?}");
+}
+
+/// `src` with roles `A` and `B`, a channel `ping` from A to A, and `body` placed at A.
+fn at_a(defs: &str, body: &str) -> &'static str {
+    Box::leak(
+        format!(
+            "program t version 1;\nrole A;\nrole B;\nchannel ping(x: u64): A -> A;\n{defs}\nat A {{\n  \
+             input i(a: Node<A>, b: Node, c: bool);\n  input j(z: Node<A>);\n{body}\n}}\n"
+        )
+        .into_boxed_str(),
+    )
+}
+
+/// The codes compiling `src` with nodes of roles A and B reports.
+fn role_program_codes(src: &'static str) -> Vec<String> {
+    diags_for(src, &role_nodes()).into_iter().map(|d| d.0).collect()
+}
+
+#[test]
+fn node_roles_join_at_merges_and_meet_only_in_conjunctions() {
+    let ok = Vec::<String>::new();
+    let err = vec!["BLS0300".to_owned()];
+    let cases: [(&str, &str, &Vec<String>); 13] = [
+        // A `None` holds no node: it fits a `Node<A>` requirement.
+        (
+            "channel told(who: Option<Node<A>>): A -> A;",
+            "on i(a, b, c) { send told(None) to a; }",
+            &ok,
+        ),
+        // A merge of a Node<A> and a Node is a Node: it cannot be sent to as a Node<A>.
+        ("", "on i(a, b, c), let x = if c { a } else { b } { send ping(1) to x; }", &err),
+        // Merges of Node<A>s stay Node<A>.
+        ("", "on i(a, b, c), j(z), let x = if c { a } else { z } { send ping(1) to x; }", &ok),
+        // A conjunct narrows: `x` is one of `a`, `b` and also in `j`.
+        ("", "on i(a, b, c), let x = if c { a } else { b }, j(x) { send ping(1) to x; }", &ok),
+        // `==` as a conjunct narrows `b` to `a`'s role.
+        ("", "on i(a, b, c), a == b { send ping(1) to b; }", &ok),
+        // Under `not`, nothing narrows.
+        ("", "on i(a, b, c), not j(b) { send ping(1) to b; }", &err),
+        ("", "on i(a, b, c), not { a == b } { send ping(1) to b; }", &err),
+        // `==` inside an expression is a comparison, not an equation.
+        ("", "on i(a, b, c), let d = (a == b) || c, d { send ping(1) to b; }", &err),
+        // In a function, parameters keep their types and merges join.
+        (
+            "fn pick(c: bool, a: Node<A>, b: Node) -> Node { if c { a } else { b } }\n\
+             fn grow(v: Vec<Node<A>>, d: Node) -> Vec<Node> { v.push(d) }\n\
+             fn last(v: Vec<Node<A>>, d: Node) -> Node { v.fold(d, |acc, x| x) }\n\
+             fn same(a: Node<A>, b: Node) -> bool { a == b }",
+            "view v(x) = i(a, b, c), let x = (pick(c, a, b), grow([a], b), last([a], b), same(a, b));",
+            &ok,
+        ),
+        // A function has no flow typing: `a == b` does not make `b` a Node<A> in a branch.
+        ("fn f(a: Node<A>, b: Node) -> Node<A> { if a == b { b } else { a } }", "", &err),
+        // A Node where a Node<A> parameter is expected.
+        ("fn g(a: Node<A>) -> Node<A> { a }", "view v(x) = i(a, b, c), let x = g(b);", &err),
+        // A view's column holds what its alternatives put there.
+        ("", "view w(x) { i(x, _, _); j(x); }\non w(x) { send ping(1) to x; }", &ok),
+        ("", "view w(x) { i(x, _, _); i(_, x, _); }\non w(x) { send ping(1) to x; }", &err),
+    ];
+    for (defs, body, want) in cases {
+        let src = at_a(defs, body);
+        assert_eq!(&role_program_codes(src), want, "{defs}\n{body}");
+    }
+}
+
+#[test]
+fn a_blob_does_not_leave_its_node_yet() {
+    let src = "program t version 1;\nrole A;\nrole B;\n\
+               channel carry(b: Blob): A -> B;\n\
+               at A {\n  input hand(x: Option<Blob>);\n  durable table keep(b: Blob);\n}\n";
+    let got = diags_for(src, &role_nodes());
+    let codes: Vec<&str> = got.iter().map(|d| d.0.as_str()).collect();
+    assert_eq!(codes, vec!["BLS0908", "BLS0908"], "{got:?}");
 }

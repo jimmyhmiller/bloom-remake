@@ -1,0 +1,50 @@
+//! The line echo server of `echo.bls`, which pauses each connection after every chunk and resumes it a few
+//! milliseconds later (FOREIGN-PROTOCOLS §1.2): what the peer sends meanwhile, and its close, wait; nothing is lost
+//! or reordered.
+program paused version 1;
+
+stream echo: listen;
+
+/// Wakes the node, so a paused connection is resumed when its time comes.
+timer beat every 2ms;
+
+/// Per connection: the bytes not yet consumed, and the next write's sequence number.
+table buf(c: Conn, pending: Bytes, next_seq: u64) key(c);
+/// The paused connections, and when to resume them.
+table held(c: Conn, until: Instant) key(c);
+
+fn split(b: Bytes) -> (Bytes, Bytes) {
+    let last = range(0, b.len()).filter(|i| b.u8_at(i) == Some(10u8)).last();
+    match last {
+        Some(i) => (b.slice(0, i + 1).unwrap_or(Bytes::empty()), b.slice(i + 1, b.len()).unwrap_or(Bytes::empty())),
+        None => (Bytes::empty(), b),
+    }
+}
+
+accept: on echo.opened(c, _peer, _at) {
+    emit buf(c, Bytes::empty(), 0);
+}
+
+recv: on echo.data(c, _seq, bytes), buf(c, pending, n), let (lines, rest) = split(pending.concat(bytes)) {
+    if lines.len() > 0 {
+        send echo.write(c, n, [Part::Bytes(lines)]);
+        upsert buf(c, rest, n + 1);
+    }
+    if lines.len() == 0 {
+        upsert buf(c, rest, n);
+    }
+    send echo.pause(c);
+    upsert held(c, now() + 5ms);
+}
+
+wake: on beat(_n, _at), held(c, until) where now() >= until {
+    send echo.resume(c);
+    delete held(c, until);
+}
+
+forget: on echo.closed(c, _reason), buf(c, p, n) {
+    delete buf(c, p, n);
+}
+forget_held: on echo.closed(c, _reason), held(c, u) {
+    delete held(c, u);
+}
