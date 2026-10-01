@@ -328,6 +328,7 @@ impl Cx<'_> {
     fn item(&mut self, item: &Item) {
         let site = match &item.kind {
             ItemKind::Use(_) => Site::Item("use"),
+            ItemKind::Format(_) => Site::Item("format"),
             ItemKind::Import(_) => Site::Item("import"),
             ItemKind::Include(_) => Site::Item("include"),
             ItemKind::Const { .. } => Site::Item("const"),

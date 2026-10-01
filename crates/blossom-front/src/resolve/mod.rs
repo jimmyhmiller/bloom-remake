@@ -1732,6 +1732,10 @@ impl<'t, 'd> Resolver<'t, 'd> {
                     }
                 }
                 ItemKind::Fact(f) => self.fact(s, f),
+                ItemKind::Format(f) => self.bugs.push(blossom_base::internal_error!(
+                    "format `{}` reached name resolution (formats are expanded when files load)",
+                    f.name.as_str()
+                )),
                 ItemKind::Rel(d) if d.guard.is_some() => self.persist_guard(s, d, placement),
                 ItemKind::Interpose(ip) => self.interpose_rules(s, ip, placement),
                 ItemKind::Invariant(inv) => {

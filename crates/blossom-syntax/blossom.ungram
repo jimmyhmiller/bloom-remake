@@ -4,7 +4,7 @@ SourceFile = InnerAttr* ProgramHeader? Item*
 ProgramHeader = 'program' Name 'version' 'INT_LIT' ('edition' 'INT_LIT')? ';'
 InnerAttr = '#![' Attr ']'
 Attr = '#[' Name ('(' Arg* ')' | '=' Expr)? ']'
-Item = UseItem | ImportItem | IncludeItem | ConstItem | ParamItem | TypeAlias | StructItem | EnumItem | FnItem | ExternItem | ImplItem | LatticeTypeItem | AggregateItem | ServiceItem | ModuleItem | ProtocolItem | RoleItem | AtSection | InterposeItem | BlockItem | OverrideItem | AclItem | RelDecl | CellDecl | TimerDecl | ViewDecl | HandlerItem | BootstrapItem | FactItem | InvariantItem | MigrateItem | TranslateItem | SnapshotItem | SpecItem
+Item = UseItem | ImportItem | IncludeItem | ConstItem | ParamItem | TypeAlias | StructItem | EnumItem | FnItem | ExternItem | ImplItem | LatticeTypeItem | AggregateItem | ServiceItem | ModuleItem | ProtocolItem | RoleItem | AtSection | InterposeItem | BlockItem | OverrideItem | AclItem | RelDecl | CellDecl | TimerDecl | ViewDecl | HandlerItem | BootstrapItem | FactItem | InvariantItem | MigrateItem | TranslateItem | SnapshotItem | SpecItem | FormatItem
 UseItem = 'use' UseTree ';'
 UseTree = Name (UseTree | Name)*
 ImportItem = 'import' Name GenericArgs? Arg* Name ';'
@@ -136,3 +136,8 @@ CheckMember = Name OptBlock?
 OptBlock = OptField*
 OptField = Name Expr
 Name = 'IDENT'
+FormatItem = Name FormatParam* (Expr | FormatField*)
+FormatParam = Name Type?
+FormatField = Name? Expr FormatCond? FormatDefault?
+FormatCond = Expr
+FormatDefault = Expr

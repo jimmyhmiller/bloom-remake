@@ -12,6 +12,7 @@
 pub mod attrs;
 mod convert;
 mod desugar;
+pub(crate) mod format;
 
 pub use convert::convert;
 
@@ -122,10 +123,39 @@ pub enum ItemKind {
         name: Ident,
         kind: Ident,
     },
+    /// `format …` (LANGUAGE §16.7): replaced, once includes are expanded, by a struct and its functions (`format`).
+    Format(FormatItem),
     /// A construct this build parses but does not accept yet; the converter has already reported it (BLS0908).
     Unsupported {
         what: &'static str,
     },
+}
+
+/// `format Name(params) { fields }` (a record: a struct and its decoder and encoder) or `format name(F, …) =
+/// element;` (an alias, expanded where it is used), LANGUAGE §16.7.
+#[derive(Clone, Debug)]
+pub struct FormatItem {
+    pub name: Ident,
+    /// A record's value parameters (`version: i16`); an alias's element parameters (no type).
+    pub params: Vec<(Ident, Option<Type>)>,
+    pub body: FormatBody,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum FormatBody {
+    Record(Vec<FormatField>),
+    Alias(Expr),
+}
+
+/// `[name:] element [if cond] [= default]`: an element without a name is read and written but kept in no field.
+#[derive(Clone, Debug)]
+pub struct FormatField {
+    pub name: Option<Ident>,
+    pub elem: Expr,
+    pub cond: Option<Expr>,
+    pub default: Option<Expr>,
+    pub span: Span,
 }
 
 /// A pure function: total, non-recursive, its body a block of `let`s and a final expression (LANGUAGE §16.1).

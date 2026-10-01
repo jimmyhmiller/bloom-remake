@@ -502,6 +502,11 @@ pub enum SyntaxKind {
     RELPATH,
     /// streamitem: `stream NAME: listen;` or `stream NAME: connect;` (FOREIGN-PROTOCOLS §1).
     STREAMITEM,
+    FORMATITEM,
+    FORMATPARAM,
+    FORMATFIELD,
+    FORMATCOND,
+    FORMATDEFAULT,
 }
 impl SyntaxKind {
     /// All kinds, in their wire/discriminant order.
@@ -756,6 +761,11 @@ impl SyntaxKind {
         Self::NAME,
         Self::RELPATH,
         Self::STREAMITEM,
+        Self::FORMATITEM,
+        Self::FORMATPARAM,
+        Self::FORMATFIELD,
+        Self::FORMATCOND,
+        Self::FORMATDEFAULT,
     ];
     /// Whether this token is trivia.
     pub fn is_trivia(self) -> bool {

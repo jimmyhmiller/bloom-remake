@@ -621,6 +621,65 @@ impl Parser<'_> {
             _ => self.contextual_item(),
         }
     }
+    /// `format Name[(params)] { [name:] element [if cond] [= default], … }` or `format name[(params)] = element;`
+    /// (LANGUAGE §16.7). Elements are expressions (`nullable(compact_array(Topic(version)))`).
+    fn format_item(&mut self) {
+        self.bump();
+        self.name(false);
+        if self.eat(L_PAREN) {
+            while !self.at(R_PAREN) && !self.at(EOF) {
+                let old = self.pos;
+                let p = self.start();
+                self.name(false);
+                if self.eat(COLON) {
+                    self.ty();
+                }
+                self.complete(p, FORMATPARAM);
+                if old == self.pos {
+                    self.bump();
+                }
+                if !self.eat(COMMA) {
+                    break;
+                }
+            }
+            self.expect(R_PAREN);
+        }
+        if self.eat(EQ) {
+            self.expr(0);
+            self.expect(SEMI);
+            return;
+        }
+        self.expect(L_CURLY);
+        while !self.at(R_CURLY) && !self.at(EOF) {
+            let old = self.pos;
+            let f = self.start();
+            if self.nth(1) == COLON && (self.at(IDENT) || self.nth(0).is_word()) {
+                self.name(true);
+                self.bump();
+            }
+            self.expr(0);
+            if self.at(IF_KW) {
+                let c = self.start();
+                self.bump();
+                self.expr(0);
+                self.complete(c, FORMATCOND);
+            }
+            if self.at(EQ) {
+                let d = self.start();
+                self.bump();
+                self.expr(0);
+                self.complete(d, FORMATDEFAULT);
+            }
+            self.complete(f, FORMATFIELD);
+            if old == self.pos {
+                self.bump();
+            }
+            if !self.eat(COMMA) {
+                break;
+            }
+        }
+        self.expect(R_CURLY);
+    }
     fn contextual_item(&mut self) -> SyntaxKind {
         if self.ctx("monotone") {
             self.bump();
@@ -654,6 +713,10 @@ impl Parser<'_> {
         if self.ctx("cell") {
             self.cell();
             return CELLDECL;
+        }
+        if self.ctx("format") && self.nth(1) == IDENT {
+            self.format_item();
+            return FORMATITEM;
         }
         if self.ctx("stream") && self.nth(1) == IDENT && self.nth(2) == COLON {
             self.bump();

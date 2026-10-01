@@ -402,6 +402,7 @@ impl Cx<'_> {
                 let items = self.items(node);
                 ItemKind::Protocol(ProtocolItem { name, generics, items })
             }
+            FORMATITEM => ItemKind::Format(self.format_item(node, span)?),
             STREAMITEM => {
                 let names = self.names(node);
                 let (Some(name), Some(kind)) = (names.first().copied(), names.get(1).copied()) else {
@@ -1740,6 +1741,52 @@ impl Cx<'_> {
             return None;
         };
         Some((name, generics, params, ret))
+    }
+
+    /// `format …` (LANGUAGE §16.7).
+    fn format_item(&mut self, node: &SyntaxNode, span: Span) -> Option<FormatItem> {
+        let name = self.need_name(node);
+        let params = children_of(node, FORMATPARAM)
+            .map(|p| (self.need_name(&p), child_of(&p, TYPE).map(|t| self.ty(&t))))
+            .collect();
+        let fields: Vec<SyntaxNode> = children_of(node, FORMATFIELD).collect();
+        let body = if has_token(node, EQ) && fields.is_empty() {
+            let Some(e) = expr_children(node).next() else {
+                self.malformed("a format alias without its element", span);
+                return None;
+            };
+            FormatBody::Alias(self.expr(&e))
+        } else {
+            let mut out = Vec::new();
+            for f in fields {
+                let fspan = self.span(&f);
+                let Some(elem) = expr_children(&f).next().map(|e| self.expr(&e)) else {
+                    self.malformed("a format field without its element", fspan);
+                    continue;
+                };
+                let sub = |this: &mut Self, kind| {
+                    child_of(&f, kind)
+                        .and_then(|c| expr_children(&c).next())
+                        .map(|e| this.expr(&e))
+                };
+                let cond = sub(self, FORMATCOND);
+                let default = sub(self, FORMATDEFAULT);
+                out.push(FormatField {
+                    name: self.first_name(&f),
+                    elem,
+                    cond,
+                    default,
+                    span: fspan,
+                });
+            }
+            FormatBody::Record(out)
+        };
+        Some(FormatItem {
+            name,
+            params,
+            body,
+            span,
+        })
     }
 
     /// `fn name(params) -> ret { body }`.

@@ -323,9 +323,9 @@ fn filters_protect_the_expressions_written_before_them() {
             want_gap.insert(vec![u(k), u(a - b)]);
         }
         inputs.push(ev(1, "pair", vec![u(k), u(a), u(b)]));
-        if b != 0 {
-            want_ratio.insert(vec![u(k), u(a / b)]);
-            if a / b > 1 {
+        if let Some(q) = a.checked_div(b) {
+            want_ratio.insert(vec![u(k), u(q)]);
+            if q > 1 {
                 want_big.insert(vec![u(k)]);
             }
         }
@@ -401,4 +401,210 @@ fn a_range_guard_narrows_past_a_fallible_let() {
     let want: BTreeSet<Vec<Value>> = (5_001..=5_003u64).map(|i| vec![u(5_000), u(i), u(i * 6)]).collect();
     assert_eq!(got, want);
     assert!(examined < 100, "answering examined {examined} rows");
+}
+
+// ---------------------------------------------------------------- formats (EXTENSIONS 2.5)
+
+/// A topic and a request as the reference encoder writes them (`formats.bls`).
+#[cfg(test)]
+struct RefTopic {
+    id: [u8; 16],
+    name: Option<String>,
+    parts: Vec<i32>,
+}
+
+#[cfg(test)]
+struct RefRequest {
+    topics: Option<Vec<RefTopic>>,
+    auto: bool,
+    ops: bool,
+    legacy: Option<String>,
+    big: u64,
+    small: i8,
+    delta: i64,
+    blob: Vec<u8>,
+}
+
+#[cfg(test)]
+fn put_uvarint(out: &mut Vec<u8>, mut n: u64) {
+    loop {
+        let b = (n & 0x7f) as u8;
+        n >>= 7;
+        if n == 0 {
+            out.push(b);
+            return;
+        }
+        out.push(b | 0x80);
+    }
+}
+
+#[cfg(test)]
+fn put_varint(out: &mut Vec<u8>, k: i64) {
+    put_uvarint(out, ((k << 1) ^ (k >> 63)) as u64);
+}
+
+/// The reference encoding, written from the layout in `formats.bls`, apart from the compiler's.
+#[cfg(test)]
+fn ref_encode(r: &RefRequest, version: i16) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend(7i16.to_be_bytes());
+    match &r.topics {
+        None => put_uvarint(&mut out, 0),
+        Some(ts) => {
+            put_uvarint(&mut out, ts.len() as u64 + 1);
+            for t in ts {
+                out.extend(t.id);
+                match &t.name {
+                    None => put_uvarint(&mut out, 0),
+                    Some(s) => {
+                        put_uvarint(&mut out, s.len() as u64 + 1);
+                        out.extend(s.as_bytes());
+                    }
+                }
+                put_uvarint(&mut out, t.parts.len() as u64 + 1);
+                for p in &t.parts {
+                    out.extend(p.to_be_bytes());
+                }
+                put_uvarint(&mut out, 0);
+            }
+        }
+    }
+    out.push(u8::from(r.auto));
+    if version >= 8 {
+        out.push(u8::from(r.ops));
+    } else {
+        match &r.legacy {
+            None => out.extend((-1i16).to_be_bytes()),
+            Some(s) => {
+                out.extend((s.len() as i16).to_be_bytes());
+                out.extend(s.as_bytes());
+            }
+        }
+    }
+    out.extend(r.big.to_be_bytes());
+    out.push(r.small as u8);
+    put_varint(&mut out, r.delta);
+    put_varint(&mut out, r.blob.len() as i64);
+    out.extend(&r.blob);
+    put_uvarint(&mut out, 0);
+    out
+}
+
+/// The `fields` column `decoded` should hold for `r`.
+#[cfg(test)]
+fn ref_fields(r: &RefRequest) -> Value {
+    let s = |x: &Option<String>| Value::Option(x.as_ref().map(|s| Arc::new(Value::Str(s.as_str().into()))));
+    let topics = r.topics.as_ref().map(|ts| {
+        Arc::new(Value::Vec(
+            ts.iter()
+                .map(|t| {
+                    Value::Tuple(
+                        vec![
+                            Value::Bytes(Arc::from(&t.id[..])),
+                            s(&t.name),
+                            Value::Vec(t.parts.iter().map(|p| Value::Int(IntValue::I32(*p))).collect()),
+                        ]
+                        .into(),
+                    )
+                })
+                .collect(),
+        ))
+    });
+    Value::Tuple(
+        vec![
+            Value::Option(topics),
+            Value::Bool(r.auto),
+            Value::Bool(r.ops),
+            s(&r.legacy),
+            u(r.big),
+            Value::Int(IntValue::I8(r.small)),
+            Value::Int(IntValue::I64(r.delta)),
+            Value::Bytes(Arc::from(&r.blob[..])),
+        ]
+        .into(),
+    )
+}
+
+#[cfg(test)]
+fn ref_string(rng: &mut Rng) -> Option<String> {
+    let words = ["", "a", "topic-1", "ΣΙΣΥΦΟΣ", "ümlaut", "x".repeat(130).leak()];
+    (rng.below(4) != 0).then(|| words[rng.below(words.len() as u64) as usize].to_owned())
+}
+
+/// A random request whose absent conditional field holds its default (what decoding gives it).
+#[cfg(test)]
+fn ref_request(rng: &mut Rng, version: i16) -> RefRequest {
+    let topics = (rng.below(4) != 0).then(|| {
+        (0..rng.below(4))
+            .map(|_| RefTopic {
+                id: std::array::from_fn(|_| rng.below(256) as u8),
+                name: ref_string(rng),
+                parts: (0..rng.below(5)).map(|_| rng.next() as i32).collect(),
+            })
+            .collect()
+    });
+    RefRequest {
+        topics,
+        auto: rng.below(2) == 0,
+        ops: version >= 8 && rng.below(2) == 0,
+        legacy: if version < 8 { ref_string(rng) } else { None },
+        big: rng.next(),
+        small: rng.next() as i8,
+        delta: rng.next() as i64 >> rng.below(64),
+        blob: (0..rng.below(200)).map(|_| rng.below(256) as u8).collect(),
+    }
+}
+
+/// Decoding gives back what the reference encoder wrote, encoding gives back its bytes, and every truncation (and a
+/// hostile count) decodes to nothing rather than an error, on both evaluators.
+#[test]
+fn formats_decode_and_encode_as_the_reference_does() {
+    let artifact = compile("formats.bls");
+    let msg = artifact.rel_named("msg").unwrap();
+    let decoded = artifact.rel_named("decoded").unwrap();
+    let mut rng = Rng(11);
+    let mut inputs = Vec::new();
+    let mut want = BTreeSet::new();
+    let mut k = 0u64;
+    let row = |k: u64, version: i16, b: &[u8]| -> InputEvent {
+        InputEvent {
+            node: NodeId(0),
+            tick: Tick(1),
+            rel: msg,
+            row: Arc::from(vec![
+                u(k),
+                Value::Int(IntValue::I16(version)),
+                Value::Bytes(Arc::from(b)),
+            ]),
+        }
+    };
+    for _ in 0..60 {
+        let version = [7i16, 8, 12][rng.below(3) as usize];
+        let r = ref_request(&mut rng, version);
+        let bytes = ref_encode(&r, version);
+        inputs.push(row(k, version, &bytes));
+        want.insert(vec![u(k), ref_fields(&r), u(bytes.len() as u64), Value::Bool(true)]);
+        k += 1;
+        for _ in 0..3 {
+            let cut = rng.below(bytes.len() as u64) as usize;
+            inputs.push(row(k, version, &bytes[..cut]));
+            k += 1;
+        }
+    }
+    // A hostile topic count: decoding it costs nothing.
+    let mut hostile = 7i16.to_be_bytes().to_vec();
+    put_uvarint(&mut hostile, 1 << 40);
+    inputs.push(row(k, 8, &hostile));
+    let run = match differential_or_error(&artifact, &inputs, 2) {
+        Outcome::Ran(run) => run,
+        Outcome::Failed(t, code) => panic!("{code} at {t:?}"),
+    };
+    let got: BTreeSet<Vec<Value>> = run
+        .node_tick(Tick(1), NodeId(0))
+        .unwrap()
+        .instance
+        .rows(decoded)
+        .map(|r| r.to_vec())
+        .collect();
+    assert_eq!(got, want);
 }

@@ -1235,3 +1235,40 @@ fn prefer_names_handlers_that_write_the_table() {
     );
     assert_eq!(codes(src), Vec::<&str>::new());
 }
+
+#[test]
+fn format_misuses_are_reported() {
+    for (decl, code) in [
+        // An unknown element; `nullable` over a plain element; an unsigned length that cannot be null; a named
+        // constant; a valued element without a name; an alias expanding into itself; a record's arity; a
+        // conditional nested format without a default; a default without a condition; typed alias parameters;
+        // two formats of one name.
+        ("format A { x: float32 }", "BLS0301"),
+        ("format A { x: nullable(i32) }", "BLS0301"),
+        ("format A { x: nullable(prefixed(uvarint, 0, utf8)) }", "BLS0301"),
+        ("format A { c: constant(i8, 1) }", "BLS0301"),
+        ("format A { i32 }", "BLS0301"),
+        ("format a = b;\nformat b = a;\nformat A { x: a }", "BLS0301"),
+        ("format B(v: i16) { x: i8 }\nformat A { b: B }", "BLS0301"),
+        ("format B { x: i8 }\nformat A(v: i16) { b: B if v > 1 }", "BLS0301"),
+        ("format A { x: i8 = 3 }", "BLS0301"),
+        ("format a(F: i32) = array(uvarint, 1, F);", "BLS0301"),
+        ("format A { x: i8 }\nformat A { y: i8 }", "BLS0201"),
+    ] {
+        let src = with_head(Box::leak(format!("{decl}\n").into_boxed_str()));
+        let got = codes(src);
+        assert!(got.contains(&code.to_owned()), "{decl}: {got:?}");
+    }
+    // A format inside an `at` section.
+    let src = "program t version 1;\nrole R;\nat R { format A { x: i8 } }\n";
+    assert!(codes(src).contains(&"BLS0110".to_owned()));
+    // A well-formed record compiles to a struct and its functions, usable from rules.
+    let src = with_head(
+        "format pair(F) = array(u8, 0, F);\n\
+         format A(v: i16) { constant(u8, 1), xs: pair(i16), s: nullable(prefixed(i16, 0, utf8)) if v > 2, tags }\n\
+         output out(k: u64, n: u64);\n\
+         view w(k, n) = go(k, v), let Some((a, n)) = A::decode(A::encode(A { xs: [1i16], s: None }, 3i16), 0, 3i16);\n\
+         a: on w(k, n) { emit out(k, n); }\n",
+    );
+    assert_eq!(codes(src), Vec::<&str>::new());
+}

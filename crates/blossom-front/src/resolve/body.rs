@@ -2285,6 +2285,35 @@ impl<'t> Resolver<'t, '_> {
                     span,
                 ))
             }
+            // A format's decoder and encoder (`Name::decode`, `Name::encode`, LANGUAGE §16.7).
+            [ty, f]
+                if let Some(id) = self
+                    .scope(cx.ms)
+                    .fns
+                    .get(&Symbol::intern(&format!("{}::{}", ty.as_str(), f.as_str())))
+                    .copied() =>
+            {
+                let arity = self.hir.fns.get(id.index()).map_or(0, |h| h.params.len());
+                if pos.len() != arity {
+                    self.error(
+                        code!("BLS0301"),
+                        span,
+                        format!(
+                            "`{}::{}` takes {arity} argument(s), {} given",
+                            ty.as_str(),
+                            f.as_str(),
+                            pos.len()
+                        ),
+                    );
+                    return None;
+                }
+                let mut xs = Vec::new();
+                for p in &pos {
+                    xs.push(self.expr(cx, p)?);
+                }
+                cx.calls.insert(id);
+                Some(HExpr::new(HExprKind::Call { f: id, args: xs }, span))
+            }
             [name] if let Some(param) = self.fn_param(cx.template, name.name) => {
                 self.call_param(cx, *name, param, &pos, span)
             }

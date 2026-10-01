@@ -28,6 +28,14 @@ pub enum SimError {
         tick: Tick,
         error: OracleError,
     },
+    /// A node stayed ready (its state changing) for `ticks` ticks at one instant: the program never quiesces, so
+    /// simulated time cannot advance. `changed` names the relations that kept changing.
+    #[error("node {} livelocks: still ready after {ticks} ticks at one instant, changing {changed:?}", .node.0)]
+    Livelock {
+        node: NodeId,
+        ticks: u64,
+        changed: Vec<String>,
+    },
     /// A node sent to a node outside the deployment.
     #[error("node {} sent to node {}, which is not in the deployment of {nodes} node(s)", .from.0, .to.0)]
     UnknownDestination { from: NodeId, to: NodeId, nodes: u32 },
