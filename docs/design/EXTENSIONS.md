@@ -163,6 +163,13 @@ overflowing arithmetic, `error`, partial `match`, or fallible call) past others,
 can bound as infallible for range probes, so views need not be split by hand to get an index range. Finish `top!`,
 `index!` with `per`, and `per` views with several alternatives (all specified).
 
+As built: this is a rule of the language, not a planner liberty, since moving a check changes which errors a tick
+raises. LANGUAGE §9.14: once its variables are bound, every check that cannot fail runs first, then fallible filters,
+then fallible bindings, each in body order; `a && b` is two checks. Both evaluators follow it, and the engine's range
+probe uses every guard up to the first fallible check (a fallible guard's bound counts when it is that check: its
+end is evaluated once per probe, and an end that fails is no bound, so the guard raises its own error). The
+aggregates (`top!`, `index!` with `per`, multi-alternative `per`) are deferred: the Kafka code uses none.
+
 ### 2.7 Request handlers as a module
 
 Not a language change if import (§6.5) suffices: a `Serve` module per request kind owns the queue head, the answer,

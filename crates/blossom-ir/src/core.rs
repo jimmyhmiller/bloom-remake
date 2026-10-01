@@ -454,6 +454,18 @@ pub enum Literal {
     Lookup { var: VarId, rel: RelId, key: Vec<Term> }, // V = r[k̄]: the cell value, ⊥ if absent (LANG-280)
     Gen { pat: Pattern, src: GenSource },              // `p in e`, ranges, table functions (LANG-088, 092, 183)
 }
+impl Literal {
+    /// Whether a check can never raise a runtime error: a negation or a lookup, or a guard or binding whose
+    /// expression cannot fail (a refutable binding only filters). Positive atoms are not checks; generators count as
+    /// fallible.
+    pub fn cannot_fail(&self) -> bool {
+        match self {
+            Literal::Neg(_) | Literal::Lookup { .. } => true,
+            Literal::Guard(e) | Literal::Bind { expr: e, .. } => e.cannot_fail(),
+            Literal::Pos(_) | Literal::Gen { .. } => false,
+        }
+    }
+}
 /// Atom data in the Dedalus core IR.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Atom {
@@ -1293,6 +1305,47 @@ pub struct QuorumSpec {
 }
 
 impl Expr {
+    /// Whether evaluating this expression can never raise a runtime error, for any values of its variables:
+    /// variables, constants, scalars, comparisons, boolean and bitwise connectives, construction, field access and
+    /// `if` over such expressions. Arithmetic (it is checked, BLSR004), shifts, casts, calls, matches, collection
+    /// literals and lattice operations can fail. This decides the order of a rule body's checks (LANGUAGE §9.14),
+    /// which both evaluators follow.
+    pub fn cannot_fail(&self) -> bool {
+        match self {
+            Expr::Term(_) | Expr::Param(_) | Expr::Scalar(_) => true,
+            Expr::Unary { op, arg } => matches!(op, UnOp::Not | UnOp::BitNot) && arg.cannot_fail(),
+            Expr::Binary { op, lhs, rhs } => {
+                matches!(
+                    op,
+                    BinOp::Eq
+                        | BinOp::Ne
+                        | BinOp::Lt
+                        | BinOp::Le
+                        | BinOp::Gt
+                        | BinOp::Ge
+                        | BinOp::CanonLt
+                        | BinOp::CanonLe
+                        | BinOp::And
+                        | BinOp::Or
+                        | BinOp::BitAnd
+                        | BinOp::BitOr
+                        | BinOp::BitXor
+                ) && lhs.cannot_fail()
+                    && rhs.cannot_fail()
+            }
+            Expr::Construct { fields, .. } => fields.iter().all(Expr::cannot_fail),
+            Expr::Field { base, .. } => base.cannot_fail(),
+            Expr::Typed { expr, .. } => expr.cannot_fail(),
+            Expr::If { cond, then, els } => cond.cannot_fail() && then.cannot_fail() && els.cannot_fail(),
+            Expr::Call { .. }
+            | Expr::Match { .. }
+            | Expr::Collection { .. }
+            | Expr::Lattice { .. }
+            | Expr::Let { .. }
+            | Expr::Closure { .. } => false,
+        }
+    }
+
     /// Whether evaluating this expression can depend on a tick's recorded time, incarnation or PRF stream.
     pub fn time_varying(&self) -> bool {
         match self {

@@ -1646,6 +1646,30 @@ exist only inside `fn`, `impl` and `aggregate` bodies. Lattice operations and th
 a column-form channel `c.payloads(…)` drops the `@` column. A renaming is a view. `schema_of(r)` is a compile-time
 constant describing `r`'s columns, usable in `const` items.
 
+### 9.14 Evaluation order and runtime errors
+
+A body's meaning is a set of valuations; its order matters only for which runtime errors (checked arithmetic,
+BLSR004; `error(…)`, BLSR010; …) a tick raises. A valuation of the positive atoms then meets the other literals —
+negations, lookups, `let`s, generators and guards — each once its variables are bound, in this order:
+
+1. every ready check that **cannot fail**, in body order: negations, lookups, and guards and `let`s whose expression
+   is built only from variables, constants, comparisons, boolean and bitwise connectives, construction, field
+   access and `if` over those;
+2. then the first ready fallible **filter** (a guard) in body order, or else the first ready fallible **binding** (a
+   `let` or a generator); then again from 1.
+
+A `where a && b` is two guards. So a filter protects every expression it can: an expression is evaluated only for
+valuations that every filter able to run before it accepts, wherever it is written, and an error is raised only
+for such a valuation.
+
+```blossom
+view ratio(k, r) = pair(k, a, b), let r = a / b where b != 0;     // never divides by zero
+view gap(k, d) = pair(k, a, b), not done(k), let d = a - b;       // `not done(k)` runs before the subtraction
+```
+
+Both evaluators follow this order, and the engine uses it: a guard bounding a column of an atom not yet joined
+narrows that atom to a range scan (§9.9) whenever only checks that cannot fail run before the guard.
+
 ---
 
 ## 10. Aggregation, choice, numbering and folds

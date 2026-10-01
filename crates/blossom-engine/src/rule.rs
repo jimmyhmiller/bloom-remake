@@ -32,7 +32,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use blossom_base::{RelId, RuleId, VarId, internal_error};
-use blossom_ir::core::{Atom, BinOp, Expr, GenSource, HeadArg, Literal, Pattern, Rule, RuleKind, Term, UnOp};
+use blossom_ir::core::{Atom, BinOp, Expr, GenSource, HeadArg, Literal, Pattern, Rule, RuleKind, Term};
 use blossom_ir::tick::{EvalError, Row};
 use blossom_value::Value;
 
@@ -227,70 +227,50 @@ impl Plan {
                 bound.extend(atom_vars(a));
             }
         }
-        // The other literals: repeated passes in body order, each as soon as the variables it needs are bound.
+        // The other literals, once the variables they need are bound (LANGUAGE §9.14): every ready check that cannot
+        // fail, in body order; then the first ready fallible guard, or else the first ready fallible binding; again.
         let mut done: Vec<bool> = lits.iter().map(|l| matches!(l, Literal::Pos(_))).collect();
         let mut checks = Vec::new();
         loop {
-            let mut progressed = false;
-            for (i, lit) in lits.iter().enumerate() {
-                if done.get(i).copied().unwrap_or(true) {
-                    continue;
-                }
-                let ready = match lit {
-                    Literal::Pos(_) => false,
-                    Literal::Neg(a) => atom_vars(a).is_subset(&bound),
-                    Literal::Guard(e) => vars_of(e).is_subset(&bound),
-                    Literal::Bind { pat, expr } => {
-                        let ready = vars_of(expr).is_subset(&bound);
-                        if ready {
-                            pattern_vars(pat, &mut bound);
-                        }
-                        ready
+            loop {
+                let mut progressed = false;
+                for (i, lit) in lits.iter().enumerate() {
+                    if done.get(i).copied().unwrap_or(true) || !lit.cannot_fail() || !check_ready(lit, &bound)? {
+                        continue;
                     }
-                    Literal::Lookup { var, key, .. } => {
-                        let ready = key.iter().all(|t| match t {
-                            Term::Var(v) => bound.contains(v),
-                            Term::Const(_) => true,
-                            Term::Wild => false,
-                        });
-                        if ready {
-                            bound.insert(*var);
-                        }
-                        ready
-                    }
-                    Literal::Gen { pat, src } => {
-                        let needs = match src {
-                            GenSource::Range { lo, hi, .. } => {
-                                let mut v = vars_of(lo);
-                                v.extend(vars_of(hi));
-                                v
-                            }
-                            GenSource::Value(e) | GenSource::Lattice(e) => vars_of(e),
-                            GenSource::TableFn { .. } => {
-                                return Err(blossom_base::unimplemented_error!(
-                                    "LANG-183",
-                                    "table-function generators in the engine"
-                                )
-                                .into());
-                            }
-                        };
-                        let ready = needs.is_subset(&bound);
-                        if ready {
-                            pattern_vars(pat, &mut bound);
-                        }
-                        ready
-                    }
-                };
-                if ready {
+                    bind_outputs(lit, &mut bound);
                     checks.push(i);
                     if let Some(d) = done.get_mut(i) {
                         *d = true;
                     }
                     progressed = true;
                 }
+                if !progressed {
+                    break;
+                }
             }
-            if !progressed {
-                break;
+            let first = |filter: bool| -> Result<Option<usize>, EvalError> {
+                for (i, lit) in lits.iter().enumerate() {
+                    if done.get(i).copied().unwrap_or(true) || (filter && !matches!(lit, Literal::Guard(_))) {
+                        continue;
+                    }
+                    if check_ready(lit, &bound)? {
+                        return Ok(Some(i));
+                    }
+                }
+                Ok(None)
+            };
+            let pick = match first(true)? {
+                Some(i) => Some(i),
+                None => first(false)?,
+            };
+            let Some(i) = pick else { break };
+            if let Some(lit) = lits.get(i) {
+                bind_outputs(lit, &mut bound);
+            }
+            checks.push(i);
+            if let Some(d) = done.get_mut(i) {
+                *d = true;
             }
         }
         if let Some(i) = done.iter().position(|d| !d) {
@@ -426,13 +406,15 @@ impl Plan {
         }
     }
 
-    /// A range on one of `a`'s unbound columns from the guards among the checks not yet run (from `next`), up to the
-    /// first check that can fail: those rows the range drops would fail the guard before any error could be raised.
+    /// A range on one of `a`'s unbound columns from the guards among the checks not yet run (from `next`), up to and
+    /// including the first check that can fail: the rows the range drops fail a guard that runs before any check
+    /// that could raise an error on them (LANGUAGE §9.14). A guard's conjuncts count up to its first fallible one. An
+    /// end that fails to evaluate is no bound (`range_end`): the guard then raises its error on the rows it reaches.
     fn range_for(&self, rule: &Rule, a: &Atom, cols: &[usize], bound: &BTreeSet<VarId>, next: usize) -> Option<RangeProbe> {
-        for &lit in self.checks.get(next..).unwrap_or_default() {
+        let mut probe: Option<RangeProbe> = None;
+        'checks: for &lit in self.checks.get(next..).unwrap_or_default() {
             let l = rule.body.lits.get(lit)?;
             if let Literal::Guard(e) = l {
-                let mut probe: Option<RangeProbe> = None;
                 for c in conjuncts(e) {
                     if let Some((col, end, lower)) = range_conjunct(c, a, cols, bound) {
                         let p = probe.get_or_insert(RangeProbe { col, lo: None, hi: None });
@@ -445,19 +427,16 @@ impl Plan {
                         }
                     }
                     // A later conjunct runs only if this one held and raised nothing.
-                    if !infallible(c) {
-                        break;
+                    if !c.cannot_fail() {
+                        break 'checks;
                     }
                 }
-                if probe.is_some() {
-                    return probe;
-                }
             }
-            if !check_infallible(l) {
-                return None;
+            if !l.cannot_fail() {
+                break;
             }
         }
-        None
+        probe
     }
 }
 
@@ -473,6 +452,18 @@ fn driver_vars(rule: &Rule, lit: usize) -> BTreeSet<VarId> {
         Some(Literal::Lookup { var: v, key, .. }) => key.iter().filter_map(var).chain(std::iter::once(*v)).collect(),
         _ => BTreeSet::new(),
     }
+}
+
+/// Whether a check's inputs are bound, for planning (a table-function generator is not implemented).
+fn check_ready(l: &Literal, bound: &BTreeSet<VarId>) -> Result<bool, EvalError> {
+    if let Literal::Gen {
+        src: GenSource::TableFn { .. },
+        ..
+    } = l
+    {
+        return Err(blossom_base::unimplemented_error!("LANG-183", "table-function generators in the engine").into());
+    }
+    Ok(ready(l, bound))
 }
 
 /// Whether a check's inputs are bound.
@@ -554,33 +545,6 @@ fn range_conjunct(c: &Expr, a: &Atom, cols: &[usize], bound: &BTreeSet<VarId>) -
         },
         lower,
     ))
-}
-
-/// Whether evaluating `e` can raise a runtime error: only variables, constants, scalars, comparisons and boolean
-/// connectives cannot.
-fn infallible(e: &Expr) -> bool {
-    match e {
-        Expr::Term(_) | Expr::Param(_) | Expr::Scalar(_) => true,
-        Expr::Unary { op: UnOp::Not, arg } => infallible(arg),
-        Expr::Binary { op, lhs, rhs } => {
-            matches!(
-                op,
-                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::And | BinOp::Or
-            ) && infallible(lhs)
-                && infallible(rhs)
-        }
-        _ => false,
-    }
-}
-
-/// Whether a check can raise a runtime error.
-fn check_infallible(l: &Literal) -> bool {
-    match l {
-        Literal::Neg(_) | Literal::Lookup { .. } => true,
-        Literal::Guard(e) => infallible(e),
-        Literal::Bind { expr, .. } => infallible(expr),
-        _ => false,
-    }
 }
 
 /// The columns of `a` whose values are known (a sender is the column after the last argument).

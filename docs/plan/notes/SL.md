@@ -4,8 +4,8 @@ Design: `docs/design/EXTENSIONS.md`. Branch `slice-lang`, worktree `.worktrees/s
 
 ## Resume here
 
-- **State (2026-10-01):** items 1 (`?`), 2 (generic functions), 3 (`while` tables) and 4 (`resolve prefer`) done.
-  Next: item 5 (planner: infallibility-aware ordering; `top!`, `index!` with `per`, multi-alternative `per`).
+- **State (2026-10-01):** items 1–5 done (`?`, generic functions, `while` tables, `resolve prefer`, the order of
+  checks). Next: item 6 (formats).
 - Update this section whenever work stops.
 
 ## Baseline (S8, merged at 69b630c)
@@ -86,6 +86,22 @@ Design: `docs/design/EXTENSIONS.md`. Branch `slice-lang`, worktree `.worktrees/s
 - Tests: `bls_extensions` (each preferring table against a hand-guarded twin, upserts and `next`s, 12 seeds, both
   evaluators; mutation: max instead of min rank fails it; same-handler and unlisted conflicts are BLSR002 on both
   evaluators; one value from listed and unlisted is fine), `blossom-front` (BLS0411, BLS0106, BLS0908).
+
+### Item 5: the order of a body's checks (done; aggregates deferred)
+
+- Semantics (LANGUAGE §9.14): once its variables are bound, every check that cannot fail runs first, then the first
+  ready fallible guard, else the first ready fallible binding, each in body order; repeat. `Expr::cannot_fail` /
+  `Literal::cannot_fail` in the IR define "cannot fail" once for both evaluators (oracle `plan::flush`, engine
+  `Plan::new`). The frontend splits top-level `&&` in guards into separate guards.
+- Engine range probes collect bounds over every guard up to and including the first fallible check.
+- Changed expectations: `engine_planner` — the range-after-fallible case now runs (the guard rejects before the
+  division) and errors only for an accepted row; the two flipping-negation fixtures now negate the `let`'s output, so
+  the negation still runs after the division and the S5 engine fix (`Search::fail`) stays covered (mutation-checked).
+- Deferred (Kafka uses none): `top!`, `index!` with `per`, multi-alternative `per`.
+- Tests: `bls_extensions` (`order.bls`: a guard after a division, a negation after a subtraction, `&&` with a
+  fallible first conjunct, all without errors on both evaluators, and a fallible `let` still raising for an accepted
+  row; a range probe past a fallible `let` examines < 100 of 20,000 rows). Mutation: classifying every check as
+  fallible fails both.
 
 ### Open observations
 

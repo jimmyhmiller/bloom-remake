@@ -330,10 +330,11 @@ impl<'h> Lowerer<'h> {
                         d.lits.extend(post);
                     }
                 }
+                // `a && b` is two checks, so the one that cannot fail can run first (LANGUAGE §9.14).
                 HLit::Guard(e) => {
                     for d in &mut drafts {
                         let x = self.expr(d, e)?;
-                        d.lits.push(Literal::Guard(x));
+                        split_and(x, &mut d.lits);
                     }
                 }
                 HLit::RangeGen { pat, lo, hi, kind, .. } => {
@@ -1946,5 +1947,20 @@ fn prefer_verbs(stmts: &[HStmt], target: HRelId, out: &mut BTreeSet<Verb>) {
             HStmt::Verb(_) => {}
             HStmt::Block { stmts, .. } => prefer_verbs(stmts, target, out),
         }
+    }
+}
+
+/// The top-level conjuncts of a guard, each as its own guard, left to right.
+fn split_and(e: Expr, out: &mut Vec<Literal>) {
+    match e {
+        Expr::Binary {
+            op: ir::BinOp::And,
+            lhs,
+            rhs,
+        } => {
+            split_and(*lhs, out);
+            split_and(*rhs, out);
+        }
+        other => out.push(Literal::Guard(other)),
     }
 }
