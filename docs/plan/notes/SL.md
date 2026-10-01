@@ -4,7 +4,7 @@ Design: `docs/design/EXTENSIONS.md`. Branch `slice-lang`, worktree `.worktrees/s
 
 ## Resume here
 
-- **State (2026-10-01):** design written; no code yet. Next: item 1.
+- **State (2026-10-01):** item 1 (`?`) done. Next: item 2 (generic functions).
 - Update this section whenever work stops.
 
 ## Baseline (S8, merged at 69b630c)
@@ -24,3 +24,11 @@ Design: `docs/design/EXTENSIONS.md`. Branch `slice-lang`, worktree `.worktrees/s
 8. Review, notes, merge.
 
 ## Findings and deviations
+
+### Item 1: `?` (done)
+
+- Lexer token `QUESTION`, postfix `TRYEXPR` (precedence 15), `ast::ExprKind::Try`, desugared per function body in
+  `ast::desugar` into nested `match`es before name resolution (no IR change). BLS0218 for a `?` under a branch, the
+  right of `&&`/`||`, a closure, a function not returning `Option`, or a rule body.
+- Tuple patterns in function `let`s already worked; nothing to add.
+- Tests: `bls_functions` (`v_try`, both evaluators against Rust), `blossom-front` diagnostics.

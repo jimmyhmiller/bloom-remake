@@ -96,6 +96,21 @@ fn arms(n: u64) -> (u64, Vec<u64>) {
     (match n { x => a + x }, v)
 }
 
+/// `?` (EXTENSIONS 2.1): early `None` from a `let`, nested inside an expression, and with a tuple pattern.
+fn two_bytes(b: Bytes) -> Option<(u64, u64)> {
+    let x = b.u8_at(0)?;
+    let y = b.u8_at(1)?;
+    Some((x as u64, y as u64 + 1))
+}
+fn byte_sum(b: Bytes) -> Option<u64> {
+    Some(b.u8_at(0)? as u64 + b.u8_at(2)? as u64)
+}
+fn swapped(b: Bytes) -> Option<(u64, u64)> {
+    let (x, y) = two_bytes(b)?;
+    let z = if x > 100 { 1 } else { 2 };
+    Some((y * z, x))
+}
+
 /// `hash64` of a composite value inside a function, and of a string in the view.
 fn hashed(n: u64, s: String, b: Bytes) -> u64 {
     hash64((n, s, b))
@@ -119,6 +134,7 @@ view v_classify(n, x) = e(n, _, _), let x = classify(n);
 view v_range(n, x) = e(n, _, _), let x = range(n, 2 * n + 1).len();
 view v_arms(n, x) = e(n, _, _), let x = arms(n);
 view v_hash(n, x) = e(n, s, b), let x = (hashed(n, s, b), hash64(s));
+view v_try(b, x) = e(_, _, b), let x = (two_bytes(b), byte_sum(b), swapped(b));
 /// A `match` in a rule's `let`: its arms' variables are the arms' own (S8: they made the rule unbindable).
 view v_match(s, x) = e(_, s, _), let x = match s.parse_i64() { Some(k) if k < 100 => k + 1, Some(k) => k, None => 0 };
 /// Decimal parsing, of the words and of the number as text.

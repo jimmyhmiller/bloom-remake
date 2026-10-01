@@ -1929,6 +1929,16 @@ impl<'t> Resolver<'t, '_> {
                 );
                 return None;
             }
+            // Function bodies have no `?` left (`ast::desugar`); a rule body fails a match without one.
+            ExprKind::Try(_) => {
+                self.error(
+                    code!("BLS0218"),
+                    span,
+                    "`?` returns early from a function: in a rule body, `let Some(x) = e` already derives nothing \
+                     when `e` is `None`",
+                );
+                return None;
+            }
         };
         Some(HExpr::new(kind, span))
     }

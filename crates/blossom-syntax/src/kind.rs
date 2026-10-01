@@ -231,6 +231,8 @@ pub enum SyntaxKind {
     TILDE,
     /// bang.
     BANG,
+    /// question mark (`e?`: early return of `None`).
+    QUESTION,
     /// underscore.
     UNDERSCORE,
     /// sourcefile.
@@ -415,6 +417,8 @@ pub enum SyntaxKind {
     CALLEXPR,
     /// methodcallexpr.
     METHODCALLEXPR,
+    /// tryexpr (`e?`).
+    TRYEXPR,
     /// bangcallexpr.
     BANGCALLEXPR,
     /// fieldexpr.
@@ -615,6 +619,7 @@ impl SyntaxKind {
         Self::CARET,
         Self::TILDE,
         Self::BANG,
+        Self::QUESTION,
         Self::UNDERSCORE,
         Self::SOURCEFILE,
         Self::PROGRAMHEADER,
@@ -707,6 +712,7 @@ impl SyntaxKind {
         Self::PATHEXPR,
         Self::CALLEXPR,
         Self::METHODCALLEXPR,
+        Self::TRYEXPR,
         Self::BANGCALLEXPR,
         Self::FIELDEXPR,
         Self::TUPLEINDEXEXPR,
@@ -872,6 +878,7 @@ impl SyntaxKind {
         ("^", Self::CARET),
         ("~", Self::TILDE),
         ("!", Self::BANG),
+        ("?", Self::QUESTION),
         ("_", Self::UNDERSCORE),
     ];
 }
