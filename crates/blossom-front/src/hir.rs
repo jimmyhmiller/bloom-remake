@@ -56,6 +56,8 @@ pub struct Hir {
     pub views: Vec<HView>,
     pub facts: Vec<HFact>,
     pub invariants: Vec<HInvariant>,
+    /// Tables' persistence conditions (`table … while BODY`, LANGUAGE §7.2).
+    pub guards: Vec<HGuard>,
     /// Pure functions (LANGUAGE §16.1).
     pub fns: Vec<HFn>,
     /// Byte streams (FOREIGN-PROTOCOLS §1), in declaration order.
@@ -170,6 +172,7 @@ impl HRel {
             durable: false,
             cell: false,
             resolve: None,
+            prefer: None,
             role: None,
             span: Span::point(blossom_base::FileId::from_raw(0), 0),
         }
@@ -217,6 +220,9 @@ pub struct HRel {
     pub cell: bool,
     /// A relation-level resolution policy (LANGUAGE §10.7).
     pub resolve: Option<HResolve>,
+    /// `resolve prefer(rule, …)` (LANGUAGE §10.7): the handler labels whose writes win, earliest first. Not a
+    /// `resolve` above: the table keeps its frame rule, and only its `next`/`upsert` writes are arbitrated.
+    pub prefer: Option<Vec<(Symbol, Span)>>,
     /// Where the relation lives; `None` in a role-free program and for shared declarations.
     pub role: Option<HRoleId>,
     pub span: Span,
@@ -410,9 +416,20 @@ pub struct HVerbStmt {
     /// `send … to d`: the destination.
     pub to: Option<HExpr>,
     pub allow_self_negation: bool,
+    /// A `next`/`upsert` into a table with `resolve prefer(…)`: the writing handler's precedence.
+    pub rank: Option<HRank>,
     /// Normalized statement text, hashed when two statements share verb and target.
     pub text: String,
     pub span: Span,
+}
+
+/// A write's precedence under `resolve prefer(…)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HRank {
+    /// Written by the `n`th listed handler.
+    Listed(u32),
+    /// Written by a handler the list does not name: never arbitrated, so it conflicts with any other value.
+    Unlisted,
 }
 
 #[derive(Clone, Debug)]
@@ -491,6 +508,18 @@ pub struct HInvariant {
     pub message: Option<String>,
     pub scope: ScopeId,
     pub body: HBody,
+    pub role: Option<HRoleId>,
+    pub span: Span,
+}
+
+/// `table p(c̄) … while BODY;` (LANGUAGE §7.2): a row of `p` persists to the next tick only if `p(c̄), BODY` holds
+/// for it this tick. `body` starts with the atom `p(c̄)`, which binds `cols`, one variable per column.
+#[derive(Clone, Debug)]
+pub struct HGuard {
+    pub rel: HRelId,
+    pub scope: ScopeId,
+    pub body: HBody,
+    pub cols: Vec<HVarId>,
     pub role: Option<HRoleId>,
     pub span: Span,
 }
@@ -769,6 +798,70 @@ pub enum HExprKind {
         params: Vec<HVarId>,
         body: Box<HExpr>,
     },
+    /// In a generic function's template only: a call of its function parameter `param` (its index among the
+    /// template's function parameters). An instance calls the named function passed for it.
+    CallParam {
+        param: u32,
+        args: Vec<HExpr>,
+    },
+    /// In a generic function's template only: a call of the generic function `template`, instantiated when the
+    /// template is. `args` are the values for its value parameters, `fn_args` the functions for its function
+    /// parameters, each in declaration order.
+    GenericCall {
+        template: u32,
+        args: Vec<HExpr>,
+        fn_args: Vec<HFnArg>,
+    },
+}
+
+/// The function a template passes for a generic callee's function parameter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HFnArg {
+    /// A named function.
+    Fn(HFnId),
+    /// The template's own function parameter, by index: what its instance was given.
+    Param(u32),
+}
+
+/// A type in a generic function's signature, over its type parameters (LANGUAGE §16.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HTy {
+    Con(TypeId),
+    /// A type parameter, by index.
+    Param(u32),
+    Tuple(Vec<HTy>),
+    Option(Box<HTy>),
+    Vec(Box<HTy>),
+    Set(Box<HTy>),
+    Map(Box<HTy>, Box<HTy>),
+}
+
+/// A function parameter's type, `fn(A, B) -> R`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HFnTy {
+    pub params: Vec<HTy>,
+    pub ret: HTy,
+}
+
+/// An instance of a generic function at one call: its signature over the type parameters, which type checking
+/// infers at the call and writes into the instance's parameter and result types, and the named functions passed
+/// for the function parameters.
+#[derive(Clone, Debug)]
+pub struct HScheme {
+    /// The generic function.
+    pub generic: QualName,
+    /// Which template, for telling instances of one generic function apart.
+    pub template: u32,
+    pub tparams: Vec<Symbol>,
+    /// The type arguments, as type checking inferred them (empty before).
+    pub targs: Vec<TypeId>,
+    /// The value parameters' types, in order.
+    pub params: Vec<HTy>,
+    pub ret: HTy,
+    /// Each function parameter's name and type, and the function passed for it.
+    pub fn_args: Vec<(Symbol, HFnTy, HFnId)>,
+    /// The call this instance serves.
+    pub call: Span,
 }
 
 /// A pure function: total, non-recursive (LANGUAGE §16.1), or a host function (§16.2). Its variables live in
@@ -777,10 +870,13 @@ pub enum HExprKind {
 pub struct HFn {
     pub name: QualName,
     pub scope: ScopeId,
+    /// The value parameters and their types; an instance's types are inferred by type checking (see `scheme`).
     pub params: Vec<(HVarId, TypeId)>,
     pub ret: TypeId,
     pub body: HFnBody,
     pub span: Span,
+    /// An instance of a generic function: its signature over the type parameters.
+    pub scheme: Option<HScheme>,
 }
 
 #[derive(Clone, Debug)]
@@ -863,4 +959,29 @@ pub enum Builtin {
     Majority(HRoleId),
     /// A function or method of the built-in library (Appendix B); the receiver, if any, first.
     Lib(blossom_ir::core::LibFn),
+}
+
+/// Whether a value of type `ty` holds a lattice or group value anywhere inside it.
+pub fn holds_lattice(types: &TypeTable, ty: TypeId) -> bool {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut stack = vec![ty];
+    while let Some(t) = stack.pop() {
+        if !seen.insert(t) {
+            continue;
+        }
+        match types.get(t) {
+            Some(blossom_value::TypeDef::Lattice(_) | blossom_value::TypeDef::Group(_)) => return true,
+            Some(blossom_value::TypeDef::Tuple(ts)) => stack.extend(ts.iter().copied()),
+            Some(
+                blossom_value::TypeDef::Vec(e) | blossom_value::TypeDef::Set(e) | blossom_value::TypeDef::Option(e),
+            ) => stack.push(*e),
+            Some(blossom_value::TypeDef::Map(k, v)) => stack.extend([*k, *v]),
+            Some(blossom_value::TypeDef::Struct(d)) => stack.extend(d.fields.iter().map(|f| f.ty)),
+            Some(blossom_value::TypeDef::Enum(d)) => {
+                stack.extend(d.variants.iter().flat_map(|v| v.payload.iter().map(|f| f.ty)))
+            }
+            _ => {}
+        }
+    }
+    false
 }

@@ -41,6 +41,8 @@ pub struct Lowered {
     pub rels: Vec<RelId>,
     /// For every HIR relation: the IR column of each declared column.
     pub surface: Vec<(RelId, Vec<usize>)>,
+    /// For every IR function: the HIR function it was lowered from (the first, for merged generic instances).
+    pub fn_origins: Vec<crate::hir::HFnId>,
 }
 
 /// Lowers a type-checked HIR for a deployment.
@@ -79,6 +81,9 @@ pub fn lower(hir: &Hir, deployment: &Deployment<'_>) -> Result<Lowered, Internal
         resolved: BTreeMap::new(),
         labels: BTreeSet::new(),
         rel_names: BTreeSet::new(),
+        fns: Vec::new(),
+        fn_origins: Vec::new(),
+        prefer: BTreeMap::new(),
     };
     l.declare_lattices()?;
     for r in &hir.roles {
@@ -119,7 +124,13 @@ pub fn lower(hir: &Hir, deployment: &Deployment<'_>) -> Result<Lowered, Internal
             errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
         )
     })?;
-    Ok(Lowered { program, rels, surface })
+    let fn_origins = l.fn_origins;
+    Ok(Lowered {
+        program,
+        rels,
+        surface,
+        fn_origins,
+    })
 }
 
 pub(crate) fn ir(e: IrError) -> InternalError {
@@ -141,6 +152,13 @@ pub(crate) struct Lowerer<'h> {
     pub resolved: BTreeMap<HRelId, RelId>,
     labels: BTreeSet<String>,
     rel_names: BTreeSet<String>,
+    /// HIR function → IR function: an instance of a generic function shares the IR function of the first instance
+    /// with its template, type arguments and function arguments.
+    pub fns: Vec<blossom_base::FnId>,
+    /// IR function → the HIR function it was lowered from.
+    pub fn_origins: Vec<crate::hir::HFnId>,
+    /// Each `resolve prefer` table's staging relations: its listed writes (with their rank) and its unlisted ones.
+    pub prefer: BTreeMap<HRelId, (RelId, RelId)>,
 }
 
 pub(crate) fn attrs() -> RelAttrs {
@@ -207,6 +225,52 @@ pub(crate) fn schema(
         key,
         payload,
         lattice,
+    }
+}
+
+impl<'h> Lowerer<'h> {
+    /// A `while` table's guard (LANGUAGE §7.2), in the table's persistence construct: `r$keep(x̄) :- r(x̄), BODY.`
+    fn persist_guard(&mut self, r: &hir::HRel, g: &'h hir::HGuard, cols: Vec<Column>) -> Result<RelId, InternalError> {
+        let keep = self.generated(suffixed(&r.name, "$keep"), cols, None, r.role, false, g.span)?;
+        let segs = r.name.segments();
+        let module = QualName::new(
+            segs.iter()
+                .take(segs.len().saturating_sub(1))
+                .copied()
+                .collect::<Vec<_>>(),
+        );
+        let stem = format!("{}$keep", r.name.last().map(|s| s.as_str()).unwrap_or_default());
+        let mut names = rules::Names {
+            base: if module.segments().is_empty() {
+                stem.clone()
+            } else {
+                format!("{module}::{stem}")
+            },
+            module,
+            stem,
+            role: r.role,
+            counter: 0,
+        };
+        for mut d in self.body(vec![expr::Draft::new(g.scope)], &g.body, &[], &mut names)? {
+            let mut args = Vec::new();
+            for v in &g.cols {
+                args.push(HeadArg::Term(Term::Var(d.var(self.hir, *v)?)));
+            }
+            let label = self.label(names.base.clone());
+            d.build(
+                &mut self.b,
+                RuleKind::Deductive,
+                label,
+                g.span,
+                Head {
+                    rel: keep,
+                    args,
+                    mode: HeadMode::Insert,
+                },
+                r.role,
+            )?;
+        }
+        Ok(keep)
     }
 }
 
@@ -701,12 +765,20 @@ impl Lowerer<'_> {
             args: args.into_iter().map(HeadArg::Term).collect(),
             mode: HeadMode::Insert,
         };
-        // The candidates.
+        // The candidates: the persisted rows (those a `while` condition keeps, LANGUAGE §7.2), and the writes.
+        let hir = self.hir;
+        let guard = match hir.guards.iter().find(|g| g.rel == h) {
+            Some(g) => Some(self.persist_guard(r, g, cols.clone())?),
+            None => None,
+        };
         let label = self.label(format!("{}$cand", r.name));
         let mut rb = self.b.rule(RuleKind::Deductive, label, res.span);
         let vars = col_vars(&mut rb)?;
         rb.lit(Literal::Pos(atom(rel, terms(&vars), res.span)));
         rb.lit(Literal::Neg(atom(del, terms(&vars), res.span)));
+        if let Some(keep) = guard {
+            rb.lit(Literal::Pos(atom(keep, terms(&vars), res.span)));
+        }
         rb.head(head(cand, terms(&vars)), role).map_err(ir)?;
         let label = self.label(format!("{}$cand#next", r.name));
         let mut rb = self.b.rule(RuleKind::Deductive, label, res.span);
@@ -870,6 +942,11 @@ impl Lowerer<'_> {
             self.b
                 .set_construct_kind(construct, ConstructKind::Persist { rel, del: Some(del) })
                 .map_err(ir)?;
+            let hir = self.hir;
+            let guard = match hir.guards.iter().find(|g| g.rel == h) {
+                Some(g) => Some(self.persist_guard(&r, g, cols.clone())?),
+                None => None,
+            };
             let label = self.label(format!("{}$persist", r.name));
             let mut rb = self.b.rule(RuleKind::Inductive, label, r.span);
             let mut vars = Vec::new();
@@ -879,6 +956,9 @@ impl Lowerer<'_> {
             let args: Vec<Term> = vars.iter().map(|v| Term::Var(*v)).collect();
             rb.lit(Literal::Pos(atom(rel, args.clone(), r.span)));
             rb.lit(Literal::Neg(atom(del, args.clone(), r.span)));
+            if let Some(keep) = guard {
+                rb.lit(Literal::Pos(atom(keep, args.clone(), r.span)));
+            }
             let rule = rb
                 .head(
                     Head {
@@ -891,7 +971,14 @@ impl Lowerer<'_> {
                 .map_err(ir)?;
             self.b.end_construct(construct).map_err(ir)?;
             self.b
-                .set_persistence(rel, Persistence::Frame { rule, del: Some(del) })
+                .set_persistence(
+                    rel,
+                    Persistence::Frame {
+                        rule,
+                        del: Some(del),
+                        guard,
+                    },
+                )
                 .map_err(ir)?;
             self.del.insert(h, del);
         }

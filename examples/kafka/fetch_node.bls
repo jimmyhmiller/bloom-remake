@@ -80,16 +80,12 @@ view fetch_answers(c, xs = collect!((j, a, pmax))) = per fetch_head(c, _, _, _, 
 answer_fetch: while fetch_head(c, i, seq, corr, fr, at, req), fetch_session_error(req) == None,
         fetch_answers(c, xs), let answers = trim_to(xs, req.max_bytes as i64)
         where fetch_ready(answers, req.min_bytes as i64) || now() >= at + Duration::from_millis(req.max_wait_ms as i64) {
-    send kafka.write(c, seq, fetch_response_parts(corr, NONE, req, answers));
-    upsert answering(c, i + 1, seq + 1);
-    delete queued(c, i, fr, at);
+    emit reply(c, i, fetch_response_parts(corr, NONE, req, answers));
 }
 
 /// A Fetch of a session this broker never created is answered at once with the error and no partitions.
 answer_fetch_session: while fetch_head(c, i, seq, corr, fr, at, req), let Some(err) = fetch_session_error(req) {
-    send kafka.write(c, seq, fetch_response_parts(corr, err, without_topics(req), []));
-    upsert answering(c, i + 1, seq + 1);
-    delete queued(c, i, fr, at);
+    emit reply(c, i, fetch_response_parts(corr, err, without_topics(req), []));
 }
 
 // ---------------------------------------------------------------- ListOffsets
@@ -173,7 +169,5 @@ view offsets_found(c, j, a) {
 view offsets_answers(c, xs = collect!((j, a))) = per list_offsets_head(c, _, _, _, _, _, _req), offsets_answer(c, j, a);
 
 answer_list_offsets: while list_offsets_head(c, i, seq, corr, fr, at, req), offsets_answers(c, xs) {
-    send kafka.write(c, seq, [Part::Bytes(encode_list_offsets_response(corr, req, xs))]);
-    upsert answering(c, i + 1, seq + 1);
-    delete queued(c, i, fr, at);
+    emit reply(c, i, [Part::Bytes(encode_list_offsets_response(corr, req, xs))]);
 }

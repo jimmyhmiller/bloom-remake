@@ -33,13 +33,22 @@ const OP_REASSIGNED: i8 = 6;
 /// partition (`part`), the target replicas (one list; none cancels) and whether the replication factor may change
 /// (`flag`); for a completed one, the topic id, the partition and the replicas. `slot` is the topic's entry in its
 /// request, which names its outcome.
-struct Item { slot: u64, part: i32, err: i16, flag: bool, name: String, id: Bytes, assignment: Vec<Vec<i32>>, configs: Vec<(String, String)> }
+format Item {
+    slot: u64,
+    part: i32,
+    err: i16,
+    flag: bool,
+    name: compact_string,
+    id: uuid,
+    assignment: compact_array(compact_array(i32)),
+    configs: compact_array((compact_string, compact_string)),
+}
 
 /// A command to the controller. `origin` and `tag` name the request that asked for it (the origin broker's id, and
 /// a tag unique among its requests). A request's creations (or deletions) are one command, applied in one tick, so
 /// no other request's commands come between them: a request takes effect at one point, as a Kafka controller handles
 /// a request in one event. A producer-id allocation has no items.
-struct Cmd { op: i8, origin: i32, tag: u64, items: Vec<Item> }
+format Cmd { op: i8, origin: i32, tag: u64, items: compact_array(Item) }
 
 fn create_item(slot: u64, err: i16, name: String, id: Bytes, assignment: Vec<Vec<i32>>, configs: Vec<(String, String)>) -> Item {
     Item { slot: slot, part: 0i32, err: err, flag: false, name: name, id: id, assignment: assignment, configs: configs }
@@ -88,106 +97,12 @@ fn pids_cmd(origin: i32, tag: u64) -> Cmd {
     Cmd { op: OP_PIDS, origin: origin, tag: tag, items: [] }
 }
 
-fn encode_item(it: Item) -> Bytes {
-    Bytes::join([
-        Bytes::from_u64_be(it.slot),
-        Bytes::from_i32_be(it.part),
-        Bytes::from_i16_be(it.err),
-        enc_bool(it.flag),
-        enc_compact_string(it.name),
-        it.id,
-        enc_compact_array(it.assignment.map(|rs| enc_compact_i32s(rs))),
-        enc_compact_array(it.configs.map(|kv| Bytes::join([enc_compact_string(kv.0), enc_compact_string(kv.1)]))),
-    ])
-}
-
 fn encode_cmd(c: Cmd) -> Bytes {
-    Bytes::join([
-        Bytes::from_i8(c.op),
-        Bytes::from_i32_be(c.origin),
-        Bytes::from_u64_be(c.tag),
-        enc_compact_array(c.items.map(|it| encode_item(it))),
-    ])
-}
-
-fn read_assignment(c: Cur) -> Option<(Vec<Vec<i32>>, Cur)> {
-    read_compact_len(c).and_then(|n| {
-        let steps = range(0, n.0).scan(Some(([], n.1)), |acc, _i| {
-            acc.and_then(|a| read_compact_i32s(a.1).map(|r| ([r.0], r.1)))
-        });
-        read_all_steps(steps, n.1)
-    })
-}
-
-fn read_configs(c: Cur) -> Option<(Vec<(String, String)>, Cur)> {
-    read_compact_len(c).and_then(|n| {
-        let steps = range(0, n.0).scan(Some(([], n.1)), |acc, _i| {
-            acc.and_then(|a| read_compact_string(a.1).and_then(|k| read_compact_string(k.1).map(|v| ([(k.0, v.0)], v.1))))
-        });
-        read_config_steps(steps, n.1)
-    })
-}
-
-/// The items a scan of reads produced, and where the last read ended; `None` if a read failed.
-fn read_all_steps(steps: Vec<Option<(Vec<Vec<i32>>, Cur)>>, start: Cur) -> Option<(Vec<Vec<i32>>, Cur)> {
-    if steps.any(|s| s.is_none()) {
-        None
-    } else {
-        let items = steps.filter_map(|s| s.map(|x| x.0)).flatten();
-        match steps.last() {
-            Some(Some(s)) => Some((items, s.1)),
-            _ => Some((items, start)),
-        }
-    }
-}
-
-fn read_config_steps(steps: Vec<Option<(Vec<(String, String)>, Cur)>>, start: Cur) -> Option<(Vec<(String, String)>, Cur)> {
-    if steps.any(|s| s.is_none()) {
-        None
-    } else {
-        let items = steps.filter_map(|s| s.map(|x| x.0)).flatten();
-        match steps.last() {
-            Some(Some(s)) => Some((items, s.1)),
-            _ => Some((items, start)),
-        }
-    }
-}
-
-fn read_item(c: Cur) -> Option<(Item, Cur)> {
-    read_u64(c).and_then(|slot| read_i32(slot.1).and_then(|part| read_i16(part.1).and_then(|err| read_bool(err.1).and_then(|flag| {
-        read_compact_string(flag.1).and_then(|name| read_uuid(name.1).and_then(|id| read_assignment(id.1).and_then(|a| {
-            read_configs(a.1).map(|cf| (Item {
-                slot: slot.0, part: part.0, err: err.0, flag: flag.0, name: name.0, id: id.0, assignment: a.0, configs: cf.0,
-            }, cf.1))
-        })))
-    }))))
-}
-
-fn read_items(c: Cur) -> Option<(Vec<Item>, Cur)> {
-    read_compact_len(c).and_then(|n| {
-        let steps = range(0, n.0).scan(Some(([], n.1)), |acc, _i| {
-            acc.and_then(|a| read_item(a.1).map(|r| ([r.0], r.1)))
-        });
-        read_item_steps(steps, n.1)
-    })
-}
-
-fn read_item_steps(steps: Vec<Option<(Vec<Item>, Cur)>>, start: Cur) -> Option<(Vec<Item>, Cur)> {
-    if steps.any(|s| s.is_none()) {
-        None
-    } else {
-        let items = steps.filter_map(|s| s.map(|x| x.0)).flatten();
-        match steps.last() {
-            Some(Some(s)) => Some((items, s.1)),
-            _ => Some((items, start)),
-        }
-    }
+    Cmd::encode(c)
 }
 
 fn decode_cmd(b: Bytes) -> Option<Cmd> {
-    read_i8(cur(b)).and_then(|op| read_i32(op.1).and_then(|origin| read_u64(origin.1).and_then(|tag| {
-        read_items(tag.1).map(|its| Cmd { op: op.0, origin: origin.0, tag: tag.0, items: its.0 })
-    })))
+    Cmd::decode(b, 0).map(|r| r.0)
 }
 
 /// The creations a Metadata request on broker `me`'s connection `c` (its `i`th request) asks for, one per name: ids

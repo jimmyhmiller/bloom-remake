@@ -130,11 +130,17 @@ fn a_hoisted_let_raises_only_for_complete_valuations() {
     ));
 }
 
+/// A guard that cannot fail runs before a division written ahead of it (LANGUAGE §9.14): rows it rejects raise
+/// nothing, rows it accepts do.
 #[test]
-fn a_range_guard_does_not_narrow_past_a_check_that_can_fail() {
+fn a_range_guard_runs_before_a_check_that_can_fail() {
     assert!(matches!(
         differential("range_after_fallible.bls", &[(1, "s", 0)], 2),
-        Outcome::Failed { tick: Tick(1), code } if code == "BLSR004"
+        Outcome::Ran(_)
+    ));
+    assert!(matches!(
+        differential("range_after_fallible.bls", &[(1, "add", 7), (2, "s", 0)], 3),
+        Outcome::Failed { tick: Tick(2), code } if code == "BLSR004"
     ));
 }
 

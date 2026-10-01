@@ -466,6 +466,39 @@ fn a_closure_outside_a_function_is_bls0214() {
 }
 
 #[test]
+fn a_question_mark_that_cannot_return_early_is_bls0218() {
+    // Under a branch, the right of `&&`, in a closure, in a function not returning an `Option`, and in a rule body.
+    for (fns, rule) in [
+        ("fn f(o: Option<u64>) -> Option<u64> { Some(if true { o? } else { 0 }) }", "f(Some(k))"),
+        ("fn f(o: Option<bool>) -> Option<bool> { Some(true && o?) }", "f(Some(true))"),
+        ("fn f(v: Vec<Option<u64>>) -> Option<Vec<u64>> { Some(v.map(|x| x?)) }", "f([Some(k)])"),
+        ("fn f(o: Option<u64>) -> u64 { o? }", "Some(f(Some(k)))"),
+    ] {
+        let src = with_head(Box::leak(
+            format!("{fns}\noutput out(k: Option<u64>);\na: on go(k, v), let x = {rule} {{ emit out(Some(k)); }}\n")
+                .into_boxed_str(),
+        ));
+        assert_eq!(codes(src), vec!["BLS0218"], "{fns}");
+    }
+    let src = with_head("output out(k: u64);\nview w(x) = go(k, _), let x = Some(k)?;\n");
+    assert_eq!(codes(src), vec!["BLS0218"]);
+}
+
+#[test]
+fn a_question_mark_in_strict_positions_compiles() {
+    let src = with_head(
+        "fn f(a: Option<u64>, b: Option<(u64, u64)>) -> Option<u64> {\n\
+             let (x, y) = b?;\n\
+             let z = [a?, x].len();\n\
+             Some(z + y + a? * 2)\n\
+         }\n\
+         output out(k: Option<u64>);\n\
+         a: on go(k, v) { emit out(f(Some(k), Some((k, k)))); }\n",
+    );
+    assert_eq!(codes(src), Vec::<&str>::new());
+}
+
+#[test]
 fn a_function_reading_a_relation_or_the_clock_is_bls0215() {
     for body in ["now()", "tick()", "self", "c", "rand_range(0, 3, n)", "rand(n)"] {
         let src = with_head(Box::leak(
@@ -1027,4 +1060,273 @@ fn a_blob_does_not_leave_its_node_yet() {
     let got = diags_for(src, &role_nodes());
     let codes: Vec<&str> = got.iter().map(|d| d.0.as_str()).collect();
     assert_eq!(codes, vec!["BLS0908", "BLS0908"], "{got:?}");
+}
+
+/// The names of the IR functions compiling `src` declares.
+fn fn_names(src: &'static str) -> Vec<String> {
+    let mut sources = SourceDb::new();
+    let nodes = [NodeSpec {
+        name: "n1".to_owned(),
+        role: None,
+    }];
+    match compile("test.bls", &nodes, &mut One(src), &mut sources) {
+        Ok((a, _)) => a.program.get().fns.iter().map(|f| f.name.to_string()).collect(),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+const GENERIC: &str = "fn inc(x: u64) -> u64 { x + 1 }\n\
+     fn dbl(x: u64) -> u64 { x * 2 }\n\
+     fn apply<T>(x: T, f: fn(T) -> T) -> T { f(x) }\n\
+     fn pair<A, B>(a: A, b: B) -> (A, B) { (a, b) }\n";
+
+#[test]
+fn generic_function_instances_merge_in_the_ir() {
+    // Two calls with the same types and function share an instance; another function or type is another one.
+    let src = with_head(Box::leak(
+        format!(
+            "{GENERIC}output out(a: u64, b: u64, c: u64, p: (u64, String), q: (bool, u64));\n\
+             a: on go(k, v) {{ emit out(apply(k, inc), apply(v, inc), apply(k, dbl), pair(k, \"x\"), pair(true, v)); }}\n"
+        )
+        .into_boxed_str(),
+    ));
+    let mut names = fn_names(src);
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "apply<u64, dbl>",
+            "apply<u64, inc>",
+            "dbl",
+            "inc",
+            "pair<bool, u64>",
+            "pair<u64, String>"
+        ]
+    );
+}
+
+#[test]
+fn misused_function_parameters_and_types_are_bls0219() {
+    for (fns, call) in [
+        // A function parameter used as a value, a function type outside a parameter list, a closure or a
+        // generic function passed for a function parameter.
+        ("fn f(x: u64, g: fn(u64) -> u64) -> u64 { let h = g; x }", "f(k, inc)"),
+        ("fn f(x: u64) -> fn(u64) -> u64 { x }", "0"),
+        ("fn f(x: u64, g: fn(u64) -> u64) -> u64 { g(x) }", "f(k, |y| y)"),
+        ("fn f(x: u64, g: fn(u64) -> u64) -> u64 { g(x) }", "f(k, apply)"),
+        ("fn f(x: u64, g: fn(fn(u64) -> u64) -> u64) -> u64 { x }", "0"),
+    ] {
+        let src = with_head(Box::leak(
+            format!(
+                "fn inc(x: u64) -> u64 {{ x + 1 }}\nfn apply<T>(x: T) -> T {{ x }}\n{fns}\n\
+                 output out(k: u64);\na: on go(k, v) {{ emit out({call}); }}\n"
+            )
+            .into_boxed_str(),
+        ));
+        assert!(
+            codes(src).contains(&"BLS0219".to_owned()),
+            "{fns} / {call}: {:?}",
+            codes(src)
+        );
+    }
+}
+
+#[test]
+fn generic_function_errors() {
+    // A type parameter no call determines; a function argument whose signature does not match; recursion through
+    // a generic call; the wrong number of arguments.
+    for (fns, call, code) in [
+        ("fn f<T>(x: u64) -> u64 { x }", "f(k)", "BLS0300"),
+        (
+            "fn s(x: String) -> String { x }\nfn f<T>(x: T, g: fn(T) -> T) -> T { g(x) }",
+            "f(k, s)",
+            "BLS0300",
+        ),
+        // Not called in the body: only its declared type is checked against the function passed.
+        ("fn s(x: String) -> String { x }\nfn f<T>(x: T, g: fn(T) -> T) -> T { x }", "f(k, s)", "BLS0300"),
+        (
+            "fn f<T>(x: T, g: fn(T) -> T) -> T { f(g(x), g) }",
+            "f(k, inc)",
+            "BLS0213",
+        ),
+        (
+            "fn f<T>(x: T) -> T { g(x) }\nfn g(x: u64) -> u64 { f(x) }",
+            "g(k)",
+            "BLS0213",
+        ),
+        ("fn f<T>(x: T, g: fn(T) -> T) -> T { g(x, x) }", "f(k, inc)", "BLS0301"),
+        ("fn f<T>(x: T, g: fn(T) -> T) -> T { g(x) }", "f(k)", "BLS0301"),
+        ("fn f<T>(x: T) -> T { x + 1 }", "f(\"a\")", "BLS0300"),
+    ] {
+        let src = with_head(Box::leak(
+            format!(
+                "fn inc(x: u64) -> u64 {{ x + 1 }}\n{fns}\n\
+                 output out(k: u64);\na: on go(k, v) {{ emit out({call}); }}\n"
+            )
+            .into_boxed_str(),
+        ));
+        let got = codes(src);
+        assert!(got.contains(&code.to_owned()), "{fns} / {call}: {got:?}");
+    }
+}
+
+#[test]
+fn generic_functions_compile_and_type_parameters_flow_through_collections() {
+    let src = with_head(Box::leak(
+        format!(
+            "{GENERIC}fn firsts<K, V>(m: Vec<(K, V)>, d: K) -> K {{ match m.first() {{ Some(e) => e.0, None => d }} }}\n\
+             fn twice<T>(x: T, f: fn(T) -> T) -> T {{ apply(apply(x, f), f) }}\n\
+             output out(a: u64, b: String);\n\
+             a: on go(k, v) {{ emit out(twice(k, inc), firsts([(\"a\", k)], \"z\")); }}\n"
+        )
+        .into_boxed_str(),
+    ));
+    assert_eq!(codes(src), Vec::<&str>::new());
+}
+
+#[test]
+fn persistence_conditions_compile_and_their_misuses_are_reported() {
+    // Durable, with a negation, a `let`, a `where`, an existential variable and the table itself.
+    let src = with_head(
+        "table owner(k: u64);\n\
+         durable table t(k: u64, v: u64) key(k) while owner(k), not t(v, _), let w = v + 1, owner(z) where w > z;\n\
+         a: on go(k, v) { emit owner(k); emit t(k, v); }\n",
+    );
+    assert_eq!(codes(src), Vec::<&str>::new());
+    for (decl, code) in [
+        // Not a table; lattice values (not implemented); an unbound name in the condition.
+        ("scratch t(k: u64, v: u64) while go(k, v);", "BLS0106"),
+        ("table t(k: u64, v: LMax<u64>) key(k) while go(k, _);", "BLS0908"),
+        ("table t(k: u64, v: u64) while go(k, v) where q > 1;", "BLS0500"),
+    ] {
+        let src = with_head(Box::leak(
+            format!("{decl}\na: on go(k, v) {{ emit t(k, v); }}\n").into_boxed_str(),
+        ));
+        let got = codes(src);
+        assert!(got.contains(&code.to_owned()), "{decl}: {got:?}");
+    }
+}
+
+#[test]
+fn prefer_names_handlers_that_write_the_table() {
+    for (decl, code) in [
+        // A handler that does not exist, one that writes with `emit`, one named twice; no key; lattice values.
+        ("table t(k: u64, v: u64) key(k) resolve prefer(a, nobody);", "BLS0411"),
+        ("table t(k: u64, v: u64) key(k) resolve prefer(a, b);", "BLS0411"),
+        ("table t(k: u64, v: u64) key(k) resolve prefer(a, a);", "BLS0411"),
+        ("table t(k: u64, v: u64) resolve prefer(a);", "BLS0106"),
+        ("table t(k: u64, v: LMax<u64>) key(k) resolve prefer(a);", "BLS0908"),
+    ] {
+        let src = with_head(Box::leak(
+            format!("{decl}\na: on go(k, v) {{ upsert t(k, v); }}\nb: on go(k, v) {{ emit t(k, v); }}\n")
+                .into_boxed_str(),
+        ));
+        let got = codes(src);
+        assert!(got.contains(&code.to_owned()), "{decl}: {got:?}");
+    }
+    let src = with_head(
+        "table t(k: u64, v: u64) key(k) resolve prefer(b, a);\n\
+         a: on go(k, v) { upsert t(k, v); }\n\
+         b: on go(k, v) { next t(k + 1, v); }\n",
+    );
+    assert_eq!(codes(src), Vec::<&str>::new());
+}
+
+#[test]
+fn format_misuses_are_reported() {
+    for (decl, code) in [
+        // An unknown element; `nullable` over a plain element; an unsigned length that cannot be null; a named
+        // constant; a valued element without a name; an alias expanding into itself; a record's arity; a
+        // conditional nested format without a default; a default without a condition; typed alias parameters;
+        // two formats of one name.
+        ("format A { x: float32 }", "BLS0301"),
+        ("format A { x: nullable(i32) }", "BLS0301"),
+        ("format A { x: nullable(prefixed(uvarint, 0, utf8)) }", "BLS0301"),
+        ("format A { c: constant(i8, 1) }", "BLS0301"),
+        ("format A { i32 }", "BLS0301"),
+        ("format a = b;\nformat b = a;\nformat A { x: a }", "BLS0301"),
+        ("format B(v: i16) { x: i8 }\nformat A { b: B }", "BLS0301"),
+        ("format B { x: i8 }\nformat A(v: i16) { b: B if v > 1 }", "BLS0301"),
+        ("format A { x: i8 = 3 }", "BLS0301"),
+        ("format a(F: i32) = array(uvarint, 1, F);", "BLS0301"),
+        ("format A { x: i8 }\nformat A { y: i8 }", "BLS0201"),
+    ] {
+        let src = with_head(Box::leak(format!("{decl}\n").into_boxed_str()));
+        let got = codes(src);
+        assert!(got.contains(&code.to_owned()), "{decl}: {got:?}");
+    }
+    // A format inside an `at` section.
+    let src = "program t version 1;\nrole R;\nat R { format A { x: i8 } }\n";
+    assert!(codes(src).contains(&"BLS0110".to_owned()));
+    // A well-formed record compiles to a struct and its functions, usable from rules.
+    let src = with_head(
+        "format pair(F) = array(u8, 0, F);\n\
+         format A(v: i16) { constant(u8, 1), xs: pair(i16), s: nullable(prefixed(i16, 0, utf8)) if v > 2, tags }\n\
+         output out(k: u64, n: u64);\n\
+         view w(k, n) = go(k, v), let Some((a, n)) = A::decode(A::encode(A { xs: [1i16], s: None }, 3i16), 0, 3i16);\n\
+         a: on w(k, n) { emit out(k, n); }\n",
+    );
+    assert_eq!(codes(src), Vec::<&str>::new());
+}
+
+/// The review's findings (S-L review): each misuse is a diagnostic, never a hang, a silent drop or an internal error.
+#[test]
+fn review_findings_are_diagnostics() {
+    let generic_chain: String = std::iter::once("fn f0<T>(x: T) -> T { x }\n".to_owned())
+        .chain((1..16).map(|i| format!("fn f{i}<T>(x: T) -> T {{ f{p}(f{p}(x)) }}\n", p = i - 1)))
+        .collect();
+    let cases: Vec<(String, &str)> = vec![
+        // An alias that doubles its argument: refused, not expanded exponentially.
+        ("format a(X) = a((X, X));\nformat R { f: a(u8) }".into(), "BLS0301"),
+        // A bias the length's type cannot hold.
+        ("format R { a: prefixed(u8, 300, rest) }".into(), "BLS0301"),
+        // `rest` before another element, in a record and in a tuple.
+        ("format R { a: rest, b: u8 }".into(), "BLS0301"),
+        ("format R { a: (rest, u8) }".into(), "BLS0301"),
+        // Array items that may take no byte, or every byte left.
+        ("format R { a: array(uvarint, 0, bytes(0)) }".into(), "BLS0301"),
+        (
+            "format E { x: i8 if false }\nformat R { a: array(uvarint, 0, E) }".into(),
+            "BLS0301",
+        ),
+        ("format R { a: array(uvarint, 0, utf8) }".into(), "BLS0301"),
+        // Instances multiplying through nested generic calls.
+        (
+            format!("{generic_chain}output out(k: u64);\na: on go(k, v) {{ emit out(f15(k)); }}"),
+            "BLS0220",
+        ),
+        // A function parameter the built-in `range` (or a relation) would shadow.
+        (
+            "fn f(range: fn(u64, u64) -> Vec<u64>) -> Vec<u64> { range(0, 3) }".into(),
+            "BLS0201",
+        ),
+        ("fn f(go: fn(u64) -> u64) -> u64 { go(1) }".into(), "BLS0201"),
+        // `resolve prefer` naming a label two handlers carry.
+        (
+            "table t(k: u64, v: u64) key(k) resolve prefer(a);\na: on go(k, v) { upsert t(k, v); }\n\
+             a: on go(k, v) { upsert t(k + 1, v); }"
+                .into(),
+            "BLS0411",
+        ),
+        // A `while` table whose column is not named as a variable.
+        ("table t(K: u64) while go(K, _);".into(), "BLS0106"),
+        // A `while` condition joining on lattice values.
+        (
+            "table x(k: u64, n: LMax<u64>) key(k);\ntable y(k: u64, n: LMax<u64>) key(k);\n\
+             table t(k: u64) while x(k, n), y(k, n);"
+                .into(),
+            "BLS0304",
+        ),
+    ];
+    for (body, code) in cases {
+        let src = with_head(Box::leak(format!("{body}\n").into_boxed_str()));
+        let got = codes(src);
+        assert!(got.contains(&code.to_owned()), "{body}: {got:?}");
+    }
+    // A format inside a protocol.
+    let src = "program t version 1;\nprotocol P { format A { x: i8 } }\n";
+    assert!(codes(src).contains(&"BLS0110".to_owned()));
+    // An alias argument used inside an expression is substituted there.
+    let src = with_head("format blob(n) = bytes(n * 2);\nformat R { a: blob(3) }\n");
+    assert_eq!(codes(src), Vec::<&str>::new());
 }

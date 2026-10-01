@@ -373,9 +373,14 @@ GenericArgs     = "<" [ GenericArg { "," GenericArg } [ "," ] ] ">" ;
 GenericArg      = IDENT "=" Type | INT_LIT | Type ;
 Type            = 'unsafe' Type                                       (* LANG-136: DomPair only *)
                 | "(" [ Type { "," Type } [ "," ] ] ")"                (* tuple; () is unit *)
+                | "fn" "(" [ Type { "," Type } [ "," ] ] ")" "->" Type (* a function parameter's type, §16.1 *)
                 | SimplePath [ GenericArgs ] ;
 
 (* ======================================================================== functions *)
+FormatItem      = 'format' IDENT [ "(" [ FormatParam { "," FormatParam } ] ")" ]
+                  ( "=" Expr ";" | "{" [ FormatField { "," FormatField } [ "," ] ] "}" ) ;   (* §16.7 *)
+FormatParam     = IDENT [ ":" Type ] ;
+FormatField     = [ FieldName ":" ] Expr [ "if" Expr ] [ "=" Expr ] ;
 FnItem          = [ FnClass ] FnSig BlockExpr ;
 FnClass         = 'morphism' | 'bimorphism' | 'monotone' | 'antitone' | 'threshold' | 'stable' ;
 FnSig           = "fn" IDENT [ Generics ] "(" [ FnParam { "," FnParam } [ "," ] ] ")" "->" Type
@@ -424,9 +429,11 @@ RelClause       = ":" IDENT "->" IDENT                                (* channel
                 | 'resolve' Policy
                 | 'partition' 'by' Expr [ 'over' RelPath ]
                 | 'sealed' 'by' "(" [ FieldName { "," FieldName } [ "," ] ] ")" [ 'producers' RelPath ]
+                | "while" Body                                        (* tables; last, §7.2 *)
                 | 'exactly_once' "(" IDENT ")" ;
 Policy          = ( 'choose' | 'choose_rand' ) [ 'sticky' ]
                 | ( 'choose_least' | 'choose_most' ) "(" Expr ")"
+                | 'prefer' "(" IDENT { "," IDENT } ")"                 (* tables, relation level *)
                 | 'merge' ;
 CellDecl        = { 'durable' | "scratch" } 'cell' IDENT ":" Type ";" ;
 TimerDecl       = 'timer' IDENT ( 'every' Expr [ 'ticks' ] [ 'times' Expr ] | 'once' [ 'after' Expr ] ) ";" ;
@@ -481,7 +488,7 @@ BinaryOp        = "||" | "&&" | "==" | "!=" | "<" | "<=" | ">" | ">=" | "in"
                 | ".." | "..=" | "<.." | "<..=" | "|" | "^" | "&" | "<<" | ">>"
                 | "+" | "-" | "++" | "*" | "/" | "%" | "**" ;
 Postfix         = Primary { "." FieldName [ "(" Args ")" ] | "." BANG_IDENT "(" Args ")"
-                          | "." INT_LIT | "(" Args ")" | "[" Expr "]" } ;
+                          | "." INT_LIT | "(" Args ")" | "[" Expr "]" | "?" } ;
 Primary         = INT_LIT | FLOAT_LIT | DURATION_LIT | STRING_LIT | BYTES_LIT
                 | "true" | "false" | "self" | "_"
                 | "(" ")" | "(" Expr ")" | "(" Expr "," [ Expr { "," Expr } [ "," ] ] ")"
@@ -556,7 +563,7 @@ operators that bind tighter than comparisons (so `x in lo..hi` needs no parenthe
 | 12 | `**` | right |
 | 13 | `as` (postfix type cast) | left |
 | 14 | prefix `-` `~` | — |
-| 15 | postfix `.f` `.m(…)` `.m!(…)` `.0` `(…)` `[…]` | left |
+| 15 | postfix `.f` `.m(…)` `.m!(…)` `.0` `(…)` `[…]` `?` | left |
 
 `if … { } else { }` and `match` are primaries (there is no `?:`). `|` is bitwise or on integers; it is never a
 lattice join (joins are `a.join(b)`, §11.4). Inside a fold's element (`lset{ e | … }`) a top-level `|` ends the
@@ -1043,6 +1050,31 @@ link(S, D, C)@next :- link(S, D, C), notin link$del(S, D, C).
 `emit` into a table inserts now and persists from now on; `next` inserts at t+1. The explicit Dedalus form
 (`while p(x), not p_del(x) { next p(x); }` over a `scratch p`) is accepted and is recognized as the same storage
 (LANG-065).
+
+**Persistence with a condition: `while`.** A table may persist its rows only while a condition holds for them
+(EXTENSIONS 2.3), which states once that a row lives as long as its owner instead of in a clean-up rule:
+
+```blossom
+table placed(c: Conn, i: u64, j: u64) while queued(c, i, _);
+table follower(g: Group, f: Node) while leader(g, self), members(g, f);
+```
+
+The condition is a body over the table's columns, by name (so they are named as variables, BLS0106) (relation atoms, negations, `let`s and a `where`); its
+other variables are existential. A row persists from tick t to t+1 only if the condition holds for it at t — a row
+whose condition fails is visible in that tick and gone in the next, exactly as with `while p(x̄), not <condition>
+{ delete p(x̄); }`, which it replaces. Writes (`emit`, `next`, `upsert`, `delete`) are unchanged. The condition may
+read the table itself, and is stratified like any rule body. `while` comes last among the declaration's clauses
+(its body runs to the `;`), applies to tables only (BLS0106), and is not implemented on tables of lattice values.
+On a table with a `resolve` policy (§10.7) it keeps a persisted row from being a candidate for the next tick. A
+`durable` table may have one: the condition is evaluated every tick, so a row whose
+owner is gone does not survive a restart either. Lowering — the frame rule gains a guard relation of the same
+construct:
+
+```ir
+decl scratch placed$keep(c: Conn, i: u64, j: u64)
+placed$keep(C, I, J) :- placed(C, I, J), queued(C, I, _).
+placed(C, I, J)@next :- placed(C, I, J), notin placed$del(C, I, J), placed$keep(C, I, J).
+```
 
 ### 7.3 `durable` (LANG-044, SEM-072)
 
@@ -1619,6 +1651,30 @@ exist only inside `fn`, `impl` and `aggregate` bodies. Lattice operations and th
 a column-form channel `c.payloads(…)` drops the `@` column. A renaming is a view. `schema_of(r)` is a compile-time
 constant describing `r`'s columns, usable in `const` items.
 
+### 9.14 Evaluation order and runtime errors
+
+A body's meaning is a set of valuations; its order matters only for which runtime errors (checked arithmetic,
+BLSR004; `error(…)`, BLSR010; …) a tick raises. A valuation of the positive atoms then meets the other literals —
+negations, lookups, `let`s, generators and guards — each once its variables are bound, in this order:
+
+1. every ready check that **cannot fail**, in body order: negations, lookups, and guards and `let`s whose expression
+   is built only from variables, constants, comparisons, boolean and bitwise connectives, construction, field
+   access and `if` over those;
+2. then the first ready fallible **filter** (a guard) in body order, or else the first ready fallible **binding** (a
+   `let` or a generator); then again from 1.
+
+A `where a && b` is two guards. So a filter protects every expression it can: an expression is evaluated only for
+valuations that every filter able to run before it accepts, wherever it is written, and an error is raised only
+for such a valuation.
+
+```blossom
+view ratio(k, r) = pair(k, a, b), let r = a / b where b != 0;     // never divides by zero
+view gap(k, d) = pair(k, a, b), not done(k), let d = a - b;       // `not done(k)` runs before the subtraction
+```
+
+Both evaluators follow this order, and the engine uses it: a guard bounding a column of an atom not yet joined
+narrows that atom to a range scan (§9.9) whenever only checks that cannot fail run before the guard.
+
 ---
 
 ## 10. Aggregation, choice, numbering and folds
@@ -1862,6 +1918,32 @@ reg$cand(K, TS, V) :- reg(K, TS, V), notin reg$del(K, TS, V).
 reg$cand(K, TS, V) :- reg$n(K, TS, V).                          // every `next`/`upsert` into reg targets reg$n
 reg$cmin(K, min<TS>) :- reg$cand(K, TS, V).
 reg(K, TS, V)@next :- reg$cand(K, TS, V), reg$cmin(K, TS).      // replaces reg's frame rule
+```
+
+**Writer precedence: `resolve prefer(rule, …)`.** Two handlers writing one key in one tick is an error, and an
+accident must not pass silently; but some programs mean it — a snapshot install resets a partition's log end in the
+tick materialization would advance it. A table may name, by handler label, whose writes win (EXTENSIONS 2.4):
+
+```blossom
+table log_end(tid: Bytes, part: i32, next: i64) key(tid, part) resolve prefer(reset_log, advance_end);
+```
+
+Among one tick's `next` and `upsert` writes to a key, those of the earliest listed handler survive; the others are
+dropped. Survivors then apply as their verb does, so two different values from one listed handler, or a write by a
+handler the list does not name next to any other value, still conflict (SEM-050, SEM-051). `emit` and `delete` are
+not arbitrated. The table keeps its frame rule (it is not a resolved table: persisted rows are not candidates, and
+an `upsert` still replaces its key's row). Each name must label a handler of the module that writes the table with
+`next` or `upsert`, once, and label only one handler (BLS0411); `prefer` needs a key and plain values. Lowering — writes are staged with their
+handler's rank (unlisted ones apart), and the least rank per key goes on:
+
+```ir
+log_end$w(T, P, N, R, U) :- <body of each listed write>, R = <its handler's position>, U = <is an upsert>.
+log_end$wx(T, P, N, U)   :- <body of each unlisted write>.
+log_end$wmin(T, P, min<R>) :- log_end$w(T, P, N, R, U).
+log_end$ups(T, P, N) :- log_end$w(T, P, N, R, true), log_end$wmin(T, P, R).     // then as any upsert
+log_end$ups(T, P, N) :- log_end$wx(T, P, N, true).
+log_end(T, P, N)@next :- log_end$w(T, P, N, R, false), log_end$wmin(T, P, R).   // and as any `next`
+log_end(T, P, N)@next :- log_end$wx(T, P, N, false).
 ```
 
 ### 10.8 User-defined aggregates and combiners (LANG-105, LANG-112)
@@ -2489,6 +2571,46 @@ and used by ANA-043, ANA-080 and fold legality. A function with a lattice-typed 
 class with a prefix (`monotone fn`, `morphism fn`, `antitone fn`, `threshold fn`); without one it is NM and is called
 with a bang. Lowering: an IR pure function; calls stay calls.
 
+**Failure as absence: `?`.** In a function whose result is an `Option`, `e?` is `e`'s value when it is `Some(v)`;
+when it is `None`, the function returns `None` at once — the function-body counterpart of a rule body, where a
+failed `let Some(x) = e` derives nothing (EXTENSIONS 2.1):
+
+```blossom
+fn read_item(c: Cur) -> Option<(Item, Cur)> {
+    let (slot, c) = read_u64(c)?;
+    let (part, c) = read_i32(c)?;
+    Some((Item { slot: slot, part: part }, c))
+}
+```
+
+A `?` must be evaluated whenever its `let` (or the result) is: under a branch (`if`, a `match` arm, the right of
+`&&`/`||`) or in a closure it is BLS0218, as in a function whose result is not an `Option` and in a rule body.
+Lowering: the frontend rewrites each `?` into a `match` on its operand, in evaluation order, before name
+resolution; nothing reaches the IR.
+
+**Generic functions and function parameters.** A function may take type parameters, and parameters of a function
+type `fn(A, B) -> R` (EXTENSIONS 2.2):
+
+```blossom
+fn read_list<T>(c: Cur, item: fn(Cur) -> Option<(T, Cur)>) -> Option<(Vec<T>, Cur)> { … }
+view items(x) = frame(b), let Some(x) = read_list(cur(b), read_item);
+```
+
+The argument for a function parameter is a function *named* at the call: a declared function with fixed types, or
+the caller's own function parameter passed on. A function parameter is only called or passed on, never stored,
+returned or captured as a value; a function type appears only as a parameter's type; a closure or a generic
+function cannot be passed (all BLS0219). A type parameter may occur inside tuples, `Option`, `Vec`, `Set` and `Map`
+in the signature, and has no bounds (every type is `Eq`, `Hash` and ordered); the body's own annotations cannot name
+one. Each call is checked with its type parameters inferred there, from the arguments, the function arguments'
+signatures and the context, like any rule variable; one the call does not determine is BLS0300, and so is a body
+that does not type-check at the types a call gives it. A generic function that no call reaches is name-resolved but
+not type-checked. Recursion through generic calls is BLS0213, as for any function; a function parameter the built-in
+or relation of its name would shadow is BLS0201; more than 10,000 instances (nested generic calls multiply them) is
+BLS0220. Lowering: monomorphization — each
+call is an instance, a copy of the body with the named functions substituted, and instances with the same type
+arguments and function arguments are one IR function, named `read_list<Item, read_item>`; the IR has no generics
+and no function values.
+
 ### 16.2 Host functions and table functions (LANG-181, LANG-183)
 
 ```blossom
@@ -2534,6 +2656,72 @@ ticks. Callbacks run after the tick commits and cannot affect it (step 6 of §4.
 
 `#[handler("rust::path")] output write_chunk(id: u64, data: Blob);` calls the host handler for each emitted row after
 the tick commits; this is the BOOM-FS data path, where bytes move outside the engine and tuples hold `Blob` handles.
+
+### 16.7 Formats: binary layouts (EXTENSIONS 2.5)
+
+A `format` declares a byte layout once; the compiler derives its decoder and encoder, as Prolog's definite clause
+grammars run one description both ways.
+
+```blossom
+format compact_string = prefixed(uvarint, 1, utf8);              // an alias: an element with a name
+format compact_array(F) = array(uvarint, 1, F);                  // with element parameters
+format MetadataTopic(version: i16) {
+    topic_id: bytes(16),
+    name:     nullable(compact_string),
+    tags,
+}
+format MetadataRequest(version: i16) {
+    topics:      nullable(compact_array(MetadataTopic(version))),
+    allow_auto:  bool,
+    include_ops: bool if version >= 8,
+    tags,
+}
+```
+
+A record format is a `struct` of its named fields plus two functions, called as `Name::decode` and `Name::encode`:
+
+```text
+fn MetadataRequest::decode(b: Bytes, p: u64, version: i16) -> Option<(MetadataRequest, u64)>
+fn MetadataRequest::encode(x: MetadataRequest, version: i16) -> Bytes
+```
+
+Decoding reads the value at `p` and returns it with the position after it, or `None` when the bytes run out or
+break the layout — never a runtime error on malformed bytes: a length or count read from the bytes is checked against
+the bytes left before anything uses it. Decoding pays the function step budget like any function (§16.1): about
+seven steps per array item, so a well-formed value of more than about a million items exceeds it (BLSR012); a
+program decoding untrusted input bounds its size first. Encoding fails the tick when a value does not fit the layout:
+a length beyond its prefix's type (BLSR004), a `bytes(n)` value of another size (BLSR010). `decode(encode(x))` is
+`Some((x, end))` for every value whose absent conditional fields hold their defaults; the rules that make it so are
+checked: `rest` and `utf8` (and a tuple or record ending in one) come last, an array's items take at least one byte
+each, and a bias fits its length's type (BLS0301).
+
+Elements (parameters in parentheses; every element is a name or a call):
+
+| Element | Value | Bytes |
+|---|---|---|
+| `u8` `i8` `u16` `i16` `u32` `i32` `u64` `i64` | the integer | big-endian |
+| `bool` | `bool` | one byte; any nonzero byte reads as `true`, `true` writes 1 |
+| `uvarint`, `varint` | `u64`, `i64` | LEB128; `varint` zigzag |
+| `bytes(n)` | `Bytes` | exactly `n` bytes (encoding a value of another size is BLSR010) |
+| `rest`, `utf8` | `Bytes`, `String` | every byte left |
+| `prefixed(L, bias, E)` | `E`'s | a length `n + bias` written as `L` (an integer or varint), then `E` in exactly `n` bytes |
+| `array(L, bias, E)` | `Vec` of `E`'s | a count `n + bias` written as `L`, then `n` elements |
+| `nullable(P)` | `Option` of `P`'s | a prefixed value or array whose length may be the bias less one: `None` |
+| `constant(E, v)` | none | `E` with value `v`: written on encode, checked on decode |
+| `ignored(E, v)` | none | `E`, read past and dropped on decode; `v` written on encode |
+| `(E1, E2, …)` | the tuple of the valued ones (the value itself, if only one) | the elements in order |
+| `tags` | none | a tagged-field section: a `uvarint` count of (tag, size, bytes); written empty, read and skipped |
+| `Name(args)` | the record | another record format, with its arguments |
+| `name(args)` | the alias's | an alias, its parameters replaced |
+
+A field is `name: element`, optionally `if cond` (an expression over the format's parameters and earlier fields; an
+absent field writes nothing and decodes to its type's zero, or to `= default`, which a nested record requires); an
+element with no value (`constant`, `ignored`, `tags`) has no name. Element arguments read the parameters. Aliases and records
+live in a file or module (BLS0110 in an `at` section) and may be declared after their use; misuse is BLS0301 (an
+unknown element, a wrong arity, `nullable` over something else or over an unsigned length with bias 0, a field name
+on a valueless element, an alias that expands into itself) or BLS0201 (two formats of one name). Lowering: none — a
+format expands, once includes are in place, into the struct, the two functions, generated functions for compound
+elements (`Name$d1`, `Name$e1`, …) and shared helpers (`format$…`), all ordinary Blossom.
 
 ---
 
@@ -2818,6 +3006,9 @@ never truncated or defaulted).
 | BLS0215 | E | a function body that reads a relation, `now()`, `tick()`, `self`, randomness or a role's members (§16.1) |
 | BLS0216 | E | an `extern fn` that names no host function of the standard library, or declares a different signature (§16.2) |
 | BLS0217 | E | an evaluation deeper than the bound the evaluators' stacks are sized for (§16.1) |
+| BLS0218 | E | `?` where it cannot return early: outside a function returning `Option`, under a branch, the right of `&&`/`||`, a nested block or a closure (§16.1) |
+| BLS0219 | E | a function type outside a function's parameter list, a function parameter neither called nor passed on, or a function argument that is not a named function (§16.1) |
+| BLS0220 | E | generic functions instantiated more than the bound allows (each call is an instance; nested generic calls multiply them) (§16.1) |
 
 **Types (BLS03xx)**
 
@@ -2855,6 +3046,7 @@ never truncated or defaulted).
 | BLS0408 | E | a rule outside every `at` section in a multi-role module, or placed at an external role |
 | BLS0409 | E | `else` after a condition that is not a single scalar guard |
 | BLS0410 | E | `delete`/`upsert` on a lattice-valued relation (LANG-284) |
+| BLS0411 | E | `resolve prefer(…)` naming no handler, one twice, or one that does not write the table with `next` or `upsert` (§10.7) |
 
 **Rules, time and stratification (BLS05xx)**
 

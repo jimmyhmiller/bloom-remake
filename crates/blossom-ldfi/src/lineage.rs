@@ -427,12 +427,14 @@ pub fn build(artifact: &SimArtifact, run: &SyncRun, outcome: &Outcome) -> Result
     Ok(g)
 }
 
-/// Whether `rule` is a table's frame rule or a lattice's identity rule (the persistence of state).
+/// Whether `rule` is a table's frame rule or a lattice's identity rule (the persistence of state), and not another
+/// rule of the same construct (a `while` table's guard).
 fn is_frame(program: &blossom_ir::core::Program, rule: &blossom_ir::core::Rule) -> bool {
-    use blossom_ir::core::ConstructKind;
-    rule.construct
-        .and_then(|c| program.constructs.get(c))
-        .is_some_and(|c| matches!(c.kind, ConstructKind::Persist { .. } | ConstructKind::Identity { .. }))
+    use blossom_ir::core::Persistence;
+    program.rels.get(rule.head.rel).is_some_and(|r| match r.persistence {
+        Persistence::Frame { rule: frame, .. } | Persistence::Identity { rule: frame } => frame == rule.id,
+        _ => false,
+    })
 }
 
 fn firing(space: Space, f: &FiringRecord, node: Option<NodeId>, tick: Tick, premises: Vec<Premise>) -> Firing {
