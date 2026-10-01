@@ -1,8 +1,9 @@
-//! Per-rule evaluation order: nested loops over the positive atoms, most-bound first, then every other literal in
-//! body order once its variables are bound. Bindings, guards, lookups and generators run only for valuations of all
-//! the positive atoms, so a rule with no such valuation raises no runtime error (BLSR004) from an expression it would
-//! never have needed, and an earlier guard protects a later expression. The order of the atoms changes only how fast a
-//! rule is evaluated, never its result.
+//! Per-rule evaluation order: nested loops over the positive atoms, most-bound first, then every other literal once
+//! its variables are bound: those that cannot fail first, then fallible filters, then fallible bindings, each in body
+//! order (LANGUAGE §9.14). Bindings, guards, lookups and generators run only for valuations of all the positive atoms,
+//! so a rule with no such valuation raises no runtime error (BLSR004) from an expression it would never have needed,
+//! and a filter protects every expression that could run after it. The order of the atoms changes only how fast a rule
+//! is evaluated, never its result.
 
 use std::collections::BTreeSet;
 
@@ -70,78 +71,104 @@ impl RulePlan {
     }
 }
 
-/// Plans the non-positive literals in body order: each as soon as the ones before it that it depends on are planned.
+/// Plans the non-positive literals once their variables are bound (LANGUAGE §9.14): every ready check that cannot
+/// fail first, in body order; then the first ready fallible filter (a guard), or else the first ready fallible
+/// binding (a `let` or a generator), in body order; then again, until none is left. So a filter protects every
+/// expression it can: none runs for a valuation a filter that could run before it rejects.
 fn flush(
     lits: &[Literal],
     done: &mut [bool],
     bound: &mut BTreeSet<VarId>,
     steps: &mut Vec<Step>,
 ) -> Result<(), OracleError> {
+    let mut plan = |i: usize, bound: &mut BTreeSet<VarId>, done: &mut [bool]| -> Result<(), OracleError> {
+        if let Some(lit) = lits.get(i) {
+            bind(lit, bound)?;
+        }
+        steps.push(Step::Check { lit: i });
+        if let Some(d) = done.get_mut(i) {
+            *d = true;
+        }
+        Ok(())
+    };
     loop {
-        let mut progressed = false;
-        for (i, lit) in lits.iter().enumerate() {
-            if done.get(i).copied().unwrap_or(true) {
-                continue;
-            }
-            let ready = match lit {
-                Literal::Pos(_) => false,
-                Literal::Neg(a) => atom_vars(a).is_subset(bound),
-                Literal::Guard(e) => expr_vars(e)?.is_subset(bound),
-                Literal::Bind { pat, expr } => {
-                    let ready = expr_vars(expr)?.is_subset(bound);
-                    if ready {
-                        pattern_vars(pat, bound)?;
-                    }
-                    ready
+        loop {
+            let mut progressed = false;
+            for (i, lit) in lits.iter().enumerate() {
+                if done.get(i).copied().unwrap_or(true) || !lit.cannot_fail() || !ready(lit, bound)? {
+                    continue;
                 }
-                Literal::Lookup { var, key, .. } => {
-                    let ready = key.iter().all(|t| match t {
-                        Term::Var(v) => bound.contains(v),
-                        Term::Const(_) => true,
-                        Term::Wild => false,
-                    });
-                    if ready {
-                        bound.insert(*var);
-                    }
-                    ready
-                }
-                Literal::Gen { pat, src } => {
-                    let ready = match src {
-                        GenSource::Range {
-                            lo,
-                            hi,
-                            ring_bits: None,
-                            ..
-                        } => {
-                            let mut vs = expr_vars(lo)?;
-                            vs.extend(expr_vars(hi)?);
-                            vs.is_subset(bound)
-                        }
-                        GenSource::Range { ring_bits: Some(_), .. } => {
-                            blossom_base::unimplemented_feature!("LANG-026", "ring-interval generators in the oracle")
-                        }
-                        GenSource::Value(e) | GenSource::Lattice(e) => expr_vars(e)?.is_subset(bound),
-                        GenSource::TableFn { .. } => {
-                            blossom_base::unimplemented_feature!("LANG-183", "table-function generators in the oracle")
-                        }
-                    };
-                    if ready {
-                        pattern_vars(pat, bound)?;
-                    }
-                    ready
-                }
-            };
-            if ready {
-                steps.push(Step::Check { lit: i });
-                if let Some(d) = done.get_mut(i) {
-                    *d = true;
-                }
+                plan(i, bound, done)?;
                 progressed = true;
             }
+            if !progressed {
+                break;
+            }
         }
-        if !progressed {
-            return Ok(());
+        let first = |filter: bool| -> Result<Option<usize>, OracleError> {
+            for (i, lit) in lits.iter().enumerate() {
+                if done.get(i).copied().unwrap_or(true) || (filter && !matches!(lit, Literal::Guard(_))) {
+                    continue;
+                }
+                if ready(lit, bound)? {
+                    return Ok(Some(i));
+                }
+            }
+            Ok(None)
+        };
+        let pick = match first(true)? {
+            Some(i) => Some(i),
+            None => first(false)?,
+        };
+        match pick {
+            Some(i) => plan(i, bound, done)?,
+            None => return Ok(()),
         }
+    }
+}
+
+/// Whether a non-positive literal's inputs are bound.
+fn ready(lit: &Literal, bound: &BTreeSet<VarId>) -> Result<bool, OracleError> {
+    Ok(match lit {
+        Literal::Pos(_) => false,
+        Literal::Neg(a) => atom_vars(a).is_subset(bound),
+        Literal::Guard(e) | Literal::Bind { expr: e, .. } => expr_vars(e)?.is_subset(bound),
+        Literal::Lookup { key, .. } => key.iter().all(|t| match t {
+            Term::Var(v) => bound.contains(v),
+            Term::Const(_) => true,
+            Term::Wild => false,
+        }),
+        Literal::Gen { src, .. } => match src {
+            GenSource::Range {
+                lo,
+                hi,
+                ring_bits: None,
+                ..
+            } => {
+                let mut vs = expr_vars(lo)?;
+                vs.extend(expr_vars(hi)?);
+                vs.is_subset(bound)
+            }
+            GenSource::Range { ring_bits: Some(_), .. } => {
+                blossom_base::unimplemented_feature!("LANG-026", "ring-interval generators in the oracle")
+            }
+            GenSource::Value(e) | GenSource::Lattice(e) => expr_vars(e)?.is_subset(bound),
+            GenSource::TableFn { .. } => {
+                blossom_base::unimplemented_feature!("LANG-183", "table-function generators in the oracle")
+            }
+        },
+    })
+}
+
+/// Adds the variables a planned literal binds.
+fn bind(lit: &Literal, bound: &mut BTreeSet<VarId>) -> Result<(), OracleError> {
+    match lit {
+        Literal::Bind { pat, .. } | Literal::Gen { pat, .. } => pattern_vars(pat, bound),
+        Literal::Lookup { var, .. } => {
+            bound.insert(*var);
+            Ok(())
+        }
+        Literal::Pos(_) | Literal::Neg(_) | Literal::Guard(_) => Ok(()),
     }
 }
 

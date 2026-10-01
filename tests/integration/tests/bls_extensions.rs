@@ -294,3 +294,111 @@ fn prefer_leaves_unarbitrated_conflicts_errors() {
         .collect();
     assert_eq!(rows, vec![vec![u(1), u(1007)]]);
 }
+
+// ---------------------------------------------------------------- the order of checks (EXTENSIONS 2.6)
+
+/// Filters run before the fallible bindings and conjuncts written ahead of them, on both evaluators: no division by
+/// zero, no underflow for a done key, and the rows are what the views say.
+#[test]
+fn filters_protect_the_expressions_written_before_them() {
+    let artifact = compile("order.bls");
+    let rel = |n: &str| artifact.rel_named(n).unwrap();
+    let ev = |t: u64, name: &str, row: Vec<Value>| InputEvent {
+        node: NodeId(0),
+        tick: Tick(t),
+        rel: rel(name),
+        row: Arc::from(row),
+    };
+    let mut inputs = Vec::new();
+    let mut want_ratio = BTreeSet::new();
+    let mut want_gap = BTreeSet::new();
+    let mut want_big = BTreeSet::new();
+    let mut rng = Rng(7);
+    for k in 0..40u64 {
+        let (a, b) = (rng.below(10), rng.below(4));
+        // A pair whose `a - b` would underflow is always done in the same tick.
+        if a < b {
+            inputs.push(ev(1, "done", vec![u(k)]));
+        } else {
+            want_gap.insert(vec![u(k), u(a - b)]);
+        }
+        inputs.push(ev(1, "pair", vec![u(k), u(a), u(b)]));
+        if b != 0 {
+            want_ratio.insert(vec![u(k), u(a / b)]);
+            if a / b > 1 {
+                want_big.insert(vec![u(k)]);
+            }
+        }
+    }
+    let run = match differential_or_error(&artifact, &inputs, 2) {
+        Outcome::Ran(run) => run,
+        Outcome::Failed(t, code) => panic!("{code} at {t:?}"),
+    };
+    let rows = |name: &str| -> BTreeSet<Vec<Value>> {
+        run.node_tick(Tick(1), NodeId(0))
+            .unwrap()
+            .instance
+            .rows(rel(name))
+            .map(|r| r.to_vec())
+            .collect()
+    };
+    assert!(want_ratio.len() > 10 && want_gap.len() > 10 && want_big.len() > 5);
+    assert_eq!(rows("ratio"), want_ratio);
+    assert_eq!(rows("gap"), want_gap);
+    assert_eq!(rows("big"), want_big);
+    // A fallible check still raises for a valuation its filters accept.
+    match differential_or_error(&artifact, &[ev(1, "pair", vec![u(1), u(1), u(2)])], 2) {
+        Outcome::Failed(tick, code) => assert_eq!((tick, code.as_str()), (Tick(1), "BLSR004")),
+        Outcome::Ran(_) => panic!("1 - 2 raised nothing"),
+    }
+}
+
+/// A range guard narrows the scan though a fallible `let` is written before it: answering costs the rows in the
+/// range, not the log.
+#[test]
+fn a_range_guard_narrows_past_a_fallible_let() {
+    use blossom_ir::tick::StepInput;
+    use blossom_value::time::Instant;
+    let artifact = compile("order.bls");
+    let cfg = blossom_engine::EngineConfig {
+        roles: artifact.roles.clone(),
+        node_names: artifact.nodes.iter().map(|x| Arc::from(x.as_str())).collect(),
+        seed: Some(blossom_value::Seed::from_u64(0)),
+        ..blossom_engine::EngineConfig::default()
+    };
+    let mut engine = blossom_engine::Engine::new(artifact.program.clone(), NodeId(0), cfg).unwrap();
+    let rel = |r: &str| artifact.rel_named(r).unwrap();
+    let mut tick = 0u64;
+    let mut step = |engine: &mut blossom_engine::Engine, events: Vec<(blossom_base::RelId, blossom_ir::tick::Row)>| {
+        engine
+            .step(
+                &StepInput {
+                    node: NodeId(0),
+                    incarnation: 1,
+                    tick: Tick(tick),
+                    now: Instant(tick as i64),
+                    events: &events,
+                    delivered: &[],
+                    ingress: &[],
+                    blobs: &blossom_value::NoBlobs,
+                },
+                &[],
+            )
+            .unwrap();
+        tick += 1;
+    };
+    let one = |x: u64| -> blossom_ir::tick::Row { Arc::from(vec![u(x)]) };
+    step(&mut engine, (0..20_000u64).map(|i| (rel("add"), one(i))).collect());
+    step(&mut engine, Vec::new());
+    let before = engine.rows_examined();
+    step(&mut engine, vec![(rel("ask"), one(5_000))]);
+    let examined = engine.rows_examined() - before;
+    let got: BTreeSet<Vec<Value>> = engine
+        .carried_rows(rel("got"))
+        .into_iter()
+        .map(|r| r.to_vec())
+        .collect();
+    let want: BTreeSet<Vec<Value>> = (5_001..=5_003u64).map(|i| vec![u(5_000), u(i), u(i * 6)]).collect();
+    assert_eq!(got, want);
+    assert!(examined < 100, "answering examined {examined} rows");
+}
