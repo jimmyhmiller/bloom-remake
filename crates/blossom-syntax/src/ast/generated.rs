@@ -1539,6 +1539,35 @@ impl ExactlyOnceClause {
     }
 }
 
+/// Typed CST view for `WhileClause`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhileClause(pub(crate) SyntaxNode);
+impl AstNode for WhileClause {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::WHILECLAUSE
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        Self::can_cast(node.kind()).then_some(Self(node))
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+impl WhileClause {
+    /// Direct named child, if present.
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// Direct expressions.
+    pub fn exprs(&self) -> AstChildren<Expr> {
+        children(&self.0)
+    }
+    /// Direct types.
+    pub fn types(&self) -> AstChildren<Type> {
+        children(&self.0)
+    }
+}
+
 /// Typed CST view for `Policy`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy(pub(crate) SyntaxNode);

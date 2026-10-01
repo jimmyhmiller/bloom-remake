@@ -333,6 +333,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 views: Vec::new(),
                 facts: Vec::new(),
                 invariants: Vec::new(),
+                guards: Vec::new(),
                 fns: Vec::new(),
                 streams: Vec::new(),
                 scopes: Vec::new(),
@@ -1648,6 +1649,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                     }
                 }
                 ItemKind::Fact(f) => self.fact(s, f),
+                ItemKind::Rel(d) if d.guard.is_some() => self.persist_guard(s, d, placement),
                 ItemKind::Interpose(ip) => self.interpose_rules(s, ip, placement),
                 ItemKind::Invariant(inv) => {
                     if has_roles && placement.is_none() {

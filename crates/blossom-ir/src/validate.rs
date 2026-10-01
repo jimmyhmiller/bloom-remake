@@ -542,10 +542,10 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
             }
         }
         match &r.persistence {
-            Persistence::Frame { rule, del } => check(
+            Persistence::Frame { rule, del, guard } => check(
                 p.rules
                     .get(*rule)
-                    .is_some_and(|rule| persist_exact(p, r, rule, *del, false)),
+                    .is_some_and(|rule| persist_exact(p, r, rule, *del, *guard, false)),
                 5,
                 None,
                 Some(r.span),
@@ -554,7 +554,7 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
             Persistence::Identity { rule } => check(
                 p.rules
                     .get(*rule)
-                    .is_some_and(|rule| persist_exact(p, r, rule, None, true)),
+                    .is_some_and(|rule| persist_exact(p, r, rule, None, None, true)),
                 5,
                 None,
                 Some(r.span),
@@ -893,7 +893,14 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
     }
     errors
 }
-fn persist_exact(p: &Program, rel: &RelDecl, rule: &Rule, del: Option<RelId>, identity: bool) -> bool {
+fn persist_exact(
+    p: &Program,
+    rel: &RelDecl,
+    rule: &Rule,
+    del: Option<RelId>,
+    guard: Option<RelId>,
+    identity: bool,
+) -> bool {
     if rule.kind != RuleKind::Inductive
         || rule.head.rel != rel.id
         || !matches!(rule.head.mode, HeadMode::Insert)
@@ -922,10 +929,22 @@ fn persist_exact(p: &Program, rel: &RelDecl, rule: &Rule, del: Option<RelId>, id
         return false;
     }
     let args = terms.into_iter().cloned().collect::<Vec<_>>();
-    let expected = if del.is_some() { 2 } else { 1 };
+    let expected = 1 + usize::from(del.is_some()) + usize::from(guard.is_some());
     if rule.body.lits.len() != expected {
         return false;
     }
+    // A guard is a relation of the same construct, over the same columns.
+    let guarded = guard.is_none_or(|g| {
+        let owned = rule
+            .construct
+            .and_then(|c| p.constructs.get(c))
+            .is_some_and(|c| c.rels.contains(&g));
+        owned
+            && rule.body.lits.iter().any(|l| {
+                matches!(l, Literal::Pos(a) if a.rel == g && a.args == args && a.sender.is_none()
+                    && a.principal.is_none() && a.weight.is_none() && a.spec.is_none())
+            })
+    });
     let positive=rule.body.lits.iter().filter(|l|matches!(l,Literal::Pos(a) if a.rel==rel.id&&a.args==args&&a.sender.is_none()&&a.principal.is_none()&&a.weight.is_none()&&a.spec.is_none())).count()==1;
     let negative=del.is_none_or(|del|rule.body.lits.iter().any(|l|matches!(l,Literal::Neg(a) if a.rel==del&&a.args==args&&a.sender.is_none()&&a.principal.is_none()&&a.weight.is_none()&&a.spec.is_none())));
     let construct = rule.construct.and_then(|id| p.constructs.get(id));
@@ -934,7 +953,7 @@ fn persist_exact(p: &Program, rel: &RelDecl, rule: &Rule, del: Option<RelId>, id
     } else {
         matches!(construct.map(|c|&c.kind),Some(ConstructKind::Persist{rel:r,del:d}) if *r==rel.id&&*d==del)
     };
-    positive && negative && tag
+    positive && negative && guarded && tag
 }
 /// Whether a value of type `actual` may stand where `expected` is required: equal types, or `Node<R>` where `Node`
 /// is expected (LANGUAGE §5.3: `Node<R>` is a subtype of `Node`), also inside tuples, options and collections

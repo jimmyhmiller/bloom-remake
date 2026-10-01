@@ -1220,6 +1220,7 @@ impl Parser<'_> {
         }
         let mut clauses = BTreeSet::new();
         while self.at(COLON)
+            || self.at(WHILE_KW)
             || self.at(IDENT)
                 && matches!(
                     self.spelling(0),
@@ -1270,6 +1271,12 @@ impl Parser<'_> {
                     }
                     PARTITIONCLAUSE
                 }
+                // `while BODY`: the condition a row persists under (LANGUAGE §7.2); last, as its body runs to `;`.
+                "while" => {
+                    self.bump();
+                    self.body(false);
+                    WHILECLAUSE
+                }
                 "sealed" => {
                     self.bump();
                     self.expect_ctx("by");
@@ -1289,7 +1296,7 @@ impl Parser<'_> {
             };
             let valid = match kind {
                 DIRECTIONCLAUSE | PARTITIONCLAUSE | EXACTLYONCECLAUSE => relkind == CHANNEL_KW,
-                TTLCLAUSE | MAXCLAUSE | RANGECLAUSE => relkind == TABLE_KW,
+                TTLCLAUSE | MAXCLAUSE | RANGECLAUSE | WHILECLAUSE => relkind == TABLE_KW,
                 RESOLVECLAUSE => relkind == TABLE_KW,
                 KEYCLAUSE => true,
                 _ => true,
@@ -1298,6 +1305,9 @@ impl Parser<'_> {
                 self.error(code!("BLS0106"), "duplicate or inapplicable relation clause", &[SEMI]);
             }
             self.complete(m, kind);
+            if kind == WHILECLAUSE {
+                break;
+            }
         }
         self.expect(SEMI);
         RELDECL

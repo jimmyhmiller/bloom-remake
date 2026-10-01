@@ -1,0 +1,48 @@
+//! `table … while BODY` (LANGUAGE §7.2): each guarded table `gN` has a twin `mN` written the same way and kept by
+//! the explicit clean-up rule the guard replaces. `bls_extensions.rs` checks that the twins hold the same rows at
+//! every tick, on both evaluators.
+program guarded version 1;
+
+input open(c: u64);
+input close(c: u64);
+input put(c: u64, i: u64, v: u64);
+input take(c: u64, i: u64);
+input ban(v: u64);
+
+table conn(c: u64);
+table banned(v: u64);
+
+opened: on open(c) { emit conn(c); }
+closed: on close(c), conn(c) { delete conn(c); }
+banning: on ban(v) { emit banned(v); }
+
+/// Lives while its connection is open: an owner.
+table g1(c: u64, i: u64, v: u64) while conn(c);
+table m1(c: u64, i: u64, v: u64);
+/// Lives while its value is unbanned and small: a negation and a `where`.
+table g2(c: u64, i: u64, v: u64) while not banned(v) where v < 200;
+table m2(c: u64, i: u64, v: u64);
+/// Lives while a row of its connection has a larger value: a view over the table itself.
+table g3(c: u64, i: u64, v: u64) while smaller_g3(c, i);
+table m3(c: u64, i: u64, v: u64);
+view smaller_g3(c, i) = g3(c, i, v), g3(c, _, w) where w > v;
+view smaller_m3(c, i) = m3(c, i, v), m3(c, _, w) where w > v;
+
+putting: on put(c, i, v) {
+    emit g1(c, i, v);
+    emit m1(c, i, v);
+    emit g2(c, i, v);
+    emit m2(c, i, v);
+    emit g3(c, i, v);
+    emit m3(c, i, v);
+}
+take_g1: on take(c, i), g1(c, i, v) { delete g1(c, i, v); }
+take_m1: on take(c, i), m1(c, i, v) { delete m1(c, i, v); }
+take_g2: on take(c, i), g2(c, i, v) { delete g2(c, i, v); }
+take_m2: on take(c, i), m2(c, i, v) { delete m2(c, i, v); }
+
+/// The clean-ups the guards replace.
+clean_m1: while m1(c, i, v), not conn(c) { delete m1(c, i, v); }
+clean_m2_banned: while m2(c, i, v), banned(v) { delete m2(c, i, v); }
+clean_m2_big: while m2(c, i, v) where v >= 200 { delete m2(c, i, v); }
+clean_m3: while m3(c, i, v), not smaller_m3(c, i) { delete m3(c, i, v); }

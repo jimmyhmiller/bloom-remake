@@ -425,6 +425,7 @@ RelClause       = ":" IDENT "->" IDENT                                (* channel
                 | 'resolve' Policy
                 | 'partition' 'by' Expr [ 'over' RelPath ]
                 | 'sealed' 'by' "(" [ FieldName { "," FieldName } [ "," ] ] ")" [ 'producers' RelPath ]
+                | "while" Body                                        (* tables; last, §7.2 *)
                 | 'exactly_once' "(" IDENT ")" ;
 Policy          = ( 'choose' | 'choose_rand' ) [ 'sticky' ]
                 | ( 'choose_least' | 'choose_most' ) "(" Expr ")"
@@ -1044,6 +1045,30 @@ link(S, D, C)@next :- link(S, D, C), notin link$del(S, D, C).
 `emit` into a table inserts now and persists from now on; `next` inserts at t+1. The explicit Dedalus form
 (`while p(x), not p_del(x) { next p(x); }` over a `scratch p`) is accepted and is recognized as the same storage
 (LANG-065).
+
+**Persistence with a condition: `while`.** A table may persist its rows only while a condition holds for them
+(EXTENSIONS 2.3), which states once that a row lives as long as its owner instead of in a clean-up rule:
+
+```blossom
+table placed(c: Conn, i: u64, j: u64) while queued(c, i, _);
+table follower(g: Group, f: Node) while leader(g, self), members(g, f);
+```
+
+The condition is a body over the table's columns, by name (relation atoms, negations, `let`s and a `where`); its
+other variables are existential. A row persists from tick t to t+1 only if the condition holds for it at t — a row
+whose condition fails is visible in that tick and gone in the next, exactly as with `while p(x̄), not <condition>
+{ delete p(x̄); }`, which it replaces. Writes (`emit`, `next`, `upsert`, `delete`) are unchanged. The condition may
+read the table itself, and is stratified like any rule body. `while` comes last among the declaration's clauses
+(its body runs to the `;`), applies to tables only (BLS0106), and is not implemented on tables with a `resolve`
+policy or lattice values. A `durable` table may have one: the condition is evaluated every tick, so a row whose
+owner is gone does not survive a restart either. Lowering — the frame rule gains a guard relation of the same
+construct:
+
+```ir
+decl scratch placed$keep(c: Conn, i: u64, j: u64)
+placed$keep(C, I, J) :- placed(C, I, J), queued(C, I, _).
+placed(C, I, J)@next :- placed(C, I, J), notin placed$del(C, I, J), placed$keep(C, I, J).
+```
 
 ### 7.3 `durable` (LANG-044, SEM-072)
 
