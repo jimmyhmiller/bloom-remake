@@ -4,8 +4,8 @@ Design: `docs/design/EXTENSIONS.md`. Branch `slice-lang`, worktree `.worktrees/s
 
 ## Resume here
 
-- **State (2026-10-01):** items 1–5 done (`?`, generic functions, `while` tables, `resolve prefer`, the order of
-  checks). Next: item 6 (formats).
+- **State (2026-10-01):** items 1–6 done (`?`, generic functions, `while` tables, `resolve prefer`, the order of
+  checks, formats). Next: item 7, the Kafka rewrite, measured.
 - Update this section whenever work stops.
 
 ## Baseline (S8, merged at 69b630c)
@@ -103,7 +103,25 @@ Design: `docs/design/EXTENSIONS.md`. Branch `slice-lang`, worktree `.worktrees/s
   row; a range probe past a fallible `let` examines < 100 of 20,000 rows). Mutation: classifying every check as
   fallible fails both.
 
+### Item 6: formats (done)
+
+- Syntax: `format Name(params) { [name:] element [if cond] [= default], … }` and `format name(F) = element;`
+  (`FORMATITEM`/`FORMATFIELD`/…); elements are expressions (calls), so `nullable(compact_array(T(v)))`.
+- `ast::format::expand` runs in `ModuleTree::load` after includes (so an alias may come from an included file):
+  records become a struct, `Name::decode`/`Name::encode` (resolved as two-segment calls), generated sub-functions
+  per compound element and shared helpers (`format$bytes`, `format$gather<T>`, `format$skip_tags`, …), built as AST
+  (spans at the format) and desugared like written functions (`?`).
+- Deviations from EXTENSIONS 2.5: call syntax (`nullable(x)`), `constant(E, v)` for `const(v)` (`const` is a
+  keyword), no `le` integers and no known tagged fields yet (`tags` only skips/writes empty) — added when a use
+  appears; element arguments read the parameters only (not earlier fields).
+- Tests: `bls_extensions` (`formats.bls`: 60 random requests from an independent Rust encoder, at three versions —
+  decoded fields, used bytes and re-encoding equal; 180 truncations and a 2^40 count decode to nothing; both
+  evaluators; mutation: inverting `bool`'s encoding fails it), `blossom-front` (11 misuses, `at`, a record used from
+  a rule).
+
 ### Open observations
+
+- After item 5 the corpus is unchanged: core 195, lattices 47, async 36, net 3 passed, 0 failed.
 
 - `kafka3::three_brokers_keep_every_acknowledged_record_under_kill_9_and_partitions` failed its idle-CPU check
   (a broker over 2 s of CPU in 4 s idle) once during a full `cargo test --workspace`, and passed alone (72 s). Load

@@ -377,6 +377,10 @@ Type            = 'unsafe' Type                                       (* LANG-13
                 | SimplePath [ GenericArgs ] ;
 
 (* ======================================================================== functions *)
+FormatItem      = 'format' IDENT [ "(" [ FormatParam { "," FormatParam } ] ")" ]
+                  ( "=" Expr ";" | "{" [ FormatField { "," FormatField } [ "," ] ] "}" ) ;   (* §16.7 *)
+FormatParam     = IDENT [ ":" Type ] ;
+FormatField     = [ FieldName ":" ] Expr [ "if" Expr ] [ "=" Expr ] ;
 FnItem          = [ FnClass ] FnSig BlockExpr ;
 FnClass         = 'morphism' | 'bimorphism' | 'monotone' | 'antitone' | 'threshold' | 'stable' ;
 FnSig           = "fn" IDENT [ Generics ] "(" [ FnParam { "," FnParam } [ "," ] ] ")" "->" Type
@@ -2649,6 +2653,65 @@ ticks. Callbacks run after the tick commits and cannot affect it (step 6 of §4.
 
 `#[handler("rust::path")] output write_chunk(id: u64, data: Blob);` calls the host handler for each emitted row after
 the tick commits; this is the BOOM-FS data path, where bytes move outside the engine and tuples hold `Blob` handles.
+
+### 16.7 Formats: binary layouts (EXTENSIONS 2.5)
+
+A `format` declares a byte layout once; the compiler derives its decoder and encoder, as Prolog's definite clause
+grammars run one description both ways.
+
+```blossom
+format compact_string = prefixed(uvarint, 1, utf8);              // an alias: an element with a name
+format compact_array(F) = array(uvarint, 1, F);                  // with element parameters
+format MetadataTopic(version: i16) {
+    topic_id: bytes(16),
+    name:     nullable(compact_string),
+    tags,
+}
+format MetadataRequest(version: i16) {
+    topics:      nullable(compact_array(MetadataTopic(version))),
+    allow_auto:  bool,
+    include_ops: bool if version >= 8,
+    tags,
+}
+```
+
+A record format is a `struct` of its named fields plus two functions, called as `Name::decode` and `Name::encode`:
+
+```text
+fn MetadataRequest::decode(b: Bytes, p: u64, version: i16) -> Option<(MetadataRequest, u64)>
+fn MetadataRequest::encode(x: MetadataRequest, version: i16) -> Bytes
+```
+
+Decoding reads the value at `p` and returns it with the position after it, or `None` when the bytes run out or
+break the layout — never a runtime error on hostile input: a length or count read from the bytes is checked against
+the bytes left before anything uses it. Encoding is total; `decode(encode(x))` is `Some((x, end))` for every value
+whose absent conditional fields hold their defaults.
+
+Elements (parameters in parentheses; every element is a name or a call):
+
+| Element | Value | Bytes |
+|---|---|---|
+| `u8` `i8` `u16` `i16` `u32` `i32` `u64` `i64` | the integer | big-endian |
+| `bool` | `bool` | one byte; any nonzero byte reads as `true`, `true` writes 1 |
+| `uvarint`, `varint` | `u64`, `i64` | LEB128; `varint` zigzag |
+| `bytes(n)` | `Bytes` | exactly `n` bytes (encoding a value of another size is BLSR010) |
+| `rest`, `utf8` | `Bytes`, `String` | every byte left |
+| `prefixed(L, bias, E)` | `E`'s | a length `n + bias` written as `L` (an integer or varint), then `E` in exactly `n` bytes |
+| `array(L, bias, E)` | `Vec` of `E`'s | a count `n + bias` written as `L`, then `n` elements |
+| `nullable(P)` | `Option` of `P`'s | a prefixed value or array whose length may be the bias less one: `None` |
+| `constant(E, v)` | none | `E` with value `v`: written on encode, checked on decode |
+| `tags` | none | a tagged-field section: a `uvarint` count of (tag, size, bytes); written empty, read and skipped |
+| `Name(args)` | the record | another record format, with its arguments |
+| `name(args)` | the alias's | an alias, its parameters replaced |
+
+A field is `name: element`, optionally `if cond` (an expression over the format's parameters and earlier fields; an
+absent field writes nothing and decodes to its type's zero, or to `= default`, which a nested record requires); an
+element with no value (`constant`, `tags`) has no name. Element arguments read the parameters. Aliases and records
+live in a file or module (BLS0110 in an `at` section) and may be declared after their use; misuse is BLS0301 (an
+unknown element, a wrong arity, `nullable` over something else or over an unsigned length with bias 0, a field name
+on a valueless element, an alias that expands into itself) or BLS0201 (two formats of one name). Lowering: none — a
+format expands, once includes are in place, into the struct, the two functions, generated functions for compound
+elements (`Name$d1`, `Name$e1`, …) and shared helpers (`format$…`), all ordinary Blossom.
 
 ---
 
