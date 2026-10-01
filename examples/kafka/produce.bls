@@ -6,6 +6,8 @@ const CORRUPT_MESSAGE: i16 = 2;
 const MESSAGE_TOO_LARGE: i16 = 10;
 const INVALID_REQUIRED_ACKS: i16 = 21;
 const TRANSACTIONAL_ID_AUTHORIZATION_FAILED: i16 = 53;
+/// No producer id can be handed out right now (the controller is unavailable): the producer retries.
+const COORDINATOR_NOT_AVAILABLE: i16 = 15;
 const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
 const INVALID_PRODUCER_EPOCH: i16 = 47;
 const INVALID_RECORD: i16 = 87;
@@ -141,11 +143,13 @@ fn check_records(records: Option<Bytes>, max_bytes: i64) -> Checked {
     }
 }
 
-/// A partition's checks for a request: with acks -1, a topic whose `min.insync.replicas` is above this broker's one
-/// replica is refused first (NOT_ENOUGH_REPLICAS, as Kafka refuses before appending); then the records.
-fn check_entry(records: Option<Bytes>, acks: i16, set: Vec<(String, String)>) -> Checked {
-    if acks == -1i16 && min_insync(set) > 1i64 {
-        refused(NOT_ENOUGH_REPLICAS, "min.insync.replicas is above the one replica of this broker", None)
+/// A partition's checks for a request: with acks -1, a partition whose in-sync replicas (`in_sync`, as its leader
+/// counts them) are fewer than the topic's `min.insync.replicas` is refused first (NOT_ENOUGH_REPLICAS, as Kafka
+/// refuses before appending); then the records. (A commit needs a majority of the replicas anyway, so a partition
+/// that lost its majority makes `acks=all` time out, whatever its in-sync replicas.)
+fn check_entry(records: Option<Bytes>, acks: i16, set: Vec<(String, String)>, in_sync: u64) -> Checked {
+    if acks == -1i16 && min_insync(set) > in_sync as i64 {
+        refused(NOT_ENOUGH_REPLICAS, "the in-sync replicas are fewer than min.insync.replicas", None)
     } else {
         check_records(records, max_message_bytes(set))
     }
@@ -239,8 +243,9 @@ struct ProducerEntry { pid: i64, epoch: i16, recent: Vec<(i32, i32, i64, i64)> }
 const RECENT_BATCHES: u64 = 5;
 
 /// One append's outcome: an error (and message), or where its batches go (`base`, and each placed batch), or, for a
-/// retried batch the partition already holds, the offset it was appended at (`duplicate`).
-struct AppendOutcome { error: i16, message: Option<String>, base: i64, placed: Vec<(i64, i64, i64, Bytes)>, count: i64 }
+/// retried batch the partition already holds, the offsets it was appended at (`base`, and `duplicate_last`, which is
+/// -1 for any other outcome): an `acks=all` answer waits for those to commit, as Kafka's does.
+struct AppendOutcome { error: i16, message: Option<String>, base: i64, placed: Vec<(i64, i64, i64, Bytes)>, count: i64, duplicate_last: i64 }
 
 /// The appends to one partition in one tick, sequenced: each one's outcome, the new log end, and the producer
 /// states that changed.
@@ -261,8 +266,8 @@ fn with_entry(states: Vec<ProducerEntry>, e: ProducerEntry) -> Vec<ProducerEntry
 }
 
 /// What an idempotent batch meets in its producer's state: an error (`refused`), a duplicate of the batch appended
-/// at `duplicate_of`, or neither (append it).
-struct Verdict { refused: Option<(i16, String)>, duplicate_of: Option<i64> }
+/// at `duplicate_of` (its first and last offsets), or neither (append it).
+struct Verdict { refused: Option<(i16, String)>, duplicate_of: Option<(i64, i64)> }
 
 fn append_it() -> Verdict {
     Verdict { refused: None, duplicate_of: None }
@@ -283,7 +288,7 @@ fn producer_check(e: Option<ProducerEntry>, h: BatchHeader) -> Verdict {
         Some(x) => {
             let dup = x.recent.filter(|r| r.0 == h.base_sequence && r.1 == last_seq).first();
             if h.producer_epoch == x.epoch && dup.is_some() {
-                Verdict { refused: None, duplicate_of: dup.map(|r| r.2) }
+                Verdict { refused: None, duplicate_of: dup.map(|r| (r.2, r.3)) }
             } else if h.producer_epoch < x.epoch {
                 refuse(INVALID_PRODUCER_EPOCH, "the producer's epoch is older than the partition's")
             } else if h.producer_epoch != x.epoch {
@@ -324,7 +329,7 @@ fn after_append(e: Option<ProducerEntry>, h: BatchHeader, base: i64, last: i64) 
 
 /// The state of an append while its batches are checked: the batches placed so far, the next offset, the producer
 /// states, and whether a batch was refused or found to be a duplicate (which ends the walk).
-struct Walk { placed: Vec<(i64, i64, i64, Bytes)>, at: i64, states: Vec<ProducerEntry>, refused: Option<(i16, String)>, duplicate_of: Option<i64> }
+struct Walk { placed: Vec<(i64, i64, i64, Bytes)>, at: i64, states: Vec<ProducerEntry>, refused: Option<(i16, String)>, duplicate_of: Option<(i64, i64)> }
 
 fn walk_batch(w: Walk, b: Bytes) -> Walk {
     if w.refused.is_some() || w.duplicate_of.is_some() {
@@ -363,10 +368,13 @@ fn walk_batch(w: Walk, b: Bytes) -> Walk {
 fn sequence_one(batches: Vec<Bytes>, end: i64, states: Vec<ProducerEntry>) -> (AppendOutcome, Vec<ProducerEntry>) {
     let w = batches.fold(Walk { placed: [], at: end, states: states, refused: None, duplicate_of: None }, |acc, b| walk_batch(acc, b));
     match (w.refused, w.duplicate_of) {
-        (Some(x), _) => (AppendOutcome { error: x.0, message: Some(x.1), base: -1i64, placed: [], count: 0i64 }, states),
-        (None, Some(base)) => (AppendOutcome { error: NONE, message: None, base: base, placed: [], count: 0i64 }, states),
+        (Some(x), _) => (AppendOutcome { error: x.0, message: Some(x.1), base: -1i64, placed: [], count: 0i64, duplicate_last: -1i64 }, states),
+        (None, Some(d)) => (AppendOutcome { error: NONE, message: None, base: d.0, placed: [], count: 0i64, duplicate_last: d.1 }, states),
         (None, None) => (
-            AppendOutcome { error: NONE, message: None, base: if w.at == end { -1i64 } else { end }, placed: w.placed, count: w.at - end },
+            AppendOutcome {
+                error: NONE, message: None, base: if w.at == end { -1i64 } else { end }, placed: w.placed, count: w.at - end,
+                duplicate_last: -1i64,
+            },
             w.states,
         ),
     }
@@ -450,7 +458,7 @@ struct SegmentChange { written: Vec<Segment>, marks: Vec<(i64, i64, i64)>, activ
 /// The placed batches added to the active segment `active` at `now_ms`, rolling a new segment at a batch that would
 /// take a non-empty segment past `limit` bytes (the topic's `segment.bytes`), as Kafka rolls. A batch raising its
 /// segment's greatest timestamp gets a time index row.
-fn segment_appends(placed: Vec<(i64, i64, i64, Bytes)>, active: Segment, limit: i64, now_ms: i64) -> SegmentChange {
+fn segment_appends(placed: Vec<(i64, i64, i64, Blob)>, active: Segment, limit: i64, now_ms: i64) -> SegmentChange {
     let start: (Vec<Segment>, Segment, Vec<(i64, i64, i64)>) = ([], active, []);
     let end = placed.fold(start, |acc, pb| {
         let (done, cur, marks) = acc;
@@ -522,4 +530,54 @@ fn max_segment(segments: Vec<(i64, i64, i64)>) -> Option<(i64, i64)> {
         Some(best) => if x.1 > best.0 { Some((x.1, x.2)) } else { Some(best) },
         None => if x.1 >= 0i64 { Some((x.1, x.2)) } else { None },
     })
+}
+
+// ---------------------------------------------------------------- replication (S8 item 3)
+
+/// A placed batch with the leader's epoch written in (its offsets are already).
+fn restamp(b: Bytes, base: i64, epoch: u64) -> Bytes {
+    match with_offsets(b, base, epoch as i32) {
+        Some(x) => x,
+        None => error("restamp: a placed batch has no room for its offsets"),
+    }
+}
+
+/// A producer's state after its batches `xs` (index, header, base, last), in order, from `start`.
+fn tail_state(start: Option<ProducerEntry>, xs: Vec<(u64, BatchHeader, i64, i64)>) -> Option<ProducerEntry> {
+    xs.fold(start, |e, x| Some(after_append(e, x.1, x.2, x.3)))
+}
+
+/// The idempotent producers of entries being materialized (index, base, last, greatest timestamp, blob, header).
+fn producers_in(xs: Vec<(u64, i64, i64, i64, Blob, BatchHeader)>) -> Set<i64> {
+    xs.map(|x| x.5.producer_id).filter(|p| p != -1i64).to_set()
+}
+
+/// Producer `pid`'s batches among entries being materialized, in order: (index, header, base, last).
+fn producer_batches(xs: Vec<(u64, i64, i64, i64, Blob, BatchHeader)>, pid: i64) -> Vec<(u64, BatchHeader, i64, i64)> {
+    xs.filter(|x| x.5.producer_id == pid).map(|x| (x.0, x.5, x.1, x.2))
+}
+
+/// Entries being materialized as placed batches: (base, last, greatest timestamp, blob).
+fn materialized_batches(xs: Vec<(u64, i64, i64, i64, Blob, BatchHeader)>) -> Vec<(i64, i64, i64, Blob)> {
+    xs.map(|x| (x.1, x.2, x.3, x.4))
+}
+
+/// A partition this broker does not lead: the client refreshes its metadata and finds the leader.
+fn not_leader() -> PartitionAnswer {
+    PartitionAnswer { error: NOT_LEADER_OR_FOLLOWER, base_offset: -1i64, log_start: -1i64, message: None, bad_batch: None }
+}
+
+const NOT_ENOUGH_REPLICAS_AFTER_APPEND: i16 = 20;
+
+/// An `acks=all` append committed after the in-sync replicas fell below `min.insync.replicas`.
+fn not_enough_after_append() -> PartitionAnswer {
+    PartitionAnswer {
+        error: NOT_ENOUGH_REPLICAS_AFTER_APPEND, base_offset: -1i64, log_start: -1i64,
+        message: Some("the in-sync replicas fell below min.insync.replicas after the append"), bad_batch: None,
+    }
+}
+
+/// An `acks=all` append whose high watermark did not pass it within the request's timeout.
+fn ack_timed_out() -> PartitionAnswer {
+    PartitionAnswer { error: REQUEST_TIMED_OUT, base_offset: -1i64, log_start: -1i64, message: None, bad_batch: None }
 }

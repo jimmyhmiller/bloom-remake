@@ -171,7 +171,7 @@ fn topic_id(hi: u64, lo: u64) -> Bytes {
 }
 
 /// A topic a CreateTopics request asks for, as the broker will make it: its name, id, partition count and configs.
-struct NewTopic { name: String, id: Bytes, partitions: i32, configs: Vec<(String, String)> }
+struct NewTopic { name: String, id: Bytes, partitions: i32, configs: Vec<(String, String)>, assignment: Vec<Vec<i32>> }
 
 /// One requested topic's outcome: its error and message (`NONE` and `None` when it is (or, validating, would be)
 /// created) and the topic.
@@ -216,7 +216,9 @@ fn create_context(names: Vec<String>, taken: Vec<String>) -> CreateContext {
 /// Decides one requested topic: a topic named twice in the request is refused, and so are topics whose names
 /// collide, and a topic whose name is taken (equal to the topic's name or colliding with it); `id` is the id it
 /// gets.
-fn create_outcome(t: CreatableTopic, ctx: CreateContext, id: Bytes, default_partitions: i32) -> CreateOutcome {
+/// `ids` are the cluster's broker ids, in order; a topic without a manual assignment is placed from `start` (D11), with
+/// `default_rf` replicas when it asks for none.
+fn create_outcome(t: CreatableTopic, ctx: CreateContext, id: Bytes, default_partitions: i32, default_rf: i16, ids: Vec<i32>, start: u64) -> CreateOutcome {
     let dup = ctx.repeated.contains(t.name);
     let key = collision_key(t.name);
     let collides_within = ctx.colliding.contains(key);
@@ -224,11 +226,18 @@ fn create_outcome(t: CreatableTopic, ctx: CreateContext, id: Bytes, default_part
     let bad_assignment = not t.assignments.is_empty() && (
         t.partitions != -1i32 || t.replication != -1i16
     );
+    let manual_rf = match t.assignments.first() {
+        Some(a) => a.1.len(),
+        None => 0,
+    };
+    let known = ids.to_set();
     let assignment_nodes_ok = t.assignments.enumerate().all(|e| {
         let (i, a) = e;
         let (p, brokers) = a;
-        p == i as i32 && brokers == [NODE_ID]
+        p == i as i32 && brokers.len() == manual_rf && manual_rf > 0 && brokers.to_set().len() == manual_rf
+            && brokers.all(|b| known.contains(b))
     });
+    let rf = if not t.assignments.is_empty() { manual_rf as i16 } else if t.replication == -1i16 { default_rf } else { t.replication };
     let bad_config = t.configs.any(|kv| match kv.1 {
         Some(v) => config_value_ok(kv.0, v) != Some(true),
         None => true,
@@ -247,47 +256,49 @@ fn create_outcome(t: CreatableTopic, ctx: CreateContext, id: Bytes, default_part
     } else if bad_assignment {
         create_failed(t.name, INVALID_REQUEST, "a manual assignment needs the partition count and replication factor to be -1")
     } else if not assignment_nodes_ok {
-        create_failed(t.name, INVALID_REPLICA_ASSIGNMENT, "every partition must be assigned, in order, to this broker alone")
+        create_failed(t.name, INVALID_REPLICA_ASSIGNMENT, "every partition must be assigned, in order, to the same number of distinct, known brokers")
     } else if partitions < 1i32 || partitions > MAX_PARTITIONS {
         create_failed(t.name, INVALID_PARTITIONS, "the partition count must be between 1 and 10000")
-    } else if t.replication != -1i16 && t.replication != 1i16 {
-        create_failed(t.name, INVALID_REPLICATION_FACTOR, "the replication factor must be 1 (one broker)")
+    } else if rf < 1i16 || rf as u64 > ids.len() {
+        create_failed(t.name, INVALID_REPLICATION_FACTOR, "the replication factor must be between 1 and the number of brokers")
     } else if bad_config {
         create_failed(t.name, INVALID_CONFIG, "a configuration is unknown, null, or has a value this broker does not support")
     } else {
-        CreateOutcome { error: NONE, message: None, topic: NewTopic { name: t.name, id: id, partitions: partitions, configs: configs } }
+        let assignment = if t.assignments.is_empty() { assign(ids, partitions, rf, start) } else { t.assignments.map(|a| a.1) };
+        CreateOutcome { error: NONE, message: None, topic: NewTopic { name: t.name, id: id, partitions: partitions, configs: configs, assignment: assignment } }
     }
 }
 
 fn create_failed(name: String, code: i16, why: String) -> CreateOutcome {
-    CreateOutcome { error: code, message: Some(why), topic: NewTopic { name: name, id: zero_uuid(), partitions: -1i32, configs: [] } }
+    CreateOutcome { error: code, message: Some(why), topic: NewTopic { name: name, id: zero_uuid(), partitions: -1i32, configs: [], assignment: [] } }
 }
 
 fn create_names(req: CreateTopicsRequest) -> Vec<String> {
     req.topics.map(|t| t.name)
 }
 
-/// The topic entry `t` of `req` creates if nothing is taken, with id `id`; `None` if it is invalid, or `req` only
-/// validates. `ctx` is `req`'s context with nothing taken.
-fn create_candidate(req: CreateTopicsRequest, ctx: CreateContext, t: CreatableTopic, id: Bytes) -> Option<NewTopic> {
-    let o = create_outcome(t, ctx, id, DEFAULT_PARTITIONS);
-    if req.validate_only || o.error != NONE { None } else { Some(o.topic) }
+/// A creation's outcome once the controller applied it: refused for a name taken, or as decided at the broker (the
+/// topic created, or a later check failed).
+fn applied_create(o: CreateOutcome, error: i16) -> CreateOutcome {
+    if error == TOPIC_ALREADY_EXISTS {
+        create_failed(o.topic.name, error, "the topic already exists")
+    } else if error == INVALID_TOPIC_EXCEPTION {
+        create_failed(o.topic.name, error, "the name collides with an existing topic's ('.' against '_')")
+    } else {
+        o
+    }
 }
 
-/// Every entry's outcome. `taken` is as for `create_context`; `ids` the ids of the topics this request creates.
-/// A validating request's topics get the zero id, as Kafka's do.
-fn create_outcomes(req: CreateTopicsRequest, taken: Vec<String>, ids: Vec<(String, Bytes)>) -> Vec<CreateOutcome> {
-    let ctx = create_context(create_names(req), taken);
-    let id_of = ids.to_map();
-    req.topics.map(|t| {
-        let id = id_of.get(t.name);
-        let o = create_outcome(t, ctx, id.unwrap_or(zero_uuid()), DEFAULT_PARTITIONS);
-        if o.error == NONE && not req.validate_only && id.is_none() {
-            error("create_outcomes: a topic this request creates has no id")
-        } else {
-            o
-        }
-    })
+/// A request that only validates gets its topics with the zero id, as Kafka's does.
+fn validated(o: CreateOutcome) -> CreateOutcome {
+    CreateOutcome { error: o.error, message: o.message, topic: NewTopic {
+        name: o.topic.name, id: zero_uuid(), partitions: o.topic.partitions, configs: o.topic.configs, assignment: o.topic.assignment,
+    } }
+}
+
+/// A topic entry whose creation did not finish within the request's timeout.
+fn create_timed_out(name: String) -> CreateOutcome {
+    create_failed(name, REQUEST_TIMED_OUT, "the controller did not apply the creation in time")
 }
 
 fn encode_created_config(name: String, value: String, set: bool) -> Bytes {
@@ -311,7 +322,7 @@ fn encode_create_outcome(o: CreateOutcome) -> Bytes {
         Bytes::from_i16_be(o.error),
         enc_compact_nullable_string(o.message),
         Bytes::from_i32_be(if ok { o.topic.partitions } else { -1i32 }),
-        Bytes::from_i16_be(if ok { 1i16 } else { -1i16 }),
+        Bytes::from_i16_be(if ok { replication_of(o.topic.assignment) } else { -1i16 }),
         enc_compact_nullable_array(if ok { Some(encode_topic_configs(o.topic.configs)) } else { None }),
         no_tags(),
     ])
@@ -348,12 +359,20 @@ fn decode_delete_topics(c: Cur) -> Option<(Vec<DeleteTopicState>, i32)> {
 /// What judging one entry of a DeleteTopics request needs to know of the whole request, computed once for it: the
 /// ids its entries by id give more than once, the names its entries by name give more than once, and every id it
 /// gives.
-struct DeleteContext { repeated_ids: Set<Bytes>, repeated_names: Set<String>, ids: Set<Bytes> }
+struct DeleteContext { repeated_ids: Set<Bytes>, repeated_names: Set<String> }
 
 fn delete_context(req: Vec<DeleteTopicState>) -> DeleteContext {
     let ids = req.filter(|s| s.id != zero_uuid()).map(|s| s.id);
     let names = req.filter_map(|s| if s.id == zero_uuid() { s.name } else { None });
-    DeleteContext { repeated_ids: repeated_ids(ids), repeated_names: repeated_names(names), ids: ids.to_set() }
+    DeleteContext { repeated_ids: repeated_ids(ids), repeated_names: repeated_names(names) }
+}
+
+/// The name an entry deletes by, or "" for an entry by id (or with neither).
+fn delete_name(s: DeleteTopicState) -> String {
+    match s.name {
+        Some(n) => if s.id == zero_uuid() { n } else { "" },
+        None => "",
+    }
 }
 
 /// Whether entry `s` of a DeleteTopics request (whose context is `ctx`) is well formed: it names a topic by name or
@@ -369,56 +388,35 @@ fn delete_entry_ok(ctx: DeleteContext, s: DeleteTopicState) -> bool {
     }
 }
 
-/// The name entry `s` deletes the topic of, if it is a well-formed entry by name.
-fn delete_by_name(ctx: DeleteContext, s: DeleteTopicState) -> Option<String> {
-    if delete_entry_ok(ctx, s) && s.id == zero_uuid() { s.name } else { None }
-}
-
-/// The id entry `s` deletes the topic of, if it is a well-formed entry by id.
-fn delete_by_id(ctx: DeleteContext, s: DeleteTopicState) -> Option<Bytes> {
-    if delete_entry_ok(ctx, s) && s.id != zero_uuid() { Some(s.id) } else { None }
-}
-
-/// Whether an entry of the request names topic `id` by id: an entry by name that finds this topic is then refused,
-/// as Kafka refuses a name that maps to an id the request already gives.
-fn id_supplied(ctx: DeleteContext, id: Bytes) -> bool {
-    ctx.ids.contains(id)
-}
-
 /// One deletion's result: the topic's name and id as the entry gave them (both when it is deleted), the error and
 /// its message.
 struct DeleteOutcome { name: Option<String>, id: Bytes, error: i16, message: Option<String> }
 
-/// Every entry's outcome. `won` holds the entries this request deletes: (entry, name, id); `clash` the entries by
-/// name whose topic another entry names by id.
-fn delete_outcomes(req: Vec<DeleteTopicState>, won: Vec<(u64, String, Bytes)>, clash: Vec<u64>) -> Vec<DeleteOutcome> {
-    let ctx = delete_context(req);
-    let won_by_entry = won.map(|w| (w.0, (w.1, w.2))).to_map();
-    let clashes = clash.to_set();
-    req.enumerate().map(|x| {
-        let (e, s) = x;
-        match won_by_entry.get(e) {
-            Some(w) => DeleteOutcome { name: Some(w.0), id: w.1, error: NONE, message: None },
-            None => {
-                if clashes.contains(e) {
-                    DeleteOutcome {
-                        name: s.name, id: s.id, error: INVALID_REQUEST,
-                        message: Some("the topic name maps to an id the request also gives"),
-                    }
-                } else if not delete_entry_ok(ctx, s) {
-                    DeleteOutcome {
-                        name: s.name, id: s.id, error: INVALID_REQUEST,
-                        message: Some("an entry names a topic by name or by id, not both, and only once"),
-                    }
-                } else if s.id != zero_uuid() {
-                    DeleteOutcome { name: None, id: s.id, error: UNKNOWN_TOPIC_ID, message: Some("the topic id does not exist") }
-                } else {
-                    DeleteOutcome { name: s.name, id: zero_uuid(), error: UNKNOWN_TOPIC_OR_PARTITION, message: Some("the topic does not exist") }
-                }
-            }
-        }
-    })
+/// An entry's outcome decided without the controller: a malformed entry, or one whose deletion did not apply in time.
+fn delete_refused(s: DeleteTopicState, error: i16) -> DeleteOutcome {
+    if error == REQUEST_TIMED_OUT {
+        DeleteOutcome { name: s.name, id: s.id, error: error, message: Some("the controller did not apply the deletion in time") }
+    } else {
+        DeleteOutcome { name: s.name, id: s.id, error: INVALID_REQUEST, message: Some("an entry names a topic by name or by id, not both, and only once") }
+    }
 }
+
+/// Entry `s`'s outcome as the controller applied it: the topic (`id`, named `name`) deleted; a name or an id no topic
+/// has; or a name whose topic another entry gives by id.
+fn delete_applied(s: DeleteTopicState, id: Bytes, name: String, error: i16) -> DeleteOutcome {
+    if error == NONE {
+        DeleteOutcome { name: Some(name), id: id, error: NONE, message: None }
+    } else if error == DELETE_CLASH {
+        DeleteOutcome { name: s.name, id: s.id, error: INVALID_REQUEST, message: Some("the topic name maps to an id the request also gives") }
+    } else if error == UNKNOWN_TOPIC_OR_PARTITION {
+        DeleteOutcome { name: s.name, id: zero_uuid(), error: error, message: Some("the topic does not exist") }
+    } else {
+        DeleteOutcome { name: None, id: s.id, error: UNKNOWN_TOPIC_ID, message: Some("the topic id does not exist") }
+    }
+}
+
+/// Marks a name entry whose topic another entry names by id (not a Kafka error code: `delete_applied` maps it).
+const DELETE_CLASH: i16 = -2;
 
 fn encode_delete_outcome(o: DeleteOutcome) -> Bytes {
     Bytes::join([
@@ -518,3 +516,38 @@ fn describe_results(req: Vec<ConfigResource>, sets: Vec<(String, Vec<(String, St
         encode_config_result(r, set)
     })
 }
+
+/// A topic's replication factor: the length of its replica lists.
+fn replication_of(assignment: Vec<Vec<i32>>) -> i16 {
+    match assignment.first() {
+        Some(rs) => rs.len() as i16,
+        None => 0i16,
+    }
+}
+
+/// A request's outcomes by entry, in entry order, without the entry numbers.
+/// Whether an entry's outcome is decided before the topics are looked at (a name given twice, an illegal name, two
+/// names of the request that collide): as Kafka's controller, a taken name is checked next, before the partition
+/// count, the replication factor, the assignment and the configurations.
+fn decided_before_taken(t: CreatableTopic, ctx: CreateContext) -> bool {
+    ctx.repeated.contains(t.name) || not topic_name_ok(t.name) || ctx.colliding.contains(collision_key(t.name))
+}
+
+fn create_outcomes_in(xs: Vec<(u64, CreateOutcome)>) -> Vec<CreateOutcome> {
+    xs.map(|x| x.1)
+}
+
+fn delete_outcomes_in(xs: Vec<(u64, DeleteOutcome)>) -> Vec<DeleteOutcome> {
+    xs.map(|x| x.1)
+}
+
+/// The replica assignment of a new topic (docs/plan/notes/S8.md D11): partition `p`'s replicas are `rf` brokers in id order from
+/// `start + p`, round-robin, as Kafka's rack-unaware assignment places them (the first is the preferred leader).
+fn assign(ids: Vec<i32>, partitions: i32, rf: i16, start: u64) -> Vec<Vec<i32>> {
+    let n = ids.len();
+    range(0, partitions as u64).map(|p| range(0, rf as u64).map(|j| match ids.get((start + p + j) % n) {
+        Some(id) => id,
+        None => error("assign: a position past the broker list"),
+    }))
+}
+

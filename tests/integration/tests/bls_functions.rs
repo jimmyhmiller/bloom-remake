@@ -173,7 +173,11 @@ fn expected(view: &str, n: u64, s: &str, b: &[u8]) -> (Value, Value) {
             Value::Str(s.into()),
             tuple(vec![
                 opt(s.parse::<i64>().ok().map(|x| Value::Int(IntValue::I64(x)))),
-                opt(s.to_lowercase().parse::<i64>().ok().map(|x| Value::Int(IntValue::I64(x)))),
+                opt(s
+                    .to_lowercase()
+                    .parse::<i64>()
+                    .ok()
+                    .map(|x| Value::Int(IntValue::I64(x)))),
             ]),
         ),
         "v_arms" => (
@@ -183,6 +187,25 @@ fn expected(view: &str, n: u64, s: &str, b: &[u8]) -> (Value, Value) {
                 vec_u([n, n + 1, 0, 0]),
             ]),
         ),
+        "v_match" => (
+            Value::Str(s.into()),
+            Value::Int(IntValue::I64(match s.parse::<i64>() {
+                Ok(k) if k < 100 => k + 1,
+                Ok(k) => k,
+                Err(_) => 0,
+            })),
+        ),
+        // The value's canonical fingerprint (blossom_value::fp), the same on both evaluators and on every node.
+        "v_hash" => {
+            let fp = |v: Value| u(blossom_value::fp::fingerprint(&v).unwrap().0);
+            (
+                u(n),
+                tuple(vec![
+                    fp(tuple(vec![u(n), Value::Str(s.into()), bytes(b)])),
+                    fp(Value::Str(s.into())),
+                ]),
+            )
+        }
         other => panic!("no expectation for {other}"),
     }
 }
@@ -207,13 +230,26 @@ const VIEWS: &[&str] = &[
     "v_range",
     "v_arms",
     "v_parse",
+    "v_hash",
+    "v_match",
 ];
 
 #[test]
 fn every_library_function_agrees_on_both_evaluators_and_with_its_definition() {
     let artifact = compile("library.bls");
     let e = artifact.rel_named("e").unwrap();
-    let words = ["Foo", "bar", "BAZ", "qUx", "ümlaut", "ΣΙΣΥΦΟΣ", "42", "-7", "+3", "99999999999999999999"];
+    let words = [
+        "Foo",
+        "bar",
+        "BAZ",
+        "qUx",
+        "ümlaut",
+        "ΣΙΣΥΦΟΣ",
+        "42",
+        "-7",
+        "+3",
+        "99999999999999999999",
+    ];
     let spaces = [" ", "  ", "\t", "\n ", ""];
     let mut checked = 0;
     for seed in 0..8u64 {

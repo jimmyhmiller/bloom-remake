@@ -856,6 +856,9 @@ pub enum Builtin {
     /// `rand(k…)` (LANGUAGE §15.1): a `u64` from the node's PRF, the same for the same key within a node's tick and
     /// incarnation. Arguments: the key.
     Rand,
+    /// `hash64(x)` (Appendix B): the value's canonical fingerprint, the same for the same value on every node and in
+    /// every version.
+    Hash64,
     /// `majority(s, R)` (LANGUAGE §10.9): `|s ∩ R| > |R| / 2` for a set of nodes `s` and a role `R`.
     Majority(HRoleId),
     /// A function or method of the built-in library (Appendix B); the receiver, if any, first.

@@ -287,9 +287,7 @@ fn bin_op(op: BinOp) -> Result<ir::BinOp, InternalError> {
 fn scalar_ordered(def: Option<&TypeDef>) -> bool {
     matches!(
         def,
-        Some(
-            TypeDef::Int(_) | TypeDef::Duration | TypeDef::Instant | TypeDef::Str | TypeDef::Bytes | TypeDef::Node(_)
-        )
+        Some(TypeDef::Int(_) | TypeDef::Duration | TypeDef::Instant | TypeDef::Str | TypeDef::Bytes | TypeDef::Node(_))
     )
 }
 
@@ -302,7 +300,10 @@ impl Lowerer<'_> {
     /// which is not `ty` when the value does not decide it (an empty collection, `None`): it is then ascribed.
     fn const_expr(&mut self, v: Value, ty: TypeId) -> Result<Expr, InternalError> {
         let types = self.b.types();
-        let decided = types.iter().find(|(t, _)| types.check_value(*t, &v).is_ok()).map(|(t, _)| t);
+        let decided = types
+            .iter()
+            .find(|(t, _)| types.check_value(*t, &v).is_ok())
+            .map(|(t, _)| t);
         let term = Expr::Term(self.konst(v)?);
         Ok(if decided == Some(ty) {
             term
@@ -680,6 +681,7 @@ impl Lowerer<'_> {
                     },
                     Builtin::RandRange => ir::BuiltinFn::RandRange,
                     Builtin::Rand => ir::BuiltinFn::Rand,
+                    Builtin::Hash64 => ir::BuiltinFn::Hash64,
                     Builtin::Error => ir::BuiltinFn::Error { ty: ty_of(e)? },
                     Builtin::Majority(r) => ir::BuiltinFn::Majority {
                         domain: ir::MajorityDomain::Role(RoleId::from_raw(r.0)),

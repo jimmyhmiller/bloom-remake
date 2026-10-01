@@ -195,7 +195,23 @@ fn the_blossom_client_and_a_rust_client_see_the_same_answers() {
     let (result, _) = compile_file(path.to_str().unwrap(), &nodes);
     let artifact: BlsArtifact = result.unwrap_or_else(|e| panic!("sim_cluster.bls: {e:?}")).0;
     let schema = DurableSchema::of(artifact.program.get());
-    let expected_versions: Versions = (0, vec![(0, 10, 12), (1, 16, 17), (2, 7, 10), (3, 13, 13), (18, 3, 4), (19, 7, 7), (20, 6, 6), (22, 3, 5), (32, 4, 4)]);
+    let expected_versions: Versions = (
+        0,
+        vec![
+            (0, 10, 12),
+            (1, 16, 17),
+            (2, 7, 10),
+            (3, 13, 13),
+            (18, 3, 4),
+            (19, 7, 7),
+            (20, 6, 6),
+            (22, 3, 5),
+            (32, 4, 4),
+            (45, 0, 1),
+            (46, 0, 0),
+            (60, 0, 2),
+        ],
+    );
     let expected_metadata: Metadata = (
         vec![(1, "b1.sim".into(), 9092, None)],
         Some("blossom-sim".into()),
@@ -220,7 +236,7 @@ fn the_blossom_client_and_a_rust_client_see_the_same_answers() {
             &artifact,
             &schema,
             blossom_value::Seed::from_u64(seed),
-            Vec::new(),
+            blossom_integration_tests::kafka_brokers(&artifact).unwrap(),
             Box::new(NoKvClients),
             cfg,
         )
@@ -405,7 +421,8 @@ impl Pipeliner {
         drop(next);
         match corr {
             1 => {
-                ResponseHeader::decode(&mut body, CreateTopicsResponse::header_version(7)).map_err(|e| e.to_string())?;
+                ResponseHeader::decode(&mut body, CreateTopicsResponse::header_version(7))
+                    .map_err(|e| e.to_string())?;
                 let r = CreateTopicsResponse::decode(&mut body, 7).map_err(|e| e.to_string())?;
                 let t = r.topics.first().ok_or("no topic created")?;
                 if t.error_code != 0 {
@@ -465,7 +482,9 @@ impl StreamClient for Pipeliner {
                 let create = kafka_protocol::messages::CreateTopicsRequest::default()
                     .with_topics(vec![
                         kafka_protocol::messages::create_topics_request::CreatableTopic::default()
-                            .with_name(kafka_protocol::messages::TopicName(StrBytes::from_string("held".into())))
+                            .with_name(kafka_protocol::messages::TopicName(StrBytes::from_string(
+                                "held".into(),
+                            )))
                             .with_num_partitions(1)
                             .with_replication_factor(1),
                     ])
@@ -509,9 +528,12 @@ fn a_pipelining_client_is_throttled_and_answered_in_order() {
             role: Some("Client".to_owned()),
         },
     ];
-    let params = [("MAX_QUEUED_REQUESTS".to_owned(), blossom_front::api::ParamBinding::Int(4))]
-        .into_iter()
-        .collect();
+    let params = [(
+        "MAX_QUEUED_REQUESTS".to_owned(),
+        blossom_front::api::ParamBinding::Int(4),
+    )]
+    .into_iter()
+    .collect();
     let (result, _) = blossom_driver::bls::compile_file_with(path.to_str().unwrap(), &nodes, &params);
     let artifact: BlsArtifact = result.unwrap_or_else(|e| panic!("sim_cluster.bls: {e:?}")).0;
     let schema = DurableSchema::of(artifact.program.get());
@@ -529,7 +551,7 @@ fn a_pipelining_client_is_throttled_and_answered_in_order() {
             &artifact,
             &schema,
             blossom_value::Seed::from_u64(seed),
-            Vec::new(),
+            blossom_integration_tests::kafka_brokers(&artifact).unwrap(),
             Box::new(NoKvClients),
             cfg,
         )
@@ -545,8 +567,16 @@ fn a_pipelining_client_is_throttled_and_answered_in_order() {
         }));
         cluster.run_until(3_000_000_000).unwrap();
         let run = cluster.run_so_far();
-        assert!(run.violation.is_none(), "seed {seed}: {:?}\n{}", run.violation, run.log.join("\n"));
+        assert!(
+            run.violation.is_none(),
+            "seed {seed}: {:?}\n{}",
+            run.violation,
+            run.log.join("\n")
+        );
         assert_eq!(*next.borrow(), N + 2, "seed {seed}: every request is answered");
-        assert!(run.stream_held > 0, "seed {seed}: the broker never stopped reading the connection");
+        assert!(
+            run.stream_held > 0,
+            "seed {seed}: the broker never stopped reading the connection"
+        );
     }
 }

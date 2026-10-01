@@ -5,13 +5,12 @@ const OFFSET_OUT_OF_RANGE: i16 = 1;
 const FETCH_SESSION_ID_NOT_FOUND: i16 = 70;
 const INVALID_FETCH_SESSION_EPOCH: i16 = 71;
 const FENCED_LEADER_EPOCH: i16 = 74;
-const UNKNOWN_LEADER_EPOCH: i16 = 76;
+const UNKNOWN_LEADER_EPOCH: i16 = 75;
 
 /// The most batches one partition's answer walks (its byte limit usually stops it first).
 const MAX_FETCH_BATCHES: u64 = 4096;
 
 /// Every partition is led by this broker at epoch 0.
-const LEADER_EPOCH: i32 = 0;
 
 // ---------------------------------------------------------------- Fetch v16–v17
 
@@ -96,12 +95,12 @@ fn fetch_session_error(req: FetchRequest) -> Option<i16> {
     }
 }
 
-/// The error of a request's leader epoch against this broker's: -1 is unset; an older one is fenced, a newer one
-/// unknown.
-fn leader_epoch_error(requested: i32) -> Option<i16> {
-    if requested == -1i32 || requested == LEADER_EPOCH {
+/// The error of a request's leader epoch against the partition leader's `current` (KIP-320, S8.md D10): -1 is unset;
+/// an older one is fenced, a newer one unknown (this broker has not heard of that leader yet).
+fn leader_epoch_error(requested: i32, current: u64) -> Option<i16> {
+    if requested == -1i32 || requested as i64 == current as i64 {
         None
-    } else if requested < LEADER_EPOCH {
+    } else if (requested as i64) < (current as i64) {
         Some(FENCED_LEADER_EPOCH)
     } else {
         Some(UNKNOWN_LEADER_EPOCH)
@@ -294,6 +293,9 @@ fn list_offsets_entries(req: ListOffsetsRequest) -> Vec<(u64, String, ListOffset
 /// One partition's answer: error, timestamp, offset, leader epoch.
 struct OffsetAnswer { error: i16, timestamp: i64, offset: i64, leader_epoch: i32 }
 
+/// The partition's new leader has not settled its high watermark yet (retriable).
+const OFFSET_NOT_AVAILABLE: i16 = 78;
+
 fn offset_failed(error: i16) -> OffsetAnswer {
     OffsetAnswer { error: error, timestamp: -1i64, offset: -1i64, leader_epoch: -1i32 }
 }
@@ -304,7 +306,7 @@ fn no_offset() -> OffsetAnswer {
 }
 
 fn offset_at(timestamp: i64, offset: i64) -> OffsetAnswer {
-    OffsetAnswer { error: NONE, timestamp: timestamp, offset: offset, leader_epoch: LEADER_EPOCH }
+    OffsetAnswer { error: NONE, timestamp: timestamp, offset: offset, leader_epoch: -1i32 }
 }
 
 fn encode_list_offsets_response(correlation_id: i32, req: ListOffsetsRequest, answers: Vec<(u64, OffsetAnswer)>) -> Bytes {
@@ -361,5 +363,14 @@ fn timestamp_answer(stored: Option<Bytes>, t: i64, exact: bool) -> OffsetAnswer 
                 }
             }
         }
+    }
+}
+
+/// An answer with the partition leader's epoch (S8.md D5: the group's term).
+fn with_epoch(a: OffsetAnswer, epoch: u64) -> OffsetAnswer {
+    if a.error == NONE && a.offset >= 0i64 {
+        OffsetAnswer { error: a.error, timestamp: a.timestamp, offset: a.offset, leader_epoch: epoch as i32 }
+    } else {
+        a
     }
 }
