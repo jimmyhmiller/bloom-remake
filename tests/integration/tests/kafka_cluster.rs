@@ -29,11 +29,13 @@ use blossom_value::value::IntValue;
 use blossom_value::{BlobRef, Value};
 use bytes::{Bytes, BytesMut};
 use kafka_protocol::messages::create_topics_request::CreatableTopic;
+use kafka_protocol::messages::fetch_request::{FetchPartition, FetchTopic};
 use kafka_protocol::messages::metadata_request::MetadataRequestTopic;
 use kafka_protocol::messages::produce_request::{PartitionProduceData, TopicProduceData};
 use kafka_protocol::messages::{
-    CreateTopicsRequest, CreateTopicsResponse, InitProducerIdRequest, InitProducerIdResponse, MetadataRequest,
-    MetadataResponse, ProduceRequest, ProduceResponse, ProducerId, RequestHeader, ResponseHeader, TopicName,
+    CreateTopicsRequest, CreateTopicsResponse, FetchRequest, FetchResponse, InitProducerIdRequest,
+    InitProducerIdResponse, MetadataRequest, MetadataResponse, ProduceRequest, ProduceResponse, ProducerId,
+    RequestHeader, ResponseHeader, TopicName,
 };
 use kafka_protocol::protocol::{Decodable, Encodable, HeaderVersion, StrBytes};
 use kafka_protocol::records::{Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType};
@@ -50,6 +52,10 @@ const NOT_LEADER_OR_FOLLOWER: i16 = 6;
 const REQUEST_TIMED_OUT: i16 = 7;
 #[cfg(test)]
 const TOPIC_ALREADY_EXISTS: i16 = 36;
+#[cfg(test)]
+const FENCED_LEADER_EPOCH: i16 = 74;
+#[cfg(test)]
+const UNKNOWN_LEADER_EPOCH: i16 = 75;
 /// A client gives up on a request after this long (closing its connection), as Kafka's clients do
 /// (`request.timeout.ms`).
 #[cfg(test)]
@@ -134,6 +140,33 @@ fn framed<M: Encodable + HeaderVersion>(key: i16, version: i16, corr: i32, body:
     out
 }
 
+/// What a client knows of a partition's leader: its broker id (-1 when it must find out) and the leader epoch, which
+/// never goes back: Metadata with an older epoch is stale (a broker cut off from the rest still believes it leads),
+/// and is ignored, as Kafka's clients do (KIP-320).
+#[cfg(test)]
+type Leaders = BTreeMap<i32, (i32, i32)>;
+
+#[cfg(test)]
+fn learn_leader(leaders: &mut Leaders, p: i32, leader: i32, epoch: i32) {
+    if leader >= 0 && epoch >= leaders.get(&p).map_or(-1, |x| x.1) {
+        leaders.insert(p, (leader, epoch));
+    }
+}
+
+/// The leader refused (it no longer leads that epoch, or its epoch is newer than ours): the next one known must
+/// have a newer epoch than the one that refused.
+#[cfg(test)]
+fn leader_refused(leaders: &mut Leaders, p: i32) {
+    if let Some(x) = leaders.get_mut(&p) {
+        *x = (-1, x.1 + 1);
+    }
+}
+
+#[cfg(test)]
+fn every_leader_known(leaders: &Leaders) -> bool {
+    (0..PARTITIONS).all(|p| leaders.get(&p).is_some_and(|x| x.0 >= 0))
+}
+
 /// One Produce: its acks, partition and batch.
 #[cfg(test)]
 #[derive(Clone, Debug)]
@@ -161,6 +194,12 @@ struct Shared {
     /// Requests sent again, and metadata refreshes after a leader moved.
     resends: usize,
     moved: usize,
+    /// What the readers fetched: (partition, base offset, the batch as stored), and fetches refused for a leader
+    /// epoch the reader had wrong.
+    reads: Vec<(i64, i64, BlobRef)>,
+    fenced: usize,
+    /// Fetches right after an `acks=1` batch (see `Client::probing`).
+    probes: usize,
 }
 
 #[cfg(test)]
@@ -170,6 +209,7 @@ enum Want {
     Metadata,
     InitPid,
     Produce(i32),
+    Probe(i32),
 }
 
 #[cfg(test)]
@@ -179,6 +219,7 @@ enum Pending {
     Metadata,
     InitPid,
     Produce(usize),
+    Probe,
 }
 
 /// A client following the partitions' leaders.
@@ -191,8 +232,7 @@ struct Client {
     left: u32,
     /// Each broker's node, by broker id.
     brokers: BTreeMap<i32, NodeId>,
-    /// Each partition's leader, by broker id, as last learned.
-    leaders: BTreeMap<i32, i32>,
+    leaders: Leaders,
     created: bool,
     /// The metadata must be read again (a leader moved, or a request failed).
     stale: bool,
@@ -211,6 +251,12 @@ struct Client {
     retry: Option<usize>,
     /// The partition of the next new produce.
     next_partition: i32,
+    /// With `probing`, after each `acks=1` acknowledgement the client fetches right after its batch at the leader
+    /// (`probe`): past the high watermark until the followers copy it, but within the leader's log, which Kafka
+    /// answers with no records, never OFFSET_OUT_OF_RANGE. (Only without faults: a failover may lose the batch.)
+    probing: bool,
+    probe: Option<(i32, i64)>,
+    topic_id: Option<[u8; 16]>,
 }
 
 #[cfg(test)]
@@ -246,6 +292,9 @@ impl Client {
             next_seq: BTreeMap::new(),
             retry: None,
             next_partition,
+            probing: false,
+            probe: None,
+            topic_id: None,
         }
     }
 
@@ -256,6 +305,8 @@ impl Client {
             Some(Want::Metadata)
         } else if self.idempotent && self.pid.is_none() {
             Some(Want::InitPid)
+        } else if let Some((p, _)) = self.probe {
+            Some(Want::Probe(p))
         } else if let Some(at) = self.retry {
             Some(Want::Produce(self.shared.borrow().sent[at].produce.partition))
         } else if self.left > 0 {
@@ -268,7 +319,7 @@ impl Client {
     /// Where a request goes: a produce to its partition's leader, anything else to any broker.
     fn target(&mut self, w: Want) -> Option<NodeId> {
         match w {
-            Want::Produce(p) => self.leaders.get(&p).and_then(|l| self.brokers.get(l)).copied(),
+            Want::Produce(p) | Want::Probe(p) => self.leaders.get(&p).and_then(|l| self.brokers.get(&l.0)).copied(),
             _ => {
                 let ids: Vec<NodeId> = self.brokers.values().copied().collect();
                 ids.get(self.rng.below(ids.len() as u64) as usize).copied()
@@ -314,7 +365,7 @@ impl Client {
             Some(c) if !self.open => {
                 let _ = c;
             }
-            Some(c) if matches!(w, Want::Produce(_)) && !self.stale && c != target => self.close(a),
+            Some(c) if matches!(w, Want::Produce(_) | Want::Probe(_)) && !self.stale && c != target => self.close(a),
             Some(_) => self.issue(now, a),
         }
     }
@@ -353,6 +404,27 @@ impl Client {
                     .with_producer_epoch(-1);
                 a.send = framed(22, 5, self.corr, &req);
                 self.pending = Some((Pending::InitPid, deadline));
+            }
+            Want::Probe(p) => {
+                let off = self.probe.take().map_or(0, |x| x.1);
+                let req = FetchRequest::default()
+                    .with_max_bytes(1 << 16)
+                    .with_min_bytes(0)
+                    .with_max_wait_ms(0)
+                    .with_session_epoch(-1)
+                    .with_topics(vec![
+                        FetchTopic::default()
+                            .with_topic_id(uuid::Uuid::from_bytes(self.topic_id.unwrap_or([0; 16])))
+                            .with_partitions(vec![
+                                FetchPartition::default()
+                                    .with_partition(p)
+                                    .with_current_leader_epoch(-1)
+                                    .with_fetch_offset(off)
+                                    .with_partition_max_bytes(1 << 16),
+                            ]),
+                    ]);
+                a.send = framed(1, 17, self.corr, &req);
+                self.pending = Some((Pending::Probe, deadline));
             }
             Want::Produce(p) => {
                 let at = match self.retry.take() {
@@ -439,6 +511,7 @@ impl Client {
                 if let Some(t) = r.topics.first()
                     && t.error_code == 0
                 {
+                    self.topic_id = Some(*t.topic_id.as_bytes());
                     if t.partitions.len() != PARTITIONS as usize {
                         return Err(format!("the topic has {} partitions", t.partitions.len()));
                     }
@@ -449,18 +522,20 @@ impl Client {
                                 part.partition_index, part.replica_nodes
                             ));
                         }
-                        if part.leader_id.0 >= 0 {
-                            if !part.replica_nodes.contains(&part.leader_id)
-                                || !part.isr_nodes.contains(&part.leader_id)
-                            {
-                                return Err(format!("a leader that is no in-sync replica: {part:?}"));
-                            }
-                            self.leaders.insert(part.partition_index, part.leader_id.0);
-                        } else {
-                            self.leaders.remove(&part.partition_index);
+                        if part.leader_id.0 >= 0
+                            && (!part.replica_nodes.contains(&part.leader_id)
+                                || !part.isr_nodes.contains(&part.leader_id))
+                        {
+                            return Err(format!("a leader that is no in-sync replica: {part:?}"));
                         }
+                        learn_leader(
+                            &mut self.leaders,
+                            part.partition_index,
+                            part.leader_id.0,
+                            part.leader_epoch,
+                        );
                     }
-                    self.stale = self.leaders.len() < PARTITIONS as usize;
+                    self.stale = !every_leader_known(&self.leaders);
                 }
                 // A broker that has not applied the creation yet does not know the topic: ask again.
             }
@@ -474,6 +549,19 @@ impl Client {
                 self.pid = Some((r.producer_id.0, r.producer_epoch));
                 self.shared.borrow_mut().pids.push(r.producer_id.0);
             }
+            Pending::Probe => {
+                ResponseHeader::decode(&mut body, FetchResponse::header_version(17)).map_err(|x| x.to_string())?;
+                let r = FetchResponse::decode(&mut body, 17).map_err(|x| x.to_string())?;
+                let code = r
+                    .responses
+                    .first()
+                    .and_then(|t| t.partitions.first())
+                    .map(|x| x.error_code);
+                if code != Some(0) {
+                    return Err(format!("a fetch right after an acks=1 batch answered {code:?}: {r:?}"));
+                }
+                self.shared.borrow_mut().probes += 1;
+            }
             Pending::Produce(at) => {
                 ResponseHeader::decode(&mut body, ProduceResponse::header_version(12)).map_err(|x| x.to_string())?;
                 let r = ProduceResponse::decode(&mut body, 12).map_err(|x| x.to_string())?;
@@ -484,6 +572,14 @@ impl Client {
                 self.shared.borrow_mut().sent[at].answer = Some((code, base));
                 match code {
                     0 => {
+                        let (acks, partition, n) = {
+                            let sh = self.shared.borrow();
+                            let x = &sh.sent[at].produce;
+                            (x.acks, x.partition, offsets_of(&x.batch))
+                        };
+                        if self.probing && acks == 1 {
+                            self.probe = Some((partition, base + n));
+                        }
                         if self.idempotent {
                             let sh = self.shared.borrow();
                             let produce = &sh.sent[at].produce;
@@ -492,6 +588,8 @@ impl Client {
                     }
                     NOT_LEADER_OR_FOLLOWER => {
                         self.shared.borrow_mut().moved += 1;
+                        let p = self.shared.borrow().sent[at].produce.partition;
+                        leader_refused(&mut self.leaders, p);
                         self.failed(Pending::Produce(at));
                         self.close(a);
                     }
@@ -580,6 +678,260 @@ impl StreamClient for Client {
     }
 }
 
+/// A consumer: it reads every partition from offset 0 with Fetch at the partition's leader, as a Kafka consumer does
+/// (with the leader epoch Metadata gave, so a stale leader is fenced), across leader changes. What it reads must come
+/// in order, with no gap, and be in the final log at the same offset (it read only what was committed).
+#[cfg(test)]
+struct Reader {
+    shared: Rc<RefCell<Shared>>,
+    rng: Rng,
+    brokers: BTreeMap<i32, NodeId>,
+    /// Each partition's leader, and the topic id, as last learned.
+    leaders: Leaders,
+    topic_id: Option<[u8; 16]>,
+    stale: bool,
+    conn: Option<NodeId>,
+    open: bool,
+    closing: bool,
+    buf: Vec<u8>,
+    corr: i32,
+    pending: Option<(bool, i64)>,
+    /// The partition read next, and each partition's next offset.
+    part: i32,
+    next: BTreeMap<i32, i64>,
+    /// Stop reading at this time.
+    until: i64,
+}
+
+#[cfg(test)]
+impl Reader {
+    fn new(seed: u64, shared: Rc<RefCell<Shared>>, brokers: BTreeMap<i32, NodeId>, until: i64) -> Self {
+        Reader {
+            shared,
+            rng: Rng(seed * 7919 + 13),
+            brokers,
+            leaders: BTreeMap::new(),
+            topic_id: None,
+            stale: true,
+            conn: None,
+            open: false,
+            closing: false,
+            buf: Vec::new(),
+            corr: 0,
+            pending: None,
+            part: 0,
+            next: BTreeMap::new(),
+            until,
+        }
+    }
+
+    fn close(&mut self, a: &mut StreamAction) {
+        if self.conn.is_some() && !self.closing {
+            a.close = true;
+            self.closing = true;
+        }
+    }
+
+    fn step(&mut self, now: i64, a: &mut StreamAction) {
+        if self.closing || self.pending.is_some() {
+            return;
+        }
+        if now >= self.until {
+            self.close(a);
+            return;
+        }
+        let target = if self.stale {
+            let ids: Vec<NodeId> = self.brokers.values().copied().collect();
+            ids.get(self.rng.below(ids.len() as u64) as usize).copied()
+        } else {
+            self.leaders
+                .get(&self.part)
+                .and_then(|(l, _)| self.brokers.get(l))
+                .copied()
+        };
+        let Some(target) = target else {
+            self.stale = true;
+            return;
+        };
+        match self.conn {
+            None => {
+                self.conn = Some(target);
+                self.open = false;
+                a.connect = Some((target, Arc::from("kafka")));
+            }
+            Some(_) if !self.open => {}
+            Some(c) if !self.stale && c != target => self.close(a),
+            Some(_) => {
+                self.corr += 1;
+                if self.stale {
+                    let req = MetadataRequest::default()
+                        .with_topics(Some(vec![
+                            MetadataRequestTopic::default()
+                                .with_name(Some(TopicName(StrBytes::from_string(TOPIC.into())))),
+                        ]))
+                        .with_allow_auto_topic_creation(false);
+                    a.send = framed(3, 13, self.corr, &req);
+                    self.pending = Some((true, now + REQUEST_TIMEOUT));
+                } else {
+                    let epoch = self.leaders.get(&self.part).map_or(-1, |x| x.1);
+                    let req = FetchRequest::default()
+                        .with_max_bytes(1 << 16)
+                        .with_min_bytes(1)
+                        .with_max_wait_ms(50)
+                        .with_session_epoch(-1)
+                        .with_topics(vec![
+                            FetchTopic::default()
+                                .with_topic_id(uuid::Uuid::from_bytes(self.topic_id.unwrap_or([0; 16])))
+                                .with_partitions(vec![
+                                    FetchPartition::default()
+                                        .with_partition(self.part)
+                                        .with_current_leader_epoch(epoch)
+                                        .with_fetch_offset(self.next.get(&self.part).copied().unwrap_or(0))
+                                        .with_partition_max_bytes(1 << 16),
+                                ]),
+                        ]);
+                    a.send = framed(1, 17, self.corr, &req);
+                    self.pending = Some((false, now + REQUEST_TIMEOUT));
+                }
+            }
+        }
+    }
+
+    fn answered(&mut self, metadata: bool, mut body: Bytes, a: &mut StreamAction) -> Result<(), String> {
+        if metadata {
+            ResponseHeader::decode(&mut body, MetadataResponse::header_version(13)).map_err(|x| x.to_string())?;
+            let r = MetadataResponse::decode(&mut body, 13).map_err(|x| x.to_string())?;
+            if let Some(t) = r.topics.first()
+                && t.error_code == 0
+            {
+                self.topic_id = Some(*t.topic_id.as_bytes());
+                for part in &t.partitions {
+                    learn_leader(
+                        &mut self.leaders,
+                        part.partition_index,
+                        part.leader_id.0,
+                        part.leader_epoch,
+                    );
+                }
+                self.stale = !every_leader_known(&self.leaders);
+            }
+            return Ok(());
+        }
+        ResponseHeader::decode(&mut body, FetchResponse::header_version(17)).map_err(|x| x.to_string())?;
+        let r = FetchResponse::decode(&mut body, 17).map_err(|x| x.to_string())?;
+        let Some(pr) = r.responses.first().and_then(|t| t.partitions.first()) else {
+            return Err(format!("a Fetch answer with no partition: {r:?}"));
+        };
+        match pr.error_code {
+            0 => {
+                let records = pr.records.clone().unwrap_or_default();
+                let mut at = 0usize;
+                let mut sh = self.shared.borrow_mut();
+                // Whole batches only (a trimmed last batch is read again from its start).
+                while records.len() >= at + 12 {
+                    let len = u32::from_be_bytes([records[at + 8], records[at + 9], records[at + 10], records[at + 11]])
+                        as usize;
+                    let Some(b) = records.get(at..at + 12 + len) else { break };
+                    let base = i64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
+                    let next = self.next.get(&self.part).copied().unwrap_or(0);
+                    if base != next {
+                        return Err(format!(
+                            "partition {}: read a batch at {base}, expected {next}",
+                            self.part
+                        ));
+                    }
+                    sh.reads.push((i64::from(self.part), base, BlobRef::of(b)));
+                    self.next.insert(self.part, base + offsets_of(b));
+                    at += 12 + len;
+                }
+                if at == 0 {
+                    self.part = (self.part + 1) % PARTITIONS;
+                }
+            }
+            NOT_LEADER_OR_FOLLOWER | FENCED_LEADER_EPOCH => {
+                if pr.error_code == FENCED_LEADER_EPOCH {
+                    self.shared.borrow_mut().fenced += 1;
+                }
+                leader_refused(&mut self.leaders, self.part);
+                self.stale = true;
+                self.close(a);
+            }
+            // The broker is behind the epoch this reader knows: ask again (the broker will learn, or another lead).
+            UNKNOWN_LEADER_EPOCH => {
+                self.stale = true;
+                self.close(a);
+            }
+            other => return Err(format!("a fetch answered {other}: {pr:?}")),
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl StreamClient for Reader {
+    fn on(&mut self, now: i64, e: StreamEvent<'_>) -> Result<StreamAction, String> {
+        let mut a = StreamAction::default();
+        match e {
+            StreamEvent::Wake => {
+                if let Some((_, deadline)) = self.pending
+                    && now >= deadline
+                {
+                    self.pending = None;
+                    self.stale = true;
+                    self.close(&mut a);
+                }
+                self.step(now, &mut a);
+            }
+            StreamEvent::Opened => {
+                self.buf.clear();
+                self.open = true;
+                self.step(now, &mut a);
+            }
+            StreamEvent::Received(b) => {
+                if self.closing {
+                    return Ok(a);
+                }
+                self.buf.extend_from_slice(b);
+                let Some(n) = self
+                    .buf
+                    .get(..4)
+                    .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
+                else {
+                    return Ok(a);
+                };
+                if self.buf.len() < 4 + n {
+                    return Ok(a);
+                }
+                if self.buf.len() > 4 + n {
+                    return Err("more than one response to one request".into());
+                }
+                let body = Bytes::copy_from_slice(&self.buf[4..]);
+                self.buf.clear();
+                let Some((metadata, _)) = self.pending.take() else {
+                    return Err("a response with no request in flight".into());
+                };
+                self.answered(metadata, body, &mut a)?;
+                if !a.close {
+                    a.wake = Some(now + if self.stale { 30_000_000 } else { 1_000_000 });
+                }
+            }
+            StreamEvent::Closed(_) => {
+                self.pending = None;
+                self.stale = true;
+                self.conn = None;
+                self.open = false;
+                self.closing = false;
+                self.buf.clear();
+                a.wake = Some(now + 20_000_000);
+            }
+        }
+        if self.pending.is_some() && a.wake.is_none() {
+            a.wake = Some(now + 100_000_000);
+        }
+        Ok(a)
+    }
+}
+
 #[cfg(test)]
 fn int(v: &Value) -> i64 {
     match v {
@@ -613,6 +965,9 @@ struct Totals {
     resends: usize,
     moved: usize,
     terms: u64,
+    read: usize,
+    fenced: usize,
+    probes: usize,
 }
 
 /// One replica's partition log: (base, last, blob) per batch, and its log start and end.
@@ -665,15 +1020,23 @@ fn check_runs(setup: &Setup) -> Totals {
         let (safety, observer) = GroupSafety::of(&artifact).unwrap().shared();
         cluster.observe(observer);
         let shared = Rc::new(RefCell::new(Shared::default()));
+        cluster.stream_client(Box::new(Reader::new(
+            seed,
+            shared.clone(),
+            brokers.clone(),
+            11_000_000_000,
+        )));
         for c in 0..setup.clients {
-            cluster.stream_client(Box::new(Client::new(
+            let mut client = Client::new(
                 c,
                 seed,
                 shared.clone(),
                 brokers.clone(),
                 setup.requests,
                 setup.idempotent,
-            )));
+            );
+            client.probing = !setup.faults;
+            cluster.stream_client(Box::new(client));
         }
         let fail = |cluster: &Cluster<'_>, what: &str| -> String {
             format!("seed {seed}: {what}\n{}", cluster.run_so_far().log.join("\n"))
@@ -829,6 +1192,28 @@ fn check_runs(setup: &Setup) -> Totals {
                 _ => totals.ambiguous += 1,
             }
         }
+        // What the reader read is in the log, where it read it.
+        for (p, base, blob) in &sh.reads {
+            assert_eq!(
+                at.get(&(*p, *base)),
+                Some(blob),
+                "{}",
+                fail(
+                    &cluster,
+                    &format!("the reader read a batch at {p}/{base} the log does not hold there")
+                )
+            );
+        }
+        // Reading on after the faults stopped, it read every partition to its end.
+        assert_eq!(
+            sh.reads.len(),
+            at.len(),
+            "{}",
+            fail(&cluster, "the reader did not read every batch")
+        );
+        totals.read += sh.reads.len();
+        totals.probes += sh.probes;
+        totals.fenced += sh.fenced;
         // Only batches sent, each once.
         for ((p, base), blob) in &at {
             let from: Vec<&Sent> = sh
@@ -872,6 +1257,7 @@ fn three_brokers_replicate_every_partition() {
         idempotent: false,
     });
     assert_eq!(t.ambiguous, 0, "{t:?}");
+    assert!(t.probes > 30, "{t:?}");
     assert!(t.acked_all + t.acked_one == 240, "{t:?}");
 }
 

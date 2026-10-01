@@ -23,11 +23,14 @@ view fetch_entry(c, j, tid, fp) =
 
 view topic_by_id(tid, parts) = mtopic(_name, tid, parts, _cfg);
 
-/// The entries that read data: a partition that exists, the right leader epoch, and an offset in the log.
+/// The entries that read data: a partition that exists, the right leader epoch, and an offset in the log. The offset
+/// may be past the high watermark `end`, up to the leader's log end (its entries, committed or not), as Kafka
+/// allows: a new leader's high watermark can lag what its predecessor exposed until its own entry commits, and a
+/// consumer that read up to the old one's must not be told its position is out of range. It reads up to `end`.
 view fetch_part(c, j, tid, p, off, pmax, end, start) =
     fetch_entry(c, j, tid, fp), topic_by_id(tid, parts), let p = fp.partition, p >= 0i32, p < parts, led(tid, p, epoch),
     leader_epoch_error(fp.leader_epoch, epoch) == None, log_end(tid, p, end), log_start(tid, p, start),
-    let off = fp.fetch_offset, off >= start, off <= end, let pmax = fp.max_bytes as i64;
+    tail_end(tid, p, leo), let off = fp.fetch_offset, off >= start, off <= leo, let pmax = fp.max_bytes as i64;
 
 /// The batch holding each entry's fetch offset: the one starting there, or (after a seek into a batch) the one the
 /// chunk index finds.
@@ -62,9 +65,9 @@ view fetch_answer(c, j, a, pmax) {
         let Some(err) = leader_epoch_error(fp.leader_epoch, epoch),
         let a = fetch_failed(err), let pmax = 0i64 where p >= 0i32 && p < parts;
     fetch_entry(c, j, tid, fp), topic_by_id(tid, parts), let p = fp.partition, led(tid, p, epoch),
-        leader_epoch_error(fp.leader_epoch, epoch) == None, log_end(tid, p, end), log_start(tid, p, start),
+        leader_epoch_error(fp.leader_epoch, epoch) == None, log_end(tid, p, end), log_start(tid, p, start), tail_end(tid, p, leo),
         let a = FetchAnswer { error: OFFSET_OUT_OF_RANGE, high_watermark: end, log_start: start, batches: [] }, let pmax = 0i64
-        where fp.partition >= 0i32 && fp.partition < parts && (fp.fetch_offset < start || fp.fetch_offset > end);
+        where fp.partition >= 0i32 && fp.partition < parts && (fp.fetch_offset < start || fp.fetch_offset > leo);
     fetch_part(c, j, _tid, _p, _off, pmax, end, start), fetch_batches(c, j, bs),
         let a = FetchAnswer { error: NONE, high_watermark: end, log_start: start, batches: blobs_of(bs) };
 }
