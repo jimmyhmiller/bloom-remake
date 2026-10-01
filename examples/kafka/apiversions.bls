@@ -26,6 +26,7 @@ fn supported() -> Vec<ApiRange> {
         ApiRange { key: API_DELETE_TOPICS, min: 6i16, max: 6i16 },
         ApiRange { key: API_INIT_PRODUCER_ID, min: 3i16, max: 5i16 },
         ApiRange { key: API_DESCRIBE_CONFIGS, min: 4i16, max: 4i16 },
+        ApiRange { key: API_DESCRIBE_CLUSTER, min: 0i16, max: 2i16 },
     ]
 }
 

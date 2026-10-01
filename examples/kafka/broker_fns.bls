@@ -63,6 +63,8 @@ fn stateful_body_ok(key: i16, fr: Bytes) -> bool {
             decode_fetch(b).is_some()
         } else if key == API_LIST_OFFSETS {
             frame_prefix(fr).and_then(|p| decode_list_offsets(b, p.1)).is_some()
+        } else if key == API_DESCRIBE_CLUSTER {
+            frame_prefix(fr).and_then(|p| decode_describe_cluster(b, p.1)).is_some()
         } else {
             error("stateful_body_ok: a supported API with no decoder here")
         }

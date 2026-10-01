@@ -39,6 +39,9 @@ input fetch_resp(corr: i32, frame: Bytes, err: i16, answers: Vec<(u64, i16, i64,
 /// leader epoch.
 input list_resp(corr: i32, frame: Bytes, answers: Vec<(u64, i16, i64, i64, i32)>);
 /// Batches appended to one partition one by one, from an empty log and no producer state.
+/// A DescribeCluster answer to encode: correlation id, version, the request (operations asked, endpoint type), the
+/// brokers, cluster id and controller.
+input dcluster_resp(corr: i32, version: i16, ops: bool, endpoint: i8, brokers: Vec<(i32, String, i32, Option<String>)>, cluster: String, controller: i32);
 input seq_case(id: u64, batches: Vec<Bytes>);
 /// Bytes to split into frames.
 input stream_bytes(b: Bytes);
@@ -65,7 +68,7 @@ fn meta_bytes(corr: i32, brokers: Vec<(i32, String, i32, Option<String>)>, clust
     };
     let bs = brokers.map(|b| BrokerInfo { node_id: b.0, host: b.1, port: b.2, rack: b.3 });
     let topics = have.map(|t| TopicInfo { name: t.0, id: t.1, partitions: range(0, t.2 as u64).map(|p| PartInfo {
-        index: p as i32, leader: controller, epoch: 0i32, replicas: [controller],
+        index: p as i32, leader: controller, epoch: 0i32, replicas: [controller], isr: [controller],
     }) });
     encode_metadata_response(corr, req, bs, cluster, controller, topics, empty_names())
 }
@@ -120,6 +123,16 @@ fn sequence_each(batches: Vec<Bytes>) -> Vec<(i16, i64)> {
 
 fn fetch_of(b: Bytes) -> Option<FetchRequest> {
     request_body(b).and_then(|c| decode_fetch(c))
+}
+
+fn dcluster_of(b: Bytes) -> Option<DescribeClusterRequest> {
+    request_prefix(cur(b)).and_then(|p| request_body(b).and_then(|c| decode_describe_cluster(c, p.1)))
+}
+
+fn dcluster_bytes(corr: i32, version: i16, ops: bool, endpoint: i8, brokers: Vec<(i32, String, i32, Option<String>)>, cluster: String, controller: i32) -> Bytes {
+    let req = DescribeClusterRequest { include_operations: ops, endpoint_type: endpoint, include_fenced: false };
+    let bs = brokers.map(|b| BrokerInfo { node_id: b.0, host: b.1, port: b.2, rack: b.3 });
+    encode_describe_cluster_response(corr, version, req, bs, cluster, controller)
 }
 
 fn list_of(b: Bytes) -> Option<ListOffsetsRequest> {
@@ -188,6 +201,9 @@ view v_create(f, r) = req(f), let r = create_of(f);
 view v_produce(f, r) = req(f), let r = produce_of(f);
 view v_fetch(f, r) = req(f), let r = fetch_of(f);
 view v_list(f, r) = req(f), let r = list_of(f);
+view v_dcluster(f, r) = req(f), let r = dcluster_of(f);
+view v_dcluster_resp(corr, b) = dcluster_resp(corr, version, ops, endpoint, brokers, cluster, controller),
+    let b = dcluster_bytes(corr, version, ops, endpoint, brokers, cluster, controller);
 view v_fetch_resp(corr, b) = fetch_resp(corr, f, err, answers), let b = fetch_bytes_of(corr, f, err, answers);
 view v_list_resp(corr, b) = list_resp(corr, f, answers), let b = list_bytes_of(corr, f, answers);
 view v_seq(id, outs) = seq_case(id, batches), let outs = sequence_each(batches);

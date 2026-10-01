@@ -169,10 +169,14 @@ fn entry_bytes(data: Blob) -> Bytes {
 
 /// A command from a broker to the controller's leader.
 channel submit(cmd: Bytes): Broker -> Broker;
-/// A partition leader's announcement: the groups it leads, with their epochs (S8.md D7).
-channel leads(gs: Vec<(Group, u64)>): Broker -> Broker;
+/// A partition leader's announcement: the groups it leads, with their epochs and in-sync replicas (S8.md D7), and
+/// when it sent it (by its clock), which orders its announcements within one epoch.
+channel leads(gs: Vec<(Group, u64, Vec<i32>)>, at: Instant): Broker -> Broker;
 
 param CMD_RESEND: Duration = 500ms;
+/// How long a follower may go without being caught up before it leaves its partition's in-sync replicas (Kafka's
+/// `replica.lag.time.max.ms`).
+param REPLICA_LAG_MAX: Duration = 30s;
 /// Producer ids are allocated one at a time (Kafka allocates blocks of 1000; one per InitProducerId is enough here).
 param PID_START: i64 = 1000;
 
@@ -326,30 +330,57 @@ at Broker {
         data_proposals(g, x);
     }
 
-    // ---- who leads each partition (D7)
+    // ---- who leads each partition, and its in-sync replicas (D7)
 
-    /// The highest epoch heard per partition group, and its leader.
-    table leader_view(g: Group, epoch: u64, l: Node<Broker>) key(g) resolve choose_most(epoch);
+    /// When each follower of a partition this broker leads was last caught up. A follower is caught up when it has
+    /// acknowledged the commit index: Kafka counts a follower caught up when it has fetched to the leader's log end,
+    /// and under Raft the commit index is where a quorum stands. A new leadership starts with every replica caught
+    /// up, as a Kafka leader starts from the ISR the controller recorded.
+    table caught_at(g: Group, f: Node<Broker>, at: Instant) key(g, f) resolve choose_most(at);
+    table isr_term(g: Group, t: u64) key(g) resolve choose_most(t);
+    isr_start: while leader(g, t), not is_controller(g), not isr_term(g, t) {
+        next isr_term(g, t);
+        for members(g, f) where f != self {
+            next caught_at(g, f, now());
+        }
+    }
+    isr_caught: while leader(g, _), not is_controller(g), match_idx(g, f, m), commit_of(g, c) where m >= c {
+        next caught_at(g, f, now());
+    }
+    forget_caught: while caught_at(g, f, at), not leader(g, _) {
+        delete caught_at(g, f, at);
+    }
+    /// A led partition's in-sync replicas, by broker id: the leader, and every follower caught up within
+    /// `REPLICA_LAG_MAX`.
+    view in_sync(g, id) {
+        leader(g, _), not is_controller(g), my_id(id);
+        leader(g, _), caught_at(g, f, at), members(g, f), broker(f, id, _, _) where f != self && at + REPLICA_LAG_MAX >= now();
+    }
+    view isr_of(g, ids = collect!(id)) = in_sync(g, id);
+
+    /// The latest announcement heard per partition group: its stamp (the epoch, and when its leader sent it), the
+    /// leader and the in-sync replicas. Announcements of one epoch come from one leader, so its clock orders them.
+    table leader_view(g: Group, stamp: (u64, Instant), l: Node<Broker>, isr: Vec<i32>) key(g) resolve choose_most(stamp);
     announce: on raft_heartbeat, led_groups(gs) {
         for broker(n, _, _, _) where n != self {
-            send leads(gs) to n;
+            send leads(gs, now()) to n;
         }
     }
-    view led_groups(gs = collect!((g, t))) = leader(g, t), not is_controller(g);
+    view led_groups(gs = collect!((g, t, isr))) = leader(g, t), not is_controller(g), isr_of(g, isr);
     view is_controller(g) = mine(g), let c = controller() where g == c;
-    heard_leads: on leads(gs) from l, (g, t) in gs {
-        if leader_view(g, e, _) where t > e {
-            next leader_view(g, t, l);
-        }
-        if not leader_view(g, _, _) {
-            next leader_view(g, t, l);
-        }
+    heard_leads: on leads(gs, at) from l, (g, t, isr) in gs {
+        next leader_view(g, (t, at), l, isr);
+    }
+    /// A deleted partition's announcements go.
+    view assigned(g) = massign(tid, p, _), let g = (tid, p);
+    forget_leader_view: while leader_view(g, stamp, l, isr), not assigned(g) {
+        delete leader_view(g, stamp, l, isr);
     }
     /// Each partition's leader as this broker knows it, with the leader epoch clients see (the term less one, so the
-    /// first leader's is 0, as Kafka's): itself where it leads, else the highest term heard.
-    view partition_leader(g, epoch, l) {
-        leader(g, t), not is_controller(g), let l = self, let epoch = t - 1;
-        leader_view(g, t, l), not leader(g, _), let epoch = t - 1;
+    /// first leader's is 0, as Kafka's) and its in-sync replicas: itself where it leads, else the latest heard.
+    view partition_leader(g, epoch, l, isr) {
+        leader(g, t), not is_controller(g), isr_of(g, isr), let l = self, let epoch = t - 1;
+        leader_view(g, stamp, l, isr), not leader(g, _), let epoch = stamp.0 - 1;
     }
     /// The controller's leader, by broker id, if known.
     view controller_id(id) {

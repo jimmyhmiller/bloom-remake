@@ -141,13 +141,13 @@ fn check_records(records: Option<Bytes>, max_bytes: i64) -> Checked {
     }
 }
 
-/// A partition's checks for a request: with acks -1, a topic whose `min.insync.replicas` is above the partition's
-/// `replicas` is refused first (NOT_ENOUGH_REPLICAS, as Kafka refuses before appending); then the records. (Kafka
-/// compares with the replicas in sync now; here a commit needs a majority of the replicas anyway, so a partition
-/// that lost its majority makes `acks=all` time out instead.)
-fn check_entry(records: Option<Bytes>, acks: i16, set: Vec<(String, String)>, replicas: u64) -> Checked {
-    if acks == -1i16 && min_insync(set) > replicas as i64 {
-        refused(NOT_ENOUGH_REPLICAS, "min.insync.replicas is above the partition's replicas", None)
+/// A partition's checks for a request: with acks -1, a partition whose in-sync replicas (`in_sync`, as its leader
+/// counts them) are fewer than the topic's `min.insync.replicas` is refused first (NOT_ENOUGH_REPLICAS, as Kafka
+/// refuses before appending); then the records. (A commit needs a majority of the replicas anyway, so a partition
+/// that lost its majority makes `acks=all` time out, whatever its in-sync replicas.)
+fn check_entry(records: Option<Bytes>, acks: i16, set: Vec<(String, String)>, in_sync: u64) -> Checked {
+    if acks == -1i16 && min_insync(set) > in_sync as i64 {
+        refused(NOT_ENOUGH_REPLICAS, "the in-sync replicas are fewer than min.insync.replicas", None)
     } else {
         check_records(records, max_message_bytes(set))
     }
