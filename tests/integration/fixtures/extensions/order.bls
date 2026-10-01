@@ -1,0 +1,34 @@
+//! The order of a body's checks (LANGUAGE §9.14): checks that cannot fail first, then fallible filters, then
+//! fallible bindings. Each view would raise BLSR004 under body order for the inputs `bls_extensions.rs` feeds.
+program order version 1;
+
+input pair(k: u64, a: u64, b: u64);
+input done(k: u64);
+input add(i: u64);
+input ask(lo: u64);
+
+/// A guard written after the division protects it.
+view ratio(k, r) = pair(k, a, b), let r = a / b where b != 0;
+/// A negation written after the subtraction runs before it.
+view gap(k, d) = pair(k, a, b), let d = a - b, not done(k);
+/// `&&`'s conjuncts are two checks: `b != 0` cannot fail, so it runs before `a / b > 1`.
+view big(k) = pair(k, a, b) where a / b > 1 && b != 0;
+
+/// An `if` with a fallible first conjunct and its `else`: both reach the division only past `b != 0`.
+table hi(k: u64);
+table lo(k: u64);
+branching: on pair(k, a, b) {
+    if a / b > 1 && b != 0 {
+        emit hi(k);
+    } else {
+        emit lo(k);
+    }
+}
+
+table log(i: u64, d: u64);
+table got(lo: u64, i: u64, b: u64);
+adding: on add(i) { emit log(i, i * 2); }
+/// The guards narrow `log` to a range, the `let` written before them notwithstanding.
+asking: on ask(lo), log(i, d), let b = d * 3 where i > lo && i <= lo + 3 {
+    emit got(lo, i, b);
+}

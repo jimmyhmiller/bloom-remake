@@ -39,11 +39,16 @@ pub(crate) struct RuleCx {
     pub in_fn: bool,
     /// The functions this scope calls, for the recursion check (BLS0213).
     pub calls: BTreeSet<HFnId>,
+    /// A generic function's template being resolved: its function parameters are in scope, and calls of generic
+    /// functions stay calls of their templates until it is instantiated (LANGUAGE §16.1).
+    pub template: Option<usize>,
+    /// The label of the handler whose statements are being resolved (for `resolve prefer`, LANGUAGE §10.7).
+    pub label: Option<Symbol>,
 }
 
 /// The functions a call resolves to before any declared one (LANGUAGE §9.12, §15, §16.1, Appendix B); a `fn` may not
 /// take one of these names, which a call would never reach.
-const BUILTIN_FNS: &[&str] = &[
+pub(super) const BUILTIN_FNS: &[&str] = &[
     "now",
     "tick",
     "random",
@@ -77,6 +82,8 @@ impl<'t> Resolver<'t, '_> {
             plain_bootstrap: false,
             in_fn: false,
             calls: BTreeSet::new(),
+            template: None,
+            label: None,
         }
     }
 
@@ -93,14 +100,21 @@ impl<'t> Resolver<'t, '_> {
     }
 
     /// Pure functions (LANGUAGE §16.1): every signature in the module is declared first, so bodies may call functions
-    /// declared after them; then the bodies are resolved, each in its own scope with the parameters as its first
-    /// variables; then calls that form a cycle are reported (BLS0213).
+    /// declared after them; then generic functions' templates are resolved (`generic`), so the other bodies can
+    /// instantiate them; then those bodies, each in its own scope with the parameters as its first variables; then
+    /// calls that form a cycle are reported (BLS0213).
     pub(crate) fn functions(&mut self, s: ScopeIdx, items: &'t [ast::Item]) {
         let mut fns: Vec<(&'t ast::FnItem, HFnId)> = Vec::new();
+        let mut templates = Vec::new();
         let mut stack = vec![items];
         while let Some(items) = stack.pop() {
             for item in items {
                 match &item.kind {
+                    ast::ItemKind::Fn(f) if super::generic::is_template(f) => {
+                        if let Some(t) = self.declare_template(s, f) {
+                            templates.push(t);
+                        }
+                    }
                     ast::ItemKind::Fn(f) => {
                         let body = HFnBody::Expr(HExpr::new(HExprKind::Tuple(Vec::new()), f.body.span));
                         if let Some(id) = self.declare_fn(s, f.name, &f.params, &f.ret, f.span, body) {
@@ -112,6 +126,9 @@ impl<'t> Resolver<'t, '_> {
                     _ => {}
                 }
             }
+        }
+        for t in templates {
+            self.resolve_template(t);
         }
         let mut calls: BTreeMap<HFnId, BTreeSet<HFnId>> = BTreeMap::new();
         for (f, id) in fns {
@@ -134,6 +151,8 @@ impl<'t> Resolver<'t, '_> {
                 plain_bootstrap: false,
                 in_fn: true,
                 calls: BTreeSet::new(),
+                template: None,
+                label: None,
             };
             for ((name, _), (v, _)) in f.params.iter().zip(&params) {
                 if let Some(frame) = cx.frames.last_mut() {
@@ -153,6 +172,12 @@ impl<'t> Resolver<'t, '_> {
                 None => {}
             }
             calls.insert(id, cx.calls);
+        }
+        // Generic function instances call what their templates call, with the functions passed for their function
+        // parameters (a cycle through one runs through a function of this module, whose instances are all made by
+        // now).
+        for (id, cs) in &self.instance_calls {
+            calls.entry(*id).or_insert_with(|| cs.clone());
         }
         // A function is total when everything it calls is: peel those off until nothing changes; what remains calls
         // itself, directly or through others.
@@ -178,6 +203,194 @@ impl<'t> Resolver<'t, '_> {
                 );
             }
         }
+    }
+
+    /// Resolves a template's body once, in its own scope with its value parameters as the first variables and its
+    /// function parameters callable. The variables move into the template: the scope is left empty (type checking
+    /// sees nothing there), and each instance gets a copy.
+    fn resolve_template(&mut self, t: usize) {
+        let Some(tm) = self.templates.get(t) else {
+            self.bugs
+                .push(blossom_base::internal_error!("template {t} was not declared"));
+            return;
+        };
+        let (item, ms) = (tm.item, tm.ms);
+        let value_params: Vec<Ident> = tm
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                super::generic::TParam::Value { name, .. } => Some(*name),
+                super::generic::TParam::Fn { .. } => None,
+            })
+            .collect();
+        let mut cx = self.rule_cx(ms, None);
+        cx.in_fn = true;
+        cx.template = Some(t);
+        for p in &value_params {
+            self.new_var(&mut cx, p.name, p.span, false);
+        }
+        let body = self.expr(&mut cx, &item.body);
+        let (vars, module) = match self.hir.scopes.get_mut(cx.scope.index()) {
+            Some(sc) => (std::mem::take(&mut sc.vars), sc.module.clone()),
+            None => {
+                self.bugs.push(blossom_base::internal_error!(
+                    "template scope {:?} does not exist",
+                    cx.scope
+                ));
+                return;
+            }
+        };
+        let state = match body {
+            Some(body) => super::generic::TemplateState::Resolved { vars, module, body },
+            None => {
+                if !self.diags.has_errors() {
+                    self.bugs.push(blossom_base::internal_error!(
+                        "the body of generic function `{}` failed to resolve without a diagnostic",
+                        item.name.as_str()
+                    ));
+                }
+                super::generic::TemplateState::Failed
+            }
+        };
+        if let Some(tm) = self.templates.get_mut(t) {
+            tm.state = state;
+        }
+    }
+
+    /// A call of the function parameter `param` of the template being resolved.
+    fn call_param(
+        &mut self,
+        cx: &mut RuleCx,
+        name: Ident,
+        (param, ty): (u32, HFnTy),
+        pos: &[&ast::Expr],
+        span: Span,
+    ) -> Option<HExpr> {
+        if pos.len() != ty.params.len() {
+            self.error(
+                code!("BLS0301"),
+                span,
+                format!(
+                    "`{}` takes {} argument(s), {} given",
+                    name.as_str(),
+                    ty.params.len(),
+                    pos.len()
+                ),
+            );
+            return None;
+        }
+        let mut args = Vec::new();
+        for p in pos {
+            args.push(self.expr(cx, p)?);
+        }
+        Some(HExpr::new(HExprKind::CallParam { param, args }, span))
+    }
+
+    /// A call of the generic function `g`: in a template, a call of `g`'s template; anywhere else, a call of a new
+    /// instance of it (`generic`).
+    fn generic_call(
+        &mut self,
+        cx: &mut RuleCx,
+        name: Ident,
+        g: usize,
+        pos: &[&ast::Expr],
+        span: Span,
+    ) -> Option<HExpr> {
+        let fn_params: Vec<Option<Symbol>> = match self.templates.get(g) {
+            Some(t) => t
+                .params
+                .iter()
+                .map(|p| match p {
+                    super::generic::TParam::Fn { name, .. } => Some(name.name),
+                    super::generic::TParam::Value { .. } => None,
+                })
+                .collect(),
+            None => {
+                self.bugs
+                    .push(blossom_base::internal_error!("template {g} was not declared"));
+                return None;
+            }
+        };
+        if pos.len() != fn_params.len() {
+            self.error(
+                code!("BLS0301"),
+                span,
+                format!(
+                    "`{}` takes {} argument(s), {} given",
+                    name.as_str(),
+                    fn_params.len(),
+                    pos.len()
+                ),
+            );
+            return None;
+        }
+        let mut args = Vec::new();
+        let mut fn_args = Vec::new();
+        for (p, a) in fn_params.iter().zip(pos) {
+            match p {
+                None => args.push(self.expr(cx, a)?),
+                Some(param) => fn_args.push(self.fn_arg(cx, *param, a)?),
+            }
+        }
+        if cx.template.is_some() {
+            return Some(HExpr::new(
+                HExprKind::GenericCall {
+                    template: u32::try_from(g).ok()?,
+                    args,
+                    fn_args,
+                },
+                span,
+            ));
+        }
+        let mut ids = Vec::new();
+        for a in fn_args {
+            match a {
+                HFnArg::Fn(f) => ids.push(f),
+                HFnArg::Param(_) => {
+                    self.bugs.push(blossom_base::internal_error!(
+                        "a function parameter was passed outside a template"
+                    ));
+                    return None;
+                }
+            }
+        }
+        let f = self.instantiate_fn(g, &ids, span)?;
+        cx.calls.insert(f);
+        Some(HExpr::new(HExprKind::Call { f, args }, span))
+    }
+
+    /// The function passed for the function parameter `param`: a named function, or a function parameter of the
+    /// template being resolved (BLS0219 otherwise).
+    fn fn_arg(&mut self, cx: &RuleCx, param: Symbol, a: &ast::Expr) -> Option<HFnArg> {
+        if let ExprKind::Path(path, targs) = &a.kind
+            && targs.is_empty()
+            && let [name] = path.as_slice()
+        {
+            if let Some((i, _)) = self.fn_param(cx.template, name.name) {
+                return Some(HFnArg::Param(i));
+            }
+            if let Some(f) = self.scope(cx.ms).fns.get(&name.name).copied() {
+                return Some(HFnArg::Fn(f));
+            }
+            if self.scope(cx.ms).generic_fns.contains_key(&name.name) {
+                self.error(
+                    code!("BLS0219"),
+                    a.span,
+                    format!(
+                        "`{}` is generic, and only a function with fixed types can be passed for `{}`; pass a function that calls it",
+                        name.as_str(),
+                        param.as_str()
+                    ),
+                );
+                return None;
+            }
+        }
+        self.error(
+            code!("BLS0219"),
+            a.span,
+            format!("`{}` takes a function: pass one by its name", param.as_str()),
+        );
+        None
     }
 
     /// `extern fn name(…) -> T = "path";`: a host function of the standard catalog (LANGUAGE §16.2), declared with
@@ -233,6 +446,7 @@ impl<'t> Resolver<'t, '_> {
             return None;
         }
         if self.scope(s).fns.contains_key(&name.name)
+            || self.scope(s).generic_fns.contains_key(&name.name)
             || self.scope(s).rels.contains_key(&name.name)
             || self.scope(s).instances.contains_key(&name.name)
         {
@@ -298,6 +512,7 @@ impl<'t> Resolver<'t, '_> {
             // reported, so the placeholder never reaches type checking.
             body,
             span,
+            scheme: None,
         });
         self.scope_mut(s).fns.insert(name.name, id);
         Some(id)
@@ -1589,7 +1804,18 @@ impl<'t> Resolver<'t, '_> {
                                         self.check_readable(cx, rel, span);
                                         return Some(HExpr::new(HExprKind::Lookup { rel, key: Vec::new() }, span));
                                     }
-                                    if self.scope(cx.ms).fns.contains_key(&name.name) {
+                                    if self.fn_param(cx.template, name.name).is_some()
+                                        || self.scope(cx.ms).generic_fns.contains_key(&name.name)
+                                    {
+                                        self.error(
+                                            code!("BLS0219"),
+                                            span,
+                                            format!(
+                                                "`{}` is a function: call it, or pass it for a function parameter",
+                                                name.as_str()
+                                            ),
+                                        );
+                                    } else if self.scope(cx.ms).fns.contains_key(&name.name) {
                                         // A function as a value is the argument of a lattice operation
                                         // (`s.map(f)`, `s.filter(p)`, LANGUAGE §11.5).
                                         self.unsupported(
@@ -1929,6 +2155,16 @@ impl<'t> Resolver<'t, '_> {
                 );
                 return None;
             }
+            // Function bodies have no `?` left (`ast::desugar`); a rule body fails a match without one.
+            ExprKind::Try(_) => {
+                self.error(
+                    code!("BLS0218"),
+                    span,
+                    "`?` returns early from a function: in a rule body, `let Some(x) = e` already derives nothing \
+                     when `e` is `None`",
+                );
+                return None;
+            }
         };
         Some(HExpr::new(kind, span))
     }
@@ -2048,6 +2284,41 @@ impl<'t> Resolver<'t, '_> {
                     },
                     span,
                 ))
+            }
+            // A format's decoder and encoder (`Name::decode`, `Name::encode`, LANGUAGE §16.7).
+            [ty, f]
+                if let Some(id) = self
+                    .scope(cx.ms)
+                    .fns
+                    .get(&Symbol::intern(&format!("{}::{}", ty.as_str(), f.as_str())))
+                    .copied() =>
+            {
+                let arity = self.hir.fns.get(id.index()).map_or(0, |h| h.params.len());
+                if pos.len() != arity {
+                    self.error(
+                        code!("BLS0301"),
+                        span,
+                        format!(
+                            "`{}::{}` takes {arity} argument(s), {} given",
+                            ty.as_str(),
+                            f.as_str(),
+                            pos.len()
+                        ),
+                    );
+                    return None;
+                }
+                let mut xs = Vec::new();
+                for p in &pos {
+                    xs.push(self.expr(cx, p)?);
+                }
+                cx.calls.insert(id);
+                Some(HExpr::new(HExprKind::Call { f: id, args: xs }, span))
+            }
+            [name] if let Some(param) = self.fn_param(cx.template, name.name) => {
+                self.call_param(cx, *name, param, &pos, span)
+            }
+            [name] if let Some(g) = self.scope(cx.ms).generic_fns.get(&name.name).copied() => {
+                self.generic_call(cx, *name, g, &pos, span)
             }
             [name] if let Some(f) = self.scope(cx.ms).fns.get(&name.name).copied() => {
                 let arity = self.hir.fns.get(f.index()).map_or(0, |h| h.params.len());
@@ -2317,11 +2588,15 @@ impl<'t> Resolver<'t, '_> {
     // ------------------------------------------------------------------ rules
 
     pub(crate) fn handler(&mut self, s: ScopeIdx, h: &'t ast::Handler, placement: Option<HRoleId>) {
+        if let Some(l) = h.label {
+            *self.handler_labels.entry((s, l.name)).or_insert(0) += 1;
+        }
         if h.monotone {
             self.unsupported("ANA-020", "`monotone` assertions", h.span);
         }
         let mut cx = self.rule_cx(s, placement);
         cx.choice_allowed = h.label.is_some();
+        cx.label = h.label.map(|l| l.name);
         let header = self.body(&mut cx, &h.header);
         cx.choice_allowed = false;
         let stmts = self.stmts(&mut cx, &h.block.stmts);
@@ -2569,12 +2844,28 @@ impl<'t> Resolver<'t, '_> {
             }
             (None, _, _) => None,
         };
+        let rank = match (&rel.prefer, v.verb) {
+            (Some(rules), Verb::Next | Verb::Upsert) => {
+                let listed = cx
+                    .label
+                    .zip(cx.label.and_then(|l| rules.iter().position(|(n, _)| *n == l)));
+                Some(match listed {
+                    Some((l, i)) => {
+                        self.prefer_writers.insert((target, l));
+                        HRank::Listed(u32::try_from(i).ok()?)
+                    }
+                    None => HRank::Unlisted,
+                })
+            }
+            _ => None,
+        };
         Some(HVerbStmt {
             verb: v.verb,
             target,
             args,
             to,
             allow_self_negation,
+            rank,
             text: self.normalized(v.span),
             span: v.span,
         })
@@ -3125,6 +3416,92 @@ impl<'t> Resolver<'t, '_> {
         });
     }
 
+    /// `table p(c̄) … while BODY;` (LANGUAGE §7.2): the body `p(c̄), BODY` over the columns, named as declared.
+    pub(crate) fn persist_guard(&mut self, s: ScopeIdx, d: &'t ast::RelDecl, placement: Option<HRoleId>) {
+        let Some(guard) = &d.guard else { return };
+        let Some(rel) = self.scope(s).rels.get(&d.name.name).copied() else {
+            // The declaration failed (and was reported).
+            return;
+        };
+        let r = self.rel_of(rel);
+        if r.kind != HRelKind::Table || r.cell {
+            self.error(code!("BLS0106"), guard.span, "`while` applies to tables");
+            return;
+        }
+        if r.cols
+            .iter()
+            .any(|c| c.ty.is_some_and(|t| holds_lattice(&self.hir.types, t)))
+        {
+            self.unsupported("SEM-104", "`while` on a table holding lattice values", guard.span);
+            return;
+        }
+        if let Some(c) = d.cols.iter().find(|c| !is_var_name(c.name.as_str())) {
+            self.error(
+                code!("BLS0106"),
+                c.name.span,
+                format!(
+                    "a `while` condition reads the columns by name, so they are named as variables (lowercase); `{}` is not",
+                    c.name.as_str()
+                ),
+            );
+            return;
+        }
+        // `p(c̄)` first: it binds the columns, which the condition reads by name.
+        let path = |n: Ident| ast::Expr::new(ExprKind::Path(vec![n], Vec::new()), n.span);
+        let atom = ast::AtomLit {
+            expr: ast::Expr::new(
+                ExprKind::Call {
+                    callee: Box::new(path(d.name)),
+                    args: d.cols.iter().map(|c| Arg::Pos(path(c.name))).collect(),
+                },
+                d.name.span,
+            ),
+            from: None,
+            principal: None,
+            weight: None,
+            at: None,
+            at_tick: None,
+            span: d.name.span,
+        };
+        let mut lits = vec![ast::Lit::Plain(atom)];
+        lits.extend(guard.lits.iter().cloned());
+        let body = ast::Body {
+            lits,
+            guards: guard.guards.clone(),
+            span: guard.span,
+        };
+        let mut cx = self.rule_cx(s, placement.or(r.role));
+        let body = self.body(&mut cx, &body);
+        let cols = match body.lits.first() {
+            Some(HLit::Atom(a)) if a.rel == rel => a
+                .args
+                .iter()
+                .map(|p| match p {
+                    HPat::Var(v, _) => Some(*v),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>(),
+            _ => None,
+        };
+        let Some(cols) = cols else {
+            if !self.diags.has_errors() {
+                self.bugs.push(blossom_base::internal_error!(
+                    "the persistence condition of `{}` does not start with its columns' atom",
+                    r.name
+                ));
+            }
+            return;
+        };
+        self.hir.guards.push(HGuard {
+            rel,
+            scope: cx.scope,
+            body,
+            cols,
+            role: r.role,
+            span: guard.span,
+        });
+    }
+
     /// `fact r(…);` (LANGUAGE §8.4).
     pub(crate) fn fact(&mut self, s: ScopeIdx, f: &'t ast::Fact) {
         if f.at.is_some() || f.tick.is_some() {
@@ -3225,27 +3602,6 @@ impl<'t> Resolver<'t, '_> {
             span: h.span,
         });
     }
-}
-
-/// Whether a value of type `ty` holds a lattice or group value anywhere inside it.
-fn holds_lattice(types: &blossom_value::TypeTable, ty: TypeId) -> bool {
-    let mut seen = BTreeSet::new();
-    let mut stack = vec![ty];
-    while let Some(t) = stack.pop() {
-        if !seen.insert(t) {
-            continue;
-        }
-        match types.get(t) {
-            Some(TypeDef::Lattice(_) | TypeDef::Group(_)) => return true,
-            Some(TypeDef::Tuple(ts)) => stack.extend(ts.iter().copied()),
-            Some(TypeDef::Vec(e) | TypeDef::Set(e) | TypeDef::Option(e)) => stack.push(*e),
-            Some(TypeDef::Map(k, v)) => stack.extend([*k, *v]),
-            Some(TypeDef::Struct(d)) => stack.extend(d.fields.iter().map(|f| f.ty)),
-            Some(TypeDef::Enum(d)) => stack.extend(d.variants.iter().flat_map(|v| v.payload.iter().map(|f| f.ty))),
-            _ => {}
-        }
-    }
-    false
 }
 
 /// The names a pattern binds, variants' fields included.

@@ -621,6 +621,65 @@ impl Parser<'_> {
             _ => self.contextual_item(),
         }
     }
+    /// `format Name[(params)] { [name:] element [if cond] [= default], … }` or `format name[(params)] = element;`
+    /// (LANGUAGE §16.7). Elements are expressions (`nullable(compact_array(Topic(version)))`).
+    fn format_item(&mut self) {
+        self.bump();
+        self.name(false);
+        if self.eat(L_PAREN) {
+            while !self.at(R_PAREN) && !self.at(EOF) {
+                let old = self.pos;
+                let p = self.start();
+                self.name(false);
+                if self.eat(COLON) {
+                    self.ty();
+                }
+                self.complete(p, FORMATPARAM);
+                if old == self.pos {
+                    self.bump();
+                }
+                if !self.eat(COMMA) {
+                    break;
+                }
+            }
+            self.expect(R_PAREN);
+        }
+        if self.eat(EQ) {
+            self.expr(0);
+            self.expect(SEMI);
+            return;
+        }
+        self.expect(L_CURLY);
+        while !self.at(R_CURLY) && !self.at(EOF) {
+            let old = self.pos;
+            let f = self.start();
+            if self.nth(1) == COLON && (self.at(IDENT) || self.nth(0).is_word()) {
+                self.name(true);
+                self.bump();
+            }
+            self.expr(0);
+            if self.at(IF_KW) {
+                let c = self.start();
+                self.bump();
+                self.expr(0);
+                self.complete(c, FORMATCOND);
+            }
+            if self.at(EQ) {
+                let d = self.start();
+                self.bump();
+                self.expr(0);
+                self.complete(d, FORMATDEFAULT);
+            }
+            self.complete(f, FORMATFIELD);
+            if old == self.pos {
+                self.bump();
+            }
+            if !self.eat(COMMA) {
+                break;
+            }
+        }
+        self.expect(R_CURLY);
+    }
     fn contextual_item(&mut self) -> SyntaxKind {
         if self.ctx("monotone") {
             self.bump();
@@ -654,6 +713,10 @@ impl Parser<'_> {
         if self.ctx("cell") {
             self.cell();
             return CELLDECL;
+        }
+        if self.ctx("format") && self.nth(1) == IDENT {
+            self.format_item();
+            return FORMATITEM;
         }
         if self.ctx("stream") && self.nth(1) == IDENT && self.nth(2) == COLON {
             self.bump();
@@ -923,6 +986,11 @@ impl Parser<'_> {
         let m = self.start();
         if self.guard() {
             if self.eat_ctx("unsafe") {
+                self.ty();
+            } else if self.eat(FN_KW) {
+                // `fn(A, B) -> R`: a function parameter's type (LANGUAGE §16.1).
+                self.type_tuple();
+                self.expect(ARROW);
                 self.ty();
             } else if self.at(L_PAREN) {
                 self.type_tuple();
@@ -1215,6 +1283,7 @@ impl Parser<'_> {
         }
         let mut clauses = BTreeSet::new();
         while self.at(COLON)
+            || self.at(WHILE_KW)
             || self.at(IDENT)
                 && matches!(
                     self.spelling(0),
@@ -1265,6 +1334,12 @@ impl Parser<'_> {
                     }
                     PARTITIONCLAUSE
                 }
+                // `while BODY`: the condition a row persists under (LANGUAGE §7.2); last, as its body runs to `;`.
+                "while" => {
+                    self.bump();
+                    self.body(false);
+                    WHILECLAUSE
+                }
                 "sealed" => {
                     self.bump();
                     self.expect_ctx("by");
@@ -1284,7 +1359,7 @@ impl Parser<'_> {
             };
             let valid = match kind {
                 DIRECTIONCLAUSE | PARTITIONCLAUSE | EXACTLYONCECLAUSE => relkind == CHANNEL_KW,
-                TTLCLAUSE | MAXCLAUSE | RANGECLAUSE => relkind == TABLE_KW,
+                TTLCLAUSE | MAXCLAUSE | RANGECLAUSE | WHILECLAUSE => relkind == TABLE_KW,
                 RESOLVECLAUSE => relkind == TABLE_KW,
                 KEYCLAUSE => true,
                 _ => true,
@@ -1293,6 +1368,9 @@ impl Parser<'_> {
                 self.error(code!("BLS0106"), "duplicate or inapplicable relation clause", &[SEMI]);
             }
             self.complete(m, kind);
+            if kind == WHILECLAUSE {
+                break;
+            }
         }
         self.expect(SEMI);
         RELDECL
@@ -1319,6 +1397,20 @@ impl Parser<'_> {
             self.bump();
             self.expect(L_PAREN);
             self.expr(0);
+            self.expect(R_PAREN);
+        } else if self.eat_ctx("prefer") {
+            // `prefer(rule, …)`: writer precedence by handler label (LANGUAGE §10.7).
+            self.expect(L_PAREN);
+            while !self.at(R_PAREN) && !self.at(EOF) {
+                let old = self.pos;
+                self.name(false);
+                if old == self.pos {
+                    self.bump();
+                }
+                if !self.eat(COMMA) {
+                    break;
+                }
+            }
             self.expect(R_PAREN);
         } else {
             self.expect_ctx("merge");
@@ -1831,7 +1923,7 @@ impl Parser<'_> {
         let mut lhs = self.primary(m);
         let mut h = self.sub + 1;
         loop {
-            if matches!(self.nth(0), DOT | L_PAREN | L_BRACK) && self.higher(h + 1) {
+            if matches!(self.nth(0), DOT | L_PAREN | L_BRACK | QUESTION) && self.higher(h + 1) {
                 // Past the height bound: the rest of the chain is not parsed as part of this expression.
                 break;
             }
@@ -1865,6 +1957,10 @@ impl Parser<'_> {
                 self.expr(0);
                 self.expect(R_BRACK);
                 lhs = self.complete(node, INDEXEXPR);
+            } else if self.at(QUESTION) {
+                let node = self.precede(lhs);
+                self.bump();
+                lhs = self.complete(node, TRYEXPR);
             } else {
                 break;
             }

@@ -1,0 +1,52 @@
+//! `resolve prefer(rule, …)` (LANGUAGE §10.7): each preferring table has a twin written the same way, whose lower
+//! writers are guarded by hand against the higher ones' events instead. `bls_extensions.rs` checks that the twins
+//! hold the same rows at every tick, on both evaluators, and that unarbitrated conflicts remain errors.
+program prefer version 1;
+
+input reset(k: u64, v: u64);
+input advance(k: u64, v: u64);
+input fresh_a(k: u64, v: u64);
+input fresh_b(k: u64, v: u64);
+input clash(k: u64, v: u64);
+input stray(k: u64, v: u64);
+
+/// Upserts: a reset beats an advance to the same key in the same tick.
+table p(k: u64, v: u64) key(k) resolve prefer(resetting, advancing, clashing);
+table q(k: u64, v: u64) key(k);
+
+resetting: on reset(k, v) {
+    upsert p(k, v);
+    upsert q(k, v);
+}
+advancing: on advance(k, v) {
+    upsert p(k, v + 1000);
+}
+advancing_q: on advance(k, v), not reset(k, _) {
+    upsert q(k, v + 1000);
+}
+
+/// `next` into keys not yet present: the first writer beats the second.
+table n(k: u64, v: u64) key(k) resolve prefer(first, second);
+table m(k: u64, v: u64) key(k);
+
+first: on fresh_a(k, v), not n(k, _) {
+    next n(k, v);
+}
+second: on fresh_b(k, v), not n(k, _) {
+    next n(k, v + 1000);
+}
+first_m: on fresh_a(k, v), not m(k, _) {
+    next m(k, v);
+}
+second_m: on fresh_b(k, v), not m(k, _), not fresh_a(k, _) {
+    next m(k, v + 1000);
+}
+
+/// Conflicts `prefer` does not settle: two values from one listed handler, and an unlisted handler's write.
+clashing: on clash(k, v) {
+    upsert p(k, v);
+    upsert p(k, v + 1);
+}
+straying: on stray(k, v) {
+    upsert p(k, v + 7);
+}

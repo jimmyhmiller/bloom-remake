@@ -357,6 +357,30 @@ pub static REGISTRY: &[CodeInfo] = &[
         "an evaluation deeper than the bound the evaluators' stacks are sized for (§16.1)",
     ),
     info(
+        "BLS0218",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "`?` where it cannot return early: outside a function returning `Option`, under a branch, the right of `&&`/`||`, a nested block or a closure (§16.1)",
+    ),
+    info(
+        "BLS0219",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "a function type outside a function's parameter list, a function parameter neither called nor passed on, or a function argument that is not a named function (§16.1)",
+    ),
+    info(
+        "BLS0220",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "generic functions instantiated more than the bound allows (each call is an instance; nested generic calls multiply them) (§16.1)",
+    ),
+    info(
         "BLS0300",
         Error,
         "blossom-front",
@@ -571,6 +595,14 @@ pub static REGISTRY: &[CodeInfo] = &[
         &[],
         CodeOrigin::Language,
         "`delete`/`upsert` on a lattice-valued relation (LANG-284)",
+    ),
+    info(
+        "BLS0411",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "`resolve prefer(…)` naming no handler, one twice, or one that does not write the table with `next` or `upsert` (§10.7)",
     ),
     info(
         "BLS0500",
@@ -1224,8 +1256,8 @@ mod tests {
     fn codes_registry_unique() {
         assert_eq!(
             REGISTRY.len(),
-            122,
-            "LANGUAGE §20 has 118 codes; ARCHITECTURE §0.3 adds 4"
+            126,
+            "LANGUAGE §20 has 122 codes; ARCHITECTURE §0.3 adds 4"
         );
         for (a, b) in REGISTRY.iter().zip(REGISTRY.iter().skip(1)) {
             assert!(

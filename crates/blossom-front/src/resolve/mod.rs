@@ -15,6 +15,7 @@
 //! matter either. Bodies, statements and expressions are resolved in [`body`].
 
 mod body;
+mod generic;
 mod types;
 
 pub(crate) use types::int_value;
@@ -220,6 +221,8 @@ pub(crate) struct ModScope<'t> {
     pub broken: BTreeSet<Symbol>,
     /// Pure functions declared in this module, by name (LANGUAGE §16.1).
     pub fns: BTreeMap<Symbol, HFnId>,
+    /// Generic functions (and functions with function parameters) declared in this module: their templates.
+    pub generic_fns: BTreeMap<Symbol, usize>,
 }
 
 impl ModScope<'_> {
@@ -238,6 +241,7 @@ impl ModScope<'_> {
             own_items: None,
             broken: BTreeSet::new(),
             fns: BTreeMap::new(),
+            generic_fns: BTreeMap::new(),
         }
     }
 }
@@ -294,6 +298,20 @@ pub(crate) struct Resolver<'t, 'd> {
     pub param_bindings: BTreeMap<String, crate::api::ParamBinding>,
     /// The parameters declared, to report bindings of names that are not parameters.
     pub params_declared: BTreeSet<String>,
+    /// Generic functions' templates (LANGUAGE §16.1), instantiated per call.
+    pub templates: Vec<generic::Template<'t>>,
+    /// The functions each generic function instance calls, for the recursion check (BLS0213).
+    pub instance_calls: BTreeMap<HFnId, BTreeSet<HFnId>>,
+    /// The templates being instantiated, innermost last: a template met again is recursive.
+    pub instantiating: Vec<usize>,
+    /// Templates already reported recursive.
+    pub recursive: BTreeSet<usize>,
+    /// Whether the instance bound was reported (once).
+    pub instances_capped: bool,
+    /// How many handlers of each module carry each label (a `resolve prefer` name must label exactly one).
+    pub handler_labels: BTreeMap<(ScopeIdx, Symbol), u32>,
+    /// The (table, handler label) pairs of `next`/`upsert` writes into tables with `resolve prefer`.
+    pub prefer_writers: BTreeSet<(HRelId, Symbol)>,
 }
 
 impl<'t, 'd> Resolver<'t, 'd> {
@@ -321,6 +339,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 views: Vec::new(),
                 facts: Vec::new(),
                 invariants: Vec::new(),
+                guards: Vec::new(),
                 fns: Vec::new(),
                 streams: Vec::new(),
                 scopes: Vec::new(),
@@ -336,6 +355,13 @@ impl<'t, 'd> Resolver<'t, 'd> {
             spec: None,
             param_bindings: BTreeMap::new(),
             params_declared: BTreeSet::new(),
+            templates: Vec::new(),
+            instance_calls: BTreeMap::new(),
+            instantiating: Vec::new(),
+            recursive: BTreeSet::new(),
+            instances_capped: false,
+            handler_labels: BTreeMap::new(),
+            prefer_writers: BTreeSet::new(),
         }
     }
 
@@ -541,6 +567,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             durable: false,
             cell: false,
             resolve: None,
+            prefer: None,
             role: None,
             span,
         });
@@ -565,6 +592,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             durable: false,
             cell: false,
             resolve: None,
+            prefer: None,
             role: None,
             span,
         });
@@ -599,6 +627,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             durable: false,
             cell: false,
             resolve: None,
+            prefer: None,
             role: None,
             span: name.span,
         });
@@ -630,6 +659,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             durable: false,
             cell: false,
             resolve: None,
+            prefer: None,
             role: None,
             span,
         });
@@ -682,6 +712,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
         self.imports(s, items, placement);
         self.functions(s, items);
         self.rules(s, items, placement);
+        self.check_prefer(s);
     }
 
     /// Pass 1: roles.
@@ -845,6 +876,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                         durable: false,
                         cell: false,
                         resolve: None,
+                        prefer: None,
                         role: placement,
                         span: v.name.span,
                     });
@@ -1229,6 +1261,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 durable: false,
                 cell: false,
                 resolve: None,
+                prefer: None,
                 role: placement,
                 span,
             });
@@ -1340,6 +1373,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             durable: false,
             cell: false,
             resolve: None,
+            prefer: None,
             role: placement,
             span: t.name.span,
         }))
@@ -1436,9 +1470,12 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 Some(idx)
             }
         };
-        let resolve = match &d.resolve {
-            None => None,
-            Some((policy, span)) => self.resolve_policy(d, &cols, key.as_deref(), policy, *span),
+        let (resolve, prefer) = match &d.resolve {
+            None => (None, None),
+            Some((ast::RelPolicy::Prefer(rules), span)) => {
+                (None, self.prefer_policy(&cols, key.as_deref(), rules, *span))
+            }
+            Some((policy, span)) => (self.resolve_policy(d, &cols, key.as_deref(), policy, *span), None),
         };
         let kind = match d.kind {
             RelKind::Table => HRelKind::Table,
@@ -1491,9 +1528,82 @@ impl<'t, 'd> Resolver<'t, 'd> {
             durable: d.mods.durable,
             cell: d.mods.cell,
             resolve,
+            prefer,
             role: placement,
             span: d.name.span,
         }))
+    }
+
+    /// `resolve prefer(rule, …)` (LANGUAGE §10.7): on a keyed table of plain values, each handler named once.
+    fn prefer_policy(
+        &mut self,
+        cols: &[HCol],
+        key: Option<&[usize]>,
+        rules: &[Ident],
+        span: Span,
+    ) -> Option<Vec<(Symbol, Span)>> {
+        if key.is_none() {
+            self.error(
+                code!("BLS0106"),
+                span,
+                "`resolve prefer` arbitrates writes to one key: declare `key(…)`",
+            );
+            return None;
+        }
+        if cols
+            .iter()
+            .any(|c| c.ty.is_some_and(|t| holds_lattice(&self.hir.types, t)))
+        {
+            self.unsupported("LANG-117", "`resolve prefer` on a table holding lattice values", span);
+            return None;
+        }
+        if rules.is_empty() {
+            self.error(code!("BLS0411"), span, "`resolve prefer` names no handler");
+            return None;
+        }
+        let mut seen = BTreeSet::new();
+        for r in rules {
+            if !seen.insert(r.name) {
+                self.error(
+                    code!("BLS0411"),
+                    r.span,
+                    format!("`{}` is named twice in `resolve prefer`", r.as_str()),
+                );
+                return None;
+            }
+        }
+        Some(rules.iter().map(|r| (r.name, r.span)).collect())
+    }
+
+    /// After a module's rules: each handler a `resolve prefer` names writes the table with `next` or `upsert`.
+    fn check_prefer(&mut self, s: ScopeIdx) {
+        let rels: Vec<HRelId> = self.scope(s).rels.values().copied().collect();
+        for id in rels {
+            let r = self.rel_of(id);
+            for (name, span) in r.prefer.iter().flatten() {
+                let labelled = self.handler_labels.get(&(s, *name)).copied().unwrap_or(0);
+                if labelled > 1 {
+                    self.error(
+                        code!("BLS0411"),
+                        *span,
+                        format!(
+                            "`resolve prefer` names `{}`, which labels {labelled} handlers",
+                            name.as_str()
+                        ),
+                    );
+                } else if !self.prefer_writers.contains(&(id, *name)) {
+                    self.error(
+                        code!("BLS0411"),
+                        *span,
+                        format!(
+                            "`resolve prefer` names `{}`, which is not a handler writing `{}` with `next` or `upsert`",
+                            name.as_str(),
+                            r.name
+                        ),
+                    );
+                }
+            }
+        }
     }
 
     /// A relation-level `resolve P` (LANGUAGE §10.7): only on a keyed table.
@@ -1515,6 +1625,12 @@ impl<'t, 'd> Resolver<'t, 'd> {
         };
         let is_lattice = |r: &Self, c: &HCol| c.ty.is_some_and(|t| r.hir.lattice_of(t).is_some());
         let policy = match policy {
+            ast::RelPolicy::Prefer(_) => {
+                self.bugs.push(blossom_base::internal_error!(
+                    "`resolve prefer` reached the resolution policies"
+                ));
+                return None;
+            }
             ast::RelPolicy::Choose { sticky: false } => HPolicy::Choose,
             ast::RelPolicy::Choose { sticky: true } => {
                 self.unsupported("LANG-115", "`resolve choose sticky`", span);
@@ -1632,6 +1748,11 @@ impl<'t, 'd> Resolver<'t, 'd> {
                     }
                 }
                 ItemKind::Fact(f) => self.fact(s, f),
+                ItemKind::Format(f) => self.bugs.push(blossom_base::internal_error!(
+                    "format `{}` reached name resolution (formats are expanded when files load)",
+                    f.name.as_str()
+                )),
+                ItemKind::Rel(d) if d.guard.is_some() => self.persist_guard(s, d, placement),
                 ItemKind::Interpose(ip) => self.interpose_rules(s, ip, placement),
                 ItemKind::Invariant(inv) => {
                     if has_roles && placement.is_none() {
@@ -1727,6 +1848,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             own_items: Some(&module.items),
             broken: Default::default(),
             fns: BTreeMap::new(),
+            generic_fns: BTreeMap::new(),
         });
         // Value and relation parameters.
         let mut given: BTreeMap<Symbol, &'t ast::Expr> = BTreeMap::new();
@@ -1937,6 +2059,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             own_items: Some(&p.items),
             broken: Default::default(),
             fns: BTreeMap::new(),
+            generic_fns: BTreeMap::new(),
         });
         for item in &p.items {
             match &item.kind {

@@ -11,6 +11,8 @@
 
 pub mod attrs;
 mod convert;
+mod desugar;
+pub(crate) mod format;
 
 pub use convert::convert;
 
@@ -121,16 +123,47 @@ pub enum ItemKind {
         name: Ident,
         kind: Ident,
     },
+    /// `format …` (LANGUAGE §16.7): replaced, once includes are expanded, by a struct and its functions (`format`).
+    Format(FormatItem),
     /// A construct this build parses but does not accept yet; the converter has already reported it (BLS0908).
     Unsupported {
         what: &'static str,
     },
 }
 
+/// `format Name(params) { fields }` (a record: a struct and its decoder and encoder) or `format name(F, …) =
+/// element;` (an alias, expanded where it is used), LANGUAGE §16.7.
+#[derive(Clone, Debug)]
+pub struct FormatItem {
+    pub name: Ident,
+    /// A record's value parameters (`version: i16`); an alias's element parameters (no type).
+    pub params: Vec<(Ident, Option<Type>)>,
+    pub body: FormatBody,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum FormatBody {
+    Record(Vec<FormatField>),
+    Alias(Expr),
+}
+
+/// `[name:] element [if cond] [= default]`: an element without a name is read and written but kept in no field.
+#[derive(Clone, Debug)]
+pub struct FormatField {
+    pub name: Option<Ident>,
+    pub elem: Expr,
+    pub cond: Option<Expr>,
+    pub default: Option<Expr>,
+    pub span: Span,
+}
+
 /// A pure function: total, non-recursive, its body a block of `let`s and a final expression (LANGUAGE §16.1).
 #[derive(Clone, Debug)]
 pub struct FnItem {
     pub name: Ident,
+    /// Type parameters (LANGUAGE §16.1): a generic function is instantiated per call.
+    pub generics: Vec<GenericParam>,
     pub params: Vec<(Ident, Type)>,
     pub ret: Type,
     pub body: Expr,
@@ -193,12 +226,20 @@ pub enum Type {
         inner: Box<Type>,
         span: Span,
     },
+    /// `fn(A, B) -> R`: the type of a function parameter, whose argument is a named function (LANGUAGE §16.1).
+    Fn {
+        params: Vec<Type>,
+        ret: Box<Type>,
+        span: Span,
+    },
 }
 
 impl Type {
     pub fn span(&self) -> Span {
         match self {
-            Type::Named { span, .. } | Type::Tuple { span, .. } | Type::Unsafe { span, .. } => *span,
+            Type::Named { span, .. } | Type::Tuple { span, .. } | Type::Unsafe { span, .. } | Type::Fn { span, .. } => {
+                *span
+            }
         }
     }
 }
@@ -307,17 +348,25 @@ pub struct RelDecl {
     pub resolve: Option<(RelPolicy, Span)>,
     /// Clauses this build does not implement yet, by name and span (reported by the resolver when used).
     pub other_clauses: Vec<(&'static str, Span)>,
+    /// `while BODY`: a row persists to the next tick only while the body holds for it (LANGUAGE §7.2).
+    pub guard: Option<Body>,
     pub span: Span,
 }
 
 /// A relation-level resolution policy (LANGUAGE §10.7).
 #[derive(Clone, Debug)]
 pub enum RelPolicy {
-    Choose { sticky: bool },
-    ChooseRand { sticky: bool },
+    Choose {
+        sticky: bool,
+    },
+    ChooseRand {
+        sticky: bool,
+    },
     Least(Expr),
     Most(Expr),
     Merge,
+    /// `prefer(rule, …)`: among one tick's writes to a key, those of the earliest listed handler win.
+    Prefer(Vec<Ident>),
 }
 
 #[derive(Clone, Debug)]
@@ -591,6 +640,12 @@ pub struct Expr {
     pub span: Span,
 }
 
+impl Expr {
+    pub fn new(kind: ExprKind, span: Span) -> Expr {
+        Expr { kind, span }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BinOp {
     Add,
@@ -720,6 +775,9 @@ pub enum ExprKind {
         params: Vec<Ident>,
         body: Box<Expr>,
     },
+    /// `e?`: `e`'s value if it is `Some`, else the enclosing function returns `None` (EXTENSIONS 2.1). Function
+    /// bodies desugar it into `match`es before name resolution (`ast::desugar`); anywhere else it is BLS0218.
+    Try(Box<Expr>),
 }
 
 /// `let pat [: T] = value;` in a block.

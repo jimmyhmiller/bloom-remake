@@ -13,39 +13,12 @@ const INVALID_PRODUCER_EPOCH: i16 = 47;
 const INVALID_RECORD: i16 = 87;
 const NOT_ENOUGH_REPLICAS: i16 = 19;
 
-struct ProducePartition { index: i32, records: Option<Bytes> }
-
-struct ProduceTopic { name: String, partitions: Vec<ProducePartition> }
-
-struct ProduceRequest { transactional_id: Option<String>, acks: i16, timeout_ms: i32, topics: Vec<ProduceTopic> }
-
-fn decode_produce_partition(c: Cur) -> Option<(ProducePartition, Cur)> {
-    read_i32(c).and_then(|i| read_compact_nullable_bytes(i.1).and_then(|r| {
-        skip_tags(r.1).map(|end| (ProducePartition { index: i.0, records: r.0 }, end))
-    }))
-}
-
-fn decode_produce_topic(c: Cur) -> Option<(ProduceTopic, Cur)> {
-    read_compact_string(c).and_then(|name| read_compact_len(name.1).and_then(|n| {
-        range(0, n.0)
-            .fold(Some(([], n.1)), |acc, _i| acc.and_then(|a| decode_produce_partition(a.1).map(|p| (a.0.push(p.0), p.1))))
-            .and_then(|ps| skip_tags(ps.1).map(|end| (ProduceTopic { name: name.0, partitions: ps.0 }, end)))
-    }))
-}
+format ProducePartition { index: i32, records: compact_nullable_bytes, tags }
+format ProduceTopic { name: compact_string, partitions: compact_array(ProducePartition), tags }
+format ProduceRequest { transactional_id: compact_nullable_string, acks: i16, timeout_ms: i32, topics: compact_array(ProduceTopic), tags }
 
 fn decode_produce(c: Cur) -> Option<ProduceRequest> {
-    read_compact_nullable_string(c).and_then(|tid| read_i16(tid.1).and_then(|acks| read_i32(acks.1).and_then(|timeout| {
-        read_compact_len(timeout.1).and_then(|n| {
-            range(0, n.0)
-                .fold(Some(([], n.1)), |acc, _i| acc.and_then(|a| decode_produce_topic(a.1).map(|t| (a.0.push(t.0), t.1))))
-                .and_then(|ts| skip_tags(ts.1).map(|_end| ProduceRequest {
-                    transactional_id: tid.0,
-                    acks: acks.0,
-                    timeout_ms: timeout.0,
-                    topics: ts.0,
-                }))
-        })
-    })))
+    ProduceRequest::decode(c.buf, c.pos).map(|r| r.0)
 }
 
 /// An error that refuses every partition of a request: `acks` other than -1, 0 or 1 (INVALID_REQUIRED_ACKS), or a
@@ -186,51 +159,36 @@ fn produce_failed(xs: Vec<(u64, PartitionAnswer)>) -> bool {
     xs.any(|x| x.1.error != NONE)
 }
 
-fn encode_partition_answer(index: i32, a: PartitionAnswer) -> Bytes {
-    let record_errors = match a.bad_batch {
-        Some(i) => [Bytes::join([Bytes::from_i32_be(i), enc_compact_nullable_string(a.message), no_tags()])],
-        None => [],
-    };
-    Bytes::join([
-        Bytes::from_i32_be(index),
-        Bytes::from_i16_be(a.error),
-        Bytes::from_i64_be(a.base_offset),
-        Bytes::from_i64_be(-1i64),
-        Bytes::from_i64_be(a.log_start),
-        enc_compact_array(record_errors),
-        enc_compact_nullable_string(a.message),
-        no_tags(),
-    ])
+/// A partition's answer on the wire: a bad batch is reported as a record error.
+format PartitionResponse {
+    index: i32,
+    error: i16,
+    base_offset: i64,
+    log_append_time: i64,
+    log_start: i64,
+    record_errors: compact_array((i32, compact_nullable_string, tags)),
+    message: compact_nullable_string,
+    tags,
 }
+format TopicResponse { name: compact_string, partitions: compact_array(PartitionResponse), tags }
+format ProduceResponse { topics: compact_array(TopicResponse), throttle: i32, tags }
 
 /// ProduceResponse v10–v12: each entry's answer (by entry position in `answers`), grouped by topic as the request
 /// grouped them.
 fn encode_produce_response(correlation_id: i32, req: ProduceRequest, answers: Vec<(u64, PartitionAnswer)>) -> Bytes {
-    // `answers` holds one per entry, in entry order: topic k's are those before its end, less its own.
-    let ends = req.topics.scan(0, |n, t| n + t.partitions.len());
-    let topics = req.topics.enumerate().map(|e| {
-        let (k, t) = e;
-        let first = match ends.get(k) {
-            Some(x) => x - t.partitions.len(),
-            None => error("encode_produce_response: a topic without an end"),
-        };
-        Bytes::join([
-            enc_compact_string(t.name),
-            enc_compact_array(t.partitions.enumerate().map(|pe| {
-                match answers.get(first + pe.0).and_then(|a| if a.0 == first + pe.0 { Some(a) } else { None }) {
-                    Some(a) => encode_partition_answer(pe.1.index, a.1),
-                    None => error("encode_produce_response: a partition entry has no answer"),
-                }
-            })),
-            no_tags(),
-        ])
+    let groups = by_topic(req.topics.map(|t| t.partitions.len()), answers);
+    let topics = req.topics.enumerate().map(|e| TopicResponse {
+        name: e.1.name,
+        partitions: e.1.partitions.enumerate().map(|pe| match groups.get(e.0).and_then(|g| g.get(pe.0)) {
+            Some(a) => PartitionResponse {
+                index: pe.1.index, error: a.error, base_offset: a.base_offset, log_append_time: -1i64,
+                log_start: a.log_start, record_errors: a.bad_batch.map(|i| [(i, a.message)]).unwrap_or([]),
+                message: a.message,
+            },
+            None => error("encode_produce_response: a partition entry has no answer"),
+        }),
     });
-    frame(Bytes::join([
-        response_header_v1(correlation_id),
-        enc_compact_array(topics),
-        Bytes::from_i32_be(0i32),
-        no_tags(),
-    ]))
+    frame(response_header_v1(correlation_id).concat(ProduceResponse::encode(ProduceResponse { topics: topics, throttle: 0i32 })))
 }
 
 // ---------------------------------------------------------------- idempotent producers
@@ -411,17 +369,10 @@ fn placed_all(s: Sequenced) -> Vec<(i64, i64, i64, Bytes)> {
 
 // ---------------------------------------------------------------- InitProducerId v3–v5
 
-struct InitProducerIdRequest { transactional_id: Option<String>, timeout_ms: i32, producer_id: i64, producer_epoch: i16 }
+format InitProducerIdRequest { transactional_id: compact_nullable_string, timeout_ms: i32, producer_id: i64, producer_epoch: i16, tags }
 
 fn decode_init_producer_id(c: Cur) -> Option<InitProducerIdRequest> {
-    read_compact_nullable_string(c).and_then(|t| read_i32(t.1).and_then(|timeout| read_i64(timeout.1).and_then(|pid| {
-        read_i16(pid.1).and_then(|epoch| skip_tags(epoch.1).map(|_end| InitProducerIdRequest {
-            transactional_id: t.0,
-            timeout_ms: timeout.0,
-            producer_id: pid.0,
-            producer_epoch: epoch.0,
-        }))
-    })))
+    InitProducerIdRequest::decode(c.buf, c.pos).map(|r| r.0)
 }
 
 fn encode_init_producer_id_response(correlation_id: i32, error: i16, producer_id: i64, epoch: i16) -> Bytes {

@@ -51,7 +51,9 @@ impl ModuleTree {
         };
         let root_key = file.key.clone();
         let root_ast = parse(&file, sources, diags)?;
-        let root_ast = expand_includes(root_ast, &root_key, loader, sources, diags, &mut vec![root_key.clone()])?;
+        let mut root_ast = expand_includes(root_ast, &root_key, loader, sources, diags, &mut vec![root_key.clone()])?;
+        // Formats expand once every include is in place: an alias may come from another file (LANGUAGE §16.7).
+        ast::format::expand(&mut root_ast.items, diags);
         let mut tree = ModuleTree {
             root_key,
             root: root_ast,
@@ -98,9 +100,10 @@ impl ModuleTree {
                 continue;
             };
             let key = f.key.clone();
-            let Some(parsed) = expand_includes(parsed, &key, loader, sources, diags, &mut vec![key.clone()]) else {
+            let Some(mut parsed) = expand_includes(parsed, &key, loader, sources, diags, &mut vec![key.clone()]) else {
                 continue;
             };
+            ast::format::expand(&mut parsed.items, diags);
             referenced(&parsed.items, &mut pending);
             tree.modules.insert(name, parsed);
         }

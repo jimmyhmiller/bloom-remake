@@ -187,6 +187,47 @@ fn expected(view: &str, n: u64, s: &str, b: &[u8]) -> (Value, Value) {
                 vec_u([n, n + 1, 0, 0]),
             ]),
         ),
+        "v_try" => {
+            let pair = |a: u64, b: u64| tuple(vec![u(a), u(b)]);
+            let two = (b.len() >= 2).then(|| (u64::from(b[0]), u64::from(b[1]) + 1));
+            let sum = (b.len() >= 3).then(|| u64::from(b[0]) + u64::from(b[2]));
+            let swapped = two.map(|(x, y)| (y * if x > 100 { 1 } else { 2 }, x));
+            (
+                bytes(b),
+                tuple(vec![
+                    opt(two.map(|(x, y)| pair(x, y))),
+                    opt(sum.map(u)),
+                    opt(swapped.map(|(x, y)| pair(x, y))),
+                ]),
+            )
+        }
+        "v_generic" => {
+            // A counted list (count: the byte at `at`, mod 4) of `width`-byte items from `at + 1`.
+            let list = |at: usize, width: usize, item: &dyn Fn(&[u8]) -> Value| -> Value {
+                let Some(&count) = b.get(at) else { return opt(None) };
+                let start = at + 1;
+                let end = start + width * usize::from(count % 4);
+                opt((end <= b.len()).then(|| {
+                    let items = b[start..end].chunks(width).map(item).collect();
+                    tuple(vec![Value::Vec(items), u(end as u64)])
+                }))
+            };
+            let byte = |c: &[u8]| u(u64::from(c[0]));
+            let pair = |c: &[u8]| tuple(vec![u(u64::from(c[0])), u(u64::from(c[1]))]);
+            let word = s.split_whitespace().next().unwrap_or("none");
+            (
+                bytes(b),
+                tuple(vec![
+                    list(0, 1, &byte),
+                    list(0, 2, &pair),
+                    list(1, 1, &byte),
+                    u(9 * n + 4),
+                    Value::Str(word.into()),
+                    u(n % 5),
+                    list(0, 1, &byte),
+                ]),
+            )
+        }
         "v_match" => (
             Value::Str(s.into()),
             Value::Int(IntValue::I64(match s.parse::<i64>() {
@@ -232,6 +273,8 @@ const VIEWS: &[&str] = &[
     "v_parse",
     "v_hash",
     "v_match",
+    "v_try",
+    "v_generic",
 ];
 
 #[test]

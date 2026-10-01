@@ -231,6 +231,8 @@ pub enum SyntaxKind {
     TILDE,
     /// bang.
     BANG,
+    /// question mark (`e?`: early return of `None`).
+    QUESTION,
     /// underscore.
     UNDERSCORE,
     /// sourcefile.
@@ -339,6 +341,7 @@ pub enum SyntaxKind {
     SEALEDBYCLAUSE,
     /// exactlyonceclause.
     EXACTLYONCECLAUSE,
+    WHILECLAUSE,
     /// policy.
     POLICY,
     /// celldecl.
@@ -415,6 +418,8 @@ pub enum SyntaxKind {
     CALLEXPR,
     /// methodcallexpr.
     METHODCALLEXPR,
+    /// tryexpr (`e?`).
+    TRYEXPR,
     /// bangcallexpr.
     BANGCALLEXPR,
     /// fieldexpr.
@@ -497,6 +502,11 @@ pub enum SyntaxKind {
     RELPATH,
     /// streamitem: `stream NAME: listen;` or `stream NAME: connect;` (FOREIGN-PROTOCOLS §1).
     STREAMITEM,
+    FORMATITEM,
+    FORMATPARAM,
+    FORMATFIELD,
+    FORMATCOND,
+    FORMATDEFAULT,
 }
 impl SyntaxKind {
     /// All kinds, in their wire/discriminant order.
@@ -615,6 +625,7 @@ impl SyntaxKind {
         Self::CARET,
         Self::TILDE,
         Self::BANG,
+        Self::QUESTION,
         Self::UNDERSCORE,
         Self::SOURCEFILE,
         Self::PROGRAMHEADER,
@@ -669,6 +680,7 @@ impl SyntaxKind {
         Self::PARTITIONCLAUSE,
         Self::SEALEDBYCLAUSE,
         Self::EXACTLYONCECLAUSE,
+        Self::WHILECLAUSE,
         Self::POLICY,
         Self::CELLDECL,
         Self::TIMERDECL,
@@ -707,6 +719,7 @@ impl SyntaxKind {
         Self::PATHEXPR,
         Self::CALLEXPR,
         Self::METHODCALLEXPR,
+        Self::TRYEXPR,
         Self::BANGCALLEXPR,
         Self::FIELDEXPR,
         Self::TUPLEINDEXEXPR,
@@ -748,6 +761,11 @@ impl SyntaxKind {
         Self::NAME,
         Self::RELPATH,
         Self::STREAMITEM,
+        Self::FORMATITEM,
+        Self::FORMATPARAM,
+        Self::FORMATFIELD,
+        Self::FORMATCOND,
+        Self::FORMATDEFAULT,
     ];
     /// Whether this token is trivia.
     pub fn is_trivia(self) -> bool {
@@ -872,6 +890,7 @@ impl SyntaxKind {
         ("^", Self::CARET),
         ("~", Self::TILDE),
         ("!", Self::BANG),
+        ("?", Self::QUESTION),
         ("_", Self::UNDERSCORE),
     ];
 }

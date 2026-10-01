@@ -55,7 +55,7 @@ fn children_of(node: &SyntaxNode, kind: SyntaxKind) -> impl Iterator<Item = Synt
 }
 
 /// A function's name, its parameters with their types, and its result type.
-type FnSig = (Ident, Vec<(Ident, Type)>, Type);
+type FnSig = (Ident, Vec<GenericParam>, Vec<(Ident, Type)>, Type);
 
 fn child_of(node: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxNode> {
     children_of(node, kind).next()
@@ -68,6 +68,7 @@ fn is_expr(kind: SyntaxKind) -> bool {
             | PATHEXPR
             | CALLEXPR
             | METHODCALLEXPR
+            | TRYEXPR
             | BANGCALLEXPR
             | FIELDEXPR
             | TUPLEINDEXEXPR
@@ -401,6 +402,7 @@ impl Cx<'_> {
                 let items = self.items(node);
                 ItemKind::Protocol(ProtocolItem { name, generics, items })
             }
+            FORMATITEM => ItemKind::Format(self.format_item(node, span)?),
             STREAMITEM => {
                 let names = self.names(node);
                 let (Some(name), Some(kind)) = (names.first().copied(), names.get(1).copied()) else {
@@ -639,6 +641,19 @@ impl Cx<'_> {
                 span,
             };
         }
+        if has_token(node, FN_KW) {
+            // `fn(A, B) -> R`: the parameter types, then the result type (the last type child).
+            let mut tys: Vec<Type> = children_of(node, TYPE).map(|t| self.ty(&t)).collect();
+            let ret = tys.pop().unwrap_or(Type::Tuple {
+                elems: Vec::new(),
+                span,
+            });
+            return Type::Fn {
+                params: tys,
+                ret: Box::new(ret),
+                span,
+            };
+        }
         let path = self.names(node);
         if path.is_empty() {
             let elems = children_of(node, TYPE).map(|t| self.ty(&t)).collect();
@@ -795,6 +810,7 @@ impl Cx<'_> {
         let mut key = None;
         let mut direction = None;
         let mut resolve = None;
+        let mut guard = None;
         let mut other_clauses = Vec::new();
         for c in node.children() {
             let cspan = self.span(&c);
@@ -814,6 +830,10 @@ impl Cx<'_> {
                 PARTITIONCLAUSE => other_clauses.push(("partition by", cspan)),
                 SEALEDBYCLAUSE => other_clauses.push(("sealed by", cspan)),
                 EXACTLYONCECLAUSE => other_clauses.push(("exactly_once", cspan)),
+                WHILECLAUSE => match child_of(&c, BODY) {
+                    Some(b) => guard = Some(self.body(&b)),
+                    None => self.malformed("a `while` clause without a body", cspan),
+                },
                 _ => {}
             }
         }
@@ -827,6 +847,7 @@ impl Cx<'_> {
             direction,
             resolve,
             other_clauses,
+            guard,
             span,
         }
     }
@@ -834,7 +855,9 @@ impl Cx<'_> {
     fn rel_policy(&mut self, node: &SyntaxNode) -> RelPolicy {
         let sticky = has_word(node, "sticky");
         let expr = || expr_children(node).next();
-        if has_word(node, "choose_rand") {
+        if has_word(node, "prefer") {
+            RelPolicy::Prefer(self.names(node))
+        } else if has_word(node, "choose_rand") {
             RelPolicy::ChooseRand { sticky }
         } else if has_word(node, "choose_least") {
             match expr() {
@@ -894,6 +917,7 @@ impl Cx<'_> {
             direction: None,
             resolve: None,
             other_clauses: Vec::new(),
+            guard: None,
             span,
         }
     }
@@ -1392,6 +1416,10 @@ impl Cx<'_> {
                     args: self.args(node),
                 }
             }
+            TRYEXPR => {
+                let inner = expr_children(node).next();
+                ExprKind::Try(self.boxed(inner, span))
+            }
             BANGCALLEXPR => {
                 let text = tokens(node)
                     .find(|t| t.kind() == BANG_IDENT)
@@ -1643,7 +1671,10 @@ impl Cx<'_> {
         if kinds.contains(&TYPE_KW) || kinds.contains(&LATTICE_KW) {
             return Some(self.unsupported_item("LANG-027", "host types and lattices", span));
         }
-        let (name, params, ret) = self.fn_signature(node, span)?;
+        let (name, generics, params, ret) = self.fn_signature(node, span)?;
+        if !generics.is_empty() {
+            return Some(self.unsupported_item("LANG-181", "generic host functions", span));
+        }
         let Some(path) = tokens(node).find(|t| t.kind() == STRING_LIT) else {
             self.malformed("an extern function without its host path", span);
             return None;
@@ -1666,8 +1697,13 @@ impl Cx<'_> {
             self.malformed("a function without a signature", span);
             return None;
         };
-        if child_of(&sig, GENERICS).is_some() {
-            self.unsupported("LANG-180", "generic functions", span);
+        let generics = self.generics(&sig);
+        if let Some(bound) = generics.iter().flat_map(|g| &g.bounds).next() {
+            self.unsupported(
+                "LANG-180",
+                "bounds and defaults on a function's type parameters",
+                bound.span(),
+            );
             return None;
         }
         // A class prefix (`monotone fn`, `threshold fn`, …) is a direct token of the item (LANGUAGE §16.1).
@@ -1704,23 +1740,72 @@ impl Cx<'_> {
             self.malformed("a function without a return type", span);
             return None;
         };
-        Some((name, params, ret))
+        Some((name, generics, params, ret))
+    }
+
+    /// `format …` (LANGUAGE §16.7).
+    fn format_item(&mut self, node: &SyntaxNode, span: Span) -> Option<FormatItem> {
+        let name = self.need_name(node);
+        let params = children_of(node, FORMATPARAM)
+            .map(|p| (self.need_name(&p), child_of(&p, TYPE).map(|t| self.ty(&t))))
+            .collect();
+        let fields: Vec<SyntaxNode> = children_of(node, FORMATFIELD).collect();
+        let body = if has_token(node, EQ) && fields.is_empty() {
+            let Some(e) = expr_children(node).next() else {
+                self.malformed("a format alias without its element", span);
+                return None;
+            };
+            FormatBody::Alias(self.expr(&e))
+        } else {
+            let mut out = Vec::new();
+            for f in fields {
+                let fspan = self.span(&f);
+                let Some(elem) = expr_children(&f).next().map(|e| self.expr(&e)) else {
+                    self.malformed("a format field without its element", fspan);
+                    continue;
+                };
+                let sub = |this: &mut Self, kind| {
+                    child_of(&f, kind)
+                        .and_then(|c| expr_children(&c).next())
+                        .map(|e| this.expr(&e))
+                };
+                let cond = sub(self, FORMATCOND);
+                let default = sub(self, FORMATDEFAULT);
+                out.push(FormatField {
+                    name: self.first_name(&f),
+                    elem,
+                    cond,
+                    default,
+                    span: fspan,
+                });
+            }
+            FormatBody::Record(out)
+        };
+        Some(FormatItem {
+            name,
+            params,
+            body,
+            span,
+        })
     }
 
     /// `fn name(params) -> ret { body }`.
     fn fn_item(&mut self, node: &SyntaxNode, span: Span) -> Option<FnItem> {
-        let (name, params, ret) = self.fn_signature(node, span)?;
+        let (name, generics, params, ret) = self.fn_signature(node, span)?;
         let Some(body) = child_of(node, BLOCKEXPR).map(|b| self.block_expr(&b)) else {
             self.malformed("a function without a body", span);
             return None;
         };
-        Some(FnItem {
+        let mut item = FnItem {
             name,
+            generics,
             params,
             ret,
             body,
             span,
-        })
+        };
+        desugar::fn_body(&mut item, self.diags);
+        Some(item)
     }
 
     fn bang_clause(&mut self, node: &SyntaxNode) -> BangClause {

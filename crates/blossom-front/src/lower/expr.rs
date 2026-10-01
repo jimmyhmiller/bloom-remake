@@ -640,8 +640,13 @@ impl Lowerer<'_> {
                 for a in args {
                     xs.push(self.expr(d, a)?);
                 }
+                let id = self
+                    .fns
+                    .get(f.index())
+                    .copied()
+                    .ok_or_else(|| internal_error!("call of function {f:?}, which was not lowered"))?;
                 Expr::Call {
-                    f: ir::FnRef::Fn(blossom_base::FnId::from_raw(f.0)),
+                    f: ir::FnRef::Fn(id),
                     args: xs,
                 }
             }
@@ -657,6 +662,11 @@ impl Lowerer<'_> {
                     value: Box::new(v),
                     body: Box::new(self.expr(d, body)?),
                 }
+            }
+            HExprKind::CallParam { .. } | HExprKind::GenericCall { .. } => {
+                return Err(internal_error!(
+                    "a generic function's template call reached lowering (templates are never lowered)"
+                ));
             }
             HExprKind::Closure { params, body } => {
                 let mut vs = Vec::new();
@@ -696,10 +706,34 @@ impl Lowerer<'_> {
         })
     }
 
-    /// The pure functions (LANGUAGE §16.1), declared in HIR order so each `HFnId` is its IR `FnId`. A body is one
-    /// expression over the function's own variables, the parameters first.
+    /// The pure functions (LANGUAGE §16.1), declared in HIR order. Instances of a generic function with the same
+    /// template, type arguments and function arguments are one IR function (their bodies are the same), named after
+    /// them: `read_array<Item, read_item>`. A body is one expression over the function's own variables, the
+    /// parameters first.
     pub fn functions(&mut self) -> Result<(), InternalError> {
+        // Every HIR function's IR function first: bodies call instances made after them.
+        let mut seen: BTreeMap<(u32, Vec<TypeId>, Vec<HFnId>), blossom_base::FnId> = BTreeMap::new();
+        let mut order = Vec::new();
         for (i, f) in self.hir.fns.iter().enumerate() {
+            let next = blossom_base::FnId::from_raw(
+                u32::try_from(order.len()).map_err(|_| internal_error!("too many functions"))?,
+            );
+            let id = match &f.scheme {
+                Some(s) => {
+                    let key = (s.template, s.targs.clone(), s.fn_args.iter().map(|a| a.2).collect());
+                    *seen.entry(key).or_insert(next)
+                }
+                None => next,
+            };
+            if id == next {
+                order.push(i);
+            }
+            self.fns.push(id);
+        }
+        for (k, i) in order.into_iter().enumerate() {
+            let Some(f) = self.hir.fns.get(i) else {
+                return Err(internal_error!("function {i} vanished while lowering"));
+            };
             let mut d = Draft::new(f.scope);
             let mut params = Vec::new();
             for (v, ty) in &f.params {
@@ -735,11 +769,15 @@ impl Lowerer<'_> {
                 .map_err(|e| internal_error!("too many variables in `{}`: {e}", f.name))?;
             }
             let n = params.len();
+            let name = match &f.scheme {
+                Some(s) => self.instance_name(f, s),
+                None => f.name.clone(),
+            };
             let id = self
                 .b
                 .declare_fn(ir::FnDecl {
                     id: blossom_base::FnId::from_raw(0),
-                    name: f.name.clone(),
+                    name,
                     params,
                     ret: f.ret,
                     vars,
@@ -756,11 +794,32 @@ impl Lowerer<'_> {
                     },
                 })
                 .map_err(ir_err)?;
-            if id.index() != i {
-                return Err(internal_error!("function `{}` is IR function {id:?}, not {i}", f.name));
+            if id.index() != k {
+                return Err(internal_error!("function `{}` is IR function {id:?}, not {k}", f.name));
             }
+            self.fn_origins.push(HFnId(
+                u32::try_from(i).map_err(|_| internal_error!("too many functions"))?,
+            ));
         }
         Ok(())
+    }
+
+    /// A generic function instance's IR name: the generic function's, its last segment followed by the type
+    /// arguments and the functions passed, `read_array<Item, read_item>`.
+    fn instance_name(&self, f: &HFn, s: &HScheme) -> blossom_base::QualName {
+        let mut args: Vec<String> = s
+            .targs
+            .iter()
+            .map(|t| crate::typeck::type_name(&self.hir.types, *t))
+            .collect();
+        for (_, _, g) in &s.fn_args {
+            let n = self.hir.fns.get(g.index()).and_then(|g| g.name.last());
+            args.push(n.map(|n| n.as_str().to_string()).unwrap_or_default());
+        }
+        let mut segs: Vec<Symbol> = f.name.segments().to_vec();
+        let last = segs.pop().map(|s| s.as_str().to_string()).unwrap_or_default();
+        segs.push(Symbol::intern(&format!("{last}<{}>", args.join(", "))));
+        blossom_base::QualName::new(segs)
     }
 
     /// The IR lattice of a lattice type.

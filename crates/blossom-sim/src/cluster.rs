@@ -806,10 +806,11 @@ impl<'p> Cluster<'p> {
                     .map(|(r, _)| name(r))
                     .collect();
                 changed.extend(before.rels.keys().filter(|r| !now_state.rels.contains_key(r)).map(name));
-                return Err(SimError::Internal(internal_error!(
-                    "node {} livelocks: still ready after {LIVELOCK_TICKS} ticks at one instant, changing {changed:?}",
-                    n.0
-                )));
+                return Err(SimError::Livelock {
+                    node: n,
+                    ticks: LIVELOCK_TICKS,
+                    changed,
+                });
             }
             let ticks = driver
                 .run_one(now)
