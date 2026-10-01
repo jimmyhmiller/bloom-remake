@@ -1059,7 +1059,7 @@ table placed(c: Conn, i: u64, j: u64) while queued(c, i, _);
 table follower(g: Group, f: Node) while leader(g, self), members(g, f);
 ```
 
-The condition is a body over the table's columns, by name (relation atoms, negations, `let`s and a `where`); its
+The condition is a body over the table's columns, by name (so they are named as variables, BLS0106) (relation atoms, negations, `let`s and a `where`); its
 other variables are existential. A row persists from tick t to t+1 only if the condition holds for it at t — a row
 whose condition fails is visible in that tick and gone in the next, exactly as with `while p(x̄), not <condition>
 { delete p(x̄); }`, which it replaces. Writes (`emit`, `next`, `upsert`, `delete`) are unchanged. The condition may
@@ -1933,7 +1933,7 @@ dropped. Survivors then apply as their verb does, so two different values from o
 handler the list does not name next to any other value, still conflict (SEM-050, SEM-051). `emit` and `delete` are
 not arbitrated. The table keeps its frame rule (it is not a resolved table: persisted rows are not candidates, and
 an `upsert` still replaces its key's row). Each name must label a handler of the module that writes the table with
-`next` or `upsert`, once (BLS0411); `prefer` needs a key and plain values. Lowering — writes are staged with their
+`next` or `upsert`, once, and label only one handler (BLS0411); `prefer` needs a key and plain values. Lowering — writes are staged with their
 handler's rank (unlisted ones apart), and the least rank per key goes on:
 
 ```ir
@@ -2604,7 +2604,9 @@ in the signature, and has no bounds (every type is `Eq`, `Hash` and ordered); th
 one. Each call is checked with its type parameters inferred there, from the arguments, the function arguments'
 signatures and the context, like any rule variable; one the call does not determine is BLS0300, and so is a body
 that does not type-check at the types a call gives it. A generic function that no call reaches is name-resolved but
-not type-checked. Recursion through generic calls is BLS0213, as for any function. Lowering: monomorphization — each
+not type-checked. Recursion through generic calls is BLS0213, as for any function; a function parameter the built-in
+or relation of its name would shadow is BLS0201; more than 10,000 instances (nested generic calls multiply them) is
+BLS0220. Lowering: monomorphization — each
 call is an instance, a copy of the body with the named functions substituted, and instances with the same type
 arguments and function arguments are one IR function, named `read_list<Item, read_item>`; the IR has no generics
 and no function values.
@@ -2684,9 +2686,14 @@ fn MetadataRequest::encode(x: MetadataRequest, version: i16) -> Bytes
 ```
 
 Decoding reads the value at `p` and returns it with the position after it, or `None` when the bytes run out or
-break the layout — never a runtime error on hostile input: a length or count read from the bytes is checked against
-the bytes left before anything uses it. Encoding is total; `decode(encode(x))` is `Some((x, end))` for every value
-whose absent conditional fields hold their defaults.
+break the layout — never a runtime error on malformed bytes: a length or count read from the bytes is checked against
+the bytes left before anything uses it. Decoding pays the function step budget like any function (§16.1): about
+seven steps per array item, so a well-formed value of more than about a million items exceeds it (BLSR012); a
+program decoding untrusted input bounds its size first. Encoding fails the tick when a value does not fit the layout:
+a length beyond its prefix's type (BLSR004), a `bytes(n)` value of another size (BLSR010). `decode(encode(x))` is
+`Some((x, end))` for every value whose absent conditional fields hold their defaults; the rules that make it so are
+checked: `rest` and `utf8` (and a tuple or record ending in one) come last, an array's items take at least one byte
+each, and a bias fits its length's type (BLS0301).
 
 Elements (parameters in parentheses; every element is a name or a call):
 
@@ -3001,6 +3008,7 @@ never truncated or defaulted).
 | BLS0217 | E | an evaluation deeper than the bound the evaluators' stacks are sized for (§16.1) |
 | BLS0218 | E | `?` where it cannot return early: outside a function returning `Option`, under a branch, the right of `&&`/`||`, a nested block or a closure (§16.1) |
 | BLS0219 | E | a function type outside a function's parameter list, a function parameter neither called nor passed on, or a function argument that is not a named function (§16.1) |
+| BLS0220 | E | generic functions instantiated more than the bound allows (each call is an instance; nested generic calls multiply them) (§16.1) |
 
 **Types (BLS03xx)**
 

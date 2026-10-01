@@ -935,6 +935,9 @@ fn persist_exact(
     }
     // A guard is a relation of the same construct, over the same columns.
     let guarded = guard.is_none_or(|g| {
+        if g == rel.id || Some(g) == del {
+            return false;
+        }
         let owned = rule
             .construct
             .and_then(|c| p.constructs.get(c))

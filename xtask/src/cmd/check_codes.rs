@@ -621,7 +621,7 @@ mod tests {
         let lang = parse_language(&std::fs::read_to_string(root.join("docs/design/LANGUAGE.md")).unwrap()).unwrap();
         let arch =
             parse_amendments(&std::fs::read_to_string(root.join("docs/design/ARCHITECTURE.md")).unwrap()).unwrap();
-        assert_eq!(lang.len(), 121);
+        assert_eq!(lang.len(), 122);
         let expected = expected_registry(&lang, &arch).unwrap();
         assert_eq!(compare_registry(&expected, REGISTRY), Vec::<String>::new());
     }

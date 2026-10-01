@@ -373,6 +373,14 @@ pub static REGISTRY: &[CodeInfo] = &[
         "a function type outside a function's parameter list, a function parameter neither called nor passed on, or a function argument that is not a named function (§16.1)",
     ),
     info(
+        "BLS0220",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "generic functions instantiated more than the bound allows (each call is an instance; nested generic calls multiply them) (§16.1)",
+    ),
+    info(
         "BLS0300",
         Error,
         "blossom-front",
@@ -1248,8 +1256,8 @@ mod tests {
     fn codes_registry_unique() {
         assert_eq!(
             REGISTRY.len(),
-            125,
-            "LANGUAGE §20 has 121 codes; ARCHITECTURE §0.3 adds 4"
+            126,
+            "LANGUAGE §20 has 122 codes; ARCHITECTURE §0.3 adds 4"
         );
         for (a, b) in REGISTRY.iter().zip(REGISTRY.iter().skip(1)) {
             assert!(

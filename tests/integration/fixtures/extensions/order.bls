@@ -14,6 +14,17 @@ view gap(k, d) = pair(k, a, b), let d = a - b, not done(k);
 /// `&&`'s conjuncts are two checks: `b != 0` cannot fail, so it runs before `a / b > 1`.
 view big(k) = pair(k, a, b) where a / b > 1 && b != 0;
 
+/// An `if` with a fallible first conjunct and its `else`: both reach the division only past `b != 0`.
+table hi(k: u64);
+table lo(k: u64);
+branching: on pair(k, a, b) {
+    if a / b > 1 && b != 0 {
+        emit hi(k);
+    } else {
+        emit lo(k);
+    }
+}
+
 table log(i: u64, d: u64);
 table got(lo: u64, i: u64, b: u64);
 adding: on add(i) { emit log(i, i * 2); }
