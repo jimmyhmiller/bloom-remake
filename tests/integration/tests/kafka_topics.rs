@@ -840,7 +840,7 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize) {
             &artifact,
             &schema,
             blossom_value::Seed::from_u64(seed),
-            Vec::new(),
+            blossom_integration_tests::kafka_brokers(&artifact).unwrap(),
             Box::new(NoKvClients),
             cfg,
         )
@@ -887,7 +887,7 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize) {
         cluster.step_until(3_500_000_000).unwrap();
         let state = cluster.state(NodeId(0)).expect("the broker is up");
         let topics: Vec<(Vec<u8>, i64)> = state
-            .rows(artifact.rel_named("topic").unwrap())
+            .rows(artifact.rel_named("mtopic").unwrap())
             .map(|r| (bytes_of(&r[1]), int(&r[2])))
             .collect();
         for rel in ["log_end", "log_start"] {

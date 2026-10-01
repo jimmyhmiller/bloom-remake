@@ -1,9 +1,5 @@
 //! The broker's request handling: the answer to each request frame (pure functions; `broker.bls` has the node).
 
-fn brokers() -> Vec<BrokerInfo> {
-    [BrokerInfo { node_id: NODE_ID, host: ADVERTISED_HOST, port: ADVERTISED_PORT, rack: None }]
-}
-
 /// The response to one request frame, or `None` to close the connection.
 fn answer(req: Bytes) -> Option<Bytes> {
     let c = cur(req);

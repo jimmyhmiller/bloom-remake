@@ -163,6 +163,9 @@ pub struct ClusterRun {
     pub stream_held: u64,
 }
 
+/// How many ticks a node may run at one instant before the simulator calls it a livelock.
+const LIVELOCK_TICKS: u64 = 10_000;
+
 /// SplitMix64: the simulation's only randomness.
 struct Rng(u64);
 
@@ -659,7 +662,12 @@ impl<'p> Cluster<'p> {
             }
             // Restart the nodes whose downtime is over.
             for i in 0..self.nodes.len() {
-                if self.nodes.get(i).and_then(|s| s.down_until).is_some_and(|t| t <= self.now) {
+                if self
+                    .nodes
+                    .get(i)
+                    .and_then(|s| s.down_until)
+                    .is_some_and(|t| t <= self.now)
+                {
                     let n = node_id(i)?;
                     self.note(format!("restart node {}", n.0));
                     self.boot(n, false)?;
@@ -720,7 +728,10 @@ impl<'p> Cluster<'p> {
             && mid_tick
         {
             let at = Instant(now.saturating_add(slot.offset));
-            if d.node.ready(at).map_err(|e| internal_error!("node {} failed: {e}", n.0))? {
+            if d.node
+                .ready(at)
+                .map_err(|e| internal_error!("node {} failed: {e}", n.0))?
+            {
                 let tick = d.node.next_tick();
                 d.crash_before_sync(at).map_err(|e| node_failure(n, tick, e))?;
                 interrupted = true;
@@ -743,7 +754,11 @@ impl<'p> Cluster<'p> {
         self.note(format!(
             "crash node {}{}",
             n.0,
-            if interrupted { " between a WAL append and its sync" } else { "" }
+            if interrupted {
+                " between a WAL append and its sync"
+            } else {
+                ""
+            }
         ));
         Ok(())
     }
@@ -760,14 +775,45 @@ impl<'p> Cluster<'p> {
         // One tick at a time, each released tick's stream writes resolved before the next tick runs, as the runtime
         // dispatches them on release: a later tick may drop a blob from the cache, or a checkpoint collect it.
         let mut released: Vec<ReleasedTick> = Vec::new();
+        let mut at_once = 0u64;
+        let mut watched: Option<blossom_ir::tick::Instance> = None;
         loop {
             let Some(driver) = self.nodes.get_mut(n.0 as usize).and_then(|s| s.driver.as_mut()) else {
                 return Ok(());
             };
-            if !driver.node.ready(now).map_err(|e| node_failure(n, driver.node.next_tick(), e))? {
+            if !driver
+                .node
+                .ready(now)
+                .map_err(|e| node_failure(n, driver.node.next_tick(), e))?
+            {
                 break;
             }
-            let ticks = driver.run_one(now).map_err(|e| node_failure(n, driver.node.next_tick(), e))?;
+            // A node that is still ready after `LIVELOCK_TICKS` ticks at one instant never quiesces: a rule changes
+            // state at every tick. The run stops with the relations the last tick changed.
+            at_once += 1;
+            if at_once == LIVELOCK_TICKS {
+                watched = Some(driver.node.carried());
+            }
+            if at_once > LIVELOCK_TICKS {
+                let now_state = driver.node.carried();
+                let p = self.artifact.program.get();
+                let name = |r: &RelId| p.rels.get(*r).map_or_else(|| format!("{r:?}"), |d| d.name.to_string());
+                let before = watched.take().unwrap_or_default();
+                let mut changed: Vec<String> = now_state
+                    .rels
+                    .iter()
+                    .filter(|(r, rows)| before.rels.get(r) != Some(rows))
+                    .map(|(r, _)| name(r))
+                    .collect();
+                changed.extend(before.rels.keys().filter(|r| !now_state.rels.contains_key(r)).map(name));
+                return Err(SimError::Internal(internal_error!(
+                    "node {} livelocks: still ready after {LIVELOCK_TICKS} ticks at one instant, changing {changed:?}",
+                    n.0
+                )));
+            }
+            let ticks = driver
+                .run_one(now)
+                .map_err(|e| node_failure(n, driver.node.next_tick(), e))?;
             self.run.ticks += 1;
             for mut t in ticks {
                 let host = std::mem::take(&mut t.host);
@@ -1098,7 +1144,10 @@ impl<'p> Cluster<'p> {
                 }
             }
             Action::Isolate => {
-                let others: Vec<NodeId> = (0..n).filter_map(|o| node_id(o).ok()).filter(|o| *o != victim).collect();
+                let others: Vec<NodeId> = (0..n)
+                    .filter_map(|o| node_id(o).ok())
+                    .filter(|o| *o != victim)
+                    .collect();
                 self.partition(&[&[victim], &others])?;
                 self.run.partitions += 1;
             }

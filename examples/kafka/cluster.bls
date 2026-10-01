@@ -1,0 +1,359 @@
+//! The cluster (docs/plan/notes/S8.md, items 2 and 4): the controller, placement, and who leads what.
+//!
+//! The controller is a replicated log (`raft.bls`) over every broker: the metadata group. Its entries are commands
+//! (D8): create a topic, delete a topic, allocate a producer id. The broker a client asked builds a command (with a
+//! fresh topic id and the replica assignment, D11), forwards it to the controller's leader, and sends it again every
+//! `CMD_RESEND` until it sees the command applied: a command reaches the log at least once, and is applied once,
+//! since applying skips a command whose (origin, tag) is already applied. Every broker applies the committed
+//! commands in log order, one per tick, so every broker decides the same outcomes (a name already taken, an id that
+//! is gone) and holds the same metadata. The applied metadata is volatile: a restarted broker applies the log again.
+//!
+//! Each topic partition is a group of its own, whose members are its replica set. A partition leader announces the
+//! groups it leads, with their epochs, to every broker at each heartbeat (D7), so any broker can answer Metadata.
+
+/// The controller's group: the metadata topic id (0, 1), partition 0 (Kafka's `__cluster_metadata`).
+fn controller() -> Group {
+    (Bytes::join([Bytes::from_u64_be(0u64), Bytes::from_u64_be(1u64)]), 0i32)
+}
+
+/// Command kinds.
+const OP_CREATE: i8 = 1;
+const OP_DELETE: i8 = 2;
+const OP_PIDS: i8 = 3;
+
+/// One topic of a command: for a creation, the error the broker found after the checks that come before a taken name
+/// (the partition count, the replication factor, ...; it applies only if the name is not taken), the topic's name,
+/// id, replica assignment (one replica list per partition) and configurations; for a deletion, the topic id alone.
+/// `slot` is the topic's entry in its request, which names its outcome.
+struct Item { slot: u64, err: i16, name: String, id: Bytes, assignment: Vec<Vec<i32>>, configs: Vec<(String, String)> }
+
+/// A command to the controller. `origin` and `tag` name the request that asked for it (the origin broker's id, and
+/// a tag unique among its requests). A request's creations (or deletions) are one command, applied in one tick, so
+/// no other request's commands come between them: a request takes effect at one point, as a Kafka controller handles
+/// a request in one event. A producer-id allocation has no items.
+struct Cmd { op: i8, origin: i32, tag: u64, items: Vec<Item> }
+
+fn create_item(slot: u64, err: i16, name: String, id: Bytes, assignment: Vec<Vec<i32>>, configs: Vec<(String, String)>) -> Item {
+    Item { slot: slot, err: err, name: name, id: id, assignment: assignment, configs: configs }
+}
+
+fn delete_item(slot: u64, id: Bytes) -> Item {
+    Item { slot: slot, err: NONE, name: "", id: id, assignment: [], configs: [] }
+}
+
+fn create_cmd(origin: i32, tag: u64, items: Vec<Item>) -> Cmd {
+    Cmd { op: OP_CREATE, origin: origin, tag: tag, items: items }
+}
+
+fn delete_cmd(origin: i32, tag: u64, items: Vec<Item>) -> Cmd {
+    Cmd { op: OP_DELETE, origin: origin, tag: tag, items: items }
+}
+
+fn pids_cmd(origin: i32, tag: u64) -> Cmd {
+    Cmd { op: OP_PIDS, origin: origin, tag: tag, items: [] }
+}
+
+fn encode_item(it: Item) -> Bytes {
+    Bytes::join([
+        Bytes::from_u64_be(it.slot),
+        Bytes::from_i16_be(it.err),
+        enc_compact_string(it.name),
+        it.id,
+        enc_compact_array(it.assignment.map(|rs| enc_compact_i32s(rs))),
+        enc_compact_array(it.configs.map(|kv| Bytes::join([enc_compact_string(kv.0), enc_compact_string(kv.1)]))),
+    ])
+}
+
+fn encode_cmd(c: Cmd) -> Bytes {
+    Bytes::join([
+        Bytes::from_i8(c.op),
+        Bytes::from_i32_be(c.origin),
+        Bytes::from_u64_be(c.tag),
+        enc_compact_array(c.items.map(|it| encode_item(it))),
+    ])
+}
+
+fn read_assignment(c: Cur) -> Option<(Vec<Vec<i32>>, Cur)> {
+    read_compact_len(c).and_then(|n| {
+        let steps = range(0, n.0).scan(Some(([], n.1)), |acc, _i| {
+            acc.and_then(|a| read_compact_i32s(a.1).map(|r| ([r.0], r.1)))
+        });
+        read_all_steps(steps, n.1)
+    })
+}
+
+fn read_configs(c: Cur) -> Option<(Vec<(String, String)>, Cur)> {
+    read_compact_len(c).and_then(|n| {
+        let steps = range(0, n.0).scan(Some(([], n.1)), |acc, _i| {
+            acc.and_then(|a| read_compact_string(a.1).and_then(|k| read_compact_string(k.1).map(|v| ([(k.0, v.0)], v.1))))
+        });
+        read_config_steps(steps, n.1)
+    })
+}
+
+/// The items a scan of reads produced, and where the last read ended; `None` if a read failed.
+fn read_all_steps(steps: Vec<Option<(Vec<Vec<i32>>, Cur)>>, start: Cur) -> Option<(Vec<Vec<i32>>, Cur)> {
+    if steps.any(|s| s.is_none()) {
+        None
+    } else {
+        let items = steps.filter_map(|s| s.map(|x| x.0)).flatten();
+        match steps.last() {
+            Some(Some(s)) => Some((items, s.1)),
+            _ => Some((items, start)),
+        }
+    }
+}
+
+fn read_config_steps(steps: Vec<Option<(Vec<(String, String)>, Cur)>>, start: Cur) -> Option<(Vec<(String, String)>, Cur)> {
+    if steps.any(|s| s.is_none()) {
+        None
+    } else {
+        let items = steps.filter_map(|s| s.map(|x| x.0)).flatten();
+        match steps.last() {
+            Some(Some(s)) => Some((items, s.1)),
+            _ => Some((items, start)),
+        }
+    }
+}
+
+fn read_item(c: Cur) -> Option<(Item, Cur)> {
+    read_u64(c).and_then(|slot| read_i16(slot.1).and_then(|err| read_compact_string(err.1).and_then(|name| {
+        read_uuid(name.1).and_then(|id| read_assignment(id.1).and_then(|a| read_configs(a.1).map(|cf| (Item {
+            slot: slot.0, err: err.0, name: name.0, id: id.0, assignment: a.0, configs: cf.0,
+        }, cf.1))))
+    })))
+}
+
+fn read_items(c: Cur) -> Option<(Vec<Item>, Cur)> {
+    read_compact_len(c).and_then(|n| {
+        let steps = range(0, n.0).scan(Some(([], n.1)), |acc, _i| {
+            acc.and_then(|a| read_item(a.1).map(|r| ([r.0], r.1)))
+        });
+        read_item_steps(steps, n.1)
+    })
+}
+
+fn read_item_steps(steps: Vec<Option<(Vec<Item>, Cur)>>, start: Cur) -> Option<(Vec<Item>, Cur)> {
+    if steps.any(|s| s.is_none()) {
+        None
+    } else {
+        let items = steps.filter_map(|s| s.map(|x| x.0)).flatten();
+        match steps.last() {
+            Some(Some(s)) => Some((items, s.1)),
+            _ => Some((items, start)),
+        }
+    }
+}
+
+fn decode_cmd(b: Bytes) -> Option<Cmd> {
+    read_i8(cur(b)).and_then(|op| read_i32(op.1).and_then(|origin| read_u64(origin.1).and_then(|tag| {
+        read_items(tag.1).map(|its| Cmd { op: op.0, origin: origin.0, tag: tag.0, items: its.0 })
+    })))
+}
+
+/// The creations a Metadata request on connection `c` (its `i`th request) asks for, one per name: ids and placements
+/// that are functions of the request, so the command sent again is the same command.
+fn metadata_items(c: Conn, i: u64, names: Vec<String>, ids: Vec<i32>, partitions: i32, rf: i16) -> Vec<Item> {
+    names.enumerate().map(|x| create_item(x.0, NONE, x.1,
+        topic_id(hash64(("id", c, i, x.1, 0u64)), hash64(("id", c, i, x.1, 1u64))),
+        assign(ids, partitions, rf, hash64(("start", c, i, x.1))), []))
+}
+
+/// The bytes of a stored entry (a blob only ever holds its whole bytes).
+fn entry_bytes(data: Blob) -> Bytes {
+    match data.read(0, data.len()) {
+        Some(b) => b,
+        None => error("entry_bytes: a blob does not hold its own length"),
+    }
+}
+
+/// A command from a broker to the controller's leader.
+channel submit(cmd: Bytes): Broker -> Broker;
+/// A partition leader's announcement: the groups it leads, with their epochs (S8.md D7).
+channel leads(gs: Vec<(Group, u64)>): Broker -> Broker;
+
+param CMD_RESEND: Duration = 500ms;
+/// Producer ids are allocated one at a time (Kafka allocates blocks of 1000; one per InitProducerId is enough here).
+param PID_START: i64 = 1000;
+
+at Broker {
+    /// This broker's id, and every broker's node by id.
+    view my_id(id) = broker(self, id, _, _);
+    view broker_at(id, n) = broker(n, id, _, _);
+    view broker_ids(ids = collect!(id)) = broker(_, id, _, _);
+
+    /// The members of each group (D1): every broker for the controller; a partition's replica set otherwise.
+    view members(g, n) {
+        broker(n, _, _, _), let g = controller();
+        massign(tid, p, rs), broker(n, id, _, _), let g = (tid, p) where rs.contains(id);
+    }
+
+    /// Each group's preferred leader: the broker with the lowest id for the controller, the first replica for a
+    /// partition (D11).
+    view preferred(g, n) {
+        broker(n, id, _, _), broker_ids(ids), let g = controller() where ids.first() == Some(id);
+        massign(tid, p, rs), broker(n, id, _, _), let g = (tid, p) where rs.first() == Some(id);
+    }
+
+    // ---- the applied metadata (volatile: a restarted broker applies the controller's log again)
+
+    /// The highest controller entry applied.
+    table applied_m(i: u64) key() resolve choose_most(i);
+    /// The topics, by name: id, partition count, the configurations given at creation.
+    table mtopic(name: String, id: Bytes, partitions: i32, configs: Vec<(String, String)>) key(name);
+    /// Each partition's replicas, by broker id; the first is the preferred leader.
+    table massign(tid: Bytes, part: i32, replicas: Vec<i32>) key(tid, part);
+    /// The ids of the topics deleted: their partitions' data goes.
+    table mdeleted(tid: Bytes) key(tid);
+    /// The commands applied, by request.
+    table done(origin: i32, tag: u64) key(origin, tag);
+    /// Each applied item's outcome, by its request and entry: the error (NONE when it took effect), the topic id and
+    /// name (a creation's, or the deleted topic's), or the allocated producer id (a producer-id allocation's, slot 0).
+    table outcome(origin: i32, tag: u64, slot: u64, error: i16, id: Bytes, pid: i64, name: String) key(origin, tag, slot);
+    /// The next producer id.
+    table next_pid(n: i64) key() resolve choose_most(n);
+
+    bootstrap {
+        emit applied_m(0);
+        emit next_pid(PID_START);
+    }
+
+    view topic_keys(k, name) = mtopic(name, _, _, _), let k = collision_key(name);
+
+    /// Whether this broker's metadata is current: once it has applied the controller's log up to a commit index it
+    /// learned in this incarnation. Until then (after a restart, while it replays the log) its requests other than
+    /// ApiVersions wait, as Kafka keeps a broker fenced until it has caught up with the metadata. It is a latch: once
+    /// caught up, a broker answers from what it has applied, as a Kafka broker answers from its metadata cache (a
+    /// request is not held back each time the controller commits ahead of what this broker applied).
+    table synced(at: u64) key();
+    latch_synced: while applied_m(a), commit(g, c), let g = controller(), not synced(_) where a >= c {
+        upsert synced(a);
+    }
+    view caught_up() = synced(_);
+
+    /// The next committed controller entry to apply.
+    view to_apply(i, kind, data) =
+        applied_m(a), commit_of(g, c), rlog(g, i, _, _, kind, _, data), let g = controller() where i == a + 1 && i <= c;
+    view to_apply_cmd(cmd) = to_apply(_, kind, data), let Some(cmd) = decode_cmd(entry_bytes(data)) where kind == CMD;
+    advance_applied: while to_apply(i, _, _) {
+        next applied_m(i);
+    }
+    /// The command to apply, unless it is already applied (sent again by its origin, so in the log twice).
+    view fresh(op, origin, tag, items) =
+        to_apply_cmd(cmd), let op = cmd.op, let origin = cmd.origin, let tag = cmd.tag, let items = cmd.items,
+        not done(origin, tag);
+    mark_done: while fresh(_, origin, tag, _) {
+        upsert done(origin, tag);
+    }
+    /// The items of the command to apply, by field. A request's items name distinct topics (two entries for one
+    /// topic are refused by the broker a client asked), so each is decided against the metadata before the command.
+    view fresh_item(op, origin, tag, slot, err, name, id, asg, cfg) =
+        fresh(op, origin, tag, items), it in items, let slot = it.slot, let err = it.err, let name = it.name,
+        let id = it.id, let asg = it.assignment, let cfg = it.configs;
+
+    /// A creation: refused for a name taken (by that name, or one colliding with it), else as the broker decided.
+    view cmd_create(origin, tag, slot, err, name, id, asg, cfg, k) =
+        fresh_item(op, origin, tag, slot, err, name, id, asg, cfg), let k = collision_key(name) where op == OP_CREATE;
+    apply_create: while cmd_create(origin, tag, slot, err, name, id, asg, cfg, k) {
+        if mtopic(name, _, _, _) {
+            upsert outcome(origin, tag, slot, TOPIC_ALREADY_EXISTS, zero_uuid(), -1i64, name);
+        }
+        if not mtopic(name, _, _, _), topic_keys(k, _) {
+            upsert outcome(origin, tag, slot, INVALID_TOPIC_EXCEPTION, zero_uuid(), -1i64, name);
+        }
+        if not mtopic(name, _, _, _), not topic_keys(k, _) where err != NONE {
+            upsert outcome(origin, tag, slot, err, zero_uuid(), -1i64, name);
+        }
+        if not mtopic(name, _, _, _), not topic_keys(k, _) where err == NONE {
+            upsert mtopic(name, id, asg.len() as i32, cfg);
+            upsert outcome(origin, tag, slot, NONE, id, -1i64, name);
+        }
+    }
+    apply_assign: while cmd_create(_, _, _, err, name, id, asg, _, k), not mtopic(name, _, _, _), not topic_keys(k, _),
+        (p, rs) in asg.enumerate() where err == NONE {
+        upsert massign(id, p as i32, rs);
+    }
+
+    view cmd_delete(origin, tag, slot, id) = fresh_item(op, origin, tag, slot, _, _, id, _, _) where op == OP_DELETE;
+    apply_delete: while cmd_delete(origin, tag, slot, id) {
+        if mtopic(name, id, parts, cfg) {
+            delete mtopic(name, id, parts, cfg);
+            upsert mdeleted(id);
+            upsert outcome(origin, tag, slot, NONE, id, -1i64, name);
+        }
+        if not mtopic(_, id, _, _) {
+            upsert outcome(origin, tag, slot, UNKNOWN_TOPIC_ID, id, -1i64, "");
+        }
+    }
+    apply_unassign: while cmd_delete(_, _, _, id), massign(id, p, rs) {
+        delete massign(id, p, rs);
+    }
+    apply_pids: while fresh(op, origin, tag, _), next_pid(n) where op == OP_PIDS {
+        upsert outcome(origin, tag, 0u64, NONE, zero_uuid(), n, "");
+        next next_pid(n + 1);
+    }
+
+    /// A deleted topic's partition data goes, here as everywhere (the topic is gone from the applied metadata, so
+    /// no broker is a member of its groups any more).
+    forget_deleted: while mdeleted(tid), rlog(g, i, t, pt, k, pos, data), let (gt, _gp) = g where gt == tid {
+        delete rlog(g, i, t, pt, k, pos, data);
+    }
+
+    // ---- commands this broker waits on: sent when first wanted, and every `CMD_RESEND` until applied
+
+    /// The commands this broker's requests wait on (`wanted_cmd`, defined with the requests) that are not applied.
+    view awaited(tag, cmd) = wanted_cmd(tag, cmd), my_id(me), not done(me, tag);
+    table cmd_sent(tag: u64) key(tag);
+    timer cmd_resend every CMD_RESEND;
+    view cmd_out(cmd) {
+        awaited(tag, cmd), not cmd_sent(tag);
+        cmd_resend, awaited(_, cmd);
+    }
+    mark_sent: while awaited(tag, _), not cmd_sent(tag) {
+        upsert cmd_sent(tag);
+    }
+    forget_sent: while cmd_sent(tag), not awaited(tag, _) {
+        delete cmd_sent(tag);
+    }
+    forward: while cmd_out(cmd), known_leader(g, l), let g = controller() where l != self {
+        send submit(cmd) to l;
+    }
+
+    /// What each group's leader appends this tick: the controller's commands (forwarded to it, or its own).
+    view proposals(g, xs = collect!(x)) {
+        submit(cmd) from _, leader(g, _), let g = controller(), let x = (CMD, -1i64, Blob::of(cmd));
+        cmd_out(cmd), leader(g, _), let g = controller(), let x = (CMD, -1i64, Blob::of(cmd));
+        data_proposals(g, x);
+    }
+
+    // ---- who leads each partition (D7)
+
+    /// The highest epoch heard per partition group, and its leader.
+    table leader_view(g: Group, epoch: u64, l: Node<Broker>) key(g) resolve choose_most(epoch);
+    announce: on raft_heartbeat, led_groups(gs) {
+        for broker(n, _, _, _) where n != self {
+            send leads(gs) to n;
+        }
+    }
+    view led_groups(gs = collect!((g, t))) = leader(g, t), not is_controller(g);
+    view is_controller(g) = mine(g), let c = controller() where g == c;
+    heard_leads: on leads(gs) from l, (g, t) in gs {
+        if leader_view(g, e, _) where t > e {
+            next leader_view(g, t, l);
+        }
+        if not leader_view(g, _, _) {
+            next leader_view(g, t, l);
+        }
+    }
+    /// Each partition's leader as this broker knows it, with the leader epoch clients see (the term less one, so the
+    /// first leader's is 0, as Kafka's): itself where it leads, else the highest term heard.
+    view partition_leader(g, epoch, l) {
+        leader(g, t), not is_controller(g), let l = self, let epoch = t - 1;
+        leader_view(g, t, l), not leader(g, _), let epoch = t - 1;
+    }
+    /// The controller's leader, by broker id, if known.
+    view controller_id(id) {
+        known_leader(g, l), broker(l, id, _, _), let g = controller();
+        leader(g, _), my_id(id), let g = controller();
+    }
+}

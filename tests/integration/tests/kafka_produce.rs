@@ -109,11 +109,25 @@ fn offsets_of(b: &[u8]) -> i64 {
 
 /// A batch as the broker stores it at `base`: `baseOffset` written, `partitionLeaderEpoch` 0.
 #[cfg(test)]
-fn stamped(b: &[u8], base: i64) -> Vec<u8> {
+fn stamped(b: &[u8], base: i64, epoch: i32) -> Vec<u8> {
     let mut out = b.to_vec();
     out[0..8].copy_from_slice(&base.to_be_bytes());
-    out[12..16].copy_from_slice(&0i32.to_be_bytes());
+    out[12..16].copy_from_slice(&epoch.to_be_bytes());
     out
+}
+
+/// The leader epochs a batch may carry: the partition's leader changes with every restart of its broker.
+#[cfg(test)]
+const EPOCHS: i32 = 64;
+#[cfg(test)]
+const NOT_LEADER_OR_FOLLOWER: i16 = 6;
+#[cfg(test)]
+const REQUEST_TIMED_OUT: i16 = 7;
+
+/// Whether `blob` is batch `b` stored at `base` by a leader of some epoch.
+#[cfg(test)]
+fn stored_as(b: &[u8], base: i64, blob: BlobRef) -> bool {
+    (0..EPOCHS).any(|e| BlobRef::of(&stamped(b, base, e)) == blob)
 }
 
 #[cfg(test)]
@@ -398,11 +412,20 @@ impl StreamClient for Client {
                             .flat_map(|t| t.partition_responses.iter().map(|p| (p.error_code, p.base_offset)))
                             .collect();
                         let mut sh = self.shared.borrow_mut();
-                        // An acknowledged partition's next batch continues its sequence.
-                        for ((p, bs, _), (code, _)) in sh.sent[at].produce.entries.iter().zip(&answers) {
-                            if *code == 0 {
-                                let n: i64 = bs.iter().map(|b| offsets_of(b)).sum();
-                                *self.next_seq.entry(*p).or_insert(0) += n as i32;
+                        // An idempotent producer sends the same request again after a retriable refusal (the
+                        // partition's leader moved, or an acks=all wait timed out): its batches may still be in the
+                        // log, so a new batch with their sequence would be taken for one of them, as Kafka's
+                        // producer knows. Only the final answer moves the sequences on.
+                        let retriable = |c: &i16| *c == NOT_LEADER_OR_FOLLOWER || *c == REQUEST_TIMED_OUT;
+                        if self.idempotent && answers.iter().any(|(c, _)| retriable(c)) {
+                            self.retry = Some(at);
+                        } else {
+                            // An acknowledged partition's next batch continues its sequence.
+                            for ((p, bs, _), (code, _)) in sh.sent[at].produce.entries.iter().zip(&answers) {
+                                if *code == 0 {
+                                    let n: i64 = bs.iter().map(|b| offsets_of(b)).sum();
+                                    *self.next_seq.entry(*p).or_insert(0) += n as i32;
+                                }
                             }
                         }
                         sh.sent[at].answer = Some(answers);
@@ -491,7 +514,7 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
             &artifact,
             &schema,
             blossom_value::Seed::from_u64(seed),
-            Vec::new(),
+            blossom_integration_tests::kafka_brokers(&artifact).unwrap(),
             Box::new(NoKvClients),
             cfg,
         )
@@ -528,7 +551,7 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
         cluster.step_until(3_500_000_000).unwrap();
         let state = cluster.state(NodeId(0)).expect("the broker is up");
         let tid = state
-            .rows(artifact.rel_named("topic").unwrap())
+            .rows(artifact.rel_named("mtopic").unwrap())
             .find(|r| r[0] == Value::Str(TOPIC.into()))
             .map(|r| r[1].clone())
             .expect("the topic exists");
@@ -569,7 +592,7 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
             pids.len(),
             "seed {seed}: a producer id twice: {pids:?}"
         );
-        let mut placed: BTreeMap<(i64, i64), BlobRef> = BTreeMap::new();
+        let mut placed: BTreeMap<(i64, i64), Vec<u8>> = BTreeMap::new();
         let mut candidates: Vec<(i64, Vec<u8>, bool)> = Vec::new();
         for s in &sent {
             for (i, (p, bs, corrupt)) in s.produce.entries.iter().enumerate() {
@@ -590,7 +613,16 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
                         } else {
                             0
                         };
-                        assert_eq!(code, want, "seed {seed}: the answer to {:?}", s.produce);
+                        // A broker that does not lead the partition yet (after a restart, before it is elected)
+                        // refuses any entry of a partition that exists, before looking at its records, as Kafka
+                        // does; an acks=all wait can time out. A client retries both.
+                        let transient =
+                            (want != 3 && code == NOT_LEADER_OR_FOLLOWER) || (want == 0 && code == REQUEST_TIMED_OUT);
+                        assert!(
+                            code == want || transient,
+                            "seed {seed}: the answer {code} to {:?}",
+                            s.produce
+                        );
                         if code != 0 {
                             refused += 1;
                             continue;
@@ -598,25 +630,35 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
                         acked += 1;
                         let mut at = base;
                         for b in bs {
-                            placed.insert((i64::from(*p), at), BlobRef::of(&stamped(b, at)));
+                            placed.insert((i64::from(*p), at), b.clone());
                             at += offsets_of(b);
                         }
                     }
                 }
             }
         }
-        for (key, blob) in &placed {
-            assert_eq!(
-                stored.get(key).map(|x| x.1),
-                Some(*blob),
-                "seed {seed}: the acknowledged batch at {key:?} is not stored as sent"
+        for (key, b) in &placed {
+            assert!(
+                stored.get(key).is_some_and(|x| stored_as(b, key.1, x.1)),
+                "seed {seed}: the acknowledged batch at {key:?} is not stored as sent: stored {:?}, around {:?}, sent header {:?}, stored is the batch with (pid, epoch, seq, count) {:?}",
+                stored.get(key),
+                stored
+                    .range((key.0, key.1 - 10)..(key.0, key.1 + 10))
+                    .map(|(k, v)| (k.1, v.0))
+                    .collect::<Vec<_>>(),
+                &b[..61],
+                candidates
+                    .iter()
+                    .filter(|(cp, cb, _)| *cp == key.0 && stored.get(key).is_some_and(|x| stored_as(cb, key.1, x.1)))
+                    .map(|(_, cb, _)| cb[43..61].to_vec())
+                    .collect::<Vec<_>>()
             );
         }
         let mut seen = BTreeSet::new();
         for ((p, base), (_, blob)) in &stored {
             let from: Vec<&(i64, Vec<u8>, bool)> = candidates
                 .iter()
-                .filter(|(cp, b, _)| cp == p && BlobRef::of(&stamped(b, *base)) == *blob)
+                .filter(|(cp, b, _)| cp == p && stored_as(b, *base, *blob))
                 .collect();
             assert_eq!(
                 from.len(),

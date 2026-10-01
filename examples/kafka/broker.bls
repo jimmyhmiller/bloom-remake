@@ -1,6 +1,7 @@
-//! A Kafka broker in Blossom (docs/design/KAFKA.md; slices 6 and 7): one node, a one-broker cluster, serving stock
-//! clients (kcat, the Java tools, franz-go) on its `kafka` stream. It answers ApiVersions and Metadata; creates,
-//! deletes and describes topics (CreateTopics, DeleteTopics, DescribeConfigs, Metadata auto-creation); appends
+//! A Kafka broker in Blossom (docs/design/KAFKA.md; slices 6–8): a cluster of brokers serving stock clients (kcat,
+//! the Java tools, franz-go) on each broker's `kafka` stream. A controller (a replicated log over every broker)
+//! holds the topics and their placement, and each partition is replicated by Raft over its replicas (S8). It answers
+//! ApiVersions and Metadata; creates, deletes and describes topics (CreateTopics, DeleteTopics, DescribeConfigs, Metadata auto-creation); appends
 //! record batches durably (Produce, with idempotent producers through InitProducerId); serves them back (Fetch,
 //! ListOffsets); and deletes old segments by time and size (retention).
 //!
@@ -20,14 +21,21 @@ include "produce.bls";
 include "fetch.bls";
 include "broker_fns.bls";
 
-/// This broker's id, the address it advertises, and its cluster id.
-param NODE_ID: i32 = 1;
-param ADVERTISED_HOST: String = "localhost";
-param ADVERTISED_PORT: i32 = 9092;
-/// The partition count of a topic created without one (Kafka's `num.partitions`), and whether a Metadata request
-/// may create the topics it names (`auto.create.topics.enable`).
+/// The brokers: every node of the cluster role runs this program.
+role Broker: cluster;
+
+/// Every broker of the deployment: its node, its Kafka broker id, and the address it advertises (S8.md D2). The
+/// deployment spec gives the rows (`[statics]`).
+static broker(n: Node<Broker>, id: i32, host: String, port: i32);
+
+/// The partition count and replication factor of a topic created without them (Kafka's `num.partitions` and
+/// `default.replication.factor`), and whether a Metadata request may create the topics it names
+/// (`auto.create.topics.enable`).
 param DEFAULT_PARTITIONS: i32 = 1;
+param DEFAULT_REPLICATION_FACTOR: i16 = 1;
 param AUTO_CREATE_TOPICS: bool = true;
+/// How long a Metadata request waits for the topics it auto-creates.
+param METADATA_CREATE_WAIT: Duration = 2s;
 /// How often retention is checked (Kafka's `log.retention.check.interval.ms`, 5 minutes by default).
 param RETENTION_CHECK: Duration = 300s;
 param CLUSTER_ID: String = "blossom-kafka";
@@ -37,7 +45,12 @@ param CLUSTER_ID: String = "blossom-kafka";
 param MAX_QUEUED_REQUESTS: u64 = 64;
 param MAX_QUEUED_BYTES: u64 = 16777216;
 
-include "broker_node.bls";
-include "topics_node.bls";
-include "produce_node.bls";
-include "fetch_node.bls";
+include "raft.bls";
+include "cluster.bls";
+
+at Broker {
+    include "broker_node.bls";
+    include "topics_node.bls";
+    include "produce_node.bls";
+    include "fetch_node.bls";
+}

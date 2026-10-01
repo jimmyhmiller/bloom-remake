@@ -455,7 +455,7 @@ fn retention_deletes_whole_segments_from_the_front() {
             &artifact,
             &schema,
             blossom_value::Seed::from_u64(seed),
-            Vec::new(),
+            blossom_integration_tests::kafka_brokers(&artifact).unwrap(),
             Box::new(NoKvClients),
             cfg,
         )
@@ -510,7 +510,7 @@ fn retention_deletes_whole_segments_from_the_front() {
             .iter()
             .map(|n| {
                 state
-                    .rows(artifact.rel_named("topic").unwrap())
+                    .rows(artifact.rel_named("mtopic").unwrap())
                     .find(|r| r[0] == Value::Str((*n).into()))
                     .map(|r| r[1].clone())
                     .unwrap()

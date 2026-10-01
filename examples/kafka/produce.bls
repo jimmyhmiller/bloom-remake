@@ -141,11 +141,13 @@ fn check_records(records: Option<Bytes>, max_bytes: i64) -> Checked {
     }
 }
 
-/// A partition's checks for a request: with acks -1, a topic whose `min.insync.replicas` is above this broker's one
-/// replica is refused first (NOT_ENOUGH_REPLICAS, as Kafka refuses before appending); then the records.
-fn check_entry(records: Option<Bytes>, acks: i16, set: Vec<(String, String)>) -> Checked {
-    if acks == -1i16 && min_insync(set) > 1i64 {
-        refused(NOT_ENOUGH_REPLICAS, "min.insync.replicas is above the one replica of this broker", None)
+/// A partition's checks for a request: with acks -1, a topic whose `min.insync.replicas` is above the partition's
+/// `replicas` is refused first (NOT_ENOUGH_REPLICAS, as Kafka refuses before appending); then the records. (Kafka
+/// compares with the replicas in sync now; here a commit needs a majority of the replicas anyway, so a partition
+/// that lost its majority makes `acks=all` time out instead.)
+fn check_entry(records: Option<Bytes>, acks: i16, set: Vec<(String, String)>, replicas: u64) -> Checked {
+    if acks == -1i16 && min_insync(set) > replicas as i64 {
+        refused(NOT_ENOUGH_REPLICAS, "min.insync.replicas is above the partition's replicas", None)
     } else {
         check_records(records, max_message_bytes(set))
     }
@@ -450,7 +452,7 @@ struct SegmentChange { written: Vec<Segment>, marks: Vec<(i64, i64, i64)>, activ
 /// The placed batches added to the active segment `active` at `now_ms`, rolling a new segment at a batch that would
 /// take a non-empty segment past `limit` bytes (the topic's `segment.bytes`), as Kafka rolls. A batch raising its
 /// segment's greatest timestamp gets a time index row.
-fn segment_appends(placed: Vec<(i64, i64, i64, Bytes)>, active: Segment, limit: i64, now_ms: i64) -> SegmentChange {
+fn segment_appends(placed: Vec<(i64, i64, i64, Blob)>, active: Segment, limit: i64, now_ms: i64) -> SegmentChange {
     let start: (Vec<Segment>, Segment, Vec<(i64, i64, i64)>) = ([], active, []);
     let end = placed.fold(start, |acc, pb| {
         let (done, cur, marks) = acc;
@@ -522,4 +524,44 @@ fn max_segment(segments: Vec<(i64, i64, i64)>) -> Option<(i64, i64)> {
         Some(best) => if x.1 > best.0 { Some((x.1, x.2)) } else { Some(best) },
         None => if x.1 >= 0i64 { Some((x.1, x.2)) } else { None },
     })
+}
+
+// ---------------------------------------------------------------- replication (S8 item 3)
+
+/// A placed batch with the leader's epoch written in (its offsets are already).
+fn restamp(b: Bytes, base: i64, epoch: u64) -> Bytes {
+    match with_offsets(b, base, epoch as i32) {
+        Some(x) => x,
+        None => error("restamp: a placed batch has no room for its offsets"),
+    }
+}
+
+/// A producer's state after its batches `xs` (index, header, base, last), in order, from `start`.
+fn tail_state(start: Option<ProducerEntry>, xs: Vec<(u64, BatchHeader, i64, i64)>) -> Option<ProducerEntry> {
+    xs.fold(start, |e, x| Some(after_append(e, x.1, x.2, x.3)))
+}
+
+/// The idempotent producers of entries being materialized (index, base, last, greatest timestamp, blob, header).
+fn producers_in(xs: Vec<(u64, i64, i64, i64, Blob, BatchHeader)>) -> Set<i64> {
+    xs.map(|x| x.5.producer_id).filter(|p| p != -1i64).to_set()
+}
+
+/// Producer `pid`'s batches among entries being materialized, in order: (index, header, base, last).
+fn producer_batches(xs: Vec<(u64, i64, i64, i64, Blob, BatchHeader)>, pid: i64) -> Vec<(u64, BatchHeader, i64, i64)> {
+    xs.filter(|x| x.5.producer_id == pid).map(|x| (x.0, x.5, x.1, x.2))
+}
+
+/// Entries being materialized as placed batches: (base, last, greatest timestamp, blob).
+fn materialized_batches(xs: Vec<(u64, i64, i64, i64, Blob, BatchHeader)>) -> Vec<(i64, i64, i64, Blob)> {
+    xs.map(|x| (x.1, x.2, x.3, x.4))
+}
+
+/// A partition this broker does not lead: the client refreshes its metadata and finds the leader.
+fn not_leader() -> PartitionAnswer {
+    PartitionAnswer { error: NOT_LEADER_OR_FOLLOWER, base_offset: -1i64, log_start: -1i64, message: None, bad_batch: None }
+}
+
+/// An `acks=all` append whose high watermark did not pass it within the request's timeout.
+fn ack_timed_out() -> PartitionAnswer {
+    PartitionAnswer { error: REQUEST_TIMED_OUT, base_offset: -1i64, log_start: -1i64, message: None, bad_batch: None }
 }

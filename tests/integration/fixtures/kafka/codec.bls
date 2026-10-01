@@ -64,7 +64,10 @@ fn meta_bytes(corr: i32, brokers: Vec<(i32, String, i32, Option<String>)>, clust
         include_topic_authorized_operations: false,
     };
     let bs = brokers.map(|b| BrokerInfo { node_id: b.0, host: b.1, port: b.2, rack: b.3 });
-    encode_metadata_response(corr, req, bs, cluster, controller, have.map(|t| TopicInfo { name: t.0, id: t.1, partitions: t.2 }))
+    let topics = have.map(|t| TopicInfo { name: t.0, id: t.1, partitions: range(0, t.2 as u64).map(|p| PartInfo {
+        index: p as i32, leader: controller, epoch: 0i32, replicas: [controller],
+    }) });
+    encode_metadata_response(corr, req, bs, cluster, controller, topics, empty_names())
 }
 
 fn create_of(b: Bytes) -> Option<CreateTopicsRequest> {
@@ -160,7 +163,7 @@ fn create_bytes(corr: i32, outcomes: Vec<(String, Bytes, i16, Option<String>, i3
     encode_create_topics_response(corr, outcomes.map(|o| CreateOutcome {
         error: o.2,
         message: o.3,
-        topic: NewTopic { name: o.0, id: o.1, partitions: o.4, configs: o.5 },
+        topic: NewTopic { name: o.0, id: o.1, partitions: o.4, configs: o.5, assignment: if o.4 > 0i32 { range(0, o.4 as u64).map(|_p| [1i32]) } else { [] } },
     }))
 }
 
@@ -214,3 +217,7 @@ fn feed_all(cs: Vec<Bytes>) -> (Vec<Bytes>, bool, u64) {
     (end.1, end.2, end.0.have)
 }
 view v_feed(id, x) = chunks(id, cs), let x = feed_all(cs);
+
+fn empty_names() -> Set<String> {
+    [].to_set()
+}

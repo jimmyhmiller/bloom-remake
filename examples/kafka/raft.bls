@@ -5,7 +5,9 @@
 //! groups over a relation. The includer, inside `at Broker`, defines:
 //! - `members(g, n)`: the brokers of group `g`, the same on every broker that knows `g`;
 //! - `proposals(g, xs)`: at most one row per group and tick, the entries this broker would append to `g` if it
-//!   leads it, in order: (kind, position, bytes as a blob).
+//!   leads it, in order: (kind, position, bytes as a blob);
+//! - `preferred(g, n)`: the member that leads a new group (Kafka's first replica leads a new partition): term 1 is
+//!   its (see `initial_vote`), so a new group has a leader at once, without an election.
 //! and reads `rlog`, `commit_of`, `leader` and `known_leader`.
 //!
 //! Durability: a group's term, vote and log are durable, so a vote or an entry is on disk before any message of the
@@ -64,7 +66,7 @@ at Broker {
     table commit(g: Group, i: u64) key(g) resolve choose_most(i);
     /// Leader state per follower: the highest index it acknowledged, and the highest index sent to it.
     table match_idx(g: Group, f: Node<Broker>, i: u64) key(g, f) resolve choose_most(i);
-    table sent(g: Group, f: Node<Broker>, i: u64) key(g, f) resolve choose_most(i);
+    table rsent(g: Group, f: Node<Broker>, i: u64) key(g, f) resolve choose_most(i);
     timer raft_poll every RAFT_POLL;
     timer raft_heartbeat every RAFT_HEARTBEAT;
 
@@ -77,9 +79,33 @@ at Broker {
         mine(g), not commit(g, _), let c = 0u64;
     }
 
-    /// A group gets an election deadline when this broker first knows it is a member (and after a restart).
-    arm: while mine(g), not deadline(g, _) {
-        upsert deadline(g, now() + rand_range(RAFT_ELECTION_MIN, RAFT_ELECTION_MAX, ("arm", g)));
+    /// A group gets an election deadline when this broker first knows it is a member (and after a restart). A member
+    /// alone in its group needs no one's vote, so its deadline is now.
+    arm: while mine(g), not deadline(g, _), group_size(g, k) {
+        if k == 1 {
+            upsert deadline(g, now());
+        }
+        if k > 1 {
+            upsert deadline(g, now() + rand_range(RAFT_ELECTION_MIN, RAFT_ELECTION_MAX, ("arm", g)));
+        }
+    }
+
+    /// A new group starts in term 1 under its preferred member. Every member, when it first learns of the group (it
+    /// has no term recorded for it), records its term-1 vote for the preferred member, durably; so no other member
+    /// can win term 1, and the preferred member leads it at once. Every later term is elected (a member's first
+    /// election is for term 2). A restarted broker has the group's term recorded, so this happens once per member.
+    initial_vote: while mine(g), not rterm(g, _), preferred(g, p) {
+        next rterm(g, 1);
+        next rvote(g, 1, p);
+    }
+    initial_lead: while mine(g), not rterm(g, _), preferred(g, self), let empty = Blob::of(Bytes::empty()) {
+        next won(g, 1);
+        next leader_of(g, 1, self);
+        next rlog(g, 1, 1, 0, NOOP, -1i64, empty);
+        for members(g, f) where f != self {
+            next match_idx(g, f, 0);
+            next rsent(g, f, 0);
+        }
     }
 
     // ---- term first: a group's effective term this tick is the largest known
@@ -161,7 +187,7 @@ at Broker {
         next rlog(g, li + 1, t, lt, NOOP, -1i64, empty);
         for members(g, p) where p != self {
             next match_idx(g, p, 0);
-            next sent(g, p, li);
+            next rsent(g, p, li);
         }
     }
     /// What an earlier leadership recorded goes: under `choose_most` a larger stale acknowledgement would otherwise
@@ -169,8 +195,8 @@ at Broker {
     forget_match: while elected(g, _), match_idx(g, p, m) {
         delete match_idx(g, p, m);
     }
-    forget_sent: while elected(g, _), sent(g, p, s) {
-        delete sent(g, p, s);
+    forget_sent: while elected(g, _), rsent(g, p, s) {
+        delete rsent(g, p, s);
     }
     /// The votes of terms that are over.
     forget_voters: while voters(g, t, v), eff(g, e) where t < e {
@@ -178,18 +204,18 @@ at Broker {
     }
 
     // ---- appending, leader side: this tick's proposals go after the last entry, in their order
-    append: on proposals(g, xs), leader(g, t), last_log(g, li, lt), (k, x) in xs.enumerate() {
+    append: while proposals(g, xs), leader(g, t), last_log(g, li, lt), (k, x) in xs.enumerate() {
         next rlog(g, li + 1 + k, t, if k == 0 { lt } else { t }, x.0, x.1, x.2);
     }
 
     // ---- replication, leader side
     /// New entries go out in the tick after they are appended.
-    push: while leader(g, t), sent(g, f, s), rlog(g, i, et, pt, k, pos, data), let Some(b) = data.read(0, data.len())
+    push: while leader(g, t), rsent(g, f, s), rlog(g, i, et, pt, k, pos, data), let Some(b) = data.read(0, data.len())
         where i > s {
         send entry(g, t, i, et, pt, k, pos, b) to f;
     }
-    pushed: while leader(g, t), sent(g, f, s), last_log(g, li, _) where li > s {
-        next sent(g, f, li);
+    pushed: while leader(g, t), rsent(g, f, s), last_log(g, li, _) where li > s {
+        next rsent(g, f, li);
     }
     /// At every heartbeat, each follower gets its unacknowledged entries again (at most `RAFT_BATCH`) and a beat.
     resend: on raft_heartbeat, leader(g, t), match_idx(g, f, m), rlog(g, i, et, pt, k, pos, data),
