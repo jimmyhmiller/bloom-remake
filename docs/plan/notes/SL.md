@@ -4,8 +4,8 @@ Design: `docs/design/EXTENSIONS.md`. Branch `slice-lang`, worktree `.worktrees/s
 
 ## Resume here
 
-- **State (2026-10-01):** items 1–6 done; item 7 (the Kafka rewrite) in progress: 3,388 code lines (from 4,066),
-  every Kafka/Raft suite green at that point. Next: a shared `reply` for the answer handlers, then measure again.
+- **State (2026-10-01):** items 1–8 done; final full-workspace and corpus run on c7dbd1d, then merge. Outcome
+  below ("Result").
 - Update this section whenever work stops.
 
 ## Baseline (S8, merged at 69b630c)
@@ -164,3 +164,20 @@ candidate rule).
 - `kafka3::three_brokers_keep_every_acknowledged_record_under_kill_9_and_partitions` failed its idle-CPU check
   (a broker over 2 s of CPU in 4 s idle) once during a full `cargo test --workspace`, and passed alone (72 s). Load
   sensitive; not caused by SL (no Kafka program uses the new features yet).
+
+## Result
+
+- The Kafka code: **4,066 → 3,360 code lines (−17%)**, every Kafka and Raft test unchanged and passing. The target
+  (~2,000) was not reached.
+- Where it went: the codecs shrank most (every request, response, command, header and record is now a format;
+  ~600 lines), then clean-up rules (`while` tables, ~70), answer boilerplate (`reply`, ~30), generic helpers (~40).
+- Why not 10x: what remains is mostly ordinary pure functions (topic-creation decisions, producer sequencing,
+  segments and retention, framing, configs: ~1,600 of the 3,360 lines) and genuine distributed logic. Datalog's
+  leverage shows where the problem is relational and distributed — `raft.bls` is 370 lines against etcd raft's
+  4,646 — and not in protocol-semantics code, which in any language is about as long as its rules. Further cuts
+  would come from library work (a Kafka-protocol module of reusable request/answer patterns, 2.7's Serve module
+  with generic views), not from more language features.
+- Language delivered (all on both evaluators, with diagnostics and docs): `?`; generic functions and function
+  parameters; `table … while` (also on resolved tables); `resolve prefer`; the order of checks (§9.14); formats
+  with tuples and `ignored`. Deferred, still BLS0908: soft tables, `upsert` into resolved tables, multi-column
+  costs, `top!`, `index!` with `per`, multi-alternative `per`.

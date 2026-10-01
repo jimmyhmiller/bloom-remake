@@ -187,3 +187,7 @@ inside `at` blocks or with stream parameters, those gaps are fixed generically.
 
 Acceptance: the Kafka code at about 2,000 code lines or less (from ~4,100), the same tests green, and each feature
 with its own tests on both evaluators (differential against the oracle) and its diagnostics.
+
+Outcome (2026-10-01, `docs/plan/notes/SL.md` "Result"): 4,066 → 3,360 code lines with the same tests green; the
+features are delivered with their tests; the line target was missed — what remains is mostly protocol-semantics
+functions, where Datalog adds no leverage.
