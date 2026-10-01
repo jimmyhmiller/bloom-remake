@@ -1460,6 +1460,7 @@ impl Remap for ResolvePolicy {
             Self::Choose => Self::Choose,
             Self::Merge(v0) => Self::Merge(v0.remap(m)),
             Self::Reject => Self::Reject,
+            Self::Prefer { rank } => Self::Prefer { rank: rank.remap(m) },
         }
     }
 }

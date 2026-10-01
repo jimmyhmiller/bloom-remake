@@ -172,6 +172,7 @@ impl HRel {
             durable: false,
             cell: false,
             resolve: None,
+            prefer: None,
             role: None,
             span: Span::point(blossom_base::FileId::from_raw(0), 0),
         }
@@ -219,6 +220,9 @@ pub struct HRel {
     pub cell: bool,
     /// A relation-level resolution policy (LANGUAGE §10.7).
     pub resolve: Option<HResolve>,
+    /// `resolve prefer(rule, …)` (LANGUAGE §10.7): the handler labels whose writes win, earliest first. Not a
+    /// `resolve` above: the table keeps its frame rule, and only its `next`/`upsert` writes are arbitrated.
+    pub prefer: Option<Vec<(Symbol, Span)>>,
     /// Where the relation lives; `None` in a role-free program and for shared declarations.
     pub role: Option<HRoleId>,
     pub span: Span,
@@ -412,9 +416,20 @@ pub struct HVerbStmt {
     /// `send … to d`: the destination.
     pub to: Option<HExpr>,
     pub allow_self_negation: bool,
+    /// A `next`/`upsert` into a table with `resolve prefer(…)`: the writing handler's precedence.
+    pub rank: Option<HRank>,
     /// Normalized statement text, hashed when two statements share verb and target.
     pub text: String,
     pub span: Span,
+}
+
+/// A write's precedence under `resolve prefer(…)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HRank {
+    /// Written by the `n`th listed handler.
+    Listed(u32),
+    /// Written by a handler the list does not name: never arbitrated, so it conflicts with any other value.
+    Unlisted,
 }
 
 #[derive(Clone, Debug)]

@@ -1210,3 +1210,28 @@ fn persistence_conditions_compile_and_their_misuses_are_reported() {
         assert!(got.contains(&code.to_owned()), "{decl}: {got:?}");
     }
 }
+
+#[test]
+fn prefer_names_handlers_that_write_the_table() {
+    for (decl, code) in [
+        // A handler that does not exist, one that writes with `emit`, one named twice; no key; lattice values.
+        ("table t(k: u64, v: u64) key(k) resolve prefer(a, nobody);", "BLS0411"),
+        ("table t(k: u64, v: u64) key(k) resolve prefer(a, b);", "BLS0411"),
+        ("table t(k: u64, v: u64) key(k) resolve prefer(a, a);", "BLS0411"),
+        ("table t(k: u64, v: u64) resolve prefer(a);", "BLS0106"),
+        ("table t(k: u64, v: LMax<u64>) key(k) resolve prefer(a);", "BLS0908"),
+    ] {
+        let src = with_head(Box::leak(
+            format!("{decl}\na: on go(k, v) {{ upsert t(k, v); }}\nb: on go(k, v) {{ emit t(k, v); }}\n")
+                .into_boxed_str(),
+        ));
+        let got = codes(src);
+        assert!(got.contains(&code.to_owned()), "{decl}: {got:?}");
+    }
+    let src = with_head(
+        "table t(k: u64, v: u64) key(k) resolve prefer(b, a);\n\
+         a: on go(k, v) { upsert t(k, v); }\n\
+         b: on go(k, v) { next t(k + 1, v); }\n",
+    );
+    assert_eq!(codes(src), Vec::<&str>::new());
+}

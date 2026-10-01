@@ -945,6 +945,40 @@ impl<'h> Lowerer<'h> {
                 *slot = Some(arg);
             }
         }
+        // Under `resolve prefer`, a write is staged with its precedence and arbitrated before it applies.
+        if let Some(rank) = v.rank {
+            let (listed, unlisted) = self.prefer_rels(v.target, v.span)?;
+            let mut args: Vec<HeadArg> = args
+                .into_iter()
+                .map(|a| a.ok_or_else(|| internal_error!("a head column was not filled")))
+                .collect::<Result<_, _>>()?;
+            let upsert = self.b.intern_const(Value::Bool(v.verb == Verb::Upsert)).map_err(ir)?;
+            let rel = match rank {
+                HRank::Listed(i) => {
+                    let i = self
+                        .b
+                        .intern_const(Value::Int(IntValue::U64(u64::from(i))))
+                        .map_err(ir)?;
+                    args.push(HeadArg::Term(Term::Const(i)));
+                    listed
+                }
+                HRank::Unlisted => unlisted,
+            };
+            args.push(HeadArg::Term(Term::Const(upsert)));
+            d.build(
+                &mut self.b,
+                RuleKind::Deductive,
+                label,
+                v.span,
+                Head {
+                    rel,
+                    args,
+                    mode: HeadMode::Insert,
+                },
+                names.role,
+            )?;
+            return Ok(());
+        }
         let kind = match v.verb {
             Verb::Emit => RuleKind::Deductive,
             // A resolved table's `next` inserts are candidates for t+1, written this tick (LANGUAGE §10.7).
@@ -1044,6 +1078,172 @@ impl<'h> Lowerer<'h> {
             args,
             order: None,
         })
+    }
+
+    /// A `resolve prefer` table's staging relations and their rules (LANGUAGE §10.7), created once: `r$w(x̄, rank, u)`
+    /// holds one tick's writes by listed handlers, `r$wx(x̄, u)` those by others (`u`: an upsert, not a `next`).
+    /// Per key the least rank survives; the survivors and every unlisted write then apply as their verb does, so two
+    /// different values that survive still conflict (SEM-050, SEM-051).
+    ///
+    /// ```text
+    /// r$wmin(k̄, min<R>) :- r$w(k̄, v̄, R, _).
+    /// r$ups(k̄, v̄)       :- r$w(k̄, v̄, R, true), r$wmin(k̄, R).      r$ups(k̄, v̄) :- r$wx(k̄, v̄, true).
+    /// r(k̄, v̄)@next      :- r$w(k̄, v̄, R, false), r$wmin(k̄, R).     r(k̄, v̄)@next :- r$wx(k̄, v̄, false).
+    /// ```
+    fn prefer_rels(&mut self, h: HRelId, span: Span) -> Result<(RelId, RelId), InternalError> {
+        if let Some(x) = self.prefer.get(&h) {
+            return Ok(*x);
+        }
+        let r = self.hir.rel(h)?.clone();
+        let rel = self.rel(h)?;
+        let key = r
+            .key
+            .clone()
+            .ok_or_else(|| internal_error!("`resolve prefer` on an unkeyed relation"))?;
+        let mut verbs = BTreeSet::new();
+        for hd in &self.hir.handlers {
+            prefer_verbs(&hd.stmts, h, &mut verbs);
+        }
+        // `$ups` is its own construct: made before this one begins.
+        let ups = if verbs.contains(&Verb::Upsert) {
+            Some(self.ups_rel(h, span)?)
+        } else {
+            None
+        };
+        let (cols, _) = self.ir_columns(h)?;
+        let u64t = self
+            .b
+            .types()
+            .insert(TypeDef::Int(blossom_value::types::IntTy::U64))
+            .map_err(|e| internal_error!("interning a type: {e}"))?;
+        let boolt = self
+            .b
+            .types()
+            .insert(TypeDef::Bool)
+            .map_err(|e| internal_error!("interning a type: {e}"))?;
+        let n = cols.len();
+        let spec = |candidates: RelId| {
+            ConstructKind::Resolve(ir::ResolveSpec {
+                rel,
+                candidates,
+                output: rel,
+                group: key.iter().map(|c| super::col_idx(*c)).collect(),
+                policy: ir::ResolvePolicy::Prefer {
+                    rank: super::col_idx(n),
+                },
+                site: None,
+            })
+        };
+        let construct = self
+            .b
+            .begin_construct(spec(rel), surface(&r.name, None, span))
+            .map_err(ir)?;
+        let mut wcols = cols.clone();
+        wcols.push(column(Symbol::intern("rank"), u64t, false));
+        wcols.push(column(Symbol::intern("upsert"), boolt, false));
+        let w = self.generated(suffixed(&r.name, "$w"), wcols, None, r.role, false, span)?;
+        let mut xcols = cols.clone();
+        xcols.push(column(Symbol::intern("upsert"), boolt, false));
+        let wx = self.generated(suffixed(&r.name, "$wx"), xcols, None, r.role, false, span)?;
+        let mut mcols: Vec<_> = key.iter().filter_map(|c| cols.get(*c).cloned()).collect();
+        mcols.push(column(Symbol::intern("rank"), u64t, false));
+        let k = key.len();
+        let wmin = self.generated(
+            suffixed(&r.name, "$wmin"),
+            mcols,
+            Some(&(0..k).collect::<Vec<_>>()),
+            r.role,
+            false,
+            span,
+        )?;
+        self.b.set_construct_kind(construct, spec(w)).map_err(ir)?;
+        // r$wmin(k̄, min<R>) :- r$w(k̄, v̄, R, _).
+        let mut d = Draft::new(ScopeId(0));
+        let vars: Vec<Term> = cols.iter().map(|c| Term::Var(d.fresh(c.ty))).collect();
+        let rank = d.fresh(u64t);
+        let mut wargs = vars.clone();
+        wargs.push(Term::Var(rank));
+        wargs.push(Term::Wild);
+        d.lits.push(Literal::Pos(ir_atom(w, wargs, span)));
+        let mut head: Vec<HeadArg> = key
+            .iter()
+            .filter_map(|c| vars.get(*c).cloned())
+            .map(HeadArg::Term)
+            .collect();
+        head.push(HeadArg::Agg(AggCall {
+            func: AggFunc::Min,
+            args: vec![Term::Var(rank)],
+            order: None,
+        }));
+        let label = self.label(format!("{}$prefer/min", r.name));
+        d.build(
+            &mut self.b,
+            RuleKind::Deductive,
+            label,
+            span,
+            Head {
+                rel: wmin,
+                args: head,
+                mode: HeadMode::Insert,
+            },
+            r.role,
+        )?;
+        // The survivors, and the unlisted writes, by verb.
+        let targets = [
+            (true, ups.map(|u| (u, RuleKind::Deductive))),
+            (false, verbs.contains(&Verb::Next).then_some((rel, RuleKind::Inductive))),
+        ];
+        for (upsert, target) in targets {
+            let Some((target, kind)) = target else { continue };
+            let flag = self.b.intern_const(Value::Bool(upsert)).map_err(ir)?;
+            let verb = if upsert { "upsert" } else { "next" };
+            // The least rank's.
+            let mut d = Draft::new(ScopeId(0));
+            let vars: Vec<Term> = cols.iter().map(|c| Term::Var(d.fresh(c.ty))).collect();
+            let rank = d.fresh(u64t);
+            let mut wargs = vars.clone();
+            wargs.push(Term::Var(rank));
+            wargs.push(Term::Const(flag));
+            d.lits.push(Literal::Pos(ir_atom(w, wargs, span)));
+            let mut margs: Vec<Term> = key.iter().filter_map(|c| vars.get(*c).cloned()).collect();
+            margs.push(Term::Var(rank));
+            d.lits.push(Literal::Pos(ir_atom(wmin, margs, span)));
+            let label = self.label(format!("{}$prefer/{verb}", r.name));
+            d.build(
+                &mut self.b,
+                kind.clone(),
+                label,
+                span,
+                Head {
+                    rel: target,
+                    args: vars.into_iter().map(HeadArg::Term).collect(),
+                    mode: HeadMode::Insert,
+                },
+                r.role,
+            )?;
+            // Every unlisted write.
+            let mut d = Draft::new(ScopeId(0));
+            let vars: Vec<Term> = cols.iter().map(|c| Term::Var(d.fresh(c.ty))).collect();
+            let mut xargs = vars.clone();
+            xargs.push(Term::Const(flag));
+            d.lits.push(Literal::Pos(ir_atom(wx, xargs, span)));
+            let label = self.label(format!("{}$prefer/{verb}#unlisted", r.name));
+            d.build(
+                &mut self.b,
+                kind,
+                label,
+                span,
+                Head {
+                    rel: target,
+                    args: vars.into_iter().map(HeadArg::Term).collect(),
+                    mode: HeadMode::Insert,
+                },
+                r.role,
+            )?;
+        }
+        self.b.end_construct(construct).map_err(ir)?;
+        self.prefer.insert(h, (w, wx));
+        Ok((w, wx))
     }
 
     /// The `$ups` staging relation of an upserted table and its rules (LANGUAGE §8.2), created once.
@@ -1732,6 +1932,19 @@ fn count_targets(stmts: &[HStmt], counts: &mut BTreeMap<(Verb, HRelId), u32>) {
         match s {
             HStmt::Verb(v) => *counts.entry((v.verb, v.target)).or_default() += 1,
             HStmt::Block { stmts, .. } => count_targets(stmts, counts),
+        }
+    }
+}
+
+/// The verbs of the arbitrated writes (`resolve prefer`) into `target` among `stmts`, blocks included.
+fn prefer_verbs(stmts: &[HStmt], target: HRelId, out: &mut BTreeSet<Verb>) {
+    for s in stmts {
+        match s {
+            HStmt::Verb(v) if v.target == target && v.rank.is_some() => {
+                out.insert(v.verb);
+            }
+            HStmt::Verb(_) => {}
+            HStmt::Block { stmts, .. } => prefer_verbs(stmts, target, out),
         }
     }
 }

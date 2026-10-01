@@ -306,6 +306,8 @@ pub(crate) struct Resolver<'t, 'd> {
     pub instantiating: Vec<usize>,
     /// Templates already reported recursive.
     pub recursive: BTreeSet<usize>,
+    /// The (table, handler label) pairs of `next`/`upsert` writes into tables with `resolve prefer`.
+    pub prefer_writers: BTreeSet<(HRelId, Symbol)>,
 }
 
 impl<'t, 'd> Resolver<'t, 'd> {
@@ -353,6 +355,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             instance_calls: BTreeMap::new(),
             instantiating: Vec::new(),
             recursive: BTreeSet::new(),
+            prefer_writers: BTreeSet::new(),
         }
     }
 
@@ -558,6 +561,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             durable: false,
             cell: false,
             resolve: None,
+            prefer: None,
             role: None,
             span,
         });
@@ -582,6 +586,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             durable: false,
             cell: false,
             resolve: None,
+            prefer: None,
             role: None,
             span,
         });
@@ -616,6 +621,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             durable: false,
             cell: false,
             resolve: None,
+            prefer: None,
             role: None,
             span: name.span,
         });
@@ -647,6 +653,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             durable: false,
             cell: false,
             resolve: None,
+            prefer: None,
             role: None,
             span,
         });
@@ -699,6 +706,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
         self.imports(s, items, placement);
         self.functions(s, items);
         self.rules(s, items, placement);
+        self.check_prefer(s);
     }
 
     /// Pass 1: roles.
@@ -862,6 +870,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                         durable: false,
                         cell: false,
                         resolve: None,
+                        prefer: None,
                         role: placement,
                         span: v.name.span,
                     });
@@ -1246,6 +1255,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 durable: false,
                 cell: false,
                 resolve: None,
+                prefer: None,
                 role: placement,
                 span,
             });
@@ -1357,6 +1367,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             durable: false,
             cell: false,
             resolve: None,
+            prefer: None,
             role: placement,
             span: t.name.span,
         }))
@@ -1453,9 +1464,12 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 Some(idx)
             }
         };
-        let resolve = match &d.resolve {
-            None => None,
-            Some((policy, span)) => self.resolve_policy(d, &cols, key.as_deref(), policy, *span),
+        let (resolve, prefer) = match &d.resolve {
+            None => (None, None),
+            Some((ast::RelPolicy::Prefer(rules), span)) => {
+                (None, self.prefer_policy(&cols, key.as_deref(), rules, *span))
+            }
+            Some((policy, span)) => (self.resolve_policy(d, &cols, key.as_deref(), policy, *span), None),
         };
         let kind = match d.kind {
             RelKind::Table => HRelKind::Table,
@@ -1508,9 +1522,72 @@ impl<'t, 'd> Resolver<'t, 'd> {
             durable: d.mods.durable,
             cell: d.mods.cell,
             resolve,
+            prefer,
             role: placement,
             span: d.name.span,
         }))
+    }
+
+    /// `resolve prefer(rule, …)` (LANGUAGE §10.7): on a keyed table of plain values, each handler named once.
+    fn prefer_policy(
+        &mut self,
+        cols: &[HCol],
+        key: Option<&[usize]>,
+        rules: &[Ident],
+        span: Span,
+    ) -> Option<Vec<(Symbol, Span)>> {
+        if key.is_none() {
+            self.error(
+                code!("BLS0106"),
+                span,
+                "`resolve prefer` arbitrates writes to one key: declare `key(…)`",
+            );
+            return None;
+        }
+        if cols
+            .iter()
+            .any(|c| c.ty.is_some_and(|t| holds_lattice(&self.hir.types, t)))
+        {
+            self.unsupported("LANG-117", "`resolve prefer` on a table holding lattice values", span);
+            return None;
+        }
+        if rules.is_empty() {
+            self.error(code!("BLS0411"), span, "`resolve prefer` names no handler");
+            return None;
+        }
+        let mut seen = BTreeSet::new();
+        for r in rules {
+            if !seen.insert(r.name) {
+                self.error(
+                    code!("BLS0411"),
+                    r.span,
+                    format!("`{}` is named twice in `resolve prefer`", r.as_str()),
+                );
+                return None;
+            }
+        }
+        Some(rules.iter().map(|r| (r.name, r.span)).collect())
+    }
+
+    /// After a module's rules: each handler a `resolve prefer` names writes the table with `next` or `upsert`.
+    fn check_prefer(&mut self, s: ScopeIdx) {
+        let rels: Vec<HRelId> = self.scope(s).rels.values().copied().collect();
+        for id in rels {
+            let r = self.rel_of(id);
+            for (name, span) in r.prefer.iter().flatten() {
+                if !self.prefer_writers.contains(&(id, *name)) {
+                    self.error(
+                        code!("BLS0411"),
+                        *span,
+                        format!(
+                            "`resolve prefer` names `{}`, which is not a handler writing `{}` with `next` or `upsert`",
+                            name.as_str(),
+                            r.name
+                        ),
+                    );
+                }
+            }
+        }
     }
 
     /// A relation-level `resolve P` (LANGUAGE §10.7): only on a keyed table.
@@ -1532,6 +1609,12 @@ impl<'t, 'd> Resolver<'t, 'd> {
         };
         let is_lattice = |r: &Self, c: &HCol| c.ty.is_some_and(|t| r.hir.lattice_of(t).is_some());
         let policy = match policy {
+            ast::RelPolicy::Prefer(_) => {
+                self.bugs.push(blossom_base::internal_error!(
+                    "`resolve prefer` reached the resolution policies"
+                ));
+                return None;
+            }
             ast::RelPolicy::Choose { sticky: false } => HPolicy::Choose,
             ast::RelPolicy::Choose { sticky: true } => {
                 self.unsupported("LANG-115", "`resolve choose sticky`", span);

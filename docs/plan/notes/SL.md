@@ -4,8 +4,8 @@ Design: `docs/design/EXTENSIONS.md`. Branch `slice-lang`, worktree `.worktrees/s
 
 ## Resume here
 
-- **State (2026-10-01):** items 1 (`?`), 2 (generic functions) and 3 (`while` tables) done. Next: item 4
-  (`upsert` into resolved tables, multi-column costs, `resolve prefer`).
+- **State (2026-10-01):** items 1 (`?`), 2 (generic functions), 3 (`while` tables) and 4 (`resolve prefer`) done.
+  Next: item 5 (planner: infallibility-aware ordering; `top!`, `index!` with `per`, multi-alternative `per`).
 - Update this section whenever work stops.
 
 ## Baseline (S8, merged at 69b630c)
@@ -73,6 +73,19 @@ Design: `docs/design/EXTENSIONS.md`. Branch `slice-lang`, worktree `.worktrees/s
 - Tests: `bls_extensions` (each guarded table against a twin kept by the explicit clean-up rule, both evaluators,
   12 seeds; mutation: lowering without the guard fails it), `blossom-front` (a durable condition with a negation,
   a `let`, a `where`, an existential and the table itself; the misuses).
+
+### Item 4: `resolve prefer(rule, …)` (done; the completions deferred)
+
+- Syntax: `resolve prefer(a, b)` (a `POLICY` with names). Resolve: `HRel::prefer` (not an `HResolve`: the table keeps
+  its frame rule); each `next`/`upsert` into it gets an `HRank` from its handler's label (`RuleCx::label`);
+  `check_prefer` after a module's rules reports names that write nothing (BLS0411, also twice-named or empty).
+- Lowering (`prefer_rels`): listed writes go to `r$w(x̄, rank, upsert)`, unlisted to `r$wx(x̄, upsert)`; the least
+  rank per key survives (`r$wmin`) and goes on to `$ups` or `@next`. Conflicts among survivors are the usual
+  BLSR001/BLSR002. IR: `ResolvePolicy::Prefer { rank }` on a Resolve construct.
+- Deferred (Kafka uses no `resolve` policy): `upsert` into resolved tables, multi-column costs; still BLS0908.
+- Tests: `bls_extensions` (each preferring table against a hand-guarded twin, upserts and `next`s, 12 seeds, both
+  evaluators; mutation: max instead of min rank fails it; same-handler and unlisted conflicts are BLSR002 on both
+  evaluators; one value from listed and unlisted is fine), `blossom-front` (BLS0411, BLS0106, BLS0908).
 
 ### Open observations
 

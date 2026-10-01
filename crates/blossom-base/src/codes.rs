@@ -589,6 +589,14 @@ pub static REGISTRY: &[CodeInfo] = &[
         "`delete`/`upsert` on a lattice-valued relation (LANG-284)",
     ),
     info(
+        "BLS0411",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "`resolve prefer(…)` naming no handler, one twice, or one that does not write the table with `next` or `upsert` (§10.7)",
+    ),
+    info(
         "BLS0500",
         Error,
         "blossom-front",
@@ -1240,8 +1248,8 @@ mod tests {
     fn codes_registry_unique() {
         assert_eq!(
             REGISTRY.len(),
-            124,
-            "LANGUAGE §20 has 120 codes; ARCHITECTURE §0.3 adds 4"
+            125,
+            "LANGUAGE §20 has 121 codes; ARCHITECTURE §0.3 adds 4"
         );
         for (a, b) in REGISTRY.iter().zip(REGISTRY.iter().skip(1)) {
             assert!(

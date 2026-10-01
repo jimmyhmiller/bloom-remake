@@ -429,6 +429,7 @@ RelClause       = ":" IDENT "->" IDENT                                (* channel
                 | 'exactly_once' "(" IDENT ")" ;
 Policy          = ( 'choose' | 'choose_rand' ) [ 'sticky' ]
                 | ( 'choose_least' | 'choose_most' ) "(" Expr ")"
+                | 'prefer' "(" IDENT { "," IDENT } ")"                 (* tables, relation level *)
                 | 'merge' ;
 CellDecl        = { 'durable' | "scratch" } 'cell' IDENT ":" Type ";" ;
 TimerDecl       = 'timer' IDENT ( 'every' Expr [ 'ticks' ] [ 'times' Expr ] | 'once' [ 'after' Expr ] ) ";" ;
@@ -1890,6 +1891,32 @@ reg$cmin(K, min<TS>) :- reg$cand(K, TS, V).
 reg(K, TS, V)@next :- reg$cand(K, TS, V), reg$cmin(K, TS).      // replaces reg's frame rule
 ```
 
+**Writer precedence: `resolve prefer(rule, …)`.** Two handlers writing one key in one tick is an error, and an
+accident must not pass silently; but some programs mean it — a snapshot install resets a partition's log end in the
+tick materialization would advance it. A table may name, by handler label, whose writes win (EXTENSIONS 2.4):
+
+```blossom
+table log_end(tid: Bytes, part: i32, next: i64) key(tid, part) resolve prefer(reset_log, advance_end);
+```
+
+Among one tick's `next` and `upsert` writes to a key, those of the earliest listed handler survive; the others are
+dropped. Survivors then apply as their verb does, so two different values from one listed handler, or a write by a
+handler the list does not name next to any other value, still conflict (SEM-050, SEM-051). `emit` and `delete` are
+not arbitrated. The table keeps its frame rule (it is not a resolved table: persisted rows are not candidates, and
+an `upsert` still replaces its key's row). Each name must label a handler of the module that writes the table with
+`next` or `upsert`, once (BLS0411); `prefer` needs a key and plain values. Lowering — writes are staged with their
+handler's rank (unlisted ones apart), and the least rank per key goes on:
+
+```ir
+log_end$w(T, P, N, R, U) :- <body of each listed write>, R = <its handler's position>, U = <is an upsert>.
+log_end$wx(T, P, N, U)   :- <body of each unlisted write>.
+log_end$wmin(T, P, min<R>) :- log_end$w(T, P, N, R, U).
+log_end$ups(T, P, N) :- log_end$w(T, P, N, R, true), log_end$wmin(T, P, R).     // then as any upsert
+log_end$ups(T, P, N) :- log_end$wx(T, P, N, true).
+log_end(T, P, N)@next :- log_end$w(T, P, N, R, false), log_end$wmin(T, P, R).   // and as any `next`
+log_end(T, P, N)@next :- log_end$wx(T, P, N, false).
+```
+
 ### 10.8 User-defined aggregates and combiners (LANG-105, LANG-112)
 
 ```blossom
@@ -2921,6 +2948,7 @@ never truncated or defaulted).
 | BLS0408 | E | a rule outside every `at` section in a multi-role module, or placed at an external role |
 | BLS0409 | E | `else` after a condition that is not a single scalar guard |
 | BLS0410 | E | `delete`/`upsert` on a lattice-valued relation (LANG-284) |
+| BLS0411 | E | `resolve prefer(…)` naming no handler, one twice, or one that does not write the table with `next` or `upsert` (§10.7) |
 
 **Rules, time and stratification (BLS05xx)**
 
