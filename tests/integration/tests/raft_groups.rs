@@ -35,12 +35,15 @@ fn compile() -> BlsArtifact {
 fn u64_at(row: &Row, col: usize) -> u64 {
     match row.get(col) {
         Some(Value::Int(IntValue::U64(x))) => *x,
+        Some(Value::Int(IntValue::U8(x))) => u64::from(*x),
         other => panic!("column {col} of {row:?} is {other:?}, not a u64"),
     }
 }
 
+/// Runs the harness; returns each group's highest commit index the observer saw, and how many configurations group
+/// `moving` committed (on the broker holding the most).
 #[cfg(test)]
-fn run(seed: u64, faults: bool) -> BTreeMap<Value, u64> {
+fn run(seed: u64, faults: bool) -> (BTreeMap<Value, u64>, usize) {
     let artifact = compile();
     let schema = DurableSchema::of(artifact.program.get());
     let cfg = ClusterConfig {
@@ -65,33 +68,55 @@ fn run(seed: u64, faults: bool) -> BTreeMap<Value, u64> {
     .unwrap();
     let (safety, observer) = GroupSafety::of(&artifact).unwrap().shared();
     cluster.observe(observer);
-    let run = cluster.run().unwrap();
+    cluster.run_until(6_000_000_000).unwrap();
+    let run = cluster.run_so_far();
     assert!(
         run.violation.is_none(),
         "seed {seed}: {:?}\n{}",
         run.violation,
         run.log.join("\n")
     );
-    safety.borrow().progress.clone()
+    let moving = Value::Tuple(vec![Value::Bytes(b"moving".to_vec().into()), Value::Int(IntValue::I32(4))].into());
+    let (rlog, commit) = (
+        artifact.rel_named("rlog").unwrap(),
+        artifact.rel_named("commit").unwrap(),
+    );
+    let configs = (0..4u32)
+        .filter_map(|n| cluster.state(blossom_value::time::NodeId(n)))
+        .map(|s| {
+            let c = s.rows(commit).find(|r| r[0] == moving).map_or(0, |r| u64_at(r, 1));
+            s.rows(rlog)
+                .filter(|r| r[0] == moving && u64_at(r, 4) == 3 && u64_at(r, 1) <= c)
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+    let progress = safety.borrow().progress.clone();
+    (progress, configs)
 }
 
 #[test]
 fn every_group_elects_and_commits_without_faults() {
-    let progress = run(1, false);
-    assert_eq!(progress.len(), 5, "{progress:?}");
+    let (progress, configs) = run(1, false);
+    assert_eq!(progress.len(), 6, "{progress:?}");
     for (g, c) in &progress {
         assert!(*c > 50, "group {g:?} committed only {c} entries");
     }
+    assert!(configs >= 8, "group moving committed only {configs} configurations");
 }
 
 #[test]
 fn every_group_stays_safe_under_loss_partitions_and_crashes() {
     for seed in 1..=4 {
-        let progress = run(seed, true);
-        assert_eq!(progress.len(), 5, "seed {seed}: {progress:?}");
+        let (progress, configs) = run(seed, true);
+        assert_eq!(progress.len(), 6, "seed {seed}: {progress:?}");
         for (g, c) in &progress {
             assert!(*c > 10, "seed {seed}: group {g:?} committed only {c} entries");
         }
+        assert!(
+            configs >= 3,
+            "seed {seed}: group moving committed only {configs} configurations"
+        );
     }
 }
 

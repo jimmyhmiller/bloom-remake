@@ -10,6 +10,7 @@ include "../../../../examples/kafka/topics.bls";
 include "../../../../examples/kafka/records.bls";
 include "../../../../examples/kafka/produce.bls";
 include "../../../../examples/kafka/fetch.bls";
+include "../../../../examples/kafka/reassign.bls";
 
 /// Read by the topic functions: the broker's id and the partition count a topic gets by default.
 param NODE_ID: i32 = 1;
@@ -42,6 +43,10 @@ input list_resp(corr: i32, frame: Bytes, answers: Vec<(u64, i16, i64, i64, i32)>
 /// A DescribeCluster answer to encode: correlation id, version, the request (operations asked, endpoint type), the
 /// brokers, cluster id and controller.
 input dcluster_resp(corr: i32, version: i16, ops: bool, endpoint: i8, brokers: Vec<(i32, String, i32, Option<String>)>, cluster: String, controller: i32);
+/// Reassignment answers to encode: an AlterPartitionReassignments request (its frame) with each entry's error, and a
+/// ListPartitionReassignments request with the reassignments in progress (topic, partition, replicas, target).
+input alter_resp(corr: i32, frame: Bytes, errors: Vec<(u64, i16)>);
+input list_resp_r(corr: i32, frame: Bytes, ongoing: Vec<(String, i32, Vec<i32>, Vec<i32>)>);
 input seq_case(id: u64, batches: Vec<Bytes>);
 /// Bytes to split into frames.
 input stream_bytes(b: Bytes);
@@ -125,6 +130,22 @@ fn fetch_of(b: Bytes) -> Option<FetchRequest> {
     request_body(b).and_then(|c| decode_fetch(c))
 }
 
+fn alter_bytes(corr: i32, f: Bytes, errors: Vec<(u64, i16)>) -> Option<Bytes> {
+    request_prefix(cur(f)).and_then(|p| alter_reassign_of(f).map(|r| encode_alter_reassignments_response(corr, p.1, r, errors.to_map())))
+}
+
+fn list_bytes(corr: i32, f: Bytes, ongoing: Vec<(String, i32, Vec<i32>, Vec<i32>)>) -> Option<Bytes> {
+    list_reassign_of(f).map(|r| encode_list_reassignments_response(corr, r, ongoing.map(|o| Ongoing { name: o.0, index: o.1, replicas: o.2, target: o.3 })))
+}
+
+fn list_reassign_of(b: Bytes) -> Option<ListReassignmentsRequest> {
+    request_body(b).and_then(|c| decode_list_reassignments(c))
+}
+
+fn alter_reassign_of(b: Bytes) -> Option<AlterReassignmentsRequest> {
+    request_prefix(cur(b)).and_then(|p| request_body(b).and_then(|c| decode_alter_reassignments(c, p.1)))
+}
+
 fn dcluster_of(b: Bytes) -> Option<DescribeClusterRequest> {
     request_prefix(cur(b)).and_then(|p| request_body(b).and_then(|c| decode_describe_cluster(c, p.1)))
 }
@@ -202,6 +223,10 @@ view v_produce(f, r) = req(f), let r = produce_of(f);
 view v_fetch(f, r) = req(f), let r = fetch_of(f);
 view v_list(f, r) = req(f), let r = list_of(f);
 view v_dcluster(f, r) = req(f), let r = dcluster_of(f);
+view v_list_reassign(f, r) = req(f), let r = list_reassign_of(f);
+view v_alter_reassign(f, r) = req(f), let r = alter_reassign_of(f);
+view v_alter_resp(corr, b) = alter_resp(corr, f, errors), let Some(b) = alter_bytes(corr, f, errors);
+view v_list_resp_r(corr, b) = list_resp_r(corr, f, ongoing), let Some(b) = list_bytes(corr, f, ongoing);
 view v_dcluster_resp(corr, b) = dcluster_resp(corr, version, ops, endpoint, brokers, cluster, controller),
     let b = dcluster_bytes(corr, version, ops, endpoint, brokers, cluster, controller);
 view v_fetch_resp(corr, b) = fetch_resp(corr, f, err, answers), let b = fetch_bytes_of(corr, f, err, answers);

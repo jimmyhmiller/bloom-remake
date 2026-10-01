@@ -10,6 +10,7 @@ include "../../../../examples/kafka/topics.bls";
 include "../../../../examples/kafka/records.bls";
 include "../../../../examples/kafka/produce.bls";
 include "../../../../examples/kafka/fetch.bls";
+include "../../../../examples/kafka/reassign.bls";
 include "../../../../examples/kafka/broker_fns.bls";
 include "../../../../examples/kafka/client_fns.bls";
 

@@ -54,6 +54,9 @@ impl Rng {
     fn below(&mut self, n: u64) -> u64 {
         if n == 0 { 0 } else { self.next() % n }
     }
+    fn pick_i16<'a>(&mut self, xs: &'a [i16]) -> &'a i16 {
+        &xs[self.below(xs.len() as u64) as usize]
+    }
     fn text(&mut self) -> String {
         let alphabet = ['a', 'b', '-', '.', '_', 'z', '9', 'é', '日'];
         (0..self.below(12))
@@ -514,6 +517,8 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
                         (20, 6, 6),
                         (22, 3, 5),
                         (32, 4, 4),
+                        (45, 0, 1),
+                        (46, 0, 0),
                         (60, 0, 2)
                     ],
                     0
@@ -1575,6 +1580,246 @@ fn describe_cluster_requests_decode_and_answers_encode() {
     }
 }
 
+#[test]
+fn reassignment_requests_decode_and_answers_encode() {
+    use kafka_protocol::messages::alter_partition_reassignments_request::{ReassignablePartition, ReassignableTopic};
+    use kafka_protocol::messages::list_partition_reassignments_request::ListPartitionReassignmentsTopics;
+    use kafka_protocol::messages::{
+        AlterPartitionReassignmentsRequest, AlterPartitionReassignmentsResponse, ListPartitionReassignmentsRequest,
+        ListPartitionReassignmentsResponse,
+    };
+    let int = |v: &Value| match v {
+        Value::Int(IntValue::I32(x)) => i64::from(*x),
+        other => panic!("{other:?}"),
+    };
+    let artifact = compile();
+    let mut rng = Rng(45);
+    let mut inputs = Vec::new();
+    // (frame, version, entries (topic, partition, replicas), allow, errors) for Alter; (frame, asked, ongoing) for List.
+    type Entry = (String, i32, Option<Vec<i32>>);
+    type Alter = (Vec<u8>, i16, i32, Vec<Entry>, bool, Vec<i16>);
+    let mut alters: Vec<Alter> = Vec::new();
+    type Ongoing = (String, i32, Vec<i32>, Vec<i32>);
+    type Asked = Option<Vec<(String, Vec<i32>)>>;
+    type List = (Vec<u8>, i32, Asked, Vec<Ongoing>);
+    let mut lists: Vec<List> = Vec::new();
+    type Listed = (String, i32, Vec<i32>, Vec<i32>, Vec<i32>);
+    for _ in 0..40 {
+        let version = rng.below(2) as i16;
+        let corr = rng.next() as i32;
+        let allow = version == 0 || rng.below(2) == 0;
+        let mut entries: Vec<Entry> = Vec::new();
+        let topics: Vec<ReassignableTopic> = (0..rng.below(3))
+            .map(|t| {
+                let name = format!("t{t}{}", rng.text());
+                let parts: Vec<ReassignablePartition> = (0..1 + rng.below(3))
+                    .map(|p| {
+                        let replicas = if rng.below(4) == 0 {
+                            None
+                        } else {
+                            Some((0..rng.below(4)).map(|_| (rng.next() % 6) as i32).collect::<Vec<i32>>())
+                        };
+                        entries.push((name.clone(), p as i32, replicas.clone()));
+                        ReassignablePartition::default()
+                            .with_partition_index(p as i32)
+                            .with_replicas(replicas.map(|rs| rs.into_iter().map(BrokerId).collect()))
+                    })
+                    .collect();
+                ReassignableTopic::default()
+                    .with_name(TopicName(StrBytes::from_string(name)))
+                    .with_partitions(parts)
+            })
+            .collect();
+        let mut req = AlterPartitionReassignmentsRequest::default()
+            .with_timeout_ms(5000)
+            .with_topics(topics);
+        if version >= 1 {
+            req = req.with_allow_replication_factor_change(allow);
+        }
+        let frame = encode_request(45, version, corr, Some("reassign"), &req);
+        let errors: Vec<i16> = entries.iter().map(|_| *rng.pick_i16(&[0, 3, 39, 38, 85, 7])).collect();
+        inputs.push(input(&artifact, "req", vec![bytes(&frame)]));
+        inputs.push(input(
+            &artifact,
+            "alter_resp",
+            vec![
+                i32v(corr),
+                bytes(&frame),
+                Value::Vec(
+                    errors
+                        .iter()
+                        .enumerate()
+                        .map(|(k, e)| Value::Tuple(vec![Value::Int(IntValue::U64(k as u64)), i16v(*e)].into()))
+                        .collect(),
+                ),
+            ],
+        ));
+        alters.push((frame, version, corr, entries, allow, errors));
+
+        let corr = rng.next() as i32;
+        let names = ["a", "b", "c"];
+        let ongoing: Vec<Ongoing> = names
+            .iter()
+            .flat_map(|n| (0..rng.below(3) as i32).map(move |p| (n.to_string(), p)))
+            .map(|(n, p)| (n, p, vec![1, 2, 3], vec![2 + p, 3, 4]))
+            .collect();
+        let asked = if rng.below(2) == 0 {
+            None
+        } else {
+            Some(vec![("a".to_string(), vec![0, 1]), ("c".to_string(), vec![1])])
+        };
+        let req = ListPartitionReassignmentsRequest::default()
+            .with_timeout_ms(1000)
+            .with_topics(asked.clone().map(|ts| {
+                ts.into_iter()
+                    .map(|(n, ps)| {
+                        ListPartitionReassignmentsTopics::default()
+                            .with_name(TopicName(StrBytes::from_string(n)))
+                            .with_partition_indexes(ps)
+                    })
+                    .collect()
+            }));
+        let frame = encode_request(46, 0, corr, Some("reassign"), &req);
+        inputs.push(input(&artifact, "req", vec![bytes(&frame)]));
+        let i32s = |xs: &[i32]| Value::Vec(xs.iter().map(|x| i32v(*x)).collect());
+        inputs.push(input(
+            &artifact,
+            "list_resp_r",
+            vec![
+                i32v(corr),
+                bytes(&frame),
+                Value::Vec(
+                    ongoing
+                        .iter()
+                        .map(|(n, p, rs, t)| Value::Tuple(vec![s(n), i32v(*p), i32s(rs), i32s(t)].into()))
+                        .collect(),
+                ),
+            ],
+        ));
+        lists.push((frame, corr, asked, ongoing));
+    }
+    let r = run(&artifact, &inputs);
+    let decoded = rows(&artifact, &r, "v_alter_reassign");
+    let alter_out = rows(&artifact, &r, "v_alter_resp");
+    let list_out = rows(&artifact, &r, "v_list_resp_r");
+    let unframe = |b: &Value| -> Bytes {
+        let Value::Bytes(b) = b else { panic!("{b:?}") };
+        let n = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize;
+        assert_eq!(n, b.len() - 4, "the size prefix is the frame's size");
+        Bytes::copy_from_slice(&b[4..])
+    };
+    for (frame, version, corr, entries, allow, errors) in &alters {
+        // The request as Blossom decoded it: timeout, allow, and each partition's replicas.
+        let row = decoded.iter().find(|x| x[0] == bytes(frame)).unwrap();
+        let Value::Option(Some(req)) = &row[1] else {
+            panic!("an AlterPartitionReassignments v{version} does not decode")
+        };
+        let Value::Struct(req) = &**req else { panic!() };
+        assert_eq!(req[1], Value::Bool(*allow));
+        let Value::Vec(ts) = &req[2] else { panic!() };
+        let got: Vec<Entry> = ts
+            .iter()
+            .flat_map(|t| {
+                let Value::Struct(t) = t else { panic!() };
+                let Value::Str(n) = &t[0] else { panic!() };
+                let Value::Vec(ps) = &t[1] else { panic!() };
+                ps.iter()
+                    .map(|p| {
+                        let Value::Struct(p) = p else { panic!() };
+                        let rs = match &p[1] {
+                            Value::Option(None) => None,
+                            Value::Option(Some(v)) => {
+                                let Value::Vec(v) = &**v else { panic!() };
+                                Some(v.iter().map(|x| int(x) as i32).collect())
+                            }
+                            other => panic!("{other:?}"),
+                        };
+                        (n.to_string(), int(&p[0]) as i32, rs)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(&got, entries);
+        // The answer, decoded by the Rust implementation.
+        let row = alter_out.iter().find(|x| x[0] == i32v(*corr)).unwrap();
+        let mut buf = unframe(&row[1]);
+        let h =
+            ResponseHeader::decode(&mut buf, AlterPartitionReassignmentsResponse::header_version(*version)).unwrap();
+        assert_eq!(h.correlation_id, *corr);
+        let resp = AlterPartitionReassignmentsResponse::decode(&mut buf, *version).unwrap();
+        assert!(
+            buf.is_empty(),
+            "trailing bytes after an AlterPartitionReassignments v{version} response"
+        );
+        let codes: Vec<(String, i32, i16)> = resp
+            .responses
+            .iter()
+            .flat_map(|t| {
+                t.partitions
+                    .iter()
+                    .map(|p| (t.name.to_string(), p.partition_index, p.error_code))
+            })
+            .collect();
+        let want: Vec<(String, i32, i16)> = entries
+            .iter()
+            .zip(errors)
+            .map(|(e, c)| (e.0.clone(), e.1, *c))
+            .collect();
+        assert_eq!(codes, want);
+        assert!(
+            resp.responses
+                .iter()
+                .flat_map(|t| &t.partitions)
+                .all(|p| (p.error_code == 0) == p.error_message.is_none())
+        );
+        if *version >= 1 {
+            assert_eq!(resp.allow_replication_factor_change, *allow);
+        }
+    }
+    for (_frame, corr, asked, ongoing) in &lists {
+        let row = list_out.iter().find(|x| x[0] == i32v(*corr)).unwrap();
+        let mut buf = unframe(&row[1]);
+        let h = ResponseHeader::decode(&mut buf, ListPartitionReassignmentsResponse::header_version(0)).unwrap();
+        assert_eq!(h.correlation_id, *corr);
+        let resp = ListPartitionReassignmentsResponse::decode(&mut buf, 0).unwrap();
+        assert!(
+            buf.is_empty(),
+            "trailing bytes after a ListPartitionReassignments response"
+        );
+        let want: Vec<Listed> = ongoing
+            .iter()
+            .filter(|o| {
+                asked
+                    .as_ref()
+                    .is_none_or(|ts| ts.iter().any(|t| t.0 == o.0 && t.1.contains(&o.1)))
+            })
+            .map(|(n, p, rs, t)| {
+                let shown: Vec<i32> = t.iter().chain(rs.iter().filter(|r| !t.contains(r))).copied().collect();
+                let adding: Vec<i32> = t.iter().filter(|x| !rs.contains(x)).copied().collect();
+                let removing: Vec<i32> = rs.iter().filter(|x| !t.contains(x)).copied().collect();
+                (n.clone(), *p, shown, adding, removing)
+            })
+            .collect();
+        let got: Vec<Listed> = resp
+            .topics
+            .iter()
+            .flat_map(|t| {
+                t.partitions.iter().map(|p| {
+                    let ids = |xs: &[BrokerId]| xs.iter().map(|b| b.0).collect::<Vec<i32>>();
+                    (
+                        t.name.to_string(),
+                        p.partition_index,
+                        ids(&p.replicas),
+                        ids(&p.adding_replicas),
+                        ids(&p.removing_replicas),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(got, want);
+    }
+}
+
 #[cfg(test)]
 fn producer_batch(pid: i64, epoch: i16, seq: i32, n: usize) -> Vec<u8> {
     use kafka_protocol::records::{Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType};
@@ -1751,6 +1996,7 @@ fn the_golden_captures_of_real_clients_decode() {
     let fetch = rows(&artifact, &r, "v_fetch");
     let list = rows(&artifact, &r, "v_list");
     let dcluster = rows(&artifact, &r, "v_dcluster");
+    let list_reassign = rows(&artifact, &r, "v_list_reassign");
     let find = |rs: &[Vec<Value>], f: &[u8]| rs.iter().find(|r| r[0] == bytes(f)).map(|r| r[1].clone());
     let mut clients = BTreeSet::new();
     for (file, key, version, frame) in &frames {
@@ -1807,8 +2053,13 @@ fn the_golden_captures_of_real_clients_decode() {
                     panic!("{file}: a DescribeCluster v2 body does not decode");
                 };
             }
-            // The APIs the broker does not advertise: the Java admin's DescribeTopicPartitions and
-            // ListPartitionReassignments. Only their headers are read here.
+            (46, 0) => {
+                let Some(Value::Option(Some(_))) = find(&list_reassign, frame) else {
+                    panic!("{file}: a ListPartitionReassignments v0 body does not decode");
+                };
+            }
+            // The API the broker does not advertise: the Java admin's DescribeTopicPartitions. Only its header is
+            // read here.
             (1, 16 | 17) => {
                 let Some(Value::Option(Some(_))) = find(&fetch, frame) else {
                     panic!("{file}: a Fetch v{version} body does not decode");
@@ -1819,7 +2070,7 @@ fn the_golden_captures_of_real_clients_decode() {
                     panic!("{file}: a ListOffsets v{version} body does not decode");
                 };
             }
-            (46, 0) | (75, 0) => {
+            (75, 0) => {
                 assert!(file.starts_with("s7-"), "{file}")
             }
             other => panic!("{file}: an unexpected request {other:?}"),

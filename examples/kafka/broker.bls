@@ -19,6 +19,7 @@ include "topics.bls";
 include "records.bls";
 include "produce.bls";
 include "fetch.bls";
+include "reassign.bls";
 include "broker_fns.bls";
 
 /// The brokers: every node of the cluster role runs this program.

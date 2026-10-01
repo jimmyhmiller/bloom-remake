@@ -1,0 +1,207 @@
+//! Partition reassignment (S8 item 5): AlterPartitionReassignments (key 45, versions 0–1) and
+//! ListPartitionReassignments (key 46, version 0), both flexible.
+//!
+//! A reassignment moves a partition to target replicas. The controller records the target (`cluster.bls`); the
+//! partition's leader changes its configuration one replica at a time (adding the target's first, removing the
+//! others once the target's are in sync) and reports when it reaches the target, which then becomes the
+//! partition's replicas.
+
+const NO_REASSIGNMENT_IN_PROGRESS: i16 = 85;
+
+/// One partition of a reassignment request: its index and target replicas (`None` cancels a reassignment).
+struct ReassignPartition { index: i32, replicas: Option<Vec<i32>> }
+struct ReassignTopic { name: String, partitions: Vec<ReassignPartition> }
+/// AlterPartitionReassignmentsRequest. `allow_rf_change` (v1; true before) lets a reassignment change the number of
+/// replicas.
+struct AlterReassignmentsRequest { timeout_ms: i32, allow_rf_change: bool, topics: Vec<ReassignTopic> }
+
+fn read_compact_nullable_i32s(c: Cur) -> Option<(Option<Vec<i32>>, Cur)> {
+    read_compact_nullable_len(c).and_then(|n| match n.0 {
+        None => Some((None, n.1)),
+        Some(k) => range(0, k)
+            .fold(Some(([], n.1)), |acc, _i| acc.and_then(|a| read_i32(a.1).map(|x| (a.0.push(x.0), x.1))))
+            .map(|a| (Some(a.0), a.1)),
+    })
+}
+
+fn decode_reassign_partition(c: Cur) -> Option<(ReassignPartition, Cur)> {
+    read_i32(c).and_then(|ix| read_compact_nullable_i32s(ix.1).and_then(|rs| {
+        skip_tags(rs.1).map(|end| (ReassignPartition { index: ix.0, replicas: rs.0 }, end))
+    }))
+}
+
+fn decode_reassign_topic(c: Cur) -> Option<(ReassignTopic, Cur)> {
+    read_compact_string(c).and_then(|name| read_compact_len(name.1).and_then(|n| {
+        range(0, n.0)
+            .fold(Some(([], n.1)), |acc, _i| acc.and_then(|a| decode_reassign_partition(a.1).map(|p| (a.0.push(p.0), p.1))))
+            .and_then(|ps| skip_tags(ps.1).map(|end| (ReassignTopic { name: name.0, partitions: ps.0 }, end)))
+    }))
+}
+
+fn decode_alter_reassignments(c: Cur, version: i16) -> Option<AlterReassignmentsRequest> {
+    read_i32(c).and_then(|timeout| {
+        let allow = if version >= 1i16 { read_bool(timeout.1) } else { Some((true, timeout.1)) };
+        allow.and_then(|al| read_compact_len(al.1).and_then(|n| {
+            range(0, n.0)
+                .fold(Some(([], n.1)), |acc, _i| acc.and_then(|a| decode_reassign_topic(a.1).map(|t| (a.0.push(t.0), t.1))))
+                .and_then(|ts| skip_tags(ts.1).map(|_end| AlterReassignmentsRequest {
+                    timeout_ms: timeout.0, allow_rf_change: al.0, topics: ts.0,
+                }))
+        }))
+    })
+}
+
+/// Each partition entry of a request, in order: (its position among the request's partitions, topic name,
+/// partition index, target replicas).
+fn reassign_entries(req: AlterReassignmentsRequest) -> Vec<(u64, String, i32, Option<Vec<i32>>)> {
+    let flat = req.topics.map(|t| t.partitions.map(|p| (t.name, p.index, p.replicas))).flatten();
+    flat.enumerate().map(|x| (x.0, (x.1).0, (x.1).1, (x.1).2))
+}
+
+/// The broker's own verdict on target replicas, before the controller (Kafka's checks of a manual assignment): a
+/// list that is empty, names a broker twice, or names one that does not exist is INVALID_REPLICA_ASSIGNMENT.
+fn reassign_replicas_error(replicas: Option<Vec<i32>>, brokers: Vec<i32>) -> i16 {
+    match replicas {
+        None => NONE,
+        Some(rs) => if rs.is_empty() || rs.to_set().len() != rs.len() || not rs.all(|r| brokers.contains(r)) {
+            INVALID_REPLICA_ASSIGNMENT
+        } else {
+            NONE
+        },
+    }
+}
+
+fn reassign_message(error: i16) -> Option<String> {
+    if error == NONE {
+        None
+    } else if error == UNKNOWN_TOPIC_OR_PARTITION {
+        Some("the topic or partition does not exist")
+    } else if error == INVALID_REPLICA_ASSIGNMENT {
+        Some("the replicas must be distinct, existing brokers, and at least one")
+    } else if error == INVALID_REPLICATION_FACTOR {
+        Some("the reassignment would change the replication factor, which the request does not allow")
+    } else if error == NO_REASSIGNMENT_IN_PROGRESS {
+        Some("no reassignment of the partition is in progress")
+    } else if error == REQUEST_TIMED_OUT {
+        Some("the controller did not apply the reassignment in time")
+    } else {
+        None
+    }
+}
+
+/// Each of `n` entries' error: the one applied, else REQUEST_TIMED_OUT.
+fn errors_or_timed_out(n: u64, es: Vec<(u64, i16)>) -> Map<u64, i16> {
+    let m = es.to_map();
+    range(0, n).map(|k| (k, m.get(k).unwrap_or(REQUEST_TIMED_OUT))).to_map()
+}
+
+fn error_at(errors: Map<u64, i16>, k: u64) -> i16 {
+    match errors.get(k) {
+        Some(e) => e,
+        None => error("encode_alter_reassignments_response: a partition without its error"),
+    }
+}
+
+/// How many partition entries the topics before topic `k` hold.
+fn entries_before(ts: Vec<ReassignTopic>, k: u64) -> u64 {
+    ts.enumerate().filter(|u| u.0 < k).fold(0u64, |acc, u| acc + (u.1).partitions.len())
+}
+
+fn encode_alter_partition(p: ReassignPartition, error: i16) -> Bytes {
+    Bytes::join([Bytes::from_i32_be(p.index), Bytes::from_i16_be(error), enc_compact_nullable_string(reassign_message(error)), no_tags()])
+}
+
+fn encode_alter_topic(t: ReassignTopic, before: u64, errors: Map<u64, i16>) -> Bytes {
+    Bytes::join([
+        enc_compact_string(t.name),
+        enc_compact_array(t.partitions.enumerate().map(|p| encode_alter_partition(p.1, error_at(errors, before + p.0)))),
+        no_tags(),
+    ])
+}
+
+/// The response: each partition of the request with its error (`errors`, by position in `reassign_entries`).
+fn encode_alter_reassignments_response(correlation_id: i32, version: i16, req: AlterReassignmentsRequest, errors: Map<u64, i16>) -> Bytes {
+    frame(Bytes::join([
+        response_header_v1(correlation_id),
+        Bytes::from_i32_be(0i32),
+        if version >= 1i16 { enc_bool(req.allow_rf_change) } else { Bytes::empty() },
+        Bytes::from_i16_be(NONE),
+        enc_compact_nullable_string(None),
+        enc_compact_array(req.topics.enumerate().map(|t| encode_alter_topic(t.1, entries_before(req.topics, t.0), errors))),
+        no_tags(),
+    ]))
+}
+
+/// ListPartitionReassignmentsRequest: the topics and partitions asked about (`None`: every reassignment).
+struct ListReassignmentsRequest { timeout_ms: i32, topics: Option<Vec<(String, Vec<i32>)>> }
+
+fn decode_list_topic(c: Cur) -> Option<((String, Vec<i32>), Cur)> {
+    read_compact_string(c).and_then(|name| read_compact_i32s(name.1).and_then(|ps| {
+        skip_tags(ps.1).map(|end| ((name.0, ps.0), end))
+    }))
+}
+
+fn decode_list_reassignments(c: Cur) -> Option<ListReassignmentsRequest> {
+    read_i32(c).and_then(|timeout| read_compact_nullable_len(timeout.1).and_then(|n| {
+        let topics = match n.0 {
+            None => Some((None, n.1)),
+            Some(k) => range(0, k)
+                .fold(Some(([], n.1)), |acc, _i| acc.and_then(|a| decode_list_topic(a.1).map(|t| (a.0.push(t.0), t.1))))
+                .map(|a| (Some(a.0), a.1)),
+        };
+        topics.and_then(|ts| skip_tags(ts.1).map(|_end| ListReassignmentsRequest { timeout_ms: timeout.0, topics: ts.0 }))
+    }))
+}
+
+/// A reassignment in progress, as ListPartitionReassignments reports it: the partition, its replicas (the
+/// target's, then the ones being removed), the ones being added and the ones being removed.
+struct Ongoing { name: String, index: i32, replicas: Vec<i32>, target: Vec<i32> }
+
+/// The members of `xs` that are in `ys`, in `xs`'s order.
+fn among(xs: Vec<i32>, ys: Vec<i32>) -> Vec<i32> {
+    xs.filter(|x| ys.contains(x))
+}
+
+/// The replicas a partition being reassigned is shown with (Metadata too): the target's, then those it removes.
+fn reassign_shown(replicas: Vec<i32>, target: Vec<i32>) -> Vec<i32> {
+    target.concat(replicas.filter(|r| not target.contains(r)))
+}
+
+fn encode_ongoing(o: Ongoing) -> Bytes {
+    Bytes::join([
+        Bytes::from_i32_be(o.index),
+        enc_compact_i32s(reassign_shown(o.replicas, o.target)),
+        enc_compact_i32s(o.target.filter(|r| not o.replicas.contains(r))),
+        enc_compact_i32s(o.replicas.filter(|r| not o.target.contains(r))),
+        no_tags(),
+    ])
+}
+
+fn asked_about(req: ListReassignmentsRequest, o: Ongoing) -> bool {
+    match req.topics {
+        None => true,
+        Some(ts) => ts.any(|t| t.0 == o.name && t.1.contains(o.index)),
+    }
+}
+
+/// The reassignments asked about, by topic (`ongoing` comes in name order), partitions in index order.
+fn list_reassignments_topics(req: ListReassignmentsRequest, ongoing: Vec<Ongoing>) -> Vec<Bytes> {
+    let asked = ongoing.filter(|o| asked_about(req, o));
+    let names = asked.fold([], |acc, o| if acc.contains(o.name) { acc } else { acc.push(o.name) });
+    names.map(|n| Bytes::join([
+        enc_compact_string(n),
+        enc_compact_array(asked.filter(|o| o.name == n).map(|o| encode_ongoing(o))),
+        no_tags(),
+    ]))
+}
+
+fn encode_list_reassignments_response(correlation_id: i32, req: ListReassignmentsRequest, ongoing: Vec<Ongoing>) -> Bytes {
+    frame(Bytes::join([
+        response_header_v1(correlation_id),
+        Bytes::from_i32_be(0i32),
+        Bytes::from_i16_be(NONE),
+        enc_compact_nullable_string(None),
+        enc_compact_array(list_reassignments_topics(req, ongoing)),
+        no_tags(),
+    ]))
+}

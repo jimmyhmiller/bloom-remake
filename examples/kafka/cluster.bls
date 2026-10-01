@@ -22,13 +22,18 @@ const OP_DELETE: i8 = 2;
 const OP_PIDS: i8 = 3;
 /// A creation that only validates: decided as a creation is, against the metadata when applied, with no effect.
 const OP_VALIDATE: i8 = 4;
+/// A partition reassignment (AlterPartitionReassignments), and a partition leader's report that one is complete.
+const OP_REASSIGN: i8 = 5;
+const OP_REASSIGNED: i8 = 6;
 
 /// One topic of a command: for a creation, the error the broker found after the checks that come before a taken name
 /// (the partition count, the replication factor, ...; it applies only if the name is not taken), the topic's name,
 /// id, replica assignment (one replica list per partition) and configurations; for a deletion, the topic's name or
-/// its id (the other empty), resolved when the command is applied. `slot` is the topic's entry in its request, which
-/// names its outcome.
-struct Item { slot: u64, err: i16, name: String, id: Bytes, assignment: Vec<Vec<i32>>, configs: Vec<(String, String)> }
+/// its id (the other empty), resolved when the command is applied; for a reassignment, the topic's name, the
+/// partition (`part`), the target replicas (one list; none cancels) and whether the replication factor may change
+/// (`flag`); for a completed one, the topic id, the partition and the replicas. `slot` is the topic's entry in its
+/// request, which names its outcome.
+struct Item { slot: u64, part: i32, err: i16, flag: bool, name: String, id: Bytes, assignment: Vec<Vec<i32>>, configs: Vec<(String, String)> }
 
 /// A command to the controller. `origin` and `tag` name the request that asked for it (the origin broker's id, and
 /// a tag unique among its requests). A request's creations (or deletions) are one command, applied in one tick, so
@@ -37,11 +42,20 @@ struct Item { slot: u64, err: i16, name: String, id: Bytes, assignment: Vec<Vec<
 struct Cmd { op: i8, origin: i32, tag: u64, items: Vec<Item> }
 
 fn create_item(slot: u64, err: i16, name: String, id: Bytes, assignment: Vec<Vec<i32>>, configs: Vec<(String, String)>) -> Item {
-    Item { slot: slot, err: err, name: name, id: id, assignment: assignment, configs: configs }
+    Item { slot: slot, part: 0i32, err: err, flag: false, name: name, id: id, assignment: assignment, configs: configs }
 }
 
 fn delete_item(slot: u64, name: String, id: Bytes) -> Item {
-    Item { slot: slot, err: NONE, name: name, id: id, assignment: [], configs: [] }
+    Item { slot: slot, part: 0i32, err: NONE, flag: false, name: name, id: id, assignment: [], configs: [] }
+}
+
+fn reassign_item(slot: u64, name: String, part: i32, err: i16, replicas: Option<Vec<i32>>, allow_rf_change: bool) -> Item {
+    let asg = match replicas { Some(rs) => [rs], None => [] };
+    Item { slot: slot, part: part, err: err, flag: allow_rf_change, name: name, id: zero_uuid(), assignment: asg, configs: [] }
+}
+
+fn reassigned_item(tid: Bytes, part: i32, replicas: Vec<i32>) -> Item {
+    Item { slot: 0u64, part: part, err: NONE, flag: false, name: "", id: tid, assignment: [replicas], configs: [] }
 }
 
 fn create_cmd(origin: i32, tag: u64, items: Vec<Item>) -> Cmd {
@@ -50,6 +64,14 @@ fn create_cmd(origin: i32, tag: u64, items: Vec<Item>) -> Cmd {
 
 fn validate_cmd(origin: i32, tag: u64, items: Vec<Item>) -> Cmd {
     Cmd { op: OP_VALIDATE, origin: origin, tag: tag, items: items }
+}
+
+fn reassign_cmd(origin: i32, tag: u64, items: Vec<Item>) -> Cmd {
+    Cmd { op: OP_REASSIGN, origin: origin, tag: tag, items: items }
+}
+
+fn reassigned_cmd(origin: i32, tag: u64, item: Item) -> Cmd {
+    Cmd { op: OP_REASSIGNED, origin: origin, tag: tag, items: [item] }
 }
 
 fn delete_cmd(origin: i32, tag: u64, items: Vec<Item>) -> Cmd {
@@ -63,7 +85,9 @@ fn pids_cmd(origin: i32, tag: u64) -> Cmd {
 fn encode_item(it: Item) -> Bytes {
     Bytes::join([
         Bytes::from_u64_be(it.slot),
+        Bytes::from_i32_be(it.part),
         Bytes::from_i16_be(it.err),
+        enc_bool(it.flag),
         enc_compact_string(it.name),
         it.id,
         enc_compact_array(it.assignment.map(|rs| enc_compact_i32s(rs))),
@@ -124,11 +148,13 @@ fn read_config_steps(steps: Vec<Option<(Vec<(String, String)>, Cur)>>, start: Cu
 }
 
 fn read_item(c: Cur) -> Option<(Item, Cur)> {
-    read_u64(c).and_then(|slot| read_i16(slot.1).and_then(|err| read_compact_string(err.1).and_then(|name| {
-        read_uuid(name.1).and_then(|id| read_assignment(id.1).and_then(|a| read_configs(a.1).map(|cf| (Item {
-            slot: slot.0, err: err.0, name: name.0, id: id.0, assignment: a.0, configs: cf.0,
-        }, cf.1))))
-    })))
+    read_u64(c).and_then(|slot| read_i32(slot.1).and_then(|part| read_i16(part.1).and_then(|err| read_bool(err.1).and_then(|flag| {
+        read_compact_string(flag.1).and_then(|name| read_uuid(name.1).and_then(|id| read_assignment(id.1).and_then(|a| {
+            read_configs(a.1).map(|cf| (Item {
+                slot: slot.0, part: part.0, err: err.0, flag: flag.0, name: name.0, id: id.0, assignment: a.0, configs: cf.0,
+            }, cf.1))
+        })))
+    }))))
 }
 
 fn read_items(c: Cur) -> Option<(Vec<Item>, Cur)> {
@@ -167,6 +193,47 @@ fn metadata_items(me: i32, c: Conn, i: u64, names: Vec<String>, ids: Vec<i32>, p
         assign(ids, partitions, rf, hash64(("start", me, c, i, x.1))), []))
 }
 
+/// A reassignment's outcome, as Kafka's controller decides it, and the target to record (if any): `err` is the
+/// broker's own verdict on the replicas; `asg` the target (none: a cancellation); `rs` the partition's replicas;
+/// `ongoing` whether a reassignment of it is in progress.
+fn reassign_decision(err: i16, flag: bool, asg: Vec<Vec<i32>>, rs: Vec<i32>, ongoing: bool) -> (i16, Option<Vec<i32>>) {
+    if err != NONE {
+        (err, None)
+    } else {
+        match asg.first() {
+            None => if ongoing { (NONE, Some(rs)) } else { (NO_REASSIGNMENT_IN_PROGRESS, None) },
+            Some(target) => if not flag && target.len() != rs.len() {
+                (INVALID_REPLICATION_FACTOR, None)
+            } else if not ongoing && target == rs {
+                (NONE, None)
+            } else {
+                (NONE, Some(target))
+            },
+        }
+    }
+}
+
+/// One configuration change of a partition being reassigned, as its leader `me` makes them (item 5): add the first
+/// target replica missing; once every target replica is in sync, remove one replica the target leaves out (the
+/// leader itself last); nothing once the configuration is the target.
+fn reassign_step(cur: Vec<i32>, target: Vec<i32>, isr: Vec<i32>, me: i32) -> Option<Vec<i32>> {
+    match target.filter(|x| not cur.contains(x)).first() {
+        Some(add) => Some(cur.push(add)),
+        None => if not target.all(|x| isr.contains(x)) {
+            None
+        } else {
+            let extra = cur.filter(|x| not target.contains(x));
+            match extra.filter(|x| x != me).first() {
+                Some(drop) => Some(cur.filter(|x| x != drop)),
+                None => match extra.first() {
+                    Some(drop) => Some(cur.filter(|x| x != drop)),
+                    None => None,
+                },
+            }
+        },
+    }
+}
+
 /// The bytes of a stored entry (a blob only ever holds its whole bytes).
 fn entry_bytes(data: Blob) -> Bytes {
     match data.read(0, data.len()) {
@@ -195,9 +262,18 @@ at Broker {
     view broker_ids(ids = collect!(id)) = broker(_, id, _, _);
 
     /// The members of each group (D1): every broker for the controller; a partition's replica set otherwise.
-    view members(g, n) {
+    /// The members of each group before its log holds a configuration (D1): every broker for the controller; a
+    /// partition's replica set otherwise. Members are named by broker id.
+    view initial_members(g, n) {
         broker(n, _, _, _), let g = controller();
         massign(tid, p, rs), broker(n, id, _, _), let g = (tid, p) where rs.contains(id);
+    }
+    view member_id(n, id) = broker(n, id, _, _);
+    /// The partitions whose log this broker keeps: those it replicates, and those a reassignment moves to it (every
+    /// configuration a reassignment passes through is made of these, item 5).
+    view hosts(g) {
+        massign(tid, p, rs), my_id(me), let g = (tid, p) where rs.contains(me);
+        mreassign(tid, p, target), my_id(me), let g = (tid, p) where target.contains(me);
     }
 
     /// Each group's preferred leader: the broker with the lowest id for the controller, the first replica for a
@@ -216,6 +292,8 @@ at Broker {
     durable table mtopic(name: String, id: Bytes, partitions: i32, configs: Vec<(String, String)>) key(name);
     /// Each partition's replicas, by broker id; the first is the preferred leader.
     durable table massign(tid: Bytes, part: i32, replicas: Vec<i32>) key(tid, part);
+    /// The partitions being reassigned, and their target replicas (`massign` keeps the replicas until it is done).
+    durable table mreassign(tid: Bytes, part: i32, target: Vec<i32>) key(tid, part);
     /// The ids of the topics deleted: their partitions' data goes.
     durable table mdeleted(tid: Bytes) key(tid);
     /// The commands applied, by request.
@@ -328,6 +406,47 @@ at Broker {
         next next_pid(n + 1);
     }
 
+    /// A reassignment's items (AlterPartitionReassignments, item 5), decided against the metadata as Kafka's
+    /// controller decides them: an unknown topic or partition; the broker's own error (malformed replicas); a
+    /// cancellation with nothing to cancel; a replication factor change not allowed. A reassignment records its
+    /// target; a cancellation reassigns back to the replicas (a configuration only changes one member at a time, so
+    /// going back is a reassignment too). A target equal to the replicas with none in progress changes nothing.
+    view reassign_item_of(origin, tag, slot, name, part, err, flag, asg) =
+        fresh(op, origin, tag, items), it in items, let slot = it.slot, let name = it.name, let part = it.part,
+        let err = it.err, let flag = it.flag, let asg = it.assignment where op == OP_REASSIGN;
+    view reassign_known(origin, tag, slot, tid, part, err, flag, asg, rs) =
+        reassign_item_of(origin, tag, slot, name, part, err, flag, asg), mtopic(name, tid, _, _), massign(tid, part, rs);
+    view reassign_known_item(origin, tag, slot) = reassign_known(origin, tag, slot, _, _, _, _, _, _);
+    view reassigning_now(tid, part) = mreassign(tid, part, _);
+    view reassign_choice(origin, tag, slot, tid, part, d) {
+        reassign_known(origin, tag, slot, tid, part, err, flag, asg, rs), reassigning_now(tid, part),
+            let d = reassign_decision(err, flag, asg, rs, true);
+        reassign_known(origin, tag, slot, tid, part, err, flag, asg, rs), not reassigning_now(tid, part),
+            let d = reassign_decision(err, flag, asg, rs, false);
+    }
+    apply_reassign_unknown: while reassign_item_of(origin, tag, slot, name, _part, _err, _flag, _asg),
+        not reassign_known_item(origin, tag, slot) {
+        upsert outcome(origin, tag, slot, UNKNOWN_TOPIC_OR_PARTITION, zero_uuid(), -1i64, name);
+    }
+    apply_reassign: while reassign_choice(origin, tag, slot, tid, _part, d) {
+        upsert outcome(origin, tag, slot, d.0, tid, -1i64, "");
+    }
+    apply_reassign_target: while reassign_choice(_origin, _tag, _slot, tid, part, d), let Some(target) = d.1 {
+        upsert mreassign(tid, part, target);
+    }
+    /// A partition leader's report that its configuration reached the target: the target becomes the replicas, if it
+    /// is still the target (a newer reassignment replaces it).
+    view reassigned_item_of(origin, tag, tid, part, target) =
+        fresh(op, origin, tag, items), it in items, let tid = it.id, let part = it.part,
+        let Some(target) = it.assignment.first() where op == OP_REASSIGNED;
+    apply_reassigned: while reassigned_item_of(origin, tag, tid, part, target) {
+        if mreassign(tid, part, target) {
+            upsert massign(tid, part, target);
+            delete mreassign(tid, part, target);
+        }
+        upsert outcome(origin, tag, 0u64, NONE, tid, -1i64, "");
+    }
+
     /// A deleted topic's partition data goes, here as everywhere (the topic is gone from the applied metadata, so
     /// no broker is a member of its groups any more).
     forget_deleted: while mdeleted(tid), rlog(g, i, t, pt, k, pos, data), let (gt, _gp) = g where gt == tid {
@@ -338,6 +457,9 @@ at Broker {
     forget_deleted_raft: while deleted_group(g) {
         if rterm(g, t) {
             delete rterm(g, t);
+        }
+        if rsnap(g, i, t, pos, conf) {
+            delete rsnap(g, i, t, pos, conf);
         }
         if rvote(g, t, v) {
             delete rvote(g, t, v);
@@ -393,6 +515,43 @@ at Broker {
         submit(cmd) from _, leader(g, _), let g = controller(), let x = (CMD, -1i64, Blob::of(cmd));
         cmd_out(cmd), leader(g, _), let g = controller(), let x = (CMD, -1i64, Blob::of(cmd));
         data_proposals(g, x);
+        config_proposals(g, x);
+    }
+
+    // ---- reassignment, at the partition's leader (item 5)
+
+    /// A partition being reassigned, its target, and whether its last configuration change is still uncommitted.
+    view reassign_target(g, target) = mreassign(tid, p, target), let g = (tid, p);
+    view config_pending(g) = latest_config(g, i, _), commit_of(g, c) where i > c;
+    /// The next configuration change (`reassign_step`), once the last is committed: one member at a time, so any two
+    /// configurations in use share a majority.
+    view reassign_next(g, ids) =
+        reassign_target(g, target), leader(g, _), member_ids(g, cur), isr_of(g, isr), my_id(me), not config_pending(g),
+        let Some(ids) = reassign_step(cur, target, isr, me);
+    view config_proposals(g, x) = reassign_next(g, ids), let x = (CONFIG, -1i64, Blob::of(encode_members(ids)));
+    /// The configuration is the target, committed: the leader tells the controller, which makes it the replicas.
+    view reassign_done(tid, p, target) =
+        reassign_target(g, target), leader(g, _), member_ids(g, cur), not config_pending(g), let (tid, p) = g
+        where cur.to_set() == target.to_set();
+    view reassigned_cmd_of(tag, cmd) =
+        reassign_done(tid, p, target), my_id(me), let tag = hash64(("reassigned", tid, p, target)),
+        let cmd = encode_cmd(reassigned_cmd(me, tag, reassigned_item(tid, p, target)));
+
+    /// A partition this broker no longer hosts (a reassignment moved it away, item 5) leaves it: its log and
+    /// snapshot point go, and with them its configuration (the produce layer drops the partition's data). Its term
+    /// and votes stay: should the partition come back, they still bind it.
+    view unhosted(g) = assigned(g), not hosts(g);
+    drop_unhosted_log: while unhosted(g), rlog(g, i, t, pt, k, pos, data) {
+        delete rlog(g, i, t, pt, k, pos, data);
+    }
+    drop_unhosted_snap: while unhosted(g), rsnap(g, i, t, pos, conf) {
+        delete rsnap(g, i, t, pos, conf);
+    }
+    drop_unhosted_commit: while unhosted(g), commit(g, c) {
+        delete commit(g, c);
+    }
+    drop_unhosted_won: while unhosted(g), won(g, t) {
+        delete won(g, t);
     }
 
     // ---- who leads each partition, and its in-sync replicas (D7)

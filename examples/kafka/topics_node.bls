@@ -37,6 +37,8 @@ view wanted_cmd(tag, cmd) {
     delete_cmd_of(_c, _i, tag, cmd);
     pid_cmd(_c, _i, tag, cmd);
     metadata_cmd_of(_c, _i, tag, cmd);
+    alter_cmd_of(_c, _i, tag, cmd);
+    reassigned_cmd_of(tag, cmd);
 }
 
 // ---------------------------------------------------------------- CreateTopics
@@ -146,10 +148,22 @@ answer_delete_late: while delete_head(c, i, seq, corr, fr, at, req), delete_fina
 // ---------------------------------------------------------------- Metadata
 
 /// Each partition as Metadata describes it (S8.md D7).
+/// A partition's replicas as Metadata shows them: during a reassignment, the target's and then those it removes.
+view shown_replicas(tid, p, rs) {
+    massign(tid, p, rs), not mreassign(tid, p, _);
+    massign(tid, p, rs0), mreassign(tid, p, target), let rs = reassign_shown(rs0, target);
+}
+/// Each partition's leader as Metadata shows it: the one this broker knows, if it is among the replicas this broker
+/// knows (a leader that a reassignment just removed still has its last announcement here until a new one is
+/// elected), with the in-sync replicas among them.
+view shown_leader(tid, p, lid, epoch, isr) =
+    shown_replicas(tid, p, rs), let g = (tid, p), partition_leader(g, epoch, l, isr0), broker(l, lid, _, _),
+    let isr = among(isr0, rs) where rs.contains(lid);
+view leader_shown(tid, p) = shown_leader(tid, p, _, _, _);
 view part_info(tid, pi) {
-    massign(tid, p, rs), partition_leader(g, epoch, l, isr), broker(l, lid, _, _), let g = (tid, p),
+    shown_replicas(tid, p, rs), shown_leader(tid, p, lid, epoch, isr),
         let pi = PartInfo { index: p, leader: lid, epoch: epoch as i32, replicas: rs, isr: isr };
-    massign(tid, p, rs), not partition_leader(g, _, _, _), let g = (tid, p),
+    shown_replicas(tid, p, rs), not leader_shown(tid, p),
         let pi = PartInfo { index: p, leader: -1i32, epoch: -1i32, replicas: rs, isr: [] };
 }
 view topic_info(name, id, ps = collect!(pi)) = mtopic(name, id, _, _), part_info(id, pi);
@@ -202,6 +216,47 @@ view metadata_ready(c, i) {
 answer_metadata: while metadata_head(c, i, seq, corr, fr, at, req), metadata_ready(c, i), metadata_known(c, known),
     metadata_creating(c, i, names), broker_infos(bs), controller_or_none(ctl) {
     send kafka.write(c, seq, [Part::Bytes(encode_metadata_response(corr, req, bs, CLUSTER_ID, ctl, known, names.to_set()))]);
+    upsert answering(c, i + 1, seq + 1);
+    delete queued(c, i, fr, at);
+}
+
+// ---------------------------------------------------------------- AlterPartitionReassignments, ListPartitionReassignments
+
+/// A reassignment request is one command (its partitions, with the broker's verdict on their replicas); the
+/// controller decides the rest (item 5). It is answered once applied, or with REQUEST_TIMED_OUT for what was not when
+/// its timeout passes.
+view alter_head(c, i, seq, version, corr, fr, at, req) =
+    head(c, i, seq, key, version, corr, fr, at), caught_up(), key == API_ALTER_PARTITION_REASSIGNMENTS,
+    let Some(body) = request_body(fr), let Some(req) = decode_alter_reassignments(body, version);
+view alter_items(c, i, items = collect!(it)) = per alter_head(c, i, _, _, _, _, _, req), broker_ids(ids),
+    e in reassign_entries(req), let it = reassign_item(e.0, e.1, e.2, reassign_replicas_error(e.3, ids), e.3, req.allow_rf_change);
+view alter_cmd_of(c, i, tag, cmd) =
+    alter_items(c, i, items), my_id(me), let tag = hash64(("reassign", c, i)), let cmd = encode_cmd(reassign_cmd(me, tag, items))
+    where items.len() > 0;
+view alter_errors(c, i, es = collect!((slot, err))) = per alter_head(c, i, _, _, _, _, _, _req), alter_cmd_of(c, i, tag, _cmd),
+    my_id(me), outcome(me, tag, slot, err, _id, _pid, _name);
+answer_alter: while alter_head(c, i, seq, version, corr, fr, at, req), alter_errors(c, i, es)
+    where es.len() == reassign_entries(req).len() {
+    send kafka.write(c, seq, [Part::Bytes(encode_alter_reassignments_response(corr, version, req, es.to_map()))]);
+    upsert answering(c, i + 1, seq + 1);
+    delete queued(c, i, fr, at);
+}
+answer_alter_late: while alter_head(c, i, seq, version, corr, fr, at, req), alter_errors(c, i, es)
+    where es.len() < reassign_entries(req).len() && now() >= at + Duration::from_millis(req.timeout_ms as i64) {
+    send kafka.write(c, seq, [Part::Bytes(encode_alter_reassignments_response(corr, version, req,
+        errors_or_timed_out(reassign_entries(req).len(), es)))]);
+    upsert answering(c, i + 1, seq + 1);
+    delete queued(c, i, fr, at);
+}
+
+/// ListPartitionReassignments reads this broker's metadata, as Kafka's brokers answer it from theirs.
+view list_reassign_head(c, i, seq, corr, fr, at, req) =
+    head(c, i, seq, key, _version, corr, fr, at), caught_up(), key == API_LIST_PARTITION_REASSIGNMENTS,
+    let Some(body) = request_body(fr), let Some(req) = decode_list_reassignments(body);
+view ongoing_for(c, os = collect!(Ongoing { name: n, index: p, replicas: rs, target: t })) =
+    per list_reassign_head(c, _, _, _, _, _, _req), mreassign(tid, p, t), massign(tid, p, rs), mtopic(n, tid, _, _);
+answer_list_reassign: while list_reassign_head(c, i, seq, corr, fr, at, req), ongoing_for(c, os) {
+    send kafka.write(c, seq, [Part::Bytes(encode_list_reassignments_response(corr, req, os))]);
     upsert answering(c, i + 1, seq + 1);
     delete queued(c, i, fr, at);
 }
