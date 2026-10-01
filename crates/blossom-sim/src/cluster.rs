@@ -53,10 +53,16 @@ pub enum Reply {
     Redirect(Option<NodeId>),
 }
 
-/// An invariant over the cluster's state, checked after every step: `nodes[n]` is node `n`'s carried state (`None`
-/// while it is down). An error is a violation: the run stops there and reports it.
+/// An invariant over the cluster's state, checked after every step it is due: `nodes[n]` is node `n`'s carried state
+/// (`None` while it is down). An error is a violation: the run stops there and reports it.
 pub trait Observer {
     fn observe(&mut self, now: i64, nodes: &[Option<&Instance>]) -> Result<(), String>;
+
+    /// Whether the observer checks the state at `now`. Reading every node's state costs O(state), so an observer
+    /// whose violations persist in the state may check less often than every step.
+    fn due(&self, _now: i64) -> bool {
+        true
+    }
 }
 
 /// How a crash treats the node's unsynced writes.
@@ -562,6 +568,19 @@ impl<'p> Cluster<'p> {
         self.boot(n, false)
     }
 
+    /// Offers `row` to node `n`'s input relation `rel`, for its next tick; a node that is down never sees it. A
+    /// directed test drives a program through its inputs this way.
+    pub fn input(&mut self, n: NodeId, rel: RelId, row: Row) -> Result<(), SimError> {
+        let slot = self
+            .nodes
+            .get_mut(n.0 as usize)
+            .ok_or_else(|| SimError::Internal(internal_error!("no node {}", n.0)))?;
+        if let Some(d) = slot.driver.as_mut() {
+            d.node.offer_input(rel, row);
+        }
+        Ok(())
+    }
+
     /// Holds clients off new operations (`true`), or lets them go on.
     pub fn pause_clients(&mut self, paused: bool) {
         self.clients_paused = paused;
@@ -659,7 +678,8 @@ impl<'p> Cluster<'p> {
     }
 
     fn check(&mut self) -> Result<(), SimError> {
-        if self.observers.is_empty() {
+        let now = self.now - EPOCH;
+        if !self.observers.iter().any(|o| o.due(now)) {
             return Ok(());
         }
         let owned: Vec<Option<Instance>> = self
@@ -668,9 +688,11 @@ impl<'p> Cluster<'p> {
             .map(|s| s.driver.as_ref().map(|d| d.node.carried()))
             .collect();
         let states: Vec<Option<&Instance>> = owned.iter().map(Option::as_ref).collect();
-        let now = self.now - EPOCH;
         let mut violation = None;
         for o in &mut self.observers {
+            if !o.due(now) {
+                continue;
+            }
             if let Err(e) = o.observe(now, &states) {
                 violation = Some(format!("{now}: {e}"));
                 break;

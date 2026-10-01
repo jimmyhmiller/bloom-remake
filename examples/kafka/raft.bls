@@ -1,0 +1,259 @@
+//! Replicated logs (docs/plan/notes/S8.md D1–D4): one Raft group (Ongaro and Ousterhout, 2014) per `Group`, written
+//! once. The controller and every topic partition are groups; what an entry means is the includer's business.
+//!
+//! This generalizes `examples/e11_raft_kv.bls`, whose rules it follows, from one static group of a role to many
+//! groups over a relation. The includer, inside `at Broker`, defines:
+//! - `members(g, n)`: the brokers of group `g`, the same on every broker that knows `g`;
+//! - `proposals(g, xs)`: at most one row per group and tick, the entries this broker would append to `g` if it
+//!   leads it, in order: (kind, position, bytes as a blob).
+//! and reads `rlog`, `commit_of`, `leader` and `known_leader`.
+//!
+//! Durability: a group's term, vote and log are durable, so a vote or an entry is on disk before any message of the
+//! same tick leaves (SEM-072), and a follower acknowledges only entries it has made durable. The commit index and the
+//! leader's view of its followers are volatile: a restarted broker relearns them.
+//!
+//! Replication: the leader sends new entries to every follower in the tick after it appends them, and at every
+//! heartbeat it resends each follower's entries from the last index that follower acknowledged (at most
+//! `RAFT_BATCH`), with a `beat` carrying its commit index. Every entry carries the term of the entry before it; a
+//! follower stores an entry whose predecessor matches its log (or the same batch), removes a conflicting suffix, and
+//! acknowledges the highest index it now holds in agreement with the leader. A new leader's first entry is a NOOP of
+//! its term, so the entries it inherited commit without waiting for a client's (§5.4.2, §8).
+
+/// A replication group: a topic id and a partition (the controller is the metadata topic's partition 0).
+pub type Group = (Bytes, i32);
+
+param RAFT_ELECTION_MIN: Duration = 300ms;
+param RAFT_ELECTION_MAX: Duration = 600ms;
+param RAFT_HEARTBEAT: Duration = 50ms;
+param RAFT_POLL: Duration = 20ms;
+param RAFT_BATCH: u64 = 64;
+
+/// Entry kinds (S8.md D3).
+const NOOP: u8 = 0;
+const DATA: u8 = 1;
+const CMD: u8 = 2;
+const CONFIG: u8 = 3;
+
+channel request_vote(g: Group, term: u64, last_idx: u64, last_term: u64): Broker -> Broker;
+channel vote(g: Group, term: u64, granted: bool): Broker -> Broker;
+/// One log entry of the leader of `term`, with the term of the entry before it (the consistency check, §5.3).
+channel entry(g: Group, term: u64, idx: u64, eterm: u64, prev_term: u64, kind: u8, pos: i64, data: Bytes): Broker -> Broker;
+/// A heartbeat: the leader's log holds `(prev_idx, prev_term)`, and its commit index is `commit`.
+channel beat(g: Group, term: u64, prev_idx: u64, prev_term: u64, commit: u64): Broker -> Broker;
+/// A follower's answer: its log agrees with the leader's up to `idx`.
+channel ack(g: Group, term: u64, idx: u64): Broker -> Broker;
+
+at Broker {
+    // ---- persistent state (Raft Fig. 2), per group
+
+    /// The latest term seen. Several writes in one tick keep the largest: terms only grow.
+    durable table rterm(g: Group, t: u64) key(g) resolve choose_most(t);
+    /// At most one vote per group and term, ever.
+    durable table rvote(g: Group, term: u64, cand: Node<Broker>) key(g, term);
+    /// The log. An entry records the term of the entry before it (`prev`, what replication's consistency check sends);
+    /// it stays true, since an entry is stored only after its predecessor's term matched, and replacing the
+    /// predecessor truncates it too.
+    durable table rlog(g: Group, idx: u64, term: u64, prev: u64, kind: u8, pos: i64, data: Blob) key(g, idx);
+
+    // ---- volatile state
+    table won(g: Group, term: u64);
+    table leader_of(g: Group, term: u64, leader: Node<Broker>) key(g, term);
+    table voters(g: Group, term: u64, v: Node<Broker>);
+    table deadline(g: Group, at: Instant) key(g);
+    /// The highest index known committed.
+    table commit(g: Group, i: u64) key(g) resolve choose_most(i);
+    /// Leader state per follower: the highest index it acknowledged, and the highest index sent to it.
+    table match_idx(g: Group, f: Node<Broker>, i: u64) key(g, f) resolve choose_most(i);
+    table sent(g: Group, f: Node<Broker>, i: u64) key(g, f) resolve choose_most(i);
+    timer raft_poll every RAFT_POLL;
+    timer raft_heartbeat every RAFT_HEARTBEAT;
+
+    /// The groups this broker is a member of, and each group's size.
+    view mine(g) = members(g, self);
+    view group_size(g, n = count!(m)) = members(g, m);
+
+    view commit_of(g, c) {
+        commit(g, c);
+        mine(g), not commit(g, _), let c = 0u64;
+    }
+
+    /// A group gets an election deadline when this broker first knows it is a member (and after a restart).
+    arm: while mine(g), not deadline(g, _) {
+        upsert deadline(g, now() + rand_range(RAFT_ELECTION_MIN, RAFT_ELECTION_MAX, ("arm", g)));
+    }
+
+    // ---- term first: a group's effective term this tick is the largest known
+    view heard_term(g, t) {
+        request_vote(g, t, _, _);
+        vote(g, t, _);
+        entry(g: g, term: t, ..);
+        beat(g: g, term: t, ..);
+        ack(g, t, _);
+    }
+    view eff(g, t = max!(x)) {
+        rterm(g, x);
+        heard_term(g, x), mine(g);
+        mine(g), let x = 0u64;
+    }
+    persist_term: while eff(g, t) {
+        next rterm(g, t);
+    }
+
+    view leader(g, t) = eff(g, t), won(g, t);
+    view candidate(g, t) = eff(g, t), rvote(g, t, self), not won(g, t), not leader_of(g, t, _);
+    view known_leader(g, l) = eff(g, t), leader_of(g, t, l);
+
+    view last_log(g, i, t) {
+        rlog(g: g, idx: i, term: t, ..), argmax!(i per g);
+        mine(g), not rlog(g: g, ..), let i = 0u64, let t = 0u64;
+    }
+
+    // ---- elections
+    view rv_ok(g, c, t) =
+        request_vote(g, t, li, lt) from c, eff(g, t), members(g, c), last_log(g, mi, mt)
+        where lt > mt || (lt == mt && li >= mi);
+    view fresh_grant(g, c, t) = rv_ok(g, c, t), not rvote(g, t, _), choose!(c per (g, t));
+    view grant(g, c, t) {
+        fresh_grant(g, c, t);
+        rv_ok(g, c, t), rvote(g, t, c);
+    }
+    grant_vote: on grant(g, c, t) {
+        next rvote(g, t, c);
+        send vote(g, t, true) to c;
+    }
+    refuse_vote: on request_vote(g, t, _, _) from c, eff(g, e), mine(g), not grant(g, c, t) {
+        send vote(g, e, false) to c;
+    }
+
+    view heard_leader(g) {
+        beat(g: g, term: t, ..), eff(g, t);
+        entry(g: g, term: t, ..), eff(g, t);
+    }
+    view granted_now(g) = grant(g, _, _);
+    view timed_out(g, t) =
+        raft_poll, eff(g, t), mine(g), deadline(g, d), not leader(g, t), not granted_now(g), not heard_leader(g)
+        where now() >= d;
+    view reset_timer(g) {
+        granted_now(g);
+        heard_leader(g);
+        timed_out(g, _);
+    }
+    rearm: on reset_timer(g), eff(g, t) {
+        upsert deadline(g, now() + rand_range(RAFT_ELECTION_MIN, RAFT_ELECTION_MAX, ("election", g, t)));
+    }
+    start_election: on timed_out(g, t), last_log(g, li, lt), let nt = t + 1 {
+        next rterm(g, nt);
+        next rvote(g, nt, self);
+        next voters(g, nt, self);
+        for members(g, p) where p != self {
+            send request_vote(g, nt, li, lt) to p;
+        }
+    }
+    count_vote: on vote(g, t, true) from v, members(g, v) {
+        emit voters(g, t, v);
+    }
+    view tally(g, t, n = count!(v)) = voters(g, t, v);
+    view elected(g, t) = candidate(g, t), tally(g, t, n), group_size(g, k) where n * 2 > k;
+    /// A new leader appends a NOOP of its term, and starts its view of the followers afresh (Fig. 2).
+    become_leader: while elected(g, t), last_log(g, li, lt), let empty = Blob::of(Bytes::empty()) {
+        next won(g, t);
+        next leader_of(g, t, self);
+        next rlog(g, li + 1, t, lt, NOOP, -1i64, empty);
+        for members(g, p) where p != self {
+            next match_idx(g, p, 0);
+            next sent(g, p, li);
+        }
+    }
+    /// What an earlier leadership recorded goes: under `choose_most` a larger stale acknowledgement would otherwise
+    /// outvote the fresh 0 and count toward commits it never acknowledged (the S4 review's bug).
+    forget_match: while elected(g, _), match_idx(g, p, m) {
+        delete match_idx(g, p, m);
+    }
+    forget_sent: while elected(g, _), sent(g, p, s) {
+        delete sent(g, p, s);
+    }
+    /// The votes of terms that are over.
+    forget_voters: while voters(g, t, v), eff(g, e) where t < e {
+        delete voters(g, t, v);
+    }
+
+    // ---- appending, leader side: this tick's proposals go after the last entry, in their order
+    append: on proposals(g, xs), leader(g, t), last_log(g, li, lt), (k, x) in xs.enumerate() {
+        next rlog(g, li + 1 + k, t, if k == 0 { lt } else { t }, x.0, x.1, x.2);
+    }
+
+    // ---- replication, leader side
+    /// New entries go out in the tick after they are appended.
+    push: while leader(g, t), sent(g, f, s), rlog(g, i, et, pt, k, pos, data), let Some(b) = data.read(0, data.len())
+        where i > s {
+        send entry(g, t, i, et, pt, k, pos, b) to f;
+    }
+    pushed: while leader(g, t), sent(g, f, s), last_log(g, li, _) where li > s {
+        next sent(g, f, li);
+    }
+    /// At every heartbeat, each follower gets its unacknowledged entries again (at most `RAFT_BATCH`) and a beat.
+    resend: on raft_heartbeat, leader(g, t), match_idx(g, f, m), rlog(g, i, et, pt, k, pos, data),
+        let Some(b) = data.read(0, data.len())
+        where i > m && i <= m + RAFT_BATCH {
+        send entry(g, t, i, et, pt, k, pos, b) to f;
+    }
+    view term_at(g, i, it) {
+        rlog(g: g, idx: i, term: it, ..);
+        match_idx(g, _, i), let it = 0u64 where i == 0;
+    }
+    beat_followers: on raft_heartbeat, leader(g, t), match_idx(g, f, m), term_at(g, m, mt), commit_of(g, c) {
+        send beat(g, t, m, mt, c) to f;
+    }
+    on_ack: on ack(g, t, m) from f, leader(g, t) {
+        next match_idx(g, f, m);
+    }
+    /// How many followers store at least index `i`, for each index a follower acknowledged.
+    view support(g, i, n = count!(f)) = leader(g, _), match_idx(g, _, i), match_idx(g, f, m) where m >= i;
+    /// The highest index a majority stores (the leader holds its whole log, and counts itself). It is committed if it
+    /// is of the leader's term (§5.4.2).
+    view quorum(g, i = max!(j)) = support(g, j, n), group_size(g, k) where (n + 1) * 2 > k;
+    advance_commit: while quorum(g, i), leader(g, t), rlog(g: g, idx: i, term: t, ..), commit_of(g, c) where i > c {
+        next commit(g, i);
+    }
+    /// A leader alone in its group is a majority.
+    advance_alone: while leader(g, t), group_size(g, k), last_log(g, li, lt), commit_of(g, c)
+        where k == 1 && lt == t && li > c {
+        next commit(g, li);
+    }
+
+    // ---- replication, follower side
+    /// Entries of the leader of our term whose predecessor matches: in the log, or earlier in the same batch.
+    view acceptable(g, i, et) {
+        entry(g: g, term: t, idx: i, eterm: et, prev_term: pt, ..), eff(g, t), mine(g),
+            let j = if i > 0 { i - 1 } else { 0 }, rlog(g: g, idx: j, term: pt, ..);
+        entry(g: g, term: t, idx: i, eterm: et, prev_term: pt, ..), eff(g, t), mine(g) where i == 1 && pt == 0;
+        entry(g: g, term: t, idx: i, eterm: et, prev_term: pt, ..), eff(g, t), mine(g),
+            let j = if i > 0 { i - 1 } else { 0 }, acceptable(g, j, pt);
+    }
+    /// A stored entry that conflicts with an acceptable one (same index, another term): it and all after it go.
+    view conflict(g, c = min!(i)) = acceptable(g, i, et), rlog(g: g, idx: i, term: lt, ..) where lt != et;
+    truncate: on conflict(g, c), rlog(g, j, jt, jp, k, pos, data) where j >= c {
+        delete rlog(g, j, jt, jp, k, pos, data);
+    }
+    store_entry: on acceptable(g, i, et), entry(g, t, i, et, pt, k, pos, b), eff(g, t), let blob = Blob::of(b) {
+        next rlog(g, i, et, pt, k, pos, blob);
+    }
+    view matched(g, m = max!(i)) = acceptable(g, i, _);
+    reply_entries: on entry(g: g, term: t, ..) from l, eff(g, t), mine(g), matched(g, m) {
+        emit leader_of(g, t, l);
+        send ack(g, t, m) to l;
+    }
+    /// A heartbeat whose `prev` matches confirms our log up to it and tells us the commit index.
+    view beat_ok(g, l, t, p, c) {
+        beat(g, t, p, pt, c) from l, eff(g, t), mine(g), rlog(g: g, idx: p, term: pt, ..);
+        beat(g, t, p, pt, c) from l, eff(g, t), mine(g) where p == 0;
+    }
+    follow: on beat_ok(g, l, t, p, c) {
+        emit leader_of(g, t, l);
+        send ack(g, t, p) to l;
+        next commit(g, if c < p { c } else { p });
+    }
+    lagging: on beat(g: g, term: t, ..) from l, eff(g, t), mine(g), not beat_ok(g, l, t, _, _) {
+        emit leader_of(g, t, l);
+    }
+}
