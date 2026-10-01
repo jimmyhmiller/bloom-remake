@@ -854,7 +854,9 @@ impl Cx<'_> {
     fn rel_policy(&mut self, node: &SyntaxNode) -> RelPolicy {
         let sticky = has_word(node, "sticky");
         let expr = || expr_children(node).next();
-        if has_word(node, "choose_rand") {
+        if has_word(node, "prefer") {
+            RelPolicy::Prefer(self.names(node))
+        } else if has_word(node, "choose_rand") {
             RelPolicy::ChooseRand { sticky }
         } else if has_word(node, "choose_least") {
             match expr() {

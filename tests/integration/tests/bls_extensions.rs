@@ -147,3 +147,150 @@ fn a_guarded_table_keeps_what_its_explicit_clean_up_keeps() {
         "too few drops to exercise the guards: {dropped:?}"
     );
 }
+
+// ---------------------------------------------------------------- `resolve prefer(rule, …)` (EXTENSIONS 2.4)
+
+/// How a run ended: the oracle's run, or a program error's tick and code.
+#[cfg(test)]
+enum Outcome {
+    Ran(Box<SyncRun>),
+    Failed(Tick, String),
+}
+
+/// Runs on both evaluators, which must agree on the rows or on the error.
+#[cfg(test)]
+fn differential_or_error(artifact: &BlsArtifact, inputs: &[InputEvent], last: u64) -> Outcome {
+    let sim = BlsSim::new(artifact, blossom_value::Seed::from_u64(0)).unwrap();
+    let round = Duration::from_nanos(1_000_000_000);
+    let reference = sim.run(inputs, Tick(last), round, &FaultSchedule::default(), false);
+    let cfg = blossom_engine::EngineConfig {
+        roles: artifact.roles.clone(),
+        node_names: artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect(),
+        seed: Some(blossom_value::Seed::from_u64(0)),
+        ..blossom_engine::EngineConfig::default()
+    };
+    let engine = EngineEvaluator::new(artifact.program.clone(), cfg);
+    let mine = sim.run_on(&engine, inputs, Tick(last), round, &FaultSchedule::default(), false);
+    let failure = |r: &Result<SyncRun, blossom_sim::sync::SimError>| match r {
+        Ok(_) => None,
+        Err(blossom_sim::sync::SimError::Node {
+            tick,
+            error: blossom_oracle::OracleError::Program { error, .. },
+            ..
+        }) => Some((*tick, error.code.to_string())),
+        Err(e) => panic!("not a program error: {e}"),
+    };
+    assert_eq!(
+        failure(&reference),
+        failure(&mine),
+        "the oracle and the engine fail differently"
+    );
+    if let (Ok(a), Ok(b)) = (&reference, &mine) {
+        for (t, (ra, rb)) in a.rounds.iter().zip(&b.rounds).enumerate() {
+            for (x, y) in ra.iter().zip(rb) {
+                assert_eq!(x.instance, y.instance, "tick {t}: the oracle and the engine differ");
+            }
+        }
+    }
+    match failure(&reference) {
+        Some((tick, code)) => Outcome::Failed(tick, code),
+        None => Outcome::Ran(Box::new(reference.unwrap())),
+    }
+}
+
+/// A preferring table holds, at every tick, exactly what its hand-guarded twin holds; the arbitration happens
+/// (ticks where both writers hit one key), so the comparison is not vacuous.
+#[test]
+fn prefer_settles_same_tick_writes_as_the_hand_written_guards_do() {
+    let artifact = compile("prefer.bls");
+    let rel = |n: &str| artifact.rel_named(n).unwrap();
+    let mut contested = 0usize;
+    let mut compared = 0usize;
+    for seed in 0..12u64 {
+        let mut rng = Rng(seed);
+        let last = 30u64;
+        let mut inputs = Vec::new();
+        for t in 1..last {
+            // At most one event of each kind per key and tick: two from one handler would conflict by design.
+            for name in ["reset", "advance", "fresh_a", "fresh_b"] {
+                for k in 0..4u64 {
+                    if rng.below(3) == 0 {
+                        inputs.push(InputEvent {
+                            node: NodeId(0),
+                            tick: Tick(t),
+                            rel: rel(name),
+                            row: Arc::from(vec![u(k), u(rng.below(100))]),
+                        });
+                    }
+                }
+            }
+        }
+        for k in 0..4u64 {
+            for t in 1..last {
+                let has = |name: &str| {
+                    inputs
+                        .iter()
+                        .any(|e| e.tick == Tick(t) && e.rel == rel(name) && e.row[0] == u(k))
+                };
+                if (has("reset") && has("advance")) || (has("fresh_a") && has("fresh_b")) {
+                    contested += 1;
+                }
+            }
+        }
+        let run = match differential_or_error(&artifact, &inputs, last) {
+            Outcome::Ran(run) => run,
+            Outcome::Failed(t, code) => panic!("seed {seed}: {code} at {t:?}"),
+        };
+        for t in 0..=last {
+            let rows = |name: &str| -> BTreeSet<Vec<Value>> {
+                run.node_tick(Tick(t), NodeId(0))
+                    .unwrap()
+                    .instance
+                    .rows(rel(name))
+                    .map(|r| r.to_vec())
+                    .collect()
+            };
+            for (a, b) in [("p", "q"), ("n", "m")] {
+                let (x, y) = (rows(a), rows(b));
+                assert_eq!(x, y, "seed {seed} tick {t}: `{a}` and its twin `{b}` differ");
+                compared += x.len();
+            }
+        }
+    }
+    assert!(compared > 1000, "only {compared} rows compared");
+    assert!(contested > 100, "only {contested} contested writes");
+}
+
+/// Two values from one listed handler, or a listed and an unlisted handler's values, still conflict (BLSR002).
+#[test]
+fn prefer_leaves_unarbitrated_conflicts_errors() {
+    let artifact = compile("prefer.bls");
+    let at = |name: &str, t: u64, k: u64, v: u64| InputEvent {
+        node: NodeId(0),
+        tick: Tick(t),
+        rel: artifact.rel_named(name).unwrap(),
+        row: Arc::from(vec![u(k), u(v)]),
+    };
+    for inputs in [
+        vec![at("clash", 2, 1, 5)],
+        vec![at("advance", 2, 1, 5), at("stray", 2, 1, 5)],
+    ] {
+        match differential_or_error(&artifact, &inputs, 4) {
+            Outcome::Failed(tick, code) => assert_eq!((tick, code.as_str()), (Tick(2), "BLSR002")),
+            Outcome::Ran(_) => panic!("{inputs:?}: no conflict"),
+        }
+    }
+    // A listed and an unlisted write of one value do not conflict.
+    let run = match differential_or_error(&artifact, &[at("advance", 2, 1, 7), at("stray", 2, 1, 1000)], 4) {
+        Outcome::Ran(run) => run,
+        Outcome::Failed(t, code) => panic!("one value conflicted: {code} at {t:?}"),
+    };
+    let rows: Vec<Vec<Value>> = run
+        .node_tick(Tick(3), NodeId(0))
+        .unwrap()
+        .instance
+        .rows(artifact.rel_named("p").unwrap())
+        .map(|r| r.to_vec())
+        .collect();
+    assert_eq!(rows, vec![vec![u(1), u(1007)]]);
+}

@@ -1335,6 +1335,20 @@ impl Parser<'_> {
             self.expect(L_PAREN);
             self.expr(0);
             self.expect(R_PAREN);
+        } else if self.eat_ctx("prefer") {
+            // `prefer(rule, …)`: writer precedence by handler label (LANGUAGE §10.7).
+            self.expect(L_PAREN);
+            while !self.at(R_PAREN) && !self.at(EOF) {
+                let old = self.pos;
+                self.name(false);
+                if old == self.pos {
+                    self.bump();
+                }
+                if !self.eat(COMMA) {
+                    break;
+                }
+            }
+            self.expect(R_PAREN);
         } else {
             self.expect_ctx("merge");
         }

@@ -42,6 +42,8 @@ pub(crate) struct RuleCx {
     /// A generic function's template being resolved: its function parameters are in scope, and calls of generic
     /// functions stay calls of their templates until it is instantiated (LANGUAGE §16.1).
     pub template: Option<usize>,
+    /// The label of the handler whose statements are being resolved (for `resolve prefer`, LANGUAGE §10.7).
+    pub label: Option<Symbol>,
 }
 
 /// The functions a call resolves to before any declared one (LANGUAGE §9.12, §15, §16.1, Appendix B); a `fn` may not
@@ -81,6 +83,7 @@ impl<'t> Resolver<'t, '_> {
             in_fn: false,
             calls: BTreeSet::new(),
             template: None,
+            label: None,
         }
     }
 
@@ -149,6 +152,7 @@ impl<'t> Resolver<'t, '_> {
                 in_fn: true,
                 calls: BTreeSet::new(),
                 template: None,
+                label: None,
             };
             for ((name, _), (v, _)) in f.params.iter().zip(&params) {
                 if let Some(frame) = cx.frames.last_mut() {
@@ -2560,6 +2564,7 @@ impl<'t> Resolver<'t, '_> {
         }
         let mut cx = self.rule_cx(s, placement);
         cx.choice_allowed = h.label.is_some();
+        cx.label = h.label.map(|l| l.name);
         let header = self.body(&mut cx, &h.header);
         cx.choice_allowed = false;
         let stmts = self.stmts(&mut cx, &h.block.stmts);
@@ -2807,12 +2812,28 @@ impl<'t> Resolver<'t, '_> {
             }
             (None, _, _) => None,
         };
+        let rank = match (&rel.prefer, v.verb) {
+            (Some(rules), Verb::Next | Verb::Upsert) => {
+                let listed = cx
+                    .label
+                    .zip(cx.label.and_then(|l| rules.iter().position(|(n, _)| *n == l)));
+                Some(match listed {
+                    Some((l, i)) => {
+                        self.prefer_writers.insert((target, l));
+                        HRank::Listed(u32::try_from(i).ok()?)
+                    }
+                    None => HRank::Unlisted,
+                })
+            }
+            _ => None,
+        };
         Some(HVerbStmt {
             verb: v.verb,
             target,
             args,
             to,
             allow_self_negation,
+            rank,
             text: self.normalized(v.span),
             span: v.span,
         })

@@ -1172,6 +1172,11 @@ pub enum ResolvePolicy {
     Choose,
     Merge(FnId),
     Reject,
+    /// `resolve prefer(…)` (LANGUAGE §10.7): the candidates are one tick's ranked writes; those of the least rank
+    /// (the candidates' column `rank`) per group survive.
+    Prefer {
+        rank: ColIdx,
+    },
 }
 /// MultiChooseSpec data in the Dedalus core IR.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -92,7 +92,8 @@ TTL state; until then they stay not implemented (BLS0908).
 ### 2.4 Resolution completions and writer precedence (LANG-117)
 
 **Completions.** `upsert` into a table with a `resolve` policy (today: use `next`), and a resolution cost that is an
-expression over several columns (today: pack them into one tuple-typed column).
+expression over several columns (today: pack them into one tuple-typed column). Deferred: the S8 Kafka code uses no
+`resolve` policy, so these follow only if the rewrite needs them; until then they stay not implemented (BLS0908).
 
 **Writer precedence.** Two rules writing one key in one tick is a hard error (SEM-050/051), and right: an accident
 must not pass silently. But some programs mean it: a snapshot install resets a partition's log end in the same tick
@@ -105,8 +106,10 @@ table log_end(tid: Bytes, part: i32, next: i64) key(tid, part) resolve prefer(re
 
 Among the candidates for one key in one tick (persisted, `next`, `upsert`), those written by the earliest listed
 rule win; rules not listed, or two candidates from one listed rule, still conflict (the error stays the default).
-**Lowering.** A new `ResolvePolicy::Prefer(Vec<RuleId>)`: each write carries its rule's rank into the candidates
-(`r$cand(X̄, rank)`), and the resolve keeps the least rank per key (then the existing conflict check).
+**Lowering.** A new `ResolvePolicy::Prefer { rank }`: each write is staged with its handler's rank (`r$w(X̄, rank,
+upsert)`, unlisted writes in `r$wx`), the least rank per key survives, and survivors apply as their verb does (then
+the existing conflict checks). Implemented as LANGUAGE §10.7 describes; the candidates are one tick's writes only
+(persisted rows are not ranked: an `upsert` replaces its key's row as always).
 
 ### 2.5 Formats: reversible binary grammars
 

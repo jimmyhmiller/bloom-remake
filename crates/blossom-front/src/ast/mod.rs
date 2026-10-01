@@ -326,11 +326,17 @@ pub struct RelDecl {
 /// A relation-level resolution policy (LANGUAGE §10.7).
 #[derive(Clone, Debug)]
 pub enum RelPolicy {
-    Choose { sticky: bool },
-    ChooseRand { sticky: bool },
+    Choose {
+        sticky: bool,
+    },
+    ChooseRand {
+        sticky: bool,
+    },
     Least(Expr),
     Most(Expr),
     Merge,
+    /// `prefer(rule, …)`: among one tick's writes to a key, those of the earliest listed handler win.
+    Prefer(Vec<Ident>),
 }
 
 #[derive(Clone, Debug)]
