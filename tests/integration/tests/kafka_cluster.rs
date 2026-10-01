@@ -23,12 +23,12 @@ use blossom_driver::bls::compile_file;
 use blossom_front::api::NodeSpec;
 use blossom_integration_tests::raft_safety::GroupSafety;
 use blossom_node::durable::DurableSchema;
-use blossom_sim::cluster::{Cluster, ClusterConfig, NoKvClients, StreamAction, StreamClient, StreamEvent};
+use blossom_sim::cluster::{Cluster, ClusterConfig, CrashWrites, NoKvClients, StreamAction, StreamClient, StreamEvent};
 use blossom_value::time::NodeId;
 use blossom_value::value::IntValue;
 use blossom_value::{BlobRef, Value};
 use bytes::{Bytes, BytesMut};
-use kafka_protocol::messages::create_topics_request::CreatableTopic;
+use kafka_protocol::messages::create_topics_request::{CreatableTopic, CreatableTopicConfig};
 use kafka_protocol::messages::fetch_request::{FetchPartition, FetchTopic};
 use kafka_protocol::messages::metadata_request::MetadataRequestTopic;
 use kafka_protocol::messages::produce_request::{PartitionProduceData, TopicProduceData};
@@ -257,6 +257,8 @@ struct Client {
     probing: bool,
     probe: Option<(i32, i64)>,
     topic_id: Option<[u8; 16]>,
+    /// The topic's configurations, when this client creates it.
+    topic_configs: Vec<(&'static str, &'static str)>,
 }
 
 #[cfg(test)]
@@ -295,6 +297,7 @@ impl Client {
             probing: false,
             probe: None,
             topic_id: None,
+            topic_configs: Vec::new(),
         }
     }
 
@@ -381,7 +384,17 @@ impl Client {
                         CreatableTopic::default()
                             .with_name(TopicName(StrBytes::from_string(TOPIC.into())))
                             .with_num_partitions(PARTITIONS)
-                            .with_replication_factor(REPLICATION),
+                            .with_replication_factor(REPLICATION)
+                            .with_configs(
+                                self.topic_configs
+                                    .iter()
+                                    .map(|(k, v)| {
+                                        CreatableTopicConfig::default()
+                                            .with_name(StrBytes::from_static_str(k))
+                                            .with_value(Some(StrBytes::from_static_str(v)))
+                                    })
+                                    .collect(),
+                            ),
                     ])
                     .with_timeout_ms(1_000);
                 a.send = framed(19, 7, self.corr, &req);
@@ -664,6 +677,9 @@ impl StreamClient for Client {
                 if let Some((p, _)) = self.pending.take() {
                     self.failed(p);
                 }
+                // A connection lost (or refused: the broker is down) sends the client back to the metadata, as
+                // Kafka's clients refresh it when a leader's connection fails.
+                self.stale = true;
                 self.conn = None;
                 self.open = false;
                 self.closing = false;
@@ -1290,4 +1306,203 @@ fn five_brokers_with_idempotent_producers_store_each_batch_once() {
     });
     assert!(t.acked_all > 300, "{t:?}");
     assert!(t.resends > 0, "{t:?}");
+}
+
+/// D12: retention compacts the replication log, so a follower that was down while its leader deleted old segments
+/// cannot be sent the entries it lacks: it gets the leader's snapshot point, empties its partition log, starts again
+/// at the leader's log start and catches up from there (as a Kafka follower that fetched below its leader's log start
+/// does). Afterwards it holds what the leader holds from its new start, to the same end.
+#[test]
+fn a_follower_behind_its_leaders_log_start_catches_up_from_a_snapshot() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/kafka/sim_cluster.bls");
+    let mut nodes: Vec<NodeSpec> = (1..=3)
+        .map(|i| NodeSpec {
+            name: format!("b{i}"),
+            role: Some("Broker".to_owned()),
+        })
+        .collect();
+    nodes.push(NodeSpec {
+        name: "c1".to_owned(),
+        role: Some("Client".to_owned()),
+    });
+    let params = [(
+        "RETENTION_CHECK".to_owned(),
+        blossom_front::api::ParamBinding::Text("50ms".into()),
+    )]
+    .into_iter()
+    .collect();
+    let (result, _) = blossom_driver::bls::compile_file_with(path.to_str().unwrap(), &nodes, &params);
+    let artifact: BlsArtifact = result.unwrap_or_else(|e| panic!("sim_cluster.bls: {e:?}")).0;
+    let schema = DurableSchema::of(artifact.program.get());
+    let rel = |n: &str| artifact.rel_named(n).unwrap();
+    let brokers: BTreeMap<i32, NodeId> = (1..=3).map(|i| (i, NodeId(i as u32 - 1))).collect();
+    for seed in 1..=2u64 {
+        let cfg = ClusterConfig {
+            seed,
+            clients: 0,
+            duration: 12_000_000_000,
+            externs: Arc::new(blossom_std_host::registry().unwrap()),
+            ..ClusterConfig::default()
+        };
+        let mut cluster = Cluster::new(
+            &artifact,
+            &schema,
+            blossom_value::Seed::from_u64(seed),
+            blossom_integration_tests::kafka_brokers(&artifact).unwrap(),
+            Box::new(NoKvClients),
+            cfg,
+        )
+        .unwrap();
+        let (_safety, observer) = GroupSafety::of(&artifact).unwrap().shared();
+        cluster.observe(observer);
+        let shared = Rc::new(RefCell::new(Shared::default()));
+        for c in 0..2 {
+            let mut client = Client::new(c, seed, shared.clone(), brokers.clone(), 120, false);
+            client.topic_configs = vec![("retention.bytes", "1000"), ("segment.bytes", "300")];
+            cluster.stream_client(Box::new(client));
+        }
+        let fail = |cluster: &Cluster<'_>, what: &str| -> String {
+            format!("seed {seed}: {what}\n{}", cluster.run_so_far().log.join("\n"))
+        };
+        // Broker 3 goes down once the topic exists, and stays down while the others produce and delete.
+        cluster.run_until(300_000_000).unwrap();
+        let lagging = NodeId(2);
+        // Per partition group: the last index of the returning broker's log when it went down (at most this: a crash
+        // may lose its unsynced writes).
+        let group_of = |r: &[Value]| match &r[0] {
+            Value::Tuple(g) if g.len() == 2 && int(&g[1]) >= 0 => Some(r[0].clone()),
+            _ => None,
+        };
+        let mut held: BTreeMap<Value, i64> = BTreeMap::new();
+        for r in cluster.state(lagging).unwrap().rows(rel("rlog")) {
+            if let Some(g) = group_of(r) {
+                let e = held.entry(g).or_insert(0);
+                *e = (*e).max(int(&r[1]));
+            }
+        }
+        cluster.crash(lagging, CrashWrites::Random).unwrap();
+        cluster.run_until(3_000_000_000).unwrap();
+        assert!(
+            cluster.violation().is_none(),
+            "{}",
+            fail(&cluster, cluster.violation().unwrap_or(""))
+        );
+        // The others compacted past it: it can only catch up from a snapshot point.
+        let past = brokers
+            .values()
+            .filter(|n| **n != lagging)
+            .flat_map(|n| {
+                cluster
+                    .state(*n)
+                    .unwrap()
+                    .rows(rel("rsnap"))
+                    .map(|r| r.to_vec())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|r| int(&r[1]) > held.get(&r[0]).copied().unwrap_or(0))
+            .count();
+        assert!(
+            past > 0,
+            "{}",
+            fail(&cluster, "no leader compacted past the stopped broker")
+        );
+        cluster.restart(lagging).unwrap();
+        cluster.run_until(8_000_000_000).unwrap();
+        cluster.step_until(9_000_000_000).unwrap();
+        assert!(
+            cluster.violation().is_none(),
+            "{}",
+            fail(&cluster, cluster.violation().unwrap_or(""))
+        );
+        assert!(
+            shared.borrow().sent.len() == 240,
+            "{}",
+            fail(
+                &cluster,
+                &format!("the producers sent {} of 240", shared.borrow().sent.len())
+            )
+        );
+        let states: Vec<_> = brokers.values().map(|n| cluster.state(*n).unwrap()).collect();
+        let tid = states[0]
+            .rows(rel("mtopic"))
+            .find(|r| r[0] == Value::Str(TOPIC.into()))
+            .map(|r| r[1].clone())
+            .unwrap();
+        let in_topic = |r: &[Value]| r[0] == tid;
+        let mut snapshots = 0;
+        for p in 0..i64::from(PARTITIONS) {
+            // Each replica's (log start, log end, batches by base).
+            let logs: Vec<(i64, i64, BTreeMap<i64, BlobRef>)> = states
+                .iter()
+                .map(|s| {
+                    let one = |name: &str| {
+                        s.rows(rel(name))
+                            .find(|r| in_topic(r) && int(&r[1]) == p)
+                            .map(|r| int(&r[2]))
+                            .unwrap_or(-1)
+                    };
+                    let batches = s
+                        .rows(rel("batch"))
+                        .filter(|r| in_topic(r) && int(&r[1]) == p)
+                        .map(|r| {
+                            let Value::Blob(b) = &r[5] else { panic!() };
+                            (int(&r[2]), *b)
+                        })
+                        .collect();
+                    (one("log_start"), one("log_end"), batches)
+                })
+                .collect();
+            let end = logs[0].1;
+            for (k, (start, e, batches)) in logs.iter().enumerate() {
+                assert_eq!(
+                    *e,
+                    end,
+                    "{}",
+                    fail(
+                        &cluster,
+                        &format!("partition {p}: broker {} ends at {e}, not {end}", k + 1)
+                    )
+                );
+                assert!(
+                    *start > 0,
+                    "seed {seed}: partition {p}: broker {} deleted nothing",
+                    k + 1
+                );
+                // Where two replicas both hold data, they hold the same batches.
+                for (other, (s2, _, b2)) in logs.iter().enumerate() {
+                    let from = (*start).max(*s2);
+                    let mine: Vec<_> = batches.range(from..).collect();
+                    let theirs: Vec<_> = b2.range(from..).collect();
+                    assert_eq!(
+                        mine,
+                        theirs,
+                        "seed {seed}: partition {p}: brokers {} and {} differ from {from}",
+                        k + 1,
+                        other + 1
+                    );
+                }
+            }
+            // The returning broker took a snapshot point: its log starts at one, past what it held when it went down.
+            let snap = states[2]
+                .rows(rel("rsnap"))
+                .find(|r| matches!(&r[0], Value::Tuple(g) if g[0] == tid && int(&g[1]) == p))
+                .map(|r| int(&r[3]));
+            if snap.is_some() {
+                snapshots += 1;
+            }
+        }
+        assert!(
+            snapshots > 0,
+            "{}",
+            fail(&cluster, "the returning broker took no snapshot point")
+        );
+        // Every acknowledged acks=all batch at or past a replica's start is there.
+        let sh = shared.borrow();
+        let acked = sh
+            .sent
+            .iter()
+            .filter(|x| x.produce.acks == -1 && matches!(x.answer, Some((0, _))))
+            .count();
+        assert!(acked > 60, "seed {seed}: only {acked} acknowledged");
+    }
 }

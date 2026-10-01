@@ -8,7 +8,17 @@
 //!   leads it, in order: (kind, position, bytes as a blob);
 //! - `preferred(g, n)`: the member that leads a new group (Kafka's first replica leads a new partition): term 1 is
 //!   its (see `initial_vote`), so a new group has a leader at once, without an election.
-//! and reads `rlog`, `commit_of`, `leader` and `known_leader`.
+//! - `compactable(g, i, pos)`: an index whose entries (it and every one before) this broker no longer needs, and
+//!   the position after it: they are committed and applied, and the includer has let go of what they held.
+//! and reads `rlog`, `commit_of`, `leader` and `known_leader`, and reacts to `install(g, i, pos)` (below).
+//!
+//! Compaction (§7): a broker drops the entries up to a `compactable` index, keeping that index's term and position
+//! as its snapshot point (`rsnap`): its log then starts after it. A follower the leader can no longer send entries
+//! to (it needs one at or before the leader's snapshot point) gets the snapshot point instead (InstallSnapshot): it
+//! drops its log, takes the point as its own, and resumes after it; the includer resets the group's state to the
+//! point's position (`install`). What a snapshot holds beyond its point is the includer's business: a Kafka
+//! partition's is nothing, since the data before a leader's log start is gone (retention), as a Kafka follower
+//! starts again at its leader's log start.
 //!
 //! Durability: a group's term, vote and log are durable, so a vote or an entry is on disk before any message of the
 //! same tick leaves (SEM-072), and a follower acknowledges only entries it has made durable. The commit index and the
@@ -39,6 +49,9 @@ const CONFIG: u8 = 3;
 
 channel request_vote(g: Group, term: u64, last_idx: u64, last_term: u64): Broker -> Broker;
 channel vote(g: Group, term: u64, granted: bool): Broker -> Broker;
+/// InstallSnapshot: the leader of `term` has compacted its log up to `idx` (whose term is `sterm`); `pos` is the
+/// position after it.
+channel snapshot(g: Group, term: u64, idx: u64, sterm: u64, pos: i64): Broker -> Broker;
 /// AppendEntries: the leader of `term`'s entries after its entry `prev_idx` (whose term is `prev_term`, the
 /// consistency check of §5.3), in index order: each one's index, term, kind, position and bytes.
 channel entries(g: Group, term: u64, prev_idx: u64, prev_term: u64, es: Vec<(u64, u64, u8, i64, Bytes)>): Broker -> Broker;
@@ -83,6 +96,9 @@ at Broker {
     /// it stays true, since an entry is stored only after its predecessor's term matched, and replacing the
     /// predecessor truncates it too.
     durable table rlog(g: Group, idx: u64, term: u64, prev: u64, kind: u8, pos: i64, data: Blob) key(g, idx);
+    /// The snapshot point: the log's entries up to `idx` (of term `term`) are compacted away; `pos` is the position
+    /// after them. It only moves forward.
+    durable table rsnap(g: Group, idx: u64, term: u64, pos: i64) key(g) resolve choose_most(idx);
 
     // ---- volatile state
     table won(g: Group, term: u64);
@@ -161,7 +177,19 @@ at Broker {
 
     view last_log(g, i, t) {
         rlog(g: g, idx: i, term: t, ..), argmax!(i per g);
-        mine(g), not rlog(g: g, ..), let i = 0u64, let t = 0u64;
+        mine(g), not rlog(g: g, ..), rsnap(g, i, t, _);
+        mine(g), not rlog(g: g, ..), not rsnap(g, _, _, _), let i = 0u64, let t = 0u64;
+    }
+    /// An index at or before the snapshot point: committed, and compacted away.
+    view compacted(g, i) = rlog(g: g, idx: i, ..), rsnap(g, s, _, _) where i <= s;
+
+    // ---- compaction
+    compact: while compactable(g, i, pos), rlog(g, i, t, _, _, _, _), not snap_covers(g, i) {
+        next rsnap(g, i, t, pos);
+    }
+    view snap_covers(g, i) = rsnap(g, s, _, _), compactable(g, i, _) where i <= s;
+    drop_compacted: while compacted(g, i), rlog(g, i, t, pt, k, pos, data) {
+        delete rlog(g, i, t, pt, k, pos, data);
     }
 
     // ---- elections
@@ -242,8 +270,11 @@ at Broker {
     /// The term of each entry, and 0 before the first.
     view term_at(g, i, it) {
         rlog(g: g, idx: i, term: it, ..);
+        rsnap(g, i, it, _);
         mine(g), let i = 0u64, let it = 0u64;
     }
+    /// Whether a follower's next entries are compacted away here: it gets the snapshot point instead.
+    view behind_snapshot(g, from) = out_from(g, _f, from), rsnap(g, s, _, _) where from < s;
     /// Where each follower's batches start this tick: after what was last sent to it, for entries appended since (in
     /// the tick after their append), and at every heartbeat after what it last acknowledged (so lost or refused
     /// batches go again).
@@ -252,8 +283,12 @@ at Broker {
         raft_heartbeat, leader(g, _), match_idx(g, f, from);
     }
     view out_batch(g, f, from, es = collect!((i, et, k, pos, b))) =
-        per out_from(g, f, from), rlog(g, i, et, _pt, k, pos, data), let b = log_bytes(data)
+        per out_from(g, f, from), not behind_snapshot(g, from), rlog(g, i, et, _pt, k, pos, data), let b = log_bytes(data)
         where i > from && i <= from + RAFT_BATCH;
+    /// At a heartbeat, a follower that acknowledged less than the snapshot point gets the point.
+    send_snapshot: on raft_heartbeat, leader(g, t), match_idx(g, f, m), rsnap(g, s, st, pos) where m < s {
+        send snapshot(g, t, s, st, pos) to f;
+    }
     replicate: while out_batch(g, f, from, es), leader(g, t), term_at(g, from, ft) {
         send entries(g, t, from, ft, es) to f;
     }
@@ -282,12 +317,18 @@ at Broker {
 
     // ---- replication, follower side
     /// Batches of the leader of our term whose predecessor matches our log (or that start the log).
+    /// A predecessor at or before the snapshot point matches: those entries are committed, the same everywhere.
     view batch_taken(g, l, t, p, pt, es) {
         entries(g, t, p, pt, es) from l, eff(g, t), mine(g), rlog(g: g, idx: p, term: pt, ..);
         entries(g, t, p, pt, es) from l, eff(g, t), mine(g) where p == 0;
+        entries(g, t, p, pt, es) from l, eff(g, t), mine(g), rsnap(g, s, _, _) where p <= s;
     }
-    view incoming(g, i, et, pt, k, pos, b) = batch_taken(g, _l, _t, p, ppt, es), e in chained(p, ppt, es),
-        let i = e.0, let et = e.1, let pt = e.2, let k = e.3, let pos = e.4, let b = e.5;
+    view snap_at(g, s) {
+        rsnap(g, s, _, _);
+        mine(g), not rsnap(g, _, _, _), let s = 0u64;
+    }
+    view incoming(g, i, et, pt, k, pos, b) = batch_taken(g, _l, _t, p, ppt, es), snap_at(g, s), e in chained(p, ppt, es),
+        let i = e.0, let et = e.1, let pt = e.2, let k = e.3, let pos = e.4, let b = e.5 where i > s;
     /// A stored entry that conflicts with an incoming one (same index, another term): it and all after it go.
     view conflict(g, c = min!(i)) = incoming(g, i, et, _, _, _, _), rlog(g: g, idx: i, term: lt, ..) where lt != et;
     truncate: on conflict(g, c), rlog(g, j, jt, jp, k, pos, data) where j >= c {
@@ -306,6 +347,28 @@ at Broker {
     view beat_ok(g, l, t, p, c) {
         beat(g, t, p, pt, c) from l, eff(g, t), mine(g), rlog(g: g, idx: p, term: pt, ..);
         beat(g, t, p, pt, c) from l, eff(g, t), mine(g) where p == 0;
+        beat(g, t, p, _pt, c) from l, eff(g, t), mine(g), rsnap(g, s, _, _) where p <= s;
+    }
+    /// A snapshot point past this broker's log: it drops its log and takes the point (Fig. 13). One that its log
+    /// already reaches (it holds that entry, or has compacted past it) changes nothing but is acknowledged.
+    view snapshot_new(g, l, t, i, st, pos) =
+        snapshot(g, t, i, st, pos) from l, eff(g, t), mine(g), not holds_point(g, i, st);
+    view holds_point(g, i, st) {
+        rlog(g: g, idx: i, term: st, ..);
+        rsnap(g, s, _, _), snapshot(g: g, idx: i, sterm: st, ..) where s >= i;
+    }
+    /// The includer resets the group's state to `pos` in this tick.
+    view install(g, i, pos) = snapshot_new(g, _l, _t, i, _st, pos);
+    take_snapshot: on snapshot_new(g, l, t, i, st, pos) {
+        next rsnap(g, i, st, pos);
+        next commit(g, i);
+    }
+    drop_for_snapshot: on snapshot_new(g, _l, _t, _i, _st, _pos), rlog(g, j, jt, jp, k, pos, data) {
+        delete rlog(g, j, jt, jp, k, pos, data);
+    }
+    ack_snapshot: on snapshot(g, t, i, _st, _pos) from l, eff(g, t), mine(g) {
+        emit leader_of(g, t, l);
+        send ack(g, t, i) to l;
     }
     follow: on beat_ok(g, l, t, p, c) {
         emit leader_of(g, t, l);

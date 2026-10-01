@@ -37,6 +37,8 @@ pub struct GroupSafety {
     won: RelId,
     rterm: RelId,
     match_idx: RelId,
+    /// The snapshot points (entries up to one are compacted away: committed, and not looked for).
+    rsnap: Option<RelId>,
     /// Per group: the broker that won each term.
     winners: BTreeMap<(Value, u64), usize>,
     /// Per group and committed index: the entry, and the term of the broker that was first seen to commit it.
@@ -58,6 +60,7 @@ impl GroupSafety {
             won: a.rel_named("won")?,
             rterm: a.rel_named("rterm")?,
             match_idx: a.rel_named("match_idx")?,
+            rsnap: a.rel_named("rsnap"),
             winners: BTreeMap::new(),
             committed: BTreeMap::new(),
             progress: BTreeMap::new(),
@@ -77,8 +80,8 @@ impl GroupSafety {
     /// in one term only that term's leader changes the follower's log). A record kept from an earlier leadership
     /// breaks this (the S4 review's bug).
     fn followers_are_as_recorded(&self, nodes: &[Option<&Instance>]) -> Result<(), String> {
-        // Per broker: each group's term, and each (group, index)'s entry term.
-        type Terms = (BTreeMap<Value, u64>, BTreeMap<(Value, u64), u64>);
+        // Per broker: each group's term, each (group, index)'s entry term, and each group's snapshot point.
+        type Terms = (BTreeMap<Value, u64>, BTreeMap<(Value, u64), u64>, BTreeMap<Value, u64>);
         let mut views: Vec<Option<Terms>> = Vec::new();
         for s in nodes {
             views.push(match s {
@@ -92,12 +95,18 @@ impl GroupSafety {
                     for r in state.rows(self.rlog) {
                         entries.insert((group(r)?, u64_at(r, 1)?), u64_at(r, 2)?);
                     }
-                    Some((terms, entries))
+                    let mut snaps = BTreeMap::new();
+                    if let Some(rs) = self.rsnap {
+                        for r in state.rows(rs) {
+                            snaps.insert(group(r)?, u64_at(r, 1)?);
+                        }
+                    }
+                    Some((terms, entries, snaps))
                 }
             });
         }
         for (n, state) in nodes.iter().enumerate() {
-            let (Some(state), Some(Some((terms, entries)))) = (state, views.get(n)) else {
+            let (Some(state), Some(Some((terms, entries, snaps)))) = (state, views.get(n)) else {
                 continue;
             };
             for w in state.rows(self.won) {
@@ -108,10 +117,14 @@ impl GroupSafety {
                 for m in state.rows(self.match_idx).filter(|r| r.first() == Some(&g)) {
                     let Some(Value::Node(f)) = m.get(1) else { continue };
                     let i = u64_at(m, 2)?;
-                    let Some(Some((fterms, fentries))) = views.get(f.0 as usize) else {
+                    let Some(Some((fterms, fentries, fsnaps))) = views.get(f.0 as usize) else {
                         continue;
                     };
                     if i == 0 || fterms.get(&g).copied() != Some(t) {
+                        continue;
+                    }
+                    // An entry compacted on either side is committed: nothing to compare.
+                    if snaps.get(&g).is_some_and(|s| i <= *s) || fsnaps.get(&g).is_some_and(|s| i <= *s) {
                         continue;
                     }
                     let mine = entries.get(&(g.clone(), i));
@@ -162,10 +175,20 @@ impl Observer for GroupSafety {
             for r in state.rows(self.rlog) {
                 logs.entry(group(r)?).or_default().insert(u64_at(r, 1)?, r.clone());
             }
+            // Per group: its snapshot point (index, term).
+            let mut snaps: BTreeMap<Value, (u64, u64)> = BTreeMap::new();
+            if let Some(rs) = self.rsnap {
+                for r in state.rows(rs) {
+                    snaps.insert(group(r)?, (u64_at(r, 1)?, u64_at(r, 2)?));
+                }
+            }
             for (g, log) in &logs {
+                let snap = snaps.get(g).copied();
                 for (i, entry) in log {
                     let before = if *i == 1 {
                         Some(0)
+                    } else if snap.is_some_and(|s| s.0 + 1 == *i) {
+                        snap.map(|s| s.1)
                     } else {
                         log.get(&(i - 1)).map(|r| u64_at(r, 2)).transpose()?
                     };
@@ -202,7 +225,11 @@ impl Observer for GroupSafety {
                 // would also break log matching or leader completeness, which are checked in full.
                 let from = self.checked.get(&(n, g.clone())).copied().unwrap_or(0);
                 self.checked.insert((n, g.clone()), commit.max(from));
+                let snap = snaps.get(&g).map_or(0, |s| s.0);
                 for i in from.min(commit) + 1..=commit {
+                    if i <= snap {
+                        continue;
+                    }
                     let Some(entry) = log.get(&i) else {
                         return Err(format!(
                             "broker {n} committed {g:?} through {commit} but holds no entry {i}"
@@ -229,8 +256,9 @@ impl Observer for GroupSafety {
                 if terms.get(&g).copied() != Some(t) || (log.is_empty() && gone.contains(&g)) {
                     continue;
                 }
+                let snap = snaps.get(&g).map_or(0, |s| s.0);
                 for ((cg, i), (entry, at)) in &self.committed {
-                    if *cg == g && *at < t && log.get(i) != Some(entry) {
+                    if *cg == g && *at < t && *i > snap && log.get(i) != Some(entry) {
                         return Err(format!(
                             "leader completeness: broker {n} leads {g:?} in term {t} without {entry:?} at {i}"
                         ));
