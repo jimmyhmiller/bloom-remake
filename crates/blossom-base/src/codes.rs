@@ -357,6 +357,14 @@ pub static REGISTRY: &[CodeInfo] = &[
         "an evaluation deeper than the bound the evaluators' stacks are sized for (§16.1)",
     ),
     info(
+        "BLS0218",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "`?` where it cannot return early: outside a function returning `Option`, under a branch, the right of `&&`/`||`, a nested block or a closure (§16.1)",
+    ),
+    info(
         "BLS0300",
         Error,
         "blossom-front",

@@ -187,6 +187,20 @@ fn expected(view: &str, n: u64, s: &str, b: &[u8]) -> (Value, Value) {
                 vec_u([n, n + 1, 0, 0]),
             ]),
         ),
+        "v_try" => {
+            let pair = |a: u64, b: u64| tuple(vec![u(a), u(b)]);
+            let two = (b.len() >= 2).then(|| (u64::from(b[0]), u64::from(b[1]) + 1));
+            let sum = (b.len() >= 3).then(|| u64::from(b[0]) + u64::from(b[2]));
+            let swapped = two.map(|(x, y)| (y * if x > 100 { 1 } else { 2 }, x));
+            (
+                bytes(b),
+                tuple(vec![
+                    opt(two.map(|(x, y)| pair(x, y))),
+                    opt(sum.map(u)),
+                    opt(swapped.map(|(x, y)| pair(x, y))),
+                ]),
+            )
+        }
         "v_match" => (
             Value::Str(s.into()),
             Value::Int(IntValue::I64(match s.parse::<i64>() {
@@ -232,6 +246,7 @@ const VIEWS: &[&str] = &[
     "v_parse",
     "v_hash",
     "v_match",
+    "v_try",
 ];
 
 #[test]

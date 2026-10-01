@@ -466,6 +466,39 @@ fn a_closure_outside_a_function_is_bls0214() {
 }
 
 #[test]
+fn a_question_mark_that_cannot_return_early_is_bls0218() {
+    // Under a branch, the right of `&&`, in a closure, in a function not returning an `Option`, and in a rule body.
+    for (fns, rule) in [
+        ("fn f(o: Option<u64>) -> Option<u64> { Some(if true { o? } else { 0 }) }", "f(Some(k))"),
+        ("fn f(o: Option<bool>) -> Option<bool> { Some(true && o?) }", "f(Some(true))"),
+        ("fn f(v: Vec<Option<u64>>) -> Option<Vec<u64>> { Some(v.map(|x| x?)) }", "f([Some(k)])"),
+        ("fn f(o: Option<u64>) -> u64 { o? }", "Some(f(Some(k)))"),
+    ] {
+        let src = with_head(Box::leak(
+            format!("{fns}\noutput out(k: Option<u64>);\na: on go(k, v), let x = {rule} {{ emit out(Some(k)); }}\n")
+                .into_boxed_str(),
+        ));
+        assert_eq!(codes(src), vec!["BLS0218"], "{fns}");
+    }
+    let src = with_head("output out(k: u64);\nview w(x) = go(k, _), let x = Some(k)?;\n");
+    assert_eq!(codes(src), vec!["BLS0218"]);
+}
+
+#[test]
+fn a_question_mark_in_strict_positions_compiles() {
+    let src = with_head(
+        "fn f(a: Option<u64>, b: Option<(u64, u64)>) -> Option<u64> {\n\
+             let (x, y) = b?;\n\
+             let z = [a?, x].len();\n\
+             Some(z + y + a? * 2)\n\
+         }\n\
+         output out(k: Option<u64>);\n\
+         a: on go(k, v) { emit out(f(Some(k), Some((k, k)))); }\n",
+    );
+    assert_eq!(codes(src), Vec::<&str>::new());
+}
+
+#[test]
 fn a_function_reading_a_relation_or_the_clock_is_bls0215() {
     for body in ["now()", "tick()", "self", "c", "rand_range(0, 3, n)", "rand(n)"] {
         let src = with_head(Box::leak(

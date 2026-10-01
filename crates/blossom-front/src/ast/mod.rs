@@ -11,6 +11,7 @@
 
 pub mod attrs;
 mod convert;
+mod desugar;
 
 pub use convert::convert;
 
@@ -591,6 +592,12 @@ pub struct Expr {
     pub span: Span,
 }
 
+impl Expr {
+    pub fn new(kind: ExprKind, span: Span) -> Expr {
+        Expr { kind, span }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BinOp {
     Add,
@@ -720,6 +727,9 @@ pub enum ExprKind {
         params: Vec<Ident>,
         body: Box<Expr>,
     },
+    /// `e?`: `e`'s value if it is `Some`, else the enclosing function returns `None` (EXTENSIONS 2.1). Function
+    /// bodies desugar it into `match`es before name resolution (`ast::desugar`); anywhere else it is BLS0218.
+    Try(Box<Expr>),
 }
 
 /// `let pat [: T] = value;` in a block.

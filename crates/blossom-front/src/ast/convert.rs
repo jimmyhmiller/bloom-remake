@@ -68,6 +68,7 @@ fn is_expr(kind: SyntaxKind) -> bool {
             | PATHEXPR
             | CALLEXPR
             | METHODCALLEXPR
+            | TRYEXPR
             | BANGCALLEXPR
             | FIELDEXPR
             | TUPLEINDEXEXPR
@@ -1392,6 +1393,10 @@ impl Cx<'_> {
                     args: self.args(node),
                 }
             }
+            TRYEXPR => {
+                let inner = expr_children(node).next();
+                ExprKind::Try(self.boxed(inner, span))
+            }
             BANGCALLEXPR => {
                 let text = tokens(node)
                     .find(|t| t.kind() == BANG_IDENT)
@@ -1714,13 +1719,15 @@ impl Cx<'_> {
             self.malformed("a function without a body", span);
             return None;
         };
-        Some(FnItem {
+        let mut item = FnItem {
             name,
             params,
             ret,
             body,
             span,
-        })
+        };
+        desugar::fn_body(&mut item, self.diags);
+        Some(item)
     }
 
     fn bang_clause(&mut self, node: &SyntaxNode) -> BangClause {

@@ -481,7 +481,7 @@ BinaryOp        = "||" | "&&" | "==" | "!=" | "<" | "<=" | ">" | ">=" | "in"
                 | ".." | "..=" | "<.." | "<..=" | "|" | "^" | "&" | "<<" | ">>"
                 | "+" | "-" | "++" | "*" | "/" | "%" | "**" ;
 Postfix         = Primary { "." FieldName [ "(" Args ")" ] | "." BANG_IDENT "(" Args ")"
-                          | "." INT_LIT | "(" Args ")" | "[" Expr "]" } ;
+                          | "." INT_LIT | "(" Args ")" | "[" Expr "]" | "?" } ;
 Primary         = INT_LIT | FLOAT_LIT | DURATION_LIT | STRING_LIT | BYTES_LIT
                 | "true" | "false" | "self" | "_"
                 | "(" ")" | "(" Expr ")" | "(" Expr "," [ Expr { "," Expr } [ "," ] ] ")"
@@ -556,7 +556,7 @@ operators that bind tighter than comparisons (so `x in lo..hi` needs no parenthe
 | 12 | `**` | right |
 | 13 | `as` (postfix type cast) | left |
 | 14 | prefix `-` `~` | — |
-| 15 | postfix `.f` `.m(…)` `.m!(…)` `.0` `(…)` `[…]` | left |
+| 15 | postfix `.f` `.m(…)` `.m!(…)` `.0` `(…)` `[…]` `?` | left |
 
 `if … { } else { }` and `match` are primaries (there is no `?:`). `|` is bitwise or on integers; it is never a
 lattice join (joins are `a.join(b)`, §11.4). Inside a fold's element (`lset{ e | … }`) a top-level `|` ends the
@@ -2489,6 +2489,23 @@ and used by ANA-043, ANA-080 and fold legality. A function with a lattice-typed 
 class with a prefix (`monotone fn`, `morphism fn`, `antitone fn`, `threshold fn`); without one it is NM and is called
 with a bang. Lowering: an IR pure function; calls stay calls.
 
+**Failure as absence: `?`.** In a function whose result is an `Option`, `e?` is `e`'s value when it is `Some(v)`;
+when it is `None`, the function returns `None` at once — the function-body counterpart of a rule body, where a
+failed `let Some(x) = e` derives nothing (EXTENSIONS 2.1):
+
+```blossom
+fn read_item(c: Cur) -> Option<(Item, Cur)> {
+    let (slot, c) = read_u64(c)?;
+    let (part, c) = read_i32(c)?;
+    Some((Item { slot: slot, part: part }, c))
+}
+```
+
+A `?` must be evaluated whenever its `let` (or the result) is: under a branch (`if`, a `match` arm, the right of
+`&&`/`||`) or in a closure it is BLS0218, as in a function whose result is not an `Option` and in a rule body.
+Lowering: the frontend rewrites each `?` into a `match` on its operand, in evaluation order, before name
+resolution; nothing reaches the IR.
+
 ### 16.2 Host functions and table functions (LANG-181, LANG-183)
 
 ```blossom
@@ -2818,6 +2835,7 @@ never truncated or defaulted).
 | BLS0215 | E | a function body that reads a relation, `now()`, `tick()`, `self`, randomness or a role's members (§16.1) |
 | BLS0216 | E | an `extern fn` that names no host function of the standard library, or declares a different signature (§16.2) |
 | BLS0217 | E | an evaluation deeper than the bound the evaluators' stacks are sized for (§16.1) |
+| BLS0218 | E | `?` where it cannot return early: outside a function returning `Option`, under a branch, the right of `&&`/`||`, a nested block or a closure (§16.1) |
 
 **Types (BLS03xx)**
 

@@ -167,7 +167,8 @@ fn diag_bls0005_escape() {
 }
 #[test]
 fn diag_bls0100_unexpected() {
-    assert_code("?", "BLS0001");
+    assert_code("$", "BLS0001");
+    assert_code("?", "BLS0100");
     assert_code("!", "BLS0100")
 }
 #[test]

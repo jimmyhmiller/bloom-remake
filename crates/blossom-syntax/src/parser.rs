@@ -1831,7 +1831,7 @@ impl Parser<'_> {
         let mut lhs = self.primary(m);
         let mut h = self.sub + 1;
         loop {
-            if matches!(self.nth(0), DOT | L_PAREN | L_BRACK) && self.higher(h + 1) {
+            if matches!(self.nth(0), DOT | L_PAREN | L_BRACK | QUESTION) && self.higher(h + 1) {
                 // Past the height bound: the rest of the chain is not parsed as part of this expression.
                 break;
             }
@@ -1865,6 +1865,10 @@ impl Parser<'_> {
                 self.expr(0);
                 self.expect(R_BRACK);
                 lhs = self.complete(node, INDEXEXPR);
+            } else if self.at(QUESTION) {
+                let node = self.precede(lhs);
+                self.bump();
+                lhs = self.complete(node, TRYEXPR);
             } else {
                 break;
             }
