@@ -316,6 +316,8 @@ fn filters_protect_the_expressions_written_before_them() {
     let mut want_ratio = BTreeSet::new();
     let mut want_gap = BTreeSet::new();
     let mut want_big = BTreeSet::new();
+    let mut want_hi = BTreeSet::new();
+    let mut want_lo = BTreeSet::new();
     let mut rng = Rng(7);
     for k in 0..40u64 {
         let (a, b) = (rng.below(10), rng.below(4));
@@ -331,6 +333,11 @@ fn filters_protect_the_expressions_written_before_them() {
             if q > 1 {
                 want_big.insert(vec![u(k)]);
             }
+        }
+        if a.checked_div(b).is_some_and(|q| q > 1) {
+            want_hi.insert(vec![u(k)]);
+        } else {
+            want_lo.insert(vec![u(k)]);
         }
     }
     let run = match differential_or_error(&artifact, &inputs, 2) {
@@ -349,6 +356,8 @@ fn filters_protect_the_expressions_written_before_them() {
     assert_eq!(rows("ratio"), want_ratio);
     assert_eq!(rows("gap"), want_gap);
     assert_eq!(rows("big"), want_big);
+    assert_eq!(rows("hi"), want_hi);
+    assert_eq!(rows("lo"), want_lo);
     // A fallible check still raises for a valuation its filters accept.
     match differential_or_error(&artifact, &[ev(1, "pair", vec![u(1), u(1), u(2)])], 2) {
         Outcome::Failed(tick, code) => assert_eq!((tick, code.as_str()), (Tick(1), "BLSR004")),
@@ -587,7 +596,9 @@ fn formats_decode_and_encode_as_the_reference_does() {
     let mut rng = Rng(11);
     let mut inputs = Vec::new();
     let mut want = BTreeSet::new();
+    let mut want_six = BTreeSet::new();
     let mut k = 0u64;
+    let mut lens: Vec<(u64, usize)> = Vec::new();
     let row = |k: u64, version: i16, b: &[u8]| -> InputEvent {
         InputEvent {
             node: NodeId(0),
@@ -605,11 +616,13 @@ fn formats_decode_and_encode_as_the_reference_does() {
         let r = ref_request(&mut rng, version);
         let bytes = ref_encode(&r, version);
         inputs.push(row(k, version, &bytes));
+        lens.push((k, bytes.len()));
         want.insert(vec![u(k), ref_fields(&r), u(bytes.len() as u64), Value::Bool(true)]);
         k += 1;
         for _ in 0..3 {
             let cut = rng.below(bytes.len() as u64) as usize;
             inputs.push(row(k, version, &bytes[..cut]));
+            lens.push((k, cut));
             k += 1;
         }
     }
@@ -629,4 +642,20 @@ fn formats_decode_and_encode_as_the_reference_does() {
         .map(|r| r.to_vec())
         .collect();
     assert_eq!(got, want);
+    for (k, len) in lens {
+        if len >= 6 {
+            want_six.insert(vec![u(k), u(6)]);
+        }
+    }
+    if hostile.len() >= 6 {
+        want_six.insert(vec![u(k), u(6)]);
+    }
+    let six: BTreeSet<Vec<Value>> = run
+        .node_tick(Tick(1), NodeId(0))
+        .unwrap()
+        .instance
+        .rows(artifact.rel_named("six").unwrap())
+        .map(|r| r.to_vec())
+        .collect();
+    assert_eq!(six, want_six);
 }

@@ -22,6 +22,9 @@ use super::{Resolver, ScopeIdx};
 use crate::ast::{self, Ident};
 use crate::hir::*;
 
+/// The most generic function instances a program may make (BLS0220).
+const MAX_INSTANCES: usize = 10_000;
+
 /// A generic function's template.
 pub(crate) struct Template<'t> {
     pub item: &'t ast::FnItem,
@@ -110,6 +113,21 @@ impl<'t> Resolver<'t, '_> {
                 continue;
             }
             match ty {
+                ast::Type::Fn { .. }
+                    if super::body::BUILTIN_FNS.contains(&p.as_str())
+                        || matches!(p.as_str(), "Some" | "None")
+                        || self.scope(s).rels.contains_key(&p.name) =>
+                {
+                    self.error(
+                        code!("BLS0201"),
+                        p.span,
+                        format!(
+                            "function parameter `{}` would be shadowed by the built-in or relation of that name",
+                            p.as_str()
+                        ),
+                    );
+                    ok = false;
+                }
                 ast::Type::Fn { params: ps, ret, .. } => {
                     let mut fps = Vec::new();
                     for t in ps {
@@ -262,6 +280,22 @@ impl<'t> Resolver<'t, '_> {
     /// parameters: a fresh scope with the template's variables, its body with each function parameter's call
     /// calling the function passed and each generic call instantiated in turn. `None` after an error (reported).
     pub(super) fn instantiate_fn(&mut self, g: usize, fn_args: &[HFnId], call: Span) -> Option<HFnId> {
+        // Each call is an instance, and an instance's generic calls are instances of their own: nested generic calls
+        // multiply them, so their number is bounded.
+        if self.instance_calls.len() >= MAX_INSTANCES {
+            if !self.instances_capped {
+                self.instances_capped = true;
+                self.error(
+                    code!("BLS0220"),
+                    call,
+                    format!(
+                        "generic functions are instantiated more than {MAX_INSTANCES} times (each call is an instance, \
+                         and nested generic calls multiply them)"
+                    ),
+                );
+            }
+            return None;
+        }
         if self.instantiating.contains(&g) {
             if self.recursive.insert(g)
                 && let Some(t) = self.templates.get(g)

@@ -306,6 +306,10 @@ pub(crate) struct Resolver<'t, 'd> {
     pub instantiating: Vec<usize>,
     /// Templates already reported recursive.
     pub recursive: BTreeSet<usize>,
+    /// Whether the instance bound was reported (once).
+    pub instances_capped: bool,
+    /// How many handlers of each module carry each label (a `resolve prefer` name must label exactly one).
+    pub handler_labels: BTreeMap<(ScopeIdx, Symbol), u32>,
     /// The (table, handler label) pairs of `next`/`upsert` writes into tables with `resolve prefer`.
     pub prefer_writers: BTreeSet<(HRelId, Symbol)>,
 }
@@ -355,6 +359,8 @@ impl<'t, 'd> Resolver<'t, 'd> {
             instance_calls: BTreeMap::new(),
             instantiating: Vec::new(),
             recursive: BTreeSet::new(),
+            instances_capped: false,
+            handler_labels: BTreeMap::new(),
             prefer_writers: BTreeSet::new(),
         }
     }
@@ -1575,7 +1581,17 @@ impl<'t, 'd> Resolver<'t, 'd> {
         for id in rels {
             let r = self.rel_of(id);
             for (name, span) in r.prefer.iter().flatten() {
-                if !self.prefer_writers.contains(&(id, *name)) {
+                let labelled = self.handler_labels.get(&(s, *name)).copied().unwrap_or(0);
+                if labelled > 1 {
+                    self.error(
+                        code!("BLS0411"),
+                        *span,
+                        format!(
+                            "`resolve prefer` names `{}`, which labels {labelled} handlers",
+                            name.as_str()
+                        ),
+                    );
+                } else if !self.prefer_writers.contains(&(id, *name)) {
                     self.error(
                         code!("BLS0411"),
                         *span,

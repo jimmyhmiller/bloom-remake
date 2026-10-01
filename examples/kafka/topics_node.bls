@@ -95,15 +95,11 @@ view create_late(c, i, j, o) {
 view create_lates(c, i, xs = collect!((j, o))) = per create_head(c, i, _, _, _, _, _req), create_late(c, i, j, o);
 
 answer_create: while create_head(c, i, seq, corr, fr, at, req), create_finals(c, i, xs) where xs.len() == req.topics.len() {
-    send kafka.write(c, seq, [Part::Bytes(encode_create_topics_response(corr, create_outcomes_in(xs)))]);
-    upsert answering(c, i + 1, seq + 1);
-    delete queued(c, i, fr, at);
+    emit reply(c, i, [Part::Bytes(encode_create_topics_response(corr, create_outcomes_in(xs)))]);
 }
 answer_create_late: while create_head(c, i, seq, corr, fr, at, req), create_finals(c, i, xs), create_lates(c, i, ys)
     where xs.len() < req.topics.len() && now() >= at + Duration::from_millis(req.timeout_ms as i64) {
-    send kafka.write(c, seq, [Part::Bytes(encode_create_topics_response(corr, create_outcomes_in(ys)))]);
-    upsert answering(c, i + 1, seq + 1);
-    delete queued(c, i, fr, at);
+    emit reply(c, i, [Part::Bytes(encode_create_topics_response(corr, create_outcomes_in(ys)))]);
 }
 
 // ---------------------------------------------------------------- DeleteTopics
@@ -143,15 +139,11 @@ view delete_timeout(c, ms) = head(c, _, _, key, _version, _corr, fr, _at), key =
     let Some(body) = request_body(fr), let Some(d) = decode_delete_topics(body), let ms = d.1;
 
 answer_delete: while delete_head(c, i, seq, corr, fr, at, req), delete_finals(c, i, xs) where xs.len() == req.len() {
-    send kafka.write(c, seq, [Part::Bytes(encode_delete_topics_response(corr, delete_outcomes_in(xs)))]);
-    upsert answering(c, i + 1, seq + 1);
-    delete queued(c, i, fr, at);
+    emit reply(c, i, [Part::Bytes(encode_delete_topics_response(corr, delete_outcomes_in(xs)))]);
 }
 answer_delete_late: while delete_head(c, i, seq, corr, fr, at, req), delete_finals(c, i, xs), delete_lates(c, i, ys),
     delete_timeout(c, ms) where xs.len() < req.len() && now() >= at + Duration::from_millis(ms as i64) {
-    send kafka.write(c, seq, [Part::Bytes(encode_delete_topics_response(corr, delete_outcomes_in(ys)))]);
-    upsert answering(c, i + 1, seq + 1);
-    delete queued(c, i, fr, at);
+    emit reply(c, i, [Part::Bytes(encode_delete_topics_response(corr, delete_outcomes_in(ys)))]);
 }
 
 // ---------------------------------------------------------------- Metadata
@@ -221,9 +213,7 @@ view metadata_ready(c, i) {
 }
 answer_metadata: while metadata_head(c, i, seq, corr, fr, at, req), metadata_ready(c, i), metadata_known(c, known),
     metadata_creating(c, i, names), broker_infos(bs), controller_or_none(ctl) {
-    send kafka.write(c, seq, [Part::Bytes(encode_metadata_response(corr, req, bs, CLUSTER_ID, ctl, known, names.to_set()))]);
-    upsert answering(c, i + 1, seq + 1);
-    delete queued(c, i, fr, at);
+    emit reply(c, i, [Part::Bytes(encode_metadata_response(corr, req, bs, CLUSTER_ID, ctl, known, names.to_set()))]);
 }
 
 // ---------------------------------------------------------------- AlterPartitionReassignments, ListPartitionReassignments
@@ -244,16 +234,12 @@ view alter_errors(c, i, es = collect!((slot, err))) = per alter_head(c, i, _, _,
     my_id(me), outcome(me, tag, slot, err, _id, _pid, _name);
 answer_alter: while alter_head(c, i, seq, version, corr, fr, at, req), alter_errors(c, i, es)
     where es.len() == reassign_entries(req).len() {
-    send kafka.write(c, seq, [Part::Bytes(encode_alter_reassignments_response(corr, version, req, es.to_map()))]);
-    upsert answering(c, i + 1, seq + 1);
-    delete queued(c, i, fr, at);
+    emit reply(c, i, [Part::Bytes(encode_alter_reassignments_response(corr, version, req, es.to_map()))]);
 }
 answer_alter_late: while alter_head(c, i, seq, version, corr, fr, at, req), alter_errors(c, i, es)
     where es.len() < reassign_entries(req).len() && now() >= at + Duration::from_millis(req.timeout_ms as i64) {
-    send kafka.write(c, seq, [Part::Bytes(encode_alter_reassignments_response(corr, version, req,
+    emit reply(c, i, [Part::Bytes(encode_alter_reassignments_response(corr, version, req,
         errors_or_timed_out(reassign_entries(req).len(), es)))]);
-    upsert answering(c, i + 1, seq + 1);
-    delete queued(c, i, fr, at);
 }
 
 /// ListPartitionReassignments reads this broker's metadata, as Kafka's brokers answer it from theirs.
@@ -263,9 +249,7 @@ view list_reassign_head(c, i, seq, corr, fr, at, req) =
 view ongoing_for(c, os = collect!(Ongoing { name: n, index: p, replicas: rs, target: t })) =
     per list_reassign_head(c, _, _, _, _, _, _req), mreassign(tid, p, t, _h, _s), massign(tid, p, rs), mtopic(n, tid, _, _);
 answer_list_reassign: while list_reassign_head(c, i, seq, corr, fr, at, req), ongoing_for(c, os) {
-    send kafka.write(c, seq, [Part::Bytes(encode_list_reassignments_response(corr, req, os))]);
-    upsert answering(c, i + 1, seq + 1);
-    delete queued(c, i, fr, at);
+    emit reply(c, i, [Part::Bytes(encode_list_reassignments_response(corr, req, os))]);
 }
 
 // ---------------------------------------------------------------- DescribeCluster
@@ -275,9 +259,7 @@ answer_list_reassign: while list_reassign_head(c, i, seq, corr, fr, at, req), on
 answer_describe_cluster: while head(c, i, seq, key, version, corr, fr, at), key == API_DESCRIBE_CLUSTER,
     let Some(body) = request_body(fr), let Some(req) = decode_describe_cluster(body, version), broker_infos(bs),
     controller_or_none(ctl) {
-    send kafka.write(c, seq, [Part::Bytes(encode_describe_cluster_response(corr, version, req, bs, CLUSTER_ID, ctl))]);
-    upsert answering(c, i + 1, seq + 1);
-    delete queued(c, i, fr, at);
+    emit reply(c, i, [Part::Bytes(encode_describe_cluster_response(corr, version, req, bs, CLUSTER_ID, ctl))]);
 }
 
 // ---------------------------------------------------------------- DescribeConfigs
@@ -287,7 +269,5 @@ view describe_found(c, sets = collect!((n, cfg))) = per describe_head(c, _, _, _
     r.kind == CONFIG_TOPIC, let n = r.name, mtopic(n, _, _, cfg);
 
 answer_describe: while describe_head(c, i, seq, corr, fr, at, req), describe_found(c, sets) {
-    send kafka.write(c, seq, [Part::Bytes(encode_describe_configs_response(corr, describe_results(req, sets)))]);
-    upsert answering(c, i + 1, seq + 1);
-    delete queued(c, i, fr, at);
+    emit reply(c, i, [Part::Bytes(encode_describe_configs_response(corr, describe_results(req, sets)))]);
 }

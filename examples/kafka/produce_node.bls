@@ -267,9 +267,7 @@ answer_produce: while produce_head(c, i, seq, corr, fr, at, req), produce_ready(
     delete queued(c, i, fr, at);
 }
 answer_produce_timeout: while produce_head(c, i, seq, corr, fr, at, req), produce_timed_out(c, i), timeout_answers(c, i, xs) {
-    send kafka.write(c, seq, [Part::Bytes(encode_produce_response(corr, req, xs))]);
-    upsert answering(c, i + 1, seq + 1);
-    delete queued(c, i, fr, at);
+    emit reply(c, i, [Part::Bytes(encode_produce_response(corr, req, xs))]);
 }
 // ---------------------------------------------------------------- materializing committed entries, on every replica
 
@@ -353,20 +351,14 @@ take_block: while pid_cmd(tag, _cmd), my_id(me), outcome(me, tag, _slot, _err, _
     upsert pid_block(start, start + PID_BLOCK);
 }
 answer_init_pid_refused: while init_pid_head(c, i, seq, corr, fr, at, req) where req.transactional_id.is_some() {
-    send kafka.write(c, seq, [Part::Bytes(encode_init_producer_id_response(corr, TRANSACTIONAL_ID_AUTHORIZATION_FAILED, -1i64, -1i16))]);
-    upsert answering(c, i + 1, seq + 1);
-    delete queued(c, i, fr, at);
+    emit reply(c, i, [Part::Bytes(encode_init_producer_id_response(corr, TRANSACTIONAL_ID_AUTHORIZATION_FAILED, -1i64, -1i16))]);
 }
 answer_init_pid: while init_pid_head(c, i, seq, corr, fr, at, _req), pid_given(c, i, pid) {
-    send kafka.write(c, seq, [Part::Bytes(encode_init_producer_id_response(corr, NONE, pid, 0i16))]);
-    upsert answering(c, i + 1, seq + 1);
-    delete queued(c, i, fr, at);
+    emit reply(c, i, [Part::Bytes(encode_init_producer_id_response(corr, NONE, pid, 0i16))]);
 }
 answer_init_pid_late: while init_pid_head(c, i, seq, corr, fr, at, _req), pid_asking(c, i), not pid_given(c, i, _)
     where now() >= at + PID_WAIT {
-    send kafka.write(c, seq, [Part::Bytes(encode_init_producer_id_response(corr, COORDINATOR_NOT_AVAILABLE, -1i64, -1i16))]);
-    upsert answering(c, i + 1, seq + 1);
-    delete queued(c, i, fr, at);
+    emit reply(c, i, [Part::Bytes(encode_init_producer_id_response(corr, COORDINATOR_NOT_AVAILABLE, -1i64, -1i16))]);
 }
 
 // ---------------------------------------------------------------- compaction and catching up from a snapshot (D12)

@@ -334,7 +334,7 @@ impl<'h> Lowerer<'h> {
                 HLit::Guard(e) => {
                     for d in &mut drafts {
                         let x = self.expr(d, e)?;
-                        split_and(x, &mut d.lits);
+                        split_and(negated_in_order(x), &mut d.lits);
                     }
                 }
                 HLit::RangeGen { pat, lo, hi, kind, .. } => {
@@ -1962,5 +1962,36 @@ fn split_and(e: Expr, out: &mut Vec<Literal>) {
             split_and(*rhs, out);
         }
         other => out.push(Literal::Guard(other)),
+    }
+}
+
+/// `!(a && b && …)` (an `else` block's condition) with the conjuncts that cannot fail first, so it evaluates them in
+/// the order the `if` block's split conjuncts run (LANGUAGE §9.14): a fallible conjunct is reached only past the
+/// ones that cannot fail, in both blocks.
+fn negated_in_order(e: Expr) -> Expr {
+    let Expr::Unary { op: ir::UnOp::Not, arg } = &e else {
+        return e;
+    };
+    if !matches!(**arg, Expr::Binary { op: ir::BinOp::And, .. }) {
+        return e;
+    }
+    let mut lits = Vec::new();
+    split_and((**arg).clone(), &mut lits);
+    let conjuncts = lits.into_iter().filter_map(|l| match l {
+        Literal::Guard(c) => Some(c),
+        _ => None,
+    });
+    let (safe, fallible): (Vec<Expr>, Vec<Expr>) = conjuncts.partition(Expr::cannot_fail);
+    // An `&&` has two conjuncts at least, so the fold has a first one.
+    match safe.into_iter().chain(fallible).reduce(|a, b| Expr::Binary {
+        op: ir::BinOp::And,
+        lhs: Box::new(a),
+        rhs: Box::new(b),
+    }) {
+        Some(c) => Expr::Unary {
+            op: ir::UnOp::Not,
+            arg: Box::new(c),
+        },
+        None => e,
     }
 }

@@ -135,6 +135,28 @@ Design: `docs/design/EXTENSIONS.md`. Branch `slice-lang`, worktree `.worktrees/s
 - Checked at 3,388 lines: kafka_cluster (6), kafka_codec (13), kafka_fetch, kafka_log, kafka_produce (3),
   kafka_records, kafka_retention, kafka_sim (2), kafka_topics (3), raft_groups (3) — all pass.
 
+### Item 8: the review (in progress)
+
+Two adversarial reviewers (read-only) over items 2–6. Fixed, each with a test (`review_findings_are_diagnostics`,
+`bls_extensions`), the behavioural ones mutation-checked:
+- formats: alias substitution now reaches every expression (`bytes(n * 2)`); an alias's expansion is bounded
+  (10,000 nodes); a bias that does not fit its length's type, `rest`/`utf8` before another element, and array items
+  that can take no byte (or every byte) are BLS0301; a format in a protocol or interposition is BLS0110; `Nullable`
+  carries its length, and compound elements dispatch on `Compound` (no fallback arms).
+- generics: more than 10,000 instances is BLS0220 (new code); a function parameter named like a built-in or a
+  relation is BLS0201.
+- order of checks: an `else` block's `!(a && b)` puts the conjuncts that cannot fail first, as the `if` block's
+  split guards run.
+- `while`: the condition gets the lattice join-key check (BLS0304); a column not named as a variable is BLS0106; the
+  validator refuses a guard that is the table or its `$del`.
+- `prefer`: a name that labels two handlers is BLS0411.
+Accepted and documented, not fixed: decoding a well-formed value of about a million items or more exceeds the step
+budget (BLSR012; the S6–S8 hand-written decoders had the same cost; a static cap would refuse large valid Produce
+requests, whose record bytes sit inside array items); encoding fails on a value that does not fit its layout; a
+durable `while` table whose condition reads only volatile state empties at restart (§7.2 says so; no warning yet);
+guards on resolved tables are not visible in `Persistence::Resolved` (the validator checks them only through the
+candidate rule).
+
 ### Open observations
 
 - After item 5 the corpus is unchanged: core 195, lattices 47, async 36, net 3 passed, 0 failed.

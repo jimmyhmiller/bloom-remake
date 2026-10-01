@@ -9,6 +9,9 @@ format compact_nullable_string = nullable(compact_string);
 format compact_array(F) = array(uvarint, 1, F);
 format string16 = nullable(prefixed(i16, 0, utf8));
 format uuid = bytes(16);
+/// An alias whose argument is used inside an expression.
+format doubled(n) = bytes(n * 2);
+format Six { a: doubled(3) }
 
 format Topic(version: i16) {
     id: uuid,
@@ -41,3 +44,5 @@ fn flat(r: Request) -> (Option<Vec<(Bytes, Option<String>, Vec<i32>, Vec<(i32, b
 /// Each message decoded: its fields, the bytes it took, and whether encoding it gives the same bytes.
 view decoded(k, fields, used, same) =
     msg(k, v, b), let Some((r, used)) = Request::decode(b, 0, v), let fields = flat(r), let same = Request::encode(r, v) == b;
+/// `doubled(3)` reads six bytes.
+view six(k, n) = msg(k, _, b), let Some((_r, n)) = Six::decode(b, 0);

@@ -1268,3 +1268,65 @@ fn format_misuses_are_reported() {
     );
     assert_eq!(codes(src), Vec::<&str>::new());
 }
+
+/// The review's findings (S-L review): each misuse is a diagnostic, never a hang, a silent drop or an internal error.
+#[test]
+fn review_findings_are_diagnostics() {
+    let generic_chain: String = std::iter::once("fn f0<T>(x: T) -> T { x }\n".to_owned())
+        .chain((1..16).map(|i| format!("fn f{i}<T>(x: T) -> T {{ f{p}(f{p}(x)) }}\n", p = i - 1)))
+        .collect();
+    let cases: Vec<(String, &str)> = vec![
+        // An alias that doubles its argument: refused, not expanded exponentially.
+        ("format a(X) = a((X, X));\nformat R { f: a(u8) }".into(), "BLS0301"),
+        // A bias the length's type cannot hold.
+        ("format R { a: prefixed(u8, 300, rest) }".into(), "BLS0301"),
+        // `rest` before another element, in a record and in a tuple.
+        ("format R { a: rest, b: u8 }".into(), "BLS0301"),
+        ("format R { a: (rest, u8) }".into(), "BLS0301"),
+        // Array items that may take no byte, or every byte left.
+        ("format R { a: array(uvarint, 0, bytes(0)) }".into(), "BLS0301"),
+        (
+            "format E { x: i8 if false }\nformat R { a: array(uvarint, 0, E) }".into(),
+            "BLS0301",
+        ),
+        ("format R { a: array(uvarint, 0, utf8) }".into(), "BLS0301"),
+        // Instances multiplying through nested generic calls.
+        (
+            format!("{generic_chain}output out(k: u64);\na: on go(k, v) {{ emit out(f15(k)); }}"),
+            "BLS0220",
+        ),
+        // A function parameter the built-in `range` (or a relation) would shadow.
+        (
+            "fn f(range: fn(u64, u64) -> Vec<u64>) -> Vec<u64> { range(0, 3) }".into(),
+            "BLS0201",
+        ),
+        ("fn f(go: fn(u64) -> u64) -> u64 { go(1) }".into(), "BLS0201"),
+        // `resolve prefer` naming a label two handlers carry.
+        (
+            "table t(k: u64, v: u64) key(k) resolve prefer(a);\na: on go(k, v) { upsert t(k, v); }\n\
+             a: on go(k, v) { upsert t(k + 1, v); }"
+                .into(),
+            "BLS0411",
+        ),
+        // A `while` table whose column is not named as a variable.
+        ("table t(K: u64) while go(K, _);".into(), "BLS0106"),
+        // A `while` condition joining on lattice values.
+        (
+            "table x(k: u64, n: LMax<u64>) key(k);\ntable y(k: u64, n: LMax<u64>) key(k);\n\
+             table t(k: u64) while x(k, n), y(k, n);"
+                .into(),
+            "BLS0304",
+        ),
+    ];
+    for (body, code) in cases {
+        let src = with_head(Box::leak(format!("{body}\n").into_boxed_str()));
+        let got = codes(src);
+        assert!(got.contains(&code.to_owned()), "{body}: {got:?}");
+    }
+    // A format inside a protocol.
+    let src = "program t version 1;\nprotocol P { format A { x: i8 } }\n";
+    assert!(codes(src).contains(&"BLS0110".to_owned()));
+    // An alias argument used inside an expression is substituted there.
+    let src = with_head("format blob(n) = bytes(n * 2);\nformat R { a: blob(3) }\n");
+    assert_eq!(codes(src), Vec::<&str>::new());
+}

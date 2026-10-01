@@ -3983,6 +3983,9 @@ fn lattice_keys(hir: &Hir, diags: &mut Diagnostics) {
     for inv in &hir.invariants {
         check_lattice_keys(hir, &[&inv.body], diags);
     }
+    for g in &hir.guards {
+        check_lattice_keys(hir, &[&g.body], diags);
+    }
 }
 
 fn check_lattice_keys(hir: &Hir, bodies: &[&HBody], diags: &mut Diagnostics) {

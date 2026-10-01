@@ -2588,6 +2588,9 @@ impl<'t> Resolver<'t, '_> {
     // ------------------------------------------------------------------ rules
 
     pub(crate) fn handler(&mut self, s: ScopeIdx, h: &'t ast::Handler, placement: Option<HRoleId>) {
+        if let Some(l) = h.label {
+            *self.handler_labels.entry((s, l.name)).or_insert(0) += 1;
+        }
         if h.monotone {
             self.unsupported("ANA-020", "`monotone` assertions", h.span);
         }
@@ -3430,6 +3433,17 @@ impl<'t> Resolver<'t, '_> {
             .any(|c| c.ty.is_some_and(|t| holds_lattice(&self.hir.types, t)))
         {
             self.unsupported("SEM-104", "`while` on a table holding lattice values", guard.span);
+            return;
+        }
+        if let Some(c) = d.cols.iter().find(|c| !is_var_name(c.name.as_str())) {
+            self.error(
+                code!("BLS0106"),
+                c.name.span,
+                format!(
+                    "a `while` condition reads the columns by name, so they are named as variables (lowercase); `{}` is not",
+                    c.name.as_str()
+                ),
+            );
             return;
         }
         // `p(c̄)` first: it binds the columns, which the condition reads by name.

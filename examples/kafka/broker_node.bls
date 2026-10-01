@@ -67,6 +67,15 @@ unthrottle: while paused(c), not queue_full(c) {
 view head(c, i, seq, key, version, corr, fr, at) =
     queued(c, i, fr, at), answering(c, i, seq), let Some(p) = frame_prefix(fr), let (key, version, corr) = p;
 
+/// The answer to the request at the head of a connection, as the parts of one stream write: once written, the
+/// request leaves the queue and the next one is the head. (An API's handler decides only what the answer is.)
+scratch reply(c: Conn, i: u64, parts: Vec<Part>);
+send_reply: while reply(c, i, parts), head(c, i, seq, _key, _version, _corr, fr, at) {
+    send kafka.write(c, seq, parts);
+    upsert answering(c, i + 1, seq + 1);
+    delete queued(c, i, fr, at);
+}
+
 /// A frame too short for a request header closes the connection.
 malformed: while queued(c, i, fr, at), answering(c, i, _), not frame_readable(fr) {
     send kafka.close(c);

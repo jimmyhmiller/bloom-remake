@@ -26,18 +26,21 @@ use blossom_value::types::IntTy;
 use super::*;
 
 /// Replaces the formats among `items` — a file's or a module's, includes expanded — by their structs and functions,
-/// recursively into modules. A format inside an `at` section is BLS0110.
+/// recursively into modules. A format inside an `at` section, a protocol or an interposition is BLS0110.
 pub(crate) fn expand(items: &mut Vec<Item>, diags: &mut Diagnostics) {
     for item in items.iter_mut() {
         match &mut item.kind {
             ItemKind::Module(m) => expand(&mut m.items, diags),
-            ItemKind::At { items: inner, .. } => {
+            ItemKind::At { items: inner, .. }
+            | ItemKind::Protocol(ProtocolItem { items: inner, .. })
+            | ItemKind::Interpose(Interpose { items: inner, .. }) => {
                 inner.retain(|i| match &i.kind {
                     ItemKind::Format(f) => {
                         diags.push(
                             Diagnostic::new(
                                 code!("BLS0110"),
-                                "a `format` belongs at the top of a file or module, not in an `at` section",
+                                "a `format` belongs at the top of a file or module, not in an `at` section, a \
+                                 protocol or an interposition",
                             )
                             .with_primary(f.span),
                         );
@@ -82,7 +85,9 @@ pub(crate) fn expand(items: &mut Vec<Item>, diags: &mut Diagnostics) {
                     .insert(f.name.name, (f.params.iter().map(|p| p.0).collect(), e.clone()));
             }
             FormatBody::Record(_) => {
-                env.records.insert(f.name.name, f.params.len());
+                if let FormatBody::Record(fields) = &f.body {
+                    env.records.insert(f.name.name, (f.params.len(), fields.clone()));
+                }
             }
         }
     }
@@ -123,7 +128,8 @@ pub(crate) fn expand(items: &mut Vec<Item>, diags: &mut Diagnostics) {
 #[derive(Default)]
 struct Env {
     aliases: BTreeMap<Symbol, (Vec<Ident>, Expr)>,
-    records: BTreeMap<Symbol, usize>,
+    /// Each record's number of parameters and fields (for the widths of the elements that hold it).
+    records: BTreeMap<Symbol, (usize, Vec<FormatField>)>,
 }
 
 fn is_builtin(name: &str) -> bool {
@@ -202,8 +208,13 @@ enum Elem {
         bias: u64,
         item: Box<Elem>,
     },
-    /// A prefixed value or array whose length may be the null value (`bias - 1`): `None`.
-    Nullable(Box<Elem>),
+    /// A prefixed value or array (`inner`, whose length is `len` with `bias`) whose length may be the null value
+    /// (`bias - 1`): `None`.
+    Nullable {
+        len: Len,
+        bias: u64,
+        inner: Box<Elem>,
+    },
     /// A record format, with its arguments.
     Format {
         name: Ident,
@@ -238,6 +249,110 @@ impl Elem {
 
 /// The deepest alias expansion: deeper is an alias that expands into itself.
 const MAX_ALIAS_DEPTH: u32 = 64;
+/// The largest element an alias may expand to (an alias that duplicates its argument grows exponentially).
+const MAX_ALIAS_SIZE: usize = 10_000;
+
+const REST_LAST: &str = "`rest` and `utf8` read every byte left: such an element comes last";
+
+/// The fewest bytes an element takes (0 for an element whose size depends on its value or parameters).
+fn min_width(e: &Elem, env: &Env, depth: u32) -> u64 {
+    match e {
+        Elem::Int(t) => int_access(*t).2 as u64,
+        Elem::Bool | Elem::Uvarint | Elem::Varint | Elem::Tags => 1,
+        Elem::Bytes(n) => match &n.kind {
+            ExprKind::Lit(LitValue::Int { value, .. }) => u64::try_from(*value).unwrap_or(u64::MAX),
+            _ => 0,
+        },
+        Elem::Rest | Elem::Utf8 => 0,
+        Elem::Prefixed { len, .. } | Elem::Array { len, .. } | Elem::Nullable { len, .. } => match len {
+            Len::Int(t) => int_access(*t).2 as u64,
+            Len::Uvarint | Len::Varint => 1,
+        },
+        Elem::Constant { elem, .. } | Elem::Ignored { elem, .. } => min_width(elem, env, depth),
+        Elem::Tuple(xs) => xs.iter().map(|x| min_width(x, env, depth)).fold(0, u64::saturating_add),
+        Elem::Format { name, .. } => record_elems(name.name, env, depth)
+            .iter()
+            .filter(|(conditional, _)| !conditional)
+            .map(|(_, x)| min_width(x, env, depth + 1))
+            .fold(0, u64::saturating_add),
+    }
+}
+
+/// Whether an element reads every byte left.
+fn consumes_all(e: &Elem, env: &Env, depth: u32) -> bool {
+    match e {
+        Elem::Rest | Elem::Utf8 => true,
+        Elem::Constant { elem, .. } | Elem::Ignored { elem, .. } => consumes_all(elem, env, depth),
+        Elem::Tuple(xs) => xs.last().is_some_and(|x| consumes_all(x, env, depth)),
+        Elem::Format { name, .. } => record_elems(name.name, env, depth)
+            .last()
+            .is_some_and(|(_, x)| consumes_all(x, env, depth + 1)),
+        _ => false,
+    }
+}
+
+/// A record's elements (and whether each is conditional), read without reporting (its own expansion reports); none
+/// past the alias depth (a record that holds itself is reported as recursive where its decoder is resolved).
+fn record_elems(name: Symbol, env: &Env, depth: u32) -> Vec<(bool, Elem)> {
+    let Some((_, fields)) = env.records.get(&name) else {
+        return Vec::new();
+    };
+    if depth > MAX_ALIAS_DEPTH {
+        return Vec::new();
+    }
+    let mut quiet = Diagnostics::new();
+    fields
+        .iter()
+        .filter_map(|f| elem(&f.elem, env, depth + 1, &mut quiet).map(|e| (f.cond.is_some(), e)))
+        .collect()
+}
+
+/// An expression's number of nodes.
+fn size(e: &Expr) -> usize {
+    let mut n = 1;
+    for c in children(e) {
+        n += size(c);
+    }
+    n
+}
+
+/// An expression's direct subexpressions (an aggregate's clauses aside).
+fn children(e: &Expr) -> Vec<&Expr> {
+    fn args(args: &[Arg]) -> Vec<&Expr> {
+        args.iter()
+            .filter_map(|a| match a {
+                Arg::Pos(x) | Arg::Named(_, x) => Some(x),
+                Arg::Rest(_) | Arg::Star(_) => None,
+            })
+            .collect()
+    }
+    match &e.kind {
+        ExprKind::Lit(_) | ExprKind::Path(..) | ExprKind::Wildcard | ExprKind::SelfNode => Vec::new(),
+        ExprKind::Call { callee, args: a } => std::iter::once(&**callee).chain(args(a)).collect(),
+        ExprKind::Method { receiver, args: a, .. } => std::iter::once(&**receiver).chain(args(a)).collect(),
+        ExprKind::Bang { args: a, .. } => args(a),
+        ExprKind::Field { base, .. } | ExprKind::TupleIndex { base, .. } => vec![base],
+        ExprKind::Index { base, index } => vec![base, index],
+        ExprKind::Binary { lhs, rhs, .. } => vec![lhs, rhs],
+        ExprKind::Prefix { arg, .. } | ExprKind::Cast { expr: arg, .. } | ExprKind::Try(arg) => vec![arg],
+        ExprKind::Tuple(xs) | ExprKind::Vec(xs) | ExprKind::Set(xs) => xs.iter().collect(),
+        ExprKind::Map(kvs) => kvs.iter().flat_map(|(k, v)| [k, v]).collect(),
+        ExprKind::If { cond, then, els } => [&**cond, &**then].into_iter().chain(els.as_deref()).collect(),
+        ExprKind::Match { scrut, arms } => std::iter::once(&**scrut)
+            .chain(
+                arms.iter()
+                    .flat_map(|a| [&a.pat, &a.body].into_iter().chain(a.guard.as_ref())),
+            )
+            .collect(),
+        ExprKind::StructLit { fields, .. } => fields.iter().filter_map(|(_, v)| v.as_ref()).collect(),
+        ExprKind::Block { lets, result } => lets
+            .iter()
+            .flat_map(|l| [&l.pat, &l.value])
+            .chain(std::iter::once(&**result))
+            .collect(),
+        ExprKind::Closure { body, .. } => vec![body],
+    }
+}
 
 /// Reads an element from its expression.
 fn elem(e: &Expr, env: &Env, depth: u32, diags: &mut Diagnostics) -> Option<Elem> {
@@ -252,6 +367,9 @@ fn elem(e: &Expr, env: &Env, depth: u32, diags: &mut Diagnostics) -> Option<Elem
         let mut out = Vec::new();
         for x in xs {
             out.push(elem(x, env, depth + 1, diags)?);
+        }
+        if out.iter().rev().skip(1).any(|x| consumes_all(x, env, 0)) {
+            return fail(diags, REST_LAST.into());
         }
         let t = Elem::Tuple(out);
         if !t.valued() {
@@ -316,12 +434,31 @@ fn elem(e: &Expr, env: &Env, depth: u32, diags: &mut Diagnostics) -> Option<Elem
                 _ => return fail(diags, format!("`{text}`'s length is an integer or a varint")),
             };
             let bias = match &pos.get(1)?.kind {
-                ExprKind::Lit(LitValue::Int { value, suffix: None }) => u64::try_from(*value).ok()?,
+                ExprKind::Lit(LitValue::Int { value, suffix: None }) => *value,
                 _ => return fail(diags, format!("`{text}`'s bias is an unsuffixed integer literal")),
             };
+            // The bias is the raw length of an empty value: it must be one the length's type can hold.
+            let max: u128 = match len {
+                Len::Int(t) if t.is_signed() => (1u128 << (t.bits() - 1)) - 1,
+                Len::Int(t) => (1u128 << t.bits()) - 1,
+                Len::Uvarint => u128::from(u64::MAX),
+                Len::Varint => u128::from(i64::MAX as u64),
+            };
+            if bias > max {
+                return fail(diags, format!("`{text}`'s bias {bias} does not fit its length's type"));
+            }
+            let bias = u64::try_from(bias).ok()?;
             let inner = elem(pos.get(2)?, env, depth + 1, diags)?;
             if !inner.valued() {
                 return fail(diags, format!("`{text}` holds an element with a value"));
+            }
+            if text == "array" && (min_width(&inner, env, 0) == 0 || consumes_all(&inner, env, 0)) {
+                return fail(
+                    diags,
+                    "an array's items must each take at least one byte, and not every byte left (so a count is \
+                     checked against the bytes left, and decoding gives back what encoding wrote)"
+                        .into(),
+                );
             }
             let inner = Box::new(inner);
             return Some(if text == "prefixed" {
@@ -335,17 +472,22 @@ fn elem(e: &Expr, env: &Env, depth: u32, diags: &mut Diagnostics) -> Option<Elem
                 return None;
             }
             let inner = elem(pos.first()?, env, depth + 1, diags)?;
-            let (Elem::Prefixed { len, bias, .. } | Elem::Array { len, bias, .. }) = &inner else {
-                return fail(diags, "`nullable` applies to a prefixed value or an array".into());
+            let (len, bias) = match &inner {
+                Elem::Prefixed { len, bias, .. } | Elem::Array { len, bias, .. } => (*len, *bias),
+                _ => return fail(diags, "`nullable` applies to a prefixed value or an array".into()),
             };
-            if !len.signed() && *bias == 0 {
+            if !len.signed() && bias == 0 {
                 return fail(
                     diags,
                     "`nullable` over an unsigned length needs a bias of at least 1 (its null is the bias less one)"
                         .into(),
                 );
             }
-            return Some(Elem::Nullable(Box::new(inner)));
+            return Some(Elem::Nullable {
+                len,
+                bias,
+                inner: Box::new(inner),
+            });
         }
         "constant" | "ignored" => {
             if !arity(diags, 2) {
@@ -370,9 +512,15 @@ fn elem(e: &Expr, env: &Env, depth: u32, diags: &mut Diagnostics) -> Option<Elem
         }
         let map: BTreeMap<Symbol, &Expr> = params.iter().map(|p| p.name).zip(pos.iter().copied()).collect();
         let expanded = substitute(body, &map);
+        if size(&expanded) > MAX_ALIAS_SIZE {
+            return fail(
+                diags,
+                format!("an alias expands to more than {MAX_ALIAS_SIZE} expression nodes"),
+            );
+        }
         return elem(&expanded, env, depth + 1, diags);
     }
-    if let Some(n) = env.records.get(&name.name) {
+    if let Some((n, _)) = env.records.get(&name.name) {
         if !arity(diags, *n) {
             return None;
         }
@@ -384,9 +532,26 @@ fn elem(e: &Expr, env: &Env, depth: u32, diags: &mut Diagnostics) -> Option<Elem
     fail(diags, format!("`{text}` is not a format element"))
 }
 
-/// An alias's element with its parameters replaced.
+/// An alias's element with its parameters replaced, wherever they occur (an argument may be any expression, such
+/// as `bytes(n * 2)`). A name a closure, a `let` or a match arm binds is not a parameter inside it.
 fn substitute(e: &Expr, map: &BTreeMap<Symbol, &Expr>) -> Expr {
     let span = e.span;
+    let sub = |x: &Expr| substitute(x, map);
+    let sub_args = |args: &[Arg]| -> Vec<Arg> {
+        args.iter()
+            .map(|a| match a {
+                Arg::Pos(x) => Arg::Pos(substitute(x, map)),
+                Arg::Named(n, x) => Arg::Named(*n, substitute(x, map)),
+                other => other.clone(),
+            })
+            .collect()
+    };
+    let without = |names: &[Symbol]| -> BTreeMap<Symbol, &Expr> {
+        map.iter()
+            .filter(|(k, _)| !names.contains(k))
+            .map(|(k, v)| (*k, *v))
+            .collect()
+    };
     let kind = match &e.kind {
         ExprKind::Path(path, targs) if targs.is_empty() && path.len() == 1 => {
             match path.first().and_then(|n| map.get(&n.name)) {
@@ -394,20 +559,106 @@ fn substitute(e: &Expr, map: &BTreeMap<Symbol, &Expr>) -> Expr {
                 None => e.kind.clone(),
             }
         }
-        ExprKind::Tuple(xs) => ExprKind::Tuple(xs.iter().map(|x| substitute(x, map)).collect()),
+        ExprKind::Lit(_) | ExprKind::Path(..) | ExprKind::Wildcard | ExprKind::SelfNode | ExprKind::Bang { .. } => {
+            e.kind.clone()
+        }
         ExprKind::Call { callee, args } => ExprKind::Call {
-            callee: Box::new(substitute(callee, map)),
-            args: args
+            callee: Box::new(sub(callee)),
+            args: sub_args(args),
+        },
+        ExprKind::Method { receiver, name, args } => ExprKind::Method {
+            receiver: Box::new(sub(receiver)),
+            name: *name,
+            args: sub_args(args),
+        },
+        ExprKind::Field { base, name } => ExprKind::Field {
+            base: Box::new(sub(base)),
+            name: *name,
+        },
+        ExprKind::TupleIndex { base, index } => ExprKind::TupleIndex {
+            base: Box::new(sub(base)),
+            index: *index,
+        },
+        ExprKind::Index { base, index } => ExprKind::Index {
+            base: Box::new(sub(base)),
+            index: Box::new(sub(index)),
+        },
+        ExprKind::Binary { op, lhs, rhs } => ExprKind::Binary {
+            op: *op,
+            lhs: Box::new(sub(lhs)),
+            rhs: Box::new(sub(rhs)),
+        },
+        ExprKind::Prefix { op, arg } => ExprKind::Prefix {
+            op: *op,
+            arg: Box::new(sub(arg)),
+        },
+        ExprKind::Cast { expr, ty } => ExprKind::Cast {
+            expr: Box::new(sub(expr)),
+            ty: ty.clone(),
+        },
+        ExprKind::Try(x) => ExprKind::Try(Box::new(sub(x))),
+        ExprKind::Tuple(xs) => ExprKind::Tuple(xs.iter().map(sub).collect()),
+        ExprKind::Vec(xs) => ExprKind::Vec(xs.iter().map(sub).collect()),
+        ExprKind::Set(xs) => ExprKind::Set(xs.iter().map(sub).collect()),
+        ExprKind::Map(kvs) => ExprKind::Map(kvs.iter().map(|(k, v)| (sub(k), sub(v))).collect()),
+        ExprKind::If { cond, then, els } => ExprKind::If {
+            cond: Box::new(sub(cond)),
+            then: Box::new(sub(then)),
+            els: els.as_ref().map(|x| Box::new(sub(x))),
+        },
+        ExprKind::StructLit { path, fields } => ExprKind::StructLit {
+            path: path.clone(),
+            fields: fields.iter().map(|(n, v)| (*n, v.as_ref().map(sub))).collect(),
+        },
+        ExprKind::Closure { params, body } => {
+            let inner = without(&params.iter().map(|p| p.name).collect::<Vec<_>>());
+            ExprKind::Closure {
+                params: params.clone(),
+                body: Box::new(substitute(body, &inner)),
+            }
+        }
+        ExprKind::Match { scrut, arms } => ExprKind::Match {
+            scrut: Box::new(sub(scrut)),
+            arms: arms
                 .iter()
-                .map(|a| match a {
-                    Arg::Pos(x) => Arg::Pos(substitute(x, map)),
-                    other => other.clone(),
+                .map(|a| {
+                    let inner = without(&bound_names(&a.pat));
+                    MatchArm {
+                        pat: a.pat.clone(),
+                        guard: a.guard.as_ref().map(|g| substitute(g, &inner)),
+                        body: substitute(&a.body, &inner),
+                    }
                 })
                 .collect(),
         },
-        other => other.clone(),
+        ExprKind::Block { lets, result } => {
+            let mut bound = Vec::new();
+            let mut out = Vec::new();
+            for l in lets {
+                let inner = without(&bound);
+                out.push(BlockLet {
+                    pat: l.pat.clone(),
+                    ty: l.ty.clone(),
+                    value: substitute(&l.value, &inner),
+                    span: l.span,
+                });
+                bound.extend(bound_names(&l.pat));
+            }
+            ExprKind::Block {
+                lets: out,
+                result: Box::new(substitute(result, &without(&bound))),
+            }
+        }
     };
     Expr::new(kind, span)
+}
+
+/// The names a pattern binds: its one-segment paths.
+fn bound_names(p: &Expr) -> Vec<Symbol> {
+    match &p.kind {
+        ExprKind::Path(path, _) if path.len() == 1 => path.iter().map(|n| n.name).collect(),
+        _ => children(p).into_iter().flat_map(bound_names).collect(),
+    }
 }
 
 /// Builds expressions, types and items at one span.
@@ -597,6 +848,15 @@ fn int_access(t: IntTy) -> (String, String, u128) {
     (format!("{name}_at"), format!("Bytes::from_{name}"), width)
 }
 
+/// A compound element, the ones generated functions decode and encode: its parts.
+#[derive(Clone, Copy)]
+enum Compound<'e> {
+    Prefixed(Len, u64, &'e Elem),
+    Array(Len, u64, &'e Elem),
+    Nullable(Len, u64, &'e Elem),
+    Tuple(&'e [Elem]),
+}
+
 /// One record's generation: its sub-functions accumulate in `out`, and what desugaring their bodies reports in
 /// `diags` (nothing, unless the generator itself is wrong).
 struct Gen<'a> {
@@ -634,7 +894,7 @@ impl Gen<'_> {
             Elem::Utf8 => b.ty("String"),
             Elem::Prefixed { inner, .. } => self.value_ty(inner),
             Elem::Array { item, .. } => b.ty_app("Vec", vec![self.value_ty(item)]),
-            Elem::Nullable(inner) => b.ty_app("Option", vec![self.value_ty(inner)]),
+            Elem::Nullable { inner, .. } => b.ty_app("Option", vec![self.value_ty(inner)]),
             Elem::Format { name, .. } => b.ty(name.as_str()),
             Elem::Tuple(xs) => {
                 let mut tys: Vec<Type> = xs.iter().filter(|x| x.valued()).map(|x| self.value_ty(x)).collect();
@@ -662,7 +922,7 @@ impl Gen<'_> {
             Elem::Utf8 => b.e(ExprKind::Lit(LitValue::Str(String::new()))),
             Elem::Prefixed { inner, .. } => return self.zero(inner),
             Elem::Array { .. } => b.e(ExprKind::Vec(Vec::new())),
-            Elem::Nullable(_) => b.none(),
+            Elem::Nullable { .. } => b.none(),
             Elem::Tuple(xs) => {
                 let mut zs = Vec::new();
                 for x in xs.iter().filter(|x| x.valued()) {
@@ -704,12 +964,10 @@ impl Gen<'_> {
                 let left = b.call("format$left", vec![buf.clone(), pos.clone()]);
                 b.call("format$utf8", vec![buf.clone(), pos.clone(), left])
             }
-            Elem::Prefixed { .. } | Elem::Array { .. } | Elem::Nullable(_) | Elem::Tuple(_) => {
-                let f = self.dec_fn(e);
-                let mut args = vec![buf.clone(), pos.clone()];
-                args.extend(self.param_args());
-                b.call(&f, args)
-            }
+            Elem::Prefixed { len, bias, inner } => self.dec_call(e, Compound::Prefixed(*len, *bias, inner), buf, pos),
+            Elem::Array { len, bias, item } => self.dec_call(e, Compound::Array(*len, *bias, item), buf, pos),
+            Elem::Nullable { len, bias, inner } => self.dec_call(e, Compound::Nullable(*len, *bias, inner), buf, pos),
+            Elem::Tuple(xs) => self.dec_call(e, Compound::Tuple(xs), buf, pos),
             Elem::Format { name, args } => {
                 let mut xs = vec![buf.clone(), pos.clone()];
                 xs.extend(args.iter().cloned());
@@ -768,17 +1026,25 @@ impl Gen<'_> {
         }
     }
 
+    /// A call of compound element `e`'s generated decoder (`dec_fn`).
+    fn dec_call(&mut self, e: &Elem, c: Compound<'_>, buf: &Expr, pos: &Expr) -> Expr {
+        let f = self.dec_fn(e, c);
+        let mut args = vec![buf.clone(), pos.clone()];
+        args.extend(self.param_args());
+        self.b.call(&f, args)
+    }
+
     /// The generated decoder of a compound element: `(b: Bytes, p: u64, params…) -> Option<(T, u64)>`.
-    fn dec_fn(&mut self, e: &Elem) -> String {
+    fn dec_fn(&mut self, e: &Elem, c: Compound<'_>) -> String {
         let b = self.b;
         let name = self.fresh('d');
         let (buf, pos) = (b.var("fmt$b"), b.var("fmt$p"));
-        let body = match e {
-            Elem::Prefixed { len, bias, inner } => {
-                let raw = self.dec(&Self::len_elem(*len), &buf, &pos);
-                let n = self.len_of(*len, *bias, b.var("fmt$raw"));
+        let body = match c {
+            Compound::Prefixed(len, bias, inner) => {
+                let raw = self.dec(&Self::len_elem(len), &buf, &pos);
+                let n = self.len_of(len, bias, b.var("fmt$raw"));
                 let slice = b.call("format$bytes", vec![buf.clone(), b.var("fmt$q"), b.var("fmt$n")]);
-                let whole = match &**inner {
+                let whole = match inner {
                     Elem::Utf8 => b.m(b.var("fmt$s"), "from_utf8", Vec::new()),
                     Elem::Rest => b.some(b.var("fmt$s")),
                     other => {
@@ -805,10 +1071,10 @@ impl Gen<'_> {
                     b.some(b.tpat(&["fmt$v", "fmt$e"])),
                 )
             }
-            Elem::Array { len, bias, item } => {
-                let raw = self.dec(&Self::len_elem(*len), &buf, &pos);
-                let n = self.len_of(*len, *bias, b.var("fmt$raw"));
-                // No item takes fewer than one byte, so a count beyond the bytes left is malformed: a hostile count
+            Compound::Array(len, bias, item) => {
+                let raw = self.dec(&Self::len_elem(len), &buf, &pos);
+                let n = self.len_of(len, bias, b.var("fmt$raw"));
+                // No item takes fewer than one byte (checked when the array is read, `min_width`), so a count beyond the bytes left is malformed: a hostile count
                 // costs nothing.
                 let fits = b.call(
                     "format$check",
@@ -849,11 +1115,7 @@ impl Gen<'_> {
                     b.call("format$gather", vec![b.var("fmt$steps"), b.var("fmt$q")]),
                 )
             }
-            Elem::Nullable(inner) => {
-                let (len, bias) = match &**inner {
-                    Elem::Prefixed { len, bias, .. } | Elem::Array { len, bias, .. } => (*len, *bias),
-                    _ => (Len::Uvarint, 1),
-                };
+            Compound::Nullable(len, bias, inner) => {
                 let raw = self.dec(&Self::len_elem(len), &buf, &pos);
                 let present = {
                     let read = self.dec(inner, &buf, &pos);
@@ -872,7 +1134,7 @@ impl Gen<'_> {
                     ),
                 )
             }
-            Elem::Tuple(xs) => {
+            Compound::Tuple(xs) => {
                 let mut lets = Vec::new();
                 let mut values = Vec::new();
                 let mut at = "fmt$p".to_string();
@@ -895,8 +1157,6 @@ impl Gen<'_> {
                 };
                 b.block(lets, b.some(b.tup(vec![value, b.var(&at)])))
             }
-            // Only compound elements get a function.
-            other => self.dec(other, &buf, &pos),
         };
         let mut params = vec![(b.id("fmt$b"), b.ty("Bytes")), (b.id("fmt$p"), b.ty("u64"))];
         params.extend(self.param_decls());
@@ -923,12 +1183,10 @@ impl Gen<'_> {
             Elem::Bytes(n) => b.call("format$exact", vec![v.clone(), n.clone()]),
             Elem::Rest => v.clone(),
             Elem::Utf8 => b.m(v.clone(), "to_utf8", Vec::new()),
-            Elem::Prefixed { .. } | Elem::Array { .. } | Elem::Nullable(_) | Elem::Tuple(_) => {
-                let f = self.enc_fn(e);
-                let mut args = vec![v.clone()];
-                args.extend(self.param_args());
-                b.call(&f, args)
-            }
+            Elem::Prefixed { len, bias, inner } => self.enc_call(e, Compound::Prefixed(*len, *bias, inner), v),
+            Elem::Array { len, bias, item } => self.enc_call(e, Compound::Array(*len, *bias, item), v),
+            Elem::Nullable { len, bias, inner } => self.enc_call(e, Compound::Nullable(*len, *bias, inner), v),
+            Elem::Tuple(xs) => self.enc_call(e, Compound::Tuple(xs), v),
             Elem::Format { name, args } => {
                 let mut xs = vec![v.clone()];
                 xs.extend(args.iter().cloned());
@@ -953,23 +1211,31 @@ impl Gen<'_> {
         }
     }
 
+    /// A call of compound element `e`'s generated encoder (`enc_fn`).
+    fn enc_call(&mut self, e: &Elem, c: Compound<'_>, v: &Expr) -> Expr {
+        let f = self.enc_fn(e, c);
+        let mut args = vec![v.clone()];
+        args.extend(self.param_args());
+        self.b.call(&f, args)
+    }
+
     /// The generated encoder of a compound element: `(v: T, params…) -> Bytes`.
-    fn enc_fn(&mut self, e: &Elem) -> String {
+    fn enc_fn(&mut self, e: &Elem, c: Compound<'_>) -> String {
         let b = self.b;
         let name = self.fresh('e');
         let v = b.var("fmt$v");
-        let body = match e {
-            Elem::Prefixed { len, bias, inner } => {
-                let bytes = match &**inner {
+        let body = match c {
+            Compound::Prefixed(len, bias, inner) => {
+                let bytes = match inner {
                     Elem::Utf8 => b.m(v.clone(), "to_utf8", Vec::new()),
                     Elem::Rest => v.clone(),
                     other => self.enc(other, &v),
                 };
-                let head = self.len_enc(*len, *bias, b.m(b.var("fmt$i"), "len", Vec::new()));
+                let head = self.len_enc(len, bias, b.m(b.var("fmt$i"), "len", Vec::new()));
                 b.block(vec![(b.var("fmt$i"), bytes)], b.m(head, "concat", vec![b.var("fmt$i")]))
             }
-            Elem::Array { len, bias, item } => {
-                let head = self.len_enc(*len, *bias, b.m(v.clone(), "len", Vec::new()));
+            Compound::Array(len, bias, item) => {
+                let head = self.len_enc(len, bias, b.m(v.clone(), "len", Vec::new()));
                 let each = self.enc(item, &b.var("fmt$x"));
                 let items = b.call(
                     "Bytes::join",
@@ -977,11 +1243,7 @@ impl Gen<'_> {
                 );
                 b.m(head, "concat", vec![items])
             }
-            Elem::Nullable(inner) => {
-                let (len, bias) = match &**inner {
-                    Elem::Prefixed { len, bias, .. } | Elem::Array { len, bias, .. } => (*len, *bias),
-                    _ => (Len::Uvarint, 1),
-                };
+            Compound::Nullable(len, bias, inner) => {
                 let present = self.enc(inner, &b.var("fmt$x"));
                 let null = match len {
                     Len::Uvarint => b.call("Bytes::uvarint", vec![self.null_raw(len, bias)]),
@@ -990,7 +1252,7 @@ impl Gen<'_> {
                 };
                 b.mat(v.clone(), vec![(b.some(b.var("fmt$x")), present), (b.none(), null)])
             }
-            Elem::Tuple(xs) => {
+            Compound::Tuple(xs) => {
                 let valued = xs.iter().filter(|x| x.valued()).count();
                 let mut k = 0;
                 let mut parts = Vec::new();
@@ -1005,7 +1267,6 @@ impl Gen<'_> {
                 }
                 b.call("Bytes::join", vec![b.e(ExprKind::Vec(parts))])
             }
-            other => self.enc(other, &v),
         };
         let mut params = vec![(b.id("fmt$v"), self.value_ty(e))];
         params.extend(self.param_decls());
@@ -1091,6 +1352,10 @@ fn record(f: &FormatItem, fields: &[FormatField], env: &Env, diags: &mut Diagnos
             ok = false;
         }
         elems.push((fd, e));
+    }
+    if let Some((fd, _)) = elems.iter().rev().skip(1).find(|(_, e)| consumes_all(e, env, 0)) {
+        diags.push(Diagnostic::new(code!("BLS0301"), REST_LAST).with_primary(fd.span));
+        ok = false;
     }
     if !ok {
         return None;
