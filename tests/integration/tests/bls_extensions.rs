@@ -88,7 +88,7 @@ fn a_guarded_table_keeps_what_its_explicit_clean_up_keeps() {
     let artifact = compile("guarded.bls");
     let rel = |n: &str| artifact.rel_named(n).unwrap();
     let values = [10u64, 50, 150, 199, 200, 250];
-    let mut dropped = [0usize; 3];
+    let mut dropped = [0usize; 4];
     let mut compared = 0usize;
     for seed in 0..12u64 {
         let mut rng = Rng(seed);
@@ -129,7 +129,10 @@ fn a_guarded_table_keeps_what_its_explicit_clean_up_keeps() {
                 .collect()
         };
         for t in 0..=last {
-            for (k, (g, m)) in [("g1", "m1"), ("g2", "m2"), ("g3", "m3")].into_iter().enumerate() {
+            for (k, (g, m)) in [("g1", "m1"), ("g2", "m2"), ("g3", "m3"), ("g4", "m4")]
+                .into_iter()
+                .enumerate()
+            {
                 let (gs, ms) = (rows(t, g), rows(t, m));
                 assert_eq!(gs, ms, "seed {seed} tick {t}: `{g}` and its twin `{m}` differ");
                 compared += gs.len();
@@ -411,6 +414,7 @@ struct RefTopic {
     id: [u8; 16],
     name: Option<String>,
     parts: Vec<i32>,
+    pairs: Vec<(i32, bool)>,
 }
 
 #[cfg(test)]
@@ -465,6 +469,12 @@ fn ref_encode(r: &RefRequest, version: i16) -> Vec<u8> {
                 for p in &t.parts {
                     out.extend(p.to_be_bytes());
                 }
+                put_uvarint(&mut out, t.pairs.len() as u64 + 1);
+                for (x, b) in &t.pairs {
+                    out.extend(x.to_be_bytes());
+                    out.push(u8::from(*b));
+                    put_uvarint(&mut out, 0);
+                }
                 put_uvarint(&mut out, 0);
             }
         }
@@ -483,6 +493,7 @@ fn ref_encode(r: &RefRequest, version: i16) -> Vec<u8> {
     }
     out.extend(r.big.to_be_bytes());
     out.push(r.small as u8);
+    out.extend((-1i64).to_be_bytes());
     put_varint(&mut out, r.delta);
     put_varint(&mut out, r.blob.len() as i64);
     out.extend(&r.blob);
@@ -503,6 +514,14 @@ fn ref_fields(r: &RefRequest) -> Value {
                             Value::Bytes(Arc::from(&t.id[..])),
                             s(&t.name),
                             Value::Vec(t.parts.iter().map(|p| Value::Int(IntValue::I32(*p))).collect()),
+                            Value::Vec(
+                                t.pairs
+                                    .iter()
+                                    .map(|(x, b)| {
+                                        Value::Tuple(vec![Value::Int(IntValue::I32(*x)), Value::Bool(*b)].into())
+                                    })
+                                    .collect(),
+                            ),
                         ]
                         .into(),
                     )
@@ -540,6 +559,9 @@ fn ref_request(rng: &mut Rng, version: i16) -> RefRequest {
                 id: std::array::from_fn(|_| rng.below(256) as u8),
                 name: ref_string(rng),
                 parts: (0..rng.below(5)).map(|_| rng.next() as i32).collect(),
+                pairs: (0..rng.below(3))
+                    .map(|_| (rng.next() as i32, rng.below(2) == 0))
+                    .collect(),
             })
             .collect()
     });

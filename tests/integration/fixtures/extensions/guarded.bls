@@ -27,6 +27,9 @@ table g3(c: u64, i: u64, v: u64) while smaller_g3(c, i);
 table m3(c: u64, i: u64, v: u64);
 view smaller_g3(c, i) = g3(c, i, v), g3(c, _, w) where w > v;
 view smaller_m3(c, i) = m3(c, i, v), m3(c, _, w) where w > v;
+/// A table with a `resolve` policy: the greatest value per connection wins, kept while the connection is open.
+table g4(c: u64, v: u64) key(c) resolve choose_most(v) while conn(c);
+table m4(c: u64, v: u64) key(c) resolve choose_most(v);
 
 putting: on put(c, i, v) {
     emit g1(c, i, v);
@@ -35,6 +38,8 @@ putting: on put(c, i, v) {
     emit m2(c, i, v);
     emit g3(c, i, v);
     emit m3(c, i, v);
+    next g4(c, v);
+    next m4(c, v);
 }
 take_g1: on take(c, i), g1(c, i, v) { delete g1(c, i, v); }
 take_m1: on take(c, i), m1(c, i, v) { delete m1(c, i, v); }
@@ -46,3 +51,4 @@ clean_m1: while m1(c, i, v), not conn(c) { delete m1(c, i, v); }
 clean_m2_banned: while m2(c, i, v), banned(v) { delete m2(c, i, v); }
 clean_m2_big: while m2(c, i, v) where v >= 200 { delete m2(c, i, v); }
 clean_m3: while m3(c, i, v), not smaller_m3(c, i) { delete m3(c, i, v); }
+clean_m4: while m4(c, v), not conn(c) { delete m4(c, v); }

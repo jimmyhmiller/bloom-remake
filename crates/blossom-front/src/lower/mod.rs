@@ -765,12 +765,20 @@ impl Lowerer<'_> {
             args: args.into_iter().map(HeadArg::Term).collect(),
             mode: HeadMode::Insert,
         };
-        // The candidates.
+        // The candidates: the persisted rows (those a `while` condition keeps, LANGUAGE §7.2), and the writes.
+        let hir = self.hir;
+        let guard = match hir.guards.iter().find(|g| g.rel == h) {
+            Some(g) => Some(self.persist_guard(r, g, cols.clone())?),
+            None => None,
+        };
         let label = self.label(format!("{}$cand", r.name));
         let mut rb = self.b.rule(RuleKind::Deductive, label, res.span);
         let vars = col_vars(&mut rb)?;
         rb.lit(Literal::Pos(atom(rel, terms(&vars), res.span)));
         rb.lit(Literal::Neg(atom(del, terms(&vars), res.span)));
+        if let Some(keep) = guard {
+            rb.lit(Literal::Pos(atom(keep, terms(&vars), res.span)));
+        }
         rb.head(head(cand, terms(&vars)), role).map_err(ir)?;
         let label = self.label(format!("{}$cand#next", r.name));
         let mut rb = self.b.rule(RuleKind::Deductive, label, res.span);

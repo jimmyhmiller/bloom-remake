@@ -140,6 +140,7 @@ fn is_builtin(name: &str) -> bool {
             | "array"
             | "nullable"
             | "constant"
+            | "ignored"
     ) || int_named(name).is_some()
 }
 
@@ -213,14 +214,25 @@ enum Elem {
         elem: Box<Elem>,
         value: Expr,
     },
+    /// An element read past and dropped on decode; `value` is written on encode. No field.
+    Ignored {
+        elem: Box<Elem>,
+        value: Expr,
+    },
     /// A flexible-version tagged-field section: none written, every one skipped (unknown tags are ignored). No field.
     Tags,
+    /// Elements in sequence; the value is the tuple of the valued ones (the one itself, when only one is).
+    Tuple(Vec<Elem>),
 }
 
 impl Elem {
     /// Whether the element has a value (a field), rather than only a position.
     fn valued(&self) -> bool {
-        !matches!(self, Elem::Constant { .. } | Elem::Tags)
+        match self {
+            Elem::Constant { .. } | Elem::Ignored { .. } | Elem::Tags => false,
+            Elem::Tuple(xs) => xs.iter().any(Elem::valued),
+            _ => true,
+        }
     }
 }
 
@@ -235,6 +247,17 @@ fn elem(e: &Expr, env: &Env, depth: u32, diags: &mut Diagnostics) -> Option<Elem
     };
     if depth > MAX_ALIAS_DEPTH {
         return fail(diags, "format aliases that expand into themselves".into());
+    }
+    if let ExprKind::Tuple(xs) = &e.kind {
+        let mut out = Vec::new();
+        for x in xs {
+            out.push(elem(x, env, depth + 1, diags)?);
+        }
+        let t = Elem::Tuple(out);
+        if !t.valued() {
+            return fail(diags, "a tuple element holds at least one element with a value".into());
+        }
+        return Some(t);
     }
     let (name, args): (Ident, &[Arg]) = match &e.kind {
         ExprKind::Path(path, targs) if targs.is_empty() && path.len() == 1 => (*path.first()?, &[]),
@@ -324,17 +347,19 @@ fn elem(e: &Expr, env: &Env, depth: u32, diags: &mut Diagnostics) -> Option<Elem
             }
             return Some(Elem::Nullable(Box::new(inner)));
         }
-        "constant" => {
+        "constant" | "ignored" => {
             if !arity(diags, 2) {
                 return None;
             }
             let inner = elem(pos.first()?, env, depth + 1, diags)?;
             if !inner.valued() {
-                return fail(diags, "`constant` fixes an element with a value".into());
+                return fail(diags, format!("`{text}` takes an element with a value"));
             }
-            return Some(Elem::Constant {
-                elem: Box::new(inner),
-                value: (*pos.get(1)?).clone(),
+            let (elem, value) = (Box::new(inner), (*pos.get(1)?).clone());
+            return Some(if text == "constant" {
+                Elem::Constant { elem, value }
+            } else {
+                Elem::Ignored { elem, value }
             });
         }
         _ => {}
@@ -369,6 +394,7 @@ fn substitute(e: &Expr, map: &BTreeMap<Symbol, &Expr>) -> Expr {
                 None => e.kind.clone(),
             }
         }
+        ExprKind::Tuple(xs) => ExprKind::Tuple(xs.iter().map(|x| substitute(x, map)).collect()),
         ExprKind::Call { callee, args } => ExprKind::Call {
             callee: Box::new(substitute(callee, map)),
             args: args
@@ -610,8 +636,16 @@ impl Gen<'_> {
             Elem::Array { item, .. } => b.ty_app("Vec", vec![self.value_ty(item)]),
             Elem::Nullable(inner) => b.ty_app("Option", vec![self.value_ty(inner)]),
             Elem::Format { name, .. } => b.ty(name.as_str()),
+            Elem::Tuple(xs) => {
+                let mut tys: Vec<Type> = xs.iter().filter(|x| x.valued()).map(|x| self.value_ty(x)).collect();
+                if tys.len() == 1 {
+                    tys.pop().unwrap_or_else(|| b.ty_tuple(Vec::new()))
+                } else {
+                    b.ty_tuple(tys)
+                }
+            }
             // Valueless elements have no field; callers check `valued` first.
-            Elem::Constant { .. } | Elem::Tags => b.ty_tuple(Vec::new()),
+            Elem::Constant { .. } | Elem::Ignored { .. } | Elem::Tags => b.ty_tuple(Vec::new()),
         }
     }
 
@@ -629,7 +663,17 @@ impl Gen<'_> {
             Elem::Prefixed { inner, .. } => return self.zero(inner),
             Elem::Array { .. } => b.e(ExprKind::Vec(Vec::new())),
             Elem::Nullable(_) => b.none(),
-            Elem::Format { .. } | Elem::Constant { .. } | Elem::Tags => return None,
+            Elem::Tuple(xs) => {
+                let mut zs = Vec::new();
+                for x in xs.iter().filter(|x| x.valued()) {
+                    zs.push(self.zero(x)?);
+                }
+                if zs.len() == 1 {
+                    return zs.pop();
+                }
+                b.tup(zs)
+            }
+            Elem::Format { .. } | Elem::Constant { .. } | Elem::Ignored { .. } | Elem::Tags => return None,
         })
     }
 
@@ -660,7 +704,7 @@ impl Gen<'_> {
                 let left = b.call("format$left", vec![buf.clone(), pos.clone()]);
                 b.call("format$utf8", vec![buf.clone(), pos.clone(), left])
             }
-            Elem::Prefixed { .. } | Elem::Array { .. } | Elem::Nullable(_) => {
+            Elem::Prefixed { .. } | Elem::Array { .. } | Elem::Nullable(_) | Elem::Tuple(_) => {
                 let f = self.dec_fn(e);
                 let mut args = vec![buf.clone(), pos.clone()];
                 args.extend(self.param_args());
@@ -679,6 +723,10 @@ impl Gen<'_> {
                     b.none(),
                 );
                 b.m(read, "and_then", vec![b.clos(&["fmt$c"], check)])
+            }
+            Elem::Ignored { elem, .. } => {
+                let read = self.dec(elem, buf, pos);
+                b.m(read, "map", vec![b.clos(&["fmt$c"], b.tidx(b.var("fmt$c"), 1))])
             }
             Elem::Tags => b.call("format$skip_tags", vec![buf.clone(), pos.clone()]),
         }
@@ -824,6 +872,29 @@ impl Gen<'_> {
                     ),
                 )
             }
+            Elem::Tuple(xs) => {
+                let mut lets = Vec::new();
+                let mut values = Vec::new();
+                let mut at = "fmt$p".to_string();
+                for (i, x) in xs.iter().enumerate() {
+                    let next = format!("fmt$q{i}");
+                    let read = self.dec(x, &buf, &b.var(&at));
+                    if x.valued() {
+                        let v = format!("fmt$t{i}");
+                        lets.push((b.tpat(&[&v, &next]), b.try_(read)));
+                        values.push(b.var(&v));
+                    } else {
+                        lets.push((b.var(&next), b.try_(read)));
+                    }
+                    at = next;
+                }
+                let value = if values.len() == 1 {
+                    values.remove(0)
+                } else {
+                    b.tup(values)
+                };
+                b.block(lets, b.some(b.tup(vec![value, b.var(&at)])))
+            }
             // Only compound elements get a function.
             other => self.dec(other, &buf, &pos),
         };
@@ -852,7 +923,7 @@ impl Gen<'_> {
             Elem::Bytes(n) => b.call("format$exact", vec![v.clone(), n.clone()]),
             Elem::Rest => v.clone(),
             Elem::Utf8 => b.m(v.clone(), "to_utf8", Vec::new()),
-            Elem::Prefixed { .. } | Elem::Array { .. } | Elem::Nullable(_) => {
+            Elem::Prefixed { .. } | Elem::Array { .. } | Elem::Nullable(_) | Elem::Tuple(_) => {
                 let f = self.enc_fn(e);
                 let mut args = vec![v.clone()];
                 args.extend(self.param_args());
@@ -863,7 +934,7 @@ impl Gen<'_> {
                 xs.extend(args.iter().cloned());
                 b.call(&format!("{}::encode", name.as_str()), xs)
             }
-            Elem::Constant { elem, value } => self.enc(elem, value),
+            Elem::Constant { elem, value } | Elem::Ignored { elem, value } => self.enc(elem, value),
             Elem::Tags => b.call("Bytes::uvarint", vec![b.int(0, Some("u64"))]),
         }
     }
@@ -918,6 +989,21 @@ impl Gen<'_> {
                     Len::Int(t) => b.call(&int_access(t).1, vec![self.null_raw(len, bias)]),
                 };
                 b.mat(v.clone(), vec![(b.some(b.var("fmt$x")), present), (b.none(), null)])
+            }
+            Elem::Tuple(xs) => {
+                let valued = xs.iter().filter(|x| x.valued()).count();
+                let mut k = 0;
+                let mut parts = Vec::new();
+                for x in xs {
+                    if x.valued() {
+                        let part = if valued == 1 { v.clone() } else { b.tidx(v.clone(), k) };
+                        k += 1;
+                        parts.push(self.enc(x, &part));
+                    } else {
+                        parts.push(self.enc(x, &b.tup(Vec::new())));
+                    }
+                }
+                b.call("Bytes::join", vec![b.e(ExprKind::Vec(parts))])
             }
             other => self.enc(other, &v),
         };
@@ -976,7 +1062,7 @@ fn record(f: &FormatItem, fields: &[FormatField], env: &Env, diags: &mut Diagnos
                 diags.push(
                     Diagnostic::new(
                         code!("BLS0301"),
-                        "`constant(…)` and `tags` have no value to keep in a field",
+                        "`constant(…)`, `ignored(…)` and `tags` have no value to keep in a field",
                     )
                     .with_primary(n.span),
                 );
@@ -986,7 +1072,7 @@ fn record(f: &FormatItem, fields: &[FormatField], env: &Env, diags: &mut Diagnos
                 diags.push(
                     Diagnostic::new(
                         code!("BLS0301"),
-                        "an element with a value needs a field name (only `constant(…)` and `tags` go without)",
+                        "an element with a value needs a field name (only `constant(…)`, `ignored(…)` and `tags` go without)",
                     )
                     .with_primary(fd.span),
                 );

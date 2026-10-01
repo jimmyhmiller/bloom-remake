@@ -1,8 +1,5 @@
 //! Kafka request and response headers (RequestHeader v1–v2, ResponseHeader v0–v1).
 
-/// A request header. `client_id` is a legacy nullable string even in the flexible header v2.
-struct RequestHeader { api_key: i16, api_version: i16, correlation_id: i32, client_id: Option<String> }
-
 const API_PRODUCE: i16 = 0;
 const API_FETCH: i16 = 1;
 const API_LIST_OFFSETS: i16 = 2;
@@ -38,22 +35,25 @@ fn flexible(api_key: i16, version: i16) -> bool {
 /// The fixed part of a request header: the API key, version and correlation id, which every version has. The rest
 /// depends on the API and version.
 fn request_prefix(c: Cur) -> Option<(i16, i16, i32, Cur)> {
-    read_i16(c).and_then(|k| read_i16(k.1).and_then(|v| read_i32(v.1).map(|id| (k.0, v.0, id.0, id.1))))
+    let (k, p) = c.buf.i16_be_at(c.pos).map(|k| (k, c.pos + 2))?;
+    let (v, p) = c.buf.i16_be_at(p).map(|v| (v, p + 2))?;
+    let (id, p) = c.buf.i32_be_at(p).map(|id| (id, p + 4))?;
+    Some((k, v, id, at(c, p)))
 }
 
-/// A whole request header, header v2 for a flexible request and v1 otherwise.
+/// A request header: v2 (with tagged fields) for a flexible request, v1 otherwise. `client_id` is a legacy nullable
+/// string even in v2.
+format RequestHeader {
+    api_key: i16,
+    api_version: i16,
+    correlation_id: i32,
+    client_id: string16,
+    tags if flexible(api_key, api_version),
+}
+
 fn request_header(c: Cur) -> Option<(RequestHeader, Cur)> {
-    request_prefix(c).and_then(|p| {
-        let (key, version, corr, rest) = p;
-        read_nullable_string(rest).and_then(|cid| {
-            let header = RequestHeader { api_key: key, api_version: version, correlation_id: corr, client_id: cid.0 };
-            if flexible(key, version) {
-                skip_tags(cid.1).map(|after| (header, after))
-            } else {
-                Some((header, cid.1))
-            }
-        })
-    })
+    let (h, p) = RequestHeader::decode(c.buf, c.pos)?;
+    Some((h, at(c, p)))
 }
 
 /// Response header v0: the correlation id. (ApiVersions answers with header v0 at every version.)
@@ -68,14 +68,10 @@ fn response_header_v1(correlation_id: i32) -> Bytes {
 
 /// A request header v2 (for a flexible request): key, version, correlation id, client id, no tags.
 fn request_header_v2(api_key: i16, version: i16, correlation_id: i32, client_id: String) -> Bytes {
-    let id = client_id.to_utf8();
-    Bytes::join([
-        Bytes::from_i16_be(api_key), Bytes::from_i16_be(version), Bytes::from_i32_be(correlation_id),
-        Bytes::from_i16_be(id.len() as i16), id, no_tags(),
-    ])
+    RequestHeader::encode(RequestHeader { api_key: api_key, api_version: version, correlation_id: correlation_id, client_id: Some(client_id) })
 }
 
 /// The correlation id at the front of a response (every response header version starts with it).
 fn response_correlation(c: Cur) -> Option<(i32, Cur)> {
-    read_i32(c)
+    c.buf.i32_be_at(c.pos).map(|id| (id, at(c, c.pos + 4)))
 }

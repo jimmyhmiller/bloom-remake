@@ -10,18 +10,20 @@
 
 stream kafka: listen;
 
+// A connection's state lasts until it closes.
+
 /// Per connection: its reassembly state (written by `serve` only).
-table reassembly(c: Conn, bytes: Framer) key(c);
+table reassembly(c: Conn, bytes: Framer) key(c) while not kafka.closed(c, _);
 /// Per connection: how many requests have arrived (the next one's index), and their bytes (written by `serve` only).
-table received(c: Conn, n: u64, bytes: u64) key(c);
+table received(c: Conn, n: u64, bytes: u64) key(c) while not kafka.closed(c, _);
 /// Per connection: the index of the next request to answer, and the next write's `seq` (written by the answers).
-table answering(c: Conn, next: u64, seq: u64) key(c);
+table answering(c: Conn, next: u64, seq: u64) key(c) while not kafka.closed(c, _);
 /// The requests waiting their turn, by connection and arrival index, with their arrival time.
-table queued(c: Conn, i: u64, frame: Bytes, at: Instant) key(c, i);
+table queued(c: Conn, i: u64, frame: Bytes, at: Instant) key(c, i) while not kafka.closed(c, _);
 /// Where each request not yet answered starts in its connection's request bytes: the bytes of the requests before it.
-table frame_start(c: Conn, i: u64, start: u64) key(c, i);
+table frame_start(c: Conn, i: u64, start: u64) key(c, i) while answering(c, head, _), not kafka.closed(c, _) where i >= head;
 /// The connections the broker stopped reading, because their queues are full.
-table paused(c: Conn) key(c);
+table paused(c: Conn) key(c) while not kafka.closed(c, _);
 
 accept: on kafka.opened(c, _peer, _at) {
     emit reassembly(c, framer());
@@ -43,11 +45,6 @@ enqueue: on kafka.data(c, _seq, bytes), reassembly(c, f), received(c, n, b), let
         (k, x) in with_starts(b, fed.frames).enumerate() {
     emit queued(c, n + k, x.1, now());
     emit frame_start(c, n + k, x.0);
-}
-
-/// An answered request's start is forgotten.
-forget_start: while frame_start(c, i, s), answering(c, head, _) where i < head {
-    delete frame_start(c, i, s);
 }
 
 /// Each connection whose queue holds as many requests, or as many bytes, as it may: the requests from its head on.
@@ -85,24 +82,5 @@ answer_pure: while head(c, i, seq, key, version, _corr, fr, at) where pure_reque
     if not answered(fr) {
         send kafka.close(c);
     }
-    delete queued(c, i, fr, at);
-}
-
-forget_reassembly: on kafka.closed(c, _reason), reassembly(c, f) {
-    delete reassembly(c, f);
-}
-forget_received: on kafka.closed(c, _reason), received(c, n, b) {
-    delete received(c, n, b);
-}
-forget_starts: on kafka.closed(c, _reason), frame_start(c, i, s) {
-    delete frame_start(c, i, s);
-}
-forget_paused: on kafka.closed(c, _reason), paused(c) {
-    delete paused(c);
-}
-forget_answering: on kafka.closed(c, _reason), answering(c, i, s) {
-    delete answering(c, i, s);
-}
-forget_queued: on kafka.closed(c, _reason), queued(c, i, fr, at) {
     delete queued(c, i, fr, at);
 }

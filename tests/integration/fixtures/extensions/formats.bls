@@ -1,5 +1,5 @@
 //! Formats (LANGUAGE §16.7): a Kafka-like vocabulary of aliases, two records (one nested in the other, with a
-//! version parameter, a constant, conditional fields and tagged sections). `bls_extensions.rs` encodes random values
+//! version parameter, a constant, an ignored field, tuples, conditional fields and tagged sections). `bls_extensions.rs` encodes random values
 //! with its own reference encoder and checks the decoded fields, the re-encoding and that truncations decode to
 //! nothing, on both evaluators.
 program formats version 1;
@@ -14,6 +14,7 @@ format Topic(version: i16) {
     id: uuid,
     name: compact_nullable_string,
     parts: compact_array(i32),
+    pairs: compact_array((i32, bool, tags)),
     tags,
 }
 
@@ -25,6 +26,7 @@ format Request(version: i16) {
     legacy: string16 if version < 8,
     big: u64,
     small: i8,
+    ignored(i64, -1i64),
     delta: varint,
     blob: prefixed(varint, 0, rest),
     tags,
@@ -32,8 +34,8 @@ format Request(version: i16) {
 
 input msg(k: u64, version: i16, b: Bytes);
 
-fn flat(r: Request) -> (Option<Vec<(Bytes, Option<String>, Vec<i32>)>>, bool, bool, Option<String>, u64, i8, i64, Bytes) {
-    (r.topics.map(|ts| ts.map(|t| (t.id, t.name, t.parts))), r.auto, r.ops, r.legacy, r.big, r.small, r.delta, r.blob)
+fn flat(r: Request) -> (Option<Vec<(Bytes, Option<String>, Vec<i32>, Vec<(i32, bool)>)>>, bool, bool, Option<String>, u64, i8, i64, Bytes) {
+    (r.topics.map(|ts| ts.map(|t| (t.id, t.name, t.parts, t.pairs))), r.auto, r.ops, r.legacy, r.big, r.small, r.delta, r.blob)
 }
 
 /// Each message decoded: its fields, the bytes it took, and whether encoding it gives the same bytes.

@@ -86,52 +86,20 @@ fn retention(set: Vec<(String, String)>) -> (i64, i64) {
 
 // ---------------------------------------------------------------- CreateTopics v7
 
-struct CreatableTopic {
-    name: String,
+/// A topic to create: its manual assignments are (partition, brokers), its configs (name, value).
+format CreatableTopic {
+    name: compact_string,
     partitions: i32,
     replication: i16,
-    assignments: Vec<(i32, Vec<i32>)>,
-    configs: Vec<(String, Option<String>)>,
+    assignments: compact_array((i32, compact_array(i32), tags)),
+    configs: compact_array((compact_string, compact_nullable_string, tags)),
+    tags,
 }
 
-struct CreateTopicsRequest { topics: Vec<CreatableTopic>, timeout_ms: i32, validate_only: bool }
-
-fn decode_assignment(c: Cur) -> Option<((i32, Vec<i32>), Cur)> {
-    read_i32(c).and_then(|p| read_compact_i32s(p.1).and_then(|b| skip_tags(b.1).map(|end| ((p.0, b.0), end))))
-}
-
-fn decode_creatable_config(c: Cur) -> Option<((String, Option<String>), Cur)> {
-    read_compact_string(c).and_then(|n| read_compact_nullable_string(n.1).and_then(|v| {
-        skip_tags(v.1).map(|end| ((n.0, v.0), end))
-    }))
-}
-
-fn decode_creatable_topic(c: Cur) -> Option<(CreatableTopic, Cur)> {
-    read_compact_string(c).and_then(|name| read_i32(name.1).and_then(|parts| read_i16(parts.1).and_then(|rf| {
-        read_compact_len(rf.1).and_then(|na| {
-            range(0, na.0)
-                .fold(Some(([], na.1)), |acc, _i| acc.and_then(|a| decode_assignment(a.1).map(|x| (a.0.push(x.0), x.1))))
-                .and_then(|asg| read_compact_len(asg.1).and_then(|nc| {
-                    range(0, nc.0)
-                        .fold(Some(([], nc.1)), |acc, _i| {
-                            acc.and_then(|a| decode_creatable_config(a.1).map(|x| (a.0.push(x.0), x.1)))
-                        })
-                        .and_then(|cfg| skip_tags(cfg.1).map(|end| {
-                            (CreatableTopic { name: name.0, partitions: parts.0, replication: rf.0, assignments: asg.0, configs: cfg.0 }, end)
-                        }))
-                }))
-        })
-    })))
-}
+format CreateTopicsRequest { topics: compact_array(CreatableTopic), timeout_ms: i32, validate_only: bool, tags }
 
 fn decode_create_topics(c: Cur) -> Option<CreateTopicsRequest> {
-    read_compact_len(c).and_then(|n| {
-        range(0, n.0)
-            .fold(Some(([], n.1)), |acc, _i| acc.and_then(|a| decode_creatable_topic(a.1).map(|t| (a.0.push(t.0), t.1))))
-            .and_then(|ts| read_i32(ts.1).and_then(|timeout| read_bool(timeout.1).and_then(|vo| {
-                skip_tags(vo.1).map(|_end| CreateTopicsRequest { topics: ts.0, timeout_ms: timeout.0, validate_only: vo.0 })
-            })))
-    })
+    CreateTopicsRequest::decode(c.buf, c.pos).map(|r| r.0)
 }
 
 /// Whether `name` is a legal topic name: 1 to 249 of `[a-zA-Z0-9._-]`, and not `.` or `..`.
@@ -177,15 +145,9 @@ struct NewTopic { name: String, id: Bytes, partitions: i32, configs: Vec<(String
 /// created) and the topic.
 struct CreateOutcome { error: i16, message: Option<String>, topic: NewTopic }
 
-/// The names that occur more than once in `xs`.
-fn repeated_names(xs: Vec<String>) -> Set<String> {
-    // Each name's first position (a later pair overwrites an earlier one, so the pairs go in reverse).
-    let first = xs.enumerate().reverse().map(|e| (e.1, e.0)).to_map();
-    xs.enumerate().filter(|e| first.get(e.1) != Some(e.0)).map(|e| e.1).to_set()
-}
-
-/// The ids that occur more than once in `xs`.
-fn repeated_ids(xs: Vec<Bytes>) -> Set<Bytes> {
+/// The values that occur more than once in `xs`.
+fn repeated<T>(xs: Vec<T>) -> Set<T> {
+    // Each value's first position (a later pair overwrites an earlier one, so the pairs go in reverse).
     let first = xs.enumerate().reverse().map(|e| (e.1, e.0)).to_map();
     xs.enumerate().filter(|e| first.get(e.1) != Some(e.0)).map(|e| e.1).to_set()
 }
@@ -206,7 +168,7 @@ struct CreateContext { repeated: Set<String>, colliding: Set<String>, taken: Set
 /// this tick.
 fn create_context(names: Vec<String>, taken: Vec<String>) -> CreateContext {
     CreateContext {
-        repeated: repeated_names(names),
+        repeated: repeated(names),
         colliding: colliding_keys(names.map(|n| (collision_key(n), n))),
         taken: taken.to_set(),
         taken_keys: taken.map(|n| collision_key(n)).to_set(),
@@ -301,59 +263,52 @@ fn create_timed_out(name: String) -> CreateOutcome {
     create_failed(name, REQUEST_TIMED_OUT, "the controller did not apply the creation in time")
 }
 
-fn encode_created_config(name: String, value: String, set: bool) -> Bytes {
-    // ConfigSource: 1 a topic's own configuration, 5 the default.
-    Bytes::join([
-        enc_compact_string(name), enc_compact_nullable_string(Some(value)), enc_bool(false),
-        Bytes::from_i8(if set { 1i8 } else { 5i8 }), enc_bool(false), no_tags(),
-    ])
+/// A configuration as CreateTopics (v5+) and DescribeConfigs report it. ConfigSource: 1 a topic's own configuration,
+/// 5 the default.
+format CreatedConfig { name: compact_string, value: compact_nullable_string, read_only: bool, source: i8, sensitive: bool, tags }
+format CreatedTopic {
+    name: compact_string,
+    id: uuid,
+    error: i16,
+    message: compact_nullable_string,
+    partitions: i32,
+    replication: i16,
+    configs: compact_nullable_array(CreatedConfig),
+    tags,
 }
+format CreateTopicsResponse { throttle: i32, topics: compact_array(CreatedTopic), tags }
 
 /// A topic's full configuration, in `topic_configs` order: what CreateTopics v5+ returns for a created topic.
-fn encode_topic_configs(set: Vec<(String, String)>) -> Vec<Bytes> {
-    topic_configs().map(|k| encode_created_config(k.name, config_value(set, k.name), set.any(|kv| kv.0 == k.name)))
+fn created_configs(set: Vec<(String, String)>) -> Vec<CreatedConfig> {
+    topic_configs().map(|k| CreatedConfig {
+        name: k.name, value: Some(config_value(set, k.name)), read_only: false,
+        source: if set.any(|kv| kv.0 == k.name) { 1i8 } else { 5i8 }, sensitive: false,
+    })
 }
 
-fn encode_create_outcome(o: CreateOutcome) -> Bytes {
+fn created_topic(o: CreateOutcome) -> CreatedTopic {
     let ok = o.error == NONE;
-    Bytes::join([
-        enc_compact_string(o.topic.name),
-        o.topic.id,
-        Bytes::from_i16_be(o.error),
-        enc_compact_nullable_string(o.message),
-        Bytes::from_i32_be(if ok { o.topic.partitions } else { -1i32 }),
-        Bytes::from_i16_be(if ok { replication_of(o.topic.assignment) } else { -1i16 }),
-        enc_compact_nullable_array(if ok { Some(encode_topic_configs(o.topic.configs)) } else { None }),
-        no_tags(),
-    ])
+    CreatedTopic {
+        name: o.topic.name, id: o.topic.id, error: o.error, message: o.message,
+        partitions: if ok { o.topic.partitions } else { -1i32 },
+        replication: if ok { replication_of(o.topic.assignment) } else { -1i16 },
+        configs: if ok { Some(created_configs(o.topic.configs)) } else { None },
+    }
 }
 
 fn encode_create_topics_response(correlation_id: i32, outcomes: Vec<CreateOutcome>) -> Bytes {
-    frame(Bytes::join([
-        response_header_v1(correlation_id),
-        Bytes::from_i32_be(0i32),
-        enc_compact_array(outcomes.map(|o| encode_create_outcome(o))),
-        no_tags(),
-    ]))
+    let r = CreateTopicsResponse { throttle: 0i32, topics: outcomes.map(|o| created_topic(o)) };
+    frame(response_header_v1(correlation_id).concat(CreateTopicsResponse::encode(r)))
 }
 
 // ---------------------------------------------------------------- DeleteTopics v6
 
 /// A topic to delete: by name, or by id (a zero id means "by name").
-struct DeleteTopicState { name: Option<String>, id: Bytes }
-
-fn decode_delete_topic_state(c: Cur) -> Option<(DeleteTopicState, Cur)> {
-    read_compact_nullable_string(c).and_then(|n| read_uuid(n.1).and_then(|id| {
-        skip_tags(id.1).map(|end| (DeleteTopicState { name: n.0, id: id.0 }, end))
-    }))
-}
+format DeleteTopicState { name: compact_nullable_string, id: uuid, tags }
+format DeleteTopicsRequest { topics: compact_array(DeleteTopicState), timeout_ms: i32, tags }
 
 fn decode_delete_topics(c: Cur) -> Option<(Vec<DeleteTopicState>, i32)> {
-    read_compact_len(c).and_then(|n| {
-        range(0, n.0)
-            .fold(Some(([], n.1)), |acc, _i| acc.and_then(|a| decode_delete_topic_state(a.1).map(|t| (a.0.push(t.0), t.1))))
-            .and_then(|ts| read_i32(ts.1).and_then(|timeout| skip_tags(timeout.1).map(|_end| (ts.0, timeout.0))))
-    })
+    DeleteTopicsRequest::decode(c.buf, c.pos).map(|r| (r.0.topics, r.0.timeout_ms))
 }
 
 /// What judging one entry of a DeleteTopics request needs to know of the whole request, computed once for it: the
@@ -364,7 +319,7 @@ struct DeleteContext { repeated_ids: Set<Bytes>, repeated_names: Set<String> }
 fn delete_context(req: Vec<DeleteTopicState>) -> DeleteContext {
     let ids = req.filter(|s| s.id != zero_uuid()).map(|s| s.id);
     let names = req.filter_map(|s| if s.id == zero_uuid() { s.name } else { None });
-    DeleteContext { repeated_ids: repeated_ids(ids), repeated_names: repeated_names(names) }
+    DeleteContext { repeated_ids: repeated(ids), repeated_names: repeated(names) }
 }
 
 /// The name an entry deletes by, or "" for an entry by id (or with neither).
@@ -390,7 +345,8 @@ fn delete_entry_ok(ctx: DeleteContext, s: DeleteTopicState) -> bool {
 
 /// One deletion's result: the topic's name and id as the entry gave them (both when it is deleted), the error and
 /// its message.
-struct DeleteOutcome { name: Option<String>, id: Bytes, error: i16, message: Option<String> }
+format DeleteOutcome { name: compact_nullable_string, id: uuid, error: i16, message: compact_nullable_string, tags }
+format DeleteTopicsResponse { throttle: i32, topics: compact_array(DeleteOutcome), tags }
 
 /// An entry's outcome decided without the controller: a malformed entry, or one whose deletion did not apply in time.
 fn delete_refused(s: DeleteTopicState, error: i16) -> DeleteOutcome {
@@ -418,59 +374,38 @@ fn delete_applied(s: DeleteTopicState, id: Bytes, name: String, error: i16) -> D
 /// Marks a name entry whose topic another entry names by id (not a Kafka error code: `delete_applied` maps it).
 const DELETE_CLASH: i16 = -2;
 
-fn encode_delete_outcome(o: DeleteOutcome) -> Bytes {
-    Bytes::join([
-        enc_compact_nullable_string(o.name), o.id, Bytes::from_i16_be(o.error), enc_compact_nullable_string(o.message),
-        no_tags(),
-    ])
-}
-
 fn encode_delete_topics_response(correlation_id: i32, outcomes: Vec<DeleteOutcome>) -> Bytes {
-    frame(Bytes::join([
-        response_header_v1(correlation_id),
-        Bytes::from_i32_be(0i32),
-        enc_compact_array(outcomes.map(|o| encode_delete_outcome(o))),
-        no_tags(),
-    ]))
+    frame(response_header_v1(correlation_id).concat(DeleteTopicsResponse::encode(DeleteTopicsResponse { throttle: 0i32, topics: outcomes })))
 }
 
 // ---------------------------------------------------------------- DescribeConfigs v4
 
 /// A resource whose configuration is asked for: its type (2 a topic, 4 a broker), name and the keys wanted (`None`,
 /// or empty, for all).
-struct ConfigResource { kind: i8, name: String, keys: Option<Vec<String>> }
-
-fn decode_config_resource(c: Cur) -> Option<(ConfigResource, Cur)> {
-    read_i8(c).and_then(|k| read_compact_string(k.1).and_then(|n| read_compact_nullable_strings(n.1).and_then(|keys| {
-        skip_tags(keys.1).map(|end| (ConfigResource { kind: k.0, name: n.0, keys: keys.0 }, end))
-    })))
-}
+format ConfigResource { kind: i8, name: compact_string, keys: compact_nullable_array(compact_string), tags }
+format DescribeConfigsRequest { resources: compact_array(ConfigResource), synonyms: bool, documentation: bool, tags }
 
 fn decode_describe_configs(c: Cur) -> Option<Vec<ConfigResource>> {
-    read_compact_len(c).and_then(|n| {
-        range(0, n.0)
-            .fold(Some(([], n.1)), |acc, _i| acc.and_then(|a| decode_config_resource(a.1).map(|r| (a.0.push(r.0), r.1))))
-            .and_then(|rs| read_bool(rs.1).and_then(|syn| read_bool(syn.1).and_then(|doc| skip_tags(doc.1).map(|_end| rs.0))))
-    })
+    DescribeConfigsRequest::decode(c.buf, c.pos).map(|r| r.0.resources)
 }
 
-fn encode_described_config(k: ConfigKey, set: Vec<(String, String)>) -> Bytes {
-    let own = set.any(|kv| kv.0 == k.name);
-    Bytes::join([
-        enc_compact_string(k.name),
-        enc_compact_nullable_string(Some(config_value(set, k.name))),
-        enc_bool(false),
-        Bytes::from_i8(if own { 1i8 } else { 5i8 }),
-        enc_bool(false),
-        enc_compact_array([]),
-        Bytes::from_i8(k.kind),
-        enc_compact_nullable_string(None),
-        no_tags(),
-    ])
+/// A described configuration: as created, plus its synonyms (none), its type and its documentation (none).
+format DescribedConfig {
+    name: compact_string,
+    value: compact_nullable_string,
+    read_only: bool,
+    source: i8,
+    sensitive: bool,
+    constant(uvarint, 1u64),
+    kind: i8,
+    documentation: compact_nullable_string,
+    tags,
 }
+format ConfigResult { error: i16, message: compact_nullable_string, kind: i8, name: compact_string, configs: compact_array(DescribedConfig), tags }
+format DescribeConfigsResponse { throttle: i32, results: compact_array(ConfigResult), tags }
 
 /// One resource's result. `set` is the topic's own configs when it exists (`None`: unknown topic).
-fn encode_config_result(r: ConfigResource, set: Option<Vec<(String, String)>>) -> Bytes {
+fn encode_config_result(r: ConfigResource, set: Option<Vec<(String, String)>>) -> ConfigResult {
     let (error, message, configs) = if r.kind == CONFIG_BROKER {
         // A broker: no configuration is described.
         (NONE, None, [])
@@ -484,32 +419,24 @@ fn encode_config_result(r: ConfigResource, set: Option<Vec<(String, String)>>) -
                     Some(ks) => ks.is_empty() || ks.any(|x| x == k.name),
                     None => true,
                 });
-                (NONE, None, wanted.map(|k| encode_described_config(k, s)))
+                (NONE, None, wanted.map(|k| DescribedConfig {
+                    name: k.name, value: Some(config_value(s, k.name)), read_only: false,
+                    source: if s.any(|kv| kv.0 == k.name) { 1i8 } else { 5i8 }, sensitive: false, kind: k.kind,
+                    documentation: None,
+                }))
             }
             None => (UNKNOWN_TOPIC_OR_PARTITION, Some("the topic does not exist"), []),
         }
     };
-    Bytes::join([
-        Bytes::from_i16_be(error),
-        enc_compact_nullable_string(message),
-        Bytes::from_i8(r.kind),
-        enc_compact_string(r.name),
-        enc_compact_array(configs),
-        no_tags(),
-    ])
+    ConfigResult { error: error, message: message, kind: r.kind, name: r.name, configs: configs }
 }
 
-fn encode_describe_configs_response(correlation_id: i32, results: Vec<Bytes>) -> Bytes {
-    frame(Bytes::join([
-        response_header_v1(correlation_id),
-        Bytes::from_i32_be(0i32),
-        enc_compact_array(results),
-        no_tags(),
-    ]))
+fn encode_describe_configs_response(correlation_id: i32, results: Vec<ConfigResult>) -> Bytes {
+    frame(response_header_v1(correlation_id).concat(DescribeConfigsResponse::encode(DescribeConfigsResponse { throttle: 0i32, results: results })))
 }
 
 /// Every resource's result. `sets` holds the configurations of the named topics that exist.
-fn describe_results(req: Vec<ConfigResource>, sets: Vec<(String, Vec<(String, String)>)>) -> Vec<Bytes> {
+fn describe_results(req: Vec<ConfigResource>, sets: Vec<(String, Vec<(String, String)>)>) -> Vec<ConfigResult> {
     let set_of = sets.to_map();
     req.map(|r| {
         let set = if r.kind == CONFIG_TOPIC { set_of.get(r.name) } else { None };

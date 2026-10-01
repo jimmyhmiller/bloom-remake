@@ -16,7 +16,7 @@ extern fn crc32c(b: Bytes) -> u32 = "blossom_std::checksum::crc32c";
 /// The fixed header of a batch: the bytes before its first record.
 const BATCH_HEADER: u64 = 61;
 
-struct BatchHeader {
+format BatchHeader {
     base_offset: i64,
     length: i32,
     leader_epoch: i32,
@@ -34,33 +34,7 @@ struct BatchHeader {
 
 /// The header of the batch at the front of `b`, if `b` is long enough to hold one.
 fn batch_header(b: Bytes) -> Option<BatchHeader> {
-    if b.len() < BATCH_HEADER {
-        None
-    } else {
-        b.i64_be_at(0).and_then(|base| b.i32_be_at(8).and_then(|len| b.i32_be_at(12).and_then(|epoch| {
-            b.i8_at(16).and_then(|magic| b.u32_be_at(17).and_then(|crc| b.i16_be_at(21).and_then(|attrs| {
-                b.i32_be_at(23).and_then(|delta| b.i64_be_at(27).and_then(|first| b.i64_be_at(35).and_then(|max| {
-                    b.i64_be_at(43).and_then(|pid| b.i16_be_at(51).and_then(|pepoch| b.i32_be_at(53).and_then(|seq| {
-                        b.i32_be_at(57).map(|count| BatchHeader {
-                            base_offset: base,
-                            length: len,
-                            leader_epoch: epoch,
-                            magic: magic,
-                            crc: crc,
-                            attributes: attrs,
-                            last_offset_delta: delta,
-                            base_timestamp: first,
-                            max_timestamp: max,
-                            producer_id: pid,
-                            producer_epoch: pepoch,
-                            base_sequence: seq,
-                            record_count: count,
-                        })
-                    })))
-                })))
-            })))
-        })))
-    }
+    BatchHeader::decode(b, 0).map(|r| r.0)
 }
 
 /// The batches of a records field, in order: `None` if any is truncated or its length is not a whole batch. A batch
@@ -176,25 +150,29 @@ fn batch_records(b: Bytes, h: BatchHeader) -> Option<Bytes> {
     })
 }
 
-/// Each record's offset and timestamp, in order (a record: its length, attributes, timestamp delta, offset delta,
-/// then key, value and headers, which are skipped by the length). `None` if the records do not parse.
+/// A record: its length, then its attributes, timestamp delta, offset delta, key (null: -1), value (never null here)
+/// and headers (kept as bytes).
+format Record { body: prefixed(varint, 0, (ignored(i8, 0i8), varint, varint, nullable(prefixed(varint, 0, rest)), prefixed(varint, 0, rest), rest)) }
+
+/// A batch's records, in order (the count from its header): (offset, timestamp, value). `None` if they do not parse
+/// or do not fill the records section.
+fn batch_rows(b: Bytes) -> Option<Vec<(i64, i64, Bytes)>> {
+    let h = batch_header(b)?;
+    let r = batch_records(b, h)?;
+    let n = if h.record_count < 0i32 { 0 } else { h.record_count as u64 };
+    let end = range(0, n).fold(Some(([], 0)), |acc, _i| acc.and_then(|a| {
+        let (out, pos) = a;
+        Record::decode(r, pos).and_then(|rec| {
+            let (td, od, _key, value, _headers) = rec.0.body;
+            add_i64(h.base_offset, od).and_then(|o| add_i64(h.base_timestamp, td).map(|t| (out.push((o, t, value)), rec.1)))
+        })
+    }));
+    end.and_then(|e| if e.1 == r.len() { Some(e.0) } else { None })
+}
+
+/// Each record's offset and timestamp, in order. `None` if the records do not parse.
 fn record_times(b: Bytes) -> Option<Vec<(i64, i64)>> {
-    batch_header(b).and_then(|h| batch_records(b, h).and_then(|r| {
-        let n = if h.record_count < 0i32 { 0 } else { h.record_count as u64 };
-        let end = range(0, n).fold(Some(([], 0)), |acc, _i| acc.and_then(|a| {
-            let (out, pos) = a;
-            r.varint_at(pos).and_then(|len| r.varint_at(len.1 + 1).and_then(|td| r.varint_at(td.1).and_then(|od| {
-                if len.0 < 0i64 {
-                    None
-                } else {
-                    add_i64(h.base_offset, od.0).and_then(|o| add_i64(h.base_timestamp, td.0).map(|t| {
-                        (out.push((o, t)), len.1 + len.0 as u64)
-                    }))
-                }
-            })))
-        }));
-        end.and_then(|e| if e.1 == r.len() { Some(e.0) } else { None })
-    }))
+    batch_rows(b).map(|rs| rs.map(|x| (x.0, x.1)))
 }
 
 /// `a + b`, or `None` where it leaves `i64`: a record's deltas come from the client and are not checked at produce
