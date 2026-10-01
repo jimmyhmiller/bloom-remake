@@ -4,7 +4,8 @@ Design: `docs/design/EXTENSIONS.md`. Branch `slice-lang`, worktree `.worktrees/s
 
 ## Resume here
 
-- **State (2026-10-01):** item 1 (`?`) done. Next: item 2 (generic functions).
+- **State (2026-10-01):** items 1 (`?`) and 2 (generic functions) done. Next: item 3 (guarded persistence, soft
+  tables).
 - Update this section whenever work stops.
 
 ## Baseline (S8, merged at 69b630c)
@@ -32,3 +33,27 @@ Design: `docs/design/EXTENSIONS.md`. Branch `slice-lang`, worktree `.worktrees/s
   right of `&&`/`||`, a closure, a function not returning `Option`, or a rule body.
 - Tuple patterns in function `let`s already worked; nothing to add.
 - Tests: `bls_functions` (`v_try`, both evaluators against Rust), `blossom-front` diagnostics.
+
+### Item 2: generic functions (done)
+
+- Syntax: `fn f<T, U>(…)`, parameter type `fn(A, B) -> R` (a `TYPE` node with `fn`; `ast::Type::Fn`). Bounds and
+  defaults on a function's type parameters, generic `extern fn`s: not implemented (LANG-180/181 errors).
+- Templates (`resolve/generic.rs`): a function with type parameters or a function parameter is resolved once into
+  HIR with `CallParam`/`GenericCall` nodes; its variables move out of its scope. Each call from a non-template
+  makes an instance (a fresh scope, the body copied with the named functions substituted, generic calls
+  instantiated recursively; a template met again on the stack is BLS0213). Instances are ordinary `HFn`s with an
+  `HScheme`.
+- Type checking: an instance's type parameters are fresh terms shared by its one call and its body, so they are
+  inferred like rule variables; each function argument's signature is unified with its parameter's type.
+  Undetermined type parameters: BLS0300 at the call, before anything in the body. `HScheme::targs` records them.
+- Lowering merges instances by (template, type arguments, function arguments) into one IR function named
+  `f<T…, g…>`; `HFnId → FnId` is now a map (`Lowerer::fns`, `Lowered::fn_origins`), no longer the identity.
+- BLS0219: misplaced function types and function parameters, closures or generic functions as function
+  arguments.
+- Deviations from EXTENSIONS 2.2: a type parameter may sit only in tuples, `Option`, `Vec`, `Set`, `Map` (not in
+  lattices or user types, which have no generics yet); a body's annotations cannot name a type parameter; an
+  uncalled template is name-resolved but not type-checked; a type error inside an instance points into the
+  template's body without naming the call.
+- Tests: `bls_functions` (`v_generic`: list readers at two types, a generic helper, a function parameter passed
+  on, a shared instance; both evaluators against Rust), `blossom-front` (IR merging, BLS0219, inference and
+  recursion errors). Mutation-checked: dropping the signature unification, dropping the merge.

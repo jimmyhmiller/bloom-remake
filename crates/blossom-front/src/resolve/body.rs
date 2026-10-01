@@ -39,11 +39,14 @@ pub(crate) struct RuleCx {
     pub in_fn: bool,
     /// The functions this scope calls, for the recursion check (BLS0213).
     pub calls: BTreeSet<HFnId>,
+    /// A generic function's template being resolved: its function parameters are in scope, and calls of generic
+    /// functions stay calls of their templates until it is instantiated (LANGUAGE §16.1).
+    pub template: Option<usize>,
 }
 
 /// The functions a call resolves to before any declared one (LANGUAGE §9.12, §15, §16.1, Appendix B); a `fn` may not
 /// take one of these names, which a call would never reach.
-const BUILTIN_FNS: &[&str] = &[
+pub(super) const BUILTIN_FNS: &[&str] = &[
     "now",
     "tick",
     "random",
@@ -77,6 +80,7 @@ impl<'t> Resolver<'t, '_> {
             plain_bootstrap: false,
             in_fn: false,
             calls: BTreeSet::new(),
+            template: None,
         }
     }
 
@@ -93,14 +97,21 @@ impl<'t> Resolver<'t, '_> {
     }
 
     /// Pure functions (LANGUAGE §16.1): every signature in the module is declared first, so bodies may call functions
-    /// declared after them; then the bodies are resolved, each in its own scope with the parameters as its first
-    /// variables; then calls that form a cycle are reported (BLS0213).
+    /// declared after them; then generic functions' templates are resolved (`generic`), so the other bodies can
+    /// instantiate them; then those bodies, each in its own scope with the parameters as its first variables; then
+    /// calls that form a cycle are reported (BLS0213).
     pub(crate) fn functions(&mut self, s: ScopeIdx, items: &'t [ast::Item]) {
         let mut fns: Vec<(&'t ast::FnItem, HFnId)> = Vec::new();
+        let mut templates = Vec::new();
         let mut stack = vec![items];
         while let Some(items) = stack.pop() {
             for item in items {
                 match &item.kind {
+                    ast::ItemKind::Fn(f) if super::generic::is_template(f) => {
+                        if let Some(t) = self.declare_template(s, f) {
+                            templates.push(t);
+                        }
+                    }
                     ast::ItemKind::Fn(f) => {
                         let body = HFnBody::Expr(HExpr::new(HExprKind::Tuple(Vec::new()), f.body.span));
                         if let Some(id) = self.declare_fn(s, f.name, &f.params, &f.ret, f.span, body) {
@@ -112,6 +123,9 @@ impl<'t> Resolver<'t, '_> {
                     _ => {}
                 }
             }
+        }
+        for t in templates {
+            self.resolve_template(t);
         }
         let mut calls: BTreeMap<HFnId, BTreeSet<HFnId>> = BTreeMap::new();
         for (f, id) in fns {
@@ -134,6 +148,7 @@ impl<'t> Resolver<'t, '_> {
                 plain_bootstrap: false,
                 in_fn: true,
                 calls: BTreeSet::new(),
+                template: None,
             };
             for ((name, _), (v, _)) in f.params.iter().zip(&params) {
                 if let Some(frame) = cx.frames.last_mut() {
@@ -153,6 +168,12 @@ impl<'t> Resolver<'t, '_> {
                 None => {}
             }
             calls.insert(id, cx.calls);
+        }
+        // Generic function instances call what their templates call, with the functions passed for their function
+        // parameters (a cycle through one runs through a function of this module, whose instances are all made by
+        // now).
+        for (id, cs) in &self.instance_calls {
+            calls.entry(*id).or_insert_with(|| cs.clone());
         }
         // A function is total when everything it calls is: peel those off until nothing changes; what remains calls
         // itself, directly or through others.
@@ -178,6 +199,194 @@ impl<'t> Resolver<'t, '_> {
                 );
             }
         }
+    }
+
+    /// Resolves a template's body once, in its own scope with its value parameters as the first variables and its
+    /// function parameters callable. The variables move into the template: the scope is left empty (type checking
+    /// sees nothing there), and each instance gets a copy.
+    fn resolve_template(&mut self, t: usize) {
+        let Some(tm) = self.templates.get(t) else {
+            self.bugs
+                .push(blossom_base::internal_error!("template {t} was not declared"));
+            return;
+        };
+        let (item, ms) = (tm.item, tm.ms);
+        let value_params: Vec<Ident> = tm
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                super::generic::TParam::Value { name, .. } => Some(*name),
+                super::generic::TParam::Fn { .. } => None,
+            })
+            .collect();
+        let mut cx = self.rule_cx(ms, None);
+        cx.in_fn = true;
+        cx.template = Some(t);
+        for p in &value_params {
+            self.new_var(&mut cx, p.name, p.span, false);
+        }
+        let body = self.expr(&mut cx, &item.body);
+        let (vars, module) = match self.hir.scopes.get_mut(cx.scope.index()) {
+            Some(sc) => (std::mem::take(&mut sc.vars), sc.module.clone()),
+            None => {
+                self.bugs.push(blossom_base::internal_error!(
+                    "template scope {:?} does not exist",
+                    cx.scope
+                ));
+                return;
+            }
+        };
+        let state = match body {
+            Some(body) => super::generic::TemplateState::Resolved { vars, module, body },
+            None => {
+                if !self.diags.has_errors() {
+                    self.bugs.push(blossom_base::internal_error!(
+                        "the body of generic function `{}` failed to resolve without a diagnostic",
+                        item.name.as_str()
+                    ));
+                }
+                super::generic::TemplateState::Failed
+            }
+        };
+        if let Some(tm) = self.templates.get_mut(t) {
+            tm.state = state;
+        }
+    }
+
+    /// A call of the function parameter `param` of the template being resolved.
+    fn call_param(
+        &mut self,
+        cx: &mut RuleCx,
+        name: Ident,
+        (param, ty): (u32, HFnTy),
+        pos: &[&ast::Expr],
+        span: Span,
+    ) -> Option<HExpr> {
+        if pos.len() != ty.params.len() {
+            self.error(
+                code!("BLS0301"),
+                span,
+                format!(
+                    "`{}` takes {} argument(s), {} given",
+                    name.as_str(),
+                    ty.params.len(),
+                    pos.len()
+                ),
+            );
+            return None;
+        }
+        let mut args = Vec::new();
+        for p in pos {
+            args.push(self.expr(cx, p)?);
+        }
+        Some(HExpr::new(HExprKind::CallParam { param, args }, span))
+    }
+
+    /// A call of the generic function `g`: in a template, a call of `g`'s template; anywhere else, a call of a new
+    /// instance of it (`generic`).
+    fn generic_call(
+        &mut self,
+        cx: &mut RuleCx,
+        name: Ident,
+        g: usize,
+        pos: &[&ast::Expr],
+        span: Span,
+    ) -> Option<HExpr> {
+        let fn_params: Vec<Option<Symbol>> = match self.templates.get(g) {
+            Some(t) => t
+                .params
+                .iter()
+                .map(|p| match p {
+                    super::generic::TParam::Fn { name, .. } => Some(name.name),
+                    super::generic::TParam::Value { .. } => None,
+                })
+                .collect(),
+            None => {
+                self.bugs
+                    .push(blossom_base::internal_error!("template {g} was not declared"));
+                return None;
+            }
+        };
+        if pos.len() != fn_params.len() {
+            self.error(
+                code!("BLS0301"),
+                span,
+                format!(
+                    "`{}` takes {} argument(s), {} given",
+                    name.as_str(),
+                    fn_params.len(),
+                    pos.len()
+                ),
+            );
+            return None;
+        }
+        let mut args = Vec::new();
+        let mut fn_args = Vec::new();
+        for (p, a) in fn_params.iter().zip(pos) {
+            match p {
+                None => args.push(self.expr(cx, a)?),
+                Some(param) => fn_args.push(self.fn_arg(cx, *param, a)?),
+            }
+        }
+        if cx.template.is_some() {
+            return Some(HExpr::new(
+                HExprKind::GenericCall {
+                    template: u32::try_from(g).ok()?,
+                    args,
+                    fn_args,
+                },
+                span,
+            ));
+        }
+        let mut ids = Vec::new();
+        for a in fn_args {
+            match a {
+                HFnArg::Fn(f) => ids.push(f),
+                HFnArg::Param(_) => {
+                    self.bugs.push(blossom_base::internal_error!(
+                        "a function parameter was passed outside a template"
+                    ));
+                    return None;
+                }
+            }
+        }
+        let f = self.instantiate_fn(g, &ids, span)?;
+        cx.calls.insert(f);
+        Some(HExpr::new(HExprKind::Call { f, args }, span))
+    }
+
+    /// The function passed for the function parameter `param`: a named function, or a function parameter of the
+    /// template being resolved (BLS0219 otherwise).
+    fn fn_arg(&mut self, cx: &RuleCx, param: Symbol, a: &ast::Expr) -> Option<HFnArg> {
+        if let ExprKind::Path(path, targs) = &a.kind
+            && targs.is_empty()
+            && let [name] = path.as_slice()
+        {
+            if let Some((i, _)) = self.fn_param(cx.template, name.name) {
+                return Some(HFnArg::Param(i));
+            }
+            if let Some(f) = self.scope(cx.ms).fns.get(&name.name).copied() {
+                return Some(HFnArg::Fn(f));
+            }
+            if self.scope(cx.ms).generic_fns.contains_key(&name.name) {
+                self.error(
+                    code!("BLS0219"),
+                    a.span,
+                    format!(
+                        "`{}` is generic, and only a function with fixed types can be passed for `{}`; pass a function that calls it",
+                        name.as_str(),
+                        param.as_str()
+                    ),
+                );
+                return None;
+            }
+        }
+        self.error(
+            code!("BLS0219"),
+            a.span,
+            format!("`{}` takes a function: pass one by its name", param.as_str()),
+        );
+        None
     }
 
     /// `extern fn name(…) -> T = "path";`: a host function of the standard catalog (LANGUAGE §16.2), declared with
@@ -233,6 +442,7 @@ impl<'t> Resolver<'t, '_> {
             return None;
         }
         if self.scope(s).fns.contains_key(&name.name)
+            || self.scope(s).generic_fns.contains_key(&name.name)
             || self.scope(s).rels.contains_key(&name.name)
             || self.scope(s).instances.contains_key(&name.name)
         {
@@ -298,6 +508,7 @@ impl<'t> Resolver<'t, '_> {
             // reported, so the placeholder never reaches type checking.
             body,
             span,
+            scheme: None,
         });
         self.scope_mut(s).fns.insert(name.name, id);
         Some(id)
@@ -1589,7 +1800,18 @@ impl<'t> Resolver<'t, '_> {
                                         self.check_readable(cx, rel, span);
                                         return Some(HExpr::new(HExprKind::Lookup { rel, key: Vec::new() }, span));
                                     }
-                                    if self.scope(cx.ms).fns.contains_key(&name.name) {
+                                    if self.fn_param(cx.template, name.name).is_some()
+                                        || self.scope(cx.ms).generic_fns.contains_key(&name.name)
+                                    {
+                                        self.error(
+                                            code!("BLS0219"),
+                                            span,
+                                            format!(
+                                                "`{}` is a function: call it, or pass it for a function parameter",
+                                                name.as_str()
+                                            ),
+                                        );
+                                    } else if self.scope(cx.ms).fns.contains_key(&name.name) {
                                         // A function as a value is the argument of a lattice operation
                                         // (`s.map(f)`, `s.filter(p)`, LANGUAGE §11.5).
                                         self.unsupported(
@@ -2058,6 +2280,12 @@ impl<'t> Resolver<'t, '_> {
                     },
                     span,
                 ))
+            }
+            [name] if let Some(param) = self.fn_param(cx.template, name.name) => {
+                self.call_param(cx, *name, param, &pos, span)
+            }
+            [name] if let Some(g) = self.scope(cx.ms).generic_fns.get(&name.name).copied() => {
+                self.generic_call(cx, *name, g, &pos, span)
             }
             [name] if let Some(f) = self.scope(cx.ms).fns.get(&name.name).copied() => {
                 let arity = self.hir.fns.get(f.index()).map_or(0, |h| h.params.len());
@@ -3235,27 +3463,6 @@ impl<'t> Resolver<'t, '_> {
             span: h.span,
         });
     }
-}
-
-/// Whether a value of type `ty` holds a lattice or group value anywhere inside it.
-fn holds_lattice(types: &blossom_value::TypeTable, ty: TypeId) -> bool {
-    let mut seen = BTreeSet::new();
-    let mut stack = vec![ty];
-    while let Some(t) = stack.pop() {
-        if !seen.insert(t) {
-            continue;
-        }
-        match types.get(t) {
-            Some(TypeDef::Lattice(_) | TypeDef::Group(_)) => return true,
-            Some(TypeDef::Tuple(ts)) => stack.extend(ts.iter().copied()),
-            Some(TypeDef::Vec(e) | TypeDef::Set(e) | TypeDef::Option(e)) => stack.push(*e),
-            Some(TypeDef::Map(k, v)) => stack.extend([*k, *v]),
-            Some(TypeDef::Struct(d)) => stack.extend(d.fields.iter().map(|f| f.ty)),
-            Some(TypeDef::Enum(d)) => stack.extend(d.variants.iter().flat_map(|v| v.payload.iter().map(|f| f.ty))),
-            _ => {}
-        }
-    }
-    false
 }
 
 /// The names a pattern binds, variants' fields included.

@@ -201,6 +201,33 @@ fn expected(view: &str, n: u64, s: &str, b: &[u8]) -> (Value, Value) {
                 ]),
             )
         }
+        "v_generic" => {
+            // A counted list (count: the byte at `at`, mod 4) of `width`-byte items from `at + 1`.
+            let list = |at: usize, width: usize, item: &dyn Fn(&[u8]) -> Value| -> Value {
+                let Some(&count) = b.get(at) else { return opt(None) };
+                let start = at + 1;
+                let end = start + width * usize::from(count % 4);
+                opt((end <= b.len()).then(|| {
+                    let items = b[start..end].chunks(width).map(item).collect();
+                    tuple(vec![Value::Vec(items), u(end as u64)])
+                }))
+            };
+            let byte = |c: &[u8]| u(u64::from(c[0]));
+            let pair = |c: &[u8]| tuple(vec![u(u64::from(c[0])), u(u64::from(c[1]))]);
+            let word = s.split_whitespace().next().unwrap_or("none");
+            (
+                bytes(b),
+                tuple(vec![
+                    list(0, 1, &byte),
+                    list(0, 2, &pair),
+                    list(1, 1, &byte),
+                    u(9 * n + 4),
+                    Value::Str(word.into()),
+                    u(n % 5),
+                    list(0, 1, &byte),
+                ]),
+            )
+        }
         "v_match" => (
             Value::Str(s.into()),
             Value::Int(IntValue::I64(match s.parse::<i64>() {
@@ -247,6 +274,7 @@ const VIEWS: &[&str] = &[
     "v_hash",
     "v_match",
     "v_try",
+    "v_generic",
 ];
 
 #[test]

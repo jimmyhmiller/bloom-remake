@@ -373,6 +373,7 @@ GenericArgs     = "<" [ GenericArg { "," GenericArg } [ "," ] ] ">" ;
 GenericArg      = IDENT "=" Type | INT_LIT | Type ;
 Type            = 'unsafe' Type                                       (* LANG-136: DomPair only *)
                 | "(" [ Type { "," Type } [ "," ] ] ")"                (* tuple; () is unit *)
+                | "fn" "(" [ Type { "," Type } [ "," ] ] ")" "->" Type (* a function parameter's type, §16.1 *)
                 | SimplePath [ GenericArgs ] ;
 
 (* ======================================================================== functions *)
@@ -2506,6 +2507,27 @@ A `?` must be evaluated whenever its `let` (or the result) is: under a branch (`
 Lowering: the frontend rewrites each `?` into a `match` on its operand, in evaluation order, before name
 resolution; nothing reaches the IR.
 
+**Generic functions and function parameters.** A function may take type parameters, and parameters of a function
+type `fn(A, B) -> R` (EXTENSIONS 2.2):
+
+```blossom
+fn read_list<T>(c: Cur, item: fn(Cur) -> Option<(T, Cur)>) -> Option<(Vec<T>, Cur)> { … }
+view items(x) = frame(b), let Some(x) = read_list(cur(b), read_item);
+```
+
+The argument for a function parameter is a function *named* at the call: a declared function with fixed types, or
+the caller's own function parameter passed on. A function parameter is only called or passed on, never stored,
+returned or captured as a value; a function type appears only as a parameter's type; a closure or a generic
+function cannot be passed (all BLS0219). A type parameter may occur inside tuples, `Option`, `Vec`, `Set` and `Map`
+in the signature, and has no bounds (every type is `Eq`, `Hash` and ordered); the body's own annotations cannot name
+one. Each call is checked with its type parameters inferred there, from the arguments, the function arguments'
+signatures and the context, like any rule variable; one the call does not determine is BLS0300, and so is a body
+that does not type-check at the types a call gives it. A generic function that no call reaches is name-resolved but
+not type-checked. Recursion through generic calls is BLS0213, as for any function. Lowering: monomorphization — each
+call is an instance, a copy of the body with the named functions substituted, and instances with the same type
+arguments and function arguments are one IR function, named `read_list<Item, read_item>`; the IR has no generics
+and no function values.
+
 ### 16.2 Host functions and table functions (LANG-181, LANG-183)
 
 ```blossom
@@ -2836,6 +2858,7 @@ never truncated or defaulted).
 | BLS0216 | E | an `extern fn` that names no host function of the standard library, or declares a different signature (§16.2) |
 | BLS0217 | E | an evaluation deeper than the bound the evaluators' stacks are sized for (§16.1) |
 | BLS0218 | E | `?` where it cannot return early: outside a function returning `Option`, under a branch, the right of `&&`/`||`, a nested block or a closure (§16.1) |
+| BLS0219 | E | a function type outside a function's parameter list, a function parameter neither called nor passed on, or a function argument that is not a named function (§16.1) |
 
 **Types (BLS03xx)**
 

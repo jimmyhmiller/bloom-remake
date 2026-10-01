@@ -1061,3 +1061,125 @@ fn a_blob_does_not_leave_its_node_yet() {
     let codes: Vec<&str> = got.iter().map(|d| d.0.as_str()).collect();
     assert_eq!(codes, vec!["BLS0908", "BLS0908"], "{got:?}");
 }
+
+/// The names of the IR functions compiling `src` declares.
+fn fn_names(src: &'static str) -> Vec<String> {
+    let mut sources = SourceDb::new();
+    let nodes = [NodeSpec {
+        name: "n1".to_owned(),
+        role: None,
+    }];
+    match compile("test.bls", &nodes, &mut One(src), &mut sources) {
+        Ok((a, _)) => a.program.get().fns.iter().map(|f| f.name.to_string()).collect(),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+const GENERIC: &str = "fn inc(x: u64) -> u64 { x + 1 }\n\
+     fn dbl(x: u64) -> u64 { x * 2 }\n\
+     fn apply<T>(x: T, f: fn(T) -> T) -> T { f(x) }\n\
+     fn pair<A, B>(a: A, b: B) -> (A, B) { (a, b) }\n";
+
+#[test]
+fn generic_function_instances_merge_in_the_ir() {
+    // Two calls with the same types and function share an instance; another function or type is another one.
+    let src = with_head(Box::leak(
+        format!(
+            "{GENERIC}output out(a: u64, b: u64, c: u64, p: (u64, String), q: (bool, u64));\n\
+             a: on go(k, v) {{ emit out(apply(k, inc), apply(v, inc), apply(k, dbl), pair(k, \"x\"), pair(true, v)); }}\n"
+        )
+        .into_boxed_str(),
+    ));
+    let mut names = fn_names(src);
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "apply<u64, dbl>",
+            "apply<u64, inc>",
+            "dbl",
+            "inc",
+            "pair<bool, u64>",
+            "pair<u64, String>"
+        ]
+    );
+}
+
+#[test]
+fn misused_function_parameters_and_types_are_bls0219() {
+    for (fns, call) in [
+        // A function parameter used as a value, a function type outside a parameter list, a closure or a
+        // generic function passed for a function parameter.
+        ("fn f(x: u64, g: fn(u64) -> u64) -> u64 { let h = g; x }", "f(k, inc)"),
+        ("fn f(x: u64) -> fn(u64) -> u64 { x }", "0"),
+        ("fn f(x: u64, g: fn(u64) -> u64) -> u64 { g(x) }", "f(k, |y| y)"),
+        ("fn f(x: u64, g: fn(u64) -> u64) -> u64 { g(x) }", "f(k, apply)"),
+        ("fn f(x: u64, g: fn(fn(u64) -> u64) -> u64) -> u64 { x }", "0"),
+    ] {
+        let src = with_head(Box::leak(
+            format!(
+                "fn inc(x: u64) -> u64 {{ x + 1 }}\nfn apply<T>(x: T) -> T {{ x }}\n{fns}\n\
+                 output out(k: u64);\na: on go(k, v) {{ emit out({call}); }}\n"
+            )
+            .into_boxed_str(),
+        ));
+        assert!(
+            codes(src).contains(&"BLS0219".to_owned()),
+            "{fns} / {call}: {:?}",
+            codes(src)
+        );
+    }
+}
+
+#[test]
+fn generic_function_errors() {
+    // A type parameter no call determines; a function argument whose signature does not match; recursion through
+    // a generic call; the wrong number of arguments.
+    for (fns, call, code) in [
+        ("fn f<T>(x: u64) -> u64 { x }", "f(k)", "BLS0300"),
+        (
+            "fn s(x: String) -> String { x }\nfn f<T>(x: T, g: fn(T) -> T) -> T { g(x) }",
+            "f(k, s)",
+            "BLS0300",
+        ),
+        // Not called in the body: only its declared type is checked against the function passed.
+        ("fn s(x: String) -> String { x }\nfn f<T>(x: T, g: fn(T) -> T) -> T { x }", "f(k, s)", "BLS0300"),
+        (
+            "fn f<T>(x: T, g: fn(T) -> T) -> T { f(g(x), g) }",
+            "f(k, inc)",
+            "BLS0213",
+        ),
+        (
+            "fn f<T>(x: T) -> T { g(x) }\nfn g(x: u64) -> u64 { f(x) }",
+            "g(k)",
+            "BLS0213",
+        ),
+        ("fn f<T>(x: T, g: fn(T) -> T) -> T { g(x, x) }", "f(k, inc)", "BLS0301"),
+        ("fn f<T>(x: T, g: fn(T) -> T) -> T { g(x) }", "f(k)", "BLS0301"),
+        ("fn f<T>(x: T) -> T { x + 1 }", "f(\"a\")", "BLS0300"),
+    ] {
+        let src = with_head(Box::leak(
+            format!(
+                "fn inc(x: u64) -> u64 {{ x + 1 }}\n{fns}\n\
+                 output out(k: u64);\na: on go(k, v) {{ emit out({call}); }}\n"
+            )
+            .into_boxed_str(),
+        ));
+        let got = codes(src);
+        assert!(got.contains(&code.to_owned()), "{fns} / {call}: {got:?}");
+    }
+}
+
+#[test]
+fn generic_functions_compile_and_type_parameters_flow_through_collections() {
+    let src = with_head(Box::leak(
+        format!(
+            "{GENERIC}fn firsts<K, V>(m: Vec<(K, V)>, d: K) -> K {{ match m.first() {{ Some(e) => e.0, None => d }} }}\n\
+             fn twice<T>(x: T, f: fn(T) -> T) -> T {{ apply(apply(x, f), f) }}\n\
+             output out(a: u64, b: String);\n\
+             a: on go(k, v) {{ emit out(twice(k, inc), firsts([(\"a\", k)], \"z\")); }}\n"
+        )
+        .into_boxed_str(),
+    ));
+    assert_eq!(codes(src), Vec::<&str>::new());
+}

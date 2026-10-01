@@ -170,7 +170,9 @@ fn mentioned_expr(e: &HExpr, out: &mut BTreeSet<HVarId>) {
                 mentioned_expr(b, out);
             }
         }
-        HExprKind::Call { args, .. } => args.iter().for_each(|x| mentioned_expr(x, out)),
+        HExprKind::Call { args, .. } | HExprKind::CallParam { args, .. } | HExprKind::GenericCall { args, .. } => {
+            args.iter().for_each(|x| mentioned_expr(x, out))
+        }
         HExprKind::Let { pat, value, body, .. } => {
             mentioned_pat(pat, out);
             mentioned_expr(value, out);

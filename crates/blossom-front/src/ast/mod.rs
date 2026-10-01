@@ -132,6 +132,8 @@ pub enum ItemKind {
 #[derive(Clone, Debug)]
 pub struct FnItem {
     pub name: Ident,
+    /// Type parameters (LANGUAGE §16.1): a generic function is instantiated per call.
+    pub generics: Vec<GenericParam>,
     pub params: Vec<(Ident, Type)>,
     pub ret: Type,
     pub body: Expr,
@@ -194,12 +196,20 @@ pub enum Type {
         inner: Box<Type>,
         span: Span,
     },
+    /// `fn(A, B) -> R`: the type of a function parameter, whose argument is a named function (LANGUAGE §16.1).
+    Fn {
+        params: Vec<Type>,
+        ret: Box<Type>,
+        span: Span,
+    },
 }
 
 impl Type {
     pub fn span(&self) -> Span {
         match self {
-            Type::Named { span, .. } | Type::Tuple { span, .. } | Type::Unsafe { span, .. } => *span,
+            Type::Named { span, .. } | Type::Tuple { span, .. } | Type::Unsafe { span, .. } | Type::Fn { span, .. } => {
+                *span
+            }
         }
     }
 }

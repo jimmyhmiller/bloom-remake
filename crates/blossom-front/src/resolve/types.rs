@@ -136,6 +136,7 @@ impl<'t> Resolver<'t, '_> {
             own_items: None,
             broken: Default::default(),
             fns: Default::default(),
+            generic_fns: Default::default(),
         });
         ScopeIdx(self.scopes.len() - 1)
     }
@@ -169,6 +170,14 @@ impl<'t> Resolver<'t, '_> {
                     None
                 }
             },
+            ast::Type::Fn { span, .. } => {
+                self.error(
+                    code!("BLS0219"),
+                    *span,
+                    "a function type is the type of a function's parameter only (LANGUAGE §16.1)",
+                );
+                None
+            }
         }
     }
 
