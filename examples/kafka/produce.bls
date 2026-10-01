@@ -241,8 +241,9 @@ struct ProducerEntry { pid: i64, epoch: i16, recent: Vec<(i32, i32, i64, i64)> }
 const RECENT_BATCHES: u64 = 5;
 
 /// One append's outcome: an error (and message), or where its batches go (`base`, and each placed batch), or, for a
-/// retried batch the partition already holds, the offset it was appended at (`duplicate`).
-struct AppendOutcome { error: i16, message: Option<String>, base: i64, placed: Vec<(i64, i64, i64, Bytes)>, count: i64 }
+/// retried batch the partition already holds, the offsets it was appended at (`base`, and `duplicate_last`, which is
+/// -1 for any other outcome): an `acks=all` answer waits for those to commit, as Kafka's does.
+struct AppendOutcome { error: i16, message: Option<String>, base: i64, placed: Vec<(i64, i64, i64, Bytes)>, count: i64, duplicate_last: i64 }
 
 /// The appends to one partition in one tick, sequenced: each one's outcome, the new log end, and the producer
 /// states that changed.
@@ -263,8 +264,8 @@ fn with_entry(states: Vec<ProducerEntry>, e: ProducerEntry) -> Vec<ProducerEntry
 }
 
 /// What an idempotent batch meets in its producer's state: an error (`refused`), a duplicate of the batch appended
-/// at `duplicate_of`, or neither (append it).
-struct Verdict { refused: Option<(i16, String)>, duplicate_of: Option<i64> }
+/// at `duplicate_of` (its first and last offsets), or neither (append it).
+struct Verdict { refused: Option<(i16, String)>, duplicate_of: Option<(i64, i64)> }
 
 fn append_it() -> Verdict {
     Verdict { refused: None, duplicate_of: None }
@@ -285,7 +286,7 @@ fn producer_check(e: Option<ProducerEntry>, h: BatchHeader) -> Verdict {
         Some(x) => {
             let dup = x.recent.filter(|r| r.0 == h.base_sequence && r.1 == last_seq).first();
             if h.producer_epoch == x.epoch && dup.is_some() {
-                Verdict { refused: None, duplicate_of: dup.map(|r| r.2) }
+                Verdict { refused: None, duplicate_of: dup.map(|r| (r.2, r.3)) }
             } else if h.producer_epoch < x.epoch {
                 refuse(INVALID_PRODUCER_EPOCH, "the producer's epoch is older than the partition's")
             } else if h.producer_epoch != x.epoch {
@@ -326,7 +327,7 @@ fn after_append(e: Option<ProducerEntry>, h: BatchHeader, base: i64, last: i64) 
 
 /// The state of an append while its batches are checked: the batches placed so far, the next offset, the producer
 /// states, and whether a batch was refused or found to be a duplicate (which ends the walk).
-struct Walk { placed: Vec<(i64, i64, i64, Bytes)>, at: i64, states: Vec<ProducerEntry>, refused: Option<(i16, String)>, duplicate_of: Option<i64> }
+struct Walk { placed: Vec<(i64, i64, i64, Bytes)>, at: i64, states: Vec<ProducerEntry>, refused: Option<(i16, String)>, duplicate_of: Option<(i64, i64)> }
 
 fn walk_batch(w: Walk, b: Bytes) -> Walk {
     if w.refused.is_some() || w.duplicate_of.is_some() {
@@ -365,10 +366,13 @@ fn walk_batch(w: Walk, b: Bytes) -> Walk {
 fn sequence_one(batches: Vec<Bytes>, end: i64, states: Vec<ProducerEntry>) -> (AppendOutcome, Vec<ProducerEntry>) {
     let w = batches.fold(Walk { placed: [], at: end, states: states, refused: None, duplicate_of: None }, |acc, b| walk_batch(acc, b));
     match (w.refused, w.duplicate_of) {
-        (Some(x), _) => (AppendOutcome { error: x.0, message: Some(x.1), base: -1i64, placed: [], count: 0i64 }, states),
-        (None, Some(base)) => (AppendOutcome { error: NONE, message: None, base: base, placed: [], count: 0i64 }, states),
+        (Some(x), _) => (AppendOutcome { error: x.0, message: Some(x.1), base: -1i64, placed: [], count: 0i64, duplicate_last: -1i64 }, states),
+        (None, Some(d)) => (AppendOutcome { error: NONE, message: None, base: d.0, placed: [], count: 0i64, duplicate_last: d.1 }, states),
         (None, None) => (
-            AppendOutcome { error: NONE, message: None, base: if w.at == end { -1i64 } else { end }, placed: w.placed, count: w.at - end },
+            AppendOutcome {
+                error: NONE, message: None, base: if w.at == end { -1i64 } else { end }, placed: w.placed, count: w.at - end,
+                duplicate_last: -1i64,
+            },
             w.states,
         ),
     }

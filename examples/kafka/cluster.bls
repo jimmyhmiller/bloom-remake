@@ -302,6 +302,40 @@ at Broker {
     forget_deleted: while mdeleted(tid), rlog(g, i, t, pt, k, pos, data), let (gt, _gp) = g where gt == tid {
         delete rlog(g, i, t, pt, k, pos, data);
     }
+    /// Its Raft state goes too (topic ids are never reused, so the group never comes back).
+    view deleted_group(g) = mdeleted(tid), rterm(g, _), let (gt, _gp) = g where gt == tid;
+    forget_deleted_raft: while deleted_group(g) {
+        if rterm(g, t) {
+            delete rterm(g, t);
+        }
+        if rvote(g, t, v) {
+            delete rvote(g, t, v);
+        }
+        if won(g, t) {
+            delete won(g, t);
+        }
+        if leader_of(g, t, l) {
+            delete leader_of(g, t, l);
+        }
+        if voters(g, t, v) {
+            delete voters(g, t, v);
+        }
+        if deadline(g, at) {
+            delete deadline(g, at);
+        }
+        if commit(g, c) {
+            delete commit(g, c);
+        }
+        if match_idx(g, f, m) {
+            delete match_idx(g, f, m);
+        }
+        if rsent(g, f, m) {
+            delete rsent(g, f, m);
+        }
+        if isr_term(g, t) {
+            delete isr_term(g, t);
+        }
+    }
 
     // ---- commands this broker waits on: sent when first wanted, and every `CMD_RESEND` until applied
 
