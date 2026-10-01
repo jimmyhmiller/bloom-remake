@@ -619,7 +619,12 @@ fn three_brokers_keep_every_acknowledged_record_under_kill_9_and_partitions() {
         }
     }
     cluster.heal();
-    std::thread::sleep(Duration::from_secs(2));
+    // Produce on after the faults until enough was acknowledged to make the checks meaningful (how many fit in the
+    // nemesis's time depends on the machine's load), within a deadline.
+    let (clock, limit) = (Stopwatch::start(), Duration::from_secs(90));
+    while out.lock().unwrap().acked.len() <= 100 && clock.elapsed() < limit {
+        std::thread::sleep(Duration::from_millis(200));
+    }
     stop.store(true, Ordering::SeqCst);
     for p in producers {
         p.join().unwrap();
@@ -627,9 +632,7 @@ fn three_brokers_keep_every_acknowledged_record_under_kill_9_and_partitions() {
     std::thread::sleep(Duration::from_secs(2));
 
     let o = out.lock().unwrap();
-    // (Each acks=all produce waits for every in-sync replica, and a killed or isolated follower stays in sync for
-    // `REPLICA_LAG_MAX`, so the faults slow the producers down.)
-    assert!(o.acked.len() > 40, "only {} produces were acknowledged", o.acked.len());
+    assert!(o.acked.len() > 100, "only {} produces were acknowledged", o.acked.len());
     let sent: BTreeSet<String> = o
         .acked
         .iter()
