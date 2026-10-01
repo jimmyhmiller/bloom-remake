@@ -2,7 +2,9 @@
 //! Shared helpers for the cross-crate tests in `tests/integration/tests/<prefix>_*.rs` (PLAN §4 D4).
 //!
 //! Each WP owns the test files with its prefix (for example `front1_*.rs` for M3.5, `engine1_*.rs` for M6.1).
-//! Cargo discovers them automatically, so adding one needs no manifest edit. There are no shared helpers yet.
+//! Cargo discovers them automatically, so adding one needs no manifest edit.
+
+pub mod raft_safety;
 
 use blossom_artifact::bls::BlsArtifact;
 use blossom_base::RelId;

@@ -13,7 +13,8 @@
 //!
 //! A Produce request is appended once (`produce_started`) and answered as its `acks` ask (D9): `acks=1` in the tick
 //! of the append (its answer leaves after that tick's record, which holds the entry, is durable); `acks=all` once the
-//! high watermark passes every batch it placed; `acks=0` never. An entry the leader no longer holds as it appended it
+//! high watermark passes every batch it placed (or, for an idempotent producer's retried batch the log already
+//! holds, the original); `acks=0` never. An entry the leader no longer holds as it appended it
 //! (a new leader replaced it) fails with NOT_LEADER_OR_FOLLOWER, and so does a request whose partition this broker
 //! does not lead.
 
@@ -136,6 +137,14 @@ record_placed: while entry_check(c, i, j, tid, p, o, ch), ch.error == NONE, appe
     placed_at(tid, p, b, idx, epoch), log_start(tid, p, start) where out.error == NONE && out.count > 0i64 {
     upsert placed(c, i, j, tid, p, idx, epoch, b, b + out.count - 1i64, start);
 }
+/// A request's retried batches the partition already held, recorded for an `acks=all` answer: the original's last
+/// offset must commit first (it may be an uncommitted entry of this leader's log), under the leadership that found
+/// it, as Kafka's leader waits for the high watermark to pass a duplicate's original.
+table duplicate(c: Conn, i: u64, j: u64, tid: Bytes, p: i32, epoch: u64, last: i64) key(c, i, j);
+record_duplicate: while entry_check(c, i, j, tid, p, o, ch), ch.error == NONE, append_outcome(tid, p, o, out),
+    led_term(tid, p, e) where out.error == NONE && out.duplicate_last >= 0i64 {
+    upsert duplicate(c, i, j, tid, p, e, out.duplicate_last);
+}
 mark_started: while produce_head(c, i, _, _, _, _, _), not produce_started(c, i) {
     upsert produce_started(c, i);
 }
@@ -166,21 +175,30 @@ record_answer: while entry_answer_now(c, i, j, a) {
     upsert produce_reply(c, i, j, a);
 }
 
-/// A placed entry's state: committed (the high watermark passed it), or lost (the leader no longer holds it as it
-/// appended it, or no longer leads in that epoch). Until one of these, it waits.
-view placed_done(c, i, j) = placed(c, i, j, tid, p, _idx, _e, _b, last, _s), log_end(tid, p, hw) where hw > last;
+/// An entry an `acks=all` answer waits on (placed, or a duplicate of an entry already in the log), and its state:
+/// committed (the high watermark passed it), or lost (the leader no longer holds a placed entry as it appended it,
+/// or no longer leads in that epoch). Until one of these, it waits.
+view waits_on(c, i, j) {
+    placed(c, i, j, _, _, _, _, _, _, _);
+    duplicate(c, i, j, _, _, _, _);
+}
+view placed_done(c, i, j) {
+    placed(c, i, j, tid, p, _idx, _e, _b, last, _s), log_end(tid, p, hw) where hw > last;
+    duplicate(c, i, j, tid, p, _e, last), log_end(tid, p, hw) where hw > last;
+}
 view placed_lost(c, i, j) {
     placed(c, i, j, tid, p, idx, e, _b, _l, _s), not rlog(g: g, idx: idx, term: e, ..), let g = (tid, p);
     placed(c, i, j, tid, p, _idx, e, _b, _l, _s), not led_term(tid, p, e);
+    duplicate(c, i, j, tid, p, e, _l), not led_term(tid, p, e);
 }
-view entry_waiting(c, i, j) = placed(c, i, j, _, _, _, _, _, _, _), not placed_done(c, i, j), not placed_lost(c, i, j);
+view entry_waiting(c, i, j) = waits_on(c, i, j), not placed_done(c, i, j), not placed_lost(c, i, j);
 view placed_waiting(c, i) = entry_waiting(c, i, _);
 
 /// Each entry's final answer: the one decided at the append, but `acks=all` makes a placed entry wait for the high
 /// watermark, and one that is lost fails.
 view final_answer(c, i, j, a) {
-    produce_reply(c, i, j, a), not placed(c, i, j, _, _, _, _, _, _, _);
-    produce_reply(c, i, j, a), placed(c, i, j, _, _, _, _, _, _, _), produce_head(c, i, _, _, _, _, req)
+    produce_reply(c, i, j, a), not waits_on(c, i, j);
+    produce_reply(c, i, j, a), waits_on(c, i, j), produce_head(c, i, _, _, _, _, req)
         where req.acks != -1i16;
     produce_reply(c, i, j, a), placed_done(c, i, j), not placed_lost(c, i, j), produce_head(c, i, _, _, _, _, req)
         where req.acks == -1i16;
@@ -228,6 +246,9 @@ forget_started: while produce_started(c, i), not queued(c, i, _, _) {
 }
 forget_placed: while placed(c, i, j, tid, p, idx, e, b, l, s), not queued(c, i, _, _) {
     delete placed(c, i, j, tid, p, idx, e, b, l, s);
+}
+forget_duplicate: while duplicate(c, i, j, tid, p, e, l), not queued(c, i, _, _) {
+    delete duplicate(c, i, j, tid, p, e, l);
 }
 forget_answer: while produce_reply(c, i, j, a), not queued(c, i, _, _) {
     delete produce_reply(c, i, j, a);
