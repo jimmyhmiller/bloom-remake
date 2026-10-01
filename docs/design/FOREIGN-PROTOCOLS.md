@@ -30,6 +30,7 @@ A stream declaration introduces:
 | `kafka.closed(c: Conn, reason: String)` | event | the peer closed, a read or write failed, or the program closed `c` |
 | `send kafka.write(c: Conn, seq: u64, parts: Vec<Part>)` | channel to the host | bytes to send on `c`; the runtime writes in `seq` order per connection |
 | `send kafka.close(c: Conn)` | channel to the host | close `c` after the writes already sent |
+| `send kafka.pause(c: Conn)`, `send kafka.resume(c: Conn)` | channel to the host | stop reading `c`, and read it again (§1.2, backpressure) |
 | `send upstream.dial(req: u64, addr: String)` | channel to the host | `connect` streams only: open a connection; it is reported as `upstream.opened` or `upstream.failed(req, reason)` |
 
 - `Conn` is a built-in opaque type, like `Session`. It is unique across incarnations: it carries the incarnation, so a
@@ -64,7 +65,12 @@ A stream declaration introduces:
   - all readers stop while `queue_bytes` wait for the engine [64 MiB];
   - the engine takes no stream bytes while the node holds `backlog_bytes` it has not delivered [16 MiB];
   - a connection whose unsent writes (held writes included) pass `write_queue_bytes` is closed, with a counter
-    [64 MiB].
+    [64 MiB];
+  - a program bounds what it holds itself with `pause(c)`: the host stops reading `c`, so the peer's sends wait in
+    its TCP window, until `resume(c)`. The chunks already read (at most `read_ahead_bytes`, and what the engine
+    took this tick) still arrive; a peer's close or a reset is learned only when the connection is read again. A
+    tick that both pauses and resumes a connection reads it. Like writes, pauses and resumes take effect when their
+    tick is released. (Kafka's broker does the same: it mutes a connection while a request of it is in flight.)
   Stream reports reach the engine on their own queue, so stream bytes never hold up peers' messages or clients'
   requests.
 - **Requests through the wrong stream.** A write or close through stream `s` of a connection of another stream is
@@ -245,6 +251,28 @@ hash plus a length (`Value::Blob` already exists).
 For Kafka, a partition log row is `(offset, count, max_timestamp, producer…, batch: Blob)`. Fetch responses are
 composed of encoded headers (`Part::Bytes`) and batch ranges (`Part::Blob`).
 
+### 5a. As built (S7 item 1)
+
+- **Surface.** `Blob::of(b: Bytes) -> Blob`, `blob.len() -> u64`, `blob.read(lo, hi) -> Option<Bytes>` (`None` unless
+  `lo <= hi <= len`), and `Part::Blob(b, lo, hi)` in a stream write. All are pure: a handle is a function of its
+  bytes, and a handle is only ever made from them.
+- **Evaluators.** Both evaluators get the node's blobs through a `BlobSource` (`TickInput::blobs` /
+  `StepInput::blobs`), and report every blob a tick created, with its bytes (`TickOutput::blobs`). A read looks at
+  the tick's new blobs, then the source. A missing blob is a host bug, reported as an internal error.
+- **Node.**
+  - It caches created blobs until a durable row references one. That tick's effects then carry the blob
+    (`TickEffects::blobs`), and the driver makes it durable before the record syncs: `ManualDriver` and the
+    runtime's committer call `BlobStore::put_all` before the WAL append.
+  - When the cache passes its budget (`NodeConfig::blob_cache_bytes`), blobs that no row of the executor's state and
+    no parked output holds are dropped.
+- **Store.** `blossom_store::BlobStore` keeps one file per blob under `<store>/blobs/`, named by hash and length. Each
+  is written to a temporary file, synced, and renamed; the directory is synced once per batch. Reads check the hash.
+  Recovery opens the store, and `Boot::blobs` gives the node the recovered rows' blobs.
+- **Collection.** After a checkpoint is installed, the store deletes every blob outside `Node::blob_roots`: the
+  checkpoint's rows, those of every WAL record after it, the running node's rows, cache and parked output.
+- **Not yet (BLS0908, LANG-028).** A `Blob` in a channel or a host input: its bytes do not leave its node. S8's
+  replication needs this.
+
 ## 6. Storage that follows change (store work, S7)
 
 Two changes to the store.
@@ -255,6 +283,23 @@ Two changes to the store.
   thread.
 - **Deletion at scale.** Retention deletes many rows at once. Deletions must cost in proportion to the rows deleted,
   including the index maintenance in the engine's stores.
+
+### 6a. As built (S7 item 2)
+
+- **Delta-layer checkpoints.** A checkpoint is a full image followed by delta layers. Each layer is the net change
+  since the checkpoint before it, in the WAL's delta encoding (`FileCheckpoints::write_layer`). Recovery decodes
+  the image, applies the layers in order, then replays the WAL after the last layer.
+  - The node accumulates the released deltas since the last checkpoint (`DeltaAcc`). A row inserted then deleted
+    leaves no trace.
+  - A checkpoint is a layer when that change is known and the chain has room (`layer_fits`): fewer than
+    `MAX_CHECKPOINT_LAYERS` layers, and layer bytes still under the image's. Otherwise it is a full image. The
+    compaction rule keeps the total checkpoint work proportional to the change, as in a log-structured merge.
+  - After a recovery that replayed WAL records, the change since the installed checkpoint is not known, so the next
+    checkpoint is full.
+  - The runtime encodes a layer on the engine thread, where its cost follows the change. A full image is encoded on
+    the checkpoint thread from a copy of the image's row handles.
+- **Deletion.** The engine already deletes in proportion to the rows deleted, by key and by an ordered range sweep:
+  its stores keep ordered indexes and never rescan. S7 pins this with a test rather than changing it.
 
 ## 7. Crate by crate
 

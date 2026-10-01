@@ -82,6 +82,7 @@ fn builtin_name(p: &Program, f: &BuiltinFn) -> String {
         BuiltinFn::Rand => "$rand".into(),
         BuiltinFn::RandFloat => "$rand_float".into(),
         BuiltinFn::RandRange => "$rand_range".into(),
+        BuiltinFn::Error { .. } => "$error".into(),
         BuiltinFn::Route { role } => format!(
             "$route<{}>",
             p.roles.get(*role).map_or("<?>".into(), |r| r.name.to_string())
@@ -114,7 +115,6 @@ fn builtin_name(p: &Program, f: &BuiltinFn) -> String {
         BuiltinFn::ToString => "$to_string".into(),
         BuiltinFn::Hash64 => "$hash64".into(),
         BuiltinFn::Fingerprint => "$fingerprint".into(),
-        BuiltinFn::Error => "$error".into(),
     }
 }
 fn agg_name(p: &Program, f: &AggFunc) -> String {
@@ -245,6 +245,7 @@ fn expr(p: &Program, r: &Rule, e: &Expr) -> String {
             params.iter().map(|x| var(r, *x)).collect::<Vec<_>>().join(", "),
             expr(p, r, body)
         ),
+        Expr::Typed { ty, expr: e } => format!("({}: {})", expr(p, r, e), type_name(p, *ty)),
     }
 }
 fn pat_as_text(p: &Program, r: &Rule, x: &Pattern) -> String {

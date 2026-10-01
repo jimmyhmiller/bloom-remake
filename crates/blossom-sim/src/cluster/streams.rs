@@ -18,9 +18,13 @@
 //! - A connection's opening is ordered with what follows it: the accepting end gets it before the connecting end's
 //!   bytes and close, and the connecting end learns it opened before the accepting end's bytes and close.
 //! - A request through a stream the connection does not belong to is refused and counted as a violation.
+//! - A program's `pause` stops a node end reading, as the runtime's reader stops: what arrives for it is held, in
+//!   order, and so is a peer's close or a reset behind it (a reader that does not read learns of neither), until its
+//!   `resume` delivers them. A node end's own close, or its node's crash, is not held.
 //!
 //! Every choice is drawn from the simulation's seeded generator, so a run replays exactly.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use blossom_base::internal_error;
@@ -93,9 +97,19 @@ pub(super) enum End {
     Nowhere,
 }
 
+/// What a paused node end has not been given yet.
+#[derive(Debug)]
+enum Held {
+    Bytes(Vec<u8>),
+    Closed(Arc<str>),
+}
+
 #[derive(Debug)]
 pub(super) struct Pipe {
     ends: [End; 2],
+    /// Whether each node end's program paused it, and what arrived for it since, in order.
+    paused: [bool; 2],
+    held: [VecDeque<Held>; 2],
     /// Each node end's writes in `seq` order.
     writers: [SeqWriter; 2],
     /// When the last delivery towards each end is due: the next arrives no earlier.
@@ -117,6 +131,8 @@ impl Pipe {
     fn new(ends: [End; 2], now: i64, dial: Option<(usize, u64)>) -> Pipe {
         Pipe {
             ends,
+            paused: [false, false],
+            held: [VecDeque::new(), VecDeque::new()],
             writers: [SeqWriter::default(), SeqWriter::default()],
             due: [now, now],
             recv: [true, true],
@@ -271,13 +287,16 @@ impl<'p> Cluster<'p> {
             let n = node_id(n).ok()?;
             Some((n, self.listen_stream(n, s)?))
         });
-        let Some((to, s)) = found else {
-            return self.stream_dial_failed(from, stream, req, format!("cannot reach `{addr}`"));
-        };
-        if self.blocked.contains(&(from, to)) || self.blocked.contains(&(to, from)) {
-            return self.stream_dial_failed(from, stream, req, format!("`{addr}` is unreachable (partitioned)"));
-        }
         let restarts = self.nodes.get(from.0 as usize).map_or(0, |s| s.restarts);
+        // A dial that cannot start fails after a delay, as an attempt does: reported at once, a node that dials again
+        // on failure would dial forever at one instant.
+        let (to, s) = match found {
+            Some((to, _)) if self.blocked.contains(&(from, to)) || self.blocked.contains(&(to, from)) => {
+                return self.dial_fails(from, restarts, stream, req, format!("`{addr}` is unreachable (partitioned)"));
+            }
+            Some(x) => x,
+            None => return self.dial_fails(from, restarts, stream, req, format!("cannot reach `{addr}`")),
+        };
         let conn = self.allocate_conn(from)?;
         let p = self.pipes.len();
         self.pipes.push(Pipe::new(
@@ -295,6 +314,37 @@ impl<'p> Cluster<'p> {
         self.node_ends.insert((from, conn), (p, 0));
         self.towards(p, 1, Envelope::PipeConnect { pipe: p });
         Ok(())
+    }
+
+    /// Reports a dial that cannot start failed, after a delay.
+    fn dial_fails(&mut self, node: NodeId, restarts: u64, stream: usize, req: u64, why: String) -> Result<(), SimError> {
+        let delay = self.rng.range(self.cfg.latency.0, self.cfg.latency.1).max(1);
+        self.schedule(
+            delay,
+            Envelope::DialFailed {
+                node,
+                restarts,
+                stream,
+                req,
+                reason: Arc::from(why),
+            },
+        );
+        Ok(())
+    }
+
+    /// A dial failure reported later reaches the node only in the incarnation that dialed.
+    pub(super) fn dial_failed_later(
+        &mut self,
+        node: NodeId,
+        restarts: u64,
+        stream: usize,
+        req: u64,
+        why: &str,
+    ) -> Result<(), SimError> {
+        if !self.end_alive(node, restarts) {
+            return Ok(());
+        }
+        self.stream_dial_failed(node, stream, req, why.to_owned())
     }
 
     fn stream_dial_failed(&mut self, node: NodeId, stream: usize, req: u64, why: String) -> Result<(), SimError> {
@@ -506,6 +556,13 @@ impl<'p> Cluster<'p> {
         {
             return self.reset(p, "partitioned");
         }
+        if *side(&pipe.paused, to) {
+            if let Some(x) = self.pipes.get_mut(p) {
+                side_mut(&mut x.held, to).push_back(Held::Bytes(bytes));
+            }
+            self.run.stream_held += 1;
+            return Ok(());
+        }
         match side(&pipe.ends, to).clone() {
             End::Client(i) => self.client_event(i, StreamEvent::Received(&bytes)),
             End::Node { node, restarts, conn } => {
@@ -537,12 +594,17 @@ impl<'p> Cluster<'p> {
         );
     }
 
-    /// End `to` of pipe `p` learns the connection closed.
+    /// End `to` of pipe `p` learns the connection closed (after what a pause holds, unless its own host closed it).
     pub(super) fn pipe_closed(&mut self, p: usize, to: usize, reason: &str) -> Result<(), SimError> {
         let Some(pipe) = self.pipes.get_mut(p) else {
             return Err(internal_error!("no pipe {p}").into());
         };
         if *side(&pipe.told, to) {
+            return Ok(());
+        }
+        if *side(&pipe.paused, to) && *side(&pipe.recv, to) {
+            side_mut(&mut pipe.held, to).push_back(Held::Closed(Arc::from(reason)));
+            self.run.stream_held += 1;
             return Ok(());
         }
         *side_mut(&mut pipe.told, to) = true;
@@ -576,12 +638,26 @@ impl<'p> Cluster<'p> {
             return Ok(());
         };
         let told = pipe.told;
+        let paused = pipe.paused;
         pipe.told = [true, true];
         pipe.recv = [false, false];
         let (ends, opened, dial) = (pipe.ends.clone(), pipe.opened, pipe.dial);
         self.run.stream_resets += 1;
         for (i, (end, was_told)) in ends.iter().zip(told).enumerate() {
             if was_told {
+                continue;
+            }
+            // A paused reader learns of the reset when it reads again, and the bytes it did not read are gone.
+            if let End::Node { node, restarts, .. } = end
+                && *side(&paused, i)
+                && self.end_alive(*node, *restarts)
+            {
+                if let Some(x) = self.pipes.get_mut(p) {
+                    *side_mut(&mut x.told, i) = false;
+                    let held = side_mut(&mut x.held, i);
+                    held.clear();
+                    held.push_back(Held::Closed(Arc::from(why)));
+                }
                 continue;
             }
             match end {
@@ -600,8 +676,8 @@ impl<'p> Cluster<'p> {
         Ok(())
     }
 
-    /// A node's released tick: its stream writes (in connection and `seq` order), its closes, the connections whose
-    /// `closed` it delivered, then its dials.
+    /// A node's released tick: its stream writes (in connection and `seq` order), its pauses, its resumes, its closes,
+    /// the connections whose `closed` it delivered, then its dials.
     pub(super) fn stream_released(
         &mut self,
         n: NodeId,
@@ -611,15 +687,23 @@ impl<'p> Cluster<'p> {
         if host.is_empty() && retired.is_empty() {
             return Ok(());
         }
-        let streams = match self.nodes.get(n.0 as usize).and_then(|s| s.driver.as_ref()) {
-            Some(d) => d.node.streams().to_vec(),
+        let requests: Vec<HostRequest> = match self.nodes.get(n.0 as usize).and_then(|s| s.driver.as_ref()) {
+            Some(d) => {
+                let blobs = d.node.blobs();
+                host.iter()
+                    .map(|h| host_request(d.node.streams(), h, &blobs))
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| SimError::Internal(internal_error!("node {}: {e}", n.0)))?
+            }
             None => return Ok(()),
         };
         let mut writes = Vec::new();
         let mut closes = Vec::new();
+        let mut pauses = Vec::new();
         let mut dials = Vec::new();
-        for h in host {
-            match host_request(&streams, h).map_err(|e| SimError::Internal(internal_error!("node {}: {e}", n.0)))? {
+        let mut refused = Vec::new();
+        for r in requests {
+            match r {
                 HostRequest::Write {
                     stream,
                     conn,
@@ -627,7 +711,24 @@ impl<'p> Cluster<'p> {
                     bytes,
                 } => writes.push((conn, seq, stream, bytes)),
                 HostRequest::Close { stream, conn } => closes.push((stream, conn)),
+                HostRequest::Pause { stream, conn, paused } => pauses.push((!paused, conn, stream)),
+                HostRequest::Refused { stream, conn, why } => refused.push((stream, conn, why)),
                 HostRequest::Dial { stream, req, addr } => dials.push((stream, req, addr)),
+            }
+        }
+        // A refused write is a located runtime error: the connection closes with it, as for a bad `seq`.
+        for (stream, conn, why) in refused {
+            let Some(&(p, end)) = self.node_ends.get(&(n, conn)) else {
+                continue;
+            };
+            if self.through_its_stream(n, p, end, stream, conn, "write") {
+                self.run.stream_violations += 1;
+                self.run.log.push(format!(
+                    "{}: node {} stream violation: {why}",
+                    self.now - super::EPOCH,
+                    n.0
+                ));
+                self.host_close(p, end, &why);
             }
         }
         writes.sort_by_key(|w| (w.0, w.1));
@@ -665,6 +766,17 @@ impl<'p> Cluster<'p> {
                 }
             }
         }
+        // Pauses before resumes, as the runtime applies them: a tick that asks both reads the connection.
+        pauses.sort();
+        for (resume, conn, stream) in pauses {
+            let Some(&(p, end)) = self.node_ends.get(&(n, conn)) else {
+                continue;
+            };
+            let what = if resume { "resume" } else { "pause" };
+            if self.through_its_stream(n, p, end, stream, conn, what) {
+                self.pipe_pause(p, end, !resume)?;
+            }
+        }
         // A program's close: the other end learns after the bytes sent, and the node end gets its own `closed`.
         for (stream, conn) in closes {
             let Some(&(p, end)) = self.node_ends.get(&(n, conn)) else {
@@ -682,6 +794,27 @@ impl<'p> Cluster<'p> {
         }
         for (stream, req, addr) in dials {
             self.node_dial(n, stream, req, &addr)?;
+        }
+        Ok(())
+    }
+
+    /// Pauses node end `end` of pipe `p`, or resumes it: a resume delivers, in order, what arrived while it was paused.
+    fn pipe_pause(&mut self, p: usize, end: usize, paused: bool) -> Result<(), SimError> {
+        let held: Vec<Held> = match self.pipes.get_mut(p) {
+            Some(x) => {
+                *side_mut(&mut x.paused, end) = paused;
+                if paused {
+                    return Ok(());
+                }
+                side_mut(&mut x.held, end).drain(..).collect()
+            }
+            None => return Ok(()),
+        };
+        for h in held {
+            match h {
+                Held::Bytes(b) => self.pipe_bytes(p, end, b)?,
+                Held::Closed(why) => self.pipe_closed(p, end, &why)?,
+            }
         }
         Ok(())
     }

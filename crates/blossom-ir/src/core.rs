@@ -140,6 +140,10 @@ pub struct StreamDecl {
     pub write: RelId,
     /// `close(c: Conn)`, to the host: close after the writes already sent.
     pub close: RelId,
+    /// `pause(c: Conn)`, to the host: stop reading `c` (the chunks already read still arrive), so the peer's sends
+    /// wait in its TCP window; `resume(c: Conn)` reads it again.
+    pub pause: RelId,
+    pub resume: RelId,
     /// A connect stream's `dial(req: u64, addr: String)`, to the host.
     pub dial: Option<RelId>,
 }
@@ -165,6 +169,8 @@ pub enum HostOp {
     Write,
     Close,
     Dial,
+    Pause,
+    Resume,
 }
 
 /// Program data in the Dedalus core IR.
@@ -561,6 +567,12 @@ pub enum Expr {
         params: Vec<VarId>,
         body: Box<Expr>,
     }, // only as an argument to built-in combinators, fn bodies only
+    /// `expr` at type `ty`: a literal whose value does not decide its type (an empty collection, `None`) carries the
+    /// type its context gave it. Evaluates to `expr`.
+    Typed {
+        ty: TypeId,
+        expr: Box<Expr>,
+    },
 }
 /// FnRef data in the Dedalus core IR.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -577,6 +589,11 @@ pub enum BuiltinFn {
     Rand,
     RandFloat,
     RandRange,                           // PRF_σnode("rand", incarnation, tick, fp(k̄)) (LANG-175)
+    /// `error("message")` (LANGUAGE Appendix B): a located hard error (BLSR010). `ty` is the type the call stands
+    /// in for; the call never returns.
+    Error {
+        ty: TypeId,
+    },
     Route { role: RoleId },              // rendezvous hashing over canonically ordered members (LANG-154)
     Majority { domain: MajorityDomain }, // |s ∩ R| > |R| / 2 (LANGUAGE §11.6); FOL: quorum sort (VER-008)
     ClusterVersionAtLeast(u32),          // threshold over the ClusterVersion event (SEM-092)
@@ -597,7 +614,6 @@ pub enum BuiltinFn {
     ToString,
     Hash64,
     Fingerprint,
-    Error, /* … Appendix B … */
 }
 
 /// The work one evaluation of a pure function may do (LANGUAGE §16.1, BLSR012): closure applications plus the
@@ -626,6 +642,8 @@ pub enum LibFn {
     VecIsEmpty,
     /// `v.reverse()`.
     VecReverse,
+    /// `v.flatten()` on a `Vec<Vec<T>>`: the inner vectors' elements, in order.
+    VecFlatten,
     /// `v.enumerate() -> Vec<(u64, T)>`.
     VecEnumerate,
     /// `v.map(|x| e)`, `v.filter(|x| b)`, `v.filter_map(|x| o)`, `v.all(|x| b)`, `v.any(|x| b)`.
@@ -636,6 +654,14 @@ pub enum LibFn {
     VecAny,
     /// `v.fold(init, |acc, x| e)`: left to right.
     VecFold,
+    /// `v.scan(init, |acc, x| e) -> Vec<A>`: a fold's accumulator after each element, left to right.
+    VecScan,
+    /// `v.to_set() -> Set<T>`: the elements, each once.
+    VecToSet,
+    /// `v.to_map() -> Map<K, V>` on a `Vec<(K, V)>`: each key with the value of its last pair.
+    VecToMap,
+    /// `m.get(k) -> Option<V>`.
+    MapGet,
     /// `o.is_some()`, `o.is_none()`, `o.unwrap_or(d)`.
     OptIsSome,
     OptIsNone,
@@ -653,6 +679,16 @@ pub enum LibFn {
     StrToLowercase,
     /// `s.to_utf8() -> Bytes`.
     StrToUtf8,
+    /// `s.parse_i64() -> Option<i64>`: the decimal integer `s` spells (an optional sign, then digits), `None` for
+    /// anything else or a value outside `i64`.
+    StrParseI64,
+    /// `Duration::from_millis(n: i64) -> Duration` (BLSR004 when it does not fit).
+    DurationFromMillis,
+    /// `d.as_millis() -> i64`: whole milliseconds, truncated toward zero.
+    DurationAsMillis,
+    /// `t.as_millis() -> i64` on an `Instant`: whole milliseconds since the deployment epoch (the Unix epoch in a
+    /// deployment), truncated toward zero.
+    InstantAsMillis,
     /// `b.from_utf8() -> Option<String>`: `None` unless `b` is valid UTF-8.
     BytesFromUtf8,
     /// `b.u8_at(pos)`, `b.i8_at(pos)`, `b.u16_be_at(pos)`, … `b.i64_be_at(pos) -> Option<T>`: the big-endian integer
@@ -676,6 +712,11 @@ pub enum LibFn {
     BytesEmpty,
     /// `Bytes::join(v: Vec<Bytes>)`: the concatenation, in order.
     BytesJoin,
+    /// `Blob::of(b: Bytes) -> Blob`: the handle of `b` (its BLAKE3 hash and length); the evaluator hands the bytes to
+    /// the host with the tick's output (FOREIGN-PROTOCOLS §5).
+    BlobOf,
+    /// `blob.read(lo, hi) -> Option<Bytes>`: bytes `lo..hi` of the blob, `None` unless `lo <= hi <= len`.
+    BlobRead,
 }
 
 /// Construct data in the Dedalus core IR.
@@ -1266,6 +1307,7 @@ impl Expr {
             }
             Self::Let { value, body, .. } => value.time_varying() || body.time_varying(),
             Self::Closure { body, .. } => body.time_varying(),
+            Self::Typed { expr, .. } => expr.time_varying(),
             Self::Term(_) | Self::Param(_) | Self::Scalar(_) => false,
         }
     }

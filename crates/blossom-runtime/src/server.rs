@@ -86,6 +86,8 @@ pub struct Stats {
     pub egress: AtomicU64,
     pub sessions: AtomicU64,
     pub checkpoints: AtomicU64,
+    /// Blobs deleted after checkpoints (no row can reach them).
+    pub blobs_collected: AtomicU64,
     /// Rejected by an ACL (an omission, SEM-090).
     pub rejected_acl: AtomicU64,
     /// Addressed to another node.
@@ -132,14 +134,28 @@ enum Data {
 enum Control {
     Synced(SyncedTick),
     WalFailed(String),
-    CheckpointDone(Result<(), String>),
+    /// A checkpoint was installed; the shape of the chain it ends.
+    CheckpointDone(Result<Option<blossom_store::ChainInfo>, String>),
     /// Data was queued.
     Wake,
     Stop,
 }
 
+/// What the checkpoint thread writes (FOREIGN-PROTOCOLS §6): a delta layer (encoded on the engine thread: its cost
+/// follows the change), or a full image, encoded on the checkpoint thread so the engine only copies row handles.
+enum CheckpointJob {
+    Layer(Vec<u8>),
+    Full(blossom_node::durable::DurableImage),
+}
+
 enum Commit {
-    Append { tick: Tick, now: Instant, payload: Vec<u8> },
+    Append {
+        tick: Tick,
+        now: Instant,
+        payload: Vec<u8>,
+        /// The blobs the record references that are not durable yet: made durable before the record syncs.
+        blobs: Vec<(blossom_value::BlobRef, Arc<[u8]>)>,
+    },
     Truncate(TruncateToken),
 }
 
@@ -325,7 +341,7 @@ impl Server {
         let opened = recovery::open(
             Arc::new(RealFs),
             &StoreSpec {
-                dir,
+                dir: dir.clone(),
                 identity: store_identity(spec, &artifact, &cfg.node)?,
                 mode: cfg.mode,
                 certification: spec.tail_certification,
@@ -335,6 +351,8 @@ impl Server {
             wall_now().map_err(RuntimeError::Config)?,
             nonce,
         )?;
+        // The node's durable blobs (FOREIGN-PROTOCOLS §5), opened by recovery.
+        let blob_store = opened.blobs.clone();
         let mut ncfg = NodeConfig::new(me, role);
         ncfg.halt = artifact.halt;
         ncfg.max_stream_bytes = spec.stream_limits.max_stream_bytes;
@@ -345,6 +363,7 @@ impl Server {
         let node = Node::boot(ncfg, &artifact.program, exec, boot.clone())?;
         let restarts = opened.record.restarts;
         let last_checkpoint_lsn = opened.checkpoint.map_or(0, |c| c.lsn.0);
+        let opened_chain = opened.checkpoints.chain()?;
 
         let peer_listener =
             TcpListener::bind(entry.addr).map_err(|e| RuntimeError::Net(format!("bind {}: {e}", entry.addr)))?;
@@ -410,7 +429,7 @@ impl Server {
             stop: stop.clone(),
         };
         let (commit_tx, commit_rx) = mpsc::channel::<Commit>();
-        let (ckpt_tx, ckpt_rx) = mpsc::channel::<(blossom_store::DurableSnapshot, SyncedTick)>();
+        let (ckpt_tx, ckpt_rx) = mpsc::channel::<(CheckpointJob, SyncedTick)>();
         let id = identity(spec, &artifact);
         let catalog = Arc::new(Catalog::of(program)?);
         let mut threads = Vec::new();
@@ -425,12 +444,14 @@ impl Server {
         } = opened;
         {
             let (tx, stats) = (ctl_tx.clone(), stats.clone());
-            threads.push(spawn("committer", move || committer(wal, commit_rx, tx, stats))?);
+            let blobs = blob_store.clone();
+            threads.push(spawn("committer", move || committer(wal, &blobs, commit_rx, tx, stats))?);
         }
         {
             let (tx, commit) = (ctl_tx.clone(), commit_tx.clone());
+            let (artifact, names) = (artifact.clone(), names.clone());
             threads.push(spawn("checkpoint", move || {
-                checkpointer(checkpoints, ckpt_rx, commit, tx)
+                checkpointer(checkpoints, &artifact, names, ckpt_rx, commit, tx)
             })?);
         }
         // Peer writers: one per other node.
@@ -482,6 +503,8 @@ impl Server {
             let e = Engine {
                 streams: stream_env.clone(),
                 backlog_bytes: spec.stream_limits.backlog_bytes,
+                blob_store: blob_store.clone(),
+                checkpoint_blobs: None,
                 node,
                 artifact: artifact.clone(),
                 schema: DurableSchema::of(program),
@@ -501,6 +524,7 @@ impl Server {
                 checkpoint_bytes: spec.checkpoint_wal_bytes,
                 checkpoint_busy: false,
                 last_checkpoint_lsn,
+                chain: opened_chain,
                 meta,
                 record,
                 _lock: lock,
@@ -510,6 +534,7 @@ impl Server {
             let (data, env) = (data.clone(), stream_env.clone());
             std::thread::Builder::new()
                 .name("engine".into())
+                .stack_size(blossom_ir::depth::EVAL_STACK_BYTES)
                 .spawn(move || {
                     let r = e.run(ctl_rx).map_err(as_fault);
                     // Readers blocked on a full queue give up, and the streams stop taking connections: a halted or
@@ -596,7 +621,13 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> Result<JoinHandle<()>
 }
 
 /// The committer (Invariant B): append everything submitted as one batch, sync once, report.
-fn committer(mut wal: FileWal, rx: Receiver<Commit>, tx: Sender<Control>, stats: Arc<Stats>) {
+fn committer(
+    mut wal: FileWal,
+    blob_store: &blossom_store::BlobStore,
+    rx: Receiver<Commit>,
+    tx: Sender<Control>,
+    stats: Arc<Stats>,
+) {
     let mut batch: u64 = 0;
     let mut truncates: Vec<TruncateToken> = Vec::new();
     while let Ok(first) = rx.recv() {
@@ -607,7 +638,17 @@ fn committer(mut wal: FileWal, rx: Receiver<Commit>, tx: Sender<Control>, stats:
         let mut appended = 0u64;
         for w in work {
             match w {
-                Commit::Append { tick, now, payload } => {
+                Commit::Append {
+                    tick,
+                    now,
+                    payload,
+                    blobs,
+                } => {
+                    // Its blobs are durable before the record can sync.
+                    if let Err(e) = blob_store.put_all(&blobs) {
+                        let _ = tx.send(Control::WalFailed(format!("the blobs of tick {} failed: {e}", tick.0)));
+                        return;
+                    }
                     if appended == 0 {
                         batch = batch.saturating_add(1);
                     }
@@ -658,17 +699,28 @@ fn committer(mut wal: FileWal, rx: Receiver<Commit>, tx: Sender<Control>, stats:
 /// The checkpoint thread: write, install, remove the older checkpoints, hand the truncation token to the committer.
 fn checkpointer(
     mut ckpt: FileCheckpoints,
-    rx: Receiver<(blossom_store::DurableSnapshot, SyncedTick)>,
+    artifact: &BlsArtifact,
+    names: Arc<[Arc<str>]>,
+    rx: Receiver<(CheckpointJob, SyncedTick)>,
     commit: Sender<Commit>,
     tx: Sender<Control>,
 ) {
-    while let Ok((snap, covers)) = rx.recv() {
-        let result = ckpt
-            .write(snap, covers)
-            .and_then(|id| ckpt.install(id))
-            .and_then(|token| ckpt.prune().map(|_| token))
-            .map_err(|e| e.to_string())
-            .and_then(|token| commit.send(Commit::Truncate(token)).map_err(|e| e.to_string()));
+    let program = artifact.program.get();
+    let schema = DurableSchema::of(program);
+    let codec = DurableCodec::new(program, &schema, names);
+    while let Ok((job, covers)) = rx.recv() {
+        let written = match job {
+            CheckpointJob::Layer(delta) => ckpt.write_layer(&delta, covers).map_err(|e| e.to_string()),
+            CheckpointJob::Full(image) => codec
+                .encode_image(&image)
+                .map_err(|e| e.to_string())
+                .and_then(|snap| ckpt.write(snap, covers).map_err(|e| e.to_string())),
+        };
+        let result = written
+            .and_then(|id| ckpt.install(id).map_err(|e| e.to_string()))
+            .and_then(|token| ckpt.prune().map(|_| token).map_err(|e| e.to_string()))
+            .and_then(|token| commit.send(Commit::Truncate(token)).map_err(|e| e.to_string()))
+            .and_then(|()| ckpt.chain().map_err(|e| e.to_string()));
         if tx.send(Control::CheckpointDone(result)).is_err() {
             return;
         }
@@ -939,6 +991,9 @@ fn session(stream: TcpStream, ctx: &Accept) -> Result<(), RuntimeError> {
 
 struct Engine {
     node: Node<Box<dyn Executor>>,
+    blob_store: Arc<blossom_store::BlobStore>,
+    /// The checkpoint in progress: its tick and the blobs its rows hold.
+    checkpoint_blobs: Option<(Tick, std::collections::BTreeSet<blossom_value::BlobRef>)>,
     streams: StreamEnv,
     /// The undelivered stream bytes past which the engine takes no more stream reports.
     backlog_bytes: u64,
@@ -957,7 +1012,9 @@ struct Engine {
     /// The most messages the node's inbox holds before the engine stops taking data.
     inbox_cap: usize,
     commit: Sender<Commit>,
-    checkpoint: Sender<(blossom_store::DurableSnapshot, SyncedTick)>,
+    checkpoint: Sender<(CheckpointJob, SyncedTick)>,
+    /// The shape of the installed checkpoint chain (`None` without one), from the last checkpoint.
+    chain: Option<blossom_store::ChainInfo>,
     checkpoint_bytes: u64,
     checkpoint_busy: bool,
     last_checkpoint_lsn: u64,
@@ -1020,7 +1077,7 @@ impl Engine {
                     self.record.reserved_tick = r.ticks.0;
                     self.record.last_now = self.record.last_now.max(r.now.0);
                     self.meta.write(&self.record)?;
-                    let released = self.node.reserved(r);
+                    let released = self.node.reserved(r)?;
                     self.dispatch(released, &codec)?;
                 }
                 match fx.wal {
@@ -1031,11 +1088,12 @@ impl Engine {
                                 tick: fx.tick,
                                 now: fx.now,
                                 payload,
+                                blobs: fx.blobs,
                             })
                             .map_err(|_| RuntimeError::Fault("the committer stopped".into()))?;
                     }
                     None => {
-                        let released = self.node.release_ready();
+                        let released = self.node.release_ready()?;
                         self.dispatch(released, &codec)?;
                     }
                 }
@@ -1142,15 +1200,22 @@ impl Engine {
     ) -> Result<Option<Stopped>, RuntimeError> {
         match m {
             Control::Synced(t) => {
-                let released = self.node.wal_synced(Tick(t.tick()));
+                let released = self.node.wal_synced(Tick(t.tick()))?;
                 self.dispatch(released, codec)?;
                 self.maybe_checkpoint(t, durable)?;
             }
             Control::WalFailed(e) => return Err(RuntimeError::Fault(e)),
             Control::CheckpointDone(r) => {
                 self.checkpoint_busy = false;
-                r.map_err(|e| RuntimeError::Fault(format!("checkpoint failed: {e}")))?;
+                self.chain = r.map_err(|e| RuntimeError::Fault(format!("checkpoint failed: {e}")))?;
                 bump(&self.stats.checkpoints, 1);
+                // The installed checkpoint is where recovery starts now: the blobs no recovery and no running rule
+                // can reach go (FOREIGN-PROTOCOLS §5).
+                if let Some((tick, outside)) = self.checkpoint_blobs.take() {
+                    let gone = self.node.blob_garbage(tick, &outside);
+                    let deleted = self.blob_store.delete(&gone)?;
+                    bump(&self.stats.blobs_collected, deleted as u64);
+                }
             }
             Control::Wake => {}
             Control::Stop => return Ok(Some(Stopped::Stopped)),
@@ -1246,13 +1311,24 @@ impl Engine {
     }
 
     /// A released tick's requests to the host (FOREIGN-PROTOCOLS §1.2): its writes, in connection and `seq` order,
-    /// then its closes, then the connections whose `closed` event it delivered, then its dials.
+    /// then its pauses, then its resumes, then its closes, then the connections whose `closed` event it delivered,
+    /// then its dials.
     fn dispatch_streams(&mut self, t: &ReleasedTick) -> Result<(), RuntimeError> {
         let mut writes = Vec::new();
         let mut closes = Vec::new();
+        let mut pauses = Vec::new();
         let mut dials = Vec::new();
-        for h in &t.host {
-            match host_request(self.node.streams(), h).map_err(|e| RuntimeError::Fault(e.to_string()))? {
+        let mut refused = Vec::new();
+        let requests: Vec<HostRequest> = {
+            let blobs = self.node.blobs();
+            t.host
+                .iter()
+                .map(|h| host_request(self.node.streams(), h, &blobs))
+                .collect::<Result<_, _>>()
+                .map_err(|e| RuntimeError::Fault(e.to_string()))?
+        };
+        for r in requests {
+            match r {
                 HostRequest::Write {
                     stream,
                     conn,
@@ -1260,12 +1336,22 @@ impl Engine {
                     bytes,
                 } => writes.push((conn, seq, stream, bytes)),
                 HostRequest::Close { stream, conn } => closes.push((stream, conn)),
+                HostRequest::Pause { stream, conn, paused } => pauses.push((!paused, conn, stream)),
+                HostRequest::Refused { stream, conn, why } => refused.push((stream, conn, why)),
                 HostRequest::Dial { stream, req, addr } => dials.push((stream, req, addr)),
             }
+        }
+        for (stream, conn, why) in refused {
+            self.streams.conns.refuse(stream, conn, why);
         }
         writes.sort_by_key(|w| (w.0, w.1));
         for (conn, seq, stream, bytes) in writes {
             self.streams.conns.write(stream, conn, seq, bytes);
+        }
+        // Pauses before resumes: a tick that asks both reads the connection.
+        pauses.sort();
+        for (resume, conn, stream) in pauses {
+            self.streams.conns.pause(stream, conn, !resume);
         }
         for (stream, conn) in closes {
             self.streams.conns.close(stream, conn);
@@ -1288,11 +1374,17 @@ impl Engine {
         if self.node.released_tick() < Some(Tick(t.tick())) {
             return Err(internal_error!("a synced tick is not released").into());
         }
-        let snap = durable.encode_image(self.node.released_image())?;
+        // A delta layer when the change since the installed checkpoint is known and the chain has room; otherwise a
+        // full image.
+        let job = match self.node.take_checkpoint_delta() {
+            Some(d) if blossom_node::durable::layer_fits(self.chain) => CheckpointJob::Layer(durable.encode_delta(&d)?),
+            _ => CheckpointJob::Full(self.node.released_image().clone()),
+        };
+        self.checkpoint_blobs = Some((Tick(t.tick()), self.node.checkpoint_candidates()));
         self.checkpoint_busy = true;
         self.last_checkpoint_lsn = t.lsn().0;
         self.checkpoint
-            .send((snap, t))
+            .send((job, t))
             .map_err(|_| RuntimeError::Fault("the checkpoint thread stopped".into()))
     }
 }

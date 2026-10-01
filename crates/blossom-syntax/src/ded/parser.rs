@@ -16,6 +16,9 @@ use blossom_base::{Diagnostic, Diagnostics, FileId, Span, Symbol, code};
 use super::ast::*;
 use super::lexer::{Token, TokenKind, lex};
 
+/// The most operators one expression chains (LANGUAGE §16.1): an evaluation is at most `MAX_EVAL_DEPTH` (1024) deep.
+const MAX_CHAIN: usize = 1024;
+
 /// Parses one `.ded` file. Every malformed clause is reported and skipped up to its `;`.
 pub fn parse(file: FileId, text: &str) -> (DedFile, Diagnostics) {
     let (tokens, diags) = lex(file, text);
@@ -355,35 +358,53 @@ impl Parser<'_> {
     }
 
     fn expr(&mut self) -> PResult<Expr> {
-        let lhs = self.term()?;
-        let op = match self.kind() {
-            TokenKind::Plus => BinOp::Add,
-            TokenKind::Minus => BinOp::Sub,
-            TokenKind::Star => BinOp::Mul,
-            TokenKind::Slash => BinOp::Div,
-            TokenKind::Lt => BinOp::Lt,
-            TokenKind::Gt => BinOp::Gt,
-            TokenKind::Le => BinOp::Le,
-            TokenKind::Ge => BinOp::Ge,
-            TokenKind::EqEq => BinOp::Eq,
-            TokenKind::Ne => BinOp::Ne,
-            _ => return Ok(Expr::Term(lhs)),
+        // Molly's `a op b op c` is `a op (b op c)`. The chain is read in a loop and nested from its end, and it is
+        // no longer than the evaluation bound: every later phase walks it recursively (LANGUAGE §16.1).
+        let mut terms = vec![self.term()?];
+        let mut ops = Vec::new();
+        loop {
+            let op = match self.kind() {
+                TokenKind::Plus => BinOp::Add,
+                TokenKind::Minus => BinOp::Sub,
+                TokenKind::Star => BinOp::Mul,
+                TokenKind::Slash => BinOp::Div,
+                TokenKind::Lt => BinOp::Lt,
+                TokenKind::Gt => BinOp::Gt,
+                TokenKind::Le => BinOp::Le,
+                TokenKind::Ge => BinOp::Ge,
+                TokenKind::EqEq => BinOp::Eq,
+                TokenKind::Ne => BinOp::Ne,
+                _ => break,
+            };
+            if ops.len() >= MAX_CHAIN {
+                return Err(Self::error(
+                    self.token(0).span,
+                    format!("an expression chains more than {MAX_CHAIN} operators: split it"),
+                ));
+            }
+            self.bump();
+            ops.push(op);
+            terms.push(self.term()?);
+        }
+        if !ops.is_empty()
+            && let Some(Term::Wild(span)) = terms.iter().find(|t| matches!(t, Term::Wild(_)))
+        {
+            return Err(Self::error(*span, "`_` cannot appear in an expression"));
+        }
+        let Some(last) = terms.pop() else {
+            return Err(Self::error(self.token(0).span, "expected a term"));
         };
-        self.bump();
-        if let Term::Wild(span) = lhs {
-            return Err(Self::error(span, "`_` cannot appear in an expression"));
+        let mut e = Expr::Term(last);
+        while let (Some(lhs), Some(op)) = (terms.pop(), ops.pop()) {
+            let span = Self::join(lhs.span(), e.span());
+            e = Expr::Binary {
+                lhs,
+                op,
+                rhs: Box::new(e),
+                span,
+            };
         }
-        let rhs = self.expr()?;
-        if let Expr::Term(Term::Wild(span)) = rhs {
-            return Err(Self::error(span, "`_` cannot appear in an expression"));
-        }
-        let span = Self::join(lhs.span(), rhs.span());
-        Ok(Expr::Binary {
-            lhs,
-            op,
-            rhs: Box::new(rhs),
-            span,
-        })
+        Ok(e)
     }
 
     fn term(&mut self) -> PResult<Term> {

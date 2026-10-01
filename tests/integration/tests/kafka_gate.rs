@@ -4,6 +4,11 @@
 //! - `kcat -L` (librdkafka) lists the broker.
 //! - `kafka-broker-api-versions.sh` (the Java client of Kafka 4.0) prints the versions it supports.
 //! - franz-go (a Go client) reads the metadata.
+//! - Slice 7, item 4: `kafka-topics.sh` creates, lists, describes and deletes topics, and `kcat -L` shows them.
+//! - Slice 7, item 8: franz-go (idempotent by default) produces to three partitions and reads them back.
+//! - Slice 7, items 5 and 6: `kcat -P` produces and `kcat -C` reads it back; the Java console producer (idempotent
+//!   by default) produces, the Java console consumer reads each partition from the earliest offset, and
+//!   `kafka-get-offsets.sh` counts them.
 //!
 //! A test whose tool is not installed is skipped, and says so in its output. The tools are found on `PATH` (`kcat`,
 //! `go`), under `$KAFKA_HOME/bin`, or in the repository's `.tools/kafka_*/bin` (see the notes for how to get them).
@@ -217,5 +222,210 @@ fn franz_go_reads_the_metadata() {
     );
     assert!(stdout.contains(&format!("broker 1 at 127.0.0.1:{port}")), "{stdout}");
     assert!(stdout.contains("0 topics"), "{stdout}");
+    server.stop().unwrap();
+}
+
+/// Runs a Kafka tool against the broker and returns its standard output, failing the test if it fails.
+#[cfg(test)]
+fn kafka_tool(bin: &Path, tool: &str, port: u16, args: &[&str]) -> String {
+    let out = Command::new(bin.join(tool))
+        .args(["--bootstrap-server", &format!("127.0.0.1:{port}")])
+        .args(args)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{tool} {args:?} failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    stdout
+}
+
+#[test]
+fn kafka_topics_creates_describes_and_deletes_topics() {
+    let Some(bin) = kafka_bin() else {
+        skipped("no Kafka distribution (set KAFKA_HOME, or unpack one into .tools/)");
+        return;
+    };
+    let (server, port) = start_broker();
+    let created = kafka_tool(
+        &bin,
+        "kafka-topics.sh",
+        port,
+        &["--create", "--topic", "orders", "--partitions", "3", "--config", "retention.ms=60000"],
+    );
+    assert!(created.contains("Created topic orders."), "{created}");
+    kafka_tool(&bin, "kafka-topics.sh", port, &["--create", "--topic", "audit"]);
+    // A second creation is refused, as Kafka refuses it.
+    let again = Command::new(bin.join("kafka-topics.sh"))
+        .args(["--bootstrap-server", &format!("127.0.0.1:{port}"), "--create", "--topic", "orders"])
+        .output()
+        .unwrap();
+    let text = format!("{}{}", String::from_utf8_lossy(&again.stdout), String::from_utf8_lossy(&again.stderr));
+    assert!(text.contains("already exists"), "{text}");
+    let listed = kafka_tool(&bin, "kafka-topics.sh", port, &["--list"]);
+    assert_eq!(listed.lines().collect::<Vec<_>>(), ["audit", "orders"], "{listed}");
+    let described = kafka_tool(&bin, "kafka-topics.sh", port, &["--describe", "--topic", "orders"]);
+    assert!(described.contains("Topic: orders"), "{described}");
+    assert!(described.contains("PartitionCount: 3"), "{described}");
+    assert!(described.contains("ReplicationFactor: 1"), "{described}");
+    assert!(described.contains("Configs: retention.ms=60000"), "{described}");
+    for p in 0..3 {
+        assert!(
+            described.contains(&format!("Partition: {p}\tLeader: 1\tReplicas: 1\tIsr: 1")),
+            "{described}"
+        );
+    }
+    let configs = kafka_tool(
+        &bin,
+        "kafka-configs.sh",
+        port,
+        &["--describe", "--entity-type", "topics", "--entity-name", "orders"],
+    );
+    assert!(configs.contains("retention.ms=60000"), "{configs}");
+    if let Some(kcat) = on_path("kcat") {
+        let out = Command::new(kcat)
+            .args(["-L", "-b", &format!("127.0.0.1:{port}"), "-m", "10"])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("2 topics:"), "{stdout}");
+        assert!(stdout.contains("topic \"orders\" with 3 partitions:"), "{stdout}");
+        assert!(stdout.contains("topic \"audit\" with 1 partitions:"), "{stdout}");
+    }
+    kafka_tool(&bin, "kafka-topics.sh", port, &["--delete", "--topic", "orders"]);
+    let listed = kafka_tool(&bin, "kafka-topics.sh", port, &["--list"]);
+    assert_eq!(listed.lines().collect::<Vec<_>>(), ["audit"], "{listed}");
+    server.stop().unwrap();
+}
+
+/// Runs `cmd` with `lines` on its standard input and returns its standard output, failing the test if it fails.
+#[cfg(test)]
+fn with_input(cmd: &mut Command, lines: &[String]) -> String {
+    use std::io::Write;
+    let mut child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        for l in lines {
+            writeln!(stdin, "{l}").unwrap();
+        }
+    }
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{cmd:?} failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    stdout
+}
+
+#[test]
+fn kcat_produces_and_consumes() {
+    let Some(kcat) = on_path("kcat") else {
+        skipped("kcat is not installed (brew install kcat)");
+        return;
+    };
+    let (server, port) = start_broker();
+    let broker = format!("127.0.0.1:{port}");
+    let messages: Vec<String> = (0..50).map(|i| format!("message {i}")).collect();
+    // The topic is created by the producer's Metadata request (auto-creation).
+    with_input(
+        Command::new(&kcat).args(["-P", "-b", &broker, "-t", "events", "-p", "0", "-X", "topic.request.required.acks=-1"]),
+        &messages,
+    );
+    let out = Command::new(&kcat)
+        .args(["-C", "-b", &broker, "-t", "events", "-p", "0", "-o", "beginning", "-e", "-q"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "kcat -C failed:\n{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(stdout.lines().collect::<Vec<_>>(), messages.iter().map(String::as_str).collect::<Vec<_>>());
+    // Reading from an offset inside the log.
+    let out = Command::new(&kcat)
+        .args(["-C", "-b", &broker, "-t", "events", "-p", "0", "-o", "45", "-e", "-q"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.lines().collect::<Vec<_>>(), messages[45..].iter().map(String::as_str).collect::<Vec<_>>());
+    server.stop().unwrap();
+}
+
+#[test]
+fn the_java_console_tools_produce_and_consume() {
+    let Some(bin) = kafka_bin() else {
+        skipped("no Kafka distribution (set KAFKA_HOME, or unpack one into .tools/)");
+        return;
+    };
+    let (server, port) = start_broker();
+    let broker = format!("127.0.0.1:{port}");
+    kafka_tool(&bin, "kafka-topics.sh", port, &["--create", "--topic", "orders", "--partitions", "2"]);
+    let messages: Vec<String> = (0..20).map(|i| format!("order {i}")).collect();
+    // The console producer is idempotent by default (InitProducerId, sequence numbers).
+    let out = with_input(
+        Command::new(bin.join("kafka-console-producer.sh")).args(["--bootstrap-server", &broker, "--topic", "orders"]),
+        &messages,
+    );
+    assert!(!out.contains("ERROR"), "{out}");
+    let offsets = kafka_tool(&bin, "kafka-get-offsets.sh", port, &["--topic", "orders"]);
+    let total: i64 = offsets
+        .lines()
+        .map(|l| l.rsplit(':').next().unwrap().trim().parse::<i64>().unwrap())
+        .sum();
+    assert_eq!(total, 20, "{offsets}");
+    // Each partition read back from the earliest offset: together, every message once.
+    let mut read = Vec::new();
+    for p in ["0", "1"] {
+        let out = Command::new(bin.join("kafka-console-consumer.sh"))
+            .args([
+                "--bootstrap-server",
+                &broker,
+                "--topic",
+                "orders",
+                "--partition",
+                p,
+                "--offset",
+                "earliest",
+                "--timeout-ms",
+                "5000",
+            ])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        read.extend(stdout.lines().map(str::to_owned));
+    }
+    read.sort();
+    let mut want = messages.clone();
+    want.sort();
+    assert_eq!(read, want);
+    server.stop().unwrap();
+}
+
+#[test]
+fn franz_go_produces_and_consumes() {
+    let Some(go) = on_path("go") else {
+        skipped("Go is not installed");
+        return;
+    };
+    let (server, port) = start_broker();
+    let dir = repo().join("tests/integration/fixtures/kafka/franz");
+    let out = Command::new(go)
+        .args(["run", ".", "produce-consume", &format!("127.0.0.1:{port}")])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "franz-go failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("ok 300 records"), "{stdout}");
     server.stop().unwrap();
 }

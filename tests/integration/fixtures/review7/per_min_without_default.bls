@@ -1,0 +1,6 @@
+//! S7 review: a `per` view with an aggregate that has no identity and no `default` reached lowering as an internal
+//! error; it is the user's (BLS0511).
+program per_min_without_default version 1;
+table item(i: u64);
+table bid(i: u64, b: u64);
+view best(i, p = min!(b), all = collect!(b)) = per item(i), bid(i, b);

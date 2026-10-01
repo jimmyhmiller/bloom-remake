@@ -90,6 +90,8 @@ pub struct Engine {
     unsettled: BTreeSet<StoreKey>,
     /// Rows the atom probes returned since the engine was created: the join work, measured without a clock.
     examined: u64,
+    /// The blobs the current tick created (`Blob::of`), with their bytes.
+    new_blobs: std::cell::RefCell<BTreeMap<blossom_value::BlobRef, Arc<[u8]>>>,
 }
 
 fn kinds(p: &Program) -> Vec<Option<Kind>> {
@@ -138,7 +140,10 @@ fn check_supported(p: &Program) -> Result<(), EvalError> {
         }
         for a in &rule.head.args {
             if let HeadArg::Agg(agg) = a {
-                let ok = matches!(agg.func, AggFunc::Count | AggFunc::Sum | AggFunc::Min | AggFunc::Max)
+                let ok = matches!(
+                    agg.func,
+                    AggFunc::Count | AggFunc::Sum | AggFunc::Min | AggFunc::Max | AggFunc::CollectVec
+                )
                     && agg.order.is_none()
                     && (!agg.args.is_empty() || matches!(agg.func, AggFunc::Count));
                 if !ok {
@@ -171,6 +176,34 @@ fn check_supported(p: &Program) -> Result<(), EvalError> {
         }
     }
     Ok(())
+}
+
+/// Whether a value of type `ty` can hold a blob (a lattice is assumed to, as its elements are not traced here).
+fn holds_blobs(p: &Program, ty: blossom_base::TypeId, depth: u32) -> bool {
+    use blossom_value::TypeDef as D;
+    // Types are acyclic; the depth guards a malformed table.
+    if depth > 64 {
+        return true;
+    }
+    match p.types.get(ty) {
+        Some(D::Blob | D::Lattice(_)) | None => true,
+        Some(D::Tuple(xs)) => xs.iter().any(|x| holds_blobs(p, *x, depth + 1)),
+        Some(D::Struct(s)) => s.fields.iter().any(|f| holds_blobs(p, f.ty, depth + 1)),
+        Some(D::Enum(e)) => e
+            .variants
+            .iter()
+            .any(|v| v.payload.iter().any(|f| holds_blobs(p, f.ty, depth + 1))),
+        Some(D::Vec(x) | D::Set(x) | D::Option(x)) => holds_blobs(p, *x, depth + 1),
+        Some(D::Map(k, v)) => holds_blobs(p, *k, depth + 1) || holds_blobs(p, *v, depth + 1),
+        Some(_) => false,
+    }
+}
+
+/// Whether rows of `rel` can hold blobs.
+fn rel_holds_blobs(p: &Program, rel: RelId) -> bool {
+    p.rels
+        .get(rel)
+        .is_none_or(|r| r.schema.cols.iter().any(|c| holds_blobs(p, c.ty, 0)))
 }
 
 fn cell_spec(p: &Program, kinds: &[Option<Kind>], rel: RelId, extra: usize) -> Result<Option<CellSpec>, EvalError> {
@@ -252,9 +285,10 @@ impl Engine {
         strata_list.retain(|s| !s.aggregates.is_empty() || !s.rules.is_empty());
         let mut stores: BTreeMap<StoreKey, Store> = BTreeMap::new();
         for (id, r) in p.rels.iter_enumerated() {
-            stores.insert(StoreKey::Main(id), Store::new(cell_spec(p, &kinds, id, 0)?));
+            let blobs = rel_holds_blobs(p, id);
+            stores.insert(StoreKey::Main(id), Store::new(cell_spec(p, &kinds, id, 0)?, blobs));
             if matches!(r.class, RelClass::Channel(_)) {
-                stores.insert(StoreKey::Sent(id), Store::new(cell_spec(p, &kinds, id, 1)?));
+                stores.insert(StoreKey::Sent(id), Store::new(cell_spec(p, &kinds, id, 1)?, blobs));
             }
         }
         for id in inductive.iter().chain(&asynchronous) {
@@ -262,7 +296,7 @@ impl Engine {
                 let rel = p.rules.get(*id).map(|r| r.head.rel).ok_or_else(|| internal_error!("rule {id:?}"))?;
                 stores
                     .entry(plan.head)
-                    .or_insert(Store::new(cell_spec(p, &kinds, rel, 0)?));
+                    .or_insert(Store::new(cell_spec(p, &kinds, rel, 0)?, rel_holds_blobs(p, rel)));
             }
         }
         let mut keyed = Vec::new();
@@ -310,6 +344,7 @@ impl Engine {
             poisoned: false,
             unsettled: BTreeSet::new(),
             examined: 0,
+            new_blobs: std::cell::RefCell::new(BTreeMap::new()),
             program,
         };
         engine.build_indexes()?;
@@ -354,7 +389,7 @@ impl Engine {
     /// sees the carried state, the facts and its inputs as new.
     pub fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
         for s in self.stores.values_mut() {
-            *s = Store::new(s.cell.clone());
+            *s = Store::new(s.cell.clone(), s.counts_blobs());
         }
         self.prev.clear();
         self.groups.clear();
@@ -526,6 +561,7 @@ impl Engine {
         self.pending = changes.clone();
         let mut out = StepOutput {
             changes,
+            blobs: self.new_blobs.take(),
             ..StepOutput::default()
         };
         for id in &self.asynchronous {
@@ -599,7 +635,7 @@ impl Engine {
             .unwrap_or_default()
     }
 
-    fn ctx<'a>(&'a self, p: &'a Program, input: &StepInput<'_>) -> Ctx<'a> {
+    fn ctx<'a>(&'a self, p: &'a Program, input: &StepInput<'a>) -> Ctx<'a> {
         Ctx {
             program: p,
             node: self.node,
@@ -608,6 +644,8 @@ impl Engine {
             now: input.now,
             shared: &self.shared,
             fuel: crate::expr::Fuel::default(),
+            blobs: input.blobs,
+            new_blobs: &self.new_blobs,
         }
     }
 
@@ -1091,6 +1129,7 @@ impl Engine {
                 events: input.events,
                 delivered: input.delivered,
                 ingress: input.ingress,
+                blobs: input.blobs,
             },
             &[],
         )?;
@@ -1109,7 +1148,14 @@ impl Engine {
             egress: step.egress,
             host: step.host,
             firings: Vec::new(),
+            blobs: step.blobs,
         })
+    }
+
+    /// Whether a row of any store holds `b`: derived rows keep their blobs across ticks without re-creating them.
+    /// Each store counts its rows' blobs as they change, so this is a lookup per store that can hold blobs.
+    pub fn holds_blob(&self, b: &blossom_value::BlobRef) -> bool {
+        self.stores.values().any(|s| s.holds_blob(b))
     }
 
     /// Rows the atom probes returned since the engine was created: the join work, measured without a clock.
@@ -1201,6 +1247,14 @@ fn fold(p: &Program, rule: &Rule, col: usize, func: &AggFunc, set: &BTreeMap<Vec
                 .map(|t| t.first().cloned().ok_or_else(|| bug("a sum over an empty tuple".into())))
                 .collect::<Result<Vec<_>, _>>()?;
             expr::int_sum(vals.iter())
+        }
+        // The first component of each distinct tuple, in the set's (canonical) order.
+        AggFunc::CollectVec => {
+            let vals = set
+                .keys()
+                .map(|t| t.first().cloned().ok_or_else(|| bug("a collect over an empty tuple".into())))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::Vec(vals.into()))
         }
         other => Err(bug(format!("the aggregate {other:?} passed the support check"))),
     }

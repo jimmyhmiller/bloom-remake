@@ -191,6 +191,7 @@ fn expr_vars(e: &Expr, out: &mut BTreeSet<VarId>) {
             expr_vars(body, &mut local);
             out.extend(local.into_iter().filter(|v| !params.contains(v)));
         }
+        Expr::Typed { expr, .. } => expr_vars(expr, out),
     }
 }
 

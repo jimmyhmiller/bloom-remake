@@ -24,6 +24,20 @@ pub(crate) struct Scope<'a> {
     pub oracle: &'a Oracle,
     /// The step budget of the function evaluation in progress (BLSR012).
     pub fuel: Fuel,
+    /// The bytes of blobs created before this tick.
+    pub blobs: &'a dyn blossom_value::BlobSource,
+    /// The blobs this tick created (`Blob::of`), with their bytes.
+    pub new_blobs: std::cell::RefCell<std::collections::BTreeMap<blossom_value::BlobRef, std::sync::Arc<[u8]>>>,
+}
+
+impl Scope<'_> {
+    /// The bytes of `b`: created this tick, or before it.
+    pub(crate) fn blob(&self, b: &blossom_value::BlobRef) -> Option<std::sync::Arc<[u8]>> {
+        if let Some(x) = self.new_blobs.borrow().get(b) {
+            return Some(x.clone());
+        }
+        self.blobs.get(b)
+    }
 }
 
 /// How many function calls are open, and the steps the outermost one has left (`FN_STEP_BUDGET` at its start).
@@ -205,6 +219,7 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
             let n = match eval(scope, env, a)? {
                 Value::Str(s) => s.len(),
                 Value::Bytes(b) => b.len(),
+                Value::Blob(b) => usize::try_from(b.len).unwrap_or(usize::MAX),
                 Value::Vec(v) => v.len(),
                 Value::Set(s) => s.len(),
                 Value::Map(m) => m.len(),
@@ -234,6 +249,28 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
             f: FnRef::Builtin(BuiltinFn::Size { role }),
             ..
         } => Ok(Value::Int(IntValue::U64(scope.oracle.role_size(*role)))),
+        Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::Error { .. }),
+            args,
+        } => {
+            let [m] = args.as_slice() else {
+                return Err(ExprError::Oracle(internal_error!("`error` takes one message").into()));
+            };
+            match eval(scope, env, m)? {
+                Value::Str(s) => Err(ExprError::Refused(s.to_string())),
+                other => Err(ExprError::Oracle(internal_error!("`error` of {other:?}").into())),
+            }
+        }
+        Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::Rand),
+            args,
+        } => {
+            let mut key = Vec::new();
+            for a in args {
+                key.push(eval(scope, env, a)?);
+            }
+            rand(scope, &key)
+        }
         Expr::Call {
             f: FnRef::Builtin(BuiltinFn::RandRange),
             args,
@@ -371,6 +408,7 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
         Expr::Closure { .. } => Err(ExprError::Oracle(
             internal_error!("a closure evaluated outside a combinator's argument").into(),
         )),
+        Expr::Typed { expr, .. } => eval(scope, env, expr),
     }
 }
 
@@ -764,6 +802,16 @@ pub(crate) fn conflict_code() -> &'static str {
 /// BLSR007's code.
 pub(crate) fn fixpoint_code() -> &'static str {
     code!("BLSR007").as_str()
+}
+
+/// `rand(k…)` (LANGUAGE §15.1): `PRF_σn("rand", fp(k̄), incarnation, tick)`.
+fn rand(scope: &Scope<'_>, key: &[Value]) -> Result<Value, ExprError> {
+    let seed = scope.oracle.node_seed(scope.node).map_err(ExprError::Oracle)?;
+    let fp = blossom_value::fp::fingerprint_row(key)
+        .map_err(|e| ExprError::Oracle(internal_error!("fingerprinting a rand key: {e}").into()))?;
+    let x = blossom_value::prf::prf(&seed, "rand", &[fp], &[scope.incarnation, scope.tick.0])
+        .map_err(|e| ExprError::Oracle(internal_error!("rand: {e}").into()))?;
+    Ok(Value::Int(IntValue::U64(x)))
 }
 
 /// `rand_range(lo, hi, k…)` (LANGUAGE §15.1): `lo + PRF_σn("rand", fp(k̄), incarnation, tick, attempt) mod span`,

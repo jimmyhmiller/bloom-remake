@@ -56,6 +56,9 @@ pub fn parse(file: FileId, text: &str) -> Parse {
         events: Vec::new(),
         errors,
         depth: 0,
+        height: 0,
+        sub: 0,
+        too_high: false,
         no_struct: false,
         fold_element: None,
     };
@@ -87,9 +90,21 @@ struct Parser<'a> {
     events: Vec<Event>,
     errors: Vec<ParseError>,
     depth: usize,
+    /// The height of the expression `expr` or `prefix` completed last: a leaf is 1, a node one more than its
+    /// highest child expression.
+    height: usize,
+    /// The greatest height of the expressions completed since the enclosing expression reset it: what a node's
+    /// nested expressions (arguments, operands, elements) reach.
+    sub: usize,
+    /// Whether an expression of the file has been reported as too high (once is enough to reject it).
+    too_high: bool,
     no_struct: bool,
     fold_element: Option<usize>,
 }
+/// The highest expression the parser builds (LANGUAGE §16.1). Operator and method chains loop in the parser rather
+/// than recurse, so the recursion guard does not bound them; every later phase walks expressions recursively, and a
+/// chain higher than the evaluation bound (`MAX_EVAL_DEPTH`, 1024) could not be evaluated anyway.
+const MAX_EXPR_HEIGHT: usize = 1024;
 impl Parser<'_> {
     fn start(&mut self) -> Marker {
         let n = self.events.len();
@@ -1716,10 +1731,14 @@ impl Parser<'_> {
     }
     fn expr(&mut self, min: u8) -> Completed {
         let m = self.start();
+        let outer = std::mem::replace(&mut self.sub, 0);
         if !self.guard() {
+            self.height = 1;
+            self.sub = outer.max(1);
             return self.complete(m, ERROR);
         }
         let mut lhs = self.prefix(m);
+        let mut h = self.height;
         let mut previous_nonassoc: Option<u8> = None;
         while let Some((left, right, nonassoc, cast)) = self.infix() {
             if left < min {
@@ -1733,30 +1752,60 @@ impl Parser<'_> {
                 );
             }
             previous_nonassoc = if nonassoc { Some(left) } else { None };
-            let node = self.precede(lhs);
+            // Past the height bound, the rest of the chain is parsed without nesting it further (the program is
+            // already rejected).
+            let wrap = !self.higher(h + 1);
+            let node = wrap.then(|| self.precede(lhs));
             self.bump();
             if cast {
                 self.ty();
-                lhs = self.complete(node, CASTEXPR);
             } else {
+                self.sub = 0;
                 self.expr(right);
-                lhs = self.complete(node, BINARYEXPR);
+            }
+            if let Some(node) = node {
+                h = h.max(if cast { 0 } else { self.height }) + 1;
+                lhs = self.complete(node, if cast { CASTEXPR } else { BINARYEXPR });
             }
         }
         self.depth -= 1;
+        self.height = h;
+        self.sub = outer.max(h);
         lhs
     }
+    /// Whether an expression of height `h` is past the bound, reporting the first in the file.
+    fn higher(&mut self, h: usize) -> bool {
+        if h <= MAX_EXPR_HEIGHT {
+            return false;
+        }
+        if !self.too_high {
+            self.too_high = true;
+            self.error(
+                code!("BLS0100"),
+                &format!(
+                    "an expression nested more than {MAX_EXPR_HEIGHT} levels deep (a chain of operators or calls): \
+                     split it"
+                ),
+                &[],
+            );
+        }
+        true
+    }
+    /// A prefix expression; sets `height`.
     fn prefix(&mut self, m: Marker) -> Completed {
         if self.at(NOT_KW) {
             self.bump();
             self.expr(6);
+            self.height += 1;
             return self.complete(m, PREFIXEXPR);
         }
         if self.at(MINUS) || self.at(TILDE) {
             self.bump();
             self.expr(28);
+            self.height += 1;
             return self.complete(m, PREFIXEXPR);
         }
+        self.sub = 0;
         if self.at(PIPE) {
             self.bump();
             while !self.at(PIPE) && !self.at(EOF) {
@@ -1776,10 +1825,17 @@ impl Parser<'_> {
             } else {
                 self.expr(0);
             }
+            self.height = self.sub + 1;
             return self.complete(m, CLOSUREEXPR);
         }
         let mut lhs = self.primary(m);
+        let mut h = self.sub + 1;
         loop {
+            if matches!(self.nth(0), DOT | L_PAREN | L_BRACK) && self.higher(h + 1) {
+                // Past the height bound: the rest of the chain is not parsed as part of this expression.
+                break;
+            }
+            self.sub = 0;
             if self.at(DOT) {
                 let node = self.precede(lhs);
                 self.bump();
@@ -1812,7 +1868,9 @@ impl Parser<'_> {
             } else {
                 break;
             }
+            h = h.max(self.sub) + 1;
         }
+        self.height = h;
         lhs
     }
     fn primary(&mut self, m: Marker) -> Completed {

@@ -235,6 +235,16 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &[Option<Value>], f: LibFn, args: &[Exp
             out.reverse();
             Ok(Value::Vec(out.into()))
         }
+        LibFn::VecFlatten => {
+            let mut out = Vec::new();
+            for inner in vector(0)?.iter() {
+                match inner {
+                    Value::Vec(xs) => out.extend(xs.iter().cloned()),
+                    other => return Err(bug(format!("`flatten` of a vector holding {other:?}"))),
+                }
+            }
+            Ok(Value::Vec(out.into()))
+        }
         LibFn::VecEnumerate => {
             let xs = vector(0)?;
             let mut out = Vec::with_capacity(xs.len());
@@ -302,6 +312,51 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &[Option<Value>], f: LibFn, args: &[Exp
                 None => value(1),
             }
         }
+        LibFn::VecScan => {
+            // As `fold`: the initial value is evaluated at the first element, or after an empty receiver.
+            let c = Closure::of(expr(2)?)?;
+            let mut acc: Option<Value> = None;
+            let mut out = Vec::new();
+            each(cx, env, expr(0)?, |x| {
+                let prev = match acc.take() {
+                    Some(a) => a,
+                    None => value(1)?,
+                };
+                let next = c.call(cx, env, &[prev, x])?;
+                out.push(next.clone());
+                acc = Some(next);
+                Ok(true)
+            })?;
+            if acc.is_none() {
+                value(1)?;
+            }
+            Ok(Value::Vec(out.into()))
+        }
+        LibFn::VecToSet => Ok(Value::Set(Arc::new(vector(0)?.iter().cloned().collect()))),
+        LibFn::VecToMap => {
+            let mut m = std::collections::BTreeMap::new();
+            for pair in vector(0)?.iter() {
+                match pair {
+                    Value::Tuple(kv) if kv.len() == 2 => {
+                        if let (Some(k), Some(v)) = (kv.first(), kv.get(1)) {
+                            m.insert(k.clone(), v.clone());
+                        }
+                    }
+                    other => return Err(bug(format!("`to_map` of a vector holding {other:?}"))),
+                }
+            }
+            Ok(Value::Map(Arc::new(m)))
+        }
+        LibFn::MapGet => match value(0)? {
+            Value::Map(m) => {
+                let k = value(1)?;
+                Ok(match m.get(&k) {
+                    Some(v) => Value::some(v.clone()),
+                    None => Value::none(),
+                })
+            }
+            other => Err(bug(format!("`get` on {other:?}"))),
+        },
         LibFn::OptIsSome => Ok(Value::Bool(optional(value(0)?)?.is_some())),
         LibFn::OptIsNone => Ok(Value::Bool(optional(value(0)?)?.is_none())),
         LibFn::OptUnwrapOr => match optional(value(0)?)? {
@@ -349,6 +404,25 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &[Option<Value>], f: LibFn, args: &[Exp
         LibFn::StrToLowercase => match value(0)? {
             Value::Str(s) => Ok(Value::Str(Arc::from(s.to_lowercase()))),
             other => Err(bug(format!("`to_lowercase` of {other:?}"))),
+        },
+        LibFn::DurationFromMillis => match value(0)? {
+            Value::Int(IntValue::I64(n)) => n
+                .checked_mul(1_000_000)
+                .map(|x| Value::Duration(blossom_value::time::Duration(x)))
+                .ok_or_else(|| ExprError::Arithmetic(format!("Duration::from_millis({n}) overflows"))),
+            other => Err(bug(format!("`from_millis` of {other:?}"))),
+        },
+        LibFn::DurationAsMillis => match value(0)? {
+            Value::Duration(d) => Ok(Value::Int(IntValue::I64(d.0 / 1_000_000))),
+            other => Err(bug(format!("`as_millis` of {other:?}"))),
+        },
+        LibFn::InstantAsMillis => match value(0)? {
+            Value::Instant(t) => Ok(Value::Int(IntValue::I64(t.0 / 1_000_000))),
+            other => Err(bug(format!("`as_millis` of {other:?}"))),
+        },
+        LibFn::StrParseI64 => match value(0)? {
+            Value::Str(s) => Ok(some_or_none(s.parse::<i64>().ok().map(|n| Value::Int(IntValue::I64(n))))),
+            other => Err(bug(format!("`parse_i64` of {other:?}"))),
         },
         LibFn::StrToUtf8 => match value(0)? {
             Value::Str(s) => Ok(Value::Bytes(Arc::from(s.as_bytes()))),
@@ -414,6 +488,29 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &[Option<Value>], f: LibFn, args: &[Exp
             other => Err(bug(format!("`Bytes::varint` of {other:?}"))),
         },
         LibFn::BytesEmpty => Ok(Value::Bytes(Arc::from(Vec::new()))),
+        LibFn::BlobOf => {
+            let Value::Bytes(b) = value(0)? else {
+                return Err(bug("`Blob::of` of a non-Bytes value".into()));
+            };
+            let r = blossom_value::BlobRef::of(&b);
+            cx.new_blobs.borrow_mut().entry(r).or_insert(b);
+            Ok(Value::Blob(r))
+        }
+        LibFn::BlobRead => {
+            let Value::Blob(r) = value(0)? else {
+                return Err(bug("`read` of a non-Blob value".into()));
+            };
+            let (lo, hi) = (as_u64(value(1)?)?, as_u64(value(2)?)?);
+            // Handles are made only from their bytes: a missing blob is a host bug.
+            let b = cx
+                .blob(&r)
+                .ok_or_else(|| bug(format!("the bytes of blob {} are not available", r.hex())))?;
+            if lo > hi || hi > b.len() as u64 {
+                return Ok(Value::Option(None));
+            }
+            let (lo, hi) = (lo as usize, hi as usize);
+            Ok(some_or_none(b.get(lo..hi).map(|s| Value::Bytes(Arc::from(s)))))
+        }
         LibFn::BytesJoin => {
             let parts = vector(0)?;
             let mut out = Vec::new();
