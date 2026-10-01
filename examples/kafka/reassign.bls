@@ -58,6 +58,18 @@ fn reassign_entries(req: AlterReassignmentsRequest) -> Vec<(u64, String, i32, Op
     flat.enumerate().map(|x| (x.0, (x.1).0, (x.1).1, (x.1).2))
 }
 
+/// The partitions a request names more than once: each of their entries is refused (INVALID_REQUEST), since one
+/// request may move a partition only one way.
+fn reassign_repeated(req: AlterReassignmentsRequest) -> Set<(String, i32)> {
+    let keys = reassign_entries(req).map(|e| (e.1, e.2));
+    keys.filter(|k| keys.filter(|x| x == k).len() > 1).to_set()
+}
+
+/// An entry's verdict at the broker: a repeated partition, else the replicas' (`reassign_replicas_error`).
+fn reassign_entry_error(repeated: Set<(String, i32)>, name: String, part: i32, replicas: Option<Vec<i32>>, brokers: Vec<i32>) -> i16 {
+    if repeated.contains((name, part)) { INVALID_REQUEST } else { reassign_replicas_error(replicas, brokers) }
+}
+
 /// The broker's own verdict on target replicas, before the controller (Kafka's checks of a manual assignment): a
 /// list that is empty, names a broker twice, or names one that does not exist is INVALID_REPLICA_ASSIGNMENT.
 fn reassign_replicas_error(replicas: Option<Vec<i32>>, brokers: Vec<i32>) -> i16 {
@@ -84,6 +96,8 @@ fn reassign_message(error: i16) -> Option<String> {
         Some("no reassignment of the partition is in progress")
     } else if error == REQUEST_TIMED_OUT {
         Some("the controller did not apply the reassignment in time")
+    } else if error == INVALID_REQUEST {
+        Some("the request names the partition more than once")
     } else {
         None
     }

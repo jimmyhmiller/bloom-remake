@@ -237,7 +237,11 @@ fn decode_metadata_response(c: Cur) -> Option<MetadataAnswer> {
 struct DescribeClusterRequest { include_operations: bool, endpoint_type: i8, include_fenced: bool }
 
 const ENDPOINT_BROKERS: i8 = 1;
-const UNSUPPORTED_ENDPOINT_TYPE: i16 = 119;
+const ENDPOINT_CONTROLLERS: i8 = 2;
+/// Asked a broker for controllers (Kafka 4.0's `AuthHelper.computeDescribeClusterResponse`), or for a type that
+/// does not exist.
+const MISMATCHED_ENDPOINT_TYPE: i16 = 114;
+const UNSUPPORTED_ENDPOINT_TYPE: i16 = 115;
 /// The cluster operations a client may perform, as a bit field (Kafka without an authorizer allows every operation
 /// the cluster resource supports: CREATE, ALTER, DESCRIBE, CLUSTER_ACTION, DESCRIBE_CONFIGS, ALTER_CONFIGS and
 /// IDEMPOTENT_WRITE).
@@ -258,8 +262,19 @@ fn decode_describe_cluster(c: Cur, version: i16) -> Option<DescribeClusterReques
 }
 
 /// The answer: this cluster's brokers (none is fenced: brokers are configuration, S8.md D2) and the controller as
-/// Metadata reports it. A broker describes only brokers; asked for controllers (or an unknown type) it answers
-/// UNSUPPORTED_ENDPOINT_TYPE, as a Kafka broker does (controllers answer for themselves on their own listener).
+/// Metadata reports it. A broker describes only brokers: asked for controllers it answers MISMATCHED_ENDPOINT_TYPE
+/// (controllers answer for themselves on their own listener), for an unknown type UNSUPPORTED_ENDPOINT_TYPE, as a
+/// Kafka broker does.
+fn describe_cluster_error(endpoint: i8) -> i16 {
+    if endpoint == ENDPOINT_BROKERS {
+        NONE
+    } else if endpoint == ENDPOINT_CONTROLLERS {
+        MISMATCHED_ENDPOINT_TYPE
+    } else {
+        UNSUPPORTED_ENDPOINT_TYPE
+    }
+}
+
 fn encode_described_broker(b: BrokerInfo, version: i16) -> Bytes {
     Bytes::join([
         Bytes::from_i32_be(b.node_id), enc_compact_string(b.host), Bytes::from_i32_be(b.port),
@@ -272,7 +287,7 @@ fn encode_describe_cluster_response(correlation_id: i32, version: i16, req: Desc
     frame(Bytes::join([
         response_header_v1(correlation_id),
         Bytes::from_i32_be(0i32),
-        Bytes::from_i16_be(if ok { NONE } else { UNSUPPORTED_ENDPOINT_TYPE }),
+        Bytes::from_i16_be(describe_cluster_error(req.endpoint_type)),
         enc_compact_nullable_string(if ok { None } else { Some("this broker describes brokers only") }),
         if version >= 1i16 { Bytes::from_i8(req.endpoint_type) } else { Bytes::empty() },
         enc_compact_string(if ok { cluster_id } else { "" }),

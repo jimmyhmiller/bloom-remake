@@ -108,10 +108,17 @@ view offsets_named(c, name, p, n = count!(j)) = offsets_entry(c, j, name, lp, _r
 view offsets_repeated(c, j) =
     offsets_entry(c, j, name, lp, _req), let p = lp.partition, offsets_named(c, name, p, n) where n > 1u64;
 
-/// The entries that look a partition up: it exists, the epoch is right, and no other entry names it.
+/// A partition whose leader has not committed an entry of its own term yet: its high watermark may still be below
+/// its predecessor's, so ListOffsets answers OFFSET_NOT_AVAILABLE rather than an offset that would go back, as
+/// Kafka's leader does until its high watermark reaches its epoch's start (KIP-207).
+view leader_unsettled(tid, p) = led_term(tid, p, _t), let g = (tid, p), term_first(g, i), commit_of(g, c) where c < i;
+
+/// The entries that look a partition up: it exists, the epoch is right, no other entry names it, and its leader
+/// has settled.
 view offsets_part(c, j, tid, p, t, end, start) =
     offsets_entry(c, j, name, lp, _req), not offsets_repeated(c, j), mtopic(name, tid, parts, _cfg),
     let p = lp.partition, p >= 0i32, p < parts, led(tid, p, epoch), leader_epoch_error(lp.leader_epoch, epoch) == None,
+    not leader_unsettled(tid, p),
     log_end(tid, p, end), log_start(tid, p, start), let t = lp.timestamp;
 
 /// A search by timestamp, as Kafka looks: the first segment whose greatest timestamp reaches it, then that
@@ -140,6 +147,9 @@ view offsets_answer(c, j, a) {
     offsets_entry(c, j, name, lp, _req), not offsets_repeated(c, j), mtopic(name, tid, parts, _cfg), let p = lp.partition,
         led(tid, p, epoch), let Some(err) = leader_epoch_error(lp.leader_epoch, epoch),
         let a = offset_failed(err) where p >= 0i32 && p < parts;
+    offsets_entry(c, j, name, lp, _req), not offsets_repeated(c, j), mtopic(name, tid, parts, _cfg), let p = lp.partition,
+        led(tid, p, epoch), leader_epoch_error(lp.leader_epoch, epoch) == None, leader_unsettled(tid, p),
+        let a = offset_failed(OFFSET_NOT_AVAILABLE) where p >= 0i32 && p < parts;
 }
 
 /// The answers of the entries that look their partition up.

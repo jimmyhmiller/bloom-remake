@@ -9,6 +9,15 @@
 //! commands of every broker, so concurrent requests see one order of creations and deletions; applying a command
 //! decides what depends on the topics then (a name taken, an id gone) the same way on every broker.
 
+/// A broker that has not caught up with the controller (cut off since it restarted) does not keep a client waiting
+/// for ever: after `NOT_CAUGHT_UP_WAIT` it closes the connection, so the client goes to another broker (a Kafka
+/// broker that has not caught up is fenced, and clients do not use it).
+not_caught_up_close: while head(c, i, _seq, key, version, _corr, fr, at), not caught_up()
+    where not pure_request(key, version) && now() >= at + NOT_CAUGHT_UP_WAIT {
+    send kafka.close(c);
+    delete queued(c, i, fr, at);
+}
+
 /// A supported request whose body this broker cannot decode closes the connection.
 undecodable: while head(c, i, _seq, key, version, _corr, fr, at) where not pure_request(key, version) && not stateful_body_ok(key, fr) {
     send kafka.close(c);
@@ -35,7 +44,7 @@ view describe_head(c, i, seq, corr, fr, at, req) =
 view wanted_cmd(tag, cmd) {
     create_cmd_of(_c, _i, tag, cmd);
     delete_cmd_of(_c, _i, tag, cmd);
-    pid_cmd(_c, _i, tag, cmd);
+    pid_cmd(tag, cmd);
     metadata_cmd_of(_c, _i, tag, cmd);
     alter_cmd_of(_c, _i, tag, cmd);
     reassigned_cmd_of(tag, cmd);
@@ -150,8 +159,8 @@ answer_delete_late: while delete_head(c, i, seq, corr, fr, at, req), delete_fina
 /// Each partition as Metadata describes it (S8.md D7).
 /// A partition's replicas as Metadata shows them: during a reassignment, the target's and then those it removes.
 view shown_replicas(tid, p, rs) {
-    massign(tid, p, rs), not mreassign(tid, p, _);
-    massign(tid, p, rs0), mreassign(tid, p, target), let rs = reassign_shown(rs0, target);
+    massign(tid, p, rs), not reassigning_now(tid, p);
+    massign(tid, p, rs0), mreassign(tid, p, target, _h, _s), let rs = reassign_shown(rs0, target);
 }
 /// Each partition's leader as Metadata shows it: the one this broker knows, if it is among the replicas this broker
 /// knows (a leader that a reassignment just removed still has its last announcement here until a new one is
@@ -229,7 +238,8 @@ view alter_head(c, i, seq, version, corr, fr, at, req) =
     head(c, i, seq, key, version, corr, fr, at), caught_up(), key == API_ALTER_PARTITION_REASSIGNMENTS,
     let Some(body) = request_body(fr), let Some(req) = decode_alter_reassignments(body, version);
 view alter_items(c, i, items = collect!(it)) = per alter_head(c, i, _, _, _, _, _, req), broker_ids(ids),
-    e in reassign_entries(req), let it = reassign_item(e.0, e.1, e.2, reassign_replicas_error(e.3, ids), e.3, req.allow_rf_change);
+    let repeated = reassign_repeated(req), e in reassign_entries(req),
+    let it = reassign_item(e.0, e.1, e.2, reassign_entry_error(repeated, e.1, e.2, e.3, ids), e.3, req.allow_rf_change);
 view alter_cmd_of(c, i, tag, cmd) =
     alter_items(c, i, items), my_id(me), let tag = hash64(("reassign", c, i)), let cmd = encode_cmd(reassign_cmd(me, tag, items))
     where items.len() > 0;
@@ -254,7 +264,7 @@ view list_reassign_head(c, i, seq, corr, fr, at, req) =
     head(c, i, seq, key, _version, corr, fr, at), caught_up(), key == API_LIST_PARTITION_REASSIGNMENTS,
     let Some(body) = request_body(fr), let Some(req) = decode_list_reassignments(body);
 view ongoing_for(c, os = collect!(Ongoing { name: n, index: p, replicas: rs, target: t })) =
-    per list_reassign_head(c, _, _, _, _, _, _req), mreassign(tid, p, t), massign(tid, p, rs), mtopic(n, tid, _, _);
+    per list_reassign_head(c, _, _, _, _, _, _req), mreassign(tid, p, t, _h, _s), massign(tid, p, rs), mtopic(n, tid, _, _);
 answer_list_reassign: while list_reassign_head(c, i, seq, corr, fr, at, req), ongoing_for(c, os) {
     send kafka.write(c, seq, [Part::Bytes(encode_list_reassignments_response(corr, req, os))]);
     upsert answering(c, i + 1, seq + 1);

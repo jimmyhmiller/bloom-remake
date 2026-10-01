@@ -104,6 +104,30 @@ fn no_members() -> Vec<i32> {
     []
 }
 
+/// A leader's proposals with any configuration among them checked (see `config_ready`): at most one, proposed when
+/// the leader may, adding or removing exactly one member of `cur`. Anything else is a program error.
+fn checked_configs(xs: Vec<(u8, i64, Blob)>, cur: Vec<i32>, ready: bool) -> Vec<(u8, i64, Blob)> {
+    let configs = xs.filter(|x| x.0 == CONFIG);
+    if configs.is_empty() {
+        xs
+    } else if configs.len() > 1 {
+        error("raft: two configuration changes proposed in one tick")
+    } else if not ready {
+        error("raft: a configuration change proposed before the term's first entry or the last change committed")
+    } else if configs.all(|x| one_member_change(cur, decode_members(log_bytes(x.2)))) {
+        xs
+    } else {
+        error("raft: a configuration change of more than one member")
+    }
+}
+
+/// Whether `proposed` is `cur` with exactly one member added or removed.
+fn one_member_change(cur: Vec<i32>, proposed: Vec<i32>) -> bool {
+    let added = proposed.filter(|x| not cur.contains(x)).len();
+    let removed = cur.filter(|x| not proposed.contains(x)).len();
+    proposed.to_set().len() == proposed.len() && added + removed == 1
+}
+
 /// The bytes of a stored entry (a blob only ever holds its whole bytes).
 fn log_bytes(data: Blob) -> Bytes {
     match data.read(0, data.len()) {
@@ -180,7 +204,7 @@ at Broker {
 
     /// A group gets an election deadline when this broker first knows it is a member (and after a restart). A member
     /// alone in its group needs no one's vote, so its deadline is now.
-    arm: while mine(g), not deadline(g, _), group_size(g, k) {
+    arm: while mine(g), not deadline(g, _), group_size(g, k), not reset_timer(g) {
         if k == 1 {
             upsert deadline(g, now());
         }
@@ -197,7 +221,8 @@ at Broker {
         next rterm(g, 1);
         next rvote(g, 1, p);
     }
-    initial_lead: while mine(g), not rterm(g, _), preferred(g, self), let empty = Blob::of(Bytes::empty()) {
+    initial_lead: while mine(g), not rterm(g, _), preferred(g, self), eff(g, t0), let empty = Blob::of(Bytes::empty())
+        where t0 <= 1 {
         next won(g, 1);
         next leader_of(g, 1, self);
         next rlog(g, 1, 1, 0, NOOP, -1i64, empty);
@@ -209,14 +234,14 @@ at Broker {
 
     // ---- term first: a group's effective term this tick is the largest known
     view heard_term(g, t) {
-        request_vote(g, t, _, _) from c, members(g, c);
+        request_vote(g, t, _, _), not recently_led(g);
         vote(g, t, _);
         entries(g: g, term: t, ..);
         beat(g: g, term: t, ..);
         ack(g, t, _);
     }
     view eff(g, t = max!(x)) {
-        rterm(g, x);
+        rterm(g, x), takes(g);
         heard_term(g, x), takes(g);
         takes(g), let x = 0u64;
     }
@@ -255,8 +280,17 @@ at Broker {
     }
 
     // ---- elections
+    /// A broker that has heard from a leader of its term within the minimum election timeout ignores vote requests
+    /// (§4.2.3; a leader itself does not, since without checking a quorum it cannot know it still leads): a removed member, or one cut off for a while, cannot depose a working leader. Only a
+    /// member votes; a candidate need not be a member in the voter's configuration (a member just added is not yet
+    /// in a lagging voter's).
+    table heard_at(g: Group, at: Instant) key(g) resolve choose_most(at);
+    note_leader: on heard_leader(g) {
+        next heard_at(g, now());
+    }
+    view recently_led(g) = heard_at(g, a) where now() < a + RAFT_ELECTION_MIN;
     view rv_ok(g, c, t) =
-        request_vote(g, t, li, lt) from c, eff(g, t), members(g, c), last_log(g, mi, mt)
+        request_vote(g, t, li, lt) from c, eff(g, t), mine(g), not recently_led(g), last_log(g, mi, mt)
         where lt > mt || (lt == mt && li >= mi);
     view fresh_grant(g, c, t) = rv_ok(g, c, t), not rvote(g, t, _), choose!(c per (g, t));
     view grant(g, c, t) {
@@ -324,7 +358,20 @@ at Broker {
     }
 
     // ---- appending, leader side: this tick's proposals go after the last entry, in their order
-    append: while proposals(g, xs), leader(g, t), last_log(g, li, lt), (k, x) in xs.enumerate() {
+    /// A leader may change its configuration once its term's first entry and its last configuration are committed
+    /// (§4.2; Ongaro's 2015 correction: a configuration of an earlier term not yet known committed must not be built
+    /// on), and by one member at a time. The includer is to propose so (`config_ready`); a proposal otherwise is a
+    /// program error, not a configuration.
+    view term_first(g, i = min!(j)) = leader(g, t), rlog(g: g, idx: j, term: t, ..);
+    view config_pending(g) = latest_config(g, i, _), commit_of(g, c) where i > c;
+    view config_ready(g) = leader(g, _), term_first(g, i), commit_of(g, c), not config_pending(g) where c >= i;
+    view config_ready_flag(g, ready) {
+        config_ready(g), let ready = true;
+        leader(g, _), not config_ready(g), let ready = false;
+    }
+    view checked_proposals(g, xs) =
+        proposals(g, xs0), config_ready_flag(g, ready), member_ids(g, cur), let xs = checked_configs(xs0, cur, ready);
+    append: while checked_proposals(g, xs), leader(g, t), last_log(g, li, lt), (k, x) in xs.enumerate() {
         next rlog(g, li + 1 + k, t, if k == 0 { lt } else { t }, x.0, x.1, x.2);
     }
 
@@ -340,13 +387,20 @@ at Broker {
     /// Where each follower's batches start this tick: after what was last sent to it, for entries appended since (in
     /// the tick after their append), and at every heartbeat after what it last acknowledged (so lost or refused
     /// batches go again).
+    /// A follower that acknowledged a batch short of the log gets the next one at once, so one catching up takes a
+    /// batch per round trip.
     view out_from(g, f, from) {
         leader(g, _), rsent(g, f, from), last_log(g, li, _) where li > from;
         raft_heartbeat, leader(g, _), match_idx(g, f, from);
+        ack(g, t, from) from f, leader(g, t), members(g, f), last_log(g, li, _) where from < li;
     }
-    view out_batch(g, f, from, es = collect!((i, et, k, pos, b))) =
-        per out_from(g, f, from), not behind_snapshot(g, from), rlog(g, i, et, _pt, k, pos, data), let b = log_bytes(data)
+    /// A batch's entries: a range of the log (found by index, not by scanning it), read only for the batch.
+    view out_rows(g, f, from, i, et, k, pos, data) =
+        out_from(g, f, from), not behind_snapshot(g, from), rlog(g, i, et, _pt, k, pos, data)
         where i > from && i <= from + RAFT_BATCH;
+    view out_batch(g, f, from, es = collect!((i, et, k, pos, b))) =
+        per out_from(g, f, from), not behind_snapshot(g, from), out_rows(g, f, from, i, et, k, pos, data),
+        let b = log_bytes(data);
     /// At a heartbeat, a follower that acknowledged less than the snapshot point gets the point.
     send_snapshot: on raft_heartbeat, leader(g, t), match_idx(g, f, m), rsnap(g, s, st, pos, conf) where m < s {
         send snapshot(g, t, s, st, pos, conf) to f;
