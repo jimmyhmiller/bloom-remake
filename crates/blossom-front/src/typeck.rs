@@ -607,14 +607,24 @@ impl Checker<'_> {
     /// known well enough. A side that is unknown takes the other's shape with fresh positions, so the two never share
     /// a `Node` position; `force` settles a flow whose source is still unknown by linking the two, as an equation.
     #[allow(clippy::too_many_arguments)]
-    fn flow_step(&mut self, types: &TypeTable, from: T, to: T, check: bool, relate: bool, span: Span, force: bool) -> bool {
+    fn flow_step(
+        &mut self,
+        types: &TypeTable,
+        from: T,
+        to: T,
+        check: bool,
+        relate: bool,
+        span: Span,
+        force: bool,
+    ) -> bool {
         let (rf, rt) = (self.find(from), self.find(to));
         if rf == rt {
             return true;
         }
         // An integer has no `Node` in it, so a flow of one is an equation (as a literal's type must be decided
         // together with where it goes).
-        if matches!(self.node(rf), Node::Unbound { int: true }) || matches!(self.node(rt), Node::Unbound { int: true }) {
+        if matches!(self.node(rf), Node::Unbound { int: true }) || matches!(self.node(rt), Node::Unbound { int: true })
+        {
             self.unify(types, from, to, span);
             return true;
         }
@@ -656,17 +666,15 @@ impl Checker<'_> {
             }
             (Node::Bound(a), Node::Bound(b)) => {
                 let pairs: Option<Vec<(T, T)>> = match (&a, &b) {
-                    (Shape::Con(x), Shape::Con(y)) => {
-                        match (Role::of(types.get(*x)), Role::of(types.get(*y))) {
-                            (Some(_), Some(_)) => {
-                                if !relate {
-                                    self.role_edges.push((rf, rt, check, span));
-                                }
-                                Some(Vec::new())
+                    (Shape::Con(x), Shape::Con(y)) => match (Role::of(types.get(*x)), Role::of(types.get(*y))) {
+                        (Some(_), Some(_)) => {
+                            if !relate {
+                                self.role_edges.push((rf, rt, check, span));
                             }
-                            _ => (x == y).then(Vec::new),
+                            Some(Vec::new())
                         }
-                    }
+                        _ => (x == y).then(Vec::new),
+                    },
                     (Shape::Tuple(xs), Shape::Tuple(ys)) if xs.len() == ys.len() => {
                         Some(xs.iter().copied().zip(ys.iter().copied()).collect())
                     }
@@ -805,7 +813,11 @@ impl Checker<'_> {
         let mut role: BTreeMap<T, Role> = base
             .iter()
             .map(|(r, b)| {
-                let start = if incoming.contains_key(r) || self.free.contains(r) { Role::Bot } else { *b };
+                let start = if incoming.contains_key(r) || self.free.contains(r) {
+                    Role::Bot
+                } else {
+                    *b
+                };
                 (*r, start)
             })
             .collect();
@@ -1020,7 +1032,11 @@ impl Checker<'_> {
                             let vt = self.var_term(scope, *var);
                             let ct = self.col_term(hir, rel, c);
                             // A view's column holds what its alternatives put there.
-                            let declared = hir.rels.get(rel).and_then(|r| r.cols.get(c)).is_some_and(|c| c.ty.is_some());
+                            let declared = hir
+                                .rels
+                                .get(rel)
+                                .and_then(|r| r.cols.get(c))
+                                .is_some_and(|c| c.ty.is_some());
                             self.flow(vt, ct, declared, v.span);
                         }
                     }
@@ -1058,8 +1074,11 @@ impl Checker<'_> {
                         HViewAggCol::Group(var) => {
                             if !self.apply {
                                 let u = self.var_term(union, *var);
-                                let declared =
-                                    hir.rels.get(rel).and_then(|r| r.cols.get(c)).is_some_and(|c| c.ty.is_some());
+                                let declared = hir
+                                    .rels
+                                    .get(rel)
+                                    .and_then(|r| r.cols.get(c))
+                                    .is_some_and(|c| c.ty.is_some());
                                 self.flow(u, ct, declared, v.span);
                             }
                         }
@@ -1197,7 +1216,11 @@ impl Checker<'_> {
             match a {
                 HHeadArg::Expr(e) => {
                     let t = self.expr(hir, scope, e);
-                    let declared = hir.rels.get(rel).and_then(|r| r.cols.get(c)).is_some_and(|c| c.ty.is_some());
+                    let declared = hir
+                        .rels
+                        .get(rel)
+                        .and_then(|r| r.cols.get(c))
+                        .is_some_and(|c| c.ty.is_some());
                     self.coerce_site(hir, e, t, ct, declared);
                 }
                 HHeadArg::Agg(agg) => self.agg(hir, scope, agg, ct),
@@ -1433,7 +1456,11 @@ impl Checker<'_> {
             if self.apply {
                 continue;
             }
-            let inferred = hir.rels.get(rel).and_then(|r| r.cols.get(c)).is_some_and(|c| c.ty.is_none());
+            let inferred = hir
+                .rels
+                .get(rel)
+                .and_then(|r| r.cols.get(c))
+                .is_some_and(|c| c.ty.is_none());
             match (outer, &*p) {
                 (Some(bound), HPat::Var(v, span)) if !bound.contains(v) => {
                     let opt = self.bound(Shape::Option(ct));
@@ -1872,7 +1899,9 @@ impl Checker<'_> {
                             }
                             self.con(&mut hir.types, TypeDef::Int(IntTy::U64))
                         }
-                        Builtin::RoleSize(_) | Builtin::Rand => self.con(&mut hir.types, TypeDef::Int(IntTy::U64)),
+                        Builtin::RoleSize(_) | Builtin::Rand | Builtin::Hash64 => {
+                            self.con(&mut hir.types, TypeDef::Int(IntTy::U64))
+                        }
                         Builtin::Error => {
                             // The message is a String; the call never returns, so it takes its context's type.
                             if let Some(m) = ats.first() {
@@ -2339,9 +2368,10 @@ impl Checker<'_> {
                 })
                 .collect();
             let duration_sum = sums.into_iter().find(|&(_, l, r)| {
-                [l, r]
-                    .into_iter()
-                    .any(|t| self.leaf(t).is_some_and(|ty| matches!(hir.types.get(ty), Some(TypeDef::Duration))))
+                [l, r].into_iter().any(|t| {
+                    self.leaf(t)
+                        .is_some_and(|ty| matches!(hir.types.get(ty), Some(TypeDef::Duration)))
+                })
             });
             if let Some((i, _, _)) = duration_sum {
                 let d = self.deferred.remove(i);
@@ -3024,7 +3054,10 @@ impl Checker<'_> {
         if args.iter().any(|a| self.closures.contains_key(a)) {
             self.error(
                 span,
-                format!("`{}` does not take a closure: only the collection combinators do", name.as_str()),
+                format!(
+                    "`{}` does not take a closure: only the collection combinators do",
+                    name.as_str()
+                ),
             );
             return true;
         }
@@ -3592,7 +3625,10 @@ impl Checker<'_> {
         // parameter, whose callers pass any value of the declared type.
         for f in &hir.fns {
             for (v, ty) in &f.params {
-                if let Some(slot) = var_types.get_mut(f.scope.index()).and_then(|tys| tys.get_mut(v.index())) {
+                if let Some(slot) = var_types
+                    .get_mut(f.scope.index())
+                    .and_then(|tys| tys.get_mut(v.index()))
+                {
                     *slot = *ty;
                 }
             }

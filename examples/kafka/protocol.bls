@@ -45,6 +45,10 @@ fn read_i64(c: Cur) -> Option<(i64, Cur)> {
     c.buf.i64_be_at(c.pos).map(|v| (v, at(c, c.pos + 8)))
 }
 
+fn read_u64(c: Cur) -> Option<(u64, Cur)> {
+    c.buf.u64_be_at(c.pos).map(|v| (v, at(c, c.pos + 8)))
+}
+
 /// The all-zero UUID, which Kafka uses for "no topic id".
 fn zero_uuid() -> Bytes {
     Bytes::join(range(0, 16).map(|_i| Bytes::from_u8(0u8)))

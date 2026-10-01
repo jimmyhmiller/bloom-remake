@@ -15,6 +15,11 @@ const API_INIT_PRODUCER_ID: i16 = 22;
 
 /// The error code for no error.
 const NONE: i16 = 0;
+/// A partition's leader is not known yet (being elected, or the topic just created).
+const LEADER_NOT_AVAILABLE: i16 = 5;
+/// This broker does not lead the partition: the client refreshes its metadata.
+const NOT_LEADER_OR_FOLLOWER: i16 = 6;
+const REQUEST_TIMED_OUT: i16 = 7;
 
 /// Whether a request of `api_key` at `version` uses the flexible encoding (compact types and tagged fields), which
 /// also puts it in header v2. Only the APIs this broker answers are listed.

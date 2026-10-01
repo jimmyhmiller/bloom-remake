@@ -1,5 +1,7 @@
-//! The Fetch and ListOffsets handlers. Included after `produce_node.bls`: both read the partition logs as the tick
-//! found them, so in the tick's order they come after the writer and before the appends.
+//! The Fetch and ListOffsets handlers. Included after `produce_node.bls`, whose materialization writes each
+//! partition's committed batches (up to its high watermark) into the partition logs; both read those logs as the
+//! tick found them. Only a partition's leader answers for it (Kafka's consumers fetch from the leader); another
+//! replica answers NOT_LEADER_OR_FOLLOWER, and a request naming a leader epoch is checked against the leader's.
 //!
 //! A Fetch reads, per partition, the batch holding its fetch offset and the batches after it (batches tile the log,
 //! so the next one starts one past the last offset of the one before), up to the partition's byte limit; the answer
@@ -11,26 +13,20 @@
 timer fetch_wake every 10ms;
 
 view fetch_head(c, i, seq, corr, fr, at, req) =
-    head(c, i, seq, key, _version, corr, fr, at), key == API_FETCH,
+    head(c, i, seq, key, _version, corr, fr, at), caught_up(), key == API_FETCH,
     let Some(body) = request_body(fr), let Some(req) = decode_fetch(body);
-
-/// A Fetch that names a topic the writer creates or deletes waits for a later tick, as a Produce does.
-view fetch_waits(c) {
-    fetch_head(c, _, _, _, _, _, req), e in fetch_entries(req), creating(_k, t) where t.id == e.1;
-    fetch_head(c, _, _, _, _, _, req), e in fetch_entries(req), deleting(_e, _name, e.1);
-}
 
 /// The partition entries of the Fetch requests read this tick.
 view fetch_entry(c, j, tid, fp) =
-    fetch_head(c, _, _, _, _, _, req), not fetch_waits(c), fetch_session_error(req) == None, e in fetch_entries(req),
+    fetch_head(c, _, _, _, _, _, req), fetch_session_error(req) == None, e in fetch_entries(req),
     let j = e.0, let tid = e.1, let fp = e.2;
 
-view topic_by_id(tid, parts) = topic(_name, tid, parts, _cfg);
+view topic_by_id(tid, parts) = mtopic(_name, tid, parts, _cfg);
 
 /// The entries that read data: a partition that exists, the right leader epoch, and an offset in the log.
 view fetch_part(c, j, tid, p, off, pmax, end, start) =
-    fetch_entry(c, j, tid, fp), topic_by_id(tid, parts), let p = fp.partition, p >= 0i32, p < parts,
-    leader_epoch_error(fp.leader_epoch) == None, log_end(tid, p, end), log_start(tid, p, start),
+    fetch_entry(c, j, tid, fp), topic_by_id(tid, parts), let p = fp.partition, p >= 0i32, p < parts, led(tid, p, epoch),
+    leader_epoch_error(fp.leader_epoch, epoch) == None, log_end(tid, p, end), log_start(tid, p, start),
     let off = fp.fetch_offset, off >= start, off <= end, let pmax = fp.max_bytes as i64;
 
 /// The batch holding each entry's fetch offset: the one starting there, or (after a seek into a batch) the one the
@@ -60,10 +56,13 @@ view fetch_answer(c, j, a, pmax) {
     fetch_entry(c, j, tid, _fp), not topic_by_id(tid, _), let a = fetch_failed(UNKNOWN_TOPIC_ID), let pmax = 0i64;
     fetch_entry(c, j, tid, fp), topic_by_id(tid, parts), let a = fetch_failed(UNKNOWN_TOPIC_OR_PARTITION), let pmax = 0i64
         where fp.partition < 0i32 || fp.partition >= parts;
-    fetch_entry(c, j, tid, fp), topic_by_id(tid, parts), let Some(err) = leader_epoch_error(fp.leader_epoch),
-        let a = fetch_failed(err), let pmax = 0i64 where fp.partition >= 0i32 && fp.partition < parts;
-    fetch_entry(c, j, tid, fp), topic_by_id(tid, parts), leader_epoch_error(fp.leader_epoch) == None,
-        log_end(tid, fp.partition, end), log_start(tid, fp.partition, start),
+    fetch_entry(c, j, tid, fp), topic_by_id(tid, parts), let p = fp.partition, not led(tid, p, _),
+        let a = fetch_failed(NOT_LEADER_OR_FOLLOWER), let pmax = 0i64 where p >= 0i32 && p < parts;
+    fetch_entry(c, j, tid, fp), topic_by_id(tid, parts), let p = fp.partition, led(tid, p, epoch),
+        let Some(err) = leader_epoch_error(fp.leader_epoch, epoch),
+        let a = fetch_failed(err), let pmax = 0i64 where p >= 0i32 && p < parts;
+    fetch_entry(c, j, tid, fp), topic_by_id(tid, parts), let p = fp.partition, led(tid, p, epoch),
+        leader_epoch_error(fp.leader_epoch, epoch) == None, log_end(tid, p, end), log_start(tid, p, start),
         let a = FetchAnswer { error: OFFSET_OUT_OF_RANGE, high_watermark: end, log_start: start, batches: [] }, let pmax = 0i64
         where fp.partition >= 0i32 && fp.partition < parts && (fp.fetch_offset < start || fp.fetch_offset > end);
     fetch_part(c, j, _tid, _p, _off, pmax, end, start), fetch_batches(c, j, bs),
@@ -75,7 +74,7 @@ view fetch_answers(c, xs = collect!((j, a, pmax))) = per fetch_head(c, _, _, _, 
 
 /// A Fetch is answered when a partition failed, when it has `min_bytes`, or when `max_wait_ms` has passed since it
 /// arrived.
-answer_fetch: while fetch_head(c, i, seq, corr, fr, at, req), not waiting(c), fetch_session_error(req) == None,
+answer_fetch: while fetch_head(c, i, seq, corr, fr, at, req), fetch_session_error(req) == None,
         fetch_answers(c, xs), let answers = trim_to(xs, req.max_bytes as i64)
         where fetch_ready(answers, req.min_bytes as i64) || now() >= at + Duration::from_millis(req.max_wait_ms as i64) {
     send kafka.write(c, seq, fetch_response_parts(corr, NONE, req, answers));
@@ -93,17 +92,12 @@ answer_fetch_session: while fetch_head(c, i, seq, corr, fr, at, req), let Some(e
 // ---------------------------------------------------------------- ListOffsets
 
 view list_offsets_head(c, i, seq, corr, fr, at, req) =
-    head(c, i, seq, key, version, corr, fr, at), key == API_LIST_OFFSETS,
+    head(c, i, seq, key, version, corr, fr, at), caught_up(), key == API_LIST_OFFSETS,
     let Some(body) = request_body(fr), let Some(req) = decode_list_offsets(body, version);
-
-view list_offsets_waits(c) {
-    list_offsets_head(c, _, _, _, _, _, req), e in list_offsets_entries(req), creating(_k, t) where t.name == e.1;
-    list_offsets_head(c, _, _, _, _, _, req), e in list_offsets_entries(req), deleting(_e, e.1, _id);
-}
 
 /// The partition entries of the ListOffsets requests answered this tick.
 view offsets_entry(c, j, name, lp, req) =
-    list_offsets_head(c, _, _, _, _, _, req), not list_offsets_waits(c), e in list_offsets_entries(req),
+    list_offsets_head(c, _, _, _, _, _, req), e in list_offsets_entries(req),
     let j = e.0, let name = e.1, let lp = e.2;
 
 /// The entries that name a partition another entry of their request also names (Kafka refuses both).
@@ -113,8 +107,8 @@ view offsets_repeated(c, j) =
 
 /// The entries that look a partition up: it exists, the epoch is right, and no other entry names it.
 view offsets_part(c, j, tid, p, t, end, start) =
-    offsets_entry(c, j, name, lp, _req), not offsets_repeated(c, j), topic(name, tid, parts, _cfg),
-    let p = lp.partition, p >= 0i32, p < parts, leader_epoch_error(lp.leader_epoch) == None,
+    offsets_entry(c, j, name, lp, _req), not offsets_repeated(c, j), mtopic(name, tid, parts, _cfg),
+    let p = lp.partition, p >= 0i32, p < parts, led(tid, p, epoch), leader_epoch_error(lp.leader_epoch, epoch) == None,
     log_end(tid, p, end), log_start(tid, p, start), let t = lp.timestamp;
 
 /// A search by timestamp, as Kafka looks: the first segment whose greatest timestamp reaches it, then that
@@ -130,15 +124,23 @@ view offsets_max(c, j, best) =
 view offsets_segments(c, j, ss = collect!((b, mts, mb))) =
     offsets_part(c, j, tid, p, t, _end, _start), segment(tid, p, b, _bytes, mts, mb, _md) where t == MAX_TIMESTAMP;
 
+/// Each entry's answer, with the partition leader's epoch where it found an offset.
 view offsets_answer(c, j, a) {
+    offsets_found(c, j, a0), offsets_part(c, j, tid, p, _t, _end, _start), led(tid, p, epoch), let a = with_epoch(a0, epoch);
     offsets_entry(c, j, _name, _lp, _req), offsets_repeated(c, j), let a = offset_failed(INVALID_REQUEST);
-    offsets_entry(c, j, name, _lp, _req), not offsets_repeated(c, j), not topic(name, _, _, _),
+    offsets_entry(c, j, name, _lp, _req), not offsets_repeated(c, j), not mtopic(name, _, _, _),
         let a = offset_failed(UNKNOWN_TOPIC_OR_PARTITION);
-    offsets_entry(c, j, name, lp, _req), not offsets_repeated(c, j), topic(name, _tid, parts, _cfg),
+    offsets_entry(c, j, name, lp, _req), not offsets_repeated(c, j), mtopic(name, _tid, parts, _cfg),
         let a = offset_failed(UNKNOWN_TOPIC_OR_PARTITION) where lp.partition < 0i32 || lp.partition >= parts;
-    offsets_entry(c, j, name, lp, _req), not offsets_repeated(c, j), topic(name, _tid, parts, _cfg),
-        let Some(err) = leader_epoch_error(lp.leader_epoch),
-        let a = offset_failed(err) where lp.partition >= 0i32 && lp.partition < parts;
+    offsets_entry(c, j, name, lp, _req), not offsets_repeated(c, j), mtopic(name, tid, parts, _cfg), let p = lp.partition,
+        not led(tid, p, _), let a = offset_failed(NOT_LEADER_OR_FOLLOWER) where p >= 0i32 && p < parts;
+    offsets_entry(c, j, name, lp, _req), not offsets_repeated(c, j), mtopic(name, tid, parts, _cfg), let p = lp.partition,
+        led(tid, p, epoch), let Some(err) = leader_epoch_error(lp.leader_epoch, epoch),
+        let a = offset_failed(err) where p >= 0i32 && p < parts;
+}
+
+/// The answers of the entries that look their partition up.
+view offsets_found(c, j, a) {
     // The log's ends: latest (the high watermark, the log end on one broker), earliest and earliest local (the
     // log start: nothing is tiered), latest tiered (none: -1).
     offsets_part(c, j, _tid, _p, t, end, _start), let a = offset_at(-1i64, end) where t == LATEST_TIMESTAMP;
@@ -157,7 +159,7 @@ view offsets_answer(c, j, a) {
 
 view offsets_answers(c, xs = collect!((j, a))) = per list_offsets_head(c, _, _, _, _, _, _req), offsets_answer(c, j, a);
 
-answer_list_offsets: while list_offsets_head(c, i, seq, corr, fr, at, req), not waiting(c), offsets_answers(c, xs) {
+answer_list_offsets: while list_offsets_head(c, i, seq, corr, fr, at, req), offsets_answers(c, xs) {
     send kafka.write(c, seq, [Part::Bytes(encode_list_offsets_response(corr, req, xs))]);
     upsert answering(c, i + 1, seq + 1);
     delete queued(c, i, fr, at);

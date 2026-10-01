@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use blossom_front::api::{NodeSpec, ParamBinding};
+use blossom_front::api::NodeSpec;
 use blossom_runtime::deploy::DeploymentSpec;
 use blossom_runtime::server::{Server, ServerConfig};
 use blossom_store::OpenMode;
@@ -59,9 +59,12 @@ source = "{}"
 secrets = "k.secrets"
 [[node]]
 name = "b1"
+role = "Broker"
 addr = "127.0.0.1:{}"
 principal = "spiffe://test/kafka/b1"
 streams = {{ kafka = "127.0.0.1:{port}" }}
+[statics]
+broker = [["b1", 1, "127.0.0.1", {port}]]
 [security]
 mode = "insecure-dev"
 [storage]
@@ -79,12 +82,7 @@ data_dir = "data"
             role: n.role.clone(),
         })
         .collect();
-    let params = [
-        ("ADVERTISED_HOST".to_owned(), ParamBinding::Text("127.0.0.1".into())),
-        ("ADVERTISED_PORT".to_owned(), ParamBinding::Int(i128::from(port))),
-    ]
-    .into_iter()
-    .collect();
+    let params = std::collections::BTreeMap::new();
     let (compiled, sources) = blossom_driver::bls::compile_file_with(&spec.source.to_string_lossy(), &nodes, &params);
     let artifact = match compiled {
         Ok((a, _)) => Arc::new(a),
@@ -253,16 +251,34 @@ fn kafka_topics_creates_describes_and_deletes_topics() {
         &bin,
         "kafka-topics.sh",
         port,
-        &["--create", "--topic", "orders", "--partitions", "3", "--config", "retention.ms=60000"],
+        &[
+            "--create",
+            "--topic",
+            "orders",
+            "--partitions",
+            "3",
+            "--config",
+            "retention.ms=60000",
+        ],
     );
     assert!(created.contains("Created topic orders."), "{created}");
     kafka_tool(&bin, "kafka-topics.sh", port, &["--create", "--topic", "audit"]);
     // A second creation is refused, as Kafka refuses it.
     let again = Command::new(bin.join("kafka-topics.sh"))
-        .args(["--bootstrap-server", &format!("127.0.0.1:{port}"), "--create", "--topic", "orders"])
+        .args([
+            "--bootstrap-server",
+            &format!("127.0.0.1:{port}"),
+            "--create",
+            "--topic",
+            "orders",
+        ])
         .output()
         .unwrap();
-    let text = format!("{}{}", String::from_utf8_lossy(&again.stdout), String::from_utf8_lossy(&again.stderr));
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&again.stdout),
+        String::from_utf8_lossy(&again.stderr)
+    );
     assert!(text.contains("already exists"), "{text}");
     let listed = kafka_tool(&bin, "kafka-topics.sh", port, &["--list"]);
     assert_eq!(listed.lines().collect::<Vec<_>>(), ["audit", "orders"], "{listed}");
@@ -337,23 +353,55 @@ fn kcat_produces_and_consumes() {
     let messages: Vec<String> = (0..50).map(|i| format!("message {i}")).collect();
     // The topic is created by the producer's Metadata request (auto-creation).
     with_input(
-        Command::new(&kcat).args(["-P", "-b", &broker, "-t", "events", "-p", "0", "-X", "topic.request.required.acks=-1"]),
+        Command::new(&kcat).args([
+            "-P",
+            "-b",
+            &broker,
+            "-t",
+            "events",
+            "-p",
+            "0",
+            "-X",
+            "topic.request.required.acks=-1",
+        ]),
         &messages,
     );
     let out = Command::new(&kcat)
-        .args(["-C", "-b", &broker, "-t", "events", "-p", "0", "-o", "beginning", "-e", "-q"])
+        .args([
+            "-C",
+            "-b",
+            &broker,
+            "-t",
+            "events",
+            "-p",
+            "0",
+            "-o",
+            "beginning",
+            "-e",
+            "-q",
+        ])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "kcat -C failed:\n{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
-    assert_eq!(stdout.lines().collect::<Vec<_>>(), messages.iter().map(String::as_str).collect::<Vec<_>>());
+    assert!(
+        out.status.success(),
+        "kcat -C failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        messages.iter().map(String::as_str).collect::<Vec<_>>()
+    );
     // Reading from an offset inside the log.
     let out = Command::new(&kcat)
         .args(["-C", "-b", &broker, "-t", "events", "-p", "0", "-o", "45", "-e", "-q"])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(stdout.lines().collect::<Vec<_>>(), messages[45..].iter().map(String::as_str).collect::<Vec<_>>());
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        messages[45..].iter().map(String::as_str).collect::<Vec<_>>()
+    );
     server.stop().unwrap();
 }
 
@@ -365,7 +413,12 @@ fn the_java_console_tools_produce_and_consume() {
     };
     let (server, port) = start_broker();
     let broker = format!("127.0.0.1:{port}");
-    kafka_tool(&bin, "kafka-topics.sh", port, &["--create", "--topic", "orders", "--partitions", "2"]);
+    kafka_tool(
+        &bin,
+        "kafka-topics.sh",
+        port,
+        &["--create", "--topic", "orders", "--partitions", "2"],
+    );
     let messages: Vec<String> = (0..20).map(|i| format!("order {i}")).collect();
     // The console producer is idempotent by default (InitProducerId, sequence numbers).
     let out = with_input(

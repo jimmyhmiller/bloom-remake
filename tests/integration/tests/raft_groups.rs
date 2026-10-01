@@ -104,7 +104,9 @@ impl GroupSafety {
             })
             .collect();
         for (n, state) in nodes.iter().enumerate() {
-            let (Some(state), Some(Some((terms, entries)))) = (state, views.get(n)) else { continue };
+            let (Some(state), Some(Some((terms, entries)))) = (state, views.get(n)) else {
+                continue;
+            };
             for w in state.rows(self.won) {
                 let (g, t) = (&w[0], u64_at(w, 1));
                 if terms.get(g).copied() != Some(t) {
@@ -113,7 +115,9 @@ impl GroupSafety {
                 for m in state.rows(self.match_idx).filter(|r| r[0] == *g) {
                     let Value::Node(f) = &m[1] else { continue };
                     let i = u64_at(m, 2);
-                    let Some(Some((fterms, fentries))) = views.get(f.0 as usize) else { continue };
+                    let Some(Some((fterms, fentries))) = views.get(f.0 as usize) else {
+                        continue;
+                    };
                     if i == 0 || fterms.get(g).copied() != Some(t) {
                         continue;
                     }
@@ -155,7 +159,11 @@ impl Observer for GroupSafety {
             }
             for (g, log) in &logs {
                 for (i, entry) in log {
-                    let before = if *i == 1 { Some(0) } else { log.get(&(i - 1)).map(|r| u64_at(r, 2)) };
+                    let before = if *i == 1 {
+                        Some(0)
+                    } else {
+                        log.get(&(i - 1)).map(|r| u64_at(r, 2))
+                    };
                     if let Some(pt) = before
                         && u64_at(entry, 3) != pt
                     {
@@ -188,7 +196,9 @@ impl Observer for GroupSafety {
                 self.checked.insert((n, g.clone()), commit.max(from));
                 for i in from.min(commit) + 1..=commit {
                     let Some(entry) = log.get(&i) else {
-                        return Err(format!("broker {n} committed {g:?} through {commit} but holds no entry {i}"));
+                        return Err(format!(
+                            "broker {n} committed {g:?} through {commit} but holds no entry {i}"
+                        ));
                     };
                     match self.committed.get(&(g.clone(), i)) {
                         None => {
@@ -251,9 +261,13 @@ fn run(seed: u64, faults: bool) -> BTreeMap<Value, u64> {
     let safety = std::rc::Rc::new(std::cell::RefCell::new(GroupSafety::of(&artifact)));
     cluster.observe(Box::new(SharedSafety(safety.clone())));
     let run = cluster.run().unwrap();
-    assert!(run.violation.is_none(), "seed {seed}: {:?}\n{}", run.violation, run.log.join("\n"));
-    let p = safety.borrow().progress.clone();
-    p
+    assert!(
+        run.violation.is_none(),
+        "seed {seed}: {:?}\n{}",
+        run.violation,
+        run.log.join("\n")
+    );
+    safety.borrow().progress.clone()
 }
 
 /// The observer, shared so the test reads its progress afterwards.
@@ -311,7 +325,11 @@ struct Directed<'a> {
 impl Directed<'_> {
     fn leads(&self, n: blossom_value::time::NodeId) -> Option<u64> {
         let state = self.c.state(n)?;
-        let term = state.rows(self.rterm).filter(|r| r[0] == self.g).map(|r| u64_at(r, 1)).max()?;
+        let term = state
+            .rows(self.rterm)
+            .filter(|r| r[0] == self.g)
+            .map(|r| u64_at(r, 1))
+            .max()?;
         state
             .rows(self.won)
             .any(|r| r[0] == self.g && u64_at(r, 1) == term)
@@ -334,7 +352,11 @@ impl Directed<'_> {
     fn wait(&mut self, d: i64) {
         let at = self.c.now() + d;
         self.c.step_until(at).unwrap();
-        assert!(self.c.violation().is_none(), "{}", self.c.violation().unwrap_or_default());
+        assert!(
+            self.c.violation().is_none(),
+            "{}",
+            self.c.violation().unwrap_or_default()
+        );
     }
 
     fn await_until(&mut self, within: i64, what: &str, cond: impl Fn(&Self) -> bool) {
@@ -360,16 +382,24 @@ impl Directed<'_> {
             {
                 return l;
             }
-            assert!(self.c.now() < end, "no leader of {:?} among {among:?} above term {above}", self.g);
+            assert!(
+                self.c.now() < end,
+                "no leader of {:?} among {among:?} above term {above}",
+                self.g
+            );
             self.wait(10_000_000);
         }
     }
 
     /// Lets `n` propose (it proposes only while it leads) until `cond` holds, then holds it again.
     fn write_until(&mut self, n: blossom_value::time::NodeId, within: i64, what: &str, cond: impl Fn(&Self) -> bool) {
-        self.c.input(n, self.release, std::sync::Arc::from(vec![self.g.clone()])).unwrap();
+        self.c
+            .input(n, self.release, std::sync::Arc::from(vec![self.g.clone()]))
+            .unwrap();
         self.await_until(within, what, cond);
-        self.c.input(n, self.hold, std::sync::Arc::from(vec![self.g.clone()])).unwrap();
+        self.c
+            .input(n, self.hold, std::sync::Arc::from(vec![self.g.clone()]))
+            .unwrap();
         self.wait(1_000_000);
     }
 }
@@ -410,7 +440,8 @@ fn a_reelected_leader_forgets_its_old_follower_state() {
         d.c.observe(Box::new(GroupSafety::of(&artifact)));
         let b4 = [NodeId(3)];
         for n in 0..4 {
-            d.c.input(NodeId(n), d.hold, std::sync::Arc::from(vec![d.g.clone()])).unwrap();
+            d.c.input(NodeId(n), d.hold, std::sync::Arc::from(vec![d.g.clone()]))
+                .unwrap();
         }
         let all = [NodeId(0), NodeId(1), NodeId(2)];
         // 1. A leader L commits a prefix.
@@ -428,7 +459,9 @@ fn a_reelected_leader_forgets_its_old_follower_state() {
         let (cc, t_c) = d.await_leader(&others, t_l, 3_000_000_000);
         let f = others.iter().copied().find(|n| *n != cc).unwrap();
         d.c.partition(&[&[l], &[cc], &[f], &b4]).unwrap();
-        d.write_until(cc, 1_000_000_000, "C appends", |d| d.last(cc).0 == t_c && d.last(cc).1 > d.last(f).1);
+        d.write_until(cc, 1_000_000_000, "C appends", |d| {
+            d.last(cc).0 == t_c && d.last(cc).1 > d.last(f).1
+        });
         // 4. L and F: L (the longer log) wins, and F takes L's old suffix.
         d.c.partition(&[&[l, f], &[cc], &b4]).unwrap();
         let (l2, _) = d.await_leader(&[l, f], t_c, 5_000_000_000);

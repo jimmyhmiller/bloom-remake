@@ -23,17 +23,19 @@ use blossom_value::Value;
 use blossom_value::time::{Duration, NodeId, Tick};
 use blossom_value::value::IntValue;
 use bytes::{Bytes, BytesMut};
-use kafka_protocol::messages::create_topics_request::{CreatableReplicaAssignment, CreatableTopic, CreatableTopicConfig};
+use kafka_protocol::messages::create_topics_request::{
+    CreatableReplicaAssignment, CreatableTopic, CreatableTopicConfig,
+};
 use kafka_protocol::messages::delete_topics_request::DeleteTopicState;
 use kafka_protocol::messages::describe_configs_request::DescribeConfigsResource;
 use kafka_protocol::messages::metadata_request::MetadataRequestTopic;
 use kafka_protocol::messages::produce_request::{PartitionProduceData, TopicProduceData};
-use kafka_protocol::messages::{ProduceRequest, ProduceResponse};
 use kafka_protocol::messages::{
     ApiVersionsRequest, ApiVersionsResponse, BrokerId, CreateTopicsRequest, CreateTopicsResponse, DeleteTopicsRequest,
     DeleteTopicsResponse, DescribeConfigsRequest, DescribeConfigsResponse, MetadataRequest, MetadataResponse,
     RequestHeader, ResponseHeader, TopicName,
 };
+use kafka_protocol::messages::{ProduceRequest, ProduceResponse};
 use kafka_protocol::protocol::{Decodable, Encodable, HeaderVersion, StrBytes};
 
 /// SplitMix64.
@@ -157,7 +159,8 @@ fn legal_topic_name(n: &str) -> bool {
     (1..=249).contains(&n.len())
         && n != "."
         && n != ".."
-        && n.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && n.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// A request encoded by the Rust implementation: header then body, without the size prefix.
@@ -301,7 +304,11 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
         for _ in 0..rng.below(4) {
             let name = rng.text();
             if !have.iter().any(|h| h.0 == name) {
-                have.push((name, (u128::from(rng.next()) << 64 | u128::from(rng.next()) | 1).to_be_bytes(), rng.below(4) as i32));
+                have.push((
+                    name,
+                    (u128::from(rng.next()) << 64 | u128::from(rng.next()) | 1).to_be_bytes(),
+                    rng.below(4) as i32,
+                ));
             }
         }
         let by_id = rng.below(3) == 0;
@@ -331,7 +338,7 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
                     .collect::<Vec<_>>(),
             )
         };
-        let (cluster, controller) = (rng.text(), rng.next() as i32);
+        let (cluster, controller) = (rng.text(), (rng.next() % 1000) as i32);
         let row = vec![
             i32v(corr),
             Value::Vec(
@@ -408,7 +415,9 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
         // every topic when none is asked for. A known topic's partitions are all led by the controller.
         type Seen = (i16, Option<String>, [u8; 16], Vec<(i32, i32, i32, Vec<i32>, Vec<i32>)>);
         let known = |h: &Have| -> Seen {
-            let parts = (0..h.2).map(|p| (p, *controller, 0, vec![*controller], vec![*controller])).collect();
+            let parts = (0..h.2)
+                .map(|p| (p, *controller, 0, vec![*controller], vec![*controller]))
+                .collect();
             (0, Some(h.0.clone()), h.1, parts)
         };
         let want: Vec<Seen> = match topics {
@@ -421,7 +430,11 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
                         .map(|(_, n)| match have.iter().find(|h| Some(&h.0) == n.as_ref()) {
                             Some(h) => known(h),
                             None => {
-                                let code = if n.as_deref().is_some_and(legal_topic_name) { 3 } else { 17 };
+                                let code = if n.as_deref().is_some_and(legal_topic_name) {
+                                    3
+                                } else {
+                                    17
+                                };
                                 (if n.is_none() { 3 } else { code }, n.clone(), [0; 16], Vec::new())
                             }
                         })
@@ -440,7 +453,11 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
             .topics
             .iter()
             .map(|t| {
-                assert!(t.partitions.iter().all(|p| p.error_code == 0 && p.offline_replicas.is_empty()));
+                assert!(
+                    t.partitions
+                        .iter()
+                        .all(|p| p.error_code == 0 && p.offline_replicas.is_empty())
+                );
                 (
                     t.error_code,
                     t.name.as_ref().map(|n| n.0.to_string()),
@@ -485,7 +502,21 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
         } else {
             assert_eq!(
                 (resp.error_code, keys, resp.throttle_time_ms),
-                (0, vec![(0, 10, 12), (1, 16, 17), (2, 7, 10), (3, 13, 13), (18, 3, 4), (19, 7, 7), (20, 6, 6), (22, 3, 5), (32, 4, 4)], 0)
+                (
+                    0,
+                    vec![
+                        (0, 10, 12),
+                        (1, 16, 17),
+                        (2, 7, 10),
+                        (3, 13, 13),
+                        (18, 3, 4),
+                        (19, 7, 7),
+                        (20, 6, 6),
+                        (22, 3, 5),
+                        (32, 4, 4)
+                    ],
+                    0
+                )
             );
         }
     }
@@ -557,7 +588,9 @@ fn topic_requests_encoded_by_the_rust_implementation_decode_in_blossom() {
                             assignments
                                 .iter()
                                 .map(|(p, bs)| {
-                                    Value::Tuple(vec![i32v(*p), Value::Vec(bs.iter().map(|b| i32v(*b)).collect())].into())
+                                    Value::Tuple(
+                                        vec![i32v(*p), Value::Vec(bs.iter().map(|b| i32v(*b)).collect())].into(),
+                                    )
                                 })
                                 .collect(),
                         ),
@@ -574,12 +607,21 @@ fn topic_requests_encoded_by_the_rust_implementation_decode_in_blossom() {
                     .with_topics(topics)
                     .with_timeout_ms(timeout)
                     .with_validate_only(validate);
-                let want = opt(Some(strukt(vec![Value::Vec(want_topics.into()), i32v(timeout), Value::Bool(validate)])));
+                let want = opt(Some(strukt(vec![
+                    Value::Vec(want_topics.into()),
+                    i32v(timeout),
+                    Value::Bool(validate),
+                ])));
                 (encode_request(19, 7, corr, client.as_deref(), &req), "v_create", want)
             }
             1 => {
                 let states: Vec<(Option<String>, uuid::Uuid)> = (0..rng.below(4))
-                    .map(|_| (if rng.below(3) == 0 { None } else { Some(rng.text()) }, uuid_of(&mut rng)))
+                    .map(|_| {
+                        (
+                            if rng.below(3) == 0 { None } else { Some(rng.text()) },
+                            uuid_of(&mut rng),
+                        )
+                    })
                     .collect();
                 let timeout = rng.next() as i32;
                 let req = DeleteTopicsRequest::default()
@@ -611,7 +653,11 @@ fn topic_requests_encoded_by_the_rust_implementation_decode_in_blossom() {
             _ => {
                 let resources: Vec<(i8, String, Option<Vec<String>>)> = (0..rng.below(4))
                     .map(|_| {
-                        let keys = if rng.below(3) == 0 { None } else { Some((0..rng.below(3)).map(|_| rng.text()).collect()) };
+                        let keys = if rng.below(3) == 0 {
+                            None
+                        } else {
+                            Some((0..rng.below(3)).map(|_| rng.text()).collect())
+                        };
                         ([2i8, 4, 8][rng.below(3) as usize], rng.text(), keys)
                     })
                     .collect();
@@ -624,7 +670,8 @@ fn topic_requests_encoded_by_the_rust_implementation_decode_in_blossom() {
                                     .with_resource_type(*k)
                                     .with_resource_name(StrBytes::from_string(n.clone()))
                                     .with_configuration_keys(
-                                        keys.as_ref().map(|ks| ks.iter().map(|x| StrBytes::from_string(x.clone())).collect()),
+                                        keys.as_ref()
+                                            .map(|ks| ks.iter().map(|x| StrBytes::from_string(x.clone())).collect()),
                                     )
                             })
                             .collect(),
@@ -704,7 +751,14 @@ fn topic_responses_encoded_in_blossom_decode_in_the_rust_implementation() {
                 if ok {
                     (rng.text(), id, 0, None, 1 + rng.below(8) as i32, own(&mut rng))
                 } else {
-                    (rng.text(), [0; 16], [36i16, 37, 40, 42][rng.below(4) as usize], Some(rng.text()), -1, Vec::new())
+                    (
+                        rng.text(),
+                        [0; 16],
+                        [36i16, 37, 40, 42][rng.below(4) as usize],
+                        Some(rng.text()),
+                        -1,
+                        Vec::new(),
+                    )
                 }
             })
             .collect();
@@ -720,7 +774,9 @@ fn topic_responses_encoded_in_blossom_decode_in_the_rust_implementation() {
                     outcomes
                         .iter()
                         .map(|(n, id, e, m, p, cs)| {
-                            Value::Tuple(vec![s(n), bytes(id), i16v(*e), opt(m.as_deref().map(s)), i32v(*p), pairs(cs)].into())
+                            Value::Tuple(
+                                vec![s(n), bytes(id), i16v(*e), opt(m.as_deref().map(s)), i32v(*p), pairs(cs)].into(),
+                            )
                         })
                         .collect(),
                 ),
@@ -732,7 +788,12 @@ fn topic_responses_encoded_in_blossom_decode_in_the_rust_implementation() {
             .map(|_| {
                 let name = if rng.below(3) == 0 { None } else { Some(rng.text()) };
                 let err = [0i16, 3, 100, 42][rng.below(4) as usize];
-                (name, uuid_of(&mut rng).into_bytes(), err, (err != 0).then(|| rng.text()))
+                (
+                    name,
+                    uuid_of(&mut rng).into_bytes(),
+                    err,
+                    (err != 0).then(|| rng.text()),
+                )
             })
             .collect();
         inputs.push(input(
@@ -744,7 +805,9 @@ fn topic_responses_encoded_in_blossom_decode_in_the_rust_implementation() {
                     outcomes
                         .iter()
                         .map(|(n, id, e, m)| {
-                            Value::Tuple(vec![opt(n.as_deref().map(s)), bytes(id), i16v(*e), opt(m.as_deref().map(s))].into())
+                            Value::Tuple(
+                                vec![opt(n.as_deref().map(s)), bytes(id), i16v(*e), opt(m.as_deref().map(s))].into(),
+                            )
                         })
                         .collect(),
                 ),
@@ -758,8 +821,11 @@ fn topic_responses_encoded_in_blossom_decode_in_the_rust_implementation() {
                 let keys = if rng.below(2) == 0 {
                     None
                 } else {
-                    let mut ks: Vec<String> =
-                        TOPIC_CONFIGS.iter().filter(|_| rng.below(2) == 0).map(|c| c.0.to_string()).collect();
+                    let mut ks: Vec<String> = TOPIC_CONFIGS
+                        .iter()
+                        .filter(|_| rng.below(2) == 0)
+                        .map(|c| c.0.to_string())
+                        .collect();
                     if rng.below(3) == 0 {
                         ks.push(rng.text());
                     }
@@ -822,14 +888,24 @@ fn topic_responses_encoded_in_blossom_decode_in_the_rust_implementation() {
             let ok = *err == 0;
             assert_eq!(t.name.0.to_string(), *name);
             assert_eq!(*t.topic_id.as_bytes(), *id);
-            assert_eq!((t.error_code, t.error_message.as_ref().map(|x| x.to_string())), (*err, msg.clone()));
+            assert_eq!(
+                (t.error_code, t.error_message.as_ref().map(|x| x.to_string())),
+                (*err, msg.clone())
+            );
             assert_eq!(t.topic_config_error_code, 0);
-            assert_eq!((t.num_partitions, t.replication_factor), if ok { (*parts, 1) } else { (-1, -1) });
+            assert_eq!(
+                (t.num_partitions, t.replication_factor),
+                if ok { (*parts, 1) } else { (-1, -1) }
+            );
             let configs = t.configs.as_ref().map(|cs| {
                 cs.iter()
                     .map(|c| {
                         assert!(!c.read_only && !c.is_sensitive);
-                        (c.name.to_string(), c.value.as_ref().map(|v| v.to_string()), c.config_source)
+                        (
+                            c.name.to_string(),
+                            c.value.as_ref().map(|v| v.to_string()),
+                            c.config_source,
+                        )
                     })
                     .collect::<Vec<_>>()
             });
@@ -877,14 +953,20 @@ fn topic_responses_encoded_in_blossom_decode_in_the_rust_implementation() {
         assert!(buf.is_empty(), "trailing bytes after the DescribeConfigs response");
         assert_eq!((m.throttle_time_ms, m.results.len()), (0, resources.len()));
         for (res, (kind, name, keys, set)) in m.results.iter().zip(resources) {
-            assert_eq!((res.resource_type, res.resource_name.to_string()), (*kind, name.clone()));
+            assert_eq!(
+                (res.resource_type, res.resource_name.to_string()),
+                (*kind, name.clone())
+            );
             // A topic is described (or unknown); a broker has no configuration described; other types are refused.
             let (err, configs): (i16, Vec<(String, String, i8, i8)>) = match (kind, set) {
                 (2, Some(set)) => (
                     0,
                     TOPIC_CONFIGS
                         .iter()
-                        .filter(|(k, _, _)| keys.as_ref().is_none_or(|ks| ks.is_empty() || ks.iter().any(|x| x == k)))
+                        .filter(|(k, _, _)| {
+                            keys.as_ref()
+                                .is_none_or(|ks| ks.is_empty() || ks.iter().any(|x| x == k))
+                        })
                         .map(|(k, d, ty)| {
                             let (v, src) = value_of(set, k, d);
                             (k.to_string(), v, src, *ty)
@@ -902,7 +984,12 @@ fn topic_responses_encoded_in_blossom_decode_in_the_rust_implementation() {
                 .iter()
                 .map(|c| {
                     assert!(!c.read_only && !c.is_sensitive && c.synonyms.is_empty() && c.documentation.is_none());
-                    (c.name.to_string(), c.value.as_ref().unwrap().to_string(), c.config_source, c.config_type)
+                    (
+                        c.name.to_string(),
+                        c.value.as_ref().unwrap().to_string(),
+                        c.config_source,
+                        c.config_type,
+                    )
                 })
                 .collect();
             assert_eq!(got, configs);
@@ -912,7 +999,11 @@ fn topic_responses_encoded_in_blossom_decode_in_the_rust_implementation() {
 
 #[cfg(test)]
 fn bytes_opt(rng: &mut Rng) -> Option<Vec<u8>> {
-    if rng.below(5) == 0 { None } else { Some((0..rng.below(40)).map(|_| rng.next() as u8).collect()) }
+    if rng.below(5) == 0 {
+        None
+    } else {
+        Some((0..rng.below(40)).map(|_| rng.next() as u8).collect())
+    }
 }
 
 #[test]
@@ -931,23 +1022,37 @@ fn produce_requests_decode_and_produce_responses_encode() {
         // Per topic: its name and each partition's index and records.
         type Topic = (String, Vec<(i32, Option<Vec<u8>>)>);
         let topics: Vec<Topic> = (0..rng.below(3))
-            .map(|_| (rng.text(), (0..rng.below(3)).map(|_| (rng.next() as i32, bytes_opt(&mut rng))).collect()))
+            .map(|_| {
+                (
+                    rng.text(),
+                    (0..rng.below(3))
+                        .map(|_| (rng.next() as i32, bytes_opt(&mut rng)))
+                        .collect(),
+                )
+            })
             .collect();
         let req = ProduceRequest::default()
-            .with_transactional_id(tid.clone().map(|t| kafka_protocol::messages::TransactionalId(StrBytes::from_string(t))))
+            .with_transactional_id(
+                tid.clone()
+                    .map(|t| kafka_protocol::messages::TransactionalId(StrBytes::from_string(t))),
+            )
             .with_acks(acks)
             .with_timeout_ms(timeout)
             .with_topic_data(
                 topics
                     .iter()
                     .map(|(n, ps)| {
-                        TopicProduceData::default().with_name(TopicName(StrBytes::from_string(n.clone()))).with_partition_data(
-                            ps.iter()
-                                .map(|(i, r)| {
-                                    PartitionProduceData::default().with_index(*i).with_records(r.clone().map(Bytes::from))
-                                })
-                                .collect(),
-                        )
+                        TopicProduceData::default()
+                            .with_name(TopicName(StrBytes::from_string(n.clone())))
+                            .with_partition_data(
+                                ps.iter()
+                                    .map(|(i, r)| {
+                                        PartitionProduceData::default()
+                                            .with_index(*i)
+                                            .with_records(r.clone().map(Bytes::from))
+                                    })
+                                    .collect(),
+                            )
                     })
                     .collect(),
             );
@@ -1017,7 +1122,9 @@ fn produce_requests_decode_and_produce_responses_encode() {
         let got = decoded.iter().find(|x| x[0] == bytes(frame)).unwrap();
         assert_eq!(&got[1], want, "the decoded request {frame:02x?}");
         let row = encoded.iter().find(|x| x[0] == i32v(*corr)).unwrap();
-        let Value::Option(Some(b)) = &row[1] else { panic!("{:?}", row[1]) };
+        let Value::Option(Some(b)) = &row[1] else {
+            panic!("{:?}", row[1])
+        };
         let Value::Bytes(b) = &**b else { panic!("{b:?}") };
         let mut buf = Bytes::copy_from_slice(&b[4..]);
         let header = ResponseHeader::decode(&mut buf, ProduceResponse::header_version(12)).unwrap();
@@ -1032,10 +1139,20 @@ fn produce_requests_decode_and_produce_responses_encode() {
             .map(|(k, p)| {
                 assert_eq!(p.log_append_time_ms, -1);
                 let bad = p.record_errors.first().map(|e| {
-                    assert_eq!(e.batch_index_error_message.as_ref().map(|x| x.to_string()), p.error_message.as_ref().map(|x| x.to_string()));
+                    assert_eq!(
+                        e.batch_index_error_message.as_ref().map(|x| x.to_string()),
+                        p.error_message.as_ref().map(|x| x.to_string())
+                    );
                     e.batch_index
                 });
-                (k as u64, p.error_code, p.base_offset, p.log_start_offset, p.error_message.as_ref().map(|x| x.to_string()), bad)
+                (
+                    k as u64,
+                    p.error_code,
+                    p.base_offset,
+                    p.log_start_offset,
+                    p.error_message.as_ref().map(|x| x.to_string()),
+                    bad,
+                )
             })
             .collect();
         assert_eq!(&got, answers);
@@ -1067,13 +1184,26 @@ fn fetch_and_list_offsets_decode_and_answers_encode() {
             .map(|_| {
                 let id = uuid_of(&mut rng).into_bytes();
                 let ps = (0..rng.below(3))
-                    .map(|_| (rng.next() as i32, rng.next() as i32 >> 20, rng.next() as i64 >> 2, rng.next() as i32 >> 8))
+                    .map(|_| {
+                        (
+                            rng.next() as i32,
+                            rng.next() as i32 >> 20,
+                            rng.next() as i64 >> 2,
+                            rng.next() as i32 >> 8,
+                        )
+                    })
                     .collect();
                 (id, ps)
             })
             .collect();
-        let (wait, minb, maxb, iso, sid, sep) =
-            (rng.next() as i32, rng.next() as i32, rng.next() as i32, rng.below(2) as i8, rng.below(3) as i32, rng.next() as i32);
+        let (wait, minb, maxb, iso, sid, sep) = (
+            rng.next() as i32,
+            rng.next() as i32,
+            rng.next() as i32,
+            rng.below(2) as i8,
+            rng.below(3) as i32,
+            rng.next() as i32,
+        );
         let req = FetchRequest::default()
             .with_max_wait_ms(wait)
             .with_min_bytes(minb)
@@ -1085,17 +1215,19 @@ fn fetch_and_list_offsets_decode_and_answers_encode() {
                 topics
                     .iter()
                     .map(|(id, ps)| {
-                        FetchTopic::default().with_topic_id(uuid::Uuid::from_bytes(*id)).with_partitions(
-                            ps.iter()
-                                .map(|(p, e, o, m)| {
-                                    FetchPartition::default()
-                                        .with_partition(*p)
-                                        .with_current_leader_epoch(*e)
-                                        .with_fetch_offset(*o)
-                                        .with_partition_max_bytes(*m)
-                                })
-                                .collect(),
-                        )
+                        FetchTopic::default()
+                            .with_topic_id(uuid::Uuid::from_bytes(*id))
+                            .with_partitions(
+                                ps.iter()
+                                    .map(|(p, e, o, m)| {
+                                        FetchPartition::default()
+                                            .with_partition(*p)
+                                            .with_current_leader_epoch(*e)
+                                            .with_fetch_offset(*o)
+                                            .with_partition_max_bytes(*m)
+                                    })
+                                    .collect(),
+                            )
                     })
                     .collect(),
             )
@@ -1116,7 +1248,9 @@ fn fetch_and_list_offsets_decode_and_answers_encode() {
                             bytes(id),
                             Value::Vec(
                                 ps.iter()
-                                    .map(|(p, e, o, m)| strukt(vec![i32v(*p), i32v(*e), Value::Int(IntValue::I64(*o)), i32v(*m)]))
+                                    .map(|(p, e, o, m)| {
+                                        strukt(vec![i32v(*p), i32v(*e), Value::Int(IntValue::I64(*o)), i32v(*m)])
+                                    })
                                     .collect(),
                             ),
                         ])
@@ -1129,7 +1263,9 @@ fn fetch_and_list_offsets_decode_and_answers_encode() {
         let answers: Vec<FetchAns> = (0..entries as u64)
             .map(|k| {
                 let e = [0i16, 0, 1, 3, 100][rng.below(5) as usize];
-                let bs = (0..rng.below(3)).map(|_| (0..1 + rng.below(30)).map(|_| rng.next() as u8).collect()).collect();
+                let bs = (0..rng.below(3))
+                    .map(|_| (0..1 + rng.below(30)).map(|_| rng.next() as u8).collect())
+                    .collect();
                 (k, e, rng.next() as i64 >> 2, rng.next() as i64 >> 3, bs)
             })
             .collect();
@@ -1166,7 +1302,9 @@ fn fetch_and_list_offsets_decode_and_answers_encode() {
         let version = 7 + rng.below(4) as i16;
         let ltopics: Vec<ListTopicCase> = (0..rng.below(3))
             .map(|_| {
-                let ps = (0..rng.below(3)).map(|_| (rng.next() as i32, rng.next() as i32 >> 20, rng.next() as i64 >> 1)).collect();
+                let ps = (0..rng.below(3))
+                    .map(|_| (rng.next() as i32, rng.next() as i32 >> 20, rng.next() as i64 >> 1))
+                    .collect();
                 (rng.text(), ps)
             })
             .collect();
@@ -1178,16 +1316,18 @@ fn fetch_and_list_offsets_decode_and_answers_encode() {
                 ltopics
                     .iter()
                     .map(|(n, ps)| {
-                        ListOffsetsTopic::default().with_name(TopicName(StrBytes::from_string(n.clone()))).with_partitions(
-                            ps.iter()
-                                .map(|(p, e, t)| {
-                                    ListOffsetsPartition::default()
-                                        .with_partition_index(*p)
-                                        .with_current_leader_epoch(*e)
-                                        .with_timestamp(*t)
-                                })
-                                .collect(),
-                        )
+                        ListOffsetsTopic::default()
+                            .with_name(TopicName(StrBytes::from_string(n.clone())))
+                            .with_partitions(
+                                ps.iter()
+                                    .map(|(p, e, t)| {
+                                        ListOffsetsPartition::default()
+                                            .with_partition_index(*p)
+                                            .with_current_leader_epoch(*e)
+                                            .with_timestamp(*t)
+                                    })
+                                    .collect(),
+                            )
                     })
                     .collect(),
             )
@@ -1213,7 +1353,15 @@ fn fetch_and_list_offsets_decode_and_answers_encode() {
         ])));
         let entries: usize = ltopics.iter().map(|t| t.1.len()).sum();
         let answers: Vec<ListAns> = (0..entries as u64)
-            .map(|k| (k, [0i16, 3, 42, 74][rng.below(4) as usize], rng.next() as i64 >> 2, rng.next() as i64 >> 2, rng.next() as i32))
+            .map(|k| {
+                (
+                    k,
+                    [0i16, 3, 42, 74][rng.below(4) as usize],
+                    rng.next() as i64 >> 2,
+                    rng.next() as i64 >> 2,
+                    rng.next() as i32,
+                )
+            })
             .collect();
         inputs.push(input(&artifact, "req", vec![bytes(&frame)]));
         inputs.push(input(
@@ -1275,11 +1423,19 @@ fn fetch_and_list_offsets_decode_and_answers_encode() {
                 assert_eq!(p.preferred_read_replica.0, -1);
                 assert!(p.aborted_transactions.as_ref().is_none_or(|a| a.is_empty()));
                 let records = p.records.clone().unwrap_or_default().to_vec();
-                (k as u64, p.error_code, p.high_watermark, p.log_start_offset, vec![records])
+                (
+                    k as u64,
+                    p.error_code,
+                    p.high_watermark,
+                    p.log_start_offset,
+                    vec![records],
+                )
             })
             .collect();
-        let want: Vec<FetchAns> =
-            answers.iter().map(|(k, e, hw, ls, bs)| (*k, *e, *hw, *ls, vec![bs.concat()])).collect();
+        let want: Vec<FetchAns> = answers
+            .iter()
+            .map(|(k, e, hw, ls, bs)| (*k, *e, *hw, *ls, vec![bs.concat()]))
+            .collect();
         assert_eq!(got, want);
     }
     for (corr, frame, want, answers) in &lists {
@@ -1316,7 +1472,11 @@ fn producer_batch(pid: i64, epoch: i16, seq: i32, n: usize) -> Vec<u8> {
             producer_epoch: epoch,
             timestamp_type: TimestampType::Creation,
             offset: i as i64,
-            sequence: if pid == -1 { i as i32 - 1 } else { seq.wrapping_add(i as i32) },
+            sequence: if pid == -1 {
+                i as i32 - 1
+            } else {
+                seq.wrapping_add(i as i32)
+            },
             timestamp: 1_700_000_000_000,
             key: None,
             value: Some(Bytes::from(format!("{pid}/{epoch}/{seq}/{i}"))),
@@ -1324,8 +1484,15 @@ fn producer_batch(pid: i64, epoch: i16, seq: i32, n: usize) -> Vec<u8> {
         })
         .collect();
     let mut buf = BytesMut::new();
-    RecordBatchEncoder::encode(&mut buf, &records, &RecordEncodeOptions { version: 2, compression: Compression::None })
-        .unwrap();
+    RecordBatchEncoder::encode(
+        &mut buf,
+        &records,
+        &RecordEncodeOptions {
+            version: 2,
+            compression: Compression::None,
+        },
+    )
+    .unwrap();
     buf.to_vec()
 }
 
@@ -1340,13 +1507,24 @@ fn idempotent_batches_follow_kafkas_sequence_rules() {
         // In sequence, a resend of the last batch (its original offset), a gap, an older epoch, a new epoch that
         // does not start at 0, and one that does.
         (
-            vec![b(7, 0, 0, 2), b(7, 0, 0, 2), b(7, 0, 2, 1), b(7, 0, 5, 1), b(7, 1, 3, 1), b(7, 1, 0, 1), b(7, 0, 3, 1)],
+            vec![
+                b(7, 0, 0, 2),
+                b(7, 0, 0, 2),
+                b(7, 0, 2, 1),
+                b(7, 0, 5, 1),
+                b(7, 1, 3, 1),
+                b(7, 1, 0, 1),
+                b(7, 0, 3, 1),
+            ],
             vec![(0, 0), (0, 0), (0, 2), (45, -1), (45, -1), (0, 3), (47, -1)],
         ),
         // Only the last five batches are remembered: a resend of the sixth-last is out of order, of the fifth-last
         // a duplicate.
         (
-            (0..6).map(|q| b(9, 0, q, 1)).chain([b(9, 0, 0, 1), b(9, 0, 1, 1)]).collect(),
+            (0..6)
+                .map(|q| b(9, 0, q, 1))
+                .chain([b(9, 0, 0, 1), b(9, 0, 1, 1)])
+                .collect(),
             vec![(0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (45, -1), (0, 1)],
         ),
         // A producer the partition has no state for starts at any sequence; sequences wrap past i32::MAX to 0.
@@ -1357,7 +1535,13 @@ fn idempotent_batches_follow_kafkas_sequence_rules() {
         // Batches without idempotence take offsets between another producer's and change nothing for it: its
         // resend of sequence 10 is still a duplicate of offset 0, and 12 continues it.
         (
-            vec![b(4, 2, 10, 1), b(-1, -1, 0, 3), b(4, 2, 11, 1), b(4, 2, 10, 1), b(4, 2, 12, 1)],
+            vec![
+                b(4, 2, 10, 1),
+                b(-1, -1, 0, 3),
+                b(4, 2, 11, 1),
+                b(4, 2, 10, 1),
+                b(4, 2, 12, 1),
+            ],
             vec![(0, 0), (0, 1), (0, 4), (0, 0), (0, 5)],
         ),
     ];
@@ -1365,13 +1549,23 @@ fn idempotent_batches_follow_kafkas_sequence_rules() {
         .iter()
         .enumerate()
         .map(|(i, (bs, _))| {
-            input(&artifact, "seq_case", vec![Value::Int(IntValue::U64(i as u64)), Value::Vec(bs.iter().map(|x| bytes(x)).collect())])
+            input(
+                &artifact,
+                "seq_case",
+                vec![
+                    Value::Int(IntValue::U64(i as u64)),
+                    Value::Vec(bs.iter().map(|x| bytes(x)).collect()),
+                ],
+            )
         })
         .collect();
     let r = run(&artifact, &inputs);
     let got = rows(&artifact, &r, "v_seq");
     for (i, (_, want)) in cases.iter().enumerate() {
-        let row = got.iter().find(|x| x[0] == Value::Int(IntValue::U64(i as u64))).unwrap();
+        let row = got
+            .iter()
+            .find(|x| x[0] == Value::Int(IntValue::U64(i as u64)))
+            .unwrap();
         let want = Value::Vec(
             want.iter()
                 .map(|(e, o)| Value::Tuple(vec![i16v(*e), Value::Int(IntValue::I64(*o))].into()))
@@ -1613,10 +1807,7 @@ fn reassembly_finds_exactly_the_frames_however_they_are_chunked() {
     let r = run(&artifact, &inputs);
     let got = rows(&artifact, &r, "v_feed");
     for (id, frames, bad, left) in expected {
-        let row = got
-            .iter()
-            .find(|r| r[0] == Value::Int(IntValue::U64(id)))
-            .unwrap();
+        let row = got.iter().find(|r| r[0] == Value::Int(IntValue::U64(id))).unwrap();
         let fields = match &row[1] {
             Value::Tuple(f) => f.clone(),
             other => panic!("{other:?}"),
@@ -1672,7 +1863,11 @@ fn hostile_lengths_are_malformed_requests_not_faults() {
     let r = run(&artifact, &inputs);
     let headers = rows(&artifact, &r, "v_header");
     let header_of = |f: &[u8]| headers.iter().find(|r| r[0] == bytes(f)).unwrap()[1].clone();
-    assert_eq!(header_of(&huge_tag), opt(None), "a tagged field larger than the request");
+    assert_eq!(
+        header_of(&huge_tag),
+        opt(None),
+        "a tagged field larger than the request"
+    );
     let apiv = rows(&artifact, &r, "v_apiv");
     let apiv_of = |f: &[u8]| apiv.iter().find(|r| r[0] == bytes(f)).unwrap()[1].clone();
     assert_eq!(apiv_of(&huge_string), opt(None), "a string longer than the request");

@@ -50,6 +50,7 @@ const BUILTIN_FNS: &[&str] = &[
     "rand",
     "rand_range",
     "majority",
+    "hash64",
     "range",
     "error",
 ];
@@ -2081,7 +2082,11 @@ impl<'t> Resolver<'t, '_> {
             }
             [ty, f] if ty.as_str() == "Blob" && f.as_str() == "of" => {
                 if pos.len() != 1 {
-                    self.error(code!("BLS0301"), span, format!("`Blob::of` takes 1 argument, {} given", pos.len()));
+                    self.error(
+                        code!("BLS0301"),
+                        span,
+                        format!("`Blob::of` takes 1 argument, {} given", pos.len()),
+                    );
                     return None;
                 }
                 let mut xs = Vec::new();
@@ -2142,6 +2147,20 @@ impl<'t> Resolver<'t, '_> {
                     HExprKind::Builtin {
                         f: Builtin::Error,
                         args: vec![m],
+                    },
+                    span,
+                ))
+            }
+            [name] if name.as_str() == "hash64" => {
+                let [x] = pos.as_slice() else {
+                    self.error(code!("BLS0301"), span, "`hash64` takes one value");
+                    return None;
+                };
+                let x = self.expr(cx, x)?;
+                Some(HExpr::new(
+                    HExprKind::Builtin {
+                        f: Builtin::Hash64,
+                        args: vec![x],
                     },
                     span,
                 ))

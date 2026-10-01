@@ -183,6 +183,17 @@ fn expected(view: &str, n: u64, s: &str, b: &[u8]) -> (Value, Value) {
                 vec_u([n, n + 1, 0, 0]),
             ]),
         ),
+        // The value's canonical fingerprint (blossom_value::fp), the same on both evaluators and on every node.
+        "v_hash" => {
+            let fp = |v: Value| u(blossom_value::fp::fingerprint(&v).unwrap().0);
+            (
+                u(n),
+                tuple(vec![
+                    fp(tuple(vec![u(n), Value::Str(s.into()), bytes(b)])),
+                    fp(Value::Str(s.into())),
+                ]),
+            )
+        }
         other => panic!("no expectation for {other}"),
     }
 }
@@ -207,6 +218,7 @@ const VIEWS: &[&str] = &[
     "v_range",
     "v_arms",
     "v_parse",
+    "v_hash",
 ];
 
 #[test]
