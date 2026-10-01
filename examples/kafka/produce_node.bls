@@ -43,9 +43,9 @@ durable table log_end(tid: Bytes, part: i32, next: i64) key(tid, part);
 durable table log_start(tid: Bytes, part: i32, start: i64) key(tid, part);
 durable table applied_d(tid: Bytes, part: i32, i: u64) key(tid, part);
 
-/// The partitions this broker replicates, and the ones it leads: with the group's term, and with the leader epoch
-/// Kafka's clients see, which starts at 0 for the first leader (term 1).
-view replica(tid, p) = mine(g), not is_controller(g), let (tid, p) = g;
+/// The partitions this broker replicates (or a reassignment moves to it), and the ones it leads: with the group's
+/// term, and with the leader epoch Kafka's clients see, which starts at 0 for the first leader (term 1).
+view replica(tid, p) = hosts(g), let (tid, p) = g;
 view led_term(tid, p, t) = leader(g, t), not is_controller(g), let (tid, p) = g;
 view led(tid, p, epoch) = led_term(tid, p, t), let epoch = t - 1;
 
@@ -363,7 +363,7 @@ view compactable(g, i, pos) =
     data_entry(tid, p, i, _base, last, _t, _h, _data), applied_d(tid, p, a), log_start(tid, p, s), let g = (tid, p),
     let pos = last + 1i64 where last < s && i <= a;
 /// An index at or before a group's snapshot point (committed, and compacted away).
-view compacted_at(g, i) = placed(_c, _i, _j, tid, p, i, _e, _b, _l, _s), let g = (tid, p), rsnap(g, sp, _, _) where i <= sp;
+view compacted_at(g, i) = placed(_c, _i, _j, tid, p, i, _e, _b, _l, _s), let g = (tid, p), rsnap(g, sp, _, _, _) where i <= sp;
 
 /// A follower too far behind its leader starts again at the leader's snapshot point (`install`, in `raft.bls`): its
 /// partition log empties and restarts at the position after the point, which is the leader's log start, as a Kafka
@@ -390,6 +390,30 @@ reset_segments: on reset_part(tid, p, _i, pos), segment(tid, p, b, by, mts, mb, 
     delete segment(tid, p, b, by, mts, mb, md);
 }
 reset_producers: on reset_part(tid, p, _i, _pos), producer(tid, p, pid, epoch, recent) {
+    delete producer(tid, p, pid, epoch, recent);
+}
+
+/// A partition this broker no longer hosts (a reassignment moved it away) leaves it, data and all.
+view unhosted_part(tid, p) = log_start(tid, p, _), let g = (tid, p), unhosted(g);
+drop_unhosted_part: while unhosted_part(tid, p), log_start(tid, p, s), log_end(tid, p, e), applied_d(tid, p, a), active_segment(tid, p, b) {
+    delete log_start(tid, p, s);
+    delete log_end(tid, p, e);
+    delete applied_d(tid, p, a);
+    delete active_segment(tid, p, b);
+}
+drop_unhosted_batches: while unhosted_part(tid, p), batch(tid, p, b, l, t, blob) {
+    delete batch(tid, p, b, l, t, blob);
+}
+drop_unhosted_chunks: while unhosted_part(tid, p), batch_chunk(tid, p, ch, b) {
+    delete batch_chunk(tid, p, ch, b);
+}
+drop_unhosted_times: while unhosted_part(tid, p), time_index(tid, p, sg, ts, b) {
+    delete time_index(tid, p, sg, ts, b);
+}
+drop_unhosted_segments: while unhosted_part(tid, p), segment(tid, p, b, by, mts, mb, md) {
+    delete segment(tid, p, b, by, mts, mb, md);
+}
+drop_unhosted_producers: while unhosted_part(tid, p), producer(tid, p, pid, epoch, recent) {
     delete producer(tid, p, pid, epoch, recent);
 }
 

@@ -3,7 +3,10 @@
 //!
 //! This generalizes `examples/e11_raft_kv.bls`, whose rules it follows, from one static group of a role to many
 //! groups over a relation. The includer, inside `at Broker`, defines:
-//! - `members(g, n)`: the brokers of group `g`, the same on every broker that knows `g`;
+//! - `initial_members(g, n)`: the brokers of group `g` until its log holds a configuration (below), the same on
+//!   every broker that knows `g`;
+//! - `member_id(n, id)`: each broker's member id (a configuration names its members by id);
+//! - `hosts(g)`: whether this broker keeps `g`'s log although no configuration names it yet (a member being added);
 //! - `proposals(g, xs)`: at most one row per group and tick, the entries this broker would append to `g` if it
 //!   leads it, in order: (kind, position, bytes as a blob);
 //! - `preferred(g, n)`: the member that leads a new group (Kafka's first replica leads a new partition): term 1 is
@@ -11,6 +14,14 @@
 //! - `compactable(g, i, pos)`: an index whose entries (it and every one before) this broker no longer needs, and
 //!   the position after it: they are committed and applied, and the includer has let go of what they held.
 //! and reads `rlog`, `commit_of`, `leader` and `known_leader`, and reacts to `install(g, i, pos)` (below).
+//!
+//! Membership changes (§4.2–4.3, one server at a time): a CONFIG entry holds a configuration, its members' ids. A
+//! broker's members of a group are those of the latest configuration in its log (committed or not), else of its
+//! snapshot point, else the initial members. The includer proposes CONFIG entries, each adding or removing one
+//! member, and a new one only once the last is committed, so any two configurations in use share a majority. The
+//! leader replicates to its configuration's members and counts only them toward commits; a leader its configuration
+//! leaves out steps down once that configuration is committed. A broker ignores a vote request from outside its
+//! configuration (a removed member's elections never raise its term).
 //!
 //! Compaction (§7): a broker drops the entries up to a `compactable` index, keeping that index's term and position
 //! as its snapshot point (`rsnap`): its log then starts after it. A follower the leader can no longer send entries
@@ -50,8 +61,8 @@ const CONFIG: u8 = 3;
 channel request_vote(g: Group, term: u64, last_idx: u64, last_term: u64): Broker -> Broker;
 channel vote(g: Group, term: u64, granted: bool): Broker -> Broker;
 /// InstallSnapshot: the leader of `term` has compacted its log up to `idx` (whose term is `sterm`); `pos` is the
-/// position after it.
-channel snapshot(g: Group, term: u64, idx: u64, sterm: u64, pos: i64): Broker -> Broker;
+/// position after it, and `conf` the configuration then (empty: the initial members).
+channel snapshot(g: Group, term: u64, idx: u64, sterm: u64, pos: i64, conf: Vec<i32>): Broker -> Broker;
 /// AppendEntries: the leader of `term`'s entries after its entry `prev_idx` (whose term is `prev_term`, the
 /// consistency check of §5.3), in index order: each one's index, term, kind, position and bytes.
 channel entries(g: Group, term: u64, prev_idx: u64, prev_term: u64, es: Vec<(u64, u64, u8, i64, Bytes)>): Broker -> Broker;
@@ -71,6 +82,26 @@ fn term_in(es: Vec<(u64, u64, u8, i64, Bytes)>, k: u64) -> u64 {
         Some(e) => e.1,
         None => error("raft: term_in past the end of a batch"),
     }
+}
+
+/// A configuration's bytes: its members' ids, four bytes each.
+fn encode_members(ids: Vec<i32>) -> Bytes {
+    Bytes::join(ids.map(|x| Bytes::from_i32_be(x)))
+}
+
+fn decode_members(b: Bytes) -> Vec<i32> {
+    if b.len() % 4 != 0 {
+        error("raft: a configuration whose length is not a multiple of four")
+    } else {
+        range(0, b.len() / 4).map(|k| match b.i32_be_at(k * 4) {
+            Some(x) => x,
+            None => error("raft: a configuration shorter than it says"),
+        })
+    }
+}
+
+fn no_members() -> Vec<i32> {
+    []
 }
 
 /// The bytes of a stored entry (a blob only ever holds its whole bytes).
@@ -97,8 +128,8 @@ at Broker {
     /// predecessor truncates it too.
     durable table rlog(g: Group, idx: u64, term: u64, prev: u64, kind: u8, pos: i64, data: Blob) key(g, idx);
     /// The snapshot point: the log's entries up to `idx` (of term `term`) are compacted away; `pos` is the position
-    /// after them. It only moves forward.
-    durable table rsnap(g: Group, idx: u64, term: u64, pos: i64) key(g) resolve choose_most(idx);
+    /// after them, and `conf` the configuration then (empty: the initial members). It only moves forward.
+    durable table rsnap(g: Group, idx: u64, term: u64, pos: i64, conf: Vec<i32>) key(g) resolve choose_most(idx);
 
     // ---- volatile state
     table won(g: Group, term: u64);
@@ -116,13 +147,35 @@ at Broker {
     timer raft_poll every RAFT_POLL;
     timer raft_heartbeat every RAFT_HEARTBEAT;
 
-    /// The groups this broker is a member of, and each group's size.
+    // ---- membership
+    /// Each configuration in a group's log, by index.
+    view config_rlog(g, i, data) = rlog(g, i, _, _, kind, _, data) where kind == CONFIG;
+    view config_entry(g, i, ids) = config_rlog(g, i, data), let ids = decode_members(log_bytes(data));
+    view latest_config(g, i, ids) = config_entry(g, i, ids), argmax!(i per g);
+    /// The configuration in force: the log's latest, else the snapshot point's.
+    view config_ids(g, ids) {
+        latest_config(g, _, ids);
+        rsnap(g, _, _, _, ids), not config_rlog(g: g, ..) where ids.len() > 0;
+    }
+    view configured(g) = config_ids(g, _);
+    view members(g, n) {
+        config_ids(g, ids), id in ids, member_id(n, id);
+        initial_members(g, n), not configured(g);
+    }
+    /// The groups this broker is a member of (it votes and counts), and each group's size.
     view mine(g) = members(g, self);
     view group_size(g, n = count!(m)) = members(g, m);
+    /// The groups whose log this broker keeps: its own, and one it is being added to.
+    view takes(g) {
+        mine(g);
+        hosts(g);
+    }
+    /// A group's members' ids, as configured (for the includer's membership changes).
+    view member_ids(g, ids = collect!(id)) = members(g, n), member_id(n, id);
 
     view commit_of(g, c) {
         commit(g, c);
-        mine(g), not commit(g, _), let c = 0u64;
+        takes(g), not commit(g, _), let c = 0u64;
     }
 
     /// A group gets an election deadline when this broker first knows it is a member (and after a restart). A member
@@ -156,7 +209,7 @@ at Broker {
 
     // ---- term first: a group's effective term this tick is the largest known
     view heard_term(g, t) {
-        request_vote(g, t, _, _);
+        request_vote(g, t, _, _) from c, members(g, c);
         vote(g, t, _);
         entries(g: g, term: t, ..);
         beat(g: g, term: t, ..);
@@ -164,8 +217,8 @@ at Broker {
     }
     view eff(g, t = max!(x)) {
         rterm(g, x);
-        heard_term(g, x), mine(g);
-        mine(g), let x = 0u64;
+        heard_term(g, x), takes(g);
+        takes(g), let x = 0u64;
     }
     persist_term: while eff(g, t) {
         next rterm(g, t);
@@ -177,17 +230,26 @@ at Broker {
 
     view last_log(g, i, t) {
         rlog(g: g, idx: i, term: t, ..), argmax!(i per g);
-        mine(g), not rlog(g: g, ..), rsnap(g, i, t, _);
-        mine(g), not rlog(g: g, ..), not rsnap(g, _, _, _), let i = 0u64, let t = 0u64;
+        takes(g), not rlog(g: g, ..), rsnap(g, i, t, _, _);
+        takes(g), not rlog(g: g, ..), not rsnap(g, _, _, _, _), let i = 0u64, let t = 0u64;
     }
     /// An index at or before the snapshot point: committed, and compacted away.
-    view compacted(g, i) = rlog(g: g, idx: i, ..), rsnap(g, s, _, _) where i <= s;
+    view compacted(g, i) = rlog(g: g, idx: i, ..), rsnap(g, s, _, _, _) where i <= s;
 
     // ---- compaction
-    compact: while compactable(g, i, pos), rlog(g, i, t, _, _, _, _), not snap_covers(g, i) {
-        next rsnap(g, i, t, pos);
+    /// The configuration at a compactable index: the latest at or before it, else the snapshot point's.
+    view config_le(g, i, ci) = compactable(g, i, _), config_rlog(g, ci, _) where ci <= i;
+    view config_le_max(g, i, m = max!(ci)) = config_le(g, i, ci);
+    view has_config_le(g, i) = config_le(g, i, _);
+    view snap_conf(g, i, conf) {
+        config_le_max(g, i, m), config_entry(g, m, conf);
+        compactable(g, i, _), not has_config_le(g, i), rsnap(g, _, _, _, conf);
+        compactable(g, i, _), not has_config_le(g, i), not rsnap(g, _, _, _, _), let conf = no_members();
     }
-    view snap_covers(g, i) = rsnap(g, s, _, _), compactable(g, i, _) where i <= s;
+    compact: while compactable(g, i, pos), rlog(g, i, t, _, _, _, _), not snap_covers(g, i), snap_conf(g, i, conf) {
+        next rsnap(g, i, t, pos, conf);
+    }
+    view snap_covers(g, i) = rsnap(g, s, _, _, _), compactable(g, i, _) where i <= s;
     drop_compacted: while compacted(g, i), rlog(g, i, t, pt, k, pos, data) {
         delete rlog(g, i, t, pt, k, pos, data);
     }
@@ -270,11 +332,11 @@ at Broker {
     /// The term of each entry, and 0 before the first.
     view term_at(g, i, it) {
         rlog(g: g, idx: i, term: it, ..);
-        rsnap(g, i, it, _);
-        mine(g), let i = 0u64, let it = 0u64;
+        rsnap(g, i, it, _, _);
+        takes(g), let i = 0u64, let it = 0u64;
     }
     /// Whether a follower's next entries are compacted away here: it gets the snapshot point instead.
-    view behind_snapshot(g, from) = out_from(g, _f, from), rsnap(g, s, _, _) where from < s;
+    view behind_snapshot(g, from) = out_from(g, _f, from), rsnap(g, s, _, _, _) where from < s;
     /// Where each follower's batches start this tick: after what was last sent to it, for entries appended since (in
     /// the tick after their append), and at every heartbeat after what it last acknowledged (so lost or refused
     /// batches go again).
@@ -286,8 +348,8 @@ at Broker {
         per out_from(g, f, from), not behind_snapshot(g, from), rlog(g, i, et, _pt, k, pos, data), let b = log_bytes(data)
         where i > from && i <= from + RAFT_BATCH;
     /// At a heartbeat, a follower that acknowledged less than the snapshot point gets the point.
-    send_snapshot: on raft_heartbeat, leader(g, t), match_idx(g, f, m), rsnap(g, s, st, pos) where m < s {
-        send snapshot(g, t, s, st, pos) to f;
+    send_snapshot: on raft_heartbeat, leader(g, t), match_idx(g, f, m), rsnap(g, s, st, pos, conf) where m < s {
+        send snapshot(g, t, s, st, pos, conf) to f;
     }
     replicate: while out_batch(g, f, from, es), leader(g, t), term_at(g, from, ft) {
         send entries(g, t, from, ft, es) to f;
@@ -298,34 +360,56 @@ at Broker {
     beat_followers: on raft_heartbeat, leader(g, t), match_idx(g, f, m), term_at(g, m, mt), commit_of(g, c) {
         send beat(g, t, m, mt, c) to f;
     }
-    on_ack: on ack(g, t, m) from f, leader(g, t) {
+    on_ack: on ack(g, t, m) from f, leader(g, t), members(g, f) {
         next match_idx(g, f, m);
     }
-    /// How many followers store at least index `i`, for each index a follower acknowledged.
-    view support(g, i, n = count!(f)) = leader(g, _), match_idx(g, _, i), match_idx(g, f, m) where m >= i;
-    /// The highest index a majority stores (the leader holds its whole log, and counts itself). It is committed if it
-    /// is of the leader's term (§5.4.2).
-    view quorum(g, i = max!(j)) = support(g, j, n), group_size(g, k) where (n + 1) * 2 > k;
+    /// The leader follows its configuration's members: one added gets its records (and its entries from the start,
+    /// at the next heartbeat), one removed loses them.
+    view tracked(g, f) = rsent(g, f, _);
+    track: while leader(g, _), members(g, f), last_log(g, li, _), not tracked(g, f) where f != self {
+        next rsent(g, f, li);
+        next match_idx(g, f, 0);
+    }
+    untrack_sent: while rsent(g, f, s), not members(g, f) {
+        delete rsent(g, f, s);
+    }
+    untrack_match: while match_idx(g, f, m), not members(g, f) {
+        delete match_idx(g, f, m);
+    }
+    /// How many of the configuration's other members store at least index `i`, for each index one acknowledged.
+    view support(g, i, n = count!(f)) = leader(g, _), match_idx(g, _, i), match_idx(g, f, m), members(g, f) where m >= i;
+    /// The highest index a majority of the configuration stores (the leader holds its whole log, and counts itself
+    /// if the configuration names it). It is committed if it is of the leader's term (§5.4.2).
+    view quorum_at(g, j) {
+        support(g, j, n), group_size(g, k), mine(g) where (n + 1) * 2 > k;
+        support(g, j, n), group_size(g, k), not mine(g) where n * 2 > k;
+    }
+    view quorum(g, i = max!(j)) = quorum_at(g, j);
     advance_commit: while quorum(g, i), leader(g, t), rlog(g: g, idx: i, term: t, ..), commit_of(g, c) where i > c {
         next commit(g, i);
     }
     /// A leader alone in its group is a majority.
-    advance_alone: while leader(g, t), group_size(g, k), last_log(g, li, lt), commit_of(g, c)
+    advance_alone: while leader(g, t), mine(g), group_size(g, k), last_log(g, li, lt), commit_of(g, c)
         where k == 1 && lt == t && li > c {
         next commit(g, li);
+    }
+    /// A leader its configuration leaves out steps down once that configuration is committed (§4.2.2).
+    view config_committed(g) = latest_config(g, i, _), commit_of(g, c) where i <= c;
+    step_down: while leader(g, t), not mine(g), config_committed(g) {
+        delete won(g, t);
     }
 
     // ---- replication, follower side
     /// Batches of the leader of our term whose predecessor matches our log (or that start the log).
     /// A predecessor at or before the snapshot point matches: those entries are committed, the same everywhere.
     view batch_taken(g, l, t, p, pt, es) {
-        entries(g, t, p, pt, es) from l, eff(g, t), mine(g), rlog(g: g, idx: p, term: pt, ..);
-        entries(g, t, p, pt, es) from l, eff(g, t), mine(g) where p == 0;
-        entries(g, t, p, pt, es) from l, eff(g, t), mine(g), rsnap(g, s, _, _) where p <= s;
+        entries(g, t, p, pt, es) from l, eff(g, t), takes(g), rlog(g: g, idx: p, term: pt, ..);
+        entries(g, t, p, pt, es) from l, eff(g, t), takes(g) where p == 0;
+        entries(g, t, p, pt, es) from l, eff(g, t), takes(g), rsnap(g, s, _, _, _) where p <= s;
     }
     view snap_at(g, s) {
-        rsnap(g, s, _, _);
-        mine(g), not rsnap(g, _, _, _), let s = 0u64;
+        rsnap(g, s, _, _, _);
+        takes(g), not rsnap(g, _, _, _, _), let s = 0u64;
     }
     view incoming(g, i, et, pt, k, pos, b) = batch_taken(g, _l, _t, p, ppt, es), snap_at(g, s), e in chained(p, ppt, es),
         let i = e.0, let et = e.1, let pt = e.2, let k = e.3, let pos = e.4, let b = e.5 where i > s;
@@ -345,28 +429,28 @@ at Broker {
     }
     /// A heartbeat whose `prev` matches confirms our log up to it and tells us the commit index.
     view beat_ok(g, l, t, p, c) {
-        beat(g, t, p, pt, c) from l, eff(g, t), mine(g), rlog(g: g, idx: p, term: pt, ..);
-        beat(g, t, p, pt, c) from l, eff(g, t), mine(g) where p == 0;
-        beat(g, t, p, _pt, c) from l, eff(g, t), mine(g), rsnap(g, s, _, _) where p <= s;
+        beat(g, t, p, pt, c) from l, eff(g, t), takes(g), rlog(g: g, idx: p, term: pt, ..);
+        beat(g, t, p, pt, c) from l, eff(g, t), takes(g) where p == 0;
+        beat(g, t, p, _pt, c) from l, eff(g, t), takes(g), rsnap(g, s, _, _, _) where p <= s;
     }
     /// A snapshot point past this broker's log: it drops its log and takes the point (Fig. 13). One that its log
     /// already reaches (it holds that entry, or has compacted past it) changes nothing but is acknowledged.
-    view snapshot_new(g, l, t, i, st, pos) =
-        snapshot(g, t, i, st, pos) from l, eff(g, t), mine(g), not holds_point(g, i, st);
+    view snapshot_new(g, l, t, i, st, pos, conf) =
+        snapshot(g, t, i, st, pos, conf) from l, eff(g, t), takes(g), not holds_point(g, i, st);
     view holds_point(g, i, st) {
         rlog(g: g, idx: i, term: st, ..);
-        rsnap(g, s, _, _), snapshot(g: g, idx: i, sterm: st, ..) where s >= i;
+        rsnap(g, s, _, _, _), snapshot(g: g, idx: i, sterm: st, ..) where s >= i;
     }
     /// The includer resets the group's state to `pos` in this tick.
-    view install(g, i, pos) = snapshot_new(g, _l, _t, i, _st, pos);
-    take_snapshot: on snapshot_new(g, l, t, i, st, pos) {
-        next rsnap(g, i, st, pos);
+    view install(g, i, pos) = snapshot_new(g, _l, _t, i, _st, pos, _conf);
+    take_snapshot: on snapshot_new(g, l, t, i, st, pos, conf) {
+        next rsnap(g, i, st, pos, conf);
         next commit(g, i);
     }
-    drop_for_snapshot: on snapshot_new(g, _l, _t, _i, _st, _pos), rlog(g, j, jt, jp, k, pos, data) {
+    drop_for_snapshot: on snapshot_new(g, _l, _t, _i, _st, _pos, _conf), rlog(g, j, jt, jp, k, pos, data) {
         delete rlog(g, j, jt, jp, k, pos, data);
     }
-    ack_snapshot: on snapshot(g, t, i, _st, _pos) from l, eff(g, t), mine(g) {
+    ack_snapshot: on snapshot(g, t, i, _st, _pos, _conf) from l, eff(g, t), takes(g) {
         emit leader_of(g, t, l);
         send ack(g, t, i) to l;
     }
@@ -375,10 +459,10 @@ at Broker {
         send ack(g, t, p) to l;
         next commit(g, if c < p { c } else { p });
     }
-    lagging: on beat(g: g, term: t, ..) from l, eff(g, t), mine(g), not beat_ok(g, l, t, _, _) {
+    lagging: on beat(g: g, term: t, ..) from l, eff(g, t), takes(g), not beat_ok(g, l, t, _, _) {
         emit leader_of(g, t, l);
     }
-    hear_commit: on beat(g: g, term: t, commit: c, ..), eff(g, t), mine(g) {
+    hear_commit: on beat(g: g, term: t, commit: c, ..), eff(g, t), takes(g) {
         next heard_commit(g, c);
     }
     /// The commit index as far as this broker knows: a leader's own, or the one its leader announced.

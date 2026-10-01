@@ -207,6 +207,8 @@ fn the_blossom_client_and_a_rust_client_see_the_same_answers() {
             (20, 6, 6),
             (22, 3, 5),
             (32, 4, 4),
+            (45, 0, 1),
+            (46, 0, 0),
             (60, 0, 2),
         ],
     );

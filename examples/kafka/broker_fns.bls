@@ -65,6 +65,10 @@ fn stateful_body_ok(key: i16, fr: Bytes) -> bool {
             frame_prefix(fr).and_then(|p| decode_list_offsets(b, p.1)).is_some()
         } else if key == API_DESCRIBE_CLUSTER {
             frame_prefix(fr).and_then(|p| decode_describe_cluster(b, p.1)).is_some()
+        } else if key == API_ALTER_PARTITION_REASSIGNMENTS {
+            frame_prefix(fr).and_then(|p| decode_alter_reassignments(b, p.1)).is_some()
+        } else if key == API_LIST_PARTITION_REASSIGNMENTS {
+            decode_list_reassignments(b).is_some()
         } else {
             error("stateful_body_ok: a supported API with no decoder here")
         }

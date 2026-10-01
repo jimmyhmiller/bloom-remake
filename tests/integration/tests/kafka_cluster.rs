@@ -28,14 +28,16 @@ use blossom_value::time::NodeId;
 use blossom_value::value::IntValue;
 use blossom_value::{BlobRef, Value};
 use bytes::{Bytes, BytesMut};
+use kafka_protocol::messages::alter_partition_reassignments_request::{ReassignablePartition, ReassignableTopic};
 use kafka_protocol::messages::create_topics_request::{CreatableTopic, CreatableTopicConfig};
 use kafka_protocol::messages::fetch_request::{FetchPartition, FetchTopic};
 use kafka_protocol::messages::metadata_request::MetadataRequestTopic;
 use kafka_protocol::messages::produce_request::{PartitionProduceData, TopicProduceData};
 use kafka_protocol::messages::{
-    CreateTopicsRequest, CreateTopicsResponse, FetchRequest, FetchResponse, InitProducerIdRequest,
-    InitProducerIdResponse, MetadataRequest, MetadataResponse, ProduceRequest, ProduceResponse, ProducerId,
-    RequestHeader, ResponseHeader, TopicName,
+    AlterPartitionReassignmentsRequest, AlterPartitionReassignmentsResponse, BrokerId, CreateTopicsRequest,
+    CreateTopicsResponse, FetchRequest, FetchResponse, InitProducerIdRequest, InitProducerIdResponse,
+    ListPartitionReassignmentsRequest, ListPartitionReassignmentsResponse, MetadataRequest, MetadataResponse,
+    ProduceRequest, ProduceResponse, ProducerId, RequestHeader, ResponseHeader, TopicName,
 };
 use kafka_protocol::protocol::{Decodable, Encodable, HeaderVersion, StrBytes};
 use kafka_protocol::records::{Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType};
@@ -198,8 +200,14 @@ struct Shared {
     /// epoch the reader had wrong.
     reads: Vec<(i64, i64, BlobRef)>,
     fenced: usize,
+    /// The reader's last state, for a failure's report: its next offset per partition and what it knows of leaders.
+    reader_state: String,
     /// Fetches right after an `acks=1` batch (see `Client::probing`).
     probes: usize,
+    /// The replicas the admin client last reassigned each partition to, once that reassignment was done.
+    reassigned: BTreeMap<i32, Vec<i32>>,
+    /// Reassignment waves finished.
+    waves: usize,
 }
 
 #[cfg(test)]
@@ -529,7 +537,8 @@ impl Client {
                         return Err(format!("the topic has {} partitions", t.partitions.len()));
                     }
                     for part in &t.partitions {
-                        if part.replica_nodes.len() != REPLICATION as usize {
+                        // During a reassignment the replicas shown are the target's and those it removes.
+                        if part.replica_nodes.len() < REPLICATION as usize {
                             return Err(format!(
                                 "partition {} has replicas {:?}",
                                 part.partition_index, part.replica_nodes
@@ -858,6 +867,7 @@ impl Reader {
                     }
                     sh.reads.push((i64::from(self.part), base, BlobRef::of(b)));
                     self.next.insert(self.part, base + offsets_of(b));
+                    sh.reader_state = format!("next {:?} leaders {:?}", self.next, self.leaders);
                     at += 12 + len;
                 }
                 if at == 0 {
@@ -948,6 +958,191 @@ impl StreamClient for Reader {
     }
 }
 
+/// An administrator: once the topic exists, it reassigns every partition to new replicas (AlterPartitionReassignments
+/// at any broker), then asks ListPartitionReassignments until none is in progress, for each wave in turn (item 5).
+#[cfg(test)]
+struct Admin {
+    shared: Rc<RefCell<Shared>>,
+    rng: Rng,
+    brokers: BTreeMap<i32, NodeId>,
+    /// Each wave: per partition, its target replicas.
+    waves: Vec<Vec<(i32, Vec<i32>)>>,
+    wave: usize,
+    /// 0 waiting to start; 1 asking for the wave; 2 polling until it is done; 3 finished.
+    phase: u8,
+    /// When it may start, and polls in a row that found nothing in progress.
+    start: i64,
+    quiet: u32,
+    conn: Option<NodeId>,
+    open: bool,
+    buf: Vec<u8>,
+    corr: i32,
+    pending: Option<i64>,
+}
+
+#[cfg(test)]
+impl Admin {
+    fn send(&mut self, now: i64, a: &mut StreamAction) {
+        self.corr += 1;
+        a.send = if self.phase == 1 {
+            let mut by_topic = Vec::new();
+            for (p, target) in &self.waves[self.wave] {
+                by_topic.push(
+                    ReassignablePartition::default()
+                        .with_partition_index(*p)
+                        .with_replicas(Some(target.iter().map(|x| BrokerId(*x)).collect())),
+                );
+            }
+            let req = AlterPartitionReassignmentsRequest::default()
+                .with_timeout_ms(1_000)
+                .with_allow_replication_factor_change(true)
+                .with_topics(vec![
+                    ReassignableTopic::default()
+                        .with_name(TopicName(StrBytes::from_string(TOPIC.into())))
+                        .with_partitions(by_topic),
+                ]);
+            framed(45, 1, self.corr, &req)
+        } else {
+            framed(
+                46,
+                0,
+                self.corr,
+                &ListPartitionReassignmentsRequest::default().with_timeout_ms(1_000),
+            )
+        };
+        self.pending = Some(now + REQUEST_TIMEOUT);
+    }
+
+    fn answered(&mut self, now: i64, mut body: Bytes) -> Result<(), String> {
+        if self.phase == 1 {
+            ResponseHeader::decode(&mut body, AlterPartitionReassignmentsResponse::header_version(1))
+                .map_err(|x| x.to_string())?;
+            let r = AlterPartitionReassignmentsResponse::decode(&mut body, 1).map_err(|x| x.to_string())?;
+            let codes: Vec<i16> = r
+                .responses
+                .iter()
+                .flat_map(|t| t.partitions.iter().map(|p| p.error_code))
+                .collect();
+            if r.error_code != 0 || codes.len() != self.waves[self.wave].len() {
+                return Err(format!("a reassignment answered {r:?}"));
+            }
+            if codes.iter().all(|c| *c == 0) {
+                self.phase = 2;
+                self.quiet = 0;
+            } else if !codes.iter().all(|c| *c == 0 || *c == REQUEST_TIMED_OUT) {
+                return Err(format!("a reassignment was refused: {r:?}"));
+            }
+            // Timed out (the controller was unavailable): asked again (the same targets).
+        } else {
+            ResponseHeader::decode(&mut body, ListPartitionReassignmentsResponse::header_version(0))
+                .map_err(|x| x.to_string())?;
+            let r = ListPartitionReassignmentsResponse::decode(&mut body, 0).map_err(|x| x.to_string())?;
+            if r.error_code != 0 {
+                return Err(format!("listing reassignments answered {r:?}"));
+            }
+            for t in &r.topics {
+                for p in &t.partitions {
+                    let want: Vec<i32> = self.waves[self.wave]
+                        .iter()
+                        .find(|x| x.0 == p.partition_index)
+                        .map(|x| x.1.clone())
+                        .unwrap_or_default();
+                    let adding: Vec<i32> = p.adding_replicas.iter().map(|b| b.0).collect();
+                    if !adding.iter().all(|b| want.contains(b)) {
+                        return Err(format!(
+                            "partition {} adds {adding:?}, not in its target {want:?}",
+                            p.partition_index
+                        ));
+                    }
+                }
+            }
+            // Three answers in a row with nothing in progress (from brokers that may lag the controller): done.
+            self.quiet = if r.topics.is_empty() { self.quiet + 1 } else { 0 };
+            if self.quiet >= 3 {
+                let mut sh = self.shared.borrow_mut();
+                for (p, target) in &self.waves[self.wave] {
+                    sh.reassigned.insert(*p, target.clone());
+                }
+                sh.waves += 1;
+                self.wave += 1;
+                self.phase = if self.wave < self.waves.len() { 1 } else { 3 };
+                self.start = now + 300_000_000;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl StreamClient for Admin {
+    fn on(&mut self, now: i64, e: StreamEvent<'_>) -> Result<StreamAction, String> {
+        let mut a = StreamAction::default();
+        match e {
+            StreamEvent::Wake => {
+                if self.pending.is_some_and(|d| now >= d) {
+                    self.pending = None;
+                    a.close = true;
+                } else if self.phase == 0 && now >= self.start {
+                    self.phase = 1;
+                }
+                if self.phase != 0 && self.phase != 3 && self.pending.is_none() && now >= self.start && !a.close {
+                    match self.conn {
+                        None => {
+                            let ids: Vec<NodeId> = self.brokers.values().copied().collect();
+                            let n = ids[self.rng.below(ids.len() as u64) as usize];
+                            self.conn = Some(n);
+                            self.open = false;
+                            a.connect = Some((n, Arc::from("kafka")));
+                        }
+                        Some(_) if self.open => self.send(now, &mut a),
+                        Some(_) => {}
+                    }
+                }
+                if self.phase != 3 {
+                    a.wake = Some(now + 50_000_000);
+                }
+            }
+            StreamEvent::Opened => {
+                self.open = true;
+                self.buf.clear();
+                if self.phase != 0 && self.phase != 3 && self.pending.is_none() {
+                    self.send(now, &mut a);
+                }
+            }
+            StreamEvent::Received(b) => {
+                self.buf.extend_from_slice(b);
+                let Some(n) = self
+                    .buf
+                    .get(..4)
+                    .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
+                else {
+                    return Ok(a);
+                };
+                if self.buf.len() < 4 + n {
+                    return Ok(a);
+                }
+                let body = Bytes::copy_from_slice(&self.buf[4..4 + n]);
+                self.buf.drain(..4 + n);
+                if self.pending.take().is_none() {
+                    return Err("a response with no request in flight".into());
+                }
+                self.answered(now, body)?;
+                // Each poll goes to another broker, a while later.
+                a.close = true;
+                a.wake = Some(now + 100_000_000);
+            }
+            StreamEvent::Closed(_) => {
+                self.pending = None;
+                self.conn = None;
+                self.open = false;
+                self.buf.clear();
+                a.wake = Some(now + 20_000_000);
+            }
+        }
+        Ok(a)
+    }
+}
+
 #[cfg(test)]
 fn int(v: &Value) -> i64 {
     match v {
@@ -965,6 +1160,8 @@ struct Setup {
     brokers: u32,
     seeds: std::ops::RangeInclusive<u64>,
     faults: bool,
+    /// Reassignment waves the admin client runs (none: no admin client).
+    waves: Vec<Vec<(i32, Vec<i32>)>>,
     clients: u64,
     requests: u32,
     idempotent: bool,
@@ -1019,7 +1216,7 @@ fn check_runs(setup: &Setup) -> Totals {
             partitions: setup.faults,
             stream_drops: setup.faults,
             downtime: 400_000_000,
-            duration: 12_000_000_000,
+            duration: 14_000_000_000,
             chunk_max: 64 + (seed as usize % 5) * 200,
             externs: Arc::new(blossom_std_host::registry().unwrap()),
             ..ClusterConfig::default()
@@ -1040,8 +1237,25 @@ fn check_runs(setup: &Setup) -> Totals {
             seed,
             shared.clone(),
             brokers.clone(),
-            11_000_000_000,
+            13_500_000_000,
         )));
+        if !setup.waves.is_empty() {
+            cluster.stream_client(Box::new(Admin {
+                shared: shared.clone(),
+                rng: Rng(seed * 31 + 7),
+                brokers: brokers.clone(),
+                waves: setup.waves.clone(),
+                wave: 0,
+                phase: 0,
+                start: 800_000_000,
+                quiet: 0,
+                conn: None,
+                open: false,
+                buf: Vec::new(),
+                corr: 0,
+                pending: None,
+            }));
+        }
         for c in 0..setup.clients {
             let mut client = Client::new(
                 c,
@@ -1065,7 +1279,7 @@ fn check_runs(setup: &Setup) -> Totals {
         );
         // The faults stop; the cluster settles (every broker back up, every replica caught up).
         cluster.heal();
-        cluster.step_until(12_000_000_000).unwrap();
+        cluster.step_until(14_000_000_000).unwrap();
         assert!(
             cluster.violation().is_none(),
             "{}",
@@ -1092,6 +1306,51 @@ fn check_runs(setup: &Setup) -> Totals {
             replicas.insert(int(&r[1]), rs.iter().map(|x| int(x) as i32).collect());
         }
         assert_eq!(replicas.len(), PARTITIONS as usize, "seed {seed}: {replicas:?}");
+        // Every wave finished, and each partition is on the replicas the last one moved it to; no reassignment is
+        // left, and the brokers it left hold nothing of it.
+        if !setup.waves.is_empty() {
+            let sh = shared.borrow();
+            assert_eq!(
+                sh.waves,
+                setup.waves.len(),
+                "{}",
+                fail(&cluster, "the reassignments did not finish")
+            );
+            for (p, target) in &sh.reassigned {
+                assert_eq!(
+                    replicas.get(&i64::from(*p)),
+                    Some(target),
+                    "seed {seed}: partition {p}'s replicas"
+                );
+            }
+            for s in &states {
+                assert_eq!(
+                    s.rows(rel("mreassign")).count(),
+                    0,
+                    "seed {seed}: a reassignment is left"
+                );
+            }
+            for (p, rs) in &replicas {
+                for (id, n) in &brokers {
+                    if rs.contains(id) {
+                        continue;
+                    }
+                    let s = &states[n.0 as usize];
+                    let held = s
+                        .rows(rel("log_start"))
+                        .filter(|r| r[0] == tid && int(&r[1]) == *p)
+                        .count()
+                        + s.rows(rel("batch")).filter(|r| r[0] == tid && int(&r[1]) == *p).count()
+                        + s.rows(rel("rlog"))
+                            .filter(|r| matches!(&r[0], Value::Tuple(g) if g[0] == tid && int(&g[1]) == *p))
+                            .count();
+                    assert_eq!(
+                        held, 0,
+                        "seed {seed}: broker {id} still holds rows of partition {p} it left"
+                    );
+                }
+            }
+        }
         let mut max_term = 0;
         for s in &states {
             for r in s.rows(rel("rterm")) {
@@ -1221,11 +1480,15 @@ fn check_runs(setup: &Setup) -> Totals {
             );
         }
         // Reading on after the faults stopped, it read every partition to its end.
+        let ends: BTreeMap<i64, i64> = logs.iter().map(|(p, l)| (*p, l.2)).collect();
         assert_eq!(
             sh.reads.len(),
             at.len(),
             "{}",
-            fail(&cluster, "the reader did not read every batch")
+            fail(
+                &cluster,
+                &format!("the reader did not read every batch: {} ends {ends:?}", sh.reader_state)
+            )
         );
         totals.read += sh.reads.len();
         totals.probes += sh.probes;
@@ -1268,6 +1531,7 @@ fn three_brokers_replicate_every_partition() {
         brokers: 3,
         seeds: 1..=2,
         faults: false,
+        waves: Vec::new(),
         clients: 3,
         requests: 40,
         idempotent: false,
@@ -1284,6 +1548,7 @@ fn three_brokers_keep_acknowledged_records_under_faults() {
         brokers: 3,
         seeds: 1..=6,
         faults: true,
+        waves: Vec::new(),
         clients: 3,
         requests: 60,
         idempotent: false,
@@ -1300,6 +1565,7 @@ fn five_brokers_with_idempotent_producers_store_each_batch_once() {
         brokers: 5,
         seeds: 1..=4,
         faults: true,
+        waves: Vec::new(),
         clients: 3,
         requests: 50,
         idempotent: true,
@@ -1504,5 +1770,28 @@ fn a_follower_behind_its_leaders_log_start_catches_up_from_a_snapshot() {
             .filter(|x| x.produce.acks == -1 && matches!(x.answer, Some((0, _))))
             .count();
         assert!(acked > 60, "seed {seed}: only {acked} acknowledged");
+    }
+}
+
+/// Item 5: five brokers, each partition moved to new replicas twice while producers and a reader run (the second
+/// wave moves every partition off replicas the first put it on, and some off their leader), without and with
+/// faults. Each change of a partition's members goes through its log, one replica at a time.
+#[test]
+fn reassignments_move_partitions_under_load() {
+    let waves = vec![
+        vec![(0, vec![4, 5, 1]), (1, vec![5, 1, 2]), (2, vec![1, 2, 3])],
+        vec![(0, vec![2, 3, 4]), (1, vec![3, 4, 5]), (2, vec![4, 5, 1])],
+    ];
+    for faults in [false, true] {
+        let t = check_runs(&Setup {
+            brokers: 5,
+            seeds: 1..=2,
+            faults,
+            waves: waves.clone(),
+            clients: 3,
+            requests: 60,
+            idempotent: true,
+        });
+        assert!(t.acked_all > 200, "faults {faults}: {t:?}");
     }
 }
