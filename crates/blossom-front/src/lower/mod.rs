@@ -41,6 +41,8 @@ pub struct Lowered {
     pub rels: Vec<RelId>,
     /// For every HIR relation: the IR column of each declared column.
     pub surface: Vec<(RelId, Vec<usize>)>,
+    /// For every IR function: the HIR function it was lowered from (the first, for merged generic instances).
+    pub fn_origins: Vec<crate::hir::HFnId>,
 }
 
 /// Lowers a type-checked HIR for a deployment.
@@ -79,6 +81,8 @@ pub fn lower(hir: &Hir, deployment: &Deployment<'_>) -> Result<Lowered, Internal
         resolved: BTreeMap::new(),
         labels: BTreeSet::new(),
         rel_names: BTreeSet::new(),
+        fns: Vec::new(),
+        fn_origins: Vec::new(),
     };
     l.declare_lattices()?;
     for r in &hir.roles {
@@ -119,7 +123,13 @@ pub fn lower(hir: &Hir, deployment: &Deployment<'_>) -> Result<Lowered, Internal
             errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
         )
     })?;
-    Ok(Lowered { program, rels, surface })
+    let fn_origins = l.fn_origins;
+    Ok(Lowered {
+        program,
+        rels,
+        surface,
+        fn_origins,
+    })
 }
 
 pub(crate) fn ir(e: IrError) -> InternalError {
@@ -141,6 +151,11 @@ pub(crate) struct Lowerer<'h> {
     pub resolved: BTreeMap<HRelId, RelId>,
     labels: BTreeSet<String>,
     rel_names: BTreeSet<String>,
+    /// HIR function → IR function: an instance of a generic function shares the IR function of the first instance
+    /// with its template, type arguments and function arguments.
+    pub fns: Vec<blossom_base::FnId>,
+    /// IR function → the HIR function it was lowered from.
+    pub fn_origins: Vec<crate::hir::HFnId>,
 }
 
 pub(crate) fn attrs() -> RelAttrs {

@@ -15,6 +15,7 @@
 //! matter either. Bodies, statements and expressions are resolved in [`body`].
 
 mod body;
+mod generic;
 mod types;
 
 pub(crate) use types::int_value;
@@ -220,6 +221,8 @@ pub(crate) struct ModScope<'t> {
     pub broken: BTreeSet<Symbol>,
     /// Pure functions declared in this module, by name (LANGUAGE §16.1).
     pub fns: BTreeMap<Symbol, HFnId>,
+    /// Generic functions (and functions with function parameters) declared in this module: their templates.
+    pub generic_fns: BTreeMap<Symbol, usize>,
 }
 
 impl ModScope<'_> {
@@ -238,6 +241,7 @@ impl ModScope<'_> {
             own_items: None,
             broken: BTreeSet::new(),
             fns: BTreeMap::new(),
+            generic_fns: BTreeMap::new(),
         }
     }
 }
@@ -294,6 +298,14 @@ pub(crate) struct Resolver<'t, 'd> {
     pub param_bindings: BTreeMap<String, crate::api::ParamBinding>,
     /// The parameters declared, to report bindings of names that are not parameters.
     pub params_declared: BTreeSet<String>,
+    /// Generic functions' templates (LANGUAGE §16.1), instantiated per call.
+    pub templates: Vec<generic::Template<'t>>,
+    /// The functions each generic function instance calls, for the recursion check (BLS0213).
+    pub instance_calls: BTreeMap<HFnId, BTreeSet<HFnId>>,
+    /// The templates being instantiated, innermost last: a template met again is recursive.
+    pub instantiating: Vec<usize>,
+    /// Templates already reported recursive.
+    pub recursive: BTreeSet<usize>,
 }
 
 impl<'t, 'd> Resolver<'t, 'd> {
@@ -336,6 +348,10 @@ impl<'t, 'd> Resolver<'t, 'd> {
             spec: None,
             param_bindings: BTreeMap::new(),
             params_declared: BTreeSet::new(),
+            templates: Vec::new(),
+            instance_calls: BTreeMap::new(),
+            instantiating: Vec::new(),
+            recursive: BTreeSet::new(),
         }
     }
 
@@ -1727,6 +1743,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             own_items: Some(&module.items),
             broken: Default::default(),
             fns: BTreeMap::new(),
+            generic_fns: BTreeMap::new(),
         });
         // Value and relation parameters.
         let mut given: BTreeMap<Symbol, &'t ast::Expr> = BTreeMap::new();
@@ -1937,6 +1954,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             own_items: Some(&p.items),
             broken: Default::default(),
             fns: BTreeMap::new(),
+            generic_fns: BTreeMap::new(),
         });
         for item in &p.items {
             match &item.kind {

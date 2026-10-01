@@ -44,6 +44,7 @@ pub fn check(hir: &mut Hir, diags: &mut Diagnostics) -> Result<(), InternalError
         bindings: BTreeMap::new(),
         closures: BTreeMap::new(),
         fn_sigs: Vec::new(),
+        fn_terms: BTreeMap::new(),
         role_edges: Vec::new(),
         conjunct_eq: false,
         placed: None,
@@ -247,6 +248,9 @@ struct Checker<'d> {
     closures: BTreeMap<T, (Vec<T>, T)>,
     /// Each function's parameter and result types, by `HFnId`.
     fn_sigs: Vec<(Vec<TypeId>, TypeId)>,
+    /// Each generic function instance's terms, by `HFnId`: its parameters', its result's, and its type parameters'.
+    /// Its one call and its body share them, so the call infers the type parameters (LANGUAGE §16.1).
+    fn_terms: BTreeMap<usize, InstanceTerms>,
     /// Flows between `Node` leaves: `(from, to, check, span)`. Roles are solved over them once shapes are known.
     role_edges: Vec<(T, T, bool, Span)>,
     /// The role the rule being walked is placed at, if any.
@@ -263,6 +267,13 @@ struct Checker<'d> {
     /// `Node` leaves a flow created, whose role is only what flows in (nothing, for a `None`'s): the roots of classes
     /// that no declared type joined.
     free: BTreeSet<T>,
+}
+
+#[derive(Clone, Debug)]
+struct InstanceTerms {
+    params: Vec<T>,
+    ret: T,
+    tparams: Vec<T>,
 }
 
 /// A `Node` position's role, as solved: no value reaches it (`Bot`), members of one role, or any node.
@@ -982,12 +993,17 @@ impl Checker<'_> {
             .collect();
         // A fresh `Node` position starts as `Node` (any node), so that type must exist.
         intern(&mut hir.types, TypeDef::Node(None));
+        self.instances(hir);
         self.walk(hir);
         self.solve(hir);
         if self.diags.error_count() > self.errors_before {
             return;
         }
         self.solve_roles(hir);
+        if self.diags.error_count() > self.errors_before {
+            return;
+        }
+        self.instance_types(hir);
         if self.diags.error_count() > self.errors_before {
             return;
         }
@@ -999,6 +1015,147 @@ impl Checker<'_> {
         self.finish(hir);
         lattice_keys(hir, self.diags);
         constant_facts(hir, self.diags);
+    }
+
+    /// The terms of each generic function instance (LANGUAGE §16.1): a fresh term per type parameter, its
+    /// signature over them, and each function argument's signature unified with its parameter's type.
+    fn instances(&mut self, hir: &mut Hir) {
+        for i in 0..hir.fns.len() {
+            let Some(scheme) = hir.fns.get(i).and_then(|f| f.scheme.clone()) else {
+                continue;
+            };
+            let tparams: Vec<T> = scheme.tparams.iter().map(|_| self.fresh(false)).collect();
+            let params = scheme
+                .params
+                .iter()
+                .map(|t| self.scheme_term(hir, t, &tparams))
+                .collect();
+            let ret = self.scheme_term(hir, &scheme.ret, &tparams);
+            for (name, fty, g) in &scheme.fn_args {
+                let Some((gparams, gret)) = self.fn_sigs.get(g.index()).cloned() else {
+                    self.bugs
+                        .push(internal_error!("function argument {g:?} was not declared"));
+                    continue;
+                };
+                let gname = hir.fns.get(g.index()).map(|f| f.name.clone());
+                if gparams.len() != fty.params.len() {
+                    self.error(
+                        scheme.call,
+                        format!(
+                            "`{}` takes {} argument(s), but `{}` of `{}` is called with {}",
+                            gname.map(|n| n.to_string()).unwrap_or_default(),
+                            gparams.len(),
+                            name.as_str(),
+                            scheme.generic,
+                            fty.params.len()
+                        ),
+                    );
+                    continue;
+                }
+                for (gp, p) in gparams.iter().zip(&fty.params) {
+                    let a = self.of_type(hir, *gp);
+                    let b = self.scheme_term(hir, p, &tparams);
+                    self.unify(&hir.types, a, b, scheme.call);
+                }
+                let a = self.of_type(hir, gret);
+                let b = self.scheme_term(hir, &fty.ret, &tparams);
+                self.unify(&hir.types, a, b, scheme.call);
+            }
+            self.fn_terms.insert(i, InstanceTerms { params, ret, tparams });
+        }
+    }
+
+    /// The term of a signature type, the type parameters being `tparams`.
+    fn scheme_term(&mut self, hir: &Hir, t: &HTy, tparams: &[T]) -> T {
+        let shape = match t {
+            HTy::Con(ty) => return self.of_type(hir, *ty),
+            HTy::Param(i) => match tparams.get(*i as usize) {
+                Some(t) => return *t,
+                None => {
+                    self.bugs
+                        .push(internal_error!("type parameter {i} of an instance is undeclared"));
+                    return self.fresh(false);
+                }
+            },
+            HTy::Tuple(ts) => Shape::Tuple(ts.iter().map(|t| self.scheme_term(hir, t, tparams)).collect()),
+            HTy::Option(t) => Shape::Option(self.scheme_term(hir, t, tparams)),
+            HTy::Vec(t) => Shape::Vec(self.scheme_term(hir, t, tparams)),
+            HTy::Set(t) => Shape::Set(self.scheme_term(hir, t, tparams)),
+            HTy::Map(k, v) => {
+                let k = self.scheme_term(hir, k, tparams);
+                Shape::Map(k, self.scheme_term(hir, v, tparams))
+            }
+        };
+        self.bound(shape)
+    }
+
+    /// Writes each generic function instance's inferred parameter and result types, once solved. Type parameters
+    /// its call does not determine are reported here, before anything in the body is.
+    fn instance_types(&mut self, hir: &mut Hir) {
+        let terms = self.fn_terms.clone();
+        for (i, inst) in terms {
+            let Some(scheme) = hir.fns.get(i).and_then(|f| f.scheme.clone()) else {
+                continue;
+            };
+            let mut known = true;
+            let mut targs = Vec::new();
+            for (name, t) in scheme.tparams.iter().zip(&inst.tparams) {
+                if let Some(ty) = self.solved(hir, *t) {
+                    targs.push(ty);
+                } else {
+                    known = false;
+                    self.error(
+                        scheme.call,
+                        format!(
+                            "cannot infer the type parameter `{}` of `{}` at this call",
+                            name.as_str(),
+                            scheme.generic
+                        ),
+                    );
+                }
+            }
+            let Some(span) = hir.fns.get(i).map(|f| f.span) else {
+                continue;
+            };
+            if !known {
+                continue;
+            }
+            let mut params = Vec::new();
+            for t in &inst.params {
+                params.push(self.solved(hir, *t));
+            }
+            let ret = self.solved(hir, inst.ret);
+            let tys: Vec<TypeId> = params.iter().flatten().copied().chain(ret).collect();
+            if tys.iter().any(|t| holds_lattice(&hir.types, *t)) {
+                self.diags.push(
+                    Diagnostic::not_implemented(
+                        blossom_base::FeatureId("LANG-182"),
+                        "a generic function instantiated with lattice types (they need a monotonicity class)",
+                        "the Blossom frontend",
+                    )
+                    .with_primary(scheme.call),
+                );
+                continue;
+            }
+            let Some(f) = hir.fns.get_mut(i) else { continue };
+            if let Some(s) = f.scheme.as_mut() {
+                s.targs = targs;
+            }
+            for ((_, slot), t) in f.params.iter_mut().zip(params) {
+                match t {
+                    Some(t) => *slot = t,
+                    None => self
+                        .bugs
+                        .push(internal_error!("an instance parameter of {span:?} is unsolved")),
+                }
+            }
+            match ret {
+                Some(t) => f.ret = t,
+                None => self
+                    .bugs
+                    .push(internal_error!("an instance result of {span:?} is unsolved")),
+            }
+        }
     }
 
     fn walk(&mut self, hir: &mut Hir) {
@@ -1118,11 +1275,15 @@ impl Checker<'_> {
         }
         hir.facts = facts;
         let mut fns = std::mem::take(&mut hir.fns);
-        for f in &mut fns {
+        for (i, f) in fns.iter_mut().enumerate() {
+            let inst = self.fn_terms.get(&i).cloned();
             if !self.apply {
-                for (v, ty) in &f.params {
+                for (k, (v, ty)) in f.params.iter().enumerate() {
                     let vt = self.var_term(f.scope, *v);
-                    let pt = self.of_type(hir, *ty);
+                    let pt = match inst.as_ref().and_then(|t| t.params.get(k)) {
+                        Some(pt) => *pt,
+                        None => self.of_type(hir, *ty),
+                    };
                     self.unify(&hir.types, vt, pt, f.span);
                 }
             }
@@ -1130,7 +1291,11 @@ impl Checker<'_> {
                 continue;
             };
             let t = self.expr(hir, f.scope, body);
-            let r = if self.apply { 0 } else { self.of_type(hir, f.ret) };
+            let r = match (&inst, self.apply) {
+                (_, true) => 0,
+                (Some(inst), false) => inst.ret,
+                (None, false) => self.of_type(hir, f.ret),
+            };
             self.coerce_site(hir, body, t, r, true);
         }
         hir.fns = fns;
@@ -2199,6 +2364,12 @@ impl Checker<'_> {
                 }
                 if self.apply {
                     self.next_term()
+                } else if let Some(inst) = self.fn_terms.get(&f.index()).cloned() {
+                    // A generic function's instance: its one call shares its terms.
+                    for (a, pt) in ts.iter().zip(&inst.params) {
+                        self.flow(*a, *pt, true, span);
+                    }
+                    self.record(inst.ret)
                 } else {
                     for (a, ty) in ts.iter().zip(&params) {
                         let pt = self.of_type(hir, *ty);
@@ -2228,6 +2399,12 @@ impl Checker<'_> {
                 }
                 let b = self.expr(hir, scope, body);
                 self.record(b)
+            }
+            HExprKind::CallParam { .. } | HExprKind::GenericCall { .. } => {
+                self.bugs.push(internal_error!(
+                    "a generic function's template call reached type checking (only instances are checked)"
+                ));
+                return 0;
             }
             HExprKind::Closure { params, body } => {
                 let ps: Vec<T> = params.iter().map(|v| self.var_term(scope, *v)).collect();

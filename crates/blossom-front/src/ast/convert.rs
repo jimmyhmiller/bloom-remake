@@ -55,7 +55,7 @@ fn children_of(node: &SyntaxNode, kind: SyntaxKind) -> impl Iterator<Item = Synt
 }
 
 /// A function's name, its parameters with their types, and its result type.
-type FnSig = (Ident, Vec<(Ident, Type)>, Type);
+type FnSig = (Ident, Vec<GenericParam>, Vec<(Ident, Type)>, Type);
 
 fn child_of(node: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxNode> {
     children_of(node, kind).next()
@@ -637,6 +637,19 @@ impl Cx<'_> {
         {
             return Type::Unsafe {
                 inner: Box::new(self.ty(&inner)),
+                span,
+            };
+        }
+        if has_token(node, FN_KW) {
+            // `fn(A, B) -> R`: the parameter types, then the result type (the last type child).
+            let mut tys: Vec<Type> = children_of(node, TYPE).map(|t| self.ty(&t)).collect();
+            let ret = tys.pop().unwrap_or(Type::Tuple {
+                elems: Vec::new(),
+                span,
+            });
+            return Type::Fn {
+                params: tys,
+                ret: Box::new(ret),
                 span,
             };
         }
@@ -1648,7 +1661,10 @@ impl Cx<'_> {
         if kinds.contains(&TYPE_KW) || kinds.contains(&LATTICE_KW) {
             return Some(self.unsupported_item("LANG-027", "host types and lattices", span));
         }
-        let (name, params, ret) = self.fn_signature(node, span)?;
+        let (name, generics, params, ret) = self.fn_signature(node, span)?;
+        if !generics.is_empty() {
+            return Some(self.unsupported_item("LANG-181", "generic host functions", span));
+        }
         let Some(path) = tokens(node).find(|t| t.kind() == STRING_LIT) else {
             self.malformed("an extern function without its host path", span);
             return None;
@@ -1671,8 +1687,13 @@ impl Cx<'_> {
             self.malformed("a function without a signature", span);
             return None;
         };
-        if child_of(&sig, GENERICS).is_some() {
-            self.unsupported("LANG-180", "generic functions", span);
+        let generics = self.generics(&sig);
+        if let Some(bound) = generics.iter().flat_map(|g| &g.bounds).next() {
+            self.unsupported(
+                "LANG-180",
+                "bounds and defaults on a function's type parameters",
+                bound.span(),
+            );
             return None;
         }
         // A class prefix (`monotone fn`, `threshold fn`, …) is a direct token of the item (LANGUAGE §16.1).
@@ -1709,18 +1730,19 @@ impl Cx<'_> {
             self.malformed("a function without a return type", span);
             return None;
         };
-        Some((name, params, ret))
+        Some((name, generics, params, ret))
     }
 
     /// `fn name(params) -> ret { body }`.
     fn fn_item(&mut self, node: &SyntaxNode, span: Span) -> Option<FnItem> {
-        let (name, params, ret) = self.fn_signature(node, span)?;
+        let (name, generics, params, ret) = self.fn_signature(node, span)?;
         let Some(body) = child_of(node, BLOCKEXPR).map(|b| self.block_expr(&b)) else {
             self.malformed("a function without a body", span);
             return None;
         };
         let mut item = FnItem {
             name,
+            generics,
             params,
             ret,
             body,

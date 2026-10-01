@@ -365,6 +365,14 @@ pub static REGISTRY: &[CodeInfo] = &[
         "`?` where it cannot return early: outside a function returning `Option`, under a branch, the right of `&&`/`||`, a nested block or a closure (§16.1)",
     ),
     info(
+        "BLS0219",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "a function type outside a function's parameter list, a function parameter neither called nor passed on, or a function argument that is not a named function (§16.1)",
+    ),
+    info(
         "BLS0300",
         Error,
         "blossom-front",
@@ -1232,8 +1240,8 @@ mod tests {
     fn codes_registry_unique() {
         assert_eq!(
             REGISTRY.len(),
-            122,
-            "LANGUAGE §20 has 118 codes; ARCHITECTURE §0.3 adds 4"
+            124,
+            "LANGUAGE §20 has 120 codes; ARCHITECTURE §0.3 adds 4"
         );
         for (a, b) in REGISTRY.iter().zip(REGISTRY.iter().skip(1)) {
             assert!(

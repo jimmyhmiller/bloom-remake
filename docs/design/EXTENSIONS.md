@@ -40,13 +40,13 @@ fn read_item(c: Cur) -> Option<(Item, Cur)> {
 ```
 
 **Semantics.** `e?` evaluates `e`; `None` makes the enclosing function return `None` at once; `Some(v)` is `v`.
-Inside a closure `?` is not allowed (BLS0215: it would return from the closure, which combinators cannot express);
+Inside a closure `?` is not allowed (BLS0218: it would return from the closure, which combinators cannot express);
 in a rule body `?` is not allowed either (a failed `let Some` already filters). Tuple patterns in `let` (`let (a,
 c) = …`) are part of this item: today a function's `let` binds one name.
 
 **Lowering.** Desugars in the frontend into nested `match`es before type checking finishes; no IR change.
 
-**Diagnostics.** `?` outside an `Option`-returning function: BLS0215 with a fix-it to change the result type.
+**Diagnostics.** `?` outside an `Option`-returning function, under a branch or in a closure: BLS0218.
 
 ### 2.2 Generic functions (LANG-180, specified, unimplemented)
 

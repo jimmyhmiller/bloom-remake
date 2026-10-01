@@ -111,6 +111,49 @@ fn swapped(b: Bytes) -> Option<(u64, u64)> {
     Some((y * z, x))
 }
 
+/// Generic functions (LANGUAGE §16.1): a counted list reader over a byte cursor, generic in its items and given the
+/// item reader; a generic helper it calls; a function parameter passed on; and a function parameter without type
+/// parameters.
+fn read_u8(b: Bytes, p: u64) -> Option<(u64, u64)> {
+    Some((b.u8_at(p)? as u64, p + 1))
+}
+fn read_pair(b: Bytes, p: u64) -> Option<((u64, u64), u64)> {
+    let (x, p) = read_u8(b, p)?;
+    let (y, p) = read_u8(b, p)?;
+    Some(((x, y), p))
+}
+fn gather<T>(steps: Vec<Option<(Vec<T>, u64)>>, start: u64) -> Option<(Vec<T>, u64)> {
+    if steps.any(|s| s.is_none()) {
+        None
+    } else {
+        let items = steps.filter_map(|s| s.map(|x| x.0)).flatten();
+        match steps.last() {
+            Some(Some(s)) => Some((items, s.1)),
+            _ => Some((items, start)),
+        }
+    }
+}
+fn read_list<T>(b: Bytes, p: u64, item: fn(Bytes, u64) -> Option<(T, u64)>) -> Option<(Vec<T>, u64)> {
+    let (n, p) = read_u8(b, p)?;
+    let steps = range(0, n % 4).scan(Some(([], p)), |acc, _i| acc.and_then(|a| item(b, a.1).map(|r| ([r.0], r.1))));
+    gather(steps, p)
+}
+fn read_list_at_1<T>(b: Bytes, item: fn(Bytes, u64) -> Option<(T, u64)>) -> Option<(Vec<T>, u64)> {
+    read_list(b, 1, item)
+}
+fn twice(x: u64, f: fn(u64) -> u64) -> u64 {
+    f(f(x))
+}
+fn bump(x: u64) -> u64 {
+    x * 3 + 1
+}
+fn first_or<T>(xs: Vec<T>, d: T) -> T {
+    match xs.first() {
+        Some(x) => x,
+        None => d,
+    }
+}
+
 /// `hash64` of a composite value inside a function, and of a string in the view.
 fn hashed(n: u64, s: String, b: Bytes) -> u64 {
     hash64((n, s, b))
@@ -135,6 +178,10 @@ view v_range(n, x) = e(n, _, _), let x = range(n, 2 * n + 1).len();
 view v_arms(n, x) = e(n, _, _), let x = arms(n);
 view v_hash(n, x) = e(n, s, b), let x = (hashed(n, s, b), hash64(s));
 view v_try(b, x) = e(_, _, b), let x = (two_bytes(b), byte_sum(b), swapped(b));
+/// Generic functions, instantiated at several types and with several functions (two calls share an instance).
+view v_generic(b, x) = e(n, s, b),
+    let x = (read_list(b, 0, read_u8), read_list(b, 0, read_pair), read_list_at_1(b, read_u8), twice(n, bump),
+             first_or(s.split_whitespace(), "none"), first_or([n % 5, n], 9), read_list(b, 0, read_u8));
 /// A `match` in a rule's `let`: its arms' variables are the arms' own (S8: they made the rule unbindable).
 view v_match(s, x) = e(_, s, _), let x = match s.parse_i64() { Some(k) if k < 100 => k + 1, Some(k) => k, None => 0 };
 /// Decimal parsing, of the words and of the number as text.

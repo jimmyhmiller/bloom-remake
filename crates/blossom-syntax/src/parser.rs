@@ -924,6 +924,11 @@ impl Parser<'_> {
         if self.guard() {
             if self.eat_ctx("unsafe") {
                 self.ty();
+            } else if self.eat(FN_KW) {
+                // `fn(A, B) -> R`: a function parameter's type (LANGUAGE §16.1).
+                self.type_tuple();
+                self.expect(ARROW);
+                self.ty();
             } else if self.at(L_PAREN) {
                 self.type_tuple();
             } else {

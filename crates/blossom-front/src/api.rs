@@ -107,8 +107,10 @@ pub fn compile_with(
     )?;
     // No evaluation may be deeper than the stack a tick runs on (LANGUAGE §16.1).
     if let Some(d) = too_deep(lowered.program.get(), |id| {
-        hir.fns
+        lowered
+            .fn_origins
             .get(id.index())
+            .and_then(|h| hir.fns.get(h.index()))
             .map(|f| (format!("function `{}`", f.name), f.span))
     }) {
         diags.push(d);
