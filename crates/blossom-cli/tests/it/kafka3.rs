@@ -172,7 +172,7 @@ impl Cluster {
             .map(|(i, n)| format!("[\"{n}\", {}, \"127.0.0.1\", {}]", i + 1, ports[i]))
             .collect();
         spec.push_str(&format!(
-            "\n[statics]\nbroker = [{}]\n\n[security]\nmode = \"insecure-dev\"\n\n[storage]\ndata_dir = \"data\"\ncheckpoint_wal_bytes = 262144\n",
+            "\n[params]\nREPLICA_LAG_MAX = \"2s\"\n\n[statics]\nbroker = [{}]\n\n[security]\nmode = \"insecure-dev\"\n\n[storage]\ndata_dir = \"data\"\ncheckpoint_wal_bytes = 262144\n",
             statics.join(", ")
         ));
         let deploy = dir.join("deploy.toml");
@@ -245,6 +245,25 @@ impl Drop for Cluster {
         }
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// A broker process's CPU time so far, in seconds (`ps`'s `[[dd-]hh:]mm:ss.ss`).
+#[cfg(test)]
+fn cpu_seconds(cluster: &Cluster, i: usize) -> f64 {
+    let pid = cluster.procs[i].as_ref().expect("the broker is running").id();
+    let out = Command::new("ps")
+        .args(["-o", "time=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    let (days, rest) = match text.split_once('-') {
+        Some((d, r)) => (d.parse::<f64>().unwrap(), r.to_owned()),
+        None => (0.0, text.clone()),
+    };
+    let secs = rest.split(':').fold(0.0, |acc, part| {
+        acc * 60.0 + part.parse::<f64>().unwrap_or_else(|_| panic!("ps said {text:?}"))
+    });
+    days * 86_400.0 + secs
 }
 
 #[cfg(test)]
@@ -583,7 +602,8 @@ fn three_brokers_keep_every_acknowledged_record_under_kill_9_and_partitions() {
     let mut kills = 0;
     for k in 0..10usize {
         std::thread::sleep(Duration::from_millis(700 + (k as u64 * 211) % 600));
-        let victim = (k * 7 + 1) % 3;
+        // Kills go round every broker (b1 first: the controller's first leader); isolations too.
+        let victim = k % 3;
         match k % 3 {
             0 | 1 => {
                 cluster.kill(victim);
@@ -607,7 +627,9 @@ fn three_brokers_keep_every_acknowledged_record_under_kill_9_and_partitions() {
     std::thread::sleep(Duration::from_secs(2));
 
     let o = out.lock().unwrap();
-    assert!(o.acked.len() > 100, "only {} produces were acknowledged", o.acked.len());
+    // (Each acks=all produce waits for every in-sync replica, and a killed or isolated follower stays in sync for
+    // `REPLICA_LAG_MAX`, so the faults slow the producers down.)
+    assert!(o.acked.len() > 40, "only {} produces were acknowledged", o.acked.len());
     let sent: BTreeSet<String> = o
         .acked
         .iter()
@@ -664,7 +686,16 @@ fn three_brokers_keep_every_acknowledged_record_under_kill_9_and_partitions() {
         cluster.start(victim, false);
         std::thread::sleep(Duration::from_secs(2));
     }
-    assert!(kills >= 6);
+    assert_eq!(kills, 7);
+    // Idle, a broker sleeps between its timers: none spins (a leader once rewrote a follower's caught-up time with
+    // the clock at every tick, so it was always ready and used a whole core).
+    std::thread::sleep(Duration::from_secs(1));
+    let before: Vec<f64> = (0..3).map(|i| cpu_seconds(&cluster, i)).collect();
+    std::thread::sleep(Duration::from_secs(4));
+    for (i, b) in before.iter().enumerate() {
+        let used = cpu_seconds(&cluster, i) - b;
+        assert!(used < 2.0, "broker {} used {used:.2} s of CPU in 4 s idle", i + 1);
+    }
 }
 
 /// Reports a test skipped because its tool is missing (as `kafka_gate.rs` does).

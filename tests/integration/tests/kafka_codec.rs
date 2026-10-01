@@ -1478,7 +1478,7 @@ fn describe_cluster_requests_decode_and_answers_encode() {
         let version = rng.below(3) as i16;
         let corr = rng.next() as i32;
         let ops = rng.below(2) == 0;
-        let endpoint = if version >= 1 { 1 + rng.below(2) as i8 } else { 1 };
+        let endpoint = if version >= 1 { 1 + rng.below(3) as i8 } else { 1 };
         let fenced = version >= 2 && rng.below(2) == 0;
         let mut req = DescribeClusterRequest::default().with_include_cluster_authorized_operations(ops);
         if version >= 1 {
@@ -1570,8 +1570,10 @@ fn describe_cluster_requests_decode_and_answers_encode() {
             let want_ops = if *ops { 8096 } else { i32::MIN };
             assert_eq!(d.cluster_authorized_operations, want_ops);
         } else {
-            // Asked for controllers: a broker answers UNSUPPORTED_ENDPOINT_TYPE.
-            assert_eq!((d.error_code, d.brokers.len()), (119, 0), "v{version}");
+            // Asked for controllers, a broker answers MISMATCHED_ENDPOINT_TYPE; for an unknown type,
+            // UNSUPPORTED_ENDPOINT_TYPE (Kafka 4.0's codes).
+            let want = if *endpoint == 2 { 114 } else { 115 };
+            assert_eq!((d.error_code, d.brokers.len()), (want, 0), "v{version}");
             assert!(d.error_message.is_some());
         }
         if *version >= 1 {

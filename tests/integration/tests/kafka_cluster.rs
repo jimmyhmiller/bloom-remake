@@ -19,7 +19,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use blossom_artifact::bls::BlsArtifact;
-use blossom_driver::bls::compile_file;
 use blossom_front::api::NodeSpec;
 use blossom_integration_tests::raft_safety::GroupSafety;
 use blossom_node::durable::DurableSchema;
@@ -54,6 +53,8 @@ const NOT_LEADER_OR_FOLLOWER: i16 = 6;
 const REQUEST_TIMED_OUT: i16 = 7;
 #[cfg(test)]
 const TOPIC_ALREADY_EXISTS: i16 = 36;
+#[cfg(test)]
+const NO_REASSIGNMENT_IN_PROGRESS: i16 = 85;
 #[cfg(test)]
 const FENCED_LEADER_EPOCH: i16 = 74;
 #[cfg(test)]
@@ -202,6 +203,9 @@ struct Shared {
     fenced: usize,
     /// The reader's last state, for a failure's report: its next offset per partition and what it knows of leaders.
     reader_state: String,
+    /// When the last produce was answered and the reader last read (virtual nanoseconds), for a failure's report.
+    last_answer: i64,
+    last_read: i64,
     /// Fetches right after an `acks=1` batch (see `Client::probing`).
     probes: usize,
     /// The replicas the admin client last reassigned each partition to, once that reassignment was done.
@@ -267,6 +271,8 @@ struct Client {
     topic_id: Option<[u8; 16]>,
     /// The topic's configurations, when this client creates it.
     topic_configs: Vec<(&'static str, &'static str)>,
+    /// The time of the event being handled.
+    now: i64,
 }
 
 #[cfg(test)]
@@ -306,6 +312,7 @@ impl Client {
             probe: None,
             topic_id: None,
             topic_configs: Vec::new(),
+            now: 0,
         }
     }
 
@@ -591,7 +598,11 @@ impl Client {
                     return Err(format!("a Produce answer with no partition: {r:?}"));
                 };
                 let (code, base) = (pr.error_code, pr.base_offset);
-                self.shared.borrow_mut().sent[at].answer = Some((code, base));
+                {
+                    let mut sh = self.shared.borrow_mut();
+                    sh.sent[at].answer = Some((code, base));
+                    sh.last_answer = self.now;
+                }
                 match code {
                     0 => {
                         let (acks, partition, n) = {
@@ -630,6 +641,7 @@ impl Client {
 #[cfg(test)]
 impl StreamClient for Client {
     fn on(&mut self, now: i64, e: StreamEvent<'_>) -> Result<StreamAction, String> {
+        self.now = now;
         let mut a = StreamAction::default();
         match e {
             StreamEvent::Wake => {
@@ -726,6 +738,7 @@ struct Reader {
     next: BTreeMap<i32, i64>,
     /// Stop reading at this time.
     until: i64,
+    now: i64,
 }
 
 #[cfg(test)]
@@ -747,6 +760,7 @@ impl Reader {
             part: 0,
             next: BTreeMap::new(),
             until,
+            now: 0,
         }
     }
 
@@ -868,6 +882,7 @@ impl Reader {
                     sh.reads.push((i64::from(self.part), base, BlobRef::of(b)));
                     self.next.insert(self.part, base + offsets_of(b));
                     sh.reader_state = format!("next {:?} leaders {:?}", self.next, self.leaders);
+                    sh.last_read = self.now;
                     at += 12 + len;
                 }
                 if at == 0 {
@@ -896,6 +911,7 @@ impl Reader {
 #[cfg(test)]
 impl StreamClient for Reader {
     fn on(&mut self, now: i64, e: StreamEvent<'_>) -> Result<StreamAction, String> {
+        self.now = now;
         let mut a = StreamAction::default();
         match e {
             StreamEvent::Wake => {
@@ -1201,7 +1217,15 @@ fn check_runs(setup: &Setup) -> Totals {
         name: "c1".to_owned(),
         role: Some("Client".to_owned()),
     });
-    let (result, _) = compile_file(path.to_str().unwrap(), &nodes);
+    // A follower out of sync leaves the ISR after half a second here (Kafka's default is 30 s): acks=all waits for
+    // every in-sync replica, and a run lasts seconds.
+    let params = [(
+        "REPLICA_LAG_MAX".to_owned(),
+        blossom_front::api::ParamBinding::Text("500ms".into()),
+    )]
+    .into_iter()
+    .collect();
+    let (result, _) = blossom_driver::bls::compile_file_with(path.to_str().unwrap(), &nodes, &params);
     let artifact: BlsArtifact = result.unwrap_or_else(|e| panic!("sim_cluster.bls: {e:?}")).0;
     let schema = DurableSchema::of(artifact.program.get());
     let rel = |n: &str| artifact.rel_named(n).unwrap();
@@ -1487,7 +1511,10 @@ fn check_runs(setup: &Setup) -> Totals {
             "{}",
             fail(
                 &cluster,
-                &format!("the reader did not read every batch: {} ends {ends:?}", sh.reader_state)
+                &format!(
+                    "the reader did not read every batch: {} ends {ends:?}; last answer at {} ns, last read at {} ns",
+                    sh.reader_state, sh.last_answer, sh.last_read
+                )
             )
         );
         totals.read += sh.reads.len();
@@ -1591,10 +1618,16 @@ fn a_follower_behind_its_leaders_log_start_catches_up_from_a_snapshot() {
         name: "c1".to_owned(),
         role: Some("Client".to_owned()),
     });
-    let params = [(
-        "RETENTION_CHECK".to_owned(),
-        blossom_front::api::ParamBinding::Text("50ms".into()),
-    )]
+    let params = [
+        (
+            "RETENTION_CHECK".to_owned(),
+            blossom_front::api::ParamBinding::Text("50ms".into()),
+        ),
+        (
+            "REPLICA_LAG_MAX".to_owned(),
+            blossom_front::api::ParamBinding::Text("500ms".into()),
+        ),
+    ]
     .into_iter()
     .collect();
     let (result, _) = blossom_driver::bls::compile_file_with(path.to_str().unwrap(), &nodes, &params);
@@ -1653,19 +1686,29 @@ fn a_follower_behind_its_leaders_log_start_catches_up_from_a_snapshot() {
             "{}",
             fail(&cluster, cluster.violation().unwrap_or(""))
         );
-        // The others compacted past it: it can only catch up from a snapshot point.
-        let past = brokers
-            .values()
-            .filter(|n| **n != lagging)
-            .flat_map(|n| {
-                cluster
-                    .state(*n)
-                    .unwrap()
-                    .rows(rel("rsnap"))
-                    .map(|r| r.to_vec())
-                    .collect::<Vec<_>>()
-            })
-            .filter(|r| int(&r[1]) > held.get(&r[0]).copied().unwrap_or(0))
+        // Both others compacted some partition past where it stopped: whichever leads it can only send it a
+        // snapshot point.
+        let mut least: BTreeMap<Value, i64> = BTreeMap::new();
+        let survivors: Vec<NodeId> = brokers.values().copied().filter(|n| *n != lagging).collect();
+        for (k, n) in survivors.iter().enumerate() {
+            let points: BTreeMap<Value, i64> = cluster
+                .state(*n)
+                .unwrap()
+                .rows(rel("rsnap"))
+                .map(|r| (r[0].clone(), int(&r[1])))
+                .collect();
+            if k == 0 {
+                least = points;
+            } else {
+                least = least
+                    .into_iter()
+                    .filter_map(|(g, i)| points.get(&g).map(|j| (g, i.min(*j))))
+                    .collect();
+            }
+        }
+        let past = least
+            .iter()
+            .filter(|(g, i)| **i > held.get(*g).copied().unwrap_or(0))
             .count();
         assert!(
             past > 0,
@@ -1696,6 +1739,8 @@ fn a_follower_behind_its_leaders_log_start_catches_up_from_a_snapshot() {
             .unwrap();
         let in_topic = |r: &[Value]| r[0] == tid;
         let mut snapshots = 0;
+        // Each partition's replicas' log starts and batches, for the acknowledged batches' check.
+        let mut held_logs: Vec<(i64, i64, BTreeMap<i64, BlobRef>)> = Vec::new();
         for p in 0..i64::from(PARTITIONS) {
             // Each replica's (log start, log end, batches by base).
             let logs: Vec<(i64, i64, BTreeMap<i64, BlobRef>)> = states
@@ -1719,6 +1764,7 @@ fn a_follower_behind_its_leaders_log_start_catches_up_from_a_snapshot() {
                 })
                 .collect();
             let end = logs[0].1;
+            held_logs.extend(logs.iter().map(|(s, _, b)| (p, *s, b.clone())));
             for (k, (start, e, batches)) in logs.iter().enumerate() {
                 assert_eq!(
                     *e,
@@ -1762,13 +1808,35 @@ fn a_follower_behind_its_leaders_log_start_catches_up_from_a_snapshot() {
             "{}",
             fail(&cluster, "the returning broker took no snapshot point")
         );
-        // Every acknowledged acks=all batch at or past a replica's start is there.
+        // Every acknowledged acks=all batch at or past a replica's start is there, on every replica.
         let sh = shared.borrow();
-        let acked = sh
-            .sent
+        let max_term = states
             .iter()
-            .filter(|x| x.produce.acks == -1 && matches!(x.answer, Some((0, _))))
-            .count();
+            .flat_map(|s| s.rows(rel("rterm")).map(|r| int(&r[1])))
+            .max()
+            .unwrap_or(0);
+        let mut acked = 0;
+        for x in sh.sent.iter().filter(|x| x.produce.acks == -1) {
+            let Some((0, base)) = x.answer else { continue };
+            acked += 1;
+            let p = i64::from(x.produce.partition);
+            for (_, start, batches) in held_logs.iter().filter(|l| l.0 == p && base >= l.1) {
+                assert!(
+                    batches
+                        .get(&base)
+                        .is_some_and(|blob| (0..max_term).any(|e| BlobRef::of(&stamped(
+                            &x.produce.batch,
+                            base,
+                            e as i32
+                        )) == *blob)),
+                    "{}",
+                    fail(
+                        &cluster,
+                        &format!("the acks=all batch at {p}/{base} is missing from a replica starting at {start}")
+                    )
+                );
+            }
+        }
         assert!(acked > 60, "seed {seed}: only {acked} acknowledged");
     }
 }
@@ -1793,5 +1861,391 @@ fn reassignments_move_partitions_under_load() {
             idempotent: true,
         });
         assert!(t.acked_all > 200, "faults {faults}: {t:?}");
+    }
+}
+
+/// One step of a scripted admin client: the request, and what to do with its answer (`Ok(true)`: next step;
+/// `Ok(false)`: ask again a while later; `Err`: the run fails).
+#[cfg(test)]
+type Check = Box<dyn Fn(Bytes) -> Result<bool, String>>;
+
+/// A scripted client: each step's request at a random broker, again until its check passes.
+#[cfg(test)]
+struct Script {
+    rng: Rng,
+    brokers: Vec<NodeId>,
+    steps: Vec<(Vec<u8>, Check)>,
+    at: usize,
+    conn: Option<NodeId>,
+    open: bool,
+    buf: Vec<u8>,
+    pending: Option<i64>,
+    done: Rc<RefCell<usize>>,
+}
+
+#[cfg(test)]
+impl StreamClient for Script {
+    fn on(&mut self, now: i64, e: StreamEvent<'_>) -> Result<StreamAction, String> {
+        let mut a = StreamAction::default();
+        match e {
+            StreamEvent::Wake => {
+                if self.pending.is_some_and(|d| now >= d) {
+                    self.pending = None;
+                    a.close = true;
+                } else if self.at < self.steps.len() && self.pending.is_none() {
+                    match self.conn {
+                        None => {
+                            let n = self.brokers[self.rng.below(self.brokers.len() as u64) as usize];
+                            self.conn = Some(n);
+                            self.open = false;
+                            a.connect = Some((n, Arc::from("kafka")));
+                        }
+                        Some(_) if self.open => {
+                            a.send = self.steps[self.at].0.clone();
+                            self.pending = Some(now + REQUEST_TIMEOUT);
+                        }
+                        Some(_) => {}
+                    }
+                }
+                if self.at < self.steps.len() {
+                    a.wake = Some(now + 50_000_000);
+                }
+            }
+            StreamEvent::Opened => {
+                self.open = true;
+                self.buf.clear();
+            }
+            StreamEvent::Received(b) => {
+                self.buf.extend_from_slice(b);
+                let Some(n) = self
+                    .buf
+                    .get(..4)
+                    .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
+                else {
+                    return Ok(a);
+                };
+                if self.buf.len() < 4 + n {
+                    return Ok(a);
+                }
+                let body = Bytes::copy_from_slice(&self.buf[4..4 + n]);
+                self.buf.drain(..4 + n);
+                self.pending = None;
+                if (self.steps[self.at].1)(body)? {
+                    self.at += 1;
+                    *self.done.borrow_mut() = self.at;
+                }
+                a.close = true;
+                a.wake = Some(now + 100_000_000);
+            }
+            StreamEvent::Closed(_) => {
+                self.pending = None;
+                self.conn = None;
+                self.open = false;
+                self.buf.clear();
+                a.wake = Some(now + 20_000_000);
+            }
+        }
+        Ok(a)
+    }
+}
+
+#[cfg(test)]
+fn alter_frame(topic: &str, parts: &[(i32, Option<Vec<i32>>)]) -> Vec<u8> {
+    let req = AlterPartitionReassignmentsRequest::default()
+        .with_timeout_ms(1_000)
+        .with_allow_replication_factor_change(true)
+        .with_topics(vec![
+            ReassignableTopic::default()
+                .with_name(TopicName(StrBytes::from_string(topic.into())))
+                .with_partitions(
+                    parts
+                        .iter()
+                        .map(|(p, rs)| {
+                            ReassignablePartition::default()
+                                .with_partition_index(*p)
+                                .with_replicas(rs.as_ref().map(|v| v.iter().map(|x| BrokerId(*x)).collect()))
+                        })
+                        .collect(),
+                ),
+        ]);
+    framed(45, 1, 1, &req)
+}
+
+/// The error per partition entry of an AlterPartitionReassignments answer; `want` each one's expected code (a
+/// timeout asks again).
+#[cfg(test)]
+fn alter_check(want: Vec<i16>) -> Check {
+    alter_check_any(vec![want])
+}
+
+/// As `alter_check`, with any of several expected answers.
+#[cfg(test)]
+fn alter_check_any(wants: Vec<Vec<i16>>) -> Check {
+    Box::new(move |mut body: Bytes| {
+        ResponseHeader::decode(&mut body, AlterPartitionReassignmentsResponse::header_version(1))
+            .map_err(|x| x.to_string())?;
+        let r = AlterPartitionReassignmentsResponse::decode(&mut body, 1).map_err(|x| x.to_string())?;
+        let codes: Vec<i16> = r
+            .responses
+            .iter()
+            .flat_map(|t| t.partitions.iter().map(|p| p.error_code))
+            .collect();
+        if codes.contains(&REQUEST_TIMED_OUT) {
+            return Ok(false);
+        }
+        if !wants.contains(&codes) {
+            return Err(format!("a reassignment answered {codes:?}, not one of {wants:?}"));
+        }
+        Ok(true)
+    })
+}
+
+/// Asks ListPartitionReassignments until it lists none (three answers in a row, from brokers that may lag).
+#[cfg(test)]
+fn until_no_reassignment() -> (Vec<u8>, Check) {
+    let quiet = Rc::new(RefCell::new(0));
+    let frame = framed(
+        46,
+        0,
+        1,
+        &ListPartitionReassignmentsRequest::default().with_timeout_ms(1_000),
+    );
+    let check: Check = Box::new(move |mut body: Bytes| {
+        ResponseHeader::decode(&mut body, ListPartitionReassignmentsResponse::header_version(0))
+            .map_err(|x| x.to_string())?;
+        let r = ListPartitionReassignmentsResponse::decode(&mut body, 0).map_err(|x| x.to_string())?;
+        let mut q = quiet.borrow_mut();
+        *q = if r.topics.is_empty() { *q + 1 } else { 0 };
+        Ok(*q >= 3)
+    });
+    (frame, check)
+}
+
+#[cfg(test)]
+fn create_frame(topic: &str, rf: i16) -> Vec<u8> {
+    let req = CreateTopicsRequest::default()
+        .with_topics(vec![
+            CreatableTopic::default()
+                .with_name(TopicName(StrBytes::from_string(topic.into())))
+                .with_num_partitions(2)
+                .with_replication_factor(rf),
+        ])
+        .with_timeout_ms(1_000);
+    framed(19, 7, 1, &req)
+}
+
+#[cfg(test)]
+fn create_check() -> Check {
+    Box::new(|mut body: Bytes| {
+        ResponseHeader::decode(&mut body, CreateTopicsResponse::header_version(7)).map_err(|x| x.to_string())?;
+        let r = CreateTopicsResponse::decode(&mut body, 7).map_err(|x| x.to_string())?;
+        match r.topics[0].error_code {
+            0 | TOPIC_ALREADY_EXISTS => Ok(true),
+            REQUEST_TIMED_OUT => Ok(false),
+            other => Err(format!("creating answered {other}")),
+        }
+    })
+}
+
+/// The review's controller findings, directed (S8 item 8), on five brokers:
+/// - a reassignment naming a partition twice is refused for both entries (it once halted every broker);
+/// - a reassignment replaced while in progress, cancelled, and set again to an earlier target finishes (its
+///   completion report once collided with the earlier one's and was never sent);
+/// - a topic deleted while a reassignment of it is in progress leaves nothing behind (its reassignment once stayed,
+///   and a late completion report brought a partition of the deleted topic back);
+///
+/// And through it all, no broker fails and the cluster settles.
+#[test]
+fn reassignments_replaced_cancelled_or_deleted_settle() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/kafka/sim_cluster.bls");
+    let mut nodes: Vec<NodeSpec> = (1..=5)
+        .map(|i| NodeSpec {
+            name: format!("b{i}"),
+            role: Some("Broker".to_owned()),
+        })
+        .collect();
+    nodes.push(NodeSpec {
+        name: "c1".to_owned(),
+        role: Some("Client".to_owned()),
+    });
+    let params = [(
+        "REPLICA_LAG_MAX".to_owned(),
+        blossom_front::api::ParamBinding::Text("500ms".into()),
+    )]
+    .into_iter()
+    .collect();
+    let (result, _) = blossom_driver::bls::compile_file_with(path.to_str().unwrap(), &nodes, &params);
+    let artifact: BlsArtifact = result.unwrap_or_else(|e| panic!("sim_cluster.bls: {e:?}")).0;
+    let schema = DurableSchema::of(artifact.program.get());
+    let rel = |n: &str| artifact.rel_named(n).unwrap();
+    let brokers: Vec<NodeId> = (0..5).map(NodeId).collect();
+    for seed in 1..=2u64 {
+        let cfg = ClusterConfig {
+            seed,
+            clients: 0,
+            duration: 20_000_000_000,
+            externs: Arc::new(blossom_std_host::registry().unwrap()),
+            ..ClusterConfig::default()
+        };
+        let mut cluster = Cluster::new(
+            &artifact,
+            &schema,
+            blossom_value::Seed::from_u64(seed),
+            blossom_integration_tests::kafka_brokers(&artifact).unwrap(),
+            Box::new(NoKvClients),
+            cfg,
+        )
+        .unwrap();
+        let (_safety, observer) = GroupSafety::of(&artifact).unwrap().shared();
+        cluster.observe(observer);
+        let steps: Vec<(Vec<u8>, Check)> = vec![
+            (create_frame("moving", 3), create_check()),
+            (create_frame("doomed", 3), create_check()),
+            // A partition twice (and one with a cancellation and a target): every entry naming it is refused.
+            (
+                alter_frame(
+                    "moving",
+                    &[
+                        (0, Some(vec![1, 2, 4])),
+                        (1, Some(vec![2, 3, 4])),
+                        (0, Some(vec![3, 4, 5])),
+                        (1, None),
+                    ],
+                ),
+                alter_check(vec![42, 42, 42, 42]),
+            ),
+            // Replaced in flight, cancelled, set again: A, then B, then back (cancelled), then A again.
+            (alter_frame("moving", &[(0, Some(vec![4, 5, 1]))]), alter_check(vec![0])),
+            (alter_frame("moving", &[(0, Some(vec![5, 1, 2]))]), alter_check(vec![0])),
+            // (The second target may already be reached: nothing to cancel then.)
+            (
+                alter_frame("moving", &[(0, None)]),
+                alter_check_any(vec![vec![0], vec![NO_REASSIGNMENT_IN_PROGRESS]]),
+            ),
+            (alter_frame("moving", &[(0, Some(vec![4, 5, 1]))]), alter_check(vec![0])),
+            until_no_reassignment(),
+            (alter_frame("moving", &[(0, Some(vec![2, 3, 4]))]), alter_check(vec![0])),
+            until_no_reassignment(),
+            (alter_frame("moving", &[(0, Some(vec![4, 5, 1]))]), alter_check(vec![0])),
+            until_no_reassignment(),
+            // A topic deleted while it is being moved (broker 5 is down meanwhile, so the moves cannot finish).
+            (
+                alter_frame("doomed", &[(0, Some(vec![1, 4, 5])), (1, Some(vec![2, 4, 5]))]),
+                alter_check(vec![0, 0]),
+            ),
+            (
+                framed(
+                    20,
+                    6,
+                    1,
+                    &kafka_protocol::messages::DeleteTopicsRequest::default()
+                        .with_topics(vec![
+                            kafka_protocol::messages::delete_topics_request::DeleteTopicState::default()
+                                .with_name(Some(TopicName(StrBytes::from_string("doomed".into())))),
+                        ])
+                        .with_timeout_ms(1_000),
+                ),
+                Box::new(|mut body: Bytes| {
+                    ResponseHeader::decode(
+                        &mut body,
+                        kafka_protocol::messages::DeleteTopicsResponse::header_version(6),
+                    )
+                    .map_err(|x| x.to_string())?;
+                    let r = kafka_protocol::messages::DeleteTopicsResponse::decode(&mut body, 6)
+                        .map_err(|x| x.to_string())?;
+                    match r.responses[0].error_code {
+                        0 => Ok(true),
+                        REQUEST_TIMED_OUT => Ok(false),
+                        other => Err(format!("deleting answered {other}")),
+                    }
+                }),
+            ),
+            until_no_reassignment(),
+        ];
+        let total = steps.len();
+        // The steps of the doomed topic's reassignment and deletion (broker 5 is down from the first to the second).
+        let (doomed_move, doomed_delete) = (total - 3, total - 2);
+        let done = Rc::new(RefCell::new(0));
+        cluster.stream_client(Box::new(Script {
+            rng: Rng(seed * 13 + 1),
+            brokers: brokers[..4].to_vec(),
+            steps,
+            at: 0,
+            conn: None,
+            open: false,
+            buf: Vec::new(),
+            pending: None,
+            done: done.clone(),
+        }));
+        let fail = |cluster: &Cluster<'_>, what: &str| -> String {
+            format!("seed {seed}: {what}\n{}", cluster.run_so_far().log.join("\n"))
+        };
+        let mut b5_down = false;
+        while cluster.now() < 18_000_000_000 && *done.borrow() < total {
+            cluster.run_until(cluster.now() + 20_000_000).unwrap();
+            assert!(
+                cluster.violation().is_none(),
+                "{}",
+                fail(&cluster, cluster.violation().unwrap_or(""))
+            );
+            let at = *done.borrow();
+            if at == doomed_move && !b5_down && cluster.state(brokers[4]).is_some() {
+                cluster.crash(brokers[4], CrashWrites::Random).unwrap();
+                b5_down = true;
+            }
+            if at > doomed_delete && b5_down && cluster.state(brokers[4]).is_none() {
+                cluster.restart(brokers[4]).unwrap();
+            }
+        }
+        assert_eq!(*done.borrow(), total, "{}", fail(&cluster, "the script did not finish"));
+        if cluster.state(brokers[4]).is_none() {
+            cluster.restart(brokers[4]).unwrap();
+        }
+        cluster.step_until(20_000_000_000).unwrap();
+        for n in &brokers {
+            let s = cluster.state(*n).unwrap();
+            assert_eq!(
+                s.rows(rel("mreassign")).count(),
+                0,
+                "seed {seed}: broker {n:?} keeps a reassignment"
+            );
+            let topics: Vec<String> = s
+                .rows(rel("mtopic"))
+                .map(|r| match &r[0] {
+                    Value::Str(x) => x.to_string(),
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            assert_eq!(topics, vec!["moving".to_owned()], "seed {seed}: broker {n:?}'s topics");
+            let tid = s.rows(rel("mtopic")).next().map(|r| r[1].clone()).unwrap();
+            let p0: Vec<i64> = s
+                .rows(rel("massign"))
+                .filter(|r| r[0] == tid && int(&r[1]) == 0)
+                .flat_map(|r| match &r[2] {
+                    Value::Vec(v) => v.iter().map(int).collect::<Vec<_>>(),
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            assert_eq!(p0, vec![4, 5, 1], "seed {seed}: moving/0's replicas at broker {n:?}");
+            // Only the controller's and moving's groups have Raft state.
+            for name in ["rterm", "rlog", "rsnap", "massign"] {
+                let foreign = s
+                    .rows(rel(name))
+                    .filter(|r| match &r[0] {
+                        Value::Tuple(g) => {
+                            g[0] != tid
+                                && int(&g[1]) >= 0
+                                && g[0] != Value::Bytes(vec![0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1].into())
+                        }
+                        Value::Bytes(_) => r[0] != tid,
+                        _ => false,
+                    })
+                    .count();
+                assert_eq!(
+                    foreign, 0,
+                    "seed {seed}: broker {n:?} keeps {name} rows of the deleted topic"
+                );
+            }
+        }
     }
 }

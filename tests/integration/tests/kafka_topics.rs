@@ -505,7 +505,7 @@ fn topic_name(n: &str) -> TopicName {
 }
 
 #[cfg(test)]
-fn encode(input: &Input, corr: i32) -> Vec<u8> {
+fn encode(input: &Input, corr: i32, timeout_ms: i32) -> Vec<u8> {
     match input {
         Input::Create { entries, validate } => {
             let topics = entries
@@ -529,7 +529,7 @@ fn encode(input: &Input, corr: i32) -> Vec<u8> {
                 .collect();
             let req = CreateTopicsRequest::default()
                 .with_topics(topics)
-                .with_timeout_ms(30_000)
+                .with_timeout_ms(timeout_ms)
                 .with_validate_only(*validate);
             framed(19, 7, corr, &req)
         }
@@ -545,7 +545,7 @@ fn encode(input: &Input, corr: i32) -> Vec<u8> {
                         })
                         .collect(),
                 )
-                .with_timeout_ms(30_000);
+                .with_timeout_ms(timeout_ms);
             framed(20, 6, corr, &req)
         }
         Input::Metadata { names, auto } => {
@@ -661,6 +661,8 @@ fn decode(input: &Input, mut body: Bytes) -> Result<Output, String> {
 struct Shared {
     history: Vec<Operation<Input, Output>>,
     ids: Vec<Id>,
+    /// Requests answered REQUEST_TIMED_OUT (recorded unanswered).
+    timeouts: usize,
 }
 
 #[cfg(test)]
@@ -696,7 +698,9 @@ impl Client {
         self.left -= 1;
         self.corr += 1;
         let input = random_input(&mut self.rng, &self.shared.borrow().ids, self.names, self.writes_only);
-        a.send = encode(&input, self.corr);
+        // Three brokers: a request whose command the controller does not apply within a second answers
+        // REQUEST_TIMED_OUT (recorded unanswered).
+        a.send = encode(&input, self.corr, if self.brokers > 1 { 1_000 } else { 30_000 });
         let mut sh = self.shared.borrow_mut();
         sh.history.push(Operation {
             call: now as u64,
@@ -774,7 +778,9 @@ impl StreamClient for Client {
                         Output::Delete(xs) => xs.iter().any(|x| x.0 == 7),
                         _ => false,
                     };
-                    if !timed_out {
+                    if timed_out {
+                        sh.timeouts += 1;
+                    } else {
                         let op = &mut sh.history[at];
                         op.ret = Some(now as u64);
                         op.output = Some(out);
@@ -834,7 +840,7 @@ struct Setup {
 #[cfg(test)]
 /// Runs each seed and checks it; returns how many requests were answered, left unanswered, and sent at the same
 /// instant as another client's.
-fn check_runs(setup: &Setup) -> (usize, usize, usize) {
+fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/kafka/sim_cluster.bls");
     let mut nodes: Vec<NodeSpec> = (1..=setup.brokers)
         .map(|i| NodeSpec {
@@ -849,7 +855,7 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize) {
     let (result, _) = compile_file(path.to_str().unwrap(), &nodes);
     let artifact: BlsArtifact = result.unwrap_or_else(|e| panic!("sim_cluster.bls: {e:?}")).0;
     let schema = DurableSchema::of(artifact.program.get());
-    let (mut answered, mut unanswered, mut together) = (0, 0, 0);
+    let (mut answered, mut unanswered, mut together, mut timeouts) = (0, 0, 0, 0);
     for seed in setup.seeds.clone() {
         let cfg = ClusterConfig {
             seed,
@@ -900,6 +906,7 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize) {
             run.log.join("\n")
         );
         let history = shared.borrow().history.clone();
+        timeouts += shared.borrow().timeouts;
         answered += history.iter().filter(|o| o.ret.is_some()).count();
         unanswered += history.iter().filter(|o| o.ret.is_none()).count();
         together += history
@@ -966,14 +973,14 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize) {
             }
         }
     }
-    (answered, unanswered, together)
+    (answered, unanswered, together, timeouts)
 }
 
 /// Requests in flight across broker crashes and dropped connections: an acknowledged change survives, and an
 /// unanswered one happened or did not.
 #[test]
 fn admin_requests_are_linearizable_across_crashes() {
-    let (answered, unanswered, _) = check_runs(&Setup {
+    let (answered, unanswered, _, _) = check_runs(&Setup {
         seeds: 1..=8,
         crashes: true,
         stream_drops: true,
@@ -996,7 +1003,7 @@ fn admin_requests_are_linearizable_across_crashes() {
 /// race, and each tick's answers must still fit one order.
 #[test]
 fn admin_requests_answered_in_one_tick_are_linearizable() {
-    let (answered, _, together) = check_runs(&Setup {
+    let (answered, _, together, _) = check_runs(&Setup {
         seeds: 1..=10,
         crashes: false,
         stream_drops: false,
@@ -1019,7 +1026,7 @@ fn admin_requests_answered_in_one_tick_are_linearizable() {
 /// broker fit one order (the controller's log), and every broker ends with the same topics.
 #[test]
 fn admin_requests_through_any_of_three_brokers_are_linearizable() {
-    let (answered, unanswered, _) = check_runs(&Setup {
+    let (answered, unanswered, _, timeouts) = check_runs(&Setup {
         seeds: 1..=8,
         crashes: true,
         stream_drops: true,
@@ -1035,5 +1042,9 @@ fn admin_requests_through_any_of_three_brokers_are_linearizable() {
     assert!(
         unanswered > 0,
         "no request was left unanswered: the faults did not bite"
+    );
+    assert!(
+        timeouts > 0,
+        "no request timed out: the controller was never unavailable long enough"
     );
 }

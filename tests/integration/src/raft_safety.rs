@@ -192,6 +192,11 @@ impl Observer for GroupSafety {
                     } else {
                         log.get(&(i - 1)).map(|r| u64_at(r, 2)).transpose()?
                     };
+                    // A hole above the snapshot point: entries are stored after their predecessor, and only
+                    // truncated from an index to the end.
+                    if *i > 1 && before.is_none() && snap.is_none_or(|s| s.0 + 1 < *i) {
+                        return Err(format!("broker {n} group {g:?}: entry {i} without entry {}", i - 1));
+                    }
                     let prev = u64_at(entry, 3)?;
                     if let Some(pt) = before
                         && prev != pt
@@ -223,8 +228,9 @@ impl Observer for GroupSafety {
                 *p = (*p).max(commit);
                 // Entries this broker committed earlier were checked then; a committed entry that changed later
                 // would also break log matching or leader completeness, which are checked in full.
-                let from = self.checked.get(&(n, g.clone())).copied().unwrap_or(0);
-                self.checked.insert((n, g.clone()), commit.max(from));
+                // A restarted broker relearns its commit index: what it commits again is checked again.
+                let from = self.checked.get(&(n, g.clone())).copied().unwrap_or(0).min(commit);
+                self.checked.insert((n, g.clone()), commit);
                 let snap = snaps.get(&g).map_or(0, |s| s.0);
                 for i in from.min(commit) + 1..=commit {
                     if i <= snap {
@@ -261,6 +267,28 @@ impl Observer for GroupSafety {
                     if *cg == g && *at < t && *i > snap && log.get(i) != Some(entry) {
                         return Err(format!(
                             "leader completeness: broker {n} leads {g:?} in term {t} without {entry:?} at {i}"
+                        ));
+                    }
+                }
+            }
+        }
+        // A snapshot point is a committed entry: no broker compacts (or installs) past what was committed, and the
+        // point's term is that entry's.
+        if let Some(rs) = self.rsnap {
+            for (n, state) in nodes.iter().enumerate() {
+                let Some(state) = state else { continue };
+                for r in state.rows(rs) {
+                    let (g, i, t) = (group(r)?, u64_at(r, 1)?, u64_at(r, 2)?);
+                    if self.progress.get(&g).is_none_or(|c| i > *c) {
+                        return Err(format!(
+                            "broker {n}'s snapshot point {i} of {g:?} is past every commit seen"
+                        ));
+                    }
+                    if let Some((entry, _)) = self.committed.get(&(g.clone(), i))
+                        && u64_at(entry, 2)? != t
+                    {
+                        return Err(format!(
+                            "broker {n}'s snapshot point {i} of {g:?} has term {t}, committed {entry:?}"
                         ));
                     }
                 }

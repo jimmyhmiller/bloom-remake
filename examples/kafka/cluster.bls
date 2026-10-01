@@ -54,8 +54,14 @@ fn reassign_item(slot: u64, name: String, part: i32, err: i16, replicas: Option<
     Item { slot: slot, part: part, err: err, flag: allow_rf_change, name: name, id: zero_uuid(), assignment: asg, configs: [] }
 }
 
-fn reassigned_item(tid: Bytes, part: i32, replicas: Vec<i32>) -> Item {
-    Item { slot: 0u64, part: part, err: NONE, flag: false, name: "", id: tid, assignment: [replicas], configs: [] }
+/// A completed reassignment's report: its target and the index it was set at (`since`, in the slot).
+fn reassigned_item(tid: Bytes, part: i32, replicas: Vec<i32>, since: u64) -> Item {
+    Item { slot: since, part: part, err: NONE, flag: false, name: "", id: tid, assignment: [replicas], configs: [] }
+}
+
+/// `xs` and then the members of `ys` not in it.
+fn union_ids(xs: Vec<i32>, ys: Vec<i32>) -> Vec<i32> {
+    xs.concat(ys.filter(|y| not xs.contains(y)))
 }
 
 fn create_cmd(origin: i32, tag: u64, items: Vec<Item>) -> Cmd {
@@ -252,8 +258,14 @@ param CMD_RESEND: Duration = 500ms;
 /// How long a follower may go without being caught up before it leaves its partition's in-sync replicas (Kafka's
 /// `replica.lag.time.max.ms`).
 param REPLICA_LAG_MAX: Duration = 30s;
-/// Producer ids are allocated one at a time (Kafka allocates blocks of 1000; one per InitProducerId is enough here).
+/// Producer ids: the first, and how many the controller gives a broker at a time (Kafka's blocks of 1000), so a
+/// broker hands out producer ids itself and an idempotent producer's start costs the controller nothing.
 param PID_START: i64 = 1000;
+param PID_BLOCK: i64 = 1000;
+/// How long InitProducerId waits for a block of producer ids before answering COORDINATOR_NOT_AVAILABLE.
+param PID_WAIT: Duration = 5s;
+/// How long a broker that has not caught up with the controller keeps a request before closing its connection.
+param NOT_CAUGHT_UP_WAIT: Duration = 10s;
 
 at Broker {
     /// This broker's id, and every broker's node by id.
@@ -273,7 +285,7 @@ at Broker {
     /// configuration a reassignment passes through is made of these, item 5).
     view hosts(g) {
         massign(tid, p, rs), my_id(me), let g = (tid, p) where rs.contains(me);
-        mreassign(tid, p, target), my_id(me), let g = (tid, p) where target.contains(me);
+        mreassign(tid, p, _target, hosting, _since), my_id(me), let g = (tid, p) where hosting.contains(me);
     }
 
     /// Each group's preferred leader: the broker with the lowest id for the controller, the first replica for a
@@ -292,8 +304,11 @@ at Broker {
     durable table mtopic(name: String, id: Bytes, partitions: i32, configs: Vec<(String, String)>) key(name);
     /// Each partition's replicas, by broker id; the first is the preferred leader.
     durable table massign(tid: Bytes, part: i32, replicas: Vec<i32>) key(tid, part);
-    /// The partitions being reassigned, and their target replicas (`massign` keeps the replicas until it is done).
-    durable table mreassign(tid: Bytes, part: i32, target: Vec<i32>) key(tid, part);
+    /// The partitions being reassigned: their target replicas (`massign` keeps the replicas until it is done), every
+    /// broker a configuration of the reassignment may name (the replicas and every target set since it began, so a
+    /// cancellation or a new target never drops a member the partition's log still counts), and the controller index
+    /// the target was set at (which tells one target from an earlier equal one).
+    durable table mreassign(tid: Bytes, part: i32, target: Vec<i32>, hosting: Vec<i32>, since: u64) key(tid, part);
     /// The ids of the topics deleted: their partitions' data goes.
     durable table mdeleted(tid: Bytes) key(tid);
     /// The commands applied, by request.
@@ -325,7 +340,7 @@ at Broker {
 
     /// The next committed controller entry to apply.
     view to_apply(i, kind, data) =
-        applied_m(a), commit_of(g, c), rlog(g, i, _, _, kind, _, data), let g = controller() where i == a + 1 && i <= c;
+        applied_m(a), let i = a + 1, let g = controller(), commit_of(g, c), rlog(g, i, _, _, kind, _, data) where i <= c;
     view to_apply_cmd(cmd) = to_apply(_, kind, data), let Some(cmd) = decode_cmd(entry_bytes(data)) where kind == CMD;
     advance_applied: while to_apply(i, _, _) {
         next applied_m(i);
@@ -401,9 +416,13 @@ at Broker {
     apply_unassign: while cmd_delete(_, _, _, tid), massign(tid, p, rs) {
         delete massign(tid, p, rs);
     }
+    apply_unreassign: while cmd_delete(_, _, _, tid), mreassign(tid, p, t, h, since) {
+        delete mreassign(tid, p, t, h, since);
+    }
+    /// A block of producer ids for the asking broker: `PID_BLOCK` of them from the outcome's id.
     apply_pids: while fresh(op, origin, tag, _), next_pid(n) where op == OP_PIDS {
         upsert outcome(origin, tag, 0u64, NONE, zero_uuid(), n, "");
-        next next_pid(n + 1);
+        next next_pid(n + PID_BLOCK);
     }
 
     /// A reassignment's items (AlterPartitionReassignments, item 5), decided against the metadata as Kafka's
@@ -417,7 +436,9 @@ at Broker {
     view reassign_known(origin, tag, slot, tid, part, err, flag, asg, rs) =
         reassign_item_of(origin, tag, slot, name, part, err, flag, asg), mtopic(name, tid, _, _), massign(tid, part, rs);
     view reassign_known_item(origin, tag, slot) = reassign_known(origin, tag, slot, _, _, _, _, _, _);
-    view reassigning_now(tid, part) = mreassign(tid, part, _);
+    view reassigning_now(tid, part) = mreassign(tid, part, _, _, _);
+    /// The controller index being applied.
+    view applying(i) = to_apply(i, _, _);
     view reassign_choice(origin, tag, slot, tid, part, d) {
         reassign_known(origin, tag, slot, tid, part, err, flag, asg, rs), reassigning_now(tid, part),
             let d = reassign_decision(err, flag, asg, rs, true);
@@ -431,18 +452,23 @@ at Broker {
     apply_reassign: while reassign_choice(origin, tag, slot, tid, _part, d) {
         upsert outcome(origin, tag, slot, d.0, tid, -1i64, "");
     }
-    apply_reassign_target: while reassign_choice(_origin, _tag, _slot, tid, part, d), let Some(target) = d.1 {
-        upsert mreassign(tid, part, target);
+    apply_reassign_target: while reassign_choice(_origin, _tag, _slot, tid, part, d), let Some(target) = d.1, applying(i) {
+        if mreassign(tid, part, _t, hosting, _s) {
+            upsert mreassign(tid, part, target, union_ids(hosting, target), i);
+        }
+        if not reassigning_now(tid, part), massign(tid, part, rs) {
+            upsert mreassign(tid, part, target, union_ids(rs, target), i);
+        }
     }
-    /// A partition leader's report that its configuration reached the target: the target becomes the replicas, if it
-    /// is still the target (a newer reassignment replaces it).
-    view reassigned_item_of(origin, tag, tid, part, target) =
-        fresh(op, origin, tag, items), it in items, let tid = it.id, let part = it.part,
+    /// A partition leader's report that its configuration reached the target set at `since`: the target becomes the
+    /// replicas, if it is still that target (a newer reassignment replaces it; a deleted topic has none).
+    view reassigned_item_of(origin, tag, tid, part, target, since) =
+        fresh(op, origin, tag, items), it in items, let tid = it.id, let part = it.part, let since = it.slot,
         let Some(target) = it.assignment.first() where op == OP_REASSIGNED;
-    apply_reassigned: while reassigned_item_of(origin, tag, tid, part, target) {
-        if mreassign(tid, part, target) {
+    apply_reassigned: while reassigned_item_of(origin, tag, tid, part, target, since) {
+        if mreassign(tid, part, target, hosting, since), massign(tid, part, rs) {
             upsert massign(tid, part, target);
-            delete mreassign(tid, part, target);
+            delete mreassign(tid, part, target, hosting, since);
         }
         upsert outcome(origin, tag, 0u64, NONE, tid, -1i64, "");
     }
@@ -488,6 +514,12 @@ at Broker {
         if isr_term(g, t) {
             delete isr_term(g, t);
         }
+        if heard_at(g, at) {
+            delete heard_at(g, at);
+        }
+        if heard_commit(g, c) {
+            delete heard_commit(g, c);
+        }
     }
 
     // ---- commands this broker waits on: sent when first wanted, and every `CMD_RESEND` until applied
@@ -511,9 +543,22 @@ at Broker {
     }
 
     /// What each group's leader appends this tick: the controller's commands (forwarded to it, or its own).
+    /// The controller's leader appends a command once: not again while it is in its log unapplied, nor once applied
+    /// (a broker sends a command again every `CMD_RESEND` until it sees it applied, and a stalled controller would
+    /// otherwise append every copy).
+    view ctl(g) = mine(g), let c = controller() where g == c;
+    view unapplied_cmd(data) = applied_m(a), ctl(g), rlog(g, i, _, _, kind, _, data) where i > a && kind == CMD;
+    view logged_cmd(origin, tag) =
+        unapplied_cmd(data), let Some(cmd) = decode_cmd(entry_bytes(data)), let origin = cmd.origin, let tag = cmd.tag;
+    view new_cmd(cmd) {
+        submit(cmd) from _;
+        cmd_out(cmd);
+    }
+    view appendable_cmd(cmd) =
+        new_cmd(cmd), let Some(d) = decode_cmd(cmd), let origin = d.origin, let tag = d.tag, not done(origin, tag),
+        not logged_cmd(origin, tag);
     view proposals(g, xs = collect!(x)) {
-        submit(cmd) from _, leader(g, _), let g = controller(), let x = (CMD, -1i64, Blob::of(cmd));
-        cmd_out(cmd), leader(g, _), let g = controller(), let x = (CMD, -1i64, Blob::of(cmd));
+        appendable_cmd(cmd), ctl(g), leader(g, _), let x = (CMD, -1i64, Blob::of(cmd));
         data_proposals(g, x);
         config_proposals(g, x);
     }
@@ -521,21 +566,20 @@ at Broker {
     // ---- reassignment, at the partition's leader (item 5)
 
     /// A partition being reassigned, its target, and whether its last configuration change is still uncommitted.
-    view reassign_target(g, target) = mreassign(tid, p, target), let g = (tid, p);
-    view config_pending(g) = latest_config(g, i, _), commit_of(g, c) where i > c;
+    view reassign_target(g, target, since) = mreassign(tid, p, target, _hosting, since), let g = (tid, p);
     /// The next configuration change (`reassign_step`), once the last is committed: one member at a time, so any two
     /// configurations in use share a majority.
     view reassign_next(g, ids) =
-        reassign_target(g, target), leader(g, _), member_ids(g, cur), isr_of(g, isr), my_id(me), not config_pending(g),
+        reassign_target(g, target, _since), config_ready(g), member_ids(g, cur), isr_of(g, isr), my_id(me),
         let Some(ids) = reassign_step(cur, target, isr, me);
     view config_proposals(g, x) = reassign_next(g, ids), let x = (CONFIG, -1i64, Blob::of(encode_members(ids)));
     /// The configuration is the target, committed: the leader tells the controller, which makes it the replicas.
-    view reassign_done(tid, p, target) =
-        reassign_target(g, target), leader(g, _), member_ids(g, cur), not config_pending(g), let (tid, p) = g
+    view reassign_done(tid, p, target, since) =
+        reassign_target(g, target, since), config_ready(g), member_ids(g, cur), let (tid, p) = g
         where cur.to_set() == target.to_set();
     view reassigned_cmd_of(tag, cmd) =
-        reassign_done(tid, p, target), my_id(me), let tag = hash64(("reassigned", tid, p, target)),
-        let cmd = encode_cmd(reassigned_cmd(me, tag, reassigned_item(tid, p, target)));
+        reassign_done(tid, p, target, since), my_id(me), let tag = hash64(("reassigned", tid, p, target, since)),
+        let cmd = encode_cmd(reassigned_cmd(me, tag, reassigned_item(tid, p, target, since)));
 
     /// A partition this broker no longer hosts (a reassignment moved it away, item 5) leaves it: its log and
     /// snapshot point go, and with them its configuration (the produce layer drops the partition's data). Its term
@@ -556,29 +600,67 @@ at Broker {
 
     // ---- who leads each partition, and its in-sync replicas (D7)
 
-    /// When each follower of a partition this broker leads was last caught up. A follower is caught up when it has
-    /// acknowledged the commit index: Kafka counts a follower caught up when it has fetched to the leader's log end,
-    /// and under Raft the commit index is where a quorum stands. A new leadership starts with every replica caught
-    /// up, as a Kafka leader starts from the ISR the controller recorded.
-    table caught_at(g: Group, f: Node<Broker>, at: Instant) key(g, f) resolve choose_most(at);
+    /// The followers of a partition this broker leads that are behind, and since when: a follower is caught up while
+    /// it has acknowledged the commit index (Kafka counts a follower caught up when it has fetched to the leader's log
+    /// end; under Raft the commit index is where a quorum stands), and leaves the in-sync replicas once it has been
+    /// behind for `REPLICA_LAG_MAX`. Only the moments a follower falls behind or catches up are written, so an idle
+    /// leader writes nothing. A new leadership starts from the in-sync replicas its predecessor last announced (as a
+    /// Kafka leader starts from the ISR the controller recorded): the others are out (`out`) until they catch up; a
+    /// new partition's replicas are all in sync.
+    table behind(g: Group, f: Node<Broker>, since: Instant, out: bool) key(g, f);
     table isr_term(g: Group, t: u64) key(g) resolve choose_most(t);
+    /// The members this leadership has placed in or out of the ISR; one added later (a reassignment) starts out of
+    /// it until it catches up, as Kafka adds a new replica to the ISR only once it has caught up.
+    table isr_known(g: Group, f: Node<Broker>) key(g, f);
+    view announced_isr(g, ids) = leader_view(g, _, _, ids);
+    view in_last_isr(g, f) {
+        announced_isr(g, ids), member_id(f, id) where ids.contains(id);
+        members(g, f), not announced(g);
+    }
+    view announced(g) = announced_isr(g, _);
     isr_start: while leader(g, t), not is_controller(g), not isr_term(g, t) {
         next isr_term(g, t);
         for members(g, f) where f != self {
-            next caught_at(g, f, now());
+            upsert isr_known(g, f);
+            if not in_last_isr(g, f) {
+                upsert behind(g, f, now(), true);
+            }
+            if in_last_isr(g, f), behind(g, f, at, out) {
+                delete behind(g, f, at, out);
+            }
         }
     }
-    isr_caught: while leader(g, _), not is_controller(g), match_idx(g, f, m), commit_of(g, c) where m >= c {
-        next caught_at(g, f, now());
+    isr_join: while leader(g, t), isr_term(g, t), members(g, f), not isr_known(g, f) where f != self {
+        upsert isr_known(g, f);
+        upsert behind(g, f, now(), true);
     }
-    forget_caught: while caught_at(g, f, at), not leader(g, _) {
-        delete caught_at(g, f, at);
+    forget_isr_known: while isr_known(g, f), not leader(g, _) {
+        delete isr_known(g, f);
     }
-    /// A led partition's in-sync replicas, by broker id: the leader, and every follower caught up within
+    forget_isr_known_removed: while isr_known(g, f), leader(g, _), not members(g, f) {
+        delete isr_known(g, f);
+    }
+    view caught_up_to(g, f) = leader(g, _), match_idx(g, f, m), commit_of(g, c) where m >= c;
+    falls_behind: while leader(g, t), isr_term(g, t), not is_controller(g), match_idx(g, f, _), members(g, f),
+        not caught_up_to(g, f), not behind(g, f, _, _) {
+        upsert behind(g, f, now(), false);
+    }
+    catches_up: while behind(g, f, at, out), caught_up_to(g, f) {
+        delete behind(g, f, at, out);
+    }
+    forget_behind: while behind(g, f, at, out), not leader(g, _) {
+        delete behind(g, f, at, out);
+    }
+    forget_behind_removed: while behind(g, f, at, out), leader(g, _), not members(g, f) {
+        delete behind(g, f, at, out);
+    }
+    /// A led partition's in-sync replicas, by broker id: the leader, and every follower not behind for
     /// `REPLICA_LAG_MAX`.
     view in_sync(g, id) {
         leader(g, _), not is_controller(g), my_id(id);
-        leader(g, _), caught_at(g, f, at), members(g, f), broker(f, id, _, _) where f != self && at + REPLICA_LAG_MAX >= now();
+        leader(g, _), isr_term(g, _), members(g, f), broker(f, id, _, _), not behind(g, f, _, _) where f != self;
+        leader(g, _), members(g, f), broker(f, id, _, _), behind(g, f, at, out)
+            where f != self && not out && now() < at + REPLICA_LAG_MAX;
     }
     view isr_of(g, ids = collect!(id)) = in_sync(g, id);
 

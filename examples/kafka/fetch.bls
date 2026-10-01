@@ -293,6 +293,9 @@ fn list_offsets_entries(req: ListOffsetsRequest) -> Vec<(u64, String, ListOffset
 /// One partition's answer: error, timestamp, offset, leader epoch.
 struct OffsetAnswer { error: i16, timestamp: i64, offset: i64, leader_epoch: i32 }
 
+/// The partition's new leader has not settled its high watermark yet (retriable).
+const OFFSET_NOT_AVAILABLE: i16 = 78;
+
 fn offset_failed(error: i16) -> OffsetAnswer {
     OffsetAnswer { error: error, timestamp: -1i64, offset: -1i64, leader_epoch: -1i32 }
 }

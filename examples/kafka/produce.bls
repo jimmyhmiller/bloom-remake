@@ -6,6 +6,8 @@ const CORRUPT_MESSAGE: i16 = 2;
 const MESSAGE_TOO_LARGE: i16 = 10;
 const INVALID_REQUIRED_ACKS: i16 = 21;
 const TRANSACTIONAL_ID_AUTHORIZATION_FAILED: i16 = 53;
+/// No producer id can be handed out right now (the controller is unavailable): the producer retries.
+const COORDINATOR_NOT_AVAILABLE: i16 = 15;
 const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
 const INVALID_PRODUCER_EPOCH: i16 = 47;
 const INVALID_RECORD: i16 = 87;
@@ -563,6 +565,16 @@ fn materialized_batches(xs: Vec<(u64, i64, i64, i64, Blob, BatchHeader)>) -> Vec
 /// A partition this broker does not lead: the client refreshes its metadata and finds the leader.
 fn not_leader() -> PartitionAnswer {
     PartitionAnswer { error: NOT_LEADER_OR_FOLLOWER, base_offset: -1i64, log_start: -1i64, message: None, bad_batch: None }
+}
+
+const NOT_ENOUGH_REPLICAS_AFTER_APPEND: i16 = 20;
+
+/// An `acks=all` append committed after the in-sync replicas fell below `min.insync.replicas`.
+fn not_enough_after_append() -> PartitionAnswer {
+    PartitionAnswer {
+        error: NOT_ENOUGH_REPLICAS_AFTER_APPEND, base_offset: -1i64, log_start: -1i64,
+        message: Some("the in-sync replicas fell below min.insync.replicas after the append"), bad_batch: None,
+    }
 }
 
 /// An `acks=all` append whose high watermark did not pass it within the request's timeout.
