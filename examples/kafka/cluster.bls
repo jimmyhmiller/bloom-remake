@@ -1,0 +1,696 @@
+//! The cluster (docs/plan/notes/S8.md, items 2 and 4): the controller, placement, and who leads what.
+//!
+//! The controller is a replicated log (`raft.bls`) over every broker: the metadata group. Its entries are commands
+//! (D8): create a topic, delete a topic, allocate a producer id. The broker a client asked builds a command (with a
+//! fresh topic id and the replica assignment, D11), forwards it to the controller's leader, and sends it again every
+//! `CMD_RESEND` until it sees the command applied: a command reaches the log at least once, and is applied once,
+//! since applying skips a command whose (origin, tag) is already applied. Every broker applies the committed
+//! commands in log order, one per tick, so every broker decides the same outcomes (a name already taken, an id that
+//! is gone) and holds the same metadata. The applied metadata is durable, with the index applied.
+//!
+//! Each topic partition is a group of its own, whose members are its replica set. A partition leader announces the
+//! groups it leads, with their epochs, to every broker at each heartbeat (D7), so any broker can answer Metadata.
+
+/// The controller's group: the metadata topic id (0, 1), partition 0 (Kafka's `__cluster_metadata`).
+fn controller() -> Group {
+    (Bytes::join([Bytes::from_u64_be(0u64), Bytes::from_u64_be(1u64)]), 0i32)
+}
+
+/// Command kinds.
+const OP_CREATE: i8 = 1;
+const OP_DELETE: i8 = 2;
+const OP_PIDS: i8 = 3;
+/// A creation that only validates: decided as a creation is, against the metadata when applied, with no effect.
+const OP_VALIDATE: i8 = 4;
+/// A partition reassignment (AlterPartitionReassignments), and a partition leader's report that one is complete.
+const OP_REASSIGN: i8 = 5;
+const OP_REASSIGNED: i8 = 6;
+
+/// One topic of a command: for a creation, the error the broker found after the checks that come before a taken name
+/// (the partition count, the replication factor, ...; it applies only if the name is not taken), the topic's name,
+/// id, replica assignment (one replica list per partition) and configurations; for a deletion, the topic's name or
+/// its id (the other empty), resolved when the command is applied; for a reassignment, the topic's name, the
+/// partition (`part`), the target replicas (one list; none cancels) and whether the replication factor may change
+/// (`flag`); for a completed one, the topic id, the partition and the replicas. `slot` is the topic's entry in its
+/// request, which names its outcome.
+struct Item { slot: u64, part: i32, err: i16, flag: bool, name: String, id: Bytes, assignment: Vec<Vec<i32>>, configs: Vec<(String, String)> }
+
+/// A command to the controller. `origin` and `tag` name the request that asked for it (the origin broker's id, and
+/// a tag unique among its requests). A request's creations (or deletions) are one command, applied in one tick, so
+/// no other request's commands come between them: a request takes effect at one point, as a Kafka controller handles
+/// a request in one event. A producer-id allocation has no items.
+struct Cmd { op: i8, origin: i32, tag: u64, items: Vec<Item> }
+
+fn create_item(slot: u64, err: i16, name: String, id: Bytes, assignment: Vec<Vec<i32>>, configs: Vec<(String, String)>) -> Item {
+    Item { slot: slot, part: 0i32, err: err, flag: false, name: name, id: id, assignment: assignment, configs: configs }
+}
+
+fn delete_item(slot: u64, name: String, id: Bytes) -> Item {
+    Item { slot: slot, part: 0i32, err: NONE, flag: false, name: name, id: id, assignment: [], configs: [] }
+}
+
+fn reassign_item(slot: u64, name: String, part: i32, err: i16, replicas: Option<Vec<i32>>, allow_rf_change: bool) -> Item {
+    let asg = match replicas { Some(rs) => [rs], None => [] };
+    Item { slot: slot, part: part, err: err, flag: allow_rf_change, name: name, id: zero_uuid(), assignment: asg, configs: [] }
+}
+
+/// A completed reassignment's report: its target and the index it was set at (`since`, in the slot).
+fn reassigned_item(tid: Bytes, part: i32, replicas: Vec<i32>, since: u64) -> Item {
+    Item { slot: since, part: part, err: NONE, flag: false, name: "", id: tid, assignment: [replicas], configs: [] }
+}
+
+/// `xs` and then the members of `ys` not in it.
+fn union_ids(xs: Vec<i32>, ys: Vec<i32>) -> Vec<i32> {
+    xs.concat(ys.filter(|y| not xs.contains(y)))
+}
+
+fn create_cmd(origin: i32, tag: u64, items: Vec<Item>) -> Cmd {
+    Cmd { op: OP_CREATE, origin: origin, tag: tag, items: items }
+}
+
+fn validate_cmd(origin: i32, tag: u64, items: Vec<Item>) -> Cmd {
+    Cmd { op: OP_VALIDATE, origin: origin, tag: tag, items: items }
+}
+
+fn reassign_cmd(origin: i32, tag: u64, items: Vec<Item>) -> Cmd {
+    Cmd { op: OP_REASSIGN, origin: origin, tag: tag, items: items }
+}
+
+fn reassigned_cmd(origin: i32, tag: u64, item: Item) -> Cmd {
+    Cmd { op: OP_REASSIGNED, origin: origin, tag: tag, items: [item] }
+}
+
+fn delete_cmd(origin: i32, tag: u64, items: Vec<Item>) -> Cmd {
+    Cmd { op: OP_DELETE, origin: origin, tag: tag, items: items }
+}
+
+fn pids_cmd(origin: i32, tag: u64) -> Cmd {
+    Cmd { op: OP_PIDS, origin: origin, tag: tag, items: [] }
+}
+
+fn encode_item(it: Item) -> Bytes {
+    Bytes::join([
+        Bytes::from_u64_be(it.slot),
+        Bytes::from_i32_be(it.part),
+        Bytes::from_i16_be(it.err),
+        enc_bool(it.flag),
+        enc_compact_string(it.name),
+        it.id,
+        enc_compact_array(it.assignment.map(|rs| enc_compact_i32s(rs))),
+        enc_compact_array(it.configs.map(|kv| Bytes::join([enc_compact_string(kv.0), enc_compact_string(kv.1)]))),
+    ])
+}
+
+fn encode_cmd(c: Cmd) -> Bytes {
+    Bytes::join([
+        Bytes::from_i8(c.op),
+        Bytes::from_i32_be(c.origin),
+        Bytes::from_u64_be(c.tag),
+        enc_compact_array(c.items.map(|it| encode_item(it))),
+    ])
+}
+
+fn read_assignment(c: Cur) -> Option<(Vec<Vec<i32>>, Cur)> {
+    read_compact_len(c).and_then(|n| {
+        let steps = range(0, n.0).scan(Some(([], n.1)), |acc, _i| {
+            acc.and_then(|a| read_compact_i32s(a.1).map(|r| ([r.0], r.1)))
+        });
+        read_all_steps(steps, n.1)
+    })
+}
+
+fn read_configs(c: Cur) -> Option<(Vec<(String, String)>, Cur)> {
+    read_compact_len(c).and_then(|n| {
+        let steps = range(0, n.0).scan(Some(([], n.1)), |acc, _i| {
+            acc.and_then(|a| read_compact_string(a.1).and_then(|k| read_compact_string(k.1).map(|v| ([(k.0, v.0)], v.1))))
+        });
+        read_config_steps(steps, n.1)
+    })
+}
+
+/// The items a scan of reads produced, and where the last read ended; `None` if a read failed.
+fn read_all_steps(steps: Vec<Option<(Vec<Vec<i32>>, Cur)>>, start: Cur) -> Option<(Vec<Vec<i32>>, Cur)> {
+    if steps.any(|s| s.is_none()) {
+        None
+    } else {
+        let items = steps.filter_map(|s| s.map(|x| x.0)).flatten();
+        match steps.last() {
+            Some(Some(s)) => Some((items, s.1)),
+            _ => Some((items, start)),
+        }
+    }
+}
+
+fn read_config_steps(steps: Vec<Option<(Vec<(String, String)>, Cur)>>, start: Cur) -> Option<(Vec<(String, String)>, Cur)> {
+    if steps.any(|s| s.is_none()) {
+        None
+    } else {
+        let items = steps.filter_map(|s| s.map(|x| x.0)).flatten();
+        match steps.last() {
+            Some(Some(s)) => Some((items, s.1)),
+            _ => Some((items, start)),
+        }
+    }
+}
+
+fn read_item(c: Cur) -> Option<(Item, Cur)> {
+    read_u64(c).and_then(|slot| read_i32(slot.1).and_then(|part| read_i16(part.1).and_then(|err| read_bool(err.1).and_then(|flag| {
+        read_compact_string(flag.1).and_then(|name| read_uuid(name.1).and_then(|id| read_assignment(id.1).and_then(|a| {
+            read_configs(a.1).map(|cf| (Item {
+                slot: slot.0, part: part.0, err: err.0, flag: flag.0, name: name.0, id: id.0, assignment: a.0, configs: cf.0,
+            }, cf.1))
+        })))
+    }))))
+}
+
+fn read_items(c: Cur) -> Option<(Vec<Item>, Cur)> {
+    read_compact_len(c).and_then(|n| {
+        let steps = range(0, n.0).scan(Some(([], n.1)), |acc, _i| {
+            acc.and_then(|a| read_item(a.1).map(|r| ([r.0], r.1)))
+        });
+        read_item_steps(steps, n.1)
+    })
+}
+
+fn read_item_steps(steps: Vec<Option<(Vec<Item>, Cur)>>, start: Cur) -> Option<(Vec<Item>, Cur)> {
+    if steps.any(|s| s.is_none()) {
+        None
+    } else {
+        let items = steps.filter_map(|s| s.map(|x| x.0)).flatten();
+        match steps.last() {
+            Some(Some(s)) => Some((items, s.1)),
+            _ => Some((items, start)),
+        }
+    }
+}
+
+fn decode_cmd(b: Bytes) -> Option<Cmd> {
+    read_i8(cur(b)).and_then(|op| read_i32(op.1).and_then(|origin| read_u64(origin.1).and_then(|tag| {
+        read_items(tag.1).map(|its| Cmd { op: op.0, origin: origin.0, tag: tag.0, items: its.0 })
+    })))
+}
+
+/// The creations a Metadata request on broker `me`'s connection `c` (its `i`th request) asks for, one per name: ids
+/// and placements that are functions of the request, so the command sent again is the same command. A connection id
+/// is unique on its broker only, so the broker is part of the id.
+fn metadata_items(me: i32, c: Conn, i: u64, names: Vec<String>, ids: Vec<i32>, partitions: i32, rf: i16) -> Vec<Item> {
+    names.enumerate().map(|x| create_item(x.0, NONE, x.1,
+        topic_id(hash64(("id", me, c, i, x.1, 0u64)), hash64(("id", me, c, i, x.1, 1u64))),
+        assign(ids, partitions, rf, hash64(("start", me, c, i, x.1))), []))
+}
+
+/// A reassignment's outcome, as Kafka's controller decides it, and the target to record (if any): `err` is the
+/// broker's own verdict on the replicas; `asg` the target (none: a cancellation); `rs` the partition's replicas;
+/// `ongoing` whether a reassignment of it is in progress.
+fn reassign_decision(err: i16, flag: bool, asg: Vec<Vec<i32>>, rs: Vec<i32>, ongoing: bool) -> (i16, Option<Vec<i32>>) {
+    if err != NONE {
+        (err, None)
+    } else {
+        match asg.first() {
+            None => if ongoing { (NONE, Some(rs)) } else { (NO_REASSIGNMENT_IN_PROGRESS, None) },
+            Some(target) => if not flag && target.len() != rs.len() {
+                (INVALID_REPLICATION_FACTOR, None)
+            } else if not ongoing && target == rs {
+                (NONE, None)
+            } else {
+                (NONE, Some(target))
+            },
+        }
+    }
+}
+
+/// One configuration change of a partition being reassigned, as its leader `me` makes them (item 5): add the first
+/// target replica missing; once every target replica is in sync, remove one replica the target leaves out (the
+/// leader itself last); nothing once the configuration is the target.
+fn reassign_step(cur: Vec<i32>, target: Vec<i32>, isr: Vec<i32>, me: i32) -> Option<Vec<i32>> {
+    match target.filter(|x| not cur.contains(x)).first() {
+        Some(add) => Some(cur.push(add)),
+        None => if not target.all(|x| isr.contains(x)) {
+            None
+        } else {
+            let extra = cur.filter(|x| not target.contains(x));
+            match extra.filter(|x| x != me).first() {
+                Some(drop) => Some(cur.filter(|x| x != drop)),
+                None => match extra.first() {
+                    Some(drop) => Some(cur.filter(|x| x != drop)),
+                    None => None,
+                },
+            }
+        },
+    }
+}
+
+/// The bytes of a stored entry (a blob only ever holds its whole bytes).
+fn entry_bytes(data: Blob) -> Bytes {
+    match data.read(0, data.len()) {
+        Some(b) => b,
+        None => error("entry_bytes: a blob does not hold its own length"),
+    }
+}
+
+/// A command from a broker to the controller's leader.
+channel submit(cmd: Bytes): Broker -> Broker;
+/// A partition leader's announcement: the groups it leads, with their epochs and in-sync replicas (S8.md D7), and
+/// when it sent it (by its clock), which orders its announcements within one epoch.
+channel leads(gs: Vec<(Group, u64, Vec<i32>)>, at: Instant): Broker -> Broker;
+
+param CMD_RESEND: Duration = 500ms;
+/// How long a follower may go without being caught up before it leaves its partition's in-sync replicas (Kafka's
+/// `replica.lag.time.max.ms`).
+param REPLICA_LAG_MAX: Duration = 30s;
+/// Producer ids: the first, and how many the controller gives a broker at a time (Kafka's blocks of 1000), so a
+/// broker hands out producer ids itself and an idempotent producer's start costs the controller nothing.
+param PID_START: i64 = 1000;
+param PID_BLOCK: i64 = 1000;
+/// How long InitProducerId waits for a block of producer ids before answering COORDINATOR_NOT_AVAILABLE.
+param PID_WAIT: Duration = 5s;
+/// How long a broker that has not caught up with the controller keeps a request before closing its connection.
+param NOT_CAUGHT_UP_WAIT: Duration = 10s;
+
+at Broker {
+    /// This broker's id, and every broker's node by id.
+    view my_id(id) = broker(self, id, _, _);
+    view broker_at(id, n) = broker(n, id, _, _);
+    view broker_ids(ids = collect!(id)) = broker(_, id, _, _);
+
+    /// The members of each group (D1): every broker for the controller; a partition's replica set otherwise.
+    /// The members of each group before its log holds a configuration (D1): every broker for the controller; a
+    /// partition's replica set otherwise. Members are named by broker id.
+    view initial_members(g, n) {
+        broker(n, _, _, _), let g = controller();
+        massign(tid, p, rs), broker(n, id, _, _), let g = (tid, p) where rs.contains(id);
+    }
+    view member_id(n, id) = broker(n, id, _, _);
+    /// The partitions whose log this broker keeps: those it replicates, and those a reassignment moves to it (every
+    /// configuration a reassignment passes through is made of these, item 5).
+    view hosts(g) {
+        massign(tid, p, rs), my_id(me), let g = (tid, p) where rs.contains(me);
+        mreassign(tid, p, _target, hosting, _since), my_id(me), let g = (tid, p) where hosting.contains(me);
+    }
+
+    /// Each group's preferred leader: the broker with the lowest id for the controller, the first replica for a
+    /// partition (D11).
+    view preferred(g, n) {
+        broker(n, id, _, _), broker_ids(ids), let g = controller() where ids.first() == Some(id);
+        massign(tid, p, rs), broker(n, id, _, _), let g = (tid, p) where rs.first() == Some(id);
+    }
+
+    // ---- the applied metadata, durable with the index applied (as a Kafka broker keeps its metadata log and
+    // snapshot): a restarted broker resumes from what it applied, and never answers from an older state
+
+    /// The highest controller entry applied.
+    durable table applied_m(i: u64) key() resolve choose_most(i);
+    /// The topics, by name: id, partition count, the configurations given at creation.
+    durable table mtopic(name: String, id: Bytes, partitions: i32, configs: Vec<(String, String)>) key(name);
+    /// Each partition's replicas, by broker id; the first is the preferred leader.
+    durable table massign(tid: Bytes, part: i32, replicas: Vec<i32>) key(tid, part);
+    /// The partitions being reassigned: their target replicas (`massign` keeps the replicas until it is done), every
+    /// broker a configuration of the reassignment may name (the replicas and every target set since it began, so a
+    /// cancellation or a new target never drops a member the partition's log still counts), and the controller index
+    /// the target was set at (which tells one target from an earlier equal one).
+    durable table mreassign(tid: Bytes, part: i32, target: Vec<i32>, hosting: Vec<i32>, since: u64) key(tid, part);
+    /// The ids of the topics deleted: their partitions' data goes.
+    durable table mdeleted(tid: Bytes) key(tid);
+    /// The commands applied, by request.
+    durable table done(origin: i32, tag: u64) key(origin, tag);
+    /// Each applied item's outcome, by its request and entry: the error (NONE when it took effect), the topic id and
+    /// name (a creation's, or the deleted topic's), or the allocated producer id (a producer-id allocation's, slot 0).
+    durable table outcome(origin: i32, tag: u64, slot: u64, error: i16, id: Bytes, pid: i64, name: String) key(origin, tag, slot);
+    /// The next producer id.
+    durable table next_pid(n: i64) key() resolve choose_most(n);
+
+    bootstrap fresh {
+        emit applied_m(0);
+        emit next_pid(PID_START);
+    }
+
+    view topic_keys(k, name) = mtopic(name, _, _, _), let k = collision_key(name);
+
+    /// Whether this broker's metadata is current: once it has applied the controller's log up to the commit index
+    /// its leader announced in this incarnation (or its own, leading). Until then (a new broker, or one that was down
+    /// while the controller moved on) its requests other than ApiVersions wait, as Kafka keeps a broker fenced until
+    /// it has caught up with the controller's high watermark. It is a latch: once caught up, a broker answers from
+    /// what it has applied, as a Kafka broker answers from its metadata cache (a request is not held back each time
+    /// the controller commits ahead of what this broker applied).
+    table synced(at: u64) key();
+    latch_synced: while applied_m(a), known_commit(g, c), let g = controller(), not synced(_) where a >= c {
+        upsert synced(a);
+    }
+    view caught_up() = synced(_);
+
+    /// The next committed controller entry to apply.
+    view to_apply(i, kind, data) =
+        applied_m(a), let i = a + 1, let g = controller(), commit_of(g, c), rlog(g, i, _, _, kind, _, data) where i <= c;
+    view to_apply_cmd(cmd) = to_apply(_, kind, data), let Some(cmd) = decode_cmd(entry_bytes(data)) where kind == CMD;
+    advance_applied: while to_apply(i, _, _) {
+        next applied_m(i);
+    }
+    /// The command to apply, unless it is already applied (sent again by its origin, so in the log twice).
+    view fresh(op, origin, tag, items) =
+        to_apply_cmd(cmd), let op = cmd.op, let origin = cmd.origin, let tag = cmd.tag, let items = cmd.items,
+        not done(origin, tag);
+    mark_done: while fresh(_, origin, tag, _) {
+        upsert done(origin, tag);
+    }
+    /// The items of the command to apply, by field. A request's items name distinct topics (two entries for one
+    /// topic are refused by the broker a client asked), so each is decided against the metadata before the command.
+    view fresh_item(op, origin, tag, slot, err, name, id, asg, cfg) =
+        fresh(op, origin, tag, items), it in items, let slot = it.slot, let err = it.err, let name = it.name,
+        let id = it.id, let asg = it.assignment, let cfg = it.configs;
+
+    /// A creation (or a validation): refused for a name taken (by that name, or one colliding with it), else as the
+    /// broker decided. Only a creation takes effect.
+    view cmd_create(origin, tag, slot, err, name, id, asg, cfg, k) =
+        fresh_item(op, origin, tag, slot, err, name, id, asg, cfg), let k = collision_key(name)
+        where op == OP_CREATE || op == OP_VALIDATE;
+    view cmd_creates(origin, tag) = fresh(op, origin, tag, _) where op == OP_CREATE;
+    apply_create: while cmd_create(origin, tag, slot, err, name, id, asg, cfg, k) {
+        if mtopic(name, _, _, _) {
+            upsert outcome(origin, tag, slot, TOPIC_ALREADY_EXISTS, zero_uuid(), -1i64, name);
+        }
+        if not mtopic(name, _, _, _), topic_keys(k, _) {
+            upsert outcome(origin, tag, slot, INVALID_TOPIC_EXCEPTION, zero_uuid(), -1i64, name);
+        }
+        if not mtopic(name, _, _, _), not topic_keys(k, _) where err != NONE {
+            upsert outcome(origin, tag, slot, err, zero_uuid(), -1i64, name);
+        }
+        if not mtopic(name, _, _, _), not topic_keys(k, _) where err == NONE {
+            upsert outcome(origin, tag, slot, NONE, id, -1i64, name);
+        }
+        if not mtopic(name, _, _, _), not topic_keys(k, _), cmd_creates(origin, tag) where err == NONE {
+            upsert mtopic(name, id, asg.len() as i32, cfg);
+        }
+    }
+    apply_assign: while cmd_create(origin, tag, _, err, name, id, asg, _, k), cmd_creates(origin, tag),
+        not mtopic(name, _, _, _), not topic_keys(k, _), (p, rs) in asg.enumerate() where err == NONE {
+        upsert massign(id, p as i32, rs);
+    }
+
+    /// A deletion's items, resolved against the metadata before the command: an item by id deletes that topic; an
+    /// item by name deletes the topic of that name, unless another item of the request names the same topic by id
+    /// (Kafka refuses such a name: DELETE_CLASH). Well-formed requests name each topic once each way, so no topic is
+    /// deleted twice.
+    view cmd_delete_item(origin, tag, slot, name, id) = fresh_item(op, origin, tag, slot, _, name, id, _, _) where op == OP_DELETE;
+    view cmd_delete_ids(origin, tag, id) = cmd_delete_item(origin, tag, _, _, id) where id != zero_uuid();
+    view cmd_delete(origin, tag, slot, tid) {
+        cmd_delete_item(origin, tag, slot, _name, tid), mtopic(_n, tid, _, _) where tid != zero_uuid();
+        cmd_delete_item(origin, tag, slot, name, id), mtopic(name, tid, _, _), not cmd_delete_ids(origin, tag, tid)
+            where id == zero_uuid();
+    }
+    apply_delete: while cmd_delete_item(origin, tag, slot, name, id) {
+        if cmd_delete(origin, tag, slot, tid), mtopic(n, tid, parts, cfg) {
+            delete mtopic(n, tid, parts, cfg);
+            upsert mdeleted(tid);
+            upsert outcome(origin, tag, slot, NONE, tid, -1i64, n);
+        }
+        if not mtopic(_, id, _, _) where id != zero_uuid() {
+            upsert outcome(origin, tag, slot, UNKNOWN_TOPIC_ID, id, -1i64, "");
+        }
+        if not mtopic(name, _, _, _) where id == zero_uuid() {
+            upsert outcome(origin, tag, slot, UNKNOWN_TOPIC_OR_PARTITION, zero_uuid(), -1i64, name);
+        }
+        if mtopic(name, tid, _, _), cmd_delete_ids(origin, tag, tid) where id == zero_uuid() {
+            upsert outcome(origin, tag, slot, DELETE_CLASH, zero_uuid(), -1i64, name);
+        }
+    }
+    apply_unassign: while cmd_delete(_, _, _, tid), massign(tid, p, rs) {
+        delete massign(tid, p, rs);
+    }
+    apply_unreassign: while cmd_delete(_, _, _, tid), mreassign(tid, p, t, h, since) {
+        delete mreassign(tid, p, t, h, since);
+    }
+    /// A block of producer ids for the asking broker: `PID_BLOCK` of them from the outcome's id.
+    apply_pids: while fresh(op, origin, tag, _), next_pid(n) where op == OP_PIDS {
+        upsert outcome(origin, tag, 0u64, NONE, zero_uuid(), n, "");
+        next next_pid(n + PID_BLOCK);
+    }
+
+    /// A reassignment's items (AlterPartitionReassignments, item 5), decided against the metadata as Kafka's
+    /// controller decides them: an unknown topic or partition; the broker's own error (malformed replicas); a
+    /// cancellation with nothing to cancel; a replication factor change not allowed. A reassignment records its
+    /// target; a cancellation reassigns back to the replicas (a configuration only changes one member at a time, so
+    /// going back is a reassignment too). A target equal to the replicas with none in progress changes nothing.
+    view reassign_item_of(origin, tag, slot, name, part, err, flag, asg) =
+        fresh(op, origin, tag, items), it in items, let slot = it.slot, let name = it.name, let part = it.part,
+        let err = it.err, let flag = it.flag, let asg = it.assignment where op == OP_REASSIGN;
+    view reassign_known(origin, tag, slot, tid, part, err, flag, asg, rs) =
+        reassign_item_of(origin, tag, slot, name, part, err, flag, asg), mtopic(name, tid, _, _), massign(tid, part, rs);
+    view reassign_known_item(origin, tag, slot) = reassign_known(origin, tag, slot, _, _, _, _, _, _);
+    view reassigning_now(tid, part) = mreassign(tid, part, _, _, _);
+    /// The controller index being applied.
+    view applying(i) = to_apply(i, _, _);
+    view reassign_choice(origin, tag, slot, tid, part, d) {
+        reassign_known(origin, tag, slot, tid, part, err, flag, asg, rs), reassigning_now(tid, part),
+            let d = reassign_decision(err, flag, asg, rs, true);
+        reassign_known(origin, tag, slot, tid, part, err, flag, asg, rs), not reassigning_now(tid, part),
+            let d = reassign_decision(err, flag, asg, rs, false);
+    }
+    apply_reassign_unknown: while reassign_item_of(origin, tag, slot, name, _part, _err, _flag, _asg),
+        not reassign_known_item(origin, tag, slot) {
+        upsert outcome(origin, tag, slot, UNKNOWN_TOPIC_OR_PARTITION, zero_uuid(), -1i64, name);
+    }
+    apply_reassign: while reassign_choice(origin, tag, slot, tid, _part, d) {
+        upsert outcome(origin, tag, slot, d.0, tid, -1i64, "");
+    }
+    apply_reassign_target: while reassign_choice(_origin, _tag, _slot, tid, part, d), let Some(target) = d.1, applying(i) {
+        if mreassign(tid, part, _t, hosting, _s) {
+            upsert mreassign(tid, part, target, union_ids(hosting, target), i);
+        }
+        if not reassigning_now(tid, part), massign(tid, part, rs) {
+            upsert mreassign(tid, part, target, union_ids(rs, target), i);
+        }
+    }
+    /// A partition leader's report that its configuration reached the target set at `since`: the target becomes the
+    /// replicas, if it is still that target (a newer reassignment replaces it; a deleted topic has none).
+    view reassigned_item_of(origin, tag, tid, part, target, since) =
+        fresh(op, origin, tag, items), it in items, let tid = it.id, let part = it.part, let since = it.slot,
+        let Some(target) = it.assignment.first() where op == OP_REASSIGNED;
+    apply_reassigned: while reassigned_item_of(origin, tag, tid, part, target, since) {
+        if mreassign(tid, part, target, hosting, since), massign(tid, part, rs) {
+            upsert massign(tid, part, target);
+            delete mreassign(tid, part, target, hosting, since);
+        }
+        upsert outcome(origin, tag, 0u64, NONE, tid, -1i64, "");
+    }
+
+    /// A deleted topic's partition data goes, here as everywhere (the topic is gone from the applied metadata, so
+    /// no broker is a member of its groups any more).
+    forget_deleted: while mdeleted(tid), rlog(g, i, t, pt, k, pos, data), let (gt, _gp) = g where gt == tid {
+        delete rlog(g, i, t, pt, k, pos, data);
+    }
+    /// Its Raft state goes too (topic ids are never reused, so the group never comes back).
+    view deleted_group(g) = mdeleted(tid), rterm(g, _), let (gt, _gp) = g where gt == tid;
+    forget_deleted_raft: while deleted_group(g) {
+        if rterm(g, t) {
+            delete rterm(g, t);
+        }
+        if rsnap(g, i, t, pos, conf) {
+            delete rsnap(g, i, t, pos, conf);
+        }
+        if rvote(g, t, v) {
+            delete rvote(g, t, v);
+        }
+        if won(g, t) {
+            delete won(g, t);
+        }
+        if leader_of(g, t, l) {
+            delete leader_of(g, t, l);
+        }
+        if voters(g, t, v) {
+            delete voters(g, t, v);
+        }
+        if deadline(g, at) {
+            delete deadline(g, at);
+        }
+        if commit(g, c) {
+            delete commit(g, c);
+        }
+        if match_idx(g, f, m) {
+            delete match_idx(g, f, m);
+        }
+        if rsent(g, f, m) {
+            delete rsent(g, f, m);
+        }
+        if isr_term(g, t) {
+            delete isr_term(g, t);
+        }
+        if heard_at(g, at) {
+            delete heard_at(g, at);
+        }
+        if heard_commit(g, c) {
+            delete heard_commit(g, c);
+        }
+    }
+
+    // ---- commands this broker waits on: sent when first wanted, and every `CMD_RESEND` until applied
+
+    /// The commands this broker's requests wait on (`wanted_cmd`, defined with the requests) that are not applied.
+    view awaited(tag, cmd) = wanted_cmd(tag, cmd), my_id(me), not done(me, tag);
+    table cmd_sent(tag: u64) key(tag);
+    timer cmd_resend every CMD_RESEND;
+    view cmd_out(cmd) {
+        awaited(tag, cmd), not cmd_sent(tag);
+        cmd_resend, awaited(_, cmd);
+    }
+    mark_sent: while awaited(tag, _), not cmd_sent(tag) {
+        upsert cmd_sent(tag);
+    }
+    forget_sent: while cmd_sent(tag), not awaited(tag, _) {
+        delete cmd_sent(tag);
+    }
+    forward: while cmd_out(cmd), known_leader(g, l), let g = controller() where l != self {
+        send submit(cmd) to l;
+    }
+
+    /// What each group's leader appends this tick: the controller's commands (forwarded to it, or its own).
+    /// The controller's leader appends a command once: not again while it is in its log unapplied, nor once applied
+    /// (a broker sends a command again every `CMD_RESEND` until it sees it applied, and a stalled controller would
+    /// otherwise append every copy).
+    view ctl(g) = mine(g), let c = controller() where g == c;
+    view unapplied_cmd(data) = applied_m(a), ctl(g), rlog(g, i, _, _, kind, _, data) where i > a && kind == CMD;
+    view logged_cmd(origin, tag) =
+        unapplied_cmd(data), let Some(cmd) = decode_cmd(entry_bytes(data)), let origin = cmd.origin, let tag = cmd.tag;
+    view new_cmd(cmd) {
+        submit(cmd) from _;
+        cmd_out(cmd);
+    }
+    view appendable_cmd(cmd) =
+        new_cmd(cmd), let Some(d) = decode_cmd(cmd), let origin = d.origin, let tag = d.tag, not done(origin, tag),
+        not logged_cmd(origin, tag);
+    view proposals(g, xs = collect!(x)) {
+        appendable_cmd(cmd), ctl(g), leader(g, _), let x = (CMD, -1i64, Blob::of(cmd));
+        data_proposals(g, x);
+        config_proposals(g, x);
+    }
+
+    // ---- reassignment, at the partition's leader (item 5)
+
+    /// A partition being reassigned, its target, and whether its last configuration change is still uncommitted.
+    view reassign_target(g, target, since) = mreassign(tid, p, target, _hosting, since), let g = (tid, p);
+    /// The next configuration change (`reassign_step`), once the last is committed: one member at a time, so any two
+    /// configurations in use share a majority.
+    view reassign_next(g, ids) =
+        reassign_target(g, target, _since), config_ready(g), member_ids(g, cur), isr_of(g, isr), my_id(me),
+        let Some(ids) = reassign_step(cur, target, isr, me);
+    view config_proposals(g, x) = reassign_next(g, ids), let x = (CONFIG, -1i64, Blob::of(encode_members(ids)));
+    /// The configuration is the target, committed: the leader tells the controller, which makes it the replicas.
+    view reassign_done(tid, p, target, since) =
+        reassign_target(g, target, since), config_ready(g), member_ids(g, cur), let (tid, p) = g
+        where cur.to_set() == target.to_set();
+    view reassigned_cmd_of(tag, cmd) =
+        reassign_done(tid, p, target, since), my_id(me), let tag = hash64(("reassigned", tid, p, target, since)),
+        let cmd = encode_cmd(reassigned_cmd(me, tag, reassigned_item(tid, p, target, since)));
+
+    /// A partition this broker no longer hosts (a reassignment moved it away, item 5) leaves it: its log and
+    /// snapshot point go, and with them its configuration (the produce layer drops the partition's data). Its term
+    /// and votes stay: should the partition come back, they still bind it.
+    view unhosted(g) = assigned(g), not hosts(g);
+    drop_unhosted_log: while unhosted(g), rlog(g, i, t, pt, k, pos, data) {
+        delete rlog(g, i, t, pt, k, pos, data);
+    }
+    drop_unhosted_snap: while unhosted(g), rsnap(g, i, t, pos, conf) {
+        delete rsnap(g, i, t, pos, conf);
+    }
+    drop_unhosted_commit: while unhosted(g), commit(g, c) {
+        delete commit(g, c);
+    }
+    drop_unhosted_won: while unhosted(g), won(g, t) {
+        delete won(g, t);
+    }
+
+    // ---- who leads each partition, and its in-sync replicas (D7)
+
+    /// The followers of a partition this broker leads that are behind, and since when: a follower is caught up while
+    /// it has acknowledged the commit index (Kafka counts a follower caught up when it has fetched to the leader's log
+    /// end; under Raft the commit index is where a quorum stands), and leaves the in-sync replicas once it has been
+    /// behind for `REPLICA_LAG_MAX`. Only the moments a follower falls behind or catches up are written, so an idle
+    /// leader writes nothing. A new leadership starts from the in-sync replicas its predecessor last announced (as a
+    /// Kafka leader starts from the ISR the controller recorded): the others are out (`out`) until they catch up; a
+    /// new partition's replicas are all in sync.
+    table behind(g: Group, f: Node<Broker>, since: Instant, out: bool) key(g, f);
+    table isr_term(g: Group, t: u64) key(g) resolve choose_most(t);
+    /// The members this leadership has placed in or out of the ISR; one added later (a reassignment) starts out of
+    /// it until it catches up, as Kafka adds a new replica to the ISR only once it has caught up.
+    table isr_known(g: Group, f: Node<Broker>) key(g, f);
+    view announced_isr(g, ids) = leader_view(g, _, _, ids);
+    view in_last_isr(g, f) {
+        announced_isr(g, ids), member_id(f, id) where ids.contains(id);
+        members(g, f), not announced(g);
+    }
+    view announced(g) = announced_isr(g, _);
+    isr_start: while leader(g, t), not is_controller(g), not isr_term(g, t) {
+        next isr_term(g, t);
+        for members(g, f) where f != self {
+            upsert isr_known(g, f);
+            if not in_last_isr(g, f) {
+                upsert behind(g, f, now(), true);
+            }
+            if in_last_isr(g, f), behind(g, f, at, out) {
+                delete behind(g, f, at, out);
+            }
+        }
+    }
+    isr_join: while leader(g, t), isr_term(g, t), members(g, f), not isr_known(g, f) where f != self {
+        upsert isr_known(g, f);
+        upsert behind(g, f, now(), true);
+    }
+    forget_isr_known: while isr_known(g, f), not leader(g, _) {
+        delete isr_known(g, f);
+    }
+    forget_isr_known_removed: while isr_known(g, f), leader(g, _), not members(g, f) {
+        delete isr_known(g, f);
+    }
+    view caught_up_to(g, f) = leader(g, _), match_idx(g, f, m), commit_of(g, c) where m >= c;
+    falls_behind: while leader(g, t), isr_term(g, t), not is_controller(g), match_idx(g, f, _), members(g, f),
+        not caught_up_to(g, f), not behind(g, f, _, _) {
+        upsert behind(g, f, now(), false);
+    }
+    catches_up: while behind(g, f, at, out), caught_up_to(g, f) {
+        delete behind(g, f, at, out);
+    }
+    forget_behind: while behind(g, f, at, out), not leader(g, _) {
+        delete behind(g, f, at, out);
+    }
+    forget_behind_removed: while behind(g, f, at, out), leader(g, _), not members(g, f) {
+        delete behind(g, f, at, out);
+    }
+    /// A led partition's in-sync replicas, by broker id: the leader, and every follower not behind for
+    /// `REPLICA_LAG_MAX`.
+    view in_sync(g, id) {
+        leader(g, _), not is_controller(g), my_id(id);
+        leader(g, _), isr_term(g, _), members(g, f), broker(f, id, _, _), not behind(g, f, _, _) where f != self;
+        leader(g, _), members(g, f), broker(f, id, _, _), behind(g, f, at, out)
+            where f != self && not out && now() < at + REPLICA_LAG_MAX;
+    }
+    view isr_of(g, ids = collect!(id)) = in_sync(g, id);
+
+    /// The latest announcement heard per partition group: its stamp (the epoch, and when its leader sent it), the
+    /// leader and the in-sync replicas. Announcements of one epoch come from one leader, so its clock orders them.
+    table leader_view(g: Group, stamp: (u64, Instant), l: Node<Broker>, isr: Vec<i32>) key(g) resolve choose_most(stamp);
+    announce: on raft_heartbeat, led_groups(gs) {
+        for broker(n, _, _, _) where n != self {
+            send leads(gs, now()) to n;
+        }
+    }
+    view led_groups(gs = collect!((g, t, isr))) = leader(g, t), not is_controller(g), isr_of(g, isr);
+    view is_controller(g) = mine(g), let c = controller() where g == c;
+    heard_leads: on leads(gs, at) from l, (g, t, isr) in gs {
+        next leader_view(g, (t, at), l, isr);
+    }
+    /// A deleted partition's announcements go.
+    view assigned(g) = massign(tid, p, _), let g = (tid, p);
+    forget_leader_view: while leader_view(g, stamp, l, isr), not assigned(g) {
+        delete leader_view(g, stamp, l, isr);
+    }
+    /// Each partition's leader as this broker knows it, with the leader epoch clients see (the term less one, so the
+    /// first leader's is 0, as Kafka's) and its in-sync replicas: itself where it leads, else the latest heard.
+    view partition_leader(g, epoch, l, isr) {
+        leader(g, t), not is_controller(g), isr_of(g, isr), let l = self, let epoch = t - 1;
+        leader_view(g, stamp, l, isr), not leader(g, _), let epoch = stamp.0 - 1;
+    }
+    /// The controller's leader, by broker id, if known.
+    view controller_id(id) {
+        known_leader(g, l), broker(l, id, _, _), let g = controller();
+        leader(g, _), my_id(id), let g = controller();
+    }
+}

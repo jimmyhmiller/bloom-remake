@@ -1,29 +1,22 @@
-//! The broker's topics: the `topic` table and each partition's offsets, and the handlers of Metadata, CreateTopics,
-//! DeleteTopics and DescribeConfigs. Included next to `broker_node.bls`, whose `head` view gives each connection's
-//! next request.
+//! The topics requests (S8 item 2): CreateTopics, DeleteTopics, Metadata and DescribeConfigs, over the applied
+//! metadata of the controller (`cluster.bls`). Included next to `broker_node.bls`, whose `head` view gives each
+//! connection's next request.
 //!
-//! Requests from several connections are answered in one tick, and their answers must fit one sequential order.
-//! So a tick changes the topics for one request at most, the **writer**: the oldest request (by arrival, then
-//! connection) that creates or deletes topics, a Metadata request that auto-creates one included. The other such
-//! requests wait for a later tick at the head of their queues. The writer sees the topics as the tick found them;
-//! every other request answered in the tick (Metadata, DescribeConfigs, a CreateTopics that only validates) sees them
-//! after the writer's change. The tick's order is therefore the writer, then the rest. A change is durable before
-//! any answer that reveals it leaves, since a tick's writes leave only after its record syncs.
-//!
-//! (Letting several writers change different topics in one tick is not enough: a DeleteTopics that misses a topic
-//! another request creates, and a Metadata request that sees both that topic and one the deletion removes, admit no
-//! order.)
+//! A creation or deletion is decided in two places. The broker a client asked checks each entry against the request
+//! alone (a malformed name, a bad configuration, a replication factor above the brokers, two entries for one topic)
+//! and answers those at once; every other entry becomes a command to the controller, and the request waits at the
+//! head of its connection until every command is applied (or its timeout passes). The controller's log orders the
+//! commands of every broker, so concurrent requests see one order of creations and deletions; applying a command
+//! decides what depends on the topics then (a name taken, an id gone) the same way on every broker.
 
-/// The topics, by name: each one's id, partition count and the configurations given at its creation.
-durable table topic(name: String, id: Bytes, partitions: i32, configs: Vec<(String, String)>) key(name);
-/// Per partition (by topic id): the offset the next appended record gets.
-durable table log_end(tid: Bytes, part: i32, next: i64) key(tid, part);
-/// Per partition (by topic id): the first offset still held.
-durable table log_start(tid: Bytes, part: i32, start: i64) key(tid, part);
-
-/// The topics by collision key, as the tick found them: two topics whose names differ only in `.` against `_` may
-/// not both exist.
-view topic_key(k, name) = topic(name, _, _, _), let k = collision_key(name);
+/// A broker that has not caught up with the controller (cut off since it restarted) does not keep a client waiting
+/// for ever: after `NOT_CAUGHT_UP_WAIT` it closes the connection, so the client goes to another broker (a Kafka
+/// broker that has not caught up is fenced, and clients do not use it).
+not_caught_up_close: while head(c, i, _seq, key, version, _corr, fr, at), not caught_up()
+    where not pure_request(key, version) && now() >= at + NOT_CAUGHT_UP_WAIT {
+    send kafka.close(c);
+    delete queued(c, i, fr, at);
+}
 
 /// A supported request whose body this broker cannot decode closes the connection.
 undecodable: while head(c, i, _seq, key, version, _corr, fr, at) where not pure_request(key, version) && not stateful_body_ok(key, fr) {
@@ -32,167 +25,269 @@ undecodable: while head(c, i, _seq, key, version, _corr, fr, at) where not pure_
 }
 
 view create_head(c, i, seq, corr, fr, at, req) =
-    head(c, i, seq, key, _version, corr, fr, at), key == API_CREATE_TOPICS,
+    head(c, i, seq, key, _version, corr, fr, at), caught_up(), key == API_CREATE_TOPICS,
     let Some(body) = request_body(fr), let Some(req) = decode_create_topics(body);
 
 view delete_head(c, i, seq, corr, fr, at, req) =
-    head(c, i, seq, key, _version, corr, fr, at), key == API_DELETE_TOPICS,
+    head(c, i, seq, key, _version, corr, fr, at), caught_up(), key == API_DELETE_TOPICS,
     let Some(body) = request_body(fr), let Some(d) = decode_delete_topics(body), let req = d.0;
 
 view metadata_head(c, i, seq, corr, fr, at, req) =
-    head(c, i, seq, key, _version, corr, fr, at), key == API_METADATA,
+    head(c, i, seq, key, _version, corr, fr, at), caught_up(), key == API_METADATA,
     let Some(body) = request_body(fr), let Some(req) = decode_metadata_request(body);
 
-/// Each CreateTopics request's context with nothing taken (what the writer's candidates are decided by), and each
-/// DeleteTopics request's: computed once per request, so an entry's decision is a lookup.
-view create_context_of(c, ctx) = create_head(c, _, _, _, _, _, req), let ctx = create_context(create_names(req), []);
-view delete_context_of(c, ctx) = delete_head(c, _, _, _, _, _, req), let ctx = delete_context(req);
-
 view describe_head(c, i, seq, corr, fr, at, req) =
-    head(c, i, seq, key, _version, corr, fr, at), key == API_DESCRIBE_CONFIGS,
+    head(c, i, seq, key, _version, corr, fr, at), caught_up(), key == API_DESCRIBE_CONFIGS,
     let Some(body) = request_body(fr), let Some(req) = decode_describe_configs(body);
 
-// ---------------------------------------------------------------- the writer
-
-/// The requests at the heads of the queues that would change the broker's state, with their arrival: a CreateTopics
-/// that is not only validating, a DeleteTopics, a Metadata request that would auto-create a topic, and an
-/// InitProducerId (`produce_node.bls`), which allocates a producer id.
-view writes(c, at) {
-    create_head(c, _, _, _, _, at, req), not req.validate_only;
-    delete_head(c, _, _, _, _, at, _req);
-    metadata_head(c, _, _, _, _, at, req), name in metadata_creates(req, AUTO_CREATE_TOPICS),
-        not topic_key(collision_key(name), _);
-    init_pid_head(c, _, _, _, _, at, _req);
-}
-
-/// This tick's writer: the oldest writing request.
-view writer(c) = writes(c, at), let order = (at, c), argmin!(order);
-
-
-// ---------------------------------------------------------------- the writer's change
-
-/// The topics the writer creates, by collision key: the valid entries of its CreateTopics, or the names its Metadata
-/// request auto-creates. None collides with a topic that exists (the entries that would are refused).
-view creating(k, t) {
-    writer(c), create_head(c, _, _, _, _, _, req), create_context_of(c, ctx), u in req.topics,
-        let Some(t) = create_candidate(req, ctx, u, topic_id(rand(u.name, 0), rand(u.name, 1))), let k = collision_key(t.name),
-        not topic_key(k, _);
-    writer(c), metadata_head(c, _, _, _, _, _, req), name in metadata_creates(req, AUTO_CREATE_TOPICS),
-        let k = collision_key(name), not topic_key(k, _),
-        let t = NewTopic { name: name, id: topic_id(rand(name, 0), rand(name, 1)), partitions: DEFAULT_PARTITIONS, configs: [] };
-}
-
-/// The topics the writer's DeleteTopics finds, by entry: an entry names one topic (by name or by id), no other entry
-/// of its request names it again the same way, and an entry by name finds a topic no entry names by id.
-view deleting(e, name, id) {
-    writer(c), delete_head(c, _, _, _, _, _, req), delete_context_of(c, ctx), (e, s) in req.enumerate(),
-        let Some(name) = delete_by_name(ctx, s), topic(name, id, _, _) where not id_supplied(ctx, id);
-    writer(c), delete_head(c, _, _, _, _, _, req), delete_context_of(c, ctx), (e, s) in req.enumerate(),
-        let Some(id) = delete_by_id(ctx, s), topic(name, id, _, _);
-}
-
-make_topic: while creating(_k, t) {
-    next topic(t.name, t.id, t.partitions, t.configs);
-}
-
-make_partitions: while creating(_k, t), p in range(0, t.partitions as u64) {
-    next log_end(t.id, p as i32, 0i64);
-    next log_start(t.id, p as i32, 0i64);
-    next segment(t.id, p as i32, 0i64, 0i64, -1i64, -1i64, now().as_millis());
-    next active_segment(t.id, p as i32, 0i64);
-}
-
-remove_topic: while deleting(_e, name, id), topic(name, id, p, cfg) {
-    delete topic(name, id, p, cfg);
-}
-remove_log_end: while deleting(_e, _name, id), log_end(id, p, n) {
-    delete log_end(id, p, n);
-}
-remove_log_start: while deleting(_e, _name, id), log_start(id, p, n) {
-    delete log_start(id, p, n);
-}
-
-/// The topics as the rest of the tick sees them: after the writer's change.
-view topic_now(name, id, p, cfg) {
-    topic(name, id, p, cfg), not deleting(_, name, id);
-    creating(_k, t), let name = t.name, let id = t.id, let p = t.partitions, let cfg = t.configs;
-}
-
-/// The topics by collision key, after the writer's change.
-view topic_now_key(k, name) = topic_now(name, _, _, _), let k = collision_key(name);
-
-/// The requests that wait for a later tick: the writing requests other than the writer, a Metadata request that
-/// would auto-create a topic once the writer's change is made (the writer deleted it), and a Produce request naming a
-/// topic the writer changes (`produce_node.bls`).
-view waiting(c) {
-    writes(c, _), not writer(c);
-    metadata_head(c, _, _, _, _, _, req), name in metadata_creates(req, AUTO_CREATE_TOPICS),
-        not topic_now_key(collision_key(name), _), not writer(c);
-    produce_waits(c);
-    fetch_waits(c);
-    list_offsets_waits(c);
+/// The commands this broker's requests wait on, by tag (`cluster.bls` sends them to the controller).
+view wanted_cmd(tag, cmd) {
+    create_cmd_of(_c, _i, tag, cmd);
+    delete_cmd_of(_c, _i, tag, cmd);
+    pid_cmd(tag, cmd);
+    metadata_cmd_of(_c, _i, tag, cmd);
+    alter_cmd_of(_c, _i, tag, cmd);
+    reassigned_cmd_of(tag, cmd);
 }
 
 // ---------------------------------------------------------------- CreateTopics
 
-/// Per CreateTopics request that creates: the names of the existing topics its entries collide with (their own
-/// names included), as the tick found them (it is the writer, when it is answered).
-view create_taken(c, names = collect!(n)) = per create_head(c, _, _, _, _, _, req), u in req.topics,
-    topic_key(collision_key(u.name), n);
+/// Each CreateTopics request's context: the request alone (what is taken is decided by the controller).
+view create_context_of(c, ctx) = create_head(c, _, _, _, _, _, req), let ctx = create_context(create_names(req), []);
 
-/// Per CreateTopics request that only validates: the same, after the writer's change.
-view validate_taken(c, names = collect!(n)) = per create_head(c, _, _, _, _, _, req), u in req.topics,
-    topic_now_key(collision_key(u.name), n);
+/// Each topic entry's outcome against the request, with the id and placement it would get: functions of the request
+/// (this broker, the connection, the request's index and the entry: a connection id is unique on its broker only),
+/// so a command sent again is the same command.
+view create_verdict(c, i, j, o) =
+    create_head(c, i, _, _, _, _, req), broker_ids(ids), (j, t) in req.topics.enumerate(), create_context_of(c, ctx),
+    my_id(me), let id = topic_id(hash64(("id", me, c, i, j, 0u64)), hash64(("id", me, c, i, j, 1u64))),
+    let o = create_outcome(t, ctx, id, DEFAULT_PARTITIONS, DEFAULT_REPLICATION_FACTOR, ids, hash64(("start", me, c, i, j)));
 
-/// Per CreateTopics request: the ids of the topics it creates (none unless it is the writer).
-view create_ids(c, ids = collect!((n, id))) = per create_head(c, _, _, _, _, _, _req), writer(c), creating(_k, t),
-    let n = t.name, let id = t.id;
+/// Each entry decided before a taken name is looked for (a name given twice, illegal, colliding within the request).
+view create_early(c, i, j) =
+    create_head(c, i, _, _, _, _, req), create_context_of(c, ctx), (j, t) in req.topics.enumerate()
+    where decided_before_taken(t, ctx);
 
-answer_create: while create_head(c, i, seq, corr, fr, at, req), writer(c), create_taken(c, taken), create_ids(c, ids) {
-    send kafka.write(c, seq, [Part::Bytes(encode_create_topics_response(corr, create_outcomes(req, taken, ids)))]);
+/// The entries that become the request's command: every other entry, with what the broker decided after that
+/// (applied only if the name is not taken). A request that only validates is a command too, decided by the
+/// controller against the metadata as it applies it, as Kafka forwards it to its controller.
+view create_item_of(c, i, j, o) = create_verdict(c, i, j, o), not create_early(c, i, j);
+view create_items(c, i, items = collect!(it)) = per create_head(c, i, _, _, _, _, _req), create_item_of(c, i, j, o),
+    let it = create_item(j, o.error, o.topic.name, o.topic.id, o.topic.assignment, o.topic.configs);
+view create_cmd_of(c, i, tag, cmd) =
+    create_items(c, i, items), create_head(c, i, _, _, _, _, req), my_id(me), let tag = hash64(("create", c, i)),
+    let cmd = encode_cmd(if req.validate_only { validate_cmd(me, tag, items) } else { create_cmd(me, tag, items) })
+    where items.len() > 0;
+
+/// Each entry's final outcome: decided at once, or once its command is applied.
+view create_final(c, i, j, o) {
+    create_verdict(c, i, j, o), create_early(c, i, j);
+    create_item_of(c, i, j, o0), create_cmd_of(c, i, tag, _cmd), my_id(me), outcome(me, tag, j, err, _id, _pid, _n),
+        create_head(c, i, _, _, _, _, req), let o1 = applied_create(o0, err),
+        let o = if req.validate_only { validated(o1) } else { o1 };
+}
+view create_finals(c, i, xs = collect!((j, o))) = per create_head(c, i, _, _, _, _, _req), create_final(c, i, j, o);
+/// When the timeout passes, an entry still waiting fails with REQUEST_TIMED_OUT.
+view create_late(c, i, j, o) {
+    create_final(c, i, j, o);
+    create_item_of(c, i, j, o0), not create_final(c, i, j, _), let o = create_timed_out(o0.topic.name);
+}
+view create_lates(c, i, xs = collect!((j, o))) = per create_head(c, i, _, _, _, _, _req), create_late(c, i, j, o);
+
+answer_create: while create_head(c, i, seq, corr, fr, at, req), create_finals(c, i, xs) where xs.len() == req.topics.len() {
+    send kafka.write(c, seq, [Part::Bytes(encode_create_topics_response(corr, create_outcomes_in(xs)))]);
     upsert answering(c, i + 1, seq + 1);
     delete queued(c, i, fr, at);
 }
-
-answer_validate: while create_head(c, i, seq, corr, fr, at, req), validate_taken(c, taken) where req.validate_only {
-    send kafka.write(c, seq, [Part::Bytes(encode_create_topics_response(corr, create_outcomes(req, taken, [])))]);
+answer_create_late: while create_head(c, i, seq, corr, fr, at, req), create_finals(c, i, xs), create_lates(c, i, ys)
+    where xs.len() < req.topics.len() && now() >= at + Duration::from_millis(req.timeout_ms as i64) {
+    send kafka.write(c, seq, [Part::Bytes(encode_create_topics_response(corr, create_outcomes_in(ys)))]);
     upsert answering(c, i + 1, seq + 1);
     delete queued(c, i, fr, at);
 }
 
 // ---------------------------------------------------------------- DeleteTopics
 
-/// Per DeleteTopics request: the entries it deletes (entry, name, id); none unless it is the writer.
-view delete_found(c, found = collect!((e, n, id))) = per delete_head(c, _, _, _, _, _, _req), writer(c),
-    deleting(e, n, id);
+view delete_context_of(c, ctx) = delete_head(c, _, _, _, _, _, req), let ctx = delete_context(req);
 
-/// Per DeleteTopics request: its entries by name whose topic another entry names by id.
-view delete_clash(c, es = collect!(e)) = per delete_head(c, _, _, _, _, _, req), delete_context_of(c, ctx),
-    (e, s) in req.enumerate(), let Some(name) = delete_by_name(ctx, s), topic(name, id, _, _) where id_supplied(ctx, id);
+/// Each entry refused at once: a malformed one (both a name and an id, or the same topic twice the same way), a
+/// function of the request alone. The others are the request's command; the controller resolves their names and ids
+/// against the metadata as it applies it, as Kafka forwards a deletion to its controller.
+view delete_malformed(c, i, e) =
+    delete_head(c, i, _, _, _, _, req), delete_context_of(c, ctx), (e, s) in req.enumerate() where not delete_entry_ok(ctx, s);
+view delete_item_of(c, i, e, name, id) =
+    delete_head(c, i, _, _, _, _, req), delete_context_of(c, ctx), (e, s) in req.enumerate(),
+    let name = delete_name(s), let id = s.id
+    where delete_entry_ok(ctx, s);
+view delete_items(c, i, items = collect!(it)) = per delete_head(c, i, _, _, _, _, _req), delete_item_of(c, i, e, name, id),
+    let it = delete_item(e, name, id);
+view delete_cmd_of(c, i, tag, cmd) =
+    delete_items(c, i, items), my_id(me), let tag = hash64(("delete", c, i)), let cmd = encode_cmd(delete_cmd(me, tag, items))
+    where items.len() > 0;
 
-answer_delete: while delete_head(c, i, seq, corr, fr, at, req), writer(c), delete_found(c, found), delete_clash(c, clash) {
-    send kafka.write(c, seq, [Part::Bytes(encode_delete_topics_response(corr, delete_outcomes(req, found, clash)))]);
+view delete_final(c, i, e, o) {
+    delete_malformed(c, i, e), delete_head(c, i, _, _, _, _, req), let Some(s) = req.get(e),
+        let o = delete_refused(s, INVALID_REQUEST);
+    delete_item_of(c, i, e, _name, _id), delete_cmd_of(c, i, tag, _cmd), my_id(me), outcome(me, tag, e, err, tid, _pid, name),
+        delete_head(c, i, _, _, _, _, req), let Some(s) = req.get(e), let o = delete_applied(s, tid, name, err);
+}
+view delete_finals(c, i, xs = collect!((e, o))) = per delete_head(c, i, _, _, _, _, _req), delete_final(c, i, e, o);
+view delete_late(c, i, e, o) {
+    delete_final(c, i, e, o);
+    delete_item_of(c, i, e, _name, _id), not delete_final(c, i, e, _), delete_head(c, i, _, _, _, _, req),
+        let Some(s) = req.get(e), let o = delete_refused(s, REQUEST_TIMED_OUT);
+}
+view delete_lates(c, i, xs = collect!((e, o))) = per delete_head(c, i, _, _, _, _, _req), delete_late(c, i, e, o);
+/// DeleteTopics' timeout (the request's only top-level field after the topics).
+view delete_timeout(c, ms) = head(c, _, _, key, _version, _corr, fr, _at), key == API_DELETE_TOPICS,
+    let Some(body) = request_body(fr), let Some(d) = decode_delete_topics(body), let ms = d.1;
+
+answer_delete: while delete_head(c, i, seq, corr, fr, at, req), delete_finals(c, i, xs) where xs.len() == req.len() {
+    send kafka.write(c, seq, [Part::Bytes(encode_delete_topics_response(corr, delete_outcomes_in(xs)))]);
+    upsert answering(c, i + 1, seq + 1);
+    delete queued(c, i, fr, at);
+}
+answer_delete_late: while delete_head(c, i, seq, corr, fr, at, req), delete_finals(c, i, xs), delete_lates(c, i, ys),
+    delete_timeout(c, ms) where xs.len() < req.len() && now() >= at + Duration::from_millis(ms as i64) {
+    send kafka.write(c, seq, [Part::Bytes(encode_delete_topics_response(corr, delete_outcomes_in(ys)))]);
     upsert answering(c, i + 1, seq + 1);
     delete queued(c, i, fr, at);
 }
 
 // ---------------------------------------------------------------- Metadata
 
-/// Per Metadata request: the topics it sees, after the writer's change (which may be its own auto-creation).
-view metadata_known(c, ts = collect!(TopicInfo { name: n, id: id, partitions: p })) =
-    per metadata_head(c, _, _, _, _, _, _req), topic_now(n, id, p, _);
+/// Each partition as Metadata describes it (S8.md D7).
+/// A partition's replicas as Metadata shows them: during a reassignment, the target's and then those it removes.
+view shown_replicas(tid, p, rs) {
+    massign(tid, p, rs), not reassigning_now(tid, p);
+    massign(tid, p, rs0), mreassign(tid, p, target, _h, _s), let rs = reassign_shown(rs0, target);
+}
+/// Each partition's leader as Metadata shows it: the one this broker knows, if it is among the replicas this broker
+/// knows (a leader that a reassignment just removed still has its last announcement here until a new one is
+/// elected), with the in-sync replicas among them.
+view shown_leader(tid, p, lid, epoch, isr) =
+    shown_replicas(tid, p, rs), let g = (tid, p), partition_leader(g, epoch, l, isr0), broker(l, lid, _, _),
+    let isr = among(isr0, rs) where rs.contains(lid);
+view leader_shown(tid, p) = shown_leader(tid, p, _, _, _);
+view part_info(tid, pi) {
+    shown_replicas(tid, p, rs), shown_leader(tid, p, lid, epoch, isr),
+        let pi = PartInfo { index: p, leader: lid, epoch: epoch as i32, replicas: rs, isr: isr };
+    shown_replicas(tid, p, rs), not leader_shown(tid, p),
+        let pi = PartInfo { index: p, leader: -1i32, epoch: -1i32, replicas: rs, isr: [] };
+}
+view topic_info(name, id, ps = collect!(pi)) = mtopic(name, id, _, _), part_info(id, pi);
 
-answer_metadata: while metadata_head(c, i, seq, corr, fr, at, req), not waiting(c), metadata_known(c, known) {
-    send kafka.write(c, seq, [Part::Bytes(encode_metadata_response(corr, req, brokers(), CLUSTER_ID, NODE_ID, known))]);
+/// The names a Metadata request auto-creates: those it asks for that may be created (auto-creation is on, the name
+/// is legal and no other asked name collides with it), if one of them collides with no topic when the request is
+/// first at the head; else none. They are pinned then, so the request's command stays the same while topics come and
+/// go. The controller creates those still free when it applies the command, and the request is answered from the
+/// metadata just after: the request takes effect at that point, so a name freed meanwhile is created too.
+table metadata_pinned(c: Conn, i: u64, names: Vec<String>) key(c, i);
+view metadata_free(c, i) = metadata_head(c, i, _, _, _, _, req), n in metadata_creates(req, AUTO_CREATE_TOPICS),
+    let k = collision_key(n), not topic_keys(k, _);
+pin_metadata: while metadata_head(c, i, _, _, _, _, req), not metadata_pinned(c, i, _) {
+    if metadata_free(c, i) {
+        upsert metadata_pinned(c, i, metadata_creates(req, AUTO_CREATE_TOPICS));
+    }
+    if not metadata_free(c, i) {
+        upsert metadata_pinned(c, i, []);
+    }
+}
+forget_metadata_pinned: while metadata_pinned(c, i, names), not queued(c, i, _, _) {
+    delete metadata_pinned(c, i, names);
+}
+view metadata_cmd_of(c, i, tag, cmd) =
+    metadata_pinned(c, i, names), broker_ids(ids), my_id(me), let tag = hash64(("auto", c, i)),
+    let rf = if DEFAULT_REPLICATION_FACTOR as u64 > ids.len() { ids.len() as i16 } else { DEFAULT_REPLICATION_FACTOR },
+    let cmd = encode_cmd(create_cmd(me, tag, metadata_items(me, c, i, names, ids, DEFAULT_PARTITIONS, rf))) where names.len() > 0;
+view metadata_known(c, ts = collect!(TopicInfo { name: n, id: id, partitions: ps })) =
+    per metadata_head(c, _, _, _, _, _, _req), topic_info(n, id, ps);
+view broker_infos(bs = collect!(BrokerInfo { node_id: id, host: host, port: port, rack: None })) = broker(_, id, host, port);
+/// The controller's leader as this broker knows it, or itself (KRaft brokers report a live broker; never -1).
+view controller_or_none(id) {
+    controller_id(id);
+    my_id(id), not controller_id(_);
+}
+
+/// A Metadata request that auto-creates topics is answered once the controller has applied its command (the names
+/// are then taken, by these topics or by others), or `METADATA_CREATE_WAIT` after it arrived: the topics are in its
+/// answer, created by it (S7 answered them at once too; Kafka answers LEADER_NOT_AVAILABLE first). The names still
+/// being created then are LEADER_NOT_AVAILABLE.
+view metadata_creating(c, i, names) {
+    metadata_pinned(c, i, names), metadata_cmd_of(c, i, tag, _cmd), my_id(me), not done(me, tag);
+    metadata_pinned(c, i, _names), not metadata_cmd_of(c, i, _, _), let names = [];
+    metadata_pinned(c, i, _names), metadata_cmd_of(c, i, tag, _cmd), my_id(me), done(me, tag), let names = [];
+}
+view metadata_ready(c, i) {
+    metadata_creating(c, i, names) where names.len() == 0;
+    metadata_pinned(c, i, _names), metadata_head(c, i, _, _, _, at, _req) where now() >= at + METADATA_CREATE_WAIT;
+}
+answer_metadata: while metadata_head(c, i, seq, corr, fr, at, req), metadata_ready(c, i), metadata_known(c, known),
+    metadata_creating(c, i, names), broker_infos(bs), controller_or_none(ctl) {
+    send kafka.write(c, seq, [Part::Bytes(encode_metadata_response(corr, req, bs, CLUSTER_ID, ctl, known, names.to_set()))]);
+    upsert answering(c, i + 1, seq + 1);
+    delete queued(c, i, fr, at);
+}
+
+// ---------------------------------------------------------------- AlterPartitionReassignments, ListPartitionReassignments
+
+/// A reassignment request is one command (its partitions, with the broker's verdict on their replicas); the
+/// controller decides the rest (item 5). It is answered once applied, or with REQUEST_TIMED_OUT for what was not when
+/// its timeout passes.
+view alter_head(c, i, seq, version, corr, fr, at, req) =
+    head(c, i, seq, key, version, corr, fr, at), caught_up(), key == API_ALTER_PARTITION_REASSIGNMENTS,
+    let Some(body) = request_body(fr), let Some(req) = decode_alter_reassignments(body, version);
+view alter_items(c, i, items = collect!(it)) = per alter_head(c, i, _, _, _, _, _, req), broker_ids(ids),
+    let repeated = reassign_repeated(req), e in reassign_entries(req),
+    let it = reassign_item(e.0, e.1, e.2, reassign_entry_error(repeated, e.1, e.2, e.3, ids), e.3, req.allow_rf_change);
+view alter_cmd_of(c, i, tag, cmd) =
+    alter_items(c, i, items), my_id(me), let tag = hash64(("reassign", c, i)), let cmd = encode_cmd(reassign_cmd(me, tag, items))
+    where items.len() > 0;
+view alter_errors(c, i, es = collect!((slot, err))) = per alter_head(c, i, _, _, _, _, _, _req), alter_cmd_of(c, i, tag, _cmd),
+    my_id(me), outcome(me, tag, slot, err, _id, _pid, _name);
+answer_alter: while alter_head(c, i, seq, version, corr, fr, at, req), alter_errors(c, i, es)
+    where es.len() == reassign_entries(req).len() {
+    send kafka.write(c, seq, [Part::Bytes(encode_alter_reassignments_response(corr, version, req, es.to_map()))]);
+    upsert answering(c, i + 1, seq + 1);
+    delete queued(c, i, fr, at);
+}
+answer_alter_late: while alter_head(c, i, seq, version, corr, fr, at, req), alter_errors(c, i, es)
+    where es.len() < reassign_entries(req).len() && now() >= at + Duration::from_millis(req.timeout_ms as i64) {
+    send kafka.write(c, seq, [Part::Bytes(encode_alter_reassignments_response(corr, version, req,
+        errors_or_timed_out(reassign_entries(req).len(), es)))]);
+    upsert answering(c, i + 1, seq + 1);
+    delete queued(c, i, fr, at);
+}
+
+/// ListPartitionReassignments reads this broker's metadata, as Kafka's brokers answer it from theirs.
+view list_reassign_head(c, i, seq, corr, fr, at, req) =
+    head(c, i, seq, key, _version, corr, fr, at), caught_up(), key == API_LIST_PARTITION_REASSIGNMENTS,
+    let Some(body) = request_body(fr), let Some(req) = decode_list_reassignments(body);
+view ongoing_for(c, os = collect!(Ongoing { name: n, index: p, replicas: rs, target: t })) =
+    per list_reassign_head(c, _, _, _, _, _, _req), mreassign(tid, p, t, _h, _s), massign(tid, p, rs), mtopic(n, tid, _, _);
+answer_list_reassign: while list_reassign_head(c, i, seq, corr, fr, at, req), ongoing_for(c, os) {
+    send kafka.write(c, seq, [Part::Bytes(encode_list_reassignments_response(corr, req, os))]);
+    upsert answering(c, i + 1, seq + 1);
+    delete queued(c, i, fr, at);
+}
+
+// ---------------------------------------------------------------- DescribeCluster
+
+/// DescribeCluster reads only the brokers (configuration) and the controller's leader, so it does not wait for the
+/// metadata to catch up.
+answer_describe_cluster: while head(c, i, seq, key, version, corr, fr, at), key == API_DESCRIBE_CLUSTER,
+    let Some(body) = request_body(fr), let Some(req) = decode_describe_cluster(body, version), broker_infos(bs),
+    controller_or_none(ctl) {
+    send kafka.write(c, seq, [Part::Bytes(encode_describe_cluster_response(corr, version, req, bs, CLUSTER_ID, ctl))]);
     upsert answering(c, i + 1, seq + 1);
     delete queued(c, i, fr, at);
 }
 
 // ---------------------------------------------------------------- DescribeConfigs
 
-/// Per DescribeConfigs request: the configurations of the topics it names that exist, after the writer's change.
+/// Per DescribeConfigs request: the configurations of the topics it names that exist.
 view describe_found(c, sets = collect!((n, cfg))) = per describe_head(c, _, _, _, _, _, req), r in req,
-    r.kind == CONFIG_TOPIC, let n = r.name, topic_now(n, _, _, cfg);
+    r.kind == CONFIG_TOPIC, let n = r.name, mtopic(n, _, _, cfg);
 
 answer_describe: while describe_head(c, i, seq, corr, fr, at, req), describe_found(c, sets) {
     send kafka.write(c, seq, [Part::Bytes(encode_describe_configs_response(corr, describe_results(req, sets)))]);

@@ -32,6 +32,10 @@ use kafka_protocol::records::{
 const TOPIC: &str = "kill9";
 #[cfg(test)]
 const PARTITIONS: i32 = 3;
+#[cfg(test)]
+const NOT_LEADER_OR_FOLLOWER: i16 = 6;
+#[cfg(test)]
+const REQUEST_TIMED_OUT: i16 = 7;
 
 #[cfg(test)]
 fn free_port() -> u16 {
@@ -63,13 +67,13 @@ secrets = "k.secrets"
 
 [[node]]
 name = "b1"
+role = "Broker"
 addr = "127.0.0.1:{}"
 principal = "spiffe://test/kafka/b1"
 streams = {{ kafka = "127.0.0.1:{port}" }}
 
-[params]
-ADVERTISED_HOST = "127.0.0.1"
-ADVERTISED_PORT = {port}
+[statics]
+broker = [["b1", 1, "127.0.0.1", {port}]]
 
 [security]
 mode = "insecure-dev"
@@ -259,8 +263,18 @@ fn produce(port: u16, stop: Arc<AtomicBool>, out: Arc<Mutex<Outcome>>) {
         match answer {
             Ok(r) => {
                 let pr = &r.responses[0].partition_responses[0];
-                assert_eq!(pr.error_code, 0, "a produce was refused: {pr:?}");
-                o.acked.push((p, pr.base_offset, values));
+                match pr.error_code {
+                    0 => o.acked.push((p, pr.base_offset, values)),
+                    // Retriable, as stock clients treat them: the partition has no leader yet (a restarted broker
+                    // before its election), or the batch's fate is unknown (its leadership lost, or the timeout
+                    // passed before the high watermark did). Either way the batch may or may not be in the log.
+                    NOT_LEADER_OR_FOLLOWER | REQUEST_TIMED_OUT => {
+                        o.unanswered.push(values);
+                        drop(o);
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    code => panic!("a produce was refused with {code}: {pr:?}"),
+                }
             }
             Err(_) => {
                 o.unanswered.push(values);
@@ -291,7 +305,7 @@ fn read_partition(port: u16, topic_id: [u8; 16], p: i32, end: i64) -> Vec<(i64, 
                     .with_partitions(vec![
                         FetchPartition::default()
                             .with_partition(p)
-                            .with_current_leader_epoch(0)
+                            .with_current_leader_epoch(-1)
                             .with_fetch_offset(next)
                             .with_partition_max_bytes(1 << 20),
                     ]),
@@ -300,6 +314,10 @@ fn read_partition(port: u16, topic_id: [u8; 16], p: i32, end: i64) -> Vec<(i64, 
         ResponseHeader::decode(&mut body, FetchResponse::header_version(17)).unwrap();
         let r = FetchResponse::decode(&mut body, 17).unwrap();
         let part = &r.responses[0].partitions[0];
+        if part.error_code == NOT_LEADER_OR_FOLLOWER {
+            std::thread::sleep(Duration::from_millis(20));
+            continue;
+        }
         assert_eq!(part.error_code, 0, "fetching partition {p} at {next}: {part:?}");
         let mut records = part.records.clone().unwrap_or_default();
         let before = next;
@@ -393,13 +411,27 @@ fn kill_9_never_loses_an_acknowledged_record() {
                         .collect(),
                 ),
         ]);
-    let mut body = call(&mut s, &framed(2, 9, 1, &req)).unwrap();
-    ResponseHeader::decode(&mut body, ListOffsetsResponse::header_version(9)).unwrap();
-    let ends: Vec<i64> = ListOffsetsResponse::decode(&mut body, 9).unwrap().topics[0]
-        .partitions
-        .iter()
-        .map(|p| p.offset)
-        .collect();
+    // Asked again while a partition has no leader yet.
+    let mut ends: Vec<i64> = Vec::new();
+    for corr in 1..=200 {
+        let mut body = call(&mut s, &framed(2, 9, corr, &req)).unwrap();
+        ResponseHeader::decode(&mut body, ListOffsetsResponse::header_version(9)).unwrap();
+        let parts = ListOffsetsResponse::decode(&mut body, 9).unwrap().topics[0]
+            .partitions
+            .clone();
+        if parts.iter().any(|p| p.error_code == NOT_LEADER_OR_FOLLOWER) {
+            std::thread::sleep(Duration::from_millis(20));
+            continue;
+        }
+        assert!(parts.iter().all(|p| p.error_code == 0), "listing offsets: {parts:?}");
+        ends = parts.iter().map(|p| p.offset).collect();
+        break;
+    }
+    assert_eq!(
+        ends.len(),
+        PARTITIONS as usize,
+        "no partition leaders after the last restart"
+    );
     let sent: BTreeSet<String> = o
         .acked
         .iter()

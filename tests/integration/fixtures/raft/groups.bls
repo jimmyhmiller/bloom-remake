@@ -1,0 +1,92 @@
+//! A harness for the replicated-log layer (`examples/kafka/raft.bls`, S8 item 1): five groups over four brokers,
+//! of sizes 4, 3, 3, 2 and 1, and a sixth whose membership changes. Each group's leader proposes a numbered entry on
+//! every `tickle`, so every group keeps appending; the test's observer checks Raft's safety properties per group.
+//! Group `moving` starts on b1, b2 and b3, and its leader walks it through a schedule of configurations, one member
+//! added or removed at a time and each change committed before the next (S8 item 5).
+program raft_groups version 1;
+
+role Broker: cluster;
+
+include "../../../../examples/kafka/raft.bls";
+
+/// The groups and their members.
+static group_member(g: Group, n: Node<Broker>);
+
+fact group_member((b"all", 0), "b1");
+fact group_member((b"all", 0), "b2");
+fact group_member((b"all", 0), "b3");
+fact group_member((b"all", 0), "b4");
+fact group_member((b"left", 0), "b1");
+fact group_member((b"left", 0), "b2");
+fact group_member((b"left", 0), "b3");
+fact group_member((b"right", 1), "b2");
+fact group_member((b"right", 1), "b3");
+fact group_member((b"right", 1), "b4");
+fact group_member((b"pair", 2), "b1");
+fact group_member((b"pair", 2), "b4");
+fact group_member((b"solo", 3), "b3");
+fact group_member((b"moving", 4), "b1");
+fact group_member((b"moving", 4), "b2");
+fact group_member((b"moving", 4), "b3");
+
+/// The configurations `moving` goes through, a phase each (by member id); each pair of neighbours differs by more
+/// than one member, so a phase takes several changes.
+fn moving_target(phase: i64) -> Vec<i32> {
+    if phase == 0 { [1i32, 2i32, 3i32] } else if phase == 1 { [2i32, 3i32, 4i32] } else if phase == 2 { [4i32, 1i32] } else { [3i32, 4i32, 1i32] }
+}
+
+/// One change from `cur` towards `target`: add the first member missing, else remove the first one too many.
+fn step_towards(cur: Vec<i32>, target: Vec<i32>) -> Option<Vec<i32>> {
+    match target.filter(|x| not cur.contains(x)).first() {
+        Some(add) => Some(cur.push(add)),
+        None => match cur.filter(|x| not target.contains(x)).first() {
+            Some(drop) => Some(cur.filter(|x| x != drop)),
+            None => None,
+        },
+    }
+}
+
+/// Each broker's member id.
+static member_no(n: Node<Broker>, id: i32);
+fact member_no("b1", 1);
+fact member_no("b2", 2);
+fact member_no("b3", 3);
+fact member_no("b4", 4);
+
+at Broker {
+    timer tickle every 30ms;
+
+    /// A directed test holds a group's proposals at a broker, and releases them.
+    input hold(g: Group);
+    input release(g: Group);
+    table held(g: Group) key(g);
+    hold_it: on hold(g) {
+        upsert held(g);
+    }
+    release_it: on release(g), held(g) {
+        delete held(g);
+    }
+
+    view initial_members(g, n) = group_member(g, n);
+    view member_id(n, id) = member_no(n, id);
+    /// Every broker keeps `moving`'s log, so a member being added takes entries before its configuration does.
+    view moving(g) = group_member(g, _) where g == (b"moving", 4);
+    view hosts(g) = moving(g);
+    /// No group has a preferred leader here: every election starts after a random timeout.
+    view preferred(g, n) = group_member(g, n) where false;
+    /// Nothing is compacted here.
+    view compactable(g, i, pos) = rlog(g, i, _, _, _, pos, _) where false;
+
+    /// `moving`'s leader proposes the next change towards the phase's configuration (phases of 400 ms), once the
+    /// last change is committed.
+    view config_step(g, ids) =
+        config_ready(g), moving(g), member_ids(g, cur),
+        let Some(ids) = step_towards(cur, moving_target(now().as_millis() / 400 % 4));
+
+    /// A leader proposes one entry per tickle (its count), unless the group is held here, and `moving`'s leader its
+    /// configuration changes.
+    view proposals(g, xs = collect!(x)) {
+        tickle(n, _), leader(g, _), not held(g), let x = (DATA, n as i64, Blob::of(Bytes::from_u64_be(n)));
+        config_step(g, ids), let x = (CONFIG, -1i64, Blob::of(encode_members(ids)));
+    }
+}

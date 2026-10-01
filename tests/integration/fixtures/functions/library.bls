@@ -96,6 +96,11 @@ fn arms(n: u64) -> (u64, Vec<u64>) {
     (match n { x => a + x }, v)
 }
 
+/// `hash64` of a composite value inside a function, and of a string in the view.
+fn hashed(n: u64, s: String, b: Bytes) -> u64 {
+    hash64((n, s, b))
+}
+
 view v_sum(n, x) = e(n, _, _), let x = sum_below(n);
 view v_evens(n, x) = e(n, _, _), let x = evens(n);
 view v_scaled(n, x) = e(n, _, _), let x = scaled(n, n);
@@ -113,5 +118,8 @@ view v_defaults(n, x) = e(n, _, _), let x = defaults(n);
 view v_classify(n, x) = e(n, _, _), let x = classify(n);
 view v_range(n, x) = e(n, _, _), let x = range(n, 2 * n + 1).len();
 view v_arms(n, x) = e(n, _, _), let x = arms(n);
+view v_hash(n, x) = e(n, s, b), let x = (hashed(n, s, b), hash64(s));
+/// A `match` in a rule's `let`: its arms' variables are the arms' own (S8: they made the rule unbindable).
+view v_match(s, x) = e(_, s, _), let x = match s.parse_i64() { Some(k) if k < 100 => k + 1, Some(k) => k, None => 0 };
 /// Decimal parsing, of the words and of the number as text.
 view v_parse(s, x) = e(n, s, _), let x = (s.parse_i64(), s.to_lowercase().parse_i64());

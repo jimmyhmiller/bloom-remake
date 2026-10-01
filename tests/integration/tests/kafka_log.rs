@@ -202,7 +202,7 @@ impl RustClient {
                             .with_partitions(vec![
                                 FetchPartition::default()
                                     .with_partition(self.part as i32)
-                                    .with_current_leader_epoch(0)
+                                    .with_current_leader_epoch(-1)
                                     .with_fetch_offset(off)
                                     .with_partition_max_bytes(1 << 20),
                             ]),
@@ -228,6 +228,12 @@ impl RustClient {
                 ResponseHeader::decode(&mut body, ProduceResponse::header_version(12)).map_err(|e| e.to_string())?;
                 let r = ProduceResponse::decode(&mut body, 12).map_err(|e| e.to_string())?;
                 let pr = &r.responses[0].partition_responses[0];
+                // The partition's leader is not elected yet (its broker just restarted): nothing was appended (with
+                // one broker, a leader that appended loses its leadership only by crashing, which also closes this
+                // connection), so the same batch goes again, as a client retries.
+                if pr.error_code == NOT_LEADER_OR_FOLLOWER {
+                    return Ok(());
+                }
                 if pr.error_code != 0 {
                     return Err(format!("a produce was refused: {pr:?}"));
                 }
@@ -245,6 +251,9 @@ impl RustClient {
                 ResponseHeader::decode(&mut body, FetchResponse::header_version(17)).map_err(|e| e.to_string())?;
                 let r = FetchResponse::decode(&mut body, 17).map_err(|e| e.to_string())?;
                 let p = &r.responses[0].partitions[0];
+                if p.error_code == NOT_LEADER_OR_FOLLOWER {
+                    return Ok(());
+                }
                 if p.error_code != 0 {
                     return Err(format!("a fetch failed: {p:?}"));
                 }
@@ -277,6 +286,10 @@ impl RustClient {
         Ok(())
     }
 }
+
+/// The partition's leader is not this broker (yet): the client asks again.
+#[cfg(test)]
+const NOT_LEADER_OR_FOLLOWER: i16 = 6;
 
 #[cfg(test)]
 impl StreamClient for RustClient {
@@ -436,7 +449,7 @@ fn both_clients_see_one_log_and_every_acknowledged_record_once() {
             &artifact,
             &schema,
             blossom_value::Seed::from_u64(seed),
-            Vec::new(),
+            blossom_integration_tests::kafka_brokers(&artifact).unwrap(),
             Box::new(NoKvClients),
             cfg,
         )

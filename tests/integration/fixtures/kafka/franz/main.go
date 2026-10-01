@@ -1,15 +1,19 @@
 // A franz-go client for the Blossom broker's gate.
 //
 //	franzcap <broker>                  asks for the metadata (the captures of S6 item 5)
-//	franzcap produce-consume <broker>  creates a topic, produces records (idempotent, franz-go's default), and reads
-//	                                   every partition back from its start, checking each record is there once, in
-//	                                   order, at the offset its produce was acknowledged at
+//	franzcap produce-consume <brokers> [rf]
+//	                                   creates a topic (with `rf` replicas, 1 by default), produces records
+//	                                   (idempotent, franz-go's default), and reads every partition back from its
+//	                                   start, checking each record is there once, in order, at the offset its produce
+//	                                   was acknowledged at; `brokers` is a comma-separated list of seed brokers
 package main
 
 import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -17,8 +21,16 @@ import (
 )
 
 func main() {
-	if len(os.Args) == 3 && os.Args[1] == "produce-consume" {
-		produceConsume(os.Args[2])
+	if (len(os.Args) == 3 || len(os.Args) == 4) && os.Args[1] == "produce-consume" {
+		rf := int16(1)
+		if len(os.Args) == 4 {
+			n, err := strconv.Atoi(os.Args[3])
+			if err != nil {
+				fail("replication factor", err)
+			}
+			rf = int16(n)
+		}
+		produceConsume(strings.Split(os.Args[2], ","), rf)
 		return
 	}
 	cl, err := kgo.NewClient(kgo.SeedBrokers(os.Args[1]))
@@ -49,16 +61,16 @@ const topic = "franz"
 const partitions = 3
 const records = 300
 
-func produceConsume(broker string) {
+func produceConsume(brokers []string, rf int16) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	admCl, err := kgo.NewClient(kgo.SeedBrokers(broker))
+	admCl, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
 	if err != nil {
 		fail("client", err)
 	}
 	adm := kadm.NewClient(admCl)
-	res, err := adm.CreateTopics(ctx, partitions, 1, nil, topic)
+	res, err := adm.CreateTopics(ctx, partitions, rf, nil, topic)
 	if err != nil {
 		fail("create", err)
 	}
@@ -71,7 +83,7 @@ func produceConsume(broker string) {
 
 	// Records to explicit partitions, produced asynchronously (franz-go batches and pipelines them), each one's
 	// acknowledged offset kept.
-	prod, err := kgo.NewClient(kgo.SeedBrokers(broker), kgo.RecordPartitioner(kgo.ManualPartitioner()))
+	prod, err := kgo.NewClient(kgo.SeedBrokers(brokers...), kgo.RecordPartitioner(kgo.ManualPartitioner()))
 	if err != nil {
 		fail("producer", err)
 	}
@@ -101,7 +113,7 @@ func produceConsume(broker string) {
 	for p := int32(0); p < partitions; p++ {
 		starts[topic][p] = kgo.NewOffset().AtStart()
 	}
-	cons, err := kgo.NewClient(kgo.SeedBrokers(broker), kgo.ConsumePartitions(starts))
+	cons, err := kgo.NewClient(kgo.SeedBrokers(brokers...), kgo.ConsumePartitions(starts))
 	if err != nil {
 		fail("consumer", err)
 	}

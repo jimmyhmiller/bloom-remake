@@ -419,6 +419,7 @@ fn int(v: &Value) -> i64 {
     match v {
         Value::Int(IntValue::I32(x)) => i64::from(*x),
         Value::Int(IntValue::I64(x)) => *x,
+        Value::Int(IntValue::U8(x)) => i64::from(*x),
         other => panic!("{other:?}"),
     }
 }
@@ -455,7 +456,7 @@ fn retention_deletes_whole_segments_from_the_front() {
             &artifact,
             &schema,
             blossom_value::Seed::from_u64(seed),
-            Vec::new(),
+            blossom_integration_tests::kafka_brokers(&artifact).unwrap(),
             Box::new(NoKvClients),
             cfg,
         )
@@ -510,7 +511,7 @@ fn retention_deletes_whole_segments_from_the_front() {
             .iter()
             .map(|n| {
                 state
-                    .rows(artifact.rel_named("topic").unwrap())
+                    .rows(artifact.rel_named("mtopic").unwrap())
                     .find(|r| r[0] == Value::Str((*n).into()))
                     .map(|r| r[1].clone())
                     .unwrap()
@@ -529,6 +530,24 @@ fn retention_deletes_whole_segments_from_the_front() {
                     rel, TOPICS[t]
                 );
             }
+            // The replication log is compacted with the data (S8 D12): no data entry below the log start is left,
+            // and the snapshot point is the start.
+            let in_group = |r: &[Value]| matches!(&r[0], Value::Tuple(g) if &g[0] == tid);
+            let low = state
+                .rows(artifact.rel_named("rlog").unwrap())
+                .filter(|r| in_group(r) && int(&r[4]) == 1 && int(&r[5]) < start)
+                .count();
+            assert_eq!(
+                low, 0,
+                "seed {seed}: {} replication log entries of {} below the log start",
+                low, TOPICS[t]
+            );
+            let snap: Vec<i64> = state
+                .rows(artifact.rel_named("rsnap").unwrap())
+                .filter(|r| in_group(r))
+                .map(|r| int(&r[3]))
+                .collect();
+            assert_eq!(snap, vec![start], "seed {seed}: {}'s snapshot point", TOPICS[t]);
         }
     }
 }

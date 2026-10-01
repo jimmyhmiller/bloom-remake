@@ -101,7 +101,11 @@ impl Fuel {
     /// Enters a call of a pure function; the outermost call starts a fresh budget.
     pub(crate) fn enter(&self) {
         let (depth, left) = self.0.get();
-        let left = if depth == 0 { blossom_ir::core::FN_STEP_BUDGET } else { left };
+        let left = if depth == 0 {
+            blossom_ir::core::FN_STEP_BUDGET
+        } else {
+            left
+        };
         self.0.set((depth.saturating_add(1), left));
     }
 
@@ -113,7 +117,11 @@ impl Fuel {
     /// Spends `n` steps; outside any function, a single `range` has the whole budget to itself.
     pub(crate) fn spend(&self, n: u64) -> ExprResult<()> {
         let (depth, left) = self.0.get();
-        let have = if depth == 0 { blossom_ir::core::FN_STEP_BUDGET } else { left };
+        let have = if depth == 0 {
+            blossom_ir::core::FN_STEP_BUDGET
+        } else {
+            left
+        };
         let Some(rest) = have.checked_sub(n) else {
             return Err(ExprError::Budget(format!(
                 "a function evaluation exceeds its step budget of {} steps",
@@ -272,7 +280,10 @@ pub(crate) fn eval(cx: &Ctx<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<
             f: FnRef::Builtin(BuiltinFn::Lib(f)),
             args,
         } => crate::func::library(cx, env, *f, args),
-        Expr::Call { f: FnRef::Builtin(f), args } => builtin(cx, env, f, args),
+        Expr::Call {
+            f: FnRef::Builtin(f),
+            args,
+        } => builtin(cx, env, f, args),
         Expr::Call { f: FnRef::Fn(f), args } => crate::func::call(cx, env, *f, args),
         Expr::Collection { kind, elems } => {
             let mut vs = Vec::with_capacity(elems.len());
@@ -344,7 +355,9 @@ fn lattice_op<'s>(cx: &'s Ctx<'_>, op: &LatOpRef) -> ExprResult<(&'s Kind, bloss
 
 fn builtin(cx: &Ctx<'_>, env: &[Option<Value>], f: &BuiltinFn, args: &[Expr]) -> ExprResult<Value> {
     let arg = |i: usize| -> ExprResult<Value> {
-        let e = args.get(i).ok_or_else(|| bug(format!("{f:?} is missing argument {i}")))?;
+        let e = args
+            .get(i)
+            .ok_or_else(|| bug(format!("{f:?} is missing argument {i}")))?;
         eval(cx, env, e)
     };
     match f {
@@ -414,6 +427,10 @@ fn builtin(cx: &Ctx<'_>, env: &[Option<Value>], f: &BuiltinFn, args: &[Expr]) ->
             Value::Str(s) => Err(ExprError::Refused(s.to_string())),
             other => Err(bug(format!("`error` of {other:?}"))),
         },
+        BuiltinFn::Hash64 => {
+            let fp = blossom_value::fp::fingerprint(&arg(0)?).map_err(|e| bug(format!("`hash64`: {e}")))?;
+            Ok(Value::Int(IntValue::U64(fp.0)))
+        }
         BuiltinFn::Rand => {
             let mut key = Vec::new();
             for i in 0..args.len() {
@@ -623,7 +640,11 @@ fn bitwise(op: &BinOp, a: IntValue, b: IntValue) -> ExprResult<IntValue> {
             let n = count()?;
             if ty.is_signed() {
                 // Sign-extend to 128 bits, shift arithmetically, keep the low bits.
-                let widened = if width < 128 && (x >> (width - 1)) & 1 == 1 { x | (!0u128 << width) } else { x };
+                let widened = if width < 128 && (x >> (width - 1)) & 1 == 1 {
+                    x | (!0u128 << width)
+                } else {
+                    x
+                };
                 from_bits(ty, ((widened as i128) >> n) as u128)
             } else {
                 from_bits(ty, x >> n)
@@ -836,7 +857,9 @@ pub(crate) fn time_varying(e: &Expr) -> bool {
         Expr::Call { f, args } => {
             matches!(
                 f,
-                FnRef::Builtin(BuiltinFn::Rand | BuiltinFn::RandFloat | BuiltinFn::RandRange | BuiltinFn::RandPrio { .. })
+                FnRef::Builtin(
+                    BuiltinFn::Rand | BuiltinFn::RandFloat | BuiltinFn::RandRange | BuiltinFn::RandPrio { .. }
+                )
             ) || args.iter().any(time_varying)
         }
         Expr::Unary { arg, .. } => time_varying(arg),

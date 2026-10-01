@@ -48,7 +48,11 @@ impl Fuel {
     /// Enters a call of a pure function; the outermost call starts a fresh budget.
     pub(crate) fn enter(&self) {
         let (depth, left) = self.0.get();
-        let left = if depth == 0 { blossom_ir::core::FN_STEP_BUDGET } else { left };
+        let left = if depth == 0 {
+            blossom_ir::core::FN_STEP_BUDGET
+        } else {
+            left
+        };
         self.0.set((depth.saturating_add(1), left));
     }
 
@@ -60,7 +64,11 @@ impl Fuel {
     /// Spends `n` steps: outside any function a single `range` has the whole budget to itself.
     pub(crate) fn spend(&self, n: u64) -> ExprResult<()> {
         let (depth, left) = self.0.get();
-        let have = if depth == 0 { blossom_ir::core::FN_STEP_BUDGET } else { left };
+        let have = if depth == 0 {
+            blossom_ir::core::FN_STEP_BUDGET
+        } else {
+            left
+        };
         match have.checked_sub(n) {
             Some(rest) => {
                 if depth > 0 {
@@ -236,13 +244,17 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
             };
             match eval(scope, env, a)? {
                 // Out of range is BLSR004 (LANGUAGE §5.2); a u128 above i128::MAX fits only a u128.
-                Value::Int(IntValue::U128(u)) if *to == blossom_value::types::IntTy::U128 => Ok(Value::Int(IntValue::U128(u))),
+                Value::Int(IntValue::U128(u)) if *to == blossom_value::types::IntTy::U128 => {
+                    Ok(Value::Int(IntValue::U128(u)))
+                }
                 Value::Int(i) => i
                     .to_i128()
                     .and_then(|w| IntValue::from_i128(*to, w))
                     .map(Value::Int)
                     .ok_or_else(|| ExprError::Arithmetic(format!("{i:?} as {} is out of range", to.name()))),
-                other => Err(ExprError::Oracle(internal_error!("an integer cast of {other:?}").into())),
+                other => Err(ExprError::Oracle(
+                    internal_error!("an integer cast of {other:?}").into(),
+                )),
             }
         }
         Expr::Call {
@@ -262,6 +274,17 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
             }
         }
         Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::Hash64),
+            args,
+        } => {
+            let [x] = args.as_slice() else {
+                return Err(ExprError::Oracle(internal_error!("`hash64` takes one value").into()));
+            };
+            let fp = blossom_value::fp::fingerprint(&eval(scope, env, x)?)
+                .map_err(|e| ExprError::Oracle(internal_error!("`hash64`: {e}").into()))?;
+            Ok(Value::Int(blossom_value::value::IntValue::U64(fp.0)))
+        }
+        Expr::Call {
             f: FnRef::Builtin(BuiltinFn::Rand),
             args,
         } => {
@@ -276,7 +299,9 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
             args,
         } => {
             let (Some(lo), Some(hi)) = (args.first(), args.get(1)) else {
-                return Err(ExprError::Oracle(internal_error!("`rand_range` takes lo, hi and a key").into()));
+                return Err(ExprError::Oracle(
+                    internal_error!("`rand_range` takes lo, hi and a key").into(),
+                ));
             };
             let (lo, hi) = (eval(scope, env, lo)?, eval(scope, env, hi)?);
             let mut key = Vec::new();
@@ -298,7 +323,9 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
                 ));
             };
             let members = match eval(scope, env, s)? {
-                Value::Lattice(blossom_value::LatValue::Set(xs)) | Value::Set(xs) => scope.oracle.role_members(*role, &xs),
+                Value::Lattice(blossom_value::LatValue::Set(xs)) | Value::Set(xs) => {
+                    scope.oracle.role_members(*role, &xs)
+                }
                 Value::Lattice(blossom_value::LatValue::Bottom) => 0,
                 other => return Err(ExprError::Oracle(internal_error!("`majority` of {other:?}").into())),
             };
@@ -366,7 +393,9 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
             f: FnRef::Builtin(BuiltinFn::Lib(f)),
             args,
         } => crate::library::lib(scope, env, *f, args),
-        Expr::Call { f: FnRef::Builtin(b), .. } => Err(ExprError::Oracle(
+        Expr::Call {
+            f: FnRef::Builtin(b), ..
+        } => Err(ExprError::Oracle(
             blossom_base::unimplemented_error!("LANG-180", "the built-in {b:?} in the oracle").into(),
         )),
         Expr::Collection { kind, elems } => {
@@ -661,7 +690,9 @@ fn binary(op: BinOp, l: Value, r: Value) -> ExprResult<Value> {
         )),
         BitAnd | BitOr | BitXor | Shl | Shr => match (l, r) {
             (Value::Int(a), Value::Int(b)) => int_bits(op, a, b).map(Value::Int),
-            (l, r) => Err(ExprError::Oracle(internal_error!("bit operation {op:?} on {l:?} and {r:?}").into())),
+            (l, r) => Err(ExprError::Oracle(
+                internal_error!("bit operation {op:?} on {l:?} and {r:?}").into(),
+            )),
         },
     }
 }
@@ -688,10 +719,14 @@ macro_rules! bit_ops {
 /// `a & b`, `a | b`, `a ^ b`, `a << b`, `a >> b` (arithmetic for signed types) on integers of one type.
 fn int_bits(op: BinOp, a: IntValue, b: IntValue) -> ExprResult<IntValue> {
     if a.ty() != b.ty() {
-        return Err(ExprError::Oracle(internal_error!("bit operation on {a:?} and {b:?}").into()));
+        return Err(ExprError::Oracle(
+            internal_error!("bit operation on {a:?} and {b:?}").into(),
+        ));
     }
     bit_ops!(op, a, b, U8, U16, U32, U64, U128, I8, I16, I32, I64, I128).ok_or_else(|| {
-        ExprError::Arithmetic(format!("{a:?} {op:?} {b:?}: the shift count is outside the type's width"))
+        ExprError::Arithmetic(format!(
+            "{a:?} {op:?} {b:?}: the shift count is outside the type's width"
+        ))
     })
 }
 
@@ -842,7 +877,9 @@ fn rand_range(scope: &Scope<'_>, lo: &Value, hi: &Value, key: &[Value]) -> Resul
                 _ => None,
             };
             let (Some(l), Some(h)) = (bound(lo), bound(hi)) else {
-                return Err(ExprError::Oracle(internal_error!("`rand_range` over {lo:?} and {hi:?}").into()));
+                return Err(ExprError::Oracle(
+                    internal_error!("`rand_range` over {lo:?} and {hi:?}").into(),
+                ));
             };
             if h <= l {
                 return Err(empty(&l, &h));
@@ -861,7 +898,9 @@ fn rand_range(scope: &Scope<'_>, lo: &Value, hi: &Value, key: &[Value]) -> Resul
                 _ => Err(ExprError::Oracle(internal_error!("`rand_range` over {lo:?}").into())),
             }
         }
-        (a, b) => Err(ExprError::Oracle(internal_error!("`rand_range` over {a:?} and {b:?}").into())),
+        (a, b) => Err(ExprError::Oracle(
+            internal_error!("`rand_range` over {a:?} and {b:?}").into(),
+        )),
     }
 }
 
@@ -880,4 +919,3 @@ fn int_ty_of(v: &IntValue) -> blossom_value::types::IntTy {
         IntValue::I128(_) => T::I128,
     }
 }
-

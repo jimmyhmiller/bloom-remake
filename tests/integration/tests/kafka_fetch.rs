@@ -447,7 +447,7 @@ fn reads() -> Vec<Step> {
             expect(
                 "errors",
                 parts.iter().map(|p| p.0).collect::<Vec<_>>(),
-                vec![76, 74, 100],
+                vec![75, 74, 100],
             )
         }),
     });
@@ -614,13 +614,13 @@ impl Script {
                 let req = ProduceRequest::default()
                     .with_acks(-1)
                     .with_timeout_ms(1000)
-                    .with_topic_data(vec![
-                        TopicProduceData::default().with_name(name()).with_partition_data(vec![
+                    .with_topic_data(vec![TopicProduceData::default().with_name(name()).with_partition_data(
+                        vec![
                             PartitionProduceData::default()
                                 .with_index(*p as i32)
                                 .with_records(Some(Bytes::from(b.clone()))),
-                        ]),
-                    ]);
+                        ],
+                    )]);
                 a.send = framed(0, 11, self.corr, &req);
             }
             2 => {
@@ -847,7 +847,7 @@ fn fetch_and_list_offsets_read_what_was_produced() {
             &artifact,
             &schema,
             blossom_value::Seed::from_u64(seed),
-            Vec::new(),
+            blossom_integration_tests::kafka_brokers(&artifact).unwrap(),
             Box::new(NoKvClients),
             cfg,
         )

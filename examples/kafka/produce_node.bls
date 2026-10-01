@@ -1,126 +1,168 @@
-//! The broker's partition logs, the Produce handler and idempotent producers (InitProducerId). Included after
-//! `topics_node.bls`, whose tick order this extends: the writer first, then the requests that read the topics, then
-//! the appends.
+//! The partition logs, the Produce handler and idempotent producers (InitProducerId), replicated (S8 item 3).
 //!
-//! Every Produce request at the head of its queue appends in the tick it is answered, unless one of its topics is
-//! being created or deleted in that tick (it then waits, so its partitions are the ones the tick ends with). The
-//! appends to one partition in a tick are sequenced in order of arrival, then connection, then position in the
-//! request: each gets the offsets after the ones before it, and an idempotent producer's batches are checked against
-//! its state in the partition as the appends before them left it. A batch is stored as a blob-backed durable row,
-//! and its answer leaves after the tick's record, and the blob, are durable (Invariant B).
+//! Each partition is a replication group (`raft.bls`) whose members are its replicas. Its leader sequences a tick's
+//! appends to the partition in order of arrival, then connection, then position in the request: each gets the
+//! offsets after its log's last entry (committed or not), and an idempotent producer's batches are checked against
+//! its state in the partition (as committed, then the uncommitted entries after it). The placed batches are
+//! proposed as DATA entries, with their offsets and the leader's epoch written in (S8.md D3, D5).
+//!
+//! Every replica materializes the committed entries, in log order, into the storage S7 built: the batches, the chunk
+//! index, the segments, the time index, each producer's state and the high watermark (`log_end`). Committed entries
+//! never change, so neither does what is materialized; Fetch and ListOffsets read it. The materialization is durable
+//! with its index (`applied_d`), in the same tick.
+//!
+//! A Produce request is appended once (`produce_started`) and answered as its `acks` ask (D9): `acks=1` in the tick
+//! of the append (its answer leaves after that tick's record, which holds the entry, is durable); `acks=all` once the
+//! high watermark passes every batch it placed (or, for an idempotent producer's retried batch the log already
+//! holds, the original); `acks=0` never. An entry the leader no longer holds as it appended it
+//! (a new leader replaced it) fails with NOT_LEADER_OR_FOLLOWER, and so does a request whose partition this broker
+//! does not lead.
 
-/// A partition's batches, by base offset: the last offset, the greatest timestamp, and the batch as stored (its
-/// `baseOffset` written).
+/// A partition's committed batches, by base offset: the last offset, the greatest timestamp, and the batch.
 durable table batch(tid: Bytes, part: i32, base: i64, last: i64, max_ts: i64, bytes: Blob) key(tid, part, base);
 
-/// The chunk index: every batch under each chunk of `CHUNK` offsets it covers, so the batch holding an offset is found
-/// among at most `CHUNK` rows whatever the log's length (Fetch after a seek).
+/// The chunk index: every batch under each chunk of `CHUNK` offsets it covers (Fetch after a seek).
 durable table batch_chunk(tid: Bytes, part: i32, chunk: i64, base: i64) key(tid, part, chunk, base);
 
 /// A partition's segments, as Kafka keeps them (see `Segment`): retention deletes whole segments.
 durable table segment(tid: Bytes, part: i32, base: i64, bytes: i64, max_ts: i64, max_base: i64, modified: i64)
     key(tid, part, base);
 
-/// Per partition: the segment appends go to. Retention may delete it, as Kafka does, and then rolls a new, empty one
-/// at the log end.
+/// Per partition: the segment materialized batches go to.
 durable table active_segment(tid: Bytes, part: i32, base: i64) key(tid, part);
 
-/// The time index, per segment: the batches that raised their segment's greatest timestamp, by that timestamp. Its
-/// rows grow in timestamp and offset together, so a segment's first row at or after a timestamp is its first batch
-/// whose greatest timestamp reaches it (ListOffsets).
+/// The time index, per segment: the batches that raised their segment's greatest timestamp, by that timestamp.
 durable table time_index(tid: Bytes, part: i32, seg: i64, ts: i64, base: i64) key(tid, part, seg, ts);
 
-/// An idempotent producer's state in a partition: its epoch and its last batches (see `ProducerEntry`).
+/// An idempotent producer's committed state in a partition: its epoch and its last batches (see `ProducerEntry`).
 durable table producer(tid: Bytes, part: i32, pid: i64, epoch: i16, recent: Vec<(i32, i32, i64, i64)>) key(tid, part, pid);
 
-/// The next producer id to hand out (no row: 0).
-durable table producer_ids(next: i64) key();
+/// Per partition: the high watermark (the offset after the last committed batch), the first offset still held,
+/// and the highest log index materialized.
+durable table log_end(tid: Bytes, part: i32, next: i64) key(tid, part);
+durable table log_start(tid: Bytes, part: i32, start: i64) key(tid, part);
+durable table applied_d(tid: Bytes, part: i32, i: u64) key(tid, part);
 
-view produce_head(c, i, seq, corr, fr, at, req) =
-    head(c, i, seq, key, _version, corr, fr, at), key == API_PRODUCE,
-    let Some(body) = request_body(fr), let Some(req) = decode_produce(body);
+/// The partitions this broker replicates (or a reassignment moves to it), and the ones it leads: with the group's
+/// term, and with the leader epoch Kafka's clients see, which starts at 0 for the first leader (term 1).
+view replica(tid, p) = hosts(g), let (tid, p) = g;
+view led_term(tid, p, t) = leader(g, t), not is_controller(g), let (tid, p) = g;
+view led(tid, p, epoch) = led_term(tid, p, t), let epoch = t - 1;
 
-view init_pid_head(c, i, seq, corr, fr, at, req) =
-    head(c, i, seq, key, _version, corr, fr, at), key == API_INIT_PRODUCER_ID,
-    let Some(body) = request_body(fr), let Some(req) = decode_init_producer_id(body);
-
-/// A Produce request that names a topic the writer creates or deletes waits for a later tick.
-view produce_waits(c) {
-    produce_head(c, _, _, _, _, _, req), e in produce_entries(req), let name = e.1, creating(_k, t) where t.name == name;
-    produce_head(c, _, _, _, _, _, req), e in produce_entries(req), deleting(_e, e.1, _id);
+/// A replica starts empty at offset 0, with an empty active segment.
+init_replica: while replica(tid, p), not log_start(tid, p, _), not installing(tid, p) {
+    upsert log_start(tid, p, 0i64);
+    upsert log_end(tid, p, 0i64);
+    upsert applied_d(tid, p, 0);
+    upsert active_segment(tid, p, 0i64);
+    next segment(tid, p, 0i64, 0i64, -1i64, -1i64, now().as_millis());
 }
 
-/// The partition entries of the Produce requests answered this tick, with their order among the tick's appends.
-view produce_entry(c, j, name, p, records, req, o) =
-    produce_head(c, _, _, _, _, at, req), not produce_waits(c), e in produce_entries(req),
+// ---------------------------------------------------------------- the partition's log, as entries
+
+/// Each DATA entry of a partition's log (committed or not): its index, offsets, greatest timestamp, header and bytes.
+view data_rlog(tid, p, i, base, data) = rlog(g, i, _, _, kind, base, data), not is_controller(g), let (tid, p) = g where kind == DATA;
+view data_entry(tid, p, i, base, last, max_ts, h, data) =
+    data_rlog(tid, p, i, base, data), let Some(h) = batch_header(entry_bytes(data)),
+    let last = base + h.last_offset_delta as i64, let max_ts = h.max_timestamp;
+
+/// The offset after a partition's last entry, committed or not: where the leader places the next batch.
+view data_last(tid, p, l = max!(last)) = data_entry(tid, p, _, _, last, _, _, _);
+view tail_end(tid, p, e) {
+    data_last(tid, p, l), let e = l + 1i64;
+    replica(tid, p), not data_last(tid, p, _), log_end(tid, p, e);
+}
+
+// ---------------------------------------------------------------- Produce
+
+view produce_head(c, i, seq, corr, fr, at, req) =
+    head(c, i, seq, key, _version, corr, fr, at), caught_up(), key == API_PRODUCE,
+    let Some(body) = request_body(fr), let Some(req) = decode_produce(body);
+
+/// A request appended already: it waits at the head for its answer.
+table produce_started(c: Conn, i: u64) key(c, i);
+
+/// The partition entries of the Produce requests at the heads, with their order among the tick's appends.
+view produce_entry(c, i, j, name, p, records, req, o) =
+    produce_head(c, i, _, _, _, at, req), e in produce_entries(req),
     let j = e.0, let name = e.1, let p = e.2, let records = e.3, let o = (at, c, j);
 
-/// The entries whose request may append and whose partition exists, with their records checked against the
-/// topic's configurations (`check_entry`).
-view entry_check(c, j, tid, p, o, checked) =
-    produce_entry(c, j, name, p, records, req, o), produce_request_error(req) == None, topic(name, tid, parts, cfg),
-    p >= 0i32, p < parts, let checked = check_entry(records, req.acks, cfg);
+/// The entries this broker appends this tick: of a request not appended yet, to a partition it leads, with their
+/// records checked against the topic's configurations (`check_entry`).
+view entry_check(c, i, j, tid, p, o, checked) =
+    produce_entry(c, i, j, name, p, records, req, o), not produce_started(c, i), produce_request_error(req) == None,
+    mtopic(name, tid, parts, cfg), led(tid, p, _), let g = (tid, p), isr_of(g, isr), p >= 0i32, p < parts,
+    let checked = check_entry(records, req.acks, cfg, isr.len());
 
 /// This tick's appends, per partition, in order: each one's order and batches.
-view appends(tid, p, xs = collect!((o, bs))) = entry_check(_c, _j, tid, p, o, ch), ch.error == NONE, let bs = ch.batches;
+view appends(tid, p, xs = collect!((o, bs))) = entry_check(_c, _i, _j, tid, p, o, ch), ch.error == NONE, let bs = ch.batches;
 
-/// The states of the producers whose batches are appended to each partition this tick (the partition's other
-/// producers are not read).
-view part_producers(tid, p, ps = collect!(ProducerEntry { pid: pid, epoch: epoch, recent: recent })) =
-    per appends(tid, p, xs), pid in batch_producers(xs), producer(tid, p, pid, epoch, recent);
+/// The producers appending to each partition this tick, as their state stands after the partition's last entry:
+/// their committed state, then their uncommitted entries in log order.
+view tail_batches(tid, p, pid, xs = collect!((i, h, base, last))) =
+    appends(tid, p, ys), pid in batch_producers(ys), data_entry(tid, p, i, base, last, _, h, _), applied_d(tid, p, a)
+    where i > a && h.producer_id == pid;
+view producer_state(tid, p, pid, e) {
+    appends(tid, p, ys), pid in batch_producers(ys), not tail_batches(tid, p, pid, _),
+        producer(tid, p, pid, epoch, recent), let e = ProducerEntry { pid: pid, epoch: epoch, recent: recent };
+    tail_batches(tid, p, pid, xs), producer(tid, p, pid, epoch, recent),
+        let Some(e) = tail_state(Some(ProducerEntry { pid: pid, epoch: epoch, recent: recent }), xs);
+    tail_batches(tid, p, pid, xs), not producer(tid, p, pid, _, _), let Some(e) = tail_state(None, xs);
+}
+view part_producers(tid, p, ps = collect!(e)) =
+    per appends(tid, p, ys), pid in batch_producers(ys), producer_state(tid, p, pid, e);
 
-/// Each partition's appends this tick, sequenced.
-view sequenced(tid, p, s) =
-    appends(tid, p, xs), log_end(tid, p, end), part_producers(tid, p, ps), let s = sequence_appends(xs, end, ps);
+/// Each partition's appends this tick, sequenced after its last entry.
+view sequenced(tid, p, s) = appends(tid, p, xs), tail_end(tid, p, end), part_producers(tid, p, ps),
+    let s = sequence_appends(xs, end, ps);
 
 /// Each append's outcome, by its order.
 view append_outcome(tid, p, o, out) = sequenced(tid, p, s), x in s.outcomes, let o = x.0, let out = x.1;
 
-store_batches: while sequenced(tid, p, s), pb in placed_all(s), let blob = Blob::of(pb.3) {
-    next batch(tid, p, pb.0, pb.1, pb.2, blob);
+/// Where each placed batch lands: the log index the leader appends it at (after its last entry, in offset order, as
+/// `raft.bls` appends a group's proposals), and the term.
+view placed_at(tid, p, base, idx, epoch) =
+    sequenced(tid, p, s), led_term(tid, p, epoch), last_log(g, li, _), let g = (tid, p), (k, pb) in placed_all(s).enumerate(),
+    let base = pb.0, let idx = li + 1 + k;
+
+/// The DATA entries each partition's leader proposes this tick (`proposals`, in `cluster.bls`).
+view data_proposals(g, x) =
+    sequenced(tid, p, s), led(tid, p, epoch), let g = (tid, p), pb in placed_all(s),
+    let x = (DATA, pb.0, Blob::of(restamp(pb.3, pb.0, epoch)));
+
+/// A request's appends this tick, recorded for its answer: per placed entry, where it went.
+table placed(c: Conn, i: u64, j: u64, tid: Bytes, p: i32, idx: u64, epoch: u64, base: i64, last: i64, log_start: i64)
+    key(c, i, j);
+record_placed: while entry_check(c, i, j, tid, p, o, ch), ch.error == NONE, append_outcome(tid, p, o, out), let b = out.base,
+    placed_at(tid, p, b, idx, epoch), log_start(tid, p, start) where out.error == NONE && out.count > 0i64 {
+    upsert placed(c, i, j, tid, p, idx, epoch, b, b + out.count - 1i64, start);
+}
+/// A request's retried batches the partition already held, recorded for an `acks=all` answer: the original's last
+/// offset must commit first (it may be an uncommitted entry of this leader's log), under the leadership that found
+/// it, as Kafka's leader waits for the high watermark to pass a duplicate's original.
+table duplicate(c: Conn, i: u64, j: u64, tid: Bytes, p: i32, epoch: u64, base: i64, last: i64) key(c, i, j);
+record_duplicate: while entry_check(c, i, j, tid, p, o, ch), ch.error == NONE, append_outcome(tid, p, o, out),
+    led_term(tid, p, e) where out.error == NONE && out.duplicate_last >= 0i64 {
+    upsert duplicate(c, i, j, tid, p, e, out.base, out.duplicate_last);
+}
+mark_started: while produce_head(c, i, _, _, _, _, _), not produce_started(c, i) {
+    upsert produce_started(c, i);
 }
 
-index_chunks: while sequenced(tid, p, s), pb in placed_all(s), ch in chunks_of(pb.0, pb.1) {
-    next batch_chunk(tid, p, ch, pb.0);
-}
-
-/// What each partition's appends this tick do to its segments.
-view segment_change(tid, p, ch) =
-    sequenced(tid, p, s), active_segment(tid, p, a), segment(tid, p, a, bytes, mts, mb, md), topic(_name, tid, _parts, cfg),
-    let ch = segment_appends(placed_all(s), Segment { base: a, bytes: bytes, max_ts: mts, max_base: mb, modified: md },
-        segment_bytes(cfg), now().as_millis());
-
-write_segments: while segment_change(tid, p, ch), sg in ch.written {
-    upsert segment(tid, p, sg.base, sg.bytes, sg.max_ts, sg.max_base, sg.modified);
-}
-
-move_active: while segment_change(tid, p, ch) {
-    upsert active_segment(tid, p, ch.active);
-}
-
-index_times: while segment_change(tid, p, ch), mk in ch.marks {
-    next time_index(tid, p, mk.0, mk.1, mk.2);
-}
-
-advance_end: while sequenced(tid, p, s), log_end(tid, p, end) where s.end > end {
-    upsert log_end(tid, p, s.end);
-}
-
-save_producers: while sequenced(tid, p, s), e in s.changed {
-    upsert producer(tid, p, e.pid, e.epoch, e.recent);
-}
-
-/// Each entry's answer.
-view entry_answer(c, j, a) {
-    produce_entry(c, j, _name, _p, _records, req, _o), let Some(err) = produce_request_error(req),
+/// Each entry's answer, decided in the tick its request is appended.
+table produce_reply(c: Conn, i: u64, j: u64, a: PartitionAnswer) key(c, i, j);
+view entry_answer_now(c, i, j, a) {
+    produce_entry(c, i, j, _name, _p, _records, req, _o), not produce_started(c, i), let Some(err) = produce_request_error(req),
         let a = PartitionAnswer { error: err.0, base_offset: -1i64, log_start: -1i64, message: Some(err.1), bad_batch: None };
-    produce_entry(c, j, name, _p, _records, req, _o), produce_request_error(req) == None, not topic(name, _, _, _),
-        let a = unknown_partition();
-    produce_entry(c, j, name, p, _records, req, _o), produce_request_error(req) == None, topic(name, _tid, parts, _cfg),
-        let a = unknown_partition() where p < 0i32 || p >= parts;
-    entry_check(c, j, _tid, _p, _o, ch), ch.error != NONE,
+    produce_entry(c, i, j, name, _p, _records, req, _o), not produce_started(c, i), produce_request_error(req) == None,
+        not mtopic(name, _, _, _), let a = unknown_partition();
+    produce_entry(c, i, j, name, p, _records, req, _o), not produce_started(c, i), produce_request_error(req) == None,
+        mtopic(name, _tid, parts, _cfg), let a = unknown_partition() where p < 0i32 || p >= parts;
+    produce_entry(c, i, j, name, p, _records, req, _o), not produce_started(c, i), produce_request_error(req) == None,
+        mtopic(name, tid, parts, _cfg), not led(tid, p, _), let a = not_leader() where p >= 0i32 && p < parts;
+    entry_check(c, i, j, _tid, _p, _o, ch), ch.error != NONE,
         let a = PartitionAnswer { error: ch.error, base_offset: -1i64, log_start: -1i64, message: ch.message, bad_batch: ch.bad_batch };
-    entry_check(c, j, tid, p, o, ch), ch.error == NONE, append_outcome(tid, p, o, out), log_start(tid, p, start),
+    entry_check(c, i, j, tid, p, o, ch), ch.error == NONE, append_outcome(tid, p, o, out), log_start(tid, p, start),
         let a = PartitionAnswer {
             error: out.error,
             base_offset: out.base,
@@ -129,13 +171,83 @@ view entry_answer(c, j, a) {
             bad_batch: None,
         };
 }
+record_answer: while entry_answer_now(c, i, j, a) {
+    upsert produce_reply(c, i, j, a);
+}
 
-/// Per Produce request answered this tick: its entries' answers.
-view produce_answers(c, xs = collect!((j, a))) = per produce_head(c, _, _, _, _, _, _req), entry_answer(c, j, a);
+/// An entry an `acks=all` answer waits on (placed, or a duplicate of an entry already in the log), and its state:
+/// committed (the high watermark passed it), or lost (the leader no longer holds a placed entry as it appended it,
+/// or no longer leads in that epoch). Until one of these, it waits.
+view waits_on(c, i, j) {
+    placed(c, i, j, _, _, _, _, _, _, _);
+    duplicate(c, i, j, _, _, _, _, _);
+}
+/// A placed entry is done when the high watermark (Raft's commit) passes it and every in-sync replica holds it, as
+/// Kafka's `acks=all` waits for the whole ISR; a duplicate, when its original is (one compacted away is long done).
+view isr_low(g, low = min!(m)) = in_sync(g, id), member_id(f, id), match_idx(g, f, m);
+view isr_followers(g) = isr_low(g, _);
+view isr_lacks(g, idx) = waits_index(g, idx), isr_low(g, low) where low < idx;
+view entry_index(tid, p, base, idx) = data_rlog(tid, p, idx, base, _data);
+/// The log indexes acks=all answers wait on.
+view waits_index(g, idx) {
+    placed(_c, _i, _j, tid, p, idx, _e, _b, _l, _s), let g = (tid, p);
+    duplicate(_c, _i, _j, tid, p, _e, base, _l), entry_index(tid, p, base, idx), let g = (tid, p);
+}
+view placed_done(c, i, j) {
+    placed(c, i, j, tid, p, idx, _e, _b, last, _s), log_end(tid, p, hw), let g = (tid, p), not isr_lacks(g, idx)
+        where hw > last;
+    duplicate(c, i, j, tid, p, _e, base, last), log_end(tid, p, hw), entry_index(tid, p, base, idx), let g = (tid, p),
+        not isr_lacks(g, idx) where hw > last;
+    duplicate(c, i, j, tid, p, _e, base, last), log_end(tid, p, hw), not entry_index(tid, p, base, _) where hw > last;
+}
+/// When it is done, the in-sync replicas are fewer than `min.insync.replicas`: Kafka then answers
+/// NOT_ENOUGH_REPLICAS_AFTER_APPEND (the record is committed, but not as durably as asked).
+view waits_in(c, i, j, tid, p) {
+    placed(c, i, j, tid, p, _, _, _, _, _);
+    duplicate(c, i, j, tid, p, _, _, _);
+}
+view isr_short(c, i, j) =
+    waits_in(c, i, j, tid, p), let g = (tid, p), isr_of(g, isr), mtopic(_n, tid, _parts, cfg) where (isr.len() as i64) < min_insync(cfg);
+view placed_lost(c, i, j) {
+    placed(c, i, j, tid, p, idx, e, _b, _l, _s), let g = (tid, p), not rlog(g: g, idx: idx, term: e, ..), not compacted_at(g, idx);
+    placed(c, i, j, tid, p, _idx, e, _b, _l, _s), not led_term(tid, p, e);
+    duplicate(c, i, j, tid, p, e, _b, _l), not led_term(tid, p, e);
+}
+view entry_waiting(c, i, j) = waits_on(c, i, j), not placed_done(c, i, j), not placed_lost(c, i, j);
+view placed_waiting(c, i) = entry_waiting(c, i, _);
 
-/// With `acks` 0 there is no response; an error then closes the connection, so the producer refreshes its
-/// metadata, as Kafka does.
-answer_produce: while produce_head(c, i, seq, corr, fr, at, req), not waiting(c), produce_answers(c, xs) {
+/// Each entry's final answer: the one decided at the append, but `acks=all` makes a placed entry wait for the high
+/// watermark, and one that is lost fails.
+view final_answer(c, i, j, a) {
+    produce_reply(c, i, j, a), not waits_on(c, i, j);
+    produce_reply(c, i, j, a), waits_on(c, i, j), produce_head(c, i, _, _, _, _, req)
+        where req.acks != -1i16;
+    produce_reply(c, i, j, a), placed_done(c, i, j), not placed_lost(c, i, j), not isr_short(c, i, j),
+        produce_head(c, i, _, _, _, _, req) where req.acks == -1i16;
+    produce_reply(c, i, j, _a0), placed_done(c, i, j), not placed_lost(c, i, j), isr_short(c, i, j),
+        produce_head(c, i, _, _, _, _, req), let a = not_enough_after_append() where req.acks == -1i16;
+    produce_reply(c, i, j, _a0), placed_lost(c, i, j), produce_head(c, i, _, _, _, _, req), let a = not_leader()
+        where req.acks == -1i16;
+}
+view produce_answers(c, i, xs = collect!((j, a))) = per produce_head(c, i, _, _, _, _, _req), final_answer(c, i, j, a);
+/// When the timeout passes, an entry still waiting fails with REQUEST_TIMED_OUT.
+view timeout_answer(c, i, j, a) {
+    final_answer(c, i, j, a);
+    entry_waiting(c, i, j), let a = ack_timed_out();
+}
+view timeout_answers(c, i, xs = collect!((j, a))) = per produce_head(c, i, _, _, _, _, _req), timeout_answer(c, i, j, a);
+
+/// The answer leaves once the request is appended (the tick after its entries are recorded) and nothing it placed
+/// waits; with `acks=all`, it also leaves, failed, when its timeout passes. With `acks` 0 there is no response; an
+/// error then closes the connection, so the producer refreshes its metadata, as Kafka does.
+view produce_ready(c, i) {
+    produce_head(c, i, _, _, _, _, req), produce_started(c, i), not placed_waiting(c, i);
+    produce_head(c, i, _, _, _, _, req), produce_started(c, i) where req.acks != -1i16;
+}
+view produce_timed_out(c, i) =
+    produce_head(c, i, _, _, _, at, req), produce_started(c, i), placed_waiting(c, i)
+    where req.acks == -1i16 && now() >= at + Duration::from_millis(req.timeout_ms as i64);
+answer_produce: while produce_head(c, i, seq, corr, fr, at, req), produce_ready(c, i), produce_answers(c, i, xs) {
     if req.acks == 0i16 {
         upsert answering(c, i + 1, seq);
         if produce_failed(xs) {
@@ -147,63 +259,240 @@ answer_produce: while produce_head(c, i, seq, corr, fr, at, req), not waiting(c)
     }
     delete queued(c, i, fr, at);
 }
+answer_produce_timeout: while produce_head(c, i, seq, corr, fr, at, req), produce_timed_out(c, i), timeout_answers(c, i, xs) {
+    send kafka.write(c, seq, [Part::Bytes(encode_produce_response(corr, req, xs))]);
+    upsert answering(c, i + 1, seq + 1);
+    delete queued(c, i, fr, at);
+}
+/// A request's records go once it is answered (or its connection closes: `queued` goes then).
+forget_started: while produce_started(c, i), not queued(c, i, _, _) {
+    delete produce_started(c, i);
+}
+forget_placed: while placed(c, i, j, tid, p, idx, e, b, l, s), not queued(c, i, _, _) {
+    delete placed(c, i, j, tid, p, idx, e, b, l, s);
+}
+forget_duplicate: while duplicate(c, i, j, tid, p, e, b, l), not queued(c, i, _, _) {
+    delete duplicate(c, i, j, tid, p, e, b, l);
+}
+forget_answer: while produce_reply(c, i, j, a), not queued(c, i, _, _) {
+    delete produce_reply(c, i, j, a);
+}
+
+// ---------------------------------------------------------------- materializing committed entries, on every replica
+
+/// Each partition's committed entries not materialized yet, in log order.
+/// (A partition installing a snapshot point this tick materializes nothing: the install resets what it would write.
+/// The entries are found by an index range, not by scanning the log.)
+view to_apply_d(tid, p, a, c) = applied_d(tid, p, a), not installing(tid, p), let g = (tid, p), commit_of(g, c) where c > a;
+view to_materialize(tid, p, xs = collect!((i, base, last, max_ts, data, h))) =
+    to_apply_d(tid, p, a, c), data_entry(tid, p, i, base, last, max_ts, h, data) where i > a && i <= c;
+view materialized_to(tid, p, c) = to_apply_d(tid, p, _a, c);
+advance_materialized: while materialized_to(tid, p, c) {
+    upsert applied_d(tid, p, c);
+}
+
+store_batches: while to_materialize(tid, p, xs), x in xs {
+    next batch(tid, p, x.1, x.2, x.3, x.4);
+}
+index_chunks: while to_materialize(tid, p, xs), x in xs, ch in chunks_of(x.1, x.2) {
+    next batch_chunk(tid, p, ch, x.1);
+}
+advance_end: while to_materialize(tid, p, xs), log_end(tid, p, end), let Some(x) = xs.last() where x.2 + 1i64 > end {
+    upsert log_end(tid, p, x.2 + 1i64);
+}
+
+/// What each partition's materialized batches do to its segments.
+view segment_change(tid, p, ch) =
+    to_materialize(tid, p, xs), active_segment(tid, p, a), segment(tid, p, a, bytes, mts, mb, md), mtopic(_name, tid, _parts, cfg),
+    let ch = segment_appends(materialized_batches(xs), Segment { base: a, bytes: bytes, max_ts: mts, max_base: mb, modified: md },
+        segment_bytes(cfg), now().as_millis());
+write_segments: while segment_change(tid, p, ch), sg in ch.written {
+    upsert segment(tid, p, sg.base, sg.bytes, sg.max_ts, sg.max_base, sg.modified);
+}
+move_active: while segment_change(tid, p, ch) {
+    upsert active_segment(tid, p, ch.active);
+}
+index_times: while segment_change(tid, p, ch), mk in ch.marks {
+    next time_index(tid, p, mk.0, mk.1, mk.2);
+}
+
+/// Each producer's committed state after the materialized batches.
+view materialized_producer(tid, p, e) {
+    to_materialize(tid, p, xs), pid in producers_in(xs), producer(tid, p, pid, epoch, recent),
+        let Some(e) = tail_state(Some(ProducerEntry { pid: pid, epoch: epoch, recent: recent }), producer_batches(xs, pid));
+    to_materialize(tid, p, xs), pid in producers_in(xs), not producer(tid, p, pid, _, _),
+        let Some(e) = tail_state(None, producer_batches(xs, pid));
+}
+save_producers: while materialized_producer(tid, p, e) {
+    upsert producer(tid, p, e.pid, e.epoch, e.recent);
+}
 
 // ---------------------------------------------------------------- InitProducerId
 
-/// The next producer id.
-view next_pid(n = max!(x default 0i64)) = producer_ids(x);
+view init_pid_head(c, i, seq, corr, fr, at, req) =
+    head(c, i, seq, key, _version, corr, fr, at), caught_up(), key == API_INIT_PRODUCER_ID,
+    let Some(body) = request_body(fr), let Some(req) = decode_init_producer_id(body);
 
-/// An idempotent producer (no transactional id) gets a fresh producer id at epoch 0, as Kafka hands them out;
-/// allocating one is a change to the broker's state, so the request is a writer (`topics_node.bls`). A
-/// transactional id is refused: this broker authorizes none (transactions are out of scope, KAFKA.md K1).
-answer_init_pid: while init_pid_head(c, i, seq, corr, fr, at, req), writer(c), next_pid(n) {
-    if req.transactional_id.is_some() {
-        send kafka.write(c, seq, [Part::Bytes(encode_init_producer_id_response(corr, TRANSACTIONAL_ID_AUTHORIZATION_FAILED, -1i64, -1i16))]);
-    } else {
-        send kafka.write(c, seq, [Part::Bytes(encode_init_producer_id_response(corr, NONE, n, 0i16))]);
-        upsert producer_ids(n + 1i64);
-    }
+/// An idempotent producer (no transactional id) gets a fresh producer id at epoch 0 from this broker's block of
+/// producer ids, which the controller allocated it (S8.md D8; Kafka's blocks). The tick's requests take the next ids
+/// in turn; while the block is spent (or there is none yet), they wait for the next block, and fail with
+/// COORDINATOR_NOT_AVAILABLE (retriable) after `PID_WAIT`. A transactional id is refused: this broker authorizes
+/// none (transactions are out of scope, K1).
+durable table pid_block(nx: i64, end: i64) key();
+view pid_asking(c, i) = init_pid_head(c, i, _, _, _, _, req) where req.transactional_id.is_none();
+view pid_queue(xs = collect!((c, i))) = pid_asking(c, i);
+view pid_given(c, i, pid) =
+    pid_queue(xs), pid_block(nx, end), (k, ci) in xs.enumerate(), let pid = nx + (k as i64), let c = ci.0, let i = ci.1
+    where pid < end;
+view pid_given_count(n = count!(pid)) = pid_given(_c, _i, pid);
+take_pids: while pid_given_count(n), pid_block(nx, end) where n > 0 {
+    upsert pid_block(nx + (n as i64), end);
+}
+/// The block this broker asks for when it needs one, named by the end of the block it has (0 for none), so each
+/// block is asked for once.
+view pid_spent(end) {
+    pid_block(nx, end) where nx >= end;
+    pid_asking(_c, _i), not pid_block(_, _), let end = 0i64;
+}
+view pid_cmd(tag, cmd) =
+    pid_spent(end), pid_asking(_c, _i), my_id(me), let tag = hash64(("pid-block", me, end)), let cmd = encode_cmd(pids_cmd(me, tag));
+take_block: while pid_cmd(tag, _cmd), my_id(me), outcome(me, tag, _slot, _err, _id, start, _name) {
+    upsert pid_block(start, start + PID_BLOCK);
+}
+answer_init_pid_refused: while init_pid_head(c, i, seq, corr, fr, at, req) where req.transactional_id.is_some() {
+    send kafka.write(c, seq, [Part::Bytes(encode_init_producer_id_response(corr, TRANSACTIONAL_ID_AUTHORIZATION_FAILED, -1i64, -1i16))]);
+    upsert answering(c, i + 1, seq + 1);
+    delete queued(c, i, fr, at);
+}
+answer_init_pid: while init_pid_head(c, i, seq, corr, fr, at, _req), pid_given(c, i, pid) {
+    send kafka.write(c, seq, [Part::Bytes(encode_init_producer_id_response(corr, NONE, pid, 0i16))]);
+    upsert answering(c, i + 1, seq + 1);
+    delete queued(c, i, fr, at);
+}
+answer_init_pid_late: while init_pid_head(c, i, seq, corr, fr, at, _req), pid_asking(c, i), not pid_given(c, i, _)
+    where now() >= at + PID_WAIT {
+    send kafka.write(c, seq, [Part::Bytes(encode_init_producer_id_response(corr, COORDINATOR_NOT_AVAILABLE, -1i64, -1i16))]);
     upsert answering(c, i + 1, seq + 1);
     delete queued(c, i, fr, at);
 }
 
 // ---------------------------------------------------------------- a deleted topic's logs
 
-remove_batches: while deleting(_e, _name, id), batch(id, p, b, l, t, blob) {
+remove_batches: while mdeleted(id), batch(id, p, b, l, t, blob) {
     delete batch(id, p, b, l, t, blob);
 }
-remove_producers: while deleting(_e, _name, id), producer(id, p, pid, epoch, recent) {
+remove_producers: while mdeleted(id), producer(id, p, pid, epoch, recent) {
     delete producer(id, p, pid, epoch, recent);
 }
-remove_chunks: while deleting(_e, _name, id), batch_chunk(id, p, ch, b) {
+remove_chunks: while mdeleted(id), batch_chunk(id, p, ch, b) {
     delete batch_chunk(id, p, ch, b);
 }
-remove_times: while deleting(_e, _name, id), time_index(id, p, sg, ts, b) {
+remove_times: while mdeleted(id), time_index(id, p, sg, ts, b) {
     delete time_index(id, p, sg, ts, b);
 }
-remove_segments: while deleting(_e, _name, id), segment(id, p, b, by, mts, mb, md) {
+remove_segments: while mdeleted(id), segment(id, p, b, by, mts, mb, md) {
     delete segment(id, p, b, by, mts, mb, md);
 }
-remove_active: while deleting(_e, _name, id), active_segment(id, p, b) {
+remove_active: while mdeleted(id), active_segment(id, p, b) {
     delete active_segment(id, p, b);
 }
+remove_log_end: while mdeleted(id), log_end(id, p, n) {
+    delete log_end(id, p, n);
+}
+remove_log_start: while mdeleted(id), log_start(id, p, n) {
+    delete log_start(id, p, n);
+}
+remove_applied: while mdeleted(id), applied_d(id, p, n) {
+    delete applied_d(id, p, n);
+}
 
-// ---------------------------------------------------------------- retention
+// ---------------------------------------------------------------- compaction and catching up from a snapshot (D12)
+
+/// A replicated entry whose data retention deleted (its batch is below the log start) is compactable once it is
+/// applied: the replication log need not keep what the partition no longer holds. The position after it is the
+/// offset the next entry starts at.
+/// (Retention deletes only materialized batches, so an entry below the log start is applied. Only a change of the
+/// log start makes this look at the retained entries.)
+view compactable(g, i, pos) =
+    log_start(tid, p, s), data_entry(tid, p, i, _base, last, _t, _h, _data), let g = (tid, p), let pos = last + 1i64
+    where last < s;
+/// An index at or before a group's snapshot point (committed, and compacted away).
+view compacted_at(g, i) = placed(_c, _i, _j, tid, p, i, _e, _b, _l, _s), let g = (tid, p), rsnap(g, sp, _, _, _) where i <= sp;
+
+/// A follower too far behind its leader starts again at the leader's snapshot point (`install`, in `raft.bls`): its
+/// partition log empties and restarts at the position after the point, which is the leader's log start, as a Kafka
+/// follower that fetched below its leader's log start truncates fully and starts there. The producers' states go
+/// too (Kafka's `truncateFullyAndStartAt`); a producer this partition no longer knows may continue at any sequence.
+view reset_part(tid, p, i, pos) = install(g, i, pos), not is_controller(g), let (tid, p) = g;
+view installing(tid, p) = reset_part(tid, p, _, _);
+reset_log: on reset_part(tid, p, i, pos) {
+    upsert log_start(tid, p, pos);
+    upsert log_end(tid, p, pos);
+    upsert applied_d(tid, p, i);
+    upsert active_segment(tid, p, pos);
+    next segment(tid, p, pos, 0i64, -1i64, -1i64, now().as_millis());
+}
+reset_batches: on reset_part(tid, p, _i, _pos), batch(tid, p, b, l, t, blob) {
+    delete batch(tid, p, b, l, t, blob);
+}
+reset_chunks: on reset_part(tid, p, _i, _pos), batch_chunk(tid, p, ch, b) {
+    delete batch_chunk(tid, p, ch, b);
+}
+reset_times: on reset_part(tid, p, _i, _pos), time_index(tid, p, sg, ts, b) {
+    delete time_index(tid, p, sg, ts, b);
+}
+reset_segments: on reset_part(tid, p, _i, pos), segment(tid, p, b, by, mts, mb, md) where b != pos {
+    delete segment(tid, p, b, by, mts, mb, md);
+}
+reset_producers: on reset_part(tid, p, _i, _pos), producer(tid, p, pid, epoch, recent) {
+    delete producer(tid, p, pid, epoch, recent);
+}
+
+/// A partition this broker no longer hosts (a reassignment moved it away) leaves it, data and all.
+view unhosted_part(tid, p) = log_start(tid, p, _), let g = (tid, p), unhosted(g);
+drop_unhosted_part: while unhosted_part(tid, p), log_start(tid, p, s), log_end(tid, p, e), applied_d(tid, p, a), active_segment(tid, p, b) {
+    delete log_start(tid, p, s);
+    delete log_end(tid, p, e);
+    delete applied_d(tid, p, a);
+    delete active_segment(tid, p, b);
+}
+drop_unhosted_batches: while unhosted_part(tid, p), batch(tid, p, b, l, t, blob) {
+    delete batch(tid, p, b, l, t, blob);
+}
+drop_unhosted_chunks: while unhosted_part(tid, p), batch_chunk(tid, p, ch, b) {
+    delete batch_chunk(tid, p, ch, b);
+}
+drop_unhosted_times: while unhosted_part(tid, p), time_index(tid, p, sg, ts, b) {
+    delete time_index(tid, p, sg, ts, b);
+}
+drop_unhosted_segments: while unhosted_part(tid, p), segment(tid, p, b, by, mts, mb, md) {
+    delete segment(tid, p, b, by, mts, mb, md);
+}
+drop_unhosted_producers: while unhosted_part(tid, p), producer(tid, p, pid, epoch, recent) {
+    delete producer(tid, p, pid, epoch, recent);
+}
+
+// ---------------------------------------------------------------- retention (each replica on its own clock, D12)
 
 /// Checks retention, as Kafka's `log.retention.check.interval.ms` does.
 timer retention_check every RETENTION_CHECK;
 
 /// Per partition, at a retention check: its segments in offset order (first offset, bytes, and the time retention
-/// ages it by: its greatest timestamp, or when it was last appended to if its records have none, as Kafka falls back
-/// to the segment file's modification time).
+/// ages it by: its greatest timestamp, or when it was last appended to if its records have none).
 view retained(tid, p, ss = collect!((b, bytes, age))) =
     retention_check(_n, _at), segment(tid, p, b, bytes, mts, _mb, md), let age = if mts >= 0i64 { mts } else { md };
 
 /// Where retention moves each partition's log start this check, if it deletes anything, and whether it deleted the
-/// active segment (a new one is rolled at the log end). A topic the tick's writer deletes is left to the deletion.
+/// active segment (a new one is rolled at the log end).
+/// (Not in a tick that materializes or installs into the partition: those write the same segments and offsets; the
+/// next check catches up.)
+view busy_part(tid, p) {
+    to_materialize(tid, p, _);
+    installing(tid, p);
+}
 view retention_cut(tid, p, start, roll) =
-    retained(tid, p, ss), log_end(tid, p, end), topic(_name, tid, _parts, cfg), log_start(tid, p, s0),
-    not deleting(_, _, tid), let Some(r) = retention_start(ss, end, now().as_millis(), retention(cfg)),
+    retained(tid, p, ss), not busy_part(tid, p), log_end(tid, p, end), mtopic(_name, tid, _parts, cfg), log_start(tid, p, s0),
+    let Some(r) = retention_start(ss, end, now().as_millis(), retention(cfg)),
     let start = r.0, let roll = r.1 where start > s0;
 
 advance_start: on retention_cut(tid, p, start, _roll), log_start(tid, p, s0) {

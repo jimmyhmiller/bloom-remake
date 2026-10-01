@@ -6,6 +6,12 @@
 //! request is recorded with the instants it was sent and answered (unanswered when its connection closed first), and
 //! the history is checked for linearizability against a sequential model of Kafka's topic rules written here,
 //! independently of the broker. At the end the broker's durable partition tables must match its topics.
+//!
+//! Slice 8: the same with three brokers under crashes, splits and one-way cuts, each client asking a random broker.
+//! Creations and deletions go through the controller's log, so they stay linearizable whichever broker they reach;
+//! Metadata and DescribeConfigs read a broker's own copy of the metadata, which may lag (as Kafka's do), so those runs
+//! send creations (some only validating) and deletions only. At the end every broker holds the same topics, and each
+//! replica the partitions it replicates.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -151,12 +157,15 @@ fn learn(state: &mut State, name: &str, id: Id) -> bool {
 
 #[cfg(test)]
 /// Kafka's topic rules for one broker, applied one request at a time.
-struct Topics;
+struct Topics {
+    /// The brokers: a replication factor from 1 to this is valid.
+    brokers: i16,
+}
 
 #[cfg(test)]
 impl Topics {
     /// A CreateTopics request's error per entry, against `state`.
-    fn create_errors(state: &State, entries: &[Entry]) -> Vec<i16> {
+    fn create_errors(&self, state: &State, entries: &[Entry]) -> Vec<i16> {
         entries
             .iter()
             .map(|e| {
@@ -171,7 +180,7 @@ impl Topics {
                     17
                 } else if e.partitions != -1 && !(1..=10000).contains(&e.partitions) {
                     37
-                } else if e.replication != -1 && e.replication != 1 {
+                } else if e.replication != -1 && !(1..=self.brokers).contains(&e.replication) {
                     38
                 } else if e
                     .configs
@@ -201,7 +210,7 @@ impl Model for Topics {
         let mut next = state.clone();
         match (input, output) {
             (Input::Create { entries, validate }, out) => {
-                let errors = Topics::create_errors(state, entries);
+                let errors = self.create_errors(state, entries);
                 let got = match out {
                     Some(Output::Create(got)) => Some(got),
                     Some(_) => return None,
@@ -426,8 +435,8 @@ const CONFIGS: [(&str, Option<&str>); 6] = [
 ];
 
 #[cfg(test)]
-fn random_input(rng: &mut Rng, ids: &[Id], names: &[&str]) -> Input {
-    match rng.below(10) {
+fn random_input(rng: &mut Rng, ids: &[Id], names: &[&str], writes_only: bool) -> Input {
+    match rng.below(if writes_only { 6 } else { 10 }) {
         0..=3 => Input::Create {
             entries: (0..1 + rng.below(3))
                 .map(|_| Entry {
@@ -496,7 +505,7 @@ fn topic_name(n: &str) -> TopicName {
 }
 
 #[cfg(test)]
-fn encode(input: &Input, corr: i32) -> Vec<u8> {
+fn encode(input: &Input, corr: i32, timeout_ms: i32) -> Vec<u8> {
     match input {
         Input::Create { entries, validate } => {
             let topics = entries
@@ -520,7 +529,7 @@ fn encode(input: &Input, corr: i32) -> Vec<u8> {
                 .collect();
             let req = CreateTopicsRequest::default()
                 .with_topics(topics)
-                .with_timeout_ms(30_000)
+                .with_timeout_ms(timeout_ms)
                 .with_validate_only(*validate);
             framed(19, 7, corr, &req)
         }
@@ -536,7 +545,7 @@ fn encode(input: &Input, corr: i32) -> Vec<u8> {
                         })
                         .collect(),
                 )
-                .with_timeout_ms(30_000);
+                .with_timeout_ms(timeout_ms);
             framed(20, 6, corr, &req)
         }
         Input::Metadata { names, auto } => {
@@ -652,6 +661,8 @@ fn decode(input: &Input, mut body: Bytes) -> Result<Output, String> {
 struct Shared {
     history: Vec<Operation<Input, Output>>,
     ids: Vec<Id>,
+    /// Requests answered REQUEST_TIMED_OUT (recorded unanswered).
+    timeouts: usize,
 }
 
 #[cfg(test)]
@@ -672,6 +683,10 @@ struct Client {
     grid: Option<i64>,
     /// The names it uses.
     names: &'static [&'static str],
+    /// How many brokers there are (each connection goes to a random one), and whether it sends creations and
+    /// deletions only.
+    brokers: u32,
+    writes_only: bool,
 }
 
 #[cfg(test)]
@@ -682,8 +697,10 @@ impl Client {
         }
         self.left -= 1;
         self.corr += 1;
-        let input = random_input(&mut self.rng, &self.shared.borrow().ids, self.names);
-        a.send = encode(&input, self.corr);
+        let input = random_input(&mut self.rng, &self.shared.borrow().ids, self.names, self.writes_only);
+        // Three brokers: a request whose command the controller does not apply within a second answers
+        // REQUEST_TIMED_OUT (recorded unanswered).
+        a.send = encode(&input, self.corr, if self.brokers > 1 { 1_000 } else { 30_000 });
         let mut sh = self.shared.borrow_mut();
         sh.history.push(Operation {
             call: now as u64,
@@ -704,7 +721,10 @@ impl StreamClient for Client {
                 if !self.connected && self.left > 0 {
                     self.connected = true;
                     self.open = false;
-                    a.connect = Some((NodeId(0), Arc::from("kafka")));
+                    a.connect = Some((
+                        NodeId(self.rng.below(u64::from(self.brokers)) as u32),
+                        Arc::from("kafka"),
+                    ));
                 } else if self.open && self.pending.is_none() {
                     self.issue(now, &mut a);
                 }
@@ -751,9 +771,20 @@ impl StreamClient for Client {
                         Output::Describe(_) => Vec::new(),
                     };
                     sh.ids.extend(revealed.into_iter().filter(|id| *id != [0; 16]));
-                    let op = &mut sh.history[at];
-                    op.ret = Some(now as u64);
-                    op.output = Some(out);
+                    // REQUEST_TIMED_OUT: the controller did not apply the request in time; it may still. The request
+                    // stays unanswered (it took effect at some point after it was sent, or never).
+                    let timed_out = match &out {
+                        Output::Create(xs) => xs.iter().any(|x| x.0 == 7),
+                        Output::Delete(xs) => xs.iter().any(|x| x.0 == 7),
+                        _ => false,
+                    };
+                    if timed_out {
+                        sh.timeouts += 1;
+                    } else {
+                        let op = &mut sh.history[at];
+                        op.ret = Some(now as u64);
+                        op.output = Some(out);
+                    }
                 }
                 // Think a while, so requests stay in flight across the nemesis's faults (or wait for the grid).
                 a.wake = Some(match self.grid {
@@ -801,27 +832,30 @@ struct Setup {
     requests: u32,
     grid: Option<i64>,
     names: &'static [&'static str],
+    brokers: u32,
+    /// Splits and one-way cuts between the brokers.
+    partitions: bool,
 }
 
 #[cfg(test)]
 /// Runs each seed and checks it; returns how many requests were answered, left unanswered, and sent at the same
 /// instant as another client's.
-fn check_runs(setup: &Setup) -> (usize, usize, usize) {
+fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/kafka/sim_cluster.bls");
-    let nodes = [
-        NodeSpec {
-            name: "b1".to_owned(),
+    let mut nodes: Vec<NodeSpec> = (1..=setup.brokers)
+        .map(|i| NodeSpec {
+            name: format!("b{i}"),
             role: Some("Broker".to_owned()),
-        },
-        NodeSpec {
-            name: "c1".to_owned(),
-            role: Some("Client".to_owned()),
-        },
-    ];
+        })
+        .collect();
+    nodes.push(NodeSpec {
+        name: "c1".to_owned(),
+        role: Some("Client".to_owned()),
+    });
     let (result, _) = compile_file(path.to_str().unwrap(), &nodes);
     let artifact: BlsArtifact = result.unwrap_or_else(|e| panic!("sim_cluster.bls: {e:?}")).0;
     let schema = DurableSchema::of(artifact.program.get());
-    let (mut answered, mut unanswered, mut together) = (0, 0, 0);
+    let (mut answered, mut unanswered, mut together, mut timeouts) = (0, 0, 0, 0);
     for seed in setup.seeds.clone() {
         let cfg = ClusterConfig {
             seed,
@@ -830,6 +864,7 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize) {
             chunk_max: 1 + (seed as usize % 7) * 16,
             nemesis: 150_000_000,
             crashes: setup.crashes && seed % 4 != 0,
+            partitions: setup.partitions,
             downtime: 40_000_000,
             stream_drops: setup.stream_drops,
             duration: 3_000_000_000,
@@ -840,7 +875,7 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize) {
             &artifact,
             &schema,
             blossom_value::Seed::from_u64(seed),
-            Vec::new(),
+            blossom_integration_tests::kafka_brokers(&artifact).unwrap(),
             Box::new(NoKvClients),
             cfg,
         )
@@ -858,6 +893,8 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize) {
                 corr: 0,
                 grid: setup.grid,
                 names: setup.names,
+                brokers: setup.brokers,
+                writes_only: setup.brokers > 1,
             }));
         }
         cluster.run_until(3_000_000_000).unwrap();
@@ -869,6 +906,7 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize) {
             run.log.join("\n")
         );
         let history = shared.borrow().history.clone();
+        timeouts += shared.borrow().timeouts;
         answered += history.iter().filter(|o| o.ret.is_some()).count();
         unanswered += history.iter().filter(|o| o.ret.is_none()).count();
         together += history
@@ -876,42 +914,73 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize) {
             .enumerate()
             .filter(|(i, o)| history.iter().enumerate().any(|(j, p)| j != *i && p.call == o.call))
             .count();
-        match linearize::check(&Topics, &history, 5_000_000) {
+        let model = Topics {
+            brokers: setup.brokers as i16,
+        };
+        match linearize::check(&model, &history, 5_000_000) {
             Verdict::Linearizable => {}
             other => {
                 let lines: Vec<String> = history.iter().enumerate().map(|(i, o)| format!("{i}: {o:?}")).collect();
                 panic!("seed {seed}: {other:?}\n{}\n{}", lines.join("\n"), run.log.join("\n"));
             }
         }
-        // Let the broker settle, then check its tables agree: each topic has exactly its partitions' offsets.
-        cluster.step_until(3_500_000_000).unwrap();
-        let state = cluster.state(NodeId(0)).expect("the broker is up");
-        let topics: Vec<(Vec<u8>, i64)> = state
-            .rows(artifact.rel_named("topic").unwrap())
-            .map(|r| (bytes_of(&r[1]), int(&r[2])))
-            .collect();
-        for rel in ["log_end", "log_start"] {
-            let mut got: Vec<(Vec<u8>, i64, i64)> = state
+        // Let the brokers settle, then check their tables agree: every broker holds the same topics and placements,
+        // and each replica exactly its partitions' offsets.
+        cluster.heal();
+        cluster.step_until(4_000_000_000).unwrap();
+        let rows = |n: u32, rel: &str| -> Vec<Vec<Value>> {
+            let state = cluster
+                .state(NodeId(n))
+                .unwrap_or_else(|| panic!("seed {seed}: broker {n} is down"));
+            let mut rs: Vec<Vec<Value>> = state
                 .rows(artifact.rel_named(rel).unwrap())
-                .map(|r| (bytes_of(&r[0]), int(&r[1]), int(&r[2])))
+                .map(|r| r.to_vec())
                 .collect();
-            got.sort();
-            let mut want: Vec<(Vec<u8>, i64, i64)> = topics
+            rs.sort();
+            rs
+        };
+        let topics = rows(0, "mtopic");
+        let assigned = rows(0, "massign");
+        for n in 1..setup.brokers {
+            assert_eq!(
+                rows(n, "mtopic"),
+                topics,
+                "seed {seed}: brokers 0 and {n} hold different topics"
+            );
+            assert_eq!(
+                rows(n, "massign"),
+                assigned,
+                "seed {seed}: brokers 0 and {n} place topics differently"
+            );
+        }
+        for n in 0..setup.brokers {
+            let id = i64::from(n + 1);
+            let mut want: Vec<(Vec<u8>, i64, i64)> = assigned
                 .iter()
-                .flat_map(|(id, n)| (0..*n).map(move |p| (id.clone(), p, 0)))
+                .filter(|r| match &r[2] {
+                    Value::Vec(rs) => rs.iter().any(|x| int(x) == id),
+                    other => panic!("{other:?}"),
+                })
+                .map(|r| (bytes_of(&r[0]), int(&r[1]), 0))
                 .collect();
             want.sort();
-            assert_eq!(got, want, "seed {seed}: {rel}");
+            for rel in ["log_end", "log_start"] {
+                let got: Vec<(Vec<u8>, i64, i64)> = rows(n, rel)
+                    .iter()
+                    .map(|r| (bytes_of(&r[0]), int(&r[1]), int(&r[2])))
+                    .collect();
+                assert_eq!(got, want, "seed {seed}: broker {n}'s {rel}");
+            }
         }
     }
-    (answered, unanswered, together)
+    (answered, unanswered, together, timeouts)
 }
 
 /// Requests in flight across broker crashes and dropped connections: an acknowledged change survives, and an
 /// unanswered one happened or did not.
 #[test]
 fn admin_requests_are_linearizable_across_crashes() {
-    let (answered, unanswered, _) = check_runs(&Setup {
+    let (answered, unanswered, _, _) = check_runs(&Setup {
         seeds: 1..=8,
         crashes: true,
         stream_drops: true,
@@ -920,6 +989,8 @@ fn admin_requests_are_linearizable_across_crashes() {
         requests: 20,
         grid: None,
         names: &NAMES,
+        brokers: 1,
+        partitions: false,
     });
     assert!(answered > 300, "only {answered} requests were answered");
     assert!(
@@ -932,7 +1003,7 @@ fn admin_requests_are_linearizable_across_crashes() {
 /// race, and each tick's answers must still fit one order.
 #[test]
 fn admin_requests_answered_in_one_tick_are_linearizable() {
-    let (answered, _, together) = check_runs(&Setup {
+    let (answered, _, together, _) = check_runs(&Setup {
         seeds: 1..=10,
         crashes: false,
         stream_drops: false,
@@ -941,10 +1012,39 @@ fn admin_requests_answered_in_one_tick_are_linearizable() {
         requests: 25,
         grid: Some(10_000_000),
         names: &["t0", "t.1", "t_1"],
+        brokers: 1,
+        partitions: false,
     });
     assert!(answered > 1000, "only {answered} requests were answered");
     assert!(
         together > 1000,
         "only {together} requests were sent together with another"
+    );
+}
+
+/// Three brokers under crashes, splits, one-way cuts and dropped connections: creations and deletions through any
+/// broker fit one order (the controller's log), and every broker ends with the same topics.
+#[test]
+fn admin_requests_through_any_of_three_brokers_are_linearizable() {
+    let (answered, unanswered, _, timeouts) = check_runs(&Setup {
+        seeds: 1..=8,
+        crashes: true,
+        stream_drops: true,
+        latency: ClusterConfig::default().latency,
+        clients: 4,
+        requests: 20,
+        grid: None,
+        names: &NAMES,
+        brokers: 3,
+        partitions: true,
+    });
+    assert!(answered > 300, "only {answered} requests were answered");
+    assert!(
+        unanswered > 0,
+        "no request was left unanswered: the faults did not bite"
+    );
+    assert!(
+        timeouts > 0,
+        "no request timed out: the controller was never unavailable long enough"
     );
 }

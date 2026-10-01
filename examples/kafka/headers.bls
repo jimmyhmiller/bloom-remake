@@ -12,9 +12,17 @@ const API_CREATE_TOPICS: i16 = 19;
 const API_DELETE_TOPICS: i16 = 20;
 const API_DESCRIBE_CONFIGS: i16 = 32;
 const API_INIT_PRODUCER_ID: i16 = 22;
+const API_DESCRIBE_CLUSTER: i16 = 60;
+const API_ALTER_PARTITION_REASSIGNMENTS: i16 = 45;
+const API_LIST_PARTITION_REASSIGNMENTS: i16 = 46;
 
 /// The error code for no error.
 const NONE: i16 = 0;
+/// A partition's leader is not known yet (being elected, or the topic just created).
+const LEADER_NOT_AVAILABLE: i16 = 5;
+/// This broker does not lead the partition: the client refreshes its metadata.
+const NOT_LEADER_OR_FOLLOWER: i16 = 6;
+const REQUEST_TIMED_OUT: i16 = 7;
 
 /// Whether a request of `api_key` at `version` uses the flexible encoding (compact types and tagged fields), which
 /// also puts it in header v2. Only the APIs this broker answers are listed.
@@ -23,7 +31,8 @@ fn flexible(api_key: i16, version: i16) -> bool {
         || (api_key == API_PRODUCE && version >= 9i16) || (api_key == API_FETCH && version >= 12i16)
         || (api_key == API_LIST_OFFSETS && version >= 6i16) || (api_key == API_INIT_PRODUCER_ID && version >= 2i16)
         || (api_key == API_CREATE_TOPICS && version >= 5i16) || (api_key == API_DELETE_TOPICS && version >= 4i16)
-        || (api_key == API_DESCRIBE_CONFIGS && version >= 4i16)
+        || (api_key == API_DESCRIBE_CONFIGS && version >= 4i16) || api_key == API_DESCRIBE_CLUSTER
+        || api_key == API_ALTER_PARTITION_REASSIGNMENTS || api_key == API_LIST_PARTITION_REASSIGNMENTS
 }
 
 /// The fixed part of a request header: the API key, version and correlation id, which every version has. The rest
