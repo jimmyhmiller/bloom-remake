@@ -41,45 +41,39 @@ view wanted_cmd(tag, cmd) {
 
 // ---------------------------------------------------------------- CreateTopics
 
-/// Each CreateTopics request's context: with nothing taken (its commands), or with the topics that exist (a request
-/// that only validates).
+/// Each CreateTopics request's context: the request alone (what is taken is decided by the controller).
 view create_context_of(c, ctx) = create_head(c, _, _, _, _, _, req), let ctx = create_context(create_names(req), []);
-view validate_taken(c, names = collect!(n)) = per create_head(c, _, _, _, _, _, req), u in req.topics,
-    let k = collision_key(u.name), topic_keys(k, n);
-view validate_context_of(c, ctx) =
-    create_head(c, _, _, _, _, _, req), validate_taken(c, taken), let ctx = create_context(create_names(req), taken);
 
-/// Each topic entry's outcome against the request (and, validating only, the topics that exist), with the id and
-/// placement it would get: functions of the request (its connection, index and entry), so a command sent again is the
-/// same command.
+/// Each topic entry's outcome against the request, with the id and placement it would get: functions of the request
+/// (this broker, the connection, the request's index and the entry: a connection id is unique on its broker only),
+/// so a command sent again is the same command.
 view create_verdict(c, i, j, o) =
-    create_head(c, i, _, _, _, _, req), broker_ids(ids), (j, t) in req.topics.enumerate(),
-    create_context_of(c, ctx0), validate_context_of(c, ctx1), let ctx = if req.validate_only { ctx1 } else { ctx0 },
-    let id = topic_id(hash64(("id", c, i, j, 0u64)), hash64(("id", c, i, j, 1u64))),
-    let o = create_outcome(t, ctx, id, DEFAULT_PARTITIONS, DEFAULT_REPLICATION_FACTOR, ids, hash64(("start", c, i, j)));
+    create_head(c, i, _, _, _, _, req), broker_ids(ids), (j, t) in req.topics.enumerate(), create_context_of(c, ctx),
+    my_id(me), let id = topic_id(hash64(("id", me, c, i, j, 0u64)), hash64(("id", me, c, i, j, 1u64))),
+    let o = create_outcome(t, ctx, id, DEFAULT_PARTITIONS, DEFAULT_REPLICATION_FACTOR, ids, hash64(("start", me, c, i, j)));
 
 /// Each entry decided before a taken name is looked for (a name given twice, illegal, colliding within the request).
 view create_early(c, i, j) =
     create_head(c, i, _, _, _, _, req), create_context_of(c, ctx), (j, t) in req.topics.enumerate()
     where decided_before_taken(t, ctx);
 
-/// The entries that become the request's command: every other entry of a request that does not only validate, with
-/// what the broker decided after that (applied only if the name is not taken).
-view create_item_of(c, i, j, o) =
-    create_verdict(c, i, j, o), create_head(c, i, _, _, _, _, req), not create_early(c, i, j) where not req.validate_only;
+/// The entries that become the request's command: every other entry, with what the broker decided after that
+/// (applied only if the name is not taken). A request that only validates is a command too, decided by the
+/// controller against the metadata as it applies it, as Kafka forwards it to its controller.
+view create_item_of(c, i, j, o) = create_verdict(c, i, j, o), not create_early(c, i, j);
 view create_items(c, i, items = collect!(it)) = per create_head(c, i, _, _, _, _, _req), create_item_of(c, i, j, o),
     let it = create_item(j, o.error, o.topic.name, o.topic.id, o.topic.assignment, o.topic.configs);
 view create_cmd_of(c, i, tag, cmd) =
-    create_items(c, i, items), my_id(me), let tag = hash64(("create", c, i)), let cmd = encode_cmd(create_cmd(me, tag, items))
+    create_items(c, i, items), create_head(c, i, _, _, _, _, req), my_id(me), let tag = hash64(("create", c, i)),
+    let cmd = encode_cmd(if req.validate_only { validate_cmd(me, tag, items) } else { create_cmd(me, tag, items) })
     where items.len() > 0;
 
 /// Each entry's final outcome: decided at once, or once its command is applied.
 view create_final(c, i, j, o) {
     create_verdict(c, i, j, o), create_early(c, i, j);
-    create_verdict(c, i, j, o0), create_head(c, i, _, _, _, _, req), not create_early(c, i, j), let o = validated(o0)
-        where req.validate_only;
     create_item_of(c, i, j, o0), create_cmd_of(c, i, tag, _cmd), my_id(me), outcome(me, tag, j, err, _id, _pid, _n),
-        let o = applied_create(o0, err);
+        create_head(c, i, _, _, _, _, req), let o1 = applied_create(o0, err),
+        let o = if req.validate_only { validated(o1) } else { o1 };
 }
 view create_finals(c, i, xs = collect!((j, o))) = per create_head(c, i, _, _, _, _, _req), create_final(c, i, j, o);
 /// When the timeout passes, an entry still waiting fails with REQUEST_TIMED_OUT.
@@ -105,53 +99,32 @@ answer_create_late: while create_head(c, i, seq, corr, fr, at, req), create_fina
 
 view delete_context_of(c, ctx) = delete_head(c, _, _, _, _, _, req), let ctx = delete_context(req);
 
-/// Each entry refused at once (malformed, a name mapping to an id the request also gives, an unknown name), or the
-/// topic id its command deletes.
-view delete_refusal(c, i, e, err) {
-    delete_head(c, i, _, _, _, _, req), delete_context_of(c, ctx), (e, s) in req.enumerate(), let err = INVALID_REQUEST
-        where not delete_entry_ok(ctx, s);
+/// Each entry refused at once: a malformed one (both a name and an id, or the same topic twice the same way), a
+/// function of the request alone. The others are the request's command; the controller resolves their names and ids
+/// against the metadata as it applies it, as Kafka forwards a deletion to its controller.
+view delete_malformed(c, i, e) =
+    delete_head(c, i, _, _, _, _, req), delete_context_of(c, ctx), (e, s) in req.enumerate() where not delete_entry_ok(ctx, s);
+view delete_item_of(c, i, e, name, id) =
     delete_head(c, i, _, _, _, _, req), delete_context_of(c, ctx), (e, s) in req.enumerate(),
-        let Some(name) = delete_by_name(ctx, s), mtopic(name, id, _, _), let err = DELETE_CLASH where id_supplied(ctx, id);
-    delete_head(c, i, _, _, _, _, req), delete_context_of(c, ctx), (e, s) in req.enumerate(),
-        let Some(name) = delete_by_name(ctx, s), not mtopic(name, _, _, _), let err = UNKNOWN_TOPIC_OR_PARTITION;
-}
-view delete_target(c, i, e, id) {
-    delete_head(c, i, _, _, _, _, req), delete_context_of(c, ctx), (e, s) in req.enumerate(),
-        let Some(name) = delete_by_name(ctx, s), mtopic(name, id, _, _) where not id_supplied(ctx, id);
-    delete_head(c, i, _, _, _, _, req), delete_context_of(c, ctx), (e, s) in req.enumerate(), let Some(id) = delete_by_id(ctx, s);
-}
-/// A request's entries are resolved once, when it is first at the head: by name against the topics then, so the
-/// request's own deletion (applied later) does not change what its entries named. A refusal is pinned with its
-/// error, a deletion with its topic id.
-table delete_pinned(c: Conn, i: u64, e: u64, id: Bytes, err: i16) key(c, i, e);
-pin_refusal: while delete_refusal(c, i, e, err), not delete_pinned(c, i, _, _, _) {
-    upsert delete_pinned(c, i, e, zero_uuid(), err);
-}
-pin_target: while delete_target(c, i, e, id), not delete_pinned(c, i, _, _, _) {
-    upsert delete_pinned(c, i, e, id, NONE);
-}
-forget_pinned: while delete_pinned(c, i, e, id, err), not queued(c, i, _, _) {
-    delete delete_pinned(c, i, e, id, err);
-}
-
-/// The request's command: its entries that delete a topic.
-view delete_items(c, i, items = collect!(it)) = per delete_head(c, i, _, _, _, _, _req), delete_pinned(c, i, e, id, err),
-    let it = delete_item(e, id) where err == NONE;
+    let name = delete_name(s), let id = s.id
+    where delete_entry_ok(ctx, s);
+view delete_items(c, i, items = collect!(it)) = per delete_head(c, i, _, _, _, _, _req), delete_item_of(c, i, e, name, id),
+    let it = delete_item(e, name, id);
 view delete_cmd_of(c, i, tag, cmd) =
     delete_items(c, i, items), my_id(me), let tag = hash64(("delete", c, i)), let cmd = encode_cmd(delete_cmd(me, tag, items))
     where items.len() > 0;
 
 view delete_final(c, i, e, o) {
-    delete_pinned(c, i, e, _id, err), delete_head(c, i, _, _, _, _, req), let Some(s) = req.get(e),
-        let o = delete_refused(s, err) where err != NONE;
-    delete_pinned(c, i, e, id, _err), delete_cmd_of(c, i, tag, _cmd), my_id(me), outcome(me, tag, e, err, _id, _pid, name),
-        delete_head(c, i, _, _, _, _, req), let Some(s) = req.get(e), let o = delete_applied(s, id, name, err);
+    delete_malformed(c, i, e), delete_head(c, i, _, _, _, _, req), let Some(s) = req.get(e),
+        let o = delete_refused(s, INVALID_REQUEST);
+    delete_item_of(c, i, e, _name, _id), delete_cmd_of(c, i, tag, _cmd), my_id(me), outcome(me, tag, e, err, tid, _pid, name),
+        delete_head(c, i, _, _, _, _, req), let Some(s) = req.get(e), let o = delete_applied(s, tid, name, err);
 }
 view delete_finals(c, i, xs = collect!((e, o))) = per delete_head(c, i, _, _, _, _, _req), delete_final(c, i, e, o);
 view delete_late(c, i, e, o) {
     delete_final(c, i, e, o);
-    delete_pinned(c, i, e, _id, err), not delete_final(c, i, e, _), delete_head(c, i, _, _, _, _, req),
-        let Some(s) = req.get(e), let o = delete_refused(s, REQUEST_TIMED_OUT) where err == NONE;
+    delete_item_of(c, i, e, _name, _id), not delete_final(c, i, e, _), delete_head(c, i, _, _, _, _, req),
+        let Some(s) = req.get(e), let o = delete_refused(s, REQUEST_TIMED_OUT);
 }
 view delete_lates(c, i, xs = collect!((e, o))) = per delete_head(c, i, _, _, _, _, _req), delete_late(c, i, e, o);
 /// DeleteTopics' timeout (the request's only top-level field after the topics).
@@ -203,7 +176,7 @@ forget_metadata_pinned: while metadata_pinned(c, i, names), not queued(c, i, _, 
 view metadata_cmd_of(c, i, tag, cmd) =
     metadata_pinned(c, i, names), broker_ids(ids), my_id(me), let tag = hash64(("auto", c, i)),
     let rf = if DEFAULT_REPLICATION_FACTOR as u64 > ids.len() { ids.len() as i16 } else { DEFAULT_REPLICATION_FACTOR },
-    let cmd = encode_cmd(create_cmd(me, tag, metadata_items(c, i, names, ids, DEFAULT_PARTITIONS, rf))) where names.len() > 0;
+    let cmd = encode_cmd(create_cmd(me, tag, metadata_items(me, c, i, names, ids, DEFAULT_PARTITIONS, rf))) where names.len() > 0;
 view metadata_known(c, ts = collect!(TopicInfo { name: n, id: id, partitions: ps })) =
     per metadata_head(c, _, _, _, _, _, _req), topic_info(n, id, ps);
 view broker_infos(bs = collect!(BrokerInfo { node_id: id, host: host, port: port, rack: None })) = broker(_, id, host, port);

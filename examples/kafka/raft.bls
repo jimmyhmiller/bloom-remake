@@ -14,12 +14,13 @@
 //! same tick leaves (SEM-072), and a follower acknowledges only entries it has made durable. The commit index and the
 //! leader's view of its followers are volatile: a restarted broker relearns them.
 //!
-//! Replication: the leader sends new entries to every follower in the tick after it appends them, and at every
-//! heartbeat it resends each follower's entries from the last index that follower acknowledged (at most
-//! `RAFT_BATCH`), with a `beat` carrying its commit index. Every entry carries the term of the entry before it; a
-//! follower stores an entry whose predecessor matches its log (or the same batch), removes a conflicting suffix, and
-//! acknowledges the highest index it now holds in agreement with the leader. A new leader's first entry is a NOOP of
-//! its term, so the entries it inherited commit without waiting for a client's (§5.4.2, §8).
+//! Replication (AppendEntries, §5.3): the leader sends each follower its new entries in the tick after it appends
+//! them, and at every heartbeat it sends each follower its entries from the last index that follower acknowledged,
+//! with a `beat` carrying its commit index; a message carries at most `RAFT_BATCH` entries after a given index and
+//! that index's term. A follower takes a batch whose predecessor matches its log whole, so the network may reorder
+//! messages without slowing it down: it removes a conflicting suffix, stores the batch, and acknowledges the batch's
+//! last index. A new leader's first entry is a NOOP of its term, so the entries it inherited commit without waiting
+//! for a client's (§5.4.2, §8).
 
 /// A replication group: a topic id and a partition (the controller is the metadata topic's partition 0).
 pub type Group = (Bytes, i32);
@@ -38,8 +39,34 @@ const CONFIG: u8 = 3;
 
 channel request_vote(g: Group, term: u64, last_idx: u64, last_term: u64): Broker -> Broker;
 channel vote(g: Group, term: u64, granted: bool): Broker -> Broker;
-/// One log entry of the leader of `term`, with the term of the entry before it (the consistency check, §5.3).
-channel entry(g: Group, term: u64, idx: u64, eterm: u64, prev_term: u64, kind: u8, pos: i64, data: Bytes): Broker -> Broker;
+/// AppendEntries: the leader of `term`'s entries after its entry `prev_idx` (whose term is `prev_term`, the
+/// consistency check of §5.3), in index order: each one's index, term, kind, position and bytes.
+channel entries(g: Group, term: u64, prev_idx: u64, prev_term: u64, es: Vec<(u64, u64, u8, i64, Bytes)>): Broker -> Broker;
+
+/// A batch's entries as the log stores them, each with the term of the entry before it: (index, term, previous term,
+/// kind, position, bytes). A batch's indexes follow `p` one by one (the leader builds it so).
+fn chained(p: u64, pt: u64, es: Vec<(u64, u64, u8, i64, Bytes)>) -> Vec<(u64, u64, u64, u8, i64, Bytes)> {
+    es.enumerate().map(|x| if (x.1).0 != p + 1 + x.0 {
+        error("raft: a batch whose indexes do not follow its predecessor's one by one")
+    } else {
+        ((x.1).0, (x.1).1, if x.0 == 0 { pt } else { term_in(es, x.0 - 1) }, (x.1).2, (x.1).3, (x.1).4)
+    })
+}
+
+fn term_in(es: Vec<(u64, u64, u8, i64, Bytes)>, k: u64) -> u64 {
+    match es.get(k) {
+        Some(e) => e.1,
+        None => error("raft: term_in past the end of a batch"),
+    }
+}
+
+/// The bytes of a stored entry (a blob only ever holds its whole bytes).
+fn log_bytes(data: Blob) -> Bytes {
+    match data.read(0, data.len()) {
+        Some(b) => b,
+        None => error("raft: a log entry's blob does not hold its own length"),
+    }
+}
 /// A heartbeat: the leader's log holds `(prev_idx, prev_term)`, and its commit index is `commit`.
 channel beat(g: Group, term: u64, prev_idx: u64, prev_term: u64, commit: u64): Broker -> Broker;
 /// A follower's answer: its log agrees with the leader's up to `idx`.
@@ -64,6 +91,9 @@ at Broker {
     table deadline(g: Group, at: Instant) key(g);
     /// The highest index known committed.
     table commit(g: Group, i: u64) key(g) resolve choose_most(i);
+    /// The highest commit index a leader of this broker's term has announced, whether or not this broker's log has
+    /// caught up with it: how far behind it is (`known_commit`).
+    table heard_commit(g: Group, i: u64) key(g) resolve choose_most(i);
     /// Leader state per follower: the highest index it acknowledged, and the highest index sent to it.
     table match_idx(g: Group, f: Node<Broker>, i: u64) key(g, f) resolve choose_most(i);
     table rsent(g: Group, f: Node<Broker>, i: u64) key(g, f) resolve choose_most(i);
@@ -112,7 +142,7 @@ at Broker {
     view heard_term(g, t) {
         request_vote(g, t, _, _);
         vote(g, t, _);
-        entry(g: g, term: t, ..);
+        entries(g: g, term: t, ..);
         beat(g: g, term: t, ..);
         ack(g, t, _);
     }
@@ -153,7 +183,7 @@ at Broker {
 
     view heard_leader(g) {
         beat(g: g, term: t, ..), eff(g, t);
-        entry(g: g, term: t, ..), eff(g, t);
+        entries(g: g, term: t, ..), eff(g, t);
     }
     view granted_now(g) = grant(g, _, _);
     view timed_out(g, t) =
@@ -209,23 +239,26 @@ at Broker {
     }
 
     // ---- replication, leader side
-    /// New entries go out in the tick after they are appended.
-    push: while leader(g, t), rsent(g, f, s), rlog(g, i, et, pt, k, pos, data), let Some(b) = data.read(0, data.len())
-        where i > s {
-        send entry(g, t, i, et, pt, k, pos, b) to f;
-    }
-    pushed: while leader(g, t), rsent(g, f, s), last_log(g, li, _) where li > s {
-        next rsent(g, f, li);
-    }
-    /// At every heartbeat, each follower gets its unacknowledged entries again (at most `RAFT_BATCH`) and a beat.
-    resend: on raft_heartbeat, leader(g, t), match_idx(g, f, m), rlog(g, i, et, pt, k, pos, data),
-        let Some(b) = data.read(0, data.len())
-        where i > m && i <= m + RAFT_BATCH {
-        send entry(g, t, i, et, pt, k, pos, b) to f;
-    }
+    /// The term of each entry, and 0 before the first.
     view term_at(g, i, it) {
         rlog(g: g, idx: i, term: it, ..);
-        match_idx(g, _, i), let it = 0u64 where i == 0;
+        mine(g), let i = 0u64, let it = 0u64;
+    }
+    /// Where each follower's batches start this tick: after what was last sent to it, for entries appended since (in
+    /// the tick after their append), and at every heartbeat after what it last acknowledged (so lost or refused
+    /// batches go again).
+    view out_from(g, f, from) {
+        leader(g, _), rsent(g, f, from), last_log(g, li, _) where li > from;
+        raft_heartbeat, leader(g, _), match_idx(g, f, from);
+    }
+    view out_batch(g, f, from, es = collect!((i, et, k, pos, b))) =
+        per out_from(g, f, from), rlog(g, i, et, _pt, k, pos, data), let b = log_bytes(data)
+        where i > from && i <= from + RAFT_BATCH;
+    replicate: while out_batch(g, f, from, es), leader(g, t), term_at(g, from, ft) {
+        send entries(g, t, from, ft, es) to f;
+    }
+    pushed: while leader(g, _), rsent(g, f, s), last_log(g, li, _) where li > s {
+        next rsent(g, f, if li > s + RAFT_BATCH { s + RAFT_BATCH } else { li });
     }
     beat_followers: on raft_heartbeat, leader(g, t), match_idx(g, f, m), term_at(g, m, mt), commit_of(g, c) {
         send beat(g, t, m, mt, c) to f;
@@ -248,24 +281,24 @@ at Broker {
     }
 
     // ---- replication, follower side
-    /// Entries of the leader of our term whose predecessor matches: in the log, or earlier in the same batch.
-    view acceptable(g, i, et) {
-        entry(g: g, term: t, idx: i, eterm: et, prev_term: pt, ..), eff(g, t), mine(g),
-            let j = if i > 0 { i - 1 } else { 0 }, rlog(g: g, idx: j, term: pt, ..);
-        entry(g: g, term: t, idx: i, eterm: et, prev_term: pt, ..), eff(g, t), mine(g) where i == 1 && pt == 0;
-        entry(g: g, term: t, idx: i, eterm: et, prev_term: pt, ..), eff(g, t), mine(g),
-            let j = if i > 0 { i - 1 } else { 0 }, acceptable(g, j, pt);
+    /// Batches of the leader of our term whose predecessor matches our log (or that start the log).
+    view batch_taken(g, l, t, p, pt, es) {
+        entries(g, t, p, pt, es) from l, eff(g, t), mine(g), rlog(g: g, idx: p, term: pt, ..);
+        entries(g, t, p, pt, es) from l, eff(g, t), mine(g) where p == 0;
     }
-    /// A stored entry that conflicts with an acceptable one (same index, another term): it and all after it go.
-    view conflict(g, c = min!(i)) = acceptable(g, i, et), rlog(g: g, idx: i, term: lt, ..) where lt != et;
+    view incoming(g, i, et, pt, k, pos, b) = batch_taken(g, _l, _t, p, ppt, es), e in chained(p, ppt, es),
+        let i = e.0, let et = e.1, let pt = e.2, let k = e.3, let pos = e.4, let b = e.5;
+    /// A stored entry that conflicts with an incoming one (same index, another term): it and all after it go.
+    view conflict(g, c = min!(i)) = incoming(g, i, et, _, _, _, _), rlog(g: g, idx: i, term: lt, ..) where lt != et;
     truncate: on conflict(g, c), rlog(g, j, jt, jp, k, pos, data) where j >= c {
         delete rlog(g, j, jt, jp, k, pos, data);
     }
-    store_entry: on acceptable(g, i, et), entry(g, t, i, et, pt, k, pos, b), eff(g, t), let blob = Blob::of(b) {
+    store_entry: on incoming(g, i, et, pt, k, pos, b), let blob = Blob::of(b) {
         next rlog(g, i, et, pt, k, pos, blob);
     }
-    view matched(g, m = max!(i)) = acceptable(g, i, _);
-    reply_entries: on entry(g: g, term: t, ..) from l, eff(g, t), mine(g), matched(g, m) {
+    /// The log now agrees with the leader's up to the end of the furthest batch taken.
+    view matched(g, l, t, m = max!(e)) = batch_taken(g, l, t, p, _pt, es), let e = p + es.len();
+    reply_entries: on matched(g, l, t, m) {
         emit leader_of(g, t, l);
         send ack(g, t, m) to l;
     }
@@ -281,5 +314,13 @@ at Broker {
     }
     lagging: on beat(g: g, term: t, ..) from l, eff(g, t), mine(g), not beat_ok(g, l, t, _, _) {
         emit leader_of(g, t, l);
+    }
+    hear_commit: on beat(g: g, term: t, commit: c, ..), eff(g, t), mine(g) {
+        next heard_commit(g, c);
+    }
+    /// The commit index as far as this broker knows: a leader's own, or the one its leader announced.
+    view known_commit(g, c) {
+        leader(g, _), commit(g, c);
+        heard_commit(g, c), not leader(g, _);
     }
 }
