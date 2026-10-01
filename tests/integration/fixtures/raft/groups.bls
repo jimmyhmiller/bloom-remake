@@ -41,6 +41,8 @@ at Broker {
     view members(g, n) = group_member(g, n);
     /// No group has a preferred leader here: every election starts after a random timeout.
     view preferred(g, n) = group_member(g, n) where false;
+    /// Nothing is compacted here.
+    view compactable(g, i, pos) = rlog(g, i, _, _, _, pos, _) where false;
 
     /// A leader proposes one entry per tickle (its count), unless the group is held here.
     view proposals(g, xs = collect!((DATA, n as i64, blob))) =
