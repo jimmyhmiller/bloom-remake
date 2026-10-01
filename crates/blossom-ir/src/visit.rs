@@ -595,9 +595,10 @@ impl Remap for Persistence {
     fn remap(&self, m: &mut impl Mapper) -> Self {
         match self {
             Self::None => Self::None,
-            Self::Frame { rule, del } => Self::Frame {
+            Self::Frame { rule, del, guard } => Self::Frame {
                 rule: rule.remap(m),
                 del: del.remap(m),
+                guard: guard.remap(m),
             },
             Self::Identity { rule } => Self::Identity { rule: rule.remap(m) },
             Self::Resolved { construct } => Self::Resolved {

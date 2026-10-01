@@ -1252,6 +1252,12 @@ impl Checker<'_> {
             self.body(hir, inv.scope, &mut inv.body, inv.role);
         }
         hir.invariants = invariants;
+        let mut guards = std::mem::take(&mut hir.guards);
+        for g in &mut guards {
+            self.placed = g.role;
+            self.body(hir, g.scope, &mut g.body, g.role);
+        }
+        hir.guards = guards;
         self.placed = None;
         let mut facts = std::mem::take(&mut hir.facts);
         for f in &mut facts {

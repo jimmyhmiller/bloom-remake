@@ -56,6 +56,8 @@ pub struct Hir {
     pub views: Vec<HView>,
     pub facts: Vec<HFact>,
     pub invariants: Vec<HInvariant>,
+    /// Tables' persistence conditions (`table … while BODY`, LANGUAGE §7.2).
+    pub guards: Vec<HGuard>,
     /// Pure functions (LANGUAGE §16.1).
     pub fns: Vec<HFn>,
     /// Byte streams (FOREIGN-PROTOCOLS §1), in declaration order.
@@ -491,6 +493,18 @@ pub struct HInvariant {
     pub message: Option<String>,
     pub scope: ScopeId,
     pub body: HBody,
+    pub role: Option<HRoleId>,
+    pub span: Span,
+}
+
+/// `table p(c̄) … while BODY;` (LANGUAGE §7.2): a row of `p` persists to the next tick only if `p(c̄), BODY` holds
+/// for it this tick. `body` starts with the atom `p(c̄)`, which binds `cols`, one variable per column.
+#[derive(Clone, Debug)]
+pub struct HGuard {
+    pub rel: HRelId,
+    pub scope: ScopeId,
+    pub body: HBody,
+    pub cols: Vec<HVarId>,
     pub role: Option<HRoleId>,
     pub span: Span,
 }

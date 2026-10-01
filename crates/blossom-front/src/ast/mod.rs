@@ -318,6 +318,8 @@ pub struct RelDecl {
     pub resolve: Option<(RelPolicy, Span)>,
     /// Clauses this build does not implement yet, by name and span (reported by the resolver when used).
     pub other_clauses: Vec<(&'static str, Span)>,
+    /// `while BODY`: a row persists to the next tick only while the body holds for it (LANGUAGE §7.2).
+    pub guard: Option<Body>,
     pub span: Span,
 }
 

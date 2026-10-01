@@ -82,11 +82,12 @@ the next — exactly what a `while X, not owner(…) { delete X }` rule does tod
 `Persistence::Frame` gets an optional guard (validator invariant 5 checks the guarded expansion); both evaluators
 already run frame rules as rules.
 
-**Static rules.** The guard may not mention the table itself (BLS0503); it is stratified like any rule body
-(a guard reading a view that depends negatively on the table is a cycle). `durable` tables may be guarded: the guard
+**Static rules.** The guard may read the table itself (the frame rule is inductive, so no same-tick cycle
+arises); it is stratified like any rule body. `durable` tables may be guarded: the guard
 is evaluated every tick, so a durable row whose owner is gone does not survive a restart either.
 
-Soft tables are implemented as §7.9 specifies (TTL and `max`, deterministic expiry at tick boundaries).
+Soft tables (§7.9: TTL and `max`, deterministic expiry at tick boundaries) follow only if the Kafka rewrite needs
+TTL state; until then they stay not implemented (BLS0908).
 
 ### 2.4 Resolution completions and writer precedence (LANG-117)
 

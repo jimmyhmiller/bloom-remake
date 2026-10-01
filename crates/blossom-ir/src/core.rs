@@ -327,7 +327,14 @@ pub enum Persistence {
     None,
     /// `table`: `r(x̄)@next :- r(x̄), notin r$del(x̄).` The rule is in `rules`, is tagged `ConstructKind::Persist`,
     /// and is what the oracle evaluates. `del == None`: deletions are rejected (sealed and range tables).
-    Frame { rule: RuleId, del: Option<RelId> },
+    /// `guard`: `table … while BODY` (LANGUAGE §7.2) adds `r$keep(x̄)` to the body, a relation of the same construct
+    /// derived from `r(x̄), BODY`.
+    Frame {
+        rule: RuleId,
+        del: Option<RelId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        guard: Option<RelId>,
+    },
     /// Persistent lattice: the implicit identity rule `r(k̄; X)@next :- r(k̄; X).` (SEM-104).
     Identity { rule: RuleId },
     /// A relation-level `resolve` policy replaces the frame rule (LANGUAGE §10.7); the construct owns the rules.

@@ -341,6 +341,7 @@ pub enum SyntaxKind {
     SEALEDBYCLAUSE,
     /// exactlyonceclause.
     EXACTLYONCECLAUSE,
+    WHILECLAUSE,
     /// policy.
     POLICY,
     /// celldecl.
@@ -674,6 +675,7 @@ impl SyntaxKind {
         Self::PARTITIONCLAUSE,
         Self::SEALEDBYCLAUSE,
         Self::EXACTLYONCECLAUSE,
+        Self::WHILECLAUSE,
         Self::POLICY,
         Self::CELLDECL,
         Self::TIMERDECL,

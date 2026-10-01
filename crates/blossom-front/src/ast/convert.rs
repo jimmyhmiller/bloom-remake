@@ -809,6 +809,7 @@ impl Cx<'_> {
         let mut key = None;
         let mut direction = None;
         let mut resolve = None;
+        let mut guard = None;
         let mut other_clauses = Vec::new();
         for c in node.children() {
             let cspan = self.span(&c);
@@ -828,6 +829,10 @@ impl Cx<'_> {
                 PARTITIONCLAUSE => other_clauses.push(("partition by", cspan)),
                 SEALEDBYCLAUSE => other_clauses.push(("sealed by", cspan)),
                 EXACTLYONCECLAUSE => other_clauses.push(("exactly_once", cspan)),
+                WHILECLAUSE => match child_of(&c, BODY) {
+                    Some(b) => guard = Some(self.body(&b)),
+                    None => self.malformed("a `while` clause without a body", cspan),
+                },
                 _ => {}
             }
         }
@@ -841,6 +846,7 @@ impl Cx<'_> {
             direction,
             resolve,
             other_clauses,
+            guard,
             span,
         }
     }
@@ -908,6 +914,7 @@ impl Cx<'_> {
             direction: None,
             resolve: None,
             other_clauses: Vec::new(),
+            guard: None,
             span,
         }
     }

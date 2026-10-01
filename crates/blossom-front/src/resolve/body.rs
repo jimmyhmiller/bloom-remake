@@ -3363,6 +3363,85 @@ impl<'t> Resolver<'t, '_> {
         });
     }
 
+    /// `table p(c̄) … while BODY;` (LANGUAGE §7.2): the body `p(c̄), BODY` over the columns, named as declared.
+    pub(crate) fn persist_guard(&mut self, s: ScopeIdx, d: &'t ast::RelDecl, placement: Option<HRoleId>) {
+        let Some(guard) = &d.guard else { return };
+        let Some(rel) = self.scope(s).rels.get(&d.name.name).copied() else {
+            // The declaration failed (and was reported).
+            return;
+        };
+        let r = self.rel_of(rel);
+        if r.kind != HRelKind::Table || r.cell {
+            self.error(code!("BLS0106"), guard.span, "`while` applies to tables");
+            return;
+        }
+        if r.resolve.is_some() {
+            self.unsupported("LANG-117", "`while` on a table with a `resolve` policy", guard.span);
+            return;
+        }
+        if r.cols
+            .iter()
+            .any(|c| c.ty.is_some_and(|t| holds_lattice(&self.hir.types, t)))
+        {
+            self.unsupported("SEM-104", "`while` on a table holding lattice values", guard.span);
+            return;
+        }
+        // `p(c̄)` first: it binds the columns, which the condition reads by name.
+        let path = |n: Ident| ast::Expr::new(ExprKind::Path(vec![n], Vec::new()), n.span);
+        let atom = ast::AtomLit {
+            expr: ast::Expr::new(
+                ExprKind::Call {
+                    callee: Box::new(path(d.name)),
+                    args: d.cols.iter().map(|c| Arg::Pos(path(c.name))).collect(),
+                },
+                d.name.span,
+            ),
+            from: None,
+            principal: None,
+            weight: None,
+            at: None,
+            at_tick: None,
+            span: d.name.span,
+        };
+        let mut lits = vec![ast::Lit::Plain(atom)];
+        lits.extend(guard.lits.iter().cloned());
+        let body = ast::Body {
+            lits,
+            guards: guard.guards.clone(),
+            span: guard.span,
+        };
+        let mut cx = self.rule_cx(s, placement.or(r.role));
+        let body = self.body(&mut cx, &body);
+        let cols = match body.lits.first() {
+            Some(HLit::Atom(a)) if a.rel == rel => a
+                .args
+                .iter()
+                .map(|p| match p {
+                    HPat::Var(v, _) => Some(*v),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>(),
+            _ => None,
+        };
+        let Some(cols) = cols else {
+            if !self.diags.has_errors() {
+                self.bugs.push(blossom_base::internal_error!(
+                    "the persistence condition of `{}` does not start with its columns' atom",
+                    r.name
+                ));
+            }
+            return;
+        };
+        self.hir.guards.push(HGuard {
+            rel,
+            scope: cx.scope,
+            body,
+            cols,
+            role: r.role,
+            span: guard.span,
+        });
+    }
+
     /// `fact r(…);` (LANGUAGE §8.4).
     pub(crate) fn fact(&mut self, s: ScopeIdx, f: &'t ast::Fact) {
         if f.at.is_some() || f.tick.is_some() {

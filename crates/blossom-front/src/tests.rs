@@ -1183,3 +1183,30 @@ fn generic_functions_compile_and_type_parameters_flow_through_collections() {
     ));
     assert_eq!(codes(src), Vec::<&str>::new());
 }
+
+#[test]
+fn persistence_conditions_compile_and_their_misuses_are_reported() {
+    // Durable, with a negation, a `let`, a `where`, an existential variable and the table itself.
+    let src = with_head(
+        "table owner(k: u64);\n\
+         durable table t(k: u64, v: u64) key(k) while owner(k), not t(v, _), let w = v + 1, owner(z) where w > z;\n\
+         a: on go(k, v) { emit owner(k); emit t(k, v); }\n",
+    );
+    assert_eq!(codes(src), Vec::<&str>::new());
+    for (decl, code) in [
+        // Not a table; a `resolve` policy or lattice values (not implemented); an unbound name in the condition.
+        ("scratch t(k: u64, v: u64) while go(k, v);", "BLS0106"),
+        (
+            "table t(k: u64, v: u64) key(k) resolve choose while go(k, v);",
+            "BLS0908",
+        ),
+        ("table t(k: u64, v: LMax<u64>) key(k) while go(k, _);", "BLS0908"),
+        ("table t(k: u64, v: u64) while go(k, v) where q > 1;", "BLS0500"),
+    ] {
+        let src = with_head(Box::leak(
+            format!("{decl}\na: on go(k, v) {{ emit t(k, v); }}\n").into_boxed_str(),
+        ));
+        let got = codes(src);
+        assert!(got.contains(&code.to_owned()), "{decl}: {got:?}");
+    }
+}

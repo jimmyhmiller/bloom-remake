@@ -163,6 +163,8 @@ pub enum RelClause {
     SealedBy(SealedByClause),
     /// Exactly-once capability.
     ExactlyOnce(ExactlyOnceClause),
+    /// Persistence condition.
+    While(WhileClause),
 }
 impl AstNode for RelClause {
     fn can_cast(kind: SyntaxKind) -> bool {
@@ -177,6 +179,7 @@ impl AstNode for RelClause {
                 | SyntaxKind::PARTITIONCLAUSE
                 | SyntaxKind::SEALEDBYCLAUSE
                 | SyntaxKind::EXACTLYONCECLAUSE
+                | SyntaxKind::WHILECLAUSE
         )
     }
     fn cast(node: SyntaxNode) -> Option<Self> {
@@ -190,6 +193,7 @@ impl AstNode for RelClause {
             SyntaxKind::PARTITIONCLAUSE => Self::PartitionBy(PartitionClause(node)),
             SyntaxKind::SEALEDBYCLAUSE => Self::SealedBy(SealedByClause(node)),
             SyntaxKind::EXACTLYONCECLAUSE => Self::ExactlyOnce(ExactlyOnceClause(node)),
+            SyntaxKind::WHILECLAUSE => Self::While(WhileClause(node)),
             _ => return None,
         })
     }
@@ -204,6 +208,7 @@ impl AstNode for RelClause {
             Self::PartitionBy(n) => &n.0,
             Self::SealedBy(n) => &n.0,
             Self::ExactlyOnce(n) => &n.0,
+            Self::While(n) => &n.0,
         }
     }
 }

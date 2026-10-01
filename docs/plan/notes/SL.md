@@ -4,8 +4,8 @@ Design: `docs/design/EXTENSIONS.md`. Branch `slice-lang`, worktree `.worktrees/s
 
 ## Resume here
 
-- **State (2026-10-01):** items 1 (`?`) and 2 (generic functions) done. Next: item 3 (guarded persistence, soft
-  tables).
+- **State (2026-10-01):** items 1 (`?`), 2 (generic functions) and 3 (`while` tables) done. Next: item 4
+  (`upsert` into resolved tables, multi-column costs, `resolve prefer`).
 - Update this section whenever work stops.
 
 ## Baseline (S8, merged at 69b630c)
@@ -57,3 +57,25 @@ Design: `docs/design/EXTENSIONS.md`. Branch `slice-lang`, worktree `.worktrees/s
 - Tests: `bls_functions` (`v_generic`: list readers at two types, a generic helper, a function parameter passed
   on, a shared instance; both evaluators against Rust), `blossom-front` (IR merging, BLS0219, inference and
   recursion errors). Mutation-checked: dropping the signature unification, dropping the merge.
+
+### Item 3: `table … while BODY` (done; soft tables deferred)
+
+- Syntax: a `while BODY` relation clause (`WHILECLAUSE`, last: its body runs to `;`), tables only (BLS0106).
+- Resolve: the condition is resolved as the body `p(c̄), BODY` (columns by name) into `Hir::guards`; type checking
+  walks it like an invariant. Not implemented (BLS0908): with a `resolve` policy, on lattice values.
+- IR: `Persistence::Frame { guard: Option<RelId> }` (serde-skipped when absent, so artifacts without guards are
+  unchanged); the guard `p$keep` is a relation of the Persist construct, derived by `p$keep(x̄) :- p(x̄), BODY`;
+  the validator checks the frame rule's extra literal and the guard's ownership. LDFI's `is_frame` now names the
+  frame rule exactly (a guard rule shares the construct).
+- Deviation: EXTENSIONS 2.3 forbade a condition reading its own table (BLS0503); nothing requires it (the frame
+  rule is inductive), so it is allowed and tested.
+- Soft tables (§7.9) are deferred until the Kafka rewrite needs TTL state; they stay BLS0908.
+- Tests: `bls_extensions` (each guarded table against a twin kept by the explicit clean-up rule, both evaluators,
+  12 seeds; mutation: lowering without the guard fails it), `blossom-front` (a durable condition with a negation,
+  a `let`, a `where`, an existential and the table itself; the misuses).
+
+### Open observations
+
+- `kafka3::three_brokers_keep_every_acknowledged_record_under_kill_9_and_partitions` failed its idle-CPU check
+  (a broker over 2 s of CPU in 4 s idle) once during a full `cargo test --workspace`, and passed alone (72 s). Load
+  sensitive; not caused by SL (no Kafka program uses the new features yet).
