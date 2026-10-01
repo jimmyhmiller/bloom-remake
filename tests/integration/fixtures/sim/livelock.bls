@@ -1,0 +1,17 @@
+//! A program that never quiesces: its one rule changes the state at every tick, so a node runs tick after tick at
+//! one instant. The cluster simulator must stop it and name what keeps changing (`sim_livelock.rs`).
+
+program livelock version 1;
+
+table count(n: u64) key() resolve choose_most(n);
+/// Never changes: the simulator's report must leave it out.
+table still(n: u64) key();
+
+bootstrap {
+    emit count(0);
+    emit still(7);
+}
+
+count_up: while count(n) {
+    next count(n + 1);
+}
