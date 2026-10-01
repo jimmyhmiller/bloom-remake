@@ -513,7 +513,8 @@ fn responses_encoded_in_blossom_decode_in_the_rust_implementation() {
                         (19, 7, 7),
                         (20, 6, 6),
                         (22, 3, 5),
-                        (32, 4, 4)
+                        (32, 4, 4),
+                        (60, 0, 2)
                     ],
                     0
                 )
@@ -1459,6 +1460,121 @@ fn fetch_and_list_offsets_decode_and_answers_encode() {
 }
 
 /// A one-record batch of producer `pid` at `epoch` and sequence `seq` (`pid` -1: no idempotence), taking `n` offsets.
+#[test]
+fn describe_cluster_requests_decode_and_answers_encode() {
+    use kafka_protocol::messages::{DescribeClusterRequest, DescribeClusterResponse};
+    type Broker = (i32, String, i32, Option<String>);
+    let artifact = compile();
+    let mut rng = Rng(60);
+    let mut inputs = Vec::new();
+    let mut reqs = Vec::new();
+    let mut answers = Vec::new();
+    for _ in 0..60 {
+        let version = rng.below(3) as i16;
+        let corr = rng.next() as i32;
+        let ops = rng.below(2) == 0;
+        let endpoint = if version >= 1 { 1 + rng.below(2) as i8 } else { 1 };
+        let fenced = version >= 2 && rng.below(2) == 0;
+        let mut req = DescribeClusterRequest::default().with_include_cluster_authorized_operations(ops);
+        if version >= 1 {
+            req = req.with_endpoint_type(endpoint);
+        }
+        if version >= 2 {
+            req = req.with_include_fenced_brokers(fenced);
+        }
+        let frame = encode_request(60, version, corr, Some("dc"), &req);
+        inputs.push(input(&artifact, "req", vec![bytes(&frame)]));
+        reqs.push((frame, ops, endpoint, fenced));
+
+        let brokers: Vec<Broker> = (0..rng.below(4))
+            .map(|i| {
+                let rack = if rng.below(2) == 0 { None } else { Some(rng.text()) };
+                (i as i32 + 1, rng.text(), 9000 + rng.below(1000) as i32, rack)
+            })
+            .collect();
+        let (cluster, controller) = (rng.text(), (rng.next() % 1000) as i32);
+        inputs.push(input(
+            &artifact,
+            "dcluster_resp",
+            vec![
+                i32v(corr),
+                i16v(version),
+                Value::Bool(ops),
+                i8v(endpoint),
+                Value::Vec(
+                    brokers
+                        .iter()
+                        .map(|(id, host, port, rack)| {
+                            Value::Tuple(vec![i32v(*id), s(host), i32v(*port), opt(rack.as_deref().map(s))].into())
+                        })
+                        .collect(),
+                ),
+                s(&cluster),
+                i32v(controller),
+            ],
+        ));
+        answers.push((corr, version, ops, endpoint, brokers, cluster, controller));
+    }
+    let r = run(&artifact, &inputs);
+    let decoded = rows(&artifact, &r, "v_dcluster");
+    for (frame, ops, endpoint, fenced) in &reqs {
+        let row = decoded.iter().find(|r| r[0] == bytes(frame)).unwrap();
+        assert_eq!(
+            row[1],
+            opt(Some(strukt(vec![
+                Value::Bool(*ops),
+                i8v(*endpoint),
+                Value::Bool(*fenced)
+            ]))),
+            "a DescribeCluster request"
+        );
+    }
+    let encoded = rows(&artifact, &r, "v_dcluster_resp");
+    for (corr, version, ops, endpoint, brokers, cluster, controller) in &answers {
+        let row = encoded.iter().find(|r| r[0] == i32v(*corr)).unwrap();
+        let Value::Bytes(b) = &row[1] else { panic!() };
+        let n = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize;
+        assert_eq!(n, b.len() - 4, "the size prefix is the frame's size");
+        let mut buf = Bytes::copy_from_slice(&b[4..]);
+        let header = ResponseHeader::decode(&mut buf, DescribeClusterResponse::header_version(*version)).unwrap();
+        assert_eq!(header.correlation_id, *corr);
+        let d = DescribeClusterResponse::decode(&mut buf, *version).unwrap();
+        assert!(
+            buf.is_empty(),
+            "trailing bytes after a DescribeCluster v{version} response"
+        );
+        let got: Vec<Broker> = d
+            .brokers
+            .iter()
+            .map(|b| {
+                (
+                    b.broker_id.0,
+                    b.host.to_string(),
+                    b.port,
+                    b.rack.as_ref().map(|r| r.to_string()),
+                )
+            })
+            .collect();
+        assert!(d.brokers.iter().all(|b| !b.is_fenced));
+        if *endpoint == 1 {
+            assert_eq!(
+                (d.error_code, d.cluster_id.to_string(), d.controller_id.0, got),
+                (0, cluster.clone(), *controller, brokers.clone()),
+                "v{version}"
+            );
+            let want_ops = if *ops { 8096 } else { i32::MIN };
+            assert_eq!(d.cluster_authorized_operations, want_ops);
+        } else {
+            // Asked for controllers: a broker answers UNSUPPORTED_ENDPOINT_TYPE.
+            assert_eq!((d.error_code, d.brokers.len()), (119, 0), "v{version}");
+            assert!(d.error_message.is_some());
+        }
+        if *version >= 1 {
+            assert_eq!(d.endpoint_type, *endpoint);
+        }
+    }
+}
+
 #[cfg(test)]
 fn producer_batch(pid: i64, epoch: i16, seq: i32, n: usize) -> Vec<u8> {
     use kafka_protocol::records::{Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType};
@@ -1634,6 +1750,7 @@ fn the_golden_captures_of_real_clients_decode() {
     let init_pid = rows(&artifact, &r, "v_init_pid");
     let fetch = rows(&artifact, &r, "v_fetch");
     let list = rows(&artifact, &r, "v_list");
+    let dcluster = rows(&artifact, &r, "v_dcluster");
     let find = |rs: &[Vec<Value>], f: &[u8]| rs.iter().find(|r| r[0] == bytes(f)).map(|r| r[1].clone());
     let mut clients = BTreeSet::new();
     for (file, key, version, frame) in &frames {
@@ -1685,7 +1802,12 @@ fn the_golden_captures_of_real_clients_decode() {
                     panic!("{file}: an InitProducerId v5 body does not decode");
                 };
             }
-            // The APIs the broker does not advertise: the Java admin's DescribeCluster, DescribeTopicPartitions and
+            (60, 2) => {
+                let Some(Value::Option(Some(_))) = find(&dcluster, frame) else {
+                    panic!("{file}: a DescribeCluster v2 body does not decode");
+                };
+            }
+            // The APIs the broker does not advertise: the Java admin's DescribeTopicPartitions and
             // ListPartitionReassignments. Only their headers are read here.
             (1, 16 | 17) => {
                 let Some(Value::Option(Some(_))) = find(&fetch, frame) else {
@@ -1697,7 +1819,7 @@ fn the_golden_captures_of_real_clients_decode() {
                     panic!("{file}: a ListOffsets v{version} body does not decode");
                 };
             }
-            (46, 0) | (60, 2) | (75, 0) => {
+            (46, 0) | (75, 0) => {
                 assert!(file.starts_with("s7-"), "{file}")
             }
             other => panic!("{file}: an unexpected request {other:?}"),

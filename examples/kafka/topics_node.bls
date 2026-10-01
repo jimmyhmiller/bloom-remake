@@ -174,10 +174,10 @@ answer_delete_late: while delete_head(c, i, seq, corr, fr, at, req), delete_fina
 
 /// Each partition as Metadata describes it (S8.md D7).
 view part_info(tid, pi) {
-    massign(tid, p, rs), partition_leader(g, epoch, l), broker(l, lid, _, _), let g = (tid, p),
-        let pi = PartInfo { index: p, leader: lid, epoch: epoch as i32, replicas: rs };
-    massign(tid, p, rs), not partition_leader(g, _, _), let g = (tid, p),
-        let pi = PartInfo { index: p, leader: -1i32, epoch: -1i32, replicas: rs };
+    massign(tid, p, rs), partition_leader(g, epoch, l, isr), broker(l, lid, _, _), let g = (tid, p),
+        let pi = PartInfo { index: p, leader: lid, epoch: epoch as i32, replicas: rs, isr: isr };
+    massign(tid, p, rs), not partition_leader(g, _, _, _), let g = (tid, p),
+        let pi = PartInfo { index: p, leader: -1i32, epoch: -1i32, replicas: rs, isr: [] };
 }
 view topic_info(name, id, ps = collect!(pi)) = mtopic(name, id, _, _), part_info(id, pi);
 
@@ -229,6 +229,18 @@ view metadata_ready(c, i) {
 answer_metadata: while metadata_head(c, i, seq, corr, fr, at, req), metadata_ready(c, i), metadata_known(c, known),
     metadata_creating(c, i, names), broker_infos(bs), controller_or_none(ctl) {
     send kafka.write(c, seq, [Part::Bytes(encode_metadata_response(corr, req, bs, CLUSTER_ID, ctl, known, names.to_set()))]);
+    upsert answering(c, i + 1, seq + 1);
+    delete queued(c, i, fr, at);
+}
+
+// ---------------------------------------------------------------- DescribeCluster
+
+/// DescribeCluster reads only the brokers (configuration) and the controller's leader, so it does not wait for the
+/// metadata to catch up.
+answer_describe_cluster: while head(c, i, seq, key, version, corr, fr, at), key == API_DESCRIBE_CLUSTER,
+    let Some(body) = request_body(fr), let Some(req) = decode_describe_cluster(body, version), broker_infos(bs),
+    controller_or_none(ctl) {
+    send kafka.write(c, seq, [Part::Bytes(encode_describe_cluster_response(corr, version, req, bs, CLUSTER_ID, ctl))]);
     upsert answering(c, i + 1, seq + 1);
     delete queued(c, i, fr, at);
 }

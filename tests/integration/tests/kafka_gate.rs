@@ -4,6 +4,7 @@
 //! - `kcat -L` (librdkafka) lists the broker.
 //! - `kafka-broker-api-versions.sh` (the Java client of Kafka 4.0) prints the versions it supports.
 //! - franz-go (a Go client) reads the metadata.
+//! - Slice 8, item 4: `kafka-cluster.sh cluster-id` reads the cluster id with DescribeCluster.
 //! - Slice 7, item 4: `kafka-topics.sh` creates, lists, describes and deletes topics, and `kcat -L` shows them.
 //! - Slice 7, item 8: franz-go (idempotent by default) produces to three partitions and reads them back.
 //! - Slice 7, items 5 and 6: `kcat -P` produces and `kcat -C` reads it back; the Java console producer (idempotent
@@ -196,6 +197,29 @@ fn kafka_broker_api_versions_prints_the_supported_versions() {
     );
     assert!(stdout.contains("Metadata(3): 13 [usable: 13]"), "{stdout}");
     assert!(stdout.contains("ApiVersions(18): 3 to 4 [usable: 4]"), "{stdout}");
+    server.stop().unwrap();
+}
+
+/// S8 item 4: `kafka-cluster.sh cluster-id` asks with DescribeCluster (60).
+#[test]
+fn kafka_cluster_prints_the_cluster_id() {
+    let Some(bin) = kafka_bin() else {
+        skipped("no Kafka distribution (set KAFKA_HOME, or unpack one into .tools/)");
+        return;
+    };
+    let (server, port) = start_broker();
+    // The subcommand comes before its options, so not through `kafka_tool`.
+    let out = Command::new(bin.join("kafka-cluster.sh"))
+        .args(["cluster-id", "--bootstrap-server", &format!("127.0.0.1:{port}")])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "the tool failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("Cluster ID: blossom-kafka"), "{stdout}");
     server.stop().unwrap();
 }
 

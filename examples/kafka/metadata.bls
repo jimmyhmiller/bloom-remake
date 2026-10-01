@@ -55,9 +55,9 @@ fn encode_unknown_topic(error: i16, name: Option<String>, topic_id: Bytes) -> By
 const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
 const UNKNOWN_TOPIC_ID: i16 = 100;
 
-/// A partition as Metadata describes it: its leader's broker id and epoch (-1 while no leader is known), and its
-/// replicas. Every replica is reported in sync (S8 deviation: the leader's view of its followers is not gossiped).
-struct PartInfo { index: i32, leader: i32, epoch: i32, replicas: Vec<i32> }
+/// A partition as Metadata describes it: its leader's broker id and epoch (-1 while no leader is known), its replicas,
+/// and its in-sync replicas as its leader last announced them.
+struct PartInfo { index: i32, leader: i32, epoch: i32, replicas: Vec<i32>, isr: Vec<i32> }
 
 /// A topic, as Metadata describes it: its partitions in index order.
 struct TopicInfo { name: String, id: Bytes, partitions: Vec<PartInfo> }
@@ -66,15 +66,16 @@ fn encode_partition(p: PartInfo) -> Bytes {
     Bytes::join([
         Bytes::from_i16_be(if p.leader < 0i32 { LEADER_NOT_AVAILABLE } else { NONE }), Bytes::from_i32_be(p.index),
         Bytes::from_i32_be(p.leader), Bytes::from_i32_be(p.epoch),
-        enc_compact_i32s(p.replicas), enc_compact_i32s(p.replicas), enc_compact_i32s([]), no_tags(),
+        enc_compact_i32s(p.replicas), enc_compact_i32s(p.isr), enc_compact_i32s([]), no_tags(),
     ])
 }
 
-fn encode_topic(t: TopicInfo) -> Bytes {
+/// A topic, with the operations a client may perform on it when the request asks (`ops`; else none reported).
+fn encode_topic(t: TopicInfo, ops: bool) -> Bytes {
     Bytes::join([
         Bytes::from_i16_be(NONE), enc_compact_nullable_string(Some(t.name)), t.id, enc_bool(false),
         enc_compact_array(t.partitions.map(|p| encode_partition(p))),
-        Bytes::from_i32_be(-2147483648i32), no_tags(),
+        Bytes::from_i32_be(if ops { TOPIC_OPERATIONS } else { -2147483648i32 }), no_tags(),
     ])
 }
 
@@ -114,7 +115,7 @@ fn metadata_topics(req: MetadataRequest, topics: Vec<TopicInfo>, creating: Set<S
                 let named = topics.map(|x| (x.name, x)).to_map();
                 ts.map(|t| match t.name {
                     Some(n) => match named.get(n) {
-                        Some(x) => encode_topic(x),
+                        Some(x) => encode_topic(x, req.include_topic_authorized_operations),
                         None => {
                             let error = if creating.contains(n) {
                                 LEADER_NOT_AVAILABLE
@@ -131,12 +132,12 @@ fn metadata_topics(req: MetadataRequest, topics: Vec<TopicInfo>, creating: Set<S
             } else {
                 let with_id = topics.map(|x| (x.id, x)).to_map();
                 by_id.map(|t| match with_id.get(t.topic_id) {
-                    Some(x) => encode_topic(x),
+                    Some(x) => encode_topic(x, req.include_topic_authorized_operations),
                     None => encode_unknown_topic(UNKNOWN_TOPIC_ID, None, t.topic_id),
                 })
             }
         }
-        None => topics.map(|x| encode_topic(x)),
+        None => topics.map(|x| encode_topic(x, req.include_topic_authorized_operations)),
     }
 }
 
@@ -227,4 +228,57 @@ fn decode_metadata_response(c: Cur) -> Option<MetadataAnswer> {
                 })
             })))
     }))
+}
+
+// ---------------------------------------------------------------- DescribeCluster (key 60), versions 0–2 (flexible)
+
+/// DescribeClusterRequest: whether to report the cluster's authorized operations, which endpoints to describe (v1+;
+/// 1 brokers, 2 controllers) and whether to include fenced brokers (v2+).
+struct DescribeClusterRequest { include_operations: bool, endpoint_type: i8, include_fenced: bool }
+
+const ENDPOINT_BROKERS: i8 = 1;
+const UNSUPPORTED_ENDPOINT_TYPE: i16 = 119;
+/// The cluster operations a client may perform, as a bit field (Kafka without an authorizer allows every operation
+/// the cluster resource supports: CREATE, ALTER, DESCRIBE, CLUSTER_ACTION, DESCRIBE_CONFIGS, ALTER_CONFIGS and
+/// IDEMPOTENT_WRITE).
+const CLUSTER_OPERATIONS: i32 = 8096;
+/// The topic operations, likewise (READ, WRITE, CREATE, DELETE, ALTER, DESCRIBE, DESCRIBE_CONFIGS, ALTER_CONFIGS).
+const TOPIC_OPERATIONS: i32 = 3576;
+
+fn decode_describe_cluster(c: Cur, version: i16) -> Option<DescribeClusterRequest> {
+    read_bool(c).and_then(|ops| {
+        let ep = if version >= 1i16 { read_i8(ops.1) } else { Some((ENDPOINT_BROKERS, ops.1)) };
+        ep.and_then(|e| {
+            let fenced = if version >= 2i16 { read_bool(e.1) } else { Some((false, e.1)) };
+            fenced.and_then(|f| skip_tags(f.1).map(|_end| DescribeClusterRequest {
+                include_operations: ops.0, endpoint_type: e.0, include_fenced: f.0,
+            }))
+        })
+    })
+}
+
+/// The answer: this cluster's brokers (none is fenced: brokers are configuration, S8.md D2) and the controller as
+/// Metadata reports it. A broker describes only brokers; asked for controllers (or an unknown type) it answers
+/// UNSUPPORTED_ENDPOINT_TYPE, as a Kafka broker does (controllers answer for themselves on their own listener).
+fn encode_described_broker(b: BrokerInfo, version: i16) -> Bytes {
+    Bytes::join([
+        Bytes::from_i32_be(b.node_id), enc_compact_string(b.host), Bytes::from_i32_be(b.port),
+        enc_compact_nullable_string(b.rack), if version >= 2i16 { enc_bool(false) } else { Bytes::empty() }, no_tags(),
+    ])
+}
+
+fn encode_describe_cluster_response(correlation_id: i32, version: i16, req: DescribeClusterRequest, brokers: Vec<BrokerInfo>, cluster_id: String, controller_id: i32) -> Bytes {
+    let ok = req.endpoint_type == ENDPOINT_BROKERS;
+    frame(Bytes::join([
+        response_header_v1(correlation_id),
+        Bytes::from_i32_be(0i32),
+        Bytes::from_i16_be(if ok { NONE } else { UNSUPPORTED_ENDPOINT_TYPE }),
+        enc_compact_nullable_string(if ok { None } else { Some("this broker describes brokers only") }),
+        if version >= 1i16 { Bytes::from_i8(req.endpoint_type) } else { Bytes::empty() },
+        enc_compact_string(if ok { cluster_id } else { "" }),
+        Bytes::from_i32_be(if ok { controller_id } else { -1i32 }),
+        enc_compact_array(if ok { brokers.map(|b| encode_described_broker(b, version)) } else { [] }),
+        Bytes::from_i32_be(if req.include_operations && ok { CLUSTER_OPERATIONS } else { -2147483648i32 }),
+        no_tags(),
+    ]))
 }

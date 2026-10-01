@@ -90,8 +90,8 @@ view produce_entry(c, i, j, name, p, records, req, o) =
 /// records checked against the topic's configurations (`check_entry`).
 view entry_check(c, i, j, tid, p, o, checked) =
     produce_entry(c, i, j, name, p, records, req, o), not produce_started(c, i), produce_request_error(req) == None,
-    mtopic(name, tid, parts, cfg), led(tid, p, _), massign(tid, p, rs), p >= 0i32, p < parts,
-    let checked = check_entry(records, req.acks, cfg, rs.len());
+    mtopic(name, tid, parts, cfg), led(tid, p, _), let g = (tid, p), isr_of(g, isr), p >= 0i32, p < parts,
+    let checked = check_entry(records, req.acks, cfg, isr.len());
 
 /// This tick's appends, per partition, in order: each one's order and batches.
 view appends(tid, p, xs = collect!((o, bs))) = entry_check(_c, _i, _j, tid, p, o, ch), ch.error == NONE, let bs = ch.batches;
