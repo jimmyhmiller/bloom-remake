@@ -233,6 +233,13 @@ impl<P: Protocol> StreamClient for Client<P> {
 
 #[cfg(test)]
 fn run<P: Protocol + Clone + 'static>(file: &str, stream: &str, protocol: P, faults: bool) -> Tally {
+    run_counting(file, stream, protocol, faults).0
+}
+
+/// [`run`], with how many chunks and closes the simulator held for paused connections.
+#[cfg(test)]
+fn run_counting<P: Protocol + Clone + 'static>(file: &str, stream: &str, protocol: P, faults: bool) -> (Tally, u64) {
+    let mut held = 0;
     let artifact = compile(file);
     let schema = DurableSchema::of(artifact.program.get());
     let mut total = Tally::default();
@@ -275,12 +282,13 @@ fn run<P: Protocol + Clone + 'static>(file: &str, stream: &str, protocol: P, fau
             r.log.join("\n")
         );
         assert_eq!(r.stream_violations, 0, "seed {seed}");
+        held += r.stream_held;
         let t = tally.borrow();
         total.complete += t.complete;
         total.cut += t.cut;
         total.refused += t.refused;
     }
-    total
+    (total, held)
 }
 
 #[cfg(test)]
@@ -316,6 +324,18 @@ fn the_framing_server_under_crashes_and_resets_answers_every_frame() {
     let t = run("frames.bls", "frames", Frames, true);
     assert!(t.complete > 50, "{t:?}");
     assert!(t.cut > 0, "the faults cut no session: {t:?}");
+}
+
+/// A server that pauses every connection after each chunk still answers every session: what arrives while it is
+/// paused, and the client's close, wait for its resume, in order; a reset while paused is learned at the resume.
+#[test]
+fn a_paused_connection_holds_what_arrives_until_it_is_resumed() {
+    let (t, held) = run_counting("paused.bls", "echo", Echo, false);
+    assert!(t.complete > 20 && t.cut == 0, "{t:?}");
+    assert!(held > 0, "no chunk arrived while a connection was paused");
+    let (t, held) = run_counting("paused.bls", "echo", Echo, true);
+    assert!(t.complete > 5 && t.cut > 0, "{t:?}");
+    assert!(held > 0);
 }
 
 #[test]

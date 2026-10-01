@@ -43,6 +43,11 @@ view metadata_head(c, i, seq, corr, fr, at, req) =
     head(c, i, seq, key, _version, corr, fr, at), key == API_METADATA,
     let Some(body) = request_body(fr), let Some(req) = decode_metadata_request(body);
 
+/// Each CreateTopics request's context with nothing taken (what the writer's candidates are decided by), and each
+/// DeleteTopics request's: computed once per request, so an entry's decision is a lookup.
+view create_context_of(c, ctx) = create_head(c, _, _, _, _, _, req), let ctx = create_context(create_names(req), []);
+view delete_context_of(c, ctx) = delete_head(c, _, _, _, _, _, req), let ctx = delete_context(req);
+
 view describe_head(c, i, seq, corr, fr, at, req) =
     head(c, i, seq, key, _version, corr, fr, at), key == API_DESCRIBE_CONFIGS,
     let Some(body) = request_body(fr), let Some(req) = decode_describe_configs(body);
@@ -69,8 +74,8 @@ view writer(c) = writes(c, at), let order = (at, c), argmin!(order);
 /// The topics the writer creates, by collision key: the valid entries of its CreateTopics, or the names its Metadata
 /// request auto-creates. None collides with a topic that exists (the entries that would are refused).
 view creating(k, t) {
-    writer(c), create_head(c, _, _, _, _, _, req), u in req.topics,
-        let Some(t) = create_candidate(req, u, topic_id(rand(u.name, 0), rand(u.name, 1))), let k = collision_key(t.name),
+    writer(c), create_head(c, _, _, _, _, _, req), create_context_of(c, ctx), u in req.topics,
+        let Some(t) = create_candidate(req, ctx, u, topic_id(rand(u.name, 0), rand(u.name, 1))), let k = collision_key(t.name),
         not topic_key(k, _);
     writer(c), metadata_head(c, _, _, _, _, _, req), name in metadata_creates(req, AUTO_CREATE_TOPICS),
         let k = collision_key(name), not topic_key(k, _),
@@ -80,10 +85,10 @@ view creating(k, t) {
 /// The topics the writer's DeleteTopics finds, by entry: an entry names one topic (by name or by id), no other entry
 /// of its request names it again the same way, and an entry by name finds a topic no entry names by id.
 view deleting(e, name, id) {
-    writer(c), delete_head(c, _, _, _, _, _, req), (e, _s) in req.enumerate(), let Some(name) = delete_by_name(req, e),
-        topic(name, id, _, _) where not id_supplied(req, id);
-    writer(c), delete_head(c, _, _, _, _, _, req), (e, _s) in req.enumerate(), let Some(id) = delete_by_id(req, e),
-        topic(name, id, _, _);
+    writer(c), delete_head(c, _, _, _, _, _, req), delete_context_of(c, ctx), (e, s) in req.enumerate(),
+        let Some(name) = delete_by_name(ctx, s), topic(name, id, _, _) where not id_supplied(ctx, id);
+    writer(c), delete_head(c, _, _, _, _, _, req), delete_context_of(c, ctx), (e, s) in req.enumerate(),
+        let Some(id) = delete_by_id(ctx, s), topic(name, id, _, _);
 }
 
 make_topic: while creating(_k, t) {
@@ -93,7 +98,7 @@ make_topic: while creating(_k, t) {
 make_partitions: while creating(_k, t), p in range(0, t.partitions as u64) {
     next log_end(t.id, p as i32, 0i64);
     next log_start(t.id, p as i32, 0i64);
-    next segment(t.id, p as i32, 0i64, 0i64, -1i64, -1i64);
+    next segment(t.id, p as i32, 0i64, 0i64, -1i64, -1i64, now().as_millis());
     next active_segment(t.id, p as i32, 0i64);
 }
 
@@ -162,8 +167,8 @@ view delete_found(c, found = collect!((e, n, id))) = per delete_head(c, _, _, _,
     deleting(e, n, id);
 
 /// Per DeleteTopics request: its entries by name whose topic another entry names by id.
-view delete_clash(c, es = collect!(e)) = per delete_head(c, _, _, _, _, _, req), (e, _s) in req.enumerate(),
-    let Some(name) = delete_by_name(req, e), topic(name, id, _, _) where id_supplied(req, id);
+view delete_clash(c, es = collect!(e)) = per delete_head(c, _, _, _, _, _, req), delete_context_of(c, ctx),
+    (e, s) in req.enumerate(), let Some(name) = delete_by_name(ctx, s), topic(name, id, _, _) where id_supplied(ctx, id);
 
 answer_delete: while delete_head(c, i, seq, corr, fr, at, req), writer(c), delete_found(c, found), delete_clash(c, clash) {
     send kafka.write(c, seq, [Part::Bytes(encode_delete_topics_response(corr, delete_outcomes(req, found, clash)))]);

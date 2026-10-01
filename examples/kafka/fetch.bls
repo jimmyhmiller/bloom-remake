@@ -80,7 +80,7 @@ fn decode_fetch(c: Cur) -> Option<FetchRequest> {
 
 /// A request's partitions, in request order: (entry, topic id, partition).
 fn fetch_entries(req: FetchRequest) -> Vec<(u64, Bytes, FetchPartition)> {
-    let flat = req.topics.fold([], |acc, t| acc.concat(t.partitions.map(|p| (t.topic_id, p))));
+    let flat = req.topics.map(|t| t.partitions.map(|p| (t.topic_id, p))).flatten();
     flat.enumerate().map(|e| (e.0, e.1.0, e.1.1))
 }
 
@@ -178,21 +178,26 @@ fn fetch_bytes(answers: Vec<(u64, FetchAnswer)>) -> i64 {
 /// FetchResponse v16–v17 as the parts of one stream write: the header and each partition's fields as bytes, and
 /// its batches as blob ranges, so the stored batches are sent without being copied through the program.
 fn fetch_response_parts(correlation_id: i32, error: i16, req: FetchRequest, answers: Vec<(u64, FetchAnswer)>) -> Vec<Part> {
-    let starts = req.topics.fold(([], 0), |acc, t| (acc.0.push(acc.1), acc.1 + t.partitions.len()));
+    // The entries of topic k are those before its end, less its own: `answers` holds one per entry, in entry order.
+    let ends = req.topics.scan(0, |n, t| n + t.partitions.len());
     let topic_parts = req.topics.enumerate().map(|e| {
         let (k, t) = e;
-        let first = match starts.0.get(k) {
-            Some(x) => x,
-            None => error("fetch_response_parts: a topic without a starting entry"),
+        let first = match ends.get(k) {
+            Some(x) => x - t.partitions.len(),
+            None => error("fetch_response_parts: a topic without an end"),
         };
         let partitions = t.partitions.enumerate().map(|pe| {
-            match answers.filter(|a| a.0 == first + pe.0).first() {
-                Some(a) => fetch_partition_parts(pe.1.partition, a.1),
+            match answers.get(first + pe.0) {
+                Some(a) => if a.0 == first + pe.0 {
+                    fetch_partition_parts(pe.1.partition, a.1)
+                } else {
+                    error("fetch_response_parts: the answers are not one per entry, in order")
+                },
                 None => error("fetch_response_parts: a partition entry has no answer"),
             }
         });
         [Part::Bytes(Bytes::join([t.topic_id, Bytes::uvarint(t.partitions.len() + 1)]))]
-            .concat(partitions.fold([], |acc, ps| acc.concat(ps)))
+            .concat(partitions.flatten())
             .push(Part::Bytes(no_tags()))
     });
     let body = [Part::Bytes(Bytes::join([
@@ -202,7 +207,7 @@ fn fetch_response_parts(correlation_id: i32, error: i16, req: FetchRequest, answ
         Bytes::from_i32_be(0i32),
         Bytes::uvarint(req.topics.len() + 1),
     ]))]
-        .concat(topic_parts.fold([], |acc, ps| acc.concat(ps)))
+        .concat(topic_parts.flatten())
         .push(Part::Bytes(no_tags()));
     let size = body.fold(0, |n, p| n + part_len(p));
     [Part::Bytes(Bytes::from_u32_be(size as u32))].concat(body)
@@ -240,6 +245,12 @@ const MAX_TIMESTAMP: i64 = -3;
 const EARLIEST_LOCAL_TIMESTAMP: i64 = -4;
 const LATEST_TIERED_TIMESTAMP: i64 = -5;
 
+/// Whether a ListOffsets timestamp is a search for the first record at or after it: any timestamp but the special
+/// ones (-1 to -5), as Kafka treats one it does not know.
+fn searches(t: i64) -> bool {
+    t >= 0i64 || t < LATEST_TIERED_TIMESTAMP
+}
+
 struct ListOffsetsPartition { partition: i32, leader_epoch: i32, timestamp: i64 }
 
 struct ListOffsetsTopic { name: String, partitions: Vec<ListOffsetsPartition> }
@@ -276,17 +287,8 @@ fn decode_list_offsets(c: Cur, version: i16) -> Option<ListOffsetsRequest> {
 
 /// A request's partitions, in request order: (entry, topic, partition).
 fn list_offsets_entries(req: ListOffsetsRequest) -> Vec<(u64, String, ListOffsetsPartition)> {
-    let flat = req.topics.fold([], |acc, t| acc.concat(t.partitions.map(|p| (t.name, p))));
+    let flat = req.topics.map(|t| t.partitions.map(|p| (t.name, p))).flatten();
     flat.enumerate().map(|e| (e.0, e.1.0, e.1.1))
-}
-
-/// Whether entry `e` names a partition another entry of the request also names (Kafka refuses both).
-fn list_offsets_duplicate(req: ListOffsetsRequest, e: u64) -> bool {
-    let es = list_offsets_entries(req);
-    match es.get(e) {
-        Some(x) => es.any(|y| y.0 != e && y.1 == x.1 && y.2.partition == x.2.partition),
-        None => false,
-    }
 }
 
 /// One partition's answer: error, timestamp, offset, leader epoch.
@@ -306,17 +308,18 @@ fn offset_at(timestamp: i64, offset: i64) -> OffsetAnswer {
 }
 
 fn encode_list_offsets_response(correlation_id: i32, req: ListOffsetsRequest, answers: Vec<(u64, OffsetAnswer)>) -> Bytes {
-    let starts = req.topics.fold(([], 0), |acc, t| (acc.0.push(acc.1), acc.1 + t.partitions.len()));
+    // As `fetch_response_parts`: `answers` holds one per entry, in entry order.
+    let ends = req.topics.scan(0, |n, t| n + t.partitions.len());
     let topics = req.topics.enumerate().map(|e| {
         let (k, t) = e;
-        let first = match starts.0.get(k) {
-            Some(x) => x,
-            None => error("encode_list_offsets_response: a topic without a starting entry"),
+        let first = match ends.get(k) {
+            Some(x) => x - t.partitions.len(),
+            None => error("encode_list_offsets_response: a topic without an end"),
         };
         Bytes::join([
             enc_compact_string(t.name),
             enc_compact_array(t.partitions.enumerate().map(|pe| {
-                match answers.filter(|a| a.0 == first + pe.0).first() {
+                match answers.get(first + pe.0).and_then(|a| if a.0 == first + pe.0 { Some(a) } else { None }) {
                     Some(a) => Bytes::join([
                         Bytes::from_i32_be(pe.1.partition),
                         Bytes::from_i16_be(a.1.error),

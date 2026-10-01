@@ -9,6 +9,7 @@ const TRANSACTIONAL_ID_AUTHORIZATION_FAILED: i16 = 53;
 const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
 const INVALID_PRODUCER_EPOCH: i16 = 47;
 const INVALID_RECORD: i16 = 87;
+const NOT_ENOUGH_REPLICAS: i16 = 19;
 
 struct ProducePartition { index: i32, records: Option<Bytes> }
 
@@ -67,7 +68,7 @@ fn max_message_bytes(set: Vec<(String, String)>) -> i64 {
 
 /// A request's partition entries, in request order, with their positions: (entry, topic, partition, records).
 fn produce_entries(req: ProduceRequest) -> Vec<(u64, String, i32, Option<Bytes>)> {
-    let flat = req.topics.fold([], |acc, t| acc.concat(t.partitions.map(|p| (t.name, p.index, p.records))));
+    let flat = req.topics.map(|t| t.partitions.map(|p| (t.name, p.index, p.records))).flatten();
     flat.enumerate().map(|e| (e.0, e.1.0, e.1.1, e.1.2))
 }
 
@@ -79,22 +80,26 @@ fn refused(error: i16, message: String, bad_batch: Option<i32>) -> Checked {
     Checked { error: error, message: Some(message), bad_batch: bad_batch, batches: [], count: 0i64 }
 }
 
-/// The error of one batch, if any: not magic 2 or with inconsistent counts (INVALID_RECORD), a bad CRC or length
-/// (CORRUPT_MESSAGE), larger than `max_bytes` (MESSAGE_TOO_LARGE), or transactional (INVALID_RECORD: a request
-/// with transactional batches must name a transactional id, which `produce_request_error` refuses). An idempotent
-/// batch's producer state is checked when it is sequenced (`sequence_appends`).
+/// The error of one batch, if any, in the order Kafka checks (`ProduceRequest.validateRecords`,
+/// `UnifiedLog.analyzeAndValidateRecords`, `LogValidator`): not magic 2, or a `baseOffset` other than 0
+/// (INVALID_RECORD); larger than `max_bytes` (MESSAGE_TOO_LARGE); a length or CRC32C that does not match
+/// (CORRUPT_MESSAGE); no record, or a count that does not match the last offset delta (INVALID_RECORD); transactional
+/// (INVALID_RECORD: a request with transactional batches must name a transactional id, which
+/// `produce_request_error` refuses). An idempotent batch's producer state is checked when it is sequenced.
 fn batch_error(b: Bytes, max_bytes: i64) -> Option<(i16, String)> {
     match batch_header(b) {
         None => Some((CORRUPT_MESSAGE, "a batch is shorter than its header")),
         Some(h) => {
             if h.magic != 2i8 {
                 Some((INVALID_RECORD, "only record batches of magic 2 are accepted"))
-            } else if not batch_ok(b) {
-                Some((CORRUPT_MESSAGE, "a batch's length or CRC32C does not match its contents"))
-            } else if h.record_count as i64 != offsets_taken(h) {
-                Some((INVALID_RECORD, "a batch's record count does not match its last offset delta"))
+            } else if h.base_offset != 0i64 {
+                Some((INVALID_RECORD, "a produced batch's baseOffset must be 0"))
             } else if b.len() as i64 > max_bytes {
                 Some((MESSAGE_TOO_LARGE, "a batch is larger than the topic's max.message.bytes"))
+            } else if 12 + h.length as u64 != b.len() || not crc_matches(b, h) {
+                Some((CORRUPT_MESSAGE, "a batch's length or CRC32C does not match its contents"))
+            } else if h.record_count <= 0i32 || h.last_offset_delta < 0i32 || h.record_count as i64 != offsets_taken(h) {
+                Some((INVALID_RECORD, "a batch's record count must be positive and match its last offset delta"))
             } else if (h.attributes & 16i16) != 0i16 {
                 Some((INVALID_RECORD, "transactional batches need a transactional id"))
             } else {
@@ -104,26 +109,59 @@ fn batch_error(b: Bytes, max_bytes: i64) -> Option<(i16, String)> {
     }
 }
 
-/// Checks a partition's records: whole batches, each valid. The first bad batch refuses the partition, as Kafka
-/// refuses it. No records (or null) append nothing.
+/// Whether a batch's CRC32C over `attributes..end` matches.
+fn crc_matches(b: Bytes, h: BatchHeader) -> bool {
+    b.slice(21, b.len()).map(|covered| crc32c(covered) == h.crc).unwrap_or(false)
+}
+
+/// Checks a partition's records: exactly one whole batch (Produce v3 and later), valid.
 fn check_records(records: Option<Bytes>, max_bytes: i64) -> Checked {
     let b = records.unwrap_or(Bytes::empty());
     match split_batches(b) {
         None => refused(CORRUPT_MESSAGE, "the records are not a sequence of whole batches", None),
         Some(batches) => {
-            let bad = batches.enumerate().filter_map(|e| batch_error(e.1, max_bytes).map(|x| (e.0, x))).first();
-            match bad {
-                Some(x) => refused(x.1.0, x.1.1, Some(x.0 as i32)),
-                None => Checked {
-                    error: NONE,
-                    message: None,
-                    bad_batch: None,
-                    batches: batches,
-                    count: batches.fold(0i64, |n, b| n + batch_header(b).map(|h| offsets_taken(h)).unwrap_or(0i64)),
-                },
+            if batches.len() != 1 {
+                refused(INVALID_RECORD, "a Produce request carries exactly one record batch per partition", None)
+            } else {
+                match batches.enumerate().filter_map(|e| batch_error(e.1, max_bytes).map(|x| (e.0, x))).first() {
+                    Some(x) => refused(x.1.0, x.1.1, Some(x.0 as i32)),
+                    None => Checked {
+                        error: NONE,
+                        message: None,
+                        bad_batch: None,
+                        batches: batches,
+                        count: batches.fold(0i64, |n, b| n + match batch_header(b) {
+                            Some(h) => offsets_taken(h),
+                            None => error("check_records: an accepted batch has no header"),
+                        }),
+                    },
+                }
             }
         }
     }
+}
+
+/// A partition's checks for a request: with acks -1, a topic whose `min.insync.replicas` is above this broker's one
+/// replica is refused first (NOT_ENOUGH_REPLICAS, as Kafka refuses before appending); then the records.
+fn check_entry(records: Option<Bytes>, acks: i16, set: Vec<(String, String)>) -> Checked {
+    if acks == -1i16 && min_insync(set) > 1i64 {
+        refused(NOT_ENOUGH_REPLICAS, "min.insync.replicas is above the one replica of this broker", None)
+    } else {
+        check_records(records, max_message_bytes(set))
+    }
+}
+
+/// A topic's `min.insync.replicas`.
+fn min_insync(set: Vec<(String, String)>) -> i64 {
+    match config_value(set, "min.insync.replicas").parse_i64() {
+        Some(n) => n,
+        None => error("min_insync: a stored min.insync.replicas is not an integer"),
+    }
+}
+
+/// The producer ids of a partition's appends this tick (-1, no producer, left out).
+fn batch_producers(xs: Vec<((Instant, Conn, u64), Vec<Bytes>)>) -> Set<i64> {
+    xs.map(|x| x.1.filter_map(|b| batch_header(b).map(|h| h.producer_id))).flatten().filter(|p| p != -1i64).to_set()
 }
 
 /// One partition's answer.
@@ -164,17 +202,18 @@ fn encode_partition_answer(index: i32, a: PartitionAnswer) -> Bytes {
 /// ProduceResponse v10–v12: each entry's answer (by entry position in `answers`), grouped by topic as the request
 /// grouped them.
 fn encode_produce_response(correlation_id: i32, req: ProduceRequest, answers: Vec<(u64, PartitionAnswer)>) -> Bytes {
-    let starts = req.topics.fold(([], 0), |acc, t| (acc.0.push(acc.1), acc.1 + t.partitions.len()));
+    // `answers` holds one per entry, in entry order: topic k's are those before its end, less its own.
+    let ends = req.topics.scan(0, |n, t| n + t.partitions.len());
     let topics = req.topics.enumerate().map(|e| {
         let (k, t) = e;
-        let first = match starts.0.get(k) {
-            Some(x) => x,
-            None => error("encode_produce_response: a topic without a starting entry"),
+        let first = match ends.get(k) {
+            Some(x) => x - t.partitions.len(),
+            None => error("encode_produce_response: a topic without an end"),
         };
         Bytes::join([
             enc_compact_string(t.name),
             enc_compact_array(t.partitions.enumerate().map(|pe| {
-                match answers.filter(|a| a.0 == first + pe.0).first() {
+                match answers.get(first + pe.0).and_then(|a| if a.0 == first + pe.0 { Some(a) } else { None }) {
                     Some(a) => encode_partition_answer(pe.1.index, a.1),
                     None => error("encode_produce_response: a partition entry has no answer"),
                 }
@@ -341,29 +380,25 @@ fn stamp(b: Bytes, at: i64) -> Bytes {
     }
 }
 
-/// The appends to one partition in one tick, in the tick's order (`xs` is ordered, as `collect!` orders it).
+/// The appends to one partition in one tick, in the tick's order (`xs` is ordered, as `collect!` orders it). Each
+/// step is the log end and producer states after an append, with its outcome.
 fn sequence_appends(xs: Vec<((Instant, Conn, u64), Vec<Bytes>)>, end: i64, states: Vec<ProducerEntry>) -> Sequenced {
-    let start: (Vec<((Instant, Conn, u64), AppendOutcome)>, i64, Vec<ProducerEntry>) = ([], end, states);
-    let r = xs.fold(start, |acc, x| {
-        let (outs, at, sts) = acc;
-        let (o, sts2) = sequence_one(x.1, at, sts);
-        (outs.push((x.0, o)), at + o.count, sts2)
+    let start: (i64, Vec<ProducerEntry>, Option<((Instant, Conn, u64), AppendOutcome)>) = (end, states, None);
+    let steps = xs.scan(start, |acc, x| {
+        let (o, sts) = sequence_one(x.1, acc.0, acc.1);
+        (acc.0 + o.count, sts, Some((x.0, o)))
     });
-    let changed = r.2.filter(|e| not states.any(|s| s == e));
-    Sequenced { outcomes: r.0, end: r.1, changed: changed }
-}
-
-/// The outcome of the append ordered `o`.
-fn outcome_of(s: Sequenced, o: (Instant, Conn, u64)) -> AppendOutcome {
-    match s.outcomes.filter(|x| x.0 == o).first() {
-        Some(x) => x.1,
-        None => error("outcome_of: an append was not sequenced"),
-    }
+    let (last_end, last_states) = match steps.last() {
+        Some(s) => (s.0, s.1),
+        None => (end, states),
+    };
+    let before = states.to_set();
+    Sequenced { outcomes: steps.filter_map(|s| s.2), end: last_end, changed: last_states.filter(|e| not before.contains(e)) }
 }
 
 /// Every batch the sequenced appends place.
 fn placed_all(s: Sequenced) -> Vec<(i64, i64, i64, Bytes)> {
-    s.outcomes.fold([], |acc, x| acc.concat(x.1.placed))
+    s.outcomes.map(|x| x.1.placed).flatten()
 }
 
 // ---------------------------------------------------------------- InitProducerId v3–v5
@@ -406,27 +441,27 @@ fn chunks_of(base: i64, last: i64) -> Vec<i64> {
 
 /// A segment of a partition's log, as Kafka keeps them: its first offset, its bytes, its greatest timestamp (-1 for
 /// none yet) and the first batch holding it. Retention deletes whole segments; the time index is per segment.
-struct Segment { base: i64, bytes: i64, max_ts: i64, max_base: i64 }
+struct Segment { base: i64, bytes: i64, max_ts: i64, max_base: i64, modified: i64 }
 
 /// What a tick's appends do to a partition's segments: the segments written (the active one, and any that filled
 /// and were rolled), the time index rows added (segment, timestamp, batch base), and the active segment after.
 struct SegmentChange { written: Vec<Segment>, marks: Vec<(i64, i64, i64)>, active: i64 }
 
-/// The placed batches added to the active segment `active`, rolling a new segment at a batch that would take a
-/// non-empty segment past `limit` bytes (the topic's `segment.bytes`), as Kafka rolls. A batch raising its
+/// The placed batches added to the active segment `active` at `now_ms`, rolling a new segment at a batch that would
+/// take a non-empty segment past `limit` bytes (the topic's `segment.bytes`), as Kafka rolls. A batch raising its
 /// segment's greatest timestamp gets a time index row.
-fn segment_appends(placed: Vec<(i64, i64, i64, Bytes)>, active: Segment, limit: i64) -> SegmentChange {
+fn segment_appends(placed: Vec<(i64, i64, i64, Bytes)>, active: Segment, limit: i64, now_ms: i64) -> SegmentChange {
     let start: (Vec<Segment>, Segment, Vec<(i64, i64, i64)>) = ([], active, []);
     let end = placed.fold(start, |acc, pb| {
         let (done, cur, marks) = acc;
         let size = pb.3.len() as i64;
         let roll = cur.bytes > 0i64 && cur.bytes + size > limit;
-        let seg = if roll { Segment { base: pb.0, bytes: 0i64, max_ts: -1i64, max_base: -1i64 } } else { cur };
+        let seg = if roll { Segment { base: pb.0, bytes: 0i64, max_ts: -1i64, max_base: -1i64, modified: now_ms } } else { cur };
         let finished = if roll { done.push(cur) } else { done };
         if pb.2 > seg.max_ts {
-            (finished, Segment { base: seg.base, bytes: seg.bytes + size, max_ts: pb.2, max_base: pb.0 }, marks.push((seg.base, pb.2, pb.0)))
+            (finished, Segment { base: seg.base, bytes: seg.bytes + size, max_ts: pb.2, max_base: pb.0, modified: now_ms }, marks.push((seg.base, pb.2, pb.0)))
         } else {
-            (finished, Segment { base: seg.base, bytes: seg.bytes + size, max_ts: seg.max_ts, max_base: seg.max_base }, marks)
+            (finished, Segment { base: seg.base, bytes: seg.bytes + size, max_ts: seg.max_ts, max_base: seg.max_base, modified: now_ms }, marks)
         }
     });
     SegmentChange { written: end.0.push(end.1), marks: end.2, active: end.1.base }
@@ -440,30 +475,42 @@ fn segment_bytes(set: Vec<(String, String)>) -> i64 {
     }
 }
 
-/// Where retention moves a partition's log start, if it deletes anything: `segments` in offset order (first offset,
-/// bytes, greatest timestamp), `active` the active segment (never deleted), `now_ms` the time, and the topic's
-/// `retention.ms` and `retention.bytes` (-1: unbounded). As Kafka does, segments are deleted from the front while
-/// their greatest timestamp is older than `retention.ms`, then while the log would still hold `retention.bytes`
-/// without the next one.
-fn retention_start(segments: Vec<(i64, i64, i64)>, active: i64, now_ms: i64, limits: (i64, i64)) -> Option<i64> {
+/// Whether retention may delete the `k`th of `n` segments, holding `bytes`: any but an empty last one.
+fn segment_deletable(k: u64, n: u64, bytes: i64) -> bool {
+    not (k + 1 == n && bytes == 0i64)
+}
+
+/// Where retention moves a partition's log start, if it deletes anything, and whether it deleted the last (active)
+/// segment: `segments` in offset order (first offset, bytes, the time it is aged by), `end` the log end, `now_ms` the
+/// time, and the topic's `retention.ms` and `retention.bytes` (-1: unbounded). As Kafka's `deleteOldSegments` does,
+/// segments are deleted from the front while their time is older than `retention.ms`, then while the log would
+/// still hold `retention.bytes` without the next one; the last segment is deleted too unless it is empty (the log
+/// start is then the log end, and a new active segment is rolled there).
+fn retention_start(segments: Vec<(i64, i64, i64)>, end: i64, now_ms: i64, limits: (i64, i64)) -> Option<(i64, bool)> {
     let (ms, max_bytes) = limits;
-    let old = segments.filter(|x| x.0 != active);
-    let by_time = old.fold((0, true), |acc, x| {
-        if acc.1 && ms >= 0i64 && x.2 < now_ms - ms { (acc.0 + 1, true) } else { (acc.0, false) }
+    let n = segments.len();
+    let by_time = segments.enumerate().fold((0, true), |acc, e| {
+        if acc.1 && segment_deletable(e.0, n, e.1.1) && ms >= 0i64 && e.1.2 < now_ms - ms { (acc.0 + 1, true) } else { (acc.0, false) }
     }).0;
-    let total = segments.fold(0i64, |n, x| n + x.1);
-    let after_time = old.enumerate().filter(|x| x.0 < by_time).fold(total, |n, x| n - x.1.1);
-    let by_size = old.enumerate().filter(|x| x.0 >= by_time).fold((0, after_time, true), |acc, x| {
+    let total = segments.fold(0i64, |t, x| t + x.1);
+    let after_time = segments.enumerate().filter(|e| e.0 < by_time).fold(total, |t, e| t - e.1.1);
+    let by_size = segments.enumerate().filter(|e| e.0 >= by_time).fold((0, after_time, true), |acc, e| {
         let (k, left, going) = acc;
-        if going && max_bytes >= 0i64 && left - x.1.1 >= max_bytes { (k + 1, left - x.1.1, true) } else { (k, left, false) }
+        if going && segment_deletable(e.0, n, e.1.1) && max_bytes >= 0i64 && left - e.1.1 >= max_bytes {
+            (k + 1, left - e.1.1, true)
+        } else {
+            (k, left, false)
+        }
     }).0;
     let deleted = by_time + by_size;
     if deleted == 0 {
         None
+    } else if deleted == n {
+        Some((end, true))
     } else {
         match segments.get(deleted) {
-            Some(x) => Some(x.0),
-            None => error("retention_start: the active segment was deleted"),
+            Some(x) => Some((x.0, false)),
+            None => error("retention_start: a kept segment is missing"),
         }
     }
 }

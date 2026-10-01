@@ -84,11 +84,13 @@ pub(crate) enum StreamData {
     },
 }
 
-/// The bytes a connection's reader has queued that the engine has not taken yet.
+/// The bytes a connection's reader has queued that the engine has not taken yet, and whether the program paused
+/// the reader.
 #[derive(Default)]
 pub(crate) struct Credit {
     queued: Mutex<u64>,
     taken: Condvar,
+    paused: AtomicBool,
 }
 
 impl Credit {
@@ -97,6 +99,14 @@ impl Credit {
         if let Ok(mut q) = self.queued.lock() {
             *q = q.saturating_sub(n);
         }
+        self.taken.notify_all();
+    }
+
+    /// The program paused the reader, or resumed it.
+    fn pause(&self, paused: bool) {
+        // Taking the lock orders the flag with a reader deciding whether to wait, so a resume is not missed.
+        let _q = self.queued.lock();
+        self.paused.store(paused, Ordering::SeqCst);
         self.taken.notify_all();
     }
 }
@@ -228,6 +238,8 @@ struct Handle {
     sock: TcpStream,
     /// The bytes queued for the writer and not yet written (held writes included).
     unsent: Arc<AtomicU64>,
+    /// The reader's credit, which the program's `pause` and `resume` gate.
+    credit: Arc<Credit>,
     /// Why the connection closed, when the host closed it for a located runtime error: the reader reports this
     /// rather than what the socket says.
     why: Arc<Mutex<Option<Arc<str>>>>,
@@ -325,6 +337,28 @@ impl StreamConns {
         }
     }
 
+    /// Stops reading `conn` (`paused`) or reads it again (a program's `pause` or `resume` through `stream`). The
+    /// chunks already read still reach the engine; the peer's further sends wait in its TCP window.
+    pub fn pause(&self, stream: usize, conn: ConnId, paused: bool) {
+        let Ok(open) = self.open.lock() else {
+            return;
+        };
+        match open.get(&conn) {
+            None => bump(&self.stats.dropped_closed, 1),
+            Some(h) if h.stream != stream => {
+                bump(&self.stats.wrong_stream, 1);
+                let belongs = h.stream;
+                drop(open);
+                let what = if paused { "pause" } else { "resume" };
+                self.violation(format!(
+                    "a {what} through stream {stream} of connection {} of stream {belongs}",
+                    conn.0
+                ));
+            }
+            Some(h) => h.credit.pause(paused),
+        }
+    }
+
     /// Closes `conn` for a located runtime error of the program (a write the host refuses): its `closed` event carries
     /// `why`, which is also recorded, as for a bad `seq`.
     pub fn refuse(&self, stream: usize, conn: ConnId, why: String) {
@@ -390,6 +424,7 @@ fn start(sock: TcpStream, stream: usize, req: Option<u64>, env: &Env) -> std::io
     let conn = env.conns.allocate();
     let (tx, rx) = mpsc::channel::<WriterMsg>();
     let unsent = Arc::new(AtomicU64::new(0));
+    let credit = Arc::new(Credit::default());
     let why: Arc<Mutex<Option<Arc<str>>>> = Arc::new(Mutex::new(None));
     env.conns
         .open
@@ -402,6 +437,7 @@ fn start(sock: TcpStream, stream: usize, req: Option<u64>, env: &Env) -> std::io
                 tx,
                 sock,
                 unsent: unsent.clone(),
+                credit: credit.clone(),
                 why: why.clone(),
             },
         );
@@ -435,7 +471,7 @@ fn start(sock: TcpStream, stream: usize, req: Option<u64>, env: &Env) -> std::io
     let env2 = env.clone();
     if let Err(e) = std::thread::Builder::new()
         .name("stream-reader".into())
-        .spawn(move || reader(reader_sock, conn, &why, &env2))
+        .spawn(move || reader(reader_sock, conn, credit, &why, &env2))
     {
         env.conns.retire(conn);
         env.queue.push(StreamData::Closed {
@@ -507,12 +543,12 @@ fn connect_any(addr: &str) -> std::io::Result<TcpStream> {
     Err(last)
 }
 
-fn reader(mut sock: TcpStream, conn: ConnId, why: &Mutex<Option<Arc<str>>>, env: &Env) {
+fn reader(mut sock: TcpStream, conn: ConnId, credit: Arc<Credit>, why: &Mutex<Option<Arc<str>>>, env: &Env) {
     let limits = env.conns.limits;
-    let credit = Arc::new(Credit::default());
     let mut buf = vec![0u8; READ_CHUNK];
     let reason: Arc<str> = 'conn: loop {
-        // Backpressure: wait while this connection, or all of them, queued enough ahead of the engine.
+        // Backpressure: wait while the program paused this connection, or while it, or all of them, queued enough
+        // ahead of the engine.
         loop {
             if env.stop.load(Ordering::SeqCst) {
                 break 'conn Arc::from("the node stopped");
@@ -520,10 +556,14 @@ fn reader(mut sock: TcpStream, conn: ConnId, why: &Mutex<Option<Arc<str>>>, env:
             let Ok(queued) = credit.queued.lock() else {
                 break 'conn Arc::from("the stream table's lock is poisoned");
             };
-            if *queued < limits.read_ahead_bytes && env.queue.bytes.load(Ordering::SeqCst) < limits.queue_bytes {
+            if !credit.paused.load(Ordering::SeqCst)
+                && *queued < limits.read_ahead_bytes
+                && env.queue.bytes.load(Ordering::SeqCst) < limits.queue_bytes
+            {
                 break;
             }
-            // Woken when the engine takes this connection's bytes; the timeout re-checks the shared limit and stop.
+            // Woken when the engine takes this connection's bytes or the program resumes it; the timeout re-checks
+            // the shared limit and stop.
             let _ = credit.taken.wait_timeout(queued, Duration::from_millis(50));
         }
         match sock.read(&mut buf) {
@@ -669,6 +709,49 @@ mod tests {
             got == total as u64
         }));
         let _client = writer.join().unwrap();
+        env.stop.store(true, Ordering::SeqCst);
+        env.conns.close_all();
+    }
+
+    #[test]
+    fn a_paused_connection_is_not_read_until_it_is_resumed() {
+        let (mut client, env, conn) = pair(StreamLimits::default());
+        // Whatever the engine was given, its credit returned at once: only a pause stops the reader.
+        let drain = |env: &Env| -> u64 {
+            let mut got = 0;
+            for d in env.queue.take(u64::MAX) {
+                if let StreamData::Bytes { bytes, credit, .. } = d {
+                    got += bytes.len() as u64;
+                    credit.release(bytes.len() as u64);
+                }
+            }
+            got
+        };
+        client.write_all(b"before").unwrap();
+        let mut got = 0;
+        assert!(eventually(|| {
+            got += drain(&env);
+            got == 6
+        }));
+        env.conns.pause(0, conn, true);
+        // A pause through another stream is refused and changes nothing.
+        env.conns.pause(1, conn, false);
+        assert_eq!(env.conns.stats.wrong_stream.load(Ordering::SeqCst), 1);
+        // The reader may be inside one read when the pause lands: that read's bytes still arrive, nothing after.
+        client.write_all(b"x").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let early = drain(&env);
+        assert!(early <= 1, "{early} bytes read while paused");
+        client.write_all(b"while paused").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(drain(&env), 0, "a paused connection was read");
+        env.conns.pause(0, conn, false);
+        let want = 1 - early + 12;
+        let mut after = 0;
+        assert!(eventually(|| {
+            after += drain(&env);
+            after == want
+        }));
         env.stop.store(true, Ordering::SeqCst);
         env.conns.close_all();
     }

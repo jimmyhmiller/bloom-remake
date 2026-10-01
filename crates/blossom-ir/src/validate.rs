@@ -162,6 +162,8 @@ fn check_stream(p: &Program, st: &StreamDecl) -> Result<(), String> {
     rel(st.data, ev(StreamEvent::Data), vec![conn, u64t, ty(TypeDef::Bytes)?], "data")?;
     rel(st.closed, ev(StreamEvent::Closed), vec![conn, text], "closed")?;
     rel(st.close, RelClass::HostOut(HostOp::Close), vec![conn], "close")?;
+    rel(st.pause, RelClass::HostOut(HostOp::Pause), vec![conn], "pause")?;
+    rel(st.resume, RelClass::HostOut(HostOp::Resume), vec![conn], "resume")?;
     // `write(c, seq, parts: Vec<Part>)`: `Part` is the built-in enum whose variant 0 is `Bytes(Bytes)`.
     let w = p.rels.get(st.write).ok_or_else(|| format!("stream {name}: `write` is not a relation"))?;
     let parts = w.schema.cols.get(2).map(|c| c.ty).ok_or_else(|| format!("stream {name}: `write` has no parts"))?;
@@ -191,7 +193,17 @@ fn check_stream(p: &Program, st: &StreamDecl) -> Result<(), String> {
         }
         _ => return Err(format!("stream {name}: `failed` and `dial` belong exactly to connect streams")),
     }
-    let mine = [Some(st.opened), Some(st.data), Some(st.closed), st.failed, Some(st.write), Some(st.close), st.dial];
+    let mine = [
+        Some(st.opened),
+        Some(st.data),
+        Some(st.closed),
+        st.failed,
+        Some(st.write),
+        Some(st.close),
+        Some(st.pause),
+        Some(st.resume),
+        st.dial,
+    ];
     for other in p.streams.iter().filter(|o| o.name != st.name) {
         let theirs = [Some(other.opened), Some(other.data), Some(other.closed), other.failed, Some(other.write), Some(other.close), other.dial];
         if mine.iter().flatten().any(|r| theirs.iter().flatten().any(|o| o == r)) {
@@ -848,9 +860,9 @@ fn persist_exact(p: &Program, rel: &RelDecl, rule: &Rule, del: Option<RelId>, id
     positive && negative && tag
 }
 /// Whether a value of type `actual` may stand where `expected` is required: equal types, or `Node<R>` where `Node`
-/// is expected (LANGUAGE §5.3: `Node<R>` is a subtype of `Node`).
-/// Whether a value of type `actual` may stand where `expected` is required: equal types, or `Node<R>` where `Node`
-/// is expected, also inside tuples, options and collections (values are immutable, so covariance is sound).
+/// is expected (LANGUAGE §5.3: `Node<R>` is a subtype of `Node`), also inside tuples, options and collections
+/// (values are immutable, so covariance is sound). A lattice type carries no roles (the frontend interns
+/// `LSet<Node<R>>` as `LSet<Node>`), so lattice types are assignable only when equal.
 fn assignable(p: &Program, actual: TypeId, expected: TypeId) -> bool {
     if actual == expected {
         return true;
@@ -1235,6 +1247,18 @@ fn expr_type(p: &Program, r: Cx<'_>, e: &Expr) -> Result<TypeId, String> {
                 (BinOp::Add, Some(TypeDef::Duration), Some(TypeDef::Instant)) => return Ok(b),
                 _ => {}
             }
+            // A comparison relates values whose types may differ in roles (`Node<R> == Node`, `Node<R> < Node<S>`).
+            if a != b && same_but_roles(p, a, b) {
+                match op {
+                    BinOp::Eq | BinOp::Ne | BinOp::CanonLt | BinOp::CanonLe => return lookup(TypeDef::Bool),
+                    BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                        if matches!(p.types.get(a), Some(TypeDef::Node(_))) =>
+                    {
+                        return lookup(TypeDef::Bool);
+                    }
+                    _ => {}
+                }
+            }
             let a = if a != b && expr_matches_type(p, r, lhs, b) {
                 b
             } else {
@@ -1542,6 +1566,12 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
             elem(v)?;
             Ok(v)
         }
+        LibFn::VecFlatten => {
+            arity(1)?;
+            let inner = elem(ty(0)?)?;
+            elem(inner)?;
+            Ok(inner)
+        }
         LibFn::VecEnumerate => {
             arity(1)?;
             let e = elem(ty(0)?)?;
@@ -1566,6 +1596,52 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
             let e = elem(ty(0)?)?;
             let out = closure_type(p, r, args.get(1).ok_or("missing closure")?, &[e])?;
             lookup(TypeDef::Vec(inner(out)?))
+        }
+        LibFn::VecScan => {
+            arity(3)?;
+            let e = elem(ty(0)?)?;
+            let init = ty(1)?;
+            let closure = args.get(2).ok_or("missing closure")?;
+            let acc = match closure {
+                Expr::Closure { params, .. } => params
+                    .first()
+                    .and_then(|v| r.vars.get(*v))
+                    .map(|v| v.ty)
+                    .ok_or("a scan's closure takes the accumulator")?,
+                _ => return Err("a combinator's last argument must be a closure".into()),
+            };
+            let step = closure_type(p, r, closure, &[init, e])?;
+            if !assignable(p, step, acc) || !assignable(p, init, acc) {
+                return Err(format!("{f:?}: a scan step returns its accumulator"));
+            }
+            lookup(TypeDef::Vec(acc))
+        }
+        LibFn::VecToSet => {
+            arity(1)?;
+            let e = elem(ty(0)?)?;
+            lookup(TypeDef::Set(e))
+        }
+        LibFn::VecToMap => {
+            arity(1)?;
+            let e = elem(ty(0)?)?;
+            match def(e)? {
+                TypeDef::Tuple(kv) if kv.len() == 2 => match (kv.first(), kv.get(1)) {
+                    (Some(k), Some(v)) => lookup(TypeDef::Map(*k, *v)),
+                    _ => Err(format!("{f:?}: a vector of (key, value) pairs")),
+                },
+                _ => Err(format!("{f:?}: a vector of (key, value) pairs")),
+            }
+        }
+        LibFn::MapGet => {
+            arity(2)?;
+            let (k, v) = match def(ty(0)?)? {
+                TypeDef::Map(k, v) => (k, v),
+                _ => return Err(format!("{f:?}: get on a map")),
+            };
+            if !same_but_roles(p, k, ty(1)?) {
+                return Err(format!("{f:?}: a key of the map's key type"));
+            }
+            lookup(TypeDef::Option(v))
         }
         LibFn::VecFold => {
             arity(3)?;
@@ -1885,21 +1961,19 @@ fn builtin_type(p: &Program, r: Cx<'_>, b: &BuiltinFn, args: &[Expr]) -> Result<
                 *types.first().ok_or("missing operand")?,
                 *types.get(1).ok_or("missing operand")?,
             );
-            // The wider operand's type (`Vec<Node<R>> ++ Vec<Node>` is a `Vec<Node>`).
-            let ty = if assignable(p, a, b) { b } else { a };
-            if !assignable(p, a, ty)
-                || !assignable(p, b, ty)
-                || !matches!(p.types.get(ty), Some(TypeDef::Str | TypeDef::Bytes | TypeDef::Vec(_)))
-            {
-                return Err("concat expects two Strings, Bytes or Vecs of one type".into());
+            // The join of the operands (`Vec<Node<R>> ++ Vec<Node<S>>` is a `Vec<Node>`).
+            match join(p, a, b) {
+                Some(ty) if matches!(p.types.get(ty), Some(TypeDef::Str | TypeDef::Bytes | TypeDef::Vec(_))) => Ok(ty),
+                _ => Err("concat expects two Strings, Bytes or Vecs of one type".into()),
             }
-            Ok(ty)
         }
         BuiltinFn::Contains => {
             arity(2)?;
             let container = types.first().and_then(|t| p.types.get(*t)).ok_or("missing container")?;
             let needle = *types.get(1).ok_or("missing needle")?;
-            if !matches!(container,TypeDef::Vec(t)|TypeDef::Set(t) if *t==needle) {
+            // A membership test compares the needle with the elements (a map's keys): the types may differ in roles.
+            if !matches!(container, TypeDef::Vec(t) | TypeDef::Set(t) | TypeDef::Map(t, _) if same_but_roles(p, *t, needle))
+            {
                 return Err("contains element type mismatch".into());
             }
             lookup(TypeDef::Bool)

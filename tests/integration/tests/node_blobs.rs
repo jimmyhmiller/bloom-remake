@@ -270,14 +270,20 @@ fn a_recovered_node_reads_its_blobs_and_collects_the_unreferenced_ones() {
             }
             d.checkpoint().unwrap();
         }
+        // A blob no row holds, as a crash between a blob's write and its record's sync leaves one.
+        let orphan: Arc<[u8]> = Arc::from(&b"written, never recorded"[..]);
+        BlobStore::open(Arc::new(fs.clone()), &k.dir)
+            .unwrap()
+            .put_all(&[(BlobRef::of(&orphan), orphan.clone())])
+            .unwrap();
         // After a restart, the recovered rows' blobs are read from the store: a new connection's chunk that equals a
         // stored one is acknowledged from it.
         let mut d = k.boot(&fs);
         const LATER: i64 = 1_000_000_000_000;
         d.run_until_quiescent(Instant(LATER)).unwrap();
         let store = BlobStore::open(Arc::new(fs.clone()), &k.dir).unwrap();
-        assert_eq!(store.list().unwrap().len(), 6, "engine {engine}");
-        // Forget three chunks, checkpoint: their blobs go, the others stay.
+        assert_eq!(store.list().unwrap().len(), 7, "engine {engine}");
+        // Forget three chunks, checkpoint: their blobs go, and so does the orphan; the others stay.
         let forget = k.artifact.rel_named("forget").unwrap();
         for c in chunks.iter().take(3) {
             d.node
@@ -304,5 +310,125 @@ fn a_recovered_node_reads_its_blobs_and_collects_the_unreferenced_ones() {
         d.run_until_quiescent(Instant(LATER + 3)).unwrap();
         let again = send(&fs, &mut d, conn2, &chunks[4], LATER + 4);
         assert_eq!(again.first().map(|x| x.0.clone()), Some(chunks[4].clone()));
+    }
+}
+
+/// Boots the store program's node alone (no driver): the test plays the committer, so it chooses when a tick's
+/// blobs reach the store and when its record syncs.
+#[cfg(test)]
+fn bare_node(k: &Store, fs: &SimFs) -> Node<Box<dyn Executor>> {
+    k.boot(fs).node
+}
+
+/// Review of S7, storage finding 1: a tick reading a blob a durable row took in an earlier tick whose record is not
+/// synced yet (the pipelined runtime runs ahead of its committer) reads the bytes the node handed over, not a store
+/// that does not have them yet.
+#[test]
+fn a_tick_reads_a_blob_whose_record_is_not_synced_yet() {
+    for engine in [false, true] {
+        let k = Store::new(engine);
+        let fs = SimFs::default();
+        let mut node = bare_node(&k, &fs);
+        let rel = |n: &str| k.artifact.rel_named(n).unwrap();
+        let key: Arc<[u8]> = Arc::from(&b"pipelined blob"[..]);
+        node.run_tick(Instant(1)).unwrap();
+        node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone())]));
+        let put = node.run_tick(Instant(2)).unwrap();
+        assert_eq!(put.blobs.len(), 1, "engine {engine}: the blob is handed over with the record");
+        // Neither written to the store nor synced: the next tick reads it all the same.
+        node.offer_input(rel("peek"), Arc::from(vec![Value::Bytes(key.clone())]));
+        node.run_tick(Instant(3)).unwrap_or_else(|f| panic!("engine {engine}: {f}"));
+        let peeked = node.carried_rows(rel("peeked"));
+        assert_eq!(peeked.len(), 1, "engine {engine}");
+        assert_eq!(peeked[0][1], Value::Bytes(key.clone()), "engine {engine}");
+    }
+}
+
+/// Review of S7, storage finding 2: a record after a checkpoint that inserts a row with an already-durable blob keeps
+/// the blob a collection root, although a later tick deletes the row again: a recovery from the checkpoint replays
+/// that record.
+#[test]
+fn a_blob_a_record_after_the_checkpoint_references_is_kept() {
+    for engine in [false, true] {
+        let k = Store::new(engine);
+        let fs = SimFs::default();
+        let mut node = bare_node(&k, &fs);
+        let rel = |n: &str| k.artifact.rel_named(n).unwrap();
+        let key: Arc<[u8]> = Arc::from(&b"re-inserted blob"[..]);
+        let blob = BlobRef::of(&key);
+        // The committer: a tick's blobs reach the store, then its record syncs.
+        let store = BlobStore::open(Arc::new(fs.clone()), &k.dir).unwrap();
+        let sync = |node: &mut Node<Box<dyn Executor>>, now: i64| {
+            let fx = node.run_tick(Instant(now)).unwrap();
+            store.put_all(&fx.blobs).unwrap();
+            node.wal_synced(fx.tick).unwrap();
+        };
+        sync(&mut node, 1);
+        node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone())]));
+        sync(&mut node, 2);
+        node.offer_input(rel("forget"), Arc::from(vec![Value::Bytes(key.clone())]));
+        sync(&mut node, 3);
+        // A checkpoint of this state holds no row with the blob: it is a candidate its installation may let go.
+        let checkpoint = node.next_tick().prev().unwrap();
+        let outside = node.checkpoint_candidates();
+        assert!(outside.contains(&blob), "engine {engine}");
+        // After it: the row again (the blob is still durable, so it is not written again), then deleted.
+        node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone())]));
+        let fx = node.run_tick(Instant(4)).unwrap();
+        assert!(fx.blobs.is_empty(), "engine {engine}: a durable blob is written again");
+        store.put_all(&fx.blobs).unwrap();
+        node.wal_synced(fx.tick).unwrap();
+        node.offer_input(rel("forget"), Arc::from(vec![Value::Bytes(key.clone())]));
+        sync(&mut node, 5);
+        let gone = node.blob_garbage(checkpoint, &outside);
+        assert!(!gone.contains(&blob), "engine {engine}: a replayable record's blob would be collected");
+        // A checkpoint after those records: nothing reaches the blob any more, and it goes. (The engine holds the
+        // last tick's rows until the next tick runs: the deleted row, the event that deleted it.)
+        sync(&mut node, 6);
+        let later = node.next_tick().prev().unwrap();
+        let outside = node.checkpoint_candidates();
+        let gone = node.blob_garbage(later, &outside);
+        assert_eq!(gone, vec![blob], "engine {engine}");
+        assert_eq!(store.delete(&gone).unwrap(), 1, "engine {engine}");
+        // Gone, it is no longer durable: a row that needs it again writes it again.
+        node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone())]));
+        let fx = node.run_tick(Instant(7)).unwrap();
+        assert_eq!(fx.blobs.len(), 1, "engine {engine}: a collected blob is not written again");
+    }
+}
+
+/// Review of S7, storage: a blob only a derived row holds (no carried row: the engine keeps the view's row across
+/// ticks without creating the blob again) stays in the cache through its trims, so a later tick that copies it into a
+/// durable row still has its bytes.
+#[test]
+fn a_blob_only_a_derived_row_holds_survives_the_cache_trims() {
+    for engine in [false, true] {
+        let k = Store::new(engine);
+        let fs = SimFs::default();
+        let mut node = bare_node(&k, &fs);
+        let store = BlobStore::open(Arc::new(fs.clone()), &k.dir).unwrap();
+        let rel = |n: &str| k.artifact.rel_named(n).unwrap();
+        let key: Arc<[u8]> = Arc::from(vec![7u8; 200]);
+        let mut now = 1;
+        let mut tick = |node: &mut Node<Box<dyn Executor>>| {
+            let fx = node.run_tick(Instant(now)).unwrap_or_else(|f| panic!("engine {engine}: {f}"));
+            now += 1;
+            store.put_all(&fx.blobs).unwrap();
+            node.wal_synced(fx.tick).unwrap();
+            fx
+        };
+        tick(&mut node);
+        node.offer_input(rel("keep"), Arc::from(vec![Value::Bytes(key.clone())]));
+        tick(&mut node);
+        // Ticks that make other blobs, past the cache's 64-byte budget, so it is trimmed.
+        for i in 0..4u8 {
+            node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(Arc::from(vec![i; 300]))]));
+            tick(&mut node);
+            tick(&mut node);
+        }
+        node.offer_input(rel("commit_kept"), Arc::from(vec![Value::Bytes(key.clone())]));
+        let fx = tick(&mut node);
+        assert_eq!(fx.blobs.len(), 1, "engine {engine}: the kept blob is written with its row");
+        assert_eq!(fx.blobs[0].0, BlobRef::of(&key), "engine {engine}");
     }
 }

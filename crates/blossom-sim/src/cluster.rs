@@ -153,6 +153,8 @@ pub struct ClusterRun {
     pub stream_bytes: u64,
     pub stream_resets: u64,
     pub stream_violations: u64,
+    /// Chunks and closes held for a paused node end, delivered when it resumed (or dropped by a reset).
+    pub stream_held: u64,
 }
 
 /// SplitMix64: the simulation's only randomness.
@@ -212,6 +214,15 @@ enum Envelope {
     PipeClosed {
         pipe: usize,
         to: usize,
+        reason: Arc<str>,
+    },
+    /// A node's dial that could not even start (no such address, or a partition) is reported failed: after a delay,
+    /// as a runtime learns it from the attempt, and only to the incarnation that dialed.
+    DialFailed {
+        node: NodeId,
+        restarts: u64,
+        stream: usize,
+        req: u64,
         reason: Arc<str>,
     },
 }
@@ -720,27 +731,39 @@ impl<'p> Cluster<'p> {
             return Err(internal_error!("no node {}", n.0).into());
         };
         let now = Instant(self.now.saturating_add(slot.offset));
-        let Some(driver) = slot.driver.as_mut() else {
+        if slot.driver.is_none() {
             return Ok(());
-        };
+        }
+        let sessions = slot.sessions.clone();
+        // One tick at a time, each released tick's stream writes resolved before the next tick runs, as the runtime
+        // dispatches them on release: a later tick may drop a blob from the cache, or a checkpoint collect it.
         let mut released: Vec<ReleasedTick> = Vec::new();
-        let before = driver.node.next_tick();
-        driver
-            .run_until_quiescent_with(now, &mut |t| released.push(t))
-            .map_err(|e| node_failure(n, driver.node.next_tick(), e))?;
-        self.run.ticks += driver.node.next_tick().0.saturating_sub(before.0);
+        loop {
+            let Some(driver) = self.nodes.get_mut(n.0 as usize).and_then(|s| s.driver.as_mut()) else {
+                return Ok(());
+            };
+            if !driver.node.ready(now).map_err(|e| node_failure(n, driver.node.next_tick(), e))? {
+                break;
+            }
+            let ticks = driver.run_one(now).map_err(|e| node_failure(n, driver.node.next_tick(), e))?;
+            self.run.ticks += 1;
+            for mut t in ticks {
+                let host = std::mem::take(&mut t.host);
+                let retired = std::mem::take(&mut t.retired);
+                self.stream_released(n, &host, &retired)?;
+                released.push(t);
+            }
+        }
         // Occasionally checkpoint, to exercise recovery from checkpoints.
-        if self.rng.below(50) == 0 {
+        if self.rng.below(50) == 0
+            && let Some(driver) = self.nodes.get_mut(n.0 as usize).and_then(|s| s.driver.as_mut())
+        {
             driver
                 .checkpoint()
                 .map_err(|e| SimError::Internal(internal_error!("node {} checkpoint failed: {e}", n.0)))?;
         }
-        let sessions = slot.sessions.clone();
         let mut local: Vec<Delivery> = Vec::new();
-        for mut t in released {
-            let host = std::mem::take(&mut t.host);
-            let retired = std::mem::take(&mut t.retired);
-            self.stream_released(n, &host, &retired)?;
+        for t in released {
             for s in t.sends {
                 if s.to == n {
                     local.push(Delivery {
@@ -855,6 +878,13 @@ impl<'p> Cluster<'p> {
             Envelope::PipeOpened { pipe } => self.pipe_opened(pipe)?,
             Envelope::PipeBytes { pipe, to, bytes } => self.pipe_bytes(pipe, to, bytes)?,
             Envelope::PipeClosed { pipe, to, reason } => self.pipe_closed(pipe, to, &reason)?,
+            Envelope::DialFailed {
+                node,
+                restarts,
+                stream,
+                req,
+                reason,
+            } => self.dial_failed_later(node, restarts, stream, req, &reason)?,
         }
         Ok(())
     }
@@ -1082,12 +1112,16 @@ impl<'p> Cluster<'p> {
     }
 }
 
-/// A node's failed tick as the run's error: the program's own error (BLSRnnn, or an evaluator error) is reported as
-/// the node's, like the runtime halting the node; only a failure of the node machinery is a bug in Blossom.
+/// A node's failed tick as the run's error: the program's own error (BLSRnnn) is reported as the node's, like the
+/// runtime halting the node; a missing feature as unimplemented; anything else (the evaluator's or the node's
+/// machinery failing) is a bug in Blossom.
 fn node_failure(n: NodeId, tick: blossom_value::time::Tick, e: blossom_node::NodeError) -> SimError {
+    use blossom_ir::tick::EvalError;
     match e {
-        blossom_node::NodeError::Eval(error) => SimError::Node { node: n, tick, error },
-        blossom_node::NodeError::Unimplemented(u) => SimError::Unimplemented(u),
+        blossom_node::NodeError::Eval(error @ EvalError::Program { .. }) => SimError::Node { node: n, tick, error },
+        blossom_node::NodeError::Eval(EvalError::Unimplemented(u)) | blossom_node::NodeError::Unimplemented(u) => {
+            SimError::Unimplemented(u)
+        }
         other => SimError::Internal(internal_error!("node {} failed: {other}", n.0)),
     }
 }

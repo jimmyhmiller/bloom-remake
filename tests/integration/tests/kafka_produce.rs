@@ -291,7 +291,8 @@ impl Client {
             }
             let mut seq = self.next_seq.get(&p).copied().unwrap_or(0);
             let mut bs: Vec<Vec<u8>> = Vec::new();
-            for _ in 0..1 + self.rng.below(2) {
+            // One batch per entry, as Produce v3 and later require; now and then two, which is refused.
+            for _ in 0..if self.rng.below(12) == 0 { 2 } else { 1 } {
                 let b = self.next_batch(seq);
                 seq += offsets_of(&b) as i32;
                 bs.push(b);
@@ -582,6 +583,8 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
                         let (code, base) = answer[i];
                         let want = if *p >= PARTITIONS {
                             3
+                        } else if bs.len() != 1 {
+                            87
                         } else if *corrupt {
                             2
                         } else {

@@ -1176,7 +1176,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
     /// A timer: `timer name every d;` declares the event relation `name(count: u64, at: Instant)` (LANGUAGE §7.14).
     /// `stream name: listen|connect;` (FOREIGN-PROTOCOLS §1.1): its relations, read and written as `name.rel` like an
     /// instance's interface — the events (`opened`, `data`, `closed`, a connect stream's `failed`) are read, the
-    /// requests to the host (`write`, `close`, a connect stream's `dial`) are sent.
+    /// requests to the host (`write`, `close`, `pause`, `resume`, a connect stream's `dial`) are sent.
     fn stream(&mut self, s: ScopeIdx, name: Ident, kind: Ident, placement: Option<HRoleId>, span: Span) {
         use blossom_ir::core::{HostOp, StreamEvent, StreamKind};
         let kind = match kind.as_str() {
@@ -1261,6 +1261,8 @@ impl<'t, 'd> Resolver<'t, 'd> {
             &[("c", conn), ("seq", u64t), ("parts", parts)],
         );
         let close = make(self, "close", HStreamRel::Host(HostOp::Close), &[("c", conn)]);
+        let pause = make(self, "pause", HStreamRel::Host(HostOp::Pause), &[("c", conn)]);
+        let resume = make(self, "resume", HStreamRel::Host(HostOp::Resume), &[("c", conn)]);
         let (failed, dial) = match kind {
             StreamKind::Listen => (None, None),
             StreamKind::Connect => (
@@ -1289,6 +1291,8 @@ impl<'t, 'd> Resolver<'t, 'd> {
             failed,
             write,
             close,
+            pause,
+            resume,
             dial,
             span,
         });

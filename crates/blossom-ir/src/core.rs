@@ -140,6 +140,10 @@ pub struct StreamDecl {
     pub write: RelId,
     /// `close(c: Conn)`, to the host: close after the writes already sent.
     pub close: RelId,
+    /// `pause(c: Conn)`, to the host: stop reading `c` (the chunks already read still arrive), so the peer's sends
+    /// wait in its TCP window; `resume(c: Conn)` reads it again.
+    pub pause: RelId,
+    pub resume: RelId,
     /// A connect stream's `dial(req: u64, addr: String)`, to the host.
     pub dial: Option<RelId>,
 }
@@ -165,6 +169,8 @@ pub enum HostOp {
     Write,
     Close,
     Dial,
+    Pause,
+    Resume,
 }
 
 /// Program data in the Dedalus core IR.
@@ -636,6 +642,8 @@ pub enum LibFn {
     VecIsEmpty,
     /// `v.reverse()`.
     VecReverse,
+    /// `v.flatten()` on a `Vec<Vec<T>>`: the inner vectors' elements, in order.
+    VecFlatten,
     /// `v.enumerate() -> Vec<(u64, T)>`.
     VecEnumerate,
     /// `v.map(|x| e)`, `v.filter(|x| b)`, `v.filter_map(|x| o)`, `v.all(|x| b)`, `v.any(|x| b)`.
@@ -646,6 +654,14 @@ pub enum LibFn {
     VecAny,
     /// `v.fold(init, |acc, x| e)`: left to right.
     VecFold,
+    /// `v.scan(init, |acc, x| e) -> Vec<A>`: a fold's accumulator after each element, left to right.
+    VecScan,
+    /// `v.to_set() -> Set<T>`: the elements, each once.
+    VecToSet,
+    /// `v.to_map() -> Map<K, V>` on a `Vec<(K, V)>`: each key with the value of its last pair.
+    VecToMap,
+    /// `m.get(k) -> Option<V>`.
+    MapGet,
     /// `o.is_some()`, `o.is_none()`, `o.unwrap_or(d)`.
     OptIsSome,
     OptIsNone,

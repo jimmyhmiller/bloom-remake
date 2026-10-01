@@ -124,8 +124,8 @@ fn record_values(b: Bytes) -> Option<Vec<(i64, Bytes)>> {
                         if vlen.0 < 0i64 || len.0 < 0i64 {
                             None
                         } else {
-                            r.slice(vlen.1, vlen.1 + vlen.0 as u64).map(|v| {
-                                (out.push((h.base_offset + od.0, v)), len.1 + len.0 as u64)
+                            r.slice(vlen.1, vlen.1 + vlen.0 as u64).and_then(|v| {
+                                add_i64(h.base_offset, od.0).map(|o| (out.push((o, v)), len.1 + len.0 as u64))
                             })
                         }
                     })

@@ -302,6 +302,8 @@ pub struct HStream {
     pub failed: Option<HRelId>,
     pub write: HRelId,
     pub close: HRelId,
+    pub pause: HRelId,
+    pub resume: HRelId,
     pub dial: Option<HRelId>,
     pub span: Span,
 }
@@ -385,6 +387,10 @@ pub enum HStmt {
         /// Normalized condition text, hashed for the block's id.
         text: String,
         span: Span,
+        /// The types inside the block of the variables bound outside it (set by type checking): the condition holds
+        /// here, so what it says of them refines their roles (a `Node` the condition finds in a `Node<R>` column is
+        /// a `Node<R>` inside), and the block's rules type them so.
+        refined: Vec<(HVarId, TypeId)>,
     },
 }
 

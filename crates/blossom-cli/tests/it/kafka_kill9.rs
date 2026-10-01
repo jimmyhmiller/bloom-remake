@@ -163,8 +163,20 @@ fn topic_name() -> TopicName {
     TopicName(StrBytes::from_string(TOPIC.into()))
 }
 
+/// The wall clock in milliseconds: records carry the time they are produced, as a client's do, since the broker's
+/// time retention judges a segment by its newest record's timestamp against its own clock.
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // a test producer stamps records like a real one
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap()
+}
+
 #[cfg(test)]
 fn batch(values: &[String]) -> Vec<u8> {
+    let now = now_ms();
     let records: Vec<Record> = values
         .iter()
         .enumerate()
@@ -178,7 +190,7 @@ fn batch(values: &[String]) -> Vec<u8> {
             timestamp_type: TimestampType::Creation,
             offset: i as i64,
             sequence: i as i32 - 1,
-            timestamp: 1_700_000_000_000,
+            timestamp: now,
             key: None,
             value: Some(Bytes::from(v.clone())),
             headers: Default::default(),
@@ -349,7 +361,15 @@ fn kill_9_never_loses_an_acknowledged_record() {
         kills += 1;
         broker = Broker(start(&deploy, false));
     }
+    // Produce on after the last restart until enough was acknowledged to make the check meaningful (how many fit in
+    // the kill loop depends on the machine's load), within a deadline.
     std::thread::sleep(Duration::from_millis(500));
+    for _ in 0..600 {
+        if out.lock().unwrap().acked.len() > 100 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
     stop.store(true, Ordering::SeqCst);
     producer.join().unwrap();
 

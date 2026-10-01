@@ -103,6 +103,9 @@ pub(crate) struct Store {
     pub del: BTreeSet<Row>,
     /// Whether any support changed this tick, even where the present rows did not.
     pub touched: bool,
+    /// For a relation whose rows can hold blobs: how many present rows hold each blob, kept with every change, so
+    /// the node asks whether a blob is still held without a scan (FOREIGN-PROTOCOLS §5).
+    blob_refs: Option<BTreeMap<blossom_value::BlobRef, u64>>,
 }
 
 fn key(row: &[Value], cols: &[usize]) -> Vec<Value> {
@@ -110,10 +113,40 @@ fn key(row: &[Value], cols: &[usize]) -> Vec<Value> {
 }
 
 impl Store {
-    pub fn new(cell: Option<CellSpec>) -> Store {
+    /// A store; `blobs` when the relation's rows can hold blobs, which it then counts.
+    pub fn new(cell: Option<CellSpec>, blobs: bool) -> Store {
         Store {
             cell,
+            blob_refs: blobs.then(BTreeMap::new),
             ..Store::default()
+        }
+    }
+
+    /// Whether this store counts blobs.
+    pub fn counts_blobs(&self) -> bool {
+        self.blob_refs.is_some()
+    }
+
+    /// Whether a present row holds `b`.
+    pub fn holds_blob(&self, b: &blossom_value::BlobRef) -> bool {
+        self.blob_refs.as_ref().is_some_and(|m| m.contains_key(b))
+    }
+
+    fn count_blobs(&mut self, row: &Row, shown: bool) {
+        let Some(refs) = self.blob_refs.as_mut() else {
+            return;
+        };
+        let mut bs = BTreeSet::new();
+        row.iter().for_each(|v| blossom_value::blobs_in(v, &mut bs));
+        for b in bs {
+            if shown {
+                *refs.entry(b).or_insert(0) += 1;
+            } else if let Some(n) = refs.get_mut(&b) {
+                *n -= 1;
+                if *n == 0 {
+                    refs.remove(&b);
+                }
+            }
         }
     }
 
@@ -228,6 +261,7 @@ impl Store {
 
     fn show(&mut self, row: Row) {
         self.generation = self.generation.wrapping_add(1);
+        self.count_blobs(&row, true);
         for (cols, index) in self.indexes.get_mut() {
             index.entry(key(&row, cols)).or_default().insert(row.clone());
         }
@@ -239,6 +273,7 @@ impl Store {
 
     fn hide(&mut self, row: &Row) {
         self.generation = self.generation.wrapping_add(1);
+        self.count_blobs(row, false);
         for (cols, index) in self.indexes.get_mut() {
             let k = key(row, cols);
             if let Some(bucket) = index.get_mut(&k) {

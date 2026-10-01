@@ -81,8 +81,9 @@ fn metadata_creates(req: MetadataRequest, enabled: bool) -> Vec<String> {
     match req.topics {
         Some(ts) => {
             if enabled && req.allow_auto_topic_creation && ts.all(|t| t.topic_id == zero_uuid()) {
-                let names = ts.filter_map(|t| t.name);
-                names.filter(|n| topic_name_ok(n) && not names.any(|m| m != n && collision_key(m) == collision_key(n)))
+                let keyed = ts.filter_map(|t| t.name).map(|n| (collision_key(n), n));
+                let colliding = colliding_keys(keyed);
+                keyed.filter(|kn| topic_name_ok(kn.1) && not colliding.contains(kn.0)).map(|kn| kn.1)
             } else {
                 []
             }
@@ -104,8 +105,9 @@ fn metadata_topics(req: MetadataRequest, topics: Vec<TopicInfo>, node: i32) -> V
         Some(ts) => {
             let by_id = ts.filter(|t| t.topic_id != zero_uuid());
             if by_id.is_empty() {
+                let named = topics.map(|x| (x.name, x)).to_map();
                 ts.map(|t| match t.name {
-                    Some(n) => match topics.filter(|x| x.name == n).first() {
+                    Some(n) => match named.get(n) {
                         Some(x) => encode_topic(x, node),
                         None => {
                             let error = if topic_name_ok(n) { UNKNOWN_TOPIC_OR_PARTITION } else { INVALID_TOPIC_EXCEPTION };
@@ -115,7 +117,8 @@ fn metadata_topics(req: MetadataRequest, topics: Vec<TopicInfo>, node: i32) -> V
                     None => encode_unknown_topic(UNKNOWN_TOPIC_OR_PARTITION, None, zero_uuid()),
                 })
             } else {
-                by_id.map(|t| match topics.filter(|x| x.id == t.topic_id).first() {
+                let with_id = topics.map(|x| (x.id, x)).to_map();
+                by_id.map(|t| match with_id.get(t.topic_id) {
                     Some(x) => encode_topic(x, node),
                     None => encode_unknown_topic(UNKNOWN_TOPIC_ID, None, t.topic_id),
                 })

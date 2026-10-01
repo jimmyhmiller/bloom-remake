@@ -235,6 +235,16 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &[Option<Value>], f: LibFn, args: &[Exp
             out.reverse();
             Ok(Value::Vec(out.into()))
         }
+        LibFn::VecFlatten => {
+            let mut out = Vec::new();
+            for inner in vector(0)?.iter() {
+                match inner {
+                    Value::Vec(xs) => out.extend(xs.iter().cloned()),
+                    other => return Err(bug(format!("`flatten` of a vector holding {other:?}"))),
+                }
+            }
+            Ok(Value::Vec(out.into()))
+        }
         LibFn::VecEnumerate => {
             let xs = vector(0)?;
             let mut out = Vec::with_capacity(xs.len());
@@ -302,6 +312,51 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &[Option<Value>], f: LibFn, args: &[Exp
                 None => value(1),
             }
         }
+        LibFn::VecScan => {
+            // As `fold`: the initial value is evaluated at the first element, or after an empty receiver.
+            let c = Closure::of(expr(2)?)?;
+            let mut acc: Option<Value> = None;
+            let mut out = Vec::new();
+            each(cx, env, expr(0)?, |x| {
+                let prev = match acc.take() {
+                    Some(a) => a,
+                    None => value(1)?,
+                };
+                let next = c.call(cx, env, &[prev, x])?;
+                out.push(next.clone());
+                acc = Some(next);
+                Ok(true)
+            })?;
+            if acc.is_none() {
+                value(1)?;
+            }
+            Ok(Value::Vec(out.into()))
+        }
+        LibFn::VecToSet => Ok(Value::Set(Arc::new(vector(0)?.iter().cloned().collect()))),
+        LibFn::VecToMap => {
+            let mut m = std::collections::BTreeMap::new();
+            for pair in vector(0)?.iter() {
+                match pair {
+                    Value::Tuple(kv) if kv.len() == 2 => {
+                        if let (Some(k), Some(v)) = (kv.first(), kv.get(1)) {
+                            m.insert(k.clone(), v.clone());
+                        }
+                    }
+                    other => return Err(bug(format!("`to_map` of a vector holding {other:?}"))),
+                }
+            }
+            Ok(Value::Map(Arc::new(m)))
+        }
+        LibFn::MapGet => match value(0)? {
+            Value::Map(m) => {
+                let k = value(1)?;
+                Ok(match m.get(&k) {
+                    Some(v) => Value::some(v.clone()),
+                    None => Value::none(),
+                })
+            }
+            other => Err(bug(format!("`get` on {other:?}"))),
+        },
         LibFn::OptIsSome => Ok(Value::Bool(optional(value(0)?)?.is_some())),
         LibFn::OptIsNone => Ok(Value::Bool(optional(value(0)?)?.is_none())),
         LibFn::OptUnwrapOr => match optional(value(0)?)? {

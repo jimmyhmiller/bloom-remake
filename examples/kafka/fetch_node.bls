@@ -106,16 +106,21 @@ view offsets_entry(c, j, name, lp, req) =
     list_offsets_head(c, _, _, _, _, _, req), not list_offsets_waits(c), e in list_offsets_entries(req),
     let j = e.0, let name = e.1, let lp = e.2;
 
+/// The entries that name a partition another entry of their request also names (Kafka refuses both).
+view offsets_named(c, name, p, n = count!(j)) = offsets_entry(c, j, name, lp, _req), let p = lp.partition;
+view offsets_repeated(c, j) =
+    offsets_entry(c, j, name, lp, _req), let p = lp.partition, offsets_named(c, name, p, n) where n > 1u64;
+
 /// The entries that look a partition up: it exists, the epoch is right, and no other entry names it.
 view offsets_part(c, j, tid, p, t, end, start) =
-    offsets_entry(c, j, name, lp, req), not list_offsets_duplicate(req, j), topic(name, tid, parts, _cfg),
+    offsets_entry(c, j, name, lp, _req), not offsets_repeated(c, j), topic(name, tid, parts, _cfg),
     let p = lp.partition, p >= 0i32, p < parts, leader_epoch_error(lp.leader_epoch) == None,
     log_end(tid, p, end), log_start(tid, p, start), let t = lp.timestamp;
 
 /// A search by timestamp, as Kafka looks: the first segment whose greatest timestamp reaches it, then that
 /// segment's first time index row at or after it.
 view offsets_segment(c, j, seg = min!(b)) =
-    offsets_part(c, j, tid, p, t, _end, _start), segment(tid, p, b, _bytes, mts, _mb) where t >= 0i64 && mts >= t;
+    offsets_part(c, j, tid, p, t, _end, _start), segment(tid, p, b, _bytes, mts, _mb, _md) where searches(t) && mts >= t;
 view offsets_search(c, j, base = min!(b)) =
     offsets_segment(c, j, seg), offsets_part(c, j, tid, p, t, _end, _start), time_index(tid, p, seg, ts, b) where ts >= t;
 
@@ -123,16 +128,17 @@ view offsets_search(c, j, base = min!(b)) =
 view offsets_max(c, j, best) =
     offsets_segments(c, j, ss), let Some(best) = max_segment(ss);
 view offsets_segments(c, j, ss = collect!((b, mts, mb))) =
-    offsets_part(c, j, tid, p, t, _end, _start), segment(tid, p, b, _bytes, mts, mb) where t == MAX_TIMESTAMP;
+    offsets_part(c, j, tid, p, t, _end, _start), segment(tid, p, b, _bytes, mts, mb, _md) where t == MAX_TIMESTAMP;
 
 view offsets_answer(c, j, a) {
-    offsets_entry(c, j, _name, _lp, req), let a = offset_failed(INVALID_REQUEST) where list_offsets_duplicate(req, j);
-    offsets_entry(c, j, name, _lp, req), not topic(name, _, _, _), let a = offset_failed(UNKNOWN_TOPIC_OR_PARTITION)
-        where not list_offsets_duplicate(req, j);
-    offsets_entry(c, j, name, lp, req), topic(name, _tid, parts, _cfg), let a = offset_failed(UNKNOWN_TOPIC_OR_PARTITION)
-        where not list_offsets_duplicate(req, j) && (lp.partition < 0i32 || lp.partition >= parts);
-    offsets_entry(c, j, name, lp, req), topic(name, _tid, parts, _cfg), let Some(err) = leader_epoch_error(lp.leader_epoch),
-        let a = offset_failed(err) where not list_offsets_duplicate(req, j) && lp.partition >= 0i32 && lp.partition < parts;
+    offsets_entry(c, j, _name, _lp, _req), offsets_repeated(c, j), let a = offset_failed(INVALID_REQUEST);
+    offsets_entry(c, j, name, _lp, _req), not offsets_repeated(c, j), not topic(name, _, _, _),
+        let a = offset_failed(UNKNOWN_TOPIC_OR_PARTITION);
+    offsets_entry(c, j, name, lp, _req), not offsets_repeated(c, j), topic(name, _tid, parts, _cfg),
+        let a = offset_failed(UNKNOWN_TOPIC_OR_PARTITION) where lp.partition < 0i32 || lp.partition >= parts;
+    offsets_entry(c, j, name, lp, _req), not offsets_repeated(c, j), topic(name, _tid, parts, _cfg),
+        let Some(err) = leader_epoch_error(lp.leader_epoch),
+        let a = offset_failed(err) where lp.partition >= 0i32 && lp.partition < parts;
     // The log's ends: latest (the high watermark, the log end on one broker), earliest and earliest local (the
     // log start: nothing is tiered), latest tiered (none: -1).
     offsets_part(c, j, _tid, _p, t, end, _start), let a = offset_at(-1i64, end) where t == LATEST_TIMESTAMP;
@@ -144,9 +150,9 @@ view offsets_answer(c, j, a) {
     offsets_part(c, j, tid, p, t, _end, _start), offsets_max(c, j, best), batch(tid, p, best.1, _l, _mt, blob),
         let a = timestamp_answer(blob.read(0, blob.len()), best.0, true) where t == MAX_TIMESTAMP;
     // A timestamp: the first record at or after it.
-    offsets_part(c, j, _tid, _p, t, _end, _start), not offsets_search(c, j, _), let a = no_offset() where t >= 0i64;
+    offsets_part(c, j, _tid, _p, t, _end, _start), not offsets_search(c, j, _), let a = no_offset() where searches(t);
     offsets_part(c, j, tid, p, t, _end, _start), offsets_search(c, j, b), batch(tid, p, b, _l, _mt, blob),
-        let a = timestamp_answer(blob.read(0, blob.len()), t, false) where t >= 0i64;
+        let a = timestamp_answer(blob.read(0, blob.len()), t, false) where searches(t);
 }
 
 view offsets_answers(c, xs = collect!((j, a))) = per list_offsets_head(c, _, _, _, _, _, _req), offsets_answer(c, j, a);

@@ -187,12 +187,24 @@ fn record_times(b: Bytes) -> Option<Vec<(i64, i64)>> {
                 if len.0 < 0i64 {
                     None
                 } else {
-                    Some((out.push((h.base_offset + od.0, h.base_timestamp + td.0)), len.1 + len.0 as u64))
+                    add_i64(h.base_offset, od.0).and_then(|o| add_i64(h.base_timestamp, td.0).map(|t| {
+                        (out.push((o, t)), len.1 + len.0 as u64)
+                    }))
                 }
             })))
         }));
         end.and_then(|e| if e.1 == r.len() { Some(e.0) } else { None })
     }))
+}
+
+/// `a + b`, or `None` where it leaves `i64`: a record's deltas come from the client and are not checked at produce
+/// time, so reading them must not overflow.
+fn add_i64(a: i64, b: i64) -> Option<i64> {
+    if (b > 0i64 && a > 9223372036854775807i64 - b) || (b < 0i64 && a < -9223372036854775807i64 - 1i64 - b) {
+        None
+    } else {
+        Some(a + b)
+    }
 }
 
 /// The first record at or after timestamp `t` in batch `b`: `Some(Some((timestamp, offset)))`, `Some(None)` if no

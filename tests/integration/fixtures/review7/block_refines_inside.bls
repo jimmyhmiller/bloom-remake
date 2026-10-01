@@ -1,0 +1,11 @@
+//! S7 review: what a handler block's condition says of a variable the handler binds holds inside the block.
+program block_refines_inside version 1;
+role A: process;
+channel ping(k: u64): A -> A;
+at A {
+    table a_peer(n: Node<A>);
+    input poke(n: Node, k: u64);
+    on poke(n, k) {
+        if a_peer(n) { send ping(k) to n; }
+    }
+}

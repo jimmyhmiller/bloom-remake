@@ -94,6 +94,15 @@ pub fn compile(
     if diags.has_errors() {
         return Err(DedError::Rejected(diags));
     }
+    // A Molly expression chain (`a + b + … `) nests: no evaluation may be deeper than the stack a tick runs on
+    // (LANGUAGE §16.1). A `.ded` program declares no functions.
+    let spec = artifact.spec.as_ref().map(|s| s.program.get());
+    for p in std::iter::once(artifact.protocol.get()).chain(spec) {
+        if let Some(d) = crate::api::too_deep(p, |_| None) {
+            diags.push(d);
+            return Err(DedError::Rejected(diags));
+        }
+    }
     Ok(artifact)
 }
 

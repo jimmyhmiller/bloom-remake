@@ -1,0 +1,31 @@
+//! S7 review: `x in s`, `<` and `==` unified their operands' types, so comparing a `Node<A>` with a `Node<B>` (or
+//! testing both against a `Set<Node>`) was a type mismatch; a comparison relates its operands and narrows neither.
+//! The IR validator refused the same shapes (`contains` needed identical element types and refused maps, `==`
+//! needed identical types, `++` needed one operand to be assignable to the other).
+program compare_relates version 1;
+role A: process;
+role B: process;
+fn both_in(a: Node<A>, b: Node<B>, s: Set<Node>) -> bool { a in s && b in s }
+fn member(a: Node<A>, s: Set<Node>) -> bool { s.contains(a) }
+fn has_key(m: Map<u64, u64>, k: u64) -> bool { m.contains(k) }
+fn before(a: Node<A>, b: Node<B>) -> bool { a < b }
+fn after(a: Node<A>, b: Node<B>) -> bool { a >= b }
+fn same(a: Node<A>, b: Node<B>) -> bool { a == b || (a, 1u64) != (b, 2u64) }
+fn joined(a: Vec<Node<A>>, b: Vec<Node<B>>) -> Vec<Node> { a ++ b }
+fn keyed(a: Node<A>, b: Node<B>) -> Map<Node, u64> { map[a => 1u64, b => 2u64] }
+fn later(a: (u64, String), b: (u64, String)) -> bool { a > b }
+fn not_before(a: (u64, String), b: (u64, String)) -> bool { a >= b }
+at A {
+    input go(a: Node<A>, b: Node<B>);
+    view out(r1, r2, r3, r4, r5, r6, r7, r8, r9, r10) = go(a, b),
+        let r1 = both_in(a, b, set[a, b]),
+        let r2 = member(a, set[b]),
+        let r3 = has_key(map[1u64 => 2u64], 1u64),
+        let r4 = before(a, b),
+        let r5 = after(a, b),
+        let r6 = same(a, b),
+        let r7 = joined([a], [b]).len(),
+        let r8 = keyed(a, b).len(),
+        let r9 = later((2u64, "a"), (1u64, "b")),
+        let r10 = not_before((1u64, "a"), (1u64, "b"));
+}

@@ -157,21 +157,33 @@ impl BlobStore {
             .collect())
     }
 
-    /// Deletes the blobs not in `keep` (after a checkpoint: `keep` holds every blob a durable row may reference).
-    /// Returns how many were deleted.
-    pub fn collect(&self, keep: &BTreeSet<BlobRef>) -> Result<usize, StoreError> {
+    /// Deletes the blobs `gone` (after a checkpoint: blobs no durable row can reference any more; the node decides
+    /// which, from the change, so this does no listing). A blob the store does not hold is skipped. Returns how
+    /// many were deleted.
+    pub fn delete(&self, gone: &[BlobRef]) -> Result<usize, StoreError> {
+        if gone.is_empty() {
+            return Ok(0);
+        }
+        // The set must forget them first, or a `put_all` racing this would skip writing one a row needs again.
+        {
+            let mut durable = self
+                .durable
+                .lock()
+                .map_err(|_| invalid("the blob store's lock is poisoned"))?;
+            for b in gone {
+                durable.remove(b);
+            }
+        }
         let mut deleted = 0;
-        for b in self.list()? {
-            if !keep.contains(&b) {
-                self.fs.remove(&self.path(&b))?;
-                deleted += 1;
+        for b in gone {
+            match self.fs.remove(&self.path(b)) {
+                Ok(()) => deleted += 1,
+                Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
             }
         }
         if deleted > 0 {
             self.fs.sync_dir(&self.dir)?;
-            if let Ok(mut d) = self.durable.lock() {
-                d.retain(|b| keep.contains(b));
-            }
         }
         Ok(deleted)
     }
@@ -205,8 +217,11 @@ mod tests {
         want.sort();
         assert_eq!(listed, want);
         assert_eq!(parse(&name(&ra)), Some(ra));
-        assert_eq!(store.collect(&[ra].into_iter().collect()).unwrap(), 1);
+        assert_eq!(store.delete(&[rb, BlobRef::of(b"absent")]).unwrap(), 1);
         assert_eq!(store.list().unwrap(), vec![ra]);
+        // A deleted blob is written again when it is put again.
+        store.put_all(&[(rb, b.clone())]).unwrap();
+        assert_eq!(store.read(&rb).unwrap().as_deref(), Some(&b[..]));
         // Bytes that are not the blob's are refused.
         assert!(store.put_all(&[(ra, b.clone())]).is_err());
     }

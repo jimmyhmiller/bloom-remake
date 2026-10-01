@@ -23,6 +23,11 @@ param AUTO_CREATE_TOPICS: bool = true;
 /// How often retention is checked (Kafka's `log.retention.check.interval.ms`, 5 minutes by default).
 param RETENTION_CHECK: Duration = 300s;
 param CLUSTER_ID: String = "blossom-sim";
+/// How many requests, and how many bytes of them, a connection's queue holds before the broker stops reading it
+/// until it is shorter (Kafka mutes a connection while a request of it is in flight). The bytes are a bound on what a
+/// pipelining client makes the broker hold, with what the host read ahead (FOREIGN-PROTOCOLS §1.2).
+param MAX_QUEUED_REQUESTS: u64 = 64;
+param MAX_QUEUED_BYTES: u64 = 16777216;
 param BROKER_ADDR: String = "sim://b1/kafka";
 /// How many batches the Blossom client produces to `CLIENT_TOPIC` and reads back (0: it only asks for versions and
 /// metadata, as in slice 6).

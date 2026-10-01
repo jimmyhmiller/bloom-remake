@@ -1,10 +1,12 @@
-//! A Kafka broker in Blossom (docs/design/KAFKA.md; slice 6): one node that answers ApiVersions and Metadata on its
-//! `kafka` stream, for a one-broker cluster with no topics. Stock clients (kcat, the Java tools, franz-go) connect,
-//! negotiate versions and read the cluster's metadata.
+//! A Kafka broker in Blossom (docs/design/KAFKA.md; slices 6 and 7): one node, a one-broker cluster, serving stock
+//! clients (kcat, the Java tools, franz-go) on its `kafka` stream. It answers ApiVersions and Metadata; creates,
+//! deletes and describes topics (CreateTopics, DeleteTopics, DescribeConfigs, Metadata auto-creation); appends
+//! record batches durably (Produce, with idempotent producers through InitProducerId); serves them back (Fetch,
+//! ListOffsets); and deletes old segments by time and size (retention).
 //!
-//! The connection layer keeps each connection's unconsumed bytes and next write `seq`. Every complete frame of a chunk
-//! is answered, in order, in one write. A request this broker cannot answer (an API it does not advertise, a
-//! malformed frame) closes the connection, as a Kafka broker does for an unknown API.
+//! The connection layer (`broker_node.bls`) cuts each connection's bytes into frames and queues them; each
+//! connection's requests are answered one at a time, in order. A request this broker cannot answer (an API it does
+//! not advertise, a malformed frame) closes the connection, as a Kafka broker does for an unknown API.
 
 program kafka version 1;
 
@@ -29,6 +31,11 @@ param AUTO_CREATE_TOPICS: bool = true;
 /// How often retention is checked (Kafka's `log.retention.check.interval.ms`, 5 minutes by default).
 param RETENTION_CHECK: Duration = 300s;
 param CLUSTER_ID: String = "blossom-kafka";
+/// How many requests, and how many bytes of them, a connection's queue holds before the broker stops reading it
+/// until it is shorter (Kafka mutes a connection while a request of it is in flight). The bytes are a bound on what a
+/// pipelining client makes the broker hold, with what the host read ahead (FOREIGN-PROTOCOLS §1.2).
+param MAX_QUEUED_REQUESTS: u64 = 64;
+param MAX_QUEUED_BYTES: u64 = 16777216;
 
 include "broker_node.bls";
 include "topics_node.bls";

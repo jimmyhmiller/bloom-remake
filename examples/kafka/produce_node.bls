@@ -18,9 +18,11 @@ durable table batch(tid: Bytes, part: i32, base: i64, last: i64, max_ts: i64, by
 durable table batch_chunk(tid: Bytes, part: i32, chunk: i64, base: i64) key(tid, part, chunk, base);
 
 /// A partition's segments, as Kafka keeps them (see `Segment`): retention deletes whole segments.
-durable table segment(tid: Bytes, part: i32, base: i64, bytes: i64, max_ts: i64, max_base: i64) key(tid, part, base);
+durable table segment(tid: Bytes, part: i32, base: i64, bytes: i64, max_ts: i64, max_base: i64, modified: i64)
+    key(tid, part, base);
 
-/// Per partition: the segment appends go to (never deleted by retention).
+/// Per partition: the segment appends go to. Retention may delete it, as Kafka does, and then rolls a new, empty one
+/// at the log end.
 durable table active_segment(tid: Bytes, part: i32, base: i64) key(tid, part);
 
 /// The time index, per segment: the batches that raised their segment's greatest timestamp, by that timestamp. Its
@@ -54,21 +56,25 @@ view produce_entry(c, j, name, p, records, req, o) =
     let j = e.0, let name = e.1, let p = e.2, let records = e.3, let o = (at, c, j);
 
 /// The entries whose request may append and whose partition exists, with their records checked against the
-/// topic's `max.message.bytes`.
+/// topic's configurations (`check_entry`).
 view entry_check(c, j, tid, p, o, checked) =
     produce_entry(c, j, name, p, records, req, o), produce_request_error(req) == None, topic(name, tid, parts, cfg),
-    p >= 0i32, p < parts, let checked = check_records(records, max_message_bytes(cfg));
+    p >= 0i32, p < parts, let checked = check_entry(records, req.acks, cfg);
 
 /// This tick's appends, per partition, in order: each one's order and batches.
 view appends(tid, p, xs = collect!((o, bs))) = entry_check(_c, _j, tid, p, o, ch), ch.error == NONE, let bs = ch.batches;
 
-/// The producer states of the partitions appended to this tick.
+/// The states of the producers whose batches are appended to each partition this tick (the partition's other
+/// producers are not read).
 view part_producers(tid, p, ps = collect!(ProducerEntry { pid: pid, epoch: epoch, recent: recent })) =
-    per appends(tid, p, _xs), producer(tid, p, pid, epoch, recent);
+    per appends(tid, p, xs), pid in batch_producers(xs), producer(tid, p, pid, epoch, recent);
 
 /// Each partition's appends this tick, sequenced.
 view sequenced(tid, p, s) =
     appends(tid, p, xs), log_end(tid, p, end), part_producers(tid, p, ps), let s = sequence_appends(xs, end, ps);
+
+/// Each append's outcome, by its order.
+view append_outcome(tid, p, o, out) = sequenced(tid, p, s), x in s.outcomes, let o = x.0, let out = x.1;
 
 store_batches: while sequenced(tid, p, s), pb in placed_all(s), let blob = Blob::of(pb.3) {
     next batch(tid, p, pb.0, pb.1, pb.2, blob);
@@ -80,11 +86,12 @@ index_chunks: while sequenced(tid, p, s), pb in placed_all(s), ch in chunks_of(p
 
 /// What each partition's appends this tick do to its segments.
 view segment_change(tid, p, ch) =
-    sequenced(tid, p, s), active_segment(tid, p, a), segment(tid, p, a, bytes, mts, mb), topic(_name, tid, _parts, cfg),
-    let ch = segment_appends(placed_all(s), Segment { base: a, bytes: bytes, max_ts: mts, max_base: mb }, segment_bytes(cfg));
+    sequenced(tid, p, s), active_segment(tid, p, a), segment(tid, p, a, bytes, mts, mb, md), topic(_name, tid, _parts, cfg),
+    let ch = segment_appends(placed_all(s), Segment { base: a, bytes: bytes, max_ts: mts, max_base: mb, modified: md },
+        segment_bytes(cfg), now().as_millis());
 
 write_segments: while segment_change(tid, p, ch), sg in ch.written {
-    upsert segment(tid, p, sg.base, sg.bytes, sg.max_ts, sg.max_base);
+    upsert segment(tid, p, sg.base, sg.bytes, sg.max_ts, sg.max_base, sg.modified);
 }
 
 move_active: while segment_change(tid, p, ch) {
@@ -113,8 +120,7 @@ view entry_answer(c, j, a) {
         let a = unknown_partition() where p < 0i32 || p >= parts;
     entry_check(c, j, _tid, _p, _o, ch), ch.error != NONE,
         let a = PartitionAnswer { error: ch.error, base_offset: -1i64, log_start: -1i64, message: ch.message, bad_batch: ch.bad_batch };
-    entry_check(c, j, tid, p, o, ch), ch.error == NONE, sequenced(tid, p, s), log_start(tid, p, start),
-        let out = outcome_of(s, o),
+    entry_check(c, j, tid, p, o, ch), ch.error == NONE, append_outcome(tid, p, o, out), log_start(tid, p, start),
         let a = PartitionAnswer {
             error: out.error,
             base_offset: out.base,
@@ -175,8 +181,8 @@ remove_chunks: while deleting(_e, _name, id), batch_chunk(id, p, ch, b) {
 remove_times: while deleting(_e, _name, id), time_index(id, p, sg, ts, b) {
     delete time_index(id, p, sg, ts, b);
 }
-remove_segments: while deleting(_e, _name, id), segment(id, p, b, by, mts, mb) {
-    delete segment(id, p, b, by, mts, mb);
+remove_segments: while deleting(_e, _name, id), segment(id, p, b, by, mts, mb, md) {
+    delete segment(id, p, b, by, mts, mb, md);
 }
 remove_active: while deleting(_e, _name, id), active_segment(id, p, b) {
     delete active_segment(id, p, b);
@@ -187,31 +193,40 @@ remove_active: while deleting(_e, _name, id), active_segment(id, p, b) {
 /// Checks retention, as Kafka's `log.retention.check.interval.ms` does.
 timer retention_check every RETENTION_CHECK;
 
-/// Per partition, at a retention check: its segments in offset order (first offset, bytes, greatest timestamp).
-view retained(tid, p, ss = collect!((b, bytes, mts))) = retention_check(_n, _at), segment(tid, p, b, bytes, mts, _mb);
+/// Per partition, at a retention check: its segments in offset order (first offset, bytes, and the time retention
+/// ages it by: its greatest timestamp, or when it was last appended to if its records have none, as Kafka falls back
+/// to the segment file's modification time).
+view retained(tid, p, ss = collect!((b, bytes, age))) =
+    retention_check(_n, _at), segment(tid, p, b, bytes, mts, _mb, md), let age = if mts >= 0i64 { mts } else { md };
 
-/// Where retention moves each partition's log start this check, if it deletes anything.
-view retention_cut(tid, p, start) =
-    retained(tid, p, ss), active_segment(tid, p, act), topic(_name, tid, _parts, cfg), log_start(tid, p, s0),
-    let Some(start) = retention_start(ss, act, now().as_millis(), retention(cfg)) where start > s0;
+/// Where retention moves each partition's log start this check, if it deletes anything, and whether it deleted the
+/// active segment (a new one is rolled at the log end). A topic the tick's writer deletes is left to the deletion.
+view retention_cut(tid, p, start, roll) =
+    retained(tid, p, ss), log_end(tid, p, end), topic(_name, tid, _parts, cfg), log_start(tid, p, s0),
+    not deleting(_, _, tid), let Some(r) = retention_start(ss, end, now().as_millis(), retention(cfg)),
+    let start = r.0, let roll = r.1 where start > s0;
 
-advance_start: on retention_cut(tid, p, start), log_start(tid, p, s0) {
+advance_start: on retention_cut(tid, p, start, _roll), log_start(tid, p, s0) {
     upsert log_start(tid, p, start);
 }
-expire_segments: on retention_cut(tid, p, start), segment(tid, p, b, by, mts, mb) where b < start {
-    delete segment(tid, p, b, by, mts, mb);
+roll_segment: on retention_cut(tid, p, start, roll) where roll {
+    upsert active_segment(tid, p, start);
+    next segment(tid, p, start, 0i64, -1i64, -1i64, now().as_millis());
 }
-expire_batches: on retention_cut(tid, p, start), batch(tid, p, b, l, t, blob) where b < start {
+expire_segments: on retention_cut(tid, p, start, _roll), segment(tid, p, b, by, mts, mb, md) where b < start {
+    delete segment(tid, p, b, by, mts, mb, md);
+}
+expire_batches: on retention_cut(tid, p, start, _roll), batch(tid, p, b, l, t, blob) where b < start {
     delete batch(tid, p, b, l, t, blob);
 }
-expire_chunks: on retention_cut(tid, p, start), batch_chunk(tid, p, ch, b) where ch <= start / CHUNK && b < start {
+expire_chunks: on retention_cut(tid, p, start, _roll), batch_chunk(tid, p, ch, b) where ch <= start / CHUNK && b < start {
     delete batch_chunk(tid, p, ch, b);
 }
-expire_times: on retention_cut(tid, p, start), time_index(tid, p, sg, ts, b) where sg < start {
+expire_times: on retention_cut(tid, p, start, _roll), time_index(tid, p, sg, ts, b) where sg < start {
     delete time_index(tid, p, sg, ts, b);
 }
 /// A producer whose batches are all below the new log start is forgotten, as Kafka's `truncateHead` does.
-expire_producers: on retention_cut(tid, p, start), producer(tid, p, pid, epoch, recent)
+expire_producers: on retention_cut(tid, p, start, _roll), producer(tid, p, pid, epoch, recent)
         where last_offset_of(recent) < start {
     delete producer(tid, p, pid, epoch, recent);
 }

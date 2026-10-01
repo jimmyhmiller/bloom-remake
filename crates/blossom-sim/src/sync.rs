@@ -245,8 +245,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                 }
                 let events = self.inputs.get(&(tick, node)).unwrap_or(&empty);
                 let ingress = self.ingress.get(&(tick, node)).unwrap_or(&no_ingress);
-                let no_blobs = blossom_value::BlobMap::default();
-                let node_blobs = blobs.get(i).unwrap_or(&no_blobs);
+                let node_blobs = blobs.get(i).ok_or_else(|| internal_error!("node {i} has no blob map"))?;
                 let out = self
                     .eval
                     .tick(&TickInput {
