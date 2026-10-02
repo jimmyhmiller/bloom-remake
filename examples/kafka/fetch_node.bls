@@ -1,6 +1,7 @@
 //! The Fetch and ListOffsets handlers. Included after `produce_node.bls`, whose materialization writes each
-//! partition's committed batches (up to its high watermark) into the partition logs; both read those logs as the
-//! tick found them. Only a partition's leader answers for it (Kafka's consumers fetch from the leader); another
+//! partition's committed batches into the partition logs, a tick after the commit index passes them; both read up to
+//! the high watermark (the commit index), the batches not materialized yet included (`readable_batch`), so a read
+//! after an `acks=all` answer finds the record. Only a partition's leader answers for it (Kafka's consumers fetch from the leader); another
 //! replica answers NOT_LEADER_OR_FOLLOWER, and a request naming a leader epoch is checked against the leader's.
 //!
 //! A Fetch reads, per partition, the batch holding its fetch offset and the batches after it (batches tile the log,
@@ -29,30 +30,35 @@ view topic_by_id(tid, parts) = mtopic(_name, tid, parts, _cfg);
 /// consumer that read up to the old one's must not be told its position is out of range. It reads up to `end`.
 view fetch_part(c, j, tid, p, off, pmax, end, start) =
     fetch_entry(c, j, tid, fp), topic_by_id(tid, parts), let p = fp.partition, p >= 0i32, p < parts, led(tid, p, epoch),
-    leader_epoch_error(fp.leader_epoch, epoch) == None, log_end(tid, p, end), log_start(tid, p, start),
+    leader_epoch_error(fp.leader_epoch, epoch) == None, high_watermark(tid, p, end), log_start(tid, p, start),
     tail_end(tid, p, leo), let off = fp.fetch_offset, off >= start, off <= leo, let pmax = fp.max_bytes as i64;
 
 /// The batch holding each entry's fetch offset: the one starting there, or (after a seek into a batch) the one the
-/// chunk index finds.
+/// chunk index finds, or the batch not materialized yet holding it.
 view fetch_first(c, j, base) {
-    fetch_part(c, j, tid, p, off, _pmax, end, _start), batch(tid, p, off, _l, _t, _blob), let base = off where off < end;
-    fetch_part(c, j, tid, p, off, _pmax, end, _start), not batch(tid, p, off, _, _, _),
+    fetch_part(c, j, tid, p, off, _pmax, end, _start), readable_batch(tid, p, off, _l, _t, _blob), let base = off
+        where off < end;
+    fetch_part(c, j, tid, p, off, _pmax, end, _start), not readable_batch(tid, p, off, _, _, _),
         let ch = off / CHUNK, batch_chunk(tid, p, ch, base), batch(tid, p, base, last, _t, _blob)
         where off < end && base <= off && last >= off;
+    fetch_part(c, j, tid, p, off, _pmax, end, _start), not readable_batch(tid, p, off, _, _, _),
+        pending_batch(tid, p, base, last, _t, _blob) where off < end && base <= off && last >= off;
 }
 
 /// Each entry's batches, walked from the first while they fit the partition's byte limit (the first always).
 view fetch_chain(c, j, k, base, bytes) {
-    fetch_first(c, j, base), fetch_part(c, j, tid, p, _off, _pmax, _end, _start), batch(tid, p, base, _l, _t, blob),
+    fetch_first(c, j, base), fetch_part(c, j, tid, p, _off, _pmax, _end, _start), readable_batch(tid, p, base, _l, _t, blob),
         let k = 0u64, let bytes = blob.len() as i64;
-    fetch_chain(c, j, k0, b0, bytes0), fetch_part(c, j, tid, p, _off, pmax, end, _start), batch(tid, p, b0, last, _t0, _b0),
-        let base = last + 1i64, batch(tid, p, base, _l, _t, blob), let bytes = bytes0 + blob.len() as i64,
+    fetch_chain(c, j, k0, b0, bytes0), fetch_part(c, j, tid, p, _off, pmax, end, _start),
+        readable_batch(tid, p, b0, last, _t0, _b0), let base = last + 1i64, readable_batch(tid, p, base, _l, _t, blob),
+        let bytes = bytes0 + blob.len() as i64,
         let k = k0 + 1u64 where base < end && bytes <= pmax && k < MAX_FETCH_BATCHES;
 }
 
 /// Per readable entry: its batches in offset order.
 view fetch_batches(c, j, bs = collect!((k, blob))) =
-    per fetch_part(c, j, tid, p, _off, _pmax, _end, _start), fetch_chain(c, j, k, base, _bytes), batch(tid, p, base, _l, _t, blob);
+    per fetch_part(c, j, tid, p, _off, _pmax, _end, _start), fetch_chain(c, j, k, base, _bytes),
+        readable_batch(tid, p, base, _l, _t, blob);
 
 /// Each entry's answer, with its partition's byte limit.
 view fetch_answer(c, j, a, pmax) {
@@ -65,7 +71,8 @@ view fetch_answer(c, j, a, pmax) {
         let Some(err) = leader_epoch_error(fp.leader_epoch, epoch),
         let a = fetch_failed(err), let pmax = 0i64 where p >= 0i32 && p < parts;
     fetch_entry(c, j, tid, fp), topic_by_id(tid, parts), let p = fp.partition, led(tid, p, epoch),
-        leader_epoch_error(fp.leader_epoch, epoch) == None, log_end(tid, p, end), log_start(tid, p, start), tail_end(tid, p, leo),
+        leader_epoch_error(fp.leader_epoch, epoch) == None, high_watermark(tid, p, end), log_start(tid, p, start),
+        tail_end(tid, p, leo),
         let a = FetchAnswer { error: OFFSET_OUT_OF_RANGE, high_watermark: end, log_start: start, batches: [] }, let pmax = 0i64
         where fp.partition >= 0i32 && fp.partition < parts && (fp.fetch_offset < start || fp.fetch_offset > leo);
     fetch_part(c, j, _tid, _p, _off, pmax, end, start), fetch_batches(c, j, bs),
@@ -115,7 +122,7 @@ view offsets_part(c, j, tid, p, t, end, start) =
     offsets_entry(c, j, name, lp, _req), not offsets_repeated(c, j), mtopic(name, tid, parts, _cfg),
     let p = lp.partition, p >= 0i32, p < parts, led(tid, p, epoch), leader_epoch_error(lp.leader_epoch, epoch) == None,
     not leader_unsettled(tid, p),
-    log_end(tid, p, end), log_start(tid, p, start), let t = lp.timestamp;
+    high_watermark(tid, p, end), log_start(tid, p, start), let t = lp.timestamp;
 
 /// A search by timestamp, as Kafka looks: the first segment whose greatest timestamp reaches it, then that
 /// segment's first time index row at or after it.
@@ -129,6 +136,22 @@ view offsets_max(c, j, best) =
     offsets_segments(c, j, ss), let Some(best) = max_segment(ss);
 view offsets_segments(c, j, ss = collect!((b, mts, mb))) =
     offsets_part(c, j, tid, p, t, _end, _start), segment(tid, p, b, _bytes, mts, mb, _md) where t == MAX_TIMESTAMP;
+
+// The batches not materialized yet come after every materialized one: a search finds one only when the materialized
+// log has none, and the greatest timestamp is one only when it is greater than the materialized log's.
+
+/// A search by timestamp in the batches not materialized yet: the first reaching it.
+view offsets_pending_search(c, j, base = min!(b)) =
+    offsets_part(c, j, tid, p, t, _end, _start), pending_batch(tid, p, b, _l, mts, _blob) where searches(t) && mts >= t;
+/// The greatest timestamp of the batches not materialized yet, and the first batch holding it (`-base`, as `max!`
+/// takes the greatest).
+view offsets_pending_max(c, j, best = max!(k)) =
+    offsets_part(c, j, tid, p, t, _end, _start), pending_batch(tid, p, b, _l, mts, _blob), let k = (mts, -b)
+    where t == MAX_TIMESTAMP;
+view offsets_max_pending(c, j) {
+    offsets_pending_max(c, j, _k), not offsets_max(c, j, _);
+    offsets_pending_max(c, j, k), offsets_max(c, j, best) where k.0 > best.0;
+}
 
 /// Each entry's answer, with the partition leader's epoch where it found an offset.
 view offsets_answer(c, j, a) {
@@ -157,13 +180,22 @@ view offsets_found(c, j, a) {
         where t == EARLIEST_TIMESTAMP || t == EARLIEST_LOCAL_TIMESTAMP;
     offsets_part(c, j, _tid, _p, t, _end, _start), let a = no_offset() where t == LATEST_TIERED_TIMESTAMP;
     // The greatest timestamp: the first record that has it.
-    offsets_part(c, j, _tid, _p, t, _end, _start), not offsets_max(c, j, _), let a = no_offset() where t == MAX_TIMESTAMP;
-    offsets_part(c, j, tid, p, t, _end, _start), offsets_max(c, j, best), batch(tid, p, best.1, _l, _mt, blob),
-        let a = timestamp_answer(blob.read(0, blob.len()), best.0, true) where t == MAX_TIMESTAMP;
+    offsets_part(c, j, _tid, _p, t, _end, _start), not offsets_max(c, j, _), not offsets_pending_max(c, j, _),
+        let a = no_offset() where t == MAX_TIMESTAMP;
+    offsets_part(c, j, tid, p, t, _end, _start), offsets_max(c, j, best), not offsets_max_pending(c, j),
+        batch(tid, p, best.1, _l, _mt, blob), let a = timestamp_answer(blob.read(0, blob.len()), best.0, true)
+        where t == MAX_TIMESTAMP;
+    offsets_part(c, j, tid, p, t, _end, _start), offsets_max_pending(c, j), offsets_pending_max(c, j, k),
+        pending_batch(tid, p, b, _l, _mt, blob), let a = timestamp_answer(blob.read(0, blob.len()), k.0, true)
+        where t == MAX_TIMESTAMP && b == -k.1;
     // A timestamp: the first record at or after it.
-    offsets_part(c, j, _tid, _p, t, _end, _start), not offsets_search(c, j, _), let a = no_offset() where searches(t);
+    offsets_part(c, j, _tid, _p, t, _end, _start), not offsets_search(c, j, _), not offsets_pending_search(c, j, _),
+        let a = no_offset() where searches(t);
     offsets_part(c, j, tid, p, t, _end, _start), offsets_search(c, j, b), batch(tid, p, b, _l, _mt, blob),
         let a = timestamp_answer(blob.read(0, blob.len()), t, false) where searches(t);
+    offsets_part(c, j, tid, p, t, _end, _start), not offsets_search(c, j, _), offsets_pending_search(c, j, b),
+        pending_batch(tid, p, b, _l, _mt, blob), let a = timestamp_answer(blob.read(0, blob.len()), t, false)
+        where searches(t);
 }
 
 view offsets_answers(c, xs = collect!((j, a))) = per list_offsets_head(c, _, _, _, _, _, _req), offsets_answer(c, j, a);

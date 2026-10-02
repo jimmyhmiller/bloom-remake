@@ -958,8 +958,13 @@ impl StreamClient for Reader {
                 }
             }
             StreamEvent::Closed(_) => {
+                // A close this reader asked for, to move to another partition's leader, keeps what it knows of the
+                // leaders (it once asked a random broker for metadata, and closed again unless that broker led the
+                // partition: a run could spend its last half second so); any other close makes it ask again.
+                if !self.closing || self.pending.is_some() {
+                    self.stale = true;
+                }
                 self.pending = None;
-                self.stale = true;
                 self.conn = None;
                 self.open = false;
                 self.closing = false;
