@@ -254,3 +254,22 @@ DescribeCluster now returns 114/115; `NOT_CAUGHT_UP_WAIT` and the InitProducerId
     BLS0201.
   - The loosened reassignment check accepting an earlier wave's target from any broker: kept; its reason is in the
     test.
+
+## Test tiers (2026-10-02, the user's choice)
+
+The verification of this slice took hours on the laptop: debug-built simulator suites, throttled, re-run in full
+after every change. The user chose fast and full tiers, with long full runs on their server (computer.jimmyhmiller.com,
+32 cores) in the background.
+- `blossom_integration_tests::{full_tier, seeds, seeds_of, scaled, scaled_of}`: `BLOSSOM_FULL=1` runs every seed. The
+  fast tier runs each multi-seed simulation's first seed, and a threshold summed over seeds is scaled to the seeds
+  that run.
+- `#[ignore = "full tier"]` (reported as ignored, never skipped silently), from per-test timings on the server:
+  - kafka_cluster's four heaviest fault runs (290–480 s each);
+  - three LDFI crash and long-run proofs in bls_raft_ldfi (270–450 s);
+  - the two kill -9 process tests in the CLI suite (150–275 s);
+  - raft_kv's per-tick work test (104 s);
+  - the 1.6M-item format decode (85 s).
+- `scripts/test-tiers.sh fast|full`; CI's gate tier sets `BLOSSOM_FULL=1` and runs the ignored tests; the policy is
+  in CONVENTIONS §8.
+- The corpus (full tier only) passes: core 195, lattices 47, async 36, net 3. Lattices takes about 20 minutes in a
+  debug build, on main as on this branch.

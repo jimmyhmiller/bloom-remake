@@ -5,6 +5,7 @@
 //! brokers' state: election safety, log matching through each entry's recorded `prev`, state machine safety over
 //! committed entries, and leader completeness.
 
+use blossom_integration_tests::seeds;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -107,7 +108,7 @@ fn every_group_elects_and_commits_without_faults() {
 
 #[test]
 fn every_group_stays_safe_under_loss_partitions_and_crashes() {
-    for seed in 1..=4 {
+    for seed in seeds(1..=4) {
         let (progress, configs) = run(seed, true);
         assert_eq!(progress.len(), 6, "seed {seed}: {progress:?}");
         for (g, c) in &progress {
@@ -225,7 +226,7 @@ fn a_reelected_leader_forgets_its_old_follower_state() {
     let artifact = compile();
     let schema = DurableSchema::of(artifact.program.get());
     let mut completed = 0;
-    for seed in 1..=12u64 {
+    for seed in seeds(1..=12) {
         let c = Cluster::new(
             &artifact,
             &schema,

@@ -2,6 +2,7 @@
 //! every crash; a reply is released only after its tick's WAL record is synced (Invariant R); recovery replays the
 //! WAL on top of the checkpoint and never reuses a tick number.
 
+use blossom_integration_tests::{scaled, seeds};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -85,7 +86,9 @@ impl Kvs {
     }
 
     fn rel(&self, name: &str) -> blossom_base::RelId {
-        self.artifact.rel_named(name).unwrap_or_else(|| panic!("no relation {name}"))
+        self.artifact
+            .rel_named(name)
+            .unwrap_or_else(|| panic!("no relation {name}"))
     }
 
     /// Opens (recovers) the store on `fs` and boots the node.
@@ -110,7 +113,13 @@ impl Kvs {
         cfg.halt = self.artifact.halt;
         let exec: Box<dyn Executor> = Box::new(OracleExecutor::new(self.oracle.clone()));
         let node = Node::boot(cfg, &self.artifact.program, exec, opened.boot.clone()).unwrap();
-        ManualDriver::new(node, self.artifact.program.get(), &self.schema, self.names.clone(), opened)
+        ManualDriver::new(
+            node,
+            self.artifact.program.get(),
+            &self.schema,
+            self.names.clone(),
+            opened,
+        )
     }
 
     fn put(&self, session: u64, id: u64, key: &str, val: &[u8]) -> Ingress {
@@ -179,10 +188,21 @@ fn a_put_is_acknowledged_and_read_back() {
     let fs = SimFs::default();
     let mut d = k.boot(&fs, 1_000);
     // Tick 0 is boot.
-    assert!(d.run_until_quiescent(Instant(1_000)).unwrap().iter().all(|t| t.egress.is_empty()));
+    assert!(
+        d.run_until_quiescent(Instant(1_000))
+            .unwrap()
+            .iter()
+            .all(|t| t.egress.is_empty())
+    );
     d.node.offer_ingress(k.put(1, 10, "a", b"x"));
     let released = d.run_until_quiescent(Instant(2_000)).unwrap();
-    assert_eq!(replies(&k, &released).iter().map(|r| (r.0.as_str(), r.1)).collect::<Vec<_>>(), [("put_ok", 10)]);
+    assert_eq!(
+        replies(&k, &released)
+            .iter()
+            .map(|r| (r.0.as_str(), r.1))
+            .collect::<Vec<_>>(),
+        [("put_ok", 10)]
+    );
     d.node.offer_ingress(k.get(1, 11, "a"));
     let released = d.run_until_quiescent(Instant(3_000)).unwrap();
     let r = replies(&k, &released);
@@ -221,7 +241,8 @@ fn acknowledged_puts_survive_a_crash_and_ticks_are_never_reused() {
         let mut d = k.boot(&fs, 1_000);
         d.run_until_quiescent(Instant(1_000)).unwrap();
         for i in 0..20u64 {
-            d.node.offer_ingress(k.put(1, i, &format!("k{}", i % 7), format!("v{i}").as_bytes()));
+            d.node
+                .offer_ingress(k.put(1, i, &format!("k{}", i % 7), format!("v{i}").as_bytes()));
             let r = d.run_until_quiescent(Instant(2_000 + i as i64)).unwrap();
             assert_eq!(replies(&k, &r).len(), 1);
         }
@@ -231,18 +252,31 @@ fn acknowledged_puts_survive_a_crash_and_ticks_are_never_reused() {
     // Every acknowledged write was synced: a crash that loses every unsynced write keeps them all.
     fs.crash(&mut |_| WriteFate::Lost).unwrap();
     let mut d = k.boot(&fs, 500);
-    assert!(d.node.next_tick() > last_tick, "boot tick {:?} reuses a tick before {last_tick:?}", d.node.next_tick());
+    assert!(
+        d.node.next_tick() > last_tick,
+        "boot tick {:?} reuses a tick before {last_tick:?}",
+        d.node.next_tick()
+    );
     assert_eq!(d.meta().restarts, 2);
     let store = k.store(&d);
     assert_eq!(store.len(), 7);
     for (key, val) in &store {
-        let i: u64 = String::from_utf8(val.clone()).unwrap().strip_prefix('v').unwrap().parse().unwrap();
+        let i: u64 = String::from_utf8(val.clone())
+            .unwrap()
+            .strip_prefix('v')
+            .unwrap()
+            .parse()
+            .unwrap();
         assert_eq!(key, &format!("k{}", i % 7));
         assert!(i >= 13, "{key} holds the last put to it");
     }
     // The clock never goes back across incarnations even when the wall clock does: the boot instant is after the
     // last instant the previous incarnation used.
-    assert!(d.node.last_now() > Instant(2_019), "boot instant {:?}", d.node.last_now());
+    assert!(
+        d.node.last_now() > Instant(2_019),
+        "boot instant {:?}",
+        d.node.last_now()
+    );
     let now = d.node.last_now();
     d.run_until_quiescent(now).unwrap();
 }
@@ -289,7 +323,10 @@ fn a_torn_tail_loses_only_the_unacknowledged_tick() {
         d.node.offer_ingress(k.put(1, 2, "b", b"unacked"));
         let fx = d.node.run_tick(Instant(2)).unwrap();
         assert!(fx.wal.is_some());
-        assert!(d.node.release_ready().unwrap().is_empty(), "a tick with a WAL record waits for its sync");
+        assert!(
+            d.node.release_ready().unwrap().is_empty(),
+            "a tick with a WAL record waits for its sync"
+        );
     }
     // Even a torn partial write of anything unsynced leaves the acknowledged state.
     fs.crash(&mut |_| WriteFate::Torn { sectors: 1 }).unwrap();
@@ -414,7 +451,10 @@ fn crash_points(k: &Kvs) {
                 .collect();
             match (store.get(&key), last_acked) {
                 (None, None) => {}
-                (Some(v), _) => assert!(allowed.contains(&v), "cut {c} ({what}): {key} = {v:?}, allowed {allowed:?}"),
+                (Some(v), _) => assert!(
+                    allowed.contains(&v),
+                    "cut {c} ({what}): {key} = {v:?}, allowed {allowed:?}"
+                ),
                 (None, Some((_, v, _))) => panic!("cut {c} ({what}): {key} lost its acknowledged value {v:?}"),
             }
         }
@@ -451,7 +491,11 @@ fn crash_points(k: &Kvs) {
             check(&k.boot(&image, 0), c, what);
             for (r, mut again) in image.recorded_cuts().unwrap().into_iter().enumerate() {
                 again.crash(&mut |_| WriteFate::Lost).unwrap();
-                check(&k.boot(&again, 0), c, &format!("{what}, then a crash at recovery step {r}"));
+                check(
+                    &k.boot(&again, 0),
+                    c,
+                    &format!("{what}, then a crash at recovery step {r}"),
+                );
             }
         }
     }
@@ -500,11 +544,7 @@ impl blossom_sim::cluster::ClientProtocol for E01Protocol {
         })
     }
 
-    fn reply(
-        &self,
-        rel: blossom_base::RelId,
-        row: &blossom_oracle::Row,
-    ) -> Option<(u64, blossom_sim::cluster::Reply)> {
+    fn reply(&self, rel: blossom_base::RelId, row: &blossom_oracle::Row) -> Option<(u64, blossom_sim::cluster::Reply)> {
         use blossom_sim::cluster::Reply;
         use blossom_sim::linearize::KvOutput;
         let Value::Int(IntValue::U64(id)) = row.get(1)? else {
@@ -545,7 +585,7 @@ fn e01_in_the_cluster_simulator_is_linearizable_under_crashes() {
         blossom_oracle::Row::from(vec![Value::Principal("spiffe://sim/client".into())]),
     )];
     let mut total = (0, 0, 0);
-    for seed in 1..=12u64 {
+    for seed in seeds(1..=12) {
         let cfg = ClusterConfig {
             seed,
             clients: 5,
@@ -578,8 +618,14 @@ fn e01_in_the_cluster_simulator_is_linearizable_under_crashes() {
             run.log.join("\n")
         );
     }
-    assert!(total.0 > 1000, "only {} answered", total.0);
-    assert!(total.1 > 0 && total.2 > 50, "unanswered {}, crashes {}", total.1, total.2);
+    let all = 1..=12;
+    assert!(total.0 > scaled(1000, &all), "only {} answered", total.0);
+    assert!(
+        total.1 > 0 && total.2 > scaled(50, &all) as u64,
+        "unanswered {}, crashes {}",
+        total.1,
+        total.2
+    );
 }
 
 /// Regression (S3 review): the boot instant is after every instant a released tick had, even when a checkpoint
@@ -599,7 +645,11 @@ fn the_clock_does_not_go_back_after_a_checkpoint() {
     }
     fs.crash(&mut |_| WriteFate::Lost).unwrap();
     let d = k.boot(&fs, 2_000);
-    assert!(d.node.last_now() > Instant(5_000_000_000), "boot instant {:?}", d.node.last_now());
+    assert!(
+        d.node.last_now() > Instant(5_000_000_000),
+        "boot instant {:?}",
+        d.node.last_now()
+    );
 }
 
 /// Regression (S3 review): a tick that reads no WAL record still exposes its instant; after an idle stretch longer
@@ -615,7 +665,11 @@ fn a_released_read_is_covered_by_the_time_reservation() {
         d.node.offer_ingress(k.get(1, 1, "a"));
         let r = d.run_until_quiescent(Instant(read_at)).unwrap();
         assert_eq!(replies(&k, &r).len(), 1);
-        assert!(d.meta().last_now >= read_at, "META's time bound {} covers the read", d.meta().last_now);
+        assert!(
+            d.meta().last_now >= read_at,
+            "META's time bound {} covers the read",
+            d.meta().last_now
+        );
     }
     fs.crash(&mut |_| WriteFate::Lost).unwrap();
     let d = k.boot(&fs, 0);
@@ -660,6 +714,8 @@ fn a_store_refuses_another_tail_certification() {
         2,
     )
     .err();
-    let Some(err) = err else { panic!("a strict store opened as crc") };
+    let Some(err) = err else {
+        panic!("a strict store opened as crc")
+    };
     assert!(err.to_string().contains("tail certification"), "{err}");
 }
