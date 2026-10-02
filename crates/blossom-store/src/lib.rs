@@ -218,6 +218,9 @@ mod tests {
         let mut wal = FileWal::create(fs.clone(), &dir, header(), Lsn(0)).unwrap();
         wal.append(&rec(1, 1, b"data")).unwrap();
         wal.sync().unwrap();
+        // Batch 1's marker leads batch 2, durable with its sync.
+        wal.append(&rec(2, 2, b"next")).unwrap();
+        wal.sync().unwrap();
         let segment = dir.join("00000000000000000001.seg");
         let receipt = dir.join("00000000000000000001.ack");
         let marker_offset = super::wal::test_header_len(&header()) + 41 + 4;

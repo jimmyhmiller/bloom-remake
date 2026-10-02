@@ -59,25 +59,49 @@ fn the_first_batch_of_a_segment_torn_out_of_order_is_a_torn_tail() {
 }
 
 #[test]
-fn a_batch_number_gap_is_still_a_torn_tail() {
-    let (fs, dir) = sim();
-    let mut wal = FileWal::create(fs.clone(), &dir, header(0), Lsn(0)).unwrap();
-    wal.append(&rec(1, 1, b"acked")).unwrap();
-    wal.sync().unwrap();
-    wal.append(&rec(3, 2, &[2u8; 700])).unwrap();
-    wal.append(&rec(3, 3, &[3u8; 700])).unwrap();
-    assert_eq!(lose_first_keep_second(&fs, &dir), 1);
+fn a_batch_number_gap_is_refused() {
+    // Recovery reads a batch's end from the next batch's number (its marker leads that batch), in both
+    // certifications.
+    for certification in [Certification::Strict, Certification::Crc] {
+        let (fs, dir) = sim();
+        let mut wal = FileWal::create(fs.clone(), &dir, header(0), Lsn(0))
+            .unwrap()
+            .certified(certification);
+        wal.append(&rec(1, 1, b"acked")).unwrap();
+        wal.sync().unwrap();
+        assert!(wal.append(&rec(3, 2, b"gap")).is_err(), "{certification:?}");
+    }
 }
 
 #[test]
 fn consecutive_batches_torn_out_of_order_are_a_torn_tail() {
+    // After batch 1's sync, batch 2 is three unsynced writes: batch 1's leading marker and two records. Whichever of
+    // them survive a crash, batch 1 (acknowledged) is recovered and the rest is a torn tail.
     let (fs, dir) = sim();
     let mut wal = FileWal::create(fs.clone(), &dir, header(0), Lsn(0)).unwrap();
     wal.append(&rec(1, 1, b"acked")).unwrap();
     wal.sync().unwrap();
     wal.append(&rec(2, 2, &[2u8; 700])).unwrap();
     wal.append(&rec(2, 3, &[3u8; 700])).unwrap();
-    assert_eq!(lose_first_keep_second(&fs, &dir), 1);
+    assert_eq!(fs.unsynced_writes().unwrap().len(), 3);
+    for mask in 0..8u32 {
+        let fates: Vec<WriteFate> = (0..3)
+            .map(|i| {
+                if mask & (1 << i) != 0 {
+                    WriteFate::Survive
+                } else {
+                    WriteFate::Lost
+                }
+            })
+            .collect();
+        let mut image = fs.fork().unwrap();
+        image.crash_with_fates(&fates).unwrap();
+        let recovered = WalScan::scan(&image, &dir, [7; 16], true)
+            .unwrap_or_else(|e| panic!("{fates:?}: {e}"))
+            .records()
+            .count();
+        assert!(recovered >= 1, "{fates:?}: the acknowledged batch was lost");
+    }
 }
 
 #[test]
@@ -148,8 +172,9 @@ fn syncs(fs: &SimFs) -> usize {
 }
 
 #[test]
-fn a_group_commit_syncs_once_with_crc_certification_and_four_times_strict() {
-    for (certification, want) in [(Certification::Crc, 1), (Certification::Strict, 4)] {
+fn a_group_commit_syncs_once_with_crc_certification_and_three_times_strict() {
+    // Strict: the batch, then its receipt (the temporary file and the directory); its marker leads the next batch.
+    for (certification, want) in [(Certification::Crc, 1), (Certification::Strict, 3)] {
         let (fs, dir) = sim();
         let mut wal = FileWal::create(fs.clone(), &dir, header(0), Lsn(0))
             .unwrap()
@@ -178,7 +203,7 @@ fn with_crc_certification_damage_in_an_earlier_synced_batch_is_corruption() {
     wal.append(&rec(2, 2, &[2u8; 300])).unwrap();
     wal.sync().unwrap();
     drop(wal);
-    let first = WalScan::scan_certified(&*fs, &dir, [7; 16], false, Certification::Crc)
+    let first = WalScan::scan(&*fs, &dir, [7; 16], false)
         .unwrap()
         .records()
         .next()
@@ -186,7 +211,7 @@ fn with_crc_certification_damage_in_an_earlier_synced_batch_is_corruption() {
         .0
         .0 as usize;
     fs.corrupt(&dir.join(format!("{:020}.seg", 0)), first + 100).unwrap();
-    assert!(WalScan::scan_certified(&*fs, &dir, [7; 16], false, Certification::Crc).is_err());
+    assert!(WalScan::scan(&*fs, &dir, [7; 16], false).is_err());
 }
 
 #[test]
@@ -199,7 +224,7 @@ fn with_crc_certification_a_damaged_header_of_an_acknowledged_segment_is_corrupt
     wal.sync().unwrap();
     drop(wal);
     fs.corrupt(&dir.join(format!("{:020}.seg", 0)), 6).unwrap();
-    assert!(WalScan::scan_certified(&*fs, &dir, [7; 16], true, Certification::Crc).is_err());
+    assert!(WalScan::scan(&*fs, &dir, [7; 16], true).is_err());
 }
 
 #[test]
@@ -231,7 +256,7 @@ fn with_crc_certification_a_torn_start_of_the_next_batch_is_a_torn_tail() {
     ] {
         let mut image = fs.fork().unwrap();
         image.crash_with_fates(&fates).unwrap();
-        let scan = WalScan::scan_certified(&image, &dir, [7; 16], true, Certification::Crc).unwrap();
+        let scan = WalScan::scan(&image, &dir, [7; 16], true).unwrap();
         assert_eq!(scan.records().count(), 1, "{fates:?}");
         assert!(scan.records().all(|(_, r)| r.tick == 1));
     }
@@ -250,7 +275,7 @@ fn with_crc_certification_damage_before_two_later_batches_is_corruption() {
     wal.append(&rec(3, 3, &[3u8; 300])).unwrap();
     wal.sync().unwrap();
     drop(wal);
-    let first = WalScan::scan_certified(&*fs, &dir, [7; 16], false, Certification::Crc)
+    let first = WalScan::scan(&*fs, &dir, [7; 16], false)
         .unwrap()
         .records()
         .next()
@@ -258,5 +283,5 @@ fn with_crc_certification_damage_before_two_later_batches_is_corruption() {
         .0
         .0 as usize;
     fs.corrupt(&dir.join(format!("{:020}.seg", 0)), first + 100).unwrap();
-    assert!(WalScan::scan_certified(&*fs, &dir, [7; 16], false, Certification::Crc).is_err());
+    assert!(WalScan::scan(&*fs, &dir, [7; 16], false).is_err());
 }

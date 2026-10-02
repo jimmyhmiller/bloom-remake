@@ -276,7 +276,7 @@ pub fn open(
     // 3. The WAL after it.
     let wdir = wal_dir(dir);
     durable_dir(&*fs, &wdir)?;
-    let scan = WalScan::scan_certified(&*fs, &wdir, uuid, true, record.certification)?;
+    let scan = WalScan::scan(&*fs, &wdir, uuid, true)?;
     let blobs = Arc::new(blossom_store::BlobStore::open(fs.clone(), dir)?);
     let mut last_now = record.last_now;
     let mut last_tick: Option<u64> = checkpoint.map(|c| c.tick);

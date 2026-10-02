@@ -29,8 +29,10 @@ pub enum OpenMode {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Certification {
-    /// Each group commit syncs the data, then a sync marker, then an acknowledgement receipt (four syncs with the
-    /// receipt's directory): recovery tells damage to acknowledged records (corruption, an error) from a torn tail.
+    /// Each group commit syncs the batch (led by the last batch's sync marker), then an acknowledgement receipt of
+    /// where it ends (three syncs with the receipt's directory): recovery tells damage to any acknowledged record
+    /// (corruption, an error) from a torn tail. (Before HD item 3 the marker was synced on its own, a fourth sync
+    /// the receipt makes redundant; such segments still recover.)
     #[default]
     Strict,
     /// Each group commit syncs once, as etcd's WAL does. A batch's sync marker leads the next batch (durable with its
