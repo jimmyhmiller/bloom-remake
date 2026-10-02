@@ -471,14 +471,23 @@ fn ref_encode(r: &RefRequest, version: i16) -> Vec<u8> {
             put_uvarint(&mut out, ts.len() as u64 + 1);
             for t in ts {
                 out.extend(t.id);
-                match &t.name {
-                    None => put_uvarint(&mut out, 0),
-                    Some(s) => {
+                match (&t.name, version >= 8) {
+                    (None, true) => put_uvarint(&mut out, 0),
+                    (Some(s), true) => {
                         put_uvarint(&mut out, s.len() as u64 + 1);
                         out.extend(s.as_bytes());
                     }
+                    (None, false) => out.extend((-1i16).to_be_bytes()),
+                    (Some(s), false) => {
+                        out.extend((s.len() as i16).to_be_bytes());
+                        out.extend(s.as_bytes());
+                    }
                 }
-                put_uvarint(&mut out, t.parts.len() as u64 + 1);
+                if version >= 12 {
+                    put_uvarint(&mut out, t.parts.len() as u64 + 1);
+                } else {
+                    out.extend((t.parts.len() as i32).to_be_bytes());
+                }
                 for p in &t.parts {
                     out.extend(p.to_be_bytes());
                 }
@@ -760,4 +769,35 @@ fn a_format_expression_takes_no_closure_and_no_range() {
     assert_eq!(codes("arg", arg), vec!["BLS0301"]);
     let alias = "format g(n) = bytes(range(0u64, n).len());\nformat F(n: u64) { a: g(n) }";
     assert!(codes("alias", alias).contains(&"BLS0301".to_owned()));
+}
+
+/// `select(cond, A, B)`'s two elements have one value type, or are both valueless.
+#[test]
+fn a_select_has_one_value_type() {
+    let dir = std::env::temp_dir().join(format!("blossom-format-select-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let codes = |tag: &str, body: &str| -> Vec<String> {
+        let path = dir.join(format!("{tag}.bls"));
+        std::fs::write(&path, format!("program f version 1;\n{body}\n")).unwrap();
+        let nodes = [NodeSpec {
+            name: "n1".to_owned(),
+            role: None,
+        }];
+        match compile_file(path.to_str().unwrap(), &nodes).0 {
+            Ok(_) => Vec::new(),
+            Err(blossom_front::api::BlsError::Rejected(d)) => d.iter().map(|x| x.code.as_str().to_owned()).collect(),
+            Err(e) => panic!("{tag}: {e}"),
+        }
+    };
+    let ok = "format F(n: u64) { a: select(n > 1u64, prefixed(uvarint, 1, utf8), prefixed(i16, 0, utf8)), \
+              select(n > 2u64, tags, constant(i8, 0i8)) }";
+    assert_eq!(codes("ok", ok), Vec::<String>::new());
+    let types = "format F(n: u64) { a: select(n > 1u64, u8, u16) }";
+    assert_eq!(codes("types", types), vec!["BLS0301"]);
+    let nested = "format F(n: u64) { a: array(i32, 0, select(n > 1u64, i32, bool)) }";
+    assert_eq!(codes("nested", nested), vec!["BLS0301"]);
+    let valued = "format F(n: u64) { a: select(n > 1u64, u8, tags) }";
+    assert_eq!(codes("valued", valued), vec!["BLS0301"]);
+    let arity = "format F(n: u64) { a: select(n > 1u64, u8) }";
+    assert_eq!(codes("arity", arity), vec!["BLS0301"]);
 }

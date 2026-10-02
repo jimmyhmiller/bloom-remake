@@ -158,6 +158,7 @@ fn is_builtin(name: &str) -> bool {
             | "nullable"
             | "constant"
             | "ignored"
+            | "select"
     ) || int_named(name).is_some()
 }
 
@@ -245,6 +246,13 @@ enum Elem {
     Tags,
     /// Elements in sequence; the value is the tuple of the valued ones (the one itself, when only one is).
     Tuple(Vec<Elem>),
+    /// `select(cond, A, B)`: `A` where the condition (over the format's parameters) holds, `B`
+    /// otherwise; both have the same value (a protocol's encoding that changes with its version).
+    Select {
+        cond: Expr,
+        then: Box<Elem>,
+        els: Box<Elem>,
+    },
 }
 
 impl Elem {
@@ -253,6 +261,7 @@ impl Elem {
         match self {
             Elem::Constant { .. } | Elem::Ignored { .. } | Elem::Tags => false,
             Elem::Tuple(xs) => xs.iter().any(Elem::valued),
+            Elem::Select { then, .. } => then.valued(),
             _ => true,
         }
     }
@@ -281,6 +290,7 @@ fn min_width(e: &Elem, env: &Env, depth: u32) -> u64 {
         },
         Elem::Constant { elem, .. } | Elem::Ignored { elem, .. } => min_width(elem, env, depth),
         Elem::Tuple(xs) => xs.iter().map(|x| min_width(x, env, depth)).fold(0, u64::saturating_add),
+        Elem::Select { then, els, .. } => min_width(then, env, depth).min(min_width(els, env, depth)),
         Elem::Format { name, .. } => record_elems(name.name, env, depth)
             .iter()
             .filter(|(conditional, _)| !conditional)
@@ -295,6 +305,7 @@ fn consumes_all(e: &Elem, env: &Env, depth: u32) -> bool {
         Elem::Rest | Elem::Utf8 => true,
         Elem::Constant { elem, .. } | Elem::Ignored { elem, .. } => consumes_all(elem, env, depth),
         Elem::Tuple(xs) => xs.last().is_some_and(|x| consumes_all(x, env, depth)),
+        Elem::Select { then, els, .. } => consumes_all(then, env, depth) || consumes_all(els, env, depth),
         Elem::Format { name, .. } => record_elems(name.name, env, depth)
             .last()
             .is_some_and(|(_, x)| consumes_all(x, env, depth + 1)),
@@ -338,6 +349,31 @@ fn unbounded(e: &Expr) -> Option<Span> {
         _ => {}
     }
     children(e).into_iter().find_map(unbounded)
+}
+
+/// Whether two written types are the same, spans aside.
+fn same_type(a: &Type, b: &Type) -> bool {
+    match (a, b) {
+        (Type::Named { path: pa, args: aa, .. }, Type::Named { path: pb, args: ab, .. }) => {
+            pa.len() == pb.len()
+                && pa.iter().zip(pb).all(|(x, y)| x.name == y.name)
+                && aa.len() == ab.len()
+                && aa.iter().zip(ab).all(|(x, y)| same_type(x, y))
+        }
+        (Type::Tuple { elems: ea, .. }, Type::Tuple { elems: eb, .. }) => {
+            ea.len() == eb.len() && ea.iter().zip(eb).all(|(x, y)| same_type(x, y))
+        }
+        (Type::Unsafe { inner: ia, .. }, Type::Unsafe { inner: ib, .. }) => same_type(ia, ib),
+        (
+            Type::Fn {
+                params: pa, ret: ra, ..
+            },
+            Type::Fn {
+                params: pb, ret: rb, ..
+            },
+        ) => pa.len() == pb.len() && pa.iter().zip(pb).all(|(x, y)| same_type(x, y)) && same_type(ra, rb),
+        _ => false,
+    }
 }
 
 /// An expression's direct subexpressions (an aggregate's clauses aside).
@@ -511,6 +547,24 @@ fn elem(e: &Expr, env: &Env, depth: u32, diags: &mut Diagnostics) -> Option<Elem
                 len,
                 bias,
                 inner: Box::new(inner),
+            });
+        }
+        "select" => {
+            if !arity(diags, 3) {
+                return None;
+            }
+            let then = elem(pos.get(1)?, env, depth + 1, diags)?;
+            let els = elem(pos.get(2)?, env, depth + 1, diags)?;
+            if then.valued() != els.valued() {
+                return fail(
+                    diags,
+                    "`select`'s two elements both have a value, or neither does".into(),
+                );
+            }
+            return Some(Elem::Select {
+                cond: (*pos.first()?).clone(),
+                then: Box::new(then),
+                els: Box::new(els),
             });
         }
         "constant" | "ignored" => {
@@ -929,8 +983,27 @@ impl Gen<'_> {
                     b.ty_tuple(tys)
                 }
             }
+            // Both branches have one value type (`select_mismatch`).
+            Elem::Select { then, .. } => self.value_ty(then),
             // Valueless elements have no field; callers check `valued` first.
             Elem::Constant { .. } | Elem::Ignored { .. } | Elem::Tags => b.ty_tuple(Vec::new()),
+        }
+    }
+
+    /// The first `select` in `e` whose two elements' values differ in type.
+    fn select_mismatch<'e>(&self, e: &'e Elem) -> Option<&'e Expr> {
+        match e {
+            Elem::Select { cond, then, els } => {
+                if then.valued() && !same_type(&self.value_ty(then), &self.value_ty(els)) {
+                    return Some(cond);
+                }
+                self.select_mismatch(then).or_else(|| self.select_mismatch(els))
+            }
+            Elem::Prefixed { inner, .. } | Elem::Nullable { inner, .. } => self.select_mismatch(inner),
+            Elem::Array { item, .. } => self.select_mismatch(item),
+            Elem::Constant { elem, .. } | Elem::Ignored { elem, .. } => self.select_mismatch(elem),
+            Elem::Tuple(xs) => xs.iter().find_map(|x| self.select_mismatch(x)),
+            _ => None,
         }
     }
 
@@ -958,6 +1031,7 @@ impl Gen<'_> {
                 }
                 b.tup(zs)
             }
+            Elem::Select { then, .. } => return self.zero(then),
             Elem::Format { .. } | Elem::Constant { .. } | Elem::Ignored { .. } | Elem::Tags => return None,
         })
     }
@@ -1012,6 +1086,10 @@ impl Gen<'_> {
                 b.m(read, "map", vec![b.clos(&["fmt$c"], b.tidx(b.var("fmt$c"), 1))])
             }
             Elem::Tags => b.call("format$skip_tags", vec![buf.clone(), pos.clone()]),
+            Elem::Select { cond, then, els } => {
+                let (t, f) = (self.dec(then, buf, pos), self.dec(els, buf, pos));
+                b.ifx(cond.clone(), t, f)
+            }
         }
     }
 
@@ -1219,6 +1297,10 @@ impl Gen<'_> {
             }
             Elem::Constant { elem, value } | Elem::Ignored { elem, value } => self.enc(elem, value),
             Elem::Tags => b.call("Bytes::uvarint", vec![b.int(0, Some("u64"))]),
+            Elem::Select { cond, then, els } => {
+                let (t, f) = (self.enc(then, v), self.enc(els, v));
+                b.ifx(cond.clone(), t, f)
+            }
         }
     }
 
@@ -1411,6 +1493,16 @@ fn record(f: &FormatItem, fields: &[FormatField], env: &Env, diags: &mut Diagnos
         next: 0,
         diags: Diagnostics::new(),
     };
+    if let Some(cond) = elems.iter().find_map(|(_, e)| g.select_mismatch(e)) {
+        diags.push(
+            Diagnostic::new(
+                code!("BLS0301"),
+                "`select`'s two elements have values of different types",
+            )
+            .with_primary(cond.span),
+        );
+        return None;
+    }
     // The struct.
     let mut struct_fields = Vec::new();
     for (fd, e) in &elems {
