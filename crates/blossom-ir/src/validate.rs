@@ -188,7 +188,9 @@ fn check_function(p: &Program, f: &FnDecl, body: &Expr) -> Result<(), String> {
     }
     for ((_, ty), var) in f.params.iter().zip(f.vars.iter()) {
         if var.ty != *ty {
-            return Err(format!("function {name}: a parameter variable's type differs from the parameter's"));
+            return Err(format!(
+                "function {name}: a parameter variable's type differs from the parameter's"
+            ));
         }
     }
     let mut m = Mentions::default();
@@ -198,7 +200,9 @@ fn check_function(p: &Program, f: &FnDecl, body: &Expr) -> Result<(), String> {
     }
     let ty = expr_type(p, Cx::function(f), body).map_err(|e| format!("function {name}: {e}"))?;
     if !assignable(p, ty, f.ret) {
-        return Err(format!("function {name}: the body's type is not the declared result type"));
+        return Err(format!(
+            "function {name}: the body's type is not the declared result type"
+        ));
     }
     Ok(())
 }
@@ -211,12 +215,19 @@ pub const PART_TYPE: &str = "$builtin::Part";
 /// exactly for a connect stream, and each belongs to one stream.
 fn check_stream(p: &Program, st: &StreamDecl) -> Result<(), String> {
     let name = &st.name;
-    let ty = |d: TypeDef| p.types.lookup(&d).ok_or_else(|| format!("stream {name}: type {d:?} is not interned"));
+    let ty = |d: TypeDef| {
+        p.types
+            .lookup(&d)
+            .ok_or_else(|| format!("stream {name}: type {d:?} is not interned"))
+    };
     let conn = ty(TypeDef::Conn)?;
     let u64t = ty(TypeDef::Int(IntTy::U64))?;
     let text = ty(TypeDef::Str)?;
     let rel = |id: RelId, class: RelClass, cols: Vec<TypeId>, what: &str| -> Result<(), String> {
-        let r = p.rels.get(id).ok_or_else(|| format!("stream {name}: `{what}` is not a relation"))?;
+        let r = p
+            .rels
+            .get(id)
+            .ok_or_else(|| format!("stream {name}: `{what}` is not a relation"))?;
         if r.class != class {
             return Err(format!("stream {name}: `{what}` has class {:?}", r.class));
         }
@@ -236,14 +247,27 @@ fn check_stream(p: &Program, st: &StreamDecl) -> Result<(), String> {
         StreamKind::Connect => vec![conn, u64t, text, instant],
     };
     rel(st.opened, ev(StreamEvent::Opened), opened, "opened")?;
-    rel(st.data, ev(StreamEvent::Data), vec![conn, u64t, ty(TypeDef::Bytes)?], "data")?;
+    rel(
+        st.data,
+        ev(StreamEvent::Data),
+        vec![conn, u64t, ty(TypeDef::Bytes)?],
+        "data",
+    )?;
     rel(st.closed, ev(StreamEvent::Closed), vec![conn, text], "closed")?;
     rel(st.close, RelClass::HostOut(HostOp::Close), vec![conn], "close")?;
     rel(st.pause, RelClass::HostOut(HostOp::Pause), vec![conn], "pause")?;
     rel(st.resume, RelClass::HostOut(HostOp::Resume), vec![conn], "resume")?;
     // `write(c, seq, parts: Vec<Part>)`: `Part` is the built-in enum whose variant 0 is `Bytes(Bytes)`.
-    let w = p.rels.get(st.write).ok_or_else(|| format!("stream {name}: `write` is not a relation"))?;
-    let parts = w.schema.cols.get(2).map(|c| c.ty).ok_or_else(|| format!("stream {name}: `write` has no parts"))?;
+    let w = p
+        .rels
+        .get(st.write)
+        .ok_or_else(|| format!("stream {name}: `write` is not a relation"))?;
+    let parts = w
+        .schema
+        .cols
+        .get(2)
+        .map(|c| c.ty)
+        .ok_or_else(|| format!("stream {name}: `write` has no parts"))?;
     let part_ok = match p.types.get(parts) {
         Some(TypeDef::Vec(part)) => match p.types.get(*part) {
             Some(TypeDef::Enum(e)) => {
@@ -251,7 +275,9 @@ fn check_stream(p: &Program, st: &StreamDecl) -> Result<(), String> {
                     && e.variants.iter().any(|v| {
                         v.number == 0
                             && v.payload.len() == 1
-                            && v.payload.first().is_some_and(|f| p.types.get(f.ty) == Some(&TypeDef::Bytes))
+                            && v.payload
+                                .first()
+                                .is_some_and(|f| p.types.get(f.ty) == Some(&TypeDef::Bytes))
                     })
             }
             _ => false,
@@ -261,14 +287,23 @@ fn check_stream(p: &Program, st: &StreamDecl) -> Result<(), String> {
     if !part_ok {
         return Err(format!("stream {name}: `write`'s parts are not a Vec<Part>"));
     }
-    rel(st.write, RelClass::HostOut(HostOp::Write), vec![conn, u64t, parts], "write")?;
+    rel(
+        st.write,
+        RelClass::HostOut(HostOp::Write),
+        vec![conn, u64t, parts],
+        "write",
+    )?;
     match (st.kind, st.failed, st.dial) {
         (StreamKind::Listen, None, None) => {}
         (StreamKind::Connect, Some(failed), Some(dial)) => {
             rel(failed, ev(StreamEvent::Failed), vec![u64t, text], "failed")?;
             rel(dial, RelClass::HostOut(HostOp::Dial), vec![u64t, text], "dial")?;
         }
-        _ => return Err(format!("stream {name}: `failed` and `dial` belong exactly to connect streams")),
+        _ => {
+            return Err(format!(
+                "stream {name}: `failed` and `dial` belong exactly to connect streams"
+            ));
+        }
     }
     let mine = [
         Some(st.opened),
@@ -282,7 +317,15 @@ fn check_stream(p: &Program, st: &StreamDecl) -> Result<(), String> {
         st.dial,
     ];
     for other in p.streams.iter().filter(|o| o.name != st.name) {
-        let theirs = [Some(other.opened), Some(other.data), Some(other.closed), other.failed, Some(other.write), Some(other.close), other.dial];
+        let theirs = [
+            Some(other.opened),
+            Some(other.data),
+            Some(other.closed),
+            other.failed,
+            Some(other.write),
+            Some(other.close),
+            other.dial,
+        ];
         if mine.iter().flatten().any(|r| theirs.iter().flatten().any(|o| o == r)) {
             return Err(format!("stream {name} shares a relation with stream {}", other.name));
         }
@@ -475,6 +518,23 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
             Some(r.span),
             format!("{}: key, payload and lattice columns must partition the schema", r.name),
         );
+        // A timer's guard is a derived relation, table or static the node holds where the timer runs (it observes it
+        // after each tick, LANGUAGE §15.2).
+        if let RelClass::Event(EventSource::Timer(TimerDecl { guard: Some(g), .. })) = &r.class {
+            check(
+                p.rels.get(*g).is_some_and(|gr| {
+                    matches!(gr.class, RelClass::Idb | RelClass::Static)
+                        && (gr.placement == Placement::Shared || gr.placement == r.placement)
+                }),
+                8,
+                None,
+                Some(r.span),
+                format!(
+                    "{}: a timer's guard must be a derived relation, table or static placed where the timer is",
+                    r.name
+                ),
+            );
+        }
         if let RelClass::Channel(c) = &r.class {
             check(
                 matches!(
@@ -736,7 +796,8 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
                 );
                 if let Some(t) = &atom.sender {
                     check(
-                        term_matches(p, Cx::rule(rule), t, &TypeDef::Node(None)) || term_matches(p, Cx::rule(rule), t, &TypeDef::Session),
+                        term_matches(p, Cx::rule(rule), t, &TypeDef::Node(None))
+                            || term_matches(p, Cx::rule(rule), t, &TypeDef::Session),
                         8,
                         Some(rule),
                         Some(atom.span),
@@ -1203,11 +1264,7 @@ fn check_literal(p: &Program, r: Cx<'_>, l: &Literal) -> Result<(), String> {
 fn pattern_type(p: &Program, r: Cx<'_>, pat: &Pattern, ty: TypeId) -> Result<(), String> {
     match pat {
         Pattern::Var(v) => {
-            if r
-                .vars
-                .get(*v)
-                .is_some_and(|x| x.ty == ty || assignable(p, ty, x.ty))
-            {
+            if r.vars.get(*v).is_some_and(|x| x.ty == ty || assignable(p, ty, x.ty)) {
                 Ok(())
             } else {
                 Err("pattern variable type mismatch".into())
@@ -1292,11 +1349,7 @@ fn expr_type(p: &Program, r: Cx<'_>, e: &Expr) -> Result<TypeId, String> {
             .ok_or(format!("expression needs uninerned type {d:?}"))
     };
     match e {
-        Expr::Term(Term::Var(v)) => r
-            .vars
-            .get(*v)
-            .map(|v| v.ty)
-            .ok_or("unknown expression variable".into()),
+        Expr::Term(Term::Var(v)) => r.vars.get(*v).map(|v| v.ty).ok_or("unknown expression variable".into()),
         Expr::Term(Term::Const(c)) => {
             let v = p.consts.get(*c).ok_or("unknown expression constant")?;
             p.types
@@ -1602,7 +1655,11 @@ fn closure_type(p: &Program, r: Cx<'_>, e: &Expr, params: &[TypeId]) -> Result<T
 
 /// The type of a library call (LANGUAGE Appendix B), checking its arguments.
 fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, String> {
-    let lookup = |d: TypeDef| p.types.lookup(&d).ok_or(format!("library result type {d:?} is not interned"));
+    let lookup = |d: TypeDef| {
+        p.types
+            .lookup(&d)
+            .ok_or(format!("library result type {d:?} is not interned"))
+    };
     let ty = |i: usize| -> Result<TypeId, String> {
         expr_type(p, r, args.get(i).ok_or(format!("{f:?}: missing argument {i}"))?)
     };
@@ -1687,7 +1744,11 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
             arity(2)?;
             let v = ty(0)?;
             let e = elem(v)?;
-            same(closure_type(p, r, args.get(1).ok_or("missing closure")?, &[e])?, boolt()?, "a predicate returns bool")?;
+            same(
+                closure_type(p, r, args.get(1).ok_or("missing closure")?, &[e])?,
+                boolt()?,
+                "a predicate returns bool",
+            )?;
             if f == LibFn::VecFilter { Ok(v) } else { boolt() }
         }
         LibFn::VecFilterMap => {
@@ -1868,12 +1929,20 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
             let b = lookup(TypeDef::Bytes)?;
             same(ty(0)?, b, "writes into Bytes")?;
             same(ty(1)?, u64t()?, "a position is u64")?;
-            same(ty(2)?, lookup(TypeDef::Int(it))?, "the written integer has the method's type")?;
+            same(
+                ty(2)?,
+                lookup(TypeDef::Int(it))?,
+                "the written integer has the method's type",
+            )?;
             lookup(TypeDef::Option(b))
         }
         LibFn::BytesFrom(it) => {
             arity(1)?;
-            same(ty(0)?, lookup(TypeDef::Int(it))?, "the integer has the constructor's type")?;
+            same(
+                ty(0)?,
+                lookup(TypeDef::Int(it))?,
+                "the integer has the constructor's type",
+            )?;
             lookup(TypeDef::Bytes)
         }
         LibFn::BytesUvarintAt | LibFn::BytesVarintAt => {
@@ -2047,7 +2116,12 @@ fn builtin_type(p: &Program, r: Cx<'_>, b: &BuiltinFn, args: &[Expr]) -> Result<
             if !matches!(
                 types.first().and_then(|t| p.types.get(*t)),
                 Some(
-                    TypeDef::Vec(_) | TypeDef::Set(_) | TypeDef::Map(..) | TypeDef::Str | TypeDef::Bytes | TypeDef::Blob
+                    TypeDef::Vec(_)
+                        | TypeDef::Set(_)
+                        | TypeDef::Map(..)
+                        | TypeDef::Str
+                        | TypeDef::Bytes
+                        | TypeDef::Blob
                 )
             ) {
                 return Err("len expects a collection, String, Bytes or a Blob".into());

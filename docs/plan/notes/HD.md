@@ -4,8 +4,8 @@ Branch `slice-hardening`, worktree `.worktrees/hd`. Chosen by the user (2026-10-
 
 ## Resume here
 
-- **State (2026-10-02):** items 1–4 done (item 4: guarded timers and kafka3's tick-count check). Next: the HD
-  adversarial review, then merge, then S9.
+- **State (2026-10-02):** items 1–4 done; the adversarial review is done and its findings are fixed (see "Review").
+  Next: merge, then S9.
 
 ## Items
 
@@ -187,3 +187,70 @@ Branch `slice-hardening`, worktree `.worktrees/hd`. Chosen by the user (2026-10-
     - the synchronous world ignoring the guard;
     - lowering dropping the guard;
     - LDFI not refusing.
+
+## Review (2026-10-02)
+
+Three reviewers ran in parallel, read-only: storage, the Kafka program changes, and guarded timers plus item 1. The
+six findings of the S8 controller review were also rechecked; all were already fixed (S8 item 8; HD item 2;
+DescribeCluster now returns 114/115; `NOT_CAUGHT_UP_WAIT` and the InitProducerId late rule).
+
+**Storage** (fixed in 4905922):
+- A logged blob's final name could survive a power loss without its bytes, after something else synced the blob
+  directory (a large blob's put, the checkpointer, a collection); the node then trusted the name. Logged blobs now
+  live under `<name>.log` until synced and renamed, and recovery deletes the provisional files no surviving record
+  logs.
+- Recovery replayed an unsynced tail (left in the page cache by a process crash) without syncing it. It now syncs
+  and certifies the newest segment first.
+- Smaller fixes:
+  - `restore_logged` propagates real I/O errors;
+  - `sync_logged_below` hard-errors on a vanished pending file;
+  - the inline-blob budget counts the delta.
+- Tests:
+  - a power loss after a directory sync;
+  - a replayed tail surviving a later power loss;
+  - an old-scheme strict segment still recovering.
+
+**Kafka program**:
+- **High.** Whether a `done` row counted at the window's edge depended on tick timing (retention is filtered on each
+  tick's state). For repeatable commands (pid blocks), brokers could disagree about applying a late copy, ending in
+  duplicate producer ids. `fresh` and `mark_done` now use `done_by(origin, tag, i)` (`at + DONE_WINDOW >= i`, which
+  retention always keeps), and the snapshot views are filtered by the applied index alone.
+- **Medium.** `meta_snap` was one row; past the 16 MiB frame limit it would be dropped and the asking broker stuck.
+  The snapshot is now a format (`MetaSnapshot`), encoded and sent as `meta_part(at, k, n, chunk)` of at most
+  `META_CHUNK` bytes. The asker reassembles the parts in `meta_parts` and adopts the newest whole one. Asks go out
+  every `META_ASK` (500 ms) through a guarded timer (`while meta_stuck`). The stopped-broker test uses 64-byte
+  parts; the mutation "send only the first part" fails it.
+- **Low–medium.** A deleted topic's Raft state leaked on a broker that adopted metadata past the `mdeleted` window.
+  The cleanup is now keyed on the metadata itself: a data group with a term whose topic id no longer names a topic.
+  `mdeleted` is gone. `check_runs` asserts that no broker keeps Raft state for a deleted topic.
+- **Low.** Controller compaction could pass this broker's commit index after an adoption. It is now bounded by
+  `commit_of`.
+- **Low, accepted.** An origin more than `DONE_WINDOW` entries behind (an asymmetric partition, still latched as
+  caught up) has every command skipped as stale, and its requests time out. Stamping `made` at the leader would
+  break the duplicate proof (copies appended by different leaders would differ).
+
+**Guarded timers and item 1**:
+- **Medium (item 1).** The program's expressions inside a format (element arguments, conditions, defaults) ran
+  unmetered, and a metered function called from a format got a fresh budget per call (N × 10^7). Now:
+  - such expressions take no closure and no `range` (BLS0301);
+  - every metered call of one evaluation spends from its one budget (`Fuel` no longer refreshes inside unmetered
+    frames, in both evaluators);
+  - the two evaluators' budget messages are identical;
+  - tests: a metered condition per array item adds up to BLSR012 (and the mutation restoring fresh budgets fails
+    it); the BLS0301 refusals.
+- **Medium-low.** A guard over events or `now()` could make the node and the synchronous world disagree. BLS0412 now
+  requires a guard that depends only on carried state, checked on the lowered IR (`unsteady_guards`). Kafka's
+  `election_armed` was rewritten over `rterm` and `won` (it read `eff`, which folds in message terms).
+- **Low.** Fixed:
+  - `SpecSim::step` and exhaustive certification refuse guarded timers (LANG-172);
+  - the IR validator checks a guard's class and placement;
+  - `timer_guards` runs after `imports`;
+  - the stats temporary file is `<path>.tmp`;
+  - kafka3's idle check also asserts at least 80 ticks and live processes.
+- **Documented.** Request deadlines now rely on the unguarded `raft_heartbeat` (50 ms) instead of `fetch_wake`
+  (10 ms); a comment on `raft_heartbeat` says it must stay unguarded.
+- **Not fixed.**
+  - A duplicate timer's guard resolving to the first timer: diagnostics only, on a program already rejected with
+    BLS0201.
+  - The loosened reassignment check accepting an earlier wave's target from any broker: kept; its reason is in the
+    test.

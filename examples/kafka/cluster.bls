@@ -180,18 +180,9 @@ channel submit(cmd: Bytes): Broker -> Broker;
 /// A broker that cannot apply the controller's log further (it holds no entries up to its snapshot point `point`)
 /// asks for the applied metadata at or past it.
 channel meta_want(point: u64): Broker -> Broker;
-/// A broker's applied metadata at index `at`, for a broker that asked for it (`meta_want`): the topics,
-/// assignments, reassignments, deleted topics, applied commands and their outcomes, and the next producer id.
-channel meta_snap(
-    at: u64,
-    topics: Vec<(String, Bytes, i32, Vec<(String, String)>)>,
-    assign: Vec<(Bytes, i32, Vec<i32>)>,
-    reassign: Vec<(Bytes, i32, Vec<i32>, Vec<i32>, u64)>,
-    deleted: Vec<(Bytes, u64)>,
-    done: Vec<(i32, u64, u64)>,
-    outcomes: Vec<(i32, u64, u64, i16, Bytes, i64, String)>,
-    next: i64,
-): Broker -> Broker;
+/// A part of a broker's applied metadata at index `at` (`MetaSnapshot`, encoded), for a broker that asked for it
+/// (`meta_want`): part `k` of `n`, each at most `META_CHUNK` bytes, so a snapshot of any size travels in frames.
+channel meta_part(at: u64, k: u64, n: u64, chunk: Bytes): Broker -> Broker;
 /// A partition leader's announcement: the groups it leads, with their epochs and in-sync replicas (S8.md D7), and
 /// when it sent it (by its clock), which orders its announcements within one epoch.
 channel leads(gs: Vec<(Group, u64, Vec<i32>)>, at: Instant): Broker -> Broker;
@@ -202,6 +193,33 @@ param DONE_WINDOW: u64 = 100000;
 /// How many applied controller entries a broker keeps in its log past its snapshot point, so a follower briefly
 /// behind catches up from entries rather than from the snapshot.
 param CONTROLLER_KEEP: u64 = 1000;
+/// The largest part of the applied metadata in one message (`meta_part`).
+param META_CHUNK: u64 = 1048576;
+/// How often a broker that needs the applied metadata asks for it again.
+param META_ASK: Duration = 500ms;
+
+/// A broker's applied metadata at index `at`: its topics, assignments, reassignments, applied commands (within the
+/// window) and their outcomes, and the next producer id. Every broker that applied `at` encodes the same bytes.
+format MetaSnapshot {
+    at: u64,
+    topics: compact_array((compact_string, uuid, i32, compact_array((compact_string, compact_string)))),
+    assign: compact_array((uuid, i32, compact_array(i32))),
+    reassign: compact_array((uuid, i32, compact_array(i32), compact_array(i32), u64)),
+    done: compact_array((i32, u64, u64)),
+    outcomes: compact_array((i32, u64, u64, i16, uuid, i64, compact_string)),
+    next: i64,
+}
+
+/// Numbered parts, joined in order (`cs` is in canonical order: by number).
+fn joined(cs: Vec<(u64, Bytes)>) -> Bytes {
+    Bytes::join(cs.map(|c| c.1))
+}
+
+/// `b` in parts of at most `size` bytes (at least one part, empty for an empty `b`).
+fn chunks(b: Bytes, size: u64) -> Vec<Bytes> {
+    let n = if b.len() == 0u64 { 1u64 } else { (b.len() + size - 1u64) / size };
+    range(0u64, n).filter_map(|k| b.slice(k * size, if (k + 1u64) * size < b.len() { (k + 1u64) * size } else { b.len() }))
+}
 /// How long a follower may go without being caught up before it leaves its partition's in-sync replicas (Kafka's
 /// `replica.lag.time.max.ms`).
 param REPLICA_LAG_MAX: Duration = 30s;
@@ -262,8 +280,6 @@ at Broker {
     // row is gone is never applied twice: such a copy comes at least `DONE_WINDOW` entries after the original, which
     // came after it was made. (A request waits seconds; `DONE_WINDOW` entries take far longer.)
 
-    /// The ids of the topics deleted (and the index): their partitions' data goes.
-    durable table mdeleted(tid: Bytes, at: u64) key(tid) while applied_m(a) where at + DONE_WINDOW > a;
     /// The commands applied, by request, and the index each was applied at.
     durable table done(origin: i32, tag: u64, at: u64) key(origin, tag) while applied_m(a) where at + DONE_WINDOW > a;
     /// Each applied item's outcome, by its request and entry: the error (NONE when it took effect), the topic id and
@@ -308,62 +324,77 @@ at Broker {
     view meta_topics(xs = collect!((n, id, p, c) default [])) = mtopic(n, id, p, c);
     view meta_assign(xs = collect!((t, p, rs) default [])) = massign(t, p, rs);
     view meta_reassign(xs = collect!((t, p, tg, h, s) default [])) = mreassign(t, p, tg, h, s);
-    view meta_deleted(xs = collect!((t, at) default [])) = mdeleted(t, at);
-    view meta_done(xs = collect!((o, tag, at) default [])) = done(o, tag, at);
-    view meta_outcomes(xs = collect!((o, tag, s, e, id, pid, n) default [])) = outcome(o, tag, s, e, id, pid, n);
-    want_meta: on raft_heartbeat, applied_m(a), rsnap(g, s, _, _, _), let c = controller() where g == c && a < s {
+    // The windowed rows as of the applied index alone (retention may keep an older one a tick longer).
+    view meta_done(xs = collect!((o, tag, at) default [])) = done(o, tag, at), applied_m(a) where at + DONE_WINDOW > a;
+    view meta_outcomes(xs = collect!((o, tag, s, e, id, pid, n) default [])) =
+        outcome(o, tag, s, e, id, pid, n), done(o, tag, at), applied_m(a) where at + DONE_WINDOW > a;
+    /// Whether this broker cannot apply further from its log: its applied index is behind its snapshot point.
+    view meta_stuck() = applied_m(a), rsnap(g, s, _, _, _), let c = controller() where g == c && a < s;
+    timer meta_ask every META_ASK while meta_stuck;
+    want_meta: on meta_ask, applied_m(a), rsnap(g, s, _, _, _), let c = controller() where g == c && a < s {
         for broker(n, _, _, _) where n != self {
             send meta_want(s) to n;
         }
     }
-    send_meta: on meta_want(s) from f, applied_m(a), next_pid(np), meta_topics(ts), meta_assign(asg),
-        meta_reassign(rs), meta_deleted(ds), meta_done(dn), meta_outcomes(os) where a >= s {
-        send meta_snap(a, ts, asg, rs, ds, dn, os, np) to f;
+    view meta_bytes(a, b) =
+        applied_m(a), next_pid(np), meta_topics(ts), meta_assign(asg), meta_reassign(rs), meta_done(dn),
+        meta_outcomes(os),
+        let b = MetaSnapshot::encode(MetaSnapshot { at: a, topics: ts, assign: asg, reassign: rs, done: dn, outcomes: os, next: np });
+    send_meta: on meta_want(s) from f, meta_bytes(a, b) where a >= s {
+        for (k, c) in chunks(b, META_CHUNK).enumerate() {
+            send meta_part(a, k, chunks(b, META_CHUNK).len(), c) to f;
+        }
     }
-    /// The newest metadata sent past what this broker applied (two copies of one index are equal).
-    view adopt_at(m = max!(at)) = meta_snap(at, _, _, _, _, _, _, _) from _, applied_m(mine) where at > mine;
-    view adopt(at, ts, asg, rs, ds, dn, os, np) = meta_snap(at, ts, asg, rs, ds, dn, os, np) from _, adopt_at(at);
+    /// The parts received of each index's metadata past what this broker applied (every sender of one index sends
+    /// the same parts).
+    table meta_parts(at: u64, k: u64, n: u64, chunk: Bytes) key(at, k) while applied_m(a) where at > a;
+    keep_meta_part: on meta_part(at, k, n, chunk), applied_m(a) where at > a && k < n {
+        upsert meta_parts(at, k, n, chunk);
+    }
+    /// An index's metadata whose parts are all here, decoded.
+    view meta_whole(at, cs = collect!((k, chunk))) = meta_parts(at, k, _n, chunk);
+    view meta_count(at, n = max!(n)) = meta_parts(at, _k, n, _chunk);
+    view meta_received(at, snap) =
+        meta_whole(at, cs), meta_count(at, n), let Some(d) = MetaSnapshot::decode(joined(cs), 0),
+        let snap = d.0 where cs.len() == n && snap.at == at;
+    /// The newest whole metadata past what this broker applied.
+    view adopt_at(m = max!(at)) = meta_received(at, _snap), applied_m(mine) where at > mine;
+    view adopt(at, snap) = meta_received(at, snap), adopt_at(at);
     view adopting() = adopt_at(_);
-    adopt_state: on adopt(at, ts, asg, rs, ds, dn, os, np) {
+    adopt_state: while adopt(at, snap) {
         next applied_m(at);
-        next next_pid(np);
-        for x in ts {
+        next next_pid(snap.next);
+        for x in snap.topics {
             upsert mtopic(x.0, x.1, x.2, x.3);
         }
-        for x in asg {
+        for x in snap.assign {
             upsert massign(x.0, x.1, x.2);
         }
-        for x in rs {
+        for x in snap.reassign {
             upsert mreassign(x.0, x.1, x.2, x.3, x.4);
         }
-        for x in ds {
-            upsert mdeleted(x.0, x.1);
-        }
-        for x in dn {
+        for x in snap.done {
             upsert done(x.0, x.1, x.2);
         }
-        for x in os {
+        for x in snap.outcomes {
             upsert outcome(x.0, x.1, x.2, x.3, x.4, x.5, x.6);
         }
     }
     /// What the adopted metadata does not hold goes.
-    adopt_drop: on adopt(_at, ts, asg, rs, ds, dn, os, _np) {
-        if mtopic(n, id, p, c) where not ts.contains((n, id, p, c)) {
+    adopt_drop: while adopt(_at, snap) {
+        if mtopic(n, id, p, c) where not snap.topics.contains((n, id, p, c)) {
             delete mtopic(n, id, p, c);
         }
-        if massign(t, p, r) where not asg.contains((t, p, r)) {
+        if massign(t, p, r) where not snap.assign.contains((t, p, r)) {
             delete massign(t, p, r);
         }
-        if mreassign(t, p, tg, h, sn) where not rs.contains((t, p, tg, h, sn)) {
+        if mreassign(t, p, tg, h, sn) where not snap.reassign.contains((t, p, tg, h, sn)) {
             delete mreassign(t, p, tg, h, sn);
         }
-        if mdeleted(t, at) where not ds.contains((t, at)) {
-            delete mdeleted(t, at);
-        }
-        if done(o, tag, at) where not dn.contains((o, tag, at)) {
+        if done(o, tag, at) where not snap.done.contains((o, tag, at)) {
             delete done(o, tag, at);
         }
-        if outcome(o, tag, sl, e, id, pid, n) where not os.contains((o, tag, sl, e, id, pid, n)) {
+        if outcome(o, tag, sl, e, id, pid, n) where not snap.outcomes.contains((o, tag, sl, e, id, pid, n)) {
             delete outcome(o, tag, sl, e, id, pid, n);
         }
     }
@@ -374,10 +405,15 @@ at Broker {
     /// The command to apply, unless it is already applied (sent again by its origin, so in the log twice) or stale.
     view fresh(op, origin, tag, items) =
         to_apply_cmd(i, cmd), let op = cmd.op, let origin = cmd.origin, let tag = cmd.tag, let items = cmd.items,
-        not done(origin, tag, _) where repeatable(op) || cmd.made + DONE_WINDOW > i;
+        not done_by(origin, tag, i) where repeatable(op) || cmd.made + DONE_WINDOW > i;
+    /// Whether a command counts as applied when entry `i` is applied: a `done` row at most `DONE_WINDOW` entries
+    /// older. A function of the index alone, so every broker decides alike (the window's retention keeps every such
+    /// row, and may keep an older one a tick longer, depending on when the broker advanced).
+    view done_by(origin, tag, i) = to_apply_cmd(i, cmd), let origin = cmd.origin, let tag = cmd.tag,
+        done(origin, tag, at) where at + DONE_WINDOW >= i;
     /// Every command applied or skipped is marked done, a stale one too (with no outcome: its origin stops sending it,
     /// and its request times out).
-    mark_done: while to_apply_cmd(i, cmd), let origin = cmd.origin, let tag = cmd.tag, not done(origin, tag, _) {
+    mark_done: while to_apply_cmd(i, cmd), let origin = cmd.origin, let tag = cmd.tag, not done_by(origin, tag, i) {
         upsert done(origin, tag, i);
     }
     /// The items of the command to apply, by field. A request's items name distinct topics (two entries for one
@@ -425,10 +461,9 @@ at Broker {
         cmd_delete_item(origin, tag, slot, name, id), mtopic(name, tid, _, _), not cmd_delete_ids(origin, tag, tid)
             where id == zero_uuid();
     }
-    apply_delete: while cmd_delete_item(origin, tag, slot, name, id), applying(i) {
+    apply_delete: while cmd_delete_item(origin, tag, slot, name, id) {
         if cmd_delete(origin, tag, slot, tid), mtopic(n, tid, parts, cfg) {
             delete mtopic(n, tid, parts, cfg);
-            upsert mdeleted(tid, i);
             upsert outcome(origin, tag, slot, NONE, tid, -1i64, n);
         }
         if not mtopic(_, id, _, _) where id != zero_uuid() {
@@ -501,13 +536,17 @@ at Broker {
         upsert outcome(origin, tag, 0u64, NONE, tid, -1i64, "");
     }
 
-    /// A deleted topic's partition data goes, here as everywhere (the topic is gone from the applied metadata, so
-    /// no broker is a member of its groups any more).
-    forget_deleted: while mdeleted(tid, _), rlog(g, i, t, pt, k, pos, data), let (gt, _gp) = g where gt == tid {
+    /// A deleted topic's partition groups: those this broker keeps Raft state for (it took them through its
+    /// metadata, `takes`) whose topic its applied metadata no longer names. Topic ids are never reused, so the group
+    /// never comes back. (Keyed on the metadata itself, not on a record of the deletion: a broker that adopts a
+    /// leader's metadata past a deletion learns of it only by the topic's absence.)
+    view deleted_group(g) =
+        rterm(g, _), let c = controller(), let (gt, _gp) = g, not mtopic(_, gt, _, _) where g != c;
+    /// Its partition data goes, here as everywhere (no broker is a member of its groups any more).
+    forget_deleted: while deleted_group(g), rlog(g, i, t, pt, k, pos, data) {
         delete rlog(g, i, t, pt, k, pos, data);
     }
-    /// Its Raft state goes too (topic ids are never reused, so the group never comes back).
-    view deleted_group(g) = mdeleted(tid, _), rterm(g, _), let (gt, _gp) = g where gt == tid;
+    /// Its Raft state goes too.
     forget_deleted_raft: while deleted_group(g) {
         if rterm(g, t) {
             delete rterm(g, t);

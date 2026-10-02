@@ -105,6 +105,22 @@ pub fn compile_with(
             roles: &roles,
         },
     )?;
+    // A timer's guard depends on carried state only (LANGUAGE §15.2).
+    for (span, why) in unsteady_guards(lowered.program.get()) {
+        diags.push(
+            Diagnostic::new(
+                code!("BLS0412"),
+                format!(
+                    "a timer's `while` guard must depend only on carried state (tables, statics and views of them): \
+                     it {why}, which the node would see only when it next ticks"
+                ),
+            )
+            .with_primary(span),
+        );
+    }
+    if diags.has_errors() {
+        return Err(BlsError::Rejected(diags));
+    }
     // No evaluation may be deeper than the stack a tick runs on (LANGUAGE §16.1).
     if let Some(d) = too_deep(lowered.program.get(), |id| {
         lowered
@@ -257,6 +273,65 @@ pub(crate) fn deployment(
 
 /// BLS0217 (LANGUAGE §16.1) when `program`'s deepest evaluation is past the bound the evaluators' stack is sized for.
 /// `function` names a declared function and gives its span.
+/// The guarded timers whose guard does not depend on carried state alone, with why: an event, an input, a message
+/// or a stream reads (or `now()`, `tick()` or `rand`) would make a guard that held at the end of a tick false at the
+/// next without the node knowing, so the node and the synchronous world would fire differently (LANGUAGE §15.2).
+fn unsteady_guards(p: &blossom_ir::core::Program) -> Vec<(blossom_base::Span, String)> {
+    use blossom_ir::core::{EventSource, GenSource, Literal, Persistence, RelClass};
+    use std::collections::BTreeMap;
+    fn steady(
+        p: &blossom_ir::core::Program,
+        r: blossom_base::RelId,
+        memo: &mut BTreeMap<blossom_base::RelId, Option<String>>,
+    ) -> Option<String> {
+        if let Some(known) = memo.get(&r) {
+            return known.clone();
+        }
+        // Assumed steady while its definition is checked (recursive views).
+        memo.insert(r, None);
+        let Some(decl) = p.rels.get(r) else {
+            return Some("names a relation the program does not have".into());
+        };
+        let why = match &decl.class {
+            RelClass::Event(_) | RelClass::Channel(_) => Some(format!("reads `{}`, an event", decl.name)),
+            RelClass::Static => None,
+            RelClass::Idb if decl.persistence != Persistence::None => None,
+            _ => p.rules.iter().filter(|rule| rule.head.rel == r).find_map(|rule| {
+                let exprs_vary = rule.body.lits.iter().any(|l| match l {
+                    Literal::Bind { expr, .. } | Literal::Guard(expr) => expr.time_varying(),
+                    Literal::Gen { src, .. } => match src {
+                        GenSource::Value(e) | GenSource::Lattice(e) => e.time_varying(),
+                        GenSource::Range { lo, hi, .. } => lo.time_varying() || hi.time_varying(),
+                        GenSource::TableFn { .. } => false,
+                    },
+                    _ => false,
+                });
+                if exprs_vary {
+                    return Some(format!("reads the clock, the tick or `rand` (in `{}`)", decl.name));
+                }
+                rule.body.lits.iter().find_map(|l| match l {
+                    Literal::Pos(a) | Literal::Neg(a) => steady(p, a.rel, memo),
+                    Literal::Lookup { rel, .. } => steady(p, *rel, memo),
+                    _ => None,
+                })
+            }),
+        };
+        memo.insert(r, why.clone());
+        why
+    }
+    let mut memo = BTreeMap::new();
+    let mut out = Vec::new();
+    for r in p.rels.iter() {
+        if let RelClass::Event(EventSource::Timer(t)) = &r.class
+            && let Some(g) = t.guard
+            && let Some(why) = steady(p, g, &mut memo)
+        {
+            out.push((r.span, why));
+        }
+    }
+    out
+}
+
 pub(crate) fn too_deep(
     program: &blossom_ir::core::Program,
     function: impl Fn(blossom_base::FnId) -> Option<(String, blossom_base::Span)>,
@@ -281,7 +356,10 @@ pub(crate) fn too_deep(
         DepthSite::Partition(id) => {
             let r = program.rels.get(id);
             (
-                format!("the partition key of `{}`", r.map(|r| r.name.to_string()).unwrap_or_default()),
+                format!(
+                    "the partition key of `{}`",
+                    r.map(|r| r.name.to_string()).unwrap_or_default()
+                ),
                 None,
             )
         }

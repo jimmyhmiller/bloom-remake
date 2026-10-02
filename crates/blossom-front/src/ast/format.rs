@@ -81,6 +81,17 @@ pub(crate) fn expand(items: &mut Vec<Item>, diags: &mut Diagnostics) {
         }
         match &f.body {
             FormatBody::Alias(e) => {
+                if let Some(span) = unbounded(e) {
+                    diags.push(
+                        Diagnostic::new(
+                            code!("BLS0301"),
+                            "a format's element arguments take no closure and no `range` (they are evaluated for \
+                             every value, outside the step budget); call a function, which is metered",
+                        )
+                        .with_primary(span),
+                    );
+                    continue;
+                }
                 env.aliases
                     .insert(f.name.name, (f.params.iter().map(|p| p.0).collect(), e.clone()));
             }
@@ -314,6 +325,19 @@ fn size(e: &Expr) -> usize {
         n += size(c);
     }
     n
+}
+
+/// The first closure or `range` call in `e`, if any: work an expression does on its own, not bounded by its size.
+fn unbounded(e: &Expr) -> Option<Span> {
+    match &e.kind {
+        ExprKind::Closure { .. } => return Some(e.span),
+        ExprKind::Call { callee, .. } if matches!(&callee.kind, ExprKind::Path(p, _) if matches!(p.as_slice(), [n] if n.as_str() == "range")) =>
+        {
+            return Some(e.span);
+        }
+        _ => {}
+    }
+    children(e).into_iter().find_map(unbounded)
 }
 
 /// An expression's direct subexpressions (an aggregate's clauses aside).
@@ -1341,6 +1365,23 @@ fn record(f: &FormatItem, fields: &[FormatField], env: &Env, diags: &mut Diagnos
                 ok = false;
             }
             (None, false) => {}
+        }
+        // The generated functions are not metered (LANGUAGE §16.7): an expression of the program's in a field (an
+        // element's argument, a condition, a default) is evaluated per value, so it may not loop on its own.
+        if let Some(span) = [Some(&fd.elem), fd.cond.as_ref(), fd.default.as_ref()]
+            .into_iter()
+            .flatten()
+            .find_map(unbounded)
+        {
+            diags.push(
+                Diagnostic::new(
+                    code!("BLS0301"),
+                    "a format's element arguments, conditions and defaults take no closure and no `range` (they \
+                     are evaluated for every value, outside the step budget); call a function, which is metered",
+                )
+                .with_primary(span),
+            );
+            ok = false;
         }
         if fd.default.is_some() && (fd.cond.is_none() || !e.valued()) {
             diags.push(

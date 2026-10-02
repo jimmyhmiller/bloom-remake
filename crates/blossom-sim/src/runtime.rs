@@ -94,6 +94,11 @@ impl Runtime {
         Ok(out)
     }
 
+    /// Whether the program has a guarded timer (whose firings depend on each node's previous round).
+    pub fn has_guarded(&self) -> bool {
+        !self.guarded.is_empty()
+    }
+
     /// The guarded timers, with the nodes they run on (`roles` gives each node's role).
     pub fn guarded(&self, roles: &[Option<RoleId>]) -> Result<Vec<GuardedTimer>, SimError> {
         guarded_timers(&self.guarded, roles)

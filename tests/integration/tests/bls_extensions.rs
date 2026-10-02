@@ -700,4 +700,59 @@ fn formats_are_bounded_by_their_input_not_the_step_budget() {
         Outcome::Failed(tick, code) => assert_eq!((tick, code.as_str()), (Tick(1), "BLSR012")),
         Outcome::Ran(_) => panic!("a metered function past its budget raised nothing"),
     }
+    // A metered condition per item spends from one budget (HD review): items × steps within it decode, past it is
+    // BLSR012 (each item once had a budget of its own).
+    let items = |k: u64, n: u64, count: u64| {
+        let mut b = Vec::new();
+        put_uvarint(&mut b, count);
+        b.extend((0..count).flat_map(|_| [9u8, 9u8]));
+        ev("many", vec![u(k), u(n), Value::Bytes(Arc::from(&b[..]))])
+    };
+    let step = blossom_ir::core::FN_STEP_BUDGET / 10;
+    match differential_or_error(&artifact, &[items(4, step, 9)], 2) {
+        Outcome::Ran(run) => {
+            let got: Vec<Vec<Value>> = run
+                .node_tick(Tick(1), NodeId(0))
+                .unwrap()
+                .instance
+                .rows(rel("per_item"))
+                .map(|r| r.to_vec())
+                .collect();
+            assert_eq!(got, vec![vec![u(4), u(9)]]);
+        }
+        Outcome::Failed(t, code) => panic!("nine items within the budget: {code} at {t:?}"),
+    }
+    match differential_or_error(&artifact, &[items(5, step, 11)], 2) {
+        Outcome::Failed(tick, code) => assert_eq!((tick, code.as_str()), (Tick(1), "BLSR012")),
+        Outcome::Ran(_) => panic!("eleven items past the budget raised nothing"),
+    }
+}
+
+/// A format's element arguments, conditions and defaults may not loop on their own (they run outside the step
+/// budget, once per value): a closure or a `range` there is BLS0301; a metered function call is fine.
+#[test]
+fn a_format_expression_takes_no_closure_and_no_range() {
+    let dir = std::env::temp_dir().join(format!("blossom-format-bounds-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let codes = |tag: &str, body: &str| -> Vec<String> {
+        let path = dir.join(format!("{tag}.bls"));
+        std::fs::write(&path, format!("program f version 1;\n{body}\n")).unwrap();
+        let nodes = [NodeSpec {
+            name: "n1".to_owned(),
+            role: None,
+        }];
+        match compile_file(path.to_str().unwrap(), &nodes).0 {
+            Ok(_) => Vec::new(),
+            Err(blossom_front::api::BlsError::Rejected(d)) => d.iter().map(|x| x.code.as_str().to_owned()).collect(),
+            Err(e) => panic!("{tag}: {e}"),
+        }
+    };
+    let ok = "fn big(n: u64) -> bool { n > 3u64 }\nformat F(n: u64) { a: u8 if big(n) = 0u8 }";
+    assert_eq!(codes("ok", ok), Vec::<String>::new());
+    let cond = "format F(n: u64) { a: u8 if range(0u64, n).len() > 0u64 = 0u8 }";
+    assert_eq!(codes("cond", cond), vec!["BLS0301"]);
+    let arg = "format F(n: u64) { a: bytes(range(0u64, n).len()) }";
+    assert_eq!(codes("arg", arg), vec!["BLS0301"]);
+    let alias = "format g(n) = bytes(range(0u64, n).len());\nformat F(n: u64) { a: g(n) }";
+    assert!(codes("alias", alias).contains(&"BLS0301".to_owned()));
 }

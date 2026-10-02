@@ -1011,11 +1011,26 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
                 "seed {seed}: brokers 0 and {n} place topics differently"
             );
             // The rest of the applied metadata is the same too: it is a function of the applied index.
-            for name in ["applied_m", "mreassign", "mdeleted", "done", "outcome", "next_pid"] {
+            for name in ["applied_m", "mreassign", "done", "outcome", "next_pid"] {
                 assert_eq!(
                     rows(n, name),
                     rows(0, name),
                     "seed {seed}: brokers 0 and {n} differ in {name}"
+                );
+            }
+        }
+        // No broker keeps Raft state for a deleted topic's partitions (whether it applied the deletion or adopted
+        // metadata past it): every group with a term is the controller's or a topic's that exists.
+        let ids: Vec<Value> = topics.iter().map(|r| r[1].clone()).collect();
+        for n in 0..setup.brokers {
+            for r in rows(n, "rterm") {
+                let Value::Tuple(g) = &r[0] else { panic!("{r:?}") };
+                assert!(
+                    g[0] == match &ctl {
+                        Value::Tuple(c) => c[0].clone(),
+                        other => panic!("{other:?}"),
+                    } || ids.contains(&g[0]),
+                    "seed {seed}: broker {n} keeps Raft state for a deleted topic's group {g:?}"
                 );
             }
         }
@@ -1027,11 +1042,6 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
                 done.len() <= w,
                 "seed {seed}: {} applied commands kept, past the window of {w}",
                 done.len()
-            );
-            let deleted = rows(0, "mdeleted").len();
-            assert!(
-                deleted <= w,
-                "seed {seed}: {deleted} deleted topics kept, past the window of {w}"
             );
             // An outcome goes with its command's `done` row.
             for r in rows(0, "outcome") {
@@ -1157,7 +1167,7 @@ fn admin_requests_through_any_of_three_brokers_are_linearizable() {
 }
 
 /// The controller's log compacted under the admin requests (a snapshot point every few entries, the applied commands
-/// kept for ten), with one broker stopped while the others compact past it: it comes back from the leader's
+/// kept for ten, the applied metadata sent in parts of 64 bytes), with one broker stopped while the others compact past it: it comes back from the leader's
 /// applied metadata, and every broker ends with the same metadata. The requests stay linearizable.
 #[test]
 fn a_broker_behind_the_controllers_snapshot_adopts_the_leaders_metadata() {
@@ -1172,7 +1182,7 @@ fn a_broker_behind_the_controllers_snapshot_adopts_the_leaders_metadata() {
         names: &NAMES,
         brokers: 3,
         partitions: false,
-        params: &[("CONTROLLER_KEEP", "4"), ("DONE_WINDOW", "10")],
+        params: &[("CONTROLLER_KEEP", "4"), ("DONE_WINDOW", "10"), ("META_CHUNK", "64")],
         down: Some((300_000_000, 1_800_000_000)),
     });
     assert!(answered > 200, "only {answered} requests were answered");
