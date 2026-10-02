@@ -261,13 +261,22 @@ composed of encoded headers (`Part::Bytes`) and batch ranges (`Part::Blob`).
   the tick's new blobs, then the source. A missing blob is a host bug, reported as an internal error.
 - **Node.**
   - It caches created blobs until a durable row references one. That tick's effects then carry the blob
-    (`TickEffects::blobs`), and the driver makes it durable before the record syncs: `ManualDriver` and the
-    runtime's committer call `BlobStore::put_all` before the WAL append.
+    (`TickEffects::blobs`), and the driver makes it durable with the record (`recovery::tick_record`, used by
+    `ManualDriver` and the runtime's committer; HD item 3). A blob of at most 1 MiB (8 MiB in all per record) is
+    logged in the record itself (kind `KIND_DELTA_BLOBS`), so its one sync covers it. A larger one is made durable
+    as a file first (`BlobStore::put_all`).
   - When the cache passes its budget (`NodeConfig::blob_cache_bytes`), blobs that no row of the executor's state and
     no parked output holds are dropped.
-- **Store.** `blossom_store::BlobStore` keeps one file per blob under `<store>/blobs/`, named by hash and length. Each
-  is written to a temporary file, synced, and renamed; the directory is synced once per batch. Reads check the hash.
-  Recovery opens the store, and `Boot::blobs` gives the node the recovered rows' blobs.
+- **Store.** `blossom_store::BlobStore` keeps one file per blob under `<store>/blobs/`, named by hash and length. Reads
+  check the hash.
+  - A put blob is written to a temporary file, synced and renamed; the directory is synced once per batch.
+  - A logged blob's file is written and renamed without a sync, so it can be read at once. It stays *pending* until
+    the checkpoint thread syncs it (`sync_logged_below`, then the directory once). That happens before the WAL that
+    logs it is truncated, and off the tick path.
+  - Recovery restores, from the surviving WAL records, every logged blob whose file a crash lost or tore, including
+    records a checkpoint already covers. The restored blobs are pending again. `Boot::blobs` gives the node the
+    recovered rows' blobs.
+  - A name this process did not write is never trusted: it may be torn, or held only in the page cache.
 - **Collection.** After a checkpoint is installed, the store deletes every blob outside `Node::blob_roots`: the
   checkpoint's rows, those of every WAL record after it, the running node's rows, cache and parked output.
 - **Not yet (BLS0908, LANG-028).** A `Blob` in a channel or a host input: its bytes do not leave its node. S8's

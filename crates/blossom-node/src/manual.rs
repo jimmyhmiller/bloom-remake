@@ -9,7 +9,7 @@ use blossom_value::time::{Instant, Tick};
 
 use crate::durable::DurableCodec;
 use crate::node::{Node, ReleasedTick, TickEffects};
-use crate::recovery::{KIND_DELTA, Opened};
+use crate::recovery::{Opened, tick_record};
 use crate::{Executor, NodeError};
 
 pub struct ManualDriver<'p, E: Executor> {
@@ -84,25 +84,27 @@ impl<'p, E: Executor> ManualDriver<'p, E> {
             MetaStore::write(&self.opened.meta, &self.opened.record)?;
         }
         if let Some(delta) = &fx.wal {
-            self.opened.blobs.put_all(&fx.blobs)?;
-            let rec = self.record(&fx, delta)?;
-            self.opened.wal.append(&rec)?;
+            self.append(&fx, delta)?;
         }
         Ok(())
     }
 
-    fn record(&mut self, fx: &TickEffects, delta: &crate::durable::Delta) -> Result<WalRecordBuf, NodeError> {
+    /// Appends the tick's record (its blobs logged in it, or made durable as files first; FOREIGN-PROTOCOLS §5).
+    fn append(&mut self, fx: &TickEffects, delta: &crate::durable::Delta) -> Result<(), NodeError> {
         self.batch = self
             .batch
             .checked_add(1)
             .ok_or_else(|| internal_error!("the WAL batch counter overflows"))?;
-        Ok(WalRecordBuf {
+        let record = tick_record(&self.opened.blobs, &fx.blobs, self.codec.encode_delta(delta)?)?;
+        let lsn = self.opened.wal.append(&WalRecordBuf {
             batch: self.batch,
             tick: fx.tick.0,
             now: fx.now.0,
-            kind: KIND_DELTA,
-            payload: self.codec.encode_delta(delta)?,
-        })
+            kind: record.kind,
+            payload: record.payload,
+        })?;
+        self.opened.blobs.write_logged(&record.logged, lsn)?;
+        Ok(())
     }
 
     fn commit(&mut self, fx: &TickEffects, sink: &mut dyn FnMut(ReleasedTick)) -> Result<(), NodeError> {
@@ -116,16 +118,16 @@ impl<'p, E: Executor> ManualDriver<'p, E> {
             self.node.release_ready()?.into_iter().for_each(&mut *sink);
             return Ok(());
         };
-        // The record's blobs are durable before it syncs (FOREIGN-PROTOCOLS §5).
-        self.opened.blobs.put_all(&fx.blobs)?;
-        let rec = self.record(fx, delta)?;
-        self.opened.wal.append(&rec)?;
+        self.append(fx, delta)?;
         let synced = self.opened.wal.sync()?;
         let tick = synced
             .synced_tick()
             .ok_or_else(|| internal_error!("a sync after an append covers no tick"))?;
         self.synced = Some(tick);
-        self.node.wal_synced(Tick(tick.tick()))?.into_iter().for_each(&mut *sink);
+        self.node
+            .wal_synced(Tick(tick.tick()))?
+            .into_iter()
+            .for_each(&mut *sink);
         Ok(())
     }
 
@@ -161,6 +163,8 @@ impl<'p, E: Executor> ManualDriver<'p, E> {
         })();
         // The change was taken: if it did not become a checkpoint, the next one must be full.
         let token = written.inspect_err(|_| self.node.checkpoint_failed())?;
+        // The blobs logged in the WAL about to go are made durable as files first.
+        self.opened.blobs.sync_logged_below(token.lsn())?;
         self.opened.wal.truncate_through(token)?;
         self.opened.checkpoints.prune()?;
         self.checkpointed = Some(covers.tick());

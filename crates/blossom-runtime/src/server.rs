@@ -35,7 +35,7 @@ use blossom_base::{RelId, RoleId, internal_error};
 use blossom_node::acl::{AclTable, Source};
 use blossom_node::durable::{DurableCodec, DurableSchema};
 use blossom_node::env::{Clock, Entropy};
-use blossom_node::recovery::{self, KIND_DELTA, StoreSpec};
+use blossom_node::recovery::{self, StoreSpec, tick_record};
 use blossom_node::{Backend, Executor, Executors, Node, NodeConfig, NodeState, ReleasedTick};
 use blossom_oracle::{Delivery, Ingress, Oracle, Row};
 use blossom_store::{
@@ -445,13 +445,15 @@ impl Server {
         {
             let (tx, stats) = (ctl_tx.clone(), stats.clone());
             let blobs = blob_store.clone();
-            threads.push(spawn("committer", move || committer(wal, &blobs, commit_rx, tx, stats))?);
+            threads.push(spawn("committer", move || {
+                committer(wal, &blobs, commit_rx, tx, stats)
+            })?);
         }
         {
             let (tx, commit) = (ctl_tx.clone(), commit_tx.clone());
-            let (artifact, names) = (artifact.clone(), names.clone());
+            let (artifact, names, blobs) = (artifact.clone(), names.clone(), blob_store.clone());
             threads.push(spawn("checkpoint", move || {
-                checkpointer(checkpoints, &artifact, names, ckpt_rx, commit, tx)
+                checkpointer(checkpoints, &artifact, names, &blobs, ckpt_rx, commit, tx)
             })?);
         }
         // Peer writers: one per other node.
@@ -644,11 +646,14 @@ fn committer(
                     payload,
                     blobs,
                 } => {
-                    // Its blobs are durable before the record can sync.
-                    if let Err(e) = blob_store.put_all(&blobs) {
-                        let _ = tx.send(Control::WalFailed(format!("the blobs of tick {} failed: {e}", tick.0)));
-                        return;
-                    }
+                    // Its blobs are durable once the record syncs: logged in it, or made durable as files first.
+                    let record = match tick_record(blob_store, &blobs, payload) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let _ = tx.send(Control::WalFailed(format!("the blobs of tick {} failed: {e}", tick.0)));
+                            return;
+                        }
+                    };
                     if appended == 0 {
                         batch = batch.saturating_add(1);
                     }
@@ -656,11 +661,18 @@ fn committer(
                         batch,
                         tick: tick.0,
                         now: now.0,
-                        kind: KIND_DELTA,
-                        payload,
+                        kind: record.kind,
+                        payload: record.payload,
                     };
-                    if let Err(e) = wal.append(&rec) {
-                        let _ = tx.send(Control::WalFailed(format!("WAL append of tick {} failed: {e}", tick.0)));
+                    let lsn = match wal.append(&rec) {
+                        Ok(lsn) => lsn,
+                        Err(e) => {
+                            let _ = tx.send(Control::WalFailed(format!("WAL append of tick {} failed: {e}", tick.0)));
+                            return;
+                        }
+                    };
+                    if let Err(e) = blob_store.write_logged(&record.logged, lsn) {
+                        let _ = tx.send(Control::WalFailed(format!("the blobs of tick {} failed: {e}", tick.0)));
                         return;
                     }
                     appended += 1;
@@ -701,6 +713,7 @@ fn checkpointer(
     mut ckpt: FileCheckpoints,
     artifact: &BlsArtifact,
     names: Arc<[Arc<str>]>,
+    blobs: &blossom_store::BlobStore,
     rx: Receiver<(CheckpointJob, SyncedTick)>,
     commit: Sender<Commit>,
     tx: Sender<Control>,
@@ -719,6 +732,13 @@ fn checkpointer(
         let result = written
             .and_then(|id| ckpt.install(id).map_err(|e| e.to_string()))
             .and_then(|token| ckpt.prune().map(|_| token).map_err(|e| e.to_string()))
+            // The blobs logged in the WAL about to go are made durable as files first (here, off the tick path).
+            .and_then(|token| {
+                blobs
+                    .sync_logged_below(token.lsn())
+                    .map(|_| token)
+                    .map_err(|e| e.to_string())
+            })
             .and_then(|token| commit.send(Commit::Truncate(token)).map_err(|e| e.to_string()))
             .and_then(|()| ckpt.chain().map_err(|e| e.to_string()));
         if tx.send(Control::CheckpointDone(result)).is_err() {
