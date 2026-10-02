@@ -18,8 +18,8 @@ use std::sync::Arc;
 use blossom_base::internal_error;
 use blossom_ir::core::Program;
 use blossom_store::{
-    Certification, CheckpointId, FileCheckpoints, FileWal, Lsn, MetaRecord, MetaStore, OpenMode, SegmentHeader, StoreError,
-    StoreIdentity, StoreLock, Vfs, WalScan, durable_dir,
+    Certification, CheckpointId, FileCheckpoints, FileWal, Lsn, MetaRecord, MetaStore, OpenMode, SegmentHeader,
+    StoreError, StoreIdentity, StoreLock, Vfs, WalScan, durable_dir,
 };
 use blossom_value::time::{Instant, Tick};
 use blossom_wire::codec::put_varint;
@@ -32,6 +32,82 @@ use crate::node::{Boot, RESERVE_STEP, TIME_STEP};
 pub const FORMAT: u16 = 1;
 /// The WAL record kind of a tick's durable delta.
 pub const KIND_DELTA: u8 = 1;
+/// The WAL record kind of a tick's durable delta led by the blobs it logs: a `u32` count, each blob as a `u32`
+/// length and its bytes, then the delta. The record makes them durable with its sync (`BlobStore::write_logged`).
+pub const KIND_DELTA_BLOBS: u8 = 2;
+/// The largest blob a record logs; a larger one is made durable as a file before the record (`BlobStore::put_all`).
+pub const INLINE_BLOB_MAX: usize = 1 << 20;
+/// The most blob bytes one record logs (records share a 64 MiB segment); the rest are made durable as files.
+pub const INLINE_RECORD_MAX: usize = 8 << 20;
+
+/// A tick's WAL record: its kind and payload, and the blobs it logs (`BlobStore::write_logged` once it is appended).
+pub struct TickRecord {
+    pub kind: u8,
+    pub payload: Vec<u8>,
+    pub logged: Vec<blossom_store::BlobBytes>,
+}
+
+/// The record of a tick with durable delta `delta` whose rows reference `blobs`: the blobs not yet durable or
+/// logged are logged in it, up to the inline limits; the others are made durable as files first.
+pub fn tick_record(
+    store: &blossom_store::BlobStore,
+    blobs: &[blossom_store::BlobBytes],
+    delta: Vec<u8>,
+) -> Result<TickRecord, NodeError> {
+    let mut logged = Vec::new();
+    let mut put = Vec::new();
+    let mut inline = 0usize;
+    for (b, bytes) in store.unwritten(blobs)? {
+        if bytes.len() <= INLINE_BLOB_MAX && inline + bytes.len() <= INLINE_RECORD_MAX {
+            inline += bytes.len();
+            logged.push((b, bytes));
+        } else {
+            put.push((b, bytes));
+        }
+    }
+    store.put_all(&put)?;
+    if logged.is_empty() {
+        return Ok(TickRecord {
+            kind: KIND_DELTA,
+            payload: delta,
+            logged,
+        });
+    }
+    let mut payload = Vec::with_capacity(4 + inline + 4 * logged.len() + delta.len());
+    let count = u32::try_from(logged.len()).map_err(|_| internal_error!("a record logs too many blobs"))?;
+    payload.extend(count.to_le_bytes());
+    for (_, bytes) in &logged {
+        let len = u32::try_from(bytes.len()).map_err(|_| internal_error!("a logged blob exceeds 4 GiB"))?;
+        payload.extend(len.to_le_bytes());
+        payload.extend_from_slice(bytes);
+    }
+    payload.extend(delta);
+    Ok(TickRecord {
+        kind: KIND_DELTA_BLOBS,
+        payload,
+        logged,
+    })
+}
+
+/// The blobs a `KIND_DELTA_BLOBS` record at `lsn` logs, and its delta.
+fn logged_blobs(payload: &[u8], lsn: Lsn) -> Result<(Vec<blossom_store::BlobBytes>, &[u8]), NodeError> {
+    let bad = || NodeError::Store(format!("the WAL record at LSN {} logs malformed blobs", lsn.0));
+    let take = |at: usize, n: usize| payload.get(at..at.checked_add(n)?);
+    let word = |at: usize| -> Result<usize, NodeError> {
+        let b: [u8; 4] = take(at, 4).and_then(|b| b.try_into().ok()).ok_or_else(bad)?;
+        Ok(u32::from_le_bytes(b) as usize)
+    };
+    let count = word(0)?;
+    let mut at = 4usize;
+    let mut blobs = Vec::new();
+    for _ in 0..count {
+        let len = word(at)?;
+        let bytes = take(at + 4, len).ok_or_else(bad)?;
+        blobs.push((blossom_value::BlobRef::of(bytes), Arc::from(bytes)));
+        at += 4 + len;
+    }
+    Ok((blobs, payload.get(at..).ok_or_else(bad)?))
+}
 
 /// Where and as whom a node's store is opened.
 #[derive(Clone, Debug)]
@@ -201,18 +277,29 @@ pub fn open(
     let wdir = wal_dir(dir);
     durable_dir(&*fs, &wdir)?;
     let scan = WalScan::scan_certified(&*fs, &wdir, uuid, true, record.certification)?;
+    let blobs = Arc::new(blossom_store::BlobStore::open(fs.clone(), dir)?);
     let mut last_now = record.last_now;
     let mut last_tick: Option<u64> = checkpoint.map(|c| c.tick);
     let mut replayed = 0;
     for (lsn, rec) in scan.records() {
+        let delta = match rec.kind {
+            KIND_DELTA => rec.payload.as_slice(),
+            KIND_DELTA_BLOBS => {
+                // The blobs it logs are restored even when the checkpoint covers it: their files may not be durable
+                // yet (they are synced before the WAL that logs them goes).
+                let (logged, delta) = logged_blobs(&rec.payload, *lsn)?;
+                blobs.restore_logged(&logged, *lsn)?;
+                delta
+            }
+            other => {
+                return Err(NodeError::Store(format!(
+                    "WAL record at LSN {} has kind {other}, which this build does not know",
+                    lsn.0
+                )));
+            }
+        };
         if checkpoint.is_some_and(|c| *lsn < c.lsn) {
             continue;
-        }
-        if rec.kind != KIND_DELTA {
-            return Err(NodeError::Store(format!(
-                "WAL record at LSN {} has kind {}, which this build does not know",
-                lsn.0, rec.kind
-            )));
         }
         if last_tick.is_some_and(|t| rec.tick <= t) {
             return Err(NodeError::Store(format!(
@@ -222,14 +309,14 @@ pub fn open(
                 last_tick.unwrap_or_default()
             )));
         }
-        image.apply(&codec.decode_delta(&rec.payload)?);
+        image.apply(&codec.decode_delta(delta)?);
         last_tick = Some(rec.tick);
         last_now = last_now.max(rec.now);
         replayed += 1;
     }
-    // The blobs the recovered rows hold were made durable before their records synced: check it, so a store that
-    // lost one refuses to start rather than failing a later tick that reads it.
-    let blobs = Arc::new(blossom_store::BlobStore::open(fs.clone(), dir)?);
+    // The blobs the recovered rows hold were made durable before their records synced (as files, or logged in a
+    // record and restored above): check it, so a store that lost one refuses to start rather than failing a later
+    // tick that reads it.
     let mut referenced = std::collections::BTreeSet::new();
     for rows in image.rows.values() {
         for r in rows {

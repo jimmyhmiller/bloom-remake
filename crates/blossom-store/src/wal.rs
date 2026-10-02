@@ -56,6 +56,12 @@ impl SyncedTick {
 pub struct TruncateToken {
     pub(crate) lsn: Lsn,
 }
+impl TruncateToken {
+    /// The position the truncation reaches: the WAL wholly below it goes.
+    pub fn lsn(&self) -> Lsn {
+        self.lsn
+    }
+}
 /// WAL seam. Invariant B: no writes of batch k+1 may be in flight before sync(k) returns.
 /// A sync or append failure permanently poisons this incarnation; a failed sync must never be retried.
 pub trait WalWriter: Send {
@@ -566,7 +572,9 @@ fn torn_tail(bytes: &[u8], off: usize, base: u64, last: Option<(u64, u8)>, crc: 
     match (later, last) {
         (None, _) => true,
         (Some(_), None) => true,
-        (Some(b), Some((lb, kind))) => b == lb || (b > lb && kind == SYNC_MARKER) || (crc && Some(b) == lb.checked_add(1)),
+        (Some(b), Some((lb, kind))) => {
+            b == lb || (b > lb && kind == SYNC_MARKER) || (crc && Some(b) == lb.checked_add(1))
+        }
     }
 }
 

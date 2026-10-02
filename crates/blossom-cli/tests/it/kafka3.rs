@@ -134,6 +134,11 @@ struct Cluster {
 #[cfg(test)]
 impl Cluster {
     fn new(tag: &str) -> Cluster {
+        Cluster::with_storage(tag, "")
+    }
+
+    /// As `new`, with more lines for the deployment's `[storage]` table.
+    fn with_storage(tag: &str, storage: &str) -> Cluster {
         let dir = std::env::temp_dir().join(format!("blossom-kafka3-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -172,7 +177,7 @@ impl Cluster {
             .map(|(i, n)| format!("[\"{n}\", {}, \"127.0.0.1\", {}]", i + 1, ports[i]))
             .collect();
         spec.push_str(&format!(
-            "\n[params]\nREPLICA_LAG_MAX = \"2s\"\n\n[statics]\nbroker = [{}]\n\n[security]\nmode = \"insecure-dev\"\n\n[storage]\ndata_dir = \"data\"\ncheckpoint_wal_bytes = 262144\n",
+            "\n[params]\nREPLICA_LAG_MAX = \"2s\"\n\n[statics]\nbroker = [{}]\n\n[security]\nmode = \"insecure-dev\"\n\n[storage]\ndata_dir = \"data\"\ncheckpoint_wal_bytes = 262144\n{storage}",
             statics.join(", ")
         ));
         let deploy = dir.join("deploy.toml");
@@ -699,6 +704,65 @@ fn three_brokers_keep_every_acknowledged_record_under_kill_9_and_partitions() {
         let used = cpu_seconds(&cluster, i) - b;
         assert!(used < 2.0, "broker {} used {used:.2} s of CPU in 4 s idle", i + 1);
     }
+}
+
+/// Sequential one-record acks=all produces to one partition's leader, one at a time, timed: the latency a producer
+/// that waits for each answer sees. A measurement, not a check (it depends on the disk): run with
+/// `cargo test -p blossom-cli --test it acks_all_latency -- --ignored --nocapture`, and `KAFKA3_TAIL=crc` for the
+/// WAL's one-sync certification.
+#[test]
+#[ignore = "a measurement: run with --ignored --nocapture"]
+#[allow(clippy::print_stderr)] // The measurement is this test's output.
+fn acks_all_latency() {
+    let tail = std::env::var("KAFKA3_TAIL").unwrap_or_else(|_| "strict".to_owned());
+    let cluster = Cluster::with_storage("latency", &format!("tail_certification = \"{tail}\"\n"));
+    let ports = cluster.ports.clone();
+    create_topic(&ports);
+    let (clock, limit) = (Stopwatch::start(), Duration::from_secs(30));
+    let leader = loop {
+        assert!(clock.elapsed() < limit, "no leader for partition 0");
+        if let Some((_, l)) = metadata(&ports, ports[0]) {
+            break l[&0];
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut s = connect(leader).unwrap();
+    let mut took: Vec<Duration> = Vec::new();
+    for n in 0..300 {
+        let req = ProduceRequest::default()
+            .with_acks(-1)
+            .with_timeout_ms(3000)
+            .with_topic_data(vec![
+                TopicProduceData::default()
+                    .with_name(topic_name())
+                    .with_partition_data(vec![
+                        PartitionProduceData::default()
+                            .with_index(0)
+                            .with_records(Some(Bytes::from(batch(&[format!("v{n}")])))),
+                    ]),
+            ]);
+        let clock = Stopwatch::start();
+        let mut body = call(&mut s, &framed(0, 12, n, &req)).unwrap();
+        let d = clock.elapsed();
+        ResponseHeader::decode(&mut body, ProduceResponse::header_version(12)).unwrap();
+        let r = ProduceResponse::decode(&mut body, 12).unwrap();
+        let code = r.responses[0].partition_responses[0].error_code;
+        assert_eq!(code, 0, "produce {n} answered {code}");
+        // The first few warm the connection and the leader's caches.
+        if n >= 20 {
+            took.push(d);
+        }
+    }
+    took.sort();
+    let at = |q: f64| took[((took.len() - 1) as f64 * q) as usize].as_secs_f64() * 1000.0;
+    eprintln!(
+        "acks=all latency ({tail}, {} produces): p50 {:.1} ms, p90 {:.1} ms, p99 {:.1} ms, max {:.1} ms",
+        took.len(),
+        at(0.5),
+        at(0.9),
+        at(0.99),
+        at(1.0)
+    );
 }
 
 /// Reports a test skipped because its tool is missing (as `kafka_gate.rs` does).

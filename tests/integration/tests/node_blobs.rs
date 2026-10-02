@@ -334,10 +334,15 @@ fn a_tick_reads_a_blob_whose_record_is_not_synced_yet() {
         node.run_tick(Instant(1)).unwrap();
         node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone())]));
         let put = node.run_tick(Instant(2)).unwrap();
-        assert_eq!(put.blobs.len(), 1, "engine {engine}: the blob is handed over with the record");
+        assert_eq!(
+            put.blobs.len(),
+            1,
+            "engine {engine}: the blob is handed over with the record"
+        );
         // Neither written to the store nor synced: the next tick reads it all the same.
         node.offer_input(rel("peek"), Arc::from(vec![Value::Bytes(key.clone())]));
-        node.run_tick(Instant(3)).unwrap_or_else(|f| panic!("engine {engine}: {f}"));
+        node.run_tick(Instant(3))
+            .unwrap_or_else(|f| panic!("engine {engine}: {f}"));
         let peeked = node.carried_rows(rel("peeked"));
         assert_eq!(peeked.len(), 1, "engine {engine}");
         assert_eq!(peeked[0][1], Value::Bytes(key.clone()), "engine {engine}");
@@ -381,7 +386,10 @@ fn a_blob_a_record_after_the_checkpoint_references_is_kept() {
         node.offer_input(rel("forget"), Arc::from(vec![Value::Bytes(key.clone())]));
         sync(&mut node, 5);
         let gone = node.blob_garbage(checkpoint, &outside);
-        assert!(!gone.contains(&blob), "engine {engine}: a replayable record's blob would be collected");
+        assert!(
+            !gone.contains(&blob),
+            "engine {engine}: a replayable record's blob would be collected"
+        );
         // A checkpoint after those records: nothing reaches the blob any more, and it goes. (The engine holds the
         // last tick's rows until the next tick runs: the deleted row, the event that deleted it.)
         sync(&mut node, 6);
@@ -393,7 +401,11 @@ fn a_blob_a_record_after_the_checkpoint_references_is_kept() {
         // Gone, it is no longer durable: a row that needs it again writes it again.
         node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone())]));
         let fx = node.run_tick(Instant(7)).unwrap();
-        assert_eq!(fx.blobs.len(), 1, "engine {engine}: a collected blob is not written again");
+        assert_eq!(
+            fx.blobs.len(),
+            1,
+            "engine {engine}: a collected blob is not written again"
+        );
     }
 }
 
@@ -411,7 +423,9 @@ fn a_blob_only_a_derived_row_holds_survives_the_cache_trims() {
         let key: Arc<[u8]> = Arc::from(vec![7u8; 200]);
         let mut now = 1;
         let mut tick = |node: &mut Node<Box<dyn Executor>>| {
-            let fx = node.run_tick(Instant(now)).unwrap_or_else(|f| panic!("engine {engine}: {f}"));
+            let fx = node
+                .run_tick(Instant(now))
+                .unwrap_or_else(|f| panic!("engine {engine}: {f}"));
             now += 1;
             store.put_all(&fx.blobs).unwrap();
             node.wal_synced(fx.tick).unwrap();
@@ -428,7 +442,71 @@ fn a_blob_only_a_derived_row_holds_survives_the_cache_trims() {
         }
         node.offer_input(rel("commit_kept"), Arc::from(vec![Value::Bytes(key.clone())]));
         let fx = tick(&mut node);
-        assert_eq!(fx.blobs.len(), 1, "engine {engine}: the kept blob is written with its row");
+        assert_eq!(
+            fx.blobs.len(),
+            1,
+            "engine {engine}: the kept blob is written with its row"
+        );
         assert_eq!(fx.blobs[0].0, BlobRef::of(&key), "engine {engine}");
+    }
+}
+
+/// HD item 3: a blob logged in its tick's WAL record (its file written, not synced) is synced as a file before the
+/// WAL that logs it is truncated. Truncation removes only segments wholly below a checkpoint, and each incarnation
+/// writes a segment of its own, so: one incarnation logs the blobs; the next recovers them (pending again) and
+/// checkpoints, which truncates the first segment; then a crash loses every write not synced. Every row's blob is
+/// still there.
+#[test]
+fn logged_blobs_are_synced_before_the_wal_that_logs_them_is_truncated() {
+    for engine in [false, true] {
+        let k = Store::new(engine);
+        let fs = SimFs::default();
+        let conn = ConnId(1);
+        let chunks: Vec<Vec<u8>> = (0..4).map(|i| format!("logged blob {i}").into_bytes()).collect();
+        let segments = |fs: &SimFs| {
+            fs.list(&k.dir.join("wal"))
+                .unwrap()
+                .iter()
+                .filter(|p| p.extension().is_some_and(|e| e == "seg"))
+                .count()
+        };
+        {
+            let mut d = k.boot(&fs);
+            d.run_until_quiescent(Instant(0)).unwrap();
+            open_conn(&mut d, conn);
+            for (i, c) in chunks.iter().enumerate() {
+                send(&fs, &mut d, conn, c, 2 + i as i64);
+            }
+        }
+        {
+            let mut d = k.boot(&fs);
+            const LATER: i64 = 1_000_000_000_000;
+            d.run_until_quiescent(Instant(LATER)).unwrap();
+            // A durable change of its own, so the checkpoint has a synced tick to cover.
+            let conn2 = ConnId(2);
+            d.node
+                .observe_stream(Observed::Opened {
+                    stream: 0,
+                    conn: conn2,
+                    peer: "peer".into(),
+                    req: None,
+                    at: Instant(LATER + 1),
+                })
+                .unwrap();
+            d.run_until_quiescent(Instant(LATER + 2)).unwrap();
+            send(&fs, &mut d, conn2, b"after the restart", LATER + 3);
+            assert_eq!(segments(&fs), 2, "engine {engine}");
+            d.checkpoint().unwrap();
+            assert_eq!(segments(&fs), 1, "engine {engine}: the first segment was not truncated");
+        }
+        let mut image = fs.fork().unwrap();
+        image.crash(&mut |_| WriteFate::Lost).unwrap();
+        let d = k.boot(&image);
+        let stored = k.stored(&d);
+        assert_eq!(stored.len(), chunks.len() + 1, "engine {engine}");
+        let store = BlobStore::open(Arc::new(image.clone()), &k.dir).unwrap();
+        for (chunk, b) in &stored {
+            assert_eq!(store.read(b).unwrap().as_deref(), Some(&chunk[..]), "engine {engine}");
+        }
     }
 }
