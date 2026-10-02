@@ -4,7 +4,8 @@ Branch `slice-hardening`, worktree `.worktrees/hd`. Chosen by the user (2026-10-
 
 ## Resume here
 
-- **State (2026-10-01):** items 1 and 2 done. Next: item 3 (acks=all latency).
+- **State (2026-10-01):** items 1 and 2 done; item 3 in progress (blobs logged in the WAL, strict at 3 syncs, both
+  committed). Next for item 3: decide whether to go further (see its notes), then item 4.
 
 ## Items
 
@@ -75,3 +76,33 @@ Branch `slice-hardening`, worktree `.worktrees/hd`. Chosen by the user (2026-10-
   - no `cmd_made` pinning (caught by the snapshot variant; the 50ms variant cannot see it, because its stale copies
     are marked done first);
   - no window on `done`, on `outcome`, or on `mdeleted`.
+
+### Item 3: acks=all latency (in progress)
+
+- **Measurement.** `kafka3::acks_all_latency` (ignored; `--ignored --nocapture`, `KAFKA3_TAIL=crc|strict`) sends 300
+  sequential one-record acks=all produces to one partition leader on three local brokers.
+- **Starting point.** Release build, this Mac: strict p50 150 ms, crc p50 70 ms.
+  - One `F_FULLFSYNC` takes about 5 ms here.
+  - A sync trace (temporary instrumentation in `vfs.rs`) counted about 30 syncs per produce over the three brokers.
+  - The brokers share one disk, so their syncs serialize. The latency here is the sum over all brokers; on separate
+    disks only the critical path counts.
+- **Where the syncs go.** Each broker does about 1.7 WAL group commits per produce: the leader appends, the follower
+  stores, then every replica materializes. Each commit cost 4 syncs in strict mode. On top of that, every Raft entry
+  cost 2 blob syncs (the temporary file and the directory) on every broker.
+- **Blobs logged in the WAL** (f5ee884): crc 70 → 28 ms, strict 150 → 120 ms. That equals the measured bound with
+  blob syncs removed entirely. Notes in FOREIGN-PROTOCOLS §5a.
+- **Strict at 3 syncs.** The batch's marker now leads the next batch, as in crc, and the receipt is written at every
+  sync with the data end: strict 120 → 90 ms. The guarantee for acknowledged data is unchanged.
+  - The marker's separate sync was redundant: the receipt alone tells damage before its frontier (corruption) from
+    damage after it (a torn tail).
+  - Recovery no longer depends on the certification; `WalScan::scan_certified` is gone.
+  - Batches count up by one in both modes.
+  - Old strict segments still recover: the extra `last + 1` torn-tail case is always covered by a receipt there
+    (see `torn_tail`).
+  - Tests: `crash_points.rs` (renamed from `crc_crash_points.rs`) runs both certifications. Mutation: strict writing
+    its receipt once per segment, as crc does, fails `synced_marker_and_receipt_media_fault_refused`.
+- **Options left** (each sync cut is about 5 ms per hop here):
+  - Strict at 2 syncs with an in-place two-slot receipt. This loses detection of a corrupted current receipt slot
+    combined with damage to the last acknowledged batch (a double fault). A user decision.
+  - Answer acks=all on commit rather than after materializing. This removes the leader's third commit, but Fetch
+    must then serve committed but unmaterialized entries, or a read after an ack can miss the record.
