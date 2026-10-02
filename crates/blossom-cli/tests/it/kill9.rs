@@ -85,19 +85,24 @@ checkpoint_wal_bytes = 65536
 #[cfg(test)]
 fn start(deploy: &Path, fresh: bool) -> Child {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_blossom"));
-    cmd.args(["run", "--deploy"]).arg(deploy).args(["--node", "s1", "--insecure-dev"]);
+    cmd.args(["run", "--deploy"])
+        .arg(deploy)
+        .args(["--node", "s1", "--insecure-dev"]);
     if fresh {
         cmd.arg("--init-fresh");
     }
     let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().unwrap();
     let mut line = String::new();
-    BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
     assert!(line.contains("ready"), "the server did not come up: {line:?}");
     child
 }
 
 #[test]
 fn kill_9_never_loses_an_acknowledged_write() {
+    let _one = crate::one_cluster();
     let dir = scratch_dir("kill9");
     let deploy = deployment(&dir);
     let spec = DeploymentSpec::load(&deploy).unwrap();
@@ -154,9 +159,16 @@ fn kill_9_never_loses_an_acknowledged_write() {
     server.wait().unwrap();
 
     assert!(kills >= 5, "only {kills} kills");
-    assert!(outcome.protocol_errors.is_empty(), "protocol errors: {:?}", outcome.protocol_errors);
+    assert!(
+        outcome.protocol_errors.is_empty(),
+        "protocol errors: {:?}",
+        outcome.protocol_errors
+    );
     assert!(outcome.answered > 200, "only {} operations answered", outcome.answered);
-    assert!(outcome.unanswered > 0, "no operation was in flight at a kill: the test did not test anything");
+    assert!(
+        outcome.unanswered > 0,
+        "no operation was in flight at a kill: the test did not test anything"
+    );
     let (verdict, key) = check_partitioned(&KvModel, &outcome.history, |i| i.key().to_vec(), 50_000_000);
     let summary = match &verdict {
         Verdict::Linearizable => "linearizable".to_string(),

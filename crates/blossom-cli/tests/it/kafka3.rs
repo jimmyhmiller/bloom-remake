@@ -590,6 +590,7 @@ fn read_all(ports: &[u16], live: &[u16]) -> BTreeMap<i32, Vec<(i64, String)>> {
 #[test]
 #[ignore = "full tier"]
 fn three_brokers_keep_every_acknowledged_record_under_kill_9_and_partitions() {
+    let _one = crate::one_cluster();
     let mut cluster = Cluster::new("rust");
     let ports = cluster.ports.clone();
     create_topic(&ports);
@@ -718,13 +719,17 @@ fn three_brokers_keep_every_acknowledged_record_under_kill_9_and_partitions() {
 }
 
 /// Sequential one-record acks=all produces to one partition's leader, one at a time, timed: the latency a producer
-/// that waits for each answer sees. A measurement, not a check (it depends on the disk): run with
-/// `cargo test -p blossom-cli --test it acks_all_latency -- --ignored --nocapture`, and `KAFKA3_TAIL=crc` for the
-/// WAL's one-sync certification.
+/// that waits for each answer sees. A measurement, not a check (it depends on the disk), so it runs only when asked:
+/// `KAFKA3_LATENCY=1 cargo test -p blossom-cli --test it acks_all_latency -- --nocapture`, and `KAFKA3_TAIL=crc` for
+/// the WAL's one-sync certification. Otherwise it reports itself skipped.
 #[test]
-#[ignore = "a measurement: run with --ignored --nocapture"]
 #[allow(clippy::print_stderr)] // The measurement is this test's output.
 fn acks_all_latency() {
+    if std::env::var_os("KAFKA3_LATENCY").is_none() {
+        skipped("acks_all_latency is a measurement: set KAFKA3_LATENCY=1 to run it");
+        return;
+    }
+    let _one = crate::one_cluster();
     let tail = std::env::var("KAFKA3_TAIL").unwrap_or_else(|_| "strict".to_owned());
     let cluster = Cluster::with_storage("latency", &format!("tail_certification = \"{tail}\"\n"));
     let ports = cluster.ports.clone();
@@ -881,6 +886,7 @@ fn described(text: &str) -> BTreeMap<i32, (i32, Vec<i32>, Vec<i32>)> {
 /// verifies it; franz-go produces and consumes on a topic replicated three times.
 #[test]
 fn stock_clients_use_the_replicated_cluster_across_a_broker_failure() {
+    let _one = crate::one_cluster();
     let Some(bin) = kafka_bin() else {
         skipped("no Kafka distribution (set KAFKA_HOME, or unpack one into .tools/)");
         return;

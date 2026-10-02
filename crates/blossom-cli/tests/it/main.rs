@@ -7,6 +7,16 @@ mod raft3;
 
 use std::process::Command;
 
+/// Held by every test that runs a cluster of `blossom` processes, so they run one at a time: each picks its ports by
+/// binding port 0 and releasing it before a broker binds it, which another such test running at the same time could
+/// take (the full tier runs them together), and each uses several cores. A test that failed while holding it does not
+/// stop the others.
+#[cfg(test)]
+fn one_cluster() -> std::sync::MutexGuard<'static, ()> {
+    static CLUSTERS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    CLUSTERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Runs the built `blossom` binary (test-only helper).
 #[cfg(test)]
 fn blossom(args: &[&str]) -> std::process::Output {
@@ -86,7 +96,10 @@ fn cli_usage_errors_exit_2_and_help_lists_exit_codes() {
 /// to the host, and refuses a script that breaks the runtime's order (a chunk in its connection's opening tick).
 #[test]
 fn sim_scripts_stream_chunks_and_prints_the_writes() {
-    let echo = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/integration/fixtures/streams/echo.bls");
+    let echo = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/integration/fixtures/streams/echo.bls"
+    );
     let out = blossom(&[
         "sim",
         echo,
@@ -104,10 +117,32 @@ fn sim_scripts_stream_chunks_and_prints_the_writes() {
         "n1:echo:1:4:ld\\n",
     ]);
     let stdout = String::from_utf8(out.stdout).unwrap();
-    assert_eq!(out.status.code(), Some(0), "{stdout}{}", String::from_utf8_lossy(&out.stderr));
-    assert!(stdout.contains("=> echo.write(conn#1, 0, [Bytes(b\"hello\\n\")])"), "{stdout}");
-    assert!(stdout.contains("=> echo.write(conn#1, 1, [Bytes(b\"world\\n\")])"), "{stdout}");
-    let bad = blossom(&["sim", echo, "--nodes", "n1", "--ticks", "3", "--open", "n1:echo:1:2", "--chunk", "n1:echo:1:2:x"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("=> echo.write(conn#1, 0, [Bytes(b\"hello\\n\")])"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("=> echo.write(conn#1, 1, [Bytes(b\"world\\n\")])"),
+        "{stdout}"
+    );
+    let bad = blossom(&[
+        "sim",
+        echo,
+        "--nodes",
+        "n1",
+        "--ticks",
+        "3",
+        "--open",
+        "n1:echo:1:2",
+        "--chunk",
+        "n1:echo:1:2:x",
+    ]);
     assert_eq!(bad.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&bad.stderr).contains("opening tick"));
 }

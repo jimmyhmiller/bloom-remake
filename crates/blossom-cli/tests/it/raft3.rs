@@ -50,7 +50,9 @@ impl Proxy {
                     drop(inbound);
                     continue;
                 }
-                let Ok(outbound) = TcpStream::connect(upstream) else { continue };
+                let Ok(outbound) = TcpStream::connect(upstream) else {
+                    continue;
+                };
                 let mut reg = st.lock().unwrap();
                 if reg.0 {
                     // Cut while connecting.
@@ -140,7 +142,9 @@ impl Cluster {
                 dial.join(", ")
             ));
         }
-        spec.push_str("\n[security]\nmode = \"insecure-dev\"\n\n[storage]\ndata_dir = \"data\"\ncheckpoint_wal_bytes = 262144\n");
+        spec.push_str(
+            "\n[security]\nmode = \"insecure-dev\"\n\n[storage]\ndata_dir = \"data\"\ncheckpoint_wal_bytes = 262144\n",
+        );
         let deploy = dir.join("deploy.toml");
         std::fs::write(&deploy, spec).unwrap();
         let secrets = dir.join("raft.secrets");
@@ -173,7 +177,9 @@ impl Cluster {
         }
         let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().unwrap();
         let mut line = String::new();
-        BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
         assert!(line.contains("ready"), "{} did not come up: {line:?}", self.names[i]);
         self.procs[i] = Some(child);
     }
@@ -230,6 +236,7 @@ impl Drop for Cluster {
 
 #[test]
 fn three_processes_stay_linearizable_under_kill_9_and_partitions() {
+    let _one = crate::one_cluster();
     let mut cluster = Cluster::new();
     let spec = DeploymentSpec::load(&cluster.deploy).unwrap();
     let nodes: Vec<NodeSpec> = spec
@@ -354,8 +361,15 @@ fn three_processes_stay_linearizable_under_kill_9_and_partitions() {
     }
     let outcome = run.join().unwrap();
     let context = format!("nemesis seed {seed}: {}", log.join(", "));
-    assert!(outcome.protocol_errors.is_empty(), "protocol errors: {:?}; {context}", outcome.protocol_errors);
-    assert!(kills >= 2 && partitions >= 2, "{kills} kills, {partitions} partitions; {context}");
+    assert!(
+        outcome.protocol_errors.is_empty(),
+        "protocol errors: {:?}; {context}",
+        outcome.protocol_errors
+    );
+    assert!(
+        kills >= 2 && partitions >= 2,
+        "{kills} kills, {partitions} partitions; {context}"
+    );
     assert!(outcome.answered > 100, "only {} operations answered", outcome.answered);
     let (verdict, key) = check_partitioned(&KvModel, &outcome.history, |i| i.key().to_vec(), 50_000_000);
     let summary = match &verdict {
