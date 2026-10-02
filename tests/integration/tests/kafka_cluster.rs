@@ -1881,6 +1881,8 @@ struct Script {
     buf: Vec<u8>,
     pending: Option<i64>,
     done: Rc<RefCell<usize>>,
+    /// How long a request may go unanswered before the connection is dropped.
+    patience: i64,
 }
 
 #[cfg(test)]
@@ -1902,7 +1904,7 @@ impl StreamClient for Script {
                         }
                         Some(_) if self.open => {
                             a.send = self.steps[self.at].0.clone();
-                            self.pending = Some(now + REQUEST_TIMEOUT);
+                            self.pending = Some(now + self.patience);
                         }
                         Some(_) => {}
                     }
@@ -2023,6 +2025,11 @@ fn until_no_reassignment() -> (Vec<u8>, Check) {
 
 #[cfg(test)]
 fn create_frame(topic: &str, rf: i16) -> Vec<u8> {
+    create_frame_within(topic, rf, 1_000)
+}
+
+#[cfg(test)]
+fn create_frame_within(topic: &str, rf: i16, timeout_ms: i32) -> Vec<u8> {
     let req = CreateTopicsRequest::default()
         .with_topics(vec![
             CreatableTopic::default()
@@ -2030,7 +2037,7 @@ fn create_frame(topic: &str, rf: i16) -> Vec<u8> {
                 .with_num_partitions(2)
                 .with_replication_factor(rf),
         ])
-        .with_timeout_ms(1_000);
+        .with_timeout_ms(timeout_ms);
     framed(19, 7, 1, &req)
 }
 
@@ -2043,6 +2050,34 @@ fn create_check() -> Check {
             0 | TOPIC_ALREADY_EXISTS => Ok(true),
             REQUEST_TIMED_OUT => Ok(false),
             other => Err(format!("creating answered {other}")),
+        }
+    })
+}
+
+#[cfg(test)]
+fn delete_frame(topic: &str) -> Vec<u8> {
+    let req = kafka_protocol::messages::DeleteTopicsRequest::default()
+        .with_topics(vec![
+            kafka_protocol::messages::delete_topics_request::DeleteTopicState::default()
+                .with_name(Some(TopicName(StrBytes::from_string(topic.into())))),
+        ])
+        .with_timeout_ms(1_000);
+    framed(20, 6, 1, &req)
+}
+
+#[cfg(test)]
+fn delete_check() -> Check {
+    Box::new(|mut body: Bytes| {
+        ResponseHeader::decode(
+            &mut body,
+            kafka_protocol::messages::DeleteTopicsResponse::header_version(6),
+        )
+        .map_err(|x| x.to_string())?;
+        let r = kafka_protocol::messages::DeleteTopicsResponse::decode(&mut body, 6).map_err(|x| x.to_string())?;
+        match r.responses[0].error_code {
+            0 => Ok(true),
+            REQUEST_TIMED_OUT => Ok(false),
+            other => Err(format!("deleting answered {other}")),
         }
     })
 }
@@ -2133,33 +2168,7 @@ fn reassignments_replaced_cancelled_or_deleted_settle() {
                 alter_frame("doomed", &[(0, Some(vec![1, 4, 5])), (1, Some(vec![2, 4, 5]))]),
                 alter_check(vec![0, 0]),
             ),
-            (
-                framed(
-                    20,
-                    6,
-                    1,
-                    &kafka_protocol::messages::DeleteTopicsRequest::default()
-                        .with_topics(vec![
-                            kafka_protocol::messages::delete_topics_request::DeleteTopicState::default()
-                                .with_name(Some(TopicName(StrBytes::from_string("doomed".into())))),
-                        ])
-                        .with_timeout_ms(1_000),
-                ),
-                Box::new(|mut body: Bytes| {
-                    ResponseHeader::decode(
-                        &mut body,
-                        kafka_protocol::messages::DeleteTopicsResponse::header_version(6),
-                    )
-                    .map_err(|x| x.to_string())?;
-                    let r = kafka_protocol::messages::DeleteTopicsResponse::decode(&mut body, 6)
-                        .map_err(|x| x.to_string())?;
-                    match r.responses[0].error_code {
-                        0 => Ok(true),
-                        REQUEST_TIMED_OUT => Ok(false),
-                        other => Err(format!("deleting answered {other}")),
-                    }
-                }),
-            ),
+            (delete_frame("doomed"), delete_check()),
             until_no_reassignment(),
         ];
         let total = steps.len();
@@ -2176,6 +2185,7 @@ fn reassignments_replaced_cancelled_or_deleted_settle() {
             buf: Vec::new(),
             pending: None,
             done: done.clone(),
+            patience: REQUEST_TIMEOUT,
         }));
         let fail = |cluster: &Cluster<'_>, what: &str| -> String {
             format!("seed {seed}: {what}\n{}", cluster.run_so_far().log.join("\n"))
@@ -2246,6 +2256,192 @@ fn reassignments_replaced_cancelled_or_deleted_settle() {
                     "seed {seed}: broker {n:?} keeps {name} rows of the deleted topic"
                 );
             }
+        }
+    }
+}
+
+/// HD item 2: a command its origin sends again after its `done` row has gone (`DONE_WINDOW` entries after it was
+/// applied) is stale, and skipped. The controller leader's messages to one broker are cut (its own still arrive, and
+/// it is slow to call an election), so it does not learn its creation was applied; meanwhile another broker's client
+/// deletes the topic and creates more, past the window. The late copy must not bring the deleted topic back.
+///
+/// Here the cut broker sends its creation again every 50ms, so copies reach the leader during the cut.
+#[test]
+fn a_command_sent_again_past_the_done_window_is_skipped() {
+    late_copies(false);
+}
+
+/// As `a_command_sent_again_past_the_done_window_is_skipped`, but the cut broker sends its creation again only every
+/// 8s: the cut heals first, it catches up from the leader's applied metadata (its creation's `done` row already gone
+/// from it), and only then sends its creation again. The copy keeps the index it was first made at, so it is stale.
+#[test]
+fn a_command_sent_again_after_catching_up_from_a_snapshot_is_skipped() {
+    late_copies(true);
+}
+
+#[cfg(test)]
+fn late_copies(slow: bool) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/kafka/sim_cluster.bls");
+    let mut nodes: Vec<NodeSpec> = (1..=3)
+        .map(|i| NodeSpec {
+            name: format!("b{i}"),
+            role: Some("Broker".to_owned()),
+        })
+        .collect();
+    nodes.push(NodeSpec {
+        name: "c1".to_owned(),
+        role: Some("Client".to_owned()),
+    });
+    let text = |v: &str| blossom_front::api::ParamBinding::Text(v.into());
+    let params = [
+        ("DONE_WINDOW".to_owned(), blossom_front::api::ParamBinding::Int(4)),
+        ("CONTROLLER_KEEP".to_owned(), blossom_front::api::ParamBinding::Int(2)),
+        ("CMD_RESEND".to_owned(), text(if slow { "8s" } else { "50ms" })),
+        ("RAFT_ELECTION_MIN".to_owned(), text("20s")),
+        ("RAFT_ELECTION_MAX".to_owned(), text("25s")),
+    ]
+    .into_iter()
+    .collect();
+    let (result, _) = blossom_driver::bls::compile_file_with(path.to_str().unwrap(), &nodes, &params);
+    let artifact: BlsArtifact = result.unwrap_or_else(|e| panic!("sim_cluster.bls: {e:?}")).0;
+    let schema = DurableSchema::of(artifact.program.get());
+    let rel = |n: &str| artifact.rel_named(n).unwrap();
+    let ctl = {
+        let mut id = vec![0u8; 16];
+        id[15] = 1;
+        Value::Tuple(vec![Value::Bytes(id.into()), Value::Int(IntValue::I32(0))].into())
+    };
+    let named = |cluster: &Cluster<'_>, n: NodeId, topic: &str| {
+        cluster
+            .state(n)
+            .unwrap()
+            .rows(rel("mtopic"))
+            .any(|r| r[0] == Value::Str(topic.into()))
+    };
+    for seed in 1..=2u64 {
+        let cfg = ClusterConfig {
+            seed,
+            clients: 0,
+            duration: 15_000_000_000,
+            externs: Arc::new(blossom_std_host::registry().unwrap()),
+            ..ClusterConfig::default()
+        };
+        let mut cluster = Cluster::new(
+            &artifact,
+            &schema,
+            blossom_value::Seed::from_u64(seed),
+            blossom_integration_tests::kafka_brokers(&artifact).unwrap(),
+            Box::new(NoKvClients),
+            cfg,
+        )
+        .unwrap();
+        let fail = |cluster: &Cluster<'_>, what: &str| -> String {
+            format!("seed {seed}: {what}\n{}", cluster.run_so_far().log.join("\n"))
+        };
+        cluster.run_until(500_000_000).unwrap();
+        // The controller's leader (the newest term's), the broker cut from it, and the third.
+        let leader = cluster
+            .state(NodeId(0))
+            .unwrap()
+            .rows(rel("leader_of"))
+            .filter(|r| r[0] == ctl)
+            .max_by_key(|r| int(&r[1]))
+            .map(|r| match &r[2] {
+                Value::Node(n) => *n,
+                other => panic!("{other:?}"),
+            })
+            .unwrap_or_else(|| panic!("seed {seed}: no controller leader"));
+        let others: Vec<NodeId> = (0..3).map(NodeId).filter(|n| *n != leader).collect();
+        let (origin, third) = (others[0], others[1]);
+        cluster.cut(leader, origin).unwrap();
+        let creator = Rc::new(RefCell::new(0));
+        cluster.stream_client(Box::new(Script {
+            rng: Rng(seed),
+            brokers: vec![origin],
+            steps: vec![(create_frame_within("gone", 3, 30_000), Box::new(|_| Ok(true)))],
+            at: 0,
+            conn: None,
+            open: false,
+            buf: Vec::new(),
+            pending: None,
+            done: creator.clone(),
+            patience: 30_000_000_000,
+        }));
+        while !named(&cluster, leader, "gone") {
+            assert!(
+                cluster.now() < 3_000_000_000,
+                "{}",
+                fail(&cluster, "the creation was not applied")
+            );
+            cluster.run_until(cluster.now() + 10_000_000).unwrap();
+        }
+        let mut steps: Vec<(Vec<u8>, Check)> = vec![(delete_frame("gone"), delete_check())];
+        steps.extend((0..5).map(|k| (create_frame(&format!("after{k}"), 3), create_check())));
+        let total = steps.len();
+        let deleter = Rc::new(RefCell::new(0));
+        cluster.stream_client(Box::new(Script {
+            rng: Rng(seed + 100),
+            brokers: vec![third],
+            steps,
+            at: 0,
+            conn: None,
+            open: false,
+            buf: Vec::new(),
+            pending: None,
+            done: deleter.clone(),
+            patience: REQUEST_TIMEOUT,
+        }));
+        while *deleter.borrow() < total {
+            assert!(
+                cluster.now() < 10_000_000_000,
+                "{}",
+                fail(&cluster, "the deletions did not finish")
+            );
+            cluster.run_until(cluster.now() + 20_000_000).unwrap();
+        }
+        // The cut broker still waits on its creation.
+        assert_eq!(*creator.borrow(), 0, "{}", fail(&cluster, "the creation was answered"));
+        if slow {
+            // It catches up from a snapshot (the leader compacted past its log) before it sends its creation again.
+            cluster.heal();
+            while !named(&cluster, origin, "after4") {
+                assert!(
+                    cluster.now() < 7_500_000_000,
+                    "{}",
+                    fail(&cluster, "the cut broker did not catch up before sending again")
+                );
+                cluster.run_until(cluster.now() + 10_000_000).unwrap();
+            }
+            let point = cluster
+                .state(origin)
+                .unwrap()
+                .rows(rel("rsnap"))
+                .find(|r| r[0] == ctl)
+                .map(|r| int(&r[1]))
+                .unwrap_or(0);
+            assert!(point > 0, "{}", fail(&cluster, "the cut broker took no snapshot point"));
+            cluster.step_until(10_000_000_000).unwrap();
+        } else {
+            cluster.run_until(cluster.now() + 1_000_000_000).unwrap();
+            cluster.heal();
+            cluster.step_until(cluster.now() + 2_000_000_000).unwrap();
+        }
+        assert!(
+            cluster.violation().is_none(),
+            "{}",
+            fail(&cluster, cluster.violation().unwrap_or(""))
+        );
+        for n in (0..3).map(NodeId) {
+            assert!(
+                !named(&cluster, n, "gone"),
+                "{}",
+                fail(&cluster, &format!("the deleted topic is back on broker {n:?}"))
+            );
+            assert!(
+                named(&cluster, n, "after4"),
+                "{}",
+                fail(&cluster, &format!("broker {n:?} is behind"))
+            );
         }
     }
 }

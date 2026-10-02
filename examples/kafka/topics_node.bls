@@ -203,9 +203,9 @@ view controller_or_none(id) {
 /// answer, created by it (S7 answered them at once too; Kafka answers LEADER_NOT_AVAILABLE first). The names still
 /// being created then are LEADER_NOT_AVAILABLE.
 view metadata_creating(c, i, names) {
-    metadata_pinned(c, i, names), metadata_cmd_of(c, i, tag, _cmd), my_id(me), not done(me, tag);
+    metadata_pinned(c, i, names), metadata_cmd_of(c, i, tag, _cmd), my_id(me), not done(me, tag, _);
     metadata_pinned(c, i, _names), not metadata_cmd_of(c, i, _, _), let names = [];
-    metadata_pinned(c, i, _names), metadata_cmd_of(c, i, tag, _cmd), my_id(me), done(me, tag), let names = [];
+    metadata_pinned(c, i, _names), metadata_cmd_of(c, i, tag, _cmd), my_id(me), done(me, tag, _), let names = [];
 }
 view metadata_ready(c, i) {
     metadata_creating(c, i, names) where names.len() == 0;

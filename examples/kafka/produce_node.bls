@@ -368,9 +368,17 @@ answer_init_pid_late: while init_pid_head(c, i, seq, corr, fr, at, _req), pid_as
 /// offset the next entry starts at.
 /// (Retention deletes only materialized batches, so an entry below the log start is applied. Only a change of the
 /// log start makes this look at the retained entries.)
-view compactable(g, i, pos) =
+///
+/// The controller's applied entries are compactable but the last `CONTROLLER_KEEP`, in steps of that many: the
+/// applied metadata is their state, and a follower that needs the entries compacted away gets it (`meta_snap`).
+view compactable(g, i, pos) {
     log_start(tid, p, s), data_entry(tid, p, i, _base, last, _t, _h, _data), let g = (tid, p), let pos = last + 1i64
-    where last < s;
+        where last < s;
+    applied_m(a), let g = controller(), not rsnap(g, _, _, _, _), let i = a - CONTROLLER_KEEP, let pos = 0i64
+        where a >= CONTROLLER_KEEP + CONTROLLER_KEEP;
+    applied_m(a), let g = controller(), rsnap(g, s, _, _, _), let i = a - CONTROLLER_KEEP, let pos = 0i64
+        where a >= s + CONTROLLER_KEEP + CONTROLLER_KEEP;
+}
 /// An index at or before a group's snapshot point (committed, and compacted away).
 view compacted_at(g, i) = placed(_c, _i, _j, tid, p, i, _e, _b, _l, _s), let g = (tid, p), rsnap(g, sp, _, _, _) where i <= sp;
 

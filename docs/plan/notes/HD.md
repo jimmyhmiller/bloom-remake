@@ -4,7 +4,7 @@ Branch `slice-hardening`, worktree `.worktrees/hd`. Chosen by the user (2026-10-
 
 ## Resume here
 
-- **State (2026-10-01):** item 1 done. Next: item 2 (controller compaction).
+- **State (2026-10-01):** items 1 and 2 done. Next: item 3 (acks=all latency).
 
 ## Items
 
@@ -23,3 +23,55 @@ Branch `slice-hardening`, worktree `.worktrees/hd`. Chosen by the user (2026-10-
 - Test: `bls_extensions::formats_are_bounded_by_their_input_not_the_step_budget` (1.6M items, ~11M steps, both
   evaluators; a metered condition past its budget is still BLSR012); mutation: metering format functions again makes
   the decode BLSR012.
+
+### Item 2: the controller's log compacted, the applied commands bounded (done)
+
+- **Compaction.** `compactable` (produce_node.bls) gains the controller: a broker compacts its controller log up to
+  `applied − CONTROLLER_KEEP` once that is `CONTROLLER_KEEP` past its snapshot point (steps of KEEP, default 1000).
+  Raft's existing InstallSnapshot moves the point to a follower that needs compacted entries.
+- **The applied metadata as the snapshot.** The metadata applied at an index is the same on every broker (a function
+  of the committed prefix). A broker whose applied index is below its controller snapshot point cannot apply from
+  its log, so every heartbeat it sends `meta_want(point)` to every other broker. Any broker that has applied at least
+  that far answers with `meta_snap`: its metadata at its own applied index (topics, assignments, reassignments, deleted
+  topics, `done`, outcomes, next producer id). The asker adopts the newest copy past its applied index
+  (`adopt_state` upserts, `adopt_drop` deletes what the copy lacks, `applied_m` jumps; `to_apply` waits that tick).
+  - First draft was a leader push gated on `match_idx < rsnap`. Liveness hole: once InstallSnapshot is acknowledged
+    the push stops, so a lost `meta_snap` (or a leader itself behind its point) left a broker stuck for ever. The
+    pull asks until it has adopted. No directed test drops exactly the `meta_snap` (the sim cannot single out one
+    channel), so the pull is covered by the random drops and partitions of the compacted run below.
+- **Bounding `done`/`outcome`/`mdeleted`.** Each keeps its rows for `DONE_WINDOW` entries after they are applied
+  (`while applied_m(a) where at + DONE_WINDOW > a`; outcome `while done(origin, tag, _)`). That is safe because a
+  command carries `made`, the controller index its origin had applied when it first wanted it. The origin pins it in
+  `cmd_made`, so every copy carries the same value. `fresh` skips a command with `made + DONE_WINDOW <= i`
+  (stale). Proof: the original was applied at i0 > made. A copy at j ≤ i0 + W still finds its `done` row; a copy at
+  j > i0 + W has made + W < j, so it is stale. Producer-id blocks and reassignment completions (`repeatable`) are
+  applied however old; applying one twice is harmless.
+  - `mark_done` marks stale copies done too (with no outcome): the origin stops sending, and its request times out
+    through the usual path (REQUEST_TIMED_OUT, "may still happen", true: it never will).
+  - `cmd_made` is not durable. That is fine because every non-repeatable command belongs to a request on a connection,
+    which a crash ends (a `Conn` is unique across incarnations).
+  - The window size affects only liveness: a request that waits more than `DONE_WINDOW` entries times out. Default
+    100000.
+- **Tests.**
+  - `kafka_topics::a_broker_behind_the_controllers_snapshot_adopts_the_leaders_metadata`: KEEP 4, W 10. Broker 3 is
+    stopped 0.3s–1.8s while the others compact past it; it comes back to a snapshot point past what it held.
+  - `kafka_topics::admin_requests_stay_linearizable_with_the_controller_compacted`: the three-broker fault run with
+    KEEP 3, W 12.
+  - `check_runs` now also compares `applied_m`, `mreassign`, `mdeleted`, `done`, `outcome` and `next_pid` across
+    brokers. With a window, it also checks the bounds: at most W `done` and `mdeleted` rows, and no outcome without
+    its `done` row.
+  - `kafka_cluster::a_command_sent_again_past_the_done_window_is_skipped`: the leader's messages to the origin are
+    cut and resends come every 50ms. Another broker deletes the topic and pushes the log past W; the late copies
+    reach the leader and must not bring the topic back.
+  - `kafka_cluster::a_command_sent_again_after_catching_up_from_a_snapshot_is_skipped`: as above, with 8s resends.
+    The origin catches up from a snapshot (the `done` row already gone) before it sends again.
+- **Mutations, all caught:**
+  - no `meta_want`;
+  - no `send meta_snap`;
+  - no `adopt_drop` of topics;
+  - no adopting `done`;
+  - no controller compaction;
+  - `fresh` ignoring staleness (caught by both late-copy tests);
+  - no `cmd_made` pinning (caught by the snapshot variant; the 50ms variant cannot see it, because its stale copies
+    are marked done first);
+  - no window on `done`, on `outcome`, or on `mdeleted`.
