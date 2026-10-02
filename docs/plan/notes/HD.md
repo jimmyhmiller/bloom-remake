@@ -101,7 +101,33 @@ Branch `slice-hardening`, worktree `.worktrees/hd`. Chosen by the user (2026-10-
     (see `torn_tail`).
   - Tests: `crash_points.rs` (renamed from `crc_crash_points.rs`) runs both certifications. Mutation: strict writing
     its receipt once per segment, as crc does, fails `synced_marker_and_receipt_media_fault_refused`.
-- **Options left** (each sync cut is about 5 ms per hop here):
+- **User decisions (2026-10-01):** keep strict at 3 syncs (no 2-sync receipt); answer acks=all on commit, with Fetch
+  serving committed but unmaterialized entries.
+- **Answer on commit** (the user's choice).
+  - `placed_done` answers once `commit_of` reaches the entry (and the ISR holds it), not once it is materialized
+    (`log_end`).
+  - Materialization works to `materialize_to`, the commit index the previous tick saw. So the tick that answers
+    writes nothing durable, and the answer waits for no sync.
+  - Fetch and ListOffsets read up to the commit index:
+    - `readable_batch` is the materialized batches plus `pending_batch`, the committed entries not materialized yet;
+    - `high_watermark` replaces `log_end`;
+    - the timestamp search and MAX_TIMESTAMP consult the pending batches after the materialized log.
+  - Without these reads, a read reaching the broker in the tick that materializes an entry (just after its answer)
+    would miss an acknowledged record.
+  - Measured: strict 90 ms (unchanged), crc 28 → 25 ms. The three brokers share one disk here, so their syncs
+    serialize, and the materialization commit moved off the critical path still occupies the device ahead of the
+    next produce. On separate disks it saves one leader commit per acks=all produce.
+  - Test: `kafka_read_after_ack` drives one broker tick by tick with the manual driver (the simulator cannot place a
+    request in that tick). It answers an acks=all produce, then in the very next tick sends a Fetch at the offset
+    and three ListOffsets: latest, the batch's first timestamp, and the greatest timestamp. Mutations, all caught:
+    no pending batches; ListOffsets using `log_end`; the timestamp search ignoring pending batches; MAX_TIMESTAMP
+    ignoring them.
+  - `kafka_cluster::reassignments_move_partitions_under_load` then failed on seed 1: the reader did not read every
+    batch. The brokers were consistent. The test's Reader marked itself stale on every close, including the ones it
+    asked for to move to another partition's leader. It then asked a random broker for metadata and closed again
+    unless that broker led the partition. The new schedule left it in that loop for its last half second (twelve
+    random picks, none the leader). Fixed in the Reader: a close it asked for keeps the leaders it knows.
+- **Options considered** (each sync cut is about 5 ms per hop here):
   - Strict at 2 syncs with an in-place two-slot receipt. This loses detection of a corrupted current receipt slot
     combined with damage to the last acknowledged batch (a double fault). A user decision.
   - Answer acks=all on commit rather than after materializing. This removes the leader's third commit, but Fetch

@@ -189,8 +189,11 @@ view waits_on(c, i, j) {
     placed(c, i, j, _, _, _, _, _, _, _);
     duplicate(c, i, j, _, _, _, _, _);
 }
-/// A placed entry is done when the high watermark (Raft's commit) passes it and every in-sync replica holds it, as
-/// Kafka's `acks=all` waits for the whole ISR; a duplicate, when its original is (one compacted away is long done).
+/// A placed entry is done when Raft's commit index reaches it (the high watermark passes it) and every in-sync replica
+/// holds it, as Kafka's `acks=all` waits for the whole ISR; a duplicate, when its original is (one compacted away is
+/// long done). The commit index decides, not the materialized log: the tick that sees it writes nothing durable, so
+/// the answer leaves without waiting for a sync (the materialization follows a tick later, `materialize_to`, and Fetch
+/// and ListOffsets read the committed entries not materialized yet meanwhile, `pending_batch`).
 view isr_low(g, low = min!(m)) = in_sync(g, id), member_id(f, id), match_idx(g, f, m);
 view isr_followers(g) = isr_low(g, _);
 view isr_lacks(g, idx) = waits_index(g, idx), isr_low(g, low) where low < idx;
@@ -201,10 +204,10 @@ view waits_index(g, idx) {
     duplicate(_c, _i, _j, tid, p, _e, base, _l), entry_index(tid, p, base, idx), let g = (tid, p);
 }
 view placed_done(c, i, j) {
-    placed(c, i, j, tid, p, idx, _e, _b, last, _s), log_end(tid, p, hw), let g = (tid, p), not isr_lacks(g, idx)
-        where hw > last;
-    duplicate(c, i, j, tid, p, _e, base, last), log_end(tid, p, hw), entry_index(tid, p, base, idx), let g = (tid, p),
-        not isr_lacks(g, idx) where hw > last;
+    placed(c, i, j, tid, p, idx, _e, _b, _last, _s), let g = (tid, p), commit_of(g, cm), not isr_lacks(g, idx)
+        where cm >= idx;
+    duplicate(c, i, j, tid, p, _e, base, _last), entry_index(tid, p, base, idx), let g = (tid, p), commit_of(g, cm),
+        not isr_lacks(g, idx) where cm >= idx;
     duplicate(c, i, j, tid, p, _e, base, last), log_end(tid, p, hw), not entry_index(tid, p, base, _) where hw > last;
 }
 /// When it is done, the in-sync replicas are fewer than `min.insync.replicas`: Kafka then answers
@@ -271,10 +274,36 @@ answer_produce_timeout: while produce_head(c, i, seq, corr, fr, at, req), produc
 }
 // ---------------------------------------------------------------- materializing committed entries, on every replica
 
-/// Each partition's committed entries not materialized yet, in log order.
+/// The commit index each partition materializes to: the one the tick before saw. So a tick that sees the commit index
+/// pass an entry answers its `acks=all` producer without writing anything durable itself (an answer leaves only once
+/// every durable write before it is synced), and the next tick materializes it.
+table materialize_to(tid: Bytes, part: i32, c: u64) key(tid, part) while replica(tid, part);
+note_commit: while replica(tid, p), let g = (tid, p), commit_of(g, c), not materialize_to(tid, p, c) {
+    upsert materialize_to(tid, p, c);
+}
+
+/// The committed entries not materialized yet (at most a tick's worth): read as batches by Fetch and ListOffsets,
+/// which answer up to the commit index, as Kafka reads up to its high watermark. A batch's blob is its entry's.
+view pending_batch(tid, p, base, last, max_ts, blob) =
+    applied_d(tid, p, a), not installing(tid, p), let g = (tid, p), commit_of(g, c),
+    data_entry(tid, p, i, base, last, max_ts, _h, blob) where i > a && i <= c;
+view pending_end(tid, p, l = max!(last)) = pending_batch(tid, p, _base, last, _t, _blob);
+/// A partition's batches up to its high watermark: materialized, or committed and not materialized yet.
+view readable_batch(tid, p, base, last, max_ts, blob) {
+    batch(tid, p, base, last, max_ts, blob);
+    pending_batch(tid, p, base, last, max_ts, blob);
+}
+/// A partition's high watermark: the offset after its last committed batch.
+view high_watermark(tid, p, end) {
+    log_end(tid, p, end), not pending_end(tid, p, _);
+    pending_end(tid, p, l), let end = l + 1i64;
+}
+
+/// Each partition's committed entries not materialized yet, in log order, up to `materialize_to`.
 /// (A partition installing a snapshot point this tick materializes nothing: the install resets what it would write.
 /// The entries are found by an index range, not by scanning the log.)
-view to_apply_d(tid, p, a, c) = applied_d(tid, p, a), not installing(tid, p), let g = (tid, p), commit_of(g, c) where c > a;
+view to_apply_d(tid, p, a, c) =
+    applied_d(tid, p, a), not installing(tid, p), materialize_to(tid, p, c) where c > a;
 view to_materialize(tid, p, xs = collect!((i, base, last, max_ts, data, h))) =
     to_apply_d(tid, p, a, c), data_entry(tid, p, i, base, last, max_ts, h, data) where i > a && i <= c;
 view materialized_to(tid, p, c) = to_apply_d(tid, p, _a, c);
