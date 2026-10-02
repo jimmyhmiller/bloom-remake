@@ -79,7 +79,7 @@ Branch `slice-hardening`, worktree `.worktrees/hd`. Chosen by the user (2026-10-
 
 ### Item 3: acks=all latency (in progress)
 
-- **Measurement.** `kafka3::acks_all_latency` (ignored; `--ignored --nocapture`, `KAFKA3_TAIL=crc|strict`) sends 300
+- **Measurement.** `kafka3::acks_all_latency` (runs only with `KAFKA3_LATENCY=1`; `--nocapture`, `KAFKA3_TAIL=crc|strict`) sends 300
   sequential one-record acks=all produces to one partition leader on three local brokers.
 - **Starting point.** Release build, this Mac: strict p50 150 ms, crc p50 70 ms.
   - One `F_FULLFSYNC` takes about 5 ms here.
@@ -271,5 +271,9 @@ after every change. The user chose fast and full tiers, with long full runs on t
   - the 1.6M-item format decode (85 s).
 - `scripts/test-tiers.sh fast|full`; CI's gate tier sets `BLOSSOM_FULL=1` and runs the ignored tests; the policy is
   in CONVENTIONS §8.
+- The process-cluster tests of the CLI suite (`kill9`, `kafka_kill9`, `raft3`, `kafka3`) hold one lock
+  (`one_cluster`) and so run one at a time: their ports are picked by binding port 0 and releasing it, which a test
+  running at the same time could take (the first full-tier run failed on `Address already in use`). The latency
+  measurement is no longer an ignored test (`--include-ignored` ran it): it runs with `KAFKA3_LATENCY=1`.
 - The corpus (full tier only) passes: core 195, lattices 47, async 36, net 3. Lattices takes about 20 minutes in a
   debug build, on main as on this branch.

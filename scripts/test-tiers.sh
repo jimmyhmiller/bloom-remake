@@ -14,10 +14,13 @@ case "$tier" in
     cargo test --workspace --no-fail-fast "$@"
     ;;
   full)
-    BLOSSOM_FULL=1 cargo test --workspace --no-fail-fast "$@" -- --include-ignored
+    # Every part runs whatever an earlier one found; the exit status says whether all passed.
+    status=0
+    BLOSSOM_FULL=1 cargo test --workspace --no-fail-fast "$@" -- --include-ignored || status=1
     for area in core lattices async net; do
-      cargo run -q -p xtask -- corpus --check --area "$area"
+      cargo run -q -p xtask -- corpus --check --area "$area" || status=1
     done
+    exit "$status"
     ;;
   *)
     echo "usage: $0 fast|full [cargo test args...]" >&2
