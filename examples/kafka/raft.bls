@@ -57,6 +57,8 @@ const NOOP: u8 = 0;
 const DATA: u8 = 1;
 const CMD: u8 = 2;
 const CONFIG: u8 = 3;
+/// An offset commit, in a `__consumer_offsets` partition (S9.md D5).
+const OFFSETS: u8 = 4;
 
 channel request_vote(g: Group, term: u64, last_idx: u64, last_term: u64): Broker -> Broker;
 channel vote(g: Group, term: u64, granted: bool): Broker -> Broker;

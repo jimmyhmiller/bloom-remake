@@ -634,6 +634,7 @@ at Broker {
         appendable_cmd(cmd), ctl(g), leader(g, _), let x = (CMD, -1i64, Blob::of(cmd));
         data_proposals(g, x);
         config_proposals(g, x);
+        offsets_proposals(g, x);
     }
 
     // ---- reassignment, at the partition's leader (item 5)

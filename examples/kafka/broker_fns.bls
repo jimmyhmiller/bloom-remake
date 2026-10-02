@@ -69,6 +69,24 @@ fn stateful_body_ok(key: i16, fr: Bytes) -> bool {
             frame_prefix(fr).and_then(|p| decode_alter_reassignments(b, p.1)).is_some()
         } else if key == API_LIST_PARTITION_REASSIGNMENTS {
             decode_list_reassignments(b).is_some()
+        } else if key == API_FIND_COORDINATOR {
+            frame_prefix(fr).and_then(|p| decode_find_coordinator(b, p.1)).is_some()
+        } else if key == API_JOIN_GROUP {
+            frame_prefix(fr).and_then(|p| decode_join_group(b, p.1)).is_some()
+        } else if key == API_SYNC_GROUP {
+            frame_prefix(fr).and_then(|p| decode_sync_group(b, p.1)).is_some()
+        } else if key == API_HEARTBEAT {
+            frame_prefix(fr).and_then(|p| decode_heartbeat(b, p.1)).is_some()
+        } else if key == API_LEAVE_GROUP {
+            frame_prefix(fr).and_then(|p| decode_leave_group(b, p.1)).is_some()
+        } else if key == API_OFFSET_COMMIT {
+            frame_prefix(fr).and_then(|p| decode_offset_commit(b, p.1)).is_some()
+        } else if key == API_OFFSET_FETCH {
+            frame_prefix(fr).and_then(|p| decode_offset_fetch(b, p.1)).is_some()
+        } else if key == API_DESCRIBE_GROUPS {
+            frame_prefix(fr).and_then(|p| decode_describe_groups(b, p.1)).is_some()
+        } else if key == API_LIST_GROUPS {
+            frame_prefix(fr).and_then(|p| decode_list_groups(b, p.1)).is_some()
         } else {
             error("stateful_body_ok: a supported API with no decoder here")
         }
