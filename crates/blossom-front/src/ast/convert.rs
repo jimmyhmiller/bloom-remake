@@ -1803,6 +1803,7 @@ impl Cx<'_> {
             ret,
             body,
             span,
+            metered: true,
         };
         desugar::fn_body(&mut item, self.diags);
         Some(item)

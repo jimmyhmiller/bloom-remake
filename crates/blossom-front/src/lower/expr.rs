@@ -791,6 +791,7 @@ impl Lowerer<'_> {
                         associative: blossom_value::Claim::Absent,
                         idempotent: blossom_value::Claim::Absent,
                         stable_after: None,
+                        metered: f.metered,
                     },
                 })
                 .map_err(ir_err)?;

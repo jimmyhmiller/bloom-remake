@@ -168,6 +168,9 @@ pub struct FnItem {
     pub ret: Type,
     pub body: Expr,
     pub span: Span,
+    /// Whether its evaluation counts against the step budget (a format's generated functions are bounded by their
+    /// input and are not, LANGUAGE §16.1).
+    pub metered: bool,
 }
 
 /// A host function: pure by declaration, implemented in Rust at `path` (LANGUAGE §16.2).

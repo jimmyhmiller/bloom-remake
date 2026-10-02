@@ -342,7 +342,13 @@ impl<'t> Resolver<'t, '_> {
             ));
             return None;
         }
-        let (name, tparams, ret, span) = (t.name.clone(), t.tparams.clone(), t.ret.clone(), t.item.span);
+        let (name, tparams, ret, span, metered) = (
+            t.name.clone(),
+            t.tparams.clone(),
+            t.ret.clone(),
+            t.item.span,
+            t.item.metered,
+        );
         let scope = ScopeId(u32::try_from(self.hir.scopes.len()).ok()?);
         self.hir.scopes.push(HScope { vars, module });
         // Types over type parameters are placeholders until type checking writes the inferred ones.
@@ -366,6 +372,7 @@ impl<'t> Resolver<'t, '_> {
             // reaches type checking.
             body: HFnBody::Expr(HExpr::new(HExprKind::Tuple(Vec::new()), span)),
             span,
+            metered,
             scheme: Some(HScheme {
                 generic: name,
                 template: u32::try_from(g).ok()?,

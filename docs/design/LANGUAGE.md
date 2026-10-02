@@ -2561,7 +2561,9 @@ combinators (`map`, `filter`, `filter_map`, `fold`, `all`, `any`, …). `error("
 located hard error (BLSR010): it is how a function refuses an impossible input, never a silent default. Totality is
 enforced by a step budget: an evaluation, from a call made outside any function to its return, may apply closures
 and build `range` elements at most `FN_STEP_BUDGET` (10⁷) times in all; past it the tick aborts with BLSR012, the
-same in both evaluators. Evaluation depth is bounded too: since functions do not recurse, the deepest evaluation a
+same in both evaluators. A format's generated functions (§16.7) are not metered: every loop in them is bounded by the
+bytes left (or by the value encoded), so they terminate without a budget, and a value of any size in a frame decodes;
+a metered function they call (a condition's) starts a budget of its own. Evaluation depth is bounded too: since functions do not recurse, the deepest evaluation a
 program can make (an expression's nesting, plus the bodies of the functions it calls and the closures a combinator
 applies, plus one level per literal of the rule it is in) is computed at compile time, and a program deeper than
 `MAX_EVAL_DEPTH` (1024 levels) is BLS0217, so no evaluation can overflow the stack a tick runs on. An expression
@@ -2686,10 +2688,9 @@ fn MetadataRequest::encode(x: MetadataRequest, version: i16) -> Bytes
 ```
 
 Decoding reads the value at `p` and returns it with the position after it, or `None` when the bytes run out or
-break the layout — never a runtime error on malformed bytes: a length or count read from the bytes is checked against
-the bytes left before anything uses it. Decoding pays the function step budget like any function (§16.1): about
-seven steps per array item, so a well-formed value of more than about a million items exceeds it (BLSR012); a
-program decoding untrusted input bounds its size first. Encoding fails the tick when a value does not fit the layout:
+break the layout — never a runtime error on the bytes: a length or count read from the bytes is checked against the
+bytes left before anything uses it, and the generated functions are bounded by their input instead of the step
+budget (§16.1), so a well-formed value of any size decodes in time linear in its bytes. Encoding fails the tick when a value does not fit the layout:
 a length beyond its prefix's type (BLSR004), a `bytes(n)` value of another size (BLSR010). `decode(encode(x))` is
 `Some((x, end))` for every value whose absent conditional fields hold their defaults; the rules that make it so are
 checked: `rest` and `utf8` (and a tuple or record ending in one) come last, an array's items take at least one byte

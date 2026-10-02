@@ -59,9 +59,9 @@ pub(crate) fn call(cx: &Ctx<'_>, env: &[Option<Value>], f: FnId, args: &[Expr]) 
         )));
     }
     frame.resize(decl.vars.len(), None);
-    cx.fuel.enter();
+    let saved = cx.fuel.enter(decl.props.metered);
     let out = eval(cx, &frame, body);
-    cx.fuel.exit();
+    cx.fuel.exit(saved);
     out
 }
 

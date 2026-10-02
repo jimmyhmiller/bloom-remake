@@ -98,6 +98,15 @@ pub struct FnProps {
     pub associative: Claim,
     pub idempotent: Claim,
     pub stable_after: Option<Symbol>, // `stable fn … after t`
+    /// Whether the function's evaluation counts against the step budget (LANGUAGE §16.1). A format's generated
+    /// functions are bounded by their input (every loop by the bytes left), so they are not metered; a metered
+    /// function they call starts a budget of its own.
+    #[serde(default = "metered_default")]
+    pub metered: bool,
+}
+
+fn metered_default() -> bool {
+    true
 }
 
 /// UdaDecl data in the Dedalus core IR.

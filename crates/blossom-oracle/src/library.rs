@@ -58,9 +58,9 @@ pub(crate) fn call(scope: &Scope<'_>, env: &[Option<Value>], id: FnId, args: &[E
     for (slot, a) in local.iter_mut().zip(args) {
         *slot = Some(eval(scope, env, a)?);
     }
-    scope.fuel.enter();
+    let saved = scope.fuel.enter(decl.props.metered);
     let out = eval(scope, &local, body);
-    scope.fuel.exit();
+    scope.fuel.exit(saved);
     out
 }
 
