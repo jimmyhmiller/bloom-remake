@@ -393,6 +393,7 @@ impl Remap for FnProps {
             associative: self.associative.remap(m),
             idempotent: self.idempotent.remap(m),
             stable_after: self.stable_after.remap(m),
+            metered: self.metered,
         }
     }
 }

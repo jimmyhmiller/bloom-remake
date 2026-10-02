@@ -826,6 +826,7 @@ impl B {
             ret,
             body,
             span: self.span,
+            metered: false,
         };
         super::desugar::fn_body(&mut item, diags);
         ItemKind::Fn(item)

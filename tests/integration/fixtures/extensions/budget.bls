@@ -1,0 +1,17 @@
+//! A format's generated functions are bounded by their input, so they are not metered (LANGUAGE §16.1): a value of
+//! more items than the step budget allows decodes. A metered function a format calls keeps its own budget.
+program budget version 1;
+
+format Big { xs: array(uvarint, 0, u8) }
+
+/// Counts to `n`: one step per element.
+fn counts(n: u64) -> bool {
+    range(0, n).fold(0, |a, _i| a + 1) == n
+}
+format Checked(n: u64) { constant(u8, 1u8) if counts(n), tail: rest }
+
+input msg(k: u64, b: Bytes);
+input cond(k: u64, n: u64, b: Bytes);
+
+view big(k, n) = msg(k, b), let Some((r, _e)) = Big::decode(b, 0), let n = r.xs.len();
+view checked(k, t) = cond(k, n, b), let Some((r, _e)) = Checked::decode(b, 0, n), let t = r.tail.len();

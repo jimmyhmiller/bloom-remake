@@ -118,6 +118,9 @@ impl<'t> Resolver<'t, '_> {
                     ast::ItemKind::Fn(f) => {
                         let body = HFnBody::Expr(HExpr::new(HExprKind::Tuple(Vec::new()), f.body.span));
                         if let Some(id) = self.declare_fn(s, f.name, &f.params, &f.ret, f.span, body) {
+                            if let Some(h) = self.hir.fns.get_mut(id.index()) {
+                                h.metered = f.metered;
+                            }
                             fns.push((f, id));
                         }
                     }
@@ -513,6 +516,7 @@ impl<'t> Resolver<'t, '_> {
             body,
             span,
             scheme: None,
+            metered: true,
         });
         self.scope_mut(s).fns.insert(name.name, id);
         Some(id)

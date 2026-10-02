@@ -356,6 +356,7 @@ fn validator_v8_polymorphic_builtin_requires_monomorphic_signature() {
                 associative: Claim::Absent,
                 idempotent: Claim::Absent,
                 stable_after: None,
+                metered: true,
             },
         })
         .unwrap();
@@ -853,6 +854,7 @@ fn assert_digest_permutation(flags: [bool; 15]) {
         associative: blossom_value::class::Claim::Absent,
         idempotent: blossom_value::class::Claim::Absent,
         stable_after: None,
+        metered: true,
     };
     for (i, n) in ["fa", "fb"].iter().enumerate() {
         p.fns
@@ -1278,6 +1280,7 @@ fn project_role_prunes_unreferenced_shared_items() {
         associative: blossom_value::class::Claim::Absent,
         idempotent: blossom_value::class::Claim::Absent,
         stable_after: None,
+        metered: true,
     };
     p.fns
         .push(FnDecl {

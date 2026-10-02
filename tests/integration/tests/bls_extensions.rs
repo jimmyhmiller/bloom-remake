@@ -659,3 +659,45 @@ fn formats_decode_and_encode_as_the_reference_does() {
         .collect();
     assert_eq!(six, want_six);
 }
+
+/// More items than the step budget allows decode, on both evaluators; a metered function a format's condition
+/// calls still exceeds its own budget (BLSR012).
+#[test]
+fn formats_are_bounded_by_their_input_not_the_step_budget() {
+    let artifact = compile("budget.bls");
+    let rel = |n: &str| artifact.rel_named(n).unwrap();
+    let ev = |name: &str, row: Vec<Value>| InputEvent {
+        node: NodeId(0),
+        tick: Tick(1),
+        rel: rel(name),
+        row: Arc::from(row),
+    };
+    let items = 1_600_000u64;
+    let mut b = Vec::new();
+    put_uvarint(&mut b, items);
+    b.extend((0..items).map(|i| i as u8));
+    let ok = vec![
+        ev("msg", vec![u(1), Value::Bytes(Arc::from(&b[..]))]),
+        ev("cond", vec![u(2), u(10), Value::Bytes(Arc::from(&[1u8, 7, 7][..]))]),
+    ];
+    let run = match differential_or_error(&artifact, &ok, 2) {
+        Outcome::Ran(run) => run,
+        Outcome::Failed(t, code) => panic!("{code} at {t:?}"),
+    };
+    let rows = |name: &str| -> Vec<Vec<Value>> {
+        run.node_tick(Tick(1), NodeId(0))
+            .unwrap()
+            .instance
+            .rows(rel(name))
+            .map(|r| r.to_vec())
+            .collect()
+    };
+    assert_eq!(rows("big"), vec![vec![u(1), u(items)]]);
+    assert_eq!(rows("checked"), vec![vec![u(2), u(2)]]);
+    let over = blossom_ir::core::FN_STEP_BUDGET + 1;
+    let heavy = [ev("cond", vec![u(3), u(over), Value::Bytes(Arc::from(&[1u8][..]))])];
+    match differential_or_error(&artifact, &heavy, 2) {
+        Outcome::Failed(tick, code) => assert_eq!((tick, code.as_str()), (Tick(1), "BLSR012")),
+        Outcome::Ran(_) => panic!("a metered function past its budget raised nothing"),
+    }
+}

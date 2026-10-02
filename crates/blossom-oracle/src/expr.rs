@@ -40,30 +40,47 @@ impl Scope<'_> {
     }
 }
 
-/// How many function calls are open, and the steps the outermost one has left (`FN_STEP_BUDGET` at its start).
+/// The step budget of the function evaluation in progress: how many calls are open, the steps the outermost metered
+/// one has left (`FN_STEP_BUDGET` at its start), and whether the innermost open call is unmetered (a format's
+/// generated functions, which are bounded by their input, LANGUAGE §16.1). A metered call inside an unmetered one
+/// starts a budget of its own. One step per closure application and per element of a `range` built as a vector.
 #[derive(Default)]
-pub(crate) struct Fuel(std::cell::Cell<(u32, u64)>);
+pub(crate) struct Fuel(std::cell::Cell<(u32, u64, bool)>);
+
+/// What a call saved of the budget, to restore when it returns.
+#[derive(Clone, Copy)]
+pub(crate) struct Saved(u64, bool);
 
 impl Fuel {
-    /// Enters a call of a pure function; the outermost call starts a fresh budget.
-    pub(crate) fn enter(&self) {
-        let (depth, left) = self.0.get();
-        let left = if depth == 0 {
-            blossom_ir::core::FN_STEP_BUDGET
+    /// Enters a call of a pure function: the outermost metered call, or one inside an unmetered call, starts a fresh
+    /// budget.
+    pub(crate) fn enter(&self, metered: bool) -> Saved {
+        let (depth, left, free) = self.0.get();
+        let saved = Saved(left, free);
+        let (left, free) = if !metered {
+            (left, true)
+        } else if depth == 0 || free {
+            (blossom_ir::core::FN_STEP_BUDGET, false)
         } else {
-            left
+            (left, false)
         };
-        self.0.set((depth.saturating_add(1), left));
+        self.0.set((depth.saturating_add(1), left, free));
+        saved
     }
 
-    pub(crate) fn exit(&self) {
-        let (depth, left) = self.0.get();
-        self.0.set((depth.saturating_sub(1), left));
+    /// Leaves a call: after a call inside an unmetered one, the outer budget is as it was.
+    pub(crate) fn exit(&self, saved: Saved) {
+        let (depth, left, _free) = self.0.get();
+        let left = if saved.1 { saved.0 } else { left };
+        self.0.set((depth.saturating_sub(1), left, saved.1));
     }
 
     /// Spends `n` steps: outside any function a single `range` has the whole budget to itself.
     pub(crate) fn spend(&self, n: u64) -> ExprResult<()> {
-        let (depth, left) = self.0.get();
+        let (depth, left, free) = self.0.get();
+        if depth > 0 && free {
+            return Ok(());
+        }
         let have = if depth == 0 {
             blossom_ir::core::FN_STEP_BUDGET
         } else {
@@ -72,7 +89,7 @@ impl Fuel {
         match have.checked_sub(n) {
             Some(rest) => {
                 if depth > 0 {
-                    self.0.set((depth, rest));
+                    self.0.set((depth, rest, false));
                 }
                 Ok(())
             }

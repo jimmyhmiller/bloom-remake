@@ -877,6 +877,8 @@ pub struct HFn {
     pub span: Span,
     /// An instance of a generic function: its signature over the type parameters.
     pub scheme: Option<HScheme>,
+    /// Whether its evaluation counts against the step budget (LANGUAGE §16.1).
+    pub metered: bool,
 }
 
 #[derive(Clone, Debug)]
