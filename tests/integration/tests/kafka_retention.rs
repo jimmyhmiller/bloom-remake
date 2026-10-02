@@ -10,6 +10,7 @@
 //! - a Fetch below the log start is OFFSET_OUT_OF_RANGE, and one from it reads the rest byte for byte;
 //! - the broker's rows hold nothing below the log start: no batch, chunk, time index or segment row.
 
+use blossom_integration_tests::seeds;
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
@@ -443,7 +444,7 @@ fn retention_deletes_whole_segments_from_the_front() {
     let (result, _) = blossom_driver::bls::compile_file_with(path.to_str().unwrap(), &nodes, &params);
     let artifact: BlsArtifact = result.unwrap_or_else(|e| panic!("sim_cluster.bls: {e:?}")).0;
     let schema = DurableSchema::of(artifact.program.get());
-    for seed in 1..=3u64 {
+    for seed in seeds(1..=3) {
         let cfg = ClusterConfig {
             seed,
             clients: 0,

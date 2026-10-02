@@ -588,6 +588,7 @@ fn read_all(ports: &[u16], live: &[u16]) -> BTreeMap<i32, Vec<(i64, String)>> {
 }
 
 #[test]
+#[ignore = "full tier"]
 fn three_brokers_keep_every_acknowledged_record_under_kill_9_and_partitions() {
     let mut cluster = Cluster::new("rust");
     let ports = cluster.ports.clone();

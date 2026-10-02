@@ -3,6 +3,7 @@
 //! run on the oracle and on the engine, which must agree at every tick, and every view must equal what this file
 //! computes for it directly in Rust (a third, independent implementation).
 
+use blossom_integration_tests::{scaled_of, seeds_of};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -295,7 +296,7 @@ fn every_library_function_agrees_on_both_evaluators_and_with_its_definition() {
     ];
     let spaces = [" ", "  ", "\t", "\n ", ""];
     let mut checked = 0;
-    for seed in 0..8u64 {
+    for seed in seeds_of(0..8) {
         let mut rng = Rng(seed);
         let last = 12u64;
         let mut per_tick: Vec<Vec<(u64, String, Vec<u8>)>> = vec![Vec::new(); last as usize + 1];
@@ -337,7 +338,7 @@ fn every_library_function_agrees_on_both_evaluators_and_with_its_definition() {
             }
         }
     }
-    assert!(checked > 500, "only {checked} rows checked");
+    assert!(checked > scaled_of(500, &(0..8)), "only {checked} rows checked");
 }
 
 // ---------------------------------------------------------------- byte primitives (FOREIGN-PROTOCOLS §3)
@@ -572,7 +573,7 @@ fn byte_primitives_round_trip_and_agree_on_both_evaluators() {
     }
     let texts = ["", "kafka", "ünïcödé", "日本語", "a\u{0}b", "🙂 emoji"];
     let mut checked = 0;
-    for seed in 0..10u64 {
+    for seed in seeds_of(0..10) {
         let mut rng = Rng(seed);
         let last = 10u64;
         let mut per_tick: Vec<Vec<Row>> = vec![Vec::new(); last as usize + 1];
@@ -668,7 +669,7 @@ fn byte_primitives_round_trip_and_agree_on_both_evaluators() {
             }
         }
     }
-    assert!(checked > 1500, "only {checked} rows checked");
+    assert!(checked > scaled_of(1500, &(0..10)), "only {checked} rows checked");
 }
 
 // ---------------------------------------------------------------- host functions (FOREIGN-PROTOCOLS §4)

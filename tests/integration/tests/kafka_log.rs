@@ -9,6 +9,7 @@
 //! - every record of the log sent by some client, and none twice; offsets consecutive from 0;
 //! - each client's read a prefix of the final log, partition by partition, with no gap: the observers agree.
 
+use blossom_integration_tests::seeds;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -432,7 +433,7 @@ fn both_clients_see_one_log_and_every_acknowledged_record_once() {
     let artifact: BlsArtifact = result.unwrap_or_else(|e| panic!("sim_cluster.bls: {e:?}")).0;
     let schema = DurableSchema::of(artifact.program.get());
     let rel = |n: &str| artifact.rel_named(n).unwrap();
-    for seed in 1..=6u64 {
+    for seed in seeds(1..=6) {
         let cfg = ClusterConfig {
             seed,
             clients: 0,

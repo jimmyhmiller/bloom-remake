@@ -113,6 +113,7 @@ fn eager_commit_loses_a_committed_value() {
 }
 
 #[test]
+#[ignore = "full tier"]
 fn commit_holds_under_omissions_over_a_long_run() {
     // BENCH-137e, 12/6/0.
     assert_eq!(check("CommitLongFaults").verdict, Verdict::NoCounterexample);
@@ -127,12 +128,14 @@ fn votes_without_the_log_check_overwrite_a_committed_value() {
 }
 
 #[test]
+#[ignore = "full tier"]
 fn commit_holds_with_a_crash() {
     // BENCH-137g, 12/6/1.
     assert_eq!(check("CommitCrashFaults").verdict, Verdict::NoCounterexample);
 }
 
 #[test]
+#[ignore = "full tier"]
 fn election_safety_holds_with_a_crash() {
     // BENCH-137h, 10/7/1.
     assert_eq!(check("ElectionCrashFaults").verdict, Verdict::NoCounterexample);

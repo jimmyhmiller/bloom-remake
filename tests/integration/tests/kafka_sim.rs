@@ -4,6 +4,7 @@
 //! versions and the cluster's metadata on every connection it gets; both must record the same answers, and those
 //! answers are the broker's.
 
+use blossom_integration_tests::seeds;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -219,7 +220,7 @@ fn the_blossom_client_and_a_rust_client_see_the_same_answers() {
         vec![],
         0,
     );
-    for seed in 1..=6u64 {
+    for seed in seeds(1..=6) {
         let cfg = ClusterConfig {
             seed,
             clients: 0,
@@ -538,7 +539,7 @@ fn a_pipelining_client_is_throttled_and_answered_in_order() {
     let artifact: BlsArtifact = result.unwrap_or_else(|e| panic!("sim_cluster.bls: {e:?}")).0;
     let schema = DurableSchema::of(artifact.program.get());
     const N: i32 = 300;
-    for seed in 1..=3u64 {
+    for seed in seeds(1..=3) {
         let cfg = ClusterConfig {
             seed,
             clients: 0,

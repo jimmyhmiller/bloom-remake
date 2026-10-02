@@ -5,6 +5,7 @@
 //! the committed prefix, and leader completeness. A directed scenario drives the stale-leader-state case an earlier
 //! version got wrong.
 
+use blossom_integration_tests::{scaled, seeds};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -162,11 +163,18 @@ impl Observer for RaftSafety {
             let term = state.rows(self.current_term).map(|r| u64_at(r, 0)).max().unwrap_or(0);
             let log: BTreeMap<u64, &Row> = state.rows(self.log).map(|r| (u64_at(r, 0), r)).collect();
             for (i, entry) in &log {
-                let before = if *i == 1 { Some(0) } else { log.get(&(i - 1)).map(|r| u64_at(r, 1)) };
+                let before = if *i == 1 {
+                    Some(0)
+                } else {
+                    log.get(&(i - 1)).map(|r| u64_at(r, 1))
+                };
                 if let Some(pt) = before
                     && u64_at(entry, 2) != pt
                 {
-                    return Err(format!("node {n}: entry {i} records prev {}, but the entry before it has term {pt}", u64_at(entry, 2)));
+                    return Err(format!(
+                        "node {n}: entry {i} records prev {}, but the entry before it has term {pt}",
+                        u64_at(entry, 2)
+                    ));
                 }
             }
             for won in state.rows(self.won).map(|r| u64_at(r, 0)) {
@@ -179,7 +187,9 @@ impl Observer for RaftSafety {
             let commit = state.rows(self.commit).map(|r| u64_at(r, 0)).max().unwrap_or(0);
             for i in 1..=commit {
                 let Some(entry) = log.get(&i) else {
-                    return Err(format!("node {n} has committed through {commit} but holds no entry {i}"));
+                    return Err(format!(
+                        "node {n} has committed through {commit} but holds no entry {i}"
+                    ));
                 };
                 match self.committed.get(&i) {
                     None => {
@@ -260,7 +270,12 @@ fn raft_kv_serves_linearizably_without_faults() {
             ..ClusterConfig::default()
         },
     );
-    assert!(answered(&run) > 50, "only {} answered of {}", answered(&run), run.history.len());
+    assert!(
+        answered(&run) > 50,
+        "only {} answered of {}",
+        answered(&run),
+        run.history.len()
+    );
 }
 
 #[test]
@@ -268,7 +283,7 @@ fn raft_kv_is_linearizable_under_loss_partitions_and_crashes() {
     let artifact = raft_kv();
     let schema = DurableSchema::of(artifact.program.get());
     let mut totals = (0usize, 0usize, 0u64, 0u64);
-    for seed in 1..=6u64 {
+    for seed in seeds(1..=6) {
         let run = run_and_check(
             &artifact,
             &schema,
@@ -291,15 +306,19 @@ fn raft_kv_is_linearizable_under_loss_partitions_and_crashes() {
         totals.3 += run.partitions;
     }
     let (answered, unanswered, crashes, partitions) = totals;
-    assert!(answered > 100, "only {answered} operations answered");
-    assert!(unanswered > 0 && crashes > 3 && partitions > 3, "{unanswered} unanswered, {crashes} crashes, {partitions} partitions: the faults did not bite");
+    let all = 1..=6;
+    assert!(answered > scaled(100, &all), "only {answered} operations answered");
+    assert!(
+        unanswered > 0 && crashes > scaled(3, &all) as u64 && partitions > scaled(3, &all) as u64,
+        "{unanswered} unanswered, {crashes} crashes, {partitions} partitions: the faults did not bite"
+    );
 }
 
 #[test]
 fn raft_kv_is_safe_on_five_nodes_with_downtime() {
     let artifact = raft_kv_on(5);
     let schema = DurableSchema::of(artifact.program.get());
-    for seed in 1..=3u64 {
+    for seed in seeds(1..=3) {
         let run = run_and_check(
             &artifact,
             &schema,
@@ -352,7 +371,10 @@ fn await_leader(c: &mut Cluster, safety: &RaftSafety, among: &[NodeId], above: u
             let term = st.and_then(|s| s.rows(safety.current_term).map(|r| u64_at(r, 0)).max());
             let last = st.and_then(|s| s.rows(safety.log).map(|r| (u64_at(r, 0), u64_at(r, 1))).max());
             let commit = st.and_then(|s| s.rows(safety.commit).map(|r| u64_at(r, 0)).max());
-            format!("n{n}: term {term:?} last {last:?} commit {commit:?} leads {:?}", leads(c, safety, NodeId(n)))
+            format!(
+                "n{n}: term {term:?} last {last:?} commit {commit:?} leads {:?}",
+                leads(c, safety, NodeId(n))
+            )
         })
         .collect();
     panic!("no leader among {among:?} above term {above}: {states:?}");
@@ -409,7 +431,7 @@ fn write_until(c: &mut Cluster, to: NodeId, within: i64, what: &str, cond: impl 
 fn a_reelected_leader_forgets_its_old_follower_state() {
     let artifact = raft_kv();
     let schema = DurableSchema::of(artifact.program.get());
-    for seed in 1..=3u64 {
+    for seed in seeds(1..=3) {
         let safety = RaftSafety::of(&artifact);
         let mut c = Cluster::new(
             &artifact,
@@ -450,7 +472,9 @@ fn a_reelected_leader_forgets_its_old_follower_state() {
         c.partition(&[&[l, f], &[cc]]).unwrap();
         let (l2, _) = await_leader(&mut c, s, &[l, f], t_c, 5_000_000_000);
         assert_eq!(l2, l, "seed {seed}: F won instead of L; the scenario did not set up");
-        await_until(&mut c, 3_000_000_000, "F takes L's suffix", |c| last(c, f) == last(c, l));
+        await_until(&mut c, 3_000_000_000, "F takes L's suffix", |c| {
+            last(c, f) == last(c, l)
+        });
         wait(&mut c, 200_000_000);
         // 5. C and F: C (the later last term) wins, and overwrites F.
         c.partition(&[&[cc, f], &[l]]).unwrap();
@@ -464,7 +488,9 @@ fn a_reelected_leader_forgets_its_old_follower_state() {
         });
         c.partition(&[&[cc, l], &[f]]).unwrap();
         let before = last(&c, f);
-        write_until(&mut c, cc, 1_000_000_000, "C's entries reach L only", |c| last(c, l) > before);
+        write_until(&mut c, cc, 1_000_000_000, "C's entries reach L only", |c| {
+            last(c, l) > before
+        });
         wait(&mut c, 100_000_000);
         let t1 = leads(&c, s, cc).unwrap_or(0);
         // 7. L and F: L (the longer log) wins again, and clients write through it.
@@ -591,6 +617,7 @@ fn join_work(artifact: &BlsArtifact, schema: &DurableSchema, secs: i64) -> (u64,
 /// The engine's work per tick does not grow with the log: a run four times as long (a log four times as long)
 /// examines about as many rows per tick. Counted in rows, not time, so the check is exact and machine-independent.
 #[test]
+#[ignore = "full tier"]
 fn join_work_per_tick_is_flat_as_the_log_grows() {
     let artifact = raft_kv();
     let schema = DurableSchema::of(artifact.program.get());
@@ -598,7 +625,10 @@ fn join_work_per_tick_is_flat_as_the_log_grows() {
     let (t2, r2) = join_work(&artifact, &schema, 8);
     let (a, b) = (r1 as f64 / t1 as f64, r2 as f64 / t2 as f64);
     assert!(t2 > 3 * t1, "the longer run has {t2} ticks against {t1}");
-    assert!(b < a * 1.25, "{b:.1} rows per tick over 8s against {a:.1} over 2s: the work grows with the log");
+    assert!(
+        b < a * 1.25,
+        "{b:.1} rows per tick over 8s against {a:.1} over 2s: the work grows with the log"
+    );
 }
 
 /// A new leader's first appending tick carries several requests while its last entry is of an older term: the one
@@ -610,7 +640,7 @@ fn a_new_leaders_first_append_is_a_burst() {
     let schema = DurableSchema::of(artifact.program.get());
     let safety = RaftSafety::of(&artifact);
     let all = [NodeId(0), NodeId(1), NodeId(2)];
-    for seed in 1..=3u64 {
+    for seed in seeds(1..=3) {
         let mut c = Cluster::new(
             &artifact,
             &schema,
@@ -654,7 +684,11 @@ fn a_new_leaders_first_append_is_a_burst() {
         let (verdict, key) = check_partitioned(&KvModel, &run.history, |i| i.key().to_vec(), 50_000_000);
         assert!(verdict == Verdict::Linearizable, "seed {seed}: {verdict:?} at {key:?}");
         assert!(bursts > 0, "seed {seed}: no leader appended a burst");
-        assert_eq!(answered(&run), run.history.len(), "seed {seed}: operations went unanswered");
+        assert_eq!(
+            answered(&run),
+            run.history.len(),
+            "seed {seed}: operations went unanswered"
+        );
     }
 }
 
@@ -675,7 +709,12 @@ fn a_single_server_commits_alone() {
             ..ClusterConfig::default()
         },
     );
-    assert!(answered(&run) > 50, "only {} answered of {}", answered(&run), run.history.len());
+    assert!(
+        answered(&run) > 50,
+        "only {} answered of {}",
+        answered(&run),
+        run.history.len()
+    );
 }
 
 /// The same guarantees on stores with one sync per group commit (`tail_certification = "crc"`, what the etcd
@@ -684,7 +723,7 @@ fn a_single_server_commits_alone() {
 fn raft_kv_is_linearizable_on_one_sync_per_commit() {
     let artifact = raft_kv();
     let schema = DurableSchema::of(artifact.program.get());
-    for seed in 1..=4u64 {
+    for seed in seeds(1..=4) {
         let run = run_and_check(
             &artifact,
             &schema,

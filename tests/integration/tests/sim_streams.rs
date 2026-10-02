@@ -4,6 +4,7 @@
 //! defines for what it sent, and a session the client half-closes must end with every reply delivered before the
 //! server's close reaches it, unless a crash or a reset cut it.
 
+use blossom_integration_tests::seeds;
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
@@ -243,7 +244,7 @@ fn run_counting<P: Protocol + Clone + 'static>(file: &str, stream: &str, protoco
     let artifact = compile(file);
     let schema = DurableSchema::of(artifact.program.get());
     let mut total = Tally::default();
-    for seed in 1..=6u64 {
+    for seed in seeds(1..=6) {
         let cfg = ClusterConfig {
             seed,
             clients: 0,
@@ -354,7 +355,7 @@ fn a_node_dials_another_nodes_stream_in_the_simulator() {
     let (result, _) = compile_file(path.to_str().unwrap(), &nodes);
     let artifact = result.unwrap_or_else(|e| panic!("pair.bls: {e:?}")).0;
     let schema = DurableSchema::of(artifact.program.get());
-    for seed in 1..=5u64 {
+    for seed in seeds(1..=5) {
         let cfg = ClusterConfig {
             seed,
             clients: 0,
@@ -427,7 +428,7 @@ fn connections_that_open_and_close_constantly_survive_every_fault() {
     ];
     for (what, crashes, partitions, stream_drops) in faults {
         let mut greeted = 0;
-        for seed in 1..=12u64 {
+        for seed in seeds(1..=12) {
             let cfg = ClusterConfig {
                 seed,
                 clients: 0,
@@ -515,7 +516,7 @@ fn a_client_may_send_and_close_with_its_connect_and_reconnect_on_refusal() {
     }
     let artifact = greet_artifact();
     let schema = DurableSchema::of(artifact.program.get());
-    for seed in 1..=10u64 {
+    for seed in seeds(1..=10) {
         let cfg = ClusterConfig {
             seed,
             clients: 0,

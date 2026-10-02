@@ -6,6 +6,42 @@
 
 pub mod raft_safety;
 
+/// Whether this is the full test tier (`BLOSSOM_FULL=1`): every seed of a multi-seed simulation, and the tests marked
+/// `#[ignore = "full tier"]` (run with `-- --include-ignored`). Otherwise the fast tier, for every change: one seed.
+/// `scripts/test-tiers.sh` runs either.
+pub fn full_tier() -> bool {
+    std::env::var("BLOSSOM_FULL").is_ok_and(|v| v != "0" && !v.is_empty())
+}
+
+/// The seeds a multi-seed simulation runs: `all` in the full tier, its first otherwise.
+pub fn seeds(all: std::ops::RangeInclusive<u64>) -> std::ops::RangeInclusive<u64> {
+    if full_tier() { all } else { *all.start()..=*all.start() }
+}
+
+/// [`seeds`] for a half-open range.
+pub fn seeds_of(all: std::ops::Range<u64>) -> std::ops::Range<u64> {
+    if full_tier() || all.is_empty() {
+        all
+    } else {
+        all.start..all.start + 1
+    }
+}
+
+/// [`scaled`] for a half-open range of seeds ([`seeds_of`]).
+pub fn scaled_of(total: usize, all: &std::ops::Range<u64>) -> usize {
+    let every = all.clone().count().max(1);
+    let run = seeds_of(all.clone()).count();
+    total * run / every
+}
+
+/// A threshold a test asserts over every seed of `all`, scaled to the seeds that run ([`seeds`]): the share of the
+/// seeds that run, rounded down.
+pub fn scaled(total: usize, all: &std::ops::RangeInclusive<u64>) -> usize {
+    let every = all.clone().count().max(1);
+    let run = seeds(all.clone()).count();
+    total * run / every
+}
+
 use blossom_artifact::bls::BlsArtifact;
 use blossom_base::RelId;
 use blossom_ir::tick::Row;

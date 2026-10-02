@@ -12,6 +12,7 @@
 //! A second client's long poll at the log end is answered as soon as a third client's batch lands, well before its
 //! `max_wait_ms`.
 
+use blossom_integration_tests::seeds;
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
@@ -834,7 +835,7 @@ fn fetch_and_list_offsets_read_what_was_produced() {
     let artifact: BlsArtifact = result.unwrap_or_else(|e| panic!("sim_cluster.bls: {e:?}")).0;
     let schema = DurableSchema::of(artifact.program.get());
     let reg = Arc::new(blossom_std_host::registry().unwrap());
-    for seed in 1..=3u64 {
+    for seed in seeds(1..=3) {
         let cfg = ClusterConfig {
             seed,
             clients: 0,

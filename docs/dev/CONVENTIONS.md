@@ -153,6 +153,11 @@ Most rules are enforced mechanically: `clippy.toml` and `[workspace.lints]`, `ca
   `owns` lists it.
 - `scripts/milestone-gate.sh Mk` merges the milestone's WP branches, collects notes, runs the gate tier and, from
   M5, the corpus ratchet and coverage (PLAN §3).
+- **Test tiers** (HD): `scripts/test-tiers.sh fast` is for every change. Each multi-seed simulation runs its first
+  seed (`blossom_integration_tests::seeds`, with thresholds summed over seeds scaled by `scaled`), and the tests
+  marked `#[ignore = "full tier"]` are skipped (reported as ignored, never silently). `scripts/test-tiers.sh full`
+  (`BLOSSOM_FULL=1`, `--include-ignored`, then the corpus) runs once per slice, before a merge, on a machine with
+  cores to spare; the gate tier of CI runs it too. While the fast tier runs, run only the suites a change touches.
 
 ## 9. Recording bugs
 

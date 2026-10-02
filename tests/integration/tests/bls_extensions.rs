@@ -1,6 +1,7 @@
 //! The language slice (docs/design/EXTENSIONS.md), end to end: each extension runs on the oracle and on the engine,
 //! which must agree at every tick, and against the explicit program it abbreviates.
 
+use blossom_integration_tests::{scaled_of, seeds_of};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -90,7 +91,7 @@ fn a_guarded_table_keeps_what_its_explicit_clean_up_keeps() {
     let values = [10u64, 50, 150, 199, 200, 250];
     let mut dropped = [0usize; 4];
     let mut compared = 0usize;
-    for seed in 0..12u64 {
+    for seed in seeds_of(0..12) {
         let mut rng = Rng(seed);
         let last = 30u64;
         let mut inputs = Vec::new();
@@ -144,9 +145,9 @@ fn a_guarded_table_keeps_what_its_explicit_clean_up_keeps() {
             }
         }
     }
-    assert!(compared > 1000, "only {compared} rows compared");
+    assert!(compared > scaled_of(1000, &(0..12)), "only {compared} rows compared");
     assert!(
-        dropped.iter().all(|d| *d > 20),
+        dropped.iter().all(|d| *d > scaled_of(20, &(0..12))),
         "too few drops to exercise the guards: {dropped:?}"
     );
 }
@@ -209,7 +210,7 @@ fn prefer_settles_same_tick_writes_as_the_hand_written_guards_do() {
     let rel = |n: &str| artifact.rel_named(n).unwrap();
     let mut contested = 0usize;
     let mut compared = 0usize;
-    for seed in 0..12u64 {
+    for seed in seeds_of(0..12) {
         let mut rng = Rng(seed);
         let last = 30u64;
         let mut inputs = Vec::new();
@@ -260,8 +261,11 @@ fn prefer_settles_same_tick_writes_as_the_hand_written_guards_do() {
             }
         }
     }
-    assert!(compared > 1000, "only {compared} rows compared");
-    assert!(contested > 100, "only {contested} contested writes");
+    assert!(compared > scaled_of(1000, &(0..12)), "only {compared} rows compared");
+    assert!(
+        contested > scaled_of(100, &(0..12)),
+        "only {contested} contested writes"
+    );
 }
 
 /// Two values from one listed handler, or a listed and an unlisted handler's values, still conflict (BLSR002).
@@ -663,6 +667,7 @@ fn formats_decode_and_encode_as_the_reference_does() {
 /// More items than the step budget allows decode, on both evaluators; a metered function a format's condition
 /// calls still exceeds its own budget (BLSR012).
 #[test]
+#[ignore = "full tier"]
 fn formats_are_bounded_by_their_input_not_the_step_budget() {
     let artifact = compile("budget.bls");
     let rel = |n: &str| artifact.rel_named(n).unwrap();

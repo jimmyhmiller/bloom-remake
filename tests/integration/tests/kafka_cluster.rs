@@ -21,6 +21,7 @@ use std::sync::Arc;
 use blossom_artifact::bls::BlsArtifact;
 use blossom_front::api::NodeSpec;
 use blossom_integration_tests::raft_safety::GroupSafety;
+use blossom_integration_tests::{scaled, seeds};
 use blossom_node::durable::DurableSchema;
 use blossom_sim::cluster::{Cluster, ClusterConfig, CrashWrites, NoKvClients, StreamAction, StreamClient, StreamEvent};
 use blossom_value::time::NodeId;
@@ -1562,9 +1563,10 @@ fn check_runs(setup: &Setup) -> Totals {
 /// Three brokers, no faults: every produce is acknowledged and every replica holds the same log.
 #[test]
 fn three_brokers_replicate_every_partition() {
+    let all = 1..=2;
     let t = check_runs(&Setup {
         brokers: 3,
-        seeds: 1..=2,
+        seeds: seeds(all.clone()),
         faults: false,
         waves: Vec::new(),
         clients: 3,
@@ -1572,40 +1574,47 @@ fn three_brokers_replicate_every_partition() {
         idempotent: false,
     });
     assert_eq!(t.ambiguous, 0, "{t:?}");
-    assert!(t.probes > 30, "{t:?}");
-    assert!(t.acked_all + t.acked_one == 240, "{t:?}");
+    assert!(t.probes > scaled(30, &all), "{t:?}");
+    assert!(t.acked_all + t.acked_one == scaled(240, &all), "{t:?}");
 }
 
 /// Three brokers under crashes, downtime, splits, one-way cuts and dropped connections.
 #[test]
+#[ignore = "full tier"]
 fn three_brokers_keep_acknowledged_records_under_faults() {
+    let all = 1..=6;
     let t = check_runs(&Setup {
         brokers: 3,
-        seeds: 1..=6,
+        seeds: seeds(all.clone()),
         faults: true,
         waves: Vec::new(),
         clients: 3,
         requests: 60,
         idempotent: false,
     });
-    assert!(t.acked_all > 300, "{t:?}");
-    assert!(t.moved > 0 && t.terms > 6 * 3, "the faults did not move leaders: {t:?}");
+    assert!(t.acked_all > scaled(300, &all), "{t:?}");
+    assert!(
+        t.moved > 0 && t.terms > scaled(6 * 3, &all) as u64,
+        "the faults did not move leaders: {t:?}"
+    );
 }
 
 /// Five brokers, each partition on three of them, so most brokers lead or follow only some partitions; idempotent
 /// producers resend across leader changes without duplicates.
 #[test]
+#[ignore = "full tier"]
 fn five_brokers_with_idempotent_producers_store_each_batch_once() {
+    let all = 1..=4;
     let t = check_runs(&Setup {
         brokers: 5,
-        seeds: 1..=4,
+        seeds: seeds(all.clone()),
         faults: true,
         waves: Vec::new(),
         clients: 3,
         requests: 50,
         idempotent: true,
     });
-    assert!(t.acked_all > 300, "{t:?}");
+    assert!(t.acked_all > scaled(300, &all), "{t:?}");
     assert!(t.resends > 0, "{t:?}");
 }
 
@@ -1614,6 +1623,7 @@ fn five_brokers_with_idempotent_producers_store_each_batch_once() {
 /// at the leader's log start and catches up from there (as a Kafka follower that fetched below its leader's log start
 /// does). Afterwards it holds what the leader holds from its new start, to the same end.
 #[test]
+#[ignore = "full tier"]
 fn a_follower_behind_its_leaders_log_start_catches_up_from_a_snapshot() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/kafka/sim_cluster.bls");
     let mut nodes: Vec<NodeSpec> = (1..=3)
@@ -1643,7 +1653,7 @@ fn a_follower_behind_its_leaders_log_start_catches_up_from_a_snapshot() {
     let schema = DurableSchema::of(artifact.program.get());
     let rel = |n: &str| artifact.rel_named(n).unwrap();
     let brokers: BTreeMap<i32, NodeId> = (1..=3).map(|i| (i, NodeId(i as u32 - 1))).collect();
-    for seed in 1..=2u64 {
+    for seed in seeds(1..=2) {
         let cfg = ClusterConfig {
             seed,
             clients: 0,
@@ -1853,22 +1863,24 @@ fn a_follower_behind_its_leaders_log_start_catches_up_from_a_snapshot() {
 /// wave moves every partition off replicas the first put it on, and some off their leader), without and with
 /// faults. Each change of a partition's members goes through its log, one replica at a time.
 #[test]
+#[ignore = "full tier"]
 fn reassignments_move_partitions_under_load() {
     let waves = vec![
         vec![(0, vec![4, 5, 1]), (1, vec![5, 1, 2]), (2, vec![1, 2, 3])],
         vec![(0, vec![2, 3, 4]), (1, vec![3, 4, 5]), (2, vec![4, 5, 1])],
     ];
+    let all = 1..=2;
     for faults in [false, true] {
         let t = check_runs(&Setup {
             brokers: 5,
-            seeds: 1..=2,
+            seeds: seeds(all.clone()),
             faults,
             waves: waves.clone(),
             clients: 3,
             requests: 60,
             idempotent: true,
         });
-        assert!(t.acked_all > 200, "faults {faults}: {t:?}");
+        assert!(t.acked_all > scaled(200, &all), "faults {faults}: {t:?}");
     }
 }
 
@@ -2122,7 +2134,7 @@ fn reassignments_replaced_cancelled_or_deleted_settle() {
     let schema = DurableSchema::of(artifact.program.get());
     let rel = |n: &str| artifact.rel_named(n).unwrap();
     let brokers: Vec<NodeId> = (0..5).map(NodeId).collect();
-    for seed in 1..=2u64 {
+    for seed in seeds(1..=2) {
         let cfg = ClusterConfig {
             seed,
             clients: 0,
@@ -2326,7 +2338,7 @@ fn late_copies(slow: bool) {
             .rows(rel("mtopic"))
             .any(|r| r[0] == Value::Str(topic.into()))
     };
-    for seed in 1..=2u64 {
+    for seed in seeds(1..=2) {
         let cfg = ClusterConfig {
             seed,
             clients: 0,

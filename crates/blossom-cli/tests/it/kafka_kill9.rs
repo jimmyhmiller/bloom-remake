@@ -342,6 +342,7 @@ fn read_partition(port: u16, topic_id: [u8; 16], p: i32, end: i64) -> Vec<(i64, 
 }
 
 #[test]
+#[ignore = "full tier"]
 fn kill_9_never_loses_an_acknowledged_record() {
     let dir = scratch_dir("kafka-kill9");
     let port = free_port();

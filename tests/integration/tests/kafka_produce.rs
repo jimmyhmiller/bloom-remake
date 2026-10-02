@@ -9,6 +9,7 @@
 //! - each partition's batches tiling its offsets from 0 to `log_end`, with no gap and no overlap;
 //! - only batches some client sent, each at most once; nothing corrupted, nothing refused.
 
+use blossom_integration_tests::{scaled, seeds};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -680,7 +681,7 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
 #[test]
 fn acknowledged_produces_are_durable_at_their_offsets() {
     let (acked, unanswered, refused, _) = check_runs(&Setup {
-        seeds: 1..=8,
+        seeds: seeds(1..=8),
         crashes: true,
         latency: ClusterConfig::default().latency,
         clients: 3,
@@ -689,12 +690,18 @@ fn acknowledged_produces_are_durable_at_their_offsets() {
         idempotent: false,
         nemesis: 150_000_000,
     });
-    assert!(acked > 300, "only {acked} partition entries were acknowledged");
+    assert!(
+        acked > scaled(300, &(1..=8)),
+        "only {acked} partition entries were acknowledged"
+    );
     assert!(
         unanswered > 0,
         "no produce was left unanswered: the faults did not bite"
     );
-    assert!(refused > 10, "only {refused} partition entries were refused");
+    assert!(
+        refused > scaled(10, &(1..=8)),
+        "only {refused} partition entries were refused"
+    );
 }
 
 /// Produces that arrive together append to the same partitions in one tick: each gets the offsets after the ones
@@ -702,7 +709,7 @@ fn acknowledged_produces_are_durable_at_their_offsets() {
 #[test]
 fn produces_in_one_tick_take_consecutive_offsets() {
     let (acked, _, _, _) = check_runs(&Setup {
-        seeds: 1..=6,
+        seeds: seeds(1..=6),
         crashes: false,
         latency: (1_000_000, 1_000_000),
         clients: 5,
@@ -711,7 +718,10 @@ fn produces_in_one_tick_take_consecutive_offsets() {
         idempotent: false,
         nemesis: 150_000_000,
     });
-    assert!(acked > 600, "only {acked} partition entries were acknowledged");
+    assert!(
+        acked > scaled(600, &(1..=6)),
+        "only {acked} partition entries were acknowledged"
+    );
 }
 
 /// Idempotent producers resend what a dropped connection or a crash left unanswered: nothing is stored twice, a
@@ -719,7 +729,7 @@ fn produces_in_one_tick_take_consecutive_offsets() {
 #[test]
 fn idempotent_producers_resend_without_duplicates() {
     let (acked, unanswered, _, resends) = check_runs(&Setup {
-        seeds: 1..=8,
+        seeds: seeds(1..=8),
         crashes: true,
         latency: ClusterConfig::default().latency,
         clients: 3,
@@ -728,10 +738,13 @@ fn idempotent_producers_resend_without_duplicates() {
         idempotent: true,
         nemesis: 40_000_000,
     });
-    assert!(acked > 300, "only {acked} partition entries were acknowledged");
+    assert!(
+        acked > scaled(300, &(1..=8)),
+        "only {acked} partition entries were acknowledged"
+    );
     assert_eq!(unanswered, 0, "an idempotent producer resends until it is answered");
     assert!(
-        resends > 10,
+        resends > scaled(10, &(1..=8)),
         "only {resends} requests were resent: the faults did not bite"
     );
 }

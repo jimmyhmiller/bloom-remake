@@ -22,6 +22,7 @@ use std::sync::Arc;
 use blossom_artifact::bls::BlsArtifact;
 use blossom_driver::bls::compile_file_with;
 use blossom_front::api::NodeSpec;
+use blossom_integration_tests::{scaled, seeds};
 use blossom_node::durable::DurableSchema;
 use blossom_sim::cluster::{Cluster, ClusterConfig, CrashWrites, NoKvClients, StreamAction, StreamClient, StreamEvent};
 use blossom_sim::linearize::{self, Model, Operation, Verdict};
@@ -1092,7 +1093,7 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
 #[test]
 fn admin_requests_are_linearizable_across_crashes() {
     let (answered, unanswered, _, _) = check_runs(&Setup {
-        seeds: 1..=8,
+        seeds: seeds(1..=8),
         crashes: true,
         stream_drops: true,
         latency: ClusterConfig::default().latency,
@@ -1105,7 +1106,10 @@ fn admin_requests_are_linearizable_across_crashes() {
         params: &[],
         down: None,
     });
-    assert!(answered > 300, "only {answered} requests were answered");
+    assert!(
+        answered > scaled(300, &(1..=8)),
+        "only {answered} requests were answered"
+    );
     assert!(
         unanswered > 0,
         "no request was left unanswered: the faults did not bite"
@@ -1117,7 +1121,7 @@ fn admin_requests_are_linearizable_across_crashes() {
 #[test]
 fn admin_requests_answered_in_one_tick_are_linearizable() {
     let (answered, _, together, _) = check_runs(&Setup {
-        seeds: 1..=10,
+        seeds: seeds(1..=10),
         crashes: false,
         stream_drops: false,
         latency: (1_000_000, 1_000_000),
@@ -1130,9 +1134,12 @@ fn admin_requests_answered_in_one_tick_are_linearizable() {
         params: &[],
         down: None,
     });
-    assert!(answered > 1000, "only {answered} requests were answered");
     assert!(
-        together > 1000,
+        answered > scaled(1000, &(1..=10)),
+        "only {answered} requests were answered"
+    );
+    assert!(
+        together > scaled(1000, &(1..=10)),
         "only {together} requests were sent together with another"
     );
 }
@@ -1142,7 +1149,7 @@ fn admin_requests_answered_in_one_tick_are_linearizable() {
 #[test]
 fn admin_requests_through_any_of_three_brokers_are_linearizable() {
     let (answered, unanswered, _, timeouts) = check_runs(&Setup {
-        seeds: 1..=8,
+        seeds: seeds(1..=8),
         crashes: true,
         stream_drops: true,
         latency: ClusterConfig::default().latency,
@@ -1155,7 +1162,10 @@ fn admin_requests_through_any_of_three_brokers_are_linearizable() {
         params: &[],
         down: None,
     });
-    assert!(answered > 300, "only {answered} requests were answered");
+    assert!(
+        answered > scaled(300, &(1..=8)),
+        "only {answered} requests were answered"
+    );
     assert!(
         unanswered > 0,
         "no request was left unanswered: the faults did not bite"
@@ -1172,7 +1182,7 @@ fn admin_requests_through_any_of_three_brokers_are_linearizable() {
 #[test]
 fn a_broker_behind_the_controllers_snapshot_adopts_the_leaders_metadata() {
     let (answered, _, _, _) = check_runs(&Setup {
-        seeds: 1..=4,
+        seeds: seeds(1..=4),
         crashes: false,
         stream_drops: false,
         latency: ClusterConfig::default().latency,
@@ -1185,7 +1195,10 @@ fn a_broker_behind_the_controllers_snapshot_adopts_the_leaders_metadata() {
         params: &[("CONTROLLER_KEEP", "4"), ("DONE_WINDOW", "10"), ("META_CHUNK", "64")],
         down: Some((300_000_000, 1_800_000_000)),
     });
-    assert!(answered > 200, "only {answered} requests were answered");
+    assert!(
+        answered > scaled(200, &(1..=4)),
+        "only {answered} requests were answered"
+    );
 }
 
 /// The three-broker faults of `admin_requests_through_any_of_three_brokers_are_linearizable` with the controller's
@@ -1194,7 +1207,7 @@ fn a_broker_behind_the_controllers_snapshot_adopts_the_leaders_metadata() {
 #[test]
 fn admin_requests_stay_linearizable_with_the_controller_compacted() {
     let (answered, unanswered, _, _) = check_runs(&Setup {
-        seeds: 1..=8,
+        seeds: seeds(1..=8),
         crashes: true,
         stream_drops: true,
         latency: ClusterConfig::default().latency,
@@ -1207,7 +1220,10 @@ fn admin_requests_stay_linearizable_with_the_controller_compacted() {
         params: &[("CONTROLLER_KEEP", "3"), ("DONE_WINDOW", "12")],
         down: None,
     });
-    assert!(answered > 300, "only {answered} requests were answered");
+    assert!(
+        answered > scaled(300, &(1..=8)),
+        "only {answered} requests were answered"
+    );
     assert!(
         unanswered > 0,
         "no request was left unanswered: the faults did not bite"
