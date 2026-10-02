@@ -196,6 +196,21 @@ impl IrBuilder {
             _ => Err(IrError::builder(format!("{} is not a channel: it has no ACL", r.name))),
         }
     }
+    /// Sets a timer's `while` guard once every relation is declared (the guard may be declared after the timer).
+    pub fn set_timer_guard(&mut self, rel: RelId, guard: RelId) -> Result<(), IrError> {
+        let r = self
+            .program
+            .rels
+            .get_mut(rel)
+            .ok_or_else(|| IrError::builder("unknown relation"))?;
+        match &mut r.class {
+            RelClass::Event(EventSource::Timer(t)) => {
+                t.guard = Some(guard);
+                Ok(())
+            }
+            _ => Err(IrError::builder(format!("{} is not a timer: it has no guard", r.name))),
+        }
+    }
     /// Replaces a construct's specification: for expansions whose spec names relations declared inside the
     /// construct (a table's `$del`).
     pub fn set_construct_kind(&mut self, id: ConstructId, kind: ConstructKindInput) -> Result<(), IrError> {

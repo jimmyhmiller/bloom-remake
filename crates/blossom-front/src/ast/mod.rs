@@ -383,12 +383,14 @@ pub struct ColDecl {
     pub span: Span,
 }
 
-/// `timer name every d;` and its variants: the words and expressions after the name, in order.
+/// `timer name every d;` and its variants: the words and expressions after the name, in order, and the guard of
+/// `while G` (the relation's path).
 #[derive(Clone, Debug)]
 pub struct TimerDecl {
     pub name: Ident,
     pub words: Vec<Ident>,
     pub exprs: Vec<Expr>,
+    pub guard: Option<Vec<Ident>>,
     pub span: Span,
 }
 

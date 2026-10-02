@@ -42,6 +42,10 @@ pub struct Args {
     /// whole state every tick).
     #[arg(long, default_value = "engine")]
     pub evaluator: blossom_node::Backend,
+    /// Write the node's counters (ticks, WAL records, messages, …) to this file every second, one `name value` per
+    /// line, replacing it whole each time (not synced: it is for watching a node, not for recovery).
+    #[arg(long, value_name = "FILE")]
+    pub stats: Option<PathBuf>,
 }
 
 /// The exit code for a runtime error.
@@ -75,11 +79,7 @@ pub fn load(deploy: &std::path::Path) -> Result<(DeploymentSpec, Arc<blossom_art
         eprintln!("the program path {} is not UTF-8", spec.source.display());
         return Err(Exit::Refused.into());
     };
-    let params = spec
-        .params
-        .iter()
-        .map(|(k, v)| (k.clone(), param_binding(v)))
-        .collect();
+    let params = spec.params.iter().map(|(k, v)| (k.clone(), param_binding(v))).collect();
     let artifact = bls::compile_with(source, &nodes, &params)?;
     Ok((spec, Arc::new(artifact)))
 }
@@ -92,6 +92,24 @@ pub fn param_binding(v: &blossom_runtime::deploy::ParamValue) -> blossom_front::
         V::Int(n) => B::Int(*n),
         V::Bool(b) => B::Bool(*b),
         V::Text(t) => B::Text(t.clone()),
+    }
+}
+
+/// Writes `stats` to `path` every second, for the life of the process: to a temporary file, renamed over `path`, so
+/// a reader sees a whole snapshot. A failed write is reported once and the writer stops (the node runs on).
+fn write_stats(path: &std::path::Path, stats: &blossom_runtime::server::Stats) {
+    let tmp = path.with_extension("tmp");
+    loop {
+        let text: String = stats
+            .snapshot()
+            .iter()
+            .map(|(name, value)| format!("{name} {value}\n"))
+            .collect();
+        if let Err(e) = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path)) {
+            eprintln!("blossom run: writing the stats to {}: {e}", path.display());
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
     }
 }
 
@@ -141,6 +159,16 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
     );
     // The readiness line is how supervisors and tests know the node serves; a closed stdout is not fatal.
     let _ = std::io::stdout().flush();
+    if let Some(path) = args.stats.clone() {
+        let stats = server.stats.clone();
+        let spawned = std::thread::Builder::new()
+            .name("stats".into())
+            .spawn(move || write_stats(&path, &stats));
+        if let Err(e) = spawned {
+            eprintln!("blossom run: cannot start the stats writer: {e}");
+            return Exit::Internal.into();
+        }
+    }
     match server.wait() {
         Ok(Stopped::Halted) => {
             eprintln!("blossom: node {} halted", args.node);

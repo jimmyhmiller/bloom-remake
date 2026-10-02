@@ -105,6 +105,20 @@ pub struct SyncConfig {
     /// A relation that, holding at the end of a node's tick, stops the node: it runs no later tick (`halt`,
     /// LANGUAGE §7.15).
     pub halt: Option<RelId>,
+    /// The guarded timers, whose firings the round loop makes.
+    pub guarded: Vec<GuardedTimer>,
+}
+
+/// A guarded timer (`every d while G`, LANGUAGE §15.2) in the synchronous world: its firings due in a round reach a
+/// node only if `G` held at the end of the node's previous tick. (A guarded timer that resumes fires from its first
+/// firing after that tick, which is exactly the round's.)
+#[derive(Clone, Debug)]
+pub struct GuardedTimer {
+    pub rel: RelId,
+    pub every: Duration,
+    pub guard: RelId,
+    /// The nodes it runs on (those of the role it is placed at).
+    pub nodes: Vec<NodeId>,
 }
 
 /// A message and what became of it.
@@ -214,6 +228,8 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
         };
         let mut carried: Vec<Instance> = vec![Instance::default(); n];
         let mut halted = vec![false; n];
+        // Per node: the guards that held at the end of its latest tick.
+        let mut held: Vec<std::collections::BTreeSet<RelId>> = vec![std::collections::BTreeSet::new(); n];
         // Each node's blobs, kept for the whole run (a simulation is short): what its later ticks read.
         let mut blobs: Vec<blossom_value::BlobMap> = vec![blossom_value::BlobMap::default(); n];
         let mut inbox: Vec<Vec<Delivery>> = vec![Vec::new(); n];
@@ -251,9 +267,27 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                     next_carried.push(state.clone());
                     continue;
                 }
-                let events = self.inputs.get(&(tick, node)).unwrap_or(&empty);
+                let scheduled = self.inputs.get(&(tick, node)).unwrap_or(&empty);
+                let mut guarded_firings = Vec::new();
+                if t > 0 {
+                    let (before, now) = (now_at(config.round, Tick(t - 1))?.0, now_at(config.round, tick)?.0);
+                    for g in &config.guarded {
+                        if g.nodes.contains(&node) && held.get(i).is_some_and(|h| h.contains(&g.guard)) {
+                            guarded_firings.extend(crate::runtime::firings(g.rel, g.every, before, now)?);
+                        }
+                    }
+                }
+                let with_guarded: Vec<(RelId, Row)>;
+                let events = if guarded_firings.is_empty() {
+                    scheduled
+                } else {
+                    with_guarded = scheduled.iter().cloned().chain(guarded_firings).collect();
+                    &with_guarded
+                };
                 let ingress = self.ingress.get(&(tick, node)).unwrap_or(&no_ingress);
-                let node_blobs = blobs.get(i).ok_or_else(|| internal_error!("node {i} has no blob map"))?;
+                let node_blobs = blobs
+                    .get(i)
+                    .ok_or_else(|| internal_error!("node {i} has no blob map"))?;
                 let out = self
                     .eval
                     .tick(&TickInput {
@@ -320,6 +354,15 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                     && let Some(slot) = halted.get_mut(i)
                 {
                     *slot = true;
+                }
+                if let Some(h) = held.get_mut(i) {
+                    for g in config.guarded.iter().filter(|g| g.nodes.contains(&node)) {
+                        if out.instance.rows(g.guard).next().is_some() {
+                            h.insert(g.guard);
+                        } else {
+                            h.remove(&g.guard);
+                        }
+                    }
                 }
                 next_carried.push(out.next);
                 // A crashed node's replies and host requests are lost like its messages.
@@ -422,6 +465,7 @@ mod tests {
             round: DED_ROUND,
             capture: false,
             halt: None,
+            guarded: Vec::new(),
         }
     }
 

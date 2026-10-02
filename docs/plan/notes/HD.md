@@ -4,8 +4,8 @@ Branch `slice-hardening`, worktree `.worktrees/hd`. Chosen by the user (2026-10-
 
 ## Resume here
 
-- **State (2026-10-01):** items 1 and 2 done; item 3 in progress (blobs logged in the WAL, strict at 3 syncs, both
-  committed). Next for item 3: decide whether to go further (see its notes), then item 4.
+- **State (2026-10-02):** items 1–4 done (item 4: guarded timers and kafka3's tick-count check). Next: the HD
+  adversarial review, then merge, then S9.
 
 ## Items
 
@@ -132,3 +132,58 @@ Branch `slice-hardening`, worktree `.worktrees/hd`. Chosen by the user (2026-10-
     combined with damage to the last acknowledged batch (a double fault). A user decision.
   - Answer acks=all on commit rather than after materializing. This removes the leader's third commit, but Fetch
     must then serve committed but unmaterialized entries, or a read after an ack can miss the record.
+
+### Item 4: idle brokers tick 100 times a second (done)
+
+- **Measurement** (scratch harness: one broker with three partitions under the manual driver, left idle for 5 s):
+  - 500 ticks (100/s: the 10 ms `fetch_wake` timer; the others coincide with it);
+  - not one of them changes carried state;
+  - 10 syncs (the META time reservations);
+  - 2.5 ms per tick in debug, 0.27 ms in release.
+- **Diagnosis.** No rule spins. The idle CPU is polling by design: `fetch_wake` (every 10 ms) checks a waiting
+  Fetch's deadline, and `raft_poll` (every 20 ms) checks election timeouts. Three debug brokers in kafka3 host more
+  groups and sit at the check's 2 s of CPU per 4 s, so machine load tips them over.
+- **User decision (2026-10-02):** guarded timers plus a spin check (over a check alone, or dynamic deadlines).
+  - The new syntax `timer t every D while G` fires only while the guard view G held in the node's latest tick.
+  - `fetch_wake` will run only while a Fetch waits.
+  - The kafka3 check will count ticks per idle second against the timers' budget, which does not depend on load.
+- **Guarded timers, as built** (LANGUAGE §15.2).
+  - Syntax: `timer t every d while G;`. The parser takes a `RELPATH` after `while`, and `ast::TimerDecl.guard` holds
+    it.
+  - Resolution happens in pass 2b (`timer_guards`), once every relation is known: G must be a view or table placed
+    at the timer's role (BLS0412, new), and an unknown name is BLS0200. The guard goes in `HRelKind::Timer.guard`,
+    then in the IR as `TimerDecl.guard` (serde default `None`, remapped). Lowering sets it after the relations are
+    declared (`IrBuilder::set_timer_guard`, as for ACLs).
+  - Node: `TimerTable` keeps a `held` bit per guarded timer. `Node::try_tick` observes the guards as it does `halt`,
+    and `TimerTable::observe` updates the bits. A dormant timer has no deadline and no firings. A guard that comes
+    to hold resumes the timer at its first firing after that tick (`first_after`): missed firings are skipped, so
+    `count` stays on the boot timeline. The cluster simulator runs real nodes, so it follows.
+  - Synchronous world (`BlsSim`, `SpecSim`): guarded timers are not pre-fed. `SyncConfig.guarded` lists them, and
+    the round loop delivers a round's firings (`runtime::firings`) iff the guard held at the end of the node's
+    previous round.
+  - LDFI refuses guarded timers (LANG-172, beside `halt`'s LANG-052): its lineage treats timer firings as inputs
+    that faults cannot change.
+  - Kafka:
+    - `fetch_wake` (10 ms) runs while `fetch_waiting` (a Fetch at a queue's head);
+    - `raft_poll` runs while `election_armed` (a group of this broker's, with a deadline, that it does not lead);
+    - an idle single broker went from 100 ticks/s to 20 (only `raft_heartbeat`).
+  - `blossom run --stats FILE` writes the node's counters every second (`Stats::snapshot`; temporary file plus
+    rename, not synced). kafka3's idle check counts ticks instead of CPU seconds. An idle broker there ticks about
+    155/s; the bound is 1 250 per 5 s (the reads span 4 to 6 s), against roughly 400/s for a spinning debug broker.
+    A spinner on a heavily loaded machine could pass; an idle broker cannot fail.
+  - Tests (`timers_guarded.rs`):
+    - the fixture `fixtures/timers/guarded.bls` in the synchronous world, oracle and engine agreeing;
+    - the same fixture on a node, under both evaluators: the firings, no deadline while dormant, and the exact
+      count of wake-ups;
+    - the guard diagnostics;
+    - LDFI's refusal.
+  - `kafka_cluster::reassignments_move_partitions_under_load` failed on seed 2 with the new schedule: the admin
+    client read a broker whose metadata lagged (ListPartitionReassignments is answered from the broker's own
+    metadata, by design) and saw the previous wave's target still in progress. The client now accepts a replica
+    being added that is in this wave's target or an earlier wave's; one in no requested target still fails.
+  - Mutations, all caught:
+    - the node ignoring the guard;
+    - the node delivering missed firings;
+    - the synchronous world ignoring the guard;
+    - lowering dropping the guard;
+    - LDFI not refusing.

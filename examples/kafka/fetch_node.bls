@@ -8,10 +8,13 @@
 //! so the next one starts one past the last offset of the one before), up to the partition's byte limit; the answer
 //! is trimmed to the request's limit. The stored batches are sent as blob ranges, never copied through the program.
 //! A Fetch with fewer than `min_bytes` waits at the head of its queue until data arrives or `max_wait_ms` passes;
-//! the `fetch_wake` timer makes sure a tick notices the deadline.
+//! the `fetch_wake` timer makes sure a tick notices the deadline. It runs only while a Fetch waits, so an idle broker
+//! does not wake for it.
 
-/// Wakes the node so a waiting Fetch is answered when its time is up.
-timer fetch_wake every 10ms;
+/// Wakes the node so a waiting Fetch is answered when its time is up (only while one waits).
+timer fetch_wake every 10ms while fetch_waiting;
+/// A Fetch at the head of its connection's queue.
+view fetch_waiting() = fetch_head(_c, _i, _seq, _corr, _fr, _at, _req);
 
 view fetch_head(c, i, seq, corr, fr, at, req) =
     head(c, i, seq, key, _version, corr, fr, at), caught_up(), key == API_FETCH,

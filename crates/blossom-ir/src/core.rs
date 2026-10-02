@@ -278,7 +278,7 @@ pub enum EventSource {
     SessionOpen,
     SessionClosed,
     ServiceResult(ServiceId),
-    ClusterVersion, // LANG-264: LMax<u32>, sampled per tick, recorded
+    ClusterVersion,      // LANG-264: LMax<u32>, sampled per tick, recorded
     Stream(StreamEvent), // FOREIGN-PROTOCOLS §1: a stream's `opened`, `data`, `closed`, `failed`
 }
 /// TimerDecl data in the Dedalus core IR.
@@ -290,6 +290,9 @@ pub struct TimerDecl {
     pub times: Option<u64>,
     pub once_after: Option<Duration>,
     pub once: bool,
+    /// `while G`: the timer fires only while `G` held at the end of the node's latest tick (LANGUAGE §15.2).
+    #[serde(default)]
+    pub guard: Option<RelId>,
 }
 /// ChannelDecl data in the Dedalus core IR.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -612,30 +615,46 @@ pub enum FnRef {
 /// BuiltinFn data in the Dedalus core IR.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BuiltinFn {
-    Prio { site: SiteId },     // $prio(site, X̄, Ȳ) = (PRF_σc(site, fp(X̄), fp(Ȳ)), Ȳ) (SEM-084/085)
-    RandPrio { site: SiteId }, // $rprio: PRF_σnode(site, incarnation, tick, fp(X̄), fp(Ȳ)) (choose_rand!)
+    Prio {
+        site: SiteId,
+    }, // $prio(site, X̄, Ȳ) = (PRF_σc(site, fp(X̄), fp(Ȳ)), Ȳ) (SEM-084/085)
+    RandPrio {
+        site: SiteId,
+    }, // $rprio: PRF_σnode(site, incarnation, tick, fp(X̄), fp(Ȳ)) (choose_rand!)
     Rand,
     RandFloat,
-    RandRange,                           // PRF_σnode("rand", incarnation, tick, fp(k̄)) (LANG-175)
+    RandRange, // PRF_σnode("rand", incarnation, tick, fp(k̄)) (LANG-175)
     /// `error("message")` (LANGUAGE Appendix B): a located hard error (BLSR010). `ty` is the type the call stands
     /// in for; the call never returns.
     Error {
         ty: TypeId,
     },
-    Route { role: RoleId },              // rendezvous hashing over canonically ordered members (LANG-154)
-    Majority { domain: MajorityDomain }, // |s ∩ R| > |R| / 2 (LANGUAGE §11.6); FOL: quorum sort (VER-008)
-    ClusterVersionAtLeast(u32),          // threshold over the ClusterVersion event (SEM-092)
-    ZWeight { rel: RelId },
-    ZDelta { rel: RelId },
-    Unwrap { rel: RelId },
+    Route {
+        role: RoleId,
+    }, // rendezvous hashing over canonically ordered members (LANG-154)
+    Majority {
+        domain: MajorityDomain,
+    }, // |s ∩ R| > |R| / 2 (LANGUAGE §11.6); FOL: quorum sort (VER-008)
+    ClusterVersionAtLeast(u32), // threshold over the ClusterVersion event (SEM-092)
+    ZWeight {
+        rel: RelId,
+    },
+    ZDelta {
+        rel: RelId,
+    },
+    Unwrap {
+        rel: RelId,
+    },
     Entries, // LANGUAGE §11.10 (ENG-070)
     PrincipalOf,
     RoleOf,
-    Size { role: RoleId },
+    Size {
+        role: RoleId,
+    },
     Len,
     IntCast(blossom_value::types::IntTy), // `x as T` between integer types: out of range is BLSR004 (LANGUAGE §5.2)
-    Lib(LibFn), // the built-in library (LANGUAGE Appendix B); the receiver, if any, first
-    Concat, // `a ++ b` on String, Bytes or Vec (LANGUAGE §9.12)
+    Lib(LibFn),                           // the built-in library (LANGUAGE Appendix B); the receiver, if any, first
+    Concat,                               // `a ++ b` on String, Bytes or Vec (LANGUAGE §9.12)
     Contains,
     Keys,
     Values,

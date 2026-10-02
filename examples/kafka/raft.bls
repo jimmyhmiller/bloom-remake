@@ -168,8 +168,10 @@ at Broker {
     /// Leader state per follower: the highest index it acknowledged, and the highest index sent to it.
     table match_idx(g: Group, f: Node<Broker>, i: u64) key(g, f) resolve choose_most(i);
     table rsent(g: Group, f: Node<Broker>, i: u64) key(g, f) resolve choose_most(i);
-    timer raft_poll every RAFT_POLL;
+    /// Checks election deadlines, only while one is armed for a group this broker does not lead (`timed_out`).
+    timer raft_poll every RAFT_POLL while election_armed;
     timer raft_heartbeat every RAFT_HEARTBEAT;
+    view election_armed() = eff(g, t), mine(g), deadline(g, _d), not leader(g, t);
 
     // ---- membership
     /// Each configuration in a group's log, by index.

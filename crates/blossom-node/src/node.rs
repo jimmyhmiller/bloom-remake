@@ -595,7 +595,8 @@ impl<E: Executor> Node<E> {
                 None => break,
             }
         }
-        let observe: Vec<RelId> = self.cfg.halt.into_iter().collect();
+        // The `halt` output and the timers' guards are read at the end of the tick.
+        let observe: Vec<RelId> = self.cfg.halt.into_iter().chain(self.timers.guards()).collect();
         let blobs = NodeBlobs {
             cache: &self.blob_cache,
             unsynced: &self.unsynced_blobs,
@@ -651,6 +652,7 @@ impl<E: Executor> Node<E> {
             .cfg
             .halt
             .is_some_and(|h| out.observed.get(&h).is_some_and(|rows| !rows.is_empty()));
+        self.timers.observe(now, &out.observed)?;
         // A new node's first boot tick always leaves a WAL record, even an empty one: it marks the store as holding
         // a boot that happened, so a restart knows it recovers (`recovered()`). Until that record is durable the
         // boot did not happen: nothing of it is released, and a crash before the sync boots fresh again.
@@ -669,7 +671,11 @@ impl<E: Executor> Node<E> {
                 continue;
             }
             let bytes = self.blob_cache.remove(&b).ok_or_else(|| {
-                internal_error!("tick {} writes a durable row with blob {}, whose bytes are gone", tick.0, b.hex())
+                internal_error!(
+                    "tick {} writes a durable row with blob {}, whose bytes are gone",
+                    tick.0,
+                    b.hex()
+                )
             })?;
             self.cache_bytes = self.cache_bytes.saturating_sub(bytes.len() as u64);
             self.durable_blobs.insert(b);

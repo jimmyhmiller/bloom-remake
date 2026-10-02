@@ -62,7 +62,15 @@ impl<'a> SpecSim<'a> {
             .map_err(SimError::Load)?
             .with_roles(artifact.roles.clone())
             .with_seed(artifact.seed)
-            .and_then(|o| o.with_node_names(artifact.nodes.iter().map(|n| std::sync::Arc::from(n.as_str())).collect()))
+            .and_then(|o| {
+                o.with_node_names(
+                    artifact
+                        .nodes
+                        .iter()
+                        .map(|n| std::sync::Arc::from(n.as_str()))
+                        .collect(),
+                )
+            })
             .map_err(SimError::Load)?;
         let runtime = match artifact.profile {
             Profile::Molly => Runtime::default(),
@@ -140,6 +148,7 @@ impl<'a> SpecSim<'a> {
                 round: profile.round(),
                 capture,
                 halt: self.artifact.halt,
+                guarded: self.runtime.guarded(&self.artifact.roles)?,
             },
             faults,
         )

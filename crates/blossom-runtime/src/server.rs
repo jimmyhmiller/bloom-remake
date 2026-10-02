@@ -102,6 +102,31 @@ pub struct Stats {
     pub dropped_oversized: AtomicU64,
 }
 
+impl Stats {
+    /// Every counter, by name, as read now (each read on its own: the counters move while they are read).
+    pub fn snapshot(&self) -> Vec<(&'static str, u64)> {
+        let r = |c: &AtomicU64| c.load(Ordering::Relaxed);
+        vec![
+            ("ticks", r(&self.ticks)),
+            ("wal_records", r(&self.wal_records)),
+            ("wal_batches", r(&self.wal_batches)),
+            ("released", r(&self.released)),
+            ("delivered", r(&self.delivered)),
+            ("ingress", r(&self.ingress)),
+            ("egress", r(&self.egress)),
+            ("sessions", r(&self.sessions)),
+            ("checkpoints", r(&self.checkpoints)),
+            ("blobs_collected", r(&self.blobs_collected)),
+            ("rejected_acl", r(&self.rejected_acl)),
+            ("rejected_unknown_dest", r(&self.rejected_unknown_dest)),
+            ("rejected_schema", r(&self.rejected_schema)),
+            ("dropped_closed_session", r(&self.dropped_closed_session)),
+            ("dropped_queue_full", r(&self.dropped_queue_full)),
+            ("dropped_oversized", r(&self.dropped_oversized)),
+        ]
+    }
+}
+
 fn bump(c: &AtomicU64, n: u64) {
     c.fetch_add(n, Ordering::Relaxed);
 }

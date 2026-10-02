@@ -269,9 +269,10 @@ pub enum HRelKind {
         root: bool,
     },
     Channel(ChannelInfo),
-    /// A physical timer `name(count: u64, at: Instant)`.
+    /// A physical timer `name(count: u64, at: Instant)`, firing only while `guard` holds (`while G`, §15.2).
     Timer {
         every: u128,
+        guard: Option<HRelId>,
     },
     /// `boot()`.
     Boot,

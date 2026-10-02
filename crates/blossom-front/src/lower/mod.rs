@@ -101,6 +101,7 @@ pub fn lower(hir: &Hir, deployment: &Deployment<'_>) -> Result<Lowered, Internal
     l.streams()?;
     l.functions()?;
     l.acls()?;
+    l.timer_guards()?;
     l.members(deployment)?;
     l.tables()?;
     l.facts(deployment)?;
@@ -393,7 +394,7 @@ impl Lowerer<'_> {
             HRelKind::Output { .. } | HRelKind::Halt => (RelClass::Idb, Some(InterfaceDir::Output)),
             HRelKind::Boot => (RelClass::Event(EventSource::Boot), None),
             HRelKind::Recovered => (RelClass::Event(EventSource::Recovered), None),
-            HRelKind::Timer { every } => {
+            HRelKind::Timer { every, .. } => {
                 let every = i64::try_from(*every)
                     .map(Duration::from_nanos)
                     .map_err(|_| internal_error!("timer period out of range"))?;
@@ -405,6 +406,8 @@ impl Lowerer<'_> {
                         times: None,
                         once_after: None,
                         once: false,
+                        // Set once every relation is declared (`timer_guards`).
+                        guard: None,
                     })),
                     None,
                 )
@@ -522,6 +525,18 @@ impl Lowerer<'_> {
     }
 
     /// Every channel's explicit ACL (LANGUAGE §18.3), once the relations it names are declared.
+    /// The timers' `while` guards, once every relation is declared.
+    fn timer_guards(&mut self) -> Result<(), InternalError> {
+        for (i, r) in self.hir.rels.iter().enumerate() {
+            let HRelKind::Timer { guard: Some(g), .. } = &r.kind else {
+                continue;
+            };
+            let (timer, guard) = (self.rel(HRelId(i as u32))?, self.rel(*g)?);
+            self.b.set_timer_guard(timer, guard).map_err(ir)?;
+        }
+        Ok(())
+    }
+
     fn acls(&mut self) -> Result<(), InternalError> {
         for (i, r) in self.hir.rels.iter().enumerate() {
             let HRelKind::Channel(hir::ChannelInfo { acl: Some(acl), .. }) = &r.kind else {

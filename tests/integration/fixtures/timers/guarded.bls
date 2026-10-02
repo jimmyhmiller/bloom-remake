@@ -1,0 +1,31 @@
+//! Guarded timers (`timer t every d while G`, LANGUAGE §15.2), for `timers_guarded.rs`: a timer that fires only
+//! while a table holds, and one that fires only while a view holds, both guards declared after their timers.
+program guarded version 1;
+
+input start(n: u64);
+input stop(n: u64);
+
+timer beat every 100ms while running;
+timer slow every 250ms while armed;
+
+/// Started with `n`, until stopped.
+table running(n: u64) key();
+/// Started with an `n` above 1.
+view armed() = running(n) where n > 1u64;
+
+/// Each firing of each timer.
+table fired(count: u64, at: Instant) key(count);
+table slow_fired(count: u64) key(count);
+
+start_it: on start(n) {
+    upsert running(n);
+}
+stop_it: on stop(_), running(n) {
+    delete running(n);
+}
+record: on beat(c, at) {
+    upsert fired(c, at);
+}
+record_slow: on slow(c, _) {
+    upsert slow_fired(c);
+}

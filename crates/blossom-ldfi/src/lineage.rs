@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use blossom_artifact::sim::{LogicalIdx, LogicalKind, SimArtifact, SpecFeed};
 use blossom_base::{InternalError, RelId, internal_error};
-use blossom_ir::core::{RelClass, RuleKind};
+use blossom_ir::core::{EventSource, RelClass, RuleKind};
 use blossom_ir::obs::{FiringKind, FiringRecord, NegRead};
 use blossom_prov::{AggGroup, Loc, NegRead as ProvNegRead};
 use blossom_prov::{Firing, GoalId, GoalKey, Premise, ProvGraph, Space};
@@ -77,6 +77,20 @@ pub fn build(artifact: &SimArtifact, run: &SyncRun, outcome: &Outcome) -> Result
         return Err(blossom_base::unimplemented_error!(
             "LANG-052",
             "LDFI over a program that can `halt` (a halt that faults cause is not a modelled hazard yet)"
+        )
+        .into());
+    }
+    // A timer's firings are inputs here (faults do not change them); a guarded timer's depend on state that faults
+    // can change.
+    if protocol
+        .rels
+        .iter()
+        .any(|r| matches!(&r.class, RelClass::Event(EventSource::Timer(t)) if t.guard.is_some()))
+    {
+        return Err(blossom_base::unimplemented_error!(
+            "LANG-172",
+            "LDFI over a program with a guarded timer (`every d while G`: firings that faults can change are not a \
+             modelled hazard yet)"
         )
         .into());
     }

@@ -605,6 +605,14 @@ pub static REGISTRY: &[CodeInfo] = &[
         "`resolve prefer(…)` naming no handler, one twice, or one that does not write the table with `next` or `upsert` (§10.7)",
     ),
     info(
+        "BLS0412",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "a timer's `while` guard that is not a view or table placed where the timer is (§15.2)",
+    ),
+    info(
         "BLS0500",
         Error,
         "blossom-front",
