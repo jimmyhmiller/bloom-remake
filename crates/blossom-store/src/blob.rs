@@ -5,12 +5,13 @@
 //! - **Put** (`put_all`): written to a temporary file, synced, then renamed to its name; the directory is synced once
 //!   for a batch of blobs.
 //! - **Logged** (`write_logged`): its bytes travel in the WAL record itself, which makes them durable with the
-//!   record's one sync; the file is written without a sync (so it can be read at once) and is *pending* until
-//!   `sync_logged_below` syncs it, which must happen before the WAL that logs it is truncated. Recovery restores a
-//!   logged blob whose file a crash lost or tore from the WAL (`restore_logged`).
+//!   record's one sync; the file is written without a sync under a provisional name (`<name>.log`, readable at once)
+//!   and is *pending* until `sync_logged_below` syncs it and renames it to its name, which must happen before the WAL
+//!   that logs it is truncated. Recovery restores a logged blob whose file a crash lost or tore from the WAL
+//!   (`restore_logged`) and deletes the provisional files no surviving record logs (`drop_unrestored`).
 //!
-//! So a name may hold content that is not durable, or (after a crash) torn: a name this process did not write is
-//! never trusted, and reading one checks its hash.
+//! So a blob's name only ever holds synced bytes (a power loss can keep a provisional name and lose its bytes, after a
+//! directory sync of something else); a provisional file is never trusted; and reading either checks the hash.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -110,8 +111,13 @@ impl BlobStore {
         Ok(())
     }
 
-    /// Writes `bytes` to a temporary file, synced or not, and renames it to `b`'s name.
-    fn write_file(&self, b: &BlobRef, bytes: &[u8], sync: bool) -> Result<(), StoreError> {
+    /// The provisional name of a logged blob that is not synced yet.
+    fn logged_path(&self, b: &BlobRef) -> PathBuf {
+        self.dir.join(format!("{}.log", name(b)))
+    }
+
+    /// Writes `bytes` to a temporary file, syncs it, and renames it to `b`'s name.
+    fn write_synced(&self, b: &BlobRef, bytes: &[u8]) -> Result<(), StoreError> {
         let path = self.path(b);
         let tmp = path.with_extension("tmp");
         let mut f = self.fs.open(
@@ -123,10 +129,44 @@ impl BlobStore {
             },
         )?;
         f.append(bytes)?;
-        if sync {
-            f.sync_data()?;
-        }
+        f.sync_data()?;
         self.fs.rename(&tmp, &path)
+    }
+
+    /// Writes `bytes` under `b`'s provisional name, without a sync.
+    fn write_logged_file(&self, b: &BlobRef, bytes: &[u8]) -> Result<(), StoreError> {
+        let mut f = self.fs.open(
+            &self.logged_path(b),
+            OpenOpts {
+                create: true,
+                truncate: true,
+                ..OpenOpts::default()
+            },
+        )?;
+        f.append(bytes)
+    }
+
+    /// Syncs a pending blob's provisional file and renames it to its name (its directory entry still to be synced).
+    /// `Ok(false)` if the provisional file is gone.
+    fn promote(&self, b: &BlobRef) -> Result<bool, StoreError> {
+        let logged = self.logged_path(b);
+        match self.fs.open(&logged, OpenOpts::default()) {
+            Ok(mut f) => f.sync_data()?,
+            Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        }
+        self.fs.rename(&logged, &self.path(b))?;
+        Ok(true)
+    }
+
+    /// Whether the file at `path` holds `b`'s bytes: `None` if there is no such file.
+    fn holds(&self, path: &Path, b: &BlobRef) -> Result<Option<bool>, StoreError> {
+        let f = match self.fs.open(path, OpenOpts::default()) {
+            Ok(f) => f,
+            Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        Ok(Some(BlobRef::of(&read_all(&*f)?) == *b))
     }
 
     /// The blobs of `blobs` this process has neither made durable nor logged, each once: those a WAL record must
@@ -142,11 +182,42 @@ impl BlobStore {
     }
 
     /// Records that `blobs` are logged in the WAL record at `at` (appended, so durable once it syncs) and writes
-    /// their files without a sync, so they can be read at once. They stay pending until `sync_logged_below`.
+    /// their provisional files without a sync, so they can be read at once. They stay pending until
+    /// `sync_logged_below`.
     pub fn write_logged(&self, blobs: &[BlobBytes], at: Lsn) -> Result<(), StoreError> {
         for (b, bytes) in blobs {
             Self::check(b, bytes)?;
-            self.write_file(b, bytes, false)?;
+            if self.known()?.durable.contains(b) {
+                continue;
+            }
+            self.write_logged_file(b, bytes)?;
+            let mut known = self.known()?;
+            let e = known.pending.entry(*b).or_insert(at);
+            *e = (*e).min(at);
+        }
+        Ok(())
+    }
+
+    /// Recovery: `blobs` are logged in the WAL record at `at`, which survived the crash. A blob under its name holds
+    /// synced bytes and is durable (a name with other bytes is damage, repaired from the record). Otherwise its
+    /// provisional file is kept if it holds the bytes (it may be in the page cache only) or written again from the
+    /// record, and it is pending, synced before that record's WAL goes.
+    pub fn restore_logged(&self, blobs: &[BlobBytes], at: Lsn) -> Result<(), StoreError> {
+        for (b, bytes) in blobs {
+            Self::check(b, bytes)?;
+            match self.holds(&self.path(b), b)? {
+                Some(true) => {
+                    let mut known = self.known()?;
+                    known.pending.remove(b);
+                    known.durable.insert(*b);
+                    continue;
+                }
+                Some(false) => self.fs.remove(&self.path(b))?,
+                None => {}
+            }
+            if self.holds(&self.logged_path(b), b)? != Some(true) {
+                self.write_logged_file(b, bytes)?;
+            }
             let mut known = self.known()?;
             if !known.durable.contains(b) {
                 let e = known.pending.entry(*b).or_insert(at);
@@ -156,26 +227,41 @@ impl BlobStore {
         Ok(())
     }
 
-    /// Recovery: `blobs` are logged in the WAL record at `at`, which survived the crash. A file the crash lost or
-    /// tore (or never wrote) is written again from the record; every one is pending, so it is synced before that
-    /// record's WAL goes (a file that reads back whole may still be in the page cache only).
-    pub fn restore_logged(&self, blobs: &[BlobBytes], at: Lsn) -> Result<(), StoreError> {
-        for (b, bytes) in blobs {
-            Self::check(b, bytes)?;
-            if !matches!(self.read(b), Ok(Some(_))) {
-                self.write_file(b, bytes, false)?;
+    /// Recovery, once every surviving record is restored: deletes the provisional files of blobs no surviving record
+    /// logs (their records were lost with the crash, so their bytes may be too). Returns how many it deleted.
+    pub fn drop_unrestored(&self) -> Result<usize, StoreError> {
+        let pending: BTreeSet<BlobRef> = self.known()?.pending.keys().copied().collect();
+        let mut dropped = 0;
+        for p in self.fs.list(&self.dir)? {
+            let Some(stem) = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(".log"))
+            else {
+                continue;
+            };
+            if parse(stem).is_some_and(|b| pending.contains(&b)) {
+                continue;
             }
-            let mut known = self.known()?;
-            let e = known.pending.entry(*b).or_insert(at);
-            *e = (*e).min(at);
+            self.fs.remove(&p)?;
+            dropped += 1;
         }
-        Ok(())
+        if dropped > 0 {
+            self.fs.sync_dir(&self.dir)?;
+        }
+        Ok(dropped)
+    }
+
+    /// The blobs pending (logged in records not truncated yet, their files not synced).
+    pub fn pending_blobs(&self) -> Result<Vec<BlobRef>, StoreError> {
+        Ok(self.known()?.pending.keys().copied().collect())
     }
 
     /// Makes durable the pending blobs logged before `lsn` (the WAL below it is about to be truncated): syncs each
-    /// one's file, then the directory once. A blob deleted meanwhile is skipped; one logged again meanwhile (deleted
-    /// and written anew) stays pending under its new position. Returns how many it synced. Holds no lock while it
-    /// syncs, so the committer keeps logging.
+    /// one's provisional file and renames it to its name, then syncs the directory once. A blob deleted meanwhile is
+    /// skipped; one logged again meanwhile (deleted and written anew) stays pending under its new position. A pending
+    /// blob whose file is gone otherwise is an error: the WAL that logs it must not go. Returns how many it made
+    /// durable. Holds no lock while it syncs, so the committer keeps logging.
     pub fn sync_logged_below(&self, lsn: Lsn) -> Result<usize, StoreError> {
         let due: Vec<(BlobRef, Lsn)> = self
             .known()?
@@ -186,10 +272,15 @@ impl BlobStore {
             .collect();
         let mut synced = Vec::new();
         for (b, at) in due {
-            match self.fs.open(&self.path(&b), OpenOpts::default()) {
-                Ok(mut f) => f.sync_data()?,
-                Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e),
+            if !self.promote(&b)? {
+                if self.known()?.pending.get(&b) == Some(&at) {
+                    return Err(invalid(format!(
+                        "the file of pending blob {} is gone before the WAL that logs it is truncated",
+                        b.hex()
+                    )));
+                }
+                // Deleted (or made durable by a put) meanwhile.
+                continue;
             }
             synced.push((b, at));
         }
@@ -231,17 +322,9 @@ impl BlobStore {
             if durable.contains(b) || wrote.contains(b) {
                 continue;
             }
-            if pending.contains(b) {
-                match self.fs.open(&self.path(b), OpenOpts::default()) {
-                    Ok(mut f) => f.sync_data()?,
-                    // Deleted meanwhile: written anew.
-                    Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                        self.write_file(b, bytes, true)?
-                    }
-                    Err(e) => return Err(e),
-                }
-            } else {
-                self.write_file(b, bytes, true)?;
+            // A pending blob's provisional file is synced and renamed; otherwise (or if it is gone) written anew.
+            if !(pending.contains(b) && self.promote(b)?) {
+                self.write_synced(b, bytes)?;
             }
             wrote.push(*b);
         }
@@ -257,12 +340,20 @@ impl BlobStore {
         Ok(())
     }
 
-    /// The bytes of `b`, checked against its hash; `None` if the store does not hold it.
+    /// The bytes of `b` (under its name, else its provisional one), checked against its hash; `None` if the store
+    /// does not hold it.
     pub fn read(&self, b: &BlobRef) -> Result<Option<Arc<[u8]>>, StoreError> {
-        let path = self.path(b);
+        let mut path = self.path(b);
         let f = match self.fs.open(&path, OpenOpts::default()) {
             Ok(f) => f,
-            Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                path = self.logged_path(b);
+                match self.fs.open(&path, OpenOpts::default()) {
+                    Ok(f) => f,
+                    Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                    Err(e) => return Err(e),
+                }
+            }
             Err(e) => return Err(e),
         };
         let bytes = read_all(&*f)?;
@@ -276,7 +367,7 @@ impl BlobStore {
         Ok(Some(Arc::from(bytes)))
     }
 
-    /// The blobs the store holds.
+    /// The blobs the store holds under their names (synced; not the pending ones).
     pub fn list(&self) -> Result<Vec<BlobRef>, StoreError> {
         Ok(self
             .fs
@@ -304,10 +395,17 @@ impl BlobStore {
         }
         let mut deleted = 0;
         for b in gone {
-            match self.fs.remove(&self.path(b)) {
-                Ok(()) => deleted += 1,
-                Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
+            // Under its name, or its provisional one (a pending blob nothing needs any more).
+            let mut held = false;
+            for path in [self.path(b), self.logged_path(b)] {
+                match self.fs.remove(&path) {
+                    Ok(()) => held = true,
+                    Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            if held {
+                deleted += 1;
             }
         }
         if deleted > 0 {
@@ -385,6 +483,46 @@ mod tests {
         assert_eq!(recovered.pending().unwrap(), 0);
         let (_, again) = crashed(&lost);
         assert_eq!(again.read(&ra).unwrap().as_deref(), Some(&a[..]));
+    }
+
+    /// From the HD review: a logged blob's directory entry made durable by another blob's put, then a power loss
+    /// that keeps the entry and loses the bytes. Its name never held the bytes (only its provisional one did), and
+    /// recovery deletes the provisional file no surviving record logs: the store does not hold the blob, so the next
+    /// record that needs it logs it again.
+    #[test]
+    fn a_logged_blob_whose_record_is_lost_is_not_held_after_a_power_loss() {
+        let fs = SimFs::default();
+        let store = BlobStore::open(Arc::new(fs.clone()), Path::new("/n")).unwrap();
+        let (x, y): (Arc<[u8]>, Arc<[u8]>) = (Arc::from(&b"logged, record lost"[..]), Arc::from(&b"put"[..]));
+        let (rx, ry) = (BlobRef::of(&x), BlobRef::of(&y));
+        store.write_logged(&[(rx, x.clone())], Lsn(10)).unwrap();
+        // The put syncs the directory, and with it the provisional entry of the logged blob.
+        store.put_all(&[(ry, y.clone())]).unwrap();
+        let mut after = fs.fork().unwrap();
+        after.crash(&mut |_| crate::WriteFate::Lost).unwrap();
+        let recovered = BlobStore::open(Arc::new(after.clone()), Path::new("/n")).unwrap();
+        // No record survived to restore it.
+        assert_eq!(recovered.drop_unrestored().unwrap(), 1);
+        assert_eq!(recovered.read(&rx).unwrap(), None);
+        assert_eq!(recovered.list().unwrap(), vec![ry]);
+        assert_eq!(recovered.unwritten(&[(rx, x.clone())]).unwrap(), vec![(rx, x.clone())]);
+        // A surviving record restores it (from a provisional file that kept the wrong bytes, or none).
+        recovered.restore_logged(&[(rx, x.clone())], Lsn(10)).unwrap();
+        assert_eq!(recovered.read(&rx).unwrap().as_deref(), Some(&x[..]));
+        assert_eq!(recovered.pending_blobs().unwrap(), vec![rx]);
+        assert_eq!(recovered.drop_unrestored().unwrap(), 0);
+    }
+
+    /// A pending blob's file that is gone without a delete stops the truncation of the WAL that logs it.
+    #[test]
+    fn a_pending_blob_whose_file_is_gone_stops_the_truncation() {
+        let fs = SimFs::default();
+        let store = BlobStore::open(Arc::new(fs.clone()), Path::new("/n")).unwrap();
+        let x: Arc<[u8]> = Arc::from(&b"vanishes"[..]);
+        let rx = BlobRef::of(&x);
+        store.write_logged(&[(rx, x.clone())], Lsn(3)).unwrap();
+        fs.remove(&store.logged_path(&rx)).unwrap();
+        assert!(store.sync_logged_below(Lsn(4)).is_err());
     }
 
     #[test]

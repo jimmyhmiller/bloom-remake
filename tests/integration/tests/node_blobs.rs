@@ -510,3 +510,69 @@ fn logged_blobs_are_synced_before_the_wal_that_logs_them_is_truncated() {
         }
     }
 }
+
+/// From the HD review: a tick logs a new blob and stops before its record syncs; another blob's put then syncs the
+/// blob directory (as a large blob's put, the checkpointer or a collection can, while a runtime batch is unsynced);
+/// then power fails, keeping the logged blob's directory entry and losing its bytes. The record is lost, so recovery
+/// must not hold the blob (its provisional file goes), and the same bytes sent again are stored and read whole.
+#[test]
+fn a_logged_blob_whose_record_is_lost_is_not_trusted_after_a_power_loss() {
+    for engine in [false, true] {
+        let k = Store::new(engine);
+        let fs = SimFs::default();
+        let conn = ConnId(1);
+        let chunk = b"logged, then its record lost".to_vec();
+        {
+            let mut d = k.boot(&fs);
+            d.run_until_quiescent(Instant(0)).unwrap();
+            open_conn(&mut d, conn);
+            d.node
+                .observe_stream(Observed::Bytes {
+                    conn,
+                    bytes: chunk.clone(),
+                })
+                .unwrap();
+            d.crash_before_sync(Instant(2)).unwrap();
+        }
+        let other: Arc<[u8]> = Arc::from(&b"a put that syncs the directory"[..]);
+        BlobStore::open(Arc::new(fs.clone()), &k.dir)
+            .unwrap()
+            .put_all(&[(BlobRef::of(&other), other.clone())])
+            .unwrap();
+        let mut image = fs.fork().unwrap();
+        image.crash(&mut |_| WriteFate::Lost).unwrap();
+        let mut d = k.boot(&image);
+        assert!(k.stored(&d).is_empty(), "engine {engine}: the lost record's row");
+        let b = BlobRef::of(&chunk);
+        let leftovers: Vec<_> = image
+            .list(&k.dir.join("blobs"))
+            .unwrap()
+            .into_iter()
+            .filter(|p| p.to_string_lossy().contains(&b.hex()))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "engine {engine}: the blob is still held: {leftovers:?}"
+        );
+        // The same bytes again: stored, and read back whole.
+        const LATER: i64 = 1_000_000_000_000;
+        d.run_until_quiescent(Instant(LATER)).unwrap();
+        let conn2 = ConnId(2);
+        d.node
+            .observe_stream(Observed::Opened {
+                stream: 0,
+                conn: conn2,
+                peer: "peer".into(),
+                req: None,
+                at: Instant(LATER + 1),
+            })
+            .unwrap();
+        d.run_until_quiescent(Instant(LATER + 2)).unwrap();
+        let again = send(&image, &mut d, conn2, &chunk, LATER + 3);
+        assert_eq!(
+            again.first().map(|x| x.0.clone()),
+            Some(chunk.clone()),
+            "engine {engine}"
+        );
+    }
+}

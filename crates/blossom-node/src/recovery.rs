@@ -37,7 +37,8 @@ pub const KIND_DELTA: u8 = 1;
 pub const KIND_DELTA_BLOBS: u8 = 2;
 /// The largest blob a record logs; a larger one is made durable as a file before the record (`BlobStore::put_all`).
 pub const INLINE_BLOB_MAX: usize = 1 << 20;
-/// The most blob bytes one record logs (records share a 64 MiB segment); the rest are made durable as files.
+/// The most bytes one record holds in logged blobs and its delta together (records share a 64 MiB segment); the blobs
+/// past it are made durable as files.
 pub const INLINE_RECORD_MAX: usize = 8 << 20;
 
 /// A tick's WAL record: its kind and payload, and the blobs it logs (`BlobStore::write_logged` once it is appended).
@@ -57,8 +58,9 @@ pub fn tick_record(
     let mut logged = Vec::new();
     let mut put = Vec::new();
     let mut inline = 0usize;
+    let budget = INLINE_RECORD_MAX.saturating_sub(delta.len());
     for (b, bytes) in store.unwritten(blobs)? {
-        if bytes.len() <= INLINE_BLOB_MAX && inline + bytes.len() <= INLINE_RECORD_MAX {
+        if bytes.len() <= INLINE_BLOB_MAX && inline + bytes.len() <= budget {
             inline += bytes.len();
             logged.push((b, bytes));
         } else {
@@ -325,9 +327,13 @@ pub fn open(
             }
         }
     }
-    // Every blob the store holds is durable; those no recovered row holds (a crash between a blob's write and its
-    // record's sync, or rows a replayed record deleted) are the node's first candidates for collection.
-    let stored: std::collections::BTreeSet<blossom_value::BlobRef> = blobs.list()?.into_iter().collect();
+    // The provisional files of blobs no surviving record logs go (their bytes may have gone with their records).
+    blobs.drop_unrestored()?;
+    // Every blob the store holds is durable, or pending (logged in a surviving record, synced before its WAL goes);
+    // those no recovered row holds (a crash between a blob's write and its record's sync, or rows a replayed record
+    // deleted) are the node's first candidates for collection.
+    let stored: std::collections::BTreeSet<blossom_value::BlobRef> =
+        blobs.list()?.into_iter().chain(blobs.pending_blobs()?).collect();
     if let Some(missing) = referenced.iter().find(|b| !stored.contains(b)) {
         return Err(NodeError::Store(format!(
             "a recovered row holds blob {}, which the blob store does not have",

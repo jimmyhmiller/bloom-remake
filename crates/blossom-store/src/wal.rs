@@ -637,6 +637,15 @@ impl WalScan {
             }
             // Absolute positions in later segments include original full segment lengths, including discarded tails.
             let end = Lsn(base.checked_add(off as u64).ok_or_else(|| invalid("scan overflow"))?);
+            // Recovery replays the newest segment's whole records, synced or not (a process crash leaves an unsynced
+            // tail in the page cache): it makes them durable first, and certifies them, so that a later power loss
+            // cannot take back what the new incarnation builds on (the next segment would then follow a damaged one).
+            if repair && segment_index + 1 == segment_count {
+                file.sync_data()?;
+                if !records.is_empty() {
+                    atomic_write(fs, &receipt_path(dir, header.segment_seq), &receipt_bytes(&header, end))?;
+                }
+            }
             result.segments.push(ScannedSegment {
                 path,
                 header,
@@ -712,4 +721,117 @@ impl WalWriter for MemDurability {
 #[cfg(test)]
 pub(crate) fn test_header_len(h: &SegmentHeader) -> usize {
     header_bytes(h).unwrap().len()
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    use crate::{SimFs, WriteFate};
+
+    fn sim() -> (Arc<SimFs>, PathBuf) {
+        let fs = Arc::new(SimFs::default());
+        let root = PathBuf::from("/store");
+        fs.create_dir_all(&root).unwrap();
+        fs.sync_dir(Path::new("/")).unwrap();
+        (fs, root.join("wal"))
+    }
+    fn header(seq: u64) -> SegmentHeader {
+        SegmentHeader {
+            format: 1,
+            store_uuid: [7; 16],
+            segment_seq: seq,
+            restarts: 1,
+            boot_nonce: 3,
+            lsn_base: Lsn(0),
+            catalog: b"opaque catalog".to_vec(),
+        }
+    }
+    fn rec(batch: u64, tick: u64, payload: &[u8]) -> WalRecordBuf {
+        WalRecordBuf {
+            batch,
+            tick,
+            now: tick as i64,
+            kind: 1,
+            payload: payload.to_vec(),
+        }
+    }
+
+    /// From the HD review: recovery replays an intact tail that was never synced (a process crash leaves it in the
+    /// page cache). It makes it durable first, so a later power loss cannot take back what the new incarnation
+    /// built on.
+    #[test]
+    fn a_replayed_unsynced_tail_survives_a_later_power_loss() {
+        let (fs, dir) = sim();
+        let mut wal = FileWal::create(fs.clone(), &dir, header(0), Lsn(0)).unwrap();
+        wal.append(&rec(1, 1, b"acknowledged")).unwrap();
+        wal.sync().unwrap();
+        wal.append(&rec(2, 2, b"appended, not synced")).unwrap();
+        drop(wal);
+        // The process restarts on the same page cache: recovery replays both records.
+        assert_eq!(WalScan::scan(&*fs, &dir, [7; 16], true).unwrap().records().count(), 2);
+        let mut after = fs.fork().unwrap();
+        after.crash(&mut |_| WriteFate::Lost).unwrap();
+        assert_eq!(WalScan::scan(&after, &dir, [7; 16], true).unwrap().records().count(), 2);
+    }
+
+    /// Writes `bytes` at the end of `path` and syncs them.
+    fn append_synced(fs: &SimFs, path: &Path, bytes: &[u8]) {
+        let mut f = fs.open(path, OpenOpts::default()).unwrap();
+        f.append(bytes).unwrap();
+        f.sync_data().unwrap();
+    }
+
+    /// A strict segment written before HD item 3: each batch ends with its own marker, synced, and a receipt past
+    /// it. It still recovers whole; damage under its receipt is corruption; a torn batch after it is a torn tail.
+    #[test]
+    fn a_strict_segment_of_the_old_scheme_still_recovers() {
+        let (fs, dir) = sim();
+        crate::vfs::durable_dir(&*fs, &dir).unwrap();
+        let h = header(0);
+        let path = segment_path(&dir, 0);
+        let head = header_bytes(&h).unwrap();
+        drop(
+            fs.open(
+                &path,
+                OpenOpts {
+                    create_new: true,
+                    ..OpenOpts::default()
+                },
+            )
+            .unwrap(),
+        );
+        append_synced(&fs, &path, &head);
+        fs.sync_dir(&dir).unwrap();
+        let mut off = head.len() as u64;
+        for (batch, tick, payload) in [(1u64, 1u64, &b"first"[..]), (2, 2, &b"second"[..])] {
+            let data = record_bytes(&rec(batch, tick, payload), Lsn(off)).unwrap();
+            append_synced(&fs, &path, &data);
+            off += data.len() as u64;
+            let marker = WalRecordBuf {
+                batch: batch + 1,
+                tick,
+                now: 0,
+                kind: SYNC_MARKER,
+                payload: Vec::new(),
+            };
+            let m = record_bytes(&marker, Lsn(off)).unwrap();
+            append_synced(&fs, &path, &m);
+            off += m.len() as u64;
+            atomic_write(&*fs, &receipt_path(&dir, 0), &receipt_bytes(&h, Lsn(off))).unwrap();
+        }
+        assert_eq!(WalScan::scan(&*fs, &dir, [7; 16], false).unwrap().records().count(), 2);
+        // The last marker is under the receipt: damage to it is corruption.
+        let damaged = fs.fork().unwrap();
+        damaged.corrupt(&path, off as usize - 10).unwrap();
+        assert!(matches!(
+            WalScan::scan(&damaged, &dir, [7; 16], false),
+            Err(StoreError::Corruption { .. })
+        ));
+        // A batch torn after it is a torn tail.
+        let mut torn = fs.fork().unwrap();
+        let next = record_bytes(&rec(3, 3, &[3u8; 900]), Lsn(off)).unwrap();
+        torn.open(&path, OpenOpts::default()).unwrap().append(&next).unwrap();
+        torn.crash(&mut |_| WriteFate::Torn { sectors: 1 }).unwrap();
+        assert_eq!(WalScan::scan(&torn, &dir, [7; 16], true).unwrap().records().count(), 2);
+    }
 }

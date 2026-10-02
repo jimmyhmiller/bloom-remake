@@ -270,12 +270,16 @@ composed of encoded headers (`Part::Bytes`) and batch ranges (`Part::Blob`).
 - **Store.** `blossom_store::BlobStore` keeps one file per blob under `<store>/blobs/`, named by hash and length. Reads
   check the hash.
   - A put blob is written to a temporary file, synced and renamed; the directory is synced once per batch.
-  - A logged blob's file is written and renamed without a sync, so it can be read at once. It stays *pending* until
-    the checkpoint thread syncs it (`sync_logged_below`, then the directory once). That happens before the WAL that
-    logs it is truncated, and off the tick path.
+  - A logged blob's file is written without a sync under a provisional name (`<name>.log`), so it can be read at
+    once. It stays *pending* until the checkpoint thread syncs it and renames it to its name (`sync_logged_below`,
+    then the directory once). That happens before the WAL that logs it is truncated, and off the tick path. So a
+    blob's name only ever holds synced bytes.
   - Recovery restores, from the surviving WAL records, every logged blob whose file a crash lost or tore, including
-    records a checkpoint already covers. The restored blobs are pending again. `Boot::blobs` gives the node the
-    recovered rows' blobs.
+    records a checkpoint already covers. The restored blobs are pending again. Provisional files that no surviving
+    record logs are deleted: a power loss can keep a provisional name and lose its bytes, when something else synced
+    the directory. Recovery also syncs (and certifies) the newest segment's tail before replaying it, so a later
+    power loss cannot take back what the new incarnation builds on. `Boot::blobs` gives the node the recovered rows'
+    blobs.
   - A name this process did not write is never trusted: it may be torn, or held only in the page cache.
 - **Collection.** After a checkpoint is installed, the store deletes every blob outside `Node::blob_roots`: the
   checkpoint's rows, those of every WAL record after it, the running node's rows, cache and parked output.
