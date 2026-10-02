@@ -324,7 +324,7 @@ at Broker {
     view adopt_at(m = max!(at)) = meta_snap(at, _, _, _, _, _, _, _) from _, applied_m(mine) where at > mine;
     view adopt(at, ts, asg, rs, ds, dn, os, np) = meta_snap(at, ts, asg, rs, ds, dn, os, np) from _, adopt_at(at);
     view adopting() = adopt_at(_);
-    adopt_state: while adopt(at, ts, asg, rs, ds, dn, os, np) {
+    adopt_state: on adopt(at, ts, asg, rs, ds, dn, os, np) {
         next applied_m(at);
         next next_pid(np);
         for x in ts {
@@ -347,7 +347,7 @@ at Broker {
         }
     }
     /// What the adopted metadata does not hold goes.
-    adopt_drop: while adopt(_at, ts, asg, rs, ds, dn, os, _np) {
+    adopt_drop: on adopt(_at, ts, asg, rs, ds, dn, os, _np) {
         if mtopic(n, id, p, c) where not ts.contains((n, id, p, c)) {
             delete mtopic(n, id, p, c);
         }
