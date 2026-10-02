@@ -706,6 +706,9 @@ pub enum HExprKind {
     Struct {
         ty: TypeId,
         fields: Vec<HExpr>,
+        /// `..base`: the variable holding the base (the fields not written read it). Type checking makes it of the
+        /// struct's type; it is evaluated by the `match` that binds it, not here.
+        base: Option<Box<HExpr>>,
     },
     TupleIndex {
         base: Box<HExpr>,

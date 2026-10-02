@@ -1913,7 +1913,7 @@ impl Checker<'_> {
                 *ty = tyref;
                 t
             }
-            HExprKind::Struct { ty, fields } => {
+            HExprKind::Struct { ty, fields, base } => {
                 let ty = *ty;
                 let ftys: Vec<TypeId> = match hir.types.get(ty) {
                     Some(TypeDef::Struct(s)) => s.fields.iter().map(|f| f.ty).collect(),
@@ -1924,6 +1924,13 @@ impl Checker<'_> {
                     if !self.apply {
                         let want = self.of_type(hir, fty);
                         self.flow(ft, want, true, f.span);
+                    }
+                }
+                if let Some(b) = base {
+                    let bt = self.expr(hir, scope, b);
+                    if !self.apply {
+                        let want = self.bound(Shape::Con(ty));
+                        self.unify(&hir.types, bt, want, b.span);
                     }
                 }
                 if self.apply {

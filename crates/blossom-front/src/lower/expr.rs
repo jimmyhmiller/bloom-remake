@@ -417,7 +417,7 @@ impl Lowerer<'_> {
                     fields: fs,
                 }
             }
-            HExprKind::Struct { ty, fields } => {
+            HExprKind::Struct { ty, fields, .. } => {
                 let mut fs = Vec::new();
                 for x in fields {
                     fs.push(self.expr(d, x)?);
