@@ -20,10 +20,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use blossom_artifact::bls::BlsArtifact;
-use blossom_driver::bls::compile_file;
+use blossom_driver::bls::compile_file_with;
 use blossom_front::api::NodeSpec;
 use blossom_node::durable::DurableSchema;
-use blossom_sim::cluster::{Cluster, ClusterConfig, NoKvClients, StreamAction, StreamClient, StreamEvent};
+use blossom_sim::cluster::{Cluster, ClusterConfig, CrashWrites, NoKvClients, StreamAction, StreamClient, StreamEvent};
 use blossom_sim::linearize::{self, Model, Operation, Verdict};
 use blossom_value::Value;
 use blossom_value::time::NodeId;
@@ -817,8 +817,17 @@ fn int(v: &Value) -> i64 {
     match v {
         Value::Int(IntValue::I32(x)) => i64::from(*x),
         Value::Int(IntValue::I64(x)) => *x,
+        Value::Int(IntValue::U64(x)) => i64::try_from(*x).unwrap(),
         other => panic!("{other:?}"),
     }
+}
+
+#[cfg(test)]
+/// The controller's Raft group (`controller()` in `cluster.bls`).
+fn controller() -> Value {
+    let mut id = vec![0u8; 16];
+    id[15] = 1;
+    Value::Tuple(vec![Value::Bytes(id.into()), Value::Int(IntValue::I32(0))].into())
 }
 
 #[cfg(test)]
@@ -835,6 +844,10 @@ struct Setup {
     brokers: u32,
     /// Splits and one-way cuts between the brokers.
     partitions: bool,
+    /// Parameters the program is compiled with (name, value: an integer, else text such as a duration).
+    params: &'static [(&'static str, &'static str)],
+    /// The last broker is stopped over this span (from, to): the others go on without it.
+    down: Option<(i64, i64)>,
 }
 
 #[cfg(test)]
@@ -852,9 +865,22 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
         name: "c1".to_owned(),
         role: Some("Client".to_owned()),
     });
-    let (result, _) = compile_file(path.to_str().unwrap(), &nodes);
+    let params = setup
+        .params
+        .iter()
+        .map(|(n, v)| {
+            let binding = match v.parse::<i128>() {
+                Ok(i) => blossom_front::api::ParamBinding::Int(i),
+                Err(_) => blossom_front::api::ParamBinding::Text((*v).into()),
+            };
+            ((*n).to_owned(), binding)
+        })
+        .collect();
+    let (result, _) = compile_file_with(path.to_str().unwrap(), &nodes, &params);
     let artifact: BlsArtifact = result.unwrap_or_else(|e| panic!("sim_cluster.bls: {e:?}")).0;
     let schema = DurableSchema::of(artifact.program.get());
+    let rel = |n: &str| artifact.rel_named(n).unwrap();
+    let ctl = controller();
     let (mut answered, mut unanswered, mut together, mut timeouts) = (0, 0, 0, 0);
     for seed in setup.seeds.clone() {
         let cfg = ClusterConfig {
@@ -896,6 +922,38 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
                 brokers: setup.brokers,
                 writes_only: setup.brokers > 1,
             }));
+        }
+        let mut had = 0;
+        if let Some((from, to)) = setup.down {
+            let stopped = NodeId(setup.brokers - 1);
+            cluster.run_until(from).unwrap();
+            // The last controller entry the stopped broker holds (at most this: a crash may lose unsynced writes).
+            had = cluster
+                .state(stopped)
+                .unwrap()
+                .rows(rel("rlog"))
+                .filter(|r| r[0] == ctl)
+                .map(|r| int(&r[1]))
+                .max()
+                .unwrap_or(0);
+            cluster.crash(stopped, CrashWrites::Random).unwrap();
+            cluster.run_until(to).unwrap();
+            // Every other broker compacted the controller's log past it: whichever leads can only send it the
+            // applied metadata.
+            for n in (0..setup.brokers - 1).map(NodeId) {
+                let point = cluster
+                    .state(n)
+                    .unwrap_or_else(|| panic!("seed {seed}: broker {n:?} is down"))
+                    .rows(rel("rsnap"))
+                    .find(|r| r[0] == ctl)
+                    .map(|r| int(&r[1]))
+                    .unwrap_or(0);
+                assert!(
+                    point > had,
+                    "seed {seed}: broker {n:?} compacted the controller's log to {point}, not past {had}"
+                );
+            }
+            cluster.restart(stopped).unwrap();
         }
         cluster.run_until(3_000_000_000).unwrap();
         let run = cluster.run_so_far();
@@ -952,6 +1010,49 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
                 assigned,
                 "seed {seed}: brokers 0 and {n} place topics differently"
             );
+            // The rest of the applied metadata is the same too: it is a function of the applied index.
+            for name in ["applied_m", "mreassign", "mdeleted", "done", "outcome", "next_pid"] {
+                assert_eq!(
+                    rows(n, name),
+                    rows(0, name),
+                    "seed {seed}: brokers 0 and {n} differ in {name}"
+                );
+            }
+        }
+        // The applied commands are kept for `DONE_WINDOW` entries, not forever.
+        if let Some((_, w)) = setup.params.iter().find(|(n, _)| *n == "DONE_WINDOW") {
+            let w: usize = w.parse().unwrap();
+            let done = rows(0, "done");
+            assert!(
+                done.len() <= w,
+                "seed {seed}: {} applied commands kept, past the window of {w}",
+                done.len()
+            );
+            let deleted = rows(0, "mdeleted").len();
+            assert!(
+                deleted <= w,
+                "seed {seed}: {deleted} deleted topics kept, past the window of {w}"
+            );
+            // An outcome goes with its command's `done` row.
+            for r in rows(0, "outcome") {
+                assert!(
+                    done.iter().any(|d| d[0] == r[0] && d[1] == r[1]),
+                    "seed {seed}: an outcome outlived its command: {r:?}"
+                );
+            }
+        }
+        if setup.down.is_some() {
+            // The stopped broker came back to a snapshot point past what it held (InstallSnapshot), so it applied no
+            // entry up to it: its metadata, the same as the others', is the leader's it adopted.
+            let point = rows(setup.brokers - 1, "rsnap")
+                .iter()
+                .find(|r| r[0] == ctl)
+                .map(|r| int(&r[1]))
+                .unwrap_or(0);
+            assert!(
+                point > had,
+                "seed {seed}: the stopped broker's controller snapshot point {point} is not past {had}"
+            );
         }
         for n in 0..setup.brokers {
             let id = i64::from(n + 1);
@@ -991,6 +1092,8 @@ fn admin_requests_are_linearizable_across_crashes() {
         names: &NAMES,
         brokers: 1,
         partitions: false,
+        params: &[],
+        down: None,
     });
     assert!(answered > 300, "only {answered} requests were answered");
     assert!(
@@ -1014,6 +1117,8 @@ fn admin_requests_answered_in_one_tick_are_linearizable() {
         names: &["t0", "t.1", "t_1"],
         brokers: 1,
         partitions: false,
+        params: &[],
+        down: None,
     });
     assert!(answered > 1000, "only {answered} requests were answered");
     assert!(
@@ -1037,6 +1142,8 @@ fn admin_requests_through_any_of_three_brokers_are_linearizable() {
         names: &NAMES,
         brokers: 3,
         partitions: true,
+        params: &[],
+        down: None,
     });
     assert!(answered > 300, "only {answered} requests were answered");
     assert!(
@@ -1046,5 +1153,53 @@ fn admin_requests_through_any_of_three_brokers_are_linearizable() {
     assert!(
         timeouts > 0,
         "no request timed out: the controller was never unavailable long enough"
+    );
+}
+
+/// The controller's log compacted under the admin requests (a snapshot point every few entries, the applied commands
+/// kept for ten), with one broker stopped while the others compact past it: it comes back from the leader's
+/// applied metadata, and every broker ends with the same metadata. The requests stay linearizable.
+#[test]
+fn a_broker_behind_the_controllers_snapshot_adopts_the_leaders_metadata() {
+    let (answered, _, _, _) = check_runs(&Setup {
+        seeds: 1..=4,
+        crashes: false,
+        stream_drops: false,
+        latency: ClusterConfig::default().latency,
+        clients: 4,
+        requests: 30,
+        grid: None,
+        names: &NAMES,
+        brokers: 3,
+        partitions: false,
+        params: &[("CONTROLLER_KEEP", "4"), ("DONE_WINDOW", "10")],
+        down: Some((300_000_000, 1_800_000_000)),
+    });
+    assert!(answered > 200, "only {answered} requests were answered");
+}
+
+/// The three-broker faults of `admin_requests_through_any_of_three_brokers_are_linearizable` with the controller's
+/// log compacted every few entries and the applied commands kept for a few dozen: a broker partitioned away catches
+/// up from snapshots, and a command sent again after its `done` row is gone is stale and skipped.
+#[test]
+fn admin_requests_stay_linearizable_with_the_controller_compacted() {
+    let (answered, unanswered, _, _) = check_runs(&Setup {
+        seeds: 1..=8,
+        crashes: true,
+        stream_drops: true,
+        latency: ClusterConfig::default().latency,
+        clients: 4,
+        requests: 20,
+        grid: None,
+        names: &NAMES,
+        brokers: 3,
+        partitions: true,
+        params: &[("CONTROLLER_KEEP", "3"), ("DONE_WINDOW", "12")],
+        down: None,
+    });
+    assert!(answered > 300, "only {answered} requests were answered");
+    assert!(
+        unanswered > 0,
+        "no request was left unanswered: the faults did not bite"
     );
 }

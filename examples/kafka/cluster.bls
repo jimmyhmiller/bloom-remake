@@ -48,7 +48,7 @@ format Item {
 /// a tag unique among its requests). A request's creations (or deletions) are one command, applied in one tick, so
 /// no other request's commands come between them: a request takes effect at one point, as a Kafka controller handles
 /// a request in one event. A producer-id allocation has no items.
-format Cmd { op: i8, origin: i32, tag: u64, items: compact_array(Item) }
+format Cmd { op: i8, origin: i32, tag: u64, made: u64, items: compact_array(Item) }
 
 fn create_item(slot: u64, err: i16, name: String, id: Bytes, assignment: Vec<Vec<i32>>, configs: Vec<(String, String)>) -> Item {
     Item { slot: slot, part: 0i32, err: err, flag: false, name: name, id: id, assignment: assignment, configs: configs }
@@ -74,27 +74,27 @@ fn union_ids(xs: Vec<i32>, ys: Vec<i32>) -> Vec<i32> {
 }
 
 fn create_cmd(origin: i32, tag: u64, items: Vec<Item>) -> Cmd {
-    Cmd { op: OP_CREATE, origin: origin, tag: tag, items: items }
+    Cmd { op: OP_CREATE, origin: origin, tag: tag, made: 0u64, items: items }
 }
 
 fn validate_cmd(origin: i32, tag: u64, items: Vec<Item>) -> Cmd {
-    Cmd { op: OP_VALIDATE, origin: origin, tag: tag, items: items }
+    Cmd { op: OP_VALIDATE, origin: origin, tag: tag, made: 0u64, items: items }
 }
 
 fn reassign_cmd(origin: i32, tag: u64, items: Vec<Item>) -> Cmd {
-    Cmd { op: OP_REASSIGN, origin: origin, tag: tag, items: items }
+    Cmd { op: OP_REASSIGN, origin: origin, tag: tag, made: 0u64, items: items }
 }
 
 fn reassigned_cmd(origin: i32, tag: u64, item: Item) -> Cmd {
-    Cmd { op: OP_REASSIGNED, origin: origin, tag: tag, items: [item] }
+    Cmd { op: OP_REASSIGNED, origin: origin, tag: tag, made: 0u64, items: [item] }
 }
 
 fn delete_cmd(origin: i32, tag: u64, items: Vec<Item>) -> Cmd {
-    Cmd { op: OP_DELETE, origin: origin, tag: tag, items: items }
+    Cmd { op: OP_DELETE, origin: origin, tag: tag, made: 0u64, items: items }
 }
 
 fn pids_cmd(origin: i32, tag: u64) -> Cmd {
-    Cmd { op: OP_PIDS, origin: origin, tag: tag, items: [] }
+    Cmd { op: OP_PIDS, origin: origin, tag: tag, made: 0u64, items: [] }
 }
 
 fn encode_cmd(c: Cmd) -> Bytes {
@@ -103,6 +103,18 @@ fn encode_cmd(c: Cmd) -> Bytes {
 
 fn decode_cmd(b: Bytes) -> Option<Cmd> {
     Cmd::decode(b, 0).map(|r| r.0)
+}
+
+/// A command's bytes with the controller index its origin had applied when it first wanted it (`made`).
+fn stamped(cmd: Bytes, made: u64) -> Option<Bytes> {
+    let c = decode_cmd(cmd)?;
+    Some(encode_cmd(Cmd { op: c.op, origin: c.origin, tag: c.tag, made: made, items: c.items }))
+}
+
+/// Whether a command is applied however old it is: a producer-id block (applying one twice wastes a block) and a
+/// reassignment's completion (applied only while its target stands) are harmless twice; the rest are not.
+fn repeatable(op: i8) -> bool {
+    op == OP_PIDS || op == OP_REASSIGNED
 }
 
 /// The creations a Metadata request on broker `me`'s connection `c` (its `i`th request) asks for, one per name: ids
@@ -165,11 +177,31 @@ fn entry_bytes(data: Blob) -> Bytes {
 
 /// A command from a broker to the controller's leader.
 channel submit(cmd: Bytes): Broker -> Broker;
+/// A broker that cannot apply the controller's log further (it holds no entries up to its snapshot point `point`)
+/// asks for the applied metadata at or past it.
+channel meta_want(point: u64): Broker -> Broker;
+/// A broker's applied metadata at index `at`, for a broker that asked for it (`meta_want`): the topics,
+/// assignments, reassignments, deleted topics, applied commands and their outcomes, and the next producer id.
+channel meta_snap(
+    at: u64,
+    topics: Vec<(String, Bytes, i32, Vec<(String, String)>)>,
+    assign: Vec<(Bytes, i32, Vec<i32>)>,
+    reassign: Vec<(Bytes, i32, Vec<i32>, Vec<i32>, u64)>,
+    deleted: Vec<(Bytes, u64)>,
+    done: Vec<(i32, u64, u64)>,
+    outcomes: Vec<(i32, u64, u64, i16, Bytes, i64, String)>,
+    next: i64,
+): Broker -> Broker;
 /// A partition leader's announcement: the groups it leads, with their epochs and in-sync replicas (S8.md D7), and
 /// when it sent it (by its clock), which orders its announcements within one epoch.
 channel leads(gs: Vec<(Group, u64, Vec<i32>)>, at: Instant): Broker -> Broker;
 
 param CMD_RESEND: Duration = 500ms;
+/// How many controller entries the applied commands, their outcomes and the deleted topics are kept for.
+param DONE_WINDOW: u64 = 100000;
+/// How many applied controller entries a broker keeps in its log past its snapshot point, so a follower briefly
+/// behind catches up from entries rather than from the snapshot.
+param CONTROLLER_KEEP: u64 = 1000;
 /// How long a follower may go without being caught up before it leaves its partition's in-sync replicas (Kafka's
 /// `replica.lag.time.max.ms`).
 param REPLICA_LAG_MAX: Duration = 30s;
@@ -224,13 +256,20 @@ at Broker {
     /// cancellation or a new target never drops a member the partition's log still counts), and the controller index
     /// the target was set at (which tells one target from an earlier equal one).
     durable table mreassign(tid: Bytes, part: i32, target: Vec<i32>, hosting: Vec<i32>, since: u64) key(tid, part);
-    /// The ids of the topics deleted: their partitions' data goes.
-    durable table mdeleted(tid: Bytes) key(tid);
-    /// The commands applied, by request.
-    durable table done(origin: i32, tag: u64) key(origin, tag);
+    // The applied commands, their outcomes and the deleted topics are kept for `DONE_WINDOW` controller entries after
+    // they are applied, which bounds them. A command made (`Cmd.made`, the index its origin had applied) more than
+    // `DONE_WINDOW` entries before it is applied is stale and skipped (`fresh`), so a copy of a command whose `done`
+    // row is gone is never applied twice: such a copy comes at least `DONE_WINDOW` entries after the original, which
+    // came after it was made. (A request waits seconds; `DONE_WINDOW` entries take far longer.)
+
+    /// The ids of the topics deleted (and the index): their partitions' data goes.
+    durable table mdeleted(tid: Bytes, at: u64) key(tid) while applied_m(a) where at + DONE_WINDOW > a;
+    /// The commands applied, by request, and the index each was applied at.
+    durable table done(origin: i32, tag: u64, at: u64) key(origin, tag) while applied_m(a) where at + DONE_WINDOW > a;
     /// Each applied item's outcome, by its request and entry: the error (NONE when it took effect), the topic id and
     /// name (a creation's, or the deleted topic's), or the allocated producer id (a producer-id allocation's, slot 0).
-    durable table outcome(origin: i32, tag: u64, slot: u64, error: i16, id: Bytes, pid: i64, name: String) key(origin, tag, slot);
+    durable table outcome(origin: i32, tag: u64, slot: u64, error: i16, id: Bytes, pid: i64, name: String)
+        key(origin, tag, slot) while done(origin, tag, _);
     /// The next producer id.
     durable table next_pid(n: i64) key() resolve choose_most(n);
 
@@ -253,19 +292,93 @@ at Broker {
     }
     view caught_up() = synced(_);
 
-    /// The next committed controller entry to apply.
+    /// The next committed controller entry to apply (none in a tick that adopts a leader's metadata).
     view to_apply(i, kind, data) =
-        applied_m(a), let i = a + 1, let g = controller(), commit_of(g, c), rlog(g, i, _, _, kind, _, data) where i <= c;
-    view to_apply_cmd(cmd) = to_apply(_, kind, data), let Some(cmd) = decode_cmd(entry_bytes(data)) where kind == CMD;
+        applied_m(a), let i = a + 1, let g = controller(), commit_of(g, c), rlog(g, i, _, _, kind, _, data), not adopting()
+        where i <= c;
+
+    // ---- the applied metadata as the controller's snapshot (D12 for the controller)
+
+    // The metadata applied at an index is the same on every broker: it is a function of the committed entries up to
+    // it. A broker that took a snapshot point past what it applied (InstallSnapshot, `raft.bls`: the leader compacted
+    // the entries it needs) cannot apply further from its log, so it asks every other broker; any that has applied as
+    // far sends its metadata at its own applied index, and the asker adopts it and the index, and never applies an
+    // entry at or before it again. It asks until it has (so a lost answer, or a leader that is itself behind, only
+    // delays it).
+    view meta_topics(xs = collect!((n, id, p, c) default [])) = mtopic(n, id, p, c);
+    view meta_assign(xs = collect!((t, p, rs) default [])) = massign(t, p, rs);
+    view meta_reassign(xs = collect!((t, p, tg, h, s) default [])) = mreassign(t, p, tg, h, s);
+    view meta_deleted(xs = collect!((t, at) default [])) = mdeleted(t, at);
+    view meta_done(xs = collect!((o, tag, at) default [])) = done(o, tag, at);
+    view meta_outcomes(xs = collect!((o, tag, s, e, id, pid, n) default [])) = outcome(o, tag, s, e, id, pid, n);
+    want_meta: on raft_heartbeat, applied_m(a), rsnap(g, s, _, _, _), let c = controller() where g == c && a < s {
+        for broker(n, _, _, _) where n != self {
+            send meta_want(s) to n;
+        }
+    }
+    send_meta: on meta_want(s) from f, applied_m(a), next_pid(np), meta_topics(ts), meta_assign(asg),
+        meta_reassign(rs), meta_deleted(ds), meta_done(dn), meta_outcomes(os) where a >= s {
+        send meta_snap(a, ts, asg, rs, ds, dn, os, np) to f;
+    }
+    /// The newest metadata sent past what this broker applied (two copies of one index are equal).
+    view adopt_at(m = max!(at)) = meta_snap(at, _, _, _, _, _, _, _) from _, applied_m(mine) where at > mine;
+    view adopt(at, ts, asg, rs, ds, dn, os, np) = meta_snap(at, ts, asg, rs, ds, dn, os, np) from _, adopt_at(at);
+    view adopting() = adopt_at(_);
+    adopt_state: while adopt(at, ts, asg, rs, ds, dn, os, np) {
+        next applied_m(at);
+        next next_pid(np);
+        for x in ts {
+            upsert mtopic(x.0, x.1, x.2, x.3);
+        }
+        for x in asg {
+            upsert massign(x.0, x.1, x.2);
+        }
+        for x in rs {
+            upsert mreassign(x.0, x.1, x.2, x.3, x.4);
+        }
+        for x in ds {
+            upsert mdeleted(x.0, x.1);
+        }
+        for x in dn {
+            upsert done(x.0, x.1, x.2);
+        }
+        for x in os {
+            upsert outcome(x.0, x.1, x.2, x.3, x.4, x.5, x.6);
+        }
+    }
+    /// What the adopted metadata does not hold goes.
+    adopt_drop: while adopt(_at, ts, asg, rs, ds, dn, os, _np) {
+        if mtopic(n, id, p, c) where not ts.contains((n, id, p, c)) {
+            delete mtopic(n, id, p, c);
+        }
+        if massign(t, p, r) where not asg.contains((t, p, r)) {
+            delete massign(t, p, r);
+        }
+        if mreassign(t, p, tg, h, sn) where not rs.contains((t, p, tg, h, sn)) {
+            delete mreassign(t, p, tg, h, sn);
+        }
+        if mdeleted(t, at) where not ds.contains((t, at)) {
+            delete mdeleted(t, at);
+        }
+        if done(o, tag, at) where not dn.contains((o, tag, at)) {
+            delete done(o, tag, at);
+        }
+        if outcome(o, tag, sl, e, id, pid, n) where not os.contains((o, tag, sl, e, id, pid, n)) {
+            delete outcome(o, tag, sl, e, id, pid, n);
+        }
+    }
+    view to_apply_cmd(i, cmd) = to_apply(i, kind, data), let Some(cmd) = decode_cmd(entry_bytes(data)) where kind == CMD;
     advance_applied: while to_apply(i, _, _) {
         next applied_m(i);
     }
-    /// The command to apply, unless it is already applied (sent again by its origin, so in the log twice).
+    /// The command to apply, unless it is already applied (sent again by its origin, so in the log twice) or stale.
     view fresh(op, origin, tag, items) =
-        to_apply_cmd(cmd), let op = cmd.op, let origin = cmd.origin, let tag = cmd.tag, let items = cmd.items,
-        not done(origin, tag);
-    mark_done: while fresh(_, origin, tag, _) {
-        upsert done(origin, tag);
+        to_apply_cmd(i, cmd), let op = cmd.op, let origin = cmd.origin, let tag = cmd.tag, let items = cmd.items,
+        not done(origin, tag, _) where repeatable(op) || cmd.made + DONE_WINDOW > i;
+    /// Every command applied or skipped is marked done, a stale one too (with no outcome: its origin stops sending it,
+    /// and its request times out).
+    mark_done: while to_apply_cmd(i, cmd), let origin = cmd.origin, let tag = cmd.tag, not done(origin, tag, _) {
+        upsert done(origin, tag, i);
     }
     /// The items of the command to apply, by field. A request's items name distinct topics (two entries for one
     /// topic are refused by the broker a client asked), so each is decided against the metadata before the command.
@@ -312,10 +425,10 @@ at Broker {
         cmd_delete_item(origin, tag, slot, name, id), mtopic(name, tid, _, _), not cmd_delete_ids(origin, tag, tid)
             where id == zero_uuid();
     }
-    apply_delete: while cmd_delete_item(origin, tag, slot, name, id) {
+    apply_delete: while cmd_delete_item(origin, tag, slot, name, id), applying(i) {
         if cmd_delete(origin, tag, slot, tid), mtopic(n, tid, parts, cfg) {
             delete mtopic(n, tid, parts, cfg);
-            upsert mdeleted(tid);
+            upsert mdeleted(tid, i);
             upsert outcome(origin, tag, slot, NONE, tid, -1i64, n);
         }
         if not mtopic(_, id, _, _) where id != zero_uuid() {
@@ -390,11 +503,11 @@ at Broker {
 
     /// A deleted topic's partition data goes, here as everywhere (the topic is gone from the applied metadata, so
     /// no broker is a member of its groups any more).
-    forget_deleted: while mdeleted(tid), rlog(g, i, t, pt, k, pos, data), let (gt, _gp) = g where gt == tid {
+    forget_deleted: while mdeleted(tid, _), rlog(g, i, t, pt, k, pos, data), let (gt, _gp) = g where gt == tid {
         delete rlog(g, i, t, pt, k, pos, data);
     }
     /// Its Raft state goes too (topic ids are never reused, so the group never comes back).
-    view deleted_group(g) = mdeleted(tid), rterm(g, _), let (gt, _gp) = g where gt == tid;
+    view deleted_group(g) = mdeleted(tid, _), rterm(g, _), let (gt, _gp) = g where gt == tid;
     forget_deleted_raft: while deleted_group(g) {
         if rterm(g, t) {
             delete rterm(g, t);
@@ -440,18 +553,24 @@ at Broker {
     // ---- commands this broker waits on: sent when first wanted, and every `CMD_RESEND` until applied
 
     /// The commands this broker's requests wait on (`wanted_cmd`, defined with the requests) that are not applied.
-    view awaited(tag, cmd) = wanted_cmd(tag, cmd), my_id(me), not done(me, tag);
-    table cmd_sent(tag: u64) key(tag);
+    view awaited(tag, cmd) = wanted_cmd(tag, cmd), my_id(me), not done(me, tag, _);
+    table cmd_sent(tag: u64) key(tag) while awaited(tag, _);
+    /// The controller index applied when each awaited command was first wanted: its `made`, the same in every copy.
+    table cmd_made(tag: u64, made: u64) key(tag) while awaited(tag, _);
+    view made_of(tag, m) {
+        cmd_made(tag, m);
+        awaited(tag, _), not cmd_made(tag, _), applied_m(m);
+    }
+    pin_made: while awaited(tag, _), not cmd_made(tag, _), applied_m(a) {
+        upsert cmd_made(tag, a);
+    }
     timer cmd_resend every CMD_RESEND;
     view cmd_out(cmd) {
-        awaited(tag, cmd), not cmd_sent(tag);
-        cmd_resend, awaited(_, cmd);
+        awaited(tag, c), not cmd_sent(tag), made_of(tag, m), let Some(cmd) = stamped(c, m);
+        cmd_resend, awaited(tag, c), made_of(tag, m), let Some(cmd) = stamped(c, m);
     }
     mark_sent: while awaited(tag, _), not cmd_sent(tag) {
         upsert cmd_sent(tag);
-    }
-    forget_sent: while cmd_sent(tag), not awaited(tag, _) {
-        delete cmd_sent(tag);
     }
     forward: while cmd_out(cmd), known_leader(g, l), let g = controller() where l != self {
         send submit(cmd) to l;
@@ -470,7 +589,7 @@ at Broker {
         cmd_out(cmd);
     }
     view appendable_cmd(cmd) =
-        new_cmd(cmd), let Some(d) = decode_cmd(cmd), let origin = d.origin, let tag = d.tag, not done(origin, tag),
+        new_cmd(cmd), let Some(d) = decode_cmd(cmd), let origin = d.origin, let tag = d.tag, not done(origin, tag, _),
         not logged_cmd(origin, tag);
     view proposals(g, xs = collect!(x)) {
         appendable_cmd(cmd), ctl(g), leader(g, _), let x = (CMD, -1i64, Blob::of(cmd));
