@@ -404,7 +404,11 @@ fn children(e: &Expr) -> Vec<&Expr> {
                     .flat_map(|a| [&a.pat, &a.body].into_iter().chain(a.guard.as_ref())),
             )
             .collect(),
-        ExprKind::StructLit { fields, .. } => fields.iter().filter_map(|(_, v)| v.as_ref()).collect(),
+        ExprKind::StructLit { fields, base, .. } => fields
+            .iter()
+            .filter_map(|(_, v)| v.as_ref())
+            .chain(base.iter().map(|x| &**x))
+            .collect(),
         ExprKind::Block { lets, result } => lets
             .iter()
             .flat_map(|l| [&l.pat, &l.value])
@@ -684,9 +688,10 @@ fn substitute(e: &Expr, map: &BTreeMap<Symbol, &Expr>) -> Expr {
             then: Box::new(sub(then)),
             els: els.as_ref().map(|x| Box::new(sub(x))),
         },
-        ExprKind::StructLit { path, fields } => ExprKind::StructLit {
+        ExprKind::StructLit { path, fields, base } => ExprKind::StructLit {
             path: path.clone(),
             fields: fields.iter().map(|(n, v)| (*n, v.as_ref().map(sub))).collect(),
+            base: base.as_ref().map(|x| Box::new(sub(x))),
         },
         ExprKind::Closure { params, body } => {
             let inner = without(&params.iter().map(|p| p.name).collect::<Vec<_>>());
@@ -1556,6 +1561,7 @@ fn record(f: &FormatItem, fields: &[FormatField], env: &Env, diags: &mut Diagnos
         pos = next;
     }
     let lit = b.e(ExprKind::StructLit {
+        base: None,
         path: vec![f.name],
         fields: elems
             .iter()

@@ -138,8 +138,12 @@ fn mentioned_expr(e: &HExpr, out: &mut BTreeSet<HVarId>) {
         }
         HExprKind::Prefix { arg, .. } | HExprKind::Cast { expr: arg, .. } => mentioned_expr(arg, out),
         HExprKind::TupleIndex { base, .. } | HExprKind::Field { base, .. } => mentioned_expr(base, out),
-        HExprKind::Tuple(es) | HExprKind::Variant { fields: es, .. } | HExprKind::Struct { fields: es, .. } => {
+        HExprKind::Tuple(es) | HExprKind::Variant { fields: es, .. } => {
             es.iter().for_each(|x| mentioned_expr(x, out));
+        }
+        HExprKind::Struct { fields, base, .. } => {
+            fields.iter().for_each(|x| mentioned_expr(x, out));
+            base.iter().for_each(|x| mentioned_expr(x, out));
         }
         HExprKind::Builtin { args, .. }
         | HExprKind::Collection { elems: args, .. }

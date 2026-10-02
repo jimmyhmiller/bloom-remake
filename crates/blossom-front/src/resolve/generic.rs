@@ -497,9 +497,12 @@ fn children(kind: &mut HExprKind) -> Vec<&mut HExpr> {
         | HExprKind::Field { base: arg, .. }
         | HExprKind::Lift { expr: arg, .. }
         | HExprKind::Closure { body: arg, .. } => out.push(arg),
+        HExprKind::Struct { fields, base, .. } => {
+            out.extend(fields.iter_mut());
+            out.extend(base.iter_mut().map(|b| &mut **b));
+        }
         HExprKind::Tuple(es)
         | HExprKind::Variant { fields: es, .. }
-        | HExprKind::Struct { fields: es, .. }
         | HExprKind::Builtin { args: es, .. }
         | HExprKind::Lookup { key: es, .. }
         | HExprKind::Collection { elems: es, .. }

@@ -724,7 +724,8 @@ module (BLS0201). Editing a labelled body changes only that body's hashes; editi
   immutable; `m.insert(k, v)` returns a new map. Iteration order is canonical (LANG-118).
 - `Option<T>` with `Some(x)` and `None`. There is no null and no nil padding (CR-28).
 - `struct Name<T> { field: T, … }` and tuple structs `struct Name(A, B);`, with structural equality, the canonical
-  order of §5.5, field access `s.f` and struct literals `Name { f: e, g }` (with punning and `..base`).
+  order of §5.5, field access `s.f` and struct literals `Name { f: e, g }` (with punning and `..base`: last, of the
+  struct's type, evaluated once, it gives the fields not written).
 - `enum Name<T> { A, B(T), C { f: T } }`. Every enum that reaches a channel, a durable relation or an interface must
   have exactly one variant marked `#[unknown]` (BLS0308): a value from a newer program version decodes to it,
   keeps its bytes, and is re-encoded unchanged (LANG-261). Variants are encoded by stable number (`#n`), never by
