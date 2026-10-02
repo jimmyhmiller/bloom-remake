@@ -154,7 +154,8 @@ impl<'a> SpecSim<'a> {
         )
     }
 
-    /// Every event of `node` at `tick`: its scheduled inputs, the runtime's (`boot`, timers) and its node statics.
+    /// Every event of `node` at `tick`: its scheduled inputs, the runtime's (`boot`, timers) and its node statics. A
+    /// guarded timer's firings are not here: they depend on the node's previous round, and `run` makes them.
     pub fn events(&self, node: NodeId, tick: Tick) -> Result<Vec<(RelId, Row)>, SimError> {
         let mut events: Vec<(RelId, Row)> = self
             .artifact
@@ -293,6 +294,14 @@ impl<'a> SpecSim<'a> {
         carried: &Instance,
         delivered: &[blossom_oracle::Delivery],
     ) -> Result<blossom_oracle::TickOutput, SimError> {
+        // A guarded timer's firings depend on the node's previous round, which this one-round step does not see.
+        if self.runtime.has_guarded() {
+            return Err(blossom_base::unimplemented_error!(
+                "LANG-172",
+                "stepping a program with a guarded timer one round at a time (`SpecSim::step`)"
+            )
+            .into());
+        }
         let events = self.events(node, tick)?;
         let ingress = self.ingress(node, tick);
         self.protocol

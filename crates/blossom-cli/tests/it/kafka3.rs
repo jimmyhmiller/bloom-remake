@@ -707,6 +707,12 @@ fn three_brokers_keep_every_acknowledged_record_under_kill_9_and_partitions() {
     for (i, b) in before.iter().enumerate() {
         let ticks = cluster.ticks(i) - b;
         assert!(ticks < 1_250, "broker {} ticked {ticks} times in 5 s idle", i + 1);
+        // And it is alive, its stats fresh: `raft_heartbeat` alone ticks it 20 times a second.
+        assert!(ticks >= 80, "broker {} ticked only {ticks} times in 5 s idle", i + 1);
+    }
+    for (i, p) in cluster.procs.iter_mut().enumerate() {
+        let p = p.as_mut().expect("every broker runs");
+        assert!(p.try_wait().unwrap().is_none(), "broker {} exited", i + 1);
     }
 }
 

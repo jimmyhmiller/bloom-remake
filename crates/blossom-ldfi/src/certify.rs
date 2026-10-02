@@ -88,6 +88,17 @@ pub fn exhaustive(
     workers: usize,
     max_states: u64,
 ) -> Result<Certification, LdfiError> {
+    // Its rounds are stepped one at a time, which a guarded timer's firings (they depend on the round before) do not
+    // allow (`SpecSim::step` refuses too; LDFI's search refuses such programs first).
+    if sim.artifact().protocol.get().rels.iter().any(|r| {
+        matches!(&r.class, blossom_ir::core::RelClass::Event(blossom_ir::core::EventSource::Timer(t)) if t.guard.is_some())
+    }) {
+        return Err(blossom_base::unimplemented_error!(
+            "LANG-172",
+            "exhaustive certification of a program with a guarded timer"
+        )
+        .into());
+    }
     if sim.artifact().halt.is_some() {
         return Err(blossom_base::unimplemented_error!(
             "TEST-029",

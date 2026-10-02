@@ -168,10 +168,14 @@ at Broker {
     /// Leader state per follower: the highest index it acknowledged, and the highest index sent to it.
     table match_idx(g: Group, f: Node<Broker>, i: u64) key(g, f) resolve choose_most(i);
     table rsent(g: Group, f: Node<Broker>, i: u64) key(g, f) resolve choose_most(i);
-    /// Checks election deadlines, only while one is armed for a group this broker does not lead (`timed_out`).
+    /// Checks election deadlines, only while one is armed for a group this broker does not lead (`timed_out`). The
+    /// guard reads the recorded term and wins (carried state; a term a message raises is recorded, which stages a
+    /// tick that checks the guard again).
     timer raft_poll every RAFT_POLL while election_armed;
+    /// Also the node's regular wake-up: the deadlines of requests (produce, topic and reassignment timeouts,
+    /// `PID_WAIT`, `NOT_CAUGHT_UP_WAIT`) and of in-sync replicas are noticed at its ticks, so it stays unguarded.
     timer raft_heartbeat every RAFT_HEARTBEAT;
-    view election_armed() = eff(g, t), mine(g), deadline(g, _d), not leader(g, t);
+    view election_armed() = rterm(g, t), mine(g), deadline(g, _d), not won(g, t);
 
     // ---- membership
     /// Each configuration in a group's log, by index.

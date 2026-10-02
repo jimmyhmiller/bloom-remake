@@ -717,8 +717,9 @@ impl<'t, 'd> Resolver<'t, 'd> {
         let has_roles = self.scope(s).has_roles;
         self.declare(s, items, placement, has_roles, false);
         self.acls(s, items);
-        self.timer_guards(s, items);
         self.imports(s, items, placement);
+        // After the imports, so a guard can name an instance's member (and be told it is not a view or table).
+        self.timer_guards(s, items);
         self.functions(s, items);
         self.rules(s, items, placement);
         self.check_prefer(s);

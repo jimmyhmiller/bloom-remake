@@ -1,5 +1,6 @@
 //! A format's generated functions are bounded by their input, so they are not metered (LANGUAGE §16.1): a value of
-//! more items than the step budget allows decodes. A metered function a format calls keeps its own budget.
+//! more items than the step budget allows decodes. The metered functions a format calls spend from one budget for
+//! the whole evaluation (once per item adds up).
 program budget version 1;
 
 format Big { xs: array(uvarint, 0, u8) }
@@ -10,8 +11,14 @@ fn counts(n: u64) -> bool {
 }
 format Checked(n: u64) { constant(u8, 1u8) if counts(n), tail: rest }
 
+/// A metered condition per item.
+format Each(n: u64) { tag: u8, v: u8 if counts(n) = 0u8 }
+format Many(n: u64) { xs: array(uvarint, 0, Each(n)) }
+
 input msg(k: u64, b: Bytes);
+input many(k: u64, n: u64, b: Bytes);
 input cond(k: u64, n: u64, b: Bytes);
 
 view big(k, n) = msg(k, b), let Some((r, _e)) = Big::decode(b, 0), let n = r.xs.len();
 view checked(k, t) = cond(k, n, b), let Some((r, _e)) = Checked::decode(b, 0, n), let t = r.tail.len();
+view per_item(k, c) = many(k, n, b), let Some((r, _e)) = Many::decode(b, 0, n), let c = r.xs.len();

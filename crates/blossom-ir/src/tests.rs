@@ -864,7 +864,7 @@ fn assert_digest_permutation(flags: [bool; 15]) {
                 params: vec![],
                 ret: u,
                 vars: IndexVec::new(),
-            body: FnBody::Builtin(BuiltinFn::Rand),
+                body: FnBody::Builtin(BuiltinFn::Rand),
                 props: props.clone(),
             })
             .unwrap();
@@ -1356,4 +1356,36 @@ fn plan_digest_changes_with_profile() {
     b.profile = PlanProfile::Literal;
     assert_ne!(a, b.digest().unwrap());
     assert_eq!(a, plan.digest().unwrap());
+}
+#[test]
+fn validator_checks_a_timer_guard() {
+    let timer = |guard: u32| {
+        let mut p = good();
+        let ty = p.rels.get(RelId::from_raw(0)).unwrap().schema.cols[0].ty;
+        let class = RelClass::Event(EventSource::Timer(TimerDecl {
+            clock: TimerClock::Physical,
+            every: Some(blossom_value::time::Duration::from_nanos(1_000)),
+            ticks: None,
+            times: None,
+            once_after: None,
+            once: false,
+            guard: Some(RelId::from_raw(guard)),
+        }));
+        p.rels.push(rel(2, "t", ty, class)).unwrap();
+        p
+    };
+    let refused = |p: Program| {
+        crate::validate::validate(&p)
+            .iter()
+            .any(|e| e.invariant() == Some(8) && e.to_string().contains("timer's guard"))
+    };
+    // A derived relation, or a static, is a guard.
+    assert!(!refused(timer(0)));
+    assert!(!refused(timer(1)));
+    // An event (the timer itself) is not.
+    assert!(refused(timer(2)));
+    // Nor a relation placed at another role than the timer.
+    let mut other = timer(0);
+    other.rels.get_mut(RelId::from_raw(0)).unwrap().placement = Placement::Role(RoleId::from_raw(0));
+    assert!(refused(other));
 }

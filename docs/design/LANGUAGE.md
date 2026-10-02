@@ -2537,8 +2537,10 @@ probe(N, T) :- probe$left(1), N := $tick / 5, T := $now.
 A logical timer keeps the node ticking (its counter is a staged change, SEM-009), so it is meant for simulation and
 LDFI; a deployed program that uses one gets BLS1006.
 
-**Guarded timers** (`every d while G`, HD item 4). `G` is a view or table placed where the timer is (BLS0412; an
-unknown name is BLS0200). The timer fires only while `G` held at the end of the node's latest tick, i.e. `G`'s
+**Guarded timers** (`every d while G`, HD item 4). `G` is a view or table placed where the timer is, and depends on
+carried state only: tables, statics and views of them, with no event, input, message, stream, `now()`, `tick()` or
+`rand` anywhere beneath it (BLS0412; an unknown name is BLS0200). (A guard that held at the end of a tick and would
+be false at the next without the state changing could not be noticed by a node that is asleep.) The timer fires only while `G` held at the end of the node's latest tick, i.e. `G`'s
 contents in that tick (so `upsert` makes it hold from the next tick). While `G` is empty the timer is dormant: it is
 never due, and it wakes the node for nothing, so a node whose guards are all empty sleeps until a message, input or
 other timer arrives. When a tick ends with `G` holding, the timer fires again from its first firing after that tick:
@@ -2577,8 +2579,11 @@ located hard error (BLSR010): it is how a function refuses an impossible input, 
 enforced by a step budget: an evaluation, from a call made outside any function to its return, may apply closures
 and build `range` elements at most `FN_STEP_BUDGET` (10⁷) times in all; past it the tick aborts with BLSR012, the
 same in both evaluators. A format's generated functions (§16.7) are not metered: every loop in them is bounded by the
-bytes left (or by the value encoded), so they terminate without a budget, and a value of any size in a frame decodes;
-a metered function they call (a condition's) starts a budget of its own. Evaluation depth is bounded too: since functions do not recurse, the deepest evaluation a
+bytes left (or by the value encoded), so they terminate without a budget, and a value of any size in a frame decodes.
+The program's own expressions in a format (element arguments, conditions, defaults) take no closure and no `range`
+(BLS0301), so each is evaluated in time bounded by its size and the values it reads; a function they call is
+metered, and every metered call of one evaluation spends from its one budget, however deep and however many times
+(a condition's call per array item adds up). Evaluation depth is bounded too: since functions do not recurse, the deepest evaluation a
 program can make (an expression's nesting, plus the bodies of the functions it calls and the closures a combinator
 applies, plus one level per literal of the rule it is in) is computed at compile time, and a program deeper than
 `MAX_EVAL_DEPTH` (1024 levels) is BLS0217, so no evaluation can overflow the stack a tick runs on. An expression
@@ -2705,7 +2710,9 @@ fn MetadataRequest::encode(x: MetadataRequest, version: i16) -> Bytes
 Decoding reads the value at `p` and returns it with the position after it, or `None` when the bytes run out or
 break the layout — never a runtime error on the bytes: a length or count read from the bytes is checked against the
 bytes left before anything uses it, and the generated functions are bounded by their input instead of the step
-budget (§16.1), so a well-formed value of any size decodes in time linear in its bytes. Encoding fails the tick when a value does not fit the layout:
+budget (§16.1), so a well-formed value of any size decodes in time linear in its bytes (the program's expressions in
+the format take no closure and no `range`, BLS0301, and the functions they call spend from the evaluation's one step
+budget). Encoding fails the tick when a value does not fit the layout:
 a length beyond its prefix's type (BLSR004), a `bytes(n)` value of another size (BLSR010). `decode(encode(x))` is
 `Some((x, end))` for every value whose absent conditional fields hold their defaults; the rules that make it so are
 checked: `rest` and `utf8` (and a tuple or record ending in one) come last, an array's items take at least one byte

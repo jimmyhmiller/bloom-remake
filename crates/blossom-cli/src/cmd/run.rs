@@ -98,7 +98,9 @@ pub fn param_binding(v: &blossom_runtime::deploy::ParamValue) -> blossom_front::
 /// Writes `stats` to `path` every second, for the life of the process: to a temporary file, renamed over `path`, so
 /// a reader sees a whole snapshot. A failed write is reported once and the writer stops (the node runs on).
 fn write_stats(path: &std::path::Path, stats: &blossom_runtime::server::Stats) {
-    let tmp = path.with_extension("tmp");
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
     loop {
         let text: String = stats
             .snapshot()

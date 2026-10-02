@@ -277,6 +277,13 @@ fn a_timer_guard_must_be_a_known_view_or_table_where_the_timer_is() {
     assert_eq!(codes("timer", timer, &one), vec!["BLS0412"]);
     let unknown = "program g version 1;\ntimer t every 1s while nowhere;\n";
     assert_eq!(codes("unknown", unknown, &one), vec!["BLS0200"]);
+    // A guard depends on carried state only: a view of an event, or of the clock, is BLS0412 (the node sees it only
+    // when it ticks, so it and the synchronous world would fire differently).
+    let flash = "program g version 1;\ninput poke(n: u64);\ntimer t every 1s while flash;\nview flash() = poke(_n);\n";
+    assert_eq!(codes("flash", flash, &one), vec!["BLS0412"]);
+    let clock = "program g version 1;\ntable since(at: Instant) key();\ntimer t every 1s while late;\n\
+                 view late() = since(at) where now() > at;\n";
+    assert_eq!(codes("clock", clock, &one), vec!["BLS0412"]);
     let roles = "program g version 1;\nrole A;\nrole B;\nat A {\n    timer t every 1s while there;\n}\nat B {\n    \
                  table there(n: u64) key();\n}\n";
     assert_eq!(
@@ -335,9 +342,18 @@ spec Got for Pinger {
     let fs =
         blossom_ldfi::FailureSpec::new(faults.eot, faults.eff, faults.crashes, artifact.nodes.len() as u32).unwrap();
     let sim = blossom_sim::spec::SpecSim::new(&artifact).unwrap();
-    let Err(err) = blossom_ldfi::run(&sim, &blossom_ldfi::LdfiConfig::new(fs)) else {
+    let Err(err) = blossom_ldfi::run(&sim, &blossom_ldfi::LdfiConfig::new(fs.clone())) else {
         panic!("LDFI ran over a guarded timer");
     };
     let text = err.to_string();
     assert!(text.contains("LANG-172") && text.contains("guarded timer"), "{text}");
+    // Exhaustive certification and the one-round step refuse too (they would not fire it).
+    let Err(err) = blossom_ldfi::certify::exhaustive(&sim, &fs, &Default::default(), 1, 1_000) else {
+        panic!("exhaustive certification ran over a guarded timer");
+    };
+    assert!(err.to_string().contains("LANG-172"), "{err}");
+    let Err(err) = sim.step(blossom_value::time::NodeId(0), Tick(1), &Default::default(), &[]) else {
+        panic!("a one-round step ran over a guarded timer");
+    };
+    assert!(err.to_string().contains("LANG-172"), "{err}");
 }

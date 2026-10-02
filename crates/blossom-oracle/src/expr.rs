@@ -40,39 +40,35 @@ impl Scope<'_> {
     }
 }
 
-/// The step budget of the function evaluation in progress: how many calls are open, the steps the outermost metered
-/// one has left (`FN_STEP_BUDGET` at its start), and whether the innermost open call is unmetered (a format's
-/// generated functions, which are bounded by their input, LANGUAGE §16.1). A metered call inside an unmetered one
-/// starts a budget of its own. One step per closure application and per element of a `range` built as a vector.
+/// The step budget of the function evaluation in progress: how many calls are open, the steps it has left
+/// (`FN_STEP_BUDGET` when the outermost call starts), and whether the innermost open call is unmetered (a format's
+/// generated functions, which are bounded by their input, LANGUAGE §16.1). Unmetered calls spend nothing; every
+/// metered one, however deep and whatever it is inside, spends from the one budget. One step per closure application
+/// and per element of a `range` built as a vector.
 #[derive(Default)]
 pub(crate) struct Fuel(std::cell::Cell<(u32, u64, bool)>);
 
-/// What a call saved of the budget, to restore when it returns.
+/// Whether the call a call was made from was unmetered, restored when it returns.
 #[derive(Clone, Copy)]
-pub(crate) struct Saved(u64, bool);
+pub(crate) struct Saved(bool);
 
 impl Fuel {
-    /// Enters a call of a pure function: the outermost metered call, or one inside an unmetered call, starts a fresh
-    /// budget.
+    /// Enters a call of a pure function: the outermost call starts the budget.
     pub(crate) fn enter(&self, metered: bool) -> Saved {
         let (depth, left, free) = self.0.get();
-        let saved = Saved(left, free);
-        let (left, free) = if !metered {
-            (left, true)
-        } else if depth == 0 || free {
-            (blossom_ir::core::FN_STEP_BUDGET, false)
+        let left = if depth == 0 {
+            blossom_ir::core::FN_STEP_BUDGET
         } else {
-            (left, false)
+            left
         };
-        self.0.set((depth.saturating_add(1), left, free));
-        saved
+        self.0.set((depth.saturating_add(1), left, !metered));
+        Saved(free)
     }
 
-    /// Leaves a call: after a call inside an unmetered one, the outer budget is as it was.
+    /// Leaves a call (what it spent stays spent).
     pub(crate) fn exit(&self, saved: Saved) {
         let (depth, left, _free) = self.0.get();
-        let left = if saved.1 { saved.0 } else { left };
-        self.0.set((depth.saturating_sub(1), left, saved.1));
+        self.0.set((depth.saturating_sub(1), left, saved.0));
     }
 
     /// Spends `n` steps: outside any function a single `range` has the whole budget to itself.
@@ -94,7 +90,7 @@ impl Fuel {
                 Ok(())
             }
             None => Err(ExprError::Budget(format!(
-                "a function evaluation exceeds its step budget of {} (closure applications and range elements)",
+                "a function evaluation exceeds its step budget of {} steps",
                 blossom_ir::core::FN_STEP_BUDGET
             ))),
         }
