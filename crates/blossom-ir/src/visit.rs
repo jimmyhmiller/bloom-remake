@@ -550,6 +550,7 @@ impl Remap for TimerDecl {
             times: self.times.remap(m),
             once_after: self.once_after.remap(m),
             once: self.once.remap(m),
+            guard: self.guard.remap(m),
         }
     }
 }

@@ -438,10 +438,12 @@ impl Cx<'_> {
                     })
                     .collect();
                 let exprs = expr_children(node).map(|e| self.expr(&e)).collect();
+                let guard = child_of(node, RELPATH).map(|r| self.names(&r));
                 ItemKind::Timer(TimerDecl {
                     name,
                     words,
                     exprs,
+                    guard,
                     span,
                 })
             }

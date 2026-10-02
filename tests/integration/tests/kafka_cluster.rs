@@ -1063,15 +1063,18 @@ impl Admin {
             }
             for t in &r.topics {
                 for p in &t.partitions {
-                    let want: Vec<i32> = self.waves[self.wave]
+                    // A replica being added is in a target asked for: this wave's, or (from a broker whose metadata
+                    // lags the controller, as Kafka's may) an earlier wave's still in progress there.
+                    let want: Vec<i32> = self.waves[..=self.wave]
                         .iter()
-                        .find(|x| x.0 == p.partition_index)
-                        .map(|x| x.1.clone())
-                        .unwrap_or_default();
+                        .flatten()
+                        .filter(|x| x.0 == p.partition_index)
+                        .flat_map(|x| x.1.iter().copied())
+                        .collect();
                     let adding: Vec<i32> = p.adding_replicas.iter().map(|b| b.0).collect();
                     if !adding.iter().all(|b| want.contains(b)) {
                         return Err(format!(
-                            "partition {} adds {adding:?}, not in its target {want:?}",
+                            "partition {} adds {adding:?}, in no target asked for {want:?}",
                             p.partition_index
                         ));
                     }

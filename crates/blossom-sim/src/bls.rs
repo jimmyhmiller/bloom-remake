@@ -33,6 +33,8 @@ pub struct BlsSim<'a> {
     oracle: Oracle,
     /// Physical timers: relation, period, and the role they are placed at.
     timers: Vec<(RelId, Duration, Option<RoleId>)>,
+    /// Guarded timers (`every d while G`): relation, period, role and guard; the round loop fires them.
+    guarded: Vec<(RelId, Duration, Option<RoleId>, RelId)>,
     boot: Option<RelId>,
 }
 
@@ -40,7 +42,11 @@ impl<'a> BlsSim<'a> {
     /// Prepares the program (stratifies it and plans every rule) for a run seeded with `seed` (SEM-084). The
     /// program may declare no host functions; [`BlsSim::with_externs`] binds them.
     pub fn new(artifact: &'a BlsArtifact, seed: blossom_value::Seed) -> Result<BlsSim<'a>, SimError> {
-        BlsSim::with_externs(artifact, seed, std::sync::Arc::new(blossom_value::ExternRegistry::new()))
+        BlsSim::with_externs(
+            artifact,
+            seed,
+            std::sync::Arc::new(blossom_value::ExternRegistry::new()),
+        )
     }
 
     /// [`BlsSim::new`] with the host functions the program's `extern fn`s call.
@@ -53,9 +59,18 @@ impl<'a> BlsSim<'a> {
             .map_err(SimError::Load)?
             .with_roles(artifact.roles.clone())
             .with_seed(seed)
-            .and_then(|o| o.with_node_names(artifact.nodes.iter().map(|n| std::sync::Arc::from(n.as_str())).collect()))
+            .and_then(|o| {
+                o.with_node_names(
+                    artifact
+                        .nodes
+                        .iter()
+                        .map(|n| std::sync::Arc::from(n.as_str()))
+                        .collect(),
+                )
+            })
             .map_err(SimError::Load)?;
         let mut timers = Vec::new();
+        let mut guarded = Vec::new();
         for (id, r) in artifact.program.get().rels.iter_enumerated() {
             if let RelClass::Event(EventSource::Timer(t)) = &r.class {
                 let Some(every) = t.every else {
@@ -76,13 +91,17 @@ impl<'a> BlsSim<'a> {
                     Placement::Role(role) => Some(role),
                     Placement::Shared => None,
                 };
-                timers.push((id, every, role));
+                match t.guard {
+                    Some(g) => guarded.push((id, every, role, g)),
+                    None => timers.push((id, every, role)),
+                }
             }
         }
         Ok(BlsSim {
             artifact,
             oracle,
             timers,
+            guarded,
             boot: artifact.boot(),
         })
     }
@@ -133,6 +152,7 @@ impl<'a> BlsSim<'a> {
                 round,
                 capture,
                 halt: self.artifact.halt,
+                guarded: crate::runtime::guarded_timers(&self.guarded, &self.artifact.roles)?,
             },
             faults,
         )

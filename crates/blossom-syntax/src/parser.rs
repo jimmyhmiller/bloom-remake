@@ -778,6 +778,10 @@ impl Parser<'_> {
                     self.expr(0);
                 }
             }
+            // `while G`: the timer fires only while the relation `G` holds (LANGUAGE §15.2).
+            if self.eat(WHILE_KW) {
+                self.relpath();
+            }
             self.expect(SEMI);
             return TIMERDECL;
         }

@@ -1210,7 +1210,8 @@ used as an expression is `clock[]`, ⊥ until something is merged in (LANG-280).
 
 ### 7.14 Timers (LANG-172, LANG-173)
 
-`timer beat every 1s;` declares an event relation `beat(count: u64, at: Instant)`; §15.2.
+`timer beat every 1s;` declares an event relation `beat(count: u64, at: Instant)`; `timer wake every 10ms while
+waiting;` fires only while the view or table `waiting` holds (§15.2).
 
 ### 7.15 Built-in relations (LANG-046, LANG-051, LANG-052, LANG-202, LANG-240, LANG-243)
 
@@ -2518,6 +2519,7 @@ timer lease every 500ms times 20;     // stops after 20 firings
 timer probe every 5 ticks;            // logical: counts local ticks
 timer kick once after 300ms;          // one-shot
 timer start once;                     // fires in the first tick of each incarnation
+timer wake every 10ms while waiting;  // physical, only while `waiting` holds
 ```
 
 A timer is an event relation `name(count: u64, at: Instant)`: the firing number and the firing time. Physical
@@ -2534,6 +2536,19 @@ probe(N, T) :- probe$left(1), N := $tick / 5, T := $now.
 
 A logical timer keeps the node ticking (its counter is a staged change, SEM-009), so it is meant for simulation and
 LDFI; a deployed program that uses one gets BLS1006.
+
+**Guarded timers** (`every d while G`, HD item 4). `G` is a view or table placed where the timer is (BLS0412; an
+unknown name is BLS0200). The timer fires only while `G` held at the end of the node's latest tick, i.e. `G`'s
+contents in that tick (so `upsert` makes it hold from the next tick). While `G` is empty the timer is dormant: it is
+never due, and it wakes the node for nothing, so a node whose guards are all empty sleeps until a message, input or
+other timer arrives. When a tick ends with `G` holding, the timer fires again from its first firing after that tick:
+the firings it missed are skipped, not delivered late, and `count` still says where on the boot timeline a firing
+is. Before the first tick every guarded timer is dormant (the boot tick decides). In the synchronous world a guarded
+timer delivers a round's firings iff `G` held at the end of the node's previous round. A polling timer that only
+matters while something waits (a request's deadline) is the use: `timer fetch_wake every 10ms while fetch_waiting;`.
+LDFI refuses a program with a guarded timer (LANG-172): its firings depend on state that faults can change, which
+the hazard encoding does not model yet. IR: `TimerDecl.guard`; the node observes `G` after each tick, as it does
+`halt`.
 
 ### 15.3 When ticks happen (SEM-009, ODD-04 (c))
 
@@ -3048,6 +3063,7 @@ never truncated or defaulted).
 | BLS0409 | E | `else` after a condition that is not a single scalar guard |
 | BLS0410 | E | `delete`/`upsert` on a lattice-valued relation (LANG-284) |
 | BLS0411 | E | `resolve prefer(…)` naming no handler, one twice, or one that does not write the table with `next` or `upsert` (§10.7) |
+| BLS0412 | E | a timer's `while` guard that is not a view or table placed where the timer is (§15.2) |
 
 **Rules, time and stratification (BLS05xx)**
 

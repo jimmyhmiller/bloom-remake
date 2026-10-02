@@ -413,12 +413,20 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 HRelKind::Input { root: true } => "a host input",
                 _ => continue,
             };
-            if rel
-                .cols
-                .iter()
-                .any(|c| c.ty.is_some_and(|t| holds(&self.hir.types, t, &|d| matches!(d, TypeDef::Blob), &mut BTreeSet::new())))
-            {
-                blobs.push((rel.span, format!("a `Blob` in {what} (`{}`): blobs do not leave their node", rel.name)));
+            if rel.cols.iter().any(|c| {
+                c.ty.is_some_and(|t| {
+                    holds(
+                        &self.hir.types,
+                        t,
+                        &|d| matches!(d, TypeDef::Blob),
+                        &mut BTreeSet::new(),
+                    )
+                })
+            }) {
+                blobs.push((
+                    rel.span,
+                    format!("a `Blob` in {what} (`{}`): blobs do not leave their node", rel.name),
+                ));
             }
         }
         for (span, what) in blobs {
@@ -709,6 +717,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
         let has_roles = self.scope(s).has_roles;
         self.declare(s, items, placement, has_roles, false);
         self.acls(s, items);
+        self.timer_guards(s, items);
         self.imports(s, items, placement);
         self.functions(s, items);
         self.rules(s, items, placement);
@@ -908,6 +917,62 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 }
                 ItemKind::Interpose(_) => {
                     // Declared in `imports`, once the instance exists.
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Pass 2b: the `while` guards of the timers declared in `items` (LANGUAGE §15.2), once every relation of the
+    /// scope is known: a view or table placed where the timer is (the node observes it after each tick).
+    fn timer_guards(&mut self, s: ScopeIdx, items: &'t [ast::Item]) {
+        for item in items {
+            match &item.kind {
+                ItemKind::At { items: inner, .. } => self.timer_guards(s, inner),
+                ItemKind::Timer(t) => {
+                    let Some(path) = &t.guard else { continue };
+                    // A timer that failed to declare was reported.
+                    let Some(timer) = self.scope(s).rels.get(&t.name.name).copied() else {
+                        continue;
+                    };
+                    let span = path.last().map_or(t.span, |i| i.span);
+                    let Some(g) = self.lookup_rel(s, path) else {
+                        let name: Vec<&str> = path.iter().map(Ident::as_str).collect();
+                        self.error(
+                            code!("BLS0200"),
+                            span,
+                            format!("unknown relation `{}` in the timer's `while` guard", name.join(".")),
+                        );
+                        continue;
+                    };
+                    // Both were declared (`lookup_rel` and the scope only hold declared relations).
+                    let (Some((gk, grole)), Some(trole)) = (
+                        self.hir.rels.get(g.index()).map(|r| (r.kind.clone(), r.role)),
+                        self.hir.rels.get(timer.index()).map(|r| r.role),
+                    ) else {
+                        continue;
+                    };
+                    if !matches!(gk, HRelKind::View | HRelKind::Table) {
+                        self.error(
+                            code!("BLS0412"),
+                            span,
+                            "a timer's `while` guard must be a view or a table (the node checks it after each tick)",
+                        );
+                        continue;
+                    }
+                    if grole.is_some() && grole != trole {
+                        self.error(
+                            code!("BLS0412"),
+                            span,
+                            "a timer's `while` guard must be placed at the timer's role",
+                        );
+                        continue;
+                    }
+                    if let Some(HRelKind::Timer { guard, .. }) =
+                        self.hir.rels.get_mut(timer.index()).map(|r| &mut r.kind)
+                    {
+                        *guard = Some(g);
+                    }
                 }
                 _ => {}
             }
@@ -1358,7 +1423,8 @@ impl<'t, 'd> Resolver<'t, 'd> {
         let instant = self.intern_type(TypeDef::Instant, t.span);
         Some(self.add_rel(HRel {
             name: self.qual(s, t.name.name),
-            kind: HRelKind::Timer { every },
+            // A `while` guard is resolved once every relation of the scope is known (`timer_guards`).
+            kind: HRelKind::Timer { every, guard: None },
             cols: vec![
                 HCol {
                     name: Symbol::intern("count"),

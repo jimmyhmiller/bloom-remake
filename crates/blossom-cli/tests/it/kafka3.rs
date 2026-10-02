@@ -207,7 +207,8 @@ impl Cluster {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_blossom"));
         cmd.args(["run", "--deploy"])
             .arg(&self.deploy)
-            .args(["--node", &self.names[i], "--insecure-dev"]);
+            .args(["--node", &self.names[i], "--insecure-dev", "--stats"])
+            .arg(self.stats_path(i));
         if fresh {
             cmd.arg("--init-fresh");
         }
@@ -218,6 +219,21 @@ impl Cluster {
             .unwrap();
         assert!(line.contains("ready"), "{} did not come up: {line:?}", self.names[i]);
         self.procs[i] = Some(child);
+    }
+
+    /// Where broker `i` writes its counters (`blossom run --stats`).
+    fn stats_path(&self, i: usize) -> PathBuf {
+        self.dir.join(format!("{}.stats", self.names[i]))
+    }
+
+    /// Broker `i`'s tick count, as its stats file last said (it rewrites the file every second).
+    fn ticks(&self, i: usize) -> u64 {
+        let text = std::fs::read_to_string(self.stats_path(i)).unwrap();
+        text.lines()
+            .find_map(|l| l.strip_prefix("ticks "))
+            .unwrap_or_else(|| panic!("no tick count in {text:?}"))
+            .parse()
+            .unwrap()
     }
 
     fn kill(&mut self, i: usize) {
@@ -250,25 +266,6 @@ impl Drop for Cluster {
         }
         let _ = std::fs::remove_dir_all(&self.dir);
     }
-}
-
-/// A broker process's CPU time so far, in seconds (`ps`'s `[[dd-]hh:]mm:ss.ss`).
-#[cfg(test)]
-fn cpu_seconds(cluster: &Cluster, i: usize) -> f64 {
-    let pid = cluster.procs[i].as_ref().expect("the broker is running").id();
-    let out = Command::new("ps")
-        .args(["-o", "time=", "-p", &pid.to_string()])
-        .output()
-        .unwrap();
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    let (days, rest) = match text.split_once('-') {
-        Some((d, r)) => (d.parse::<f64>().unwrap(), r.to_owned()),
-        None => (0.0, text.clone()),
-    };
-    let secs = rest.split(':').fold(0.0, |acc, part| {
-        acc * 60.0 + part.parse::<f64>().unwrap_or_else(|_| panic!("ps said {text:?}"))
-    });
-    days * 86_400.0 + secs
 }
 
 #[cfg(test)]
@@ -695,14 +692,21 @@ fn three_brokers_keep_every_acknowledged_record_under_kill_9_and_partitions() {
         std::thread::sleep(Duration::from_secs(2));
     }
     assert_eq!(kills, 7);
-    // Idle, a broker sleeps between its timers: none spins (a leader once rewrote a follower's caught-up time with
-    // the clock at every tick, so it was always ready and used a whole core).
-    std::thread::sleep(Duration::from_secs(1));
-    let before: Vec<f64> = (0..3).map(|i| cpu_seconds(&cluster, i)).collect();
-    std::thread::sleep(Duration::from_secs(4));
+    // Idle, a broker ticks only for its timers and its peers' messages: none spins (a leader once rewrote a
+    // follower's caught-up time with the clock at every tick, so it was always ready and used a whole core).
+    //
+    // Counted in ticks, which machine load does not change (CPU time did: HD item 4). An idle broker here ticks about
+    // 155 times a second: `raft_poll` (50/s, while it follows a group), `raft_heartbeat` (20/s), and its two peers'
+    // heartbeats, acknowledgements and leadership announcements with the tick each one stages. The stats files are
+    // rewritten every second, so the 5 s between the reads count 4 to 6 s of ticks: under 1 000. A broker that spins
+    // ticks as fast as it computes, about 400 times a second in a debug build: over 2 000. (Under a heavily loaded
+    // machine a spinning broker may tick less and pass; an idle one never fails.)
+    std::thread::sleep(Duration::from_secs(2));
+    let before: Vec<u64> = (0..3).map(|i| cluster.ticks(i)).collect();
+    std::thread::sleep(Duration::from_secs(5));
     for (i, b) in before.iter().enumerate() {
-        let used = cpu_seconds(&cluster, i) - b;
-        assert!(used < 2.0, "broker {} used {used:.2} s of CPU in 4 s idle", i + 1);
+        let ticks = cluster.ticks(i) - b;
+        assert!(ticks < 1_250, "broker {} ticked {ticks} times in 5 s idle", i + 1);
     }
 }
 

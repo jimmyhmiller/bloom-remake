@@ -5,7 +5,13 @@
 //! the simulator's rule with the boot instant as the origin, so a program behaves the same on the network and in the
 //! synchronous world. A timer placed at a role fires only on that role's nodes. Each incarnation starts counting
 //! from 0 at its own boot.
+//!
+//! A guarded timer (`every d while G`) is dormant while `G` was empty at the end of the node's latest tick: it is not
+//! due and wakes the node for nothing. When a tick ends with `G` holding, it fires again from its first firing after
+//! that tick (the firings it missed are skipped, not delivered late), so its count still says where on the boot
+//! timeline a firing is. Before the first tick every guarded timer is dormant (the boot tick decides).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use blossom_base::{RelId, RoleId, internal_error};
@@ -23,6 +29,15 @@ struct Timer {
     period: i64,
     /// The next firing's count.
     next: u64,
+    /// `while G`: the guard, and whether it held at the end of the latest tick.
+    guard: Option<RelId>,
+    held: bool,
+}
+
+impl Timer {
+    fn active(&self) -> bool {
+        self.guard.is_none() || self.held
+    }
 }
 
 /// The node's physical timers.
@@ -64,15 +79,42 @@ impl TimerTable {
                 rel: id,
                 period,
                 next: 0,
+                guard: t.guard,
+                held: false,
             });
         }
         Ok(TimerTable { boot, timers })
     }
 
-    /// The earliest instant a timer is due.
+    /// The guards the node must observe at the end of each tick (`observe`).
+    pub fn guards(&self) -> impl Iterator<Item = RelId> + '_ {
+        self.timers.iter().filter_map(|t| t.guard)
+    }
+
+    /// Records, after a tick at `now`, whether each guard holds (`observed` has every guard's final rows). A guard
+    /// that comes to hold resumes its timer at its first firing after `now`.
+    pub fn observe(&mut self, now: Instant, observed: &BTreeMap<RelId, Vec<Row>>) -> Result<(), NodeError> {
+        let boot = self.boot;
+        for t in &mut self.timers {
+            let Some(g) = t.guard else { continue };
+            let holds = observed
+                .get(&g)
+                .ok_or_else(|| internal_error!("a timer guard was not observed"))?
+                .iter()
+                .next()
+                .is_some();
+            if holds && !t.held {
+                t.next = first_after(boot, t, now)?.max(t.next);
+            }
+            t.held = holds;
+        }
+        Ok(())
+    }
+
+    /// The earliest instant an active timer is due.
     pub fn next_deadline(&self) -> Result<Option<Instant>, NodeError> {
         let mut best: Option<i64> = None;
-        for t in &self.timers {
+        for t in self.timers.iter().filter(|t| t.active()) {
             let d = due_at(self.boot, t, t.next)?;
             best = Some(best.map_or(d, |b| b.min(d)));
         }
@@ -84,11 +126,11 @@ impl TimerTable {
         Ok(self.next_deadline()?.is_some_and(|d| d <= now))
     }
 
-    /// Takes every firing due at `now`, in timer order then count order.
+    /// Takes every firing of an active timer due at `now`, in timer order then count order.
     pub fn fire(&mut self, now: Instant) -> Result<Vec<(RelId, Row)>, NodeError> {
         let mut out = Vec::new();
         let boot = self.boot;
-        for t in &mut self.timers {
+        for t in self.timers.iter_mut().filter(|t| t.active()) {
             loop {
                 let due = due_at(boot, t, t.next)?;
                 if due > now.0 {
@@ -106,6 +148,12 @@ impl TimerTable {
         }
         Ok(out)
     }
+}
+
+/// The count of `t`'s first firing due after `now`: the least `k` with `boot + (k + 1) × period > now`.
+fn first_after(boot: Instant, t: &Timer, now: Instant) -> Result<u64, NodeError> {
+    let since = now.0.saturating_sub(boot.0).max(0);
+    u64::try_from(since / t.period).map_err(|_| internal_error!("timer arithmetic overflows").into())
 }
 
 /// When firing `k` of `t` is due: `boot + (k + 1) × period`.
