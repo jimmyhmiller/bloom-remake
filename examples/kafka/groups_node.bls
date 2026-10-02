@@ -1,0 +1,426 @@
+//! Consumer groups at the broker (S9): the coordinator lookup, the group protocol, and committed offsets. Included
+//! next to `broker_node.bls`, whose `head` view gives each connection's next request.
+//!
+//! - **`__consumer_offsets`** (S9.md D2) is created by the first FindCoordinator that needs it. A group's
+//!   coordinator is the leader of its partition of that topic (D3).
+//! - **The group protocol** (D4): this broker keeps the state of each group it coordinates (`cgroup`), and each tick
+//!   applies to a group either the deadlines that passed or its first request in arrival order (`coordinator.bls`).
+//!   The state is volatile: a broker that stops leading a partition forgets its groups.
+//! - **Offset commits** (D5) are OFFSETS entries of the group's partition log, answered once committed; every
+//!   replica materializes them (`committed`), and OffsetFetch reads them at the coordinator.
+
+
+fn group_config() -> GroupConfig {
+    GroupConfig { min_session_ms: GROUP_MIN_SESSION_MS, max_session_ms: GROUP_MAX_SESSION_MS, initial_delay_ms: GROUP_INITIAL_DELAY_MS }
+}
+
+/// Each connection's client host, as members report it.
+table conn_host(c: Conn, host: String) key(c) while not kafka.closed(c, _);
+note_host: on kafka.opened(c, peer, _at) {
+    emit conn_host(c, client_host(peer));
+}
+
+// ---------------------------------------------------------------- __consumer_offsets and the coordinator
+
+/// The offsets topic, once created: its id and partition count.
+view offsets_topic(tid, n) = mtopic(name, tid, n, _) where name == OFFSETS_TOPIC;
+/// The offsets partitions this broker leads, and those of them ready to coordinate: their leader has committed an
+/// entry of its own term, so every entry committed under an earlier leader is committed here too (D3).
+view offsets_led(p) = offsets_topic(tid, _), led_term(tid, p, _);
+view offsets_ready(p) = offsets_topic(tid, _), led_term(tid, p, _), let g = (tid, p), term_first(g, f), commit_of(g, c)
+    where c >= f;
+view offsets_group(p, g) = offsets_topic(tid, _), led_term(tid, p, _), let g = (tid, p);
+
+/// A group's coordination status here: NONE (this broker coordinates it, ready), COORDINATOR_LOAD_IN_PROGRESS, or
+/// NOT_COORDINATOR. `named(name)` lists the groups asked about.
+view group_status(name, s) {
+    named(name), not offsets_topic(_, _), let s = NOT_COORDINATOR;
+    named(name), offsets_topic(_tid, n), let p = group_partition(name, n), not offsets_led(p), let s = NOT_COORDINATOR;
+    named(name), offsets_topic(_tid, n), let p = group_partition(name, n), offsets_led(p), not offsets_ready(p),
+        let s = COORDINATOR_LOAD_IN_PROGRESS;
+    named(name), offsets_topic(_tid, n), let p = group_partition(name, n), offsets_ready(p), let s = NONE;
+}
+view coordinated(name) = group_status(name, s) where s == NONE;
+/// Each group a request at a head names, and each group this broker holds state for.
+view named(name) {
+    group_req(_c, _i, _at, _key, name);
+    commit_head(_c, _i, _seq, _version, _corr, _fr, _at, req), let name = req.group_id;
+    ofetch_group_of(_c, _i, _k, name, _ts);
+    dgroups_head(_c, _i, _seq, _version, _corr, _fr, _at, req), name in req.groups;
+    cgroup(name, _t, _g);
+}
+
+// ---------------------------------------------------------------- FindCoordinator
+
+view find_head(c, i, seq, version, corr, fr, at, req) =
+    head(c, i, seq, key, version, corr, fr, at), caught_up(), key == API_FIND_COORDINATOR,
+    let Some(body) = request_body(fr), let Some(req) = decode_find_coordinator(body, version);
+view find_key(c, k, name, kt) = find_head(c, _, _, version, _, _, _, req), (k, name) in coordinator_keys(req, version).enumerate(),
+    let kt = req.key_type;
+view leader_known(g) = partition_leader(g, _, _, _);
+/// Each key's answer: (key, error, node id, host, port).
+view find_answer(c, k, a) {
+    find_key(c, k, name, kt), let a = (name, TRANSACTIONAL_ID_AUTHORIZATION_FAILED, -1i32, "", -1i32) where kt == KEY_TRANSACTION;
+    find_key(c, k, name, kt), let a = (name, INVALID_REQUEST, -1i32, "", -1i32) where kt != KEY_GROUP && kt != KEY_TRANSACTION;
+    find_key(c, k, name, kt), not offsets_topic(_, _), let a = (name, COORDINATOR_NOT_AVAILABLE, -1i32, "", -1i32)
+        where kt == KEY_GROUP;
+    find_key(c, k, name, kt), offsets_topic(tid, n), let g = (tid, group_partition(name, n)), partition_leader(g, _e, l, _isr),
+        broker(l, id, host, port), let a = (name, NONE, id, host, port) where kt == KEY_GROUP;
+    find_key(c, k, name, kt), offsets_topic(tid, n), let g = (tid, group_partition(name, n)), not leader_known(g),
+        let a = (name, COORDINATOR_NOT_AVAILABLE, -1i32, "", -1i32) where kt == KEY_GROUP;
+}
+view find_answers(c, xs = collect!((k, a))) = per find_head(c, _, _, _, _, _, _, _req), find_answer(c, k, a);
+answer_find: while find_head(c, i, seq, version, corr, fr, at, req), find_answers(c, xs)
+    where xs.len() == coordinator_keys(req, version).len() {
+    emit reply(c, i, [Part::Bytes(encode_find_coordinator_response(corr, version, values_of(xs)))]);
+}
+
+/// A lookup that finds no `__consumer_offsets` creates it, as Kafka does, by a command to the controller like any
+/// creation (tagged by the controller index then, so a topic deleted later is created again under a new tag). The
+/// lookups meanwhile answer COORDINATOR_NOT_AVAILABLE, and the client asks again.
+table offsets_creating(tag: u64) key();
+view wants_offsets() = find_key(_c, _k, _name, kt) where kt == KEY_GROUP;
+start_offsets: while wants_offsets(), not offsets_topic(_, _), not offsets_creating(_), applied_m(a), my_id(me) {
+    upsert offsets_creating(hash64(("offsets-topic", me, a)));
+}
+end_offsets: while offsets_creating(tag), my_id(me), done(me, tag, _) {
+    delete offsets_creating(tag);
+}
+view offsets_cmd(tag, cmd) =
+    offsets_creating(tag), broker_ids(ids), my_id(me),
+    let rf = if OFFSETS_REPLICATION as u64 > ids.len() { ids.len() as i16 } else { OFFSETS_REPLICATION },
+    let id = topic_id(hash64(("offsets-id", tag, 0u64)), hash64(("offsets-id", tag, 1u64))),
+    let item = create_item(0u64, NONE, OFFSETS_TOPIC, id, assign(ids, OFFSETS_PARTITIONS, rf, hash64(("offsets-start", tag))), []),
+    let cmd = encode_cmd(create_cmd(me, tag, [item]));
+
+// ---------------------------------------------------------------- the group protocol
+
+/// The group each JoinGroup, SyncGroup, Heartbeat and LeaveGroup request at a head is about.
+view join_head(c, i, version, corr, fr, at, req) =
+    head(c, i, _seq, key, version, corr, fr, at), caught_up(), key == API_JOIN_GROUP,
+    let Some(body) = request_body(fr), let Some(req) = decode_join_group(body, version);
+view sync_head(c, i, version, corr, fr, at, req) =
+    head(c, i, _seq, key, version, corr, fr, at), caught_up(), key == API_SYNC_GROUP,
+    let Some(body) = request_body(fr), let Some(req) = decode_sync_group(body, version);
+view heartbeat_head(c, i, version, corr, fr, at, req) =
+    head(c, i, _seq, key, version, corr, fr, at), caught_up(), key == API_HEARTBEAT,
+    let Some(body) = request_body(fr), let Some(req) = decode_heartbeat(body, version);
+view leave_head(c, i, version, corr, fr, at, req) =
+    head(c, i, _seq, key, version, corr, fr, at), caught_up(), key == API_LEAVE_GROUP,
+    let Some(body) = request_body(fr), let Some(req) = decode_leave_group(body, version);
+view group_req(c, i, at, key, name) {
+    join_head(c, i, _v, _corr, _fr, at, req), let key = API_JOIN_GROUP, let name = req.group_id;
+    sync_head(c, i, _v, _corr, _fr, at, req), let key = API_SYNC_GROUP, let name = req.group_id;
+    heartbeat_head(c, i, _v, _corr, _fr, at, req), let key = API_HEARTBEAT, let name = req.group_id;
+    leave_head(c, i, _v, _corr, _fr, at, req), let key = API_LEAVE_GROUP, let name = req.group_id;
+}
+
+/// The groups this broker coordinates, with the term of the partition's leadership they belong to: a leadership
+/// that ended takes its groups with it, even if this broker leads the partition again later (another broker may have
+/// coordinated meanwhile).
+table cgroup(name: String, term: u64, g: GroupState) key(name);
+view group_term(name, t) = named(name), offsets_topic(tid, n), led_term(tid, p, t) where p == group_partition(name, n);
+view cur_group(name, g) = cgroup(name, t, g), group_term(name, t), coordinated(name);
+
+/// A request group_refused before any group is looked at (Kafka checks these first): an empty group id, and a JoinGroup's
+/// session timeout outside the coordinator's bounds. Then a group this broker does not coordinate (or not yet).
+view req_refused(c, i, err) {
+    group_req(c, i, _at, _key, name), let err = INVALID_GROUP_ID where name == "";
+    join_head(c, i, _v, _corr, _fr, _at, req), let err = INVALID_SESSION_TIMEOUT
+        where req.group_id != "" && (req.session_timeout_ms < GROUP_MIN_SESSION_MS || req.session_timeout_ms > GROUP_MAX_SESSION_MS);
+    group_req(c, i, _at, _key, name), group_status(name, err), not req_invalid(c, i) where err != NONE;
+}
+view req_invalid(c, i) {
+    group_req(c, i, _at, _key, name) where name == "";
+    join_head(c, i, _v, _corr, _fr, _at, req)
+        where req.session_timeout_ms < GROUP_MIN_SESSION_MS || req.session_timeout_ms > GROUP_MAX_SESSION_MS;
+}
+view group_refused(c, i) = req_refused(c, i, _);
+answer_join_refused: while join_head(c, i, version, corr, _fr, _at, req), req_refused(c, i, err) {
+    emit reply(c, i, [Part::Bytes(encode_join_response(corr, version, join_error(err, req.member_id)))]);
+}
+answer_sync_refused: while sync_head(c, i, version, corr, _fr, _at, _req), req_refused(c, i, err) {
+    emit reply(c, i, [Part::Bytes(encode_sync_response(corr, version, sync_error(err)))]);
+}
+/// A Heartbeat to a coordinator still loading is answered NONE, as Kafka's is (the member keeps its place).
+answer_heartbeat_refused: while heartbeat_head(c, i, version, corr, _fr, _at, _req), req_refused(c, i, err) {
+    emit reply(c, i, [Part::Bytes(encode_heartbeat_response(corr, version,
+        if err == COORDINATOR_LOAD_IN_PROGRESS { NONE } else { err }))]);
+}
+answer_leave_refused: while leave_head(c, i, version, corr, _fr, _at, req), req_refused(c, i, err) {
+    emit reply(c, i, [Part::Bytes(encode_leave_response(corr, version, err, leaving_members(req, version), []))]);
+}
+
+/// The requests parked in a group (waiting at their heads for the group).
+view parked(c, i) {
+    cur_group(_name, g), m in g.members, let Some(p) = m.join, let c = p.0, let i = p.1;
+    cur_group(_name, g), m in g.members, let Some(p) = m.sync, let c = p.0, let i = p.1;
+}
+/// Each group's requests to apply: not group_refused, not parked; the first in arrival order (then by connection and index)
+/// is applied this tick.
+view group_fresh(name, at, c, i, key) = group_req(c, i, at, key, name), not group_refused(c, i), not parked(c, i);
+view group_first(name, o = min!(x)) = group_fresh(name, at, c, i, _key), let x = (at, c, i);
+view group_op(name, c, i, key) = group_first(name, o), group_fresh(name, at, c, i, key) where o == (at, c, i);
+
+/// A coordinated group's deadlines, when any passed: they are applied, and its requests wait a tick.
+view group_ticked(name, s) = cur_group(name, g), let s = tick_group(g, now(), group_config())
+    where s.group != Some(g) || not s.replies.is_empty();
+view ticked(name) = group_ticked(name, _);
+view op_state(name, c, i, key, g0) {
+    group_op(name, c, i, key), not ticked(name), cur_group(name, g), let g0 = Some(g);
+    group_op(name, c, i, key), not ticked(name), not cur_group(name, _), let g0 = group_none();
+}
+/// A new member's id: its client id and a UUID drawn from the broker, the request and the time.
+view new_member_id(c, i, id) = join_head(c, i, _v, _corr, fr, at, _req), my_id(me), let Some(h) = request_header(cur(fr)),
+    let id = member_id_for(h.0.client_id.unwrap_or(""), hash64(("member", me, c, i, at, 0u64)), hash64(("member", me, c, i, at, 1u64)));
+view host_of(c, host) {
+    conn_host(c, host);
+    group_req(c, _i, _at, _key, _name), not conn_host(c, _), let host = "/unknown";
+}
+view heartbeat_result(c, i, r) = op_state(name, c, i, key, g0), heartbeat_head(c, i, _v, _corr, _fr, _at, req),
+    let r = heartbeat(g0, req.generation, req.member_id, now()) where key == API_HEARTBEAT;
+view leave_result(c, i, r) = op_state(name, c, i, key, g0), leave_head(c, i, version, _corr, _fr, _at, req),
+    let r = leave(g0, leaving_members(req, version), now(), group_config()) where key == API_LEAVE_GROUP;
+/// What each group does this tick.
+view group_step(name, s) {
+    group_ticked(name, s);
+    op_state(name, c, i, key, g0), join_head(c, i, version, _corr, fr, _at, req), new_member_id(c, i, id), host_of(c, host),
+        let Some(h) = request_header(cur(fr)),
+        let s = join(g0, JoinIn {
+            member_id: req.member_id, instance: req.group_instance_id, client: h.0.client_id.unwrap_or(""), host: host,
+            session_ms: req.session_timeout_ms, rebalance_ms: req.rebalance_timeout_ms, protocol_type: req.protocol_type,
+            protocols: join_protocols(req), version: version, new_id: id, c: c, i: i,
+        }, now(), group_config()) where key == API_JOIN_GROUP;
+    op_state(name, c, i, key, g0), sync_head(c, i, _v, _corr, _fr, _at, req),
+        let s = sync(g0, SyncIn {
+            generation: req.generation, member_id: req.member_id, protocol_type: req.protocol_type, chosen: req.protocol_name,
+            assignments: sync_assignments(req), c: c, i: i,
+        }, now()) where key == API_SYNC_GROUP;
+    op_state(name, c, i, _key, _g0), heartbeat_result(c, i, r), let s = Step { group: r.0, replies: [] };
+    op_state(name, c, i, _key, _g0), leave_result(c, i, r), let s = r.0;
+}
+keep_group: while group_step(name, s), let Some(g) = s.group, group_term(name, t) {
+    upsert cgroup(name, t, g);
+}
+drop_group: while group_step(name, s), cgroup(name, t, g) where s.group.is_none() {
+    delete cgroup(name, t, g);
+}
+answer_group: while group_step(_name, s), r in s.replies, let c = r.c, let i = r.i, head(c, i, _seq, _key, version, corr, _fr, _at) {
+    emit reply(c, i, [Part::Bytes(encode_reply(corr, version, r))]);
+}
+answer_heartbeat: while heartbeat_result(c, i, r), heartbeat_head(c, i, version, corr, _fr, _at, _req) {
+    emit reply(c, i, [Part::Bytes(encode_heartbeat_response(corr, version, r.1))]);
+}
+answer_leave: while leave_result(c, i, r), leave_head(c, i, version, corr, _fr, _at, req) {
+    emit reply(c, i, [Part::Bytes(encode_leave_response(corr, version, NONE, leaving_members(req, version), r.1))]);
+}
+/// A group this broker no longer coordinates is forgotten (its requests now get NOT_COORDINATOR).
+forget_group: while cgroup(name, t, g), not group_term(name, t) {
+    delete cgroup(name, t, g);
+}
+
+// ---------------------------------------------------------------- OffsetCommit
+
+view commit_head(c, i, seq, version, corr, fr, at, req) =
+    head(c, i, seq, key, version, corr, fr, at), caught_up(), key == API_OFFSET_COMMIT,
+    let Some(body) = request_body(fr), let Some(req) = decode_offset_commit(body, version);
+
+/// Each commit's errors before it is appended, one per partition in request order: an unknown topic or partition
+/// first (Kafka checks those before the coordinator); then the group's (an empty id, the coordinator's status, the
+/// member and generation); then a metadata too large. NONE marks the partitions to commit.
+view commit_known(name) = cur_group(name, _g);
+view has_offsets(name) = offsets_topic(tid, n), let p = group_partition(name, n), committed(tid, p, name, _, _, _, _, _, _);
+view group_exists(name, known) {
+    named(name), commit_known(name), let known = true;
+    named(name), not commit_known(name), has_offsets(name), let known = true;
+    named(name), not commit_known(name), not has_offsets(name), let known = false;
+}
+view commit_group_error(c, i, err) {
+    commit_head(c, i, _s, _v, _corr, _fr, _at, req), let err = INVALID_GROUP_ID where req.group_id == "";
+    commit_head(c, i, _s, _v, _corr, _fr, _at, req), let name = req.group_id, group_status(name, err)
+        where name != "" && err != NONE;
+    commit_head(c, i, _s, _v, _corr, _fr, _at, req), let name = req.group_id, cur_group(name, g),
+        let err = commit_error(Some(g), true, req.generation, req.member_id);
+    commit_head(c, i, _s, _v, _corr, _fr, _at, req), let name = req.group_id, coordinated(name), not cur_group(name, _),
+        group_exists(name, known), let err = commit_error(group_none(), known, req.generation, req.member_id);
+}
+view topic_parts(name, id, n) = mtopic(name, id, n, _);
+view commit_entry_error(c, i, k, err) {
+    commit_head(c, i, _s, _v, _corr, _fr, _at, req), (k, e) in commit_entries(req).enumerate(), let t = e.0,
+        not topic_parts(t, _, _), let err = UNKNOWN_TOPIC_OR_PARTITION;
+    commit_head(c, i, _s, _v, _corr, _fr, _at, req), (k, e) in commit_entries(req).enumerate(), let t = e.0,
+        topic_parts(t, _id, n), let err = UNKNOWN_TOPIC_OR_PARTITION where e.1 < 0i32 || e.1 >= n;
+    commit_head(c, i, _s, _v, _corr, _fr, _at, req), (k, e) in commit_entries(req).enumerate(), let t = e.0,
+        topic_parts(t, _id, n), commit_group_error(c, i, g), let err = if g != NONE { g } else if metadata_too_large(e.4) { OFFSET_METADATA_TOO_LARGE } else { NONE }
+        where e.1 >= 0i32 && e.1 < n;
+}
+view commit_errors_now(c, i, es = collect!((k, err))) = per commit_head(c, i, _s, _v, _corr, _fr, _at, _req), commit_entry_error(c, i, k, err);
+
+/// A commit's errors as decided when it arrived, and its entry, once appended. A request's records last while it is
+/// queued.
+table commit_decided(c: Conn, i: u64, errors: Vec<i16>) key(c, i) while queued(c, i, _, _);
+table commit_placed(c: Conn, i: u64, g: Group, idx: u64, term: u64) key(c, i) while queued(c, i, _, _);
+view commit_new(c, i, req, errors) = commit_head(c, i, _s, _v, _corr, _fr, _at, req), not commit_decided(c, i, _),
+    commit_errors_now(c, i, es), let errors = values_of(es) where es.len() == commit_entries(req).len();
+decide_commit: while commit_new(c, i, _req, errors) {
+    upsert commit_decided(c, i, errors);
+}
+/// The OFFSETS entry a new commit appends to its group's partition (when any partition is to be committed): the
+/// last value given for each partition of the request.
+view commit_entry_of(c, i, g, x) = commit_new(c, i, req, errors), offsets_topic(tid, n), let p = group_partition(req.group_id, n),
+    let g = (tid, p), my_id(me), commit_items(c, i, items),
+    let x = (OFFSETS, -1i64, Blob::of(encode_offsets_entry(OffsetsEntry { tag: hash64(("commit", me, c, i)), group: req.group_id, items: items })))
+    where to_commit(errors);
+view commit_item(c, i, k, it) = commit_new(c, i, req, errors), (k, e) in commit_entries(req).enumerate(), let Some(err) = errors.get(k),
+    topic_parts(e.0, id, _n), let it = (e.0, id, e.1, e.2, e.3, e.4) where err == NONE;
+view commit_items_by(c, i, xs = collect!((k, it))) = per commit_new(c, i, _req, _errors), commit_item(c, i, k, it);
+view commit_items(c, i, items) = commit_items_by(c, i, xs), let items = values_of(xs);
+view offsets_proposals(g, x) = commit_entry_of(_c, _i, g, x);
+/// Where each commit's entry lands: its place among the group's proposals this tick, after the log's last entry.
+record_commit: while commit_entry_of(c, i, g, x), checked_proposals(g, xs), leader(g, t), last_log(g, li, _), (k, y) in xs.enumerate()
+    where y == x {
+    upsert commit_placed(c, i, g, li + 1 + k, t);
+}
+
+/// A commit is done when the commit index reaches its entry and every in-sync replica holds it (as Kafka writes
+/// offsets with `acks=all`); lost when the entry is no longer in the log as appended, or its leadership ended first.
+view commit_isr_lacks(c, i) = commit_placed(c, i, g, idx, _t), isr_low(g, low) where low < idx;
+view commit_compacted(c, i) = commit_placed(c, i, g, idx, _t), rsnap(g, s, _, _, _) where idx <= s;
+view commit_logged(c, i) {
+    commit_placed(c, i, g, idx, t), rlog(g: g, idx: idx, term: t, ..);
+    commit_compacted(c, i);
+}
+view commit_done(c, i) = commit_placed(c, i, g, idx, _t), commit_logged(c, i), commit_of(g, cm), not commit_isr_lacks(c, i)
+    where cm >= idx;
+view commit_lost(c, i) {
+    commit_placed(c, i, _g, _idx, _t), not commit_logged(c, i);
+    commit_placed(c, i, g, _idx, t), not leader(g, t), not commit_done(c, i);
+}
+view commit_waits(c, i) = commit_decided(c, i, errors) where to_commit(errors);
+/// The answer: each partition's error as decided, the committed ones NONE once done (NOT_COORDINATOR if lost,
+/// REQUEST_TIMED_OUT past the timeout). A commit with nothing to append is answered at once.
+answer_commit_now: while commit_head(c, i, seq, version, corr, fr, at, req), commit_decided(c, i, errors), not commit_waits(c, i) {
+    emit reply(c, i, [Part::Bytes(encode_offset_commit_response(corr, version, req, errors))]);
+}
+answer_commit: while commit_head(c, i, seq, version, corr, fr, at, req), commit_decided(c, i, errors), commit_done(c, i) {
+    emit reply(c, i, [Part::Bytes(encode_offset_commit_response(corr, version, req, errors))]);
+}
+answer_commit_lost: while commit_head(c, i, seq, version, corr, fr, at, req), commit_decided(c, i, errors), commit_lost(c, i) {
+    emit reply(c, i, [Part::Bytes(encode_offset_commit_response(corr, version, req, none_as(errors, NOT_COORDINATOR)))]);
+}
+answer_commit_late: while commit_head(c, i, seq, version, corr, fr, at, req), commit_decided(c, i, errors), commit_waits(c, i),
+    not commit_done(c, i), not commit_lost(c, i) where now() >= at + OFFSET_COMMIT_TIMEOUT {
+    emit reply(c, i, [Part::Bytes(encode_offset_commit_response(corr, version, req, none_as(errors, REQUEST_TIMED_OUT)))]);
+}
+/// A commit whose entry was never appended (its coordinator stopped leading in the tick it arrived) is lost too.
+answer_commit_unplaced: while commit_head(c, i, seq, version, corr, fr, at, req), commit_decided(c, i, errors), commit_waits(c, i),
+    not commit_placed(c, i, _, _, _), not commit_new(c, i, _, _) {
+    emit reply(c, i, [Part::Bytes(encode_offset_commit_response(corr, version, req, none_as(errors, NOT_COORDINATOR)))]);
+}
+
+// ---------------------------------------------------------------- committed offsets, on every replica
+
+/// Each partition's committed offsets, by group, topic and partition: the topic's id when committed (a topic deleted
+/// and created again has a new id, and its old offsets are not shown), the offset, leader epoch and metadata.
+durable table committed(tid: Bytes, part: i32, group: String, topic: String, p: i32, id: Bytes, offset: i64, epoch: i32, meta: Option<String>)
+    key(tid, part, group, topic, p) while replica(tid, part);
+
+/// The OFFSETS entries materialized this tick (with the DATA entries, `to_apply_d`), per partition committed to:
+/// the last per key.
+view offsets_applied(tid, part, i, group, topic, p, id, offset, epoch, meta) =
+    to_apply_d(tid, part, a, c), let g = (tid, part), rlog(g, i, _t, _pt, kind, _pos, data),
+    let Some(e) = decode_offsets_entry(entry_bytes(data)), let group = e.group, x in e.items,
+    let topic = x.0, let id = x.1, let p = x.2, let offset = x.3, let epoch = x.4, let meta = x.5
+    where kind == OFFSETS && i > a && i <= c;
+view offsets_last(tid, part, group, topic, p, m = max!(i)) = offsets_applied(tid, part, i, group, topic, p, _id, _o, _e, _m);
+store_offsets: while offsets_last(tid, part, group, topic, p, m), offsets_applied(tid, part, m, group, topic, p, id, offset, epoch, meta) {
+    upsert committed(tid, part, group, topic, p, id, offset, epoch, meta);
+}
+
+/// The committed OFFSETS entries not materialized yet (at most a tick's worth), read by OffsetFetch with the
+/// materialized ones.
+view offsets_pending(tid, part, i, group, topic, p, id, offset, epoch, meta) =
+    applied_d(tid, part, a), not installing(tid, part), let g = (tid, part), commit_of(g, c), rlog(g, i, _t, _pt, kind, _pos, data),
+    let Some(e) = decode_offsets_entry(entry_bytes(data)), let group = e.group, x in e.items,
+    let topic = x.0, let id = x.1, let p = x.2, let offset = x.3, let epoch = x.4, let meta = x.5
+    where kind == OFFSETS && i > a && i <= c;
+view pending_last(tid, part, group, topic, p, m = max!(i)) = offsets_pending(tid, part, i, group, topic, p, _id, _o, _e, _m);
+/// A group's current committed offsets in a partition: the newest committed entry's, else the materialized one, for
+/// topics that still exist under the id committed.
+view current_offset(tid, part, group, topic, p, offset, epoch, meta) {
+    pending_last(tid, part, group, topic, p, m), offsets_pending(tid, part, m, group, topic, p, id, offset, epoch, meta),
+        mtopic(topic, id, _, _);
+    committed(tid, part, group, topic, p, id, offset, epoch, meta), not pending_last(tid, part, group, topic, p, _),
+        mtopic(topic, id, _, _);
+}
+
+// ---------------------------------------------------------------- OffsetFetch
+
+view ofetch_head(c, i, seq, version, corr, fr, at, req) =
+    head(c, i, seq, key, version, corr, fr, at), caught_up(), key == API_OFFSET_FETCH,
+    let Some(body) = request_body(fr), let Some(req) = decode_offset_fetch(body, version);
+view ofetch_group_of(c, i, k, name, ts) = ofetch_head(c, i, _s, version, _corr, _fr, _at, req),
+    (k, x) in fetch_groups(req, version).enumerate(), let name = x.0, let ts = x.1;
+/// The partitions each asked group's answer has: those asked for, or all it committed.
+view ofetch_part(c, k, topic, p) {
+    ofetch_group_of(c, _i, k, _name, ts), let Some(tps) = ts, tp in tps, let topic = tp.0, p in tp.1;
+    ofetch_group_of(c, _i, k, name, ts), coordinated(name), offsets_topic(tid, n), let part = group_partition(name, n),
+        current_offset(tid, part, name, topic, p, _o, _e, _m) where ts.is_none();
+}
+view ofetch_value(c, k, topic, p, v) {
+    ofetch_part(c, k, topic, p), ofetch_group_of(c, _i, k, name, _ts), coordinated(name), offsets_topic(tid, n),
+        let part = group_partition(name, n), current_offset(tid, part, name, topic, p, o, e, m),
+        let v = (p, o, e, Some(m.unwrap_or("")), NONE);
+    ofetch_part(c, k, topic, p), ofetch_group_of(c, _i, k, name, _ts), offsets_topic(tid, n), let part = group_partition(name, n),
+        not current_offset(tid, part, name, topic, p, _, _, _), let v = (p, -1i64, -1i32, Some(""), NONE);
+    ofetch_part(c, k, topic, p), ofetch_group_of(c, _i, k, _name, _ts), not offsets_topic(_, _), let v = (p, -1i64, -1i32, Some(""), NONE);
+}
+view ofetch_topic_by(c, k, topic, xs = collect!((p, v))) = ofetch_value(c, k, topic, p, v);
+view ofetch_topic(c, k, topic, ps) = ofetch_topic_by(c, k, topic, xs), let ps = values_of(xs);
+view ofetch_topics(c, k, ts = collect!((topic, ps) default [])) = per ofetch_group_of(c, _i, k, _name, _ts), ofetch_topic(c, k, topic, ps);
+/// Each group's answer: its offsets, or the coordinator's error (Kafka's group-level error) with none.
+view ofetch_answer(c, k, a) {
+    ofetch_group_of(c, _i, k, name, _ts), coordinated(name), ofetch_topics(c, k, ts),
+        let a = GroupOffsets { group: name, error: NONE, topics: ts };
+    ofetch_group_of(c, _i, k, name, _ts), group_status(name, s), let a = GroupOffsets { group: name, error: s, topics: [] }
+        where s != NONE;
+}
+view ofetch_answers(c, xs = collect!((k, a))) = per ofetch_head(c, _i, _s, _v, _corr, _fr, _at, _req), ofetch_answer(c, k, a);
+answer_offset_fetch: while ofetch_head(c, i, seq, version, corr, fr, at, req), ofetch_answers(c, xs)
+    where xs.len() == fetch_groups(req, version).len() {
+    emit reply(c, i, [Part::Bytes(encode_offset_fetch_response(corr, version, values_of(xs)))]);
+}
+
+// ---------------------------------------------------------------- DescribeGroups, ListGroups
+
+view dgroups_head(c, i, seq, version, corr, fr, at, req) =
+    head(c, i, seq, key, version, corr, fr, at), caught_up(), key == API_DESCRIBE_GROUPS,
+    let Some(body) = request_body(fr), let Some(req) = decode_describe_groups(body, version);
+view described(c, k, d) {
+    dgroups_head(c, _i, _s, version, _corr, _fr, _at, req), (k, name) in req.groups.enumerate(), cur_group(name, g),
+        let d = describe_group(name, Some(g), true, version, req.include_operations);
+    dgroups_head(c, _i, _s, version, _corr, _fr, _at, req), (k, name) in req.groups.enumerate(), coordinated(name), not cur_group(name, _),
+        group_exists(name, known), let d = describe_group(name, group_none(), known, version, req.include_operations);
+    dgroups_head(c, _i, _s, version, _corr, _fr, _at, req), (k, name) in req.groups.enumerate(), group_status(name, s),
+        let d = DescribedGroup { error: s, message: error_message(s), group_id: name, state: "", protocol_type: "", protocol_data: "",
+            members: [], operations: NO_OPERATIONS } where s != NONE;
+}
+view describe_all(c, xs = collect!((k, d))) = per dgroups_head(c, _i, _s, _v, _corr, _fr, _at, _req), described(c, k, d);
+answer_describe_groups: while dgroups_head(c, i, seq, version, corr, fr, at, req), describe_all(c, xs) where xs.len() == req.groups.len() {
+    emit reply(c, i, [Part::Bytes(encode_describe_groups_response(corr, version, values_of(xs)))]);
+}
+
+view list_groups_head(c, i, seq, version, corr, fr, at, req) =
+    head(c, i, seq, key, version, corr, fr, at), caught_up(), key == API_LIST_GROUPS,
+    let Some(body) = request_body(fr), let Some(req) = decode_list_groups(body, version);
+/// The groups this broker coordinates: those with state, and those with only committed offsets in a partition it
+/// leads, ready.
+view listed(x) {
+    list_groups_head(_c, _i, _s, _v, _corr, _fr, _at, _req), cur_group(name, g), let x = listed_group(name, Some(g));
+    list_groups_head(_c, _i, _s, _v, _corr, _fr, _at, _req), offsets_topic(tid, _n), offsets_ready(part),
+        committed(tid, part, name, _t, _p, _id, _o, _e, _m), not cur_group(name, _), let x = listed_group(name, group_none());
+}
+view listed_all(xs = collect!(x default [])) = listed(x);
+answer_list_groups: while list_groups_head(c, i, seq, version, corr, fr, at, req), listed_all(xs) {
+    emit reply(c, i, [Part::Bytes(encode_list_groups_response(corr, version, req, xs))]);
+}

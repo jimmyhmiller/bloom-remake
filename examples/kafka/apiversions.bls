@@ -17,8 +17,9 @@ format ApiVersionsResponse { error: i16, keys: compact_array(ApiRange), throttle
 /// The version-0 layout, as UNSUPPORTED_VERSION (35) is answered.
 format ApiVersionsUnsupported { constant(i16, 35), keys: array(i32, 0, ApiRange0) }
 
-/// What this broker answers: Produce 10–12, Fetch 16–17, ListOffsets 7–10, ApiVersions 3–4, Metadata 13, CreateTopics 7, DeleteTopics 6,
-/// DescribeConfigs 4 and InitProducerId 3–5.
+/// What this broker answers: Produce 10–12, Fetch 16–17, ListOffsets 7–10, ApiVersions 3–4, Metadata 13, CreateTopics 7,
+/// DeleteTopics 6, DescribeConfigs 4, InitProducerId 3–5, the reassignment APIs, DescribeCluster 0–2, and the
+/// consumer group APIs over Kafka 4.0's ranges (S9.md D1).
 fn supported() -> Vec<ApiRange> {
     [
         ApiRange { key: API_PRODUCE, min: 10i16, max: 12i16 },
@@ -33,6 +34,15 @@ fn supported() -> Vec<ApiRange> {
         ApiRange { key: API_ALTER_PARTITION_REASSIGNMENTS, min: 0i16, max: 1i16 },
         ApiRange { key: API_LIST_PARTITION_REASSIGNMENTS, min: 0i16, max: 0i16 },
         ApiRange { key: API_DESCRIBE_CLUSTER, min: 0i16, max: 2i16 },
+        ApiRange { key: API_OFFSET_COMMIT, min: 2i16, max: 9i16 },
+        ApiRange { key: API_OFFSET_FETCH, min: 1i16, max: 9i16 },
+        ApiRange { key: API_FIND_COORDINATOR, min: 0i16, max: 6i16 },
+        ApiRange { key: API_JOIN_GROUP, min: 2i16, max: 9i16 },
+        ApiRange { key: API_HEARTBEAT, min: 0i16, max: 4i16 },
+        ApiRange { key: API_LEAVE_GROUP, min: 0i16, max: 5i16 },
+        ApiRange { key: API_SYNC_GROUP, min: 0i16, max: 5i16 },
+        ApiRange { key: API_DESCRIBE_GROUPS, min: 0i16, max: 6i16 },
+        ApiRange { key: API_LIST_GROUPS, min: 0i16, max: 5i16 },
     ]
 }
 

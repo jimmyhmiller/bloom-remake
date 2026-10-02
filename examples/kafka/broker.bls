@@ -20,6 +20,8 @@ include "records.bls";
 include "produce.bls";
 include "fetch.bls";
 include "reassign.bls";
+include "groups.bls";
+include "coordinator.bls";
 include "broker_fns.bls";
 
 /// The brokers: every node of the cluster role runs this program.
@@ -45,6 +47,16 @@ param CLUSTER_ID: String = "blossom-kafka";
 /// pipelining client makes the broker hold, with what the host read ahead (FOREIGN-PROTOCOLS §1.2).
 param MAX_QUEUED_REQUESTS: u64 = 64;
 param MAX_QUEUED_BYTES: u64 = 16777216;
+/// The partition count of `__consumer_offsets` and its replication factor (fewer with fewer brokers): Kafka's
+/// `offsets.topic.num.partitions` and `offsets.topic.replication.factor`.
+param OFFSETS_PARTITIONS: i32 = 50;
+param OFFSETS_REPLICATION: i16 = 3;
+/// Kafka's `group.min.session.timeout.ms`, `group.max.session.timeout.ms` and `group.initial.rebalance.delay.ms`.
+param GROUP_MIN_SESSION_MS: i32 = 6000;
+param GROUP_MAX_SESSION_MS: i32 = 1800000;
+param GROUP_INITIAL_DELAY_MS: i32 = 3000;
+/// How long an offset commit waits to be committed (Kafka's `offsets.commit.timeout.ms`).
+param OFFSET_COMMIT_TIMEOUT: Duration = 5s;
 
 include "raft.bls";
 include "cluster.bls";
@@ -54,4 +66,5 @@ at Broker {
     include "topics_node.bls";
     include "produce_node.bls";
     include "fetch_node.bls";
+    include "groups_node.bls";
 }

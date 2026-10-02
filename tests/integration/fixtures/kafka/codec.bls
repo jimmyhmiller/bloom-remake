@@ -11,6 +11,8 @@ include "../../../../examples/kafka/records.bls";
 include "../../../../examples/kafka/produce.bls";
 include "../../../../examples/kafka/fetch.bls";
 include "../../../../examples/kafka/reassign.bls";
+include "../../../../examples/kafka/groups.bls";
+include "../../../../examples/kafka/coordinator.bls";
 
 /// Read by the topic functions: the broker's id and the partition count a topic gets by default.
 param NODE_ID: i32 = 1;
