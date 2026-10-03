@@ -1159,16 +1159,34 @@ fn check_groups(seeds: std::ops::RangeInclusive<u64>, scenario: Scenario) -> u64
         let mut zombie_window = None;
         if scenario == Scenario::Zombie || scenario == Scenario::ZombieBare {
             cluster.run_until(3_000_000_000).unwrap();
-            let rel_cgroup = rel("cgroup");
-            let coordinator = brokers
-                .values()
-                .copied()
-                .find(|n| {
-                    cluster
-                        .state(*n)
-                        .is_some_and(|st| st.rows(rel_cgroup).any(|r| r[0] == Value::Str(GROUP.into())))
-                })
-                .unwrap_or_else(|| panic!("{}", fail(&cluster, "no broker coordinates the group at 3 s")));
+            // The coordinator: the leader of the group's `__consumer_offsets` partition (Kafka's hash of the id).
+            let st0 = cluster.state(brokers[&1]).unwrap();
+            let offsets_tid = st0
+                .rows(rel("mtopic"))
+                .find(|r| r[0] == Value::Str("__consumer_offsets".into()))
+                .map(|r| r[1].clone())
+                .unwrap_or_else(|| panic!("{}", fail(&cluster, "no __consumer_offsets at 3 s")));
+            let h = GROUP
+                .encode_utf16()
+                .fold(0i32, |h, u| h.wrapping_mul(31).wrapping_add(i32::from(u)));
+            let part = (if h == i32::MIN { 0 } else { h.abs() }) % 4;
+            let group_g = Value::Tuple(Arc::from(vec![offsets_tid, Value::Int(IntValue::I32(part))]));
+            let rel_won = rel("won");
+            let leads = |cluster: &Cluster<'_>, n: NodeId| {
+                cluster
+                    .state(n)
+                    .is_some_and(|st| st.rows(rel_won).any(|r| r[0] == group_g))
+            };
+            let leaders: Vec<NodeId> = brokers.values().copied().filter(|n| leads(&cluster, *n)).collect();
+            let [coordinator] = leaders[..] else {
+                panic!(
+                    "{}",
+                    fail(
+                        &cluster,
+                        &format!("the group's offsets partition has leaders {leaders:?} at 3 s")
+                    )
+                );
+            };
             let others: Vec<NodeId> = brokers.values().copied().filter(|n| *n != coordinator).collect();
             shared.borrow_mut().pin = Some(coordinator);
             cluster.partition(&[&others]).unwrap();
@@ -1176,13 +1194,13 @@ fn check_groups(seeds: std::ops::RangeInclusive<u64>, scenario: Scenario) -> u64
                 // CheckQuorum: within a few check periods the cut-off coordinator no longer leads the group's
                 // partition, and forgets the group.
                 cluster.run_until(4_500_000_000).unwrap();
-                let still = cluster
-                    .state(coordinator)
-                    .is_some_and(|st| st.rows(rel_cgroup).any(|r| r[0] == Value::Str(GROUP.into())));
                 assert!(
-                    !still,
+                    !leads(&cluster, coordinator),
                     "{}",
-                    fail(&cluster, "the cut-off coordinator still coordinates the group at 4.5 s")
+                    fail(
+                        &cluster,
+                        "the cut-off coordinator still leads the group's offsets partition at 4.5 s"
+                    )
                 );
                 zombie_window = Some((5_000_000_000i64, 7_000_000_000i64));
             }
