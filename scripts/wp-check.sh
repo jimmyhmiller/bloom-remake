@@ -4,7 +4,7 @@
 #   scripts/wp-check.sh <crate>...
 #
 # For each crate: rustfmt, clippy with every target and feature (-D warnings) and its tests; then the workspace
-# layer and code-registry checks. Every step runs; the exit status is non-zero if any failed.
+# layer, code-registry and sans-IO node checks. Every step runs; the exit status is non-zero if any failed.
 set -uo pipefail
 
 if [ "$#" -lt 1 ]; then
@@ -25,6 +25,7 @@ for crate in "$@"; do
 done
 step cargo run -q -p xtask -- check-layers
 step cargo run -q -p xtask -- check-codes
+step cargo run -q -p xtask -- check-sans-io
 
 if [ "${#failed[@]}" -gt 0 ]; then
   echo "wp-check: FAILED:" >&2

@@ -404,7 +404,10 @@ impl Server {
                     incarnation: boot.incarnation,
                     seed: seed.0,
                 };
-                Box::new(blossom_node::record::Recording::create(&path, &header, exec)?)
+                let file = create_private(&path)
+                    .map_err(|e| RuntimeError::Config(format!("the trace {}: {e}", path.display())))?;
+                let sink: Box<dyn std::io::Write + Send> = Box::new(std::io::BufWriter::new(file));
+                Box::new(blossom_node::record::Recording::new(sink, &header, exec)?)
             }
         };
         let node = Node::boot(ncfg, &artifact.program, exec, boot.clone())?;
@@ -1454,4 +1457,17 @@ impl Engine {
             .send((job, t))
             .map_err(|_| RuntimeError::Fault("the checkpoint thread stopped".into()))
     }
+}
+
+/// Creates a new file readable and writable by its owner only (a trace holds the deployment's seed); an existing
+/// file is an error, never overwritten.
+fn create_private(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
 }

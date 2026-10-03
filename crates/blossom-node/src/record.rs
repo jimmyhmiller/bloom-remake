@@ -1,11 +1,10 @@
 //! Recording a node's inputs (`blossom run --record`, ARCHITECTURE §6.4): an [`Executor`] that writes every tick it
 //! runs to a [`blossom_trace::node`] trace before running it, so the incarnation can be replayed exactly and
-//! questioned afterwards.
+//! questioned afterwards. The node performs no I/O of its own (ARCH-03): the host hands it the sink (a file it
+//! created readable by its owner only, since the trace holds the deployment's seed).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
-use std::io::BufWriter;
-use std::path::Path;
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use blossom_base::{RelId, RuleId};
@@ -18,27 +17,20 @@ use crate::eval::Executor;
 /// An executor that records its inputs, then runs them on `inner`.
 pub struct Recording {
     inner: Box<dyn Executor>,
-    out: TraceWriter<BufWriter<File>>,
+    out: TraceWriter<Box<dyn Write + Send>>,
     /// Blobs the trace holds, and blobs this incarnation created (a replay creates them again).
     written: BTreeSet<BlobRef>,
     created: BTreeSet<BlobRef>,
 }
 
 impl Recording {
-    /// Creates the trace at `path` (readable by its owner only: it holds the deployment's seed) and records into it.
-    pub fn create(path: &Path, header: &NodeTraceHeader, inner: Box<dyn Executor>) -> Result<Recording, EvalError> {
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let file = opts
-            .open(path)
-            .map_err(|e| EvalError::Trace(format!("creating {}: {e}", path.display())))?;
-        let out = TraceWriter::new(BufWriter::new(file), header)
-            .map_err(|e| EvalError::Trace(format!("{}: {e}", path.display())))?;
+    /// Records into `sink` (flushed after every tick), starting with `header`.
+    pub fn new(
+        sink: Box<dyn Write + Send>,
+        header: &NodeTraceHeader,
+        inner: Box<dyn Executor>,
+    ) -> Result<Recording, EvalError> {
+        let out = TraceWriter::new(sink, header).map_err(|e| EvalError::Trace(e.to_string()))?;
         Ok(Recording {
             inner,
             out,
