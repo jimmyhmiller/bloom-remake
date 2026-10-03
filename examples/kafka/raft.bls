@@ -55,6 +55,9 @@ param RAFT_BATCH: u64 = 64;
 /// Whether a leader that hears from no majority for a period steps down (CheckQuorum, §6.2; below). Raft is safe
 /// without it; a test that needs a leader cut off to go on appending turns it off.
 param RAFT_CHECK_QUORUM: bool = true;
+/// Whether a member asks for pre-votes before it stands (PreVote, §9.6; below). It goes with CheckQuorum: a leader
+/// refuses pre-votes, so without CheckQuorum a leader cut off would keep the others from ever standing.
+param RAFT_PRE_VOTE: bool = true;
 
 /// Entry kinds (S8.md D3).
 const NOOP: u8 = 0;
@@ -65,6 +68,10 @@ const CONFIG: u8 = 3;
 const OFFSETS: u8 = 4;
 
 channel request_vote(g: Group, term: u64, last_idx: u64, last_term: u64): Broker -> Broker;
+/// PreVote (§9.6): would the receiver vote for the sender in `term` (its next)? `round` names the sender's attempt,
+/// which the answer echoes.
+channel pre_vote(g: Group, term: u64, last_idx: u64, last_term: u64, round: Instant): Broker -> Broker;
+channel pre_vote_reply(g: Group, term: u64, round: Instant, granted: bool): Broker -> Broker;
 channel vote(g: Group, term: u64, granted: bool): Broker -> Broker;
 /// InstallSnapshot: the leader of `term` has compacted its log up to `idx` (whose term is `sterm`); `pos` is the
 /// position after it, and `conf` the configuration then (empty: the initial members).
@@ -340,13 +347,60 @@ at Broker {
     rearm: on reset_timer(g), eff(g, t) {
         upsert deadline(g, now() + rand_range(RAFT_ELECTION_MIN, RAFT_ELECTION_MAX, ("election", g, t)));
     }
-    start_election: on timed_out(g, t), last_log(g, li, lt), let nt = t + 1 {
+    // ---- PreVote (§9.6)
+    /// A member whose election timeout passes first asks the others whether they would vote for it in the next term,
+    /// without anyone changing a term or a vote, and stands only once a majority would. So a member cut off from the
+    /// others (a follower, or a leader that stepped down, CheckQuorum) does not raise its term while cut off, and
+    /// does not depose a working leader when it is back. A member answers a pre-vote as it would a vote (a log at least
+    /// as up to date as its own, and no leader heard from within the minimum election timeout; a leader refuses), for a
+    /// term above its own. Each attempt (`round`, when it began) counts only its own answers.
+    table prevoting(g: Group, term: u64, round: Instant) key(g);
+    table prevoters(g: Group, term: u64, round: Instant, v: Node<Broker>);
+    start_prevote: on timed_out(g, t), last_log(g, li, lt), let nt = t + 1, let round = now() where RAFT_PRE_VOTE {
+        upsert prevoting(g, nt, round);
+        next prevoters(g, nt, round, self);
+        for members(g, p) where p != self {
+            send pre_vote(g, nt, li, lt, round) to p;
+        }
+    }
+    view pv_ok(g, c, nt, round) =
+        pre_vote(g, nt, li, lt, round) from c, eff(g, e), mine(g), not recently_led(g), not leader(g, _), last_log(g, mi, mt)
+        where nt > e && (lt > mt || (lt == mt && li >= mi));
+    grant_prevote: on pv_ok(g, c, nt, round) {
+        send pre_vote_reply(g, nt, round, true) to c;
+    }
+    refuse_prevote: on pre_vote(g, nt, _, _, round) from c, mine(g), not pv_ok(g, c, nt, round) {
+        send pre_vote_reply(g, nt, round, false) to c;
+    }
+    count_prevote: on pre_vote_reply(g, nt, round, true) from v, prevoting(g, nt, round), members(g, v) {
+        emit prevoters(g, nt, round, v);
+    }
+    view pre_tally(g, nt, round, n = count!(v)) = prevoters(g, nt, round, v);
+    view prevote_won(g, nt) =
+        prevoting(g, nt, round), pre_tally(g, nt, round, n), group_size(g, k), eff(g, t) where n * 2 > k && nt == t + 1;
+    start_election: while prevote_won(g, nt), last_log(g, li, lt), prevoting(g, nt, round) {
+        next rterm(g, nt);
+        next rvote(g, nt, self);
+        next voters(g, nt, self);
+        delete prevoting(g, nt, round);
+        for members(g, p) where p != self {
+            send request_vote(g, nt, li, lt) to p;
+        }
+    }
+    /// Without PreVote, a member whose election timeout passes stands at once.
+    stand_at_once: on timed_out(g, t), last_log(g, li, lt), let nt = t + 1 where not RAFT_PRE_VOTE {
         next rterm(g, nt);
         next rvote(g, nt, self);
         next voters(g, nt, self);
         for members(g, p) where p != self {
             send request_vote(g, nt, li, lt) to p;
         }
+    }
+    forget_prevoting: while prevoting(g, nt, round), eff(g, t) where t >= nt {
+        delete prevoting(g, nt, round);
+    }
+    forget_prevoters: while prevoters(g, nt, round, v), not prevoting(g, nt, round) {
+        delete prevoters(g, nt, round, v);
     }
     count_vote: on vote(g, t, true) from v, members(g, v) {
         emit voters(g, t, v);
