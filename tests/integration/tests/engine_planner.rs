@@ -5,12 +5,14 @@
 //! recursive table with carried rows, an error inside a recursion, and the cost of a long chain). The engine must
 //! agree with the oracle at every tick: the same rows, or the same error at the same tick.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
 use blossom_artifact::bls::BlsArtifact;
 use blossom_driver::bls::compile_file;
 use blossom_front::api::NodeSpec;
+use blossom_ir::tick::{Instance, TickInput};
 use blossom_node::EngineEvaluator;
 use blossom_sim::FaultSchedule;
 use blossom_sim::bls::{BlsSim, InputEvent};
@@ -478,5 +480,85 @@ fn a_recursion_that_never_converges_fails_at_the_round_bound() {
     match r {
         Err(blossom_ir::tick::EvalError::Program { error, .. }) => assert_eq!(error.code, "BLSR007"),
         other => panic!("expected BLSR007, got {:?}", other.map(|_| ())),
+    }
+}
+
+/// One tick of `name` from an empty state with input `events` (relation, u64), on the oracle and on the engine, both
+/// bounded to `max_rounds` per recursive stratum: the instance, or the program error's code.
+#[cfg(test)]
+fn bounded_tick(
+    name: &str,
+    events: &[(&str, u64)],
+    max_rounds: u32,
+) -> (Result<Instance, String>, Result<Instance, String>) {
+    use blossom_node::Evaluator;
+    let artifact = compile(name);
+    let seed = blossom_value::Seed::from_u64(0);
+    let oracle = blossom_oracle::Oracle::with_limits(artifact.program.clone(), blossom_oracle::Limits { max_rounds })
+        .unwrap()
+        .with_roles(artifact.roles.clone())
+        .with_seed(seed)
+        .unwrap()
+        .with_node_names(vec![Arc::from("n1")])
+        .unwrap();
+    let cfg = blossom_engine::EngineConfig {
+        roles: artifact.roles.clone(),
+        node_names: vec![Arc::from("n1")],
+        seed: Some(seed),
+        max_rounds,
+        ..blossom_engine::EngineConfig::default()
+    };
+    let engine = EngineEvaluator::new(artifact.program.clone(), cfg);
+    let events: Vec<(blossom_base::RelId, blossom_ir::tick::Row)> = events
+        .iter()
+        .map(|(r, v)| (artifact.rel_named(r).unwrap(), Arc::from(vec![Value::Int(IntValue::U64(*v))])))
+        .collect();
+    let carried = Instance::default();
+    let input = TickInput {
+        node: NodeId(0),
+        incarnation: 1,
+        tick: Tick(0),
+        now: blossom_value::time::Instant(0),
+        carried: &carried,
+        events: &events,
+        delivered: &[],
+        ingress: &[],
+        capture: false,
+        blobs: &blossom_value::NoBlobs,
+    };
+    let o = oracle.tick(&input).map(|out| out.instance).map_err(|e| match e {
+        blossom_oracle::OracleError::Program { error, .. } => error.code.to_string(),
+        other => panic!("{name}: the oracle failed: {other}"),
+    });
+    let e = engine.tick(&input).map(|out| out.instance).map_err(|e| match e {
+        blossom_ir::tick::EvalError::Program { error, .. } => error.code.to_string(),
+        other => panic!("{name}: the engine failed: {other}"),
+    });
+    (o, e)
+}
+
+/// The semi-naive iteration goes through the naive iteration's rounds: under every round bound, from one round to
+/// past the fixpoint, the engine converges exactly when the oracle (the naive iteration) does, to the same instance,
+/// and fails with the same error when it does not (BLSR007, or an error a valuation raises at the fixpoint).
+#[test]
+fn semi_naive_rounds_are_the_naive_rounds() {
+    let chain: Vec<(&str, u64)> = (0..12).map(|b| ("add", b)).chain([("ask", 1000)]).collect();
+    let mutual: Vec<(&str, u64)> = (0..17).map(|x| ("link", x)).chain([("start", 0)]).collect();
+    let table: Vec<(&str, u64)> = (0..13).map(|x| ("link", x)).chain([("seed", 0)]).collect();
+    let error: Vec<(&str, u64)> = (0..15).map(|b| ("add", b)).chain([("ask", 1000)]).collect();
+    for (name, events) in [
+        ("recursive_chain.bls", &chain),
+        ("recursive_mutual.bls", &mutual),
+        ("recursive_table.bls", &table),
+        ("recursive_error.bls", &error),
+    ] {
+        let mut outcomes = BTreeSet::new();
+        for k in 1..=30 {
+            let (o, e) = bounded_tick(name, events, k);
+            assert_eq!(o, e, "{name} with at most {k} rounds");
+            outcomes.insert(o.as_ref().err().cloned().unwrap_or_else(|| "converged".into()));
+        }
+        // The sweep reaches both sides of the bound.
+        assert!(outcomes.contains("BLSR007") && outcomes.len() > 1, "{name}: {outcomes:?}");
     }
 }
