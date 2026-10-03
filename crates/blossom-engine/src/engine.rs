@@ -891,9 +891,14 @@ impl Engine {
             return self.apply_aggregates(p, rule, plan, terms.aggs, tick);
         }
         let store = self.store(plan.head)?;
+        let mut writes = 0u64;
         for (row, w) in terms.heads {
+            if w != 0 {
+                writes += 1;
+            }
             store.add(row, w).map_err(|e| to_eval(e, tick, Some(rule)))?;
         }
+        self.count_writes(rule.id, writes);
         Ok(())
     }
 
@@ -944,14 +949,18 @@ impl Engine {
             }
         }
         let store = self.store(plan.head)?;
+        let mut writes = 0u64;
         for (old, new) in edits {
             if let Some(o) = old {
+                writes += 1;
                 store.add(o, -1).map_err(|e| to_eval(e, tick, Some(rule)))?;
             }
             if let Some(n) = new {
+                writes += 1;
                 store.add(n, 1).map_err(|e| to_eval(e, tick, Some(rule)))?;
             }
         }
+        self.count_writes(rule.id, writes);
         Ok(())
     }
 
@@ -984,14 +993,25 @@ impl Engine {
         } else {
             terms.heads.into_iter().filter(|(_, w)| *w > 0).collect()
         };
+        // Only the difference from the last output is applied: a row in both, with the same support, is left alone
+        // (retracting and re-adding it would change nothing but rebuild its index entries and touch the store).
         let old = self.prev.remove(&rule.id).unwrap_or_default();
         let store = self.store(plan.head)?;
+        let mut writes = 0u64;
         for (row, w) in &old {
-            store.add(row.clone(), -w).map_err(|e| to_eval(e, tick, Some(rule)))?;
+            let d = new.get(row).copied().unwrap_or(0) - w;
+            if d != 0 {
+                writes += 1;
+                store.add(row.clone(), d).map_err(|e| to_eval(e, tick, Some(rule)))?;
+            }
         }
         for (row, w) in &new {
-            store.add(row.clone(), *w).map_err(|e| to_eval(e, tick, Some(rule)))?;
+            if !old.contains_key(row) {
+                writes += 1;
+                store.add(row.clone(), *w).map_err(|e| to_eval(e, tick, Some(rule)))?;
+            }
         }
+        self.count_writes(rule.id, writes);
         self.prev.insert(rule.id, new);
         Ok(())
     }
@@ -1376,6 +1396,12 @@ impl Engine {
     /// Each function's work since profiling was switched on (`None`: off).
     pub fn work_by_function(&self) -> Option<BTreeMap<blossom_base::FnId, FnWork>> {
         self.fn_work.as_ref().map(|w| w.borrow().clone())
+    }
+
+    fn count_writes(&mut self, rule: RuleId, writes: u64) {
+        if writes > 0 {
+            self.examined_by.entry(rule).or_default().writes += writes;
+        }
     }
 
     fn count(&mut self, rule: RuleId, examined: u64, steps: u64) {

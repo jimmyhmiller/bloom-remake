@@ -136,8 +136,16 @@ Y
 }
 
 wait_ready() {
-  local i
+  local i pid
   for i in $(seq 1 60); do
+    if [ -f "$BENCH_DIR/pids" ]; then
+      while read -r pid; do
+        if ! kill -0 "$pid" 2> /dev/null; then
+          tail -n 20 "$BENCH_DIR"/*/b1.log "$BENCH_DIR"/*/k1.out 2> /dev/null >&2
+          die "a broker exited while starting"
+        fi
+      done < "$BENCH_DIR/pids"
+    fi
     if timeout 10 "$K/kafka-topics.sh" --bootstrap-server "$BOOTSTRAP" --list > /dev/null 2>&1; then
       return 0
     fi

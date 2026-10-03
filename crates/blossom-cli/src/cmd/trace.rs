@@ -191,22 +191,31 @@ mod stopwatch {
 }
 use stopwatch::Stopwatch;
 
-/// The `top` rules that did the most work in `work` (a profiled tick's, or a sum): by expression nodes evaluated
-/// plus rows examined, each a unit of the engine's work.
+/// The `top` rules that did the most work in `work` (a profiled tick's, or a sum): by expression nodes evaluated,
+/// rows examined and rows written, each a unit of the engine's work.
 fn print_work(names: &Names<'_>, work: &BTreeMap<RuleId, RuleWork>, top: usize) {
-    let (rows, steps) = work.values().fold((0u64, 0u64), |(r, s), w| (r + w.rows, s + w.steps));
+    let (rows, steps, writes) = work.values().fold((0u64, 0u64, 0u64), |(r, s, w), x| {
+        (r + x.rows, s + x.steps, w + x.writes)
+    });
     let mut by: Vec<(RuleId, RuleWork)> = work.iter().map(|(k, v)| (*k, *v)).collect();
-    by.sort_by(|a, b| (b.1.rows + b.1.steps).cmp(&(a.1.rows + a.1.steps)).then(a.0.cmp(&b.0)));
+    let total = |w: &RuleWork| w.rows + w.steps + w.writes;
+    by.sort_by(|a, b| total(&b.1).cmp(&total(&a.1)).then(a.0.cmp(&b.0)));
     println!(
-        "  {rows} rows examined, {steps} expression steps, by {} rules",
+        "  {rows} rows examined, {steps} expression steps, {writes} rows written, by {} rules",
         by.len()
     );
-    println!("  {:>12}  {:>12}", "steps", "rows");
+    println!("  {:>12}  {:>12}  {:>12}", "steps", "rows", "writes");
     let program = names.program();
     for (id, w) in by.into_iter().take(top) {
         let Some(rule) = program.rules.get(id) else { continue };
-        println!("  {:>12}  {:>12}  {} ({:?})", w.steps, w.rows, rule.label, rule.kind);
-        println!("                              {}", rule_text(program, rule));
+        println!(
+            "  {:>12}  {:>12}  {:>12}  {} ({:?})",
+            w.steps, w.rows, w.writes, rule.label, rule.kind
+        );
+        println!(
+            "                                            {}",
+            rule_text(program, rule)
+        );
     }
 }
 
@@ -704,6 +713,7 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
                     let w = work.entry(rule).or_default();
                     w.rows += n.rows;
                     w.steps += n.steps;
+                    w.writes += n.writes;
                 }
                 for (f, n) in r.fn_work {
                     let w = fns.entry(f).or_default();

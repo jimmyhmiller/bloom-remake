@@ -300,6 +300,7 @@ impl<R: Read> Replay<R> {
                 let d = RuleWork {
                     rows: n.rows - b.rows,
                     steps: n.steps - b.steps,
+                    writes: n.writes - b.writes,
                 };
                 if d != RuleWork::default() {
                     work.insert(rule, d);

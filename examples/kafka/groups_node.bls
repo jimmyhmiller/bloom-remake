@@ -340,8 +340,10 @@ durable table committed(tid: Bytes, part: i32, group: String, topic: String, p: 
 /// the last per key.
 /// (The OFFSETS entries are picked out before anything is decoded: a partition's DATA entries are record batches,
 /// not read here.)
+/// Only the offsets topic's partitions hold OFFSETS entries, and only theirs are read.
 view offsets_to_apply(tid, part, i, data) =
-    to_apply_d(tid, part, a, c), let g = (tid, part), rlog(g, i, _t, _pt, kind, _pos, data) where kind == OFFSETS && i > a && i <= c;
+    to_apply_d(tid, part, a, c), offsets_topic(tid, _), let g = (tid, part), rlog(g, i, _t, _pt, kind, _pos, data)
+    where kind == OFFSETS && i > a && i <= c;
 view offsets_applied(tid, part, i, group, topic, p, id, offset, epoch, meta) =
     offsets_to_apply(tid, part, i, data),
     let Some(e) = decode_offsets_entry(entry_bytes(data)), let group = e.group, x in last_per_partition(e.items),
@@ -353,9 +355,11 @@ store_offsets: while offsets_last(tid, part, group, topic, p, m), offsets_applie
 
 /// The committed OFFSETS entries not materialized yet (at most a tick's worth), read by OffsetFetch with the
 /// materialized ones.
+/// (Written from the group's commit index, its partition taken apart from the group: whichever of them changed, the
+/// partition's key is known before its log is read, and the log is read only over the entries not applied.)
 view offsets_unapplied(tid, part, i, data) =
-    applied_d(tid, part, a), not installing(tid, part), not offsets_stale(tid, part, _), let g = (tid, part), commit_of(g, c),
-    rlog(g, i, _t, _pt, kind, _pos, data) where kind == OFFSETS && i > a && i <= c;
+    commit_of(g, c), let (tid, part) = g, offsets_topic(tid, _), applied_d(tid, part, a), not installing(tid, part),
+    not offsets_stale(tid, part, _), rlog(g, i, _t, _pt, kind, _pos, data) where kind == OFFSETS && i > a && i <= c;
 view offsets_pending(tid, part, i, group, topic, p, id, offset, epoch, meta) =
     offsets_unapplied(tid, part, i, data),
     let Some(e) = decode_offsets_entry(entry_bytes(data)), let group = e.group, x in last_per_partition(e.items),
