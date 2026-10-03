@@ -1006,9 +1006,8 @@ impl Engine {
             self.recompute_rule(p, input, rule, &plan)?;
         }
         self.settle(tick)?;
-        if self.semi_naive_applies(p, s)
-            && let Some(derived) = self.semi_naive(p, input, s)?
-        {
+        if self.semi_naive_applies(p, s) {
+            let derived = self.semi_naive(p, input, s)?;
             for (id, rows) in derived {
                 self.prev.insert(id, rows.into_iter().map(|r| (r, 1)).collect());
             }
@@ -1100,100 +1099,122 @@ impl Engine {
         })
     }
 
-    /// A recursive stratum's fixpoint, semi-naively: every rule in full once, then, round after round, only the
-    /// valuations that use a row the round before derived (each such row drives the rule's atoms over its relation,
-    /// the other atoms read as they are now), until a round derives nothing new. For set relations read positively
-    /// this reaches the naive iteration's fixpoint, with the same rows derived by each rule (a valuation's rows only
-    /// accumulate, and one whose newest row came at round k is found at round k + 1), doing each valuation's work
-    /// about once instead of once per round: a chain of n rows costs O(n), not O(n²).
+    /// A recursive stratum's fixpoint, semi-naively, doing what the naive iteration does round for round.
     ///
-    /// Each rule's derivations, or `None` when a valuation raised an error or the rounds reached the bound (CR-53):
-    /// what this derived is then taken back and the naive iteration decides, so a program error (BLSR007 included) is
-    /// reported as it always is. With no error raised by any valuation, none is raised at the fixpoint, so the naive
-    /// iteration's last strict round is not needed.
+    /// The naive iteration runs the rules in order, each over the stores as they are then (Gauss–Seidel), adding
+    /// what it derives at once. Here each rule runs in full the first time; after that it is driven only by the rows
+    /// that became present since it last ran (each such row drives the rule's atoms over its relation, the other
+    /// atoms read as they are now). A valuation of only older rows was found when the rule last ran, over stores
+    /// that held them, so the rule derives exactly what the naive iteration's full run derives at that point: the
+    /// stores go through the same states, every round changes what the naive round changes, and the round bound
+    /// (CR-53, BLSR007) is reached at the same round. The work is each valuation about once instead of once per
+    /// round: a chain of n rows costs O(n), not O(n²).
+    ///
+    /// Errors, as the naive iteration has them: a rule with a valuation that raises is skipped for the round (it
+    /// derives nothing), and since rows only accumulate that valuation stays, so it is skipped every round after
+    /// (here: not run again). At the fixpoint the naive iteration runs every rule once more with errors fatal; a rule
+    /// that never raised has had every valuation evaluated without error and derives nothing new, so only the first
+    /// rule that raised needs that run, which reports its error.
     fn semi_naive(
         &mut self,
         p: &Program,
         input: &StepInput<'_>,
         s: &Stratum,
-    ) -> Result<Option<BTreeMap<RuleId, BTreeSet<Row>>>, EvalError> {
+    ) -> Result<BTreeMap<RuleId, BTreeSet<Row>>, EvalError> {
         let tick = input.tick;
         let mut derived: BTreeMap<RuleId, BTreeSet<Row>> = BTreeMap::new();
-        // The rows of each head the stratum derived this tick, and those the last round derived first.
-        let mut seen: BTreeMap<StoreKey, BTreeSet<Row>> = BTreeMap::new();
-        let mut delta: BTreeMap<StoreKey, Vec<Row>> = BTreeMap::new();
-        let mut first = true;
+        // The rows of each head that became present during the iteration, in order; and, per rule, how far into each
+        // log it had read when it last ran (absent: it has not run).
+        let mut log: BTreeMap<StoreKey, Vec<Row>> = BTreeMap::new();
+        let mut read: BTreeMap<RuleId, BTreeMap<StoreKey, usize>> = BTreeMap::new();
+        let mut raised: BTreeSet<RuleId> = BTreeSet::new();
+        let mut strict = false;
         let mut rounds = 0u32;
-        let mut failed = false;
-        'rounds: loop {
-            let mut next: BTreeMap<StoreKey, Vec<Row>> = BTreeMap::new();
-            for id in &s.rules {
+        loop {
+            if strict {
+                // The naive iteration's last round: the first rule that raised reports its error.
+                let Some(id) = s.rules.iter().find(|id| raised.contains(id)) else { break };
                 let plan = self.plans.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?.clone();
                 let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
-                let terms = if first {
-                    self.evaluate(p, input, rule, &plan, true)?
-                } else {
-                    let mut drivers: Vec<(Driver, usize)> = Vec::new();
-                    for (lit, l) in rule.body.lits.iter().enumerate() {
-                        let Literal::Pos(a) = l else { continue };
-                        for row in delta.get(&rule::atom_store(a)).into_iter().flatten() {
-                            drivers.push((
-                                Driver::Atom {
-                                    lit,
-                                    row: row.clone(),
-                                    sign: 1,
-                                },
-                                usize::MAX,
-                            ));
+                let terms = self.evaluate(p, input, rule, &plan, true)?;
+                self.count(rule.id, terms.examined);
+                return match terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
+                    Some((_, (_, Some(e)))) => Err(to_eval(e, tick, Some(rule))),
+                    _ => Err(internal_error!("rule {id:?} raised during the iteration and not at its fixpoint").into()),
+                };
+            }
+            let mut changed = false;
+            for id in &s.rules {
+                if raised.contains(id) {
+                    continue;
+                }
+                let plan = self.plans.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?.clone();
+                let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
+                let now: BTreeMap<StoreKey, usize> = log.iter().map(|(k, rows)| (*k, rows.len())).collect();
+                let terms = match read.insert(*id, now) {
+                    None => self.evaluate(p, input, rule, &plan, true)?,
+                    Some(before) => {
+                        let mut drivers: Vec<(Driver, usize)> = Vec::new();
+                        for (lit, l) in rule.body.lits.iter().enumerate() {
+                            let Literal::Pos(a) = l else { continue };
+                            let key = rule::atom_store(a);
+                            let Some(rows) = log.get(&key) else { continue };
+                            let from = before.get(&key).copied().unwrap_or(0);
+                            for row in rows.get(from..).unwrap_or_default() {
+                                drivers.push((
+                                    Driver::Atom {
+                                        lit,
+                                        row: row.clone(),
+                                        sign: 1,
+                                    },
+                                    usize::MAX,
+                                ));
+                            }
                         }
+                        if drivers.is_empty() {
+                            continue;
+                        }
+                        self.run_drivers(p, input, rule, &plan, drivers)?
                     }
-                    if drivers.is_empty() {
-                        continue;
-                    }
-                    self.run_drivers(p, input, rule, &plan, drivers)?
                 };
                 self.count(rule.id, terms.examined);
                 if terms.errors.values().any(|(n, _)| *n > 0) {
-                    failed = true;
-                    break 'rounds;
+                    raised.insert(*id);
+                    continue;
                 }
                 let mine = derived.entry(*id).or_default();
                 for (row, w) in terms.heads {
                     if w > 0 && !mine.contains(&row) {
                         mine.insert(row.clone());
-                        self.store(plan.head)?.add(row.clone(), 1).map_err(|e| to_eval(e, tick, Some(rule)))?;
-                        if seen.entry(plan.head).or_default().insert(row.clone()) {
-                            next.entry(plan.head).or_default().push(row);
+                        let store = self.store(plan.head)?;
+                        let fresh = !store.contains(&row);
+                        store.add(row.clone(), 1).map_err(|e| to_eval(e, tick, Some(rule)))?;
+                        if fresh {
+                            changed = true;
+                            log.entry(plan.head).or_default().push(row);
                         }
                     }
                 }
                 self.settle(tick)?;
             }
-            first = false;
-            if next.is_empty() {
-                break;
-            }
-            delta = next;
+            strict = !changed;
             rounds += 1;
-            // A valuation using a row another rule derived earlier in the same round is found a round later than
-            // the naive iteration finds it, so this can take more rounds: the naive iteration decides the bound.
             if rounds >= self.max_rounds {
-                failed = true;
-                break;
+                let label = s.rules.first().and_then(|id| p.rules.get(*id)).map(|r| r.label.clone());
+                return Err(EvalError::Program {
+                    tick,
+                    error: ProgramErrorRecord {
+                        code: blossom_base::code!("BLSR007").as_str(),
+                        rule: label,
+                        detail: Arc::from(format!(
+                            "the fixpoint did not converge within {} rounds (CR-53)",
+                            self.max_rounds
+                        )),
+                    },
+                });
             }
         }
-        if !failed {
-            return Ok(Some(derived));
-        }
-        for (id, rows) in derived {
-            let head = self.plans.get(&id).map(|pl| pl.head).ok_or_else(|| internal_error!("rule {id:?}"))?;
-            let rule = p.rules.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?;
-            for row in rows {
-                self.store(head)?.add(row, -1).map_err(|e| to_eval(e, tick, Some(rule)))?;
-            }
-        }
-        self.settle(tick)?;
-        Ok(None)
+        Ok(derived)
     }
 
     fn check_keys(&self, p: &Program, tick: Tick) -> Result<(), EvalError> {

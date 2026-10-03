@@ -255,6 +255,11 @@ impl Store {
     }
 
     /// A counter that moves with every change to the present rows.
+    /// Whether `row` is present.
+    pub fn contains(&self, row: &Row) -> bool {
+        self.present.contains(row)
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }
