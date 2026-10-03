@@ -30,6 +30,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use blossom_node::streams::SeqWriter;
+
+use crate::clock::Stopwatch;
 use blossom_value::value::ConnId;
 
 /// The byte limits of a node's streams (the deployment's `[stream_limits]`).
@@ -113,23 +115,27 @@ impl Credit {
 
 /// The stream reports waiting for the engine, in order.
 pub(crate) struct StreamQueue {
-    q: Mutex<VecDeque<StreamData>>,
+    /// Each report with how long it has waited.
+    q: Mutex<VecDeque<(Stopwatch, StreamData)>>,
     /// The bytes of the queued `Bytes` reports.
     bytes: AtomicU64,
     closed: AtomicBool,
     /// Whether a wake-up is already on its way to the engine.
     wake_pending: AtomicBool,
     wake: Box<dyn Fn() + Send + Sync>,
+    /// Told how long each report waited, in nanoseconds, as the engine takes it.
+    waited: Box<dyn Fn(u64) + Send + Sync>,
 }
 
 impl StreamQueue {
-    pub(crate) fn new(wake: Box<dyn Fn() + Send + Sync>) -> StreamQueue {
+    pub(crate) fn new(wake: Box<dyn Fn() + Send + Sync>, waited: Box<dyn Fn(u64) + Send + Sync>) -> StreamQueue {
         StreamQueue {
             q: Mutex::new(VecDeque::new()),
             bytes: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             wake_pending: AtomicBool::new(false),
             wake,
+            waited,
         }
     }
 
@@ -144,7 +150,7 @@ impl StreamQueue {
         if let StreamData::Bytes { bytes, .. } = &d {
             self.bytes.fetch_add(bytes.len() as u64, Ordering::SeqCst);
         }
-        q.push_back(d);
+        q.push_back((Stopwatch::start(), d));
         drop(q);
         if !self.wake_pending.swap(true, Ordering::SeqCst) {
             (self.wake)();
@@ -161,7 +167,7 @@ impl StreamQueue {
         };
         let mut left = budget;
         let mut out = Vec::new();
-        while let Some(front) = q.front() {
+        while let Some((_, front)) = q.front() {
             let n = match front {
                 StreamData::Bytes { bytes, .. } => bytes.len() as u64,
                 _ => 0,
@@ -171,7 +177,8 @@ impl StreamQueue {
             }
             left = left.saturating_sub(n);
             self.bytes.fetch_sub(n, Ordering::SeqCst);
-            if let Some(d) = q.pop_front() {
+            if let Some((waited, d)) = q.pop_front() {
+                (self.waited)(waited.nanos());
                 out.push(d);
             }
         }
@@ -180,7 +187,7 @@ impl StreamQueue {
 
     /// Whether a report waits that `budget` lets the engine take.
     pub(crate) fn takeable(&self, budget: u64) -> bool {
-        self.q.lock().is_ok_and(|q| match q.front() {
+        self.q.lock().is_ok_and(|q| match q.front().map(|(_, d)| d) {
             Some(StreamData::Bytes { .. }) => budget > 0,
             Some(_) => true,
             None => false,
@@ -645,7 +652,7 @@ mod tests {
         let (server, _) = listener.accept().unwrap();
         let env = Env {
             conns: Arc::new(StreamConns::new(0, limits, Arc::new(StreamStats::default()))),
-            queue: Arc::new(StreamQueue::new(Box::new(|| {}))),
+            queue: Arc::new(StreamQueue::new(Box::new(|| {}), Box::new(|_| {}))),
             stop: Arc::new(AtomicBool::new(false)),
         };
         start(server, 0, None, &env).unwrap();

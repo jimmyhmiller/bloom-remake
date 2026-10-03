@@ -14,7 +14,8 @@ use std::sync::Arc;
 use blossom_artifact::bls::BlsArtifact;
 use blossom_base::{FnId, RelId, RuleId};
 use blossom_ir::tick::{
-    Changes, Delivery, EvalError, FnWork, Ingress, Instance, Row, RuleWork, Send, StepInput, TickInput, TickOutput,
+    Changes, Delivery, EvalError, FnWork, HostOut, Ingress, Instance, Row, RuleWork, Send, StepInput, TickInput,
+    TickOutput,
 };
 use blossom_node::{Backend, Executor, Executors};
 use blossom_oracle::Oracle;
@@ -59,6 +60,8 @@ pub struct Replayed {
     pub failed: Option<String>,
     /// What it sent to other nodes.
     pub sent: Vec<Send>,
+    /// What it asked of the host (stream writes, closes, dials).
+    pub host: Vec<HostOut>,
     /// The rows at the end of the tick of the relations observed ([`Replay::observe`]).
     pub observed: BTreeMap<RelId, Vec<Row>>,
     /// The work of each rule in the tick (rows examined, expression nodes evaluated), when profiling
@@ -323,6 +326,7 @@ impl<R: Read> Replay<R> {
                     changes: Some(out.changes),
                     failed: None,
                     sent: out.outbox.into_iter().collect(),
+                    host: out.host.into_iter().collect(),
                     observed: out.observed,
                     work,
                     fn_work,
@@ -336,6 +340,7 @@ impl<R: Read> Replay<R> {
                     changes: Some(out.changes),
                     failed: None,
                     sent: out.outbox.into_iter().collect(),
+                    host: out.host.into_iter().collect(),
                     observed: out.observed,
                     work,
                     fn_work,
@@ -351,6 +356,7 @@ impl<R: Read> Replay<R> {
                 changes: None,
                 failed: Some(error),
                 sent: Vec::new(),
+                host: Vec::new(),
                 observed: BTreeMap::new(),
                 work,
                 fn_work,
