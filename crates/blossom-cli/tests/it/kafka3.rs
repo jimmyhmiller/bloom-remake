@@ -1087,7 +1087,8 @@ fn dir_file(cluster: &Cluster, name: &str, content: &str) -> PathBuf {
 /// Java's `String.hashCode`, over UTF-16 code units.
 #[cfg(test)]
 fn java_hash(s: &str) -> i32 {
-    s.encode_utf16().fold(0i32, |h, u| h.wrapping_mul(31).wrapping_add(i32::from(u)))
+    s.encode_utf16()
+        .fold(0i32, |h, u| h.wrapping_mul(31).wrapping_add(i32::from(u)))
 }
 
 /// Each group's committed offset per partition of `topic`, from `kafka-consumer-groups.sh --describe`'s lines.
@@ -1105,7 +1106,7 @@ fn group_offsets(text: &str, topic: &str) -> BTreeMap<i32, i64> {
 /// `kafka-consumer-groups.sh` lists and describes the group with its offsets; with the group's coordinator killed
 /// (kill -9), the group's next consumer reads only the messages after the committed offsets, from the new
 /// coordinator; kcat (librdkafka, the legacy versions) consumes in a group and resumes from its commits; franz-go's
-/// group consumer shares a topic between two members and commits.
+/// group consumer, and a Java program with two KafkaConsumers, share a topic between two members and commit.
 #[test]
 fn consumer_groups_with_stock_clients_across_a_coordinator_failure() {
     let _one = crate::one_cluster();
@@ -1119,11 +1120,24 @@ fn consumer_groups_with_stock_clients_across_a_coordinator_failure() {
     let bootstrap = all.join(",");
     let topics = |args: &[&str], at: &str| {
         run_tool(
-            Command::new(bin.join("kafka-topics.sh")).args(["--bootstrap-server", at]).args(args),
+            Command::new(bin.join("kafka-topics.sh"))
+                .args(["--bootstrap-server", at])
+                .args(args),
             &format!("kafka-topics.sh {args:?}"),
         )
     };
-    let created = topics(&["--create", "--topic", "events", "--partitions", "3", "--replication-factor", "3"], &bootstrap);
+    let created = topics(
+        &[
+            "--create",
+            "--topic",
+            "events",
+            "--partitions",
+            "3",
+            "--replication-factor",
+            "3",
+        ],
+        &bootstrap,
+    );
     assert!(created.contains("Created topic events."), "{created}");
     let produce = |msgs: &[String], at: &str| {
         let out = run_with_input(
@@ -1153,7 +1167,10 @@ fn consumer_groups_with_stock_clients_across_a_coordinator_failure() {
         } else {
             cmd.args(["--consumer-property", "auto.offset.reset=earliest"]);
         }
-        let mut got: Vec<String> = run_tool(&mut cmd, "the console consumer in a group").lines().map(str::to_owned).collect();
+        let mut got: Vec<String> = run_tool(&mut cmd, "the console consumer in a group")
+            .lines()
+            .map(str::to_owned)
+            .collect();
         got.sort();
         got
     };
@@ -1162,12 +1179,18 @@ fn consumer_groups_with_stock_clients_across_a_coordinator_failure() {
         v.sort();
         v
     };
-    assert_eq!(consume("cg", &bootstrap, 30, true), sorted(&first), "the group read the topic");
+    assert_eq!(
+        consume("cg", &bootstrap, 30, true),
+        sorted(&first),
+        "the group read the topic"
+    );
 
     // The group, its offsets committed (each partition at its log end).
     let groups = |args: &[&str], at: &str| {
         run_tool(
-            Command::new(bin.join("kafka-consumer-groups.sh")).args(["--bootstrap-server", at]).args(args),
+            Command::new(bin.join("kafka-consumer-groups.sh"))
+                .args(["--bootstrap-server", at])
+                .args(args),
             &format!("kafka-consumer-groups.sh {args:?}"),
         )
     };
@@ -1177,11 +1200,20 @@ fn consumer_groups_with_stock_clients_across_a_coordinator_failure() {
     assert_eq!(offsets.values().sum::<i64>(), 30, "the committed offsets: {offsets:?}");
 
     // The coordinator: the leader of the group's __consumer_offsets partition. Killed, the group moves.
-    let part = (if java_hash("cg") == i32::MIN { 0 } else { java_hash("cg").abs() }) % 5;
+    let part = (if java_hash("cg") == i32::MIN {
+        0
+    } else {
+        java_hash("cg").abs()
+    }) % 5;
     let d = described(&topics(&["--describe", "--topic", "__consumer_offsets"], &bootstrap));
     let victim = (d[&part].0 - 1) as usize;
     cluster.kill(victim);
-    let live: Vec<String> = all.iter().enumerate().filter(|(i, _)| *i != victim).map(|(_, a)| a.clone()).collect();
+    let live: Vec<String> = all
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != victim)
+        .map(|(_, a)| a.clone())
+        .collect();
     let live = live.join(",");
     let second: Vec<String> = (30..40).map(|i| format!("event {i}")).collect();
     produce(&second, &live);
@@ -1212,7 +1244,11 @@ fn consumer_groups_with_stock_clients_across_a_coordinator_failure() {
         assert_eq!(kcat_group(true), sorted(&every), "kcat read the topic in a group");
         let third: Vec<String> = (40..45).map(|i| format!("event {i}")).collect();
         produce(&third, &bootstrap);
-        assert_eq!(kcat_group(false), sorted(&third), "kcat resumed from its group's committed offsets");
+        assert_eq!(
+            kcat_group(false),
+            sorted(&third),
+            "kcat resumed from its group's committed offsets"
+        );
         let listed = groups(&["--list"], &bootstrap);
         assert!(listed.lines().any(|l| l.trim() == "kg"), "{listed}");
     } else {
@@ -1221,9 +1257,28 @@ fn consumer_groups_with_stock_clients_across_a_coordinator_failure() {
 
     if let Some(go) = on_path("go") {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/integration/fixtures/kafka/franz");
-        let out = run_tool(Command::new(go).args(["run", ".", "group", &bootstrap]).current_dir(&dir), "franz-go group");
+        let out = run_tool(
+            Command::new(go)
+                .args(["run", ".", "group", &bootstrap])
+                .current_dir(&dir),
+            "franz-go group",
+        );
         assert!(out.contains("ok group 200 then 20 records"), "{out}");
     } else {
         skipped("Go is not installed");
     }
+
+    // A Java program with Kafka's own client: two KafkaConsumers share the group, committing synchronously.
+    let libs = bin.join("../libs");
+    let program =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/integration/fixtures/kafka/java/GroupConsumers.java");
+    let out = run_tool(
+        Command::new("java")
+            .arg("-cp")
+            .arg(format!("{}/*", libs.display()))
+            .arg(&program)
+            .arg(&bootstrap),
+        "the Java group program",
+    );
+    assert!(out.contains("ok java group 300 then 20 records"), "{out}");
 }
