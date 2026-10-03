@@ -253,6 +253,9 @@ struct Member {
     start: i64,
     leave_at: Option<i64>,
     die_at: Option<i64>,
+    /// An observer only fetches the group's committed offsets, often, wherever the coordinator is (as an admin tool
+    /// does): it reads at a coordinator that has just taken over.
+    observer: bool,
 }
 
 #[cfg(test)]
@@ -283,6 +286,7 @@ impl Member {
             start,
             leave_at: None,
             die_at: None,
+            observer: false,
         }
     }
 
@@ -517,7 +521,12 @@ impl Member {
                                     .with_partition_indexes(all),
                             ]))
                     };
-                    self.next_fetch = now + 400 * MS + self.rng.below(300) as i64 * MS;
+                    self.next_fetch = now
+                        + if self.observer {
+                            50 * MS
+                        } else {
+                            400 * MS + self.rng.below(300) as i64 * MS
+                        };
                     self.send(
                         now,
                         a,
@@ -526,7 +535,7 @@ impl Member {
                         REQUEST_TIMEOUT,
                         Vec::new(),
                     );
-                } else if now >= self.next_beat {
+                } else if now >= self.next_beat && !self.observer {
                     let req = HeartbeatRequest::default()
                         .with_group_id(GroupId(sb(GROUP)))
                         .with_generation_id(self.generation)
@@ -616,7 +625,7 @@ impl Member {
                         return Err(format!("FindCoordinator named broker {node}, which does not exist"));
                     };
                     self.coordinator = Some(n);
-                    self.phase = Phase::Join;
+                    self.phase = if self.observer { Phase::Steady } else { Phase::Join };
                     if self.conn != Some(n) {
                         self.close(a);
                     }
@@ -733,7 +742,9 @@ impl Member {
                 }
                 drop(sh);
                 match worst {
-                    NONE => {}
+                    // Read what was just written: the next request is a fetch (the window between a commit's
+                    // acknowledgement and its materialization).
+                    NONE => self.next_fetch = now,
                     REBALANCE_IN_PROGRESS | ILLEGAL_GENERATION => self.rejoin(),
                     UNKNOWN_MEMBER_ID => {
                         self.member_id.clear();
@@ -984,8 +995,9 @@ fn check_groups(seeds: std::ops::RangeInclusive<u64>, faults: bool) -> u64 {
         cluster.observe(observer);
         let shared = Rc::new(RefCell::new(Shared::default()));
         // Members join over the first seconds; member 1 leaves at 7 s, member 2 dies at 8 s.
-        for (me, start) in [(0u64, 300), (1, 800), (2, 2500), (3, 4000)] {
+        for (me, start) in [(0u64, 300), (1, 800), (2, 2500), (3, 4000), (4, 1000)] {
             let mut m = Member::new(me, seed, shared.clone(), brokers.clone(), start * MS);
+            m.observer = me == 4;
             if me == 1 {
                 m.leave_at = Some(7000 * MS);
             }
