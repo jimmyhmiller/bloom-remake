@@ -2262,3 +2262,1012 @@ fn hostile_lengths_are_malformed_requests_not_faults() {
         opt(Some(strukt(vec![opt(None), Value::Bool(true), Value::Bool(true)])))
     );
 }
+
+// ---------------------------------------------------------------- the consumer group APIs (S9)
+
+/// An OffsetCommit topic (name; partition, offset, leader epoch, metadata), an OffsetFetch group asked about (with
+/// its topics' partitions, none for all), an OffsetFetch answer's partition and group.
+#[cfg(test)]
+type CommitTopic = (String, Vec<(i32, i64, i32, Option<String>)>);
+#[cfg(test)]
+type FetchAsk = (String, Option<Vec<(String, Vec<i32>)>>);
+#[cfg(test)]
+type Part = (i32, i64, i32, Option<String>, i16);
+#[cfg(test)]
+type FetchedGroupT = (String, i16, Vec<(String, Vec<Part>)>);
+
+#[cfg(test)]
+fn tup(xs: Vec<Value>) -> Value {
+    Value::Tuple(xs.into())
+}
+#[cfg(test)]
+fn vecv(xs: Vec<Value>) -> Value {
+    Value::Vec(xs.into())
+}
+#[cfg(test)]
+fn i64v(x: i64) -> Value {
+    Value::Int(IntValue::I64(x))
+}
+#[cfg(test)]
+fn sb(x: &str) -> StrBytes {
+    StrBytes::from_string(x.to_owned())
+}
+#[cfg(test)]
+fn sbo(x: &Option<String>) -> Option<StrBytes> {
+    x.as_deref().map(sb)
+}
+#[cfg(test)]
+fn so(x: &Option<String>) -> Value {
+    opt(x.as_deref().map(s))
+}
+#[cfg(test)]
+fn str_of(x: &StrBytes) -> String {
+    x.to_string()
+}
+#[cfg(test)]
+fn stro(x: &Option<StrBytes>) -> Option<String> {
+    x.as_ref().map(|y| y.to_string())
+}
+
+#[cfg(test)]
+impl Rng {
+    fn maybe(&mut self) -> Option<String> {
+        if self.below(3) == 0 { None } else { Some(self.text()) }
+    }
+    fn blob(&mut self) -> Vec<u8> {
+        (0..self.below(20)).map(|_| self.next() as u8).collect()
+    }
+}
+
+/// The group APIs at every version Kafka 4.0 has (S9.md D1): requests the Rust implementation encodes decode in
+/// Blossom to the fields it was given (and encode back to the same bytes); answers Blossom encodes decode in the Rust
+/// implementation to the fields Blossom was given, with nothing left over.
+#[test]
+fn group_requests_decode_and_answers_encode() {
+    use kafka_protocol::messages::find_coordinator_response::Coordinator;
+    use kafka_protocol::messages::join_group_request::JoinGroupRequestProtocol;
+    use kafka_protocol::messages::leave_group_request::MemberIdentity;
+    use kafka_protocol::messages::offset_commit_request::{OffsetCommitRequestPartition, OffsetCommitRequestTopic};
+    use kafka_protocol::messages::offset_fetch_request::{
+        OffsetFetchRequestGroup, OffsetFetchRequestTopic, OffsetFetchRequestTopics,
+    };
+    use kafka_protocol::messages::sync_group_request::SyncGroupRequestAssignment;
+    use kafka_protocol::messages::{
+        DescribeGroupsRequest, DescribeGroupsResponse, FindCoordinatorRequest, FindCoordinatorResponse, GroupId,
+        HeartbeatRequest, HeartbeatResponse, JoinGroupRequest, JoinGroupResponse, LeaveGroupRequest,
+        LeaveGroupResponse, ListGroupsRequest, ListGroupsResponse, OffsetCommitRequest, OffsetCommitResponse,
+        OffsetFetchRequest, OffsetFetchResponse, SyncGroupRequest, SyncGroupResponse,
+    };
+    let _ = Coordinator::default();
+    let artifact = compile();
+    let mut rng = Rng(90);
+    let mut inputs = Vec::new();
+    // (view, frame, summary): every request's expected decoding.
+    let mut want: Vec<(&str, Vec<u8>, Value)> = Vec::new();
+    let mut add = |inputs: &mut Vec<InputEvent>, view: &'static str, frame: Vec<u8>, summary: Value| {
+        inputs.push(input(&artifact, "greq", vec![bytes(&frame)]));
+        want.push((view, frame, summary));
+    };
+    for round in 0..4 {
+        let corr = round;
+        for v in 0..=6i16 {
+            let kt = if v >= 1 { rng.below(3) as i8 } else { 0 };
+            let keys: Vec<String> = if v >= 4 {
+                (0..1 + rng.below(3)).map(|_| rng.text()).collect()
+            } else {
+                vec![rng.text()]
+            };
+            let mut r = FindCoordinatorRequest::default().with_key_type(kt);
+            if v >= 4 {
+                r = r.with_coordinator_keys(keys.iter().map(|k| sb(k)).collect());
+            } else {
+                r = r.with_key(sb(&keys[0]));
+            }
+            let f = encode_request(10, v, corr, Some("g"), &r);
+            add(
+                &mut inputs,
+                "v_find",
+                f,
+                tup(vec![vecv(keys.iter().map(|k| s(k)).collect()), i8v(kt)]),
+            );
+        }
+        for v in 2..=9i16 {
+            let instance = if v >= 5 { rng.maybe() } else { None };
+            let reason = if v >= 8 { rng.maybe() } else { None };
+            let protos: Vec<(String, Vec<u8>)> = (0..rng.below(3)).map(|_| (rng.text(), rng.blob())).collect();
+            let (group, member, ptype) = (rng.text(), rng.text(), rng.text());
+            let (session, rebalance) = (rng.next() as i32, rng.next() as i32);
+            let r = JoinGroupRequest::default()
+                .with_group_id(GroupId(sb(&group)))
+                .with_session_timeout_ms(session)
+                .with_rebalance_timeout_ms(rebalance)
+                .with_member_id(sb(&member))
+                .with_group_instance_id(sbo(&instance))
+                .with_protocol_type(sb(&ptype))
+                .with_protocols(
+                    protos
+                        .iter()
+                        .map(|(n, m)| {
+                            JoinGroupRequestProtocol::default()
+                                .with_name(sb(n))
+                                .with_metadata(Bytes::copy_from_slice(m))
+                        })
+                        .collect(),
+                )
+                .with_reason(sbo(&reason));
+            let x = tup(vec![
+                s(&group),
+                i32v(session),
+                i32v(rebalance),
+                s(&member),
+                so(&instance),
+                s(&ptype),
+                vecv(protos.iter().map(|(n, m)| tup(vec![s(n), bytes(m)])).collect()),
+                so(&reason),
+            ]);
+            add(&mut inputs, "v_join", encode_request(11, v, corr, Some("g"), &r), x);
+        }
+        for v in 0..=5i16 {
+            let instance = if v >= 3 { rng.maybe() } else { None };
+            let (ptype, pname) = if v >= 5 {
+                (rng.maybe(), rng.maybe())
+            } else {
+                (None, None)
+            };
+            let asg: Vec<(String, Vec<u8>)> = (0..rng.below(3)).map(|_| (rng.text(), rng.blob())).collect();
+            let (group, member, generation) = (rng.text(), rng.text(), rng.next() as i32);
+            let r = SyncGroupRequest::default()
+                .with_group_id(GroupId(sb(&group)))
+                .with_generation_id(generation)
+                .with_member_id(sb(&member))
+                .with_group_instance_id(sbo(&instance))
+                .with_protocol_type(sbo(&ptype))
+                .with_protocol_name(sbo(&pname))
+                .with_assignments(
+                    asg.iter()
+                        .map(|(m, a)| {
+                            SyncGroupRequestAssignment::default()
+                                .with_member_id(sb(m))
+                                .with_assignment(Bytes::copy_from_slice(a))
+                        })
+                        .collect(),
+                );
+            let x = tup(vec![
+                s(&group),
+                i32v(generation),
+                s(&member),
+                so(&instance),
+                so(&ptype),
+                so(&pname),
+                vecv(asg.iter().map(|(m, a)| tup(vec![s(m), bytes(a)])).collect()),
+            ]);
+            add(&mut inputs, "v_sync", encode_request(14, v, corr, Some("g"), &r), x);
+        }
+        for v in 0..=4i16 {
+            let instance = if v >= 3 { rng.maybe() } else { None };
+            let (group, member, generation) = (rng.text(), rng.text(), rng.next() as i32);
+            let r = HeartbeatRequest::default()
+                .with_group_id(GroupId(sb(&group)))
+                .with_generation_id(generation)
+                .with_member_id(sb(&member))
+                .with_group_instance_id(sbo(&instance));
+            let x = tup(vec![s(&group), i32v(generation), s(&member), so(&instance)]);
+            add(&mut inputs, "v_hb", encode_request(12, v, corr, Some("g"), &r), x);
+        }
+        for v in 0..=5i16 {
+            let group = rng.text();
+            let members: Vec<(String, Option<String>, Option<String>)> = if v >= 3 {
+                (0..1 + rng.below(3))
+                    .map(|_| (rng.text(), rng.maybe(), if v >= 5 { rng.maybe() } else { None }))
+                    .collect()
+            } else {
+                vec![(rng.text(), None, None)]
+            };
+            let mut r = LeaveGroupRequest::default().with_group_id(GroupId(sb(&group)));
+            if v >= 3 {
+                r = r.with_members(
+                    members
+                        .iter()
+                        .map(|(m, i, why)| {
+                            MemberIdentity::default()
+                                .with_member_id(sb(m))
+                                .with_group_instance_id(sbo(i))
+                                .with_reason(sbo(why))
+                        })
+                        .collect(),
+                );
+            } else {
+                r = r.with_member_id(sb(&members[0].0));
+            }
+            let x = tup(vec![
+                s(&group),
+                vecv(members.iter().map(|(m, i, _)| tup(vec![s(m), so(i)])).collect()),
+            ]);
+            add(&mut inputs, "v_leave", encode_request(13, v, corr, Some("g"), &r), x);
+        }
+        for v in 2..=9i16 {
+            let instance = if v >= 7 { rng.maybe() } else { None };
+            let (group, member, generation) = (rng.text(), rng.text(), rng.next() as i32);
+            let topics: Vec<CommitTopic> = (0..rng.below(3))
+                .map(|_| {
+                    let ps = (0..rng.below(3))
+                        .map(|_| {
+                            let epoch = if v >= 6 { rng.next() as i32 } else { -1 };
+                            (rng.next() as i32, rng.next() as i64, epoch, rng.maybe())
+                        })
+                        .collect();
+                    (rng.text(), ps)
+                })
+                .collect();
+            let mut r = OffsetCommitRequest::default()
+                .with_group_id(GroupId(sb(&group)))
+                .with_generation_id_or_member_epoch(generation)
+                .with_member_id(sb(&member))
+                .with_group_instance_id(sbo(&instance))
+                .with_topics(
+                    topics
+                        .iter()
+                        .map(|(n, ps)| {
+                            OffsetCommitRequestTopic::default()
+                                .with_name(TopicName(sb(n)))
+                                .with_partitions(
+                                    ps.iter()
+                                        .map(|(p, o, e, m)| {
+                                            OffsetCommitRequestPartition::default()
+                                                .with_partition_index(*p)
+                                                .with_committed_offset(*o)
+                                                .with_committed_leader_epoch(*e)
+                                                .with_committed_metadata(sbo(m))
+                                        })
+                                        .collect(),
+                                )
+                        })
+                        .collect(),
+                );
+            if v <= 4 {
+                r = r.with_retention_time_ms(rng.next() as i64);
+            }
+            let entries: Vec<Value> = topics
+                .iter()
+                .flat_map(|(n, ps)| {
+                    ps.iter()
+                        .map(move |(p, o, e, m)| tup(vec![s(n), i32v(*p), i64v(*o), i32v(*e), so(m)]))
+                })
+                .collect();
+            let x = tup(vec![
+                s(&group),
+                i32v(generation),
+                s(&member),
+                so(&instance),
+                vecv(entries),
+            ]);
+            add(&mut inputs, "v_commit", encode_request(8, v, corr, Some("g"), &r), x);
+        }
+        for v in 1..=9i16 {
+            let stable = v >= 7 && rng.below(2) == 0;
+            let groups: Vec<FetchAsk> = (0..if v >= 8 { 1 + rng.below(3) } else { 1 })
+                .map(|_| {
+                    let ts = if v >= 2 && rng.below(3) == 0 {
+                        None
+                    } else {
+                        Some(
+                            (0..rng.below(3))
+                                .map(|_| (rng.text(), (0..rng.below(3)).map(|_| rng.next() as i32).collect()))
+                                .collect(),
+                        )
+                    };
+                    (rng.text(), ts)
+                })
+                .collect();
+            let mut r = OffsetFetchRequest::default().with_require_stable(stable);
+            if v >= 8 {
+                r = r.with_groups(
+                    groups
+                        .iter()
+                        .map(|(g, ts)| {
+                            OffsetFetchRequestGroup::default()
+                                .with_group_id(GroupId(sb(g)))
+                                .with_topics(ts.as_ref().map(|ts| {
+                                    ts.iter()
+                                        .map(|(n, ps)| {
+                                            OffsetFetchRequestTopics::default()
+                                                .with_name(TopicName(sb(n)))
+                                                .with_partition_indexes(ps.clone())
+                                        })
+                                        .collect()
+                                }))
+                        })
+                        .collect(),
+                );
+            } else {
+                let (g, ts) = &groups[0];
+                r = r.with_group_id(GroupId(sb(g))).with_topics(ts.as_ref().map(|ts| {
+                    ts.iter()
+                        .map(|(n, ps)| {
+                            OffsetFetchRequestTopic::default()
+                                .with_name(TopicName(sb(n)))
+                                .with_partition_indexes(ps.clone())
+                        })
+                        .collect()
+                }));
+            }
+            let x = tup(vec![
+                vecv(
+                    groups
+                        .iter()
+                        .map(|(g, ts)| {
+                            tup(vec![
+                                s(g),
+                                opt(ts.as_ref().map(|ts| {
+                                    vecv(
+                                        ts.iter()
+                                            .map(|(n, ps)| tup(vec![s(n), vecv(ps.iter().map(|p| i32v(*p)).collect())]))
+                                            .collect(),
+                                    )
+                                })),
+                            ])
+                        })
+                        .collect(),
+                ),
+                Value::Bool(stable),
+            ]);
+            add(&mut inputs, "v_ofetch", encode_request(9, v, corr, Some("g"), &r), x);
+        }
+        for v in 0..=6i16 {
+            let ops = v >= 3 && rng.below(2) == 0;
+            let groups: Vec<String> = (0..rng.below(4)).map(|_| rng.text()).collect();
+            let r = DescribeGroupsRequest::default()
+                .with_groups(groups.iter().map(|g| GroupId(sb(g))).collect())
+                .with_include_authorized_operations(ops);
+            let x = tup(vec![vecv(groups.iter().map(|g| s(g)).collect()), Value::Bool(ops)]);
+            add(&mut inputs, "v_dgroups", encode_request(15, v, corr, Some("g"), &r), x);
+        }
+        for v in 0..=5i16 {
+            let states: Vec<String> = if v >= 4 {
+                (0..rng.below(3)).map(|_| rng.text()).collect()
+            } else {
+                vec![]
+            };
+            let types: Vec<String> = if v >= 5 {
+                (0..rng.below(3)).map(|_| rng.text()).collect()
+            } else {
+                vec![]
+            };
+            let r = ListGroupsRequest::default()
+                .with_states_filter(states.iter().map(|x| sb(x)).collect())
+                .with_types_filter(types.iter().map(|x| sb(x)).collect());
+            let x = tup(vec![
+                vecv(states.iter().map(|x| s(x)).collect()),
+                vecv(types.iter().map(|x| s(x)).collect()),
+            ]);
+            add(&mut inputs, "v_lgroups", encode_request(16, v, corr, Some("g"), &r), x);
+        }
+    }
+
+    // Answers to encode. Each has a distinct correlation id; `check` decodes it in the Rust implementation.
+    type Check = Box<dyn Fn(Bytes)>;
+    let mut checks: Vec<(i32, Check)> = Vec::new();
+    let mut corr = 1000i32;
+    let errs = [0i16, 15, 16, 25, 27, 79];
+    for round in 0..3 {
+        for v in 0..=6i16 {
+            corr += 1;
+            let n = if v >= 4 { 1 + rng.below(3) } else { 1 };
+            let answers: Vec<(String, i16, i32, String, i32)> = (0..n)
+                .map(|_| {
+                    (
+                        rng.text(),
+                        *rng.pick_i16(&errs),
+                        (rng.next() % 9) as i32,
+                        rng.text(),
+                        (rng.next() % 9000) as i32,
+                    )
+                })
+                .collect();
+            inputs.push(input(
+                &artifact,
+                "g_find",
+                vec![
+                    i32v(corr),
+                    i16v(v),
+                    vecv(
+                        answers
+                            .iter()
+                            .map(|a| tup(vec![s(&a.0), i16v(a.1), i32v(a.2), s(&a.3), i32v(a.4)]))
+                            .collect(),
+                    ),
+                ],
+            ));
+            checks.push((
+                corr,
+                Box::new(move |mut b| {
+                    let _ = ResponseHeader::decode(&mut b, FindCoordinatorResponse::header_version(v)).unwrap();
+                    let r = FindCoordinatorResponse::decode(&mut b, v).unwrap();
+                    assert!(b.is_empty(), "FindCoordinator v{v}: trailing bytes");
+                    if v >= 4 {
+                        let got: Vec<(String, i16, i32, String, i32)> = r
+                            .coordinators
+                            .iter()
+                            .map(|c| (str_of(&c.key), c.error_code, c.node_id.0, str_of(&c.host), c.port))
+                            .collect();
+                        assert_eq!(got, answers, "FindCoordinator v{v}");
+                        assert!(
+                            r.coordinators
+                                .iter()
+                                .all(|c| c.error_message.is_some() == (c.error_code != 0))
+                        );
+                    } else {
+                        let a = &answers[0];
+                        assert_eq!(
+                            (r.error_code, r.node_id.0, str_of(&r.host), r.port),
+                            (a.1, a.2, a.3.clone(), a.4),
+                            "FindCoordinator v{v}"
+                        );
+                        if v >= 1 {
+                            assert_eq!(r.error_message.is_some(), a.1 != 0);
+                        }
+                    }
+                }),
+            ));
+        }
+        for v in 2..=9i16 {
+            corr += 1;
+            let (e, generation) = (*rng.pick_i16(&errs), rng.next() as i32);
+            let ptype = if v >= 7 { rng.maybe() } else { None };
+            let proto = rng.maybe();
+            let (leader, member) = (rng.text(), rng.text());
+            let members: Vec<(String, Option<String>, Vec<u8>)> = (0..rng.below(3))
+                .map(|_| (rng.text(), if v >= 5 { rng.maybe() } else { None }, rng.blob()))
+                .collect();
+            inputs.push(input(
+                &artifact,
+                "g_join",
+                vec![
+                    i32v(corr),
+                    i16v(v),
+                    i16v(e),
+                    i32v(generation),
+                    so(&ptype),
+                    so(&proto),
+                    s(&leader),
+                    s(&member),
+                    vecv(
+                        members
+                            .iter()
+                            .map(|m| tup(vec![s(&m.0), so(&m.1), bytes(&m.2)]))
+                            .collect(),
+                    ),
+                ],
+            ));
+            checks.push((
+                corr,
+                Box::new(move |mut b| {
+                    let _ = ResponseHeader::decode(&mut b, JoinGroupResponse::header_version(v)).unwrap();
+                    let r = JoinGroupResponse::decode(&mut b, v).unwrap();
+                    assert!(b.is_empty(), "JoinGroup v{v}: trailing bytes");
+                    // Before v7 the protocol name is not nullable: a missing one is written empty.
+                    let want_proto = if v >= 7 {
+                        proto.clone()
+                    } else {
+                        Some(proto.clone().unwrap_or_default())
+                    };
+                    let got_members: Vec<(String, Option<String>, Vec<u8>)> = r
+                        .members
+                        .iter()
+                        .map(|m| (str_of(&m.member_id), stro(&m.group_instance_id), m.metadata.to_vec()))
+                        .collect();
+                    assert_eq!(
+                        (
+                            r.error_code,
+                            r.generation_id,
+                            stro(&r.protocol_type),
+                            stro(&r.protocol_name),
+                            str_of(&r.leader),
+                            str_of(&r.member_id),
+                            got_members,
+                            r.skip_assignment
+                        ),
+                        (
+                            e,
+                            generation,
+                            ptype.clone(),
+                            want_proto,
+                            leader.clone(),
+                            member.clone(),
+                            members.clone(),
+                            false
+                        ),
+                        "JoinGroup v{v}"
+                    );
+                }),
+            ));
+        }
+        for v in 0..=5i16 {
+            corr += 1;
+            let e = *rng.pick_i16(&errs);
+            let (ptype, proto) = if v >= 5 {
+                (rng.maybe(), rng.maybe())
+            } else {
+                (None, None)
+            };
+            let a = rng.blob();
+            inputs.push(input(
+                &artifact,
+                "g_sync",
+                vec![i32v(corr), i16v(v), i16v(e), so(&ptype), so(&proto), bytes(&a)],
+            ));
+            checks.push((
+                corr,
+                Box::new(move |mut b| {
+                    let _ = ResponseHeader::decode(&mut b, SyncGroupResponse::header_version(v)).unwrap();
+                    let r = SyncGroupResponse::decode(&mut b, v).unwrap();
+                    assert!(b.is_empty(), "SyncGroup v{v}: trailing bytes");
+                    assert_eq!(
+                        (
+                            r.error_code,
+                            stro(&r.protocol_type),
+                            stro(&r.protocol_name),
+                            r.assignment.to_vec()
+                        ),
+                        (e, ptype.clone(), proto.clone(), a.clone()),
+                        "SyncGroup v{v}"
+                    );
+                }),
+            ));
+        }
+        for v in 0..=4i16 {
+            corr += 1;
+            let e = *rng.pick_i16(&errs);
+            inputs.push(input(&artifact, "g_hb", vec![i32v(corr), i16v(v), i16v(e)]));
+            checks.push((
+                corr,
+                Box::new(move |mut b| {
+                    let _ = ResponseHeader::decode(&mut b, HeartbeatResponse::header_version(v)).unwrap();
+                    let r = HeartbeatResponse::decode(&mut b, v).unwrap();
+                    assert!(b.is_empty(), "Heartbeat v{v}: trailing bytes");
+                    assert_eq!(r.error_code, e, "Heartbeat v{v}");
+                }),
+            ));
+        }
+        for v in 0..=5i16 {
+            corr += 1;
+            let top = if round == 0 { 16 } else { 0 };
+            let members: Vec<(String, Option<String>)> = if v >= 3 {
+                (0..1 + rng.below(3)).map(|_| (rng.text(), rng.maybe())).collect()
+            } else {
+                vec![(rng.text(), None)]
+            };
+            let es: Vec<i16> = members.iter().map(|_| *rng.pick_i16(&errs)).collect();
+            inputs.push(input(
+                &artifact,
+                "g_leave",
+                vec![
+                    i32v(corr),
+                    i16v(v),
+                    i16v(top),
+                    vecv(members.iter().map(|m| tup(vec![s(&m.0), so(&m.1)])).collect()),
+                    vecv(es.iter().map(|x| i16v(*x)).collect()),
+                ],
+            ));
+            checks.push((
+                corr,
+                Box::new(move |mut b| {
+                    let _ = ResponseHeader::decode(&mut b, LeaveGroupResponse::header_version(v)).unwrap();
+                    let r = LeaveGroupResponse::decode(&mut b, v).unwrap();
+                    assert!(b.is_empty(), "LeaveGroup v{v}: trailing bytes");
+                    if top != 0 {
+                        assert_eq!((r.error_code, r.members.len()), (top, 0), "LeaveGroup v{v}");
+                    } else if v >= 3 {
+                        let got: Vec<(String, Option<String>, i16)> = r
+                            .members
+                            .iter()
+                            .map(|m| (str_of(&m.member_id), stro(&m.group_instance_id), m.error_code))
+                            .collect();
+                        let want: Vec<(String, Option<String>, i16)> = members
+                            .iter()
+                            .zip(&es)
+                            .map(|(m, e)| (m.0.clone(), m.1.clone(), *e))
+                            .collect();
+                        assert_eq!((r.error_code, got), (0, want), "LeaveGroup v{v}");
+                    } else {
+                        assert_eq!(r.error_code, es[0], "LeaveGroup v{v}");
+                    }
+                }),
+            ));
+        }
+        for v in 2..=9i16 {
+            corr += 1;
+            let topics: Vec<(String, Vec<i32>)> = (0..rng.below(3))
+                .map(|_| (rng.text(), (0..rng.below(3)).map(|_| rng.next() as i32).collect()))
+                .collect();
+            let req = OffsetCommitRequest::default()
+                .with_group_id(GroupId(sb("g")))
+                .with_topics(
+                    topics
+                        .iter()
+                        .map(|(n, ps)| {
+                            OffsetCommitRequestTopic::default()
+                                .with_name(TopicName(sb(n)))
+                                .with_partitions(
+                                    ps.iter()
+                                        .map(|p| OffsetCommitRequestPartition::default().with_partition_index(*p))
+                                        .collect(),
+                                )
+                        })
+                        .collect(),
+                );
+            let frame = encode_request(8, v, corr, Some("g"), &req);
+            let es: Vec<i16> = topics
+                .iter()
+                .flat_map(|t| t.1.iter())
+                .map(|_| *rng.pick_i16(&errs))
+                .collect();
+            inputs.push(input(
+                &artifact,
+                "g_commit",
+                vec![i32v(corr), bytes(&frame), vecv(es.iter().map(|x| i16v(*x)).collect())],
+            ));
+            checks.push((
+                corr,
+                Box::new(move |mut b| {
+                    let _ = ResponseHeader::decode(&mut b, OffsetCommitResponse::header_version(v)).unwrap();
+                    let r = OffsetCommitResponse::decode(&mut b, v).unwrap();
+                    assert!(b.is_empty(), "OffsetCommit v{v}: trailing bytes");
+                    let got: Vec<(String, i32, i16)> = r
+                        .topics
+                        .iter()
+                        .flat_map(|t| {
+                            t.partitions
+                                .iter()
+                                .map(move |p| (str_of(&t.name.0), p.partition_index, p.error_code))
+                        })
+                        .collect();
+                    let want: Vec<(String, i32, i16)> = topics
+                        .iter()
+                        .flat_map(|(n, ps)| ps.iter().map(move |p| (n.clone(), *p)))
+                        .zip(&es)
+                        .map(|((n, p), e)| (n, p, *e))
+                        .collect();
+                    assert_eq!(got, want, "OffsetCommit v{v}");
+                }),
+            ));
+        }
+        for v in 1..=9i16 {
+            corr += 1;
+            let groups: Vec<FetchedGroupT> = (0..if v >= 8 { 1 + rng.below(3) } else { 1 })
+                .map(|_| {
+                    let e = if rng.below(3) == 0 { *rng.pick_i16(&errs) } else { 0 };
+                    let ts = (0..rng.below(3))
+                        .map(|_| {
+                            let ps = (0..rng.below(3))
+                                .map(|_| {
+                                    let epoch = if v >= 5 { rng.next() as i32 } else { -1 };
+                                    (
+                                        rng.next() as i32,
+                                        rng.next() as i64,
+                                        epoch,
+                                        Some(rng.text()),
+                                        *rng.pick_i16(&errs),
+                                    )
+                                })
+                                .collect();
+                            (rng.text(), ps)
+                        })
+                        .collect();
+                    (rng.text(), e, ts)
+                })
+                .collect();
+            let gv = |g: &FetchedGroupT| {
+                tup(vec![
+                    s(&g.0),
+                    i16v(g.1),
+                    vecv(
+                        g.2.iter()
+                            .map(|(n, ps)| {
+                                tup(vec![
+                                    s(n),
+                                    vecv(
+                                        ps.iter()
+                                            .map(|p| tup(vec![i32v(p.0), i64v(p.1), i32v(p.2), so(&p.3), i16v(p.4)]))
+                                            .collect(),
+                                    ),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                ])
+            };
+            inputs.push(input(
+                &artifact,
+                "g_ofetch",
+                vec![i32v(corr), i16v(v), vecv(groups.iter().map(gv).collect())],
+            ));
+            checks.push((
+                corr,
+                Box::new(move |mut b| {
+                    let _ = ResponseHeader::decode(&mut b, OffsetFetchResponse::header_version(v)).unwrap();
+                    let r = OffsetFetchResponse::decode(&mut b, v).unwrap();
+                    assert!(b.is_empty(), "OffsetFetch v{v}: trailing bytes");
+                    // Before v2 a group's error is in each partition.
+                    let part_err = |g: &FetchedGroupT, p: &Part| {
+                        if v < 2 && g.1 != 0 { g.1 } else { p.4 }
+                    };
+                    let want_topics = |g: &FetchedGroupT| -> Vec<(String, Vec<Part>)> {
+                        g.2.iter()
+                            .map(|(n, ps)| {
+                                (
+                                    n.clone(),
+                                    ps.iter()
+                                        .map(|p| (p.0, p.1, p.2, p.3.clone(), part_err(g, p)))
+                                        .collect(),
+                                )
+                            })
+                            .collect()
+                    };
+                    if v >= 8 {
+                        let got: Vec<FetchedGroupT> = r
+                            .groups
+                            .iter()
+                            .map(|g| {
+                                let ts = g
+                                    .topics
+                                    .iter()
+                                    .map(|t| {
+                                        let ps = t
+                                            .partitions
+                                            .iter()
+                                            .map(|p| {
+                                                (
+                                                    p.partition_index,
+                                                    p.committed_offset,
+                                                    p.committed_leader_epoch,
+                                                    stro(&p.metadata),
+                                                    p.error_code,
+                                                )
+                                            })
+                                            .collect();
+                                        (str_of(&t.name.0), ps)
+                                    })
+                                    .collect();
+                                (str_of(&g.group_id.0), g.error_code, ts)
+                            })
+                            .collect();
+                        let want: Vec<FetchedGroupT> =
+                            groups.iter().map(|g| (g.0.clone(), g.1, want_topics(g))).collect();
+                        assert_eq!(got, want, "OffsetFetch v{v}");
+                    } else {
+                        let got: Vec<(String, Vec<Part>)> = r
+                            .topics
+                            .iter()
+                            .map(|t| {
+                                let ps = t
+                                    .partitions
+                                    .iter()
+                                    .map(|p| {
+                                        (
+                                            p.partition_index,
+                                            p.committed_offset,
+                                            p.committed_leader_epoch,
+                                            stro(&p.metadata),
+                                            p.error_code,
+                                        )
+                                    })
+                                    .collect();
+                                (str_of(&t.name.0), ps)
+                            })
+                            .collect();
+                        assert_eq!(got, want_topics(&groups[0]), "OffsetFetch v{v}");
+                        if v >= 2 {
+                            assert_eq!(r.error_code, groups[0].1, "OffsetFetch v{v}");
+                        }
+                    }
+                }),
+            ));
+        }
+        for v in 0..=6i16 {
+            corr += 1;
+            type Mem = (String, Option<String>, String, String, Vec<u8>, Vec<u8>);
+            type Grp = (i16, String, String, String, String, Vec<Mem>, i32);
+            let groups: Vec<Grp> = (0..rng.below(3))
+                .map(|_| {
+                    let ms = (0..rng.below(3))
+                        .map(|_| {
+                            (
+                                rng.text(),
+                                if v >= 4 { rng.maybe() } else { None },
+                                rng.text(),
+                                rng.text(),
+                                rng.blob(),
+                                rng.blob(),
+                            )
+                        })
+                        .collect();
+                    let ops = if v >= 3 { rng.next() as i32 } else { i32::MIN };
+                    (
+                        *rng.pick_i16(&errs),
+                        rng.text(),
+                        rng.text(),
+                        rng.text(),
+                        rng.text(),
+                        ms,
+                        ops,
+                    )
+                })
+                .collect();
+            let row = vecv(
+                groups
+                    .iter()
+                    .map(|g| {
+                        tup(vec![
+                            i16v(g.0),
+                            s(&g.1),
+                            s(&g.2),
+                            s(&g.3),
+                            s(&g.4),
+                            vecv(
+                                g.5.iter()
+                                    .map(|m| tup(vec![s(&m.0), so(&m.1), s(&m.2), s(&m.3), bytes(&m.4), bytes(&m.5)]))
+                                    .collect(),
+                            ),
+                            i32v(g.6),
+                        ])
+                    })
+                    .collect(),
+            );
+            inputs.push(input(&artifact, "g_dgroups", vec![i32v(corr), i16v(v), row]));
+            checks.push((
+                corr,
+                Box::new(move |mut b| {
+                    let _ = ResponseHeader::decode(&mut b, DescribeGroupsResponse::header_version(v)).unwrap();
+                    let r = DescribeGroupsResponse::decode(&mut b, v).unwrap();
+                    assert!(b.is_empty(), "DescribeGroups v{v}: trailing bytes");
+                    let got: Vec<Grp> = r
+                        .groups
+                        .iter()
+                        .map(|g| {
+                            let ms = g
+                                .members
+                                .iter()
+                                .map(|m| {
+                                    (
+                                        str_of(&m.member_id),
+                                        stro(&m.group_instance_id),
+                                        str_of(&m.client_id),
+                                        str_of(&m.client_host),
+                                        m.member_metadata.to_vec(),
+                                        m.member_assignment.to_vec(),
+                                    )
+                                })
+                                .collect();
+                            (
+                                g.error_code,
+                                str_of(&g.group_id.0),
+                                str_of(&g.group_state),
+                                str_of(&g.protocol_type),
+                                str_of(&g.protocol_data),
+                                ms,
+                                g.authorized_operations,
+                            )
+                        })
+                        .collect();
+                    assert_eq!(got, groups, "DescribeGroups v{v}");
+                }),
+            ));
+        }
+        for v in 0..=5i16 {
+            corr += 1;
+            let states = ["Stable", "Empty", "PreparingRebalance", "CompletingRebalance"];
+            let filter: Vec<String> = if v >= 4 && rng.below(2) == 0 {
+                vec![states[rng.below(4) as usize].to_lowercase()]
+            } else {
+                vec![]
+            };
+            let req = ListGroupsRequest::default().with_states_filter(filter.iter().map(|x| sb(x)).collect());
+            let frame = encode_request(16, v, corr, Some("g"), &req);
+            let groups: Vec<(String, String, String)> = (0..rng.below(4))
+                .map(|_| (rng.text(), rng.text(), states[rng.below(4) as usize].to_owned()))
+                .collect();
+            inputs.push(input(
+                &artifact,
+                "g_lgroups",
+                vec![
+                    i32v(corr),
+                    bytes(&frame),
+                    vecv(groups.iter().map(|g| tup(vec![s(&g.0), s(&g.1), s(&g.2)])).collect()),
+                ],
+            ));
+            checks.push((
+                corr,
+                Box::new(move |mut b| {
+                    let _ = ResponseHeader::decode(&mut b, ListGroupsResponse::header_version(v)).unwrap();
+                    let r = ListGroupsResponse::decode(&mut b, v).unwrap();
+                    assert!(b.is_empty(), "ListGroups v{v}: trailing bytes");
+                    let kept: Vec<&(String, String, String)> = groups
+                        .iter()
+                        .filter(|g| filter.is_empty() || filter.contains(&g.2.to_lowercase()))
+                        .collect();
+                    let got: Vec<(String, String)> = r
+                        .groups
+                        .iter()
+                        .map(|g| (str_of(&g.group_id.0), str_of(&g.protocol_type)))
+                        .collect();
+                    let want: Vec<(String, String)> = kept.iter().map(|g| (g.0.clone(), g.1.clone())).collect();
+                    assert_eq!((r.error_code, got), (0, want), "ListGroups v{v}");
+                    if v >= 4 {
+                        let states: Vec<String> = r.groups.iter().map(|g| str_of(&g.group_state)).collect();
+                        assert_eq!(states, kept.iter().map(|g| g.2.clone()).collect::<Vec<_>>());
+                    }
+                    if v >= 5 {
+                        assert!(r.groups.iter().all(|g| str_of(&g.group_type) == "classic"));
+                    }
+                }),
+            ));
+        }
+    }
+    // Kafka's coordinator partition: `Utils.abs(groupId.hashCode()) % n`, over UTF-16 code units.
+    let names = [
+        "",
+        "g1",
+        "console-consumer-91213",
+        "日本語のグループ",
+        "emoji-😀-group",
+        "a-much-longer-group-name-to-overflow",
+    ];
+    let java_hash = |x: &str| {
+        x.encode_utf16()
+            .fold(0i32, |h, u| h.wrapping_mul(31).wrapping_add(u as i32))
+    };
+    for n in names {
+        inputs.push(input(&artifact, "ghash", vec![s(n), i32v(50)]));
+    }
+
+    let r = run(&artifact, &inputs);
+    for (view, frame, summary) in &want {
+        let decoded = rows(&artifact, &r, view);
+        let row = decoded
+            .iter()
+            .find(|r| r[0] == bytes(frame))
+            .unwrap_or_else(|| panic!("{view}: a request did not decode: {frame:?}"));
+        if *view == "v_find" {
+            assert_eq!(tup(vec![row[1].clone(), row[2].clone()]), *summary, "{view}");
+            assert_eq!(
+                row[3],
+                Value::Bool(true),
+                "{view}: the decoded request encodes to other bytes"
+            );
+        } else {
+            assert_eq!(row[1], *summary, "{view}");
+            assert_eq!(
+                row[2],
+                Value::Bool(true),
+                "{view}: the decoded request encodes to other bytes"
+            );
+        }
+    }
+    let encoded = rows(&artifact, &r, "v_gresp");
+    for (corr, check) in &checks {
+        let row = encoded
+            .iter()
+            .find(|r| r[0] == i32v(*corr))
+            .unwrap_or_else(|| panic!("no answer encoded for {corr}"));
+        let Value::Bytes(b) = &row[1] else { panic!() };
+        let n = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize;
+        assert_eq!(n, b.len() - 4, "the size prefix is the frame's size");
+        let mut buf = Bytes::copy_from_slice(&b[4..]);
+        let c = i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        assert_eq!(c, *corr);
+        let _ = buf.split_to(0);
+        check(buf);
+    }
+    let hashes = rows(&artifact, &r, "v_ghash");
+    for n in names {
+        let row = hashes.iter().find(|r| r[0] == s(n)).unwrap();
+        let h = java_hash(n);
+        let p = if h == i32::MIN { 0 } else { h.abs() } % 50;
+        assert_eq!(
+            (row[1].clone(), row[2].clone()),
+            (i32v(h), i32v(p)),
+            "the coordinator partition of {n:?}"
+        );
+    }
+}
