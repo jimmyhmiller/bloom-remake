@@ -57,17 +57,21 @@ view find_head(c, i, seq, version, corr, fr, at, req) =
     let Some(body) = request_body(fr), let Some(req) = decode_find_coordinator(body, version);
 view find_key(c, k, name, kt) = find_head(c, _, _, version, _, _, _, req), (k, name) in coordinator_keys(req, version).enumerate(),
     let kt = req.key_type;
-view leader_known(g) = partition_leader(g, _, _, _);
+/// The coordinator of each key asked for, by broker: the leader of its `__consumer_offsets` partition. (Scoped to the
+/// keys asked: `partition_leader` reads the in-sync replicas, which change with the time, so a view of every
+/// partition's leader would be computed again at every tick.)
+view find_leader(c, k, id, host, port) = find_key(c, k, name, kt), offsets_topic(tid, n), let g = (tid, group_partition(name, n)),
+    partition_leader(g, _e, l, _isr), broker(l, id, host, port) where kt == KEY_GROUP;
+view find_led(c, k) = find_leader(c, k, _id, _host, _port);
 /// Each key's answer: (key, error, node id, host, port).
 view find_answer(c, k, a) {
     find_key(c, k, name, kt), let a = (name, TRANSACTIONAL_ID_AUTHORIZATION_FAILED, -1i32, "", -1i32) where kt == KEY_TRANSACTION;
     find_key(c, k, name, kt), let a = (name, INVALID_REQUEST, -1i32, "", -1i32) where kt != KEY_GROUP && kt != KEY_TRANSACTION;
     find_key(c, k, name, kt), not offsets_topic(_, _), let a = (name, COORDINATOR_NOT_AVAILABLE, -1i32, "", -1i32)
         where kt == KEY_GROUP;
-    find_key(c, k, name, kt), offsets_topic(tid, n), let g = (tid, group_partition(name, n)), partition_leader(g, _e, l, _isr),
-        broker(l, id, host, port), let a = (name, NONE, id, host, port) where kt == KEY_GROUP;
-    find_key(c, k, name, kt), offsets_topic(tid, n), let g = (tid, group_partition(name, n)), not leader_known(g),
-        let a = (name, COORDINATOR_NOT_AVAILABLE, -1i32, "", -1i32) where kt == KEY_GROUP;
+    find_key(c, k, name, kt), find_leader(c, k, id, host, port), let a = (name, NONE, id, host, port);
+    find_key(c, k, name, kt), offsets_topic(_tid, _n), not find_led(c, k), let a = (name, COORDINATOR_NOT_AVAILABLE, -1i32, "", -1i32)
+        where kt == KEY_GROUP;
 }
 view find_answers(c, xs = collect!((k, a))) = per find_head(c, _, _, _, _, _, _, _req), find_answer(c, k, a);
 answer_find: while find_head(c, i, seq, version, corr, fr, at, req), find_answers(c, xs)
