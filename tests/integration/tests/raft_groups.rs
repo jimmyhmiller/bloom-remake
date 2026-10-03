@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use blossom_artifact::bls::BlsArtifact;
-use blossom_driver::bls::compile_file;
+use blossom_driver::bls::compile_file_with;
 use blossom_front::api::NodeSpec;
 use blossom_integration_tests::raft_safety::GroupSafety;
 use blossom_ir::tick::Row;
@@ -21,6 +21,12 @@ use blossom_value::value::IntValue;
 
 #[cfg(test)]
 fn compile() -> BlsArtifact {
+    compile_with(true)
+}
+
+/// The harness, with CheckQuorum on or off (`RAFT_CHECK_QUORUM`).
+#[cfg(test)]
+fn compile_with(check_quorum: bool) -> BlsArtifact {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/raft/groups.bls");
     let nodes: Vec<NodeSpec> = (1..=4)
         .map(|i| NodeSpec {
@@ -28,7 +34,13 @@ fn compile() -> BlsArtifact {
             role: Some("Broker".to_owned()),
         })
         .collect();
-    let (result, _) = compile_file(path.to_str().unwrap(), &nodes);
+    let params = [(
+        "RAFT_CHECK_QUORUM".to_owned(),
+        blossom_front::api::ParamBinding::Bool(check_quorum),
+    )]
+    .into_iter()
+    .collect();
+    let (result, _) = compile_file_with(path.to_str().unwrap(), &nodes, &params);
     result.unwrap_or_else(|e| panic!("groups.bls: {e:?}")).0
 }
 
@@ -223,7 +235,9 @@ impl Directed<'_> {
 #[test]
 fn a_reelected_leader_forgets_its_old_follower_state() {
     use blossom_value::time::NodeId;
-    let artifact = compile();
+    // The scenario has a leader cut off go on appending for seconds, which CheckQuorum would stop (a leader that
+    // hears from no majority steps down): Raft without it, whose safety this checks.
+    let artifact = compile_with(false);
     let schema = DurableSchema::of(artifact.program.get());
     let mut completed = 0;
     for seed in seeds(1..=12) {
