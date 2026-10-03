@@ -32,8 +32,9 @@ accept: on kafka.opened(c, _peer, _at) {
 }
 
 /// A connection's chunks come one per tick, after its `opened` tick, so the state read here is current. A frame
-/// whose size is invalid closes the connection.
-serve: on kafka.data(c, _seq, bytes), reassembly(c, f), received(c, n, b), let fed = feed(f, bytes) {
+/// whose size is invalid closes the connection. Each chunk is fed once, here, for both the rules after.
+view fed_chunk(c, n, b, fed) = kafka.data(c, _seq, bytes), reassembly(c, f), received(c, n, b), let fed = feed(f, bytes);
+serve: on fed_chunk(c, n, b, fed) {
     upsert reassembly(c, fed.next);
     upsert received(c, n + fed.frames.len(), b + frames_bytes(fed.frames));
     if fed.bad {
@@ -41,8 +42,7 @@ serve: on kafka.data(c, _seq, bytes), reassembly(c, f), received(c, n, b), let f
     }
 }
 
-enqueue: on kafka.data(c, _seq, bytes), reassembly(c, f), received(c, n, b), let fed = feed(f, bytes),
-        (k, x) in with_starts(b, fed.frames).enumerate() {
+enqueue: on fed_chunk(c, n, b, fed), (k, x) in with_starts(b, fed.frames).enumerate() {
     emit queued(c, n + k, x.1, now());
     emit frame_start(c, n + k, x.0);
 }

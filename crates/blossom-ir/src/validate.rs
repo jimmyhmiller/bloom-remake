@@ -1776,6 +1776,26 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
             }
             lookup(TypeDef::Vec(acc))
         }
+        LibFn::VecScanWhile => {
+            arity(3)?;
+            let e = elem(ty(0)?)?;
+            let init = ty(1)?;
+            let closure = args.get(2).ok_or("missing closure")?;
+            let acc = match closure {
+                Expr::Closure { params, .. } => params
+                    .first()
+                    .and_then(|v| r.vars.get(*v))
+                    .map(|v| v.ty)
+                    .ok_or("a scan's closure takes the accumulator")?,
+                _ => return Err("a combinator's last argument must be a closure".into()),
+            };
+            let step = closure_type(p, r, closure, &[init, e])?;
+            let returns_option = matches!(p.types.get(step), Some(TypeDef::Option(a)) if assignable(p, *a, acc));
+            if !returns_option || !assignable(p, init, acc) {
+                return Err(format!("{f:?}: a scan_while step returns its accumulator in an option"));
+            }
+            lookup(TypeDef::Vec(acc))
+        }
         LibFn::VecToSet => {
             arity(1)?;
             let e = elem(ty(0)?)?;

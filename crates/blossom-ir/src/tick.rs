@@ -224,6 +224,14 @@ pub struct StepInput<'a> {
     pub blobs: &'a dyn blossom_value::BlobSource,
 }
 
+/// The work one rule did, measured without a clock: the rows its atom probes returned, and the expression nodes it
+/// evaluated (functions' bodies included).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RuleWork {
+    pub rows: u64,
+    pub steps: u64,
+}
+
 /// What one tick of a stateful executor produces.
 #[derive(Clone, Debug, Default)]
 pub struct StepOutput {
