@@ -338,11 +338,14 @@ durable table committed(tid: Bytes, part: i32, group: String, topic: String, p: 
 
 /// The OFFSETS entries materialized this tick (with the DATA entries, `to_apply_d`), per partition committed to:
 /// the last per key.
+/// (The OFFSETS entries are picked out before anything is decoded: a partition's DATA entries are record batches,
+/// not read here.)
+view offsets_to_apply(tid, part, i, data) =
+    to_apply_d(tid, part, a, c), let g = (tid, part), rlog(g, i, _t, _pt, kind, _pos, data) where kind == OFFSETS && i > a && i <= c;
 view offsets_applied(tid, part, i, group, topic, p, id, offset, epoch, meta) =
-    to_apply_d(tid, part, a, c), let g = (tid, part), rlog(g, i, _t, _pt, kind, _pos, data),
+    offsets_to_apply(tid, part, i, data),
     let Some(e) = decode_offsets_entry(entry_bytes(data)), let group = e.group, x in last_per_partition(e.items),
-    let topic = x.0, let id = x.1, let p = x.2, let offset = x.3, let epoch = x.4, let meta = x.5
-    where kind == OFFSETS && i > a && i <= c;
+    let topic = x.0, let id = x.1, let p = x.2, let offset = x.3, let epoch = x.4, let meta = x.5;
 view offsets_last(tid, part, group, topic, p, m = max!(i)) = offsets_applied(tid, part, i, group, topic, p, _id, _o, _e, _m);
 store_offsets: while offsets_last(tid, part, group, topic, p, m), offsets_applied(tid, part, m, group, topic, p, id, offset, epoch, meta) {
     upsert committed(tid, part, group, topic, p, id, offset, epoch, meta);
@@ -350,11 +353,13 @@ store_offsets: while offsets_last(tid, part, group, topic, p, m), offsets_applie
 
 /// The committed OFFSETS entries not materialized yet (at most a tick's worth), read by OffsetFetch with the
 /// materialized ones.
+view offsets_unapplied(tid, part, i, data) =
+    applied_d(tid, part, a), not installing(tid, part), not offsets_stale(tid, part, _), let g = (tid, part), commit_of(g, c),
+    rlog(g, i, _t, _pt, kind, _pos, data) where kind == OFFSETS && i > a && i <= c;
 view offsets_pending(tid, part, i, group, topic, p, id, offset, epoch, meta) =
-    applied_d(tid, part, a), not installing(tid, part), not offsets_stale(tid, part, _), let g = (tid, part), commit_of(g, c), rlog(g, i, _t, _pt, kind, _pos, data),
+    offsets_unapplied(tid, part, i, data),
     let Some(e) = decode_offsets_entry(entry_bytes(data)), let group = e.group, x in last_per_partition(e.items),
-    let topic = x.0, let id = x.1, let p = x.2, let offset = x.3, let epoch = x.4, let meta = x.5
-    where kind == OFFSETS && i > a && i <= c;
+    let topic = x.0, let id = x.1, let p = x.2, let offset = x.3, let epoch = x.4, let meta = x.5;
 view pending_last(tid, part, group, topic, p, m = max!(i)) = offsets_pending(tid, part, i, group, topic, p, _id, _o, _e, _m);
 /// A group's current committed offsets in a partition: the newest committed entry's, else the materialized one, for
 /// topics that still exist under the id committed.
