@@ -240,6 +240,7 @@ at Broker {
         where t0 <= 1 {
         next won(g, 1);
         next leader_of(g, 1, self);
+        next led_since(g, 1, now());
         next rlog(g, 1, 1, 0, NOOP, -1i64, empty);
         for members(g, f) where f != self {
             next match_idx(g, f, 0);
@@ -265,7 +266,7 @@ at Broker {
     }
 
     view leader(g, t) = eff(g, t), won(g, t);
-    view candidate(g, t) = eff(g, t), rvote(g, t, self), not won(g, t), not leader_of(g, t, _);
+    view candidate(g, t) = eff(g, t), rvote(g, t, self), not won(g, t), not leader_of(g, t, _), not stepped_down(g, t);
     view known_leader(g, l) = eff(g, t), leader_of(g, t, l);
 
     view last_log(g, i, t) {
@@ -353,6 +354,7 @@ at Broker {
     become_leader: while elected(g, t), last_log(g, li, lt), let empty = Blob::of(Bytes::empty()) {
         next won(g, t);
         next leader_of(g, t, self);
+        next led_since(g, t, now());
         next rlog(g, li + 1, t, lt, NOOP, -1i64, empty);
         for members(g, p) where p != self {
             next match_idx(g, p, 0);
@@ -478,6 +480,46 @@ at Broker {
     view config_committed(g) = latest_config(g, i, _), commit_of(g, c) where i <= c;
     step_down: while leader(g, t), not mine(g), config_committed(g) {
         delete won(g, t);
+    }
+
+    // ---- CheckQuorum (§6.2)
+    /// A leader that has not heard from a majority of its configuration for a whole check period
+    /// (`RAFT_ELECTION_MIN`) steps down: a leader cut off from the others stops acting as one, so the clients
+    /// connected to it go elsewhere (its followers elect another once their election timeouts pass) and nothing is
+    /// acknowledged or read there that a successor may lack. `quorum_heard` holds the followers it heard from in the
+    /// current period; `led_since`, when its leadership began (a first period that began before it does not count).
+    table quorum_heard(g: Group, f: Node<Broker>) key(g, f);
+    table led_since(g: Group, t: u64, at: Instant) key(g, t);
+    /// The term a leader stepped down in: it is a follower for the rest of the term, never its candidate again (it
+    /// still holds that term's votes, which would elect it at once).
+    table stepped_down(g: Group, t: u64) key(g);
+    view leading() = won(_, _);
+    timer quorum_check every RAFT_ELECTION_MIN while leading;
+    note_heard: on ack(g, t, _m, _s) from f, leader(g, t), members(g, f), not quorum_heard(g, f) {
+        upsert quorum_heard(g, f);
+    }
+    view heard_n(g, n = count!(f)) = quorum_heard(g, f), members(g, f);
+    view quorum_kept(g) {
+        heard_n(g, n), group_size(g, k), mine(g) where (n + 1) * 2 > k;
+        heard_n(g, n), group_size(g, k), not mine(g) where n * 2 > k;
+        group_size(g, k), mine(g) where k == 1;
+    }
+    check_quorum: on quorum_check, leader(g, t), led_since(g, t, at), not quorum_kept(g) where now() >= at + RAFT_ELECTION_MIN {
+        delete won(g, t);
+        delete leader_of(g, t, self);
+        upsert stepped_down(g, t);
+    }
+    forget_stepped_down: while stepped_down(g, t), eff(g, e) where e > t {
+        delete stepped_down(g, t);
+    }
+    new_quorum_period: on quorum_check, quorum_heard(g, f) {
+        delete quorum_heard(g, f);
+    }
+    forget_quorum: while quorum_heard(g, f), not leader(g, _) {
+        delete quorum_heard(g, f);
+    }
+    forget_led_since: while led_since(g, t, at), not won(g, t) {
+        delete led_since(g, t, at);
     }
 
     // ---- replication, follower side

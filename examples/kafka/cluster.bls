@@ -591,6 +591,9 @@ at Broker {
         if heard_commit(g, c) {
             delete heard_commit(g, c);
         }
+        if stepped_down(g, t) {
+            delete stepped_down(g, t);
+        }
     }
 
     // ---- commands this broker waits on: sent when first wanted, and every `CMD_RESEND` until applied
@@ -674,6 +677,9 @@ at Broker {
     }
     drop_unhosted_won: while unhosted(g), won(g, t) {
         delete won(g, t);
+    }
+    drop_unhosted_stepped_down: while unhosted(g), stepped_down(g, t) {
+        delete stepped_down(g, t);
     }
 
     // ---- who leads each partition, and its in-sync replicas (D7)

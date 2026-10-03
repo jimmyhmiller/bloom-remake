@@ -79,6 +79,21 @@ const REBALANCE_MS: i32 = 3000;
 /// The members stop committing at this time, so the replicas' committed offsets can settle before the end.
 #[cfg(test)]
 const QUIET_AT: i64 = 17_000_000_000;
+
+/// What a run does to the cluster besides the members' comings and goings.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq)]
+enum Scenario {
+    /// No faults.
+    Calm,
+    /// The nemesis: crashes, splits, one-way cuts, dropped connections, until 9 s.
+    Faults,
+    /// A broker is down from 3 s to 9 s; the members stop committing at 8.5 s and the offsets logs keep one entry
+    /// past their snapshot points, so the broker gets its committed offsets from a snapshot only.
+    Lagging,
+    /// The group's coordinator is cut off from the other brokers (not from the clients) from 3 s to 7 s.
+    Zombie,
+}
 /// A request is given up after this long (a JoinGroup waits for the rebalance, so longer), as Kafka's clients do.
 #[cfg(test)]
 const REQUEST_TIMEOUT: i64 = 1_500_000_000;
@@ -262,6 +277,8 @@ struct Member {
     pipeline: bool,
     /// Whether this member has sent its OffsetCommit for the group "" (the observer does, once).
     bad_sent: bool,
+    /// When it stops committing.
+    quiet_at: i64,
     next_beat: i64,
     next_commit: i64,
     next_fetch: i64,
@@ -298,6 +315,7 @@ impl Member {
             conn_acked: BTreeMap::new(),
             pipeline: false,
             bad_sent: false,
+            quiet_at: QUIET_AT,
             next_beat: 0,
             next_commit: 0,
             next_fetch: 0,
@@ -503,7 +521,7 @@ impl Member {
                         REQUEST_TIMEOUT,
                         Vec::new(),
                     );
-                } else if now >= self.next_commit && !self.owned.is_empty() && now < QUIET_AT {
+                } else if now >= self.next_commit && !self.owned.is_empty() && now < self.quiet_at {
                     // Offsets that only grow: the time in milliseconds, so a later commit always carries more.
                     let offset = now / MS;
                     let mut parts: Vec<(i32, i64)> = self.owned.iter().map(|p| (*p, offset)).collect();
@@ -1013,7 +1031,9 @@ fn int(v: &Value) -> i64 {
 /// Runs the group scenario on three brokers over `seeds`, with faults until 9 s, then settles; returns how many
 /// times a member lost its coordinator.
 #[cfg(test)]
-fn check_groups(seeds: std::ops::RangeInclusive<u64>, faults: bool, lagging: bool) -> u64 {
+fn check_groups(seeds: std::ops::RangeInclusive<u64>, scenario: Scenario) -> u64 {
+    let faults = scenario == Scenario::Faults;
+    let lagging = scenario == Scenario::Lagging;
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/kafka/sim_cluster.bls");
     let mut nodes: Vec<NodeSpec> = (1..=3)
         .map(|i| NodeSpec {
@@ -1043,7 +1063,7 @@ fn check_groups(seeds: std::ops::RangeInclusive<u64>, faults: bool, lagging: boo
         // A replica down for seconds misses more than its offsets partition's leader keeps.
         (
             "OFFSETS_KEEP".to_owned(),
-            blossom_front::api::ParamBinding::Int(if lagging { 5 } else { 1000 }),
+            blossom_front::api::ParamBinding::Int(if lagging { 1 } else { 1000 }),
         ),
     ]
     .into_iter()
@@ -1095,6 +1115,9 @@ fn check_groups(seeds: std::ops::RangeInclusive<u64>, faults: bool, lagging: boo
             if me == 2 {
                 m.die_at = Some(8000 * MS);
             }
+            if lagging {
+                m.quiet_at = 8500 * MS;
+            }
             cluster.stream_client(Box::new(m));
         }
         let fail = |cluster: &Cluster<'_>, what: &str| -> String {
@@ -1105,6 +1128,27 @@ fn check_groups(seeds: std::ops::RangeInclusive<u64>, faults: bool, lagging: boo
         if lagging {
             cluster.run_until(3_000_000_000).unwrap();
             cluster.crash(lagging_node, CrashWrites::Random).unwrap();
+        }
+        // The coordinator cut off: it stops coordinating (CheckQuorum), the others elect a leader for the group's
+        // offsets partition, and the members move there and go on committing while it is cut off.
+        let mut zombie_window = None;
+        if scenario == Scenario::Zombie {
+            cluster.run_until(3_000_000_000).unwrap();
+            let rel_cgroup = rel("cgroup");
+            let coordinator = brokers
+                .values()
+                .copied()
+                .find(|n| {
+                    cluster
+                        .state(*n)
+                        .is_some_and(|st| st.rows(rel_cgroup).any(|r| r[0] == Value::Str(GROUP.into())))
+                })
+                .unwrap_or_else(|| panic!("{}", fail(&cluster, "no broker coordinates the group at 3 s")));
+            let others: Vec<NodeId> = brokers.values().copied().filter(|n| *n != coordinator).collect();
+            cluster.partition(&[&others]).unwrap();
+            cluster.run_until(7_000_000_000).unwrap();
+            cluster.heal();
+            zombie_window = Some((5_000_000_000i64, 7_000_000_000i64));
         }
         cluster.run_until(9_000_000_000).unwrap();
         assert!(
@@ -1266,6 +1310,18 @@ fn check_groups(seeds: std::ops::RangeInclusive<u64>, faults: bool, lagging: boo
                 fail(&cluster, "the lagging broker still lacks committed offsets")
             );
         }
+        // While the old coordinator was cut off, the members committed through the new one.
+        if let Some((from, to)) = zombie_window {
+            let during = sh.acked.values().flatten().filter(|a| a.1 >= from && a.1 < to).count();
+            assert!(
+                during > 0,
+                "{}",
+                fail(
+                    &cluster,
+                    "no commit was acknowledged while the old coordinator was cut off"
+                )
+            );
+        }
         // Members came, left and died: the group went through generations for each.
         assert!(
             sh.generations.len() >= 4,
@@ -1287,21 +1343,28 @@ fn check_groups(seeds: std::ops::RangeInclusive<u64>, faults: bool, lagging: boo
 
 #[test]
 fn group_members_join_leave_and_die_and_rebalance() {
-    check_groups(seeds(1..=2), false, false);
+    check_groups(seeds(1..=2), Scenario::Calm);
+}
+
+/// The group's coordinator cut off from the other brokers: it steps down (it hears from no majority), the members
+/// find the new coordinator and go on committing, and nothing reads stale offsets at the old one meanwhile.
+#[test]
+fn a_coordinator_cut_off_from_the_others_hands_its_groups_over() {
+    check_groups(seeds(1..=2), Scenario::Zombie);
 }
 
 /// A replica of the group's offsets partition that was down while the others compacted their logs past it catches
 /// up from a snapshot of the committed offsets.
 #[test]
 fn a_replica_behind_its_offsets_partitions_snapshot_catches_up() {
-    check_groups(seeds(1..=2), false, true);
+    check_groups(seeds(1..=2), Scenario::Lagging);
 }
 
 /// Under faults the members lose their coordinator (a crash, a split, a dropped connection) and find it again; over
 /// the full tier's seeds that happens.
 #[test]
 fn groups_keep_acknowledged_offsets_under_faults() {
-    let lost = check_groups(seeds(1..=3), true, false);
+    let lost = check_groups(seeds(1..=3), Scenario::Faults);
     assert!(
         !blossom_integration_tests::full_tier() || lost > 0,
         "no member ever lost its coordinator"
