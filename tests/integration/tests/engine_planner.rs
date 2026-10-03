@@ -445,3 +445,38 @@ fn a_binding_keys_a_probe_only_past_checks_that_cannot_fail() {
     let u = |x: u64| Value::Int(IntValue::U64(x));
     assert_eq!(rows_at(&run, "key_after_fallible.bls", "out", 1), vec![vec![u(5), u(6)]]);
 }
+
+/// A recursion that never converges fails with BLSR007 once the rounds reach the bound (CR-53); the semi-naive
+/// iteration hands it to the naive one, which reports it.
+#[test]
+fn a_recursion_that_never_converges_fails_at_the_round_bound() {
+    use blossom_ir::tick::StepInput;
+    use blossom_value::time::Instant;
+    let artifact = compile("recursive_unbounded.bls");
+    let cfg = blossom_engine::EngineConfig {
+        roles: artifact.roles.clone(),
+        node_names: artifact.nodes.iter().map(|x| Arc::from(x.as_str())).collect(),
+        seed: Some(blossom_value::Seed::from_u64(0)),
+        max_rounds: 40,
+        ..blossom_engine::EngineConfig::default()
+    };
+    let mut engine = blossom_engine::Engine::new(artifact.program.clone(), NodeId(0), cfg).unwrap();
+    let events = vec![(artifact.rel_named("start").unwrap(), Arc::from(vec![Value::Int(IntValue::U64(0))]))];
+    let r = engine.step(
+        &StepInput {
+            node: NodeId(0),
+            incarnation: 1,
+            tick: Tick(0),
+            now: Instant(0),
+            events: &events,
+            delivered: &[],
+            ingress: &[],
+            blobs: &blossom_value::NoBlobs,
+        },
+        &[],
+    );
+    match r {
+        Err(blossom_ir::tick::EvalError::Program { error, .. }) => assert_eq!(error.code, "BLSR007"),
+        other => panic!("expected BLSR007, got {:?}", other.map(|_| ())),
+    }
+}

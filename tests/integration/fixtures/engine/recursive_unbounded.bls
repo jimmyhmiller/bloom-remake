@@ -1,0 +1,15 @@
+//! A recursion that never converges: every number after a start.
+program recursive_unbounded version 1;
+
+input start(x: u64);
+
+table s(x: u64) key(x);
+
+st: on start(x) {
+    emit s(x);
+}
+
+view n(x) {
+    s(x);
+    n(y), let x = y + 1u64;
+}
