@@ -1107,9 +1107,10 @@ impl Engine {
     /// accumulate, and one whose newest row came at round k is found at round k + 1), doing each valuation's work
     /// about once instead of once per round: a chain of n rows costs O(n), not O(n²).
     ///
-    /// Each rule's derivations, or `None` when a valuation raised an error: what this derived is then taken back and
-    /// the naive iteration decides, so a program error is reported as it always is. With no error raised by any
-    /// valuation, none is raised at the fixpoint, so the naive iteration's last strict round is not needed.
+    /// Each rule's derivations, or `None` when a valuation raised an error or the rounds reached the bound (CR-53):
+    /// what this derived is then taken back and the naive iteration decides, so a program error (BLSR007 included) is
+    /// reported as it always is. With no error raised by any valuation, none is raised at the fixpoint, so the naive
+    /// iteration's last strict round is not needed.
     fn semi_naive(
         &mut self,
         p: &Program,
@@ -1174,19 +1175,11 @@ impl Engine {
             }
             delta = next;
             rounds += 1;
+            // A valuation using a row another rule derived earlier in the same round is found a round later than
+            // the naive iteration finds it, so this can take more rounds: the naive iteration decides the bound.
             if rounds >= self.max_rounds {
-                let label = s.rules.first().and_then(|id| p.rules.get(*id)).map(|r| r.label.clone());
-                return Err(EvalError::Program {
-                    tick,
-                    error: ProgramErrorRecord {
-                        code: blossom_base::code!("BLSR007").as_str(),
-                        rule: label,
-                        detail: Arc::from(format!(
-                            "the fixpoint did not converge within {} rounds (CR-53)",
-                            self.max_rounds
-                        )),
-                    },
-                });
+                failed = true;
+                break;
             }
         }
         if !failed {
