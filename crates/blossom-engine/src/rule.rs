@@ -97,7 +97,9 @@ pub(crate) struct RangeProbe {
 /// equality that keeps a row); its value is only computed early, to find the rows it can keep. The rows the probe
 /// skips would have failed that binding, and every check before it in the plan cannot fail, so none of them would
 /// have raised an error either. If the early value fails to evaluate, the atom is probed as if there were no key, and
-/// the binding raises its error at its place.
+/// the binding raises its error at its place. The early value is computed for valuations the plan might never have
+/// evaluated the binding for, so its expression may only compute from values ([`keyable`]): no call (a function's
+/// cost, or a blob's bytes), only operators, construction and field access.
 #[derive(Clone, Debug)]
 pub(crate) struct KeyProbe {
     /// The probe's columns: the atom's bound ones, then the keyed ones.
@@ -453,7 +455,7 @@ impl Plan {
                 if let Literal::Bind { pat: Pattern::Var(x), expr } = l
                     && x == v
                 {
-                    if vars_of(expr).is_subset(bound) {
+                    if vars_of(expr).is_subset(bound) && keyable(expr) {
                         key.cols.push(c);
                         key.from.push(lit);
                     }
@@ -498,6 +500,27 @@ impl Plan {
             }
         }
         probe
+    }
+}
+
+/// Whether an expression only computes from values, so that computing it early, for a probe key, reads and costs
+/// nothing the plan would not: variables, constants, parameters, the tick's scalars, operators, construction, field
+/// access and conditionals over such expressions.
+fn keyable(e: &Expr) -> bool {
+    match e {
+        Expr::Term(_) | Expr::Param(_) | Expr::Scalar(_) => true,
+        Expr::Unary { arg, .. } => keyable(arg),
+        Expr::Binary { lhs, rhs, .. } => keyable(lhs) && keyable(rhs),
+        Expr::Construct { fields, .. } => fields.iter().all(keyable),
+        Expr::Field { base, .. } => keyable(base),
+        Expr::Typed { expr, .. } => keyable(expr),
+        Expr::If { cond, then, els } => keyable(cond) && keyable(then) && keyable(els),
+        Expr::Call { .. }
+        | Expr::Match { .. }
+        | Expr::Collection { .. }
+        | Expr::Lattice { .. }
+        | Expr::Let { .. }
+        | Expr::Closure { .. } => false,
     }
 }
 
