@@ -69,9 +69,10 @@ const OFFSETS: u8 = 4;
 
 channel request_vote(g: Group, term: u64, last_idx: u64, last_term: u64): Broker -> Broker;
 /// PreVote (§9.6): would the receiver vote for the sender in `term` (its next)? `round` names the sender's attempt,
-/// which the answer echoes.
+/// which the answer echoes; `current` is the answerer's own term, which a sender behind adopts (a member with the
+/// most complete log but an older term would otherwise ask for a term no one grants, for ever).
 channel pre_vote(g: Group, term: u64, last_idx: u64, last_term: u64, round: Instant): Broker -> Broker;
-channel pre_vote_reply(g: Group, term: u64, round: Instant, granted: bool): Broker -> Broker;
+channel pre_vote_reply(g: Group, term: u64, round: Instant, granted: bool, current: u64): Broker -> Broker;
 channel vote(g: Group, term: u64, granted: bool): Broker -> Broker;
 /// InstallSnapshot: the leader of `term` has compacted its log up to `idx` (whose term is `sterm`); `pos` is the
 /// position after it, and `conf` the configuration then (empty: the initial members).
@@ -265,6 +266,7 @@ at Broker {
         entries(g: g, term: t, ..);
         beat(g: g, term: t, ..);
         ack(g, t, _, _);
+        pre_vote_reply(g: g, current: t, ..);
     }
     view eff(g, t = max!(x)) {
         rterm(g, x), takes(g);
@@ -366,13 +368,13 @@ at Broker {
     view pv_ok(g, c, nt, round) =
         pre_vote(g, nt, li, lt, round) from c, eff(g, e), mine(g), not recently_led(g), not leader(g, _), last_log(g, mi, mt)
         where nt > e && (lt > mt || (lt == mt && li >= mi));
-    grant_prevote: on pv_ok(g, c, nt, round) {
-        send pre_vote_reply(g, nt, round, true) to c;
+    grant_prevote: on pv_ok(g, c, nt, round), eff(g, e) {
+        send pre_vote_reply(g, nt, round, true, e) to c;
     }
-    refuse_prevote: on pre_vote(g, nt, _, _, round) from c, mine(g), not pv_ok(g, c, nt, round) {
-        send pre_vote_reply(g, nt, round, false) to c;
+    refuse_prevote: on pre_vote(g, nt, _, _, round) from c, mine(g), not pv_ok(g, c, nt, round), eff(g, e) {
+        send pre_vote_reply(g, nt, round, false, e) to c;
     }
-    count_prevote: on pre_vote_reply(g, nt, round, true) from v, prevoting(g, nt, round), members(g, v) {
+    count_prevote: on pre_vote_reply(g, nt, round, true, _current) from v, prevoting(g, nt, round), members(g, v) {
         emit prevoters(g, nt, round, v);
     }
     view pre_tally(g, nt, round, n = count!(v)) = prevoters(g, nt, round, v);
