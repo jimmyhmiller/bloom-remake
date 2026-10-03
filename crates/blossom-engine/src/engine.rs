@@ -33,7 +33,7 @@ use blossom_value::value::IntValue;
 use blossom_value::{Seed, TypeDef, Value};
 
 use crate::expr::{self, Ctx, ExprError, Shared, bug};
-use crate::rule::{self, Driver, Found, Plan, Regime, StoreKey, Token, dep_store, non_wild};
+use crate::rule::{self, Driver, Found, Plan, Plans, Regime, StoreKey, Stores, Token, dep_store, non_wild};
 use crate::store::{CellSpec, Store};
 use crate::strata::{self, Stratum};
 
@@ -66,11 +66,11 @@ pub struct Engine {
     program: ValidatedProgram,
     shared: Shared,
     node: NodeId,
-    plans: BTreeMap<RuleId, Plan>,
-    strata: Vec<Stratum>,
-    inductive: Vec<RuleId>,
-    asynchronous: Vec<RuleId>,
-    stores: BTreeMap<StoreKey, Store>,
+    plans: Plans,
+    strata: Arc<[Stratum]>,
+    inductive: Arc<[RuleId]>,
+    asynchronous: Arc<[RuleId]>,
+    stores: Stores,
     /// A recompute rule's (or a recursive stratum rule's) head rows at its last evaluation, with their support.
     prev: BTreeMap<RuleId, BTreeMap<Row, i64>>,
     groups: BTreeMap<RuleId, BTreeMap<Vec<Value>, Group>>,
@@ -265,7 +265,7 @@ impl Engine {
         };
         let my_role = cfg.roles.get(node.0 as usize).copied().flatten();
         let runs = |rule: &Rule| rule.role.is_none_or(|r| Some(r) == my_role);
-        let mut plans = BTreeMap::new();
+        let mut plans = Plans::default();
         let mut inductive = Vec::new();
         let mut asynchronous = Vec::new();
         for (id, rule) in p.rules.iter_enumerated() {
@@ -285,7 +285,7 @@ impl Engine {
             s.rules.retain(|r| plans.contains_key(r));
         }
         strata_list.retain(|s| !s.aggregates.is_empty() || !s.rules.is_empty());
-        let mut stores: BTreeMap<StoreKey, Store> = BTreeMap::new();
+        let mut stores = Stores::default();
         for (id, r) in p.rels.iter_enumerated() {
             let blobs = rel_holds_blobs(p, id);
             stores.insert(StoreKey::Main(id), Store::new(cell_spec(p, &kinds, id, 0)?, blobs));
@@ -296,9 +296,8 @@ impl Engine {
         for id in inductive.iter().chain(&asynchronous) {
             if let Some(plan) = plans.get(id) {
                 let rel = p.rules.get(*id).map(|r| r.head.rel).ok_or_else(|| internal_error!("rule {id:?}"))?;
-                stores
-                    .entry(plan.head)
-                    .or_insert(Store::new(cell_spec(p, &kinds, rel, 0)?, rel_holds_blobs(p, rel)));
+                let spec = cell_spec(p, &kinds, rel, 0)?;
+                stores.insert_absent(plan.head, || Store::new(spec, rel_holds_blobs(p, rel)));
             }
         }
         let mut keyed = Vec::new();
@@ -330,9 +329,9 @@ impl Engine {
             },
             node,
             plans,
-            strata: strata_list,
-            inductive,
-            asynchronous,
+            strata: strata_list.into(),
+            inductive: inductive.into(),
+            asynchronous: asynchronous.into(),
             stores,
             prev: BTreeMap::new(),
             groups: BTreeMap::new(),
@@ -518,7 +517,7 @@ impl Engine {
         let p = program.get();
         // 2. The strata.
         let strata_list = self.strata.clone();
-        for s in &strata_list {
+        for s in strata_list.iter() {
             if s.recursive {
                 self.recursive_stratum(p, input, s)?;
             } else {
@@ -533,7 +532,8 @@ impl Engine {
             self.settle(tick)?;
         }
         // 3. The next tick's state and the tick's sends.
-        for id in self.inductive.clone().iter().chain(&self.asynchronous.clone()) {
+        let (inductive, asynchronous) = (self.inductive.clone(), self.asynchronous.clone());
+        for id in inductive.iter().chain(asynchronous.iter()) {
             self.maintain(p, input, *id)?;
         }
         self.settle(tick)?;
@@ -542,7 +542,7 @@ impl Engine {
         self.check_invariants(p, tick)?;
         // 5. The outputs.
         let mut changes = Changes::default();
-        for id in &self.inductive {
+        for id in self.inductive.iter() {
             let Some(plan) = self.plans.get(id) else { continue };
             let StoreKey::Next(rel) = plan.head else { continue };
             if changes.inserted.contains_key(&rel) || changes.deleted.contains_key(&rel) {
@@ -567,7 +567,7 @@ impl Engine {
             blobs: self.new_blobs.take(),
             ..StepOutput::default()
         };
-        for id in &self.asynchronous {
+        for id in self.asynchronous.iter() {
             let Some(plan) = self.plans.get(id) else { continue };
             let StoreKey::Async(rel) = plan.head else { continue };
             let s = self.stores.get(&plan.head).ok_or_else(|| internal_error!("no async store"))?;
@@ -609,10 +609,10 @@ impl Engine {
 
     fn next_instance(&self) -> Result<Instance, EvalError> {
         let mut next = Instance::default();
-        for (key, s) in &self.stores {
+        for (key, s) in self.stores.iter() {
             if let StoreKey::Next(rel) = key {
                 for r in s.present() {
-                    next.insert(*rel, r.clone());
+                    next.insert(rel, r.clone());
                 }
             }
         }
@@ -1301,10 +1301,10 @@ impl Engine {
             &[],
         )?;
         let mut instance = Instance::default();
-        for (key, s) in &self.stores {
+        for (key, s) in self.stores.iter() {
             if let StoreKey::Main(rel) = key {
                 for r in s.present() {
-                    instance.insert(*rel, r.clone());
+                    instance.insert(rel, r.clone());
                 }
             }
         }

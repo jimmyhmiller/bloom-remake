@@ -29,7 +29,7 @@
 //! reference raises it once per complete valuation, so the remaining atoms are joined without the check's outputs
 //! and the error counted for each.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use blossom_base::{RelId, RuleId, VarId, internal_error};
 use blossom_ir::core::{Atom, BinOp, Expr, GenSource, HeadArg, Literal, Pattern, Rule, RuleKind, Term};
@@ -50,6 +50,95 @@ pub(crate) enum StoreKey {
     Next(RelId),
     /// The rows asynchronous rules send this tick.
     Async(RelId),
+}
+
+impl StoreKey {
+    /// The store's place in [`Stores`]: four kinds per relation.
+    fn slot(self) -> usize {
+        let (rel, kind) = match self {
+            StoreKey::Main(r) => (r, 0),
+            StoreKey::Sent(r) => (r, 1),
+            StoreKey::Next(r) => (r, 2),
+            StoreKey::Async(r) => (r, 3),
+        };
+        rel.index() * 4 + kind
+    }
+}
+
+/// Every store of an engine, found by its key in constant time (the keys are dense: four kinds per relation).
+#[derive(Default)]
+pub(crate) struct Stores {
+    slots: Vec<Option<(StoreKey, Store)>>,
+}
+
+impl Stores {
+    pub fn insert(&mut self, key: StoreKey, store: Store) {
+        let i = key.slot();
+        if self.slots.len() <= i {
+            self.slots.resize_with(i + 1, || None);
+        }
+        if let Some(slot) = self.slots.get_mut(i) {
+            *slot = Some((key, store));
+        }
+    }
+
+    /// Inserts `make()` at `key` unless a store is there.
+    pub fn insert_absent(&mut self, key: StoreKey, make: impl FnOnce() -> Store) {
+        if self.get(&key).is_none() {
+            self.insert(key, make());
+        }
+    }
+
+    pub fn get(&self, key: &StoreKey) -> Option<&Store> {
+        self.slots.get(key.slot()).and_then(Option::as_ref).map(|(_, s)| s)
+    }
+
+    pub fn get_mut(&mut self, key: &StoreKey) -> Option<&mut Store> {
+        self.slots.get_mut(key.slot()).and_then(Option::as_mut).map(|(_, s)| s)
+    }
+
+    /// Every store with its key.
+    pub fn iter(&self) -> impl Iterator<Item = (StoreKey, &Store)> {
+        self.slots.iter().flatten().map(|(k, s)| (*k, s))
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &Store> {
+        self.slots.iter().flatten().map(|(_, s)| s)
+    }
+
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut Store> {
+        self.slots.iter_mut().flatten().map(|(_, s)| s)
+    }
+}
+
+/// Every rule's plan, found by its id in constant time, shared so that reading one copies nothing.
+#[derive(Default)]
+pub(crate) struct Plans {
+    slots: Vec<Option<std::sync::Arc<Plan>>>,
+}
+
+impl Plans {
+    pub fn insert(&mut self, id: RuleId, plan: Plan) {
+        let i = id.index();
+        if self.slots.len() <= i {
+            self.slots.resize_with(i + 1, || None);
+        }
+        if let Some(slot) = self.slots.get_mut(i) {
+            *slot = Some(std::sync::Arc::new(plan));
+        }
+    }
+
+    pub fn get(&self, id: &RuleId) -> Option<&std::sync::Arc<Plan>> {
+        self.slots.get(id.index()).and_then(Option::as_ref)
+    }
+
+    pub fn contains_key(&self, id: &RuleId) -> bool {
+        self.get(id).is_some()
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &std::sync::Arc<Plan>> {
+        self.slots.iter().flatten()
+    }
 }
 
 /// How a rule's output is kept up to date.
@@ -702,7 +791,7 @@ pub(crate) type Token = Vec<Value>;
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_term(
     cx: &Ctx<'_>,
-    stores: &BTreeMap<StoreKey, Store>,
+    stores: &Stores,
     rule: &Rule,
     plan: &Plan,
     order: &Order,
@@ -863,7 +952,7 @@ fn range_end(cx: &Ctx<'_>, env: &[Option<Value>], end: &Option<RangeEnd>) -> Opt
 
 struct Search<'a, 'b> {
     cx: &'a Ctx<'a>,
-    stores: &'a BTreeMap<StoreKey, Store>,
+    stores: &'a Stores,
     rule: &'a Rule,
     plan: &'a Plan,
     driver: &'a Driver,
