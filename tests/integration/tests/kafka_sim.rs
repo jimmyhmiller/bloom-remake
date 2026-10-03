@@ -211,6 +211,15 @@ fn the_blossom_client_and_a_rust_client_see_the_same_answers() {
             (45, 0, 1),
             (46, 0, 0),
             (60, 0, 2),
+            (8, 2, 9),
+            (9, 1, 9),
+            (10, 0, 6),
+            (11, 2, 9),
+            (12, 0, 4),
+            (13, 0, 5),
+            (14, 0, 5),
+            (15, 0, 6),
+            (16, 0, 5),
         ],
     );
     let expected_metadata: Metadata = (
