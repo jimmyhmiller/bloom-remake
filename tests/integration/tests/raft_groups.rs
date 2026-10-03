@@ -3,7 +3,9 @@
 //! each leader appending entries, in the cluster simulator under message loss, partitions, crashes (some between a
 //! WAL append and its sync) and downtime. An observer checks Raft's safety properties (Fig. 3) per group on the
 //! brokers' state: election safety, log matching through each entry's recorded `prev`, state machine safety over
-//! committed entries, and leader completeness.
+//! committed entries, and leader completeness. Directed scenarios check a re-elected leader's follower state and the
+//! quiescence of idle groups (no heartbeats while every member is caught up; a leader's broker that dies or restarts
+//! is replaced; a member cut off from a quiet leader does not depose it).
 
 use blossom_integration_tests::seeds;
 use std::collections::BTreeMap;
@@ -353,4 +355,242 @@ fn a_reelected_leader_forgets_its_old_follower_state() {
         completed += 1;
     }
     assert!(completed >= 1, "the scenario never set up");
+}
+
+/// The harness's groups.
+#[cfg(test)]
+fn groups() -> Vec<Value> {
+    [
+        ("all", 0),
+        ("left", 0),
+        ("right", 1),
+        ("pair", 2),
+        ("solo", 3),
+        ("moving", 4),
+    ]
+    .iter()
+    .map(|(n, p)| {
+        Value::Tuple(std::sync::Arc::from(vec![
+            Value::Bytes(std::sync::Arc::from(n.as_bytes())),
+            Value::Int(IntValue::I32(*p)),
+        ]))
+    })
+    .collect()
+}
+
+/// A directed run of the harness (CheckQuorum and PreVote on) with every group held at every broker, once each has
+/// a leader: no group proposes, so every one goes idle.
+#[cfg(test)]
+fn quiet_run<'a>(artifact: &'a BlsArtifact, schema: &'a DurableSchema, seed: u64) -> Directed<'a> {
+    quiet_run_with(artifact, schema, seed, ClusterConfig::default().latency)
+}
+
+/// `quiet_run` with this one-way message latency.
+#[cfg(test)]
+fn quiet_run_with<'a>(
+    artifact: &'a BlsArtifact,
+    schema: &'a DurableSchema,
+    seed: u64,
+    latency: (i64, i64),
+) -> Directed<'a> {
+    let c = Cluster::new(
+        artifact,
+        schema,
+        blossom_value::Seed::from_u64(seed),
+        Vec::new(),
+        Box::new(NoKvClients),
+        ClusterConfig {
+            seed,
+            clients: 0,
+            latency,
+            record: blossom_integration_tests::sim_record(&format!("quiet-seed{seed}")),
+            ..ClusterConfig::default()
+        },
+    )
+    .unwrap();
+    let r = |n: &str| artifact.rel_named(n).unwrap();
+    let mut d = Directed {
+        c,
+        g: groups()[0].clone(),
+        rterm: r("rterm"),
+        won: r("won"),
+        rlog: r("rlog"),
+        hold: r("hold"),
+        release: r("release"),
+    };
+    d.c.observe(Box::new(GroupSafety::of(artifact).unwrap()));
+    d.wait(1_500_000_000);
+    hold_everything(&mut d, &[0, 1, 2, 3]);
+    d
+}
+
+#[cfg(test)]
+fn hold_everything(d: &mut Directed<'_>, nodes: &[u32]) {
+    for g in groups() {
+        for &n in nodes {
+            d.c.input(
+                blossom_value::time::NodeId(n),
+                d.hold,
+                std::sync::Arc::from(vec![g.clone()]),
+            )
+            .unwrap();
+        }
+    }
+}
+
+/// Every group's leader and term among `among` (the highest term led), or `None`.
+#[cfg(test)]
+fn leaders(d: &mut Directed<'_>, among: &[u32]) -> Vec<(Value, Option<(u32, u64)>)> {
+    let mut out = Vec::new();
+    for g in groups() {
+        d.g = g.clone();
+        let l = among
+            .iter()
+            .filter_map(|&n| d.leads(blossom_value::time::NodeId(n)).map(|t| (n, t)))
+            .max_by_key(|x| x.1);
+        out.push((g, l));
+    }
+    out
+}
+
+/// Idle groups stop their heartbeats: what is left is each broker's liveness (4 brokers x 3 peers x 20 per second),
+/// and no group elects again while quiet. A group that gets a proposal wakes and commits it under the same leader.
+#[test]
+fn idle_groups_go_quiet_and_wake_for_a_proposal() {
+    let artifact = compile();
+    let schema = DurableSchema::of(artifact.program.get());
+    let mut d = quiet_run(&artifact, &schema, 1);
+    d.wait(1_500_000_000);
+    let before = leaders(&mut d, &[0, 1, 2, 3]);
+    assert!(
+        before.iter().all(|(_, l)| l.is_some()),
+        "a group has no leader: {before:?}"
+    );
+    let m0 = d.c.run_so_far().messages;
+    d.wait(3_000_000_000);
+    let per_second = (d.c.run_so_far().messages - m0) / 3;
+    assert!(
+        per_second < 400,
+        "{per_second} messages a second while every group is idle"
+    );
+    assert_eq!(
+        leaders(&mut d, &[0, 1, 2, 3]),
+        before,
+        "a group elected again while quiet"
+    );
+    // "left" gets proposals again: it wakes, appends and commits.
+    d.g = groups()[1].clone();
+    let (l, t) = before[1].1.unwrap();
+    let l = blossom_value::time::NodeId(l);
+    let start = d.last(l);
+    d.write_until(l, 1_000_000_000, "left appends", |d| d.last(l).1 > start.1 + 3);
+    let others: Vec<_> = (0..3u32).map(blossom_value::time::NodeId).filter(|n| *n != l).collect();
+    d.await_until(1_000_000_000, "left's followers take its entries", |d| {
+        others.iter().all(|f| d.last(*f) == d.last(l))
+    });
+    assert_eq!(d.leads(l), Some(t), "left's leader changed");
+}
+
+/// A quiet group that wakes keeps its leader whenever in a CheckQuorum period it wakes: its members acknowledged
+/// nothing while quiet, but their brokers were alive, which counts for the period. (The leader once counted them only
+/// while quiet, so a wake shortly before a check, the members' acknowledgements still on their way, deposed it.)
+/// The latency is high so that the acknowledgements take a good part of a period to arrive.
+#[test]
+fn a_quiet_group_that_wakes_keeps_its_leader() {
+    let artifact = compile();
+    let schema = DurableSchema::of(artifact.program.get());
+    let mut d = quiet_run_with(&artifact, &schema, 5, (20_000_000, 40_000_000));
+    d.wait(1_500_000_000);
+    let before = leaders(&mut d, &[0, 1, 2, 3]);
+    d.g = groups()[1].clone();
+    let (l, t) = before[1].1.unwrap();
+    let l = blossom_value::time::NodeId(l);
+    // Wakes at phases across the check period (300 ms): quiet for a while, then a proposal.
+    for k in 0..16 {
+        d.wait(400_000_000 + k * 19_000_000);
+        let start = d.last(l);
+        d.write_until(l, 1_000_000_000, "left appends", |d| d.last(l).1 > start.1);
+        d.wait(320_000_000);
+        assert_eq!(d.leads(l), Some(t), "left's leader stepped down after wake {k}");
+    }
+}
+
+/// A quiet group whose leader's broker crashes elects another among the rest once the broker's liveness stops.
+#[test]
+fn a_quiet_groups_crashed_leader_is_replaced() {
+    let artifact = compile();
+    let schema = DurableSchema::of(artifact.program.get());
+    let mut d = quiet_run(&artifact, &schema, 2);
+    d.wait(1_500_000_000);
+    let before = leaders(&mut d, &[0, 1, 2, 3]);
+    // The leader of "all" (every broker is a member) crashes.
+    let (l, t) = before[0].1.unwrap();
+    d.c.crash(
+        blossom_value::time::NodeId(l),
+        blossom_sim::cluster::CrashWrites::Random,
+    )
+    .unwrap();
+    let rest: Vec<u32> = (0..4).filter(|n| *n != l).collect();
+    d.g = groups()[0].clone();
+    let among: Vec<_> = rest.iter().map(|n| blossom_value::time::NodeId(*n)).collect();
+    d.await_leader(&among, t, 2_000_000_000);
+}
+
+/// A quiet group's leader that restarts at once (a new incarnation, its leadership forgotten) is replaced, or wins
+/// again, in a later term: its followers do not go on counting the restarted broker's liveness as their leader's.
+#[test]
+fn a_quiet_groups_restarted_leader_is_followed_by_an_election() {
+    let artifact = compile();
+    let schema = DurableSchema::of(artifact.program.get());
+    let mut d = quiet_run(&artifact, &schema, 3);
+    d.wait(1_500_000_000);
+    let before = leaders(&mut d, &[0, 1, 2, 3]);
+    let (l, t) = before[0].1.unwrap();
+    let ln = blossom_value::time::NodeId(l);
+    d.c.crash(ln, blossom_sim::cluster::CrashWrites::Random).unwrap();
+    d.wait(1_000_000);
+    d.c.restart(ln).unwrap();
+    hold_everything(&mut d, &[l]);
+    d.g = groups()[0].clone();
+    let all: Vec<_> = (0..4u32).map(blossom_value::time::NodeId).collect();
+    d.await_leader(&all, t, 2_500_000_000);
+}
+
+/// A quiet group's leader that stops hearing its members (cut off one way: it still reaches them) steps down
+/// (CheckQuorum); its members still hear its broker alive, so it tells them it was deposed, and they elect another.
+#[test]
+fn a_quiet_leader_that_hears_no_member_is_replaced() {
+    let artifact = compile();
+    let schema = DurableSchema::of(artifact.program.get());
+    let mut d = quiet_run(&artifact, &schema, 6);
+    d.wait(1_500_000_000);
+    let before = leaders(&mut d, &[0, 1, 2, 3]);
+    // "left" is b1, b2 and b3: its followers' messages no longer reach its leader.
+    let (l, t) = before[1].1.unwrap();
+    let followers: Vec<_> = (0..3u32).filter(|n| *n != l).map(blossom_value::time::NodeId).collect();
+    for f in &followers {
+        d.c.cut(*f, blossom_value::time::NodeId(l)).unwrap();
+    }
+    d.g = groups()[1].clone();
+    d.await_leader(&followers, t, 2_500_000_000);
+}
+
+/// A member cut off from a quiet leader (both ways) finds its timeout passing, but the others, who hear the leader's
+/// broker alive, refuse its pre-votes: no group's term moves.
+#[test]
+fn a_member_cut_off_from_a_quiet_leader_does_not_depose_it() {
+    let artifact = compile();
+    let schema = DurableSchema::of(artifact.program.get());
+    let mut d = quiet_run(&artifact, &schema, 4);
+    d.wait(1_500_000_000);
+    let before = leaders(&mut d, &[0, 1, 2, 3]);
+    // "left" is b1, b2 and b3: cut its leader off from one follower.
+    let (l, _) = before[1].1.unwrap();
+    let f = (0..3u32).find(|n| *n != l).unwrap();
+    d.c.cut(blossom_value::time::NodeId(l), blossom_value::time::NodeId(f))
+        .unwrap();
+    d.c.cut(blossom_value::time::NodeId(f), blossom_value::time::NodeId(l))
+        .unwrap();
+    d.wait(3_000_000_000);
+    assert_eq!(leaders(&mut d, &[0, 1, 2, 3]), before, "a group's term moved");
 }

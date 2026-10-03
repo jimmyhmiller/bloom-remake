@@ -126,14 +126,29 @@ pub enum TraceCommand {
     },
 }
 
-/// What every subcommand takes.
+/// What every subcommand takes: the trace, and the program it was recorded with, from the deployment spec or (a
+/// simulated run, which has none) as the program's source, nodes and parameters.
 #[derive(Debug, clap::Args)]
 pub struct Common {
     /// The trace (`<node>-<incarnation>.blstrace`).
     pub trace: PathBuf,
     /// The deployment spec it was recorded under (`deploy.toml`): its program is compiled and replayed.
-    #[arg(long = "deploy", value_name = "FILE")]
-    pub deploy: PathBuf,
+    #[arg(
+        long = "deploy",
+        value_name = "FILE",
+        required_unless_present = "program",
+        conflicts_with = "program"
+    )]
+    pub deploy: Option<PathBuf>,
+    /// Instead of a deployment: the program's source, compiled for `--node`s with `--param`s.
+    #[arg(long, value_name = "FILE")]
+    pub program: Option<PathBuf>,
+    /// A node of the deployment, in order (`NAME:ROLE`, or `NAME` in a role-free program).
+    #[arg(long = "node", value_name = "NAME[:ROLE]", requires = "program")]
+    pub nodes: Vec<String>,
+    /// A deploy-time parameter (`NAME=VALUE`: `true`/`false`, an integer, or text such as `500ms`).
+    #[arg(long = "param", value_name = "NAME=VALUE", requires = "program")]
+    pub params: Vec<String>,
 }
 
 /// Runs the command.
@@ -149,11 +164,50 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
 }
 
 fn open(common: &Common) -> Result<(Arc<BlsArtifact>, Replay<BufReader<File>>), String> {
-    let (_spec, artifact) = load(&common.deploy).map_err(|_| "the deployment did not load".to_owned())?;
+    let artifact = match (&common.deploy, &common.program) {
+        (Some(deploy), _) => load(deploy).map_err(|_| "the deployment did not load".to_owned())?.1,
+        (None, Some(program)) => Arc::new(compile_program(program, &common.nodes, &common.params)?),
+        (None, None) => return Err("give --deploy, or --program with its --node and --param".into()),
+    };
     let file = File::open(&common.trace).map_err(|e| format!("{}: {e}", common.trace.display()))?;
     let externs = crate::common::std_externs().map_err(|e| e.to_string())?;
     let replay = Replay::open(&artifact, BufReader::new(file), externs).map_err(|e| e.to_string())?;
     Ok((artifact, replay))
+}
+
+/// Compiles `program` for `nodes` (`NAME[:ROLE]`) with `params` (`NAME=VALUE`).
+fn compile_program(program: &std::path::Path, nodes: &[String], params: &[String]) -> Result<BlsArtifact, String> {
+    use blossom_front::api::{NodeSpec, ParamBinding};
+    let nodes: Vec<NodeSpec> = nodes
+        .iter()
+        .map(|n| match n.split_once(':') {
+            Some((name, role)) => NodeSpec {
+                name: name.to_owned(),
+                role: Some(role.to_owned()),
+            },
+            None => NodeSpec {
+                name: n.clone(),
+                role: None,
+            },
+        })
+        .collect();
+    let mut bindings = BTreeMap::new();
+    for p in params {
+        let (name, value) = p.split_once('=').ok_or_else(|| format!("`{p}` is not NAME=VALUE"))?;
+        let binding = match value {
+            "true" => ParamBinding::Bool(true),
+            "false" => ParamBinding::Bool(false),
+            v => match v.parse::<i128>() {
+                Ok(n) => ParamBinding::Int(n),
+                Err(_) => ParamBinding::Text(v.to_owned()),
+            },
+        };
+        bindings.insert(name.to_owned(), binding);
+    }
+    let source = program
+        .to_str()
+        .ok_or_else(|| format!("the program path {} is not UTF-8", program.display()))?;
+    crate::common::bls::compile_with(source, &nodes, &bindings).map_err(|_| "the program did not compile".to_owned())
 }
 
 /// What a relation's history reports: a carried relation's changes, a channel's messages received and sent, an
