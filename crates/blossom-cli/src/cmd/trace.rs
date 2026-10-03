@@ -75,6 +75,12 @@ pub enum TraceCommand {
     History {
         #[command(flatten)]
         common: Common,
+        /// Only ticks at or after this time (seconds since the epoch, as the output prints them).
+        #[arg(long)]
+        from: Option<f64>,
+        /// Only ticks at or before this time.
+        #[arg(long)]
+        to: Option<f64>,
         /// The pattern (`rel(v, _, …)`).
         pattern: String,
     },
@@ -95,6 +101,12 @@ pub enum TraceCommand {
         /// The tick (without it: the whole trace, summed).
         #[arg(long)]
         at: Option<u64>,
+        /// Summing, only ticks at or after this time (seconds since the epoch).
+        #[arg(long)]
+        from: Option<f64>,
+        /// Summing, only ticks at or before this time.
+        #[arg(long)]
+        to: Option<f64>,
         /// How many rules to list.
         #[arg(long, default_value_t = 10)]
         top: usize,
@@ -150,6 +162,7 @@ fn open(common: &Common) -> Result<(Arc<BlsArtifact>, Replay<BufReader<File>>), 
 enum Kind {
     Carried,
     Channel,
+    Host,
     Event,
     View,
 }
@@ -215,6 +228,12 @@ fn print_fn_work(names: &Names<'_>, work: &BTreeMap<FnId, FnWork>, top: usize) {
             .map_or_else(|| format!("{id:?}"), |d| d.name.to_string());
         println!("  {:>12}  {:>12}  {:>10}  {name}", w.self_steps, w.steps, w.calls);
     }
+}
+
+/// Seconds since the epoch (as `history --from/--to` take them) in the trace's nanoseconds.
+#[allow(clippy::cast_possible_truncation)] // A time within ±292 years of the epoch: nanoseconds fit an i64.
+fn seconds_to_nanos(s: f64) -> i64 {
+    (s * 1e9).round() as i64
 }
 
 /// What a tick received, counted per relation: `name ×n` for events, deliveries and client requests.
@@ -561,7 +580,12 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
             }
             Ok(())
         }
-        TraceCommand::History { common, pattern } => {
+        TraceCommand::History {
+            common,
+            from,
+            to,
+            pattern,
+        } => {
             let (artifact, mut replay) = open(&common)?;
             let names = Names { artifact: &artifact };
             let (rel, pat) = names.pattern(&pattern)?;
@@ -572,6 +596,7 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
                 .ok_or_else(|| format!("{rel:?} is not declared"))?;
             let kind = match (&decl.class, &decl.persistence) {
                 (RelClass::Channel(_), _) => Kind::Channel,
+                (RelClass::HostOut(_), _) => Kind::Host,
                 (RelClass::Event(_), _) => Kind::Event,
                 (_, Persistence::None) => Kind::View,
                 _ => Kind::Carried,
@@ -581,6 +606,15 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
             }
             let mut held: BTreeSet<Row> = BTreeSet::new();
             while let Some(r) = replay.next(false).map_err(err)? {
+                // The window, compared in nanoseconds (as the trace holds times).
+                let now = r.inputs.now.0;
+                if to.is_some_and(|t| now > seconds_to_nanos(t)) {
+                    break;
+                }
+                let shown = from.is_none_or(|f| now >= seconds_to_nanos(f));
+                if !shown && kind != Kind::View {
+                    continue;
+                }
                 let at = format!(
                     "tick {} {}",
                     r.inputs.tick.0,
@@ -596,6 +630,11 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
                                     println!("{at} {sign} {} (from the next tick)", names.row(rel, row));
                                 }
                             }
+                        }
+                    }
+                    Kind::Host => {
+                        for h in r.host.iter().filter(|h| h.rel == rel && matches(&pat, &h.row)) {
+                            println!("{at} -> {}", names.row(rel, &h.row));
                         }
                     }
                     Kind::Channel => {
@@ -625,11 +664,13 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
                     Kind::View => {
                         let Some(rows) = r.observed.get(&rel) else { continue };
                         let now: BTreeSet<Row> = rows.iter().filter(|row| matches(&pat, row)).cloned().collect();
-                        for row in held.difference(&now) {
-                            println!("{at} - {} (no longer holds)", names.row(rel, row));
-                        }
-                        for row in now.difference(&held) {
-                            println!("{at} + {} (holds)", names.row(rel, row));
+                        if shown {
+                            for row in held.difference(&now) {
+                                println!("{at} - {} (no longer holds)", names.row(rel, row));
+                            }
+                            for row in now.difference(&held) {
+                                println!("{at} + {} (holds)", names.row(rel, row));
+                            }
                         }
                         held = now;
                     }
@@ -637,7 +678,13 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
             }
             Ok(())
         }
-        TraceCommand::Profile { common, at: None, top } => {
+        TraceCommand::Profile {
+            common,
+            at: None,
+            from,
+            to,
+            top,
+        } => {
             let (artifact, mut replay) = open(&common)?;
             let names = Names { artifact: &artifact };
             replay.profile(true).map_err(err)?;
@@ -645,6 +692,13 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
             let mut fns: BTreeMap<FnId, FnWork> = BTreeMap::new();
             let mut ticks = 0u64;
             while let Some(r) = replay.next(false).map_err(err)? {
+                let now = r.inputs.now.0;
+                if to.is_some_and(|t| now > seconds_to_nanos(t)) {
+                    break;
+                }
+                if from.is_some_and(|f| now < seconds_to_nanos(f)) {
+                    continue;
+                }
                 ticks += 1;
                 for (rule, n) in r.work {
                     let w = work.entry(rule).or_default();
@@ -667,6 +721,7 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
             common,
             at: Some(at),
             top,
+            ..
         } => {
             let (artifact, mut replay) = open(&common)?;
             let names = Names { artifact: &artifact };

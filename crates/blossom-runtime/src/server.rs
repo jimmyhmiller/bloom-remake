@@ -48,7 +48,7 @@ use blossom_value::value::SessionId;
 use blossom_wire::frame::{Frame, Peer, RejectReason};
 
 use crate::RuntimeError;
-use crate::clock::{OsEntropy, SystemClock, wall_now};
+use crate::clock::{OsEntropy, Stopwatch, SystemClock, wall_now};
 use crate::deploy::DeploymentSpec;
 use crate::net::{self, Catalog, Conn, Identity};
 use crate::streams::{Env as StreamEnv, StreamConns, StreamData, StreamQueue, StreamStats};
@@ -89,6 +89,20 @@ pub struct Stats {
     pub egress: AtomicU64,
     pub sessions: AtomicU64,
     pub checkpoints: AtomicU64,
+    /// The time WAL syncs took, in total and at most, and how many took over 4, 16 and 64 ms.
+    pub wal_sync_nanos: AtomicU64,
+    pub wal_sync_max_nanos: AtomicU64,
+    pub wal_syncs_over_4ms: AtomicU64,
+    pub wal_syncs_over_16ms: AtomicU64,
+    pub wal_syncs_over_64ms: AtomicU64,
+    /// The time checkpoints took (written, installed, pruned, their logged blobs made files), in total.
+    pub checkpoint_nanos: AtomicU64,
+    /// How long messages from peers, and clients' stream data, waited between their reader queueing them and the
+    /// engine taking them: at most, and how many waited over 4 ms.
+    pub peer_wait_max_nanos: AtomicU64,
+    pub peer_waits_over_4ms: AtomicU64,
+    pub stream_wait_max_nanos: AtomicU64,
+    pub stream_waits_over_4ms: AtomicU64,
     /// Blobs deleted after checkpoints (no row can reach them).
     pub blobs_collected: AtomicU64,
     /// Rejected by an ACL (an omission, SEM-090).
@@ -119,6 +133,16 @@ impl Stats {
             ("egress", r(&self.egress)),
             ("sessions", r(&self.sessions)),
             ("checkpoints", r(&self.checkpoints)),
+            ("wal_sync_nanos", r(&self.wal_sync_nanos)),
+            ("wal_sync_max_nanos", r(&self.wal_sync_max_nanos)),
+            ("wal_syncs_over_4ms", r(&self.wal_syncs_over_4ms)),
+            ("wal_syncs_over_16ms", r(&self.wal_syncs_over_16ms)),
+            ("wal_syncs_over_64ms", r(&self.wal_syncs_over_64ms)),
+            ("checkpoint_nanos", r(&self.checkpoint_nanos)),
+            ("peer_wait_max_nanos", r(&self.peer_wait_max_nanos)),
+            ("peer_waits_over_4ms", r(&self.peer_waits_over_4ms)),
+            ("stream_wait_max_nanos", r(&self.stream_wait_max_nanos)),
+            ("stream_waits_over_4ms", r(&self.stream_waits_over_4ms)),
             ("blobs_collected", r(&self.blobs_collected)),
             ("rejected_acl", r(&self.rejected_acl)),
             ("rejected_unknown_dest", r(&self.rejected_unknown_dest)),
@@ -127,6 +151,14 @@ impl Stats {
             ("dropped_queue_full", r(&self.dropped_queue_full)),
             ("dropped_oversized", r(&self.dropped_oversized)),
         ]
+    }
+}
+
+/// Notes how long a queued message waited: the largest wait, and the count over 4 ms.
+fn note_wait(max: &AtomicU64, over: &AtomicU64, nanos: u64) {
+    max.fetch_max(nanos, Ordering::Relaxed);
+    if nanos > 4_000_000 {
+        over.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -189,13 +221,15 @@ enum Commit {
 
 /// The bounded data queue between the readers and the engine.
 struct DataQueue {
-    q: Mutex<VecDeque<Data>>,
+    /// Each message with how long it has waited.
+    q: Mutex<VecDeque<(Stopwatch, Data)>>,
     not_full: Condvar,
     cap: usize,
     closed: AtomicBool,
     /// Whether a `Wake` is already on its way to the engine.
     wake_pending: AtomicBool,
     control: Sender<Control>,
+    stats: Arc<Stats>,
 }
 
 impl DataQueue {
@@ -213,7 +247,7 @@ impl DataQueue {
         if self.closed.load(Ordering::SeqCst) {
             return false;
         }
-        q.push_back(d);
+        q.push_back((Stopwatch::start(), d));
         drop(q);
         if !self.wake_pending.swap(true, Ordering::SeqCst) {
             // The engine may be gone; the closed flag reports that on the next push.
@@ -229,7 +263,17 @@ impl DataQueue {
             return Vec::new();
         };
         let n = max.min(q.len());
-        let out: Vec<Data> = q.drain(..n).collect();
+        let out: Vec<Data> = q
+            .drain(..n)
+            .map(|(waited, d)| {
+                note_wait(
+                    &self.stats.peer_wait_max_nanos,
+                    &self.stats.peer_waits_over_4ms,
+                    waited.nanos(),
+                );
+                d
+            })
+            .collect();
         self.not_full.notify_all();
         out
     }
@@ -463,16 +507,23 @@ impl Server {
             closed: AtomicBool::new(false),
             wake_pending: AtomicBool::new(false),
             control: ctl_tx.clone(),
+            stats: stats.clone(),
         });
         let stream_stats = Arc::new(StreamStats::default());
         let streams = Arc::new(StreamConns::new(restarts, spec.stream_limits, stream_stats.clone()));
-        let stream_queue = Arc::new(StreamQueue::new({
-            let control = ctl_tx.clone();
-            // The engine may be gone; the closed queue reports that on the next push.
-            Box::new(move || {
-                let _ = control.send(Control::Wake);
-            })
-        }));
+        let stream_queue = Arc::new(StreamQueue::new(
+            {
+                let control = ctl_tx.clone();
+                // The engine may be gone; the closed queue reports that on the next push.
+                Box::new(move || {
+                    let _ = control.send(Control::Wake);
+                })
+            },
+            {
+                let stats = stats.clone();
+                Box::new(move |nanos| note_wait(&stats.stream_wait_max_nanos, &stats.stream_waits_over_4ms, nanos))
+            },
+        ));
         let stream_env = StreamEnv {
             conns: streams.clone(),
             queue: stream_queue.clone(),
@@ -500,10 +551,10 @@ impl Server {
             })?);
         }
         {
-            let (tx, commit) = (ctl_tx.clone(), commit_tx.clone());
+            let (tx, commit, stats) = (ctl_tx.clone(), commit_tx.clone(), stats.clone());
             let (artifact, names, blobs) = (artifact.clone(), names.clone(), blob_store.clone());
             threads.push(spawn("checkpoint", move || {
-                checkpointer(checkpoints, &artifact, names, &blobs, ckpt_rx, commit, tx)
+                checkpointer(checkpoints, &artifact, names, &blobs, ckpt_rx, commit, tx, &stats)
             })?);
         }
         // Peer writers: one per other node.
@@ -731,7 +782,21 @@ fn committer(
             }
         }
         if appended > 0 {
-            match wal.sync() {
+            let clock = Stopwatch::start();
+            let result = wal.sync();
+            let took = clock.nanos();
+            bump(&stats.wal_sync_nanos, took);
+            stats.wal_sync_max_nanos.fetch_max(took, Ordering::Relaxed);
+            for (over, c) in [
+                (4_000_000, &stats.wal_syncs_over_4ms),
+                (16_000_000, &stats.wal_syncs_over_16ms),
+                (64_000_000, &stats.wal_syncs_over_64ms),
+            ] {
+                if took > over {
+                    bump(c, 1);
+                }
+            }
+            match result {
                 Ok(synced) => {
                     bump(&stats.wal_records, appended);
                     bump(&stats.wal_batches, 1);
@@ -759,6 +824,7 @@ fn committer(
 }
 
 /// The checkpoint thread: write, install, remove the older checkpoints, hand the truncation token to the committer.
+#[allow(clippy::too_many_arguments)]
 fn checkpointer(
     mut ckpt: FileCheckpoints,
     artifact: &BlsArtifact,
@@ -767,11 +833,13 @@ fn checkpointer(
     rx: Receiver<(CheckpointJob, SyncedTick)>,
     commit: Sender<Commit>,
     tx: Sender<Control>,
+    stats: &Stats,
 ) {
     let program = artifact.program.get();
     let schema = DurableSchema::of(program);
     let codec = DurableCodec::new(program, &schema, names);
     while let Ok((job, covers)) = rx.recv() {
+        let clock = Stopwatch::start();
         let written = match job {
             CheckpointJob::Layer(delta) => ckpt.write_layer(&delta, covers).map_err(|e| e.to_string()),
             CheckpointJob::Full(image) => codec
@@ -791,6 +859,7 @@ fn checkpointer(
             })
             .and_then(|token| commit.send(Commit::Truncate(token)).map_err(|e| e.to_string()))
             .and_then(|()| ckpt.chain().map_err(|e| e.to_string()));
+        bump(&stats.checkpoint_nanos, clock.nanos());
         if tx.send(Control::CheckpointDone(result)).is_err() {
             return;
         }

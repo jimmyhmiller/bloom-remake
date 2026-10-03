@@ -7,7 +7,7 @@
 #   scripts/bench-kafka.sh down               stop every cluster this script started
 #   scripts/bench-kafka.sh produce [ARGS…]    kafka-producer-perf-test against the running cluster
 #   scripts/bench-kafka.sh consume [ARGS…]    kafka-consumer-perf-test against the running cluster
-#   scripts/bench-kafka.sh e2e [ARGS…]        kafka-e2e-latency against the running cluster
+#   scripts/bench-kafka.sh e2e [N] [SIZE]     kafka-e2e-latency against the running cluster
 #   scripts/bench-kafka.sh suite SYSTEM…      the whole workload against each system in turn (results in $OUT)
 #
 # Environment: KAFKA_HOME (default: the repository's .tools/kafka_*), BENCH_DIR (scratch data, default
@@ -52,7 +52,7 @@ blossom_up() {
   printf 'seed = "00112233445566778899aabbccddeeff"\n' > "$d/k.secrets"
   chmod 600 "$d/k.secrets"
   for i in 1 2 3; do
-    nohup "$BLOSSOM" run --deploy "$d/deploy.toml" --node "b$i" --insecure-dev --init-fresh \
+    nohup "$BLOSSOM" run --deploy "$d/deploy.toml" --node "b$i" --insecure-dev --init-fresh --stats "$d/b$i.stats" \
       ${RECORD:+--record "$d/traces"} > "$d/b$i.log" 2>&1 &
     echo $! >> "$BENCH_DIR/pids"
   done
@@ -180,6 +180,15 @@ case "$cmd" in
   down) down ;;
   produce)
     "$K/kafka-producer-perf-test.sh" --topic "$TOPIC" --producer-props bootstrap.servers="$BOOTSTRAP" acks=all "$@"
+    ;;
+  consume)
+    # A consumer in a group (the coordinator, joins and offset commits included) reading the topic from the start.
+    "$K/kafka-consumer-perf-test.sh" --bootstrap-server "$BOOTSTRAP" --topic "$TOPIC" --timeout 60000 "$@"
+    ;;
+  e2e)
+    # One record at a time, produced with acks=all and consumed: the time from send to receipt.
+    # Arguments: the number of records and their size.
+    "$K/kafka-e2e-latency.sh" "$BOOTSTRAP" "$TOPIC" "${1:-2000}" all "${2:-1024}"
     ;;
   *) sed -n '2,15p' "$0" >&2; exit 2 ;;
 esac
