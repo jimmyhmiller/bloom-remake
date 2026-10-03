@@ -248,7 +248,12 @@ fn a_reelected_leader_forgets_its_old_follower_state() {
     let artifact = compile_with(false);
     let schema = DurableSchema::of(artifact.program.get());
     let mut completed = 0;
-    for seed in seeds(1..=12) {
+    // Whether a seed sets the scenario up depends on who wins its elections: the fast tier tries the seeds in order
+    // until one does, the full tier runs them all.
+    for seed in 1..=12 {
+        if completed > 0 && !blossom_integration_tests::full_tier() {
+            break;
+        }
         let c = Cluster::new(
             &artifact,
             &schema,

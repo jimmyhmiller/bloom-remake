@@ -179,7 +179,11 @@ at Broker {
     table won(g: Group, term: u64);
     table leader_of(g: Group, term: u64, leader: Node<Broker>) key(g, term);
     table voters(g: Group, term: u64, v: Node<Broker>);
+    /// A group's election deadline as last armed (at the start, a vote granted, an election timed out), and the
+    /// randomized timeout drawn then. Hearing the leader does not re-arm it: the timeout counts from the last time the
+    /// leader was heard (`heard_at`), as etcd resets its elapsed time on a heartbeat without drawing a new timeout.
     table deadline(g: Group, at: Instant) key(g);
+    table election_span(g: Group, span: Duration) key(g);
     /// The highest index known committed.
     table commit(g: Group, i: u64) key(g) resolve choose_most(i);
     /// The highest commit index a leader of this broker's term has announced, whether or not this broker's log has
@@ -230,12 +234,14 @@ at Broker {
 
     /// A group gets an election deadline when this broker first knows it is a member (and after a restart). A member
     /// alone in its group needs no one's vote, so its deadline is now.
-    arm: while mine(g), not deadline(g, _), group_size(g, k), not reset_timer(g) {
+    arm: while mine(g), not deadline(g, _), group_size(g, k), not reset_timer(g),
+            let span = rand_range(RAFT_ELECTION_MIN, RAFT_ELECTION_MAX, ("arm", g)) {
         if k == 1 {
             upsert deadline(g, now());
         }
         if k > 1 {
-            upsert deadline(g, now() + rand_range(RAFT_ELECTION_MIN, RAFT_ELECTION_MAX, ("arm", g)));
+            upsert deadline(g, now() + span);
+            upsert election_span(g, span);
         }
     }
 
@@ -312,9 +318,11 @@ at Broker {
     /// (§4.2.3; a leader itself does not, since without checking a quorum it cannot know it still leads): a removed member, or one cut off for a while, cannot depose a working leader. Only a
     /// member votes; a candidate need not be a member in the voter's configuration (a member just added is not yet
     /// in a lagging voter's).
-    table heard_at(g: Group, at: Instant) key(g) resolve choose_most(at);
+    /// When this broker last heard a leader of its term, per group (one write per group per tick: `heard_leader` is a
+    /// set of groups).
+    table heard_at(g: Group, at: Instant) key(g);
     note_leader: on heard_leader(g) {
-        next heard_at(g, now());
+        upsert heard_at(g, now());
     }
     view recently_led(g) = heard_at(g, a) where now() < a + RAFT_ELECTION_MIN;
     view rv_ok(g, c, t) =
@@ -338,16 +346,25 @@ at Broker {
         entries(g: g, term: t, ..), eff(g, t);
     }
     view granted_now(g) = grant(g, _, _);
+    /// When a group's election is due: its armed deadline, or its timeout past the last time its leader was heard,
+    /// whichever is later.
+    view election_due(g, d) {
+        deadline(g, d0), not heard_at(g, _), let d = d0;
+        deadline(g, d0), heard_at(g, h), election_span(g, s), let d = if h + s > d0 { h + s } else { d0 };
+        deadline(g, d0), heard_at(g, _), not election_span(g, _), let d = d0;
+    }
     view timed_out(g, t) =
-        raft_poll, eff(g, t), mine(g), deadline(g, d), not leader(g, t), not granted_now(g), not heard_leader(g)
+        raft_poll, eff(g, t), mine(g), election_due(g, d), not leader(g, t), not granted_now(g), not heard_leader(g)
         where now() >= d;
+    /// What re-arms a group's election timeout: a vote granted, or an election that timed out (a leader heard moves
+    /// `election_due` through `heard_at` instead).
     view reset_timer(g) {
         granted_now(g);
-        heard_leader(g);
         timed_out(g, _);
     }
-    rearm: on reset_timer(g), eff(g, t) {
-        upsert deadline(g, now() + rand_range(RAFT_ELECTION_MIN, RAFT_ELECTION_MAX, ("election", g, t)));
+    rearm: on reset_timer(g), eff(g, t), let span = rand_range(RAFT_ELECTION_MIN, RAFT_ELECTION_MAX, ("election", g, t)) {
+        upsert deadline(g, now() + span);
+        upsert election_span(g, span);
     }
     // ---- PreVote (§9.6)
     /// A member whose election timeout passes first asks the others whether they would vote for it in the next term,

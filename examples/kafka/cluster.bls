@@ -9,7 +9,8 @@
 //! is gone) and holds the same metadata. The applied metadata is durable, with the index applied.
 //!
 //! Each topic partition is a group of its own, whose members are its replica set. A partition leader announces the
-//! groups it leads, with their epochs, to every broker at each heartbeat (D7), so any broker can answer Metadata.
+//! groups it leads, with their epochs, to every broker (D7), so any broker can answer Metadata: a change at the next
+//! heartbeat, and everything every `ANNOUNCE_REFRESH`.
 
 /// The controller's group: the metadata topic id (0, 1), partition 0 (Kafka's `__cluster_metadata`).
 fn controller() -> Group {
@@ -227,6 +228,8 @@ fn chunks(b: Bytes, size: u64) -> Vec<Bytes> {
 /// How long a follower may go without being caught up before it leaves its partition's in-sync replicas (Kafka's
 /// `replica.lag.time.max.ms`).
 param REPLICA_LAG_MAX: Duration = 30s;
+/// How often a partition leader announces every group it leads, unchanged ones included (changes go at once).
+param ANNOUNCE_REFRESH: Duration = 1s;
 /// Producer ids: the first, and how many the controller gives a broker at a time (Kafka's blocks of 1000), so a
 /// broker hands out producer ids itself and an idempotent producer's start costs the controller nothing.
 param PID_START: i64 = 1000;
@@ -588,6 +591,9 @@ at Broker {
         if heard_at(g, at) {
             delete heard_at(g, at);
         }
+        if election_span(g, s) {
+            delete election_span(g, s);
+        }
         if heard_commit(g, c) {
             delete heard_commit(g, c);
         }
@@ -754,7 +760,27 @@ at Broker {
     /// The latest announcement heard per partition group: its stamp (the epoch, and when its leader sent it), the
     /// leader and the in-sync replicas. Announcements of one epoch come from one leader, so its clock orders them.
     table leader_view(g: Group, stamp: (u64, Instant), l: Node<Broker>, isr: Vec<i32>) key(g) resolve choose_most(stamp);
-    announce: on raft_heartbeat, led_groups(gs) {
+    /// A leader announces a group when its epoch or in-sync replicas change (at the next heartbeat), and every group it
+    /// leads every `ANNOUNCE_REFRESH`, for a broker that restarted or missed a message.
+    table announced_as(g: Group, t: u64, isr: Vec<i32>) key(g);
+    view announce_change(g, t, isr) = leader(g, t), not is_controller(g), isr_of(g, isr), not announced_as(g, t, isr);
+    view led_changes(gs = collect!((g, t, isr))) = announce_change(g, t, isr);
+    announce: on raft_heartbeat, led_changes(gs) {
+        for broker(n, _, _, _) where n != self {
+            send leads(gs, now()) to n;
+        }
+    }
+    note_announced: on raft_heartbeat, announce_change(g, t, isr) {
+        upsert announced_as(g, t, isr);
+    }
+    forget_announced: while announced_as(g, t, isr), not leader(g, t) {
+        delete announced_as(g, t, isr);
+    }
+    /// Whether this broker has led a partition (carried state, as a timer's guard must be; a leadership that ended
+    /// leaves the refresh firing with nothing to announce).
+    view leading_partitions() = won(g, _), not is_controller(g);
+    timer announce_refresh every ANNOUNCE_REFRESH while leading_partitions;
+    refresh_announcements: on announce_refresh, led_groups(gs) {
         for broker(n, _, _, _) where n != self {
             send leads(gs, now()) to n;
         }
