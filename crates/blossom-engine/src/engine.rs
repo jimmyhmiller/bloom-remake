@@ -94,6 +94,10 @@ pub struct Engine {
     examined_by: BTreeMap<RuleId, RuleWork>,
     /// The blobs the current tick created (`Blob::of`), with their bytes.
     new_blobs: std::cell::RefCell<BTreeMap<blossom_value::BlobRef, Arc<[u8]>>>,
+    /// Each (rule, driver literal)'s join order, with the sizes of the stores its atoms read when it was chosen, in
+    /// powers of two: reused while every one stays in its power of two. A join order decides a term's cost, never
+    /// its valuations, so reusing one changes only the work.
+    orders: std::cell::RefCell<BTreeMap<(RuleId, Option<usize>), CachedOrder>>,
 }
 
 fn kinds(p: &Program) -> Vec<Option<Kind>> {
@@ -347,6 +351,7 @@ impl Engine {
             examined: 0,
             examined_by: BTreeMap::new(),
             new_blobs: std::cell::RefCell::new(BTreeMap::new()),
+            orders: std::cell::RefCell::new(BTreeMap::new()),
             program,
         };
         engine.build_indexes()?;
@@ -798,11 +803,33 @@ impl Engine {
             // A range keeps some of the rows its probe finds: assume a small fraction.
             if range { rows / 16 + 1 } else { rows }
         };
-        let mut orders: BTreeMap<Option<usize>, rule::Order> = BTreeMap::new();
+        let sizes: Vec<u32> = plan
+            .atoms
+            .iter()
+            .map(|lit| match rule.body.lits.get(*lit) {
+                Some(Literal::Pos(a)) => self
+                    .stores
+                    .get(&rule::atom_store(a))
+                    .map_or(0, |s| usize::BITS - s.present().len().leading_zeros()),
+                _ => 0,
+            })
+            .collect();
+        let mut orders: BTreeMap<Option<usize>, Arc<rule::Order>> = BTreeMap::new();
         for (driver, _) in &drivers {
-            orders
-                .entry(driver.lit())
-                .or_insert_with(|| plan.order_for(rule, driver.lit(), &cost));
+            let lit = driver.lit();
+            if orders.contains_key(&lit) {
+                continue;
+            }
+            let mut cache = self.orders.borrow_mut();
+            let order = match cache.get(&(rule.id, lit)) {
+                Some((at, order)) if *at == sizes => order.clone(),
+                _ => {
+                    let order = Arc::new(plan.order_for(rule, lit, &cost));
+                    cache.insert((rule.id, lit), (sizes.clone(), order.clone()));
+                    order
+                }
+            };
+            orders.insert(lit, order);
         }
         for (driver, pos) in drivers {
             let order = orders
@@ -1349,6 +1376,9 @@ impl Engine {
         self.node
     }
 }
+
+/// A join order with the sizes of the stores it was chosen for, in powers of two (`Engine::orders`).
+type CachedOrder = (Vec<u32>, Arc<rule::Order>);
 
 /// A rule's evaluated change: head rows (or aggregate tuples) with signed weights, and runtime errors per valuation.
 #[derive(Default)]
