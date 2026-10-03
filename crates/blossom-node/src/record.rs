@@ -2,13 +2,13 @@
 //! runs to a [`blossom_trace::node`] trace before running it, so the incarnation can be replayed exactly and
 //! questioned afterwards.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use blossom_base::RelId;
+use blossom_base::{RelId, RuleId};
 use blossom_ir::tick::{EvalError, Instance, Row, StepInput, StepOutput};
 use blossom_trace::node::{NodeRecord, NodeTraceHeader, TraceWriter, outcome_digest};
 use blossom_value::{BlobRef, BlobSource};
@@ -145,6 +145,10 @@ impl Executor for Recording {
 
     fn rows_examined(&self) -> Option<u64> {
         self.inner.rows_examined()
+    }
+
+    fn rows_examined_by_rule(&self) -> Option<BTreeMap<RuleId, u64>> {
+        self.inner.rows_examined_by_rule()
     }
 
     fn holds_blob(&self, b: &BlobRef) -> bool {

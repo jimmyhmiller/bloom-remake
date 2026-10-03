@@ -5,7 +5,10 @@
 //!
 //! - `replay`: replay the whole trace and summarize it.
 //! - `show`: a relation's rows at a tick (views and events included).
-//! - `history`: every tick a relation's carried rows matching a pattern were added or removed.
+//! - `history`: every tick a relation's rows matching a pattern changed: a table's rows added or removed (for the
+//!   next tick), a channel's messages received (`<-`) and sent (`->`), an event's rows (`!`), and when a view's rows
+//!   start and stop holding.
+//! - `profile`: the rules that did the most join work at a tick (`replay --slow` finds the slow ticks).
 //! - `why`: the rule firings that derived the rows matching a pattern at a tick.
 //! - `whynot`: for each rule that could derive a tuple matching a pattern, how far its body got at a tick, and the
 //!   first literal no valuation passed (ask again about that literal's relation to go deeper).
@@ -14,6 +17,7 @@
 //! 0), `_` for any value; values are written as `show` prints them (`3`, `"name"`, `b"bytes"`, `(a, b)`, `None`,
 //! `Some(x)`, `true`, a node by name).
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -21,9 +25,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use blossom_artifact::bls::BlsArtifact;
-use blossom_base::{RelId, TypeId};
-use blossom_ir::core::Program;
+use blossom_base::{RelId, RuleId, TypeId};
+use blossom_ir::core::{Persistence, Program, RelClass};
 use blossom_ir::printer::{literal_text, rule_text, value_text, var_text};
+use blossom_ir::tick::Row;
 use blossom_sim::replay::{Replay, ReplayError, Replayed};
 use blossom_value::time::NodeId;
 use blossom_value::value::IntValue;
@@ -46,6 +51,10 @@ pub enum TraceCommand {
     Replay {
         #[command(flatten)]
         common: Common,
+        /// Also list the ticks whose replay took at least this many milliseconds, with what they received, and
+        /// the ticks the recorded node started more than this long after the one before.
+        #[arg(long, value_name = "MS")]
+        slow: Option<u64>,
     },
     /// A relation's rows at a tick.
     Show {
@@ -61,7 +70,7 @@ pub enum TraceCommand {
         #[arg(long = "match")]
         pattern: Option<String>,
     },
-    /// Every tick the carried rows of a relation matching a pattern were added or removed.
+    /// Every tick a relation's rows matching a pattern changed (a table's, a view's), arrived or were sent.
     History {
         #[command(flatten)]
         common: Common,
@@ -77,6 +86,17 @@ pub enum TraceCommand {
         at: u64,
         /// The pattern (`rel(v, _, …)`).
         pattern: String,
+    },
+    /// The rules that did the most join work at a tick (rows examined), with what the tick received.
+    Profile {
+        #[command(flatten)]
+        common: Common,
+        /// The tick.
+        #[arg(long)]
+        at: u64,
+        /// How many rules to list.
+        #[arg(long, default_value_t = 10)]
+        top: usize,
     },
     /// How far each rule that could derive a tuple matching a pattern got at a tick.
     Whynot {
@@ -121,6 +141,74 @@ fn open(common: &Common) -> Result<(Arc<BlsArtifact>, Replay<BufReader<File>>), 
     let externs = crate::common::std_externs().map_err(|e| e.to_string())?;
     let replay = Replay::open(&artifact, BufReader::new(file), externs).map_err(|e| e.to_string())?;
     Ok((artifact, replay))
+}
+
+/// What a relation's history reports: a carried relation's changes, a channel's messages received and sent, an
+/// event's rows, or when a view's rows start and stop holding.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Carried,
+    Channel,
+    Event,
+    View,
+}
+
+/// How long the replay of a tick takes.
+///
+/// Exempt from the ambient-time rule (clippy.toml): it measures the replaying process, for `trace replay --slow`;
+/// nothing it reads reaches a replayed tick.
+mod stopwatch {
+    #![allow(clippy::disallowed_methods)]
+
+    use std::time::Instant;
+
+    pub struct Stopwatch(Instant);
+
+    impl Stopwatch {
+        pub fn start() -> Stopwatch {
+            Stopwatch(Instant::now())
+        }
+
+        /// Nanoseconds since the start.
+        pub fn nanos(&self) -> u64 {
+            u64::try_from(self.0.elapsed().as_nanos()).unwrap_or(u64::MAX)
+        }
+    }
+}
+use stopwatch::Stopwatch;
+
+/// The `top` rules that examined the most rows in the replayed tick `r` (profiled).
+fn print_work(names: &Names<'_>, r: &Replayed, top: usize) {
+    let total: u64 = r.work.values().sum();
+    let mut by: Vec<(RuleId, u64)> = r.work.iter().map(|(k, v)| (*k, *v)).collect();
+    by.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    println!("  {total} rows examined by {} rules", by.len());
+    let program = names.program();
+    for (id, n) in by.into_iter().take(top) {
+        let Some(rule) = program.rules.get(id) else { continue };
+        println!("  {n:>12}  {} ({:?})", rule.label, rule.kind);
+        println!("                {}", rule_text(program, rule));
+    }
+}
+
+/// What a tick received, counted per relation: `name ×n` for events, deliveries and client requests.
+fn received(names: &Names<'_>, r: &Replayed) -> String {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let rels = r
+        .inputs
+        .events
+        .iter()
+        .map(|(rel, _)| *rel)
+        .chain(r.inputs.delivered.iter().map(|d| d.rel))
+        .chain(r.inputs.ingress.iter().map(|g| g.rel));
+    for rel in rels {
+        *counts.entry(names.rel_name(rel)).or_default() += 1;
+    }
+    if counts.is_empty() {
+        return "received nothing".into();
+    }
+    let parts: Vec<String> = counts.iter().map(|(n, c)| format!("{n} ×{c}")).collect();
+    format!("received {}", parts.join(", "))
 }
 
 /// Names and printing for one trace's program.
@@ -358,12 +446,36 @@ fn matches(pattern: &[Option<Value>], row: &[Value]) -> bool {
 
 fn drive(cmd: TraceCommand) -> Result<(), String> {
     match cmd {
-        TraceCommand::Replay { common } => {
+        TraceCommand::Replay { common, slow } => {
             let (artifact, mut replay) = open(&common)?;
             let names = Names { artifact: &artifact };
             let h = replay.header().clone();
             let (mut ticks, mut first, mut last, mut failed) = (0u64, None, None, None);
-            while let Some(r) = replay.next(false).map_err(err)? {
+            let mut before: Option<(u64, i64)> = None;
+            if slow.is_some() {
+                replay.profile(true).map_err(err)?;
+            }
+            loop {
+                let clock = Stopwatch::start();
+                let Some(r) = replay.next(false).map_err(err)? else {
+                    break;
+                };
+                if let Some(ms) = slow {
+                    let took = clock.nanos() / 1_000_000;
+                    let (t, now) = (r.inputs.tick.0, r.inputs.now.0);
+                    // The recorded node's gap: from the tick before's start to this one's.
+                    if let Some((pt, pnow)) = before {
+                        let gap = (now - pnow) / 1_000_000;
+                        if gap >= i64::try_from(ms).unwrap_or(i64::MAX) {
+                            println!("tick {pt}: the next tick started {gap} ms after it, on the recorded node");
+                        }
+                    }
+                    before = Some((t, now));
+                    if took >= ms {
+                        println!("tick {t}: replayed in {took} ms; {}", received(&names, &r));
+                        print_work(&names, &r, 3);
+                    }
+                }
                 ticks += 1;
                 first.get_or_insert(r.inputs.tick.0);
                 last = Some(r.inputs.tick.0);
@@ -427,18 +539,101 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
             let (artifact, mut replay) = open(&common)?;
             let names = Names { artifact: &artifact };
             let (rel, pat) = names.pattern(&pattern)?;
+            let decl = names
+                .program()
+                .rels
+                .get(rel)
+                .ok_or_else(|| format!("{rel:?} is not declared"))?;
+            let kind = match (&decl.class, &decl.persistence) {
+                (RelClass::Channel(_), _) => Kind::Channel,
+                (RelClass::Event(_), _) => Kind::Event,
+                (_, Persistence::None) => Kind::View,
+                _ => Kind::Carried,
+            };
+            if kind == Kind::View {
+                replay.observe(vec![rel]);
+            }
+            let mut held: BTreeSet<Row> = BTreeSet::new();
             while let Some(r) = replay.next(false).map_err(err)? {
-                let Some(changes) = &r.changes else { continue };
-                // A tick's changes are what its rules write for the next tick.
-                for (sign, side) in [("-", &changes.deleted), ("+", &changes.inserted)] {
-                    for row in side.get(&rel).into_iter().flatten() {
-                        if matches(&pat, row) {
-                            let t = r.inputs.tick.0;
-                            println!("tick {t} {sign} {} (from tick {})", names.row(rel, row), t + 1);
+                let at = format!(
+                    "tick {} {}",
+                    r.inputs.tick.0,
+                    names.value(&Value::Instant(r.inputs.now), None)
+                );
+                match kind {
+                    // A tick's changes are what its rules write for the next tick.
+                    Kind::Carried => {
+                        let Some(changes) = &r.changes else { continue };
+                        for (sign, side) in [("-", &changes.deleted), ("+", &changes.inserted)] {
+                            for row in side.get(&rel).into_iter().flatten() {
+                                if matches(&pat, row) {
+                                    println!("{at} {sign} {} (from the next tick)", names.row(rel, row));
+                                }
+                            }
                         }
+                    }
+                    Kind::Channel => {
+                        for d in r
+                            .inputs
+                            .delivered
+                            .iter()
+                            .filter(|d| d.rel == rel && matches(&pat, &d.row))
+                        {
+                            println!("{at} <- {} from {}", names.row(rel, &d.row), names.node(d.from));
+                        }
+                        for s in r.sent.iter().filter(|s| s.rel == rel && matches(&pat, &s.row)) {
+                            println!("{at} -> {}", names.row(rel, &s.row));
+                        }
+                    }
+                    Kind::Event => {
+                        for (_, row) in r
+                            .inputs
+                            .events
+                            .iter()
+                            .filter(|(e, row)| *e == rel && matches(&pat, row))
+                        {
+                            println!("{at} ! {}", names.row(rel, row));
+                        }
+                    }
+                    // A view holds at a tick: report when its matching rows start and stop holding.
+                    Kind::View => {
+                        let Some(rows) = r.observed.get(&rel) else { continue };
+                        let now: BTreeSet<Row> = rows.iter().filter(|row| matches(&pat, row)).cloned().collect();
+                        for row in held.difference(&now) {
+                            println!("{at} - {} (no longer holds)", names.row(rel, row));
+                        }
+                        for row in now.difference(&held) {
+                            println!("{at} + {} (holds)", names.row(rel, row));
+                        }
+                        held = now;
                     }
                 }
             }
+            Ok(())
+        }
+        TraceCommand::Profile { common, at, top } => {
+            let (artifact, mut replay) = open(&common)?;
+            let names = Names { artifact: &artifact };
+            loop {
+                match replay.peek_tick().map_err(err)? {
+                    None => return Err(format!("tick {at} is not in the trace")),
+                    Some(t) if t.0 > at => {
+                        return Err(format!("tick {at} is not in the trace (it continues at {})", t.0));
+                    }
+                    Some(t) if t.0 == at => break,
+                    Some(_) => {
+                        replay.next(false).map_err(err)?;
+                    }
+                }
+            }
+            replay.profile(true).map_err(err)?;
+            let r = replay.next(false).map_err(err)?.ok_or("the trace ended")?;
+            println!(
+                "tick {at} at {}: {}",
+                names.value(&Value::Instant(r.inputs.now), None),
+                received(&names, &r)
+            );
+            print_work(&names, &r, top);
             Ok(())
         }
         TraceCommand::Why { common, at, pattern } => {

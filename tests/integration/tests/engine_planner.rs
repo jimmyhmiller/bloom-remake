@@ -1,8 +1,9 @@
 //! Slice 5: the engine's join planner against the reference oracle. Each fixture in `fixtures/engine/` exercises one
 //! planning decision whose exactness is subtle: a `let` hoisted before an atom (its error counts only for complete
 //! valuations), a range probe from a guard (not past a check that can fail), and range probes over an ordered index
-//! as rows are inserted and deleted. The engine must agree with the oracle at every tick: the same rows, or the same
-//! error at the same tick.
+//! as rows are inserted and deleted; and the semi-naive evaluation of recursive strata (chains, mutual recursion, a
+//! recursive table with carried rows, an error inside a recursion, and the cost of a long chain). The engine must
+//! agree with the oracle at every tick: the same rows, or the same error at the same tick.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -312,4 +313,135 @@ fn integer_casts_convert_and_are_checked() {
         differential_on("integer_casts.bls", &solo, &[(1, 0, "e", vec![u16v(300)])], 2),
         Outcome::Failed { tick: Tick(1), code } if code == "BLSR004"
     ));
+}
+
+/// The rows of `rel` in the single node's instance at tick `t` of a run.
+#[cfg(test)]
+fn rows_at(run: &SyncRun, artifact_name: &str, rel: &str, t: usize) -> Vec<Vec<Value>> {
+    let artifact = compile(artifact_name);
+    let rel = artifact.rel_named(rel).unwrap();
+    run.rounds[t][0].instance.rows(rel).map(|r| r.to_vec()).collect()
+}
+
+/// A recursive view walking a table as a chain (a Kafka fetch's batches), evaluated semi-naively: the engine agrees
+/// with the oracle as the chain grows, breaks where a batch is removed, and is mended.
+#[test]
+fn a_recursive_chain_agrees_with_the_oracle() {
+    let mut inputs: Vec<(u64, &str, u64)> = (0..30).map(|b| (0, "add", b)).collect();
+    // A delete takes effect at the next tick; an add (`emit`) at its own.
+    inputs.extend([
+        (1, "ask", 1000),
+        (2, "ask", 31),
+        (3, "remove", 10),
+        (5, "add", 10),
+        (6, "remove", 0),
+        (8, "add", 0),
+    ]);
+    let Outcome::Ran(run) = differential("recursive_chain.bls", &inputs, 9) else {
+        panic!("recursive_chain.bls failed")
+    };
+    let u = |x: u64| Value::Int(IntValue::U64(x));
+    let len = |t: usize| rows_at(&run, "recursive_chain.bls", "chain_len", t);
+    assert!(len(1).contains(&vec![u(1000), u(30)]), "{:?}", len(1));
+    assert!(len(2).contains(&vec![u(31), u(16)]), "{:?}", len(2));
+    assert!(len(4).contains(&vec![u(1000), u(10)]), "{:?}", len(4));
+    assert!(len(5).contains(&vec![u(1000), u(30)]), "{:?}", len(5));
+    assert!(len(7).is_empty(), "{:?}", len(7));
+    assert!(len(8).contains(&vec![u(1000), u(30)]), "{:?}", len(8));
+}
+
+/// Mutual recursion over a graph with cycles, as edges come and go.
+#[test]
+fn mutual_recursion_agrees_with_the_oracle() {
+    let mut inputs: Vec<(u64, &str, u64)> = (0..17).map(|x| (0, "link", x)).collect();
+    inputs.extend([(1, "start", 0), (2, "unlink", 3), (3, "start", 5), (4, "unlink", 0), (5, "link", 3)]);
+    assert!(matches!(differential("recursive_mutual.bls", &inputs, 7), Outcome::Ran(_)));
+}
+
+/// A table its own rules extend within the tick, with rows carried and seeded from outside the recursion.
+#[test]
+fn a_recursive_table_with_carried_rows_agrees_with_the_oracle() {
+    let mut inputs: Vec<(u64, &str, u64)> = (0..13).map(|x| (0, "link", x)).collect();
+    inputs.extend([(1, "seed", 0), (2, "unlink", 1), (3, "seed", 7), (4, "unlink", 7), (5, "seed", 2)]);
+    assert!(matches!(differential("recursive_table.bls", &inputs, 7), Outcome::Ran(_)));
+}
+
+/// A recursive step that divides by zero partway along the chain: the engine fails at the oracle's tick with its
+/// error (the semi-naive iteration hands an erring stratum to the naive one, which reports errors at the fixpoint).
+#[test]
+fn an_error_inside_a_recursion_is_the_oracles() {
+    let mut inputs: Vec<(u64, &str, u64)> = (0..15).map(|b| (0, "add", b)).collect();
+    inputs.push((1, "ask", 1000));
+    assert!(matches!(differential("recursive_error.bls", &inputs, 3), Outcome::Failed { .. }));
+    let mut short: Vec<(u64, &str, u64)> = (0..15).map(|b| (0, "add", b)).collect();
+    short.push((1, "ask", 15));
+    differential("recursive_error.bls", &short, 3);
+}
+
+/// The rows the engine examines to walk a chain of `n` batches once.
+#[cfg(test)]
+fn chain_work(n: u64) -> u64 {
+    use blossom_ir::tick::StepInput;
+    use blossom_value::time::Instant;
+    let artifact = compile("recursive_chain.bls");
+    let cfg = blossom_engine::EngineConfig {
+        roles: artifact.roles.clone(),
+        node_names: artifact.nodes.iter().map(|x| Arc::from(x.as_str())).collect(),
+        seed: Some(blossom_value::Seed::from_u64(0)),
+        ..blossom_engine::EngineConfig::default()
+    };
+    let mut engine = blossom_engine::Engine::new(artifact.program.clone(), NodeId(0), cfg).unwrap();
+    let rel = |r: &str| artifact.rel_named(r).unwrap();
+    let u = |x: u64| -> blossom_ir::tick::Row { Arc::from(vec![Value::Int(IntValue::U64(x))]) };
+    let step = |engine: &mut blossom_engine::Engine, tick: u64, events: Vec<(blossom_base::RelId, blossom_ir::tick::Row)>| {
+        engine
+            .step(
+                &StepInput {
+                    node: NodeId(0),
+                    incarnation: 1,
+                    tick: Tick(tick),
+                    now: Instant(tick as i64),
+                    events: &events,
+                    delivered: &[],
+                    ingress: &[],
+                    blobs: &blossom_value::NoBlobs,
+                },
+                &[],
+            )
+            .unwrap();
+    };
+    step(&mut engine, 0, (0..n).map(|b| (rel("add"), u(b))).collect());
+    let before = engine.rows_examined();
+    step(&mut engine, 1, vec![(rel("ask"), u(u64::MAX))]);
+    let work = engine.rows_examined() - before;
+    let len = engine.carried_rows(rel("asked")).len();
+    assert_eq!(len, 1);
+    work
+}
+
+/// A recursive chain costs in proportion to its length: each step's valuation is joined about once, not once per
+/// round of the fixpoint (the naive iteration's n rounds of n rows made a Kafka fetch of a few hundred batches take
+/// seconds). Counted in rows examined, so the check is exact and machine-independent.
+#[test]
+fn a_recursive_chain_costs_its_length_not_its_square() {
+    let (small, large) = (chain_work(400), chain_work(800));
+    assert!(large < 3 * small, "a chain of 400 examined {small} rows, of 800 {large}");
+    assert!(large < 40 * 800, "a chain of 800 examined {large} rows");
+}
+
+/// A later binding keys a probe only past checks that cannot fail: a fallible guard ahead of it still sees, and
+/// raises its error on, the rows the binding would reject.
+#[test]
+fn a_binding_keys_a_probe_only_past_checks_that_cannot_fail() {
+    let fails = [(0, "put", 0), (0, "put", 6), (1, "go", 5)];
+    assert!(matches!(
+        differential("key_after_fallible.bls", &fails, 2),
+        Outcome::Failed { tick: Tick(1), code } if code == "BLSR004"
+    ));
+    let Outcome::Ran(run) = differential("key_after_fallible.bls", &[(0, "put", 6), (0, "put", 7), (1, "go", 5)], 2)
+    else {
+        panic!("key_after_fallible.bls failed without a zero")
+    };
+    let u = |x: u64| Value::Int(IntValue::U64(x));
+    assert_eq!(rows_at(&run, "key_after_fallible.bls", "out", 1), vec![vec![u(5), u(6)]]);
 }

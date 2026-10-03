@@ -1,0 +1,26 @@
+//! Mutual recursion over a graph with cycles: the nodes an even and an odd number of steps from an origin.
+program recursive_mutual version 1;
+
+input link(x: u64);
+input unlink(x: u64);
+input start(x: u64);
+
+table edge(a: u64, b: u64);
+table origin(x: u64) key(x);
+
+mk: on link(x) {
+    emit edge(x, x + 1u64);
+    emit edge(x, (x * 3u64) % 17u64);
+}
+rm: on unlink(x), edge(a, b) where a == x {
+    delete edge(a, b);
+}
+st: on start(x) {
+    emit origin(x);
+}
+
+view even(x) {
+    origin(x);
+    odd(y), edge(y, x);
+}
+view odd(x) = even(y), edge(y, x);
