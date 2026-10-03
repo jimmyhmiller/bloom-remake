@@ -27,8 +27,8 @@ view offsets_topic(tid, n) = mtopic(name, tid, n, _) where name == OFFSETS_TOPIC
 /// The offsets partitions this broker leads, and those of them ready to coordinate: their leader has committed an
 /// entry of its own term, so every entry committed under an earlier leader is committed here too (D3).
 view offsets_led(p) = offsets_topic(tid, _), led_term(tid, p, _);
-view offsets_ready(p) = offsets_topic(tid, _), led_term(tid, p, _), let g = (tid, p), term_first(g, f), commit_of(g, c)
-    where c >= f;
+view offsets_ready(p) = offsets_topic(tid, _), led_term(tid, p, _), let g = (tid, p), term_first(g, f), commit_of(g, c),
+    not offsets_stale(tid, p, _) where c >= f;
 view offsets_group(p, g) = offsets_topic(tid, _), led_term(tid, p, _), let g = (tid, p);
 
 /// A group's coordination status here: NONE (this broker coordinates it, ready), COORDINATOR_LOAD_IN_PROGRESS, or
@@ -344,7 +344,7 @@ store_offsets: while offsets_last(tid, part, group, topic, p, m), offsets_applie
 /// The committed OFFSETS entries not materialized yet (at most a tick's worth), read by OffsetFetch with the
 /// materialized ones.
 view offsets_pending(tid, part, i, group, topic, p, id, offset, epoch, meta) =
-    applied_d(tid, part, a), not installing(tid, part), let g = (tid, part), commit_of(g, c), rlog(g, i, _t, _pt, kind, _pos, data),
+    applied_d(tid, part, a), not installing(tid, part), not offsets_stale(tid, part, _), let g = (tid, part), commit_of(g, c), rlog(g, i, _t, _pt, kind, _pos, data),
     let Some(e) = decode_offsets_entry(entry_bytes(data)), let group = e.group, x in e.items,
     let topic = x.0, let id = x.1, let p = x.2, let offset = x.3, let epoch = x.4, let meta = x.5
     where kind == OFFSETS && i > a && i <= c;
@@ -356,6 +356,72 @@ view current_offset(tid, part, group, topic, p, offset, epoch, meta) {
         mtopic(topic, id, _, _);
     committed(tid, part, group, topic, p, id, offset, epoch, meta), not pending_last(tid, part, group, topic, p, _),
         mtopic(topic, id, _, _);
+}
+
+// ---------------------------------------------------------------- compaction and catching up from a snapshot
+
+// An offsets partition's applied entries are compactable but the last `OFFSETS_KEEP`, in steps of that many, as the
+// controller's are: the committed offsets are their state. A replica that takes a snapshot point (InstallSnapshot:
+// its leader compacted the entries it needs) cannot apply further from its log, so it asks the other brokers for the
+// committed offsets at or past the point; any replica that has applied that far sends its own, at its applied index,
+// and the asker adopts them and the index, and never applies an entry at or before it again. It asks until it has.
+
+view offsets_compactable(g, i, pos) {
+    offsets_topic(tid, _), applied_d(tid, p, a), log_end(tid, p, pos), let g = (tid, p), not rsnap(g, _, _, _, _),
+        let i = a - OFFSETS_KEEP, commit_of(g, c) where a >= OFFSETS_KEEP + OFFSETS_KEEP && i <= c;
+    offsets_topic(tid, _), applied_d(tid, p, a), log_end(tid, p, pos), let g = (tid, p), rsnap(g, s, _, _, _),
+        let i = a - OFFSETS_KEEP, commit_of(g, c) where a >= s + OFFSETS_KEEP + OFFSETS_KEEP && i <= c;
+}
+
+/// The offsets partitions this broker took a snapshot point of and holds no committed offsets for yet, with the point.
+/// Durable: a broker that restarts before it has them still asks (its applied index is the point already).
+durable table offsets_stale(tid: Bytes, part: i32, point: u64) key(tid, part) while replica(tid, part);
+view offsets_install(tid, p, i) = reset_part(tid, p, i, _pos), offsets_topic(tid, _);
+note_stale: on offsets_install(tid, p, i) {
+    upsert offsets_stale(tid, p, i);
+}
+view offsets_wanting() = offsets_stale(_, _, _);
+timer offsets_ask every META_ASK while offsets_wanting;
+want_offsets: on offsets_ask, offsets_stale(tid, p, point) {
+    for broker(n, _, _, _) where n != self {
+        send offsets_want(tid, p, point) to n;
+    }
+}
+view offsets_asked(tid, p) = offsets_want(tid, p, _point);
+view offsets_rows(tid, p, xs = collect!((g, t, q, id, o, e, m) default [])) =
+    per offsets_asked(tid, p), committed(tid, p, g, t, q, id, o, e, m);
+send_offsets: on offsets_want(tid, p, point) from f, applied_d(tid, p, a), not offsets_stale(tid, p, _), not installing(tid, p),
+    offsets_rows(tid, p, xs), let b = offsets_snapshot(a, xs) where a >= point {
+    for (k, c) in chunks(b, META_CHUNK).enumerate() {
+        send offsets_chunk(tid, p, a, k, chunks(b, META_CHUNK).len(), c) to f;
+    }
+}
+/// The parts received of each partition's offsets at an index past its point.
+table offsets_parts(tid: Bytes, part: i32, at: u64, k: u64, n: u64, chunk: Bytes) key(tid, part, at, k)
+    while offsets_stale(tid, part, _);
+keep_offsets_part: on offsets_chunk(tid, p, at, k, n, chunk), offsets_stale(tid, p, point) where at >= point && k < n {
+    upsert offsets_parts(tid, p, at, k, n, chunk);
+}
+view offsets_whole(tid, p, at, cs = collect!((k, chunk))) = offsets_parts(tid, p, at, k, _n, chunk);
+view offsets_count(tid, p, at, n = max!(n)) = offsets_parts(tid, p, at, _k, n, _chunk);
+view offsets_received(tid, p, at, snap) =
+    offsets_whole(tid, p, at, cs), offsets_count(tid, p, at, n), let Some(d) = OffsetsSnapshot::decode(joined(cs), 0),
+    let snap = d.0 where cs.len() == n && snap.at == at;
+view offsets_adopt_at(tid, p, m = max!(at)) = offsets_received(tid, p, at, _snap);
+view offsets_adopt(tid, p, at, snap) = offsets_received(tid, p, at, snap), offsets_adopt_at(tid, p, at), not installing(tid, p);
+adopt_offsets: while offsets_adopt(tid, p, at, snap) {
+    upsert applied_d(tid, p, at);
+    for x in snap.rows {
+        upsert committed(tid, p, x.0, x.1, x.2, x.3, x.4, x.5, x.6);
+    }
+    if offsets_stale(tid, p, point) {
+        delete offsets_stale(tid, p, point);
+    }
+}
+/// What the adopted offsets do not hold goes.
+adopt_offsets_drop: while offsets_adopt(tid, p, _at, snap), committed(tid, p, g, t, q, id, o, e, m)
+    where not snap.rows.contains((g, t, q, id, o, e, m)) {
+    delete committed(tid, p, g, t, q, id, o, e, m);
 }
 
 // ---------------------------------------------------------------- OffsetFetch

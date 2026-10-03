@@ -630,3 +630,13 @@ fn metadata_too_large(m: Option<String>) -> bool {
         None => false,
     }
 }
+
+/// A partition's committed offsets as of the index applied (every replica that applied it holds the same rows).
+format OffsetsSnapshot {
+    at: u64,
+    rows: compact_array((compact_string, compact_string, i32, uuid, i64, i32, compact_nullable_string)),
+}
+
+fn offsets_snapshot(at: u64, rows: Vec<(String, String, i32, Bytes, i64, i32, Option<String>)>) -> Bytes {
+    OffsetsSnapshot::encode(OffsetsSnapshot { at: at, rows: rows })
+}

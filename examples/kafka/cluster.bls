@@ -183,6 +183,10 @@ channel meta_want(point: u64): Broker -> Broker;
 /// A part of a broker's applied metadata at index `at` (`MetaSnapshot`, encoded), for a broker that asked for it
 /// (`meta_want`): part `k` of `n`, each at most `META_CHUNK` bytes, so a snapshot of any size travels in frames.
 channel meta_part(at: u64, k: u64, n: u64, chunk: Bytes): Broker -> Broker;
+/// A broker that took a snapshot point of an offsets partition asks for its committed offsets at or past the point
+/// (S9), and a replica that applied that far sends them in parts (as `meta_want` and `meta_part`).
+channel offsets_want(tid: Bytes, part: i32, point: u64): Broker -> Broker;
+channel offsets_chunk(tid: Bytes, part: i32, at: u64, k: u64, n: u64, chunk: Bytes): Broker -> Broker;
 /// A partition leader's announcement: the groups it leads, with their epochs and in-sync replicas (S8.md D7), and
 /// when it sent it (by its clock), which orders its announcements within one epoch.
 channel leads(gs: Vec<(Group, u64, Vec<i32>)>, at: Instant): Broker -> Broker;

@@ -57,6 +57,8 @@ param GROUP_MAX_SESSION_MS: i32 = 1800000;
 param GROUP_INITIAL_DELAY_MS: i32 = 3000;
 /// How long an offset commit waits to be committed (Kafka's `offsets.commit.timeout.ms`).
 param OFFSET_COMMIT_TIMEOUT: Duration = 5s;
+/// How many applied entries an offsets partition keeps in its log past its snapshot point (as `CONTROLLER_KEEP`).
+param OFFSETS_KEEP: u64 = 1000;
 
 include "raft.bls";
 include "cluster.bls";

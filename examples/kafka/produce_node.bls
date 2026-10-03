@@ -309,7 +309,7 @@ view high_watermark(tid, p, end) {
 /// (A partition installing a snapshot point this tick materializes nothing: the install resets what it would write.
 /// The entries are found by an index range, not by scanning the log.)
 view to_apply_d(tid, p, a, c) =
-    applied_d(tid, p, a), not installing(tid, p), materialize_to(tid, p, c) where c > a;
+    applied_d(tid, p, a), not installing(tid, p), not offsets_stale(tid, p, _), materialize_to(tid, p, c) where c > a;
 view to_materialize(tid, p, xs = collect!((i, base, last, max_ts, data, h))) =
     to_apply_d(tid, p, a, c), data_entry(tid, p, i, base, last, max_ts, h, data) where i > a && i <= c;
 view materialized_to(tid, p, c) = to_apply_d(tid, p, _a, c);
@@ -415,6 +415,7 @@ view compactable(g, i, pos) {
         commit_of(g, c) where a >= CONTROLLER_KEEP + CONTROLLER_KEEP && i <= c;
     applied_m(a), let g = controller(), rsnap(g, s, _, _, _), let i = a - CONTROLLER_KEEP, let pos = 0i64,
         commit_of(g, c) where a >= s + CONTROLLER_KEEP + CONTROLLER_KEEP && i <= c;
+    offsets_compactable(g, i, pos);
 }
 /// An index at or before a group's snapshot point (committed, and compacted away).
 view compacted_at(g, i) = placed(_c, _i, _j, tid, p, i, _e, _b, _l, _s), let g = (tid, p), rsnap(g, sp, _, _, _) where i <= sp;
@@ -430,7 +431,9 @@ reset_log: on reset_part(tid, p, i, pos) {
     upsert log_end(tid, p, pos);
     upsert applied_d(tid, p, i);
     upsert active_segment(tid, p, pos);
-    next segment(tid, p, pos, 0i64, -1i64, -1i64, now().as_millis());
+    // Replaces the segment already at `pos`, if any (`reset_segments` deletes the others): a replica whose log start
+    // is the point's position (an offsets partition's is always 0) has one.
+    upsert segment(tid, p, pos, 0i64, -1i64, -1i64, now().as_millis());
 }
 reset_batches: on reset_part(tid, p, _i, _pos), batch(tid, p, b, l, t, blob) {
     delete batch(tid, p, b, l, t, blob);

@@ -24,7 +24,7 @@ use blossom_front::api::NodeSpec;
 use blossom_integration_tests::raft_safety::GroupSafety;
 use blossom_integration_tests::seeds;
 use blossom_node::durable::DurableSchema;
-use blossom_sim::cluster::{Cluster, ClusterConfig, NoKvClients, StreamAction, StreamClient, StreamEvent};
+use blossom_sim::cluster::{Cluster, ClusterConfig, CrashWrites, NoKvClients, StreamAction, StreamClient, StreamEvent};
 use blossom_value::Value;
 use blossom_value::time::NodeId;
 use blossom_value::value::IntValue;
@@ -76,6 +76,9 @@ const MEMBER_ID_REQUIRED: i16 = 79;
 const SESSION_MS: i32 = 1500;
 #[cfg(test)]
 const REBALANCE_MS: i32 = 3000;
+/// The members stop committing at this time, so the replicas' committed offsets can settle before the end.
+#[cfg(test)]
+const QUIET_AT: i64 = 17_000_000_000;
 /// A request is given up after this long (a JoinGroup waits for the rebalance, so longer), as Kafka's clients do.
 #[cfg(test)]
 const REQUEST_TIMEOUT: i64 = 1_500_000_000;
@@ -463,7 +466,7 @@ impl Member {
                 );
             }
             Phase::Steady => {
-                if now >= self.next_commit && !self.owned.is_empty() {
+                if now >= self.next_commit && !self.owned.is_empty() && now < QUIET_AT {
                     // Offsets that only grow: the time in milliseconds, so a later commit always carries more.
                     let offset = now / MS;
                     let parts: Vec<(i32, i64)> = self.owned.iter().map(|p| (*p, offset)).collect();
@@ -932,7 +935,7 @@ fn int(v: &Value) -> i64 {
 /// Runs the group scenario on three brokers over `seeds`, with faults until 9 s, then settles; returns how many
 /// times a member lost its coordinator.
 #[cfg(test)]
-fn check_groups(seeds: std::ops::RangeInclusive<u64>, faults: bool) -> u64 {
+fn check_groups(seeds: std::ops::RangeInclusive<u64>, faults: bool, lagging: bool) -> u64 {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/kafka/sim_cluster.bls");
     let mut nodes: Vec<NodeSpec> = (1..=3)
         .map(|i| NodeSpec {
@@ -958,6 +961,11 @@ fn check_groups(seeds: std::ops::RangeInclusive<u64>, faults: bool) -> u64 {
         (
             "GROUP_INITIAL_DELAY_MS".to_owned(),
             blossom_front::api::ParamBinding::Int(300),
+        ),
+        // A replica down for seconds misses more than its offsets partition's leader keeps.
+        (
+            "OFFSETS_KEEP".to_owned(),
+            blossom_front::api::ParamBinding::Int(if lagging { 5 } else { 1000 }),
         ),
     ]
     .into_iter()
@@ -1009,12 +1017,21 @@ fn check_groups(seeds: std::ops::RangeInclusive<u64>, faults: bool) -> u64 {
         let fail = |cluster: &Cluster<'_>, what: &str| -> String {
             format!("seed {seed}: {what}\n{}", cluster.run_so_far().log.join("\n"))
         };
+        // A lagging broker goes down once the group is steady, and comes back after the others compacted past it.
+        let lagging_node = NodeId((seed % 3) as u32);
+        if lagging {
+            cluster.run_until(3_000_000_000).unwrap();
+            cluster.crash(lagging_node, CrashWrites::Random).unwrap();
+        }
         cluster.run_until(9_000_000_000).unwrap();
         assert!(
             cluster.violation().is_none(),
             "{}",
             fail(&cluster, cluster.violation().unwrap_or(""))
         );
+        if lagging {
+            cluster.restart(lagging_node).unwrap();
+        }
         cluster.heal();
         cluster.step_until(20_000_000_000).unwrap();
         assert!(
@@ -1147,6 +1164,25 @@ fn check_groups(seeds: std::ops::RangeInclusive<u64>, faults: bool) -> u64 {
                 )
             );
         }
+        // The lagging broker took a snapshot point of the group's offsets partition (its leader compacted past it) and
+        // adopted the committed offsets from another replica: it holds them, as the others do (checked above).
+        if lagging {
+            let s = &states[lagging_node.0 as usize];
+            let snapped = s
+                .rows(rel("rsnap"))
+                .any(|r| matches!(&r[0], Value::Tuple(g) if g[0] == offsets_tid));
+            assert!(
+                snapped,
+                "{}",
+                fail(&cluster, "no offsets partition was compacted on the lagging broker")
+            );
+            assert_eq!(
+                s.rows(rel("offsets_stale")).count(),
+                0,
+                "{}",
+                fail(&cluster, "the lagging broker still lacks committed offsets")
+            );
+        }
         // Members came, left and died: the group went through generations for each.
         assert!(
             sh.generations.len() >= 4,
@@ -1168,14 +1204,21 @@ fn check_groups(seeds: std::ops::RangeInclusive<u64>, faults: bool) -> u64 {
 
 #[test]
 fn group_members_join_leave_and_die_and_rebalance() {
-    check_groups(seeds(1..=2), false);
+    check_groups(seeds(1..=2), false, false);
+}
+
+/// A replica of the group's offsets partition that was down while the others compacted their logs past it catches
+/// up from a snapshot of the committed offsets.
+#[test]
+fn a_replica_behind_its_offsets_partitions_snapshot_catches_up() {
+    check_groups(seeds(1..=2), false, true);
 }
 
 /// Under faults the members lose their coordinator (a crash, a split, a dropped connection) and find it again; over
 /// the full tier's seeds that happens.
 #[test]
 fn groups_keep_acknowledged_offsets_under_faults() {
-    let lost = check_groups(seeds(1..=3), true);
+    let lost = check_groups(seeds(1..=3), true, false);
     assert!(
         !blossom_integration_tests::full_tier() || lost > 0,
         "no member ever lost its coordinator"
