@@ -12,9 +12,9 @@ use std::io::Read;
 use std::sync::Arc;
 
 use blossom_artifact::bls::BlsArtifact;
-use blossom_base::{RelId, RuleId};
+use blossom_base::{FnId, RelId, RuleId};
 use blossom_ir::tick::{
-    Changes, Delivery, EvalError, Ingress, Instance, Row, RuleWork, Send, StepInput, TickInput, TickOutput,
+    Changes, Delivery, EvalError, FnWork, Ingress, Instance, Row, RuleWork, Send, StepInput, TickInput, TickOutput,
 };
 use blossom_node::{Backend, Executor, Executors};
 use blossom_oracle::Oracle;
@@ -64,6 +64,8 @@ pub struct Replayed {
     /// The work of each rule in the tick (rows examined, expression nodes evaluated), when profiling
     /// ([`Replay::profile`]).
     pub work: BTreeMap<RuleId, RuleWork>,
+    /// The work of each function called in the tick, when profiling.
+    pub fn_work: BTreeMap<FnId, FnWork>,
     /// The tick run by the oracle from the same state, when asked for ([`Replay::next`] with `examine`).
     pub examined: Option<TickOutput>,
 }
@@ -142,12 +144,16 @@ impl<R: Read> Replay<R> {
         self.observe = rels;
     }
 
-    /// Reports each rule's join work in every tick replayed from now on ([`Replayed::work`]).
+    /// Reports each rule's and each function's work in every tick replayed from now on ([`Replayed::work`],
+    /// [`Replayed::fn_work`]).
     pub fn profile(&mut self, on: bool) -> Result<(), ReplayError> {
-        if on && self.engine.work_by_rule().is_none() {
+        if on && (self.engine.work_by_rule().is_none() || !self.engine.profile_functions(true)) {
             return Err(ReplayError::Order(
                 "the replaying executor does not measure its work".into(),
             ));
+        }
+        if !on {
+            self.engine.profile_functions(false);
         }
         self.profile = on;
         Ok(())
@@ -263,7 +269,13 @@ impl<R: Read> Replay<R> {
         } else {
             None
         };
-        let work_before = if self.profile { self.engine.work_by_rule() } else { None };
+        let work_before = if self.profile {
+            // Counted afresh for this tick.
+            self.engine.profile_functions(true);
+            self.engine.work_by_rule()
+        } else {
+            None
+        };
         let result = self.engine.step(
             &StepInput {
                 node: self.node,
@@ -291,6 +303,11 @@ impl<R: Read> Replay<R> {
                 }
             }
         }
+        let fn_work = if self.profile {
+            self.engine.work_by_function().unwrap_or_default()
+        } else {
+            BTreeMap::new()
+        };
         match (result, outcome) {
             (Ok(out), Some(Ok(digest))) => {
                 let replayed = outcome_digest(&out.changes, &out.outbox, &out.egress, &out.host);
@@ -308,6 +325,7 @@ impl<R: Read> Replay<R> {
                     sent: out.outbox.into_iter().collect(),
                     observed: out.observed,
                     work,
+                    fn_work,
                     examined,
                 }))
             }
@@ -320,6 +338,7 @@ impl<R: Read> Replay<R> {
                     sent: out.outbox.into_iter().collect(),
                     observed: out.observed,
                     work,
+                    fn_work,
                     examined,
                 }))
             }
@@ -334,6 +353,7 @@ impl<R: Read> Replay<R> {
                 sent: Vec::new(),
                 observed: BTreeMap::new(),
                 work,
+                fn_work,
                 examined,
             })),
             (Err(e), _) => Err(ReplayError::Diverged {

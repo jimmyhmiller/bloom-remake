@@ -78,6 +78,10 @@ pub(crate) struct Ctx<'a> {
     pub fuel: Fuel,
     /// The expression nodes evaluated with this context (the work measure of `Engine::work_by_rule`).
     pub steps: std::cell::Cell<u64>,
+    /// When the engine profiles functions: each function's work, and the steps the calls inside the call in
+    /// progress took (what its own steps leave out).
+    pub fn_work: Option<&'a std::cell::RefCell<BTreeMap<blossom_base::FnId, blossom_ir::tick::FnWork>>>,
+    pub callee_steps: std::cell::Cell<u64>,
     /// The bytes of blobs created before this tick.
     pub blobs: &'a dyn blossom_value::BlobSource,
     /// The blobs this tick created, with their bytes.

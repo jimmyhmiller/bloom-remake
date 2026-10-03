@@ -25,7 +25,7 @@ use blossom_ir::core::{
 };
 use blossom_ir::obs::ProgramErrorRecord;
 use blossom_ir::tick::{
-    Changes, Egress, EvalError, Instance, Row, Send, RuleWork, StepInput, StepOutput, TickInput, TickOutput,
+    Changes, Egress, EvalError, FnWork, Instance, Row, RuleWork, Send, StepInput, StepOutput, TickInput, TickOutput,
 };
 use blossom_lattice::Kind;
 use blossom_value::time::{NodeId, Tick};
@@ -98,6 +98,8 @@ pub struct Engine {
     /// powers of two: reused while every one stays in its power of two. A join order decides a term's cost, never
     /// its valuations, so reusing one changes only the work.
     orders: std::cell::RefCell<BTreeMap<(RuleId, Option<usize>), CachedOrder>>,
+    /// Each function's work since profiling was switched on (`None`: off).
+    fn_work: Option<std::cell::RefCell<BTreeMap<blossom_base::FnId, FnWork>>>,
 }
 
 fn kinds(p: &Program) -> Vec<Option<Kind>> {
@@ -352,6 +354,7 @@ impl Engine {
             examined_by: BTreeMap::new(),
             new_blobs: std::cell::RefCell::new(BTreeMap::new()),
             orders: std::cell::RefCell::new(BTreeMap::new()),
+            fn_work: None,
             program,
         };
         engine.build_indexes()?;
@@ -653,6 +656,8 @@ impl Engine {
             shared: &self.shared,
             fuel: crate::expr::Fuel::default(),
             steps: std::cell::Cell::new(0),
+            fn_work: self.fn_work.as_ref(),
+            callee_steps: std::cell::Cell::new(0),
             blobs: input.blobs,
             new_blobs: &self.new_blobs,
         }
@@ -1361,6 +1366,16 @@ impl Engine {
     /// [`Engine::rows_examined`], and expression nodes evaluated.
     pub fn work_by_rule(&self) -> &BTreeMap<RuleId, RuleWork> {
         &self.examined_by
+    }
+
+    /// Starts (afresh) or stops counting each function's work.
+    pub fn set_profile_functions(&mut self, on: bool) {
+        self.fn_work = on.then(|| std::cell::RefCell::new(BTreeMap::new()));
+    }
+
+    /// Each function's work since profiling was switched on (`None`: off).
+    pub fn work_by_function(&self) -> Option<BTreeMap<blossom_base::FnId, FnWork>> {
+        self.fn_work.as_ref().map(|w| w.borrow().clone())
     }
 
     fn count(&mut self, rule: RuleId, examined: u64, steps: u64) {

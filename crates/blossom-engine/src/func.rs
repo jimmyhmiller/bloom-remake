@@ -16,6 +16,23 @@ use blossom_value::value::IntValue;
 use crate::expr::{Ctx, ExprError, ExprResult, bug, eval, truth};
 
 pub(crate) fn call(cx: &Ctx<'_>, env: &[Option<Value>], f: FnId, args: &[Expr]) -> ExprResult<Value> {
+    let Some(work) = cx.fn_work else {
+        return call_unprofiled(cx, env, f, args);
+    };
+    // The steps of this call, those of the calls inside it, and its own (the difference).
+    let (before, outer) = (cx.steps.get(), cx.callee_steps.replace(0));
+    let out = call_unprofiled(cx, env, f, args);
+    let total = cx.steps.get() - before;
+    let inner = cx.callee_steps.replace(outer + total);
+    let mut work = work.borrow_mut();
+    let w = work.entry(f).or_default();
+    w.calls += 1;
+    w.steps += total;
+    w.self_steps += total.saturating_sub(inner);
+    out
+}
+
+fn call_unprofiled(cx: &Ctx<'_>, env: &[Option<Value>], f: FnId, args: &[Expr]) -> ExprResult<Value> {
     let Some(decl) = cx.program.fns.get(f) else {
         return Err(bug(format!("call of undeclared function {f:?}")));
     };
