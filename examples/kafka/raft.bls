@@ -52,6 +52,9 @@ param RAFT_ELECTION_MAX: Duration = 600ms;
 param RAFT_HEARTBEAT: Duration = 50ms;
 param RAFT_POLL: Duration = 20ms;
 param RAFT_BATCH: u64 = 64;
+/// Whether a leader that hears from no majority for a period steps down (CheckQuorum, §6.2; below). Raft is safe
+/// without it; a test that needs a leader cut off to go on appending turns it off.
+param RAFT_CHECK_QUORUM: bool = true;
 
 /// Entry kinds (S8.md D3).
 const NOOP: u8 = 0;
@@ -493,7 +496,7 @@ at Broker {
     /// The term a leader stepped down in: it is a follower for the rest of the term, never its candidate again (it
     /// still holds that term's votes, which would elect it at once).
     table stepped_down(g: Group, t: u64) key(g);
-    view leading() = won(_, _);
+    view leading() = won(_, _) where RAFT_CHECK_QUORUM;
     timer quorum_check every RAFT_ELECTION_MIN while leading;
     note_heard: on ack(g, t, _m, _s) from f, leader(g, t), members(g, f), not quorum_heard(g, f) {
         upsert quorum_heard(g, f);
