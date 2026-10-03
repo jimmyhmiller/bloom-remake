@@ -59,6 +59,8 @@ param GROUP_INITIAL_DELAY_MS: i32 = 3000;
 param OFFSET_COMMIT_TIMEOUT: Duration = 5s;
 /// How many applied entries an offsets partition keeps in its log past its snapshot point (as `CONTROLLER_KEEP`).
 param OFFSETS_KEEP: u64 = 1000;
+/// How long an OffsetFetch waits for its coordinator's leadership to be confirmed before answering NOT_COORDINATOR.
+param OFFSET_FETCH_CONFIRM: Duration = 2s;
 
 include "raft.bls";
 include "cluster.bls";

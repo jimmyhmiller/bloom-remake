@@ -47,7 +47,7 @@ view named(name) {
     commit_head(_c, _i, _seq, _version, _corr, _fr, _at, req), let name = req.group_id;
     ofetch_group_of(_c, _i, _k, name, _ts);
     dgroups_head(_c, _i, _seq, _version, _corr, _fr, _at, req), name in req.groups;
-    cgroup(name, _t, _g);
+    cgroup(name, _t, _g, _due);
 }
 
 // ---------------------------------------------------------------- FindCoordinator
@@ -122,9 +122,10 @@ view group_req(c, i, at, key, name) {
 /// The groups this broker coordinates, with the term of the partition's leadership they belong to: a leadership
 /// that ended takes its groups with it, even if this broker leads the partition again later (another broker may have
 /// coordinated meanwhile).
-table cgroup(name: String, term: u64, g: GroupState) key(name);
+/// With the group: when its deadlines next do anything (`next_due`), so an idle group costs nothing per tick.
+table cgroup(name: String, term: u64, g: GroupState, due: Option<Instant>) key(name);
 view group_term(name, t) = named(name), offsets_topic(tid, n), led_term(tid, p, t) where p == group_partition(name, n);
-view cur_group(name, g) = cgroup(name, t, g), group_term(name, t), coordinated(name);
+view cur_group(name, g) = cgroup(name, t, g, _due), group_term(name, t), coordinated(name);
 
 /// A request group_refused before any group is looked at (Kafka checks these first): an empty group id, and a JoinGroup's
 /// session timeout outside the coordinator's bounds. Then a group this broker does not coordinate (or not yet).
@@ -167,8 +168,8 @@ view group_first(name, o = min!(x)) = group_fresh(name, at, c, i, _key), let x =
 view group_op(name, c, i, key) = group_first(name, o), group_fresh(name, at, c, i, key) where o == (at, c, i);
 
 /// A coordinated group's deadlines, when any passed: they are applied, and its requests wait a tick.
-view group_ticked(name, s) = cur_group(name, g), let s = tick_group(g, now(), group_config())
-    where s.group != Some(g) || not s.replies.is_empty();
+view group_due(name, g) = cgroup(name, t, g, due), let Some(d) = due, group_term(name, t), coordinated(name) where now() >= d;
+view group_ticked(name, s) = group_due(name, g), let s = tick_group(g, now(), group_config());
 view ticked(name) = group_ticked(name, _);
 view op_state(name, c, i, key, g0) {
     group_op(name, c, i, key), not ticked(name), cur_group(name, g), let g0 = Some(g);
@@ -204,10 +205,10 @@ view group_step(name, s) {
     op_state(name, c, i, _key, _g0), leave_result(c, i, r), let s = r.0;
 }
 keep_group: while group_step(name, s), let Some(g) = s.group, group_term(name, t) {
-    upsert cgroup(name, t, g);
+    upsert cgroup(name, t, g, next_due(g, now()));
 }
-drop_group: while group_step(name, s), cgroup(name, t, g) where s.group.is_none() {
-    delete cgroup(name, t, g);
+drop_group: while group_step(name, s), cgroup(name, t, g, due) where s.group.is_none() {
+    delete cgroup(name, t, g, due);
 }
 answer_group: while group_step(_name, s), r in s.replies, let c = r.c, let i = r.i, head(c, i, _seq, _key, version, corr, _fr, _at) {
     emit reply(c, i, [Part::Bytes(encode_reply(corr, version, r))]);
@@ -216,11 +217,11 @@ answer_heartbeat: while heartbeat_result(c, i, r), heartbeat_head(c, i, version,
     emit reply(c, i, [Part::Bytes(encode_heartbeat_response(corr, version, r.1))]);
 }
 answer_leave: while leave_result(c, i, r), leave_head(c, i, version, corr, _fr, _at, req) {
-    emit reply(c, i, [Part::Bytes(encode_leave_response(corr, version, NONE, leaving_members(req, version), r.1))]);
+    emit reply(c, i, [Part::Bytes(encode_leave_response(corr, version, r.1, leaving_members(req, version), r.2))]);
 }
 /// A group this broker no longer coordinates is forgotten (its requests now get NOT_COORDINATOR).
-forget_group: while cgroup(name, t, g), not group_term(name, t) {
-    delete cgroup(name, t, g);
+forget_group: while cgroup(name, t, g, due), not group_term(name, t) {
+    delete cgroup(name, t, g, due);
 }
 
 // ---------------------------------------------------------------- OffsetCommit
@@ -243,10 +244,11 @@ view commit_group_error(c, i, err) {
     commit_head(c, i, _s, _v, _corr, _fr, _at, req), let err = INVALID_GROUP_ID where req.group_id == "";
     commit_head(c, i, _s, _v, _corr, _fr, _at, req), let name = req.group_id, group_status(name, err)
         where name != "" && err != NONE;
-    commit_head(c, i, _s, _v, _corr, _fr, _at, req), let name = req.group_id, cur_group(name, g),
-        let err = commit_error(Some(g), true, req.generation, req.member_id);
-    commit_head(c, i, _s, _v, _corr, _fr, _at, req), let name = req.group_id, coordinated(name), not cur_group(name, _),
-        group_exists(name, known), let err = commit_error(group_none(), known, req.generation, req.member_id);
+    commit_head(c, i, _s, v, _corr, _fr, _at, req), let name = req.group_id, cur_group(name, g),
+        let err = commit_error(Some(g), true, req.generation, req.member_id, req.group_instance_id, v) where name != "";
+    commit_head(c, i, _s, v, _corr, _fr, _at, req), let name = req.group_id, coordinated(name), not cur_group(name, _),
+        group_exists(name, known), let err = commit_error(group_none(), known, req.generation, req.member_id, req.group_instance_id, v)
+        where name != "";
 }
 view topic_parts(name, id, n) = mtopic(name, id, n, _);
 view commit_entry_error(c, i, k, err) {
@@ -271,14 +273,19 @@ decide_commit: while commit_new(c, i, _req, errors) {
 }
 /// The OFFSETS entry a new commit appends to its group's partition (when any partition is to be committed): the
 /// last value given for each partition of the request.
-view commit_entry_of(c, i, g, x) = commit_new(c, i, req, errors), offsets_topic(tid, n), let p = group_partition(req.group_id, n),
-    let g = (tid, p), my_id(me), commit_items(c, i, items),
-    let x = (OFFSETS, -1i64, Blob::of(encode_offsets_entry(OffsetsEntry { tag: hash64(("commit", me, c, i)), group: req.group_id, items: items })))
-    where to_commit(errors);
+view commit_entry_of(c, i, g, x) = commit_new(c, i, req, _errors), commit_rank(c, i, g, k), my_id(me), commit_items(c, i, items),
+    let x = (OFFSETS, k as i64, Blob::of(encode_offsets_entry(OffsetsEntry { tag: hash64(("commit", me, c, i)), group: req.group_id, items: items })));
 view commit_item(c, i, k, it) = commit_new(c, i, req, errors), (k, e) in commit_entries(req).enumerate(), let Some(err) = errors.get(k),
     topic_parts(e.0, id, _n), let it = (e.0, id, e.1, e.2, e.3, e.4) where err == NONE;
 view commit_items_by(c, i, xs = collect!((k, it))) = per commit_new(c, i, _req, _errors), commit_item(c, i, k, it);
-view commit_items(c, i, items) = commit_items_by(c, i, xs), let items = values_of(xs);
+/// A partition named twice in one request is committed at its last value, as Kafka does.
+view commit_items(c, i, items) = commit_items_by(c, i, xs), let items = last_per_partition(values_of(xs));
+/// The order of each new commit among its group partition's new commits this tick: arrival, then connection and
+/// index. Its entry's position is that order, so `proposals` (ordered by kind, then position) appends them so.
+view commit_new_in(c, i, g, o) = commit_new(c, i, req, errors), commit_head(c, i, _s, _v, _corr, _fr, at, _req),
+    offsets_topic(tid, n), let g = (tid, group_partition(req.group_id, n)), let o = (at, c, i) where to_commit(errors);
+view commit_order(g, os = collect!(o)) = commit_new_in(_c, _i, g, o);
+view commit_rank(c, i, g, k) = commit_new_in(c, i, g, o), commit_order(g, os), (k, x) in os.enumerate() where x == o;
 view offsets_proposals(g, x) = commit_entry_of(_c, _i, g, x);
 /// Where each commit's entry lands: its place among the group's proposals this tick, after the log's last entry.
 record_commit: while commit_entry_of(c, i, g, x), checked_proposals(g, xs), leader(g, t), last_log(g, li, _), (k, y) in xs.enumerate()
@@ -333,7 +340,7 @@ durable table committed(tid: Bytes, part: i32, group: String, topic: String, p: 
 /// the last per key.
 view offsets_applied(tid, part, i, group, topic, p, id, offset, epoch, meta) =
     to_apply_d(tid, part, a, c), let g = (tid, part), rlog(g, i, _t, _pt, kind, _pos, data),
-    let Some(e) = decode_offsets_entry(entry_bytes(data)), let group = e.group, x in e.items,
+    let Some(e) = decode_offsets_entry(entry_bytes(data)), let group = e.group, x in last_per_partition(e.items),
     let topic = x.0, let id = x.1, let p = x.2, let offset = x.3, let epoch = x.4, let meta = x.5
     where kind == OFFSETS && i > a && i <= c;
 view offsets_last(tid, part, group, topic, p, m = max!(i)) = offsets_applied(tid, part, i, group, topic, p, _id, _o, _e, _m);
@@ -345,7 +352,7 @@ store_offsets: while offsets_last(tid, part, group, topic, p, m), offsets_applie
 /// materialized ones.
 view offsets_pending(tid, part, i, group, topic, p, id, offset, epoch, meta) =
     applied_d(tid, part, a), not installing(tid, part), not offsets_stale(tid, part, _), let g = (tid, part), commit_of(g, c), rlog(g, i, _t, _pt, kind, _pos, data),
-    let Some(e) = decode_offsets_entry(entry_bytes(data)), let group = e.group, x in e.items,
+    let Some(e) = decode_offsets_entry(entry_bytes(data)), let group = e.group, x in last_per_partition(e.items),
     let topic = x.0, let id = x.1, let p = x.2, let offset = x.3, let epoch = x.4, let meta = x.5
     where kind == OFFSETS && i > a && i <= c;
 view pending_last(tid, part, group, topic, p, m = max!(i)) = offsets_pending(tid, part, i, group, topic, p, _id, _o, _e, _m);
@@ -398,7 +405,7 @@ send_offsets: on offsets_want(tid, p, point) from f, applied_d(tid, p, a), not o
 }
 /// The parts received of each partition's offsets at an index past its point.
 table offsets_parts(tid: Bytes, part: i32, at: u64, k: u64, n: u64, chunk: Bytes) key(tid, part, at, k)
-    while offsets_stale(tid, part, _);
+    while offsets_stale(tid, part, point) where at >= point;
 keep_offsets_part: on offsets_chunk(tid, p, at, k, n, chunk), offsets_stale(tid, p, point) where at >= point && k < n {
     upsert offsets_parts(tid, p, at, k, n, chunk);
 }
@@ -408,7 +415,9 @@ view offsets_received(tid, p, at, snap) =
     offsets_whole(tid, p, at, cs), offsets_count(tid, p, at, n), let Some(d) = OffsetsSnapshot::decode(joined(cs), 0),
     let snap = d.0 where cs.len() == n && snap.at == at;
 view offsets_adopt_at(tid, p, m = max!(at)) = offsets_received(tid, p, at, _snap);
-view offsets_adopt(tid, p, at, snap) = offsets_received(tid, p, at, snap), offsets_adopt_at(tid, p, at), not installing(tid, p);
+/// Only while stale, and only offsets at or past the point (the entries before it are gone from this log).
+view offsets_adopt(tid, p, at, snap) = offsets_received(tid, p, at, snap), offsets_adopt_at(tid, p, at), not installing(tid, p),
+    offsets_stale(tid, p, point) where at >= point;
 adopt_offsets: while offsets_adopt(tid, p, at, snap) {
     upsert applied_d(tid, p, at);
     for x in snap.rows {
@@ -448,12 +457,33 @@ view ofetch_value(c, k, topic, p, v) {
 view ofetch_topic_by(c, k, topic, xs = collect!((p, v))) = ofetch_value(c, k, topic, p, v);
 view ofetch_topic(c, k, topic, ps) = ofetch_topic_by(c, k, topic, xs), let ps = values_of(xs);
 view ofetch_topics(c, k, ts = collect!((topic, ps) default [])) = per ofetch_group_of(c, _i, k, _name, _ts), ofetch_topic(c, k, topic, ps);
-/// Each group's answer: its offsets, or the coordinator's error (Kafka's group-level error) with none.
+/// A coordinator answers committed offsets only once its leadership of the group's partition is confirmed after the
+/// request arrived (Raft's ReadIndex, `confirmed_at`): a majority of the partition's replicas answered a heartbeat it
+/// sent since. So a deposed coordinator that has not heard of its successor (cut off by a partition) answers nothing
+/// stale; after `OFFSET_FETCH_CONFIRM` unconfirmed, it answers NOT_COORDINATOR and the client looks again.
+view ofetch_part_group(c, k, g, at) = ofetch_group_of(c, _i, k, name, _ts), coordinated(name), offsets_topic(tid, n),
+    ofetch_head(c, _i2, _s, _v, _corr, _fr, at, _req), let g = (tid, group_partition(name, n));
+view confirms(g) = ofetch_part_group(_c, _k, g, _at);
+view ofetch_confirms(c, k, n = count!(f)) = ofetch_part_group(c, k, g, at), members(g, f), confirmed_at(g, f, a) where a >= at;
+view ofetch_confirmed(c, k) {
+    ofetch_part_group(c, k, g, _at), group_size(g, size), ofetch_confirms(c, k, n), mine(g) where (n + 1) * 2 > size;
+    ofetch_part_group(c, k, g, _at), group_size(g, size), ofetch_confirms(c, k, n), not mine(g) where n * 2 > size;
+    ofetch_part_group(c, k, g, _at), group_size(g, size), mine(g) where size == 1;
+}
+/// Each group's answer: its offsets; or a group-level error with none (before v2, which has no group-level error,
+/// in each partition asked for): an empty group id, the coordinator's status, an unconfirmed leadership.
 view ofetch_answer(c, k, a) {
-    ofetch_group_of(c, _i, k, name, _ts), coordinated(name), ofetch_topics(c, k, ts),
-        let a = GroupOffsets { group: name, error: NONE, topics: ts };
-    ofetch_group_of(c, _i, k, name, _ts), group_status(name, s), let a = GroupOffsets { group: name, error: s, topics: [] }
-        where s != NONE;
+    ofetch_group_of(c, _i, k, name, _ts), coordinated(name), ofetch_confirmed(c, k), ofetch_topics(c, k, ts),
+        let a = GroupOffsets { group: name, error: NONE, topics: ts } where name != "";
+    ofetch_group_of(c, _i, k, name, ts), ofetch_head(c, _i2, _s, version, _corr, _fr, _at, _req),
+        let a = GroupOffsets { group: name, error: INVALID_GROUP_ID, topics: error_topics(ts, INVALID_GROUP_ID, version) }
+        where name == "";
+    ofetch_group_of(c, _i, k, name, ts), group_status(name, s), ofetch_head(c, _i2, _s, version, _corr, _fr, _at, _req),
+        let a = GroupOffsets { group: name, error: s, topics: error_topics(ts, s, version) } where s != NONE && name != "";
+    ofetch_group_of(c, _i, k, name, ts), coordinated(name), not ofetch_confirmed(c, k),
+        ofetch_head(c, _i2, _s, version, _corr, _fr, at, _req),
+        let a = GroupOffsets { group: name, error: NOT_COORDINATOR, topics: error_topics(ts, NOT_COORDINATOR, version) }
+        where name != "" && now() >= at + OFFSET_FETCH_CONFIRM;
 }
 view ofetch_answers(c, xs = collect!((k, a))) = per ofetch_head(c, _i, _s, _v, _corr, _fr, _at, _req), ofetch_answer(c, k, a);
 answer_offset_fetch: while ofetch_head(c, i, seq, version, corr, fr, at, req), ofetch_answers(c, xs)
@@ -470,10 +500,14 @@ view described(c, k, d) {
     dgroups_head(c, _i, _s, version, _corr, _fr, _at, req), (k, name) in req.groups.enumerate(), cur_group(name, g),
         let d = describe_group(name, Some(g), true, version, req.include_operations);
     dgroups_head(c, _i, _s, version, _corr, _fr, _at, req), (k, name) in req.groups.enumerate(), coordinated(name), not cur_group(name, _),
-        group_exists(name, known), let d = describe_group(name, group_none(), known, version, req.include_operations);
+        group_exists(name, known), let d = describe_group(name, group_none(), known, version, req.include_operations)
+        where name != "";
     dgroups_head(c, _i, _s, version, _corr, _fr, _at, req), (k, name) in req.groups.enumerate(), group_status(name, s),
         let d = DescribedGroup { error: s, message: error_message(s), group_id: name, state: "", protocol_type: "", protocol_data: "",
-            members: [], operations: NO_OPERATIONS } where s != NONE;
+            members: [], operations: NO_OPERATIONS } where s != NONE && name != "";
+    dgroups_head(c, _i, _s, _version, _corr, _fr, _at, req), (k, name) in req.groups.enumerate(),
+        let d = DescribedGroup { error: INVALID_GROUP_ID, message: error_message(INVALID_GROUP_ID), group_id: name, state: "",
+            protocol_type: "", protocol_data: "", members: [], operations: NO_OPERATIONS } where name == "";
 }
 view describe_all(c, xs = collect!((k, d))) = per dgroups_head(c, _i, _s, _v, _corr, _fr, _at, _req), described(c, k, d);
 answer_describe_groups: while dgroups_head(c, i, seq, version, corr, fr, at, req), describe_all(c, xs) where xs.len() == req.groups.len() {

@@ -100,6 +100,8 @@ fn error_message(error: i16) -> Option<String> {
         Some("Transactional Id authorization failed.")
     } else if error == GROUP_ID_NOT_FOUND {
         Some("The group id does not exist.")
+    } else if error == INVALID_GROUP_ID {
+        Some("The configured groupId is invalid.")
     } else {
         Some("")
     }
@@ -395,6 +397,16 @@ format OffsetFetchResponse(version: i16) {
 /// One group's answer: its error, and per topic its partitions' (partition, offset, leader epoch, metadata, error).
 struct GroupOffsets { group: String, error: i16, topics: Vec<(String, Vec<(i32, i64, i32, Option<String>, i16)>)> }
 
+/// The partitions of a group-level error answer: before v2 (no group-level error field) each partition asked for,
+/// with the error; from v2 none.
+fn error_topics(ts: Option<Vec<(String, Vec<i32>)>>, err: i16, version: i16) -> Vec<(String, Vec<(i32, i64, i32, Option<String>, i16)>)> {
+    if version >= 2i16 {
+        []
+    } else {
+        ts.unwrap_or([]).map(|t| (t.0, t.1.map(|p| (p, -1i64, -1i32, Some(""), err))))
+    }
+}
+
 /// The answer. Before v2 a group-level error goes in every partition (there is no top-level error).
 fn fetched_topics(version: i16, g: GroupOffsets) -> Vec<FetchedOffsetsTopic> {
     g.topics.map(|t| FetchedOffsetsTopic {
@@ -619,6 +631,11 @@ fn encode_offsets_entry(e: OffsetsEntry) -> Bytes {
 
 fn decode_offsets_entry(b: Bytes) -> Option<OffsetsEntry> {
     OffsetsEntry::decode(b, 0).map(|r| r.0)
+}
+
+/// The items of an offset commit with only the last value of each (topic, partition), in their order.
+fn last_per_partition(items: Vec<(String, Bytes, i32, i64, i32, Option<String>)>) -> Vec<(String, Bytes, i32, i64, i32, Option<String>)> {
+    items.enumerate().filter(|e| not items.enumerate().any(|f| f.0 > e.0 && (f.1).0 == (e.1).0 && (f.1).2 == (e.1).2)).map(|e| e.1)
 }
 
 /// The most metadata an offset commit may carry (Kafka's `offset.metadata.max.bytes`).
