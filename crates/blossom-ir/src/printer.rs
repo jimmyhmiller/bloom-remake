@@ -4,6 +4,9 @@ use blossom_base::idx::*;
 use blossom_value::TypeDef;
 use std::fmt::Write;
 
+use blossom_value::Value;
+use blossom_value::time::NodeId;
+
 fn type_name(p: &Program, id: TypeId) -> String {
     match p.types.get(id) {
         None => format!("<type:{}>", id.raw()),
@@ -359,6 +362,21 @@ fn rule(p: &Program, r: &Rule) -> String {
 }
 /// Prints declarations and rules in stable name and label order, with construct markers.
 // FEATURE: LANG-001
+/// One rule in the textual form: `head :- body.` (`blossom trace why`/`whynot` show the rules they explain).
+pub fn rule_text(p: &Program, r: &Rule) -> String {
+    rule(p, r)
+}
+
+/// One body literal of `r` in the textual form.
+pub fn literal_text(p: &Program, r: &Rule, l: &Literal) -> String {
+    literal(p, r, l)
+}
+
+/// A variable of `r` by its source name.
+pub fn var_text(r: &Rule, v: VarId) -> String {
+    var(r, v)
+}
+
 pub fn print(p: &Program) -> String {
     let mut out = String::new();
     let mut rels = p.rels.iter().collect::<Vec<_>>();
@@ -489,4 +507,158 @@ pub fn print(p: &Program) -> String {
         writeln!(out, "{}", rule(p, r)).ok();
     }
     out
+}
+
+// ---------------------------------------------------------------- values
+
+/// A value of type `ty` in `program`'s type table, in source syntax: enum variants and struct fields by name,
+/// lattice values by their elements (`⊥` for bottom), durations and instants in seconds.
+pub fn value_text(program: Option<&Program>, v: &Value, ty: Option<TypeId>, node: &dyn Fn(NodeId) -> String) -> String {
+    use blossom_value::TypeDef;
+    let def = ty.and_then(|t| program.and_then(|p| p.types.get(t)));
+    let list = |vs: &mut dyn Iterator<Item = String>| vs.collect::<Vec<_>>().join(", ");
+    match (v, def) {
+        (Value::Node(n), _) => node(*n),
+        (Value::Str(s), _) => format!("{s:?}"),
+        (Value::Bool(b), _) => b.to_string(),
+        (Value::Unit, _) => "()".to_owned(),
+        (Value::Int(i), _) => format!("{i:?}")
+            .split_once('(')
+            .and_then(|(_, rest)| rest.strip_suffix(')'))
+            .map_or_else(|| format!("{i:?}"), str::to_owned),
+        (Value::Duration(d), _) => seconds(d.as_nanos()),
+        (Value::Instant(t), _) => format!("@{}", seconds(t.0)),
+        (Value::Session(s), _) => format!("session {}", s.0),
+        (Value::Conn(c), _) => format!("conn#{}", c.0),
+        // Bytes as a byte string: printable ASCII as is, the rest escaped.
+        (Value::Bytes(b), _) => format!("b\"{}\"", b.escape_ascii()),
+        (Value::Principal(p), _) => format!("principal {p:?}"),
+        (Value::Option(None), _) => "None".to_owned(),
+        (Value::Option(Some(x)), Some(TypeDef::Option(t))) => {
+            format!("Some({})", value_text(program, x, Some(*t), node))
+        }
+        (Value::Option(Some(x)), _) => format!("Some({})", value_text(program, x, None, node)),
+        (Value::Tuple(xs), Some(TypeDef::Tuple(ts))) => format!(
+            "({})",
+            list(&mut xs.iter().zip(ts).map(|(x, t)| value_text(program, x, Some(*t), node)))
+        ),
+        (Value::Tuple(xs), _) => format!("({})", list(&mut xs.iter().map(|x| value_text(program, x, None, node)))),
+        (Value::Enum { variant, fields }, Some(TypeDef::Enum(e))) => {
+            let var = e.variants.iter().find(|x| x.number == *variant);
+            let name = var.map_or_else(|| format!("#{variant}"), |x| x.name.to_string());
+            if fields.is_empty() {
+                name
+            } else {
+                let tys: Vec<Option<TypeId>> = var
+                    .map(|x| x.payload.iter().map(|f| Some(f.ty)).collect())
+                    .unwrap_or_default();
+                format!(
+                    "{name}({})",
+                    list(&mut fields.iter().enumerate().map(|(i, x)| value_text(
+                        program,
+                        x,
+                        tys.get(i).copied().flatten(),
+                        node
+                    )))
+                )
+            }
+        }
+        (Value::Struct(xs), Some(TypeDef::Struct(s))) => format!(
+            "{} {{ {} }}",
+            s.name,
+            list(&mut xs.iter().zip(&s.fields).map(|(x, f)| format!(
+                "{}: {}",
+                f.name,
+                value_text(program, x, Some(f.ty), node)
+            )))
+        ),
+        (Value::Vec(xs), Some(TypeDef::Vec(t))) => {
+            format!(
+                "[{}]",
+                list(&mut xs.iter().map(|x| value_text(program, x, Some(*t), node)))
+            )
+        }
+        (Value::Set(xs), Some(TypeDef::Set(t))) => {
+            format!(
+                "set[{}]",
+                list(&mut xs.iter().map(|x| value_text(program, x, Some(*t), node)))
+            )
+        }
+        (Value::Map(m), Some(TypeDef::Map(k, t))) => format!(
+            "map[{}]",
+            list(&mut m.iter().map(|(a, b)| format!(
+                "{} => {}",
+                value_text(program, a, Some(*k), node),
+                value_text(program, b, Some(*t), node)
+            )))
+        ),
+        (Value::Lattice(l), _) => {
+            let ctor = match def {
+                Some(TypeDef::Lattice(id)) => program.and_then(|p| p.lattices.get(*id)).map(|d| d.ctor.clone()),
+                _ => None,
+            };
+            lattice_text(l, ctor.as_ref(), program, node)
+        }
+        (other, _) => format!("{other:?}"),
+    }
+}
+
+fn lattice_text(
+    l: &blossom_value::value::LatValue,
+    ctor: Option<&LatticeCtor>,
+    program: Option<&Program>,
+    node: &dyn Fn(NodeId) -> String,
+) -> String {
+    use LatticeCtor as C;
+    use blossom_value::value::LatValue as L;
+    let elem = match ctor {
+        Some(C::Max(t) | C::Min(t) | C::Point(t) | C::Set(t) | C::PSet(t)) => Some(*t),
+        _ => None,
+    };
+    match l {
+        L::Bottom => "⊥".to_owned(),
+        L::Top => "⊤".to_owned(),
+        L::Bool(b) => b.to_string(),
+        L::Elem(x) => value_text(program, x, elem, node),
+        L::Set(xs) => format!(
+            "{{{}}}",
+            xs.iter()
+                .map(|x| value_text(program, x, elem, node))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        L::Map(m) => {
+            let (key, inner) = match ctor {
+                Some(C::Map(k, inner)) => (
+                    Some(*k),
+                    program.and_then(|p| p.lattices.get(*inner)).map(|d| d.ctor.clone()),
+                ),
+                _ => (None, None),
+            };
+            format!(
+                "{{{}}}",
+                m.iter()
+                    .map(|(k, v)| format!(
+                        "{}: {}",
+                        value_text(program, k, key, node),
+                        lattice_text(v, inner.as_ref(), program, node)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+        other => format!("{other:?}"),
+    }
+}
+
+/// Nanoseconds as seconds: `1s`, `1.5s`, `-2s`.
+fn seconds(nanos: i64) -> String {
+    let whole = nanos / 1_000_000_000;
+    let frac = (nanos % 1_000_000_000).unsigned_abs();
+    if frac == 0 {
+        format!("{whole}s")
+    } else {
+        let digits = format!("{frac:09}");
+        format!("{whole}.{}s", digits.trim_end_matches('0'))
+    }
 }

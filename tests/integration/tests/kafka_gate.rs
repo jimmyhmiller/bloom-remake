@@ -101,6 +101,7 @@ data_dir = "data"
         dir: None,
         backend: blossom_node::Backend::Engine,
         externs: Arc::new(blossom_std_host::registry().unwrap()),
+        record: None,
     })
     .unwrap();
     (server, port)

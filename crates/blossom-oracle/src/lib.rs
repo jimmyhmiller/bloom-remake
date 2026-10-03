@@ -33,10 +33,7 @@ use std::sync::Arc;
 
 use blossom_base::{RelId, RoleId, RuleId};
 use blossom_ir::ValidatedProgram;
-use blossom_value::{
-    Value,
-    time::NodeId,
-};
+use blossom_value::{Value, time::NodeId};
 
 pub use strata::Stratum;
 
@@ -175,11 +172,9 @@ impl Oracle {
         let Some(c) = decl.default else {
             return Err(OracleError::Unbound(decl.name.to_string()));
         };
-        program
-            .consts
-            .get(c)
-            .cloned()
-            .ok_or_else(|| blossom_base::internal_error!("the default of parameter {} is not a constant", decl.name).into())
+        program.consts.get(c).cloned().ok_or_else(|| {
+            blossom_base::internal_error!("the default of parameter {} is not a constant", decl.name).into()
+        })
     }
 
     /// Seeds the run: σc = PRF(ρ, "choose") from the root seed ρ (the run seed in simulation), which seeded choices
@@ -268,4 +263,37 @@ impl Oracle {
     pub fn tick(&self, input: &TickInput<'_>) -> Result<TickOutput, OracleError> {
         eval::tick(self, input)
     }
+
+    /// Why the rules deriving `rel` do or do not derive a tuple matching `pattern` (`None`: any value) on the tick
+    /// `input` describes, whose final instance is `instance` (its [`TickOutput::instance`]): one [`WhyNot`] per
+    /// rule of the node with that head, with up to `samples` partial valuations each.
+    pub fn why_not(
+        &self,
+        input: &TickInput<'_>,
+        instance: &Instance,
+        rel: RelId,
+        pattern: &[Option<Value>],
+        samples: usize,
+    ) -> Result<Vec<WhyNot>, OracleError> {
+        eval::why_not(self, input, instance, rel, pattern, samples)
+    }
+}
+
+/// How far one rule got towards deriving a tuple (see [`Oracle::why_not`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WhyNot {
+    pub rule: RuleId,
+    /// A head column whose constant (or repeated variable) differs from the pattern: the rule cannot derive it.
+    pub head_differs: Option<usize>,
+    /// How many steps of the rule's plan some valuation passed, of `steps`.
+    pub passed: usize,
+    pub steps: usize,
+    /// The body literal (by index) of the first step no valuation passed.
+    pub failed: Option<usize>,
+    /// Some valuations that passed `passed` steps: the variables bound so far.
+    pub partial: Vec<Vec<(blossom_base::VarId, Value)>>,
+    /// How many valuations passed the whole body (the rule derives the tuple).
+    pub complete: usize,
+    /// An evaluation error on the way (an expression that fails on these values).
+    pub error: Option<String>,
 }

@@ -129,6 +129,8 @@ struct Cluster {
     ports: Vec<u16>,
     procs: Vec<Option<Child>>,
     proxies: Vec<((usize, usize), Proxy)>,
+    /// Where the brokers record their traces (`BLOSSOM_RECORD_DIR`).
+    record: Option<PathBuf>,
 }
 
 #[cfg(test)]
@@ -186,9 +188,23 @@ impl Cluster {
             statics.join(", ")
         ));
         let deploy = dir.join("deploy.toml");
-        std::fs::write(&deploy, spec).unwrap();
+        std::fs::write(&deploy, &spec).unwrap();
         let secrets = dir.join("k.secrets");
         std::fs::write(&secrets, "seed = \"00112233445566778899aabbccddeeff\"\n").unwrap();
+        // With BLOSSOM_RECORD_DIR set, every broker records its inputs (`blossom run --record`) under
+        // `$BLOSSOM_RECORD_DIR/<tag>`, next to a copy of the deployment, for `blossom trace` to replay after the test.
+        let record = std::env::var_os("BLOSSOM_RECORD_DIR").map(|d| PathBuf::from(d).join(tag));
+        if let Some(r) = &record {
+            let _ = std::fs::remove_dir_all(r);
+            std::fs::create_dir_all(r).unwrap();
+            std::fs::write(r.join("deploy.toml"), &spec).unwrap();
+            std::fs::write(r.join("k.secrets"), "seed = \"00112233445566778899aabbccddeeff\"\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(r.join("k.secrets"), std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -201,6 +217,7 @@ impl Cluster {
             ports,
             procs: vec![None, None, None],
             proxies,
+            record,
         };
         for i in 0..3 {
             c.start(i, true);
@@ -214,6 +231,9 @@ impl Cluster {
             .arg(&self.deploy)
             .args(["--node", &self.names[i], "--insecure-dev", "--stats"])
             .arg(self.stats_path(i));
+        if let Some(r) = &self.record {
+            cmd.arg("--record").arg(r.join("traces"));
+        }
         if fresh {
             cmd.arg("--init-fresh");
         }
