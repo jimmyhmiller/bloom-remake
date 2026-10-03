@@ -264,3 +264,90 @@ view v_feed(id, x) = chunks(id, cs), let x = feed_all(cs);
 fn empty_names() -> Set<String> {
     [].to_set()
 }
+
+// ---------------------------------------------------------------- the consumer group APIs (S9)
+
+/// A group API request: each decodes to a summary of its fields (`same`: encoding the decoded request gives back its
+/// body's bytes).
+input greq(frame: Bytes);
+
+fn body_bytes(f: Bytes, c: Cur) -> Bytes {
+    f.slice(c.pos, f.len()).unwrap_or(Bytes::empty())
+}
+
+view greq_at(f, key, version, c) = greq(f), let Some(h) = header_of(f), let key = h.api_key, let version = h.api_version,
+    let Some(c) = request_body(f);
+view v_find(f, keys, kt, same) = greq_at(f, key, v, c), let Some(r) = decode_find_coordinator(c, v), let keys = coordinator_keys(r, v),
+    let kt = r.key_type, let same = FindCoordinatorRequest::encode(r, v) == body_bytes(f, c) where key == API_FIND_COORDINATOR;
+view v_join(f, x, same) = greq_at(f, key, v, c), let Some(r) = decode_join_group(c, v),
+    let x = (r.group_id, r.session_timeout_ms, r.rebalance_timeout_ms, r.member_id, r.group_instance_id, r.protocol_type, join_protocols(r), r.reason),
+    let same = JoinGroupRequest::encode(r, v) == body_bytes(f, c) where key == API_JOIN_GROUP;
+view v_sync(f, x, same) = greq_at(f, key, v, c), let Some(r) = decode_sync_group(c, v),
+    let x = (r.group_id, r.generation, r.member_id, r.group_instance_id, r.protocol_type, r.protocol_name, sync_assignments(r)),
+    let same = SyncGroupRequest::encode(r, v) == body_bytes(f, c) where key == API_SYNC_GROUP;
+view v_hb(f, x, same) = greq_at(f, key, v, c), let Some(r) = decode_heartbeat(c, v),
+    let x = (r.group_id, r.generation, r.member_id, r.group_instance_id),
+    let same = HeartbeatRequest::encode(r, v) == body_bytes(f, c) where key == API_HEARTBEAT;
+view v_leave(f, x, same) = greq_at(f, key, v, c), let Some(r) = decode_leave_group(c, v), let x = (r.group_id, leaving_members(r, v)),
+    let same = LeaveGroupRequest::encode(r, v) == body_bytes(f, c) where key == API_LEAVE_GROUP;
+view v_commit(f, x, same) = greq_at(f, key, v, c), let Some(r) = decode_offset_commit(c, v),
+    let x = (r.group_id, r.generation, r.member_id, r.group_instance_id, commit_entries(r)),
+    let same = OffsetCommitRequest::encode(r, v) == body_bytes(f, c) where key == API_OFFSET_COMMIT;
+view v_ofetch(f, x, same) = greq_at(f, key, v, c), let Some(r) = decode_offset_fetch(c, v), let x = (fetch_groups(r, v), r.require_stable),
+    let same = OffsetFetchRequest::encode(r, v) == body_bytes(f, c) where key == API_OFFSET_FETCH;
+view v_dgroups(f, x, same) = greq_at(f, key, v, c), let Some(r) = decode_describe_groups(c, v), let x = (r.groups, r.include_operations),
+    let same = DescribeGroupsRequest::encode(r, v) == body_bytes(f, c) where key == API_DESCRIBE_GROUPS;
+view v_lgroups(f, x, same) = greq_at(f, key, v, c), let Some(r) = decode_list_groups(c, v), let x = (r.states, r.types),
+    let same = ListGroupsRequest::encode(r, v) == body_bytes(f, c) where key == API_LIST_GROUPS;
+
+/// Group API answers to encode, by correlation id.
+input g_find(corr: i32, version: i16, answers: Vec<(String, i16, i32, String, i32)>);
+input g_join(corr: i32, version: i16, error: i16, generation: i32, ptype: Option<String>, proto: Option<String>, leader: String, member: String, members: Vec<(String, Option<String>, Bytes)>);
+input g_sync(corr: i32, version: i16, error: i16, ptype: Option<String>, proto: Option<String>, assignment: Bytes);
+input g_hb(corr: i32, version: i16, error: i16);
+input g_leave(corr: i32, version: i16, error: i16, members: Vec<(String, Option<String>)>, errors: Vec<i16>);
+input g_commit(corr: i32, frame: Bytes, errors: Vec<i16>);
+input g_ofetch(corr: i32, version: i16, groups: Vec<(String, i16, Vec<(String, Vec<(i32, i64, i32, Option<String>, i16)>)>)>);
+input g_dgroups(corr: i32, version: i16, groups: Vec<(i16, String, String, String, String, Vec<(String, Option<String>, String, String, Bytes, Bytes)>, i32)>);
+input g_lgroups(corr: i32, frame: Bytes, groups: Vec<(String, String, String)>);
+
+fn commit_bytes(corr: i32, f: Bytes, errors: Vec<i16>) -> Option<Bytes> {
+    let h = header_of(f)?;
+    let r = request_body(f).and_then(|c| decode_offset_commit(c, h.api_version))?;
+    Some(encode_offset_commit_response(corr, h.api_version, r, errors))
+}
+
+fn lgroups_bytes(corr: i32, f: Bytes, groups: Vec<(String, String, String)>) -> Option<Bytes> {
+    let h = header_of(f)?;
+    let r = request_body(f).and_then(|c| decode_list_groups(c, h.api_version))?;
+    Some(encode_list_groups_response(corr, h.api_version, r, groups))
+}
+
+fn ofetch_bytes(corr: i32, version: i16, groups: Vec<(String, i16, Vec<(String, Vec<(i32, i64, i32, Option<String>, i16)>)>)>) -> Bytes {
+    encode_offset_fetch_response(corr, version, groups.map(|g| GroupOffsets { group: g.0, error: g.1, topics: g.2 }))
+}
+
+fn dgroups_bytes(corr: i32, version: i16, groups: Vec<(i16, String, String, String, String, Vec<(String, Option<String>, String, String, Bytes, Bytes)>, i32)>) -> Bytes {
+    encode_describe_groups_response(corr, version, groups.map(|g| DescribedGroup {
+        error: g.0, message: error_message(g.0), group_id: g.1, state: g.2, protocol_type: g.3, protocol_data: g.4,
+        members: g.5.map(|m| DescribedMember { member_id: m.0, group_instance_id: m.1, client_id: m.2, client_host: m.3, metadata: m.4, assignment: m.5 }),
+        operations: g.6,
+    }))
+}
+
+view v_gresp(corr, b) {
+    g_find(corr, v, answers), let b = encode_find_coordinator_response(corr, v, answers);
+    g_join(corr, v, e, gen, pt, pr, leader, member, ms),
+        let b = encode_join_response(corr, v, JoinAnswer { error: e, generation: gen, protocol_type: pt, chosen: pr, leader: leader, member_id: member, members: ms });
+    g_sync(corr, v, e, pt, pr, a), let b = encode_sync_response(corr, v, SyncAnswer { error: e, protocol_type: pt, chosen: pr, assignment: a });
+    g_hb(corr, v, e), let b = encode_heartbeat_response(corr, v, e);
+    g_leave(corr, v, e, ms, es), let b = encode_leave_response(corr, v, e, ms, es);
+    g_commit(corr, f, es), let Some(b) = commit_bytes(corr, f, es);
+    g_ofetch(corr, v, gs), let b = ofetch_bytes(corr, v, gs);
+    g_dgroups(corr, v, gs), let b = dgroups_bytes(corr, v, gs);
+    g_lgroups(corr, f, gs), let Some(b) = lgroups_bytes(corr, f, gs);
+}
+
+/// `java_hash` and `group_partition` (Kafka's coordinator partition) on given strings.
+input ghash(s: String, n: i32);
+view v_ghash(s, h, p) = ghash(s, n), let h = java_hash(s), let p = group_partition(s, n);
