@@ -91,8 +91,13 @@ enum Scenario {
     /// A broker is down from 3 s to 9 s; the members stop committing at 8.5 s and the offsets logs keep one entry
     /// past their snapshot points, so the broker gets its committed offsets from a snapshot only.
     Lagging,
-    /// The group's coordinator is cut off from the other brokers (not from the clients) from 3 s to 7 s.
+    /// The group's coordinator is cut off from the other brokers (not from the clients) from 3 s to 7 s; the observer
+    /// reads there throughout.
     Zombie,
+    /// The same, with Raft's CheckQuorum and PreVote off: the coordinator cut off goes on believing it leads, and
+    /// only the confirmation of its leadership (ReadIndex) keeps it from answering stale offsets (member 3, which
+    /// joins after the cut, commits through the new coordinator).
+    ZombieBare,
 }
 /// A request is given up after this long (a JoinGroup waits for the rebalance, so longer), as Kafka's clients do.
 #[cfg(test)]
@@ -176,6 +181,8 @@ struct Shared {
     failovers: u64,
     /// Each live member's last state: (member id, leader id, generation, partitions), when steady.
     steady: BTreeMap<u64, Option<Settled>>,
+    /// The broker the observer is pinned to (it reads there whatever FindCoordinator says), once set.
+    pin: Option<NodeId>,
 }
 
 /// A steady member: its id, its generation's leader and number, and its partitions.
@@ -364,12 +371,18 @@ impl Member {
             self.close(a);
             return;
         }
-        let target = match self.phase {
-            Phase::Create | Phase::Find => match self.conn {
+        let pinned = if self.observer { self.shared.borrow().pin } else { None };
+        if pinned.is_some() {
+            self.phase = Phase::Steady;
+            self.bad_sent = true;
+        }
+        let target = match (pinned, self.phase) {
+            (Some(p), _) => p,
+            (None, Phase::Create | Phase::Find) => match self.conn {
                 Some(c) => c,
                 None => self.random_broker(),
             },
-            _ => match self.coordinator {
+            (None, _) => match self.coordinator {
                 Some(c) => c,
                 None => {
                     self.phase = Phase::Find;
@@ -856,6 +869,10 @@ impl Member {
                     e
                 };
                 if coordinator_moved(e) {
+                    // A pinned observer stays where it is and asks again.
+                    if self.observer && self.shared.borrow().pin.is_some() {
+                        return Ok(());
+                    }
                     self.refind(a);
                     return Ok(());
                 }
@@ -1065,6 +1082,14 @@ fn check_groups(seeds: std::ops::RangeInclusive<u64>, scenario: Scenario) -> u64
             "OFFSETS_KEEP".to_owned(),
             blossom_front::api::ParamBinding::Int(if lagging { 1 } else { 1000 }),
         ),
+        (
+            "RAFT_CHECK_QUORUM".to_owned(),
+            blossom_front::api::ParamBinding::Bool(scenario != Scenario::ZombieBare),
+        ),
+        (
+            "RAFT_PRE_VOTE".to_owned(),
+            blossom_front::api::ParamBinding::Bool(scenario != Scenario::ZombieBare),
+        ),
     ]
     .into_iter()
     .collect();
@@ -1132,7 +1157,7 @@ fn check_groups(seeds: std::ops::RangeInclusive<u64>, scenario: Scenario) -> u64
         // The coordinator cut off: it stops coordinating (CheckQuorum), the others elect a leader for the group's
         // offsets partition, and the members move there and go on committing while it is cut off.
         let mut zombie_window = None;
-        if scenario == Scenario::Zombie {
+        if scenario == Scenario::Zombie || scenario == Scenario::ZombieBare {
             cluster.run_until(3_000_000_000).unwrap();
             let rel_cgroup = rel("cgroup");
             let coordinator = brokers
@@ -1145,10 +1170,24 @@ fn check_groups(seeds: std::ops::RangeInclusive<u64>, scenario: Scenario) -> u64
                 })
                 .unwrap_or_else(|| panic!("{}", fail(&cluster, "no broker coordinates the group at 3 s")));
             let others: Vec<NodeId> = brokers.values().copied().filter(|n| *n != coordinator).collect();
+            shared.borrow_mut().pin = Some(coordinator);
             cluster.partition(&[&others]).unwrap();
+            if scenario == Scenario::Zombie {
+                // CheckQuorum: within a few check periods the cut-off coordinator no longer leads the group's
+                // partition, and forgets the group.
+                cluster.run_until(4_500_000_000).unwrap();
+                let still = cluster
+                    .state(coordinator)
+                    .is_some_and(|st| st.rows(rel_cgroup).any(|r| r[0] == Value::Str(GROUP.into())));
+                assert!(
+                    !still,
+                    "{}",
+                    fail(&cluster, "the cut-off coordinator still coordinates the group at 4.5 s")
+                );
+                zombie_window = Some((5_000_000_000i64, 7_000_000_000i64));
+            }
             cluster.run_until(7_000_000_000).unwrap();
             cluster.heal();
-            zombie_window = Some((5_000_000_000i64, 7_000_000_000i64));
         }
         cluster.run_until(9_000_000_000).unwrap();
         assert!(
@@ -1351,6 +1390,13 @@ fn group_members_join_leave_and_die_and_rebalance() {
 #[test]
 fn a_coordinator_cut_off_from_the_others_hands_its_groups_over() {
     check_groups(seeds(1..=2), Scenario::Zombie);
+}
+
+/// The same without CheckQuorum (Raft is safe without it): the cut-off coordinator believes it leads for as long as
+/// it is cut off, and answers no stale offsets, because it confirms its leadership before every read.
+#[test]
+fn a_coordinator_that_believes_it_leads_answers_no_stale_offsets() {
+    check_groups(seeds(1..=2), Scenario::ZombieBare);
 }
 
 /// A replica of the group's offsets partition that was down while the others compacted their logs past it catches
