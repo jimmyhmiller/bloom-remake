@@ -1,0 +1,22 @@
+//! A recursive view whose step divides by zero once the chain reaches offset 20: the tick fails with the same error
+//! whichever way the fixpoint is computed.
+program recursive_error version 1;
+
+input add(b: u64);
+input ask(end: u64);
+
+table batch(base: u64, last: u64) key(base);
+table asked(end: u64) key(end);
+
+put: on add(b) {
+    emit batch(b * 2u64, b * 2u64 + 1u64);
+}
+note: on ask(end) {
+    emit asked(end);
+}
+
+view chain(end, k, base) {
+    asked(end), batch(0u64, _), let k = 0u64, let base = 0u64;
+    chain(end, k0, b0), batch(b0, last), let base = last + 1u64, batch(base, _), let k = k0 + 1u64,
+        let q = 100u64 / (20u64 - base % 21u64) where base < end && q > 0u64;
+}

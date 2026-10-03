@@ -1,0 +1,28 @@
+//! A chain over a table, as a Kafka fetch walks a partition's batches: each step finds the batch after the last one,
+//! while it is below a bound. A recursive view as long as the table: evaluated semi-naively, its cost follows its
+//! length, where the naive iteration's grew with its square.
+program recursive_chain version 1;
+
+input add(b: u64);
+input remove(b: u64);
+input ask(end: u64);
+
+/// Batch `b` covers offsets `2b` and `2b + 1`.
+table batch(base: u64, last: u64) key(base);
+table asked(end: u64) key(end);
+
+put: on add(b) {
+    emit batch(b * 2u64, b * 2u64 + 1u64);
+}
+drop: on remove(b), batch(base, last) where base == b * 2u64 {
+    delete batch(base, last);
+}
+note: on ask(end) {
+    emit asked(end);
+}
+
+view chain(end, k, base) {
+    asked(end), batch(0u64, _), let k = 0u64, let base = 0u64;
+    chain(end, k0, b0), batch(b0, last), let base = last + 1u64, batch(base, _), let k = k0 + 1u64 where base < end;
+}
+view chain_len(end, n = count!(k)) = chain(end, k, _);

@@ -92,14 +92,30 @@ pub(crate) struct RangeProbe {
     pub hi: Option<RangeEnd>,
 }
 
+/// A probe of an atom on more columns than the bound ones: those a later binding `let x = e` gives, where `x` is the
+/// column's variable and `e` reads only bound variables. The binding still runs at its place in the plan (it is the
+/// equality that keeps a row); its value is only computed early, to find the rows it can keep. The rows the probe
+/// skips would have failed that binding, and every check before it in the plan cannot fail, so none of them would
+/// have raised an error either. If the early value fails to evaluate, the atom is probed as if there were no key, and
+/// the binding raises its error at its place.
+#[derive(Clone, Debug)]
+pub(crate) struct KeyProbe {
+    /// The probe's columns: the atom's bound ones, then the keyed ones.
+    pub cols: Vec<usize>,
+    /// The keyed columns' bindings, by literal index, in the order of their columns in `cols`.
+    pub from: Vec<usize>,
+}
+
 /// One step of a term.
 #[derive(Clone, Debug)]
 pub(crate) enum Step {
-    /// Joins an atom, probing the columns whose values are known (`cols`), and a range of one more column.
+    /// Joins an atom, probing the columns whose values are known (`cols`), and a range of one more column; or, when
+    /// `key` is given and its values evaluate, the key's columns.
     Atom {
         lit: usize,
         cols: Vec<usize>,
         range: Option<RangeProbe>,
+        key: Option<Box<KeyProbe>>,
     },
     /// Runs check `k` (an index into [`Plan::checks`]).
     Check(usize),
@@ -349,6 +365,7 @@ impl Plan {
                 lit: usize,
                 cols: Vec<usize>,
                 range: Option<RangeProbe>,
+                key: Option<KeyProbe>,
                 rows: usize,
             }
             let mut best: Option<Candidate> = None;
@@ -356,13 +373,18 @@ impl Plan {
                 let Some(Literal::Pos(a)) = rule.body.lits.get(lit) else { continue };
                 let cols = bound_columns(a, &bound);
                 let range = self.range_for(rule, a, &cols, &bound, next);
-                let rows = cost(lit, &cols, range.is_some());
+                let key = self.key_for(rule, a, &cols, &bound, next);
+                let rows = match &key {
+                    Some(k) => cost(lit, &k.cols, false),
+                    None => cost(lit, &cols, range.is_some()),
+                };
                 if best.as_ref().is_none_or(|b| rows < b.rows) {
                     best = Some(Candidate {
                         pos,
                         lit,
                         cols,
                         range,
+                        key,
                         rows,
                     });
                 }
@@ -372,6 +394,7 @@ impl Plan {
                 lit: i,
                 cols,
                 range,
+                key,
                 ..
             }) = best
             else {
@@ -381,7 +404,12 @@ impl Plan {
             if let Some(Literal::Pos(a)) = rule.body.lits.get(i) {
                 bound.extend(atom_vars(a));
             }
-            steps.push(Step::Atom { lit: i, cols, range });
+            steps.push(Step::Atom {
+                lit: i,
+                cols,
+                range,
+                key: key.map(Box::new),
+            });
             self.hoist(rule, &mut next, &mut bound, &mut steps);
         }
         // Whatever is left runs after every atom (a check whose inputs no atom binds is not evaluable; Plan::new
@@ -404,6 +432,39 @@ impl Plan {
             steps.push(Step::Check(*next));
             *next += 1;
         }
+    }
+
+    /// A key for `a` from the bindings not yet run (from `next`): each unbound column whose variable a binding
+    /// `let x = e` gives, with `e` over bound variables, where every check before that binding in the plan cannot fail
+    /// ([`KeyProbe`]).
+    fn key_for(&self, rule: &Rule, a: &Atom, cols: &[usize], bound: &BTreeSet<VarId>, next: usize) -> Option<KeyProbe> {
+        let pending = self.checks.get(next..).unwrap_or_default();
+        let mut key = KeyProbe {
+            cols: cols.to_vec(),
+            from: Vec::new(),
+        };
+        for (c, t) in a.args.iter().enumerate() {
+            let Term::Var(v) = t else { continue };
+            if cols.contains(&c) || bound.contains(v) {
+                continue;
+            }
+            for &lit in pending {
+                let Some(l) = rule.body.lits.get(lit) else { break };
+                if let Literal::Bind { pat: Pattern::Var(x), expr } = l
+                    && x == v
+                {
+                    if vars_of(expr).is_subset(bound) {
+                        key.cols.push(c);
+                        key.from.push(lit);
+                    }
+                    break;
+                }
+                if !l.cannot_fail() {
+                    break;
+                }
+            }
+        }
+        (!key.from.is_empty()).then_some(key)
     }
 
     /// A range on one of `a`'s unbound columns from the guards among the checks not yet run (from `next`), up to and
@@ -840,7 +901,9 @@ impl Search<'_, '_> {
             };
         };
         match step {
-            Step::Atom { lit, cols, range } => self.atom(pc, *lit, cols, range.as_ref(), env, rows, looked, failed),
+            Step::Atom { lit, cols, range, key } => {
+                self.atom(pc, *lit, cols, range.as_ref(), key.as_deref(), env, rows, looked, failed)
+            }
             Step::Check(_) if failed.is_some() => self.run(pc + 1, env, rows, looked, failed),
             Step::Check(k) => {
                 let lit = *self
@@ -860,6 +923,7 @@ impl Search<'_, '_> {
         lit: usize,
         cols: &[usize],
         range: Option<&RangeProbe>,
+        key: Option<&KeyProbe>,
         env: &mut Vec<Option<Value>>,
         rows: &mut Vec<Option<Row>>,
         looked: &mut Vec<Value>,
@@ -886,7 +950,13 @@ impl Search<'_, '_> {
         }
         let store = self.store(atom_store(a))?;
         let old = (self.old)(lit);
-        let candidates = if !probe {
+        let keyed = match key {
+            Some(k) if probe && failed.is_none() => self.key_values(k, &values, env)?,
+            _ => None,
+        };
+        let candidates = if let (Some(k), Some(kv)) = (key, &keyed) {
+            store.rows(old, &k.cols, kv)?
+        } else if !probe {
             store.rows(old, &[], &[])?
         } else {
             let bounds = match range {
@@ -918,6 +988,27 @@ impl Search<'_, '_> {
             undo(env, &newly);
         }
         Ok(())
+    }
+
+    /// A key probe's values: the bound columns' `values`, then each keyed binding's value; `None` when one fails to
+    /// evaluate (the binding raises it at its place).
+    fn key_values(
+        &self,
+        key: &KeyProbe,
+        values: &[Value],
+        env: &[Option<Value>],
+    ) -> Result<Option<Vec<Value>>, EvalError> {
+        let mut out = values.to_vec();
+        for lit in &key.from {
+            let Some(Literal::Bind { expr: e, .. }) = self.rule.body.lits.get(*lit) else {
+                return Err(internal_error!("a key probe names a non-binding").into());
+            };
+            match expr::eval(self.cx, env, e) {
+                Ok(v) => out.push(v),
+                Err(_) => return Ok(None),
+            }
+        }
+        Ok(Some(out))
     }
 
     /// Runs check `lit`, then the steps after `pc` for each way it holds.

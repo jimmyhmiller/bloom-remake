@@ -12,8 +12,8 @@ use std::io::Read;
 use std::sync::Arc;
 
 use blossom_artifact::bls::BlsArtifact;
-use blossom_base::RelId;
-use blossom_ir::tick::{Changes, Delivery, EvalError, Ingress, Instance, Row, StepInput, TickInput, TickOutput};
+use blossom_base::{RelId, RuleId};
+use blossom_ir::tick::{Changes, Delivery, EvalError, Ingress, Instance, Row, Send, StepInput, TickInput, TickOutput};
 use blossom_node::{Backend, Executor, Executors};
 use blossom_oracle::Oracle;
 use blossom_trace::node::{NodeRecord, NodeTraceHeader, TraceError, TraceReader, outcome_digest};
@@ -55,6 +55,12 @@ pub struct Replayed {
     pub changes: Option<Changes>,
     /// The error it failed with, as recorded and replayed.
     pub failed: Option<String>,
+    /// What it sent to other nodes.
+    pub sent: Vec<Send>,
+    /// The rows at the end of the tick of the relations observed ([`Replay::observe`]).
+    pub observed: BTreeMap<RelId, Vec<Row>>,
+    /// The join work of each rule in the tick, in rows examined, when profiling ([`Replay::profile`]).
+    pub work: BTreeMap<RuleId, u64>,
     /// The tick run by the oracle from the same state, when asked for ([`Replay::next`] with `examine`).
     pub examined: Option<TickOutput>,
 }
@@ -71,6 +77,9 @@ pub struct Replay<R: Read> {
     /// A record read ahead.
     ahead: Option<NodeRecord>,
     booted: bool,
+    /// The relations whose rows each replayed tick reports.
+    observe: Vec<RelId>,
+    profile: bool,
 }
 
 impl<R: Read> Replay<R> {
@@ -110,6 +119,8 @@ impl<R: Read> Replay<R> {
             blobs: BTreeMap::new(),
             ahead: None,
             booted: false,
+            observe: Vec::new(),
+            profile: false,
         })
     }
 
@@ -120,6 +131,23 @@ impl<R: Read> Replay<R> {
     /// Whether the trace ended inside a record (the node was killed while recording a tick).
     pub fn torn(&self) -> bool {
         self.reader.torn()
+    }
+
+    /// Reports the rows of `rels` at the end of every tick replayed from now on ([`Replayed::observed`]): views
+    /// included, which the carried state does not hold.
+    pub fn observe(&mut self, rels: Vec<RelId>) {
+        self.observe = rels;
+    }
+
+    /// Reports each rule's join work in every tick replayed from now on ([`Replayed::work`]).
+    pub fn profile(&mut self, on: bool) -> Result<(), ReplayError> {
+        if on && self.engine.rows_examined_by_rule().is_none() {
+            return Err(ReplayError::Order(
+                "the replaying executor does not measure its work".into(),
+            ));
+        }
+        self.profile = on;
+        Ok(())
     }
 
     /// The carried state the next tick starts from.
@@ -232,7 +260,11 @@ impl<R: Read> Replay<R> {
         } else {
             None
         };
-        let observe: Vec<RelId> = Vec::new();
+        let work_before = if self.profile {
+            self.engine.rows_examined_by_rule()
+        } else {
+            None
+        };
         let result = self.engine.step(
             &StepInput {
                 node: self.node,
@@ -244,9 +276,18 @@ impl<R: Read> Replay<R> {
                 ingress: &inputs.ingress,
                 blobs: &blobs,
             },
-            &observe,
+            &self.observe,
         );
         let tick = inputs.tick.0;
+        let mut work = BTreeMap::new();
+        if let (Some(before), Some(after)) = (work_before, self.engine.rows_examined_by_rule()) {
+            for (rule, n) in after {
+                let d = n - before.get(&rule).copied().unwrap_or(0);
+                if d > 0 {
+                    work.insert(rule, d);
+                }
+            }
+        }
         match (result, outcome) {
             (Ok(out), Some(Ok(digest))) => {
                 let replayed = outcome_digest(&out.changes, &out.outbox, &out.egress, &out.host);
@@ -261,6 +302,9 @@ impl<R: Read> Replay<R> {
                     inputs,
                     changes: Some(out.changes),
                     failed: None,
+                    sent: out.outbox.into_iter().collect(),
+                    observed: out.observed,
+                    work,
                     examined,
                 }))
             }
@@ -270,6 +314,9 @@ impl<R: Read> Replay<R> {
                     inputs,
                     changes: Some(out.changes),
                     failed: None,
+                    sent: out.outbox.into_iter().collect(),
+                    observed: out.observed,
+                    work,
                     examined,
                 }))
             }
@@ -281,6 +328,9 @@ impl<R: Read> Replay<R> {
                 inputs,
                 changes: None,
                 failed: Some(error),
+                sent: Vec::new(),
+                observed: BTreeMap::new(),
+                work,
                 examined,
             })),
             (Err(e), _) => Err(ReplayError::Diverged {
