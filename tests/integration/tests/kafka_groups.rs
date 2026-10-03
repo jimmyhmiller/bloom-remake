@@ -14,7 +14,7 @@
 //!   and every replica of an offsets partition holds the same committed offsets.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -185,6 +185,8 @@ enum Phase {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Req {
+    /// An OffsetCommit for the group "" (refused, INVALID_GROUP_ID per partition, and never left waiting).
+    BadCommit,
     Create,
     Find,
     Join,
@@ -248,8 +250,18 @@ struct Member {
     closing: bool,
     buf: Vec<u8>,
     corr: i32,
-    /// The request in flight: what it is, when it was sent, when it is given up, and a commit's offsets.
-    pending: Option<InFlight>,
+    /// The requests in flight, in order (answers come in order): what each is, when it was sent, when it is given up,
+    /// and a commit's offsets.
+    pending: VecDeque<InFlight>,
+    /// The highest offset per partition acknowledged on this connection: a fetch answered after them was asked after
+    /// them, on the same connection, and Kafka answers a connection's requests in order.
+    conn_acked: BTreeMap<i32, i64>,
+    /// Sends each OffsetCommit with an OffsetFetch right behind it on the connection (a client that pipelines): the
+    /// fetch is answered just after the commit. Its commits also name their first partition twice (the last value
+    /// wins).
+    pipeline: bool,
+    /// Whether this member has sent its OffsetCommit for the group "" (the observer does, once).
+    bad_sent: bool,
     next_beat: i64,
     next_commit: i64,
     next_fetch: i64,
@@ -282,7 +294,10 @@ impl Member {
             closing: false,
             buf: Vec::new(),
             corr: 0,
-            pending: None,
+            pending: VecDeque::new(),
+            conn_acked: BTreeMap::new(),
+            pipeline: false,
+            bad_sent: false,
             next_beat: 0,
             next_commit: 0,
             next_fetch: 0,
@@ -319,7 +334,7 @@ impl Member {
     }
 
     fn step(&mut self, now: i64, a: &mut StreamAction) {
-        if self.phase == Phase::Gone || self.closing || self.pending.is_some() || now < self.start {
+        if self.phase == Phase::Gone || self.closing || !self.pending.is_empty() || now < self.start {
             return;
         }
         if let Some(t) = self.die_at
@@ -466,10 +481,35 @@ impl Member {
                 );
             }
             Phase::Steady => {
-                if now >= self.next_commit && !self.owned.is_empty() && now < QUIET_AT {
+                if self.observer && !self.bad_sent {
+                    self.bad_sent = true;
+                    let req = OffsetCommitRequest::default()
+                        .with_group_id(GroupId(sb("")))
+                        .with_generation_id_or_member_epoch(-1)
+                        .with_topics(vec![
+                            OffsetCommitRequestTopic::default()
+                                .with_name(TopicName(sb(TOPIC)))
+                                .with_partitions(vec![
+                                    OffsetCommitRequestPartition::default()
+                                        .with_partition_index(0)
+                                        .with_committed_offset(1),
+                                ]),
+                        ]);
+                    self.send(
+                        now,
+                        a,
+                        Req::BadCommit,
+                        framed(8, 9, self.corr + 1, &req),
+                        REQUEST_TIMEOUT,
+                        Vec::new(),
+                    );
+                } else if now >= self.next_commit && !self.owned.is_empty() && now < QUIET_AT {
                     // Offsets that only grow: the time in milliseconds, so a later commit always carries more.
                     let offset = now / MS;
-                    let parts: Vec<(i32, i64)> = self.owned.iter().map(|p| (*p, offset)).collect();
+                    let mut parts: Vec<(i32, i64)> = self.owned.iter().map(|p| (*p, offset)).collect();
+                    if self.pipeline {
+                        parts.insert(0, (self.owned[0], offset - 1));
+                    }
                     let req = OffsetCommitRequest::default()
                         .with_group_id(GroupId(sb(GROUP)))
                         .with_generation_id_or_member_epoch(self.generation)
@@ -503,41 +543,19 @@ impl Member {
                         REQUEST_TIMEOUT,
                         parts,
                     );
+                    if self.pipeline {
+                        let f = self.fetch_frame();
+                        self.send(now, a, Req::Fetch, f, REQUEST_TIMEOUT, Vec::new());
+                    }
                 } else if now >= self.next_fetch {
-                    let all: Vec<i32> = (0..PARTITIONS).collect();
-                    let req = if self.v.fetch >= 8 {
-                        OffsetFetchRequest::default().with_groups(vec![
-                            OffsetFetchRequestGroup::default()
-                                .with_group_id(GroupId(sb(GROUP)))
-                                .with_topics(Some(vec![
-                                    OffsetFetchRequestTopics::default()
-                                        .with_name(TopicName(sb(TOPIC)))
-                                        .with_partition_indexes(all),
-                                ])),
-                        ])
-                    } else {
-                        OffsetFetchRequest::default()
-                            .with_group_id(GroupId(sb(GROUP)))
-                            .with_topics(Some(vec![
-                                OffsetFetchRequestTopic::default()
-                                    .with_name(TopicName(sb(TOPIC)))
-                                    .with_partition_indexes(all),
-                            ]))
-                    };
                     self.next_fetch = now
                         + if self.observer {
                             50 * MS
                         } else {
                             400 * MS + self.rng.below(300) as i64 * MS
                         };
-                    self.send(
-                        now,
-                        a,
-                        Req::Fetch,
-                        framed(9, self.v.fetch, self.corr + 1, &req),
-                        REQUEST_TIMEOUT,
-                        Vec::new(),
-                    );
+                    let f = self.fetch_frame();
+                    self.send(now, a, Req::Fetch, f, REQUEST_TIMEOUT, Vec::new());
                 } else if now >= self.next_beat && !self.observer {
                     let req = HeartbeatRequest::default()
                         .with_group_id(GroupId(sb(GROUP)))
@@ -578,8 +596,33 @@ impl Member {
 
     fn send(&mut self, now: i64, a: &mut StreamAction, r: Req, frame: Vec<u8>, timeout: i64, parts: Vec<(i32, i64)>) {
         self.corr += 1;
-        a.send = frame;
-        self.pending = Some((r, now, now + timeout, parts));
+        a.send.extend_from_slice(&frame);
+        self.pending.push_back((r, now, now + timeout, parts));
+    }
+
+    /// An OffsetFetch of every partition of the topic, at this member's version.
+    fn fetch_frame(&self) -> Vec<u8> {
+        let all: Vec<i32> = (0..PARTITIONS).collect();
+        let req = if self.v.fetch >= 8 {
+            OffsetFetchRequest::default().with_groups(vec![
+                OffsetFetchRequestGroup::default()
+                    .with_group_id(GroupId(sb(GROUP)))
+                    .with_topics(Some(vec![
+                        OffsetFetchRequestTopics::default()
+                            .with_name(TopicName(sb(TOPIC)))
+                            .with_partition_indexes(all),
+                    ])),
+            ])
+        } else {
+            OffsetFetchRequest::default()
+                .with_group_id(GroupId(sb(GROUP)))
+                .with_topics(Some(vec![
+                    OffsetFetchRequestTopic::default()
+                        .with_name(TopicName(sb(TOPIC)))
+                        .with_partition_indexes(all),
+                ]))
+        };
+        framed(9, self.v.fetch, self.corr + 1, &req)
     }
 
     fn answered(
@@ -739,6 +782,8 @@ impl Member {
                     }
                     if *e == NONE {
                         sh.acked.entry(*p).or_default().push((sent, now, *o));
+                        let best = self.conn_acked.entry(*p).or_insert(*o);
+                        *best = (*best).max(*o);
                     } else {
                         worst = *e;
                     }
@@ -786,12 +831,24 @@ impl Member {
                             .collect(),
                     )
                 };
+                // Before v2 a group-level error comes in every partition asked for.
+                let e = if e == NONE && self.v.fetch < 2 {
+                    parts.first().map_or(NONE, |p| p.2)
+                } else {
+                    e
+                };
                 if coordinator_moved(e) {
                     self.refind(a);
                     return Ok(());
                 }
                 if e != NONE {
                     return Err(format!("OffsetFetch answered {e}"));
+                }
+                if parts.len() != PARTITIONS as usize {
+                    return Err(format!(
+                        "OffsetFetch answered {} partitions of {PARTITIONS}",
+                        parts.len()
+                    ));
                 }
                 let mut sh = self.shared.borrow_mut();
                 sh.fetches += 1;
@@ -808,6 +865,7 @@ impl Member {
                         .filter(|(_, answered, _)| *answered < sent)
                         .map(|(_, _, off)| *off)
                         .max();
+                    let floor = floor.max(self.conn_acked.get(&p).copied());
                     if let Some(f) = floor
                         && o < f
                     {
@@ -820,6 +878,19 @@ impl Member {
                             "partition {p}: OffsetFetch returned {o}, which no commit carried"
                         ));
                     }
+                }
+            }
+            Req::BadCommit => {
+                let m = decode!(OffsetCommitResponse, 9);
+                let errors: Vec<i16> = m
+                    .topics
+                    .iter()
+                    .flat_map(|t| t.partitions.iter().map(|p| p.error_code))
+                    .collect();
+                if errors != vec![24] {
+                    return Err(format!(
+                        "an OffsetCommit for the group \"\" answered {errors:?}, not INVALID_GROUP_ID"
+                    ));
                 }
             }
             Req::Leave => {
@@ -853,10 +924,16 @@ impl StreamClient for Member {
         let mut a = StreamAction::default();
         match e {
             StreamEvent::Wake => {
-                if let Some((_, _, deadline, _)) = self.pending
-                    && now >= deadline
+                if let Some((r, _, deadline, _)) = self.pending.front()
+                    && now >= *deadline
                 {
-                    self.pending = None;
+                    if *r == Req::BadCommit {
+                        return Err(format!(
+                            "member {}: an OffsetCommit for the group \"\" was never answered",
+                            self.me
+                        ));
+                    }
+                    self.pending.clear();
                     self.refind(&mut a);
                 }
                 self.step(now, &mut a);
@@ -871,32 +948,32 @@ impl StreamClient for Member {
                     return Ok(a);
                 }
                 self.buf.extend_from_slice(b);
-                let Some(n) = self
+                // Every complete answer, in order (a pipelining member has two in flight).
+                while let Some(n) = self
                     .buf
                     .get(..4)
                     .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
-                else {
-                    return Ok(a);
-                };
-                if self.buf.len() < 4 + n {
-                    return Ok(a);
+                {
+                    if self.buf.len() < 4 + n || a.close {
+                        break;
+                    }
+                    let body = Bytes::copy_from_slice(&self.buf[4..4 + n]);
+                    self.buf.drain(..4 + n);
+                    let Some((r, sent, _, parts)) = self.pending.pop_front() else {
+                        return Err("a response with no request in flight".into());
+                    };
+                    self.answered(now, r, sent, parts, body, &mut a)
+                        .map_err(|x| format!("member {}: {x}", self.me))?;
                 }
-                if self.buf.len() > 4 + n {
-                    return Err("more than one response to one request".into());
+                if !a.close && self.pending.is_empty() && !self.buf.is_empty() {
+                    return Err("more answers than requests".into());
                 }
-                let body = Bytes::copy_from_slice(&self.buf[4..]);
-                self.buf.clear();
-                let Some((r, sent, _, parts)) = self.pending.take() else {
-                    return Err("a response with no request in flight".into());
-                };
-                self.answered(now, r, sent, parts, body, &mut a)
-                    .map_err(|x| format!("member {}: {x}", self.me))?;
                 if !a.close {
                     self.step(now, &mut a);
                 }
             }
             StreamEvent::Closed(_) => {
-                if self.pending.is_some() || !self.closing {
+                if !self.pending.is_empty() || !self.closing {
                     // A lost connection: the coordinator may have moved (a parked JoinGroup or SyncGroup is lost too).
                     if self.phase != Phase::Gone && self.phase != Phase::Create {
                         if self.phase == Phase::Steady || self.phase == Phase::Sync {
@@ -908,7 +985,8 @@ impl StreamClient for Member {
                         }
                     }
                 }
-                self.pending = None;
+                self.pending.clear();
+                self.conn_acked.clear();
                 self.conn = None;
                 self.open = false;
                 self.closing = false;
@@ -1006,6 +1084,11 @@ fn check_groups(seeds: std::ops::RangeInclusive<u64>, faults: bool, lagging: boo
         for (me, start) in [(0u64, 300), (1, 800), (2, 2500), (3, 4000), (4, 1000)] {
             let mut m = Member::new(me, seed, shared.clone(), brokers.clone(), start * MS);
             m.observer = me == 4;
+            if me == 4 {
+                // OffsetFetch v1: no group-level error field (an error comes in each partition).
+                m.v = Versions { fetch: 1, ..LATEST };
+            }
+            m.pipeline = me == 3;
             if me == 1 {
                 m.leave_at = Some(7000 * MS);
             }
