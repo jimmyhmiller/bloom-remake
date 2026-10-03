@@ -332,6 +332,34 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &[Option<Value>], f: LibFn, args: &[Exp
             }
             Ok(Value::Vec(out.into()))
         }
+        LibFn::VecScanWhile => {
+            // As `scan`: the initial value is evaluated at the first element, or after an empty receiver.
+            let c = Closure::of(expr(2)?)?;
+            let mut acc: Option<Value> = None;
+            let mut started = false;
+            let mut out = Vec::new();
+            each(cx, env, expr(0)?, |x| {
+                let prev = match acc.take() {
+                    Some(a) => a,
+                    None => value(1)?,
+                };
+                started = true;
+                match c.call(cx, env, &[prev, x])? {
+                    Value::Option(Some(next)) => {
+                        let next = (*next).clone();
+                        out.push(next.clone());
+                        acc = Some(next);
+                        Ok(true)
+                    }
+                    Value::Option(None) => Ok(false),
+                    other => Err(bug(format!("a scan_while step returned {other:?}"))),
+                }
+            })?;
+            if !started {
+                value(1)?;
+            }
+            Ok(Value::Vec(out.into()))
+        }
         LibFn::VecToSet => Ok(Value::Set(Arc::new(vector(0)?.iter().cloned().collect()))),
         LibFn::VecToMap => {
             let mut m = std::collections::BTreeMap::new();

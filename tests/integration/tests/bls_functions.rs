@@ -170,6 +170,29 @@ fn expected(view: &str, n: u64, s: &str, b: &[u8]) -> (Value, Value) {
             ),
         ),
         "v_range" => (u(n), u(n + 1)),
+        "v_upto" => {
+            let mut sums = Vec::new();
+            let mut acc = 0;
+            for i in 0.. {
+                if acc + i > n {
+                    break;
+                }
+                acc += i;
+                sums.push(acc);
+            }
+            (u(n), vec_u(sums))
+        }
+        "v_prefix" => {
+            let (mut count, mut sum) = (0u64, 0u64);
+            for x in b {
+                if sum + u64::from(*x) > 300 {
+                    break;
+                }
+                sum += u64::from(*x);
+                count += 1;
+            }
+            (bytes(b), tuple(vec![u(count), u(sum)]))
+        }
         "v_parse" => (
             Value::Str(s.into()),
             tuple(vec![
@@ -270,6 +293,8 @@ const VIEWS: &[&str] = &[
     "v_defaults",
     "v_classify",
     "v_range",
+    "v_upto",
+    "v_prefix",
     "v_arms",
     "v_parse",
     "v_hash",

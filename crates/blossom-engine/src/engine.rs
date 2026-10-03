@@ -25,7 +25,7 @@ use blossom_ir::core::{
 };
 use blossom_ir::obs::ProgramErrorRecord;
 use blossom_ir::tick::{
-    Changes, Egress, EvalError, Instance, Row, Send, StepInput, StepOutput, TickInput, TickOutput,
+    Changes, Egress, EvalError, Instance, Row, Send, RuleWork, StepInput, StepOutput, TickInput, TickOutput,
 };
 use blossom_lattice::Kind;
 use blossom_value::time::{NodeId, Tick};
@@ -90,8 +90,8 @@ pub struct Engine {
     unsettled: BTreeSet<StoreKey>,
     /// Rows the atom probes returned since the engine was created: the join work, measured without a clock.
     examined: u64,
-    /// The same, per rule.
-    examined_by: BTreeMap<RuleId, u64>,
+    /// The work of each rule (rows examined, expression nodes evaluated).
+    examined_by: BTreeMap<RuleId, RuleWork>,
     /// The blobs the current tick created (`Blob::of`), with their bytes.
     new_blobs: std::cell::RefCell<BTreeMap<blossom_value::BlobRef, Arc<[u8]>>>,
 }
@@ -647,6 +647,7 @@ impl Engine {
             now: input.now,
             shared: &self.shared,
             fuel: crate::expr::Fuel::default(),
+            steps: std::cell::Cell::new(0),
             blobs: input.blobs,
             new_blobs: &self.new_blobs,
         }
@@ -668,7 +669,7 @@ impl Engine {
                     return Ok(());
                 }
                 let terms = self.evaluate(p, input, rule, &plan, false)?;
-                self.count(rule.id, terms.examined);
+                self.count(rule.id, terms.examined, terms.steps);
                 self.apply(p, input, rule, &plan, terms)
             }
         }
@@ -844,6 +845,7 @@ impl Engine {
                 }
             }
         }
+        out.steps = cx.steps.get();
         Ok(out)
     }
 
@@ -924,7 +926,7 @@ impl Engine {
     /// A recompute rule: evaluated in full, its change is the difference from its last output.
     fn recompute_rule(&mut self, p: &Program, input: &StepInput<'_>, rule: &Rule, plan: &Plan) -> Result<(), EvalError> {
         let terms = self.evaluate(p, input, rule, plan, true)?;
-        self.count(rule.id, terms.examined);
+        self.count(rule.id, terms.examined, terms.steps);
         let tick = input.tick;
         if let Some((_, (_, Some(e)))) = terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
             return Err(to_eval(e, tick, Some(rule)));
@@ -1024,7 +1026,7 @@ impl Engine {
                 let plan = self.plans.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?.clone();
                 let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
                 let terms = self.evaluate(p, input, rule, &plan, true)?;
-                self.count(rule.id, terms.examined);
+                self.count(rule.id, terms.examined, terms.steps);
                 if let Some((_, (_, Some(e)))) = terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
                     if strict {
                         return Err(to_eval(e, tick, Some(rule)));
@@ -1137,7 +1139,7 @@ impl Engine {
                 let plan = self.plans.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?.clone();
                 let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
                 let terms = self.evaluate(p, input, rule, &plan, true)?;
-                self.count(rule.id, terms.examined);
+                self.count(rule.id, terms.examined, terms.steps);
                 return match terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
                     Some((_, (_, Some(e)))) => Err(to_eval(e, tick, Some(rule))),
                     _ => Err(internal_error!("rule {id:?} raised during the iteration and not at its fixpoint").into()),
@@ -1177,7 +1179,7 @@ impl Engine {
                         self.run_drivers(p, input, rule, &plan, drivers)?
                     }
                 };
-                self.count(rule.id, terms.examined);
+                self.count(rule.id, terms.examined, terms.steps);
                 if terms.errors.values().any(|(n, _)| *n > 0) {
                     raised.insert(*id);
                     continue;
@@ -1328,15 +1330,18 @@ impl Engine {
         self.examined
     }
 
-    /// [`Engine::rows_examined`] per rule (the rules that examined any).
-    pub fn rows_examined_by_rule(&self) -> &BTreeMap<RuleId, u64> {
+    /// The work of each rule since the engine was created (the rules that did any): rows examined, as
+    /// [`Engine::rows_examined`], and expression nodes evaluated.
+    pub fn work_by_rule(&self) -> &BTreeMap<RuleId, RuleWork> {
         &self.examined_by
     }
 
-    fn count(&mut self, rule: RuleId, examined: u64) {
+    fn count(&mut self, rule: RuleId, examined: u64, steps: u64) {
         self.examined += examined;
-        if examined > 0 {
-            *self.examined_by.entry(rule).or_insert(0) += examined;
+        if examined > 0 || steps > 0 {
+            let w = self.examined_by.entry(rule).or_default();
+            w.rows += examined;
+            w.steps += steps;
         }
     }
 
@@ -1348,8 +1353,9 @@ impl Engine {
 /// A rule's evaluated change: head rows (or aggregate tuples) with signed weights, and runtime errors per valuation.
 #[derive(Default)]
 struct Terms {
-    /// The rows its atom probes returned (the work it did).
+    /// The rows its atom probes returned, and the expression nodes it evaluated (the work it did).
     examined: u64,
+    steps: u64,
     heads: BTreeMap<Row, i64>,
     aggs: BTreeMap<(Vec<Value>, usize, Vec<Value>), i64>,
     errors: BTreeMap<Token, (i64, Option<ExprError>)>,

@@ -3432,6 +3432,7 @@ impl Checker<'_> {
             (Shape::Vec(_), _, "any") => (Builtin::Lib(LibFn::VecAny), Some(0), 1),
             (Shape::Vec(_), _, "fold") => (Builtin::Lib(LibFn::VecFold), Some(1), 2),
             (Shape::Vec(_), _, "scan") => (Builtin::Lib(LibFn::VecScan), Some(1), 2),
+            (Shape::Vec(_), _, "scan_while") => (Builtin::Lib(LibFn::VecScanWhile), Some(1), 2),
             (Shape::Vec(_), _, "to_set") => (Builtin::Lib(LibFn::VecToSet), None, 0),
             (Shape::Vec(_), _, "to_map") => (Builtin::Lib(LibFn::VecToMap), None, 0),
             (Shape::Map(..), _, "get") => (Builtin::Lib(LibFn::MapGet), None, 1),
@@ -3607,6 +3608,19 @@ impl Checker<'_> {
                         let acc = self.fresh(false);
                         self.flow(init, acc, false, span);
                         self.flow(b, acc, false, span);
+                        self.unify_params(hir, &ps, &[acc, e], span);
+                        self.bound(Shape::Vec(acc))
+                    }
+                    LibFn::VecScanWhile => {
+                        let Some((ps, b)) = closure(self, 2) else {
+                            return Some(true);
+                        };
+                        let Some(init) = a0 else { return Some(true) };
+                        // The accumulator holds the initial value and every step's result, which comes in an option.
+                        let acc = self.fresh(false);
+                        self.flow(init, acc, false, span);
+                        let step = self.bound(Shape::Option(acc));
+                        self.unify(&hir.types, b, step, span);
                         self.unify_params(hir, &ps, &[acc, e], span);
                         self.bound(Shape::Vec(acc))
                     }

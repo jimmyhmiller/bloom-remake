@@ -8,7 +8,8 @@
 //! - `history`: every tick a relation's rows matching a pattern changed: a table's rows added or removed (for the
 //!   next tick), a channel's messages received (`<-`) and sent (`->`), an event's rows (`!`), and when a view's rows
 //!   start and stop holding.
-//! - `profile`: the rules that did the most join work at a tick (`replay --slow` finds the slow ticks).
+//! - `profile`: the rules that did the most join work at a tick, or over the whole trace (`replay --slow` finds the
+//!   slow ticks).
 //! - `why`: the rule firings that derived the rows matching a pattern at a tick.
 //! - `whynot`: for each rule that could derive a tuple matching a pattern, how far its body got at a tick, and the
 //!   first literal no valuation passed (ask again about that literal's relation to go deeper).
@@ -28,7 +29,7 @@ use blossom_artifact::bls::BlsArtifact;
 use blossom_base::{RelId, RuleId, TypeId};
 use blossom_ir::core::{Persistence, Program, RelClass};
 use blossom_ir::printer::{literal_text, rule_text, value_text, var_text};
-use blossom_ir::tick::Row;
+use blossom_ir::tick::{Row, RuleWork};
 use blossom_sim::replay::{Replay, ReplayError, Replayed};
 use blossom_value::time::NodeId;
 use blossom_value::value::IntValue;
@@ -91,9 +92,9 @@ pub enum TraceCommand {
     Profile {
         #[command(flatten)]
         common: Common,
-        /// The tick.
+        /// The tick (without it: the whole trace, summed).
         #[arg(long)]
-        at: u64,
+        at: Option<u64>,
         /// How many rules to list.
         #[arg(long, default_value_t = 10)]
         top: usize,
@@ -177,17 +178,22 @@ mod stopwatch {
 }
 use stopwatch::Stopwatch;
 
-/// The `top` rules that examined the most rows in the replayed tick `r` (profiled).
-fn print_work(names: &Names<'_>, r: &Replayed, top: usize) {
-    let total: u64 = r.work.values().sum();
-    let mut by: Vec<(RuleId, u64)> = r.work.iter().map(|(k, v)| (*k, *v)).collect();
-    by.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    println!("  {total} rows examined by {} rules", by.len());
+/// The `top` rules that did the most work in `work` (a profiled tick's, or a sum): by expression nodes evaluated
+/// plus rows examined, each a unit of the engine's work.
+fn print_work(names: &Names<'_>, work: &BTreeMap<RuleId, RuleWork>, top: usize) {
+    let (rows, steps) = work.values().fold((0u64, 0u64), |(r, s), w| (r + w.rows, s + w.steps));
+    let mut by: Vec<(RuleId, RuleWork)> = work.iter().map(|(k, v)| (*k, *v)).collect();
+    by.sort_by(|a, b| (b.1.rows + b.1.steps).cmp(&(a.1.rows + a.1.steps)).then(a.0.cmp(&b.0)));
+    println!(
+        "  {rows} rows examined, {steps} expression steps, by {} rules",
+        by.len()
+    );
+    println!("  {:>12}  {:>12}", "steps", "rows");
     let program = names.program();
-    for (id, n) in by.into_iter().take(top) {
+    for (id, w) in by.into_iter().take(top) {
         let Some(rule) = program.rules.get(id) else { continue };
-        println!("  {n:>12}  {} ({:?})", rule.label, rule.kind);
-        println!("                {}", rule_text(program, rule));
+        println!("  {:>12}  {:>12}  {} ({:?})", w.steps, w.rows, rule.label, rule.kind);
+        println!("                              {}", rule_text(program, rule));
     }
 }
 
@@ -473,7 +479,7 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
                     before = Some((t, now));
                     if took >= ms {
                         println!("tick {t}: replayed in {took} ms; {}", received(&names, &r));
-                        print_work(&names, &r, 3);
+                        print_work(&names, &r.work, 3);
                     }
                 }
                 ticks += 1;
@@ -611,7 +617,29 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
             }
             Ok(())
         }
-        TraceCommand::Profile { common, at, top } => {
+        TraceCommand::Profile { common, at: None, top } => {
+            let (artifact, mut replay) = open(&common)?;
+            let names = Names { artifact: &artifact };
+            replay.profile(true).map_err(err)?;
+            let mut work: BTreeMap<RuleId, RuleWork> = BTreeMap::new();
+            let mut ticks = 0u64;
+            while let Some(r) = replay.next(false).map_err(err)? {
+                ticks += 1;
+                for (rule, n) in r.work {
+                    let w = work.entry(rule).or_default();
+                    w.rows += n.rows;
+                    w.steps += n.steps;
+                }
+            }
+            println!("{ticks} ticks");
+            print_work(&names, &work, top);
+            Ok(())
+        }
+        TraceCommand::Profile {
+            common,
+            at: Some(at),
+            top,
+        } => {
             let (artifact, mut replay) = open(&common)?;
             let names = Names { artifact: &artifact };
             loop {
@@ -633,7 +661,7 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
                 names.value(&Value::Instant(r.inputs.now), None),
                 received(&names, &r)
             );
-            print_work(&names, &r, top);
+            print_work(&names, &r.work, top);
             Ok(())
         }
         TraceCommand::Why { common, at, pattern } => {

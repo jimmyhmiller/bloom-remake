@@ -13,7 +13,9 @@ use std::sync::Arc;
 
 use blossom_artifact::bls::BlsArtifact;
 use blossom_base::{RelId, RuleId};
-use blossom_ir::tick::{Changes, Delivery, EvalError, Ingress, Instance, Row, Send, StepInput, TickInput, TickOutput};
+use blossom_ir::tick::{
+    Changes, Delivery, EvalError, Ingress, Instance, Row, RuleWork, Send, StepInput, TickInput, TickOutput,
+};
 use blossom_node::{Backend, Executor, Executors};
 use blossom_oracle::Oracle;
 use blossom_trace::node::{NodeRecord, NodeTraceHeader, TraceError, TraceReader, outcome_digest};
@@ -59,8 +61,9 @@ pub struct Replayed {
     pub sent: Vec<Send>,
     /// The rows at the end of the tick of the relations observed ([`Replay::observe`]).
     pub observed: BTreeMap<RelId, Vec<Row>>,
-    /// The join work of each rule in the tick, in rows examined, when profiling ([`Replay::profile`]).
-    pub work: BTreeMap<RuleId, u64>,
+    /// The work of each rule in the tick (rows examined, expression nodes evaluated), when profiling
+    /// ([`Replay::profile`]).
+    pub work: BTreeMap<RuleId, RuleWork>,
     /// The tick run by the oracle from the same state, when asked for ([`Replay::next`] with `examine`).
     pub examined: Option<TickOutput>,
 }
@@ -141,7 +144,7 @@ impl<R: Read> Replay<R> {
 
     /// Reports each rule's join work in every tick replayed from now on ([`Replayed::work`]).
     pub fn profile(&mut self, on: bool) -> Result<(), ReplayError> {
-        if on && self.engine.rows_examined_by_rule().is_none() {
+        if on && self.engine.work_by_rule().is_none() {
             return Err(ReplayError::Order(
                 "the replaying executor does not measure its work".into(),
             ));
@@ -260,11 +263,7 @@ impl<R: Read> Replay<R> {
         } else {
             None
         };
-        let work_before = if self.profile {
-            self.engine.rows_examined_by_rule()
-        } else {
-            None
-        };
+        let work_before = if self.profile { self.engine.work_by_rule() } else { None };
         let result = self.engine.step(
             &StepInput {
                 node: self.node,
@@ -280,10 +279,14 @@ impl<R: Read> Replay<R> {
         );
         let tick = inputs.tick.0;
         let mut work = BTreeMap::new();
-        if let (Some(before), Some(after)) = (work_before, self.engine.rows_examined_by_rule()) {
+        if let (Some(before), Some(after)) = (work_before, self.engine.work_by_rule()) {
             for (rule, n) in after {
-                let d = n - before.get(&rule).copied().unwrap_or(0);
-                if d > 0 {
+                let b = before.get(&rule).copied().unwrap_or_default();
+                let d = RuleWork {
+                    rows: n.rows - b.rows,
+                    steps: n.steps - b.steps,
+                };
+                if d != RuleWork::default() {
                     work.insert(rule, d);
                 }
             }

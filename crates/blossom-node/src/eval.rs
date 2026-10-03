@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 
 use blossom_base::{RelId, RuleId};
-use blossom_ir::tick::{Changes, EvalError, Instance, Row, StepInput, StepOutput, TickInput, TickOutput};
+use blossom_ir::tick::{Changes, EvalError, Instance, Row, RuleWork, StepInput, StepOutput, TickInput, TickOutput};
 use blossom_oracle::Oracle;
 
 /// Runs one node's tick from an explicit carried state (the reference interface).
@@ -51,8 +51,8 @@ pub trait Executor: Send {
     fn carried(&self) -> Instance;
     /// The join work done so far, in rows examined, if the executor measures it.
     fn rows_examined(&self) -> Option<u64>;
-    /// The same per rule (the rules that examined any), if the executor measures it.
-    fn rows_examined_by_rule(&self) -> Option<BTreeMap<RuleId, u64>>;
+    /// The work of each rule so far (rows examined, expression nodes evaluated), if the executor measures it.
+    fn work_by_rule(&self) -> Option<BTreeMap<RuleId, RuleWork>>;
     /// Whether a row the executor keeps beyond its carried state holds `b`: a blob it may still copy into a durable
     /// row or a request without creating it again. (The node counts the carried rows' blobs itself, from each tick's
     /// changes.)
@@ -122,7 +122,7 @@ impl<E: Evaluator> Executor for OracleExecutor<E> {
         None
     }
 
-    fn rows_examined_by_rule(&self) -> Option<BTreeMap<RuleId, u64>> {
+    fn work_by_rule(&self) -> Option<BTreeMap<RuleId, RuleWork>> {
         None
     }
 
@@ -156,8 +156,8 @@ impl<X: Executor + ?Sized> Executor for Box<X> {
         (**self).rows_examined()
     }
 
-    fn rows_examined_by_rule(&self) -> Option<BTreeMap<RuleId, u64>> {
-        (**self).rows_examined_by_rule()
+    fn work_by_rule(&self) -> Option<BTreeMap<RuleId, RuleWork>> {
+        (**self).work_by_rule()
     }
 
     fn holds_blob(&self, b: &blossom_value::BlobRef) -> bool {
@@ -186,8 +186,8 @@ impl Executor for blossom_engine::Engine {
         Some(blossom_engine::Engine::rows_examined(self))
     }
 
-    fn rows_examined_by_rule(&self) -> Option<BTreeMap<RuleId, u64>> {
-        Some(blossom_engine::Engine::rows_examined_by_rule(self).clone())
+    fn work_by_rule(&self) -> Option<BTreeMap<RuleId, RuleWork>> {
+        Some(blossom_engine::Engine::work_by_rule(self).clone())
     }
 
     fn holds_blob(&self, b: &blossom_value::BlobRef) -> bool {

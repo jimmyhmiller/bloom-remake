@@ -297,6 +297,23 @@ pub(crate) fn lib(scope: &Scope<'_>, env: &[Option<Value>], f: LibFn, args: &[Ex
             }
             Value::Vec(out.into())
         }
+        LibFn::VecScanWhile => {
+            let s = seq(scope, env, arg(0)?)?;
+            let mut acc = val(1)?;
+            let c = arg(2)?;
+            let mut out = Vec::new();
+            for x in s.iter() {
+                match apply(scope, env, c, vec![acc, x])? {
+                    Value::Option(Some(next)) => {
+                        acc = (*next).clone();
+                        out.push(acc.clone());
+                    }
+                    Value::Option(None) => break,
+                    other => return Err(bug(format!("a scan_while step returned {other:?}"))),
+                }
+            }
+            Value::Vec(out.into())
+        }
         LibFn::VecToSet => Value::Set(Arc::new(vec_of(val(0)?)?.iter().cloned().collect())),
         LibFn::VecToMap => {
             let mut m = std::collections::BTreeMap::new();

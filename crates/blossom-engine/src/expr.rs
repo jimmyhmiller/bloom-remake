@@ -76,6 +76,8 @@ pub(crate) struct Ctx<'a> {
     pub shared: &'a Shared,
     /// The step budget of the function evaluation in progress (BLSR012).
     pub fuel: Fuel,
+    /// The expression nodes evaluated with this context (the work measure of `Engine::work_by_rule`).
+    pub steps: std::cell::Cell<u64>,
     /// The bytes of blobs created before this tick.
     pub blobs: &'a dyn blossom_value::BlobSource,
     /// The blobs this tick created, with their bytes.
@@ -200,6 +202,7 @@ macro_rules! unimplemented {
 }
 
 pub(crate) fn eval(cx: &Ctx<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<Value> {
+    cx.steps.set(cx.steps.get().wrapping_add(1));
     match e {
         Expr::Term(t) => term(cx, env, t),
         Expr::Param(p) => param(cx, *p),
