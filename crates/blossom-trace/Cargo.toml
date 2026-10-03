@@ -10,6 +10,10 @@ publish.workspace = true
 blossom-base.workspace = true
 blossom-value.workspace = true
 blossom-ir.workspace = true
+serde.workspace = true
+postcard.workspace = true
+blake3.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

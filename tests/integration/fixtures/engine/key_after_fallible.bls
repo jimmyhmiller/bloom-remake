@@ -1,0 +1,15 @@
+//! A binding that could key a probe (`let k = x + 1`, then `t(k, b)`), after a guard that can fail: the guard runs
+//! first (LANGUAGE §9.14), on every row of `t`, so a row whose `b` is 0 raises its division by zero although the
+//! binding would reject it. Probing `t` on `k` early would skip that row and its error.
+program key_after_fallible version 1;
+
+input put(a: u64);
+input go(x: u64);
+
+table t(a: u64, b: u64);
+
+p: on put(a) {
+    emit t(a, a);
+}
+
+view out(x, b) = go(x), let k = x + 1u64, t(k, b) where 10u64 / b > 0u64;

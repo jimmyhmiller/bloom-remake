@@ -1170,8 +1170,10 @@ fn admin_requests_through_any_of_three_brokers_are_linearizable() {
         unanswered > 0,
         "no request was left unanswered: the faults did not bite"
     );
+    // Whether some seed's faults kept the controller away for a whole request timeout is a property of the full
+    // tier's eight seeds; one seed (the fast tier) may well not.
     assert!(
-        timeouts > 0,
+        !blossom_integration_tests::full_tier() || timeouts > 0,
         "no request timed out: the controller was never unavailable long enough"
     );
 }

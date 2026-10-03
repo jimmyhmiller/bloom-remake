@@ -74,14 +74,15 @@ fn known_topic(t: TopicInfo, ops: bool) -> MetadataTopic {
         epoch: p.epoch, replicas: p.replicas, isr: p.isr, offline: [],
     });
     MetadataTopic {
-        error: NONE, name: Some(t.name), id: t.id, internal: false, partitions: parts,
+        error: NONE, name: Some(t.name), id: t.id, internal: t.name == OFFSETS_TOPIC, partitions: parts,
         ops: if ops { TOPIC_OPERATIONS } else { NO_OPERATIONS },
     }
 }
 
 /// The names a Metadata request asks for by name that auto-creation would make, when the broker allows it
 /// (`enabled`, Kafka's `auto.create.topics.enable`) and so does the request: the legal names, less any whose
-/// collision key another requested name shares (creating one of them would refuse the others; none is created).
+/// collision key another requested name shares (creating one of them would refuse the others; none is created), and
+/// less `__consumer_offsets` (a FindCoordinator creates it, S9.md D2).
 /// The node leaves out the names of topics that exist.
 fn metadata_creates(req: MetadataRequest, enabled: bool) -> Vec<String> {
     match req.topics {
@@ -89,7 +90,7 @@ fn metadata_creates(req: MetadataRequest, enabled: bool) -> Vec<String> {
             if enabled && req.allow_auto_topic_creation && ts.all(|t| t.topic_id == zero_uuid()) {
                 let keyed = ts.filter_map(|t| t.name).map(|n| (collision_key(n), n));
                 let colliding = colliding_keys(keyed);
-                keyed.filter(|kn| topic_name_ok(kn.1) && not colliding.contains(kn.0)).map(|kn| kn.1)
+                keyed.filter(|kn| topic_name_ok(kn.1) && kn.1 != OFFSETS_TOPIC && not colliding.contains(kn.0)).map(|kn| kn.1)
             } else {
                 []
             }

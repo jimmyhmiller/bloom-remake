@@ -183,6 +183,10 @@ channel meta_want(point: u64): Broker -> Broker;
 /// A part of a broker's applied metadata at index `at` (`MetaSnapshot`, encoded), for a broker that asked for it
 /// (`meta_want`): part `k` of `n`, each at most `META_CHUNK` bytes, so a snapshot of any size travels in frames.
 channel meta_part(at: u64, k: u64, n: u64, chunk: Bytes): Broker -> Broker;
+/// A broker that took a snapshot point of an offsets partition asks for its committed offsets at or past the point
+/// (S9), and a replica that applied that far sends them in parts (as `meta_want` and `meta_part`).
+channel offsets_want(tid: Bytes, part: i32, point: u64): Broker -> Broker;
+channel offsets_chunk(tid: Bytes, part: i32, at: u64, k: u64, n: u64, chunk: Bytes): Broker -> Broker;
 /// A partition leader's announcement: the groups it leads, with their epochs and in-sync replicas (S8.md D7), and
 /// when it sent it (by its clock), which orders its announcements within one epoch.
 channel leads(gs: Vec<(Group, u64, Vec<i32>)>, at: Instant): Broker -> Broker;
@@ -587,6 +591,12 @@ at Broker {
         if heard_commit(g, c) {
             delete heard_commit(g, c);
         }
+        if stepped_down(g, t) {
+            delete stepped_down(g, t);
+        }
+        if prevoting(g, nt, round) {
+            delete prevoting(g, nt, round);
+        }
     }
 
     // ---- commands this broker waits on: sent when first wanted, and every `CMD_RESEND` until applied
@@ -634,6 +644,7 @@ at Broker {
         appendable_cmd(cmd), ctl(g), leader(g, _), let x = (CMD, -1i64, Blob::of(cmd));
         data_proposals(g, x);
         config_proposals(g, x);
+        offsets_proposals(g, x);
     }
 
     // ---- reassignment, at the partition's leader (item 5)
@@ -669,6 +680,9 @@ at Broker {
     }
     drop_unhosted_won: while unhosted(g), won(g, t) {
         delete won(g, t);
+    }
+    drop_unhosted_stepped_down: while unhosted(g), stepped_down(g, t) {
+        delete stepped_down(g, t);
     }
 
     // ---- who leads each partition, and its in-sync replicas (D7)

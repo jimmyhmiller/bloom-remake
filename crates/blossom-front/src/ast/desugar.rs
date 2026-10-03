@@ -24,7 +24,8 @@ pub(super) fn fn_body(item: &mut FnItem, diags: &mut Diagnostics) {
     if !has_try(&item.body) {
         return;
     }
-    let returns_option = matches!(&item.ret, Type::Named { path, .. } if path.last().is_some_and(|p| p.as_str() == "Option"));
+    let returns_option =
+        matches!(&item.ret, Type::Named { path, .. } if path.last().is_some_and(|p| p.as_str() == "Option"));
     if !returns_option {
         for span in try_spans(&item.body) {
             diags.push(
@@ -161,12 +162,13 @@ impl Desugar<'_> {
                     })
                     .collect(),
             ),
-            ExprKind::StructLit { path, fields } => ExprKind::StructLit {
+            ExprKind::StructLit { path, fields, base } => ExprKind::StructLit {
                 path,
                 fields: fields
                     .into_iter()
                     .map(|(n, v)| (n, v.map(|v| self.extract(v, binds))))
                     .collect(),
+                base: base.map(|x| Box::new(self.extract(*x, binds))),
             },
             ExprKind::If { cond, then, els } => {
                 let cond = Box::new(self.extract(*cond, binds));
@@ -232,7 +234,18 @@ impl Desugar<'_> {
 fn wrap(binds: Vec<(Ident, Expr)>, inner: Expr) -> Expr {
     binds.into_iter().rev().fold(inner, |body, (name, scrut)| {
         let span = scrut.span;
-        let path = |s: &str| Expr::new(ExprKind::Path(vec![Ident { name: Symbol::intern(s), span }], Vec::new()), span);
+        let path = |s: &str| {
+            Expr::new(
+                ExprKind::Path(
+                    vec![Ident {
+                        name: Symbol::intern(s),
+                        span,
+                    }],
+                    Vec::new(),
+                ),
+                span,
+            )
+        };
         let some = Expr::new(
             ExprKind::Call {
                 callee: Box::new(path("Some")),
@@ -313,7 +326,10 @@ fn collect(e: &Expr, out: &mut Vec<Span>) {
                 each(v);
             }
         }
-        ExprKind::StructLit { fields, .. } => fields.iter().filter_map(|(_, v)| v.as_ref()).for_each(each),
+        ExprKind::StructLit { fields, base, .. } => {
+            fields.iter().filter_map(|(_, v)| v.as_ref()).for_each(&mut each);
+            base.iter().for_each(|x| each(x));
+        }
         ExprKind::If { cond, then, els } => {
             each(cond);
             each(then);

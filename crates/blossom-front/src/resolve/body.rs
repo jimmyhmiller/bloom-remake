@@ -2074,7 +2074,7 @@ impl<'t> Resolver<'t, '_> {
                     arms: out,
                 }
             }
-            ExprKind::StructLit { path, fields } => {
+            ExprKind::StructLit { path, fields, base } => {
                 let [name] = path.as_slice() else {
                     self.unsupported("LANG-023", "qualified struct names", span);
                     return None;
@@ -2114,11 +2114,29 @@ impl<'t> Resolver<'t, '_> {
                         *slot = Some(value);
                     }
                 }
+                // `..base`: the base is evaluated once, into a variable of the struct's type, and gives each field
+                // not written.
+                let from = match base {
+                    Some(b) => {
+                        let value = self.expr(cx, b)?;
+                        let var = self.new_var(cx, Symbol::intern("struct$base"), b.span, true);
+                        Some((var, value))
+                    }
+                    None => None,
+                };
                 let mut out = Vec::new();
                 for (s, field) in slots.into_iter().zip(&def.fields) {
-                    match s {
-                        Some(v) => out.push(v),
-                        None => {
+                    match (s, &from) {
+                        (Some(v), _) => out.push(v),
+                        (None, Some((var, value))) => out.push(HExpr::new(
+                            HExprKind::Field {
+                                base: Box::new(HExpr::new(HExprKind::Var(*var), value.span)),
+                                name: field.name,
+                                index: None,
+                            },
+                            value.span,
+                        )),
+                        (None, None) => {
                             self.error(
                                 code!("BLS0303"),
                                 span,
@@ -2128,7 +2146,31 @@ impl<'t> Resolver<'t, '_> {
                         }
                     }
                 }
-                HExprKind::Struct { ty, fields: out }
+                if let Some((var, value)) = from {
+                    let vspan = value.span;
+                    let witness = HExpr::new(HExprKind::Var(var), vspan);
+                    let lit = HExpr::new(
+                        HExprKind::Struct {
+                            ty,
+                            fields: out,
+                            base: Some(Box::new(witness)),
+                        },
+                        span,
+                    );
+                    // A `match` with one arm binds the base (a `let` expression is for function bodies only).
+                    return Some(HExpr::new(
+                        HExprKind::Match {
+                            scrut: Box::new(value),
+                            arms: vec![(HPat::Var(var, vspan), None, lit)],
+                        },
+                        span,
+                    ));
+                }
+                HExprKind::Struct {
+                    ty,
+                    fields: out,
+                    base: None,
+                }
             }
             ExprKind::Wildcard => {
                 self.error(code!("BLS0500"), span, "`_` is a pattern, not a value");

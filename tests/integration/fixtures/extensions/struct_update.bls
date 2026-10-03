@@ -1,0 +1,21 @@
+//! Struct update (LANGUAGE §5.2): `Name { f: e, ..base }` takes the fields not written from `base`, in a function
+//! body and in a rule body. `bls_extensions.rs` checks the rows on both evaluators.
+program struct_update version 1;
+
+struct P { a: u64, b: String, c: bool }
+
+fn bump(p: P) -> P {
+    P { a: p.a + 1u64, ..p }
+}
+
+/// A base computed by a call is evaluated once, and every field can come from it.
+fn copied(k: u64) -> P {
+    P { ..bump(P { a: k, b: "y", c: true }) }
+}
+
+input inp(k: u64);
+
+view out(k, a, b, c) =
+    inp(k), let p = P { a: k, b: "x", c: true }, let q = bump(p), let r = P { c: false, ..q }, let a = r.a, let b = r.b,
+    let c = r.c;
+view copy(k, a, b) = inp(k), let p = copied(k), let a = p.a, let b = p.b;

@@ -1,0 +1,659 @@
+//! The consumer group APIs' messages (S9): FindCoordinator (10), JoinGroup (11), Heartbeat (12), LeaveGroup (13),
+//! SyncGroup (14), OffsetCommit (8), OffsetFetch (9), DescribeGroups (15) and ListGroups (16), each over Kafka 4.0's
+//! whole version range (S9.md D1). librdkafka speaks their legacy versions and the Java clients their flexible ones, so
+//! each message is one format whose types `select` their encoding by version (`kstr` and friends, `protocol.bls`).
+//! The thresholds are the schemas' `flexibleVersions`.
+
+const API_OFFSET_COMMIT: i16 = 8;
+const API_OFFSET_FETCH: i16 = 9;
+const API_FIND_COORDINATOR: i16 = 10;
+const API_JOIN_GROUP: i16 = 11;
+const API_HEARTBEAT: i16 = 12;
+const API_LEAVE_GROUP: i16 = 13;
+const API_SYNC_GROUP: i16 = 14;
+const API_DESCRIBE_GROUPS: i16 = 15;
+const API_LIST_GROUPS: i16 = 16;
+
+const OFFSET_METADATA_TOO_LARGE: i16 = 12;
+const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
+const NOT_COORDINATOR: i16 = 16;
+const ILLEGAL_GENERATION: i16 = 22;
+const INCONSISTENT_GROUP_PROTOCOL: i16 = 23;
+const INVALID_GROUP_ID: i16 = 24;
+const UNKNOWN_MEMBER_ID: i16 = 25;
+const INVALID_SESSION_TIMEOUT: i16 = 26;
+const REBALANCE_IN_PROGRESS: i16 = 27;
+const GROUP_ID_NOT_FOUND: i16 = 69;
+const MEMBER_ID_REQUIRED: i16 = 79;
+
+/// FindCoordinator's key types: a consumer group, a transactional id (transactions are out of scope, K1).
+const KEY_GROUP: i8 = 0;
+const KEY_TRANSACTION: i8 = 1;
+
+/// The operations a client may perform on a group, as a bit field (Kafka without an authorizer: READ, DELETE and
+/// DESCRIBE, the operations the group resource supports).
+const GROUP_OPERATIONS: i32 = 328;
+
+/// The response header of an API at a version: v1 (tagged fields) for a flexible version, v0 otherwise.
+fn response_header(api_key: i16, version: i16, correlation_id: i32) -> Bytes {
+    if flexible(api_key, version) { response_header_v1(correlation_id) } else { response_header_v0(correlation_id) }
+}
+
+/// A group API's response, framed.
+fn group_frame(api_key: i16, version: i16, correlation_id: i32, body: Bytes) -> Bytes {
+    frame(response_header(api_key, version, correlation_id).concat(body))
+}
+
+// ---------------------------------------------------------------- FindCoordinator (10), versions 0–6 (flexible 3+)
+
+/// FindCoordinatorRequest: one key before v4, a batch of keys from v4 (KIP-699), and their type from v1.
+format FindCoordinatorRequest(version: i16) {
+    key: kstr(version >= 3i16) if version < 4i16,
+    key_type: i8 if version >= 1i16,
+    keys: compact_array(compact_string) if version >= 4i16,
+    tags if version >= 3i16,
+}
+
+fn decode_find_coordinator(c: Cur, version: i16) -> Option<FindCoordinatorRequest> {
+    FindCoordinatorRequest::decode(c.buf, c.pos, version).map(|r| r.0)
+}
+
+/// The keys a FindCoordinator request asks about, in order.
+fn coordinator_keys(r: FindCoordinatorRequest, version: i16) -> Vec<String> {
+    if version >= 4i16 { r.keys } else { [r.key] }
+}
+
+/// One key's answer: its coordinator's broker (-1, "" and -1 with an error).
+format Coordinator {
+    key: compact_string,
+    node_id: i32,
+    host: compact_string,
+    port: i32,
+    error: i16,
+    message: compact_nullable_string,
+    tags,
+}
+format FindCoordinatorResponse(version: i16) {
+    throttle: i32 if version >= 1i16,
+    error: i16 if version < 4i16,
+    message: knstr(version >= 3i16) if version >= 1i16 && version < 4i16,
+    node_id: i32 if version < 4i16,
+    host: kstr(version >= 3i16) if version < 4i16,
+    port: i32 if version < 4i16,
+    coordinators: compact_array(Coordinator) if version >= 4i16,
+    tags if version >= 3i16,
+}
+
+/// The message Kafka gives with an error (none without one).
+fn error_message(error: i16) -> Option<String> {
+    if error == NONE {
+        None
+    } else if error == COORDINATOR_NOT_AVAILABLE {
+        Some("The coordinator is not available.")
+    } else if error == COORDINATOR_LOAD_IN_PROGRESS {
+        Some("The coordinator is loading and hence can't process requests.")
+    } else if error == NOT_COORDINATOR {
+        Some("This is not the correct coordinator.")
+    } else if error == INVALID_REQUEST {
+        Some("This most likely occurs because of a request being malformed by the client library or the message was sent to an incompatible broker. See the broker logs for more details.")
+    } else if error == TRANSACTIONAL_ID_AUTHORIZATION_FAILED {
+        Some("Transactional Id authorization failed.")
+    } else if error == GROUP_ID_NOT_FOUND {
+        Some("The group id does not exist.")
+    } else if error == INVALID_GROUP_ID {
+        Some("The configured groupId is invalid.")
+    } else {
+        Some("")
+    }
+}
+
+/// The answer for each key, in order: (key, error, node id, host, port).
+fn encode_find_coordinator_response(correlation_id: i32, version: i16, answers: Vec<(String, i16, i32, String, i32)>) -> Bytes {
+    let first = match answers.first() {
+        Some(a) => a,
+        None => error("encode_find_coordinator_response: a request with no key"),
+    };
+    let r = FindCoordinatorResponse {
+        throttle: 0i32,
+        error: first.1,
+        message: error_message(first.1),
+        node_id: first.2,
+        host: first.3,
+        port: first.4,
+        coordinators: answers.map(|a| Coordinator { key: a.0, node_id: a.2, host: a.3, port: a.4, error: a.1, message: error_message(a.1) }),
+    };
+    group_frame(API_FIND_COORDINATOR, version, correlation_id, FindCoordinatorResponse::encode(r, version))
+}
+
+// ---------------------------------------------------------------- JoinGroup (11), versions 2–9 (flexible 6+)
+
+format JoinProtocol(version: i16) { name: kstr(version >= 6i16), metadata: kbytes(version >= 6i16), tags if version >= 6i16 }
+format JoinGroupRequest(version: i16) {
+    group_id: kstr(version >= 6i16),
+    session_timeout_ms: i32,
+    rebalance_timeout_ms: i32,
+    member_id: kstr(version >= 6i16),
+    group_instance_id: knstr(version >= 6i16) if version >= 5i16,
+    protocol_type: kstr(version >= 6i16),
+    protocols: karray(version >= 6i16, JoinProtocol(version)),
+    reason: knstr(version >= 6i16) if version >= 8i16,
+    tags if version >= 6i16,
+}
+
+fn decode_join_group(c: Cur, version: i16) -> Option<JoinGroupRequest> {
+    JoinGroupRequest::decode(c.buf, c.pos, version).map(|r| r.0)
+}
+
+/// A JoinGroup's protocols: (name, metadata).
+fn join_protocols(r: JoinGroupRequest) -> Vec<(String, Bytes)> {
+    r.protocols.map(|p| (p.name, p.metadata))
+}
+
+format JoinMember(version: i16) {
+    member_id: kstr(version >= 6i16),
+    group_instance_id: knstr(version >= 6i16) if version >= 5i16,
+    metadata: kbytes(version >= 6i16),
+    tags if version >= 6i16,
+}
+/// The protocol type and name are nullable from v7; before, a missing one is written empty (`join_name`).
+format JoinGroupResponse(version: i16) {
+    throttle: i32,
+    error: i16,
+    generation: i32,
+    protocol_type: knstr(version >= 6i16) if version >= 7i16,
+    protocol_name: knstr(version >= 6i16),
+    leader: kstr(version >= 6i16),
+    skip_assignment: bool if version >= 9i16,
+    member_id: kstr(version >= 6i16),
+    members: karray(version >= 6i16, JoinMember(version)),
+    tags if version >= 6i16,
+}
+
+// ---------------------------------------------------------------- SyncGroup (14), versions 0–5 (flexible 4+)
+
+format SyncAssignment(version: i16) { member_id: kstr(version >= 4i16), assignment: kbytes(version >= 4i16), tags if version >= 4i16 }
+format SyncGroupRequest(version: i16) {
+    group_id: kstr(version >= 4i16),
+    generation: i32,
+    member_id: kstr(version >= 4i16),
+    group_instance_id: knstr(version >= 4i16) if version >= 3i16,
+    protocol_type: knstr(version >= 4i16) if version >= 5i16,
+    protocol_name: knstr(version >= 4i16) if version >= 5i16,
+    assignments: karray(version >= 4i16, SyncAssignment(version)),
+    tags if version >= 4i16,
+}
+
+fn decode_sync_group(c: Cur, version: i16) -> Option<SyncGroupRequest> {
+    SyncGroupRequest::decode(c.buf, c.pos, version).map(|r| r.0)
+}
+
+/// A SyncGroup's assignments: (member id, assignment).
+fn sync_assignments(r: SyncGroupRequest) -> Vec<(String, Bytes)> {
+    r.assignments.map(|a| (a.member_id, a.assignment))
+}
+
+format SyncGroupResponse(version: i16) {
+    throttle: i32 if version >= 1i16,
+    error: i16,
+    protocol_type: knstr(version >= 4i16) if version >= 5i16,
+    protocol_name: knstr(version >= 4i16) if version >= 5i16,
+    assignment: kbytes(version >= 4i16),
+    tags if version >= 4i16,
+}
+
+// ---------------------------------------------------------------- Heartbeat (12), versions 0–4 (flexible 4)
+
+format HeartbeatRequest(version: i16) {
+    group_id: kstr(version >= 4i16),
+    generation: i32,
+    member_id: kstr(version >= 4i16),
+    group_instance_id: knstr(version >= 4i16) if version >= 3i16,
+    tags if version >= 4i16,
+}
+
+fn decode_heartbeat(c: Cur, version: i16) -> Option<HeartbeatRequest> {
+    HeartbeatRequest::decode(c.buf, c.pos, version).map(|r| r.0)
+}
+
+format HeartbeatResponse(version: i16) { throttle: i32 if version >= 1i16, error: i16, tags if version >= 4i16 }
+
+// ---------------------------------------------------------------- LeaveGroup (13), versions 0–5 (flexible 4+)
+
+format LeaveMember(version: i16) {
+    member_id: kstr(version >= 4i16),
+    group_instance_id: knstr(version >= 4i16),
+    reason: knstr(version >= 4i16) if version >= 5i16,
+    tags if version >= 4i16,
+}
+/// One member before v3, a batch from v3 (KIP-345).
+format LeaveGroupRequest(version: i16) {
+    group_id: kstr(version >= 4i16),
+    member_id: kstr(version >= 4i16) if version < 3i16,
+    members: karray(version >= 4i16, LeaveMember(version)) if version >= 3i16,
+    tags if version >= 4i16,
+}
+
+fn decode_leave_group(c: Cur, version: i16) -> Option<LeaveGroupRequest> {
+    LeaveGroupRequest::decode(c.buf, c.pos, version).map(|r| r.0)
+}
+
+/// The members a LeaveGroup request removes, in order: (member id, instance id).
+fn leaving_members(r: LeaveGroupRequest, version: i16) -> Vec<(String, Option<String>)> {
+    if version >= 3i16 { r.members.map(|m| (m.member_id, m.group_instance_id)) } else { [(r.member_id, None)] }
+}
+
+format LeaveMemberResponse(version: i16) {
+    member_id: kstr(version >= 4i16),
+    group_instance_id: knstr(version >= 4i16),
+    error: i16,
+    tags if version >= 4i16,
+}
+format LeaveGroupResponse(version: i16) {
+    throttle: i32 if version >= 1i16,
+    error: i16,
+    members: karray(version >= 4i16, LeaveMemberResponse(version)) if version >= 3i16,
+    tags if version >= 4i16,
+}
+
+// ---------------------------------------------------------------- OffsetCommit (8), versions 2–9 (flexible 8+)
+
+format CommitPartition(version: i16) {
+    partition: i32,
+    offset: i64,
+    leader_epoch: i32 if version >= 6i16 = -1i32,
+    metadata: knstr(version >= 8i16),
+    tags if version >= 8i16,
+}
+format CommitTopic(version: i16) {
+    name: kstr(version >= 8i16),
+    partitions: karray(version >= 8i16, CommitPartition(version)),
+    tags if version >= 8i16,
+}
+/// `generation` is the generation (or, from v9, a consumer group's member epoch: not served here); -1 with no member
+/// is a simple consumer's commit.
+format OffsetCommitRequest(version: i16) {
+    group_id: kstr(version >= 8i16),
+    generation: i32,
+    member_id: kstr(version >= 8i16),
+    group_instance_id: knstr(version >= 8i16) if version >= 7i16,
+    retention_ms: i64 if version <= 4i16 = -1i64,
+    topics: karray(version >= 8i16, CommitTopic(version)),
+    tags if version >= 8i16,
+}
+
+fn decode_offset_commit(c: Cur, version: i16) -> Option<OffsetCommitRequest> {
+    OffsetCommitRequest::decode(c.buf, c.pos, version).map(|r| r.0)
+}
+
+/// An OffsetCommit request's partitions, in order: (topic, partition, offset, leader epoch, metadata).
+fn commit_entries(r: OffsetCommitRequest) -> Vec<(String, i32, i64, i32, Option<String>)> {
+    r.topics.map(|t| t.partitions.map(|p| (t.name, p.partition, p.offset, p.leader_epoch, p.metadata))).flatten()
+}
+
+format CommitPartitionResponse(version: i16) { partition: i32, error: i16, tags if version >= 8i16 }
+format CommitTopicResponse(version: i16) {
+    name: kstr(version >= 8i16),
+    partitions: karray(version >= 8i16, CommitPartitionResponse(version)),
+    tags if version >= 8i16,
+}
+format OffsetCommitResponse(version: i16) {
+    throttle: i32 if version >= 3i16,
+    topics: karray(version >= 8i16, CommitTopicResponse(version)),
+    tags if version >= 8i16,
+}
+
+/// Whether any partition of a commit is to be committed (its error so far is NONE).
+fn to_commit(errors: Vec<i16>) -> bool {
+    errors.any(|e| e == NONE)
+}
+
+/// The errors with each NONE replaced by `e`.
+fn none_as(errors: Vec<i16>, e: i16) -> Vec<i16> {
+    errors.map(|x| if x == NONE { e } else { x })
+}
+
+/// The answer, one error per partition in request order (`errors`, by position).
+fn encode_offset_commit_response(correlation_id: i32, version: i16, req: OffsetCommitRequest, errors: Vec<i16>) -> Bytes {
+    let counts = req.topics.map(|t| t.partitions.len());
+    let answers = errors.enumerate();
+    let grouped = by_topic(counts, answers);
+    let topics = req.topics.enumerate().map(|e| CommitTopicResponse {
+        name: (e.1).name,
+        partitions: (e.1).partitions.enumerate().map(|q| CommitPartitionResponse {
+            partition: (q.1).partition,
+            error: match grouped.get(e.0).and_then(|g| g.get(q.0)) {
+                Some(x) => x,
+                None => error("encode_offset_commit_response: a partition without an answer"),
+            },
+        }),
+    });
+    group_frame(API_OFFSET_COMMIT, version, correlation_id, OffsetCommitResponse::encode(OffsetCommitResponse { throttle: 0i32, topics: topics }, version))
+}
+
+// ---------------------------------------------------------------- OffsetFetch (9), versions 1–9 (flexible 6+)
+
+format FetchOffsetsTopic(version: i16) {
+    name: kstr(version >= 6i16),
+    partitions: karray(version >= 6i16, i32),
+    tags if version >= 6i16,
+}
+/// A group of a v8+ request (always flexible); no topics means every committed offset of the group.
+format FetchOffsetsGroup(version: i16) {
+    group_id: compact_string,
+    member_id: compact_nullable_string if version >= 9i16,
+    member_epoch: i32 if version >= 9i16 = -1i32,
+    topics: compact_nullable_array(FetchOffsetsTopic(version)),
+    tags,
+}
+/// One group before v8, a batch from v8 (KIP-709). Before v2 the topics are never null.
+format OffsetFetchRequest(version: i16) {
+    group_id: kstr(version >= 6i16) if version <= 7i16,
+    topics: knarray(version >= 6i16, FetchOffsetsTopic(version)) if version <= 7i16,
+    groups: compact_array(FetchOffsetsGroup(version)) if version >= 8i16,
+    require_stable: bool if version >= 7i16,
+    tags if version >= 6i16,
+}
+
+fn decode_offset_fetch(c: Cur, version: i16) -> Option<OffsetFetchRequest> {
+    OffsetFetchRequest::decode(c.buf, c.pos, version).map(|r| r.0)
+}
+
+/// The groups an OffsetFetch request asks about, with the partitions asked for (none: all).
+fn fetch_groups(r: OffsetFetchRequest, version: i16) -> Vec<(String, Option<Vec<(String, Vec<i32>)>>)> {
+    if version >= 8i16 {
+        r.groups.map(|g| (g.group_id, g.topics.map(|ts| ts.map(|t| (t.name, t.partitions)))))
+    } else {
+        [(r.group_id, r.topics.map(|ts| ts.map(|t| (t.name, t.partitions))))]
+    }
+}
+
+format FetchedOffset(version: i16) {
+    partition: i32,
+    offset: i64,
+    leader_epoch: i32 if version >= 5i16 = -1i32,
+    metadata: knstr(version >= 6i16),
+    error: i16,
+    tags if version >= 6i16,
+}
+format FetchedOffsetsTopic(version: i16) {
+    name: kstr(version >= 6i16),
+    partitions: karray(version >= 6i16, FetchedOffset(version)),
+    tags if version >= 6i16,
+}
+format FetchedGroup(version: i16) {
+    group_id: compact_string,
+    topics: compact_array(FetchedOffsetsTopic(version)),
+    error: i16,
+    tags,
+}
+format OffsetFetchResponse(version: i16) {
+    throttle: i32 if version >= 3i16,
+    topics: karray(version >= 6i16, FetchedOffsetsTopic(version)) if version <= 7i16,
+    error: i16 if version >= 2i16 && version <= 7i16,
+    groups: compact_array(FetchedGroup(version)) if version >= 8i16,
+    tags if version >= 6i16,
+}
+
+/// One group's answer: its error, and per topic its partitions' (partition, offset, leader epoch, metadata, error).
+struct GroupOffsets { group: String, error: i16, topics: Vec<(String, Vec<(i32, i64, i32, Option<String>, i16)>)> }
+
+/// The partitions of a group-level error answer: before v2 (no group-level error field) each partition asked for,
+/// with the error; from v2 none.
+fn error_topics(ts: Option<Vec<(String, Vec<i32>)>>, err: i16, version: i16) -> Vec<(String, Vec<(i32, i64, i32, Option<String>, i16)>)> {
+    if version >= 2i16 {
+        []
+    } else {
+        ts.unwrap_or([]).map(|t| (t.0, t.1.map(|p| (p, -1i64, -1i32, Some(""), err))))
+    }
+}
+
+/// The answer. Before v2 a group-level error goes in every partition (there is no top-level error).
+fn fetched_topics(version: i16, g: GroupOffsets) -> Vec<FetchedOffsetsTopic> {
+    g.topics.map(|t| FetchedOffsetsTopic {
+        name: t.0,
+        partitions: t.1.map(|p| FetchedOffset {
+            partition: p.0, offset: p.1, leader_epoch: p.2, metadata: p.3,
+            error: if version < 2i16 && g.error != NONE { g.error } else { p.4 },
+        }),
+    })
+}
+
+fn encode_offset_fetch_response(correlation_id: i32, version: i16, groups: Vec<GroupOffsets>) -> Bytes {
+    let first = match groups.first() {
+        Some(g) => g,
+        None => error("encode_offset_fetch_response: a request with no group"),
+    };
+    let r = OffsetFetchResponse {
+        throttle: 0i32,
+        topics: fetched_topics(version, first),
+        error: first.error,
+        groups: groups.map(|g| FetchedGroup { group_id: g.group, topics: fetched_topics(version, g), error: g.error }),
+    };
+    group_frame(API_OFFSET_FETCH, version, correlation_id, OffsetFetchResponse::encode(r, version))
+}
+
+// ---------------------------------------------------------------- DescribeGroups (15), versions 0–6 (flexible 5+)
+
+format DescribeGroupsRequest(version: i16) {
+    groups: karray(version >= 5i16, kstr(version >= 5i16)),
+    include_operations: bool if version >= 3i16,
+    tags if version >= 5i16,
+}
+
+fn decode_describe_groups(c: Cur, version: i16) -> Option<DescribeGroupsRequest> {
+    DescribeGroupsRequest::decode(c.buf, c.pos, version).map(|r| r.0)
+}
+
+format DescribedMember(version: i16) {
+    member_id: kstr(version >= 5i16),
+    group_instance_id: knstr(version >= 5i16) if version >= 4i16,
+    client_id: kstr(version >= 5i16),
+    client_host: kstr(version >= 5i16),
+    metadata: kbytes(version >= 5i16),
+    assignment: kbytes(version >= 5i16),
+    tags if version >= 5i16,
+}
+format DescribedGroup(version: i16) {
+    error: i16,
+    message: knstr(version >= 5i16) if version >= 6i16,
+    group_id: kstr(version >= 5i16),
+    state: kstr(version >= 5i16),
+    protocol_type: kstr(version >= 5i16),
+    protocol_data: kstr(version >= 5i16),
+    members: karray(version >= 5i16, DescribedMember(version)),
+    operations: i32 if version >= 3i16 = NO_OPERATIONS,
+    tags if version >= 5i16,
+}
+format DescribeGroupsResponse(version: i16) {
+    throttle: i32 if version >= 1i16,
+    groups: karray(version >= 5i16, DescribedGroup(version)),
+    tags if version >= 5i16,
+}
+
+fn encode_describe_groups_response(correlation_id: i32, version: i16, groups: Vec<DescribedGroup>) -> Bytes {
+    group_frame(API_DESCRIBE_GROUPS, version, correlation_id, DescribeGroupsResponse::encode(DescribeGroupsResponse { throttle: 0i32, groups: groups }, version))
+}
+
+// ---------------------------------------------------------------- ListGroups (16), versions 0–5 (flexible 3+)
+
+/// The states (v4+) and types (v5+) to list, matched without regard to case; none means all.
+format ListGroupsRequest(version: i16) {
+    states: compact_array(compact_string) if version >= 4i16,
+    types: compact_array(compact_string) if version >= 5i16,
+    tags if version >= 3i16,
+}
+
+fn decode_list_groups(c: Cur, version: i16) -> Option<ListGroupsRequest> {
+    ListGroupsRequest::decode(c.buf, c.pos, version).map(|r| r.0)
+}
+
+format ListedGroup(version: i16) {
+    group_id: kstr(version >= 3i16),
+    protocol_type: kstr(version >= 3i16),
+    state: compact_string if version >= 4i16,
+    group_type: compact_string if version >= 5i16,
+    tags if version >= 3i16,
+}
+format ListGroupsResponse(version: i16) {
+    throttle: i32 if version >= 1i16,
+    error: i16,
+    groups: karray(version >= 3i16, ListedGroup(version)),
+    tags if version >= 3i16,
+}
+
+/// The groups (id, protocol type, state) a ListGroups request's filters keep, answered. Every group here is a
+/// classic group.
+fn encode_list_groups_response(correlation_id: i32, version: i16, req: ListGroupsRequest, groups: Vec<(String, String, String)>) -> Bytes {
+    let states = req.states.map(|s| s.to_lowercase());
+    let types = req.types.map(|s| s.to_lowercase());
+    let kept = groups.filter(|g| (states.is_empty() || states.contains(g.2.to_lowercase()))
+        && (types.is_empty() || types.contains("classic")));
+    let r = ListGroupsResponse {
+        throttle: 0i32,
+        error: NONE,
+        groups: kept.map(|g| ListedGroup { group_id: g.0, protocol_type: g.1, state: g.2, group_type: "classic" }),
+    };
+    group_frame(API_LIST_GROUPS, version, correlation_id, ListGroupsResponse::encode(r, version))
+}
+
+// ---------------------------------------------------------------- the coordinator's partition
+
+/// Java's `String.hashCode` of `s`: `h = 31 h + u` over its UTF-16 code units, in 32-bit two's complement. UTF-8 is
+/// decoded to code points first; one above U+FFFF is two units (a surrogate pair).
+fn java_hash(s: String) -> i32 {
+    let b = s.to_utf8();
+    // The fold carries (hash, position of the next code point); bytes inside a code point are passed over.
+    let h = range(0u64, b.len()).fold((0u64, 0u64), |acc, k| if k != acc.1 { acc } else { hash_step(acc.0, b, k) }).0;
+    if h >= 2147483648u64 { (h as i64 - 4294967296i64) as i32 } else { h as i32 }
+}
+
+/// The hash after the code point at `k` of `b`, and the position after it.
+fn hash_step(h0: u64, b: Bytes, k: u64) -> (u64, u64) {
+    let (cp, width) = code_point_at(b, k);
+    let h = if cp < 65536u64 {
+        (h0 * 31u64 + cp) % 4294967296u64
+    } else {
+        let v = cp - 65536u64;
+        let hi = 55296u64 + v / 1024u64;
+        let lo = 56320u64 + v % 1024u64;
+        (((h0 * 31u64 + hi) % 4294967296u64) * 31u64 + lo) % 4294967296u64
+    };
+    (h, k + width)
+}
+
+/// The code point at `k` of valid UTF-8 `b` and its width in bytes (a `String`'s bytes are valid UTF-8).
+fn code_point_at(b: Bytes, k: u64) -> (u64, u64) {
+    let b0 = byte_at(b, k);
+    if b0 < 128u64 {
+        (b0, 1u64)
+    } else if b0 < 224u64 {
+        ((b0 % 32u64) * 64u64 + byte_at(b, k + 1u64) % 64u64, 2u64)
+    } else if b0 < 240u64 {
+        ((b0 % 16u64) * 4096u64 + (byte_at(b, k + 1u64) % 64u64) * 64u64 + byte_at(b, k + 2u64) % 64u64, 3u64)
+    } else {
+        ((b0 % 8u64) * 262144u64 + (byte_at(b, k + 1u64) % 64u64) * 4096u64 + (byte_at(b, k + 2u64) % 64u64) * 64u64 + byte_at(b, k + 3u64) % 64u64, 4u64)
+    }
+}
+
+fn byte_at(b: Bytes, j: u64) -> u64 {
+    match b.u8_at(j) {
+        Some(x) => x as u64,
+        None => error("byte_at: a code point past the end of its string"),
+    }
+}
+
+/// The `__consumer_offsets` partition a group's offsets and coordinator live in, as Kafka computes it:
+/// `Utils.abs(groupId.hashCode()) % partitions`, where `Utils.abs` maps the minimum to 0.
+fn group_partition(group: String, partitions: i32) -> i32 {
+    let h = java_hash(group) as i64;
+    let a = if h == -2147483648i64 { 0i64 } else if h < 0i64 { 0i64 - h } else { h };
+    (a % (partitions as i64)) as i32
+}
+
+/// The internal topic offsets are committed to.
+const OFFSETS_TOPIC: String = "__consumer_offsets";
+
+/// The host part of a connection's peer address (`host:port`, or `[v6]:port`), as Kafka reports a member's client
+/// host: with a leading slash.
+fn client_host(peer: String) -> String {
+    let b = peer.to_utf8();
+    let colon = range(0u64, b.len()).fold(b.len(), |at, k| if b.u8_at(k) == Some(58u8) { k } else { at });
+    let host = b.slice(0u64, colon).unwrap_or(b);
+    let bare = if host.len() >= 2u64 && host.u8_at(0u64) == Some(91u8) && host.u8_at(host.len() - 1u64) == Some(93u8) {
+        host.slice(1u64, host.len() - 1u64).unwrap_or(host)
+    } else {
+        host
+    };
+    match Bytes::from_u8(47u8).concat(bare).from_utf8() {
+        Some(s) => s,
+        None => error("client_host: a peer address cut inside a character"),
+    }
+}
+
+/// The id Kafka gives a new member: its client id, a dash and a UUID (here from two 64-bit values).
+fn member_id_for(client: String, hi: u64, lo: u64) -> String {
+    let uuid = Bytes::join([hex(hi / 4294967296u64, 8u64), dash(), hex((hi / 65536u64) % 65536u64, 4u64), dash(),
+        hex(hi % 65536u64, 4u64), dash(), hex(lo / 281474976710656u64, 4u64), dash(), hex(lo % 281474976710656u64, 12u64)]);
+    match client.to_utf8().concat(dash()).concat(uuid).from_utf8() {
+        Some(s) => s,
+        None => error("member_id_for: a client id that is not UTF-8"),
+    }
+}
+
+fn dash() -> Bytes {
+    Bytes::from_u8(45u8)
+}
+
+/// `x` as `digits` lowercase hexadecimal digits (the low ones).
+fn hex(x: u64, digits: u64) -> Bytes {
+    Bytes::join(range(0u64, digits).map(|k| {
+        let d = (x / power16(digits - 1u64 - k)) % 16u64;
+        Bytes::from_u8(if d < 10u64 { (48u64 + d) as u8 } else { (87u64 + d) as u8 })
+    }))
+}
+
+fn power16(n: u64) -> u64 {
+    range(0u64, n).fold(1u64, |p, _k| p * 16u64)
+}
+
+/// An offset commit, as an OFFSETS entry of the group's `__consumer_offsets` partition (S9.md D5): the group, and per
+/// partition its topic, the topic's id when committed, the partition, offset, leader epoch and metadata. `tag` names
+/// the request (it makes each request's entry distinct).
+format OffsetsEntry {
+    tag: u64,
+    group: compact_string,
+    items: compact_array((compact_string, uuid, i32, i64, i32, compact_nullable_string)),
+}
+
+fn encode_offsets_entry(e: OffsetsEntry) -> Bytes {
+    OffsetsEntry::encode(e)
+}
+
+fn decode_offsets_entry(b: Bytes) -> Option<OffsetsEntry> {
+    OffsetsEntry::decode(b, 0).map(|r| r.0)
+}
+
+/// The items of an offset commit with only the last value of each (topic, partition), in their order.
+fn last_per_partition(items: Vec<(String, Bytes, i32, i64, i32, Option<String>)>) -> Vec<(String, Bytes, i32, i64, i32, Option<String>)> {
+    items.enumerate().filter(|e| not items.enumerate().any(|f| f.0 > e.0 && (f.1).0 == (e.1).0 && (f.1).2 == (e.1).2)).map(|e| e.1)
+}
+
+/// The most metadata an offset commit may carry (Kafka's `offset.metadata.max.bytes`).
+const OFFSET_METADATA_MAX: u64 = 4096;
+
+fn metadata_too_large(m: Option<String>) -> bool {
+    match m {
+        Some(s) => s.to_utf8().len() > OFFSET_METADATA_MAX,
+        None => false,
+    }
+}
+
+/// A partition's committed offsets as of the index applied (every replica that applied it holds the same rows).
+format OffsetsSnapshot {
+    at: u64,
+    rows: compact_array((compact_string, compact_string, i32, uuid, i64, i32, compact_nullable_string)),
+}
+
+fn offsets_snapshot(at: u64, rows: Vec<(String, String, i32, Bytes, i64, i32, Option<String>)>) -> Bytes {
+    OffsetsSnapshot::encode(OffsetsSnapshot { at: at, rows: rows })
+}

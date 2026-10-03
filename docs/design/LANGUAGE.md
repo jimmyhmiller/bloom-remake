@@ -724,7 +724,8 @@ module (BLS0201). Editing a labelled body changes only that body's hashes; editi
   immutable; `m.insert(k, v)` returns a new map. Iteration order is canonical (LANG-118).
 - `Option<T>` with `Some(x)` and `None`. There is no null and no nil padding (CR-28).
 - `struct Name<T> { field: T, … }` and tuple structs `struct Name(A, B);`, with structural equality, the canonical
-  order of §5.5, field access `s.f` and struct literals `Name { f: e, g }` (with punning and `..base`).
+  order of §5.5, field access `s.f` and struct literals `Name { f: e, g }` (with punning and `..base`: last, of the
+  struct's type, evaluated once, it gives the fields not written).
 - `enum Name<T> { A, B(T), C { f: T } }`. Every enum that reaches a channel, a durable relation or an interface must
   have exactly one variant marked `#[unknown]` (BLS0308): a value from a newer program version decodes to it,
   keeps its bytes, and is re-encoded unchanged (LANG-261). Variants are encoded by stable number (`#n`), never by
@@ -2732,6 +2733,7 @@ Elements (parameters in parentheses; every element is a name or a call):
 | `nullable(P)` | `Option` of `P`'s | a prefixed value or array whose length may be the bias less one: `None` |
 | `constant(E, v)` | none | `E` with value `v`: written on encode, checked on decode |
 | `ignored(E, v)` | none | `E`, read past and dropped on decode; `v` written on encode |
+| `select(c, A, B)` | `A`'s (and `B`'s: one type, or both none) | `A` where `c` (an expression over the parameters) holds, `B` otherwise — an encoding that changes with a protocol version |
 | `(E1, E2, …)` | the tuple of the valued ones (the value itself, if only one) | the elements in order |
 | `tags` | none | a tagged-field section: a `uvarint` count of (tag, size, bytes); written empty, read and skipped |
 | `Name(args)` | the record | another record format, with its arguments |
@@ -2742,7 +2744,7 @@ absent field writes nothing and decodes to its type's zero, or to `= default`, w
 element with no value (`constant`, `ignored`, `tags`) has no name. Element arguments read the parameters. Aliases and records
 live in a file or module (BLS0110 in an `at` section) and may be declared after their use; misuse is BLS0301 (an
 unknown element, a wrong arity, `nullable` over something else or over an unsigned length with bias 0, a field name
-on a valueless element, an alias that expands into itself) or BLS0201 (two formats of one name). Lowering: none — a
+on a valueless element, an alias that expands into itself, a `select` whose elements differ in type) or BLS0201 (two formats of one name). Lowering: none — a
 format expands, once includes are in place, into the struct, the two functions, generated functions for compound
 elements (`Name$d1`, `Name$e1`, …) and shared helpers (`format$…`), all ordinary Blossom.
 

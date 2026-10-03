@@ -6,6 +6,10 @@
 //	                                   (idempotent, franz-go's default), and reads every partition back from its
 //	                                   start, checking each record is there once, in order, at the offset its produce
 //	                                   was acknowledged at; `brokers` is a comma-separated list of seed brokers
+//	franzcap group <brokers>           creates a topic replicated three times and produces records; two consumers in
+//	                                   one group (franz-go's group consumer) read them together, rebalancing as the
+//	                                   second joins, and commit; a third in the same group then gets only records
+//	                                   produced after (the committed offsets hold)
 package main
 
 import (
@@ -21,6 +25,10 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "group" {
+		group(strings.Split(os.Args[2], ","))
+		return
+	}
 	if (len(os.Args) == 3 || len(os.Args) == 4) && os.Args[1] == "produce-consume" {
 		rf := int16(1)
 		if len(os.Args) == 4 {
@@ -138,4 +146,138 @@ func produceConsume(brokers []string, rf int16) {
 		})
 	}
 	fmt.Printf("ok %d records\n", seen)
+}
+
+const groupTopic = "franz-group-topic"
+const groupID = "franz-group"
+
+func produceN(ctx context.Context, brokers []string, from, n int) {
+	prod, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
+	if err != nil {
+		fail("producer", err)
+	}
+	defer prod.Close()
+	for i := from; i < from+n; i++ {
+		r := &kgo.Record{Topic: groupTopic, Value: []byte(fmt.Sprintf("record %d", i))}
+		if err := prod.ProduceSync(ctx, r).FirstErr(); err != nil {
+			fail("produce", err)
+		}
+	}
+}
+
+// consume reads records into `seen` until `stop` is closed or the context ends, committing as it goes (franz-go
+// autocommits) and on close.
+func consume(ctx context.Context, brokers []string, name string, seen chan<- string, stop <-chan struct{}, done chan<- struct{}) {
+	cl, err := kgo.NewClient(
+		kgo.SeedBrokers(brokers...),
+		kgo.ConsumerGroup(groupID),
+		kgo.ConsumeTopics(groupTopic),
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+		kgo.ClientID(name),
+	)
+	if err != nil {
+		fail("consumer", err)
+	}
+	for {
+		select {
+		case <-stop:
+			if err := cl.CommitUncommittedOffsets(ctx); err != nil {
+				fail(name+" commit", err)
+			}
+			cl.Close()
+			done <- struct{}{}
+			return
+		default:
+		}
+		pctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		fetches := cl.PollFetches(pctx)
+		cancel()
+		for _, e := range fetches.Errors() {
+			if e.Err != context.DeadlineExceeded && e.Err != context.Canceled {
+				fail(name+" fetch", e.Err)
+			}
+		}
+		fetches.EachRecord(func(r *kgo.Record) { seen <- string(r.Value) })
+	}
+}
+
+func group(brokers []string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	admCl, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
+	if err != nil {
+		fail("client", err)
+	}
+	adm := kadm.NewClient(admCl)
+	res, err := adm.CreateTopics(ctx, 3, 3, nil, groupTopic)
+	if err != nil {
+		fail("create", err)
+	}
+	for _, r := range res {
+		if r.Err != nil {
+			fail("create "+r.Topic, r.Err)
+		}
+	}
+	produceN(ctx, brokers, 0, 200)
+
+	seen := make(chan string, 1000)
+	stop := make(chan struct{})
+	done := make(chan struct{}, 2)
+	go consume(ctx, brokers, "first", seen, stop, done)
+	got := map[string]bool{}
+	// The second member joins once the first is reading: the group rebalances to share the partitions.
+	for len(got) < 50 {
+		select {
+		case v := <-seen:
+			got[v] = true
+		case <-ctx.Done():
+			fail("first reads", ctx.Err())
+		}
+	}
+	go consume(ctx, brokers, "second", seen, stop, done)
+	for len(got) < 200 {
+		select {
+		case v := <-seen:
+			got[v] = true
+		case <-ctx.Done():
+			fail(fmt.Sprintf("group reads (%d of 200)", len(got)), ctx.Err())
+		}
+	}
+	close(stop)
+	<-done
+	<-done
+	described, err := adm.DescribeGroups(ctx, groupID)
+	if err != nil {
+		fail("describe", err)
+	}
+	admCl.Close()
+	for _, g := range described {
+		if g.Err != nil {
+			fail("describe "+g.Group, g.Err)
+		}
+	}
+
+	// A new member reads only what comes after the committed offsets.
+	produceN(ctx, brokers, 200, 20)
+	seen2 := make(chan string, 1000)
+	stop2 := make(chan struct{})
+	go consume(ctx, brokers, "third", seen2, stop2, done)
+	later := map[string]bool{}
+	deadline := time.After(20 * time.Second)
+	for len(later) < 20 {
+		select {
+		case v := <-seen2:
+			n := 0
+			fmt.Sscanf(v, "record %d", &n)
+			if n < 200 {
+				fail("committed offsets", fmt.Errorf("the third member read %q, which the group had committed past", v))
+			}
+			later[v] = true
+		case <-deadline:
+			fail(fmt.Sprintf("third reads (%d of 20)", len(later)), fmt.Errorf("timed out"))
+		}
+	}
+	close(stop2)
+	<-done
+	fmt.Printf("ok group %d then %d records\n", len(got), len(later))
 }

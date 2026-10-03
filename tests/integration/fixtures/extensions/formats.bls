@@ -1,5 +1,6 @@
 //! Formats (LANGUAGE §16.7): a Kafka-like vocabulary of aliases, two records (one nested in the other, with a
-//! version parameter, a constant, an ignored field, tuples, conditional fields and tagged sections). `bls_extensions.rs` encodes random values
+//! version parameter, a constant, an ignored field, tuples, conditional fields, tagged sections, and `select`s
+//! between a legacy and a compact encoding by version). `bls_extensions.rs` encodes random values
 //! with its own reference encoder and checks the decoded fields, the re-encoding and that truncations decode to
 //! nothing, on both evaluators.
 program formats version 1;
@@ -12,11 +13,14 @@ format uuid = bytes(16);
 /// An alias whose argument is used inside an expression.
 format doubled(n) = bytes(n * 2);
 format Six { a: doubled(3) }
+/// The legacy encoding before a version, the compact one from it.
+format kstring(flex) = select(flex, compact_nullable_string, string16);
+format karray(flex, F) = select(flex, compact_array(F), array(i32, 0, F));
 
 format Topic(version: i16) {
     id: uuid,
-    name: compact_nullable_string,
-    parts: compact_array(i32),
+    name: kstring(version >= 8i16),
+    parts: karray(version >= 12i16, i32),
     pairs: compact_array((i32, bool, tags)),
     tags,
 }

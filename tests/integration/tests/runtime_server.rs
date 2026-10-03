@@ -83,6 +83,7 @@ fn start(spec: &DeploymentSpec, artifact: &Arc<BlsArtifact>) -> Server {
         dir: None,
         backend: blossom_node::Backend::Engine,
         externs: Arc::new(blossom_std_host::registry().unwrap()),
+        record: None,
     })
     .unwrap()
 }
@@ -107,7 +108,10 @@ fn closed_sessions_release_their_descriptors() {
     }
     std::thread::sleep(Duration::from_millis(1500));
     let after = open_fds();
-    assert!(after < before + 20, "{before} descriptors before 200 closed sessions, {after} after");
+    assert!(
+        after < before + 20,
+        "{before} descriptors before 200 closed sessions, {after} after"
+    );
     server.stop().unwrap();
 }
 
@@ -116,17 +120,33 @@ fn replies_larger_than_a_frame_are_split() {
     let (spec, artifact) = setup("bigframe");
     let server = start(&spec, &artifact);
     let id = identity(&spec, &artifact);
-    let mut c = Client::connect(server.client_addr.unwrap(), artifact.clone(), &id, "p", Duration::from_secs(5)).unwrap();
+    let mut c = Client::connect(
+        server.client_addr.unwrap(),
+        artifact.clone(),
+        &id,
+        "p",
+        Duration::from_secs(5),
+    )
+    .unwrap();
     let put = c.rel("put").unwrap();
     let get = c.rel("get").unwrap();
     let key = Value::Str("k".into());
     c.send(
         put,
-        &[vec![Value::Int(IntValue::U64(1)), key.clone(), Value::Bytes(vec![7u8; 1 << 20].into())]],
+        &[vec![
+            Value::Int(IntValue::U64(1)),
+            key.clone(),
+            Value::Bytes(vec![7u8; 1 << 20].into()),
+        ]],
     )
     .unwrap();
-    assert!(c.recv(Some(Duration::from_secs(10))).unwrap().is_some(), "the put is acknowledged");
-    let gets: Vec<Vec<Value>> = (0..20u64).map(|i| vec![Value::Int(IntValue::U64(100 + i)), key.clone()]).collect();
+    assert!(
+        c.recv(Some(Duration::from_secs(10))).unwrap().is_some(),
+        "the put is acknowledged"
+    );
+    let gets: Vec<Vec<Value>> = (0..20u64)
+        .map(|i| vec![Value::Int(IntValue::U64(100 + i)), key.clone()])
+        .collect();
     c.send(get, &gets).unwrap();
     for got in 0..20 {
         let r = c.recv(Some(Duration::from_secs(10))).unwrap();
@@ -145,15 +165,115 @@ fn only_admins_may_delete() {
     let id = identity(&spec, &artifact);
     let addr = server.client_addr.unwrap();
     let del_row = |id: u64| vec![Value::Int(IntValue::U64(id)), Value::Str("k".into())];
-    let mut other = Client::connect(addr, artifact.clone(), &id, "spiffe://test/kvs/client/other", Duration::from_secs(5)).unwrap();
+    let mut other = Client::connect(
+        addr,
+        artifact.clone(),
+        &id,
+        "spiffe://test/kvs/client/other",
+        Duration::from_secs(5),
+    )
+    .unwrap();
     let del = other.rel("del").unwrap();
     other.send(del, &[del_row(1)]).unwrap();
-    assert!(other.recv(Some(Duration::from_millis(800))).unwrap().is_none(), "a non-admin's delete is answered");
+    assert!(
+        other.recv(Some(Duration::from_millis(800))).unwrap().is_none(),
+        "a non-admin's delete is answered"
+    );
     assert!(server.stats.rejected_acl.load(Ordering::Relaxed) >= 1);
-    let mut admin = Client::connect(addr, artifact.clone(), &id, "spiffe://test/kvs/client/admin", Duration::from_secs(5)).unwrap();
+    let mut admin = Client::connect(
+        addr,
+        artifact.clone(),
+        &id,
+        "spiffe://test/kvs/client/admin",
+        Duration::from_secs(5),
+    )
+    .unwrap();
     admin.send(del, &[del_row(2)]).unwrap();
-    let (rel, row) = admin.recv(Some(Duration::from_secs(5))).unwrap().expect("the admin's delete is answered");
+    let (rel, row) = admin
+        .recv(Some(Duration::from_secs(5)))
+        .unwrap()
+        .expect("the admin's delete is answered");
     assert_eq!(rel, admin.rel("del_ok").unwrap());
     assert_eq!(row.get(2), Some(&Value::Bool(false)));
     server.stop().unwrap();
+}
+
+/// A node run with `record` writes a trace that replays exactly (every tick's outcome matches the recording), and
+/// the replay explains the node's rows: the rule that stored a put (`why_not` finds its body satisfied at the
+/// put's tick) and why a key never put is absent (no rule's body holds, and each names the literal that fails).
+#[test]
+fn a_recorded_node_replays_exactly_and_explains_its_rows() {
+    use std::io::BufReader;
+    let (spec, artifact) = setup("record");
+    let traces = std::env::temp_dir().join(format!("blossom-rt-record-traces-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&traces);
+    let server = Server::start(ServerConfig {
+        spec: spec.clone(),
+        artifact: artifact.clone(),
+        node: "s1".into(),
+        mode: OpenMode::InitFresh,
+        dir: None,
+        backend: blossom_node::Backend::Engine,
+        externs: Arc::new(blossom_std_host::registry().unwrap()),
+        record: Some(traces.clone()),
+    })
+    .unwrap();
+    let id = identity(&spec, &artifact);
+    let mut c = Client::connect(server.client_addr.unwrap(), artifact.clone(), &id, "p", Duration::from_secs(5)).unwrap();
+    let key = Value::Str("k".into());
+    let val = Value::Bytes(b"v".to_vec().into());
+    c.send(c.rel("put").unwrap(), &[vec![Value::Int(IntValue::U64(1)), key.clone(), val.clone()]])
+        .unwrap();
+    assert!(c.recv(Some(Duration::from_secs(10))).unwrap().is_some(), "the put is acknowledged");
+    c.send(c.rel("get").unwrap(), &[vec![Value::Int(IntValue::U64(2)), key.clone()]]).unwrap();
+    assert!(c.recv(Some(Duration::from_secs(10))).unwrap().is_some(), "the get is answered");
+    server.stop().unwrap();
+
+    let path = traces.join("s1-1.blstrace");
+    let open = || {
+        blossom_sim::replay::Replay::open(
+            &artifact,
+            BufReader::new(std::fs::File::open(&path).unwrap()),
+            Arc::new(blossom_std_host::registry().unwrap()),
+        )
+        .unwrap()
+    };
+    let store = artifact.rel_named("store").unwrap();
+    let stored: blossom_ir::tick::Row = Arc::from(vec![key.clone(), val.clone()]);
+    // Every tick replays to the recorded outcome; the put is stored at some tick.
+    let mut replay = open();
+    let (mut ticks, mut stored_at) = (0, None);
+    while let Some(r) = replay.next(false).unwrap() {
+        ticks += 1;
+        let changes = r.changes.unwrap();
+        if changes.inserted.get(&store).is_some_and(|rows| rows.contains(&stored)) {
+            stored_at = Some(r.inputs.tick.0);
+        }
+    }
+    assert!(ticks > 1, "only {ticks} ticks recorded");
+    let stored_at = stored_at.expect("the put's row is stored at a replayed tick");
+    // A tick's changes are what it writes for the next tick: `upsert` is inductive, so the rule that wrote the row
+    // ran at that very tick.
+    let mut replay = open();
+    let examined = loop {
+        let t = replay.peek_tick().unwrap().unwrap();
+        let r = replay.next(t.0 == stored_at).unwrap().unwrap();
+        if t.0 == stored_at {
+            break r;
+        }
+    };
+    let program = artifact.program.get();
+    let derived = replay.why_not(&examined, store, &[Some(key.clone()), None], 3).unwrap();
+    assert!(
+        derived.iter().any(|w| w.complete > 0
+            && program.rules.get(w.rule).is_some_and(|r| r.kind == blossom_ir::core::RuleKind::Inductive)),
+        "no inductive rule derives the stored row: {derived:?}"
+    );
+    let absent = replay.why_not(&examined, store, &[Some(Value::Str("never".into())), None], 3).unwrap();
+    assert!(!absent.is_empty());
+    for w in &absent {
+        assert_eq!(w.complete, 0, "a rule derives a key never put: {w:?}");
+        assert!(w.failed.is_some() || w.head_differs.is_some(), "no failing literal named: {w:?}");
+    }
+    let _ = std::fs::remove_dir_all(&traces);
 }

@@ -46,6 +46,10 @@ pub struct Args {
     /// line, replacing it whole each time (not synced: it is for watching a node, not for recovery).
     #[arg(long, value_name = "FILE")]
     pub stats: Option<PathBuf>,
+    /// Record every tick's inputs to a trace in this directory (`<node>-<incarnation>.blstrace`, readable by its
+    /// owner only: it holds the deployment's seed), for `blossom trace` to replay and question.
+    #[arg(long, value_name = "DIR")]
+    pub record: Option<PathBuf>,
 }
 
 /// The exit code for a runtime error.
@@ -145,6 +149,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
         dir: args.store,
         backend: args.evaluator,
         externs,
+        record: args.record.clone(),
     }) {
         Ok(s) => s,
         Err(e) => {

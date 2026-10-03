@@ -76,6 +76,7 @@ at Broker {
     view preferred(g, n) = group_member(g, n) where false;
     /// Nothing is compacted here.
     view compactable(g, i, pos) = rlog(g, i, _, _, _, pos, _) where false;
+    view confirms(g) = rlog(g, _, _, _, _, _, _) where false;
 
     /// `moving`'s leader proposes the next change towards the phase's configuration (phases of 400 ms), once the
     /// last change is committed.
