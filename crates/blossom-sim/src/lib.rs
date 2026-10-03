@@ -10,6 +10,7 @@
 pub mod bls;
 pub mod cluster;
 pub mod linearize;
+pub mod replay;
 pub mod runtime;
 pub mod spec;
 pub mod sync;

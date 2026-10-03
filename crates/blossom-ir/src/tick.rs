@@ -48,7 +48,7 @@ impl Instance {
 }
 
 /// A channel tuple delivered to the node this tick. Column 0 of `row` is the destination, the node itself.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Delivery {
     pub rel: RelId,
     pub from: NodeId,
@@ -65,7 +65,7 @@ pub struct Send {
 
 /// A message from an external client session on a channel whose source role is `external` (LANGUAGE §18.4).
 /// Column 0 of `row` is the destination, the node itself.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Ingress {
     pub rel: RelId,
     pub session: SessionId,
@@ -148,6 +148,10 @@ pub enum EvalError {
     /// A runtime hard error of the program at this tick (BLSRnnn, ARCHITECTURE §6.6).
     #[error("{} at tick {}: {}", .error.code, .tick.0, .error.detail)]
     Program { tick: Tick, error: ProgramErrorRecord },
+    /// The node's input trace (`blossom run --record`) could not be written: the node stops rather than run
+    /// unrecorded.
+    #[error("recording the trace: {0}")]
+    Trace(String),
     #[error(transparent)]
     Unimplemented(#[from] Unimplemented),
     #[error(transparent)]
@@ -237,10 +241,7 @@ pub struct StepOutput {
 /// Checks that `registry` provides every host function `program` declares (`extern fn`), with the declared
 /// signature. The error lists every one that is missing or differs, so a program never loads with a host call that
 /// cannot run.
-pub fn bind_externs(
-    program: &crate::core::Program,
-    registry: &blossom_value::ExternRegistry,
-) -> Result<(), EvalError> {
+pub fn bind_externs(program: &crate::core::Program, registry: &blossom_value::ExternRegistry) -> Result<(), EvalError> {
     let mut problems = Vec::new();
     for f in program.fns.iter() {
         if let crate::core::FnBody::Extern { path, .. } = &f.body {

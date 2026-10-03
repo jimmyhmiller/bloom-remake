@@ -40,8 +40,7 @@ pub(crate) fn check_supported(p: &Program) -> Result<(), OracleError> {
                 let supported = matches!(
                     agg.func,
                     AggFunc::Count | AggFunc::Sum | AggFunc::Min | AggFunc::Max | AggFunc::CollectVec
-                )
-                    && agg.order.is_none()
+                ) && agg.order.is_none()
                     && (!agg.args.is_empty() || matches!(agg.func, AggFunc::Count));
                 if !supported {
                     blossom_base::unimplemented_feature!(
@@ -457,7 +456,10 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
             continue;
         }
         db.prepare(rule, plan);
-        let to_host = matches!(program.rels.get(rule.head.rel).map(|r| &r.class), Some(RelClass::HostOut(_)));
+        let to_host = matches!(
+            program.rels.get(rule.head.rel).map(|r| &r.class),
+            Some(RelClass::HostOut(_))
+        );
         for (row, firing) in heads(&scope, &db, rule, plan, input.capture).map_err(|e| fail(rule, e))? {
             // A request to the host (a stream's write, close or dial) leaves with the tick (FOREIGN-PROTOCOLS §1).
             if to_host {
@@ -1081,4 +1083,172 @@ fn check_invariants(
         });
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------- why not (`blossom trace whynot`)
+
+/// Why each rule deriving `rel` does (not) derive a tuple matching `pattern` on the tick `input` describes, whose
+/// final instance is `instance`: for every rule of the node with that head, the head is unified with the pattern
+/// (a constant that differs rules the rule out), then the body is evaluated step by step in the rule's plan order
+/// on the instance, and the explanation is how far any valuation got: the first step no valuation passes, and the
+/// partial valuations that reached it. A rule whose whole body has valuations derives the tuple (at this tick for a
+/// deductive rule, the next for an inductive one, at the destination for an async one).
+pub(crate) fn why_not(
+    oracle: &Oracle,
+    input: &TickInput<'_>,
+    instance: &Instance,
+    rel: RelId,
+    pattern: &[Option<Value>],
+    samples: usize,
+) -> Result<Vec<crate::WhyNot>, OracleError> {
+    let program = oracle.program.get();
+    let scope = Scope {
+        incarnation: input.incarnation,
+        program,
+        node: input.node,
+        tick: input.tick,
+        now: input.now,
+        oracle,
+        fuel: expr::Fuel::default(),
+        blobs: input.blobs,
+        new_blobs: std::cell::RefCell::new(BTreeMap::new()),
+    };
+    let load = |e: ExprError| -> OracleError {
+        match e {
+            ExprError::Oracle(e) => e,
+            other => internal_error!("loading the tick's instance: {other:?}").into(),
+        }
+    };
+    let mut db = Db::new(&oracle.cells);
+    for (r, rows) in oracle.statics.rels.iter().chain(&instance.rels) {
+        for row in rows {
+            db.insert(*r, row.clone()).map_err(load)?;
+        }
+    }
+    for d in input.delivered {
+        let mut with_sender: Vec<Value> = d.row.to_vec();
+        with_sender.push(Value::Node(d.from));
+        db.insert_in(d.rel, true, Arc::from(with_sender)).map_err(load)?;
+    }
+    for g in input.ingress {
+        let mut with_sender: Vec<Value> = g.row.to_vec();
+        with_sender.push(Value::Session(g.session));
+        db.insert_in(g.rel, true, Arc::from(with_sender)).map_err(load)?;
+    }
+    let mut out = Vec::new();
+    for rule in program.rules.iter() {
+        if rule.head.rel != rel || !oracle.runs_on(rule, input.node) {
+            continue;
+        }
+        let (rule, plan) = rule_and_plan(oracle, rule.id)?;
+        db.prepare(rule, plan);
+        // The head unified with the pattern: its variables seeded, its constants compared.
+        let mut env: Vec<Option<Value>> = vec![None; plan.nvars];
+        let mut head_differs = None;
+        for (col, (arg, want)) in rule.head.args.iter().zip(pattern).enumerate() {
+            let Some(want) = want else { continue };
+            match arg {
+                HeadArg::Term(Term::Var(v)) => match env.get_mut(v.index()) {
+                    Some(slot @ None) => *slot = Some(want.clone()),
+                    Some(Some(have)) if have != want => head_differs = Some(col),
+                    Some(Some(_)) => {}
+                    None => return Err(internal_error!("variable {v:?} out of range").into()),
+                },
+                HeadArg::Term(t @ Term::Const(_)) => {
+                    let have = expr::term(&scope, &env, t).map_err(|e| fail_explain(rule, e))?;
+                    if have != *want {
+                        head_differs = Some(col);
+                    }
+                }
+                // A wildcard or an aggregate head column constrains no body variable.
+                HeadArg::Term(Term::Wild) | HeadArg::Agg(_) => {}
+            }
+        }
+        if let Some(col) = head_differs {
+            out.push(crate::WhyNot {
+                rule: rule.id,
+                head_differs: Some(col),
+                passed: 0,
+                steps: plan.steps.len(),
+                failed: None,
+                partial: Vec::new(),
+                complete: 0,
+                error: None,
+            });
+            continue;
+        }
+        // The longest prefix of the plan that has a valuation, with the head seeded.
+        let mut passed = 0;
+        let mut partial: Vec<Vec<Option<Value>>> = Vec::new();
+        let mut complete = 0;
+        let mut error = None;
+        for k in 0..=plan.steps.len() {
+            let prefix = RulePlan {
+                steps: plan.steps.get(..k).unwrap_or(&[]).to_vec(),
+                nvars: plan.nvars,
+            };
+            let mut found = Vec::new();
+            let mut e = env.clone();
+            let mut reads: Vec<Option<Row>> = vec![None; rule.body.lits.len()];
+            let mut negations = Vec::new();
+            match search(
+                &scope,
+                &db,
+                rule,
+                &prefix,
+                0,
+                &mut e,
+                &mut reads,
+                &mut negations,
+                &mut found,
+            ) {
+                Ok(()) => {}
+                Err(x) => {
+                    error = Some(format!("{x:?}"));
+                    break;
+                }
+            }
+            if found.is_empty() {
+                break;
+            }
+            passed = k;
+            if k == plan.steps.len() {
+                complete = found.len();
+            }
+            partial = found.into_iter().take(samples).map(|v| v.env).collect();
+        }
+        let failed = if passed < plan.steps.len() && error.is_none() {
+            plan.steps.get(passed).map(|s| match s {
+                Step::Scan { lit, .. } | Step::Check { lit } => *lit,
+            })
+        } else {
+            None
+        };
+        out.push(crate::WhyNot {
+            rule: rule.id,
+            head_differs: None,
+            passed,
+            steps: plan.steps.len(),
+            failed,
+            partial: partial
+                .into_iter()
+                .map(|env| {
+                    env.into_iter()
+                        .enumerate()
+                        .filter_map(|(i, v)| v.map(|v| (blossom_base::VarId::from_raw(i as u32), v)))
+                        .collect()
+                })
+                .collect(),
+            complete,
+            error,
+        });
+    }
+    Ok(out)
+}
+
+fn fail_explain(rule: &Rule, e: ExprError) -> OracleError {
+    match e {
+        ExprError::Oracle(e) => e,
+        other => internal_error!("evaluating the head of {}: {other:?}", rule.label).into(),
+    }
 }

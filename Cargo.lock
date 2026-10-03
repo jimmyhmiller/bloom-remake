@@ -817,9 +817,13 @@ dependencies = [
 name = "blossom-trace"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "blossom-base",
  "blossom-ir",
  "blossom-value",
+ "postcard",
+ "serde",
+ "thiserror",
 ]
 
 [[package]]
