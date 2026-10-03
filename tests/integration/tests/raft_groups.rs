@@ -24,7 +24,7 @@ fn compile() -> BlsArtifact {
     compile_with(true)
 }
 
-/// The harness, with CheckQuorum on or off (`RAFT_CHECK_QUORUM`).
+/// The harness, with CheckQuorum and PreVote on or off (`RAFT_CHECK_QUORUM`, `RAFT_PRE_VOTE`).
 #[cfg(test)]
 fn compile_with(check_quorum: bool) -> BlsArtifact {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/raft/groups.bls");
@@ -34,10 +34,17 @@ fn compile_with(check_quorum: bool) -> BlsArtifact {
             role: Some("Broker".to_owned()),
         })
         .collect();
-    let params = [(
-        "RAFT_CHECK_QUORUM".to_owned(),
-        blossom_front::api::ParamBinding::Bool(check_quorum),
-    )]
+    // PreVote goes with CheckQuorum (a leader refuses pre-votes).
+    let params = [
+        (
+            "RAFT_CHECK_QUORUM".to_owned(),
+            blossom_front::api::ParamBinding::Bool(check_quorum),
+        ),
+        (
+            "RAFT_PRE_VOTE".to_owned(),
+            blossom_front::api::ParamBinding::Bool(check_quorum),
+        ),
+    ]
     .into_iter()
     .collect();
     let (result, _) = compile_file_with(path.to_str().unwrap(), &nodes, &params);
@@ -236,7 +243,8 @@ impl Directed<'_> {
 fn a_reelected_leader_forgets_its_old_follower_state() {
     use blossom_value::time::NodeId;
     // The scenario has a leader cut off go on appending for seconds, which CheckQuorum would stop (a leader that
-    // hears from no majority steps down): Raft without it, whose safety this checks.
+    // hears from no majority steps down), and then win again by raising its term, which PreVote would stop: Raft
+    // without them, whose safety this checks.
     let artifact = compile_with(false);
     let schema = DurableSchema::of(artifact.program.get());
     let mut completed = 0;

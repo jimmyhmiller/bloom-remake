@@ -594,6 +594,9 @@ at Broker {
         if stepped_down(g, t) {
             delete stepped_down(g, t);
         }
+        if prevoting(g, nt, round) {
+            delete prevoting(g, nt, round);
+        }
     }
 
     // ---- commands this broker waits on: sent when first wanted, and every `CMD_RESEND` until applied
