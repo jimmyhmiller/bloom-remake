@@ -38,30 +38,33 @@ fn batch_header(b: Bytes) -> Option<BatchHeader> {
 }
 
 /// The batches of a records field, in order: `None` if any is truncated or its length is not a whole batch. A batch
-/// takes at least a header, so at most `len / 61` are looked for.
+/// takes at least a header, so at most `len / 61` are looked for; the walk stops at the end or at the first batch
+/// that is not whole, so it costs one step per batch.
 fn split_batches(b: Bytes) -> Option<Vec<Bytes>> {
-    let end = range(0, b.len() / BATCH_HEADER + 1).fold(Some(([], 0)), |acc, _i| {
-        acc.and_then(|a| {
-            let (batches, pos) = a;
-            if pos == b.len() {
-                Some((batches, pos))
-            } else {
-                b.i32_be_at(pos + 8).and_then(|n| {
+    // One step per whole batch: the position after it, and the batch.
+    let steps = range(0, b.len() / BATCH_HEADER + 1).scan_while((0, Bytes::empty()), |acc, _i| {
+        let pos = acc.0;
+        if pos == b.len() {
+            None
+        } else {
+            match b.i32_be_at(pos + 8) {
+                Some(n) => {
                     if n < 49i32 {
                         None
                     } else {
                         let size = 12 + n as u64;
-                        if size > b.len() - pos {
-                            None
-                        } else {
-                            b.slice(pos, pos + size).map(|x| (batches.push(x), pos + size))
-                        }
+                        if size > b.len() - pos { None } else { b.slice(pos, pos + size).map(|x| (pos + size, x)) }
                     }
-                })
+                }
+                None => None,
             }
-        })
+        }
     });
-    end.and_then(|e| if e.1 == b.len() { Some(e.0) } else { None })
+    let end = match steps.last() {
+        Some(s) => s.0,
+        None => 0,
+    };
+    if end == b.len() { Some(steps.map(|s| s.1)) } else { None }
 }
 
 /// Whether `b` is one whole, uncorrupted magic-2 batch: its length matches, its counts are sane and its CRC32C over

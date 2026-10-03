@@ -232,6 +232,15 @@ pub struct RuleWork {
     pub steps: u64,
 }
 
+/// The work of one function's calls, measured without a clock: how many calls, the expression nodes they
+/// evaluated (the functions they called included), and those of the function's own bodies (`self_steps`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FnWork {
+    pub calls: u64,
+    pub steps: u64,
+    pub self_steps: u64,
+}
+
 /// What one tick of a stateful executor produces.
 #[derive(Clone, Debug, Default)]
 pub struct StepOutput {

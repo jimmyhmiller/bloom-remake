@@ -26,10 +26,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use blossom_artifact::bls::BlsArtifact;
-use blossom_base::{RelId, RuleId, TypeId};
+use blossom_base::{FnId, RelId, RuleId, TypeId};
 use blossom_ir::core::{Persistence, Program, RelClass};
 use blossom_ir::printer::{literal_text, rule_text, value_text, var_text};
-use blossom_ir::tick::{Row, RuleWork};
+use blossom_ir::tick::{FnWork, Row, RuleWork};
 use blossom_sim::replay::{Replay, ReplayError, Replayed};
 use blossom_value::time::NodeId;
 use blossom_value::value::IntValue;
@@ -194,6 +194,26 @@ fn print_work(names: &Names<'_>, work: &BTreeMap<RuleId, RuleWork>, top: usize) 
         let Some(rule) = program.rules.get(id) else { continue };
         println!("  {:>12}  {:>12}  {} ({:?})", w.steps, w.rows, rule.label, rule.kind);
         println!("                              {}", rule_text(program, rule));
+    }
+}
+
+/// The `top` functions whose own bodies took the most steps in `work`, with their calls and their steps including
+/// the functions they called.
+fn print_fn_work(names: &Names<'_>, work: &BTreeMap<FnId, FnWork>, top: usize) {
+    if work.is_empty() {
+        return;
+    }
+    let mut by: Vec<(FnId, FnWork)> = work.iter().map(|(k, v)| (*k, *v)).collect();
+    by.sort_by(|a, b| b.1.self_steps.cmp(&a.1.self_steps).then(a.0.cmp(&b.0)));
+    println!("  functions, by their own steps:");
+    println!("  {:>12}  {:>12}  {:>10}", "own steps", "with calls", "calls");
+    let program = names.program();
+    for (id, w) in by.into_iter().take(top) {
+        let name = program
+            .fns
+            .get(id)
+            .map_or_else(|| format!("{id:?}"), |d| d.name.to_string());
+        println!("  {:>12}  {:>12}  {:>10}  {name}", w.self_steps, w.steps, w.calls);
     }
 }
 
@@ -622,6 +642,7 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
             let names = Names { artifact: &artifact };
             replay.profile(true).map_err(err)?;
             let mut work: BTreeMap<RuleId, RuleWork> = BTreeMap::new();
+            let mut fns: BTreeMap<FnId, FnWork> = BTreeMap::new();
             let mut ticks = 0u64;
             while let Some(r) = replay.next(false).map_err(err)? {
                 ticks += 1;
@@ -630,9 +651,16 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
                     w.rows += n.rows;
                     w.steps += n.steps;
                 }
+                for (f, n) in r.fn_work {
+                    let w = fns.entry(f).or_default();
+                    w.calls += n.calls;
+                    w.steps += n.steps;
+                    w.self_steps += n.self_steps;
+                }
             }
             println!("{ticks} ticks");
             print_work(&names, &work, top);
+            print_fn_work(&names, &fns, top);
             Ok(())
         }
         TraceCommand::Profile {
@@ -662,6 +690,7 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
                 received(&names, &r)
             );
             print_work(&names, &r.work, top);
+            print_fn_work(&names, &r.fn_work, top);
             Ok(())
         }
         TraceCommand::Why { common, at, pattern } => {

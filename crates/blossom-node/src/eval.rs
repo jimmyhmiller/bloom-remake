@@ -11,8 +11,10 @@
 
 use std::collections::BTreeMap;
 
-use blossom_base::{RelId, RuleId};
-use blossom_ir::tick::{Changes, EvalError, Instance, Row, RuleWork, StepInput, StepOutput, TickInput, TickOutput};
+use blossom_base::{FnId, RelId, RuleId};
+use blossom_ir::tick::{
+    Changes, EvalError, FnWork, Instance, Row, RuleWork, StepInput, StepOutput, TickInput, TickOutput,
+};
 use blossom_oracle::Oracle;
 
 /// Runs one node's tick from an explicit carried state (the reference interface).
@@ -53,6 +55,10 @@ pub trait Executor: Send {
     fn rows_examined(&self) -> Option<u64>;
     /// The work of each rule so far (rows examined, expression nodes evaluated), if the executor measures it.
     fn work_by_rule(&self) -> Option<BTreeMap<RuleId, RuleWork>>;
+    /// Starts (afresh) or stops counting each function's work; false if the executor cannot.
+    fn profile_functions(&mut self, on: bool) -> bool;
+    /// Each function's work since counting started, if it is counted.
+    fn work_by_function(&self) -> Option<BTreeMap<FnId, FnWork>>;
     /// Whether a row the executor keeps beyond its carried state holds `b`: a blob it may still copy into a durable
     /// row or a request without creating it again. (The node counts the carried rows' blobs itself, from each tick's
     /// changes.)
@@ -126,6 +132,14 @@ impl<E: Evaluator> Executor for OracleExecutor<E> {
         None
     }
 
+    fn profile_functions(&mut self, _on: bool) -> bool {
+        false
+    }
+
+    fn work_by_function(&self) -> Option<BTreeMap<FnId, FnWork>> {
+        None
+    }
+
     /// The reference evaluator recomputes every derived row, and the blobs they hold, at every tick: only the
     /// carried rows keep blobs across ticks.
     /// The reference evaluator keeps only its carried state: it derives every other row afresh each tick, which
@@ -160,6 +174,14 @@ impl<X: Executor + ?Sized> Executor for Box<X> {
         (**self).work_by_rule()
     }
 
+    fn profile_functions(&mut self, on: bool) -> bool {
+        (**self).profile_functions(on)
+    }
+
+    fn work_by_function(&self) -> Option<BTreeMap<FnId, FnWork>> {
+        (**self).work_by_function()
+    }
+
     fn holds_blob(&self, b: &blossom_value::BlobRef) -> bool {
         (**self).holds_blob(b)
     }
@@ -188,6 +210,15 @@ impl Executor for blossom_engine::Engine {
 
     fn work_by_rule(&self) -> Option<BTreeMap<RuleId, RuleWork>> {
         Some(blossom_engine::Engine::work_by_rule(self).clone())
+    }
+
+    fn profile_functions(&mut self, on: bool) -> bool {
+        self.set_profile_functions(on);
+        true
+    }
+
+    fn work_by_function(&self) -> Option<BTreeMap<FnId, FnWork>> {
+        blossom_engine::Engine::work_by_function(self)
     }
 
     fn holds_blob(&self, b: &blossom_value::BlobRef) -> bool {
