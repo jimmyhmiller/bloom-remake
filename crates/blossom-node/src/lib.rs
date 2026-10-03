@@ -14,6 +14,7 @@ pub mod env;
 pub mod eval;
 pub mod manual;
 pub mod node;
+pub mod record;
 pub mod recovery;
 pub mod streams;
 pub mod timers;
@@ -26,7 +27,6 @@ use blossom_wire::codec::WireError;
 
 pub use eval::{Backend, EngineEvaluator, Evaluator, Executor, Executors, OracleExecutor};
 pub use node::{Boot, Node, NodeConfig, NodeState, ReleasedTick, TickEffects};
-
 
 /// Why a node operation failed.
 #[derive(Debug, thiserror::Error)]

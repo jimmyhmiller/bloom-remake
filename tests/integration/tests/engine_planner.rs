@@ -1,15 +1,18 @@
 //! Slice 5: the engine's join planner against the reference oracle. Each fixture in `fixtures/engine/` exercises one
 //! planning decision whose exactness is subtle: a `let` hoisted before an atom (its error counts only for complete
 //! valuations), a range probe from a guard (not past a check that can fail), and range probes over an ordered index
-//! as rows are inserted and deleted. The engine must agree with the oracle at every tick: the same rows, or the same
-//! error at the same tick.
+//! as rows are inserted and deleted; and the semi-naive evaluation of recursive strata (chains, mutual recursion, a
+//! recursive table with carried rows, an error inside a recursion, and the cost of a long chain). The engine must
+//! agree with the oracle at every tick: the same rows, or the same error at the same tick.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
 use blossom_artifact::bls::BlsArtifact;
 use blossom_driver::bls::compile_file;
 use blossom_front::api::NodeSpec;
+use blossom_ir::tick::{Instance, TickInput};
 use blossom_node::EngineEvaluator;
 use blossom_sim::FaultSchedule;
 use blossom_sim::bls::{BlsSim, InputEvent};
@@ -312,4 +315,250 @@ fn integer_casts_convert_and_are_checked() {
         differential_on("integer_casts.bls", &solo, &[(1, 0, "e", vec![u16v(300)])], 2),
         Outcome::Failed { tick: Tick(1), code } if code == "BLSR004"
     ));
+}
+
+/// The rows of `rel` in the single node's instance at tick `t` of a run.
+#[cfg(test)]
+fn rows_at(run: &SyncRun, artifact_name: &str, rel: &str, t: usize) -> Vec<Vec<Value>> {
+    let artifact = compile(artifact_name);
+    let rel = artifact.rel_named(rel).unwrap();
+    run.rounds[t][0].instance.rows(rel).map(|r| r.to_vec()).collect()
+}
+
+/// A recursive view walking a table as a chain (a Kafka fetch's batches), evaluated semi-naively: the engine agrees
+/// with the oracle as the chain grows, breaks where a batch is removed, and is mended.
+#[test]
+fn a_recursive_chain_agrees_with_the_oracle() {
+    let mut inputs: Vec<(u64, &str, u64)> = (0..30).map(|b| (0, "add", b)).collect();
+    // A delete takes effect at the next tick; an add (`emit`) at its own.
+    inputs.extend([
+        (1, "ask", 1000),
+        (2, "ask", 31),
+        (3, "remove", 10),
+        (5, "add", 10),
+        (6, "remove", 0),
+        (8, "add", 0),
+    ]);
+    let Outcome::Ran(run) = differential("recursive_chain.bls", &inputs, 9) else {
+        panic!("recursive_chain.bls failed")
+    };
+    let u = |x: u64| Value::Int(IntValue::U64(x));
+    let len = |t: usize| rows_at(&run, "recursive_chain.bls", "chain_len", t);
+    assert!(len(1).contains(&vec![u(1000), u(30)]), "{:?}", len(1));
+    assert!(len(2).contains(&vec![u(31), u(16)]), "{:?}", len(2));
+    assert!(len(4).contains(&vec![u(1000), u(10)]), "{:?}", len(4));
+    assert!(len(5).contains(&vec![u(1000), u(30)]), "{:?}", len(5));
+    assert!(len(7).is_empty(), "{:?}", len(7));
+    assert!(len(8).contains(&vec![u(1000), u(30)]), "{:?}", len(8));
+}
+
+/// Mutual recursion over a graph with cycles, as edges come and go.
+#[test]
+fn mutual_recursion_agrees_with_the_oracle() {
+    let mut inputs: Vec<(u64, &str, u64)> = (0..17).map(|x| (0, "link", x)).collect();
+    inputs.extend([(1, "start", 0), (2, "unlink", 3), (3, "start", 5), (4, "unlink", 0), (5, "link", 3)]);
+    assert!(matches!(differential("recursive_mutual.bls", &inputs, 7), Outcome::Ran(_)));
+}
+
+/// A table its own rules extend within the tick, with rows carried and seeded from outside the recursion.
+#[test]
+fn a_recursive_table_with_carried_rows_agrees_with_the_oracle() {
+    let mut inputs: Vec<(u64, &str, u64)> = (0..13).map(|x| (0, "link", x)).collect();
+    inputs.extend([(1, "seed", 0), (2, "unlink", 1), (3, "seed", 7), (4, "unlink", 7), (5, "seed", 2)]);
+    assert!(matches!(differential("recursive_table.bls", &inputs, 7), Outcome::Ran(_)));
+}
+
+/// A recursive step that divides by zero partway along the chain: the engine fails at the oracle's tick with its
+/// error (the semi-naive iteration hands an erring stratum to the naive one, which reports errors at the fixpoint).
+#[test]
+fn an_error_inside_a_recursion_is_the_oracles() {
+    let mut inputs: Vec<(u64, &str, u64)> = (0..15).map(|b| (0, "add", b)).collect();
+    inputs.push((1, "ask", 1000));
+    assert!(matches!(differential("recursive_error.bls", &inputs, 3), Outcome::Failed { .. }));
+    let mut short: Vec<(u64, &str, u64)> = (0..15).map(|b| (0, "add", b)).collect();
+    short.push((1, "ask", 15));
+    differential("recursive_error.bls", &short, 3);
+}
+
+/// The rows the engine examines to walk a chain of `n` batches once.
+#[cfg(test)]
+fn chain_work(n: u64) -> u64 {
+    use blossom_ir::tick::StepInput;
+    use blossom_value::time::Instant;
+    let artifact = compile("recursive_chain.bls");
+    let cfg = blossom_engine::EngineConfig {
+        roles: artifact.roles.clone(),
+        node_names: artifact.nodes.iter().map(|x| Arc::from(x.as_str())).collect(),
+        seed: Some(blossom_value::Seed::from_u64(0)),
+        ..blossom_engine::EngineConfig::default()
+    };
+    let mut engine = blossom_engine::Engine::new(artifact.program.clone(), NodeId(0), cfg).unwrap();
+    let rel = |r: &str| artifact.rel_named(r).unwrap();
+    let u = |x: u64| -> blossom_ir::tick::Row { Arc::from(vec![Value::Int(IntValue::U64(x))]) };
+    let step = |engine: &mut blossom_engine::Engine, tick: u64, events: Vec<(blossom_base::RelId, blossom_ir::tick::Row)>| {
+        engine
+            .step(
+                &StepInput {
+                    node: NodeId(0),
+                    incarnation: 1,
+                    tick: Tick(tick),
+                    now: Instant(tick as i64),
+                    events: &events,
+                    delivered: &[],
+                    ingress: &[],
+                    blobs: &blossom_value::NoBlobs,
+                },
+                &[],
+            )
+            .unwrap();
+    };
+    step(&mut engine, 0, (0..n).map(|b| (rel("add"), u(b))).collect());
+    let before = engine.rows_examined();
+    step(&mut engine, 1, vec![(rel("ask"), u(u64::MAX))]);
+    let work = engine.rows_examined() - before;
+    let len = engine.carried_rows(rel("asked")).len();
+    assert_eq!(len, 1);
+    work
+}
+
+/// A recursive chain costs in proportion to its length: each step's valuation is joined about once, not once per
+/// round of the fixpoint (the naive iteration's n rounds of n rows made a Kafka fetch of a few hundred batches take
+/// seconds). Counted in rows examined, so the check is exact and machine-independent.
+#[test]
+fn a_recursive_chain_costs_its_length_not_its_square() {
+    let (small, large) = (chain_work(400), chain_work(800));
+    assert!(large < 3 * small, "a chain of 400 examined {small} rows, of 800 {large}");
+    assert!(large < 40 * 800, "a chain of 800 examined {large} rows");
+}
+
+/// A later binding keys a probe only past checks that cannot fail: a fallible guard ahead of it still sees, and
+/// raises its error on, the rows the binding would reject.
+#[test]
+fn a_binding_keys_a_probe_only_past_checks_that_cannot_fail() {
+    let fails = [(0, "put", 0), (0, "put", 6), (1, "go", 5)];
+    assert!(matches!(
+        differential("key_after_fallible.bls", &fails, 2),
+        Outcome::Failed { tick: Tick(1), code } if code == "BLSR004"
+    ));
+    let Outcome::Ran(run) = differential("key_after_fallible.bls", &[(0, "put", 6), (0, "put", 7), (1, "go", 5)], 2)
+    else {
+        panic!("key_after_fallible.bls failed without a zero")
+    };
+    let u = |x: u64| Value::Int(IntValue::U64(x));
+    assert_eq!(rows_at(&run, "key_after_fallible.bls", "out", 1), vec![vec![u(5), u(6)]]);
+}
+
+/// A recursion that never converges fails with BLSR007 once the rounds reach the bound (CR-53); the semi-naive
+/// iteration hands it to the naive one, which reports it.
+#[test]
+fn a_recursion_that_never_converges_fails_at_the_round_bound() {
+    use blossom_ir::tick::StepInput;
+    use blossom_value::time::Instant;
+    let artifact = compile("recursive_unbounded.bls");
+    let cfg = blossom_engine::EngineConfig {
+        roles: artifact.roles.clone(),
+        node_names: artifact.nodes.iter().map(|x| Arc::from(x.as_str())).collect(),
+        seed: Some(blossom_value::Seed::from_u64(0)),
+        max_rounds: 40,
+        ..blossom_engine::EngineConfig::default()
+    };
+    let mut engine = blossom_engine::Engine::new(artifact.program.clone(), NodeId(0), cfg).unwrap();
+    let events = vec![(artifact.rel_named("start").unwrap(), Arc::from(vec![Value::Int(IntValue::U64(0))]))];
+    let r = engine.step(
+        &StepInput {
+            node: NodeId(0),
+            incarnation: 1,
+            tick: Tick(0),
+            now: Instant(0),
+            events: &events,
+            delivered: &[],
+            ingress: &[],
+            blobs: &blossom_value::NoBlobs,
+        },
+        &[],
+    );
+    match r {
+        Err(blossom_ir::tick::EvalError::Program { error, .. }) => assert_eq!(error.code, "BLSR007"),
+        other => panic!("expected BLSR007, got {:?}", other.map(|_| ())),
+    }
+}
+
+/// One tick of `name` from an empty state with input `events` (relation, u64), on the oracle and on the engine, both
+/// bounded to `max_rounds` per recursive stratum: the instance, or the program error's code.
+#[cfg(test)]
+fn bounded_tick(
+    name: &str,
+    events: &[(&str, u64)],
+    max_rounds: u32,
+) -> (Result<Instance, String>, Result<Instance, String>) {
+    use blossom_node::Evaluator;
+    let artifact = compile(name);
+    let seed = blossom_value::Seed::from_u64(0);
+    let oracle = blossom_oracle::Oracle::with_limits(artifact.program.clone(), blossom_oracle::Limits { max_rounds })
+        .unwrap()
+        .with_roles(artifact.roles.clone())
+        .with_seed(seed)
+        .unwrap()
+        .with_node_names(vec![Arc::from("n1")])
+        .unwrap();
+    let cfg = blossom_engine::EngineConfig {
+        roles: artifact.roles.clone(),
+        node_names: vec![Arc::from("n1")],
+        seed: Some(seed),
+        max_rounds,
+        ..blossom_engine::EngineConfig::default()
+    };
+    let engine = EngineEvaluator::new(artifact.program.clone(), cfg);
+    let events: Vec<(blossom_base::RelId, blossom_ir::tick::Row)> = events
+        .iter()
+        .map(|(r, v)| (artifact.rel_named(r).unwrap(), Arc::from(vec![Value::Int(IntValue::U64(*v))])))
+        .collect();
+    let carried = Instance::default();
+    let input = TickInput {
+        node: NodeId(0),
+        incarnation: 1,
+        tick: Tick(0),
+        now: blossom_value::time::Instant(0),
+        carried: &carried,
+        events: &events,
+        delivered: &[],
+        ingress: &[],
+        capture: false,
+        blobs: &blossom_value::NoBlobs,
+    };
+    let o = oracle.tick(&input).map(|out| out.instance).map_err(|e| match e {
+        blossom_oracle::OracleError::Program { error, .. } => error.code.to_string(),
+        other => panic!("{name}: the oracle failed: {other}"),
+    });
+    let e = engine.tick(&input).map(|out| out.instance).map_err(|e| match e {
+        blossom_ir::tick::EvalError::Program { error, .. } => error.code.to_string(),
+        other => panic!("{name}: the engine failed: {other}"),
+    });
+    (o, e)
+}
+
+/// The semi-naive iteration goes through the naive iteration's rounds: under every round bound, from one round to
+/// past the fixpoint, the engine converges exactly when the oracle (the naive iteration) does, to the same instance,
+/// and fails with the same error when it does not (BLSR007, or an error a valuation raises at the fixpoint).
+#[test]
+fn semi_naive_rounds_are_the_naive_rounds() {
+    let chain: Vec<(&str, u64)> = (0..12).map(|b| ("add", b)).chain([("ask", 1000)]).collect();
+    let mutual: Vec<(&str, u64)> = (0..17).map(|x| ("link", x)).chain([("start", 0)]).collect();
+    let table: Vec<(&str, u64)> = (0..13).map(|x| ("link", x)).chain([("seed", 0)]).collect();
+    let error: Vec<(&str, u64)> = (0..15).map(|b| ("add", b)).chain([("ask", 1000)]).collect();
+    for (name, events) in [
+        ("recursive_chain.bls", &chain),
+        ("recursive_mutual.bls", &mutual),
+        ("recursive_table.bls", &table),
+        ("recursive_error.bls", &error),
+    ] {
+        let mut outcomes = BTreeSet::new();
+        for k in 1..=30 {
+            let (o, e) = bounded_tick(name, events, k);
+            assert_eq!(o, e, "{name} with at most {k} rounds");
+            outcomes.insert(o.as_ref().err().cloned().unwrap_or_else(|| "converged".into()));
+        }
+        // The sweep reaches both sides of the bound.
+        assert!(outcomes.contains("BLSR007") && outcomes.len() > 1, "{name}: {outcomes:?}");
+    }
 }

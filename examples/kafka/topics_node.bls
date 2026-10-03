@@ -48,6 +48,7 @@ view wanted_cmd(tag, cmd) {
     metadata_cmd_of(_c, _i, tag, cmd);
     alter_cmd_of(_c, _i, tag, cmd);
     reassigned_cmd_of(tag, cmd);
+    offsets_cmd(tag, cmd);
 }
 
 // ---------------------------------------------------------------- CreateTopics

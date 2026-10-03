@@ -98,7 +98,7 @@ view produce_entry(c, i, j, name, p, records, req, o) =
 view entry_check(c, i, j, tid, p, o, checked) =
     produce_entry(c, i, j, name, p, records, req, o), not produce_started(c, i), produce_request_error(req) == None,
     mtopic(name, tid, parts, cfg), led(tid, p, _), let g = (tid, p), isr_of(g, isr), p >= 0i32, p < parts,
-    let checked = check_entry(records, req.acks, cfg, isr.len());
+    let checked = check_entry(records, req.acks, cfg, isr.len()) where name != OFFSETS_TOPIC;
 
 /// This tick's appends, per partition, in order: each one's order and batches.
 view appends(tid, p, xs = collect!((o, bs))) = entry_check(_c, _i, _j, tid, p, o, ch), ch.error == NONE, let bs = ch.batches;
@@ -162,11 +162,17 @@ view entry_answer_now(c, i, j, a) {
     produce_entry(c, i, j, _name, _p, _records, req, _o), not produce_started(c, i), let Some(err) = produce_request_error(req),
         let a = PartitionAnswer { error: err.0, base_offset: -1i64, log_start: -1i64, message: Some(err.1), bad_batch: None };
     produce_entry(c, i, j, name, _p, _records, req, _o), not produce_started(c, i), produce_request_error(req) == None,
-        not mtopic(name, _, _, _), let a = unknown_partition();
+        not mtopic(name, _, _, _), let a = unknown_partition() where name != OFFSETS_TOPIC;
     produce_entry(c, i, j, name, p, _records, req, _o), not produce_started(c, i), produce_request_error(req) == None,
-        mtopic(name, _tid, parts, _cfg), let a = unknown_partition() where p < 0i32 || p >= parts;
+        mtopic(name, _tid, parts, _cfg), let a = unknown_partition() where name != OFFSETS_TOPIC && (p < 0i32 || p >= parts);
     produce_entry(c, i, j, name, p, _records, req, _o), not produce_started(c, i), produce_request_error(req) == None,
-        mtopic(name, tid, parts, _cfg), not led(tid, p, _), let a = not_leader() where p >= 0i32 && p < parts;
+        mtopic(name, tid, parts, _cfg), not led(tid, p, _), let a = not_leader() where name != OFFSETS_TOPIC && p >= 0i32 && p < parts;
+    // Kafka refuses appends to an internal topic from clients.
+    produce_entry(c, i, j, name, _p, _records, req, _o), not produce_started(c, i), produce_request_error(req) == None,
+        let a = PartitionAnswer {
+            error: INVALID_TOPIC_EXCEPTION, base_offset: -1i64, log_start: -1i64,
+            message: Some("Cannot append to internal topic __consumer_offsets"), bad_batch: None,
+        } where name == OFFSETS_TOPIC;
     entry_check(c, i, j, _tid, _p, _o, ch), ch.error != NONE,
         let a = PartitionAnswer { error: ch.error, base_offset: -1i64, log_start: -1i64, message: ch.message, bad_batch: ch.bad_batch };
     entry_check(c, i, j, tid, p, o, ch), ch.error == NONE, append_outcome(tid, p, o, out), log_start(tid, p, start),
@@ -303,7 +309,7 @@ view high_watermark(tid, p, end) {
 /// (A partition installing a snapshot point this tick materializes nothing: the install resets what it would write.
 /// The entries are found by an index range, not by scanning the log.)
 view to_apply_d(tid, p, a, c) =
-    applied_d(tid, p, a), not installing(tid, p), materialize_to(tid, p, c) where c > a;
+    applied_d(tid, p, a), not installing(tid, p), not offsets_stale(tid, p, _), materialize_to(tid, p, c) where c > a;
 view to_materialize(tid, p, xs = collect!((i, base, last, max_ts, data, h))) =
     to_apply_d(tid, p, a, c), data_entry(tid, p, i, base, last, max_ts, h, data) where i > a && i <= c;
 view materialized_to(tid, p, c) = to_apply_d(tid, p, _a, c);
@@ -409,6 +415,7 @@ view compactable(g, i, pos) {
         commit_of(g, c) where a >= CONTROLLER_KEEP + CONTROLLER_KEEP && i <= c;
     applied_m(a), let g = controller(), rsnap(g, s, _, _, _), let i = a - CONTROLLER_KEEP, let pos = 0i64,
         commit_of(g, c) where a >= s + CONTROLLER_KEEP + CONTROLLER_KEEP && i <= c;
+    offsets_compactable(g, i, pos);
 }
 /// An index at or before a group's snapshot point (committed, and compacted away).
 view compacted_at(g, i) = placed(_c, _i, _j, tid, p, i, _e, _b, _l, _s), let g = (tid, p), rsnap(g, sp, _, _, _) where i <= sp;
@@ -424,7 +431,9 @@ reset_log: on reset_part(tid, p, i, pos) {
     upsert log_end(tid, p, pos);
     upsert applied_d(tid, p, i);
     upsert active_segment(tid, p, pos);
-    next segment(tid, p, pos, 0i64, -1i64, -1i64, now().as_millis());
+    // Replaces the segment already at `pos`, if any (`reset_segments` deletes the others): a replica whose log start
+    // is the point's position (an offsets partition's is always 0) has one.
+    upsert segment(tid, p, pos, 0i64, -1i64, -1i64, now().as_millis());
 }
 reset_batches: on reset_part(tid, p, _i, _pos), batch(tid, p, b, l, t, blob) {
     delete batch(tid, p, b, l, t, blob);

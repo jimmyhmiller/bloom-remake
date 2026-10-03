@@ -764,9 +764,11 @@ pub enum ExprKind {
         scrut: Box<Expr>,
         arms: Vec<MatchArm>,
     },
+    /// `Name { f: e, g, ..base }`: `base` gives the fields not written (LANGUAGE §5.2).
     StructLit {
         path: Vec<Ident>,
         fields: Vec<(Ident, Option<Expr>)>,
+        base: Option<Box<Expr>>,
     },
     Wildcard,
     SelfNode,

@@ -72,6 +72,9 @@ pub struct ServerConfig {
     pub backend: Backend,
     /// The host functions the program's `extern fn`s call (the standard library's, for `blossom run`).
     pub externs: Arc<blossom_value::ExternRegistry>,
+    /// Record every tick's inputs to a trace in this directory, `<node>-<incarnation>.blstrace` (ARCHITECTURE
+    /// §6.4), for `blossom trace` to replay and question.
+    pub record: Option<PathBuf>,
 }
 
 /// Counters of what the node did and dropped.
@@ -385,6 +388,28 @@ impl Server {
         let inbox_cap = ncfg.max_batch.saturating_mul(4);
         let boot = opened.boot.clone();
         let exec = executors.make(me)?;
+        let exec: Box<dyn blossom_node::Executor> = match &cfg.record {
+            None => exec,
+            Some(dir) => {
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| RuntimeError::Config(format!("the trace directory {}: {e}", dir.display())))?;
+                let path = dir.join(format!("{}-{}.blstrace", entry.name, boot.incarnation));
+                let header = blossom_trace::node::NodeTraceHeader {
+                    format: blossom_trace::node::FORMAT,
+                    program: program.meta.name.as_str().into(),
+                    version: program.meta.version,
+                    digest: artifact.program.digest().0,
+                    nodes: names.to_vec(),
+                    node: me,
+                    incarnation: boot.incarnation,
+                    seed: seed.0,
+                };
+                let file = create_private(&path)
+                    .map_err(|e| RuntimeError::Config(format!("the trace {}: {e}", path.display())))?;
+                let sink: Box<dyn std::io::Write + Send> = Box::new(std::io::BufWriter::new(file));
+                Box::new(blossom_node::record::Recording::new(sink, &header, exec)?)
+            }
+        };
         let node = Node::boot(ncfg, &artifact.program, exec, boot.clone())?;
         let restarts = opened.record.restarts;
         let last_checkpoint_lsn = opened.checkpoint.map_or(0, |c| c.lsn.0);
@@ -1432,4 +1457,17 @@ impl Engine {
             .send((job, t))
             .map_err(|_| RuntimeError::Fault("the checkpoint thread stopped".into()))
     }
+}
+
+/// Creates a new file readable and writable by its owner only (a trace holds the deployment's seed); an existing
+/// file is an error, never overwritten.
+fn create_private(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
 }

@@ -1579,10 +1579,19 @@ impl Cx<'_> {
                     None => self.names(node),
                 };
                 let mut fields = Vec::new();
+                let mut base = None;
                 for f in children_of(node, FIELDINIT) {
                     let fspan = self.span(&f);
                     if has_token(&f, RANGE) {
-                        self.unsupported("LANG-023", "struct update syntax `..base`", fspan);
+                        match expr_children(&f).next() {
+                            Some(e) if base.is_none() => base = Some(Box::new(self.expr(&e))),
+                            Some(_) => self.malformed("a struct literal with two `..base`s", fspan),
+                            None => self.malformed("`..` without a base", fspan),
+                        }
+                        continue;
+                    }
+                    if base.is_some() {
+                        self.malformed("a field after `..base` (the base comes last)", fspan);
                         continue;
                     }
                     let name = self.first_name(&f);
@@ -1592,7 +1601,7 @@ impl Cx<'_> {
                         None => self.malformed("a struct field without a name", fspan),
                     }
                 }
-                ExprKind::StructLit { path, fields }
+                ExprKind::StructLit { path, fields, base }
             }
             WILDCARD => ExprKind::Wildcard,
             SELFEXPR => ExprKind::SelfNode,

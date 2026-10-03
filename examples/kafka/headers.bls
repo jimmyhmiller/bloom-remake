@@ -30,6 +30,11 @@ fn flexible(api_key: i16, version: i16) -> bool {
         || (api_key == API_CREATE_TOPICS && version >= 5i16) || (api_key == API_DELETE_TOPICS && version >= 4i16)
         || (api_key == API_DESCRIBE_CONFIGS && version >= 4i16) || api_key == API_DESCRIBE_CLUSTER
         || api_key == API_ALTER_PARTITION_REASSIGNMENTS || api_key == API_LIST_PARTITION_REASSIGNMENTS
+        || (api_key == API_FIND_COORDINATOR && version >= 3i16) || (api_key == API_JOIN_GROUP && version >= 6i16)
+        || (api_key == API_SYNC_GROUP && version >= 4i16) || (api_key == API_HEARTBEAT && version >= 4i16)
+        || (api_key == API_LEAVE_GROUP && version >= 4i16) || (api_key == API_OFFSET_COMMIT && version >= 8i16)
+        || (api_key == API_OFFSET_FETCH && version >= 6i16) || (api_key == API_DESCRIBE_GROUPS && version >= 5i16)
+        || (api_key == API_LIST_GROUPS && version >= 3i16)
 }
 
 /// The fixed part of a request header: the API key, version and correlation id, which every version has. The rest

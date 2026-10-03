@@ -1,0 +1,24 @@
+//! A table its own rules extend within the tick: reachability whose rows are also carried from earlier ticks and
+//! seeded by inputs (support from outside the recursion), with edges removed later.
+program recursive_table version 1;
+
+input seed(x: u64);
+input link(x: u64);
+input unlink(x: u64);
+
+table edge(a: u64, b: u64);
+table reach(x: u64);
+
+mk: on link(x) {
+    emit edge(x, x + 1u64);
+    emit edge(x, (x * 5u64) % 13u64);
+}
+rm: on unlink(x), edge(a, b) where a == x {
+    delete edge(a, b);
+}
+sd: on seed(x) {
+    emit reach(x);
+}
+grow: while reach(x), edge(x, y) {
+    emit reach(y);
+}

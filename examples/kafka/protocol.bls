@@ -20,6 +20,14 @@ format compact_nullable_array(F) = nullable(array(uvarint, 1, F));
 format string16 = nullable(prefixed(i16, 0, utf8));
 format uuid = bytes(16);
 
+/// The same types in a message whose encoding depends on its version: the compact (flexible) encoding where `flex`
+/// holds, the legacy one otherwise (an int16 string length, an int32 bytes length or array count, -1 for null).
+format kstr(flex) = select(flex, compact_string, prefixed(i16, 0, utf8));
+format knstr(flex) = select(flex, compact_nullable_string, string16);
+format kbytes(flex) = select(flex, prefixed(uvarint, 1, rest), prefixed(i32, 0, rest));
+format karray(flex, F) = select(flex, compact_array(F), array(i32, 0, F));
+format knarray(flex, F) = select(flex, compact_nullable_array(F), nullable(array(i32, 0, F)));
+
 /// A decoding position in a buffer.
 struct Cur { buf: Bytes, pos: u64 }
 
@@ -93,6 +101,11 @@ fn by_topic<T>(counts: Vec<u64>, answers: Vec<(u64, T)>) -> Vec<Vec<T>> {
             None => error("by_topic: an entry has no answer"),
         })
     })
+}
+
+/// The second of each pair, in order.
+fn values_of<K, T>(xs: Vec<(K, T)>) -> Vec<T> {
+    xs.map(|x| x.1)
 }
 
 // ---------------------------------------------------------------- frames

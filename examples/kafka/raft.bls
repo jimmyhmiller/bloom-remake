@@ -13,6 +13,7 @@
 //!   its (see `initial_vote`), so a new group has a leader at once, without an election.
 //! - `compactable(g, i, pos)`: an index whose entries (it and every one before) this broker no longer needs, and
 //!   the position after it: they are committed and applied, and the includer has let go of what they held.
+//! - `confirms(g)`: the groups whose leadership the includer wants confirmed for reads (below, `confirmed_at`).
 //! and reads `rlog`, `commit_of`, `leader` and `known_leader`, and reacts to `install(g, i, pos)` (below).
 //!
 //! Membership changes (§4.2–4.3, one server at a time): a CONFIG entry holds a configuration, its members' ids. A
@@ -51,14 +52,27 @@ param RAFT_ELECTION_MAX: Duration = 600ms;
 param RAFT_HEARTBEAT: Duration = 50ms;
 param RAFT_POLL: Duration = 20ms;
 param RAFT_BATCH: u64 = 64;
+/// Whether a leader that hears from no majority for a period steps down (CheckQuorum, §6.2; below). Raft is safe
+/// without it; a test that needs a leader cut off to go on appending turns it off.
+param RAFT_CHECK_QUORUM: bool = true;
+/// Whether a member asks for pre-votes before it stands (PreVote, §9.6; below). It goes with CheckQuorum: a leader
+/// refuses pre-votes, so without CheckQuorum a leader cut off would keep the others from ever standing.
+param RAFT_PRE_VOTE: bool = true;
 
 /// Entry kinds (S8.md D3).
 const NOOP: u8 = 0;
 const DATA: u8 = 1;
 const CMD: u8 = 2;
 const CONFIG: u8 = 3;
+/// An offset commit, in a `__consumer_offsets` partition (S9.md D5).
+const OFFSETS: u8 = 4;
 
 channel request_vote(g: Group, term: u64, last_idx: u64, last_term: u64): Broker -> Broker;
+/// PreVote (§9.6): would the receiver vote for the sender in `term` (its next)? `round` names the sender's attempt,
+/// which the answer echoes; `current` is the answerer's own term, which a sender behind adopts (a member with the
+/// most complete log but an older term would otherwise ask for a term no one grants, for ever).
+channel pre_vote(g: Group, term: u64, last_idx: u64, last_term: u64, round: Instant): Broker -> Broker;
+channel pre_vote_reply(g: Group, term: u64, round: Instant, granted: bool, current: u64): Broker -> Broker;
 channel vote(g: Group, term: u64, granted: bool): Broker -> Broker;
 /// InstallSnapshot: the leader of `term` has compacted its log up to `idx` (whose term is `sterm`); `pos` is the
 /// position after it, and `conf` the configuration then (empty: the initial members).
@@ -135,10 +149,16 @@ fn log_bytes(data: Blob) -> Bytes {
         None => error("raft: a log entry's blob does not hold its own length"),
     }
 }
-/// A heartbeat: the leader's log holds `(prev_idx, prev_term)`, and its commit index is `commit`.
-channel beat(g: Group, term: u64, prev_idx: u64, prev_term: u64, commit: u64): Broker -> Broker;
-/// A follower's answer: its log agrees with the leader's up to `idx`.
-channel ack(g: Group, term: u64, idx: u64): Broker -> Broker;
+/// A heartbeat: the leader's log holds `(prev_idx, prev_term)`, and its commit index is `commit`; `sent` is when the
+/// leader sent it (by its clock), which the follower's answer echoes.
+channel beat(g: Group, term: u64, prev_idx: u64, prev_term: u64, commit: u64, sent: Instant): Broker -> Broker;
+/// A follower's answer: its log agrees with the leader's up to `idx`; `sent` is the answered heartbeat's (none for an
+/// answer to entries or a snapshot).
+channel ack(g: Group, term: u64, idx: u64, sent: Option<Instant>): Broker -> Broker;
+
+fn no_stamp() -> Option<Instant> {
+    None
+}
 
 at Broker {
     // ---- persistent state (Raft Fig. 2), per group
@@ -231,6 +251,7 @@ at Broker {
         where t0 <= 1 {
         next won(g, 1);
         next leader_of(g, 1, self);
+        next led_since(g, 1, now());
         next rlog(g, 1, 1, 0, NOOP, -1i64, empty);
         for members(g, f) where f != self {
             next match_idx(g, f, 0);
@@ -244,7 +265,8 @@ at Broker {
         vote(g, t, _);
         entries(g: g, term: t, ..);
         beat(g: g, term: t, ..);
-        ack(g, t, _);
+        ack(g, t, _, _);
+        pre_vote_reply(g: g, current: t, ..);
     }
     view eff(g, t = max!(x)) {
         rterm(g, x), takes(g);
@@ -256,7 +278,7 @@ at Broker {
     }
 
     view leader(g, t) = eff(g, t), won(g, t);
-    view candidate(g, t) = eff(g, t), rvote(g, t, self), not won(g, t), not leader_of(g, t, _);
+    view candidate(g, t) = eff(g, t), rvote(g, t, self), not won(g, t), not leader_of(g, t, _), not stepped_down(g, t);
     view known_leader(g, l) = eff(g, t), leader_of(g, t, l);
 
     view last_log(g, i, t) {
@@ -327,13 +349,60 @@ at Broker {
     rearm: on reset_timer(g), eff(g, t) {
         upsert deadline(g, now() + rand_range(RAFT_ELECTION_MIN, RAFT_ELECTION_MAX, ("election", g, t)));
     }
-    start_election: on timed_out(g, t), last_log(g, li, lt), let nt = t + 1 {
+    // ---- PreVote (§9.6)
+    /// A member whose election timeout passes first asks the others whether they would vote for it in the next term,
+    /// without anyone changing a term or a vote, and stands only once a majority would. So a member cut off from the
+    /// others (a follower, or a leader that stepped down, CheckQuorum) does not raise its term while cut off, and
+    /// does not depose a working leader when it is back. A member answers a pre-vote as it would a vote (a log at least
+    /// as up to date as its own, and no leader heard from within the minimum election timeout; a leader refuses), for a
+    /// term above its own. Each attempt (`round`, when it began) counts only its own answers.
+    table prevoting(g: Group, term: u64, round: Instant) key(g);
+    table prevoters(g: Group, term: u64, round: Instant, v: Node<Broker>);
+    start_prevote: on timed_out(g, t), last_log(g, li, lt), let nt = t + 1, let round = now() where RAFT_PRE_VOTE {
+        upsert prevoting(g, nt, round);
+        next prevoters(g, nt, round, self);
+        for members(g, p) where p != self {
+            send pre_vote(g, nt, li, lt, round) to p;
+        }
+    }
+    view pv_ok(g, c, nt, round) =
+        pre_vote(g, nt, li, lt, round) from c, eff(g, e), mine(g), not recently_led(g), not leader(g, _), last_log(g, mi, mt)
+        where nt > e && (lt > mt || (lt == mt && li >= mi));
+    grant_prevote: on pv_ok(g, c, nt, round), eff(g, e) {
+        send pre_vote_reply(g, nt, round, true, e) to c;
+    }
+    refuse_prevote: on pre_vote(g, nt, _, _, round) from c, mine(g), not pv_ok(g, c, nt, round), eff(g, e) {
+        send pre_vote_reply(g, nt, round, false, e) to c;
+    }
+    count_prevote: on pre_vote_reply(g, nt, round, true, _current) from v, prevoting(g, nt, round), members(g, v) {
+        emit prevoters(g, nt, round, v);
+    }
+    view pre_tally(g, nt, round, n = count!(v)) = prevoters(g, nt, round, v);
+    view prevote_won(g, nt) =
+        prevoting(g, nt, round), pre_tally(g, nt, round, n), group_size(g, k), eff(g, t) where n * 2 > k && nt == t + 1;
+    start_election: while prevote_won(g, nt), last_log(g, li, lt), prevoting(g, nt, round) {
+        next rterm(g, nt);
+        next rvote(g, nt, self);
+        next voters(g, nt, self);
+        delete prevoting(g, nt, round);
+        for members(g, p) where p != self {
+            send request_vote(g, nt, li, lt) to p;
+        }
+    }
+    /// Without PreVote, a member whose election timeout passes stands at once.
+    stand_at_once: on timed_out(g, t), last_log(g, li, lt), let nt = t + 1 where not RAFT_PRE_VOTE {
         next rterm(g, nt);
         next rvote(g, nt, self);
         next voters(g, nt, self);
         for members(g, p) where p != self {
             send request_vote(g, nt, li, lt) to p;
         }
+    }
+    forget_prevoting: while prevoting(g, nt, round), eff(g, t) where t >= nt {
+        delete prevoting(g, nt, round);
+    }
+    forget_prevoters: while prevoters(g, nt, round, v), not prevoting(g, nt, round) {
+        delete prevoters(g, nt, round, v);
     }
     count_vote: on vote(g, t, true) from v, members(g, v) {
         emit voters(g, t, v);
@@ -344,6 +413,7 @@ at Broker {
     become_leader: while elected(g, t), last_log(g, li, lt), let empty = Blob::of(Bytes::empty()) {
         next won(g, t);
         next leader_of(g, t, self);
+        next led_since(g, t, now());
         next rlog(g, li + 1, t, lt, NOOP, -1i64, empty);
         for members(g, p) where p != self {
             next match_idx(g, p, 0);
@@ -398,7 +468,7 @@ at Broker {
     view out_from(g, f, from) {
         leader(g, _), rsent(g, f, from), last_log(g, li, _) where li > from;
         raft_heartbeat, leader(g, _), match_idx(g, f, from);
-        ack(g, t, from) from f, leader(g, t), members(g, f), last_log(g, li, _) where from < li;
+        ack(g, t, from, _) from f, leader(g, t), members(g, f), last_log(g, li, _) where from < li;
     }
     /// A batch's entries: a range of the log (found by index, not by scanning it), read only for the batch.
     view out_rows(g, f, from, i, et, k, pos, data) =
@@ -418,10 +488,22 @@ at Broker {
         next rsent(g, f, if li > s + RAFT_BATCH { s + RAFT_BATCH } else { li });
     }
     beat_followers: on raft_heartbeat, leader(g, t), match_idx(g, f, m), term_at(g, m, mt), commit_of(g, c) {
-        send beat(g, t, m, mt, c) to f;
+        send beat(g, t, m, mt, c, now()) to f;
     }
-    on_ack: on ack(g, t, m) from f, leader(g, t), members(g, f) {
+    on_ack: on ack(g, t, m, _sent) from f, leader(g, t), members(g, f) {
         next match_idx(g, f, m);
+    }
+    /// Leadership confirmations for reads (Raft's ReadIndex, §6.4), for the groups the includer reads (`confirms`):
+    /// when each follower last answered a heartbeat, by the heartbeat's send time. A read that arrived at `t` may be
+    /// answered once a majority of the configuration (this leader with the followers whose confirmation is at or
+    /// after `t`) has answered a heartbeat sent since: then no other leader had been elected by `t`, so nothing was
+    /// committed by `t` that this leader lacks. Kept only while reads wait.
+    table confirmed_at(g: Group, f: Node<Broker>, at: Instant) key(g, f) resolve choose_most(at);
+    note_confirmed: on ack(g, t, _m, s) from f, leader(g, t), members(g, f), confirms(g), let Some(at) = s {
+        next confirmed_at(g, f, at);
+    }
+    forget_confirmed: while confirmed_at(g, f, at), not confirms(g) {
+        delete confirmed_at(g, f, at);
     }
     /// The leader follows its configuration's members: one added gets its records (and its entries from the start,
     /// at the next heartbeat), one removed loses them.
@@ -459,6 +541,46 @@ at Broker {
         delete won(g, t);
     }
 
+    // ---- CheckQuorum (§6.2)
+    /// A leader that has not heard from a majority of its configuration for a whole check period
+    /// (`RAFT_ELECTION_MIN`) steps down: a leader cut off from the others stops acting as one, so the clients
+    /// connected to it go elsewhere (its followers elect another once their election timeouts pass) and nothing is
+    /// acknowledged or read there that a successor may lack. `quorum_heard` holds the followers it heard from in the
+    /// current period; `led_since`, when its leadership began (a first period that began before it does not count).
+    table quorum_heard(g: Group, f: Node<Broker>) key(g, f);
+    table led_since(g: Group, t: u64, at: Instant) key(g, t);
+    /// The term a leader stepped down in: it is a follower for the rest of the term, never its candidate again (it
+    /// still holds that term's votes, which would elect it at once).
+    table stepped_down(g: Group, t: u64) key(g);
+    view leading() = won(_, _) where RAFT_CHECK_QUORUM;
+    timer quorum_check every RAFT_ELECTION_MIN while leading;
+    note_heard: on ack(g, t, _m, _s) from f, leader(g, t), members(g, f), not quorum_heard(g, f) {
+        upsert quorum_heard(g, f);
+    }
+    view heard_n(g, n = count!(f)) = quorum_heard(g, f), members(g, f);
+    view quorum_kept(g) {
+        heard_n(g, n), group_size(g, k), mine(g) where (n + 1) * 2 > k;
+        heard_n(g, n), group_size(g, k), not mine(g) where n * 2 > k;
+        group_size(g, k), mine(g) where k == 1;
+    }
+    check_quorum: on quorum_check, leader(g, t), led_since(g, t, at), not quorum_kept(g) where now() >= at + RAFT_ELECTION_MIN {
+        delete won(g, t);
+        delete leader_of(g, t, self);
+        upsert stepped_down(g, t);
+    }
+    forget_stepped_down: while stepped_down(g, t), eff(g, e) where e > t {
+        delete stepped_down(g, t);
+    }
+    new_quorum_period: on quorum_check, quorum_heard(g, f) {
+        delete quorum_heard(g, f);
+    }
+    forget_quorum: while quorum_heard(g, f), not leader(g, _) {
+        delete quorum_heard(g, f);
+    }
+    forget_led_since: while led_since(g, t, at), not won(g, t) {
+        delete led_since(g, t, at);
+    }
+
     // ---- replication, follower side
     /// Batches of the leader of our term whose predecessor matches our log (or that start the log).
     /// A predecessor at or before the snapshot point matches: those entries are committed, the same everywhere.
@@ -485,13 +607,13 @@ at Broker {
     view matched(g, l, t, m = max!(e)) = batch_taken(g, l, t, p, _pt, es), let e = p + es.len();
     reply_entries: on matched(g, l, t, m) {
         emit leader_of(g, t, l);
-        send ack(g, t, m) to l;
+        send ack(g, t, m, no_stamp()) to l;
     }
     /// A heartbeat whose `prev` matches confirms our log up to it and tells us the commit index.
-    view beat_ok(g, l, t, p, c) {
-        beat(g, t, p, pt, c) from l, eff(g, t), takes(g), rlog(g: g, idx: p, term: pt, ..);
-        beat(g, t, p, pt, c) from l, eff(g, t), takes(g) where p == 0;
-        beat(g, t, p, _pt, c) from l, eff(g, t), takes(g), rsnap(g, s, _, _, _) where p <= s;
+    view beat_ok(g, l, t, p, c, sent) {
+        beat(g, t, p, pt, c, sent) from l, eff(g, t), takes(g), rlog(g: g, idx: p, term: pt, ..);
+        beat(g, t, p, pt, c, sent) from l, eff(g, t), takes(g) where p == 0;
+        beat(g, t, p, _pt, c, sent) from l, eff(g, t), takes(g), rsnap(g, s, _, _, _) where p <= s;
     }
     /// A snapshot point past this broker's log: it drops its log and takes the point (Fig. 13). One that its log
     /// already reaches (it holds that entry, or has compacted past it) changes nothing but is acknowledged.
@@ -512,14 +634,14 @@ at Broker {
     }
     ack_snapshot: on snapshot(g, t, i, _st, _pos, _conf) from l, eff(g, t), takes(g) {
         emit leader_of(g, t, l);
-        send ack(g, t, i) to l;
+        send ack(g, t, i, no_stamp()) to l;
     }
-    follow: on beat_ok(g, l, t, p, c) {
+    follow: on beat_ok(g, l, t, p, c, sent) {
         emit leader_of(g, t, l);
-        send ack(g, t, p) to l;
+        send ack(g, t, p, Some(sent)) to l;
         next commit(g, if c < p { c } else { p });
     }
-    lagging: on beat(g: g, term: t, ..) from l, eff(g, t), takes(g), not beat_ok(g, l, t, _, _) {
+    lagging: on beat(g: g, term: t, ..) from l, eff(g, t), takes(g), not beat_ok(g, l, t, _, _, _) {
         emit leader_of(g, t, l);
     }
     hear_commit: on beat(g: g, term: t, commit: c, ..), eff(g, t), takes(g) {

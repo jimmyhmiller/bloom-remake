@@ -1,0 +1,687 @@
+//! The classic consumer group protocol at a group's coordinator (S9 item 3; S9.md D4), as pure functions over the
+//! group's state: the node (`groups_node.bls`) holds one `GroupState` per group, and each tick applies at most one
+//! request, or the deadlines that passed, to it, as Kafka's coordinator handles one event of a group at a time.
+//!
+//! The protocol is Kafka's (its `ClassicGroup` and the `GroupMetadataManager` that drives it):
+//! - a member joins without an id; from JoinGroup v4 it first gets MEMBER_ID_REQUIRED and an id, and joins with it
+//!   (KIP-394; until then it is a pending member);
+//! - a join to an Empty group starts a rebalance that waits `initial_delay` for more members (extended while members
+//!   keep coming, up to the rebalance timeout); any other rebalance completes once every member has rejoined, or at
+//!   the rebalance timeout, without the members that did not;
+//! - completing a rebalance starts a new generation: the protocol most members prefer among those every member
+//!   supports, the leader (kept if it rejoined), and the members' metadata, which only the leader gets;
+//! - the leader's SyncGroup carries every member's assignment; each member's SyncGroup waits for it, and the group is
+//!   Stable once it comes; one that does not come within the rebalance timeout removes the members that did not sync;
+//! - a member that sends nothing for its session timeout (and is not waiting on a JoinGroup or SyncGroup) is removed,
+//!   and so is one that leaves; either rebalances the group.
+//!
+//! A request that waits (a JoinGroup until the rebalance completes, a SyncGroup until the leader's) is parked: the
+//! member records it, by connection and request index, and the reply that completes it names it.
+
+const GROUP_EMPTY: i8 = 0;
+const GROUP_PREPARING: i8 = 1;
+const GROUP_COMPLETING: i8 = 2;
+const GROUP_STABLE: i8 = 3;
+
+/// A state's name, as DescribeGroups and ListGroups report it.
+fn state_name(s: i8) -> String {
+    if s == GROUP_EMPTY {
+        "Empty"
+    } else if s == GROUP_PREPARING {
+        "PreparingRebalance"
+    } else if s == GROUP_COMPLETING {
+        "CompletingRebalance"
+    } else if s == GROUP_STABLE {
+        "Stable"
+    } else {
+        error("state_name: not a group state")
+    }
+}
+
+/// The coordinator's settings: Kafka's `group.min.session.timeout.ms`, `group.max.session.timeout.ms` and
+/// `group.initial.rebalance.delay.ms`.
+struct GroupConfig { min_session_ms: i32, max_session_ms: i32, initial_delay_ms: i32 }
+
+/// A member: its id, instance id (S9.md D7), client id and host, timeouts, the protocols it supports with their
+/// metadata in its order of preference, its parked JoinGroup and SyncGroup, when it was last heard from, its
+/// assignment, and whether it has sent its SyncGroup since the last rebalance completed (Kafka's pending-sync members
+/// are those that have not).
+struct Member {
+    id: String,
+    instance: Option<String>,
+    client: String,
+    host: String,
+    session_ms: i32,
+    rebalance_ms: i32,
+    protocols: Vec<(String, Bytes)>,
+    join: Option<(Conn, u64)>,
+    sync: Option<(Conn, u64)>,
+    seen: Instant,
+    assignment: Bytes,
+    synced: bool,
+}
+
+/// A group: its state and generation; the protocol type its members share and the protocol chosen; the leader; the
+/// members, in the order they joined; the pending members (an id given by MEMBER_ID_REQUIRED, and until when it may
+/// join); the deadline of the state (PreparingRebalance: when the join completes at the latest; CompletingRebalance:
+/// when the leader's sync must come); and, for an initial rebalance (`initial`), whether a member joined since the
+/// delay began (`added`) and the rebalance timeout left after it (`remaining_ms`).
+struct GroupState {
+    state: i8,
+    generation: i32,
+    protocol_type: Option<String>,
+    chosen: Option<String>,
+    leader: Option<String>,
+    members: Vec<Member>,
+    pending: Vec<(String, Instant)>,
+    deadline: Instant,
+    initial: bool,
+    added: bool,
+    remaining_ms: i64,
+}
+
+/// A JoinGroup answer: the generation, protocol, leader, the member's id, and the members' metadata (to the leader).
+struct JoinAnswer {
+    error: i16,
+    generation: i32,
+    protocol_type: Option<String>,
+    chosen: Option<String>,
+    leader: String,
+    member_id: String,
+    members: Vec<(String, Option<String>, Bytes)>,
+}
+
+/// A SyncGroup answer: the protocol and the member's assignment.
+struct SyncAnswer { error: i16, protocol_type: Option<String>, chosen: Option<String>, assignment: Bytes }
+
+/// The answer to a parked or arriving JoinGroup or SyncGroup request, which the head `(c, i)` of a connection is.
+struct Reply { c: Conn, i: u64, join: Option<JoinAnswer>, sync: Option<SyncAnswer> }
+
+/// What one event does: the group after it (`None`: the group is gone, Empty with no one pending) and the answers it
+/// gives.
+struct Step { group: Option<GroupState>, replies: Vec<Reply> }
+
+/// No group (a group a request names before any state).
+fn group_none() -> Option<GroupState> {
+    None
+}
+
+fn new_group(now: Instant) -> GroupState {
+    GroupState {
+        state: GROUP_EMPTY, generation: 0i32, protocol_type: None, chosen: None, leader: None, members: [], pending: [],
+        deadline: now, initial: false, added: false, remaining_ms: 0i64,
+    }
+}
+
+fn join_reply(c: Conn, i: u64, a: JoinAnswer) -> Reply {
+    Reply { c: c, i: i, join: Some(a), sync: None }
+}
+
+fn sync_reply(c: Conn, i: u64, a: SyncAnswer) -> Reply {
+    Reply { c: c, i: i, join: None, sync: Some(a) }
+}
+
+/// A JoinGroup refused with `error`, before any generation.
+fn join_error(error: i16, member_id: String) -> JoinAnswer {
+    JoinAnswer { error: error, generation: -1i32, protocol_type: None, chosen: None, leader: "", member_id: member_id, members: [] }
+}
+
+fn sync_error(error: i16) -> SyncAnswer {
+    SyncAnswer { error: error, protocol_type: None, chosen: None, assignment: Bytes::empty() }
+}
+
+/// A group with no state change and one answer.
+fn unchanged(g: Option<GroupState>, r: Reply) -> Step {
+    Step { group: g, replies: [r] }
+}
+
+fn member_of(g: GroupState, id: String) -> Option<Member> {
+    g.members.filter(|m| m.id == id).first()
+}
+
+fn is_pending(g: GroupState, id: String) -> bool {
+    g.pending.any(|p| p.0 == id)
+}
+
+/// The protocols every one of `ms` supports, in the first member's order.
+fn common_protocols(ms: Vec<Member>) -> Vec<String> {
+    match ms.first() {
+        Some(m0) => m0.protocols.map(|p| p.0).filter(|n| ms.all(|m| m.protocols.any(|q| q.0 == n))),
+        None => [],
+    }
+}
+
+/// Whether a member of protocol type `ptype` supporting `protocols` may join (Kafka's `supportsProtocols`): any, to an
+/// empty group, with a type and a protocol; else of the group's type, with a protocol every member supports.
+fn group_supports(g: GroupState, ptype: String, protocols: Vec<(String, Bytes)>) -> bool {
+    if g.members.is_empty() {
+        ptype != "" && not protocols.is_empty()
+    } else {
+        let common = common_protocols(g.members);
+        g.protocol_type == Some(ptype) && protocols.any(|p| common.contains(p.0))
+    }
+}
+
+/// The protocol a member prefers among `candidates`.
+fn preferred_of(m: Member, candidates: Vec<String>) -> Option<String> {
+    m.protocols.map(|p| p.0).filter(|n| candidates.contains(n)).first()
+}
+
+/// The protocol for a generation: among those every member supports, the one most members prefer (the earliest in
+/// the first member's order on a tie).
+fn select_protocol(ms: Vec<Member>) -> Option<String> {
+    let candidates = common_protocols(ms);
+    let votes = candidates.map(|c| (c, ms.filter(|m| preferred_of(m, candidates) == Some(c)).len()));
+    let best = votes.fold(0u64, |b, v| if v.1 > b { v.1 } else { b });
+    votes.filter(|v| v.1 == best).map(|v| v.0).first()
+}
+
+/// A member's metadata for `protocol`.
+fn metadata_for(m: Member, chosen: Option<String>) -> Bytes {
+    match chosen {
+        Some(p) => m.protocols.filter(|q| q.0 == p).map(|q| q.1).first().unwrap_or(Bytes::empty()),
+        None => Bytes::empty(),
+    }
+}
+
+/// The largest rebalance timeout of the members (Kafka's group rebalance timeout).
+fn rebalance_ms(ms: Vec<Member>) -> i64 {
+    ms.fold(0i64, |t, m| if m.rebalance_ms as i64 > t { m.rebalance_ms as i64 } else { t })
+}
+
+fn after(now: Instant, ms: i64) -> Instant {
+    now + Duration::from_millis(ms)
+}
+
+/// The members with `m` in place of the member of its id.
+fn replaced(ms: Vec<Member>, m: Member) -> Vec<Member> {
+    ms.map(|x| if x.id == m.id { m } else { x })
+}
+
+/// Starts a rebalance (Kafka's `prepareRebalance`): a group completing one answers its parked SyncGroups with
+/// REBALANCE_IN_PROGRESS and drops its assignments. From Empty it is an initial rebalance, which waits `initial_delay`;
+/// otherwise it waits for the members up to the rebalance timeout.
+fn prepare_rebalance(g: GroupState, now: Instant, cfg: GroupConfig) -> Step {
+    let completing = g.state == GROUP_COMPLETING;
+    let replies = if completing {
+        g.members.filter_map(|m| m.sync.map(|p| sync_reply(p.0, p.1, sync_error(REBALANCE_IN_PROGRESS))))
+    } else {
+        []
+    };
+    let members = if completing { g.members.map(|m| Member { sync: None, assignment: Bytes::empty(), ..m }) } else { g.members };
+    let timeout = rebalance_ms(members);
+    let delay = cfg.initial_delay_ms as i64;
+    let initial = g.state == GROUP_EMPTY;
+    let group = GroupState {
+        state: GROUP_PREPARING,
+        members: members,
+        deadline: if initial { after(now, delay) } else { after(now, timeout) },
+        initial: initial,
+        added: false,
+        remaining_ms: if initial && timeout > delay { timeout - delay } else { 0i64 },
+        ..g
+    };
+    Step { group: Some(group), replies: replies }
+}
+
+/// `step`'s group, which an event that starts from a group always has.
+fn group_of(step: Step) -> GroupState {
+    match step.group {
+        Some(g) => g,
+        None => error("group_of: a step that keeps its group lost it"),
+    }
+}
+
+/// `a`'s answers, then `b`'s, with `b`'s group.
+fn then(a: Step, b: Step) -> Step {
+    Step { group: b.group, replies: a.replies.concat(b.replies) }
+}
+
+/// Adds a member that joins with its JoinGroup parked (Kafka's `addMemberThenRebalanceOrCompleteJoin`); the first
+/// member leads, and sets the group's protocol type. A group not already rebalancing starts to.
+fn add_member(g: GroupState, m: Member, ptype: String, now: Instant, cfg: GroupConfig) -> Step {
+    let g1 = GroupState {
+        members: g.members.push(m),
+        pending: g.pending.filter(|p| p.0 != m.id),
+        leader: if g.leader.is_none() { Some(m.id) } else { g.leader },
+        protocol_type: if g.protocol_type.is_none() { Some(ptype) } else { g.protocol_type },
+        added: g.added || (g.state == GROUP_PREPARING && g.initial),
+        ..g
+    };
+    if g.state == GROUP_PREPARING { Step { group: Some(g1), replies: [] } } else { prepare_rebalance(g1, now, cfg) }
+}
+
+/// A JoinGroup request as the coordinator sees it: the member's request, the id a new member gets (Kafka's client id
+/// and a UUID), its client host, and the request's place.
+struct JoinIn {
+    member_id: String,
+    instance: Option<String>,
+    client: String,
+    host: String,
+    session_ms: i32,
+    rebalance_ms: i32,
+    protocol_type: String,
+    protocols: Vec<(String, Bytes)>,
+    version: i16,
+    new_id: String,
+    c: Conn,
+    i: u64,
+}
+
+/// A JoinGroup to a group (`None`: no such group yet). Kafka's `classicGroupJoin`: a new member (no id) gets an id
+/// (from v4 by MEMBER_ID_REQUIRED, as a pending member) or joins at once; a known member rejoins, which rebalances a
+/// Stable group only for its leader or for changed protocols, and a group completing a rebalance only for changed
+/// protocols; otherwise it gets its generation at once.
+fn join(g0: Option<GroupState>, r: JoinIn, now: Instant, cfg: GroupConfig) -> Step {
+    let g = g0.unwrap_or(new_group(now));
+    let member = Member {
+        id: if r.member_id == "" { r.new_id } else { r.member_id }, instance: r.instance, client: r.client, host: r.host,
+        session_ms: r.session_ms, rebalance_ms: r.rebalance_ms, protocols: r.protocols, join: Some((r.c, r.i)),
+        sync: None, seen: now, assignment: Bytes::empty(), synced: false,
+    };
+    // A static member joining anew replaces the member of its instance id (whose requests are answered
+    // UNKNOWN_MEMBER_ID): a restarted static member never leaves a copy of itself behind.
+    let same_instance = match r.instance {
+        Some(inst) => g.members.filter(|m| m.instance == Some(inst)).map(|m| m.id),
+        None => [],
+    };
+    if not group_supports(g, r.protocol_type, r.protocols) {
+        unchanged(g0, join_reply(r.c, r.i, join_error(INCONSISTENT_GROUP_PROTOCOL, r.member_id)))
+    } else if r.member_id == "" {
+        if r.version >= 4i16 && r.instance.is_none() {
+            let g1 = GroupState { pending: g.pending.push((r.new_id, after(now, r.session_ms as i64))), ..g };
+            unchanged(Some(g1), join_reply(r.c, r.i, join_error(MEMBER_ID_REQUIRED, r.new_id)))
+        } else if same_instance.is_empty() {
+            add_member(g, member, r.protocol_type, now, cfg)
+        } else {
+            let s1 = remove_members(g, same_instance, now, cfg);
+            then(s1, add_member(group_of(s1), member, r.protocol_type, now, cfg))
+        }
+    } else if g0.is_none() {
+        unchanged(g0, join_reply(r.c, r.i, join_error(UNKNOWN_MEMBER_ID, r.member_id)))
+    } else if is_pending(g, r.member_id) {
+        add_member(g, member, r.protocol_type, now, cfg)
+    } else {
+        match member_of(g, r.member_id) {
+            None => unchanged(g0, join_reply(r.c, r.i, join_error(UNKNOWN_MEMBER_ID, r.member_id))),
+            Some(m) => rejoin(g, m, member, now, cfg),
+        }
+    }
+}
+
+/// A known member's JoinGroup (`m` as it was, `next` as it asks to be). A JoinGroup it had parked already is answered
+/// REBALANCE_IN_PROGRESS: the new one replaces it.
+fn rejoin(g: GroupState, m: Member, want: Member, now: Instant, cfg: GroupConfig) -> Step {
+    let (c, i) = match want.join {
+        Some(p) => p,
+        None => error("rejoin: a JoinGroup without its request"),
+    };
+    let superseded = match m.join {
+        Some(p) => if p != (c, i) { [join_reply(p.0, p.1, join_error(REBALANCE_IN_PROGRESS, m.id))] } else { [] },
+        None => [],
+    };
+    let same = want.protocols == m.protocols;
+    let updated = Member { sync: m.sync, assignment: m.assignment, synced: m.synced, ..want };
+    let g1 = GroupState { members: replaced(g.members, updated), ..g };
+    let current = JoinAnswer {
+        error: NONE, generation: g.generation, protocol_type: g.protocol_type, chosen: g.chosen,
+        leader: g.leader.unwrap_or(""), member_id: m.id,
+        members: if g.leader == Some(m.id) { g.members.map(|x| (x.id, x.instance, metadata_for(x, g.chosen))) } else { [] },
+    };
+    let at_once = Step { group: Some(GroupState { members: replaced(g.members, Member { seen: now, ..m }), ..g }), replies: [join_reply(c, i, current)] };
+    let step = if g.state == GROUP_PREPARING {
+        Step { group: Some(g1), replies: [] }
+    } else if g.state == GROUP_COMPLETING && same {
+        at_once
+    } else if g.state == GROUP_STABLE && same && g.leader != Some(m.id) {
+        at_once
+    } else {
+        prepare_rebalance(g1, now, cfg)
+    };
+    Step { group: step.group, replies: superseded.concat(step.replies) }
+}
+
+/// Completes a rebalance (Kafka's `onCompleteJoin`): the members that rejoined form the next generation, and each
+/// parked JoinGroup is answered; a group no one rejoined is Empty.
+fn complete_join(g: GroupState, now: Instant) -> Step {
+    let kept = g.members.filter(|m| m.join.is_some());
+    if kept.is_empty() {
+        Step {
+            group: Some(GroupState { state: GROUP_EMPTY, generation: g.generation + 1i32, protocol_type: None, chosen: None, leader: None, members: [], initial: false, added: false, ..g }),
+            replies: [],
+        }
+    } else {
+        let leader = match g.leader {
+            Some(l) => if kept.any(|m| m.id == l) { l } else { first_id(kept) },
+            None => first_id(kept),
+        };
+        let chosen = select_protocol(kept);
+        let generation = g.generation + 1i32;
+        let all = kept.map(|m| (m.id, m.instance, metadata_for(m, chosen)));
+        let replies = kept.filter_map(|m| m.join.map(|p| join_reply(p.0, p.1, JoinAnswer {
+            error: NONE, generation: generation, protocol_type: g.protocol_type, chosen: chosen, leader: leader,
+            member_id: m.id, members: if m.id == leader { all } else { [] },
+        })));
+        let members = kept.map(|m| Member { join: None, sync: None, seen: now, assignment: Bytes::empty(), synced: false, ..m });
+        let group = GroupState {
+            state: GROUP_COMPLETING, generation: generation, chosen: chosen, leader: Some(leader), members: members,
+            deadline: after(now, rebalance_ms(members)), initial: false, added: false,
+            ..g
+        };
+        Step { group: Some(group), replies: replies }
+    }
+}
+
+fn first_id(ms: Vec<Member>) -> String {
+    match ms.first() {
+        Some(m) => m.id,
+        None => error("first_id: no member"),
+    }
+}
+
+/// A SyncGroup request: the member's generation and assignments (from the leader), the protocol it expects (v5+),
+/// and the request's place.
+struct SyncIn {
+    generation: i32,
+    member_id: String,
+    protocol_type: Option<String>,
+    chosen: Option<String>,
+    assignments: Vec<(String, Bytes)>,
+    c: Conn,
+    i: u64,
+}
+
+/// A SyncGroup (Kafka's `classicGroupSync`). While the group completes a rebalance, a member's waits for the
+/// leader's, which hands out every assignment (a member it leaves out gets none) and makes the group Stable; in a
+/// Stable group a member gets its assignment at once.
+fn sync(g0: Option<GroupState>, r: SyncIn, now: Instant) -> Step {
+    match g0 {
+        None => unchanged(g0, sync_reply(r.c, r.i, sync_error(UNKNOWN_MEMBER_ID))),
+        Some(g) => match member_of(g, r.member_id) {
+            None => unchanged(g0, sync_reply(r.c, r.i, sync_error(UNKNOWN_MEMBER_ID))),
+            Some(m) => sync_member(g, m, r, now),
+        },
+    }
+}
+
+fn sync_member(g: GroupState, m: Member, r: SyncIn, now: Instant) -> Step {
+    let here = Member { seen: now, synced: true, ..m };
+    let answer = SyncAnswer { error: NONE, protocol_type: g.protocol_type, chosen: g.chosen, assignment: m.assignment };
+    if r.generation != g.generation {
+        unchanged(Some(g), sync_reply(r.c, r.i, sync_error(ILLEGAL_GENERATION)))
+    } else if (r.protocol_type.is_some() && r.protocol_type != g.protocol_type) || (r.chosen.is_some() && r.chosen != g.chosen) {
+        unchanged(Some(g), sync_reply(r.c, r.i, sync_error(INCONSISTENT_GROUP_PROTOCOL)))
+    } else if g.state == GROUP_PREPARING {
+        unchanged(Some(g), sync_reply(r.c, r.i, sync_error(REBALANCE_IN_PROGRESS)))
+    } else if g.state == GROUP_STABLE {
+        unchanged(Some(GroupState { members: replaced(g.members, here), ..g }), sync_reply(r.c, r.i, answer))
+    } else if g.state != GROUP_COMPLETING {
+        unchanged(Some(g), sync_reply(r.c, r.i, sync_error(UNKNOWN_MEMBER_ID)))
+    } else if g.leader == Some(m.id) {
+        let given = r.assignments.to_map();
+        let members = g.members.map(|x| Member {
+            sync: None,
+            seen: if x.id == m.id { now } else { x.seen },
+            assignment: given.get(x.id).unwrap_or(Bytes::empty()),
+            synced: x.id == m.id || x.synced,
+            ..x
+        });
+        let waiting = g.members.filter(|x| x.id != m.id).filter_map(|x| x.sync.map(|p| sync_reply(p.0, p.1, SyncAnswer {
+            error: NONE, protocol_type: g.protocol_type, chosen: g.chosen, assignment: given.get(x.id).unwrap_or(Bytes::empty()),
+        })));
+        let own = sync_reply(r.c, r.i, SyncAnswer {
+            error: NONE, protocol_type: g.protocol_type, chosen: g.chosen, assignment: given.get(m.id).unwrap_or(Bytes::empty()),
+        });
+        Step { group: Some(GroupState { state: GROUP_STABLE, members: members, ..g }), replies: waiting.push(own) }
+    } else {
+        let superseded = match m.sync {
+            Some(p) => if p != (r.c, r.i) { [sync_reply(p.0, p.1, sync_error(REBALANCE_IN_PROGRESS))] } else { [] },
+            None => [],
+        };
+        Step { group: Some(GroupState { members: replaced(g.members, Member { sync: Some((r.c, r.i)), ..here }), ..g }), replies: superseded }
+    }
+}
+
+/// A Heartbeat: the group after it, and the error to answer.
+fn heartbeat(g0: Option<GroupState>, generation: i32, member_id: String, now: Instant) -> (Option<GroupState>, i16) {
+    match g0 {
+        None => (g0, UNKNOWN_MEMBER_ID),
+        Some(g) => match member_of(g, member_id) {
+            None => (g0, UNKNOWN_MEMBER_ID),
+            Some(m) => {
+                let g1 = Some(GroupState { members: replaced(g.members, Member { seen: now, ..m }), ..g });
+                if g.state == GROUP_EMPTY {
+                    (g0, UNKNOWN_MEMBER_ID)
+                } else if generation != g.generation {
+                    (g0, ILLEGAL_GENERATION)
+                } else if g.state == GROUP_PREPARING {
+                    (g1, REBALANCE_IN_PROGRESS)
+                } else {
+                    (g1, NONE)
+                }
+            }
+        },
+    }
+}
+
+/// Removes members (by id): their parked requests are answered UNKNOWN_MEMBER_ID, and a group that was Stable or
+/// completing a rebalance rebalances. A removed leader is succeeded by the first member left.
+fn remove_members(g: GroupState, ids: Vec<String>, now: Instant, cfg: GroupConfig) -> Step {
+    let gone = g.members.filter(|m| ids.contains(m.id));
+    if gone.is_empty() {
+        Step { group: Some(GroupState { pending: g.pending.filter(|p| not ids.contains(p.0)), ..g }), replies: [] }
+    } else {
+        let left = g.members.filter(|m| not ids.contains(m.id));
+        let parked = gone.filter_map(|m| m.join.map(|p| join_reply(p.0, p.1, join_error(UNKNOWN_MEMBER_ID, m.id))))
+            .concat(gone.filter_map(|m| m.sync.map(|p| sync_reply(p.0, p.1, sync_error(UNKNOWN_MEMBER_ID)))));
+        let leader = match g.leader {
+            Some(l) => if ids.contains(l) { left.first().map(|m| m.id) } else { Some(l) },
+            None => None,
+        };
+        let g1 = GroupState { members: left, leader: leader, pending: g.pending.filter(|p| not ids.contains(p.0)), ..g };
+        let want = if g.state == GROUP_STABLE || g.state == GROUP_COMPLETING { prepare_rebalance(g1, now, cfg) } else { Step { group: Some(g1), replies: [] } };
+        Step { group: want.group, replies: parked.concat(want.replies) }
+    }
+}
+
+/// A LeaveGroup of members (id, instance id): the group after it (and the answers to the removed members' parked
+/// requests), the request's error (UNKNOWN_MEMBER_ID for a group that does not exist, as Kafka fails the whole
+/// request), and each member's.
+fn leave(g0: Option<GroupState>, members: Vec<(String, Option<String>)>, now: Instant, cfg: GroupConfig) -> (Step, i16, Vec<i16>) {
+    match g0 {
+        None => (Step { group: g0, replies: [] }, UNKNOWN_MEMBER_ID, []),
+        Some(g) => {
+            let errors = members.map(|x| if is_pending(g, x.0) || member_of(g, x.0).is_some() { NONE } else { UNKNOWN_MEMBER_ID });
+            let ids = members.map(|x| x.0).filter(|id| is_pending(g, id) || member_of(g, id).is_some());
+            (remove_members(g, ids, now, cfg), NONE, errors)
+        }
+    }
+}
+
+/// Whether a member is overdue: no request of it parked, and nothing heard from it for its session timeout.
+fn expired(m: Member, now: Instant) -> bool {
+    m.join.is_none() && m.sync.is_none() && now >= after(m.seen, m.session_ms as i64)
+}
+
+/// The deadlines that passed by `now` (Kafka's delayed operations): pending members that never joined go; overdue
+/// members are removed; a rebalance completes once every member rejoined (an initial one only when its delay is
+/// over, extended while members keep joining) or at its timeout; the members that did not sync within the rebalance
+/// timeout after a rebalance completed are removed, and the group rebalances. An Empty group with no one pending is
+/// dropped. `next_due` says when this next does anything.
+fn tick_group(g0: GroupState, now: Instant, cfg: GroupConfig) -> Step {
+    let g = GroupState { pending: g0.pending.filter(|p| now < p.1), ..g0 };
+    let overdue = g.members.filter(|m| expired(m, now)).map(|m| m.id);
+    let s1 = remove_members(g, overdue, now, cfg);
+    let g1 = group_of(s1);
+    let all_joined = g1.members.all(|m| m.join.is_some()) && g1.pending.is_empty();
+    let s2 = if g1.state == GROUP_PREPARING && g1.initial {
+        if now < g1.deadline {
+            Step { group: Some(g1), replies: [] }
+        } else if g1.added && g1.remaining_ms > 0i64 {
+            let delay = if (cfg.initial_delay_ms as i64) < g1.remaining_ms { cfg.initial_delay_ms as i64 } else { g1.remaining_ms };
+            let left = if g1.remaining_ms > cfg.initial_delay_ms as i64 { g1.remaining_ms - cfg.initial_delay_ms as i64 } else { 0i64 };
+            Step { group: Some(GroupState { deadline: after(now, delay), added: false, remaining_ms: left, ..g1 }), replies: [] }
+        } else {
+            complete_join(g1, now)
+        }
+    } else if g1.state == GROUP_PREPARING && (all_joined || now >= g1.deadline) {
+        complete_join(g1, now)
+    } else if (g1.state == GROUP_COMPLETING || g1.state == GROUP_STABLE) && now >= g1.deadline && g1.members.any(|m| not m.synced) {
+        // The members that did not sync within the rebalance timeout after it completed (Kafka's pending-sync
+        // timeout): a leader that never syncs keeps the group completing; a follower that never syncs would own nothing.
+        remove_members(g1, g1.members.filter(|m| not m.synced).map(|m| m.id), now, cfg)
+    } else {
+        Step { group: Some(g1), replies: [] }
+    };
+    let g2 = group_of(s2);
+    let kept = if g2.state == GROUP_EMPTY && g2.members.is_empty() && g2.pending.is_empty() { None } else { Some(g2) };
+    Step { group: kept, replies: s1.replies.concat(s2.replies) }
+}
+
+/// The error for an OffsetCommit at `version` of `generation` by `member_id` (Kafka 4.0's `validateOffsetCommit`): a
+/// commit outside group management (generation below 0) is accepted for an Empty group, and creates nothing for an
+/// unknown one; one naming a member must come from a member of the group at its generation, and not while the group
+/// completes a rebalance; one naming none (generation below 0, no member) is refused by a group with members.
+/// `known` says whether the group exists at all (with members, or with committed offsets); an unknown group refuses
+/// a commit at a generation with GROUP_ID_NOT_FOUND from v9, ILLEGAL_GENERATION before.
+fn commit_error(g0: Option<GroupState>, known: bool, generation: i32, member_id: String, instance: Option<String>, version: i16) -> i16 {
+    let names_member = generation >= 0i32 || member_id != "" || instance.is_some();
+    match g0 {
+        None => if generation < 0i32 {
+            NONE
+        } else if known {
+            UNKNOWN_MEMBER_ID
+        } else if version >= 9i16 {
+            GROUP_ID_NOT_FOUND
+        } else {
+            ILLEGAL_GENERATION
+        },
+        Some(g) => if generation < 0i32 && g.state == GROUP_EMPTY {
+            NONE
+        } else if not names_member {
+            UNKNOWN_MEMBER_ID
+        } else if member_of(g, member_id).is_none() {
+            UNKNOWN_MEMBER_ID
+        } else if generation != g.generation {
+            ILLEGAL_GENERATION
+        } else if g.state == GROUP_COMPLETING {
+            REBALANCE_IN_PROGRESS
+        } else {
+            NONE
+        },
+    }
+}
+
+/// When `tick_group` next changes the group, if ever: the earliest of its deadlines (a pending member's, an overdue
+/// member's, the state's) that apply, and now for a rebalance every member has rejoined or an Empty group to drop.
+/// The node applies `tick_group` only once it is due, so an idle group costs nothing per tick.
+fn next_due(g: GroupState, now: Instant) -> Option<Instant> {
+    let pending = g.pending.map(|p| p.1);
+    let overdue = g.members.filter(|m| m.join.is_none() && m.sync.is_none()).map(|m| after(m.seen, m.session_ms as i64));
+    let all_joined = g.members.all(|m| m.join.is_some()) && g.pending.is_empty();
+    let state = if g.state == GROUP_PREPARING && not g.initial && all_joined {
+        [now]
+    } else if g.state == GROUP_PREPARING {
+        [g.deadline]
+    } else if (g.state == GROUP_COMPLETING || g.state == GROUP_STABLE) && g.members.any(|m| not m.synced) {
+        [g.deadline]
+    } else if g.state == GROUP_EMPTY && g.members.is_empty() && g.pending.is_empty() {
+        [now]
+    } else {
+        []
+    };
+    pending.concat(overdue).concat(state).fold(group_no_time(), |best, t| match best {
+        Some(b) => if t < b { Some(t) } else { Some(b) },
+        None => Some(t),
+    })
+}
+
+fn group_no_time() -> Option<Instant> {
+    None
+}
+
+/// A group as DescribeGroups describes it: members with their metadata and assignment only while Stable. A group with
+/// only committed offsets (`known`) is Empty; an unknown one is Dead, and from v6 GROUP_ID_NOT_FOUND.
+fn describe_group(name: String, g0: Option<GroupState>, known: bool, version: i16, ops: bool) -> DescribedGroup {
+    let operations = if ops { GROUP_OPERATIONS } else { NO_OPERATIONS };
+    match g0 {
+        Some(g) => {
+            let stable = g.state == GROUP_STABLE;
+            DescribedGroup {
+                error: NONE, message: None, group_id: name, state: state_name(g.state),
+                protocol_type: g.protocol_type.unwrap_or(""),
+                protocol_data: if stable { g.chosen.unwrap_or("") } else { "" },
+                members: g.members.map(|m| DescribedMember {
+                    member_id: m.id, group_instance_id: m.instance, client_id: m.client, client_host: m.host,
+                    metadata: if stable { metadata_for(m, g.chosen) } else { Bytes::empty() },
+                    assignment: if stable { m.assignment } else { Bytes::empty() },
+                }),
+                operations: operations,
+            }
+        }
+        None => {
+            let dead = not known;
+            let missing = dead && version >= 6i16;
+            DescribedGroup {
+                error: if missing { GROUP_ID_NOT_FOUND } else { NONE },
+                message: if missing { error_message(GROUP_ID_NOT_FOUND) } else { None },
+                group_id: name, state: if dead { "Dead" } else { "Empty" }, protocol_type: "", protocol_data: "", members: [],
+                operations: operations,
+            }
+        }
+    }
+}
+
+/// A group as ListGroups lists it: its id, protocol type and state.
+fn listed_group(name: String, g0: Option<GroupState>) -> (String, String, String) {
+    match g0 {
+        Some(g) => (name, g.protocol_type.unwrap_or(""), state_name(g.state)),
+        None => (name, "", "Empty"),
+    }
+}
+
+// ---------------------------------------------------------------- the answers, encoded
+
+/// A JoinGroup answer at `version`. Before v7 the protocol type is not sent and a missing protocol name is empty.
+fn encode_join_response(correlation_id: i32, version: i16, a: JoinAnswer) -> Bytes {
+    let r = JoinGroupResponse {
+        throttle: 0i32, error: a.error, generation: a.generation, protocol_type: a.protocol_type,
+        protocol_name: if version >= 7i16 { a.chosen } else { Some(a.chosen.unwrap_or("")) },
+        leader: a.leader, skip_assignment: false, member_id: a.member_id,
+        members: a.members.map(|m| JoinMember { member_id: m.0, group_instance_id: m.1, metadata: m.2 }),
+    };
+    group_frame(API_JOIN_GROUP, version, correlation_id, JoinGroupResponse::encode(r, version))
+}
+
+fn encode_sync_response(correlation_id: i32, version: i16, a: SyncAnswer) -> Bytes {
+    let r = SyncGroupResponse { throttle: 0i32, error: a.error, protocol_type: a.protocol_type, protocol_name: a.chosen, assignment: a.assignment };
+    group_frame(API_SYNC_GROUP, version, correlation_id, SyncGroupResponse::encode(r, version))
+}
+
+fn encode_heartbeat_response(correlation_id: i32, version: i16, error: i16) -> Bytes {
+    group_frame(API_HEARTBEAT, version, correlation_id, HeartbeatResponse::encode(HeartbeatResponse { throttle: 0i32, error: error }, version))
+}
+
+/// A LeaveGroup answer: before v3 the one member's error is the request's; from v3 each member has its own.
+fn encode_leave_response(correlation_id: i32, version: i16, error: i16, members: Vec<(String, Option<String>)>, errors: Vec<i16>) -> Bytes {
+    let top = if error != NONE { error } else if version < 3i16 { errors.first().unwrap_or(NONE) } else { NONE };
+    let r = LeaveGroupResponse {
+        throttle: 0i32,
+        error: top,
+        members: if error != NONE { [] } else {
+            members.enumerate().map(|e| LeaveMemberResponse { member_id: (e.1).0, group_instance_id: (e.1).1, error: errors.get(e.0).unwrap_or(NONE) })
+        },
+    };
+    group_frame(API_LEAVE_GROUP, version, correlation_id, LeaveGroupResponse::encode(r, version))
+}
+
+/// A parked or arriving request's answer, at the head's version.
+fn encode_reply(correlation_id: i32, version: i16, r: Reply) -> Bytes {
+    match r.join {
+        Some(a) => encode_join_response(correlation_id, version, a),
+        None => match r.sync {
+            Some(a) => encode_sync_response(correlation_id, version, a),
+            None => error("encode_reply: a reply with no answer"),
+        },
+    }
+}

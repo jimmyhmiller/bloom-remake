@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use blossom_base::RelId;
+use blossom_base::{RelId, RuleId};
 use blossom_ir::tick::{Changes, EvalError, Instance, Row, StepInput, StepOutput, TickInput, TickOutput};
 use blossom_oracle::Oracle;
 
@@ -51,6 +51,8 @@ pub trait Executor: Send {
     fn carried(&self) -> Instance;
     /// The join work done so far, in rows examined, if the executor measures it.
     fn rows_examined(&self) -> Option<u64>;
+    /// The same per rule (the rules that examined any), if the executor measures it.
+    fn rows_examined_by_rule(&self) -> Option<BTreeMap<RuleId, u64>>;
     /// Whether a row the executor keeps beyond its carried state holds `b`: a blob it may still copy into a durable
     /// row or a request without creating it again. (The node counts the carried rows' blobs itself, from each tick's
     /// changes.)
@@ -120,6 +122,10 @@ impl<E: Evaluator> Executor for OracleExecutor<E> {
         None
     }
 
+    fn rows_examined_by_rule(&self) -> Option<BTreeMap<RuleId, u64>> {
+        None
+    }
+
     /// The reference evaluator recomputes every derived row, and the blobs they hold, at every tick: only the
     /// carried rows keep blobs across ticks.
     /// The reference evaluator keeps only its carried state: it derives every other row afresh each tick, which
@@ -150,6 +156,10 @@ impl<X: Executor + ?Sized> Executor for Box<X> {
         (**self).rows_examined()
     }
 
+    fn rows_examined_by_rule(&self) -> Option<BTreeMap<RuleId, u64>> {
+        (**self).rows_examined_by_rule()
+    }
+
     fn holds_blob(&self, b: &blossom_value::BlobRef) -> bool {
         (**self).holds_blob(b)
     }
@@ -174,6 +184,10 @@ impl Executor for blossom_engine::Engine {
 
     fn rows_examined(&self) -> Option<u64> {
         Some(blossom_engine::Engine::rows_examined(self))
+    }
+
+    fn rows_examined_by_rule(&self) -> Option<BTreeMap<RuleId, u64>> {
+        Some(blossom_engine::Engine::rows_examined_by_rule(self).clone())
     }
 
     fn holds_blob(&self, b: &blossom_value::BlobRef) -> bool {

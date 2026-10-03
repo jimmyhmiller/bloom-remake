@@ -471,14 +471,23 @@ fn ref_encode(r: &RefRequest, version: i16) -> Vec<u8> {
             put_uvarint(&mut out, ts.len() as u64 + 1);
             for t in ts {
                 out.extend(t.id);
-                match &t.name {
-                    None => put_uvarint(&mut out, 0),
-                    Some(s) => {
+                match (&t.name, version >= 8) {
+                    (None, true) => put_uvarint(&mut out, 0),
+                    (Some(s), true) => {
                         put_uvarint(&mut out, s.len() as u64 + 1);
                         out.extend(s.as_bytes());
                     }
+                    (None, false) => out.extend((-1i16).to_be_bytes()),
+                    (Some(s), false) => {
+                        out.extend((s.len() as i16).to_be_bytes());
+                        out.extend(s.as_bytes());
+                    }
                 }
-                put_uvarint(&mut out, t.parts.len() as u64 + 1);
+                if version >= 12 {
+                    put_uvarint(&mut out, t.parts.len() as u64 + 1);
+                } else {
+                    out.extend((t.parts.len() as i32).to_be_bytes());
+                }
                 for p in &t.parts {
                     out.extend(p.to_be_bytes());
                 }
@@ -760,4 +769,94 @@ fn a_format_expression_takes_no_closure_and_no_range() {
     assert_eq!(codes("arg", arg), vec!["BLS0301"]);
     let alias = "format g(n) = bytes(range(0u64, n).len());\nformat F(n: u64) { a: g(n) }";
     assert!(codes("alias", alias).contains(&"BLS0301".to_owned()));
+}
+
+/// `Name { f: e, ..base }` takes the other fields from `base` (in a function and in a rule body), on both
+/// evaluators; a base of another type, and a field after the base, are refused.
+#[test]
+fn struct_update_takes_the_fields_not_written() {
+    let artifact = compile("struct_update.bls");
+    let ev = |k: u64| InputEvent {
+        node: NodeId(0),
+        tick: Tick(1),
+        rel: artifact.rel_named("inp").unwrap(),
+        row: Arc::from(vec![u(k)]),
+    };
+    let run = match differential_or_error(&artifact, &[ev(3), ev(9)], 2) {
+        Outcome::Ran(run) => run,
+        Outcome::Failed(t, code) => panic!("{code} at {t:?}"),
+    };
+    let rows = |name: &str| -> BTreeSet<Vec<Value>> {
+        run.node_tick(Tick(1), NodeId(0))
+            .unwrap()
+            .instance
+            .rows(artifact.rel_named(name).unwrap())
+            .map(|r| r.to_vec())
+            .collect()
+    };
+    let s = |x: &str| Value::Str(x.into());
+    let want: BTreeSet<Vec<Value>> = [3u64, 9]
+        .iter()
+        .map(|k| vec![u(*k), u(k + 1), s("x"), Value::Bool(false)])
+        .collect();
+    assert_eq!(rows("out"), want);
+    let copies: BTreeSet<Vec<Value>> = [3u64, 9].iter().map(|k| vec![u(*k), u(k + 1), s("y")]).collect();
+    assert_eq!(rows("copy"), copies);
+
+    let dir = std::env::temp_dir().join(format!("blossom-struct-update-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let codes = |tag: &str, body: &str| -> Vec<String> {
+        let path = dir.join(format!("{tag}.bls"));
+        std::fs::write(
+            &path,
+            format!("program f version 1;\nstruct P {{ a: u64, b: u64 }}\nstruct Q {{ a: u64, b: u64 }}\n{body}\n"),
+        )
+        .unwrap();
+        let nodes = [NodeSpec {
+            name: "n1".to_owned(),
+            role: None,
+        }];
+        match compile_file(path.to_str().unwrap(), &nodes).0 {
+            Ok(_) => Vec::new(),
+            Err(blossom_front::api::BlsError::Rejected(d)) => d.iter().map(|x| x.code.as_str().to_owned()).collect(),
+            Err(e) => panic!("{tag}: {e}"),
+        }
+    };
+    assert_eq!(
+        codes("ok", "fn f(q: P) -> P { P { a: 1u64, ..q } }"),
+        Vec::<String>::new()
+    );
+    assert!(!codes("other", "fn f(q: Q) -> P { P { a: 1u64, ..q } }").is_empty());
+    assert!(!codes("after", "fn f(q: P) -> P { P { ..q, a: 1u64 } }").is_empty());
+}
+
+/// `select(cond, A, B)`'s two elements have one value type, or are both valueless.
+#[test]
+fn a_select_has_one_value_type() {
+    let dir = std::env::temp_dir().join(format!("blossom-format-select-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let codes = |tag: &str, body: &str| -> Vec<String> {
+        let path = dir.join(format!("{tag}.bls"));
+        std::fs::write(&path, format!("program f version 1;\n{body}\n")).unwrap();
+        let nodes = [NodeSpec {
+            name: "n1".to_owned(),
+            role: None,
+        }];
+        match compile_file(path.to_str().unwrap(), &nodes).0 {
+            Ok(_) => Vec::new(),
+            Err(blossom_front::api::BlsError::Rejected(d)) => d.iter().map(|x| x.code.as_str().to_owned()).collect(),
+            Err(e) => panic!("{tag}: {e}"),
+        }
+    };
+    let ok = "format F(n: u64) { a: select(n > 1u64, prefixed(uvarint, 1, utf8), prefixed(i16, 0, utf8)), \
+              select(n > 2u64, tags, constant(i8, 0i8)) }";
+    assert_eq!(codes("ok", ok), Vec::<String>::new());
+    let types = "format F(n: u64) { a: select(n > 1u64, u8, u16) }";
+    assert_eq!(codes("types", types), vec!["BLS0301"]);
+    let nested = "format F(n: u64) { a: array(i32, 0, select(n > 1u64, i32, bool)) }";
+    assert_eq!(codes("nested", nested), vec!["BLS0301"]);
+    let valued = "format F(n: u64) { a: select(n > 1u64, u8, tags) }";
+    assert_eq!(codes("valued", valued), vec!["BLS0301"]);
+    let arity = "format F(n: u64) { a: select(n > 1u64, u8) }";
+    assert_eq!(codes("arity", arity), vec!["BLS0301"]);
 }
