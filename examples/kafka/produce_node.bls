@@ -103,20 +103,23 @@ view entry_check(c, i, j, tid, p, o, checked) =
 /// This tick's appends, per partition, in order: each one's order and batches.
 view appends(tid, p, xs = collect!((o, bs))) = entry_check(_c, _i, _j, tid, p, o, ch), ch.error == NONE, let bs = ch.batches;
 
+/// The producers appending to each partition this tick (once, for the views after).
+view append_producer(tid, p, pid) = appends(tid, p, ys), pid in batch_producers(ys);
+
 /// The producers appending to each partition this tick, as their state stands after the partition's last entry:
 /// their committed state, then their uncommitted entries in log order.
 view tail_batches(tid, p, pid, xs = collect!((i, h, base, last))) =
-    appends(tid, p, ys), pid in batch_producers(ys), data_entry(tid, p, i, base, last, _, h, _), applied_d(tid, p, a)
+    append_producer(tid, p, pid), data_entry(tid, p, i, base, last, _, h, _), applied_d(tid, p, a)
     where i > a && h.producer_id == pid;
 view producer_state(tid, p, pid, e) {
-    appends(tid, p, ys), pid in batch_producers(ys), not tail_batches(tid, p, pid, _),
+    append_producer(tid, p, pid), not tail_batches(tid, p, pid, _),
         producer(tid, p, pid, epoch, recent), let e = ProducerEntry { pid: pid, epoch: epoch, recent: recent };
     tail_batches(tid, p, pid, xs), producer(tid, p, pid, epoch, recent),
         let Some(e) = tail_state(Some(ProducerEntry { pid: pid, epoch: epoch, recent: recent }), xs);
     tail_batches(tid, p, pid, xs), not producer(tid, p, pid, _, _), let Some(e) = tail_state(None, xs);
 }
 view part_producers(tid, p, ps = collect!(e)) =
-    per appends(tid, p, ys), pid in batch_producers(ys), producer_state(tid, p, pid, e);
+    per appends(tid, p, _ys), append_producer(tid, p, pid), producer_state(tid, p, pid, e);
 
 /// Each partition's appends this tick, sequenced after its last entry.
 view sequenced(tid, p, s) = appends(tid, p, xs), tail_end(tid, p, end), part_producers(tid, p, ps),
