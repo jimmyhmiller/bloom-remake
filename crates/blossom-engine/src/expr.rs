@@ -90,6 +90,9 @@ pub(crate) struct Ctx<'a> {
     /// (`Plan::skip`: a rule that reads the time only so is not evaluated again before then, if nothing it reads
     /// changes).
     pub flips_at: std::cell::Cell<Option<blossom_value::time::Instant>>,
+    /// Whether the evaluation read the time, the tick or randomness otherwise than by ordering `now()` against
+    /// an instant (then its outcome may differ at the next tick, whatever `flips_at` says).
+    pub reads_time: std::cell::Cell<bool>,
 }
 
 impl Ctx<'_> {
@@ -300,8 +303,14 @@ pub(crate) fn eval_in(cx: &Ctx<'_>, env: &mut Frame<'_>, e: &Expr) -> ExprResult
         Expr::Param(p) => param(cx, *p),
         Expr::Scalar(s) => match s {
             BuiltinScalar::SelfNode => Ok(Value::Node(cx.node)),
-            BuiltinScalar::Tick => Ok(Value::Int(IntValue::U64(cx.tick.0))),
-            BuiltinScalar::Now => Ok(Value::Instant(cx.now)),
+            BuiltinScalar::Tick => {
+                cx.reads_time.set(true);
+                Ok(Value::Int(IntValue::U64(cx.tick.0)))
+            }
+            BuiltinScalar::Now => {
+                cx.reads_time.set(true);
+                Ok(Value::Instant(cx.now))
+            }
             other => Err(unimplemented!("LANG-180", &format!("`${other:?}`"))),
         },
         Expr::Unary { op, arg } => {
@@ -332,9 +341,21 @@ pub(crate) fn eval_in(cx: &Ctx<'_>, env: &mut Frame<'_>, e: &Expr) -> ExprResult
                 binary_ref(op, l, r)
             }
             _ => {
-                let l = eval_in(cx, env, lhs)?;
-                let r = eval_in(cx, env, rhs)?;
-                note_flip(cx, op, lhs, rhs, &l, &r);
+                // `now()` ordered against an instant is read here, its flip noted (not as a free read of the time).
+                let timed = matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) && is_now(lhs) != is_now(rhs);
+                let l = if timed && is_now(lhs) {
+                    now_operand(cx, lhs)
+                } else {
+                    eval_in(cx, env, lhs)?
+                };
+                let r = if timed && is_now(rhs) {
+                    now_operand(cx, rhs)
+                } else {
+                    eval_in(cx, env, rhs)?
+                };
+                if timed {
+                    note_flip(cx, op, lhs, rhs, &l, &r);
+                }
                 binary(op, l, r)
             }
         },
@@ -399,7 +420,12 @@ pub(crate) fn eval_in(cx: &Ctx<'_>, env: &mut Frame<'_>, e: &Expr) -> ExprResult
         Expr::Call {
             f: FnRef::Builtin(f),
             args,
-        } => builtin(cx, env, f, args),
+        } => {
+            if random_builtin(f) {
+                cx.reads_time.set(true);
+            }
+            builtin(cx, env, f, args)
+        }
         Expr::Call { f: FnRef::Fn(f), args } => crate::func::call(cx, env, *f, args),
         Expr::Collection { kind, elems } => {
             let mut vs = Vec::with_capacity(elems.len());
@@ -444,6 +470,16 @@ pub(crate) fn is_now(e: &Expr) -> bool {
         Expr::Scalar(BuiltinScalar::Now) => true,
         Expr::Typed { expr, .. } => is_now(expr),
         _ => false,
+    }
+}
+
+/// The value of a `now()` operand of an ordering (`is_now`), counting its nodes as `eval_in` would; not a free
+/// read of the time (`Ctx::reads_time`): the ordering notes its flip.
+fn now_operand(cx: &Ctx<'_>, e: &Expr) -> Value {
+    cx.steps.set(cx.steps.get().wrapping_add(1));
+    match e {
+        Expr::Typed { expr, .. } => now_operand(cx, expr),
+        _ => Value::Instant(cx.now),
     }
 }
 
@@ -1073,9 +1109,13 @@ pub(crate) fn int_sum<'a>(mut values: impl Iterator<Item = &'a Value>) -> ExprRe
 /// tick to tick with no relation changing, so a rule reading one is re-evaluated at every tick.
 /// Whether calling `f` draws randomness (its value changes from tick to tick).
 pub(crate) fn draws_randomness(f: &FnRef) -> bool {
+    matches!(f, FnRef::Builtin(b) if random_builtin(b))
+}
+
+fn random_builtin(f: &BuiltinFn) -> bool {
     matches!(
         f,
-        FnRef::Builtin(BuiltinFn::Rand | BuiltinFn::RandFloat | BuiltinFn::RandRange | BuiltinFn::RandPrio { .. })
+        BuiltinFn::Rand | BuiltinFn::RandFloat | BuiltinFn::RandRange | BuiltinFn::RandPrio { .. }
     )
 }
 

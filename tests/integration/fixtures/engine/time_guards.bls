@@ -18,3 +18,5 @@ view stale_excl(x) = at(x, t) where now() > t + THREE;
 view later(x) = at(x, t) where t + ONE < now();
 view gated(x) = at(x, t) where x > 1 && now() > t + ONE;
 view nothing_seen() = not at(_, _);
+/// Reads the time freely: its output changes at every tick though nothing it reads does.
+view age(x, d: Duration) = at(x, t), let d = now() - t;

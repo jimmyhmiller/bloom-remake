@@ -114,6 +114,11 @@ fn key(row: &[Value], cols: &[usize]) -> Vec<Value> {
     cols.iter().filter_map(|c| row.get(*c).cloned()).collect()
 }
 
+/// Whether `row`'s columns `cols` hold `values` (as `key(row, cols) == values`, without building the key).
+fn holds(row: &[Value], cols: &[usize], values: &[Value]) -> bool {
+    cols.len() == values.len() && cols.iter().zip(values).all(|(c, v)| row.get(*c) == Some(v))
+}
+
 /// A store's present rows, in order.
 pub(crate) enum Present<'a> {
     Set(std::collections::btree_map::Keys<'a, Row, i64>),
@@ -367,7 +372,7 @@ impl Store {
     /// Whether a row of one version has columns `cols` holding `values` (without collecting them).
     pub fn any(&self, old: bool, cols: &[usize], values: &[Value]) -> Result<bool, EvalError> {
         self.settled()?;
-        let matches = |r: &Row| key(r, cols) == values;
+        let matches = |r: &Row| holds(r, cols, values);
         if old && self.del.iter().any(matches) {
             return Ok(true);
         }
@@ -390,7 +395,7 @@ impl Store {
             .into_iter()
             .filter(|r| !self.ins.contains(r))
             .collect();
-        out.extend(self.del.iter().filter(|r| key(r, cols) == values).cloned());
+        out.extend(self.del.iter().filter(|r| holds(r, cols, values)).cloned());
         Ok(out)
     }
 
@@ -452,7 +457,7 @@ impl Store {
             out.extend(
                 self.del
                     .iter()
-                    .filter(|r| key(r, cols) == values && r.get(col).is_some_and(within))
+                    .filter(|r| holds(r, cols, values) && r.get(col).is_some_and(within))
                     .cloned(),
             );
         }
