@@ -1,6 +1,7 @@
 //! The synchronous-round world (TEST-006, ARCHITECTURE §6 `SyncRoundScheduler`): every node ticks every round; a
 //! message sent in round `t` arrives in round `t + 1` unless the [`FaultSchedule`] omits it; a crashed node
-//! behaves as its [`CrashView`] says.
+//! behaves as its [`CrashView`] says, and one that restarts (crash-recovery, TEST-037) comes back with its durable
+//! relations only.
 //!
 //! The world is generic over the [`Evaluator`] that runs one node's tick. Until the engine exists (docs/design/
 //! SLICES.md, slice 5) that is the oracle; the trait is the seam the engine will be put behind.
@@ -59,12 +60,20 @@ pub struct FaultSchedule {
     pub omissions: BTreeSet<Omission>,
     /// Each crashed node and its crash round.
     pub crashes: BTreeMap<NodeId, Tick>,
+    /// Each crashed node that restarts, and the round it runs again in (after its crash round; crash-recovery,
+    /// TEST-037, under [`CrashView::Frozen`] only).
+    pub restarts: BTreeMap<NodeId, Tick>,
 }
 
 impl FaultSchedule {
-    /// Whether `node` has crashed by round `t` (it crashed at or before `t`).
+    /// Whether `node` is down at round `t`: it crashed at or before `t` and has not restarted by `t`.
     pub fn crashed(&self, node: NodeId, t: Tick) -> bool {
-        self.crashes.get(&node).is_some_and(|c| *c <= t)
+        self.crashes.get(&node).is_some_and(|c| *c <= t) && self.restarts.get(&node).is_none_or(|r| t < *r)
+    }
+
+    /// Whether `node` restarts at round `t`.
+    pub fn restarts_at(&self, node: NodeId, t: Tick) -> bool {
+        self.restarts.get(&node) == Some(&t)
     }
 
     /// The number of faults.
@@ -105,18 +114,25 @@ pub struct SyncConfig {
     /// A relation that, holding at the end of a node's tick, stops the node: it runs no later tick (`halt`,
     /// LANGUAGE §7.15).
     pub halt: Option<RelId>,
-    /// The guarded timers, whose firings the round loop makes.
-    pub guarded: Vec<GuardedTimer>,
+    /// The physical timers, whose firings the round loop makes.
+    pub timers: Vec<Timer>,
+    /// What a restart keeps and raises (crash-recovery): the durable relations, and the `boot()` and
+    /// `recovered()` events of the restart round.
+    pub durable: BTreeSet<RelId>,
+    pub boot: Option<RelId>,
+    pub recovered: Option<RelId>,
 }
 
-/// A guarded timer (`every d while G`, LANGUAGE §15.2) in the synchronous world: its firings due in a round reach a
-/// node only if `G` held at the end of the node's previous tick. (A guarded timer that resumes fires from its first
-/// firing after that tick, which is exactly the round's.)
+/// A physical timer (`every d`, LANGUAGE §15.2) in the synchronous world: firing `k` of a node's incarnation is due
+/// at `boot + (k + 1) × d`, `boot` the clock of the incarnation's first round, and reaches the node in the first round
+/// whose clock has reached it ([`crate::runtime::firings`]). A guarded timer's (`every d while G`) reach it only if
+/// `G` held at the end of the node's previous tick. (A guarded timer that resumes fires from its first firing after
+/// that tick, which is exactly the round's.)
 #[derive(Clone, Debug)]
-pub struct GuardedTimer {
+pub struct Timer {
     pub rel: RelId,
     pub every: Duration,
-    pub guard: RelId,
+    pub guard: Option<RelId>,
     /// The nodes it runs on (those of the role it is placed at).
     pub nodes: Vec<NodeId>,
 }
@@ -221,6 +237,21 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
     /// Runs rounds `config.first..=config.last` under `faults` (earlier rounds are empty).
     pub fn run(&self, config: &SyncConfig, faults: &FaultSchedule) -> Result<SyncRun, SimError> {
         let n = self.nodes as usize;
+        if !faults.restarts.is_empty() && config.crash_view != CrashView::Frozen {
+            return Err(blossom_base::unimplemented_error!(
+                "TEST-037",
+                "restarts under the `.ded` crash view (Molly's model has crash-stop failures only)"
+            )
+            .into());
+        }
+        for (node, r) in &faults.restarts {
+            if faults.crashes.get(node).is_none_or(|c| c >= r) {
+                return Err(internal_error!("node {} restarts at {} without crashing before it", node.0, r.0).into());
+            }
+        }
+        // Each node's incarnation (1, and one more at each restart) and the round it booted in.
+        let mut incarnation = vec![1u64; n];
+        let mut booted = vec![Tick(0); n];
         let mut run = SyncRun {
             rounds: Vec::new(),
             messages: Vec::new(),
@@ -267,22 +298,67 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                     next_carried.push(state.clone());
                     continue;
                 }
+                // A node that restarts this round starts from its durable relations as they were after its last
+                // round (a crash loses the round it lands in), with every volatile relation empty.
+                let restarting = faults.restarts_at(node, tick);
+                let restored;
+                let state = if restarting {
+                    restored = Instance {
+                        rels: state
+                            .rels
+                            .iter()
+                            .filter(|(r, _)| config.durable.contains(r))
+                            .map(|(r, rows)| (*r, rows.clone()))
+                            .collect(),
+                    };
+                    if let Some(slot) = incarnation.get_mut(i) {
+                        *slot += 1;
+                    }
+                    if let Some(slot) = booted.get_mut(i) {
+                        *slot = tick;
+                    }
+                    if let Some(h) = held.get_mut(i) {
+                        h.clear();
+                    }
+                    &restored
+                } else {
+                    state
+                };
                 let scheduled = self.inputs.get(&(tick, node)).unwrap_or(&empty);
-                let mut guarded_firings = Vec::new();
-                if t > 0 {
+                let restart_events: Vec<(RelId, Row)>;
+                let scheduled = if restarting {
+                    restart_events = scheduled
+                        .iter()
+                        .cloned()
+                        .chain(
+                            config
+                                .boot
+                                .into_iter()
+                                .chain(config.recovered)
+                                .map(|r| (r, Row::from(Vec::new()))),
+                        )
+                        .collect();
+                    &restart_events
+                } else {
+                    scheduled
+                };
+                let mut timer_firings = Vec::new();
+                let boot = booted.get(i).copied().unwrap_or(Tick(0));
+                if tick > boot {
+                    let origin = now_at(config.round, boot)?.0;
                     let (before, now) = (now_at(config.round, Tick(t - 1))?.0, now_at(config.round, tick)?.0);
-                    for g in &config.guarded {
-                        if g.nodes.contains(&node) && held.get(i).is_some_and(|h| h.contains(&g.guard)) {
-                            guarded_firings.extend(crate::runtime::firings(g.rel, g.every, before, now)?);
+                    for timer in config.timers.iter().filter(|timer| timer.nodes.contains(&node)) {
+                        if timer.guard.is_none_or(|g| held.get(i).is_some_and(|h| h.contains(&g))) {
+                            timer_firings.extend(crate::runtime::firings(timer.rel, timer.every, origin, before, now)?);
                         }
                     }
                 }
-                let with_guarded: Vec<(RelId, Row)>;
-                let events = if guarded_firings.is_empty() {
+                let with_timers: Vec<(RelId, Row)>;
+                let events = if timer_firings.is_empty() {
                     scheduled
                 } else {
-                    with_guarded = scheduled.iter().cloned().chain(guarded_firings).collect();
-                    &with_guarded
+                    with_timers = scheduled.iter().cloned().chain(timer_firings).collect();
+                    &with_timers
                 };
                 let ingress = self.ingress.get(&(tick, node)).unwrap_or(&no_ingress);
                 let node_blobs = blobs
@@ -291,7 +367,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                 let out = self
                     .eval
                     .tick(&TickInput {
-                        incarnation: 1,
+                        incarnation: incarnation.get(i).copied().unwrap_or(1),
                         node,
                         tick,
                         now: now_at(config.round, tick)?,
@@ -356,11 +432,16 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                     *slot = true;
                 }
                 if let Some(h) = held.get_mut(i) {
-                    for g in config.guarded.iter().filter(|g| g.nodes.contains(&node)) {
-                        if out.instance.rows(g.guard).next().is_some() {
-                            h.insert(g.guard);
+                    for g in config
+                        .timers
+                        .iter()
+                        .filter(|t| t.nodes.contains(&node))
+                        .filter_map(|t| t.guard)
+                    {
+                        if out.instance.rows(g).next().is_some() {
+                            h.insert(g);
                         } else {
-                            h.remove(&g.guard);
+                            h.remove(&g);
                         }
                     }
                 }
@@ -392,6 +473,25 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
         run.messages.sort();
         Ok(run)
     }
+}
+
+/// What a restart keeps and raises in `program`: its durable relations, and its `boot()` and `recovered()` events
+/// (for [`SyncConfig`]).
+pub fn restart_shape(program: &blossom_ir::core::Program) -> (BTreeSet<RelId>, Option<RelId>, Option<RelId>) {
+    use blossom_ir::core::{EventSource, RelClass};
+    let mut durable = BTreeSet::new();
+    let (mut boot, mut recovered) = (None, None);
+    for (id, r) in program.rels.iter_enumerated() {
+        if r.durable {
+            durable.insert(id);
+        }
+        match r.class {
+            RelClass::Event(EventSource::Boot) => boot = Some(id),
+            RelClass::Event(EventSource::Recovered) => recovered = Some(id),
+            _ => {}
+        }
+    }
+    (durable, boot, recovered)
 }
 
 /// The clock sample of round `t`: `t × round` after the deployment epoch.
@@ -465,7 +565,10 @@ mod tests {
             round: DED_ROUND,
             capture: false,
             halt: None,
-            guarded: Vec::new(),
+            timers: Vec::new(),
+            durable: BTreeSet::new(),
+            boot: None,
+            recovered: None,
         }
     }
 
@@ -506,6 +609,161 @@ mod tests {
                 .filter(|m| m.send == Tick(3))
                 .all(|m| m.fate == Fate::AfterEnd)
         );
+    }
+
+    /// Node 0 carries a durable row and a volatile row per tick it ran, and records what it saw: the incarnation,
+    /// `boot()`, `recovered()` and every ping delivered. Every node pings every node.
+    struct Keeper {
+        nodes: u32,
+    }
+
+    const DUR: RelId = RelId::from_raw(1);
+    const VOL: RelId = RelId::from_raw(2);
+    const BOOT: RelId = RelId::from_raw(3);
+    const RECOVERED: RelId = RelId::from_raw(4);
+    const SAW: RelId = RelId::from_raw(5);
+
+    impl Evaluator for Keeper {
+        fn tick(&self, input: &TickInput<'_>) -> Result<TickOutput, OracleError> {
+            let mut out = TickOutput::default();
+            let u = |x: u64| Value::Int(blossom_value::value::IntValue::U64(x));
+            out.next = input.carried.clone();
+            out.next.insert(DUR, Arc::from(vec![u(input.tick.0)]));
+            out.next.insert(VOL, Arc::from(vec![u(input.tick.0)]));
+            out.instance = input.carried.clone();
+            out.instance.insert(SAW, Arc::from(vec![u(input.incarnation)]));
+            for (rel, _) in input.events {
+                out.instance.insert(*rel, Arc::from(vec![]));
+            }
+            for d in input.delivered {
+                out.instance.insert(PING, d.row.clone());
+            }
+            for to in (0..self.nodes).map(NodeId) {
+                out.outbox.insert(Send {
+                    rel: PING,
+                    to,
+                    row: Arc::from(vec![Value::Node(to), Value::Node(input.node)]),
+                });
+            }
+            Ok(out)
+        }
+    }
+
+    #[test]
+    fn a_restarted_node_keeps_only_its_durable_relations_and_boots_again() {
+        let eval = Keeper { nodes: 2 };
+        let world = SyncWorld::new(&eval, 2);
+        let mut faults = FaultSchedule::default();
+        faults.crashes.insert(NodeId(0), Tick(3));
+        faults.restarts.insert(NodeId(0), Tick(5));
+        let mut cfg = config(CrashView::Frozen);
+        cfg.last = Tick(6);
+        cfg.durable = BTreeSet::from([DUR]);
+        cfg.boot = Some(BOOT);
+        cfg.recovered = Some(RECOVERED);
+        let run = world.run(&cfg, &faults).unwrap();
+        let at = |t: u64| run.node_tick(Tick(t), NodeId(0)).unwrap();
+        let ticks = |t: u64, rel: RelId| -> Vec<u64> {
+            at(t)
+                .instance
+                .rows(rel)
+                .filter_map(|r| match r.first() {
+                    Some(Value::Int(blossom_value::value::IntValue::U64(x))) => Some(*x),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(
+            at(2).ran && !at(3).ran && !at(4).ran && at(5).ran,
+            "down for rounds 3 and 4"
+        );
+        assert_eq!(ticks(5, DUR), [1, 2], "the durable rows of the rounds before the crash");
+        assert_eq!(ticks(5, VOL), Vec::<u64>::new(), "no volatile row survives the restart");
+        assert_eq!(ticks(2, SAW), [1]);
+        assert_eq!(ticks(5, SAW), [2], "a restart is a new incarnation");
+        assert!(at(5).instance.rows(BOOT).next().is_some() && at(5).instance.rows(RECOVERED).next().is_some());
+        assert!(
+            at(6).instance.rows(BOOT).next().is_none(),
+            "boot() holds in the restart round only"
+        );
+        assert_eq!(senders(&run, 5, 1), [1], "nothing from 0 while it was down (sent at 4)");
+        assert_eq!(senders(&run, 6, 1), [0, 1], "0 sends again from its restart");
+        assert!(
+            !run.messages
+                .iter()
+                .any(|m| m.from == NodeId(0) && (m.send == Tick(3) || m.send == Tick(4))),
+            "a down node sends nothing"
+        );
+    }
+
+    /// Records every timer firing it gets as a row of `TIMER`.
+    struct Ticker;
+
+    const TIMER: RelId = RelId::from_raw(6);
+
+    impl Evaluator for Ticker {
+        fn tick(&self, input: &TickInput<'_>) -> Result<TickOutput, OracleError> {
+            let mut out = TickOutput::default();
+            for (rel, row) in input.events {
+                if *rel == TIMER {
+                    out.instance.insert(TIMER, row.clone());
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    #[test]
+    fn a_restart_starts_the_timers_counting_again_from_its_round() {
+        let world = SyncWorld::new(&Ticker, 1);
+        let mut faults = FaultSchedule::default();
+        faults.crashes.insert(NodeId(0), Tick(3));
+        faults.restarts.insert(NodeId(0), Tick(5));
+        let mut cfg = config(CrashView::Frozen);
+        cfg.first = Tick(0);
+        cfg.last = Tick(9);
+        cfg.round = Duration::from_nanos(10);
+        cfg.timers = vec![Timer {
+            rel: TIMER,
+            every: Duration::from_nanos(20),
+            guard: None,
+            nodes: vec![NodeId(0)],
+        }];
+        let run = world.run(&cfg, &faults).unwrap();
+        let firings: Vec<(u64, u64, i64)> = (0..=9)
+            .flat_map(|t| {
+                let nt = run.node_tick(Tick(t), NodeId(0)).unwrap();
+                let rows: Vec<_> = if nt.ran {
+                    nt.instance.rows(TIMER).collect()
+                } else {
+                    Vec::new()
+                };
+                rows.into_iter()
+                    .map(|r| match (&r[0], &r[1]) {
+                        (Value::Int(blossom_value::value::IntValue::U64(k)), Value::Instant(due)) => (t, *k, due.0),
+                        other => panic!("not a timer row: {other:?}"),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(
+            firings,
+            [(2, 0, 20), (7, 0, 70), (9, 1, 90)],
+            "counted from boot (0), then from the restart's clock (50)"
+        );
+    }
+
+    #[test]
+    fn restarts_are_refused_under_the_ded_crash_view() {
+        let eval = Pinger { nodes: 2 };
+        let world = SyncWorld::new(&eval, 2);
+        let mut faults = FaultSchedule::default();
+        faults.crashes.insert(NodeId(0), Tick(2));
+        faults.restarts.insert(NodeId(0), Tick(3));
+        assert!(matches!(
+            world.run(&config(CrashView::MollyContinue), &faults),
+            Err(SimError::Unimplemented(_))
+        ));
     }
 
     #[test]

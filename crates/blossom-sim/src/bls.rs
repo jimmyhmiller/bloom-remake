@@ -2,21 +2,15 @@
 //!
 //! Every node runs the program; rules placed at a role run only on that role's nodes. The world feeds the runtime
 //! events: `boot()` in every node's first round (tick 0, SEM-012) and each physical timer's firings, with round `t`
-//! at time `t × round` (LANGUAGE §15.2). A timer `every d` placed on a node fires once per period: firing `k` (from
-//! 0) is due at `(k + 1) × d` and is delivered in the first round whose clock has reached it, as the row
-//! `(k, (k + 1) × d)`. A crashed node is frozen from its crash round (CR-20).
-
-use std::sync::Arc;
+//! at time `t × round` (LANGUAGE §15.2; [`crate::runtime`] says when a timer fires). A crashed node is frozen from
+//! its crash round (CR-20); one that restarts boots again with its durable relations.
 
 use blossom_artifact::bls::BlsArtifact;
-use blossom_base::{RelId, RoleId, internal_error};
-use blossom_ir::core::{EventSource, Placement, RelClass};
+use blossom_base::{RelId, internal_error};
 use blossom_oracle::{Oracle, Row};
-use blossom_value::Value;
-use blossom_value::time::{Duration, Instant, NodeId, Tick};
-use blossom_value::value::IntValue;
+use blossom_value::time::{Duration, NodeId, Tick};
 
-use crate::sync::{CrashView, FaultSchedule, SimError, SyncConfig, SyncRun, SyncWorld, now_at};
+use crate::sync::{CrashView, FaultSchedule, SimError, SyncConfig, SyncRun, SyncWorld};
 
 /// An input event: `row` in the root input `rel` at `node`, in round `tick`.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -31,11 +25,8 @@ pub struct InputEvent {
 pub struct BlsSim<'a> {
     artifact: &'a BlsArtifact,
     oracle: Oracle,
-    /// Physical timers: relation, period, and the role they are placed at.
-    timers: Vec<(RelId, Duration, Option<RoleId>)>,
-    /// Guarded timers (`every d while G`): relation, period, role and guard; the round loop fires them.
-    guarded: Vec<(RelId, Duration, Option<RoleId>, RelId)>,
-    boot: Option<RelId>,
+    /// `boot()` and the timers.
+    runtime: crate::runtime::Runtime,
 }
 
 impl<'a> BlsSim<'a> {
@@ -69,40 +60,11 @@ impl<'a> BlsSim<'a> {
                 )
             })
             .map_err(SimError::Load)?;
-        let mut timers = Vec::new();
-        let mut guarded = Vec::new();
-        for (id, r) in artifact.program.get().rels.iter_enumerated() {
-            if let RelClass::Event(EventSource::Timer(t)) = &r.class {
-                let Some(every) = t.every else {
-                    return Err(blossom_base::unimplemented_error!(
-                        "LANG-173",
-                        "timers without a period in the simulator"
-                    )
-                    .into());
-                };
-                if t.ticks.is_some() || t.times.is_some() || t.once_after.is_some() || t.once {
-                    return Err(blossom_base::unimplemented_error!(
-                        "LANG-173",
-                        "bounded, logical and one-shot timers in the simulator"
-                    )
-                    .into());
-                }
-                let role = match r.placement {
-                    Placement::Role(role) => Some(role),
-                    Placement::Shared => None,
-                };
-                match t.guard {
-                    Some(g) => guarded.push((id, every, role, g)),
-                    None => timers.push((id, every, role)),
-                }
-            }
-        }
+        let runtime = crate::runtime::Runtime::of(artifact.program.get())?;
         Ok(BlsSim {
             artifact,
             oracle,
-            timers,
-            guarded,
-            boot: artifact.boot(),
+            runtime,
         })
     }
 
@@ -138,12 +100,15 @@ impl<'a> BlsSim<'a> {
     ) -> Result<SyncRun, SimError> {
         let n = u32::try_from(self.artifact.nodes.len()).map_err(|_| internal_error!("too many nodes"))?;
         let mut world = SyncWorld::new(eval, n);
-        for (node, tick, rel, row) in self.runtime_events(last, round)? {
-            world.input(node, tick, rel, row);
+        if let Some((rel, row)) = self.runtime.boot_at(Tick(0)) {
+            for node in 0..n {
+                world.input(NodeId(node), Tick(0), rel, row.clone());
+            }
         }
         for e in inputs {
             world.input(e.node, e.tick, e.rel, e.row.clone());
         }
+        let (durable, boot, recovered) = crate::sync::restart_shape(self.artifact.program.get());
         world.run(
             &SyncConfig {
                 first: Tick(0),
@@ -152,51 +117,12 @@ impl<'a> BlsSim<'a> {
                 round,
                 capture,
                 halt: self.artifact.halt,
-                guarded: crate::runtime::guarded_timers(&self.guarded, &self.artifact.roles)?,
+                timers: self.runtime.timers(&self.artifact.roles)?,
+                durable,
+                boot,
+                recovered,
             },
             faults,
         )
-    }
-
-    /// `boot()` at tick 0 on every node, and the timers' firings.
-    pub fn runtime_events(&self, last: Tick, round: Duration) -> Result<Vec<(NodeId, Tick, RelId, Row)>, SimError> {
-        let mut out = Vec::new();
-        for (i, role) in self.artifact.roles.iter().enumerate() {
-            let node = NodeId(u32::try_from(i).map_err(|_| internal_error!("too many nodes"))?);
-            if let Some(boot) = self.boot {
-                out.push((node, Tick(0), boot, Arc::from(Vec::new())));
-            }
-            for (rel, every, placed) in &self.timers {
-                if placed.is_some() && placed != role {
-                    continue;
-                }
-                let period = every.as_nanos();
-                if period <= 0 {
-                    return Err(internal_error!("a timer with a non-positive period").into());
-                }
-                let mut k: i64 = 0;
-                for t in 1..=last.0 {
-                    let now = now_at(round, Tick(t))?;
-                    loop {
-                        let due = k
-                            .checked_add(1)
-                            .and_then(|k1| k1.checked_mul(period))
-                            .ok_or_else(|| internal_error!("timer arithmetic overflows"))?;
-                        if due > now.0 {
-                            break;
-                        }
-                        let count = u64::try_from(k).map_err(|_| internal_error!("negative timer count"))?;
-                        out.push((
-                            node,
-                            Tick(t),
-                            *rel,
-                            Arc::from(vec![Value::Int(IntValue::U64(count)), Value::Instant(Instant(due))]),
-                        ));
-                        k += 1;
-                    }
-                }
-            }
-        }
-        Ok(out)
     }
 }

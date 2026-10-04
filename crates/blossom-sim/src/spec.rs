@@ -132,7 +132,7 @@ impl<'a> SpecSim<'a> {
         let profile = self.artifact.profile;
         for t in profile.first_tick().0..=last.0 {
             for n in 0..nodes {
-                for (rel, row) in self.events(NodeId(n), Tick(t))? {
+                for (rel, row) in self.scheduled(NodeId(n), Tick(t)) {
                     world.input(NodeId(n), Tick(t), rel, row);
                 }
                 for m in self.ingress(NodeId(n), Tick(t)) {
@@ -140,6 +140,7 @@ impl<'a> SpecSim<'a> {
                 }
             }
         }
+        let (durable, boot, recovered) = crate::sync::restart_shape(self.artifact.protocol.get());
         world.run(
             &SyncConfig {
                 first: profile.first_tick(),
@@ -148,15 +149,19 @@ impl<'a> SpecSim<'a> {
                 round: profile.round(),
                 capture,
                 halt: self.artifact.halt,
-                guarded: self.runtime.guarded(&self.artifact.roles)?,
+                timers: self.runtime.timers(&self.artifact.roles)?,
+                durable,
+                boot,
+                recovered,
             },
             faults,
         )
     }
 
-    /// Every event of `node` at `tick`: its scheduled inputs, the runtime's (`boot`, timers) and its node statics. A
-    /// guarded timer's firings are not here: they depend on the node's previous round, and `run` makes them.
-    pub fn events(&self, node: NodeId, tick: Tick) -> Result<Vec<(RelId, Row)>, SimError> {
+    /// The events of `node` at `tick` a run schedules: its inputs, `boot()` and its node statics. The timers'
+    /// firings are not here: the round loop makes them (a guarded timer's depend on the node's previous round, and
+    /// a restart starts every timer's count again).
+    pub fn scheduled(&self, node: NodeId, tick: Tick) -> Vec<(RelId, Row)> {
         let mut events: Vec<(RelId, Row)> = self
             .artifact
             .inputs
@@ -164,11 +169,7 @@ impl<'a> SpecSim<'a> {
             .filter(|f| f.node == node && f.tick == tick)
             .map(|f| (f.rel, Arc::from(f.row.clone())))
             .collect();
-        events.extend(self.runtime.events_at(
-            role_of(&self.artifact.roles, node),
-            tick,
-            self.artifact.profile.round(),
-        )?);
+        events.extend(self.runtime.boot_at(tick));
         events.extend(
             self.artifact
                 .statics
@@ -176,6 +177,18 @@ impl<'a> SpecSim<'a> {
                 .filter(|s| s.node == node)
                 .map(|s| (s.rel, Arc::from(s.row.clone()))),
         );
+        events
+    }
+
+    /// Every event of a first incarnation of `node` at `tick`: [`SpecSim::scheduled`]'s and the unguarded timers'
+    /// firings.
+    pub fn events(&self, node: NodeId, tick: Tick) -> Result<Vec<(RelId, Row)>, SimError> {
+        let mut events = self.scheduled(node, tick);
+        events.extend(self.runtime.timer_firings_at(
+            role_of(&self.artifact.roles, node),
+            tick,
+            self.artifact.profile.round(),
+        )?);
         Ok(events)
     }
 
