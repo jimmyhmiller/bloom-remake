@@ -37,6 +37,9 @@ use crate::rule::{self, Driver, Found, Plan, Plans, Regime, StoreKey, Stores, To
 use crate::store::{CellSpec, Store};
 use crate::strata::{self, Stratum};
 
+/// Stores this small share one size for the join-order cache (`run_drivers`).
+const SMALL_STORE: usize = 32;
+
 /// How to set up an engine for one node of a deployment.
 #[derive(Clone, Debug, Default)]
 pub struct EngineConfig {
@@ -608,7 +611,7 @@ impl Engine {
             let rows = self
                 .stores
                 .get(&StoreKey::Main(*rel))
-                .map(|s| s.present().iter().cloned().collect())
+                .map(|s| s.present().cloned().collect())
                 .unwrap_or_default();
             out.observed.insert(*rel, rows);
         }
@@ -642,7 +645,7 @@ impl Engine {
         }
         self.stores
             .get(&StoreKey::Next(rel))
-            .map(|s| s.present().iter().cloned().collect())
+            .map(|s| s.present().cloned().collect())
             .unwrap_or_default()
     }
 
@@ -665,19 +668,24 @@ impl Engine {
 
     /// Brings one rule's output up to date.
     fn maintain(&mut self, p: &Program, input: &StepInput<'_>, id: RuleId) -> Result<(), EvalError> {
-        let plan = self.plans.get(&id).ok_or_else(|| internal_error!("rule {id:?} has no plan"))?.clone();
         let rule = p.rules.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?;
-        match plan.regime {
-            Regime::Recompute => self.recompute_rule(p, input, rule, &plan),
-            Regime::Delta => {
-                let changed = plan
+        {
+            // Most rules see no change in a tick: tell so without taking a handle on the plan.
+            let plan = self.plans.get(&id).ok_or_else(|| internal_error!("rule {id:?} has no plan"))?;
+            if plan.regime == Regime::Delta
+                && !plan
                     .deps
                     .iter()
                     .filter_map(|l| rule.body.lits.get(*l).and_then(dep_store))
-                    .any(|k| self.stores.get(&k).is_some_and(Store::changed));
-                if !changed {
-                    return Ok(());
-                }
+                    .any(|k| self.stores.get(&k).is_some_and(Store::changed))
+            {
+                return Ok(());
+            }
+        }
+        let plan = self.plans.get(&id).ok_or_else(|| internal_error!("rule {id:?} has no plan"))?.clone();
+        match plan.regime {
+            Regime::Recompute => self.recompute_rule(p, input, rule, &plan),
+            Regime::Delta => {
                 let terms = self.evaluate(p, input, rule, &plan, false)?;
                 self.count(rule.id, terms.examined, terms.steps);
                 self.apply(p, input, rule, &plan, terms)
@@ -808,14 +816,15 @@ impl Engine {
             // A range keeps some of the rows its probe finds: assume a small fraction.
             if range { rows / 16 + 1 } else { rows }
         };
+        // The orders are kept while every store stays within its power of two; stores below `SMALL_STORE` rows count
+        // as one size (they flip between a few rows from tick to tick, and any order joins them cheaply).
         let sizes: Vec<u32> = plan
             .atoms
             .iter()
             .map(|lit| match rule.body.lits.get(*lit) {
-                Some(Literal::Pos(a)) => self
-                    .stores
-                    .get(&rule::atom_store(a))
-                    .map_or(0, |s| usize::BITS - s.present().len().leading_zeros()),
+                Some(Literal::Pos(a)) => self.stores.get(&rule::atom_store(a)).map_or(0, |s| {
+                    (usize::BITS - s.present_len().leading_zeros()).max(SMALL_STORE.trailing_zeros())
+                }),
                 _ => 0,
             })
             .collect();
@@ -1305,7 +1314,7 @@ impl Engine {
             let Some(row) = self
                 .stores
                 .get(&StoreKey::Main(rule.head.rel))
-                .and_then(|s| s.present().iter().next())
+                .and_then(|s| s.present().next())
             else {
                 continue;
             };
