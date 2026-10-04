@@ -2032,11 +2032,16 @@ impl Cx<'_> {
         let target = if has_for { names.get(1).map(|n| vec![*n]) } else { None };
         let mut members = Vec::new();
         let mut member_attrs = Vec::new();
+        let mut target_args = Vec::new();
         for c in node.children() {
             let cspan = self.span(&c);
             member_attrs.extend(self.attrs(&c));
             let m = match c.kind() {
                 NAME => continue,
+                ARG if has_for => {
+                    target_args.push(self.arg(&c));
+                    continue;
+                }
                 NODESMEMBER => SpecMember::Nodes(self.names(&c)),
                 ASSIGNMEMBER => {
                     let names = self.names(&c);
@@ -2101,6 +2106,7 @@ impl Cx<'_> {
         SpecItem {
             name,
             target,
+            target_args,
             members,
             member_attrs,
             span,

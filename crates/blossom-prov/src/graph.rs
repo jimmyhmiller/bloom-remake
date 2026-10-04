@@ -72,11 +72,29 @@ pub struct Goal {
     pub support: Support,
 }
 
+/// What made a firing: a rule of the program, or the runtime.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum By {
+    Rule(RuleId),
+    Runtime(RuntimeAct),
+}
+
+/// What the runtime did to make a fact hold.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RuntimeAct {
+    /// A physical timer fired (a guarded one because its guard held).
+    Timer,
+    /// A restarted node reloaded a durable tuple it held before it crashed.
+    Restore,
+    /// The host delivered a stream event (a connection opened, bytes, a close, a failed dial).
+    Stream,
+}
+
 /// One distinct firing.
 #[derive(Clone, Debug)]
 pub struct Firing {
     pub space: Space,
-    pub rule: RuleId,
+    pub by: By,
     pub node: Option<NodeId>,
     pub tick: Tick,
     pub kind: FiringKind,
@@ -99,8 +117,16 @@ pub enum Premise {
     CrashAbsent { node: Option<NodeId>, time: Option<Tick> },
     /// A positive read of the crash oracle's tuple `crash(_, node, time)`: falsified if `node` crashes earlier.
     CrashPresent { node: NodeId, time: Tick },
-    /// The firing node was up (the frozen crash view, CR-20): falsified if `node` crashes at or before `tick`.
+    /// The firing node was up (the frozen crash view, CR-20): falsified if `node` is down at `tick` (crashed at or
+    /// before it, and not restarted since).
     Alive { node: NodeId, tick: Tick },
+    /// `node` was up at every tick of `from..=to` (a stream event waits in its node's inbox, which a crash clears).
+    Up { node: NodeId, from: Tick, to: Tick },
+    /// `node` does not restart at `tick` (crash-recovery: a restart loses the node's volatile state).
+    NoRestart { node: NodeId, tick: Tick },
+    /// `node` has not restarted after `from` (the start of the incarnation the fact belongs to: 0, or the run's own
+    /// restart) and at or before `tick` (a restart starts its timers counting again).
+    NotRestarted { node: NodeId, from: Tick, tick: Tick },
     /// An aggregate firing's group, recorded in [`ProvGraph::aggregate`]: the firing's row changes when a
     /// contributor appears (a contributor lost is one of its read premises).
     Aggregate(AggId),
@@ -375,6 +401,28 @@ impl ProvGraph {
                             Premise::Alive { node, tick } => {
                                 let _ = writeln!(out, "{indent}    {} is up at {}", names.node(*node), tick.0);
                             }
+                            Premise::Up { node, from, to } => {
+                                let _ = writeln!(
+                                    out,
+                                    "{indent}    {} is up from {} to {}",
+                                    names.node(*node),
+                                    from.0,
+                                    to.0
+                                );
+                            }
+                            Premise::NoRestart { node, tick } => {
+                                let _ =
+                                    writeln!(out, "{indent}    {} does not restart at {}", names.node(*node), tick.0);
+                            }
+                            Premise::NotRestarted { node, from, tick } => {
+                                let _ = writeln!(
+                                    out,
+                                    "{indent}    {} has not restarted after {} and by {}",
+                                    names.node(*node),
+                                    from.0,
+                                    tick.0
+                                );
+                            }
                         }
                     }
                 }
@@ -443,7 +491,7 @@ mod tests {
                 a,
                 Firing {
                     space: Space::Protocol,
-                    rule: RuleId::from_raw(0),
+                    by: By::Rule(RuleId::from_raw(0)),
                     node: Some(NodeId(0)),
                     tick: Tick(2),
                     kind: FiringKind::Rule,

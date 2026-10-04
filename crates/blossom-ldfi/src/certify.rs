@@ -19,7 +19,7 @@ use blossom_sim::{FaultSchedule, Omission};
 use blossom_value::time::{NodeId, Tick};
 
 use crate::LdfiError;
-use crate::faults::{FailureSpec, canonical};
+use crate::faults::FailureSpec;
 
 /// The result of an exhaustive search.
 #[derive(Clone, Debug)]
@@ -99,6 +99,13 @@ pub fn exhaustive(
         )
         .into());
     }
+    if spec.restart.is_some() {
+        return Err(blossom_base::unimplemented_error!(
+            "TEST-037",
+            "exhaustive certification under crash-restarts (it steps nodes one round at a time, without restarts)"
+        )
+        .into());
+    }
     if sim.artifact().halt.is_some() {
         return Err(blossom_base::unimplemented_error!(
             "TEST-029",
@@ -145,7 +152,7 @@ pub fn exhaustive(
                 for s in stepped {
                     match s {
                         Stepped::Violation(oms) => {
-                            result.counterexample = Some(canonical(FaultSchedule {
+                            result.counterexample = Some(spec.canonical(FaultSchedule {
                                 omissions: oms,
                                 crashes: crashes.clone(),
                                 restarts: std::collections::BTreeMap::new(),
@@ -269,7 +276,11 @@ fn step_state(
                     .map(|(_, inst)| inst.iter().collect())
             }
         };
-        let outcome = sim.outcome_of(tick, &at, crashes, false)?;
+        let faults = FaultSchedule {
+            crashes: crashes.clone(),
+            ..FaultSchedule::default()
+        };
+        let outcome = sim.outcome_of(tick, &at, &faults, false)?;
         return Ok(if is_good(ff_post, &outcome) {
             Stepped::Good
         } else {

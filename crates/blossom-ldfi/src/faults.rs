@@ -8,7 +8,9 @@ use blossom_value::time::{NodeId, Tick};
 use crate::LdfiError;
 
 /// What faults LDFI may inject (TEST-020, TEST-021): omissions of messages sent before EFF, and up to
-/// `max_crashes` crashes, over a run of ticks `1..=eot`.
+/// `max_crashes` crashes, over a run of ticks `1..=eot`. A crash is a crash-stop, or with `restart` a crash-restart
+/// (crash-recovery, TEST-037): a node that crashes at `c` is down for `restart` ticks and runs again from
+/// `c + restart` (when that is within the run).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FailureSpec {
     pub eot: Tick,
@@ -16,6 +18,8 @@ pub struct FailureSpec {
     pub max_crashes: u32,
     /// The number of nodes of the deployment.
     pub nodes: u32,
+    /// How many ticks a crashed node stays down before it restarts (`None`: it never does).
+    pub restart: Option<u64>,
 }
 
 impl FailureSpec {
@@ -38,7 +42,51 @@ impl FailureSpec {
             eff: Tick(eff),
             max_crashes,
             nodes,
+            restart: None,
         })
+    }
+
+    /// The spec with crash-restarts: a crashed node is down for `rounds` ticks.
+    pub fn with_restart(mut self, rounds: u64) -> Result<FailureSpec, LdfiError> {
+        if rounds == 0 {
+            return Err(LdfiError::Spec(
+                "a restart comes at least 1 tick after its crash".into(),
+            ));
+        }
+        self.restart = Some(rounds);
+        Ok(self)
+    }
+
+    /// The tick a node that crashes at `crash` runs again, if it restarts within the run.
+    pub fn restart_of(&self, crash: Tick) -> Option<Tick> {
+        let r = crash.0.checked_add(self.restart?)?;
+        (r <= self.eot.0).then_some(Tick(r))
+    }
+
+    /// Whether a node that crashes at `crash` is down at `t`.
+    pub fn down(&self, crash: Tick, t: Tick) -> bool {
+        crash <= t && self.restart.is_none_or(|d| t.0 < crash.0.saturating_add(d))
+    }
+
+    /// `faults` with the restarts its crashes imply (none for crash-stops).
+    pub fn with_restarts(&self, mut faults: FaultSchedule) -> FaultSchedule {
+        faults.restarts = faults
+            .crashes
+            .iter()
+            .filter_map(|(n, c)| Some((*n, self.restart_of(*c)?)))
+            .collect();
+        faults
+    }
+
+    /// The canonical form of a fault set: its restarts are the ones its crashes imply, and omissions that a crash of
+    /// their sender already implies (the sender is down at the send tick) are dropped.
+    pub fn canonical(&self, faults: FaultSchedule) -> FaultSchedule {
+        let mut faults = self.with_restarts(faults);
+        let crashes = faults.crashes.clone();
+        faults
+            .omissions
+            .retain(|o| crashes.get(&o.from).is_none_or(|c| !self.down(*c, o.send)));
+        faults
     }
 
     /// Whether the message `from -> to` sent at `send` may be omitted (CR-21, TEST-021).
@@ -54,6 +102,7 @@ impl FailureSpec {
     /// Whether `faults` lies within the spec.
     pub fn admits(&self, faults: &FaultSchedule) -> bool {
         u32::try_from(faults.crashes.len()).is_ok_and(|n| n <= self.max_crashes)
+            && self.with_restarts(faults.clone()).restarts == faults.restarts
             && faults
                 .crashes
                 .iter()
@@ -65,15 +114,16 @@ impl FailureSpec {
     }
 
     /// The clock facts a fault set removes (ARCHITECTURE §8.3, LDFI Appendix B): an omission removes its own; a crash
-    /// of `n` at `c` removes every clock `n -> x` with `x != n` from `c` to EOT.
+    /// of `n` at `c` removes every clock `n -> x` with `x != n` from `c` to EOT, or until its restart.
     pub fn removed_clocks(&self, faults: &FaultSchedule) -> BTreeSet<Omission> {
         let mut out: BTreeSet<Omission> = faults.omissions.clone();
         for (&n, &c) in &faults.crashes {
+            let end = self.restart_of(c).map_or(self.eot.0, |r| r.0 - 1);
             for x in (0..self.nodes).map(NodeId) {
                 if x == n {
                     continue;
                 }
-                for s in c.0..=self.eot.0 {
+                for s in c.0..=end {
                     out.insert(Omission {
                         from: n,
                         to: x,
@@ -86,22 +136,13 @@ impl FailureSpec {
     }
 }
 
-/// The canonical form of a fault set: omissions that a crash of their sender at or before the send tick already
-/// implies are dropped.
-pub fn canonical(mut faults: FaultSchedule) -> FaultSchedule {
-    let crashes = faults.crashes.clone();
-    faults
-        .omissions
-        .retain(|o| crashes.get(&o.from).is_none_or(|c| *c > o.send));
-    faults
-}
-
-/// `O(from,to,send)` and `C(node,tick)` labels, sorted (the corpus's notation).
+/// `O(from,to,send)`, `C(node,tick)` and `R(node,tick)` (a restart) labels, sorted (the corpus's notation).
 pub fn labels(faults: &FaultSchedule, node: &dyn Fn(NodeId) -> String) -> Vec<String> {
     let mut out: Vec<String> = faults
         .crashes
         .iter()
         .map(|(n, t)| format!("C({},{})", node(*n), t.0))
+        .chain(faults.restarts.iter().map(|(n, t)| format!("R({},{})", node(*n), t.0)))
         .chain(
             faults
                 .omissions

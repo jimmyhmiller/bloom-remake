@@ -50,6 +50,9 @@ pub struct Faults {
     pub eot: u64,
     pub eff: u64,
     pub crashes: u32,
+    /// `restart: d`: every crash is a crash-restart, the node down for `d` ticks (crash-recovery, TEST-037);
+    /// `None`: crash-stop.
+    pub restart: Option<u64>,
 }
 
 /// A spec compiled with its target.
@@ -250,7 +253,9 @@ fn compile(
         return Ok(None);
     }
     // The target, compiled as a program root.
-    let Some((mut hir, _)) = crate::resolve::resolve_module_root(tree, sources, diags, target, &[], &[], None)? else {
+    let target_args = target_spec.target_args.as_slice();
+    let Some((mut hir, _)) = crate::resolve::resolve_module_root(tree, sources, diags, target, &[], target_args, None)?
+    else {
         return Ok(None);
     };
     crate::typeck::check(&mut hir, diags)?;
@@ -845,6 +850,7 @@ fn parse_faults(opts: &[(Ident, ast::Expr)], span: Span, diags: &mut Diagnostics
     let mut eot = None;
     let mut eff = None;
     let mut crashes = None;
+    let mut restart = None;
     for (k, e) in opts {
         let int = || match &e.kind {
             ExprKind::Lit(LitValue::Int { value, .. }) => u64::try_from(*value).ok(),
@@ -854,6 +860,12 @@ fn parse_faults(opts: &[(Ident, ast::Expr)], span: Span, diags: &mut Diagnostics
             "eot" => eot = int(),
             "eff" => eff = int(),
             "crashes" => crashes = int().and_then(|c| u32::try_from(c).ok()),
+            "restart" => match int().filter(|d| *d >= 1) {
+                Some(d) => restart = Some(d),
+                None => diags.push(
+                    Diagnostic::new(code!("BLS0900"), "`restart` is a positive number of ticks").with_primary(e.span),
+                ),
+            },
             "model" => {
                 let model = match &e.kind {
                     ExprKind::Path(p, _) if p.len() == 1 => p.first().map(Ident::as_str),
@@ -885,7 +897,12 @@ fn parse_faults(opts: &[(Ident, ast::Expr)], span: Span, diags: &mut Diagnostics
         }
     }
     match (eot, eff, crashes) {
-        (Some(eot), Some(eff), Some(crashes)) => Some(Faults { eot, eff, crashes }),
+        (Some(eot), Some(eff), Some(crashes)) => Some(Faults {
+            eot,
+            eff,
+            crashes,
+            restart,
+        }),
         _ => {
             diags.push(
                 Diagnostic::new(code!("BLS0900"), "`faults` needs integer `eot`, `eff` and `crashes`")

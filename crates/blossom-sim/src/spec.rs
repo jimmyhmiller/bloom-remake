@@ -224,18 +224,20 @@ impl<'a> SpecSim<'a> {
                 })
                 .collect()
         };
-        self.outcome_of(eot, &instances, &run.faults.crashes, capture)
+        self.outcome_of(eot, &instances, &run.faults, capture)
     }
 
     /// Evaluates the outcome spec at `eot` over every node's instance at a tick, as `instances` gives them (one per
-    /// node, in node order; `None` for a tick it does not have), with the crashes of the run.
+    /// node, in node order; `None` for a tick it does not have), with the faults of the run: `crashed(n)` holds for a
+    /// node that is down at `eot` (one that restarted is up), the `.ded` crash oracle lists every crash.
     pub fn outcome_of<'i>(
         &self,
         eot: Tick,
         instances: &dyn Fn(Tick) -> Option<Vec<&'i Instance>>,
-        crashes: &std::collections::BTreeMap<NodeId, Tick>,
+        faults: &FaultSchedule,
         capture: bool,
     ) -> Result<Outcome, SimError> {
+        let crashes = &faults.crashes;
         let (Some(spec), Some(oracle)) = (&self.artifact.spec, &self.spec) else {
             return Err(internal_error!("outcome requested for a program without `pre` and `post` (CR-30)").into());
         };
@@ -255,8 +257,8 @@ impl<'a> SpecSim<'a> {
                     }
                 }
                 SpecFeed::Crashed { spec: rel } => {
-                    for (node, at) in crashes {
-                        if *at <= eot {
+                    for node in crashes.keys() {
+                        if faults.crashed(*node, eot) {
                             events.push((rel, Arc::from(vec![Value::Node(*node)])));
                         }
                     }
