@@ -82,6 +82,9 @@ pub trait SatSolver: Send {
     fn solve(&mut self, assumptions: &[Lit], limits: &SolveLimits) -> Result<SatOutcome, SatError>;
     fn value(&self, v: Var) -> Result<bool, SatError>;
     fn failed_assumption(&self, l: Lit) -> Result<bool, SatError>;
+    /// A hint: when the search decides `l`'s variable freely, it tries `l` first. Answers do not depend on it, only
+    /// which model a satisfiable call finds; a backend without the control may ignore it.
+    fn prefer(&mut self, l: Lit) -> Result<(), SatError>;
 }
 
 #[derive(Default)]

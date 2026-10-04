@@ -64,6 +64,7 @@ fn extensions(g: &ProvGraph, spec: &FailureSpec, seed: FaultSchedule, target: Go
         preds: &preds,
         neg: crate::NegSupport::Conservative,
         rules: None,
+        clock: None,
     };
     minimal_extensions(
         g,
