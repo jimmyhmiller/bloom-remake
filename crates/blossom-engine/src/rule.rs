@@ -209,6 +209,102 @@ pub(crate) struct Plan {
     pub head: StoreKey,
     pub aggregate: bool,
     pub regime: Regime,
+    /// When the rule only copies one atom's rows into its head: how, column by column.
+    pub copy: Option<CopyPlan>,
+}
+
+/// A rule whose body is one positive atom and whose head is plain terms (lowering makes many: unions, renames,
+/// the copies into a table's next state): a changed row of the atom maps to its head row column by column, with no
+/// join, valuation or allocation but the head row.
+#[derive(Clone, Debug)]
+pub(crate) struct CopyPlan {
+    /// What each atom column must hold.
+    cols: Vec<ColCheck>,
+    /// Where each head column comes from.
+    head: Vec<HeadSrc>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ColCheck {
+    /// Anything (a wildcard, or a variable's first column).
+    Any,
+    /// This constant.
+    Const(blossom_base::ConstId),
+    /// The value of an earlier column (a variable met again).
+    Same(usize),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum HeadSrc {
+    Col(usize),
+    Const(blossom_base::ConstId),
+}
+
+impl CopyPlan {
+    /// The copy plan of `rule`, if its body is one positive atom and its head plain terms over the atom's
+    /// variables.
+    fn of(rule: &Rule) -> Option<CopyPlan> {
+        let [Literal::Pos(a)] = rule.body.lits.as_slice() else { return None };
+        let mut first: std::collections::BTreeMap<VarId, usize> = std::collections::BTreeMap::new();
+        let mut cols = Vec::new();
+        for (i, t) in atom_terms(a).enumerate() {
+            cols.push(match t {
+                Term::Wild => ColCheck::Any,
+                Term::Const(c) => ColCheck::Const(*c),
+                Term::Var(v) => match first.get(v) {
+                    Some(j) => ColCheck::Same(*j),
+                    None => {
+                        first.insert(*v, i);
+                        ColCheck::Any
+                    }
+                },
+            });
+        }
+        let mut head = Vec::new();
+        for h in &rule.head.args {
+            head.push(match h {
+                HeadArg::Term(Term::Var(v)) => HeadSrc::Col(*first.get(v)?),
+                HeadArg::Term(Term::Const(c)) => HeadSrc::Const(*c),
+                _ => return None,
+            });
+        }
+        Some(CopyPlan { cols, head })
+    }
+
+    /// The head row `row` maps to, if it matches the atom.
+    pub(crate) fn row(&self, cx: &Ctx<'_>, row: &[Value]) -> ExprResult<Option<Row>> {
+        if row.len() != self.cols.len() {
+            return Err(bug(format!("{} terms against {} values", self.cols.len(), row.len())));
+        }
+        let konst = |c: &blossom_base::ConstId| -> ExprResult<&Value> {
+            cx.program
+                .consts
+                .get(*c)
+                .ok_or_else(|| bug(format!("unknown constant {c:?}")))
+        };
+        for (i, check) in self.cols.iter().enumerate() {
+            let held = row.get(i).ok_or_else(|| bug("a copied column out of range".into()))?;
+            let ok = match check {
+                ColCheck::Any => true,
+                ColCheck::Const(c) => konst(c)? == held,
+                ColCheck::Same(j) => row.get(*j).is_some_and(|x| x == held),
+            };
+            if !ok {
+                return Ok(None);
+            }
+        }
+        let mut out = Vec::with_capacity(self.head.len());
+        for src in &self.head {
+            out.push(match src {
+                HeadSrc::Col(i) => row
+                    .get(*i)
+                    .cloned()
+                    .ok_or_else(|| bug("a copied column out of range".into()))?,
+                HeadSrc::Const(c) => konst(c)?.clone(),
+            });
+        }
+        Ok(Some(Row::from(out)))
+    }
 }
 
 /// One end of a range probe: an expression over bound variables, and whether the end is included.
@@ -451,6 +547,8 @@ impl Plan {
         };
         let no_atoms = atoms.is_empty();
         let dep_keys = deps.iter().filter_map(|l| rule.body.lits.get(*l).and_then(dep_store)).collect();
+        let aggregate = crate::strata::is_aggregate(rule);
+        let copy = if aggregate { None } else { CopyPlan::of(rule) };
         Ok(Plan {
             rule: rule.id,
             nvars: rule.body.vars.len(),
@@ -466,7 +564,8 @@ impl Plan {
             deps,
             dep_keys,
             head,
-            aggregate: crate::strata::is_aggregate(rule),
+            aggregate,
+            copy,
         })
     }
 

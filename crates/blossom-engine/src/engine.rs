@@ -796,10 +796,28 @@ impl Engine {
         input: &StepInput<'_>,
         rule: &Rule,
         plan: &Plan,
-        drivers: Vec<(Driver, usize)>,
+        mut drivers: Vec<(Driver, usize)>,
     ) -> Result<Terms, EvalError> {
         let cx = self.ctx(p, input);
         let mut out = Terms::default();
+        // A copy rule's changed rows map straight to head rows (a full evaluation takes the general way).
+        if let Some(copy) = &plan.copy {
+            let mut rest = Vec::new();
+            for (driver, pos) in drivers {
+                match &driver {
+                    Driver::Atom { row, sign, .. } => {
+                        if let Some(h) = copy.row(&cx, row).map_err(|e| to_eval(e, input.tick, Some(rule)))? {
+                            *out.heads.entry(h).or_insert(0) += sign;
+                        }
+                    }
+                    _ => rest.push((driver, pos)),
+                }
+            }
+            if rest.is_empty() {
+                return Ok(out);
+            }
+            drivers = rest;
+        }
         let position: BTreeMap<usize, usize> = plan.deps.iter().enumerate().map(|(i, l)| (*l, i)).collect();
         // The join order of each driver's terms, from the stores as they are now.
         let cost = |lit: usize, cols: &[usize], range: bool| -> usize {
