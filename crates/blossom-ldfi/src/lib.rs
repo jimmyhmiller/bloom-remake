@@ -16,6 +16,7 @@
 
 pub mod certify;
 pub mod driver;
+pub mod explain;
 pub mod faults;
 pub mod hazard;
 pub mod lineage;
@@ -51,9 +52,9 @@ pub enum LdfiError {
     /// The lineage-driven search found no counterexample, but some hazard held already under a run's own faults, so
     /// its lineage cannot certify the program (see `hazard::Extensions::incomplete`).
     #[error(
-        "inconclusive: the lineage-driven search found no counterexample, but its lineage was incomplete; certify exhaustively"
+        "inconclusive: the lineage-driven search found no counterexample, but its lineage was incomplete; certify exhaustively ({0})"
     )]
-    Incomplete,
+    Incomplete(String),
     #[error(transparent)]
     Unimplemented(#[from] Unimplemented),
     #[error(transparent)]

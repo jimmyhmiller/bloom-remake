@@ -49,9 +49,10 @@ fn simulate(artifact: &BlsArtifact, last: u64, faults: &FaultSchedule) -> SyncRu
         .unwrap()
 }
 
-/// The stream events `node` took in round `t`: the event's relation name, and its causes.
+/// The stream events `node` took in round `t`: the event's relation name, and its causes, as `rel@node:round` for a
+/// request or a taken event, `crash node@round` and `omission from->to@round`.
 #[cfg(test)]
-fn events(artifact: &BlsArtifact, run: &SyncRun, t: u64, node: NodeId) -> Vec<(String, Vec<Cause>)> {
+fn events(artifact: &BlsArtifact, run: &SyncRun, t: u64, node: NodeId) -> Vec<(String, Vec<String>)> {
     let names: BTreeMap<_, _> = artifact
         .program
         .get()
@@ -59,11 +60,19 @@ fn events(artifact: &BlsArtifact, run: &SyncRun, t: u64, node: NodeId) -> Vec<(S
         .iter_enumerated()
         .map(|(id, r)| (id, r.name.to_string()))
         .collect();
+    let who = |n: &NodeId| artifact.nodes[n.0 as usize].as_str().to_owned();
+    let label = |c: &Cause| match c {
+        Cause::Request { node, tick, rel, .. } | Cause::Taken { node, tick, rel, .. } => {
+            format!("{}@{}:{}", names[rel], who(node), tick.0)
+        }
+        Cause::Crash { node, tick } => format!("crash {}@{}", who(node), tick.0),
+        Cause::Omission { from, to, tick } => format!("omission {}->{}@{}", who(from), who(to), tick.0),
+    };
     run.node_tick(Tick(t), node)
         .unwrap()
         .streams
         .iter()
-        .map(|e| (names[&e.rel].clone(), e.causes.clone()))
+        .map(|e| (names[&e.rel].clone(), e.causes.iter().map(label).collect()))
         .collect()
 }
 
@@ -92,8 +101,8 @@ fn rows(artifact: &BlsArtifact, run: &SyncRun, node: NodeId, rel: &str) -> Vec<V
 }
 
 #[cfg(test)]
-fn act(node: NodeId, t: u64) -> Cause {
-    Cause::Act { node, tick: Tick(t) }
+fn labels(xs: &[&str]) -> Vec<String> {
+    xs.iter().map(|x| (*x).to_owned()).collect()
 }
 
 #[cfg(test)]
@@ -116,15 +125,30 @@ fn a_dial_opens_both_ends_the_next_round_and_bytes_take_a_round_each_way() {
     );
     assert_eq!(
         events(&artifact, &run, 1, SRV)[0].1,
-        [act(CLI, 0)],
+        ["up.dial@cli:0"],
         "opened by the dial"
     );
     assert_eq!(
         events(&artifact, &run, 2, SRV)[0].1,
-        [act(CLI, 1)],
+        ["up.write@cli:1"],
         "the client's write"
     );
-    assert_eq!(events(&artifact, &run, 3, CLI)[0].1, [act(SRV, 2)], "the server's echo");
+    assert_eq!(
+        events(&artifact, &run, 3, CLI)[0].1,
+        ["echo.write@srv:2"],
+        "the server's echo"
+    );
+    // One connection, dialed at 0, with traffic each way.
+    assert_eq!(run.connections.len(), 1);
+    assert_eq!(run.connections[0].dialed, Tick(0));
+    assert_eq!(
+        run.connections[0]
+            .traffic
+            .iter()
+            .map(|(f, t, s)| (f.0, t.0, s.0))
+            .collect::<Vec<_>>(),
+        [(0, 1, 1), (1, 0, 2)]
+    );
     assert_eq!(
         rows(&artifact, &run, CLI, "got"),
         [vec![
@@ -156,8 +180,8 @@ fn writes_leave_in_seq_order_and_a_pause_holds_bytes_and_the_close_behind_them()
     );
     assert_eq!(
         events(&artifact, &run, 5, SRV)[0].1,
-        [act(CLI, 2), act(SRV, 4)],
-        "the write, and the resume that let it through"
+        labels(&["up.write@cli:1", "up.write@cli:2", "s.resume@srv:4"]),
+        "the writes of seq 1 (held from round 1) and seq 0 (round 2), and the resume that let them through"
     );
     assert_eq!(
         rows(&artifact, &run, SRV, "srv_ended"),
@@ -205,13 +229,7 @@ fn a_crash_resets_the_connection_at_the_other_end_and_a_restart_begins_with_none
     let run = simulate(&artifact, 6, &faults);
     assert_eq!(
         events(&artifact, &run, 2, CLI),
-        [(
-            "up.closed".to_owned(),
-            vec![Cause::Crash {
-                node: SRV,
-                tick: Tick(2)
-            }]
-        )],
+        [("up.closed".to_owned(), labels(&["crash srv@2"]))],
         "the client learns in the crash round"
     );
     assert_eq!(
@@ -231,7 +249,7 @@ fn a_dial_to_a_node_that_is_down_fails() {
     let run = simulate(&artifact, 3, &faults);
     assert_eq!(
         events(&artifact, &run, 1, CLI),
-        [("up.failed".to_owned(), vec![act(CLI, 0)])]
+        [("up.failed".to_owned(), labels(&["up.dial@cli:0"]))]
     );
     assert_eq!(
         rows(&artifact, &run, CLI, "failures"),
@@ -251,11 +269,7 @@ fn a_lost_message_resets_the_connection_it_carries_or_fails_the_dial() {
     let mut faults = FaultSchedule::default();
     faults.omissions.insert(lost(CLI, SRV, 1));
     let run = simulate(&artifact, 4, &faults);
-    let reset = vec![Cause::Omission {
-        from: CLI,
-        to: SRV,
-        tick: Tick(1),
-    }];
+    let reset = labels(&["omission cli->srv@1"]);
     assert_eq!(
         events(&artifact, &run, 2, CLI),
         [("up.closed".to_owned(), reset.clone())]
@@ -270,14 +284,7 @@ fn a_lost_message_resets_the_connection_it_carries_or_fails_the_dial() {
         events(&artifact, &run, 1, CLI),
         [(
             "up.failed".to_owned(),
-            vec![
-                act(CLI, 0),
-                Cause::Omission {
-                    from: CLI,
-                    to: SRV,
-                    tick: Tick(0)
-                }
-            ]
+            labels(&["up.dial@cli:0", "omission cli->srv@0"])
         )]
     );
     assert!(timeline(&artifact, &run, SRV).is_empty());

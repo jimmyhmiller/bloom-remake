@@ -192,6 +192,8 @@ pub struct SyncRun {
     pub faults: FaultSchedule,
     /// The requests the nodes' hosts refused (located runtime errors of the program).
     pub stream_violations: Vec<crate::fabric::StreamViolation>,
+    /// The stream connections made, by the index stream events refer to them by.
+    pub connections: Vec<crate::fabric::Connection>,
 }
 
 impl SyncRun {
@@ -268,6 +270,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
             messages: Vec::new(),
             faults: faults.clone(),
             stream_violations: Vec::new(),
+            connections: Vec::new(),
         };
         let mut carried: Vec<Instance> = vec![Instance::default(); n];
         let mut halted = vec![false; n];
@@ -529,6 +532,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
         run.messages.sort();
         if let Some(f) = fabric {
             run.stream_violations = f.violations;
+            run.connections = f.connections;
         }
         Ok(run)
     }

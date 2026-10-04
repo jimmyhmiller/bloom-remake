@@ -76,6 +76,8 @@ pub trait Rules {
     fn durable(&self, space: Space, rel: RelId) -> bool;
     /// A relation's number of columns.
     fn arity(&self, space: Space, rel: RelId) -> usize;
+    /// The relations of requests to the host (a stream's `write`, `close`, `dial`, `pause`, `resume`).
+    fn host_requests(&self) -> Vec<RelId>;
 }
 
 /// What a seeded enumeration looks for.
@@ -123,6 +125,9 @@ pub enum Origin<'r> {
     /// A physical timer's firings: a restart starts its count again, and a guarded timer fires while its guard held
     /// at the end of the node's previous tick.
     Timer { guard: Option<RelId> },
+    /// A stream event (FOREIGN-PROTOCOLS §1): faults can reset a connection (a lost message, a crash) or fail a
+    /// dial, and new requests to the host (writes, closes, dials) make new events.
+    Stream,
 }
 
 type Pattern = Vec<Option<Value>>;
@@ -477,6 +482,10 @@ pub struct Encoder<'a> {
     low: usize,
     /// The run's own crashes: hypotheses extend them (a crash may only move earlier).
     seed_crashes: BTreeMap<NodeId, Tick>,
+    /// The run's own omissions: what they lose the run already lost.
+    seed_omissions: BTreeSet<Omission>,
+    /// Whether a stream event can appear at a node and tick.
+    stream_memo: BTreeMap<(NodeId, Tick), Hazard>,
     frozen: bool,
 }
 
@@ -499,6 +508,8 @@ impl<'a> Encoder<'a> {
         } = setting;
         Encoder {
             seed_crashes: seed.crashes.clone(),
+            seed_omissions: seed.omissions.clone(),
+            stream_memo: BTreeMap::new(),
             frozen,
             graph,
             spec,
@@ -591,6 +602,25 @@ impl<'a> Encoder<'a> {
         match bound {
             Some(t) if t >= 1 => self.vars.k(self.solver, self.spec, node, at_or_before(t)),
             _ => Ok(Hazard::False),
+        }
+    }
+
+    /// A crash of `node` at or before `t` that the run does not already have: under crash-stop its own crash moved
+    /// earlier, under crash-restart none (a node crashes once).
+    fn new_crash_by(&mut self, node: NodeId, t: Tick) -> Result<Hazard, LdfiError> {
+        match (self.spec.restart, self.seed_crashes.get(&node).copied()) {
+            (Some(_), Some(_)) => Ok(Hazard::False),
+            (Some(_), None) => self.vars.crash_in(self.solver, self.spec, node, 1, t.0),
+            (None, Some(c)) => match c.prev() {
+                Some(before) if before.0 >= 1 => self.vars.k(self.solver, self.spec, node, before.min(t)),
+                _ => Ok(Hazard::False),
+            },
+            (None, None) => self.vars.k(
+                self.solver,
+                self.spec,
+                node,
+                t.min(Tick(self.spec.eot.0.saturating_sub(1))),
+            ),
         }
     }
 
@@ -927,11 +957,10 @@ impl<'a> Encoder<'a> {
         let origin = rules.origin(space, rel)?;
         // Under the frozen crash view, a tuple a node held before some tick stays if the node crashes at that tick.
         let frozen = match (&origin, loc) {
-            (Origin::Input | Origin::Rules { .. } | Origin::Restart | Origin::Timer { .. }, Loc::Node(n))
-                if self.frozen && space == Space::Protocol =>
-            {
-                self.frozen_appear(rel, n, tick, pattern)?
-            }
+            (
+                Origin::Input | Origin::Rules { .. } | Origin::Restart | Origin::Timer { .. } | Origin::Stream,
+                Loc::Node(n),
+            ) if self.frozen && space == Space::Protocol => self.frozen_appear(rel, n, tick, pattern)?,
             _ => Hazard::False,
         };
         if frozen == Hazard::True {
@@ -991,15 +1020,25 @@ impl<'a> Encoder<'a> {
         };
         match origin {
             Origin::Input => Ok(Hazard::False),
+            // A node crashes once: the run's own restart already raised its events.
             Origin::Restart => match loc {
+                Loc::Node(n) if self.seed_crashes.contains_key(&n) => Ok(Hazard::False),
                 Loc::Node(n) => self.vars.restart_at(self.solver, self.spec, n, tick),
                 _ => Err(internal_error!("a restart event outside a node").into()),
+            },
+            Origin::Stream => match loc {
+                Loc::Node(n) => self.stream_appear(n, tick),
+                _ => Err(internal_error!("a stream event outside a node").into()),
             },
             Origin::Timer { guard } => {
                 let Loc::Node(n) = loc else {
                     return Err(internal_error!("a timer firing outside a node").into());
                 };
-                let restarted = self.vars.restarted_by(self.solver, self.spec, n, tick)?;
+                let restarted = if self.seed_crashes.contains_key(&n) {
+                    Hazard::False
+                } else {
+                    self.vars.restarted_by(self.solver, self.spec, n, tick)?
+                };
                 // A guarded timer fires when its guard held at the end of the previous tick: some guard tuple there.
                 let guarded = match (guard, tick.prev()) {
                     (Some(g), Some(before)) => {
@@ -1064,6 +1103,57 @@ impl<'a> Encoder<'a> {
                 self.or(options)
             }
         }
+    }
+
+    /// Whether faults beyond the run's own can make a stream event appear at `node` and `tick` (conservatively, any
+    /// event): a message lost between `node` and another node before `tick` (it resets a connection, or fails a
+    /// dial), a crash of any node by `tick` (it resets connections, or fails a dial to it), or a new request to the
+    /// host at any node before `tick`.
+    fn stream_appear(&mut self, node: NodeId, tick: Tick) -> Result<Hazard, LdfiError> {
+        if let Some(h) = self.stream_memo.get(&(node, tick)) {
+            return Ok(*h);
+        }
+        let Some(rules) = self.rules else {
+            return Err(internal_error!("tuple-level negative support without the program's rules").into());
+        };
+        let nodes = rules.nodes();
+        let requests: Vec<(RelId, usize)> = rules
+            .host_requests()
+            .into_iter()
+            .map(|r| (r, rules.arity(Space::Protocol, r)))
+            .collect();
+        let (h, independent) = self.tracked(|e| {
+            let mut options = Vec::new();
+            for send in (1..tick.0).map(Tick) {
+                for other in (0..nodes).map(NodeId).filter(|m| *m != node) {
+                    for (from, to) in [(node, other), (other, node)] {
+                        let o = Omission { from, to, send };
+                        if e.spec.omission_allowed(from, to, send) && !e.seed_omissions.contains(&o) {
+                            let v = e.vars.omission_var(e.solver, o);
+                            options.push(Hazard::Lit(v.positive()));
+                        }
+                    }
+                }
+            }
+            for m in (0..nodes).map(NodeId) {
+                options.push(e.new_crash_by(m, tick)?);
+            }
+            for before in (0..tick.0).map(Tick) {
+                for (rel, arity) in &requests {
+                    let open: Pattern = vec![None; *arity];
+                    let h = e.appear(Space::Protocol, *rel, Loc::AnyNode, before, &open)?;
+                    if h == Hazard::True {
+                        return Ok(Hazard::True);
+                    }
+                    options.push(h);
+                }
+            }
+            e.or(options)
+        })?;
+        if independent {
+            self.stream_memo.insert((node, tick), h);
+        }
+        Ok(h)
     }
 
     /// Whether `rule`, evaluated at `loc` and `tick`, can gain a valuation that derives a head matching `pattern`.
@@ -1246,7 +1336,7 @@ impl<'a> Encoder<'a> {
                 let (node_loc, rest) = split_node(pattern);
                 self.exists(Space::Protocol, protocol, node_loc, at.unwrap_or(tick), rest)
             }
-            Origin::Input | Origin::Rules { .. } | Origin::Restart | Origin::Timer { .. } => {
+            Origin::Input | Origin::Rules { .. } | Origin::Restart | Origin::Timer { .. } | Origin::Stream => {
                 let nodes: Vec<Option<NodeId>> = match loc {
                     Loc::Node(n) => vec![Some(n)],
                     Loc::Global => vec![None],
@@ -1304,7 +1394,7 @@ impl<'a> Encoder<'a> {
             }
             // A crashed node stays crashed in every superset of the run's faults.
             Origin::Crashed => return Ok(Hazard::False),
-            Origin::Input | Origin::Rules { .. } | Origin::Restart | Origin::Timer { .. } => {}
+            Origin::Input | Origin::Rules { .. } | Origin::Restart | Origin::Timer { .. } | Origin::Stream => {}
         }
         if loc == Loc::AnyNode {
             let mut options = Vec::new();
@@ -1486,6 +1576,8 @@ pub struct Extensions {
     /// it (a derivation met again on its own path counts as falsified), so the lineage gives no guidance for it and
     /// cannot certify the program by itself.
     pub incomplete: bool,
+    /// The targets (by index) that were incomplete.
+    pub incomplete_targets: Vec<usize>,
 }
 
 /// The seeded enumeration (ARCHITECTURE §8.4, TEST-028): for each target, the minimal fault sets that reach it
@@ -1508,11 +1600,12 @@ pub fn minimal_extensions(
         }
     }
     let mut out = Extensions::default();
-    for root in roots {
+    for (index, root) in roots.into_iter().enumerate() {
         let l = match root {
             Hazard::False => continue,
             Hazard::True => {
                 out.incomplete = true;
+                out.incomplete_targets.push(index);
                 continue;
             }
             Hazard::Lit(l) => l,
@@ -1528,6 +1621,7 @@ pub fn minimal_extensions(
         only_seed.extend(free.iter().map(|v| v.negative()));
         if solve(solver, &only_seed)? {
             out.incomplete = true;
+            out.incomplete_targets.push(index);
             continue;
         }
         while solve(solver, &base)? {
