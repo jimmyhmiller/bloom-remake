@@ -183,43 +183,6 @@ pub fn build(artifact: &SimArtifact, run: &SyncRun, outcome: &Outcome) -> Result
         }
     }
 
-    // A restarted node's durable tuples in its restart tick: reloaded from what it held before it crashed (its frozen
-    // copy in the previous tick).
-    for (node, at) in &run.faults.restarts {
-        let Some(nt) = run.node_tick(*at, *node) else { continue };
-        let before = at
-            .prev()
-            .ok_or_else(|| internal_error!("a restart in the first tick"))?;
-        for (rel, rows) in &nt.instance.rels {
-            if !protocol.rels.get(*rel).is_some_and(|r| r.durable) {
-                continue;
-            }
-            for row in rows {
-                let key = |tick: Tick| GoalKey {
-                    space: Space::Protocol,
-                    rel: *rel,
-                    node: Some(*node),
-                    tick,
-                    row: row.clone(),
-                };
-                let (Some(goal), Some(prev)) = (g.find(&key(*at)), g.find(&key(before))) else {
-                    continue;
-                };
-                g.add_firing(
-                    goal,
-                    Firing {
-                        space: Space::Protocol,
-                        by: By::Runtime(RuntimeAct::Restore),
-                        node: Some(*node),
-                        tick: *at,
-                        kind: FiringKind::Rule,
-                        premises: vec![Premise::Goal(prev)],
-                    },
-                )?;
-            }
-        }
-    }
-
     // A crashed node's frozen ticks (CR-20): each tuple is the one it held at the previous tick.
     if artifact.profile.frozen() {
         for (t, round) in run.rounds.iter().enumerate().skip(1) {
@@ -299,6 +262,18 @@ pub fn build(artifact: &SimArtifact, run: &SyncRun, outcome: &Outcome) -> Result
                         }
                         (dest, Tick(tick.0 + 1), (dest != node).then_some((node, dest, tick)))
                     }
+                };
+                // A restarted node reloads the state its last round carried out: a durable head of an inductive firing
+                // in the round before its crash holds again in its restart tick (the crash tick never ran).
+                let at_tick = match (run.faults.crashes.get(&node), run.faults.restarts.get(&node)) {
+                    (Some(c), Some(r))
+                        if rule.kind == RuleKind::Inductive
+                            && *c == at_tick
+                            && protocol.rels.get(rule.head.rel).is_some_and(|x| x.durable) =>
+                    {
+                        *r
+                    }
+                    _ => at_tick,
                 };
                 // An inductive head at EOT + 1 lies outside the run.
                 if at_tick.0 >= run.rounds.len() as u64 {
@@ -825,6 +800,9 @@ pub struct ArtifactRules<'a> {
     artifact: &'a SimArtifact,
     feeds: BTreeMap<RelId, SpecFeed>,
     nodes: u32,
+    /// Per relation, the rules that derive it: deductive, inductive and asynchronous (looked up for every tuple the
+    /// encoder reasons about, so indexed once).
+    by_head: BTreeMap<(Space, RelId), [Vec<&'a blossom_ir::core::Rule>; 3]>,
 }
 
 impl<'a> ArtifactRules<'a> {
@@ -836,7 +814,25 @@ impl<'a> ArtifactRules<'a> {
                 feeds.insert(feed.spec_rel(), *feed);
             }
         }
-        Ok(ArtifactRules { artifact, feeds, nodes })
+        let mut by_head: BTreeMap<(Space, RelId), [Vec<&'a blossom_ir::core::Rule>; 3]> = BTreeMap::new();
+        let programs = std::iter::once((Space::Protocol, artifact.protocol.get()))
+            .chain(artifact.spec.as_ref().map(|s| (Space::Spec, s.program.get())));
+        for (space, program) in programs {
+            for rule in program.rules.iter() {
+                let [deductive, inductive, asynchronous] = by_head.entry((space, rule.head.rel)).or_default();
+                match rule.kind {
+                    RuleKind::Deductive => deductive.push(rule),
+                    RuleKind::Inductive => inductive.push(rule),
+                    RuleKind::Async => asynchronous.push(rule),
+                }
+            }
+        }
+        Ok(ArtifactRules {
+            artifact,
+            feeds,
+            nodes,
+            by_head,
+        })
     }
 }
 
@@ -892,6 +888,17 @@ impl crate::hazard::Rules for ArtifactRules<'_> {
             .collect()
     }
 
+    fn stream_events(&self) -> Vec<RelId> {
+        self.artifact
+            .protocol
+            .get()
+            .rels
+            .iter_enumerated()
+            .filter(|(_, r)| matches!(r.class, RelClass::Event(EventSource::Stream(_))))
+            .map(|(id, _)| id)
+            .collect()
+    }
+
     fn arity(&self, space: Space, rel: RelId) -> usize {
         let program = match space {
             Space::Protocol => Some(self.artifact.protocol.get()),
@@ -943,20 +950,18 @@ impl crate::hazard::Rules for ArtifactRules<'_> {
             Some(_) => return Ok(Origin::Input),
             None => return Err(internal_error!("unknown relation {rel:?}")),
         }
-        let mut deductive = Vec::new();
-        let mut inductive = Vec::new();
-        let mut asynchronous = Vec::new();
-        for rule in program.rules.iter().filter(|r| r.head.rel == rel) {
-            match rule.kind {
-                RuleKind::Deductive => deductive.push(rule),
-                RuleKind::Inductive => inductive.push(rule),
-                RuleKind::Async => asynchronous.push(rule),
-            }
-        }
-        Ok(Origin::Rules {
-            deductive,
-            inductive,
-            asynchronous,
+        let none: &[&blossom_ir::core::Rule] = &[];
+        Ok(match self.by_head.get(&(space, rel)) {
+            Some([deductive, inductive, asynchronous]) => Origin::Rules {
+                deductive,
+                inductive,
+                asynchronous,
+            },
+            None => Origin::Rules {
+                deductive: none,
+                inductive: none,
+                asynchronous: none,
+            },
         })
     }
 }

@@ -78,6 +78,8 @@ pub trait Rules {
     fn arity(&self, space: Space, rel: RelId) -> usize;
     /// The relations of requests to the host (a stream's `write`, `close`, `dial`, `pause`, `resume`).
     fn host_requests(&self) -> Vec<RelId>;
+    /// The relations of stream events (`opened`, `data`, `closed`, `failed`).
+    fn stream_events(&self) -> Vec<RelId>;
 }
 
 /// What a seeded enumeration looks for.
@@ -109,9 +111,9 @@ pub enum Origin<'r> {
     Input,
     /// Derived by rules: deductive and inductive ones, and for a channel the async rules that send to it.
     Rules {
-        deductive: Vec<&'r Rule>,
-        inductive: Vec<&'r Rule>,
-        asynchronous: Vec<&'r Rule>,
+        deductive: &'r [&'r Rule],
+        inductive: &'r [&'r Rule],
+        asynchronous: &'r [&'r Rule],
     },
     /// A copy of a protocol relation's tuples (the spec's inputs): column 0 is the node; at a fixed tick, or at the
     /// read's own tick.
@@ -484,8 +486,9 @@ pub struct Encoder<'a> {
     seed_crashes: BTreeMap<NodeId, Tick>,
     /// The run's own omissions: what they lose the run already lost.
     seed_omissions: BTreeSet<Omission>,
-    /// Whether a stream event can appear at a node and tick.
+    /// Whether a stream event can appear at a node and tick, and whether traffic can leave a node in a tick.
     stream_memo: BTreeMap<(NodeId, Tick), Hazard>,
+    traffic_memo: BTreeMap<(NodeId, Tick), Hazard>,
     frozen: bool,
 }
 
@@ -510,6 +513,7 @@ impl<'a> Encoder<'a> {
             seed_crashes: seed.crashes.clone(),
             seed_omissions: seed.omissions.clone(),
             stream_memo: BTreeMap::new(),
+            traffic_memo: BTreeMap::new(),
             frozen,
             graph,
             spec,
@@ -1091,7 +1095,7 @@ impl<'a> Encoder<'a> {
                             _ => {}
                         }
                         for s in (0..rules.nodes()).map(NodeId) {
-                            for r in &asynchronous {
+                            for r in asynchronous {
                                 options.push(self.rule_appear(r, space, Loc::Node(s), earlier, &sent)?);
                                 if options.last() == Some(&Hazard::True) {
                                     return Ok(Hazard::True);
@@ -1106,9 +1110,9 @@ impl<'a> Encoder<'a> {
     }
 
     /// Whether faults beyond the run's own can make a stream event appear at `node` and `tick` (conservatively, any
-    /// event): a message lost between `node` and another node before `tick` (it resets a connection, or fails a
-    /// dial), a crash of any node by `tick` (it resets connections, or fails a dial to it), or a new request to the
-    /// host at any node before `tick`.
+    /// event): a message lost between `node` and another node before `tick` in a tick traffic can leave the sender
+    /// (it resets a connection, or fails a dial), a crash of any node by `tick` (it resets connections, or fails a
+    /// dial to it), or a new request to the host at any node before `tick`.
     fn stream_appear(&mut self, node: NodeId, tick: Tick) -> Result<Hazard, LdfiError> {
         if let Some(h) = self.stream_memo.get(&(node, tick)) {
             return Ok(*h);
@@ -1129,8 +1133,13 @@ impl<'a> Encoder<'a> {
                     for (from, to) in [(node, other), (other, node)] {
                         let o = Omission { from, to, send };
                         if e.spec.omission_allowed(from, to, send) && !e.seed_omissions.contains(&o) {
+                            let traffic = e.traffic(from, send)?;
+                            if traffic == Hazard::False {
+                                continue;
+                            }
                             let v = e.vars.omission_var(e.solver, o);
-                            options.push(Hazard::Lit(v.positive()));
+                            let lost = e.and(vec![Hazard::Lit(v.positive()), traffic])?;
+                            options.push(lost);
                         }
                     }
                 }
@@ -1152,6 +1161,48 @@ impl<'a> Encoder<'a> {
         })?;
         if independent {
             self.stream_memo.insert((node, tick), h);
+        }
+        Ok(h)
+    }
+
+    /// Whether stream traffic can leave `node` in `tick` (so a message lost then can reset a connection): the run has
+    /// it make a request to the host or take a stream event then (a retiring end tells its peer), or faults can make
+    /// it make a new request then.
+    fn traffic(&mut self, node: NodeId, tick: Tick) -> Result<Hazard, LdfiError> {
+        if let Some(h) = self.traffic_memo.get(&(node, tick)) {
+            return Ok(*h);
+        }
+        let Some(rules) = self.rules else {
+            return Err(internal_error!("tuple-level negative support without the program's rules").into());
+        };
+        let requests: Vec<(RelId, usize)> = rules
+            .host_requests()
+            .into_iter()
+            .map(|r| (r, rules.arity(Space::Protocol, r)))
+            .collect();
+        let held = requests
+            .iter()
+            .map(|(r, _)| *r)
+            .chain(rules.stream_events())
+            .any(|r| !self.graph.goals_at(Space::Protocol, r, Some(node), tick).is_empty());
+        if held {
+            self.traffic_memo.insert((node, tick), Hazard::True);
+            return Ok(Hazard::True);
+        }
+        let (h, independent) = self.tracked(|e| {
+            let mut options = Vec::new();
+            for (rel, arity) in &requests {
+                let open: Pattern = vec![None; *arity];
+                let h = e.appear(Space::Protocol, *rel, Loc::Node(node), tick, &open)?;
+                if h == Hazard::True {
+                    return Ok(Hazard::True);
+                }
+                options.push(h);
+            }
+            e.or(options)
+        })?;
+        if independent {
+            self.traffic_memo.insert((node, tick), h);
         }
         Ok(h)
     }

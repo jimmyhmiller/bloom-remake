@@ -51,6 +51,10 @@ pub struct Args {
     /// Print search statistics.
     #[arg(long)]
     pub stats: bool,
+    /// Print a line per run of the lineage-driven search to stderr as it goes: its faults, its lineage's size, the
+    /// hypotheses it suggested, and what running it, building its lineage and finding its hypotheses took.
+    #[arg(long)]
+    pub progress: bool,
     /// How negated reads are supported: precise (tuple-level), conservative (relation-level, CR-31) or off (unsound
     /// for non-monotone programs; for experiments).
     #[arg(long, default_value = "precise")]
@@ -157,6 +161,13 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
     config.exhaustive_fallback = (!args.no_exhaustive).then_some(args.max_states);
     config.sat = args.sat.clone();
 
+    if args.progress {
+        let names: Vec<String> = artifact.nodes.iter().map(|n| n.as_str().to_owned()).collect();
+        config.observer = Some(blossom_ldfi::ObserverRef(std::sync::Arc::new(Progress {
+            clock: crate::common::stopwatch::Stopwatch::start(),
+            names,
+        })));
+    }
     config.workers = args
         .jobs
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get));
@@ -231,5 +242,43 @@ fn fail(e: &LdfiError) -> ExitCode {
         LdfiError::Sim(blossom_sim::SimError::Internal(_)) => Exit::Internal.into(),
         LdfiError::Sim(blossom_sim::SimError::Unimplemented(_)) => Exit::Unimplemented.into(),
         _ => Exit::UserError.into(),
+    }
+}
+
+/// `--progress`: a line per committed run, on stderr.
+struct Progress {
+    clock: crate::common::stopwatch::Stopwatch,
+    names: Vec<String>,
+}
+
+impl blossom_ldfi::Observer for Progress {
+    fn now_nanos(&self) -> u64 {
+        self.clock.nanos()
+    }
+
+    fn run_done(&self, p: &blossom_ldfi::RunProgress) {
+        let name = |n: blossom_value::time::NodeId| {
+            self.names
+                .get(n.0 as usize)
+                .cloned()
+                .unwrap_or_else(|| format!("node#{}", n.0))
+        };
+        let faults = blossom_ldfi::faults::labels(&p.faults, &name).join(", ");
+        let secs = |ns: u64| ns as f64 / 1e9;
+        eprintln!(
+            "[{:>8.1}s] run {} {{{faults}}} {}: {} goals, {} firings, +{} hypotheses, queue {}, {} counterexample(s) | \
+             run {:.2}s lineage {:.2}s hypotheses {:.2}s",
+            secs(self.clock.nanos()),
+            p.runs,
+            if p.good { "good" } else { "BAD" },
+            p.goals,
+            p.firings,
+            p.suggested,
+            p.queue,
+            p.counterexamples,
+            secs(p.execute_ns),
+            secs(p.lineage_ns),
+            secs(p.hypotheses_ns),
+        );
     }
 }

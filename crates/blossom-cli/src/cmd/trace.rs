@@ -221,29 +221,7 @@ enum Kind {
     View,
 }
 
-/// How long the replay of a tick takes.
-///
-/// Exempt from the ambient-time rule (clippy.toml): it measures the replaying process, for `trace replay --slow`;
-/// nothing it reads reaches a replayed tick.
-mod stopwatch {
-    #![allow(clippy::disallowed_methods)]
-
-    use std::time::Instant;
-
-    pub struct Stopwatch(Instant);
-
-    impl Stopwatch {
-        pub fn start() -> Stopwatch {
-            Stopwatch(Instant::now())
-        }
-
-        /// Nanoseconds since the start.
-        pub fn nanos(&self) -> u64 {
-            u64::try_from(self.0.elapsed().as_nanos()).unwrap_or(u64::MAX)
-        }
-    }
-}
-use stopwatch::Stopwatch;
+use crate::common::stopwatch::Stopwatch;
 
 /// The `top` rules that did the most work in `work` (a profiled tick's, or a sum): by expression nodes evaluated,
 /// rows examined and rows written, each a unit of the engine's work.
