@@ -153,9 +153,17 @@ impl<'a> SpecSim<'a> {
                 durable,
                 boot,
                 recovered,
+                streams: self.streams(),
             },
             faults,
         )
+    }
+
+    /// The deployment's byte streams, which a run connects (`None` when no node runs one).
+    fn streams(&self) -> Option<crate::fabric::StreamsConfig> {
+        let names: Vec<Arc<str>> = self.artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect();
+        let cfg = crate::fabric::StreamsConfig::of(self.artifact.protocol.get(), &names, &self.artifact.roles);
+        cfg.any().then_some(cfg)
     }
 
     /// The events of `node` at `tick` a run schedules: its inputs, `boot()` and its node statics. The timers'

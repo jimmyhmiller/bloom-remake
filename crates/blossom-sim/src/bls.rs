@@ -27,6 +27,9 @@ pub struct BlsSim<'a> {
     oracle: Oracle,
     /// `boot()` and the timers.
     runtime: crate::runtime::Runtime,
+    /// Whether runs connect the nodes' byte streams ([`crate::fabric`]); otherwise stream events are scheduled
+    /// inputs, and requests to the host are only recorded.
+    connect_streams: bool,
 }
 
 impl<'a> BlsSim<'a> {
@@ -65,7 +68,15 @@ impl<'a> BlsSim<'a> {
             artifact,
             oracle,
             runtime,
+            connect_streams: false,
         })
+    }
+
+    /// Runs connect the nodes' byte streams: a connect stream dialing `sim://NODE/STREAM` reaches that node's listen
+    /// stream ([`crate::fabric`]).
+    pub fn connecting_streams(mut self) -> BlsSim<'a> {
+        self.connect_streams = true;
+        self
     }
 
     pub fn artifact(&self) -> &BlsArtifact {
@@ -121,6 +132,15 @@ impl<'a> BlsSim<'a> {
                 durable,
                 boot,
                 recovered,
+                streams: self.connect_streams.then(|| {
+                    let names: Vec<std::sync::Arc<str>> = self
+                        .artifact
+                        .nodes
+                        .iter()
+                        .map(|n| std::sync::Arc::from(n.as_str()))
+                        .collect();
+                    crate::fabric::StreamsConfig::of(self.artifact.program.get(), &names, &self.artifact.roles)
+                }),
             },
             faults,
         )

@@ -468,7 +468,9 @@ impl<'p> Cluster<'p> {
                     incarnation: opened.boot.incarnation,
                     seed: self.program_seed.0,
                 };
-                let name = names.get(n.0 as usize).map_or_else(|| format!("node{}", n.0), |s| s.to_string());
+                let name = names
+                    .get(n.0 as usize)
+                    .map_or_else(|| format!("node{}", n.0), |s| s.to_string());
                 let path = dir.join(format!("{name}-{}.blstrace", opened.boot.incarnation));
                 let file = std::fs::create_dir_all(dir)
                     .and_then(|()| blossom_trace::node::create_trace_file(&path))

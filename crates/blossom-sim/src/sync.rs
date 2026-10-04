@@ -121,6 +121,9 @@ pub struct SyncConfig {
     pub durable: BTreeSet<RelId>,
     pub boot: Option<RelId>,
     pub recovered: Option<RelId>,
+    /// The deployment's byte streams, when the world connects them ([`crate::fabric`]); `None` leaves stream events
+    /// to the scheduled inputs and drops the requests to the host.
+    pub streams: Option<crate::fabric::StreamsConfig>,
 }
 
 /// A physical timer (`every d`, LANGUAGE §15.2) in the synchronous world: firing `k` of a node's incarnation is due
@@ -174,6 +177,8 @@ pub struct NodeTick {
     pub egress: Vec<Egress>,
     /// The requests to the host (stream writes, closes, dials) the node made in the round.
     pub host: Vec<blossom_ir::tick::HostOut>,
+    /// The stream events the node took in the round, with their causes (when the world connects streams).
+    pub streams: Vec<crate::fabric::StreamEvent>,
     /// Whether the node ran this round (a crashed node under [`CrashView::Frozen`] does not).
     pub ran: bool,
 }
@@ -185,6 +190,8 @@ pub struct SyncRun {
     /// Every message sent to another node or to the sender itself, in canonical order.
     pub messages: Vec<MessageRecord>,
     pub faults: FaultSchedule,
+    /// The requests the nodes' hosts refused (located runtime errors of the program).
+    pub stream_violations: Vec<crate::fabric::StreamViolation>,
 }
 
 impl SyncRun {
@@ -249,6 +256,10 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                 return Err(internal_error!("node {} restarts at {} without crashing before it", node.0, r.0).into());
             }
         }
+        if config.streams.is_some() && config.crash_view != CrashView::Frozen {
+            return Err(internal_error!("byte streams under the `.ded` crash view").into());
+        }
+        let mut fabric = config.streams.as_ref().map(crate::fabric::Fabric::new);
         // Each node's incarnation (1, and one more at each restart) and the round it booted in.
         let mut incarnation = vec![1u64; n];
         let mut booted = vec![Tick(0); n];
@@ -256,6 +267,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
             rounds: Vec::new(),
             messages: Vec::new(),
             faults: faults.clone(),
+            stream_violations: Vec::new(),
         };
         let mut carried: Vec<Instance> = vec![Instance::default(); n];
         let mut halted = vec![false; n];
@@ -272,6 +284,19 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                 run.rounds.push(vec![NodeTick::default(); n]);
                 continue;
             }
+            if let Some(f) = fabric.as_mut() {
+                for (node, c) in &faults.crashes {
+                    if *c == tick {
+                        f.node_down(*node, tick)?;
+                    }
+                }
+            }
+            // Each node's requests to the host and the connections whose `closed` it took: released after the round.
+            let mut released: Vec<(
+                NodeId,
+                Vec<blossom_ir::tick::HostOut>,
+                Vec<blossom_value::value::ConnId>,
+            )> = Vec::new();
             let mut round = Vec::with_capacity(n);
             let mut next_carried = Vec::with_capacity(n);
             let mut next_inbox: Vec<Vec<Delivery>> = vec![Vec::new(); n];
@@ -293,6 +318,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                         ingress: Vec::new(),
                         egress: Vec::new(),
                         host: Vec::new(),
+                        streams: Vec::new(),
                         ran: false,
                     });
                     next_carried.push(state.clone());
@@ -353,12 +379,21 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                         }
                     }
                 }
-                let with_timers: Vec<(RelId, Row)>;
-                let events = if timer_firings.is_empty() {
+                let (stream_events, retired) = match fabric.as_mut() {
+                    Some(f) => f.take(node, tick)?,
+                    None => (Vec::new(), Vec::new()),
+                };
+                let with_more: Vec<(RelId, Row)>;
+                let events = if timer_firings.is_empty() && stream_events.is_empty() {
                     scheduled
                 } else {
-                    with_timers = scheduled.iter().cloned().chain(timer_firings).collect();
-                    &with_timers
+                    with_more = scheduled
+                        .iter()
+                        .cloned()
+                        .chain(timer_firings)
+                        .chain(stream_events.iter().map(|e| (e.rel, e.row.clone())))
+                        .collect();
+                    &with_more
                 };
                 let ingress = self.ingress.get(&(tick, node)).unwrap_or(&no_ingress);
                 let node_blobs = blobs
@@ -452,6 +487,9 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                 } else {
                     (out.egress.into_iter().collect(), out.host.into_iter().collect())
                 };
+                if fabric.is_some() {
+                    released.push((node, host.clone(), retired));
+                }
                 round.push(NodeTick {
                     instance: out.instance,
                     firings: out.firings,
@@ -459,6 +497,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                     ingress: ingress.clone(),
                     egress,
                     host,
+                    streams: stream_events,
                     ran: true,
                 });
             }
@@ -466,11 +505,31 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                 slot.sort();
                 slot.dedup();
             }
+            if let Some(f) = fabric.as_mut() {
+                let next = Tick(t + 1);
+                let at = now_at(config.round, next)?;
+                let up_next = |m: NodeId| {
+                    next <= config.last
+                        && !faults.crashed(m, next)
+                        && !halted.get(m.0 as usize).copied().unwrap_or(true)
+                };
+                for (node, host, retired) in &released {
+                    let node_blobs = blobs
+                        .get(node.0 as usize)
+                        .ok_or_else(|| internal_error!("node {} has no blob map", node.0))?;
+                    f.release(*node, tick, host, retired, node_blobs)?;
+                }
+                let lost = |from: NodeId, to: NodeId| faults.omissions.contains(&Omission { from, to, send: tick });
+                f.deliver(tick, &up_next, &lost, at)?;
+            }
             run.rounds.push(round);
             carried = next_carried;
             inbox = next_inbox;
         }
         run.messages.sort();
+        if let Some(f) = fabric {
+            run.stream_violations = f.violations;
+        }
         Ok(run)
     }
 }
@@ -569,6 +628,7 @@ mod tests {
             durable: BTreeSet::new(),
             boot: None,
             recovered: None,
+            streams: None,
         }
     }
 

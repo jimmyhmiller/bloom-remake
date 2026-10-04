@@ -292,7 +292,13 @@ impl<'p> Cluster<'p> {
         // on failure would dial forever at one instant.
         let (to, s) = match found {
             Some((to, _)) if self.blocked.contains(&(from, to)) || self.blocked.contains(&(to, from)) => {
-                return self.dial_fails(from, restarts, stream, req, format!("`{addr}` is unreachable (partitioned)"));
+                return self.dial_fails(
+                    from,
+                    restarts,
+                    stream,
+                    req,
+                    format!("`{addr}` is unreachable (partitioned)"),
+                );
             }
             Some(x) => x,
             None => return self.dial_fails(from, restarts, stream, req, format!("cannot reach `{addr}`")),
@@ -317,7 +323,14 @@ impl<'p> Cluster<'p> {
     }
 
     /// Reports a dial that cannot start failed, after a delay.
-    fn dial_fails(&mut self, node: NodeId, restarts: u64, stream: usize, req: u64, why: String) -> Result<(), SimError> {
+    fn dial_fails(
+        &mut self,
+        node: NodeId,
+        restarts: u64,
+        stream: usize,
+        req: u64,
+        why: String,
+    ) -> Result<(), SimError> {
         let delay = self.rng.range(self.cfg.latency.0, self.cfg.latency.1).max(1);
         self.schedule(
             delay,
