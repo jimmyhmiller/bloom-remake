@@ -1,8 +1,9 @@
 //! S11: the Blossom Kafka broker under LDFI (`examples/kafka/ldfi.bls`): the broker and the Blossom Kafka client in the
 //! synchronous-round world, connected over byte streams, checked with the producer guarantees (an acknowledged batch
 //! stays in the partition's committed log; a client that read to the end read it) under crash-restarts. The correct
-//! broker holds with one broker and with three replicating ones; a producer configured with `acks=1` loses an
-//! acknowledged batch to a crash of the leader right after it answered.
+//! broker holds with one broker and with three replicating ones (one or two batches; any one crash-restart, or any one
+//! lost message); a producer configured with `acks=1` loses an acknowledged batch to a crash of the leader right after
+//! it answered.
 
 use std::path::Path;
 
@@ -66,6 +67,18 @@ fn one_broker_keeps_an_acknowledged_batch_through_a_crash_restart() {
 #[ignore = "full tier"]
 fn three_brokers_keep_an_acknowledged_batch_through_a_crash_restart() {
     check("TripleRestart");
+}
+
+#[test]
+#[ignore = "full tier"]
+fn three_brokers_keep_two_batches_at_their_own_offsets_through_a_crash_restart() {
+    check("TripleTwoRestart");
+}
+
+#[test]
+#[ignore = "full tier"]
+fn three_brokers_keep_an_acknowledged_batch_through_any_one_lost_message() {
+    check("TripleOneLoss");
 }
 
 #[test]

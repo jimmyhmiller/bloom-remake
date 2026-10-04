@@ -70,12 +70,14 @@ spec Single {
 ///   with, which it restarts from), and no broker holds another batch at its offset (a replica that restarted may
 ///   lag: it is not asked to hold what it has not committed yet, only not to hold something else there);
 /// - read back: once the client has read every partition to its end, it has read every acknowledged batch, at its
-///   offset.
+///   offset;
+/// - unique offset: no other acknowledged batch was given its offset.
 spec Guarantees {
     view acknowledged(k, p, base) = acked(k, p, base, 0i16) @ _;
     view pre(prop, k) {
         acknowledged(k, _, _), let prop = "durability";
         acknowledged(k, _, _), read_done(true) @ _, let prop = "read back";
+        acknowledged(k, _, _), let prop = "unique offset";
     }
     /// The batches a broker holds committed, by blob: materialized, or committed and not yet materialized.
     view holds_batch(b, p, base, blob) {
@@ -85,6 +87,7 @@ spec Guarantees {
     view held(p, base) = holds_batch(_, p, base, _);
     /// Two brokers that hold different batches at one offset.
     view diverged(p, base) = holds_batch(b1, p, base, x), holds_batch(b2, p, base, y) where x != y;
+    view shared_offset(k) = acknowledged(k, p, base), acknowledged(j, p, base) where j != k;
     view lost(k) {
         acknowledged(k, p, base), not held(p, base);
         acknowledged(k, p, base), diverged(p, base);
@@ -92,6 +95,7 @@ spec Guarantees {
     view post(prop, k) {
         acknowledged(k, _, _), not lost(k), let prop = "durability";
         acknowledged(k, p, base), consumed(p, base, _) @ _, let prop = "read back";
+        acknowledged(k, _, _), not shared_offset(k), let prop = "unique offset";
     }
 }
 
@@ -176,5 +180,13 @@ spec TripleLossRestart for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
     include Triple;
     include Guarantees;
     faults { eot: 40, eff: 30, crashes: 1, restart: 3, omissions: 1, model: sync, round: 50ms }
+    check ldfi expect holds;
+}
+
+/// Three brokers, two batches, under a crash-restart of any node.
+spec TripleTwoRestart for Kafka(DEFAULT_REPLICATION_FACTOR = 3, CLIENT_BATCHES = 2) {
+    include Triple;
+    include Guarantees;
+    faults { eot: 50, eff: 1, crashes: 1, restart: 3, model: sync, round: 50ms }
     check ldfi expect holds;
 }
