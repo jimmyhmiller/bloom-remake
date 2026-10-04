@@ -284,8 +284,8 @@ pub(crate) struct Resolver<'t, 'd> {
     pub scopes: Vec<ModScope<'t>>,
     pub builtins: BTreeMap<BuiltinRel, HRelId>,
     pub members: BTreeMap<HRoleId, HRelId>,
-    /// Structs and enums already interned, by defining file and name.
-    pub nominal: BTreeMap<(FileKey, Symbol), TypeId>,
+    /// Structs and enums already interned, by home (defining file and module body, `types::Home::body_id`) and name.
+    pub nominal: BTreeMap<(FileKey, usize, Symbol), TypeId>,
     pub rel_spans: BTreeMap<HRelId, Span>,
     /// Frontend bugs met while resolving (a lookup of an id the resolver minted that fails).
     pub bugs: Vec<InternalError>,

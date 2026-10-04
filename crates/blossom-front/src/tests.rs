@@ -469,9 +469,18 @@ fn a_closure_outside_a_function_is_bls0214() {
 fn a_question_mark_that_cannot_return_early_is_bls0218() {
     // Under a branch, the right of `&&`, in a closure, in a function not returning an `Option`, and in a rule body.
     for (fns, rule) in [
-        ("fn f(o: Option<u64>) -> Option<u64> { Some(if true { o? } else { 0 }) }", "f(Some(k))"),
-        ("fn f(o: Option<bool>) -> Option<bool> { Some(true && o?) }", "f(Some(true))"),
-        ("fn f(v: Vec<Option<u64>>) -> Option<Vec<u64>> { Some(v.map(|x| x?)) }", "f([Some(k)])"),
+        (
+            "fn f(o: Option<u64>) -> Option<u64> { Some(if true { o? } else { 0 }) }",
+            "f(Some(k))",
+        ),
+        (
+            "fn f(o: Option<bool>) -> Option<bool> { Some(true && o?) }",
+            "f(Some(true))",
+        ),
+        (
+            "fn f(v: Vec<Option<u64>>) -> Option<Vec<u64>> { Some(v.map(|x| x?)) }",
+            "f([Some(k)])",
+        ),
         ("fn f(o: Option<u64>) -> u64 { o? }", "Some(f(Some(k)))"),
     ] {
         let src = with_head(Box::leak(
@@ -1017,18 +1026,34 @@ fn node_roles_join_at_merges_and_meet_only_in_conjunctions() {
             &ok,
         ),
         // A merge of a Node<A> and a Node is a Node: it cannot be sent to as a Node<A>.
-        ("", "on i(a, b, c), let x = if c { a } else { b } { send ping(1) to x; }", &err),
+        (
+            "",
+            "on i(a, b, c), let x = if c { a } else { b } { send ping(1) to x; }",
+            &err,
+        ),
         // Merges of Node<A>s stay Node<A>.
-        ("", "on i(a, b, c), j(z), let x = if c { a } else { z } { send ping(1) to x; }", &ok),
+        (
+            "",
+            "on i(a, b, c), j(z), let x = if c { a } else { z } { send ping(1) to x; }",
+            &ok,
+        ),
         // A conjunct narrows: `x` is one of `a`, `b` and also in `j`.
-        ("", "on i(a, b, c), let x = if c { a } else { b }, j(x) { send ping(1) to x; }", &ok),
+        (
+            "",
+            "on i(a, b, c), let x = if c { a } else { b }, j(x) { send ping(1) to x; }",
+            &ok,
+        ),
         // `==` as a conjunct narrows `b` to `a`'s role.
         ("", "on i(a, b, c), a == b { send ping(1) to b; }", &ok),
         // Under `not`, nothing narrows.
         ("", "on i(a, b, c), not j(b) { send ping(1) to b; }", &err),
         ("", "on i(a, b, c), not { a == b } { send ping(1) to b; }", &err),
         // `==` inside an expression is a comparison, not an equation.
-        ("", "on i(a, b, c), let d = (a == b) || c, d { send ping(1) to b; }", &err),
+        (
+            "",
+            "on i(a, b, c), let d = (a == b) || c, d { send ping(1) to b; }",
+            &err,
+        ),
         // In a function, parameters keep their types and merges join.
         (
             "fn pick(c: bool, a: Node<A>, b: Node) -> Node { if c { a } else { b } }\n\
@@ -1039,12 +1064,28 @@ fn node_roles_join_at_merges_and_meet_only_in_conjunctions() {
             &ok,
         ),
         // A function has no flow typing: `a == b` does not make `b` a Node<A> in a branch.
-        ("fn f(a: Node<A>, b: Node) -> Node<A> { if a == b { b } else { a } }", "", &err),
+        (
+            "fn f(a: Node<A>, b: Node) -> Node<A> { if a == b { b } else { a } }",
+            "",
+            &err,
+        ),
         // A Node where a Node<A> parameter is expected.
-        ("fn g(a: Node<A>) -> Node<A> { a }", "view v(x) = i(a, b, c), let x = g(b);", &err),
+        (
+            "fn g(a: Node<A>) -> Node<A> { a }",
+            "view v(x) = i(a, b, c), let x = g(b);",
+            &err,
+        ),
         // A view's column holds what its alternatives put there.
-        ("", "view w(x) { i(x, _, _); j(x); }\non w(x) { send ping(1) to x; }", &ok),
-        ("", "view w(x) { i(x, _, _); i(_, x, _); }\non w(x) { send ping(1) to x; }", &err),
+        (
+            "",
+            "view w(x) { i(x, _, _); j(x); }\non w(x) { send ping(1) to x; }",
+            &ok,
+        ),
+        (
+            "",
+            "view w(x) { i(x, _, _); i(_, x, _); }\non w(x) { send ping(1) to x; }",
+            &err,
+        ),
     ];
     for (defs, body, want) in cases {
         let src = at_a(defs, body);
@@ -1143,7 +1184,11 @@ fn generic_function_errors() {
             "BLS0300",
         ),
         // Not called in the body: only its declared type is checked against the function passed.
-        ("fn s(x: String) -> String { x }\nfn f<T>(x: T, g: fn(T) -> T) -> T { x }", "f(k, s)", "BLS0300"),
+        (
+            "fn s(x: String) -> String { x }\nfn f<T>(x: T, g: fn(T) -> T) -> T { x }",
+            "f(k, s)",
+            "BLS0300",
+        ),
         (
             "fn f<T>(x: T, g: fn(T) -> T) -> T { f(g(x), g) }",
             "f(k, inc)",
@@ -1329,4 +1374,40 @@ fn review_findings_are_diagnostics() {
     // An alias argument used inside an expression is substituted there.
     let src = with_head("format blob(n) = bytes(n * 2);\nformat R { a: blob(3) }\n");
     assert_eq!(codes(src), Vec::<&str>::new());
+}
+
+#[test]
+fn a_modules_types_see_its_other_types_and_two_modules_types_of_one_name_are_distinct() {
+    // A struct, enum or alias inside a module is resolved in that module's body, where its sibling types are.
+    let nested = "program t version 1;
+module M {
+    struct Inner { a: u64 }
+    enum Tag { One(Inner), Two }
+    struct Outer { inner: Inner, tag: Tag }
+    type Alias = Outer;
+    fn mk(k: u64) -> Alias { Outer { inner: Inner { a: k }, tag: Tag::One(Inner { a: k }) } }
+    input go(k: u64);
+    view v(x) = go(k), let x = mk(k).inner.a;
+}
+import M as m;
+";
+    assert_eq!(codes(nested), Vec::<String>::new());
+    // Each module's `P` and `Q` are its own.
+    let twins = "program t version 1;
+module A {
+    struct P { x: u64 }
+    struct Q { p: P }
+    input i(k: u64);
+    view va(x) = i(k), let x = Q { p: P { x: k } }.p.x;
+}
+module B {
+    struct P { y: String }
+    struct Q { p: P }
+    input j(s: String);
+    view vb(y) = j(s), let y = Q { p: P { y: s } }.p.y;
+}
+import A as a;
+import B as b;
+";
+    assert_eq!(codes(twins), Vec::<String>::new());
 }
