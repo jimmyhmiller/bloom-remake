@@ -216,3 +216,12 @@ spec TripleRetryIdempotent for Kafka(DEFAULT_REPLICATION_FACTOR = 3, CLIENT_RETR
     faults { eot: 55, eff: 40, crashes: 0, omissions: 1, model: sync, round: 50ms }
     check ldfi expect holds;
 }
+
+/// Three brokers under two crash-restarts (a majority can be down at once): the cluster may stall, but what it
+/// acknowledged stays.
+spec TripleTwoCrashes for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
+    include Triple;
+    include Guarantees;
+    faults { eot: 40, eff: 1, crashes: 2, restart: 3, model: sync, round: 50ms }
+    check ldfi expect holds;
+}
