@@ -28,10 +28,6 @@ fn frame_prefix(fr: Bytes) -> Option<(i16, i16, i32)> {
     request_prefix(cur(fr)).map(|p| (p.0, p.1, p.2))
 }
 
-fn frame_readable(fr: Bytes) -> bool {
-    frame_prefix(fr).is_some()
-}
-
 /// Whether a request is answered from its bytes alone: ApiVersions, and anything unsupported (which closes the
 /// connection).
 fn pure_request(key: i16, version: i16) -> bool {

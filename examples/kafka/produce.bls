@@ -126,12 +126,19 @@ fn check_records(records: Option<Bytes>, max_bytes: i64) -> Checked {
 /// counts them) are fewer than the topic's `min.insync.replicas` is refused first (NOT_ENOUGH_REPLICAS, as Kafka
 /// refuses before appending); then the records. (A commit needs a majority of the replicas anyway, so a partition
 /// that lost its majority makes `acks=all` time out, whatever its in-sync replicas.)
-fn check_entry(records: Option<Bytes>, acks: i16, set: Vec<(String, String)>, in_sync: u64) -> Checked {
-    if acks == -1i16 && min_insync(set) > in_sync as i64 {
+fn check_entry(records: Option<Bytes>, acks: i16, limits: TopicLimits, in_sync: u64) -> Checked {
+    if acks == -1i16 && limits.min_insync > in_sync as i64 {
         refused(NOT_ENOUGH_REPLICAS, "the in-sync replicas are fewer than min.insync.replicas", None)
     } else {
-        check_records(records, max_message_bytes(set))
+        check_records(records, limits.max_message_bytes)
     }
+}
+
+/// The configurations a produce reads, parsed from a topic's configurations once (`topic_limits`), not per entry.
+struct TopicLimits { max_message_bytes: i64, min_insync: i64, segment_bytes: i64 }
+
+fn topic_limits_of(set: Vec<(String, String)>) -> TopicLimits {
+    TopicLimits { max_message_bytes: max_message_bytes(set), min_insync: min_insync(set), segment_bytes: segment_bytes(set) }
 }
 
 /// A topic's `min.insync.replicas`.
