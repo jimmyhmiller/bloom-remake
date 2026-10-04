@@ -587,7 +587,7 @@ impl FaultVars {
         Some(
             atoms
                 .iter()
-                .filter(|v| hits(v) && !later.get(v).is_some_and(|next| hits(next)))
+                .filter(|v| hits(v) && !later.get(v).is_some_and(&hits))
                 .copied()
                 .collect(),
         )
