@@ -14,29 +14,55 @@ use super::{FileKey, Resolver, ScopeIdx};
 use crate::ast::{self, BinOp, ExprKind, Ident, ItemKind, LitValue, PrefixOp};
 use crate::hir::HRoleId;
 
+/// Where a definition is written: its file, and the module body it is an item of (`None`: the file's top level).
+/// The names a definition's own types and constants use are looked up from there.
+#[derive(Clone)]
+pub(crate) struct Home<'t> {
+    pub file: FileKey,
+    pub body: Option<&'t [ast::Item]>,
+}
+
+impl Home<'_> {
+    /// Identifies the module body (0 for a file's top level): bodies are borrowed from the module tree, which outlives
+    /// resolution, so a body's address names it.
+    fn body_id(&self) -> usize {
+        self.body.map_or(0, |b| b.as_ptr() as usize)
+    }
+
+    /// Whether `items` (a scope's module body) is this home's body.
+    fn is_body(&self, items: Option<&[ast::Item]>) -> bool {
+        match (self.body, items) {
+            (None, None) => true,
+            (Some(a), Some(b)) => std::ptr::eq(a, b),
+            _ => false,
+        }
+    }
+}
+
 /// A named definition found by a lookup.
 pub(crate) enum Def<'t> {
-    Alias(&'t ast::Type, FileKey),
-    Struct(&'t ast::StructItem, FileKey),
-    Enum(&'t ast::EnumItem, FileKey),
-    Module(&'t ast::ModuleItem, FileKey),
-    Protocol(&'t ast::ProtocolItem, FileKey),
-    Const(&'t ast::Type, &'t ast::Expr, FileKey),
+    Alias(&'t ast::Type, Home<'t>),
+    Struct(&'t ast::StructItem, Home<'t>),
+    Enum(&'t ast::EnumItem, Home<'t>),
+    Module(&'t ast::ModuleItem, Home<'t>),
+    Protocol(&'t ast::ProtocolItem, Home<'t>),
+    Const(&'t ast::Type, &'t ast::Expr, Home<'t>),
 }
 
 impl<'t> Resolver<'t, '_> {
-    /// Finds a definition named `name` among `items` (not descending into modules; `at` sections hold no types).
-    fn find_in(items: &'t [ast::Item], name: Symbol, file: &FileKey) -> Option<Def<'t>> {
+    /// Finds a definition named `name` among `items`, whose home is `home` (not descending into modules; `at`
+    /// sections hold no types).
+    fn find_in(items: &'t [ast::Item], name: Symbol, home: &Home<'t>) -> Option<Def<'t>> {
         for item in items {
             let found = match &item.kind {
                 ItemKind::TypeAlias { name: n, ty, generics } if n.name == name && generics.is_empty() => {
-                    Some(Def::Alias(ty, file.clone()))
+                    Some(Def::Alias(ty, home.clone()))
                 }
-                ItemKind::Struct(s) if s.name.name == name => Some(Def::Struct(s, file.clone())),
-                ItemKind::Enum(e) if e.name.name == name => Some(Def::Enum(e, file.clone())),
-                ItemKind::Module(m) if m.name.name == name => Some(Def::Module(m, file.clone())),
-                ItemKind::Protocol(p) if p.name.name == name => Some(Def::Protocol(p, file.clone())),
-                ItemKind::Const { name: n, ty, value } if n.name == name => Some(Def::Const(ty, value, file.clone())),
+                ItemKind::Struct(s) if s.name.name == name => Some(Def::Struct(s, home.clone())),
+                ItemKind::Enum(e) if e.name.name == name => Some(Def::Enum(e, home.clone())),
+                ItemKind::Module(m) if m.name.name == name => Some(Def::Module(m, home.clone())),
+                ItemKind::Protocol(p) if p.name.name == name => Some(Def::Protocol(p, home.clone())),
+                ItemKind::Const { name: n, ty, value } if n.name == name => Some(Def::Const(ty, value, home.clone())),
                 _ => None,
             };
             if found.is_some() {
@@ -49,7 +75,11 @@ impl<'t> Resolver<'t, '_> {
     /// Looks `name` up in the file `file` and through its `use` items.
     fn find_in_file(&self, file: &FileKey, name: Symbol, depth: u32) -> Option<Def<'t>> {
         let items = self.file_items(file);
-        if let Some(d) = Self::find_in(items, name, file) {
+        let home = Home {
+            file: file.clone(),
+            body: None,
+        };
+        if let Some(d) = Self::find_in(items, name, &home) {
             return Some(d);
         }
         if depth > 8 {
@@ -77,10 +107,14 @@ impl<'t> Resolver<'t, '_> {
     /// Looks up a definition by name from scope `s`.
     pub fn find_def(&self, s: ScopeIdx, name: Symbol) -> Option<Def<'t>> {
         let scope = self.scope(s);
-        if let Some(items) = scope.own_items
-            && let Some(d) = Self::find_in(items, name, &scope.file)
-        {
-            return Some(d);
+        if let Some(items) = scope.own_items {
+            let home = Home {
+                file: scope.file.clone(),
+                body: Some(items),
+            };
+            if let Some(d) = Self::find_in(items, name, &home) {
+                return Some(d);
+            }
         }
         self.find_in_file(&scope.file, name, 0)
     }
@@ -92,7 +126,7 @@ impl<'t> Resolver<'t, '_> {
             _ => None,
         };
         match def {
-            Some(Def::Module(m, f)) => Some((f, m)),
+            Some(Def::Module(m, home)) => Some((home.file, m)),
             _ => None,
         }
     }
@@ -104,26 +138,38 @@ impl<'t> Resolver<'t, '_> {
             _ => None,
         };
         match def {
-            Some(Def::Protocol(p, f)) => Some((f, p)),
+            Some(Def::Protocol(p, home)) => Some((home.file, p)),
             _ => None,
         }
     }
 
-    /// A scope over a definition's file (no instance parameters): for resolving file-level types and constants.
-    fn file_scope(&mut self, file: FileKey) -> ScopeIdx {
+    /// A scope over a definition's home (no instance parameters): for resolving the types and constants a type or
+    /// constant definition uses, from where it is written.
+    fn home_scope(&mut self, home: &Home<'t>) -> ScopeIdx {
         if let Some(i) = self
             .scopes
             .iter()
-            .position(|sc| sc.file == file && sc.prefix.is_empty() && sc.own_items.is_none())
+            .position(|sc| sc.file == home.file && sc.prefix.is_empty() && home.is_body(sc.own_items))
         {
             return ScopeIdx(i);
         }
-        self.new_scope_for_file(file)
+        self.new_scope_for_home(home)
     }
 
-    fn new_scope_for_file(&mut self, file: FileKey) -> ScopeIdx {
+    /// The scope to resolve a definition found from scope `s` in: `s` itself when the definition is written in `s`'s
+    /// body, else its home's.
+    fn def_scope(&mut self, s: ScopeIdx, home: &Home<'t>) -> ScopeIdx {
+        let scope = self.scope(s);
+        if scope.file == home.file && home.is_body(scope.own_items) {
+            s
+        } else {
+            self.home_scope(home)
+        }
+    }
+
+    fn new_scope_for_home(&mut self, home: &Home<'t>) -> ScopeIdx {
         self.scopes.push(super::ModScope {
-            file,
+            file: home.file.clone(),
             prefix: Vec::new(),
             generics: Default::default(),
             values: Default::default(),
@@ -133,7 +179,7 @@ impl<'t> Resolver<'t, '_> {
             role_template: None,
             has_roles: false,
             write_redirect: Default::default(),
-            own_items: None,
+            own_items: home.body,
             broken: Default::default(),
             fns: Default::default(),
             generic_fns: Default::default(),
@@ -308,34 +354,30 @@ impl<'t> Resolver<'t, '_> {
             _ => {}
         }
         match self.find_def(s, name.name) {
-            Some(Def::Alias(t, file)) => {
+            Some(Def::Alias(t, home)) => {
                 if !arity(self, 0) {
                     return None;
                 }
-                let fs = if file == self.scope(s).file {
-                    s
-                } else {
-                    self.file_scope(file)
-                };
+                let fs = self.def_scope(s, &home);
                 self.resolve_type(fs, t)
             }
-            Some(Def::Struct(st, file)) => {
+            Some(Def::Struct(st, home)) => {
                 if !arity(self, 0) || !st.generics.is_empty() {
                     if !st.generics.is_empty() {
                         self.unsupported("LANG-023", "generic structs", span);
                     }
                     return None;
                 }
-                self.struct_type(st, file)
+                self.struct_type(st, home)
             }
-            Some(Def::Enum(en, file)) => {
+            Some(Def::Enum(en, home)) => {
                 if !arity(self, 0) || !en.generics.is_empty() {
                     if !en.generics.is_empty() {
                         self.unsupported("LANG-023", "generic enums", span);
                     }
                     return None;
                 }
-                self.enum_type(en, file)
+                self.enum_type(en, home)
             }
             _ => {
                 self.error(code!("BLS0200"), name.span, format!("unknown type `{text}`"));
@@ -344,11 +386,12 @@ impl<'t> Resolver<'t, '_> {
         }
     }
 
-    fn struct_type(&mut self, st: &'t ast::StructItem, file: FileKey) -> Option<TypeId> {
-        if let Some(t) = self.nominal.get(&(file.clone(), st.name.name)) {
+    fn struct_type(&mut self, st: &'t ast::StructItem, home: Home<'t>) -> Option<TypeId> {
+        let key = (home.file.clone(), home.body_id(), st.name.name);
+        if let Some(t) = self.nominal.get(&key) {
             return Some(*t);
         }
-        let fs = self.file_scope(file.clone());
+        let fs = self.home_scope(&home);
         let mut fields = Vec::new();
         for (i, f) in st.fields.iter().enumerate() {
             let ty = self.resolve_type(fs, &f.ty)?;
@@ -363,15 +406,16 @@ impl<'t> Resolver<'t, '_> {
             }),
             st.name.span,
         );
-        self.nominal.insert((file, st.name.name), t);
+        self.nominal.insert(key, t);
         Some(t)
     }
 
-    fn enum_type(&mut self, en: &'t ast::EnumItem, file: FileKey) -> Option<TypeId> {
-        if let Some(t) = self.nominal.get(&(file.clone(), en.name.name)) {
+    fn enum_type(&mut self, en: &'t ast::EnumItem, home: Home<'t>) -> Option<TypeId> {
+        let key = (home.file.clone(), home.body_id(), en.name.name);
+        if let Some(t) = self.nominal.get(&key) {
             return Some(*t);
         }
-        let fs = self.file_scope(file.clone());
+        let fs = self.home_scope(&home);
         let mut variants = Vec::new();
         let mut unknown = None;
         for (i, v) in en.variants.iter().enumerate() {
@@ -408,7 +452,7 @@ impl<'t> Resolver<'t, '_> {
             }),
             en.name.span,
         );
-        self.nominal.insert((file, en.name.name), t);
+        self.nominal.insert(key, t);
         Some(t)
     }
 
@@ -453,7 +497,7 @@ impl<'t> Resolver<'t, '_> {
             return Some(self.part_type(name.span));
         }
         match self.find_def(s, name.name) {
-            Some(Def::Enum(en, file)) if en.generics.is_empty() => self.enum_type(en, file),
+            Some(Def::Enum(en, home)) if en.generics.is_empty() => self.enum_type(en, home),
             Some(Def::Alias(..)) => {
                 let t = self.named_type(s, &[name], &[], name.span)?;
                 matches!(self.hir.types.get(t), Some(TypeDef::Enum(_))).then_some(t)
@@ -465,7 +509,7 @@ impl<'t> Resolver<'t, '_> {
     /// A struct type named `name` in scope, for struct literals.
     pub fn struct_named(&mut self, s: ScopeIdx, name: Ident) -> Option<TypeId> {
         match self.find_def(s, name.name) {
-            Some(Def::Struct(st, file)) if st.generics.is_empty() => self.struct_type(st, file),
+            Some(Def::Struct(st, home)) if st.generics.is_empty() => self.struct_type(st, home),
             _ => None,
         }
     }
@@ -476,12 +520,8 @@ impl<'t> Resolver<'t, '_> {
             return Some(v.clone());
         }
         match self.find_def(s, name) {
-            Some(Def::Const(ty, value, file)) => {
-                let fs = if file == self.scope(s).file {
-                    s
-                } else {
-                    self.file_scope(file)
-                };
+            Some(Def::Const(ty, value, home)) => {
+                let fs = self.def_scope(s, &home);
                 let t = self.resolve_type(fs, ty)?;
                 let v = self.const_value(fs, value, Some(t))?;
                 self.scope_mut(fs).values.insert(name, v.clone());

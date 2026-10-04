@@ -1,0 +1,102 @@
+//! The Blossom Kafka broker under LDFI (S11): the broker and the Blossom Kafka client (`client_node.bls`) as two
+//! roles of one module, the client dialing the first broker at `sim://B1/kafka`, producing `CLIENT_BATCHES` batches
+//! with acks -1 and reading them back, checked with Kafka's properties in the synchronous-round world under lost
+//! messages and crash-restarts. This file is a library of modules and specs: it has no `program` header.
+
+pub module Kafka(CLIENT_BATCHES: u64 = 1) {
+    include "protocol.bls";
+    include "headers.bls";
+    include "apiversions.bls";
+    include "metadata.bls";
+    include "topics.bls";
+    include "records.bls";
+    include "produce.bls";
+    include "fetch.bls";
+    include "reassign.bls";
+    include "groups.bls";
+    include "coordinator.bls";
+    include "broker_fns.bls";
+    include "client_fns.bls";
+
+    role Broker: cluster;
+    role Client;
+
+    static broker(n: Node<Broker>, id: i32, host: String, port: i32);
+
+    param DEFAULT_PARTITIONS: i32 = 1;
+    param DEFAULT_REPLICATION_FACTOR: i16 = 1;
+    param AUTO_CREATE_TOPICS: bool = true;
+    param METADATA_CREATE_WAIT: Duration = 2s;
+    param RETENTION_CHECK: Duration = 300s;
+    param CLUSTER_ID: String = "blossom-ldfi";
+    param MAX_QUEUED_REQUESTS: u64 = 64;
+    param MAX_QUEUED_BYTES: u64 = 16777216;
+    param OFFSETS_PARTITIONS: i32 = 1;
+    param OFFSETS_REPLICATION: i16 = 1;
+    param GROUP_MIN_SESSION_MS: i32 = 6000;
+    param GROUP_MAX_SESSION_MS: i32 = 1800000;
+    param GROUP_INITIAL_DELAY_MS: i32 = 3000;
+    param OFFSET_COMMIT_TIMEOUT: Duration = 5s;
+    param OFFSETS_KEEP: u64 = 1000;
+    param OFFSET_FETCH_CONFIRM: Duration = 2s;
+    param BROKER_ADDR: String = "sim://B1/kafka";
+    param CLIENT_TOPIC: String = "logs";
+
+    include "raft.bls";
+    include "cluster.bls";
+
+    at Broker {
+        include "broker_node.bls";
+        include "topics_node.bls";
+        include "produce_node.bls";
+        include "fetch_node.bls";
+        include "groups_node.bls";
+    }
+
+    at Client {
+        include "client_node.bls";
+    }
+}
+
+/// One broker and the client.
+spec Single {
+    nodes B1, C1;
+    assign Broker = [B1];
+    assign Client = [C1];
+    fact broker(B1, 1, "b1.sim", 9092);
+}
+
+/// Kafka's guarantees to a producer, one `(property, batch)` row each:
+/// - durability: a batch acknowledged without error is in the log of every broker that is up, at the offset it was
+///   acknowledged with;
+/// - read back: once the client has read every partition to its end, it has read every acknowledged batch, at its
+///   offset.
+spec Guarantees {
+    view acknowledged(k, p, base) = acked(k, p, base, 0i16) @ _;
+    view pre(prop, k) {
+        acknowledged(k, _, _), let prop = "durability";
+        acknowledged(k, _, _), read_done(true) @ _, let prop = "read back";
+    }
+    /// A broker's log holds a batch when its chunk index does (`batch` itself holds a blob, which a spec does not read).
+    view lost(k) =
+        acknowledged(k, p, base), broker(b, _, _, _) @ b, not crashed(b), not batch_chunk(_, p, _, base) @ b;
+    view post(prop, k) {
+        acknowledged(k, _, _), not lost(k), let prop = "durability";
+        acknowledged(k, p, base), consumed(p, base, _) @ _, let prop = "read back";
+    }
+}
+
+/// The failure-free run.
+spec SingleRun for Kafka {
+    include Single;
+    include Guarantees;
+    faults { eot: 30, eff: 0, crashes: 0, model: sync, round: 50ms }
+}
+
+/// One broker under lost messages and one crash.
+spec SingleFaults for Kafka {
+    include Single;
+    include Guarantees;
+    faults { eot: 30, eff: 20, crashes: 1, model: sync, round: 50ms }
+    check ldfi expect holds;
+}
