@@ -116,7 +116,9 @@ pub fn build(artifact: &SimArtifact, run: &SyncRun, outcome: &Outcome) -> Result
                     Some(RelClass::Event(EventSource::Timer(t))) => Some(t.guard),
                     _ => None,
                 };
-                let leaf = timer.is_none() && matches!(class, Some(RelClass::Event(_) | RelClass::Static));
+                // A stream event comes from the host's connections ([`blossom_sim::fabric`]): supported below.
+                let stream = matches!(class, Some(RelClass::Event(EventSource::Stream(_))));
+                let leaf = timer.is_none() && !stream && matches!(class, Some(RelClass::Event(_) | RelClass::Static));
                 for row in rows {
                     let leaf = leaf || nt.ingress.iter().any(|m| m.rel == *rel && m.row == *row);
                     let id = g.goal(
@@ -266,6 +268,25 @@ pub fn build(artifact: &SimArtifact, run: &SyncRun, outcome: &Outcome) -> Result
                 let (at_node, at_tick, clock) = match rule.kind {
                     RuleKind::Deductive => (node, tick, None),
                     RuleKind::Inductive => (node, Tick(tick.0 + 1), None),
+                    // A request to the host (a stream's write, close, dial, pause, resume) at the requesting node.
+                    RuleKind::Async
+                        if matches!(
+                            protocol.rels.get(rule.head.rel).map(|r| &r.class),
+                            Some(RelClass::HostOut(_))
+                        ) =>
+                    {
+                        g.goal(
+                            GoalKey {
+                                space: Space::Protocol,
+                                rel: rule.head.rel,
+                                node: Some(node),
+                                tick,
+                                row: f.head.clone(),
+                            },
+                            main_protocol.get(&rule.head.rel).copied(),
+                        )?;
+                        (node, tick, None)
+                    }
                     RuleKind::Async => {
                         let dest = match f.head.first() {
                             Some(Value::Node(d)) => *d,
@@ -367,6 +388,8 @@ pub fn build(artifact: &SimArtifact, run: &SyncRun, outcome: &Outcome) -> Result
             }
         }
     }
+
+    stream_supports(&mut g, protocol, run)?;
 
     // Lattice cells: one firing per cell, needing every contribution and that no other appears.
     for ((rel, node, tick, ident), contribs) in &contributions {
@@ -517,6 +540,140 @@ pub fn build(artifact: &SimArtifact, run: &SyncRun, outcome: &Outcome) -> Result
         }
     }
     Ok(g)
+}
+
+/// The supports of the run's stream events (`blossom_sim::fabric`): each needs the program requests and stream
+/// events it comes from (the writes whose bytes it carries, the resume that let them through, the close it reports,
+/// the dial it answers), and its connection: opened at its end, no message lost in a round traffic crossed it up to
+/// the event's causes (a lost message resets it), both ends up meanwhile (a crash resets it, and clears the inbox the
+/// event waits in), and for bytes the connection's previous bytes at its end (a gap holds later bytes back).
+fn stream_supports(g: &mut ProvGraph, protocol: &blossom_ir::core::Program, run: &SyncRun) -> Result<(), LdfiError> {
+    use blossom_ir::core::StreamEvent as Kind;
+    let kind_of = |rel: RelId| match protocol.rels.get(rel).map(|r| &r.class) {
+        Some(RelClass::Event(EventSource::Stream(k))) => Some(*k),
+        _ => None,
+    };
+    let find = |g: &ProvGraph, rel: RelId, node: NodeId, tick: Tick, row: &Arc<[Value]>| {
+        g.find(&GoalKey {
+            space: Space::Protocol,
+            rel,
+            node: Some(node),
+            tick,
+            row: row.clone(),
+        })
+    };
+    // The goal of each connection end's latest bytes.
+    let mut last_data: BTreeMap<(NodeId, blossom_value::value::ConnId), GoalId> = BTreeMap::new();
+    for (t, round) in run.rounds.iter().enumerate() {
+        let tick = Tick(u64::try_from(t).map_err(|_| internal_error!("tick overflow"))?);
+        for (n, nt) in round.iter().enumerate() {
+            let node = NodeId(u32::try_from(n).map_err(|_| internal_error!("node overflow"))?);
+            for e in &nt.streams {
+                let goal = find(g, e.rel, node, tick, &e.row)
+                    .ok_or_else(|| internal_error!("a stream event the run does not hold: {:?}", e.row))?;
+                let mut premises = Vec::new();
+                for c in &e.causes {
+                    match c {
+                        blossom_sim::fabric::Cause::Request { node, tick, rel, row }
+                        | blossom_sim::fabric::Cause::Taken { node, tick, rel, row } => {
+                            let id = find(g, *rel, *node, *tick, row).ok_or_else(|| {
+                                internal_error!("a stream event's cause is not in the lineage: {row:?}")
+                            })?;
+                            premises.push(Premise::Goal(id));
+                        }
+                        // A reset or a failed dial by a fault: the fault stays in every superset of the run's faults.
+                        blossom_sim::fabric::Cause::Crash { .. } | blossom_sim::fabric::Cause::Omission { .. } => {}
+                    }
+                }
+                if let Some(conn_ref) = e.conn {
+                    let c = run
+                        .connections
+                        .get(conn_ref.pipe)
+                        .ok_or_else(|| internal_error!("a stream event on an unknown connection"))?;
+                    let Some(Value::Conn(conn)) = e.row.first() else {
+                        return Err(internal_error!("a stream event {:?} without its connection", e.row).into());
+                    };
+                    let (mine, peer) = match c.ends {
+                        [a, b] if a.node == node && a.conn == *conn => (a, b),
+                        [a, b] if b.node == node && b.conn == *conn => (b, a),
+                        _ => return Err(internal_error!("a stream event on a connection without its end").into()),
+                    };
+                    let [dialer, acceptor] = c.ends;
+                    let opened = Tick(c.dialed.0 + 1);
+                    if kind_of(e.rel) == Some(Kind::Opened) {
+                        if dialer.node != acceptor.node {
+                            premises.push(Premise::Clock {
+                                from: dialer.node,
+                                to: acceptor.node,
+                                send: c.dialed,
+                            });
+                        }
+                        premises.push(Premise::Up {
+                            node: acceptor.node,
+                            from: opened,
+                            to: opened,
+                        });
+                    } else {
+                        let opened_goal = g
+                            .goals_at(Space::Protocol, mine.opened, Some(node), opened)
+                            .iter()
+                            .copied()
+                            .find(|id| {
+                                g.get(*id)
+                                    .is_some_and(|goal| goal.key.row.first() == Some(&Value::Conn(*conn)))
+                            })
+                            .ok_or_else(|| internal_error!("connection {conn:?} has no opened event at its end"))?;
+                        premises.push(Premise::Goal(opened_goal));
+                        for (from, to, send) in &c.traffic {
+                            if *send <= conn_ref.as_of {
+                                premises.push(Premise::Clock {
+                                    from: *from,
+                                    to: *to,
+                                    send: *send,
+                                });
+                            }
+                        }
+                        if conn_ref.as_of >= opened {
+                            premises.push(Premise::Up {
+                                node: peer.node,
+                                from: opened,
+                                to: conn_ref.as_of,
+                            });
+                        }
+                        if let Some(before) = tick.prev()
+                            && before >= opened
+                        {
+                            premises.push(Premise::Up {
+                                node,
+                                from: opened,
+                                to: before,
+                            });
+                        }
+                        if kind_of(e.rel) == Some(Kind::Data) {
+                            if let Some(prev) = last_data.get(&(node, *conn)) {
+                                premises.push(Premise::Goal(*prev));
+                            }
+                            last_data.insert((node, *conn), goal);
+                        }
+                    }
+                }
+                premises.sort();
+                premises.dedup();
+                g.add_firing(
+                    goal,
+                    Firing {
+                        space: Space::Protocol,
+                        by: By::Runtime(RuntimeAct::Stream),
+                        node: Some(node),
+                        tick,
+                        kind: FiringKind::Rule,
+                        premises,
+                    },
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Whether `rule` is a table's frame rule or a lattice's identity rule (the persistence of state), and not another
@@ -724,6 +881,17 @@ impl crate::hazard::Rules for ArtifactRules<'_> {
         space == Space::Protocol && self.artifact.protocol.get().rels.get(rel).is_some_and(|r| r.durable)
     }
 
+    fn host_requests(&self) -> Vec<RelId> {
+        self.artifact
+            .protocol
+            .get()
+            .rels
+            .iter_enumerated()
+            .filter(|(_, r)| matches!(r.class, RelClass::HostOut(_)))
+            .map(|(id, _)| id)
+            .collect()
+    }
+
     fn arity(&self, space: Space, rel: RelId) -> usize {
         let program = match space {
             Space::Protocol => Some(self.artifact.protocol.get()),
@@ -771,6 +939,7 @@ impl crate::hazard::Rules for ArtifactRules<'_> {
             Some(RelClass::Event(EventSource::Timer(t))) if space == Space::Protocol => {
                 return Ok(Origin::Timer { guard: t.guard });
             }
+            Some(RelClass::Event(EventSource::Stream(_))) if space == Space::Protocol => return Ok(Origin::Stream),
             Some(_) => return Ok(Origin::Input),
             None => return Err(internal_error!("unknown relation {rel:?}")),
         }

@@ -1,0 +1,93 @@
+//! LDFI over byte streams (S11): the store of `store.bls`, its client and server talking over a connection. The
+//! client dials the server at boot and writes a one-byte value once the connection opens; the server keeps the value
+//! (durably, or in a volatile table with `DURABLE = false`, the seeded bug) and writes it back as the acknowledgement.
+//! The server's per-connection state lasts while the connection is not closed, as the Kafka broker's does, so a
+//! connection reset (a lost message, a crash) matters to the lineage through a negated read of `closed`. With
+//! `EAGER = true` (another seeded bug) the client counts the value acknowledged as soon as it writes it: a lost
+//! message resets the connection before the server reads it, which only the stream's lineage (the bytes crossed the
+//! connection in the round they were written) shows.
+
+pub module StreamStore(DURABLE: bool = true, EAGER: bool = false) {
+    role Server;
+    role Client;
+
+    at Server {
+        stream s: listen;
+        durable table kept(v: u8);
+        table held(v: u8);
+        /// The open connections.
+        table conns(c: Conn) key(c) while not s.closed(c, _);
+
+        accept: on s.opened(c, _peer, _at) {
+            emit conns(c);
+        }
+        store: on s.data(c, _seq, b), conns(c), let Some(v) = b.u8_at(0) {
+            if DURABLE {
+                emit kept(v);
+            }
+            if not DURABLE {
+                emit held(v);
+            }
+            send s.write(c, 0, [Part::Bytes(b)]);
+        }
+    }
+
+    at Client {
+        stream up: connect;
+        durable table acked(v: u8);
+
+        start: on boot() {
+            send up.dial(0, "sim://S/s");
+        }
+        put: on up.opened(c, _req, _peer, _at) {
+            send up.write(c, 0, [Part::Bytes("x".to_utf8())]);
+            if EAGER {
+                emit acked(120u8);
+            }
+        }
+        got: on up.data(_c, _seq, b), let Some(v) = b.u8_at(0) {
+            emit acked(v);
+        }
+    }
+}
+
+/// The server S and the client C.
+spec Scenario {
+    nodes S, C;
+    assign Server = [S];
+    assign Client = [C];
+}
+
+/// An acknowledged value is kept by the server.
+spec Durability {
+    view stored(v) {
+        kept(v) @ _;
+        held(v) @ _;
+    }
+    view pre(v) = acked(v) @ _;
+    view post(v) = acked(v) @ _, stored(v);
+}
+
+/// Durable: holds under lost messages and a crash-restart.
+spec DurableRestart for StreamStore {
+    include Scenario;
+    include Durability;
+    faults { eot: 6, eff: 3, crashes: 1, restart: 1, model: sync, round: 1s }
+    check ldfi expect holds;
+}
+
+/// Volatile: a restart of the server after it acknowledged loses the value.
+spec VolatileRestart for StreamStore(DURABLE = false) {
+    include Scenario;
+    include Durability;
+    faults { eot: 6, eff: 3, crashes: 1, restart: 1, model: sync, round: 1s }
+    check ldfi expect fails;
+}
+
+/// Eager: a lost message after the write loses the value the client counts acknowledged.
+spec EagerOmission for StreamStore(EAGER = true) {
+    include Scenario;
+    include Durability;
+    faults { eot: 6, eff: 3, crashes: 0, model: sync, round: 1s }
+    check ldfi expect fails;
+}

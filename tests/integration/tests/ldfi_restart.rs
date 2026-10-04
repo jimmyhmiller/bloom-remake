@@ -102,3 +102,26 @@ fn losing_the_message_that_arms_a_guarded_timer_silences_it() {
     // Only the guard's lineage leads from the pings back to the `arm` message.
     assert_eq!(check("armed.bls", "Heard"), ["O(C,P,1)"]);
 }
+
+#[test]
+fn a_durable_store_over_a_stream_survives_lost_messages_and_a_restart() {
+    check("stream_store.bls", "DurableRestart");
+}
+
+#[test]
+fn a_volatile_store_over_a_stream_loses_an_acknowledged_value_to_a_restart() {
+    let faults = check("stream_store.bls", "VolatileRestart");
+    // The server acknowledges at 2 (the client wrote at 1, on the connection opened at 1).
+    let crash: u64 = faults
+        .iter()
+        .find_map(|f| f.strip_prefix("C(S,")?.strip_suffix(')')?.parse().ok())
+        .unwrap_or_else(|| panic!("no crash of S in {faults:?}"));
+    assert!(crash >= 3, "{faults:?}");
+}
+
+#[test]
+fn a_client_that_counts_its_own_write_as_acknowledged_loses_it_to_a_reset() {
+    // The client writes at 1 on the connection opened at 1: losing what it sends the server then resets the connection
+    // before the server reads the value.
+    assert_eq!(check("stream_store.bls", "EagerOmission"), ["O(C,S,1)"]);
+}
