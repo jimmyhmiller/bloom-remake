@@ -86,6 +86,10 @@ pub(crate) struct Ctx<'a> {
     pub blobs: &'a dyn blossom_value::BlobSource,
     /// The blobs this tick created, with their bytes.
     pub new_blobs: &'a std::cell::RefCell<BTreeMap<blossom_value::BlobRef, std::sync::Arc<[u8]>>>,
+    /// The earliest later instant at which a comparison with `now()` evaluated so far would come out the other way
+    /// (`Plan::skip`: a rule that reads the time only so is not evaluated again before then, if nothing it reads
+    /// changes).
+    pub flips_at: std::cell::Cell<Option<blossom_value::time::Instant>>,
 }
 
 impl Ctx<'_> {
@@ -330,6 +334,7 @@ pub(crate) fn eval_in(cx: &Ctx<'_>, env: &mut Frame<'_>, e: &Expr) -> ExprResult
             _ => {
                 let l = eval_in(cx, env, lhs)?;
                 let r = eval_in(cx, env, rhs)?;
+                note_flip(cx, op, lhs, rhs, &l, &r);
                 binary(op, l, r)
             }
         },
@@ -430,6 +435,44 @@ pub(crate) fn eval_in(cx: &Ctx<'_>, env: &mut Frame<'_>, e: &Expr) -> ExprResult
         Expr::Let { pat, value, body } => crate::func::let_expr(cx, env, pat, value, body),
         Expr::Closure { .. } => Err(bug("a closure evaluated outside a combinator".into())),
         Expr::Typed { expr, .. } => eval_in(cx, env, expr),
+    }
+}
+
+/// Whether `e` is `now()`.
+pub(crate) fn is_now(e: &Expr) -> bool {
+    match e {
+        Expr::Scalar(BuiltinScalar::Now) => true,
+        Expr::Typed { expr, .. } => is_now(expr),
+        _ => false,
+    }
+}
+
+/// For an ordering of `now()` against an instant: records in `cx.flips_at` when its outcome changes, if later.
+fn note_flip(cx: &Ctx<'_>, op: &BinOp, lhs: &Expr, rhs: &Expr, l: &Value, r: &Value) {
+    use blossom_value::time::Instant;
+    // With `now()` on the left: `now op e`.
+    let (op, e) = match (is_now(lhs), is_now(rhs), l, r) {
+        (true, false, _, Value::Instant(e)) => (op.clone(), *e),
+        (false, true, Value::Instant(e), _) => match op {
+            BinOp::Lt => (BinOp::Gt, *e),
+            BinOp::Le => (BinOp::Ge, *e),
+            BinOp::Gt => (BinOp::Lt, *e),
+            BinOp::Ge => (BinOp::Le, *e),
+            _ => return,
+        },
+        _ => return,
+    };
+    let now = cx.now;
+    let after = Instant(e.0.saturating_add(1));
+    let at = match op {
+        // `now < e` turns false at `e`; `now >= e` turns true at `e`.
+        BinOp::Lt | BinOp::Ge if now < e => e,
+        // `now <= e` turns false, and `now > e` true, just past `e`.
+        BinOp::Le | BinOp::Gt if now <= e => after,
+        _ => return,
+    };
+    if cx.flips_at.get().is_none_or(|t| at < t) {
+        cx.flips_at.set(Some(at));
     }
 }
 
@@ -1028,18 +1071,19 @@ pub(crate) fn int_sum<'a>(mut values: impl Iterator<Item = &'a Value>) -> ExprRe
 
 /// Whether an expression reads a time-varying scalar (LANGUAGE §15.1, ARCHITECTURE §3.4.2): its value can change from
 /// tick to tick with no relation changing, so a rule reading one is re-evaluated at every tick.
+/// Whether calling `f` draws randomness (its value changes from tick to tick).
+pub(crate) fn draws_randomness(f: &FnRef) -> bool {
+    matches!(
+        f,
+        FnRef::Builtin(BuiltinFn::Rand | BuiltinFn::RandFloat | BuiltinFn::RandRange | BuiltinFn::RandPrio { .. })
+    )
+}
+
 pub(crate) fn time_varying(e: &Expr) -> bool {
     match e {
         Expr::Scalar(BuiltinScalar::Now | BuiltinScalar::Tick | BuiltinScalar::Incarnation) => true,
         Expr::Scalar(_) | Expr::Term(_) | Expr::Param(_) => false,
-        Expr::Call { f, args } => {
-            matches!(
-                f,
-                FnRef::Builtin(
-                    BuiltinFn::Rand | BuiltinFn::RandFloat | BuiltinFn::RandRange | BuiltinFn::RandPrio { .. }
-                )
-            ) || args.iter().any(time_varying)
-        }
+        Expr::Call { f, args } => draws_randomness(f) || args.iter().any(time_varying),
         Expr::Unary { arg, .. } => time_varying(arg),
         Expr::Binary { lhs, rhs, .. } => time_varying(lhs) || time_varying(rhs),
         Expr::Construct { fields, .. } => fields.iter().any(time_varying),

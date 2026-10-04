@@ -184,6 +184,20 @@ impl Plans {
     }
 }
 
+/// When a re-evaluated rule (`Regime::Recompute`) may be left alone at a tick: its output is the same as at its last
+/// evaluation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Skip {
+    /// Never: it reads the tick, the incarnation, randomness, or the time otherwise than below.
+    Never,
+    /// While nothing it reads changes (it reads no time: re-evaluated only for having no positive atom).
+    Unchanged,
+    /// While nothing it reads changes and the time stays before the instant at which a comparison of `now()`
+    /// against an instant, in its last evaluation, would come out the other way (`Ctx::flips_at`): its only use
+    /// of the time.
+    UntilFlip,
+}
+
 /// How a rule's output is kept up to date.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Regime {
@@ -211,7 +225,43 @@ pub(crate) struct Plan {
     pub regime: Regime,
     /// When the rule only copies one atom's rows into its head: how, column by column.
     pub copy: Option<CopyPlan>,
+    /// A re-evaluated rule: when it may be left alone.
+    pub skip: Skip,
 }
+
+/// Whether `e` reads the time only by ordering `now()` against an expression that does not read it (and reads
+/// neither the tick, the incarnation nor randomness).
+fn time_only_compared(e: &Expr) -> bool {
+    match e {
+        Expr::Binary {
+            op: BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge,
+            lhs,
+            rhs,
+        } if expr::is_now(lhs) != expr::is_now(rhs) => {
+            let other = if expr::is_now(lhs) { rhs } else { lhs };
+            !expr::time_varying(other)
+        }
+        Expr::Scalar(_) | Expr::Term(_) | Expr::Param(_) => !expr::time_varying(e),
+        Expr::Call { f, args } => !expr::draws_randomness(f) && args.iter().all(time_only_compared),
+        Expr::Unary { arg, .. } => time_only_compared(arg),
+        Expr::Binary { lhs, rhs, .. } => time_only_compared(lhs) && time_only_compared(rhs),
+        Expr::Construct { fields, .. } => fields.iter().all(time_only_compared),
+        Expr::Field { base, .. } => time_only_compared(base),
+        Expr::If { cond, then, els } => time_only_compared(cond) && time_only_compared(then) && time_only_compared(els),
+        Expr::Match { scrut, arms } => {
+            time_only_compared(scrut)
+                && arms
+                    .iter()
+                    .all(|(_, g, b)| g.as_ref().is_none_or(time_only_compared) && time_only_compared(b))
+        }
+        Expr::Collection { elems, .. } => elems.iter().all(time_only_compared),
+        Expr::Lattice { args, .. } => args.iter().all(time_only_compared),
+        Expr::Let { value, body, .. } => time_only_compared(value) && time_only_compared(body),
+        Expr::Closure { body, .. } => time_only_compared(body),
+        Expr::Typed { expr, .. } => time_only_compared(expr),
+    }
+}
+
 
 /// A rule whose body is one positive atom and whose head is plain terms (lowering makes many: unions, renames,
 /// the copies into a table's next state): a changed row of the atom maps to its head row column by column, with no
@@ -549,6 +599,20 @@ impl Plan {
         let dep_keys = deps.iter().filter_map(|l| rule.body.lits.get(*l).and_then(dep_store)).collect();
         let aggregate = crate::strata::is_aggregate(rule);
         let copy = if aggregate { None } else { CopyPlan::of(rule) };
+        let compared_only = lits.iter().all(|l| match l {
+            Literal::Guard(e) | Literal::Bind { expr: e, .. } => time_only_compared(e),
+            Literal::Gen { src, .. } => match src {
+                GenSource::Range { lo, hi, .. } => time_only_compared(lo) && time_only_compared(hi),
+                GenSource::Value(e) | GenSource::Lattice(e) => time_only_compared(e),
+                GenSource::TableFn { .. } => false,
+            },
+            _ => true,
+        });
+        let skip = match (time_varying, compared_only) {
+            (false, _) => Skip::Unchanged,
+            (true, true) => Skip::UntilFlip,
+            (true, false) => Skip::Never,
+        };
         Ok(Plan {
             rule: rule.id,
             nvars: rule.body.vars.len(),
@@ -566,6 +630,7 @@ impl Plan {
             head,
             aggregate,
             copy,
+            skip,
         })
     }
 
