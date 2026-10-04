@@ -284,7 +284,12 @@ impl Engine {
             if !runs(rule) {
                 continue;
             }
-            plans.insert(id, Plan::new(rule)?);
+            let mut plan = Plan::new(rule)?;
+            plan.frame = p
+                .rels
+                .get(rule.head.rel)
+                .and_then(|r| rule::FramePlan::of(rule, &r.persistence));
+            plans.insert(id, plan);
             match rule.kind {
                 RuleKind::Deductive => {}
                 RuleKind::Inductive => inductive.push(id),
@@ -710,6 +715,9 @@ impl Engine {
         plan: &Plan,
         full: bool,
     ) -> Result<Terms, EvalError> {
+        if let (Some(frame), false) = (&plan.frame, full) {
+            return self.frame_change(frame);
+        }
         let cx = self.ctx(p, input);
         let mut drivers: Vec<(Driver, usize)> = Vec::new();
         if full {
@@ -802,6 +810,32 @@ impl Engine {
             }
         }
         self.run_drivers(p, input, rule, plan, drivers)
+    }
+
+    /// A table frame's change (`FramePlan`): for each row that changed in the table, its deletions or its guard this
+    /// tick, the difference between its membership in the frame's output at the start of the tick and now.
+    fn frame_change(&self, frame: &rule::FramePlan) -> Result<Terms, EvalError> {
+        let store = |k: &StoreKey| {
+            self.stores
+                .get(k)
+                .ok_or_else(|| EvalError::from(internal_error!("no store for {k:?}")))
+        };
+        let (rel, del) = (store(&frame.rel)?, store(&frame.del)?);
+        let keep = frame.keep.as_ref().map(store).transpose()?;
+        let mut rows: BTreeSet<&Row> = rel.delta().map(|(r, _)| r).collect();
+        rows.extend(del.delta().map(|(r, _)| r));
+        if let Some(k) = keep {
+            rows.extend(k.delta().map(|(r, _)| r));
+        }
+        let mut out = Terms::default();
+        for row in rows {
+            let was = rel.contained(row) && !del.contained(row) && keep.is_none_or(|k| k.contained(row));
+            let is = rel.contains(row) && !del.contains(row) && keep.is_none_or(|k| k.contains(row));
+            if was != is {
+                out.heads.insert(row.clone(), if is { 1 } else { -1 });
+            }
+        }
+        Ok(out)
     }
 
     /// Evaluates the terms of `rule` that `drivers` drive, each with its position among the rule's dependencies:

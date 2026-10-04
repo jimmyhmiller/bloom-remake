@@ -226,6 +226,57 @@ pub(crate) struct Plan {
     pub copy: Option<CopyPlan>,
     /// A re-evaluated rule: when it may be left alone.
     pub skip: Skip,
+    /// When the rule is a table's frame (`Persistence::Frame`): the stores its native operator reads.
+    pub frame: Option<FramePlan>,
+}
+
+/// A table's frame (ENG-003, `Persistence::Frame`): `r(x̄)@next :- r(x̄), notin r$del(x̄)` (and `r$keep(x̄)` for a
+/// guarded table). Its contribution to `r`'s next state is exactly the rows of `r` not in `r$del` (and in
+/// `r$keep`): a row's contribution changes only where the row changed in one of them this tick, and the change is
+/// the difference between the row's membership at the start of the tick and now.
+#[derive(Clone, Debug)]
+pub(crate) struct FramePlan {
+    pub rel: StoreKey,
+    pub del: StoreKey,
+    pub keep: Option<StoreKey>,
+}
+
+impl FramePlan {
+    /// The frame plan of `rule`, if it is the frame of its head's table, in the expansion's shape.
+    pub(crate) fn of(rule: &Rule, persistence: &blossom_ir::core::Persistence) -> Option<FramePlan> {
+        let blossom_ir::core::Persistence::Frame {
+            rule: id,
+            del: Some(del),
+            guard,
+        } = persistence
+        else {
+            return None;
+        };
+        if *id != rule.id || rule.kind != RuleKind::Inductive {
+            return None;
+        }
+        let vars: Vec<&Term> = rule.head.args.iter().filter_map(|h| match h {
+            HeadArg::Term(t @ Term::Var(_)) => Some(t),
+            _ => None,
+        }).collect();
+        if vars.len() != rule.head.args.len() {
+            return None;
+        }
+        let same = |a: &Atom| a.sender.is_none() && a.args.iter().collect::<Vec<_>>() == vars;
+        let lits = rule.body.lits.as_slice();
+        let ok = match (lits, guard) {
+            ([Literal::Pos(r), Literal::Neg(d)], None) => r.rel == rule.head.rel && d.rel == *del && same(r) && same(d),
+            ([Literal::Pos(r), Literal::Neg(d), Literal::Pos(k)], Some(g)) => {
+                r.rel == rule.head.rel && d.rel == *del && k.rel == *g && same(r) && same(d) && same(k)
+            }
+            _ => false,
+        };
+        ok.then(|| FramePlan {
+            rel: StoreKey::Main(rule.head.rel),
+            del: StoreKey::Main(*del),
+            keep: guard.map(StoreKey::Main),
+        })
+    }
 }
 
 /// A rule whose body is one positive atom and whose head is plain terms (lowering makes many: unions, renames,
@@ -596,6 +647,7 @@ impl Plan {
             aggregate,
             copy,
             skip,
+            frame: None,
         })
     }
 

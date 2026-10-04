@@ -290,6 +290,11 @@ impl Store {
 
     /// A counter that moves with every change to the present rows.
     /// Whether `row` is present.
+    /// Whether `row` was present at the start of the tick.
+    pub fn contained(&self, row: &Row) -> bool {
+        (self.contains(row) && !self.ins.contains(row)) || self.del.contains(row)
+    }
+
     pub fn contains(&self, row: &Row) -> bool {
         if self.cell.is_some() { self.merged_rows.contains(row) } else { self.counts.contains_key(row) }
     }
