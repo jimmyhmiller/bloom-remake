@@ -1,0 +1,69 @@
+//! Streams in the synchronous-round world (`blossom_sim::fabric`): the Client dials the Server at boot; when the
+//! connection opens it writes `b` with seq 1, and the round after `a` with seq 0, and closes it. The Server pauses
+//! each connection it accepts for three rounds, then reads it, recording each chunk and how the connection ended.
+//! With `DUP` the Client also writes seq 1 again with `a`: a duplicate, which closes the connection.
+program rounds version 1;
+
+param DUP: bool = false;
+
+role Server;
+role Client;
+
+at Server {
+    stream s: listen;
+    table got(seq: u64, b: Bytes);
+    table srv_ended(why: String);
+    /// A paused connection and the rounds until it is resumed.
+    table wait(c: Conn, n: u64) key(c);
+
+    hold: on s.opened(c, _peer, _at) {
+        send s.pause(c);
+        emit wait(c, 3);
+    }
+    count: while wait(c, n) where n > 0u64 {
+        upsert wait(c, n - 1u64);
+    }
+    go: while wait(c, n) where n == 0u64 {
+        send s.resume(c);
+        delete wait(c, n);
+    }
+    keep: on s.data(_c, seq, b) {
+        emit got(seq, b);
+    }
+    end: on s.closed(_c, why) {
+        emit srv_ended(why);
+    }
+}
+
+at Client {
+    stream up: connect;
+    /// A connection and the rounds until its seq 0 write.
+    table pending(c: Conn, n: u64) key(c);
+    table cli_ended(why: String);
+    table failures(req: u64, why: String);
+
+    start: on boot() {
+        send up.dial(7, "sim://srv/s");
+    }
+    second: on up.opened(c, _req, _peer, _at) {
+        send up.write(c, 1, [Part::Bytes("b".to_utf8())]);
+        emit pending(c, 1);
+    }
+    later: while pending(c, n) where n > 0u64 {
+        upsert pending(c, n - 1u64);
+    }
+    first: while pending(c, n) where n == 0u64 {
+        send up.write(c, 0, [Part::Bytes("a".to_utf8())]);
+        send up.close(c);
+        delete pending(c, n);
+    }
+    again: while pending(c, n) where n == 0u64 && DUP {
+        send up.write(c, 1, [Part::Bytes("a".to_utf8())]);
+    }
+    end: on up.closed(_c, why) {
+        emit cli_ended(why);
+    }
+    failed: on up.failed(req, why) {
+        emit failures(req, why);
+    }
+}
