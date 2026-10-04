@@ -32,7 +32,7 @@ use blossom_value::Value;
 use blossom_value::time::{NodeId, Tick};
 
 use crate::LdfiError;
-use crate::faults::{FailureSpec, canonical};
+use crate::faults::FailureSpec;
 use crate::reach::Preds;
 
 /// A hazard: a constant, or a literal of the solver.
@@ -72,6 +72,10 @@ pub trait Rules {
     /// The lattice columns of a lattice-valued relation (empty for a set relation): its rows are merged per key, so a
     /// cell's row changes when a contribution is gained or lost (SEM-100).
     fn lattice_cols(&self, space: Space, rel: RelId) -> Vec<usize>;
+    /// Whether a relation is durable (a restart keeps it).
+    fn durable(&self, space: Space, rel: RelId) -> bool;
+    /// A relation's number of columns.
+    fn arity(&self, space: Space, rel: RelId) -> usize;
 }
 
 /// What a seeded enumeration looks for.
@@ -112,21 +116,38 @@ pub enum Origin<'r> {
     Snapshot { protocol: RelId, tick: Option<Tick> },
     /// The crash oracle `crash(Observer, Node, Time)`.
     Crash,
-    /// The crash oracle `crashed(Node)` of a Blossom spec: every node that crashed.
+    /// The crash oracle `crashed(Node)` of a Blossom spec: every node that is down at EOT.
     Crashed,
+    /// `boot()` and `recovered()`: a restart raises them, in its tick.
+    Restart,
+    /// A physical timer's firings: a restart starts its count again, and a guarded timer fires while its guard held
+    /// at the end of the node's previous tick.
+    Timer { guard: Option<RelId> },
 }
 
 type Pattern = Vec<Option<Value>>;
 type PlaceKey = (Space, RelId, Loc, Tick, Pattern);
 
-/// The fault variables of one solver: `O(from,to,send)` per allowed omission, and the crash-order variables
-/// `K(n,t)` for `t` in `1..EOT` per node, created on first use.
+/// The fault variables of one solver: `O(from,to,send)` per allowed omission, and per node its crash variables,
+/// created on first use. Under crash-stop they are the crash-order variables `K(n,t)` ("crashed at or before `t`")
+/// for `t` in `1..EOT`, with `K(n,t) -> K(n,t+1)`. Under crash-restart they are the crash-time variables `X(n,c)`
+/// ("crashes at `c`"), at most one per node: a node is down at `t` when it crashed in the `restart` ticks up to `t`,
+/// which is a disjunction of `X` variables, so the encoding stays monotone in the fault variables.
 #[derive(Debug, Default)]
 pub struct FaultVars {
     omission: BTreeMap<Omission, Var>,
-    crash: BTreeMap<NodeId, Vec<(Tick, Var)>>,
+    crash: BTreeMap<NodeId, NodeCrash>,
+    /// Disjunctions of a node's crash-time variables over a tick range (crash-restart).
+    ranges: BTreeMap<(NodeId, u64, u64), Hazard>,
     /// The nodes the last crash budget covered.
     budget_nodes: BTreeSet<NodeId>,
+}
+
+/// One node's crash variables (`K` or `X`, by tick) and the literal that holds when it crashes at all.
+#[derive(Debug)]
+struct NodeCrash {
+    vars: Vec<(Tick, Var)>,
+    any: Lit,
 }
 
 impl FaultVars {
@@ -143,31 +164,48 @@ impl FaultVars {
         v
     }
 
-    /// The crash-order variables of `node`, created on first use with `K(n,t) -> K(n,t+1)`.
+    /// The crash variables of `node`, created on first use: the `K` chain under crash-stop; under crash-restart the
+    /// `X` variables, held to at most one by a ladder `S(n,c)` ("crashed at or before `c`") whose last variable
+    /// counts the node for the crash budget.
     fn crash_vars(
         &mut self,
         solver: &mut dyn SatSolver,
         spec: &FailureSpec,
         node: NodeId,
-    ) -> Result<&[(Tick, Var)], LdfiError> {
-        let vars = match self.crash.entry(node) {
-            std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::btree_map::Entry::Vacant(e) => {
-                let mut vars: Vec<(Tick, Var)> = Vec::new();
-                for t in spec.crash_ticks() {
-                    vars.push((t, solver.new_var()));
-                }
-                for w in vars.windows(2) {
-                    if let [(_, a), (_, b)] = w {
-                        solver.add_clause(&[a.negative(), b.positive()])?;
-                    }
-                }
-                e.insert(vars)
-            }
+    ) -> Result<&NodeCrash, LdfiError> {
+        let entry = match self.crash.entry(node) {
+            std::collections::btree_map::Entry::Occupied(e) => return Ok(e.into_mut()),
+            std::collections::btree_map::Entry::Vacant(e) => e,
         };
-        Ok(vars.as_slice())
+        let mut vars: Vec<(Tick, Var)> = Vec::new();
+        for t in spec.crash_ticks() {
+            vars.push((t, solver.new_var()));
+        }
+        let any = if spec.restart.is_none() {
+            for w in vars.windows(2) {
+                if let [(_, a), (_, b)] = w {
+                    solver.add_clause(&[a.negative(), b.positive()])?;
+                }
+            }
+            vars.last().map(|(_, v)| v.positive())
+        } else {
+            let mut prev: Option<Var> = None;
+            for (_, x) in &vars {
+                let ladder = solver.new_var();
+                solver.add_clause(&[x.negative(), ladder.positive()])?;
+                if let Some(p) = prev {
+                    solver.add_clause(&[p.negative(), ladder.positive()])?;
+                    solver.add_clause(&[p.negative(), x.negative()])?;
+                }
+                prev = Some(ladder);
+            }
+            prev.map(|v| v.positive())
+        };
+        let any = any.ok_or_else(|| internal_error!("a run too short for any crash has crash variables"))?;
+        Ok(entry.insert(NodeCrash { vars, any }))
     }
 
+    /// `K(n,t)` (crash-stop): `node` crashed at or before `t`.
     fn k(
         &mut self,
         solver: &mut dyn SatSolver,
@@ -178,27 +216,148 @@ impl FaultVars {
         if spec.max_crashes == 0 {
             return Ok(Hazard::False);
         }
-        let vars = self.crash_vars(solver, spec, node)?;
+        let vars = &self.crash_vars(solver, spec, node)?.vars;
         Ok(vars
             .iter()
             .find(|(tick, _)| *tick == t)
             .map_or(Hazard::False, |(_, v)| Hazard::Lit(v.positive())))
     }
 
-    /// Asserts that at most `max_crashes` nodes crash: a totalizer over every node's last crash-order variable,
-    /// asserted again when crash variables exist for more nodes.
+    /// Under crash-restart: `node` crashes at some tick of `lo..=hi`.
+    fn crash_in(
+        &mut self,
+        solver: &mut dyn SatSolver,
+        spec: &FailureSpec,
+        node: NodeId,
+        lo: u64,
+        hi: u64,
+    ) -> Result<Hazard, LdfiError> {
+        if spec.max_crashes == 0 {
+            return Ok(Hazard::False);
+        }
+        let lo = lo.max(1);
+        let hi = hi.min(spec.eot.0.saturating_sub(1));
+        if lo > hi {
+            return Ok(Hazard::False);
+        }
+        if let Some(h) = self.ranges.get(&(node, lo, hi)) {
+            return Ok(*h);
+        }
+        let lits: Vec<Lit> = self
+            .crash_vars(solver, spec, node)?
+            .vars
+            .iter()
+            .filter(|(t, _)| (lo..=hi).contains(&t.0))
+            .map(|(_, v)| v.positive())
+            .collect();
+        let h = match lits.as_slice() {
+            [] => Hazard::False,
+            [one] => Hazard::Lit(*one),
+            _ => {
+                let h = solver.new_var().positive();
+                let mut clause = vec![!h];
+                clause.extend(lits);
+                solver.add_clause(&clause)?;
+                Hazard::Lit(h)
+            }
+        };
+        self.ranges.insert((node, lo, hi), h);
+        Ok(h)
+    }
+
+    /// `node` is down at `t`: crashed at or before it, and (crash-restart) not restarted since.
+    pub fn down(
+        &mut self,
+        solver: &mut dyn SatSolver,
+        spec: &FailureSpec,
+        node: NodeId,
+        t: Tick,
+    ) -> Result<Hazard, LdfiError> {
+        match spec.restart {
+            None => self.k(solver, spec, node, t),
+            Some(d) => self.crash_in(solver, spec, node, (t.0 + 1).saturating_sub(d), t.0),
+        }
+    }
+
+    /// `node` is down at some tick of `from..=to`.
+    pub fn down_during(
+        &mut self,
+        solver: &mut dyn SatSolver,
+        spec: &FailureSpec,
+        node: NodeId,
+        from: Tick,
+        to: Tick,
+    ) -> Result<Hazard, LdfiError> {
+        match spec.restart {
+            None => self.k(solver, spec, node, to),
+            Some(d) => self.crash_in(solver, spec, node, (from.0 + 1).saturating_sub(d), to.0),
+        }
+    }
+
+    /// `node` restarts at `t` (never under crash-stop).
+    pub fn restart_at(
+        &mut self,
+        solver: &mut dyn SatSolver,
+        spec: &FailureSpec,
+        node: NodeId,
+        t: Tick,
+    ) -> Result<Hazard, LdfiError> {
+        match spec.restart {
+            Some(d) if t.0 > d => self.crash_in(solver, spec, node, t.0 - d, t.0 - d),
+            _ => Ok(Hazard::False),
+        }
+    }
+
+    /// `node` has restarted at or before `t` (never under crash-stop).
+    pub fn restarted_by(
+        &mut self,
+        solver: &mut dyn SatSolver,
+        spec: &FailureSpec,
+        node: NodeId,
+        t: Tick,
+    ) -> Result<Hazard, LdfiError> {
+        self.restarted_between(solver, spec, node, Tick(0), t)
+    }
+
+    /// `node` restarts at some tick after `from` and at or before `to` (never under crash-stop).
+    pub fn restarted_between(
+        &mut self,
+        solver: &mut dyn SatSolver,
+        spec: &FailureSpec,
+        node: NodeId,
+        from: Tick,
+        to: Tick,
+    ) -> Result<Hazard, LdfiError> {
+        match spec.restart {
+            Some(d) if to.0 > d => self.crash_in(solver, spec, node, (from.0 + 1).saturating_sub(d), to.0 - d),
+            _ => Ok(Hazard::False),
+        }
+    }
+
+    /// `node` crashes at `c` (under crash-stop `K(n,c)`, which a crash at `c` implies: the encoding is monotone).
+    fn crash_at(
+        &mut self,
+        solver: &mut dyn SatSolver,
+        spec: &FailureSpec,
+        node: NodeId,
+        c: Tick,
+    ) -> Result<Hazard, LdfiError> {
+        match spec.restart {
+            None => self.k(solver, spec, node, c),
+            Some(_) => self.crash_in(solver, spec, node, c.0, c.0),
+        }
+    }
+
+    /// Asserts that at most `max_crashes` nodes crash: a totalizer over every node's crash literal, asserted again
+    /// when crash variables exist for more nodes.
     pub fn crash_budget(&mut self, solver: &mut dyn SatSolver, spec: &FailureSpec) -> Result<(), LdfiError> {
         let nodes: BTreeSet<NodeId> = self.crash.keys().copied().collect();
         if nodes.is_empty() || nodes == self.budget_nodes {
             return Ok(());
         }
-        let last: Vec<Lit> = self
-            .crash
-            .values()
-            .filter_map(|ks| ks.last().map(|(_, v)| v.positive()))
-            .collect();
+        let any: Vec<Lit> = self.crash.values().map(|c| c.any).collect();
         let k = spec.max_crashes;
-        let outputs = card::totalizer(solver, &last, k)?;
+        let outputs = card::totalizer(solver, &any, k)?;
         if let Some(over) = outputs.get(k as usize) {
             solver.add_clause(&[!*over])?;
         }
@@ -227,12 +386,12 @@ impl FaultVars {
         self.omission
             .values()
             .copied()
-            .chain(self.crash.values().flatten().map(|(_, v)| *v))
+            .chain(self.crash.values().flat_map(|c| c.vars.iter().map(|(_, v)| *v)))
             .collect()
     }
 
     /// The literals asserting `faults` (those with variables here).
-    pub fn lits_of(&self, faults: &FaultSchedule) -> Vec<Lit> {
+    pub fn lits_of(&self, spec: &FailureSpec, faults: &FaultSchedule) -> Vec<Lit> {
         let mut out = Vec::new();
         for o in &faults.omissions {
             if let Some(v) = self.omission.get(o) {
@@ -240,15 +399,21 @@ impl FaultVars {
             }
         }
         for (n, c) in &faults.crashes {
-            if let Some((_, v)) = self.crash.get(n).and_then(|ks| ks.iter().find(|(t, _)| t >= c)) {
+            let vars = self.crash.get(n).map(|nc| nc.vars.as_slice()).unwrap_or_default();
+            let found = match spec.restart {
+                None => vars.iter().find(|(t, _)| t >= c),
+                Some(_) => vars.iter().find(|(t, _)| t == c),
+            };
+            if let Some((_, v)) = found {
                 out.push(v.positive());
             }
         }
         out
     }
 
-    /// Every fault variable `faults` makes true (a crash makes its later crash-order variables true too).
-    pub fn implied_by(&self, faults: &FaultSchedule) -> BTreeSet<Var> {
+    /// Every fault variable `faults` makes true (under crash-stop a crash makes its later crash-order variables true
+    /// too).
+    pub fn implied_by(&self, spec: &FailureSpec, faults: &FaultSchedule) -> BTreeSet<Var> {
         let mut out = BTreeSet::new();
         for o in &faults.omissions {
             if let Some(v) = self.omission.get(o) {
@@ -256,8 +421,12 @@ impl FaultVars {
             }
         }
         for (n, c) in &faults.crashes {
-            for (t, v) in self.crash.get(n).into_iter().flatten() {
-                if t >= c {
+            for (t, v) in self.crash.get(n).into_iter().flat_map(|nc| nc.vars.iter()) {
+                let implied = match spec.restart {
+                    None => t >= c,
+                    Some(_) => t == c,
+                };
+                if implied {
                     out.insert(*v);
                 }
             }
@@ -266,22 +435,22 @@ impl FaultVars {
     }
 
     /// The fault schedule `base` plus the faults of the true variables `model`.
-    pub fn schedule(&self, base: &FaultSchedule, model: &BTreeSet<Var>) -> FaultSchedule {
+    pub fn schedule(&self, spec: &FailureSpec, base: &FaultSchedule, model: &BTreeSet<Var>) -> FaultSchedule {
         let mut out = base.clone();
         for (o, v) in &self.omission {
             if model.contains(v) {
                 out.omissions.insert(*o);
             }
         }
-        for (n, ks) in &self.crash {
-            if let Some((t, _)) = ks.iter().find(|(_, v)| model.contains(v)) {
+        for (n, nc) in &self.crash {
+            if let Some((t, _)) = nc.vars.iter().find(|(_, v)| model.contains(v)) {
                 let entry = out.crashes.entry(*n).or_insert(*t);
                 if *t < *entry {
                     *entry = *t;
                 }
             }
         }
-        canonical(out)
+        spec.canonical(out)
     }
 }
 
@@ -397,6 +566,20 @@ impl<'a> Encoder<'a> {
     /// A crash that the run does not already have, of `node` at `time` (any time when `None`): the run's own crash of
     /// `node` can only move earlier. Monotone: `K(n, k)` stands for "at `k`", which it implies.
     fn crash_appears(&mut self, node: NodeId, time: Option<Tick>) -> Result<Hazard, LdfiError> {
+        if let Some(d) = self.spec.restart {
+            // Crash-restart: a node crashes at most once, so the run's own crash of `node` stays as it is. With no
+            // time, the crash that matters is one that leaves the node down at EOT (`crashed(n)` of a spec).
+            if self.seed_crashes.contains_key(&node) {
+                return Ok(Hazard::False);
+            }
+            let eot = self.spec.eot;
+            return match time {
+                Some(c) => self.vars.crash_at(self.solver, self.spec, node, c),
+                None => self
+                    .vars
+                    .crash_in(self.solver, self.spec, node, (eot.0 + 1).saturating_sub(d), eot.0),
+            };
+        }
         let last = self.spec.eot.0.saturating_sub(1);
         let at_or_before = |t: u64| Tick(t.min(last));
         let bound = match (self.seed_crashes.get(&node).copied(), time) {
@@ -566,7 +749,7 @@ impl<'a> Encoder<'a> {
                     let v = self.vars.omission_var(self.solver, Omission { from, to, send });
                     options.push(Hazard::Lit(v.positive()));
                 }
-                options.push(self.vars.k(self.solver, self.spec, from, send)?);
+                options.push(self.vars.down(self.solver, self.spec, from, send)?);
                 self.or(options)
             }
             Premise::Neg(id) => {
@@ -581,7 +764,12 @@ impl<'a> Encoder<'a> {
                 }
             }
             Premise::CrashAbsent { node, time } => self.crash_appears_any(node, time),
-            Premise::Alive { node, tick } => self.vars.k(self.solver, self.spec, node, tick),
+            Premise::Alive { node, tick } => self.vars.down(self.solver, self.spec, node, tick),
+            Premise::Up { node, from, to } => self.vars.down_during(self.solver, self.spec, node, from, to),
+            Premise::NoRestart { node, tick } => self.vars.restart_at(self.solver, self.spec, node, tick),
+            Premise::NotRestarted { node, from, tick } => {
+                self.vars.restarted_between(self.solver, self.spec, node, from, tick)
+            }
             Premise::CrashPresent { node, time } => self.crash_removed(node, time),
             Premise::Aggregate(id) => {
                 let graph = self.graph;
@@ -739,7 +927,9 @@ impl<'a> Encoder<'a> {
         let origin = rules.origin(space, rel)?;
         // Under the frozen crash view, a tuple a node held before some tick stays if the node crashes at that tick.
         let frozen = match (&origin, loc) {
-            (Origin::Input | Origin::Rules { .. }, Loc::Node(n)) if self.frozen && space == Space::Protocol => {
+            (Origin::Input | Origin::Rules { .. } | Origin::Restart | Origin::Timer { .. }, Loc::Node(n))
+                if self.frozen && space == Space::Protocol =>
+            {
                 self.frozen_appear(rel, n, tick, pattern)?
             }
             _ => Hazard::False,
@@ -763,7 +953,8 @@ impl<'a> Encoder<'a> {
         self.or(vec![frozen, derived])
     }
 
-    /// A crash of `node` at some tick `c <= tick` whose previous tick held a matching tuple (the frozen view).
+    /// A crash of `node` at some tick `c <= tick` whose previous tick held a matching tuple (the frozen view). Under
+    /// crash-restart the node keeps such a tuple while it is down, and a durable one after its restart too.
     fn frozen_appear(
         &mut self,
         rel: RelId,
@@ -771,8 +962,12 @@ impl<'a> Encoder<'a> {
         tick: Tick,
         pattern: &[Option<Value>],
     ) -> Result<Hazard, LdfiError> {
+        let durable = self.rules.is_some_and(|r| r.durable(Space::Protocol, rel));
         let mut options = Vec::new();
         for c in self.spec.crash_ticks().filter(|c| *c <= tick) {
+            if !durable && !self.spec.down(c, tick) {
+                continue;
+            }
             let Some(before) = c.prev() else { continue };
             if self.exists(Space::Protocol, rel, Loc::Node(node), before, pattern)? {
                 options.push(self.crash_appears(node, Some(c))?);
@@ -796,6 +991,25 @@ impl<'a> Encoder<'a> {
         };
         match origin {
             Origin::Input => Ok(Hazard::False),
+            Origin::Restart => match loc {
+                Loc::Node(n) => self.vars.restart_at(self.solver, self.spec, n, tick),
+                _ => Err(internal_error!("a restart event outside a node").into()),
+            },
+            Origin::Timer { guard } => {
+                let Loc::Node(n) = loc else {
+                    return Err(internal_error!("a timer firing outside a node").into());
+                };
+                let restarted = self.vars.restarted_by(self.solver, self.spec, n, tick)?;
+                // A guarded timer fires when its guard held at the end of the previous tick: some guard tuple there.
+                let guarded = match (guard, tick.prev()) {
+                    (Some(g), Some(before)) => {
+                        let open: Pattern = vec![None; rules.arity(Space::Protocol, g)];
+                        self.appear(Space::Protocol, g, loc, before, &open)?
+                    }
+                    _ => Hazard::False,
+                };
+                self.or(vec![restarted, guarded])
+            }
             Origin::Crash => {
                 // A tuple crash(Observer, Node, Time) appears when that node crashes at that time.
                 let (node, time) = crash_pattern(pattern)?;
@@ -1022,13 +1236,17 @@ impl<'a> Encoder<'a> {
             }
             Origin::Crashed => {
                 let node = crashed_node(pattern)?;
-                Ok(self.seed_crashes.keys().any(|n| node.is_none_or(|m| m == *n)))
+                let eot = self.spec.eot;
+                Ok(self
+                    .seed_crashes
+                    .iter()
+                    .any(|(n, c)| node.is_none_or(|m| m == *n) && self.spec.down(*c, eot)))
             }
             Origin::Snapshot { protocol, tick: at } => {
                 let (node_loc, rest) = split_node(pattern);
                 self.exists(Space::Protocol, protocol, node_loc, at.unwrap_or(tick), rest)
             }
-            Origin::Input | Origin::Rules { .. } => {
+            Origin::Input | Origin::Rules { .. } | Origin::Restart | Origin::Timer { .. } => {
                 let nodes: Vec<Option<NodeId>> = match loc {
                     Loc::Node(n) => vec![Some(n)],
                     Loc::Global => vec![None],
@@ -1086,7 +1304,7 @@ impl<'a> Encoder<'a> {
             }
             // A crashed node stays crashed in every superset of the run's faults.
             Origin::Crashed => return Ok(Hazard::False),
-            Origin::Input | Origin::Rules { .. } => {}
+            Origin::Input | Origin::Rules { .. } | Origin::Restart | Origin::Timer { .. } => {}
         }
         if loc == Loc::AnyNode {
             let mut options = Vec::new();
@@ -1301,8 +1519,8 @@ pub fn minimal_extensions(
         };
         let act = solver.new_var().positive();
         solver.add_clause(&[!act, l])?;
-        let seed_lits = vars.lits_of(seed);
-        let seeded = vars.implied_by(seed);
+        let seed_lits = vars.lits_of(spec, seed);
+        let seeded = vars.implied_by(spec, seed);
         let free: Vec<Var> = vars.all().into_iter().filter(|v| !seeded.contains(v)).collect();
         let mut base = vec![act];
         base.extend(seed_lits.iter().copied());
@@ -1320,7 +1538,7 @@ pub fn minimal_extensions(
             let mut block = vec![!act];
             block.extend(model.iter().map(|v| v.negative()));
             solver.add_clause(&block)?;
-            out.hypotheses.push(vars.schedule(seed, &model));
+            out.hypotheses.push(vars.schedule(spec, seed, &model));
         }
     }
     Ok(out)

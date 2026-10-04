@@ -8,6 +8,6 @@
 pub mod graph;
 
 pub use graph::{
-    AggGroup, AggId, Firing, FiringId, Goal, GoalId, GoalKey, Loc, Names, NegId, NegRead, Premise, ProvGraph, Space,
-    Support,
+    AggGroup, AggId, By, Firing, FiringId, Goal, GoalId, GoalKey, Loc, Names, NegId, NegRead, Premise, ProvGraph,
+    RuntimeAct, Space, Support,
 };

@@ -818,6 +818,8 @@ pub struct BangClause {
 pub struct SpecItem {
     pub name: Option<Ident>,
     pub target: Option<Vec<Ident>>,
+    /// The target's value arguments (`for M(K = v, …)`).
+    pub target_args: Vec<Arg>,
     pub members: Vec<SpecMember>,
     /// The attributes written on its members (no built-in attribute applies to one).
     pub member_attrs: Vec<Attr>,

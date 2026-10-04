@@ -292,10 +292,11 @@ fn a_timer_guard_must_be_a_known_view_or_table_where_the_timer_is() {
     );
 }
 
-/// LDFI treats a timer's firings as inputs that faults cannot change; a guarded timer's depend on state that faults
-/// can change, so LDFI refuses the program (as it refuses one that can `halt`) rather than miss a hazard.
+/// LDFI models a guarded timer's firings: each needs some tuple of its guard at the end of the node's previous round
+/// (and, under crash-restarts, no restart of the node since: a restart starts the count again). Exhaustive
+/// certification and the one-round step drive rounds themselves and do not fire guarded timers, so they refuse.
 #[test]
-fn ldfi_refuses_a_program_with_a_guarded_timer() {
+fn ldfi_runs_over_a_guarded_timer_and_the_one_round_searches_refuse_it() {
     let dir = std::env::temp_dir().join(format!("blossom-timer-guards-ldfi-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("guarded_specs.bls");
@@ -342,12 +343,12 @@ spec Got for Pinger {
     let fs =
         blossom_ldfi::FailureSpec::new(faults.eot, faults.eff, faults.crashes, artifact.nodes.len() as u32).unwrap();
     let sim = blossom_sim::spec::SpecSim::new(&artifact).unwrap();
-    let Err(err) = blossom_ldfi::run(&sim, &blossom_ldfi::LdfiConfig::new(fs.clone())) else {
-        panic!("LDFI ran over a guarded timer");
-    };
-    let text = err.to_string();
-    assert!(text.contains("LANG-172") && text.contains("guarded timer"), "{text}");
-    // Exhaustive certification and the one-round step refuse too (they would not fire it).
+    // The lineage-driven search models a guarded timer's firings (each needs its guard in the round before).
+    let mut config = blossom_ldfi::LdfiConfig::new(fs.clone());
+    config.exhaustive_fallback = None;
+    let report = blossom_ldfi::run(&sim, &config).unwrap();
+    assert_eq!(report.verdict, blossom_ldfi::Verdict::NoCounterexample);
+    // Exhaustive certification and the one-round step refuse it (they would not fire it).
     let Err(err) = blossom_ldfi::certify::exhaustive(&sim, &fs, &Default::default(), 1, 1_000) else {
         panic!("exhaustive certification ran over a guarded timer");
     };

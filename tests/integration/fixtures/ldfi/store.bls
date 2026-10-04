@@ -1,0 +1,86 @@
+//! LDFI under crash-restarts (S11): a store that acknowledges a write after keeping it. Kept in a durable table, the
+//! write survives a restart of the server; kept in a volatile one (`DURABLE = false`, the seeded bug), a restart
+//! after the acknowledgement loses it. Under crash-stop the bug is invisible: a crashed server keeps its state (the
+//! frozen view), so only crash-restarts expose it. This file is a library of modules and specs.
+
+pub module Store(DURABLE: bool = true) {
+    role Server;
+    role Client;
+
+    static server(n: Node<Server>);
+    static client(n: Node<Client>);
+
+    channel put(v: u64): Client -> Server;
+    channel ack(v: u64): Server -> Client;
+
+    at Client {
+        input write(v: u64);
+        durable table acked(v: u64);
+
+        go: on write(v), server(s) {
+            send put(v) to s;
+        }
+        got: on ack(v) {
+            emit acked(v);
+        }
+    }
+
+    at Server {
+        durable table kept(v: u64);
+        table held(v: u64);
+
+        store: on put(v) from c {
+            if DURABLE {
+                emit kept(v);
+            }
+            if not DURABLE {
+                emit held(v);
+            }
+            send ack(v) to c;
+        }
+    }
+}
+
+/// The server S and the client C, which writes 7 at tick 1.
+spec Scenario {
+    nodes S, C;
+    assign Server = [S];
+    assign Client = [C];
+    fact server(S);
+    fact client(C);
+    fact write(7) @ C at tick 1;
+}
+
+/// An acknowledged write is kept by the server (which is up at EOT: a crash restarts within the run).
+spec Durability {
+    view stored(v) {
+        kept(v) @ _;
+        held(v) @ _;
+    }
+    view pre(v) = acked(v) @ _;
+    view post(v) = acked(v) @ _, stored(v);
+}
+
+/// Durable: holds under a crash-restart.
+spec DurableRestart for Store {
+    include Scenario;
+    include Durability;
+    faults { eot: 6, eff: 3, crashes: 1, restart: 1, model: sync }
+    check ldfi expect holds;
+}
+
+/// Volatile: a restart after the acknowledgement loses the write.
+spec VolatileRestart for Store(DURABLE = false) {
+    include Scenario;
+    include Durability;
+    faults { eot: 6, eff: 3, crashes: 1, restart: 1, model: sync }
+    check ldfi expect fails;
+}
+
+/// Volatile under crash-stop: a crashed server keeps what it held, so nothing is lost.
+spec VolatileStop for Store(DURABLE = false) {
+    include Scenario;
+    include Durability;
+    faults { eot: 6, eff: 3, crashes: 1, model: sync }
+    check ldfi expect holds;
+}

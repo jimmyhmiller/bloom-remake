@@ -10,7 +10,7 @@ use blossom_value::Value;
 use blossom_value::time::{NodeId, Tick};
 use blossom_value::value::IntValue;
 
-use crate::faults::{FailureSpec, canonical, labels};
+use crate::faults::{FailureSpec, labels};
 use crate::hazard::minimal_extensions;
 use crate::reach::Preds;
 
@@ -39,7 +39,7 @@ fn goal(g: &mut ProvGraph, rel: u32, tick: u64, v: i64) -> GoalId {
 fn firing(premises: Vec<Premise>) -> Firing {
     Firing {
         space: Space::Protocol,
-        rule: RuleId::from_raw(0),
+        by: blossom_prov::By::Rule(RuleId::from_raw(0)),
         node: Some(C),
         tick: Tick(1),
         kind: FiringKind::Rule,
@@ -212,7 +212,7 @@ fn fault_sets_normalize_and_compare_by_removed_clocks() {
         to: B,
         send: Tick(1),
     });
-    let f = canonical(f);
+    let f = spec.canonical(f);
     assert_eq!(
         labels(&f, &name),
         ["C(a,2)", "O(a,b,1)"],

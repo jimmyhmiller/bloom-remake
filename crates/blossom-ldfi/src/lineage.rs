@@ -30,7 +30,7 @@ use blossom_base::{InternalError, RelId, internal_error};
 use blossom_ir::core::{EventSource, RelClass, RuleKind};
 use blossom_ir::obs::{FiringKind, FiringRecord, NegRead};
 use blossom_prov::{AggGroup, Loc, NegRead as ProvNegRead};
-use blossom_prov::{Firing, GoalId, GoalKey, Premise, ProvGraph, Space};
+use blossom_prov::{By, Firing, GoalId, GoalKey, Premise, ProvGraph, RuntimeAct, Space};
 use blossom_sim::spec::Outcome;
 use blossom_sim::{Fate, SyncRun};
 use blossom_value::{
@@ -80,20 +80,6 @@ pub fn build(artifact: &SimArtifact, run: &SyncRun, outcome: &Outcome) -> Result
         )
         .into());
     }
-    // A timer's firings are inputs here (faults do not change them); a guarded timer's depend on state that faults
-    // can change.
-    if protocol
-        .rels
-        .iter()
-        .any(|r| matches!(&r.class, RelClass::Event(EventSource::Timer(t)) if t.guard.is_some()))
-    {
-        return Err(blossom_base::unimplemented_error!(
-            "LANG-172",
-            "LDFI over a program with a guarded timer (`every d while G`: firings that faults can change are not a \
-             modelled hazard yet)"
-        )
-        .into());
-    }
     for rule in protocol.rules.iter() {
         if rule.kind == RuleKind::Async && cells.contains_key(&rule.head.rel) {
             return Err(blossom_base::unimplemented_error!(
@@ -117,16 +103,20 @@ pub fn build(artifact: &SimArtifact, run: &SyncRun, outcome: &Outcome) -> Result
         .collect();
     let mut g = ProvGraph::new();
 
-    // Protocol goals.
+    // Protocol goals. A timer's firing is not a leaf: a restart starts the timer's count again, and a guarded timer
+    // fires only while its guard holds.
+    let mut timer_goals: Vec<(GoalId, NodeId, Tick, Option<RelId>)> = Vec::new();
     for (t, round) in run.rounds.iter().enumerate() {
         let tick = Tick(u64::try_from(t).map_err(|_| internal_error!("tick overflow"))?);
         for (n, nt) in round.iter().enumerate() {
             let node = NodeId(u32::try_from(n).map_err(|_| internal_error!("node overflow"))?);
             for (rel, rows) in &nt.instance.rels {
-                let leaf = matches!(
-                    protocol.rels.get(*rel).map(|r| &r.class),
-                    Some(RelClass::Event(_) | RelClass::Static)
-                );
+                let class = protocol.rels.get(*rel).map(|r| &r.class);
+                let timer = match class {
+                    Some(RelClass::Event(EventSource::Timer(t))) => Some(t.guard),
+                    _ => None,
+                };
+                let leaf = timer.is_none() && matches!(class, Some(RelClass::Event(_) | RelClass::Static));
                 for row in rows {
                     let leaf = leaf || nt.ingress.iter().any(|m| m.rel == *rel && m.row == *row);
                     let id = g.goal(
@@ -142,7 +132,88 @@ pub fn build(artifact: &SimArtifact, run: &SyncRun, outcome: &Outcome) -> Result
                     if leaf {
                         g.set_leaf(id);
                     }
+                    if let Some(guard) = timer
+                        && nt.ran
+                    {
+                        timer_goals.push((id, node, tick, guard));
+                    }
                 }
+            }
+        }
+    }
+
+    // Timer firings: each needs the node not to have restarted by then, and a guarded one some tuple of its guard at
+    // the end of the node's previous tick.
+    for (goal, node, tick, guard) in timer_goals {
+        // Since the start of the incarnation the firing belongs to (the run's own restart of the node, if before).
+        let from = run
+            .faults
+            .restarts
+            .get(&node)
+            .copied()
+            .filter(|r| *r <= tick)
+            .unwrap_or(Tick(0));
+        let not_restarted = Premise::NotRestarted { node, from, tick };
+        let runtime = |premises: Vec<Premise>| Firing {
+            space: Space::Protocol,
+            by: By::Runtime(RuntimeAct::Timer),
+            node: Some(node),
+            tick,
+            kind: FiringKind::Rule,
+            premises,
+        };
+        match guard {
+            None => {
+                g.add_firing(goal, runtime(vec![not_restarted]))?;
+            }
+            Some(guard) => {
+                let before = tick
+                    .prev()
+                    .ok_or_else(|| internal_error!("a guarded timer fired in the first tick"))?;
+                let held: Vec<GoalId> = g.goals_at(Space::Protocol, guard, Some(node), before).to_vec();
+                if held.is_empty() {
+                    return Err(internal_error!("a guarded timer fired at {tick:?} without its guard before").into());
+                }
+                for h in held {
+                    g.add_firing(goal, runtime(vec![Premise::Goal(h), not_restarted]))?;
+                }
+            }
+        }
+    }
+
+    // A restarted node's durable tuples in its restart tick: reloaded from what it held before it crashed (its frozen
+    // copy in the previous tick).
+    for (node, at) in &run.faults.restarts {
+        let Some(nt) = run.node_tick(*at, *node) else { continue };
+        let before = at
+            .prev()
+            .ok_or_else(|| internal_error!("a restart in the first tick"))?;
+        for (rel, rows) in &nt.instance.rels {
+            if !protocol.rels.get(*rel).is_some_and(|r| r.durable) {
+                continue;
+            }
+            for row in rows {
+                let key = |tick: Tick| GoalKey {
+                    space: Space::Protocol,
+                    rel: *rel,
+                    node: Some(*node),
+                    tick,
+                    row: row.clone(),
+                };
+                let (Some(goal), Some(prev)) = (g.find(&key(*at)), g.find(&key(before))) else {
+                    continue;
+                };
+                g.add_firing(
+                    goal,
+                    Firing {
+                        space: Space::Protocol,
+                        by: By::Runtime(RuntimeAct::Restore),
+                        node: Some(*node),
+                        tick: *at,
+                        kind: FiringKind::Rule,
+                        premises: vec![Premise::Goal(prev)],
+                    },
+                )?;
             }
         }
     }
@@ -242,9 +313,16 @@ pub fn build(artifact: &SimArtifact, run: &SyncRun, outcome: &Outcome) -> Result
                 if let Some((from, to, send)) = clock {
                     premises.push(Premise::Clock { from, to, send });
                 }
-                // Under the frozen crash view a crashed node fires nothing; its persisted state is its frozen copy.
+                // Under the frozen crash view a crashed node fires nothing; its persisted state is its frozen copy, which
+                // a restart keeps only for durable relations.
                 if artifact.profile.frozen() && !is_frame(protocol, rule) {
                     premises.push(Premise::Alive { node, tick });
+                }
+                if is_frame(protocol, rule) && !protocol.rels.get(rule.head.rel).is_some_and(|r| r.durable) {
+                    premises.push(Premise::NoRestart {
+                        node: at_node,
+                        tick: at_tick,
+                    });
                 }
                 for r in &f.reads {
                     let key = GoalKey {
@@ -342,7 +420,7 @@ pub fn build(artifact: &SimArtifact, run: &SyncRun, outcome: &Outcome) -> Result
             head,
             Firing {
                 space: Space::Protocol,
-                rule,
+                by: By::Rule(rule),
                 node: Some(*node),
                 tick: *tick,
                 kind: FiringKind::Aggregate,
@@ -454,7 +532,7 @@ fn is_frame(program: &blossom_ir::core::Program, rule: &blossom_ir::core::Rule) 
 fn firing(space: Space, f: &FiringRecord, node: Option<NodeId>, tick: Tick, premises: Vec<Premise>) -> Firing {
     Firing {
         space,
-        rule: f.rule,
+        by: By::Rule(f.rule),
         node,
         tick,
         kind: f.kind,
@@ -642,6 +720,18 @@ impl crate::hazard::Rules for ArtifactRules<'_> {
             .unwrap_or_default()
     }
 
+    fn durable(&self, space: Space, rel: RelId) -> bool {
+        space == Space::Protocol && self.artifact.protocol.get().rels.get(rel).is_some_and(|r| r.durable)
+    }
+
+    fn arity(&self, space: Space, rel: RelId) -> usize {
+        let program = match space {
+            Space::Protocol => Some(self.artifact.protocol.get()),
+            Space::Spec => self.artifact.spec.as_ref().map(|s| s.program.get()),
+        };
+        program.and_then(|p| p.rels.get(rel)).map_or(0, |r| r.schema.cols.len())
+    }
+
     fn origin(&self, space: Space, rel: RelId) -> Result<crate::hazard::Origin<'_>, InternalError> {
         use crate::hazard::Origin;
         let snapshot_of = |ded: LogicalIdx| {
@@ -675,6 +765,12 @@ impl crate::hazard::Rules for ArtifactRules<'_> {
         };
         match program.rels.get(rel).map(|r| &r.class) {
             Some(RelClass::Idb | RelClass::Channel(_)) => {}
+            Some(RelClass::Event(EventSource::Boot | EventSource::Recovered)) if space == Space::Protocol => {
+                return Ok(Origin::Restart);
+            }
+            Some(RelClass::Event(EventSource::Timer(t))) if space == Space::Protocol => {
+                return Ok(Origin::Timer { guard: t.guard });
+            }
             Some(_) => return Ok(Origin::Input),
             None => return Err(internal_error!("unknown relation {rel:?}")),
         }

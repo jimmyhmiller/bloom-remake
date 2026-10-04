@@ -1,0 +1,67 @@
+//! LDFI over a guarded timer whose guard a message sets (S11): a coordinator arms a pinger with one `arm` message
+//! (no retry), and the pinger pings the receiver on a timer that runs while it is armed. The pinging rule does not
+//! read the guard, so only the timer's lineage (each firing needs its guard in the round before) ties the pings to
+//! the `arm` message: losing it silences the pinger.
+
+pub module Armed {
+    role Coordinator;
+    role Pinger;
+    role Receiver;
+
+    static pinger(n: Node<Pinger>);
+    static receiver(n: Node<Receiver>);
+
+    channel arm(): Coordinator -> Pinger;
+    channel ping(): Pinger -> Receiver;
+
+    at Coordinator {
+        input go();
+        durable table started();
+
+        start: on go(), pinger(p) {
+            emit started();
+            send arm() to p;
+        }
+    }
+
+    at Pinger {
+        table armed() key();
+
+        timer beat every 1s while armed;
+
+        arming: on arm() {
+            upsert armed();
+        }
+        pinging: on beat(_, _), receiver(r) {
+            send ping() to r;
+        }
+    }
+
+    at Receiver {
+        durable table heard();
+
+        hear: on ping() {
+            emit heard();
+        }
+    }
+}
+
+/// C arms P at tick 1; P pings R.
+spec Scenario {
+    nodes C, P, R;
+    assign Coordinator = [C];
+    assign Pinger = [P];
+    assign Receiver = [R];
+    fact pinger(P);
+    fact receiver(R);
+    fact go() @ C at tick 1;
+}
+
+/// Once the coordinator started, the receiver hears a ping.
+spec Heard for Armed {
+    include Scenario;
+    view pre(x) = started() @ x;
+    view post(x) = started() @ x, heard() @ _;
+    faults { eot: 6, eff: 3, crashes: 0, model: sync, round: 1s }
+    check ldfi expect fails;
+}

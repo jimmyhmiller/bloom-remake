@@ -90,9 +90,23 @@ impl Names for DedNames<'_> {
             Space::Protocol => Some(self.artifact.protocol.get()),
             Space::Spec => self.artifact.spec.as_ref().map(|s| s.program.get()),
         };
+        let rule = match firing.by {
+            blossom_prov::By::Rule(rule) => rule,
+            blossom_prov::By::Runtime(act) => {
+                let what = match act {
+                    blossom_prov::RuntimeAct::Timer => "a timer firing",
+                    blossom_prov::RuntimeAct::Restore => "a restart reloading durable state",
+                    blossom_prov::RuntimeAct::Stream => "a stream event from the host",
+                };
+                return match firing.node {
+                    Some(n) => format!("{what} at {} tick {}", self.node(n), firing.tick.0),
+                    None => what.to_owned(),
+                };
+            }
+        };
         let label = program
-            .and_then(|p| p.rules.get(firing.rule))
-            .map_or_else(|| format!("{:?}", firing.rule), |r| r.label.text.to_string());
+            .and_then(|p| p.rules.get(rule))
+            .map_or_else(|| format!("{rule:?}"), |r| r.label.text.to_string());
         match firing.node {
             Some(n) => format!("rule {label} at {} tick {}", self.node(n), firing.tick.0),
             None => format!("spec rule {label}"),

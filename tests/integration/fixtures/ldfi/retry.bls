@@ -1,0 +1,97 @@
+//! LDFI over a guarded timer (S11): a sender retransmits its sent messages (a durable table) on a timer that runs
+//! while a message is pending. Nothing but the timer's guard ties the retransmissions to the pending state, so their
+//! lineage must go through the guard. With the pending state durable, a crash-restart of the sender keeps it and the
+//! retransmissions resume after the restart; volatile (`DURABLE = false`, the seeded bug), a crash-restart after a
+//! lost first send clears it and the message is never delivered.
+
+pub module Retry(DURABLE: bool = true) {
+    role Sender;
+    role Receiver;
+
+    static receiver(n: Node<Receiver>);
+
+    channel msg(v: u64): Sender -> Receiver;
+    channel ack(v: u64): Receiver -> Sender;
+
+    at Sender {
+        input send_it(v: u64);
+        durable table sent(v: u64);
+        /// The messages not acknowledged yet: durable, or volatile.
+        durable table kept(v: u64);
+        table held(v: u64);
+        view waiting() {
+            kept(_);
+            held(_);
+        }
+
+        timer resend every 1s while waiting;
+
+        start: on send_it(v), receiver(r) {
+            emit sent(v);
+            if DURABLE {
+                emit kept(v);
+            }
+            if not DURABLE {
+                emit held(v);
+            }
+            send msg(v) to r;
+        }
+        retry: on resend(_, _), sent(v), receiver(r) {
+            send msg(v) to r;
+        }
+        done_kept: on ack(v), kept(v) {
+            delete kept(v);
+        }
+        done_held: on ack(v), held(v) {
+            delete held(v);
+        }
+    }
+
+    at Receiver {
+        durable table got(v: u64);
+
+        recv: on msg(v) from s {
+            emit got(v);
+            send ack(v) to s;
+        }
+    }
+}
+
+/// The sender S sends 7 at tick 1 to the receiver R.
+spec Scenario {
+    nodes S, R;
+    assign Sender = [S];
+    assign Receiver = [R];
+    fact receiver(R);
+    fact send_it(7) @ S at tick 1;
+}
+
+/// A sent message is delivered.
+spec Delivery {
+    view pre(v) = sent(v) @ _;
+    view post(v) = sent(v) @ _, got(v) @ _;
+}
+
+/// Lost messages before EFF only delay it.
+spec Omissions for Retry {
+    include Scenario;
+    include Delivery;
+    faults { eot: 7, eff: 4, crashes: 0, model: sync, round: 1s }
+    check ldfi expect holds;
+}
+
+/// A durable pending state survives a crash-restart of the sender.
+spec DurableRestart for Retry {
+    include Scenario;
+    include Delivery;
+    faults { eot: 7, eff: 4, crashes: 1, restart: 1, model: sync, round: 1s }
+    check ldfi expect holds;
+}
+
+/// A volatile one does not: the first send lost and a restart of the sender stop the retransmissions.
+spec VolatileRestart for Retry(DURABLE = false) {
+    include Scenario;
+    include Delivery;
+    faults { eot: 7, eff: 4, crashes: 1, restart: 1, model: sync, round: 1s }
+    check ldfi expect fails;
+}
