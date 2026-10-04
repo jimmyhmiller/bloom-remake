@@ -23,7 +23,9 @@ pub mod lineage;
 pub mod reach;
 pub mod report;
 
-pub use driver::{Fallback, LdfiConfig, LdfiReport, Method, SearchStats, Verdict, falsifiers, run};
+pub use driver::{
+    Fallback, LdfiConfig, LdfiReport, Method, Observer, ObserverRef, RunProgress, SearchStats, Verdict, falsifiers, run,
+};
 pub use faults::FailureSpec;
 pub use hazard::NegSupport;
 

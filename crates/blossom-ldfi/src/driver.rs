@@ -31,6 +31,8 @@ pub struct LdfiConfig {
     /// Worker threads that process upcoming hypotheses speculatively; 1 runs everything on the calling thread.
     /// Results do not depend on it.
     pub workers: usize,
+    /// Told about every run the lineage-driven search commits (diagnostics; results do not depend on it).
+    pub observer: Option<ObserverRef>,
     /// When the lineage-driven search exhausts `max_runs` without a verdict, decide by exhaustive certification
     /// ([`crate::certify`]) within this many states; `None` reports the budget error instead.
     pub exhaustive_fallback: Option<u64>,
@@ -46,8 +48,57 @@ impl LdfiConfig {
             sat: "cadical-plain".into(),
             workers: 1,
             exhaustive_fallback: Some(1_000_000),
+            observer: None,
         }
     }
+}
+
+/// What watches a search as it goes ([`LdfiConfig::observer`]).
+pub trait Observer: Send + Sync {
+    /// Nanoseconds on a monotonic clock, to time the phases of each run (the search reads no clock itself).
+    fn now_nanos(&self) -> u64;
+    /// A run was committed.
+    fn run_done(&self, progress: &RunProgress);
+}
+
+/// An [`Observer`], shared.
+#[derive(Clone)]
+pub struct ObserverRef(pub std::sync::Arc<dyn Observer>);
+
+impl std::fmt::Debug for ObserverRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ObserverRef")
+    }
+}
+
+/// One committed run of the lineage-driven search.
+#[derive(Clone, Debug, Default)]
+pub struct RunProgress {
+    /// Runs so far (the failure-free run included), hypotheses waiting, counterexamples found.
+    pub runs: u64,
+    pub queue: usize,
+    pub counterexamples: usize,
+    /// The run's faults, and whether it kept the outcome spec.
+    pub faults: FaultSchedule,
+    pub good: bool,
+    /// The size of its lineage, and the hypotheses it suggested (before deduplication).
+    pub goals: usize,
+    pub firings: usize,
+    pub suggested: usize,
+    /// Time spent running it, building its lineage, and finding its hypotheses.
+    pub execute_ns: u64,
+    pub lineage_ns: u64,
+    pub hypotheses_ns: u64,
+}
+
+/// What processing a hypothesis cost, for the observer.
+#[derive(Clone, Copy, Debug, Default)]
+struct Cost {
+    goals: usize,
+    firings: usize,
+    execute_ns: u64,
+    lineage_ns: u64,
+    hypotheses_ns: u64,
 }
 
 /// The verdict.
@@ -130,8 +181,8 @@ struct Search<'a> {
 /// What processing one hypothesis found.
 enum Processed {
     /// The run is good; these are the hypotheses its lineage suggests, and why its lineage was incomplete if it was.
-    Good(BTreeSet<FaultSchedule>, Option<String>),
-    Bad(Box<Counterexample>),
+    Good(BTreeSet<FaultSchedule>, Option<String>, Cost),
+    Bad(Box<Counterexample>, Cost),
 }
 
 impl<'a> Search<'a> {
@@ -258,23 +309,38 @@ impl<'a> Search<'a> {
         Ok((admitted, why))
     }
 
+    fn now(&self) -> u64 {
+        self.config.observer.as_ref().map_or(0, |o| o.0.now_nanos())
+    }
+
     /// Runs `h`, judges it against the failure-free `post`, and for a good run derives the next hypotheses.
     fn process(&self, h: &FaultSchedule, ff_post: &BTreeSet<Row>) -> Result<Processed, LdfiError> {
+        let mut cost = Cost::default();
+        let start = self.now();
         let (run, outcome) = self.execute(h)?;
+        let executed = self.now();
+        cost.execute_ns = executed.saturating_sub(start);
         if !is_good(ff_post, &outcome) {
             let violated = ff_post
                 .iter()
                 .filter(|g| !outcome.post.contains(*g) && outcome.pre.contains(*g))
                 .cloned()
                 .collect();
-            return Ok(Processed::Bad(Box::new(Counterexample {
-                faults: h.clone(),
-                outcome,
-                run,
-                violated,
-            })));
+            return Ok(Processed::Bad(
+                Box::new(Counterexample {
+                    faults: h.clone(),
+                    outcome,
+                    run,
+                    violated,
+                }),
+                cost,
+            ));
         }
         let graph = self.graph(&run, &outcome)?;
+        let built = self.now();
+        cost.lineage_ns = built.saturating_sub(executed);
+        cost.goals = graph.goal_count();
+        cost.firings = graph.firing_count();
         let goals: Vec<Row> = outcome.post.iter().cloned().collect();
         // A failure-free `post` tuple this run lost together with its `pre` tuple: a larger fault set that brings
         // the `pre` tuple back while the `post` tuple stays lost is a counterexample.
@@ -284,7 +350,8 @@ impl<'a> Search<'a> {
             .cloned()
             .collect();
         let (next, incomplete) = self.hypotheses(&graph, &goals, &revive, h)?;
-        Ok(Processed::Good(next, incomplete))
+        cost.hypotheses_ns = self.now().saturating_sub(built);
+        Ok(Processed::Good(next, incomplete, cost))
     }
 }
 
@@ -398,12 +465,31 @@ fn certify_exhaustively(
 /// when its hypothesis reaches the head of the queue.
 fn lineage_search(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, LdfiError> {
     let search = Search::new(sim, config)?;
+    let start = search.now();
     let (ff_run, ff) = search.execute(&FaultSchedule::default())?;
+    let executed = search.now();
     let ff_graph = search.graph(&ff_run, &ff)?;
+    let built = search.now();
     let ff_goals: Vec<Row> = ff.post.iter().cloned().collect();
     let mut queue = Queue::new(&config.spec);
     let (first, mut incomplete) = search.hypotheses(&ff_graph, &ff_goals, &[], &FaultSchedule::default())?;
+    let suggested = first.len();
     queue.push(first);
+    if let Some(o) = &config.observer {
+        o.0.run_done(&RunProgress {
+            runs: 1,
+            queue: queue.order.len(),
+            counterexamples: 0,
+            faults: FaultSchedule::default(),
+            good: true,
+            goals: ff_graph.goal_count(),
+            firings: ff_graph.firing_count(),
+            suggested,
+            execute_ns: executed.saturating_sub(start),
+            lineage_ns: built.saturating_sub(executed),
+            hypotheses_ns: search.now().saturating_sub(built),
+        });
+    }
     let mut runs: u64 = 1;
     let mut counterexamples = Vec::new();
     let mut stats = SearchStats {
@@ -417,21 +503,38 @@ fn lineage_search(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, 
         |h: &FaultSchedule, processed: Processed, runs: &mut u64, queue: &mut Queue<'_>| -> Result<bool, LdfiError> {
             *runs += 1;
             *stats.by_size.entry(h.len()).or_insert(0) += 1;
-            match processed {
-                Processed::Bad(ce) => {
+            let (stop, good, suggested, cost) = match processed {
+                Processed::Bad(ce, cost) => {
                     counterexamples.push(*ce);
-                    Ok(!config.find_all)
+                    (!config.find_all, false, 0, cost)
                 }
-                Processed::Good(next, run_incomplete) => {
+                Processed::Good(next, run_incomplete, cost) => {
                     if incomplete.is_none() {
                         incomplete = run_incomplete;
                     }
-                    stats.suggested += next.len() as u64;
+                    let suggested = next.len();
+                    stats.suggested += suggested as u64;
                     queue.push(next);
                     stats.queue_peak = stats.queue_peak.max(queue.order.len());
-                    Ok(false)
+                    (false, true, suggested, cost)
                 }
+            };
+            if let Some(o) = &config.observer {
+                o.0.run_done(&RunProgress {
+                    runs: *runs,
+                    queue: queue.order.len(),
+                    counterexamples: counterexamples.len(),
+                    faults: h.clone(),
+                    good,
+                    goals: cost.goals,
+                    firings: cost.firings,
+                    suggested,
+                    execute_ns: cost.execute_ns,
+                    lineage_ns: cost.lineage_ns,
+                    hypotheses_ns: cost.hypotheses_ns,
+                });
             }
+            Ok(stop)
         };
     if workers == 1 {
         while let Some(h) = queue.pop() {

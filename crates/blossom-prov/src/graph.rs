@@ -84,8 +84,6 @@ pub enum By {
 pub enum RuntimeAct {
     /// A physical timer fired (a guarded one because its guard held).
     Timer,
-    /// A restarted node reloaded a durable tuple it held before it crashed.
-    Restore,
     /// The host delivered a stream event (a connection opened, bytes, a close, a failed dial).
     Stream,
 }

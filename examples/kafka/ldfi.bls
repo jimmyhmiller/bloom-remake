@@ -100,3 +100,11 @@ spec SingleFaults for Kafka {
     faults { eot: 30, eff: 20, crashes: 1, model: sync, round: 50ms }
     check ldfi expect holds;
 }
+
+/// One broker under a crash-restart of either node (down two rounds, back with its durable state), no lost messages.
+spec SingleRestart for Kafka {
+    include Single;
+    include Guarantees;
+    faults { eot: 30, eff: 1, crashes: 1, restart: 2, model: sync, round: 50ms }
+    check ldfi expect holds;
+}

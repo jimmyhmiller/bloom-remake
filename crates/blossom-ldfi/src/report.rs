@@ -95,7 +95,6 @@ impl Names for DedNames<'_> {
             blossom_prov::By::Runtime(act) => {
                 let what = match act {
                     blossom_prov::RuntimeAct::Timer => "a timer firing",
-                    blossom_prov::RuntimeAct::Restore => "a restart reloading durable state",
                     blossom_prov::RuntimeAct::Stream => "a stream event from the host",
                 };
                 return match firing.node {

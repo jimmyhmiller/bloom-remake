@@ -50,6 +50,8 @@ pub fn std_externs() -> Result<std::sync::Arc<blossom_value::ExternRegistry>, St
 }
 
 /// Compiling `.ded` programs for the commands that run them (`sim`, `ldfi`).
+pub mod stopwatch;
+
 pub mod bls {
     use std::process::ExitCode;
 
