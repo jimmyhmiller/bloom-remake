@@ -47,6 +47,8 @@ blossom-verify.workspace = true
 blossom-build.workspace = true
 blossom-lsp.workspace = true
 clap.workspace = true
+# The process's allocator (S10: small allocations on the engine's hot paths).
+mimalloc = { version = "0.1", default-features = false }
 
 [dev-dependencies]
 blossom-bench.workspace = true
