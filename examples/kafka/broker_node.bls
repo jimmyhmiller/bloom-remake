@@ -76,8 +76,9 @@ send_reply: while reply(c, i, parts), head(c, i, seq, _key, _version, _corr, fr,
     delete queued(c, i, fr, at);
 }
 
-/// A frame too short for a request header closes the connection.
-malformed: while queued(c, i, fr, at), answering(c, i, _), not frame_readable(fr) {
+/// A frame too short for a request header closes the connection: the queue's head that `head` could not read (it
+/// reads the frame's prefix once, for both).
+malformed: while queued(c, i, fr, at), answering(c, i, _), not head(c, i, _, _, _, _, _, _) {
     send kafka.close(c);
     delete queued(c, i, fr, at);
 }
