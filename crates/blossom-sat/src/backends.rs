@@ -30,6 +30,10 @@ impl SatSolver for ExhaustiveSolver {
     fn backend(&self) -> &'static str {
         "exhaustive"
     }
+    /// The exhaustive search tries every assignment in a fixed order: the hint does not apply.
+    fn prefer(&mut self, l: Lit) -> Result<(), SatError> {
+        self.state.check(&[l])
+    }
     fn new_var(&mut self) -> Var {
         self.state.new_var()
     }
@@ -119,6 +123,13 @@ impl SatSolver for DimacsDump {
     fn backend(&self) -> &'static str {
         "dimacs"
     }
+    /// A DIMACS file records clauses, not search hints.
+    fn prefer(&mut self, l: Lit) -> Result<(), SatError> {
+        if l.var().0 >= self.vars {
+            return Err(SatError::InvalidVariable(l.var()));
+        }
+        Ok(())
+    }
     fn new_var(&mut self) -> Var {
         let v = Var(self.vars);
         self.vars += 1;
@@ -177,6 +188,12 @@ mod cadical {
     impl SatSolver for CadicalSolver {
         fn backend(&self) -> &'static str {
             "cadical"
+        }
+        fn prefer(&mut self, l: Lit) -> Result<(), SatError> {
+            use rustsat::solvers::PhaseLit;
+            self.state.check(&[l])?;
+            self.inner.reserve(RVar::new(l.var().0)).map_err(error)?;
+            self.inner.phase_lit(rl(l)).map_err(error)
         }
         fn new_var(&mut self) -> Var {
             self.state.new_var()
@@ -297,6 +314,10 @@ mod bat {
     impl SatSolver for BatSolver {
         fn backend(&self) -> &'static str {
             "batsat"
+        }
+        /// batsat sets a variable's preferred polarity only when it creates the variable: the hint does not apply.
+        fn prefer(&mut self, l: Lit) -> Result<(), SatError> {
+            self.state.check(&[l])
         }
         fn new_var(&mut self) -> Var {
             self.inner.new_var_default();

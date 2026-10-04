@@ -267,7 +267,7 @@ impl blossom_ldfi::Observer for Progress {
         let secs = |ns: u64| ns as f64 / 1e9;
         eprintln!(
             "[{:>8.1}s] run {} {{{faults}}} {}: {} goals, {} firings, +{} hypotheses, queue {}, {} counterexample(s) | \
-             run {:.2}s lineage {:.2}s hypotheses {:.2}s",
+             run {:.2}s lineage {:.2}s hypotheses {:.2}s (encode {:.2}s, enumerate {:.2}s, {} SAT calls)",
             secs(self.clock.nanos()),
             p.runs,
             if p.good { "good" } else { "BAD" },
@@ -279,6 +279,9 @@ impl blossom_ldfi::Observer for Progress {
             secs(p.execute_ns),
             secs(p.lineage_ns),
             secs(p.hypotheses_ns),
+            secs(p.encode_ns),
+            secs(p.enumerate_ns),
+            p.solves,
         );
     }
 }

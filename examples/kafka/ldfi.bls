@@ -154,3 +154,11 @@ spec TripleRestartAcks1 for Kafka(DEFAULT_REPLICATION_FACTOR = 3, CLIENT_ACKS = 
     faults { eot: 40, eff: 1, crashes: 1, restart: 3, model: sync, round: 50ms }
     check ldfi expect fails;
 }
+
+/// Three brokers under lost messages (between any nodes, until round 30), no crashes.
+spec TripleOmissions for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
+    include Triple;
+    include Guarantees;
+    faults { eot: 40, eff: 30, crashes: 0, model: sync, round: 50ms }
+    check ldfi expect holds;
+}

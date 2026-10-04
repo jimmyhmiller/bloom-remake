@@ -85,15 +85,28 @@ pub struct RunProgress {
     pub goals: usize,
     pub firings: usize,
     pub suggested: usize,
-    /// Time spent running it, building its lineage, and finding its hypotheses.
+    /// Time spent running it, building its lineage, and finding its hypotheses (of which: encoding its hazards, and
+    /// enumerating their minimal models, with this many SAT calls).
     pub execute_ns: u64,
     pub lineage_ns: u64,
     pub hypotheses_ns: u64,
+    pub encode_ns: u64,
+    pub enumerate_ns: u64,
+    pub solves: u64,
+}
+
+/// What finding a run's hypotheses cost.
+#[derive(Clone, Copy, Debug, Default)]
+struct SatCost {
+    solves: u64,
+    encode_ns: u64,
+    enumerate_ns: u64,
 }
 
 /// What processing a hypothesis cost, for the observer.
 #[derive(Clone, Copy, Debug, Default)]
 struct Cost {
+    sat: SatCost,
     goals: usize,
     firings: usize,
     execute_ns: u64,
@@ -247,7 +260,7 @@ impl<'a> Search<'a> {
         goals: &[Row],
         revive: &[Row],
         seed: &FaultSchedule,
-    ) -> Result<(BTreeSet<FaultSchedule>, Option<String>), LdfiError> {
+    ) -> Result<(BTreeSet<FaultSchedule>, Option<String>, SatCost), LdfiError> {
         let mut solver = select_backend(&self.config.sat)?;
         let mut targets = Vec::with_capacity(goals.len() + revive.len());
         for row in goals {
@@ -270,8 +283,14 @@ impl<'a> Search<'a> {
             neg: self.config.negative_support,
             rules: Some(&self.rules),
             frozen: self.artifact.profile.frozen(),
+            clock: Some(&|| self.now()),
         };
         let found = crate::hazard::minimal_extensions(graph, setting, solver.as_mut(), seed, &targets)?;
+        let sat = SatCost {
+            solves: found.solves,
+            encode_ns: found.encode_ns,
+            enumerate_ns: found.enumerate_ns,
+        };
         let admitted = found
             .hypotheses
             .into_iter()
@@ -306,7 +325,7 @@ impl<'a> Search<'a> {
                 })
             }
         };
-        Ok((admitted, why))
+        Ok((admitted, why, sat))
     }
 
     fn now(&self) -> u64 {
@@ -349,8 +368,9 @@ impl<'a> Search<'a> {
             .filter(|g| !outcome.post.contains(*g) && !outcome.pre.contains(*g))
             .cloned()
             .collect();
-        let (next, incomplete) = self.hypotheses(&graph, &goals, &revive, h)?;
+        let (next, incomplete, sat) = self.hypotheses(&graph, &goals, &revive, h)?;
         cost.hypotheses_ns = self.now().saturating_sub(built);
+        cost.sat = sat;
         Ok(Processed::Good(next, incomplete, cost))
     }
 }
@@ -472,7 +492,7 @@ fn lineage_search(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, 
     let built = search.now();
     let ff_goals: Vec<Row> = ff.post.iter().cloned().collect();
     let mut queue = Queue::new(&config.spec);
-    let (first, mut incomplete) = search.hypotheses(&ff_graph, &ff_goals, &[], &FaultSchedule::default())?;
+    let (first, mut incomplete, sat) = search.hypotheses(&ff_graph, &ff_goals, &[], &FaultSchedule::default())?;
     let suggested = first.len();
     queue.push(first);
     if let Some(o) = &config.observer {
@@ -488,6 +508,9 @@ fn lineage_search(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, 
             execute_ns: executed.saturating_sub(start),
             lineage_ns: built.saturating_sub(executed),
             hypotheses_ns: search.now().saturating_sub(built),
+            encode_ns: sat.encode_ns,
+            enumerate_ns: sat.enumerate_ns,
+            solves: sat.solves,
         });
     }
     let mut runs: u64 = 1;
@@ -532,6 +555,9 @@ fn lineage_search(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, 
                     execute_ns: cost.execute_ns,
                     lineage_ns: cost.lineage_ns,
                     hypotheses_ns: cost.hypotheses_ns,
+                    encode_ns: cost.sat.encode_ns,
+                    enumerate_ns: cost.sat.enumerate_ns,
+                    solves: cost.sat.solves,
                 });
             }
             Ok(stop)
@@ -647,7 +673,7 @@ pub fn falsifiers(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<Vec<FaultSch
         let target = std::slice::from_ref(goal);
         let mut found: Vec<FaultSchedule> = Vec::new();
         let mut queue = Queue::new(&config.spec);
-        let (first, incomplete) = search.hypotheses(&ff_graph, target, &[], &FaultSchedule::default())?;
+        let (first, incomplete, _) = search.hypotheses(&ff_graph, target, &[], &FaultSchedule::default())?;
         if let Some(why) = incomplete {
             return Err(LdfiError::Incomplete(why));
         }
@@ -663,7 +689,7 @@ pub fn falsifiers(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<Vec<FaultSch
                 continue;
             }
             let graph = search.graph(&run, &outcome)?;
-            let (next, incomplete) = search.hypotheses(&graph, target, &[], &h)?;
+            let (next, incomplete, _) = search.hypotheses(&graph, target, &[], &h)?;
             if let Some(why) = incomplete {
                 return Err(LdfiError::Incomplete(why));
             }
