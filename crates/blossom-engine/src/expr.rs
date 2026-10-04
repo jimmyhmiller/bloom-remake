@@ -322,6 +322,11 @@ pub(crate) fn eval_in(cx: &Ctx<'_>, env: &mut Frame<'_>, e: &Expr) -> ExprResult
                 }
                 Ok(Value::Bool(truth(&eval_in(cx, env, rhs)?)?))
             }
+            _ if is_read(lhs) && is_read(rhs) => {
+                let l = read(cx, env, lhs)?;
+                let r = read(cx, env, rhs)?;
+                binary_ref(op, l, r)
+            }
             _ => {
                 let l = eval_in(cx, env, lhs)?;
                 let r = eval_in(cx, env, rhs)?;
@@ -355,6 +360,13 @@ pub(crate) fn eval_in(cx: &Ctx<'_>, env: &mut Frame<'_>, e: &Expr) -> ExprResult
                 (other, v) => Err(bug(format!("constructing {other:?} variant {v:?}"))),
             }
         }
+        Expr::Field { base, index } if is_read(base) => match read(cx, env, base)? {
+            Value::Tuple(fs) | Value::Struct(fs) => fs
+                .get(*index as usize)
+                .cloned()
+                .ok_or_else(|| bug(format!("field {index} out of range"))),
+            other => Err(bug(format!("field {index} of {other:?}"))),
+        },
         Expr::Field { base, index } => match eval_in(cx, env, base)? {
             Value::Tuple(fs) | Value::Struct(fs) => fs
                 .get(*index as usize)
@@ -418,6 +430,53 @@ pub(crate) fn eval_in(cx: &Ctx<'_>, env: &mut Frame<'_>, e: &Expr) -> ExprResult
         Expr::Let { pat, value, body } => crate::func::let_expr(cx, env, pat, value, body),
         Expr::Closure { .. } => Err(bug("a closure evaluated outside a combinator".into())),
         Expr::Typed { expr, .. } => eval_in(cx, env, expr),
+    }
+}
+
+/// Whether `e` only reads a value that exists already: a variable, a constant, or a field of one. `read` takes it
+/// without copying it.
+fn is_read(e: &Expr) -> bool {
+    match e {
+        Expr::Term(Term::Var(_) | Term::Const(_)) => true,
+        Expr::Field { base, .. } | Expr::Typed { expr: base, .. } => is_read(base),
+        _ => false,
+    }
+}
+
+/// The value an `is_read` expression reads, in place (counting its nodes as `eval_in` would).
+fn read<'v>(cx: &'v Ctx<'_>, env: &'v Frame<'_>, e: &'v Expr) -> ExprResult<&'v Value> {
+    cx.steps.set(cx.steps.get().wrapping_add(1));
+    match e {
+        Expr::Term(Term::Var(v)) => env
+            .slots()
+            .get(v.index())
+            .and_then(Option::as_ref)
+            .ok_or_else(|| bug(format!("variable {v:?} read before it is bound"))),
+        Expr::Term(Term::Const(c)) => cx
+            .program
+            .consts
+            .get(*c)
+            .ok_or_else(|| bug(format!("unknown constant {c:?}"))),
+        Expr::Field { base, index } => match read(cx, env, base)? {
+            Value::Tuple(fs) | Value::Struct(fs) => fs
+                .get(*index as usize)
+                .ok_or_else(|| bug(format!("field {index} out of range"))),
+            other => Err(bug(format!("field {index} of {other:?}"))),
+        },
+        Expr::Typed { expr, .. } => read(cx, env, expr),
+        other => Err(bug(format!("{other:?} read in place"))),
+    }
+}
+
+/// `binary` over operands read in place: comparisons copy nothing; other operators take copies (numbers, mostly).
+fn binary_ref(op: &BinOp, l: &Value, r: &Value) -> ExprResult<Value> {
+    use BinOp::*;
+    match op {
+        Eq => Ok(Value::Bool(l == r)),
+        Ne => Ok(Value::Bool(l != r)),
+        CanonLt => Ok(Value::Bool(l < r)),
+        CanonLe => Ok(Value::Bool(l <= r)),
+        _ => binary(op, l.clone(), r.clone()),
     }
 }
 

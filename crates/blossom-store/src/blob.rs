@@ -12,8 +12,11 @@
 //!
 //! So a blob's name only ever holds synced bytes (a power loss can keep a provisional name and lose its bytes, after a
 //! directory sync of something else); a provisional file is never trusted; and reading either checks the hash.
+//!
+//! The bytes of the blobs written or read most recently are also kept in memory (`CACHE_BYTES`): a node reads a blob
+//! back soon after writing it (a Raft entry replicated or applied in the next tick), and a blob's bytes are its name.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -34,6 +37,47 @@ pub struct BlobStore {
     fs: Arc<dyn Vfs>,
     dir: PathBuf,
     known: Mutex<Known>,
+    cache: Mutex<Cache>,
+}
+
+/// How many bytes of recently written or read blobs the store keeps in memory.
+const CACHE_BYTES: u64 = 64 << 20;
+
+/// Recently written or read blobs' bytes, the oldest dropped first past `CACHE_BYTES`.
+#[derive(Default)]
+struct Cache {
+    bytes: BTreeMap<BlobRef, Arc<[u8]>>,
+    order: VecDeque<BlobRef>,
+    total: u64,
+}
+
+impl Cache {
+    fn get(&self, b: &BlobRef) -> Option<Arc<[u8]>> {
+        self.bytes.get(b).cloned()
+    }
+
+    fn insert(&mut self, b: BlobRef, bytes: Arc<[u8]>) {
+        if self.bytes.contains_key(&b) || b.len > CACHE_BYTES {
+            return;
+        }
+        self.total += b.len;
+        self.bytes.insert(b, bytes);
+        self.order.push_back(b);
+        while self.total > CACHE_BYTES {
+            let Some(old) = self.order.pop_front() else { break };
+            if self.bytes.remove(&old).is_some() {
+                self.total -= old.len;
+            }
+        }
+    }
+
+    /// Forgets `b`. Its place in `order` stays: dropping it later finds it gone (or, cached again since, drops it
+    /// early), and `total` counts only what `bytes` holds.
+    fn remove(&mut self, b: &BlobRef) {
+        if self.bytes.remove(b).is_some() {
+            self.total -= b.len;
+        }
+    }
 }
 
 /// The blobs this process wrote: writing them again is skipped.
@@ -88,11 +132,18 @@ impl BlobStore {
             fs,
             dir,
             known: Mutex::new(Known::default()),
+            cache: Mutex::new(Cache::default()),
         })
     }
 
     fn path(&self, b: &BlobRef) -> PathBuf {
         self.dir.join(name(b))
+    }
+
+    fn cache(&self) -> Result<std::sync::MutexGuard<'_, Cache>, StoreError> {
+        self.cache
+            .lock()
+            .map_err(|_| invalid("the blob store's cache lock is poisoned"))
     }
 
     fn known(&self) -> Result<std::sync::MutexGuard<'_, Known>, StoreError> {
@@ -187,6 +238,7 @@ impl BlobStore {
     pub fn write_logged(&self, blobs: &[BlobBytes], at: Lsn) -> Result<(), StoreError> {
         for (b, bytes) in blobs {
             Self::check(b, bytes)?;
+            self.cache()?.insert(*b, bytes.clone());
             if self.known()?.durable.contains(b) {
                 continue;
             }
@@ -319,6 +371,7 @@ impl BlobStore {
         let mut wrote = Vec::new();
         for (b, bytes) in blobs {
             Self::check(b, bytes)?;
+            self.cache()?.insert(*b, bytes.clone());
             if durable.contains(b) || wrote.contains(b) {
                 continue;
             }
@@ -343,6 +396,9 @@ impl BlobStore {
     /// The bytes of `b` (under its name, else its provisional one), checked against its hash; `None` if the store
     /// does not hold it.
     pub fn read(&self, b: &BlobRef) -> Result<Option<Arc<[u8]>>, StoreError> {
+        if let Some(bytes) = self.cache()?.get(b) {
+            return Ok(Some(bytes));
+        }
         let mut path = self.path(b);
         let f = match self.fs.open(&path, OpenOpts::default()) {
             Ok(f) => f,
@@ -364,7 +420,9 @@ impl BlobStore {
                 reason: format!("blob {} does not hold its bytes", b.hex()),
             });
         }
-        Ok(Some(Arc::from(bytes)))
+        let bytes: Arc<[u8]> = Arc::from(bytes);
+        self.cache()?.insert(*b, bytes.clone());
+        Ok(Some(bytes))
     }
 
     /// The blobs the store holds under their names (synced; not the pending ones).
@@ -391,6 +449,12 @@ impl BlobStore {
             for b in gone {
                 known.durable.remove(b);
                 known.pending.remove(b);
+            }
+        }
+        {
+            let mut cache = self.cache()?;
+            for b in gone {
+                cache.remove(b);
             }
         }
         let mut deleted = 0;
