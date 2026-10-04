@@ -3,7 +3,8 @@
 //! stays in the partition's committed log; a client that read to the end read it) under crash-restarts. The correct
 //! broker holds with one broker and with three replicating ones (one or two batches; any one crash-restart, or any one
 //! lost message); a producer configured with `acks=1` loses an acknowledged batch to a crash of the leader right after
-//! it answered.
+//! it answered. With retries, a lost answer makes the client send a batch again: a producer without idempotence has it
+//! stored twice, an idempotent one once.
 
 use std::path::Path;
 
@@ -87,4 +88,21 @@ fn acks_1_loses_an_acknowledged_batch_to_a_leader_crash() {
     let faults = check("TripleRestartAcks1");
     // The leader crashes after it answered and comes back as a follower without the batch its successor never got.
     assert!(faults.iter().any(|f| f.starts_with("C(B")), "{faults:?}");
+}
+
+#[test]
+#[ignore = "full tier"]
+fn retries_without_idempotence_store_a_batch_twice() {
+    // The leader's answer is lost: the connection resets, the client sends the batch again.
+    let faults = check("TripleRetry");
+    assert!(
+        faults.len() == 1 && faults[0].starts_with("O(B") && faults[0].contains(",C1,"),
+        "{faults:?}"
+    );
+}
+
+#[test]
+#[ignore = "full tier"]
+fn an_idempotent_producer_stores_a_retried_batch_once() {
+    check("TripleRetryIdempotent");
 }

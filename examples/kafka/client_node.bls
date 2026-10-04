@@ -3,9 +3,9 @@
 //! asks again, so every connection it gets answered records the same answers.
 //!
 //! It talks to one broker at a time, from its `contact` addresses (`BROKER_ADDR` alone without any), and moves to
-//! the next when a connection closes or a dial fails, and when the broker answers that it does not lead the partition
-//! (S11): as a Kafka client follows the partition's leader, though by trying the brokers in turn rather than by
-//! reading the leader from Metadata.
+//! the next when a dial fails or the broker answers that it does not lead the partition (S11): as a Kafka client
+//! follows the partition's leader, though by trying the brokers in turn rather than by reading the leader from
+//! Metadata. A connection that closes is dialed again to the same broker (a broker that is down fails the dial).
 
 stream up: connect;
 
@@ -43,9 +43,8 @@ redial_after_failure: on up.failed(req, _why), next_broker(j, a) {
     send up.dial(req + 1, a);
 }
 
-redial_after_close: on up.closed(c, _why), session(c, p), next_broker(j, a) {
+redial_after_close: on up.closed(c, _why), session(c, p), current_addr(a) {
     delete session(c, p);
-    upsert on_broker(j);
     send up.dial(0, a);
 }
 
@@ -77,9 +76,10 @@ record_metadata: on up.data(c, _seq, bytes), session(c, f),
 // ---------------------------------------------------------------- producing and reading back (slice 7, item 8)
 //
 // With `CLIENT_BATCHES` above 0 the client also produces that many batches to `CLIENT_TOPIC` (auto-created through
-// Metadata), one at a time with acks -1, then reads every partition back from offset 0 to its high watermark. Its
-// progress is durable, so a crash of the client resumes it; a produce whose connection closed unanswered is not
-// sent again (it may or may not be in the log).
+// Metadata), one at a time with `CLIENT_ACKS`, then reads every partition back from offset 0 to its high watermark.
+// Its progress is durable, so a crash of the client resumes it. A produce whose connection closed unanswered (it may
+// or may not be in the log) is sent again only with `CLIENT_RETRY`; with `CLIENT_IDEMPOTENT` the client first asks
+// for a producer id and numbers its batches, so the broker keeps one copy of a batch sent twice.
 
 /// The topic, once Metadata has named it: its id and partition count.
 durable table topic_seen(id: Bytes, partitions: u64) key();
@@ -97,14 +97,52 @@ durable table consumed(partition: i32, offset: i64, value: Bytes) key(partition,
 table wseq(c: Conn, next: u64) key(c);
 
 view progress(k = max!(x default 0u64)) = produced_next(x);
+
+/// The producer id and epoch, once InitProducerId answered (idempotence), and what batches carry: those, or none.
+durable table producer_id(pid: i64, epoch: i16) key();
+view producing_as(pid, epoch) {
+    producer_id(pid, epoch);
+    not producer_id(_, _), let pid = -1i64, let epoch = -1i16 where not CLIENT_IDEMPOTENT;
+}
+/// A batch sent and not answered.
+view outstanding(k) = sent(k), not acked(k, _, _, _);
 view read_at(p = max!(x default 0i32), off = max!(y default 0i64)) = reading(x, y);
 
 /// The response frames that arrive this tick, per connection.
 view frames(c, fr) = up.data(c, _seq, bytes), session(c, f), fr in feed(f, bytes).frames;
 
-ask_topic: on up.opened(c, _req, _peer, _at) where CLIENT_BATCHES > 0u64 {
+ask_topic: on up.opened(c, _req, _peer, _at) where CLIENT_BATCHES > 0u64 && not CLIENT_IDEMPOTENT {
     send up.write(c, 1, [Part::Bytes(encode_metadata_request(CORR_TOPIC, "blossom", Some([CLIENT_TOPIC])))]);
     emit wseq(c, 2);
+}
+
+ask_topic_with_pid: on up.opened(c, _req, _peer, _at), producer_id(_, _) where CLIENT_BATCHES > 0u64 && CLIENT_IDEMPOTENT {
+    send up.write(c, 1, [Part::Bytes(encode_metadata_request(CORR_TOPIC, "blossom", Some([CLIENT_TOPIC])))]);
+    emit wseq(c, 2);
+}
+
+/// An idempotent producer without its id asks for one first, in the same write: the answer comes before the topic's.
+ask_pid_and_topic: on up.opened(c, _req, _peer, _at), not producer_id(_, _) where CLIENT_BATCHES > 0u64 && CLIENT_IDEMPOTENT {
+    send up.write(c, 1, [
+        Part::Bytes(encode_init_pid_request(CORR_INIT_PID, "blossom")),
+        Part::Bytes(encode_metadata_request(CORR_TOPIC, "blossom", Some([CLIENT_TOPIC]))),
+    ]);
+    emit wseq(c, 2);
+}
+
+/// The producer id, recorded in the tick it arrives (the topic's answer may come in the same chunk).
+learn_pid: on frames(_c, fr), let Some(a) = init_pid_answer(fr) where a.0 == NONE {
+    emit producer_id(a.1, a.2);
+}
+
+/// No producer id yet (the cluster has none to give): ask again on a new connection.
+pid_refused: on frames(c, fr), let Some(a) = init_pid_answer(fr) where a.0 != NONE {
+    send up.close(c);
+}
+
+/// A produce whose connection closed unanswered is sent again (`CLIENT_RETRY`).
+retry_unanswered: on up.closed(_c, _why), outstanding(k) where CLIENT_RETRY {
+    upsert produced_next(k);
 }
 
 forget_wseq: on up.closed(c, _why), wseq(c, n) {
@@ -116,8 +154,9 @@ learn_topic: on frames(c, fr), let Some(t) = topic_answer(fr) {
     upsert topic_seen(t.0, t.1);
 }
 
-resume_produce: on frames(c, fr), let Some(t) = topic_answer(fr), progress(k), wseq(c, n) where k < CLIENT_BATCHES {
-    send up.write(c, n, [Part::Bytes(produce_frame(k, t.1))]);
+resume_produce: on frames(c, fr), let Some(t) = topic_answer(fr), progress(k), wseq(c, n), producing_as(pid, epoch)
+        where k < CLIENT_BATCHES {
+    send up.write(c, n, [Part::Bytes(produce_frame_as(k, t.1, pid, epoch))]);
     upsert wseq(c, n + 1u64);
     upsert produced_next(k + 1u64);
     emit sent(k);
@@ -130,20 +169,21 @@ resume_read: on frames(c, fr), let Some(t) = topic_answer(fr), progress(k), read
 }
 
 /// A produce answered by a broker that does not lead the partition (or by one whose partition has no leader yet):
-/// the batch was not appended, so it is sent again, to the next broker (closing the connection moves the client on).
-produce_elsewhere: on frames(c, fr), let Some(a) = produce_answer(fr)
+/// the batch was not appended, so it is sent again, to the next broker (the connection's close redials there).
+produce_elsewhere: on frames(c, fr), let Some(a) = produce_answer(fr), next_broker(j, _a)
         where a.1 == NOT_LEADER_OR_FOLLOWER || a.1 == LEADER_NOT_AVAILABLE {
     upsert produced_next(a.0);
+    upsert on_broker(j);
     send up.close(c);
 }
 
 /// A produce answered: record it, then send the next batch, or start reading.
-after_produce: on frames(c, fr), let Some(a) = produce_answer(fr), topic_seen(id, parts), wseq(c, n)
+after_produce: on frames(c, fr), let Some(a) = produce_answer(fr), topic_seen(id, parts), wseq(c, n), producing_as(pid, epoch)
         where a.1 != NOT_LEADER_OR_FOLLOWER && a.1 != LEADER_NOT_AVAILABLE {
     emit acked(a.0, (a.0 % parts) as i32, a.2, a.1);
     upsert wseq(c, n + 1u64);
     if a.0 + 1u64 < CLIENT_BATCHES {
-        send up.write(c, n, [Part::Bytes(produce_frame(a.0 + 1u64, parts))]);
+        send up.write(c, n, [Part::Bytes(produce_frame_as(a.0 + 1u64, parts, pid, epoch))]);
         upsert produced_next(a.0 + 2u64);
         emit sent(a.0 + 1u64);
     } else {
@@ -157,7 +197,8 @@ record_fetch: on frames(_c, fr), let Some(r) = fetched_answer(fr), read_at(p, _o
 }
 
 /// A fetch from a broker that does not lead the partition: read on from the next broker.
-fetch_elsewhere: on frames(c, fr), let Some(r) = fetched_answer(fr) where r.0 == NOT_LEADER_OR_FOLLOWER {
+fetch_elsewhere: on frames(c, fr), let Some(r) = fetched_answer(fr), next_broker(j, _a) where r.0 == NOT_LEADER_OR_FOLLOWER {
+    upsert on_broker(j);
     send up.close(c);
 }
 
