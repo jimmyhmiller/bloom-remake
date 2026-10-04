@@ -20,6 +20,8 @@ pub struct FailureSpec {
     pub nodes: u32,
     /// How many ticks a crashed node stays down before it restarts (`None`: it never does).
     pub restart: Option<u64>,
+    /// At most this many lost messages in a fault set (`None`: any number before EFF).
+    pub max_omissions: Option<u32>,
 }
 
 impl FailureSpec {
@@ -43,7 +45,14 @@ impl FailureSpec {
             max_crashes,
             nodes,
             restart: None,
+            max_omissions: None,
         })
+    }
+
+    /// The spec with at most `n` lost messages in a fault set.
+    pub fn with_max_omissions(mut self, n: u32) -> FailureSpec {
+        self.max_omissions = Some(n);
+        self
     }
 
     /// The spec with crash-restarts: a crashed node is down for `rounds` ticks.
@@ -103,6 +112,9 @@ impl FailureSpec {
     pub fn admits(&self, faults: &FaultSchedule) -> bool {
         u32::try_from(faults.crashes.len()).is_ok_and(|n| n <= self.max_crashes)
             && self.with_restarts(faults.clone()).restarts == faults.restarts
+            && self
+                .max_omissions
+                .is_none_or(|k| u32::try_from(faults.omissions.len()).is_ok_and(|n| n <= k))
             && faults
                 .crashes
                 .iter()

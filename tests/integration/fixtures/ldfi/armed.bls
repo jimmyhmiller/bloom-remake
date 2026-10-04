@@ -1,9 +1,10 @@
 //! LDFI over a guarded timer whose guard a message sets (S11): a coordinator arms a pinger with one `arm` message
 //! (no retry), and the pinger pings the receiver on a timer that runs while it is armed. The pinging rule does not
 //! read the guard, so only the timer's lineage (each firing needs its guard in the round before) ties the pings to
-//! the `arm` message: losing it silences the pinger.
+//! the `arm` message: losing it silences the pinger. With `TWICE` the coordinator arms it again a tick later, so it
+//! takes two lost messages (which `omissions: 1` does not allow).
 
-pub module Armed {
+pub module Armed(TWICE: bool = false) {
     role Coordinator;
     role Pinger;
     role Receiver;
@@ -17,10 +18,18 @@ pub module Armed {
     at Coordinator {
         input go();
         durable table started();
+        table again() key();
 
         start: on go(), pinger(p) {
             emit started();
             send arm() to p;
+            if TWICE {
+                next again();
+            }
+        }
+        rearm: while again(), pinger(p) {
+            send arm() to p;
+            delete again();
         }
     }
 
@@ -64,4 +73,22 @@ spec Heard for Armed {
     view post(x) = started() @ x, heard() @ _;
     faults { eot: 6, eff: 3, crashes: 0, model: sync, round: 1s }
     check ldfi expect fails;
+}
+
+/// Armed twice: losing both arms silences the pinger.
+spec HeardTwice for Armed(TWICE = true) {
+    include Scenario;
+    view pre(x) = started() @ x;
+    view post(x) = started() @ x, heard() @ _;
+    faults { eot: 6, eff: 3, crashes: 0, model: sync, round: 1s }
+    check ldfi expect fails;
+}
+
+/// Armed twice, at most one lost message: it holds.
+spec HeardTwiceOneLoss for Armed(TWICE = true) {
+    include Scenario;
+    view pre(x) = started() @ x;
+    view post(x) = started() @ x, heard() @ _;
+    faults { eot: 6, eff: 3, crashes: 0, omissions: 1, model: sync, round: 1s }
+    check ldfi expect holds;
 }

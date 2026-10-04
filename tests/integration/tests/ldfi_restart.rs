@@ -31,6 +31,9 @@ fn check(file: &str, spec: &str) -> Vec<String> {
     if let Some(d) = faults.restart {
         fs = fs.with_restart(d).unwrap();
     }
+    if let Some(k) = faults.omissions {
+        fs = fs.with_max_omissions(k);
+    }
     let sim = SpecSim::new(&artifact).unwrap();
     let mut config = LdfiConfig::new(fs.clone());
     config.workers = 2;
@@ -124,4 +127,11 @@ fn a_client_that_counts_its_own_write_as_acknowledged_loses_it_to_a_reset() {
     // The client writes at 1 on the connection opened at 1: losing what it sends the server then resets the connection
     // before the server reads the value.
     assert_eq!(check("stream_store.bls", "EagerOmission"), ["O(C,S,1)"]);
+}
+
+#[test]
+fn a_bound_on_lost_messages_limits_the_fault_sets() {
+    // Arming twice takes both arms lost; with at most one lost message the pinger is always armed.
+    assert_eq!(check("armed.bls", "HeardTwice"), ["O(C,P,1)", "O(C,P,2)"]);
+    check("armed.bls", "HeardTwiceOneLoss");
 }
