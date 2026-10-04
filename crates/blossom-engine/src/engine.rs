@@ -76,6 +76,9 @@ pub struct Engine {
     stores: Stores,
     /// A recompute rule's (or a recursive stratum rule's) head rows at its last evaluation, with their support.
     prev: BTreeMap<RuleId, BTreeMap<Row, i64>>,
+    /// Per re-evaluated rule that may be left alone (`Plan::skip`), by index: evaluated since the last reset, and
+    /// when its output may change with nothing it reads changing (`None`: not before they change).
+    recomputed: Vec<Option<Option<blossom_value::time::Instant>>>,
     groups: BTreeMap<RuleId, BTreeMap<Vec<Value>, Group>>,
     /// The tick-local input rows of the last tick, per store.
     inputs: BTreeMap<StoreKey, BTreeSet<Row>>,
@@ -343,6 +346,7 @@ impl Engine {
             asynchronous: asynchronous.into(),
             stores,
             prev: BTreeMap::new(),
+            recomputed: Vec::new(),
             groups: BTreeMap::new(),
             inputs: BTreeMap::new(),
             pending: Changes::default(),
@@ -405,6 +409,7 @@ impl Engine {
             *s = Store::new(s.cell.clone(), s.counts_blobs());
         }
         self.prev.clear();
+        self.recomputed.clear();
         self.groups.clear();
         self.inputs.clear();
         self.facts_loaded = false;
@@ -661,6 +666,7 @@ impl Engine {
             callee_steps: std::cell::Cell::new(0),
             blobs: input.blobs,
             new_blobs: &self.new_blobs,
+            flips_at: std::cell::Cell::new(None),
         }
     }
 
@@ -670,7 +676,19 @@ impl Engine {
         {
             // Most rules see no change in a tick: tell so without taking a handle on the plan.
             let plan = self.plans.get(&id).ok_or_else(|| internal_error!("rule {id:?} has no plan"))?;
-            if plan.regime == Regime::Delta && !plan.dep_keys.iter().any(|k| self.stores.changed(k)) {
+            let unchanged = !plan.dep_keys.iter().any(|k| self.stores.changed(k));
+            if plan.regime == Regime::Delta && unchanged {
+                return Ok(());
+            }
+            if plan.regime == Regime::Recompute
+                && unchanged
+                && let Some(Some(flips)) = self.recomputed.get(id.index())
+                && match plan.skip {
+                    rule::Skip::Never => false,
+                    rule::Skip::Unchanged => true,
+                    rule::Skip::UntilFlip => flips.is_none_or(|t| input.now < t),
+                }
+            {
                 return Ok(());
             }
         }
@@ -897,6 +915,7 @@ impl Engine {
             }
         }
         out.steps = cx.steps.get();
+        out.flips_at = cx.flips_at.get();
         Ok(out)
     }
 
@@ -987,6 +1006,7 @@ impl Engine {
     fn recompute_rule(&mut self, p: &Program, input: &StepInput<'_>, rule: &Rule, plan: &Plan) -> Result<(), EvalError> {
         let terms = self.evaluate(p, input, rule, plan, true)?;
         self.count(rule.id, terms.examined, terms.steps);
+        let flips_at = terms.flips_at;
         let tick = input.tick;
         if let Some((_, (_, Some(e)))) = terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
             return Err(to_eval(e, tick, Some(rule)));
@@ -1032,6 +1052,15 @@ impl Engine {
         }
         self.count_writes(rule.id, writes);
         self.prev.insert(rule.id, new);
+        if plan.skip != rule::Skip::Never {
+            let i = rule.id.index();
+            if self.recomputed.len() <= i {
+                self.recomputed.resize(i + 1, None);
+            }
+            if let Some(slot) = self.recomputed.get_mut(i) {
+                *slot = Some(flips_at);
+            }
+        }
         Ok(())
     }
 
@@ -1449,6 +1478,8 @@ struct Terms {
     heads: BTreeMap<Row, i64>,
     aggs: BTreeMap<(Vec<Value>, usize, Vec<Value>), i64>,
     errors: BTreeMap<Token, (i64, Option<ExprError>)>,
+    /// When a comparison of `now()` it evaluated would come out the other way (`Ctx::flips_at`).
+    flips_at: Option<blossom_value::time::Instant>,
 }
 
 /// An aggregate rule's head row for a group whose live argument tuples are `tuples` (per aggregate column).
