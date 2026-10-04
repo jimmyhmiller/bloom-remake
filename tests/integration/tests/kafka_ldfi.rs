@@ -30,6 +30,9 @@ fn check(spec: &str) -> Vec<String> {
     if let Some(d) = faults.restart {
         fs = fs.with_restart(d).unwrap();
     }
+    if let Some(k) = faults.omissions {
+        fs = fs.with_max_omissions(k);
+    }
     let sim = SpecSim::with_externs(&artifact, std::sync::Arc::new(blossom_std_host::registry().unwrap())).unwrap();
     let mut config = LdfiConfig::new(fs.clone());
     config.workers = 2;

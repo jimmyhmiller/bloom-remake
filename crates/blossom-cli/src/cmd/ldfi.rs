@@ -80,7 +80,7 @@ pub struct Args {
 /// Runs the command.
 pub fn run(args: Args, cx: &Context) -> ExitCode {
     let _ = cx;
-    let (artifact, eot, eff, crashes, restart, expect) = if ded::all_ded(&args.files) {
+    let (artifact, eot, eff, crashes, restart, max_omissions, expect) = if ded::all_ded(&args.files) {
         if args.spec.is_some() {
             eprintln!("`--spec` names a spec of a `.bls` file");
             return Exit::Usage.into();
@@ -97,7 +97,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
             Ok(a) => a,
             Err(code) => return code,
         };
-        (artifact, eot, eff, args.crashes.unwrap_or(0), None, None)
+        (artifact, eot, eff, args.crashes.unwrap_or(0), None, None, None)
     } else {
         let ([file], Some(name)) = (args.files.as_slice(), &args.spec) else {
             eprintln!("a Blossom spec is checked with `blossom ldfi FILE.bls --spec NAME`");
@@ -129,6 +129,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
             faults.eff,
             faults.crashes,
             faults.restart,
+            faults.omissions,
             expect,
         )
     };
@@ -136,9 +137,15 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
         Ok(n) => n,
         Err(_) => return Exit::UserError.into(),
     };
-    let spec = match FailureSpec::new(eot, eff, crashes, nodes).and_then(|s| match restart {
-        Some(d) => s.with_restart(d),
-        None => Ok(s),
+    let spec = match FailureSpec::new(eot, eff, crashes, nodes).and_then(|s| {
+        let s = match max_omissions {
+            Some(k) => s.with_max_omissions(k),
+            None => s,
+        };
+        match restart {
+            Some(d) => s.with_restart(d),
+            None => Ok(s),
+        }
     }) {
         Ok(s) => s,
         Err(e) => {

@@ -811,17 +811,19 @@ impl<'c> Fabric<'c> {
     }
 
     /// The host closes end `end` of pipe `p`, by `cause` in round `tick`: the other end learns after the bytes sent,
-    /// and the end gets its own `closed` with `reason` (not held by a pause: its own host closed it).
+    /// and the end gets its own `closed` with `reason` (not held by a pause: its own host closed it). The end's own
+    /// close is local, done before the round's traffic crosses: it needs the connection as of the round before.
     fn host_close(&mut self, p: usize, end: usize, reason: &str, cause: &Cause, tick: Tick) -> Result<(), SimError> {
         self.half_close(p, end, cause, tick);
         let pipe = self.pipe_mut(p)?;
         *side_mut(&mut pipe.paused, end)? = false;
         side_mut(&mut pipe.held, end)?.clear();
-        self.deliver_to(p, end, Held::Closed(Arc::from(reason), Trace::of(cause, tick)))
+        let local = tick.prev().unwrap_or(tick);
+        self.deliver_to(p, end, Held::Closed(Arc::from(reason), Trace::of(cause, local)))
     }
 
     /// Pauses end `end` of pipe `p`, or resumes it (by `cause` in round `tick`): a resume gives it what arrived
-    /// meanwhile, in order.
+    /// meanwhile, in order (locally, before the round's traffic crosses: as of the round before).
     fn pause(&mut self, p: usize, end: usize, paused: bool, cause: &Cause, tick: Tick) -> Result<(), SimError> {
         let pipe = self.pipe_mut(p)?;
         *side_mut(&mut pipe.paused, end)? = paused;
@@ -832,7 +834,7 @@ impl<'c> Fabric<'c> {
         for h in held {
             let with = |mut t: Trace| {
                 t.causes.push(cause.clone());
-                t.as_of = tick;
+                t.as_of = t.as_of.max(tick.prev().unwrap_or(tick));
                 t
             };
             let h = match h {

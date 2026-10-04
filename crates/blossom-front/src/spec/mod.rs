@@ -53,6 +53,8 @@ pub struct Faults {
     /// `restart: d`: every crash is a crash-restart, the node down for `d` ticks (crash-recovery, TEST-037);
     /// `None`: crash-stop.
     pub restart: Option<u64>,
+    /// `omissions: k`: at most `k` lost messages in a fault set.
+    pub omissions: Option<u32>,
 }
 
 /// A spec compiled with its target.
@@ -851,6 +853,7 @@ fn parse_faults(opts: &[(Ident, ast::Expr)], span: Span, diags: &mut Diagnostics
     let mut eff = None;
     let mut crashes = None;
     let mut restart = None;
+    let mut omissions = None;
     for (k, e) in opts {
         let int = || match &e.kind {
             ExprKind::Lit(LitValue::Int { value, .. }) => u64::try_from(*value).ok(),
@@ -860,6 +863,12 @@ fn parse_faults(opts: &[(Ident, ast::Expr)], span: Span, diags: &mut Diagnostics
             "eot" => eot = int(),
             "eff" => eff = int(),
             "crashes" => crashes = int().and_then(|c| u32::try_from(c).ok()),
+            "omissions" => match int().and_then(|n| u32::try_from(n).ok()) {
+                Some(n) => omissions = Some(n),
+                None => diags.push(
+                    Diagnostic::new(code!("BLS0900"), "`omissions` is a number of lost messages").with_primary(e.span),
+                ),
+            },
             "restart" => match int().filter(|d| *d >= 1) {
                 Some(d) => restart = Some(d),
                 None => diags.push(
@@ -902,6 +911,7 @@ fn parse_faults(opts: &[(Ident, ast::Expr)], span: Span, diags: &mut Diagnostics
             eff,
             crashes,
             restart,
+            omissions,
         }),
         _ => {
             diags.push(

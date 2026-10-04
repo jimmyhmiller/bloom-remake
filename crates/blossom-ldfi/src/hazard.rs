@@ -151,8 +151,9 @@ pub struct FaultVars {
     /// Every gate of the encoding, by its variable: a conjunction or a disjunction of literals created before it
     /// (one-directional, Plaisted–Greenbaum), for [`FaultVars::single_hitters`].
     gates: BTreeMap<Var, Gate>,
-    /// The nodes the last crash budget covered.
+    /// The nodes the last crash budget covered, and the omission variables the last omission budget covered.
     budget_nodes: BTreeSet<NodeId>,
+    budget_omissions: usize,
 }
 
 /// A gate: `v -> AND(children)` or `v -> OR(children)`.
@@ -395,13 +396,35 @@ impl FaultVars {
         Ok(())
     }
 
-    /// Makes sure the nodes `faults` crashes have crash variables.
+    /// Asserts that at most `max_omissions` messages are lost (when the spec bounds them): a totalizer over every
+    /// omission variable, asserted again when there are more.
+    pub fn omission_budget(&mut self, solver: &mut dyn SatSolver, spec: &FailureSpec) -> Result<(), LdfiError> {
+        let Some(k) = spec.max_omissions else { return Ok(()) };
+        if self.omission.len() == self.budget_omissions {
+            return Ok(());
+        }
+        let lits: Vec<Lit> = self.omission.values().map(|v| v.positive()).collect();
+        let outputs = card::totalizer(solver, &lits, k)?;
+        if let Some(over) = outputs.get(k as usize) {
+            solver.add_clause(&[!*over])?;
+        }
+        self.budget_omissions = self.omission.len();
+        Ok(())
+    }
+
+    /// Makes sure the nodes `faults` crashes have crash variables, and (when the spec bounds lost messages) that its
+    /// omissions have variables, so the budgets count them.
     pub fn cover(
         &mut self,
         solver: &mut dyn SatSolver,
         spec: &FailureSpec,
         faults: &FaultSchedule,
     ) -> Result<(), LdfiError> {
+        if spec.max_omissions.is_some() {
+            for o in &faults.omissions {
+                self.omission_var(solver, *o)?;
+            }
+        }
         if spec.max_crashes == 0 {
             return Ok(());
         }
@@ -473,12 +496,15 @@ impl FaultVars {
     pub fn single_hitters(&self, spec: &FailureSpec, seed: &FaultSchedule, root: Lit) -> Option<Vec<Var>> {
         let seeded = self.implied_by(spec, seed);
         let budget_left = (seed.crashes.len() as u32) < spec.max_crashes;
+        let omissions_left = spec
+            .max_omissions
+            .is_none_or(|k| u32::try_from(seed.omissions.len()).is_ok_and(|n| n < k));
         // The candidate faults, by index.
         let mut atoms: Vec<Var> = self
             .omission
             .values()
             .copied()
-            .filter(|v| !seeded.contains(v))
+            .filter(|v| omissions_left && !seeded.contains(v))
             .collect();
         for (n, nc) in &self.crash {
             let allowed = match (spec.restart, seed.crashes.contains_key(n)) {
@@ -1829,6 +1855,7 @@ pub fn minimal_extensions(
             roots.push(enc.target(t)?);
         }
     }
+    vars.omission_budget(solver, spec)?;
     let encoded = now();
     let mut out = Extensions {
         encode_ns: encoded.saturating_sub(start),
