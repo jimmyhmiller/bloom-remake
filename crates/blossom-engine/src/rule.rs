@@ -188,14 +188,13 @@ impl Plans {
 /// evaluation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Skip {
-    /// Never: it reads the tick, the incarnation, randomness, or the time otherwise than below.
+    /// Never: it calls a host table function.
     Never,
-    /// While nothing it reads changes (it reads no time: re-evaluated only for having no positive atom).
-    Unchanged,
-    /// While nothing it reads changes and the time stays before the instant at which a comparison of `now()`
-    /// against an instant, in its last evaluation, would come out the other way (`Ctx::flips_at`): its only use
-    /// of the time.
-    UntilFlip,
+    /// While nothing it reads changes, if its last evaluation read the time, the tick and randomness only by
+    /// ordering `now()` against instants (`Ctx::reads_time`), or not at all: then until the earliest instant at
+    /// which one of those orderings would come out the other way (`Ctx::flips_at`). Its evaluation then takes the
+    /// same path to the same output.
+    WhenUnchanged,
 }
 
 /// How a rule's output is kept up to date.
@@ -228,40 +227,6 @@ pub(crate) struct Plan {
     /// A re-evaluated rule: when it may be left alone.
     pub skip: Skip,
 }
-
-/// Whether `e` reads the time only by ordering `now()` against an expression that does not read it (and reads
-/// neither the tick, the incarnation nor randomness).
-fn time_only_compared(e: &Expr) -> bool {
-    match e {
-        Expr::Binary {
-            op: BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge,
-            lhs,
-            rhs,
-        } if expr::is_now(lhs) != expr::is_now(rhs) => {
-            let other = if expr::is_now(lhs) { rhs } else { lhs };
-            !expr::time_varying(other)
-        }
-        Expr::Scalar(_) | Expr::Term(_) | Expr::Param(_) => !expr::time_varying(e),
-        Expr::Call { f, args } => !expr::draws_randomness(f) && args.iter().all(time_only_compared),
-        Expr::Unary { arg, .. } => time_only_compared(arg),
-        Expr::Binary { lhs, rhs, .. } => time_only_compared(lhs) && time_only_compared(rhs),
-        Expr::Construct { fields, .. } => fields.iter().all(time_only_compared),
-        Expr::Field { base, .. } => time_only_compared(base),
-        Expr::If { cond, then, els } => time_only_compared(cond) && time_only_compared(then) && time_only_compared(els),
-        Expr::Match { scrut, arms } => {
-            time_only_compared(scrut)
-                && arms
-                    .iter()
-                    .all(|(_, g, b)| g.as_ref().is_none_or(time_only_compared) && time_only_compared(b))
-        }
-        Expr::Collection { elems, .. } => elems.iter().all(time_only_compared),
-        Expr::Lattice { args, .. } => args.iter().all(time_only_compared),
-        Expr::Let { value, body, .. } => time_only_compared(value) && time_only_compared(body),
-        Expr::Closure { body, .. } => time_only_compared(body),
-        Expr::Typed { expr, .. } => time_only_compared(expr),
-    }
-}
-
 
 /// A rule whose body is one positive atom and whose head is plain terms (lowering makes many: unions, renames,
 /// the copies into a table's next state): a changed row of the atom maps to its head row column by column, with no
@@ -432,6 +397,15 @@ fn atom_terms(a: &Atom) -> impl Iterator<Item = &Term> {
     a.args.iter().chain(a.sender.iter())
 }
 
+/// The term of column `i` of `a` (`atom_terms(a).nth(i)`).
+fn atom_term(a: &Atom, i: usize) -> Option<&Term> {
+    match a.args.get(i) {
+        Some(t) => Some(t),
+        None if i == a.args.len() => a.sender.as_ref(),
+        None => None,
+    }
+}
+
 fn atom_vars(a: &Atom) -> BTreeSet<VarId> {
     atom_terms(a)
         .filter_map(|t| match t {
@@ -599,19 +573,10 @@ impl Plan {
         let dep_keys = deps.iter().filter_map(|l| rule.body.lits.get(*l).and_then(dep_store)).collect();
         let aggregate = crate::strata::is_aggregate(rule);
         let copy = if aggregate { None } else { CopyPlan::of(rule) };
-        let compared_only = lits.iter().all(|l| match l {
-            Literal::Guard(e) | Literal::Bind { expr: e, .. } => time_only_compared(e),
-            Literal::Gen { src, .. } => match src {
-                GenSource::Range { lo, hi, .. } => time_only_compared(lo) && time_only_compared(hi),
-                GenSource::Value(e) | GenSource::Lattice(e) => time_only_compared(e),
-                GenSource::TableFn { .. } => false,
-            },
-            _ => true,
-        });
-        let skip = match (time_varying, compared_only) {
-            (false, _) => Skip::Unchanged,
-            (true, true) => Skip::UntilFlip,
-            (true, false) => Skip::Never,
+        let skip = if lits.iter().any(|l| matches!(l, Literal::Gen { src: GenSource::TableFn { .. }, .. })) {
+            Skip::Never
+        } else {
+            Skip::WhenUnchanged
         };
         Ok(Plan {
             rule: rule.id,
@@ -997,6 +962,13 @@ pub(crate) struct Found<'e> {
 /// A valuation's identity, for counting its runtime errors: its atom rows and lookup values.
 pub(crate) type Token = Vec<Value>;
 
+/// The buffers a rule's terms are evaluated in, reused from one term to the next.
+#[derive(Default)]
+pub(crate) struct TermBuffers {
+    env: Vec<Option<Value>>,
+    rows: Vec<Option<Row>>,
+}
+
 /// Evaluates one term of `rule`'s delta query. `old(lit)` says whether dependency `lit` is read at its old version.
 /// Each valuation goes to `emit`; each runtime error to `error`, with the valuation's token.
 #[allow(clippy::too_many_arguments)]
@@ -1010,8 +982,13 @@ pub(crate) fn run_term(
     old: &dyn Fn(usize) -> bool,
     emit: &mut dyn FnMut(Found<'_>) -> ExprResult<()>,
     error: &mut dyn FnMut(Token, ExprError, i64),
+    buffers: &mut TermBuffers,
 ) -> Result<u64, EvalError> {
-    let mut env: Vec<Option<Value>> = vec![None; plan.nvars];
+    let TermBuffers { env, rows } = buffers;
+    env.clear();
+    env.resize(plan.nvars, None);
+    rows.clear();
+    rows.resize(rule.body.lits.len(), None);
     let sign = driver.sign();
     // Bind what the driver fixes.
     match driver {
@@ -1020,7 +997,7 @@ pub(crate) fn run_term(
             let Some(Literal::Pos(a)) = rule.body.lits.get(*lit) else {
                 return Err(internal_error!("an atom driver names a non-atom").into());
             };
-            if !unify(cx, &mut env, atom_terms(a), row).map_err(fatal)? {
+            if !unify(cx, env, atom_terms(a), row).map_err(fatal)? {
                 return Ok(0);
             }
         }
@@ -1029,7 +1006,7 @@ pub(crate) fn run_term(
                 return Err(internal_error!("a negation driver names a non-negation").into());
             };
             let terms: Vec<&Term> = non_wild(a).iter().filter_map(|c| a.args.get(*c)).collect();
-            if !unify(cx, &mut env, terms.into_iter(), key).map_err(fatal)? {
+            if !unify(cx, env, terms.into_iter(), key).map_err(fatal)? {
                 return Ok(0);
             }
         }
@@ -1037,7 +1014,7 @@ pub(crate) fn run_term(
             let Some(Literal::Lookup { var, key: terms, .. }) = rule.body.lits.get(*lit) else {
                 return Err(internal_error!("a lookup driver names a non-lookup").into());
             };
-            if !unify(cx, &mut env, terms.iter(), key).map_err(fatal)? {
+            if !unify(cx, env, terms.iter(), key).map_err(fatal)? {
                 return Ok(0);
             }
             match env.get_mut(var.index()) {
@@ -1048,7 +1025,6 @@ pub(crate) fn run_term(
             }
         }
     }
-    let mut rows: Vec<Option<Row>> = vec![None; rule.body.lits.len()];
     if let Driver::Atom { lit, row, .. } = driver
         && let Some(slot) = rows.get_mut(*lit)
     {
@@ -1073,7 +1049,7 @@ pub(crate) fn run_term(
         error,
         examined: 0,
     };
-    search.run(0, &mut env, &mut rows, &mut Vec::new(), None)?;
+    search.run(0, env, rows, &mut Vec::new(), None)?;
     Ok(search.examined)
 }
 
@@ -1255,14 +1231,11 @@ impl Search<'_, '_> {
         let Some(Literal::Pos(a)) = self.rule.body.lits.get(lit) else {
             return Err(internal_error!("a join step names a non-atom").into());
         };
-        let terms: Vec<&Term> = atom_terms(a).collect();
         // The probe's values; after a failed check a planned column may be unbound, and the atom is scanned.
         let mut values = Vec::with_capacity(cols.len());
         let mut probe = true;
         for c in cols {
-            let t = terms
-                .get(*c)
-                .ok_or_else(|| internal_error!("a bound column is out of range"))?;
+            let t = atom_term(a, *c).ok_or_else(|| internal_error!("a bound column is out of range"))?;
             // Only after a failed check can a planned column's variable be unbound (the check would have bound it).
             let unbound = matches!(t, Term::Var(v) if env.get(v.index()).is_none_or(Option::is_none));
             if unbound && failed.is_some() {
@@ -1298,7 +1271,7 @@ impl Search<'_, '_> {
         let mut newly = Vec::new();
         for row in candidates {
             newly.clear();
-            let ok = unify_tracked(self.cx, env, terms.iter().copied(), &row, &mut newly).map_err(fatal)?;
+            let ok = unify_tracked(self.cx, env, atom_terms(a), &row, &mut newly).map_err(fatal)?;
             if ok {
                 if let Some(slot) = rows.get_mut(lit) {
                     *slot = Some(row);

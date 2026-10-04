@@ -667,6 +667,7 @@ impl Engine {
             blobs: input.blobs,
             new_blobs: &self.new_blobs,
             flips_at: std::cell::Cell::new(None),
+            reads_time: std::cell::Cell::new(false),
         }
     }
 
@@ -683,11 +684,8 @@ impl Engine {
             if plan.regime == Regime::Recompute
                 && unchanged
                 && let Some(Some(flips)) = self.recomputed.get(id.index())
-                && match plan.skip {
-                    rule::Skip::Never => false,
-                    rule::Skip::Unchanged => true,
-                    rule::Skip::UntilFlip => flips.is_none_or(|t| input.now < t),
-                }
+                && plan.skip == rule::Skip::WhenUnchanged
+                && flips.is_none_or(|t| input.now < t)
             {
                 return Ok(());
             }
@@ -873,6 +871,7 @@ impl Engine {
             };
             orders.insert(lit, order);
         }
+        let mut buffers = rule::TermBuffers::default();
         for (driver, pos) in drivers {
             let order = orders
                 .get(&driver.lit())
@@ -905,7 +904,18 @@ impl Engine {
             };
             let mut errors: Vec<(Token, ExprError, i64)> = Vec::new();
             let mut error = |t: Token, e: ExprError, s: i64| errors.push((t, e, s));
-            out.examined += rule::run_term(&cx, &self.stores, rule, plan, order, &driver, &old, &mut emit, &mut error)?;
+            out.examined += rule::run_term(
+                &cx,
+                &self.stores,
+                rule,
+                plan,
+                order,
+                &driver,
+                &old,
+                &mut emit,
+                &mut error,
+                &mut buffers,
+            )?;
             for (t, e, s) in errors {
                 let slot = out.errors.entry(t).or_insert((0, None));
                 slot.0 += s;
@@ -916,6 +926,7 @@ impl Engine {
         }
         out.steps = cx.steps.get();
         out.flips_at = cx.flips_at.get();
+        out.reads_time = cx.reads_time.get();
         Ok(out)
     }
 
@@ -1006,7 +1017,7 @@ impl Engine {
     fn recompute_rule(&mut self, p: &Program, input: &StepInput<'_>, rule: &Rule, plan: &Plan) -> Result<(), EvalError> {
         let terms = self.evaluate(p, input, rule, plan, true)?;
         self.count(rule.id, terms.examined, terms.steps);
-        let flips_at = terms.flips_at;
+        let (flips_at, reads_time) = (terms.flips_at, terms.reads_time);
         let tick = input.tick;
         if let Some((_, (_, Some(e)))) = terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
             return Err(to_eval(e, tick, Some(rule)));
@@ -1052,13 +1063,14 @@ impl Engine {
         }
         self.count_writes(rule.id, writes);
         self.prev.insert(rule.id, new);
-        if plan.skip != rule::Skip::Never {
+        if plan.skip == rule::Skip::WhenUnchanged {
             let i = rule.id.index();
             if self.recomputed.len() <= i {
                 self.recomputed.resize(i + 1, None);
             }
             if let Some(slot) = self.recomputed.get_mut(i) {
-                *slot = Some(flips_at);
+                // Read freely, the time may change its output at the next tick: it is evaluated again.
+                *slot = if reads_time { None } else { Some(flips_at) };
             }
         }
         Ok(())
@@ -1478,8 +1490,10 @@ struct Terms {
     heads: BTreeMap<Row, i64>,
     aggs: BTreeMap<(Vec<Value>, usize, Vec<Value>), i64>,
     errors: BTreeMap<Token, (i64, Option<ExprError>)>,
-    /// When a comparison of `now()` it evaluated would come out the other way (`Ctx::flips_at`).
+    /// When a comparison of `now()` it evaluated would come out the other way (`Ctx::flips_at`), and whether it
+    /// read the time otherwise (`Ctx::reads_time`).
     flips_at: Option<blossom_value::time::Instant>,
+    reads_time: bool,
 }
 
 /// An aggregate rule's head row for a group whose live argument tuples are `tuples` (per aggregate column).
