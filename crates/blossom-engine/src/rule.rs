@@ -66,9 +66,14 @@ impl StoreKey {
 }
 
 /// Every store of an engine, found by its key in constant time (the keys are dense: four kinds per relation).
+/// It knows which stores were written since the tick began (every write goes through `get_mut` or `values_mut`), so
+/// a tick clears only those stores' changes and tells that a store did not change without reading it.
 #[derive(Default)]
 pub(crate) struct Stores {
     slots: Vec<Option<(StoreKey, Store)>>,
+    /// The slots written since `clear_deltas`, and a flag per slot.
+    touched: Vec<usize>,
+    flags: Vec<bool>,
 }
 
 impl Stores {
@@ -94,7 +99,40 @@ impl Stores {
     }
 
     pub fn get_mut(&mut self, key: &StoreKey) -> Option<&mut Store> {
-        self.slots.get_mut(key.slot()).and_then(Option::as_mut).map(|(_, s)| s)
+        let i = key.slot();
+        self.touch(i);
+        self.slots.get_mut(i).and_then(Option::as_mut).map(|(_, s)| s)
+    }
+
+    fn touch(&mut self, i: usize) {
+        if self.flags.len() <= i {
+            self.flags.resize(i + 1, false);
+        }
+        if let Some(f) = self.flags.get_mut(i)
+            && !*f
+        {
+            *f = true;
+            self.touched.push(i);
+        }
+    }
+
+    /// Whether the store at `key` changed this tick (`Store::changed`); a store not written since the tick began
+    /// did not, and is not read.
+    pub fn changed(&self, key: &StoreKey) -> bool {
+        let i = key.slot();
+        self.flags.get(i).copied().unwrap_or(false) && self.get(key).is_some_and(Store::changed)
+    }
+
+    /// Clears the tick's changes of every store written since the last clear.
+    pub fn clear_deltas(&mut self) {
+        for i in std::mem::take(&mut self.touched) {
+            if let Some(f) = self.flags.get_mut(i) {
+                *f = false;
+            }
+            if let Some(Some((_, s))) = self.slots.get_mut(i) {
+                s.clear_delta();
+            }
+        }
     }
 
     /// Every store with its key.
@@ -107,6 +145,11 @@ impl Stores {
     }
 
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut Store> {
+        for i in 0..self.slots.len() {
+            if self.slots.get(i).is_some_and(Option::is_some) {
+                self.touch(i);
+            }
+        }
         self.slots.iter_mut().flatten().map(|(_, s)| s)
     }
 }
@@ -161,6 +204,8 @@ pub(crate) struct Plan {
     pub checks: Vec<usize>,
     /// The dependencies (atoms, then negations and lookups in body order), by literal index.
     pub deps: Vec<usize>,
+    /// The stores the dependencies read.
+    pub dep_keys: Vec<StoreKey>,
     pub head: StoreKey,
     pub aggregate: bool,
     pub regime: Regime,
@@ -405,6 +450,7 @@ impl Plan {
             RuleKind::Async => StoreKey::Async(rule.head.rel),
         };
         let no_atoms = atoms.is_empty();
+        let dep_keys = deps.iter().filter_map(|l| rule.body.lits.get(*l).and_then(dep_store)).collect();
         Ok(Plan {
             rule: rule.id,
             nvars: rule.body.vars.len(),
@@ -418,6 +464,7 @@ impl Plan {
                 Regime::Delta
             },
             deps,
+            dep_keys,
             head,
             aggregate: crate::strata::is_aggregate(rule),
         })

@@ -463,9 +463,7 @@ impl Engine {
         let tick = input.tick;
         let wrap = |e: ExprError| to_eval(e, tick, None);
         // 1. What changes.
-        for s in self.stores.values_mut() {
-            s.clear_delta();
-        }
+        self.stores.clear_deltas();
         let pending = std::mem::take(&mut self.pending);
         for (rel, rows) in &pending.deleted {
             for r in rows {
@@ -672,13 +670,7 @@ impl Engine {
         {
             // Most rules see no change in a tick: tell so without taking a handle on the plan.
             let plan = self.plans.get(&id).ok_or_else(|| internal_error!("rule {id:?} has no plan"))?;
-            if plan.regime == Regime::Delta
-                && !plan
-                    .deps
-                    .iter()
-                    .filter_map(|l| rule.body.lits.get(*l).and_then(dep_store))
-                    .any(|k| self.stores.get(&k).is_some_and(Store::changed))
-            {
+            if plan.regime == Regime::Delta && !plan.dep_keys.iter().any(|k| self.stores.changed(k)) {
                 return Ok(());
             }
         }
