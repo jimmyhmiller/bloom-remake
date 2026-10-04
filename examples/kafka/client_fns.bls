@@ -45,10 +45,13 @@ fn encode_batch(values: Vec<Bytes>, ts: i64) -> Bytes {
     ])
 }
 
-/// ProduceRequest v12, framed: one batch to one partition, acks -1.
+/// The producer's `acks`: -1 (all in-sync replicas), 1 (the leader), 0 (none).
+param CLIENT_ACKS: i16 = -1;
+
+/// ProduceRequest v12, framed: one batch to one partition, acks `CLIENT_ACKS`.
 fn encode_produce_request(correlation_id: i32, client_id: String, topic: String, partition: i32, batch: Bytes) -> Bytes {
     let r = ProduceRequest {
-        transactional_id: None, acks: -1i16, timeout_ms: 30000i32,
+        transactional_id: None, acks: CLIENT_ACKS, timeout_ms: 30000i32,
         topics: [ProduceTopic { name: topic, partitions: [ProducePartition { index: partition, records: Some(batch) }] }],
     };
     frame(request_header_v2(API_PRODUCE, 12i16, correlation_id, client_id).concat(ProduceRequest::encode(r)))

@@ -3,7 +3,7 @@
 //! with acks -1 and reading them back, checked with Kafka's properties in the synchronous-round world under lost
 //! messages and crash-restarts. This file is a library of modules and specs: it has no `program` header.
 
-pub module Kafka(CLIENT_BATCHES: u64 = 1) {
+pub module Kafka(CLIENT_BATCHES: u64 = 1, DEFAULT_PARTITIONS: i32 = 1, DEFAULT_REPLICATION_FACTOR: i16 = 1) {
     include "protocol.bls";
     include "headers.bls";
     include "apiversions.bls";
@@ -23,8 +23,6 @@ pub module Kafka(CLIENT_BATCHES: u64 = 1) {
 
     static broker(n: Node<Broker>, id: i32, host: String, port: i32);
 
-    param DEFAULT_PARTITIONS: i32 = 1;
-    param DEFAULT_REPLICATION_FACTOR: i16 = 1;
     param AUTO_CREATE_TOPICS: bool = true;
     param METADATA_CREATE_WAIT: Duration = 2s;
     param RETENTION_CHECK: Duration = 300s;
@@ -67,8 +65,10 @@ spec Single {
 }
 
 /// Kafka's guarantees to a producer, one `(property, batch)` row each:
-/// - durability: a batch acknowledged without error is in the log of every broker that is up, at the offset it was
-///   acknowledged with;
+/// - durability: a batch acknowledged without error stays in the partition's committed log: some broker holds it
+///   committed (materialized, or committed and waiting to be; a broker down at EOT counts with the state it went down
+///   with, which it restarts from), and no broker holds another batch at its offset (a replica that restarted may
+///   lag: it is not asked to hold what it has not committed yet, only not to hold something else there);
 /// - read back: once the client has read every partition to its end, it has read every acknowledged batch, at its
 ///   offset.
 spec Guarantees {
@@ -77,9 +77,18 @@ spec Guarantees {
         acknowledged(k, _, _), let prop = "durability";
         acknowledged(k, _, _), read_done(true) @ _, let prop = "read back";
     }
-    /// A broker's log holds a batch when its chunk index does (`batch` itself holds a blob, which a spec does not read).
-    view lost(k) =
-        acknowledged(k, p, base), broker(b, _, _, _) @ b, not crashed(b), not batch_chunk(_, p, _, base) @ b;
+    /// The batches a broker holds committed, by blob: materialized, or committed and not yet materialized.
+    view holds_batch(b, p, base, blob) {
+        batch(_, p, base, _, _, blob) @ b;
+        pending_batch(_, p, base, _, _, blob) @ b;
+    }
+    view held(p, base) = holds_batch(_, p, base, _);
+    /// Two brokers that hold different batches at one offset.
+    view diverged(p, base) = holds_batch(b1, p, base, x), holds_batch(b2, p, base, y) where x != y;
+    view lost(k) {
+        acknowledged(k, p, base), not held(p, base);
+        acknowledged(k, p, base), diverged(p, base);
+    }
     view post(prop, k) {
         acknowledged(k, _, _), not lost(k), let prop = "durability";
         acknowledged(k, p, base), consumed(p, base, _) @ _, let prop = "read back";
@@ -107,4 +116,41 @@ spec SingleRestart for Kafka {
     include Guarantees;
     faults { eot: 30, eff: 1, crashes: 1, restart: 2, model: sync, round: 50ms }
     check ldfi expect holds;
+}
+
+/// Three brokers and the client, which tries them in turn.
+spec Triple {
+    nodes B1, B2, B3, C1;
+    assign Broker = [B1, B2, B3];
+    assign Client = [C1];
+    fact broker(B1, 1, "b1.sim", 9092);
+    fact broker(B2, 2, "b2.sim", 9092);
+    fact broker(B3, 3, "b3.sim", 9092);
+    fact contact(0, "sim://B1/kafka") @ C1;
+    fact contact(1, "sim://B2/kafka") @ C1;
+    fact contact(2, "sim://B3/kafka") @ C1;
+}
+
+/// Three brokers, the topic replicated on all three: the failure-free run.
+spec TripleRun for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
+    include Triple;
+    include Guarantees;
+    faults { eot: 60, eff: 1, crashes: 0, model: sync, round: 50ms }
+}
+
+/// Three brokers under a crash-restart of any node (down 3 rounds), no lost messages: an `acks=all` batch survives.
+spec TripleRestart for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
+    include Triple;
+    include Guarantees;
+    faults { eot: 40, eff: 1, crashes: 1, restart: 3, model: sync, round: 50ms }
+    check ldfi expect holds;
+}
+
+/// SEEDED BUG (a misconfigured producer): with `acks=1` the leader answers before the followers copy the batch, so a
+/// crash of the leader right after it answered loses an acknowledged batch the durability check counts on.
+spec TripleRestartAcks1 for Kafka(DEFAULT_REPLICATION_FACTOR = 3, CLIENT_ACKS = 1) {
+    include Triple;
+    include Guarantees;
+    faults { eot: 40, eff: 1, crashes: 1, restart: 3, model: sync, round: 50ms }
+    check ldfi expect fails;
 }

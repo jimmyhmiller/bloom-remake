@@ -702,7 +702,24 @@ fn snapshot_goal(
         tick,
         row: Arc::from(rest.to_vec()),
     };
-    g.find(&key)
+    if let Some(id) = g.find(&key) {
+        return Ok(id);
+    }
+    // A blob column holds the blob's reference in the spec's copy.
+    g.goals_at(Space::Protocol, rel, Some(*node), tick)
+        .iter()
+        .copied()
+        .find(|id| {
+            g.get(*id).is_some_and(|goal| {
+                goal.key.row.len() == rest.len()
+                    && goal
+                        .key
+                        .row
+                        .iter()
+                        .zip(rest)
+                        .all(|(v, w)| blossom_sim::spec::trace_value(v) == *w)
+            })
+        })
         .ok_or_else(|| internal_error!("a spec input copies a tuple the run does not hold: {key:?}"))
 }
 

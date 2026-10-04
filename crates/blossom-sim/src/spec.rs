@@ -362,7 +362,7 @@ impl<'a> SpecSim<'a> {
             for row in instance.rows(protocol) {
                 let mut full = Vec::with_capacity(row.len() + 1);
                 full.push(Value::Node(node));
-                full.extend(row.iter().cloned());
+                full.extend(row.iter().map(trace_value));
                 out.push((rel, Arc::from(full)));
             }
         }
@@ -380,6 +380,19 @@ impl<'a> SpecSim<'a> {
                 _ => None,
             })
             .collect()
+    }
+}
+
+/// A protocol value as a spec's trace holds it: a blob as its reference (its content's hash, then its length as an
+/// 8-byte big-endian integer), anything else as itself.
+pub fn trace_value(v: &Value) -> Value {
+    match v {
+        Value::Blob(r) => {
+            let mut b = r.hash.to_vec();
+            b.extend_from_slice(&r.len.to_be_bytes());
+            Value::Bytes(b.into())
+        }
+        other => other.clone(),
     }
 }
 

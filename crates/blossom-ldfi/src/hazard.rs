@@ -1402,7 +1402,7 @@ impl<'a> Encoder<'a> {
                                     .row
                                     .iter()
                                     .zip(pattern)
-                                    .all(|(v, p)| p.as_ref().is_none_or(|p| p == v))
+                                    .all(|(v, p)| p.as_ref().is_none_or(|p| matches_trace(p, v)))
                         })
                     })
                 }))
@@ -1479,7 +1479,7 @@ impl<'a> Encoder<'a> {
                             .row
                             .iter()
                             .zip(pattern)
-                            .all(|(v, p)| p.as_ref().is_none_or(|p| p == v))
+                            .all(|(v, p)| p.as_ref().is_none_or(|p| matches_trace(p, v)))
                 })
             })
             .collect();
@@ -1712,4 +1712,9 @@ fn lookup_pattern(rules: &dyn Rules, space: Space, rel: RelId, key: &[Option<Val
             }
         })
         .collect()
+}
+
+/// Whether a protocol value matches a pattern value, which a spec's trace may give as a blob's reference.
+fn matches_trace(pattern: &Value, v: &Value) -> bool {
+    pattern == v || (matches!(v, Value::Blob(_)) && *pattern == blossom_sim::spec::trace_value(v))
 }
