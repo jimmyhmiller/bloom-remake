@@ -19,7 +19,17 @@ not_caught_up_close: while head(c, i, _seq, key, version, _corr, fr, at), not ca
 }
 
 /// A supported request whose body this broker cannot decode closes the connection.
-undecodable: while head(c, i, _seq, key, version, _corr, fr, at) where not pure_request(key, version) && not stateful_body_ok(key, fr) {
+undecodable: while head(c, i, _seq, key, version, _corr, fr, at)
+    where not pure_request(key, version) && not decoded_by_view(key) && not stateful_body_ok(key, fr) {
+    send kafka.close(c);
+    delete queued(c, i, fr, at);
+}
+view request_decoded(c, i) {
+    produce_req(c, i, _);
+    fetch_req(c, i, _);
+}
+undecodable_by_view: while head(c, i, _seq, key, version, _corr, fr, at), not request_decoded(c, i)
+    where not pure_request(key, version) && decoded_by_view(key) {
     send kafka.close(c);
     delete queued(c, i, fr, at);
 }

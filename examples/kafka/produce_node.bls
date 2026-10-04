@@ -80,9 +80,12 @@ view tail_end(tid, p, e) {
 
 // ---------------------------------------------------------------- Produce
 
-view produce_head(c, i, seq, corr, fr, at, req) =
-    head(c, i, seq, key, _version, corr, fr, at), caught_up(), key == API_PRODUCE,
+/// Each Produce request's body, decoded once (whether or not this broker has caught up; `undecodable_by_view` reads
+/// it too).
+view produce_req(c, i, req) =
+    head(c, i, _seq, key, _version, _corr, fr, _at), key == API_PRODUCE,
     let Some(body) = request_body(fr), let Some(req) = decode_produce(body);
+view produce_head(c, i, seq, corr, fr, at, req) = produce_req(c, i, req), head(c, i, seq, _key, _version, corr, fr, at), caught_up();
 
 /// A request appended already: it waits at the head for its answer. A request's records last while it is queued
 /// (until it is answered, or its connection closes).
@@ -95,28 +98,33 @@ view produce_entry(c, i, j, name, p, records, req, o) =
 
 /// The entries this broker appends this tick: of a request not appended yet, to a partition it leads, with their
 /// records checked against the topic's configurations (`check_entry`).
+/// Each topic's limits, parsed from its configurations when it changes.
+view topic_limits(tid, limits) = mtopic(_name, tid, _parts, cfg), let limits = topic_limits_of(cfg);
 view entry_check(c, i, j, tid, p, o, checked) =
     produce_entry(c, i, j, name, p, records, req, o), not produce_started(c, i), produce_request_error(req) == None,
-    mtopic(name, tid, parts, cfg), led(tid, p, _), let g = (tid, p), isr_of(g, isr), p >= 0i32, p < parts,
-    let checked = check_entry(records, req.acks, cfg, isr.len()) where name != OFFSETS_TOPIC;
+    mtopic(name, tid, parts, _cfg), topic_limits(tid, limits), led(tid, p, _), let g = (tid, p), isr_of(g, isr),
+    p >= 0i32, p < parts, let checked = check_entry(records, req.acks, limits, isr.len()) where name != OFFSETS_TOPIC;
 
 /// This tick's appends, per partition, in order: each one's order and batches.
 view appends(tid, p, xs = collect!((o, bs))) = entry_check(_c, _i, _j, tid, p, o, ch), ch.error == NONE, let bs = ch.batches;
 
+/// The producers appending to each partition this tick (once, for the views after).
+view append_producer(tid, p, pid) = appends(tid, p, ys), pid in batch_producers(ys);
+
 /// The producers appending to each partition this tick, as their state stands after the partition's last entry:
 /// their committed state, then their uncommitted entries in log order.
 view tail_batches(tid, p, pid, xs = collect!((i, h, base, last))) =
-    appends(tid, p, ys), pid in batch_producers(ys), data_entry(tid, p, i, base, last, _, h, _), applied_d(tid, p, a)
+    append_producer(tid, p, pid), data_entry(tid, p, i, base, last, _, h, _), applied_d(tid, p, a)
     where i > a && h.producer_id == pid;
 view producer_state(tid, p, pid, e) {
-    appends(tid, p, ys), pid in batch_producers(ys), not tail_batches(tid, p, pid, _),
+    append_producer(tid, p, pid), not tail_batches(tid, p, pid, _),
         producer(tid, p, pid, epoch, recent), let e = ProducerEntry { pid: pid, epoch: epoch, recent: recent };
     tail_batches(tid, p, pid, xs), producer(tid, p, pid, epoch, recent),
         let Some(e) = tail_state(Some(ProducerEntry { pid: pid, epoch: epoch, recent: recent }), xs);
     tail_batches(tid, p, pid, xs), not producer(tid, p, pid, _, _), let Some(e) = tail_state(None, xs);
 }
 view part_producers(tid, p, ps = collect!(e)) =
-    per appends(tid, p, ys), pid in batch_producers(ys), producer_state(tid, p, pid, e);
+    per appends(tid, p, _ys), append_producer(tid, p, pid), producer_state(tid, p, pid, e);
 
 /// Each partition's appends this tick, sequenced after its last entry.
 view sequenced(tid, p, s) = appends(tid, p, xs), tail_end(tid, p, end), part_producers(tid, p, ps),
@@ -223,7 +231,8 @@ view waits_in(c, i, j, tid, p) {
     duplicate(c, i, j, tid, p, _, _, _);
 }
 view isr_short(c, i, j) =
-    waits_in(c, i, j, tid, p), let g = (tid, p), isr_of(g, isr), mtopic(_n, tid, _parts, cfg) where (isr.len() as i64) < min_insync(cfg);
+    waits_in(c, i, j, tid, p), let g = (tid, p), isr_of(g, isr), topic_limits(tid, limits)
+    where (isr.len() as i64) < limits.min_insync;
 view placed_lost(c, i, j) {
     placed(c, i, j, tid, p, idx, e, _b, _l, _s), let g = (tid, p), not rlog(g: g, idx: idx, term: e, ..), not compacted_at(g, idx);
     placed(c, i, j, tid, p, _idx, e, _b, _l, _s), not led_term(tid, p, e);
@@ -329,9 +338,9 @@ advance_end: while to_materialize(tid, p, xs), log_end(tid, p, end), let Some(x)
 
 /// What each partition's materialized batches do to its segments.
 view segment_change(tid, p, ch) =
-    to_materialize(tid, p, xs), active_segment(tid, p, a), segment(tid, p, a, bytes, mts, mb, md), mtopic(_name, tid, _parts, cfg),
+    to_materialize(tid, p, xs), active_segment(tid, p, a), segment(tid, p, a, bytes, mts, mb, md), topic_limits(tid, limits),
     let ch = segment_appends(materialized_batches(xs), Segment { base: a, bytes: bytes, max_ts: mts, max_base: mb, modified: md },
-        segment_bytes(cfg), now().as_millis());
+        limits.segment_bytes, now().as_millis());
 write_segments: while segment_change(tid, p, ch), sg in ch.written {
     upsert segment(tid, p, sg.base, sg.bytes, sg.max_ts, sg.max_base, sg.modified);
 }

@@ -25,7 +25,7 @@ use blossom_ir::core::{
 };
 use blossom_ir::obs::ProgramErrorRecord;
 use blossom_ir::tick::{
-    Changes, Egress, EvalError, Instance, Row, Send, StepInput, StepOutput, TickInput, TickOutput,
+    Changes, Egress, EvalError, FnWork, Instance, Row, RuleWork, Send, StepInput, StepOutput, TickInput, TickOutput,
 };
 use blossom_lattice::Kind;
 use blossom_value::time::{NodeId, Tick};
@@ -33,9 +33,12 @@ use blossom_value::value::IntValue;
 use blossom_value::{Seed, TypeDef, Value};
 
 use crate::expr::{self, Ctx, ExprError, Shared, bug};
-use crate::rule::{self, Driver, Found, Plan, Regime, StoreKey, Token, dep_store, non_wild};
+use crate::rule::{self, Driver, Found, Plan, Plans, Regime, StoreKey, Stores, Token, dep_store, non_wild};
 use crate::store::{CellSpec, Store};
 use crate::strata::{self, Stratum};
+
+/// Stores this small share one size for the join-order cache (`run_drivers`).
+const SMALL_STORE: usize = 32;
 
 /// How to set up an engine for one node of a deployment.
 #[derive(Clone, Debug, Default)]
@@ -66,13 +69,16 @@ pub struct Engine {
     program: ValidatedProgram,
     shared: Shared,
     node: NodeId,
-    plans: BTreeMap<RuleId, Plan>,
-    strata: Vec<Stratum>,
-    inductive: Vec<RuleId>,
-    asynchronous: Vec<RuleId>,
-    stores: BTreeMap<StoreKey, Store>,
+    plans: Plans,
+    strata: Arc<[Stratum]>,
+    inductive: Arc<[RuleId]>,
+    asynchronous: Arc<[RuleId]>,
+    stores: Stores,
     /// A recompute rule's (or a recursive stratum rule's) head rows at its last evaluation, with their support.
     prev: BTreeMap<RuleId, BTreeMap<Row, i64>>,
+    /// Per re-evaluated rule that may be left alone (`Plan::skip`), by index: evaluated since the last reset, and
+    /// when its output may change with nothing it reads changing (`None`: not before they change).
+    recomputed: Vec<Option<Option<blossom_value::time::Instant>>>,
     groups: BTreeMap<RuleId, BTreeMap<Vec<Value>, Group>>,
     /// The tick-local input rows of the last tick, per store.
     inputs: BTreeMap<StoreKey, BTreeSet<Row>>,
@@ -90,10 +96,16 @@ pub struct Engine {
     unsettled: BTreeSet<StoreKey>,
     /// Rows the atom probes returned since the engine was created: the join work, measured without a clock.
     examined: u64,
-    /// The same, per rule.
-    examined_by: BTreeMap<RuleId, u64>,
+    /// The work of each rule (rows examined, expression nodes evaluated).
+    examined_by: BTreeMap<RuleId, RuleWork>,
     /// The blobs the current tick created (`Blob::of`), with their bytes.
     new_blobs: std::cell::RefCell<BTreeMap<blossom_value::BlobRef, Arc<[u8]>>>,
+    /// Each (rule, driver literal)'s join order, with the sizes of the stores its atoms read when it was chosen, in
+    /// powers of two: reused while every one stays in its power of two. A join order decides a term's cost, never
+    /// its valuations, so reusing one changes only the work.
+    orders: std::cell::RefCell<BTreeMap<(RuleId, Option<usize>), CachedOrder>>,
+    /// Each function's work since profiling was switched on (`None`: off).
+    fn_work: Option<std::cell::RefCell<BTreeMap<blossom_base::FnId, FnWork>>>,
 }
 
 fn kinds(p: &Program) -> Vec<Option<Kind>> {
@@ -265,14 +277,19 @@ impl Engine {
         };
         let my_role = cfg.roles.get(node.0 as usize).copied().flatten();
         let runs = |rule: &Rule| rule.role.is_none_or(|r| Some(r) == my_role);
-        let mut plans = BTreeMap::new();
+        let mut plans = Plans::default();
         let mut inductive = Vec::new();
         let mut asynchronous = Vec::new();
         for (id, rule) in p.rules.iter_enumerated() {
             if !runs(rule) {
                 continue;
             }
-            plans.insert(id, Plan::new(rule)?);
+            let mut plan = Plan::new(rule)?;
+            plan.frame = p
+                .rels
+                .get(rule.head.rel)
+                .and_then(|r| rule::FramePlan::of(rule, &r.persistence));
+            plans.insert(id, plan);
             match rule.kind {
                 RuleKind::Deductive => {}
                 RuleKind::Inductive => inductive.push(id),
@@ -285,7 +302,7 @@ impl Engine {
             s.rules.retain(|r| plans.contains_key(r));
         }
         strata_list.retain(|s| !s.aggregates.is_empty() || !s.rules.is_empty());
-        let mut stores: BTreeMap<StoreKey, Store> = BTreeMap::new();
+        let mut stores = Stores::default();
         for (id, r) in p.rels.iter_enumerated() {
             let blobs = rel_holds_blobs(p, id);
             stores.insert(StoreKey::Main(id), Store::new(cell_spec(p, &kinds, id, 0)?, blobs));
@@ -296,9 +313,8 @@ impl Engine {
         for id in inductive.iter().chain(&asynchronous) {
             if let Some(plan) = plans.get(id) {
                 let rel = p.rules.get(*id).map(|r| r.head.rel).ok_or_else(|| internal_error!("rule {id:?}"))?;
-                stores
-                    .entry(plan.head)
-                    .or_insert(Store::new(cell_spec(p, &kinds, rel, 0)?, rel_holds_blobs(p, rel)));
+                let spec = cell_spec(p, &kinds, rel, 0)?;
+                stores.insert_absent(plan.head, || Store::new(spec, rel_holds_blobs(p, rel)));
             }
         }
         let mut keyed = Vec::new();
@@ -330,11 +346,12 @@ impl Engine {
             },
             node,
             plans,
-            strata: strata_list,
-            inductive,
-            asynchronous,
+            strata: strata_list.into(),
+            inductive: inductive.into(),
+            asynchronous: asynchronous.into(),
             stores,
             prev: BTreeMap::new(),
+            recomputed: Vec::new(),
             groups: BTreeMap::new(),
             inputs: BTreeMap::new(),
             pending: Changes::default(),
@@ -348,6 +365,8 @@ impl Engine {
             examined: 0,
             examined_by: BTreeMap::new(),
             new_blobs: std::cell::RefCell::new(BTreeMap::new()),
+            orders: std::cell::RefCell::new(BTreeMap::new()),
+            fn_work: None,
             program,
         };
         engine.build_indexes()?;
@@ -395,6 +414,7 @@ impl Engine {
             *s = Store::new(s.cell.clone(), s.counts_blobs());
         }
         self.prev.clear();
+        self.recomputed.clear();
         self.groups.clear();
         self.inputs.clear();
         self.facts_loaded = false;
@@ -453,9 +473,7 @@ impl Engine {
         let tick = input.tick;
         let wrap = |e: ExprError| to_eval(e, tick, None);
         // 1. What changes.
-        for s in self.stores.values_mut() {
-            s.clear_delta();
-        }
+        self.stores.clear_deltas();
         let pending = std::mem::take(&mut self.pending);
         for (rel, rows) in &pending.deleted {
             for r in rows {
@@ -518,7 +536,7 @@ impl Engine {
         let p = program.get();
         // 2. The strata.
         let strata_list = self.strata.clone();
-        for s in &strata_list {
+        for s in strata_list.iter() {
             if s.recursive {
                 self.recursive_stratum(p, input, s)?;
             } else {
@@ -533,7 +551,8 @@ impl Engine {
             self.settle(tick)?;
         }
         // 3. The next tick's state and the tick's sends.
-        for id in self.inductive.clone().iter().chain(&self.asynchronous.clone()) {
+        let (inductive, asynchronous) = (self.inductive.clone(), self.asynchronous.clone());
+        for id in inductive.iter().chain(asynchronous.iter()) {
             self.maintain(p, input, *id)?;
         }
         self.settle(tick)?;
@@ -542,7 +561,7 @@ impl Engine {
         self.check_invariants(p, tick)?;
         // 5. The outputs.
         let mut changes = Changes::default();
-        for id in &self.inductive {
+        for id in self.inductive.iter() {
             let Some(plan) = self.plans.get(id) else { continue };
             let StoreKey::Next(rel) = plan.head else { continue };
             if changes.inserted.contains_key(&rel) || changes.deleted.contains_key(&rel) {
@@ -567,7 +586,7 @@ impl Engine {
             blobs: self.new_blobs.take(),
             ..StepOutput::default()
         };
-        for id in &self.asynchronous {
+        for id in self.asynchronous.iter() {
             let Some(plan) = self.plans.get(id) else { continue };
             let StoreKey::Async(rel) = plan.head else { continue };
             let s = self.stores.get(&plan.head).ok_or_else(|| internal_error!("no async store"))?;
@@ -600,7 +619,7 @@ impl Engine {
             let rows = self
                 .stores
                 .get(&StoreKey::Main(*rel))
-                .map(|s| s.present().iter().cloned().collect())
+                .map(|s| s.present().cloned().collect())
                 .unwrap_or_default();
             out.observed.insert(*rel, rows);
         }
@@ -609,10 +628,10 @@ impl Engine {
 
     fn next_instance(&self) -> Result<Instance, EvalError> {
         let mut next = Instance::default();
-        for (key, s) in &self.stores {
+        for (key, s) in self.stores.iter() {
             if let StoreKey::Next(rel) = key {
                 for r in s.present() {
-                    next.insert(*rel, r.clone());
+                    next.insert(rel, r.clone());
                 }
             }
         }
@@ -634,7 +653,7 @@ impl Engine {
         }
         self.stores
             .get(&StoreKey::Next(rel))
-            .map(|s| s.present().iter().cloned().collect())
+            .map(|s| s.present().cloned().collect())
             .unwrap_or_default()
     }
 
@@ -647,28 +666,41 @@ impl Engine {
             now: input.now,
             shared: &self.shared,
             fuel: crate::expr::Fuel::default(),
+            steps: std::cell::Cell::new(0),
+            fn_work: self.fn_work.as_ref(),
+            callee_steps: std::cell::Cell::new(0),
             blobs: input.blobs,
             new_blobs: &self.new_blobs,
+            flips_at: std::cell::Cell::new(None),
+            reads_time: std::cell::Cell::new(false),
         }
     }
 
     /// Brings one rule's output up to date.
     fn maintain(&mut self, p: &Program, input: &StepInput<'_>, id: RuleId) -> Result<(), EvalError> {
-        let plan = self.plans.get(&id).ok_or_else(|| internal_error!("rule {id:?} has no plan"))?.clone();
         let rule = p.rules.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?;
+        {
+            // Most rules see no change in a tick: tell so without taking a handle on the plan.
+            let plan = self.plans.get(&id).ok_or_else(|| internal_error!("rule {id:?} has no plan"))?;
+            let unchanged = !plan.dep_keys.iter().any(|k| self.stores.changed(k));
+            if plan.regime == Regime::Delta && unchanged {
+                return Ok(());
+            }
+            if plan.regime == Regime::Recompute
+                && unchanged
+                && let Some(Some(flips)) = self.recomputed.get(id.index())
+                && plan.skip == rule::Skip::WhenUnchanged
+                && flips.is_none_or(|t| input.now < t)
+            {
+                return Ok(());
+            }
+        }
+        let plan = self.plans.get(&id).ok_or_else(|| internal_error!("rule {id:?} has no plan"))?.clone();
         match plan.regime {
             Regime::Recompute => self.recompute_rule(p, input, rule, &plan),
             Regime::Delta => {
-                let changed = plan
-                    .deps
-                    .iter()
-                    .filter_map(|l| rule.body.lits.get(*l).and_then(dep_store))
-                    .any(|k| self.stores.get(&k).is_some_and(Store::changed));
-                if !changed {
-                    return Ok(());
-                }
                 let terms = self.evaluate(p, input, rule, &plan, false)?;
-                self.count(rule.id, terms.examined);
+                self.count(rule.id, terms.examined, terms.steps);
                 self.apply(p, input, rule, &plan, terms)
             }
         }
@@ -683,6 +715,9 @@ impl Engine {
         plan: &Plan,
         full: bool,
     ) -> Result<Terms, EvalError> {
+        if let (Some(frame), false) = (&plan.frame, full) {
+            return self.frame_change(frame);
+        }
         let cx = self.ctx(p, input);
         let mut drivers: Vec<(Driver, usize)> = Vec::new();
         if full {
@@ -777,6 +812,32 @@ impl Engine {
         self.run_drivers(p, input, rule, plan, drivers)
     }
 
+    /// A table frame's change (`FramePlan`): for each row that changed in the table, its deletions or its guard this
+    /// tick, the difference between its membership in the frame's output at the start of the tick and now.
+    fn frame_change(&self, frame: &rule::FramePlan) -> Result<Terms, EvalError> {
+        let store = |k: &StoreKey| {
+            self.stores
+                .get(k)
+                .ok_or_else(|| EvalError::from(internal_error!("no store for {k:?}")))
+        };
+        let (rel, del) = (store(&frame.rel)?, store(&frame.del)?);
+        let keep = frame.keep.as_ref().map(store).transpose()?;
+        let mut rows: BTreeSet<&Row> = rel.delta().map(|(r, _)| r).collect();
+        rows.extend(del.delta().map(|(r, _)| r));
+        if let Some(k) = keep {
+            rows.extend(k.delta().map(|(r, _)| r));
+        }
+        let mut out = Terms::default();
+        for row in rows {
+            let was = rel.contained(row) && !del.contained(row) && keep.is_none_or(|k| k.contained(row));
+            let is = rel.contains(row) && !del.contains(row) && keep.is_none_or(|k| k.contains(row));
+            if was != is {
+                out.heads.insert(row.clone(), if is { 1 } else { -1 });
+            }
+        }
+        Ok(out)
+    }
+
     /// Evaluates the terms of `rule` that `drivers` drive, each with its position among the rule's dependencies:
     /// the dependencies after it are read at their old version (`usize::MAX`: every one at its current version).
     fn run_drivers(
@@ -785,10 +846,28 @@ impl Engine {
         input: &StepInput<'_>,
         rule: &Rule,
         plan: &Plan,
-        drivers: Vec<(Driver, usize)>,
+        mut drivers: Vec<(Driver, usize)>,
     ) -> Result<Terms, EvalError> {
         let cx = self.ctx(p, input);
         let mut out = Terms::default();
+        // A copy rule's changed rows map straight to head rows (a full evaluation takes the general way).
+        if let Some(copy) = &plan.copy {
+            let mut rest = Vec::new();
+            for (driver, pos) in drivers {
+                match &driver {
+                    Driver::Atom { row, sign, .. } => {
+                        if let Some(h) = copy.row(&cx, row).map_err(|e| to_eval(e, input.tick, Some(rule)))? {
+                            *out.heads.entry(h).or_insert(0) += sign;
+                        }
+                    }
+                    _ => rest.push((driver, pos)),
+                }
+            }
+            if rest.is_empty() {
+                return Ok(out);
+            }
+            drivers = rest;
+        }
         let position: BTreeMap<usize, usize> = plan.deps.iter().enumerate().map(|(i, l)| (*l, i)).collect();
         // The join order of each driver's terms, from the stores as they are now.
         let cost = |lit: usize, cols: &[usize], range: bool| -> usize {
@@ -797,12 +876,36 @@ impl Engine {
             // A range keeps some of the rows its probe finds: assume a small fraction.
             if range { rows / 16 + 1 } else { rows }
         };
-        let mut orders: BTreeMap<Option<usize>, rule::Order> = BTreeMap::new();
+        // The orders are kept while every store stays within its power of two; stores below `SMALL_STORE` rows count
+        // as one size (they flip between a few rows from tick to tick, and any order joins them cheaply).
+        let sizes: Vec<u32> = plan
+            .atoms
+            .iter()
+            .map(|lit| match rule.body.lits.get(*lit) {
+                Some(Literal::Pos(a)) => self.stores.get(&rule::atom_store(a)).map_or(0, |s| {
+                    (usize::BITS - s.present_len().leading_zeros()).max(SMALL_STORE.trailing_zeros())
+                }),
+                _ => 0,
+            })
+            .collect();
+        let mut orders: BTreeMap<Option<usize>, Arc<rule::Order>> = BTreeMap::new();
         for (driver, _) in &drivers {
-            orders
-                .entry(driver.lit())
-                .or_insert_with(|| plan.order_for(rule, driver.lit(), &cost));
+            let lit = driver.lit();
+            if orders.contains_key(&lit) {
+                continue;
+            }
+            let mut cache = self.orders.borrow_mut();
+            let order = match cache.get(&(rule.id, lit)) {
+                Some((at, order)) if *at == sizes => order.clone(),
+                _ => {
+                    let order = Arc::new(plan.order_for(rule, lit, &cost));
+                    cache.insert((rule.id, lit), (sizes.clone(), order.clone()));
+                    order
+                }
+            };
+            orders.insert(lit, order);
         }
+        let mut buffers = rule::TermBuffers::default();
         for (driver, pos) in drivers {
             let order = orders
                 .get(&driver.lit())
@@ -835,7 +938,18 @@ impl Engine {
             };
             let mut errors: Vec<(Token, ExprError, i64)> = Vec::new();
             let mut error = |t: Token, e: ExprError, s: i64| errors.push((t, e, s));
-            out.examined += rule::run_term(&cx, &self.stores, rule, plan, order, &driver, &old, &mut emit, &mut error)?;
+            out.examined += rule::run_term(
+                &cx,
+                &self.stores,
+                rule,
+                plan,
+                order,
+                &driver,
+                &old,
+                &mut emit,
+                &mut error,
+                &mut buffers,
+            )?;
             for (t, e, s) in errors {
                 let slot = out.errors.entry(t).or_insert((0, None));
                 slot.0 += s;
@@ -844,6 +958,9 @@ impl Engine {
                 }
             }
         }
+        out.steps = cx.steps.get();
+        out.flips_at = cx.flips_at.get();
+        out.reads_time = cx.reads_time.get();
         Ok(out)
     }
 
@@ -857,9 +974,14 @@ impl Engine {
             return self.apply_aggregates(p, rule, plan, terms.aggs, tick);
         }
         let store = self.store(plan.head)?;
+        let mut writes = 0u64;
         for (row, w) in terms.heads {
+            if w != 0 {
+                writes += 1;
+            }
             store.add(row, w).map_err(|e| to_eval(e, tick, Some(rule)))?;
         }
+        self.count_writes(rule.id, writes);
         Ok(())
     }
 
@@ -910,21 +1032,26 @@ impl Engine {
             }
         }
         let store = self.store(plan.head)?;
+        let mut writes = 0u64;
         for (old, new) in edits {
             if let Some(o) = old {
+                writes += 1;
                 store.add(o, -1).map_err(|e| to_eval(e, tick, Some(rule)))?;
             }
             if let Some(n) = new {
+                writes += 1;
                 store.add(n, 1).map_err(|e| to_eval(e, tick, Some(rule)))?;
             }
         }
+        self.count_writes(rule.id, writes);
         Ok(())
     }
 
     /// A recompute rule: evaluated in full, its change is the difference from its last output.
     fn recompute_rule(&mut self, p: &Program, input: &StepInput<'_>, rule: &Rule, plan: &Plan) -> Result<(), EvalError> {
         let terms = self.evaluate(p, input, rule, plan, true)?;
-        self.count(rule.id, terms.examined);
+        self.count(rule.id, terms.examined, terms.steps);
+        let (flips_at, reads_time) = (terms.flips_at, terms.reads_time);
         let tick = input.tick;
         if let Some((_, (_, Some(e)))) = terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
             return Err(to_eval(e, tick, Some(rule)));
@@ -950,15 +1077,36 @@ impl Engine {
         } else {
             terms.heads.into_iter().filter(|(_, w)| *w > 0).collect()
         };
+        // Only the difference from the last output is applied: a row in both, with the same support, is left alone
+        // (retracting and re-adding it would change nothing but rebuild its index entries and touch the store).
         let old = self.prev.remove(&rule.id).unwrap_or_default();
         let store = self.store(plan.head)?;
+        let mut writes = 0u64;
         for (row, w) in &old {
-            store.add(row.clone(), -w).map_err(|e| to_eval(e, tick, Some(rule)))?;
+            let d = new.get(row).copied().unwrap_or(0) - w;
+            if d != 0 {
+                writes += 1;
+                store.add(row.clone(), d).map_err(|e| to_eval(e, tick, Some(rule)))?;
+            }
         }
         for (row, w) in &new {
-            store.add(row.clone(), *w).map_err(|e| to_eval(e, tick, Some(rule)))?;
+            if !old.contains_key(row) {
+                writes += 1;
+                store.add(row.clone(), *w).map_err(|e| to_eval(e, tick, Some(rule)))?;
+            }
         }
+        self.count_writes(rule.id, writes);
         self.prev.insert(rule.id, new);
+        if plan.skip == rule::Skip::WhenUnchanged {
+            let i = rule.id.index();
+            if self.recomputed.len() <= i {
+                self.recomputed.resize(i + 1, None);
+            }
+            if let Some(slot) = self.recomputed.get_mut(i) {
+                // Read freely, the time may change its output at the next tick: it is evaluated again.
+                *slot = if reads_time { None } else { Some(flips_at) };
+            }
+        }
         Ok(())
     }
 
@@ -1024,7 +1172,7 @@ impl Engine {
                 let plan = self.plans.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?.clone();
                 let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
                 let terms = self.evaluate(p, input, rule, &plan, true)?;
-                self.count(rule.id, terms.examined);
+                self.count(rule.id, terms.examined, terms.steps);
                 if let Some((_, (_, Some(e)))) = terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
                     if strict {
                         return Err(to_eval(e, tick, Some(rule)));
@@ -1137,7 +1285,7 @@ impl Engine {
                 let plan = self.plans.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?.clone();
                 let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
                 let terms = self.evaluate(p, input, rule, &plan, true)?;
-                self.count(rule.id, terms.examined);
+                self.count(rule.id, terms.examined, terms.steps);
                 return match terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
                     Some((_, (_, Some(e)))) => Err(to_eval(e, tick, Some(rule))),
                     _ => Err(internal_error!("rule {id:?} raised during the iteration and not at its fixpoint").into()),
@@ -1177,7 +1325,7 @@ impl Engine {
                         self.run_drivers(p, input, rule, &plan, drivers)?
                     }
                 };
-                self.count(rule.id, terms.examined);
+                self.count(rule.id, terms.examined, terms.steps);
                 if terms.errors.values().any(|(n, _)| *n > 0) {
                     raised.insert(*id);
                     continue;
@@ -1251,7 +1399,7 @@ impl Engine {
             let Some(row) = self
                 .stores
                 .get(&StoreKey::Main(rule.head.rel))
-                .and_then(|s| s.present().iter().next())
+                .and_then(|s| s.present().next())
             else {
                 continue;
             };
@@ -1299,10 +1447,10 @@ impl Engine {
             &[],
         )?;
         let mut instance = Instance::default();
-        for (key, s) in &self.stores {
+        for (key, s) in self.stores.iter() {
             if let StoreKey::Main(rel) = key {
                 for r in s.present() {
-                    instance.insert(*rel, r.clone());
+                    instance.insert(rel, r.clone());
                 }
             }
         }
@@ -1328,15 +1476,34 @@ impl Engine {
         self.examined
     }
 
-    /// [`Engine::rows_examined`] per rule (the rules that examined any).
-    pub fn rows_examined_by_rule(&self) -> &BTreeMap<RuleId, u64> {
+    /// The work of each rule since the engine was created (the rules that did any): rows examined, as
+    /// [`Engine::rows_examined`], and expression nodes evaluated.
+    pub fn work_by_rule(&self) -> &BTreeMap<RuleId, RuleWork> {
         &self.examined_by
     }
 
-    fn count(&mut self, rule: RuleId, examined: u64) {
+    /// Starts (afresh) or stops counting each function's work.
+    pub fn set_profile_functions(&mut self, on: bool) {
+        self.fn_work = on.then(|| std::cell::RefCell::new(BTreeMap::new()));
+    }
+
+    /// Each function's work since profiling was switched on (`None`: off).
+    pub fn work_by_function(&self) -> Option<BTreeMap<blossom_base::FnId, FnWork>> {
+        self.fn_work.as_ref().map(|w| w.borrow().clone())
+    }
+
+    fn count_writes(&mut self, rule: RuleId, writes: u64) {
+        if writes > 0 {
+            self.examined_by.entry(rule).or_default().writes += writes;
+        }
+    }
+
+    fn count(&mut self, rule: RuleId, examined: u64, steps: u64) {
         self.examined += examined;
-        if examined > 0 {
-            *self.examined_by.entry(rule).or_insert(0) += examined;
+        if examined > 0 || steps > 0 {
+            let w = self.examined_by.entry(rule).or_default();
+            w.rows += examined;
+            w.steps += steps;
         }
     }
 
@@ -1345,14 +1512,22 @@ impl Engine {
     }
 }
 
+/// A join order with the sizes of the stores it was chosen for, in powers of two (`Engine::orders`).
+type CachedOrder = (Vec<u32>, Arc<rule::Order>);
+
 /// A rule's evaluated change: head rows (or aggregate tuples) with signed weights, and runtime errors per valuation.
 #[derive(Default)]
 struct Terms {
-    /// The rows its atom probes returned (the work it did).
+    /// The rows its atom probes returned, and the expression nodes it evaluated (the work it did).
     examined: u64,
+    steps: u64,
     heads: BTreeMap<Row, i64>,
     aggs: BTreeMap<(Vec<Value>, usize, Vec<Value>), i64>,
     errors: BTreeMap<Token, (i64, Option<ExprError>)>,
+    /// When a comparison of `now()` it evaluated would come out the other way (`Ctx::flips_at`), and whether it
+    /// read the time otherwise (`Ctx::reads_time`).
+    flips_at: Option<blossom_value::time::Instant>,
+    reads_time: bool,
 }
 
 /// An aggregate rule's head row for a group whose live argument tuples are `tuples` (per aggregate column).

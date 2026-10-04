@@ -49,7 +49,9 @@ fn produce_entries(req: ProduceRequest) -> Vec<(u64, String, i32, Option<Bytes>)
 
 /// One partition's records, checked: an error (with its message and, for a bad batch, the batch's index), or the
 /// batches and how many offsets they take.
-struct Checked { error: i16, message: Option<String>, bad_batch: Option<i32>, batches: Vec<Bytes>, count: i64 }
+/// A partition's checked records: its error (NONE: accepted), and the accepted batches each with its header (decoded
+/// once, here, for everything after).
+struct Checked { error: i16, message: Option<String>, bad_batch: Option<i32>, batches: Vec<(Bytes, BatchHeader)>, count: i64 }
 
 fn refused(error: i16, message: String, bad_batch: Option<i32>) -> Checked {
     Checked { error: error, message: Some(message), bad_batch: bad_batch, batches: [], count: 0i64 }
@@ -61,8 +63,8 @@ fn refused(error: i16, message: String, bad_batch: Option<i32>) -> Checked {
 /// (CORRUPT_MESSAGE); no record, or a count that does not match the last offset delta (INVALID_RECORD); transactional
 /// (INVALID_RECORD: a request with transactional batches must name a transactional id, which
 /// `produce_request_error` refuses). An idempotent batch's producer state is checked when it is sequenced.
-fn batch_error(b: Bytes, max_bytes: i64) -> Option<(i16, String)> {
-    match batch_header(b) {
+fn batch_error(b: Bytes, header: Option<BatchHeader>, max_bytes: i64) -> Option<(i16, String)> {
+    match header {
         None => Some((CORRUPT_MESSAGE, "a batch is shorter than its header")),
         Some(h) => {
             if h.magic != 2i8 {
@@ -98,18 +100,22 @@ fn check_records(records: Option<Bytes>, max_bytes: i64) -> Checked {
             if batches.len() != 1 {
                 refused(INVALID_RECORD, "a Produce request carries exactly one record batch per partition", None)
             } else {
-                match batches.enumerate().filter_map(|e| batch_error(e.1, max_bytes).map(|x| (e.0, x))).first() {
+                let decoded = batches.map(|b| (b, batch_header(b)));
+                match decoded.enumerate().filter_map(|e| batch_error(e.1.0, e.1.1, max_bytes).map(|x| (e.0, x))).first() {
                     Some(x) => refused(x.1.0, x.1.1, Some(x.0 as i32)),
-                    None => Checked {
-                        error: NONE,
-                        message: None,
-                        bad_batch: None,
-                        batches: batches,
-                        count: batches.fold(0i64, |n, b| n + match batch_header(b) {
-                            Some(h) => offsets_taken(h),
+                    None => {
+                        let accepted = decoded.map(|d| match d.1 {
+                            Some(h) => (d.0, h),
                             None => error("check_records: an accepted batch has no header"),
-                        }),
-                    },
+                        });
+                        Checked {
+                            error: NONE,
+                            message: None,
+                            bad_batch: None,
+                            batches: accepted,
+                            count: accepted.fold(0i64, |n, bh| n + offsets_taken(bh.1)),
+                        }
+                    }
                 }
             }
         }
@@ -120,12 +126,19 @@ fn check_records(records: Option<Bytes>, max_bytes: i64) -> Checked {
 /// counts them) are fewer than the topic's `min.insync.replicas` is refused first (NOT_ENOUGH_REPLICAS, as Kafka
 /// refuses before appending); then the records. (A commit needs a majority of the replicas anyway, so a partition
 /// that lost its majority makes `acks=all` time out, whatever its in-sync replicas.)
-fn check_entry(records: Option<Bytes>, acks: i16, set: Vec<(String, String)>, in_sync: u64) -> Checked {
-    if acks == -1i16 && min_insync(set) > in_sync as i64 {
+fn check_entry(records: Option<Bytes>, acks: i16, limits: TopicLimits, in_sync: u64) -> Checked {
+    if acks == -1i16 && limits.min_insync > in_sync as i64 {
         refused(NOT_ENOUGH_REPLICAS, "the in-sync replicas are fewer than min.insync.replicas", None)
     } else {
-        check_records(records, max_message_bytes(set))
+        check_records(records, limits.max_message_bytes)
     }
+}
+
+/// The configurations a produce reads, parsed from a topic's configurations once (`topic_limits`), not per entry.
+struct TopicLimits { max_message_bytes: i64, min_insync: i64, segment_bytes: i64 }
+
+fn topic_limits_of(set: Vec<(String, String)>) -> TopicLimits {
+    TopicLimits { max_message_bytes: max_message_bytes(set), min_insync: min_insync(set), segment_bytes: segment_bytes(set) }
 }
 
 /// A topic's `min.insync.replicas`.
@@ -137,8 +150,8 @@ fn min_insync(set: Vec<(String, String)>) -> i64 {
 }
 
 /// The producer ids of a partition's appends this tick (-1, no producer, left out).
-fn batch_producers(xs: Vec<((Instant, Conn, u64), Vec<Bytes>)>) -> Set<i64> {
-    xs.map(|x| x.1.filter_map(|b| batch_header(b).map(|h| h.producer_id))).flatten().filter(|p| p != -1i64).to_set()
+fn batch_producers(xs: Vec<((Instant, Conn, u64), Vec<(Bytes, BatchHeader)>)>) -> Set<i64> {
+    xs.map(|x| x.1.map(|bh| bh.1.producer_id)).flatten().filter(|p| p != -1i64).to_set()
 }
 
 /// One partition's answer.
@@ -289,31 +302,27 @@ fn after_append(e: Option<ProducerEntry>, h: BatchHeader, base: i64, last: i64) 
 /// states, and whether a batch was refused or found to be a duplicate (which ends the walk).
 struct Walk { placed: Vec<(i64, i64, i64, Bytes)>, at: i64, states: Vec<ProducerEntry>, refused: Option<(i16, String)>, duplicate_of: Option<(i64, i64)> }
 
-fn walk_batch(w: Walk, b: Bytes) -> Walk {
+fn walk_batch(w: Walk, bh: (Bytes, BatchHeader)) -> Walk {
+    let (b, h) = bh;
     if w.refused.is_some() || w.duplicate_of.is_some() {
         w
     } else {
-        match batch_header(b) {
-            None => error("walk_batch: an accepted batch has no header"),
-            Some(h) => {
-                let n = offsets_taken(h);
-                let placed = w.placed.push((w.at, w.at + n - 1i64, h.max_timestamp, stamp(b, w.at)));
-                if h.producer_id == -1i64 {
-                    Walk { placed: placed, at: w.at + n, states: w.states, refused: None, duplicate_of: None }
-                } else {
-                    let e = entry_of(w.states, h.producer_id);
-                    let v = producer_check(e, h);
-                    if v.refused.is_some() || v.duplicate_of.is_some() {
-                        Walk { placed: w.placed, at: w.at, states: w.states, refused: v.refused, duplicate_of: v.duplicate_of }
-                    } else {
-                        Walk {
-                            placed: placed,
-                            at: w.at + n,
-                            states: with_entry(w.states, after_append(e, h, w.at, w.at + n - 1i64)),
-                            refused: None,
-                            duplicate_of: None,
-                        }
-                    }
+        let n = offsets_taken(h);
+        let placed = w.placed.push((w.at, w.at + n - 1i64, h.max_timestamp, stamp(b, w.at)));
+        if h.producer_id == -1i64 {
+            Walk { placed: placed, at: w.at + n, states: w.states, refused: None, duplicate_of: None }
+        } else {
+            let e = entry_of(w.states, h.producer_id);
+            let v = producer_check(e, h);
+            if v.refused.is_some() || v.duplicate_of.is_some() {
+                Walk { placed: w.placed, at: w.at, states: w.states, refused: v.refused, duplicate_of: v.duplicate_of }
+            } else {
+                Walk {
+                    placed: placed,
+                    at: w.at + n,
+                    states: with_entry(w.states, after_append(e, h, w.at, w.at + n - 1i64)),
+                    refused: None,
+                    duplicate_of: None,
                 }
             }
         }
@@ -323,7 +332,7 @@ fn walk_batch(w: Walk, b: Bytes) -> Walk {
 /// One append (one partition entry's batches) against the log end `end` and the producer states: its outcome, and
 /// the states after it. Every batch must pass; the first refusal refuses the whole entry and changes nothing. A
 /// retried batch returns where it was appended and appends nothing, as Kafka answers a duplicate.
-fn sequence_one(batches: Vec<Bytes>, end: i64, states: Vec<ProducerEntry>) -> (AppendOutcome, Vec<ProducerEntry>) {
+fn sequence_one(batches: Vec<(Bytes, BatchHeader)>, end: i64, states: Vec<ProducerEntry>) -> (AppendOutcome, Vec<ProducerEntry>) {
     let w = batches.fold(Walk { placed: [], at: end, states: states, refused: None, duplicate_of: None }, |acc, b| walk_batch(acc, b));
     match (w.refused, w.duplicate_of) {
         (Some(x), _) => (AppendOutcome { error: x.0, message: Some(x.1), base: -1i64, placed: [], count: 0i64, duplicate_last: -1i64 }, states),
@@ -348,7 +357,7 @@ fn stamp(b: Bytes, at: i64) -> Bytes {
 
 /// The appends to one partition in one tick, in the tick's order (`xs` is ordered, as `collect!` orders it). Each
 /// step is the log end and producer states after an append, with its outcome.
-fn sequence_appends(xs: Vec<((Instant, Conn, u64), Vec<Bytes>)>, end: i64, states: Vec<ProducerEntry>) -> Sequenced {
+fn sequence_appends(xs: Vec<((Instant, Conn, u64), Vec<(Bytes, BatchHeader)>)>, end: i64, states: Vec<ProducerEntry>) -> Sequenced {
     let start: (i64, Vec<ProducerEntry>, Option<((Instant, Conn, u64), AppendOutcome)>) = (end, states, None);
     let steps = xs.scan(start, |acc, x| {
         let (o, sts) = sequence_one(x.1, acc.0, acc.1);

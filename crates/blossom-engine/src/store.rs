@@ -95,7 +95,9 @@ pub(crate) struct Store {
     unsettled: BTreeSet<Vec<Value>>,
     /// Counts every change to the present rows.
     generation: u64,
-    present: BTreeSet<Row>,
+    /// Lattice relation: the present rows (the merged cells). A set relation's present rows are the keys of
+    /// `counts` (a row is kept there only while its support is positive), so it keeps no second copy.
+    merged_rows: BTreeSet<Row>,
     /// Built lazily from `&self` (a node's engine runs on one thread).
     indexes: RefCell<BTreeMap<Vec<usize>, Index>>,
     /// The tick's change to the present rows.
@@ -110,6 +112,28 @@ pub(crate) struct Store {
 
 fn key(row: &[Value], cols: &[usize]) -> Vec<Value> {
     cols.iter().filter_map(|c| row.get(*c).cloned()).collect()
+}
+
+/// Whether `row`'s columns `cols` hold `values` (as `key(row, cols) == values`, without building the key).
+fn holds(row: &[Value], cols: &[usize], values: &[Value]) -> bool {
+    cols.len() == values.len() && cols.iter().zip(values).all(|(c, v)| row.get(*c) == Some(v))
+}
+
+/// A store's present rows, in order.
+pub(crate) enum Present<'a> {
+    Set(std::collections::btree_map::Keys<'a, Row, i64>),
+    Lattice(std::collections::btree_set::Iter<'a, Row>),
+}
+
+impl<'a> Iterator for Present<'a> {
+    type Item = &'a Row;
+
+    fn next(&mut self) -> Option<&'a Row> {
+        match self {
+            Present::Set(it) => it.next(),
+            Present::Lattice(it) => it.next(),
+        }
+    }
 }
 
 impl Store {
@@ -150,8 +174,18 @@ impl Store {
         }
     }
 
-    pub fn present(&self) -> &BTreeSet<Row> {
-        &self.present
+    /// The present rows, in order.
+    pub fn present(&self) -> Present<'_> {
+        if self.cell.is_some() {
+            Present::Lattice(self.merged_rows.iter())
+        } else {
+            Present::Set(self.counts.keys())
+        }
+    }
+
+    /// How many rows are present.
+    pub fn present_len(&self) -> usize {
+        if self.cell.is_some() { self.merged_rows.len() } else { self.counts.len() }
     }
 
     pub fn changed(&self) -> bool {
@@ -256,8 +290,13 @@ impl Store {
 
     /// A counter that moves with every change to the present rows.
     /// Whether `row` is present.
+    /// Whether `row` was present at the start of the tick.
+    pub fn contained(&self, row: &Row) -> bool {
+        (self.contains(row) && !self.ins.contains(row)) || self.del.contains(row)
+    }
+
     pub fn contains(&self, row: &Row) -> bool {
-        self.present.contains(row)
+        if self.cell.is_some() { self.merged_rows.contains(row) } else { self.counts.contains_key(row) }
     }
 
     pub fn generation(&self) -> u64 {
@@ -270,10 +309,12 @@ impl Store {
         for (cols, index) in self.indexes.get_mut() {
             index.entry(key(&row, cols)).or_default().insert(row.clone());
         }
-        if !self.del.remove(&row) {
-            self.ins.insert(row.clone());
+        if self.cell.is_some() {
+            self.merged_rows.insert(row.clone());
         }
-        self.present.insert(row);
+        if !self.del.remove(&row) {
+            self.ins.insert(row);
+        }
     }
 
     fn hide(&mut self, row: &Row) {
@@ -288,10 +329,12 @@ impl Store {
                 }
             }
         }
+        if self.cell.is_some() {
+            self.merged_rows.remove(row);
+        }
         if !self.ins.remove(row) {
             self.del.insert(row.clone());
         }
-        self.present.remove(row);
     }
 
     /// Builds the index on `cols` if there is none.
@@ -300,7 +343,7 @@ impl Store {
             return;
         }
         let mut index = Index::new();
-        for row in &self.present {
+        for row in self.present() {
             index.entry(key(row, cols)).or_default().insert(row.clone());
         }
         self.indexes.borrow_mut().insert(cols.to_vec(), index);
@@ -308,7 +351,7 @@ impl Store {
 
     /// About how many present rows match a probe on `cols`: all of them, or the average bucket of the index.
     pub fn estimate(&self, cols: &[usize]) -> usize {
-        let n = self.present.len();
+        let n = self.present_len();
         if cols.is_empty() {
             return n;
         }
@@ -321,7 +364,7 @@ impl Store {
     pub fn new_rows(&self, cols: &[usize], values: &[Value]) -> Result<Vec<Row>, EvalError> {
         self.settled()?;
         if cols.is_empty() {
-            return Ok(self.present.iter().cloned().collect());
+            return Ok(self.present().cloned().collect());
         }
         self.ensure_index(cols);
         let indexes = self.indexes.borrow();
@@ -334,13 +377,13 @@ impl Store {
     /// Whether a row of one version has columns `cols` holding `values` (without collecting them).
     pub fn any(&self, old: bool, cols: &[usize], values: &[Value]) -> Result<bool, EvalError> {
         self.settled()?;
-        let matches = |r: &Row| key(r, cols) == values;
+        let matches = |r: &Row| holds(r, cols, values);
         if old && self.del.iter().any(matches) {
             return Ok(true);
         }
         let live = |r: &Row| !old || !self.ins.contains(r);
         if cols.is_empty() {
-            return Ok(self.present.iter().any(live));
+            return Ok(self.present().any(live));
         }
         self.ensure_index(cols);
         let indexes = self.indexes.borrow();
@@ -357,7 +400,7 @@ impl Store {
             .into_iter()
             .filter(|r| !self.ins.contains(r))
             .collect();
-        out.extend(self.del.iter().filter(|r| key(r, cols) == values).cloned());
+        out.extend(self.del.iter().filter(|r| holds(r, cols, values)).cloned());
         Ok(out)
     }
 
@@ -419,7 +462,7 @@ impl Store {
             out.extend(
                 self.del
                     .iter()
-                    .filter(|r| key(r, cols) == values && r.get(col).is_some_and(within))
+                    .filter(|r| holds(r, cols, values) && r.get(col).is_some_and(within))
                     .cloned(),
             );
         }

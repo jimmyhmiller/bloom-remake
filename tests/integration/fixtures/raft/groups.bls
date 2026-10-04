@@ -79,9 +79,9 @@ at Broker {
     view confirms(g) = rlog(g, _, _, _, _, _, _) where false;
 
     /// `moving`'s leader proposes the next change towards the phase's configuration (phases of 400 ms), once the
-    /// last change is committed.
+    /// last change is committed, unless the group is held here.
     view config_step(g, ids) =
-        config_ready(g), moving(g), member_ids(g, cur),
+        config_ready(g), moving(g), not held(g), member_ids(g, cur),
         let Some(ids) = step_towards(cur, moving_target(now().as_millis() / 400 % 4));
 
     /// A leader proposes one entry per tickle (its count), unless the group is held here, and `moving`'s leader its

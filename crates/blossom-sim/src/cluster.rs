@@ -111,6 +111,8 @@ pub struct ClusterConfig {
     pub chunk_max: usize,
     /// Whether the nemesis also resets byte-stream connections.
     pub stream_drops: bool,
+    /// Each node records its trace (`blossom trace`) into this directory: `<node>-<incarnation>.blstrace`.
+    pub record: Option<std::path::PathBuf>,
 }
 
 impl Default for ClusterConfig {
@@ -135,6 +137,7 @@ impl Default for ClusterConfig {
             externs: Arc::new(blossom_value::ExternRegistry::new()),
             chunk_max: 16,
             stream_drops: false,
+            record: None,
         }
     }
 }
@@ -290,6 +293,8 @@ pub struct Cluster<'p> {
     artifact: &'p BlsArtifact,
     schema: &'p DurableSchema,
     executors: Executors,
+    /// The program's seed (for a recorded trace's header).
+    program_seed: blossom_value::Seed,
     acl: AclTable,
     names: Arc<[Arc<str>]>,
     statics: Vec<(RelId, Row)>,
@@ -355,6 +360,7 @@ impl<'p> Cluster<'p> {
         .map_err(SimError::Load)?;
         let names: Arc<[Arc<str>]> = artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect();
         let mut c = Cluster {
+            program_seed,
             artifact,
             schema,
             acl: AclTable::of(artifact.program.get()),
@@ -448,6 +454,32 @@ impl<'p> Cluster<'p> {
             .executors
             .make(n)
             .map_err(|e| SimError::Internal(internal_error!("node {} cannot start its evaluator: {e}", n.0)))?;
+        let exec = match &self.cfg.record {
+            None => exec,
+            Some(dir) => {
+                let program = artifact.program.get();
+                let header = blossom_trace::node::NodeTraceHeader {
+                    format: blossom_trace::node::FORMAT,
+                    program: program.meta.name.as_str().into(),
+                    version: program.meta.version,
+                    digest: artifact.program.digest().0,
+                    nodes: names.to_vec(),
+                    node: n,
+                    incarnation: opened.boot.incarnation,
+                    seed: self.program_seed.0,
+                };
+                let name = names.get(n.0 as usize).map_or_else(|| format!("node{}", n.0), |s| s.to_string());
+                let path = dir.join(format!("{name}-{}.blstrace", opened.boot.incarnation));
+                let file = std::fs::create_dir_all(dir)
+                    .and_then(|()| blossom_trace::node::create_trace_file(&path))
+                    .map_err(|e| SimError::Internal(internal_error!("the trace {}: {e}", path.display())))?;
+                let sink: Box<dyn std::io::Write + Send> = Box::new(std::io::BufWriter::new(file));
+                Box::new(
+                    blossom_node::record::Recording::new(sink, &header, exec)
+                        .map_err(|e| SimError::Internal(internal_error!("the trace {}: {e}", path.display())))?,
+                )
+            }
+        };
         let node = Node::boot(cfg, &artifact.program, exec, opened.boot.clone())
             .map_err(|e| SimError::Internal(internal_error!("node {} cannot boot: {e}", n.0)))?;
         slot.driver = Some(ManualDriver::new(node, artifact.program.get(), schema, names, opened));

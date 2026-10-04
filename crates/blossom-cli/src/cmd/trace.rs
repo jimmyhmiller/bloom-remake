@@ -8,7 +8,8 @@
 //! - `history`: every tick a relation's rows matching a pattern changed: a table's rows added or removed (for the
 //!   next tick), a channel's messages received (`<-`) and sent (`->`), an event's rows (`!`), and when a view's rows
 //!   start and stop holding.
-//! - `profile`: the rules that did the most join work at a tick (`replay --slow` finds the slow ticks).
+//! - `profile`: the rules that did the most join work at a tick, or over the whole trace (`replay --slow` finds the
+//!   slow ticks).
 //! - `why`: the rule firings that derived the rows matching a pattern at a tick.
 //! - `whynot`: for each rule that could derive a tuple matching a pattern, how far its body got at a tick, and the
 //!   first literal no valuation passed (ask again about that literal's relation to go deeper).
@@ -25,10 +26,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use blossom_artifact::bls::BlsArtifact;
-use blossom_base::{RelId, RuleId, TypeId};
+use blossom_base::{FnId, RelId, RuleId, TypeId};
 use blossom_ir::core::{Persistence, Program, RelClass};
 use blossom_ir::printer::{literal_text, rule_text, value_text, var_text};
-use blossom_ir::tick::Row;
+use blossom_ir::tick::{FnWork, Row, RuleWork};
 use blossom_sim::replay::{Replay, ReplayError, Replayed};
 use blossom_value::time::NodeId;
 use blossom_value::value::IntValue;
@@ -74,6 +75,12 @@ pub enum TraceCommand {
     History {
         #[command(flatten)]
         common: Common,
+        /// Only ticks at or after this time (seconds since the epoch, as the output prints them).
+        #[arg(long)]
+        from: Option<f64>,
+        /// Only ticks at or before this time.
+        #[arg(long)]
+        to: Option<f64>,
         /// The pattern (`rel(v, _, …)`).
         pattern: String,
     },
@@ -91,9 +98,15 @@ pub enum TraceCommand {
     Profile {
         #[command(flatten)]
         common: Common,
-        /// The tick.
+        /// The tick (without it: the whole trace, summed).
         #[arg(long)]
-        at: u64,
+        at: Option<u64>,
+        /// Summing, only ticks at or after this time (seconds since the epoch).
+        #[arg(long)]
+        from: Option<f64>,
+        /// Summing, only ticks at or before this time.
+        #[arg(long)]
+        to: Option<f64>,
         /// How many rules to list.
         #[arg(long, default_value_t = 10)]
         top: usize,
@@ -113,14 +126,29 @@ pub enum TraceCommand {
     },
 }
 
-/// What every subcommand takes.
+/// What every subcommand takes: the trace, and the program it was recorded with, from the deployment spec or (a
+/// simulated run, which has none) as the program's source, nodes and parameters.
 #[derive(Debug, clap::Args)]
 pub struct Common {
     /// The trace (`<node>-<incarnation>.blstrace`).
     pub trace: PathBuf,
     /// The deployment spec it was recorded under (`deploy.toml`): its program is compiled and replayed.
-    #[arg(long = "deploy", value_name = "FILE")]
-    pub deploy: PathBuf,
+    #[arg(
+        long = "deploy",
+        value_name = "FILE",
+        required_unless_present = "program",
+        conflicts_with = "program"
+    )]
+    pub deploy: Option<PathBuf>,
+    /// Instead of a deployment: the program's source, compiled for `--node`s with `--param`s.
+    #[arg(long, value_name = "FILE")]
+    pub program: Option<PathBuf>,
+    /// A node of the deployment, in order (`NAME:ROLE`, or `NAME` in a role-free program).
+    #[arg(long = "node", value_name = "NAME[:ROLE]", requires = "program")]
+    pub nodes: Vec<String>,
+    /// A deploy-time parameter (`NAME=VALUE`: `true`/`false`, an integer, or text such as `500ms`).
+    #[arg(long = "param", value_name = "NAME=VALUE", requires = "program")]
+    pub params: Vec<String>,
 }
 
 /// Runs the command.
@@ -136,11 +164,50 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
 }
 
 fn open(common: &Common) -> Result<(Arc<BlsArtifact>, Replay<BufReader<File>>), String> {
-    let (_spec, artifact) = load(&common.deploy).map_err(|_| "the deployment did not load".to_owned())?;
+    let artifact = match (&common.deploy, &common.program) {
+        (Some(deploy), _) => load(deploy).map_err(|_| "the deployment did not load".to_owned())?.1,
+        (None, Some(program)) => Arc::new(compile_program(program, &common.nodes, &common.params)?),
+        (None, None) => return Err("give --deploy, or --program with its --node and --param".into()),
+    };
     let file = File::open(&common.trace).map_err(|e| format!("{}: {e}", common.trace.display()))?;
     let externs = crate::common::std_externs().map_err(|e| e.to_string())?;
     let replay = Replay::open(&artifact, BufReader::new(file), externs).map_err(|e| e.to_string())?;
     Ok((artifact, replay))
+}
+
+/// Compiles `program` for `nodes` (`NAME[:ROLE]`) with `params` (`NAME=VALUE`).
+fn compile_program(program: &std::path::Path, nodes: &[String], params: &[String]) -> Result<BlsArtifact, String> {
+    use blossom_front::api::{NodeSpec, ParamBinding};
+    let nodes: Vec<NodeSpec> = nodes
+        .iter()
+        .map(|n| match n.split_once(':') {
+            Some((name, role)) => NodeSpec {
+                name: name.to_owned(),
+                role: Some(role.to_owned()),
+            },
+            None => NodeSpec {
+                name: n.clone(),
+                role: None,
+            },
+        })
+        .collect();
+    let mut bindings = BTreeMap::new();
+    for p in params {
+        let (name, value) = p.split_once('=').ok_or_else(|| format!("`{p}` is not NAME=VALUE"))?;
+        let binding = match value {
+            "true" => ParamBinding::Bool(true),
+            "false" => ParamBinding::Bool(false),
+            v => match v.parse::<i128>() {
+                Ok(n) => ParamBinding::Int(n),
+                Err(_) => ParamBinding::Text(v.to_owned()),
+            },
+        };
+        bindings.insert(name.to_owned(), binding);
+    }
+    let source = program
+        .to_str()
+        .ok_or_else(|| format!("the program path {} is not UTF-8", program.display()))?;
+    crate::common::bls::compile_with(source, &nodes, &bindings).map_err(|_| "the program did not compile".to_owned())
 }
 
 /// What a relation's history reports: a carried relation's changes, a channel's messages received and sent, an
@@ -149,6 +216,7 @@ fn open(common: &Common) -> Result<(Arc<BlsArtifact>, Replay<BufReader<File>>), 
 enum Kind {
     Carried,
     Channel,
+    Host,
     Event,
     View,
 }
@@ -177,18 +245,58 @@ mod stopwatch {
 }
 use stopwatch::Stopwatch;
 
-/// The `top` rules that examined the most rows in the replayed tick `r` (profiled).
-fn print_work(names: &Names<'_>, r: &Replayed, top: usize) {
-    let total: u64 = r.work.values().sum();
-    let mut by: Vec<(RuleId, u64)> = r.work.iter().map(|(k, v)| (*k, *v)).collect();
-    by.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    println!("  {total} rows examined by {} rules", by.len());
+/// The `top` rules that did the most work in `work` (a profiled tick's, or a sum): by expression nodes evaluated,
+/// rows examined and rows written, each a unit of the engine's work.
+fn print_work(names: &Names<'_>, work: &BTreeMap<RuleId, RuleWork>, top: usize) {
+    let (rows, steps, writes) = work.values().fold((0u64, 0u64, 0u64), |(r, s, w), x| {
+        (r + x.rows, s + x.steps, w + x.writes)
+    });
+    let mut by: Vec<(RuleId, RuleWork)> = work.iter().map(|(k, v)| (*k, *v)).collect();
+    let total = |w: &RuleWork| w.rows + w.steps + w.writes;
+    by.sort_by(|a, b| total(&b.1).cmp(&total(&a.1)).then(a.0.cmp(&b.0)));
+    println!(
+        "  {rows} rows examined, {steps} expression steps, {writes} rows written, by {} rules",
+        by.len()
+    );
+    println!("  {:>12}  {:>12}  {:>12}", "steps", "rows", "writes");
     let program = names.program();
-    for (id, n) in by.into_iter().take(top) {
+    for (id, w) in by.into_iter().take(top) {
         let Some(rule) = program.rules.get(id) else { continue };
-        println!("  {n:>12}  {} ({:?})", rule.label, rule.kind);
-        println!("                {}", rule_text(program, rule));
+        println!(
+            "  {:>12}  {:>12}  {:>12}  {} ({:?})",
+            w.steps, w.rows, w.writes, rule.label, rule.kind
+        );
+        println!(
+            "                                            {}",
+            rule_text(program, rule)
+        );
     }
+}
+
+/// The `top` functions whose own bodies took the most steps in `work`, with their calls and their steps including
+/// the functions they called.
+fn print_fn_work(names: &Names<'_>, work: &BTreeMap<FnId, FnWork>, top: usize) {
+    if work.is_empty() {
+        return;
+    }
+    let mut by: Vec<(FnId, FnWork)> = work.iter().map(|(k, v)| (*k, *v)).collect();
+    by.sort_by(|a, b| b.1.self_steps.cmp(&a.1.self_steps).then(a.0.cmp(&b.0)));
+    println!("  functions, by their own steps:");
+    println!("  {:>12}  {:>12}  {:>10}", "own steps", "with calls", "calls");
+    let program = names.program();
+    for (id, w) in by.into_iter().take(top) {
+        let name = program
+            .fns
+            .get(id)
+            .map_or_else(|| format!("{id:?}"), |d| d.name.to_string());
+        println!("  {:>12}  {:>12}  {:>10}  {name}", w.self_steps, w.steps, w.calls);
+    }
+}
+
+/// Seconds since the epoch (as `history --from/--to` take them) in the trace's nanoseconds.
+#[allow(clippy::cast_possible_truncation)] // A time within ±292 years of the epoch: nanoseconds fit an i64.
+fn seconds_to_nanos(s: f64) -> i64 {
+    (s * 1e9).round() as i64
 }
 
 /// What a tick received, counted per relation: `name ×n` for events, deliveries and client requests.
@@ -473,7 +581,7 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
                     before = Some((t, now));
                     if took >= ms {
                         println!("tick {t}: replayed in {took} ms; {}", received(&names, &r));
-                        print_work(&names, &r, 3);
+                        print_work(&names, &r.work, 3);
                     }
                 }
                 ticks += 1;
@@ -535,7 +643,12 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
             }
             Ok(())
         }
-        TraceCommand::History { common, pattern } => {
+        TraceCommand::History {
+            common,
+            from,
+            to,
+            pattern,
+        } => {
             let (artifact, mut replay) = open(&common)?;
             let names = Names { artifact: &artifact };
             let (rel, pat) = names.pattern(&pattern)?;
@@ -546,6 +659,7 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
                 .ok_or_else(|| format!("{rel:?} is not declared"))?;
             let kind = match (&decl.class, &decl.persistence) {
                 (RelClass::Channel(_), _) => Kind::Channel,
+                (RelClass::HostOut(_), _) => Kind::Host,
                 (RelClass::Event(_), _) => Kind::Event,
                 (_, Persistence::None) => Kind::View,
                 _ => Kind::Carried,
@@ -555,6 +669,15 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
             }
             let mut held: BTreeSet<Row> = BTreeSet::new();
             while let Some(r) = replay.next(false).map_err(err)? {
+                // The window, compared in nanoseconds (as the trace holds times).
+                let now = r.inputs.now.0;
+                if to.is_some_and(|t| now > seconds_to_nanos(t)) {
+                    break;
+                }
+                let shown = from.is_none_or(|f| now >= seconds_to_nanos(f));
+                if !shown && kind != Kind::View {
+                    continue;
+                }
                 let at = format!(
                     "tick {} {}",
                     r.inputs.tick.0,
@@ -570,6 +693,11 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
                                     println!("{at} {sign} {} (from the next tick)", names.row(rel, row));
                                 }
                             }
+                        }
+                    }
+                    Kind::Host => {
+                        for h in r.host.iter().filter(|h| h.rel == rel && matches(&pat, &h.row)) {
+                            println!("{at} -> {}", names.row(rel, &h.row));
                         }
                     }
                     Kind::Channel => {
@@ -599,11 +727,13 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
                     Kind::View => {
                         let Some(rows) = r.observed.get(&rel) else { continue };
                         let now: BTreeSet<Row> = rows.iter().filter(|row| matches(&pat, row)).cloned().collect();
-                        for row in held.difference(&now) {
-                            println!("{at} - {} (no longer holds)", names.row(rel, row));
-                        }
-                        for row in now.difference(&held) {
-                            println!("{at} + {} (holds)", names.row(rel, row));
+                        if shown {
+                            for row in held.difference(&now) {
+                                println!("{at} - {} (no longer holds)", names.row(rel, row));
+                            }
+                            for row in now.difference(&held) {
+                                println!("{at} + {} (holds)", names.row(rel, row));
+                            }
                         }
                         held = now;
                     }
@@ -611,7 +741,52 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
             }
             Ok(())
         }
-        TraceCommand::Profile { common, at, top } => {
+        TraceCommand::Profile {
+            common,
+            at: None,
+            from,
+            to,
+            top,
+        } => {
+            let (artifact, mut replay) = open(&common)?;
+            let names = Names { artifact: &artifact };
+            replay.profile(true).map_err(err)?;
+            let mut work: BTreeMap<RuleId, RuleWork> = BTreeMap::new();
+            let mut fns: BTreeMap<FnId, FnWork> = BTreeMap::new();
+            let mut ticks = 0u64;
+            while let Some(r) = replay.next(false).map_err(err)? {
+                let now = r.inputs.now.0;
+                if to.is_some_and(|t| now > seconds_to_nanos(t)) {
+                    break;
+                }
+                if from.is_some_and(|f| now < seconds_to_nanos(f)) {
+                    continue;
+                }
+                ticks += 1;
+                for (rule, n) in r.work {
+                    let w = work.entry(rule).or_default();
+                    w.rows += n.rows;
+                    w.steps += n.steps;
+                    w.writes += n.writes;
+                }
+                for (f, n) in r.fn_work {
+                    let w = fns.entry(f).or_default();
+                    w.calls += n.calls;
+                    w.steps += n.steps;
+                    w.self_steps += n.self_steps;
+                }
+            }
+            println!("{ticks} ticks");
+            print_work(&names, &work, top);
+            print_fn_work(&names, &fns, top);
+            Ok(())
+        }
+        TraceCommand::Profile {
+            common,
+            at: Some(at),
+            top,
+            ..
+        } => {
             let (artifact, mut replay) = open(&common)?;
             let names = Names { artifact: &artifact };
             loop {
@@ -633,7 +808,8 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
                 names.value(&Value::Instant(r.inputs.now), None),
                 received(&names, &r)
             );
-            print_work(&names, &r, top);
+            print_work(&names, &r.work, top);
+            print_fn_work(&names, &r.fn_work, top);
             Ok(())
         }
         TraceCommand::Why { common, at, pattern } => {

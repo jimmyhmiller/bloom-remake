@@ -664,6 +664,8 @@ struct Shared {
     ids: Vec<Id>,
     /// Requests answered REQUEST_TIMED_OUT (recorded unanswered).
     timeouts: usize,
+    /// Set when the checked run ends: no client issues another request, so the brokers can settle.
+    stopped: bool,
 }
 
 #[cfg(test)]
@@ -693,7 +695,7 @@ struct Client {
 #[cfg(test)]
 impl Client {
     fn issue(&mut self, now: i64, a: &mut StreamAction) {
-        if self.left == 0 {
+        if self.left == 0 || self.shared.borrow().stopped {
             return;
         }
         self.left -= 1;
@@ -896,6 +898,7 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
             stream_drops: setup.stream_drops,
             duration: 3_000_000_000,
             externs: Arc::new(blossom_std_host::registry().unwrap()),
+            record: blossom_integration_tests::sim_record(&format!("topics{}-seed{seed}", setup.brokers)),
             ..ClusterConfig::default()
         };
         let mut cluster = Cluster::new(
@@ -957,6 +960,7 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
             cluster.restart(stopped).unwrap();
         }
         cluster.run_until(3_000_000_000).unwrap();
+        shared.borrow_mut().stopped = true;
         let run = cluster.run_so_far();
         assert!(
             run.violation.is_none(),
@@ -985,8 +989,10 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
         }
         // Let the brokers settle, then check their tables agree: every broker holds the same topics and placements,
         // and each replica exactly its partitions' offsets.
+        // A request in flight at the end holds its command for up to its deadline (a second), resending it to the
+        // controller until then: settle a second past that, so the last command appended is applied everywhere.
         cluster.heal();
-        cluster.step_until(4_000_000_000).unwrap();
+        cluster.step_until(5_000_000_000).unwrap();
         let rows = |n: u32, rel: &str| -> Vec<Vec<Value>> {
             let state = cluster
                 .state(NodeId(n))

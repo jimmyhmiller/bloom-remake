@@ -9,7 +9,8 @@
 //! is gone) and holds the same metadata. The applied metadata is durable, with the index applied.
 //!
 //! Each topic partition is a group of its own, whose members are its replica set. A partition leader announces the
-//! groups it leads, with their epochs, to every broker at each heartbeat (D7), so any broker can answer Metadata.
+//! groups it leads, with their epochs, to every broker (D7), so any broker can answer Metadata: each change until the
+//! broker confirms it, and everything again to a broker that restarted.
 
 /// The controller's group: the metadata topic id (0, 1), partition 0 (Kafka's `__cluster_metadata`).
 fn controller() -> Group {
@@ -190,6 +191,8 @@ channel offsets_chunk(tid: Bytes, part: i32, at: u64, k: u64, n: u64, chunk: Byt
 /// A partition leader's announcement: the groups it leads, with their epochs and in-sync replicas (S8.md D7), and
 /// when it sent it (by its clock), which orders its announcements within one epoch.
 channel leads(gs: Vec<(Group, u64, Vec<i32>)>, at: Instant): Broker -> Broker;
+/// A broker's confirmation of the announcements it took, with its incarnation (it forgets them when it restarts).
+channel leads_taken(gs: Vec<(Group, u64, Vec<i32>)>, boot: u64): Broker -> Broker;
 
 param CMD_RESEND: Duration = 500ms;
 /// How many controller entries the applied commands, their outcomes and the deleted topics are kept for.
@@ -588,6 +591,15 @@ at Broker {
         if heard_at(g, at) {
             delete heard_at(g, at);
         }
+        if election_span(g, s) {
+            delete election_span(g, s);
+        }
+        if quiet(g, t) {
+            delete quiet(g, t);
+        }
+        if quiesced(g, t, l, b, qc, qat) {
+            delete quiesced(g, t, l, b, qc, qat);
+        }
         if heard_commit(g, c) {
             delete heard_commit(g, c);
         }
@@ -684,6 +696,12 @@ at Broker {
     drop_unhosted_stepped_down: while unhosted(g), stepped_down(g, t) {
         delete stepped_down(g, t);
     }
+    drop_unhosted_quiet: while unhosted(g), quiet(g, t) {
+        delete quiet(g, t);
+    }
+    drop_unhosted_quiesced: while unhosted(g), quiesced(g, t, l, b, c, at) {
+        delete quiesced(g, t, l, b, c, at);
+    }
 
     // ---- who leads each partition, and its in-sync replicas (D7)
 
@@ -754,18 +772,39 @@ at Broker {
     /// The latest announcement heard per partition group: its stamp (the epoch, and when its leader sent it), the
     /// leader and the in-sync replicas. Announcements of one epoch come from one leader, so its clock orders them.
     table leader_view(g: Group, stamp: (u64, Instant), l: Node<Broker>, isr: Vec<i32>) key(g) resolve choose_most(stamp);
-    announce: on raft_heartbeat, led_groups(gs) {
-        for broker(n, _, _, _) where n != self {
-            send leads(gs, now()) to n;
-        }
+    /// A leader tells each broker which groups it leads, with their epochs and in-sync replicas, until that broker
+    /// confirms each (`leads_taken`): a change at the next heartbeat, and again at each heartbeat to a broker that has
+    /// not confirmed it (a broker takes only partitions its metadata names, so one whose metadata lags gets them
+    /// again until it can). A confirmation holds for the incarnation that gave it: a broker that restarted forgot its
+    /// views, and is told everything again once it is heard alive in another (`alive_at`).
+    table told(b: Node<Broker>, g: Group, t: u64, isr: Vec<i32>, boot: u64);
+    view current_lead(g, t, isr) = leader(g, t), not is_controller(g), isr_of(g, isr);
+    view untold(b, g, t, isr) = current_lead(g, t, isr), broker(b, _, _, _), not told(b, g, t, isr, _) where b != self;
+    view untold_to(b, gs = collect!((g, t, isr))) = untold(b, g, t, isr);
+    announce: on raft_heartbeat, untold_to(b, gs) {
+        send leads(gs, now()) to b;
     }
-    view led_groups(gs = collect!((g, t, isr))) = leader(g, t), not is_controller(g), isr_of(g, isr);
+    note_told: on leads_taken(gs, boot) from b, (g, t, isr) in gs, current_lead(g, t, isr) {
+        emit told(b, g, t, isr, boot);
+    }
+    view told_ends(b, g, t, isr, boot) {
+        told(b, g, t, isr, boot), not current_lead(g, t, isr);
+        told(b, g, t, isr, boot), alive_at(b, now_boot, _) where now_boot != boot;
+    }
+    forget_told: while told_ends(b, g, t, isr, boot) {
+        delete told(b, g, t, isr, boot);
+    }
     view is_controller(g) = mine(g), let c = controller() where g == c;
-    heard_leads: on leads(gs, at) from l, (g, t, isr) in gs {
+    /// An announcement is taken for a partition this broker's metadata names, and confirmed to its sender.
+    view assigned(g) = massign(tid, p, _), let g = (tid, p);
+    heard_leads: on leads(gs, at) from l, (g, t, isr) in gs, assigned(g) {
         next leader_view(g, (t, at), l, isr);
     }
+    view leads_taken_from(l, xs = collect!(x)) = leads(gs, _) from l, x in gs, assigned(x.0);
+    confirm_leads: on leads_taken_from(l, xs), my_boot(boot) {
+        send leads_taken(xs, boot) to l;
+    }
     /// A deleted partition's announcements go.
-    view assigned(g) = massign(tid, p, _), let g = (tid, p);
     forget_leader_view: while leader_view(g, stamp, l, isr), not assigned(g) {
         delete leader_view(g, stamp, l, isr);
     }

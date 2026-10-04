@@ -68,6 +68,17 @@ const CONFIG: u8 = 3;
 const OFFSETS: u8 = 4;
 
 channel request_vote(g: Group, term: u64, last_idx: u64, last_term: u64): Broker -> Broker;
+/// A broker's liveness, sent to each peer at every heartbeat, one message per pair whatever the number of groups,
+/// with an id of its incarnation: what a quiesced group's followers watch instead of its leader's heartbeats.
+channel alive(boot: u64): Broker -> Broker;
+/// A leader's word that a group is idle and caught up to `commit`: its followers stop expecting its heartbeats while
+/// its broker is alive in the incarnation `boot` (carried here, so a follower need not have heard `alive` yet).
+/// `sent` is when it was sent (by the leader's clock): of the leader's messages, only those sent after it wake the
+/// follower (a heartbeat sent before it may arrive after it).
+channel quiesce(g: Group, term: u64, commit: u64, boot: u64, sent: Instant): Broker -> Broker;
+/// A leader that stepped down (CheckQuorum) in `term` says so to the group's members at every heartbeat until a
+/// later term: a member quiesced by it stops counting its broker's liveness as hearing a leader.
+channel deposed(g: Group, term: u64): Broker -> Broker;
 /// PreVote (§9.6): would the receiver vote for the sender in `term` (its next)? `round` names the sender's attempt,
 /// which the answer echoes; `current` is the answerer's own term, which a sender behind adopts (a member with the
 /// most complete log but an older term would otherwise ask for a term no one grants, for ever).
@@ -179,7 +190,11 @@ at Broker {
     table won(g: Group, term: u64);
     table leader_of(g: Group, term: u64, leader: Node<Broker>) key(g, term);
     table voters(g: Group, term: u64, v: Node<Broker>);
+    /// A group's election deadline as last armed (at the start, a vote granted, an election timed out), and the
+    /// randomized timeout drawn then. Hearing the leader does not re-arm it: the timeout counts from the last time the
+    /// leader was heard (`heard_at`), as etcd resets its elapsed time on a heartbeat without drawing a new timeout.
     table deadline(g: Group, at: Instant) key(g);
+    table election_span(g: Group, span: Duration) key(g);
     /// The highest index known committed.
     table commit(g: Group, i: u64) key(g) resolve choose_most(i);
     /// The highest commit index a leader of this broker's term has announced, whether or not this broker's log has
@@ -230,12 +245,14 @@ at Broker {
 
     /// A group gets an election deadline when this broker first knows it is a member (and after a restart). A member
     /// alone in its group needs no one's vote, so its deadline is now.
-    arm: while mine(g), not deadline(g, _), group_size(g, k), not reset_timer(g) {
+    arm: while mine(g), not deadline(g, _), group_size(g, k), not reset_timer(g),
+            let span = rand_range(RAFT_ELECTION_MIN, RAFT_ELECTION_MAX, ("arm", g)) {
         if k == 1 {
             upsert deadline(g, now());
         }
         if k > 1 {
-            upsert deadline(g, now() + rand_range(RAFT_ELECTION_MIN, RAFT_ELECTION_MAX, ("arm", g)));
+            upsert deadline(g, now() + span);
+            upsert election_span(g, span);
         }
     }
 
@@ -312,11 +329,13 @@ at Broker {
     /// (§4.2.3; a leader itself does not, since without checking a quorum it cannot know it still leads): a removed member, or one cut off for a while, cannot depose a working leader. Only a
     /// member votes; a candidate need not be a member in the voter's configuration (a member just added is not yet
     /// in a lagging voter's).
-    table heard_at(g: Group, at: Instant) key(g) resolve choose_most(at);
+    /// When this broker last heard a leader of its term, per group (one write per group per tick: `heard_leader` is a
+    /// set of groups).
+    table heard_at(g: Group, at: Instant) key(g);
     note_leader: on heard_leader(g) {
-        next heard_at(g, now());
+        upsert heard_at(g, now());
     }
-    view recently_led(g) = heard_at(g, a) where now() < a + RAFT_ELECTION_MIN;
+    view recently_led(g) = last_heard(g, a) where now() < a + RAFT_ELECTION_MIN;
     view rv_ok(g, c, t) =
         request_vote(g, t, li, lt) from c, eff(g, t), mine(g), not recently_led(g), last_log(g, mi, mt)
         where lt > mt || (lt == mt && li >= mi);
@@ -336,18 +355,28 @@ at Broker {
     view heard_leader(g) {
         beat(g: g, term: t, ..), eff(g, t);
         entries(g: g, term: t, ..), eff(g, t);
+        quiesce(g: g, term: t, ..), eff(g, t);
     }
     view granted_now(g) = grant(g, _, _);
+    /// When a group's election is due: its armed deadline, or its timeout past the last time its leader was heard,
+    /// whichever is later.
+    view election_due(g, d) {
+        deadline(g, d0), not last_heard(g, _), let d = d0;
+        deadline(g, d0), last_heard(g, h), election_span(g, s), let d = if h + s > d0 { h + s } else { d0 };
+        deadline(g, d0), last_heard(g, _), not election_span(g, _), let d = d0;
+    }
     view timed_out(g, t) =
-        raft_poll, eff(g, t), mine(g), deadline(g, d), not leader(g, t), not granted_now(g), not heard_leader(g)
+        raft_poll, eff(g, t), mine(g), election_due(g, d), not leader(g, t), not granted_now(g), not heard_leader(g)
         where now() >= d;
+    /// What re-arms a group's election timeout: a vote granted, or an election that timed out (a leader heard moves
+    /// `election_due` through `heard_at` instead).
     view reset_timer(g) {
         granted_now(g);
-        heard_leader(g);
         timed_out(g, _);
     }
-    rearm: on reset_timer(g), eff(g, t) {
-        upsert deadline(g, now() + rand_range(RAFT_ELECTION_MIN, RAFT_ELECTION_MAX, ("election", g, t)));
+    rearm: on reset_timer(g), eff(g, t), let span = rand_range(RAFT_ELECTION_MIN, RAFT_ELECTION_MAX, ("election", g, t)) {
+        upsert deadline(g, now() + span);
+        upsert election_span(g, span);
     }
     // ---- PreVote (§9.6)
     /// A member whose election timeout passes first asks the others whether they would vote for it in the next term,
@@ -467,7 +496,7 @@ at Broker {
     /// batch per round trip.
     view out_from(g, f, from) {
         leader(g, _), rsent(g, f, from), last_log(g, li, _) where li > from;
-        raft_heartbeat, leader(g, _), match_idx(g, f, from);
+        raft_heartbeat, leader(g, t), not idle(g, t), match_idx(g, f, from);
         ack(g, t, from, _) from f, leader(g, t), members(g, f), last_log(g, li, _) where from < li;
     }
     /// A batch's entries: a range of the log (found by index, not by scanning it), read only for the batch.
@@ -487,7 +516,9 @@ at Broker {
     pushed: while leader(g, _), rsent(g, f, s), last_log(g, li, _) where li > s {
         next rsent(g, f, if li > s + RAFT_BATCH { s + RAFT_BATCH } else { li });
     }
-    beat_followers: on raft_heartbeat, leader(g, t), match_idx(g, f, m), term_at(g, m, mt), commit_of(g, c) {
+    /// An idle group's leader sends no heartbeat (at the heartbeat it goes quiet it sends `quiesce` alone, so the
+    /// followers do not see it with a heartbeat and take the group as active).
+    beat_followers: on raft_heartbeat, leader(g, t), not idle(g, t), match_idx(g, f, m), term_at(g, m, mt), commit_of(g, c) {
         send beat(g, t, m, mt, c, now()) to f;
     }
     on_ack: on ack(g, t, m, _sent) from f, leader(g, t), members(g, f) {
@@ -557,6 +588,11 @@ at Broker {
     note_heard: on ack(g, t, _m, _s) from f, leader(g, t), members(g, f), not quorum_heard(g, f) {
         upsert quorum_heard(g, f);
     }
+    /// A quiet group's members do not acknowledge anything: one whose broker is alive while the group is quiet is
+    /// heard in that period, so a group that wakes late in a period keeps it (its members answer the wake from then).
+    note_heard_quiet: while quiet(g, _), members(g, f), peer_alive(f), not quorum_heard(g, f) {
+        upsert quorum_heard(g, f);
+    }
     view heard_n(g, n = count!(f)) = quorum_heard(g, f), members(g, f);
     view quorum_kept(g) {
         heard_n(g, n), group_size(g, k), mine(g) where (n + 1) * 2 > k;
@@ -567,6 +603,9 @@ at Broker {
         delete won(g, t);
         delete leader_of(g, t, self);
         upsert stepped_down(g, t);
+    }
+    tell_deposed: on raft_heartbeat, stepped_down(g, t), eff(g, t), members(g, f) where f != self {
+        send deposed(g, t) to f;
     }
     forget_stepped_down: while stepped_down(g, t), eff(g, e) where e > t {
         delete stepped_down(g, t);
@@ -579,6 +618,103 @@ at Broker {
     }
     forget_led_since: while led_since(g, t, at), not won(g, t) {
         delete led_since(g, t, at);
+    }
+
+    // ---- quiescence
+    /// An idle group costs nothing (CockroachDB quiesces idle ranges the same way): its leader stops its heartbeats
+    /// once every member holds and has acknowledged the whole log and it is committed, telling the followers so
+    /// (`quiesce`); they then count their leader's broker being alive (`alive`, one message per broker pair) as
+    /// hearing their leader, for their election timeouts and for refusing votes (`last_heard`). The group wakes on a
+    /// proposal, a read to confirm, a configuration change or a member left behind, or when a member asks for a vote:
+    /// one that restarted, or missed the `quiesce`, finds its timeout passing and asks. A leader's broker that dies or
+    /// restarts (another incarnation) stops counting, so its followers' timeouts pass and they elect another. Raft's
+    /// safety does not depend on when elections start, only its liveness; CheckQuorum counts a quiet group's members
+    /// whose brokers are alive as heard.
+    table my_boot(id: u64) key();
+    note_boot: on boot() {
+        upsert my_boot(rand("boot"));
+    }
+    view peer(p) = members(_, p) where p != self;
+    send_alive: on raft_heartbeat, my_boot(b), peer(p) {
+        send alive(b) to p;
+    }
+    /// The last time each peer was heard alive, and its incarnation.
+    table alive_at(b: Node<Broker>, boot: u64, at: Instant) key(b);
+    hear_alive: on alive(boot) from b {
+        upsert alive_at(b, boot, now());
+    }
+    view peer_alive(b) = alive_at(b, _, a) where now() < a + RAFT_ELECTION_MIN;
+
+    /// Leader side. A group is busy while something is proposed, read, or changing, or a member is behind (it lacks
+    /// entries, was sent some it has not acknowledged, or is new), or a member asks for a vote.
+    view member_behind(g) {
+        leader(g, _), members(g, f), last_log(g, li, _), match_idx(g, f, m) where f != self && m < li;
+        leader(g, _), members(g, f), not match_idx(g, f, _) where f != self;
+        leader(g, _), rsent(g, f, s), last_log(g, li, _) where s < li;
+    }
+    view vote_asked(g) {
+        pre_vote(g: g, ..) from c, members(g, c);
+        request_vote(g: g, ..) from c, members(g, c);
+    }
+    view busy(g) {
+        proposals(g, _);
+        confirms(g);
+        config_pending(g);
+        member_behind(g);
+        vote_asked(g);
+    }
+    view idle(g, t) = leader(g, t), last_log(g, li, _), commit_of(g, c), not busy(g) where c == li;
+    table quiet(g: Group, t: u64) key(g);
+    go_quiet: on raft_heartbeat, idle(g, t), not quiet(g, t), commit_of(g, c), my_boot(b) {
+        upsert quiet(g, t);
+        for members(g, f) where f != self {
+            send quiesce(g, t, c, b, now()) to f;
+        }
+    }
+    wake: while quiet(g, t), not idle(g, t) {
+        delete quiet(g, t);
+    }
+
+    /// Follower side: quiesced by a leader of our term whose entries up to the commit point `c` we hold, with the
+    /// incarnation its broker was alive in and when it sent the `quiesce` (its clock).
+    table quiesced(g: Group, t: u64, l: Node<Broker>, boot: u64, c: u64, at: Instant) key(g);
+    /// The leader's messages that it sent after a quiescence of `term` at `sent` up to `c`, the group having woken: a
+    /// heartbeat sent later, entries past `c` (anything sent before it ended at or before `c`, where the log was
+    /// committed and every member caught up), or a snapshot past `c`.
+    view woke_after(g, t, c, sent) {
+        quiesce(g: g, term: t, commit: c, sent: sent, ..), beat(g: g, term: t, sent: s, ..) where s > sent;
+        quiesced(g, t, _, _, c, sent), beat(g: g, term: t, sent: s, ..) where s > sent;
+        quiesce(g: g, term: t, commit: c, sent: sent, ..), entries(g: g, term: t, prev_idx: p, es: es, ..)
+            where p >= c && es.len() > 0;
+        quiesced(g, t, _, _, c, sent), entries(g: g, term: t, prev_idx: p, es: es, ..) where p >= c && es.len() > 0;
+        quiesce(g: g, term: t, commit: c, sent: sent, ..), snapshot(g: g, term: t, idx: i, ..) where i > c;
+        quiesced(g, t, _, _, c, sent), snapshot(g: g, term: t, idx: i, ..) where i > c;
+    }
+    /// A `quiesce` sent before the one this broker holds (overtaken on the way) changes nothing.
+    view quiesce_overtaken(g, sent) = quiesce(g: g, sent: sent, ..), quiesced(g, _, _, _, _, at) where at >= sent;
+    go_quiesced: on quiesce(g, t, c, boot, sent) from l, eff(g, t), takes(g), last_log(g, li, _),
+            not woke_after(g, t, c, sent), not quiesce_overtaken(g, sent) where li >= c {
+        upsert quiesced(g, t, l, boot, c, sent);
+        next commit(g, c);
+        emit leader_of(g, t, l);
+    }
+    view quiesced_until(g) {
+        quiesced(g, t, _, _, c, at), woke_after(g, t, c, at);
+        quiesced(g, t, _, _, _, _), eff(g, e) where e != t;
+        quiesced(g, _, l, b, _, _), alive_at(l, b2, _) where b2 != b;
+        quiesced(g, t, l, _, _, _), deposed(g: g, term: t) from l;
+    }
+    unquiesce: while quiesced(g, t, l, b, c, at), quiesced_until(g) {
+        delete quiesced(g, t, l, b, c, at);
+    }
+    /// When this broker last heard its leader: its messages, or, quiesced, its broker alive in the same incarnation.
+    /// (Of the term recorded, not this tick's: what this tick hears decides the term through `recently_led`; a term
+    /// raised this tick ends the quiescence in the next.)
+    view quiet_heard(g, a) = quiesced(g, t, l, b, _, _), rterm(g, t), alive_at(l, b, a);
+    view last_heard(g, h) {
+        heard_at(g, h), not quiet_heard(g, _);
+        heard_at(g, h0), quiet_heard(g, a), let h = if a > h0 { a } else { h0 };
+        quiet_heard(g, h), not heard_at(g, _);
     }
 
     // ---- replication, follower side
@@ -645,6 +781,10 @@ at Broker {
         emit leader_of(g, t, l);
     }
     hear_commit: on beat(g: g, term: t, commit: c, ..), eff(g, t), takes(g) {
+        next heard_commit(g, c);
+    }
+    /// A `quiesce` announces the commit index too, whether or not this broker takes it (it may lack entries).
+    hear_quiet_commit: on quiesce(g: g, term: t, commit: c, ..), eff(g, t), takes(g) {
         next heard_commit(g, c);
     }
     /// The commit index as far as this broker knows: a leader's own, or the one its leader announced.
