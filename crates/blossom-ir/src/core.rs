@@ -703,6 +703,9 @@ pub enum LibFn {
     VecFold,
     /// `v.scan(init, |acc, x| e) -> Vec<A>`: a fold's accumulator after each element, left to right.
     VecScan,
+    /// `v.scan_while(init, |acc, x| e) -> Vec<A>`, `e: Option<A>`: as `scan`, stopping at the first element whose
+    /// step is `None` (the elements after it are not visited; over a `range`, not walked).
+    VecScanWhile,
     /// `v.to_set() -> Set<T>`: the elements, each once.
     VecToSet,
     /// `v.to_map() -> Map<K, V>` on a `Vec<(K, V)>`: each key with the value of its last pair.

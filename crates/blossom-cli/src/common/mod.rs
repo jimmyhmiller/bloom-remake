@@ -4,6 +4,11 @@
 
 use std::process::ExitCode;
 
+/// The process's allocator. The engine allocates and frees many small values per tick (rows, keys, frames); glibc's
+/// allocator spent about 14% of a broker's CPU on them (S10 notes), mimalloc much less.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// Options accepted before the subcommand. None yet.
 #[derive(Debug, Default, clap::Args)]
 pub struct GlobalArgs {}

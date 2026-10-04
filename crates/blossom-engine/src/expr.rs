@@ -76,10 +76,23 @@ pub(crate) struct Ctx<'a> {
     pub shared: &'a Shared,
     /// The step budget of the function evaluation in progress (BLSR012).
     pub fuel: Fuel,
+    /// The expression nodes evaluated with this context (the work measure of `Engine::work_by_rule`).
+    pub steps: std::cell::Cell<u64>,
+    /// When the engine profiles functions: each function's work, and the steps the calls inside the call in
+    /// progress took (what its own steps leave out).
+    pub fn_work: Option<&'a std::cell::RefCell<BTreeMap<blossom_base::FnId, blossom_ir::tick::FnWork>>>,
+    pub callee_steps: std::cell::Cell<u64>,
     /// The bytes of blobs created before this tick.
     pub blobs: &'a dyn blossom_value::BlobSource,
     /// The blobs this tick created, with their bytes.
     pub new_blobs: &'a std::cell::RefCell<BTreeMap<blossom_value::BlobRef, std::sync::Arc<[u8]>>>,
+    /// The earliest later instant at which a comparison with `now()` evaluated so far would come out the other way
+    /// (`Plan::skip`: a rule that reads the time only so is not evaluated again before then, if nothing it reads
+    /// changes).
+    pub flips_at: std::cell::Cell<Option<blossom_value::time::Instant>>,
+    /// Whether the evaluation read the time, the tick or randomness otherwise than by ordering `now()` against
+    /// an instant (then its outcome may differ at the next tick, whatever `flips_at` says).
+    pub reads_time: std::cell::Cell<bool>,
 }
 
 impl Ctx<'_> {
@@ -168,6 +181,86 @@ impl Shared {
     }
 }
 
+/// The variables an expression reads. Its binders (`let`, a `match` arm, a closure's parameters) bind their
+/// variables in place and restore what the slots held when they end, so evaluation never copies the frame; a frame
+/// borrowed from a rule's valuation is copied once, at its first binding.
+pub(crate) struct Frame<'a> {
+    slots: std::borrow::Cow<'a, [Option<Value>]>,
+    /// What the binders in progress displaced, innermost last.
+    saved: Vec<(usize, Option<Value>)>,
+    /// The slots the `match` arms in progress bound (each was unbound before).
+    newly: Vec<usize>,
+}
+
+impl<'a> Frame<'a> {
+    pub(crate) fn borrowed(slots: &'a [Option<Value>]) -> Self {
+        Frame {
+            slots: std::borrow::Cow::Borrowed(slots),
+            saved: Vec::new(),
+            newly: Vec::new(),
+        }
+    }
+
+    pub(crate) fn owned(slots: Vec<Option<Value>>) -> Frame<'static> {
+        Frame {
+            slots: std::borrow::Cow::Owned(slots),
+            saved: Vec::new(),
+            newly: Vec::new(),
+        }
+    }
+
+    pub(crate) fn slots(&self) -> &[Option<Value>] {
+        &self.slots
+    }
+
+    /// Where the bindings made from now on start (for `restore`).
+    pub(crate) fn mark(&self) -> usize {
+        self.saved.len()
+    }
+
+    /// Binds slot `i` to `v`, remembering what it held.
+    pub(crate) fn bind(&mut self, i: usize, v: Value) -> ExprResult<()> {
+        let slot = self
+            .slots
+            .to_mut()
+            .get_mut(i)
+            .ok_or_else(|| bug(format!("binding slot {i} outside the frame")))?;
+        let old = slot.replace(v);
+        self.saved.push((i, old));
+        Ok(())
+    }
+
+    /// Undoes the bindings made since `mark`, innermost first.
+    pub(crate) fn restore(&mut self, mark: usize) {
+        while self.saved.len() > mark {
+            let Some((i, old)) = self.saved.pop() else { break };
+            if let Some(slot) = self.slots.to_mut().get_mut(i) {
+                *slot = old;
+            }
+        }
+    }
+
+    /// Matches `v` against `pat` as a `match` arm does, recording the slots it binds from `newly`'s current length.
+    fn match_arm(&mut self, cx: &Ctx<'_>, pat: &Pattern, v: &Value) -> ExprResult<bool> {
+        let Frame { slots, newly, .. } = self;
+        matches(cx, slots.to_mut(), pat, v, newly)
+    }
+
+    /// Unbinds the slots `match` arms bound since `mark` (each was unbound before).
+    fn unbind_arm(&mut self, mark: usize) {
+        if self.newly.len() <= mark {
+            return;
+        }
+        let Frame { slots, newly, .. } = self;
+        let slots = slots.to_mut();
+        for i in newly.drain(mark..) {
+            if let Some(slot) = slots.get_mut(i) {
+                *slot = None;
+            }
+        }
+    }
+}
+
 pub(crate) fn term(cx: &Ctx<'_>, env: &[Option<Value>], t: &Term) -> ExprResult<Value> {
     match t {
         Term::Var(v) => env
@@ -200,17 +293,28 @@ macro_rules! unimplemented {
 }
 
 pub(crate) fn eval(cx: &Ctx<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<Value> {
+    eval_in(cx, &mut Frame::borrowed(env), e)
+}
+
+pub(crate) fn eval_in(cx: &Ctx<'_>, env: &mut Frame<'_>, e: &Expr) -> ExprResult<Value> {
+    cx.steps.set(cx.steps.get().wrapping_add(1));
     match e {
-        Expr::Term(t) => term(cx, env, t),
+        Expr::Term(t) => term(cx, env.slots(), t),
         Expr::Param(p) => param(cx, *p),
         Expr::Scalar(s) => match s {
             BuiltinScalar::SelfNode => Ok(Value::Node(cx.node)),
-            BuiltinScalar::Tick => Ok(Value::Int(IntValue::U64(cx.tick.0))),
-            BuiltinScalar::Now => Ok(Value::Instant(cx.now)),
+            BuiltinScalar::Tick => {
+                cx.reads_time.set(true);
+                Ok(Value::Int(IntValue::U64(cx.tick.0)))
+            }
+            BuiltinScalar::Now => {
+                cx.reads_time.set(true);
+                Ok(Value::Instant(cx.now))
+            }
             other => Err(unimplemented!("LANG-180", &format!("`${other:?}`"))),
         },
         Expr::Unary { op, arg } => {
-            let v = eval(cx, env, arg)?;
+            let v = eval_in(cx, env, arg)?;
             match (op, v) {
                 (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
                 (UnOp::Neg, Value::Int(i)) => negate(i).map(Value::Int),
@@ -220,34 +324,52 @@ pub(crate) fn eval(cx: &Ctx<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<
         }
         Expr::Binary { op, lhs, rhs } => match op {
             BinOp::And => {
-                if !truth(&eval(cx, env, lhs)?)? {
+                if !truth(&eval_in(cx, env, lhs)?)? {
                     return Ok(Value::Bool(false));
                 }
-                Ok(Value::Bool(truth(&eval(cx, env, rhs)?)?))
+                Ok(Value::Bool(truth(&eval_in(cx, env, rhs)?)?))
             }
             BinOp::Or => {
-                if truth(&eval(cx, env, lhs)?)? {
+                if truth(&eval_in(cx, env, lhs)?)? {
                     return Ok(Value::Bool(true));
                 }
-                Ok(Value::Bool(truth(&eval(cx, env, rhs)?)?))
+                Ok(Value::Bool(truth(&eval_in(cx, env, rhs)?)?))
+            }
+            _ if is_read(lhs) && is_read(rhs) => {
+                let l = read(cx, env, lhs)?;
+                let r = read(cx, env, rhs)?;
+                binary_ref(op, l, r)
             }
             _ => {
-                let l = eval(cx, env, lhs)?;
-                let r = eval(cx, env, rhs)?;
+                // `now()` ordered against an instant is read here, its flip noted (not as a free read of the time).
+                let timed = matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) && is_now(lhs) != is_now(rhs);
+                let l = if timed && is_now(lhs) {
+                    now_operand(cx, lhs)
+                } else {
+                    eval_in(cx, env, lhs)?
+                };
+                let r = if timed && is_now(rhs) {
+                    now_operand(cx, rhs)
+                } else {
+                    eval_in(cx, env, rhs)?
+                };
+                if timed {
+                    note_flip(cx, op, lhs, rhs, &l, &r);
+                }
                 binary(op, l, r)
             }
         },
         Expr::If { cond, then, els } => {
-            if truth(&eval(cx, env, cond)?)? {
-                eval(cx, env, then)
+            if truth(&eval_in(cx, env, cond)?)? {
+                eval_in(cx, env, then)
             } else {
-                eval(cx, env, els)
+                eval_in(cx, env, els)
             }
         }
         Expr::Construct { ty, variant, fields } => {
             let mut vs = Vec::with_capacity(fields.len());
             for f in fields {
-                vs.push(eval(cx, env, f)?);
+                vs.push(eval_in(cx, env, f)?);
             }
             match (cx.program.types.get(*ty), variant) {
                 (Some(TypeDef::Option(_)), Some(1)) => match <[Value; 1]>::try_from(vs) {
@@ -264,7 +386,14 @@ pub(crate) fn eval(cx: &Ctx<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<
                 (other, v) => Err(bug(format!("constructing {other:?} variant {v:?}"))),
             }
         }
-        Expr::Field { base, index } => match eval(cx, env, base)? {
+        Expr::Field { base, index } if is_read(base) => match read(cx, env, base)? {
+            Value::Tuple(fs) | Value::Struct(fs) => fs
+                .get(*index as usize)
+                .cloned()
+                .ok_or_else(|| bug(format!("field {index} out of range"))),
+            other => Err(bug(format!("field {index} of {other:?}"))),
+        },
+        Expr::Field { base, index } => match eval_in(cx, env, base)? {
             Value::Tuple(fs) | Value::Struct(fs) => fs
                 .get(*index as usize)
                 .cloned()
@@ -272,19 +401,15 @@ pub(crate) fn eval(cx: &Ctx<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<
             other => Err(bug(format!("field {index} of {other:?}"))),
         },
         Expr::Match { scrut, arms } => {
-            let v = eval(cx, env, scrut)?;
+            let v = eval_in(cx, env, scrut)?;
             for (pat, guard, body) in arms {
-                // An arm's bindings are local to it.
-                let mut local = env.to_vec();
-                if !matches(cx, &mut local, pat, &v, &mut Vec::new())? {
-                    continue;
+                // An arm's bindings are local to it: unbound again after it, whether it matched or not.
+                let mark = env.newly.len();
+                let r = arm(cx, env, pat, guard.as_ref(), body, &v);
+                env.unbind_arm(mark);
+                if let Some(out) = r? {
+                    return Ok(out);
                 }
-                if let Some(g) = guard
-                    && !truth(&eval(cx, &local, g)?)?
-                {
-                    continue;
-                }
-                return eval(cx, &local, body);
             }
             Err(bug(format!("no match arm matched {v:?}")))
         }
@@ -295,12 +420,17 @@ pub(crate) fn eval(cx: &Ctx<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<
         Expr::Call {
             f: FnRef::Builtin(f),
             args,
-        } => builtin(cx, env, f, args),
+        } => {
+            if random_builtin(f) {
+                cx.reads_time.set(true);
+            }
+            builtin(cx, env, f, args)
+        }
         Expr::Call { f: FnRef::Fn(f), args } => crate::func::call(cx, env, *f, args),
         Expr::Collection { kind, elems } => {
             let mut vs = Vec::with_capacity(elems.len());
             for x in elems {
-                vs.push(eval(cx, env, x)?);
+                vs.push(eval_in(cx, env, x)?);
             }
             Ok(match kind {
                 CollKind::Vec => Value::Vec(vs.into()),
@@ -324,14 +454,129 @@ pub(crate) fn eval(cx: &Ctx<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<
             let (kind, lop) = lattice_op(cx, op)?;
             let mut vs = Vec::with_capacity(args.len());
             for a in args {
-                vs.push(eval(cx, env, a)?);
+                vs.push(eval_in(cx, env, a)?);
             }
             Ok(kind.eval(lop, &vs)?)
         }
         Expr::Let { pat, value, body } => crate::func::let_expr(cx, env, pat, value, body),
         Expr::Closure { .. } => Err(bug("a closure evaluated outside a combinator".into())),
-        Expr::Typed { expr, .. } => eval(cx, env, expr),
+        Expr::Typed { expr, .. } => eval_in(cx, env, expr),
     }
+}
+
+/// Whether `e` is `now()`.
+pub(crate) fn is_now(e: &Expr) -> bool {
+    match e {
+        Expr::Scalar(BuiltinScalar::Now) => true,
+        Expr::Typed { expr, .. } => is_now(expr),
+        _ => false,
+    }
+}
+
+/// The value of a `now()` operand of an ordering (`is_now`), counting its nodes as `eval_in` would; not a free
+/// read of the time (`Ctx::reads_time`): the ordering notes its flip.
+fn now_operand(cx: &Ctx<'_>, e: &Expr) -> Value {
+    cx.steps.set(cx.steps.get().wrapping_add(1));
+    match e {
+        Expr::Typed { expr, .. } => now_operand(cx, expr),
+        _ => Value::Instant(cx.now),
+    }
+}
+
+/// For an ordering of `now()` against an instant: records in `cx.flips_at` when its outcome changes, if later.
+fn note_flip(cx: &Ctx<'_>, op: &BinOp, lhs: &Expr, rhs: &Expr, l: &Value, r: &Value) {
+    use blossom_value::time::Instant;
+    // With `now()` on the left: `now op e`.
+    let (op, e) = match (is_now(lhs), is_now(rhs), l, r) {
+        (true, false, _, Value::Instant(e)) => (op.clone(), *e),
+        (false, true, Value::Instant(e), _) => match op {
+            BinOp::Lt => (BinOp::Gt, *e),
+            BinOp::Le => (BinOp::Ge, *e),
+            BinOp::Gt => (BinOp::Lt, *e),
+            BinOp::Ge => (BinOp::Le, *e),
+            _ => return,
+        },
+        _ => return,
+    };
+    let now = cx.now;
+    let after = Instant(e.0.saturating_add(1));
+    let at = match op {
+        // `now < e` turns false at `e`; `now >= e` turns true at `e`.
+        BinOp::Lt | BinOp::Ge if now < e => e,
+        // `now <= e` turns false, and `now > e` true, just past `e`.
+        BinOp::Le | BinOp::Gt if now <= e => after,
+        _ => return,
+    };
+    if cx.flips_at.get().is_none_or(|t| at < t) {
+        cx.flips_at.set(Some(at));
+    }
+}
+
+/// Whether `e` only reads a value that exists already: a variable, a constant, or a field of one. `read` takes it
+/// without copying it.
+fn is_read(e: &Expr) -> bool {
+    match e {
+        Expr::Term(Term::Var(_) | Term::Const(_)) => true,
+        Expr::Field { base, .. } | Expr::Typed { expr: base, .. } => is_read(base),
+        _ => false,
+    }
+}
+
+/// The value an `is_read` expression reads, in place (counting its nodes as `eval_in` would).
+fn read<'v>(cx: &'v Ctx<'_>, env: &'v Frame<'_>, e: &'v Expr) -> ExprResult<&'v Value> {
+    cx.steps.set(cx.steps.get().wrapping_add(1));
+    match e {
+        Expr::Term(Term::Var(v)) => env
+            .slots()
+            .get(v.index())
+            .and_then(Option::as_ref)
+            .ok_or_else(|| bug(format!("variable {v:?} read before it is bound"))),
+        Expr::Term(Term::Const(c)) => cx
+            .program
+            .consts
+            .get(*c)
+            .ok_or_else(|| bug(format!("unknown constant {c:?}"))),
+        Expr::Field { base, index } => match read(cx, env, base)? {
+            Value::Tuple(fs) | Value::Struct(fs) => fs
+                .get(*index as usize)
+                .ok_or_else(|| bug(format!("field {index} out of range"))),
+            other => Err(bug(format!("field {index} of {other:?}"))),
+        },
+        Expr::Typed { expr, .. } => read(cx, env, expr),
+        other => Err(bug(format!("{other:?} read in place"))),
+    }
+}
+
+/// `binary` over operands read in place: comparisons copy nothing; other operators take copies (numbers, mostly).
+fn binary_ref(op: &BinOp, l: &Value, r: &Value) -> ExprResult<Value> {
+    use BinOp::*;
+    match op {
+        Eq => Ok(Value::Bool(l == r)),
+        Ne => Ok(Value::Bool(l != r)),
+        CanonLt => Ok(Value::Bool(l < r)),
+        CanonLe => Ok(Value::Bool(l <= r)),
+        _ => binary(op, l.clone(), r.clone()),
+    }
+}
+
+/// One `match` arm against `v`: its value if its pattern matches and its guard holds.
+fn arm(
+    cx: &Ctx<'_>,
+    env: &mut Frame<'_>,
+    pat: &Pattern,
+    guard: Option<&Expr>,
+    body: &Expr,
+    v: &Value,
+) -> ExprResult<Option<Value>> {
+    if !env.match_arm(cx, pat, v)? {
+        return Ok(None);
+    }
+    if let Some(g) = guard
+        && !truth(&eval_in(cx, env, g)?)?
+    {
+        return Ok(None);
+    }
+    eval_in(cx, env, body).map(Some)
 }
 
 fn param(cx: &Ctx<'_>, p: ParamId) -> ExprResult<Value> {
@@ -365,12 +610,12 @@ fn lattice_op<'s>(cx: &'s Ctx<'_>, op: &LatOpRef) -> ExprResult<(&'s Kind, bloss
     Ok((kind, lop))
 }
 
-fn builtin(cx: &Ctx<'_>, env: &[Option<Value>], f: &BuiltinFn, args: &[Expr]) -> ExprResult<Value> {
-    let arg = |i: usize| -> ExprResult<Value> {
+fn builtin(cx: &Ctx<'_>, env: &mut Frame<'_>, f: &BuiltinFn, args: &[Expr]) -> ExprResult<Value> {
+    let mut arg = |i: usize| -> ExprResult<Value> {
         let e = args
             .get(i)
             .ok_or_else(|| bug(format!("{f:?} is missing argument {i}")))?;
-        eval(cx, env, e)
+        eval_in(cx, env, e)
     };
     match f {
         BuiltinFn::Len => {
@@ -862,18 +1107,23 @@ pub(crate) fn int_sum<'a>(mut values: impl Iterator<Item = &'a Value>) -> ExprRe
 
 /// Whether an expression reads a time-varying scalar (LANGUAGE §15.1, ARCHITECTURE §3.4.2): its value can change from
 /// tick to tick with no relation changing, so a rule reading one is re-evaluated at every tick.
+/// Whether calling `f` draws randomness (its value changes from tick to tick).
+pub(crate) fn draws_randomness(f: &FnRef) -> bool {
+    matches!(f, FnRef::Builtin(b) if random_builtin(b))
+}
+
+fn random_builtin(f: &BuiltinFn) -> bool {
+    matches!(
+        f,
+        BuiltinFn::Rand | BuiltinFn::RandFloat | BuiltinFn::RandRange | BuiltinFn::RandPrio { .. }
+    )
+}
+
 pub(crate) fn time_varying(e: &Expr) -> bool {
     match e {
         Expr::Scalar(BuiltinScalar::Now | BuiltinScalar::Tick | BuiltinScalar::Incarnation) => true,
         Expr::Scalar(_) | Expr::Term(_) | Expr::Param(_) => false,
-        Expr::Call { f, args } => {
-            matches!(
-                f,
-                FnRef::Builtin(
-                    BuiltinFn::Rand | BuiltinFn::RandFloat | BuiltinFn::RandRange | BuiltinFn::RandPrio { .. }
-                )
-            ) || args.iter().any(time_varying)
-        }
+        Expr::Call { f, args } => draws_randomness(f) || args.iter().any(time_varying),
         Expr::Unary { arg, .. } => time_varying(arg),
         Expr::Binary { lhs, rhs, .. } => time_varying(lhs) || time_varying(rhs),
         Expr::Construct { fields, .. } => fields.iter().any(time_varying),

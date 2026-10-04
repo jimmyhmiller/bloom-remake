@@ -122,7 +122,11 @@ fn sequence_each(batches: Vec<Bytes>) -> Vec<(i16, i64)> {
     let start: (Vec<(i16, i64)>, i64, Vec<ProducerEntry>) = ([], 0i64, []);
     let end = batches.fold(start, |acc, b| {
         let (outs, at, sts) = acc;
-        let (o, sts2) = sequence_one([b], at, sts);
+        let h = match batch_header(b) {
+            Some(h) => h,
+            None => error("sequence_each: a batch without a header"),
+        };
+        let (o, sts2) = sequence_one([(b, h)], at, sts);
         (outs.push((o.error, o.base)), at + o.count, sts2)
     });
     end.0

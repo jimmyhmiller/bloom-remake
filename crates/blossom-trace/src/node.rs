@@ -31,6 +31,19 @@ use serde::{Deserialize, Serialize};
 /// The trace format's version: a reader refuses any other.
 pub const FORMAT: u16 = 1;
 
+/// Creates a new trace file, readable and writable by its owner only (a trace holds the deployment's seed); an
+/// existing file is an error, never overwritten.
+pub fn create_trace_file(path: &std::path::Path) -> io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
+}
+
 const MAGIC: [u8; 8] = *b"BLSTRACE";
 
 /// The largest record a reader accepts (a tick's inputs, or a blob: the runtime's blobs are at most 1 GiB).

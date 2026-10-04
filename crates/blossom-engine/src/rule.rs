@@ -29,7 +29,7 @@
 //! reference raises it once per complete valuation, so the remaining atoms are joined without the check's outputs
 //! and the error counted for each.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use blossom_base::{RelId, RuleId, VarId, internal_error};
 use blossom_ir::core::{Atom, BinOp, Expr, GenSource, HeadArg, Literal, Pattern, Rule, RuleKind, Term};
@@ -52,6 +52,151 @@ pub(crate) enum StoreKey {
     Async(RelId),
 }
 
+impl StoreKey {
+    /// The store's place in [`Stores`]: four kinds per relation.
+    fn slot(self) -> usize {
+        let (rel, kind) = match self {
+            StoreKey::Main(r) => (r, 0),
+            StoreKey::Sent(r) => (r, 1),
+            StoreKey::Next(r) => (r, 2),
+            StoreKey::Async(r) => (r, 3),
+        };
+        rel.index() * 4 + kind
+    }
+}
+
+/// Every store of an engine, found by its key in constant time (the keys are dense: four kinds per relation).
+/// It knows which stores were written since the tick began (every write goes through `get_mut` or `values_mut`), so
+/// a tick clears only those stores' changes and tells that a store did not change without reading it.
+#[derive(Default)]
+pub(crate) struct Stores {
+    slots: Vec<Option<(StoreKey, Store)>>,
+    /// The slots written since `clear_deltas`, and a flag per slot.
+    touched: Vec<usize>,
+    flags: Vec<bool>,
+}
+
+impl Stores {
+    pub fn insert(&mut self, key: StoreKey, store: Store) {
+        let i = key.slot();
+        if self.slots.len() <= i {
+            self.slots.resize_with(i + 1, || None);
+        }
+        if let Some(slot) = self.slots.get_mut(i) {
+            *slot = Some((key, store));
+        }
+    }
+
+    /// Inserts `make()` at `key` unless a store is there.
+    pub fn insert_absent(&mut self, key: StoreKey, make: impl FnOnce() -> Store) {
+        if self.get(&key).is_none() {
+            self.insert(key, make());
+        }
+    }
+
+    pub fn get(&self, key: &StoreKey) -> Option<&Store> {
+        self.slots.get(key.slot()).and_then(Option::as_ref).map(|(_, s)| s)
+    }
+
+    pub fn get_mut(&mut self, key: &StoreKey) -> Option<&mut Store> {
+        let i = key.slot();
+        self.touch(i);
+        self.slots.get_mut(i).and_then(Option::as_mut).map(|(_, s)| s)
+    }
+
+    fn touch(&mut self, i: usize) {
+        if self.flags.len() <= i {
+            self.flags.resize(i + 1, false);
+        }
+        if let Some(f) = self.flags.get_mut(i)
+            && !*f
+        {
+            *f = true;
+            self.touched.push(i);
+        }
+    }
+
+    /// Whether the store at `key` changed this tick (`Store::changed`); a store not written since the tick began
+    /// did not, and is not read.
+    pub fn changed(&self, key: &StoreKey) -> bool {
+        let i = key.slot();
+        self.flags.get(i).copied().unwrap_or(false) && self.get(key).is_some_and(Store::changed)
+    }
+
+    /// Clears the tick's changes of every store written since the last clear.
+    pub fn clear_deltas(&mut self) {
+        for i in std::mem::take(&mut self.touched) {
+            if let Some(f) = self.flags.get_mut(i) {
+                *f = false;
+            }
+            if let Some(Some((_, s))) = self.slots.get_mut(i) {
+                s.clear_delta();
+            }
+        }
+    }
+
+    /// Every store with its key.
+    pub fn iter(&self) -> impl Iterator<Item = (StoreKey, &Store)> {
+        self.slots.iter().flatten().map(|(k, s)| (*k, s))
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &Store> {
+        self.slots.iter().flatten().map(|(_, s)| s)
+    }
+
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut Store> {
+        for i in 0..self.slots.len() {
+            if self.slots.get(i).is_some_and(Option::is_some) {
+                self.touch(i);
+            }
+        }
+        self.slots.iter_mut().flatten().map(|(_, s)| s)
+    }
+}
+
+/// Every rule's plan, found by its id in constant time, shared so that reading one copies nothing.
+#[derive(Default)]
+pub(crate) struct Plans {
+    slots: Vec<Option<std::sync::Arc<Plan>>>,
+}
+
+impl Plans {
+    pub fn insert(&mut self, id: RuleId, plan: Plan) {
+        let i = id.index();
+        if self.slots.len() <= i {
+            self.slots.resize_with(i + 1, || None);
+        }
+        if let Some(slot) = self.slots.get_mut(i) {
+            *slot = Some(std::sync::Arc::new(plan));
+        }
+    }
+
+    pub fn get(&self, id: &RuleId) -> Option<&std::sync::Arc<Plan>> {
+        self.slots.get(id.index()).and_then(Option::as_ref)
+    }
+
+    pub fn contains_key(&self, id: &RuleId) -> bool {
+        self.get(id).is_some()
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &std::sync::Arc<Plan>> {
+        self.slots.iter().flatten()
+    }
+}
+
+/// When a re-evaluated rule (`Regime::Recompute`) may be left alone at a tick: its output is the same as at its last
+/// evaluation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Skip {
+    /// Never: it calls a host table function.
+    Never,
+    /// While nothing it reads changes, if its last evaluation read the time, the tick and randomness only by
+    /// ordering `now()` against instants (`Ctx::reads_time`), or not at all: then until the earliest instant at
+    /// which one of those orderings would come out the other way (`Ctx::flips_at`). Its evaluation then takes the
+    /// same path to the same output.
+    WhenUnchanged,
+}
+
 /// How a rule's output is kept up to date.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Regime {
@@ -72,9 +217,160 @@ pub(crate) struct Plan {
     pub checks: Vec<usize>,
     /// The dependencies (atoms, then negations and lookups in body order), by literal index.
     pub deps: Vec<usize>,
+    /// The stores the dependencies read.
+    pub dep_keys: Vec<StoreKey>,
     pub head: StoreKey,
     pub aggregate: bool,
     pub regime: Regime,
+    /// When the rule only copies one atom's rows into its head: how, column by column.
+    pub copy: Option<CopyPlan>,
+    /// A re-evaluated rule: when it may be left alone.
+    pub skip: Skip,
+    /// When the rule is a table's frame (`Persistence::Frame`): the stores its native operator reads.
+    pub frame: Option<FramePlan>,
+}
+
+/// A table's frame (ENG-003, `Persistence::Frame`): `r(x̄)@next :- r(x̄), notin r$del(x̄)` (and `r$keep(x̄)` for a
+/// guarded table). Its contribution to `r`'s next state is exactly the rows of `r` not in `r$del` (and in
+/// `r$keep`): a row's contribution changes only where the row changed in one of them this tick, and the change is
+/// the difference between the row's membership at the start of the tick and now.
+#[derive(Clone, Debug)]
+pub(crate) struct FramePlan {
+    pub rel: StoreKey,
+    pub del: StoreKey,
+    pub keep: Option<StoreKey>,
+}
+
+impl FramePlan {
+    /// The frame plan of `rule`, if it is the frame of its head's table, in the expansion's shape.
+    pub(crate) fn of(rule: &Rule, persistence: &blossom_ir::core::Persistence) -> Option<FramePlan> {
+        let blossom_ir::core::Persistence::Frame {
+            rule: id,
+            del: Some(del),
+            guard,
+        } = persistence
+        else {
+            return None;
+        };
+        if *id != rule.id || rule.kind != RuleKind::Inductive {
+            return None;
+        }
+        let vars: Vec<&Term> = rule.head.args.iter().filter_map(|h| match h {
+            HeadArg::Term(t @ Term::Var(_)) => Some(t),
+            _ => None,
+        }).collect();
+        if vars.len() != rule.head.args.len() {
+            return None;
+        }
+        let same = |a: &Atom| a.sender.is_none() && a.args.iter().collect::<Vec<_>>() == vars;
+        let lits = rule.body.lits.as_slice();
+        let ok = match (lits, guard) {
+            ([Literal::Pos(r), Literal::Neg(d)], None) => r.rel == rule.head.rel && d.rel == *del && same(r) && same(d),
+            ([Literal::Pos(r), Literal::Neg(d), Literal::Pos(k)], Some(g)) => {
+                r.rel == rule.head.rel && d.rel == *del && k.rel == *g && same(r) && same(d) && same(k)
+            }
+            _ => false,
+        };
+        ok.then(|| FramePlan {
+            rel: StoreKey::Main(rule.head.rel),
+            del: StoreKey::Main(*del),
+            keep: guard.map(StoreKey::Main),
+        })
+    }
+}
+
+/// A rule whose body is one positive atom and whose head is plain terms (lowering makes many: unions, renames,
+/// the copies into a table's next state): a changed row of the atom maps to its head row column by column, with no
+/// join, valuation or allocation but the head row.
+#[derive(Clone, Debug)]
+pub(crate) struct CopyPlan {
+    /// What each atom column must hold.
+    cols: Vec<ColCheck>,
+    /// Where each head column comes from.
+    head: Vec<HeadSrc>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ColCheck {
+    /// Anything (a wildcard, or a variable's first column).
+    Any,
+    /// This constant.
+    Const(blossom_base::ConstId),
+    /// The value of an earlier column (a variable met again).
+    Same(usize),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum HeadSrc {
+    Col(usize),
+    Const(blossom_base::ConstId),
+}
+
+impl CopyPlan {
+    /// The copy plan of `rule`, if its body is one positive atom and its head plain terms over the atom's
+    /// variables.
+    fn of(rule: &Rule) -> Option<CopyPlan> {
+        let [Literal::Pos(a)] = rule.body.lits.as_slice() else { return None };
+        let mut first: std::collections::BTreeMap<VarId, usize> = std::collections::BTreeMap::new();
+        let mut cols = Vec::new();
+        for (i, t) in atom_terms(a).enumerate() {
+            cols.push(match t {
+                Term::Wild => ColCheck::Any,
+                Term::Const(c) => ColCheck::Const(*c),
+                Term::Var(v) => match first.get(v) {
+                    Some(j) => ColCheck::Same(*j),
+                    None => {
+                        first.insert(*v, i);
+                        ColCheck::Any
+                    }
+                },
+            });
+        }
+        let mut head = Vec::new();
+        for h in &rule.head.args {
+            head.push(match h {
+                HeadArg::Term(Term::Var(v)) => HeadSrc::Col(*first.get(v)?),
+                HeadArg::Term(Term::Const(c)) => HeadSrc::Const(*c),
+                _ => return None,
+            });
+        }
+        Some(CopyPlan { cols, head })
+    }
+
+    /// The head row `row` maps to, if it matches the atom.
+    pub(crate) fn row(&self, cx: &Ctx<'_>, row: &[Value]) -> ExprResult<Option<Row>> {
+        if row.len() != self.cols.len() {
+            return Err(bug(format!("{} terms against {} values", self.cols.len(), row.len())));
+        }
+        let konst = |c: &blossom_base::ConstId| -> ExprResult<&Value> {
+            cx.program
+                .consts
+                .get(*c)
+                .ok_or_else(|| bug(format!("unknown constant {c:?}")))
+        };
+        for (i, check) in self.cols.iter().enumerate() {
+            let held = row.get(i).ok_or_else(|| bug("a copied column out of range".into()))?;
+            let ok = match check {
+                ColCheck::Any => true,
+                ColCheck::Const(c) => konst(c)? == held,
+                ColCheck::Same(j) => row.get(*j).is_some_and(|x| x == held),
+            };
+            if !ok {
+                return Ok(None);
+            }
+        }
+        let mut out = Vec::with_capacity(self.head.len());
+        for src in &self.head {
+            out.push(match src {
+                HeadSrc::Col(i) => row
+                    .get(*i)
+                    .cloned()
+                    .ok_or_else(|| bug("a copied column out of range".into()))?,
+                HeadSrc::Const(c) => konst(c)?.clone(),
+            });
+        }
+        Ok(Some(Row::from(out)))
+    }
 }
 
 /// One end of a range probe: an expression over bound variables, and whether the end is included.
@@ -150,6 +446,15 @@ pub(crate) fn dep_store(lit: &Literal) -> Option<StoreKey> {
 
 fn atom_terms(a: &Atom) -> impl Iterator<Item = &Term> {
     a.args.iter().chain(a.sender.iter())
+}
+
+/// The term of column `i` of `a` (`atom_terms(a).nth(i)`).
+fn atom_term(a: &Atom, i: usize) -> Option<&Term> {
+    match a.args.get(i) {
+        Some(t) => Some(t),
+        None if i == a.args.len() => a.sender.as_ref(),
+        None => None,
+    }
 }
 
 fn atom_vars(a: &Atom) -> BTreeSet<VarId> {
@@ -316,6 +621,14 @@ impl Plan {
             RuleKind::Async => StoreKey::Async(rule.head.rel),
         };
         let no_atoms = atoms.is_empty();
+        let dep_keys = deps.iter().filter_map(|l| rule.body.lits.get(*l).and_then(dep_store)).collect();
+        let aggregate = crate::strata::is_aggregate(rule);
+        let copy = if aggregate { None } else { CopyPlan::of(rule) };
+        let skip = if lits.iter().any(|l| matches!(l, Literal::Gen { src: GenSource::TableFn { .. }, .. })) {
+            Skip::Never
+        } else {
+            Skip::WhenUnchanged
+        };
         Ok(Plan {
             rule: rule.id,
             nvars: rule.body.vars.len(),
@@ -329,8 +642,12 @@ impl Plan {
                 Regime::Delta
             },
             deps,
+            dep_keys,
             head,
-            aggregate: crate::strata::is_aggregate(rule),
+            aggregate,
+            copy,
+            skip,
+            frame: None,
         })
     }
 
@@ -697,12 +1014,19 @@ pub(crate) struct Found<'e> {
 /// A valuation's identity, for counting its runtime errors: its atom rows and lookup values.
 pub(crate) type Token = Vec<Value>;
 
+/// The buffers a rule's terms are evaluated in, reused from one term to the next.
+#[derive(Default)]
+pub(crate) struct TermBuffers {
+    env: Vec<Option<Value>>,
+    rows: Vec<Option<Row>>,
+}
+
 /// Evaluates one term of `rule`'s delta query. `old(lit)` says whether dependency `lit` is read at its old version.
 /// Each valuation goes to `emit`; each runtime error to `error`, with the valuation's token.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_term(
     cx: &Ctx<'_>,
-    stores: &BTreeMap<StoreKey, Store>,
+    stores: &Stores,
     rule: &Rule,
     plan: &Plan,
     order: &Order,
@@ -710,8 +1034,13 @@ pub(crate) fn run_term(
     old: &dyn Fn(usize) -> bool,
     emit: &mut dyn FnMut(Found<'_>) -> ExprResult<()>,
     error: &mut dyn FnMut(Token, ExprError, i64),
+    buffers: &mut TermBuffers,
 ) -> Result<u64, EvalError> {
-    let mut env: Vec<Option<Value>> = vec![None; plan.nvars];
+    let TermBuffers { env, rows } = buffers;
+    env.clear();
+    env.resize(plan.nvars, None);
+    rows.clear();
+    rows.resize(rule.body.lits.len(), None);
     let sign = driver.sign();
     // Bind what the driver fixes.
     match driver {
@@ -720,7 +1049,7 @@ pub(crate) fn run_term(
             let Some(Literal::Pos(a)) = rule.body.lits.get(*lit) else {
                 return Err(internal_error!("an atom driver names a non-atom").into());
             };
-            if !unify(cx, &mut env, atom_terms(a), row).map_err(fatal)? {
+            if !unify(cx, env, atom_terms(a), row).map_err(fatal)? {
                 return Ok(0);
             }
         }
@@ -729,7 +1058,7 @@ pub(crate) fn run_term(
                 return Err(internal_error!("a negation driver names a non-negation").into());
             };
             let terms: Vec<&Term> = non_wild(a).iter().filter_map(|c| a.args.get(*c)).collect();
-            if !unify(cx, &mut env, terms.into_iter(), key).map_err(fatal)? {
+            if !unify(cx, env, terms.into_iter(), key).map_err(fatal)? {
                 return Ok(0);
             }
         }
@@ -737,7 +1066,7 @@ pub(crate) fn run_term(
             let Some(Literal::Lookup { var, key: terms, .. }) = rule.body.lits.get(*lit) else {
                 return Err(internal_error!("a lookup driver names a non-lookup").into());
             };
-            if !unify(cx, &mut env, terms.iter(), key).map_err(fatal)? {
+            if !unify(cx, env, terms.iter(), key).map_err(fatal)? {
                 return Ok(0);
             }
             match env.get_mut(var.index()) {
@@ -748,7 +1077,6 @@ pub(crate) fn run_term(
             }
         }
     }
-    let mut rows: Vec<Option<Row>> = vec![None; rule.body.lits.len()];
     if let Driver::Atom { lit, row, .. } = driver
         && let Some(slot) = rows.get_mut(*lit)
     {
@@ -773,7 +1101,7 @@ pub(crate) fn run_term(
         error,
         examined: 0,
     };
-    search.run(0, &mut env, &mut rows, &mut Vec::new(), None)?;
+    search.run(0, env, rows, &mut Vec::new(), None)?;
     Ok(search.examined)
 }
 
@@ -863,7 +1191,7 @@ fn range_end(cx: &Ctx<'_>, env: &[Option<Value>], end: &Option<RangeEnd>) -> Opt
 
 struct Search<'a, 'b> {
     cx: &'a Ctx<'a>,
-    stores: &'a BTreeMap<StoreKey, Store>,
+    stores: &'a Stores,
     rule: &'a Rule,
     plan: &'a Plan,
     driver: &'a Driver,
@@ -955,14 +1283,11 @@ impl Search<'_, '_> {
         let Some(Literal::Pos(a)) = self.rule.body.lits.get(lit) else {
             return Err(internal_error!("a join step names a non-atom").into());
         };
-        let terms: Vec<&Term> = atom_terms(a).collect();
         // The probe's values; after a failed check a planned column may be unbound, and the atom is scanned.
         let mut values = Vec::with_capacity(cols.len());
         let mut probe = true;
         for c in cols {
-            let t = terms
-                .get(*c)
-                .ok_or_else(|| internal_error!("a bound column is out of range"))?;
+            let t = atom_term(a, *c).ok_or_else(|| internal_error!("a bound column is out of range"))?;
             // Only after a failed check can a planned column's variable be unbound (the check would have bound it).
             let unbound = matches!(t, Term::Var(v) if env.get(v.index()).is_none_or(Option::is_none));
             if unbound && failed.is_some() {
@@ -998,7 +1323,7 @@ impl Search<'_, '_> {
         let mut newly = Vec::new();
         for row in candidates {
             newly.clear();
-            let ok = unify_tracked(self.cx, env, terms.iter().copied(), &row, &mut newly).map_err(fatal)?;
+            let ok = unify_tracked(self.cx, env, atom_terms(a), &row, &mut newly).map_err(fatal)?;
             if ok {
                 if let Some(slot) = rows.get_mut(lit) {
                     *slot = Some(row);

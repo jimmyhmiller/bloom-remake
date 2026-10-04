@@ -120,28 +120,28 @@ fn frame(body: Bytes) -> Bytes {
 
 /// Every complete frame at the front of `b` (without their size prefixes), the bytes they take, and whether a
 /// declared size is invalid (negative or over `MAX_FRAME`): then the connection must close. At most `most` frames
-/// are looked for; a caller that knows how many frames `b` can hold passes that, so a long buffer holding one big
-/// frame costs one step, not one per four bytes.
+/// are looked for; the walk stops at the first incomplete frame or invalid size, so it costs one step per frame
+/// found, not one per position the bound allows.
 fn split_frames(b: Bytes, most: u64) -> (Vec<Bytes>, u64, bool) {
-    // One step per frame looked for: the position after it, the frame it cut (none once the front frame is
-    // incomplete or a size is invalid), and whether a size was invalid.
-    let steps = range(0, most).scan((0, None, false), |acc, _i| {
+    // One step per frame cut: the position after it, the frame, and whether the size that ended the walk was
+    // invalid (that step cuts no frame, and is the last).
+    let steps = range(0, most).scan_while((0, None, false), |acc, _i| {
         let (pos, _cut, bad) = acc;
         if bad {
-            (pos, None, true)
+            None
         } else {
             match b.i32_be_at(pos) {
                 Some(n) => {
                     if n < 0i32 || n as u64 > MAX_FRAME {
-                        (pos, None, true)
+                        Some((pos, None, true))
                     } else {
                         match b.slice(pos + 4, pos + 4 + n as u64) {
-                            Some(body) => (pos + 4 + n as u64, Some(body), false),
-                            None => (pos, None, false),
+                            Some(body) => Some((pos + 4 + n as u64, Some(body), false)),
+                            None => None,
                         }
                     }
                 }
-                None => (pos, None, false),
+                None => None,
             }
         }
     });

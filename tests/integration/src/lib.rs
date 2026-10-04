@@ -71,3 +71,16 @@ pub fn kafka_brokers(artifact: &BlsArtifact) -> Option<Vec<(RelId, Row)>> {
     }
     Some(rows)
 }
+
+/// Where a simulated run records its nodes' traces (`ClusterConfig::record`), when `BLOSSOM_RECORD_DIR` is set:
+/// `$BLOSSOM_RECORD_DIR/<test>/<tag>`, the test named by its thread (the test harness names each test's thread after
+/// it), one directory per run: a test that runs a tag again (another setup, the same seed) records into
+/// `<tag>.2`, `<tag>.3`, …. `blossom trace … --program FILE --node NAME:ROLE …` reads them.
+pub fn sim_record(tag: &str) -> Option<std::path::PathBuf> {
+    let dir = std::path::PathBuf::from(std::env::var_os("BLOSSOM_RECORD_DIR")?);
+    let thread = std::thread::current();
+    let test = dir.join(thread.name().unwrap_or("unnamed").replace("::", "-"));
+    (1u32..)
+        .map(|k| test.join(if k == 1 { tag.to_owned() } else { format!("{tag}.{k}") }))
+        .find(|d| !d.exists())
+}

@@ -42,6 +42,20 @@ impl Clock for SystemClock {
     }
 }
 
+/// How long the runtime's own operations take (a WAL sync, a checkpoint), for its counters: never read by a node.
+pub struct Stopwatch(std::time::Instant);
+
+impl Stopwatch {
+    pub fn start() -> Stopwatch {
+        Stopwatch(std::time::Instant::now())
+    }
+
+    /// Nanoseconds since the start.
+    pub fn nanos(&self) -> u64 {
+        u64::try_from(self.0.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+}
+
 /// The operating system's entropy.
 pub struct OsEntropy;
 

@@ -207,6 +207,10 @@ struct Shared {
     /// When the last produce was answered and the reader last read (virtual nanoseconds), for a failure's report.
     last_answer: i64,
     last_read: i64,
+    /// Producers that have sent and settled all their produces; whether the reader has stopped, having read on for
+    /// `READ_ON` after the last producer finished.
+    producers_done: usize,
+    reader_done: bool,
     /// Fetches right after an `acks=1` batch (see `Client::probing`).
     probes: usize,
     /// The replicas the admin client last reassigned each partition to, once that reassignment was done.
@@ -272,6 +276,8 @@ struct Client {
     topic_id: Option<[u8; 16]>,
     /// The topic's configurations, when this client creates it.
     topic_configs: Vec<(&'static str, &'static str)>,
+    /// Whether this client has sent and settled all its produces (counted in `Shared::producers_done`).
+    done: bool,
     /// The time of the event being handled.
     now: i64,
 }
@@ -313,6 +319,7 @@ impl Client {
             probe: None,
             topic_id: None,
             topic_configs: Vec::new(),
+            done: false,
             now: 0,
         }
     }
@@ -360,6 +367,10 @@ impl Client {
             return;
         }
         let Some(w) = self.want() else {
+            if !self.done {
+                self.done = true;
+                self.shared.borrow_mut().producers_done += 1;
+            }
             self.close(a);
             return;
         };
@@ -737,14 +748,19 @@ struct Reader {
     /// The partition read next, and each partition's next offset.
     part: i32,
     next: BTreeMap<i32, i64>,
-    /// Stop reading at this time.
-    until: i64,
+    /// The producers: the reader stops `READ_ON` after the last of them finished.
+    producers: usize,
+    finished_at: Option<i64>,
     now: i64,
 }
 
+/// How long the reader reads on after the last producer finished: enough to reach every partition's end.
+#[cfg(test)]
+const READ_ON: i64 = 1_000_000_000;
+
 #[cfg(test)]
 impl Reader {
-    fn new(seed: u64, shared: Rc<RefCell<Shared>>, brokers: BTreeMap<i32, NodeId>, until: i64) -> Self {
+    fn new(seed: u64, shared: Rc<RefCell<Shared>>, brokers: BTreeMap<i32, NodeId>, producers: usize) -> Self {
         Reader {
             shared,
             rng: Rng(seed * 7919 + 13),
@@ -760,7 +776,8 @@ impl Reader {
             pending: None,
             part: 0,
             next: BTreeMap::new(),
-            until,
+            producers,
+            finished_at: None,
             now: 0,
         }
     }
@@ -776,9 +793,13 @@ impl Reader {
         if self.closing || self.pending.is_some() {
             return;
         }
-        if now >= self.until {
-            self.close(a);
-            return;
+        if self.shared.borrow().producers_done == self.producers {
+            let finished = *self.finished_at.get_or_insert(now);
+            if now >= finished + READ_ON {
+                self.shared.borrow_mut().reader_done = true;
+                self.close(a);
+                return;
+            }
         }
         let target = if self.stale {
             let ids: Vec<NodeId> = self.brokers.values().copied().collect();
@@ -1252,6 +1273,7 @@ fn check_runs(setup: &Setup) -> Totals {
             duration: 14_000_000_000,
             chunk_max: 64 + (seed as usize % 5) * 200,
             externs: Arc::new(blossom_std_host::registry().unwrap()),
+            record: blossom_integration_tests::sim_record(&format!("brokers{}-seed{seed}", setup.brokers)),
             ..ClusterConfig::default()
         };
         let mut cluster = Cluster::new(
@@ -1270,7 +1292,7 @@ fn check_runs(setup: &Setup) -> Totals {
             seed,
             shared.clone(),
             brokers.clone(),
-            13_500_000_000,
+            setup.clients as usize,
         )));
         if !setup.waves.is_empty() {
             cluster.stream_client(Box::new(Admin {
@@ -1310,9 +1332,25 @@ fn check_runs(setup: &Setup) -> Totals {
             "{}",
             fail(&cluster, cluster.violation().unwrap_or(""))
         );
-        // The faults stop; the cluster settles (every broker back up, every replica caught up).
+        // The faults stop; the cluster settles (every broker back up, every replica caught up), the producers finish
+        // (their pace varies with the faults and the reassignments) and the reader reads on to every partition's end.
         cluster.heal();
         cluster.step_until(14_000_000_000).unwrap();
+        while !shared.borrow().reader_done {
+            assert!(
+                cluster.now() < 30_000_000_000,
+                "{}",
+                fail(
+                    &cluster,
+                    &format!(
+                        "the producers ({} of {} finished) and the reader did not finish",
+                        shared.borrow().producers_done,
+                        setup.clients
+                    )
+                )
+            );
+            cluster.step_until(cluster.now() + 100_000_000).unwrap();
+        }
         assert!(
             cluster.violation().is_none(),
             "{}",
@@ -1659,6 +1697,7 @@ fn a_follower_behind_its_leaders_log_start_catches_up_from_a_snapshot() {
             clients: 0,
             duration: 12_000_000_000,
             externs: Arc::new(blossom_std_host::registry().unwrap()),
+            record: blossom_integration_tests::sim_record(&format!("snapshot-seed{seed}")),
             ..ClusterConfig::default()
         };
         let mut cluster = Cluster::new(
@@ -1734,8 +1773,15 @@ fn a_follower_behind_its_leaders_log_start_catches_up_from_a_snapshot() {
             fail(&cluster, "no leader compacted past the stopped broker")
         );
         cluster.restart(lagging).unwrap();
-        cluster.run_until(8_000_000_000).unwrap();
-        cluster.step_until(9_000_000_000).unwrap();
+        // The producers go on until each has sent and seen answered all of its batches: their pace is mostly
+        // reconnections (a connection per leader they switch to, so it varies with where the leaders are). Wait for
+        // the last answer, within a bound, then let the replicas settle.
+        let done = |sh: &Shared| sh.sent.len() == 240 && sh.sent.iter().all(|s| s.answer.is_some());
+        while !done(&shared.borrow()) && cluster.now() < 11_000_000_000 {
+            cluster.run_until(cluster.now() + 100_000_000).unwrap();
+        }
+        let settled = cluster.now() + 1_000_000_000;
+        cluster.step_until(settled).unwrap();
         assert!(
             cluster.violation().is_none(),
             "{}",
@@ -2297,6 +2343,133 @@ fn a_command_sent_again_past_the_done_window_is_skipped() {
 #[test]
 fn a_command_sent_again_after_catching_up_from_a_snapshot_is_skipped() {
     late_copies(true);
+}
+
+/// A broker that restarts forgets the partition leaders it was told of, while the leaders still hold its
+/// confirmations: once it is heard alive in its new incarnation they tell it again, so it learns the leader of every
+/// partition, the quiet ones included (whose leaders announce nothing else).
+#[test]
+fn a_restarted_broker_learns_every_partitions_leader_again() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/kafka/sim_cluster.bls");
+    let mut nodes: Vec<NodeSpec> = (1..=3)
+        .map(|i| NodeSpec {
+            name: format!("b{i}"),
+            role: Some("Broker".to_owned()),
+        })
+        .collect();
+    nodes.push(NodeSpec {
+        name: "c1".to_owned(),
+        role: Some("Client".to_owned()),
+    });
+    let (result, _) = blossom_driver::bls::compile_file_with(path.to_str().unwrap(), &nodes, &BTreeMap::new());
+    let artifact: BlsArtifact = result.unwrap_or_else(|e| panic!("sim_cluster.bls: {e:?}")).0;
+    let schema = DurableSchema::of(artifact.program.get());
+    let rel = |n: &str| artifact.rel_named(n).unwrap();
+    let topics = ["q0", "q1", "q2"];
+    let mut checked = 0;
+    for seed in seeds(1..=2) {
+        let cfg = ClusterConfig {
+            seed,
+            clients: 0,
+            duration: 10_000_000_000,
+            externs: Arc::new(blossom_std_host::registry().unwrap()),
+            record: blossom_integration_tests::sim_record(&format!("restart-seed{seed}")),
+            ..ClusterConfig::default()
+        };
+        let mut cluster = Cluster::new(
+            &artifact,
+            &schema,
+            blossom_value::Seed::from_u64(seed),
+            blossom_integration_tests::kafka_brokers(&artifact).unwrap(),
+            Box::new(NoKvClients),
+            cfg,
+        )
+        .unwrap();
+        let fail = |cluster: &Cluster<'_>, what: &str| -> String {
+            format!("seed {seed}: {what}\n{}", cluster.run_so_far().log.join("\n"))
+        };
+        let created = Rc::new(RefCell::new(0));
+        cluster.stream_client(Box::new(Script {
+            rng: Rng(seed),
+            brokers: vec![NodeId(0)],
+            steps: topics.iter().map(|t| (create_frame(t, 3), create_check())).collect(),
+            at: 0,
+            conn: None,
+            open: false,
+            buf: Vec::new(),
+            pending: None,
+            done: created.clone(),
+            patience: REQUEST_TIMEOUT,
+        }));
+        while *created.borrow() < topics.len() {
+            assert!(
+                cluster.now() < 3_000_000_000,
+                "{}",
+                fail(&cluster, "the topics were not created")
+            );
+            cluster.run_until(cluster.now() + 20_000_000).unwrap();
+        }
+        // Every partition elects, is announced and goes quiet; then one broker restarts.
+        cluster.run_until(cluster.now() + 2_000_000_000).unwrap();
+        let restarted = NodeId(2);
+        cluster.crash(restarted, CrashWrites::Random).unwrap();
+        cluster.run_until(cluster.now() + 100_000_000).unwrap();
+        cluster.restart(restarted).unwrap();
+        cluster.run_until(cluster.now() + 2_000_000_000).unwrap();
+        assert!(
+            cluster.violation().is_none(),
+            "{}",
+            fail(&cluster, cluster.violation().unwrap_or(""))
+        );
+        let ids: Vec<Value> = cluster
+            .state(NodeId(0))
+            .unwrap()
+            .rows(rel("mtopic"))
+            .filter(|r| topics.iter().any(|t| r[0] == Value::Str((*t).into())))
+            .map(|r| r[1].clone())
+            .collect();
+        assert_eq!(ids.len(), topics.len(), "{}", fail(&cluster, "a topic is missing"));
+        let views: Vec<Vec<Value>> = cluster
+            .state(restarted)
+            .unwrap()
+            .rows(rel("leader_view"))
+            .map(|r| r.to_vec())
+            .collect();
+        for id in &ids {
+            for p in 0..2 {
+                let g = Value::Tuple(vec![id.clone(), Value::Int(IntValue::I32(p))].into());
+                // The partition's leader: the broker that won its newest term.
+                let leader = (0..3u32)
+                    .map(NodeId)
+                    .filter_map(|n| {
+                        cluster
+                            .state(n)
+                            .unwrap()
+                            .rows(rel("won"))
+                            .filter(|r| r[0] == g)
+                            .map(|r| int(&r[1]))
+                            .max()
+                            .map(|t| (t, n))
+                    })
+                    .max()
+                    .map(|(_, n)| n)
+                    .unwrap_or_else(|| panic!("{}", fail(&cluster, &format!("{g:?} has no leader"))));
+                if leader == restarted {
+                    continue;
+                }
+                assert!(
+                    views.iter().any(|r| r[0] == g && r[2] == Value::Node(leader)),
+                    "{}",
+                    fail(
+                        &cluster,
+                        &format!("the restarted broker does not know {g:?} is led by {leader:?}: {views:?}")
+                    )
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 0, "no partition was led by a broker that stayed up");
 }
 
 #[cfg(test)]

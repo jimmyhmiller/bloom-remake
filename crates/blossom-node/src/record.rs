@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use blossom_base::{RelId, RuleId};
-use blossom_ir::tick::{EvalError, Instance, Row, StepInput, StepOutput};
+use blossom_base::{FnId, RelId, RuleId};
+use blossom_ir::tick::{EvalError, FnWork, Instance, Row, RuleWork, StepInput, StepOutput};
 use blossom_trace::node::{NodeRecord, NodeTraceHeader, TraceWriter, outcome_digest};
 use blossom_value::{BlobRef, BlobSource};
 
@@ -139,8 +139,16 @@ impl Executor for Recording {
         self.inner.rows_examined()
     }
 
-    fn rows_examined_by_rule(&self) -> Option<BTreeMap<RuleId, u64>> {
-        self.inner.rows_examined_by_rule()
+    fn work_by_rule(&self) -> Option<BTreeMap<RuleId, RuleWork>> {
+        self.inner.work_by_rule()
+    }
+
+    fn profile_functions(&mut self, on: bool) -> bool {
+        self.inner.profile_functions(on)
+    }
+
+    fn work_by_function(&self) -> Option<BTreeMap<FnId, FnWork>> {
+        self.inner.work_by_function()
     }
 
     fn holds_blob(&self, b: &BlobRef) -> bool {

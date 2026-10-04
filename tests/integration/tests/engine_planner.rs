@@ -230,6 +230,22 @@ fn a_point_cell_changing_its_contribution_is_not_a_conflict() {
     assert!(matches!(differential_on("point_send_changes.bls", &pair, &set, 4), Outcome::Ran(_)));
 }
 
+/// Rules that read the time only by comparing `now()` with an instant (each operator, `now()` on either side, under
+/// `&&`), and a rule with no positive atom, agree with the oracle at every tick: the engine skips them while nothing
+/// they read changes and the time is before their next flip, and must re-evaluate exactly at the flip.
+#[test]
+fn rules_skipped_until_the_time_flips_them_agree_with_the_oracle() {
+    let inputs = [(1, "seen", 1), (2, "seen", 2), (6, "forget", 1), (7, "seen", 1), (9, "forget", 2)];
+    let Outcome::Ran(run) = differential("time_guards.bls", &inputs, 14) else {
+        panic!("time_guards.bls failed");
+    };
+    // The views change at ticks with no input: the skipped rules did come back.
+    let artifact = compile("time_guards.bls");
+    let fresh = artifact.rel_named("fresh").unwrap();
+    let count = |t: u64| run.node_tick(Tick(t), NodeId(0)).unwrap().instance.rows(fresh).count();
+    assert!((3..6).any(|t| count(t) != count(t + 1)), "fresh never changed between inputs");
+}
+
 #[test]
 fn rand_range_draws_spans_above_2_64_on_the_engine() {
     let solo = [NodeSpec {
