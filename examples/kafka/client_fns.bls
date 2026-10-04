@@ -30,14 +30,20 @@ format BatchBody {
     records: rest,
 }
 
-/// A magic-2 batch of `values`, uncompressed, without idempotence, all at timestamp `ts`: its header, with the
-/// length and the CRC32C over `attributes..end` computed, then its records (a null key, no headers).
+/// A magic-2 batch of `values`, uncompressed, without idempotence, all at timestamp `ts`.
 fn encode_batch(values: Vec<Bytes>, ts: i64) -> Bytes {
+    encode_batch_as(values, ts, -1i64, -1i16, -1i32)
+}
+
+/// A magic-2 batch of `values`, uncompressed, all at timestamp `ts`, from producer `pid` at `epoch` with its first
+/// record at sequence `seq` (-1, -1, -1: no idempotence): its header, with the length and the CRC32C over
+/// `attributes..end` computed, then its records (a null key, no headers).
+fn encode_batch_as(values: Vec<Bytes>, ts: i64, pid: i64, epoch: i16, seq: i32) -> Bytes {
     let records = Bytes::join(values.enumerate().map(|e| Record::encode(Record { body: (0i64, e.0 as i64, None, e.1, Bytes::varint(0i64)) })));
     let n = values.len() as i32;
     let covered = BatchBody::encode(BatchBody {
-        attributes: 0i16, last_offset_delta: n - 1i32, base_timestamp: ts, max_timestamp: ts, producer_id: -1i64,
-        producer_epoch: -1i16, base_sequence: -1i32, record_count: n, records: records,
+        attributes: 0i16, last_offset_delta: n - 1i32, base_timestamp: ts, max_timestamp: ts, producer_id: pid,
+        producer_epoch: epoch, base_sequence: seq, record_count: n, records: records,
     });
     Bytes::join([
         Bytes::from_i64_be(0i64), Bytes::from_i32_be((covered.len() + 9) as i32), Bytes::from_i32_be(-1i32),
@@ -47,6 +53,12 @@ fn encode_batch(values: Vec<Bytes>, ts: i64) -> Bytes {
 
 /// The producer's `acks`: -1 (all in-sync replicas), 1 (the leader), 0 (none).
 param CLIENT_ACKS: i16 = -1;
+/// Whether a produce whose connection closed unanswered is sent again (Kafka's `retries`): it may be in the log
+/// already, so without idempotence a retry can store a batch twice.
+param CLIENT_RETRY: bool = false;
+/// Whether the producer is idempotent (Kafka's `enable.idempotence`): it asks InitProducerId for a producer id and
+/// numbers its batches per partition, so the broker stores a retried batch once.
+param CLIENT_IDEMPOTENT: bool = false;
 
 /// ProduceRequest v12, framed: one batch to one partition, acks `CLIENT_ACKS`.
 fn encode_produce_request(correlation_id: i32, client_id: String, topic: String, partition: i32, batch: Bytes) -> Bytes {
@@ -146,6 +158,38 @@ fn batch_values(k: u64) -> Vec<Bytes> {
 /// The produce request for batch `k`, to partition `k` modulo the partition count.
 fn produce_frame(k: u64, parts: u64) -> Bytes {
     encode_produce_request(CORR_PRODUCE + k as i32, "blossom", CLIENT_TOPIC, (k % parts) as i32, encode_batch(batch_values(k), 0i64))
+}
+
+/// The produce request for batch `k` from producer `pid` at `epoch` (-1: not idempotent): batches go to the
+/// partitions in turn, so batch `k` is the `k / parts`-th to its partition, and its records start at that many
+/// batches' records into the partition's sequence.
+fn produce_frame_as(k: u64, parts: u64, pid: i64, epoch: i16) -> Bytes {
+    let seq = if pid < 0i64 {
+        -1i32
+    } else {
+        range(0, k / parts).map(|j| (1u64 + (j * parts + k % parts) % 3u64) as i32).fold(0i32, |a, b| a + b)
+    };
+    encode_produce_request(CORR_PRODUCE + k as i32, "blossom", CLIENT_TOPIC, (k % parts) as i32,
+        encode_batch_as(batch_values(k), 0i64, pid, epoch, seq))
+}
+
+const CORR_INIT_PID: i32 = 5;
+
+/// InitProducerId v4, framed: a new idempotent producer (no transactional id).
+fn encode_init_pid_request(correlation_id: i32, client_id: String) -> Bytes {
+    let r = InitProducerIdRequest { transactional_id: None, timeout_ms: 30000i32, producer_id: -1i64, producer_epoch: -1i16 };
+    frame(request_header_v2(API_INIT_PRODUCER_ID, 4i16, correlation_id, client_id).concat(InitProducerIdRequest::encode(r)))
+}
+
+format InitProducerIdResponse { throttle: i32, error: i16, producer_id: i64, producer_epoch: i16, tags }
+
+/// A response frame's InitProducerId answer: its error, producer id and epoch.
+fn init_pid_answer(f: Bytes) -> Option<(i16, i64, i16)> {
+    response_correlation(cur(f)).and_then(|p| if p.0 == CORR_INIT_PID {
+        skip_tags(p.1).and_then(|b| InitProducerIdResponse::decode(b.buf, b.pos)).map(|r| (r.0.error, r.0.producer_id, r.0.producer_epoch))
+    } else {
+        None
+    })
 }
 
 /// Where the read goes after reading `records` at `(p, off)` in a log whose high watermark is `hw`: on in the same
