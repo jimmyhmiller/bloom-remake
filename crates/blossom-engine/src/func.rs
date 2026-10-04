@@ -92,25 +92,23 @@ pub(crate) fn let_expr(
 ) -> ExprResult<Value> {
     let v = eval_in(cx, env, value)?;
     let mark = env.mark();
-    let out = set(env, pat, &v).and_then(|()| eval_in(cx, env, body));
+    let out = set(env, pat, v).and_then(|()| eval_in(cx, env, body));
     env.restore(mark);
     out
 }
 
-/// Binds an irrefutable pattern's variables in `frame` (undone by `Frame::restore`).
-fn set(frame: &mut Frame<'_>, pat: &Pattern, v: &Value) -> ExprResult<()> {
+/// Binds an irrefutable pattern's variables in `frame` (undone by `Frame::restore`), taking `v`.
+fn set(frame: &mut Frame<'_>, pat: &Pattern, v: Value) -> ExprResult<()> {
     match pat {
         Pattern::Wild => Ok(()),
-        Pattern::Var(x) => frame.bind(x.index(), v.clone()),
-        Pattern::Tuple(ps) => {
-            let Value::Tuple(fs) = v else {
-                return Err(bug(format!("a tuple pattern over {v:?}")));
-            };
-            if ps.len() != fs.len() {
-                return Err(bug(format!("a {}-tuple pattern over {v:?}", ps.len())));
+        Pattern::Var(x) => frame.bind(x.index(), v),
+        Pattern::Tuple(ps) => match v {
+            Value::Tuple(fs) if fs.len() == ps.len() => {
+                ps.iter().zip(fs.iter()).try_for_each(|(p, f)| set(frame, p, f.clone()))
             }
-            ps.iter().zip(fs.iter()).try_for_each(|(p, f)| set(frame, p, f))
-        }
+            Value::Tuple(fs) => Err(bug(format!("a {}-tuple pattern over {:?}", ps.len(), Value::Tuple(fs)))),
+            other => Err(bug(format!("a tuple pattern over {other:?}"))),
+        },
         other => Err(bug(format!("a refutable `let` pattern {other:?}"))),
     }
 }
@@ -129,13 +127,10 @@ impl<'e> Closure<'e> {
         }
     }
 
-    fn call(&self, cx: &Ctx<'_>, env: &mut Frame<'_>, args: &[Value]) -> ExprResult<Value> {
-        if args.len() != self.params.len() {
-            return Err(bug(format!(
-                "a {}-parameter closure given {}",
-                self.params.len(),
-                args.len()
-            )));
+    /// Applies the closure to `args`, which its parameters take (moved, not copied).
+    fn call<const N: usize>(&self, cx: &Ctx<'_>, env: &mut Frame<'_>, args: [Value; N]) -> ExprResult<Value> {
+        if N != self.params.len() {
+            return Err(bug(format!("a {}-parameter closure given {N}", self.params.len())));
         }
         cx.fuel.spend(1)?;
         let mark = env.mark();
@@ -143,7 +138,7 @@ impl<'e> Closure<'e> {
             .params
             .iter()
             .zip(args)
-            .try_for_each(|(p, a)| env.bind(p.index(), a.clone()))
+            .try_for_each(|(p, a)| env.bind(p.index(), a))
             .and_then(|()| eval_in(cx, env, self.body));
         env.restore(mark);
         out
@@ -279,16 +274,15 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
             let c = Closure::of(expr(1)?)?;
             let mut out = Vec::new();
             each(cx, env, expr(0)?, |env, x| {
-                let r = c.call(cx, env, std::slice::from_ref(&x))?;
                 match f {
-                    LibFn::VecMap => out.push(r),
+                    LibFn::VecMap => out.push(c.call(cx, env, [x])?),
                     LibFn::VecFilter => {
-                        if truth(&r)? {
+                        if truth(&c.call(cx, env, [x.clone()])?)? {
                             out.push(x);
                         }
                     }
                     _ => {
-                        if let Some(y) = optional(r)? {
+                        if let Some(y) = optional(c.call(cx, env, [x])?)? {
                             out.push(y);
                         }
                     }
@@ -301,7 +295,7 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
             let c = Closure::of(expr(1)?)?;
             let mut all = true;
             each(cx, env, expr(0)?, |env, x| {
-                all = truth(&c.call(cx, env, &[x])?)?;
+                all = truth(&c.call(cx, env, [x])?)?;
                 Ok(all)
             })?;
             Ok(Value::Bool(all))
@@ -310,7 +304,7 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
             let c = Closure::of(expr(1)?)?;
             let mut any = false;
             each(cx, env, expr(0)?, |env, x| {
-                any = truth(&c.call(cx, env, &[x])?)?;
+                any = truth(&c.call(cx, env, [x])?)?;
                 Ok(!any)
             })?;
             Ok(Value::Bool(any))
@@ -325,7 +319,7 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
                     Some(a) => a,
                     None => arg_value(cx, env, f, args, 1)?,
                 };
-                acc = Some(c.call(cx, env, &[prev, x])?);
+                acc = Some(c.call(cx, env, [prev, x])?);
                 Ok(true)
             })?;
             match acc {
@@ -343,7 +337,7 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
                     Some(a) => a,
                     None => arg_value(cx, env, f, args, 1)?,
                 };
-                let next = c.call(cx, env, &[prev, x])?;
+                let next = c.call(cx, env, [prev, x])?;
                 out.push(next.clone());
                 acc = Some(next);
                 Ok(true)
@@ -365,7 +359,7 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
                     None => arg_value(cx, env, f, args, 1)?,
                 };
                 started = true;
-                match c.call(cx, env, &[prev, x])? {
+                match c.call(cx, env, [prev, x])? {
                     Value::Option(Some(next)) => {
                         let next = (*next).clone();
                         out.push(next.clone());
@@ -416,7 +410,7 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
             let Some(x) = optional(arg_value(cx, env, f, args, 0)?)? else {
                 return Ok(Value::Option(None));
             };
-            let r = Closure::of(expr(1)?)?.call(cx, env, &[x])?;
+            let r = Closure::of(expr(1)?)?.call(cx, env, [x])?;
             Ok(if f == LibFn::OptMap {
                 Value::Option(Some(Arc::new(r)))
             } else {
