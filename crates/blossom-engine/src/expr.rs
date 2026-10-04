@@ -174,6 +174,86 @@ impl Shared {
     }
 }
 
+/// The variables an expression reads. Its binders (`let`, a `match` arm, a closure's parameters) bind their
+/// variables in place and restore what the slots held when they end, so evaluation never copies the frame; a frame
+/// borrowed from a rule's valuation is copied once, at its first binding.
+pub(crate) struct Frame<'a> {
+    slots: std::borrow::Cow<'a, [Option<Value>]>,
+    /// What the binders in progress displaced, innermost last.
+    saved: Vec<(usize, Option<Value>)>,
+    /// The slots the `match` arms in progress bound (each was unbound before).
+    newly: Vec<usize>,
+}
+
+impl<'a> Frame<'a> {
+    pub(crate) fn borrowed(slots: &'a [Option<Value>]) -> Self {
+        Frame {
+            slots: std::borrow::Cow::Borrowed(slots),
+            saved: Vec::new(),
+            newly: Vec::new(),
+        }
+    }
+
+    pub(crate) fn owned(slots: Vec<Option<Value>>) -> Frame<'static> {
+        Frame {
+            slots: std::borrow::Cow::Owned(slots),
+            saved: Vec::new(),
+            newly: Vec::new(),
+        }
+    }
+
+    pub(crate) fn slots(&self) -> &[Option<Value>] {
+        &self.slots
+    }
+
+    /// Where the bindings made from now on start (for `restore`).
+    pub(crate) fn mark(&self) -> usize {
+        self.saved.len()
+    }
+
+    /// Binds slot `i` to `v`, remembering what it held.
+    pub(crate) fn bind(&mut self, i: usize, v: Value) -> ExprResult<()> {
+        let slot = self
+            .slots
+            .to_mut()
+            .get_mut(i)
+            .ok_or_else(|| bug(format!("binding slot {i} outside the frame")))?;
+        let old = slot.replace(v);
+        self.saved.push((i, old));
+        Ok(())
+    }
+
+    /// Undoes the bindings made since `mark`, innermost first.
+    pub(crate) fn restore(&mut self, mark: usize) {
+        while self.saved.len() > mark {
+            let Some((i, old)) = self.saved.pop() else { break };
+            if let Some(slot) = self.slots.to_mut().get_mut(i) {
+                *slot = old;
+            }
+        }
+    }
+
+    /// Matches `v` against `pat` as a `match` arm does, recording the slots it binds from `newly`'s current length.
+    fn match_arm(&mut self, cx: &Ctx<'_>, pat: &Pattern, v: &Value) -> ExprResult<bool> {
+        let Frame { slots, newly, .. } = self;
+        matches(cx, slots.to_mut(), pat, v, newly)
+    }
+
+    /// Unbinds the slots `match` arms bound since `mark` (each was unbound before).
+    fn unbind_arm(&mut self, mark: usize) {
+        if self.newly.len() <= mark {
+            return;
+        }
+        let Frame { slots, newly, .. } = self;
+        let slots = slots.to_mut();
+        for i in newly.drain(mark..) {
+            if let Some(slot) = slots.get_mut(i) {
+                *slot = None;
+            }
+        }
+    }
+}
+
 pub(crate) fn term(cx: &Ctx<'_>, env: &[Option<Value>], t: &Term) -> ExprResult<Value> {
     match t {
         Term::Var(v) => env
@@ -206,9 +286,13 @@ macro_rules! unimplemented {
 }
 
 pub(crate) fn eval(cx: &Ctx<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<Value> {
+    eval_in(cx, &mut Frame::borrowed(env), e)
+}
+
+pub(crate) fn eval_in(cx: &Ctx<'_>, env: &mut Frame<'_>, e: &Expr) -> ExprResult<Value> {
     cx.steps.set(cx.steps.get().wrapping_add(1));
     match e {
-        Expr::Term(t) => term(cx, env, t),
+        Expr::Term(t) => term(cx, env.slots(), t),
         Expr::Param(p) => param(cx, *p),
         Expr::Scalar(s) => match s {
             BuiltinScalar::SelfNode => Ok(Value::Node(cx.node)),
@@ -217,7 +301,7 @@ pub(crate) fn eval(cx: &Ctx<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<
             other => Err(unimplemented!("LANG-180", &format!("`${other:?}`"))),
         },
         Expr::Unary { op, arg } => {
-            let v = eval(cx, env, arg)?;
+            let v = eval_in(cx, env, arg)?;
             match (op, v) {
                 (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
                 (UnOp::Neg, Value::Int(i)) => negate(i).map(Value::Int),
@@ -227,34 +311,34 @@ pub(crate) fn eval(cx: &Ctx<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<
         }
         Expr::Binary { op, lhs, rhs } => match op {
             BinOp::And => {
-                if !truth(&eval(cx, env, lhs)?)? {
+                if !truth(&eval_in(cx, env, lhs)?)? {
                     return Ok(Value::Bool(false));
                 }
-                Ok(Value::Bool(truth(&eval(cx, env, rhs)?)?))
+                Ok(Value::Bool(truth(&eval_in(cx, env, rhs)?)?))
             }
             BinOp::Or => {
-                if truth(&eval(cx, env, lhs)?)? {
+                if truth(&eval_in(cx, env, lhs)?)? {
                     return Ok(Value::Bool(true));
                 }
-                Ok(Value::Bool(truth(&eval(cx, env, rhs)?)?))
+                Ok(Value::Bool(truth(&eval_in(cx, env, rhs)?)?))
             }
             _ => {
-                let l = eval(cx, env, lhs)?;
-                let r = eval(cx, env, rhs)?;
+                let l = eval_in(cx, env, lhs)?;
+                let r = eval_in(cx, env, rhs)?;
                 binary(op, l, r)
             }
         },
         Expr::If { cond, then, els } => {
-            if truth(&eval(cx, env, cond)?)? {
-                eval(cx, env, then)
+            if truth(&eval_in(cx, env, cond)?)? {
+                eval_in(cx, env, then)
             } else {
-                eval(cx, env, els)
+                eval_in(cx, env, els)
             }
         }
         Expr::Construct { ty, variant, fields } => {
             let mut vs = Vec::with_capacity(fields.len());
             for f in fields {
-                vs.push(eval(cx, env, f)?);
+                vs.push(eval_in(cx, env, f)?);
             }
             match (cx.program.types.get(*ty), variant) {
                 (Some(TypeDef::Option(_)), Some(1)) => match <[Value; 1]>::try_from(vs) {
@@ -271,7 +355,7 @@ pub(crate) fn eval(cx: &Ctx<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<
                 (other, v) => Err(bug(format!("constructing {other:?} variant {v:?}"))),
             }
         }
-        Expr::Field { base, index } => match eval(cx, env, base)? {
+        Expr::Field { base, index } => match eval_in(cx, env, base)? {
             Value::Tuple(fs) | Value::Struct(fs) => fs
                 .get(*index as usize)
                 .cloned()
@@ -279,19 +363,15 @@ pub(crate) fn eval(cx: &Ctx<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<
             other => Err(bug(format!("field {index} of {other:?}"))),
         },
         Expr::Match { scrut, arms } => {
-            let v = eval(cx, env, scrut)?;
+            let v = eval_in(cx, env, scrut)?;
             for (pat, guard, body) in arms {
-                // An arm's bindings are local to it.
-                let mut local = env.to_vec();
-                if !matches(cx, &mut local, pat, &v, &mut Vec::new())? {
-                    continue;
+                // An arm's bindings are local to it: unbound again after it, whether it matched or not.
+                let mark = env.newly.len();
+                let r = arm(cx, env, pat, guard.as_ref(), body, &v);
+                env.unbind_arm(mark);
+                if let Some(out) = r? {
+                    return Ok(out);
                 }
-                if let Some(g) = guard
-                    && !truth(&eval(cx, &local, g)?)?
-                {
-                    continue;
-                }
-                return eval(cx, &local, body);
             }
             Err(bug(format!("no match arm matched {v:?}")))
         }
@@ -307,7 +387,7 @@ pub(crate) fn eval(cx: &Ctx<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<
         Expr::Collection { kind, elems } => {
             let mut vs = Vec::with_capacity(elems.len());
             for x in elems {
-                vs.push(eval(cx, env, x)?);
+                vs.push(eval_in(cx, env, x)?);
             }
             Ok(match kind {
                 CollKind::Vec => Value::Vec(vs.into()),
@@ -331,14 +411,34 @@ pub(crate) fn eval(cx: &Ctx<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<
             let (kind, lop) = lattice_op(cx, op)?;
             let mut vs = Vec::with_capacity(args.len());
             for a in args {
-                vs.push(eval(cx, env, a)?);
+                vs.push(eval_in(cx, env, a)?);
             }
             Ok(kind.eval(lop, &vs)?)
         }
         Expr::Let { pat, value, body } => crate::func::let_expr(cx, env, pat, value, body),
         Expr::Closure { .. } => Err(bug("a closure evaluated outside a combinator".into())),
-        Expr::Typed { expr, .. } => eval(cx, env, expr),
+        Expr::Typed { expr, .. } => eval_in(cx, env, expr),
     }
+}
+
+/// One `match` arm against `v`: its value if its pattern matches and its guard holds.
+fn arm(
+    cx: &Ctx<'_>,
+    env: &mut Frame<'_>,
+    pat: &Pattern,
+    guard: Option<&Expr>,
+    body: &Expr,
+    v: &Value,
+) -> ExprResult<Option<Value>> {
+    if !env.match_arm(cx, pat, v)? {
+        return Ok(None);
+    }
+    if let Some(g) = guard
+        && !truth(&eval_in(cx, env, g)?)?
+    {
+        return Ok(None);
+    }
+    eval_in(cx, env, body).map(Some)
 }
 
 fn param(cx: &Ctx<'_>, p: ParamId) -> ExprResult<Value> {
@@ -372,12 +472,12 @@ fn lattice_op<'s>(cx: &'s Ctx<'_>, op: &LatOpRef) -> ExprResult<(&'s Kind, bloss
     Ok((kind, lop))
 }
 
-fn builtin(cx: &Ctx<'_>, env: &[Option<Value>], f: &BuiltinFn, args: &[Expr]) -> ExprResult<Value> {
-    let arg = |i: usize| -> ExprResult<Value> {
+fn builtin(cx: &Ctx<'_>, env: &mut Frame<'_>, f: &BuiltinFn, args: &[Expr]) -> ExprResult<Value> {
+    let mut arg = |i: usize| -> ExprResult<Value> {
         let e = args
             .get(i)
             .ok_or_else(|| bug(format!("{f:?} is missing argument {i}")))?;
-        eval(cx, env, e)
+        eval_in(cx, env, e)
     };
     match f {
         BuiltinFn::Len => {

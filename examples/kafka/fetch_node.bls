@@ -16,9 +16,12 @@ timer fetch_wake every 10ms while fetch_waiting;
 /// A Fetch at the head of its connection's queue.
 view fetch_waiting() = fetch_head(_c, _i, _seq, _corr, _fr, _at, _req);
 
-view fetch_head(c, i, seq, corr, fr, at, req) =
-    head(c, i, seq, key, _version, corr, fr, at), caught_up(), key == API_FETCH,
+/// Each Fetch request's body, decoded once (whether or not this broker has caught up; `undecodable_by_view` reads it
+/// too).
+view fetch_req(c, i, req) =
+    head(c, i, _seq, key, _version, _corr, fr, _at), key == API_FETCH,
     let Some(body) = request_body(fr), let Some(req) = decode_fetch(body);
+view fetch_head(c, i, seq, corr, fr, at, req) = fetch_req(c, i, req), head(c, i, seq, _key, _version, corr, fr, at), caught_up();
 
 /// The partition entries of the Fetch requests read this tick.
 view fetch_entry(c, j, tid, fp) =
