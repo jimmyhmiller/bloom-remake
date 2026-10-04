@@ -80,9 +80,12 @@ view tail_end(tid, p, e) {
 
 // ---------------------------------------------------------------- Produce
 
-view produce_head(c, i, seq, corr, fr, at, req) =
-    head(c, i, seq, key, _version, corr, fr, at), caught_up(), key == API_PRODUCE,
+/// Each Produce request's body, decoded once (whether or not this broker has caught up; `undecodable_by_view` reads
+/// it too).
+view produce_req(c, i, req) =
+    head(c, i, _seq, key, _version, _corr, fr, _at), key == API_PRODUCE,
     let Some(body) = request_body(fr), let Some(req) = decode_produce(body);
+view produce_head(c, i, seq, corr, fr, at, req) = produce_req(c, i, req), head(c, i, seq, _key, _version, corr, fr, at), caught_up();
 
 /// A request appended already: it waits at the head for its answer. A request's records last while it is queued
 /// (until it is answered, or its connection closes).

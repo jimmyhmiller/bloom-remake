@@ -43,11 +43,19 @@ fn request_body(fr: Bytes) -> Option<Cur> {
     request_header(cur(fr)).map(|h| h.1)
 }
 
+/// The APIs whose bodies a view decodes once for both the request's handling and this check (`produce_req`,
+/// `fetch_req`): their bodies are the large ones, so the check does not decode them a second time.
+fn decoded_by_view(key: i16) -> bool {
+    key == API_PRODUCE || key == API_FETCH
+}
+
 /// Whether a request that reads the broker's state has a body this broker can decode (otherwise the connection
-/// closes, as Kafka closes it on a request it cannot parse).
+/// closes, as Kafka closes it on a request it cannot parse). Not for the APIs `decoded_by_view` names.
 fn stateful_body_ok(key: i16, fr: Bytes) -> bool {
     request_body(fr).map(|b| {
-        if key == API_METADATA {
+        if decoded_by_view(key) {
+            error("stateful_body_ok: this API's body is checked by its decoding view")
+        } else if key == API_METADATA {
             decode_metadata_request(b).is_some()
         } else if key == API_CREATE_TOPICS {
             decode_create_topics(b).is_some()
@@ -55,12 +63,8 @@ fn stateful_body_ok(key: i16, fr: Bytes) -> bool {
             decode_delete_topics(b).is_some()
         } else if key == API_DESCRIBE_CONFIGS {
             decode_describe_configs(b).is_some()
-        } else if key == API_PRODUCE {
-            decode_produce(b).is_some()
         } else if key == API_INIT_PRODUCER_ID {
             decode_init_producer_id(b).is_some()
-        } else if key == API_FETCH {
-            decode_fetch(b).is_some()
         } else if key == API_LIST_OFFSETS {
             frame_prefix(fr).and_then(|p| decode_list_offsets(b, p.1)).is_some()
         } else if key == API_DESCRIBE_CLUSTER {
