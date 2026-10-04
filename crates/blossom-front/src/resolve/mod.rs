@@ -146,18 +146,44 @@ pub fn resolve_module_root(
             }
         }
     }
+    // An argument that is not a parameter of the module's header binds a `param` of its body, as a deployment does.
+    let mut body_params = Vec::new();
     for (name, e) in given {
-        r.error(
-            code!("BLS0205"),
-            e.span,
-            format!("`{}` has no parameter `{}`", module.name.as_str(), name.as_str()),
-        );
+        let binding = match r.const_value(file_scope, e, None) {
+            Some((Value::Int(i), _)) => i.to_i128().map(crate::api::ParamBinding::Int),
+            Some((Value::Bool(b), _)) => Some(crate::api::ParamBinding::Bool(b)),
+            Some((Value::Str(t), _)) => Some(crate::api::ParamBinding::Text(t.to_string())),
+            Some((Value::Duration(d), _)) => Some(crate::api::ParamBinding::Text(format!("{}ns", d.as_nanos()))),
+            _ => None,
+        };
+        let Some(binding) = binding else {
+            r.error(
+                code!("BLS0205"),
+                e.span,
+                format!(
+                    "the value for `{}` is not an integer, a bool, a string or a duration",
+                    name.as_str()
+                ),
+            );
+            continue;
+        };
+        r.param_bindings.insert(name.as_str().to_owned(), binding);
+        body_params.push((name, e.span));
     }
     for proto in &module.protocols {
         r.protocol_interfaces(root, proto, None);
     }
     r.spec = spec;
     r.process(root, &module.items, None);
+    for (name, span) in body_params {
+        if !r.params_declared.contains(name.as_str()) {
+            r.error(
+                code!("BLS0205"),
+                span,
+                format!("`{}` has no parameter `{}`", module.name.as_str(), name.as_str()),
+            );
+        }
+    }
     let spec = r.spec.take();
     Ok(r.finish()?.map(|h| (h, spec)))
 }
@@ -611,9 +637,21 @@ impl<'t, 'd> Resolver<'t, 'd> {
     }
 
     /// The trace relation of target relation `name` at `time` (`None`: the evaluation point), created on first use:
-    /// the target's columns after a `node: Node` column.
+    /// the target's columns after a `node: Node` column. A `Blob` column is its reference (its content's hash and
+    /// length, as `Bytes`): a blob's bytes stay in its node's store, but which blob a tuple holds the spec may compare.
     pub fn trace_rel(&mut self, name: Ident, time: Option<u64>) -> Option<HRelId> {
-        let cols = self.spec.as_ref()?.targets.get(&name.name)?.clone();
+        let target_cols = self.spec.as_ref()?.targets.get(&name.name)?.clone();
+        let bytes = self.intern_type(TypeDef::Bytes, name.span);
+        let cols: Vec<HCol> = target_cols
+            .into_iter()
+            .map(|c| match c.ty.and_then(|t| self.hir.types.get(t)) {
+                Some(TypeDef::Blob) => HCol {
+                    name: c.name,
+                    ty: Some(bytes),
+                },
+                _ => c,
+            })
+            .collect();
         if let Some(id) = self.spec.as_ref().and_then(|s| s.traces.get(&(name.name, time))) {
             return Some(*id);
         }

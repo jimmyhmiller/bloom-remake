@@ -48,6 +48,10 @@ pub struct Args {
     /// Crash a node at a tick: `node:tick` (repeatable).
     #[arg(long = "crash", value_name = "NODE:TICK")]
     pub crashes: Vec<String>,
+    /// Restart a crashed node at a tick, with its durable state (crash-recovery): `node:tick` (repeatable; a Blossom
+    /// program under the frozen crash view).
+    #[arg(long = "restart", value_name = "NODE:TICK")]
+    pub restarts: Vec<String>,
     /// The run seed (seeded choices and resolution policies draw from it; default 0).
     #[arg(long)]
     pub seed: Option<u64>,
@@ -297,6 +301,13 @@ fn faults(artifact: &SimArtifact, args: &Args) -> Result<FaultSchedule, String> 
             return Err(format!("`{text}`: expected NODE:TICK"));
         };
         out.crashes.insert(node(n)?, Tick(tick));
+    }
+    for text in &args.restarts {
+        let (names, tick) = ded::parse_fault(text, 2)?;
+        let [n] = names.as_slice() else {
+            return Err(format!("`{text}`: expected NODE:TICK"));
+        };
+        out.restarts.insert(node(n)?, Tick(tick));
     }
     Ok(out)
 }

@@ -1,8 +1,30 @@
-//! A Kafka client in Blossom (slice 6, item 8): on a connect stream it dials the broker at `BROKER_ADDR`, sends
-//! ApiVersions (v4) and Metadata (v13, all topics), and records the answers. It redials when the connection closes or
-//! a dial fails, and asks again, so every connection it gets answered records the same answers.
+//! A Kafka client in Blossom (slice 6, item 8): on a connect stream it dials a broker, sends ApiVersions (v4) and
+//! Metadata (v13, all topics), and records the answers. It redials when the connection closes or a dial fails, and
+//! asks again, so every connection it gets answered records the same answers.
+//!
+//! It talks to one broker at a time, from its `contact` addresses (`BROKER_ADDR` alone without any), and moves to
+//! the next when a connection closes or a dial fails, and when the broker answers that it does not lead the partition
+//! (S11): as a Kafka client follows the partition's leader, though by trying the brokers in turn rather than by
+//! reading the leader from Metadata.
 
 stream up: connect;
+
+/// The brokers to talk to, by index.
+static contact(i: u64, addr: String);
+view contacts(n = count!(i)) = contact(i, _);
+view broker_addr(i, a) {
+    contact(i, a);
+    not contact(_, _), let i = 0u64, let a = BROKER_ADDR;
+}
+view broker_count(n) {
+    contacts(n);
+    not contact(_, _), let n = 1u64;
+}
+/// The broker the client is on (no row: the first), its address, and the next one's.
+durable table on_broker(i: u64) key();
+view current_broker(i = max!(x default 0u64)) = on_broker(x);
+view current_addr(a) = current_broker(i), broker_addr(i, a);
+view next_broker(j, a) = current_broker(i), broker_count(n), let j = (i + 1u64) % n, broker_addr(j, a);
 
 /// Per connection: the bytes not yet consumed.
 table session(c: Conn, bytes: Framer) key(c);
@@ -12,17 +34,19 @@ table versions_seen(error: i16, ranges: Vec<ApiRange>);
 table metadata_seen(answer: MetadataAnswer);
 
 
-start: on boot() {
-    send up.dial(0, BROKER_ADDR);
+start: on boot(), current_addr(a) {
+    send up.dial(0, a);
 }
 
-redial_after_failure: on up.failed(req, _why) {
-    send up.dial(req + 1, BROKER_ADDR);
+redial_after_failure: on up.failed(req, _why), next_broker(j, a) {
+    upsert on_broker(j);
+    send up.dial(req + 1, a);
 }
 
-redial_after_close: on up.closed(c, _why), session(c, p) {
+redial_after_close: on up.closed(c, _why), session(c, p), next_broker(j, a) {
     delete session(c, p);
-    send up.dial(0, BROKER_ADDR);
+    upsert on_broker(j);
+    send up.dial(0, a);
 }
 
 ask: on up.opened(c, _req, _peer, _at) {
@@ -105,8 +129,17 @@ resume_read: on frames(c, fr), let Some(t) = topic_answer(fr), progress(k), read
     upsert wseq(c, n + 1u64);
 }
 
+/// A produce answered by a broker that does not lead the partition (or by one whose partition has no leader yet):
+/// the batch was not appended, so it is sent again, to the next broker (closing the connection moves the client on).
+produce_elsewhere: on frames(c, fr), let Some(a) = produce_answer(fr)
+        where a.1 == NOT_LEADER_OR_FOLLOWER || a.1 == LEADER_NOT_AVAILABLE {
+    upsert produced_next(a.0);
+    send up.close(c);
+}
+
 /// A produce answered: record it, then send the next batch, or start reading.
-after_produce: on frames(c, fr), let Some(a) = produce_answer(fr), topic_seen(id, parts), wseq(c, n) {
+after_produce: on frames(c, fr), let Some(a) = produce_answer(fr), topic_seen(id, parts), wseq(c, n)
+        where a.1 != NOT_LEADER_OR_FOLLOWER && a.1 != LEADER_NOT_AVAILABLE {
     emit acked(a.0, (a.0 % parts) as i32, a.2, a.1);
     upsert wseq(c, n + 1u64);
     if a.0 + 1u64 < CLIENT_BATCHES {
@@ -123,8 +156,13 @@ record_fetch: on frames(_c, fr), let Some(r) = fetched_answer(fr), read_at(p, _o
     emit consumed(p, rec.0, rec.1);
 }
 
+/// A fetch from a broker that does not lead the partition: read on from the next broker.
+fetch_elsewhere: on frames(c, fr), let Some(r) = fetched_answer(fr) where r.0 == NOT_LEADER_OR_FOLLOWER {
+    send up.close(c);
+}
+
 after_fetch: on frames(c, fr), let Some(r) = fetched_answer(fr), read_at(p, off), topic_seen(id, parts), wseq(c, w),
-        let Some(n) = next_read(p, off, parts, r.0, r.1, r.2) {
+        let Some(n) = next_read(p, off, parts, r.0, r.1, r.2) where r.0 != NOT_LEADER_OR_FOLLOWER {
     upsert reading(n.0, n.1);
     send up.write(c, w, [Part::Bytes(encode_fetch_request(CORR_FETCH, "blossom", id, n.0, n.1))]);
     upsert wseq(c, w + 1u64);
