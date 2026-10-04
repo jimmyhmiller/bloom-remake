@@ -148,6 +148,7 @@ pub fn exhaustive(
                             result.counterexample = Some(canonical(FaultSchedule {
                                 omissions: oms,
                                 crashes: crashes.clone(),
+                                restarts: std::collections::BTreeMap::new(),
                             }));
                             return Ok(result);
                         }
