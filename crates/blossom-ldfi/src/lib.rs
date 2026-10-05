@@ -24,7 +24,8 @@ pub mod reach;
 pub mod report;
 
 pub use driver::{
-    Fallback, LdfiConfig, LdfiReport, Method, Observer, ObserverRef, RunProgress, SearchStats, Verdict, falsifiers, run,
+    Fallback, LdfiConfig, LdfiReport, Method, Observer, ObserverRef, RunProgress, SearchStats, Verdict, enumerate,
+    falsifiers, run,
 };
 pub use faults::FailureSpec;
 pub use hazard::NegSupport;
@@ -51,6 +52,9 @@ pub enum LdfiError {
     /// Exhaustive certification exceeded its state budget.
     #[error("no verdict within {0} states")]
     StateBudget(u64),
+    /// The spec admits more fault schedules than enumeration may run.
+    #[error("more than {0} fault schedules to enumerate")]
+    ScheduleBudget(u64),
     /// The lineage-driven search found no counterexample, but some hazard held already under a run's own faults, so
     /// its lineage cannot certify the program (see `hazard::Extensions::incomplete`).
     #[error(

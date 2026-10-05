@@ -68,6 +68,14 @@ pub struct Args {
     /// Report the lineage-driven search's budget error instead of certifying exhaustively.
     #[arg(long)]
     pub no_exhaustive: bool,
+    /// Decide by running every admissible fault schedule instead of the lineage-driven search (fewest faults first;
+    /// an oracle for it on specs small enough to enumerate).
+    #[arg(long)]
+    pub enumerate: bool,
+    /// Fault schedules enumeration may run (`--enumerate`, or exhaustive certification of a program it cannot step
+    /// round by round: crash-restarts, guarded timers, streams).
+    #[arg(long, default_value_t = 100_000)]
+    pub max_schedules: u64,
     /// Worker threads (default: the machine's parallelism). Results do not depend on it.
     #[arg(long)]
     pub jobs: Option<usize>,
@@ -166,6 +174,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
     };
     config.max_runs = args.max_runs;
     config.exhaustive_fallback = (!args.no_exhaustive).then_some(args.max_states);
+    config.max_schedules = args.max_schedules;
     config.sat = args.sat.clone();
 
     if args.progress {
@@ -201,7 +210,12 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
             Err(e) => fail(&e),
         };
     }
-    match blossom_ldfi::run(&sim, &config) {
+    let report = if args.enumerate {
+        blossom_ldfi::enumerate(&sim, &config)
+    } else {
+        blossom_ldfi::run(&sim, &config)
+    };
+    match report {
         Ok(report) => {
             print!("{}", render(&artifact, &report));
             if args.stats {

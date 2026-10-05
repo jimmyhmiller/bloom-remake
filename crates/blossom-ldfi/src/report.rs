@@ -172,6 +172,25 @@ pub fn render(artifact: &SimArtifact, report: &LdfiReport) -> String {
                 "{what} by exhaustive certification: {states} distinct state(s) over {schedules} crash schedule(s), {why}"
             );
         }
+        (verdict, Method::Enumerated { schedules, after }) => {
+            let what = match verdict {
+                Verdict::NoCounterexample => "no counterexample",
+                Verdict::Counterexample => "counterexample found",
+            };
+            let why = match after {
+                Some(crate::driver::Fallback::RunBudget) => {
+                    format!(", after the lineage-driven search spent its {} run(s)", report.runs)
+                }
+                Some(crate::driver::Fallback::IncompleteLineage) => {
+                    ", because the lineage-driven search's lineage was incomplete".to_owned()
+                }
+                None => String::new(),
+            };
+            let _ = writeln!(
+                out,
+                "{what} by enumeration: {schedules} fault schedule(s), each run in full (fewest faults first){why}"
+            );
+        }
     }
     let _ = writeln!(
         out,

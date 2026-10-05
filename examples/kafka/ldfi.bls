@@ -250,3 +250,14 @@ spec TripleTwoLosses for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
     faults { eot: 40, eff: 30, crashes: 0, omissions: 2, model: sync, round: 50ms }
     check ldfi expect holds;
 }
+
+/// Three brokers, two partitions (each its own Raft group, its leader elected on its own), a batch to each, under a
+/// crash-restart of any node: the client finds each partition's leader and both batches survive. (The failure-free
+/// run acknowledges the batches at rounds 35 and 53 and reads both partitions back by round 87: the client finds a
+/// partition's leader by trying the brokers in turn.)
+spec TriplePartitionsRestart for Kafka(DEFAULT_REPLICATION_FACTOR = 3, DEFAULT_PARTITIONS = 2, CLIENT_BATCHES = 2) {
+    include Triple;
+    include Guarantees;
+    faults { eot: 95, eff: 1, crashes: 1, restart: 3, model: sync, round: 50ms }
+    check ldfi expect holds;
+}

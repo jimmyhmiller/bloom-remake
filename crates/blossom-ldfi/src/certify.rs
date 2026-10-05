@@ -9,6 +9,11 @@
 //! that are equal (every node's carried state, every node's inbox, and the snapshots the spec reads) are merged, so
 //! schedules that lead to the same state share their future. At EOT each state is judged by Molly's oracle. It is
 //! sound and complete for the failure spec: every admissible schedule leads to some state of the last frontier.
+//!
+//! Programs whose rounds cannot be stepped one at a time (crash-restarts, guarded timers, streams: see
+//! [`steppable`]) are decided by [`enumerate`] instead: every admissible fault schedule, each run in full, fewest
+//! faults first. It is as sound and complete, at one run per schedule, and it counts the schedules before it runs
+//! any, so a spec too large for it fails at once.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -72,6 +77,206 @@ fn crash_schedules(spec: &FailureSpec) -> Vec<BTreeMap<NodeId, Tick>> {
     out
 }
 
+/// Whether the stepped search can decide `spec` for `sim`'s program (otherwise [`enumerate`] does).
+pub fn steppable(sim: &SpecSim<'_>, spec: &FailureSpec) -> bool {
+    unsteppable(sim, spec).is_none()
+}
+
+/// Why the stepped search cannot decide `spec`: its rounds are stepped one at a time, by `SpecSim::step`, which sees
+/// neither a node's previous round (a guarded timer fires on it), nor its incarnations (restarts), nor the stream
+/// fabric between the nodes.
+fn unsteppable(sim: &SpecSim<'_>, spec: &FailureSpec) -> Option<LdfiError> {
+    use blossom_ir::core::{EventSource, RelClass};
+    let rels = &sim.artifact().protocol.get().rels;
+    if rels
+        .iter()
+        .any(|r| matches!(&r.class, RelClass::Event(EventSource::Timer(t)) if t.guard.is_some()))
+    {
+        return Some(
+            blossom_base::unimplemented_error!("LANG-172", "stepped certification of a program with a guarded timer")
+                .into(),
+        );
+    }
+    if spec.restart.is_some() {
+        return Some(
+            blossom_base::unimplemented_error!(
+                "TEST-037",
+                "stepped certification under crash-restarts (it steps nodes one round at a time, without restarts)"
+            )
+            .into(),
+        );
+    }
+    if rels
+        .iter()
+        .any(|r| matches!(&r.class, RelClass::Event(EventSource::Stream(_))))
+    {
+        return Some(
+            blossom_base::unimplemented_error!(
+                "TEST-146",
+                "stepped certification of a program with streams (it steps nodes without the stream fabric)"
+            )
+            .into(),
+        );
+    }
+    None
+}
+
+/// The result of an enumeration.
+#[derive(Clone, Debug)]
+pub struct Enumeration {
+    /// A schedule that violates the outcome spec, if there is one: one with the fewest faults.
+    pub counterexample: Option<FaultSchedule>,
+    /// The schedules run.
+    pub schedules: u64,
+}
+
+/// How many fault schedules [`enumerate`] runs for `spec` (saturating): per crash schedule, every set of allowed
+/// omissions within the bound (the ones a crashed sender's own downtime implies included: they are skipped, not
+/// subtracted).
+pub fn schedule_count(spec: &FailureSpec) -> u128 {
+    let m = omission_candidates(spec).len() as u128;
+    let k = spec.max_omissions.map_or(m, |k| u128::from(k).min(m));
+    // Sets of at most k of m omissions: the sum of the binomials C(m, j), j ≤ k.
+    let mut sets: u128 = 0;
+    let mut binomial: u128 = 1;
+    for j in 0..=k {
+        sets = sets.saturating_add(binomial);
+        // C(m, j+1) = C(m, j)·(m−j)/(j+1), exactly; past u128 the count is saturated, and so is the sum.
+        match binomial.checked_mul(m - j) {
+            Some(x) => binomial = x / (j + 1),
+            None => return u128::MAX,
+        }
+    }
+    (crash_schedules(spec).len() as u128).saturating_mul(sets)
+}
+
+/// Every omission the spec allows, in order.
+fn omission_candidates(spec: &FailureSpec) -> Vec<Omission> {
+    let mut out = Vec::new();
+    for send in (1..spec.eff.0).map(Tick) {
+        for from in (0..spec.nodes).map(NodeId) {
+            for to in (0..spec.nodes).map(NodeId) {
+                if spec.omission_allowed(from, to, send) {
+                    out.push(Omission { from, to, send });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Every admissible fault schedule of `spec`, each run in full and judged against `ff_post`, the failure-free run's
+/// `post`, fewest faults first; stops at the first violation. Fails with a budget error, before running any, when
+/// there are more than `max_schedules`.
+pub fn enumerate(
+    sim: &SpecSim<'_>,
+    spec: &FailureSpec,
+    ff_post: &BTreeSet<Row>,
+    workers: usize,
+    max_schedules: u64,
+) -> Result<Enumeration, LdfiError> {
+    if schedule_count(spec) > u128::from(max_schedules) {
+        return Err(LdfiError::ScheduleBudget(max_schedules));
+    }
+    let candidates = omission_candidates(spec);
+    let k = spec
+        .max_omissions
+        .map_or(candidates.len(), |k| (k as usize).min(candidates.len()));
+    let mut schedules: Vec<FaultSchedule> = Vec::new();
+    for crashes in crash_schedules(spec) {
+        let base = spec.with_restarts(FaultSchedule {
+            crashes,
+            ..FaultSchedule::default()
+        });
+        subsets(&candidates, k, &mut Vec::new(), 0, &mut |omissions| {
+            let faults = FaultSchedule {
+                omissions: omissions.iter().copied().collect(),
+                ..base.clone()
+            };
+            // An omission whose sender is down at the send is implied by the crash: the smaller schedule covers it.
+            if spec.canonical(faults.clone()) == faults {
+                schedules.push(faults);
+            }
+        });
+    }
+    schedules.sort_by_cached_key(|f| crate::faults::order_key(spec, f));
+    let mut result = Enumeration {
+        counterexample: None,
+        schedules: 0,
+    };
+    let judge = |faults: &FaultSchedule| -> Result<bool, LdfiError> {
+        if !spec.admits(faults) {
+            return Err(internal_error!("enumerated a schedule the spec does not admit: {faults:?}").into());
+        }
+        let run = sim.run(spec.eot, faults, false)?;
+        Ok(is_good(ff_post, &sim.outcome(&run, spec.eot, false)?))
+    };
+    // Judge in order, a batch at a time in parallel: the first violation in order is the result.
+    let batch = workers.max(1) * 8;
+    for part in schedules.chunks(batch) {
+        let goods = in_parallel(part, workers, &judge)?;
+        for (faults, good) in part.iter().zip(goods) {
+            result.schedules += 1;
+            if !good {
+                result.counterexample = Some(faults.clone());
+                return Ok(result);
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// Calls `f` with every subset of at most `k` of `items[from..]` added to `chosen`.
+fn subsets<T: Copy>(items: &[T], k: usize, chosen: &mut Vec<T>, from: usize, f: &mut dyn FnMut(&[T])) {
+    f(chosen);
+    if chosen.len() == k {
+        return;
+    }
+    for i in from..items.len() {
+        if let Some(item) = items.get(i) {
+            chosen.push(*item);
+            subsets(items, k, chosen, i + 1, f);
+            chosen.pop();
+        }
+    }
+}
+
+/// `f` over `items` on up to `workers` threads; results in `items` order.
+fn in_parallel<T: Sync, R: Send>(
+    items: &[T],
+    workers: usize,
+    f: &(dyn Fn(&T) -> Result<R, LdfiError> + Sync),
+) -> Result<Vec<R>, LdfiError> {
+    if workers <= 1 || items.len() < 2 {
+        return items.iter().map(f).collect();
+    }
+    let chunk = items.len().div_ceil(workers);
+    let results: Vec<Result<Vec<R>, LdfiError>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = items
+            .chunks(chunk)
+            .map(|part| {
+                std::thread::Builder::new()
+                    .stack_size(blossom_ir::depth::EVAL_STACK_BYTES)
+                    .spawn_scoped(scope, move || part.iter().map(f).collect::<Result<Vec<_>, _>>())
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| match h {
+                Ok(h) => h
+                    .join()
+                    .unwrap_or_else(|_| Err(internal_error!("an enumeration worker panicked").into())),
+                Err(e) => Err(internal_error!("an enumeration worker could not start: {e}").into()),
+            })
+            .collect()
+    });
+    let mut out = Vec::with_capacity(items.len());
+    for r in results {
+        out.extend(r?);
+    }
+    Ok(out)
+}
+
 /// What stepping one state produced: its successors with the omissions that lead to each, or a violation.
 enum Stepped {
     Next(Vec<(State, BTreeSet<Omission>)>),
@@ -88,23 +293,8 @@ pub fn exhaustive(
     workers: usize,
     max_states: u64,
 ) -> Result<Certification, LdfiError> {
-    // Its rounds are stepped one at a time, which a guarded timer's firings (they depend on the round before) do not
-    // allow (`SpecSim::step` refuses too; LDFI's search refuses such programs first).
-    if sim.artifact().protocol.get().rels.iter().any(|r| {
-        matches!(&r.class, blossom_ir::core::RelClass::Event(blossom_ir::core::EventSource::Timer(t)) if t.guard.is_some())
-    }) {
-        return Err(blossom_base::unimplemented_error!(
-            "LANG-172",
-            "exhaustive certification of a program with a guarded timer"
-        )
-        .into());
-    }
-    if spec.restart.is_some() {
-        return Err(blossom_base::unimplemented_error!(
-            "TEST-037",
-            "exhaustive certification under crash-restarts (it steps nodes one round at a time, without restarts)"
-        )
-        .into());
+    if let Some(e) = unsteppable(sim, spec) {
+        return Err(e);
     }
     if sim.artifact().halt.is_some() {
         return Err(blossom_base::unimplemented_error!(
