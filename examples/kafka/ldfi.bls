@@ -261,3 +261,13 @@ spec TriplePartitionsRestart for Kafka(DEFAULT_REPLICATION_FACTOR = 3, DEFAULT_P
     faults { eot: 95, eff: 1, crashes: 1, restart: 3, model: sync, round: 50ms }
     check ldfi expect holds;
 }
+
+/// Three brokers under the asynchronous model (S13): any one batch delayed by a round, no losses or crashes. Two of a
+/// leader's `quiesce` messages for one group can then arrive in one round, which the broker must handle (the bug the
+/// full tier found in S11, invisible to the synchronous model).
+spec TripleDelay for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
+    include Triple;
+    include Guarantees;
+    faults { eot: 40, eff: 30, crashes: 0, omissions: 0, model: async, delay: 12, delays: 1, round: 50ms }
+    check ldfi expect holds;
+}

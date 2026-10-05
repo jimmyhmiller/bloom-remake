@@ -212,6 +212,14 @@ fn render_counterexample(
     ce: &Counterexample,
 ) {
     let _ = writeln!(out, "\nfaults: {{{}}}", fault_labels(artifact, &ce.faults).join(", "));
+    if let Some(failure) = &ce.failure {
+        let _ = writeln!(out, "the run ends in a program error: {failure}");
+        let _ = writeln!(
+            out,
+            "(replay it with `blossom sim` and these faults to see the rounds before it)"
+        );
+        return;
+    }
     let Some(spec) = &artifact.spec else { return };
     for row in &ce.violated {
         let key = GoalKey {

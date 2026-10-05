@@ -1,10 +1,11 @@
 //! A race only delays expose (S13): the Client writes 1, then 2 a round later; the Server keeps the latest value it
 //! received (the largest, when two arrive together). Batches arrive in order in the synchronous model, so the Server
 //! ends with 2; delayed past the second, the first write overwrites it with 1. With `VERSIONED` the Server ignores a
-//! value older than the one it holds.
+//! value older than the one it holds. With `EACH` it applies every value that arrives, which two arriving together make
+//! a key conflict: a program error, a counterexample of its own.
 //! This file is a library of modules and specs.
 
-pub module Race(VERSIONED: bool = false) {
+pub module Race(VERSIONED: bool = false, EACH: bool = false) {
     role Server;
     role Client;
 
@@ -29,7 +30,10 @@ pub module Race(VERSIONED: bool = false) {
         /// A value older than the one held (ignored with `VERSIONED`).
         view stale(v) = arriving(v), held(w) where w > v;
 
-        apply: on arriving(v) where not VERSIONED {
+        apply: on arriving(v) where not VERSIONED && not EACH {
+            upsert held(v);
+        }
+        apply_each: on put(v) where EACH {
             upsert held(v);
         }
         apply_newer: on arriving(v), not stale(v) where VERSIONED {
@@ -76,4 +80,13 @@ spec VersionedAsync for Race(VERSIONED = true) {
     include Latest;
     faults { eot: 8, eff: 4, crashes: 0, omissions: 0, model: async, delay: 3, delays: 1 }
     check ldfi expect holds;
+}
+
+/// Applying every arriving value: a delay that brings both writes into one round makes two writes of one key, a
+/// program error (BLSR002).
+spec EachAsync for Race(EACH = true) {
+    include Scenario;
+    include Latest;
+    faults { eot: 8, eff: 4, crashes: 0, omissions: 0, model: async, delay: 2, delays: 1 }
+    check ldfi expect fails;
 }
