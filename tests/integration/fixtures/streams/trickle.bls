@@ -1,0 +1,37 @@
+//! A stream written a chunk per round (S13): when the connection opens, the Client writes `x`, `y` and `z` with seq
+//! 0, 1 and 2 in three consecutive rounds; the Server records each chunk. A delay of one round's flight holds back
+//! the later ones: a stream keeps its order.
+program trickle version 1;
+
+role Server;
+role Client;
+
+fn chunk(n: u64) -> String {
+    if n == 0u64 { "x" } else if n == 1u64 { "y" } else { "z" }
+}
+
+at Server {
+    stream s: listen;
+    table got(seq: u64, b: Bytes);
+
+    keep: on s.data(_c, seq, b) {
+        emit got(seq, b);
+    }
+}
+
+at Client {
+    stream up: connect;
+    /// The connection and the seq of its next write.
+    table writing(c: Conn, n: u64) key(c);
+
+    start: on boot() {
+        send up.dial(1, "sim://srv/s");
+    }
+    first: on up.opened(c, _req, _peer, _at) {
+        emit writing(c, 0);
+    }
+    more: while writing(c, n) where n < 3u64 {
+        send up.write(c, n, [Part::Bytes(chunk(n).to_utf8())]);
+        upsert writing(c, n + 1u64);
+    }
+}

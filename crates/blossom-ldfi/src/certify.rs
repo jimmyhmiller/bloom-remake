@@ -345,7 +345,7 @@ pub fn exhaustive(
                             result.counterexample = Some(spec.canonical(FaultSchedule {
                                 omissions: oms,
                                 crashes: crashes.clone(),
-                                restarts: std::collections::BTreeMap::new(),
+                                ..FaultSchedule::default()
                             }));
                             return Ok(result);
                         }

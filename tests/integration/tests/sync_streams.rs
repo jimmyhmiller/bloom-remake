@@ -289,3 +289,90 @@ fn a_lost_message_resets_the_connection_it_carries_or_fails_the_dial() {
     );
     assert!(timeline(&artifact, &run, SRV).is_empty());
 }
+
+/// A fault schedule delaying what `from` sends `to` in round `send` by `by` rounds.
+#[cfg(test)]
+fn delayed(from: NodeId, to: NodeId, send: u64, by: u64) -> FaultSchedule {
+    let mut f = FaultSchedule::default();
+    f.delays.insert(
+        Omission {
+            from,
+            to,
+            send: Tick(send),
+        },
+        by,
+    );
+    f
+}
+
+#[test]
+fn a_delayed_write_or_dial_arrives_later() {
+    let artifact = compile("pair.bls", &BTreeMap::new());
+    // The client's write of round 1 arrives at 3, not 2; the echo follows.
+    let run = simulate(&artifact, 8, &delayed(CLI, SRV, 1, 2));
+    assert_eq!(
+        timeline(&artifact, &run, SRV),
+        [(1, "echo.opened".to_owned()), (3, "echo.data".to_owned())]
+    );
+    assert_eq!(
+        timeline(&artifact, &run, CLI),
+        [(1, "up.opened".to_owned()), (4, "up.data".to_owned())]
+    );
+    // The echo of round 2 delayed instead.
+    let run = simulate(&artifact, 8, &delayed(SRV, CLI, 2, 2));
+    assert_eq!(
+        timeline(&artifact, &run, CLI),
+        [(1, "up.opened".to_owned()), (4, "up.data".to_owned())]
+    );
+    // The dial of round 0 delayed: both ends open at 3, and the connection says so.
+    let run = simulate(&artifact, 8, &delayed(CLI, SRV, 0, 3));
+    assert_eq!(
+        timeline(&artifact, &run, SRV),
+        [(3, "echo.opened".to_owned()), (4, "echo.data".to_owned())]
+    );
+    assert_eq!(
+        timeline(&artifact, &run, CLI),
+        [(3, "up.opened".to_owned()), (5, "up.data".to_owned())]
+    );
+    assert_eq!(
+        run.connections.iter().map(|c| (c.dialed, c.opened)).collect::<Vec<_>>(),
+        [(Tick(0), Tick(3))]
+    );
+    assert!(run.stream_violations.is_empty());
+}
+
+#[test]
+fn a_delayed_flight_holds_back_the_later_ones_on_its_connection() {
+    let artifact = compile("trickle.bls", &BTreeMap::new());
+    let chunks = |run: &SyncRun| rows(&artifact, run, SRV, "got");
+    let all = vec![
+        vec![Value::Int(IntValue::U64(0)), Value::Bytes(b"x".to_vec().into())],
+        vec![Value::Int(IntValue::U64(1)), Value::Bytes(b"y".to_vec().into())],
+        vec![Value::Int(IntValue::U64(2)), Value::Bytes(b"z".to_vec().into())],
+    ];
+    // On time: a chunk a round, written at 1, 2 and 3.
+    let run = simulate(&artifact, 8, &FaultSchedule::default());
+    let arrivals: Vec<u64> = timeline(&artifact, &run, SRV)
+        .into_iter()
+        .filter(|(_, e)| e == "s.data")
+        .map(|(t, _)| t)
+        .collect();
+    assert_eq!(arrivals, [2, 3, 4]);
+    assert_eq!(chunks(&run), all);
+    // The flight of round 1 arrives at 4: those of 2 and 3 wait behind it, so nothing arrives before 4.
+    let run = simulate(&artifact, 8, &delayed(CLI, SRV, 1, 3));
+    let arrivals: Vec<u64> = timeline(&artifact, &run, SRV)
+        .into_iter()
+        .filter(|(_, e)| e == "s.data")
+        .map(|(t, _)| t)
+        .collect();
+    assert_eq!(arrivals, [4], "one chunk: the three flights arrive together");
+    assert_eq!(
+        chunks(&run),
+        [vec![Value::Int(IntValue::U64(0)), Value::Bytes(b"xyz".to_vec().into())]],
+        "in order"
+    );
+    // A delay past the end of the run: nothing arrives.
+    let run = simulate(&artifact, 8, &delayed(CLI, SRV, 1, 8));
+    assert!(chunks(&run).is_empty());
+}
