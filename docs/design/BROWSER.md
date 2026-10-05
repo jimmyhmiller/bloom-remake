@@ -60,23 +60,30 @@ runs waits for it.
 
 ### Persistence
 
-The program's `durable` tables are its persistent state. After each round the host writes them to `localStorage`
-(the node's durable image, `DurableCodec`, as base64), keyed by the program's name; at boot it restores them, so a
-reload continues where it was. A program whose durable schema changed (in the editor) starts empty, and says so.
+The program's `durable` tables are its persistent state. After each event the host writes them to `localStorage`
+(JSON: each table's rows under its schema hash, the runtime's `schema_hash`), keyed by the program's name; at boot it
+restores them, so a reload continues where it was. A table whose schema changed (in the editor) starts empty, and the
+host says so.
 
 ### The inspector
 
 The engine runs the rounds; provenance comes from the oracle, which re-runs a round with capture on (the pattern of
-`blossom trace why`). The host keeps a bounded history of rounds (the state each started from and its event). In
-inspect mode, clicking an element asks for its derivation: the firings that produced its `elem`, `attr` and `text`
-rows, recursively through views, down to the round's event and the durable rows it read; a durable row leads back to
-the round that wrote it, and that round's event. The page shows it as a tree beside the app.
+`blossom trace why`). The host keeps a bounded history of rounds (the last 500: the state each started from, its
+events and the rows it wrote). In inspect mode, clicking an element asks for its derivation: the firings that
+produced its `elem`, `attr` and `text` rows, recursively through views, down to the round's event and the table rows
+it read; a table row leads back to the round that wrote it, that write's firing and that round's event. Generated
+relations (a statement's expansion) are provenance-transparent: their reasons stand in for them, and a write by an
+expansion's own rule (an `upsert`'s) is credited to the user rules that fed it. A fact explained once is referred to
+afterwards ("explained above"). A row older than the history, or restored from storage, says so. The page shows the
+tree beside the app; while inspecting, the app gets no input, and the tree follows the page as events arrive.
 
 ### The editor
 
 The source is shown beside the app. Running it (a button, or Ctrl-Enter) compiles it in the page; diagnostics are
-shown with their source positions. A successful compile replaces the running program, keeping the persisted state
-when its durable schema is unchanged.
+listed with their positions, and clicking one selects its span in the source. A program that does not compile is not
+run (the old one keeps running). A successful compile replaces the running program, keeping each durable table whose
+schema is unchanged (one that changed starts empty, and the editor says so). The edited source is kept in
+`localStorage` across reloads until it is reverted to the app's own.
 
 ## Architecture
 

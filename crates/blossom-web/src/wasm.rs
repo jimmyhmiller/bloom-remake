@@ -59,6 +59,12 @@ impl WebApp {
         json(&self.app.dispatch(&event).map_err(js_error)?)
     }
 
+    /// Why the element `id` is on the page as it is, as JSON: a tree of `{fact, how, round, because}` (see
+    /// [`crate::why::Why`]).
+    pub fn why(&self, id: &str) -> Result<String, JsValue> {
+        json(&self.app.why(id).map_err(js_error)?)
+    }
+
     /// The durable tables, as JSON, for `localStorage`.
     pub fn saved(&self) -> Result<String, JsValue> {
         self.app.saved().map_err(js_error)

@@ -127,6 +127,14 @@ fn a_program_that_breaks_the_page_or_the_interface_is_told_why() {
     );
     let diags = compile("typo.bls", &files).err().unwrap();
     assert_eq!(diags[0].line, Some(2), "{diags:?}");
+    // Its range is an editor's (UTF-16 offsets): past text that is not ASCII, it still marks the wrong expression.
+    let source = "program mixed version 1;\n/// Ünïcödé, and 🌸 (two UTF-16 units).\ntable t(x: u64) key(x);\non boot() { upsert t(\"seven\"); }\n";
+    files.insert("mixed.bls".to_owned(), source.to_owned());
+    let diags = compile("mixed.bls", &files).err().unwrap();
+    let (start, end) = diags[0].range.unwrap_or_else(|| panic!("{diags:?}"));
+    let units: Vec<u16> = source.encode_utf16().collect();
+    let marked = String::from_utf16(&units[start as usize..end as usize]).unwrap();
+    assert!(marked.contains("\"seven\""), "{marked:?} {diags:?}");
 }
 
 #[test]
@@ -399,4 +407,103 @@ fn todomvc_follows_the_spec() {
         "numbering continues: {:?}",
         dom.children.get("list")
     );
+}
+
+/// The first explanation of `fact`, anywhere in the tree.
+#[cfg(test)]
+fn find<'w>(ws: &'w [blossom_web::why::Why], fact: &str) -> Option<&'w blossom_web::why::Why> {
+    ws.iter().find_map(|w| {
+        if w.fact == fact && w.how != "(explained above)" {
+            Some(w)
+        } else {
+            find(&w.because, fact)
+        }
+    })
+}
+
+#[cfg(test)]
+fn render(ws: &[blossom_web::why::Why], depth: usize, out: &mut String) {
+    for w in ws {
+        out.push_str(&format!("{}{} <- {}\n", "  ".repeat(depth), w.fact, w.how));
+        render(&w.because, depth + 1, out);
+    }
+}
+
+#[test]
+fn the_inspector_explains_an_element_down_to_the_events_and_rules() {
+    let mut a = app("todomvc.bls");
+    a.start(None, "").unwrap();
+    a.dispatch(&ev_key("new-todo", "Enter", "Buy milk")).unwrap();
+    a.dispatch(&ev_key("new-todo", "Enter", "Walk the dog")).unwrap();
+    a.dispatch(&Event::Change {
+        id: "toggle-1".to_owned(),
+        checked: true,
+    })
+    .unwrap();
+    let why = a.why("label-1").unwrap();
+    let mut tree = String::new();
+    render(&why, 0, &mut tree);
+    // The label's element and its text, each made by rule `item` this round.
+    let elem = find(&why, r#"elem("label-1", "view-1", 1, "label")"#).unwrap_or_else(|| panic!("{tree}"));
+    assert!(elem.how.starts_with("rule `item` in round "), "{tree}");
+    let text = find(&why, r#"text("label-1", "Walk the dog")"#).unwrap_or_else(|| panic!("{tree}"));
+    assert!(text.how.starts_with("rule `item` in round "), "{tree}");
+    // From the todo, toggled by its checkbox's change, added by the Enter that typed it.
+    let done = find(&why, r#"todos(1, "Walk the dog", true)"#).unwrap_or_else(|| panic!("{tree}"));
+    assert!(done.how.ends_with("by rule `toggle`"), "{tree}");
+    assert!(
+        find(&done.because, r#"change("toggle-1", true)"#).is_some_and(|w| w.how.starts_with("the event of round"))
+    );
+    let added = find(&done.because, r#"todos(1, "Walk the dog", false)"#).unwrap_or_else(|| panic!("{tree}"));
+    assert!(added.how.ends_with("by rule `add`"), "{tree}");
+    assert!(
+        find(&added.because, r#"keydown("new-todo", "Enter", "Walk the dog")"#)
+            .is_some_and(|w| w.how.starts_with("the event of round")),
+        "{tree}"
+    );
+    // Its number, from the first todo's add.
+    assert!(
+        find(&added.because, "next_n(1)").is_some_and(|w| w.how.ends_with("by rule `add`")),
+        "{tree}"
+    );
+    // The filter it is shown under, from the route at boot.
+    assert!(
+        find(&why, r#"showing("all")"#).is_some_and(|w| w.how.ends_with("by rule `route`")),
+        "{tree}"
+    );
+    // No expansion's internals as facts, except a negation (which says whose it is).
+    for line in tree.lines() {
+        assert!(
+            !line.contains('$') || line.contains("expansion)"),
+            "an internal relation shown: {line}\n{tree}"
+        );
+    }
+    // The edit field, from the double-click that started the edit.
+    a.dispatch(&Event::Dblclick {
+        id: "label-0".to_owned(),
+    })
+    .unwrap();
+    let why = a.why("edit-0").unwrap();
+    let mut tree = String::new();
+    render(&why, 0, &mut tree);
+    let editing = find(&why, "editing(0)").unwrap_or_else(|| panic!("{tree}"));
+    assert!(editing.how.ends_with("by rule `start_edit`"), "{tree}");
+    assert!(find(&editing.because, r#"dblclick("label-0")"#).is_some(), "{tree}");
+    // An element not on the page has no explanation.
+    assert_eq!(a.why("nope").unwrap(), []);
+}
+
+#[test]
+fn the_inspector_says_when_a_row_was_restored_from_storage() {
+    let mut a = app("todomvc.bls");
+    a.start(None, "").unwrap();
+    a.dispatch(&ev_key("new-todo", "Enter", "Buy milk")).unwrap();
+    let saved = a.saved().unwrap();
+    let mut b = app("todomvc.bls");
+    b.start(Some(&saved), "").unwrap();
+    let why = b.why("label-0").unwrap();
+    let mut tree = String::new();
+    render(&why, 0, &mut tree);
+    let row = find(&why, r#"todos(0, "Buy milk", false)"#).unwrap_or_else(|| panic!("{tree}"));
+    assert!(row.how.contains("restored from storage"), "{tree}");
 }

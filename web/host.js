@@ -1,15 +1,20 @@
 // The browser host (docs/design/BROWSER.md): loads a Blossom program's source, compiles and runs it in WebAssembly,
 // applies each round's page patches to the DOM, reports the DOM events the program reads, and keeps its durable
 // tables in localStorage. `?app=NAME` picks examples/web/NAME.bls (default: todomvc).
+//
+// Beside the app: the inspector (click an element, see why it is there) and the editor (the app's source, edited and
+// re-run in place, the durable state kept when its schema stays).
 import init, { compile } from "./pkg/blossom_web.js";
 
 const appName = new URLSearchParams(location.search).get("app") ?? "todomvc";
+const root = `${appName}.bls`;
 const mount = document.getElementById("app");
 const statusLine = document.getElementById("blossom-status");
 const storageKey = `blossom:${appName}`;
+const sourceKey = `blossom-source:${appName}`;
 
 /** The elements the program made, by its ids. */
-const nodes = new Map();
+let nodes = new Map();
 /** Attributes the DOM keeps as live state: set as properties. */
 const PROPS = new Set(["value", "checked", "disabled"]);
 
@@ -79,7 +84,7 @@ function apply(patches) {
         throw new Error(`unknown patch ${JSON.stringify(p)}`);
     }
   }
-  if (focus) {
+  if (focus && !keepFocus) {
     focus.focus();
     if (typeof focus.value === "string" && focus.setSelectionRange) {
       const end = focus.value.length;
@@ -93,7 +98,11 @@ function report(message) {
 }
 
 let app = null;
+/** The inputs the running program reads. */
+let listening = new Set();
 let busy = false;
+/** While set, a focus patch does not move the focus (the editor keeps it across a run). */
+let keepFocus = false;
 const queue = [];
 
 /** Runs events one at a time: an event fired while patches apply (a removed field's blur) waits for its turn. */
@@ -107,6 +116,7 @@ function send(event) {
       try {
         apply(JSON.parse(app.dispatch(JSON.stringify(next))));
         localStorage.setItem(storageKey, app.saved());
+        inspector.refresh();
       } catch (err) {
         report(`error: ${err}`);
       }
@@ -126,43 +136,339 @@ const LISTENERS = {
   change: ["change", (e, id) => ({ kind: "change", id, checked: Boolean(e.target.checked) })],
 };
 
-function listen(inputs) {
-  for (const name of inputs) {
-    if (name === "route") {
-      addEventListener("hashchange", () => send({ kind: "route", hash: location.hash }));
-      continue;
-    }
-    const [dom, make] = LISTENERS[name];
+/** Every DOM event the host knows, reported while the running program reads its input. */
+function listen() {
+  addEventListener("hashchange", () => {
+    if (app && listening.has("route")) send({ kind: "route", hash: location.hash });
+  });
+  for (const [name, [dom, make]] of Object.entries(LISTENERS)) {
     mount.addEventListener(dom, (e) => {
+      if (!app || !listening.has(name) || inspector.on) return;
       const target = e.target.closest?.("[data-bid]");
       if (target) send(make(e, target.dataset.bid));
     });
   }
 }
 
-async function source(file) {
+async function fetchSource(file) {
   const res = await fetch(`pkg/apps/${file}`);
   if (!res.ok) throw new Error(`cannot load ${file}: ${res.status}`);
   return res.text();
 }
 
+/** The diagnostics a failed compile throws (JSON), or the error itself when it is something else. */
+function diagnostics(err) {
+  try {
+    return { diags: JSON.parse(String(err)), ok: false };
+  } catch {
+    return { diags: [], ok: false, error: String(err) };
+  }
+}
+
+/** Compiles `files` and, if it compiles and starts, runs it in place of the running program, from its saved state
+ * (each durable table whose schema stays is kept). */
+function run(files) {
+  let next;
+  try {
+    next = compile(root, JSON.stringify(files));
+  } catch (err) {
+    return diagnostics(err);
+  }
+  const warnings = JSON.parse(next.warnings());
+  const saved = app ? app.saved() : (localStorage.getItem(storageKey) ?? "");
+  let started;
+  try {
+    started = JSON.parse(next.start(saved, location.hash));
+  } catch (err) {
+    next.free();
+    return { diags: warnings, ok: false, error: String(err) };
+  }
+  if (app) app.free();
+  app = next;
+  listening = new Set(JSON.parse(app.listens()));
+  nodes = new Map();
+  mount.replaceChildren();
+  apply(started.patches);
+  localStorage.setItem(storageKey, app.saved());
+  report(started.notes.join("\n"));
+  inspector.refresh();
+  return { diags: warnings, ok: true, notes: started.notes };
+}
+
+// ---------------------------------------------------------------- the panel
+
+const panel = document.getElementById("blossom-panel");
+const tabs = { why: document.getElementById("blossom-why"), source: document.getElementById("blossom-source") };
+const buttons = {
+  inspect: document.getElementById("blossom-inspect"),
+  source: document.getElementById("blossom-edit"),
+};
+
+/** Shows the panel's `tab`, or hides the panel (`null`). */
+function show(tab) {
+  for (const [name, el] of Object.entries(tabs)) el.hidden = name !== tab;
+  panel.hidden = tab === null;
+  document.documentElement.classList.toggle("blossom-panel-open", tab !== null);
+  buttons.source.setAttribute("aria-pressed", String(tab === "source"));
+}
+
+// ---------------------------------------------------------------- the inspector
+
+const highlight = document.getElementById("blossom-highlight");
+
+const inspector = {
+  on: false,
+  /** The element explained, by id. */
+  id: null,
+
+  toggle(on) {
+    this.on = on;
+    buttons.inspect.setAttribute("aria-pressed", String(on));
+    document.documentElement.classList.toggle("blossom-inspecting", on);
+    if (on) show("why");
+    else this.mark(null);
+  },
+
+  /** Outlines `node` (or nothing). */
+  mark(node) {
+    if (!node) {
+      highlight.hidden = true;
+      return;
+    }
+    const r = node.getBoundingClientRect();
+    Object.assign(highlight.style, {
+      left: `${r.left}px`,
+      top: `${r.top}px`,
+      width: `${r.width}px`,
+      height: `${r.height}px`,
+    });
+    highlight.dataset.id = node.dataset.bid;
+    highlight.hidden = false;
+  },
+
+  explain(id) {
+    this.id = id;
+    this.refresh();
+  },
+
+  /** Shows why the element is on the page, as of the last round. */
+  refresh() {
+    if (this.id === null || !app) return;
+    const out = tabs.why.querySelector(".blossom-tree");
+    tabs.why.querySelector(".blossom-subject").textContent = this.id;
+    let whys;
+    try {
+      whys = JSON.parse(app.why(this.id));
+    } catch (err) {
+      out.replaceChildren(text("p", `error: ${err}`, "blossom-error"));
+      return;
+    }
+    if (whys.length === 0) {
+      out.replaceChildren(text("p", "Not on the page.", "blossom-muted"));
+      return;
+    }
+    out.replaceChildren(...whys.map((w) => tree(w, 0)));
+  },
+};
+
+function text(tag, s, cls) {
+  const el = document.createElement(tag);
+  el.textContent = s;
+  if (cls) el.className = cls;
+  return el;
+}
+
+/** One reason, and (collapsible) the reasons for it. */
+function tree(w, depth) {
+  const line = document.createElement("div");
+  line.className = "blossom-why-line";
+  line.append(text("code", w.fact, "blossom-fact"), text("span", w.how, "blossom-how"));
+  if (w.how === "(explained above)") line.classList.add("blossom-muted");
+  if (w.because.length === 0) {
+    const leaf = document.createElement("div");
+    leaf.className = "blossom-why blossom-leaf";
+    leaf.append(line);
+    return leaf;
+  }
+  const node = document.createElement("details");
+  node.className = "blossom-why";
+  node.open = depth < 4;
+  const summary = document.createElement("summary");
+  summary.append(line);
+  node.append(summary, ...w.because.map((b) => tree(b, depth + 1)));
+  return node;
+}
+
+function target(e) {
+  return e.target.closest?.("[data-bid]") ?? null;
+}
+
+/** In inspect mode the app gets no input: a click explains, the rest is held back. */
+function inspectEvents() {
+  for (const kind of ["mousedown", "mouseup", "click", "dblclick", "change", "keydown", "input"]) {
+    mount.addEventListener(
+      kind,
+      (e) => {
+        if (!inspector.on) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const t = target(e);
+        if (kind === "click" && t) inspector.explain(t.dataset.bid);
+      },
+      true,
+    );
+  }
+  mount.addEventListener("mouseover", (e) => {
+    if (inspector.on) inspector.mark(target(e));
+  });
+  mount.addEventListener("mouseleave", () => inspector.mark(null));
+  addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && inspector.on) inspector.toggle(false);
+  });
+}
+
+// ---------------------------------------------------------------- the editor
+
+const editor = {
+  files: {},
+  original: {},
+  file: root,
+  area: document.getElementById("blossom-code"),
+  picker: document.getElementById("blossom-file"),
+  diags: document.getElementById("blossom-diags"),
+
+  load(files, original) {
+    this.files = files;
+    this.original = original;
+    this.picker.replaceChildren(...Object.keys(files).map((f) => text("option", f)));
+    this.picker.value = root;
+    this.file = root;
+    this.area.value = files[root];
+    this.marks();
+  },
+
+  pick(file) {
+    this.files[this.file] = this.area.value;
+    this.file = file;
+    this.area.value = this.files[file];
+  },
+
+  /** Whether the source differs from the app's files. */
+  marks() {
+    const edited = Object.keys(this.files).some((f) => this.files[f] !== this.original[f]);
+    document.getElementById("blossom-revert").disabled = !edited;
+  },
+
+  run() {
+    this.files[this.file] = this.area.value;
+    keepFocus = true;
+    let result;
+    try {
+      result = run(this.files);
+    } catch (err) {
+      result = { diags: [], ok: false, error: String(err) };
+    } finally {
+      keepFocus = false;
+    }
+    this.show(result);
+    if (result.ok) {
+      const edited = Object.keys(this.files).filter((f) => this.files[f] !== this.original[f]);
+      if (edited.length > 0) localStorage.setItem(sourceKey, JSON.stringify(this.files));
+      else localStorage.removeItem(sourceKey);
+    }
+    this.marks();
+  },
+
+  revert() {
+    localStorage.removeItem(sourceKey);
+    this.load({ ...this.original }, this.original);
+    this.run();
+  },
+
+  show(result) {
+    const items = [];
+    if (result.error) items.push(text("li", `error: ${result.error}`, "blossom-error"));
+    if (!result.ok && !result.error) items.push(text("li", "Not run: the program does not compile.", "blossom-error"));
+    for (const n of result.notes ?? []) items.push(text("li", n, "blossom-note"));
+    for (const d of result.diags) {
+      const li = document.createElement("li");
+      li.className = d.severity === "error" ? "blossom-error" : "blossom-warning";
+      const where = d.file ? `${d.file}:${d.line}:${d.column}` : "";
+      const pos = text("button", where || d.code, "blossom-pos");
+      pos.type = "button";
+      pos.addEventListener("click", () => this.reveal(d));
+      li.append(pos, text("span", ` ${d.code}: ${d.message}`));
+      li.title = d.rendered;
+      items.push(li);
+    }
+    if (result.ok && items.length === 0) items.push(text("li", "Running.", "blossom-ok"));
+    this.diags.replaceChildren(...items);
+  },
+
+  /** Selects a diagnostic's place in the editor. */
+  reveal(d) {
+    if (!d.file || !d.range || !(d.file in this.files)) return;
+    if (d.file !== this.file) {
+      this.picker.value = d.file;
+      this.pick(d.file);
+    }
+    const [start, end] = d.range;
+    this.area.focus();
+    this.area.setSelectionRange(start, Math.max(start, end));
+    const lines = this.area.value.split("\n").length;
+    const lineHeight = this.area.scrollHeight / Math.max(1, lines);
+    this.area.scrollTop = Math.max(0, (d.line - 5) * lineHeight);
+  },
+};
+
+function editorEvents() {
+  editor.picker.addEventListener("change", () => editor.pick(editor.picker.value));
+  document.getElementById("blossom-run").addEventListener("click", () => editor.run());
+  document.getElementById("blossom-revert").addEventListener("click", () => editor.revert());
+  editor.area.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      editor.run();
+    } else if (e.key === "Tab" && !e.shiftKey) {
+      e.preventDefault();
+      editor.area.setRangeText("    ", editor.area.selectionStart, editor.area.selectionEnd, "end");
+    }
+  });
+  editor.area.addEventListener("input", () => {
+    editor.files[editor.file] = editor.area.value;
+    editor.marks();
+  });
+}
+
+// ---------------------------------------------------------------- start
+
 async function main() {
   await init();
   const css = document.getElementById("app-css");
   if (appName === "todomvc") css.href = "todomvc.css";
-  const files = { "ui.bls": await source("ui.bls"), [`${appName}.bls`]: await source(`${appName}.bls`) };
-  try {
-    app = compile(`${appName}.bls`, JSON.stringify(files));
-  } catch (err) {
-    const diags = JSON.parse(String(err));
-    report(diags.map((d) => d.rendered).join("\n"));
-    return;
+  const original = { "ui.bls": await fetchSource("ui.bls"), [root]: await fetchSource(root) };
+  let files = { ...original };
+  const edited = localStorage.getItem(sourceKey);
+  if (edited) files = { ...original, ...JSON.parse(edited) };
+  listen();
+  inspectEvents();
+  editorEvents();
+  buttons.inspect.addEventListener("click", () => inspector.toggle(!inspector.on));
+  buttons.source.addEventListener("click", () => {
+    if (inspector.on) inspector.toggle(false);
+    show(tabs.source.hidden || panel.hidden ? "source" : null);
+  });
+  document.getElementById("blossom-close").addEventListener("click", () => {
+    inspector.toggle(false);
+    show(null);
+  });
+  editor.load({ ...files }, original);
+  const result = run(files);
+  editor.show(result);
+  if (!result.ok) {
+    report(result.error ?? result.diags.map((d) => d.rendered).join("\n"));
+    show("source");
   }
-  listen(JSON.parse(app.listens()));
-  const started = JSON.parse(app.start(localStorage.getItem(storageKey) ?? "", location.hash));
-  apply(started.patches);
-  localStorage.setItem(storageKey, app.saved());
-  if (started.notes.length > 0) report(started.notes.join("\n"));
   document.body.dataset.blossom = "ready";
 }
 

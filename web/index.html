@@ -4,12 +4,36 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Blossom in the browser</title>
-  <link rel="stylesheet" href="host.css">
   <link rel="stylesheet" id="app-css">
+  <link rel="stylesheet" href="host.css">
 </head>
 <body>
   <main id="app"></main>
   <div id="blossom-status" role="status"></div>
+  <div id="blossom-highlight" hidden></div>
+  <nav id="blossom-bar" aria-label="Blossom">
+    <button type="button" id="blossom-inspect" aria-pressed="false" title="Click an element to see why it is there (Esc to stop)">Why?</button>
+    <button type="button" id="blossom-edit" aria-pressed="false" title="The app's source">Source</button>
+  </nav>
+  <aside id="blossom-panel" hidden>
+    <header class="blossom-panel-head">
+      <span class="blossom-brand">Blossom</span>
+      <button type="button" id="blossom-close" aria-label="Close the panel">×</button>
+    </header>
+    <section id="blossom-why" hidden>
+      <h2>Why is <code class="blossom-subject">…</code> here?</h2>
+      <div class="blossom-tree"><p class="blossom-muted">Click an element of the app.</p></div>
+    </section>
+    <section id="blossom-source" hidden>
+      <div class="blossom-tools">
+        <select id="blossom-file" aria-label="File"></select>
+        <button type="button" id="blossom-revert" disabled title="Back to the app's own source">Revert</button>
+        <button type="button" id="blossom-run" class="blossom-primary" title="Compile and run (Ctrl-Enter)">Run</button>
+      </div>
+      <textarea id="blossom-code" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Source"></textarea>
+      <ul id="blossom-diags" aria-live="polite"></ul>
+    </section>
+  </aside>
   <script type="module" src="host.js"></script>
 </body>
 </html>
