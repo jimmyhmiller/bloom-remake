@@ -200,8 +200,9 @@ struct Search<'a> {
     config: &'a LdfiConfig,
     preds: Preds,
     rules: lineage::ArtifactRules<'a>,
-    /// The hazards the runs share (S12), when the config allows any.
+    /// The hazards the runs share (S12), when the config allows any, and the row patterns they all intern.
     shared: Option<crate::shared::SharedHazards>,
+    patterns: crate::patterns::Patterns,
 }
 
 /// What processing one hypothesis found.
@@ -239,6 +240,7 @@ impl<'a> Search<'a> {
             preds: Preds::of(artifact),
             rules: lineage::ArtifactRules::new(artifact)?,
             shared: (config.shared_hazards > 0).then(|| crate::shared::SharedHazards::new(config.shared_hazards)),
+            patterns: crate::patterns::Patterns::new(),
         })
     }
 
@@ -293,6 +295,7 @@ impl<'a> Search<'a> {
         }
         let setting = crate::hazard::Setting {
             spec: &self.config.spec,
+            patterns: &self.patterns,
             preds: &self.preds,
             neg: self.config.negative_support,
             rules: Some(&self.rules),

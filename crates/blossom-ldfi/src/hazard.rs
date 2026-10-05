@@ -25,6 +25,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use std::rc::Rc;
+
 use blossom_base::{ConstId, DetMap, InternalError, RelId, RuleId, internal_error};
 use blossom_ir::core::{Expr, HeadArg, Literal, Rule, Term};
 use blossom_prov::{GoalId, Loc, Premise, ProvGraph, Space, Support};
@@ -37,6 +39,7 @@ use crate::LdfiError;
 pub use crate::circuit::Hazard;
 use crate::circuit::{Atom, Atoms, Kind, Node};
 use crate::faults::FailureSpec;
+use crate::patterns::{Local, PatId, Pattern, Patterns};
 use crate::reach::Preds;
 use crate::shared::{CtxId, Entries, Other, RunContexts, SharedHazards};
 
@@ -92,6 +95,8 @@ pub enum Target {
 #[derive(Clone, Copy)]
 pub struct Setting<'a> {
     pub spec: &'a FailureSpec,
+    /// The search's interned patterns.
+    pub patterns: &'a Patterns,
     pub preds: &'a Preds,
     pub neg: NegSupport,
     pub rules: Option<&'a dyn Rules>,
@@ -129,9 +134,26 @@ pub enum Origin<'r> {
     Stream,
 }
 
-pub(crate) type Pattern = Vec<Option<Value>>;
-/// A place and a row pattern: what an appearance or a removal is asked about.
-pub(crate) type PlaceKey = (Space, RelId, Loc, Tick, Pattern);
+/// A place and an interned row pattern: what an appearance or a removal is asked about.
+pub(crate) type PlaceKey = (Space, RelId, Loc, Tick, PatId);
+
+/// What a rule's body asks about, for one head pattern at one location: per body literal, the relation and the
+/// interned pattern its atom matches (a lattice atom by its key cells), or none when the head cannot match.
+struct Plan {
+    aggregate: bool,
+    steps: Vec<Step>,
+}
+
+enum Step {
+    /// A lookup of a lattice cell by key.
+    Lookup { rel: RelId, pat: PatId },
+    Atom {
+        rel: RelId,
+        pat: PatId,
+        negated: bool,
+        lattice: bool,
+    },
+}
 
 /// The fault variables of one solver, and the circuit nodes it was given: `O(from,to,send)` per omission atom, and
 /// per node its crash variables, created together on first use. Under crash-stop they are the crash-order variables
@@ -584,6 +606,16 @@ pub struct Encoder<'a> {
     /// The hazards earlier runs shared, and this run's context at every tick (S12).
     shared: Option<&'a SharedHazards>,
     ctx: RunContexts,
+    /// The search's patterns as this run saw them, and patterns derived from others: a pattern's lattice key cells,
+    /// its split into a node and the rest, the send a channel tuple comes from, an open pattern of an arity.
+    pats: Local<'a>,
+    key_memo: DetMap<(PatId, Space, RelId), PatId>,
+    split_memo: DetMap<PatId, (Loc, PatId)>,
+    sent_memo: DetMap<(PatId, NodeId), Option<PatId>>,
+    open_memo: DetMap<usize, PatId>,
+    /// Per rule (by space and id), location and head pattern: its body's [`Plan`].
+    plans: DetMap<(Space, RuleId, Loc, PatId), Option<Rc<Plan>>>,
+    exists_memo: DetMap<PlaceKey, bool>,
     /// Per frame on the current path, whether it is a goal's (else an appearance's); whether a cycle through both
     /// kinds was met, which has no single fixpoint, so the run's entries are not shared.
     frames: Vec<bool>,
@@ -618,6 +650,7 @@ impl<'a> Encoder<'a> {
     ) -> Result<Encoder<'a>, LdfiError> {
         let Setting {
             spec,
+            patterns,
             preds,
             neg,
             rules,
@@ -645,6 +678,13 @@ impl<'a> Encoder<'a> {
             atoms: Atoms::new(spec),
             shared,
             ctx,
+            pats: Local::new(patterns),
+            key_memo: DetMap::default(),
+            split_memo: DetMap::default(),
+            sent_memo: DetMap::default(),
+            open_memo: DetMap::default(),
+            plans: DetMap::default(),
+            exists_memo: DetMap::default(),
             frames: Vec::new(),
             mixed: false,
             memo: vec![None; graph.goal_count()],
@@ -703,12 +743,12 @@ impl<'a> Encoder<'a> {
         }
         for (key, h) in self.appear_memo.iter() {
             if let Some(c) = ctx(key.3) {
-                out.appears.push((key.clone(), c, h.clone()));
+                out.appears.push((*key, c, h.clone()));
             }
         }
         for (key, h) in self.remove_memo.iter() {
             if let Some(c) = ctx(key.3) {
-                out.removes.push((key.clone(), c, h.clone()));
+                out.removes.push((*key, c, h.clone()));
             }
         }
         let others = self
@@ -742,24 +782,18 @@ impl<'a> Encoder<'a> {
             Target::Goal(g) => self.goal(*g)?,
             Target::Appears { rel, row } => {
                 let pattern: Pattern = row.iter().cloned().map(Some).collect();
-                self.appearance(Space::Spec, *rel, Loc::Global, self.spec.eot, &pattern)?
+                let pat = self.pats.intern(&pattern)?;
+                self.appearance(Space::Spec, *rel, Loc::Global, self.spec.eot, pat)?
             }
         };
         Ok(h)
     }
 
     /// Whether a tuple matching `pattern` can appear, by the negative-support mode.
-    fn appearance(
-        &mut self,
-        space: Space,
-        rel: RelId,
-        loc: Loc,
-        tick: Tick,
-        pattern: &[Option<Value>],
-    ) -> Result<Hazard, LdfiError> {
+    fn appearance(&mut self, space: Space, rel: RelId, loc: Loc, tick: Tick, pat: PatId) -> Result<Hazard, LdfiError> {
         match (self.neg, self.rules) {
             (NegSupport::Off, _) => Ok(Hazard::False),
-            (NegSupport::Precise, Some(_)) => self.appear(space, rel, loc, tick, pattern),
+            (NegSupport::Precise, Some(_)) => self.appear(space, rel, loc, tick, pat),
             (NegSupport::Conservative, Some(rules)) => match rules.logical(space, rel) {
                 Some(logical) => self.negative_support(logical, tick),
                 None => Err(internal_error!("no source-level relation for {rel:?}").into()),
@@ -948,7 +982,10 @@ impl<'a> Encoder<'a> {
                     .ok_or_else(|| internal_error!("unknown negated read {id:?}"))?;
                 match (self.neg, self.rules) {
                     (NegSupport::Off, _) => Ok(Hazard::False),
-                    (NegSupport::Precise, Some(_)) => self.appear(n.space, n.rel, n.loc, n.tick, &n.pattern),
+                    (NegSupport::Precise, Some(_)) => {
+                        let pat = self.pats.intern(&n.pattern)?;
+                        self.appear(n.space, n.rel, n.loc, n.tick, pat)
+                    }
                     (NegSupport::Conservative | NegSupport::Precise, _) => self.negative_support(n.logical, n.tick),
                 }
             }
@@ -982,7 +1019,10 @@ impl<'a> Encoder<'a> {
             .ok_or_else(|| internal_error!("unknown aggregate rule {:?}", group.rule))?;
         match self.neg {
             NegSupport::Off => Ok(Hazard::False),
-            NegSupport::Precise => self.rule_appear(rule, group.space, group.loc, group.tick, &group.key),
+            NegSupport::Precise => {
+                let pat = self.pats.intern(&group.key)?;
+                self.rule_appear(rule, group.space, group.loc, group.tick, pat)
+            }
             NegSupport::Conservative => {
                 let atom_loc = match group.space {
                     Space::Protocol => group.loc,
@@ -998,8 +1038,8 @@ impl<'a> Encoder<'a> {
                             options.push(self.negative_support(logical, group.tick)?);
                         }
                         Literal::Neg(a) => {
-                            let open: Pattern = vec![None; a.args.len()];
-                            options.push(self.remove(group.space, a.rel, atom_loc, group.tick, &open)?);
+                            let open = self.open(a.args.len())?;
+                            options.push(self.remove(group.space, a.rel, atom_loc, group.tick, open)?);
                         }
                         _ => {}
                     }
@@ -1061,19 +1101,12 @@ impl<'a> Encoder<'a> {
     /// negated atoms is lost (that tuple's hazard). A channel tuple appears only through a new send one tick earlier
     /// (a message the run sent and lost stays lost under a superset of its faults); inputs never appear. A derivation
     /// that needs its own appearance is no reason (least fixpoint): a place met again on the path contributes false.
-    fn appear(
-        &mut self,
-        space: Space,
-        rel: RelId,
-        loc: Loc,
-        tick: Tick,
-        pattern: &[Option<Value>],
-    ) -> Result<Hazard, LdfiError> {
+    fn appear(&mut self, space: Space, rel: RelId, loc: Loc, tick: Tick, pat: PatId) -> Result<Hazard, LdfiError> {
         if loc == Loc::AnyNode {
             let nodes = self.rules.map_or(0, |r| r.nodes());
             let mut options = Vec::new();
             for n in (0..nodes).map(NodeId) {
-                let h = self.appear(space, rel, Loc::Node(n), tick, pattern)?;
+                let h = self.appear(space, rel, Loc::Node(n), tick, pat)?;
                 if h == Hazard::True {
                     return Ok(Hazard::True);
                 }
@@ -1081,7 +1114,7 @@ impl<'a> Encoder<'a> {
             }
             return self.or(options);
         }
-        let key: PlaceKey = (space, rel, loc, tick, pattern.to_vec());
+        let key: PlaceKey = (space, rel, loc, tick, pat);
         if let Some(h) = self.appear_memo.get(&key) {
             return Ok(h.clone());
         }
@@ -1098,11 +1131,11 @@ impl<'a> Encoder<'a> {
             return Ok(Hazard::False);
         }
         let depth = self.depth;
-        self.appear_path.insert(key.clone(), depth);
+        self.appear_path.insert(key, depth);
         self.depth += 1;
         let saved = std::mem::replace(&mut self.low, usize::MAX);
         self.frames.push(false);
-        let result = self.appear_body(space, rel, loc, tick, pattern);
+        let result = self.appear_body(space, rel, loc, tick, pat);
         self.frames.pop();
         self.depth -= 1;
         self.appear_path.remove(&key);
@@ -1114,14 +1147,7 @@ impl<'a> Encoder<'a> {
         Ok(result)
     }
 
-    fn appear_body(
-        &mut self,
-        space: Space,
-        rel: RelId,
-        loc: Loc,
-        tick: Tick,
-        pattern: &[Option<Value>],
-    ) -> Result<Hazard, LdfiError> {
+    fn appear_body(&mut self, space: Space, rel: RelId, loc: Loc, tick: Tick, pat: PatId) -> Result<Hazard, LdfiError> {
         let Some(rules) = self.rules else {
             return Err(internal_error!("tuple-level negative support without the program's rules").into());
         };
@@ -1131,7 +1157,7 @@ impl<'a> Encoder<'a> {
             (
                 Origin::Input | Origin::Rules { .. } | Origin::Restart | Origin::Timer { .. } | Origin::Stream,
                 Loc::Node(n),
-            ) if self.frozen && space == Space::Protocol => self.frozen_appear(rel, n, tick, pattern)?,
+            ) if self.frozen && space == Space::Protocol => self.frozen_appear(rel, n, tick, pat)?,
             _ => Hazard::False,
         };
         if frozen == Hazard::True {
@@ -1139,29 +1165,22 @@ impl<'a> Encoder<'a> {
         }
         // A lattice cell's row is the join of its contributions: a new row for a key appears when a contribution is
         // gained (with any value) or lost (the join shrinks).
-        let lattice = rules.lattice_cols(space, rel);
-        if !lattice.is_empty() {
-            let key = key_pattern(pattern, lattice);
-            let gained = self.appear_origin(origin, space, rel, loc, tick, &key)?;
+        if !rules.lattice_cols(space, rel).is_empty() {
+            let key = self.key_of(pat, space, rel)?;
+            let gained = self.appear_origin(origin, space, rel, loc, tick, key)?;
             if gained == Hazard::True {
                 return Ok(Hazard::True);
             }
-            let lost = self.remove(space, rel, loc, tick, &key)?;
+            let lost = self.remove(space, rel, loc, tick, key)?;
             return self.or(vec![frozen, gained, lost]);
         }
-        let derived = self.appear_origin(origin, space, rel, loc, tick, pattern)?;
+        let derived = self.appear_origin(origin, space, rel, loc, tick, pat)?;
         self.or(vec![frozen, derived])
     }
 
     /// A crash of `node` at some tick `c <= tick` whose previous tick held a matching tuple (the frozen view). Under
     /// crash-restart the node keeps such a tuple while it is down, and a durable one after its restart too.
-    fn frozen_appear(
-        &mut self,
-        rel: RelId,
-        node: NodeId,
-        tick: Tick,
-        pattern: &[Option<Value>],
-    ) -> Result<Hazard, LdfiError> {
+    fn frozen_appear(&mut self, rel: RelId, node: NodeId, tick: Tick, pat: PatId) -> Result<Hazard, LdfiError> {
         let durable = self.rules.is_some_and(|r| r.durable(Space::Protocol, rel));
         let mut options = Vec::new();
         for c in self.spec.crash_ticks().filter(|c| *c <= tick) {
@@ -1169,7 +1188,7 @@ impl<'a> Encoder<'a> {
                 continue;
             }
             let Some(before) = c.prev() else { continue };
-            if self.exists(Space::Protocol, rel, Loc::Node(node), before, pattern)? {
+            if self.exists(Space::Protocol, rel, Loc::Node(node), before, pat)? {
                 options.push(self.crash_appears(node, Some(c))?);
             }
         }
@@ -1183,7 +1202,7 @@ impl<'a> Encoder<'a> {
         rel: RelId,
         loc: Loc,
         tick: Tick,
-        pattern: &[Option<Value>],
+        pat: PatId,
     ) -> Result<Hazard, LdfiError> {
         let _ = rel;
         let Some(rules) = self.rules else {
@@ -1213,8 +1232,8 @@ impl<'a> Encoder<'a> {
                 // A guarded timer fires when its guard held at the end of the previous tick: some guard tuple there.
                 let guarded = match (guard, tick.prev()) {
                     (Some(g), Some(before)) => {
-                        let open: Pattern = vec![None; rules.arity(Space::Protocol, g)];
-                        self.appear(Space::Protocol, g, loc, before, &open)?
+                        let open = self.open(rules.arity(Space::Protocol, g))?;
+                        self.appear(Space::Protocol, g, loc, before, open)?
                     }
                     _ => Hazard::False,
                 };
@@ -1222,13 +1241,16 @@ impl<'a> Encoder<'a> {
             }
             Origin::Crash => {
                 // A tuple crash(Observer, Node, Time) appears when that node crashes at that time.
-                let (node, time) = crash_pattern(pattern)?;
+                let (node, time) = crash_pattern(&self.pats.get(pat)?)?;
                 self.crash_appears_any(node, time)
             }
             // A tuple crashed(Node) appears when that node crashes, at any time.
-            Origin::Crashed => self.crash_appears_any(crashed_node(pattern)?, None),
+            Origin::Crashed => {
+                let node = crashed_node(&self.pats.get(pat)?)?;
+                self.crash_appears_any(node, None)
+            }
             Origin::Snapshot { protocol, tick: at } => {
-                let (node_loc, rest) = split_node(pattern);
+                let (node_loc, rest) = self.split(pat)?;
                 self.appear(Space::Protocol, protocol, node_loc, at.unwrap_or(tick), rest)
             }
             Origin::Rules {
@@ -1238,14 +1260,14 @@ impl<'a> Encoder<'a> {
             } => {
                 let mut options = Vec::new();
                 for r in deductive {
-                    options.push(self.rule_appear(r, space, loc, tick, pattern)?);
+                    options.push(self.rule_appear(r, space, loc, tick, pat)?);
                     if options.last() == Some(&Hazard::True) {
                         return Ok(Hazard::True);
                     }
                 }
                 if let Some(earlier) = tick.prev() {
                     for r in inductive {
-                        options.push(self.rule_appear(r, space, loc, earlier, pattern)?);
+                        options.push(self.rule_appear(r, space, loc, earlier, pat)?);
                         if options.last() == Some(&Hazard::True) {
                             return Ok(Hazard::True);
                         }
@@ -1255,15 +1277,12 @@ impl<'a> Encoder<'a> {
                         let Loc::Node(dest) = loc else {
                             return Err(internal_error!("a channel read outside a node").into());
                         };
-                        let mut sent: Pattern = pattern.to_vec();
-                        match sent.first_mut() {
-                            Some(slot @ None) => *slot = Some(Value::Node(dest)),
-                            Some(Some(v)) if *v != Value::Node(dest) => return self.or(options),
-                            _ => {}
-                        }
+                        let Some(sent) = self.sent(pat, dest)? else {
+                            return self.or(options);
+                        };
                         for s in (0..rules.nodes()).map(NodeId) {
                             for r in asynchronous {
-                                options.push(self.rule_appear(r, space, Loc::Node(s), earlier, &sent)?);
+                                options.push(self.rule_appear(r, space, Loc::Node(s), earlier, sent)?);
                                 if options.last() == Some(&Hazard::True) {
                                     return Ok(Hazard::True);
                                 }
@@ -1320,8 +1339,8 @@ impl<'a> Encoder<'a> {
             }
             for before in (0..tick.0).map(Tick) {
                 for (rel, arity) in &requests {
-                    let open: Pattern = vec![None; *arity];
-                    let h = e.appear(Space::Protocol, *rel, Loc::AnyNode, before, &open)?;
+                    let open = e.open(*arity)?;
+                    let h = e.appear(Space::Protocol, *rel, Loc::AnyNode, before, open)?;
                     if h == Hazard::True {
                         return Ok(Hazard::True);
                     }
@@ -1367,8 +1386,8 @@ impl<'a> Encoder<'a> {
         let (h, independent) = self.tracked(|e| {
             let mut options = Vec::new();
             for (rel, arity) in &requests {
-                let open: Pattern = vec![None; *arity];
-                let h = e.appear(Space::Protocol, *rel, Loc::Node(node), tick, &open)?;
+                let open = e.open(*arity)?;
+                let h = e.appear(Space::Protocol, *rel, Loc::Node(node), tick, open)?;
                 if h == Hazard::True {
                     return Ok(Hazard::True);
                 }
@@ -1389,26 +1408,100 @@ impl<'a> Encoder<'a> {
         space: Space,
         loc: Loc,
         tick: Tick,
-        pattern: &[Option<Value>],
+        pat: PatId,
     ) -> Result<Hazard, LdfiError> {
+        let Some(plan) = self.plan(rule, space, loc, pat)? else {
+            return Ok(Hazard::False);
+        };
+        let atom_loc = match space {
+            Space::Protocol => loc,
+            Space::Spec => Loc::Global,
+        };
+        // A positive atom with no matching tuple in the run must gain one: every new derivation needs it. Otherwise
+        // some body literal must change in the enabling direction.
+        let mut required = Vec::new();
+        let mut options = Vec::new();
+        for step in &plan.steps {
+            match *step {
+                // A lookup reads a cell, which faults can grow or shrink (or make absent or present): either may
+                // enable the rule, depending on how its value is used.
+                Step::Lookup { rel, pat } => {
+                    options.push(self.appear(space, rel, atom_loc, tick, pat)?);
+                    options.push(self.remove(space, rel, atom_loc, tick, pat)?);
+                }
+                // A lattice cell matches by its key: its value can change either way.
+                Step::Atom {
+                    rel,
+                    pat,
+                    negated: false,
+                    lattice: true,
+                } => {
+                    if !self.exists(space, rel, atom_loc, tick, pat)? {
+                        let h = self.appear(space, rel, atom_loc, tick, pat)?;
+                        if h == Hazard::False {
+                            return Ok(Hazard::False);
+                        }
+                        required.push(h);
+                        continue;
+                    }
+                    options.push(self.appear(space, rel, atom_loc, tick, pat)?);
+                    options.push(self.remove(space, rel, atom_loc, tick, pat)?);
+                }
+                Step::Atom { rel, pat, negated, .. } => {
+                    if !negated && !plan.aggregate && !self.exists(space, rel, atom_loc, tick, pat)? {
+                        let h = self.appear(space, rel, atom_loc, tick, pat)?;
+                        if h == Hazard::False {
+                            return Ok(Hazard::False);
+                        }
+                        required.push(h);
+                        continue;
+                    }
+                    if !negated || plan.aggregate {
+                        options.push(self.appear(space, rel, atom_loc, tick, pat)?);
+                    }
+                    if negated || plan.aggregate {
+                        options.push(self.remove(space, rel, atom_loc, tick, pat)?);
+                    }
+                }
+            }
+        }
+        if !required.is_empty() {
+            return self.and(required);
+        }
+        self.or(options)
+    }
+
+    /// What `rule`'s body asks about when its head is to match `pat` at `loc` (none when it cannot): the head binds
+    /// variables, the location and copies bind more, and each body atom's pattern follows (a lattice atom's by its
+    /// key cells, a lookup's by its key). The same at every tick, so computed once.
+    fn plan(&mut self, rule: &Rule, space: Space, loc: Loc, pat: PatId) -> Result<Option<Rc<Plan>>, LdfiError> {
+        if let Some(p) = self.plans.get(&(space, rule.id, loc, pat)) {
+            return Ok(p.clone());
+        }
         let Some(rules) = self.rules else {
             return Err(internal_error!("tuple-level negative support without the program's rules").into());
         };
+        let pattern = self.pats.get(pat)?;
         let mut sigma: Vec<Option<Value>> = vec![None; rule.body.vars.len()];
         let mut aggregate = false;
-        for (arg, want) in rule.head.args.iter().zip(pattern) {
+        let mut matches = true;
+        for (arg, want) in rule.head.args.iter().zip(pattern.iter()) {
             match (arg, want) {
                 (HeadArg::Agg(_), _) => aggregate = true,
                 (HeadArg::Term(Term::Var(v)), Some(val)) => match sigma.get_mut(v.index()) {
                     Some(slot @ None) => *slot = Some(val.clone()),
-                    Some(Some(bound)) if bound != val => return Ok(Hazard::False),
+                    Some(Some(bound)) if bound != val => matches = false,
                     _ => {}
                 },
                 (HeadArg::Term(Term::Const(c)), Some(val)) if rules.constant(space, *c).is_some_and(|k| k != val) => {
-                    return Ok(Hazard::False);
+                    matches = false;
                 }
                 _ => {}
             }
+        }
+        if !matches {
+            self.plans.insert((space, rule.id, loc, pat), None);
+            return Ok(None);
         }
         // Bindings that follow from the location and from copies.
         loop {
@@ -1447,31 +1540,22 @@ impl<'a> Encoder<'a> {
                 break;
             }
         }
-        let atom_loc = match space {
-            Space::Protocol => loc,
-            Space::Spec => Loc::Global,
+        let bound = |t: &Term| match t {
+            Term::Const(c) => rules.constant(space, *c).cloned(),
+            Term::Var(v) => sigma.get(v.index()).cloned().flatten(),
+            Term::Wild => None,
         };
-        // A positive atom with no matching tuple in the run must gain one: every new derivation needs it. Otherwise
-        // some body literal must change in the enabling direction.
-        let mut required = Vec::new();
-        let mut options = Vec::new();
+        let mut steps = Vec::new();
         for lit in &rule.body.lits {
-            // A lookup reads a cell, which faults can grow or shrink (or make absent or present): either may enable
-            // the rule, depending on how its value is used.
             if let Literal::Lookup { rel, key, .. } = lit {
                 let n = rules.lattice_cols(space, *rel).len() + key.len();
-                let mut pat: Pattern = key
-                    .iter()
-                    .map(|t| match t {
-                        Term::Const(c) => rules.constant(space, *c).cloned(),
-                        Term::Var(v) => sigma.get(v.index()).cloned().flatten(),
-                        Term::Wild => None,
-                    })
-                    .collect();
-                pat.resize(n, None);
-                let pat = lookup_pattern(rules, space, *rel, &pat);
-                options.push(self.appear(space, *rel, atom_loc, tick, &pat)?);
-                options.push(self.remove(space, *rel, atom_loc, tick, &pat)?);
+                let mut p: Pattern = key.iter().map(bound).collect();
+                p.resize(n, None);
+                let p = lookup_pattern(rules, space, *rel, &p);
+                steps.push(Step::Lookup {
+                    rel: *rel,
+                    pat: self.pats.intern(&p)?,
+                });
                 continue;
             }
             let (atom, negated) = match lit {
@@ -1480,78 +1564,109 @@ impl<'a> Encoder<'a> {
                 _ => continue,
             };
             let lattice = rules.lattice_cols(space, atom.rel);
-            let pat: Pattern = atom
-                .args
-                .iter()
-                .map(|t| match t {
-                    Term::Const(c) => rules.constant(space, *c).cloned(),
-                    Term::Var(v) => sigma.get(v.index()).cloned().flatten(),
-                    Term::Wild => None,
-                })
-                .collect();
-            // A lattice cell matches by its key: its value can change either way.
-            let pat = if lattice.is_empty() {
-                pat
+            let p: Pattern = atom.args.iter().map(bound).collect();
+            let p = if lattice.is_empty() {
+                p
             } else {
-                key_pattern(&pat, lattice)
+                key_pattern(&p, lattice)
             };
-            if !lattice.is_empty() && !negated {
-                if !self.exists(space, atom.rel, atom_loc, tick, &pat)? {
-                    let h = self.appear(space, atom.rel, atom_loc, tick, &pat)?;
-                    if h == Hazard::False {
-                        return Ok(Hazard::False);
-                    }
-                    required.push(h);
-                    continue;
-                }
-                options.push(self.appear(space, atom.rel, atom_loc, tick, &pat)?);
-                options.push(self.remove(space, atom.rel, atom_loc, tick, &pat)?);
-                continue;
-            }
-            if !negated && !aggregate && !self.exists(space, atom.rel, atom_loc, tick, &pat)? {
-                let h = self.appear(space, atom.rel, atom_loc, tick, &pat)?;
-                if h == Hazard::False {
-                    return Ok(Hazard::False);
-                }
-                required.push(h);
-                continue;
-            }
-            if !negated || aggregate {
-                options.push(self.appear(space, atom.rel, atom_loc, tick, &pat)?);
-            }
-            if negated || aggregate {
-                options.push(self.remove(space, atom.rel, atom_loc, tick, &pat)?);
-            }
+            steps.push(Step::Atom {
+                rel: atom.rel,
+                pat: self.pats.intern(&p)?,
+                negated,
+                lattice: !lattice.is_empty(),
+            });
         }
-        if !required.is_empty() {
-            return self.and(required);
+        let plan = Some(Rc::new(Plan { aggregate, steps }));
+        self.plans.insert((space, rule.id, loc, pat), plan.clone());
+        Ok(plan)
+    }
+
+    /// `pat` with the lattice columns of `rel` open: a cell is identified by its key.
+    fn key_of(&mut self, pat: PatId, space: Space, rel: RelId) -> Result<PatId, LdfiError> {
+        if let Some(k) = self.key_memo.get(&(pat, space, rel)) {
+            return Ok(*k);
         }
-        self.or(options)
+        let lattice = self.rules.map_or(&[][..], |r| r.lattice_cols(space, rel));
+        let k = if lattice.is_empty() {
+            pat
+        } else {
+            let p = key_pattern(&self.pats.get(pat)?, lattice);
+            self.pats.intern(&p)?
+        };
+        self.key_memo.insert((pat, space, rel), k);
+        Ok(k)
+    }
+
+    /// A pattern over a spec copy of a protocol relation, split into its node column and the rest.
+    fn split(&mut self, pat: PatId) -> Result<(Loc, PatId), LdfiError> {
+        if let Some(s) = self.split_memo.get(&pat) {
+            return Ok(*s);
+        }
+        let p = self.pats.get(pat)?;
+        let (loc, rest) = split_node(&p);
+        let rest = self.pats.intern(rest)?;
+        self.split_memo.insert(pat, (loc, rest));
+        Ok((loc, rest))
+    }
+
+    /// The pattern of the send a channel tuple matching `pat` at `dest` comes from: column 0, the destination, fixed
+    /// to `dest` (none when `pat` names another destination).
+    fn sent(&mut self, pat: PatId, dest: NodeId) -> Result<Option<PatId>, LdfiError> {
+        if let Some(s) = self.sent_memo.get(&(pat, dest)) {
+            return Ok(*s);
+        }
+        let mut sent: Pattern = self.pats.get(pat)?.to_vec();
+        let ok = match sent.first_mut() {
+            Some(slot @ None) => {
+                *slot = Some(Value::Node(dest));
+                true
+            }
+            Some(Some(v)) => *v == Value::Node(dest),
+            None => true,
+        };
+        let s = if ok { Some(self.pats.intern(&sent)?) } else { None };
+        self.sent_memo.insert((pat, dest), s);
+        Ok(s)
+    }
+
+    /// The pattern of `arity` open columns.
+    fn open(&mut self, arity: usize) -> Result<PatId, LdfiError> {
+        if let Some(p) = self.open_memo.get(&arity) {
+            return Ok(*p);
+        }
+        let p = self.pats.intern(&vec![None; arity])?;
+        self.open_memo.insert(arity, p);
+        Ok(p)
     }
 
     /// Whether the run holds some tuple of `rel` matching `pattern` at `loc` and `tick`. Unknown places (the crash
     /// oracle's tuples, which are not goals) count as held, the conservative answer.
-    fn exists(
-        &self,
-        space: Space,
-        rel: RelId,
-        loc: Loc,
-        tick: Tick,
-        pattern: &[Option<Value>],
-    ) -> Result<bool, LdfiError> {
+    fn exists(&mut self, space: Space, rel: RelId, loc: Loc, tick: Tick, pat: PatId) -> Result<bool, LdfiError> {
+        let key: PlaceKey = (space, rel, loc, tick, pat);
+        if let Some(e) = self.exists_memo.get(&key) {
+            return Ok(*e);
+        }
+        let e = self.exists_body(space, rel, loc, tick, pat)?;
+        self.exists_memo.insert(key, e);
+        Ok(e)
+    }
+
+    fn exists_body(&mut self, space: Space, rel: RelId, loc: Loc, tick: Tick, pat: PatId) -> Result<bool, LdfiError> {
         let Some(rules) = self.rules else {
             return Err(internal_error!("tuple-level negative support without the program's rules").into());
         };
+        let pattern = self.pats.get(pat)?;
         match rules.origin(space, rel)? {
             Origin::Crash => {
-                let (node, time) = crash_pattern(pattern)?;
+                let (node, time) = crash_pattern(&pattern)?;
                 Ok(self
                     .seed_crashes
                     .iter()
                     .any(|(n, c)| node.is_none_or(|m| m == *n) && time.is_none_or(|t| t == *c)))
             }
             Origin::Crashed => {
-                let node = crashed_node(pattern)?;
+                let node = crashed_node(&pattern)?;
                 let eot = self.spec.eot;
                 Ok(self
                     .seed_crashes
@@ -1559,7 +1674,7 @@ impl<'a> Encoder<'a> {
                     .any(|(n, c)| node.is_none_or(|m| m == *n) && self.spec.down(*c, eot)))
             }
             Origin::Snapshot { protocol, tick: at } => {
-                let (node_loc, rest) = split_node(pattern);
+                let (node_loc, rest) = self.split(pat)?;
                 self.exists(Space::Protocol, protocol, node_loc, at.unwrap_or(tick), rest)
             }
             Origin::Input | Origin::Rules { .. } | Origin::Restart | Origin::Timer { .. } | Origin::Stream => {
@@ -1576,7 +1691,7 @@ impl<'a> Encoder<'a> {
                                     .key
                                     .row
                                     .iter()
-                                    .zip(pattern)
+                                    .zip(pattern.iter())
                                     .all(|(v, p)| p.as_ref().is_none_or(|p| matches_trace(p, v)))
                         })
                     })
@@ -1587,21 +1702,14 @@ impl<'a> Encoder<'a> {
 
     /// Whether faults can make the run lose some tuple of `rel` matching `pattern` at `loc` and `tick`: the
     /// disjunction of those tuples' hazards.
-    fn remove(
-        &mut self,
-        space: Space,
-        rel: RelId,
-        loc: Loc,
-        tick: Tick,
-        pattern: &[Option<Value>],
-    ) -> Result<Hazard, LdfiError> {
+    fn remove(&mut self, space: Space, rel: RelId, loc: Loc, tick: Tick, pat: PatId) -> Result<Hazard, LdfiError> {
         let Some(rules) = self.rules else {
             return Err(internal_error!("tuple-level negative support without the program's rules").into());
         };
         match rules.origin(space, rel)? {
             // A run's crash tuple goes only if a superset crashes the node earlier.
             Origin::Crash => {
-                let (node, time) = crash_pattern(pattern)?;
+                let (node, time) = crash_pattern(&self.pats.get(pat)?)?;
                 let present: Vec<(NodeId, Tick)> = self
                     .seed_crashes
                     .iter()
@@ -1615,7 +1723,7 @@ impl<'a> Encoder<'a> {
                 return self.or(options);
             }
             Origin::Snapshot { protocol, tick: at } => {
-                let (node_loc, rest) = split_node(pattern);
+                let (node_loc, rest) = self.split(pat)?;
                 return self.remove(Space::Protocol, protocol, node_loc, at.unwrap_or(tick), rest);
             }
             // A crashed node stays crashed in every superset of the run's faults.
@@ -1625,7 +1733,7 @@ impl<'a> Encoder<'a> {
         if loc == Loc::AnyNode {
             let mut options = Vec::new();
             for n in (0..rules.nodes()).map(NodeId) {
-                let h = self.remove(space, rel, Loc::Node(n), tick, pattern)?;
+                let h = self.remove(space, rel, Loc::Node(n), tick, pat)?;
                 if h == Hazard::True {
                     return Ok(Hazard::True);
                 }
@@ -1633,7 +1741,7 @@ impl<'a> Encoder<'a> {
             }
             return self.or(options);
         }
-        let key: PlaceKey = (space, rel, loc, tick, pattern.to_vec());
+        let key: PlaceKey = (space, rel, loc, tick, pat);
         if let Some(h) = self.remove_memo.get(&key) {
             return Ok(h.clone());
         }
@@ -1648,6 +1756,7 @@ impl<'a> Encoder<'a> {
             _ => None,
         };
         let graph = self.graph;
+        let pattern = self.pats.get(pat)?;
         let goals: Vec<GoalId> = graph
             .goals_at(space, rel, node, tick)
             .iter()
@@ -1659,7 +1768,7 @@ impl<'a> Encoder<'a> {
                             .key
                             .row
                             .iter()
-                            .zip(pattern)
+                            .zip(pattern.iter())
                             .all(|(v, p)| p.as_ref().is_none_or(|p| matches_trace(p, v)))
                 })
             })
