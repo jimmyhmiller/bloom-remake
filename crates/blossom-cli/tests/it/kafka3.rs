@@ -919,14 +919,12 @@ fn stock_clients_use_the_replicated_cluster_across_a_broker_failure() {
     let mut cluster = Cluster::new("tools");
     let all: Vec<String> = cluster.ports.iter().map(|p| format!("127.0.0.1:{p}")).collect();
     let bootstrap = all.join(",");
-    if let Some(kcat) = on_path("kcat") {
+    if let Some(kcat) = kcat() {
         let out = run_tool(Command::new(&kcat).args(["-L", "-b", &all[0], "-m", "10"]), "kcat -L");
         assert!(out.contains("3 brokers:"), "{out}");
         for (i, a) in all.iter().enumerate() {
             assert!(out.contains(&format!("broker {} at {a}", i + 1)), "{out}");
         }
-    } else {
-        skipped("kcat is not installed");
     }
     let topics = |args: &[&str], at: &str| {
         run_tool(
@@ -1247,7 +1245,7 @@ fn consumer_groups_with_stock_clients_across_a_coordinator_failure() {
 
     let mut every = first.clone();
     every.extend(second.iter().cloned());
-    if let Some(kcat) = on_path("kcat") {
+    if let Some(kcat) = kcat() {
         let kcat_group = |from_start: bool| -> Vec<String> {
             let mut cmd = Command::new(&kcat);
             cmd.args(["-b", &bootstrap, "-q", "-e", "-X", "session.timeout.ms=6000"]);
@@ -1271,8 +1269,6 @@ fn consumer_groups_with_stock_clients_across_a_coordinator_failure() {
         );
         let listed = groups(&["--list"], &bootstrap);
         assert!(listed.lines().any(|l| l.trim() == "kg"), "{listed}");
-    } else {
-        skipped("kcat is not installed");
     }
 
     if let Some(go) = on_path("go") {
@@ -1301,4 +1297,36 @@ fn consumer_groups_with_stock_clients_across_a_coordinator_failure() {
         "the Java group program",
     );
     assert!(out.contains("ok java group 300 then 20 records"), "{out}");
+}
+
+/// kcat, when it is installed and its librdkafka can talk to the broker, else `None` (and the test says it skips).
+/// The broker answers Metadata v13 only (with Produce 10+ and Fetch 16+, Kafka 4.0's newest), and librdkafka 2.11.0
+/// is the first release that asks for v13: an older one finds no Metadata version in common and fails every request
+/// ("Required feature not supported by broker").
+#[cfg(test)]
+fn kcat() -> Option<PathBuf> {
+    let Some(path) = on_path("kcat") else {
+        skipped("kcat is not installed (brew install kcat)");
+        return None;
+    };
+    let out = Command::new(&path).arg("-V").output().unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let version: Vec<u32> = text
+        .split("librdkafka ")
+        .nth(1)
+        .and_then(|rest| rest.split([' ', ')']).next())
+        .map(|v| v.split('.').filter_map(|x| x.parse().ok()).collect())
+        .unwrap_or_else(|| panic!("no librdkafka version in `kcat -V`: {text}"));
+    if version.as_slice() < [2, 11, 0].as_slice() {
+        skipped(&format!(
+            "kcat's librdkafka {} is older than 2.11.0, the first that speaks Metadata v13, the broker's only version",
+            version.iter().map(u32::to_string).collect::<Vec<_>>().join(".")
+        ));
+        return None;
+    }
+    Some(path)
 }
