@@ -18,10 +18,12 @@
 //! A derivation that needs the goal it derives is not a support (derivation trees are finite): a goal met again on
 //! the current path counts as already falsified, and a goal whose encoding depended on the path is not shared.
 //!
-//! [`FaultVars`] owns the fault variables of one solver; [`Encoder`] encodes one run's graph into a solver;
+//! [`Encoder`] encodes one run's graph as a circuit over fault atoms ([`crate::circuit`]), independent of any solver;
+//! [`FaultVars`] gives a solver the circuit nodes it needs, with the fault variables and their constraints;
 //! [`minimal_extensions`] is the seeded enumeration of §8.4.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use blossom_base::{ConstId, DetMap, InternalError, RelId, RuleId, internal_error};
 use blossom_ir::core::{Expr, HeadArg, Literal, Rule, Term};
@@ -32,18 +34,10 @@ use blossom_value::Value;
 use blossom_value::time::{NodeId, Tick};
 
 use crate::LdfiError;
+pub use crate::circuit::Hazard;
+use crate::circuit::{Atom, Atoms, Kind, Node};
 use crate::faults::FailureSpec;
 use crate::reach::Preds;
-
-/// A hazard: a constant, or a literal of the solver.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Hazard {
-    /// Nothing the spec allows falsifies it.
-    False,
-    /// Already falsified.
-    True,
-    Lit(Lit),
-}
 
 /// How negated reads are supported (TEST-025).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -137,30 +131,21 @@ pub enum Origin<'r> {
 type Pattern = Vec<Option<Value>>;
 type PlaceKey = (Space, RelId, Loc, Tick, Pattern);
 
-/// The fault variables of one solver: `O(from,to,send)` per allowed omission, and per node its crash variables,
-/// created on first use. Under crash-stop they are the crash-order variables `K(n,t)` ("crashed at or before `t`")
-/// for `t` in `1..EOT`, with `K(n,t) -> K(n,t+1)`. Under crash-restart they are the crash-time variables `X(n,c)`
-/// ("crashes at `c`"), at most one per node: a node is down at `t` when it crashed in the `restart` ticks up to `t`,
-/// which is a disjunction of `X` variables, so the encoding stays monotone in the fault variables.
+/// The fault variables of one solver, and the circuit nodes it was given: `O(from,to,send)` per omission atom, and
+/// per node its crash variables, created together on first use. Under crash-stop they are the crash-order variables
+/// `K(n,t)` ("crashed at or before `t`") for `t` in `1..EOT`, with `K(n,t) -> K(n,t+1)`. Under crash-restart they are
+/// the crash-time variables `X(n,c)` ("crashes at `c`"), at most one per node: a node is down at `t` when it crashed
+/// in the `restart` ticks up to `t`, which is a disjunction of `X` variables, so the encoding stays monotone. Every
+/// circuit node gets one variable, implying its conjunction or disjunction (Plaisted–Greenbaum).
 #[derive(Debug, Default)]
 pub struct FaultVars {
     omission: BTreeMap<Omission, Var>,
     crash: BTreeMap<NodeId, NodeCrash>,
-    /// Disjunctions of a node's crash-time variables over a tick range (crash-restart).
-    ranges: BTreeMap<(NodeId, u64, u64), Hazard>,
-    /// Every gate of the encoding, by its variable: a conjunction or a disjunction of literals created before it
-    /// (one-directional, Plaisted–Greenbaum), for [`FaultVars::single_hitters`].
-    gates: BTreeMap<Var, Gate>,
+    /// The literal of every circuit node given to the solver, by node id.
+    nodes: DetMap<u64, Lit>,
     /// The nodes the last crash budget covered, and the omission variables the last omission budget covered.
     budget_nodes: BTreeSet<NodeId>,
     budget_omissions: usize,
-}
-
-/// A gate: `v -> AND(children)` or `v -> OR(children)`.
-#[derive(Debug)]
-struct Gate {
-    all: bool,
-    children: Vec<Lit>,
 }
 
 /// One node's crash variables (`K` or `X`, by tick) and the literal that holds when it crashes at all.
@@ -229,154 +214,85 @@ impl FaultVars {
         Ok(entry.insert(NodeCrash { vars, any }))
     }
 
-    /// `K(n,t)` (crash-stop): `node` crashed at or before `t`.
-    fn k(
-        &mut self,
-        solver: &mut dyn SatSolver,
-        spec: &FailureSpec,
-        node: NodeId,
-        t: Tick,
-    ) -> Result<Hazard, LdfiError> {
-        if spec.max_crashes == 0 {
-            return Ok(Hazard::False);
+    /// The variable of a fault atom, created on first use.
+    fn atom_var(&mut self, solver: &mut dyn SatSolver, spec: &FailureSpec, atom: Atom) -> Result<Var, LdfiError> {
+        match atom {
+            Atom::Omission(o) => self.omission_var(solver, o),
+            Atom::Crash(node, t) => self
+                .crash_vars(solver, spec, node)?
+                .vars
+                .iter()
+                .find(|(tick, _)| *tick == t)
+                .map(|(_, v)| *v)
+                .ok_or_else(|| internal_error!("a crash atom of {node:?} at {t:?}, outside the crash ticks").into()),
         }
-        let vars = &self.crash_vars(solver, spec, node)?.vars;
-        Ok(vars
-            .iter()
-            .find(|(tick, _)| *tick == t)
-            .map_or(Hazard::False, |(_, v)| Hazard::Lit(v.positive())))
     }
 
-    /// Under crash-restart: `node` crashes at some tick of `lo..=hi`.
-    fn crash_in(
-        &mut self,
-        solver: &mut dyn SatSolver,
-        spec: &FailureSpec,
-        node: NodeId,
-        lo: u64,
-        hi: u64,
-    ) -> Result<Hazard, LdfiError> {
-        if spec.max_crashes == 0 {
-            return Ok(Hazard::False);
+    /// The variable of a fault atom the solver already has.
+    fn existing_atom_var(&self, atom: Atom) -> Option<Var> {
+        match atom {
+            Atom::Omission(o) => self.omission.get(&o).copied(),
+            Atom::Crash(node, t) => self
+                .crash
+                .get(&node)?
+                .vars
+                .iter()
+                .find(|(tick, _)| *tick == t)
+                .map(|(_, v)| *v),
         }
-        let lo = lo.max(1);
-        let hi = hi.min(spec.eot.0.saturating_sub(1));
-        if lo > hi {
-            return Ok(Hazard::False);
-        }
-        if let Some(h) = self.ranges.get(&(node, lo, hi)) {
-            return Ok(*h);
-        }
-        let lits: Vec<Lit> = self
-            .crash_vars(solver, spec, node)?
-            .vars
-            .iter()
-            .filter(|(t, _)| (lo..=hi).contains(&t.0))
-            .map(|(_, v)| v.positive())
-            .collect();
-        let h = match lits.as_slice() {
-            [] => Hazard::False,
-            [one] => Hazard::Lit(*one),
-            _ => {
-                let h = solver.new_var().positive();
-                let mut clause = vec![!h];
-                clause.extend(lits.iter().copied());
-                solver.add_clause(&clause)?;
-                self.gates.insert(
-                    h.var(),
-                    Gate {
-                        all: false,
-                        children: lits,
-                    },
-                );
-                Hazard::Lit(h)
+    }
+
+    /// Gives the solver `root` and every node under it that it does not have yet; returns `root`'s literal.
+    pub fn emit(&mut self, solver: &mut dyn SatSolver, spec: &FailureSpec, root: &Arc<Node>) -> Result<Lit, LdfiError> {
+        // Post-order, with an explicit stack: a circuit can be deeper than the thread's stack allows recursion.
+        let mut stack: Vec<(&Arc<Node>, bool)> = vec![(root, false)];
+        while let Some((n, expanded)) = stack.pop() {
+            if self.nodes.contains_key(&n.id()) {
+                continue;
             }
-        };
-        self.ranges.insert((node, lo, hi), h);
-        Ok(h)
-    }
-
-    /// `node` is down at `t`: crashed at or before it, and (crash-restart) not restarted since.
-    pub fn down(
-        &mut self,
-        solver: &mut dyn SatSolver,
-        spec: &FailureSpec,
-        node: NodeId,
-        t: Tick,
-    ) -> Result<Hazard, LdfiError> {
-        match spec.restart {
-            None => self.k(solver, spec, node, t),
-            Some(d) => self.crash_in(solver, spec, node, (t.0 + 1).saturating_sub(d), t.0),
+            match n.kind() {
+                Kind::Atom(a) => {
+                    let v = self.atom_var(solver, spec, *a)?;
+                    self.nodes.insert(n.id(), v.positive());
+                }
+                Kind::And(children) | Kind::Or(children) if !expanded => {
+                    stack.push((n, true));
+                    stack.extend(
+                        children
+                            .iter()
+                            .filter(|c| !self.nodes.contains_key(&c.id()))
+                            .map(|c| (c, false)),
+                    );
+                }
+                Kind::And(children) | Kind::Or(children) => {
+                    let mut lits = Vec::with_capacity(children.len());
+                    for c in children {
+                        let l = self.nodes.get(&c.id()).copied();
+                        lits.push(l.ok_or_else(|| internal_error!("a circuit node emitted before its child"))?);
+                    }
+                    let h = solver.new_var().positive();
+                    if matches!(n.kind(), Kind::And(_)) {
+                        for l in &lits {
+                            solver.add_clause(&[!h, *l])?;
+                        }
+                    } else {
+                        let mut clause = vec![!h];
+                        clause.extend(lits);
+                        solver.add_clause(&clause)?;
+                    }
+                    self.nodes.insert(n.id(), h);
+                }
+            }
         }
+        self.lit_of(root)
     }
 
-    /// `node` is down at some tick of `from..=to`.
-    pub fn down_during(
-        &mut self,
-        solver: &mut dyn SatSolver,
-        spec: &FailureSpec,
-        node: NodeId,
-        from: Tick,
-        to: Tick,
-    ) -> Result<Hazard, LdfiError> {
-        match spec.restart {
-            None => self.k(solver, spec, node, to),
-            Some(d) => self.crash_in(solver, spec, node, (from.0 + 1).saturating_sub(d), to.0),
-        }
-    }
-
-    /// `node` restarts at `t` (never under crash-stop).
-    pub fn restart_at(
-        &mut self,
-        solver: &mut dyn SatSolver,
-        spec: &FailureSpec,
-        node: NodeId,
-        t: Tick,
-    ) -> Result<Hazard, LdfiError> {
-        match spec.restart {
-            Some(d) if t.0 > d => self.crash_in(solver, spec, node, t.0 - d, t.0 - d),
-            _ => Ok(Hazard::False),
-        }
-    }
-
-    /// `node` has restarted at or before `t` (never under crash-stop).
-    pub fn restarted_by(
-        &mut self,
-        solver: &mut dyn SatSolver,
-        spec: &FailureSpec,
-        node: NodeId,
-        t: Tick,
-    ) -> Result<Hazard, LdfiError> {
-        self.restarted_between(solver, spec, node, Tick(0), t)
-    }
-
-    /// `node` restarts at some tick after `from` and at or before `to` (never under crash-stop).
-    pub fn restarted_between(
-        &mut self,
-        solver: &mut dyn SatSolver,
-        spec: &FailureSpec,
-        node: NodeId,
-        from: Tick,
-        to: Tick,
-    ) -> Result<Hazard, LdfiError> {
-        match spec.restart {
-            Some(d) if to.0 > d => self.crash_in(solver, spec, node, (from.0 + 1).saturating_sub(d), to.0 - d),
-            _ => Ok(Hazard::False),
-        }
-    }
-
-    /// `node` crashes at `c` (under crash-stop `K(n,c)`, which a crash at `c` implies: the encoding is monotone).
-    fn crash_at(
-        &mut self,
-        solver: &mut dyn SatSolver,
-        spec: &FailureSpec,
-        node: NodeId,
-        c: Tick,
-    ) -> Result<Hazard, LdfiError> {
-        match spec.restart {
-            None => self.k(solver, spec, node, c),
-            Some(_) => self.crash_in(solver, spec, node, c.0, c.0),
-        }
+    /// The literal of a node the solver was given.
+    pub fn lit_of(&self, node: &Node) -> Result<Lit, LdfiError> {
+        self.nodes
+            .get(&node.id())
+            .copied()
+            .ok_or_else(|| internal_error!("a circuit node the solver was not given").into())
     }
 
     /// Asserts that at most `max_crashes` nodes crash: a totalizer over every node's crash literal, asserted again
@@ -488,13 +404,13 @@ impl FaultVars {
     }
 
     /// The single faults that, added to `seed`, make each of `roots` hold: the minimal models of size one, computed
-    /// from the gates (a monotone circuit over the fault variables) without the solver, in one pass for every root.
-    /// Each gate's set is the faults that make it hold alone (with the seed): the intersection of its children's for a
-    /// conjunction, the union for a disjunction; a fault variable holds by itself, or (a crash-order variable `K(n,t)`)
-    /// by a crash at or before `t`; a variable of the seed holds whatever is added. A fault is a candidate only if the
-    /// spec admits it with the seed (a node crashes once under crash-restart; the crash budget). `None` when the circuit
-    /// has a negative literal.
-    pub fn single_hitters(&self, spec: &FailureSpec, seed: &FaultSchedule, roots: &[Lit]) -> Option<Vec<Vec<Var>>> {
+    /// from the circuit (monotone over the fault atoms) without the solver, in one pass for every root. Each node's
+    /// set is the faults that make it hold alone (with the seed): the intersection of its children's for a
+    /// conjunction, the union for a disjunction; a fault atom holds by itself, or (a crash-order atom `K(n,t)`) by a
+    /// crash at or before `t`; an atom of the seed holds whatever is added. A fault is a candidate only if the spec
+    /// admits it with the seed (a node crashes once under crash-restart; the crash budget). The roots must have been
+    /// given to the solver.
+    pub fn single_hitters(&self, spec: &FailureSpec, seed: &FaultSchedule, roots: &[Arc<Node>]) -> Vec<Vec<Var>> {
         let seeded = self.implied_by(spec, seed);
         let budget_left = (seed.crashes.len() as u32) < spec.max_crashes;
         let omissions_left = spec
@@ -517,29 +433,8 @@ impl FaultVars {
                 atoms.extend(nc.vars.iter().map(|(_, v)| *v).filter(|v| !seeded.contains(v)));
             }
         }
+        let atom_of: DetMap<Var, usize> = atoms.iter().enumerate().map(|(i, v)| (*v, i)).collect();
         let words = atoms.len().div_ceil(64).max(1);
-        // Dense by variable: the highest variable any gate, fault or root names.
-        let top = self
-            .gates
-            .iter()
-            .flat_map(|(v, g)| std::iter::once(*v).chain(g.children.iter().map(|l| l.var())))
-            .chain(self.all())
-            .chain(roots.iter().map(|l| l.var()))
-            .map(|v| v.0 as usize + 1)
-            .max()
-            .unwrap_or(0);
-        let mut atom_of: Vec<Option<usize>> = vec![None; top];
-        for (i, v) in atoms.iter().enumerate() {
-            if let Some(slot) = atom_of.get_mut(v.0 as usize) {
-                *slot = Some(i);
-            }
-        }
-        let mut is_seeded = vec![false; top];
-        for v in &seeded {
-            if let Some(slot) = is_seeded.get_mut(v.0 as usize) {
-                *slot = true;
-            }
-        }
         let full = {
             let mut b = vec![u64::MAX; words];
             if let Some(last) = b.last_mut()
@@ -554,71 +449,68 @@ impl FaultVars {
                 *w |= 1u64 << (i % 64);
             }
         };
-        // Each variable's set, once known: a gate's, or a crash-order variable's under crash-stop (`K(n,t)` holds after
-        // a crash of `n` at any `c <= t`).
-        let mut sets: Vec<Option<Vec<u64>>> = vec![None; top];
-        if spec.restart.is_none() {
-            for nc in self.crash.values() {
-                for (t, v) in &nc.vars {
-                    let mut b = vec![0u64; words];
-                    for (c, w) in &nc.vars {
-                        if c <= t
-                            && let Some(Some(i)) = atom_of.get(w.0 as usize)
+        // An atom's set: everything when the seed holds it; under crash-stop `K(n,t)` holds after a crash of `n` at
+        // any `c <= t`; otherwise the atom itself, when it is a candidate.
+        let leaf = |a: Atom| -> Vec<u64> {
+            let mut b = vec![0u64; words];
+            let Some(v) = self.existing_atom_var(a) else { return b };
+            if seeded.contains(&v) {
+                return full.clone();
+            }
+            match (a, spec.restart) {
+                (Atom::Crash(n, t), None) => {
+                    for (c, w) in self.crash.get(&n).into_iter().flat_map(|nc| nc.vars.iter()) {
+                        if *c <= t
+                            && let Some(i) = atom_of.get(w)
                         {
                             bit(&mut b, *i);
                         }
                     }
-                    if let Some(slot) = sets.get_mut(v.0 as usize) {
-                        *slot = Some(b);
+                }
+                _ => {
+                    if let Some(i) = atom_of.get(&v) {
+                        bit(&mut b, *i);
                     }
                 }
             }
-        }
-        /// A child's set, without copying it.
-        enum Child<'a> {
-            Full,
-            Empty,
-            Bit(usize),
-            Set(&'a [u64]),
-        }
-        fn child<'a>(v: Var, sets: &'a [Option<Vec<u64>>], is_seeded: &[bool], atom_of: &[Option<usize>]) -> Child<'a> {
-            let i = v.0 as usize;
-            if is_seeded.get(i).copied().unwrap_or(false) {
-                return Child::Full;
-            }
-            if let Some(Some(s)) = sets.get(i) {
-                return Child::Set(s);
-            }
-            match atom_of.get(i) {
-                Some(Some(a)) => Child::Bit(*a),
-                _ => Child::Empty,
-            }
-        }
-        // Children are created before their gate: increasing variable order is a topological order.
-        for (v, gate) in &self.gates {
-            let mut acc = if gate.all { full.clone() } else { vec![0u64; words] };
-            for l in &gate.children {
-                if l.is_negative() {
-                    return None;
+            b
+        };
+        // Every node's set, children first (post-order, with an explicit stack).
+        let mut sets: DetMap<u64, Vec<u64>> = DetMap::default();
+        for root in roots {
+            let mut stack: Vec<(&Arc<Node>, bool)> = vec![(root, false)];
+            while let Some((n, expanded)) = stack.pop() {
+                if sets.contains_key(&n.id()) {
+                    continue;
                 }
-                match (child(l.var(), &sets, &is_seeded, &atom_of), gate.all) {
-                    (Child::Full, true) | (Child::Empty, false) => {}
-                    (Child::Full, false) => acc.copy_from_slice(&full),
-                    (Child::Empty, true) => acc.iter_mut().for_each(|w| *w = 0),
-                    (Child::Bit(i), true) => {
-                        let kept = acc.get(i / 64).map_or(0, |w| w & (1u64 << (i % 64)));
-                        acc.iter_mut().for_each(|w| *w = 0);
-                        if let Some(w) = acc.get_mut(i / 64) {
-                            *w = kept;
+                match n.kind() {
+                    Kind::Atom(a) => {
+                        sets.insert(n.id(), leaf(*a));
+                    }
+                    Kind::And(children) | Kind::Or(children) if !expanded => {
+                        stack.push((n, true));
+                        stack.extend(
+                            children
+                                .iter()
+                                .filter(|c| !sets.contains_key(&c.id()))
+                                .map(|c| (c, false)),
+                        );
+                    }
+                    Kind::And(children) | Kind::Or(children) => {
+                        let all = matches!(n.kind(), Kind::And(_));
+                        let mut acc = if all { full.clone() } else { vec![0u64; words] };
+                        let empty = vec![0u64; words];
+                        for c in children {
+                            let s = sets.get(&c.id()).unwrap_or(&empty);
+                            if all {
+                                acc.iter_mut().zip(s).for_each(|(a, b)| *a &= *b);
+                            } else {
+                                acc.iter_mut().zip(s).for_each(|(a, b)| *a |= *b);
+                            }
                         }
+                        sets.insert(n.id(), acc);
                     }
-                    (Child::Bit(i), false) => bit(&mut acc, i),
-                    (Child::Set(c), true) => acc.iter_mut().zip(c).for_each(|(a, b)| *a &= *b),
-                    (Child::Set(c), false) => acc.iter_mut().zip(c).for_each(|(a, b)| *a |= *b),
                 }
-            }
-            if let Some(slot) = sets.get_mut(v.0 as usize) {
-                *slot = Some(acc);
             }
         }
         // Under crash-stop a crash at `c` sets every `K(n,t)` from `c`: it is a minimal model only when a crash a tick
@@ -636,34 +528,22 @@ impl FaultVars {
         } else {
             BTreeMap::new()
         };
-        let mut out = Vec::with_capacity(roots.len());
-        for root in roots {
-            if root.is_negative() {
-                return None;
-            }
-            let root_set: Vec<u64> = match child(root.var(), &sets, &is_seeded, &atom_of) {
-                Child::Full => full.clone(),
-                Child::Empty => vec![0u64; words],
-                Child::Bit(i) => {
-                    let mut b = vec![0u64; words];
-                    bit(&mut b, i);
-                    b
-                }
-                Child::Set(s) => s.to_vec(),
-            };
-            let hits = |v: &Var| {
-                matches!(atom_of.get(v.0 as usize), Some(Some(i))
-                    if root_set.get(i / 64).is_some_and(|w| w & (1u64 << (i % 64)) != 0))
-            };
-            out.push(
+        roots
+            .iter()
+            .map(|root| {
+                let empty = vec![0u64; words];
+                let root_set = sets.get(&root.id()).unwrap_or(&empty);
+                let hits = |v: &Var| {
+                    matches!(atom_of.get(v), Some(i)
+                        if root_set.get(i / 64).is_some_and(|w| w & (1u64 << (i % 64)) != 0))
+                };
                 atoms
                     .iter()
                     .filter(|v| hits(v) && !later.get(v).is_some_and(&hits))
                     .copied()
-                    .collect(),
-            );
-        }
-        Some(out)
+                    .collect()
+            })
+            .collect()
     }
 
     /// The fault schedule `base` plus the faults of the true variables `model`.
@@ -697,8 +577,8 @@ pub struct Encoder<'a> {
     appear_memo: DetMap<PlaceKey, Hazard>,
     appear_path: DetMap<PlaceKey, usize>,
     remove_memo: DetMap<PlaceKey, Hazard>,
-    solver: &'a mut dyn SatSolver,
-    vars: &'a mut FaultVars,
+    /// The fault atoms and predicates the hazards are built over.
+    atoms: Atoms<'a>,
     /// Per goal (dense by id): its memoized hazard, and its depth on the current path.
     memo: Vec<Option<Hazard>>,
     on_path: Vec<Option<usize>>,
@@ -721,13 +601,7 @@ pub struct Encoder<'a> {
 impl<'a> Encoder<'a> {
     /// An encoder for `graph`. Tuple-level negative support needs the program's `rules`; without them
     /// [`NegSupport::Precise`] falls back to relation-level support.
-    pub fn new(
-        graph: &'a ProvGraph,
-        setting: Setting<'a>,
-        solver: &'a mut dyn SatSolver,
-        vars: &'a mut FaultVars,
-        seed: &FaultSchedule,
-    ) -> Encoder<'a> {
+    pub fn new(graph: &'a ProvGraph, setting: Setting<'a>, seed: &FaultSchedule) -> Encoder<'a> {
         let Setting {
             spec,
             preds,
@@ -750,8 +624,7 @@ impl<'a> Encoder<'a> {
             appear_memo: DetMap::default(),
             appear_path: DetMap::default(),
             remove_memo: DetMap::default(),
-            solver,
-            vars,
+            atoms: Atoms::new(spec),
             memo: vec![None; graph.goal_count()],
             on_path: vec![None; graph.goal_count()],
             depth: 0,
@@ -760,13 +633,6 @@ impl<'a> Encoder<'a> {
             prefix_memo: BTreeMap::new(),
             low: usize::MAX,
         }
-    }
-
-    /// The hazard of `goal`, with the crash budget asserted over every crash variable it created.
-    pub fn hazard(&mut self, goal: GoalId) -> Result<Hazard, LdfiError> {
-        let h = self.goal(goal)?;
-        self.vars.crash_budget(self.solver, self.spec)?;
-        Ok(h)
     }
 
     /// The hazard of a target: a goal's, or for an appearance, whether the fault variables can make the tuple
@@ -779,7 +645,6 @@ impl<'a> Encoder<'a> {
                 self.appearance(Space::Spec, *rel, Loc::Global, self.spec.eot, &pattern)?
             }
         };
-        self.vars.crash_budget(self.solver, self.spec)?;
         Ok(h)
     }
 
@@ -816,10 +681,8 @@ impl<'a> Encoder<'a> {
             }
             let eot = self.spec.eot;
             return match time {
-                Some(c) => self.vars.crash_at(self.solver, self.spec, node, c),
-                None => self
-                    .vars
-                    .crash_in(self.solver, self.spec, node, (eot.0 + 1).saturating_sub(d), eot.0),
+                Some(c) => Ok(self.atoms.crash_at(node, c)),
+                None => Ok(self.atoms.crash_in(node, (eot.0 + 1).saturating_sub(d), eot.0)),
             };
         }
         let last = self.spec.eot.0.saturating_sub(1);
@@ -831,7 +694,7 @@ impl<'a> Encoder<'a> {
             (Some(c), None) => c.0.checked_sub(1),
         };
         match bound {
-            Some(t) if t >= 1 => self.vars.k(self.solver, self.spec, node, at_or_before(t)),
+            Some(t) if t >= 1 => Ok(self.atoms.k(node, at_or_before(t))),
             _ => Ok(Hazard::False),
         }
     }
@@ -841,24 +704,19 @@ impl<'a> Encoder<'a> {
     fn new_crash_by(&mut self, node: NodeId, t: Tick) -> Result<Hazard, LdfiError> {
         match (self.spec.restart, self.seed_crashes.get(&node).copied()) {
             (Some(_), Some(_)) => Ok(Hazard::False),
-            (Some(_), None) => self.vars.crash_in(self.solver, self.spec, node, 1, t.0),
+            (Some(_), None) => Ok(self.atoms.crash_in(node, 1, t.0)),
             (None, Some(c)) => match c.prev() {
-                Some(before) if before.0 >= 1 => self.vars.k(self.solver, self.spec, node, before.min(t)),
+                Some(before) if before.0 >= 1 => Ok(self.atoms.k(node, before.min(t))),
                 _ => Ok(Hazard::False),
             },
-            (None, None) => self.vars.k(
-                self.solver,
-                self.spec,
-                node,
-                t.min(Tick(self.spec.eot.0.saturating_sub(1))),
-            ),
+            (None, None) => Ok(self.atoms.k(node, t.min(Tick(self.spec.eot.0.saturating_sub(1))))),
         }
     }
 
     /// Whether faults can remove the crash tuple `crash(_, node, time)`: only by crashing `node` earlier.
     fn crash_removed(&mut self, node: NodeId, time: Tick) -> Result<Hazard, LdfiError> {
         match time.0.checked_sub(1) {
-            Some(t) if t >= 1 => self.vars.k(self.solver, self.spec, node, Tick(t)),
+            Some(t) if t >= 1 => Ok(self.atoms.k(node, Tick(t))),
             _ => Ok(Hazard::False),
         }
     }
@@ -878,73 +736,17 @@ impl<'a> Encoder<'a> {
     }
 
     fn and(&mut self, children: Vec<Hazard>) -> Result<Hazard, LdfiError> {
-        if children.contains(&Hazard::False) {
-            return Ok(Hazard::False);
-        }
-        let lits: Vec<Lit> = children
-            .into_iter()
-            .filter_map(|c| match c {
-                Hazard::Lit(l) => Some(l),
-                _ => None,
-            })
-            .collect();
-        match lits.as_slice() {
-            [] => Ok(Hazard::True),
-            [one] => Ok(Hazard::Lit(*one)),
-            _ => {
-                let h = self.solver.new_var().positive();
-                for l in &lits {
-                    self.solver.add_clause(&[!h, *l])?;
-                }
-                self.vars.gates.insert(
-                    h.var(),
-                    Gate {
-                        all: true,
-                        children: lits,
-                    },
-                );
-                Ok(Hazard::Lit(h))
-            }
-        }
+        Ok(crate::circuit::and(children))
     }
 
     fn or(&mut self, children: Vec<Hazard>) -> Result<Hazard, LdfiError> {
-        if children.contains(&Hazard::True) {
-            return Ok(Hazard::True);
-        }
-        let mut lits: Vec<Lit> = children
-            .into_iter()
-            .filter_map(|c| match c {
-                Hazard::Lit(l) => Some(l),
-                _ => None,
-            })
-            .collect();
-        lits.sort();
-        lits.dedup();
-        match lits.as_slice() {
-            [] => Ok(Hazard::False),
-            [one] => Ok(Hazard::Lit(*one)),
-            _ => {
-                let h = self.solver.new_var().positive();
-                let mut clause = vec![!h];
-                clause.extend(lits.iter().copied());
-                self.solver.add_clause(&clause)?;
-                self.vars.gates.insert(
-                    h.var(),
-                    Gate {
-                        all: false,
-                        children: lits,
-                    },
-                );
-                Ok(Hazard::Lit(h))
-            }
-        }
+        Ok(crate::circuit::or(children))
     }
 
     fn goal(&mut self, goal: GoalId) -> Result<Hazard, LdfiError> {
         let i = goal.0 as usize;
         if let Some(Some(h)) = self.memo.get(i) {
-            return Ok(*h);
+            return Ok(h.clone());
         }
         if let Some(Some(depth)) = self.on_path.get(i) {
             self.low = self.low.min(*depth);
@@ -967,7 +769,7 @@ impl<'a> Encoder<'a> {
         if self.low >= depth
             && let Some(slot) = self.memo.get_mut(i)
         {
-            *slot = Some(result);
+            *slot = Some(result.clone());
         }
         self.low = saved.min(self.low);
         Ok(result)
@@ -1021,10 +823,9 @@ impl<'a> Encoder<'a> {
             Premise::Clock { from, to, send } => {
                 let mut options = Vec::with_capacity(2);
                 if self.spec.omission_allowed(from, to, send) {
-                    let v = self.vars.omission_var(self.solver, Omission { from, to, send })?;
-                    options.push(Hazard::Lit(v.positive()));
+                    options.push(self.atoms.omission(Omission { from, to, send }));
                 }
-                options.push(self.vars.down(self.solver, self.spec, from, send)?);
+                options.push(self.atoms.down(from, send));
                 self.or(options)
             }
             Premise::Neg(id) => {
@@ -1039,12 +840,10 @@ impl<'a> Encoder<'a> {
                 }
             }
             Premise::CrashAbsent { node, time } => self.crash_appears_any(node, time),
-            Premise::Alive { node, tick } => self.vars.down(self.solver, self.spec, node, tick),
-            Premise::Up { node, from, to } => self.vars.down_during(self.solver, self.spec, node, from, to),
-            Premise::NoRestart { node, tick } => self.vars.restart_at(self.solver, self.spec, node, tick),
-            Premise::NotRestarted { node, from, tick } => {
-                self.vars.restarted_between(self.solver, self.spec, node, from, tick)
-            }
+            Premise::Alive { node, tick } => Ok(self.atoms.down(node, tick)),
+            Premise::Up { node, from, to } => Ok(self.atoms.down_during(node, from, to)),
+            Premise::NoRestart { node, tick } => Ok(self.atoms.restart_at(node, tick)),
+            Premise::NotRestarted { node, from, tick } => Ok(self.atoms.restarted_between(node, from, tick)),
             Premise::CrashPresent { node, time } => self.crash_removed(node, time),
             Premise::Aggregate(id) => {
                 let graph = self.graph;
@@ -1112,7 +911,7 @@ impl<'a> Encoder<'a> {
     /// reaches it, at earlier ticks, or at `tick` along a purely deductive path.
     fn negative_support(&mut self, logical: u32, tick: Tick) -> Result<Hazard, LdfiError> {
         if let Some(h) = self.neg_memo.get(&(logical, tick)) {
-            return Ok(*h);
+            return Ok(h.clone());
         }
         let sources: Vec<(u32, bool)> = self.preds.of_rel(logical).collect();
         let crash_reaches = self.preds.crash_reaches(logical);
@@ -1133,7 +932,7 @@ impl<'a> Encoder<'a> {
             e.or(options)
         })?;
         if independent {
-            self.neg_memo.insert((logical, tick), h);
+            self.neg_memo.insert((logical, tick), h.clone());
         }
         Ok(h)
     }
@@ -1167,7 +966,7 @@ impl<'a> Encoder<'a> {
         }
         let key: PlaceKey = (space, rel, loc, tick, pattern.to_vec());
         if let Some(h) = self.appear_memo.get(&key) {
-            return Ok(*h);
+            return Ok(h.clone());
         }
         if let Some(depth) = self.appear_path.get(&key) {
             self.low = self.low.min(*depth);
@@ -1182,7 +981,7 @@ impl<'a> Encoder<'a> {
         self.appear_path.remove(&key);
         let result = result?;
         if self.low >= depth {
-            self.appear_memo.insert(key, result);
+            self.appear_memo.insert(key, result.clone());
         }
         self.low = saved.min(self.low);
         Ok(result)
@@ -1268,7 +1067,7 @@ impl<'a> Encoder<'a> {
             // A node crashes once: the run's own restart already raised its events.
             Origin::Restart => match loc {
                 Loc::Node(n) if self.seed_crashes.contains_key(&n) => Ok(Hazard::False),
-                Loc::Node(n) => self.vars.restart_at(self.solver, self.spec, n, tick),
+                Loc::Node(n) => Ok(self.atoms.restart_at(n, tick)),
                 _ => Err(internal_error!("a restart event outside a node").into()),
             },
             Origin::Stream => match loc {
@@ -1282,7 +1081,7 @@ impl<'a> Encoder<'a> {
                 let restarted = if self.seed_crashes.contains_key(&n) {
                     Hazard::False
                 } else {
-                    self.vars.restarted_by(self.solver, self.spec, n, tick)?
+                    self.atoms.restarted_by(n, tick)
                 };
                 // A guarded timer fires when its guard held at the end of the previous tick: some guard tuple there.
                 let guarded = match (guard, tick.prev()) {
@@ -1356,7 +1155,7 @@ impl<'a> Encoder<'a> {
     /// dial to it), or a new request to the host at any node before `tick`.
     fn stream_appear(&mut self, node: NodeId, tick: Tick) -> Result<Hazard, LdfiError> {
         if let Some(h) = self.stream_memo.get(&(node, tick)) {
-            return Ok(*h);
+            return Ok(h.clone());
         }
         let Some(rules) = self.rules else {
             return Err(internal_error!("tuple-level negative support without the program's rules").into());
@@ -1378,8 +1177,8 @@ impl<'a> Encoder<'a> {
                             if traffic == Hazard::False {
                                 continue;
                             }
-                            let v = e.vars.omission_var(e.solver, o)?;
-                            let lost = e.and(vec![Hazard::Lit(v.positive()), traffic])?;
+                            let lost = e.atoms.omission(o);
+                            let lost = e.and(vec![lost, traffic])?;
                             options.push(lost);
                         }
                     }
@@ -1401,7 +1200,7 @@ impl<'a> Encoder<'a> {
             e.or(options)
         })?;
         if independent {
-            self.stream_memo.insert((node, tick), h);
+            self.stream_memo.insert((node, tick), h.clone());
         }
         Ok(h)
     }
@@ -1411,7 +1210,7 @@ impl<'a> Encoder<'a> {
     /// it make a new request then.
     fn traffic(&mut self, node: NodeId, tick: Tick) -> Result<Hazard, LdfiError> {
         if let Some(h) = self.traffic_memo.get(&(node, tick)) {
-            return Ok(*h);
+            return Ok(h.clone());
         }
         let Some(rules) = self.rules else {
             return Err(internal_error!("tuple-level negative support without the program's rules").into());
@@ -1443,7 +1242,7 @@ impl<'a> Encoder<'a> {
             e.or(options)
         })?;
         if independent {
-            self.traffic_memo.insert((node, tick), h);
+            self.traffic_memo.insert((node, tick), h.clone());
         }
         Ok(h)
     }
@@ -1701,7 +1500,7 @@ impl<'a> Encoder<'a> {
         }
         let key: PlaceKey = (space, rel, loc, tick, pattern.to_vec());
         if let Some(h) = self.remove_memo.get(&key) {
-            return Ok(*h);
+            return Ok(h.clone());
         }
         let node = match loc {
             Loc::Node(n) => Some(n),
@@ -1736,7 +1535,7 @@ impl<'a> Encoder<'a> {
             e.or(options)
         })?;
         if independent {
-            self.remove_memo.insert(key, h);
+            self.remove_memo.insert(key, h.clone());
         }
         Ok(h)
     }
@@ -1747,7 +1546,7 @@ impl<'a> Encoder<'a> {
             return Ok(Hazard::False);
         }
         if let Some(h) = self.prefix_memo.get(&(src, upto)) {
-            return Ok(*h);
+            return Ok(h.clone());
         }
         let (h, independent) = self.tracked(|e| {
             let earlier = e.prefix(src, Tick(upto.0 - 1))?;
@@ -1758,7 +1557,7 @@ impl<'a> Encoder<'a> {
             e.or(vec![earlier, now])
         })?;
         if independent {
-            self.prefix_memo.insert((src, upto), h);
+            self.prefix_memo.insert((src, upto), h.clone());
         }
         Ok(h)
     }
@@ -1766,7 +1565,7 @@ impl<'a> Encoder<'a> {
     /// The disjunction of the hazards of every goal of `src` at `tick`.
     fn at_tick(&mut self, src: u32, tick: Tick) -> Result<Hazard, LdfiError> {
         if let Some(h) = self.tick_memo.get(&(src, tick)) {
-            return Ok(*h);
+            return Ok(h.clone());
         }
         let graph = self.graph;
         let goals = graph.goals_of(src, tick);
@@ -1782,7 +1581,7 @@ impl<'a> Encoder<'a> {
             e.or(options)
         })?;
         if independent {
-            self.tick_memo.insert((src, tick), h);
+            self.tick_memo.insert((src, tick), h.clone());
         }
         Ok(h)
     }
@@ -1898,11 +1697,23 @@ pub fn minimal_extensions(
     vars.cover(solver, spec, seed)?;
     let mut roots = Vec::with_capacity(targets.len());
     {
-        let mut enc = Encoder::new(graph, setting, solver, &mut vars, seed);
+        let mut enc = Encoder::new(graph, setting, seed);
         for t in targets {
             roots.push(enc.target(t)?);
         }
     }
+    // The solver gets the circuit under the roots, and the budgets over every fault variable it now has.
+    let root_nodes: Vec<Arc<Node>> = roots
+        .iter()
+        .filter_map(|r| match r {
+            Hazard::Node(n) => Some(Arc::clone(n)),
+            _ => None,
+        })
+        .collect();
+    for n in &root_nodes {
+        vars.emit(solver, spec, n)?;
+    }
+    vars.crash_budget(solver, spec)?;
     vars.omission_budget(solver, spec)?;
     let encoded = now();
     let mut out = Extensions {
@@ -1910,27 +1721,22 @@ pub fn minimal_extensions(
         ..Extensions::default()
     };
     // The single faults of every target, in one pass over the circuit (before any target's activation clause).
-    let root_lits: Vec<Lit> = roots
+    let singles_of: BTreeMap<u64, Vec<Var>> = root_nodes
         .iter()
-        .filter_map(|r| match r {
-            Hazard::Lit(l) => Some(*l),
-            _ => None,
-        })
+        .map(|n| n.id())
+        .zip(vars.single_hitters(spec, seed, &root_nodes))
         .collect();
-    let singles_of: BTreeMap<Lit, Vec<Var>> = vars
-        .single_hitters(spec, seed, &root_lits)
-        .map(|all| root_lits.iter().copied().zip(all).collect())
-        .unwrap_or_default();
     for (index, root) in roots.into_iter().enumerate() {
-        let l = match root {
+        let n = match root {
             Hazard::False => continue,
             Hazard::True => {
                 out.incomplete = true;
                 out.incomplete_targets.push(index);
                 continue;
             }
-            Hazard::Lit(l) => l,
+            Hazard::Node(n) => n,
         };
+        let l = vars.lit_of(&n)?;
         let act = solver.new_var().positive();
         solver.add_clause(&[!act, l])?;
         let seed_lits = vars.lits_of(spec, seed);
@@ -1948,7 +1754,7 @@ pub fn minimal_extensions(
         }
         // The single faults, from the circuit; the solver then looks for larger minimal models only (a model holding
         // a single fault is not minimal unless it is that fault).
-        if let Some(singles) = singles_of.get(&l) {
+        if let Some(singles) = singles_of.get(&n.id()) {
             for v in singles.iter().copied() {
                 solver.add_clause(&[!act, v.negative()])?;
                 out.hypotheses.push(vars.schedule(spec, seed, &BTreeSet::from([v])));
@@ -2042,23 +1848,9 @@ mod tests {
             .collect()
     }
 
-    fn gate(vars: &mut FaultVars, solver: &mut dyn SatSolver, all: bool, children: Vec<Lit>) -> Lit {
-        let h = solver.new_var().positive();
-        if all {
-            for c in &children {
-                solver.add_clause(&[!h, *c]).unwrap();
-            }
-        } else {
-            let mut clause = vec![!h];
-            clause.extend(children.iter().copied());
-            solver.add_clause(&clause).unwrap();
-        }
-        vars.gates.insert(h.var(), Gate { all, children });
-        h
-    }
-
     #[test]
     fn single_hitters_are_the_solvers_single_fault_models() {
+        use crate::circuit::{and, or};
         let (a, b, c) = (NodeId(0), NodeId(1), NodeId(2));
         for restart in [None, Some(2)] {
             let mut spec = FailureSpec::new(8, 6, 1, 3).unwrap();
@@ -2079,49 +1871,37 @@ mod tests {
                 let solver = solver.as_mut();
                 let mut vars = FaultVars::new();
                 vars.cover(solver, &spec, &seed).unwrap();
-                let o = |vars: &mut FaultVars, solver: &mut dyn SatSolver, from, to, send| {
-                    vars.omission_var(
-                        solver,
-                        Omission {
-                            from,
-                            to,
-                            send: Tick(send),
-                        },
-                    )
-                    .unwrap()
-                    .positive()
-                };
-                let lit = |h: Hazard| match h {
-                    Hazard::Lit(l) => l,
-                    other => panic!("not a literal: {other:?}"),
+                let mut atoms = Atoms::new(&spec);
+                let mut o = |from, to, send| {
+                    atoms.omission(Omission {
+                        from,
+                        to,
+                        send: Tick(send),
+                    })
                 };
                 // (O(a,b,1) or O(a,b,2) or b down at 4) and (O(a,c,1) or O(a,b,1) or a down from 3 to 5) and
                 // (O(b,c,3) or O(a,b,1) or c restarted by 7 or a down at 4).
-                let o1 = o(&mut vars, solver, a, b, 1);
-                let o2 = o(&mut vars, solver, a, b, 2);
-                let o3 = o(&mut vars, solver, a, c, 1);
-                let o4 = o(&mut vars, solver, b, c, 3);
-                let down_b = lit(vars.down(solver, &spec, b, Tick(4)).unwrap());
-                let span_a = lit(vars.down_during(solver, &spec, a, Tick(3), Tick(5)).unwrap());
-                let down_a = lit(vars.down(solver, &spec, a, Tick(4)).unwrap());
-                let mut third = vec![o4, o1, down_a];
-                if let Hazard::Lit(l) = vars.restarted_by(solver, &spec, c, Tick(7)).unwrap() {
-                    third.push(l);
-                }
-                let g1 = gate(&mut vars, solver, false, vec![o1, o2, down_b]);
-                let g2 = gate(&mut vars, solver, false, vec![o3, o1, span_a]);
-                let g3 = gate(&mut vars, solver, false, third);
-                let root = gate(&mut vars, solver, true, vec![g1, g2, g3]);
+                let (o1, o2, o3, o4) = (o(a, b, 1), o(a, b, 2), o(a, c, 1), o(b, c, 3));
+                let down_b = atoms.down(b, Tick(4));
+                let span_a = atoms.down_during(a, Tick(3), Tick(5));
+                let down_a = atoms.down(a, Tick(4));
+                let restarted_c = atoms.restarted_by(c, Tick(7));
+                let g1 = or(vec![o1.clone(), o2, down_b]);
+                let g2 = or(vec![o3, o1.clone(), span_a]);
+                let g3 = or(vec![o4, o1, restarted_c, down_a]);
+                let Hazard::Node(root) = and(vec![g1, g2, g3]) else {
+                    panic!("the example is not constant")
+                };
+                let lit = vars.emit(solver, &spec, &root).unwrap();
                 vars.crash_budget(solver, &spec).unwrap();
                 let dp: BTreeSet<Var> = vars
-                    .single_hitters(&spec, &seed, &[root])
-                    .unwrap()
+                    .single_hitters(&spec, &seed, std::slice::from_ref(&root))
                     .remove(0)
                     .into_iter()
                     .collect();
                 assert_eq!(
                     dp,
-                    by_solver(solver, &vars, &spec, &seed, root),
+                    by_solver(solver, &vars, &spec, &seed, lit),
                     "restart {restart:?}, seed {seed:?}"
                 );
                 assert!(!dp.is_empty(), "the example has single-fault models");

@@ -15,6 +15,7 @@
 //! When no hypothesis is left, the program has no counterexample within the failure spec.
 
 pub mod certify;
+pub mod circuit;
 pub mod driver;
 pub mod explain;
 pub mod faults;
