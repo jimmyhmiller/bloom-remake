@@ -138,6 +138,10 @@ layer = "L4"
 deps = ["blossom-base", "blossom-value", "blossom-lattice", "blossom-std-src", "blossom-syntax", "blossom-ir", "blossom-schema", "blossom-artifact", "blossom-front", "blossom-analysis", "blossom-rewrite", "blossom-plan", "blossom-oracle", "blossom-driver", "blossom-kernel", "blossom-engine", "blossom-prov", "blossom-codegen", "blossom-std-host", "blossom-wire", "blossom-store", "blossom-trace", "blossom-node", "blossom-runtime", "blossom-sim", "blossom-smt", "blossom-sat", "blossom-ldfi", "blossom-verify"]
 test_only = true
 
+[crates.blossom-web]
+layer = "L5"
+deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-artifact", "blossom-front", "blossom-driver", "blossom-engine", "blossom-oracle", "blossom-wire"]
+
 [crates.blossom-build]
 layer = "L5"
 deps = ["blossom-base", "blossom-driver", "blossom-artifact", "blossom-codegen"]

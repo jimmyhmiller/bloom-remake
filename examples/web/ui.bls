@@ -1,0 +1,28 @@
+//! The browser host's interface (docs/design/BROWSER.md): include it in a program to run it in the page.
+//!
+//! The program describes its page with the outputs below, every round; the host diffs them into the DOM. It hears
+//! the world through the inputs, each event in a round of its own (the host listens only to the inputs the program
+//! reads).
+
+/// An element `tag` with identity `id`, the `pos`-th child of `parent` (`""`: the app's mount point).
+output elem(id: String, parent: String, pos: i64, tag: String);
+/// An attribute of an element (`value`, `checked` and `disabled` are set as properties).
+output attr(id: String, name: String, value: String);
+/// The text inside an element, before its children.
+output text(id: String, s: String);
+/// The element to focus after the round.
+output focus(id: String);
+
+/// `location.hash`, at boot and whenever it changes.
+input route(hash: String);
+/// A click on an element with an `id` (or its nearest ancestor with one).
+input click(id: String);
+input dblclick(id: String);
+/// Typing in a text field: its value.
+input typed(id: String, value: String);
+/// A key (the DOM's `key` names: `Enter`, `Escape`, ...) in a field, with its value.
+input keydown(id: String, key: String, value: String);
+/// A field loses focus, with its value.
+input blur(id: String, value: String);
+/// A checkbox changes.
+input change(id: String, checked: bool);
