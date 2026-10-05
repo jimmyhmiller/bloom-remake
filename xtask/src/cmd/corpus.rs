@@ -603,6 +603,9 @@ fn ldfi_backend(files: &[PathBuf], m: &toml::Table, workers: usize, max_runs: u6
                 report.runs
             )
         }
+        blossom_ldfi::Method::Enumerated { schedules, .. } => {
+            format!("{got} by enumeration ({schedules} schedules) after {} runs", report.runs)
+        }
     };
     // A published run count is part of the expectation (the BENCH-136 cases pin Molly's counts, which need the P1
     // search reductions): exceeding it fails the case.
