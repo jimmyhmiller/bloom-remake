@@ -75,9 +75,40 @@ fn the_race_holds_in_order_and_fails_when_a_delay_reorders_the_writes() {
     assert_eq!(blossom_ldfi::certify::schedule_count(&fs, paths.len()), 13);
 }
 
+/// Decides `spec` by the lineage-driven search: the verdict must be its `check ldfi expect …`. Returns the
+/// counterexample's labels.
+#[cfg(test)]
+fn lineage(file: &str, spec: &str) -> Vec<String> {
+    let (artifact, fs, expect) = compile(file, spec);
+    let sim = SpecSim::new(&artifact).unwrap();
+    let mut config = LdfiConfig::new(fs);
+    config.workers = 2;
+    config.exhaustive_fallback = None;
+    let report = blossom_ldfi::run(&sim, &config).unwrap_or_else(|e| panic!("{spec}: {e}"));
+    assert!(matches!(report.method, Method::Lineage), "{spec}");
+    assert_eq!(report.verdict == Verdict::NoCounterexample, expect, "{spec}");
+    report
+        .counterexamples
+        .first()
+        .map(|ce| fault_labels(&artifact, &ce.faults))
+        .unwrap_or_default()
+}
+
 #[test]
-fn the_lineage_driven_search_refuses_the_asynchronous_model_for_now() {
-    let (artifact, fs, _) = compile("race.bls", "NaiveAsync");
+fn the_lineage_driven_search_finds_the_reordering_and_proves_the_versioned_server() {
+    // A delay falsifies a delivery's arrival (the second write's), and makes a tuple appear later (the first write's):
+    // the lineage leads to the same smallest counterexample as enumeration.
+    assert_eq!(lineage("race.bls", "NaiveAsync"), ["D(C,S,1,put,+3)"]);
+    assert!(lineage("race.bls", "VersionedAsync").is_empty());
+    assert!(lineage("race.bls", "NaiveSync").is_empty());
+}
+
+#[test]
+fn delayed_streams_are_enumerated_and_the_lineage_driven_search_refuses_them_for_now() {
+    // A write delayed past the end of the run loses the value the eager client counts acknowledged.
+    assert_eq!(enumerate("stream_store.bls", "EagerDelay").0, ["D(C,S,1,streams,+6)"]);
+    assert!(enumerate("stream_store.bls", "DurableDelay").0.is_empty());
+    let (artifact, fs, _) = compile("stream_store.bls", "EagerDelay");
     let sim = SpecSim::new(&artifact).unwrap();
     let mut config = LdfiConfig::new(fs);
     config.exhaustive_fallback = None;
@@ -85,12 +116,15 @@ fn the_lineage_driven_search_refuses_the_asynchronous_model_for_now() {
     assert!(matches!(refused, Err(LdfiError::Unimplemented(_))), "{refused:?}");
     // Deciding by size enumerates it.
     let report = blossom_ldfi::decide(&sim, &config).unwrap();
+    assert!(matches!(report.method, Method::Enumerated { .. }));
     assert_eq!(report.verdict, Verdict::Counterexample);
 }
 
 #[test]
 fn a_program_error_under_a_delay_is_a_counterexample() {
-    // The first write, delayed a round, arrives with the second: two writes of one key in one round.
+    // The first write, delayed a round, arrives with the second: two writes of one key in one round. Enumeration finds
+    // it; the lineage-driven search's hazards cover the outcome spec, not program errors, which it meets only in the
+    // runs it makes.
     let (artifact, fs, _) = compile("race.bls", "EachAsync");
     let sim = SpecSim::new(&artifact).unwrap();
     let mut config = LdfiConfig::new(fs);

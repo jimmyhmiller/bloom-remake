@@ -171,11 +171,14 @@ enum Step {
 pub struct FaultVars {
     omission: BTreeMap<Omission, Var>,
     crash: BTreeMap<NodeId, NodeCrash>,
+    /// Per delayed batch (asynchronous model), its delay variables by length: at most one holds.
+    delay: BTreeMap<blossom_sim::Delayed, Vec<(u64, Var)>>,
     /// The literal of every circuit node given to the solver, by node id.
     nodes: DetMap<u64, Lit>,
-    /// The nodes the last crash budget covered, and the omission variables the last omission budget covered.
+    /// The nodes the last crash budget covered, and the omission and delay variables the last budgets covered.
     budget_nodes: BTreeSet<NodeId>,
     budget_omissions: usize,
+    budget_delays: usize,
 }
 
 /// One node's crash variables (`K` or `X`, by tick) and the literal that holds when it crashes at all.
@@ -244,6 +247,34 @@ impl FaultVars {
         Ok(entry.insert(NodeCrash { vars, any }))
     }
 
+    /// The delay variables of batch `key`, created together on first use: one per length the spec allows, at most one
+    /// of them true.
+    fn delay_vars(
+        &mut self,
+        solver: &mut dyn SatSolver,
+        spec: &FailureSpec,
+        key: blossom_sim::Delayed,
+    ) -> Result<&[(u64, Var)], LdfiError> {
+        if !self.delay.contains_key(&key) {
+            let o = key.batch;
+            let mut vars = Vec::new();
+            for d in 2..=spec.delay.unwrap_or(1) {
+                if spec.delay_allowed(o.from, o.to, o.send, d) {
+                    let v = solver.new_var();
+                    solver.prefer(v.negative())?;
+                    vars.push((d, v));
+                }
+            }
+            for (i, (_, a)) in vars.iter().enumerate() {
+                for (_, b) in vars.iter().skip(i + 1) {
+                    solver.add_clause(&[a.negative(), b.negative()])?;
+                }
+            }
+            self.delay.insert(key, vars);
+        }
+        Ok(self.delay.get(&key).map_or(&[][..], Vec::as_slice))
+    }
+
     /// The variable of a fault atom, created on first use.
     fn atom_var(&mut self, solver: &mut dyn SatSolver, spec: &FailureSpec, atom: Atom) -> Result<Var, LdfiError> {
         match atom {
@@ -255,6 +286,14 @@ impl FaultVars {
                 .find(|(tick, _)| *tick == t)
                 .map(|(_, v)| *v)
                 .ok_or_else(|| internal_error!("a crash atom of {node:?} at {t:?}, outside the crash ticks").into()),
+            Atom::Delay(key, rounds) => self
+                .delay_vars(solver, spec, key)?
+                .iter()
+                .find(|(d, _)| *d == rounds)
+                .map(|(_, v)| *v)
+                .ok_or_else(|| {
+                    internal_error!("a delay atom of {key:?} by {rounds}, which the spec does not allow").into()
+                }),
         }
     }
 
@@ -268,6 +307,12 @@ impl FaultVars {
                 .vars
                 .iter()
                 .find(|(tick, _)| *tick == t)
+                .map(|(_, v)| *v),
+            Atom::Delay(key, rounds) => self
+                .delay
+                .get(&key)?
+                .iter()
+                .find(|(d, _)| *d == rounds)
                 .map(|(_, v)| *v),
         }
     }
@@ -358,8 +403,28 @@ impl FaultVars {
         Ok(())
     }
 
+    /// Asserts that at most `max_delays` batches are delayed (asynchronous model): a totalizer over every delay variable,
+    /// asserted again when there are more (at most one length of a batch holds, so this counts batches).
+    pub fn delay_budget(&mut self, solver: &mut dyn SatSolver, spec: &FailureSpec) -> Result<(), LdfiError> {
+        let lits: Vec<Lit> = self
+            .delay
+            .values()
+            .flat_map(|vs| vs.iter().map(|(_, v)| v.positive()))
+            .collect();
+        if lits.len() == self.budget_delays {
+            return Ok(());
+        }
+        let k = spec.max_delays;
+        let outputs = card::totalizer(solver, &lits, k)?;
+        if let Some(over) = outputs.get(k as usize) {
+            solver.add_clause(&[!*over])?;
+        }
+        self.budget_delays = lits.len();
+        Ok(())
+    }
+
     /// Makes sure the nodes `faults` crashes have crash variables, and (when the spec bounds lost messages) that its
-    /// omissions have variables, so the budgets count them.
+    /// omissions have variables, and its delays, so the budgets count them.
     pub fn cover(
         &mut self,
         solver: &mut dyn SatSolver,
@@ -370,6 +435,9 @@ impl FaultVars {
             for o in &faults.omissions {
                 self.omission_var(solver, *o)?;
             }
+        }
+        for key in faults.delays.keys() {
+            self.delay_vars(solver, spec, *key)?;
         }
         if spec.max_crashes == 0 {
             return Ok(());
@@ -386,7 +454,13 @@ impl FaultVars {
             .values()
             .copied()
             .chain(self.crash.values().flat_map(|c| c.vars.iter().map(|(_, v)| *v)))
+            .chain(self.delay.values().flat_map(|vs| vs.iter().map(|(_, v)| *v)))
             .collect()
+    }
+
+    /// The variable of `key` delayed by `rounds`, if the solver has it.
+    fn delay_var(&self, key: &blossom_sim::Delayed, rounds: u64) -> Option<Var> {
+        self.delay.get(key)?.iter().find(|(d, _)| *d == rounds).map(|(_, v)| *v)
     }
 
     /// The literals asserting `faults` (those with variables here).
@@ -404,6 +478,11 @@ impl FaultVars {
                 Some(_) => vars.iter().find(|(t, _)| t == c),
             };
             if let Some((_, v)) = found {
+                out.push(v.positive());
+            }
+        }
+        for (key, d) in &faults.delays {
+            if let Some(v) = self.delay_var(key, *d) {
                 out.push(v.positive());
             }
         }
@@ -428,6 +507,11 @@ impl FaultVars {
                 if implied {
                     out.insert(*v);
                 }
+            }
+        }
+        for (key, d) in &faults.delays {
+            if let Some(v) = self.delay_var(key, *d) {
+                out.insert(v);
             }
         }
         out
@@ -461,6 +545,14 @@ impl FaultVars {
             };
             if allowed {
                 atoms.extend(nc.vars.iter().map(|(_, v)| *v).filter(|v| !seeded.contains(v)));
+            }
+        }
+        // A delay of a batch the seed neither delays (one length) nor loses, within the budget.
+        if (seed.delays.len() as u32) < spec.max_delays {
+            for (key, vs) in &self.delay {
+                if !seed.delays.contains_key(key) && !seed.omissions.contains(&key.batch) {
+                    atoms.extend(vs.iter().map(|(_, v)| *v));
+                }
             }
         }
         let atom_of: DetMap<Var, usize> = atoms.iter().enumerate().map(|(i, v)| (*v, i)).collect();
@@ -590,6 +682,11 @@ impl FaultVars {
                 if *t < *entry {
                     *entry = *t;
                 }
+            }
+        }
+        for (key, vs) in &self.delay {
+            if let Some((d, _)) = vs.iter().find(|(_, v)| model.contains(v)) {
+                out.delays.insert(*key, *d);
             }
         }
         spec.canonical(out)
@@ -1003,6 +1100,13 @@ impl<'a> Encoder<'a> {
             Premise::NoRestart { node, tick } => Ok(self.atoms.restart_at(node, tick)),
             Premise::NotRestarted { node, from, tick } => Ok(self.atoms.restarted_between(node, from, tick)),
             Premise::CrashPresent { node, time } => self.crash_removed(node, time),
+            Premise::Arrives {
+                from,
+                to,
+                send,
+                via,
+                by,
+            } => Ok(self.atoms.delayed_past(from, to, send, via, by)),
             Premise::Aggregate(id) => {
                 let graph = self.graph;
                 let group = graph
@@ -1220,7 +1324,6 @@ impl<'a> Encoder<'a> {
         tick: Tick,
         pat: PatId,
     ) -> Result<Hazard, LdfiError> {
-        let _ = rel;
         let Some(rules) = self.rules else {
             return Err(internal_error!("tuple-level negative support without the program's rules").into());
         };
@@ -1302,6 +1405,45 @@ impl<'a> Encoder<'a> {
                                 if options.last() == Some(&Hazard::True) {
                                     return Ok(Hazard::True);
                                 }
+                            }
+                        }
+                        // The asynchronous model: a send `d` rounds earlier delayed by `d` (a message the run sent and
+                        // delivered on time, or a new send).
+                        for d in 2..=self.spec.delay.unwrap_or(1) {
+                            let Some(send) = tick.0.checked_sub(d).map(Tick) else {
+                                break;
+                            };
+                            let pattern = self.pats.get(sent)?;
+                            for s in (0..rules.nodes()).map(NodeId).filter(|s| *s != dest) {
+                                let key = blossom_sim::Delayed {
+                                    batch: Omission {
+                                        from: s,
+                                        to: dest,
+                                        send,
+                                    },
+                                    path: blossom_sim::Path::Channel(rel),
+                                };
+                                let delay = self.atoms.delay(key, d);
+                                if delay == Hazard::False {
+                                    continue;
+                                }
+                                let sent_then = self.graph.on_time(rel, s, dest, send).iter().any(|row| {
+                                    row.len() == pattern.len()
+                                        && row
+                                            .iter()
+                                            .zip(pattern.iter())
+                                            .all(|(v, p)| p.as_ref().is_none_or(|p| matches_trace(p, v)))
+                                });
+                                let source = if sent_then {
+                                    Hazard::True
+                                } else {
+                                    let mut sends = Vec::with_capacity(asynchronous.len());
+                                    for r in asynchronous {
+                                        sends.push(self.rule_appear(r, space, Loc::Node(s), send, sent)?);
+                                    }
+                                    self.or(sends)?
+                                };
+                                options.push(self.and(vec![delay, source])?);
                             }
                         }
                     }
@@ -1993,6 +2135,7 @@ pub fn minimal_extensions(
     }
     vars.crash_budget(solver, spec)?;
     vars.omission_budget(solver, spec)?;
+    vars.delay_budget(solver, spec)?;
     let encoded = now();
     let mut out = Extensions {
         encode_ns: encoded.saturating_sub(start),

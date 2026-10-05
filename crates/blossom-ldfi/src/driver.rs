@@ -607,13 +607,14 @@ fn certify_by_enumeration(
     })
 }
 
-/// The lineage and hazards of the asynchronous model (delays) are not built yet: the lineage-driven search refuses
-/// it rather than search the synchronous model in its place. Enumeration decides it.
-fn asynchronous_lineage(config: &LdfiConfig) -> Result<(), LdfiError> {
-    if config.spec.delay.is_some() {
+/// The lineage and hazards of delayed streams are not built yet: under the asynchronous model the lineage-driven
+/// search refuses a program with streams rather than miss their delays. Enumeration decides it.
+fn asynchronous_lineage(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<(), LdfiError> {
+    let streams = crate::certify::paths(sim).contains(&blossom_sim::Path::Streams);
+    if config.spec.delay.is_some() && streams {
         return Err(blossom_base::unimplemented_error!(
             "TEST-001",
-            "the lineage-driven search under the asynchronous model (enumeration decides it: `--method enumerate`)"
+            "the lineage-driven search over delayed streams (enumeration decides it: `--method enumerate`)"
         )
         .into());
     }
@@ -627,7 +628,7 @@ fn asynchronous_lineage(config: &LdfiConfig) -> Result<(), LdfiError> {
 /// process the next hypotheses in the queue speculatively (TEST-033: hypotheses run in parallel); a result is used
 /// when its hypothesis reaches the head of the queue.
 fn lineage_search(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, LdfiError> {
-    asynchronous_lineage(config)?;
+    asynchronous_lineage(sim, config)?;
     let search = Search::new(sim, config)?;
     let start = search.now();
     let (ff_run, ff) = search.execute(&FaultSchedule::default())?;
@@ -808,7 +809,7 @@ fn lineage_search(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, 
 /// each goal, the admissible fault sets after which it no longer holds at EOT, minimal by the clock facts they
 /// remove. Each goal is searched like LDFI does, with a concrete run confirming every candidate.
 pub fn falsifiers(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<Vec<FaultSchedule>, LdfiError> {
-    asynchronous_lineage(config)?;
+    asynchronous_lineage(sim, config)?;
     let search = Search::new(sim, config)?;
     let (ff_run, ff) = search.execute(&FaultSchedule::default())?;
     let ff_graph = search.graph(&ff_run, &ff)?;
