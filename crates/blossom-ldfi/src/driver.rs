@@ -498,6 +498,19 @@ fn certify_exhaustively(
     })
 }
 
+/// Decides `config.spec` by the faster exact search for its size: by enumeration ([`enumerate`]) when its
+/// admissible schedules fit `config.max_schedules`, else by the lineage-driven search ([`run`]). On specs small
+/// enough to enumerate, running every schedule costs less than the lineage-driven search's runs with their encodings
+/// (S11, S12: on the Kafka specs its lineage leaves a third to all of the schedules to run, at several times a
+/// run's cost each); beyond that, its pruning is what makes a verdict reachable at all.
+pub fn decide(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, LdfiError> {
+    if crate::certify::schedule_count(&config.spec) <= u128::from(config.max_schedules) {
+        enumerate(sim, config)
+    } else {
+        run(sim, config)
+    }
+}
+
 /// Decides `config.spec` by running every admissible fault schedule ([`crate::certify::enumerate`]), within
 /// `config.max_schedules`: an oracle for the lineage-driven search on specs small enough to enumerate.
 pub fn enumerate(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, LdfiError> {

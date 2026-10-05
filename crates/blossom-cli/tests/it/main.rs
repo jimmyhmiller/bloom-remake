@@ -146,3 +146,31 @@ fn sim_scripts_stream_chunks_and_prints_the_writes() {
     assert_eq!(bad.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&bad.stderr).contains("opening tick"));
 }
+
+#[test]
+fn ldfi_decides_a_small_spec_by_enumeration_unless_told_otherwise() {
+    let store = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/integration/fixtures/ldfi/store.bls"
+    );
+    let run = |extra: &[&str]| {
+        let mut args = vec!["ldfi", store, "--spec", "VolatileRestart", "--jobs", "2"];
+        args.extend_from_slice(extra);
+        let out = blossom(&args);
+        (out.status.code(), String::from_utf8(out.stdout).unwrap())
+    };
+    // The spec's schedules fit the default budget: enumeration decides, finding the restart counterexample.
+    let (code, auto) = run(&[]);
+    assert_eq!(code, Some(0), "{auto}");
+    assert!(auto.contains("counterexample found by enumeration"), "{auto}");
+    assert!(auto.contains("check ldfi expect fails: as expected"), "{auto}");
+    // Under a smaller budget, or when asked, the lineage-driven search does, to the same verdict.
+    for extra in [&["--max-schedules", "3"][..], &["--method", "lineage"][..]] {
+        let (code, out) = run(extra);
+        assert_eq!(code, Some(0), "{extra:?}: {out}");
+        assert!(out.contains("counterexample found after"), "{extra:?}: {out}");
+        assert!(out.contains("check ldfi expect fails: as expected"), "{extra:?}: {out}");
+    }
+    let (code, _) = run(&["--method", "sideways"]);
+    assert_eq!(code, Some(2));
+}

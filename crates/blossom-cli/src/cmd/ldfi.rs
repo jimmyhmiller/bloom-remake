@@ -68,12 +68,14 @@ pub struct Args {
     /// Report the lineage-driven search's budget error instead of certifying exhaustively.
     #[arg(long)]
     pub no_exhaustive: bool,
-    /// Decide by running every admissible fault schedule instead of the lineage-driven search (fewest faults first;
-    /// an oracle for it on specs small enough to enumerate).
-    #[arg(long)]
-    pub enumerate: bool,
-    /// Fault schedules enumeration may run (`--enumerate`, or exhaustive certification of a program it cannot step
-    /// round by round: crash-restarts, guarded timers, streams).
+    /// How to decide: auto (by enumeration when the spec's admissible schedules fit --max-schedules, the faster
+    /// exact search at that size; else by the lineage-driven search), lineage, or enumerate (every admissible
+    /// schedule run in full, fewest faults first). --find-all and --lineage use the lineage-driven search.
+    #[arg(long, default_value = "auto")]
+    pub method: String,
+    /// Fault schedules enumeration may run (`--method auto` enumerates when the spec has at most this many; also the
+    /// budget of exhaustive certification of a program it cannot step round by round: crash-restarts, guarded timers,
+    /// streams).
     #[arg(long, default_value_t = 100_000)]
     pub max_schedules: u64,
     /// Hazard entries the runs of the lineage-driven search may share (0: encode every run from scratch). Results do
@@ -215,10 +217,19 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
             Err(e) => fail(&e),
         };
     }
-    let report = if args.enumerate {
-        blossom_ldfi::enumerate(&sim, &config)
-    } else {
-        blossom_ldfi::run(&sim, &config)
+    let lineage_only = args.find_all || args.lineage;
+    let report = match args.method.as_str() {
+        "auto" if !lineage_only => blossom_ldfi::decide(&sim, &config),
+        "auto" | "lineage" => blossom_ldfi::run(&sim, &config),
+        "enumerate" if !lineage_only => blossom_ldfi::enumerate(&sim, &config),
+        "enumerate" => {
+            eprintln!("--find-all and --lineage need the lineage-driven search, not --method enumerate");
+            return Exit::Usage.into();
+        }
+        other => {
+            eprintln!("unknown method `{other}`: expected auto, lineage or enumerate");
+            return Exit::Usage.into();
+        }
     };
     match report {
         Ok(report) => {

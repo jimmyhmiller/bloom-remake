@@ -27,8 +27,8 @@ pub mod report;
 pub mod shared;
 
 pub use driver::{
-    Fallback, LdfiConfig, LdfiReport, Method, Observer, ObserverRef, RunProgress, SearchStats, Verdict, enumerate,
-    falsifiers, run,
+    Fallback, LdfiConfig, LdfiReport, Method, Observer, ObserverRef, RunProgress, SearchStats, Verdict, decide,
+    enumerate, falsifiers, run,
 };
 pub use faults::FailureSpec;
 pub use hazard::NegSupport;
