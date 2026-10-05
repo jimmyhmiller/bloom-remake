@@ -23,7 +23,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use blossom_base::{ConstId, InternalError, RelId, RuleId, internal_error};
+use blossom_base::{ConstId, DetMap, InternalError, RelId, RuleId, internal_error};
 use blossom_ir::core::{Expr, HeadArg, Literal, Rule, Term};
 use blossom_prov::{GoalId, Loc, Premise, ProvGraph, Space, Support};
 use blossom_sat::{Lit, SatOutcome, SatSolver, SolveLimits, Var, card};
@@ -487,13 +487,14 @@ impl FaultVars {
         out
     }
 
-    /// The single faults that, added to `seed`, make `root` hold: the minimal models of size one, computed from the
-    /// gates (a monotone circuit over the fault variables) without the solver. Each gate's set is the faults that make
-    /// it hold alone (with the seed): the intersection of its children's for a conjunction, the union for a
-    /// disjunction; a fault variable holds by itself, or (a crash-order variable `K(n,t)`) by a crash at or before `t`;
-    /// a variable of the seed holds whatever is added. A fault is a candidate only if the spec admits it with the seed
-    /// (a node crashes once under crash-restart; the crash budget). `None` when the circuit has a negative literal.
-    pub fn single_hitters(&self, spec: &FailureSpec, seed: &FaultSchedule, root: Lit) -> Option<Vec<Var>> {
+    /// The single faults that, added to `seed`, make each of `roots` hold: the minimal models of size one, computed
+    /// from the gates (a monotone circuit over the fault variables) without the solver, in one pass for every root.
+    /// Each gate's set is the faults that make it hold alone (with the seed): the intersection of its children's for a
+    /// conjunction, the union for a disjunction; a fault variable holds by itself, or (a crash-order variable `K(n,t)`)
+    /// by a crash at or before `t`; a variable of the seed holds whatever is added. A fault is a candidate only if the
+    /// spec admits it with the seed (a node crashes once under crash-restart; the crash budget). `None` when the circuit
+    /// has a negative literal.
+    pub fn single_hitters(&self, spec: &FailureSpec, seed: &FaultSchedule, roots: &[Lit]) -> Option<Vec<Vec<Var>>> {
         let seeded = self.implied_by(spec, seed);
         let budget_left = (seed.crashes.len() as u32) < spec.max_crashes;
         let omissions_left = spec
@@ -517,7 +518,28 @@ impl FaultVars {
             }
         }
         let words = atoms.len().div_ceil(64).max(1);
-        let index: BTreeMap<Var, usize> = atoms.iter().enumerate().map(|(i, v)| (*v, i)).collect();
+        // Dense by variable: the highest variable any gate, fault or root names.
+        let top = self
+            .gates
+            .iter()
+            .flat_map(|(v, g)| std::iter::once(*v).chain(g.children.iter().map(|l| l.var())))
+            .chain(self.all())
+            .chain(roots.iter().map(|l| l.var()))
+            .map(|v| v.0 as usize + 1)
+            .max()
+            .unwrap_or(0);
+        let mut atom_of: Vec<Option<usize>> = vec![None; top];
+        for (i, v) in atoms.iter().enumerate() {
+            if let Some(slot) = atom_of.get_mut(v.0 as usize) {
+                *slot = Some(i);
+            }
+        }
+        let mut is_seeded = vec![false; top];
+        for v in &seeded {
+            if let Some(slot) = is_seeded.get_mut(v.0 as usize) {
+                *slot = true;
+            }
+        }
         let full = {
             let mut b = vec![u64::MAX; words];
             if let Some(last) = b.last_mut()
@@ -527,47 +549,51 @@ impl FaultVars {
             }
             b
         };
-        let single = |i: usize| {
-            let mut b = vec![0u64; words];
+        let bit = |b: &mut [u64], i: usize| {
             if let Some(w) = b.get_mut(i / 64) {
                 *w |= 1u64 << (i % 64);
             }
-            b
         };
-        // The crash-order variables under crash-stop: `K(n,t)` holds after a crash of `n` at any `c <= t`.
-        let mut chain: BTreeMap<Var, Vec<usize>> = BTreeMap::new();
+        // Each variable's set, once known: a gate's, or a crash-order variable's under crash-stop (`K(n,t)` holds after
+        // a crash of `n` at any `c <= t`).
+        let mut sets: Vec<Option<Vec<u64>>> = vec![None; top];
         if spec.restart.is_none() {
             for nc in self.crash.values() {
                 for (t, v) in &nc.vars {
-                    let at_or_before: Vec<usize> = nc
-                        .vars
-                        .iter()
-                        .filter(|(c, _)| c <= t)
-                        .filter_map(|(_, w)| index.get(w).copied())
-                        .collect();
-                    chain.insert(*v, at_or_before);
+                    let mut b = vec![0u64; words];
+                    for (c, w) in &nc.vars {
+                        if c <= t
+                            && let Some(Some(i)) = atom_of.get(w.0 as usize)
+                        {
+                            bit(&mut b, *i);
+                        }
+                    }
+                    if let Some(slot) = sets.get_mut(v.0 as usize) {
+                        *slot = Some(b);
+                    }
                 }
             }
         }
-        let mut sets: BTreeMap<Var, Vec<u64>> = BTreeMap::new();
-        let leaf = |v: Var, sets: &BTreeMap<Var, Vec<u64>>| -> Vec<u64> {
-            if seeded.contains(&v) {
-                return full.clone();
+        /// A child's set, without copying it.
+        enum Child<'a> {
+            Full,
+            Empty,
+            Bit(usize),
+            Set(&'a [u64]),
+        }
+        fn child<'a>(v: Var, sets: &'a [Option<Vec<u64>>], is_seeded: &[bool], atom_of: &[Option<usize>]) -> Child<'a> {
+            let i = v.0 as usize;
+            if is_seeded.get(i).copied().unwrap_or(false) {
+                return Child::Full;
             }
-            if let Some(s) = sets.get(&v) {
-                return s.clone();
+            if let Some(Some(s)) = sets.get(i) {
+                return Child::Set(s);
             }
-            if let Some(ix) = chain.get(&v) {
-                let mut b = vec![0u64; words];
-                for i in ix {
-                    if let Some(w) = b.get_mut(i / 64) {
-                        *w |= 1u64 << (i % 64);
-                    }
-                }
-                return b;
+            match atom_of.get(i) {
+                Some(Some(a)) => Child::Bit(*a),
+                _ => Child::Empty,
             }
-            index.get(&v).map_or_else(|| vec![0u64; words], |i| single(*i))
-        };
+        }
         // Children are created before their gate: increasing variable order is a topological order.
         for (v, gate) in &self.gates {
             let mut acc = if gate.all { full.clone() } else { vec![0u64; words] };
@@ -575,26 +601,26 @@ impl FaultVars {
                 if l.is_negative() {
                     return None;
                 }
-                let c = leaf(l.var(), &sets);
-                for (a, b) in acc.iter_mut().zip(&c) {
-                    if gate.all {
-                        *a &= *b;
-                    } else {
-                        *a |= *b;
+                match (child(l.var(), &sets, &is_seeded, &atom_of), gate.all) {
+                    (Child::Full, true) | (Child::Empty, false) => {}
+                    (Child::Full, false) => acc.copy_from_slice(&full),
+                    (Child::Empty, true) => acc.iter_mut().for_each(|w| *w = 0),
+                    (Child::Bit(i), true) => {
+                        let kept = acc.get(i / 64).map_or(0, |w| w & (1u64 << (i % 64)));
+                        acc.iter_mut().for_each(|w| *w = 0);
+                        if let Some(w) = acc.get_mut(i / 64) {
+                            *w = kept;
+                        }
                     }
+                    (Child::Bit(i), false) => bit(&mut acc, i),
+                    (Child::Set(c), true) => acc.iter_mut().zip(c).for_each(|(a, b)| *a &= *b),
+                    (Child::Set(c), false) => acc.iter_mut().zip(c).for_each(|(a, b)| *a |= *b),
                 }
             }
-            sets.insert(*v, acc);
+            if let Some(slot) = sets.get_mut(v.0 as usize) {
+                *slot = Some(acc);
+            }
         }
-        if root.is_negative() {
-            return None;
-        }
-        let root_set = leaf(root.var(), &sets);
-        let hits = |v: &Var| {
-            index
-                .get(v)
-                .is_some_and(|i| root_set.get(i / 64).is_some_and(|w| w & (1u64 << (i % 64)) != 0))
-        };
         // Under crash-stop a crash at `c` sets every `K(n,t)` from `c`: it is a minimal model only when a crash a tick
         // later is not one too (a crash is tried at its latest useful tick).
         let later: BTreeMap<Var, Var> = if spec.restart.is_none() {
@@ -610,13 +636,34 @@ impl FaultVars {
         } else {
             BTreeMap::new()
         };
-        Some(
-            atoms
-                .iter()
-                .filter(|v| hits(v) && !later.get(v).is_some_and(&hits))
-                .copied()
-                .collect(),
-        )
+        let mut out = Vec::with_capacity(roots.len());
+        for root in roots {
+            if root.is_negative() {
+                return None;
+            }
+            let root_set: Vec<u64> = match child(root.var(), &sets, &is_seeded, &atom_of) {
+                Child::Full => full.clone(),
+                Child::Empty => vec![0u64; words],
+                Child::Bit(i) => {
+                    let mut b = vec![0u64; words];
+                    bit(&mut b, i);
+                    b
+                }
+                Child::Set(s) => s.to_vec(),
+            };
+            let hits = |v: &Var| {
+                matches!(atom_of.get(v.0 as usize), Some(Some(i))
+                    if root_set.get(i / 64).is_some_and(|w| w & (1u64 << (i % 64)) != 0))
+            };
+            out.push(
+                atoms
+                    .iter()
+                    .filter(|v| hits(v) && !later.get(v).is_some_and(&hits))
+                    .copied()
+                    .collect(),
+            );
+        }
+        Some(out)
     }
 
     /// The fault schedule `base` plus the faults of the true variables `model`.
@@ -646,9 +693,10 @@ pub struct Encoder<'a> {
     preds: &'a Preds,
     neg: NegSupport,
     rules: Option<&'a dyn Rules>,
-    appear_memo: BTreeMap<PlaceKey, Hazard>,
-    appear_path: BTreeMap<PlaceKey, usize>,
-    remove_memo: BTreeMap<PlaceKey, Hazard>,
+    /// Keyed by a place and a row pattern (hashed: they are only looked up).
+    appear_memo: DetMap<PlaceKey, Hazard>,
+    appear_path: DetMap<PlaceKey, usize>,
+    remove_memo: DetMap<PlaceKey, Hazard>,
     solver: &'a mut dyn SatSolver,
     vars: &'a mut FaultVars,
     /// Per goal (dense by id): its memoized hazard, and its depth on the current path.
@@ -699,9 +747,9 @@ impl<'a> Encoder<'a> {
             preds,
             neg,
             rules,
-            appear_memo: BTreeMap::new(),
-            appear_path: BTreeMap::new(),
-            remove_memo: BTreeMap::new(),
+            appear_memo: DetMap::default(),
+            appear_path: DetMap::default(),
+            remove_memo: DetMap::default(),
             solver,
             vars,
             memo: vec![None; graph.goal_count()],
@@ -1861,6 +1909,18 @@ pub fn minimal_extensions(
         encode_ns: encoded.saturating_sub(start),
         ..Extensions::default()
     };
+    // The single faults of every target, in one pass over the circuit (before any target's activation clause).
+    let root_lits: Vec<Lit> = roots
+        .iter()
+        .filter_map(|r| match r {
+            Hazard::Lit(l) => Some(*l),
+            _ => None,
+        })
+        .collect();
+    let singles_of: BTreeMap<Lit, Vec<Var>> = vars
+        .single_hitters(spec, seed, &root_lits)
+        .map(|all| root_lits.iter().copied().zip(all).collect())
+        .unwrap_or_default();
     for (index, root) in roots.into_iter().enumerate() {
         let l = match root {
             Hazard::False => continue,
@@ -1888,8 +1948,8 @@ pub fn minimal_extensions(
         }
         // The single faults, from the circuit; the solver then looks for larger minimal models only (a model holding
         // a single fault is not minimal unless it is that fault).
-        if let Some(singles) = vars.single_hitters(spec, seed, l) {
-            for v in singles {
+        if let Some(singles) = singles_of.get(&l) {
+            for v in singles.iter().copied() {
                 solver.add_clause(&[!act, v.negative()])?;
                 out.hypotheses.push(vars.schedule(spec, seed, &BTreeSet::from([v])));
             }
@@ -2053,7 +2113,12 @@ mod tests {
                 let g3 = gate(&mut vars, solver, false, third);
                 let root = gate(&mut vars, solver, true, vec![g1, g2, g3]);
                 vars.crash_budget(solver, &spec).unwrap();
-                let dp: BTreeSet<Var> = vars.single_hitters(&spec, &seed, root).unwrap().into_iter().collect();
+                let dp: BTreeSet<Var> = vars
+                    .single_hitters(&spec, &seed, &[root])
+                    .unwrap()
+                    .remove(0)
+                    .into_iter()
+                    .collect();
                 assert_eq!(
                     dp,
                     by_solver(solver, &vars, &spec, &seed, root),
