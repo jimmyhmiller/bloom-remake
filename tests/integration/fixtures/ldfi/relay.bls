@@ -1,0 +1,42 @@
+//! A program file that specs in another file target (`spec … for relay`, S11): the store of `store.bls` as a program,
+//! its seeded bug behind a deploy-time `param`, which a spec binds as a deployment does (`for relay(DURABLE = false)`).
+
+program relay version 1;
+
+param DURABLE: bool = true;
+
+role Server;
+role Client;
+
+static server(n: Node<Server>);
+static client(n: Node<Client>);
+
+channel put(v: u64): Client -> Server;
+channel ack(v: u64): Server -> Client;
+
+at Client {
+    input write(v: u64);
+    durable table acked(v: u64);
+
+    go: on write(v), server(s) {
+        send put(v) to s;
+    }
+    got: on ack(v) {
+        emit acked(v);
+    }
+}
+
+at Server {
+    durable table kept(v: u64);
+    table held(v: u64);
+
+    store: on put(v) from c {
+        if DURABLE {
+            emit kept(v);
+        }
+        if not DURABLE {
+            emit held(v);
+        }
+        send ack(v) to c;
+    }
+}

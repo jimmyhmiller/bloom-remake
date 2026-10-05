@@ -61,7 +61,17 @@ impl ModuleTree {
         };
         let mut pending: Vec<(String, Span)> = Vec::new();
         referenced(&tree.root.items, &mut pending);
-        while let Some((name, span)) = pending.pop() {
+        // A spec whose target names no module of these files names a program file next to the root: loaded once every
+        // module the files use is, so a module that a `use` brings in is not mistaken for a file.
+        let mut targets = spec_targets(&tree.root.items);
+        loop {
+            let Some((name, span)) = pending.pop() else {
+                pending = std::mem::take(&mut targets);
+                if pending.is_empty() {
+                    break;
+                }
+                continue;
+            };
             if tree.modules.contains_key(&name) || is_local(&tree, &name) {
                 continue;
             }
@@ -233,6 +243,20 @@ fn is_local(tree: &ModuleTree, name: &str) -> bool {
         })
     }
     declares(&tree.root.items, name) || tree.modules.values().any(|f| declares(&f.items, name))
+}
+
+/// The one-segment targets of the specs in `items`.
+fn spec_targets(items: &[ast::Item]) -> Vec<(String, Span)> {
+    items
+        .iter()
+        .filter_map(|i| match &i.kind {
+            ItemKind::Spec(s) => match s.target.as_deref() {
+                Some([one]) => Some((one.as_str().to_owned(), one.span)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
 }
 
 /// The first segments of every multi-segment `use` path and `import` path in `items`.

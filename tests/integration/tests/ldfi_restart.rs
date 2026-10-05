@@ -3,7 +3,8 @@
 //! `fixtures/ldfi/store.bls` must hold when it keeps an acknowledged write durably, and give a counterexample (a crash
 //! and its restart after the acknowledgement) when it keeps it in a volatile table, a bug crash-stop faults cannot
 //! expose. The sender of `fixtures/ldfi/retry.bls` retransmits on a timer guarded by its pending state: lost when the
-//! pending state is volatile and the sender restarts, which only the guard's lineage shows.
+//! pending state is volatile and the sender restarts, which only the guard's lineage shows. `relay_specs.bls`
+//! checks the store as a program file that its specs target.
 
 use std::path::Path;
 
@@ -134,4 +135,12 @@ fn a_bound_on_lost_messages_limits_the_fault_sets() {
     // Arming twice takes both arms lost; with at most one lost message the pinger is always armed.
     assert_eq!(check("armed.bls", "HeardTwice"), ["O(C,P,1)", "O(C,P,2)"]);
     check("armed.bls", "HeardTwiceOneLoss");
+}
+
+#[test]
+fn a_spec_over_a_program_file_binds_its_param_and_finds_the_restart() {
+    // `relay_specs.bls` targets the program file `relay.bls`; its seeded bug is a deploy-time `param`.
+    check("relay_specs.bls", "DurableRestart");
+    let faults = check("relay_specs.bls", "VolatileRestart");
+    assert!(faults.iter().any(|f| f.starts_with("R(S,")), "{faults:?}");
 }

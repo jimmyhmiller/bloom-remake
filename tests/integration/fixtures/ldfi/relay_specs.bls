@@ -1,0 +1,38 @@
+//! Specs whose target is the program file `relay.bls` next to this one (S11): the target is the file's items, and
+//! a spec argument binds one of its `param`s.
+
+/// The server S and the client C, which writes 7 at tick 1.
+spec Scenario {
+    nodes S, C;
+    assign Server = [S];
+    assign Client = [C];
+    fact server(S);
+    fact client(C);
+    fact write(7) @ C at tick 1;
+}
+
+/// An acknowledged write is kept by the server.
+spec Durability {
+    view stored(v) {
+        kept(v) @ _;
+        held(v) @ _;
+    }
+    view pre(v) = acked(v) @ _;
+    view post(v) = acked(v) @ _, stored(v);
+}
+
+/// Durable (the param's default): holds under a crash-restart.
+spec DurableRestart for relay {
+    include Scenario;
+    include Durability;
+    faults { eot: 6, eff: 3, crashes: 1, restart: 1, model: sync }
+    check ldfi expect holds;
+}
+
+/// Volatile: a restart after the acknowledgement loses the write.
+spec VolatileRestart for relay(DURABLE = false) {
+    include Scenario;
+    include Durability;
+    faults { eot: 6, eff: 3, crashes: 1, restart: 1, model: sync }
+    check ldfi expect fails;
+}

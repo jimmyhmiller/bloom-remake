@@ -743,6 +743,33 @@ fn codes_of(files: Vec<(&'static str, &'static str)>) -> Vec<String> {
     }
 }
 
+fn spec_codes(files: Vec<(&'static str, &'static str)>, spec: &str) -> Vec<String> {
+    let mut sources = SourceDb::new();
+    let root = files.first().map(|f| f.0).unwrap_or("specs.bls");
+    match crate::spec::compile_spec(root, spec, &mut Files(files), &mut sources) {
+        Ok((_, warnings)) => warnings.iter().map(|d| d.code.as_str().to_owned()).collect(),
+        Err(BlsError::Rejected(d)) => d.iter().map(|d| d.code.as_str().to_owned()).collect(),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+#[test]
+fn a_spec_targets_a_program_file_next_to_it_and_binds_its_params() {
+    const TARGET: &str = "program p version 1;\nparam K: u64 = 1;\nrole R;\n\
+                          at R { input go(k: u64); table seen(k: u64); a: on go(k) where k == K { emit seen(k); } }\n";
+    let spec = |target: &'static str| vec![("specs.bls", target), ("p.bls", TARGET), ("lib.bls", "role R;\n")];
+    let ok = "spec S for p(K = 2) {\n nodes A;\n assign R = [A];\n view post(k) = seen(k) @ _;\n}\n";
+    assert_eq!(spec_codes(spec(ok), "S"), Vec::<String>::new());
+    // A param the program does not declare.
+    let unknown = "spec S for p(J = 2) {\n nodes A;\n assign R = [A];\n view post(k) = seen(k) @ _;\n}\n";
+    assert_eq!(spec_codes(spec(unknown), "S"), vec!["BLS0205"]);
+    // A file with no `program` header is no target; a missing file is not found.
+    let library = "spec S for lib {\n nodes A;\n assign R = [A];\n}\n";
+    assert_eq!(spec_codes(spec(library), "S"), vec!["BLS0200"]);
+    let missing = "spec S for nope {\n nodes A;\n assign R = [A];\n}\n";
+    assert_eq!(spec_codes(spec(missing), "S"), vec!["BLS0204"]);
+}
+
 #[test]
 fn a_textual_include_brings_in_the_files_items_recursively() {
     let files = vec![
