@@ -151,8 +151,7 @@ fn kafka_bin() -> Option<PathBuf> {
 
 #[test]
 fn kcat_lists_the_blossom_broker() {
-    let Some(kcat) = on_path("kcat") else {
-        skipped("kcat is not installed (brew install kcat)");
+    let Some(kcat) = kcat() else {
         return;
     };
     let (server, port) = start_broker();
@@ -325,7 +324,7 @@ fn kafka_topics_creates_describes_and_deletes_topics() {
         &["--describe", "--entity-type", "topics", "--entity-name", "orders"],
     );
     assert!(configs.contains("retention.ms=60000"), "{configs}");
-    if let Some(kcat) = on_path("kcat") {
+    if let Some(kcat) = kcat() {
         let out = Command::new(kcat)
             .args(["-L", "-b", &format!("127.0.0.1:{port}"), "-m", "10"])
             .output()
@@ -369,8 +368,7 @@ fn with_input(cmd: &mut Command, lines: &[String]) -> String {
 
 #[test]
 fn kcat_produces_and_consumes() {
-    let Some(kcat) = on_path("kcat") else {
-        skipped("kcat is not installed (brew install kcat)");
+    let Some(kcat) = kcat() else {
         return;
     };
     let (server, port) = start_broker();
@@ -506,4 +504,36 @@ fn franz_go_produces_and_consumes() {
     );
     assert!(stdout.contains("ok 300 records"), "{stdout}");
     server.stop().unwrap();
+}
+
+/// kcat, when it is installed and its librdkafka can talk to the broker, else `None` (and the test says it skips).
+/// The broker answers Metadata v13 only (with Produce 10+ and Fetch 16+, Kafka 4.0's newest), and librdkafka 2.11.0
+/// is the first release that asks for v13: an older one finds no Metadata version in common and fails every request
+/// ("Required feature not supported by broker").
+#[cfg(test)]
+fn kcat() -> Option<PathBuf> {
+    let Some(path) = on_path("kcat") else {
+        skipped("kcat is not installed (brew install kcat)");
+        return None;
+    };
+    let out = Command::new(&path).arg("-V").output().unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let version: Vec<u32> = text
+        .split("librdkafka ")
+        .nth(1)
+        .and_then(|rest| rest.split([' ', ')']).next())
+        .map(|v| v.split('.').filter_map(|x| x.parse().ok()).collect())
+        .unwrap_or_else(|| panic!("no librdkafka version in `kcat -V`: {text}"));
+    if version.as_slice() < [2, 11, 0].as_slice() {
+        skipped(&format!(
+            "kcat's librdkafka {} is older than 2.11.0, the first that speaks Metadata v13, the broker's only version",
+            version.iter().map(u32::to_string).collect::<Vec<_>>().join(".")
+        ));
+        return None;
+    }
+    Some(path)
 }

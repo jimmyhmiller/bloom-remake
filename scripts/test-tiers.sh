@@ -7,6 +7,9 @@
 #   scripts/test-tiers.sh full
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# The checkout's own tools come first: the pinned solvers (scripts/install-solvers.sh) and any client tools a machine
+# links in (a kcat whose librdkafka speaks the broker's protocol versions, see kafka_gate.rs).
+export PATH="$PWD/.tools/bin:$PATH"
 tier="${1:-fast}"
 shift || true
 case "$tier" in
