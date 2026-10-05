@@ -23,6 +23,7 @@ pub mod hazard;
 pub mod lineage;
 pub mod reach;
 pub mod report;
+pub mod shared;
 
 pub use driver::{
     Fallback, LdfiConfig, LdfiReport, Method, Observer, ObserverRef, RunProgress, SearchStats, Verdict, enumerate,

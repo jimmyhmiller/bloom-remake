@@ -251,3 +251,24 @@ fn stepped_certification_refuses_a_program_with_streams() {
         .is_err()
     );
 }
+
+#[test]
+fn sharing_hazards_across_runs_and_workers_changes_no_result() {
+    // Runs share the hazards they encoded (S12); what a run finds must not depend on which runs came before it.
+    for (file, spec) in SPECS {
+        let (artifact, fs, _) = compile(file, spec);
+        let sim = SpecSim::new(&artifact).unwrap();
+        let mut outcomes = Vec::new();
+        for (workers, shared) in [(1, 0), (1, 4_000_000), (3, 4_000_000)] {
+            let mut config = LdfiConfig::new(fs.clone());
+            config.workers = workers;
+            config.shared_hazards = shared;
+            config.exhaustive_fallback = None;
+            let report = blossom_ldfi::run(&sim, &config).unwrap_or_else(|e| panic!("{spec}: {e}"));
+            let faults: Vec<_> = report.counterexamples.iter().map(|ce| ce.faults.clone()).collect();
+            outcomes.push((report.verdict, report.runs, faults));
+        }
+        assert_eq!(outcomes[0], outcomes[1], "{file} {spec}");
+        assert_eq!(outcomes[0], outcomes[2], "{file} {spec}");
+    }
+}

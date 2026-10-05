@@ -237,6 +237,9 @@ pub struct Fabric<'c> {
     pub violations: Vec<StreamViolation>,
     /// Every connection made, by pipe index.
     pub connections: Vec<Connection>,
+    /// Every dial to a node of the deployment: its node, the node it dialed, and its round (a lost message then
+    /// fails it).
+    pub dials: BTreeSet<(NodeId, NodeId, Tick)>,
 }
 
 fn side<T>(pair: &[T; 2], i: usize) -> Result<&T, SimError> {
@@ -273,6 +276,7 @@ impl<'c> Fabric<'c> {
             flights: Vec::new(),
             violations: Vec::new(),
             connections: Vec::new(),
+            dials: BTreeSet::new(),
         }
     }
 
@@ -654,6 +658,11 @@ impl<'c> Fabric<'c> {
             Some((n, self.listen_stream(n, s)?))
         });
         let traced = |causes: Vec<Cause>| Trace { causes, as_of: tick };
+        if let Some((to, _)) = found
+            && to != from
+        {
+            self.dials.insert((from, to, tick));
+        }
         let (to, listen) = match found {
             None => {
                 let why = format!("cannot reach `{addr}`");
