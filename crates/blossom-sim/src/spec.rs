@@ -31,6 +31,8 @@ pub struct SpecSim<'a> {
     protocol: Oracle,
     spec: Option<Oracle>,
     runtime: Runtime,
+    /// The deployment's byte streams, which a run connects (`None` when no node runs one).
+    streams: Option<crate::fabric::StreamsConfig>,
 }
 
 /// The spec's verdict inputs for one run: `pre` and `post` at EOT.
@@ -80,11 +82,14 @@ impl<'a> SpecSim<'a> {
             Some(s) => Some(Oracle::with_externs(s.program.clone(), limits, externs).map_err(SimError::Load)?),
             None => None,
         };
+        let names: Vec<Arc<str>> = artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect();
+        let streams = crate::fabric::StreamsConfig::of(artifact.protocol.get(), &names, &artifact.roles);
         Ok(SpecSim {
             artifact,
             protocol,
             spec,
             runtime,
+            streams: streams.any().then_some(streams),
         })
     }
 
@@ -153,17 +158,10 @@ impl<'a> SpecSim<'a> {
                 durable,
                 boot,
                 recovered,
-                streams: self.streams(),
+                streams: self.streams.clone(),
             },
             faults,
         )
-    }
-
-    /// The deployment's byte streams, which a run connects (`None` when no node runs one).
-    fn streams(&self) -> Option<crate::fabric::StreamsConfig> {
-        let names: Vec<Arc<str>> = self.artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect();
-        let cfg = crate::fabric::StreamsConfig::of(self.artifact.protocol.get(), &names, &self.artifact.roles);
-        cfg.any().then_some(cfg)
     }
 
     /// The events of `node` at `tick` a run schedules: its inputs, `boot()` and its node statics. The timers'
@@ -322,6 +320,14 @@ impl<'a> SpecSim<'a> {
             return Err(blossom_base::unimplemented_error!(
                 "LANG-172",
                 "stepping a program with a guarded timer one round at a time (`SpecSim::step`)"
+            )
+            .into());
+        }
+        // Nor does it connect streams: the fabric between the nodes lives in the round loop.
+        if self.streams.is_some() {
+            return Err(blossom_base::unimplemented_error!(
+                "TEST-146",
+                "stepping a program with streams one round at a time (`SpecSim::step`)"
             )
             .into());
         }

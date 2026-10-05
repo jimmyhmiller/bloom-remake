@@ -8,15 +8,34 @@
 
 use std::path::Path;
 
+use blossom_artifact::sim::SimArtifact;
 use blossom_driver::bls::compile_spec_file;
 use blossom_ldfi::report::fault_labels;
-use blossom_ldfi::{FailureSpec, LdfiConfig, Verdict};
+use blossom_ldfi::{FailureSpec, LdfiConfig, LdfiError, Method, Verdict};
 use blossom_sim::spec::{SpecSim, is_good};
 
-/// Checks `spec` of `fixtures/ldfi/FILE`: the verdict must be its `check ldfi expect …`, and a counterexample must
-/// reproduce. Returns the counterexample's fault labels.
+/// Every spec of `fixtures/ldfi` with an LDFI check.
 #[cfg(test)]
-fn check(file: &str, spec: &str) -> Vec<String> {
+const SPECS: &[(&str, &str)] = &[
+    ("store.bls", "DurableRestart"),
+    ("store.bls", "VolatileRestart"),
+    ("store.bls", "VolatileStop"),
+    ("retry.bls", "Omissions"),
+    ("retry.bls", "DurableRestart"),
+    ("retry.bls", "VolatileRestart"),
+    ("armed.bls", "Heard"),
+    ("armed.bls", "HeardTwice"),
+    ("armed.bls", "HeardTwiceOneLoss"),
+    ("stream_store.bls", "DurableRestart"),
+    ("stream_store.bls", "VolatileRestart"),
+    ("stream_store.bls", "EagerOmission"),
+    ("relay_specs.bls", "DurableRestart"),
+    ("relay_specs.bls", "VolatileRestart"),
+];
+
+/// `spec` of `fixtures/ldfi/FILE` compiled: its artifact, its failure spec, and its `check ldfi expect …`.
+#[cfg(test)]
+fn compile(file: &str, spec: &str) -> (SimArtifact, FailureSpec, bool) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/ldfi").join(file);
     let (result, _) = compile_spec_file(path.to_str().unwrap(), spec);
     let (compiled, _) = result.unwrap_or_else(|e| panic!("{spec}: {e:?}"));
@@ -35,6 +54,14 @@ fn check(file: &str, spec: &str) -> Vec<String> {
     if let Some(k) = faults.omissions {
         fs = fs.with_max_omissions(k);
     }
+    (artifact, fs, expect)
+}
+
+/// Checks `spec` of `fixtures/ldfi/FILE`: the verdict must be its `check ldfi expect …`, and a counterexample must
+/// reproduce. Returns the counterexample's fault labels.
+#[cfg(test)]
+fn check(file: &str, spec: &str) -> Vec<String> {
+    let (artifact, fs, expect) = compile(file, spec);
     let sim = SpecSim::new(&artifact).unwrap();
     let mut config = LdfiConfig::new(fs.clone());
     config.workers = 2;
@@ -143,4 +170,84 @@ fn a_spec_over_a_program_file_binds_its_param_and_finds_the_restart() {
     check("relay_specs.bls", "DurableRestart");
     let faults = check("relay_specs.bls", "VolatileRestart");
     assert!(faults.iter().any(|f| f.starts_with("R(S,")), "{faults:?}");
+}
+
+#[test]
+fn enumerating_every_schedule_agrees_with_the_lineage_driven_search() {
+    // The oracle: every admissible schedule run in full. Same verdict on every fixture, and a counterexample no
+    // larger than the lineage-driven search's (enumeration goes fewest faults first).
+    for (file, spec) in SPECS {
+        let (artifact, fs, expect) = compile(file, spec);
+        let sim = SpecSim::new(&artifact).unwrap();
+        let mut config = LdfiConfig::new(fs);
+        config.workers = 2;
+        config.exhaustive_fallback = None;
+        let lineage = blossom_ldfi::run(&sim, &config).unwrap_or_else(|e| panic!("{spec}: {e}"));
+        let enumerated = blossom_ldfi::enumerate(&sim, &config).unwrap_or_else(|e| panic!("{spec}: {e}"));
+        assert!(
+            matches!(enumerated.method, Method::Enumerated { after: None, .. }),
+            "{file} {spec}"
+        );
+        assert_eq!(enumerated.verdict, lineage.verdict, "{file} {spec}");
+        assert_eq!(enumerated.verdict == Verdict::NoCounterexample, expect, "{file} {spec}");
+        if let (Some(a), Some(b)) = (enumerated.counterexamples.first(), lineage.counterexamples.first()) {
+            assert!(
+                a.faults.len() <= b.faults.len(),
+                "{file} {spec}: {:?} vs {:?}",
+                a.faults,
+                b.faults
+            );
+        }
+    }
+}
+
+#[test]
+fn certification_after_a_spent_budget_enumerates_a_program_it_cannot_step() {
+    // A crash-restart spec cannot be stepped round by round: the fallback runs every schedule instead.
+    let (artifact, fs, _) = compile("store.bls", "VolatileRestart");
+    let sim = SpecSim::new(&artifact).unwrap();
+    let mut config = LdfiConfig::new(fs.clone());
+    config.max_runs = 1;
+    let report = blossom_ldfi::run(&sim, &config).unwrap();
+    assert!(
+        matches!(
+            report.method,
+            Method::Enumerated {
+                after: Some(blossom_ldfi::Fallback::RunBudget),
+                ..
+            }
+        ),
+        "{:?}",
+        report.method
+    );
+    assert_eq!(report.verdict, Verdict::Counterexample);
+    // Beyond its budget it refuses before running anything.
+    config.max_schedules = 3;
+    assert!(matches!(
+        blossom_ldfi::run(&sim, &config),
+        Err(LdfiError::ScheduleBudget(3))
+    ));
+    assert!(blossom_ldfi::certify::schedule_count(&fs) > 3);
+}
+
+#[test]
+fn stepped_certification_refuses_a_program_with_streams() {
+    // Stepping nodes one round at a time leaves out the stream fabric: it must refuse, not judge a run whose
+    // connections never open.
+    let (artifact, fs, _) = compile("stream_store.bls", "EagerOmission");
+    let sim = SpecSim::new(&artifact).unwrap();
+    assert!(!blossom_ldfi::certify::steppable(&sim, &fs));
+    let ff = sim.run(fs.eot, &Default::default(), false).unwrap();
+    let post = sim.outcome(&ff, fs.eot, false).unwrap().post;
+    let refused = blossom_ldfi::certify::exhaustive(&sim, &fs, &post, 1, 1000);
+    assert!(matches!(refused, Err(LdfiError::Unimplemented(_))), "{refused:?}");
+    assert!(
+        sim.step(
+            blossom_value::time::NodeId(0),
+            blossom_value::time::Tick(0),
+            &Default::default(),
+            &[]
+        )
+        .is_err()
+    );
 }

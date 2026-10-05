@@ -36,6 +36,9 @@ pub struct LdfiConfig {
     /// When the lineage-driven search exhausts `max_runs` without a verdict, decide by exhaustive certification
     /// ([`crate::certify`]) within this many states; `None` reports the budget error instead.
     pub exhaustive_fallback: Option<u64>,
+    /// The fault schedules exhaustive certification may run when it enumerates them (a program it cannot step:
+    /// [`crate::certify::steppable`]), or when enumeration is asked for directly ([`enumerate`]).
+    pub max_schedules: u64,
 }
 
 impl LdfiConfig {
@@ -48,6 +51,7 @@ impl LdfiConfig {
             sat: "cadical-plain".into(),
             workers: 1,
             exhaustive_fallback: Some(1_000_000),
+            max_schedules: 100_000,
             observer: None,
         }
     }
@@ -159,6 +163,9 @@ pub enum Method {
         schedules: u64,
         after: Fallback,
     },
+    /// Every admissible fault schedule was run ([`crate::certify::enumerate`]): after the lineage-driven search gave
+    /// up on a program the stepped search cannot step, or (`after: None`) because it was asked for.
+    Enumerated { schedules: u64, after: Option<Fallback> },
 }
 
 /// Why the lineage-driven search handed over to exhaustive certification.
@@ -434,6 +441,9 @@ fn certify_exhaustively(
     why: Fallback,
     max_states: u64,
 ) -> Result<LdfiReport, LdfiError> {
+    if !crate::certify::steppable(sim, &config.spec) {
+        return certify_by_enumeration(sim, config, runs, Some(why));
+    }
     let search = Search::new(sim, config)?;
     let (ff_run, ff) = search.execute(&FaultSchedule::default())?;
     let ff_graph = search.graph(&ff_run, &ff)?;
@@ -467,6 +477,60 @@ fn certify_exhaustively(
             states: cert.states,
             schedules: cert.schedules,
             after: why,
+        },
+        counterexamples,
+        runs,
+        stats: SearchStats::default(),
+        failure_free: ff,
+        failure_free_run: ff_run,
+        failure_free_graph: ff_graph,
+    })
+}
+
+/// Decides `config.spec` by running every admissible fault schedule ([`crate::certify::enumerate`]), within
+/// `config.max_schedules`: an oracle for the lineage-driven search on specs small enough to enumerate.
+pub fn enumerate(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, LdfiError> {
+    certify_by_enumeration(sim, config, 0, None)
+}
+
+fn certify_by_enumeration(
+    sim: &SpecSim<'_>,
+    config: &LdfiConfig,
+    runs: u64,
+    after: Option<Fallback>,
+) -> Result<LdfiReport, LdfiError> {
+    let search = Search::new(sim, config)?;
+    let (ff_run, ff) = search.execute(&FaultSchedule::default())?;
+    let ff_graph = search.graph(&ff_run, &ff)?;
+    let found = crate::certify::enumerate(sim, &config.spec, &ff.post, config.workers.max(1), config.max_schedules)?;
+    let mut counterexamples = Vec::new();
+    if let Some(faults) = found.counterexample {
+        let (run, outcome) = search.execute(&faults)?;
+        if is_good(&ff.post, &outcome) {
+            return Err(internal_error!("an enumerated counterexample does not reproduce").into());
+        }
+        let violated = ff
+            .post
+            .iter()
+            .filter(|g| !outcome.post.contains(*g) && outcome.pre.contains(*g))
+            .cloned()
+            .collect();
+        counterexamples.push(Counterexample {
+            faults,
+            outcome,
+            run,
+            violated,
+        });
+    }
+    Ok(LdfiReport {
+        verdict: if counterexamples.is_empty() {
+            Verdict::NoCounterexample
+        } else {
+            Verdict::Counterexample
+        },
+        method: Method::Enumerated {
+            schedules: found.schedules,
+            after,
         },
         counterexamples,
         runs,
