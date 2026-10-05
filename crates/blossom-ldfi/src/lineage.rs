@@ -815,28 +815,79 @@ fn aggregate_group(space: Space, rule: &blossom_ir::core::Rule, loc: Loc, tick: 
 /// How the tuples of a `.ded` program's relations come about, for tuple-level negative support.
 pub struct ArtifactRules<'a> {
     artifact: &'a SimArtifact,
-    feeds: BTreeMap<RelId, SpecFeed>,
     nodes: u32,
-    /// Per relation, the rules that derive it: deductive, inductive and asynchronous (looked up for every tuple the
-    /// encoder reasons about, so indexed once).
-    by_head: BTreeMap<(Space, RelId), [Vec<&'a blossom_ir::core::Rule>; 3]>,
+    /// Per space, dense by relation: what the encoder asks about a relation for every tuple it reasons about, so
+    /// computed once.
+    protocol: Vec<RelFacts<'a>>,
+    spec: Vec<RelFacts<'a>>,
+}
+
+/// What the encoder asks about one relation.
+struct RelFacts<'a> {
+    from: From,
+    /// The rules that derive it: deductive, inductive and asynchronous.
+    rules: [Vec<&'a blossom_ir::core::Rule>; 3],
+    lattice: Vec<usize>,
+    arity: usize,
+    durable: bool,
+}
+
+/// Where a relation's tuples come from ([`crate::hazard::Origin`] without the rules it borrows).
+#[derive(Clone, Copy)]
+enum From {
+    Rules,
+    Input,
+    Snapshot {
+        protocol: RelId,
+        tick: Option<Tick>,
+    },
+    Crash,
+    Crashed,
+    Restart,
+    Timer {
+        guard: Option<RelId>,
+    },
+    Stream,
+    /// A spec copy of a relation without a protocol relation (reported when asked).
+    NoProtocol,
 }
 
 impl<'a> ArtifactRules<'a> {
     pub fn new(artifact: &'a SimArtifact) -> Result<ArtifactRules<'a>, InternalError> {
         let nodes = u32::try_from(artifact.nodes.len()).map_err(|_| internal_error!("too many nodes"))?;
-        let mut feeds = BTreeMap::new();
-        if let Some(spec) = &artifact.spec {
-            for feed in &spec.feeds {
-                feeds.insert(feed.spec_rel(), *feed);
-            }
-        }
-        let mut by_head: BTreeMap<(Space, RelId), [Vec<&'a blossom_ir::core::Rule>; 3]> = BTreeMap::new();
+        let (mut protocol, mut spec_rels) = (Vec::new(), Vec::new());
         let programs = std::iter::once((Space::Protocol, artifact.protocol.get()))
             .chain(artifact.spec.as_ref().map(|s| (Space::Spec, s.program.get())));
         for (space, program) in programs {
+            let facts = match space {
+                Space::Protocol => &mut protocol,
+                Space::Spec => &mut spec_rels,
+            };
+            for rel in program.rels.iter() {
+                let from = match &rel.class {
+                    RelClass::Idb | RelClass::Channel(_) => From::Rules,
+                    RelClass::Event(EventSource::Boot | EventSource::Recovered) if space == Space::Protocol => {
+                        From::Restart
+                    }
+                    RelClass::Event(EventSource::Timer(t)) if space == Space::Protocol => {
+                        From::Timer { guard: t.guard }
+                    }
+                    RelClass::Event(EventSource::Stream(_)) if space == Space::Protocol => From::Stream,
+                    _ => From::Input,
+                };
+                facts.push(RelFacts {
+                    from,
+                    rules: Default::default(),
+                    lattice: rel.schema.lattice.iter().map(|(c, _)| c.index()).collect(),
+                    arity: rel.schema.cols.len(),
+                    durable: space == Space::Protocol && rel.durable,
+                });
+            }
             for rule in program.rules.iter() {
-                let [deductive, inductive, asynchronous] = by_head.entry((space, rule.head.rel)).or_default();
+                let Some(f) = facts.get_mut(rule.head.rel.index()) else {
+                    return Err(internal_error!("a rule's head {:?} is not a relation", rule.head.rel));
+                };
+                let [deductive, inductive, asynchronous] = &mut f.rules;
                 match rule.kind {
                     RuleKind::Deductive => deductive.push(rule),
                     RuleKind::Inductive => inductive.push(rule),
@@ -844,12 +895,46 @@ impl<'a> ArtifactRules<'a> {
                 }
             }
         }
+        if let Some(spec) = &artifact.spec {
+            let snapshot_of = |ded: LogicalIdx| match artifact.rel(ded).and_then(|r| r.protocol) {
+                Some(protocol) => From::Snapshot { protocol, tick: None },
+                None => From::NoProtocol,
+            };
+            for feed in &spec.feeds {
+                let from = match *feed {
+                    SpecFeed::Crash { .. } => From::Crash,
+                    SpecFeed::Crashed { .. } => From::Crashed,
+                    SpecFeed::AtEot { rel, .. } => snapshot_of(rel),
+                    SpecFeed::AtTick { rel, tick, .. } => match snapshot_of(rel) {
+                        From::Snapshot { protocol, .. } => From::Snapshot {
+                            protocol,
+                            tick: Some(tick),
+                        },
+                        other => other,
+                    },
+                };
+                let Some(f) = spec_rels.get_mut(feed.spec_rel().index()) else {
+                    return Err(internal_error!(
+                        "a spec feed's relation {:?} is not a relation",
+                        feed.spec_rel()
+                    ));
+                };
+                f.from = from;
+            }
+        }
         Ok(ArtifactRules {
             artifact,
-            feeds,
             nodes,
-            by_head,
+            protocol,
+            spec: spec_rels,
         })
+    }
+
+    fn facts(&self, space: Space, rel: RelId) -> Option<&RelFacts<'a>> {
+        match space {
+            Space::Protocol => self.protocol.get(rel.index()),
+            Space::Spec => self.spec.get(rel.index()),
+        }
     }
 }
 
@@ -879,19 +964,12 @@ impl crate::hazard::Rules for ArtifactRules<'_> {
         }
     }
 
-    fn lattice_cols(&self, space: Space, rel: RelId) -> Vec<usize> {
-        let program = match space {
-            Space::Protocol => Some(self.artifact.protocol.get()),
-            Space::Spec => self.artifact.spec.as_ref().map(|s| s.program.get()),
-        };
-        program
-            .and_then(|p| p.rels.get(rel))
-            .map(|r| r.schema.lattice.iter().map(|(c, _)| c.index()).collect())
-            .unwrap_or_default()
+    fn lattice_cols(&self, space: Space, rel: RelId) -> &[usize] {
+        self.facts(space, rel).map_or(&[], |f| f.lattice.as_slice())
     }
 
     fn durable(&self, space: Space, rel: RelId) -> bool {
-        space == Space::Protocol && self.artifact.protocol.get().rels.get(rel).is_some_and(|r| r.durable)
+        self.facts(space, rel).is_some_and(|f| f.durable)
     }
 
     fn host_requests(&self) -> Vec<RelId> {
@@ -917,68 +995,35 @@ impl crate::hazard::Rules for ArtifactRules<'_> {
     }
 
     fn arity(&self, space: Space, rel: RelId) -> usize {
-        let program = match space {
-            Space::Protocol => Some(self.artifact.protocol.get()),
-            Space::Spec => self.artifact.spec.as_ref().map(|s| s.program.get()),
-        };
-        program.and_then(|p| p.rels.get(rel)).map_or(0, |r| r.schema.cols.len())
+        self.facts(space, rel).map_or(0, |f| f.arity)
     }
 
     fn origin(&self, space: Space, rel: RelId) -> Result<crate::hazard::Origin<'_>, InternalError> {
         use crate::hazard::Origin;
-        let snapshot_of = |ded: LogicalIdx| {
-            self.artifact
-                .rel(ded)
-                .and_then(|r| r.protocol)
-                .ok_or_else(|| internal_error!("a spec snapshot of a relation without a protocol relation"))
+        let Some(f) = self.facts(space, rel) else {
+            return Err(internal_error!("unknown relation {rel:?} of the {space:?} program"));
         };
-        let program = match space {
-            Space::Protocol => self.artifact.protocol.get(),
-            Space::Spec => match self.feeds.get(&rel) {
-                Some(SpecFeed::Crash { .. }) => return Ok(Origin::Crash),
-                Some(SpecFeed::Crashed { .. }) => return Ok(Origin::Crashed),
-                Some(SpecFeed::AtEot { rel: ded, .. }) => {
-                    return Ok(Origin::Snapshot {
-                        protocol: snapshot_of(*ded)?,
-                        tick: None,
-                    });
+        Ok(match f.from {
+            From::Rules => {
+                let [deductive, inductive, asynchronous] = &f.rules;
+                Origin::Rules {
+                    deductive,
+                    inductive,
+                    asynchronous,
                 }
-                Some(SpecFeed::AtTick { rel: ded, tick, .. }) => {
-                    return Ok(Origin::Snapshot {
-                        protocol: snapshot_of(*ded)?,
-                        tick: Some(*tick),
-                    });
-                }
-                None => match &self.artifact.spec {
-                    Some(s) => s.program.get(),
-                    None => return Err(internal_error!("a spec relation in a program without a spec")),
-                },
-            },
-        };
-        match program.rels.get(rel).map(|r| &r.class) {
-            Some(RelClass::Idb | RelClass::Channel(_)) => {}
-            Some(RelClass::Event(EventSource::Boot | EventSource::Recovered)) if space == Space::Protocol => {
-                return Ok(Origin::Restart);
             }
-            Some(RelClass::Event(EventSource::Timer(t))) if space == Space::Protocol => {
-                return Ok(Origin::Timer { guard: t.guard });
+            From::Input => Origin::Input,
+            From::Snapshot { protocol, tick } => Origin::Snapshot { protocol, tick },
+            From::Crash => Origin::Crash,
+            From::Crashed => Origin::Crashed,
+            From::Restart => Origin::Restart,
+            From::Timer { guard } => Origin::Timer { guard },
+            From::Stream => Origin::Stream,
+            From::NoProtocol => {
+                return Err(internal_error!(
+                    "a spec snapshot of a relation without a protocol relation"
+                ));
             }
-            Some(RelClass::Event(EventSource::Stream(_))) if space == Space::Protocol => return Ok(Origin::Stream),
-            Some(_) => return Ok(Origin::Input),
-            None => return Err(internal_error!("unknown relation {rel:?}")),
-        }
-        let none: &[&blossom_ir::core::Rule] = &[];
-        Ok(match self.by_head.get(&(space, rel)) {
-            Some([deductive, inductive, asynchronous]) => Origin::Rules {
-                deductive,
-                inductive,
-                asynchronous,
-            },
-            None => Origin::Rules {
-                deductive: none,
-                inductive: none,
-                asynchronous: none,
-            },
         })
     }
 }

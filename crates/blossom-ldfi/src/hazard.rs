@@ -71,7 +71,7 @@ pub trait Rules {
     fn constant(&self, space: Space, id: ConstId) -> Option<&Value>;
     /// The lattice columns of a lattice-valued relation (empty for a set relation): its rows are merged per key, so a
     /// cell's row changes when a contribution is gained or lost (SEM-100).
-    fn lattice_cols(&self, space: Space, rel: RelId) -> Vec<usize>;
+    fn lattice_cols(&self, space: Space, rel: RelId) -> &[usize];
     /// Whether a relation is durable (a restart keeps it).
     fn durable(&self, space: Space, rel: RelId) -> bool;
     /// A relation's number of columns.
@@ -1215,7 +1215,7 @@ impl<'a> Encoder<'a> {
         // gained (with any value) or lost (the join shrinks).
         let lattice = rules.lattice_cols(space, rel);
         if !lattice.is_empty() {
-            let key = key_pattern(pattern, &lattice);
+            let key = key_pattern(pattern, lattice);
             let gained = self.appear_origin(origin, space, rel, loc, tick, &key)?;
             if gained == Hazard::True {
                 return Ok(Hazard::True);
@@ -1559,7 +1559,7 @@ impl<'a> Encoder<'a> {
             let pat = if lattice.is_empty() {
                 pat
             } else {
-                key_pattern(&pat, &lattice)
+                key_pattern(&pat, lattice)
             };
             if !lattice.is_empty() && !negated {
                 if !self.exists(space, atom.rel, atom_loc, tick, &pat)? {
