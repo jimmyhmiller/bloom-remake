@@ -123,8 +123,9 @@ fn every_schedule_confirms_the_three_broker_verdicts() {
 #[ignore = "full tier"]
 fn every_single_delay_keeps_the_guarantees() {
     // The asynchronous model (S13): any one batch (a channel's, or the stream traffic, between two nodes in a round)
-    // arriving a round late.
+    // arriving a round late. The lineage needs a few hundred of the thousands of schedules (most batches are empty).
     enumerate("TripleDelay");
+    check("TripleDelay");
 }
 
 #[test]
