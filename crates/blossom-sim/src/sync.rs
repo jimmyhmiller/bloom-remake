@@ -63,6 +63,10 @@ pub struct FaultSchedule {
     /// Each crashed node that restarts, and the round it runs again in (after its crash round; crash-recovery,
     /// TEST-037, under [`CrashView::Frozen`] only).
     pub restarts: BTreeMap<NodeId, Tick>,
+    /// Each delayed batch (named like an omission: everything `from` sends `to` in round `send`) and the number of
+    /// rounds after its send it arrives in, at least 2 (the asynchronous model, S13). A stream's delayed flight holds
+    /// back the ones after it on its connection.
+    pub delays: BTreeMap<Omission, u64>,
 }
 
 impl FaultSchedule {
@@ -78,12 +82,20 @@ impl FaultSchedule {
 
     /// The number of faults.
     pub fn len(&self) -> usize {
-        self.omissions.len() + self.crashes.len()
+        self.omissions.len() + self.crashes.len() + self.delays.len()
     }
 
     /// Whether there are no faults.
     pub fn is_empty(&self) -> bool {
-        self.omissions.is_empty() && self.crashes.is_empty()
+        self.omissions.is_empty() && self.crashes.is_empty() && self.delays.is_empty()
+    }
+
+    /// The rounds after its send the batch `from -> to` sent in round `send` arrives in: 1, unless delayed.
+    pub fn delay(&self, from: NodeId, to: NodeId, send: Tick) -> u64 {
+        if from == to {
+            return 1;
+        }
+        self.delays.get(&Omission { from, to, send }).copied().unwrap_or(1)
     }
 }
 
@@ -281,7 +293,16 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
         let mut held: Vec<std::collections::BTreeSet<RelId>> = vec![std::collections::BTreeSet::new(); n];
         // Each node's blobs, kept for the whole run (a simulation is short): what its later ticks read.
         let mut blobs: Vec<blossom_value::BlobMap> = vec![blossom_value::BlobMap::default(); n];
-        let mut inbox: Vec<Vec<Delivery>> = vec![Vec::new(); n];
+        // What arrives in each later round, per node: a batch arrives a round after its send, or later when delayed.
+        let mut arriving: BTreeMap<Tick, Vec<Vec<Delivery>>> = BTreeMap::new();
+        for (batch, d) in &faults.delays {
+            if *d < 2 {
+                return Err(internal_error!(
+                    "a delay of {d} round(s) for {batch:?}: a delayed batch arrives 2 or more rounds after its send"
+                )
+                .into());
+            }
+        }
         let empty: Vec<(RelId, Row)> = Vec::new();
         let no_ingress: Vec<Ingress> = Vec::new();
         for t in 0..=config.last.0 {
@@ -305,7 +326,11 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
             )> = Vec::new();
             let mut round = Vec::with_capacity(n);
             let mut next_carried = Vec::with_capacity(n);
-            let mut next_inbox: Vec<Vec<Delivery>> = vec![Vec::new(); n];
+            let mut inbox = arriving.remove(&tick).unwrap_or_else(|| vec![Vec::new(); n]);
+            for slot in &mut inbox {
+                slot.sort();
+                slot.dedup();
+            }
             for (i, (state, delivered)) in carried.iter().zip(inbox.iter()).enumerate() {
                 let node = NodeId(u32::try_from(i).map_err(|_| internal_error!("node index overflow"))?);
                 if halted.get(i).copied().unwrap_or(false) {
@@ -436,7 +461,8 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                         // A crashed node sends nothing to other nodes (both crash views).
                         continue;
                     }
-                    let fate = if t == config.last.0 {
+                    let arrival = Tick(t + faults.delay(node, send.to, tick));
+                    let fate = if arrival > config.last {
                         Fate::AfterEnd
                     } else if !own
                         && faults.omissions.contains(&Omission {
@@ -447,10 +473,13 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                     {
                         Fate::Lost
                     } else {
-                        Fate::Delivered(Tick(t + 1))
+                        Fate::Delivered(arrival)
                     };
-                    if let Fate::Delivered(_) = fate
-                        && let Some(slot) = next_inbox.get_mut(send.to.0 as usize)
+                    if let Fate::Delivered(at) = fate
+                        && let Some(slot) = arriving
+                            .entry(at)
+                            .or_insert_with(|| vec![Vec::new(); n])
+                            .get_mut(send.to.0 as usize)
                     {
                         slot.push(Delivery {
                             rel: send.rel,
@@ -507,10 +536,6 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                     ran: true,
                 });
             }
-            for slot in &mut next_inbox {
-                slot.sort();
-                slot.dedup();
-            }
             if let Some(f) = fabric.as_mut() {
                 let next = Tick(t + 1);
                 let at = now_at(config.round, next)?;
@@ -526,11 +551,11 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                     f.release(*node, tick, host, retired, node_blobs)?;
                 }
                 let lost = |from: NodeId, to: NodeId| faults.omissions.contains(&Omission { from, to, send: tick });
-                f.deliver(tick, &up_next, &lost, at)?;
+                let delay = |from: NodeId, to: NodeId| faults.delay(from, to, tick);
+                f.deliver(tick, &up_next, &lost, &delay, at)?;
             }
             run.rounds.push(round);
             carried = next_carried;
-            inbox = next_inbox;
         }
         run.messages.sort();
         if let Some(f) = fabric {
@@ -677,6 +702,41 @@ mod tests {
                 .filter(|m| m.send == Tick(3))
                 .all(|m| m.fate == Fate::AfterEnd)
         );
+    }
+
+    #[test]
+    fn a_delayed_batch_arrives_later_and_a_later_one_overtakes_it() {
+        let eval = Pinger { nodes: 2 };
+        let world = SyncWorld::new(&eval, 2);
+        let mut faults = FaultSchedule::default();
+        let batch = |send| Omission {
+            from: NodeId(0),
+            to: NodeId(1),
+            send: Tick(send),
+        };
+        // 0's batch to 1 sent at 1 arrives at 4, after the one sent at 2 (at 3); the one sent at 4 would arrive at 7.
+        faults.delays.insert(batch(1), 3);
+        faults.delays.insert(batch(4), 3);
+        let mut cfg = config(CrashView::MollyContinue);
+        cfg.last = Tick(5);
+        let run = world.run(&cfg, &faults).unwrap();
+        assert_eq!(senders(&run, 2, 1), [1], "0's batch of 1 is delayed; 1's own arrives");
+        assert_eq!(senders(&run, 3, 1), [0, 1], "0's batch of 2 overtook it");
+        assert_eq!(
+            senders(&run, 4, 1),
+            [0, 1],
+            "0's batches of 1 and 3 (the same row, once)"
+        );
+        assert_eq!(senders(&run, 5, 1), [1], "0's batch of 4 is delayed past the run");
+        let fate = |send| {
+            run.messages
+                .iter()
+                .find(|m| m.from == NodeId(0) && m.to == NodeId(1) && m.send == Tick(send))
+                .map(|m| m.fate)
+        };
+        assert_eq!(fate(1), Some(Fate::Delivered(Tick(4))));
+        assert_eq!(fate(2), Some(Fate::Delivered(Tick(3))));
+        assert_eq!(fate(4), Some(Fate::AfterEnd));
     }
 
     /// Node 0 carries a durable row and a volatile row per tick it ran, and records what it saw: the incarnation,

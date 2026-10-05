@@ -119,12 +119,14 @@ pub struct ConnRef {
     pub as_of: Tick,
 }
 
-/// A connection of a run: end 0 dialed in round `dialed`, both ends opened in the next; and every round something
-/// crossed it, from one node to the other (a lost message in such a round resets it).
+/// A connection of a run: end 0 dialed in round `dialed`, both ends opened in round `opened` (the next, unless the
+/// dial was delayed); and every round something crossed it, from one node to the other (a lost message in such a
+/// round resets it).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Connection {
     pub ends: [ConnEnd; 2],
     pub dialed: Tick,
+    pub opened: Tick,
     pub traffic: BTreeSet<(NodeId, NodeId, Tick)>,
 }
 
@@ -186,6 +188,15 @@ enum Flight {
     },
 }
 
+/// A flight sent in round `sent` that a delay holds until a later round (or that waits behind a delayed one on its
+/// connection); a dial remembers its node's incarnation, and is lost if the node went down before it arrives.
+#[derive(Debug)]
+struct InFlight {
+    sent: Tick,
+    flight: Flight,
+    incarnation: u64,
+}
+
 /// What a paused end has not been given yet.
 #[derive(Debug)]
 enum Held {
@@ -234,6 +245,10 @@ pub struct Fabric<'c> {
     next_conn: Vec<u64>,
     /// What the round's releases sent, in order, for [`Fabric::deliver`].
     flights: Vec<Flight>,
+    /// Flights a delay holds, by the round they arrive in, in the order they were sent; and per connection end, the
+    /// round the latest flight towards it arrives in (a later flight may not overtake it).
+    in_flight: BTreeMap<Tick, Vec<InFlight>>,
+    last_arrival: BTreeMap<(usize, usize), Tick>,
     pub violations: Vec<StreamViolation>,
     /// Every connection made, by pipe index.
     pub connections: Vec<Connection>,
@@ -274,6 +289,8 @@ impl<'c> Fabric<'c> {
             restarts: vec![0; n],
             next_conn: vec![0; n],
             flights: Vec::new(),
+            in_flight: BTreeMap::new(),
+            last_arrival: BTreeMap::new(),
             violations: Vec::new(),
             connections: Vec::new(),
             dials: BTreeSet::new(),
@@ -494,16 +511,43 @@ impl<'c> Fabric<'c> {
         Ok(())
     }
 
-    /// Delivers what the releases of round `tick` sent, at the start of round `tick + 1`. `up_next` says which nodes
-    /// run that round, `lost(from, to)` whether the fault schedule loses what `from` sends `to` in round `tick`,
-    /// and `at` is the clock of round `tick + 1`.
+    /// Delivers, at the start of round `tick + 1`, what arrives then: flights a delay held, and what the releases of
+    /// round `tick` sent that is not delayed. `up_next` says which nodes run that round; `lost(from, to)` whether the
+    /// fault schedule loses what `from` sends `to` in round `tick`, and `delay(from, to)` the rounds after `tick` it
+    /// arrives in (1 unless delayed; a flight never overtakes an earlier one on its connection); `at` is the clock of
+    /// round `tick + 1`.
     pub fn deliver(
         &mut self,
         tick: Tick,
         up_next: &dyn Fn(NodeId) -> bool,
         lost: &dyn Fn(NodeId, NodeId) -> bool,
+        delay: &dyn Fn(NodeId, NodeId) -> u64,
         at: Instant,
     ) -> Result<(), SimError> {
+        let next = Tick(tick.0 + 1);
+        // Flights sent earlier arrive first: on a connection, they were sent first.
+        for held in self.in_flight.remove(&next).unwrap_or_default() {
+            match held.flight {
+                Flight::Towards { p, to, what } => {
+                    if !*side(&self.pipe(p)?.told, to)? {
+                        self.deliver_to(p, to, what)?;
+                    }
+                }
+                Flight::Dial {
+                    from,
+                    stream,
+                    req,
+                    addr,
+                    cause,
+                } => {
+                    // A dial whose node went down before it arrived went down with it.
+                    if self.restarts.get(from.0 as usize).copied() == Some(held.incarnation) {
+                        let no_loss = |_: NodeId, _: NodeId| false;
+                        self.dial(from, held.sent, next, stream, req, &addr, &cause, up_next, &no_loss, at)?;
+                    }
+                }
+            }
+        }
         for f in std::mem::take(&mut self.flights) {
             match f {
                 Flight::Towards { p, to, what } => {
@@ -524,7 +568,13 @@ impl<'c> Fabric<'c> {
                         self.reset(p, "connection reset (a lost message)", &cause, as_of)?;
                         continue;
                     }
-                    self.deliver_to(p, to, what)?;
+                    let mut arrive = Tick(tick.0 + if from == dest { 1 } else { delay(from, dest) });
+                    if let Some(last) = self.last_arrival.get(&(p, to)) {
+                        arrive = arrive.max(*last);
+                    }
+                    self.last_arrival.insert((p, to), arrive);
+                    let what = Flight::Towards { p, to, what };
+                    self.hold_or_deliver(tick, next, arrive, what, 0)?;
                 }
                 Flight::Dial {
                     from,
@@ -532,10 +582,58 @@ impl<'c> Fabric<'c> {
                     req,
                     addr,
                     cause,
-                } => self.dial(from, tick, stream, req, &addr, &cause, up_next, lost, at)?,
+                } => {
+                    let d = match self.target(&addr) {
+                        Some((to, _)) if to != from && !lost(from, to) => delay(from, to),
+                        _ => 1,
+                    };
+                    if d <= 1 {
+                        self.dial(from, tick, next, stream, req, &addr, &cause, up_next, lost, at)?;
+                    } else {
+                        let incarnation = self.restarts.get(from.0 as usize).copied().unwrap_or(0);
+                        let what = Flight::Dial {
+                            from,
+                            stream,
+                            req,
+                            addr,
+                            cause,
+                        };
+                        self.hold_or_deliver(tick, next, Tick(tick.0 + d), what, incarnation)?;
+                    }
+                }
             }
         }
         Ok(())
+    }
+
+    /// Delivers a flight towards a connection end now when it arrives in round `next`, else holds it until it does.
+    fn hold_or_deliver(
+        &mut self,
+        sent: Tick,
+        next: Tick,
+        arrive: Tick,
+        flight: Flight,
+        incarnation: u64,
+    ) -> Result<(), SimError> {
+        match flight {
+            Flight::Towards { p, to, what } if arrive <= next => self.deliver_to(p, to, what),
+            flight => {
+                self.in_flight.entry(arrive).or_default().push(InFlight {
+                    sent,
+                    flight,
+                    incarnation,
+                });
+                Ok(())
+            }
+        }
+    }
+
+    /// The node and listening stream an address names, when it names one of the deployment.
+    fn target(&self, addr: &str) -> Option<(NodeId, usize)> {
+        let (name, s) = addr.strip_prefix("sim://").and_then(|rest| rest.split_once('/'))?;
+        let n = self.cfg.names.iter().position(|x| &**x == name)?;
+        let n = NodeId(u32::try_from(n).ok()?);
+        Some((n, self.listen_stream(n, s)?))
     }
 
     /// `node` goes down in round `tick`: every connection it has resets, and it forgets them all (a restarted node
@@ -643,6 +741,7 @@ impl<'c> Fabric<'c> {
         &mut self,
         from: NodeId,
         tick: Tick,
+        opened: Tick,
         stream: usize,
         req: u64,
         addr: &str,
@@ -651,12 +750,7 @@ impl<'c> Fabric<'c> {
         lost: &dyn Fn(NodeId, NodeId) -> bool,
         at: Instant,
     ) -> Result<(), SimError> {
-        let target = addr.strip_prefix("sim://").and_then(|rest| rest.split_once('/'));
-        let found = target.and_then(|(name, s)| {
-            let n = self.cfg.names.iter().position(|x| &**x == name)?;
-            let n = NodeId(u32::try_from(n).ok()?);
-            Some((n, self.listen_stream(n, s)?))
-        });
+        let found = self.target(addr);
         let traced = |causes: Vec<Cause>| Trace { causes, as_of: tick };
         if let Some((to, _)) = found
             && to != from
@@ -721,6 +815,7 @@ impl<'c> Fabric<'c> {
                 },
             ],
             dialed: tick,
+            opened,
             traffic: BTreeSet::new(),
         });
         let peer: Arc<str> = Arc::from(format!("sim-pipe-{p}"));

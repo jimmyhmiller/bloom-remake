@@ -583,7 +583,7 @@ fn stream_supports(g: &mut ProvGraph, protocol: &blossom_ir::core::Program, run:
                         _ => return Err(internal_error!("a stream event on a connection without its end").into()),
                     };
                     let [dialer, acceptor] = c.ends;
-                    let opened = Tick(c.dialed.0 + 1);
+                    let opened = c.opened;
                     if kind_of(e.rel) == Some(Kind::Opened) {
                         if dialer.node != acceptor.node {
                             premises.push(Premise::Clock {
