@@ -1,0 +1,9 @@
+{
+  "name": "blossom-web-tests",
+  "private": true,
+  "description": "Playwright tests of the browser host (docs/design/BROWSER.md): build with scripts/build-web.sh, then npx playwright test.",
+  "type": "module",
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}

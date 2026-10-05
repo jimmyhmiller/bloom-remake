@@ -4,3 +4,8 @@
 # test threads the same.
 [env]
 RUST_MIN_STACK = "67108864"
+
+# The browser host (crates/blossom-web, docs/design/BROWSER.md): the evaluator in WebAssembly needs the stack a native
+# evaluation thread gets (`EVAL_STACK_BYTES`), in the module's linear memory.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-zstack-size=67108864"]
