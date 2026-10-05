@@ -607,6 +607,14 @@ fn stream_supports(g: &mut ProvGraph, protocol: &blossom_ir::core::Program, run:
                                 to: acceptor.node,
                                 send: c.dialed,
                             });
+                            // The dial arrives when it did (the asynchronous model: a delay opens it later).
+                            premises.push(Premise::Arrives {
+                                from: dialer.node,
+                                to: acceptor.node,
+                                send: c.dialed,
+                                via: blossom_prov::Via::Streams,
+                                by: tick,
+                            });
                         }
                         premises.push(Premise::Up {
                             node: acceptor.node,
@@ -630,6 +638,17 @@ fn stream_supports(g: &mut ProvGraph, protocol: &blossom_ir::core::Program, run:
                                     from: *from,
                                     to: *to,
                                     send: *send,
+                                });
+                            }
+                            // Every flight the peer sent on the connection before the event arrives by it: one delayed
+                            // past it holds back what follows (the asynchronous model; a stream keeps its order).
+                            if *from == peer.node && *to == node && *send < tick {
+                                premises.push(Premise::Arrives {
+                                    from: *from,
+                                    to: *to,
+                                    send: *send,
+                                    via: blossom_prov::Via::Streams,
+                                    by: tick,
                                 });
                             }
                         }

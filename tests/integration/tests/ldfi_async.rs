@@ -8,7 +8,7 @@ use std::path::Path;
 use blossom_artifact::sim::SimArtifact;
 use blossom_driver::bls::compile_spec_file;
 use blossom_ldfi::report::fault_labels;
-use blossom_ldfi::{FailureSpec, LdfiConfig, LdfiError, Method, Verdict};
+use blossom_ldfi::{FailureSpec, LdfiConfig, Method, Verdict};
 use blossom_sim::spec::SpecSim;
 
 /// `spec` of `fixtures/ldfi/FILE` compiled: its artifact, its failure spec, and its `check ldfi expect …`.
@@ -104,20 +104,33 @@ fn the_lineage_driven_search_finds_the_reordering_and_proves_the_versioned_serve
 }
 
 #[test]
-fn delayed_streams_are_enumerated_and_the_lineage_driven_search_refuses_them_for_now() {
-    // A write delayed past the end of the run loses the value the eager client counts acknowledged.
+fn delays_of_streams_are_found_both_ways() {
+    // A write delayed past the end of the run loses the value the eager client counts acknowledged; the
+    // acknowledging one holds. The lineage reaches the delay through the event's arrival (the flight and those before
+    // it on the connection).
     assert_eq!(enumerate("stream_store.bls", "EagerDelay").0, ["D(C,S,1,streams,+6)"]);
+    assert_eq!(lineage("stream_store.bls", "EagerDelay"), ["D(C,S,1,streams,+6)"]);
     assert!(enumerate("stream_store.bls", "DurableDelay").0.is_empty());
-    let (artifact, fs, _) = compile("stream_store.bls", "EagerDelay");
-    let sim = SpecSim::new(&artifact).unwrap();
-    let mut config = LdfiConfig::new(fs);
-    config.exhaustive_fallback = None;
-    let refused = blossom_ldfi::run(&sim, &config);
-    assert!(matches!(refused, Err(LdfiError::Unimplemented(_))), "{refused:?}");
-    // Deciding by size enumerates it.
-    let report = blossom_ldfi::decide(&sim, &config).unwrap();
-    assert!(matches!(report.method, Method::Enumerated { .. }));
-    assert_eq!(report.verdict, Verdict::Counterexample);
+    assert!(lineage("stream_store.bls", "DurableDelay").is_empty());
+}
+
+#[test]
+fn the_lineage_driven_search_agrees_with_enumeration_under_delays() {
+    // Every asynchronous spec of the fixtures but the program error (which only enumeration anticipates).
+    for (file, spec) in [
+        ("race.bls", "NaiveSync"),
+        ("race.bls", "NaiveAsync"),
+        ("race.bls", "VersionedAsync"),
+        ("stream_store.bls", "DurableDelay"),
+        ("stream_store.bls", "EagerDelay"),
+    ] {
+        let (by_lineage, (by_enumeration, _)) = (lineage(file, spec), enumerate(file, spec));
+        assert_eq!(by_lineage.is_empty(), by_enumeration.is_empty(), "{file} {spec}");
+        assert!(
+            by_enumeration.len() <= by_lineage.len(),
+            "{file} {spec}: {by_lineage:?} vs {by_enumeration:?}"
+        );
+    }
 }
 
 #[test]
