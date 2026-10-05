@@ -66,6 +66,8 @@ pub fn resolve(
 
 /// Resolves the module `path` of the root file (or of a module it uses), instantiated as a program root: the
 /// target of a spec (LANGUAGE §17.2). Its inputs are host-fed, its value parameters take `args` or their defaults.
+/// A one-segment `path` that names no module may name a program file next to the root (`spec S for e03_raft`): its
+/// items are the target, its `param`s bound by `args` as a deployment binds them.
 pub fn resolve_module_root(
     tree: &ModuleTree,
     sources: &SourceDb,
@@ -78,31 +80,64 @@ pub fn resolve_module_root(
     let name = path.last().map_or(Symbol::intern("<spec>"), |i| i.name);
     let mut r = Resolver::new(tree, sources, diags, name, 1, 1);
     let file_scope = r.new_scope(ModScope::empty(FileKey::Root));
-    let Some((file, module)) = r.find_module(file_scope, path) else {
-        let names: Vec<&str> = path.iter().map(Ident::as_str).collect();
-        let span = path.first().map_or(Span::point(tree.root.span.file, 0), |i| i.span);
-        r.error(code!("BLS0200"), span, format!("unknown module `{}`", names.join("::")));
-        return Ok(None);
+    // The target's parts: a module's, or a program file's (its items at its own file level, no header parameters).
+    let target = match r.find_module(file_scope, path) {
+        Some((file, module)) => Target {
+            file,
+            name: module.name.as_str().to_owned(),
+            generics: &module.generics,
+            params: &module.params,
+            protocols: &module.protocols,
+            items: &module.items,
+            own_items: Some(&module.items),
+        },
+        None => match path {
+            [one] if tree.modules.get(one.as_str()).is_some_and(|f| f.header.is_some()) => {
+                let items = tree.modules.get(one.as_str()).map_or(&[][..], |f| f.items.as_slice());
+                Target {
+                    file: FileKey::Module(one.as_str().to_owned()),
+                    name: one.as_str().to_owned(),
+                    generics: &[],
+                    params: &[],
+                    protocols: &[],
+                    items,
+                    own_items: None,
+                }
+            }
+            _ => {
+                let names: Vec<&str> = path.iter().map(Ident::as_str).collect();
+                let span = path.first().map_or(Span::point(tree.root.span.file, 0), |i| i.span);
+                let message = match path {
+                    [one] if tree.modules.contains_key(one.as_str()) => format!(
+                        "`{0}.bls` is not a program (it has no `program` header) and declares no module `{0}`",
+                        one.as_str()
+                    ),
+                    _ => format!("unknown module `{}`", names.join("::")),
+                };
+                r.error(code!("BLS0200"), span, message);
+                return Ok(None);
+            }
+        },
     };
     let root = r.new_scope(ModScope {
-        own_items: Some(&module.items),
-        ..ModScope::empty(file)
+        own_items: target.own_items,
+        ..ModScope::empty(target.file.clone())
     });
-    if module.generics.len() != type_args.len() {
+    if target.generics.len() != type_args.len() {
         let span = path.first().map_or(Span::point(tree.root.span.file, 0), |i| i.span);
         r.error(
             code!("BLS0301"),
             span,
             format!(
                 "`{}` takes {} type argument(s), {} given",
-                module.name.as_str(),
-                module.generics.len(),
+                target.name,
+                target.generics.len(),
                 type_args.len()
             ),
         );
         return Ok(None);
     }
-    for (g, a) in module.generics.iter().zip(type_args) {
+    for (g, a) in target.generics.iter().zip(type_args) {
         let Some(t) = r.resolve_type(file_scope, a) else {
             return r.finish().map(|_| None);
         };
@@ -121,7 +156,7 @@ pub fn resolve_module_root(
             ),
         }
     }
-    for p in &module.params {
+    for p in target.params {
         match &p.kind {
             ast::ModParamKind::Value { ty, default } => {
                 let Some(t) = r.resolve_type(root, ty) else { continue };
@@ -170,22 +205,34 @@ pub fn resolve_module_root(
         r.param_bindings.insert(name.as_str().to_owned(), binding);
         body_params.push((name, e.span));
     }
-    for proto in &module.protocols {
+    for proto in target.protocols {
         r.protocol_interfaces(root, proto, None);
     }
     r.spec = spec;
-    r.process(root, &module.items, None);
+    r.process(root, target.items, None);
     for (name, span) in body_params {
         if !r.params_declared.contains(name.as_str()) {
             r.error(
                 code!("BLS0205"),
                 span,
-                format!("`{}` has no parameter `{}`", module.name.as_str(), name.as_str()),
+                format!("`{}` has no parameter `{}`", target.name, name.as_str()),
             );
         }
     }
     let spec = r.spec.take();
     Ok(r.finish()?.map(|h| (h, spec)))
+}
+
+/// What a spec targets: a module, or a program file.
+struct Target<'a> {
+    file: FileKey,
+    name: String,
+    generics: &'a [ast::GenericParam],
+    params: &'a [ast::ModParam],
+    protocols: &'a [ast::Type],
+    items: &'a [ast::Item],
+    /// The module's own items (a program file's items are its file level).
+    own_items: Option<&'a [ast::Item]>,
 }
 
 /// Resolves a spec's views (`items`) in spec mode, over the target `target` (whose types and roles the spec program
