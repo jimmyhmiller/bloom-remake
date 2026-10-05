@@ -30,8 +30,18 @@ pub fn compile_file_with(
     nodes: &[NodeSpec],
     params: &std::collections::BTreeMap<String, api::ParamBinding>,
 ) -> (Result<(BlsArtifact, Diagnostics), BlsError>, SourceDb) {
+    compile_with_loader(root, nodes, params, &mut FsLoader)
+}
+
+/// [`compile_file_with`] from any [`Loader`]: sources in memory (an editor, the browser) as well as on disk.
+pub fn compile_with_loader(
+    root: &str,
+    nodes: &[NodeSpec],
+    params: &std::collections::BTreeMap<String, api::ParamBinding>,
+    loader: &mut dyn Loader,
+) -> (Result<(BlsArtifact, Diagnostics), BlsError>, SourceDb) {
     let mut sources = SourceDb::new();
-    let result = api::compile_with(root, nodes, params, &mut FsLoader, &mut sources).and_then(|(artifact, mut diags)| {
+    let result = api::compile_with(root, nodes, params, loader, &mut sources).and_then(|(artifact, mut diags)| {
         let found = analyses(artifact.program.get())?;
         let rejected = found.has_errors();
         for d in found.iter() {

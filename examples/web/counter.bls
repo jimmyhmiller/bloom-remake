@@ -1,0 +1,25 @@
+//! A counter in the browser (docs/design/BROWSER.md): two buttons and the count between them, kept across reloads.
+
+program counter version 1;
+
+include "ui.bls";
+
+durable table count(n: i64) key();
+view current(n = sum!(c default 0i64)) = count(c);
+
+inc: on click(id), current(n) where id == "plus" {
+    upsert count(n + 1i64);
+}
+dec: on click(id), current(n) where id == "minus" {
+    upsert count(n - 1i64);
+}
+
+page: while current(n) {
+    emit elem("counter", "", 0, "div");
+    emit elem("minus", "counter", 0, "button");
+    emit text("minus", "-");
+    emit elem("value", "counter", 1, "span");
+    emit text("value", n.to_string());
+    emit elem("plus", "counter", 2, "button");
+    emit text("plus", "+");
+}

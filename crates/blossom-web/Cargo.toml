@@ -1,0 +1,30 @@
+[package]
+name = "blossom-web"
+description = "Blossom in the browser: a host that compiles a program in memory, runs it round by round on the engine, diffs its page relations into DOM patches, persists its durable tables, and explains its elements; with a wasm-bindgen API for the page."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+blossom-base.workspace = true
+blossom-value.workspace = true
+blossom-ir.workspace = true
+blossom-artifact.workspace = true
+blossom-front.workspace = true
+blossom-driver.workspace = true
+blossom-engine.workspace = true
+blossom-oracle.workspace = true
+blossom-wire.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.114"
+
+[lints]
+workspace = true

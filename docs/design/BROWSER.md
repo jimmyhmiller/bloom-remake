@@ -33,7 +33,7 @@ LANGUAGE §16.5 describes for any host.
 | `text(id: String, s: String)` | Text inside an element, before its children. |
 | `focus(id: String)` | The element to focus after the round's changes (with its text selected at the end). |
 
-**The world (inputs).** The host feeds the events a program declares (an event the program does not declare is not
+**The world (inputs).** The host feeds the events a program declares and reads (an event no rule reads is not
 listened to), each into a round of its own:
 
 | Input | When |
@@ -41,7 +41,7 @@ listened to), each into a round of its own:
 | `boot()` | The first round (as everywhere). |
 | `route(hash: String)` | At boot and on every `hashchange`: `location.hash`. |
 | `click(id: String)`, `dblclick(id: String)` | On an element with an `id`, or its nearest ancestor with one. |
-| `input(id: String, value: String)` | Typing in a text field. |
+| `typed(id: String, value: String)` | Typing in a text field (the DOM's `input` event; `input` is a keyword). |
 | `keydown(id: String, key: String, value: String)` | A key (DOM `key` names: `Enter`, `Escape`, …), with the field's value. |
 | `blur(id: String, value: String)` | A field loses focus. |
 | `change(id: String, checked: bool)` | A checkbox changes. |
@@ -50,8 +50,10 @@ listened to), each into a round of its own:
 
 ### A round
 
-One event, one round: the host steps the engine (`Executor::step`, incremental) with the event's row, observes the
-page outputs, diffs them against the previous round's, and hands the DOM a list of patches (create, move, set or
+An event runs until its effects settle: the host steps the engine (incremental) with the event's row, then steps it
+without events while the state changes (a write takes effect in the next round, so an `upsert` in an event's round
+shows on the page a round later), at most 1000 rounds. It then diffs the page against the one before the event and
+hands the DOM a list of patches (create, move, set or
 remove an attribute or text, remove, focus). Elements are keyed by `id`, so an element keeps its DOM node (and its
 focus and caret) across rounds while its id stays. Rounds are run one at a time; an event that arrives while a round
 runs waits for it.
