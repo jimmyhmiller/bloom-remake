@@ -110,6 +110,8 @@ fn every_schedule_of_one_broker_keeps_an_acknowledged_batch() {
 fn every_schedule_confirms_the_three_broker_verdicts() {
     enumerate("TripleRestart");
     enumerate("TripleOneLoss");
+    // Two partitions, a batch to each (LDFI holds too, in 377 runs: as many as there are schedules).
+    enumerate("TriplePartitionsRestart");
     // The smallest counterexample is the one LDFI finds: the leader crashes right after it answered.
     assert_eq!(enumerate("TripleRestartAcks1"), ["C(B2,18)", "R(B2,21)"]);
 }
