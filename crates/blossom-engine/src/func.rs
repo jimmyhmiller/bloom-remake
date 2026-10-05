@@ -194,7 +194,9 @@ fn each<'f>(
 
 /// A library call's argument `i`, evaluated.
 fn arg_value(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr], i: usize) -> ExprResult<Value> {
-    let e = args.get(i).ok_or_else(|| bug(format!("{f:?} is missing argument {i}")))?;
+    let e = args
+        .get(i)
+        .ok_or_else(|| bug(format!("{f:?} is missing argument {i}")))?;
     eval_in(cx, env, e)
 }
 
@@ -216,7 +218,10 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
     };
     match f {
         LibFn::Range => {
-            let (lo, hi) = (as_u64(arg_value(cx, env, f, args, 0)?)?, as_u64(arg_value(cx, env, f, args, 1)?)?);
+            let (lo, hi) = (
+                as_u64(arg_value(cx, env, f, args, 0)?)?,
+                as_u64(arg_value(cx, env, f, args, 1)?)?,
+            );
             let n = hi.saturating_sub(lo);
             cx.fuel.spend(n)?;
             let mut out = Vec::with_capacity(usize::try_from(n).unwrap_or(0).min(1 << 16));
@@ -375,7 +380,9 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
             }
             Ok(Value::Vec(out.into()))
         }
-        LibFn::VecToSet => Ok(Value::Set(Arc::new(arg_vector(cx, env, f, args, 0)?.iter().cloned().collect()))),
+        LibFn::VecToSet => Ok(Value::Set(Arc::new(
+            arg_vector(cx, env, f, args, 0)?.iter().cloned().collect(),
+        ))),
         LibFn::VecToMap => {
             let mut m = std::collections::BTreeMap::new();
             for pair in arg_vector(cx, env, f, args, 0)?.iter() {
@@ -421,7 +428,10 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
             let Value::Bytes(b) = arg_value(cx, env, f, args, 0)? else {
                 return Err(bug("`slice` of a non-Bytes value".into()));
             };
-            let (lo, hi) = (as_u64(arg_value(cx, env, f, args, 1)?)?, as_u64(arg_value(cx, env, f, args, 2)?)?);
+            let (lo, hi) = (
+                as_u64(arg_value(cx, env, f, args, 1)?)?,
+                as_u64(arg_value(cx, env, f, args, 2)?)?,
+            );
             let len = b.len() as u64;
             if lo > hi || hi > len {
                 return Ok(Value::Option(None));
@@ -448,6 +458,14 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
             Value::Str(s) => Ok(Value::Str(Arc::from(s.to_lowercase()))),
             other => Err(bug(format!("`to_lowercase` of {other:?}"))),
         },
+        LibFn::StrTrim => match arg_value(cx, env, f, args, 0)? {
+            Value::Str(s) => Ok(Value::Str(Arc::from(s.trim()))),
+            other => Err(bug(format!("`trim` of {other:?}"))),
+        },
+        LibFn::IntToString => match arg_value(cx, env, f, args, 0)? {
+            Value::Int(i) => Ok(Value::Str(Arc::from(i.to_string()))),
+            other => Err(bug(format!("`to_string` of {other:?}"))),
+        },
         LibFn::DurationFromMillis => match arg_value(cx, env, f, args, 0)? {
             Value::Int(IntValue::I64(n)) => n
                 .checked_mul(1_000_000)
@@ -464,7 +482,9 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
             other => Err(bug(format!("`as_millis` of {other:?}"))),
         },
         LibFn::StrParseI64 => match arg_value(cx, env, f, args, 0)? {
-            Value::Str(s) => Ok(some_or_none(s.parse::<i64>().ok().map(|n| Value::Int(IntValue::I64(n))))),
+            Value::Str(s) => Ok(some_or_none(
+                s.parse::<i64>().ok().map(|n| Value::Int(IntValue::I64(n))),
+            )),
             other => Err(bug(format!("`parse_i64` of {other:?}"))),
         },
         LibFn::StrToUtf8 => match arg_value(cx, env, f, args, 0)? {
@@ -518,7 +538,9 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
                 Value::Int(IntValue::U64(next)),
             ]))))))
         }
-        LibFn::BytesUvarint => Ok(Value::Bytes(write_uvarint(as_u64(arg_value(cx, env, f, args, 0)?)?).into())),
+        LibFn::BytesUvarint => Ok(Value::Bytes(
+            write_uvarint(as_u64(arg_value(cx, env, f, args, 0)?)?).into(),
+        )),
         LibFn::BytesVarint => match arg_value(cx, env, f, args, 0)? {
             Value::Int(IntValue::I64(x)) => {
                 let zz = if x >= 0 {
@@ -543,7 +565,10 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
             let Value::Blob(r) = arg_value(cx, env, f, args, 0)? else {
                 return Err(bug("`read` of a non-Blob value".into()));
             };
-            let (lo, hi) = (as_u64(arg_value(cx, env, f, args, 1)?)?, as_u64(arg_value(cx, env, f, args, 2)?)?);
+            let (lo, hi) = (
+                as_u64(arg_value(cx, env, f, args, 1)?)?,
+                as_u64(arg_value(cx, env, f, args, 2)?)?,
+            );
             // Handles are made only from their bytes: a missing blob is a host bug.
             let b = cx
                 .blob(&r)

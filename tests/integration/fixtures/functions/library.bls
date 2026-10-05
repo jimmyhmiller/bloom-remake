@@ -201,5 +201,8 @@ view v_generic(b, x) = e(n, s, b),
              first_or(s.split_whitespace(), "none"), first_or([n % 5, n], 9), read_list(b, 0, read_u8));
 /// A `match` in a rule's `let`: its arms' variables are the arms' own (S8: they made the rule unbindable).
 view v_match(s, x) = e(_, s, _), let x = match s.parse_i64() { Some(k) if k < 100 => k + 1, Some(k) => k, None => 0 };
+/// Strings (S14): trimmed, empty when trimmed, with a suffix (`++`), and numbers as text.
+view v_strings(s, x) = e(n, s, _),
+    let x = (s.trim(), s.trim() == "", s.trim() ++ "!", n.to_string(), (0i64 - n as i64).to_string());
 /// Decimal parsing, of the words and of the number as text.
 view v_parse(s, x) = e(n, s, _), let x = (s.parse_i64(), s.to_lowercase().parse_i64());

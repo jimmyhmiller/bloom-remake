@@ -3446,6 +3446,8 @@ impl Checker<'_> {
             (_, Some(TypeDef::Str), "split_whitespace") => (Builtin::Lib(LibFn::StrSplitWhitespace), None, 0),
             (_, Some(TypeDef::Str), "to_lowercase") => (Builtin::Lib(LibFn::StrToLowercase), None, 0),
             (_, Some(TypeDef::Str), "to_utf8") => (Builtin::Lib(LibFn::StrToUtf8), None, 0),
+            (_, Some(TypeDef::Str), "trim") => (Builtin::Lib(LibFn::StrTrim), None, 0),
+            (_, Some(TypeDef::Int(_)), "to_string") => (Builtin::Lib(LibFn::IntToString), None, 0),
             (_, Some(TypeDef::Str), "parse_i64") => (Builtin::Lib(LibFn::StrParseI64), None, 0),
             (_, Some(TypeDef::Duration), "as_millis") => (Builtin::Lib(LibFn::DurationAsMillis), None, 0),
             (_, Some(TypeDef::Instant), "as_millis") => (Builtin::Lib(LibFn::InstantAsMillis), None, 0),
@@ -3699,7 +3701,8 @@ impl Checker<'_> {
                 recv
             }
             (_, Builtin::Lib(LibFn::StrSplitWhitespace)) => self.bound(Shape::Vec(recv)),
-            (_, Builtin::Lib(LibFn::StrToLowercase)) => recv,
+            (_, Builtin::Lib(LibFn::StrToLowercase | LibFn::StrTrim)) => recv,
+            (_, Builtin::Lib(LibFn::IntToString)) => self.con(&mut hir.types, TypeDef::Str),
             (_, Builtin::Lib(LibFn::StrToUtf8)) => self.con(&mut hir.types, TypeDef::Bytes),
             (_, Builtin::Lib(LibFn::DurationAsMillis | LibFn::InstantAsMillis)) => {
                 self.con(&mut hir.types, TypeDef::Int(IntTy::I64))
