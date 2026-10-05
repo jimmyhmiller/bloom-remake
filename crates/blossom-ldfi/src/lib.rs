@@ -21,6 +21,7 @@ pub mod explain;
 pub mod faults;
 pub mod hazard;
 pub mod lineage;
+pub mod patterns;
 pub mod reach;
 pub mod report;
 pub mod shared;

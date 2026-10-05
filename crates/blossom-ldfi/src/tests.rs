@@ -58,9 +58,11 @@ fn clock(from: NodeId, to: NodeId, send: u64) -> Premise {
 fn extensions(g: &ProvGraph, spec: &FailureSpec, seed: FaultSchedule, target: GoalId) -> BTreeSet<Vec<String>> {
     let preds = Preds::default();
     let mut solver = select_backend("cadical-plain").unwrap();
+    let patterns = crate::patterns::Patterns::new();
     let setting = crate::hazard::Setting {
         frozen: false,
         spec,
+        patterns: &patterns,
         preds: &preds,
         neg: crate::NegSupport::Conservative,
         rules: None,
