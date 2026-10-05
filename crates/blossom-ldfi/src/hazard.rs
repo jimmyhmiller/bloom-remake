@@ -737,6 +737,8 @@ pub struct Encoder<'a> {
     seed_crashes: BTreeMap<NodeId, Tick>,
     /// The run's own omissions: what they lose the run already lost.
     seed_omissions: BTreeSet<Omission>,
+    /// The run's own delays: what they delay already arrived when it did (one length per batch).
+    seed_delays: BTreeSet<blossom_sim::Delayed>,
     /// Whether a stream event can appear at a node and tick, and whether traffic can leave a node in a tick.
     stream_memo: BTreeMap<(NodeId, Tick), Hazard>,
     traffic_memo: BTreeMap<(NodeId, Tick), Hazard>,
@@ -768,6 +770,7 @@ impl<'a> Encoder<'a> {
         Ok(Encoder {
             seed_crashes: seed.crashes.clone(),
             seed_omissions: seed.omissions.clone(),
+            seed_delays: seed.delays.keys().copied().collect(),
             stream_memo: BTreeMap::new(),
             traffic_memo: BTreeMap::new(),
             frozen,
@@ -1424,6 +1427,9 @@ impl<'a> Encoder<'a> {
                                     },
                                     path: blossom_sim::Path::Channel(rel),
                                 };
+                                if self.seed_delays.contains(&key) || self.seed_omissions.contains(&key.batch) {
+                                    continue;
+                                }
                                 let delay = self.atoms.delay(key, d);
                                 if delay == Hazard::False {
                                     continue;
@@ -1487,8 +1493,25 @@ impl<'a> Encoder<'a> {
                                 continue;
                             }
                             let lost = e.atoms.omission(o);
-                            let lost = e.and(vec![lost, traffic])?;
+                            let lost = e.and(vec![lost, traffic.clone()])?;
                             options.push(lost);
+                        }
+                        // The asynchronous model: a flight towards `node` delayed (it, or what it holds back on its
+                        // connection, arrives in another round).
+                        let key = blossom_sim::Delayed {
+                            batch: o,
+                            path: blossom_sim::Path::Streams,
+                        };
+                        if to == node && !e.seed_delays.contains(&key) {
+                            let mut delays = Vec::new();
+                            for d in 2..=e.spec.delay.unwrap_or(1) {
+                                delays.push(e.atoms.delay(key, d));
+                            }
+                            let delayed = e.or(delays)?;
+                            if delayed != Hazard::False {
+                                let traffic = e.traffic(from, to, send)?;
+                                options.push(e.and(vec![delayed, traffic])?);
+                            }
                         }
                     }
                 }
