@@ -16,6 +16,7 @@ PINNED=(
   "cargo-deny 0.20.2 cargo-deny"
   "cargo-hack 0.6.45 cargo-hack"
   "cargo-nextest 0.9.146 cargo-nextest"
+  "wasm-bindgen-cli 0.2.114 wasm-bindgen" # the browser host's glue (scripts/build-web.sh); matches crates/blossom-web
 )
 
 check_only=0
@@ -30,9 +31,11 @@ installed_version() {
   # Prints the installed version of $1 (a binary in .tools/bin), or nothing.
   local bin="$TOOLS/bin/$1"
   [ -x "$bin" ] || return 0
-  # Every pinned tool answers `<bin> <subcommand> --version` with "<name> <version>".
-  local sub="${1#cargo-}"
-  "$bin" "$sub" --version 2>/dev/null | awk '{print $2}' | head -n1
+  # A cargo subcommand answers `<bin> <subcommand> --version`, a plain tool `<bin> --version`, with "<name> <version>".
+  case "$1" in
+    cargo-*) "$bin" "${1#cargo-}" --version 2>/dev/null | awk '{print $2}' | head -n1 ;;
+    *) "$bin" --version 2>/dev/null | awk '{print $2}' | head -n1 ;;
+  esac
 }
 
 missing=0
