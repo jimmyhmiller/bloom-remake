@@ -771,6 +771,36 @@ fn a_spec_targets_a_program_file_next_to_it_and_binds_its_params() {
 }
 
 #[test]
+fn the_asynchronous_fault_model_needs_its_delay_and_only_it_takes_one() {
+    const TARGET: &str = "program p version 1;\nrole R;\n\
+                          at R { input go(k: u64); table seen(k: u64); a: on go(k) { emit seen(k); } }\n";
+    let with = |faults: &'static str| -> Vec<String> {
+        let spec: &'static str = Box::leak(
+            format!("spec S for p {{\n nodes A;\n assign R = [A];\n view post(k) = seen(k) @ _;\n faults {{ {faults} }}\n}}\n")
+                .into_boxed_str(),
+        );
+        spec_codes(vec![("specs.bls", spec), ("p.bls", TARGET)], "S")
+    };
+    let ok = Vec::<String>::new();
+    assert_eq!(with("eot: 6, eff: 3, crashes: 0, model: async, delay: 3"), ok);
+    assert_eq!(
+        with("eot: 6, eff: 3, crashes: 0, model: async, delay: 2, delays: 2"),
+        ok
+    );
+    assert_eq!(with("eot: 6, eff: 3, crashes: 0, model: sync"), ok);
+    // No delay for the asynchronous model; a delay or a budget without it; a delay of one round; an unknown model.
+    for bad in [
+        "eot: 6, eff: 3, crashes: 0, model: async",
+        "eot: 6, eff: 3, crashes: 0, delay: 3",
+        "eot: 6, eff: 3, crashes: 0, model: sync, delays: 2",
+        "eot: 6, eff: 3, crashes: 0, model: async, delay: 1",
+        "eot: 6, eff: 3, crashes: 0, model: partial",
+    ] {
+        assert_eq!(with(bad), ["BLS0900"], "{bad}");
+    }
+}
+
+#[test]
 fn a_textual_include_brings_in_the_files_items_recursively() {
     let files = vec![
         (

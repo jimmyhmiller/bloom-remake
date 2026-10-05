@@ -277,3 +277,38 @@ fn crash_reads_depend_on_times_and_the_runs_own_crashes() {
     seed3.crashes.insert(B, Tick(3));
     assert_eq!(extensions(&g3, &spec, seed3, r), set(&[&["C(b,2)"]]));
 }
+
+#[test]
+fn the_asynchronous_model_admits_delays_within_its_bounds_and_canonicalizes_them() {
+    let (a, b) = (NodeId(0), NodeId(1));
+    let batch = |from, to, send| Omission {
+        from,
+        to,
+        send: Tick(send),
+    };
+    assert!(FailureSpec::new(8, 4, 1, 2).unwrap().with_delays(1, 1).is_err());
+    let spec = FailureSpec::new(8, 4, 1, 2).unwrap().with_delays(3, 1).unwrap();
+    // A batch between two nodes sent before EFF, by 2 or 3 rounds.
+    assert!(spec.delay_allowed(a, b, Tick(1), 2) && spec.delay_allowed(a, b, Tick(3), 3));
+    assert!(!spec.delay_allowed(a, b, Tick(1), 1) && !spec.delay_allowed(a, b, Tick(1), 4));
+    assert!(!spec.delay_allowed(a, b, Tick(4), 2) && !spec.delay_allowed(a, a, Tick(1), 2));
+    let mut one = FaultSchedule::default();
+    one.delays.insert(batch(a, b, 1), 3);
+    assert!(spec.admits(&one));
+    assert_eq!(labels(&one, &name), ["D(a,b,1,+3)"]);
+    let mut two = one.clone();
+    two.delays.insert(batch(b, a, 2), 2);
+    assert!(!spec.admits(&two), "over the budget of one delay");
+    let mut both = one.clone();
+    both.omissions.insert(batch(a, b, 1));
+    assert!(!spec.admits(&both), "a batch both lost and delayed");
+    // Canonically, a lost batch is not also delayed, and a crashed sender delays nothing.
+    let lost = spec.canonical(both);
+    assert!(lost.delays.is_empty() && lost.omissions.len() == 1);
+    let mut crashed = one.clone();
+    crashed.crashes.insert(a, Tick(1));
+    assert!(spec.canonical(crashed).delays.is_empty());
+    // The synchronous model delays nothing.
+    let sync = FailureSpec::new(8, 4, 1, 2).unwrap();
+    assert!(!sync.delay_allowed(a, b, Tick(1), 2) && !sync.admits(&one));
+}

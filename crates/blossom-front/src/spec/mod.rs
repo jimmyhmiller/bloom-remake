@@ -55,6 +55,10 @@ pub struct Faults {
     pub restart: Option<u64>,
     /// `omissions: k`: at most `k` lost messages in a fault set.
     pub omissions: Option<u32>,
+    /// `model: async, delay: d`: a batch may arrive up to `d` rounds after its send (S13); `None`: `model: sync`.
+    pub delay: Option<u64>,
+    /// `delays: k`: at most `k` delayed batches in a fault set (asynchronous model; 1 when not given).
+    pub delays: u32,
 }
 
 /// A spec compiled with its target.
@@ -854,6 +858,11 @@ fn parse_faults(opts: &[(Ident, ast::Expr)], span: Span, diags: &mut Diagnostics
     let mut crashes = None;
     let mut restart = None;
     let mut omissions = None;
+    let mut asynchronous = false;
+    let mut delay: Option<(u64, Span)> = None;
+    let mut delays: Option<(u32, Span)> = None;
+    // Whether `delay` was written at all (an invalid one is reported once, not again as missing).
+    let mut delay_written = false;
     for (k, e) in opts {
         let int = || match &e.kind {
             ExprKind::Lit(LitValue::Int { value, .. }) => u64::try_from(*value).ok(),
@@ -880,30 +889,58 @@ fn parse_faults(opts: &[(Ident, ast::Expr)], span: Span, diags: &mut Diagnostics
                     ExprKind::Path(p, _) if p.len() == 1 => p.first().map(Ident::as_str),
                     _ => None,
                 };
-                if model != Some("sync") {
-                    diags.push(
-                        Diagnostic::not_implemented(
-                            blossom_base::FeatureId("TEST-001"),
-                            "the asynchronous fault model under LDFI",
-                            "the Blossom frontend (slice 2)",
-                        )
-                        .with_primary(e.span),
-                    );
+                match model {
+                    Some("sync") => asynchronous = false,
+                    Some("async") => asynchronous = true,
+                    _ => diags.push(
+                        Diagnostic::new(code!("BLS0900"), "the fault `model` is `sync` or `async`")
+                            .with_primary(e.span),
+                    ),
                 }
             }
             "round" => {}
-            "delay" => diags.push(
-                Diagnostic::not_implemented(
-                    blossom_base::FeatureId("TEST-001"),
-                    "`delay`",
-                    "the Blossom frontend (slice 2)",
-                )
-                .with_primary(e.span),
-            ),
+            "delay" => {
+                delay_written = true;
+                match int().filter(|d| *d >= 2) {
+                    Some(d) => delay = Some((d, e.span)),
+                    None => diags.push(
+                        Diagnostic::new(
+                            code!("BLS0900"),
+                            "`delay` is the most rounds a batch may take, at least 2 (one round is the synchronous \
+                             model)",
+                        )
+                        .with_primary(e.span),
+                    ),
+                }
+            }
+            "delays" => match int().and_then(|n| u32::try_from(n).ok()) {
+                Some(n) => delays = Some((n, e.span)),
+                None => diags.push(
+                    Diagnostic::new(code!("BLS0900"), "`delays` is a number of delayed batches").with_primary(e.span),
+                ),
+            },
             other => diags.push(
                 Diagnostic::new(code!("BLS0900"), format!("unknown `faults` field `{other}`")).with_primary(k.span),
             ),
         }
+    }
+    if asynchronous && !delay_written {
+        diags.push(
+            Diagnostic::new(
+                code!("BLS0900"),
+                "the asynchronous model needs `delay`, the most rounds a batch may take",
+            )
+            .with_primary(span),
+        );
+        return None;
+    }
+    if asynchronous && delay.is_none() {
+        // An invalid `delay`, reported above.
+        return None;
+    }
+    if !asynchronous && let Some((_, at)) = delay.or(delays.map(|(n, s)| (u64::from(n), s))) {
+        diags.push(Diagnostic::new(code!("BLS0900"), "`delay` and `delays` belong to `model: async`").with_primary(at));
+        return None;
     }
     match (eot, eff, crashes) {
         (Some(eot), Some(eff), Some(crashes)) => Some(Faults {
@@ -912,6 +949,8 @@ fn parse_faults(opts: &[(Ident, ast::Expr)], span: Span, diags: &mut Diagnostics
             crashes,
             restart,
             omissions,
+            delay: delay.map(|(d, _)| d),
+            delays: delays.map_or(1, |(n, _)| n),
         }),
         _ => {
             diags.push(

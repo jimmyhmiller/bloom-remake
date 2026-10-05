@@ -106,6 +106,15 @@ fn unsteppable(sim: &SpecSim<'_>, spec: &FailureSpec) -> Option<LdfiError> {
             .into(),
         );
     }
+    if spec.delay.is_some() {
+        return Some(
+            blossom_base::unimplemented_error!(
+                "TEST-001",
+                "stepped certification under the asynchronous model (it steps nodes with a one-round inbox)"
+            )
+            .into(),
+        );
+    }
     if rels
         .iter()
         .any(|r| matches!(&r.class, RelClass::Event(EventSource::Stream(_))))
@@ -131,23 +140,42 @@ pub struct Enumeration {
 }
 
 /// How many fault schedules [`enumerate`] runs for `spec` (saturating): per crash schedule, every set of allowed
-/// omissions within the bound (the ones a crashed sender's own downtime implies included: they are skipped, not
-/// subtracted).
+/// omissions within the bound and, under the asynchronous model, every way to delay at most `max_delays` of the
+/// other batches (the ones a crashed sender's own downtime implies included: they are skipped, not subtracted).
 pub fn schedule_count(spec: &FailureSpec) -> u128 {
     let m = omission_candidates(spec).len() as u128;
     let k = spec.max_omissions.map_or(m, |k| u128::from(k).min(m));
-    // Sets of at most k of m omissions: the sum of the binomials C(m, j), j ≤ k.
-    let mut sets: u128 = 0;
-    let mut binomial: u128 = 1;
-    for j in 0..=k {
-        sets = sets.saturating_add(binomial);
-        // C(m, j+1) = C(m, j)·(m−j)/(j+1), exactly; past u128 the count is saturated, and so is the sum.
-        match binomial.checked_mul(m - j) {
-            Some(x) => binomial = x / (j + 1),
-            None => return u128::MAX,
+    let lengths = spec.delay.map_or(0, |d| u128::from(d.saturating_sub(1)));
+    let mut total: u128 = 0;
+    for i in 0..=k {
+        // C(m, i) omission sets, then delays among the other m − i batches: Σ_j C(m − i, j)·lengths^j, j ≤ max.
+        let Some(lost) = binomial(m, i) else { return u128::MAX };
+        let rest = m - i;
+        let mut delayed: u128 = 0;
+        for j in 0..=u128::from(spec.max_delays).min(rest) {
+            let Some(c) = binomial(rest, j) else { return u128::MAX };
+            let Some(ways) = u32::try_from(j).ok().and_then(|j| lengths.checked_pow(j)) else {
+                return u128::MAX;
+            };
+            delayed = delayed.saturating_add(c.saturating_mul(ways));
         }
+        total = total.saturating_add(lost.saturating_mul(delayed));
     }
-    (crash_schedules(spec).len() as u128).saturating_mul(sets)
+    (crash_schedules(spec).len() as u128).saturating_mul(total)
+}
+
+/// `C(n, k)`, or `None` past `u128`.
+fn binomial(n: u128, k: u128) -> Option<u128> {
+    if k > n {
+        return Some(0);
+    }
+    let k = k.min(n - k);
+    let mut c: u128 = 1;
+    for j in 0..k {
+        // C(n, j+1) = C(n, j)·(n−j)/(j+1), exactly.
+        c = c.checked_mul(n - j)? / (j + 1);
+    }
+    Some(c)
 }
 
 /// Every omission the spec allows, in order.
@@ -189,14 +217,20 @@ pub fn enumerate(
             ..FaultSchedule::default()
         });
         subsets(&candidates, k, &mut Vec::new(), 0, &mut |omissions| {
-            let faults = FaultSchedule {
-                omissions: omissions.iter().copied().collect(),
-                ..base.clone()
-            };
-            // An omission whose sender is down at the send is implied by the crash: the smaller schedule covers it.
-            if spec.canonical(faults.clone()) == faults {
-                schedules.push(faults);
-            }
+            let lost: BTreeSet<Omission> = omissions.iter().copied().collect();
+            let others: Vec<Omission> = candidates.iter().filter(|o| !lost.contains(o)).copied().collect();
+            delay_sets(spec, &others, &mut Vec::new(), 0, &mut |delays| {
+                let faults = FaultSchedule {
+                    omissions: lost.clone(),
+                    delays: delays.iter().copied().collect(),
+                    ..base.clone()
+                };
+                // An omission or delay whose sender is down at the send is implied by the crash: the smaller schedule
+                // covers it.
+                if spec.canonical(faults.clone()) == faults {
+                    schedules.push(faults);
+                }
+            });
         });
     }
     schedules.sort_by_cached_key(|f| crate::faults::order_key(spec, f));
@@ -224,6 +258,34 @@ pub fn enumerate(
         }
     }
     Ok(result)
+}
+
+/// A batch and the rounds after its send it arrives in.
+type Delayed = (Omission, u64);
+
+/// Calls `f` with every way to delay at most `spec.max_delays` of `batches[from..]` (each by 2 to `spec.delay` rounds)
+/// added to `chosen`; under the synchronous model, only with `chosen`.
+fn delay_sets(
+    spec: &FailureSpec,
+    batches: &[Omission],
+    chosen: &mut Vec<Delayed>,
+    from: usize,
+    f: &mut dyn FnMut(&[Delayed]),
+) {
+    f(chosen);
+    let Some(max) = spec.delay else { return };
+    if chosen.len() >= spec.max_delays as usize {
+        return;
+    }
+    for i in from..batches.len() {
+        if let Some(batch) = batches.get(i) {
+            for rounds in 2..=max {
+                chosen.push((*batch, rounds));
+                delay_sets(spec, batches, chosen, i + 1, f);
+                chosen.pop();
+            }
+        }
+    }
 }
 
 /// Calls `f` with every subset of at most `k` of `items[from..]` added to `chosen`.
