@@ -144,6 +144,12 @@ struct Plan {
     steps: Vec<Step>,
 }
 
+/// A place's entry while the encoder visits it: on the current path at a depth, or done.
+enum Slot {
+    Open(usize),
+    Done(Hazard),
+}
+
 enum Step {
     /// A lookup of a lattice cell by key.
     Lookup { rel: RelId, pat: PatId },
@@ -598,8 +604,8 @@ pub struct Encoder<'a> {
     neg: NegSupport,
     rules: Option<&'a dyn Rules>,
     /// Keyed by a place and a row pattern (hashed: they are only looked up).
-    appear_memo: DetMap<PlaceKey, Hazard>,
-    appear_path: DetMap<PlaceKey, usize>,
+    /// Per place: its appearance, or the depth it is on the current path at (one map, one probe per visit).
+    appear_memo: DetMap<PlaceKey, Slot>,
     remove_memo: DetMap<PlaceKey, Hazard>,
     /// The fault atoms and predicates the hazards are built over.
     atoms: Atoms<'a>,
@@ -673,7 +679,6 @@ impl<'a> Encoder<'a> {
             neg,
             rules,
             appear_memo: DetMap::default(),
-            appear_path: DetMap::default(),
             remove_memo: DetMap::default(),
             atoms: Atoms::new(spec),
             shared,
@@ -741,7 +746,10 @@ impl<'a> Encoder<'a> {
                 out.goals.push((g.key.clone(), c, h.clone()));
             }
         }
-        for (key, h) in self.appear_memo.iter() {
+        for (key, h) in self.appear_memo.iter().filter_map(|(k, s)| match s {
+            Slot::Done(h) => Some((k, h)),
+            Slot::Open(_) => None,
+        }) {
             if let Some(c) = ctx(key.3) {
                 out.appears.push((*key, c, h.clone()));
             }
@@ -1115,33 +1123,41 @@ impl<'a> Encoder<'a> {
             return self.or(options);
         }
         let key: PlaceKey = (space, rel, loc, tick, pat);
-        if let Some(h) = self.appear_memo.get(&key) {
-            return Ok(h.clone());
+        match self.appear_memo.get(&key) {
+            Some(Slot::Done(h)) => return Ok(h.clone()),
+            Some(Slot::Open(depth)) => {
+                let depth = *depth;
+                self.low = self.low.min(depth);
+                self.note_cut(depth, false);
+                return Ok(Hazard::False);
+            }
+            None => {}
         }
         if let (Some(s), Some(c)) = (self.shared, self.ctx_at(tick))
             && let Some(h) = s.appear(&key, c)?
         {
-            self.appear_memo.insert(key, h.clone());
+            self.appear_memo.insert(key, Slot::Done(h.clone()));
             return Ok(h);
         }
-        if let Some(depth) = self.appear_path.get(&key) {
-            let depth = *depth;
-            self.low = self.low.min(depth);
-            self.note_cut(depth, false);
-            return Ok(Hazard::False);
-        }
         let depth = self.depth;
-        self.appear_path.insert(key, depth);
+        self.appear_memo.insert(key, Slot::Open(depth));
         self.depth += 1;
         let saved = std::mem::replace(&mut self.low, usize::MAX);
         self.frames.push(false);
         let result = self.appear_body(space, rel, loc, tick, pat);
         self.frames.pop();
         self.depth -= 1;
-        self.appear_path.remove(&key);
-        let result = result?;
+        let result = match result {
+            Ok(h) => h,
+            Err(e) => {
+                self.appear_memo.remove(&key);
+                return Err(e);
+            }
+        };
         if self.low >= depth {
-            self.appear_memo.insert(key, result.clone());
+            self.appear_memo.insert(key, Slot::Done(result.clone()));
+        } else {
+            self.appear_memo.remove(&key);
         }
         self.low = saved.min(self.low);
         Ok(result)
