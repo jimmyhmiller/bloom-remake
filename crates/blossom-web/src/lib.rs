@@ -11,6 +11,7 @@ pub mod page;
 pub mod store;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
+pub mod why;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -61,6 +62,8 @@ pub struct Diag {
     pub file: Option<String>,
     pub line: Option<u32>,
     pub column: Option<u32>,
+    /// The primary span in the file's text, as UTF-16 offsets (an editor's, in JavaScript): `[start, end)`.
+    pub range: Option<(u32, u32)>,
 }
 
 /// A DOM event, as the page reports it.
@@ -157,7 +160,10 @@ fn diags(found: &blossom_base::Diagnostics, sources: &SourceDb) -> Vec<Diag> {
             let at = d.primary.and_then(|s| {
                 let lc = sources.line_col(s.file, s.lo).ok()?;
                 let file = sources.path(s.file).ok()?.to_string();
-                Some((file, lc.line, lc.column))
+                // An editor's offsets (JavaScript's: UTF-16 code units).
+                let text = sources.text(s.file).ok()?;
+                let utf16 = |byte: u32| u32::try_from(text.get(..byte as usize)?.encode_utf16().count()).ok();
+                Some((file, lc.line, lc.column, utf16(s.lo)?, utf16(s.hi)?))
             });
             Diag {
                 severity: format!("{:?}", d.severity).to_lowercase(),
@@ -167,6 +173,7 @@ fn diags(found: &blossom_base::Diagnostics, sources: &SourceDb) -> Vec<Diag> {
                 file: at.as_ref().map(|a| a.0.clone()),
                 line: at.as_ref().map(|a| a.1),
                 column: at.as_ref().map(|a| a.2),
+                range: at.as_ref().map(|a| (a.3, a.4)),
             }
         })
         .collect()
@@ -202,6 +209,7 @@ pub fn compile(root: &str, files: &BTreeMap<String, String>) -> Result<Compiled,
                 file: None,
                 line: None,
                 column: None,
+                range: None,
             }]);
         }
     };
@@ -269,6 +277,7 @@ pub fn compile(root: &str, files: &BTreeMap<String, String>) -> Result<Compiled,
                 file: None,
                 line: None,
                 column: None,
+                range: None,
             })
             .collect());
     }
@@ -297,6 +306,8 @@ pub struct App {
     /// The next round, and the page the last one left.
     tick: u64,
     page: Page,
+    /// The rounds the inspector can explain.
+    history: why::History,
 }
 
 /// What starting a program did: the first page, and what the restore could not keep.
@@ -327,6 +338,7 @@ impl App {
             engine,
             tick: 0,
             page: Page::default(),
+            history: why::History::new(),
         })
     }
 
@@ -352,6 +364,7 @@ impl App {
         })?;
         self.tick = 0;
         self.page = Page::default();
+        self.history.clear();
         let boot: Vec<(RelId, Row)> = self
             .compiled
             .artifact
@@ -392,6 +405,7 @@ impl App {
     /// Runs one round with `events`, leaving its page in `self.page`; whether the state changed.
     fn round(&mut self, events: &[(RelId, Row)]) -> Result<bool, HostError> {
         let tick = self.tick;
+        let before = self.engine.carried_instance();
         let observe: Vec<RelId> = self.compiled.outputs.values().copied().collect();
         let out = self
             .engine
@@ -413,6 +427,17 @@ impl App {
                 error: e.to_string(),
             })?;
         self.tick += 1;
+        self.history.push(why::Round {
+            tick,
+            before,
+            events: events.to_vec(),
+            inserted: out
+                .changes
+                .inserted
+                .iter()
+                .flat_map(|(rel, rows)| rows.iter().map(|r| (*rel, Arc::clone(r))))
+                .collect(),
+        });
         let rows = |name: &str| -> &[Row] {
             self.compiled
                 .outputs
@@ -422,6 +447,31 @@ impl App {
         };
         self.page = Page::of(rows("elem"), rows("attr"), rows("text"), rows("focus"))?;
         Ok(!out.changes.inserted.is_empty() || !out.changes.deleted.is_empty())
+    }
+
+    /// Why the element `id` is on the page as it is: an explanation of each of its rows (`elem`, `attr`, `text`) in the
+    /// last round.
+    pub fn why(&self, id: &str) -> Result<Vec<why::Why>, HostError> {
+        let explainer = why::Explainer::new(
+            self.compiled.artifact.program.get(),
+            self.compiled.artifact.program.clone(),
+            self.compiled.artifact.roles.clone(),
+            &self.history,
+        )?;
+        let Some(last) = explainer.last() else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for name in ["elem", "attr", "text"] {
+            let Some(rel) = self.compiled.outputs.get(name) else {
+                continue;
+            };
+            let rows = explainer.rows(*rel, last)?;
+            for row in rows.iter().filter(|r| r.first() == Some(&Value::Str(id.into()))) {
+                out.extend(explainer.why(*rel, row, last, 0)?);
+            }
+        }
+        Ok(out)
     }
 
     /// The durable tables, as JSON (for `localStorage`).

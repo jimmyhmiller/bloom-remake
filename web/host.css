@@ -1,7 +1,144 @@
-/* The host's own chrome (docs/design/BROWSER.md); an app brings its own styles. */
+/* The host's own chrome (docs/design/BROWSER.md): the status line, the inspector and the editor. An app brings its
+ * own styles; everything here is under #blossom-… ids, so an app's stylesheet and this one stay out of each other's
+ * way. */
+:root {
+  --blossom-bg: #ffffff;
+  --blossom-fg: #1d1f24;
+  --blossom-muted: #6b7180;
+  --blossom-line: #e3e5ea;
+  --blossom-accent: #b83f6e;
+  --blossom-accent-soft: #f8e6ee;
+  --blossom-code-bg: #f6f7f9;
+  --blossom-error: #b3261e;
+  --blossom-warning: #8a5a00;
+  --blossom-ok: #1f7a3f;
+  --blossom-panel-width: 440px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --blossom-bg: #17181c;
+    --blossom-fg: #e6e7ea;
+    --blossom-muted: #9aa0ad;
+    --blossom-line: #2c2e35;
+    --blossom-accent: #e77fa8;
+    --blossom-accent-soft: #3a2230;
+    --blossom-code-bg: #1f2026;
+    --blossom-error: #ff8a80;
+    --blossom-warning: #f2c26b;
+    --blossom-ok: #7fd49a;
+  }
+}
+:root[data-theme="dark"] {
+  --blossom-bg: #17181c;
+  --blossom-fg: #e6e7ea;
+  --blossom-muted: #9aa0ad;
+  --blossom-line: #2c2e35;
+  --blossom-accent: #e77fa8;
+  --blossom-accent-soft: #3a2230;
+  --blossom-code-bg: #1f2026;
+  --blossom-error: #ff8a80;
+  --blossom-warning: #f2c26b;
+  --blossom-ok: #7fd49a;
+}
+
+html.blossom-panel-open { padding-right: var(--blossom-panel-width); }
+html.blossom-inspecting #app, html.blossom-inspecting #app * { cursor: help !important; }
+
 #blossom-status:empty { display: none; }
 #blossom-status {
   position: fixed; left: 0; right: 0; bottom: 0; margin: 0; padding: 8px 12px;
   font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap;
-  background: #2b0f12; color: #ffd7d7; max-height: 40vh; overflow: auto; z-index: 10;
+  background: #2b0f12; color: #ffd7d7; max-height: 40vh; overflow: auto; z-index: 30;
+}
+
+#blossom-highlight {
+  position: fixed; pointer-events: none; z-index: 20;
+  outline: 2px solid var(--blossom-accent); background: color-mix(in srgb, var(--blossom-accent) 12%, transparent);
+  border-radius: 2px;
+}
+#blossom-highlight[hidden] { display: none; }
+#blossom-highlight::after {
+  content: attr(data-id); position: absolute; left: -2px; bottom: 100%; padding: 1px 6px;
+  font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: #fff; background: var(--blossom-accent);
+  border-radius: 2px 2px 0 0; white-space: nowrap;
+}
+
+#blossom-bar {
+  position: fixed; top: 12px; right: 12px; z-index: 25; display: flex; gap: 6px;
+}
+html.blossom-panel-open #blossom-bar { right: calc(var(--blossom-panel-width) + 12px); }
+#blossom-bar button, #blossom-panel button, #blossom-panel select {
+  font: 500 13px/1 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--blossom-fg);
+  background: var(--blossom-bg); border: 1px solid var(--blossom-line); border-radius: 6px;
+  padding: 7px 11px; cursor: pointer; -webkit-appearance: none; appearance: none;
+}
+#blossom-bar button { box-shadow: 0 1px 3px rgb(0 0 0 / 0.12); }
+#blossom-bar button[aria-pressed="true"] {
+  background: var(--blossom-accent); border-color: var(--blossom-accent); color: #fff;
+}
+#blossom-panel button:disabled { opacity: 0.45; cursor: default; }
+#blossom-panel button.blossom-primary { background: var(--blossom-accent); border-color: var(--blossom-accent); color: #fff; }
+#blossom-bar button:focus-visible, #blossom-panel button:focus-visible, #blossom-panel select:focus-visible,
+#blossom-code:focus-visible {
+  outline: 2px solid var(--blossom-accent); outline-offset: 1px; box-shadow: none;
+}
+
+#blossom-panel {
+  position: fixed; top: 0; right: 0; bottom: 0; width: var(--blossom-panel-width); max-width: 100vw;
+  z-index: 24; display: flex; flex-direction: column; box-sizing: border-box;
+  background: var(--blossom-bg); color: var(--blossom-fg); border-left: 1px solid var(--blossom-line);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; text-align: left;
+  -webkit-font-smoothing: antialiased;
+}
+#blossom-panel[hidden] { display: none; }
+#blossom-panel [hidden] { display: none !important; }
+.blossom-panel-head {
+  display: flex; align-items: center; justify-content: space-between; padding: 10px 14px;
+  border-bottom: 1px solid var(--blossom-line);
+}
+.blossom-brand { font-weight: 650; color: var(--blossom-accent); letter-spacing: 0.01em; }
+#blossom-close { padding: 2px 9px; font-size: 18px; border-color: transparent; }
+#blossom-why, #blossom-source { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+#blossom-why h2 { font-size: 14px; font-weight: 600; margin: 0; padding: 12px 14px 8px; }
+#blossom-why h2 code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--blossom-accent); }
+.blossom-tree { overflow: auto; padding: 0 14px 16px 26px; flex: 1; }
+.blossom-why { margin-left: 14px; }
+.blossom-tree > .blossom-why { margin-left: 0; }
+.blossom-why > summary { cursor: pointer; list-style-position: outside; }
+.blossom-why > summary::marker { color: var(--blossom-muted); }
+.blossom-leaf { padding-left: 2px; }
+.blossom-why-line { display: inline-flex; flex-wrap: wrap; gap: 2px 8px; padding: 3px 0; align-items: baseline; }
+.blossom-fact {
+  font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--blossom-code-bg);
+  padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere;
+}
+.blossom-how { color: var(--blossom-muted); font-size: 12.5px; }
+.blossom-muted, .blossom-muted .blossom-fact { color: var(--blossom-muted); }
+
+.blossom-tools { display: flex; gap: 6px; padding: 10px 14px; border-bottom: 1px solid var(--blossom-line); }
+.blossom-tools select { flex: 1; min-width: 0; }
+#blossom-code {
+  flex: 1; min-height: 0; resize: none; border: 0; margin: 0; padding: 12px 14px; box-sizing: border-box;
+  font: 12.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; tab-size: 4; white-space: pre;
+  color: var(--blossom-fg); background: var(--blossom-code-bg);
+}
+#blossom-diags {
+  list-style: none; margin: 0; padding: 8px 14px; max-height: 32%; overflow: auto; font-size: 13px;
+  border-top: 1px solid var(--blossom-line);
+}
+#blossom-diags:empty { display: none; }
+#blossom-diags li { padding: 3px 0; }
+#blossom-diags .blossom-pos {
+  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 1px 5px; color: inherit;
+  background: transparent; border: 1px solid currentColor; border-radius: 4px;
+}
+.blossom-error { color: var(--blossom-error); }
+.blossom-warning { color: var(--blossom-warning); }
+.blossom-note { color: var(--blossom-muted); }
+.blossom-ok { color: var(--blossom-ok); }
+
+@media (max-width: 720px) {
+  :root { --blossom-panel-width: 100vw; }
+  html.blossom-panel-open { padding-right: 0; }
+  html.blossom-panel-open #blossom-bar { right: 12px; top: auto; bottom: 12px; }
 }
