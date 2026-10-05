@@ -77,7 +77,9 @@ spec Single {
 ///   offset;
 /// - unique offset: no other acknowledged batch was given its offset;
 /// - stored once (one row, batch 0): once the client has read every partition to its end, it read no record twice
-///   (a retried batch the log holds twice would show).
+///   (a retried batch the log holds twice would show);
+/// - commit kept (one row, batch 0): an offset commit answered without error is held by some broker (committed, or
+///   committed and waiting to be applied), at the offset committed.
 spec Guarantees {
     view acknowledged(k, p, base) = acked(k, p, base, 0i16) @ _;
     view pre(prop, k) {
@@ -85,6 +87,7 @@ spec Guarantees {
         acknowledged(k, _, _), read_done(true) @ _, let prop = "read back";
         acknowledged(k, _, _), let prop = "unique offset";
         read_done(true) @ _, let prop = "stored once", let k = 0u64;
+        commit_acked(_, _, 0i16) @ _, let prop = "commit kept", let k = 0u64;
     }
     /// The batches a broker holds committed, by blob: materialized, or committed and not yet materialized.
     view holds_batch(b, p, base, blob) {
@@ -105,6 +108,8 @@ spec Guarantees {
         acknowledged(k, p, base), consumed(p, base, _) @ _, let prop = "read back";
         acknowledged(k, _, _), not shared_offset(k), let prop = "unique offset";
         read_done(true) @ _, not read_twice(_), let prop = "stored once", let k = 0u64;
+        commit_acked(p, off, 0i16) @ _, current_offset(_, _, _, _, p, off, _, _) @ _, let prop = "commit kept",
+            let k = 0u64;
     }
 }
 
@@ -142,6 +147,9 @@ spec Triple {
     fact contact(0, "sim://B1/kafka") @ C1;
     fact contact(1, "sim://B2/kafka") @ C1;
     fact contact(2, "sim://B3/kafka") @ C1;
+    fact contact_id(0, 1) @ C1;
+    fact contact_id(1, 2) @ C1;
+    fact contact_id(2, 3) @ C1;
 }
 
 /// Three brokers, the topic replicated on all three: the failure-free run.
@@ -223,5 +231,14 @@ spec TripleTwoCrashes for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
     include Triple;
     include Guarantees;
     faults { eot: 40, eff: 1, crashes: 2, restart: 3, model: sync, round: 50ms }
+    check ldfi expect holds;
+}
+
+/// Three brokers, the offsets topic replicated on all three, the client committing what it read: under a crash-restart
+/// of any node, an acknowledged commit stays.
+spec TripleCommitRestart for Kafka(DEFAULT_REPLICATION_FACTOR = 3, CLIENT_COMMIT = true, OFFSETS_REPLICATION = 3) {
+    include Triple;
+    include Guarantees;
+    faults { eot: 85, eff: 1, crashes: 1, restart: 3, model: sync, round: 50ms }
     check ldfi expect holds;
 }

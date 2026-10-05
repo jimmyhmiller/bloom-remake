@@ -213,3 +213,67 @@ finish_read: on frames(_c, fr), let Some(r) = fetched_answer(fr), read_at(p, off
         where next_read(p, off, parts, r.0, r.1, r.2) == None {
     emit read_done(true);
 }
+
+// ---------------------------------------------------------------- committing what it read (S11)
+//
+// With `CLIENT_COMMIT` the client, once it read to the end, commits the offset it read the last partition to for
+// `CLIENT_GROUP` (outside group management), as a Kafka consumer does: it asks FindCoordinator (which also makes the
+// cluster create `__consumer_offsets`), and commits through the coordinator. Its `contact_id` facts say which
+// contact is which broker id; without one for the coordinator it tries the next broker. A coordinator that is not
+// ready (or moved) is asked about again on a new connection.
+
+/// Which contact is which broker id (optional: without it, the client tries the brokers in turn).
+static contact_id(i: u64, id: i32);
+/// The offset to commit, and the commit's answer.
+durable table commit_offset(partition: i32, offset: i64) key();
+durable table commit_acked(partition: i32, offset: i64, error: i16) key();
+
+ask_coordinator_after_read: on frames(c, fr), let Some(r) = fetched_answer(fr), read_at(p, off), topic_seen(_id, parts), wseq(c, w)
+        where CLIENT_COMMIT && next_read(p, off, parts, r.0, r.1, r.2) == None {
+    emit commit_offset(p, r.1);
+    send up.write(c, w, [Part::Bytes(encode_find_coordinator_request(CORR_FIND, "blossom", CLIENT_GROUP))]);
+    upsert wseq(c, w + 1u64);
+}
+
+resume_commit: on frames(c, fr), let Some(_t) = topic_answer(fr), commit_offset(_p, _off), not commit_acked(_, _, _), wseq(c, n)
+        where CLIENT_COMMIT {
+    send up.write(c, n, [Part::Bytes(encode_find_coordinator_request(CORR_FIND, "blossom", CLIENT_GROUP))]);
+    upsert wseq(c, n + 1u64);
+}
+
+/// The coordinator is the broker this connection is to: commit through it.
+commit_here: on frames(c, fr), let Some(a) = coordinator_answer(fr), current_broker(i), contact_id(i, id), commit_offset(p, off), wseq(c, n)
+        where a.0 == NONE && a.1 == id {
+    send up.write(c, n, [Part::Bytes(encode_offset_commit_request(CORR_COMMIT, "blossom", CLIENT_GROUP, CLIENT_TOPIC, p, off))]);
+    upsert wseq(c, n + 1u64);
+}
+
+/// Another broker coordinates: go there (closing the connection redials it).
+view coordinator_contact(j, id) = contact_id(j, id);
+coordinate_elsewhere: on frames(c, fr), let Some(a) = coordinator_answer(fr), current_broker(i), coordinator_contact(j, a.1)
+        where a.0 == NONE && j != i {
+    upsert on_broker(j);
+    send up.close(c);
+}
+
+/// A coordinator this client has no contact for: try the next broker.
+coordinator_unknown: on frames(c, fr), let Some(a) = coordinator_answer(fr), next_broker(j, _a), not coordinator_contact(_, a.1)
+        where a.0 == NONE {
+    upsert on_broker(j);
+    send up.close(c);
+}
+/// No coordinator yet (`__consumer_offsets` being created, its partition without a leader): ask again.
+coordinator_not_ready: on frames(c, fr), let Some(a) = coordinator_answer(fr), wseq(c, n) where a.0 != NONE {
+    send up.write(c, n, [Part::Bytes(encode_find_coordinator_request(CORR_FIND, "blossom", CLIENT_GROUP))]);
+    upsert wseq(c, n + 1u64);
+}
+
+commit_elsewhere: on frames(c, fr), let Some(e) = commit_answer(fr)
+        where e == NOT_COORDINATOR || e == COORDINATOR_NOT_AVAILABLE || e == COORDINATOR_LOAD_IN_PROGRESS {
+    send up.close(c);
+}
+
+learn_commit: on frames(_c, fr), let Some(e) = commit_answer(fr), commit_offset(p, off)
+        where e != NOT_COORDINATOR && e != COORDINATOR_NOT_AVAILABLE && e != COORDINATOR_LOAD_IN_PROGRESS {
+    emit commit_acked(p, off, e);
+}

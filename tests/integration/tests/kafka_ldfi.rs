@@ -4,7 +4,8 @@
 //! broker holds with one broker and with three replicating ones (one or two batches; any one crash-restart, or any one
 //! lost message); a producer configured with `acks=1` loses an acknowledged batch to a crash of the leader right after
 //! it answered. With retries, a lost answer makes the client send a batch again: a producer without idempotence has it
-//! stored twice, an idempotent one once.
+//! stored twice, an idempotent one once. A consumer that commits the offset it read (outside group management, through
+//! the coordinator FindCoordinator names) keeps the commit through a crash-restart.
 
 use std::path::Path;
 
@@ -105,4 +106,10 @@ fn retries_without_idempotence_store_a_batch_twice() {
 #[ignore = "full tier"]
 fn an_idempotent_producer_stores_a_retried_batch_once() {
     check("TripleRetryIdempotent");
+}
+
+#[test]
+#[ignore = "full tier"]
+fn an_acknowledged_offset_commit_survives_a_crash_restart() {
+    check("TripleCommitRestart");
 }
