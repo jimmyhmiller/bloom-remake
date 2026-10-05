@@ -222,12 +222,20 @@ pub fn build(artifact: &SimArtifact, run: &SyncRun, outcome: &Outcome) -> Result
         }
     }
 
-    // Which messages arrived.
-    let delivered: BTreeSet<Arrival> = run
+    // What arrived on time, between two nodes: what a delay can make arrive later.
+    for m in &run.messages {
+        if m.from != m.to && m.fate == Fate::Delivered(Tick(m.send.0 + 1)) {
+            g.sent_on_time(m.rel, m.from, m.to, m.send, m.row.clone());
+        }
+    }
+    // Which messages arrived, and when (the round after their send, or later when delayed).
+    let delivered: BTreeMap<Arrival, Tick> = run
         .messages
         .iter()
-        .filter(|m| matches!(m.fate, Fate::Delivered(_)))
-        .map(|m| (m.rel, m.from, m.to, m.send, m.row.clone()))
+        .filter_map(|m| match m.fate {
+            Fate::Delivered(at) => Some(((m.rel, m.from, m.to, m.send, m.row.clone()), at)),
+            _ => None,
+        })
         .collect();
 
     // Protocol firings.
@@ -266,10 +274,10 @@ pub fn build(artifact: &SimArtifact, run: &SyncRun, outcome: &Outcome) -> Result
                             Some(Value::Session(_)) => continue,
                             other => return Err(internal_error!("an async head's destination is {other:?}").into()),
                         };
-                        if !delivered.contains(&(rule.head.rel, node, dest, tick, f.head.clone())) {
+                        let Some(at) = delivered.get(&(rule.head.rel, node, dest, tick, f.head.clone())) else {
                             continue;
-                        }
-                        (dest, Tick(tick.0 + 1), (dest != node).then_some((node, dest, tick)))
+                        };
+                        (dest, *at, (dest != node).then_some((node, dest, tick)))
                     }
                 };
                 // A restarted node reloads the state its last round carried out: a durable head of an inductive firing
@@ -317,6 +325,14 @@ pub fn build(artifact: &SimArtifact, run: &SyncRun, outcome: &Outcome) -> Result
                 let mut premises = Vec::with_capacity(f.reads.len() + f.negations.len() + 2);
                 if let Some((from, to, send)) = clock {
                     premises.push(Premise::Clock { from, to, send });
+                    // It arrives when it did: a delay past then (asynchronous model) falsifies the firing here.
+                    premises.push(Premise::Arrives {
+                        from,
+                        to,
+                        send,
+                        via: blossom_prov::Via::Channel(rule.head.rel),
+                        by: at_tick,
+                    });
                 }
                 // Under the frozen crash view a crashed node fires nothing; its persisted state is its frozen copy, which
                 // a restart keeps only for durable relations.

@@ -128,6 +128,26 @@ pub enum Premise {
     /// An aggregate firing's group, recorded in [`ProvGraph::aggregate`]: the firing's row changes when a
     /// contributor appears (a contributor lost is one of its read premises).
     Aggregate(AggId),
+    /// What `from` sent `to` at `send` on `via` arrives by round `by` (the asynchronous model, S13): falsified by a
+    /// delay of that batch past `by`. A stream event's flight, and every earlier flight on its connection (which, held
+    /// back, holds it back).
+    Arrives {
+        from: NodeId,
+        to: NodeId,
+        send: Tick,
+        via: Via,
+        by: Tick,
+    },
+}
+
+/// What one node sends another on a channel in a round.
+type Batch = (RelId, NodeId, NodeId, Tick);
+
+/// The path a delivery takes: a channel, or the streams between two nodes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Via {
+    Channel(RelId),
+    Streams,
 }
 
 /// An aggregate group's index.
@@ -190,6 +210,9 @@ pub struct ProvGraph {
     /// Every round in which a stream carried something from one node to another (bytes, a close, a dial): a lost
     /// message from the one to the other in that round resets the connection, or fails the dial.
     crossings: BTreeSet<(NodeId, NodeId, Tick)>,
+    /// The rows each node sent another on each channel in each round that arrived the round after (only probed): what
+    /// a delay can make arrive later (the asynchronous model).
+    on_time: DetMap<Batch, Vec<Arc<[Value]>>>,
 }
 
 impl ProvGraph {
@@ -303,6 +326,16 @@ impl ProvGraph {
     /// Records that a stream carried something from `from` to `to` in round `tick`.
     pub fn crossing(&mut self, from: NodeId, to: NodeId, tick: Tick) {
         self.crossings.insert((from, to, tick));
+    }
+
+    /// Records that `from` sent `to` `row` on channel `rel` in round `send`, and it arrived the round after.
+    pub fn sent_on_time(&mut self, rel: RelId, from: NodeId, to: NodeId, send: Tick, row: Arc<[Value]>) {
+        self.on_time.entry((rel, from, to, send)).or_default().push(row);
+    }
+
+    /// The rows `from` sent `to` on channel `rel` in round `send` that arrived the round after.
+    pub fn on_time(&self, rel: RelId, from: NodeId, to: NodeId, send: Tick) -> &[Arc<[Value]>] {
+        self.on_time.get(&(rel, from, to, send)).map_or(&[], Vec::as_slice)
     }
 
     /// Whether a stream carried something from `from` to `to` in round `tick`.
@@ -425,6 +458,16 @@ impl ProvGraph {
                             Premise::NoRestart { node, tick } => {
                                 let _ =
                                     writeln!(out, "{indent}    {} does not restart at {}", names.node(*node), tick.0);
+                            }
+                            Premise::Arrives { from, to, send, by, .. } => {
+                                let _ = writeln!(
+                                    out,
+                                    "{indent}    what {} sent {} at {} arrives by {}",
+                                    names.node(*from),
+                                    names.node(*to),
+                                    send.0,
+                                    by.0
+                                );
                             }
                             Premise::NotRestarted { node, from, tick } => {
                                 let _ = writeln!(

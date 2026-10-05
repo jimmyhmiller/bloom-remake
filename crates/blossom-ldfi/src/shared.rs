@@ -32,11 +32,12 @@ use crate::hazard::PlaceKey;
 
 /// The part of a run's faults that a hazard at a tick depends on: which nodes crash (a crash after the tick only as
 /// "the node crashes later": under crash-restart a node crashes once, so a later crash rules out a new one; under
-/// crash-stop the crash tick is kept), and the omissions sent before the tick.
+/// crash-stop the crash tick is kept), and the omissions and delays sent before the tick.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Context {
     crashes: Vec<(NodeId, Option<Tick>)>,
     omissions: Vec<Omission>,
+    delays: Vec<(blossom_sim::Delayed, u64)>,
 }
 
 impl Context {
@@ -49,13 +50,19 @@ impl Context {
                 .map(|(n, c)| (*n, (spec.restart.is_none() || *c <= tick).then_some(*c)))
                 .collect(),
             omissions: seed.omissions.iter().filter(|o| o.send < tick).copied().collect(),
+            delays: seed
+                .delays
+                .iter()
+                .filter(|(k, _)| k.batch.send < tick)
+                .map(|(k, d)| (*k, *d))
+                .collect(),
         }
     }
 
     /// Whether the context names no fault tick: no omission, and every crash only as "the node crashes later". Only
     /// such contexts recur across runs (a run's faults are its own), so only they are shared.
     fn plain(&self) -> bool {
-        self.omissions.is_empty() && self.crashes.iter().all(|(_, c)| c.is_none())
+        self.omissions.is_empty() && self.delays.is_empty() && self.crashes.iter().all(|(_, c)| c.is_none())
     }
 }
 

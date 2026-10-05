@@ -9,5 +9,5 @@ pub mod graph;
 
 pub use graph::{
     AggGroup, AggId, By, Firing, FiringId, Goal, GoalId, GoalKey, Loc, Names, NegId, NegRead, Premise, ProvGraph,
-    RuntimeAct, Space, Support,
+    RuntimeAct, Space, Support, Via,
 };

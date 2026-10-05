@@ -91,3 +91,21 @@ spec EagerOmission for StreamStore(EAGER = true) {
     faults { eot: 6, eff: 3, crashes: 0, model: sync, round: 1s }
     check ldfi expect fails;
 }
+
+/// Under the asynchronous model (S13), streams delayed, no losses: the acknowledgement comes back over the same
+/// stream, so whatever the delay, an acknowledged value was kept.
+spec DurableDelay for StreamStore {
+    include Scenario;
+    include Durability;
+    faults { eot: 6, eff: 4, crashes: 0, omissions: 0, model: async, delay: 6, delays: 1, round: 1s }
+    check ldfi expect holds;
+}
+
+/// Eager: the client counts the value acknowledged when it writes it, so a delay of the write past the end of the run
+/// loses it.
+spec EagerDelay for StreamStore(EAGER = true) {
+    include Scenario;
+    include Durability;
+    faults { eot: 6, eff: 4, crashes: 0, omissions: 0, model: async, delay: 6, delays: 1, round: 1s }
+    check ldfi expect fails;
+}

@@ -13,17 +13,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use blossom_base::DetMap;
-use blossom_sim::Omission;
+use blossom_prov::Via;
+use blossom_sim::{Delayed, Omission, Path};
 use blossom_value::time::{NodeId, Tick};
 
 use crate::faults::FailureSpec;
 
-/// A fault atom: a lost message, or a crash variable of a node at a tick: under crash-stop `K(n,t)`, "crashed at or
-/// before `t`"; under crash-restart `X(n,t)`, "crashes at `t`".
+/// A fault atom: a lost message, a crash variable of a node at a tick (under crash-stop `K(n,t)`, "crashed at or
+/// before `t`"; under crash-restart `X(n,t)`, "crashes at `t`"), or a batch delayed by a number of rounds.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Atom {
     Omission(Omission),
     Crash(NodeId, Tick),
+    Delay(Delayed, u64),
 }
 
 /// A circuit node: an atom, or a conjunction or disjunction of nodes.
@@ -130,6 +132,7 @@ pub struct Atoms<'s> {
     crashes: DetMap<(NodeId, Tick), Hazard>,
     /// Disjunctions of a node's crash-time atoms over a tick range (crash-restart).
     ranges: DetMap<(NodeId, u64, u64), Hazard>,
+    delays: DetMap<(Delayed, u64), Hazard>,
 }
 
 impl<'s> Atoms<'s> {
@@ -139,7 +142,41 @@ impl<'s> Atoms<'s> {
             omissions: DetMap::default(),
             crashes: DetMap::default(),
             ranges: DetMap::default(),
+            delays: DetMap::default(),
         }
+    }
+
+    /// What `from` sends `to` at `send` on `via` arrives after round `by`: a delay of the batch past `by` (false under
+    /// the synchronous model, or where the spec allows no delay).
+    pub fn delayed_past(&mut self, from: NodeId, to: NodeId, send: Tick, via: Via, by: Tick) -> Hazard {
+        let Some(max) = self.spec.delay else {
+            return Hazard::False;
+        };
+        let path = match via {
+            Via::Channel(rel) => Path::Channel(rel),
+            Via::Streams => Path::Streams,
+        };
+        let key = Delayed {
+            batch: Omission { from, to, send },
+            path,
+        };
+        let atoms: Vec<Hazard> = (2..=max)
+            .filter(|d| send.0 + d > by.0 && self.spec.delay_allowed(from, to, send, *d))
+            .map(|d| self.delay(key, d))
+            .collect();
+        or(atoms)
+    }
+
+    /// The batch `key` delayed by `rounds`, when the spec allows it.
+    pub fn delay(&mut self, key: Delayed, rounds: u64) -> Hazard {
+        let o = key.batch;
+        if !self.spec.delay_allowed(o.from, o.to, o.send, rounds) {
+            return Hazard::False;
+        }
+        self.delays
+            .entry((key, rounds))
+            .or_insert_with(|| atom(Atom::Delay(key, rounds)))
+            .clone()
     }
 
     /// `O(o)`: the message is lost.

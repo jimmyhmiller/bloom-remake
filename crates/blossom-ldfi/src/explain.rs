@@ -72,6 +72,23 @@ impl Eval<'_> {
                         None => self.down(*n, self.spec.eot),
                     }
             }),
+            Premise::Arrives {
+                from,
+                to,
+                send,
+                via,
+                by,
+            } => {
+                let path = match via {
+                    blossom_prov::Via::Channel(rel) => blossom_sim::Path::Channel(rel),
+                    blossom_prov::Via::Streams => blossom_sim::Path::Streams,
+                };
+                let batch = Omission { from, to, send };
+                self.faults
+                    .delays
+                    .get(&blossom_sim::Delayed { batch, path })
+                    .is_some_and(|d| send.0 + d > by.0)
+            }
             Premise::CrashPresent { .. } | Premise::Neg(_) | Premise::Aggregate(_) => false,
         }
     }
@@ -161,6 +178,13 @@ fn premise_text(p: &Premise, names: &dyn Names) -> String {
                 tick.0
             )
         }
+        Premise::Arrives { from, to, send, by, .. } => format!(
+            "what {} sent {} at {} arrives by {}",
+            names.node(from),
+            names.node(to),
+            send.0,
+            by.0
+        ),
         Premise::CrashAbsent { node, .. } => match node {
             Some(n) => format!("{} has not crashed", names.node(n)),
             None => "no node has crashed".to_owned(),
