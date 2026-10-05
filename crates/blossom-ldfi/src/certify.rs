@@ -242,7 +242,12 @@ pub fn enumerate(
         if !spec.admits(faults) {
             return Err(internal_error!("enumerated a schedule the spec does not admit: {faults:?}").into());
         }
-        let run = sim.run(spec.eot, faults, false)?;
+        // A run that ends in a program error is a counterexample.
+        let run = match sim.run(spec.eot, faults, false) {
+            Ok(run) => run,
+            Err(e) if crate::driver::program_failure(&e).is_some() => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
         Ok(is_good(ff_post, &sim.outcome(&run, spec.eot, false)?))
     };
     // Judge in order, a batch at a time in parallel: the first violation in order is the result.

@@ -121,6 +121,14 @@ fn every_schedule_confirms_the_three_broker_verdicts() {
 
 #[test]
 #[ignore = "full tier"]
+fn every_single_delay_of_up_to_twelve_rounds_keeps_the_guarantees() {
+    // The asynchronous model (S13): any one batch between any two nodes delayed by 2 to 12 rounds, which brings two of
+    // a leader's quiesce messages together (the broker ignores the stale one).
+    enumerate("TripleDelay");
+}
+
+#[test]
+#[ignore = "full tier"]
 fn three_brokers_keep_an_acknowledged_batch_through_a_crash_restart() {
     check("TripleRestart");
 }

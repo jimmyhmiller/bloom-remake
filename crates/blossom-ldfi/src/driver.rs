@@ -139,6 +139,9 @@ pub struct Counterexample {
     pub run: SyncRun,
     /// The failure-free `post` tuples the run lost while `pre` held them.
     pub violated: Vec<Row>,
+    /// A program error the run ended in (a node's runtime hard error, ARCHITECTURE §6.6: a verdict of its own); the
+    /// run and outcome are then empty.
+    pub failure: Option<String>,
 }
 
 /// The result of an LDFI search.
@@ -205,6 +208,30 @@ struct Search<'a> {
     patterns: crate::patterns::Patterns,
 }
 
+/// A run of the program: done, or ended in a program error.
+enum Ran {
+    Done(SyncRun, Outcome),
+    Failed(String),
+}
+
+/// A run judged against the failure-free `post`.
+enum Judged {
+    Good(SyncRun, Outcome),
+    Bad(Box<Counterexample>),
+}
+
+/// The program error a simulation error is, if it is one: a node's runtime hard error (BLSRnnn), which under faults is
+/// a verdict of its own rather than a failure of the search.
+pub(crate) fn program_failure(e: &blossom_sim::SimError) -> Option<String> {
+    match e {
+        blossom_sim::SimError::Node {
+            error: blossom_ir::tick::EvalError::Program { .. },
+            ..
+        } => Some(e.to_string()),
+        _ => None,
+    }
+}
+
 /// What processing one hypothesis found.
 enum Processed {
     /// The run is good; these are the hypotheses its lineage suggests, and why its lineage was incomplete if it was.
@@ -250,6 +277,50 @@ impl<'a> Search<'a> {
         let run = self.sim.run(eot, faults, true)?;
         let outcome = self.sim.outcome(&run, eot, true)?;
         Ok((run, outcome))
+    }
+
+    /// Runs the program under `faults`: its run and outcome, or the program error it ended in.
+    fn try_execute(&self, faults: &FaultSchedule) -> Result<Ran, LdfiError> {
+        match self.execute(faults) {
+            Ok((run, outcome)) => Ok(Ran::Done(run, outcome)),
+            Err(LdfiError::Sim(e)) => match program_failure(&e) {
+                Some(failure) => Ok(Ran::Failed(failure)),
+                None => Err(LdfiError::Sim(e)),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Runs `faults` and judges it against the failure-free `post`: its counterexample, when the run ends in a
+    /// program error or loses a `post` tuple `pre` holds; else its run and outcome.
+    fn judge(&self, faults: &FaultSchedule, ff_post: &BTreeSet<Row>) -> Result<Judged, LdfiError> {
+        let (run, outcome) = match self.try_execute(faults)? {
+            Ran::Failed(failure) => {
+                return Ok(Judged::Bad(Box::new(Counterexample {
+                    faults: faults.clone(),
+                    outcome: Outcome::default(),
+                    run: SyncRun::default(),
+                    violated: Vec::new(),
+                    failure: Some(failure),
+                })));
+            }
+            Ran::Done(run, outcome) => (run, outcome),
+        };
+        if is_good(ff_post, &outcome) {
+            return Ok(Judged::Good(run, outcome));
+        }
+        let violated = ff_post
+            .iter()
+            .filter(|g| !outcome.post.contains(*g) && outcome.pre.contains(*g))
+            .cloned()
+            .collect();
+        Ok(Judged::Bad(Box::new(Counterexample {
+            faults: faults.clone(),
+            outcome,
+            run,
+            violated,
+            failure: None,
+        })))
     }
 
     fn graph(&self, run: &SyncRun, outcome: &Outcome) -> Result<ProvGraph, LdfiError> {
@@ -354,25 +425,13 @@ impl<'a> Search<'a> {
     fn process(&self, h: &FaultSchedule, ff_post: &BTreeSet<Row>) -> Result<Processed, LdfiError> {
         let mut cost = Cost::default();
         let start = self.now();
-        let (run, outcome) = self.execute(h)?;
+        let judged = self.judge(h, ff_post)?;
         let executed = self.now();
         cost.execute_ns = executed.saturating_sub(start);
-        if !is_good(ff_post, &outcome) {
-            let violated = ff_post
-                .iter()
-                .filter(|g| !outcome.post.contains(*g) && outcome.pre.contains(*g))
-                .cloned()
-                .collect();
-            return Ok(Processed::Bad(
-                Box::new(Counterexample {
-                    faults: h.clone(),
-                    outcome,
-                    run,
-                    violated,
-                }),
-                cost,
-            ));
-        }
+        let (run, outcome) = match judged {
+            Judged::Bad(ce) => return Ok(Processed::Bad(ce, cost)),
+            Judged::Good(run, outcome) => (run, outcome),
+        };
         let graph = self.graph(&run, &outcome)?;
         let built = self.now();
         cost.lineage_ns = built.saturating_sub(executed);
@@ -461,22 +520,12 @@ fn certify_exhaustively(
     let cert = crate::certify::exhaustive(sim, &config.spec, &ff.post, config.workers.max(1), max_states)?;
     let mut counterexamples = Vec::new();
     if let Some(faults) = cert.counterexample {
-        let (run, outcome) = search.execute(&faults)?;
-        if is_good(&ff.post, &outcome) {
-            return Err(internal_error!("exhaustive certification's counterexample does not reproduce").into());
+        match search.judge(&faults, &ff.post)? {
+            Judged::Bad(ce) => counterexamples.push(*ce),
+            Judged::Good(..) => {
+                return Err(internal_error!("exhaustive certification's counterexample does not reproduce").into());
+            }
         }
-        let violated = ff
-            .post
-            .iter()
-            .filter(|g| !outcome.post.contains(*g) && outcome.pre.contains(*g))
-            .cloned()
-            .collect();
-        counterexamples.push(Counterexample {
-            faults,
-            outcome,
-            run,
-            violated,
-        });
     }
     Ok(LdfiReport {
         verdict: if counterexamples.is_empty() {
@@ -529,22 +578,10 @@ fn certify_by_enumeration(
     let found = crate::certify::enumerate(sim, &config.spec, &ff.post, config.workers.max(1), config.max_schedules)?;
     let mut counterexamples = Vec::new();
     if let Some(faults) = found.counterexample {
-        let (run, outcome) = search.execute(&faults)?;
-        if is_good(&ff.post, &outcome) {
-            return Err(internal_error!("an enumerated counterexample does not reproduce").into());
+        match search.judge(&faults, &ff.post)? {
+            Judged::Bad(ce) => counterexamples.push(*ce),
+            Judged::Good(..) => return Err(internal_error!("an enumerated counterexample does not reproduce").into()),
         }
-        let violated = ff
-            .post
-            .iter()
-            .filter(|g| !outcome.post.contains(*g) && outcome.pre.contains(*g))
-            .cloned()
-            .collect();
-        counterexamples.push(Counterexample {
-            faults,
-            outcome,
-            run,
-            violated,
-        });
     }
     Ok(LdfiReport {
         verdict: if counterexamples.is_empty() {
@@ -786,7 +823,14 @@ pub fn falsifiers(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<Vec<FaultSch
                 return Err(LdfiError::RunBudget(config.max_runs));
             }
             runs += 1;
-            let (run, outcome) = search.execute(&h)?;
+            // A run that ends in a program error falsifies every goal.
+            let (run, outcome) = match search.try_execute(&h)? {
+                Ran::Failed(_) => {
+                    found.push(h);
+                    continue;
+                }
+                Ran::Done(run, outcome) => (run, outcome),
+            };
             if !outcome.post.contains(goal) {
                 found.push(h);
                 continue;

@@ -85,3 +85,18 @@ fn the_lineage_driven_search_refuses_the_asynchronous_model_for_now() {
     let report = blossom_ldfi::decide(&sim, &config).unwrap();
     assert_eq!(report.verdict, Verdict::Counterexample);
 }
+
+#[test]
+fn a_program_error_under_a_delay_is_a_counterexample() {
+    // The first write, delayed a round, arrives with the second: two writes of one key in one round.
+    let (artifact, fs, _) = compile("race.bls", "EachAsync");
+    let sim = SpecSim::new(&artifact).unwrap();
+    let mut config = LdfiConfig::new(fs);
+    config.workers = 2;
+    let report = blossom_ldfi::enumerate(&sim, &config).unwrap();
+    assert_eq!(report.verdict, Verdict::Counterexample);
+    let ce = &report.counterexamples[0];
+    assert_eq!(fault_labels(&artifact, &ce.faults), ["D(C,S,1,+2)"]);
+    let failure = ce.failure.as_deref().unwrap_or_default();
+    assert!(failure.contains("BLSR002"), "{failure}");
+}
