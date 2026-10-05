@@ -242,3 +242,11 @@ spec TripleCommitRestart for Kafka(DEFAULT_REPLICATION_FACTOR = 3, CLIENT_COMMIT
     faults { eot: 85, eff: 1, crashes: 1, restart: 3, model: sync, round: 50ms }
     check ldfi expect holds;
 }
+
+/// Three brokers, any two lost messages (between any two nodes, until round 30).
+spec TripleTwoLosses for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
+    include Triple;
+    include Guarantees;
+    faults { eot: 40, eff: 30, crashes: 0, omissions: 2, model: sync, round: 50ms }
+    check ldfi expect holds;
+}
