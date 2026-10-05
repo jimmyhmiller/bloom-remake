@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use blossom_sim::{FaultSchedule, Omission};
+use blossom_sim::{FaultSchedule, Omission, Path};
 use blossom_value::time::{NodeId, Tick};
 
 use crate::LdfiError;
@@ -76,8 +76,8 @@ impl FailureSpec {
         Ok(self)
     }
 
-    /// Whether the batch `from -> to` sent at `send` may arrive `rounds` rounds after its send: under the asynchronous
-    /// model, a batch an omission could lose, delayed by 2 to `delay` rounds.
+    /// Whether what `from` sends `to` at `send` (on a channel, or by stream) may arrive `rounds` rounds after its send:
+    /// under the asynchronous model, a batch an omission could lose, delayed by 2 to `delay` rounds.
     pub fn delay_allowed(&self, from: NodeId, to: NodeId, send: Tick, rounds: u64) -> bool {
         self.delay.is_some_and(|max| (2..=max).contains(&rounds)) && self.omission_allowed(from, to, send)
     }
@@ -123,7 +123,7 @@ impl FailureSpec {
         let sends = |o: &Omission| crashes.get(&o.from).is_none_or(|c| !self.down(*c, o.send));
         faults.omissions.retain(sends);
         let lost = faults.omissions.clone();
-        faults.delays.retain(|o, _| sends(o) && !lost.contains(o));
+        faults.delays.retain(|k, _| sends(&k.batch) && !lost.contains(&k.batch));
         faults
     }
 
@@ -153,10 +153,10 @@ impl FailureSpec {
                 .iter()
                 .all(|o| self.omission_allowed(o.from, o.to, o.send))
             && u32::try_from(faults.delays.len()).is_ok_and(|n| n <= self.max_delays)
-            && faults
-                .delays
-                .iter()
-                .all(|(o, d)| self.delay_allowed(o.from, o.to, o.send, *d) && !faults.omissions.contains(o))
+            && faults.delays.iter().all(|(k, d)| {
+                let o = &k.batch;
+                self.delay_allowed(o.from, o.to, o.send, *d) && !faults.omissions.contains(o)
+            })
     }
 
     /// The clock facts a fault set removes (ARCHITECTURE §8.3, LDFI Appendix B): an omission removes its own, as does
@@ -164,7 +164,7 @@ impl FailureSpec {
     /// `x != n` from `c` to EOT, or until its restart.
     pub fn removed_clocks(&self, faults: &FaultSchedule) -> BTreeSet<Omission> {
         let mut out: BTreeSet<Omission> = faults.omissions.clone();
-        out.extend(faults.delays.keys().copied());
+        out.extend(faults.delays.keys().map(|k| k.batch));
         for (&n, &c) in &faults.crashes {
             let end = self.restart_of(c).map_or(self.eot.0, |r| r.0 - 1);
             for x in (0..self.nodes).map(NodeId) {
@@ -184,9 +184,9 @@ impl FailureSpec {
     }
 }
 
-/// `O(from,to,send)`, `C(node,tick)`, `R(node,tick)` (a restart) and `D(from,to,send,+d)` (a batch arriving `d`
-/// rounds after its send) labels, sorted (the corpus's notation, and the delays').
-pub fn labels(faults: &FaultSchedule, node: &dyn Fn(NodeId) -> String) -> Vec<String> {
+/// `O(from,to,send)`, `C(node,tick)`, `R(node,tick)` (a restart) and `D(from,to,send,path,+d)` (a channel's batch, or
+/// the stream traffic, arriving `d` rounds after its send) labels, sorted (the corpus's notation, and the delays').
+pub fn labels(faults: &FaultSchedule, node: &dyn Fn(NodeId) -> String, path: &dyn Fn(Path) -> String) -> Vec<String> {
     let mut out: Vec<String> = faults
         .crashes
         .iter()
@@ -198,12 +198,10 @@ pub fn labels(faults: &FaultSchedule, node: &dyn Fn(NodeId) -> String) -> Vec<St
                 .iter()
                 .map(|o| format!("O({},{},{})", node(o.from), node(o.to), o.send.0)),
         )
-        .chain(
-            faults
-                .delays
-                .iter()
-                .map(|(o, d)| format!("D({},{},{},+{d})", node(o.from), node(o.to), o.send.0)),
-        )
+        .chain(faults.delays.iter().map(|(k, d)| {
+            let o = &k.batch;
+            format!("D({},{},{},{},+{d})", node(o.from), node(o.to), o.send.0, path(k.path))
+        }))
         .collect();
     out.sort();
     out

@@ -230,7 +230,7 @@ fn certification_after_a_spent_budget_enumerates_a_program_it_cannot_step() {
         blossom_ldfi::run(&sim, &config),
         Err(LdfiError::ScheduleBudget(3))
     ));
-    assert!(blossom_ldfi::certify::schedule_count(&fs) > 3);
+    assert!(blossom_ldfi::certify::schedule_count(&fs, blossom_ldfi::certify::paths(&sim).len()) > 3);
 }
 
 #[test]

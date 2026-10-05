@@ -45,9 +45,10 @@ pub struct Args {
     /// Lose everything `from` sends to `to` at a tick: `from:to:tick` (repeatable).
     #[arg(long = "omit", value_name = "FROM:TO:TICK")]
     pub omissions: Vec<String>,
-    /// Delay everything `from` sends to `to` at a tick so it arrives `rounds` (at least 2) ticks after its send
-    /// instead of the next (the asynchronous model): `from:to:tick:rounds` (repeatable).
-    #[arg(long = "delay", value_name = "FROM:TO:TICK:ROUNDS")]
+    /// Delay what `from` sends to `to` at a tick on a channel (or `streams`: its stream traffic) so it arrives
+    /// `rounds` (at least 2) ticks after its send instead of the next (the asynchronous model):
+    /// `from:to:tick:channel:rounds` (repeatable).
+    #[arg(long = "delay", value_name = "FROM:TO:TICK:CHANNEL:ROUNDS")]
     pub delays: Vec<String>,
     /// Crash a node at a tick: `node:tick` (repeatable).
     #[arg(long = "crash", value_name = "NODE:TICK")]
@@ -301,8 +302,21 @@ fn faults(artifact: &SimArtifact, args: &Args) -> Result<FaultSchedule, String> 
     }
     for text in &args.delays {
         let parts: Vec<&str> = text.split(':').collect();
-        let [from, to, tick, rounds] = parts.as_slice() else {
-            return Err(format!("`{text}`: expected FROM:TO:TICK:ROUNDS"));
+        let [from, to, tick, channel, rounds] = parts.as_slice() else {
+            return Err(format!("`{text}`: expected FROM:TO:TICK:CHANNEL:ROUNDS"));
+        };
+        let path = if *channel == "streams" {
+            blossom_sim::Path::Streams
+        } else {
+            let rels = &artifact.protocol.get().rels;
+            let rel = rels
+                .iter_enumerated()
+                .find(|(_, r)| {
+                    r.name.to_string() == *channel && matches!(r.class, blossom_ir::core::RelClass::Channel(_))
+                })
+                .map(|(id, _)| id)
+                .ok_or_else(|| format!("`{text}`: `{channel}` is not a channel of the program (or `streams`)"))?;
+            blossom_sim::Path::Channel(rel)
         };
         let number = |s: &str| s.parse::<u64>().map_err(|_| format!("`{text}`: `{s}` is not a number"));
         let rounds = number(rounds)?;
@@ -312,10 +326,13 @@ fn faults(artifact: &SimArtifact, args: &Args) -> Result<FaultSchedule, String> 
             ));
         }
         out.delays.insert(
-            Omission {
-                from: node(from)?,
-                to: node(to)?,
-                send: Tick(number(tick)?),
+            blossom_sim::Delayed {
+                batch: Omission {
+                    from: node(from)?,
+                    to: node(to)?,
+                    send: Tick(number(tick)?),
+                },
+                path,
             },
             rounds,
         );

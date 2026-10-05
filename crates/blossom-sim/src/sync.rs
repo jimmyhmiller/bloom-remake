@@ -54,6 +54,21 @@ pub struct Omission {
     pub send: Tick,
 }
 
+/// What a delay delays (S13): the messages of one channel, or the stream traffic, a node sends another in a round.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Path {
+    Channel(RelId),
+    /// Every connection's flights between the two nodes (a stream keeps its order).
+    Streams,
+}
+
+/// A delayed batch: what `batch.from` sends `batch.to` in round `batch.send` on `path`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Delayed {
+    pub batch: Omission,
+    pub path: Path,
+}
+
 /// The faults of one run.
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FaultSchedule {
@@ -63,10 +78,9 @@ pub struct FaultSchedule {
     /// Each crashed node that restarts, and the round it runs again in (after its crash round; crash-recovery,
     /// TEST-037, under [`CrashView::Frozen`] only).
     pub restarts: BTreeMap<NodeId, Tick>,
-    /// Each delayed batch (named like an omission: everything `from` sends `to` in round `send`) and the number of
-    /// rounds after its send it arrives in, at least 2 (the asynchronous model, S13). A stream's delayed flight holds
-    /// back the ones after it on its connection.
-    pub delays: BTreeMap<Omission, u64>,
+    /// Each delayed batch and the number of rounds after its send it arrives in, at least 2 (the asynchronous model,
+    /// S13). A stream's delayed flight holds back the ones after it on its connection.
+    pub delays: BTreeMap<Delayed, u64>,
 }
 
 impl FaultSchedule {
@@ -90,12 +104,13 @@ impl FaultSchedule {
         self.omissions.is_empty() && self.crashes.is_empty() && self.delays.is_empty()
     }
 
-    /// The rounds after its send the batch `from -> to` sent in round `send` arrives in: 1, unless delayed.
-    pub fn delay(&self, from: NodeId, to: NodeId, send: Tick) -> u64 {
+    /// The rounds after its send what `from` sends `to` in round `send` on `path` arrives in: 1, unless delayed.
+    pub fn delay(&self, from: NodeId, to: NodeId, send: Tick, path: Path) -> u64 {
         if from == to {
             return 1;
         }
-        self.delays.get(&Omission { from, to, send }).copied().unwrap_or(1)
+        let batch = Omission { from, to, send };
+        self.delays.get(&Delayed { batch, path }).copied().unwrap_or(1)
     }
 }
 
@@ -461,7 +476,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                         // A crashed node sends nothing to other nodes (both crash views).
                         continue;
                     }
-                    let arrival = Tick(t + faults.delay(node, send.to, tick));
+                    let arrival = Tick(t + faults.delay(node, send.to, tick, Path::Channel(send.rel)));
                     let fate = if arrival > config.last {
                         Fate::AfterEnd
                     } else if !own
@@ -551,7 +566,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                     f.release(*node, tick, host, retired, node_blobs)?;
                 }
                 let lost = |from: NodeId, to: NodeId| faults.omissions.contains(&Omission { from, to, send: tick });
-                let delay = |from: NodeId, to: NodeId| faults.delay(from, to, tick);
+                let delay = |from: NodeId, to: NodeId| faults.delay(from, to, tick, Path::Streams);
                 f.deliver(tick, &up_next, &lost, &delay, at)?;
             }
             run.rounds.push(round);
@@ -709,10 +724,13 @@ mod tests {
         let eval = Pinger { nodes: 2 };
         let world = SyncWorld::new(&eval, 2);
         let mut faults = FaultSchedule::default();
-        let batch = |send| Omission {
-            from: NodeId(0),
-            to: NodeId(1),
-            send: Tick(send),
+        let batch = |send| Delayed {
+            batch: Omission {
+                from: NodeId(0),
+                to: NodeId(1),
+                send: Tick(send),
+            },
+            path: Path::Channel(PING),
         };
         // 0's batch to 1 sent at 1 arrives at 4, after the one sent at 2 (at 3); the one sent at 4 would arrive at 7.
         faults.delays.insert(batch(1), 3);

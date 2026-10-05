@@ -129,7 +129,20 @@ impl Names for DedNames<'_> {
 /// The fault set in the corpus's notation: `{C(a,2), O(a,b,1)}`.
 pub fn fault_labels(artifact: &SimArtifact, faults: &FaultSchedule) -> Vec<String> {
     let names = DedNames { artifact };
-    labels(faults, &|n| names.node(n))
+    labels(faults, &|n| names.node(n), &|p| path_name(artifact, p))
+}
+
+/// What a delay delays, by name: a channel's relation, or `streams`.
+pub fn path_name(artifact: &SimArtifact, path: blossom_sim::Path) -> String {
+    match path {
+        blossom_sim::Path::Channel(rel) => artifact
+            .protocol
+            .get()
+            .rels
+            .get(rel)
+            .map_or_else(|| format!("{rel:?}"), |r| r.name.to_string()),
+        blossom_sim::Path::Streams => "streams".to_owned(),
+    }
 }
 
 /// A human-readable report.

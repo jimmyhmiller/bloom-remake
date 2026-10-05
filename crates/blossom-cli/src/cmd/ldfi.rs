@@ -191,9 +191,19 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
 
     if args.progress {
         let names: Vec<String> = artifact.nodes.iter().map(|n| n.as_str().to_owned()).collect();
+        let paths = artifact
+            .protocol
+            .get()
+            .rels
+            .iter_enumerated()
+            .map(|(id, _)| blossom_sim::Path::Channel(id))
+            .chain([blossom_sim::Path::Streams])
+            .map(|p| (p, blossom_ldfi::report::path_name(&artifact, p)))
+            .collect();
         config.observer = Some(blossom_ldfi::ObserverRef(std::sync::Arc::new(Progress {
             clock: crate::common::stopwatch::Stopwatch::start(),
             names,
+            paths,
         })));
     }
     config.workers = args
@@ -291,6 +301,8 @@ fn fail(e: &LdfiError) -> ExitCode {
 struct Progress {
     clock: crate::common::stopwatch::Stopwatch,
     names: Vec<String>,
+    /// What a delay delays, by name.
+    paths: std::collections::BTreeMap<blossom_sim::Path, String>,
 }
 
 impl blossom_ldfi::Observer for Progress {
@@ -305,7 +317,8 @@ impl blossom_ldfi::Observer for Progress {
                 .cloned()
                 .unwrap_or_else(|| format!("node#{}", n.0))
         };
-        let faults = blossom_ldfi::faults::labels(&p.faults, &name).join(", ");
+        let path = |p: blossom_sim::Path| self.paths.get(&p).cloned().unwrap_or_else(|| format!("{p:?}"));
+        let faults = blossom_ldfi::faults::labels(&p.faults, &name, &path).join(", ");
         let secs = |ns: u64| ns as f64 / 1e9;
         eprintln!(
             "[{:>8.1}s] run {} {{{faults}}} {}: {} goals, {} firings, +{} hypotheses, queue {}, {} counterexample(s) | \

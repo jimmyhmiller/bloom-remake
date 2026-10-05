@@ -64,13 +64,15 @@ fn the_race_holds_in_order_and_fails_when_a_delay_reorders_the_writes() {
     assert_eq!(enumerate("race.bls", "NaiveSync"), (vec![], 1));
     // The first write (sent at 1) arrives at 4, after the second (sent at 2, arriving at 3).
     let (faults, _) = enumerate("race.bls", "NaiveAsync");
-    assert_eq!(faults, ["D(C,S,1,+3)"]);
-    // The versioned server holds under every delay: 6 batches (either way, sent at 1, 2 or 3) by 2 or 3 rounds, and none.
+    assert_eq!(faults, ["D(C,S,1,put,+3)"]);
+    // The versioned server holds under every delay: 6 batches (either way, sent at 1, 2 or 3) on its one channel by 2 or
+    // 3 rounds, and none.
     let (faults, schedules) = enumerate("race.bls", "VersionedAsync");
     assert!(faults.is_empty());
     assert_eq!(schedules, 13);
-    let (_, fs, _) = compile("race.bls", "VersionedAsync");
-    assert_eq!(blossom_ldfi::certify::schedule_count(&fs), 13);
+    let (artifact, fs, _) = compile("race.bls", "VersionedAsync");
+    let paths = blossom_ldfi::certify::paths(&SpecSim::new(&artifact).unwrap());
+    assert_eq!(blossom_ldfi::certify::schedule_count(&fs, paths.len()), 13);
 }
 
 #[test]
@@ -96,7 +98,7 @@ fn a_program_error_under_a_delay_is_a_counterexample() {
     let report = blossom_ldfi::enumerate(&sim, &config).unwrap();
     assert_eq!(report.verdict, Verdict::Counterexample);
     let ce = &report.counterexamples[0];
-    assert_eq!(fault_labels(&artifact, &ce.faults), ["D(C,S,1,+2)"]);
+    assert_eq!(fault_labels(&artifact, &ce.faults), ["D(C,S,1,put,+2)"]);
     let failure = ce.failure.as_deref().unwrap_or_default();
     assert!(failure.contains("BLSR002"), "{failure}");
 }

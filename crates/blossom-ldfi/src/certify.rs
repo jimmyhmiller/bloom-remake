@@ -139,18 +139,38 @@ pub struct Enumeration {
     pub schedules: u64,
 }
 
-/// How many fault schedules [`enumerate`] runs for `spec` (saturating): per crash schedule, every set of allowed
-/// omissions within the bound and, under the asynchronous model, every way to delay at most `max_delays` of the
-/// other batches (the ones a crashed sender's own downtime implies included: they are skipped, not subtracted).
-pub fn schedule_count(spec: &FailureSpec) -> u128 {
+/// What a delay may delay in `sim`'s program: each channel, and its streams (when it has any).
+pub fn paths(sim: &SpecSim<'_>) -> Vec<blossom_sim::Path> {
+    use blossom_ir::core::{EventSource, RelClass};
+    let rels = &sim.artifact().protocol.get().rels;
+    let mut out: Vec<blossom_sim::Path> = rels
+        .iter_enumerated()
+        .filter(|(_, r)| matches!(r.class, RelClass::Channel(_)))
+        .map(|(id, _)| blossom_sim::Path::Channel(id))
+        .collect();
+    if rels
+        .iter()
+        .any(|r| matches!(&r.class, RelClass::Event(EventSource::Stream(_))))
+    {
+        out.push(blossom_sim::Path::Streams);
+    }
+    out
+}
+
+/// How many fault schedules [`enumerate`] runs for `spec` over a program with `paths` delay paths (saturating): per
+/// crash schedule, every set of allowed omissions within the bound and, under the asynchronous model, every way to
+/// delay at most `max_delays` of the other batches on any path (the ones a crashed sender's own downtime implies
+/// included: they are skipped, not subtracted).
+pub fn schedule_count(spec: &FailureSpec, paths: usize) -> u128 {
     let m = omission_candidates(spec).len() as u128;
+    let paths = paths as u128;
     let k = spec.max_omissions.map_or(m, |k| u128::from(k).min(m));
     let lengths = spec.delay.map_or(0, |d| u128::from(d.saturating_sub(1)));
     let mut total: u128 = 0;
     for i in 0..=k {
         // C(m, i) omission sets, then delays among the other m − i batches: Σ_j C(m − i, j)·lengths^j, j ≤ max.
         let Some(lost) = binomial(m, i) else { return u128::MAX };
-        let rest = m - i;
+        let rest = (m - i).saturating_mul(paths);
         let mut delayed: u128 = 0;
         for j in 0..=u128::from(spec.max_delays).min(rest) {
             let Some(c) = binomial(rest, j) else { return u128::MAX };
@@ -203,7 +223,8 @@ pub fn enumerate(
     workers: usize,
     max_schedules: u64,
 ) -> Result<Enumeration, LdfiError> {
-    if schedule_count(spec) > u128::from(max_schedules) {
+    let paths = paths(sim);
+    if schedule_count(spec, paths.len()) > u128::from(max_schedules) {
         return Err(LdfiError::ScheduleBudget(max_schedules));
     }
     let candidates = omission_candidates(spec);
@@ -218,7 +239,11 @@ pub fn enumerate(
         });
         subsets(&candidates, k, &mut Vec::new(), 0, &mut |omissions| {
             let lost: BTreeSet<Omission> = omissions.iter().copied().collect();
-            let others: Vec<Omission> = candidates.iter().filter(|o| !lost.contains(o)).copied().collect();
+            let others: Vec<blossom_sim::Delayed> = candidates
+                .iter()
+                .filter(|o| !lost.contains(o))
+                .flat_map(|o| paths.iter().map(|p| blossom_sim::Delayed { batch: *o, path: *p }))
+                .collect();
             delay_sets(spec, &others, &mut Vec::new(), 0, &mut |delays| {
                 let faults = FaultSchedule {
                     omissions: lost.clone(),
@@ -265,14 +290,14 @@ pub fn enumerate(
     Ok(result)
 }
 
-/// A batch and the rounds after its send it arrives in.
-type Delayed = (Omission, u64);
+/// A delayed batch and the rounds after its send it arrives in.
+type Delayed = (blossom_sim::Delayed, u64);
 
 /// Calls `f` with every way to delay at most `spec.max_delays` of `batches[from..]` (each by 2 to `spec.delay` rounds)
 /// added to `chosen`; under the synchronous model, only with `chosen`.
 fn delay_sets(
     spec: &FailureSpec,
-    batches: &[Omission],
+    batches: &[blossom_sim::Delayed],
     chosen: &mut Vec<Delayed>,
     from: usize,
     f: &mut dyn FnMut(&[Delayed]),
