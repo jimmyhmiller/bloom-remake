@@ -290,15 +290,18 @@ fn a_lost_message_resets_the_connection_it_carries_or_fails_the_dial() {
     assert!(timeline(&artifact, &run, SRV).is_empty());
 }
 
-/// A fault schedule delaying what `from` sends `to` in round `send` by `by` rounds.
+/// A fault schedule delaying the stream traffic `from` sends `to` in round `send` by `by` rounds.
 #[cfg(test)]
 fn delayed(from: NodeId, to: NodeId, send: u64, by: u64) -> FaultSchedule {
     let mut f = FaultSchedule::default();
     f.delays.insert(
-        Omission {
-            from,
-            to,
-            send: Tick(send),
+        blossom_sim::Delayed {
+            batch: Omission {
+                from,
+                to,
+                send: Tick(send),
+            },
+            path: blossom_sim::Path::Streams,
         },
         by,
     );

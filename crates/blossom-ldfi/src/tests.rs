@@ -79,7 +79,7 @@ fn extensions(g: &ProvGraph, spec: &FailureSpec, seed: FaultSchedule, target: Go
     .unwrap()
     .hypotheses
     .iter()
-    .map(|f| labels(f, &name))
+    .map(|f| labels(f, &name, &|p| format!("{p:?}")))
     .collect()
 }
 
@@ -218,7 +218,7 @@ fn fault_sets_normalize_and_compare_by_removed_clocks() {
     });
     let f = spec.canonical(f);
     assert_eq!(
-        labels(&f, &name),
+        labels(&f, &name, &|p| format!("{p:?}")),
         ["C(a,2)", "O(a,b,1)"],
         "the crash implies the later omission"
     );
@@ -286,6 +286,10 @@ fn the_asynchronous_model_admits_delays_within_its_bounds_and_canonicalizes_them
         to,
         send: Tick(send),
     };
+    let on_ping = |from, to, send| blossom_sim::Delayed {
+        batch: batch(from, to, send),
+        path: blossom_sim::Path::Channel(RelId::from_raw(0)),
+    };
     assert!(FailureSpec::new(8, 4, 1, 2).unwrap().with_delays(1, 1).is_err());
     let spec = FailureSpec::new(8, 4, 1, 2).unwrap().with_delays(3, 1).unwrap();
     // A batch between two nodes sent before EFF, by 2 or 3 rounds.
@@ -293,11 +297,11 @@ fn the_asynchronous_model_admits_delays_within_its_bounds_and_canonicalizes_them
     assert!(!spec.delay_allowed(a, b, Tick(1), 1) && !spec.delay_allowed(a, b, Tick(1), 4));
     assert!(!spec.delay_allowed(a, b, Tick(4), 2) && !spec.delay_allowed(a, a, Tick(1), 2));
     let mut one = FaultSchedule::default();
-    one.delays.insert(batch(a, b, 1), 3);
+    one.delays.insert(on_ping(a, b, 1), 3);
     assert!(spec.admits(&one));
-    assert_eq!(labels(&one, &name), ["D(a,b,1,+3)"]);
+    assert_eq!(labels(&one, &name, &|_| "ping".to_owned()), ["D(a,b,1,ping,+3)"]);
     let mut two = one.clone();
-    two.delays.insert(batch(b, a, 2), 2);
+    two.delays.insert(on_ping(b, a, 2), 2);
     assert!(!spec.admits(&two), "over the budget of one delay");
     let mut both = one.clone();
     both.omissions.insert(batch(a, b, 1));

@@ -17,6 +17,6 @@ pub mod spec;
 pub mod sync;
 
 pub use sync::{
-    CrashView, Evaluator, Fate, FaultSchedule, MessageRecord, NodeTick, Omission, SimError, SyncConfig, SyncRun,
-    SyncWorld,
+    CrashView, Delayed, Evaluator, Fate, FaultSchedule, MessageRecord, NodeTick, Omission, Path, SimError, SyncConfig,
+    SyncRun, SyncWorld,
 };

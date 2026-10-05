@@ -392,7 +392,10 @@ impl<'a> Search<'a> {
                 let names = crate::report::DedNames {
                     artifact: self.artifact,
                 };
-                let faults = crate::faults::labels(seed, &|n| names.node(n)).join(", ");
+                let faults = crate::faults::labels(seed, &|n| names.node(n), &|p| {
+                    crate::report::path_name(self.artifact, p)
+                })
+                .join(", ");
                 Some(match target {
                     crate::hazard::Target::Goal(goal) => {
                         let lost = crate::explain::lost_under(graph, &self.config.spec, seed, *goal, &names);
@@ -553,7 +556,9 @@ fn certify_exhaustively(
 /// (S11, S12: on the Kafka specs its lineage leaves a third to all of the schedules to run, at several times a
 /// run's cost each); beyond that, its pruning is what makes a verdict reachable at all.
 pub fn decide(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<LdfiReport, LdfiError> {
-    if crate::certify::schedule_count(&config.spec) <= u128::from(config.max_schedules) {
+    if crate::certify::schedule_count(&config.spec, crate::certify::paths(sim).len())
+        <= u128::from(config.max_schedules)
+    {
         enumerate(sim, config)
     } else {
         run(sim, config)
