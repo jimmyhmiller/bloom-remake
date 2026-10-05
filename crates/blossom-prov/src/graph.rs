@@ -180,12 +180,13 @@ pub struct ProvGraph {
     negation_index: DetMap<NegRead, NegId>,
     aggregates: Vec<AggGroup>,
     aggregate_index: DetMap<AggGroup, AggId>,
-    /// Goals by relation, node and tick, for scans of tuples matching a pattern.
-    by_place: BTreeMap<(Space, RelId, Option<NodeId>, Tick), Vec<GoalId>>,
+    /// Goals by relation, node and tick, for scans of tuples matching a pattern (only probed, like `index`).
+    by_place: DetMap<(Space, RelId, Option<NodeId>, Tick), Vec<GoalId>>,
     /// Hash iteration order is never observed: the index is only probed.
     index: DetMap<GoalKey, GoalId>,
     firings: Vec<Firing>,
-    by_logical: BTreeMap<(u32, Tick), Vec<GoalId>>,
+    /// Goals by source-level relation and tick (only probed).
+    by_logical: DetMap<(u32, Tick), Vec<GoalId>>,
 }
 
 impl ProvGraph {
