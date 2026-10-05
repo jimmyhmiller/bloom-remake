@@ -10,7 +10,7 @@
 //! The graph is built by a frontend-specific converter (for `.ded` programs, in `blossom-ldfi`) through
 //! [`ProvGraph::goal`], [`ProvGraph::set_support`] and [`ProvGraph::add_firing`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::sync::Arc;
 
@@ -187,6 +187,9 @@ pub struct ProvGraph {
     firings: Vec<Firing>,
     /// Goals by source-level relation and tick (only probed).
     by_logical: DetMap<(u32, Tick), Vec<GoalId>>,
+    /// Every round in which a stream carried something from one node to another (bytes, a close, a dial): a lost
+    /// message from the one to the other in that round resets the connection, or fails the dial.
+    crossings: BTreeSet<(NodeId, NodeId, Tick)>,
 }
 
 impl ProvGraph {
@@ -295,6 +298,16 @@ impl ProvGraph {
     /// Every goal of source-level relation `logical` at `tick`.
     pub fn goals_of(&self, logical: u32, tick: Tick) -> &[GoalId] {
         self.by_logical.get(&(logical, tick)).map_or(&[], Vec::as_slice)
+    }
+
+    /// Records that a stream carried something from `from` to `to` in round `tick`.
+    pub fn crossing(&mut self, from: NodeId, to: NodeId, tick: Tick) {
+        self.crossings.insert((from, to, tick));
+    }
+
+    /// Whether a stream carried something from `from` to `to` in round `tick`.
+    pub fn crossed(&self, from: NodeId, to: NodeId, tick: Tick) -> bool {
+        self.crossings.contains(&(from, to, tick))
     }
 
     pub fn goal_count(&self) -> usize {

@@ -38,6 +38,7 @@ pub use crate::circuit::Hazard;
 use crate::circuit::{Atom, Atoms, Kind, Node};
 use crate::faults::FailureSpec;
 use crate::reach::Preds;
+use crate::shared::{CtxId, Entries, Other, RunContexts, SharedHazards};
 
 /// How negated reads are supported (TEST-025).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -128,8 +129,9 @@ pub enum Origin<'r> {
     Stream,
 }
 
-type Pattern = Vec<Option<Value>>;
-type PlaceKey = (Space, RelId, Loc, Tick, Pattern);
+pub(crate) type Pattern = Vec<Option<Value>>;
+/// A place and a row pattern: what an appearance or a removal is asked about.
+pub(crate) type PlaceKey = (Space, RelId, Loc, Tick, Pattern);
 
 /// The fault variables of one solver, and the circuit nodes it was given: `O(from,to,send)` per omission atom, and
 /// per node its crash variables, created together on first use. Under crash-stop they are the crash-order variables
@@ -579,6 +581,13 @@ pub struct Encoder<'a> {
     remove_memo: DetMap<PlaceKey, Hazard>,
     /// The fault atoms and predicates the hazards are built over.
     atoms: Atoms<'a>,
+    /// The hazards earlier runs shared, and this run's context at every tick (S12).
+    shared: Option<&'a SharedHazards>,
+    ctx: RunContexts,
+    /// Per frame on the current path, whether it is a goal's (else an appearance's); whether a cycle through both
+    /// kinds was met, which has no single fixpoint, so the run's entries are not shared.
+    frames: Vec<bool>,
+    mixed: bool,
     /// Per goal (dense by id): its memoized hazard, and its depth on the current path.
     memo: Vec<Option<Hazard>>,
     on_path: Vec<Option<usize>>,
@@ -601,7 +610,12 @@ pub struct Encoder<'a> {
 impl<'a> Encoder<'a> {
     /// An encoder for `graph`. Tuple-level negative support needs the program's `rules`; without them
     /// [`NegSupport::Precise`] falls back to relation-level support.
-    pub fn new(graph: &'a ProvGraph, setting: Setting<'a>, seed: &FaultSchedule) -> Encoder<'a> {
+    pub fn new(
+        graph: &'a ProvGraph,
+        setting: Setting<'a>,
+        seed: &FaultSchedule,
+        shared: Option<&'a SharedHazards>,
+    ) -> Result<Encoder<'a>, LdfiError> {
         let Setting {
             spec,
             preds,
@@ -610,7 +624,11 @@ impl<'a> Encoder<'a> {
             frozen,
             clock: _,
         } = setting;
-        Encoder {
+        let ctx = match shared {
+            Some(s) => s.contexts(spec, seed)?,
+            None => RunContexts::default(),
+        };
+        Ok(Encoder {
             seed_crashes: seed.crashes.clone(),
             seed_omissions: seed.omissions.clone(),
             stream_memo: BTreeMap::new(),
@@ -625,6 +643,10 @@ impl<'a> Encoder<'a> {
             appear_path: DetMap::default(),
             remove_memo: DetMap::default(),
             atoms: Atoms::new(spec),
+            shared,
+            ctx,
+            frames: Vec::new(),
+            mixed: false,
             memo: vec![None; graph.goal_count()],
             on_path: vec![None; graph.goal_count()],
             depth: 0,
@@ -632,7 +654,85 @@ impl<'a> Encoder<'a> {
             tick_memo: BTreeMap::new(),
             prefix_memo: BTreeMap::new(),
             low: usize::MAX,
+        })
+    }
+
+    /// This run's context at `tick`, when earlier runs may have shared entries there.
+    fn ctx_at(&self, tick: Tick) -> Option<CtxId> {
+        let t = usize::try_from(tick.0).ok()?;
+        self.ctx.lookup.get(t).copied()?.then_some(*self.ctx.ids.get(t)?)
+    }
+
+    /// The shared hazard of `key` at `tick`, if an earlier run shared it.
+    fn shared_other(&self, key: Other, tick: Tick) -> Result<Option<Hazard>, LdfiError> {
+        match (self.shared, self.ctx_at(tick)) {
+            (Some(s), Some(c)) => Ok(s.other(key, c)?),
+            _ => Ok(None),
         }
+    }
+
+    /// Notes a cycle cut at the frame at `depth`, of a goal or an appearance: it runs through both kinds when a frame
+    /// of the other kind lies between that frame and the top of the path.
+    fn note_cut(&mut self, depth: usize, goal: bool) {
+        if self.frames.get(depth..).is_some_and(|f| f.contains(&!goal)) {
+            self.mixed = true;
+        }
+    }
+
+    /// The entries to share: every hazard this run memoized, under its context; none when a cycle ran through goals
+    /// and appearances both.
+    pub fn entries(self) -> Option<(Entries, RunContexts)> {
+        if self.mixed || self.shared.is_none() {
+            return None;
+        }
+        let mut out = Entries::default();
+        // Only where this run is the first to share: earlier runs shared the ticks before.
+        let ctx = |t: Tick| {
+            let t = usize::try_from(t.0).ok()?;
+            self.ctx.publish.get(t).copied()?.then_some(*self.ctx.ids.get(t)?)
+        };
+        for (i, h) in self.memo.iter().enumerate() {
+            let (Some(h), Ok(id)) = (h, u32::try_from(i)) else {
+                continue;
+            };
+            if let Some(g) = self.graph.get(GoalId(id))
+                && let Some(c) = ctx(g.key.tick)
+            {
+                out.goals.push((g.key.clone(), c, h.clone()));
+            }
+        }
+        for (key, h) in self.appear_memo.iter() {
+            if let Some(c) = ctx(key.3) {
+                out.appears.push((key.clone(), c, h.clone()));
+            }
+        }
+        for (key, h) in self.remove_memo.iter() {
+            if let Some(c) = ctx(key.3) {
+                out.removes.push((key.clone(), c, h.clone()));
+            }
+        }
+        let others = self
+            .stream_memo
+            .iter()
+            .map(|((n, t), h)| (Other::Stream(*n, *t), *t, h))
+            .chain(
+                self.traffic_memo
+                    .iter()
+                    .map(|((n, t), h)| (Other::Traffic(*n, *t), *t, h)),
+            )
+            .chain(self.neg_memo.iter().map(|((l, t), h)| (Other::Neg(*l, *t), *t, h)))
+            .chain(self.tick_memo.iter().map(|((l, t), h)| (Other::AtTick(*l, *t), *t, h)))
+            .chain(
+                self.prefix_memo
+                    .iter()
+                    .map(|((l, t), h)| (Other::Prefix(*l, *t), *t, h)),
+            );
+        for (key, t, h) in others {
+            if let Some(c) = ctx(t) {
+                out.others.push((key, c, h.clone()));
+            }
+        }
+        Some((out, self.ctx))
     }
 
     /// The hazard of a target: a goal's, or for an appearance, whether the fault variables can make the tuple
@@ -748,8 +848,19 @@ impl<'a> Encoder<'a> {
         if let Some(Some(h)) = self.memo.get(i) {
             return Ok(h.clone());
         }
+        if let (Some(s), Some(g)) = (self.shared, self.graph.get(goal))
+            && let Some(c) = self.ctx_at(g.key.tick)
+            && let Some(h) = s.goal(&g.key, c)?
+        {
+            if let Some(slot) = self.memo.get_mut(i) {
+                *slot = Some(h.clone());
+            }
+            return Ok(h);
+        }
         if let Some(Some(depth)) = self.on_path.get(i) {
-            self.low = self.low.min(*depth);
+            let depth = *depth;
+            self.low = self.low.min(depth);
+            self.note_cut(depth, true);
             return Ok(Hazard::True);
         }
         let depth = self.depth;
@@ -760,7 +871,9 @@ impl<'a> Encoder<'a> {
         *slot = Some(depth);
         self.depth += 1;
         let saved = std::mem::replace(&mut self.low, usize::MAX);
+        self.frames.push(true);
         let result = self.goal_body(goal);
+        self.frames.pop();
         self.depth -= 1;
         if let Some(slot) = self.on_path.get_mut(i) {
             *slot = None;
@@ -913,6 +1026,10 @@ impl<'a> Encoder<'a> {
         if let Some(h) = self.neg_memo.get(&(logical, tick)) {
             return Ok(h.clone());
         }
+        if let Some(h) = self.shared_other(Other::Neg(logical, tick), tick)? {
+            self.neg_memo.insert((logical, tick), h.clone());
+            return Ok(h);
+        }
         let sources: Vec<(u32, bool)> = self.preds.of_rel(logical).collect();
         let crash_reaches = self.preds.crash_reaches(logical);
         let (h, independent) = self.tracked(|e| {
@@ -968,15 +1085,25 @@ impl<'a> Encoder<'a> {
         if let Some(h) = self.appear_memo.get(&key) {
             return Ok(h.clone());
         }
+        if let (Some(s), Some(c)) = (self.shared, self.ctx_at(tick))
+            && let Some(h) = s.appear(&key, c)?
+        {
+            self.appear_memo.insert(key, h.clone());
+            return Ok(h);
+        }
         if let Some(depth) = self.appear_path.get(&key) {
-            self.low = self.low.min(*depth);
+            let depth = *depth;
+            self.low = self.low.min(depth);
+            self.note_cut(depth, false);
             return Ok(Hazard::False);
         }
         let depth = self.depth;
         self.appear_path.insert(key.clone(), depth);
         self.depth += 1;
         let saved = std::mem::replace(&mut self.low, usize::MAX);
+        self.frames.push(false);
         let result = self.appear_body(space, rel, loc, tick, pattern);
+        self.frames.pop();
         self.depth -= 1;
         self.appear_path.remove(&key);
         let result = result?;
@@ -1150,12 +1277,16 @@ impl<'a> Encoder<'a> {
     }
 
     /// Whether faults beyond the run's own can make a stream event appear at `node` and `tick` (conservatively, any
-    /// event): a message lost between `node` and another node before `tick` in a tick traffic can leave the sender
-    /// (it resets a connection, or fails a dial), a crash of any node by `tick` (it resets connections, or fails a
+    /// event): a message lost between `node` and another node before `tick` in a round something can cross from the
+    /// sender to the receiver (it resets a connection, or fails a dial), a crash of any node by `tick` (it resets connections, or fails a
     /// dial to it), or a new request to the host at any node before `tick`.
     fn stream_appear(&mut self, node: NodeId, tick: Tick) -> Result<Hazard, LdfiError> {
         if let Some(h) = self.stream_memo.get(&(node, tick)) {
             return Ok(h.clone());
+        }
+        if let Some(h) = self.shared_other(Other::Stream(node, tick), tick)? {
+            self.stream_memo.insert((node, tick), h.clone());
+            return Ok(h);
         }
         let Some(rules) = self.rules else {
             return Err(internal_error!("tuple-level negative support without the program's rules").into());
@@ -1173,7 +1304,7 @@ impl<'a> Encoder<'a> {
                     for (from, to) in [(node, other), (other, node)] {
                         let o = Omission { from, to, send };
                         if e.spec.omission_allowed(from, to, send) && !e.seed_omissions.contains(&o) {
-                            let traffic = e.traffic(from, send)?;
+                            let traffic = e.traffic(from, to, send)?;
                             if traffic == Hazard::False {
                                 continue;
                             }
@@ -1205,12 +1336,25 @@ impl<'a> Encoder<'a> {
         Ok(h)
     }
 
-    /// Whether stream traffic can leave `node` in `tick` (so a message lost then can reset a connection): the run has
-    /// it make a request to the host or take a stream event then (a retiring end tells its peer), or faults can make
-    /// it make a new request then.
-    fn traffic(&mut self, node: NodeId, tick: Tick) -> Result<Hazard, LdfiError> {
+    /// Whether a message `from -> to` lost in round `tick` can reset a connection or fail a dial: the run's streams
+    /// carried something from the one to the other then (bytes, a close, a dial), or faults can make `from` make a
+    /// new request then. (A stream event that faults make `from` take, and a retiring end's close with it, comes from
+    /// an earlier fault, which the same hazard holds; its run's lineage then has the crossing.)
+    fn traffic(&mut self, from: NodeId, to: NodeId, tick: Tick) -> Result<Hazard, LdfiError> {
+        if self.graph.crossed(from, to, tick) {
+            return Ok(Hazard::True);
+        }
+        self.new_requests(from, tick)
+    }
+
+    /// Whether faults can make `node` make a request to the host in round `tick` that the run did not have.
+    fn new_requests(&mut self, node: NodeId, tick: Tick) -> Result<Hazard, LdfiError> {
         if let Some(h) = self.traffic_memo.get(&(node, tick)) {
             return Ok(h.clone());
+        }
+        if let Some(h) = self.shared_other(Other::Traffic(node, tick), tick)? {
+            self.traffic_memo.insert((node, tick), h.clone());
+            return Ok(h);
         }
         let Some(rules) = self.rules else {
             return Err(internal_error!("tuple-level negative support without the program's rules").into());
@@ -1220,15 +1364,6 @@ impl<'a> Encoder<'a> {
             .into_iter()
             .map(|r| (r, rules.arity(Space::Protocol, r)))
             .collect();
-        let held = requests
-            .iter()
-            .map(|(r, _)| *r)
-            .chain(rules.stream_events())
-            .any(|r| !self.graph.goals_at(Space::Protocol, r, Some(node), tick).is_empty());
-        if held {
-            self.traffic_memo.insert((node, tick), Hazard::True);
-            return Ok(Hazard::True);
-        }
         let (h, independent) = self.tracked(|e| {
             let mut options = Vec::new();
             for (rel, arity) in &requests {
@@ -1502,6 +1637,12 @@ impl<'a> Encoder<'a> {
         if let Some(h) = self.remove_memo.get(&key) {
             return Ok(h.clone());
         }
+        if let (Some(s), Some(c)) = (self.shared, self.ctx_at(tick))
+            && let Some(h) = s.remove(&key, c)?
+        {
+            self.remove_memo.insert(key, h.clone());
+            return Ok(h);
+        }
         let node = match loc {
             Loc::Node(n) => Some(n),
             _ => None,
@@ -1548,6 +1689,10 @@ impl<'a> Encoder<'a> {
         if let Some(h) = self.prefix_memo.get(&(src, upto)) {
             return Ok(h.clone());
         }
+        if let Some(h) = self.shared_other(Other::Prefix(src, upto), upto)? {
+            self.prefix_memo.insert((src, upto), h.clone());
+            return Ok(h);
+        }
         let (h, independent) = self.tracked(|e| {
             let earlier = e.prefix(src, Tick(upto.0 - 1))?;
             if earlier == Hazard::True {
@@ -1566,6 +1711,10 @@ impl<'a> Encoder<'a> {
     fn at_tick(&mut self, src: u32, tick: Tick) -> Result<Hazard, LdfiError> {
         if let Some(h) = self.tick_memo.get(&(src, tick)) {
             return Ok(h.clone());
+        }
+        if let Some(h) = self.shared_other(Other::AtTick(src, tick), tick)? {
+            self.tick_memo.insert((src, tick), h.clone());
+            return Ok(h);
         }
         let graph = self.graph;
         let goals = graph.goals_of(src, tick);
@@ -1689,6 +1838,7 @@ pub fn minimal_extensions(
     solver: &mut dyn SatSolver,
     seed: &FaultSchedule,
     targets: &[Target],
+    shared: Option<&SharedHazards>,
 ) -> Result<Extensions, LdfiError> {
     let spec = setting.spec;
     let now = || setting.clock.map_or(0, |c| c());
@@ -1697,9 +1847,12 @@ pub fn minimal_extensions(
     vars.cover(solver, spec, seed)?;
     let mut roots = Vec::with_capacity(targets.len());
     {
-        let mut enc = Encoder::new(graph, setting, seed);
+        let mut enc = Encoder::new(graph, setting, seed, shared)?;
         for t in targets {
             roots.push(enc.target(t)?);
+        }
+        if let (Some(s), Some((entries, contexts))) = (shared, enc.entries()) {
+            s.publish(entries, &contexts)?;
         }
     }
     // The solver gets the circuit under the roots, and the budgets over every fault variable it now has.

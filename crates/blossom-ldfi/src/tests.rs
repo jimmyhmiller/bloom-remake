@@ -72,6 +72,7 @@ fn extensions(g: &ProvGraph, spec: &FailureSpec, seed: FaultSchedule, target: Go
         solver.as_mut(),
         &seed,
         &[crate::hazard::Target::Goal(target)],
+        None,
     )
     .unwrap()
     .hypotheses

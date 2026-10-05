@@ -194,6 +194,8 @@ pub struct SyncRun {
     pub stream_violations: Vec<crate::fabric::StreamViolation>,
     /// The stream connections made, by the index stream events refer to them by.
     pub connections: Vec<crate::fabric::Connection>,
+    /// Every dial to a node of the deployment: its node, the node it dialed, and its round.
+    pub dials: BTreeSet<(NodeId, NodeId, Tick)>,
 }
 
 impl SyncRun {
@@ -271,6 +273,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
             faults: faults.clone(),
             stream_violations: Vec::new(),
             connections: Vec::new(),
+            dials: BTreeSet::new(),
         };
         let mut carried: Vec<Instance> = vec![Instance::default(); n];
         let mut halted = vec![false; n];
@@ -533,6 +536,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
         if let Some(f) = fabric {
             run.stream_violations = f.violations;
             run.connections = f.connections;
+            run.dials = f.dials;
         }
         Ok(run)
     }

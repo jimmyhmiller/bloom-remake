@@ -102,6 +102,15 @@ pub fn build(artifact: &SimArtifact, run: &SyncRun, outcome: &Outcome) -> Result
         .filter_map(|(i, r)| Some((r.protocol?, u32::try_from(i).ok()?)))
         .collect();
     let mut g = ProvGraph::new();
+    // What the streams carried between nodes, round by round: where a lost message resets a connection or fails a dial.
+    for c in &run.connections {
+        for (from, to, tick) in &c.traffic {
+            g.crossing(*from, *to, *tick);
+        }
+    }
+    for (from, to, tick) in &run.dials {
+        g.crossing(*from, *to, *tick);
+    }
 
     // Protocol goals. A timer's firing is not a leaf: a restart starts the timer's count again, and a guarded timer
     // fires only while its guard holds.

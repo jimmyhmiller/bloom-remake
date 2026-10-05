@@ -39,6 +39,9 @@ pub struct LdfiConfig {
     /// The fault schedules exhaustive certification may run when it enumerates them (a program it cannot step:
     /// [`crate::certify::steppable`]), or when enumeration is asked for directly ([`enumerate`]).
     pub max_schedules: u64,
+    /// The hazard entries the runs of a search may share ([`crate::shared`]); 0 encodes every run from scratch.
+    /// Results do not depend on it.
+    pub shared_hazards: usize,
 }
 
 impl LdfiConfig {
@@ -52,6 +55,7 @@ impl LdfiConfig {
             workers: 1,
             exhaustive_fallback: Some(1_000_000),
             max_schedules: 100_000,
+            shared_hazards: 4_000_000,
             observer: None,
         }
     }
@@ -196,6 +200,8 @@ struct Search<'a> {
     config: &'a LdfiConfig,
     preds: Preds,
     rules: lineage::ArtifactRules<'a>,
+    /// The hazards the runs share (S12), when the config allows any.
+    shared: Option<crate::shared::SharedHazards>,
 }
 
 /// What processing one hypothesis found.
@@ -232,6 +238,7 @@ impl<'a> Search<'a> {
             config,
             preds: Preds::of(artifact),
             rules: lineage::ArtifactRules::new(artifact)?,
+            shared: (config.shared_hazards > 0).then(|| crate::shared::SharedHazards::new(config.shared_hazards)),
         })
     }
 
@@ -292,7 +299,8 @@ impl<'a> Search<'a> {
             frozen: self.artifact.profile.frozen(),
             clock: Some(&|| self.now()),
         };
-        let found = crate::hazard::minimal_extensions(graph, setting, solver.as_mut(), seed, &targets)?;
+        let found =
+            crate::hazard::minimal_extensions(graph, setting, solver.as_mut(), seed, &targets, self.shared.as_ref())?;
         let sat = SatCost {
             solves: found.solves,
             encode_ns: found.encode_ns,

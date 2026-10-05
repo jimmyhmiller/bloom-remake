@@ -76,6 +76,10 @@ pub struct Args {
     /// round by round: crash-restarts, guarded timers, streams).
     #[arg(long, default_value_t = 100_000)]
     pub max_schedules: u64,
+    /// Hazard entries the runs of the lineage-driven search may share (0: encode every run from scratch). Results do
+    /// not depend on it.
+    #[arg(long, default_value_t = 4_000_000)]
+    pub shared_hazards: usize,
     /// Worker threads (default: the machine's parallelism). Results do not depend on it.
     #[arg(long)]
     pub jobs: Option<usize>,
@@ -175,6 +179,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
     config.max_runs = args.max_runs;
     config.exhaustive_fallback = (!args.no_exhaustive).then_some(args.max_states);
     config.max_schedules = args.max_schedules;
+    config.shared_hazards = args.shared_hazards;
     config.sat = args.sat.clone();
 
     if args.progress {
