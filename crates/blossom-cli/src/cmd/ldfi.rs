@@ -94,7 +94,7 @@ pub struct Args {
 /// Runs the command.
 pub fn run(args: Args, cx: &Context) -> ExitCode {
     let _ = cx;
-    let (artifact, eot, eff, crashes, restart, max_omissions, expect) = if ded::all_ded(&args.files) {
+    let (artifact, eot, eff, crashes, restart, max_omissions, delays, expect) = if ded::all_ded(&args.files) {
         if args.spec.is_some() {
             eprintln!("`--spec` names a spec of a `.bls` file");
             return Exit::Usage.into();
@@ -111,7 +111,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
             Ok(a) => a,
             Err(code) => return code,
         };
-        (artifact, eot, eff, args.crashes.unwrap_or(0), None, None, None)
+        (artifact, eot, eff, args.crashes.unwrap_or(0), None, None, None, None)
     } else {
         let ([file], Some(name)) = (args.files.as_slice(), &args.spec) else {
             eprintln!("a Blossom spec is checked with `blossom ldfi FILE.bls --spec NAME`");
@@ -144,6 +144,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
             faults.crashes,
             faults.restart,
             faults.omissions,
+            faults.delay.map(|d| (d, faults.delays)),
             expect,
         )
     };
@@ -156,8 +157,12 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
             Some(k) => s.with_max_omissions(k),
             None => s,
         };
-        match restart {
-            Some(d) => s.with_restart(d),
+        let s = match restart {
+            Some(d) => s.with_restart(d)?,
+            None => s,
+        };
+        match delays {
+            Some((delay, max)) => s.with_delays(delay, max),
             None => Ok(s),
         }
     }) {

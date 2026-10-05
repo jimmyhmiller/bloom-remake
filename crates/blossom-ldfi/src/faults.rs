@@ -10,7 +10,8 @@ use crate::LdfiError;
 /// What faults LDFI may inject (TEST-020, TEST-021): omissions of messages sent before EFF, and up to
 /// `max_crashes` crashes, over a run of ticks `1..=eot`. A crash is a crash-stop, or with `restart` a crash-restart
 /// (crash-recovery, TEST-037): a node that crashes at `c` is down for `restart` ticks and runs again from
-/// `c + restart` (when that is within the run).
+/// `c + restart` (when that is within the run). Under the asynchronous model (`delay`, S13) a batch sent before EFF
+/// may also be delayed: it arrives 2 to `delay` rounds after its send instead of the next.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FailureSpec {
     pub eot: Tick,
@@ -22,6 +23,11 @@ pub struct FailureSpec {
     pub restart: Option<u64>,
     /// At most this many lost messages in a fault set (`None`: any number before EFF).
     pub max_omissions: Option<u32>,
+    /// The asynchronous model: the most rounds after its send a batch may arrive in (`None`: the synchronous model,
+    /// every batch the next round).
+    pub delay: Option<u64>,
+    /// At most this many delayed batches in a fault set (none under the synchronous model).
+    pub max_delays: u32,
 }
 
 impl FailureSpec {
@@ -46,6 +52,8 @@ impl FailureSpec {
             nodes,
             restart: None,
             max_omissions: None,
+            delay: None,
+            max_delays: 0,
         })
     }
 
@@ -53,6 +61,25 @@ impl FailureSpec {
     pub fn with_max_omissions(mut self, n: u32) -> FailureSpec {
         self.max_omissions = Some(n);
         self
+    }
+
+    /// The spec under the asynchronous model: a batch may arrive up to `delay` rounds after its send (at least 2: one
+    /// round is the synchronous model), and at most `max` batches are delayed in a fault set.
+    pub fn with_delays(mut self, delay: u64, max: u32) -> Result<FailureSpec, LdfiError> {
+        if delay < 2 {
+            return Err(LdfiError::Spec(format!(
+                "a delay of {delay} round(s): a delayed batch arrives 2 or more rounds after its send"
+            )));
+        }
+        self.delay = Some(delay);
+        self.max_delays = max;
+        Ok(self)
+    }
+
+    /// Whether the batch `from -> to` sent at `send` may arrive `rounds` rounds after its send: under the asynchronous
+    /// model, a batch an omission could lose, delayed by 2 to `delay` rounds.
+    pub fn delay_allowed(&self, from: NodeId, to: NodeId, send: Tick, rounds: u64) -> bool {
+        self.delay.is_some_and(|max| (2..=max).contains(&rounds)) && self.omission_allowed(from, to, send)
     }
 
     /// The spec with crash-restarts: a crashed node is down for `rounds` ticks.
@@ -87,14 +114,16 @@ impl FailureSpec {
         faults
     }
 
-    /// The canonical form of a fault set: its restarts are the ones its crashes imply, and omissions that a crash of
-    /// their sender already implies (the sender is down at the send tick) are dropped.
+    /// The canonical form of a fault set: its restarts are the ones its crashes imply, and omissions and delays that
+    /// a crash of their sender already implies (the sender is down at the send tick, so it sends nothing) are dropped,
+    /// as are delays of lost batches.
     pub fn canonical(&self, faults: FaultSchedule) -> FaultSchedule {
         let mut faults = self.with_restarts(faults);
         let crashes = faults.crashes.clone();
-        faults
-            .omissions
-            .retain(|o| crashes.get(&o.from).is_none_or(|c| !self.down(*c, o.send)));
+        let sends = |o: &Omission| crashes.get(&o.from).is_none_or(|c| !self.down(*c, o.send));
+        faults.omissions.retain(sends);
+        let lost = faults.omissions.clone();
+        faults.delays.retain(|o, _| sends(o) && !lost.contains(o));
         faults
     }
 
@@ -123,12 +152,19 @@ impl FailureSpec {
                 .omissions
                 .iter()
                 .all(|o| self.omission_allowed(o.from, o.to, o.send))
+            && u32::try_from(faults.delays.len()).is_ok_and(|n| n <= self.max_delays)
+            && faults
+                .delays
+                .iter()
+                .all(|(o, d)| self.delay_allowed(o.from, o.to, o.send, *d) && !faults.omissions.contains(o))
     }
 
-    /// The clock facts a fault set removes (ARCHITECTURE §8.3, LDFI Appendix B): an omission removes its own; a crash
-    /// of `n` at `c` removes every clock `n -> x` with `x != n` from `c` to EOT, or until its restart.
+    /// The clock facts a fault set removes (ARCHITECTURE §8.3, LDFI Appendix B): an omission removes its own, as does
+    /// a delay (the batch does not arrive the next round); a crash of `n` at `c` removes every clock `n -> x` with
+    /// `x != n` from `c` to EOT, or until its restart.
     pub fn removed_clocks(&self, faults: &FaultSchedule) -> BTreeSet<Omission> {
         let mut out: BTreeSet<Omission> = faults.omissions.clone();
+        out.extend(faults.delays.keys().copied());
         for (&n, &c) in &faults.crashes {
             let end = self.restart_of(c).map_or(self.eot.0, |r| r.0 - 1);
             for x in (0..self.nodes).map(NodeId) {
@@ -148,7 +184,8 @@ impl FailureSpec {
     }
 }
 
-/// `O(from,to,send)`, `C(node,tick)` and `R(node,tick)` (a restart) labels, sorted (the corpus's notation).
+/// `O(from,to,send)`, `C(node,tick)`, `R(node,tick)` (a restart) and `D(from,to,send,+d)` (a batch arriving `d`
+/// rounds after its send) labels, sorted (the corpus's notation, and the delays').
 pub fn labels(faults: &FaultSchedule, node: &dyn Fn(NodeId) -> String) -> Vec<String> {
     let mut out: Vec<String> = faults
         .crashes
@@ -160,6 +197,12 @@ pub fn labels(faults: &FaultSchedule, node: &dyn Fn(NodeId) -> String) -> Vec<St
                 .omissions
                 .iter()
                 .map(|o| format!("O({},{},{})", node(o.from), node(o.to), o.send.0)),
+        )
+        .chain(
+            faults
+                .delays
+                .iter()
+                .map(|(o, d)| format!("D({},{},{},+{d})", node(o.from), node(o.to), o.send.0)),
         )
         .collect();
     out.sort();

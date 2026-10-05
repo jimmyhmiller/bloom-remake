@@ -45,6 +45,10 @@ pub struct Args {
     /// Lose everything `from` sends to `to` at a tick: `from:to:tick` (repeatable).
     #[arg(long = "omit", value_name = "FROM:TO:TICK")]
     pub omissions: Vec<String>,
+    /// Delay everything `from` sends to `to` at a tick so it arrives `rounds` (at least 2) ticks after its send
+    /// instead of the next (the asynchronous model): `from:to:tick:rounds` (repeatable).
+    #[arg(long = "delay", value_name = "FROM:TO:TICK:ROUNDS")]
+    pub delays: Vec<String>,
     /// Crash a node at a tick: `node:tick` (repeatable).
     #[arg(long = "crash", value_name = "NODE:TICK")]
     pub crashes: Vec<String>,
@@ -294,6 +298,27 @@ fn faults(artifact: &SimArtifact, args: &Args) -> Result<FaultSchedule, String> 
             to: node(to)?,
             send: Tick(tick),
         });
+    }
+    for text in &args.delays {
+        let parts: Vec<&str> = text.split(':').collect();
+        let [from, to, tick, rounds] = parts.as_slice() else {
+            return Err(format!("`{text}`: expected FROM:TO:TICK:ROUNDS"));
+        };
+        let number = |s: &str| s.parse::<u64>().map_err(|_| format!("`{text}`: `{s}` is not a number"));
+        let rounds = number(rounds)?;
+        if rounds < 2 {
+            return Err(format!(
+                "`{text}`: a delayed batch arrives 2 or more ticks after its send"
+            ));
+        }
+        out.delays.insert(
+            Omission {
+                from: node(from)?,
+                to: node(to)?,
+                send: Tick(number(tick)?),
+            },
+            rounds,
+        );
     }
     for text in &args.crashes {
         let (names, tick) = ded::parse_fault(text, 2)?;

@@ -54,6 +54,9 @@ fn compile(file: &str, spec: &str) -> (SimArtifact, FailureSpec, bool) {
     if let Some(k) = faults.omissions {
         fs = fs.with_max_omissions(k);
     }
+    if let Some(d) = faults.delay {
+        fs = fs.with_delays(d, faults.delays).unwrap();
+    }
     (artifact, fs, expect)
 }
 

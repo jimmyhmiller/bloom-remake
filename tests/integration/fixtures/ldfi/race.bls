@@ -1,0 +1,79 @@
+//! A race only delays expose (S13): the Client writes 1, then 2 a round later; the Server keeps the latest value it
+//! received (the largest, when two arrive together). Batches arrive in order in the synchronous model, so the Server
+//! ends with 2; delayed past the second, the first write overwrites it with 1. With `VERSIONED` the Server ignores a
+//! value older than the one it holds.
+//! This file is a library of modules and specs.
+
+pub module Race(VERSIONED: bool = false) {
+    role Server;
+    role Client;
+
+    static server(n: Node<Server>);
+
+    channel put(v: u64): Client -> Server;
+
+    at Client {
+        input write(v: u64);
+        durable table wrote(v: u64);
+
+        go: on write(v), server(s) {
+            send put(v) to s;
+            emit wrote(v);
+        }
+    }
+
+    at Server {
+        durable table held(v: u64) key();
+        /// The largest value arriving this round.
+        view arriving(v = max!(x)) = put(x);
+        /// A value older than the one held (ignored with `VERSIONED`).
+        view stale(v) = arriving(v), held(w) where w > v;
+
+        apply: on arriving(v) where not VERSIONED {
+            upsert held(v);
+        }
+        apply_newer: on arriving(v), not stale(v) where VERSIONED {
+            upsert held(v);
+        }
+    }
+}
+
+/// The Server S and the Client C, which writes 1 at tick 1 and 2 at tick 2.
+spec Scenario {
+    nodes S, C;
+    assign Server = [S];
+    assign Client = [C];
+    fact server(S);
+    fact write(1) @ C at tick 1;
+    fact write(2) @ C at tick 2;
+}
+
+/// The Server holds the last value the Client wrote.
+spec Latest {
+    view pre(v) = wrote(v) @ _ where v == 2u64;
+    view post(v) = wrote(v) @ _, held(v) @ _ where v == 2u64;
+}
+
+/// In the synchronous model the writes arrive in order: the naive Server holds.
+spec NaiveSync for Race {
+    include Scenario;
+    include Latest;
+    faults { eot: 8, eff: 4, crashes: 0, omissions: 0, model: sync }
+    check ldfi expect holds;
+}
+
+/// A delayed first write overwrites the second: the naive Server fails.
+spec NaiveAsync for Race {
+    include Scenario;
+    include Latest;
+    faults { eot: 8, eff: 4, crashes: 0, omissions: 0, model: async, delay: 3, delays: 1 }
+    check ldfi expect fails;
+}
+
+/// The versioned Server ignores the stale write.
+spec VersionedAsync for Race(VERSIONED = true) {
+    include Scenario;
+    include Latest;
+    faults { eot: 8, eff: 4, crashes: 0, omissions: 0, model: async, delay: 3, delays: 1 }
+    check ldfi expect holds;
+}
