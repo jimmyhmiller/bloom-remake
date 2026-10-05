@@ -255,24 +255,25 @@ impl FaultVars {
         spec: &FailureSpec,
         key: blossom_sim::Delayed,
     ) -> Result<&[(u64, Var)], LdfiError> {
-        if !self.delay.contains_key(&key) {
-            let o = key.batch;
-            let mut vars = Vec::new();
-            for d in 2..=spec.delay.unwrap_or(1) {
-                if spec.delay_allowed(o.from, o.to, o.send, d) {
-                    let v = solver.new_var();
-                    solver.prefer(v.negative())?;
-                    vars.push((d, v));
-                }
+        let entry = match self.delay.entry(key) {
+            std::collections::btree_map::Entry::Occupied(e) => return Ok(e.into_mut()),
+            std::collections::btree_map::Entry::Vacant(e) => e,
+        };
+        let o = key.batch;
+        let mut vars = Vec::new();
+        for d in 2..=spec.delay.unwrap_or(1) {
+            if spec.delay_allowed(o.from, o.to, o.send, d) {
+                let v = solver.new_var();
+                solver.prefer(v.negative())?;
+                vars.push((d, v));
             }
-            for (i, (_, a)) in vars.iter().enumerate() {
-                for (_, b) in vars.iter().skip(i + 1) {
-                    solver.add_clause(&[a.negative(), b.negative()])?;
-                }
-            }
-            self.delay.insert(key, vars);
         }
-        Ok(self.delay.get(&key).map_or(&[][..], Vec::as_slice))
+        for (i, (_, a)) in vars.iter().enumerate() {
+            for (_, b) in vars.iter().skip(i + 1) {
+                solver.add_clause(&[a.negative(), b.negative()])?;
+            }
+        }
+        Ok(entry.insert(vars))
     }
 
     /// The variable of a fault atom, created on first use.
