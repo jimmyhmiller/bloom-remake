@@ -690,10 +690,15 @@ at Broker {
         quiesce(g: g, term: t, commit: c, sent: sent, ..), snapshot(g: g, term: t, idx: i, ..) where i > c;
         quiesced(g, t, _, _, c, sent), snapshot(g: g, term: t, idx: i, ..) where i > c;
     }
-    /// A `quiesce` sent before the one this broker holds (overtaken on the way) changes nothing.
+    /// A `quiesce` sent before the one this broker holds (overtaken on the way) changes nothing; nor does one that
+    /// arrives with a newer one for its group in the same tick (a later term, or the same term sent later: a leader
+    /// that quiesced, woke and quiesced again, both delivered at once), so a tick records one quiescence per group.
     view quiesce_overtaken(g, sent) = quiesce(g: g, sent: sent, ..), quiesced(g, _, _, _, _, at) where at >= sent;
+    view quiesce_superseded(g, t, sent) =
+        quiesce(g: g, term: t, sent: sent, ..), quiesce(g: g, term: t2, sent: s2, ..) where t2 > t || (t2 == t && s2 > sent);
     go_quiesced: on quiesce(g, t, c, boot, sent) from l, eff(g, t), takes(g), last_log(g, li, _),
-            not woke_after(g, t, c, sent), not quiesce_overtaken(g, sent) where li >= c {
+            not woke_after(g, t, c, sent), not quiesce_overtaken(g, sent), not quiesce_superseded(g, t, sent)
+            where li >= c {
         upsert quiesced(g, t, l, boot, c, sent);
         next commit(g, c);
         emit leader_of(g, t, l);
