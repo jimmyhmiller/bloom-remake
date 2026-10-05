@@ -210,13 +210,13 @@ struct Search<'a> {
 
 /// A run of the program: done, or ended in a program error.
 enum Ran {
-    Done(SyncRun, Outcome),
+    Done(Box<(SyncRun, Outcome)>),
     Failed(String),
 }
 
 /// A run judged against the failure-free `post`.
 enum Judged {
-    Good(SyncRun, Outcome),
+    Good(Box<(SyncRun, Outcome)>),
     Bad(Box<Counterexample>),
 }
 
@@ -282,7 +282,7 @@ impl<'a> Search<'a> {
     /// Runs the program under `faults`: its run and outcome, or the program error it ended in.
     fn try_execute(&self, faults: &FaultSchedule) -> Result<Ran, LdfiError> {
         match self.execute(faults) {
-            Ok((run, outcome)) => Ok(Ran::Done(run, outcome)),
+            Ok(done) => Ok(Ran::Done(Box::new(done))),
             Err(LdfiError::Sim(e)) => match program_failure(&e) {
                 Some(failure) => Ok(Ran::Failed(failure)),
                 None => Err(LdfiError::Sim(e)),
@@ -304,10 +304,10 @@ impl<'a> Search<'a> {
                     failure: Some(failure),
                 })));
             }
-            Ran::Done(run, outcome) => (run, outcome),
+            Ran::Done(done) => *done,
         };
         if is_good(ff_post, &outcome) {
-            return Ok(Judged::Good(run, outcome));
+            return Ok(Judged::Good(Box::new((run, outcome))));
         }
         let violated = ff_post
             .iter()
@@ -430,7 +430,7 @@ impl<'a> Search<'a> {
         cost.execute_ns = executed.saturating_sub(start);
         let (run, outcome) = match judged {
             Judged::Bad(ce) => return Ok(Processed::Bad(ce, cost)),
-            Judged::Good(run, outcome) => (run, outcome),
+            Judged::Good(done) => *done,
         };
         let graph = self.graph(&run, &outcome)?;
         let built = self.now();
@@ -829,7 +829,7 @@ pub fn falsifiers(sim: &SpecSim<'_>, config: &LdfiConfig) -> Result<Vec<FaultSch
                     found.push(h);
                     continue;
                 }
-                Ran::Done(run, outcome) => (run, outcome),
+                Ran::Done(done) => *done,
             };
             if !outcome.post.contains(goal) {
                 found.push(h);
