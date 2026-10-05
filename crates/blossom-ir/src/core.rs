@@ -729,6 +729,10 @@ pub enum LibFn {
     StrToLowercase,
     /// `s.to_utf8() -> Bytes`.
     StrToUtf8,
+    /// `s.trim() -> String`: without leading and trailing Unicode whitespace.
+    StrTrim,
+    /// `n.to_string() -> String` on any integer: its decimal digits, with a `-` when negative.
+    IntToString,
     /// `s.parse_i64() -> Option<i64>`: the decimal integer `s` spells (an optional sign, then digits), `None` for
     /// anything else or a value outside `i64`.
     StrParseI64,

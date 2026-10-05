@@ -107,6 +107,16 @@ fn bytes(b: &[u8]) -> Value {
 fn expected(view: &str, n: u64, s: &str, b: &[u8]) -> (Value, Value) {
     let evens: Vec<u64> = (0..n).filter(|i| i % 2 == 0).collect();
     match view {
+        "v_strings" => (
+            Value::Str(s.into()),
+            tuple(vec![
+                Value::Str(s.trim().into()),
+                Value::Bool(s.trim().is_empty()),
+                Value::Str(format!("{}!", s.trim()).into()),
+                Value::Str(n.to_string().into()),
+                Value::Str((-(n as i64)).to_string().into()),
+            ]),
+        ),
         "v_sum" => (u(n), u((0..n).sum())),
         "v_evens" => (u(n), vec_u(evens)),
         "v_scaled" => (u(n), vec_u((0..n).map(|i| i * n))),
@@ -277,6 +287,7 @@ fn expected(view: &str, n: u64, s: &str, b: &[u8]) -> (Value, Value) {
 
 #[cfg(test)]
 const VIEWS: &[&str] = &[
+    "v_strings",
     "v_sum",
     "v_evens",
     "v_scaled",

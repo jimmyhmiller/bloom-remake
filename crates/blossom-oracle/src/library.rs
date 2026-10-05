@@ -367,8 +367,16 @@ pub(crate) fn lib(scope: &Scope<'_>, env: &[Option<Value>], f: LibFn, args: &[Ex
                 .collect(),
         ),
         LibFn::StrToLowercase => Value::Str(str_of(val(0)?)?.to_lowercase().into()),
+        LibFn::StrTrim => Value::Str(str_of(val(0)?)?.trim().into()),
+        LibFn::IntToString => match val(0)? {
+            Value::Int(i) => Value::Str(i.to_string().into()),
+            other => return Err(bug(format!("`to_string` of {other:?}"))),
+        },
         LibFn::StrToUtf8 => Value::Bytes(str_of(val(0)?)?.as_bytes().into()),
-        LibFn::StrParseI64 => opt(str_of(val(0)?)?.parse::<i64>().ok().map(|n| Value::Int(IntValue::I64(n)))),
+        LibFn::StrParseI64 => opt(str_of(val(0)?)?
+            .parse::<i64>()
+            .ok()
+            .map(|n| Value::Int(IntValue::I64(n)))),
         LibFn::BytesFromUtf8 => {
             let b = bytes_of(val(0)?)?;
             opt(std::str::from_utf8(&b).ok().map(|s| Value::Str(s.into())))
@@ -433,7 +441,11 @@ pub(crate) fn lib(scope: &Scope<'_>, env: &[Option<Value>], f: LibFn, args: &[Ex
         LibFn::BlobOf => {
             let b = bytes_of(val(0)?)?;
             let r = blossom_value::BlobRef::of(&b);
-            scope.new_blobs.borrow_mut().entry(r).or_insert_with(|| Arc::from(&b[..]));
+            scope
+                .new_blobs
+                .borrow_mut()
+                .entry(r)
+                .or_insert_with(|| Arc::from(&b[..]));
             Value::Blob(r)
         }
         LibFn::BlobRead => {

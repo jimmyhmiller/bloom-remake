@@ -1920,6 +1920,19 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
             same(ty(0)?, st, "to_lowercase of a String")?;
             Ok(st)
         }
+        LibFn::StrTrim => {
+            arity(1)?;
+            let st = lookup(TypeDef::Str)?;
+            same(ty(0)?, st, "trim of a String")?;
+            Ok(st)
+        }
+        LibFn::IntToString => {
+            arity(1)?;
+            match p.types.get(ty(0)?) {
+                Some(TypeDef::Int(_)) => lookup(TypeDef::Str),
+                other => Err(format!("to_string of {other:?}, not an integer")),
+            }
+        }
         LibFn::StrParseI64 => {
             arity(1)?;
             same(ty(0)?, lookup(TypeDef::Str)?, "parse_i64 of a String")?;

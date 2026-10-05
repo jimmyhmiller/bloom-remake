@@ -121,6 +121,24 @@ pub enum IntValue {
     I128(i128),
 }
 
+/// The decimal digits, with a `-` when negative (no type suffix).
+impl std::fmt::Display for IntValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IntValue::U8(n) => n.fmt(f),
+            IntValue::U16(n) => n.fmt(f),
+            IntValue::U32(n) => n.fmt(f),
+            IntValue::U64(n) => n.fmt(f),
+            IntValue::U128(n) => n.fmt(f),
+            IntValue::I8(n) => n.fmt(f),
+            IntValue::I16(n) => n.fmt(f),
+            IntValue::I32(n) => n.fmt(f),
+            IntValue::I64(n) => n.fmt(f),
+            IntValue::I128(n) => n.fmt(f),
+        }
+    }
+}
+
 impl IntValue {
     /// The integer type.
     pub const fn ty(self) -> IntTy {
