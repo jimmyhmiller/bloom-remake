@@ -59,6 +59,10 @@ param CLIENT_RETRY: bool = false;
 /// Whether the producer is idempotent (Kafka's `enable.idempotence`): it asks InitProducerId for a producer id and
 /// numbers its batches per partition, so the broker stores a retried batch once.
 param CLIENT_IDEMPOTENT: bool = false;
+/// Whether the client, once it read to the end, commits the offset it read to for `CLIENT_GROUP`, as a consumer
+/// outside group management does (OffsetCommit at generation -1, no member).
+param CLIENT_COMMIT: bool = false;
+param CLIENT_GROUP: String = "blossom-group";
 
 /// ProduceRequest v12, framed: one batch to one partition, acks `CLIENT_ACKS`.
 fn encode_produce_request(correlation_id: i32, client_id: String, topic: String, partition: i32, batch: Bytes) -> Bytes {
@@ -174,6 +178,44 @@ fn produce_frame_as(k: u64, parts: u64, pid: i64, epoch: i16) -> Bytes {
 }
 
 const CORR_INIT_PID: i32 = 5;
+const CORR_COMMIT: i32 = 6;
+const CORR_FIND: i32 = 7;
+
+/// FindCoordinator v4, framed: the coordinator of group `group` (key type 0).
+fn encode_find_coordinator_request(correlation_id: i32, client_id: String, group: String) -> Bytes {
+    let r = FindCoordinatorRequest { key: "", key_type: 0i8, keys: [group] };
+    frame(request_header_v2(API_FIND_COORDINATOR, 4i16, correlation_id, client_id).concat(FindCoordinatorRequest::encode(r, 4i16)))
+}
+
+/// A response frame's FindCoordinator answer: the (only) key's error and coordinator broker id.
+fn coordinator_answer(f: Bytes) -> Option<(i16, i32)> {
+    response_correlation(cur(f)).and_then(|p| if p.0 == CORR_FIND {
+        skip_tags(p.1).and_then(|b| FindCoordinatorResponse::decode(b.buf, b.pos, 4i16))
+            .and_then(|r| r.0.coordinators.first().map(|c| (c.error, c.node_id)))
+    } else {
+        None
+    })
+}
+
+/// OffsetCommit v9, framed: partition `partition` of `topic` read to `offset`, for `group`, by a consumer outside
+/// group management (generation -1, no member).
+fn encode_offset_commit_request(correlation_id: i32, client_id: String, group: String, topic: String, partition: i32, offset: i64) -> Bytes {
+    let r = OffsetCommitRequest {
+        group_id: group, generation: -1i32, member_id: "", group_instance_id: None, retention_ms: -1i64,
+        topics: [CommitTopic { name: topic, partitions: [CommitPartition { partition: partition, offset: offset, leader_epoch: -1i32, metadata: None }] }],
+    };
+    frame(request_header_v2(API_OFFSET_COMMIT, 9i16, correlation_id, client_id).concat(OffsetCommitRequest::encode(r, 9i16)))
+}
+
+/// A response frame's OffsetCommit answer: its (only) partition's error.
+fn commit_answer(f: Bytes) -> Option<i16> {
+    response_correlation(cur(f)).and_then(|p| if p.0 == CORR_COMMIT {
+        skip_tags(p.1).and_then(|b| OffsetCommitResponse::decode(b.buf, b.pos, 9i16))
+            .and_then(|r| r.0.topics.first().and_then(|t| t.partitions.first()).map(|x| x.error))
+    } else {
+        None
+    })
+}
 
 /// InitProducerId v4, framed: a new idempotent producer (no transactional id).
 fn encode_init_pid_request(correlation_id: i32, client_id: String) -> Bytes {
