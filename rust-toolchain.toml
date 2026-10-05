@@ -2,3 +2,5 @@
 [toolchain]
 channel = "1.96.0"
 components = ["rustfmt", "clippy"]
+# The browser host (crates/blossom-web) builds for WebAssembly.
+targets = ["wasm32-unknown-unknown"]
