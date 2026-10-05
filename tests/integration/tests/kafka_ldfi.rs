@@ -5,19 +5,20 @@
 //! lost message); a producer configured with `acks=1` loses an acknowledged batch to a crash of the leader right after
 //! it answered. With retries, a lost answer makes the client send a batch again: a producer without idempotence has it
 //! stored twice, an idempotent one once. A consumer that commits the offset it read (outside group management, through
-//! the coordinator FindCoordinator names) keeps the commit through a crash-restart.
+//! the coordinator FindCoordinator names) keeps the commit through a crash-restart. Enumerating every admissible
+//! fault schedule (each run in full) confirms the verdicts it can afford.
 
 use std::path::Path;
 
+use blossom_artifact::sim::SimArtifact;
 use blossom_driver::bls::compile_spec_file;
 use blossom_ldfi::report::fault_labels;
-use blossom_ldfi::{FailureSpec, LdfiConfig, Verdict};
+use blossom_ldfi::{FailureSpec, LdfiConfig, Method, Verdict};
 use blossom_sim::spec::{SpecSim, is_good};
 
-/// Checks `spec` of `examples/kafka/ldfi.bls`: the verdict must be its `check ldfi expect …`, and a counterexample
-/// must reproduce. Returns the counterexample's fault labels.
+/// `spec` of `examples/kafka/ldfi.bls` compiled: its artifact, its failure spec, and its `check ldfi expect …`.
 #[cfg(test)]
-fn check(spec: &str) -> Vec<String> {
+fn compile(spec: &str) -> (SimArtifact, FailureSpec, bool) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/kafka/ldfi.bls");
     let (result, _) = compile_spec_file(path.to_str().unwrap(), spec);
     let (compiled, _) = result.unwrap_or_else(|e| panic!("{spec}: {e:?}"));
@@ -36,7 +37,41 @@ fn check(spec: &str) -> Vec<String> {
     if let Some(k) = faults.omissions {
         fs = fs.with_max_omissions(k);
     }
-    let sim = SpecSim::with_externs(&artifact, std::sync::Arc::new(blossom_std_host::registry().unwrap())).unwrap();
+    (artifact, fs, expect)
+}
+
+#[cfg(test)]
+fn sim(artifact: &SimArtifact) -> SpecSim<'_> {
+    SpecSim::with_externs(artifact, std::sync::Arc::new(blossom_std_host::registry().unwrap())).unwrap()
+}
+
+/// Checks `spec` by enumerating every admissible fault schedule: the verdict must be its `check ldfi expect …`.
+/// Returns the counterexample's fault labels (one with the fewest faults).
+#[cfg(test)]
+fn enumerate(spec: &str) -> Vec<String> {
+    let (artifact, fs, expect) = compile(spec);
+    let sim = sim(&artifact);
+    let mut config = LdfiConfig::new(fs);
+    config.workers = 2;
+    let report = blossom_ldfi::enumerate(&sim, &config).unwrap_or_else(|e| panic!("{spec}: {e}"));
+    assert!(
+        matches!(report.method, Method::Enumerated { after: None, .. }),
+        "{spec}"
+    );
+    assert_eq!(report.verdict == Verdict::NoCounterexample, expect, "{spec}");
+    report
+        .counterexamples
+        .first()
+        .map(|ce| fault_labels(&artifact, &ce.faults))
+        .unwrap_or_default()
+}
+
+/// Checks `spec` of `examples/kafka/ldfi.bls`: the verdict must be its `check ldfi expect …`, and a counterexample
+/// must reproduce. Returns the counterexample's fault labels.
+#[cfg(test)]
+fn check(spec: &str) -> Vec<String> {
+    let (artifact, fs, expect) = compile(spec);
+    let sim = sim(&artifact);
     let mut config = LdfiConfig::new(fs.clone());
     config.workers = 2;
     config.exhaustive_fallback = None;
@@ -63,6 +98,20 @@ fn check(spec: &str) -> Vec<String> {
 #[test]
 fn one_broker_keeps_an_acknowledged_batch_through_a_crash_restart() {
     check("SingleRestart");
+}
+
+#[test]
+fn every_schedule_of_one_broker_keeps_an_acknowledged_batch() {
+    enumerate("SingleRestart");
+}
+
+#[test]
+#[ignore = "full tier"]
+fn every_schedule_confirms_the_three_broker_verdicts() {
+    enumerate("TripleRestart");
+    enumerate("TripleOneLoss");
+    // The smallest counterexample is the one LDFI finds: the leader crashes right after it answered.
+    assert_eq!(enumerate("TripleRestartAcks1"), ["C(B2,18)", "R(B2,21)"]);
 }
 
 #[test]
