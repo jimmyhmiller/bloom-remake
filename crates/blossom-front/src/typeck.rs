@@ -3524,6 +3524,9 @@ impl Checker<'_> {
             (_, Some(TypeDef::Str), "trim") => (Builtin::Lib(LibFn::StrTrim), None, 0),
             (_, Some(TypeDef::Int(_)), "to_string") => (Builtin::Lib(LibFn::IntToString), None, 0),
             (_, Some(TypeDef::F64), "to_string") => (Builtin::Lib(LibFn::FloatToString), None, 0),
+            (_, Some(TypeDef::F64), "to_fixed") => (Builtin::Lib(LibFn::FloatFixed), None, 1),
+            (_, Some(TypeDef::Bool), "to_string") => (Builtin::Lib(LibFn::BoolToString), None, 0),
+            (_, Some(TypeDef::Str), "to_string") => (Builtin::Lib(LibFn::StrToString), None, 0),
             (_, Some(TypeDef::F64), "sqrt") => (Builtin::Lib(LibFn::FloatSqrt), None, 0),
             (_, Some(TypeDef::F64), "floor") => (Builtin::Lib(LibFn::FloatFloor), None, 0),
             (_, Some(TypeDef::F64), "ceil") => (Builtin::Lib(LibFn::FloatCeil), None, 0),
@@ -3783,7 +3786,16 @@ impl Checker<'_> {
             }
             (_, Builtin::Lib(LibFn::StrSplitWhitespace)) => self.bound(Shape::Vec(recv)),
             (_, Builtin::Lib(LibFn::StrToLowercase | LibFn::StrTrim)) => recv,
-            (_, Builtin::Lib(LibFn::IntToString | LibFn::FloatToString)) => self.con(&mut hir.types, TypeDef::Str),
+            (_, Builtin::Lib(LibFn::IntToString | LibFn::FloatToString | LibFn::BoolToString | LibFn::StrToString)) => {
+                self.con(&mut hir.types, TypeDef::Str)
+            }
+            (_, Builtin::Lib(LibFn::FloatFixed)) => {
+                if let Some(d) = args.first() {
+                    let u = self.con(&mut hir.types, TypeDef::Int(IntTy::U64));
+                    self.unify(&hir.types, *d, u, span);
+                }
+                self.con(&mut hir.types, TypeDef::Str)
+            }
             (
                 _,
                 Builtin::Lib(

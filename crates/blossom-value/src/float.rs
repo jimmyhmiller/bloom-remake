@@ -65,6 +65,30 @@ pub fn to_string(x: f64) -> String {
     canonical(x).to_string()
 }
 
+/// The most digits `x.to_fixed(n)` writes after the point.
+pub const MAX_FIXED_DIGITS: u64 = 64;
+
+/// `x.to_fixed(n)`: `x` with exactly `n` digits after the point, rounded half to even on its exact binary value (`NaN`,
+/// `inf`, `-inf` as `to_string` writes them); more than [`MAX_FIXED_DIGITS`] is an error.
+pub fn to_fixed(x: f64, digits: u64) -> Result<String, NumError> {
+    if digits > MAX_FIXED_DIGITS {
+        return Err(NumError::Arithmetic(format!(
+            "to_fixed({digits}): at most {MAX_FIXED_DIGITS} digits"
+        )));
+    }
+    let x = canonical(x);
+    if !x.is_finite() {
+        return Ok(to_string(x));
+    }
+    // `digits` is at most 64: it fits a usize.
+    let s = format!("{x:.*}", digits as usize);
+    // A negative value that rounds to zero is written without its sign: the canonical zero has none.
+    Ok(match s.strip_prefix('-') {
+        Some(magnitude) if magnitude.chars().all(|c| c == '0' || c == '.') => magnitude.to_owned(),
+        _ => s,
+    })
+}
+
 /// A float in `[0, 1)` from 64 random bits: the top 53, as a multiple of 2^-53 (every such double equally likely).
 pub fn unit_from_bits(bits: u64) -> f64 {
     (bits >> 11) as f64 * (1.0 / 9_007_199_254_740_992.0)
@@ -212,6 +236,18 @@ mod tests {
             method(Method::Ceil, &f(-0.5)).map(|v| matches!(v, Value::F64(z) if z.to_bits() == 0)),
             Ok(true)
         );
+    }
+
+    #[test]
+    fn fixed_digits() {
+        assert_eq!(to_fixed(2.5, 0), Ok("2".to_owned()));
+        assert_eq!(to_fixed(3.5, 0), Ok("4".to_owned()));
+        assert_eq!(to_fixed(0.125, 2), Ok("0.12".to_owned()));
+        assert_eq!(to_fixed(21.320999999, 1), Ok("21.3".to_owned()));
+        assert_eq!(to_fixed(-0.001, 2), Ok("0.00".to_owned()));
+        assert_eq!(to_fixed(-1.5, 3), Ok("-1.500".to_owned()));
+        assert_eq!(to_fixed(f64::NAN, 2), Ok("NaN".to_owned()));
+        assert!(matches!(to_fixed(1.0, 65), Err(NumError::Arithmetic(_))));
     }
 
     #[test]

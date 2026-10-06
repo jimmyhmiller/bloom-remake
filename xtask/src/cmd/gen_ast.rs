@@ -129,6 +129,7 @@ fn generate(path: &Path) -> Result<String, String> {
                 "ClosureExpr",
                 "Wildcard",
                 "SelfExpr",
+                "FStringExpr",
             ],
         ),
         (

@@ -1959,6 +1959,23 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
             same(ty(0)?, lookup(TypeDef::F64)?, "to_string of an f64")?;
             lookup(TypeDef::Str)
         }
+        LibFn::FloatFixed => {
+            arity(2)?;
+            same(ty(0)?, lookup(TypeDef::F64)?, "to_fixed of an f64")?;
+            same(ty(1)?, u64t()?, "to_fixed's digits are a u64")?;
+            lookup(TypeDef::Str)
+        }
+        LibFn::StrToString => {
+            arity(1)?;
+            let st = lookup(TypeDef::Str)?;
+            same(ty(0)?, st, "to_string of a String")?;
+            Ok(st)
+        }
+        LibFn::BoolToString => {
+            arity(1)?;
+            same(ty(0)?, lookup(TypeDef::Bool)?, "to_string of a bool")?;
+            lookup(TypeDef::Str)
+        }
         LibFn::StrParseI64 => {
             arity(1)?;
             same(ty(0)?, lookup(TypeDef::Str)?, "parse_i64 of a String")?;

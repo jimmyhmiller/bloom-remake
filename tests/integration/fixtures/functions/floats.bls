@@ -30,3 +30,5 @@ view v_ints(a, b, r) = e(a, b), let r = (abs(a), min(a, b), max(a, b), clamp(a, 
 /// `rand_float` is in [0, 1) (its value: the two evaluators agree on it).
 view v_rand(a, x, r) = e(a, _b), let x = rand_float(a), let r = x >= 0.0 && x < 1.0;
 view v_cast(num, den, n) = cast(num, den), let n = (num as f64 / den as f64) as i64;
+/// Interpolation (LANGUAGE §2.4): holes of every kind, a spec, braces, a nested string.
+view v_fmt(a, b, r) = e(a, b), let r = f"{q(a)}|{a}|{q(a):.2}|{a > b}|{{x}}|{"s"}|{f"<{b}>"}\t.";

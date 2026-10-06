@@ -88,6 +88,7 @@ fn is_expr(kind: SyntaxKind) -> bool {
             | CLOSUREEXPR
             | WILDCARD
             | SELFEXPR
+            | FSTRINGEXPR
     )
 }
 
@@ -1603,6 +1604,7 @@ impl Cx<'_> {
                 }
                 ExprKind::StructLit { path, fields, base }
             }
+            FSTRINGEXPR => self.fstring(node, span).kind,
             WILDCARD => ExprKind::Wildcard,
             SELFEXPR => ExprKind::SelfNode,
             FOLDEXPR => {
@@ -1904,6 +1906,126 @@ impl Cx<'_> {
                 None
             }
         }
+    }
+
+    /// `f"a{x}b{y:.2}"` (LANGUAGE §2.4): its text and holes joined with `++`, each hole converted with `to_string` (or,
+    /// with a spec `.N`, `to_fixed(N)`): `"a" ++ x.to_string() ++ "b" ++ y.to_fixed(2)`.
+    fn fstring(&mut self, node: &SyntaxNode, span: Span) -> Expr {
+        let mut parts: Vec<Expr> = Vec::new();
+        for el in node.children_with_tokens() {
+            if let Some(t) = el.as_token().filter(|t| t.kind() == FSTRING_TEXT) {
+                let tspan = self.token_span(t);
+                let text = self.fstring_text(t.text(), tspan);
+                parts.push(Expr {
+                    kind: ExprKind::Lit(LitValue::Str(text)),
+                    span: tspan,
+                });
+            } else if let Some(h) = el.as_node().filter(|h| h.kind() == FSTRINGHOLE) {
+                let hspan = self.span(h);
+                let Some(e) = expr_children(h).next() else {
+                    self.malformed("an interpolation hole without an expression", hspan);
+                    continue;
+                };
+                let value = self.expr(&e);
+                let spec = h
+                    .children_with_tokens()
+                    .filter_map(|x| x.into_token())
+                    .find(|t| t.kind() == FSTRING_SPEC);
+                let (name, args) = match spec {
+                    None => ("to_string", Vec::new()),
+                    Some(t) => {
+                        let digits = t.text().strip_prefix('.').and_then(|d| d.parse::<u128>().ok());
+                        match digits {
+                            Some(n) => (
+                                "to_fixed",
+                                vec![Arg::Pos(Expr {
+                                    kind: ExprKind::Lit(LitValue::Int {
+                                        value: n,
+                                        suffix: Some(Symbol::intern("u64")),
+                                    }),
+                                    span: self.token_span(&t),
+                                })],
+                            ),
+                            None => {
+                                self.diags.push(
+                                    Diagnostic::new(
+                                        blossom_base::code!("BLS0435"),
+                                        format!(
+                                            "the format spec `{}`: an interpolation hole takes `.N` (N digits \
+                                                 after the point, for an f64)",
+                                            t.text()
+                                        ),
+                                    )
+                                    .with_primary(self.token_span(&t)),
+                                );
+                                ("to_string", Vec::new())
+                            }
+                        }
+                    }
+                };
+                parts.push(Expr {
+                    kind: ExprKind::Method {
+                        receiver: Box::new(value),
+                        name: Ident {
+                            name: Symbol::intern(name),
+                            span: hspan,
+                        },
+                        args,
+                    },
+                    span: hspan,
+                });
+            }
+        }
+        let mut parts = parts.into_iter();
+        let Some(first) = parts.next() else {
+            return Expr {
+                kind: ExprKind::Lit(LitValue::Str(String::new())),
+                span,
+            };
+        };
+        // A lone hole is still a String: `f"{n}"` is `"" ++ n.to_string()`'s value, `n.to_string()`.
+        let mut out = first;
+        for p in parts {
+            out = Expr {
+                kind: ExprKind::Binary {
+                    op: BinOp::Concat,
+                    lhs: Box::new(out),
+                    rhs: Box::new(p),
+                },
+                span,
+            };
+        }
+        out.span = span;
+        out
+    }
+
+    /// An interpolated string's text run: its escapes decoded, `{{` and `}}` as single braces.
+    fn fstring_text(&mut self, text: &str, span: Span) -> String {
+        let mut out = String::new();
+        let mut rest = text;
+        while let Some(c) = rest.chars().next() {
+            if let Some(r) = rest.strip_prefix("{{") {
+                out.push('{');
+                rest = r;
+            } else if let Some(r) = rest.strip_prefix("}}") {
+                out.push('}');
+                rest = r;
+            } else if c == '\\' {
+                // One escape: `\u{…}` up to its `}`, any other two characters.
+                let len = if rest.starts_with("\\u{") {
+                    rest.find('}').map_or(rest.len(), |i| i + 1)
+                } else {
+                    rest.chars().take(2).map(char::len_utf8).sum()
+                };
+                let (esc, r) = rest.split_at_checked(len).unwrap_or((rest, ""));
+                out.push_str(&self.string(&format!("\"{esc}\""), span));
+                rest = r;
+            } else {
+                out.push(c);
+                rest = rest.get(c.len_utf8()..).unwrap_or("");
+            }
+        }
+        out
     }
 
     /// The value of a (lexically valid) quoted string.

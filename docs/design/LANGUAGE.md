@@ -258,6 +258,7 @@ be declared as types, relations or functions (BLS0201).
 | float | `1.5`, `2e-3`, `1.0f64`, `6.02e23` | `f64` |
 | duration | `250us`, `100ms`, `2s`, `1.5s`, `5m`, `1h`, `3d`, `10ns` | `Duration` |
 | string | `"a\n\"b\""`, `r"raw"`, `r#"raw with "quotes""#` | `String` |
+| interpolated string | `f"{n} item{s} left"`, `f"{x:.2}"`, `f"{{literal braces}}"` | `String` |
 | byte string | `b"abc"`, `br"raw"` | `Bytes` |
 | boolean | `true`, `false` | `bool` |
 | unit | `()` | `()` |
@@ -270,6 +271,11 @@ Rules:
   `kb`"), never an identifier.
 - A `.` begins a float's fraction only when a digit follows it. `1..5` is `1`, `..`, `5`.
 - After the token `.`, a run of digits is an integer (tuple index), so `p.1.0` is `p . 1 . 0`.
+- **Interpolated strings** (S16, docs/design/SUGAR.md §1): `f"…"` holds `{expr}` holes, any expression; a `:` outside
+  the hole's brackets starts its spec, of which `.N` (N digits after the point, for an `f64`) is the only one
+  (BLS0435). `{{` and `}}` are literal braces, a lone `}` is BLS0005, and the escapes are a string's. The value is the
+  text and the holes joined with `++`, each hole converted with `to_string` (with `.N`, `to_fixed(N)`), so a hole of
+  a type without one is that method's error.
 - There is no `null`: absent values are `None` (`Option<T>`, LANG-025).
 - A string is accepted where a `Node` or `Principal` is expected only in `fact`s and `static` configuration inside
   specs and deployments; rules never build node names from strings.
@@ -499,7 +505,9 @@ Primary         = INT_LIT | FLOAT_LIT | DURATION_LIT | STRING_LIT | BYTES_LIT
                 | BANG_IDENT "(" BangArgs ")"
                 | "if" Expr⁰ BlockExpr "else" ( Primary | BlockExpr )  (* the Primary is another `if` *)
                 | "match" Expr⁰ "{" [ MatchArm { "," MatchArm } [ "," ] ] "}"
-                | PathExpr [ StructLit ] ;                            (* StructLit: never in no-struct contexts *)
+                | PathExpr [ StructLit ]                              (* StructLit: never in no-struct contexts *)
+                | FString ;
+FString         = 'f"' { FSTRING_TEXT | "{" Expr [ ":" FSTRING_SPEC ] "}" } '"' ;  (* §2.4 *)
 PathExpr        = IDENT { "::" ( IDENT | GenericArgs ) } ;
 StructLit       = "{" [ FieldInit { "," FieldInit } [ "," ] ] "}" ;
 FieldInit       = FieldName ":" Expr | FieldName | ".." Expr ;
@@ -3091,6 +3099,12 @@ never truncated or defaulted).
 | BLS0410 | E | `delete`/`upsert` on a lattice-valued relation (LANG-284) |
 | BLS0411 | E | `resolve prefer(…)` naming no handler, one twice, or one that does not write the table with `next` or `upsert` (§10.7) |
 | BLS0412 | E | a timer's `while` guard that is not a view or table placed where the timer is (§15.2) |
+| BLS0430 | E | a tree element inside a `for` block with neither an id nor a key (its rows would repeat one id) |
+| BLS0431 | E | a key on a tree element that has an id |
+| BLS0432 | E | a fragment's tree elements where no tree encloses the call |
+| BLS0433 | E | a fragment that calls itself, directly or through others |
+| BLS0434 | E | a `tree` declaration whose relations do not have the shapes of their roles |
+| BLS0435 | E | an interpolation hole's format spec other than `.N` |
 
 **Rules, time and stratification (BLS05xx)**
 
@@ -3434,7 +3448,7 @@ All functions are pure. Methods on values use `.`; there are no closures outside
 |---|---|
 | Arithmetic | `+ - * / % **` (checked); `abs`, `min(a, b)`, `max(a, b)`, `clamp`, `wrapping_add`, `wrapping_sub`, `wrapping_mul`, `saturating_add`, `pow`, `sqrt` (`f64`) |
 | Bits | `& \| ^ ~ << >>`, `count_ones`, `leading_zeros` |
-| Strings | `len`, `++`, `split_whitespace() -> Vec<String>`, `split(sep)`, `to_lowercase`, `to_uppercase`, `trim`, `starts_with`, `ends_with`, `contains`, `replace`, `parse_u64() -> Option<u64>`, `parse_i64`, `to_string` (every type) |
+| Strings | `len`, `++`, `split_whitespace() -> Vec<String>`, `split(sep)`, `to_lowercase`, `to_uppercase`, `trim`, `starts_with`, `ends_with`, `contains`, `replace`, `parse_u64() -> Option<u64>`, `parse_i64`, `to_string` (every type; this build: integers, `f64`, `bool`, `String`), `x.to_fixed(n)` (`f64`: `n` digits after the point, at most 64) |
 | Bytes | `len`, `slice(lo, hi) -> Option<Bytes>`, `concat`, `to_hex`, `from_utf8() -> Option<String>`; big-endian reads `u8_at(p)`, `i8_at(p)`, `u16_be_at(p)` … `i64_be_at(p) -> Option<T>`; patches `put_u8(p, x)` … `put_i64_be(p, x) -> Option<Bytes>`; varints `uvarint_at(p) -> Option<(u64, u64)>`, `varint_at(p) -> Option<(i64, u64)>` (value and next position; `None` when truncated, longer than 10 bytes or past `u64`); `Bytes::from_u8(x)` … `Bytes::from_i64_be(x)`, `Bytes::uvarint(x)`, `Bytes::varint(x)`, `Bytes::empty()`, `Bytes::join(v)`; `s.to_utf8()` on strings |
 | Vec | `len`, `get(i) -> Option<T>`, `first`, `last`, `push`, `concat`, `contains`, `enumerate() -> Vec<(u64, T)>`, `sort`, `reverse`, `flatten()` (on a `Vec<Vec<T>>`), `dedup`, `map`, `filter`, `filter_map`, `fold`, `scan(init, |acc, x| e) -> Vec<A>` (the accumulator after each element), `scan_while(init, |acc, x| e) -> Vec<A>` (`e: Option<A>`; as `scan`, stopping at the first step that is `None`: over a `range`, a loop that ends early), `all`, `any` (closures: function bodies only); `to_set() -> Set<T>`, `to_map() -> Map<K, V>` (on a `Vec<(K, V)>`: a repeated key keeps its last value) |
 | Ranges | `range(lo: u64, hi: u64) -> Vec<u64>`: `lo` up to, not including, `hi`; a combinator over `range(…)` walks it without building it |

@@ -3192,6 +3192,64 @@ impl StructLitExpr {
     }
 }
 
+/// Typed CST view for `FStringExpr`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FStringExpr(pub(crate) SyntaxNode);
+impl AstNode for FStringExpr {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::FSTRINGEXPR
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        Self::can_cast(node.kind()).then_some(Self(node))
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+impl FStringExpr {
+    /// Direct named child, if present.
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// Direct expressions.
+    pub fn exprs(&self) -> AstChildren<Expr> {
+        children(&self.0)
+    }
+    /// Direct types.
+    pub fn types(&self) -> AstChildren<Type> {
+        children(&self.0)
+    }
+}
+
+/// Typed CST view for `FStringHole`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FStringHole(pub(crate) SyntaxNode);
+impl AstNode for FStringHole {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::FSTRINGHOLE
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        Self::can_cast(node.kind()).then_some(Self(node))
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+impl FStringHole {
+    /// Direct named child, if present.
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// Direct expressions.
+    pub fn exprs(&self) -> AstChildren<Expr> {
+        children(&self.0)
+    }
+    /// Direct types.
+    pub fn types(&self) -> AstChildren<Type> {
+        children(&self.0)
+    }
+}
+
 /// Typed CST view for `FieldInit`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldInit(pub(crate) SyntaxNode);
@@ -4146,6 +4204,8 @@ pub enum Expr {
     Wildcard(Wildcard),
     /// `SelfExpr`.
     SelfValue(SelfExpr),
+    /// `FStringExpr`.
+    FString(FStringExpr),
 }
 impl AstNode for Expr {
     fn can_cast(kind: SyntaxKind) -> bool {
@@ -4174,6 +4234,7 @@ impl AstNode for Expr {
                 | SyntaxKind::CLOSUREEXPR
                 | SyntaxKind::WILDCARD
                 | SyntaxKind::SELFEXPR
+                | SyntaxKind::FSTRINGEXPR
         )
     }
     fn cast(node: SyntaxNode) -> Option<Self> {
@@ -4201,6 +4262,7 @@ impl AstNode for Expr {
             SyntaxKind::CLOSUREEXPR => Some(Self::Closure(ClosureExpr(node))),
             SyntaxKind::WILDCARD => Some(Self::Wildcard(Wildcard(node))),
             SyntaxKind::SELFEXPR => Some(Self::SelfValue(SelfExpr(node))),
+            SyntaxKind::FSTRINGEXPR => Some(Self::FString(FStringExpr(node))),
             _ => None,
         }
     }
@@ -4229,6 +4291,7 @@ impl AstNode for Expr {
             Self::Closure(n) => n.syntax(),
             Self::Wildcard(n) => n.syntax(),
             Self::SelfValue(n) => n.syntax(),
+            Self::FString(n) => n.syntax(),
         }
     }
 }

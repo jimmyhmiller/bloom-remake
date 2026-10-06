@@ -305,3 +305,64 @@ fn parser_fold_parenthesized_pipe() {
     assert!(p.errors.is_empty(), "{:?}", p.errors);
     assert_eq!(p.syntax().to_string(), s);
 }
+#[test]
+fn interpolated_strings_lex_into_text_and_holes() {
+    use blossom_syntax::SyntaxKind as K;
+    // A nested interpolated string, a hole with brackets and a struct-free `{`, escaped braces, a spec, an escape.
+    let source = r#"const S: String = f"a{x}b{f"in{y}"}{g(1, [2])}{{c}}{z:.2}\n";"#;
+    let l = lexer::lex(FileId::from_raw(0), source);
+    assert!(l.errors.is_empty(), "{:?}", l.errors);
+    let kinds: Vec<_> = l
+        .tokens
+        .iter()
+        .map(|t| t.kind)
+        .filter(|k| !k.is_trivia())
+        .skip_while(|k| *k != K::FSTRING_START)
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            K::FSTRING_START,
+            K::FSTRING_TEXT,
+            K::L_CURLY,
+            K::IDENT,
+            K::R_CURLY,
+            K::FSTRING_TEXT,
+            K::L_CURLY,
+            K::FSTRING_START,
+            K::FSTRING_TEXT,
+            K::L_CURLY,
+            K::IDENT,
+            K::R_CURLY,
+            K::FSTRING_END,
+            K::R_CURLY,
+            K::L_CURLY,
+            K::IDENT,
+            K::L_PAREN,
+            K::INT_LIT,
+            K::COMMA,
+            K::L_BRACK,
+            K::INT_LIT,
+            K::R_BRACK,
+            K::R_PAREN,
+            K::R_CURLY,
+            K::FSTRING_TEXT,
+            K::L_CURLY,
+            K::IDENT,
+            K::COLON,
+            K::FSTRING_SPEC,
+            K::R_CURLY,
+            K::FSTRING_TEXT,
+            K::FSTRING_END,
+            K::SEMI,
+            K::EOF
+        ]
+    );
+    let p = parser::parse(FileId::from_raw(0), source);
+    assert!(p.errors.is_empty(), "{:?}", p.errors);
+    assert_eq!(p.syntax().to_string(), source);
+    // Unterminated, in the text and in a hole; a lone `}`.
+    assert_code(r#"const S: String = f"abc"#, "BLS0002");
+    assert_code(r#"const S: String = f"a{x"#, "BLS0002");
+    assert_code(r#"const S: String = f"a}b";"#, "BLS0005");
+}

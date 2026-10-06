@@ -507,6 +507,18 @@ pub enum SyntaxKind {
     FORMATFIELD,
     FORMATCOND,
     FORMATDEFAULT,
+    /// `f"`: the start of an interpolated string (LANGUAGE §2.4).
+    FSTRING_START,
+    /// A run of an interpolated string's text (escapes and `{{`, `}}` included).
+    FSTRING_TEXT,
+    /// A hole's format spec, after its `:` (`.2`).
+    FSTRING_SPEC,
+    /// The closing `"` of an interpolated string.
+    FSTRING_END,
+    /// fstringexpr.
+    FSTRINGEXPR,
+    /// fstringhole.
+    FSTRINGHOLE,
 }
 impl SyntaxKind {
     /// All kinds, in their wire/discriminant order.
@@ -766,6 +778,12 @@ impl SyntaxKind {
         Self::FORMATFIELD,
         Self::FORMATCOND,
         Self::FORMATDEFAULT,
+        Self::FSTRING_START,
+        Self::FSTRING_TEXT,
+        Self::FSTRING_SPEC,
+        Self::FSTRING_END,
+        Self::FSTRINGEXPR,
+        Self::FSTRINGHOLE,
     ];
     /// Whether this token is trivia.
     pub fn is_trivia(self) -> bool {

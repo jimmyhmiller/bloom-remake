@@ -789,6 +789,12 @@ pub enum LibFn {
     FloatTrunc,
     /// `x.to_string()` on an `f64`: the shortest decimal that reads back as `x`, without an exponent.
     FloatToString,
+    /// `x.to_fixed(n: u64)` on an `f64`: exactly `n` digits after the point (at most 64; BLSR004 past that).
+    FloatFixed,
+    /// `b.to_string()` on a `bool`: `"true"` or `"false"`.
+    BoolToString,
+    /// `s.to_string()` on a `String`: `s` (every type has a `to_string`, Appendix B; interpolation relies on it).
+    StrToString,
 }
 
 /// Construct data in the Dedalus core IR.
