@@ -532,7 +532,7 @@ impl<E: Executor> Node<E> {
 
     /// The earliest instant a timer is due (the driver sleeps until then when nothing else arrives).
     pub fn next_deadline(&self) -> Result<Option<Instant>, NodeError> {
-        self.timers.next_deadline()
+        Ok(self.timers.next_deadline()?)
     }
 
     /// Runs the next tick at `now`. A program error faults the node: the tick commits and releases nothing.
