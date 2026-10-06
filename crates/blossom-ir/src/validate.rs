@@ -1397,6 +1397,9 @@ fn expr_type(p: &Program, r: Cx<'_>, e: &Expr) -> Result<TypeId, String> {
                 (BinOp::Sub, Some(TypeDef::Instant), Some(TypeDef::Instant)) => return lookup(TypeDef::Duration),
                 (BinOp::Add | BinOp::Sub, Some(TypeDef::Instant), Some(TypeDef::Duration)) => return Ok(a),
                 (BinOp::Add, Some(TypeDef::Duration), Some(TypeDef::Instant)) => return Ok(b),
+                // Scaling (LANGUAGE §5.1): a duration times or divided by an integer.
+                (BinOp::Mul | BinOp::Div, Some(TypeDef::Duration), Some(TypeDef::Int(_))) => return Ok(a),
+                (BinOp::Mul, Some(TypeDef::Int(_)), Some(TypeDef::Duration)) => return Ok(b),
                 _ => {}
             }
             // A comparison relates values whose types may differ in roles (`Node<R> == Node`, `Node<R> < Node<S>`).
@@ -2248,8 +2251,11 @@ fn builtin_type(p: &Program, r: Cx<'_>, b: &BuiltinFn, args: &[Expr]) -> Result<
             };
             lookup(TypeDef::Vec(if matches!(b, BuiltinFn::Keys) { *k } else { *v }))
         }
-        BuiltinFn::ToString => {
+        BuiltinFn::ToString { ty } => {
             arity(1)?;
+            if types.first() != Some(ty) {
+                return Err("`to_string` of a value of another type than its own".into());
+            }
             lookup(TypeDef::Str)
         }
         BuiltinFn::Hash64 | BuiltinFn::Fingerprint => {

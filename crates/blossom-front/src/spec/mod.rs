@@ -92,6 +92,46 @@ pub fn compile_spec(
     }
 }
 
+/// What a file holds for `blossom check`: whether its root is a program (it has a `program` header), and the specs
+/// declared in it that have a target (`spec S for M`, or one through an include), in file order.
+pub struct FileContents {
+    pub program: bool,
+    pub specs: Vec<String>,
+}
+
+/// Lists what the file `root` holds ([`FileContents`]). A spec whose includes do not resolve is listed too, so
+/// compiling it reports why.
+pub fn file_contents(
+    root: &str,
+    loader: &mut dyn Loader,
+    sources: &mut SourceDb,
+) -> Result<(FileContents, Diagnostics), BlsError> {
+    let mut diags = Diagnostics::new();
+    let Some(tree) = ModuleTree::load(root, loader, sources, &mut diags) else {
+        return Err(BlsError::Rejected(diags));
+    };
+    if diags.has_errors() {
+        return Err(BlsError::Rejected(diags));
+    }
+    let mut specs = Vec::new();
+    for item in &tree.root.items {
+        let ItemKind::Spec(spec) = &item.kind else {
+            continue;
+        };
+        let Some(name) = spec.name else {
+            continue;
+        };
+        let mut members = Members::default();
+        let mut found = Diagnostics::new();
+        collect(&tree, spec, &mut members, &mut BTreeSet::new(), &mut found);
+        if members.target.is_some() || found.has_errors() {
+            specs.push(name.as_str().to_owned());
+        }
+    }
+    let program = tree.root.header.is_some();
+    Ok((FileContents { program, specs }, diags))
+}
+
 /// A spec's members, its includes merged.
 #[derive(Default)]
 struct Members<'t> {

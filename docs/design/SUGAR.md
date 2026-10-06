@@ -20,7 +20,8 @@ f"{x:.2}"
 - `f"…"` is a string literal whose `{expr}` holes hold any expression; `{{` and `}}` are literal braces; the escapes
   are a string's (§2.4).
 - A hole's value is converted with `to_string`: a `String` as it is, integers and `f64` as their `to_string`
-  (Appendix B), `bool` as `true`/`false`. Another type is a type error at the hole.
+  (Appendix B), `bool` as `true`/`false`, any other value as Blossom writes it (`(1, "a")`, `[1, 2]`; S17, Appendix
+  B).
 - `{x:.N}` (an `f64` only) writes `x` with exactly `N` digits after the point, rounding half to even on the exact
   binary value (as Rust's `{:.N}`; deterministic on every platform).
 - Lowering: the literal parts and the converted holes, joined with `++`.
@@ -155,7 +156,7 @@ Elsewhere: entity-attribute-value relations: Kafka record headers, metric labels
 | BLS0433 | a fragment that calls itself (directly or through others) |
 | BLS0434 | a tree declaration whose relations do not have the roles' shapes |
 | BLS0436 | a fragment parameter that is not a variable name |
-| BLS0435 | an interpolation hole's format spec other than `.N` (a hole of a type with no `to_string`, or `.N` on a non-`f64`, is the type error of the method it lowers to) |
+| BLS0435 | an interpolation hole's format spec other than `.N` (`.N` on a non-`f64` is the type error of `to_fixed`) |
 
 ## Slices
 

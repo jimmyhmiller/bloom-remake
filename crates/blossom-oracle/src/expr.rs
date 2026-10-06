@@ -432,6 +432,23 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
                 .map_err(|e| ExprError::Oracle(internal_error!("the PRF: {e}").into()))?;
             Ok(Value::Tuple(vec![Value::Int(IntValue::U64(p)), y].into()))
         }
+        Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::ToString { ty }),
+            args,
+        } => {
+            let [x] = args.as_slice() else {
+                return Err(ExprError::Oracle(
+                    internal_error!("`to_string` takes one argument").into(),
+                ));
+            };
+            let v = eval(scope, env, x)?;
+            Ok(Value::Str(std::sync::Arc::from(blossom_ir::printer::to_string_text(
+                scope.program,
+                &v,
+                *ty,
+                scope.oracle.node_names(),
+            ))))
+        }
         Expr::Call { f: FnRef::Fn(id), args } => crate::library::call(scope, env, *id, args),
         Expr::Call {
             f: FnRef::Builtin(BuiltinFn::Lib(f)),
@@ -726,6 +743,17 @@ fn binary(op: BinOp, l: Value, r: Value) -> ExprResult<Value> {
                 r.map(Value::Instant)
                     .ok_or_else(|| ExprError::Arithmetic(format!("{a:?} {} {d:?} overflows", op_text(op))))
             }
+            // Scaling (LANGUAGE §5.1).
+            (Value::Duration(d), Value::Int(k)) if matches!(op, Mul | Div) => {
+                let r = if op == Mul { d.times(k) } else { d.divided_by(k) };
+                r.map(Value::Duration).ok_or_else(|| {
+                    ExprError::Arithmetic(format!("{d:?} {} {k} overflows or divides by zero", op_text(op)))
+                })
+            }
+            (Value::Int(k), Value::Duration(d)) if op == Mul => d
+                .times(k)
+                .map(Value::Duration)
+                .ok_or_else(|| ExprError::Arithmetic(format!("{k} * {d:?} overflows"))),
             (Value::Duration(d), Value::Instant(a)) if op == Add => a
                 .checked_add(d)
                 .map(Value::Instant)

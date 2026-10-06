@@ -658,7 +658,11 @@ pub enum BuiltinFn {
     Contains,
     Keys,
     Values,
-    ToString,
+    /// `x.to_string()` for a value of type `ty` with no `to_string` of its own in the library (a collection, an
+    /// option, a tuple, a struct, an enum, a duration, …): the value as Blossom writes it (`printer::value_text`).
+    ToString {
+        ty: TypeId,
+    },
     Hash64,
     Fingerprint,
     /// `x as f64` from an integer (the nearest double) or an `f64` (LANGUAGE §5.1).

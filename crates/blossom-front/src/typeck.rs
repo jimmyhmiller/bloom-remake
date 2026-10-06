@@ -2098,6 +2098,7 @@ impl Checker<'_> {
                             self.con(&mut hir.types, TypeDef::Int(IntTy::U64))
                         }
                         Builtin::RandFloat => self.con(&mut hir.types, TypeDef::F64),
+                        Builtin::ToString => self.con(&mut hir.types, TypeDef::Str),
                         Builtin::Error => {
                             // The message is a String; the call never returns, so it takes its context's type.
                             if let Some(m) = ats.first() {
@@ -2720,13 +2721,37 @@ impl Checker<'_> {
                         if open && !self.settle_duration {
                             return false;
                         }
-                        if matches!(op, BinOp::Add | BinOp::Sub) {
-                            self.unify(&hir.types, l, r, span);
-                            self.unify(&hir.types, l, res, span);
-                        } else {
-                            self.unsupported(span, "scaling durations");
+                        match op {
+                            BinOp::Add | BinOp::Sub => {
+                                self.unify(&hir.types, l, r, span);
+                                self.unify(&hir.types, l, res, span);
+                            }
+                            // Scaling (LANGUAGE §5.1): `d * k`, `k * d`, `d / k`, `k` an integer.
+                            BinOp::Mul | BinOp::Div => {
+                                let d_left = matches!(ld, Some(TypeDef::Duration));
+                                let k = if d_left { r } else { l };
+                                if op == BinOp::Div && !d_left {
+                                    self.error(span, "a Duration is divided by an integer, not the other way".into());
+                                    return true;
+                                }
+                                let d = self.con(&mut hir.types, TypeDef::Duration);
+                                self.unify(&hir.types, res, d, span);
+                                self.deferred.push(Deferred::IntColumn { t: k, span });
+                            }
+                            _ => self.error(span, "a Duration is added, subtracted, scaled or divided".into()),
                         }
                         true
+                    }
+                    // `x * k` or `k / x` with `x` not yet known next to an integer `k` may scale a duration: wait for
+                    // `x`, settling it as an integer only when nothing else decides it.
+                    (Some(TypeDef::Int(_)), None) | (None, Some(TypeDef::Int(_)))
+                        if matches!(op, BinOp::Mul | BinOp::Div) && !self.settle_duration && {
+                            let unknown = if ld.is_none() { l } else { r };
+                            let root = self.find(unknown);
+                            !matches!(self.node(root), Node::Unbound { int: true })
+                        } =>
+                    {
+                        false
                     }
                     (Some(_), _) | (_, Some(_)) => {
                         // An integer literal is not a float (LANGUAGE §5.1): say how to write one.
@@ -3539,6 +3564,8 @@ impl Checker<'_> {
             (_, Some(TypeDef::F64), "to_fixed") => (Builtin::Lib(LibFn::FloatFixed), None, 1),
             (_, Some(TypeDef::Bool), "to_string") => (Builtin::Lib(LibFn::BoolToString), None, 0),
             (_, Some(TypeDef::Str), "to_string") => (Builtin::Lib(LibFn::StrToString), None, 0),
+            // Every other type has one too (Appendix B): the value as Blossom writes it.
+            (_, _, "to_string") => (Builtin::ToString, None, 0),
             (_, Some(TypeDef::F64), "sqrt") => (Builtin::Lib(LibFn::FloatSqrt), None, 0),
             (_, Some(TypeDef::F64), "floor") => (Builtin::Lib(LibFn::FloatFloor), None, 0),
             (_, Some(TypeDef::F64), "ceil") => (Builtin::Lib(LibFn::FloatCeil), None, 0),
@@ -3855,6 +3882,7 @@ impl Checker<'_> {
                 }
                 self.bound(Shape::Option(recv))
             }
+            (_, Builtin::ToString) => self.con(&mut hir.types, TypeDef::Str),
             (_, other) => {
                 self.bugs.push(internal_error!("{other:?} dispatched on a plain value"));
                 return Some(true);

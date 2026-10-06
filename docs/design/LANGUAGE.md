@@ -274,8 +274,8 @@ Rules:
 - **Interpolated strings** (S16, docs/design/SUGAR.md §1): `f"…"` holds `{expr}` holes, any expression; a `:` outside
   the hole's brackets starts its spec, of which `.N` (N digits after the point, for an `f64`) is the only one
   (BLS0435). `{{` and `}}` are literal braces, a lone `}` is BLS0005, and the escapes are a string's. The value is the
-  text and the holes joined with `++`, each hole converted with `to_string` (with `.N`, `to_fixed(N)`), so a hole of
-  a type without one is that method's error.
+  text and the holes joined with `++`, each hole converted with `to_string` (with `.N`, `to_fixed(N)`), which every
+  type has (Appendix B).
 - There is no `null`: absent values are `None` (`Option<T>`, LANG-025).
 - A string is accepted where a `Node` or `Principal` is expected only in `fact`s and `static` configuration inside
   specs and deployments; rules never build node names from strings.
@@ -738,7 +738,7 @@ module (BLS0201). Editing a labelled body changes only that body's hashes; editi
 | `f64` | IEEE 754 doubles | totally ordered by IEEE `totalOrder` for canonical order; **not** usable as the element of `LMax`/`LMin` (BLS0312) |
 | `String`, `Bytes` | UTF-8 text, byte strings | |
 | `()` | unit | |
-| `Duration`, `Instant` | nanosecond durations and instants | `Instant - Instant = Duration`, `Instant ± Duration = Instant` |
+| `Duration`, `Instant` | nanosecond durations and instants | `Instant - Instant = Duration`, `Instant ± Duration = Instant`, `Duration ± Duration = Duration`; `d * k`, `k * d` and `d / k` scale by an integer `k` of any type (truncating toward zero; out of range or `k = 0` is BLSR004) |
 | `Mod<N>` | `N`-bit modular ids (LANG-026) | modular `+ - << >>`; ring intervals (§9.4) |
 | `Blob` | a handle to an out-of-line byte stream (LANG-028) | bytes move through host handlers (§16.6) |
 | `Node`, `Node<R>` | routable node addresses | §5.3 |
@@ -3497,20 +3497,31 @@ All functions are pure. Methods on values use `.`; there are no closures outside
 |---|---|
 | Arithmetic | `+ - * / % **` (checked); `abs`, `min(a, b)`, `max(a, b)`, `clamp`, `wrapping_add`, `wrapping_sub`, `wrapping_mul`, `saturating_add`, `pow`, `sqrt` (`f64`) |
 | Bits | `& \| ^ ~ << >>`, `count_ones`, `leading_zeros` |
-| Strings | `len`, `++`, `split_whitespace() -> Vec<String>`, `split(sep)`, `to_lowercase`, `to_uppercase`, `trim`, `starts_with`, `ends_with`, `contains`, `replace`, `parse_u64() -> Option<u64>`, `parse_i64`, `to_string` (every type; this build: integers, `f64`, `bool`, `String`), `x.to_fixed(n)` (`f64`: `n` digits after the point, at most 64) |
+| Strings | `len`, `++`, `split_whitespace() -> Vec<String>`, `split(sep)`, `to_lowercase`, `to_uppercase`, `trim`, `starts_with`, `ends_with`, `contains`, `replace`, `parse_u64() -> Option<u64>`, `parse_i64`, `to_string` (every type, below), `x.to_fixed(n)` (`f64`: `n` digits after the point, at most 64) |
 | Bytes | `len`, `slice(lo, hi) -> Option<Bytes>`, `concat`, `to_hex`, `from_utf8() -> Option<String>`; big-endian reads `u8_at(p)`, `i8_at(p)`, `u16_be_at(p)` … `i64_be_at(p) -> Option<T>`; patches `put_u8(p, x)` … `put_i64_be(p, x) -> Option<Bytes>`; varints `uvarint_at(p) -> Option<(u64, u64)>`, `varint_at(p) -> Option<(i64, u64)>` (value and next position; `None` when truncated, longer than 10 bytes or past `u64`); `Bytes::from_u8(x)` … `Bytes::from_i64_be(x)`, `Bytes::uvarint(x)`, `Bytes::varint(x)`, `Bytes::empty()`, `Bytes::join(v)`; `s.to_utf8()` on strings |
 | Vec | `len`, `get(i) -> Option<T>`, `first`, `last`, `push`, `concat`, `contains`, `enumerate() -> Vec<(u64, T)>`, `sort`, `reverse`, `flatten()` (on a `Vec<Vec<T>>`), `dedup`, `map`, `filter`, `filter_map`, `fold`, `scan(init, |acc, x| e) -> Vec<A>` (the accumulator after each element), `scan_while(init, |acc, x| e) -> Vec<A>` (`e: Option<A>`; as `scan`, stopping at the first step that is `None`: over a `range`, a loop that ends early), `all`, `any` (closures: function bodies only); `to_set() -> Set<T>`, `to_map() -> Map<K, V>` (on a `Vec<(K, V)>`: a repeated key keeps its last value) |
 | Ranges | `range(lo: u64, hi: u64) -> Vec<u64>`: `lo` up to, not including, `hi`; a combinator over `range(…)` walks it without building it |
 | Set | `len`, `contains`, `insert`, `remove`, `union`, `intersection`, `difference`, `items() -> Vec<T>` |
 | Map | `len`, `get(k) -> Option<V>`, `contains(k)`, `contains_key`, `insert`, `remove`, `keys`, `values`, `entries() -> Vec<(K, V)>` |
 | Option | `is_some`, `is_none`, `unwrap_or(d)`, `map`, `and_then`; `Some`, `None` |
-| Time | `now()`, `tick()`; `Duration::from_millis`, `.as_millis()` (a `Duration`'s, or an `Instant`'s since the deployment epoch, which is the Unix epoch in a deployment), `Instant - Instant`, `Instant ± Duration` |
+| Time | `now()`, `tick()`; `Duration::from_millis`, `.as_millis()` (a `Duration`'s, or an `Instant`'s since the deployment epoch, which is the Unix epoch in a deployment), `Instant - Instant`, `Instant ± Duration`, `Duration ± Duration`, `d * k`, `k * d`, `d / k` (§5.1) |
 | Randomness | `random()`, `rand(k…)`, `rand_float(k…)`, `rand_range(lo, hi, k…)` (§15.1) |
 | Hashing and ids | `hash64(x)` (canonical fingerprint, stable across versions), `fingerprint(x)`; `std::hash::sha256` |
 | Locations | `self`, `R.size()`, `R.route(k)`, `c.owner(k)`, `principal_of(n)`, `role_of(n)` |
 | Lattices | the constructors and methods of §11.5; `reveal!`, `threshold(…)`, `majority(s, R)`, `when_final(e)` |
 | Versions | `cluster_version()` |
 | Errors | `error("message")`: a located hard error (BLSR010) |
+
+**`to_string`.** Every value has one. An integer is its decimal digits, an `f64` as §5.1 says, a `bool` `true` or
+`false`, a `String` itself. Every other value is written as Blossom writes it, recursively: a string inside it quoted
+and escaped (`"a\"b"`), an `f64` inside it as a literal (`1.0`), `()`, tuples `(a, b)`, `[a, b]`, `set[a, b]`,
+`map[k => v]`, `Some(x)` and `None`, a struct `Point { x: 1, y: 2 }`, an enum variant by name (`Dot`, `Circle(5)`;
+a newer version's variant kept by the local `#[unknown]` one as `Unknown(#14, 3 bytes)`, its wire number and payload
+size), a duration in seconds (`1.5s`, `-0.007s`), an instant as `@` and its time since the epoch, a `Mod<N>` in decimal,
+bytes as a byte string (`b"a\x00"`), a blob as `blob#` and its BLAKE3 hash in hex and its length, a node by the name
+the deployment gave it (`n1`; `node#3` if none), a lattice value by its elements (`⊥`, `⊤`, `{a, b}`, `{k: v}`, a
+bag's `{x × 2}`, a product's `(a, b)`), a group value by its weights (`zset[x => -1]`) and a host value as its type and
+encoded bytes. The text is for reading: it is deterministic but not a stable encoding (use `fingerprint` or a codec).
 
 ---
 

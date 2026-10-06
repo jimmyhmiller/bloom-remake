@@ -1206,3 +1206,122 @@ fn a_float_cast_out_of_range_is_blsr004_on_both_evaluators() {
         ));
     }
 }
+
+// ---------------------------------------------------------------- scaling durations (LANGUAGE §5.1)
+
+#[test]
+fn durations_scale_on_both_evaluators_and_overflow_is_blsr004() {
+    let artifact = compile("durations.bls");
+    let scale = artifact.rel_named("scale").unwrap();
+    let at = |t: u64, ms: i64, k: i64| InputEvent {
+        node: NodeId(0),
+        tick: Tick(t),
+        rel: scale,
+        row: Arc::from(vec![Value::Int(IntValue::I64(ms)), Value::Int(IntValue::I64(k))]),
+    };
+    let cases = [(1_500, 3), (-7, 2), (999, -4), (0, 9), (1, 7)];
+    let inputs: Vec<InputEvent> = cases.iter().map(|(ms, k)| at(1, *ms, *k)).collect();
+    let Hosted::Ran(run) = differential_hosted(&artifact, &inputs, 2) else {
+        panic!("scaling in range failed");
+    };
+    let i = |n: i64| Value::Int(IntValue::I64(n));
+    let got: BTreeSet<Vec<Value>> = run
+        .node_tick(Tick(1), NodeId(0))
+        .unwrap()
+        .instance
+        .rows(artifact.rel_named("v_scale").unwrap())
+        .map(|r| r.to_vec())
+        .collect();
+    // In nanoseconds, then whole milliseconds truncated toward zero, as `as_millis` does.
+    let ms_of = |ns: i64| i(ns / 1_000_000);
+    let want: BTreeSet<Vec<Value>> = cases
+        .iter()
+        .map(|(ms, k)| {
+            let ns = ms * 1_000_000;
+            vec![
+                i(*ms),
+                i(*k),
+                tuple(vec![
+                    ms_of(ns * k),
+                    ms_of(k * ns),
+                    ms_of(ns / k),
+                    ms_of(ns * 2),
+                    ms_of(ns / 4),
+                ]),
+            ]
+        })
+        .collect();
+    assert_eq!(got, want);
+    // Out of range, and a division by zero.
+    for (ms, k) in [(i64::MAX / 1_000_000, 2), (5, 0)] {
+        assert!(matches!(
+            differential_hosted(&artifact, &[at(1, 1, 1), at(2, ms, k)], 3),
+            Hosted::Failed(Tick(2), code) if code == "BLSR004"
+        ));
+    }
+}
+
+#[test]
+fn to_string_writes_every_type_on_both_evaluators() {
+    let artifact = compile("to_string.bls");
+    let e = artifact.rel_named("e").unwrap();
+    let at = |n: i64, s: &str| InputEvent {
+        node: NodeId(0),
+        tick: Tick(1),
+        rel: e,
+        row: Arc::from(vec![Value::Int(IntValue::I64(n)), Value::Str(s.into())]),
+    };
+    let Hosted::Ran(run) = differential_hosted(&artifact, &[at(1500, "a b"), at(-7, "q\"t")], 2) else {
+        panic!("to_string failed");
+    };
+    let got: BTreeSet<Vec<Value>> = run
+        .node_tick(Tick(1), NodeId(0))
+        .unwrap()
+        .instance
+        .rows(artifact.rel_named("v_text").unwrap())
+        .map(|r| r.to_vec())
+        .collect();
+    let row = |n: i64, texts: &[&str]| {
+        vec![
+            Value::Int(IntValue::I64(n)),
+            tuple(texts.iter().map(|t| Value::Str((*t).into())).collect()),
+        ]
+    };
+    let want: BTreeSet<Vec<Value>> = [
+        row(
+            1500,
+            &[
+                "[1500, 1501]",
+                "(1500, \"a b\")",
+                "Some(1500)",
+                "Point { x: 1500, y: 2 }",
+                "Circle(1500)",
+                "Dot",
+                "1.5s",
+                "set[\"a b\"]",
+                "map[\"a b\" => 1500]",
+                "n1",
+                "(1500, 1500) [\"a b\"]",
+            ],
+        ),
+        row(
+            -7,
+            &[
+                "[-7, -6]",
+                "(-7, \"q\\\"t\")",
+                "Some(-7)",
+                "Point { x: -7, y: 2 }",
+                "Circle(-7)",
+                "Dot",
+                "-0.007s",
+                "set[\"q\\\"t\"]",
+                "map[\"q\\\"t\" => -7]",
+                "n1",
+                "(-7, -7) [\"q\\\"t\"]",
+            ],
+        ),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(got, want);
+}
