@@ -476,13 +476,14 @@ impl Lowerer<'_> {
                 if expr.ty == Some(*ty) {
                     self.expr(d, expr)?
                 } else {
-                    // Type checking admits casts between integer types only.
-                    let to = match self.b.types().get(*ty) {
-                        Some(TypeDef::Int(t)) => *t,
+                    // Type checking admits casts between integer types and `f64` only.
+                    let f = match self.b.types().get(*ty) {
+                        Some(TypeDef::Int(t)) => ir::BuiltinFn::IntCast(*t),
+                        Some(TypeDef::F64) => ir::BuiltinFn::FloatCast,
                         other => return Err(internal_error!("a cast to {other:?} reached lowering")),
                     };
                     Expr::Call {
-                        f: ir::FnRef::Builtin(ir::BuiltinFn::IntCast(to)),
+                        f: ir::FnRef::Builtin(f),
                         args: vec![self.expr(d, expr)?],
                     }
                 }
@@ -691,6 +692,7 @@ impl Lowerer<'_> {
                     },
                     Builtin::RandRange => ir::BuiltinFn::RandRange,
                     Builtin::Rand => ir::BuiltinFn::Rand,
+                    Builtin::RandFloat => ir::BuiltinFn::RandFloat,
                     Builtin::Hash64 => ir::BuiltinFn::Hash64,
                     Builtin::Error => ir::BuiltinFn::Error { ty: ty_of(e)? },
                     Builtin::Majority(r) => ir::BuiltinFn::Majority {

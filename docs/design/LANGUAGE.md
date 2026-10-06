@@ -717,6 +717,24 @@ module (BLS0201). Editing a labelled body changes only that body's hashes; editi
 | `Session` | an external client session | §18.4 |
 | `Principal` | an authenticated identity (SPIFFE id) | §18.1 |
 
+**`f64` (LANG-022).** Floats are IEEE 754 binary64 with round-to-nearest-even, made deterministic:
+
+- **Canonical values.** Every `f64` a program computes (a literal, a constant, arithmetic, a cast, a library call,
+  `rand_float`) is canonical: zero has one sign (`-0.0` is `0.0`) and NaN one bit pattern. So `==` and the
+  comparisons, which use the values' total order (as joins and keys do), agree with IEEE on numbers; NaN equals
+  itself and sorts above `+∞`.
+- **Arithmetic** `+ - * / %` and unary `-` are IEEE (`%` is the truncated remainder, the dividend's sign); a
+  division by zero gives `±∞`, an invalid operation NaN — never a runtime error. Both operands are `f64`: an integer
+  literal is not a float (`x * 2` with `x: f64` is a type error; write `2.0`), and integers convert with `as`.
+- **Casts.** `n as f64` is the nearest double. `x as i64` (any integer type) truncates toward zero; NaN, `±∞` or a
+  value out of the type's range is BLSR004, as for integer casts.
+- **The library** offers only correctly rounded operations, so results are the same on every platform: `abs`,
+  `min`, `max`, `clamp`, `x.sqrt()`, `x.floor()`, `x.ceil()`, `x.round()` (half away from zero), `x.trunc()`, and
+  `x.to_string()` (the shortest decimal that reads back as `x`, without an exponent: `1`, `0.1`, `-2.5`, `NaN`,
+  `inf`). Transcendental functions wait for a deterministic implementation.
+- **Aggregates.** `min!`, `max!`, `count!` and the others that do not add accept `f64`; `sum!` over `f64` is refused
+  (BLS0908): float addition is not associative, so the sum would depend on the evaluation order.
+
 ### 5.2 Compound types (LANG-023, LANG-025)
 
 - Tuples `(A, B, …)`, with `.0`, `.1` access and destructuring patterns; `()` is unit.

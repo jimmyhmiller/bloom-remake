@@ -652,7 +652,7 @@ pub enum BuiltinFn {
         role: RoleId,
     },
     Len,
-    IntCast(blossom_value::types::IntTy), // `x as T` between integer types: out of range is BLSR004 (LANGUAGE §5.2)
+    IntCast(blossom_value::types::IntTy), // `x as T` from an integer or an `f64`: out of range is BLSR004 (LANGUAGE §5.1)
     Lib(LibFn),                           // the built-in library (LANGUAGE Appendix B); the receiver, if any, first
     Concat,                               // `a ++ b` on String, Bytes or Vec (LANGUAGE §9.12)
     Contains,
@@ -661,6 +661,8 @@ pub enum BuiltinFn {
     ToString,
     Hash64,
     Fingerprint,
+    /// `x as f64` from an integer (the nearest double) or an `f64` (LANGUAGE §5.1).
+    FloatCast,
 }
 
 /// The work one evaluation of a pure function may do (LANGUAGE §16.1, BLSR012): closure applications plus the
@@ -771,6 +773,22 @@ pub enum LibFn {
     BlobOf,
     /// `blob.read(lo, hi) -> Option<Bytes>`: bytes `lo..hi` of the blob, `None` unless `lo <= hi <= len`.
     BlobRead,
+    /// `abs(x)` on an integer (BLSR004 when `-x` does not fit) or an `f64`.
+    Abs,
+    /// `min(a, b)`, `max(a, b)` of two integers of one type or two `f64`s (the values' order).
+    Min,
+    Max,
+    /// `clamp(x, lo, hi)`: `max(lo, min(x, hi))`; BLSR004 when `lo > hi`.
+    Clamp,
+    /// `x.sqrt()`, `x.floor()`, `x.ceil()`, `x.round()` (half away from zero), `x.trunc()` on an `f64` (LANGUAGE §5.1:
+    /// correctly rounded, canonical).
+    FloatSqrt,
+    FloatFloor,
+    FloatCeil,
+    FloatRound,
+    FloatTrunc,
+    /// `x.to_string()` on an `f64`: the shortest decimal that reads back as `x`, without an exponent.
+    FloatToString,
 }
 
 /// Construct data in the Dedalus core IR.

@@ -569,10 +569,10 @@ impl<'t> Resolver<'t, '_> {
                     self.intern_type(TypeDef::Bytes, e.span),
                 ),
                 LitValue::Bool(b) => (Value::Bool(*b), self.intern_type(TypeDef::Bool, e.span)),
-                LitValue::Float(_) => {
-                    self.unsupported("LANG-022", "floating-point constants", e.span);
-                    return None;
-                }
+                LitValue::Float(f) => (
+                    Value::F64(blossom_value::float::canonical(*f)),
+                    self.intern_type(TypeDef::F64, e.span),
+                ),
             },
             ExprKind::Prefix { op: PrefixOp::Neg, arg } => {
                 if let ExprKind::Lit(LitValue::Int { value, suffix }) = &arg.kind {
@@ -590,6 +590,11 @@ impl<'t> Resolver<'t, '_> {
                         return None;
                     };
                     (v, self.intern_type(TypeDef::Int(ity), e.span))
+                } else if let ExprKind::Lit(LitValue::Float(f)) = &arg.kind {
+                    (
+                        Value::F64(blossom_value::float::canonical(-*f)),
+                        self.intern_type(TypeDef::F64, e.span),
+                    )
                 } else {
                     self.unsupported("LANG-010", "this constant expression", e.span);
                     return None;
@@ -640,6 +645,13 @@ impl<'t> Resolver<'t, '_> {
                             }
                         }
                     }
+                    // IEEE, canonical (LANGUAGE §5.1).
+                    (Value::F64(x), Value::F64(y)) => Value::F64(blossom_value::float::canonical(match op {
+                        BinOp::Add => x + y,
+                        BinOp::Sub => x - y,
+                        BinOp::Mul => x * y,
+                        _ => x / y,
+                    })),
                     (Value::Duration(x), Value::Duration(y)) if matches!(op, BinOp::Add | BinOp::Sub) => {
                         let r = if *op == BinOp::Add {
                             x.checked_add(y)

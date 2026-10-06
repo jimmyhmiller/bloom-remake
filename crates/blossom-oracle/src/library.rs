@@ -10,7 +10,7 @@ use std::sync::Arc;
 use blossom_base::FnId;
 use blossom_base::internal_error;
 use blossom_ir::core::{BuiltinFn, Expr, FnBody, FnRef, LibFn, Pattern};
-use blossom_value::{Value, types::IntTy, value::IntValue};
+use blossom_value::{Value, float, types::IntTy, value::IntValue};
 
 use crate::expr::{ExprError, ExprResult, Scope, eval, truth};
 
@@ -169,6 +169,14 @@ fn option(v: Value) -> ExprResult<Option<Value>> {
         Value::Option(o) => Ok(o.map(|x| (*x).clone())),
         other => Err(bug(format!("expected an option, got {other:?}"))),
     }
+}
+
+/// A numeric library call's value: its runtime error is BLSR004, a mistyped call an oracle bug.
+fn num(r: Result<Value, float::NumError>) -> ExprResult<Value> {
+    r.map_err(|e| match e {
+        float::NumError::Arithmetic(m) => ExprError::Arithmetic(m),
+        float::NumError::Type(m) => bug(m),
+    })
 }
 
 fn opt(v: Option<Value>) -> Value {
@@ -372,6 +380,18 @@ pub(crate) fn lib(scope: &Scope<'_>, env: &[Option<Value>], f: LibFn, args: &[Ex
             Value::Int(i) => Value::Str(i.to_string().into()),
             other => return Err(bug(format!("`to_string` of {other:?}"))),
         },
+        LibFn::FloatToString => match val(0)? {
+            Value::F64(x) => Value::Str(float::to_string(x).into()),
+            other => return Err(bug(format!("`to_string` of {other:?}"))),
+        },
+        LibFn::Abs => num(float::abs(&val(0)?))?,
+        LibFn::Min | LibFn::Max => num(float::min_max(&val(0)?, &val(1)?, f == LibFn::Max))?,
+        LibFn::Clamp => num(float::clamp(&val(0)?, &val(1)?, &val(2)?))?,
+        LibFn::FloatSqrt => num(float::method(float::Method::Sqrt, &val(0)?))?,
+        LibFn::FloatFloor => num(float::method(float::Method::Floor, &val(0)?))?,
+        LibFn::FloatCeil => num(float::method(float::Method::Ceil, &val(0)?))?,
+        LibFn::FloatRound => num(float::method(float::Method::Round, &val(0)?))?,
+        LibFn::FloatTrunc => num(float::method(float::Method::Trunc, &val(0)?))?,
         LibFn::StrToUtf8 => Value::Bytes(str_of(val(0)?)?.as_bytes().into()),
         LibFn::StrParseI64 => opt(str_of(val(0)?)?
             .parse::<i64>()

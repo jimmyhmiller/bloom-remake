@@ -395,6 +395,13 @@ impl Names<'_> {
                 let n: i128 = digits.parse().map_err(|_| bad())?;
                 IntValue::from_i128(t, n).map(Value::Int).ok_or_else(bad)
             }
+            // As the printer writes a float (`1.0`, `2.5e-7`, `NaN`, `inf`), or a literal with its `f64` suffix.
+            Some(TypeDef::F64) => text
+                .strip_suffix("f64")
+                .unwrap_or(text)
+                .parse::<f64>()
+                .map(|f| Value::F64(blossom_value::float::canonical(f)))
+                .map_err(|_| bad()),
             Some(TypeDef::Str) => text
                 .strip_prefix('"')
                 .and_then(|t| t.strip_suffix('"'))

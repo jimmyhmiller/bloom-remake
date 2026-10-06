@@ -1053,3 +1053,148 @@ fn blobs_are_made_measured_and_read_on_both_evaluators() {
         .collect();
     assert_eq!(rows(3, "v_kept"), kept);
 }
+
+// ---------------------------------------------------------------- f64 (LANGUAGE §5.1)
+
+/// What `floats.bls` computes, written directly in Rust: IEEE with canonical values.
+#[cfg(test)]
+fn canonical(x: f64) -> Value {
+    Value::F64(if x.is_nan() {
+        f64::from_bits(0x7ff8_0000_0000_0000)
+    } else if x == 0.0 {
+        0.0
+    } else {
+        x
+    })
+}
+
+#[cfg(test)]
+fn expected_float(view: &str, a: i64, b: i64) -> Value {
+    let (p, q) = (a as f64 * 0.25, b as f64 * 0.25);
+    let f = canonical;
+    let i = |n: i64| Value::Int(IntValue::I64(n));
+    let s = |x: f64| Value::Str(format!("{}", if x == 0.0 { 0.0 } else { x }).into());
+    let t = p / 3.0;
+    match view {
+        "v_arith" => tuple(vec![f(p + q), f(p - q), f(p * q), f(p / q), f(p % q), f(-p)]),
+        "v_order" => tuple(
+            [p < q, p <= q, p == q, p > q, p >= q, p != q]
+                .into_iter()
+                .map(Value::Bool)
+                .collect(),
+        ),
+        "v_lib" => tuple(vec![
+            f(p.min(q)),
+            f(p.max(q)),
+            f(p.clamp(-1.5, 2.0)),
+            f(p.abs()),
+            f(p.abs().sqrt()),
+            f(t.floor()),
+            f(t.ceil()),
+            f(t.round()),
+            f(t.trunc()),
+        ]),
+        "v_text" => tuple(vec![
+            s(p),
+            if (p / q).is_nan() {
+                Value::Str("NaN".into())
+            } else {
+                s(p / q)
+            },
+            i((p * 2.5).trunc() as i64),
+            f(a as f64),
+            s(p / 8.0),
+        ]),
+        "v_ints" => tuple(vec![i(a.abs()), i(a.min(b)), i(a.max(b)), i(a.clamp(-5, 5))]),
+        other => panic!("no view {other}"),
+    }
+}
+
+#[test]
+fn floats_agree_on_both_evaluators_and_with_ieee() {
+    let artifact = compile("floats.bls");
+    let e = artifact.rel_named("e").unwrap();
+    let mut checked = 0;
+    for seed in seeds_of(0..8) {
+        let mut rng = Rng(seed);
+        let last = 10u64;
+        let mut per_tick: Vec<Vec<(i64, i64)>> = vec![Vec::new(); last as usize + 1];
+        let mut inputs = Vec::new();
+        for t in 1..last {
+            for _ in 0..rng.below(5) {
+                // Small values (zeros and signs included, so -0.0 and divisions by zero occur), and large ones.
+                let pick = |rng: &mut Rng| {
+                    let n = rng.below(41) as i64 - 20;
+                    if rng.below(8) == 0 { n * 1_000_000_007 } else { n }
+                };
+                let (a, b) = (pick(&mut rng), pick(&mut rng));
+                inputs.push(InputEvent {
+                    node: NodeId(0),
+                    tick: Tick(t),
+                    rel: e,
+                    row: Arc::from(vec![Value::Int(IntValue::I64(a)), Value::Int(IntValue::I64(b))]),
+                });
+                per_tick[t as usize].push((a, b));
+            }
+        }
+        let Hosted::Ran(run) = differential_hosted(&artifact, &inputs, last) else {
+            panic!("seed {seed}: a float program failed");
+        };
+        for (t, rows) in per_tick.iter().enumerate() {
+            let instance = &run.node_tick(Tick(t as u64), NodeId(0)).unwrap().instance;
+            for view in ["v_arith", "v_order", "v_lib", "v_text", "v_ints"] {
+                let rel = artifact.rel_named(view).unwrap();
+                let got: BTreeSet<Vec<Value>> = instance.rows(rel).map(|r| r.to_vec()).collect();
+                let want: BTreeSet<Vec<Value>> = rows
+                    .iter()
+                    .map(|(a, b)| {
+                        vec![
+                            Value::Int(IntValue::I64(*a)),
+                            Value::Int(IntValue::I64(*b)),
+                            expected_float(view, *a, *b),
+                        ]
+                    })
+                    .collect();
+                assert_eq!(got, want, "seed {seed} tick {t} view {view}");
+                checked += want.len();
+            }
+            let rand = artifact.rel_named("v_rand").unwrap();
+            for r in instance.rows(rand) {
+                assert_eq!(r[2], Value::Bool(true), "rand_float out of [0, 1): {r:?}");
+            }
+        }
+    }
+    assert!(checked > scaled_of(300, &(0..8)), "only {checked} rows checked");
+}
+
+#[test]
+fn a_float_cast_out_of_range_is_blsr004_on_both_evaluators() {
+    let artifact = compile("floats.bls");
+    let cast = artifact.rel_named("cast").unwrap();
+    let at = |t: u64, num: i64, den: i64| InputEvent {
+        node: NodeId(0),
+        tick: Tick(t),
+        rel: cast,
+        row: Arc::from(vec![Value::Int(IntValue::I64(num)), Value::Int(IntValue::I64(den))]),
+    };
+    let Hosted::Ran(run) = differential_hosted(&artifact, &[at(1, -7, 2), at(1, 9, 4)], 2) else {
+        panic!("casts in range failed");
+    };
+    let v = artifact.rel_named("v_cast").unwrap();
+    let got: BTreeSet<Vec<Value>> = run
+        .node_tick(Tick(1), NodeId(0))
+        .unwrap()
+        .instance
+        .rows(v)
+        .map(|r| r.to_vec())
+        .collect();
+    let i = |n: i64| Value::Int(IntValue::I64(n));
+    assert_eq!(got, BTreeSet::from([vec![i(-7), i(2), i(-3)], vec![i(9), i(4), i(2)]]));
+    // Infinite (a division by zero) and NaN.
+    for (num, den) in [(1, 0), (0, 0)] {
+        assert!(matches!(
+            differential_hosted(&artifact, &[at(1, 1, 1), at(2, num, den)], 3),
+            Hosted::Failed(Tick(2), code) if code == "BLSR004"
+        ));
+    }
+}

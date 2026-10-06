@@ -173,6 +173,8 @@ fn value(a: &BlsArtifact, types: &TypeTable, v: &toml::Value, ty: blossom_base::
         (toml::Value::String(s), TypeDef::Str) => Value::Str(s.as_str().into()),
         (toml::Value::String(s), TypeDef::Bytes) => Value::Bytes(s.as_bytes().into()),
         (toml::Value::Boolean(b), TypeDef::Bool) => Value::Bool(*b),
+        // A float is canonical, as every f64 a program computes (LANGUAGE §5.1).
+        (toml::Value::Float(f), TypeDef::F64) => Value::F64(blossom_value::float::canonical(*f)),
         (toml::Value::Array(xs), TypeDef::Tuple(ts)) => {
             if xs.len() != ts.len() {
                 return Err(bad());

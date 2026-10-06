@@ -25,6 +25,7 @@ pub mod class;
 pub mod digest;
 pub mod error;
 pub mod externs;
+pub mod float;
 pub mod fp;
 pub mod order;
 pub mod prf;

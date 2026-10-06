@@ -945,6 +945,7 @@ impl Remap for BuiltinFn {
             Self::ToString => Self::ToString,
             Self::Hash64 => Self::Hash64,
             Self::Fingerprint => Self::Fingerprint,
+            Self::FloatCast => Self::FloatCast,
         }
     }
 }
