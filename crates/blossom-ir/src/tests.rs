@@ -1447,3 +1447,217 @@ fn every_value_has_a_text_without_a_type() {
         "regex(b\"a+\")"
     );
 }
+
+/// A program of `good()` and one timer `t` (relation 2) declared `decl`.
+#[cfg(test)]
+fn with_timer(decl: TimerDecl) -> Program {
+    let mut p = good();
+    let ty = p.rels.get(RelId::from_raw(0)).unwrap().schema.cols[0].ty;
+    p.rels
+        .push(rel(2, "t", ty, RelClass::Event(EventSource::Timer(decl))))
+        .unwrap();
+    p
+}
+
+#[cfg(test)]
+fn timer_decl() -> TimerDecl {
+    TimerDecl {
+        clock: TimerClock::Physical,
+        every: None,
+        ticks: None,
+        times: None,
+        once_after: None,
+        once: false,
+        guard: None,
+    }
+}
+
+/// The counts a timer table delivers in ticks at `instants`, with the guard (relation 0) held at the end of the ticks
+/// in `held`.
+#[cfg(test)]
+fn table_counts(decl: TimerDecl, instants: &[i64], held: &[usize]) -> Vec<Vec<u64>> {
+    use crate::timers::TimerTable;
+    use blossom_value::Value;
+    use blossom_value::time::Instant;
+    use std::sync::Arc;
+    let p = with_timer(decl);
+    let mut table = TimerTable::new(&p, None, Instant(0)).unwrap();
+    let mut out = Vec::new();
+    for (i, at) in instants.iter().enumerate() {
+        let fired = table.fire(Instant(*at)).unwrap();
+        out.push(
+            fired
+                .iter()
+                .map(|(_, row)| match &row[0] {
+                    Value::Int(blossom_value::IntValue::U64(k)) => *k,
+                    other => panic!("{other:?}"),
+                })
+                .collect(),
+        );
+        let rows: Vec<crate::tick::Row> = if held.contains(&i) {
+            vec![Arc::from(vec![Value::Unit])]
+        } else {
+            Vec::new()
+        };
+        table
+            .observe(&[(RelId::from_raw(0), rows)].into_iter().collect())
+            .unwrap();
+    }
+    out
+}
+
+#[test]
+fn a_timer_table_runs_every_kind_of_timer() {
+    use blossom_value::time::Duration;
+    let every = |n, times| TimerDecl {
+        every: Some(Duration::from_nanos(n)),
+        times,
+        ..timer_decl()
+    };
+    // Ticks at 0 (boot), 10, 25, 30, 40.
+    let at = [0, 10, 25, 30, 40];
+    let none: Vec<u64> = Vec::new();
+    assert_eq!(
+        table_counts(every(10, None), &at, &[]),
+        [none.clone(), vec![0], vec![1], vec![2], vec![3]]
+    );
+    assert_eq!(
+        table_counts(every(10, Some(2)), &at, &[]),
+        [none.clone(), vec![0], vec![1], none.clone(), none.clone()]
+    );
+    let once_after = TimerDecl {
+        once_after: Some(Duration::from_nanos(20)),
+        ..timer_decl()
+    };
+    assert_eq!(
+        table_counts(once_after, &at, &[]),
+        [none.clone(), none.clone(), vec![0], none.clone(), none.clone()]
+    );
+    let once = TimerDecl {
+        once: true,
+        ..timer_decl()
+    };
+    assert_eq!(
+        table_counts(once, &at, &[]),
+        [vec![0], none.clone(), none.clone(), none.clone(), none.clone()]
+    );
+    let ticks = |n, times| TimerDecl {
+        clock: TimerClock::Logical,
+        ticks: Some(n),
+        times,
+        ..timer_decl()
+    };
+    assert_eq!(
+        table_counts(ticks(2, None), &at, &[]),
+        [none.clone(), vec![0], none.clone(), vec![1], none.clone()]
+    );
+    assert_eq!(
+        table_counts(ticks(2, Some(1)), &at, &[]),
+        [none.clone(), vec![0], none.clone(), none.clone(), none.clone()]
+    );
+    // Guarded: dormant until the guard held at the end of a tick; skipped firings count toward `times`. Held after
+    // the ticks at 10 and 25 only: firing 1 (due 20) was due before the guard held, firing 2 (due 30) is delivered.
+    let guarded = TimerDecl {
+        guard: Some(RelId::from_raw(0)),
+        ..every(10, Some(3))
+    };
+    assert_eq!(
+        table_counts(guarded.clone(), &at, &[1, 2]),
+        [none.clone(), none.clone(), vec![1], vec![2], none.clone()]
+    );
+    // A guarded logical timer counts every tick; only its delivery waits for the guard.
+    let guarded_ticks = TimerDecl {
+        guard: Some(RelId::from_raw(0)),
+        ..ticks(2, None)
+    };
+    assert_eq!(
+        table_counts(guarded_ticks, &at, &[2]),
+        [none.clone(), none.clone(), none.clone(), vec![1], none]
+    );
+}
+
+#[test]
+fn a_spent_timer_has_no_deadline_and_a_logical_one_is_always_due() {
+    use crate::timers::TimerTable;
+    use blossom_value::time::{Duration, Instant};
+    let deadlines = |decl: TimerDecl, instants: &[i64]| {
+        let p = with_timer(decl);
+        let mut table = TimerTable::new(&p, None, Instant(0)).unwrap();
+        let mut out = vec![table.next_deadline().unwrap().map(|i| i.0)];
+        for at in instants {
+            table.fire(Instant(*at)).unwrap();
+            out.push(table.next_deadline().unwrap().map(|i| i.0));
+        }
+        out
+    };
+    let bounded = TimerDecl {
+        every: Some(Duration::from_nanos(10)),
+        times: Some(2),
+        ..timer_decl()
+    };
+    assert_eq!(deadlines(bounded, &[0, 10, 20]), [Some(10), Some(10), Some(20), None]);
+    let once = TimerDecl {
+        once: true,
+        ..timer_decl()
+    };
+    assert_eq!(deadlines(once, &[5]), [Some(0), None]);
+    let logical = TimerDecl {
+        clock: TimerClock::Logical,
+        ticks: Some(2),
+        times: Some(1),
+        ..timer_decl()
+    };
+    // Due at the latest tick's clock until its firing (the boot tick's successor), then spent.
+    assert_eq!(deadlines(logical, &[3, 3]), [Some(0), Some(3), None]);
+}
+
+#[test]
+fn validator_checks_a_timer_shape() {
+    use blossom_value::time::Duration;
+    let refused = |decl: TimerDecl| {
+        crate::validate::validate(&with_timer(decl))
+            .iter()
+            .any(|e| e.invariant() == Some(8) && e.to_string().contains("ill-formed timer"))
+    };
+    let every = TimerDecl {
+        every: Some(Duration::from_nanos(10)),
+        ..timer_decl()
+    };
+    assert!(!refused(every.clone()));
+    assert!(refused(timer_decl()), "no schedule");
+    assert!(
+        refused(TimerDecl {
+            once: true,
+            ..every.clone()
+        }),
+        "two schedules"
+    );
+    assert!(
+        refused(TimerDecl {
+            times: Some(0),
+            ..every.clone()
+        }),
+        "no firings"
+    );
+    assert!(
+        refused(TimerDecl {
+            ticks: Some(3),
+            every: None,
+            ..every.clone()
+        }),
+        "ticks on a physical clock"
+    );
+    assert!(
+        refused(TimerDecl {
+            once: true,
+            guard: Some(RelId::from_raw(0)),
+            ..timer_decl()
+        }),
+        "a guarded `once`"
+    );
+    assert!(refused(TimerDecl {
+        once_after: Some(Duration::from_nanos(5)),
+        times: Some(2),
+        ..timer_decl()
+    }));
+}

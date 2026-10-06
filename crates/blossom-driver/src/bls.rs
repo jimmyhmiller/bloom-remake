@@ -33,6 +33,23 @@ pub fn compile_file_with(
     compile_with_loader(root, nodes, params, &mut FsLoader)
 }
 
+/// [`compile_file_with`] for a deployment (`blossom run`, `blossom deploy`): the deployed build's lints
+/// (`api::deployed_lints`) join the warnings.
+pub fn compile_deployed(
+    root: &str,
+    nodes: &[NodeSpec],
+    params: &std::collections::BTreeMap<String, api::ParamBinding>,
+) -> (Result<(BlsArtifact, Diagnostics), BlsError>, SourceDb) {
+    let (result, sources) = compile_file_with(root, nodes, params);
+    let result = result.map(|(artifact, mut diags)| {
+        for d in api::deployed_lints(artifact.program.get()).iter() {
+            diags.push(d.clone());
+        }
+        (artifact, diags)
+    });
+    (result, sources)
+}
+
 /// [`compile_file_with`] from any [`Loader`]: sources in memory (an editor, the browser) as well as on disk.
 pub fn compile_with_loader(
     root: &str,

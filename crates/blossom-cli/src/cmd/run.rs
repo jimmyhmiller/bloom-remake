@@ -84,7 +84,7 @@ pub fn load(deploy: &std::path::Path) -> Result<(DeploymentSpec, Arc<blossom_art
         return Err(Exit::Refused.into());
     };
     let params = spec.params.iter().map(|(k, v)| (k.clone(), param_binding(v))).collect();
-    let artifact = bls::compile_with(source, &nodes, &params)?;
+    let artifact = bls::compile_deployed(source, &nodes, &params)?;
     Ok((spec, Arc::new(artifact)))
 }
 

@@ -394,23 +394,41 @@ impl Lowerer<'_> {
             HRelKind::Output { .. } | HRelKind::Halt => (RelClass::Idb, Some(InterfaceDir::Output)),
             HRelKind::Boot => (RelClass::Event(EventSource::Boot), None),
             HRelKind::Recovered => (RelClass::Event(EventSource::Recovered), None),
-            HRelKind::Timer { every, .. } => {
-                let every = i64::try_from(*every)
-                    .map(Duration::from_nanos)
-                    .map_err(|_| internal_error!("timer period out of range"))?;
-                (
-                    RelClass::Event(EventSource::Timer(TimerDecl {
-                        clock: TimerClock::Physical,
-                        every: Some(every),
-                        ticks: None,
-                        times: None,
-                        once_after: None,
-                        once: false,
-                        // Set once every relation is declared (`timer_guards`).
-                        guard: None,
-                    })),
-                    None,
-                )
+            HRelKind::Timer { schedule, .. } => {
+                let nanos = |d: u128| {
+                    i64::try_from(d)
+                        .map(Duration::from_nanos)
+                        .map_err(|_| internal_error!("timer period out of range"))
+                };
+                // Set once every relation is declared (`timer_guards`).
+                let none = TimerDecl {
+                    clock: TimerClock::Physical,
+                    every: None,
+                    ticks: None,
+                    times: None,
+                    once_after: None,
+                    once: false,
+                    guard: None,
+                };
+                let decl = match *schedule {
+                    hir::TimerSchedule::Every { period, times } => TimerDecl {
+                        every: Some(nanos(period)?),
+                        times,
+                        ..none
+                    },
+                    hir::TimerSchedule::Ticks { every, times } => TimerDecl {
+                        clock: TimerClock::Logical,
+                        ticks: Some(every),
+                        times,
+                        ..none
+                    },
+                    hir::TimerSchedule::OnceAfter(d) => TimerDecl {
+                        once_after: Some(nanos(d)?),
+                        ..none
+                    },
+                    hir::TimerSchedule::Once => TimerDecl { once: true, ..none },
+                };
+                (RelClass::Event(EventSource::Timer(decl)), None)
             }
             HRelKind::Channel(ch) => {
                 let form = match (ch.direction, ch.dest_col) {

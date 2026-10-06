@@ -1,0 +1,26 @@
+//! Every kind of timer (LANGUAGE §15.2), for `timers_kinds.rs`: a bounded periodic timer, a one-shot timer, a timer
+//! that fires in the boot tick and a bounded logical timer, each firing recorded in a table.
+program kinds version 1;
+
+timer beat every 100ms times 3;
+timer kick once after 250ms;
+timer start once;
+timer probe every 3 ticks times 2;
+
+table beat_fired(count: u64, at: Instant) key(count);
+table kick_fired(count: u64, at: Instant) key(count);
+table start_fired(count: u64, at: Instant) key(count);
+table probe_fired(count: u64, at: Instant) key(count);
+
+record_beat: on beat(c, at) {
+    upsert beat_fired(c, at);
+}
+record_kick: on kick(c, at) {
+    upsert kick_fired(c, at);
+}
+record_start: on start(c, at) {
+    upsert start_fired(c, at);
+}
+record_probe: on probe(c, at) {
+    upsert probe_fired(c, at);
+}

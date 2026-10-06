@@ -153,15 +153,14 @@ pub struct SyncConfig {
     pub streams: Option<crate::fabric::StreamsConfig>,
 }
 
-/// A physical timer (`every d`, LANGUAGE §15.2) in the synchronous world: firing `k` of a node's incarnation is due
-/// at `boot + (k + 1) × d`, `boot` the clock of the incarnation's first round, and reaches the node in the first round
-/// whose clock has reached it ([`crate::runtime::firings`]). A guarded timer's (`every d while G`) reach it only if
-/// `G` held at the end of the node's previous tick. (A guarded timer that resumes fires from its first firing after
-/// that tick, which is exactly the round's.)
+/// A timer (LANGUAGE §15.2) in the synchronous world: it fires by the node runtime's rule ([`blossom_ir::timers`]),
+/// `boot` the clock of the incarnation's first round and each round one tick ([`crate::runtime::firings`]). A guarded
+/// timer's firings (`while G`) reach the node only if `G` held at the end of the node's previous tick. (A guarded
+/// timer that resumes fires from its first firing after that tick, which is exactly the round's.)
 #[derive(Clone, Debug)]
 pub struct Timer {
     pub rel: RelId,
-    pub every: Duration,
+    pub schedule: blossom_ir::timers::Schedule,
     pub guard: Option<RelId>,
     /// The nodes it runs on (those of the role it is placed at).
     pub nodes: Vec<NodeId>,
@@ -416,12 +415,16 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                 };
                 let mut timer_firings = Vec::new();
                 let boot = booted.get(i).copied().unwrap_or(Tick(0));
-                if tick > boot {
-                    let origin = now_at(config.round, boot)?.0;
-                    let (before, now) = (now_at(config.round, Tick(t - 1))?.0, now_at(config.round, tick)?.0);
+                if tick >= boot {
                     for timer in config.timers.iter().filter(|timer| timer.nodes.contains(&node)) {
                         if timer.guard.is_none_or(|g| held.get(i).is_some_and(|h| h.contains(&g))) {
-                            timer_firings.extend(crate::runtime::firings(timer.rel, timer.every, origin, before, now)?);
+                            timer_firings.extend(crate::runtime::firings(
+                                timer.rel,
+                                &timer.schedule,
+                                boot,
+                                tick,
+                                config.round,
+                            )?);
                         }
                     }
                 }
@@ -859,8 +862,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_restart_starts_the_timers_counting_again_from_its_round() {
+    /// The firings `(round, count, at)` node 0 gets from a timer of `schedule`, down from round 3, restarting at 5.
+    fn firings_across_a_restart(schedule: blossom_ir::timers::Schedule) -> Vec<(u64, u64, i64)> {
         let world = SyncWorld::new(&Ticker, 1);
         let mut faults = FaultSchedule::default();
         faults.crashes.insert(NodeId(0), Tick(3));
@@ -871,12 +874,12 @@ mod tests {
         cfg.round = Duration::from_nanos(10);
         cfg.timers = vec![Timer {
             rel: TIMER,
-            every: Duration::from_nanos(20),
+            schedule,
             guard: None,
             nodes: vec![NodeId(0)],
         }];
         let run = world.run(&cfg, &faults).unwrap();
-        let firings: Vec<(u64, u64, i64)> = (0..=9)
+        (0..=9)
             .flat_map(|t| {
                 let nt = run.node_tick(Tick(t), NodeId(0)).unwrap();
                 let rows: Vec<_> = if nt.ran {
@@ -891,12 +894,51 @@ mod tests {
                     })
                     .collect::<Vec<_>>()
             })
-            .collect();
-        assert_eq!(
-            firings,
-            [(2, 0, 20), (7, 0, 70), (9, 1, 90)],
-            "counted from boot (0), then from the restart's clock (50)"
-        );
+            .collect()
+    }
+
+    #[test]
+    fn a_restart_starts_every_kind_of_timer_counting_again_from_its_round() {
+        use blossom_ir::timers::{Cadence, Schedule};
+        let every = |period, limit| Schedule {
+            cadence: Cadence::Every { period },
+            limit,
+        };
+        let ticks = |every, limit| Schedule {
+            cadence: Cadence::Ticks { every },
+            limit,
+        };
+        // (schedule, the firings as (round, count, at), what it shows)
+        type Case<'a> = (Schedule, &'a [(u64, u64, i64)], &'a str);
+        let cases: [Case<'_>; 5] = [
+            (
+                every(20, None),
+                &[(2, 0, 20), (7, 0, 70), (9, 1, 90)],
+                "every 20: counted from boot (0), then from the restart's clock (50)",
+            ),
+            (
+                every(20, Some(1)),
+                &[(2, 0, 20), (7, 0, 70)],
+                "once after 20, in each incarnation",
+            ),
+            (
+                Schedule {
+                    cadence: Cadence::Boot,
+                    limit: Some(1),
+                },
+                &[(0, 0, 0), (5, 0, 50)],
+                "once: in each boot round",
+            ),
+            (
+                ticks(2, None),
+                &[(1, 0, 10), (6, 0, 60), (8, 1, 80)],
+                "every 2 ticks: the incarnation's ticks 1 and 3 (round 3 is lost to the crash)",
+            ),
+            (ticks(2, Some(1)), &[(1, 0, 10), (6, 0, 60)], "every 2 ticks times 1"),
+        ];
+        for (schedule, want, what) in cases {
+            assert_eq!(firings_across_a_restart(schedule), want, "{what}");
+        }
     }
 
     #[test]

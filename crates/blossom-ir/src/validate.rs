@@ -518,6 +518,17 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
             Some(r.span),
             format!("{}: key, payload and lattice columns must partition the schema", r.name),
         );
+        // A timer is one of `every d [times m]`, `every n ticks [times m]`, `once after d` and `once` (no guard),
+        // with positive values (LANGUAGE §15.2).
+        if let RelClass::Event(EventSource::Timer(t)) = &r.class {
+            check(
+                crate::timers::Schedule::shape(t).is_some(),
+                8,
+                None,
+                Some(r.span),
+                format!("{}: an ill-formed timer", r.name),
+            );
+        }
         // A timer's guard is a derived relation, table or static the node holds where the timer runs (it observes it
         // after each tick, LANGUAGE §15.2).
         if let RelClass::Event(EventSource::Timer(TimerDecl { guard: Some(g), .. })) = &r.class {

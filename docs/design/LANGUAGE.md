@@ -444,7 +444,8 @@ Policy          = ( 'choose' | 'choose_rand' ) [ 'sticky' ]
                 | 'prefer' "(" IDENT { "," IDENT } ")"                 (* tables, relation level *)
                 | 'merge' ;
 CellDecl        = { 'durable' | "scratch" } 'cell' IDENT ":" Type ";" ;
-TimerDecl       = 'timer' IDENT ( 'every' Expr [ 'ticks' ] [ 'times' Expr ] | 'once' [ 'after' Expr ] ) ";" ;
+TimerDecl       = 'timer' IDENT ( 'every' Expr [ 'ticks' ] [ 'times' Expr ] | 'once' [ 'after' Expr ] )
+                  [ 'while' RelPath ] ";" ;
 RelPath         = FieldName { "." FieldName } ;
 
 (* ======================================================================== rules *)
@@ -1258,7 +1259,9 @@ used as an expression is `clock[]`, ⊥ until something is merged in (LANG-280).
 ### 7.14 Timers (LANG-172, LANG-173)
 
 `timer beat every 1s;` declares an event relation `beat(count: u64, at: Instant)`; `timer wake every 10ms while
-waiting;` fires only while the view or table `waiting` holds (§15.2).
+waiting;` fires only while the view or table `waiting` holds. A timer is periodic (`every d`), bounded (`every d times
+m`), one-shot (`once after d`), fired in the boot tick (`once`) or logical (`every n ticks`, counting the node's
+ticks), §15.2.
 
 ### 7.15 Built-in relations (LANG-046, LANG-051, LANG-052, LANG-202, LANG-240, LANG-243)
 
@@ -2599,8 +2602,16 @@ timer wake every 10ms while waiting;  // physical, only while `waiting` holds
 
 A timer is an event relation `name(count: u64, at: Instant)`: the firing number and the firing time. Physical
 timers are fed by the timer wheel (DIST-030), which also triggers ticks; under simulation they run on the virtual
-clock, and under LDFI they are mapped to rounds by the spec's `round` (ODD-16 (c)). `once` without `after` is
-`start(0, $now) :- boot().` A logical timer is its own Dedalus expansion:
+clock, and under LDFI they are mapped to rounds by the spec's `round` (ODD-16 (c)). Firings are counted from the
+incarnation's boot, and every incarnation counts from 0 again:
+
+- `every d`: firing `k` is due at `boot + (k + 1) × d`, delivered in the first tick whose clock has reached it with
+  `at` its due time (several in one tick when the node was late; each counts).
+- `times m` keeps the firings numbered `0` to `m − 1`; after them the timer is spent and never wakes the node again.
+- `once after d` is `every d times 1`.
+- `once` without `after` is `start(0, $now) :- boot().`: it fires in the boot tick, `at` that tick's time.
+- A logical timer `every n ticks` is its own Dedalus expansion, firing `k` in the incarnation's tick
+  `(k + 1) × n − 1` (the boot tick is tick 0), `at` that tick's time:
 
 ```ir
 probe$left(5) :- boot().
@@ -2609,8 +2620,11 @@ probe$left(5)@next :- probe$left(1).
 probe(N, T) :- probe$left(1), N := $tick / 5, T := $now.
 ```
 
-A logical timer keeps the node ticking (its counter is a staged change, SEM-009), so it is meant for simulation and
-LDFI; a deployed program that uses one gets BLS1006.
+A logical timer keeps the node ticking (its counter is a staged change, SEM-009) until it is spent, so it is meant
+for simulation and LDFI, where every node runs a tick per round; a deployed program that uses one gets BLS1006
+(`blossom run`, `blossom deploy`). The positive values are checked: a period is a positive `Duration`, a number of
+ticks or `times` a positive integer (BLS0300). Hosts run the expansion directly (`blossom_ir::timers`), with the
+same firings.
 
 **Guarded timers** (`every d while G`, HD item 4). `G` is a view or table placed where the timer is, and depends on
 carried state only: tables, statics and views of them, with no event, input, message, stream, `now()`, `tick()` or
@@ -2623,8 +2637,12 @@ the firings it missed are skipped, not delivered late, and `count` still says wh
 is. Before the first tick every guarded timer is dormant (the boot tick decides). In the synchronous world a guarded
 timer delivers a round's firings iff `G` held at the end of the node's previous round. A polling timer that only
 matters while something waits (a request's deadline) is the use: `timer fetch_wake every 10ms while fetch_waiting;`.
-LDFI refuses a program with a guarded timer (LANG-172): its firings depend on state that faults can change, which
-the hazard encoding does not model yet. IR: `TimerDecl.guard`; the node observes `G` after each tick, as it does
+Under `times m` the skipped firings count, so a guarded bounded timer may deliver fewer than `m`. A guarded logical
+timer keeps counting the node's ticks while dormant; only delivery waits for `G`. `once` without `after` takes no
+guard (BLS0412): it fires in the boot tick, before any guard can hold.
+Under LDFI a guarded timer's firing needs some tuple of its guard at the end of the node's previous round (and no
+restart since); the stepped searches (exhaustive certification, the one-round step) see neither a previous round nor
+a restart and refuse a program with a guarded timer (LANG-172). IR: `TimerDecl.guard`; the node observes `G` after each tick, as it does
 `halt`.
 
 ### 15.3 When ticks happen (SEM-009, ODD-04 (c))

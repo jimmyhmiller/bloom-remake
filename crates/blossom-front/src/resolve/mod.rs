@@ -1628,25 +1628,58 @@ impl<'t, 'd> Resolver<'t, 'd> {
 
     fn timer(&mut self, s: ScopeIdx, t: &'t ast::TimerDecl, placement: Option<HRoleId>) -> Option<HRelId> {
         let words: Vec<&str> = t.words.iter().map(Ident::as_str).collect();
-        if words != ["every"] || t.exprs.len() != 1 {
-            self.unsupported(
-                "LANG-173",
-                "timers other than `timer name every DURATION;` (logical, `once` and bounded timers)",
-                t.span,
-            );
-            return None;
-        }
-        let every = match t.exprs.first().map(|e| self.const_value(s, e, None)) {
-            Some(Some((Value::Duration(d), _))) if d.as_nanos() > 0 => d.as_nanos() as u128,
-            Some(Some((Value::Duration(_), _))) => 0,
-            Some(Some(_)) => {
-                self.error(code!("BLS0300"), t.span, "a timer period must be a Duration");
+        // The parser accepts `every E [ticks] [times E]` and `once [after E]` only.
+        let (schedule, used) = match words.as_slice() {
+            ["every"] => (
+                TimerSchedule::Every {
+                    period: self.timer_period(s, t, 0)?,
+                    times: None,
+                },
+                1,
+            ),
+            ["every", "times"] => (
+                TimerSchedule::Every {
+                    period: self.timer_period(s, t, 0)?,
+                    times: Some(self.timer_count(s, t, 1, "a timer's `times`")?),
+                },
+                2,
+            ),
+            ["every", "ticks"] => (
+                TimerSchedule::Ticks {
+                    every: self.timer_count(s, t, 0, "a logical timer's number of ticks")?,
+                    times: None,
+                },
+                1,
+            ),
+            ["every", "ticks", "times"] => (
+                TimerSchedule::Ticks {
+                    every: self.timer_count(s, t, 0, "a logical timer's number of ticks")?,
+                    times: Some(self.timer_count(s, t, 1, "a timer's `times`")?),
+                },
+                2,
+            ),
+            ["once"] => (TimerSchedule::Once, 0),
+            ["once", "after"] => (TimerSchedule::OnceAfter(self.timer_period(s, t, 0)?), 1),
+            _ => {
+                self.bugs.push(blossom_base::internal_error!(
+                    "a timer declaration of the words {words:?} parsed"
+                ));
                 return None;
             }
-            _ => return None,
         };
-        if every == 0 {
-            self.error(code!("BLS0300"), t.span, "a timer period must be positive");
+        if t.exprs.len() != used {
+            self.bugs.push(blossom_base::internal_error!(
+                "a timer declaration with {} expressions parsed",
+                t.exprs.len()
+            ));
+            return None;
+        }
+        if schedule == TimerSchedule::Once && t.guard.is_some() {
+            self.error(
+                code!("BLS0412"),
+                t.span,
+                "a `once` timer fires in the boot tick, before any guard can hold: it takes no `while`",
+            );
             return None;
         }
         let u64_ty = self.intern_type(TypeDef::Int(blossom_value::types::IntTy::U64), t.span);
@@ -1654,7 +1687,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
         Some(self.add_rel(HRel {
             name: self.qual(s, t.name.name),
             // A `while` guard is resolved once every relation of the scope is known (`timer_guards`).
-            kind: HRelKind::Timer { every, guard: None },
+            kind: HRelKind::Timer { schedule, guard: None },
             cols: vec![
                 HCol {
                     name: Symbol::intern("count"),
@@ -1673,6 +1706,43 @@ impl<'t, 'd> Resolver<'t, 'd> {
             role: placement,
             span: t.name.span,
         }))
+    }
+
+    /// The positive `Duration` that expression `i` of a timer declaration is (its period, or `once after`'s delay), in
+    /// nanoseconds.
+    fn timer_period(&mut self, s: ScopeIdx, t: &'t ast::TimerDecl, i: usize) -> Option<u128> {
+        let e = t.exprs.get(i)?;
+        match self.const_value(s, e, None) {
+            Some((Value::Duration(d), _)) if d.as_nanos() > 0 => Some(d.as_nanos() as u128),
+            Some((Value::Duration(_), _)) => {
+                self.error(code!("BLS0300"), e.span, "a timer period must be positive");
+                None
+            }
+            Some(_) => {
+                self.error(code!("BLS0300"), e.span, "a timer period must be a Duration");
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// The positive integer that expression `i` of a timer declaration is (`what`: a logical timer's ticks, or
+    /// `times`).
+    fn timer_count(&mut self, s: ScopeIdx, t: &'t ast::TimerDecl, i: usize, what: &str) -> Option<u64> {
+        let e = t.exprs.get(i)?;
+        let u64_ty = self.intern_type(TypeDef::Int(blossom_value::types::IntTy::U64), e.span);
+        match self.const_value(s, e, Some(u64_ty)) {
+            Some((Value::Int(blossom_value::value::IntValue::U64(n)), _)) if n > 0 => Some(n),
+            Some((Value::Int(_), _)) => {
+                self.error(code!("BLS0300"), e.span, format!("{what} must be positive"));
+                None
+            }
+            Some(_) => {
+                self.error(code!("BLS0300"), e.span, format!("{what} must be an integer"));
+                None
+            }
+            None => None,
+        }
     }
 
     /// A relation declaration. `root` says whether the scope is the program root (inputs are then host-fed).
