@@ -741,6 +741,33 @@ impl Parser<'_> {
             self.items_block(false);
             return ATSECTION;
         }
+        if self.ctx("tree") && self.nth(1) == IDENT && self.nth(2) == L_CURLY {
+            // `tree NAME { node rel(cols); props rel(cols); content rel(cols); }` (SUGAR.md §3).
+            self.bump();
+            self.name(false);
+            self.expect(L_CURLY);
+            while !self.at(R_CURLY) && !self.at(EOF) {
+                let old = self.pos;
+                let r = self.start();
+                self.name(false);
+                self.relpath();
+                self.expect(L_PAREN);
+                while !self.at(R_PAREN) && !self.at(EOF) {
+                    self.name(true);
+                    if !self.eat(COMMA) {
+                        break;
+                    }
+                }
+                self.expect(R_PAREN);
+                self.expect(SEMI);
+                self.complete(r, TREEROLE);
+                if old == self.pos {
+                    self.bump();
+                }
+            }
+            self.expect(R_CURLY);
+            return TREEITEM;
+        }
         if self.ctx("block") && self.nth(1) == IDENT {
             self.bump();
             self.name(false);
@@ -1493,7 +1520,16 @@ impl Parser<'_> {
             EMIT_KW | NEXT_KW | SEND_KW | DELETE_KW | UPSERT_KW | SEAL_KW => {
                 let verb = self.nth(0);
                 self.bump();
-                self.head();
+                // `emit TREE root…` writes a tree (docs/design/SUGAR.md §3): a tree's name, then an element.
+                let tree = self.nth(0).is_word() && self.tree_after_name();
+                if tree {
+                    let t = self.start();
+                    self.relpath();
+                    self.complete(t, TREENAME);
+                    self.element();
+                } else {
+                    self.head();
+                }
                 if matches!(verb, EMIT_KW | NEXT_KW) && self.eat_ctx("weight") {
                     self.expr(0);
                 }
@@ -1503,7 +1539,14 @@ impl Parser<'_> {
                 if verb == UPSERT_KW && self.eat_ctx("resolve") {
                     self.policy();
                 }
-                self.expect(SEMI);
+                if !tree {
+                    // A head's child heads (SUGAR.md §2), or the statement's end.
+                    if self.at(L_CURLY) {
+                        self.children();
+                    } else {
+                        self.expect(SEMI);
+                    }
+                }
                 VERBSTMT
             }
             IF_KW => {
@@ -1554,6 +1597,173 @@ impl Parser<'_> {
         self.relpath();
         self.args(false);
         self.complete(m, HEAD);
+    }
+    /// After a verb: whether the relation path ahead is followed by an element (a tree statement), not by `(`.
+    fn tree_after_name(&self) -> bool {
+        let mut n = 1;
+        while self.nth(n) == DOT && self.nth(n + 1).is_word() {
+            n += 2;
+        }
+        self.nth(n).is_word()
+    }
+    /// Whether a dashed name (`stroke-width`, `font-face`) starts here and ends just before `end`; the tokens it
+    /// spans, or 0.
+    fn dashed_name(&self, end: &[SyntaxKind]) -> usize {
+        if !self.nth(0).is_word() {
+            return 0;
+        }
+        let mut n = 1;
+        while self.nth(n) == MINUS && self.nth(n + 1).is_word() {
+            n += 2;
+        }
+        if end.contains(&self.nth(n)) { n } else { 0 }
+    }
+    /// A property's name: a dashed name, or a string (`"aria-label"`), before its `:`.
+    fn prop_name(&mut self) -> bool {
+        let n = if self.at(STRING_LIT) && self.nth(1) == COLON {
+            1
+        } else {
+            self.dashed_name(&[COLON])
+        };
+        if n == 0 {
+            return false;
+        }
+        let m = self.start();
+        for _ in 0..n {
+            self.bump();
+        }
+        self.complete(m, PROPNAME);
+        self.expect(COLON);
+        true
+    }
+    /// `{ name: value, … }` after a spread's `..` (SUGAR.md §5).
+    fn record_lit(&mut self) {
+        let m = self.start();
+        self.expect(L_CURLY);
+        while !self.at(R_CURLY) && !self.at(EOF) {
+            let old = self.pos;
+            let f = self.start();
+            if !self.prop_name() {
+                self.error(code!("BLS0100"), "expected `name: value`", &[IDENT]);
+            }
+            self.expr(0);
+            self.complete(f, ARG);
+            if old == self.pos {
+                self.bump();
+            }
+            if !self.eat(COMMA) {
+                break;
+            }
+        }
+        self.expect(R_CURLY);
+        self.complete(m, RECORDLIT);
+    }
+    /// An element of a tree, or a child head (SUGAR.md §§2–3): a name (dashes allowed; a path for a head), then
+    /// optionally `[meta]`, `(arguments)` and `{ children }`; without children it ends with `;`.
+    fn element(&mut self) {
+        let m = self.start();
+        let n = self.start();
+        if self.nth(0).is_word() {
+            self.bump();
+            while (self.at(MINUS) || self.at(DOT)) && self.nth(1).is_word() {
+                self.bump();
+                self.bump();
+            }
+        } else {
+            self.error(code!("BLS0100"), "expected an element or a head", &[IDENT]);
+        }
+        self.complete(n, ELEMNAME);
+        if self.at(L_BRACK) {
+            let meta = self.start();
+            self.bump();
+            while !self.at(R_BRACK) && !self.at(EOF) {
+                let old = self.pos;
+                let a = self.start();
+                if self.nth(0).is_word() && self.nth(1) == COLON {
+                    self.name(true);
+                    self.bump();
+                }
+                self.expr(0);
+                self.complete(a, ARG);
+                if old == self.pos {
+                    self.bump();
+                }
+                if !self.eat(COMMA) {
+                    break;
+                }
+            }
+            self.expect(R_BRACK);
+            self.complete(meta, META);
+        }
+        if self.at(L_PAREN) {
+            self.args(false);
+        }
+        if self.at(L_CURLY) {
+            self.children();
+        } else {
+            self.expect(SEMI);
+        }
+        self.complete(m, ELEMENT);
+    }
+    /// `{ child… }`: elements or child heads, `if`/`for` blocks of them, and content (a bare expression).
+    fn children(&mut self) {
+        let m = self.start();
+        self.expect(L_CURLY);
+        if self.guard() {
+            while !self.at(R_CURLY) && !self.at(EOF) {
+                let old = self.pos;
+                self.child();
+                if old == self.pos {
+                    self.bump();
+                }
+            }
+            self.depth -= 1;
+        }
+        self.expect(R_CURLY);
+        self.complete(m, CHILDREN);
+    }
+    fn child(&mut self) {
+        match self.nth(0) {
+            IF_KW => {
+                let m = self.start();
+                self.bump();
+                self.body(true);
+                self.children();
+                if self.eat(ELSE_KW) {
+                    if self.at(IF_KW) {
+                        self.child();
+                    } else {
+                        self.children();
+                    }
+                }
+                self.complete(m, IFCHILD);
+            }
+            FOR_KW => {
+                let m = self.start();
+                self.bump();
+                self.body(true);
+                self.children();
+                self.complete(m, FORCHILD);
+            }
+            _ if self.element_ahead() => self.element(),
+            _ => {
+                let m = self.start();
+                self.expr(0);
+                self.eat(SEMI);
+                self.complete(m, CONTENT);
+            }
+        }
+    }
+    /// Whether an element starts here: a name (dashed or dotted) followed by `[`, `(`, `{` or `;`.
+    fn element_ahead(&self) -> bool {
+        if !self.nth(0).is_word() {
+            return false;
+        }
+        let mut n = 1;
+        while matches!(self.nth(n), MINUS | DOT) && self.nth(n + 1).is_word() {
+            n += 2;
+        }
+        matches!(self.nth(n), L_BRACK | L_PAREN | L_CURLY)
     }
     fn body(&mut self, no_struct: bool) {
         let m = self.start();
@@ -1762,10 +1972,19 @@ impl Parser<'_> {
                 self.parse_bang_clause();
             } else {
                 let a = self.start();
-                if !self.eat(STAR) && !self.eat(RANGE) {
+                if self.eat(RANGE) {
+                    // `..` alone (a body atom's rest), or a spread: `..{ name: value, … }`, `..map` (SUGAR.md §5).
+                    if !bang && self.at(L_CURLY) {
+                        self.record_lit();
+                    } else if !bang && !self.at(R_PAREN) && !self.at(COMMA) {
+                        self.expr(0);
+                    }
+                } else if !self.eat(STAR) {
                     if !bang && self.nth(0).is_word() && self.nth(1) == COLON {
                         self.name(true);
                         self.bump();
+                    } else if !bang {
+                        self.prop_name();
                     }
                     self.expr(0);
                 }

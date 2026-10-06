@@ -519,6 +519,30 @@ pub enum SyntaxKind {
     FSTRINGEXPR,
     /// fstringhole.
     FSTRINGHOLE,
+    /// propname.
+    PROPNAME,
+    /// recordlit.
+    RECORDLIT,
+    /// treename.
+    TREENAME,
+    /// element.
+    ELEMENT,
+    /// elemname.
+    ELEMNAME,
+    /// meta.
+    META,
+    /// children.
+    CHILDREN,
+    /// ifchild.
+    IFCHILD,
+    /// forchild.
+    FORCHILD,
+    /// content.
+    CONTENT,
+    /// treeitem.
+    TREEITEM,
+    /// treerole.
+    TREEROLE,
 }
 impl SyntaxKind {
     /// All kinds, in their wire/discriminant order.
@@ -784,6 +808,18 @@ impl SyntaxKind {
         Self::FSTRING_END,
         Self::FSTRINGEXPR,
         Self::FSTRINGHOLE,
+        Self::PROPNAME,
+        Self::RECORDLIT,
+        Self::TREENAME,
+        Self::ELEMENT,
+        Self::ELEMNAME,
+        Self::META,
+        Self::CHILDREN,
+        Self::IFCHILD,
+        Self::FORCHILD,
+        Self::CONTENT,
+        Self::TREEITEM,
+        Self::TREEROLE,
     ];
     /// Whether this token is trivia.
     pub fn is_trivia(self) -> bool {

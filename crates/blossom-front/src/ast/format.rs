@@ -380,9 +380,10 @@ fn same_type(a: &Type, b: &Type) -> bool {
 fn children(e: &Expr) -> Vec<&Expr> {
     fn args(args: &[Arg]) -> Vec<&Expr> {
         args.iter()
-            .filter_map(|a| match a {
-                Arg::Pos(x) | Arg::Named(_, x) => Some(x),
-                Arg::Rest(_) | Arg::Star(_) => None,
+            .flat_map(|a| match a {
+                Arg::Pos(x) | Arg::Named(_, x) | Arg::Spread(Spread::Expr(x, _)) => vec![x],
+                Arg::Spread(Spread::Record(fields, _)) => fields.iter().map(|(_, x)| x).collect(),
+                Arg::Rest(_) | Arg::Star(_) => Vec::new(),
             })
             .collect()
     }

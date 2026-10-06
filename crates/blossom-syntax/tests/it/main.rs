@@ -366,3 +366,45 @@ fn interpolated_strings_lex_into_text_and_holes() {
     assert_code(r#"const S: String = f"a{x"#, "BLS0002");
     assert_code(r#"const S: String = f"a}b";"#, "BLS0005");
 }
+#[test]
+fn trees_child_heads_and_spreads_parse() {
+    // docs/design/SUGAR.md §§2, 3, 5.
+    let source = r#"tree html { node elem(id, parent, pos, tag); props attr(id, name, value); content text(id, s); }
+page: while screen(s), bird(y, v) {
+    emit html svg[id: "game"](viewBox: "10 0 80 100", width: 480, stroke-width: 0.5, "aria-label": "x") {
+        rect(x: 0);
+        g[key: k, pos: 2](transform: f"t({y})") { ellipse(rx: 5); }
+        if s == "game" { text[id: "score"](x: 50) { n } } else if s == "menu" { text(x: 1) { "menu" } } else { text(x: 1) { "over"; } }
+        for obstacle_at(k, x, h) { g[key: k] { rect(width: 10); } }
+        font-face(x: 1);
+        br();
+    }
+    emit html br();
+    emit order(id: o, customer: c) { line(sku: "a", qty: 2); if b { line(sku: "b", qty: x - y); } }
+    emit attr("x", ..{rx: 5, fill-opacity: 0.5});
+    emit header(r, ..m);
+    emit plain(a - b, c);
+}
+"#;
+    let p = parser::parse(FileId::from_raw(0), source);
+    assert!(p.errors.is_empty(), "{:?}", p.errors);
+    assert_eq!(p.syntax().to_string(), source);
+    let kinds: std::collections::BTreeSet<_> = p.syntax().descendants().map(|n| n.kind()).collect();
+    use blossom_syntax::SyntaxKind as K;
+    for k in [
+        K::TREEITEM,
+        K::TREEROLE,
+        K::TREENAME,
+        K::ELEMENT,
+        K::ELEMNAME,
+        K::META,
+        K::CHILDREN,
+        K::IFCHILD,
+        K::FORCHILD,
+        K::CONTENT,
+        K::PROPNAME,
+        K::RECORDLIT,
+    ] {
+        assert!(kinds.contains(&k), "no {k:?}");
+    }
+}

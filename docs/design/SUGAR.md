@@ -70,14 +70,14 @@ tree html {
 
 ```blossom
 page: while screen(s), bird(y, v), score(n) {
-    emit html svg#game(viewBox: "10 0 80 100", width: 480) {
-        rect#sky(x: 0, y: 0, width: 100, height: 95, fill: SKY);
-        g#bird(transform: f"translate({X} {y}) rotate({tilt(v)})") {
+    emit html svg[id: "game"](viewBox: "10 0 80 100", width: 480) {
+        rect[id: "sky"](x: 0, y: 0, width: 100, height: 95, fill: SKY);
+        g[id: "bird"](transform: f"translate({X} {y}) rotate({tilt(v)})") {
             ellipse(rx: 5, ry: 4.2, fill: YELLOW);
             circle(cx: 2.2, cy: -1.5, r: 1.5, fill: "white");
         }
         if s == "game" {
-            text#score(x: 50, y: 14) { n }
+            text[id: "score"](x: 50, y: 14) { n }
         }
         for obstacle_at(k, x, h) {
             g[key: k](transform: f"translate({x} 0)") { rect(width: 10, height: h); }
@@ -86,16 +86,16 @@ page: while screen(s), bird(y, v), score(n) {
 }
 ```
 
-- An element is `KIND` (an identifier; `-` is allowed inside it, as in `foreignObject`'s cousins `font-face`),
-  then optionally `#name` (a literal id) or `#(expr)` (a computed id), then optionally `[key: e]` and `[pos: e]`, then
-  optionally `(name: value, …)` properties, then optionally `{ … }` children.
+- An element is `KIND` (an identifier; `-` is allowed inside it, as in `font-face`), then optionally `[…]` with
+  `id: e`, `key: e` and `pos: e`, then optionally `(name: value, …)` properties, then `{ … }` children or `;`. (Not
+  `#id`: `#` starts a comment, LANGUAGE §2.2, kept for pasted Dedalus.)
 - **Children** are elements, `if`/`for` blocks, fragment calls (§4) and content: a bare expression (`{ n }`, `{ "Hi" }`,
   `{ f"Score {n}" }`), which becomes the content row (at most one per element).
 - **Parent and position.** A child's parent is the enclosing element's id (the root's is `""`, the mount point). Its
   position is its slot: the index of the child (or of the block or call it is in) among its siblings, counting from
   0, unless `[pos: e]` gives it. Siblings with one position order by id, so the children of a `for` that need an
   order give `[pos: …]`.
-- **Ids.** `#name` and `#(expr)` give an id. Otherwise the id is derived: the parent's id, `/`, the kind, `.`, the
+- **Ids.** `[id: e]` gives an id. Otherwise the id is derived: the parent's id, `/`, the kind, `.`, the
   slot, and `[k]` with `[key: k]` (`game/g.4[0]/rect.0`). An element without an id or a key inside a `for` block is an
   error (BLS0430: its rows would repeat one id), as is a key on an element outside one that has an id (BLS0431).
 - **Properties** are rows of the props relation: one per `name: value`, the value converted with `to_string` (as an

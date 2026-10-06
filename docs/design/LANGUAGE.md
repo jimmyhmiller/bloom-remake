@@ -348,7 +348,8 @@ ItemKind        = UseItem | ImportItem | IncludeItem | ConstItem | ParamItem
                 | RelDecl | CellDecl | TimerDecl | ViewDecl | HandlerItem
                 | BootstrapItem | FactItem | InvariantItem
                 | InterposeItem | BlockItem | OverrideItem | AclItem
-                | SnapshotItem | MigrateItem | TranslateItem | SpecItem ;
+                | SnapshotItem | MigrateItem | TranslateItem | SpecItem | TreeItem ;
+TreeItem        = 'tree' IDENT "{" { IDENT RelPath "(" IDENT { "," IDENT } ")" ";" } "}" ;  (* §8.2 *)
 
 UseItem         = "use" UseTree ";" ;
 UseTree         = IDENT { "::" IDENT }
@@ -452,15 +453,22 @@ ViewCol         = IDENT [ ":" Type ] [ "=" Expr ] ;                   (* the Exp
 HandlerItem     = [ IDENT ":" ] [ 'monotone' ] ( "on" | "while" ) Body⁰ Block ;
 Block           = "{" { Stmt } "}" ;
 Stmt            = OuterAttrs ( VerbStmt | IfStmt | ForStmt ) ;
-VerbStmt        = "emit" Head [ 'weight' Expr ] ";"
-                | "next" Head [ 'weight' Expr ] ";"
-                | "send" Head [ 'to' Expr ] ";"
-                | "delete" Head ";"
-                | "upsert" Head [ 'resolve' Policy ] ";"
+VerbStmt        = "emit" Target [ 'weight' Expr ] End
+                | "next" Target [ 'weight' Expr ] End
+                | "send" Target [ 'to' Expr ] End
+                | "delete" Target End
+                | "upsert" Target [ 'resolve' Policy ] End
                 | "seal" Head [ 'to' Expr ] ";" ;
+Target          = Head | RelPath Element ;                            (* the second: a tree statement, §8.2 *)
+End             = ";" | Children ;                                    (* a tree statement's element ends itself *)
 IfStmt          = "if" Body⁰ Block [ "else" ( IfStmt | Block ) ] ;
 ForStmt         = "for" Body⁰ Block ;
 Head            = RelPath "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+Element         = ElemName [ "[" [ Arg { "," Arg } ] "]" ] [ "(" [ Arg { "," Arg } [ "," ] ] ")" ] ( Children | ";" ) ;
+ElemName        = IDENT { ( "-" | "." ) IDENT } ;                     (* `font-face`; `a.rel` for a child head *)
+Children        = "{" { Element | ChildIf | ChildFor | Expr [ ";" ] } "}" ;   (* the Expr: content *)
+ChildIf         = "if" Body⁰ Children [ "else" ( ChildIf | Children ) ] ;
+ChildFor        = "for" Body⁰ Children ;
 BootstrapItem   = "bootstrap" [ 'fresh' ] Block ;
 FactItem        = 'fact' Head [ "@" Expr ] [ 'from' Expr ] [ 'at' 'tick' Expr ] ";" ;
 InvariantItem   = "invariant" IDENT [ STRING_LIT ] ":" 'never' Body ";" ;
@@ -514,7 +522,9 @@ FieldInit       = FieldName ":" Expr | FieldName | ".." Expr ;
 FoldName        = 'lset' | 'lmax' | 'lmin' | 'lbool' | 'lmap' | 'lbag' | 'lpset' ;
 MatchArm        = Expr [ "if" Expr ] "=>" Expr ;                      (* the first Expr is a pattern *)
 Args            = [ Arg { "," Arg } [ "," ] ] ;
-Arg             = ".." | FieldName ":" Expr | "*" | Expr ;
+Arg             = ".." [ Expr | Record ] | ( FieldName | PropName ) ":" Expr | "*" | Expr ;
+Record          = "{" [ ( FieldName | PropName ) ":" Expr { "," ( FieldName | PropName ) ":" Expr } [ "," ] ] "}" ;
+PropName        = IDENT { "-" IDENT } | STRING_LIT ;                  (* `stroke-width`, `"aria-label"` *)
 BangArgs        = [ BangArg { "," BangArg } ] { BangClause } ;
 BangArg         = "*" | Expr ;
 BangClause      = 'per' Expr | 'by' OrderKeys | 'default' Expr | 'least' Expr | 'most' Expr
@@ -1343,6 +1353,26 @@ statements inside; they differ only in intent (`for` usually binds new variables
 nested block is lowered to its own relation (`H$if#…`, `H$for#…`). `else` is legal only when the `if` body is a
 single scalar guard over already-bound variables, with no atom, lattice operand or bang (BLS0409): its negation is
 then a selection, not an anti-join. Write `if not r(x) { … }` for the relational case.
+
+**Child heads, spreads and trees** (S16; docs/design/SUGAR.md has the rationale and examples). Sugar for writing
+many related rows; each lowers to ordinary statements of the statement's verb in the enclosing block, so nothing
+else in the language sees it.
+
+- *Child heads.* `emit order(id: o, customer: c) { line(sku: s, qty: 2); }`: the block after a head holds child heads
+  (named arguments; `if`/`for` blocks of them; more children). A child inherits, from its enclosing heads (nearest
+  first), every column it does not give whose name and type match one of theirs; a column neither given nor
+  inherited is BLS0303. Positional arguments in a child head are BLS0303.
+- *Spreads.* `..{name: value, …}` as a head's last argument writes one row per field into the relation's last two
+  columns (a `String` name, a value); `..m` (a `Map<String, T>`) one row per entry. A value is converted with
+  `to_string` when the column is a `String`.
+- *Trees.* `tree T { node r(id, parent, pos, kind); props p(id, name, value); content c(id, value); }` names the
+  relations a tree is written to, their columns in each role's order (BLS0434 when the shapes do not fit: ids of one
+  type, an integer position). `emit T kind[meta](props) { children }` then writes elements: a node row each (its
+  parent the enclosing element's id, `""` at the root; its position its slot among its siblings, counting through
+  `if` blocks, or `[pos: e]`), a props row per property (dashed or string names allowed, values converted with
+  `to_string` into a `String` column), and a content row for a bare-expression child (at most one). An element's id
+  is `[id: e]`, else derived: the parent's id, `/`, the kind, `.`, the slot, and `[k]` with `[key: k]`. An element
+  inside a `for` with neither an id nor a key is BLS0430; a key beside an id BLS0431.
 
 **No `let` statements.** A `let` is a body literal and belongs in the header or in an `if`/`for` body
 (`on timed_out(t), let nt = t + 1 { … }`). A `let` statement is BLS0102. This keeps blocks from reading as

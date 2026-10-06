@@ -125,6 +125,8 @@ pub enum ItemKind {
     },
     /// `format …` (LANGUAGE §16.7): replaced, once includes are expanded, by a struct and its functions (`format`).
     Format(FormatItem),
+    /// `tree NAME { node rel(cols); props rel(cols); content rel(cols); }` (docs/design/SUGAR.md §3).
+    Tree(TreeDecl),
     /// A construct this build parses but does not accept yet; the converter has already reported it (BLS0908).
     Unsupported {
         what: &'static str,
@@ -485,10 +487,71 @@ impl Verb {
 pub struct VerbStmt {
     pub attrs: Vec<Attr>,
     pub verb: Verb,
+    /// The head; in a tree statement, the tree's name (with no arguments).
     pub head: Head,
     pub to: Option<Expr>,
     pub weight: Option<Expr>,
     pub resolve: Option<Policy>,
+    /// The head's child heads (docs/design/SUGAR.md §2).
+    pub children: Vec<Child>,
+    /// A tree statement's root element (SUGAR.md §3).
+    pub tree: Option<Box<Element>>,
+    /// For a statement the sugar wrote: what in the sugared statement it stands for, so its rule's label is its own.
+    pub tag: Option<String>,
+    pub span: Span,
+}
+
+/// A child of a head or of a tree element (docs/design/SUGAR.md §§2–3).
+#[derive(Clone, Debug)]
+pub enum Child {
+    /// A child head, or a tree element (or, in a tree, a fragment call: decided by name).
+    Element(Element),
+    If {
+        cond: Body,
+        then: Vec<Child>,
+        els: Option<Box<ChildElse>>,
+        span: Span,
+    },
+    For {
+        cond: Body,
+        children: Vec<Child>,
+        span: Span,
+    },
+    /// A bare expression: an element's content.
+    Content(Expr),
+}
+
+#[derive(Clone, Debug)]
+pub enum ChildElse {
+    Children(Vec<Child>),
+    If(Box<Child>),
+}
+
+/// `kind[meta](args) { children }` in a tree; `rel(args) { children }` as a child head.
+#[derive(Clone, Debug)]
+pub struct Element {
+    /// A relation path (a child head), or one element kind (dashes kept: `font-face`).
+    pub name: Vec<Ident>,
+    pub meta: Vec<Arg>,
+    pub args: Vec<Arg>,
+    pub children: Vec<Child>,
+    pub span: Span,
+}
+
+/// A `tree` declaration: the relations a tree's nodes, properties and content are rows of.
+#[derive(Clone, Debug)]
+pub struct TreeDecl {
+    pub name: Ident,
+    pub roles: Vec<TreeRole>,
+    pub span: Span,
+}
+
+/// `node elem(id, parent, pos, tag);`: a role, its relation, and that relation's columns named in the role's order.
+#[derive(Clone, Debug)]
+pub struct TreeRole {
+    pub role: Ident,
+    pub rel: Vec<Ident>,
+    pub cols: Vec<Ident>,
     pub span: Span,
 }
 
@@ -627,6 +690,14 @@ pub enum Arg {
     Named(Ident, Expr),
     Rest(Span),
     Star(Span),
+    /// `..{ name: value, … }` or `..map` in a head: one row per field or entry (docs/design/SUGAR.md §5).
+    Spread(Spread),
+}
+
+#[derive(Clone, Debug)]
+pub enum Spread {
+    Record(Vec<(Ident, Expr)>, Span),
+    Expr(Expr, Span),
 }
 
 impl Arg {
@@ -635,6 +706,7 @@ impl Arg {
             Arg::Pos(e) => e.span,
             Arg::Named(n, e) => n.span.to(e.span).unwrap_or(n.span),
             Arg::Rest(s) | Arg::Star(s) => *s,
+            Arg::Spread(Spread::Record(_, s) | Spread::Expr(_, s)) => *s,
         }
     }
 }

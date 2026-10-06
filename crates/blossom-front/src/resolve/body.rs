@@ -841,7 +841,7 @@ impl<'t> Resolver<'t, '_> {
             for a in args {
                 match a {
                     Arg::Pos(p) | Arg::Named(_, p) => self.declare_pattern(cx, p),
-                    Arg::Rest(_) | Arg::Star(_) => {}
+                    Arg::Rest(_) | Arg::Star(_) | Arg::Spread(_) => {}
                 }
             }
         }
@@ -1284,6 +1284,10 @@ impl<'t> Resolver<'t, '_> {
                         self.error(code!("BLS0302"), *s, "`*` is not an atom argument");
                         return None;
                     }
+                    Arg::Spread(_) => {
+                        self.error(code!("BLS0302"), a.span(), "a spread is not an atom argument");
+                        return None;
+                    }
                     Arg::Named(..) | Arg::Rest(_) => return None,
                 }
             }
@@ -1314,6 +1318,10 @@ impl<'t> Resolver<'t, '_> {
                 }
                 Arg::Star(s) => {
                     self.error(code!("BLS0302"), *s, "`*` is not an atom argument");
+                    return None;
+                }
+                Arg::Spread(_) => {
+                    self.error(code!("BLS0302"), a.span(), "a spread is not an atom argument");
                     return None;
                 }
             };
@@ -2762,6 +2770,12 @@ impl<'t> Resolver<'t, '_> {
         let mut out = Vec::new();
         for st in stmts {
             match st {
+                Stmt::Verb(v) if Self::sugared(v) => {
+                    // Child heads, spreads and trees (docs/design/SUGAR.md): plain statements, resolved as written.
+                    if let Some(plain) = self.expand(cx, v) {
+                        out.extend(self.stmts(cx, &plain));
+                    }
+                }
                 Stmt::Verb(v) => {
                     if let Some(h) = self.verb_stmt(cx, v) {
                         out.push(HStmt::Verb(h));
@@ -2964,7 +2978,10 @@ impl<'t> Resolver<'t, '_> {
             to,
             allow_self_negation,
             rank,
-            text: self.normalized(v.span),
+            text: match &v.tag {
+                Some(tag) => format!("{} {tag}", self.normalized(v.span)),
+                None => self.normalized(v.span),
+            },
             span: v.span,
         })
     }

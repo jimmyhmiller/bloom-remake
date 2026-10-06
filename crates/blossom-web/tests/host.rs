@@ -705,3 +705,96 @@ fn flappy_with_an_autopilot_passes_obstacles_and_hits_one_without_it() {
     assert_eq!(shown_text(&dom, "over").as_deref(), Some("Game Over"));
     assert!(last_y < 85.0, "it hit the ground at {last_y}, not an obstacle");
 }
+
+/// A program from `body` with the page interface.
+#[cfg(test)]
+fn app_of(name: &str, body: &str) -> App {
+    let mut files = files();
+    files.insert(
+        format!("{name}.bls"),
+        format!("program {name} version 1;\ninclude \"ui.bls\";\n{body}"),
+    );
+    let compiled = compile(&format!("{name}.bls"), &files).unwrap_or_else(|d| {
+        panic!(
+            "{name}:\n{}",
+            d.iter().map(|d| d.rendered.clone()).collect::<Vec<_>>().join("\n")
+        )
+    });
+    App::new(compiled, blossom_value::Seed::from_u64(0)).unwrap()
+}
+
+#[test]
+fn the_sugar_draws_the_page_the_plain_rows_draw() {
+    // docs/design/SUGAR.md: a tree literal, a child head inheriting its parent's id, and a spread, against the same
+    // page written as plain rows (derived ids and slots spelled out).
+    let state = "table todo(n: u64, title: String) key(n);\n\
+                 view total(k = count!(n default 0u64)) = todo(n, _);\n\
+                 init: on boot() { upsert todo(1, \"milk\"); upsert todo(2, \"eggs\"); }\n";
+    let sugar = format!(
+        "{state}page: while total(k) {{\n\
+             emit html section[id: \"app\"](class: \"todoapp\", data-count: k) {{\n\
+                 h1 {{ \"todos\" }}\n\
+                 ul[id: \"list\"] {{ for todo(n, t) {{ li[key: n, pos: n as i64](class: \"item\") {{ t }} }} }}\n\
+                 footer {{ f\"{{k}} left\" }}\n\
+             }}\n\
+             emit elem(id: \"x\", parent: \"\", pos: 1, tag: \"p\") {{ attr(name: \"title\", value: \"hi\"); text(s: \"x\"); }}\n\
+             emit attr(\"x\", ..{{lang: \"en\", tabindex: 3}});\n\
+         }}\n"
+    );
+    let plain = format!(
+        "{state}page: while total(k) {{\n\
+             emit elem(\"app\", \"\", 0, \"section\");\n\
+             emit attr(\"app\", \"class\", \"todoapp\");\n\
+             emit attr(\"app\", \"data-count\", k.to_string());\n\
+             emit elem(\"app/h1.0\", \"app\", 0, \"h1\");\n\
+             emit text(\"app/h1.0\", \"todos\");\n\
+             emit elem(\"list\", \"app\", 1, \"ul\");\n\
+             emit elem(\"app/footer.2\", \"app\", 2, \"footer\");\n\
+             emit text(\"app/footer.2\", k.to_string() ++ \" left\");\n\
+             emit elem(\"x\", \"\", 1, \"p\");\n\
+             emit attr(\"x\", \"title\", \"hi\");\n\
+             emit text(\"x\", \"x\");\n\
+             emit attr(\"x\", \"lang\", \"en\");\n\
+             emit attr(\"x\", \"tabindex\", \"3\");\n\
+         }}\n\
+         items: while todo(n, t) {{\n\
+             emit elem(\"list/li.0[\" ++ n.to_string() ++ \"]\", \"list\", n as i64, \"li\");\n\
+             emit attr(\"list/li.0[\" ++ n.to_string() ++ \"]\", \"class\", \"item\");\n\
+             emit text(\"list/li.0[\" ++ n.to_string() ++ \"]\", t);\n\
+         }}\n"
+    );
+    let mut a = app_of("sugar", &sugar);
+    let mut b = app_of("plain", &plain);
+    let pa = a.start(None, "", T0).unwrap().patches;
+    let pb = b.start(None, "", T0).unwrap().patches;
+    assert!(!pa.is_empty());
+    assert_eq!(a.page(), b.page());
+    assert_eq!(pa, pb);
+}
+
+#[test]
+fn a_map_spread_draws_a_row_per_entry() {
+    let state = "table seen(n: u64) key();\ninit: on boot() { upsert seen(5); }\n";
+    let mut a = app_of(
+        "spread",
+        &format!(
+            "{state}page: while seen(k), let m = map[\"data-a\" => k, \"data-b\" => 7u64] {{\n\
+                 emit elem(\"x\", \"\", 0, \"p\");\n\
+                 emit attr(\"x\", ..m);\n\
+             }}\n"
+        ),
+    );
+    let mut b = app_of(
+        "spread_plain",
+        &format!(
+            "{state}page: while seen(k) {{\n\
+                 emit elem(\"x\", \"\", 0, \"p\");\n\
+                 emit attr(\"x\", \"data-a\", k.to_string());\n\
+                 emit attr(\"x\", \"data-b\", \"7\");\n\
+             }}\n"
+        ),
+    );
+    a.start(None, "", T0).unwrap();
+    b.start(None, "", T0).unwrap();
+    assert_eq!(a.page(), b.page());
+}
