@@ -2,7 +2,8 @@
 //!
 //! The todos live in a durable table, so a reload continues where it was; everything on the page is derived from
 //! the state every round, Eve style: the rules below say what the page is, not how to change it. Events arrive as
-//! inputs (`ui.bls`); a handler matches them to a todo by its element's id (`toggle-3` is todo 3's checkbox).
+//! inputs (`ui.bls`); a handler finds the todo an event's element belongs to through a view from element ids to todos
+//! (`toggle-3` is todo 3's checkbox), which the engine keeps as todos come and go and looks up by the id.
 //! The markup and classes are TodoMVC's template, for its stylesheet.
 
 program todomvc version 1;
@@ -31,6 +32,10 @@ view typed_now(s) {
     draft(s);
     not draft(_), let s = "";
 }
+/// Each todo's checkbox, delete button and label, by element id.
+view toggle_of(id, n) = todos(n, _, _), let id = f"toggle-{n}";
+view destroy_of(id, n) = todos(n, _, _), let id = f"destroy-{n}";
+view label_of(id, n) = todos(n, _, _), let id = f"label-{n}";
 view is_editing(n, e) {
     editing(n), let e = true;
     todos(n, _, _), not editing(n), let e = false;
@@ -87,7 +92,7 @@ add: on keydown(id, key, value), next_id(n) where id == "new-todo" && key == "En
     upsert draft("");
 }
 
-toggle: on change(id, checked), todos(n, title, _done) where id == f"toggle-{n}" {
+toggle: on change(id, checked), toggle_of(id, n), todos(n, title, _done) {
     upsert todos(n, title, checked);
 }
 
@@ -95,7 +100,7 @@ toggle_all: on change(id, checked), todos(n, title, _done) where id == "toggle-a
     upsert todos(n, title, checked);
 }
 
-destroy: on click(id), todos(n, title, done) where id == f"destroy-{n}" {
+destroy: on click(id), destroy_of(id, n), todos(n, title, done) {
     delete todos(n, title, done);
 }
 
@@ -103,7 +108,7 @@ clear_completed: on click(id), todos(n, title, done) where id == "clear-complete
     delete todos(n, title, done);
 }
 
-start_edit: on dblclick(id), todos(n, _title, _done) where id == f"label-{n}" {
+start_edit: on dblclick(id), label_of(id, n), todos(n, _title, _done) {
     upsert editing(n);
 }
 

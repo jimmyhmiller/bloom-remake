@@ -133,6 +133,7 @@ const INPUTS: [(&str, &[&str]); 8] = [
 ];
 
 /// A program compiled for the browser.
+#[derive(Clone)]
 pub struct Compiled {
     artifact: BlsArtifact,
     /// The page outputs the program declares (missing ones are empty), by name.
@@ -357,6 +358,28 @@ impl App {
         })
     }
 
+    /// The rounds run so far.
+    pub fn rounds(&self) -> u64 {
+        self.tick
+    }
+
+    /// Each rule's work since the program was created, by rule label (the rules that did any): rows its probes
+    /// returned, expression nodes evaluated, rows written (`blossom_engine::Engine::work_by_rule`).
+    pub fn work_by_rule(&self) -> Vec<(Arc<str>, blossom_ir::tick::RuleWork)> {
+        let program = self.compiled.artifact.program.get();
+        self.engine
+            .work_by_rule()
+            .iter()
+            .map(|(id, w)| {
+                let label = program
+                    .rules
+                    .get(*id)
+                    .map_or_else(|| Arc::from(format!("rule {}", id.index())), |r| r.label.text.clone());
+                (label, *w)
+            })
+            .collect()
+    }
+
     /// Whether the program has physical timers: the page then runs a clock and calls [`App::advance`].
     pub fn clocked(&self) -> bool {
         self.compiled
@@ -390,13 +413,13 @@ impl App {
             }
             None => Instance::default(),
         };
+        self.history.reset(carried.clone());
         self.engine.reset(carried).map_err(|e| HostError::Round {
             tick: 0,
             error: e.to_string(),
         })?;
         self.tick = 0;
         self.page = Page::default();
-        self.history.clear();
         self.now = now;
         self.timers = Some(
             TimerTable::new(self.compiled.artifact.program.get(), None, now).map_err(|e| HostError::Round {
@@ -459,7 +482,6 @@ impl App {
     /// Runs a round with `events`, then rounds without events while the state changes (a write takes effect in the
     /// next round, LANGUAGE §7: the page shows an event's effects once they settle), at most [`SETTLE`] of them.
     fn settle(&mut self, events: &[(RelId, Row)]) -> Result<Vec<Patch>, HostError> {
-        let before = self.page.clone();
         let mut changed = self.round(events)?;
         let mut quiet_rounds = 0;
         while changed {
@@ -469,7 +491,7 @@ impl App {
             changed = self.round(&[])?;
             quiet_rounds += 1;
         }
-        Ok(before.diff(&self.page))
+        Ok(self.page.take_patches())
     }
 
     /// Runs one round with `events` and the timers' firings due by now (every round is a tick the timers count),
@@ -486,9 +508,8 @@ impl App {
         };
         let events: Vec<(RelId, Row)> = firings.into_iter().chain(events.iter().cloned()).collect();
         let events = events.as_slice();
-        let before = self.engine.carried_instance();
-        let guards: Vec<RelId> = self.timers.iter().flat_map(|t| t.guards()).collect();
-        let observe: Vec<RelId> = self.compiled.outputs.values().copied().chain(guards).collect();
+        // The page takes its outputs' changes; the timers' guards are read whole.
+        let observe: Vec<RelId> = self.timers.iter().flat_map(|t| t.guards()).collect();
         let out = self
             .engine
             .step(
@@ -518,7 +539,6 @@ impl App {
         self.history.push(why::Round {
             tick,
             now,
-            before,
             events: events.to_vec(),
             inserted: out
                 .changes
@@ -526,15 +546,22 @@ impl App {
                 .iter()
                 .flat_map(|(rel, rows)| rows.iter().map(|r| (*rel, Arc::clone(r))))
                 .collect(),
+            changes: out.changes.clone(),
         });
-        let rows = |name: &str| -> &[Row] {
+        let changes = |name: &str| -> (Vec<Row>, Vec<Row>) {
             self.compiled
                 .outputs
                 .get(name)
-                .and_then(|r| out.observed.get(r))
-                .map_or(&[], Vec::as_slice)
+                .map(|r| self.engine.changes_of(*r))
+                .unwrap_or_default()
         };
-        self.page = Page::of(rows("elem"), rows("attr"), rows("text"), rows("focus"))?;
+        let delta = page::Delta {
+            elem: changes("elem"),
+            attr: changes("attr"),
+            text: changes("text"),
+            focus: changes("focus"),
+        };
+        self.page.apply(&delta)?;
         Ok(!out.changes.inserted.is_empty() || !out.changes.deleted.is_empty())
     }
 
