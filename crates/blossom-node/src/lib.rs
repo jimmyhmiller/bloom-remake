@@ -50,6 +50,15 @@ pub enum NodeError {
     Internal(#[from] InternalError),
 }
 
+impl From<blossom_ir::timers::TimerError> for NodeError {
+    fn from(e: blossom_ir::timers::TimerError) -> NodeError {
+        match e {
+            blossom_ir::timers::TimerError::Unimplemented(u) => NodeError::Unimplemented(u),
+            blossom_ir::timers::TimerError::Internal(i) => NodeError::Internal(i),
+        }
+    }
+}
+
 /// A tick that failed: it commits and releases nothing, and the node is faulted.
 #[derive(Debug, thiserror::Error)]
 #[error("tick {} failed: {error}", .tick.0)]

@@ -22,6 +22,7 @@ pub mod plan;
 pub mod polarity;
 pub mod spec;
 pub mod tick;
+pub mod timers;
 pub mod strata;
 
 mod canonical;
