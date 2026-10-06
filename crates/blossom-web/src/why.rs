@@ -124,6 +124,7 @@ impl<'a> Explainer<'a> {
         program: &'a Program,
         oracle: blossom_ir::ValidatedProgram,
         roles: Vec<Option<blossom_base::RoleId>>,
+        seed: blossom_value::Seed,
         history: &'a History,
     ) -> Result<Explainer<'a>, HostError> {
         let fail = |e: blossom_oracle::OracleError| HostError::Round {
@@ -137,6 +138,8 @@ impl<'a> Explainer<'a> {
         )
         .map_err(fail)?
         .with_roles(roles)
+        .with_seed(seed)
+        .map_err(fail)?
         .with_node_names(vec![Arc::from("app")])
         .map_err(fail)?;
         Ok(Explainer {
