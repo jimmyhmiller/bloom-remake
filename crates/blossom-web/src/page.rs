@@ -14,6 +14,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use blossom_base::det::DetMap;
+
 use blossom_ir::tick::Row;
 use blossom_value::Value;
 use blossom_value::value::IntValue;
@@ -58,16 +60,18 @@ struct Journal {
 /// A page: what the program's outputs hold at the end of a round.
 #[derive(Clone, Debug, Default)]
 pub struct Page {
-    elems: BTreeMap<Text, Elem>,
-    attrs: BTreeMap<(Text, Text), Text>,
-    texts: BTreeMap<Text, Text>,
+    // Hashed by id (no order is read from them: the journal and each parent's children are ordered).
+    elems: DetMap<Text, Elem>,
+    /// Each element's attributes, by name (an element with none has no entry).
+    attrs: DetMap<Text, BTreeMap<Text, Text>>,
+    texts: DetMap<Text, Text>,
     focus: BTreeSet<Text>,
     /// The rows the outputs hold, by id: a page is well formed when each holds at most one.
-    elem_rows: BTreeMap<Text, BTreeSet<ElemRow>>,
-    attr_rows: BTreeMap<(Text, Text), BTreeSet<Text>>,
-    text_rows: BTreeMap<Text, BTreeSet<Text>>,
+    elem_rows: DetMap<Text, BTreeSet<ElemRow>>,
+    attr_rows: DetMap<(Text, Text), BTreeSet<Text>>,
+    text_rows: DetMap<Text, BTreeSet<Text>>,
     /// Each parent's children, by position then id (a parent with none has no entry).
-    kids: BTreeMap<Text, BTreeSet<(i64, Text)>>,
+    kids: DetMap<Text, BTreeSet<(i64, Text)>>,
     /// What a round left ill formed, checked again in the next (as a whole-page check would).
     recheck_elems: BTreeSet<Text>,
     recheck_attrs: BTreeSet<(Text, Text)>,
@@ -157,7 +161,7 @@ fn focus_row(row: &Row) -> Result<Text, HostError> {
 }
 
 /// Adds or removes `row` from the set under `key`, dropping an empty set.
-fn edit<K: Ord + Clone, V: Ord>(map: &mut BTreeMap<K, BTreeSet<V>>, key: &K, value: V, add: bool) {
+fn edit<K: std::hash::Hash + Eq + Clone, V: Ord>(map: &mut DetMap<K, BTreeSet<V>>, key: &K, value: V, add: bool) {
     if add {
         map.entry(key.clone()).or_default().insert(value);
     } else if let Some(set) = map.get_mut(key) {
@@ -331,15 +335,23 @@ impl Page {
                     continue;
                 }
             };
-            if self.attrs.get(&key) != next.as_ref() {
-                self.journal
-                    .attrs
-                    .entry(key.clone())
-                    .or_insert_with(|| self.attrs.get(&key).cloned());
+            if self.attr(&key.0, &key.1) != next.as_ref() {
+                let old = self.attr(&key.0, &key.1).cloned();
+                self.journal.attrs.entry(key.clone()).or_insert(old);
+                let (id, name) = key;
                 match next {
-                    Some(v) => self.attrs.insert(key, v),
-                    None => self.attrs.remove(&key),
-                };
+                    Some(v) => {
+                        self.attrs.entry(id).or_default().insert(name, v);
+                    }
+                    None => {
+                        if let Some(names) = self.attrs.get_mut(&id) {
+                            names.remove(&name);
+                            if names.is_empty() {
+                                self.attrs.remove(&id);
+                            }
+                        }
+                    }
+                }
             }
         }
         for id in texts {
@@ -376,6 +388,11 @@ impl Page {
             Some(e) => Err(e),
             None => Ok(()),
         }
+    }
+
+    /// The value of attribute `name` of element `id`.
+    fn attr(&self, id: &str, name: &str) -> Option<&Text> {
+        self.attrs.get(id).and_then(|names| names.get(name))
     }
 
     /// Replaces element `id` (journaling what it was).
@@ -453,19 +470,22 @@ impl Page {
         for id in &fresh {
             keys.extend(
                 self.attrs
-                    .range((id.clone(), Text::from(""))..)
-                    .take_while(|((i, _), _)| i == id)
-                    .map(|(k, _)| k.clone()),
+                    .get(id)
+                    .into_iter()
+                    .flat_map(|names| names.keys())
+                    .map(|n| (id.clone(), n.clone())),
             );
         }
         let old_attr = |key: &(Text, Text)| -> Option<&Text> {
             match j.attrs.get(key) {
                 Some(old) => old.as_ref(),
-                None => self.attrs.get(key),
+                None => self.attr(&key.0, &key.1),
             }
         };
         for key in &keys {
-            let Some(value) = self.attrs.get(key) else { continue };
+            let Some(value) = self.attr(&key.0, &key.1) else {
+                continue;
+            };
             if !self.elems.contains_key(&key.0) {
                 continue;
             }
@@ -479,7 +499,7 @@ impl Page {
             }
         }
         for (key, old) in &j.attrs {
-            if old.is_some() && kept(&key.0) && !self.attrs.contains_key(key) {
+            if old.is_some() && kept(&key.0) && self.attr(&key.0, &key.1).is_none() {
                 out.push(Patch::Unattr {
                     id: key.0.to_string(),
                     name: key.1.to_string(),
@@ -560,9 +580,11 @@ impl Page {
         Ok(page)
     }
 
-    /// The ids of the elements on the page.
-    pub fn ids(&self) -> impl Iterator<Item = &str> {
-        self.elems.keys().map(|k| &**k)
+    /// The ids of the elements on the page, in order.
+    pub fn ids(&self) -> Vec<&str> {
+        let mut ids: Vec<&str> = self.elems.keys().map(|k| &**k).collect();
+        ids.sort_unstable();
+        ids
     }
 }
 
@@ -922,9 +944,10 @@ mod tests {
                 Some(e) => {
                     let attrs: BTreeMap<String, String> = page
                         .attrs
-                        .iter()
-                        .filter(|((i, _), _)| &**i == id)
-                        .map(|((_, n), v)| (n.to_string(), v.to_string()))
+                        .get(id)
+                        .into_iter()
+                        .flatten()
+                        .map(|(n, v)| (n.to_string(), v.to_string()))
                         .collect();
                     let text = page.texts.get(id).cloned().unwrap_or_default();
                     out.push_str(&format!("<{} {} {attrs:?} {text:?}>[", e.tag, e.svg));
@@ -986,7 +1009,7 @@ mod tests {
             }
         }
         let svg = reference_namespaces(&page)?;
-        for (id, e) in &mut page.elems {
+        for (id, e) in page.elems.iter_mut() {
             e.svg = svg.contains(id);
         }
         for row in attr {
@@ -996,7 +1019,11 @@ mod tests {
                 string(name, "an attribute's name")?,
             );
             let value = string(value, "an attribute's value")?;
-            if let Some(old) = page.attrs.insert(key.clone(), value.clone())
+            if let Some(old) = page
+                .attrs
+                .entry(key.0.clone())
+                .or_default()
+                .insert(key.1.clone(), value.clone())
                 && old != value
             {
                 return Err(HostError::Page(format!(
