@@ -204,6 +204,9 @@ pub(crate) enum Regime {
     Delta,
     /// Re-evaluated in full at every tick and diffed: it reads a time-varying scalar, or has no positive atom.
     Recompute,
+    /// Its head is tick-scoped (`Plan::scoped`): the head is emptied at the start of every tick and the rule evaluated
+    /// in full, only while one of its tick-scoped atoms holds a row (its valuations need one).
+    Scoped,
 }
 
 /// A rule's plan.
@@ -219,6 +222,8 @@ pub(crate) struct Plan {
     pub deps: Vec<usize>,
     /// Each literal's place in `deps`, by literal index (`None`: not a dependency).
     pub dep_pos: Vec<Option<usize>>,
+    /// Under [`Regime::Scoped`]: the stores of its positive atoms over tick-scoped relations.
+    pub scoped: Vec<StoreKey>,
     /// The stores the dependencies read.
     pub dep_keys: Vec<StoreKey>,
     pub head: StoreKey,
@@ -661,6 +666,7 @@ impl Plan {
             } else {
                 Regime::Delta
             },
+            scoped: Vec::new(),
             dep_pos: {
                 let mut at = vec![None; rule.body.lits.len()];
                 for (i, lit) in deps.iter().enumerate() {

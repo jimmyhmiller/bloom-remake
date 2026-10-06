@@ -100,11 +100,13 @@ fn main() {
         app.rounds() - before_rounds
     );
 
+    let mut evals = 0;
     let mut work: Vec<(String, u64, u64, u64)> = app
         .work_by_rule()
         .into_iter()
         .map(|(label, w)| {
             let b = before.get(&label).copied().unwrap_or_default();
+            evals += w.evals - b.evals;
             (
                 label.to_string(),
                 w.rows - b.rows,
@@ -116,13 +118,30 @@ fn main() {
     work.sort_by_key(|(_, rows, steps, writes)| std::cmp::Reverse(rows + steps + writes));
     let sum = |f: fn(&(String, u64, u64, u64)) -> u64| work.iter().map(f).sum::<u64>();
     println!(
-        "\nwork: {} rows, {} steps, {} writes; the rules that did most:",
+        "\nwork: {} rows, {} steps, {} writes, {evals} rule evaluations; the rules that did most:",
         sum(|w| w.1),
         sum(|w| w.2),
         sum(|w| w.3)
     );
     for (label, rows, steps, writes) in work.iter().take(25) {
         println!("{rows:>9} rows {steps:>9} steps {writes:>8} writes  {label}");
+    }
+    if std::env::var_os("BY_EVALS").is_some() {
+        let mut by: Vec<(u64, String)> = app
+            .work_by_rule()
+            .into_iter()
+            .map(|(label, w)| {
+                (
+                    w.evals - before.get(&label).copied().unwrap_or_default().evals,
+                    label.to_string(),
+                )
+            })
+            .collect();
+        by.sort_by_key(|(e, _)| std::cmp::Reverse(*e));
+        println!("\nthe rules evaluated most:");
+        for (e, label) in by.iter().take(40) {
+            println!("{e:>7}  {label}");
+        }
     }
 }
 

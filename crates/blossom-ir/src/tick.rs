@@ -232,6 +232,8 @@ pub struct RuleWork {
     pub rows: u64,
     pub steps: u64,
     pub writes: u64,
+    /// How many times the rule was evaluated (a tick's delta query, or a re-evaluation).
+    pub evals: u64,
 }
 
 /// The work of one function's calls, measured without a clock: how many calls, the expression nodes they

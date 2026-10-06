@@ -1,0 +1,32 @@
+//! Tick-scoped relations (the engine's `Regime::Scoped`), for `engine_scoped.rs`: relations that hold rows only in a
+//! tick with an event, read every way a rule can read them.
+program scoped version 1;
+
+input poke(n: u64);
+input stop(n: u64);
+
+table seen(n: u64) key(n);
+table stopped(n: u64) key(n);
+
+/// An event alternative and a table alternative: not scoped, though one of its rules is.
+view mixed(n) {
+    poke(n);
+    seen(n);
+}
+/// A scoped relation read through a negation, by a rule that is not scoped.
+view quiet(n) = seen(n), not poke(n);
+/// A scoped chain two deep.
+view doubled(m) = poke(n), let m = n * 2u64;
+view shifted(k) = doubled(m), let k = m + 1u64;
+/// An event joined with a table.
+view stop_seen(n) = stop(n), seen(n);
+/// An aggregate over an event (not scoped: it counts).
+view pokes(c = count!(n default 0u64)) = poke(n);
+
+remember: on poke(n) {
+    next seen(n);
+}
+forget: on stop(n), seen(n) {
+    delete seen(n);
+    upsert stopped(n);
+}
