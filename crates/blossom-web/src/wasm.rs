@@ -5,7 +5,19 @@ use std::collections::BTreeMap;
 
 use wasm_bindgen::prelude::*;
 
+use blossom_value::time::Instant;
+
 use crate::{App, Event};
+
+/// The page's clock (milliseconds since the epoch, as `performance.timeOrigin + performance.now()` gives them) as
+/// an instant.
+fn instant(ms: f64) -> Result<Instant, JsValue> {
+    if !ms.is_finite() {
+        return Err(JsValue::from_str(&format!("the clock reads {ms}, not a time")));
+    }
+    // Saturates far outside any clock's range.
+    Ok(Instant((ms * 1e6).round() as i64))
+}
 
 fn js_error(e: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&e.to_string())
@@ -47,16 +59,27 @@ impl WebApp {
         json(&self.app.compiled().listens())
     }
 
-    /// Starts the program from `saved` (the last [`WebApp::saved`], or empty) at `hash`: `{patches, notes}`.
-    pub fn start(&mut self, saved: &str, hash: &str) -> Result<String, JsValue> {
+    /// Starts the program at `now_ms` from `saved` (the last [`WebApp::saved`], or empty) at `hash`:
+    /// `{patches, notes}`.
+    pub fn start(&mut self, saved: &str, hash: &str, now_ms: f64) -> Result<String, JsValue> {
         let saved = (!saved.is_empty()).then_some(saved);
-        json(&self.app.start(saved, hash).map_err(js_error)?)
+        json(&self.app.start(saved, hash, instant(now_ms)?).map_err(js_error)?)
     }
 
-    /// Runs one event (`{kind, …}`, see [`Event`]): the patches.
-    pub fn dispatch(&mut self, event_json: &str) -> Result<String, JsValue> {
+    /// Runs one event (`{kind, …}`, see [`Event`]) at `now_ms`: the patches.
+    pub fn dispatch(&mut self, event_json: &str, now_ms: f64) -> Result<String, JsValue> {
         let event: Event = serde_json::from_str(event_json).map_err(js_error)?;
-        json(&self.app.dispatch(&event).map_err(js_error)?)
+        json(&self.app.dispatch(&event, instant(now_ms)?).map_err(js_error)?)
+    }
+
+    /// Whether the program has physical timers: the page then calls [`WebApp::advance`] every animation frame.
+    pub fn clocked(&self) -> bool {
+        self.app.clocked()
+    }
+
+    /// Moves the clock to `now_ms`, running the timers due by then: the patches (`[]` when none was due).
+    pub fn advance(&mut self, now_ms: f64) -> Result<String, JsValue> {
+        json(&self.app.advance(instant(now_ms)?).map_err(js_error)?)
     }
 
     /// Why the element `id` is on the page as it is, as JSON: a tree of `{fact, how, round, because}` (see

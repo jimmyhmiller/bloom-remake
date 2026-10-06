@@ -4,7 +4,11 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use blossom_value::time::Instant;
 use blossom_web::{App, Event, Patch, compile};
+
+/// The clock of the tests that need none (programs without timers).
+const T0: Instant = Instant(0);
 
 /// The sources of `examples/web`, by file name.
 #[cfg(test)]
@@ -50,7 +54,7 @@ fn text(id: &str, t: &str) -> Patch {
 fn the_counter_draws_its_page_and_changes_only_what_a_click_changes() {
     let mut a = app("counter.bls");
     assert_eq!(a.compiled().listens(), ["click"]);
-    let started = a.start(None, "").unwrap();
+    let started = a.start(None, "", T0).unwrap();
     assert!(started.notes.is_empty());
     let p = &started.patches;
     for id in ["counter", "minus", "value", "plus"] {
@@ -69,23 +73,23 @@ fn the_counter_draws_its_page_and_changes_only_what_a_click_changes() {
         ids: vec!["counter".to_owned()],
     }));
     // A click changes the count's text and nothing else.
-    assert_eq!(a.dispatch(&click("plus")).unwrap(), [text("value", "1")]);
-    assert_eq!(a.dispatch(&click("plus")).unwrap(), [text("value", "2")]);
-    assert_eq!(a.dispatch(&click("minus")).unwrap(), [text("value", "1")]);
+    assert_eq!(a.dispatch(&click("plus"), T0).unwrap(), [text("value", "1")]);
+    assert_eq!(a.dispatch(&click("plus"), T0).unwrap(), [text("value", "2")]);
+    assert_eq!(a.dispatch(&click("minus"), T0).unwrap(), [text("value", "1")]);
     // A click elsewhere runs a round that changes nothing; an event it does not listen to runs none.
-    assert_eq!(a.dispatch(&click("value")).unwrap(), []);
-    assert_eq!(a.dispatch(&Event::Route { hash: "#/x".to_owned() }).unwrap(), []);
+    assert_eq!(a.dispatch(&click("value"), T0).unwrap(), []);
+    assert_eq!(a.dispatch(&Event::Route { hash: "#/x".to_owned() }, T0).unwrap(), []);
 }
 
 #[test]
 fn the_counter_continues_from_its_saved_state() {
     let mut a = app("counter.bls");
-    a.start(None, "").unwrap();
-    a.dispatch(&click("plus")).unwrap();
-    a.dispatch(&click("plus")).unwrap();
+    a.start(None, "", T0).unwrap();
+    a.dispatch(&click("plus"), T0).unwrap();
+    a.dispatch(&click("plus"), T0).unwrap();
     let saved = a.saved().unwrap();
     let mut b = app("counter.bls");
-    let started = b.start(Some(&saved), "").unwrap();
+    let started = b.start(Some(&saved), "", T0).unwrap();
     assert!(started.patches.contains(&text("value", "2")), "{:?}", started.patches);
     // A program whose durable schema changed starts empty, and says so.
     let mut files = files();
@@ -98,7 +102,7 @@ fn the_counter_continues_from_its_saved_state() {
             .replace("= count(c)", "= count(c, _)"),
     );
     let mut c = App::new(compile("counter.bls", &files).unwrap_or_else(|d| panic!("{:?}", d))).unwrap();
-    let started = c.start(Some(&saved), "").unwrap();
+    let started = c.start(Some(&saved), "", T0).unwrap();
     assert_eq!(started.notes.len(), 1, "{:?}", started.notes);
     assert!(started.patches.contains(&text("value", "0")));
 }
@@ -112,7 +116,7 @@ fn a_program_that_breaks_the_page_or_the_interface_is_told_why() {
             .to_owned(),
     );
     let mut a = App::new(compile("bad.bls", &files).unwrap()).unwrap();
-    let err = a.start(None, "").unwrap_err().to_string();
+    let err = a.start(None, "", T0).unwrap_err().to_string();
     assert!(err.contains("`nowhere` is not on the page"), "{err}");
     files.insert(
         "wrong.bls".to_owned(),
@@ -161,7 +165,7 @@ impl Dom {
     fn apply(&mut self, patches: &[Patch]) {
         for p in patches {
             match p {
-                Patch::Create { id, tag } => {
+                Patch::Create { id, tag, .. } => {
                     self.tags.insert(id.clone(), tag.clone());
                     self.attrs.insert(id.clone(), BTreeMap::new());
                     self.texts.remove(id);
@@ -246,8 +250,8 @@ fn ev_key(id: &str, key: &str, value: &str) -> Event {
 fn todomvc_follows_the_spec() {
     let mut a = app("todomvc.bls");
     let mut dom = Dom::default();
-    let go = |a: &mut App, dom: &mut Dom, e: Event| dom.apply(&a.dispatch(&e).unwrap());
-    dom.apply(&a.start(None, "").unwrap().patches);
+    let go = |a: &mut App, dom: &mut Dom, e: Event| dom.apply(&a.dispatch(&e, T0).unwrap());
+    dom.apply(&a.start(None, "", T0).unwrap().patches);
     // An empty app: the header only; the new-todo field focused.
     assert!(dom.shown("new-todo") && !dom.shown("main") && !dom.shown("footer"));
     assert_eq!(dom.focused.as_deref(), Some("new-todo"));
@@ -317,10 +321,13 @@ fn todomvc_follows_the_spec() {
     assert!(!dom.shown("edit-1"));
     assert_eq!(dom.todos(), ["Buy milk", "Walk the cat"]);
     assert_eq!(
-        a.dispatch(&Event::Blur {
-            id: "edit-1".to_owned(),
-            value: "Walk the cat".to_owned()
-        })
+        a.dispatch(
+            &Event::Blur {
+                id: "edit-1".to_owned(),
+                value: "Walk the cat".to_owned()
+            },
+            T0
+        )
         .unwrap(),
         []
     );
@@ -398,10 +405,10 @@ fn todomvc_follows_the_spec() {
     // A reload continues from the saved todos (numbering included).
     let mut b = app("todomvc.bls");
     let mut dom = Dom::default();
-    dom.apply(&b.start(Some(&saved), "#/active").unwrap().patches);
+    dom.apply(&b.start(Some(&saved), "#/active", T0).unwrap().patches);
     assert_eq!(dom.todos(), ["Feed the cat"]);
     assert_eq!(dom.attr("link-active", "class").as_deref(), Some("selected"));
-    dom.apply(&b.dispatch(&ev_key("new-todo", "Enter", "Next")).unwrap());
+    dom.apply(&b.dispatch(&ev_key("new-todo", "Enter", "Next"), T0).unwrap());
     assert!(
         dom.shown("todo-3"),
         "numbering continues: {:?}",
@@ -432,13 +439,16 @@ fn render(ws: &[blossom_web::why::Why], depth: usize, out: &mut String) {
 #[test]
 fn the_inspector_explains_an_element_down_to_the_events_and_rules() {
     let mut a = app("todomvc.bls");
-    a.start(None, "").unwrap();
-    a.dispatch(&ev_key("new-todo", "Enter", "Buy milk")).unwrap();
-    a.dispatch(&ev_key("new-todo", "Enter", "Walk the dog")).unwrap();
-    a.dispatch(&Event::Change {
-        id: "toggle-1".to_owned(),
-        checked: true,
-    })
+    a.start(None, "", T0).unwrap();
+    a.dispatch(&ev_key("new-todo", "Enter", "Buy milk"), T0).unwrap();
+    a.dispatch(&ev_key("new-todo", "Enter", "Walk the dog"), T0).unwrap();
+    a.dispatch(
+        &Event::Change {
+            id: "toggle-1".to_owned(),
+            checked: true,
+        },
+        T0,
+    )
     .unwrap();
     let why = a.why("label-1").unwrap();
     let mut tree = String::new();
@@ -479,9 +489,12 @@ fn the_inspector_explains_an_element_down_to_the_events_and_rules() {
         );
     }
     // The edit field, from the double-click that started the edit.
-    a.dispatch(&Event::Dblclick {
-        id: "label-0".to_owned(),
-    })
+    a.dispatch(
+        &Event::Dblclick {
+            id: "label-0".to_owned(),
+        },
+        T0,
+    )
     .unwrap();
     let why = a.why("edit-0").unwrap();
     let mut tree = String::new();
@@ -496,14 +509,58 @@ fn the_inspector_explains_an_element_down_to_the_events_and_rules() {
 #[test]
 fn the_inspector_says_when_a_row_was_restored_from_storage() {
     let mut a = app("todomvc.bls");
-    a.start(None, "").unwrap();
-    a.dispatch(&ev_key("new-todo", "Enter", "Buy milk")).unwrap();
+    a.start(None, "", T0).unwrap();
+    a.dispatch(&ev_key("new-todo", "Enter", "Buy milk"), T0).unwrap();
     let saved = a.saved().unwrap();
     let mut b = app("todomvc.bls");
-    b.start(Some(&saved), "").unwrap();
+    b.start(Some(&saved), "", T0).unwrap();
     let why = b.why("label-0").unwrap();
     let mut tree = String::new();
     render(&why, 0, &mut tree);
     let row = find(&why, r#"todos(0, "Buy milk", false)"#).unwrap_or_else(|| panic!("{tree}"));
     assert!(row.how.contains("restored from storage"), "{tree}");
+}
+
+#[cfg(test)]
+fn ms(n: i64) -> Instant {
+    Instant(n * 1_000_000)
+}
+
+#[cfg(test)]
+fn time_of(patches: &[Patch]) -> Option<String> {
+    patches.iter().find_map(|p| match p {
+        Patch::Text { id, text } if id == "time" => Some(text.clone()),
+        _ => None,
+    })
+}
+
+#[test]
+fn the_clock_fires_timers_while_their_guard_holds_and_counts_late_firings() {
+    let mut a = app("stopwatch.bls");
+    assert!(a.clocked());
+    a.start(None, "", ms(0)).unwrap();
+    // Stopped: no timer is active.
+    assert_eq!(a.next_deadline().unwrap(), None);
+    assert_eq!(a.advance(ms(5_000)).unwrap(), []);
+    // Started at 5.2s: the next firing is the first one after, at 6s (counted from the start).
+    a.dispatch(&click("toggle"), ms(5_200)).unwrap();
+    assert_eq!(a.next_deadline().unwrap(), Some(ms(6_000)));
+    assert_eq!(a.advance(ms(5_900)).unwrap(), []);
+    assert_eq!(time_of(&a.advance(ms(6_000)).unwrap()).as_deref(), Some("1"));
+    // Late by two seconds: one round, with every firing due (each counts).
+    assert_eq!(time_of(&a.advance(ms(9_050)).unwrap()).as_deref(), Some("4"));
+    // Stopped again: the clock moves, nothing fires.
+    a.dispatch(&click("toggle"), ms(9_100)).unwrap();
+    assert_eq!(a.next_deadline().unwrap(), None);
+    assert_eq!(a.advance(ms(20_000)).unwrap(), []);
+    // The seconds are durable; the timer counts from the new start.
+    let saved = a.saved().unwrap();
+    let mut b = app("stopwatch.bls");
+    b.start(Some(&saved), "", ms(100_000)).unwrap();
+    b.dispatch(&click("toggle"), ms(100_000)).unwrap();
+    assert_eq!(b.next_deadline().unwrap(), Some(ms(101_000)));
+    assert_eq!(time_of(&b.advance(ms(101_000)).unwrap()).as_deref(), Some("5"));
+    // A clock that goes back is held where it was.
+    assert_eq!(b.advance(ms(50)).unwrap(), []);
+    assert_eq!(time_of(&b.advance(ms(102_000)).unwrap()).as_deref(), Some("6"));
 }

@@ -2,8 +2,11 @@
 // applies each round's page patches to the DOM, reports the DOM events the program reads, and keeps its durable
 // tables in localStorage. `?app=NAME` picks examples/web/NAME.bls (default: todomvc).
 //
-// Beside the app: the inspector (click an element, see why it is there) and the editor (the app's source, edited and
-// re-run in place, the durable state kept when its schema stays).
+// A program with physical timers runs on the page's clock: every animation frame moves it, and the timers due by then
+// fire (LANGUAGE §15.2).
+//
+// Beside the app: the inspector (click an element, see why it is there; it holds the clock while it is on) and the
+// editor (the app's source, edited and re-run in place, the durable state kept when its schema stays).
 import init, { compile } from "./pkg/blossom_web.js";
 
 const appName = new URLSearchParams(location.search).get("app") ?? "todomvc";
@@ -15,6 +18,7 @@ const sourceKey = `blossom-source:${appName}`;
 
 /** The elements the program made, by its ids. */
 let nodes = new Map();
+const SVG = "http://www.w3.org/2000/svg";
 /** Attributes the DOM keeps as live state: set as properties. */
 const PROPS = new Set(["value", "checked", "disabled"]);
 
@@ -40,7 +44,7 @@ function apply(patches) {
   for (const p of patches) {
     switch (p.op) {
       case "create": {
-        const n = document.createElement(p.tag);
+        const n = p.svg ? document.createElementNS(SVG, p.tag) : document.createElement(p.tag);
         n.dataset.bid = p.id;
         nodes.set(p.id, n);
         break;
@@ -97,6 +101,24 @@ function report(message) {
   statusLine.textContent = message;
 }
 
+/** The page's clock, in milliseconds since the epoch. */
+function now() {
+  return performance.timeOrigin + performance.now();
+}
+
+/** Saves the durable tables: at once, or (while the clock runs, which may change them every frame) soon after. */
+let saveTimer = null;
+function persist(soon) {
+  if (soon) {
+    if (saveTimer === null) saveTimer = setTimeout(() => persist(false), 500);
+    return;
+  }
+  if (saveTimer !== null) clearTimeout(saveTimer);
+  saveTimer = null;
+  if (app) localStorage.setItem(storageKey, app.saved());
+}
+addEventListener("pagehide", () => persist(false));
+
 let app = null;
 /** The inputs the running program reads. */
 let listening = new Set();
@@ -108,14 +130,19 @@ const queue = [];
 /** Runs events one at a time: an event fired while patches apply (a removed field's blur) waits for its turn. */
 function send(event) {
   queue.push(event);
+  drain();
+}
+
+/** Runs the queued events, unless a round is running (it drains them when it ends). */
+function drain() {
   if (busy) return;
   busy = true;
   try {
     while (queue.length > 0) {
       const next = queue.shift();
       try {
-        apply(JSON.parse(app.dispatch(JSON.stringify(next))));
-        localStorage.setItem(storageKey, app.saved());
+        apply(JSON.parse(app.dispatch(JSON.stringify(next), now())));
+        persist(false);
         inspector.refresh();
       } catch (err) {
         report(`error: ${err}`);
@@ -130,6 +157,7 @@ function send(event) {
 const LISTENERS = {
   click: ["click", (e, id) => ({ kind: "click", id })],
   dblclick: ["dblclick", (e, id) => ({ kind: "dblclick", id })],
+  press: ["pointerdown", (e, id) => ({ kind: "press", id })],
   typed: ["input", (e, id) => ({ kind: "input", id, value: e.target.value ?? "" })],
   keydown: ["keydown", (e, id) => ({ kind: "keydown", id, key: e.key, value: e.target.value ?? "" })],
   blur: ["focusout", (e, id) => ({ kind: "blur", id, value: e.target.value ?? "" })],
@@ -148,6 +176,29 @@ function listen() {
       if (target) send(make(e, target.dataset.bid));
     });
   }
+}
+
+/** The clock: every animation frame, the timers due by now fire (while the program has timers, the inspector is
+ * off, and no event is running). A failed round stops it until the program is run again. */
+let clockFailed = false;
+function frame() {
+  requestAnimationFrame(frame);
+  if (!app || clockFailed || inspector.on || busy || !app.clocked()) return;
+  busy = true;
+  try {
+    const patches = JSON.parse(app.advance(now()));
+    if (patches.length > 0) {
+      apply(patches);
+      persist(true);
+      inspector.soon();
+    }
+  } catch (err) {
+    clockFailed = true;
+    report(`error: ${err}`);
+  } finally {
+    busy = false;
+  }
+  drain();
 }
 
 async function fetchSource(file) {
@@ -178,7 +229,7 @@ function run(files) {
   const saved = app ? app.saved() : (localStorage.getItem(storageKey) ?? "");
   let started;
   try {
-    started = JSON.parse(next.start(saved, location.hash));
+    started = JSON.parse(next.start(saved, location.hash, now()));
   } catch (err) {
     next.free();
     return { diags: warnings, ok: false, error: String(err) };
@@ -188,8 +239,9 @@ function run(files) {
   listening = new Set(JSON.parse(app.listens()));
   nodes = new Map();
   mount.replaceChildren();
+  clockFailed = false;
   apply(started.patches);
-  localStorage.setItem(storageKey, app.saved());
+  persist(false);
   report(started.notes.join("\n"));
   inspector.refresh();
   return { diags: warnings, ok: true, notes: started.notes };
@@ -225,6 +277,7 @@ const inspector = {
     this.on = on;
     buttons.inspect.setAttribute("aria-pressed", String(on));
     document.documentElement.classList.toggle("blossom-inspecting", on);
+    tabs.why.querySelector(".blossom-paused").hidden = !(on && app && app.clocked());
     if (on) show("why");
     else this.mark(null);
   },
@@ -249,6 +302,16 @@ const inspector = {
   explain(id) {
     this.id = id;
     this.refresh();
+  },
+
+  /** Refreshes soon (the clock may change the page every frame; an explanation re-runs rounds). */
+  pending: null,
+  soon() {
+    if (this.id === null || this.pending !== null) return;
+    this.pending = setTimeout(() => {
+      this.pending = null;
+      this.refresh();
+    }, 400);
   },
 
   /** Shows why the element is on the page, as of the last round. */
@@ -305,7 +368,7 @@ function target(e) {
 
 /** In inspect mode the app gets no input: a click explains, the rest is held back. */
 function inspectEvents() {
-  for (const kind of ["mousedown", "mouseup", "click", "dblclick", "change", "keydown", "input"]) {
+  for (const kind of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "change", "keydown", "input"]) {
     mount.addEventListener(
       kind,
       (e) => {
@@ -463,6 +526,7 @@ async function main() {
     show(null);
   });
   editor.load({ ...files }, original);
+  requestAnimationFrame(frame);
   const result = run(files);
   editor.show(result);
   if (!result.ok) {

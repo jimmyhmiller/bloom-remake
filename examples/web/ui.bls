@@ -18,6 +18,8 @@ input route(hash: String);
 /// A click on an element with an `id` (or its nearest ancestor with one).
 input click(id: String);
 input dblclick(id: String);
+/// A pointer (mouse button, touch, pen) goes down on an element: sooner than a click, which waits for the release.
+input press(id: String);
 /// Typing in a text field: its value.
 input typed(id: String, value: String);
 /// A key (the DOM's `key` names: `Enter`, `Escape`, ...) in a field, with its value.
