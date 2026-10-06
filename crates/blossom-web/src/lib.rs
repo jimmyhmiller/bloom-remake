@@ -2,8 +2,9 @@
 //!
 //! A browser app is an ordinary single-node Blossom program. [`compile`] compiles it from sources in memory;
 //! [`App::start`] restores its durable tables and runs its first rounds; [`App::dispatch`] runs one round per DOM
-//! event. The program describes its page with the outputs `elem`, `attr`, `text` and `focus` ([`page`]), and hears
-//! the world through the inputs it declares (`route`, `click`, `dblclick`, `typed`, `keydown`, `blur`, `change`);
+//! event, and [`App::advance`] one per instant its physical timers fire (the page's clock; LANGUAGE §15.2). The
+//! program describes its page with the outputs `elem`, `attr`, `text` and `focus` ([`page`]), and hears the world
+//! through the inputs it declares (`route`, `click`, `dblclick`, `press`, `typed`, `keydown`, `blur`, `change`);
 //! each round's page is diffed against the last into DOM patches. The core here is plain Rust, which native tests
 //! drive; `wasm` is the page's API over it.
 
@@ -24,6 +25,7 @@ use blossom_front::ded::LoadedFile;
 use blossom_front::modules::Loader;
 use blossom_ir::core::RelClass;
 use blossom_ir::tick::{Instance, Row, StepInput};
+use blossom_ir::timers::TimerTable;
 use blossom_value::Value;
 use blossom_value::time::{Instant, NodeId, Tick};
 use blossom_value::types::{IntTy, TypeDef};
@@ -73,6 +75,7 @@ pub enum Event {
     Route { hash: String },
     Click { id: String },
     Dblclick { id: String },
+    Press { id: String },
     Input { id: String, value: String },
     Keydown { id: String, key: String, value: String },
     Blur { id: String, value: String },
@@ -86,6 +89,7 @@ impl Event {
             Event::Route { .. } => "route",
             Event::Click { .. } => "click",
             Event::Dblclick { .. } => "dblclick",
+            Event::Press { .. } => "press",
             Event::Input { .. } => "typed",
             Event::Keydown { .. } => "keydown",
             Event::Blur { .. } => "blur",
@@ -98,7 +102,7 @@ impl Event {
         let s = |x: &str| Value::Str(x.into());
         let values = match self {
             Event::Route { hash } => vec![s(hash)],
-            Event::Click { id } | Event::Dblclick { id } => vec![s(id)],
+            Event::Click { id } | Event::Dblclick { id } | Event::Press { id } => vec![s(id)],
             Event::Input { id, value } | Event::Blur { id, value } => vec![s(id), s(value)],
             Event::Keydown { id, key, value } => vec![s(id), s(key), s(value)],
             Event::Change { id, checked } => vec![s(id), Value::Bool(*checked)],
@@ -117,10 +121,11 @@ const OUTPUTS: [(&str, &[&str]); 4] = [
     ("text", &[STR, STR]),
     ("focus", &[STR]),
 ];
-const INPUTS: [(&str, &[&str]); 7] = [
+const INPUTS: [(&str, &[&str]); 8] = [
     ("route", &[STR]),
     ("click", &[STR]),
     ("dblclick", &[STR]),
+    ("press", &[STR]),
     ("typed", &[STR, STR]),
     ("keydown", &[STR, STR, STR]),
     ("blur", &[STR, STR]),
@@ -306,6 +311,10 @@ pub struct App {
     /// The next round, and the page the last one left.
     tick: u64,
     page: Page,
+    /// The program's physical timers, anchored at the start; and the clock as of the latest round (it never goes
+    /// back: an earlier instant from the page is taken as this one).
+    timers: Option<TimerTable>,
+    now: Instant,
     /// The rounds the inspector can explain.
     history: why::History,
 }
@@ -338,13 +347,32 @@ impl App {
             engine,
             tick: 0,
             page: Page::default(),
+            timers: None,
+            now: Instant(0),
             history: why::History::new(),
         })
     }
 
-    /// Starts the program: restores the durable tables `saved` holds (when given), then runs the boot round and the
-    /// `route` round of `hash`. Returns the patches that draw the first page.
-    pub fn start(&mut self, saved: Option<&str>, hash: &str) -> Result<Started, HostError> {
+    /// Whether the program has physical timers: the page then runs a clock and calls [`App::advance`].
+    pub fn clocked(&self) -> bool {
+        self.compiled
+            .artifact
+            .program
+            .get()
+            .rels
+            .iter()
+            .any(|r| matches!(r.class, RelClass::Event(blossom_ir::core::EventSource::Timer(_))))
+    }
+
+    /// Moves the clock to `now` (never back).
+    fn tick_to(&mut self, now: Instant) {
+        self.now = Instant(self.now.0.max(now.0));
+    }
+
+    /// Starts the program at `now`: restores the durable tables `saved` holds (when given), then runs the boot round
+    /// and the `route` round of `hash`. Its timers count from `now` (LANGUAGE §15.2: each start is an incarnation).
+    /// Returns the patches that draw the first page.
+    pub fn start(&mut self, saved: Option<&str>, hash: &str, now: Instant) -> Result<Started, HostError> {
         let mut notes = Vec::new();
         let carried = match saved {
             Some(json) => {
@@ -365,6 +393,13 @@ impl App {
         self.tick = 0;
         self.page = Page::default();
         self.history.clear();
+        self.now = now;
+        self.timers = Some(
+            TimerTable::new(self.compiled.artifact.program.get(), None, now).map_err(|e| HostError::Round {
+                tick: 0,
+                error: e.to_string(),
+            })?,
+        );
         let boot: Vec<(RelId, Row)> = self
             .compiled
             .artifact
@@ -373,16 +408,48 @@ impl App {
             .into_iter()
             .collect();
         let mut patches = self.settle(&boot)?;
-        patches.extend(self.dispatch(&Event::Route { hash: hash.to_owned() })?);
+        patches.extend(self.dispatch(&Event::Route { hash: hash.to_owned() }, now)?);
         Ok(Started { patches, notes })
     }
 
-    /// Runs one event (an event the program does not listen to runs nothing) until its effects settle; returns the
-    /// patches from the page before it to the page after.
-    pub fn dispatch(&mut self, event: &Event) -> Result<Vec<Patch>, HostError> {
+    /// Runs one event at `now` (an event the program does not listen to runs nothing) until its effects settle;
+    /// returns the patches from the page before it to the page after.
+    pub fn dispatch(&mut self, event: &Event, now: Instant) -> Result<Vec<Patch>, HostError> {
+        self.tick_to(now);
         match self.compiled.inputs.get(event.input()) {
             Some(rel) => self.settle(&[(*rel, event.row())]),
             None => Ok(Vec::new()),
+        }
+    }
+
+    /// Moves the clock to `now`: when timers are due, runs a round with their firings (every firing due by `now`,
+    /// as a node delivers them) until its effects settle. The patches (none when nothing was due).
+    pub fn advance(&mut self, now: Instant) -> Result<Vec<Patch>, HostError> {
+        self.tick_to(now);
+        let at = self.now;
+        let timers = self.timers.as_mut().ok_or_else(|| HostError::Round {
+            tick: self.tick,
+            error: "the program has not started".to_owned(),
+        })?;
+        let fail = |e: blossom_ir::timers::TimerError| HostError::Round {
+            tick: 0,
+            error: e.to_string(),
+        };
+        if !timers.any_due(at).map_err(fail)? {
+            return Ok(Vec::new());
+        }
+        let firings = timers.fire(at).map_err(fail)?;
+        self.settle(&firings)
+    }
+
+    /// When the next timer is due (none while no timer is active).
+    pub fn next_deadline(&self) -> Result<Option<Instant>, HostError> {
+        match &self.timers {
+            Some(t) => t.next_deadline().map_err(|e| HostError::Round {
+                tick: self.tick,
+                error: e.to_string(),
+            }),
+            None => Ok(None),
         }
     }
 
@@ -405,8 +472,10 @@ impl App {
     /// Runs one round with `events`, leaving its page in `self.page`; whether the state changed.
     fn round(&mut self, events: &[(RelId, Row)]) -> Result<bool, HostError> {
         let tick = self.tick;
+        let now = self.now;
         let before = self.engine.carried_instance();
-        let observe: Vec<RelId> = self.compiled.outputs.values().copied().collect();
+        let guards: Vec<RelId> = self.timers.iter().flat_map(|t| t.guards()).collect();
+        let observe: Vec<RelId> = self.compiled.outputs.values().copied().chain(guards).collect();
         let out = self
             .engine
             .step(
@@ -414,7 +483,7 @@ impl App {
                     node: NodeId(0),
                     incarnation: 1,
                     tick: Tick(tick),
-                    now: Instant(i64::try_from(tick).unwrap_or(i64::MAX).saturating_mul(1_000_000)),
+                    now,
                     events,
                     delivered: &[],
                     ingress: &[],
@@ -427,8 +496,15 @@ impl App {
                 error: e.to_string(),
             })?;
         self.tick += 1;
+        if let Some(timers) = self.timers.as_mut() {
+            timers.observe(now, &out.observed).map_err(|e| HostError::Round {
+                tick,
+                error: e.to_string(),
+            })?;
+        }
         self.history.push(why::Round {
             tick,
+            now,
             before,
             events: events.to_vec(),
             inserted: out

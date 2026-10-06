@@ -3,7 +3,8 @@
 //!
 //! Elements are keyed by id: an element whose id and tag stay keeps its DOM node across rounds (and with it its
 //! focus, caret and scroll position); one whose tag changes is replaced. A parent's children are ordered by `pos`,
-//! then `id`.
+//! then `id`. An `svg` element and its descendants (but those of a `foreignObject`) are SVG elements: the DOM makes
+//! them in the SVG namespace, so an element that moves in or out of an `svg` is replaced too.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -20,6 +21,8 @@ struct Elem {
     parent: String,
     pos: i64,
     tag: String,
+    /// In the SVG namespace (set once the page's elements are known).
+    svg: bool,
 }
 
 /// A page: what the program's outputs hold at the end of a round.
@@ -35,8 +38,8 @@ pub struct Page {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum Patch {
-    /// Make a detached element `tag` with identity `id`.
-    Create { id: String, tag: String },
+    /// Make a detached element `tag` with identity `id` (in the SVG namespace when `svg`).
+    Create { id: String, tag: String, svg: bool },
     /// Drop the element `id` (its children that stay on the page are placed again by a [`Patch::Children`]).
     Remove { id: String },
     /// Set an attribute (or, for `value`, `checked` and `disabled`, the property).
@@ -83,6 +86,7 @@ impl Page {
                 parent: string(parent, "an element's parent")?,
                 pos,
                 tag: string(tag, "an element's tag")?,
+                svg: false,
             };
             if let Some(old) = page.elems.insert(id.clone(), e.clone())
                 && old != e
@@ -99,6 +103,10 @@ impl Page {
                     e.parent
                 )));
             }
+        }
+        let svg = page.namespaces()?;
+        for (id, e) in &mut page.elems {
+            e.svg = svg.contains(id);
         }
         for row in attr {
             let [id, name, value] = columns::<3>(row, "attr")?;
@@ -135,6 +143,36 @@ impl Page {
         Ok(page)
     }
 
+    /// The SVG elements: an `svg`, and the children of an SVG element but a `foreignObject`. An element that is its
+    /// own ancestor is an error.
+    fn namespaces(&self) -> Result<BTreeSet<String>, HostError> {
+        let mut svg = BTreeSet::new();
+        for id in self.elems.keys() {
+            // The chain from `id` up to the mount point; the nearest `svg` or `foreignObject` decides.
+            let mut seen = BTreeSet::new();
+            let mut at = id.as_str();
+            let inside = loop {
+                if !seen.insert(at) {
+                    return Err(HostError::Page(format!("element `{at}` is its own ancestor")));
+                }
+                let Some(e) = self.elems.get(at) else { break false };
+                match e.tag.as_str() {
+                    "svg" => break true,
+                    "foreignObject" if at != id => break false,
+                    _ => {}
+                }
+                if e.parent.is_empty() {
+                    break false;
+                }
+                at = e.parent.as_str();
+            };
+            if inside {
+                svg.insert(id.clone());
+            }
+        }
+        Ok(svg)
+    }
+
     /// Each parent's children, in order.
     fn children(&self) -> BTreeMap<&str, Vec<&str>> {
         let mut by_parent: BTreeMap<&str, Vec<(i64, &str)>> = BTreeMap::new();
@@ -156,7 +194,7 @@ impl Page {
     /// The patches that turn this page into `next`.
     pub fn diff(&self, next: &Page) -> Vec<Patch> {
         let mut out = Vec::new();
-        let kept = |id: &str| matches!((self.elems.get(id), next.elems.get(id)), (Some(a), Some(b)) if a.tag == b.tag);
+        let kept = |id: &str| matches!((self.elems.get(id), next.elems.get(id)), (Some(a), Some(b)) if a.tag == b.tag && a.svg == b.svg);
         // Elements gone, or replaced (another tag), then elements new.
         for id in self.elems.keys() {
             if !kept(id) {
@@ -168,6 +206,7 @@ impl Page {
                 out.push(Patch::Create {
                     id: id.clone(),
                     tag: e.tag.clone(),
+                    svg: e.svg,
                 });
             }
         }
@@ -334,7 +373,8 @@ mod tests {
                 Patch::Remove { id: "box".to_owned() },
                 Patch::Create {
                     id: "box".to_owned(),
-                    tag: "section".to_owned()
+                    tag: "section".to_owned(),
+                    svg: false,
                 },
                 Patch::Attr {
                     id: "box".to_owned(),
@@ -374,6 +414,60 @@ mod tests {
         );
         // Still focused: not asked again.
         assert_eq!(b.diff(&b), []);
+    }
+
+    #[test]
+    fn svg_elements_are_made_in_their_namespace_and_replaced_when_they_leave_it() {
+        let in_svg = |parent: &str| {
+            page(
+                &[
+                    elem("game", "", 0, "svg"),
+                    elem("box", "", 1, "div"),
+                    elem("bird", parent, 0, "circle"),
+                    elem("html", "game", 1, "foreignObject"),
+                    elem("note", "html", 0, "p"),
+                ],
+                &[],
+                &[],
+            )
+        };
+        let a = in_svg("game");
+        let created: Vec<(String, bool)> = Page::default()
+            .diff(&a)
+            .into_iter()
+            .filter_map(|p| match p {
+                Patch::Create { id, svg, .. } => Some((id, svg)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            created,
+            [
+                ("bird".to_owned(), true),
+                ("box".to_owned(), false),
+                ("game".to_owned(), true),
+                ("html".to_owned(), true),
+                ("note".to_owned(), false),
+            ]
+        );
+        // The circle moves out of the svg: another element.
+        let b = in_svg("box");
+        let d = a.diff(&b);
+        assert!(d.contains(&Patch::Remove { id: "bird".to_owned() }), "{d:?}");
+        assert!(
+            d.contains(&Patch::Create {
+                id: "bird".to_owned(),
+                tag: "circle".to_owned(),
+                svg: false
+            }),
+            "{d:?}"
+        );
+    }
+
+    #[test]
+    fn an_element_that_is_its_own_ancestor_is_an_error() {
+        let err = Page::of(&[elem("a", "b", 0, "div"), elem("b", "a", 0, "div")], &[], &[], &[]).unwrap_err();
+        assert!(err.to_string().contains("its own ancestor"), "{err}");
     }
 
     #[test]

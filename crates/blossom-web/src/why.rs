@@ -28,6 +28,8 @@ pub struct History {
 /// from.
 pub struct Round {
     pub tick: u64,
+    /// The clock the round ran at.
+    pub now: Instant,
     pub before: Instance,
     pub events: Vec<(RelId, Row)>,
     pub inserted: BTreeSet<(RelId, Row)>,
@@ -161,7 +163,7 @@ impl<'a> Explainer<'a> {
                 node: NodeId(0),
                 incarnation: 1,
                 tick: Tick(tick),
-                now: Instant(i64::try_from(tick).unwrap_or(i64::MAX).saturating_mul(1_000_000)),
+                now: round.now,
                 carried: &round.before,
                 events: &round.events,
                 delivered: &[],

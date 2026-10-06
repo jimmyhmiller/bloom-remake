@@ -1,0 +1,45 @@
+//! A stopwatch in the browser (docs/design/BROWSER.md): a physical timer (LANGUAGE §15.2) that the page's clock
+//! fires while the stopwatch runs; the seconds are kept across reloads.
+
+program stopwatch version 1;
+
+include "ui.bls";
+
+/// Fires once a second while the stopwatch runs.
+timer second every 1s while running;
+
+table running() key();
+durable table elapsed(s: u64) key();
+
+view seconds(s = max!(x default 0u64)) = elapsed(x);
+/// The firings of this round: more than one when the clock was late (each counts).
+view fired(n = count!(k default 0u64)) = second(k, _);
+
+count: on second(_k, _at), seconds(s), fired(n) {
+    upsert elapsed(s + n);
+}
+
+start: on click(id), not running() where id == "toggle" {
+    upsert running();
+}
+stop: on click(id), running() where id == "toggle" {
+    delete running();
+}
+reset: on click(id), seconds(s) where id == "reset" {
+    delete elapsed(s);
+}
+
+page: while seconds(s) {
+    emit elem("watch", "", 0, "div");
+    emit elem("time", "watch", 0, "span");
+    emit text("time", s.to_string());
+    emit elem("toggle", "watch", 1, "button");
+    emit elem("reset", "watch", 2, "button");
+    emit text("reset", "Reset");
+}
+button_on: while running() {
+    emit text("toggle", "Stop");
+}
+button_off: while not running() {
+    emit text("toggle", "Start");
+}

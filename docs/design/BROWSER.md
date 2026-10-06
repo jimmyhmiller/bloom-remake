@@ -33,6 +33,9 @@ LANGUAGE §16.5 describes for any host.
 | `text(id: String, s: String)` | Text inside an element, before its children. |
 | `focus(id: String)` | The element to focus after the round's changes (with its text selected at the end). |
 
+An `svg` element and its descendants (but a `foreignObject`'s) are made in the SVG namespace, so a program draws
+graphics with the same outputs: `elem("bird", "game", 3, "circle")`, `attr("bird", "cx", "25")`.
+
 **The world (inputs).** The host feeds the events a program declares and reads (an event no rule reads is not
 listened to), each into a round of its own:
 
@@ -41,6 +44,7 @@ listened to), each into a round of its own:
 | `boot()` | The first round (as everywhere). |
 | `route(hash: String)` | At boot and on every `hashchange`: `location.hash`. |
 | `click(id: String)`, `dblclick(id: String)` | On an element with an `id`, or its nearest ancestor with one. |
+| `press(id: String)` | A pointer goes down on such an element (`pointerdown`: mouse, touch, pen), before the click. |
 | `typed(id: String, value: String)` | Typing in a text field (the DOM's `input` event; `input` is a keyword). |
 | `keydown(id: String, key: String, value: String)` | A key (DOM `key` names: `Enter`, `Escape`, …), with the field's value. |
 | `blur(id: String, value: String)` | A field loses focus. |
@@ -57,6 +61,17 @@ hands the DOM a list of patches (create, move, set or
 remove an attribute or text, remove, focus). Elements are keyed by `id`, so an element keeps its DOM node (and its
 focus and caret) across rounds while its id stays. Rounds are run one at a time; an event that arrives while a round
 runs waits for it.
+
+### The clock
+
+A program's physical timers (`timer t every d [while G]`, LANGUAGE §15.2) run on the page's clock, with the
+node's rules (`blossom_ir::timers`, shared with the node): firing `k` is due at `start + (k + 1) × d`, a guarded
+timer is dormant while `G` was empty at the end of the latest round, and every firing due by a round's instant is
+delivered in that round (a late clock delivers several; a program counts them if each matters). The page moves the
+clock every animation frame (`requestAnimationFrame`) and runs a round when a timer is due; each round runs at the
+page's time (`now()`), recorded for the inspector's replays. The clock never goes back. While the inspector is on,
+the page holds the clock (the app stands still to be inspected); when it lets go, the late firings are delivered.
+Each start (a load, or a run from the editor) is an incarnation: timers count from it.
 
 ### Persistence
 
