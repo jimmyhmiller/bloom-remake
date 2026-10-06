@@ -29,10 +29,6 @@ exceptions = [
     { allow = ["BSL-1.0"], crate = "xxhash-rust" },
 ]
 
-# Workspace crates are `publish = false` and carry no license yet (PLAN §4 D19).
-[licenses.private]
-ignore = true
-
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

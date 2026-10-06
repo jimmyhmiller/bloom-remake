@@ -231,7 +231,8 @@ Each is a delivery-level refinement of ARCHITECTURE (what is built does not chan
   express are integration tests named `bench_<id>_*`.
 - **D18 `InputRow`/`OutputRow` live in `blossom-engine::abi`**, so generated typed bindings name only the ABI
   (ARCHITECTURE §4.7's rule for generated code).
-- **D19 No project license is chosen**; every package is `publish = false` until the user decides.
+- **D19 The project is MIT-licensed** (the user's choice, 2026-10-06): `LICENSE` at the root, `license = "MIT"` on
+  every package. Packages stay `publish = false`.
 - **D20 The Raft core is a library module**, `std::consensus::raft`, implementing the `std::consensus::Consensus`
   protocol that coordination synthesis (ANA-046) and dynamic membership (LIB-023) use; `systems/raft` is the flagship
   system built on it.

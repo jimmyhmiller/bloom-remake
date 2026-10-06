@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
 
 # xtask/Cargo.toml is owned by M1.1. A WP that owns an `xtask/src/cmd/*.rs` file and needs another dependency adds
 # it here as a recorded out-of-scope fix (PLAN §2.7); see docs/dev/CONVENTIONS.md.

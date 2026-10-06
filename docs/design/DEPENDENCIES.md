@@ -6,8 +6,8 @@ Every external crate the workspace uses, with its reason and license (ARCHITECTU
 - The license allowlist is ARCHITECTURE §1.2's: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, Zlib and
   Unicode-3.0; MPL-2.0 only for `imbl` and `webpki-roots`. `deny.toml` enforces it with `cargo deny check`, which
   `scripts/ci.sh gate` runs when cargo-deny is installed (`scripts/install-dev-tools.sh`).
-- **No project license has been chosen** (PLAN §4 D19): every workspace package is `publish = false`, and
-  cargo-deny ignores the unlicensed private workspace crates (`[licenses.private] ignore = true`).
+- **The project is MIT-licensed** (`LICENSE`, PLAN §4 D19): every workspace package declares `license = "MIT"`
+  (`license.workspace = true`), which the allowlist admits, and stays `publish = false`.
 - The light crates of ARCHITECTURE §1.2 are declared once in the root `[workspace.dependencies]`; a crate uses them
   with `dep.workspace = true`. Heavy crates (tokio, rustls, quinn, rayon, rustsat, batsat, criterion, dbsp, timely,
   differential-dataflow, dfir_rs, codespan-reporting, syn, quote, prettyplease, rcgen, x509-parser, hdrhistogram,
