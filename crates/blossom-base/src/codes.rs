@@ -1320,8 +1320,8 @@ mod tests {
     fn codes_registry_unique() {
         assert_eq!(
             REGISTRY.len(),
-            127,
-            "LANGUAGE §20 has 123 codes; ARCHITECTURE §0.3 adds 4"
+            134,
+            "LANGUAGE §20 has 130 codes; ARCHITECTURE §0.3 adds 4"
         );
         for (a, b) in REGISTRY.iter().zip(REGISTRY.iter().skip(1)) {
             assert!(
