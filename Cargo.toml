@@ -19,7 +19,8 @@ exclude = ["fuzz"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
-# No project license has been chosen (PLAN §4 D19): nothing is published.
+# The project is MIT-licensed (LICENSE, PLAN §4 D19); nothing is published to a registry.
+license = "MIT"
 publish = false
 
 [workspace.lints.rust]

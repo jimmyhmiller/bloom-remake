@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
 
 # Implemented by WP M8.5 (`cargo run -p xtask -- gen-codegen-corpus`). Generated code names only
 # `blossom_engine::abi` and `blossom_wire::abi`.
