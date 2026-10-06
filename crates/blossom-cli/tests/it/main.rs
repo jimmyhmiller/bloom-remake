@@ -94,6 +94,32 @@ fn cli_usage_errors_exit_2_and_help_lists_exit_codes() {
     assert!(String::from_utf8(version.stdout).unwrap().starts_with("blossom "));
 }
 
+#[test]
+fn completions_write_a_script_for_each_shell() {
+    for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+        let out = blossom(&["completions", shell]);
+        assert_eq!(out.status.code(), Some(0), "{shell}");
+        let script = String::from_utf8(out.stdout).unwrap();
+        // Every subcommand is completed.
+        for cmd in ["check", "explain", "completions", "ldfi"] {
+            assert!(script.contains(cmd), "{shell}: {cmd}");
+        }
+        // The shells this machine has parse their scripts (`-n`: read, do not run).
+        if matches!(shell, "bash" | "zsh") {
+            let path = std::env::temp_dir().join(format!("blossom-completions-{}.{shell}", std::process::id()));
+            std::fs::write(&path, &script).unwrap();
+            let parsed = Command::new(shell).arg("-n").arg(&path).output();
+            let _ = std::fs::remove_file(&path);
+            match parsed {
+                Ok(o) => assert!(o.status.success(), "{shell}: {}", String::from_utf8_lossy(&o.stderr)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => panic!("{shell}: {e}"),
+            }
+        }
+    }
+    assert_eq!(blossom(&["completions", "nushell"]).status.code(), Some(2));
+}
+
 /// `blossom sim` feeds a Blossom program's byte streams scripted connections and chunks, prints each tick's requests
 /// to the host, and refuses a script that breaks the runtime's order (a chunk in its connection's opening tick).
 #[test]

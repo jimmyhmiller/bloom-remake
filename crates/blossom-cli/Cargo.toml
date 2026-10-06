@@ -47,6 +47,8 @@ blossom-verify.workspace = true
 blossom-build.workspace = true
 blossom-lsp.workspace = true
 clap.workspace = true
+# `blossom completions`: shell completion scripts generated from the command tree (S17).
+clap_complete = "4.6.11"
 # The process's allocator (S10: small allocations on the engine's hot paths).
 mimalloc = { version = "0.1", default-features = false }
 
