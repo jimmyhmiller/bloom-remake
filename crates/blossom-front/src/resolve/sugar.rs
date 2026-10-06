@@ -10,8 +10,8 @@ use blossom_value::types::TypeDef;
 use super::Resolver;
 use super::body::RuleCx;
 use crate::ast::{
-    Arg, AtomLit, BinOp, Block, Body, Child, ChildElse, Element, Expr, ExprKind, Head, Ident, Lit, LitValue, Spread,
-    Stmt, VerbStmt,
+    Arg, AtomLit, BinOp, Block, Body, Child, ChildElse, Element, Expr, ExprKind, FragmentItem, Head, Ident, Lit,
+    LitValue, Spread, Stmt, VerbStmt,
 };
 use crate::hir::HRelId;
 
@@ -312,6 +312,7 @@ impl<'t> Resolver<'t, '_> {
                     );
                     return None;
                 }
+                Child::Stmt(s) => out.push((**s).clone()),
             }
         }
         Some(out)
@@ -604,10 +605,11 @@ impl<'t> Resolver<'t, '_> {
             }
         }
         // Children: elements by slot, `if`/`for` blocks around theirs, and at most one content.
+        // Below an element its id tells its descendants apart: inside a `for`, it has an id or a key of its own.
         let inner = Place {
             parent: id.clone(),
             path,
-            in_for: place.in_for,
+            in_for: false,
         };
         let mut child_ordinal = 0;
         let mut content_seen = false;
@@ -630,7 +632,37 @@ impl<'t> Resolver<'t, '_> {
         let mut out = Vec::new();
         for c in children {
             match c {
+                Child::Element(e) if self.fragment_named(cx, e).is_some() => {
+                    let Some(frag) = self.fragment_named(cx, e) else {
+                        continue;
+                    };
+                    if v.to.is_some() {
+                        self.unsupported("LANG-084", "a fragment call in a tree statement with `to`", e.span);
+                        return None;
+                    }
+                    if self.fragments_expanding.contains(&frag.name.name) {
+                        self.error(
+                            code!("BLS0433"),
+                            e.span,
+                            format!("the fragment `{}` calls itself", frag.name.as_str()),
+                        );
+                        return None;
+                    }
+                    // The call's elements are the enclosing element's children: its id is a hidden parameter.
+                    let hidden = format!("parent$frag@{}", e.span.lo);
+                    let inner = Place {
+                        parent: path_expr(&hidden, e.span),
+                        path: place.path.clone(),
+                        in_for: place.in_for,
+                    };
+                    self.fragments_expanding.push(frag.name.name);
+                    let body = self.tree_children(cx, v, info, &frag.body, &inner, ordinal, content_seen);
+                    self.fragments_expanding.pop();
+                    let body = body?;
+                    out.push(self.fragment_block(cx, frag, e, vec![(hidden, place.parent.clone())], body)?);
+                }
                 Child::Element(e) => self.element(cx, v, info, e, place, ordinal, &mut out)?,
+                Child::Stmt(s) => out.push((**s).clone()),
                 Child::Content(x) => {
                     let Some(content) = &info.content else {
                         self.error(code!("BLS0434"), x.span, "this tree declares no `content` relation");
@@ -715,6 +747,182 @@ impl<'t> Resolver<'t, '_> {
             }
         }
         Some(out)
+    }
+
+    /// The fragment an element (or a call statement) names, if it names one.
+    fn fragment_named(&self, cx: &RuleCx, e: &Element) -> Option<&'t FragmentItem> {
+        match e.name.as_slice() {
+            [name] => self.scope(cx.ms).fragments.get(&name.name).copied(),
+            _ => None,
+        }
+    }
+
+    /// `frag(args);` among statements: the fragment's statements in a block of their own (SUGAR.md §4).
+    pub(super) fn fragment_call(&mut self, cx: &RuleCx, e: &Element) -> Option<Stmt> {
+        let Some(frag) = self.fragment_named(cx, e) else {
+            let name: Vec<&str> = e.name.iter().map(Ident::as_str).collect();
+            self.error(code!("BLS0200"), e.span, format!("no fragment `{}`", name.join(".")));
+            return None;
+        };
+        if !e.meta.is_empty() || !e.children.is_empty() {
+            self.error(
+                code!("BLS0303"),
+                e.span,
+                "a fragment call takes arguments only: `name(args);`",
+            );
+            return None;
+        }
+        let body = self.fragment_stmts(cx, &frag.body)?;
+        self.fragment_block(cx, frag, e, Vec::new(), body)
+    }
+
+    /// A fragment's items as statements: a call outside a tree has no element to put tree elements under (BLS0432).
+    fn fragment_stmts(&mut self, cx: &RuleCx, items: &[Child]) -> Option<Vec<Stmt>> {
+        let mut out = Vec::new();
+        for c in items {
+            match c {
+                Child::Stmt(s) => out.push((**s).clone()),
+                Child::Element(e) if self.fragment_named(cx, e).is_some() => out.push(Stmt::Call(e.clone())),
+                Child::Element(e) => {
+                    self.error(
+                        code!("BLS0432"),
+                        e.span,
+                        "a fragment's elements need a tree around the call (`emit html … { call(…); }`)",
+                    );
+                    return None;
+                }
+                Child::If { cond, then, els, span } => {
+                    let then = self.fragment_stmts(cx, then)?;
+                    let els = match els.as_deref() {
+                        None => None,
+                        Some(ChildElse::Children(cs)) => Some(Box::new(crate::ast::Else::Block(Block {
+                            stmts: self.fragment_stmts(cx, cs)?,
+                            span: *span,
+                        }))),
+                        Some(ChildElse::If(c)) => {
+                            let mut inner = self.fragment_stmts(cx, std::slice::from_ref(&**c))?;
+                            match inner.pop() {
+                                Some(s @ Stmt::If { .. }) if inner.is_empty() => {
+                                    Some(Box::new(crate::ast::Else::If(Box::new(s))))
+                                }
+                                _ => None,
+                            }
+                        }
+                    };
+                    out.push(Stmt::If {
+                        attrs: Vec::new(),
+                        cond: cond.clone(),
+                        then: Block {
+                            stmts: then,
+                            span: *span,
+                        },
+                        els,
+                        span: *span,
+                    });
+                }
+                Child::For { cond, children, span } => {
+                    let inner = self.fragment_stmts(cx, children)?;
+                    out.push(Stmt::For {
+                        attrs: Vec::new(),
+                        cond: cond.clone(),
+                        block: Block {
+                            stmts: inner,
+                            span: *span,
+                        },
+                        span: *span,
+                    });
+                }
+                Child::Content(x) => {
+                    self.error(
+                        code!("BLS0432"),
+                        x.span,
+                        "a fragment's content or elements need a tree around the call",
+                    );
+                    return None;
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// A call's block: its arguments' values bound in the caller's scope (with `hidden` ones, a tree's context), then
+    /// the parameters, typed, from them, for `body` to see alone.
+    fn fragment_block(
+        &mut self,
+        cx: &RuleCx,
+        frag: &FragmentItem,
+        call: &Element,
+        hidden: Vec<(String, Expr)>,
+        body: Vec<Stmt>,
+    ) -> Option<Stmt> {
+        let _ = cx;
+        let span = call.span;
+        let mut values = Vec::new();
+        for a in &call.args {
+            match a {
+                Arg::Pos(x) => values.push(x.clone()),
+                other => {
+                    self.error(
+                        code!("BLS0303"),
+                        other.span(),
+                        "a fragment's arguments are positional, in its parameters' order",
+                    );
+                    return None;
+                }
+            }
+        }
+        if values.len() != frag.params.len() {
+            self.error(
+                code!("BLS0301"),
+                span,
+                format!(
+                    "`{}` takes {} argument(s), {} given",
+                    frag.name.as_str(),
+                    frag.params.len(),
+                    values.len()
+                ),
+            );
+            return None;
+        }
+        let let_lit = |pat: &str, value: Expr| Lit::Let {
+            pat: path_expr(pat, span),
+            value,
+            span,
+        };
+        let mut args = Vec::new();
+        let mut params = Vec::new();
+        for (i, ((p, ty), value)) in frag.params.iter().zip(values).enumerate() {
+            let temp = format!("arg${}${i}@{}", p.as_str(), span.lo);
+            args.push(let_lit(&temp, value));
+            params.push(let_lit(
+                p.as_str(),
+                Expr {
+                    kind: ExprKind::Ascribe {
+                        expr: Box::new(path_expr(&temp, span)),
+                        ty: ty.clone(),
+                    },
+                    span,
+                },
+            ));
+        }
+        for (name, value) in hidden {
+            let temp = format!("arg${name}");
+            args.push(let_lit(&temp, value));
+            params.push(let_lit(&name, path_expr(&temp, span)));
+        }
+        let body_of = |lits: Vec<Lit>| Body {
+            lits,
+            guards: Vec::new(),
+            span,
+        };
+        Some(Stmt::Fragment {
+            name: frag.name,
+            args: body_of(args),
+            params: body_of(params),
+            body: Block { stmts: body, span },
+            text: self.normalized(span),
+            span,
+        })
     }
 
     /// The arguments of a role's row, in its relation's column order, from the values in the role's order.

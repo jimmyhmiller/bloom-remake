@@ -395,7 +395,10 @@ fn children(e: &Expr) -> Vec<&Expr> {
         ExprKind::Field { base, .. } | ExprKind::TupleIndex { base, .. } => vec![base],
         ExprKind::Index { base, index } => vec![base, index],
         ExprKind::Binary { lhs, rhs, .. } => vec![lhs, rhs],
-        ExprKind::Prefix { arg, .. } | ExprKind::Cast { expr: arg, .. } | ExprKind::Try(arg) => vec![arg],
+        ExprKind::Prefix { arg, .. }
+        | ExprKind::Cast { expr: arg, .. }
+        | ExprKind::Ascribe { expr: arg, .. }
+        | ExprKind::Try(arg) => vec![arg],
         ExprKind::Tuple(xs) | ExprKind::Vec(xs) | ExprKind::Set(xs) => xs.iter().collect(),
         ExprKind::Map(kvs) => kvs.iter().flat_map(|(k, v)| [k, v]).collect(),
         ExprKind::If { cond, then, els } => [&**cond, &**then].into_iter().chain(els.as_deref()).collect(),
@@ -676,6 +679,10 @@ fn substitute(e: &Expr, map: &BTreeMap<Symbol, &Expr>) -> Expr {
             arg: Box::new(sub(arg)),
         },
         ExprKind::Cast { expr, ty } => ExprKind::Cast {
+            expr: Box::new(sub(expr)),
+            ty: ty.clone(),
+        },
+        ExprKind::Ascribe { expr, ty } => ExprKind::Ascribe {
             expr: Box::new(sub(expr)),
             ty: ty.clone(),
         },

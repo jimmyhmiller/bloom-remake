@@ -83,7 +83,7 @@ fn generate(path: &Path) -> Result<String, String> {
         out.push_str(&format!("impl {name} {{\n    /// Direct named child, if present.\n    pub fn name(&self) -> Option<Name> {{ child(&self.0) }}\n    /// Direct expressions.\n    pub fn exprs(&self) -> AstChildren<Expr> {{ children(&self.0) }}\n    /// Direct types.\n    pub fn types(&self) -> AstChildren<Type> {{ children(&self.0) }}\n}}\n\n"));
     }
     let groups: [(&str, &[&str]); 4] = [
-        ("Stmt", &["VerbStmt", "IfStmt", "ForStmt"]),
+        ("Stmt", &["VerbStmt", "IfStmt", "ForStmt", "CallStmt"]),
         (
             "Literal",
             &[
@@ -170,6 +170,7 @@ fn generate(path: &Path) -> Result<String, String> {
                 "SnapshotItem",
                 "SpecItem",
                 "TreeItem",
+                "FragmentItem",
             ],
         ),
     ];

@@ -661,6 +661,14 @@ pub static REGISTRY: &[CodeInfo] = &[
         "an interpolation hole's format spec other than `.N`",
     ),
     info(
+        "BLS0436",
+        Error,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "a fragment parameter that is not a variable name (variables start with a lowercase letter or `_`)",
+    ),
+    info(
         "BLS0500",
         Error,
         "blossom-front",

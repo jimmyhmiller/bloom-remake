@@ -1800,6 +1800,35 @@ impl Block {
     }
 }
 
+/// Typed CST view for `CallStmt`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallStmt(pub(crate) SyntaxNode);
+impl AstNode for CallStmt {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::CALLSTMT
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        Self::can_cast(node.kind()).then_some(Self(node))
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+impl CallStmt {
+    /// Direct named child, if present.
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// Direct expressions.
+    pub fn exprs(&self) -> AstChildren<Expr> {
+        children(&self.0)
+    }
+    /// Direct types.
+    pub fn types(&self) -> AstChildren<Type> {
+        children(&self.0)
+    }
+}
+
 /// Typed CST view for `VerbStmt`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerbStmt(pub(crate) SyntaxNode);
@@ -3598,6 +3627,35 @@ impl Children {
     }
 }
 
+/// Typed CST view for `FragmentItem`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FragmentItem(pub(crate) SyntaxNode);
+impl AstNode for FragmentItem {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::FRAGMENTITEM
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        Self::can_cast(node.kind()).then_some(Self(node))
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+impl FragmentItem {
+    /// Direct named child, if present.
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// Direct expressions.
+    pub fn exprs(&self) -> AstChildren<Expr> {
+        children(&self.0)
+    }
+    /// Direct types.
+    pub fn types(&self) -> AstChildren<Type> {
+        children(&self.0)
+    }
+}
+
 /// Typed CST view for `IfChild`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IfChild(pub(crate) SyntaxNode);
@@ -4390,16 +4448,22 @@ pub enum Stmt {
     If(IfStmt),
     /// `ForStmt`.
     For(ForStmt),
+    /// `CallStmt`.
+    Call(CallStmt),
 }
 impl AstNode for Stmt {
     fn can_cast(kind: SyntaxKind) -> bool {
-        matches!(kind, SyntaxKind::VERBSTMT | SyntaxKind::IFSTMT | SyntaxKind::FORSTMT)
+        matches!(
+            kind,
+            SyntaxKind::VERBSTMT | SyntaxKind::IFSTMT | SyntaxKind::FORSTMT | SyntaxKind::CALLSTMT
+        )
     }
     fn cast(node: SyntaxNode) -> Option<Self> {
         match node.kind() {
             SyntaxKind::VERBSTMT => Some(Self::Verb(VerbStmt(node))),
             SyntaxKind::IFSTMT => Some(Self::If(IfStmt(node))),
             SyntaxKind::FORSTMT => Some(Self::For(ForStmt(node))),
+            SyntaxKind::CALLSTMT => Some(Self::Call(CallStmt(node))),
             _ => None,
         }
     }
@@ -4408,6 +4472,7 @@ impl AstNode for Stmt {
             Self::Verb(n) => n.syntax(),
             Self::If(n) => n.syntax(),
             Self::For(n) => n.syntax(),
+            Self::Call(n) => n.syntax(),
         }
     }
 }
@@ -4717,6 +4782,8 @@ pub enum Item {
     Spec(SpecItem),
     /// `TreeItem`.
     Tree(TreeItem),
+    /// `FragmentItem`.
+    Fragment(FragmentItem),
 }
 impl AstNode for Item {
     fn can_cast(kind: SyntaxKind) -> bool {
@@ -4757,6 +4824,7 @@ impl AstNode for Item {
                 | SyntaxKind::SNAPSHOTITEM
                 | SyntaxKind::SPECITEM
                 | SyntaxKind::TREEITEM
+                | SyntaxKind::FRAGMENTITEM
         )
     }
     fn cast(node: SyntaxNode) -> Option<Self> {
@@ -4796,6 +4864,7 @@ impl AstNode for Item {
             SyntaxKind::SNAPSHOTITEM => Some(Self::Snapshot(SnapshotItem(node))),
             SyntaxKind::SPECITEM => Some(Self::Spec(SpecItem(node))),
             SyntaxKind::TREEITEM => Some(Self::Tree(TreeItem(node))),
+            SyntaxKind::FRAGMENTITEM => Some(Self::Fragment(FragmentItem(node))),
             _ => None,
         }
     }
@@ -4836,6 +4905,7 @@ impl AstNode for Item {
             Self::Snapshot(n) => n.syntax(),
             Self::Spec(n) => n.syntax(),
             Self::Tree(n) => n.syntax(),
+            Self::Fragment(n) => n.syntax(),
         }
     }
 }

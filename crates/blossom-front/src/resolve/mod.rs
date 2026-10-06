@@ -299,6 +299,8 @@ pub(crate) struct ModScope<'t> {
     pub generic_fns: BTreeMap<Symbol, usize>,
     /// Trees declared in this module, by name (docs/design/SUGAR.md §3).
     pub trees: BTreeMap<Symbol, sugar::TreeInfo>,
+    /// Fragments declared in this module, by name (SUGAR.md §4).
+    pub fragments: BTreeMap<Symbol, &'t ast::FragmentItem>,
 }
 
 impl ModScope<'_> {
@@ -319,6 +321,7 @@ impl ModScope<'_> {
             fns: BTreeMap::new(),
             generic_fns: BTreeMap::new(),
             trees: BTreeMap::new(),
+            fragments: BTreeMap::new(),
         }
     }
 }
@@ -381,6 +384,8 @@ pub(crate) struct Resolver<'t, 'd> {
     pub instance_calls: BTreeMap<HFnId, BTreeSet<HFnId>>,
     /// The templates being instantiated, innermost last: a template met again is recursive.
     pub instantiating: Vec<usize>,
+    /// The fragments being expanded, innermost last: one met again calls itself (BLS0433).
+    pub fragments_expanding: Vec<Symbol>,
     /// Templates already reported recursive.
     pub recursive: BTreeSet<usize>,
     /// Whether the instance bound was reported (once).
@@ -435,6 +440,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             templates: Vec::new(),
             instance_calls: BTreeMap::new(),
             instantiating: Vec::new(),
+            fragments_expanding: Vec::new(),
             recursive: BTreeSet::new(),
             instances_capped: false,
             handler_labels: BTreeMap::new(),
@@ -1020,6 +1026,31 @@ impl<'t, 'd> Resolver<'t, 'd> {
     /// their shapes (BLS0434).
     fn trees(&mut self, s: ScopeIdx, items: &'t [ast::Item]) {
         for item in items {
+            if let ItemKind::Fragment(f) = &item.kind {
+                if self.scope(s).fragments.contains_key(&f.name.name) {
+                    self.error(
+                        code!("BLS0201"),
+                        f.name.span,
+                        format!("`{}` is declared twice", f.name.as_str()),
+                    );
+                } else {
+                    self.scope_mut(s).fragments.insert(f.name.name, f);
+                }
+                for (p, _) in &f.params {
+                    if !p.as_str().starts_with(|c: char| c.is_ascii_lowercase() || c == '_') || p.as_str() == "_" {
+                        self.error(
+                            code!("BLS0436"),
+                            p.span,
+                            format!(
+                                "`{}` is not a variable name: a fragment's parameters start with a lowercase letter \
+                                 or `_`",
+                                p.as_str()
+                            ),
+                        );
+                    }
+                }
+                continue;
+            }
             let ItemKind::Tree(t) = &item.kind else { continue };
             let mut node = None;
             let mut props = None;
@@ -2014,7 +2045,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 }
                 ItemKind::Fact(f) => self.fact(s, f),
                 // Declared by `trees`.
-                ItemKind::Tree(_) => {}
+                ItemKind::Tree(_) | ItemKind::Fragment(_) => {}
                 ItemKind::Format(f) => self.bugs.push(blossom_base::internal_error!(
                     "format `{}` reached name resolution (formats are expanded when files load)",
                     f.name.as_str()
@@ -2117,6 +2148,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             fns: BTreeMap::new(),
             generic_fns: BTreeMap::new(),
             trees: BTreeMap::new(),
+            fragments: BTreeMap::new(),
         });
         // Value and relation parameters.
         let mut given: BTreeMap<Symbol, &'t ast::Expr> = BTreeMap::new();
@@ -2329,6 +2361,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             fns: BTreeMap::new(),
             generic_fns: BTreeMap::new(),
             trees: BTreeMap::new(),
+            fragments: BTreeMap::new(),
         });
         for item in &p.items {
             match &item.kind {

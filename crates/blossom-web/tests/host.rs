@@ -798,3 +798,48 @@ fn a_map_spread_draws_a_row_per_entry() {
     b.start(None, "", T0).unwrap();
     assert_eq!(a.page(), b.page());
 }
+
+#[test]
+fn fragments_draw_what_their_expansion_draws_and_keep_their_variables_to_themselves() {
+    // A fragment in a tree (its elements are the calling element's children, in its slot) and among statements;
+    // inside it, `x` is its own: the caller's `x` does not narrow its `for`.
+    let state = "table seen(x: u64) key(x);\n\
+                 init: on boot() { upsert seen(1); upsert seen(2); upsert seen(3); }\n";
+    let sugar = format!(
+        "{state}fragment pillar(k: u64, h: f64) {{\n\
+             g[key: k](transform: f\"translate({{k}} 0)\") {{ rect(height: h); }}\n\
+         }}\n\
+         fragment every(tag: String) {{\n\
+             for seen(x) {{ emit elem(tag ++ x.to_string(), \"\", 10, \"i\"); }}\n\
+         }}\n\
+         page: while seen(x) where x == 2 {{\n\
+             emit html div[id: \"box\"] {{\n\
+                 span();\n\
+                 for seen(k) {{ pillar(k, k as f64 * 2.0); }}\n\
+                 b();\n\
+             }}\n\
+             every(\"e\");\n\
+         }}\n"
+    );
+    let plain = format!(
+        "{state}page: while seen(x) where x == 2 {{\n\
+             emit elem(\"box\", \"\", 0, \"div\");\n\
+             emit elem(\"box/span.0\", \"box\", 0, \"span\");\n\
+             emit elem(\"box/b.2\", \"box\", 2, \"b\");\n\
+         }}\n\
+         pillars: while seen(k) {{\n\
+             emit elem(\"box/g.1[\" ++ k.to_string() ++ \"]\", \"box\", 1, \"g\");\n\
+             emit attr(\"box/g.1[\" ++ k.to_string() ++ \"]\", \"transform\", \"translate(\" ++ k.to_string() ++ \" 0)\");\n\
+             emit elem(\"box/g.1[\" ++ k.to_string() ++ \"]/rect.0\", \"box/g.1[\" ++ k.to_string() ++ \"]\", 0, \"rect\");\n\
+             emit attr(\"box/g.1[\" ++ k.to_string() ++ \"]/rect.0\", \"height\", (k as f64 * 2.0).to_string());\n\
+         }}\n\
+         every: while seen(x) {{ emit elem(\"e\" ++ x.to_string(), \"\", 10, \"i\"); }}\n"
+    );
+    let mut a = app_of("frag", &sugar);
+    let mut b = app_of("frag_plain", &plain);
+    a.start(None, "", T0).unwrap();
+    b.start(None, "", T0).unwrap();
+    assert_eq!(a.page(), b.page());
+    // Three `every` elements, not the one the caller's `x` would have joined to.
+    assert_eq!(a.page().ids().filter(|i| i.starts_with('e')).count(), 3);
+}

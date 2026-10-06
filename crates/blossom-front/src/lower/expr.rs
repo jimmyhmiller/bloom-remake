@@ -472,6 +472,7 @@ impl Lowerer<'_> {
                     arms: out,
                 }
             }
+            HExprKind::Ascribe { expr, .. } => self.expr(d, expr)?,
             HExprKind::Cast { expr, ty } => {
                 if expr.ty == Some(*ty) {
                     self.expr(d, expr)?

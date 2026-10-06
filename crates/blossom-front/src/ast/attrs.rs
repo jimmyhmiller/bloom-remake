@@ -330,6 +330,7 @@ impl Cx<'_> {
             ItemKind::Use(_) => Site::Item("use"),
             ItemKind::Format(_) => Site::Item("format"),
             ItemKind::Tree(_) => Site::Item("tree"),
+            ItemKind::Fragment(_) => Site::Item("fragment"),
             ItemKind::Import(_) => Site::Item("import"),
             ItemKind::Include(_) => Site::Item("include"),
             ItemKind::Const { .. } => Site::Item("const"),
@@ -411,6 +412,8 @@ impl Cx<'_> {
                     self.attrs(attrs, Site::BlockStatement);
                     self.stmts(&block.stmts);
                 }
+                Stmt::Fragment { body, .. } => self.stmts(&body.stmts),
+                Stmt::Call(_) => {}
             }
         }
     }

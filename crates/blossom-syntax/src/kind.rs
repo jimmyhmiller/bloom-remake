@@ -543,6 +543,10 @@ pub enum SyntaxKind {
     TREEITEM,
     /// treerole.
     TREEROLE,
+    /// fragmentitem.
+    FRAGMENTITEM,
+    /// callstmt.
+    CALLSTMT,
 }
 impl SyntaxKind {
     /// All kinds, in their wire/discriminant order.
@@ -820,6 +824,8 @@ impl SyntaxKind {
         Self::CONTENT,
         Self::TREEITEM,
         Self::TREEROLE,
+        Self::FRAGMENTITEM,
+        Self::CALLSTMT,
     ];
     /// Whether this token is trivia.
     pub fn is_trivia(self) -> bool {

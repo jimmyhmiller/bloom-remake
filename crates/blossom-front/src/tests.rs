@@ -1621,3 +1621,39 @@ fn a_map_spread_is_a_row_per_entry() {
     );
     assert_eq!(diags(src), Vec::<(String, String)>::new());
 }
+
+#[test]
+fn fragments_check_their_calls() {
+    let head = "output elem(id: String, parent: String, pos: i64, tag: String);\n\
+                output attr(id: String, name: String, value: String);\n\
+                output text(id: String, s: String);\n\
+                tree html { node elem(id, parent, pos, tag); props attr(id, name, value); content text(id, s); }\n\
+                output o(n: u64);\n";
+    let case = |body: &str| diags(Box::leak(format!("{HEAD}{head}{body}").into_boxed_str()));
+    let has = |d: &[(String, String)], code: &str| d.iter().any(|(c, _)| c == code);
+    let ok = case(
+        "fragment two(n: u64) { emit o(n); emit o(n + 1); }\n\
+         fragment item(n: u64) { li[key: n] { n } }\n\
+         a: on go(k, v) { two(k); }\n\
+         b: on go(k, v) { emit html ul() { item(k); } }\n",
+    );
+    assert_eq!(ok, Vec::<(String, String)>::new());
+    let d = case("fragment f(n: u64) { g(n); }\nfragment g(n: u64) { f(n); }\na: on go(k, v) { f(k); }\n");
+    assert!(has(&d, "BLS0433"), "{d:?}");
+    let d = case("fragment f(n: u64) { span { n } }\na: on go(k, v) { f(k); }\n");
+    assert!(has(&d, "BLS0432"), "{d:?}");
+    let d = case("fragment f(n: u64) { emit o(n); }\na: on go(k, v) { f(k, v); }\n");
+    assert!(has(&d, "BLS0301"), "{d:?}");
+    let d = case("fragment f(n: u64) { emit o(n); }\na: on go(k, v) { f(\"seven\"); }\n");
+    assert!(!d.is_empty(), "a String passed for a u64 parameter compiled");
+    let d = case("a: on go(k, v) { nothing(k); }\n");
+    assert!(has(&d, "BLS0200"), "{d:?}");
+}
+
+#[test]
+fn a_fragment_parameter_may_not_name_a_constant() {
+    let d = diags(with_head(
+        "const N: u64 = 3;\noutput o(n: u64);\nfragment f(N: u64) { emit o(N); }\na: on go(k, v) { f(k); }\n",
+    ));
+    assert!(d.iter().any(|(c, _)| c == "BLS0436"), "{d:?}");
+}

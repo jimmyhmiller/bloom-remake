@@ -2040,6 +2040,18 @@ impl Checker<'_> {
                     self.record(to)
                 }
             }
+            HExprKind::Ascribe { expr, ty } => {
+                // The value flows into the declared type, as an argument into a parameter.
+                let ty = *ty;
+                let a = self.expr(hir, scope, expr);
+                if self.apply {
+                    self.next_term()
+                } else {
+                    let to = self.of_type(hir, ty);
+                    self.flow(a, to, true, span);
+                    self.record(to)
+                }
+            }
             HExprKind::SelfNode => {
                 if self.apply {
                     self.next_term()

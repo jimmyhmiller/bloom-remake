@@ -127,6 +127,8 @@ pub enum ItemKind {
     Format(FormatItem),
     /// `tree NAME { node rel(cols); props rel(cols); content rel(cols); }` (docs/design/SUGAR.md §3).
     Tree(TreeDecl),
+    /// `fragment NAME(params) { items }` (docs/design/SUGAR.md §4).
+    Fragment(FragmentItem),
     /// A construct this build parses but does not accept yet; the converter has already reported it (BLS0908).
     Unsupported {
         what: &'static str,
@@ -452,6 +454,19 @@ pub enum Stmt {
         block: Block,
         span: Span,
     },
+    /// `frag(args);`: a fragment's statements here (docs/design/SUGAR.md §4).
+    Call(Element),
+    /// A fragment call, expanded (never written): `args` binds the call's argument values in the caller's scope;
+    /// below it only those are visible, and `params` binds the fragment's parameters from them, so the fragment's
+    /// variables are its own.
+    Fragment {
+        name: Ident,
+        args: Body,
+        params: Body,
+        body: Block,
+        text: String,
+        span: Span,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -519,6 +534,8 @@ pub enum Child {
     },
     /// A bare expression: an element's content.
     Content(Expr),
+    /// A statement among a fragment's or a tree's items.
+    Stmt(Box<Stmt>),
 }
 
 #[derive(Clone, Debug)]
@@ -535,6 +552,15 @@ pub struct Element {
     pub meta: Vec<Arg>,
     pub args: Vec<Arg>,
     pub children: Vec<Child>,
+    pub span: Span,
+}
+
+/// A fragment: a named, parameterized group of statements and tree elements.
+#[derive(Clone, Debug)]
+pub struct FragmentItem {
+    pub name: Ident,
+    pub params: Vec<(Ident, Type)>,
+    pub body: Vec<Child>,
     pub span: Span,
 }
 
@@ -857,6 +883,11 @@ pub enum ExprKind {
     /// `e?`: `e`'s value if it is `Some`, else the enclosing function returns `None` (EXTENSIONS 2.1). Function
     /// bodies desugar it into `match`es before name resolution (`ast::desugar`); anywhere else it is BLS0218.
     Try(Box<Expr>),
+    /// `expr` checked to have type `ty` (never written: a fragment's typed parameter, docs/design/SUGAR.md §4).
+    Ascribe {
+        expr: Box<Expr>,
+        ty: Type,
+    },
 }
 
 /// `let pat [: T] = value;` in a block.

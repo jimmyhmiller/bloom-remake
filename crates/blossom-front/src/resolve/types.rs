@@ -184,6 +184,7 @@ impl<'t> Resolver<'t, '_> {
             fns: Default::default(),
             generic_fns: Default::default(),
             trees: Default::default(),
+            fragments: Default::default(),
         });
         ScopeIdx(self.scopes.len() - 1)
     }
