@@ -41,7 +41,7 @@ test("the inspector explains a todo down to the events that made it, and holds t
   await expect(page.locator("#blossom-highlight")).toHaveAttribute("data-id", "label-1");
   await labels(page).nth(1).click();
   await expect(page.locator("#blossom-why .blossom-subject")).toHaveText("label-1");
-  await expect(reason(page, 'elem("label-1"').first()).toContainText("rule `item`");
+  await expect(reason(page, 'elem("label-1"').first()).toContainText("rule `frame`");
   await expect(reason(page, 'todos(1, "Walk the dog", true)').first()).toContainText("by rule `toggle`");
   await expect(reason(page, 'change("toggle-1", true)').first()).toContainText("the event of round");
   await expect(reason(page, 'todos(1, "Walk the dog", false)').first()).toContainText("by rule `add`");

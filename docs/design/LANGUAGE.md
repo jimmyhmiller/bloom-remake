@@ -1381,6 +1381,8 @@ else in the language sees it.
   fragment's own variables are visible: a caller's variable never joins a fragment's (hygiene). Called inside a tree,
   its elements are the enclosing element's children, in the call's slots; called elsewhere, a tree element in it is
   BLS0432. A fragment that calls itself is BLS0433; a parameter that is not a variable name BLS0436.
+- *Calls and content.* Among children, `name(…)` is an element or a fragment call when it ends with `;`, has `[…]`
+  or opens `{ … }`; otherwise it is content (`span { plural(n) }`).
 
 **No `let` statements.** A `let` is a body literal and belongs in the header or in an `if`/`for` body
 (`on timed_out(t), let nt = t + 1 { … }`). A `let` statement is BLS0102. This keeps blocks from reading as
