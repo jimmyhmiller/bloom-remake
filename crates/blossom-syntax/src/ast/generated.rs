@@ -3395,6 +3395,354 @@ impl Arg {
     }
 }
 
+/// Typed CST view for `PropName`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropName(pub(crate) SyntaxNode);
+impl AstNode for PropName {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::PROPNAME
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        Self::can_cast(node.kind()).then_some(Self(node))
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+impl PropName {
+    /// Direct named child, if present.
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// Direct expressions.
+    pub fn exprs(&self) -> AstChildren<Expr> {
+        children(&self.0)
+    }
+    /// Direct types.
+    pub fn types(&self) -> AstChildren<Type> {
+        children(&self.0)
+    }
+}
+
+/// Typed CST view for `RecordLit`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordLit(pub(crate) SyntaxNode);
+impl AstNode for RecordLit {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::RECORDLIT
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        Self::can_cast(node.kind()).then_some(Self(node))
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+impl RecordLit {
+    /// Direct named child, if present.
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// Direct expressions.
+    pub fn exprs(&self) -> AstChildren<Expr> {
+        children(&self.0)
+    }
+    /// Direct types.
+    pub fn types(&self) -> AstChildren<Type> {
+        children(&self.0)
+    }
+}
+
+/// Typed CST view for `TreeName`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeName(pub(crate) SyntaxNode);
+impl AstNode for TreeName {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::TREENAME
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        Self::can_cast(node.kind()).then_some(Self(node))
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+impl TreeName {
+    /// Direct named child, if present.
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// Direct expressions.
+    pub fn exprs(&self) -> AstChildren<Expr> {
+        children(&self.0)
+    }
+    /// Direct types.
+    pub fn types(&self) -> AstChildren<Type> {
+        children(&self.0)
+    }
+}
+
+/// Typed CST view for `Element`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Element(pub(crate) SyntaxNode);
+impl AstNode for Element {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::ELEMENT
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        Self::can_cast(node.kind()).then_some(Self(node))
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+impl Element {
+    /// Direct named child, if present.
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// Direct expressions.
+    pub fn exprs(&self) -> AstChildren<Expr> {
+        children(&self.0)
+    }
+    /// Direct types.
+    pub fn types(&self) -> AstChildren<Type> {
+        children(&self.0)
+    }
+}
+
+/// Typed CST view for `ElemName`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElemName(pub(crate) SyntaxNode);
+impl AstNode for ElemName {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::ELEMNAME
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        Self::can_cast(node.kind()).then_some(Self(node))
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+impl ElemName {
+    /// Direct named child, if present.
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// Direct expressions.
+    pub fn exprs(&self) -> AstChildren<Expr> {
+        children(&self.0)
+    }
+    /// Direct types.
+    pub fn types(&self) -> AstChildren<Type> {
+        children(&self.0)
+    }
+}
+
+/// Typed CST view for `Meta`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Meta(pub(crate) SyntaxNode);
+impl AstNode for Meta {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::META
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        Self::can_cast(node.kind()).then_some(Self(node))
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+impl Meta {
+    /// Direct named child, if present.
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// Direct expressions.
+    pub fn exprs(&self) -> AstChildren<Expr> {
+        children(&self.0)
+    }
+    /// Direct types.
+    pub fn types(&self) -> AstChildren<Type> {
+        children(&self.0)
+    }
+}
+
+/// Typed CST view for `Children`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Children(pub(crate) SyntaxNode);
+impl AstNode for Children {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::CHILDREN
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        Self::can_cast(node.kind()).then_some(Self(node))
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+impl Children {
+    /// Direct named child, if present.
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// Direct expressions.
+    pub fn exprs(&self) -> AstChildren<Expr> {
+        children(&self.0)
+    }
+    /// Direct types.
+    pub fn types(&self) -> AstChildren<Type> {
+        children(&self.0)
+    }
+}
+
+/// Typed CST view for `IfChild`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IfChild(pub(crate) SyntaxNode);
+impl AstNode for IfChild {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::IFCHILD
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        Self::can_cast(node.kind()).then_some(Self(node))
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+impl IfChild {
+    /// Direct named child, if present.
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// Direct expressions.
+    pub fn exprs(&self) -> AstChildren<Expr> {
+        children(&self.0)
+    }
+    /// Direct types.
+    pub fn types(&self) -> AstChildren<Type> {
+        children(&self.0)
+    }
+}
+
+/// Typed CST view for `ForChild`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForChild(pub(crate) SyntaxNode);
+impl AstNode for ForChild {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::FORCHILD
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        Self::can_cast(node.kind()).then_some(Self(node))
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+impl ForChild {
+    /// Direct named child, if present.
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// Direct expressions.
+    pub fn exprs(&self) -> AstChildren<Expr> {
+        children(&self.0)
+    }
+    /// Direct types.
+    pub fn types(&self) -> AstChildren<Type> {
+        children(&self.0)
+    }
+}
+
+/// Typed CST view for `Content`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Content(pub(crate) SyntaxNode);
+impl AstNode for Content {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::CONTENT
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        Self::can_cast(node.kind()).then_some(Self(node))
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+impl Content {
+    /// Direct named child, if present.
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// Direct expressions.
+    pub fn exprs(&self) -> AstChildren<Expr> {
+        children(&self.0)
+    }
+    /// Direct types.
+    pub fn types(&self) -> AstChildren<Type> {
+        children(&self.0)
+    }
+}
+
+/// Typed CST view for `TreeItem`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeItem(pub(crate) SyntaxNode);
+impl AstNode for TreeItem {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::TREEITEM
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        Self::can_cast(node.kind()).then_some(Self(node))
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+impl TreeItem {
+    /// Direct named child, if present.
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// Direct expressions.
+    pub fn exprs(&self) -> AstChildren<Expr> {
+        children(&self.0)
+    }
+    /// Direct types.
+    pub fn types(&self) -> AstChildren<Type> {
+        children(&self.0)
+    }
+}
+
+/// Typed CST view for `TreeRole`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeRole(pub(crate) SyntaxNode);
+impl AstNode for TreeRole {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::TREEROLE
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        Self::can_cast(node.kind()).then_some(Self(node))
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+impl TreeRole {
+    /// Direct named child, if present.
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// Direct expressions.
+    pub fn exprs(&self) -> AstChildren<Expr> {
+        children(&self.0)
+    }
+    /// Direct types.
+    pub fn types(&self) -> AstChildren<Type> {
+        children(&self.0)
+    }
+}
+
 /// Typed CST view for `BangClause`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BangClause(pub(crate) SyntaxNode);
@@ -4367,6 +4715,8 @@ pub enum Item {
     Snapshot(SnapshotItem),
     /// `SpecItem`.
     Spec(SpecItem),
+    /// `TreeItem`.
+    Tree(TreeItem),
 }
 impl AstNode for Item {
     fn can_cast(kind: SyntaxKind) -> bool {
@@ -4406,6 +4756,7 @@ impl AstNode for Item {
                 | SyntaxKind::TRANSLATEITEM
                 | SyntaxKind::SNAPSHOTITEM
                 | SyntaxKind::SPECITEM
+                | SyntaxKind::TREEITEM
         )
     }
     fn cast(node: SyntaxNode) -> Option<Self> {
@@ -4444,6 +4795,7 @@ impl AstNode for Item {
             SyntaxKind::TRANSLATEITEM => Some(Self::Translate(TranslateItem(node))),
             SyntaxKind::SNAPSHOTITEM => Some(Self::Snapshot(SnapshotItem(node))),
             SyntaxKind::SPECITEM => Some(Self::Spec(SpecItem(node))),
+            SyntaxKind::TREEITEM => Some(Self::Tree(TreeItem(node))),
             _ => None,
         }
     }
@@ -4483,6 +4835,7 @@ impl AstNode for Item {
             Self::Translate(n) => n.syntax(),
             Self::Snapshot(n) => n.syntax(),
             Self::Spec(n) => n.syntax(),
+            Self::Tree(n) => n.syntax(),
         }
     }
 }

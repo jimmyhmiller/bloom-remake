@@ -404,6 +404,7 @@ impl Cx<'_> {
                 ItemKind::Protocol(ProtocolItem { name, generics, items })
             }
             FORMATITEM => ItemKind::Format(self.format_item(node, span)?),
+            TREEITEM => ItemKind::Tree(self.tree_item(node, span)?),
             STREAMITEM => {
                 let names = self.names(node);
                 let (Some(name), Some(kind)) = (names.first().copied(), names.get(1).copied()) else {
@@ -1021,13 +1022,27 @@ impl Cx<'_> {
                     self.malformed("a statement without a verb", span);
                     return None;
                 };
-                let head = match child_of(node, HEAD) {
-                    Some(h) => self.head(&h),
-                    None => {
+                let (head, tree) = match (child_of(node, HEAD), child_of(node, TREENAME), child_of(node, ELEMENT)) {
+                    (Some(h), _, _) => (self.head(&h), None),
+                    (None, Some(t), Some(e)) => {
+                        let tspan = self.span(&t);
+                        let rel = match child_of(&t, RELPATH) {
+                            Some(r) => self.names(&r),
+                            None => self.names(&t),
+                        };
+                        let head = Head {
+                            rel,
+                            args: Vec::new(),
+                            span: tspan,
+                        };
+                        (head, Some(Box::new(self.element(&e))))
+                    }
+                    _ => {
                         self.malformed("a statement without a head", span);
                         return None;
                     }
                 };
+                let children = child_of(node, CHILDREN).map(|c| self.children(&c)).unwrap_or_default();
                 let extra = expr_children(node).next().map(|e| self.expr(&e));
                 let (to, weight) = match verb {
                     Verb::Send | Verb::Seal => (extra, None),
@@ -1041,6 +1056,9 @@ impl Cx<'_> {
                     to,
                     weight,
                     resolve,
+                    children,
+                    tree,
+                    tag: None,
                     span,
                 })))
             }
@@ -1323,13 +1341,33 @@ impl Cx<'_> {
 
     fn arg(&mut self, node: &SyntaxNode) -> Arg {
         let span = self.span(node);
-        if has_token(node, RANGE) && expr_children(node).next().is_none() {
+        if has_token(node, RANGE) {
+            if let Some(r) = child_of(node, RECORDLIT) {
+                let fields = children_of(&r, ARG)
+                    .filter_map(|f| {
+                        let fspan = self.span(&f);
+                        let name = self.prop_name(&f);
+                        let value = expr_children(&f).next().map(|e| self.expr(&e));
+                        match (name, value) {
+                            (Some(n), Some(v)) => Some((n, v)),
+                            _ => {
+                                self.malformed("a spread field without a name and a value", fspan);
+                                None
+                            }
+                        }
+                    })
+                    .collect();
+                return Arg::Spread(Spread::Record(fields, span));
+            }
+            if let Some(e) = expr_children(node).next() {
+                return Arg::Spread(Spread::Expr(self.expr(&e), span));
+            }
             return Arg::Rest(span);
         }
         if has_token(node, STAR) && expr_children(node).next().is_none() {
             return Arg::Star(span);
         }
-        let name = self.first_name(node);
+        let name = self.prop_name(node);
         let value = expr_children(node).next().map(|e| self.expr(&e));
         match (name, value) {
             (Some(n), Some(v)) => Arg::Named(n, v),
@@ -1343,6 +1381,143 @@ impl Cx<'_> {
                 Arg::Rest(span)
             }
         }
+    }
+
+    /// An argument's name: a plain name, or a property name (dashed, or a string: SUGAR.md §3).
+    fn prop_name(&mut self, node: &SyntaxNode) -> Option<Ident> {
+        if let Some(p) = child_of(node, PROPNAME) {
+            let span = self.span(&p);
+            let toks: Vec<SyntaxToken> = tokens(&p).collect();
+            let text = match toks.as_slice() {
+                [t] if t.kind() == STRING_LIT => self.string(t.text(), span),
+                _ => toks.iter().map(|t| t.text()).collect::<String>(),
+            };
+            return Some(Ident {
+                name: Symbol::intern(&text),
+                span,
+            });
+        }
+        self.first_name(node)
+    }
+
+    /// An element's name: a relation path (`a.b`) or one kind, dashes kept (`font-face`).
+    fn elem_name(&mut self, node: &SyntaxNode) -> Vec<Ident> {
+        let mut out: Vec<Ident> = Vec::new();
+        let mut joined = false;
+        for t in tokens(node) {
+            let span = self.token_span(&t);
+            match t.kind() {
+                DOT => joined = false,
+                MINUS => joined = true,
+                _ => match out.last_mut() {
+                    Some(last) if joined => {
+                        let text = format!("{}-{}", last.as_str(), t.text());
+                        last.name = Symbol::intern(&text);
+                        last.span = last.span.to(span).unwrap_or(span);
+                        joined = false;
+                    }
+                    _ => out.push(Ident {
+                        name: Symbol::intern(t.text()),
+                        span,
+                    }),
+                },
+            }
+        }
+        out
+    }
+
+    fn element(&mut self, node: &SyntaxNode) -> Element {
+        let span = self.span(node);
+        let name = match child_of(node, ELEMNAME) {
+            Some(n) => self.elem_name(&n),
+            None => Vec::new(),
+        };
+        let meta = match child_of(node, META) {
+            Some(m) => children_of(&m, ARG).map(|a| self.arg(&a)).collect(),
+            None => Vec::new(),
+        };
+        let args = children_of(node, ARG).map(|a| self.arg(&a)).collect();
+        let children = child_of(node, CHILDREN).map(|c| self.children(&c)).unwrap_or_default();
+        Element {
+            name,
+            meta,
+            args,
+            children,
+            span,
+        }
+    }
+
+    fn children(&mut self, node: &SyntaxNode) -> Vec<Child> {
+        let mut out = Vec::new();
+        for c in node.children() {
+            if let Some(child) = self.child(&c) {
+                out.push(child);
+            }
+        }
+        out
+    }
+
+    fn child(&mut self, node: &SyntaxNode) -> Option<Child> {
+        let span = self.span(node);
+        match node.kind() {
+            ELEMENT => Some(Child::Element(self.element(node))),
+            CONTENT => match expr_children(node).next() {
+                Some(e) => Some(Child::Content(self.expr(&e))),
+                None => {
+                    self.malformed("content without an expression", span);
+                    None
+                }
+            },
+            IFCHILD => {
+                let Some(b) = child_of(node, BODY) else {
+                    self.malformed("an `if` without a condition", span);
+                    return None;
+                };
+                let cond = self.body(&b);
+                let blocks: Vec<SyntaxNode> = children_of(node, CHILDREN).collect();
+                let then = blocks.first().map(|c| self.children(c)).unwrap_or_default();
+                let els = match (blocks.get(1), child_of(node, IFCHILD)) {
+                    (Some(c), _) => Some(Box::new(ChildElse::Children(self.children(c)))),
+                    (None, Some(i)) => self.child(&i).map(|c| Box::new(ChildElse::If(Box::new(c)))),
+                    (None, None) => None,
+                };
+                Some(Child::If { cond, then, els, span })
+            }
+            FORCHILD => {
+                let Some(b) = child_of(node, BODY) else {
+                    self.malformed("a `for` without a condition", span);
+                    return None;
+                };
+                let cond = self.body(&b);
+                let children = child_of(node, CHILDREN).map(|c| self.children(&c)).unwrap_or_default();
+                Some(Child::For { cond, children, span })
+            }
+            _ => None,
+        }
+    }
+
+    fn tree_item(&mut self, node: &SyntaxNode, span: Span) -> Option<TreeDecl> {
+        let Some(name) = self.first_name(node) else {
+            self.malformed("a tree without a name", span);
+            return None;
+        };
+        let mut roles = Vec::new();
+        for r in children_of(node, TREEROLE) {
+            let rspan = self.span(&r);
+            let names: Vec<Ident> = children_of(&r, NAME).map(|n| self.ident(&n)).collect();
+            let rel = child_of(&r, RELPATH).map(|p| self.names(&p)).unwrap_or_default();
+            let Some((role, cols)) = names.split_first() else {
+                self.malformed("a tree role without a name", rspan);
+                continue;
+            };
+            roles.push(TreeRole {
+                role: *role,
+                rel,
+                cols: cols.to_vec(),
+                span: rspan,
+            });
+        }
+        Some(TreeDecl { name, roles, span })
     }
 
     fn args(&mut self, node: &SyntaxNode) -> Vec<Arg> {

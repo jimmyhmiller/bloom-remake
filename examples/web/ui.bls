@@ -13,6 +13,14 @@ output text(id: String, s: String);
 /// The element to focus after the round.
 output focus(id: String);
 
+/// The page as a tree (docs/design/SUGAR.md §3): `emit html div[id: "box"](class: "a") { span { "hi" } }` writes the
+/// `elem`, `attr` and `text` rows of the elements it describes.
+tree html {
+    node elem(id, parent, pos, tag);
+    props attr(id, name, value);
+    content text(id, s);
+}
+
 /// `location.hash`, at boot and whenever it changes.
 input route(hash: String);
 /// A click on an element with an `id` (or its nearest ancestor with one).

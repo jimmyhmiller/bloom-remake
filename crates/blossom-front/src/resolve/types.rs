@@ -183,6 +183,7 @@ impl<'t> Resolver<'t, '_> {
             broken: Default::default(),
             fns: Default::default(),
             generic_fns: Default::default(),
+            trees: Default::default(),
         });
         ScopeIdx(self.scopes.len() - 1)
     }

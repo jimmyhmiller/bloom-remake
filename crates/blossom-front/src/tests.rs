@@ -1554,3 +1554,70 @@ fn interpolation_converts_its_holes_and_checks_its_specs() {
     ));
     assert!(d.iter().any(|(_, m)| m.contains("`to_fixed` on u64")), "{d:?}");
 }
+
+#[test]
+fn child_heads_spreads_and_trees_expand_into_plain_statements() {
+    let src = with_head(
+        "table order(id: u64, customer: String) key(id);\n\
+         table line(id: u64, sku: String, qty: u64) key(id, sku);\n\
+         table prop(id: u64, name: String, value: String);\n\
+         output elem(id: String, parent: String, pos: i64, tag: String);\n\
+         output attr(id: String, name: String, value: String);\n\
+         output text(id: String, s: String);\n\
+         tree html { node elem(id, parent, pos, tag); props attr(id, name, value); content text(id, s); }\n\
+         a: on go(k, v) {\n\
+             upsert order(id: k, customer: \"ann\") {\n\
+                 line(sku: \"apple\", qty: v);\n\
+                 if v > 1 { line(sku: \"pear\", qty: 1); }\n\
+             }\n\
+             next prop(k, ..{colour: \"red\", size: v});\n\
+         }\n\
+         b: while order(n, c) {\n\
+             emit html div[id: \"box\"](class: \"order\", data-n: n) {\n\
+                 span { f\"{c} #{n}\" }\n\
+                 for line(n, sku, q) { li[key: sku](qty: q) { sku } }\n\
+                 if n > 3 { b(); } else { i(); }\n\
+             }\n\
+         }\n",
+    );
+    assert_eq!(diags(src), Vec::<(String, String)>::new());
+    // The diagnostics of the sugar.
+    let tree_head = "output elem(id: String, parent: String, pos: i64, tag: String);\n\
+                     output attr(id: String, name: String, value: String);\n\
+                     output text(id: String, s: String);\n\
+                     tree html { node elem(id, parent, pos, tag); props attr(id, name, value); content text(id, s); }\n\
+                     table t(k: u64);\n";
+    let case = |body: &str| diags(Box::leak(format!("{HEAD}{tree_head}{body}").into_boxed_str()));
+    let has = |d: Vec<(String, String)>, code: &str| d.iter().any(|(c, _)| c == code);
+    assert!(has(
+        case("w: while t(k) { emit html ul() { for t(j) { li(); } } }\n"),
+        "BLS0430"
+    ));
+    assert!(has(
+        case("w: while t(k) { emit html li[id: \"x\", key: k](); }\n"),
+        "BLS0431"
+    ));
+    assert!(has(case("w: while t(k) { emit nope div(); }\n"), "BLS0200"));
+    let bad_tree =
+        with_head("output elem(id: String, parent: String, tag: String);\ntree html { node elem(id, parent, tag); }\n");
+    assert!(diags(bad_tree).iter().any(|(c, _)| c == "BLS0434"));
+    // A child head takes named arguments, and inherits only what it lacks.
+    let d = diags(with_head(
+        "table order(id: u64) key(id);\ntable line(id: u64, sku: u64) key(id, sku);\n\
+         a: on go(k, v) { upsert order(id: k) { line(k, v); } }\n",
+    ));
+    assert!(
+        d.iter()
+            .any(|(c, m)| c == "BLS0303" && m.contains("names its arguments")),
+        "{d:?}"
+    );
+}
+
+#[test]
+fn a_map_spread_is_a_row_per_entry() {
+    let src = with_head(
+        "output attr(id: String, name: String, value: String);\n\
+         a: on go(k, v), let m = map[\"a\" => k, \"b\" => v] { emit attr(\"x\", ..m); }\n",
+    );
+    assert_eq!(diags(src), Vec::<(String, String)>::new());
+}

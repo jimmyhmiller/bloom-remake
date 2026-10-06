@@ -359,8 +359,9 @@ fn collect(e: &Expr, out: &mut Vec<Span>) {
 }
 
 fn args_of(args: &[Arg]) -> impl Iterator<Item = &Expr> {
-    args.iter().filter_map(|a| match a {
-        Arg::Pos(e) | Arg::Named(_, e) => Some(e),
-        Arg::Rest(_) | Arg::Star(_) => None,
+    args.iter().flat_map(|a| match a {
+        Arg::Pos(e) | Arg::Named(_, e) | Arg::Spread(Spread::Expr(e, _)) => vec![e],
+        Arg::Spread(Spread::Record(fields, _)) => fields.iter().map(|(_, e)| e).collect(),
+        Arg::Rest(_) | Arg::Star(_) => Vec::new(),
     })
 }

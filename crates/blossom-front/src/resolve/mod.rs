@@ -16,6 +16,7 @@
 
 mod body;
 mod generic;
+mod sugar;
 mod types;
 
 pub(crate) use types::int_value;
@@ -296,6 +297,8 @@ pub(crate) struct ModScope<'t> {
     pub fns: BTreeMap<Symbol, HFnId>,
     /// Generic functions (and functions with function parameters) declared in this module: their templates.
     pub generic_fns: BTreeMap<Symbol, usize>,
+    /// Trees declared in this module, by name (docs/design/SUGAR.md §3).
+    pub trees: BTreeMap<Symbol, sugar::TreeInfo>,
 }
 
 impl ModScope<'_> {
@@ -315,6 +318,7 @@ impl ModScope<'_> {
             broken: BTreeSet::new(),
             fns: BTreeMap::new(),
             generic_fns: BTreeMap::new(),
+            trees: BTreeMap::new(),
         }
     }
 }
@@ -805,6 +809,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
         self.imports(s, items, placement);
         // After the imports, so a guard can name an instance's member (and be told it is not a view or table).
         self.timer_guards(s, items);
+        self.trees(s, items);
         self.functions(s, items);
         self.rules(s, items, placement);
         self.check_prefer(s);
@@ -1011,6 +1016,114 @@ impl<'t, 'd> Resolver<'t, 'd> {
 
     /// Pass 2b: the `while` guards of the timers declared in `items` (LANGUAGE §15.2), once every relation of the
     /// scope is known: a view or table placed where the timer is (the node observes it after each tick).
+    /// Pass: tree declarations (docs/design/SUGAR.md §3): each role's relation, its columns in the role's order, and
+    /// their shapes (BLS0434).
+    fn trees(&mut self, s: ScopeIdx, items: &'t [ast::Item]) {
+        for item in items {
+            let ItemKind::Tree(t) = &item.kind else { continue };
+            let mut node = None;
+            let mut props = None;
+            let mut content = None;
+            let mut ok = true;
+            for r in &t.roles {
+                let arity = match r.role.as_str() {
+                    "node" => 4,
+                    "props" => 3,
+                    "content" => 2,
+                    other => {
+                        self.error(
+                            code!("BLS0434"),
+                            r.role.span,
+                            format!("a tree's roles are `node`, `props` and `content`, not `{other}`"),
+                        );
+                        ok = false;
+                        continue;
+                    }
+                };
+                let Some(rel) = self.lookup_rel(s, &r.rel) else {
+                    let name: Vec<&str> = r.rel.iter().map(ast::Ident::as_str).collect();
+                    self.error(code!("BLS0434"), r.span, format!("no relation `{}`", name.join(".")));
+                    ok = false;
+                    continue;
+                };
+                let cols: Vec<Symbol> = self.rel_of(rel).cols.iter().map(|c| c.name).collect();
+                if r.cols.len() != arity || cols.len() != arity {
+                    self.error(
+                        code!("BLS0434"),
+                        r.span,
+                        format!(
+                            "a tree's `{}` relation has {arity} columns, named here in the role's order",
+                            r.role.as_str()
+                        ),
+                    );
+                    ok = false;
+                    continue;
+                }
+                let mut places = Vec::new();
+                for c in &r.cols {
+                    match cols.iter().position(|x| *x == c.name) {
+                        Some(i) => places.push(i),
+                        None => {
+                            self.error(
+                                code!("BLS0434"),
+                                c.span,
+                                format!("the relation has no column `{}`", c.as_str()),
+                            );
+                            ok = false;
+                        }
+                    }
+                }
+                let role = sugar::Role {
+                    path: r.rel.clone(),
+                    rel,
+                    cols: places,
+                };
+                let slot = match r.role.as_str() {
+                    "node" => &mut node,
+                    "props" => &mut props,
+                    _ => &mut content,
+                };
+                if slot.is_some() {
+                    self.error(code!("BLS0434"), r.span, "a role given twice");
+                    ok = false;
+                }
+                *slot = Some(role);
+            }
+            let Some(node) = node else {
+                if ok {
+                    self.error(code!("BLS0434"), t.span, "a tree needs a `node` relation");
+                }
+                continue;
+            };
+            // The ids are one type throughout; a position is an integer.
+            let ty = |me: &mut Self, role: &sugar::Role, place: usize| {
+                let rel = me.rel_of(role.rel);
+                role.cols.get(place).and_then(|c| rel.cols.get(*c)).and_then(|c| c.ty)
+            };
+            let id = ty(self, &node, 0);
+            let pos = ty(self, &node, 2);
+            let mut shapes_ok =
+                ty(self, &node, 1) == id && matches!(pos.and_then(|t| self.hir.types.get(t)), Some(TypeDef::Int(_)));
+            for role in props.iter().chain(content.iter()) {
+                shapes_ok &= ty(self, role, 0) == id;
+            }
+            if !shapes_ok {
+                self.error(
+                    code!("BLS0434"),
+                    t.span,
+                    "a tree's ids (the node's id and parent, the props' and content's ids) are one type, and its \
+                     position an integer",
+                );
+                continue;
+            }
+            if ok {
+                self.scope_mut(s)
+                    .trees
+                    .insert(t.name.name, sugar::TreeInfo { node, props, content });
+            }
+        }
+    }
+
     fn timer_guards(&mut self, s: ScopeIdx, items: &'t [ast::Item]) {
         for item in items {
             match &item.kind {
@@ -1900,6 +2013,8 @@ impl<'t, 'd> Resolver<'t, 'd> {
                     }
                 }
                 ItemKind::Fact(f) => self.fact(s, f),
+                // Declared by `trees`.
+                ItemKind::Tree(_) => {}
                 ItemKind::Format(f) => self.bugs.push(blossom_base::internal_error!(
                     "format `{}` reached name resolution (formats are expanded when files load)",
                     f.name.as_str()
@@ -2001,6 +2116,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             broken: Default::default(),
             fns: BTreeMap::new(),
             generic_fns: BTreeMap::new(),
+            trees: BTreeMap::new(),
         });
         // Value and relation parameters.
         let mut given: BTreeMap<Symbol, &'t ast::Expr> = BTreeMap::new();
@@ -2212,6 +2328,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             broken: Default::default(),
             fns: BTreeMap::new(),
             generic_fns: BTreeMap::new(),
+            trees: BTreeMap::new(),
         });
         for item in &p.items {
             match &item.kind {

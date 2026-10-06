@@ -329,6 +329,7 @@ impl Cx<'_> {
         let site = match &item.kind {
             ItemKind::Use(_) => Site::Item("use"),
             ItemKind::Format(_) => Site::Item("format"),
+            ItemKind::Tree(_) => Site::Item("tree"),
             ItemKind::Import(_) => Site::Item("import"),
             ItemKind::Include(_) => Site::Item("include"),
             ItemKind::Const { .. } => Site::Item("const"),

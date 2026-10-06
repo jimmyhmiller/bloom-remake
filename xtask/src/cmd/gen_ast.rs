@@ -169,6 +169,7 @@ fn generate(path: &Path) -> Result<String, String> {
                 "TranslateItem",
                 "SnapshotItem",
                 "SpecItem",
+                "TreeItem",
             ],
         ),
     ];
