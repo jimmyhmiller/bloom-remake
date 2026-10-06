@@ -408,3 +408,192 @@ page: while screen(s), bird(y, v) {
         assert!(kinds.contains(&k), "no {k:?}");
     }
 }
+
+// ---------------------------------------------------------------- the formatter (LANGUAGE §3.5)
+
+/// Every source the formatter must handle: the examples, the corpus programs, and LANGUAGE.md's blocks that parse.
+#[cfg(test)]
+fn fmt_sources() -> Vec<(String, String)> {
+    let mut paths = Vec::new();
+    files(&root().join("examples"), "*.bls", &mut paths);
+    files(&root().join("tests/corpus"), "program.bls", &mut paths);
+    let mut out: Vec<(String, String)> = paths
+        .iter()
+        .map(|p| (p.display().to_string(), fs::read_to_string(p).unwrap()))
+        .collect();
+    let md = fs::read_to_string(root().join("docs/design/LANGUAGE.md")).unwrap();
+    let mut block: Option<String> = None;
+    for (i, l) in md.lines().enumerate() {
+        match (&mut block, l) {
+            (None, "```blossom") => block = Some(String::new()),
+            (Some(b), "```") => {
+                let text = std::mem::take(b);
+                block = None;
+                if parser::parse(FileId::from_raw(0), &text).errors.is_empty() {
+                    out.push((format!("LANGUAGE.md block ending at line {}", i + 1), text));
+                }
+            }
+            (Some(b), l) => {
+                b.push_str(l);
+                b.push('\n');
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The non-trivia tokens of a source, in order.
+#[cfg(test)]
+fn significant(text: &str) -> Vec<(blossom_syntax::SyntaxKind, String)> {
+    lexer::lex(FileId::from_raw(0), text)
+        .tokens
+        .iter()
+        .filter(|t| !t.kind.is_trivia() && t.kind != blossom_syntax::SyntaxKind::EOF)
+        .map(|t| (t.kind, t.text(text).unwrap_or("").to_owned()))
+        .collect()
+}
+
+/// The comments of a source, in order, as the formatter writes them (a `#` comment as `//`).
+#[cfg(test)]
+fn comments(text: &str) -> Vec<String> {
+    use blossom_syntax::SyntaxKind as K;
+    lexer::lex(FileId::from_raw(0), text)
+        .tokens
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.kind,
+                K::LINE_COMMENT | K::DOC_COMMENT | K::INNER_DOC_COMMENT | K::BLOCK_COMMENT | K::HASH_COMMENT
+            )
+        })
+        .map(|t| {
+            let s = t.text(text).unwrap_or("").trim_end();
+            match s.strip_prefix('#') {
+                Some(rest) if t.kind == K::HASH_COMMENT && !(t.span.lo == 0 && rest.starts_with('!')) => {
+                    if rest.is_empty() || rest.starts_with(' ') {
+                        format!("//{rest}")
+                    } else {
+                        format!("// {rest}")
+                    }
+                }
+                _ => s.to_owned(),
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn fmt_idempotent() {
+    let mut n = 0;
+    for (name, text) in fmt_sources() {
+        let once = blossom_syntax::fmt::format(&text).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let p = parser::parse(FileId::from_raw(0), &once);
+        assert!(
+            p.errors.is_empty(),
+            "{name}: the formatted source does not parse:\n{once}"
+        );
+        let twice = blossom_syntax::fmt::format(&once).unwrap_or_else(|e| panic!("{name} (formatted): {e}"));
+        assert_eq!(once, twice, "{name}: formatting is not idempotent");
+        assert!(once.lines().all(|l| l == l.trim_end()), "{name}: a line ends in spaces");
+        n += 1;
+    }
+    assert!(n > 400, "only {n} sources");
+}
+
+#[test]
+fn fmt_preserves_cst_modulo_trivia() {
+    for (name, text) in fmt_sources() {
+        let out = blossom_syntax::fmt::format(&text).unwrap();
+        assert_eq!(significant(&out), significant(&text), "{name}: the tokens changed");
+        assert_eq!(comments(&out), comments(&text), "{name}: the comments changed");
+    }
+}
+
+#[test]
+fn fmt_never_reorders() {
+    // Items, statements and literals keep their order: the item kinds of each file, in order, are unchanged (the
+    // token stream, checked above, pins the rest).
+    for (name, text) in fmt_sources() {
+        let out = blossom_syntax::fmt::format(&text).unwrap();
+        let kinds = |s: &str| -> Vec<blossom_syntax::SyntaxKind> {
+            parser::parse(FileId::from_raw(0), s)
+                .syntax()
+                .children()
+                .map(|n| n.kind())
+                .collect()
+        };
+        assert_eq!(kinds(&out), kinds(&text), "{name}: the items moved");
+    }
+}
+
+#[test]
+fn fmt_refuses_a_source_that_does_not_parse() {
+    assert!(blossom_syntax::fmt::format("program p version 1;\ntable t(x: u64;\n").is_err());
+}
+
+/// A source with its whitespace shuffled where it means nothing: runs of spaces, indentation, and line breaks
+/// between two tokens (never next to a comment, never a blank line made or lost).
+#[cfg(test)]
+fn perturb(text: &str, seed: u64) -> String {
+    use blossom_syntax::SyntaxKind as K;
+    let tokens = lexer::lex(FileId::from_raw(0), text).tokens;
+    let mut rng = seed;
+    let mut next = move || {
+        rng = rng
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        rng >> 33
+    };
+    let mut out = String::new();
+    let is_comment = |k: K| {
+        matches!(
+            k,
+            K::LINE_COMMENT | K::DOC_COMMENT | K::INNER_DOC_COMMENT | K::BLOCK_COMMENT | K::HASH_COMMENT
+        )
+    };
+    for (i, t) in tokens.iter().enumerate() {
+        let s = t.text(text).unwrap_or("");
+        if t.kind != K::WHITESPACE {
+            out.push_str(s);
+            continue;
+        }
+        let prev = i.checked_sub(1).and_then(|j| tokens.get(j)).map(|t| t.kind);
+        let after = tokens.get(i + 1).map(|t| t.kind);
+        let near_comment = prev.is_some_and(is_comment) || after.is_some_and(is_comment);
+        let newlines = s.matches('\n').count();
+        if newlines >= 2 || near_comment {
+            // Blank lines and comments' lines stay; the indentation of the line after may change.
+            let lines = s.matches('\n').count();
+            for _ in 0..lines {
+                out.push('\n');
+            }
+            for _ in 0..(next() % 9) {
+                out.push(' ');
+            }
+        } else if next() % 3 == 0 {
+            out.push('\n');
+            for _ in 0..(next() % 9) {
+                out.push(' ');
+            }
+        } else {
+            for _ in 0..(1 + next() % 3) {
+                out.push(' ');
+            }
+        }
+    }
+    out
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(96))]
+    #[test]
+    fn formatter_fuzz_mirror(pick in 0usize..10_000, seed in proptest::prelude::any::<u64>()) {
+        let sources = fmt_sources();
+        let (name, text) = &sources[pick % sources.len()];
+        let shuffled = perturb(text, seed);
+        let a = blossom_syntax::fmt::format(text).unwrap();
+        let b = blossom_syntax::fmt::format(&shuffled).unwrap_or_else(|e| panic!("{name} shuffled: {e}\n{shuffled}"));
+        proptest::prop_assert_eq!(a, b, "{}: whitespace changed the format", name);
+    }
+}

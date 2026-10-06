@@ -1,5 +1,6 @@
 //! Integration tests of the `blossom` binary: dispatch, exit codes and placeholders.
 
+mod fmt;
 mod kafka3;
 mod kafka_kill9;
 mod kill9;

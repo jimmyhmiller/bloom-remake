@@ -636,9 +636,17 @@ This keeps the parser context-free and lets the language server parse incomplete
   starts an item at the beginning of a line. Inside a body, `,` at depth 0 is a synchronization point, so one bad
   literal does not lose the rest of the header. A missing `;` before an item keyword on a new line is inserted and
   reported (BLS0101). Every parse error carries its span and the set of expected tokens.
-- **Formatter.** One canonical format, no options. It never reorders items, statements, literals or alternatives
-  (rule identity does not depend on order, but reviews do). One statement per line; headers longer than the line
-  width break after commas with a continuation indent; `where` starts a line when the header breaks.
+- **Formatter** (`blossom fmt`, `blossom_syntax::fmt`). One canonical format, no options. It never reorders items,
+  statements, literals or alternatives (rule identity does not depend on order, but reviews do), and never adds,
+  removes or changes a token: the formatted file is the same program token for token. The line width is 120 and the
+  indent 4. One statement per line, as are struct fields, enum variants, match arms, view alternatives and a tree
+  element's children (one child element or content alone stays on its line when it fits). Headers longer than the
+  line width fill their lines, breaking after commas with a continuation indent of 8; `where` starts a line when the
+  header breaks. Brackets in expressions stay on one line when they fit, else hold one entry per line; a call with a
+  single argument keeps its parentheses tight and lets the argument break; long binary expressions break before an
+  operator. `if … else if …` chains and function bodies take a line per branch or statement. Comments keep their
+  places (`#` comments become `//`, a first-line `#!` stays); blank lines between items, statements and members are
+  kept, at most one. A file that does not parse is not formatted.
 - **Tree-sitter.** A tree-sitter grammar is kept in the repository and tested against the same corpus as the
   parser (`examples/` plus the grammar tests). Contextual keywords are handled with tree-sitter's keyword
   extraction; no external scanner is needed.
