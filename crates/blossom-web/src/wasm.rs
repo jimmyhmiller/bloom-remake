@@ -33,17 +33,33 @@ pub struct WebApp {
     app: App,
 }
 
-/// Compiles `root` of `files_json` (a JSON object, path → source). Throws the diagnostics, as JSON, on failure;
-/// warnings are in [`WebApp::warnings`].
+/// The root of a program's randomness, from 32 hex digits (the page draws them from `crypto.getRandomValues`).
+fn seed(hex: &str) -> Result<blossom_value::Seed, JsValue> {
+    let bad = || JsValue::from_str(&format!("a seed is 32 hex digits, not `{hex}`"));
+    if hex.len() != 32 || !hex.is_ascii() {
+        return Err(bad());
+    }
+    let mut bytes = [0u8; 16];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = hex
+            .get(2 * i..2 * i + 2)
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+            .ok_or_else(bad)?;
+    }
+    Ok(blossom_value::Seed(bytes))
+}
+
+/// Compiles `root` of `files_json` (a JSON object, path → source), its randomness rooted at `seed_hex`. Throws the
+/// diagnostics, as JSON, on failure; warnings are in [`WebApp::warnings`].
 #[wasm_bindgen]
-pub fn compile(root: &str, files_json: &str) -> Result<WebApp, JsValue> {
+pub fn compile(root: &str, files_json: &str, seed_hex: &str) -> Result<WebApp, JsValue> {
     let files: BTreeMap<String, String> = serde_json::from_str(files_json).map_err(js_error)?;
     let compiled = crate::compile(root, &files).map_err(|diags| match json(&diags) {
         Ok(text) => JsValue::from_str(&text),
         Err(e) => e,
     })?;
     Ok(WebApp {
-        app: App::new(compiled).map_err(js_error)?,
+        app: App::new(compiled, seed(seed_hex)?).map_err(js_error)?,
     })
 }
 

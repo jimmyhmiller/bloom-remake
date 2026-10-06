@@ -101,6 +101,12 @@ function report(message) {
   statusLine.textContent = message;
 }
 
+/** A fresh root for the program's randomness: 32 hex digits. */
+function seed() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /** The page's clock, in milliseconds since the epoch. */
 function now() {
   return performance.timeOrigin + performance.now();
@@ -221,7 +227,7 @@ function diagnostics(err) {
 function run(files) {
   let next;
   try {
-    next = compile(root, JSON.stringify(files));
+    next = compile(root, JSON.stringify(files), seed());
   } catch (err) {
     return diagnostics(err);
   }

@@ -308,6 +308,8 @@ pub const SETTLE: u32 = 1000;
 pub struct App {
     compiled: Compiled,
     engine: Engine,
+    /// The root of the program's randomness (`rand`, `rand_float`, seeded choices): the inspector's replays use it too.
+    seed: blossom_value::Seed,
     /// The next round, and the page the last one left.
     tick: u64,
     page: Page,
@@ -327,14 +329,15 @@ pub struct Started {
 }
 
 impl App {
-    /// A program ready to start.
-    pub fn new(compiled: Compiled) -> Result<App, HostError> {
+    /// A program ready to start, its randomness drawn from `seed`.
+    pub fn new(compiled: Compiled, seed: blossom_value::Seed) -> Result<App, HostError> {
         let engine = Engine::new(
             compiled.artifact.program.clone(),
             NodeId(0),
             EngineConfig {
                 roles: compiled.artifact.roles.clone(),
                 node_names: vec![Arc::from("app")],
+                seed: Some(seed),
                 ..EngineConfig::default()
             },
         )
@@ -345,6 +348,7 @@ impl App {
         Ok(App {
             compiled,
             engine,
+            seed,
             tick: 0,
             page: Page::default(),
             timers: None,
@@ -532,6 +536,7 @@ impl App {
             self.compiled.artifact.program.get(),
             self.compiled.artifact.program.clone(),
             self.compiled.artifact.roles.clone(),
+            self.seed,
             &self.history,
         )?;
         let Some(last) = explainer.last() else {

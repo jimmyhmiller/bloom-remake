@@ -1,7 +1,7 @@
 //! The browser host, natively (docs/design/BROWSER.md): programs of `examples/web` compiled in memory, run round by
 //! round, their pages diffed into patches and their durable tables saved and restored.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use blossom_value::time::Instant;
@@ -34,7 +34,7 @@ fn app(root: &str) -> App {
             d.iter().map(|d| d.rendered.clone()).collect::<Vec<_>>().join("\n")
         )
     });
-    App::new(compiled).unwrap()
+    App::new(compiled, blossom_value::Seed::from_u64(0)).unwrap()
 }
 
 #[cfg(test)]
@@ -101,7 +101,11 @@ fn the_counter_continues_from_its_saved_state() {
             .replace("upsert count(n - 1i64)", "upsert count(n - 1i64, 0)")
             .replace("= count(c)", "= count(c, _)"),
     );
-    let mut c = App::new(compile("counter.bls", &files).unwrap_or_else(|d| panic!("{:?}", d))).unwrap();
+    let mut c = App::new(
+        compile("counter.bls", &files).unwrap_or_else(|d| panic!("{:?}", d)),
+        blossom_value::Seed::from_u64(0),
+    )
+    .unwrap();
     let started = c.start(Some(&saved), "", T0).unwrap();
     assert_eq!(started.notes.len(), 1, "{:?}", started.notes);
     assert!(started.patches.contains(&text("value", "0")));
@@ -115,7 +119,7 @@ fn a_program_that_breaks_the_page_or_the_interface_is_told_why() {
         "program bad version 1;\ninclude \"ui.bls\";\nshow: on boot() { emit elem(\"a\", \"nowhere\", 0, \"div\"); }\n"
             .to_owned(),
     );
-    let mut a = App::new(compile("bad.bls", &files).unwrap()).unwrap();
+    let mut a = App::new(compile("bad.bls", &files).unwrap(), blossom_value::Seed::from_u64(0)).unwrap();
     let err = a.start(None, "", T0).unwrap_err().to_string();
     assert!(err.contains("`nowhere` is not on the page"), "{err}");
     files.insert(
@@ -563,4 +567,141 @@ fn the_clock_fires_timers_while_their_guard_holds_and_counts_late_firings() {
     // A clock that goes back is held where it was.
     assert_eq!(b.advance(ms(50)).unwrap(), []);
     assert_eq!(time_of(&b.advance(ms(102_000)).unwrap()).as_deref(), Some("6"));
+}
+
+/// The text of `id`, if it is on the page.
+#[cfg(test)]
+fn shown_text(dom: &Dom, id: &str) -> Option<String> {
+    dom.shown(id).then(|| dom.text(id))
+}
+
+/// The text of an element, as the patches so far set it.
+#[cfg(test)]
+fn texts(patches: &[Patch]) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for p in patches {
+        if let Patch::Text { id, text } = p {
+            out.insert(id.clone(), text.clone());
+        }
+    }
+    out
+}
+
+#[test]
+fn flappy_plays_falls_flaps_scores_and_crashes() {
+    let mut a = app("flappy.bls");
+    let mut dom = Dom::default();
+    dom.apply(&a.start(None, "", ms(0)).unwrap().patches);
+    assert_eq!(shown_text(&dom, "message").as_deref(), Some("Click to begin!"));
+    // The menu has no clock.
+    assert_eq!(a.next_deadline().unwrap(), None);
+    dom.apply(&a.dispatch(&Event::Press { id: "sky".to_owned() }, ms(1_000)).unwrap());
+    assert_eq!(shown_text(&dom, "score").as_deref(), Some("0"));
+    assert!(a.next_deadline().unwrap().is_some());
+    // A second of frames: the bird falls (its y grows), the score is 1.
+    let y_of = |dom: &Dom| -> f64 {
+        let t = dom.attr("bird", "transform").unwrap();
+        t.split(' ').nth(1).unwrap().trim_end_matches(')').parse().unwrap()
+    };
+    let start_y = y_of(&dom);
+    let mut t = 1_000;
+    for _ in 0..30 {
+        t += 17;
+        dom.apply(&a.advance(ms(t)).unwrap());
+    }
+    let fallen = y_of(&dom);
+    assert!(fallen > start_y + 5.0, "{start_y} -> {fallen}");
+    // A flap sends it up.
+    dom.apply(&a.dispatch(&Event::Press { id: "bird".to_owned() }, ms(t)).unwrap());
+    for _ in 0..8 {
+        t += 17;
+        dom.apply(&a.advance(ms(t)).unwrap());
+    }
+    assert!(y_of(&dom) < fallen, "{fallen} -> {}", y_of(&dom));
+    // Left alone it falls to the ground: game over, with the score and the best kept.
+    for _ in 0..600 {
+        t += 17;
+        dom.apply(&a.advance(ms(t)).unwrap());
+        if shown_text(&dom, "over").is_some() {
+            break;
+        }
+    }
+    assert_eq!(shown_text(&dom, "over").as_deref(), Some("Game Over"));
+    assert_eq!(a.next_deadline().unwrap(), None, "the clock stops when the game does");
+    let score = shown_text(&dom, "final").unwrap();
+    let best = shown_text(&dom, "best").unwrap();
+    assert_eq!(score.trim_start_matches("Score "), best.trim_start_matches("Best "));
+    // The best score is durable.
+    let saved = a.saved().unwrap();
+    let mut b = app("flappy.bls");
+    b.start(Some(&saved), "", ms(0)).unwrap();
+    assert!(texts(&b.dispatch(&Event::Press { id: "sky".to_owned() }, ms(10)).unwrap()).contains_key("score"));
+}
+
+#[test]
+fn flappy_with_an_autopilot_passes_obstacles_and_hits_one_without_it() {
+    let num = |s: &str| -> f64 { s.parse().unwrap() };
+    let translate = |dom: &Dom, id: &str, i: usize| -> f64 {
+        let t = dom.attr(id, "transform").unwrap();
+        let inner = t.trim_start_matches("translate(");
+        num(inner.split([' ', ')']).nth(i).unwrap())
+    };
+    let mut a = app("flappy.bls");
+    let mut dom = Dom::default();
+    dom.apply(&a.start(None, "", ms(0)).unwrap().patches);
+    let mut t = 0;
+    dom.apply(&a.dispatch(&Event::Press { id: "sky".to_owned() }, ms(t)).unwrap());
+    // Flap whenever the bird sinks below the middle of the next gap (the obstacle nearest ahead of it).
+    let mut gaps = BTreeSet::new();
+    for _ in 0..60 * 12 {
+        t += 17;
+        dom.apply(&a.advance(ms(t)).unwrap());
+        if shown_text(&dom, "over").is_some() {
+            break;
+        }
+        let y = translate(&dom, "bird", 1);
+        let ahead = (0..2)
+            .filter(|n| dom.shown(&format!("obstacle-{n}")))
+            .map(|n| (translate(&dom, &format!("obstacle-{n}"), 0), n))
+            .filter(|(x, _)| *x + 12.0 > 25.0 - 5.0)
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        let target = match ahead {
+            Some((_, n)) => {
+                let h = num(&dom.attr(&format!("top-{n}"), "height").unwrap());
+                gaps.insert(h.to_bits());
+                h + 35.0 / 2.0 + 4.0
+            }
+            None => 50.0,
+        };
+        if y > target {
+            dom.apply(&a.dispatch(&Event::Press { id: "bird".to_owned() }, ms(t)).unwrap());
+        }
+    }
+    let score: u64 = shown_text(&dom, "score")
+        .or_else(|| shown_text(&dom, "final").map(|s| s.trim_start_matches("Score ").to_owned()))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(score >= 8, "the autopilot scored only {score}");
+    assert!(gaps.len() >= 3, "the gaps did not change: {gaps:?}");
+    // Without it, a bird that flaps only to stay above the ground hits the first obstacle, not the ground.
+    let mut b = app("flappy.bls");
+    let mut dom = Dom::default();
+    dom.apply(&b.start(None, "", ms(0)).unwrap().patches);
+    let mut t = 0;
+    dom.apply(&b.dispatch(&Event::Press { id: "sky".to_owned() }, ms(t)).unwrap());
+    let mut last_y = 0.0;
+    for _ in 0..60 * 6 {
+        t += 17;
+        dom.apply(&b.advance(ms(t)).unwrap());
+        if shown_text(&dom, "over").is_some() {
+            break;
+        }
+        last_y = translate(&dom, "bird", 1);
+        if last_y > 80.0 {
+            dom.apply(&b.dispatch(&Event::Press { id: "bird".to_owned() }, ms(t)).unwrap());
+        }
+    }
+    assert_eq!(shown_text(&dom, "over").as_deref(), Some("Game Over"));
+    assert!(last_y < 85.0, "it hit the ground at {last_y}, not an obstacle");
 }
