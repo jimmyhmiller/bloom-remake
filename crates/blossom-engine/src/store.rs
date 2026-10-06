@@ -185,7 +185,11 @@ impl Store {
 
     /// How many rows are present.
     pub fn present_len(&self) -> usize {
-        if self.cell.is_some() { self.merged_rows.len() } else { self.counts.len() }
+        if self.cell.is_some() {
+            self.merged_rows.len()
+        } else {
+            self.counts.len()
+        }
     }
 
     pub fn changed(&self) -> bool {
@@ -296,11 +300,28 @@ impl Store {
     }
 
     pub fn contains(&self, row: &Row) -> bool {
-        if self.cell.is_some() { self.merged_rows.contains(row) } else { self.counts.contains_key(row) }
+        if self.cell.is_some() {
+            self.merged_rows.contains(row)
+        } else {
+            self.counts.contains_key(row)
+        }
     }
 
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Retracts every row, with all its support (a tick-scoped relation at the start of a tick: its rows came from the
+    /// last tick's events). The change shows in the deltas like any other.
+    pub fn retract_all(&mut self) -> ExprResult<()> {
+        if self.cell.is_some() {
+            return Err(bug("a lattice store is never tick-scoped".into()));
+        }
+        let rows: Vec<(Row, i64)> = self.counts.iter().map(|(r, c)| (r.clone(), *c)).collect();
+        for (row, count) in rows {
+            self.add(row, -count)?;
+        }
+        Ok(())
     }
 
     fn show(&mut self, row: Row) {
@@ -371,7 +392,10 @@ impl Store {
         let index = indexes
             .get(cols)
             .ok_or_else(|| internal_error!("a probe on columns {cols:?} without an index"))?;
-        Ok(index.get(values).map(|b| b.iter().cloned().collect()).unwrap_or_default())
+        Ok(index
+            .get(values)
+            .map(|b| b.iter().cloned().collect())
+            .unwrap_or_default())
     }
 
     /// Whether a row of one version has columns `cols` holding `values` (without collecting them).
@@ -471,7 +495,11 @@ impl Store {
 
     /// The rows of one version whose columns `cols` hold `values`.
     pub fn rows(&self, old: bool, cols: &[usize], values: &[Value]) -> Result<Vec<Row>, EvalError> {
-        if old { self.old_rows(cols, values) } else { self.new_rows(cols, values) }
+        if old {
+            self.old_rows(cols, values)
+        } else {
+            self.new_rows(cols, values)
+        }
     }
 
     /// The tick's change: inserted rows with weight 1, deleted rows with weight -1.

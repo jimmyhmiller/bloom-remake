@@ -103,8 +103,12 @@ pub struct Engine {
     /// powers of two: reused while every one stays in its power of two. A join order decides a term's cost, never
     /// its valuations, so reusing one changes only the work.
     orders: std::cell::RefCell<BTreeMap<(RuleId, Option<usize>), CachedOrder>>,
+    /// The scratch buffers of a term's search, kept from one rule evaluation to the next.
+    buffers: std::cell::RefCell<rule::TermBuffers>,
     /// Each function's work since profiling was switched on (`None`: off).
     fn_work: Option<std::cell::RefCell<BTreeMap<blossom_base::FnId, FnWork>>>,
+    /// The derived tick-scoped relations ([`tick_scoped`]), emptied at the start of every tick.
+    scoped: Vec<RelId>,
 }
 
 fn kinds(p: &Program) -> Vec<Option<Kind>> {
@@ -253,6 +257,59 @@ fn cell_spec(p: &Program, kinds: &[Option<Kind>], rel: RelId, extra: usize) -> R
     Ok(Some(CellSpec { ident, extra, lattice }))
 }
 
+/// The tick-scoped relations: those whose rows can hold only in a tick with an event. The events (host events and
+/// delivered messages, which hold for their one tick), and a derived relation all of whose deductive rules on this node
+/// read one positively and aggregate nothing, that has no facts, merges no lattice and is in no recursive stratum. Its
+/// rules can be evaluated from scratch each tick instead of retracting the last tick's rows one by one
+/// ([`Regime::Scoped`]); readers that are not themselves scoped see the retraction as a change, as before.
+fn tick_scoped(p: &Program, rules: &[RuleId], recursive: &BTreeSet<RelId>) -> BTreeSet<RelId> {
+    let mut scoped: BTreeSet<RelId> = p
+        .rels
+        .iter_enumerated()
+        .filter(|(_, r)| matches!(r.class, RelClass::Event(_) | RelClass::Channel(_)))
+        .map(|(id, _)| id)
+        .collect();
+    let with_facts: BTreeSet<RelId> = p.facts.iter().map(|f| f.rel).collect();
+    let mut by_head: BTreeMap<RelId, Vec<&Rule>> = BTreeMap::new();
+    let mut other_writes: BTreeSet<RelId> = BTreeSet::new();
+    for id in rules {
+        let Some(rule) = p.rules.get(*id) else { continue };
+        match rule.kind {
+            RuleKind::Deductive => by_head.entry(rule.head.rel).or_default().push(rule),
+            _ => {
+                other_writes.insert(rule.head.rel);
+            }
+        }
+    }
+    loop {
+        let mut grew = false;
+        for (rel, rules) in &by_head {
+            if scoped.contains(rel) || with_facts.contains(rel) || recursive.contains(rel) || other_writes.contains(rel)
+            {
+                continue;
+            }
+            let Some(decl) = p.rels.get(*rel) else { continue };
+            if decl.class != RelClass::Idb || !decl.schema.lattice.is_empty() {
+                continue;
+            }
+            let all = rules.iter().all(|r| {
+                !strata::is_aggregate(r)
+                    && r.body
+                        .lits
+                        .iter()
+                        .any(|l| matches!(l, Literal::Pos(a) if scoped.contains(&a.rel)))
+            });
+            if all {
+                scoped.insert(*rel);
+                grew = true;
+            }
+        }
+        if !grew {
+            return scoped;
+        }
+    }
+}
+
 impl Engine {
     /// Prepares `program` for node `node`: checks what it evaluates, stratifies, plans every rule the node runs, and
     /// creates and indexes every store.
@@ -305,6 +362,43 @@ impl Engine {
             s.rules.retain(|r| plans.contains_key(r));
         }
         strata_list.retain(|s| !s.aggregates.is_empty() || !s.rules.is_empty());
+        // Tick-scoped heads: emptied each tick, their rules evaluated from scratch while an event is there.
+        let recursive: BTreeSet<RelId> = strata_list
+            .iter()
+            .filter(|s| s.recursive)
+            .flat_map(|s| s.rules.iter().chain(&s.aggregates))
+            .filter_map(|id| p.rules.get(*id).map(|r| r.head.rel))
+            .collect();
+        let running: Vec<RuleId> = p
+            .rules
+            .iter_enumerated()
+            .filter(|(id, _)| plans.contains_key(id))
+            .map(|(id, _)| id)
+            .collect();
+        let scoped_rels = tick_scoped(p, &running, &recursive);
+        let mut scoped_derived = Vec::new();
+        for id in &running {
+            let Some(rule) = p.rules.get(*id) else { continue };
+            if rule.kind != RuleKind::Deductive || !scoped_rels.contains(&rule.head.rel) {
+                continue;
+            }
+            let Some(plan) = plans.get(id) else { continue };
+            let mut plan = Plan::clone(plan);
+            plan.regime = Regime::Scoped;
+            plan.scoped = rule
+                .body
+                .lits
+                .iter()
+                .filter_map(|l| match l {
+                    Literal::Pos(a) if scoped_rels.contains(&a.rel) => Some(rule::atom_store(a)),
+                    _ => None,
+                })
+                .collect();
+            plans.insert(*id, plan);
+            if !scoped_derived.contains(&rule.head.rel) {
+                scoped_derived.push(rule.head.rel);
+            }
+        }
         let mut stores = Stores::default();
         for (id, r) in p.rels.iter_enumerated() {
             let blobs = rel_holds_blobs(p, id);
@@ -374,7 +468,9 @@ impl Engine {
             examined_by: BTreeMap::new(),
             new_blobs: std::cell::RefCell::new(BTreeMap::new()),
             orders: std::cell::RefCell::new(BTreeMap::new()),
+            buffers: std::cell::RefCell::new(rule::TermBuffers::default()),
             fn_work: None,
+            scoped: scoped_derived,
             program,
         };
         engine.build_indexes()?;
@@ -561,6 +657,10 @@ impl Engine {
             }
         }
         self.inputs = now_inputs;
+        // The derived tick-scoped relations start every tick empty: their rules derive this tick's rows afresh.
+        for rel in self.scoped.clone() {
+            self.store(StoreKey::Main(rel))?.retract_all().map_err(wrap)?;
+        }
         self.settle(tick)?;
         let program = self.program.clone();
         let p = program.get();
@@ -733,6 +833,16 @@ impl Engine {
                 .plans
                 .get(&id)
                 .ok_or_else(|| internal_error!("rule {id:?} has no plan"))?;
+            if plan.regime == Regime::Scoped {
+                // No row in a scoped atom: no valuation, and the head was emptied at the start of the tick.
+                let live = plan
+                    .scoped
+                    .iter()
+                    .any(|k| self.stores.get(k).is_some_and(|s| s.present_len() > 0));
+                if !live {
+                    return Ok(());
+                }
+            }
             let unchanged = !plan.dep_keys.iter().any(|k| self.stores.changed(k));
             if plan.regime == Regime::Delta && unchanged {
                 return Ok(());
@@ -753,6 +863,11 @@ impl Engine {
             .clone();
         match plan.regime {
             Regime::Recompute => self.recompute_rule(p, input, rule, &plan),
+            Regime::Scoped => {
+                let terms = self.evaluate(p, input, rule, &plan, true)?;
+                self.count(rule.id, terms.examined, terms.steps);
+                self.apply(p, input, rule, &plan, terms)
+            }
             Regime::Delta => {
                 let terms = self.evaluate(p, input, rule, &plan, false)?;
                 self.count(rule.id, terms.examined, terms.steps);
@@ -967,7 +1082,10 @@ impl Engine {
             };
             orders.push((lit, order));
         }
-        let mut buffers = rule::TermBuffers::default();
+        let mut buffers = self
+            .buffers
+            .try_borrow_mut()
+            .map_err(|_| internal_error!("a rule evaluation inside another"))?;
         for (driver, pos) in drivers {
             let order = orders
                 .iter()
@@ -1619,11 +1737,10 @@ impl Engine {
 
     fn count(&mut self, rule: RuleId, examined: u64, steps: u64) {
         self.examined += examined;
-        if examined > 0 || steps > 0 {
-            let w = self.examined_by.entry(rule).or_default();
-            w.rows += examined;
-            w.steps += steps;
-        }
+        let w = self.examined_by.entry(rule).or_default();
+        w.rows += examined;
+        w.steps += steps;
+        w.evals += 1;
     }
 
     pub fn node(&self) -> NodeId {
