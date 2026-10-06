@@ -84,6 +84,7 @@ pub fn lower(hir: &Hir, deployment: &Deployment<'_>) -> Result<Lowered, Internal
         fns: Vec::new(),
         fn_origins: Vec::new(),
         prefer: BTreeMap::new(),
+        projections: BTreeMap::new(),
     };
     l.declare_lattices()?;
     for r in &hir.roles {
@@ -160,6 +161,9 @@ pub(crate) struct Lowerer<'h> {
     pub fn_origins: Vec<crate::hir::HFnId>,
     /// Each `resolve prefer` table's staging relations: its listed writes (with their rank) and its unlisted ones.
     pub prefer: BTreeMap<HRelId, (RelId, RelId)>,
+    /// The projections of handler and block relations that statements and blocks read (`rules::Lowerer::through`):
+    /// by the relation and the variables kept.
+    pub projections: BTreeMap<(RelId, Vec<crate::hir::HVarId>), RelId>,
 }
 
 pub(crate) fn attrs() -> RelAttrs {

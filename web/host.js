@@ -79,20 +79,10 @@ function apply(patches) {
       case "text":
         textOf(nodes.get(p.id)).data = p.text;
         break;
-      case "children": {
-        // Only the nodes out of place move (a node that keeps its place keeps its focus and caret untouched).
-        const parent = element(p.parent);
-        const want = p.ids.map((id) => nodes.get(id));
-        const wanted = new Set(want);
-        for (const child of [...parent.children]) {
-          if (!wanted.has(child)) parent.removeChild(child);
-        }
-        want.forEach((child, i) => {
-          const at = parent.children[i] ?? null;
-          if (at !== child) parent.insertBefore(child, at);
-        });
+      case "place":
+        // Last sibling first: `before` is already in place (null: the element goes last).
+        element(p.parent).insertBefore(nodes.get(p.id), p.before === null ? null : nodes.get(p.before));
         break;
-      }
       case "focus":
         focus = nodes.get(p.id);
         break;
