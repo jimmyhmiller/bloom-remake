@@ -741,6 +741,14 @@ impl Parser<'_> {
             self.items_block(false);
             return ATSECTION;
         }
+        if self.ctx("fragment") && self.nth(1) == IDENT && self.nth(2) == L_PAREN {
+            // `fragment NAME(param: T, …) { items }` (docs/design/SUGAR.md §4).
+            self.bump();
+            self.name(false);
+            self.param_list();
+            self.children();
+            return FRAGMENTITEM;
+        }
         if self.ctx("tree") && self.nth(1) == IDENT && self.nth(2) == L_CURLY {
             // `tree NAME { node rel(cols); props rel(cols); content rel(cols); }` (SUGAR.md §3).
             self.bump();
@@ -1579,6 +1587,11 @@ impl Parser<'_> {
                 self.eat(SEMI);
                 ERROR
             }
+            // `frag(args);`: a fragment's statements here (SUGAR.md §4).
+            _ if self.element_ahead() => {
+                self.element();
+                CALLSTMT
+            }
             _ => {
                 self.error(
                     code!("BLS0100"),
@@ -1745,6 +1758,8 @@ impl Parser<'_> {
                 self.children();
                 self.complete(m, FORCHILD);
             }
+            // A statement among a fragment's or a tree's items.
+            EMIT_KW | NEXT_KW | SEND_KW | DELETE_KW | UPSERT_KW | SEAL_KW => self.stmt(),
             _ if self.element_ahead() => self.element(),
             _ => {
                 let m = self.start();

@@ -733,6 +733,11 @@ pub enum HExprKind {
         expr: Box<HExpr>,
         ty: TypeId,
     },
+    /// `expr`, which must have type `ty` (a fragment's typed parameter): the value of `expr`.
+    Ascribe {
+        expr: Box<HExpr>,
+        ty: TypeId,
+    },
     /// `self`.
     SelfNode,
     /// `now()`.

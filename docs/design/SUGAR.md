@@ -154,6 +154,7 @@ Elsewhere: entity-attribute-value relations: Kafka record headers, metric labels
 | BLS0432 | a fragment's tree elements where no tree encloses the call |
 | BLS0433 | a fragment that calls itself (directly or through others) |
 | BLS0434 | a tree declaration whose relations do not have the roles' shapes |
+| BLS0436 | a fragment parameter that is not a variable name |
 | BLS0435 | an interpolation hole's format spec other than `.N` (a hole of a type with no `to_string`, or `.N` on a non-`f64`, is the type error of the method it lowers to) |
 
 ## Slices

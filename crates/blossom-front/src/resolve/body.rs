@@ -25,6 +25,9 @@ pub(crate) struct RuleCx {
     pub ms: ScopeIdx,
     pub scope: ScopeId,
     frames: Vec<BTreeMap<Symbol, HVarId>>,
+    /// The frames below this one are hidden: inside a fragment's call, only its parameters and its own variables
+    /// are visible (docs/design/SUGAR.md §4).
+    barrier: usize,
     pub placement: Option<HRoleId>,
     /// The interposition aliases `outside`/`inside` in effect, if any.
     aliases: BTreeMap<Symbol, HRelId>,
@@ -80,6 +83,7 @@ impl<'t> Resolver<'t, '_> {
             ms,
             scope: ScopeId(u32::try_from(self.hir.scopes.len() - 1).unwrap_or(u32::MAX)),
             frames: vec![BTreeMap::new()],
+            barrier: 0,
             placement,
             aliases: BTreeMap::new(),
             choice_allowed: false,
@@ -152,6 +156,7 @@ impl<'t> Resolver<'t, '_> {
                 ms: s,
                 scope,
                 frames: vec![BTreeMap::new()],
+                barrier: 0,
                 placement: None,
                 aliases: BTreeMap::new(),
                 choice_allowed: false,
@@ -687,7 +692,12 @@ impl<'t> Resolver<'t, '_> {
     }
 
     fn lookup_var(cx: &RuleCx, name: Symbol) -> Option<HVarId> {
-        cx.frames.iter().rev().find_map(|f| f.get(&name).copied())
+        cx.frames
+            .get(cx.barrier..)
+            .unwrap_or(&[])
+            .iter()
+            .rev()
+            .find_map(|f| f.get(&name).copied())
     }
 
     /// A relation named by an atom's callee: `r`, `a.r`, or an interposition alias.
@@ -2009,6 +2019,13 @@ impl<'t> Resolver<'t, '_> {
                     ty,
                 }
             }
+            ExprKind::Ascribe { expr, ty } => {
+                let ty = self.resolve_type(cx.ms, ty)?;
+                HExprKind::Ascribe {
+                    expr: Box::new(self.expr(cx, expr)?),
+                    ty,
+                }
+            }
             ExprKind::Tuple(elems) => {
                 if elems.is_empty() {
                     let t = self.intern_type(TypeDef::Unit, span);
@@ -2798,6 +2815,56 @@ impl<'t> Resolver<'t, '_> {
                 Stmt::If {
                     cond, then, els, span, ..
                 } => self.if_stmt(cx, cond, then, els.as_deref(), *span, &mut out),
+                Stmt::Call(e) => {
+                    if let Some(f) = self.fragment_call(cx, e) {
+                        out.extend(self.stmts(cx, std::slice::from_ref(&f)));
+                    }
+                }
+                Stmt::Fragment {
+                    name,
+                    args,
+                    params,
+                    body,
+                    text,
+                    span,
+                } => {
+                    if self.fragments_expanding.contains(&name.name) {
+                        self.error(
+                            code!("BLS0433"),
+                            *span,
+                            format!("the fragment `{}` calls itself", name.as_str()),
+                        );
+                        continue;
+                    }
+                    // The arguments' values, in the caller's scope; then, with only those visible, the parameters.
+                    cx.frames.push(BTreeMap::new());
+                    let c0 = self.body(cx, args);
+                    let saved = cx.barrier;
+                    cx.barrier = cx.frames.len() - 1;
+                    cx.frames.push(BTreeMap::new());
+                    let c1 = self.body(cx, params);
+                    self.fragments_expanding.push(name.name);
+                    let inner = self.stmts(cx, &body.stmts);
+                    self.fragments_expanding.pop();
+                    cx.frames.pop();
+                    cx.barrier = saved;
+                    cx.frames.pop();
+                    out.push(HStmt::Block {
+                        kind: BlockKind::For,
+                        cond: c0,
+                        stmts: vec![HStmt::Block {
+                            kind: BlockKind::For,
+                            cond: c1,
+                            stmts: inner,
+                            text: format!("{text} $params"),
+                            span: *span,
+                            refined: Vec::new(),
+                        }],
+                        text: format!("{text} $args"),
+                        span: *span,
+                        refined: Vec::new(),
+                    });
+                }
             }
         }
         out

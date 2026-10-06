@@ -405,6 +405,22 @@ impl Cx<'_> {
             }
             FORMATITEM => ItemKind::Format(self.format_item(node, span)?),
             TREEITEM => ItemKind::Tree(self.tree_item(node, span)?),
+            FRAGMENTITEM => {
+                let name = self.need_name(node);
+                let params = match child_of(node, PARAMLIST) {
+                    Some(list) => children_of(&list, PARAM)
+                        .map(|c| (self.need_name(&c), self.need_type(&c)))
+                        .collect(),
+                    None => Vec::new(),
+                };
+                let body = child_of(node, CHILDREN).map(|c| self.children(&c)).unwrap_or_default();
+                ItemKind::Fragment(FragmentItem {
+                    name,
+                    params,
+                    body,
+                    span,
+                })
+            }
             STREAMITEM => {
                 let names = self.names(node);
                 let (Some(name), Some(kind)) = (names.first().copied(), names.get(1).copied()) else {
@@ -1106,6 +1122,13 @@ impl Cx<'_> {
                     span,
                 })
             }
+            CALLSTMT => match child_of(node, ELEMENT) {
+                Some(e) => Some(Stmt::Call(self.element(&e))),
+                None => {
+                    self.malformed("a call without its fragment", span);
+                    None
+                }
+            },
             ATTR => None,
             other => {
                 self.malformed(&format!("statement {other:?}"), span);
@@ -1461,6 +1484,7 @@ impl Cx<'_> {
         let span = self.span(node);
         match node.kind() {
             ELEMENT => Some(Child::Element(self.element(node))),
+            VERBSTMT => self.stmt(node).map(|s| Child::Stmt(Box::new(s))),
             CONTENT => match expr_children(node).next() {
                 Some(e) => Some(Child::Content(self.expr(&e))),
                 None => {

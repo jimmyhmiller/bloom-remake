@@ -151,6 +151,10 @@ impl Desugar<'_> {
                 expr: Box::new(self.extract(*expr, binds)),
                 ty,
             },
+            ExprKind::Ascribe { expr, ty } => ExprKind::Ascribe {
+                expr: Box::new(self.extract(*expr, binds)),
+                ty,
+            },
             ExprKind::Tuple(xs) => ExprKind::Tuple(self.all(xs, binds)),
             ExprKind::Vec(xs) => ExprKind::Vec(self.all(xs, binds)),
             ExprKind::Set(xs) => ExprKind::Set(self.all(xs, binds)),
@@ -318,7 +322,7 @@ fn collect(e: &Expr, out: &mut Vec<Span>) {
             each(rhs);
         }
         ExprKind::Prefix { arg, .. } => each(arg),
-        ExprKind::Cast { expr, .. } => each(expr),
+        ExprKind::Cast { expr, .. } | ExprKind::Ascribe { expr, .. } => each(expr),
         ExprKind::Tuple(xs) | ExprKind::Vec(xs) | ExprKind::Set(xs) => xs.iter().for_each(each),
         ExprKind::Map(kvs) => {
             for (k, v) in kvs {

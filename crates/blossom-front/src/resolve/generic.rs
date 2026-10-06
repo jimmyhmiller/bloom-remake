@@ -493,6 +493,7 @@ fn children(kind: &mut HExprKind) -> Vec<&mut HExpr> {
         }
         HExprKind::Prefix { arg, .. }
         | HExprKind::Cast { expr: arg, .. }
+        | HExprKind::Ascribe { expr: arg, .. }
         | HExprKind::TupleIndex { base: arg, .. }
         | HExprKind::Field { base: arg, .. }
         | HExprKind::Lift { expr: arg, .. }

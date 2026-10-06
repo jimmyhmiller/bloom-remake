@@ -350,6 +350,7 @@ ItemKind        = UseItem | ImportItem | IncludeItem | ConstItem | ParamItem
                 | InterposeItem | BlockItem | OverrideItem | AclItem
                 | SnapshotItem | MigrateItem | TranslateItem | SpecItem | TreeItem ;
 TreeItem        = 'tree' IDENT "{" { IDENT RelPath "(" IDENT { "," IDENT } ")" ";" } "}" ;  (* §8.2 *)
+FragmentItem    = 'fragment' IDENT "(" [ IDENT ":" Type { "," IDENT ":" Type } ] ")" Children ;  (* §8.2 *)
 
 UseItem         = "use" UseTree ";" ;
 UseTree         = IDENT { "::" IDENT }
@@ -452,7 +453,8 @@ ViewDecl        = [ 'monotone' ] "view" IDENT "(" [ ViewCol { "," ViewCol } [ ",
 ViewCol         = IDENT [ ":" Type ] [ "=" Expr ] ;                   (* the Expr is a head aggregate call *)
 HandlerItem     = [ IDENT ":" ] [ 'monotone' ] ( "on" | "while" ) Body⁰ Block ;
 Block           = "{" { Stmt } "}" ;
-Stmt            = OuterAttrs ( VerbStmt | IfStmt | ForStmt ) ;
+Stmt            = OuterAttrs ( VerbStmt | IfStmt | ForStmt | CallStmt ) ;
+CallStmt        = Element ;                                           (* a fragment call, §8.2 *)
 VerbStmt        = "emit" Target [ 'weight' Expr ] End
                 | "next" Target [ 'weight' Expr ] End
                 | "send" Target [ 'to' Expr ] End
@@ -466,7 +468,7 @@ ForStmt         = "for" Body⁰ Block ;
 Head            = RelPath "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 Element         = ElemName [ "[" [ Arg { "," Arg } ] "]" ] [ "(" [ Arg { "," Arg } [ "," ] ] ")" ] ( Children | ";" ) ;
 ElemName        = IDENT { ( "-" | "." ) IDENT } ;                     (* `font-face`; `a.rel` for a child head *)
-Children        = "{" { Element | ChildIf | ChildFor | Expr [ ";" ] } "}" ;   (* the Expr: content *)
+Children        = "{" { Element | ChildIf | ChildFor | VerbStmt | Expr [ ";" ] } "}" ;   (* the Expr: content *)
 ChildIf         = "if" Body⁰ Children [ "else" ( ChildIf | Children ) ] ;
 ChildFor        = "for" Body⁰ Children ;
 BootstrapItem   = "bootstrap" [ 'fresh' ] Block ;
@@ -1373,6 +1375,12 @@ else in the language sees it.
   `to_string` into a `String` column), and a content row for a bare-expression child (at most one). An element's id
   is `[id: e]`, else derived: the parent's id, `/`, the kind, `.`, the slot, and `[k]` with `[key: k]`. An element
   inside a `for` with neither an id nor a key is BLS0430; a key beside an id BLS0431.
+- *Fragments.* `fragment f(x: T, …) { items }` names a group of statements and tree elements; a call `f(e, …)` stands
+  where a statement or a tree element can. Its meaning is its items in a block of their own whose body binds each
+  parameter to its argument (typed: the argument flows into `T`), and in which only the parameters and the
+  fragment's own variables are visible: a caller's variable never joins a fragment's (hygiene). Called inside a tree,
+  its elements are the enclosing element's children, in the call's slots; called elsewhere, a tree element in it is
+  BLS0432. A fragment that calls itself is BLS0433; a parameter that is not a variable name BLS0436.
 
 **No `let` statements.** A `let` is a body literal and belongs in the header or in an `if`/`for` body
 (`on timed_out(t), let nt = t + 1 { … }`). A `let` statement is BLS0102. This keeps blocks from reading as
@@ -3135,6 +3143,7 @@ never truncated or defaulted).
 | BLS0433 | E | a fragment that calls itself, directly or through others |
 | BLS0434 | E | a `tree` declaration whose relations do not have the shapes of their roles |
 | BLS0435 | E | an interpolation hole's format spec other than `.N` |
+| BLS0436 | E | a fragment parameter that is not a variable name (variables start with a lowercase letter or `_`) |
 
 **Rules, time and stratification (BLS05xx)**
 
