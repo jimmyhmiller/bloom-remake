@@ -73,8 +73,8 @@ flap: on tapped(), screen("game"), bird(y, _v) {
     upsert bird(y, FLAP);
 }
 
-step: on frame(_k, _at), screen("game"), frames(n), bird(y, v), world(d), not tapped() {
-    upsert bird(fall(y, v, n).0, fall(y, v, n).1);
+step: on frame(_k, _at), screen("game"), frames(n), bird(y, v), world(d), not tapped(), let after = fall(y, v, n) {
+    upsert bird(after.0, after.1);
     upsert world(d + n as f64 * FRAME);
 }
 /// An obstacle off the right edge gets a new gap each frame until it comes on: a different game every time.
@@ -112,7 +112,7 @@ page: while screen(s), bird(y, v), score(n), best_score(b) {
     emit attr("sky", "height", "95");
     emit attr("sky", "fill", "rgb(112, 197, 206)");
     emit elem("city", "game", 1, "path");
-    emit attr("city", "d", "M10 78 h6 v-9 h5 v6 h4 v-13 h6 v10 h3 v-6 h7 v12 h4 v-16 h6 v9 h5 v-5 h6 v11 h4 v-8 h7 v10 h4 v-7 h7 v6 h3 v18 h-80 z");
+    emit attr("city", "d", "M10 78 h6 v-9 h5 v6 h4 v-13 h6 v10 h3 v-6 h7 v12 h4 v-16 h6 v9 h5 v-5 h6 v11 h4 v-8 h7 v10 h4 v-7 h7 v6 h6 v18 h-80 z");
     emit attr("city", "fill", "rgb(160, 220, 222)");
     emit elem("bushes", "game", 2, "path");
     emit attr("bushes", "d", "M10 90 q4 -9 8 -3 q4 -8 9 -1 q5 -8 9 -1 q4 -7 9 0 q5 -9 9 -1 q4 -7 9 0 q4 -8 9 -1 q4 -6 8 1 v6 h-80 z");
