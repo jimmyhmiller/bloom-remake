@@ -874,7 +874,9 @@ fn space(p: &SyntaxToken, n: &SyntaxToken) -> bool {
         return false;
     }
     // Ranges `0..n`, and `..base`, `..{…}`, `..m` in arguments and struct literals.
-    if matches!(pk, RANGE | RANGE_EQ | OPEN_RANGE | OPEN_RANGE_EQ) || matches!(nk, RANGE | RANGE_EQ) {
+    if matches!(pk, RANGE | RANGE_EQ | OPEN_RANGE | OPEN_RANGE_EQ)
+        || matches!(nk, RANGE | RANGE_EQ | OPEN_RANGE | OPEN_RANGE_EQ)
+    {
         return !(matches!(pp, Some(BINARYEXPR | ARG | FIELDINIT) | None) || matches!(np, Some(BINARYEXPR)));
     }
     // Closures: `|a, b| body`.
@@ -917,6 +919,12 @@ mod tests {
              }\n"
         );
         assert_eq!(fmt(&out), out, "not idempotent");
+    }
+
+    #[test]
+    fn ranges_and_ring_intervals_are_tight() {
+        let src = "program p version 1;\nview v(x) = r(x, n, s), x in n<..s, x in 0..n, x in n<..=s, x in 1..=s;\n";
+        assert_eq!(fmt(src), src);
     }
 
     #[test]
