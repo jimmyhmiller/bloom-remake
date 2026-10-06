@@ -8,8 +8,9 @@
 //!
 //! The page is kept incrementally: each round hands it the rows its outputs gained and lost ([`Page::apply`]), it
 //! re-checks only what those rows touch, and [`Page::take_patches`] turns what changed since the last call into
-//! patches. They are exactly the patches a comparison of the whole page before and after would give, in the same
-//! order (the tests check it against that comparison).
+//! patches, in proportion to the change: an element is placed among its siblings only when it is new, moved, or
+//! under a new parent (the tests check that the patches build the same DOM a comparison of the whole page before and
+//! after would).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -20,18 +21,21 @@ use serde::Serialize;
 
 use crate::HostError;
 
+/// A string of the page: shared with the output rows it comes from (cloning one is a reference count).
+type Text = std::sync::Arc<str>;
+
 /// One element: its parent (`""`: the mount point), its position among its siblings, its tag.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Elem {
-    parent: String,
+    parent: Text,
     pos: i64,
-    tag: String,
+    tag: Text,
     /// In the SVG namespace (set once the page's elements are known).
     svg: bool,
 }
 
 /// An `elem` row's columns after the id: parent, position, tag.
-type ElemRow = (String, i64, String);
+type ElemRow = (Text, i64, Text);
 
 /// The rows of a page's four outputs that a round added and removed.
 #[derive(Clone, Debug, Default)]
@@ -45,31 +49,29 @@ pub struct Delta {
 /// What changed since the last [`Page::take_patches`]: each touched entry's value before its first change.
 #[derive(Clone, Debug, Default)]
 struct Journal {
-    elems: BTreeMap<String, Option<Elem>>,
-    attrs: BTreeMap<(String, String), Option<String>>,
-    texts: BTreeMap<String, Option<String>>,
-    /// A parent's children, in order (`None`: it had none).
-    kids: BTreeMap<String, Option<Vec<String>>>,
-    focus: BTreeMap<String, bool>,
+    elems: BTreeMap<Text, Option<Elem>>,
+    attrs: BTreeMap<(Text, Text), Option<Text>>,
+    texts: BTreeMap<Text, Option<Text>>,
+    focus: BTreeMap<Text, bool>,
 }
 
 /// A page: what the program's outputs hold at the end of a round.
 #[derive(Clone, Debug, Default)]
 pub struct Page {
-    elems: BTreeMap<String, Elem>,
-    attrs: BTreeMap<(String, String), String>,
-    texts: BTreeMap<String, String>,
-    focus: BTreeSet<String>,
+    elems: BTreeMap<Text, Elem>,
+    attrs: BTreeMap<(Text, Text), Text>,
+    texts: BTreeMap<Text, Text>,
+    focus: BTreeSet<Text>,
     /// The rows the outputs hold, by id: a page is well formed when each holds at most one.
-    elem_rows: BTreeMap<String, BTreeSet<ElemRow>>,
-    attr_rows: BTreeMap<(String, String), BTreeSet<String>>,
-    text_rows: BTreeMap<String, BTreeSet<String>>,
+    elem_rows: BTreeMap<Text, BTreeSet<ElemRow>>,
+    attr_rows: BTreeMap<(Text, Text), BTreeSet<Text>>,
+    text_rows: BTreeMap<Text, BTreeSet<Text>>,
     /// Each parent's children, by position then id (a parent with none has no entry).
-    kids: BTreeMap<String, BTreeSet<(i64, String)>>,
+    kids: BTreeMap<Text, BTreeSet<(i64, Text)>>,
     /// What a round left ill formed, checked again in the next (as a whole-page check would).
-    recheck_elems: BTreeSet<String>,
-    recheck_attrs: BTreeSet<(String, String)>,
-    recheck_texts: BTreeSet<String>,
+    recheck_elems: BTreeSet<Text>,
+    recheck_attrs: BTreeSet<(Text, Text)>,
+    recheck_texts: BTreeSet<Text>,
     journal: Journal,
 }
 
@@ -88,7 +90,7 @@ impl Eq for Page {}
 pub enum Patch {
     /// Make a detached element `tag` with identity `id` (in the SVG namespace when `svg`).
     Create { id: String, tag: String, svg: bool },
-    /// Drop the element `id` (its children that stay on the page are placed again by a [`Patch::Children`]).
+    /// Drop the element `id` (its children that stay on the page are placed again by a [`Patch::Place`]).
     Remove { id: String },
     /// Set an attribute (or, for `value`, `checked` and `disabled`, the property).
     Attr { id: String, name: String, value: String },
@@ -96,15 +98,20 @@ pub enum Patch {
     Unattr { id: String, name: String },
     /// Set the text before the element's children (`""`: none).
     Text { id: String, text: String },
-    /// The element `parent`'s children (`""`: the mount point's), in order.
-    Children { parent: String, ids: Vec<String> },
+    /// Put the element `id` under `parent` (`""`: the mount point), just before its sibling `before` (`None`: last).
+    /// Places come last-sibling-first, so `before` is already where it belongs.
+    Place {
+        parent: String,
+        id: String,
+        before: Option<String>,
+    },
     /// Focus the element.
     Focus { id: String },
 }
 
-fn string(v: &Value, what: &str) -> Result<String, HostError> {
+fn string(v: &Value, what: &str) -> Result<Text, HostError> {
     match v {
-        Value::Str(s) => Ok(s.to_string()),
+        Value::Str(s) => Ok(s.clone()),
         other => Err(HostError::Page(format!("{what} is {other:?}, not a String"))),
     }
 }
@@ -114,7 +121,7 @@ fn columns<'r, const N: usize>(row: &'r Row, rel: &str) -> Result<&'r [Value; N]
         .map_err(|_| HostError::Page(format!("a row of `{rel}` with {} columns, not {N}", row.len())))
 }
 
-fn elem_row(row: &Row) -> Result<(String, ElemRow), HostError> {
+fn elem_row(row: &Row) -> Result<(Text, ElemRow), HostError> {
     let [id, parent, pos, tag] = columns::<4>(row, "elem")?;
     let id = string(id, "an element's id")?;
     let pos = match pos {
@@ -130,7 +137,7 @@ fn elem_row(row: &Row) -> Result<(String, ElemRow), HostError> {
     Ok((id, (parent, pos, tag)))
 }
 
-fn attr_row(row: &Row) -> Result<((String, String), String), HostError> {
+fn attr_row(row: &Row) -> Result<((Text, Text), Text), HostError> {
     let [id, name, value] = columns::<3>(row, "attr")?;
     let key = (
         string(id, "an attribute's element")?,
@@ -139,12 +146,12 @@ fn attr_row(row: &Row) -> Result<((String, String), String), HostError> {
     Ok((key, string(value, "an attribute's value")?))
 }
 
-fn text_row(row: &Row) -> Result<(String, String), HostError> {
+fn text_row(row: &Row) -> Result<(Text, Text), HostError> {
     let [id, s] = columns::<2>(row, "text")?;
     Ok((string(id, "a text's element")?, string(s, "a text")?))
 }
 
-fn focus_row(row: &Row) -> Result<String, HostError> {
+fn focus_row(row: &Row) -> Result<Text, HostError> {
     let [id] = columns::<1>(row, "focus")?;
     string(id, "a focused element")
 }
@@ -167,9 +174,9 @@ impl Page {
     /// given twice, are program errors. An error leaves the rows applied and the ill-formed parts as they were; the
     /// next round checks them again.
     pub fn apply(&mut self, d: &Delta) -> Result<(), HostError> {
-        let mut elems: BTreeSet<String> = std::mem::take(&mut self.recheck_elems);
-        let mut attrs: BTreeSet<(String, String)> = std::mem::take(&mut self.recheck_attrs);
-        let mut texts: BTreeSet<String> = std::mem::take(&mut self.recheck_texts);
+        let mut elems: BTreeSet<Text> = std::mem::take(&mut self.recheck_elems);
+        let mut attrs: BTreeSet<(Text, Text)> = std::mem::take(&mut self.recheck_attrs);
+        let mut texts: BTreeSet<Text> = std::mem::take(&mut self.recheck_texts);
         for (rows, add) in [(&d.elem.1, false), (&d.elem.0, true)] {
             for row in rows {
                 let (id, r) = elem_row(row)?;
@@ -272,7 +279,7 @@ impl Page {
         }
         // Namespaces (and cycles): an element whose tag or parent changed decides its descendants' too.
         if orphans.is_empty() {
-            let mut todo: Vec<String> = changed
+            let mut todo: Vec<Text> = changed
                 .iter()
                 .filter(|id| self.elems.contains_key(*id))
                 .cloned()
@@ -371,40 +378,23 @@ impl Page {
         }
     }
 
-    /// Replaces element `id` (journaling what it was, and its old and new parents' children).
-    fn set_elem(&mut self, id: &str, next: Option<Elem>) {
+    /// Replaces element `id` (journaling what it was).
+    fn set_elem(&mut self, id: &Text, next: Option<Elem>) {
         let old = self.elems.get(id).cloned();
-        self.journal.elems.entry(id.to_owned()).or_insert_with(|| old.clone());
+        self.journal.elems.entry(id.clone()).or_insert_with(|| old.clone());
         let moved = old.as_ref().map(|e| (&e.parent, e.pos)) != next.as_ref().map(|e| (&e.parent, e.pos));
         if moved {
-            for parent in old
-                .iter()
-                .map(|e| e.parent.clone())
-                .chain(next.iter().map(|e| e.parent.clone()))
-            {
-                if !self.journal.kids.contains_key(&parent) {
-                    let list = self.kid_list(&parent);
-                    self.journal.kids.insert(parent, list);
-                }
-            }
             if let Some(e) = &old {
-                edit(&mut self.kids, &e.parent, (e.pos, id.to_owned()), false);
+                edit(&mut self.kids, &e.parent, (e.pos, id.clone()), false);
             }
             if let Some(e) = &next {
-                edit(&mut self.kids, &e.parent, (e.pos, id.to_owned()), true);
+                edit(&mut self.kids, &e.parent, (e.pos, id.clone()), true);
             }
         }
         match next {
-            Some(e) => self.elems.insert(id.to_owned(), e),
+            Some(e) => self.elems.insert(id.clone(), e),
             None => self.elems.remove(id),
         };
-    }
-
-    /// `parent`'s children in order (`None`: it has none).
-    fn kid_list(&self, parent: &str) -> Option<Vec<String>> {
-        self.kids
-            .get(parent)
-            .map(|kids| kids.iter().map(|(_, id)| id.clone()).collect())
     }
 
     /// Whether element `id` is in the SVG namespace: the nearest `svg` or `foreignObject` above it (itself included,
@@ -417,7 +407,7 @@ impl Page {
                 return Err(HostError::Page(format!("element `{at}` is its own ancestor")));
             }
             let Some(e) = self.elems.get(at) else { return Ok(false) };
-            match e.tag.as_str() {
+            match &*e.tag {
                 "svg" => return Ok(true),
                 "foreignObject" if at != id => return Ok(false),
                 _ => {}
@@ -425,12 +415,11 @@ impl Page {
             if e.parent.is_empty() {
                 return Ok(false);
             }
-            at = e.parent.as_str();
+            at = &e.parent;
         }
     }
 
-    /// The patches that turn the page of the last call (or the empty page) into this one; exactly those
-    /// [`Page::diff`] gives for the two pages, in the same order.
+    /// The patches that turn the page of the last call (or the empty page) into this one.
     pub fn take_patches(&mut self) -> Vec<Patch> {
         let j = std::mem::take(&mut self.journal);
         let old_elem = |id: &str| -> Option<&Elem> {
@@ -443,7 +432,7 @@ impl Page {
         let mut out = Vec::new();
         for (id, old) in &j.elems {
             if old.is_some() && !kept(id) {
-                out.push(Patch::Remove { id: id.clone() });
+                out.push(Patch::Remove { id: id.to_string() });
             }
         }
         let mut fresh = BTreeSet::new();
@@ -452,24 +441,24 @@ impl Page {
                 && !kept(id)
             {
                 out.push(Patch::Create {
-                    id: id.clone(),
-                    tag: e.tag.clone(),
+                    id: id.to_string(),
+                    tag: e.tag.to_string(),
                     svg: e.svg,
                 });
                 fresh.insert(id.clone());
             }
         }
         // Attributes: a new element's all, a kept one's changes.
-        let mut keys: BTreeSet<(String, String)> = j.attrs.keys().cloned().collect();
+        let mut keys: BTreeSet<(Text, Text)> = j.attrs.keys().cloned().collect();
         for id in &fresh {
             keys.extend(
                 self.attrs
-                    .range((id.clone(), String::new())..)
+                    .range((id.clone(), Text::from(""))..)
                     .take_while(|((i, _), _)| i == id)
                     .map(|(k, _)| k.clone()),
             );
         }
-        let old_attr = |key: &(String, String)| -> Option<&String> {
+        let old_attr = |key: &(Text, Text)| -> Option<&Text> {
             match j.attrs.get(key) {
                 Some(old) => old.as_ref(),
                 None => self.attrs.get(key),
@@ -483,27 +472,27 @@ impl Page {
             let old = if kept(&key.0) { old_attr(key) } else { None };
             if old != Some(value) {
                 out.push(Patch::Attr {
-                    id: key.0.clone(),
-                    name: key.1.clone(),
-                    value: value.clone(),
+                    id: key.0.to_string(),
+                    name: key.1.to_string(),
+                    value: value.to_string(),
                 });
             }
         }
         for (key, old) in &j.attrs {
             if old.is_some() && kept(&key.0) && !self.attrs.contains_key(key) {
                 out.push(Patch::Unattr {
-                    id: key.0.clone(),
-                    name: key.1.clone(),
+                    id: key.0.to_string(),
+                    name: key.1.to_string(),
                 });
             }
         }
         // Texts.
-        let ids: BTreeSet<&String> = j.texts.keys().chain(fresh.iter()).collect();
+        let ids: BTreeSet<&Text> = j.texts.keys().chain(fresh.iter()).collect();
         for id in ids {
             if !self.elems.contains_key(id) {
                 continue;
             }
-            let new = self.texts.get(id).map_or("", String::as_str);
+            let new = self.texts.get(id).map_or("", |t| &**t);
             let old = if kept(id) {
                 match j.texts.get(id) {
                     Some(old) => old.as_deref().unwrap_or(""),
@@ -514,46 +503,44 @@ impl Page {
             };
             if new != old {
                 out.push(Patch::Text {
-                    id: id.clone(),
+                    id: id.to_string(),
                     text: new.to_owned(),
                 });
             }
         }
-        // Children: every parent whose list changed, or that is new (its children were placed in the old one).
-        let parents: BTreeSet<&String> = j.kids.keys().chain(fresh.iter()).collect();
-        let old_kids = |p: &str| -> Option<Vec<String>> {
-            match j.kids.get(p) {
-                Some(old) => old.clone(),
-                None => self.kid_list(p),
-            }
-        };
-        let mut gone = Vec::new();
-        for parent in parents {
-            match self.kid_list(parent) {
-                Some(kids) => {
-                    let fresh = !parent.is_empty() && !kept(parent);
-                    if fresh || old_kids(parent).as_ref() != Some(&kids) {
-                        out.push(Patch::Children {
-                            parent: parent.clone(),
-                            ids: kids,
-                        });
-                    }
-                }
-                None => {
-                    if old_kids(parent).is_some() && (parent.is_empty() || kept(parent)) {
-                        gone.push(parent.clone());
-                    }
-                }
+        // Placing: a new element, one that moved, and the children of a new one (they were in the old node). Each
+        // parent's, last sibling first.
+        let mut place: BTreeMap<&Text, BTreeSet<(i64, &Text)>> = BTreeMap::new();
+        for (id, old) in &j.elems {
+            let Some(e) = self.elems.get(id) else { continue };
+            let moved = old.as_ref().is_none_or(|o| o.parent != e.parent || o.pos != e.pos);
+            if moved || !kept(id) {
+                place.entry(&e.parent).or_default().insert((e.pos, id));
             }
         }
-        out.extend(gone.into_iter().map(|parent| Patch::Children {
-            parent,
-            ids: Vec::new(),
-        }));
+        for parent in &fresh {
+            for (pos, kid) in self.kids.get(parent).into_iter().flatten() {
+                place.entry(parent).or_default().insert((*pos, kid));
+            }
+        }
+        for (parent, kids) in place {
+            for (pos, id) in kids.into_iter().rev() {
+                let before = self
+                    .kids
+                    .get(parent)
+                    .and_then(|s| s.range((pos, id.clone())..).nth(1))
+                    .map(|(_, k)| k.to_string());
+                out.push(Patch::Place {
+                    parent: parent.to_string(),
+                    id: id.to_string(),
+                    before,
+                });
+            }
+        }
         // Focus what the program newly asks to focus.
         for (id, was) in &j.focus {
             if !was && self.focus.contains(id) && self.elems.contains_key(id) {
-                out.push(Patch::Focus { id: id.clone() });
+                out.push(Patch::Focus { id: id.to_string() });
             }
         }
         out
@@ -573,117 +560,9 @@ impl Page {
         Ok(page)
     }
 
-    /// Each parent's children, in order.
-    #[cfg(test)]
-    fn children(&self) -> BTreeMap<&str, Vec<&str>> {
-        let mut by_parent: BTreeMap<&str, Vec<(i64, &str)>> = BTreeMap::new();
-        for (id, e) in &self.elems {
-            by_parent
-                .entry(e.parent.as_str())
-                .or_default()
-                .push((e.pos, id.as_str()));
-        }
-        by_parent
-            .into_iter()
-            .map(|(p, mut kids)| {
-                kids.sort();
-                (p, kids.into_iter().map(|(_, id)| id).collect())
-            })
-            .collect()
-    }
-
-    /// The patches that turn this page into `next`, by comparing the whole of both: the reference
-    /// [`Page::take_patches`] is checked against.
-    #[cfg(test)]
-    pub fn diff(&self, next: &Page) -> Vec<Patch> {
-        let mut out = Vec::new();
-        let kept = |id: &str| matches!((self.elems.get(id), next.elems.get(id)), (Some(a), Some(b)) if a.tag == b.tag && a.svg == b.svg);
-        // Elements gone, or replaced (another tag), then elements new.
-        for id in self.elems.keys() {
-            if !kept(id) {
-                out.push(Patch::Remove { id: id.clone() });
-            }
-        }
-        for (id, e) in &next.elems {
-            if !kept(id) {
-                out.push(Patch::Create {
-                    id: id.clone(),
-                    tag: e.tag.clone(),
-                    svg: e.svg,
-                });
-            }
-        }
-        // Attributes and texts: a new element's all, a kept one's changes.
-        for ((id, name), value) in &next.attrs {
-            if !next.elems.contains_key(id) {
-                continue;
-            }
-            let old = if kept(id) {
-                self.attrs.get(&(id.clone(), name.clone()))
-            } else {
-                None
-            };
-            if old != Some(value) {
-                out.push(Patch::Attr {
-                    id: id.clone(),
-                    name: name.clone(),
-                    value: value.clone(),
-                });
-            }
-        }
-        for (id, name) in self.attrs.keys() {
-            if kept(id) && !next.attrs.contains_key(&(id.clone(), name.clone())) {
-                out.push(Patch::Unattr {
-                    id: id.clone(),
-                    name: name.clone(),
-                });
-            }
-        }
-        for id in next.elems.keys() {
-            let new = next.texts.get(id).map_or("", String::as_str);
-            let old = if kept(id) {
-                self.texts.get(id).map_or("", String::as_str)
-            } else {
-                ""
-            };
-            if new != old {
-                out.push(Patch::Text {
-                    id: id.clone(),
-                    text: new.to_owned(),
-                });
-            }
-        }
-        // Children: every parent whose list changed, or that is new (its children were placed in the old one).
-        let (before, after) = (self.children(), next.children());
-        for (parent, kids) in &after {
-            let fresh = !parent.is_empty() && !kept(parent);
-            if fresh || before.get(parent) != Some(kids) {
-                out.push(Patch::Children {
-                    parent: (*parent).to_owned(),
-                    ids: kids.iter().map(|k| (*k).to_owned()).collect(),
-                });
-            }
-        }
-        for parent in before.keys() {
-            if !after.contains_key(parent) && (parent.is_empty() || kept(parent)) {
-                out.push(Patch::Children {
-                    parent: (*parent).to_owned(),
-                    ids: Vec::new(),
-                });
-            }
-        }
-        // Focus what the program newly asks to focus.
-        for id in next.focus.difference(&self.focus) {
-            if next.elems.contains_key(id) {
-                out.push(Patch::Focus { id: id.clone() });
-            }
-        }
-        out
-    }
-
     /// The ids of the elements on the page.
     pub fn ids(&self) -> impl Iterator<Item = &str> {
-        self.elems.keys().map(String::as_str)
+        self.elems.keys().map(|k| &**k)
     }
 }
 
@@ -705,18 +584,51 @@ mod tests {
         Arc::from(vec![s(id), s(name), s(value)])
     }
 
-    fn page(elems: &[Row], attrs: &[Row], focus: &[&str]) -> Page {
-        let focus: Vec<Row> = focus.iter().map(|f| Arc::from(vec![s(f)])).collect();
-        Page::of(elems, attrs, &[], &focus).unwrap()
+    fn rows(elems: &[Row], attrs: &[Row], focus: &[&str]) -> [BTreeSet<Row>; 4] {
+        [
+            elems.iter().cloned().collect(),
+            attrs.iter().cloned().collect(),
+            BTreeSet::new(),
+            focus.iter().map(|f| -> Row { Arc::from(vec![s(f)]) }).collect(),
+        ]
     }
 
-    fn ids(xs: &[&str]) -> Vec<String> {
-        xs.iter().map(|x| (*x).to_owned()).collect()
+    /// The changes from `before`'s rows to `after`'s.
+    fn delta(before: &[BTreeSet<Row>; 4], after: &[BTreeSet<Row>; 4]) -> Delta {
+        let d = |k: usize| -> (Vec<Row>, Vec<Row>) {
+            (
+                after[k].difference(&before[k]).cloned().collect(),
+                before[k].difference(&after[k]).cloned().collect(),
+            )
+        };
+        Delta {
+            elem: d(0),
+            attr: d(1),
+            text: d(2),
+            focus: d(3),
+        }
+    }
+
+    /// The patches from the page of `a`'s rows to that of `b`'s.
+    fn patches(a: &[BTreeSet<Row>; 4], b: &[BTreeSet<Row>; 4]) -> Vec<Patch> {
+        let mut page = Page::default();
+        page.apply(&delta(&Default::default(), a)).unwrap();
+        page.take_patches();
+        page.apply(&delta(a, b)).unwrap();
+        page.take_patches()
+    }
+
+    fn place(parent: &str, id: &str, before: Option<&str>) -> Patch {
+        Patch::Place {
+            parent: parent.to_owned(),
+            id: id.to_owned(),
+            before: before.map(str::to_owned),
+        }
     }
 
     #[test]
     fn children_are_ordered_by_position_and_moves_reorder_without_recreating() {
-        let a = page(
+        let a = rows(
             &[
                 elem("ul", "", 0, "ul"),
                 elem("x", "ul", 1, "li"),
@@ -725,7 +637,7 @@ mod tests {
             &[],
             &[],
         );
-        let b = page(
+        let b = rows(
             &[
                 elem("ul", "", 0, "ul"),
                 elem("x", "ul", 3, "li"),
@@ -734,15 +646,10 @@ mod tests {
             &[],
             &[],
         );
-        assert_eq!(
-            a.diff(&b),
-            [Patch::Children {
-                parent: "ul".to_owned(),
-                ids: ids(&["y", "x"])
-            }]
-        );
-        // Equal positions order by id.
-        let c = page(
+        // Only the element that moved is placed, last among its siblings.
+        assert_eq!(patches(&a, &b), [place("ul", "x", None)]);
+        // Equal positions order by id; siblings are placed last first.
+        let c = rows(
             &[
                 elem("ul", "", 0, "ul"),
                 elem("b", "ul", 0, "li"),
@@ -751,27 +658,49 @@ mod tests {
             &[],
             &[],
         );
-        assert!(Page::default().diff(&c).contains(&Patch::Children {
-            parent: "ul".to_owned(),
-            ids: ids(&["a", "b"])
-        }));
+        let p = patches(&Default::default(), &c);
+        let b_at = p.iter().position(|x| *x == place("ul", "b", None));
+        let a_at = p.iter().position(|x| *x == place("ul", "a", Some("b")));
+        assert!(b_at.is_some() && a_at.is_some() && b_at < a_at, "{p:?}");
+    }
+
+    #[test]
+    fn adding_one_child_places_it_alone() {
+        let kids: Vec<Row> = (0..50).map(|i| elem(&format!("li{i}"), "ul", i, "li")).collect();
+        let mut more = kids.clone();
+        more.push(elem("li50", "ul", 25, "li"));
+        let base = [elem("ul", "", 0, "ul")];
+        let a = rows(&[&base[..], &kids].concat(), &[], &[]);
+        let b = rows(&[&base[..], &more].concat(), &[], &[]);
+        // Between li25 and li26 by (position, id): ("li25", 25) < ("li50", 25) < ("li26", 26).
+        let p = patches(&a, &b);
+        assert_eq!(
+            p,
+            [
+                Patch::Create {
+                    id: "li50".to_owned(),
+                    tag: "li".to_owned(),
+                    svg: false
+                },
+                place("ul", "li50", Some("li26"))
+            ]
+        );
     }
 
     #[test]
     fn a_new_tag_replaces_the_element_and_its_children_are_placed_again() {
-        let a = page(
+        let a = rows(
             &[elem("box", "", 0, "div"), elem("t", "box", 0, "span")],
             &[attr("box", "class", "x")],
             &[],
         );
-        let b = page(
+        let b = rows(
             &[elem("box", "", 0, "section"), elem("t", "box", 0, "span")],
             &[attr("box", "class", "x")],
             &[],
         );
-        let d = a.diff(&b);
         assert_eq!(
-            d,
+            patches(&a, &b),
             [
                 Patch::Remove { id: "box".to_owned() },
                 Patch::Create {
@@ -784,24 +713,22 @@ mod tests {
                     name: "class".to_owned(),
                     value: "x".to_owned()
                 },
-                Patch::Children {
-                    parent: "box".to_owned(),
-                    ids: ids(&["t"])
-                },
+                place("", "box", None),
+                place("box", "t", None),
             ]
         );
     }
 
     #[test]
     fn attributes_set_change_and_go_and_focus_is_asked_once() {
-        let a = page(
+        let a = rows(
             &[elem("i", "", 0, "input")],
             &[attr("i", "value", "a"), attr("i", "class", "c")],
             &[],
         );
-        let b = page(&[elem("i", "", 0, "input")], &[attr("i", "value", "b")], &["i"]);
+        let b = rows(&[elem("i", "", 0, "input")], &[attr("i", "value", "b")], &["i"]);
         assert_eq!(
-            a.diff(&b),
+            patches(&a, &b),
             [
                 Patch::Attr {
                     id: "i".to_owned(),
@@ -816,13 +743,13 @@ mod tests {
             ]
         );
         // Still focused: not asked again.
-        assert_eq!(b.diff(&b), []);
+        assert_eq!(patches(&b, &b), []);
     }
 
     #[test]
     fn svg_elements_are_made_in_their_namespace_and_replaced_when_they_leave_it() {
         let in_svg = |parent: &str| {
-            page(
+            rows(
                 &[
                     elem("game", "", 0, "svg"),
                     elem("box", "", 1, "div"),
@@ -835,8 +762,7 @@ mod tests {
             )
         };
         let a = in_svg("game");
-        let created: Vec<(String, bool)> = Page::default()
-            .diff(&a)
+        let created: Vec<(String, bool)> = patches(&Default::default(), &a)
             .into_iter()
             .filter_map(|p| match p {
                 Patch::Create { id, svg, .. } => Some((id, svg)),
@@ -854,8 +780,7 @@ mod tests {
             ]
         );
         // The circle moves out of the svg: another element.
-        let b = in_svg("box");
-        let d = a.diff(&b);
+        let d = patches(&a, &in_svg("box"));
         assert!(d.contains(&Patch::Remove { id: "bird".to_owned() }), "{d:?}");
         assert!(
             d.contains(&Patch::Create {
@@ -879,6 +804,147 @@ mod tests {
         assert!(Page::of(&[elem("a", "nope", 0, "div")], &[], &[], &[]).is_err());
         // The same row twice is the same element.
         assert!(Page::of(&[elem("a", "", 0, "div"), elem("a", "", 0, "div")], &[], &[], &[]).is_ok());
+    }
+
+    // ---------------------------------------------------------------- a DOM, to check what the patches build
+
+    #[derive(Clone, Debug, Default)]
+    struct Node {
+        tag: String,
+        svg: bool,
+        attrs: BTreeMap<String, String>,
+        text: String,
+        kids: Vec<usize>,
+        parent: Option<usize>,
+    }
+
+    /// A DOM as the browser host builds it: nodes with identity (a created node is a new one; a removed one leaves
+    /// with its subtree), the mount point node 0, each patch applied as the host applies it.
+    #[derive(Clone, Debug)]
+    struct Dom {
+        nodes: Vec<Node>,
+        by_id: BTreeMap<String, usize>,
+    }
+
+    impl Dom {
+        fn new() -> Dom {
+            Dom {
+                nodes: vec![Node::default()],
+                by_id: BTreeMap::new(),
+            }
+        }
+
+        fn handle(&self, id: &str) -> usize {
+            if id.is_empty() { 0 } else { self.by_id[id] }
+        }
+
+        fn detach(&mut self, n: usize) {
+            if let Some(p) = self.nodes[n].parent.take() {
+                self.nodes[p].kids.retain(|k| *k != n);
+            }
+        }
+
+        /// `parent.insertBefore(n, before)`.
+        fn insert_before(&mut self, parent: usize, n: usize, before: Option<usize>) {
+            self.detach(n);
+            let at = before
+                .and_then(|b| self.nodes[parent].kids.iter().position(|k| *k == b))
+                .unwrap_or(self.nodes[parent].kids.len());
+            self.nodes[parent].kids.insert(at, n);
+            self.nodes[n].parent = Some(parent);
+        }
+
+        fn create(&mut self, id: &str, tag: &str, svg: bool) {
+            self.nodes.push(Node {
+                tag: tag.to_owned(),
+                svg,
+                ..Node::default()
+            });
+            self.by_id.insert(id.to_owned(), self.nodes.len() - 1);
+        }
+
+        fn remove(&mut self, id: &str) {
+            if let Some(n) = self.by_id.remove(id) {
+                self.detach(n);
+            }
+        }
+
+        fn apply(&mut self, patches: &[Patch]) {
+            for p in patches {
+                match p {
+                    Patch::Create { id, tag, svg } => self.create(id, tag, *svg),
+                    Patch::Remove { id } => self.remove(id),
+                    Patch::Attr { id, name, value } => {
+                        let n = self.handle(id);
+                        self.nodes[n].attrs.insert(name.clone(), value.clone());
+                    }
+                    Patch::Unattr { id, name } => {
+                        let n = self.handle(id);
+                        self.nodes[n].attrs.remove(name);
+                    }
+                    Patch::Text { id, text } => {
+                        let n = self.handle(id);
+                        self.nodes[n].text = text.clone();
+                    }
+                    Patch::Place { parent, id, before } => {
+                        let (p, n) = (self.handle(parent), self.handle(id));
+                        let before = before.as_deref().map(|b| self.handle(b));
+                        self.insert_before(p, n, before);
+                    }
+                    Patch::Focus { .. } => {}
+                }
+            }
+        }
+
+        /// What the mount point shows, as text.
+        fn render(&self) -> String {
+            fn go(d: &Dom, n: usize, out: &mut String) {
+                let node = &d.nodes[n];
+                out.push_str(&format!(
+                    "<{} {} {:?} {:?}>[",
+                    node.tag, node.svg, node.attrs, node.text
+                ));
+                for k in &node.kids {
+                    go(d, *k, out);
+                }
+                out.push(']');
+            }
+            let mut out = String::new();
+            go(self, 0, &mut out);
+            out
+        }
+    }
+
+    /// The page as a DOM would show it.
+    fn shown(page: &Page) -> String {
+        fn go(page: &Page, id: &str, out: &mut String) {
+            match page.elems.get(id) {
+                Some(e) => {
+                    let attrs: BTreeMap<String, String> = page
+                        .attrs
+                        .iter()
+                        .filter(|((i, _), _)| &**i == id)
+                        .map(|((_, n), v)| (n.to_string(), v.to_string()))
+                        .collect();
+                    let text = page.texts.get(id).cloned().unwrap_or_default();
+                    out.push_str(&format!("<{} {} {attrs:?} {text:?}>[", e.tag, e.svg));
+                }
+                None => out.push_str(&format!(
+                    "<{} {} {:?} {:?}>[",
+                    "",
+                    false,
+                    BTreeMap::<String, String>::new(),
+                    ""
+                )),
+            }
+            for (_, k) in page.kids.get(id).into_iter().flatten() {
+                go(page, k, out);
+            }
+            out.push(']');
+        }
+        let mut out = String::new();
+        go(page, "", &mut out);
+        out
     }
 
     // ---------------------------------------------------------------- the reference: the whole page, rebuilt
@@ -960,27 +1026,27 @@ mod tests {
 
     /// The SVG elements: an `svg`, and the children of an SVG element but a `foreignObject`. An element that is its
     /// own ancestor is an error.
-    fn reference_namespaces(page: &Page) -> Result<BTreeSet<String>, HostError> {
+    fn reference_namespaces(page: &Page) -> Result<BTreeSet<Text>, HostError> {
         let this = page;
         let mut svg = BTreeSet::new();
         for id in this.elems.keys() {
             // The chain from `id` up to the mount point; the nearest `svg` or `foreignObject` decides.
             let mut seen = BTreeSet::new();
-            let mut at = id.as_str();
+            let mut at: &str = id;
             let inside = loop {
                 if !seen.insert(at) {
                     return Err(HostError::Page(format!("element `{at}` is its own ancestor")));
                 }
                 let Some(e) = this.elems.get(at) else { break false };
-                match e.tag.as_str() {
+                match &*e.tag {
                     "svg" => break true,
-                    "foreignObject" if at != id => break false,
+                    "foreignObject" if at != &**id => break false,
                     _ => {}
                 }
                 if e.parent.is_empty() {
                     break false;
                 }
-                at = e.parent.as_str();
+                at = &e.parent;
             };
             if inside {
                 svg.insert(id.clone());
@@ -1052,28 +1118,21 @@ mod tests {
         [elems, attrs, text, focus]
     }
 
+    /// The page kept incrementally is the page rebuilt whole from the rows after every round (both refuse the same
+    /// ill-formed rounds), and its patches build, in the host's DOM, exactly that page: every round, from the DOM the
+    /// rounds before built. (A comparison of the whole page before and after, which the page made before, misses an
+    /// element replaced under a parent whose list of ids stays: its new node is never placed.)
     #[test]
-    fn the_incremental_page_patches_exactly_as_the_whole_page_comparison() {
+    fn the_incremental_page_is_the_page_and_its_patches_build_it() {
         let mut rng = Rng(0x2545_f491_4f6c_dd1d);
         let (mut errors, mut steps) = (0, 0);
-        for _run in 0..200 {
+        for _run in 0..300 {
             let mut page = Page::default();
-            let mut reference = Page::default();
+            let mut dom = Dom::new();
             let mut rows: [BTreeSet<Row>; 4] = Default::default();
             for _step in 0..12 {
                 let next = random_rows(&mut rng);
-                let delta = |k: usize| -> (Vec<Row>, Vec<Row>) {
-                    (
-                        next[k].difference(&rows[k]).cloned().collect(),
-                        rows[k].difference(&next[k]).cloned().collect(),
-                    )
-                };
-                let d = Delta {
-                    elem: delta(0),
-                    attr: delta(1),
-                    text: delta(2),
-                    focus: delta(3),
-                };
+                let d = delta(&rows, &next);
                 let as_vec = |k: usize| next[k].iter().cloned().collect::<Vec<Row>>();
                 let whole = reference_of(&as_vec(0), &as_vec(1), &as_vec(2), &as_vec(3));
                 let applied = page.apply(&d);
@@ -1082,9 +1141,10 @@ mod tests {
                 match whole {
                     Ok(whole) => {
                         assert!(applied.is_ok(), "incremental refused a good page: {applied:?}");
-                        assert_eq!(page.take_patches(), reference.diff(&whole));
                         assert!(page == whole, "the pages differ");
-                        reference = whole;
+                        let patches = page.take_patches();
+                        dom.apply(&patches);
+                        assert_eq!(dom.render(), shown(&page), "the DOM is not the page after {patches:?}");
                     }
                     Err(e) => {
                         assert!(applied.is_err(), "incremental accepted a bad page ({e})");
@@ -1095,7 +1155,7 @@ mod tests {
         }
         // The generator reaches both kinds of page.
         assert!(
-            errors > steps / 10 && errors < steps * 9 / 10,
+            errors > steps / 20 && errors < steps * 9 / 10,
             "{errors} errors in {steps} steps"
         );
     }

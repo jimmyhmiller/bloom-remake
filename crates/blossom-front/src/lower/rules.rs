@@ -80,24 +80,9 @@ fn needed(stmts: &[HStmt]) -> Option<BTreeSet<HVarId>> {
     fn walk(stmts: &[HStmt], out: &mut BTreeSet<HVarId>) -> bool {
         for s in stmts {
             match s {
-                HStmt::Verb(HVerbStmt {
-                    verb: _,
-                    target: _,
-                    args,
-                    to,
-                    allow_self_negation: _,
-                    rank: _,
-                    text: _,
-                    span: _,
-                }) => {
-                    for a in args {
-                        match a {
-                            HHeadArg::Expr(e) => mentioned_expr(e, out),
-                            HHeadArg::Agg(_) => return false,
-                        }
-                    }
-                    if let Some(d) = to {
-                        mentioned_expr(d, out);
+                HStmt::Verb(v) => {
+                    if !verb_mentions(v, out) {
+                        return false;
                     }
                 }
                 HStmt::Block { cond, stmts, .. } => {
@@ -112,6 +97,36 @@ fn needed(stmts: &[HStmt]) -> Option<BTreeSet<HVarId>> {
     }
     let mut out = BTreeSet::new();
     walk(stmts, &mut out).then_some(out)
+}
+
+/// What one statement reads, as [`needed`].
+fn verb_needed(v: &HVerbStmt) -> Option<BTreeSet<HVarId>> {
+    let mut out = BTreeSet::new();
+    verb_mentions(v, &mut out).then_some(out)
+}
+
+/// Adds what a statement's head and destination mention to `out`; false when a head aggregates over valuations.
+fn verb_mentions(v: &HVerbStmt, out: &mut BTreeSet<HVarId>) -> bool {
+    let HVerbStmt {
+        verb: _,
+        target: _,
+        args,
+        to,
+        allow_self_negation: _,
+        rank: _,
+        text: _,
+        span: _,
+    } = v;
+    for a in args {
+        match a {
+            HHeadArg::Expr(e) => mentioned_expr(e, out),
+            HHeadArg::Agg(_) => return false,
+        }
+    }
+    if let Some(d) = to {
+        mentioned_expr(d, out);
+    }
+    true
 }
 
 /// `vars` without those `stmts` do not need ([`needed`]), in order.
@@ -940,55 +955,13 @@ impl<'h> Lowerer<'h> {
                         .set_construct_kind(construct, ConstructKind::Block { rel })
                         .map_err(ir)?;
                     // The block reads its parent through a projection onto the variables it needs (its condition's
-                    // and its statements'), when that drops some: a change to the parent's row that leaves those
-                    // alone then derives nothing here, so a loop under a header whose count changes is not redone.
+                    // and its statements'): a change to the parent's row that leaves those alone then derives nothing
+                    // here, so a loop under a header whose count changes is not redone.
                     let wanted = needed(inner).map(|mut u| {
                         mentioned(cond, &mut u);
                         u
                     });
-                    let (source, source_vars) = match wanted {
-                        Some(u) if parent.1.iter().any(|v| !u.contains(v)) => {
-                            let keep: Vec<HVarId> = parent.1.iter().copied().filter(|v| u.contains(v)).collect();
-                            let cols: Vec<ir::Column> = keep
-                                .iter()
-                                .map(|v| {
-                                    let name = self.hir.var(scope, *v)?.name;
-                                    let ty = match refined.get(v) {
-                                        Some(ty) => *ty,
-                                        None => self.var_ty(scope, *v)?,
-                                    };
-                                    Ok(column(name, ty, false))
-                                })
-                                .collect::<Result<_, InternalError>>()?;
-                            let proj = self.generated(
-                                names.rel_segments(&format!("{tag}$in")),
-                                cols,
-                                None,
-                                names.role,
-                                false,
-                                *span,
-                            )?;
-                            let mut d = Draft::refined(scope, refined.clone());
-                            let pargs = self.var_terms(&mut d, &parent.1)?;
-                            d.lits.push(Literal::Pos(ir_atom(parent.0, pargs, *span)));
-                            let args = self.var_terms(&mut d, &keep)?;
-                            let l = self.label(format!("{}{tag}$in", names.base));
-                            d.build(
-                                &mut self.b,
-                                RuleKind::Deductive,
-                                l,
-                                *span,
-                                Head {
-                                    rel: proj,
-                                    args: args.into_iter().map(HeadArg::Term).collect(),
-                                    mode: HeadMode::Insert,
-                                },
-                                names.role,
-                            )?;
-                            (proj, keep)
-                        }
-                        _ => (parent.0, parent.1.clone()),
-                    };
+                    let (source, source_vars) = self.through(&parent, wanted.as_ref(), scope, refined, names, *span)?;
                     let given = [Given::Rel {
                         rel: source,
                         vars: source_vars,
@@ -1020,6 +993,93 @@ impl<'h> Lowerer<'h> {
         Ok(())
     }
 
+    /// `parent` (a header's or block's relation and its variables) as a reader that uses only `wanted` sees it: the
+    /// parent itself when the reader uses all its variables (or counts its valuations: `None`), else its projection
+    /// onto those it uses, made once per relation and kept variables (`projection(kept) :- parent(vars)`).
+    fn through(
+        &mut self,
+        parent: &(RelId, Vec<HVarId>),
+        wanted: Option<&BTreeSet<HVarId>>,
+        scope: ScopeId,
+        refined: &BTreeMap<HVarId, TypeId>,
+        names: &Names,
+        span: Span,
+    ) -> Result<(RelId, Vec<HVarId>), InternalError> {
+        let Some(u) = wanted else {
+            return Ok(parent.clone());
+        };
+        let keep: Vec<HVarId> = parent.1.iter().copied().filter(|v| u.contains(v)).collect();
+        if keep.len() == parent.1.len() {
+            return Ok(parent.clone());
+        }
+        if let Some(rel) = self.projections.get(&(parent.0, keep.clone())) {
+            return Ok((*rel, keep));
+        }
+        let mut cols = Vec::with_capacity(keep.len());
+        let mut kept_names = Vec::with_capacity(keep.len());
+        for v in &keep {
+            let name = self.hir.var(scope, *v)?.name;
+            let ty = match refined.get(v) {
+                Some(ty) => *ty,
+                None => self.var_ty(scope, *v)?,
+            };
+            kept_names.push(name.as_str().to_owned());
+            cols.push(column(name, ty, false));
+        }
+        let parent_name = self
+            .b
+            .program()
+            .rels
+            .get(parent.0)
+            .map(|r| r.name.to_string())
+            .ok_or_else(|| internal_error!("a projection of an unknown relation"))?;
+        let tag = format!(
+            "$in#{}",
+            stable_hash_hex8(format!("{parent_name}({})", kept_names.join(",")).as_bytes())
+        );
+        let module = names.module.clone();
+        let construct = self
+            .b
+            .begin_construct(
+                ConstructKind::Projection {
+                    rel: parent.0,
+                    proj: RelId::from_raw(0),
+                },
+                surface(&module, None, span),
+            )
+            .map_err(ir)?;
+        let rel = self.generated(names.rel_segments(&tag), cols, None, names.role, false, span)?;
+        self.b
+            .set_construct_kind(
+                construct,
+                ConstructKind::Projection {
+                    rel: parent.0,
+                    proj: rel,
+                },
+            )
+            .map_err(ir)?;
+        let mut d = Draft::refined(scope, refined.clone());
+        let pargs = self.var_terms(&mut d, &parent.1)?;
+        d.lits.push(Literal::Pos(ir_atom(parent.0, pargs, span)));
+        let args = self.var_terms(&mut d, &keep)?;
+        let l = self.label(format!("{}{tag}", names.base));
+        d.build(
+            &mut self.b,
+            RuleKind::Deductive,
+            l,
+            span,
+            Head {
+                rel,
+                args: args.into_iter().map(HeadArg::Term).collect(),
+                mode: HeadMode::Insert,
+            },
+            names.role,
+        )?;
+        self.b.end_construct(construct).map_err(ir)?;
+        self.projections.insert((parent.0, keep.clone()), rel);
+        Ok((rel, keep))
+    }
+
     /// One statement: one rule reading the enclosing header or block relation (LANGUAGE §8.2).
     fn verb(
         &mut self,
@@ -1038,9 +1098,13 @@ impl<'h> Lowerer<'h> {
             text.push_str(&stable_hash_hex8(v.text.as_bytes()));
         }
         let label = self.label(text);
+        // The statement reads its parent through a projection onto the variables it uses (often none: the parent's
+        // row then changes without the statement re-deriving).
+        let wanted = verb_needed(v);
+        let (source, source_vars) = self.through(parent, wanted.as_ref(), scope, refined, names, v.span)?;
         let mut d = Draft::refined(scope, refined.clone());
-        let pargs = self.var_terms(&mut d, &parent.1)?;
-        d.lits.push(Literal::Pos(ir_atom(parent.0, pargs, v.span)));
+        let pargs = self.var_terms(&mut d, &source_vars)?;
+        d.lits.push(Literal::Pos(ir_atom(source, pargs, v.span)));
         // Head columns, in IR order.
         let mut rel = self.rel(v.target)?;
         let n_ir = self.b.program().rels.get(rel).map(|r| r.schema.cols.len()).unwrap_or(0);
@@ -1049,7 +1113,7 @@ impl<'h> Lowerer<'h> {
             let col = self.ir_col(v.target, c)?;
             let arg = match a {
                 HHeadArg::Expr(e) => HeadArg::Term(self.term(&mut d, e)?),
-                HHeadArg::Agg(g) => HeadArg::Agg(self.agg_call(&mut d, g, &parent.1)?),
+                HHeadArg::Agg(g) => HeadArg::Agg(self.agg_call(&mut d, g, &source_vars)?),
             };
             if let Some(slot) = args.get_mut(col) {
                 *slot = Some(arg);

@@ -64,14 +64,10 @@ fn the_counter_draws_its_page_and_changes_only_what_a_click_changes() {
         );
     }
     assert!(p.contains(&text("value", "0")), "{p:?}");
-    assert!(p.contains(&Patch::Children {
-        parent: "counter".to_owned(),
-        ids: vec!["minus".to_owned(), "value".to_owned(), "plus".to_owned()],
-    }));
-    assert!(p.contains(&Patch::Children {
-        parent: String::new(),
-        ids: vec!["counter".to_owned()],
-    }));
+    let mut dom = Dom::default();
+    dom.apply(p);
+    assert_eq!(dom.children[""], ["counter"]);
+    assert_eq!(dom.children["counter"], ["minus", "value", "plus"]);
     // A click changes the count's text and nothing else.
     assert_eq!(a.dispatch(&click("plus"), T0).unwrap(), [text("value", "1")]);
     assert_eq!(a.dispatch(&click("plus"), T0).unwrap(), [text("value", "2")]);
@@ -153,7 +149,7 @@ fn todomvc_compiles() {
     assert_eq!(l, ["blur", "change", "click", "dblclick", "keydown", "route", "typed"]);
 }
 
-/// A model of the DOM the patches build: per element its tag, attributes, text and children.
+/// A model of the DOM the patches build: per element its tag, attributes, text, children and parent.
 #[cfg(test)]
 #[derive(Default)]
 struct Dom {
@@ -161,6 +157,7 @@ struct Dom {
     attrs: BTreeMap<String, BTreeMap<String, String>>,
     texts: BTreeMap<String, String>,
     children: BTreeMap<String, Vec<String>>,
+    parents: BTreeMap<String, String>,
     focused: Option<String>,
 }
 
@@ -170,12 +167,14 @@ impl Dom {
         for p in patches {
             match p {
                 Patch::Create { id, tag, .. } => {
+                    self.detach(id);
                     self.tags.insert(id.clone(), tag.clone());
                     self.attrs.insert(id.clone(), BTreeMap::new());
                     self.texts.remove(id);
                     self.children.remove(id);
                 }
                 Patch::Remove { id } => {
+                    self.detach(id);
                     self.tags.remove(id);
                     self.attrs.remove(id);
                     self.texts.remove(id);
@@ -192,11 +191,27 @@ impl Dom {
                 Patch::Text { id, text } => {
                     self.texts.insert(id.clone(), text.clone());
                 }
-                Patch::Children { parent, ids } => {
-                    self.children.insert(parent.clone(), ids.clone());
+                Patch::Place { parent, id, before } => {
+                    self.detach(id);
+                    let kids = self.children.entry(parent.clone()).or_default();
+                    let at = before
+                        .as_ref()
+                        .and_then(|b| kids.iter().position(|k| k == b))
+                        .unwrap_or(kids.len());
+                    kids.insert(at, id.clone());
+                    self.parents.insert(id.clone(), parent.clone());
                 }
                 Patch::Focus { id } => self.focused = Some(id.clone()),
             }
+        }
+    }
+
+    /// Takes `id` out of its parent's children.
+    fn detach(&mut self, id: &str) {
+        if let Some(p) = self.parents.remove(id)
+            && let Some(kids) = self.children.get_mut(&p)
+        {
+            kids.retain(|k| k != id);
         }
     }
 
