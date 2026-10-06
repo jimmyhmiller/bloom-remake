@@ -843,3 +843,67 @@ fn fragments_draw_what_their_expansion_draws_and_keep_their_variables_to_themsel
     // Three `every` elements, not the one the caller's `x` would have joined to.
     assert_eq!(a.page().ids().filter(|i| i.starts_with('e')).count(), 3);
 }
+
+/// A page that shows which of its one-shot and bounded timers fired (LANGUAGE §15.2).
+const SHOTS: &str = r#"program shots version 1;
+
+include "ui.bls";
+
+timer hello once;
+timer later once after 2s;
+timer beat every 1s times 2;
+
+table said(id: String) key(id);
+
+hi: on hello(_, _) {
+    upsert said("hello");
+}
+late: on later(_, _) {
+    upsert said("later");
+}
+beating: on beat(k, _) {
+    upsert said(f"beat{k}");
+}
+page: while said(id) {
+    emit elem(id, "", 0, "span");
+    emit text(id, id);
+}
+"#;
+
+#[test]
+fn the_clock_fires_one_shot_and_bounded_timers_and_then_sleeps() {
+    let mut sources = files();
+    sources.insert("shots.bls".to_owned(), SHOTS.to_owned());
+    let compiled = compile("shots.bls", &sources).unwrap_or_else(|d| {
+        panic!(
+            "{}",
+            d.iter().map(|d| d.rendered.clone()).collect::<Vec<_>>().join("\n")
+        )
+    });
+    let mut a = App::new(compiled, blossom_value::Seed::from_u64(0)).unwrap();
+    let shown = |patches: &[Patch]| -> BTreeSet<String> {
+        patches
+            .iter()
+            .filter_map(|p| match p {
+                Patch::Text { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    // `once` fires in the start round.
+    let started = a.start(None, "", ms(0)).unwrap();
+    assert_eq!(shown(&started.patches), BTreeSet::from(["hello".to_owned()]));
+    assert_eq!(a.next_deadline().unwrap(), Some(ms(1_000)));
+    assert_eq!(
+        shown(&a.advance(ms(1_000)).unwrap()),
+        BTreeSet::from(["beat0".to_owned()])
+    );
+    // The beat's second and last firing and the one-shot are due together.
+    assert_eq!(
+        shown(&a.advance(ms(2_000)).unwrap()),
+        BTreeSet::from(["beat1".to_owned(), "later".to_owned()])
+    );
+    // Every timer is spent: the page's clock has nothing to wait for.
+    assert_eq!(a.next_deadline().unwrap(), None);
+    assert_eq!(a.advance(ms(10_000)).unwrap(), []);
+}

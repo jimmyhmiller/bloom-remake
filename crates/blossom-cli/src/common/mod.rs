@@ -75,7 +75,25 @@ pub mod bls {
         nodes: &[blossom_front::api::NodeSpec],
         params: &std::collections::BTreeMap<String, blossom_front::api::ParamBinding>,
     ) -> Result<blossom_artifact::bls::BlsArtifact, ExitCode> {
-        let (result, sources) = blossom_driver::bls::compile_file_with(file, nodes, params);
+        report(blossom_driver::bls::compile_file_with(file, nodes, params))
+    }
+
+    /// [`compile_with`] for a deployment: with the deployed build's lints (BLS1006).
+    pub fn compile_deployed(
+        file: &str,
+        nodes: &[blossom_front::api::NodeSpec],
+        params: &std::collections::BTreeMap<String, blossom_front::api::ParamBinding>,
+    ) -> Result<blossom_artifact::bls::BlsArtifact, ExitCode> {
+        report(blossom_driver::bls::compile_deployed(file, nodes, params))
+    }
+
+    /// Prints a compile's diagnostics; on failure, the exit code to return.
+    fn report(
+        (result, sources): (
+            Result<(blossom_artifact::bls::BlsArtifact, blossom_base::Diagnostics), BlsError>,
+            blossom_base::SourceDb,
+        ),
+    ) -> Result<blossom_artifact::bls::BlsArtifact, ExitCode> {
         match result {
             Ok((a, warnings)) => {
                 for d in warnings.iter() {

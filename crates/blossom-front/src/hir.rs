@@ -250,6 +250,19 @@ pub struct HCol {
     pub ty: Option<TypeId>,
 }
 
+/// When a timer fires (LANGUAGE §15.2). Durations are in nanoseconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimerSchedule {
+    /// `every d [times m]`: physical, periodic.
+    Every { period: u128, times: Option<u64> },
+    /// `every n ticks [times m]`: logical, counting the node's ticks.
+    Ticks { every: u64, times: Option<u64> },
+    /// `once after d`.
+    OnceAfter(u128),
+    /// `once`: in the boot tick of each incarnation.
+    Once,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HRelKind {
     /// Persistent: frame rule and `$del`.
@@ -269,9 +282,9 @@ pub enum HRelKind {
         root: bool,
     },
     Channel(ChannelInfo),
-    /// A physical timer `name(count: u64, at: Instant)`, firing only while `guard` holds (`while G`, §15.2).
+    /// A timer `name(count: u64, at: Instant)` (§15.2), firing on `schedule`, only while `guard` holds (`while G`).
     Timer {
-        every: u128,
+        schedule: TimerSchedule,
         guard: Option<HRelId>,
     },
     /// `boot()`.

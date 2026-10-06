@@ -426,24 +426,23 @@ impl App {
         }
     }
 
-    /// Moves the clock to `now`: when timers are due, runs a round with their firings (every firing due by `now`,
-    /// as a node delivers them) until its effects settle. The patches (none when nothing was due).
+    /// Moves the clock to `now`: when timers are due, runs a round (which takes their firings, every one due by
+    /// `now`, as a node delivers them) until its effects settle. The patches (none when nothing was due).
     pub fn advance(&mut self, now: Instant) -> Result<Vec<Patch>, HostError> {
         self.tick_to(now);
         let at = self.now;
-        let timers = self.timers.as_mut().ok_or_else(|| HostError::Round {
+        let timers = self.timers.as_ref().ok_or_else(|| HostError::Round {
             tick: self.tick,
             error: "the program has not started".to_owned(),
         })?;
-        let fail = |e: blossom_ir::timers::TimerError| HostError::Round {
-            tick: 0,
+        let due = timers.any_due(at).map_err(|e| HostError::Round {
+            tick: self.tick,
             error: e.to_string(),
-        };
-        if !timers.any_due(at).map_err(fail)? {
+        })?;
+        if !due {
             return Ok(Vec::new());
         }
-        let firings = timers.fire(at).map_err(fail)?;
-        self.settle(&firings)
+        self.settle(&[])
     }
 
     /// When the next timer is due (none while no timer is active).
@@ -473,10 +472,20 @@ impl App {
         Ok(before.diff(&self.page))
     }
 
-    /// Runs one round with `events`, leaving its page in `self.page`; whether the state changed.
+    /// Runs one round with `events` and the timers' firings due by now (every round is a tick the timers count),
+    /// leaving its page in `self.page`; whether the state changed.
     fn round(&mut self, events: &[(RelId, Row)]) -> Result<bool, HostError> {
         let tick = self.tick;
         let now = self.now;
+        let firings = match self.timers.as_mut() {
+            Some(t) => t.fire(now).map_err(|e| HostError::Round {
+                tick,
+                error: e.to_string(),
+            })?,
+            None => Vec::new(),
+        };
+        let events: Vec<(RelId, Row)> = firings.into_iter().chain(events.iter().cloned()).collect();
+        let events = events.as_slice();
         let before = self.engine.carried_instance();
         let guards: Vec<RelId> = self.timers.iter().flat_map(|t| t.guards()).collect();
         let observe: Vec<RelId> = self.compiled.outputs.values().copied().chain(guards).collect();
@@ -501,7 +510,7 @@ impl App {
             })?;
         self.tick += 1;
         if let Some(timers) = self.timers.as_mut() {
-            timers.observe(now, &out.observed).map_err(|e| HostError::Round {
+            timers.observe(&out.observed).map_err(|e| HostError::Round {
                 tick,
                 error: e.to_string(),
             })?;

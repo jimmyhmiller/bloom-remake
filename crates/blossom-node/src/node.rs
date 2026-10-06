@@ -652,7 +652,7 @@ impl<E: Executor> Node<E> {
             .cfg
             .halt
             .is_some_and(|h| out.observed.get(&h).is_some_and(|rows| !rows.is_empty()));
-        self.timers.observe(now, &out.observed)?;
+        self.timers.observe(&out.observed)?;
         // A new node's first boot tick always leaves a WAL record, even an empty one: it marks the store as holding
         // a boot that happened, so a restart knows it recovers (`recovered()`). Until that record is durable the
         // boot did not happen: nothing of it is released, and a crash before the sync boots fresh again.

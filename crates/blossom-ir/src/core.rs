@@ -281,7 +281,9 @@ pub enum EventSource {
     ClusterVersion,      // LANG-264: LMax<u32>, sampled per tick, recorded
     Stream(StreamEvent), // FOREIGN-PROTOCOLS §1: a stream's `opened`, `data`, `closed`, `failed`
 }
-/// TimerDecl data in the Dedalus core IR.
+/// TimerDecl data in the Dedalus core IR: exactly one of `every d [times m]` (physical, `every`), `every n ticks
+/// [times m]` (logical, `ticks`), `once after d` (physical, `once_after`) and `once` (physical, `once`, no guard), with
+/// positive values (LANGUAGE §15.2; `timers::Schedule::shape`, validator invariant 8).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimerDecl {
     pub clock: TimerClock, /* Physical | Logical */

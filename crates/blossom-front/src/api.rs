@@ -324,6 +324,31 @@ pub(crate) fn deployment(
 /// The guarded timers whose guard does not depend on carried state alone, with why: an event, an input, a message
 /// or a stream reads (or `now()`, `tick()` or `rand`) would make a guard that held at the end of a tick false at the
 /// next without the node knowing, so the node and the synchronous world would fire differently (LANGUAGE §15.2).
+/// The lints of a program built to be deployed: a logical timer (`every n ticks`) keeps its node ticking, so it is
+/// meant for simulation and LDFI (BLS1006, LANGUAGE §15.2).
+pub fn deployed_lints(p: &blossom_ir::core::Program) -> Diagnostics {
+    use blossom_ir::core::{EventSource, RelClass, TimerClock};
+    let mut out = Diagnostics::new();
+    for r in p.rels.iter() {
+        if let RelClass::Event(EventSource::Timer(t)) = &r.class
+            && t.clock == TimerClock::Logical
+        {
+            out.push(
+                Diagnostic::new(
+                    code!("BLS1006"),
+                    format!(
+                        "`{}` is a logical timer: it keeps its node ticking without pause, so it is meant for \
+                         simulation and LDFI; a deployment uses a physical one (`every DURATION`)",
+                        r.name
+                    ),
+                )
+                .with_primary(r.span),
+            );
+        }
+    }
+    out
+}
+
 fn unsteady_guards(p: &blossom_ir::core::Program) -> Vec<(blossom_base::Span, String)> {
     use blossom_ir::core::{EventSource, GenSource, Literal, Persistence, RelClass};
     use std::collections::BTreeMap;
