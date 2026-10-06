@@ -1,0 +1,14 @@
+//! Scaling durations (LANGUAGE §5.1): a duration times an integer, an integer times a duration, a duration divided by
+//! an integer; out of range or a division by zero is BLSR004.
+program durations version 1;
+
+input scale(ms: i64, k: i64);
+
+view v_scale(ms, k, r) = scale(ms, k), let d = Duration::from_millis(ms),
+        let r = (
+            (d * k).as_millis(),
+            (k * d).as_millis(),
+            (d / k).as_millis(),
+            (d * 2).as_millis(),
+            (d / 4u8).as_millis()
+        );

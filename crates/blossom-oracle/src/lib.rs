@@ -244,6 +244,11 @@ impl Oracle {
         self.roles.iter().filter(|x| **x == Some(r)).count() as u64
     }
 
+    /// Each node's name, by node id (none unless [`Oracle::with_node_names`] gave them).
+    pub fn node_names(&self) -> &[Arc<str>] {
+        &self.node_names
+    }
+
     /// The program.
     pub fn program(&self) -> &ValidatedProgram {
         &self.program

@@ -972,6 +972,8 @@ pub enum Builtin {
     Majority(HRoleId),
     /// A function or method of the built-in library (Appendix B); the receiver, if any, first.
     Lib(blossom_ir::core::LibFn),
+    /// `x.to_string()` on a value whose type has no `to_string` of its own: the value as Blossom writes it.
+    ToString,
 }
 
 /// Whether a value of type `ty` holds a lattice or group value anywhere inside it.

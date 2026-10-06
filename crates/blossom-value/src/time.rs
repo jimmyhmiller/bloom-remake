@@ -2,6 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// An integer as an `i128` (a `u128` above `i128::MAX` has none: it overflows any duration anyway).
+fn int_wide(k: crate::value::IntValue) -> Option<i128> {
+    k.to_i128()
+}
+
 /// Per-node logical time. Tick 0 is the boot tick of a fresh node (CR-13); ticks are durable and monotone across
 /// incarnations (ARCHITECTURE §5.6).
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize)]
@@ -69,6 +74,18 @@ impl Duration {
             Some(ns) => Some(Duration(ns)),
             None => None,
         }
+    }
+
+    /// `self × k` for an integer of any type (LANGUAGE §5.1); `None` on overflow.
+    pub fn times(self, k: crate::value::IntValue) -> Option<Duration> {
+        let product = i128::from(self.0).checked_mul(int_wide(k)?)?;
+        i64::try_from(product).ok().map(Duration)
+    }
+
+    /// `self ÷ k` for an integer of any type, truncated toward zero; `None` for zero or on overflow.
+    pub fn divided_by(self, k: crate::value::IntValue) -> Option<Duration> {
+        let quotient = i128::from(self.0).checked_div(int_wide(k)?)?;
+        i64::try_from(quotient).ok().map(Duration)
     }
 
     /// The length in nanoseconds.

@@ -700,6 +700,10 @@ impl Lowerer<'_> {
                         domain: ir::MajorityDomain::Role(RoleId::from_raw(r.0)),
                     },
                     Builtin::Lib(f) => ir::BuiltinFn::Lib(*f),
+                    Builtin::ToString => match args.first() {
+                        Some(x) => ir::BuiltinFn::ToString { ty: ty_of(x)? },
+                        None => return Err(internal_error!("`to_string` without its receiver reached lowering")),
+                    },
                 };
                 Expr::Call {
                     f: ir::FnRef::Builtin(f),

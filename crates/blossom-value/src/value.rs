@@ -221,6 +221,38 @@ impl TryFrom<ModRepr> for ModValue {
     }
 }
 
+/// The decimal digits of the value, `0` to `2^N − 1` (no type suffix).
+impl std::fmt::Display for ModValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Repeated division of the 256-bit value by 10^19 (the largest power of ten in a u64), most significant limb
+        // first; each remainder is the next 19 digits from the right.
+        const CHUNK: u64 = 10_000_000_000_000_000_000;
+        let mut limbs = self.limbs;
+        let mut chunks = Vec::new();
+        loop {
+            let mut rem: u128 = 0;
+            for limb in &mut limbs {
+                let cur = (rem << 64) | u128::from(*limb);
+                *limb = (cur / u128::from(CHUNK)) as u64;
+                rem = cur % u128::from(CHUNK);
+            }
+            chunks.push(rem as u64);
+            if limbs.iter().all(|l| *l == 0) {
+                break;
+            }
+        }
+        let mut out = String::new();
+        for (i, c) in chunks.iter().rev().enumerate() {
+            if i == 0 {
+                out.push_str(&c.to_string());
+            } else {
+                out.push_str(&format!("{c:019}"));
+            }
+        }
+        f.pad(&out)
+    }
+}
+
 impl ModValue {
     /// The widest modular type.
     pub const MAX_BITS: u16 = 256;
@@ -575,6 +607,28 @@ mod tests {
 
     use super::*;
     use crate::testgen::arb_value;
+
+    proptest! {
+        #[test]
+        fn mod_values_print_in_decimal(hi in any::<u64>(), lo in any::<u64>()) {
+            // Two limbs: the decimal of the u128 they make.
+            let m = ModValue::new(128, [0, 0, hi, lo]).unwrap();
+            prop_assert_eq!(m.to_string(), ((u128::from(hi) << 64) | u128::from(lo)).to_string());
+        }
+    }
+
+    #[test]
+    fn the_widest_mod_value_prints_in_decimal() {
+        assert_eq!(ModValue::from_u64(8, 0).unwrap().to_string(), "0");
+        assert_eq!(
+            ModValue::new(256, [u64::MAX; 4]).unwrap().to_string(),
+            "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+        );
+        assert_eq!(
+            ModValue::new(256, [1, 0, 0, 0]).unwrap().to_string(),
+            "6277101735386680763835789423207666416102355444464034512896"
+        );
+    }
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(512))]

@@ -76,6 +76,46 @@ pub fn compile_with(
     loader: &mut dyn Loader,
     sources: &mut SourceDb,
 ) -> Result<(BlsArtifact, Diagnostics), BlsError> {
+    compile_for(root, Some(nodes), params, loader, sources)
+}
+
+/// Compiles a program for checking, with no deployment given: a role-free program on one node, a program with roles
+/// on one node per role that holds nodes ([`checking_nodes`]).
+pub fn compile_checking(
+    root: &str,
+    params: &std::collections::BTreeMap<String, ParamBinding>,
+    loader: &mut dyn Loader,
+    sources: &mut SourceDb,
+) -> Result<(BlsArtifact, Diagnostics), BlsError> {
+    compile_for(root, None, params, loader, sources)
+}
+
+/// The deployment a program is checked on: one node `n1` when it has no roles, else one node per role but an
+/// external one (`server1` for `Server`).
+pub(crate) fn checking_nodes(hir: &crate::hir::Hir) -> Vec<NodeSpec> {
+    if hir.roles.is_empty() {
+        return vec![NodeSpec {
+            name: "n1".to_owned(),
+            role: None,
+        }];
+    }
+    hir.roles
+        .iter()
+        .filter(|r| r.name.segments().len() == 1 && r.kind != crate::hir::RoleKind::External)
+        .map(|r| NodeSpec {
+            name: format!("{}1", r.name.to_string().to_lowercase()),
+            role: Some(r.name.to_string()),
+        })
+        .collect()
+}
+
+fn compile_for(
+    root: &str,
+    nodes: Option<&[NodeSpec]>,
+    params: &std::collections::BTreeMap<String, ParamBinding>,
+    loader: &mut dyn Loader,
+    sources: &mut SourceDb,
+) -> Result<(BlsArtifact, Diagnostics), BlsError> {
     let mut diags = Diagnostics::new();
     let Some(tree) = ModuleTree::load(root, loader, sources, &mut diags) else {
         return Err(BlsError::Rejected(diags));
@@ -94,6 +134,14 @@ pub fn compile_with(
     if diags.has_errors() {
         return Err(BlsError::Rejected(diags));
     }
+    let derived;
+    let nodes = match nodes {
+        Some(n) => n,
+        None => {
+            derived = checking_nodes(&hir);
+            &derived
+        }
+    };
     let (names, roles) = deployment(&hir, nodes, &mut diags);
     if diags.has_errors() {
         return Err(BlsError::Rejected(diags));

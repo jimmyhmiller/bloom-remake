@@ -1,0 +1,30 @@
+//! `to_string` on every type (Appendix B): a value whose type has no `to_string` of its own is written as Blossom
+//! writes it (strings quoted, enum variants and struct fields by name, durations in seconds, nodes by name).
+program to_string version 1;
+
+struct Point {
+    x: i64,
+    y: i64
+}
+
+enum Shape {
+    Dot,
+    Circle(i64)
+}
+
+input e(n: i64, s: String);
+
+view v_text(n, t) = e(n, s),
+        let t = (
+            [n, n + 1].to_string(),
+            (n, s).to_string(),
+            Some(n).to_string(),
+            Point { x: n, y: 2 }.to_string(),
+            Shape::Circle(n).to_string(),
+            Shape::Dot.to_string(),
+            Duration::from_millis(n).to_string(),
+            set[s].to_string(),
+            map[s => n].to_string(),
+            self.to_string(),
+            f"{(n, n)} {[s]}",
+        );

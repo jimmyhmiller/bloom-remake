@@ -1389,3 +1389,61 @@ fn validator_checks_a_timer_guard() {
     other.rels.get_mut(RelId::from_raw(0)).unwrap().placement = Placement::Role(RoleId::from_raw(0));
     assert!(refused(other));
 }
+
+#[test]
+fn every_value_has_a_text_without_a_type() {
+    use crate::printer::value_text;
+    use blossom_value::Value;
+    use blossom_value::time::{Duration, NodeId};
+    use blossom_value::value::{BlobRef, GroupValue, LatValue, ModValue};
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+    let text = |v: &Value| value_text(None, v, None, &|n: NodeId| format!("node#{}", n.0));
+    let int = |n: u64| Value::Int(blossom_value::IntValue::U64(n));
+    assert_eq!(text(&Value::Duration(Duration::from_nanos(-7_000_000))), "-0.007s");
+    assert_eq!(text(&Value::Duration(Duration::from_nanos(-2_500_000_000))), "-2.5s");
+    assert_eq!(
+        text(&Value::Mod(ModValue::new(256, [1, 0, 0, 0]).unwrap())),
+        "6277101735386680763835789423207666416102355444464034512896"
+    );
+    let blob = BlobRef::of(b"abc");
+    assert_eq!(text(&Value::Blob(blob)), format!("blob#{}:3", blob.hex()));
+    assert_eq!(
+        text(&Value::Struct(vec![int(1), Value::Bool(true)].into())),
+        "struct(1, true)"
+    );
+    assert_eq!(
+        text(&Value::Enum {
+            variant: 2,
+            fields: vec![int(5)].into()
+        }),
+        "#2(5)"
+    );
+    assert_eq!(
+        text(&Value::UnknownVariant {
+            variant: 9,
+            wire_number: 14,
+            payload: vec![1, 2, 3].into()
+        }),
+        "#9(#14, 3 bytes)"
+    );
+    let bag: BTreeMap<Value, u64> = [(int(4), 2)].into_iter().collect();
+    assert_eq!(text(&Value::Lattice(LatValue::Bag(Arc::new(bag)))), "{4 × 2}");
+    let pair = LatValue::Seq(vec![LatValue::Bottom, LatValue::Set(Arc::new(BTreeSet::from([int(1)])))].into());
+    assert_eq!(text(&Value::Lattice(pair)), "(⊥, {1})");
+    let zset: BTreeMap<Value, i64> = [(int(3), -1)].into_iter().collect();
+    assert_eq!(text(&Value::Group(GroupValue::ZSet(Arc::new(zset)))), "zset[3 => -1]");
+    assert_eq!(
+        text(&Value::Group(GroupValue::Tuple(
+            vec![GroupValue::Z(-4), GroupValue::Zn(2)].into()
+        ))),
+        "(-4, 2)"
+    );
+    assert_eq!(
+        text(&Value::Extern {
+            codec: blossom_value::types::ExternCodecId("regex".into()),
+            bytes: b"a+".to_vec().into()
+        }),
+        "regex(b\"a+\")"
+    );
+}

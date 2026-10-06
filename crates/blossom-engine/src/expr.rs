@@ -174,6 +174,8 @@ pub(crate) struct Shared {
     pub kinds: Vec<Option<Kind>>,
     /// The host functions of the program's `extern fn`s, bound when the engine was built.
     pub externs: Arc<blossom_value::ExternRegistry>,
+    /// Each node's name, by node id (`to_string` writes nodes by name).
+    pub node_names: Vec<Arc<str>>,
 }
 
 impl Shared {
@@ -725,6 +727,12 @@ fn builtin(cx: &Ctx<'_>, env: &mut Frame<'_>, f: &BuiltinFn, args: &[Expr]) -> E
             }
             rand_range(cx, &lo, &hi, &key)
         }
+        BuiltinFn::ToString { ty } => Ok(Value::Str(Arc::from(blossom_ir::printer::to_string_text(
+            cx.program,
+            &arg(0)?,
+            *ty,
+            &cx.shared.node_names,
+        )))),
         BuiltinFn::Majority { domain } => {
             let MajorityDomain::Role(role) = domain else {
                 return Err(unimplemented!("LANG-113", "`majority` over a relation"));
@@ -966,6 +974,14 @@ fn arithmetic(op: &BinOp, l: Value, r: Value) -> ExprResult<Value> {
         (Value::Instant(a), Value::Duration(d)) if matches!(op, Add | Sub) => {
             let v = if *op == Add { a.checked_add(d) } else { a.checked_sub(d) };
             v.map(Value::Instant).ok_or_else(|| overflow(&a, &d))
+        }
+        // Scaling (LANGUAGE §5.1).
+        (Value::Duration(d), Value::Int(k)) if matches!(op, Mul | Div) => {
+            let v = if *op == Mul { d.times(k) } else { d.divided_by(k) };
+            v.map(Value::Duration).ok_or_else(|| overflow(&d, &k))
+        }
+        (Value::Int(k), Value::Duration(d)) if *op == Mul => {
+            d.times(k).map(Value::Duration).ok_or_else(|| overflow(&k, &d))
         }
         (Value::Duration(d), Value::Instant(a)) if *op == Add => {
             a.checked_add(d).map(Value::Instant).ok_or_else(|| overflow(&d, &a))

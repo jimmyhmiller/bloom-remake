@@ -1544,11 +1544,12 @@ fn interpolation_converts_its_holes_and_checks_its_specs() {
         "output o(s: String);\na: on go(k, v) { emit o(f\"{k:x}\"); }\n",
     ));
     assert!(d.iter().any(|(c, _)| c == "BLS0435"), "{d:?}");
-    // A hole whose type has no to_string, and `.N` on an integer: the methods' type errors.
+    // Every type has a `to_string` (Appendix B): a vector, a tuple and an option convert.
     let d = diags(with_head(
-        "output o(s: String);\na: on go(k, v) { emit o(f\"{[k]}\"); }\n",
+        "output o(s: String);\na: on go(k, v) { emit o(f\"{[k]} {(k, v)} {Some(k)}\"); }\n",
     ));
-    assert!(d.iter().any(|(_, m)| m.contains("`to_string` on Vec<u64>")), "{d:?}");
+    assert_eq!(d, Vec::<(String, String)>::new());
+    // `.N` on an integer: `to_fixed`'s type error.
     let d = diags(with_head(
         "output o(s: String);\na: on go(k, v) { emit o(f\"{k:.2}\"); }\n",
     ));

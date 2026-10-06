@@ -20,8 +20,7 @@ use std::sync::Arc;
 use blossom_base::{ParamId, RelId, RoleId, RuleId, internal_error};
 use blossom_ir::ValidatedProgram;
 use blossom_ir::core::{
-    AggFunc, ConstructKind, HeadArg, HeadMode, LatticeCtor, Literal, Program, RelClass, Rule, RuleKind,
-    ViolationAction,
+    AggFunc, ConstructKind, HeadArg, HeadMode, LatticeCtor, Literal, Program, RelClass, Rule, RuleKind, ViolationAction,
 };
 use blossom_ir::obs::ProgramErrorRecord;
 use blossom_ir::tick::{
@@ -135,7 +134,9 @@ fn check_supported(p: &Program) -> Result<(), EvalError> {
                 return Err(blossom_base::unimplemented_error!("LANG-138", "weighted relations in the engine").into());
             }
             RelClass::HostTable => {
-                return Err(blossom_base::unimplemented_error!("LANG-051", "host-maintained tables in the engine").into());
+                return Err(
+                    blossom_base::unimplemented_error!("LANG-051", "host-maintained tables in the engine").into(),
+                );
             }
             _ => {}
         }
@@ -157,8 +158,7 @@ fn check_supported(p: &Program) -> Result<(), EvalError> {
                 let ok = matches!(
                     agg.func,
                     AggFunc::Count | AggFunc::Sum | AggFunc::Min | AggFunc::Max | AggFunc::CollectVec
-                )
-                    && agg.order.is_none()
+                ) && agg.order.is_none()
                     && (!agg.args.is_empty() || matches!(agg.func, AggFunc::Count));
                 if !ok {
                     return Err(blossom_base::unimplemented_error!(
@@ -221,7 +221,10 @@ fn rel_holds_blobs(p: &Program, rel: RelId) -> bool {
 }
 
 fn cell_spec(p: &Program, kinds: &[Option<Kind>], rel: RelId, extra: usize) -> Result<Option<CellSpec>, EvalError> {
-    let decl = p.rels.get(rel).ok_or_else(|| internal_error!("relation {rel:?} is not declared"))?;
+    let decl = p
+        .rels
+        .get(rel)
+        .ok_or_else(|| internal_error!("relation {rel:?} is not declared"))?;
     if decl.schema.lattice.is_empty() {
         return Ok(None);
     }
@@ -312,7 +315,11 @@ impl Engine {
         }
         for id in inductive.iter().chain(&asynchronous) {
             if let Some(plan) = plans.get(id) {
-                let rel = p.rules.get(*id).map(|r| r.head.rel).ok_or_else(|| internal_error!("rule {id:?}"))?;
+                let rel = p
+                    .rules
+                    .get(*id)
+                    .map(|r| r.head.rel)
+                    .ok_or_else(|| internal_error!("rule {id:?}"))?;
                 let spec = cell_spec(p, &kinds, rel, 0)?;
                 stores.insert_absent(plan.head, || Store::new(spec, rel_holds_blobs(p, rel)));
             }
@@ -343,6 +350,7 @@ impl Engine {
                 roles: cfg.roles,
                 kinds,
                 externs: cfg.externs,
+                node_names: cfg.node_names,
             },
             node,
             plans,
@@ -378,7 +386,10 @@ impl Engine {
         let p = self.program.get();
         let mut wanted: BTreeSet<(StoreKey, Vec<usize>)> = BTreeSet::new();
         for plan in self.plans.values() {
-            let rule = p.rules.get(plan.rule).ok_or_else(|| internal_error!("rule {:?}", plan.rule))?;
+            let rule = p
+                .rules
+                .get(plan.rule)
+                .ok_or_else(|| internal_error!("rule {:?}", plan.rule))?;
             for lit in &rule.body.lits {
                 match lit {
                     Literal::Neg(a) => {
@@ -458,7 +469,9 @@ impl Engine {
             return Err(internal_error!("the engine is used after a failed tick without a reset").into());
         }
         if input.node != self.node {
-            return Err(internal_error!("an engine for node {} ran a tick of node {}", self.node.0, input.node.0).into());
+            return Err(
+                internal_error!("an engine for node {} ran a tick of node {}", self.node.0, input.node.0).into(),
+            );
         }
         match self.step_inner(input, observe) {
             Ok(out) => Ok(out),
@@ -492,7 +505,12 @@ impl Engine {
                 let row = f
                     .row
                     .iter()
-                    .map(|c| p.consts.get(*c).cloned().ok_or_else(|| internal_error!("unknown constant {c:?}")))
+                    .map(|c| {
+                        p.consts
+                            .get(*c)
+                            .cloned()
+                            .ok_or_else(|| internal_error!("unknown constant {c:?}"))
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 facts.push((f.rel, Row::from(row)));
             }
@@ -506,16 +524,28 @@ impl Engine {
             now_inputs.entry(StoreKey::Main(*rel)).or_default().insert(row.clone());
         }
         for d in input.delivered {
-            now_inputs.entry(StoreKey::Main(d.rel)).or_default().insert(d.row.clone());
+            now_inputs
+                .entry(StoreKey::Main(d.rel))
+                .or_default()
+                .insert(d.row.clone());
             let mut with_sender = d.row.to_vec();
             with_sender.push(Value::Node(d.from));
-            now_inputs.entry(StoreKey::Sent(d.rel)).or_default().insert(Row::from(with_sender));
+            now_inputs
+                .entry(StoreKey::Sent(d.rel))
+                .or_default()
+                .insert(Row::from(with_sender));
         }
         for g in input.ingress {
-            now_inputs.entry(StoreKey::Main(g.rel)).or_default().insert(g.row.clone());
+            now_inputs
+                .entry(StoreKey::Main(g.rel))
+                .or_default()
+                .insert(g.row.clone());
             let mut with_sender = g.row.to_vec();
             with_sender.push(Value::Session(g.session));
-            now_inputs.entry(StoreKey::Sent(g.rel)).or_default().insert(Row::from(with_sender));
+            now_inputs
+                .entry(StoreKey::Sent(g.rel))
+                .or_default()
+                .insert(Row::from(with_sender));
         }
         let before = std::mem::take(&mut self.inputs);
         let keys: BTreeSet<StoreKey> = before.keys().chain(now_inputs.keys()).copied().collect();
@@ -567,7 +597,10 @@ impl Engine {
             if changes.inserted.contains_key(&rel) || changes.deleted.contains_key(&rel) {
                 continue;
             }
-            let s = self.stores.get(&plan.head).ok_or_else(|| internal_error!("no next store"))?;
+            let s = self
+                .stores
+                .get(&plan.head)
+                .ok_or_else(|| internal_error!("no next store"))?;
             if !s.ins.is_empty() {
                 changes.inserted.insert(rel, s.ins.iter().cloned().collect());
             }
@@ -589,8 +622,14 @@ impl Engine {
         for id in self.asynchronous.iter() {
             let Some(plan) = self.plans.get(id) else { continue };
             let StoreKey::Async(rel) = plan.head else { continue };
-            let s = self.stores.get(&plan.head).ok_or_else(|| internal_error!("no async store"))?;
-            let to_host = matches!(self.program.get().rels.get(rel).map(|r| &r.class), Some(RelClass::HostOut(_)));
+            let s = self
+                .stores
+                .get(&plan.head)
+                .ok_or_else(|| internal_error!("no async store"))?;
+            let to_host = matches!(
+                self.program.get().rels.get(rel).map(|r| &r.class),
+                Some(RelClass::HostOut(_))
+            );
             for row in s.present() {
                 if to_host {
                     out.host.insert(blossom_ir::tick::HostOut { rel, row: row.clone() });
@@ -681,7 +720,10 @@ impl Engine {
         let rule = p.rules.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?;
         {
             // Most rules see no change in a tick: tell so without taking a handle on the plan.
-            let plan = self.plans.get(&id).ok_or_else(|| internal_error!("rule {id:?} has no plan"))?;
+            let plan = self
+                .plans
+                .get(&id)
+                .ok_or_else(|| internal_error!("rule {id:?} has no plan"))?;
             let unchanged = !plan.dep_keys.iter().any(|k| self.stores.changed(k));
             if plan.regime == Regime::Delta && unchanged {
                 return Ok(());
@@ -695,7 +737,11 @@ impl Engine {
                 return Ok(());
             }
         }
-        let plan = self.plans.get(&id).ok_or_else(|| internal_error!("rule {id:?} has no plan"))?.clone();
+        let plan = self
+            .plans
+            .get(&id)
+            .ok_or_else(|| internal_error!("rule {id:?} has no plan"))?
+            .clone();
         match plan.regime {
             Regime::Recompute => self.recompute_rule(p, input, rule, &plan),
             Regime::Delta => {
@@ -724,8 +770,13 @@ impl Engine {
             drivers.push((Driver::Full, usize::MAX));
         } else {
             for (pos, &lit) in plan.deps.iter().enumerate() {
-                let Some(key) = rule.body.lits.get(lit).and_then(dep_store) else { continue };
-                let store = self.stores.get(&key).ok_or_else(|| internal_error!("no store for {key:?}"))?;
+                let Some(key) = rule.body.lits.get(lit).and_then(dep_store) else {
+                    continue;
+                };
+                let store = self
+                    .stores
+                    .get(&key)
+                    .ok_or_else(|| internal_error!("no store for {key:?}"))?;
                 if !store.changed() {
                     continue;
                 }
@@ -871,7 +922,9 @@ impl Engine {
         let position: BTreeMap<usize, usize> = plan.deps.iter().enumerate().map(|(i, l)| (*l, i)).collect();
         // The join order of each driver's terms, from the stores as they are now.
         let cost = |lit: usize, cols: &[usize], range: bool| -> usize {
-            let Some(Literal::Pos(a)) = rule.body.lits.get(lit) else { return usize::MAX };
+            let Some(Literal::Pos(a)) = rule.body.lits.get(lit) else {
+                return usize::MAX;
+            };
             let rows = self.stores.get(&rule::atom_store(a)).map_or(0, |s| s.estimate(cols));
             // A range keeps some of the rows its probe finds: assume a small fraction.
             if range { rows / 16 + 1 } else { rows }
@@ -965,7 +1018,14 @@ impl Engine {
     }
 
     /// Applies a rule's evaluated change: raises the errors real valuations hit, then updates its head.
-    fn apply(&mut self, p: &Program, input: &StepInput<'_>, rule: &Rule, plan: &Plan, terms: Terms) -> Result<(), EvalError> {
+    fn apply(
+        &mut self,
+        p: &Program,
+        input: &StepInput<'_>,
+        rule: &Rule,
+        plan: &Plan,
+        terms: Terms,
+    ) -> Result<(), EvalError> {
         let tick = input.tick;
         if let Some((_, (_, Some(e)))) = terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
             return Err(to_eval(e, tick, Some(rule)));
@@ -1004,7 +1064,10 @@ impl Engine {
                 tuples: vec![BTreeMap::new(); naggs],
                 row: None,
             });
-            let slot = g.tuples.get_mut(col).ok_or_else(|| internal_error!("aggregate column {col} out of range"))?;
+            let slot = g
+                .tuples
+                .get_mut(col)
+                .ok_or_else(|| internal_error!("aggregate column {col} out of range"))?;
             let c = slot.entry(tuple.clone()).or_insert(0);
             *c += w;
             if *c == 0 {
@@ -1048,7 +1111,13 @@ impl Engine {
     }
 
     /// A recompute rule: evaluated in full, its change is the difference from its last output.
-    fn recompute_rule(&mut self, p: &Program, input: &StepInput<'_>, rule: &Rule, plan: &Plan) -> Result<(), EvalError> {
+    fn recompute_rule(
+        &mut self,
+        p: &Program,
+        input: &StepInput<'_>,
+        rule: &Rule,
+        plan: &Plan,
+    ) -> Result<(), EvalError> {
         let terms = self.evaluate(p, input, rule, plan, true)?;
         self.count(rule.id, terms.examined, terms.steps);
         let (flips_at, reads_time) = (terms.flips_at, terms.reads_time);
@@ -1071,7 +1140,10 @@ impl Engine {
             }
             let mut rows = BTreeMap::new();
             for (group, tuples) in groups {
-                rows.insert(group_row(p, rule, &group, &tuples).map_err(|e| to_eval(e, tick, Some(rule)))?, 1);
+                rows.insert(
+                    group_row(p, rule, &group, &tuples).map_err(|e| to_eval(e, tick, Some(rule)))?,
+                    1,
+                );
             }
             rows
         } else {
@@ -1122,7 +1194,10 @@ impl Engine {
         let ids: Vec<RuleId> = s.aggregates.iter().chain(&s.rules).copied().collect();
         let mut dirty = false;
         for id in &ids {
-            let plan = self.plans.get(id).ok_or_else(|| internal_error!("rule {id:?} has no plan"))?;
+            let plan = self
+                .plans
+                .get(id)
+                .ok_or_else(|| internal_error!("rule {id:?} has no plan"))?;
             let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
             dirty |= plan.regime == Regime::Recompute
                 || self.stores.get(&plan.head).is_some_and(|st| st.touched)
@@ -1139,7 +1214,11 @@ impl Engine {
         // Take back the last fixpoint's derivations.
         for id in &ids {
             let old = self.prev.remove(id).unwrap_or_default();
-            let head = self.plans.get(id).map(|pl| pl.head).ok_or_else(|| internal_error!("rule {id:?}"))?;
+            let head = self
+                .plans
+                .get(id)
+                .map(|pl| pl.head)
+                .ok_or_else(|| internal_error!("rule {id:?}"))?;
             let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
             let store = self.store(head)?;
             for (row, w) in old {
@@ -1149,7 +1228,11 @@ impl Engine {
         self.settle(tick)?;
         // The aggregates read only lower strata: once, first.
         for id in &s.aggregates {
-            let plan = self.plans.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?.clone();
+            let plan = self
+                .plans
+                .get(id)
+                .ok_or_else(|| internal_error!("rule {id:?}"))?
+                .clone();
             let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
             self.recompute_rule(p, input, rule, &plan)?;
         }
@@ -1169,7 +1252,11 @@ impl Engine {
         loop {
             let mut changed = false;
             for id in &s.rules {
-                let plan = self.plans.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?.clone();
+                let plan = self
+                    .plans
+                    .get(id)
+                    .ok_or_else(|| internal_error!("rule {id:?}"))?
+                    .clone();
                 let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
                 let terms = self.evaluate(p, input, rule, &plan, true)?;
                 self.count(rule.id, terms.examined, terms.steps);
@@ -1191,7 +1278,9 @@ impl Engine {
                 let before = self.stores.get(&plan.head).map_or(0, Store::generation);
                 for row in fresh {
                     mine.insert(row.clone());
-                    self.store(plan.head)?.add(row, 1).map_err(|e| to_eval(e, tick, Some(rule)))?;
+                    self.store(plan.head)?
+                        .add(row, 1)
+                        .map_err(|e| to_eval(e, tick, Some(rule)))?;
                 }
                 self.settle(tick)?;
                 if self.stores.get(&plan.head).map_or(0, Store::generation) != before {
@@ -1234,11 +1323,16 @@ impl Engine {
             let Some(plan) = self.plans.get(id) else { return false };
             heads.insert(plan.head);
         }
-        if heads.iter().any(|h| self.stores.get(h).is_none_or(|st| st.cell.is_some())) {
+        if heads
+            .iter()
+            .any(|h| self.stores.get(h).is_none_or(|st| st.cell.is_some()))
+        {
             return false;
         }
         s.rules.iter().all(|id| {
-            let (Some(rule), Some(plan)) = (p.rules.get(*id), self.plans.get(id)) else { return false };
+            let (Some(rule), Some(plan)) = (p.rules.get(*id), self.plans.get(id)) else {
+                return false;
+            };
             !plan.aggregate
                 && rule.body.lits.iter().all(|l| match l {
                     Literal::Neg(_) | Literal::Lookup { .. } => dep_store(l).is_none_or(|k| !heads.contains(&k)),
@@ -1281,8 +1375,14 @@ impl Engine {
         loop {
             if strict {
                 // The naive iteration's last round: the first rule that raised reports its error.
-                let Some(id) = s.rules.iter().find(|id| raised.contains(id)) else { break };
-                let plan = self.plans.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?.clone();
+                let Some(id) = s.rules.iter().find(|id| raised.contains(id)) else {
+                    break;
+                };
+                let plan = self
+                    .plans
+                    .get(id)
+                    .ok_or_else(|| internal_error!("rule {id:?}"))?
+                    .clone();
                 let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
                 let terms = self.evaluate(p, input, rule, &plan, true)?;
                 self.count(rule.id, terms.examined, terms.steps);
@@ -1296,7 +1396,11 @@ impl Engine {
                 if raised.contains(id) {
                     continue;
                 }
-                let plan = self.plans.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?.clone();
+                let plan = self
+                    .plans
+                    .get(id)
+                    .ok_or_else(|| internal_error!("rule {id:?}"))?
+                    .clone();
                 let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
                 let now: BTreeMap<StoreKey, usize> = log.iter().map(|(k, rows)| (*k, rows.len())).collect();
                 let terms = match read.insert(*id, now) {
@@ -1367,7 +1471,9 @@ impl Engine {
 
     fn check_keys(&self, p: &Program, tick: Tick) -> Result<(), EvalError> {
         for (rel, cols, upsert) in &self.keyed {
-            let Some(store) = self.stores.get(&StoreKey::Main(*rel)) else { continue };
+            let Some(store) = self.stores.get(&StoreKey::Main(*rel)) else {
+                continue;
+            };
             for row in &store.ins {
                 let k: Vec<Value> = cols.iter().filter_map(|c| row.get(*c).cloned()).collect();
                 let rows = store.new_rows(cols, &k)?;
@@ -1395,7 +1501,9 @@ impl Engine {
     fn check_invariants(&self, p: &Program, tick: Tick) -> Result<(), EvalError> {
         for id in &self.violations {
             let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
-            let HeadMode::Violation { invariant } = rule.head.mode else { continue };
+            let HeadMode::Violation { invariant } = rule.head.mode else {
+                continue;
+            };
             let Some(row) = self
                 .stores
                 .get(&StoreKey::Main(rule.head.rel))
@@ -1531,18 +1639,17 @@ struct Terms {
 }
 
 /// An aggregate rule's head row for a group whose live argument tuples are `tuples` (per aggregate column).
-fn group_row(
-    p: &Program,
-    rule: &Rule,
-    group: &[Value],
-    tuples: &[BTreeMap<Vec<Value>, i64>],
-) -> expr::ExprResult<Row> {
+fn group_row(p: &Program, rule: &Rule, group: &[Value], tuples: &[BTreeMap<Vec<Value>, i64>]) -> expr::ExprResult<Row> {
     let mut keys = group.iter();
     let mut aggs = tuples.iter();
     let mut row = Vec::with_capacity(rule.head.args.len());
     for (col, a) in rule.head.args.iter().enumerate() {
         match a {
-            HeadArg::Term(_) => row.push(keys.next().cloned().ok_or_else(|| bug("a group key too short".into()))?),
+            HeadArg::Term(_) => row.push(
+                keys.next()
+                    .cloned()
+                    .ok_or_else(|| bug("a group key too short".into()))?,
+            ),
             HeadArg::Agg(agg) => {
                 let set = aggs.next().ok_or_else(|| bug("aggregate tuples missing".into()))?;
                 row.push(fold(p, rule, col, &agg.func, set)?);
@@ -1553,7 +1660,13 @@ fn group_row(
 }
 
 /// An aggregate over a group's distinct argument tuples (LANG-100).
-fn fold(p: &Program, rule: &Rule, col: usize, func: &AggFunc, set: &BTreeMap<Vec<Value>, i64>) -> expr::ExprResult<Value> {
+fn fold(
+    p: &Program,
+    rule: &Rule,
+    col: usize,
+    func: &AggFunc,
+    set: &BTreeMap<Vec<Value>, i64>,
+) -> expr::ExprResult<Value> {
     let single = |t: &Vec<Value>| -> expr::ExprResult<Value> {
         match t.as_slice() {
             [v] => Ok(v.clone()),
@@ -1586,7 +1699,11 @@ fn fold(p: &Program, rule: &Rule, col: usize, func: &AggFunc, set: &BTreeMap<Vec
             }))
         }
         // The tuples are single values, kept in value order: the least and greatest are the ends.
-        AggFunc::Min => set.keys().next().map(single).ok_or_else(|| bug("min over an empty group".into()))?,
+        AggFunc::Min => set
+            .keys()
+            .next()
+            .map(single)
+            .ok_or_else(|| bug("min over an empty group".into()))?,
         AggFunc::Max => set
             .keys()
             .next_back()
@@ -1596,7 +1713,11 @@ fn fold(p: &Program, rule: &Rule, col: usize, func: &AggFunc, set: &BTreeMap<Vec
             // The first component of each distinct tuple; the rest is the valuation it belongs to.
             let vals = set
                 .keys()
-                .map(|t| t.first().cloned().ok_or_else(|| bug("a sum over an empty tuple".into())))
+                .map(|t| {
+                    t.first()
+                        .cloned()
+                        .ok_or_else(|| bug("a sum over an empty tuple".into()))
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             expr::int_sum(vals.iter())
         }
@@ -1604,7 +1725,11 @@ fn fold(p: &Program, rule: &Rule, col: usize, func: &AggFunc, set: &BTreeMap<Vec
         AggFunc::CollectVec => {
             let vals = set
                 .keys()
-                .map(|t| t.first().cloned().ok_or_else(|| bug("a collect over an empty tuple".into())))
+                .map(|t| {
+                    t.first()
+                        .cloned()
+                        .ok_or_else(|| bug("a collect over an empty tuple".into()))
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Value::Vec(vals.into()))
         }

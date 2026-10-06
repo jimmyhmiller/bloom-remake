@@ -942,7 +942,7 @@ impl Remap for BuiltinFn {
             Self::Contains => Self::Contains,
             Self::Keys => Self::Keys,
             Self::Values => Self::Values,
-            Self::ToString => Self::ToString,
+            Self::ToString { ty } => Self::ToString { ty: ty.remap(m) },
             Self::Hash64 => Self::Hash64,
             Self::Fingerprint => Self::Fingerprint,
             Self::FloatCast => Self::FloatCast,

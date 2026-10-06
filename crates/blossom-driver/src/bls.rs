@@ -41,19 +41,43 @@ pub fn compile_with_loader(
     loader: &mut dyn Loader,
 ) -> (Result<(BlsArtifact, Diagnostics), BlsError>, SourceDb) {
     let mut sources = SourceDb::new();
-    let result = api::compile_with(root, nodes, params, loader, &mut sources).and_then(|(artifact, mut diags)| {
-        let found = analyses(artifact.program.get())?;
-        let rejected = found.has_errors();
-        for d in found.iter() {
-            diags.push(d.clone());
-        }
-        if rejected {
-            Err(BlsError::Rejected(diags))
-        } else {
-            Ok((artifact, diags))
-        }
-    });
+    let result = api::compile_with(root, nodes, params, loader, &mut sources).and_then(with_analyses);
     (result, sources)
+}
+
+/// Checks the program rooted at `root` (`blossom check`): compiled with no deployment given (a role-free program on
+/// one node, else one node per role, `api::compile_checking`), then the analyses.
+pub fn check_file(root: &str) -> (Result<(BlsArtifact, Diagnostics), BlsError>, SourceDb) {
+    let mut sources = SourceDb::new();
+    let result = api::compile_checking(root, &std::collections::BTreeMap::new(), &mut FsLoader, &mut sources)
+        .and_then(with_analyses);
+    (result, sources)
+}
+
+/// What the file `root` holds for `blossom check`: whether it is a program, and its specs that have a target.
+pub fn file_contents(
+    root: &str,
+) -> (
+    Result<(blossom_front::spec::FileContents, Diagnostics), BlsError>,
+    SourceDb,
+) {
+    let mut sources = SourceDb::new();
+    let result = blossom_front::spec::file_contents(root, &mut FsLoader, &mut sources);
+    (result, sources)
+}
+
+/// A compiled program with the analyses' findings added; rejected when one is an error.
+fn with_analyses((artifact, mut diags): (BlsArtifact, Diagnostics)) -> Result<(BlsArtifact, Diagnostics), BlsError> {
+    let found = analyses(artifact.program.get())?;
+    let rejected = found.has_errors();
+    for d in found.iter() {
+        diags.push(d.clone());
+    }
+    if rejected {
+        Err(BlsError::Rejected(diags))
+    } else {
+        Ok((artifact, diags))
+    }
 }
 
 /// Compiles the spec `name` of the file `root` with its target (LANGUAGE §17). After the frontend, the target's and
