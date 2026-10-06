@@ -66,6 +66,7 @@ html.blossom-inspecting #app, html.blossom-inspecting #app * { cursor: help !imp
 #blossom-bar {
   position: fixed; top: 12px; right: 12px; z-index: 25; display: flex; gap: 6px;
 }
+#blossom-bar[hidden] { display: none; }
 html.blossom-panel-open #blossom-bar { right: calc(var(--blossom-panel-width) + 12px); }
 #blossom-bar button, #blossom-panel button, #blossom-panel select {
   font: 500 13px/1 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--blossom-fg);

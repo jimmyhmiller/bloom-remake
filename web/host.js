@@ -2,6 +2,9 @@
 // applies each round's page patches to the DOM, reports the DOM events the program reads, and keeps its durable
 // tables in localStorage. `?app=NAME` picks examples/web/NAME.bls (default: todomvc).
 //
+// `?bench` runs the app alone for a benchmark (scripts/bench-todomvc.sh): from an empty state and the app's own
+// source, without the inspector and editor bar, saving nothing; `?bench=persist` saves the durable tables as usual.
+//
 // A program with physical timers runs on the page's clock: every animation frame moves it, and the timers due by then
 // fire (LANGUAGE §15.2).
 //
@@ -9,7 +12,11 @@
 // editor (the app's source, edited and re-run in place, the durable state kept when its schema stays).
 import init, { compile } from "./pkg/blossom_web.js";
 
-const appName = new URLSearchParams(location.search).get("app") ?? "todomvc";
+const search = new URLSearchParams(location.search);
+const appName = search.get("app") ?? "todomvc";
+/** Benchmark mode: `null` (off), `""` (saves nothing) or `"persist"`. */
+const bench = search.get("bench");
+const saving = bench === null || bench === "persist";
 const root = `${appName}.bls`;
 const mount = document.getElementById("app");
 const statusLine = document.getElementById("blossom-status");
@@ -121,7 +128,7 @@ function persist(soon) {
   }
   if (saveTimer !== null) clearTimeout(saveTimer);
   saveTimer = null;
-  if (app) localStorage.setItem(storageKey, app.saved());
+  if (app && saving) localStorage.setItem(storageKey, app.saved());
 }
 addEventListener("pagehide", () => persist(false));
 
@@ -232,7 +239,7 @@ function run(files) {
     return diagnostics(err);
   }
   const warnings = JSON.parse(next.warnings());
-  const saved = app ? app.saved() : (localStorage.getItem(storageKey) ?? "");
+  const saved = app ? app.saved() : bench !== null ? "" : (localStorage.getItem(storageKey) ?? "");
   let started;
   try {
     started = JSON.parse(next.start(saved, location.hash, now()));
@@ -517,7 +524,8 @@ async function main() {
   if (appName === "todomvc") css.href = "todomvc.css";
   const original = { "ui.bls": await fetchSource("ui.bls"), [root]: await fetchSource(root) };
   let files = { ...original };
-  const edited = localStorage.getItem(sourceKey);
+  const edited = bench === null ? localStorage.getItem(sourceKey) : null;
+  if (bench !== null) document.getElementById("blossom-bar").hidden = true;
   if (edited) files = { ...original, ...JSON.parse(edited) };
   listen();
   inspectEvents();
