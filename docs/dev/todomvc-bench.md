@@ -13,7 +13,46 @@ plus the work until the next frame. The suites:
 
 `tests/web/bench/todomvc.mjs` drives it in headless Chromium and prints the table; `--json FILE` keeps every metric.
 
-## Results (2026-10-06, S17 + the bench host mode)
+## Results after S18 (2026-10-06): 52.8 ms
+
+Same machine and method, 10 iterations, mean ms per iteration:
+
+| suite | total | Adding100Items | CompletingAllItems | DeletingAllItems |
+|---|---:|---:|---:|---:|
+| TodoMVC-Svelte | 6.3 | 3.5 | 1.9 | 0.8 |
+| TodoMVC-Preact | 7.0 | 3.6 | 2.4 | 0.9 |
+| TodoMVC-WebComponents | 8.6 | 5.0 | 2.2 | 1.5 |
+| TodoMVC-Lit | 8.9 | 5.2 | 2.5 | 1.3 |
+| TodoMVC-Vue | 13.9 | 7.3 | 3.9 | 2.7 |
+| TodoMVC-Backbone | 15.3 | 7.5 | 4.7 | 3.1 |
+| TodoMVC-Angular | 18.0 | 10.7 | 4.2 | 3.1 |
+| TodoMVC-React | 20.5 | 9.2 | 7.2 | 4.0 |
+| TodoMVC-JavaScript-ES6-Webpack | 21.3 | 10.9 | 6.8 | 3.7 |
+| TodoMVC-React-Redux | 23.3 | 9.9 | 8.7 | 4.6 |
+| TodoMVC-JavaScript-ES5 | 27.5 | 18.5 | 5.8 | 3.3 |
+| **TodoMVC-Blossom** | **52.8** | **29.2** | **12.8** | **10.8** |
+| TodoMVC-Blossom-Persist | 64.5 | 27.3 | 24.6 | 12.6 |
+| TodoMVC-jQuery | 75.5 | 17.9 | 34.4 | 23.1 |
+
+From 1482 ms to 52.8 ms (28×): ahead of jQuery, 2.6× React. Speedometer's split shows where the rest is: React
+spends 17 ms in its event handlers and 7.5 ms laying out and painting; Blossom 38 ms and 3.5 ms. The page is now
+incremental end to end, so the gap is the engine's work per event in WebAssembly (about 100 µs; natively the
+workload takes 20.7 ms, `cargo run --release -p blossom-web --example todomvc_work`). `?bench=persist` still saves
+the whole durable state after every event, the one cost left that grows with the state.
+
+What changed (docs/plan/notes/S18.md):
+
+| step | browser | native |
+|---|---:|---:|
+| S17 | 1482 ms | 968 ms |
+| handler relations projected onto the variables their statements read | | 548 ms |
+| the page kept incrementally from the outputs' row changes; history kept as changes | 95 ms | 50 ms |
+| TodoMVC finds an event's todo through views from element ids | 73 ms | 34 ms |
+| the host moves only children out of place | 62 ms | 31 ms |
+| placement patches; statements read projections; shared strings | 52 ms | 25.7 ms |
+| engine plan positions; the page's maps hashed | 50–53 ms | 20.7 ms |
+
+## Results at S17 (2026-10-06, the bench host mode)
 
 Headless Chromium 153.0.8010.12 on an Apple-silicon laptop, 10 iterations, mean ms per iteration:
 
