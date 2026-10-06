@@ -11,6 +11,7 @@ use std::sync::Arc;
 use blossom_base::FnId;
 use blossom_ir::core::{BuiltinFn, Expr, FnBody, FnRef, LibFn, Pattern};
 use blossom_value::Value;
+use blossom_value::float;
 use blossom_value::types::IntTy;
 use blossom_value::value::IntValue;
 
@@ -466,6 +467,25 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
             Value::Int(i) => Ok(Value::Str(Arc::from(i.to_string()))),
             other => Err(bug(format!("`to_string` of {other:?}"))),
         },
+        LibFn::FloatToString => match arg_value(cx, env, f, args, 0)? {
+            Value::F64(x) => Ok(Value::Str(Arc::from(float::to_string(x)))),
+            other => Err(bug(format!("`to_string` of {other:?}"))),
+        },
+        LibFn::Abs => num(float::abs(&arg_value(cx, env, f, args, 0)?)),
+        LibFn::Min | LibFn::Max => {
+            let (a, b) = (arg_value(cx, env, f, args, 0)?, arg_value(cx, env, f, args, 1)?);
+            num(float::min_max(&a, &b, f == LibFn::Max))
+        }
+        LibFn::Clamp => {
+            let x = arg_value(cx, env, f, args, 0)?;
+            let (lo, hi) = (arg_value(cx, env, f, args, 1)?, arg_value(cx, env, f, args, 2)?);
+            num(float::clamp(&x, &lo, &hi))
+        }
+        LibFn::FloatSqrt => num(float::method(float::Method::Sqrt, &arg_value(cx, env, f, args, 0)?)),
+        LibFn::FloatFloor => num(float::method(float::Method::Floor, &arg_value(cx, env, f, args, 0)?)),
+        LibFn::FloatCeil => num(float::method(float::Method::Ceil, &arg_value(cx, env, f, args, 0)?)),
+        LibFn::FloatRound => num(float::method(float::Method::Round, &arg_value(cx, env, f, args, 0)?)),
+        LibFn::FloatTrunc => num(float::method(float::Method::Trunc, &arg_value(cx, env, f, args, 0)?)),
         LibFn::DurationFromMillis => match arg_value(cx, env, f, args, 0)? {
             Value::Int(IntValue::I64(n)) => n
                 .checked_mul(1_000_000)
@@ -679,4 +699,12 @@ fn write_uvarint(mut n: u64) -> Vec<u8> {
     }
     out.push(n as u8);
     out
+}
+
+/// A numeric library call's value: its runtime error is BLSR004, a mistyped call an engine bug.
+fn num(r: Result<Value, float::NumError>) -> ExprResult<Value> {
+    r.map_err(|e| match e {
+        float::NumError::Arithmetic(m) => ExprError::Arithmetic(m),
+        float::NumError::Type(m) => bug(m),
+    })
 }

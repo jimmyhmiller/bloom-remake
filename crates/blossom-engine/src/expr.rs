@@ -12,6 +12,7 @@ use blossom_ir::core::{
 };
 use blossom_ir::tick::EvalError;
 use blossom_lattice::{Kind, LatticeError};
+use blossom_value::float;
 use blossom_value::time::{Instant, NodeId, Tick};
 use blossom_value::value::{IntValue, LatValue};
 use blossom_value::{Seed, TypeDef, Value};
@@ -318,6 +319,7 @@ pub(crate) fn eval_in(cx: &Ctx<'_>, env: &mut Frame<'_>, e: &Expr) -> ExprResult
             match (op, v) {
                 (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
                 (UnOp::Neg, Value::Int(i)) => negate(i).map(Value::Int),
+                (UnOp::Neg, Value::F64(f)) => Ok(Value::F64(float::canonical(-f))),
                 (UnOp::BitNot, Value::Int(i)) => Ok(Value::Int(from_bits(i.ty(), !to_bits(i)))),
                 (op, v) => Err(bug(format!("{op:?} applied to {v:?}"))),
             }
@@ -632,6 +634,10 @@ fn builtin(cx: &Ctx<'_>, env: &mut Frame<'_>, f: &BuiltinFn, args: &[Expr]) -> E
         }
         BuiltinFn::Size { role } => Ok(Value::Int(IntValue::U64(cx.shared.role_size(*role)))),
         BuiltinFn::IntCast(to) => match arg(0)? {
+            // Truncated toward zero; NaN, infinite or out of range is BLSR004 (LANGUAGE §5.1).
+            Value::F64(x) => float::to_int(x, *to)
+                .map(Value::Int)
+                .ok_or_else(|| ExprError::Arithmetic(format!("{x:?} as {} is out of range", to.name()))),
             Value::Int(i) => {
                 let wide = match i {
                     IntValue::U128(u) => i128::try_from(u).ok(),
@@ -646,6 +652,11 @@ fn builtin(cx: &Ctx<'_>, env: &mut Frame<'_>, f: &BuiltinFn, args: &[Expr]) -> E
                     .ok_or_else(|| ExprError::Arithmetic(format!("{i:?} as {} is out of range", to.name())))
             }
             other => Err(bug(format!("an integer cast of {other:?}"))),
+        },
+        BuiltinFn::FloatCast => match arg(0)? {
+            Value::F64(x) => Ok(Value::F64(float::canonical(x))),
+            Value::Int(i) => Ok(Value::F64(float::from_int(i))),
+            other => Err(bug(format!("a cast to f64 of {other:?}"))),
         },
         BuiltinFn::Concat => match (arg(0)?, arg(1)?) {
             (Value::Str(a), Value::Str(b)) => Ok(Value::Str(format!("{a}{b}").into())),
@@ -694,6 +705,17 @@ fn builtin(cx: &Ctx<'_>, env: &mut Frame<'_>, f: &BuiltinFn, args: &[Expr]) -> E
                 key.push(arg(i)?);
             }
             rand(cx, &key)
+        }
+        BuiltinFn::RandFloat => {
+            let mut key = Vec::new();
+            for i in 0..args.len() {
+                key.push(arg(i)?);
+            }
+            match rand(cx, &key)? {
+                // `rand_float(k…)` is `rand(k…)`'s draw, as a float in [0, 1).
+                Value::Int(IntValue::U64(bits)) => Ok(Value::F64(float::unit_from_bits(bits))),
+                other => Err(bug(format!("rand gave {other:?}"))),
+            }
         }
         BuiltinFn::RandRange => {
             let (lo, hi) = (arg(0)?, arg(1)?);
@@ -929,6 +951,14 @@ fn arithmetic(op: &BinOp, l: Value, r: Value) -> ExprResult<Value> {
     };
     match (l, r) {
         (Value::Int(a), Value::Int(b)) => int_op(op, a, b).map(Value::Int),
+        // IEEE, canonical; never an error (LANGUAGE §5.1).
+        (Value::F64(a), Value::F64(b)) => Ok(Value::F64(float::canonical(match op {
+            Add => a + b,
+            Sub => a - b,
+            Mul => a * b,
+            Div => a / b,
+            _ => a % b,
+        }))),
         (Value::Duration(a), Value::Duration(b)) if matches!(op, Add | Sub) => {
             let v = if *op == Add { a.checked_add(b) } else { a.checked_sub(b) };
             v.map(Value::Duration).ok_or_else(|| overflow(&a, &b))

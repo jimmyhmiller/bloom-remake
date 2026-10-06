@@ -1933,6 +1933,32 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
                 other => Err(format!("to_string of {other:?}, not an integer")),
             }
         }
+        LibFn::Abs | LibFn::Min | LibFn::Max | LibFn::Clamp => {
+            arity(match f {
+                LibFn::Abs => 1,
+                LibFn::Clamp => 3,
+                _ => 2,
+            })?;
+            let t = ty(0)?;
+            if !matches!(p.types.get(t), Some(TypeDef::Int(_) | TypeDef::F64)) {
+                return Err(format!("{f:?} of {:?}, not a number", p.types.get(t)));
+            }
+            for i in 1..args.len() {
+                same(ty(i)?, t, "the arguments have one type")?;
+            }
+            Ok(t)
+        }
+        LibFn::FloatSqrt | LibFn::FloatFloor | LibFn::FloatCeil | LibFn::FloatRound | LibFn::FloatTrunc => {
+            arity(1)?;
+            let f64t = lookup(TypeDef::F64)?;
+            same(ty(0)?, f64t, "a method of an f64")?;
+            Ok(f64t)
+        }
+        LibFn::FloatToString => {
+            arity(1)?;
+            same(ty(0)?, lookup(TypeDef::F64)?, "to_string of an f64")?;
+            lookup(TypeDef::Str)
+        }
         LibFn::StrParseI64 => {
             arity(1)?;
             same(ty(0)?, lookup(TypeDef::Str)?, "parse_i64 of a String")?;
@@ -2139,10 +2165,23 @@ fn builtin_type(p: &Program, r: Cx<'_>, b: &BuiltinFn, args: &[Expr]) -> Result<
         }
         BuiltinFn::IntCast(to) => {
             arity(1)?;
-            if !matches!(types.first().and_then(|t| p.types.get(*t)), Some(TypeDef::Int(_))) {
-                return Err("an integer cast expects an integer".into());
+            if !matches!(
+                types.first().and_then(|t| p.types.get(*t)),
+                Some(TypeDef::Int(_) | TypeDef::F64)
+            ) {
+                return Err("an integer cast expects an integer or an f64".into());
             }
             lookup(TypeDef::Int(*to))
+        }
+        BuiltinFn::FloatCast => {
+            arity(1)?;
+            if !matches!(
+                types.first().and_then(|t| p.types.get(*t)),
+                Some(TypeDef::Int(_) | TypeDef::F64)
+            ) {
+                return Err("a cast to f64 expects an integer or an f64".into());
+            }
+            lookup(TypeDef::F64)
         }
         BuiltinFn::Len => {
             arity(1)?;

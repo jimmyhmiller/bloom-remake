@@ -1,0 +1,32 @@
+//! `f64` (LANGUAGE §5.1): arithmetic, comparisons, casts, constants and the numeric library, in functions and views.
+//! The inputs are integers read as quarters, so `bls_functions.rs` computes every view exactly in Rust as well.
+program floats version 1;
+
+input e(a: i64, b: i64);
+/// A float to cast to an integer: out of range (or NaN) is BLSR004.
+input cast(num: i64, den: i64);
+
+const QUARTER: f64 = 0.25;
+const LOW: f64 = -1.5;
+const HIGH: f64 = LOW + 3.5;
+
+fn q(n: i64) -> f64 {
+    n as f64 * QUARTER
+}
+
+/// IEEE arithmetic, canonical: a division by zero is infinite or NaN, never an error; `-0.0` is `0.0`.
+view v_arith(a, b, r) = e(a, b),
+    let r = (q(a) + q(b), q(a) - q(b), q(a) * q(b), q(a) / q(b), q(a) % q(b), -q(a));
+/// The values' order: numeric on numbers.
+view v_order(a, b, r) = e(a, b),
+    let r = (q(a) < q(b), q(a) <= q(b), q(a) == q(b), q(a) > q(b), q(a) >= q(b), q(a) != q(b));
+view v_lib(a, b, r) = e(a, b),
+    let t = q(a) / 3.0,
+    let r = (min(q(a), q(b)), max(q(a), q(b)), clamp(q(a), LOW, HIGH), abs(q(a)), abs(q(a)).sqrt(), t.floor(),
+        t.ceil(), t.round(), t.trunc());
+view v_text(a, b, r) = e(a, b),
+    let r = (q(a).to_string(), (q(a) / q(b)).to_string(), (q(a) * 2.5) as i64, a as f64, (q(a) / 8.0).to_string());
+view v_ints(a, b, r) = e(a, b), let r = (abs(a), min(a, b), max(a, b), clamp(a, -5, 5));
+/// `rand_float` is in [0, 1) (its value: the two evaluators agree on it).
+view v_rand(a, x, r) = e(a, _b), let x = rand_float(a), let r = x >= 0.0 && x < 1.0;
+view v_cast(num, den, n) = cast(num, den), let n = (num as f64 / den as f64) as i64;

@@ -460,6 +460,7 @@ fn value_of(program: &Program, ty: TypeId, v: &toml::Value, names: &[Arc<str>]) 
         (TypeDef::Int(t), toml::Value::Integer(n)) => {
             Value::Int(IntValue::from_i128(*t, i128::from(*n)).ok_or_else(|| format!("{n} is out of range for {t:?}"))?)
         }
+        (TypeDef::F64, toml::Value::Float(f)) => Value::F64(blossom_value::float::canonical(*f)),
         (TypeDef::Str, toml::Value::String(s)) => Value::Str(s.as_str().into()),
         (TypeDef::Principal, toml::Value::String(s)) => Value::Principal(s.as_str().into()),
         (TypeDef::Bytes, toml::Value::String(s)) => Value::Bytes(s.as_bytes().into()),
@@ -472,7 +473,7 @@ fn value_of(program: &Program, ty: TypeId, v: &toml::Value, names: &[Arc<str>]) 
         }
         (def, v) => {
             return Err(format!(
-                "cannot read {v} as a {def:?} (this build reads bool, integers, strings, principals, bytes and nodes)"
+                "cannot read {v} as a {def:?} (this build reads bool, integers, f64, strings, principals, bytes and nodes)"
             ));
         }
     })

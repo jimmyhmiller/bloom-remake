@@ -958,6 +958,8 @@ pub enum Builtin {
     /// `rand(k…)` (LANGUAGE §15.1): a `u64` from the node's PRF, the same for the same key within a node's tick and
     /// incarnation. Arguments: the key.
     Rand,
+    /// `rand_float(k…)` (LANGUAGE §15.1): `rand(k…)`'s draw as an `f64` in `[0, 1)`. Arguments: the key.
+    RandFloat,
     /// `hash64(x)` (Appendix B): the value's canonical fingerprint, the same for the same value on every node and in
     /// every version.
     Hash64,

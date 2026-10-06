@@ -256,6 +256,10 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
                 return Err(ExprError::Oracle(internal_error!("a cast takes one argument").into()));
             };
             match eval(scope, env, a)? {
+                // Truncated toward zero; NaN, infinite or out of range is BLSR004 (LANGUAGE §5.1).
+                Value::F64(f) => blossom_value::float::to_int(f, *to)
+                    .map(Value::Int)
+                    .ok_or_else(|| ExprError::Arithmetic(format!("{f:?} as {} is out of range", to.name()))),
                 // Out of range is BLSR004 (LANGUAGE §5.2); a u128 above i128::MAX fits only a u128.
                 Value::Int(IntValue::U128(u)) if *to == blossom_value::types::IntTy::U128 => {
                     Ok(Value::Int(IntValue::U128(u)))
@@ -268,6 +272,19 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
                 other => Err(ExprError::Oracle(
                     internal_error!("an integer cast of {other:?}").into(),
                 )),
+            }
+        }
+        Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::FloatCast),
+            args,
+        } => {
+            let [a] = args.as_slice() else {
+                return Err(ExprError::Oracle(internal_error!("a cast takes one argument").into()));
+            };
+            match eval(scope, env, a)? {
+                Value::F64(f) => Ok(Value::F64(blossom_value::float::canonical(f))),
+                Value::Int(i) => Ok(Value::F64(blossom_value::float::from_int(i))),
+                other => Err(ExprError::Oracle(internal_error!("a cast to f64 of {other:?}").into())),
             }
         }
         Expr::Call {
@@ -306,6 +323,20 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
                 key.push(eval(scope, env, a)?);
             }
             rand(scope, &key)
+        }
+        Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::RandFloat),
+            args,
+        } => {
+            let mut key = Vec::new();
+            for a in args {
+                key.push(eval(scope, env, a)?);
+            }
+            match rand(scope, &key)? {
+                // `rand_float(k…)` is `rand(k…)`'s draw, as a float in [0, 1).
+                Value::Int(IntValue::U64(bits)) => Ok(Value::F64(blossom_value::float::unit_from_bits(bits))),
+                other => Err(ExprError::Oracle(internal_error!("rand gave {other:?}").into())),
+            }
         }
         Expr::Call {
             f: FnRef::Builtin(BuiltinFn::RandRange),
@@ -640,6 +671,7 @@ fn unary(op: UnOp, v: Value) -> ExprResult<Value> {
     match (op, v) {
         (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
         (UnOp::Neg, Value::Int(i)) => int_neg(i).map(Value::Int),
+        (UnOp::Neg, Value::F64(f)) => Ok(Value::F64(blossom_value::float::canonical(-f))),
         (UnOp::BitNot, Value::Int(i)) => Ok(Value::Int(int_not(i))),
         (op, v) => Err(ExprError::Oracle(internal_error!("{op:?} applied to {v:?}").into())),
     }
@@ -676,6 +708,14 @@ fn binary(op: BinOp, l: Value, r: Value) -> ExprResult<Value> {
         }
         Add | Sub | Mul | Div | Rem => match (l, r) {
             (Value::Int(a), Value::Int(b)) => int_arith(op, a, b).map(Value::Int),
+            // IEEE, canonical; never an error (LANGUAGE §5.1).
+            (Value::F64(a), Value::F64(b)) => Ok(Value::F64(blossom_value::float::canonical(match op {
+                Add => a + b,
+                Sub => a - b,
+                Mul => a * b,
+                Div => a / b,
+                _ => a % b,
+            }))),
             (Value::Duration(a), Value::Duration(b)) if matches!(op, Add | Sub) => {
                 let r = if op == Add { a.checked_add(b) } else { a.checked_sub(b) };
                 r.map(Value::Duration)

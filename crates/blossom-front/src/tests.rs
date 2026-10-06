@@ -1468,3 +1468,66 @@ import B as b;
 ";
     assert_eq!(codes(twins), Vec::<String>::new());
 }
+
+/// The code and message of every diagnostic compiling `src` on one role-free node.
+#[cfg(test)]
+fn diags(src: &'static str) -> Vec<(String, String)> {
+    diags_for(
+        src,
+        &[NodeSpec {
+            name: "n1".to_owned(),
+            role: None,
+        }],
+    )
+}
+
+#[test]
+fn floats_type_check_and_say_how_to_write_one() {
+    let ok = with_head(
+        "const G: f64 = -0.061;\n\
+         const H: f64 = G * 2.0 + 1e-3;\n\
+         table bird(y: f64, v: f64) key();\n\
+         output o(s: String, n: i64, x: f64, m: u64);\n\
+         a: on go(k, v), bird(y, w) { upsert bird(y - w * 0.5, w + G + H); }\n\
+         b: while bird(y, w) where y > -1.5 && w != 0.0 {\n\
+             emit o(y.to_string(), y.floor() as i64, max(abs(y), (k_of(y) as f64).sqrt()), min(3u64, 7u64));\n\
+         }\n\
+         fn k_of(y: f64) -> u8 { clamp(y, 0.0, 255.0) as u8 }\n",
+    );
+    assert_eq!(diags(ok), Vec::<(String, String)>::new());
+    // An integer literal is not an f64.
+    let d = diags(with_head(
+        "table t(x: f64) key();\noutput o(x: f64);\na: while t(x) { emit o(x * 2); }\n",
+    ));
+    assert!(
+        d.iter().any(|(_, m)| m.contains("write it with a fraction (`2.0`)")),
+        "{d:?}"
+    );
+    // `sum!` over f64 is refused; `max!` is not.
+    let d = diags(with_head(
+        "table t(k: u64, x: f64) key(k);\nview s(n = sum!(x default 0.0)) = t(_, x);\n",
+    ));
+    assert!(
+        d.iter().any(|(c, m)| c == "BLS0908" && m.contains("`sum!` over f64")),
+        "{d:?}"
+    );
+    let ok = with_head("table t(k: u64, x: f64) key(k);\nview s(n = max!(x default 0.0)) = t(_, x);\n");
+    assert_eq!(diags(ok), Vec::<(String, String)>::new());
+    // The numeric library takes numbers of one type.
+    let d = diags(with_head(
+        "output o(x: String);\na: on go(k, v) { emit o(abs(\"x\")); }\n",
+    ));
+    assert!(
+        d.iter().any(|(_, m)| m.contains("expected an integer or an f64")),
+        "{d:?}"
+    );
+    let d = diags(with_head(
+        "output o(x: f64);\na: on go(k, v) { emit o(min(1.0, k)); }\n",
+    ));
+    assert!(!d.is_empty(), "min of an f64 and a u64 compiled");
+    // A float cast to a string is no cast.
+    let d = diags(with_head(
+        "output o(x: String);\na: on go(k, v) { emit o(1.5 as String); }\n",
+    ));
+    assert!(d.iter().any(|(c, _)| c == "BLS0908" || c == "BLS0300"), "{d:?}");
+}

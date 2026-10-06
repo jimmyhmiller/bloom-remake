@@ -54,7 +54,12 @@ pub(super) const BUILTIN_FNS: &[&str] = &[
     "random",
     "rand",
     "rand_range",
+    "rand_float",
     "majority",
+    "abs",
+    "min",
+    "max",
+    "clamp",
     "hash64",
     "range",
     "error",
@@ -1762,15 +1767,16 @@ impl<'t> Resolver<'t, '_> {
                         .find(|t| t.name() == sfx.as_str())?;
                     HExprKind::TypedInt(*value, ty, false)
                 }
-                LitValue::Float(_) => {
-                    self.unsupported("LANG-022", "floating-point values", span);
-                    return None;
-                }
                 _ => {
                     let (v, t) = self.const_value(cx.ms, e, None)?;
                     HExprKind::Value(v, t)
                 }
             },
+            // `-1.5` is a constant.
+            ExprKind::Prefix { op: PrefixOp::Neg, arg } if matches!(arg.kind, ExprKind::Lit(LitValue::Float(_))) => {
+                let (v, t) = self.const_value(cx.ms, e, None)?;
+                HExprKind::Value(v, t)
+            }
             ExprKind::Prefix { op: PrefixOp::Neg, arg } if matches!(arg.kind, ExprKind::Lit(LitValue::Int { .. })) => {
                 match &arg.kind {
                     ExprKind::Lit(LitValue::Int { value, suffix: None }) => HExprKind::IntLit(*value, true),
@@ -2307,7 +2313,7 @@ impl<'t> Resolver<'t, '_> {
                 }
                 Some(HExpr::new(HExprKind::LatCtor { kind, bot, args: xs }, span))
             }
-            [name] if matches!(name.as_str(), "rand" | "rand_range" | "majority") && cx.in_fn => {
+            [name] if matches!(name.as_str(), "rand" | "rand_range" | "rand_float" | "majority") && cx.in_fn => {
                 let what = if name.as_str() == "majority" {
                     "a role's members"
                 } else {
@@ -2495,6 +2501,52 @@ impl<'t> Resolver<'t, '_> {
                 Some(HExpr::new(
                     HExprKind::Builtin {
                         f: Builtin::Rand,
+                        args: xs,
+                    },
+                    span,
+                ))
+            }
+            [name] if name.as_str() == "rand_float" => {
+                // As `rand`: the key makes the draw stable (LANG-175).
+                if pos.is_empty() {
+                    self.error(code!("BLS0301"), span, "`rand_float` takes a key");
+                    return None;
+                }
+                let mut xs = Vec::new();
+                for p in pos {
+                    xs.push(self.expr(cx, p)?);
+                }
+                Some(HExpr::new(
+                    HExprKind::Builtin {
+                        f: Builtin::RandFloat,
+                        args: xs,
+                    },
+                    span,
+                ))
+            }
+            [name] if matches!(name.as_str(), "abs" | "min" | "max" | "clamp") => {
+                use blossom_ir::core::LibFn;
+                let (f, want) = match name.as_str() {
+                    "abs" => (LibFn::Abs, 1),
+                    "min" => (LibFn::Min, 2),
+                    "max" => (LibFn::Max, 2),
+                    _ => (LibFn::Clamp, 3),
+                };
+                if pos.len() != want {
+                    self.error(
+                        code!("BLS0301"),
+                        span,
+                        format!("`{}` takes {want} argument(s)", name.as_str()),
+                    );
+                    return None;
+                }
+                let mut xs = Vec::new();
+                for p in pos {
+                    xs.push(self.expr(cx, p)?);
+                }
+                Some(HExpr::new(
+                    HExprKind::Builtin {
+                        f: Builtin::Lib(f),
                         args: xs,
                     },
                     span,

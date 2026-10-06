@@ -175,6 +175,10 @@ enum Deferred {
     Ordered { t: T, span: Span },
     /// An aggregate `count!` result: an integer column.
     IntColumn { t: T, span: Span },
+    /// `abs`, `min`, `max`, `clamp`: an integer or an `f64`.
+    Numeric { t: T, span: Span },
+    /// A `sum!` column: not an `f64` (float addition is not associative, LANGUAGE §5.1).
+    NoFloat { t: T, span: Span },
     /// `a ++ b`: strings, bytes or vectors.
     Concat { t: T, span: Span },
     /// A value of term `from` where `to` is expected: lifted when `to` is a lattice and `from` is not (LANGUAGE §5.6).
@@ -1464,6 +1468,7 @@ impl Checker<'_> {
                         res: col,
                         span: agg.span,
                     });
+                    self.deferred.push(Deferred::NoFloat { t: col, span: agg.span });
                 } else {
                     self.deferred.push(Deferred::Ordered { t: col, span: agg.span });
                 }
@@ -2080,6 +2085,7 @@ impl Checker<'_> {
                         Builtin::RoleSize(_) | Builtin::Rand | Builtin::Hash64 => {
                             self.con(&mut hir.types, TypeDef::Int(IntTy::U64))
                         }
+                        Builtin::RandFloat => self.con(&mut hir.types, TypeDef::F64),
                         Builtin::Error => {
                             // The message is a String; the call never returns, so it takes its context's type.
                             if let Some(m) = ats.first() {
@@ -2153,6 +2159,19 @@ impl Checker<'_> {
                             self.con(&mut hir.types, TypeDef::Bytes)
                         }
                         Builtin::Lib(LibFn::BytesEmpty) => self.con(&mut hir.types, TypeDef::Bytes),
+                        Builtin::Lib(LibFn::Abs | LibFn::Min | LibFn::Max | LibFn::Clamp) => {
+                            // One numeric type for the arguments and the result.
+                            match ats.first().copied() {
+                                Some(t) => {
+                                    for a in ats.iter().skip(1) {
+                                        self.unify(&hir.types, t, *a, span);
+                                    }
+                                    self.deferred.push(Deferred::Numeric { t, span });
+                                    t
+                                }
+                                None => self.fresh(false),
+                            }
+                        }
                         Builtin::Lib(LibFn::DurationFromMillis) => {
                             let i = self.con(&mut hir.types, TypeDef::Int(IntTy::I64));
                             for a in &ats {
@@ -2621,6 +2640,8 @@ impl Checker<'_> {
                 | Deferred::Len { span, .. }
                 | Deferred::Ordered { span, .. }
                 | Deferred::IntColumn { span, .. }
+                | Deferred::Numeric { span, .. }
+                | Deferred::NoFloat { span, .. }
                 | Deferred::Concat { span, .. }
                 | Deferred::Coerce { span, .. }
                 | Deferred::Compare { span, .. }
@@ -2696,14 +2717,30 @@ impl Checker<'_> {
                         true
                     }
                     (Some(_), _) | (_, Some(_)) => {
+                        // An integer literal is not a float (LANGUAGE §5.1): say how to write one.
+                        let int_literal = |me: &mut Self, t: T| {
+                            let r = me.find(t);
+                            matches!(me.node(r), Node::Unbound { int: true })
+                        };
+                        let float_with_int = (matches!(ld, Some(TypeDef::F64)) && int_literal(self, r))
+                            || (matches!(rd, Some(TypeDef::F64)) && int_literal(self, l));
+                        if float_with_int {
+                            self.error(
+                                span,
+                                "an integer literal is not an f64: write it with a fraction (`2.0`), or convert \
+                                 with `as f64`"
+                                    .into(),
+                            );
+                            return true;
+                        }
                         self.unify(&hir.types, l, r, span);
                         self.unify(&hir.types, l, res, span);
                         let t = self.leaf(l);
-                        if !t.is_some_and(|t| matches!(hir.types.get(t), Some(TypeDef::Int(_)))) {
+                        if !t.is_some_and(|t| matches!(hir.types.get(t), Some(TypeDef::Int(_) | TypeDef::F64))) {
                             let dl = self.describe(&hir.types, l);
                             self.error(
                                 span,
-                                format!("arithmetic needs integers, Duration or Instant, found {dl}"),
+                                format!("arithmetic needs integers, f64, Duration or Instant, found {dl}"),
                             );
                         }
                         true
@@ -2771,15 +2808,18 @@ impl Checker<'_> {
                         }
                         return false;
                     }
-                    self.error(span, "casts convert between integer types".into());
+                    self.error(span, "casts convert between integer types and f64".into());
                     return true;
                 };
                 let ok = matches!(
                     (hir.types.get(a), hir.types.get(b)),
-                    (Some(TypeDef::Int(_)), Some(TypeDef::Int(_)))
+                    (
+                        Some(TypeDef::Int(_) | TypeDef::F64),
+                        Some(TypeDef::Int(_) | TypeDef::F64)
+                    )
                 );
                 if !ok {
-                    self.unsupported(span, "casts other than between integer types");
+                    self.unsupported(span, "casts other than between integer types and f64");
                 }
                 true
             }
@@ -2815,6 +2855,41 @@ impl Checker<'_> {
                 if !ok {
                     let d = self.describe(&hir.types, t);
                     self.error(span, format!("expected an integer, found {d}"));
+                }
+                true
+            }
+            Deferred::Numeric { t, span } => {
+                if self.is_unbound(t) {
+                    // An integer literal settles as an integer; anything else waits for its type.
+                    let r = self.find(t);
+                    return matches!(self.node(r), Node::Unbound { int: true });
+                }
+                let ok = self
+                    .leaf(t)
+                    .is_some_and(|ty| matches!(hir.types.get(ty), Some(TypeDef::Int(_) | TypeDef::F64)));
+                if !ok {
+                    let d = self.describe(&hir.types, t);
+                    self.error(span, format!("expected an integer or an f64, found {d}"));
+                }
+                true
+            }
+            Deferred::NoFloat { t, span } => {
+                if self.is_unbound(t) {
+                    return false;
+                }
+                if self
+                    .leaf(t)
+                    .is_some_and(|ty| matches!(hir.types.get(ty), Some(TypeDef::F64)))
+                {
+                    self.diags.push(
+                        Diagnostic::not_implemented(
+                            blossom_base::FeatureId("LANG-022"),
+                            "`sum!` over f64 (float addition is not associative, so the sum would depend on the \
+                             evaluation order)",
+                            "a deterministic float sum",
+                        )
+                        .with_primary(span),
+                    );
                 }
                 true
             }
@@ -3448,6 +3523,12 @@ impl Checker<'_> {
             (_, Some(TypeDef::Str), "to_utf8") => (Builtin::Lib(LibFn::StrToUtf8), None, 0),
             (_, Some(TypeDef::Str), "trim") => (Builtin::Lib(LibFn::StrTrim), None, 0),
             (_, Some(TypeDef::Int(_)), "to_string") => (Builtin::Lib(LibFn::IntToString), None, 0),
+            (_, Some(TypeDef::F64), "to_string") => (Builtin::Lib(LibFn::FloatToString), None, 0),
+            (_, Some(TypeDef::F64), "sqrt") => (Builtin::Lib(LibFn::FloatSqrt), None, 0),
+            (_, Some(TypeDef::F64), "floor") => (Builtin::Lib(LibFn::FloatFloor), None, 0),
+            (_, Some(TypeDef::F64), "ceil") => (Builtin::Lib(LibFn::FloatCeil), None, 0),
+            (_, Some(TypeDef::F64), "round") => (Builtin::Lib(LibFn::FloatRound), None, 0),
+            (_, Some(TypeDef::F64), "trunc") => (Builtin::Lib(LibFn::FloatTrunc), None, 0),
             (_, Some(TypeDef::Str), "parse_i64") => (Builtin::Lib(LibFn::StrParseI64), None, 0),
             (_, Some(TypeDef::Duration), "as_millis") => (Builtin::Lib(LibFn::DurationAsMillis), None, 0),
             (_, Some(TypeDef::Instant), "as_millis") => (Builtin::Lib(LibFn::InstantAsMillis), None, 0),
@@ -3702,7 +3783,13 @@ impl Checker<'_> {
             }
             (_, Builtin::Lib(LibFn::StrSplitWhitespace)) => self.bound(Shape::Vec(recv)),
             (_, Builtin::Lib(LibFn::StrToLowercase | LibFn::StrTrim)) => recv,
-            (_, Builtin::Lib(LibFn::IntToString)) => self.con(&mut hir.types, TypeDef::Str),
+            (_, Builtin::Lib(LibFn::IntToString | LibFn::FloatToString)) => self.con(&mut hir.types, TypeDef::Str),
+            (
+                _,
+                Builtin::Lib(
+                    LibFn::FloatSqrt | LibFn::FloatFloor | LibFn::FloatCeil | LibFn::FloatRound | LibFn::FloatTrunc,
+                ),
+            ) => recv,
             (_, Builtin::Lib(LibFn::StrToUtf8)) => self.con(&mut hir.types, TypeDef::Bytes),
             (_, Builtin::Lib(LibFn::DurationAsMillis | LibFn::InstantAsMillis)) => {
                 self.con(&mut hir.types, TypeDef::Int(IntTy::I64))

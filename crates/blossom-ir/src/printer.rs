@@ -118,6 +118,7 @@ fn builtin_name(p: &Program, f: &BuiltinFn) -> String {
         BuiltinFn::ToString => "$to_string".into(),
         BuiltinFn::Hash64 => "$hash64".into(),
         BuiltinFn::Fingerprint => "$fingerprint".into(),
+        BuiltinFn::FloatCast => "$as_f64".into(),
     }
 }
 fn agg_name(p: &Program, f: &AggFunc) -> String {
@@ -526,6 +527,8 @@ pub fn value_text(program: Option<&Program>, v: &Value, ty: Option<TypeId>, node
             .split_once('(')
             .and_then(|(_, rest)| rest.strip_suffix(')'))
             .map_or_else(|| format!("{i:?}"), str::to_owned),
+        // As a literal reads (`1.0`, `2.5e-7`; `NaN`, `inf` have none).
+        (Value::F64(f), _) => format!("{f:?}"),
         (Value::Duration(d), _) => seconds(d.as_nanos()),
         (Value::Instant(t), _) => format!("@{}", seconds(t.0)),
         (Value::Session(s), _) => format!("session {}", s.0),
