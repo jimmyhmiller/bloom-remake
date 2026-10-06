@@ -80,12 +80,17 @@ function apply(patches) {
         textOf(nodes.get(p.id)).data = p.text;
         break;
       case "children": {
+        // Only the nodes out of place move (a node that keeps its place keeps its focus and caret untouched).
         const parent = element(p.parent);
         const want = p.ids.map((id) => nodes.get(id));
-        for (const child of want) parent.appendChild(child);
+        const wanted = new Set(want);
         for (const child of [...parent.children]) {
-          if (!want.includes(child)) parent.removeChild(child);
+          if (!wanted.has(child)) parent.removeChild(child);
         }
+        want.forEach((child, i) => {
+          const at = parent.children[i] ?? null;
+          if (at !== child) parent.insertBefore(child, at);
+        });
         break;
       }
       case "focus":

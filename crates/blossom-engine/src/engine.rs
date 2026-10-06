@@ -685,6 +685,15 @@ impl Engine {
         }
     }
 
+    /// How the last tick changed `rel`'s rows: those it gained and those it lost, against the tick before (O(the
+    /// change); empty before the first tick or for a relation the program never fills).
+    pub fn changes_of(&self, rel: RelId) -> (Vec<Row>, Vec<Row>) {
+        self.stores
+            .get(&StoreKey::Main(rel))
+            .map(|s| (s.ins.iter().cloned().collect(), s.del.iter().cloned().collect()))
+            .unwrap_or_default()
+    }
+
     /// The carried rows of `rel`: what the next tick starts from.
     pub fn carried_rows(&self, rel: RelId) -> Vec<Row> {
         if let Some(base) = &self.baseline {

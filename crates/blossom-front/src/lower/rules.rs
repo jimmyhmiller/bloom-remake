@@ -72,6 +72,56 @@ pub(crate) fn binders(body: &HBody) -> Vec<HVarId> {
     out
 }
 
+/// The variables `stmts` read from the relation of the header or block they are under: what the statements' heads
+/// and destinations mention and what nested blocks need (their conditions, and what their own statements need).
+/// `None` when a head aggregates over the valuations (`count!(*)`, `sum!`, `collect!` count each valuation once), so
+/// every variable is needed: dropping one could merge two valuations.
+fn needed(stmts: &[HStmt]) -> Option<BTreeSet<HVarId>> {
+    fn walk(stmts: &[HStmt], out: &mut BTreeSet<HVarId>) -> bool {
+        for s in stmts {
+            match s {
+                HStmt::Verb(HVerbStmt {
+                    verb: _,
+                    target: _,
+                    args,
+                    to,
+                    allow_self_negation: _,
+                    rank: _,
+                    text: _,
+                    span: _,
+                }) => {
+                    for a in args {
+                        match a {
+                            HHeadArg::Expr(e) => mentioned_expr(e, out),
+                            HHeadArg::Agg(_) => return false,
+                        }
+                    }
+                    if let Some(d) = to {
+                        mentioned_expr(d, out);
+                    }
+                }
+                HStmt::Block { cond, stmts, .. } => {
+                    mentioned(cond, out);
+                    if !walk(stmts, out) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+    let mut out = BTreeSet::new();
+    walk(stmts, &mut out).then_some(out)
+}
+
+/// `vars` without those `stmts` do not need ([`needed`]), in order.
+fn project(mut vars: Vec<HVarId>, stmts: &[HStmt]) -> Vec<HVarId> {
+    if let Some(used) = needed(stmts) {
+        vars.retain(|v| used.contains(v));
+    }
+    vars
+}
+
 /// Every variable a body mentions (for the correlated variables of `not { … }` and `forall`).
 fn mentioned(body: &HBody, out: &mut BTreeSet<HVarId>) {
     for l in &body.lits {
@@ -781,7 +831,9 @@ impl<'h> Lowerer<'h> {
             role: h.role,
             counter: 0,
         };
-        let vars = binders(&h.header);
+        // The header's relation holds only the variables the statements read: a change to a header variable no
+        // statement reads (a count, a typed text) then changes none of its rows, so nothing below re-derives.
+        let vars = project(binders(&h.header), &h.stmts);
         let cols: Vec<ir::Column> = vars
             .iter()
             .map(|v| {
@@ -861,6 +913,7 @@ impl<'h> Lowerer<'h> {
                             vars.push(v);
                         }
                     }
+                    let vars = project(vars, inner);
                     let cols: Vec<ir::Column> = vars
                         .iter()
                         .map(|v| {
@@ -886,9 +939,59 @@ impl<'h> Lowerer<'h> {
                     self.b
                         .set_construct_kind(construct, ConstructKind::Block { rel })
                         .map_err(ir)?;
+                    // The block reads its parent through a projection onto the variables it needs (its condition's
+                    // and its statements'), when that drops some: a change to the parent's row that leaves those
+                    // alone then derives nothing here, so a loop under a header whose count changes is not redone.
+                    let wanted = needed(inner).map(|mut u| {
+                        mentioned(cond, &mut u);
+                        u
+                    });
+                    let (source, source_vars) = match wanted {
+                        Some(u) if parent.1.iter().any(|v| !u.contains(v)) => {
+                            let keep: Vec<HVarId> = parent.1.iter().copied().filter(|v| u.contains(v)).collect();
+                            let cols: Vec<ir::Column> = keep
+                                .iter()
+                                .map(|v| {
+                                    let name = self.hir.var(scope, *v)?.name;
+                                    let ty = match refined.get(v) {
+                                        Some(ty) => *ty,
+                                        None => self.var_ty(scope, *v)?,
+                                    };
+                                    Ok(column(name, ty, false))
+                                })
+                                .collect::<Result<_, InternalError>>()?;
+                            let proj = self.generated(
+                                names.rel_segments(&format!("{tag}$in")),
+                                cols,
+                                None,
+                                names.role,
+                                false,
+                                *span,
+                            )?;
+                            let mut d = Draft::refined(scope, refined.clone());
+                            let pargs = self.var_terms(&mut d, &parent.1)?;
+                            d.lits.push(Literal::Pos(ir_atom(parent.0, pargs, *span)));
+                            let args = self.var_terms(&mut d, &keep)?;
+                            let l = self.label(format!("{}{tag}$in", names.base));
+                            d.build(
+                                &mut self.b,
+                                RuleKind::Deductive,
+                                l,
+                                *span,
+                                Head {
+                                    rel: proj,
+                                    args: args.into_iter().map(HeadArg::Term).collect(),
+                                    mode: HeadMode::Insert,
+                                },
+                                names.role,
+                            )?;
+                            (proj, keep)
+                        }
+                        _ => (parent.0, parent.1.clone()),
+                    };
                     let given = [Given::Rel {
-                        rel: parent.0,
-                        vars: parent.1.clone(),
+                        rel: source,
+                        vars: source_vars,
                         span: *span,
                     }];
                     let seed = self.given(vec![Draft::refined(scope, inside.clone())], &given, names)?;

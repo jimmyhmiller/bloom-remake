@@ -12,26 +12,30 @@ use std::sync::Arc;
 
 use blossom_base::{RelId, RuleId};
 use blossom_ir::core::{Origin, Persistence, Program};
-use blossom_ir::tick::{Instance, Row, TickInput, TickOutput};
+use blossom_ir::tick::{Changes, Instance, Row, TickInput, TickOutput};
 use blossom_oracle::{Limits, Oracle};
 use blossom_value::time::{Instant, NodeId, Tick};
 use serde::Serialize;
 
 use crate::HostError;
 
-/// The rounds the inspector can explain: the latest [`History::KEEP`].
+/// The rounds the inspector can explain: the latest [`History::KEEP`]. It keeps the state the oldest of them started
+/// from and what each changed, so a round costs the host only its changes; the state a round started from is rebuilt
+/// when the inspector asks ([`History::before`]).
 pub struct History {
+    /// The carried state the oldest kept round started from.
+    base: Instance,
     rounds: VecDeque<Round>,
 }
 
-/// One round: the state it started from, its events, and the rows it wrote into the state the next round starts
-/// from.
+/// One round: its events, and how it changed the state the next round starts from.
 pub struct Round {
     pub tick: u64,
     /// The clock the round ran at.
     pub now: Instant,
-    pub before: Instance,
     pub events: Vec<(RelId, Row)>,
+    pub changes: Changes,
+    /// The rows it wrote (`changes`' insertions).
     pub inserted: BTreeSet<(RelId, Row)>,
 }
 
@@ -41,19 +45,37 @@ impl History {
 
     pub fn new() -> History {
         History {
+            base: Instance::default(),
             rounds: VecDeque::new(),
         }
     }
 
+    /// Records a round. The oldest kept one, past [`History::KEEP`], folds into the base state.
     pub fn push(&mut self, round: Round) {
-        if self.rounds.len() == History::KEEP {
-            self.rounds.pop_front();
+        if self.rounds.len() == History::KEEP
+            && let Some(oldest) = self.rounds.pop_front()
+        {
+            oldest.changes.apply(&mut self.base);
         }
         self.rounds.push_back(round);
     }
 
-    pub fn clear(&mut self) {
+    /// Forgets every round: the next starts from `base`.
+    pub fn reset(&mut self, base: Instance) {
+        self.base = base;
         self.rounds.clear();
+    }
+
+    /// The carried state round `tick` started from, rebuilt from the base and the changes of the rounds before it.
+    fn before(&self, tick: u64) -> Option<Instance> {
+        let mut state = self.base.clone();
+        for r in &self.rounds {
+            if r.tick == tick {
+                return Some(state);
+            }
+            r.changes.apply(&mut state);
+        }
+        None
     }
 
     fn get(&self, tick: u64) -> Option<&Round> {
@@ -92,6 +114,8 @@ pub struct Explainer<'a> {
     oracle: Oracle,
     history: &'a History,
     runs: RefCell<BTreeMap<u64, Arc<TickOutput>>>,
+    /// The state each round started from, rebuilt once per round asked about.
+    befores: RefCell<BTreeMap<u64, Arc<Instance>>>,
     /// The facts whose explanation was started (once: later ones refer to it), and those finished.
     started: RefCell<BTreeSet<(RelId, Row, u64)>>,
     done: RefCell<BTreeMap<(RelId, Row, u64), Found>>,
@@ -147,6 +171,7 @@ impl<'a> Explainer<'a> {
             oracle,
             history,
             runs: RefCell::new(BTreeMap::new()),
+            befores: RefCell::new(BTreeMap::new()),
             started: RefCell::new(BTreeSet::new()),
             done: RefCell::new(BTreeMap::new()),
         })
@@ -157,7 +182,7 @@ impl<'a> Explainer<'a> {
         if let Some(out) = self.runs.borrow().get(&tick) {
             return Ok(Some(Arc::clone(out)));
         }
-        let Some(round) = self.history.get(tick) else {
+        let (Some(round), Some(before)) = (self.history.get(tick), self.before(tick)) else {
             return Ok(None);
         };
         let out = self
@@ -167,7 +192,7 @@ impl<'a> Explainer<'a> {
                 incarnation: 1,
                 tick: Tick(tick),
                 now: round.now,
-                carried: &round.before,
+                carried: &before,
                 events: &round.events,
                 delivered: &[],
                 ingress: &[],
@@ -181,6 +206,16 @@ impl<'a> Explainer<'a> {
         let out = Arc::new(out);
         self.runs.borrow_mut().insert(tick, Arc::clone(&out));
         Ok(Some(out))
+    }
+
+    /// The carried state round `tick` started from.
+    fn before(&self, tick: u64) -> Option<Arc<Instance>> {
+        if let Some(b) = self.befores.borrow().get(&tick) {
+            return Some(Arc::clone(b));
+        }
+        let b = Arc::new(self.history.before(tick)?);
+        self.befores.borrow_mut().insert(tick, Arc::clone(&b));
+        Some(b)
     }
 
     /// `rel(row)`, as Blossom writes it.
@@ -334,7 +369,7 @@ impl<'a> Explainer<'a> {
             return Ok(self.splice(rel, row, tick, fired));
         }
         // Kept: written by an earlier round.
-        if round.before.rows(rel).any(|x| x == row) {
+        if self.before(tick).is_some_and(|b| b.rows(rel).any(|x| x == row)) {
             return self.written(rel, row, tick, depth);
         }
         Ok(leaf("(held: a static fact, or a fact of the program)"))
@@ -487,5 +522,53 @@ impl<'a> Explainer<'a> {
     /// The last round, the one whose page is shown.
     pub fn last(&self) -> Option<u64> {
         self.history.last().map(|r| r.tick)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blossom_value::value::IntValue;
+
+    fn row(n: u64) -> Row {
+        Arc::from(vec![blossom_value::Value::Int(IntValue::U64(n))])
+    }
+
+    #[test]
+    fn the_state_a_round_started_from_is_rebuilt_from_the_base_and_the_changes() {
+        let rel = RelId::from_raw(0);
+        // Round t inserts t and deletes t - 3: the state before round t is {t-3 .. t-1} (from 0).
+        let start: Instance = {
+            let mut i = Instance::default();
+            i.insert(rel, row(1_000_000));
+            i
+        };
+        let mut history = History::new();
+        history.reset(start.clone());
+        let mut states = vec![start.clone()];
+        let mut state = start;
+        let rounds = History::KEEP as u64 + 40;
+        for t in 0..rounds {
+            let mut changes = Changes::default();
+            changes.inserted.insert(rel, vec![row(t)]);
+            if t >= 3 {
+                changes.deleted.insert(rel, vec![row(t - 3)]);
+            }
+            history.push(Round {
+                tick: t,
+                now: Instant(0),
+                events: Vec::new(),
+                changes: changes.clone(),
+                inserted: BTreeSet::new(),
+            });
+            changes.apply(&mut state);
+            states.push(state.clone());
+        }
+        // The oldest rounds have folded into the base; every kept round's state is the one it started from.
+        assert!(history.before(0).is_none());
+        let first = rounds - History::KEEP as u64;
+        for t in first..rounds {
+            assert_eq!(history.before(t).as_ref(), states.get(t as usize), "round {t}");
+        }
     }
 }
