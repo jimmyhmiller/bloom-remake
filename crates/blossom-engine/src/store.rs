@@ -86,8 +86,10 @@ type Index = BTreeMap<Vec<Value>, BTreeSet<Row>>;
 #[derive(Debug, Default)]
 pub(crate) struct Store {
     pub cell: Option<CellSpec>,
-    /// Set relation: the support of each row. Lattice relation: the support of each contribution.
-    counts: BTreeMap<Row, i64>,
+    /// Set relation: the support of each row. Lattice relation: the support of each contribution. Hashed: a write
+    /// costs one hash and one comparison, not a row comparison per tree level; nothing reads its order (readers whose
+    /// output shows an order sort, [`Store::present_sorted`]).
+    counts: blossom_base::det::DetMap<Row, i64>,
     /// Lattice relation: each cell's live contributions, and its merged row.
     contributions: BTreeMap<Vec<Value>, BTreeSet<Row>>,
     merged: BTreeMap<Vec<Value>, Row>,
@@ -121,7 +123,7 @@ fn holds(row: &[Value], cols: &[usize], values: &[Value]) -> bool {
 
 /// A store's present rows, in order.
 pub(crate) enum Present<'a> {
-    Set(std::collections::btree_map::Keys<'a, Row, i64>),
+    Set(blossom_base::det::Iter<'a, Row, i64>),
     Lattice(std::collections::btree_set::Iter<'a, Row>),
 }
 
@@ -130,7 +132,7 @@ impl<'a> Iterator for Present<'a> {
 
     fn next(&mut self) -> Option<&'a Row> {
         match self {
-            Present::Set(it) => it.next(),
+            Present::Set(it) => it.next().map(|(row, _)| row),
             Present::Lattice(it) => it.next(),
         }
     }
@@ -174,13 +176,20 @@ impl Store {
         }
     }
 
-    /// The present rows, in order.
+    /// The present rows, in no particular order (a set relation's are hashed).
     pub fn present(&self) -> Present<'_> {
         if self.cell.is_some() {
             Present::Lattice(self.merged_rows.iter())
         } else {
-            Present::Set(self.counts.keys())
+            Present::Set(self.counts.iter())
         }
+    }
+
+    /// The present rows, in order.
+    pub fn present_sorted(&self) -> Vec<Row> {
+        let mut rows: Vec<Row> = self.present().cloned().collect();
+        rows.sort_unstable();
+        rows
     }
 
     /// How many rows are present.

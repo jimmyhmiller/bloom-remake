@@ -758,7 +758,7 @@ impl Engine {
             let rows = self
                 .stores
                 .get(&StoreKey::Main(*rel))
-                .map(|s| s.present().cloned().collect())
+                .map(Store::present_sorted)
                 .unwrap_or_default();
             out.observed.insert(*rel, rows);
         }
@@ -801,7 +801,7 @@ impl Engine {
         }
         self.stores
             .get(&StoreKey::Next(rel))
-            .map(|s| s.present().cloned().collect())
+            .map(Store::present_sorted)
             .unwrap_or_default()
     }
 
@@ -1636,7 +1636,7 @@ impl Engine {
             let Some(row) = self
                 .stores
                 .get(&StoreKey::Main(rule.head.rel))
-                .and_then(|s| s.present().next())
+                .and_then(|s| s.present().min())
             else {
                 continue;
             };
