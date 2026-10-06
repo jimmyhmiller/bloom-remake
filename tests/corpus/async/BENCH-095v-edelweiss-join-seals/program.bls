@@ -16,7 +16,7 @@ program edelweiss_join_seals version 1;
 
 table ws_t1(key: String, val: String);
 
-table ws_t2(key: String, val2: String) key(key) sealed by (val2);
+table ws_t2(key: String, val2: String) key(key) sealed by(val2);
 
 input ws_t2_in(key: String, val2: String);
 
@@ -61,7 +61,7 @@ ws_notin: while ws_t3(k, v), not ws_t4(k, v) {
 
 table wsr_t1(key: String, val: String);
 
-table wsr_t2(key: String, val2: String) key(key) sealed by (val2);
+table wsr_t2(key: String, val2: String) key(key) sealed by(val2);
 
 input wsr_t2_in(key: String, val2: String);
 
@@ -108,7 +108,7 @@ wsr_notin: while wsr_t3(k, v), not wsr_t4(k, v) {
 
 table mpa_t1(key: String, val: String);
 
-table mpa_t2(a: String, b: String, c: String) sealed by (a);
+table mpa_t2(a: String, b: String, c: String) sealed by(a);
 
 input mpa_t2_in(a: String, b: String, c: String);
 
@@ -153,7 +153,7 @@ mpa_notin: while mpa_t3(d, e, fv), not mpa_t4(d) {
 
 table mpb_t1(key: String, val: String);
 
-table mpb_t2(a: String, b: String, c: String) sealed by (b);
+table mpb_t2(a: String, b: String, c: String) sealed by(b);
 
 input mpb_t2_in(a: String, b: String, c: String);
 
@@ -202,7 +202,7 @@ table isx_t0(key: u64, val: u64);
 
 table isx_t1(key: u64, val: u64);
 
-table isx_t2(key: u64, val2: u64) key(key) sealed by (val2);
+table isx_t2(key: u64, val2: u64) key(key) sealed by(val2);
 
 input isx_t2_in(key: u64, val2: u64);
 
@@ -224,7 +224,7 @@ isx_t3_load: on isx_t3_in(key, val) {
     emit isx_t3(key, val);
 }
 
-table isx_t4(key: u64, val4: u64) key(key) sealed by (val4);
+table isx_t4(key: u64, val4: u64) key(key) sealed by(val4);
 
 input isx_t4_in(key: u64, val4: u64);
 

@@ -23,7 +23,10 @@ spec PnCounterFinalitySound for r#program {
     fact dec(102) @ SRC at tick 14;
     fact dec(103) @ SRC at tick 15;
 
-    faults { crashes: 1, model: async }
+    faults {
+        crashes: 1,
+        model: async
+    }
 
     /// The inverse curse (SEM-017): the value can always return, so it is never final in either direction.
     invariant value_never_final: never value_final() @ a;
@@ -34,5 +37,8 @@ spec PnCounterFinalitySound for r#program {
     /// Finality is monotone (SEM-016) at the replica that reports it.
     invariant pos_final_holds: never pos_final() @ a, not pos_ge_10() @ a;
 
-    check sim { runs: 10000, seed: 1 } expect holds;
+    check sim {
+        runs: 10000,
+        seed: 1
+    } expect holds;
 }

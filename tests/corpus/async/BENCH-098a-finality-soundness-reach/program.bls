@@ -17,8 +17,8 @@ fact replica("R2");
 input add_edge(a: String, b: String);
 input end_of_edges();
 
-channel edge_msg(a: String, b: String) sealed by () producers edge_source;
-table edge(a: String, b: String) sealed by ();
+channel edge_msg(a: String, b: String) sealed by() producers edge_source;
+table edge(a: String, b: String) sealed by();
 
 final output reach();
 final output reach_z();

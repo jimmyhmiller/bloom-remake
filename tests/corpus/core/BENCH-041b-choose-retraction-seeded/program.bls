@@ -54,11 +54,13 @@ invariant one_pick "pick chose twice in one group": never pick(g, v1), pick(g, v
 invariant pick_total "a group with candidates has no pick": never cand(g, _), not pick(g, _);
 /// pick is min over a fixed seeded priority of the candidates: while no candidate arrives, removing candidates
 /// other than the chosen one cannot change the choice.
-invariant pick_stable "pick changed although its value stayed and nothing new arrived":
-    never pick_prev(g, v), cand(g, v), pick(g, w), not gained(g) where v != w;
+invariant pick_stable "pick changed although its value stayed and nothing new arrived": never pick_prev(g, v),
+        cand(g, v), pick(g, w), not gained(g)
+        where v != w;
 invariant spick_is_candidate "spick chose a non-candidate": never spick(g, v), not cand(g, v);
 invariant one_spick "spick chose twice in one group": never spick(g, v1), spick(g, v2) where v1 != v2;
 invariant spick_total "a group with candidates has no spick": never cand(g, _), not spick(g, _);
 /// Sticky: the previous tick's choice is kept while it is still a candidate, even when new candidates arrive.
-invariant sticky_keeps "spick dropped a held value that is still a candidate":
-    never spick_prev(g, v), cand(g, v), spick(g, w) where v != w;
+invariant sticky_keeps "spick dropped a held value that is still a candidate": never spick_prev(g, v), cand(g, v),
+        spick(g, w)
+        where v != w;

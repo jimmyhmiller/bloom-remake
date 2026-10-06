@@ -31,9 +31,7 @@ fn words(text: String) -> Vec<String> {
 
 /// One tuple per word occurrence; (split, line, pos) keeps occurrences apart under set semantics. The channel routes
 /// each word to the reducer that owns it and carries per-split seals whose count digests the compiler maintains.
-channel occ(word: String, split: u32, line: u64, pos: u64): Mapper -> Reducer
-    partition by word
-    sealed by (split);
+channel occ(word: String, split: u32, line: u64, pos: u64): Mapper -> Reducer partition by word sealed by(split);
 
 at Mapper {
     /// A split's records, from the host.

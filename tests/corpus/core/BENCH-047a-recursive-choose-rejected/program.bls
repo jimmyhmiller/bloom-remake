@@ -26,7 +26,7 @@ view reached(y) {
     parent(y, _);
 }
 
-view parent(y, x) = reached(x), g(x, y), choose!(x per y);    // expect: BLS0503
+view parent(y, x) = reached(x), g(x, y), choose!(x per y); // expect: BLS0503
 
 report: while parent(y, x) {
     emit tree(y, x);

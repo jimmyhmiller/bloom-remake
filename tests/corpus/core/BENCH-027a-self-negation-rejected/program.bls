@@ -8,7 +8,7 @@ program evita_self_negation version 1;
 
 output answer();
 
-view p() = not p();                         // expect: BLS0502
+view p() = not p(); // expect: BLS0502
 
 report: while p() {
     emit answer();

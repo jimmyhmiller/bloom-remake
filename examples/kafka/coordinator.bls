@@ -40,7 +40,11 @@ fn state_name(s: i8) -> String {
 
 /// The coordinator's settings: Kafka's `group.min.session.timeout.ms`, `group.max.session.timeout.ms` and
 /// `group.initial.rebalance.delay.ms`.
-struct GroupConfig { min_session_ms: i32, max_session_ms: i32, initial_delay_ms: i32 }
+struct GroupConfig {
+    min_session_ms: i32,
+    max_session_ms: i32,
+    initial_delay_ms: i32
+}
 
 /// A member: its id, instance id (S9.md D7), client id and host, timeouts, the protocols it supports with their
 /// metadata in its order of preference, its parked JoinGroup and SyncGroup, when it was last heard from, its
@@ -92,14 +96,27 @@ struct JoinAnswer {
 }
 
 /// A SyncGroup answer: the protocol and the member's assignment.
-struct SyncAnswer { error: i16, protocol_type: Option<String>, chosen: Option<String>, assignment: Bytes }
+struct SyncAnswer {
+    error: i16,
+    protocol_type: Option<String>,
+    chosen: Option<String>,
+    assignment: Bytes
+}
 
 /// The answer to a parked or arriving JoinGroup or SyncGroup request, which the head `(c, i)` of a connection is.
-struct Reply { c: Conn, i: u64, join: Option<JoinAnswer>, sync: Option<SyncAnswer> }
+struct Reply {
+    c: Conn,
+    i: u64,
+    join: Option<JoinAnswer>,
+    sync: Option<SyncAnswer>
+}
 
 /// What one event does: the group after it (`None`: the group is gone, Empty with no one pending) and the answers it
 /// gives.
-struct Step { group: Option<GroupState>, replies: Vec<Reply> }
+struct Step {
+    group: Option<GroupState>,
+    replies: Vec<Reply>
+}
 
 /// No group (a group a request names before any state).
 fn group_none() -> Option<GroupState> {
@@ -108,8 +125,17 @@ fn group_none() -> Option<GroupState> {
 
 fn new_group(now: Instant) -> GroupState {
     GroupState {
-        state: GROUP_EMPTY, generation: 0i32, protocol_type: None, chosen: None, leader: None, members: [], pending: [],
-        deadline: now, initial: false, added: false, remaining_ms: 0i64,
+        state: GROUP_EMPTY,
+        generation: 0i32,
+        protocol_type: None,
+        chosen: None,
+        leader: None,
+        members: [],
+        pending: [],
+        deadline: now,
+        initial: false,
+        added: false,
+        remaining_ms: 0i64,
     }
 }
 
@@ -123,7 +149,15 @@ fn sync_reply(c: Conn, i: u64, a: SyncAnswer) -> Reply {
 
 /// A JoinGroup refused with `error`, before any generation.
 fn join_error(error: i16, member_id: String) -> JoinAnswer {
-    JoinAnswer { error: error, generation: -1i32, protocol_type: None, chosen: None, leader: "", member_id: member_id, members: [] }
+    JoinAnswer {
+        error: error,
+        generation: -1i32,
+        protocol_type: None,
+        chosen: None,
+        leader: "",
+        member_id: member_id,
+        members: []
+    }
 }
 
 fn sync_error(error: i16) -> SyncAnswer {
@@ -208,7 +242,11 @@ fn prepare_rebalance(g: GroupState, now: Instant, cfg: GroupConfig) -> Step {
     } else {
         []
     };
-    let members = if completing { g.members.map(|m| Member { sync: None, assignment: Bytes::empty(), ..m }) } else { g.members };
+    let members = if completing {
+        g.members.map(|m| Member { sync: None, assignment: Bytes::empty(), ..m })
+    } else {
+        g.members
+    };
     let timeout = rebalance_ms(members);
     let delay = cfg.initial_delay_ms as i64;
     let initial = g.state == GROUP_EMPTY;
@@ -275,9 +313,18 @@ struct JoinIn {
 fn join(g0: Option<GroupState>, r: JoinIn, now: Instant, cfg: GroupConfig) -> Step {
     let g = g0.unwrap_or(new_group(now));
     let member = Member {
-        id: if r.member_id == "" { r.new_id } else { r.member_id }, instance: r.instance, client: r.client, host: r.host,
-        session_ms: r.session_ms, rebalance_ms: r.rebalance_ms, protocols: r.protocols, join: Some((r.c, r.i)),
-        sync: None, seen: now, assignment: Bytes::empty(), synced: false,
+        id: if r.member_id == "" { r.new_id } else { r.member_id },
+        instance: r.instance,
+        client: r.client,
+        host: r.host,
+        session_ms: r.session_ms,
+        rebalance_ms: r.rebalance_ms,
+        protocols: r.protocols,
+        join: Some((r.c, r.i)),
+        sync: None,
+        seen: now,
+        assignment: Bytes::empty(),
+        synced: false,
     };
     // A static member joining anew replaces the member of its instance id (whose requests are answered
     // UNKNOWN_MEMBER_ID): a restarted static member never leaves a copy of itself behind.
@@ -324,11 +371,22 @@ fn rejoin(g: GroupState, m: Member, want: Member, now: Instant, cfg: GroupConfig
     let updated = Member { sync: m.sync, assignment: m.assignment, synced: m.synced, ..want };
     let g1 = GroupState { members: replaced(g.members, updated), ..g };
     let current = JoinAnswer {
-        error: NONE, generation: g.generation, protocol_type: g.protocol_type, chosen: g.chosen,
-        leader: g.leader.unwrap_or(""), member_id: m.id,
-        members: if g.leader == Some(m.id) { g.members.map(|x| (x.id, x.instance, metadata_for(x, g.chosen))) } else { [] },
+        error: NONE,
+        generation: g.generation,
+        protocol_type: g.protocol_type,
+        chosen: g.chosen,
+        leader: g.leader.unwrap_or(""),
+        member_id: m.id,
+        members: if g.leader == Some(m.id) {
+            g.members.map(|x| (x.id, x.instance, metadata_for(x, g.chosen)))
+        } else {
+            []
+        },
     };
-    let at_once = Step { group: Some(GroupState { members: replaced(g.members, Member { seen: now, ..m }), ..g }), replies: [join_reply(c, i, current)] };
+    let at_once = Step {
+        group: Some(GroupState { members: replaced(g.members, Member { seen: now, ..m }), ..g }),
+        replies: [join_reply(c, i, current)]
+    };
     let step = if g.state == GROUP_PREPARING {
         Step { group: Some(g1), replies: [] }
     } else if g.state == GROUP_COMPLETING && same {
@@ -347,7 +405,17 @@ fn complete_join(g: GroupState, now: Instant) -> Step {
     let kept = g.members.filter(|m| m.join.is_some());
     if kept.is_empty() {
         Step {
-            group: Some(GroupState { state: GROUP_EMPTY, generation: g.generation + 1i32, protocol_type: None, chosen: None, leader: None, members: [], initial: false, added: false, ..g }),
+            group: Some(GroupState {
+                state: GROUP_EMPTY,
+                generation: g.generation + 1i32,
+                protocol_type: None,
+                chosen: None,
+                leader: None,
+                members: [],
+                initial: false,
+                added: false,
+                ..g
+            }),
             replies: [],
         }
     } else {
@@ -358,14 +426,36 @@ fn complete_join(g: GroupState, now: Instant) -> Step {
         let chosen = select_protocol(kept);
         let generation = g.generation + 1i32;
         let all = kept.map(|m| (m.id, m.instance, metadata_for(m, chosen)));
-        let replies = kept.filter_map(|m| m.join.map(|p| join_reply(p.0, p.1, JoinAnswer {
-            error: NONE, generation: generation, protocol_type: g.protocol_type, chosen: chosen, leader: leader,
-            member_id: m.id, members: if m.id == leader { all } else { [] },
-        })));
-        let members = kept.map(|m| Member { join: None, sync: None, seen: now, assignment: Bytes::empty(), synced: false, ..m });
+        let replies = kept.filter_map(|m| m.join.map(|p| join_reply(
+            p.0,
+            p.1,
+            JoinAnswer {
+                error: NONE,
+                generation: generation,
+                protocol_type: g.protocol_type,
+                chosen: chosen,
+                leader: leader,
+                member_id: m.id,
+                members: if m.id == leader { all } else { [] },
+            }
+        )));
+        let members = kept.map(|m| Member {
+            join: None,
+            sync: None,
+            seen: now,
+            assignment: Bytes::empty(),
+            synced: false,
+            ..m
+        });
         let group = GroupState {
-            state: GROUP_COMPLETING, generation: generation, chosen: chosen, leader: Some(leader), members: members,
-            deadline: after(now, rebalance_ms(members)), initial: false, added: false,
+            state: GROUP_COMPLETING,
+            generation: generation,
+            chosen: chosen,
+            leader: Some(leader),
+            members: members,
+            deadline: after(now, rebalance_ms(members)),
+            initial: false,
+            added: false,
             ..g
         };
         Step { group: Some(group), replies: replies }
@@ -409,7 +499,8 @@ fn sync_member(g: GroupState, m: Member, r: SyncIn, now: Instant) -> Step {
     let answer = SyncAnswer { error: NONE, protocol_type: g.protocol_type, chosen: g.chosen, assignment: m.assignment };
     if r.generation != g.generation {
         unchanged(Some(g), sync_reply(r.c, r.i, sync_error(ILLEGAL_GENERATION)))
-    } else if (r.protocol_type.is_some() && r.protocol_type != g.protocol_type) || (r.chosen.is_some() && r.chosen != g.chosen) {
+    } else if (r.protocol_type.is_some() && r.protocol_type != g.protocol_type)
+        || (r.chosen.is_some() && r.chosen != g.chosen) {
         unchanged(Some(g), sync_reply(r.c, r.i, sync_error(INCONSISTENT_GROUP_PROTOCOL)))
     } else if g.state == GROUP_PREPARING {
         unchanged(Some(g), sync_reply(r.c, r.i, sync_error(REBALANCE_IN_PROGRESS)))
@@ -426,19 +517,36 @@ fn sync_member(g: GroupState, m: Member, r: SyncIn, now: Instant) -> Step {
             synced: x.id == m.id || x.synced,
             ..x
         });
-        let waiting = g.members.filter(|x| x.id != m.id).filter_map(|x| x.sync.map(|p| sync_reply(p.0, p.1, SyncAnswer {
-            error: NONE, protocol_type: g.protocol_type, chosen: g.chosen, assignment: given.get(x.id).unwrap_or(Bytes::empty()),
-        })));
-        let own = sync_reply(r.c, r.i, SyncAnswer {
-            error: NONE, protocol_type: g.protocol_type, chosen: g.chosen, assignment: given.get(m.id).unwrap_or(Bytes::empty()),
-        });
+        let waiting = g.members.filter(|x| x.id != m.id).filter_map(|x| x.sync.map(|p| sync_reply(
+            p.0,
+            p.1,
+            SyncAnswer {
+                error: NONE,
+                protocol_type: g.protocol_type,
+                chosen: g.chosen,
+                assignment: given.get(x.id).unwrap_or(Bytes::empty()),
+            }
+        )));
+        let own = sync_reply(
+            r.c,
+            r.i,
+            SyncAnswer {
+                error: NONE,
+                protocol_type: g.protocol_type,
+                chosen: g.chosen,
+                assignment: given.get(m.id).unwrap_or(Bytes::empty()),
+            }
+        );
         Step { group: Some(GroupState { state: GROUP_STABLE, members: members, ..g }), replies: waiting.push(own) }
     } else {
         let superseded = match m.sync {
             Some(p) => if p != (r.c, r.i) { [sync_reply(p.0, p.1, sync_error(REBALANCE_IN_PROGRESS))] } else { [] },
             None => [],
         };
-        Step { group: Some(GroupState { members: replaced(g.members, Member { sync: Some((r.c, r.i)), ..here }), ..g }), replies: superseded }
+        Step {
+            group: Some(GroupState { members: replaced(g.members, Member { sync: Some((r.c, r.i)), ..here }), ..g }),
+            replies: superseded
+        }
     }
 }
 
@@ -472,14 +580,26 @@ fn remove_members(g: GroupState, ids: Vec<String>, now: Instant, cfg: GroupConfi
         Step { group: Some(GroupState { pending: g.pending.filter(|p| not ids.contains(p.0)), ..g }), replies: [] }
     } else {
         let left = g.members.filter(|m| not ids.contains(m.id));
-        let parked = gone.filter_map(|m| m.join.map(|p| join_reply(p.0, p.1, join_error(UNKNOWN_MEMBER_ID, m.id))))
-            .concat(gone.filter_map(|m| m.sync.map(|p| sync_reply(p.0, p.1, sync_error(UNKNOWN_MEMBER_ID)))));
+        let parked = gone.filter_map(|m| m.join.map(|p| join_reply(
+            p.0,
+            p.1,
+            join_error(UNKNOWN_MEMBER_ID, m.id)
+        ))).concat(gone.filter_map(|m| m.sync.map(|p| sync_reply(p.0, p.1, sync_error(UNKNOWN_MEMBER_ID)))));
         let leader = match g.leader {
             Some(l) => if ids.contains(l) { left.first().map(|m| m.id) } else { Some(l) },
             None => None,
         };
-        let g1 = GroupState { members: left, leader: leader, pending: g.pending.filter(|p| not ids.contains(p.0)), ..g };
-        let want = if g.state == GROUP_STABLE || g.state == GROUP_COMPLETING { prepare_rebalance(g1, now, cfg) } else { Step { group: Some(g1), replies: [] } };
+        let g1 = GroupState {
+            members: left,
+            leader: leader,
+            pending: g.pending.filter(|p| not ids.contains(p.0)),
+            ..g
+        };
+        let want = if g.state == GROUP_STABLE || g.state == GROUP_COMPLETING {
+            prepare_rebalance(g1, now, cfg)
+        } else {
+            Step { group: Some(g1), replies: [] }
+        };
         Step { group: want.group, replies: parked.concat(want.replies) }
     }
 }
@@ -487,11 +607,20 @@ fn remove_members(g: GroupState, ids: Vec<String>, now: Instant, cfg: GroupConfi
 /// A LeaveGroup of members (id, instance id): the group after it (and the answers to the removed members' parked
 /// requests), the request's error (UNKNOWN_MEMBER_ID for a group that does not exist, as Kafka fails the whole
 /// request), and each member's.
-fn leave(g0: Option<GroupState>, members: Vec<(String, Option<String>)>, now: Instant, cfg: GroupConfig) -> (Step, i16, Vec<i16>) {
+fn leave(
+    g0: Option<GroupState>,
+    members: Vec<(String, Option<String>)>,
+    now: Instant,
+    cfg: GroupConfig
+) -> (Step, i16, Vec<i16>) {
     match g0 {
         None => (Step { group: g0, replies: [] }, UNKNOWN_MEMBER_ID, []),
         Some(g) => {
-            let errors = members.map(|x| if is_pending(g, x.0) || member_of(g, x.0).is_some() { NONE } else { UNKNOWN_MEMBER_ID });
+            let errors = members.map(|x| if is_pending(g, x.0) || member_of(g, x.0).is_some() {
+                NONE
+            } else {
+                UNKNOWN_MEMBER_ID
+            });
             let ids = members.map(|x| x.0).filter(|id| is_pending(g, id) || member_of(g, id).is_some());
             (remove_members(g, ids, now, cfg), NONE, errors)
         }
@@ -518,15 +647,27 @@ fn tick_group(g0: GroupState, now: Instant, cfg: GroupConfig) -> Step {
         if now < g1.deadline {
             Step { group: Some(g1), replies: [] }
         } else if g1.added && g1.remaining_ms > 0i64 {
-            let delay = if (cfg.initial_delay_ms as i64) < g1.remaining_ms { cfg.initial_delay_ms as i64 } else { g1.remaining_ms };
-            let left = if g1.remaining_ms > cfg.initial_delay_ms as i64 { g1.remaining_ms - cfg.initial_delay_ms as i64 } else { 0i64 };
-            Step { group: Some(GroupState { deadline: after(now, delay), added: false, remaining_ms: left, ..g1 }), replies: [] }
+            let delay = if (cfg.initial_delay_ms as i64) < g1.remaining_ms {
+                cfg.initial_delay_ms as i64
+            } else {
+                g1.remaining_ms
+            };
+            let left = if g1.remaining_ms > cfg.initial_delay_ms as i64 {
+                g1.remaining_ms - cfg.initial_delay_ms as i64
+            } else {
+                0i64
+            };
+            Step {
+                group: Some(GroupState { deadline: after(now, delay), added: false, remaining_ms: left, ..g1 }),
+                replies: []
+            }
         } else {
             complete_join(g1, now)
         }
     } else if g1.state == GROUP_PREPARING && (all_joined || now >= g1.deadline) {
         complete_join(g1, now)
-    } else if (g1.state == GROUP_COMPLETING || g1.state == GROUP_STABLE) && now >= g1.deadline && g1.members.any(|m| not m.synced) {
+    } else if (g1.state == GROUP_COMPLETING || g1.state == GROUP_STABLE) && now >= g1.deadline
+        && g1.members.any(|m| not m.synced) {
         // The members that did not sync within the rebalance timeout after it completed (Kafka's pending-sync
         // timeout): a leader that never syncs keeps the group completing; a follower that never syncs would own nothing.
         remove_members(g1, g1.members.filter(|m| not m.synced).map(|m| m.id), now, cfg)
@@ -544,7 +685,14 @@ fn tick_group(g0: GroupState, now: Instant, cfg: GroupConfig) -> Step {
 /// completes a rebalance; one naming none (generation below 0, no member) is refused by a group with members.
 /// `known` says whether the group exists at all (with members, or with committed offsets); an unknown group refuses
 /// a commit at a generation with GROUP_ID_NOT_FOUND from v9, ILLEGAL_GENERATION before.
-fn commit_error(g0: Option<GroupState>, known: bool, generation: i32, member_id: String, instance: Option<String>, version: i16) -> i16 {
+fn commit_error(
+    g0: Option<GroupState>,
+    known: bool,
+    generation: i32,
+    member_id: String,
+    instance: Option<String>,
+    version: i16
+) -> i16 {
     let names_member = generation >= 0i32 || member_id != "" || instance.is_some();
     match g0 {
         None => if generation < 0i32 {
@@ -577,7 +725,10 @@ fn commit_error(g0: Option<GroupState>, known: bool, generation: i32, member_id:
 /// The node applies `tick_group` only once it is due, so an idle group costs nothing per tick.
 fn next_due(g: GroupState, now: Instant) -> Option<Instant> {
     let pending = g.pending.map(|p| p.1);
-    let overdue = g.members.filter(|m| m.join.is_none() && m.sync.is_none()).map(|m| after(m.seen, m.session_ms as i64));
+    let overdue = g.members.filter(|m| m.join.is_none() && m.sync.is_none()).map(|m| after(
+        m.seen,
+        m.session_ms as i64
+    ));
     let all_joined = g.members.all(|m| m.join.is_some()) && g.pending.is_empty();
     let state = if g.state == GROUP_PREPARING && not g.initial && all_joined {
         [now]
@@ -590,10 +741,13 @@ fn next_due(g: GroupState, now: Instant) -> Option<Instant> {
     } else {
         []
     };
-    pending.concat(overdue).concat(state).fold(group_no_time(), |best, t| match best {
-        Some(b) => if t < b { Some(t) } else { Some(b) },
-        None => Some(t),
-    })
+    pending.concat(overdue).concat(state).fold(
+        group_no_time(),
+        |best, t| match best {
+            Some(b) => if t < b { Some(t) } else { Some(b) },
+            None => Some(t),
+        }
+    )
 }
 
 fn group_no_time() -> Option<Instant> {
@@ -608,11 +762,17 @@ fn describe_group(name: String, g0: Option<GroupState>, known: bool, version: i1
         Some(g) => {
             let stable = g.state == GROUP_STABLE;
             DescribedGroup {
-                error: NONE, message: None, group_id: name, state: state_name(g.state),
+                error: NONE,
+                message: None,
+                group_id: name,
+                state: state_name(g.state),
                 protocol_type: g.protocol_type.unwrap_or(""),
                 protocol_data: if stable { g.chosen.unwrap_or("") } else { "" },
                 members: g.members.map(|m| DescribedMember {
-                    member_id: m.id, group_instance_id: m.instance, client_id: m.client, client_host: m.host,
+                    member_id: m.id,
+                    group_instance_id: m.instance,
+                    client_id: m.client,
+                    client_host: m.host,
                     metadata: if stable { metadata_for(m, g.chosen) } else { Bytes::empty() },
                     assignment: if stable { m.assignment } else { Bytes::empty() },
                 }),
@@ -625,7 +785,11 @@ fn describe_group(name: String, g0: Option<GroupState>, known: bool, version: i1
             DescribedGroup {
                 error: if missing { GROUP_ID_NOT_FOUND } else { NONE },
                 message: if missing { error_message(GROUP_ID_NOT_FOUND) } else { None },
-                group_id: name, state: if dead { "Dead" } else { "Empty" }, protocol_type: "", protocol_data: "", members: [],
+                group_id: name,
+                state: if dead { "Dead" } else { "Empty" },
+                protocol_type: "",
+                protocol_data: "",
+                members: [],
                 operations: operations,
             }
         }
@@ -645,31 +809,65 @@ fn listed_group(name: String, g0: Option<GroupState>) -> (String, String, String
 /// A JoinGroup answer at `version`. Before v7 the protocol type is not sent and a missing protocol name is empty.
 fn encode_join_response(correlation_id: i32, version: i16, a: JoinAnswer) -> Bytes {
     let r = JoinGroupResponse {
-        throttle: 0i32, error: a.error, generation: a.generation, protocol_type: a.protocol_type,
+        throttle: 0i32,
+        error: a.error,
+        generation: a.generation,
+        protocol_type: a.protocol_type,
         protocol_name: if version >= 7i16 { a.chosen } else { Some(a.chosen.unwrap_or("")) },
-        leader: a.leader, skip_assignment: false, member_id: a.member_id,
+        leader: a.leader,
+        skip_assignment: false,
+        member_id: a.member_id,
         members: a.members.map(|m| JoinMember { member_id: m.0, group_instance_id: m.1, metadata: m.2 }),
     };
     group_frame(API_JOIN_GROUP, version, correlation_id, JoinGroupResponse::encode(r, version))
 }
 
 fn encode_sync_response(correlation_id: i32, version: i16, a: SyncAnswer) -> Bytes {
-    let r = SyncGroupResponse { throttle: 0i32, error: a.error, protocol_type: a.protocol_type, protocol_name: a.chosen, assignment: a.assignment };
+    let r = SyncGroupResponse {
+        throttle: 0i32,
+        error: a.error,
+        protocol_type: a.protocol_type,
+        protocol_name: a.chosen,
+        assignment: a.assignment
+    };
     group_frame(API_SYNC_GROUP, version, correlation_id, SyncGroupResponse::encode(r, version))
 }
 
 fn encode_heartbeat_response(correlation_id: i32, version: i16, error: i16) -> Bytes {
-    group_frame(API_HEARTBEAT, version, correlation_id, HeartbeatResponse::encode(HeartbeatResponse { throttle: 0i32, error: error }, version))
+    group_frame(
+        API_HEARTBEAT,
+        version,
+        correlation_id,
+        HeartbeatResponse::encode(HeartbeatResponse { throttle: 0i32, error: error }, version)
+    )
 }
 
 /// A LeaveGroup answer: before v3 the one member's error is the request's; from v3 each member has its own.
-fn encode_leave_response(correlation_id: i32, version: i16, error: i16, members: Vec<(String, Option<String>)>, errors: Vec<i16>) -> Bytes {
-    let top = if error != NONE { error } else if version < 3i16 { errors.first().unwrap_or(NONE) } else { NONE };
+fn encode_leave_response(
+    correlation_id: i32,
+    version: i16,
+    error: i16,
+    members: Vec<(String, Option<String>)>,
+    errors: Vec<i16>
+) -> Bytes {
+    let top = if error != NONE {
+        error
+    } else if version < 3i16 {
+        errors.first().unwrap_or(NONE)
+    } else {
+        NONE
+    };
     let r = LeaveGroupResponse {
         throttle: 0i32,
         error: top,
-        members: if error != NONE { [] } else {
-            members.enumerate().map(|e| LeaveMemberResponse { member_id: (e.1).0, group_instance_id: (e.1).1, error: errors.get(e.0).unwrap_or(NONE) })
+        members: if error != NONE {
+            []
+        } else {
+            members.enumerate().map(|e| LeaveMemberResponse {
+                member_id: (e.1).0,
+                group_instance_id: (e.1).1,
+                error: errors.get(e.0).unwrap_or(NONE)
+            })
         },
     };
     group_frame(API_LEAVE_GROUP, version, correlation_id, LeaveGroupResponse::encode(r, version))

@@ -47,9 +47,8 @@ at Proc {
     buffer: on chn(id, p, clk, ob) from s {
         emit recv_buf(s, id, p, clk, ob);
     }
-    view buf_chosen(s, id, p, clk, ob) =
-        recv_buf(s, id, p, clk, ob), not delivered(s, id)
-        where ob.at(self).leq!(my_vc);
+    view buf_chosen(s, id, p, clk, ob) = recv_buf(s, id, p, clk, ob), not delivered(s, id)
+            where ob.at(self).leq!(my_vc);
     deliver: while buf_chosen(s, id, p, clk, ob) {
         emit pipe_out(s, id, p);
         emit next_vc(map[self => my_vc.at(self).join(0) + 1]);
@@ -61,6 +60,5 @@ at Proc {
 }
 
 at Proc {
-    invariant causal_order "b was delivered before a":
-        never pipe_out(_, _, "b"), not log("a");
+    invariant causal_order "b was delivered before a": never pipe_out(_, _, "b"), not log("a");
 }

@@ -364,7 +364,7 @@ nob_event: while nob_write(w, b), nob_commit(b), not nob_write_log(w) {
 
 sealed table frange_node(addr: Node);
 
-channel frange_log_commit_chn(@addr: Node, id: u64);
+channel frange_log_commit_chn(@ addr: Node, id: u64);
 
 table frange_log_commit(id: u64) range(id);
 

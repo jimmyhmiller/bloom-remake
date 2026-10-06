@@ -9,7 +9,7 @@ input num(n: u64);
 
 cell total: LPSet<u64>;
 
-fold: while let s = lpset{ n | num(n) } {
+fold: while let s = lpset { n | num(n) } {
     emit total(s);
 }
 monotone view exact_total(t) = let t = reveal!(total.sum());

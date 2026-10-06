@@ -11,7 +11,7 @@
 program channel_emit version 1;
 
 /// Bud: `channel :c, [:@addr, :k1] => [:v1]`, without the key.
-channel c(@addr: Node, k1: i64, v1: i64);
+channel c(@ addr: Node, k1: i64, v1: i64);
 /// Bud: `scratch :kickoff, [:addr, :v1, :v2]`, which the test fills with `kickoff <+ [...]`.
 input kickoff(addr: Node, v1: i64, v2: i64);
 /// Bud: `table :recv, c.key_cols => c.val_cols`, without the key.

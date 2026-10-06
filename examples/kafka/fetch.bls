@@ -15,9 +15,21 @@ const MAX_FETCH_BATCHES: u64 = 4096;
 // ---------------------------------------------------------------- Fetch v16–v17
 
 /// A partition to fetch; its last fetched epoch and log start (follower fields) are read past.
-format FetchPartition { partition: i32, leader_epoch: i32, fetch_offset: i64, ignored(i32, -1i32), ignored(i64, -1i64), max_bytes: i32, tags }
+format FetchPartition {
+    partition: i32,
+    leader_epoch: i32,
+    fetch_offset: i64,
+    ignored(i32, -1i32),
+    ignored(i64, -1i64),
+    max_bytes: i32,
+    tags
+}
 
-format FetchTopic { topic_id: uuid, partitions: compact_array(FetchPartition), tags }
+format FetchTopic {
+    topic_id: uuid,
+    partitions: compact_array(FetchPartition),
+    tags
+}
 
 /// FetchRequest v16–v17; the forgotten topics (sessions only; this broker keeps none) and the rack are read past.
 format FetchRequest {
@@ -68,7 +80,12 @@ fn leader_epoch_error(requested: i32, current: u64) -> Option<i16> {
 }
 
 /// One partition's answer: its error, high watermark, log start, and its batches (blob, size) in offset order.
-struct FetchAnswer { error: i16, high_watermark: i64, log_start: i64, batches: Vec<Blob> }
+struct FetchAnswer {
+    error: i16,
+    high_watermark: i64,
+    log_start: i64,
+    batches: Vec<Blob>
+}
 
 fn fetch_failed(error: i16) -> FetchAnswer {
     FetchAnswer { error: error, high_watermark: -1i64, log_start: -1i64, batches: [] }
@@ -76,7 +93,13 @@ fn fetch_failed(error: i16) -> FetchAnswer {
 
 /// The batches a partition keeps while they are trimmed: those kept, the bytes left for the partition and for the
 /// response, whether the response has data yet, and whether this partition stopped (a batch did not fit).
-struct Trim { kept: Vec<Blob>, room: i64, left: i64, any: bool, stopped: bool }
+struct Trim {
+    kept: Vec<Blob>,
+    room: i64,
+    left: i64,
+    any: bool,
+    stopped: bool
+}
 
 fn trim_batch(t: Trim, b: Blob) -> Trim {
     let size = b.len() as i64;
@@ -95,14 +118,25 @@ fn trim_batch(t: Trim, b: Blob) -> Trim {
 /// `answers` holds each entry's answer with its partition's limit.
 fn trim_to(answers: Vec<(u64, FetchAnswer, i64)>, max_bytes: i64) -> Vec<(u64, FetchAnswer)> {
     let start: (Vec<(u64, FetchAnswer)>, i64, bool) = ([], max_bytes, false);
-    let end = answers.fold(start, |acc, x| {
-        let (out, left, any) = acc;
-        let a = x.1;
-        let room = if x.2 < left { x.2 } else { left };
-        let t = a.batches.fold(Trim { kept: [], room: room, left: left, any: any, stopped: false }, |t, b| trim_batch(t, b));
-        let answer = FetchAnswer { error: a.error, high_watermark: a.high_watermark, log_start: a.log_start, batches: t.kept };
-        (out.push((x.0, answer)), t.left, t.any)
-    });
+    let end = answers.fold(
+        start,
+        |acc, x| {
+            let (out, left, any) = acc;
+            let a = x.1;
+            let room = if x.2 < left { x.2 } else { left };
+            let t = a.batches.fold(
+                Trim { kept: [], room: room, left: left, any: any, stopped: false },
+                |t, b| trim_batch(t, b)
+            );
+            let answer = FetchAnswer {
+                error: a.error,
+                high_watermark: a.high_watermark,
+                log_start: a.log_start,
+                batches: t.kept
+            };
+            (out.push((x.0, answer)), t.left, t.any)
+        }
+    );
     end.0
 }
 
@@ -136,7 +170,12 @@ fn fetch_bytes(answers: Vec<(u64, FetchAnswer)>) -> i64 {
 
 /// FetchResponse v16–v17 as the parts of one stream write: the header and each partition's fields as bytes, and
 /// its batches as blob ranges, so the stored batches are sent without being copied through the program.
-fn fetch_response_parts(correlation_id: i32, error: i16, req: FetchRequest, answers: Vec<(u64, FetchAnswer)>) -> Vec<Part> {
+fn fetch_response_parts(
+    correlation_id: i32,
+    error: i16,
+    req: FetchRequest,
+    answers: Vec<(u64, FetchAnswer)>
+) -> Vec<Part> {
     let groups = by_topic(req.topics.map(|t| t.partitions.len()), answers);
     let topic_parts = req.topics.enumerate().map(|e| {
         let (k, t) = e;
@@ -144,19 +183,19 @@ fn fetch_response_parts(correlation_id: i32, error: i16, req: FetchRequest, answ
             Some(a) => fetch_partition_parts(pe.1.partition, a),
             None => error("fetch_response_parts: a partition entry has no answer"),
         });
-        [Part::Bytes(Bytes::join([t.topic_id, Bytes::uvarint(t.partitions.len() + 1)]))]
-            .concat(partitions.flatten())
-            .push(Part::Bytes(no_tags()))
+        [
+            Part::Bytes(Bytes::join([t.topic_id, Bytes::uvarint(t.partitions.len() + 1)]))
+        ].concat(partitions.flatten()).push(Part::Bytes(no_tags()))
     });
-    let body = [Part::Bytes(Bytes::join([
-        response_header_v1(correlation_id),
-        Bytes::from_i32_be(0i32),
-        Bytes::from_i16_be(error),
-        Bytes::from_i32_be(0i32),
-        Bytes::uvarint(req.topics.len() + 1),
-    ]))]
-        .concat(topic_parts.flatten())
-        .push(Part::Bytes(no_tags()));
+    let body = [
+        Part::Bytes(Bytes::join([
+            response_header_v1(correlation_id),
+            Bytes::from_i32_be(0i32),
+            Bytes::from_i16_be(error),
+            Bytes::from_i32_be(0i32),
+            Bytes::uvarint(req.topics.len() + 1),
+        ]))
+    ].concat(topic_parts.flatten()).push(Part::Bytes(no_tags()));
     let size = body.fold(0, |n, p| n + part_len(p));
     [Part::Bytes(Bytes::from_u32_be(size as u32))].concat(body)
 }
@@ -171,18 +210,18 @@ fn part_len(p: Part) -> u64 {
 
 fn fetch_partition_parts(index: i32, a: FetchAnswer) -> Vec<Part> {
     let records = a.batches.fold(0, |n, b| n + b.len());
-    [Part::Bytes(Bytes::join([
-        Bytes::from_i32_be(index),
-        Bytes::from_i16_be(a.error),
-        Bytes::from_i64_be(a.high_watermark),
-        Bytes::from_i64_be(a.high_watermark),
-        Bytes::from_i64_be(a.log_start),
-        Bytes::uvarint(0),
-        Bytes::from_i32_be(-1i32),
-        Bytes::uvarint(records + 1),
-    ]))]
-        .concat(a.batches.map(|b| Part::Blob(b, 0, b.len())))
-        .push(Part::Bytes(no_tags()))
+    [
+        Part::Bytes(Bytes::join([
+            Bytes::from_i32_be(index),
+            Bytes::from_i16_be(a.error),
+            Bytes::from_i64_be(a.high_watermark),
+            Bytes::from_i64_be(a.high_watermark),
+            Bytes::from_i64_be(a.log_start),
+            Bytes::uvarint(0),
+            Bytes::from_i32_be(-1i32),
+            Bytes::uvarint(records + 1),
+        ]))
+    ].concat(a.batches.map(|b| Part::Blob(b, 0, b.len()))).push(Part::Bytes(no_tags()))
 }
 
 // ---------------------------------------------------------------- ListOffsets v7–v10
@@ -199,8 +238,17 @@ fn searches(t: i64) -> bool {
     t >= 0i64 || t < LATEST_TIERED_TIMESTAMP
 }
 
-format ListOffsetsPartition { partition: i32, leader_epoch: i32, timestamp: i64, tags }
-format ListOffsetsTopic { name: compact_string, partitions: compact_array(ListOffsetsPartition), tags }
+format ListOffsetsPartition {
+    partition: i32,
+    leader_epoch: i32,
+    timestamp: i64,
+    tags
+}
+format ListOffsetsTopic {
+    name: compact_string,
+    partitions: compact_array(ListOffsetsPartition),
+    tags
+}
 /// ListOffsets v7–v10 (the replica id is read past; v10 adds a timeout after the topics).
 format ListOffsetsRequest(version: i16) {
     ignored(i32, -1i32),
@@ -221,7 +269,12 @@ fn list_offsets_entries(req: ListOffsetsRequest) -> Vec<(u64, String, ListOffset
 }
 
 /// One partition's answer: error, timestamp, offset, leader epoch.
-struct OffsetAnswer { error: i16, timestamp: i64, offset: i64, leader_epoch: i32 }
+struct OffsetAnswer {
+    error: i16,
+    timestamp: i64,
+    offset: i64,
+    leader_epoch: i32
+}
 
 /// The partition's new leader has not settled its high watermark yet (retriable).
 const OFFSET_NOT_AVAILABLE: i16 = 78;
@@ -239,20 +292,48 @@ fn offset_at(timestamp: i64, offset: i64) -> OffsetAnswer {
     OffsetAnswer { error: NONE, timestamp: timestamp, offset: offset, leader_epoch: -1i32 }
 }
 
-format OffsetPartition { partition: i32, error: i16, timestamp: i64, offset: i64, leader_epoch: i32, tags }
-format OffsetTopic { name: compact_string, partitions: compact_array(OffsetPartition), tags }
-format ListOffsetsResponse { throttle: i32, topics: compact_array(OffsetTopic), tags }
+format OffsetPartition {
+    partition: i32,
+    error: i16,
+    timestamp: i64,
+    offset: i64,
+    leader_epoch: i32,
+    tags
+}
+format OffsetTopic {
+    name: compact_string,
+    partitions: compact_array(OffsetPartition),
+    tags
+}
+format ListOffsetsResponse {
+    throttle: i32,
+    topics: compact_array(OffsetTopic),
+    tags
+}
 
-fn encode_list_offsets_response(correlation_id: i32, req: ListOffsetsRequest, answers: Vec<(u64, OffsetAnswer)>) -> Bytes {
+fn encode_list_offsets_response(
+    correlation_id: i32,
+    req: ListOffsetsRequest,
+    answers: Vec<(u64, OffsetAnswer)>
+) -> Bytes {
     let groups = by_topic(req.topics.map(|t| t.partitions.len()), answers);
     let topics = req.topics.enumerate().map(|e| OffsetTopic {
         name: e.1.name,
         partitions: e.1.partitions.enumerate().map(|pe| match groups.get(e.0).and_then(|g| g.get(pe.0)) {
-            Some(a) => OffsetPartition { partition: pe.1.partition, error: a.error, timestamp: a.timestamp, offset: a.offset, leader_epoch: a.leader_epoch },
+            Some(a) => OffsetPartition {
+                partition: pe.1.partition,
+                error: a.error,
+                timestamp: a.timestamp,
+                offset: a.offset,
+                leader_epoch: a.leader_epoch
+            },
             None => error("encode_list_offsets_response: a partition entry has no answer"),
         }),
     });
-    frame(response_header_v1(correlation_id).concat(ListOffsetsResponse::encode(ListOffsetsResponse { throttle: 0i32, topics: topics })))
+    frame(response_header_v1(correlation_id).concat(ListOffsetsResponse::encode(ListOffsetsResponse {
+        throttle: 0i32,
+        topics: topics
+    })))
 }
 
 /// The answer found in stored batch `stored` for timestamp `t`: with `exact`, the first record whose timestamp is

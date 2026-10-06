@@ -9,7 +9,7 @@ program tickle_count version 1;
 /// Bud: `loopback :loop_chan, [:cnt]`.
 loopback loop_chan(cnt: i64);
 /// Bud: `channel :mcast, [:@addr, :cnt]`: the column form, with one `@` column.
-channel mcast(@addr: Node, cnt: i64);
+channel mcast(@ addr: Node, cnt: i64);
 /// Bud: `scratch :loopback_done, [:nums]`.
 scratch loopback_done(nums: i64);
 /// Bud: `scratch :mcast_done, [:nums]`.

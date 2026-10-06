@@ -36,10 +36,10 @@ pub module ReliableBroadcast<P>(RETRY: Duration = 1s): Broadcast<P> {
 
     originate: on bcast(id, payload) {
         emit mine(id);
-        emit deliver(self, id, payload);            // the origin delivers to itself at once
+        emit deliver(self, id, payload); // the origin delivers to itself at once
         next seen(self, id);
         for peer(n) {
-            emit outbox(n, id, payload);            // `emit`: `pending` already holds in this tick
+            emit outbox(n, id, payload); // `emit`: `pending` already holds in this tick
             send msg(self, id, payload) to n;
         }
     }
@@ -50,10 +50,10 @@ pub module ReliableBroadcast<P>(RETRY: Duration = 1s): Broadcast<P> {
     }
 
     receive: on msg(origin, id, payload) from s {
-        send ack(origin, id) to s;                  // ack every copy: an earlier ack may have been lost
+        send ack(origin, id) to s; // ack every copy: an earlier ack may have been lost
         if not seen(origin, id) {
             emit deliver(origin, id, payload);
-            next seen(origin, id);                  // `next`: this tick's `not seen` must not see its own write
+            next seen(origin, id); // `next`: this tick's `not seen` must not see its own write
         }
     }
 

@@ -13,5 +13,8 @@ spec PruningFindsTheAlarm for r#program {
     /// network this check must run on (equal delays; see the manifest).
     invariant no_alarm: never alarmed(1) @ MON;
 
-    check sim { runs: 500, seed: 1 } expect fails;
+    check sim {
+        runs: 500,
+        seed: 1
+    } expect fails;
 }

@@ -39,5 +39,5 @@ until = "M6"
 
 [[expect_diag]]
 code = "BLS0705"
-line = 65
+line = 62
 severity = "error"

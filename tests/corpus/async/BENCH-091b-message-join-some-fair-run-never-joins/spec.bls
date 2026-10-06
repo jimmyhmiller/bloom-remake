@@ -7,5 +7,8 @@ spec NeverTogether for r#program {
     /// (each within two ticks of its send) never joins, so this bounded liveness property fails.
     liveness joins: eventually joined(1) @ Z within 6 ticks after 0;
 
-    check bmc { ticks: 8, delay: 2 } expect fails;
+    check bmc {
+        ticks: 8,
+        delay: 2
+    } expect fails;
 }

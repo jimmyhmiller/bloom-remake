@@ -17,4 +17,4 @@ fact g(1, "a");
 fact g(1, "b");
 fact g(2, "a");
 
-view matching(x, y) = g(x, y), choose!(y per x least (x, y)), choose!(x per y);
+view matching(x, y) = g(x, y), choose!(y per x least(x, y)), choose!(x per y);

@@ -25,15 +25,24 @@ const REQUEST_TIMED_OUT: i16 = 7;
 /// also puts it in header v2. Only the APIs this broker answers are listed.
 fn flexible(api_key: i16, version: i16) -> bool {
     (api_key == API_VERSIONS && version >= 3i16) || (api_key == API_METADATA && version >= 9i16)
-        || (api_key == API_PRODUCE && version >= 9i16) || (api_key == API_FETCH && version >= 12i16)
-        || (api_key == API_LIST_OFFSETS && version >= 6i16) || (api_key == API_INIT_PRODUCER_ID && version >= 2i16)
-        || (api_key == API_CREATE_TOPICS && version >= 5i16) || (api_key == API_DELETE_TOPICS && version >= 4i16)
-        || (api_key == API_DESCRIBE_CONFIGS && version >= 4i16) || api_key == API_DESCRIBE_CLUSTER
-        || api_key == API_ALTER_PARTITION_REASSIGNMENTS || api_key == API_LIST_PARTITION_REASSIGNMENTS
-        || (api_key == API_FIND_COORDINATOR && version >= 3i16) || (api_key == API_JOIN_GROUP && version >= 6i16)
-        || (api_key == API_SYNC_GROUP && version >= 4i16) || (api_key == API_HEARTBEAT && version >= 4i16)
-        || (api_key == API_LEAVE_GROUP && version >= 4i16) || (api_key == API_OFFSET_COMMIT && version >= 8i16)
-        || (api_key == API_OFFSET_FETCH && version >= 6i16) || (api_key == API_DESCRIBE_GROUPS && version >= 5i16)
+        || (api_key == API_PRODUCE && version >= 9i16)
+        || (api_key == API_FETCH && version >= 12i16)
+        || (api_key == API_LIST_OFFSETS && version >= 6i16)
+        || (api_key == API_INIT_PRODUCER_ID && version >= 2i16)
+        || (api_key == API_CREATE_TOPICS && version >= 5i16)
+        || (api_key == API_DELETE_TOPICS && version >= 4i16)
+        || (api_key == API_DESCRIBE_CONFIGS && version >= 4i16)
+        || api_key == API_DESCRIBE_CLUSTER
+        || api_key == API_ALTER_PARTITION_REASSIGNMENTS
+        || api_key == API_LIST_PARTITION_REASSIGNMENTS
+        || (api_key == API_FIND_COORDINATOR && version >= 3i16)
+        || (api_key == API_JOIN_GROUP && version >= 6i16)
+        || (api_key == API_SYNC_GROUP && version >= 4i16)
+        || (api_key == API_HEARTBEAT && version >= 4i16)
+        || (api_key == API_LEAVE_GROUP && version >= 4i16)
+        || (api_key == API_OFFSET_COMMIT && version >= 8i16)
+        || (api_key == API_OFFSET_FETCH && version >= 6i16)
+        || (api_key == API_DESCRIBE_GROUPS && version >= 5i16)
         || (api_key == API_LIST_GROUPS && version >= 3i16)
 }
 
@@ -73,7 +82,12 @@ fn response_header_v1(correlation_id: i32) -> Bytes {
 
 /// A request header v2 (for a flexible request): key, version, correlation id, client id, no tags.
 fn request_header_v2(api_key: i16, version: i16, correlation_id: i32, client_id: String) -> Bytes {
-    RequestHeader::encode(RequestHeader { api_key: api_key, api_version: version, correlation_id: correlation_id, client_id: Some(client_id) })
+    RequestHeader::encode(RequestHeader {
+        api_key: api_key,
+        api_version: version,
+        correlation_id: correlation_id,
+        client_id: Some(client_id)
+    })
 }
 
 /// The correlation id at the front of a response (every response header version starts with it).

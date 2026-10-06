@@ -49,9 +49,22 @@ format Item {
 /// a tag unique among its requests). A request's creations (or deletions) are one command, applied in one tick, so
 /// no other request's commands come between them: a request takes effect at one point, as a Kafka controller handles
 /// a request in one event. A producer-id allocation has no items.
-format Cmd { op: i8, origin: i32, tag: u64, made: u64, items: compact_array(Item) }
+format Cmd {
+    op: i8,
+    origin: i32,
+    tag: u64,
+    made: u64,
+    items: compact_array(Item)
+}
 
-fn create_item(slot: u64, err: i16, name: String, id: Bytes, assignment: Vec<Vec<i32>>, configs: Vec<(String, String)>) -> Item {
+fn create_item(
+    slot: u64,
+    err: i16,
+    name: String,
+    id: Bytes,
+    assignment: Vec<Vec<i32>>,
+    configs: Vec<(String, String)>
+) -> Item {
     Item { slot: slot, part: 0i32, err: err, flag: false, name: name, id: id, assignment: assignment, configs: configs }
 }
 
@@ -59,9 +72,28 @@ fn delete_item(slot: u64, name: String, id: Bytes) -> Item {
     Item { slot: slot, part: 0i32, err: NONE, flag: false, name: name, id: id, assignment: [], configs: [] }
 }
 
-fn reassign_item(slot: u64, name: String, part: i32, err: i16, replicas: Option<Vec<i32>>, allow_rf_change: bool) -> Item {
-    let asg = match replicas { Some(rs) => [rs], None => [] };
-    Item { slot: slot, part: part, err: err, flag: allow_rf_change, name: name, id: zero_uuid(), assignment: asg, configs: [] }
+fn reassign_item(
+    slot: u64,
+    name: String,
+    part: i32,
+    err: i16,
+    replicas: Option<Vec<i32>>,
+    allow_rf_change: bool
+) -> Item {
+    let asg = match replicas {
+        Some(rs) => [rs],
+        None => []
+    };
+    Item {
+        slot: slot,
+        part: part,
+        err: err,
+        flag: allow_rf_change,
+        name: name,
+        id: zero_uuid(),
+        assignment: asg,
+        configs: []
+    }
 }
 
 /// A completed reassignment's report: its target and the index it was set at (`since`, in the slot).
@@ -122,9 +154,14 @@ fn repeatable(op: i8) -> bool {
 /// and placements that are functions of the request, so the command sent again is the same command. A connection id
 /// is unique on its broker only, so the broker is part of the id.
 fn metadata_items(me: i32, c: Conn, i: u64, names: Vec<String>, ids: Vec<i32>, partitions: i32, rf: i16) -> Vec<Item> {
-    names.enumerate().map(|x| create_item(x.0, NONE, x.1,
+    names.enumerate().map(|x| create_item(
+        x.0,
+        NONE,
+        x.1,
         topic_id(hash64(("id", me, c, i, x.1, 0u64)), hash64(("id", me, c, i, x.1, 1u64))),
-        assign(ids, partitions, rf, hash64(("start", me, c, i, x.1))), []))
+        assign(ids, partitions, rf, hash64(("start", me, c, i, x.1))),
+        []
+    ))
 }
 
 /// A reassignment's outcome, as Kafka's controller decides it, and the target to record (if any): `err` is the
@@ -225,7 +262,10 @@ fn joined(cs: Vec<(u64, Bytes)>) -> Bytes {
 /// `b` in parts of at most `size` bytes (at least one part, empty for an empty `b`).
 fn chunks(b: Bytes, size: u64) -> Vec<Bytes> {
     let n = if b.len() == 0u64 { 1u64 } else { (b.len() + size - 1u64) / size };
-    range(0u64, n).filter_map(|k| b.slice(k * size, if (k + 1u64) * size < b.len() { (k + 1u64) * size } else { b.len() }))
+    range(0u64, n).filter_map(|k| b.slice(
+        k * size,
+        if (k + 1u64) * size < b.len() { (k + 1u64) * size } else { b.len() }
+    ))
 }
 /// How long a follower may go without being caught up before it leaves its partition's in-sync replicas (Kafka's
 /// `replica.lag.time.max.ms`).
@@ -291,8 +331,11 @@ at Broker {
     durable table done(origin: i32, tag: u64, at: u64) key(origin, tag) while applied_m(a) where at + DONE_WINDOW > a;
     /// Each applied item's outcome, by its request and entry: the error (NONE when it took effect), the topic id and
     /// name (a creation's, or the deleted topic's), or the allocated producer id (a producer-id allocation's, slot 0).
-    durable table outcome(origin: i32, tag: u64, slot: u64, error: i16, id: Bytes, pid: i64, name: String)
-        key(origin, tag, slot) while done(origin, tag, _);
+    durable table outcome(origin: i32, tag: u64, slot: u64, error: i16, id: Bytes, pid: i64, name: String) key(
+        origin,
+        tag,
+        slot
+    ) while done(origin, tag, _);
     /// The next producer id.
     durable table next_pid(n: i64) key() resolve choose_most(n);
 
@@ -316,9 +359,9 @@ at Broker {
     view caught_up() = synced(_);
 
     /// The next committed controller entry to apply (none in a tick that adopts a leader's metadata).
-    view to_apply(i, kind, data) =
-        applied_m(a), let i = a + 1, let g = controller(), commit_of(g, c), rlog(g, i, _, _, kind, _, data), not adopting()
-        where i <= c;
+    view to_apply(i, kind, data) = applied_m(a), let i = a + 1, let g = controller(), commit_of(g, c),
+            rlog(g, i, _, _, kind, _, data), not adopting()
+            where i <= c;
 
     // ---- the applied metadata as the controller's snapshot (D12 for the controller)
 
@@ -328,13 +371,14 @@ at Broker {
     // far sends its metadata at its own applied index, and the asker adopts it and the index, and never applies an
     // entry at or before it again. It asks until it has (so a lost answer, or a leader that is itself behind, only
     // delays it).
-    view meta_topics(xs = collect!((n, id, p, c) default [])) = mtopic(n, id, p, c);
-    view meta_assign(xs = collect!((t, p, rs) default [])) = massign(t, p, rs);
-    view meta_reassign(xs = collect!((t, p, tg, h, s) default [])) = mreassign(t, p, tg, h, s);
+    view meta_topics(xs = collect!((n, id, p, c) default[])) = mtopic(n, id, p, c);
+    view meta_assign(xs = collect!((t, p, rs) default[])) = massign(t, p, rs);
+    view meta_reassign(xs = collect!((t, p, tg, h, s) default[])) = mreassign(t, p, tg, h, s);
     // The windowed rows as of the applied index alone (retention may keep an older one a tick longer).
-    view meta_done(xs = collect!((o, tag, at) default [])) = done(o, tag, at), applied_m(a) where at + DONE_WINDOW > a;
-    view meta_outcomes(xs = collect!((o, tag, s, e, id, pid, n) default [])) =
-        outcome(o, tag, s, e, id, pid, n), done(o, tag, at), applied_m(a) where at + DONE_WINDOW > a;
+    view meta_done(xs = collect!((o, tag, at) default[])) = done(o, tag, at), applied_m(a) where at + DONE_WINDOW > a;
+    view meta_outcomes(xs = collect!((o, tag, s, e, id, pid, n) default[])) = outcome(o, tag, s, e, id, pid, n),
+            done(o, tag, at), applied_m(a)
+            where at + DONE_WINDOW > a;
     /// Whether this broker cannot apply further from its log: its applied index is behind its snapshot point.
     view meta_stuck() = applied_m(a), rsnap(g, s, _, _, _), let c = controller() where g == c && a < s;
     timer meta_ask every META_ASK while meta_stuck;
@@ -343,10 +387,17 @@ at Broker {
             send meta_want(s) to n;
         }
     }
-    view meta_bytes(a, b) =
-        applied_m(a), next_pid(np), meta_topics(ts), meta_assign(asg), meta_reassign(rs), meta_done(dn),
-        meta_outcomes(os),
-        let b = MetaSnapshot::encode(MetaSnapshot { at: a, topics: ts, assign: asg, reassign: rs, done: dn, outcomes: os, next: np });
+    view meta_bytes(a, b) = applied_m(a), next_pid(np), meta_topics(ts), meta_assign(asg), meta_reassign(rs),
+            meta_done(dn), meta_outcomes(os),
+            let b = MetaSnapshot::encode(MetaSnapshot {
+                at: a,
+                topics: ts,
+                assign: asg,
+                reassign: rs,
+                done: dn,
+                outcomes: os,
+                next: np
+            });
     send_meta: on meta_want(s) from f, meta_bytes(a, b) where a >= s {
         for (k, c) in chunks(b, META_CHUNK).enumerate() {
             send meta_part(a, k, chunks(b, META_CHUNK).len(), c) to f;
@@ -361,9 +412,9 @@ at Broker {
     /// An index's metadata whose parts are all here, decoded.
     view meta_whole(at, cs = collect!((k, chunk))) = meta_parts(at, k, _n, chunk);
     view meta_count(at, n = max!(n)) = meta_parts(at, _k, n, _chunk);
-    view meta_received(at, snap) =
-        meta_whole(at, cs), meta_count(at, n), let Some(d) = MetaSnapshot::decode(joined(cs), 0),
-        let snap = d.0 where cs.len() == n && snap.at == at;
+    view meta_received(at, snap) = meta_whole(at, cs), meta_count(at, n),
+            let Some(d) = MetaSnapshot::decode(joined(cs), 0), let snap = d.0
+            where cs.len() == n && snap.at == at;
     /// The newest whole metadata past what this broker applied.
     view adopt_at(m = max!(at)) = meta_received(at, _snap), applied_m(mine) where at > mine;
     view adopt(at, snap) = meta_received(at, snap), adopt_at(at);
@@ -405,19 +456,21 @@ at Broker {
             delete outcome(o, tag, sl, e, id, pid, n);
         }
     }
-    view to_apply_cmd(i, cmd) = to_apply(i, kind, data), let Some(cmd) = decode_cmd(entry_bytes(data)) where kind == CMD;
+    view to_apply_cmd(i, cmd) = to_apply(i, kind, data), let Some(cmd) = decode_cmd(entry_bytes(data))
+            where kind == CMD;
     advance_applied: while to_apply(i, _, _) {
         next applied_m(i);
     }
     /// The command to apply, unless it is already applied (sent again by its origin, so in the log twice) or stale.
-    view fresh(op, origin, tag, items) =
-        to_apply_cmd(i, cmd), let op = cmd.op, let origin = cmd.origin, let tag = cmd.tag, let items = cmd.items,
-        not done_by(origin, tag, i) where repeatable(op) || cmd.made + DONE_WINDOW > i;
+    view fresh(op, origin, tag, items) = to_apply_cmd(i, cmd), let op = cmd.op, let origin = cmd.origin,
+            let tag = cmd.tag, let items = cmd.items, not done_by(origin, tag, i)
+            where repeatable(op) || cmd.made + DONE_WINDOW > i;
     /// Whether a command counts as applied when entry `i` is applied: a `done` row at most `DONE_WINDOW` entries
     /// older. A function of the index alone, so every broker decides alike (the window's retention keeps every such
     /// row, and may keep an older one a tick longer, depending on when the broker advanced).
     view done_by(origin, tag, i) = to_apply_cmd(i, cmd), let origin = cmd.origin, let tag = cmd.tag,
-        done(origin, tag, at) where at + DONE_WINDOW >= i;
+            done(origin, tag, at)
+            where at + DONE_WINDOW >= i;
     /// Every command applied or skipped is marked done, a stale one too (with no outcome: its origin stops sending it,
     /// and its request times out).
     mark_done: while to_apply_cmd(i, cmd), let origin = cmd.origin, let tag = cmd.tag, not done_by(origin, tag, i) {
@@ -425,15 +478,24 @@ at Broker {
     }
     /// The items of the command to apply, by field. A request's items name distinct topics (two entries for one
     /// topic are refused by the broker a client asked), so each is decided against the metadata before the command.
-    view fresh_item(op, origin, tag, slot, err, name, id, asg, cfg) =
-        fresh(op, origin, tag, items), it in items, let slot = it.slot, let err = it.err, let name = it.name,
-        let id = it.id, let asg = it.assignment, let cfg = it.configs;
+    view fresh_item(op, origin, tag, slot, err, name, id, asg, cfg) = fresh(op, origin, tag, items), it in items,
+            let slot = it.slot, let err = it.err, let name = it.name, let id = it.id, let asg = it.assignment,
+            let cfg = it.configs;
 
     /// A creation (or a validation): refused for a name taken (by that name, or one colliding with it), else as the
     /// broker decided. Only a creation takes effect.
-    view cmd_create(origin, tag, slot, err, name, id, asg, cfg, k) =
-        fresh_item(op, origin, tag, slot, err, name, id, asg, cfg), let k = collision_key(name)
-        where op == OP_CREATE || op == OP_VALIDATE;
+    view cmd_create(origin, tag, slot, err, name, id, asg, cfg, k) = fresh_item(
+                op,
+                origin,
+                tag,
+                slot,
+                err,
+                name,
+                id,
+                asg,
+                cfg
+            ), let k = collision_key(name)
+            where op == OP_CREATE || op == OP_VALIDATE;
     view cmd_creates(origin, tag) = fresh(op, origin, tag, _) where op == OP_CREATE;
     apply_create: while cmd_create(origin, tag, slot, err, name, id, asg, cfg, k) {
         if mtopic(name, _, _, _) {
@@ -453,7 +515,8 @@ at Broker {
         }
     }
     apply_assign: while cmd_create(origin, tag, _, err, name, id, asg, _, k), cmd_creates(origin, tag),
-        not mtopic(name, _, _, _), not topic_keys(k, _), (p, rs) in asg.enumerate() where err == NONE {
+            not mtopic(name, _, _, _), not topic_keys(k, _), (p, rs) in asg.enumerate()
+            where err == NONE {
         upsert massign(id, p as i32, rs);
     }
 
@@ -461,12 +524,13 @@ at Broker {
     /// item by name deletes the topic of that name, unless another item of the request names the same topic by id
     /// (Kafka refuses such a name: DELETE_CLASH). Well-formed requests name each topic once each way, so no topic is
     /// deleted twice.
-    view cmd_delete_item(origin, tag, slot, name, id) = fresh_item(op, origin, tag, slot, _, name, id, _, _) where op == OP_DELETE;
+    view cmd_delete_item(origin, tag, slot, name, id) = fresh_item(op, origin, tag, slot, _, name, id, _, _)
+            where op == OP_DELETE;
     view cmd_delete_ids(origin, tag, id) = cmd_delete_item(origin, tag, _, _, id) where id != zero_uuid();
     view cmd_delete(origin, tag, slot, tid) {
         cmd_delete_item(origin, tag, slot, _name, tid), mtopic(_n, tid, _, _) where tid != zero_uuid();
         cmd_delete_item(origin, tag, slot, name, id), mtopic(name, tid, _, _), not cmd_delete_ids(origin, tag, tid)
-            where id == zero_uuid();
+                where id == zero_uuid();
     }
     apply_delete: while cmd_delete_item(origin, tag, slot, name, id) {
         if cmd_delete(origin, tag, slot, tid), mtopic(n, tid, parts, cfg) {
@@ -500,29 +564,39 @@ at Broker {
     /// cancellation with nothing to cancel; a replication factor change not allowed. A reassignment records its
     /// target; a cancellation reassigns back to the replicas (a configuration only changes one member at a time, so
     /// going back is a reassignment too). A target equal to the replicas with none in progress changes nothing.
-    view reassign_item_of(origin, tag, slot, name, part, err, flag, asg) =
-        fresh(op, origin, tag, items), it in items, let slot = it.slot, let name = it.name, let part = it.part,
-        let err = it.err, let flag = it.flag, let asg = it.assignment where op == OP_REASSIGN;
-    view reassign_known(origin, tag, slot, tid, part, err, flag, asg, rs) =
-        reassign_item_of(origin, tag, slot, name, part, err, flag, asg), mtopic(name, tid, _, _), massign(tid, part, rs);
+    view reassign_item_of(origin, tag, slot, name, part, err, flag, asg) = fresh(op, origin, tag, items), it in items,
+            let slot = it.slot, let name = it.name, let part = it.part, let err = it.err, let flag = it.flag,
+            let asg = it.assignment
+            where op == OP_REASSIGN;
+    view reassign_known(origin, tag, slot, tid, part, err, flag, asg, rs) = reassign_item_of(
+                origin,
+                tag,
+                slot,
+                name,
+                part,
+                err,
+                flag,
+                asg
+            ), mtopic(name, tid, _, _), massign(tid, part, rs);
     view reassign_known_item(origin, tag, slot) = reassign_known(origin, tag, slot, _, _, _, _, _, _);
     view reassigning_now(tid, part) = mreassign(tid, part, _, _, _);
     /// The controller index being applied.
     view applying(i) = to_apply(i, _, _);
     view reassign_choice(origin, tag, slot, tid, part, d) {
         reassign_known(origin, tag, slot, tid, part, err, flag, asg, rs), reassigning_now(tid, part),
-            let d = reassign_decision(err, flag, asg, rs, true);
+                let d = reassign_decision(err, flag, asg, rs, true);
         reassign_known(origin, tag, slot, tid, part, err, flag, asg, rs), not reassigning_now(tid, part),
-            let d = reassign_decision(err, flag, asg, rs, false);
+                let d = reassign_decision(err, flag, asg, rs, false);
     }
     apply_reassign_unknown: while reassign_item_of(origin, tag, slot, name, _part, _err, _flag, _asg),
-        not reassign_known_item(origin, tag, slot) {
+            not reassign_known_item(origin, tag, slot) {
         upsert outcome(origin, tag, slot, UNKNOWN_TOPIC_OR_PARTITION, zero_uuid(), -1i64, name);
     }
     apply_reassign: while reassign_choice(origin, tag, slot, tid, _part, d) {
         upsert outcome(origin, tag, slot, d.0, tid, -1i64, "");
     }
-    apply_reassign_target: while reassign_choice(_origin, _tag, _slot, tid, part, d), let Some(target) = d.1, applying(i) {
+    apply_reassign_target: while reassign_choice(_origin, _tag, _slot, tid, part, d), let Some(target) = d.1,
+            applying(i) {
         if mreassign(tid, part, _t, hosting, _s) {
             upsert mreassign(tid, part, target, union_ids(hosting, target), i);
         }
@@ -532,9 +606,9 @@ at Broker {
     }
     /// A partition leader's report that its configuration reached the target set at `since`: the target becomes the
     /// replicas, if it is still that target (a newer reassignment replaces it; a deleted topic has none).
-    view reassigned_item_of(origin, tag, tid, part, target, since) =
-        fresh(op, origin, tag, items), it in items, let tid = it.id, let part = it.part, let since = it.slot,
-        let Some(target) = it.assignment.first() where op == OP_REASSIGNED;
+    view reassigned_item_of(origin, tag, tid, part, target, since) = fresh(op, origin, tag, items), it in items,
+            let tid = it.id, let part = it.part, let since = it.slot, let Some(target) = it.assignment.first()
+            where op == OP_REASSIGNED;
     apply_reassigned: while reassigned_item_of(origin, tag, tid, part, target, since) {
         if mreassign(tid, part, target, hosting, since), massign(tid, part, rs) {
             upsert massign(tid, part, target);
@@ -547,8 +621,7 @@ at Broker {
     /// metadata, `takes`) whose topic its applied metadata no longer names. Topic ids are never reused, so the group
     /// never comes back. (Keyed on the metadata itself, not on a record of the deletion: a broker that adopts a
     /// leader's metadata past a deletion learns of it only by the topic's absence.)
-    view deleted_group(g) =
-        rterm(g, _), let c = controller(), let (gt, _gp) = g, not mtopic(_, gt, _, _) where g != c;
+    view deleted_group(g) = rterm(g, _), let c = controller(), let (gt, _gp) = g, not mtopic(_, gt, _, _) where g != c;
     /// Its partition data goes, here as everywhere (no broker is a member of its groups any more).
     forget_deleted: while deleted_group(g), rlog(g, i, t, pt, k, pos, data) {
         delete rlog(g, i, t, pt, k, pos, data);
@@ -643,15 +716,14 @@ at Broker {
     /// otherwise append every copy).
     view ctl(g) = mine(g), let c = controller() where g == c;
     view unapplied_cmd(data) = applied_m(a), ctl(g), rlog(g, i, _, _, kind, _, data) where i > a && kind == CMD;
-    view logged_cmd(origin, tag) =
-        unapplied_cmd(data), let Some(cmd) = decode_cmd(entry_bytes(data)), let origin = cmd.origin, let tag = cmd.tag;
+    view logged_cmd(origin, tag) = unapplied_cmd(data), let Some(cmd) = decode_cmd(entry_bytes(data)),
+            let origin = cmd.origin, let tag = cmd.tag;
     view new_cmd(cmd) {
         submit(cmd) from _;
         cmd_out(cmd);
     }
-    view appendable_cmd(cmd) =
-        new_cmd(cmd), let Some(d) = decode_cmd(cmd), let origin = d.origin, let tag = d.tag, not done(origin, tag, _),
-        not logged_cmd(origin, tag);
+    view appendable_cmd(cmd) = new_cmd(cmd), let Some(d) = decode_cmd(cmd), let origin = d.origin, let tag = d.tag,
+            not done(origin, tag, _), not logged_cmd(origin, tag);
     view proposals(g, xs = collect!(x)) {
         appendable_cmd(cmd), ctl(g), leader(g, _), let x = (CMD, -1i64, Blob::of(cmd));
         data_proposals(g, x);
@@ -665,17 +737,16 @@ at Broker {
     view reassign_target(g, target, since) = mreassign(tid, p, target, _hosting, since), let g = (tid, p);
     /// The next configuration change (`reassign_step`), once the last is committed: one member at a time, so any two
     /// configurations in use share a majority.
-    view reassign_next(g, ids) =
-        reassign_target(g, target, _since), config_ready(g), member_ids(g, cur), isr_of(g, isr), my_id(me),
-        let Some(ids) = reassign_step(cur, target, isr, me);
+    view reassign_next(g, ids) = reassign_target(g, target, _since), config_ready(g), member_ids(g, cur),
+            isr_of(g, isr), my_id(me), let Some(ids) = reassign_step(cur, target, isr, me);
     view config_proposals(g, x) = reassign_next(g, ids), let x = (CONFIG, -1i64, Blob::of(encode_members(ids)));
     /// The configuration is the target, committed: the leader tells the controller, which makes it the replicas.
-    view reassign_done(tid, p, target, since) =
-        reassign_target(g, target, since), config_ready(g), member_ids(g, cur), let (tid, p) = g
-        where cur.to_set() == target.to_set();
-    view reassigned_cmd_of(tag, cmd) =
-        reassign_done(tid, p, target, since), my_id(me), let tag = hash64(("reassigned", tid, p, target, since)),
-        let cmd = encode_cmd(reassigned_cmd(me, tag, reassigned_item(tid, p, target, since)));
+    view reassign_done(tid, p, target, since) = reassign_target(g, target, since), config_ready(g), member_ids(g, cur),
+            let (tid, p) = g
+            where cur.to_set() == target.to_set();
+    view reassigned_cmd_of(tag, cmd) = reassign_done(tid, p, target, since), my_id(me),
+            let tag = hash64(("reassigned", tid, p, target, since)),
+            let cmd = encode_cmd(reassigned_cmd(me, tag, reassigned_item(tid, p, target, since)));
 
     /// A partition this broker no longer hosts (a reassignment moved it away, item 5) leaves it: its log and
     /// snapshot point go, and with them its configuration (the produce layer drops the partition's data). Its term
@@ -747,7 +818,7 @@ at Broker {
     }
     view caught_up_to(g, f) = leader(g, _), match_idx(g, f, m), commit_of(g, c) where m >= c;
     falls_behind: while leader(g, t), isr_term(g, t), not is_controller(g), match_idx(g, f, _), members(g, f),
-        not caught_up_to(g, f), not behind(g, f, _, _) {
+            not caught_up_to(g, f), not behind(g, f, _, _) {
         upsert behind(g, f, now(), false);
     }
     catches_up: while behind(g, f, at, out), caught_up_to(g, f) {
@@ -765,13 +836,18 @@ at Broker {
         leader(g, _), not is_controller(g), my_id(id);
         leader(g, _), isr_term(g, _), members(g, f), broker(f, id, _, _), not behind(g, f, _, _) where f != self;
         leader(g, _), members(g, f), broker(f, id, _, _), behind(g, f, at, out)
-            where f != self && not out && now() < at + REPLICA_LAG_MAX;
+                where f != self && not out && now() < at + REPLICA_LAG_MAX;
     }
     view isr_of(g, ids = collect!(id)) = in_sync(g, id);
 
     /// The latest announcement heard per partition group: its stamp (the epoch, and when its leader sent it), the
     /// leader and the in-sync replicas. Announcements of one epoch come from one leader, so its clock orders them.
-    table leader_view(g: Group, stamp: (u64, Instant), l: Node<Broker>, isr: Vec<i32>) key(g) resolve choose_most(stamp);
+    table leader_view(
+        g: Group,
+        stamp: (u64, Instant),
+        l: Node<Broker>,
+        isr: Vec<i32>
+    ) key(g) resolve choose_most(stamp);
     /// A leader tells each broker which groups it leads, with their epochs and in-sync replicas, until that broker
     /// confirms each (`leads_taken`): a change at the next heartbeat, and again at each heartbeat to a broker that has
     /// not confirmed it (a broker takes only partitions its metadata names, so one whose metadata lags gets them

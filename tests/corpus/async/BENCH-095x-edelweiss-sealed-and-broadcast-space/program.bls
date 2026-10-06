@@ -33,7 +33,7 @@ fact rb_node("n2");
 fact rb_node("n3");
 
 table rb_log(id: u64, val: String) key(id);
-channel rb_chn(@addr: Node, id: u64, val: String) key(addr, id);
+channel rb_chn(@ addr: Node, id: u64, val: String) key(addr, id);
 
 /// From the host, at the first node: a message to broadcast.
 input rb_log_in(id: u64, val: String);

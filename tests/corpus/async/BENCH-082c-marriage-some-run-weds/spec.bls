@@ -8,5 +8,8 @@ spec SomeRunWeds for r#program {
     /// has both vows present from tick 1 on, so `runaway` never holds and this bounded liveness property fails.
     liveness always_off: eventually runaway() @ N1 within 4 ticks after 0;
 
-    check bmc { ticks: 6, delay: 2 } expect fails;
+    check bmc {
+        ticks: 6,
+        delay: 2
+    } expect fails;
 }

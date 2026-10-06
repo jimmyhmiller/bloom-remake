@@ -597,3 +597,23 @@ proptest::proptest! {
         proptest::prop_assert_eq!(a, b, "{}: whitespace changed the format", name);
     }
 }
+
+#[test]
+fn repository_sources_are_formatted() {
+    // The examples and the corpus are kept in the canonical format (`blossom fmt examples tests/corpus`).
+    let mut paths = Vec::new();
+    files(&root().join("examples"), "*.bls", &mut paths);
+    files(&root().join("tests/corpus"), "*.bls", &mut paths);
+    let unformatted: Vec<String> = paths
+        .iter()
+        .filter(|p| {
+            let text = fs::read_to_string(p).unwrap();
+            blossom_syntax::fmt::format(&text).is_ok_and(|out| out != text)
+        })
+        .map(|p| p.display().to_string())
+        .collect();
+    assert!(
+        unformatted.is_empty(),
+        "not formatted (run `blossom fmt examples tests/corpus`): {unformatted:?}"
+    );
+}

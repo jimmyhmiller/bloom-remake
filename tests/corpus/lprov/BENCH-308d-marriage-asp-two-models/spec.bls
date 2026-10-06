@@ -10,9 +10,17 @@ spec MarriageAsp for r#program {
     fact say_yes() @ BRIDE at tick 1;
     fact say_yes() @ GROOM at tick 1;
 
-    faults { eot: 6, eff: 1, crashes: 0, model: async, delay: 3 }
+    faults {
+        eot: 6,
+        eff: 1,
+        crashes: 0,
+        model: async,
+        delay: 3
+    }
 
     invariant never_exactly_one "exactly one vow was counted": never exactly_one() @ O;
 
-    check asp { ticks: 6 } expect fails;
+    check asp {
+        ticks: 6
+    } expect fails;
 }

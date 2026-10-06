@@ -10,7 +10,7 @@
 //!
 //! `:+` is dfir-datalog's next-tick rule (`next`). `choose` is Blossom's seeded choice; its validity is checked by
 //! the invariants below. The `#` line comment of the original test is kept (LANG-208).
-# david doesn't think this line of code will execute
+// david doesn't think this line of code will execute
 
 program datalog_aggregations version 1;
 
@@ -49,6 +49,6 @@ parity: on ints(a, b) {
 }
 
 invariant choice_is_candidate "result2 chose a value that is not a candidate": never result2(a, b), not ints(a, b);
-invariant one_choice_per_group "result2 chose two values for one group":
-    never result2(a1, b), result2(a2, b) where a1 != a2;
+invariant one_choice_per_group "result2 chose two values for one group": never result2(a1, b), result2(a2, b)
+        where a1 != a2;
 invariant choice_is_total "a group with candidates has no choice": never ints(_, b), not result2(_, b);

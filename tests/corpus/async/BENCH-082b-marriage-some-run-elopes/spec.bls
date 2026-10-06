@@ -8,5 +8,8 @@ spec SomeRunElopes for r#program {
     /// the other derives `runaway` in the tick the first one arrives, so this invariant fails within the bounds.
     invariant wedding_on: never runaway() @ N1;
 
-    check bmc { ticks: 4, delay: 2 } expect fails;
+    check bmc {
+        ticks: 4,
+        delay: 2
+    } expect fails;
 }

@@ -7,5 +7,8 @@ spec SomeRunTogether for r#program {
     /// `concurrent`, so this invariant fails.
     invariant never_together: never concurrent() @ N1;
 
-    check bmc { ticks: 4, delay: 2 } expect fails;
+    check bmc {
+        ticks: 4,
+        delay: 2
+    } expect fails;
 }

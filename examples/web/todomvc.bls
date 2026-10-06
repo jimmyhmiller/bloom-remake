@@ -126,8 +126,7 @@ blur_edit: on blur(id, value), editing(n), todos(n, _title, done) where id == f"
     upsert todos(n, value.trim(), done);
     delete editing(n);
 }
-blur_empty_edit: on blur(id, value), editing(n), todos(n, title, done)
-        where id == f"edit-{n}" && value.trim() == "" {
+blur_empty_edit: on blur(id, value), editing(n), todos(n, title, done) where id == f"edit-{n}" && value.trim() == "" {
     delete todos(n, title, done);
     delete editing(n);
 }
@@ -147,7 +146,12 @@ frame: while total(all), left(active), filter(f), typed_now(d) {
         }
         if all > 0u64 {
             section[id: "main"](class: "main") {
-                input[id: "toggle-all"](id: "toggle-all", class: "toggle-all", type: "checkbox", checked: active == 0u64);
+                input[id: "toggle-all"](
+                    id: "toggle-all",
+                    class: "toggle-all",
+                    type: "checkbox",
+                    checked: active == 0u64
+                );
                 label(for: "toggle-all") { "Mark all as complete" }
                 ul[id: "list"](class: "todo-list") {
                     for todos(n, title, done), is_editing(n, e) where shown(f, done) {
@@ -163,7 +167,10 @@ frame: while total(all), left(active), filter(f), typed_now(d) {
                 }
             }
             footer[id: "footer"](class: "footer") {
-                span[id: "count"](class: "todo-count") { strong { active } span { plural(active) } }
+                span[id: "count"](class: "todo-count") {
+                    strong { active }
+                    span { plural(active) }
+                }
                 ul(class: "filters") {
                     link("all", "#/", f, "All");
                     link("active", "#/active", f, "Active");

@@ -6,7 +6,10 @@
 
 program false_commutativity version 1;
 
-#[commutative] fn step(s: i64, x: i64) -> i64 { 2 * s + x }    // expect: BLS0704
+#[commutative]
+fn step(s: i64, x: i64) -> i64 {
+    2 * s + x
+} // expect: BLS0704
 
 input append(i: u64, x: i64);
 

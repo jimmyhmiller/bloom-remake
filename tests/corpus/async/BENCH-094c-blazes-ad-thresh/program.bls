@@ -51,7 +51,7 @@ module Report {
 
     /// THRESH: `select id from clicks group by id having count(*) > 1000`. The count is a threshold over the growing
     /// set of the ad's clicks, so the answer never changes once given (monotone, LANGUAGE §11.6).
-    answer: on request(q, id) where lset{ c | clicks(c, id, _, _) }.size() > 1000 {
+    answer: on request(q, id) where lset { c | clicks(c, id, _, _) }.size() > 1000 {
         emit response(q, id);
     }
 }

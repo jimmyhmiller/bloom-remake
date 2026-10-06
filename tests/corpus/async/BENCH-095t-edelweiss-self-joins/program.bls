@@ -19,7 +19,7 @@ program edelweiss_self_joins version 1;
 // `r1 <= (t1 * t1).pairs(:val => :val) {|x,y| [x.key, y.key]}.notin(t2)`: a self-join on one column. After the partial
 // seal on val = 10, t1(5, 10) is reclaimed once all its results, on either side of the join, are in t2; then t1(6, 10).
 
-table sj_t1(key: u64, val: u64) key(key) sealed by (val);
+table sj_t1(key: u64, val: u64) key(key) sealed by(val);
 
 input sj_t1_in(key: u64, val: u64);
 
@@ -52,7 +52,7 @@ sj_pairs: while sj_t1(k1, v), sj_t1(k2, v), not sj_t2(k1, k2) {
 // (left.x = right.y), with a whole-relation seal. t1(1, 2) has no partner as the left input and its one result as the
 // right input is in t2, so the seal lets it go; t1(2, 3) and t1(3, 4) follow once [3, 4, 2, 3] is in t2.
 
-table dp_t1(x: u64, y: u64) sealed by ();
+table dp_t1(x: u64, y: u64) sealed by();
 
 input dp_t1_in(x: u64, y: u64);
 

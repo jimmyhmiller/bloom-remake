@@ -57,9 +57,8 @@ at Server {
         not log(_, _), let i = 0, let t = 0;
     }
 
-    view rv_ok(c, t, id) =
-        request_vote(t, id, li, lt) from c, eff(t), last_log(mi, mt)
-        where lt > mt || (lt == mt && li >= mi);
+    view rv_ok(c, t, id) = request_vote(t, id, li, lt) from c, eff(t), last_log(mi, mt)
+            where lt > mt || (lt == mt && li >= mi);
 
     /// (b) choose<C>: the seeded choice among the up-to-date candidates of the term.
     view fresh_grant(c, t) = rv_ok(c, t, _), not voted_for(t, _), choose!(c per t);
@@ -87,6 +86,6 @@ at Server {
         emit replies(t, g);
     }
 
-    invariant one_grantee "two candidates were granted a vote in one term":
-        never granted_ever(t, a), granted_ever(t, b) where a != b;
+    invariant one_grantee "two candidates were granted a vote in one term": never granted_ever(t, a), granted_ever(t, b)
+            where a != b;
 }

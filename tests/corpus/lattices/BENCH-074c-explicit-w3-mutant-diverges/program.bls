@@ -72,9 +72,8 @@ at Replica {
     }
 
     // ---- unwrap
-    view current(o, k, c) =
-        (o, e) in seen, let Some(k) = reveal!(e.key()), let Some(c) = e.val!().get()
-        where o != self;
+    view current(o, k, c) = (o, e) in seen, let Some(k) = reveal!(e.key()), let Some(c) = e.val!().get()
+            where o != self;
     view advanced(o, k2, c2, c1) {
         current(o, k2, c2), applied(o, k1, c1) where k2 > k1;
         current(o, k2, c2), not applied(o, _, _), let c1 = map[];

@@ -82,7 +82,7 @@ at Peer {
 
     #[localize(chain)]
     sb3: on stabilize(), node_id(self, n), succ(_, si), pred_seen(p, _, known) @ si, node_id(si, n1)
-        where (not known || n in p<..n1) && si != self {
+            where (not known || n in p<..n1) && si != self {
         send pred_update(n) to si;
     }
 

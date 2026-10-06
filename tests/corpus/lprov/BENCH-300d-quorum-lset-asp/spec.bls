@@ -13,10 +13,16 @@ spec QuorumAsp for r#program {
     fact cast() @ V4 at tick 1;
     fact cast() @ V5 at tick 1;
 
-    faults { eot: 4, eff: 2, crashes: 0, model: sync }
+    faults {
+        eot: 4,
+        eff: 2,
+        crashes: 0,
+        model: sync
+    }
 
-    invariant decided_by_eot "the coordinator has not decided at EOT":
-        never not decided() @ C at tick 4;
+    invariant decided_by_eot "the coordinator has not decided at EOT": never not decided() @ C at tick 4;
 
-    check asp { ticks: 4 } expect fails;
+    check asp {
+        ticks: 4
+    } expect fails;
 }

@@ -6,8 +6,9 @@
 spec FlpOracle for r#program {
     nodes N;
 
-    invariant never_both "p contains both a and b":
-        never has_both() @ N;
+    invariant never_both "p contains both a and b": never has_both() @ N;
 
-    check asp { ticks: 1 } expect fails;
+    check asp {
+        ticks: 1
+    } expect fails;
 }

@@ -13,7 +13,7 @@
 
 program edelweiss_unicast version 1;
 
-channel chn(id: u64, @addr: Node, val: String) key(id);
+channel chn(id: u64, @ addr: Node, val: String) key(id);
 
 table sbuf(id: u64, addr: Node, val: String) key(id);
 table rbuf(id: u64, addr: Node, val: String) key(id);

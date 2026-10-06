@@ -10,7 +10,7 @@
 program ring_member version 1;
 
 /// Bud: `channel :pipe, [:@addr, :cnt]`.
-channel pipe(@addr: Node, cnt: i64);
+channel pipe(@ addr: Node, cnt: i64);
 /// Bud: `scratch :kickoff, [:cnt]`, which the test fills with `kickoff <+ [[0]]` on the first member.
 input kickoff(cnt: i64);
 /// The test's `next_guy <+ [[next_addr]]`.

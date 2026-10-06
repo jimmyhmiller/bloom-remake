@@ -20,7 +20,7 @@ fact node("n2");
 fact node("n3");
 
 table log(id: u64, val: String) key(id);
-channel chn(@addr: Node, id: u64, val: String) key(addr, id);
+channel chn(@ addr: Node, id: u64, val: String) key(addr, id);
 
 /// From the host: a message this node originates.
 input originate(id: u64, val: String);

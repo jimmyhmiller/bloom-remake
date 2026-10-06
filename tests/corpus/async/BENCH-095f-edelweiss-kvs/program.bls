@@ -18,8 +18,8 @@ fact node("n1");
 fact node("n2");
 fact node("n3");
 
-channel ins_chn(@addr: Node, id: u64, key: String, val: String) key(addr, id);
-channel del_chn(@addr: Node, id: u64, del_id: u64) key(addr, id);
+channel ins_chn(@ addr: Node, id: u64, key: String, val: String) key(addr, id);
+channel del_chn(@ addr: Node, id: u64, del_id: u64) key(addr, id);
 table ins_log(id: u64, key: String, val: String) key(id);
 table del_log(id: u64, del_id: u64) key(id);
 

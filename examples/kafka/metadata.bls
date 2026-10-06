@@ -1,7 +1,11 @@
 //! Metadata (key 3), version 13 (flexible).
 
 /// A requested topic: by id, by name, or both.
-format MetadataTopicRequest { topic_id: uuid, name: compact_nullable_string, tags }
+format MetadataTopicRequest {
+    topic_id: uuid,
+    name: compact_nullable_string,
+    tags
+}
 
 /// MetadataRequest v13. `topics` is `None` for "all topics".
 format MetadataRequest {
@@ -16,7 +20,13 @@ fn decode_metadata_request(c: Cur) -> Option<MetadataRequest> {
 }
 
 /// A broker in a metadata response.
-format BrokerInfo { node_id: i32, host: compact_string, port: i32, rack: compact_nullable_string, tags }
+format BrokerInfo {
+    node_id: i32,
+    host: compact_string,
+    port: i32,
+    rack: compact_nullable_string,
+    tags
+}
 
 /// A partition and a topic of a metadata response.
 format MetadataPartition {
@@ -62,19 +72,38 @@ const UNKNOWN_TOPIC_ID: i16 = 100;
 
 /// A partition as Metadata describes it: its leader's broker id and epoch (-1 while no leader is known), its replicas,
 /// and its in-sync replicas as its leader last announced them.
-struct PartInfo { index: i32, leader: i32, epoch: i32, replicas: Vec<i32>, isr: Vec<i32> }
+struct PartInfo {
+    index: i32,
+    leader: i32,
+    epoch: i32,
+    replicas: Vec<i32>,
+    isr: Vec<i32>
+}
 
 /// A topic, as Metadata describes it: its partitions in index order.
-struct TopicInfo { name: String, id: Bytes, partitions: Vec<PartInfo> }
+struct TopicInfo {
+    name: String,
+    id: Bytes,
+    partitions: Vec<PartInfo>
+}
 
 /// A topic, with the operations a client may perform on it when the request asks (`ops`; else none reported).
 fn known_topic(t: TopicInfo, ops: bool) -> MetadataTopic {
     let parts = t.partitions.map(|p| MetadataPartition {
-        error: if p.leader < 0i32 { LEADER_NOT_AVAILABLE } else { NONE }, index: p.index, leader: p.leader,
-        epoch: p.epoch, replicas: p.replicas, isr: p.isr, offline: [],
+        error: if p.leader < 0i32 { LEADER_NOT_AVAILABLE } else { NONE },
+        index: p.index,
+        leader: p.leader,
+        epoch: p.epoch,
+        replicas: p.replicas,
+        isr: p.isr,
+        offline: [],
     });
     MetadataTopic {
-        error: NONE, name: Some(t.name), id: t.id, internal: t.name == OFFSETS_TOPIC, partitions: parts,
+        error: NONE,
+        name: Some(t.name),
+        id: t.id,
+        internal: t.name == OFFSETS_TOPIC,
+        partitions: parts,
         ops: if ops { TOPIC_OPERATIONS } else { NO_OPERATIONS },
     }
 }
@@ -90,7 +119,8 @@ fn metadata_creates(req: MetadataRequest, enabled: bool) -> Vec<String> {
             if enabled && req.allow_auto_topic_creation && ts.all(|t| t.topic_id == zero_uuid()) {
                 let keyed = ts.filter_map(|t| t.name).map(|n| (collision_key(n), n));
                 let colliding = colliding_keys(keyed);
-                keyed.filter(|kn| topic_name_ok(kn.1) && kn.1 != OFFSETS_TOPIC && not colliding.contains(kn.0)).map(|kn| kn.1)
+                keyed.filter(|kn| topic_name_ok(kn.1) && kn.1 != OFFSETS_TOPIC
+                    && not colliding.contains(kn.0)).map(|kn| kn.1)
             } else {
                 []
             }
@@ -153,8 +183,12 @@ fn encode_metadata_response(
     creating: Set<String>,
 ) -> Bytes {
     let r = MetadataResponse {
-        throttle: 0i32, brokers: brokers, cluster_id: Some(cluster_id), controller_id: controller_id,
-        topics: metadata_topics(req, topics, creating), error: 0i16,
+        throttle: 0i32,
+        brokers: brokers,
+        cluster_id: Some(cluster_id),
+        controller_id: controller_id,
+        topics: metadata_topics(req, topics, creating),
+        error: 0i16,
     };
     frame(response_header_v1(correlation_id).concat(MetadataResponse::encode(r)))
 }
@@ -167,14 +201,23 @@ fn encode_metadata_request(correlation_id: i32, client_id: String, topics: Optio
 }
 
 /// What a client keeps of a metadata answer: the brokers, cluster id, controller and each topic's error and name.
-struct MetadataAnswer { brokers: Vec<BrokerInfo>, cluster_id: Option<String>, controller_id: i32, topics: Vec<(i16, Option<String>)>, error: i16 }
+struct MetadataAnswer {
+    brokers: Vec<BrokerInfo>,
+    cluster_id: Option<String>,
+    controller_id: i32,
+    topics: Vec<(i16, Option<String>)>,
+    error: i16
+}
 
 /// MetadataResponse v13 after its header.
 fn decode_metadata_response(c: Cur) -> Option<MetadataAnswer> {
     let (r, _end) = MetadataResponse::decode(c.buf, c.pos)?;
     Some(MetadataAnswer {
-        brokers: r.brokers, cluster_id: r.cluster_id, controller_id: r.controller_id,
-        topics: r.topics.map(|t| (t.error, t.name)), error: r.error,
+        brokers: r.brokers,
+        cluster_id: r.cluster_id,
+        controller_id: r.controller_id,
+        topics: r.topics.map(|t| (t.error, t.name)),
+        error: r.error,
     })
 }
 
@@ -221,7 +264,12 @@ fn describe_cluster_error(endpoint: i8) -> i16 {
 }
 
 format DescribedBroker(version: i16) {
-    node_id: i32, host: compact_string, port: i32, rack: compact_nullable_string, fenced: bool if version >= 2i16, tags,
+    node_id: i32,
+    host: compact_string,
+    port: i32,
+    rack: compact_nullable_string,
+    fenced: bool if version >= 2i16,
+    tags,
 }
 format DescribeClusterResponse(version: i16) {
     throttle: i32,
@@ -235,7 +283,14 @@ format DescribeClusterResponse(version: i16) {
     tags,
 }
 
-fn encode_describe_cluster_response(correlation_id: i32, version: i16, req: DescribeClusterRequest, brokers: Vec<BrokerInfo>, cluster_id: String, controller_id: i32) -> Bytes {
+fn encode_describe_cluster_response(
+    correlation_id: i32,
+    version: i16,
+    req: DescribeClusterRequest,
+    brokers: Vec<BrokerInfo>,
+    cluster_id: String,
+    controller_id: i32
+) -> Bytes {
     let ok = req.endpoint_type == ENDPOINT_BROKERS;
     let r = DescribeClusterResponse {
         throttle: 0i32,
@@ -244,7 +299,17 @@ fn encode_describe_cluster_response(correlation_id: i32, version: i16, req: Desc
         endpoint_type: req.endpoint_type,
         cluster_id: if ok { cluster_id } else { "" },
         controller_id: if ok { controller_id } else { -1i32 },
-        brokers: if ok { brokers.map(|b| DescribedBroker { node_id: b.node_id, host: b.host, port: b.port, rack: b.rack, fenced: false }) } else { [] },
+        brokers: if ok {
+            brokers.map(|b| DescribedBroker {
+                node_id: b.node_id,
+                host: b.host,
+                port: b.port,
+                rack: b.rack,
+                fenced: false
+            })
+        } else {
+            []
+        },
         ops: if req.include_operations && ok { CLUSTER_OPERATIONS } else { NO_OPERATIONS },
     };
     frame(response_header_v1(correlation_id).concat(DescribeClusterResponse::encode(r, version)))

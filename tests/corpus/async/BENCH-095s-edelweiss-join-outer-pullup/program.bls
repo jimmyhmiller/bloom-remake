@@ -14,7 +14,7 @@ program edelweiss_join_outer_pullup version 1;
 // in t3 and t2 is sealed on c = 6; t2(5, 100) once its result is in t3 and t1 is sealed on a = 5. (Bud's comment on why
 // t2(6, 110) is kept: a duplicate t1 tuple would produce a padded result.)
 
-table osane_t1(a: u64, b: u64) sealed by (a);
+table osane_t1(a: u64, b: u64) sealed by(a);
 
 input osane_t1_in(a: u64, b: u64);
 
@@ -28,7 +28,7 @@ osane_t1_close: on osane_t1_seal(a) {
     seal osane_t1(a: a);
 }
 
-table osane_t2(c: u64, d: u64) sealed by (c);
+table osane_t2(c: u64, d: u64) sealed by(c);
 
 input osane_t2_in(c: u64, d: u64);
 
@@ -69,7 +69,7 @@ oouter_t1_load: on oouter_t1_in(a, b) {
     emit oouter_t1(a, b);
 }
 
-table oouter_t2(c: u64, d: u64) sealed by ();
+table oouter_t2(c: u64, d: u64) sealed by();
 
 input oouter_t2_in(c: u64, d: u64);
 

@@ -19,7 +19,7 @@ table link(src: String, dst: String, cost: i64);
 table path(src: String, dst: String, nxt: String, cost: i64);
 table shortest(src: String, dst: String, nxt: String, cost: i64) key(src, dst);
 
-view best(src, dst, nxt, cost) = path(src, dst, nxt, cost), argmin!(cost per (src, dst));
+view best(src, dst, nxt, cost) = path(src, dst, nxt, cost), argmin!(cost per(src, dst));
 
 load: on add_link(s, d, c) {
     emit link(s, d, c);

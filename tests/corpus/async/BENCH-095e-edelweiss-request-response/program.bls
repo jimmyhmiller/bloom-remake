@@ -15,8 +15,8 @@
 
 program edelweiss_request_response version 1;
 
-channel req_chn(@addr: Node, client: Node, id: u64, key: String) key(addr, client, id);
-channel resp_chn(@addr: Node, id: u64, key: String, val: String) key(addr, id);
+channel req_chn(@ addr: Node, client: Node, id: u64, key: String) key(addr, client, id);
+channel resp_chn(@ addr: Node, id: u64, key: String, val: String) key(addr, id);
 
 // Server state.
 table req_log(client: Node, id: u64, key: String) key(client, id);

@@ -16,7 +16,7 @@ program edelweiss_semijoins_keys version 1;
 
 table sjr_t1(key: String, val: String);
 
-table sjr_t2(key: String, val: String) key(key) sealed by (key);
+table sjr_t2(key: String, val: String) key(key) sealed by(key);
 
 input sjr_t2_in(key: String, val: String);
 
@@ -61,7 +61,7 @@ sjr_notin: while sjr_t3(k, v), not sjr_t4(k, v) {
 
 table sjl_t1(key: String, val: String);
 
-table sjl_t2(key: String, val: String) key(key) sealed by (key);
+table sjl_t2(key: String, val: String) key(key) sealed by(key);
 
 input sjl_t2_in(key: String, val: String);
 
@@ -107,7 +107,7 @@ sjl_notin: while sjl_t3(k, v), not sjl_t4(k, v) {
 
 table hsj_t1(key: String, val: String);
 
-table hsj_t2(key: String, val: String) key(key) sealed by (key);
+table hsj_t2(key: String, val: String) key(key) sealed by(key);
 
 input hsj_t2_in(key: String, val: String);
 
@@ -154,7 +154,7 @@ hsj_notin: while hsj_t3(k, v), not hsj_t4(k, v) {
 
 table wj_t1(key: u64, val: u64);
 
-table wj_t2(key: u64, val: u64) sealed by (key);
+table wj_t2(key: u64, val: u64) sealed by(key);
 
 input wj_t2_in(key: u64, val: u64);
 
@@ -176,7 +176,7 @@ wj_t3_load: on wj_t3_in(key, val) {
     emit wj_t3(key, val);
 }
 
-table wj_t4(key: u64, val: u64) key(key) sealed by (key);
+table wj_t4(key: u64, val: u64) key(key) sealed by(key);
 
 input wj_t4_in(key: u64, val: u64);
 
@@ -262,7 +262,7 @@ omk_t2_load: on omk_t2_in(key, val) {
     emit omk_t2(key, val);
 }
 
-table omk_t3(k1: u64, k2: u64, k3: u64, val: u64) key(k1, k2, k3) sealed by (k2);
+table omk_t3(k1: u64, k2: u64, k3: u64, val: u64) key(k1, k2, k3) sealed by(k2);
 
 input omk_t3_in(k1: u64, k2: u64, k3: u64, val: u64);
 

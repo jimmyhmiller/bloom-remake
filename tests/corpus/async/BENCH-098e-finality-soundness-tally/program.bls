@@ -21,7 +21,7 @@ fact counter("C2");
 input cast(e: u64, choice: String);
 
 /// One vote per voter per election; each voter seals the election at each counter once it has voted there.
-channel vote(e: u64, choice: String) sealed by (e) producers voter;
+channel vote(e: u64, choice: String) sealed by(e) producers voter;
 
 /// At a counter: every vote received, with its voter.
 table votes(e: u64, voter: Node, choice: String);
@@ -44,7 +44,7 @@ count_votes: while votes(e, v, _) {
     emit tally(e, count!(v));
 }
 
-three: while votes(e, _, _) where lset{ v | votes(e, v, _) }.size() >= 3 {
+three: while votes(e, _, _) where lset { v | votes(e, v, _) }.size() >= 3 {
     emit at_least_three(e);
 }
 

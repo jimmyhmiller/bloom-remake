@@ -7,5 +7,8 @@ spec PrematureCollection for r#program {
     /// address b to the master before H2's pointer a -> b derives garbage(b), so this invariant fails.
     invariant only_c_is_garbage: never garbage(x) @ M where x != "c";
 
-    check bmc { ticks: 4, delay: 2 } expect fails;
+    check bmc {
+        ticks: 4,
+        delay: 2
+    } expect fails;
 }

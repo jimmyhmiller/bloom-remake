@@ -20,7 +20,11 @@ const MAX_PARTITIONS: i32 = 10000;
 
 /// A topic configuration this broker knows: its name, its default, and its Kafka type (`ConfigType`: 1 boolean,
 /// 2 string, 3 int, 5 long).
-struct ConfigKey { name: String, default: String, kind: i8 }
+struct ConfigKey {
+    name: String,
+    default: String,
+    kind: i8
+}
 
 fn topic_configs() -> Vec<ConfigKey> {
     [
@@ -96,7 +100,12 @@ format CreatableTopic {
     tags,
 }
 
-format CreateTopicsRequest { topics: compact_array(CreatableTopic), timeout_ms: i32, validate_only: bool, tags }
+format CreateTopicsRequest {
+    topics: compact_array(CreatableTopic),
+    timeout_ms: i32,
+    validate_only: bool,
+    tags
+}
 
 fn decode_create_topics(c: Cur) -> Option<CreateTopicsRequest> {
     CreateTopicsRequest::decode(c.buf, c.pos).map(|r| r.0)
@@ -105,13 +114,16 @@ fn decode_create_topics(c: Cur) -> Option<CreateTopicsRequest> {
 /// Whether `name` is a legal topic name: 1 to 249 of `[a-zA-Z0-9._-]`, and not `.` or `..`.
 fn topic_name_ok(name: String) -> bool {
     let b = name.to_utf8();
-    b.len() >= 1 && b.len() <= 249 && name != "." && name != ".." && range(0, b.len()).all(|i| {
-        match b.u8_at(i) {
-            Some(x) => (x >= 97u8 && x <= 122u8) || (x >= 65u8 && x <= 90u8) || (x >= 48u8 && x <= 57u8)
-                || x == 46u8 || x == 95u8 || x == 45u8,
-            None => false,
-        }
-    })
+    b.len() >= 1 && b.len() <= 249 && name != "." && name != ".."
+        && range(0, b.len()).all(|i| {
+            match b.u8_at(i) {
+                Some(x) => (x >= 97u8 && x <= 122u8) || (x >= 65u8 && x <= 90u8) || (x >= 48u8 && x <= 57u8)
+                    || x == 46u8
+                    || x == 95u8
+                    || x == 45u8,
+                None => false,
+            }
+        })
 }
 
 /// A topic name with `.` replaced by `_`: Kafka refuses a topic whose name collides with another's this way,
@@ -139,11 +151,21 @@ fn topic_id(hi: u64, lo: u64) -> Bytes {
 }
 
 /// A topic a CreateTopics request asks for, as the broker will make it: its name, id, partition count and configs.
-struct NewTopic { name: String, id: Bytes, partitions: i32, configs: Vec<(String, String)>, assignment: Vec<Vec<i32>> }
+struct NewTopic {
+    name: String,
+    id: Bytes,
+    partitions: i32,
+    configs: Vec<(String, String)>,
+    assignment: Vec<Vec<i32>>
+}
 
 /// One requested topic's outcome: its error and message (`NONE` and `None` when it is (or, validating, would be)
 /// created) and the topic.
-struct CreateOutcome { error: i16, message: Option<String>, topic: NewTopic }
+struct CreateOutcome {
+    error: i16,
+    message: Option<String>,
+    topic: NewTopic
+}
 
 /// The values that occur more than once in `xs`.
 fn repeated<T>(xs: Vec<T>) -> Set<T> {
@@ -162,7 +184,12 @@ fn colliding_keys(keyed: Vec<(String, String)>) -> Set<String> {
 /// What deciding one entry of a CreateTopics request needs to know of the whole request, computed once for it: the
 /// names it gives more than once, the collision keys two of its names share, and the names that are taken and their
 /// keys.
-struct CreateContext { repeated: Set<String>, colliding: Set<String>, taken: Set<String>, taken_keys: Set<String> }
+struct CreateContext {
+    repeated: Set<String>,
+    colliding: Set<String>,
+    taken: Set<String>,
+    taken_keys: Set<String>
+}
 
 /// `names` is every name the request asks for, `taken` the names that exist or that other connections create first
 /// this tick.
@@ -180,14 +207,24 @@ fn create_context(names: Vec<String>, taken: Vec<String>) -> CreateContext {
 /// gets.
 /// `ids` are the cluster's broker ids, in order; a topic without a manual assignment is placed from `start` (D11), with
 /// `default_rf` replicas when it asks for none.
-fn create_outcome(t: CreatableTopic, ctx: CreateContext, id: Bytes, default_partitions: i32, default_rf: i16, ids: Vec<i32>, start: u64) -> CreateOutcome {
+fn create_outcome(
+    t: CreatableTopic,
+    ctx: CreateContext,
+    id: Bytes,
+    default_partitions: i32,
+    default_rf: i16,
+    ids: Vec<i32>,
+    start: u64
+) -> CreateOutcome {
     let dup = ctx.repeated.contains(t.name);
     let key = collision_key(t.name);
     let collides_within = ctx.colliding.contains(key);
-    let partitions = if t.assignments.is_empty() { if t.partitions == -1i32 { default_partitions } else { t.partitions } } else { t.assignments.len() as i32 };
-    let bad_assignment = not t.assignments.is_empty() && (
-        t.partitions != -1i32 || t.replication != -1i16
-    );
+    let partitions = if t.assignments.is_empty() {
+        if t.partitions == -1i32 { default_partitions } else { t.partitions }
+    } else {
+        t.assignments.len() as i32
+    };
+    let bad_assignment = not t.assignments.is_empty() && (t.partitions != -1i32 || t.replication != -1i16);
     let manual_rf = match t.assignments.first() {
         Some(a) => a.1.len(),
         None => 0,
@@ -199,7 +236,13 @@ fn create_outcome(t: CreatableTopic, ctx: CreateContext, id: Bytes, default_part
         p == i as i32 && brokers.len() == manual_rf && manual_rf > 0 && brokers.to_set().len() == manual_rf
             && brokers.all(|b| known.contains(b))
     });
-    let rf = if not t.assignments.is_empty() { manual_rf as i16 } else if t.replication == -1i16 { default_rf } else { t.replication };
+    let rf = if not t.assignments.is_empty() {
+        manual_rf as i16
+    } else if t.replication == -1i16 {
+        default_rf
+    } else {
+        t.replication
+    };
     let bad_config = t.configs.any(|kv| match kv.1 {
         Some(v) => config_value_ok(kv.0, v) != Some(true),
         None => true,
@@ -208,7 +251,11 @@ fn create_outcome(t: CreatableTopic, ctx: CreateContext, id: Bytes, default_part
     if dup {
         create_failed(t.name, INVALID_REQUEST, "the request names this topic more than once")
     } else if not topic_name_ok(t.name) {
-        create_failed(t.name, INVALID_TOPIC_EXCEPTION, "a topic name is 1 to 249 characters of [a-zA-Z0-9._-], not . or ..")
+        create_failed(
+            t.name,
+            INVALID_TOPIC_EXCEPTION,
+            "a topic name is 1 to 249 characters of [a-zA-Z0-9._-], not . or .."
+        )
     } else if collides_within {
         create_failed(t.name, INVALID_TOPIC_EXCEPTION, "the request names topics whose names collide ('.' against '_')")
     } else if ctx.taken.contains(t.name) {
@@ -216,23 +263,51 @@ fn create_outcome(t: CreatableTopic, ctx: CreateContext, id: Bytes, default_part
     } else if ctx.taken_keys.contains(key) {
         create_failed(t.name, INVALID_TOPIC_EXCEPTION, "the name collides with an existing topic's ('.' against '_')")
     } else if bad_assignment {
-        create_failed(t.name, INVALID_REQUEST, "a manual assignment needs the partition count and replication factor to be -1")
+        create_failed(
+            t.name,
+            INVALID_REQUEST,
+            "a manual assignment needs the partition count and replication factor to be -1"
+        )
     } else if not assignment_nodes_ok {
-        create_failed(t.name, INVALID_REPLICA_ASSIGNMENT, "every partition must be assigned, in order, to the same number of distinct, known brokers")
+        create_failed(
+            t.name,
+            INVALID_REPLICA_ASSIGNMENT,
+            "every partition must be assigned, in order, to the same number of distinct, known brokers"
+        )
     } else if partitions < 1i32 || partitions > MAX_PARTITIONS {
         create_failed(t.name, INVALID_PARTITIONS, "the partition count must be between 1 and 10000")
     } else if rf < 1i16 || rf as u64 > ids.len() {
-        create_failed(t.name, INVALID_REPLICATION_FACTOR, "the replication factor must be between 1 and the number of brokers")
+        create_failed(
+            t.name,
+            INVALID_REPLICATION_FACTOR,
+            "the replication factor must be between 1 and the number of brokers"
+        )
     } else if bad_config {
-        create_failed(t.name, INVALID_CONFIG, "a configuration is unknown, null, or has a value this broker does not support")
+        create_failed(
+            t.name,
+            INVALID_CONFIG,
+            "a configuration is unknown, null, or has a value this broker does not support"
+        )
     } else {
-        let assignment = if t.assignments.is_empty() { assign(ids, partitions, rf, start) } else { t.assignments.map(|a| a.1) };
-        CreateOutcome { error: NONE, message: None, topic: NewTopic { name: t.name, id: id, partitions: partitions, configs: configs, assignment: assignment } }
+        let assignment = if t.assignments.is_empty() {
+            assign(ids, partitions, rf, start)
+        } else {
+            t.assignments.map(|a| a.1)
+        };
+        CreateOutcome {
+            error: NONE,
+            message: None,
+            topic: NewTopic { name: t.name, id: id, partitions: partitions, configs: configs, assignment: assignment }
+        }
     }
 }
 
 fn create_failed(name: String, code: i16, why: String) -> CreateOutcome {
-    CreateOutcome { error: code, message: Some(why), topic: NewTopic { name: name, id: zero_uuid(), partitions: -1i32, configs: [], assignment: [] } }
+    CreateOutcome {
+        error: code,
+        message: Some(why),
+        topic: NewTopic { name: name, id: zero_uuid(), partitions: -1i32, configs: [], assignment: [] }
+    }
 }
 
 fn create_names(req: CreateTopicsRequest) -> Vec<String> {
@@ -253,9 +328,17 @@ fn applied_create(o: CreateOutcome, error: i16) -> CreateOutcome {
 
 /// A request that only validates gets its topics with the zero id, as Kafka's does.
 fn validated(o: CreateOutcome) -> CreateOutcome {
-    CreateOutcome { error: o.error, message: o.message, topic: NewTopic {
-        name: o.topic.name, id: zero_uuid(), partitions: o.topic.partitions, configs: o.topic.configs, assignment: o.topic.assignment,
-    } }
+    CreateOutcome {
+        error: o.error,
+        message: o.message,
+        topic: NewTopic {
+            name: o.topic.name,
+            id: zero_uuid(),
+            partitions: o.topic.partitions,
+            configs: o.topic.configs,
+            assignment: o.topic.assignment,
+        }
+    }
 }
 
 /// A topic entry whose creation did not finish within the request's timeout.
@@ -265,7 +348,14 @@ fn create_timed_out(name: String) -> CreateOutcome {
 
 /// A configuration as CreateTopics (v5+) and DescribeConfigs report it. ConfigSource: 1 a topic's own configuration,
 /// 5 the default.
-format CreatedConfig { name: compact_string, value: compact_nullable_string, read_only: bool, source: i8, sensitive: bool, tags }
+format CreatedConfig {
+    name: compact_string,
+    value: compact_nullable_string,
+    read_only: bool,
+    source: i8,
+    sensitive: bool,
+    tags
+}
 format CreatedTopic {
     name: compact_string,
     id: uuid,
@@ -276,20 +366,30 @@ format CreatedTopic {
     configs: compact_nullable_array(CreatedConfig),
     tags,
 }
-format CreateTopicsResponse { throttle: i32, topics: compact_array(CreatedTopic), tags }
+format CreateTopicsResponse {
+    throttle: i32,
+    topics: compact_array(CreatedTopic),
+    tags
+}
 
 /// A topic's full configuration, in `topic_configs` order: what CreateTopics v5+ returns for a created topic.
 fn created_configs(set: Vec<(String, String)>) -> Vec<CreatedConfig> {
     topic_configs().map(|k| CreatedConfig {
-        name: k.name, value: Some(config_value(set, k.name)), read_only: false,
-        source: if set.any(|kv| kv.0 == k.name) { 1i8 } else { 5i8 }, sensitive: false,
+        name: k.name,
+        value: Some(config_value(set, k.name)),
+        read_only: false,
+        source: if set.any(|kv| kv.0 == k.name) { 1i8 } else { 5i8 },
+        sensitive: false,
     })
 }
 
 fn created_topic(o: CreateOutcome) -> CreatedTopic {
     let ok = o.error == NONE;
     CreatedTopic {
-        name: o.topic.name, id: o.topic.id, error: o.error, message: o.message,
+        name: o.topic.name,
+        id: o.topic.id,
+        error: o.error,
+        message: o.message,
         partitions: if ok { o.topic.partitions } else { -1i32 },
         replication: if ok { replication_of(o.topic.assignment) } else { -1i16 },
         configs: if ok { Some(created_configs(o.topic.configs)) } else { None },
@@ -304,8 +404,16 @@ fn encode_create_topics_response(correlation_id: i32, outcomes: Vec<CreateOutcom
 // ---------------------------------------------------------------- DeleteTopics v6
 
 /// A topic to delete: by name, or by id (a zero id means "by name").
-format DeleteTopicState { name: compact_nullable_string, id: uuid, tags }
-format DeleteTopicsRequest { topics: compact_array(DeleteTopicState), timeout_ms: i32, tags }
+format DeleteTopicState {
+    name: compact_nullable_string,
+    id: uuid,
+    tags
+}
+format DeleteTopicsRequest {
+    topics: compact_array(DeleteTopicState),
+    timeout_ms: i32,
+    tags
+}
 
 fn decode_delete_topics(c: Cur) -> Option<(Vec<DeleteTopicState>, i32)> {
     DeleteTopicsRequest::decode(c.buf, c.pos).map(|r| (r.0.topics, r.0.timeout_ms))
@@ -314,7 +422,10 @@ fn decode_delete_topics(c: Cur) -> Option<(Vec<DeleteTopicState>, i32)> {
 /// What judging one entry of a DeleteTopics request needs to know of the whole request, computed once for it: the
 /// ids its entries by id give more than once, the names its entries by name give more than once, and every id it
 /// gives.
-struct DeleteContext { repeated_ids: Set<Bytes>, repeated_names: Set<String> }
+struct DeleteContext {
+    repeated_ids: Set<Bytes>,
+    repeated_names: Set<String>
+}
 
 fn delete_context(req: Vec<DeleteTopicState>) -> DeleteContext {
     let ids = req.filter(|s| s.id != zero_uuid()).map(|s| s.id);
@@ -345,15 +456,35 @@ fn delete_entry_ok(ctx: DeleteContext, s: DeleteTopicState) -> bool {
 
 /// One deletion's result: the topic's name and id as the entry gave them (both when it is deleted), the error and
 /// its message.
-format DeleteOutcome { name: compact_nullable_string, id: uuid, error: i16, message: compact_nullable_string, tags }
-format DeleteTopicsResponse { throttle: i32, topics: compact_array(DeleteOutcome), tags }
+format DeleteOutcome {
+    name: compact_nullable_string,
+    id: uuid,
+    error: i16,
+    message: compact_nullable_string,
+    tags
+}
+format DeleteTopicsResponse {
+    throttle: i32,
+    topics: compact_array(DeleteOutcome),
+    tags
+}
 
 /// An entry's outcome decided without the controller: a malformed entry, or one whose deletion did not apply in time.
 fn delete_refused(s: DeleteTopicState, error: i16) -> DeleteOutcome {
     if error == REQUEST_TIMED_OUT {
-        DeleteOutcome { name: s.name, id: s.id, error: error, message: Some("the controller did not apply the deletion in time") }
+        DeleteOutcome {
+            name: s.name,
+            id: s.id,
+            error: error,
+            message: Some("the controller did not apply the deletion in time")
+        }
     } else {
-        DeleteOutcome { name: s.name, id: s.id, error: INVALID_REQUEST, message: Some("an entry names a topic by name or by id, not both, and only once") }
+        DeleteOutcome {
+            name: s.name,
+            id: s.id,
+            error: INVALID_REQUEST,
+            message: Some("an entry names a topic by name or by id, not both, and only once")
+        }
     }
 }
 
@@ -363,7 +494,12 @@ fn delete_applied(s: DeleteTopicState, id: Bytes, name: String, error: i16) -> D
     if error == NONE {
         DeleteOutcome { name: Some(name), id: id, error: NONE, message: None }
     } else if error == DELETE_CLASH {
-        DeleteOutcome { name: s.name, id: s.id, error: INVALID_REQUEST, message: Some("the topic name maps to an id the request also gives") }
+        DeleteOutcome {
+            name: s.name,
+            id: s.id,
+            error: INVALID_REQUEST,
+            message: Some("the topic name maps to an id the request also gives")
+        }
     } else if error == UNKNOWN_TOPIC_OR_PARTITION {
         DeleteOutcome { name: s.name, id: zero_uuid(), error: error, message: Some("the topic does not exist") }
     } else {
@@ -375,15 +511,28 @@ fn delete_applied(s: DeleteTopicState, id: Bytes, name: String, error: i16) -> D
 const DELETE_CLASH: i16 = -2;
 
 fn encode_delete_topics_response(correlation_id: i32, outcomes: Vec<DeleteOutcome>) -> Bytes {
-    frame(response_header_v1(correlation_id).concat(DeleteTopicsResponse::encode(DeleteTopicsResponse { throttle: 0i32, topics: outcomes })))
+    frame(response_header_v1(correlation_id).concat(DeleteTopicsResponse::encode(DeleteTopicsResponse {
+        throttle: 0i32,
+        topics: outcomes
+    })))
 }
 
 // ---------------------------------------------------------------- DescribeConfigs v4
 
 /// A resource whose configuration is asked for: its type (2 a topic, 4 a broker), name and the keys wanted (`None`,
 /// or empty, for all).
-format ConfigResource { kind: i8, name: compact_string, keys: compact_nullable_array(compact_string), tags }
-format DescribeConfigsRequest { resources: compact_array(ConfigResource), synonyms: bool, documentation: bool, tags }
+format ConfigResource {
+    kind: i8,
+    name: compact_string,
+    keys: compact_nullable_array(compact_string),
+    tags
+}
+format DescribeConfigsRequest {
+    resources: compact_array(ConfigResource),
+    synonyms: bool,
+    documentation: bool,
+    tags
+}
 
 fn decode_describe_configs(c: Cur) -> Option<Vec<ConfigResource>> {
     DescribeConfigsRequest::decode(c.buf, c.pos).map(|r| r.0.resources)
@@ -401,14 +550,29 @@ format DescribedConfig {
     documentation: compact_nullable_string,
     tags,
 }
-format ConfigResult { error: i16, message: compact_nullable_string, kind: i8, name: compact_string, configs: compact_array(DescribedConfig), tags }
-format DescribeConfigsResponse { throttle: i32, results: compact_array(ConfigResult), tags }
+format ConfigResult {
+    error: i16,
+    message: compact_nullable_string,
+    kind: i8,
+    name: compact_string,
+    configs: compact_array(DescribedConfig),
+    tags
+}
+format DescribeConfigsResponse {
+    throttle: i32,
+    results: compact_array(ConfigResult),
+    tags
+}
 
 /// One resource's result. `set` is the topic's own configs when it exists (`None`: unknown topic).
 fn encode_config_result(r: ConfigResource, set: Option<Vec<(String, String)>>) -> ConfigResult {
     let (error, message, configs) = if r.kind == CONFIG_BROKER {
         // A broker: no configuration is described.
-        (NONE, None, [])
+        (
+            NONE,
+            None,
+            []
+        )
     } else if r.kind != CONFIG_TOPIC {
         (INVALID_REQUEST, Some("only topics and brokers are described"), [])
     } else {
@@ -419,11 +583,19 @@ fn encode_config_result(r: ConfigResource, set: Option<Vec<(String, String)>>) -
                     Some(ks) => ks.is_empty() || ks.any(|x| x == k.name),
                     None => true,
                 });
-                (NONE, None, wanted.map(|k| DescribedConfig {
-                    name: k.name, value: Some(config_value(s, k.name)), read_only: false,
-                    source: if s.any(|kv| kv.0 == k.name) { 1i8 } else { 5i8 }, sensitive: false, kind: k.kind,
-                    documentation: None,
-                }))
+                (
+                    NONE,
+                    None,
+                    wanted.map(|k| DescribedConfig {
+                        name: k.name,
+                        value: Some(config_value(s, k.name)),
+                        read_only: false,
+                        source: if s.any(|kv| kv.0 == k.name) { 1i8 } else { 5i8 },
+                        sensitive: false,
+                        kind: k.kind,
+                        documentation: None,
+                    })
+                )
             }
             None => (UNKNOWN_TOPIC_OR_PARTITION, Some("the topic does not exist"), []),
         }
@@ -432,7 +604,10 @@ fn encode_config_result(r: ConfigResource, set: Option<Vec<(String, String)>>) -
 }
 
 fn encode_describe_configs_response(correlation_id: i32, results: Vec<ConfigResult>) -> Bytes {
-    frame(response_header_v1(correlation_id).concat(DescribeConfigsResponse::encode(DescribeConfigsResponse { throttle: 0i32, results: results })))
+    frame(response_header_v1(correlation_id).concat(DescribeConfigsResponse::encode(DescribeConfigsResponse {
+        throttle: 0i32,
+        results: results
+    })))
 }
 
 /// Every resource's result. `sets` holds the configurations of the named topics that exist.
@@ -477,4 +652,3 @@ fn assign(ids: Vec<i32>, partitions: i32, rf: i16, start: u64) -> Vec<Vec<i32>> 
         None => error("assign: a position past the broker list"),
     }))
 }
-

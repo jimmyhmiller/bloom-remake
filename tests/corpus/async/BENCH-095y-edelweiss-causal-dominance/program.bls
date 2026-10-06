@@ -97,7 +97,7 @@ cdr_sk_load: on cdr_sk_in(w1, w2) {
     emit cdr_sk(w1, w2);
 }
 
-table cdr_dep(id: u64, target: u64) sealed by (id);
+table cdr_dep(id: u64, target: u64) sealed by(id);
 
 input cdr_dep_in(id: u64, target: u64);
 
@@ -129,7 +129,7 @@ ros_t1_load: on ros_t1_in(id, val) {
     emit ros_t1(id, val);
 }
 
-table ros_t2(id: u64, val: u64) sealed by (id);
+table ros_t2(id: u64, val: u64) sealed by(id);
 
 input ros_t2_in(id: u64, val: u64);
 

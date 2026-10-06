@@ -29,12 +29,9 @@ fn words(text: String) -> Vec<String> {
 }
 
 /// One tuple per word occurrence, sealed per split as in BENCH-099 (a).
-channel occ(word: String, split: u32, line: u64, pos: u64): Mapper -> Reducer
-    partition by word
-    sealed by (split);
+channel occ(word: String, split: u32, line: u64, pos: u64): Mapper -> Reducer partition by word sealed by(split);
 /// A correction withdraws one occurrence. It may come at any time, before or after its split's seal: no seal.
-channel retraction(word: String, split: u32, line: u64, pos: u64): Mapper -> Reducer
-    partition by word;
+channel retraction(word: String, split: u32, line: u64, pos: u64): Mapper -> Reducer partition by word;
 
 at Mapper {
     /// A split's records, from the host.

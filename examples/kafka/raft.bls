@@ -90,7 +90,13 @@ channel vote(g: Group, term: u64, granted: bool): Broker -> Broker;
 channel snapshot(g: Group, term: u64, idx: u64, sterm: u64, pos: i64, conf: Vec<i32>): Broker -> Broker;
 /// AppendEntries: the leader of `term`'s entries after its entry `prev_idx` (whose term is `prev_term`, the
 /// consistency check of §5.3), in index order: each one's index, term, kind, position and bytes.
-channel entries(g: Group, term: u64, prev_idx: u64, prev_term: u64, es: Vec<(u64, u64, u8, i64, Bytes)>): Broker -> Broker;
+channel entries(
+    g: Group,
+    term: u64,
+    prev_idx: u64,
+    prev_term: u64,
+    es: Vec<(u64, u64, u8, i64, Bytes)>
+): Broker -> Broker;
 
 /// A batch's entries as the log stores them, each with the term of the entry before it: (index, term, previous term,
 /// kind, position, bytes). A batch's indexes follow `p` one by one (the leader builds it so).
@@ -265,7 +271,7 @@ at Broker {
         next rvote(g, 1, p);
     }
     initial_lead: while mine(g), not rterm(g, _), preferred(g, self), eff(g, t0), let empty = Blob::of(Bytes::empty())
-        where t0 <= 1 {
+            where t0 <= 1 {
         next won(g, 1);
         next leader_of(g, 1, self);
         next led_since(g, 1, now());
@@ -336,10 +342,10 @@ at Broker {
         upsert heard_at(g, now());
     }
     view recently_led(g) = last_heard(g, a) where now() < a + RAFT_ELECTION_MIN;
-    view rv_ok(g, c, t) =
-        request_vote(g, t, li, lt) from c, eff(g, t), mine(g), not recently_led(g), last_log(g, mi, mt)
-        where lt > mt || (lt == mt && li >= mi);
-    view fresh_grant(g, c, t) = rv_ok(g, c, t), not rvote(g, t, _), choose!(c per (g, t));
+    view rv_ok(g, c, t) = request_vote(g, t, li, lt) from c, eff(g, t), mine(g), not recently_led(g),
+            last_log(g, mi, mt)
+            where lt > mt || (lt == mt && li >= mi);
+    view fresh_grant(g, c, t) = rv_ok(g, c, t), not rvote(g, t, _), choose!(c per(g, t));
     view grant(g, c, t) {
         fresh_grant(g, c, t);
         rv_ok(g, c, t), rvote(g, t, c);
@@ -365,16 +371,17 @@ at Broker {
         deadline(g, d0), last_heard(g, h), election_span(g, s), let d = if h + s > d0 { h + s } else { d0 };
         deadline(g, d0), last_heard(g, _), not election_span(g, _), let d = d0;
     }
-    view timed_out(g, t) =
-        raft_poll, eff(g, t), mine(g), election_due(g, d), not leader(g, t), not granted_now(g), not heard_leader(g)
-        where now() >= d;
+    view timed_out(g, t) = raft_poll, eff(g, t), mine(g), election_due(g, d), not leader(g, t), not granted_now(g),
+            not heard_leader(g)
+            where now() >= d;
     /// What re-arms a group's election timeout: a vote granted, or an election that timed out (a leader heard moves
     /// `election_due` through `heard_at` instead).
     view reset_timer(g) {
         granted_now(g);
         timed_out(g, _);
     }
-    rearm: on reset_timer(g), eff(g, t), let span = rand_range(RAFT_ELECTION_MIN, RAFT_ELECTION_MAX, ("election", g, t)) {
+    rearm: on reset_timer(g), eff(g, t),
+            let span = rand_range(RAFT_ELECTION_MIN, RAFT_ELECTION_MAX, ("election", g, t)) {
         upsert deadline(g, now() + span);
         upsert election_span(g, span);
     }
@@ -394,9 +401,9 @@ at Broker {
             send pre_vote(g, nt, li, lt, round) to p;
         }
     }
-    view pv_ok(g, c, nt, round) =
-        pre_vote(g, nt, li, lt, round) from c, eff(g, e), mine(g), not recently_led(g), not leader(g, _), last_log(g, mi, mt)
-        where nt > e && (lt > mt || (lt == mt && li >= mi));
+    view pv_ok(g, c, nt, round) = pre_vote(g, nt, li, lt, round) from c, eff(g, e), mine(g), not recently_led(g),
+            not leader(g, _), last_log(g, mi, mt)
+            where nt > e && (lt > mt || (lt == mt && li >= mi));
     grant_prevote: on pv_ok(g, c, nt, round), eff(g, e) {
         send pre_vote_reply(g, nt, round, true, e) to c;
     }
@@ -407,8 +414,8 @@ at Broker {
         emit prevoters(g, nt, round, v);
     }
     view pre_tally(g, nt, round, n = count!(v)) = prevoters(g, nt, round, v);
-    view prevote_won(g, nt) =
-        prevoting(g, nt, round), pre_tally(g, nt, round, n), group_size(g, k), eff(g, t) where n * 2 > k && nt == t + 1;
+    view prevote_won(g, nt) = prevoting(g, nt, round), pre_tally(g, nt, round, n), group_size(g, k), eff(g, t)
+            where n * 2 > k && nt == t + 1;
     start_election: while prevote_won(g, nt), last_log(g, li, lt), prevoting(g, nt, round) {
         next rterm(g, nt);
         next rvote(g, nt, self);
@@ -474,8 +481,8 @@ at Broker {
         config_ready(g), let ready = true;
         leader(g, _), not config_ready(g), let ready = false;
     }
-    view checked_proposals(g, xs) =
-        proposals(g, xs0), config_ready_flag(g, ready), member_ids(g, cur), let xs = checked_configs(xs0, cur, ready);
+    view checked_proposals(g, xs) = proposals(g, xs0), config_ready_flag(g, ready), member_ids(g, cur),
+            let xs = checked_configs(xs0, cur, ready);
     append: while checked_proposals(g, xs), leader(g, t), last_log(g, li, lt), (k, x) in xs.enumerate() {
         next rlog(g, li + 1 + k, t, if k == 0 { lt } else { t }, x.0, x.1, x.2);
     }
@@ -500,12 +507,11 @@ at Broker {
         ack(g, t, from, _) from f, leader(g, t), members(g, f), last_log(g, li, _) where from < li;
     }
     /// A batch's entries: a range of the log (found by index, not by scanning it), read only for the batch.
-    view out_rows(g, f, from, i, et, k, pos, data) =
-        out_from(g, f, from), not behind_snapshot(g, from), rlog(g, i, et, _pt, k, pos, data)
-        where i > from && i <= from + RAFT_BATCH;
-    view out_batch(g, f, from, es = collect!((i, et, k, pos, b))) =
-        per out_from(g, f, from), not behind_snapshot(g, from), out_rows(g, f, from, i, et, k, pos, data),
-        let b = log_bytes(data);
+    view out_rows(g, f, from, i, et, k, pos, data) = out_from(g, f, from), not behind_snapshot(g, from),
+            rlog(g, i, et, _pt, k, pos, data)
+            where i > from && i <= from + RAFT_BATCH;
+    view out_batch(g, f, from, es = collect!((i, et, k, pos, b))) = per out_from(g, f, from),
+            not behind_snapshot(g, from), out_rows(g, f, from, i, et, k, pos, data), let b = log_bytes(data);
     /// At a heartbeat, a follower that acknowledged less than the snapshot point gets the point.
     send_snapshot: on raft_heartbeat, leader(g, t), match_idx(g, f, m), rsnap(g, s, st, pos, conf) where m < s {
         send snapshot(g, t, s, st, pos, conf) to f;
@@ -518,7 +524,8 @@ at Broker {
     }
     /// An idle group's leader sends no heartbeat (at the heartbeat it goes quiet it sends `quiesce` alone, so the
     /// followers do not see it with a heartbeat and take the group as active).
-    beat_followers: on raft_heartbeat, leader(g, t), not idle(g, t), match_idx(g, f, m), term_at(g, m, mt), commit_of(g, c) {
+    beat_followers: on raft_heartbeat, leader(g, t), not idle(g, t), match_idx(g, f, m), term_at(g, m, mt),
+            commit_of(g, c) {
         send beat(g, t, m, mt, c, now()) to f;
     }
     on_ack: on ack(g, t, m, _sent) from f, leader(g, t), members(g, f) {
@@ -550,7 +557,8 @@ at Broker {
         delete match_idx(g, f, m);
     }
     /// How many of the configuration's other members store at least index `i`, for each index one acknowledged.
-    view support(g, i, n = count!(f)) = leader(g, _), match_idx(g, _, i), match_idx(g, f, m), members(g, f) where m >= i;
+    view support(g, i, n = count!(f)) = leader(g, _), match_idx(g, _, i), match_idx(g, f, m), members(g, f)
+            where m >= i;
     /// The highest index a majority of the configuration stores (the leader holds its whole log, and counts itself
     /// if the configuration names it). It is committed if it is of the leader's term (§5.4.2).
     view quorum_at(g, j) {
@@ -563,7 +571,7 @@ at Broker {
     }
     /// A leader alone in its group is a majority.
     advance_alone: while leader(g, t), mine(g), group_size(g, k), last_log(g, li, lt), commit_of(g, c)
-        where k == 1 && lt == t && li > c {
+            where k == 1 && lt == t && li > c {
         next commit(g, li);
     }
     /// A leader its configuration leaves out steps down once that configuration is committed (§4.2.2).
@@ -599,7 +607,8 @@ at Broker {
         heard_n(g, n), group_size(g, k), not mine(g) where n * 2 > k;
         group_size(g, k), mine(g) where k == 1;
     }
-    check_quorum: on quorum_check, leader(g, t), led_since(g, t, at), not quorum_kept(g) where now() >= at + RAFT_ELECTION_MIN {
+    check_quorum: on quorum_check, leader(g, t), led_since(g, t, at), not quorum_kept(g)
+            where now() >= at + RAFT_ELECTION_MIN {
         delete won(g, t);
         delete leader_of(g, t, self);
         upsert stepped_down(g, t);
@@ -685,7 +694,7 @@ at Broker {
         quiesce(g: g, term: t, commit: c, sent: sent, ..), beat(g: g, term: t, sent: s, ..) where s > sent;
         quiesced(g, t, _, _, c, sent), beat(g: g, term: t, sent: s, ..) where s > sent;
         quiesce(g: g, term: t, commit: c, sent: sent, ..), entries(g: g, term: t, prev_idx: p, es: es, ..)
-            where p >= c && es.len() > 0;
+                where p >= c && es.len() > 0;
         quiesced(g, t, _, _, c, sent), entries(g: g, term: t, prev_idx: p, es: es, ..) where p >= c && es.len() > 0;
         quiesce(g: g, term: t, commit: c, sent: sent, ..), snapshot(g: g, term: t, idx: i, ..) where i > c;
         quiesced(g, t, _, _, c, sent), snapshot(g: g, term: t, idx: i, ..) where i > c;
@@ -694,8 +703,8 @@ at Broker {
     /// arrives with a newer one for its group in the same tick (a later term, or the same term sent later: a leader
     /// that quiesced, woke and quiesced again, both delivered at once), so a tick records one quiescence per group.
     view quiesce_overtaken(g, sent) = quiesce(g: g, sent: sent, ..), quiesced(g, _, _, _, _, at) where at >= sent;
-    view quiesce_superseded(g, t, sent) =
-        quiesce(g: g, term: t, sent: sent, ..), quiesce(g: g, term: t2, sent: s2, ..) where t2 > t || (t2 == t && s2 > sent);
+    view quiesce_superseded(g, t, sent) = quiesce(g: g, term: t, sent: sent, ..), quiesce(g: g, term: t2, sent: s2, ..)
+            where t2 > t || (t2 == t && s2 > sent);
     go_quiesced: on quiesce(g, t, c, boot, sent) from l, eff(g, t), takes(g), last_log(g, li, _),
             not woke_after(g, t, c, sent), not quiesce_overtaken(g, sent), not quiesce_superseded(g, t, sent)
             where li >= c {
@@ -734,8 +743,9 @@ at Broker {
         rsnap(g, s, _, _, _);
         takes(g), not rsnap(g, _, _, _, _), let s = 0u64;
     }
-    view incoming(g, i, et, pt, k, pos, b) = batch_taken(g, _l, _t, p, ppt, es), snap_at(g, s), e in chained(p, ppt, es),
-        let i = e.0, let et = e.1, let pt = e.2, let k = e.3, let pos = e.4, let b = e.5 where i > s;
+    view incoming(g, i, et, pt, k, pos, b) = batch_taken(g, _l, _t, p, ppt, es), snap_at(g, s),
+            e in chained(p, ppt, es), let i = e.0, let et = e.1, let pt = e.2, let k = e.3, let pos = e.4, let b = e.5
+            where i > s;
     /// A stored entry that conflicts with an incoming one (same index, another term): it and all after it go.
     view conflict(g, c = min!(i)) = incoming(g, i, et, _, _, _, _), rlog(g: g, idx: i, term: lt, ..) where lt != et;
     truncate: on conflict(g, c), rlog(g, j, jt, jp, k, pos, data) where j >= c {
@@ -758,8 +768,8 @@ at Broker {
     }
     /// A snapshot point past this broker's log: it drops its log and takes the point (Fig. 13). One that its log
     /// already reaches (it holds that entry, or has compacted past it) changes nothing but is acknowledged.
-    view snapshot_new(g, l, t, i, st, pos, conf) =
-        snapshot(g, t, i, st, pos, conf) from l, eff(g, t), takes(g), not holds_point(g, i, st);
+    view snapshot_new(g, l, t, i, st, pos, conf) = snapshot(g, t, i, st, pos, conf) from l, eff(g, t), takes(g),
+            not holds_point(g, i, st);
     view holds_point(g, i, st) {
         rlog(g: g, idx: i, term: st, ..);
         rsnap(g, s, _, _, _), snapshot(g: g, idx: i, sterm: st, ..) where s >= i;

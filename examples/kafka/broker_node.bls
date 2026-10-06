@@ -21,7 +21,8 @@ table answering(c: Conn, next: u64, seq: u64) key(c) while not kafka.closed(c, _
 /// The requests waiting their turn, by connection and arrival index, with their arrival time.
 table queued(c: Conn, i: u64, frame: Bytes, at: Instant) key(c, i) while not kafka.closed(c, _);
 /// Where each request not yet answered starts in its connection's request bytes: the bytes of the requests before it.
-table frame_start(c: Conn, i: u64, start: u64) key(c, i) while answering(c, head, _), not kafka.closed(c, _) where i >= head;
+table frame_start(c: Conn, i: u64, start: u64) key(c, i) while answering(c, head, _), not kafka.closed(c, _)
+        where i >= head;
 /// The connections the broker stopped reading, because their queues are full.
 table paused(c: Conn) key(c) while not kafka.closed(c, _);
 
@@ -33,7 +34,8 @@ accept: on kafka.opened(c, _peer, _at) {
 
 /// A connection's chunks come one per tick, after its `opened` tick, so the state read here is current. A frame
 /// whose size is invalid closes the connection. Each chunk is fed once, here, for both the rules after.
-view fed_chunk(c, n, b, fed) = kafka.data(c, _seq, bytes), reassembly(c, f), received(c, n, b), let fed = feed(f, bytes);
+view fed_chunk(c, n, b, fed) = kafka.data(c, _seq, bytes), reassembly(c, f), received(c, n, b),
+        let fed = feed(f, bytes);
 serve: on fed_chunk(c, n, b, fed) {
     upsert reassembly(c, fed.next);
     upsert received(c, n + fed.frames.len(), b + frames_bytes(fed.frames));
@@ -49,7 +51,7 @@ enqueue: on fed_chunk(c, n, b, fed), (k, x) in with_starts(b, fed.frames).enumer
 
 /// Each connection whose queue holds as many requests, or as many bytes, as it may: the requests from its head on.
 view queue_full(c) = received(c, n, b), answering(c, i, _), frame_start(c, i, s)
-    where n - i >= MAX_QUEUED_REQUESTS || b - s >= MAX_QUEUED_BYTES;
+        where n - i >= MAX_QUEUED_REQUESTS || b - s >= MAX_QUEUED_BYTES;
 
 /// A full queue stops the connection being read; the chunks the host already read still arrive, so the queue can
 /// pass the bound by what the host read ahead. The head is answered without more of the connection's bytes, so the
@@ -64,8 +66,8 @@ unthrottle: while paused(c), not queue_full(c) {
 }
 
 /// The request at the head of each connection's queue, with its API key, version and correlation id.
-view head(c, i, seq, key, version, corr, fr, at) =
-    queued(c, i, fr, at), answering(c, i, seq), let Some(p) = frame_prefix(fr), let (key, version, corr) = p;
+view head(c, i, seq, key, version, corr, fr, at) = queued(c, i, fr, at), answering(c, i, seq),
+        let Some(p) = frame_prefix(fr), let (key, version, corr) = p;
 
 /// The answer to the request at the head of a connection, as the parts of one stream write: once written, the
 /// request leaves the queue and the next one is the head. (An API's handler decides only what the answer is.)

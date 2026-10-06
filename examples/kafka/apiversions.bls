@@ -2,20 +2,41 @@
 //! broker does not support, which Kafka clients use to fall back (KIP-511).
 
 /// ApiVersionsRequest v3–v4.
-format ApiVersionsRequest { client_software_name: compact_string, client_software_version: compact_string, tags }
+format ApiVersionsRequest {
+    client_software_name: compact_string,
+    client_software_version: compact_string,
+    tags
+}
 
 fn decode_api_versions_request(c: Cur) -> Option<ApiVersionsRequest> {
     ApiVersionsRequest::decode(c.buf, c.pos).map(|r| r.0)
 }
 
 /// One supported API: its key and version range.
-format ApiRange { key: i16, min: i16, max: i16, tags }
+format ApiRange {
+    key: i16,
+    min: i16,
+    max: i16,
+    tags
+}
 /// The same, in the version-0 layout (no tagged fields).
-format ApiRange0 { key: i16, min: i16, max: i16 }
+format ApiRange0 {
+    key: i16,
+    min: i16,
+    max: i16
+}
 /// ApiVersionsResponse v3–v4 after its header.
-format ApiVersionsResponse { error: i16, keys: compact_array(ApiRange), throttle: i32, tags }
+format ApiVersionsResponse {
+    error: i16,
+    keys: compact_array(ApiRange),
+    throttle: i32,
+    tags
+}
 /// The version-0 layout, as UNSUPPORTED_VERSION (35) is answered.
-format ApiVersionsUnsupported { constant(i16, 35), keys: array(i32, 0, ApiRange0) }
+format ApiVersionsUnsupported {
+    constant(i16, 35),
+    keys: array(i32, 0, ApiRange0)
+}
 
 /// What this broker answers: Produce 10–12, Fetch 16–17, ListOffsets 7–10, ApiVersions 3–4, Metadata 13, CreateTopics 7,
 /// DeleteTopics 6, DescribeConfigs 4, InitProducerId 3–5, the reassignment APIs, DescribeCluster 0–2, and the
@@ -52,18 +73,29 @@ fn supports(api_key: i16, version: i16) -> bool {
 
 /// ApiVersionsResponse v3–v4 with no error: every supported API, no throttle, and no feature tags.
 fn encode_api_versions_response(correlation_id: i32) -> Bytes {
-    frame(response_header_v0(correlation_id).concat(ApiVersionsResponse::encode(ApiVersionsResponse { error: 0i16, keys: supported(), throttle: 0i32 })))
+    frame(response_header_v0(correlation_id).concat(ApiVersionsResponse::encode(ApiVersionsResponse {
+        error: 0i16,
+        keys: supported(),
+        throttle: 0i32
+    })))
 }
 
 /// UNSUPPORTED_VERSION (35), answered in the version-0 layout, whatever the version asked, listing the ApiVersions
 /// range: a client that sent a version it may not reads this and retries with a supported one.
 fn encode_api_versions_unsupported(correlation_id: i32) -> Bytes {
     let own = supported().filter(|r| r.key == API_VERSIONS).map(|r| ApiRange0 { key: r.key, min: r.min, max: r.max });
-    frame(response_header_v0(correlation_id).concat(ApiVersionsUnsupported::encode(ApiVersionsUnsupported { keys: own })))
+    frame(response_header_v0(correlation_id).concat(ApiVersionsUnsupported::encode(ApiVersionsUnsupported {
+        keys: own
+    })))
 }
 
 /// ApiVersionsRequest v4, framed, from a client.
-fn encode_api_versions_request(correlation_id: i32, client_id: String, software: String, software_version: String) -> Bytes {
+fn encode_api_versions_request(
+    correlation_id: i32,
+    client_id: String,
+    software: String,
+    software_version: String
+) -> Bytes {
     let body = ApiVersionsRequest { client_software_name: software, client_software_version: software_version };
     frame(request_header_v2(API_VERSIONS, 4i16, correlation_id, client_id).concat(ApiVersionsRequest::encode(body)))
 }

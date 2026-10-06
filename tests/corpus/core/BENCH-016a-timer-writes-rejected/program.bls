@@ -15,15 +15,15 @@ timer ticker every 1s;
 output fired(n: u64);
 
 w_emit: while item(n) {
-    emit ticker(n, now());                  // expect: BLS0400 (`<=` into a periodic)
+    emit ticker(n, now()); // expect: BLS0400 (`<=` into a periodic)
 }
 
 w_next: while item(n) {
-    next ticker(n, now());                  // expect: BLS0400 (`<+` into a periodic)
+    next ticker(n, now()); // expect: BLS0400 (`<+` into a periodic)
 }
 
 w_delete: on ticker(c, t) {
-    delete ticker(c, t);                    // expect: BLS0400 (`<-` from a periodic)
+    delete ticker(c, t); // expect: BLS0400 (`<-` from a periodic)
 }
 
 report: on ticker(c, _) {

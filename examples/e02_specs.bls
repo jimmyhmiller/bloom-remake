@@ -8,7 +8,7 @@
 //! `simple_deliv`, loses a message at 4/2/0 (BENCH-130b). This file is a library of modules and specs: it has no
 //! `program` header.
 
-use e02_reliable_broadcast::{ReliableBroadcast, MsgId};
+use e02_reliable_broadcast::{ ReliableBroadcast, MsgId };
 
 /// Every member runs one instance of the broadcast; `start` asks a node to broadcast.
 pub module Group {
@@ -70,7 +70,13 @@ spec Delivered {
 spec RetryFaults for Group {
     include Clique;
     include Delivered;
-    faults { eot: 6, eff: 3, crashes: 0, model: sync, round: 1s }
+    faults {
+        eot: 6,
+        eff: 3,
+        crashes: 0,
+        model: sync,
+        round: 1s
+    }
     check ldfi expect holds;
 }
 
@@ -78,7 +84,13 @@ spec RetryFaults for Group {
 spec RetryLongFaults for Group {
     include Clique;
     include Delivered;
-    faults { eot: 25, eff: 23, crashes: 0, model: sync, round: 1s }
+    faults {
+        eot: 25,
+        eff: 23,
+        crashes: 0,
+        model: sync,
+        round: 1s
+    }
     check ldfi expect holds;
 }
 
@@ -86,7 +98,13 @@ spec RetryLongFaults for Group {
 spec RetryCrashFaults for Group {
     include Clique;
     include Delivered;
-    faults { eot: 4, eff: 2, crashes: 1, model: sync, round: 1s }
+    faults {
+        eot: 4,
+        eff: 2,
+        crashes: 1,
+        model: sync,
+        round: 1s
+    }
     check ldfi expect fails;
 }
 
@@ -94,6 +112,12 @@ spec RetryCrashFaults for Group {
 spec OneShotFaults for OneShotGroup {
     include Clique;
     include Delivered;
-    faults { eot: 4, eff: 2, crashes: 0, model: sync, round: 1s }
+    faults {
+        eot: 4,
+        eff: 2,
+        crashes: 0,
+        model: sync,
+        round: 1s
+    }
     check ldfi expect fails;
 }

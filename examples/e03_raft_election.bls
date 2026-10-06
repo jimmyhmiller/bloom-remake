@@ -17,7 +17,7 @@ role Server: cluster;
 
 channel request_vote(term: u64, last_idx: u64, last_term: u64): Server -> Server;
 channel vote(term: u64, granted: bool): Server -> Server;
-channel append_entries(term: u64): Server -> Server;           // the heartbeat form
+channel append_entries(term: u64): Server -> Server; // the heartbeat form
 channel append_reply(term: u64, ok: bool): Server -> Server;
 
 at Server {
@@ -41,7 +41,7 @@ at Server {
     output leader_term(term: u64);
 
     bootstrap fresh {
-        emit current_term(0);                       // durable: written on a node's very first start only
+        emit current_term(0); // durable: written on a node's very first start only
     }
     bootstrap {
         emit deadline(now() + rand_range(ELECTION_MIN, ELECTION_MAX, ("boot", 0u64)));
@@ -62,8 +62,9 @@ at Server {
         next current_term(t);
     }
 
-    invariant vote_needs_term "a vote was recorded for a term above the current term":
-        never voted_for(t, _), current_term(c) where t > c;
+    invariant vote_needs_term "a vote was recorded for a term above the current term": never voted_for(t, _),
+            current_term(c)
+            where t > c;
 
     // ---- roles are views; a higher term makes each of them false for the old term
     view leader(t) = eff(t), won(t);
@@ -80,30 +81,27 @@ at Server {
     }
 
     // ---- voter side
-    view rv_ok(c, t) =
-        request_vote(t, li, lt) from c, eff(t), last_log(mi, mt)
-        where lt > mt || (lt == mt && li >= mi);
+    view rv_ok(c, t) = request_vote(t, li, lt) from c, eff(t), last_log(mi, mt) where lt > mt || (lt == mt && li >= mi);
     /// At most one new vote per term per tick. The seeded choice is the same on every replay (SEM-085).
     view fresh_grant(c, t) = rv_ok(c, t), not voted_for(t, _), choose!(c per t);
     view grant(c, t) {
         fresh_grant(c, t);
-        rv_ok(c, t), voted_for(t, c);               // a candidate's retry gets the same answer
+        rv_ok(c, t), voted_for(t, c); // a candidate's retry gets the same answer
     }
 
     grant_vote: on grant(c, t) {
-        next voted_for(t, c);                       // durable before the reply is released
+        next voted_for(t, c); // durable before the reply is released
         send vote(t, true) to c;
     }
     refuse_vote: on request_vote(t, _, _) from c, eff(e), not grant(c, t) {
-        send vote(e, false) to c;                   // carries our term: a stale candidate steps down
+        send vote(e, false) to c; // carries our term: a stale candidate steps down
     }
 
     // ---- the randomized election timeout
     view heard_leader() = append_entries(t), eff(t);
     view granted_now() = grant(_, _);
-    view timed_out(t) =
-        poll, eff(t), deadline(d), not leader(t), not granted_now(), not heard_leader()
-        where now() >= d;
+    view timed_out(t) = poll, eff(t), deadline(d), not leader(t), not granted_now(), not heard_leader()
+            where now() >= d;
     view reset_timer() {
         granted_now();
         heard_leader();
@@ -116,7 +114,7 @@ at Server {
 
     start_election: on timed_out(t), last_log(li, lt), let nt = t + 1 {
         next current_term(nt);
-        next voted_for(nt, self);                   // vote for myself, durably
+        next voted_for(nt, self); // vote for myself, durably
         next votes(nt, set[self]);
         for p in Server where p != self {
             send request_vote(nt, li, lt) to p;
@@ -132,7 +130,7 @@ at Server {
         next won(t);
         next leader_of(t, self);
         for p in Server where p != self {
-            send append_entries(t) to p;            // announce at once
+            send append_entries(t) to p; // announce at once
         }
     }
 
@@ -143,7 +141,7 @@ at Server {
         }
     }
     accept_leader: on append_entries(t) from l, eff(t) {
-        emit leader_of(t, l);                       // two leaders of one term would break the key (SEM-050)
+        emit leader_of(t, l); // two leaders of one term would break the key (SEM-050)
         send append_reply(t, true) to l;
     }
     reject_stale: on append_entries(st) from l, eff(t) where st < t {

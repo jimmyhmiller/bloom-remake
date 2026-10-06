@@ -34,8 +34,8 @@ at Src {
     view has_a() = m("a", _);
     view has_b() = m("b", _);
     /// m read as one map value: `key?("a")` and the value-level size.
-    view key_a() = lmap{ k => s | m(k, s) }.has_key("a");
-    view m_size(n) = let n = reveal!(lmap{ k => s | m(k, s) }.size());
+    view key_a() = lmap { k => s | m(k, s) }.has_key("a");
+    view m_size(n) = let n = reveal!(lmap { k => s | m(k, s) }.size());
 }
 
 at Dst {

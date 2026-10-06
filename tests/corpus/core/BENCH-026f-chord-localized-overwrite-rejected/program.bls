@@ -58,15 +58,20 @@ at Peer {
         }
     }
 
-    #[localize(chain)] sb1: on stabilize(), node_id(self, n), best_succ(self, s, si), pred(p, pi, true) @ si where p in n<..s {    // expect: BLS0805
+    #[localize(chain)]
+    sb1: on stabilize(), node_id(self, n), best_succ(self, s, si), pred(p, pi, true) @ si
+            where p in n<..s { // expect: BLS0805
         emit succ(p, pi);
     }
 
-    #[localize(chain)] sb2: on stabilize(), succ(_, si), succ(s1, si1) @ si {    // expect: BLS1005
+    #[localize(chain)]
+    sb2: on stabilize(), succ(_, si), succ(s1, si1) @ si { // expect: BLS1005
         emit succ(s1, si1);
     }
 
-    #[localize(chain)] sb3: on stabilize(), node_id(self, n), succ(_, si), pred(p, _, known) @ si, node_id(si, n1) where (not known || n in p<..n1) && si != self {    // expect: BLS0805
+    #[localize(chain)]
+    sb3: on stabilize(), node_id(self, n), succ(_, si), pred(p, _, known) @ si, node_id(si, n1)
+            where (not known || n in p<..n1) && si != self { // expect: BLS0805
         send pred_update(n) to si;
     }
 

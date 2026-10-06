@@ -9,8 +9,16 @@
 const NO_REASSIGNMENT_IN_PROGRESS: i16 = 85;
 
 /// One partition of a reassignment request: its index and target replicas (`None` cancels a reassignment).
-format ReassignPartition { index: i32, replicas: compact_nullable_array(i32), tags }
-format ReassignTopic { name: compact_string, partitions: compact_array(ReassignPartition), tags }
+format ReassignPartition {
+    index: i32,
+    replicas: compact_nullable_array(i32),
+    tags
+}
+format ReassignTopic {
+    name: compact_string,
+    partitions: compact_array(ReassignPartition),
+    tags
+}
 /// AlterPartitionReassignmentsRequest. `allow_rf_change` (v1; true before) lets a reassignment change the number of
 /// replicas.
 format AlterReassignmentsRequest(version: i16) {
@@ -39,7 +47,13 @@ fn reassign_repeated(req: AlterReassignmentsRequest) -> Set<(String, i32)> {
 }
 
 /// An entry's verdict at the broker: a repeated partition, else the replicas' (`reassign_replicas_error`).
-fn reassign_entry_error(repeated: Set<(String, i32)>, name: String, part: i32, replicas: Option<Vec<i32>>, brokers: Vec<i32>) -> i16 {
+fn reassign_entry_error(
+    repeated: Set<(String, i32)>,
+    name: String,
+    part: i32,
+    replicas: Option<Vec<i32>>,
+    brokers: Vec<i32>
+) -> i16 {
     if repeated.contains((name, part)) { INVALID_REQUEST } else { reassign_replicas_error(replicas, brokers) }
 }
 
@@ -89,8 +103,17 @@ fn error_at(errors: Map<u64, i16>, k: u64) -> i16 {
     }
 }
 
-format AlterPartition { index: i32, error: i16, message: compact_nullable_string, tags }
-format AlterTopic { name: compact_string, partitions: compact_array(AlterPartition), tags }
+format AlterPartition {
+    index: i32,
+    error: i16,
+    message: compact_nullable_string,
+    tags
+}
+format AlterTopic {
+    name: compact_string,
+    partitions: compact_array(AlterPartition),
+    tags
+}
 format AlterReassignmentsResponse(version: i16) {
     throttle: i32,
     allow_rf_change: bool if version >= 1i16,
@@ -101,24 +124,42 @@ format AlterReassignmentsResponse(version: i16) {
 }
 
 /// The response: each partition of the request with its error (`errors`, by position in `reassign_entries`).
-fn encode_alter_reassignments_response(correlation_id: i32, version: i16, req: AlterReassignmentsRequest, errors: Map<u64, i16>) -> Bytes {
+fn encode_alter_reassignments_response(
+    correlation_id: i32,
+    version: i16,
+    req: AlterReassignmentsRequest,
+    errors: Map<u64, i16>
+) -> Bytes {
     let ends = req.topics.scan(0, |n, t| n + t.partitions.len());
     let topics = req.topics.enumerate().map(|t| {
         let first = match ends.get(t.0) {
             Some(x) => x - t.1.partitions.len(),
             None => error("encode_alter_reassignments_response: a topic without an end"),
         };
-        AlterTopic { name: t.1.name, partitions: t.1.partitions.enumerate().map(|p| {
-            let e = error_at(errors, first + p.0);
-            AlterPartition { index: p.1.index, error: e, message: reassign_message(e) }
-        }) }
+        AlterTopic {
+            name: t.1.name,
+            partitions: t.1.partitions.enumerate().map(|p| {
+                let e = error_at(errors, first + p.0);
+                AlterPartition { index: p.1.index, error: e, message: reassign_message(e) }
+            })
+        }
     });
-    let r = AlterReassignmentsResponse { throttle: 0i32, allow_rf_change: req.allow_rf_change, error: NONE, message: None, topics: topics };
+    let r = AlterReassignmentsResponse {
+        throttle: 0i32,
+        allow_rf_change: req.allow_rf_change,
+        error: NONE,
+        message: None,
+        topics: topics
+    };
     frame(response_header_v1(correlation_id).concat(AlterReassignmentsResponse::encode(r, version)))
 }
 
 /// ListPartitionReassignmentsRequest: the topics and partitions asked about (`None`: every reassignment).
-format ListReassignmentsRequest { timeout_ms: i32, topics: compact_nullable_array((compact_string, compact_array(i32), tags)), tags }
+format ListReassignmentsRequest {
+    timeout_ms: i32,
+    topics: compact_nullable_array((compact_string, compact_array(i32), tags)),
+    tags
+}
 
 fn decode_list_reassignments(c: Cur) -> Option<ListReassignmentsRequest> {
     ListReassignmentsRequest::decode(c.buf, c.pos).map(|r| r.0)
@@ -126,7 +167,12 @@ fn decode_list_reassignments(c: Cur) -> Option<ListReassignmentsRequest> {
 
 /// A reassignment in progress, as ListPartitionReassignments reports it: the partition, its replicas (the
 /// target's, then the ones being removed), the ones being added and the ones being removed.
-struct Ongoing { name: String, index: i32, replicas: Vec<i32>, target: Vec<i32> }
+struct Ongoing {
+    name: String,
+    index: i32,
+    replicas: Vec<i32>,
+    target: Vec<i32>
+}
 
 /// The members of `xs` that are in `ys`, in `xs`'s order.
 fn among(xs: Vec<i32>, ys: Vec<i32>) -> Vec<i32> {
@@ -139,14 +185,32 @@ fn reassign_shown(replicas: Vec<i32>, target: Vec<i32>) -> Vec<i32> {
 }
 
 /// A partition being reassigned on the wire: its replicas as shown, those being added and those being removed.
-format OngoingPartition { index: i32, replicas: compact_array(i32), adding: compact_array(i32), removing: compact_array(i32), tags }
-format OngoingTopic { name: compact_string, partitions: compact_array(OngoingPartition), tags }
-format ListReassignmentsResponse { throttle: i32, error: i16, message: compact_nullable_string, topics: compact_array(OngoingTopic), tags }
+format OngoingPartition {
+    index: i32,
+    replicas: compact_array(i32),
+    adding: compact_array(i32),
+    removing: compact_array(i32),
+    tags
+}
+format OngoingTopic {
+    name: compact_string,
+    partitions: compact_array(OngoingPartition),
+    tags
+}
+format ListReassignmentsResponse {
+    throttle: i32,
+    error: i16,
+    message: compact_nullable_string,
+    topics: compact_array(OngoingTopic),
+    tags
+}
 
 fn ongoing_partition(o: Ongoing) -> OngoingPartition {
     OngoingPartition {
-        index: o.index, replicas: reassign_shown(o.replicas, o.target),
-        adding: o.target.filter(|r| not o.replicas.contains(r)), removing: o.replicas.filter(|r| not o.target.contains(r)),
+        index: o.index,
+        replicas: reassign_shown(o.replicas, o.target),
+        adding: o.target.filter(|r| not o.replicas.contains(r)),
+        removing: o.replicas.filter(|r| not o.target.contains(r)),
     }
 }
 
@@ -164,7 +228,16 @@ fn list_reassignments_topics(req: ListReassignmentsRequest, ongoing: Vec<Ongoing
     names.map(|n| OngoingTopic { name: n, partitions: asked.filter(|o| o.name == n).map(|o| ongoing_partition(o)) })
 }
 
-fn encode_list_reassignments_response(correlation_id: i32, req: ListReassignmentsRequest, ongoing: Vec<Ongoing>) -> Bytes {
-    let r = ListReassignmentsResponse { throttle: 0i32, error: NONE, message: None, topics: list_reassignments_topics(req, ongoing) };
+fn encode_list_reassignments_response(
+    correlation_id: i32,
+    req: ListReassignmentsRequest,
+    ongoing: Vec<Ongoing>
+) -> Bytes {
+    let r = ListReassignmentsResponse {
+        throttle: 0i32,
+        error: NONE,
+        message: None,
+        topics: list_reassignments_topics(req, ongoing)
+    };
     frame(response_header_v1(correlation_id).concat(ListReassignmentsResponse::encode(r)))
 }
