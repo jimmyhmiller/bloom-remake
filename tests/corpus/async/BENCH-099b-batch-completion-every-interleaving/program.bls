@@ -34,9 +34,7 @@ fn words(text: String) -> Vec<String> {
 /// declared reliable, as in E6: the simulator may delay and reorder its messages but not lose them, so every run
 /// completes and the finals can be compared across interleavings.
 #[fault(reliable)]
-channel occ(word: String, split: u32, line: u64, pos: u64): Mapper -> Reducer
-    partition by word
-    sealed by (split);
+channel occ(word: String, split: u32, line: u64, pos: u64): Mapper -> Reducer partition by word sealed by(split);
 
 at Mapper {
     /// A split's records, from the host.

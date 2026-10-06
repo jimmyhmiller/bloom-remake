@@ -9,9 +9,9 @@
 program destructive_cart version 1;
 
 /// Figure 11, CartProtocol and CartClientProtocol.
-channel action_msg(@server: Node, client: Node, session: u64, reqid: u64, item: String, action: String);
-channel checkout_msg(@server: Node, client: Node, session: u64, reqid: u64);
-channel response_msg(@client: Node, server: Node, session: u64, contents: Vec<String>);
+channel action_msg(@ server: Node, client: Node, session: u64, reqid: u64, item: String, action: String);
+channel checkout_msg(@ server: Node, client: Node, session: u64, reqid: u64);
+channel response_msg(@ client: Node, server: Node, session: u64, contents: Vec<String>);
 input client_action(server: Node, session: u64, reqid: u64, item: String, action: String);
 input client_checkout(server: Node, session: u64, reqid: u64);
 output client_response(client: Node, server: Node, session: u64, contents: Vec<String>);

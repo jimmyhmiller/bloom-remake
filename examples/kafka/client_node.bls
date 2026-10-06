@@ -33,7 +33,6 @@ table session(c: Conn, bytes: Framer) key(c);
 table versions_seen(error: i16, ranges: Vec<ApiRange>);
 table metadata_seen(answer: MetadataAnswer);
 
-
 start: on boot(), current_addr(a) {
     send up.dial(0, a);
 }
@@ -50,10 +49,14 @@ redial_after_close: on up.closed(c, _why), session(c, p), current_addr(a) {
 
 ask: on up.opened(c, _req, _peer, _at) {
     emit session(c, framer());
-    send up.write(c, 0, [
-        Part::Bytes(encode_api_versions_request(CORR_VERSIONS, "blossom", "blossom-kafka-client", "0.1")),
-        Part::Bytes(encode_metadata_request(CORR_METADATA, "blossom", None)),
-    ]);
+    send up.write(
+        c,
+        0,
+        [
+            Part::Bytes(encode_api_versions_request(CORR_VERSIONS, "blossom", "blossom-kafka-client", "0.1")),
+            Part::Bytes(encode_metadata_request(CORR_METADATA, "blossom", None)),
+        ]
+    );
 }
 
 /// A connection's chunks come one per tick after its `opened` tick; each complete response frame is recorded.
@@ -61,14 +64,12 @@ recv: on up.data(c, _seq, bytes), session(c, f) {
     upsert session(c, feed(f, bytes).next);
 }
 
-record_versions: on up.data(c, _seq, bytes), session(c, f),
-        fr in feed(f, bytes).frames,
+record_versions: on up.data(c, _seq, bytes), session(c, f), fr in feed(f, bytes).frames,
         let Some(v) = versions_answer(fr) {
     emit versions_seen(v.0, v.1);
 }
 
-record_metadata: on up.data(c, _seq, bytes), session(c, f),
-        fr in feed(f, bytes).frames,
+record_metadata: on up.data(c, _seq, bytes), session(c, f), fr in feed(f, bytes).frames,
         let Some(m) = metadata_answer(fr) {
     emit metadata_seen(m);
 }
@@ -116,17 +117,23 @@ ask_topic: on up.opened(c, _req, _peer, _at) where CLIENT_BATCHES > 0u64 && not 
     emit wseq(c, 2);
 }
 
-ask_topic_with_pid: on up.opened(c, _req, _peer, _at), producer_id(_, _) where CLIENT_BATCHES > 0u64 && CLIENT_IDEMPOTENT {
+ask_topic_with_pid: on up.opened(c, _req, _peer, _at), producer_id(_, _)
+        where CLIENT_BATCHES > 0u64 && CLIENT_IDEMPOTENT {
     send up.write(c, 1, [Part::Bytes(encode_metadata_request(CORR_TOPIC, "blossom", Some([CLIENT_TOPIC])))]);
     emit wseq(c, 2);
 }
 
 /// An idempotent producer without its id asks for one first, in the same write: the answer comes before the topic's.
-ask_pid_and_topic: on up.opened(c, _req, _peer, _at), not producer_id(_, _) where CLIENT_BATCHES > 0u64 && CLIENT_IDEMPOTENT {
-    send up.write(c, 1, [
-        Part::Bytes(encode_init_pid_request(CORR_INIT_PID, "blossom")),
-        Part::Bytes(encode_metadata_request(CORR_TOPIC, "blossom", Some([CLIENT_TOPIC]))),
-    ]);
+ask_pid_and_topic: on up.opened(c, _req, _peer, _at), not producer_id(_, _)
+        where CLIENT_BATCHES > 0u64 && CLIENT_IDEMPOTENT {
+    send up.write(
+        c,
+        1,
+        [
+            Part::Bytes(encode_init_pid_request(CORR_INIT_PID, "blossom")),
+            Part::Bytes(encode_metadata_request(CORR_TOPIC, "blossom", Some([CLIENT_TOPIC]))),
+        ]
+    );
     emit wseq(c, 2);
 }
 
@@ -162,7 +169,8 @@ resume_produce: on frames(c, fr), let Some(t) = topic_answer(fr), progress(k), w
     emit sent(k);
 }
 
-resume_read: on frames(c, fr), let Some(t) = topic_answer(fr), progress(k), read_at(p, off), not read_done(_), wseq(c, n)
+resume_read: on frames(c, fr), let Some(t) = topic_answer(fr), progress(k), read_at(p, off), not read_done(_),
+        wseq(c, n)
         where k >= CLIENT_BATCHES && CLIENT_BATCHES > 0u64 {
     send up.write(c, n, [Part::Bytes(encode_fetch_request(CORR_FETCH, "blossom", t.0, p, off))]);
     upsert wseq(c, n + 1u64);
@@ -178,7 +186,8 @@ produce_elsewhere: on frames(c, fr), let Some(a) = produce_answer(fr), next_brok
 }
 
 /// A produce answered: record it, then send the next batch, or start reading.
-after_produce: on frames(c, fr), let Some(a) = produce_answer(fr), topic_seen(id, parts), wseq(c, n), producing_as(pid, epoch)
+after_produce: on frames(c, fr), let Some(a) = produce_answer(fr), topic_seen(id, parts), wseq(c, n),
+        producing_as(pid, epoch)
         where a.1 != NOT_LEADER_OR_FOLLOWER && a.1 != LEADER_NOT_AVAILABLE {
     emit acked(a.0, (a.0 % parts) as i32, a.2, a.1);
     upsert wseq(c, n + 1u64);
@@ -197,13 +206,15 @@ record_fetch: on frames(_c, fr), let Some(r) = fetched_answer(fr), read_at(p, _o
 }
 
 /// A fetch from a broker that does not lead the partition: read on from the next broker.
-fetch_elsewhere: on frames(c, fr), let Some(r) = fetched_answer(fr), next_broker(j, _a) where r.0 == NOT_LEADER_OR_FOLLOWER {
+fetch_elsewhere: on frames(c, fr), let Some(r) = fetched_answer(fr), next_broker(j, _a)
+        where r.0 == NOT_LEADER_OR_FOLLOWER {
     upsert on_broker(j);
     send up.close(c);
 }
 
 after_fetch: on frames(c, fr), let Some(r) = fetched_answer(fr), read_at(p, off), topic_seen(id, parts), wseq(c, w),
-        let Some(n) = next_read(p, off, parts, r.0, r.1, r.2) where r.0 != NOT_LEADER_OR_FOLLOWER {
+        let Some(n) = next_read(p, off, parts, r.0, r.1, r.2)
+        where r.0 != NOT_LEADER_OR_FOLLOWER {
     upsert reading(n.0, n.1);
     send up.write(c, w, [Part::Bytes(encode_fetch_request(CORR_FETCH, "blossom", id, n.0, n.1))]);
     upsert wseq(c, w + 1u64);
@@ -228,36 +239,45 @@ static contact_id(i: u64, id: i32);
 durable table commit_offset(partition: i32, offset: i64) key();
 durable table commit_acked(partition: i32, offset: i64, error: i16) key();
 
-ask_coordinator_after_read: on frames(c, fr), let Some(r) = fetched_answer(fr), read_at(p, off), topic_seen(_id, parts), wseq(c, w)
+ask_coordinator_after_read: on frames(c, fr), let Some(r) = fetched_answer(fr), read_at(p, off), topic_seen(_id, parts),
+        wseq(c, w)
         where CLIENT_COMMIT && next_read(p, off, parts, r.0, r.1, r.2) == None {
     emit commit_offset(p, r.1);
     send up.write(c, w, [Part::Bytes(encode_find_coordinator_request(CORR_FIND, "blossom", CLIENT_GROUP))]);
     upsert wseq(c, w + 1u64);
 }
 
-resume_commit: on frames(c, fr), let Some(_t) = topic_answer(fr), commit_offset(_p, _off), not commit_acked(_, _, _), wseq(c, n)
+resume_commit: on frames(c, fr), let Some(_t) = topic_answer(fr), commit_offset(_p, _off), not commit_acked(_, _, _),
+        wseq(c, n)
         where CLIENT_COMMIT {
     send up.write(c, n, [Part::Bytes(encode_find_coordinator_request(CORR_FIND, "blossom", CLIENT_GROUP))]);
     upsert wseq(c, n + 1u64);
 }
 
 /// The coordinator is the broker this connection is to: commit through it.
-commit_here: on frames(c, fr), let Some(a) = coordinator_answer(fr), current_broker(i), contact_id(i, id), commit_offset(p, off), wseq(c, n)
+commit_here: on frames(c, fr), let Some(a) = coordinator_answer(fr), current_broker(i), contact_id(i, id),
+        commit_offset(p, off), wseq(c, n)
         where a.0 == NONE && a.1 == id {
-    send up.write(c, n, [Part::Bytes(encode_offset_commit_request(CORR_COMMIT, "blossom", CLIENT_GROUP, CLIENT_TOPIC, p, off))]);
+    send up.write(
+        c,
+        n,
+        [Part::Bytes(encode_offset_commit_request(CORR_COMMIT, "blossom", CLIENT_GROUP, CLIENT_TOPIC, p, off))]
+    );
     upsert wseq(c, n + 1u64);
 }
 
 /// Another broker coordinates: go there (closing the connection redials it).
 view coordinator_contact(j, id) = contact_id(j, id);
-coordinate_elsewhere: on frames(c, fr), let Some(a) = coordinator_answer(fr), current_broker(i), coordinator_contact(j, a.1)
+coordinate_elsewhere: on frames(c, fr), let Some(a) = coordinator_answer(fr), current_broker(i),
+        coordinator_contact(j, a.1)
         where a.0 == NONE && j != i {
     upsert on_broker(j);
     send up.close(c);
 }
 
 /// A coordinator this client has no contact for: try the next broker.
-coordinator_unknown: on frames(c, fr), let Some(a) = coordinator_answer(fr), next_broker(j, _a), not coordinator_contact(_, a.1)
+coordinator_unknown: on frames(c, fr), let Some(a) = coordinator_answer(fr), next_broker(j, _a),
+        not coordinator_contact(_, a.1)
         where a.0 == NONE {
     upsert on_broker(j);
     send up.close(c);

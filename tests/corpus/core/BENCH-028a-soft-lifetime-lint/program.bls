@@ -17,7 +17,9 @@ refresh: on ping(n) {
     emit body(n);
 }
 
-derive: while body(n) { emit head(n); }     // expect: BLS1007 (head ttl 3s < body ttl 10s)
+derive: while body(n) {
+    emit head(n);
+} // expect: BLS1007 (head ttl 3s < body ttl 10s)
 
 report: while head(n) {
     emit alive(n);

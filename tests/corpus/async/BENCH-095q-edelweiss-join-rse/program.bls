@@ -17,7 +17,7 @@ program edelweiss_join_rse version 1;
 // reached it and sbuf's epoch is sealed. Bud's seal tables seal_sbuf_epoch and seal_node_epoch are the seals of tables
 // declared `sealed by (epoch)`.
 
-table jr_node(addr: String, epoch: u64) sealed by (epoch);
+table jr_node(addr: String, epoch: u64) sealed by(epoch);
 
 input jr_node_in(addr: String, epoch: u64);
 
@@ -31,7 +31,7 @@ jr_node_close: on jr_node_seal(epoch) {
     seal jr_node(epoch: epoch);
 }
 
-table jr_sbuf(id: u64, epoch: u64, val: String) key(id) sealed by (epoch);
+table jr_sbuf(id: u64, epoch: u64, val: String) key(id) sealed by(epoch);
 
 input jr_sbuf_in(id: u64, epoch: u64, val: String);
 
@@ -63,7 +63,7 @@ jr_deliver: while jr_sbuf(i, e, v), jr_node(a, e), not jr_res_approx(a, i, e, v)
 // The same program with the join predicate written the other way round (`pairs(node.epoch => sbuf.epoch)`): the same
 // reclamation. In the port the join atoms are written in the other order.
 
-table jrv_node(addr: String, epoch: u64) sealed by (epoch);
+table jrv_node(addr: String, epoch: u64) sealed by(epoch);
 
 input jrv_node_in(addr: String, epoch: u64);
 
@@ -77,7 +77,7 @@ jrv_node_close: on jrv_node_seal(epoch) {
     seal jrv_node(epoch: epoch);
 }
 
-table jrv_sbuf(id: u64, epoch: u64, val: String) key(id) sealed by (epoch);
+table jrv_sbuf(id: u64, epoch: u64, val: String) key(id) sealed by(epoch);
 
 input jrv_sbuf_in(id: u64, epoch: u64, val: String);
 
@@ -109,7 +109,7 @@ jrv_deliver: while jrv_node(a, e), jrv_sbuf(i, e, v), not jrv_res_approx(a, i, e
 // A join with no predicate (a Cartesian product): `res <= ((sbuf * node).pairs {|s,n| s + n}).notin(res_approx)`, with
 // whole-relation seals on node and on sbuf.
 
-table nq_node(addr: String) sealed by ();
+table nq_node(addr: String) sealed by();
 
 input nq_node_in(addr: String);
 
@@ -123,7 +123,7 @@ nq_node_close: on nq_node_seal() {
     seal nq_node();
 }
 
-table nq_sbuf(id: u64, val: String) key(id) sealed by ();
+table nq_sbuf(id: u64, val: String) key(id) sealed by();
 
 input nq_sbuf_in(id: u64, val: String);
 

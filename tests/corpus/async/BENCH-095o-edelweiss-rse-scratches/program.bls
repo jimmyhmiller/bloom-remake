@@ -318,7 +318,7 @@ rbad_t12_load: on rbad_t12_in(x, y) {
 
 scratch rbad_t8(key: u64, val: u64);
 
-channel rbad_t11(@x: Node, y: u64);
+channel rbad_t11(@ x: Node, y: u64);
 
 output rbad_r1(key: u64, val: u64);
 output rbad_r2(key: u64, val: u64);

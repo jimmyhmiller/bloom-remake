@@ -20,10 +20,10 @@ input add_edge(a: String, b: String);
 input end_of_edges();
 
 /// The edge stream, punctuated as a whole by its producers.
-channel edge_msg(a: String, b: String) sealed by () producers edge_source;
+channel edge_msg(a: String, b: String) sealed by() producers edge_source;
 
 /// At the graph node: every edge received. It only grows until it is sealed.
-table edge(a: String, b: String) sealed by ();
+table edge(a: String, b: String) sealed by();
 
 output reach();
 output reach_final();

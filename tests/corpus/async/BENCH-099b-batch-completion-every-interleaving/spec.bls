@@ -11,27 +11,107 @@ spec StageCompletion for r#program {
     assign Mapper = [M1, M2, M3, M4];
     assign Reducer = [R];
 
-    fact line(1, 1, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M1 at tick 1;
-    fact line(1, 2, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M1 at tick 1;
-    fact line(1, 3, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M1 at tick 1;
-    fact line(1, 4, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M1 at tick 1;
-    fact line(1, 5, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M1 at tick 1;
-    fact line(1, 6, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M1 at tick 1;
-    fact line(1, 7, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M1 at tick 1;
-    fact line(1, 8, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M1 at tick 1;
-    fact line(1, 9, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M1 at tick 1;
-    fact line(1, 10, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M1 at tick 1;
+    fact line(
+        1,
+        1,
+        "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"
+    ) @ M1 at tick 1;
+    fact line(
+        1,
+        2,
+        "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"
+    ) @ M1 at tick 1;
+    fact line(
+        1,
+        3,
+        "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"
+    ) @ M1 at tick 1;
+    fact line(
+        1,
+        4,
+        "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"
+    ) @ M1 at tick 1;
+    fact line(
+        1,
+        5,
+        "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"
+    ) @ M1 at tick 1;
+    fact line(
+        1,
+        6,
+        "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"
+    ) @ M1 at tick 1;
+    fact line(
+        1,
+        7,
+        "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"
+    ) @ M1 at tick 1;
+    fact line(
+        1,
+        8,
+        "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"
+    ) @ M1 at tick 1;
+    fact line(
+        1,
+        9,
+        "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"
+    ) @ M1 at tick 1;
+    fact line(
+        1,
+        10,
+        "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"
+    ) @ M1 at tick 1;
     fact line(1, 11, "cat dog") @ M1 at tick 1;
-    fact line(2, 1, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M2 at tick 1;
-    fact line(2, 2, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M2 at tick 1;
-    fact line(2, 3, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M2 at tick 1;
-    fact line(2, 4, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M2 at tick 1;
-    fact line(2, 5, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M2 at tick 1;
-    fact line(2, 6, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M2 at tick 1;
-    fact line(2, 7, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M2 at tick 1;
-    fact line(2, 8, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M2 at tick 1;
-    fact line(2, 9, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M2 at tick 1;
-    fact line(2, 10, "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the") @ M2 at tick 1;
+    fact line(
+        2,
+        1,
+        "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"
+    ) @ M2 at tick 1;
+    fact line(
+        2,
+        2,
+        "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"
+    ) @ M2 at tick 1;
+    fact line(
+        2,
+        3,
+        "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"
+    ) @ M2 at tick 1;
+    fact line(
+        2,
+        4,
+        "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"
+    ) @ M2 at tick 1;
+    fact line(
+        2,
+        5,
+        "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"
+    ) @ M2 at tick 1;
+    fact line(
+        2,
+        6,
+        "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"
+    ) @ M2 at tick 1;
+    fact line(
+        2,
+        7,
+        "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"
+    ) @ M2 at tick 1;
+    fact line(
+        2,
+        8,
+        "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"
+    ) @ M2 at tick 1;
+    fact line(
+        2,
+        9,
+        "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"
+    ) @ M2 at tick 1;
+    fact line(
+        2,
+        10,
+        "the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the"
+    ) @ M2 at tick 1;
     fact line(2, 11, "dog") @ M2 at tick 1;
     fact line(3, 1, "dog") @ M3 at tick 1;
     fact line(4, 1, "cat bird") @ M4 at tick 4;
@@ -40,7 +120,11 @@ spec StageCompletion for r#program {
     fact split_end(3) @ M3 at tick 4;
     fact split_end(4) @ M4 at tick 6;
 
-    faults { crashes: 0, model: async, delay: 3 }
+    faults {
+        crashes: 0,
+        model: async,
+        delay: 3
+    }
 
     /// Completion and finality coincide: nothing exact is final before the stage is complete, and once it is
     /// complete every count and the distinct-word count are final.
@@ -53,5 +137,8 @@ spec StageCompletion for r#program {
     invariant count_final_holds: never word_count_final(w, n) @ x, not word_count(w, n) @ x;
     invariant hot_final_holds: never hot_final(w) @ x, not hot(w) @ x;
 
-    check sim { runs: 256, seed: 1 } expect holds;
+    check sim {
+        runs: 256,
+        seed: 1
+    } expect holds;
 }

@@ -16,7 +16,11 @@ pub module Commit {
     role Coord;
     role Worker: cluster;
 
-    import TwoPhaseCommit(TIMEOUT = 4s, RETRY = 1s) as tpc with (Client = App, Coordinator = Coord, Participant = Worker);
+    import TwoPhaseCommit(TIMEOUT = 4s, RETRY = 1s) as tpc with(
+        Client = App,
+        Coordinator = Coord,
+        Participant = Worker
+    );
 
     at Worker {
         /// The local resource manager's refusals (none in these scenarios: every worker is willing).
@@ -59,7 +63,13 @@ spec Atomic {
 spec OmissionFaults for Commit {
     include Scenario;
     include Atomic;
-    faults { eot: 10, eff: 3, crashes: 0, model: sync, round: 1s }
+    faults {
+        eot: 10,
+        eff: 3,
+        crashes: 0,
+        model: sync,
+        round: 1s
+    }
     check ldfi expect holds;
 }
 
@@ -67,6 +77,12 @@ spec OmissionFaults for Commit {
 spec CrashFaults for Commit {
     include Scenario;
     include Atomic;
-    faults { eot: 10, eff: 3, crashes: 1, model: sync, round: 1s }
+    faults {
+        eot: 10,
+        eff: 3,
+        crashes: 1,
+        model: sync,
+        round: 1s
+    }
     check ldfi expect fails;
 }

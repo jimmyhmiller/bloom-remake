@@ -22,10 +22,10 @@ input add_edge(a: String, b: String);
 input end_of_edges();
 
 /// The edge stream, punctuated as a whole by its producers.
-channel edge_msg(a: String, b: String) sealed by () producers edge_source;
+channel edge_msg(a: String, b: String) sealed by() producers edge_source;
 
 /// At the graph node: every edge received. It only grows until it is sealed.
-table edge(a: String, b: String) sealed by ();
+table edge(a: String, b: String) sealed by();
 
 output reach();
 output big();
@@ -61,7 +61,7 @@ answer: while p("s", "t") {
 }
 
 /// count<*> Edge > 10, written as a threshold on the size of the edge set (monotone, LANGUAGE §11.6).
-too_big: while lset{ (a, b) | edge(a, b) }.size() > 10 {
+too_big: while lset { (a, b) | edge(a, b) }.size() > 10 {
     emit big();
 }
 

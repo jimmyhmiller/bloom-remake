@@ -13,9 +13,23 @@ const INVALID_PRODUCER_EPOCH: i16 = 47;
 const INVALID_RECORD: i16 = 87;
 const NOT_ENOUGH_REPLICAS: i16 = 19;
 
-format ProducePartition { index: i32, records: compact_nullable_bytes, tags }
-format ProduceTopic { name: compact_string, partitions: compact_array(ProducePartition), tags }
-format ProduceRequest { transactional_id: compact_nullable_string, acks: i16, timeout_ms: i32, topics: compact_array(ProduceTopic), tags }
+format ProducePartition {
+    index: i32,
+    records: compact_nullable_bytes,
+    tags
+}
+format ProduceTopic {
+    name: compact_string,
+    partitions: compact_array(ProducePartition),
+    tags
+}
+format ProduceRequest {
+    transactional_id: compact_nullable_string,
+    acks: i16,
+    timeout_ms: i32,
+    topics: compact_array(ProduceTopic),
+    tags
+}
 
 fn decode_produce(c: Cur) -> Option<ProduceRequest> {
     ProduceRequest::decode(c.buf, c.pos).map(|r| r.0)
@@ -51,7 +65,13 @@ fn produce_entries(req: ProduceRequest) -> Vec<(u64, String, i32, Option<Bytes>)
 /// batches and how many offsets they take.
 /// A partition's checked records: its error (NONE: accepted), and the accepted batches each with its header (decoded
 /// once, here, for everything after).
-struct Checked { error: i16, message: Option<String>, bad_batch: Option<i32>, batches: Vec<(Bytes, BatchHeader)>, count: i64 }
+struct Checked {
+    error: i16,
+    message: Option<String>,
+    bad_batch: Option<i32>,
+    batches: Vec<(Bytes, BatchHeader)>,
+    count: i64
+}
 
 fn refused(error: i16, message: String, bad_batch: Option<i32>) -> Checked {
     Checked { error: error, message: Some(message), bad_batch: bad_batch, batches: [], count: 0i64 }
@@ -75,7 +95,8 @@ fn batch_error(b: Bytes, header: Option<BatchHeader>, max_bytes: i64) -> Option<
                 Some((MESSAGE_TOO_LARGE, "a batch is larger than the topic's max.message.bytes"))
             } else if 12 + h.length as u64 != b.len() || not crc_matches(b, h) {
                 Some((CORRUPT_MESSAGE, "a batch's length or CRC32C does not match its contents"))
-            } else if h.record_count <= 0i32 || h.last_offset_delta < 0i32 || h.record_count as i64 != offsets_taken(h) {
+            } else if h.record_count <= 0i32 || h.last_offset_delta < 0i32
+                || h.record_count as i64 != offsets_taken(h) {
                 Some((INVALID_RECORD, "a batch's record count must be positive and match its last offset delta"))
             } else if (h.attributes & 16i16) != 0i16 {
                 Some((INVALID_RECORD, "transactional batches need a transactional id"))
@@ -101,7 +122,10 @@ fn check_records(records: Option<Bytes>, max_bytes: i64) -> Checked {
                 refused(INVALID_RECORD, "a Produce request carries exactly one record batch per partition", None)
             } else {
                 let decoded = batches.map(|b| (b, batch_header(b)));
-                match decoded.enumerate().filter_map(|e| batch_error(e.1.0, e.1.1, max_bytes).map(|x| (e.0, x))).first() {
+                match decoded.enumerate().filter_map(|e| batch_error(e.1.0, e.1.1, max_bytes).map(|x| (
+                    e.0,
+                    x
+                ))).first() {
                     Some(x) => refused(x.1.0, x.1.1, Some(x.0 as i32)),
                     None => {
                         let accepted = decoded.map(|d| match d.1 {
@@ -135,10 +159,18 @@ fn check_entry(records: Option<Bytes>, acks: i16, limits: TopicLimits, in_sync: 
 }
 
 /// The configurations a produce reads, parsed from a topic's configurations once (`topic_limits`), not per entry.
-struct TopicLimits { max_message_bytes: i64, min_insync: i64, segment_bytes: i64 }
+struct TopicLimits {
+    max_message_bytes: i64,
+    min_insync: i64,
+    segment_bytes: i64
+}
 
 fn topic_limits_of(set: Vec<(String, String)>) -> TopicLimits {
-    TopicLimits { max_message_bytes: max_message_bytes(set), min_insync: min_insync(set), segment_bytes: segment_bytes(set) }
+    TopicLimits {
+        max_message_bytes: max_message_bytes(set),
+        min_insync: min_insync(set),
+        segment_bytes: segment_bytes(set)
+    }
 }
 
 /// A topic's `min.insync.replicas`.
@@ -155,7 +187,13 @@ fn batch_producers(xs: Vec<((Instant, Conn, u64), Vec<(Bytes, BatchHeader)>)>) -
 }
 
 /// One partition's answer.
-struct PartitionAnswer { error: i16, base_offset: i64, log_start: i64, message: Option<String>, bad_batch: Option<i32> }
+struct PartitionAnswer {
+    error: i16,
+    base_offset: i64,
+    log_start: i64,
+    message: Option<String>,
+    bad_batch: Option<i32>
+}
 
 fn unknown_partition() -> PartitionAnswer {
     PartitionAnswer {
@@ -183,8 +221,16 @@ format PartitionResponse {
     message: compact_nullable_string,
     tags,
 }
-format TopicResponse { name: compact_string, partitions: compact_array(PartitionResponse), tags }
-format ProduceResponse { topics: compact_array(TopicResponse), throttle: i32, tags }
+format TopicResponse {
+    name: compact_string,
+    partitions: compact_array(PartitionResponse),
+    tags
+}
+format ProduceResponse {
+    topics: compact_array(TopicResponse),
+    throttle: i32,
+    tags
+}
 
 /// ProduceResponse v10–v12: each entry's answer (by entry position in `answers`), grouped by topic as the request
 /// grouped them.
@@ -194,21 +240,32 @@ fn encode_produce_response(correlation_id: i32, req: ProduceRequest, answers: Ve
         name: e.1.name,
         partitions: e.1.partitions.enumerate().map(|pe| match groups.get(e.0).and_then(|g| g.get(pe.0)) {
             Some(a) => PartitionResponse {
-                index: pe.1.index, error: a.error, base_offset: a.base_offset, log_append_time: -1i64,
-                log_start: a.log_start, record_errors: a.bad_batch.map(|i| [(i, a.message)]).unwrap_or([]),
+                index: pe.1.index,
+                error: a.error,
+                base_offset: a.base_offset,
+                log_append_time: -1i64,
+                log_start: a.log_start,
+                record_errors: a.bad_batch.map(|i| [(i, a.message)]).unwrap_or([]),
                 message: a.message,
             },
             None => error("encode_produce_response: a partition entry has no answer"),
         }),
     });
-    frame(response_header_v1(correlation_id).concat(ProduceResponse::encode(ProduceResponse { topics: topics, throttle: 0i32 })))
+    frame(response_header_v1(correlation_id).concat(ProduceResponse::encode(ProduceResponse {
+        topics: topics,
+        throttle: 0i32
+    })))
 }
 
 // ---------------------------------------------------------------- idempotent producers
 
 /// A producer's state in one partition: its epoch and its last batches (at most five, oldest first): first and last
 /// sequence, base and last offset.
-struct ProducerEntry { pid: i64, epoch: i16, recent: Vec<(i32, i32, i64, i64)> }
+struct ProducerEntry {
+    pid: i64,
+    epoch: i16,
+    recent: Vec<(i32, i32, i64, i64)>
+}
 
 /// How many batches a producer's state remembers for duplicate detection, as Kafka does.
 const RECENT_BATCHES: u64 = 5;
@@ -216,11 +273,22 @@ const RECENT_BATCHES: u64 = 5;
 /// One append's outcome: an error (and message), or where its batches go (`base`, and each placed batch), or, for a
 /// retried batch the partition already holds, the offsets it was appended at (`base`, and `duplicate_last`, which is
 /// -1 for any other outcome): an `acks=all` answer waits for those to commit, as Kafka's does.
-struct AppendOutcome { error: i16, message: Option<String>, base: i64, placed: Vec<(i64, i64, i64, Bytes)>, count: i64, duplicate_last: i64 }
+struct AppendOutcome {
+    error: i16,
+    message: Option<String>,
+    base: i64,
+    placed: Vec<(i64, i64, i64, Bytes)>,
+    count: i64,
+    duplicate_last: i64
+}
 
 /// The appends to one partition in one tick, sequenced: each one's outcome, the new log end, and the producer
 /// states that changed.
-struct Sequenced { outcomes: Vec<((Instant, Conn, u64), AppendOutcome)>, end: i64, changed: Vec<ProducerEntry> }
+struct Sequenced {
+    outcomes: Vec<((Instant, Conn, u64), AppendOutcome)>,
+    end: i64,
+    changed: Vec<ProducerEntry>
+}
 
 /// The sequence number after `s` by `n`, wrapping from `i32::MAX` to 0 as Kafka's do.
 fn seq_add(s: i32, n: i32) -> i32 {
@@ -238,7 +306,10 @@ fn with_entry(states: Vec<ProducerEntry>, e: ProducerEntry) -> Vec<ProducerEntry
 
 /// What an idempotent batch meets in its producer's state: an error (`refused`), a duplicate of the batch appended
 /// at `duplicate_of` (its first and last offsets), or neither (append it).
-struct Verdict { refused: Option<(i16, String)>, duplicate_of: Option<(i64, i64)> }
+struct Verdict {
+    refused: Option<(i16, String)>,
+    duplicate_of: Option<(i64, i64)>
+}
 
 fn append_it() -> Verdict {
     Verdict { refused: None, duplicate_of: None }
@@ -263,7 +334,11 @@ fn producer_check(e: Option<ProducerEntry>, h: BatchHeader) -> Verdict {
             } else if h.producer_epoch < x.epoch {
                 refuse(INVALID_PRODUCER_EPOCH, "the producer's epoch is older than the partition's")
             } else if h.producer_epoch != x.epoch {
-                if h.base_sequence == 0i32 { append_it() } else { refuse(OUT_OF_ORDER_SEQUENCE_NUMBER, "a new epoch starts at sequence 0") }
+                if h.base_sequence == 0i32 {
+                    append_it()
+                } else {
+                    refuse(OUT_OF_ORDER_SEQUENCE_NUMBER, "a new epoch starts at sequence 0")
+                }
             } else if h.base_sequence == next_sequence(x) {
                 append_it()
             } else {
@@ -295,12 +370,22 @@ fn after_append(e: Option<ProducerEntry>, h: BatchHeader, base: i64, last: i64) 
     };
     let all = kept.push(batch);
     let drop = if all.len() > RECENT_BATCHES { all.len() - RECENT_BATCHES } else { 0 };
-    ProducerEntry { pid: h.producer_id, epoch: h.producer_epoch, recent: all.enumerate().filter(|x| x.0 >= drop).map(|x| x.1) }
+    ProducerEntry {
+        pid: h.producer_id,
+        epoch: h.producer_epoch,
+        recent: all.enumerate().filter(|x| x.0 >= drop).map(|x| x.1)
+    }
 }
 
 /// The state of an append while its batches are checked: the batches placed so far, the next offset, the producer
 /// states, and whether a batch was refused or found to be a duplicate (which ends the walk).
-struct Walk { placed: Vec<(i64, i64, i64, Bytes)>, at: i64, states: Vec<ProducerEntry>, refused: Option<(i16, String)>, duplicate_of: Option<(i64, i64)> }
+struct Walk {
+    placed: Vec<(i64, i64, i64, Bytes)>,
+    at: i64,
+    states: Vec<ProducerEntry>,
+    refused: Option<(i16, String)>,
+    duplicate_of: Option<(i64, i64)>
+}
 
 fn walk_batch(w: Walk, bh: (Bytes, BatchHeader)) -> Walk {
     let (b, h) = bh;
@@ -332,14 +417,38 @@ fn walk_batch(w: Walk, bh: (Bytes, BatchHeader)) -> Walk {
 /// One append (one partition entry's batches) against the log end `end` and the producer states: its outcome, and
 /// the states after it. Every batch must pass; the first refusal refuses the whole entry and changes nothing. A
 /// retried batch returns where it was appended and appends nothing, as Kafka answers a duplicate.
-fn sequence_one(batches: Vec<(Bytes, BatchHeader)>, end: i64, states: Vec<ProducerEntry>) -> (AppendOutcome, Vec<ProducerEntry>) {
-    let w = batches.fold(Walk { placed: [], at: end, states: states, refused: None, duplicate_of: None }, |acc, b| walk_batch(acc, b));
+fn sequence_one(
+    batches: Vec<(Bytes, BatchHeader)>,
+    end: i64,
+    states: Vec<ProducerEntry>
+) -> (AppendOutcome, Vec<ProducerEntry>) {
+    let w = batches.fold(
+        Walk { placed: [], at: end, states: states, refused: None, duplicate_of: None },
+        |acc, b| walk_batch(acc, b)
+    );
     match (w.refused, w.duplicate_of) {
-        (Some(x), _) => (AppendOutcome { error: x.0, message: Some(x.1), base: -1i64, placed: [], count: 0i64, duplicate_last: -1i64 }, states),
-        (None, Some(d)) => (AppendOutcome { error: NONE, message: None, base: d.0, placed: [], count: 0i64, duplicate_last: d.1 }, states),
+        (Some(x), _) => (
+            AppendOutcome {
+                error: x.0,
+                message: Some(x.1),
+                base: -1i64,
+                placed: [],
+                count: 0i64,
+                duplicate_last: -1i64
+            },
+            states
+        ),
+        (None, Some(d)) => (
+            AppendOutcome { error: NONE, message: None, base: d.0, placed: [], count: 0i64, duplicate_last: d.1 },
+            states
+        ),
         (None, None) => (
             AppendOutcome {
-                error: NONE, message: None, base: if w.at == end { -1i64 } else { end }, placed: w.placed, count: w.at - end,
+                error: NONE,
+                message: None,
+                base: if w.at == end { -1i64 } else { end },
+                placed: w.placed,
+                count: w.at - end,
                 duplicate_last: -1i64,
             },
             w.states,
@@ -357,18 +466,29 @@ fn stamp(b: Bytes, at: i64) -> Bytes {
 
 /// The appends to one partition in one tick, in the tick's order (`xs` is ordered, as `collect!` orders it). Each
 /// step is the log end and producer states after an append, with its outcome.
-fn sequence_appends(xs: Vec<((Instant, Conn, u64), Vec<(Bytes, BatchHeader)>)>, end: i64, states: Vec<ProducerEntry>) -> Sequenced {
+fn sequence_appends(
+    xs: Vec<((Instant, Conn, u64), Vec<(Bytes, BatchHeader)>)>,
+    end: i64,
+    states: Vec<ProducerEntry>
+) -> Sequenced {
     let start: (i64, Vec<ProducerEntry>, Option<((Instant, Conn, u64), AppendOutcome)>) = (end, states, None);
-    let steps = xs.scan(start, |acc, x| {
-        let (o, sts) = sequence_one(x.1, acc.0, acc.1);
-        (acc.0 + o.count, sts, Some((x.0, o)))
-    });
+    let steps = xs.scan(
+        start,
+        |acc, x| {
+            let (o, sts) = sequence_one(x.1, acc.0, acc.1);
+            (acc.0 + o.count, sts, Some((x.0, o)))
+        }
+    );
     let (last_end, last_states) = match steps.last() {
         Some(s) => (s.0, s.1),
         None => (end, states),
     };
     let before = states.to_set();
-    Sequenced { outcomes: steps.filter_map(|s| s.2), end: last_end, changed: last_states.filter(|e| not before.contains(e)) }
+    Sequenced {
+        outcomes: steps.filter_map(|s| s.2),
+        end: last_end,
+        changed: last_states.filter(|e| not before.contains(e))
+    }
 }
 
 /// Every batch the sequenced appends place.
@@ -378,7 +498,13 @@ fn placed_all(s: Sequenced) -> Vec<(i64, i64, i64, Bytes)> {
 
 // ---------------------------------------------------------------- InitProducerId v3–v5
 
-format InitProducerIdRequest { transactional_id: compact_nullable_string, timeout_ms: i32, producer_id: i64, producer_epoch: i16, tags }
+format InitProducerIdRequest {
+    transactional_id: compact_nullable_string,
+    timeout_ms: i32,
+    producer_id: i64,
+    producer_epoch: i16,
+    tags
+}
 
 fn decode_init_producer_id(c: Cur) -> Option<InitProducerIdRequest> {
     InitProducerIdRequest::decode(c.buf, c.pos).map(|r| r.0)
@@ -409,29 +535,60 @@ fn chunks_of(base: i64, last: i64) -> Vec<i64> {
 
 /// A segment of a partition's log, as Kafka keeps them: its first offset, its bytes, its greatest timestamp (-1 for
 /// none yet) and the first batch holding it. Retention deletes whole segments; the time index is per segment.
-struct Segment { base: i64, bytes: i64, max_ts: i64, max_base: i64, modified: i64 }
+struct Segment {
+    base: i64,
+    bytes: i64,
+    max_ts: i64,
+    max_base: i64,
+    modified: i64
+}
 
 /// What a tick's appends do to a partition's segments: the segments written (the active one, and any that filled
 /// and were rolled), the time index rows added (segment, timestamp, batch base), and the active segment after.
-struct SegmentChange { written: Vec<Segment>, marks: Vec<(i64, i64, i64)>, active: i64 }
+struct SegmentChange {
+    written: Vec<Segment>,
+    marks: Vec<(i64, i64, i64)>,
+    active: i64
+}
 
 /// The placed batches added to the active segment `active` at `now_ms`, rolling a new segment at a batch that would
 /// take a non-empty segment past `limit` bytes (the topic's `segment.bytes`), as Kafka rolls. A batch raising its
 /// segment's greatest timestamp gets a time index row.
 fn segment_appends(placed: Vec<(i64, i64, i64, Blob)>, active: Segment, limit: i64, now_ms: i64) -> SegmentChange {
     let start: (Vec<Segment>, Segment, Vec<(i64, i64, i64)>) = ([], active, []);
-    let end = placed.fold(start, |acc, pb| {
-        let (done, cur, marks) = acc;
-        let size = pb.3.len() as i64;
-        let roll = cur.bytes > 0i64 && cur.bytes + size > limit;
-        let seg = if roll { Segment { base: pb.0, bytes: 0i64, max_ts: -1i64, max_base: -1i64, modified: now_ms } } else { cur };
-        let finished = if roll { done.push(cur) } else { done };
-        if pb.2 > seg.max_ts {
-            (finished, Segment { base: seg.base, bytes: seg.bytes + size, max_ts: pb.2, max_base: pb.0, modified: now_ms }, marks.push((seg.base, pb.2, pb.0)))
-        } else {
-            (finished, Segment { base: seg.base, bytes: seg.bytes + size, max_ts: seg.max_ts, max_base: seg.max_base, modified: now_ms }, marks)
+    let end = placed.fold(
+        start,
+        |acc, pb| {
+            let (done, cur, marks) = acc;
+            let size = pb.3.len() as i64;
+            let roll = cur.bytes > 0i64 && cur.bytes + size > limit;
+            let seg = if roll {
+                Segment { base: pb.0, bytes: 0i64, max_ts: -1i64, max_base: -1i64, modified: now_ms }
+            } else {
+                cur
+            };
+            let finished = if roll { done.push(cur) } else { done };
+            if pb.2 > seg.max_ts {
+                (
+                    finished,
+                    Segment { base: seg.base, bytes: seg.bytes + size, max_ts: pb.2, max_base: pb.0, modified: now_ms },
+                    marks.push((seg.base, pb.2, pb.0))
+                )
+            } else {
+                (
+                    finished,
+                    Segment {
+                        base: seg.base,
+                        bytes: seg.bytes + size,
+                        max_ts: seg.max_ts,
+                        max_base: seg.max_base,
+                        modified: now_ms
+                    },
+                    marks
+                )
+            }
         }
-    });
+    );
     SegmentChange { written: end.0.push(end.1), marks: end.2, active: end.1.base }
 }
 
@@ -457,19 +614,29 @@ fn segment_deletable(k: u64, n: u64, bytes: i64) -> bool {
 fn retention_start(segments: Vec<(i64, i64, i64)>, end: i64, now_ms: i64, limits: (i64, i64)) -> Option<(i64, bool)> {
     let (ms, max_bytes) = limits;
     let n = segments.len();
-    let by_time = segments.enumerate().fold((0, true), |acc, e| {
-        if acc.1 && segment_deletable(e.0, n, e.1.1) && ms >= 0i64 && e.1.2 < now_ms - ms { (acc.0 + 1, true) } else { (acc.0, false) }
-    }).0;
+    let by_time = segments.enumerate().fold(
+        (0, true),
+        |acc, e| {
+            if acc.1 && segment_deletable(e.0, n, e.1.1) && ms >= 0i64 && e.1.2 < now_ms - ms {
+                (acc.0 + 1, true)
+            } else {
+                (acc.0, false)
+            }
+        }
+    ).0;
     let total = segments.fold(0i64, |t, x| t + x.1);
     let after_time = segments.enumerate().filter(|e| e.0 < by_time).fold(total, |t, e| t - e.1.1);
-    let by_size = segments.enumerate().filter(|e| e.0 >= by_time).fold((0, after_time, true), |acc, e| {
-        let (k, left, going) = acc;
-        if going && segment_deletable(e.0, n, e.1.1) && max_bytes >= 0i64 && left - e.1.1 >= max_bytes {
-            (k + 1, left - e.1.1, true)
-        } else {
-            (k, left, false)
+    let by_size = segments.enumerate().filter(|e| e.0 >= by_time).fold(
+        (0, after_time, true),
+        |acc, e| {
+            let (k, left, going) = acc;
+            if going && segment_deletable(e.0, n, e.1.1) && max_bytes >= 0i64 && left - e.1.1 >= max_bytes {
+                (k + 1, left - e.1.1, true)
+            } else {
+                (k, left, false)
+            }
         }
-    }).0;
+    ).0;
     let deleted = by_time + by_size;
     if deleted == 0 {
         None
@@ -486,10 +653,13 @@ fn retention_start(segments: Vec<(i64, i64, i64)>, end: i64, now_ms: i64, limits
 /// The segment holding a partition's greatest timestamp, the first such on ties, as Kafka finds it: its greatest
 /// timestamp and the first batch holding it.
 fn max_segment(segments: Vec<(i64, i64, i64)>) -> Option<(i64, i64)> {
-    segments.fold(None, |acc, x| match acc {
-        Some(best) => if x.1 > best.0 { Some((x.1, x.2)) } else { Some(best) },
-        None => if x.1 >= 0i64 { Some((x.1, x.2)) } else { None },
-    })
+    segments.fold(
+        None,
+        |acc, x| match acc {
+            Some(best) => if x.1 > best.0 { Some((x.1, x.2)) } else { Some(best) },
+            None => if x.1 >= 0i64 { Some((x.1, x.2)) } else { None },
+        }
+    )
 }
 
 // ---------------------------------------------------------------- replication (S8 item 3)
@@ -524,7 +694,13 @@ fn materialized_batches(xs: Vec<(u64, i64, i64, i64, Blob, BatchHeader)>) -> Vec
 
 /// A partition this broker does not lead: the client refreshes its metadata and finds the leader.
 fn not_leader() -> PartitionAnswer {
-    PartitionAnswer { error: NOT_LEADER_OR_FOLLOWER, base_offset: -1i64, log_start: -1i64, message: None, bad_batch: None }
+    PartitionAnswer {
+        error: NOT_LEADER_OR_FOLLOWER,
+        base_offset: -1i64,
+        log_start: -1i64,
+        message: None,
+        bad_batch: None
+    }
 }
 
 const NOT_ENOUGH_REPLICAS_AFTER_APPEND: i16 = 20;
@@ -532,8 +708,11 @@ const NOT_ENOUGH_REPLICAS_AFTER_APPEND: i16 = 20;
 /// An `acks=all` append committed after the in-sync replicas fell below `min.insync.replicas`.
 fn not_enough_after_append() -> PartitionAnswer {
     PartitionAnswer {
-        error: NOT_ENOUGH_REPLICAS_AFTER_APPEND, base_offset: -1i64, log_start: -1i64,
-        message: Some("the in-sync replicas fell below min.insync.replicas after the append"), bad_batch: None,
+        error: NOT_ENOUGH_REPLICAS_AFTER_APPEND,
+        base_offset: -1i64,
+        log_start: -1i64,
+        message: Some("the in-sync replicas fell below min.insync.replicas after the append"),
+        bad_batch: None,
     }
 }
 

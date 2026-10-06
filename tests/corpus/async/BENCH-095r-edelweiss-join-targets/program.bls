@@ -17,8 +17,8 @@ program edelweiss_join_targets version 1;
 
 sealed table sut_node(addr: Node);
 
-channel sut_ins_chn(@addr: Node, id: u64);
-channel sut_del_chn(@addr: Node, id: u64);
+channel sut_ins_chn(@ addr: Node, id: u64);
+channel sut_del_chn(@ addr: Node, id: u64);
 
 table sut_ins_log(id: u64);
 table sut_del_log(id: u64);
@@ -44,8 +44,8 @@ sut_del_keep: on sut_del_chn(_, i) {
 
 sealed table ut_node(addr: Node, epoch: u64);
 
-channel ut_ins_chn(@addr: Node, id: u64, epoch: u64) key(addr, id);
-channel ut_del_chn(@addr: Node, id: u64, epoch: u64) key(addr, id);
+channel ut_ins_chn(@ addr: Node, id: u64, epoch: u64) key(addr, id);
+channel ut_del_chn(@ addr: Node, id: u64, epoch: u64) key(addr, id);
 
 table ut_ins_log(id: u64, epoch: u64) key(id);
 table ut_del_log(id: u64, epoch: u64) key(id);
@@ -81,7 +81,7 @@ bootstrap {
     emit dr_node("bar", "c", 2);
 }
 
-table dr_x_log(id: u64, epoch: String) sealed by (epoch);
+table dr_x_log(id: u64, epoch: String) sealed by(epoch);
 
 input dr_x_log_in(id: u64, epoch: String);
 
@@ -95,7 +95,7 @@ dr_x_log_close: on dr_x_log_seal(epoch) {
     seal dr_x_log(epoch: epoch);
 }
 
-table dr_y_log(id: u64, epoch: u64) sealed by (epoch);
+table dr_y_log(id: u64, epoch: u64) sealed by(epoch);
 
 input dr_y_log_in(id: u64, epoch: u64);
 
@@ -150,7 +150,7 @@ ds_obj_load: on ds_obj_in(oid, val) {
     emit ds_obj(oid, val);
 }
 
-table ds_ref(id: u64, name: String, obj_id: u64) key(id) sealed by ();
+table ds_ref(id: u64, name: String, obj_id: u64) key(id) sealed by();
 
 input ds_ref_in(id: u64, name: String, obj_id: u64);
 

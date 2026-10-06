@@ -27,8 +27,8 @@ line = 61
 
 [[expect_diag]]
 code = "BLS1005"
-line = 65
+line = 67
 
 [[expect_diag]]
 code = "BLS0805"
-line = 69
+line = 72

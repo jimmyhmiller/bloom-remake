@@ -12,7 +12,7 @@ fact node("n1");
 fact node("n2");
 
 // ---------------- replication
-channel log_chn(@addr: Node, id: u64, key: String, val: String, deps: Set<u64>) key(addr, id);
+channel log_chn(@ addr: Node, id: u64, key: String, val: String, deps: Set<u64>) key(addr, id);
 table log(id: u64, key: String, val: String, deps: Set<u64>) key(id);
 
 /// From the host, at a replica: a client write with its dependencies.
@@ -75,8 +75,8 @@ dominate: while safe_dep(t, k), safe(t, k, _), not dom(t) {
 view r#view(id, key, val) = safe(id, key, val), not dom(id);
 
 // ---------------- read_server
-channel req_chn(@addr: Node, id: u64, key: String, deps: Set<u64>) key(addr, id);
-channel resp_chn(@addr: Node, id: u64, key: String, val: String);
+channel req_chn(@ addr: Node, id: u64, key: String, deps: Set<u64>) key(addr, id);
+channel resp_chn(@ addr: Node, id: u64, key: String, val: String);
 
 table read_buf(id: u64, key: String, deps: Set<u64>, src_addr: Node) key(id);
 table read_resp(addr: Node, id: u64, key: String, val: String);

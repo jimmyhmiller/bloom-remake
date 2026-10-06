@@ -50,7 +50,7 @@ view via_cost(a, c, via, cost) {
     edge(a, c, w), let via = c, let cost = w;
     edge(a, b, w), distance(b, c, n), let via = b, let cost = w + n;
 }
-view best_hop(a, c, via) = via_cost(a, c, via, cost), argmin!(cost per (a, c));
+view best_hop(a, c, via) = via_cost(a, c, via, cost), argmin!(cost per(a, c));
 
 report_reach: while reach(a, b) {
     emit reachable(a, b);

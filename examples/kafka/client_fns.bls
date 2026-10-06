@@ -5,7 +5,11 @@ const CORR_METADATA: i32 = 2;
 
 /// A response frame's ApiVersions answer, if it is the answer to `CORR_VERSIONS`.
 fn versions_answer(f: Bytes) -> Option<(i16, Vec<ApiRange>)> {
-    response_correlation(cur(f)).and_then(|p| if p.0 == CORR_VERSIONS { decode_api_versions_response(p.1) } else { None })
+    response_correlation(cur(f)).and_then(|p| if p.0 == CORR_VERSIONS {
+        decode_api_versions_response(p.1)
+    } else {
+        None
+    })
 }
 
 /// A response frame's Metadata answer, if it is the answer to `CORR_METADATA` (after response header v1's tags).
@@ -39,15 +43,28 @@ fn encode_batch(values: Vec<Bytes>, ts: i64) -> Bytes {
 /// record at sequence `seq` (-1, -1, -1: no idempotence): its header, with the length and the CRC32C over
 /// `attributes..end` computed, then its records (a null key, no headers).
 fn encode_batch_as(values: Vec<Bytes>, ts: i64, pid: i64, epoch: i16, seq: i32) -> Bytes {
-    let records = Bytes::join(values.enumerate().map(|e| Record::encode(Record { body: (0i64, e.0 as i64, None, e.1, Bytes::varint(0i64)) })));
+    let records = Bytes::join(values.enumerate().map(|e| Record::encode(Record {
+        body: (0i64, e.0 as i64, None, e.1, Bytes::varint(0i64))
+    })));
     let n = values.len() as i32;
     let covered = BatchBody::encode(BatchBody {
-        attributes: 0i16, last_offset_delta: n - 1i32, base_timestamp: ts, max_timestamp: ts, producer_id: pid,
-        producer_epoch: epoch, base_sequence: seq, record_count: n, records: records,
+        attributes: 0i16,
+        last_offset_delta: n - 1i32,
+        base_timestamp: ts,
+        max_timestamp: ts,
+        producer_id: pid,
+        producer_epoch: epoch,
+        base_sequence: seq,
+        record_count: n,
+        records: records,
     });
     Bytes::join([
-        Bytes::from_i64_be(0i64), Bytes::from_i32_be((covered.len() + 9) as i32), Bytes::from_i32_be(-1i32),
-        Bytes::from_i8(2i8), Bytes::from_u32_be(crc32c(covered)), covered,
+        Bytes::from_i64_be(0i64),
+        Bytes::from_i32_be((covered.len() + 9) as i32),
+        Bytes::from_i32_be(-1i32),
+        Bytes::from_i8(2i8),
+        Bytes::from_u32_be(crc32c(covered)),
+        covered,
     ])
 }
 
@@ -65,10 +82,20 @@ param CLIENT_COMMIT: bool = false;
 param CLIENT_GROUP: String = "blossom-group";
 
 /// ProduceRequest v12, framed: one batch to one partition, acks `CLIENT_ACKS`.
-fn encode_produce_request(correlation_id: i32, client_id: String, topic: String, partition: i32, batch: Bytes) -> Bytes {
+fn encode_produce_request(
+    correlation_id: i32,
+    client_id: String,
+    topic: String,
+    partition: i32,
+    batch: Bytes
+) -> Bytes {
     let r = ProduceRequest {
-        transactional_id: None, acks: CLIENT_ACKS, timeout_ms: 30000i32,
-        topics: [ProduceTopic { name: topic, partitions: [ProducePartition { index: partition, records: Some(batch) }] }],
+        transactional_id: None,
+        acks: CLIENT_ACKS,
+        timeout_ms: 30000i32,
+        topics: [
+            ProduceTopic { name: topic, partitions: [ProducePartition { index: partition, records: Some(batch) }] }
+        ],
     };
     frame(request_header_v2(API_PRODUCE, 12i16, correlation_id, client_id).concat(ProduceRequest::encode(r)))
 }
@@ -83,8 +110,25 @@ fn decode_produce_response(c: Cur) -> Option<(i16, i64)> {
 /// FetchRequest v17, framed: one partition from `offset`, answered at once (`min_bytes` 0).
 fn encode_fetch_request(correlation_id: i32, client_id: String, topic_id: Bytes, partition: i32, offset: i64) -> Bytes {
     let r = FetchRequest {
-        max_wait_ms: 0i32, min_bytes: 0i32, max_bytes: 1048576i32, isolation_level: 0i8, session_id: 0i32, session_epoch: -1i32,
-        topics: [FetchTopic { topic_id: topic_id, partitions: [FetchPartition { partition: partition, leader_epoch: -1i32, fetch_offset: offset, max_bytes: 1048576i32 }] }],
+        max_wait_ms: 0i32,
+        min_bytes: 0i32,
+        max_bytes: 1048576i32,
+        isolation_level: 0i8,
+        session_id: 0i32,
+        session_epoch: -1i32,
+        topics: [
+            FetchTopic {
+                topic_id: topic_id,
+                partitions: [
+                    FetchPartition {
+                        partition: partition,
+                        leader_epoch: -1i32,
+                        fetch_offset: offset,
+                        max_bytes: 1048576i32
+                    }
+                ]
+            }
+        ],
     };
     frame(request_header_v2(API_FETCH, 17i16, correlation_id, client_id).concat(FetchRequest::encode(r)))
 }
@@ -101,8 +145,18 @@ format FetchedPartition {
     records: compact_nullable_bytes,
     tags,
 }
-format FetchedTopic { topic_id: uuid, partitions: compact_array(FetchedPartition), tags }
-format FetchResponse { throttle: i32, error: i16, session_id: i32, topics: compact_array(FetchedTopic), tags }
+format FetchedTopic {
+    topic_id: uuid,
+    partitions: compact_array(FetchedPartition),
+    tags
+}
+format FetchResponse {
+    throttle: i32,
+    error: i16,
+    session_id: i32,
+    topics: compact_array(FetchedTopic),
+    tags
+}
 
 /// Each record of a batch: its offset and value.
 fn record_values(b: Bytes) -> Option<Vec<(i64, Bytes)>> {
@@ -134,7 +188,10 @@ const CORR_PRODUCE: i32 = 1000;
 /// A response frame's topic metadata for `CLIENT_TOPIC`: its id and partition count, if it exists.
 fn topic_answer(f: Bytes) -> Option<(Bytes, u64)> {
     response_correlation(cur(f)).and_then(|p| if p.0 == CORR_TOPIC {
-        metadata_topic_ids(p.1).and_then(|ts| ts.filter(|t| t.0 == NONE && t.1 == Some(CLIENT_TOPIC)).first().map(|t| (t.2, t.3)))
+        metadata_topic_ids(p.1).and_then(|ts| ts.filter(|t| t.0 == NONE && t.1 == Some(CLIENT_TOPIC)).first().map(|t| (
+            t.2,
+            t.3
+        )))
     } else {
         None
     })
@@ -161,7 +218,13 @@ fn batch_values(k: u64) -> Vec<Bytes> {
 
 /// The produce request for batch `k`, to partition `k` modulo the partition count.
 fn produce_frame(k: u64, parts: u64) -> Bytes {
-    encode_produce_request(CORR_PRODUCE + k as i32, "blossom", CLIENT_TOPIC, (k % parts) as i32, encode_batch(batch_values(k), 0i64))
+    encode_produce_request(
+        CORR_PRODUCE + k as i32,
+        "blossom",
+        CLIENT_TOPIC,
+        (k % parts) as i32,
+        encode_batch(batch_values(k), 0i64)
+    )
 }
 
 /// The produce request for batch `k` from producer `pid` at `epoch` (-1: not idempotent): batches go to the
@@ -173,8 +236,13 @@ fn produce_frame_as(k: u64, parts: u64, pid: i64, epoch: i16) -> Bytes {
     } else {
         range(0, k / parts).map(|j| (1u64 + (j * parts + k % parts) % 3u64) as i32).fold(0i32, |a, b| a + b)
     };
-    encode_produce_request(CORR_PRODUCE + k as i32, "blossom", CLIENT_TOPIC, (k % parts) as i32,
-        encode_batch_as(batch_values(k), 0i64, pid, epoch, seq))
+    encode_produce_request(
+        CORR_PRODUCE + k as i32,
+        "blossom",
+        CLIENT_TOPIC,
+        (k % parts) as i32,
+        encode_batch_as(batch_values(k), 0i64, pid, epoch, seq)
+    )
 }
 
 const CORR_INIT_PID: i32 = 5;
@@ -184,14 +252,22 @@ const CORR_FIND: i32 = 7;
 /// FindCoordinator v4, framed: the coordinator of group `group` (key type 0).
 fn encode_find_coordinator_request(correlation_id: i32, client_id: String, group: String) -> Bytes {
     let r = FindCoordinatorRequest { key: "", key_type: 0i8, keys: [group] };
-    frame(request_header_v2(API_FIND_COORDINATOR, 4i16, correlation_id, client_id).concat(FindCoordinatorRequest::encode(r, 4i16)))
+    frame(request_header_v2(
+        API_FIND_COORDINATOR,
+        4i16,
+        correlation_id,
+        client_id
+    ).concat(FindCoordinatorRequest::encode(r, 4i16)))
 }
 
 /// A response frame's FindCoordinator answer: the (only) key's error and coordinator broker id.
 fn coordinator_answer(f: Bytes) -> Option<(i16, i32)> {
     response_correlation(cur(f)).and_then(|p| if p.0 == CORR_FIND {
-        skip_tags(p.1).and_then(|b| FindCoordinatorResponse::decode(b.buf, b.pos, 4i16))
-            .and_then(|r| r.0.coordinators.first().map(|c| (c.error, c.node_id)))
+        skip_tags(p.1).and_then(|b| FindCoordinatorResponse::decode(
+            b.buf,
+            b.pos,
+            4i16
+        )).and_then(|r| r.0.coordinators.first().map(|c| (c.error, c.node_id)))
     } else {
         None
     })
@@ -199,19 +275,43 @@ fn coordinator_answer(f: Bytes) -> Option<(i16, i32)> {
 
 /// OffsetCommit v9, framed: partition `partition` of `topic` read to `offset`, for `group`, by a consumer outside
 /// group management (generation -1, no member).
-fn encode_offset_commit_request(correlation_id: i32, client_id: String, group: String, topic: String, partition: i32, offset: i64) -> Bytes {
+fn encode_offset_commit_request(
+    correlation_id: i32,
+    client_id: String,
+    group: String,
+    topic: String,
+    partition: i32,
+    offset: i64
+) -> Bytes {
     let r = OffsetCommitRequest {
-        group_id: group, generation: -1i32, member_id: "", group_instance_id: None, retention_ms: -1i64,
-        topics: [CommitTopic { name: topic, partitions: [CommitPartition { partition: partition, offset: offset, leader_epoch: -1i32, metadata: None }] }],
+        group_id: group,
+        generation: -1i32,
+        member_id: "",
+        group_instance_id: None,
+        retention_ms: -1i64,
+        topics: [
+            CommitTopic {
+                name: topic,
+                partitions: [
+                    CommitPartition { partition: partition, offset: offset, leader_epoch: -1i32, metadata: None }
+                ]
+            }
+        ],
     };
-    frame(request_header_v2(API_OFFSET_COMMIT, 9i16, correlation_id, client_id).concat(OffsetCommitRequest::encode(r, 9i16)))
+    frame(request_header_v2(API_OFFSET_COMMIT, 9i16, correlation_id, client_id).concat(OffsetCommitRequest::encode(
+        r,
+        9i16
+    )))
 }
 
 /// A response frame's OffsetCommit answer: its (only) partition's error.
 fn commit_answer(f: Bytes) -> Option<i16> {
     response_correlation(cur(f)).and_then(|p| if p.0 == CORR_COMMIT {
-        skip_tags(p.1).and_then(|b| OffsetCommitResponse::decode(b.buf, b.pos, 9i16))
-            .and_then(|r| r.0.topics.first().and_then(|t| t.partitions.first()).map(|x| x.error))
+        skip_tags(p.1).and_then(|b| OffsetCommitResponse::decode(
+            b.buf,
+            b.pos,
+            9i16
+        )).and_then(|r| r.0.topics.first().and_then(|t| t.partitions.first()).map(|x| x.error))
     } else {
         None
     })
@@ -219,16 +319,36 @@ fn commit_answer(f: Bytes) -> Option<i16> {
 
 /// InitProducerId v4, framed: a new idempotent producer (no transactional id).
 fn encode_init_pid_request(correlation_id: i32, client_id: String) -> Bytes {
-    let r = InitProducerIdRequest { transactional_id: None, timeout_ms: 30000i32, producer_id: -1i64, producer_epoch: -1i16 };
-    frame(request_header_v2(API_INIT_PRODUCER_ID, 4i16, correlation_id, client_id).concat(InitProducerIdRequest::encode(r)))
+    let r = InitProducerIdRequest {
+        transactional_id: None,
+        timeout_ms: 30000i32,
+        producer_id: -1i64,
+        producer_epoch: -1i16
+    };
+    frame(request_header_v2(
+        API_INIT_PRODUCER_ID,
+        4i16,
+        correlation_id,
+        client_id
+    ).concat(InitProducerIdRequest::encode(r)))
 }
 
-format InitProducerIdResponse { throttle: i32, error: i16, producer_id: i64, producer_epoch: i16, tags }
+format InitProducerIdResponse {
+    throttle: i32,
+    error: i16,
+    producer_id: i64,
+    producer_epoch: i16,
+    tags
+}
 
 /// A response frame's InitProducerId answer: its error, producer id and epoch.
 fn init_pid_answer(f: Bytes) -> Option<(i16, i64, i16)> {
     response_correlation(cur(f)).and_then(|p| if p.0 == CORR_INIT_PID {
-        skip_tags(p.1).and_then(|b| InitProducerIdResponse::decode(b.buf, b.pos)).map(|r| (r.0.error, r.0.producer_id, r.0.producer_epoch))
+        skip_tags(p.1).and_then(|b| InitProducerIdResponse::decode(b.buf, b.pos)).map(|r| (
+            r.0.error,
+            r.0.producer_id,
+            r.0.producer_epoch
+        ))
     } else {
         None
     })

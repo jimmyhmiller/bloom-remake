@@ -90,7 +90,7 @@ at Replica {
 
     /// "assume ∀v. ¬propose_msg(r, v)" and "assume ∀n. member(n, q) → ∃r′, v. join_ack_msg(n, r, r′, v)": the
     /// nodes that joined r include a quorum.
-    view ready(r) = owned(r, _), not proposed(r, _) where majority(lset{ m | acks(r, m, _, _) }, Replica);
+    view ready(r) = owned(r, _), not proposed(r, _) where majority(lset { m | acks(r, m, _, _) }, Replica);
     /// "maxr, v := max {(r′, v′) | ∃n. member(n, q) ∧ join_ack_msg(n, r, r′, v′) ∧ r′ ≠ ⊥}", over every node that
     /// joined r so far (a superset of a quorum).
     view reported(r, top = max!((mr, mv))) = acks(r, _, mr, mv) where mr > 0;

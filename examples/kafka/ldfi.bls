@@ -3,11 +3,7 @@
 //! with acks -1 and reading them back, checked with Kafka's properties in the synchronous-round world under lost
 //! messages and crash-restarts. This file is a library of modules and specs: it has no `program` header.
 
-pub module Kafka(
-    CLIENT_BATCHES: u64 = 1,
-    DEFAULT_PARTITIONS: i32 = 1,
-    DEFAULT_REPLICATION_FACTOR: i16 = 1,
-) {
+pub module Kafka(CLIENT_BATCHES: u64 = 1, DEFAULT_PARTITIONS: i32 = 1, DEFAULT_REPLICATION_FACTOR: i16 = 1,) {
     include "protocol.bls";
     include "headers.bls";
     include "apiversions.bls";
@@ -109,7 +105,7 @@ spec Guarantees {
         acknowledged(k, _, _), not shared_offset(k), let prop = "unique offset";
         read_done(true) @ _, not read_twice(_), let prop = "stored once", let k = 0u64;
         commit_acked(p, off, 0i16) @ _, current_offset(_, _, _, _, p, off, _, _) @ _, let prop = "commit kept",
-            let k = 0u64;
+                let k = 0u64;
     }
 }
 
@@ -117,14 +113,26 @@ spec Guarantees {
 spec SingleRun for Kafka {
     include Single;
     include Guarantees;
-    faults { eot: 30, eff: 0, crashes: 0, model: sync, round: 50ms }
+    faults {
+        eot: 30,
+        eff: 0,
+        crashes: 0,
+        model: sync,
+        round: 50ms
+    }
 }
 
 /// One broker under lost messages and one crash.
 spec SingleFaults for Kafka {
     include Single;
     include Guarantees;
-    faults { eot: 30, eff: 20, crashes: 1, model: sync, round: 50ms }
+    faults {
+        eot: 30,
+        eff: 20,
+        crashes: 1,
+        model: sync,
+        round: 50ms
+    }
     check ldfi expect holds;
 }
 
@@ -132,7 +140,14 @@ spec SingleFaults for Kafka {
 spec SingleRestart for Kafka {
     include Single;
     include Guarantees;
-    faults { eot: 30, eff: 1, crashes: 1, restart: 2, model: sync, round: 50ms }
+    faults {
+        eot: 30,
+        eff: 1,
+        crashes: 1,
+        restart: 2,
+        model: sync,
+        round: 50ms
+    }
     check ldfi expect holds;
 }
 
@@ -156,14 +171,27 @@ spec Triple {
 spec TripleRun for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
     include Triple;
     include Guarantees;
-    faults { eot: 60, eff: 1, crashes: 0, model: sync, round: 50ms }
+    faults {
+        eot: 60,
+        eff: 1,
+        crashes: 0,
+        model: sync,
+        round: 50ms
+    }
 }
 
 /// Three brokers under a crash-restart of any node (down 3 rounds), no lost messages: an `acks=all` batch survives.
 spec TripleRestart for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
     include Triple;
     include Guarantees;
-    faults { eot: 40, eff: 1, crashes: 1, restart: 3, model: sync, round: 50ms }
+    faults {
+        eot: 40,
+        eff: 1,
+        crashes: 1,
+        restart: 3,
+        model: sync,
+        round: 50ms
+    }
     check ldfi expect holds;
 }
 
@@ -172,7 +200,14 @@ spec TripleRestart for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
 spec TripleRestartAcks1 for Kafka(DEFAULT_REPLICATION_FACTOR = 3, CLIENT_ACKS = 1) {
     include Triple;
     include Guarantees;
-    faults { eot: 40, eff: 1, crashes: 1, restart: 3, model: sync, round: 50ms }
+    faults {
+        eot: 40,
+        eff: 1,
+        crashes: 1,
+        restart: 3,
+        model: sync,
+        round: 50ms
+    }
     check ldfi expect fails;
 }
 
@@ -180,7 +215,13 @@ spec TripleRestartAcks1 for Kafka(DEFAULT_REPLICATION_FACTOR = 3, CLIENT_ACKS = 
 spec TripleOmissions for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
     include Triple;
     include Guarantees;
-    faults { eot: 40, eff: 30, crashes: 0, model: sync, round: 50ms }
+    faults {
+        eot: 40,
+        eff: 30,
+        crashes: 0,
+        model: sync,
+        round: 50ms
+    }
     check ldfi expect holds;
 }
 
@@ -188,7 +229,14 @@ spec TripleOmissions for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
 spec TripleOneLoss for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
     include Triple;
     include Guarantees;
-    faults { eot: 40, eff: 30, crashes: 0, omissions: 1, model: sync, round: 50ms }
+    faults {
+        eot: 40,
+        eff: 30,
+        crashes: 0,
+        omissions: 1,
+        model: sync,
+        round: 50ms
+    }
     check ldfi expect holds;
 }
 
@@ -196,7 +244,15 @@ spec TripleOneLoss for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
 spec TripleLossRestart for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
     include Triple;
     include Guarantees;
-    faults { eot: 40, eff: 30, crashes: 1, restart: 3, omissions: 1, model: sync, round: 50ms }
+    faults {
+        eot: 40,
+        eff: 30,
+        crashes: 1,
+        restart: 3,
+        omissions: 1,
+        model: sync,
+        round: 50ms
+    }
     check ldfi expect holds;
 }
 
@@ -204,7 +260,14 @@ spec TripleLossRestart for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
 spec TripleTwoRestart for Kafka(DEFAULT_REPLICATION_FACTOR = 3, CLIENT_BATCHES = 2) {
     include Triple;
     include Guarantees;
-    faults { eot: 50, eff: 1, crashes: 1, restart: 3, model: sync, round: 50ms }
+    faults {
+        eot: 50,
+        eff: 1,
+        crashes: 1,
+        restart: 3,
+        model: sync,
+        round: 50ms
+    }
     check ldfi expect holds;
 }
 
@@ -213,7 +276,14 @@ spec TripleTwoRestart for Kafka(DEFAULT_REPLICATION_FACTOR = 3, CLIENT_BATCHES =
 spec TripleRetry for Kafka(DEFAULT_REPLICATION_FACTOR = 3, CLIENT_RETRY = true) {
     include Triple;
     include Guarantees;
-    faults { eot: 55, eff: 40, crashes: 0, omissions: 1, model: sync, round: 50ms }
+    faults {
+        eot: 55,
+        eff: 40,
+        crashes: 0,
+        omissions: 1,
+        model: sync,
+        round: 50ms
+    }
     check ldfi expect fails;
 }
 
@@ -221,7 +291,14 @@ spec TripleRetry for Kafka(DEFAULT_REPLICATION_FACTOR = 3, CLIENT_RETRY = true) 
 spec TripleRetryIdempotent for Kafka(DEFAULT_REPLICATION_FACTOR = 3, CLIENT_RETRY = true, CLIENT_IDEMPOTENT = true) {
     include Triple;
     include Guarantees;
-    faults { eot: 55, eff: 40, crashes: 0, omissions: 1, model: sync, round: 50ms }
+    faults {
+        eot: 55,
+        eff: 40,
+        crashes: 0,
+        omissions: 1,
+        model: sync,
+        round: 50ms
+    }
     check ldfi expect holds;
 }
 
@@ -230,7 +307,14 @@ spec TripleRetryIdempotent for Kafka(DEFAULT_REPLICATION_FACTOR = 3, CLIENT_RETR
 spec TripleTwoCrashes for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
     include Triple;
     include Guarantees;
-    faults { eot: 40, eff: 1, crashes: 2, restart: 3, model: sync, round: 50ms }
+    faults {
+        eot: 40,
+        eff: 1,
+        crashes: 2,
+        restart: 3,
+        model: sync,
+        round: 50ms
+    }
     check ldfi expect holds;
 }
 
@@ -239,7 +323,14 @@ spec TripleTwoCrashes for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
 spec TripleCommitRestart for Kafka(DEFAULT_REPLICATION_FACTOR = 3, CLIENT_COMMIT = true, OFFSETS_REPLICATION = 3) {
     include Triple;
     include Guarantees;
-    faults { eot: 85, eff: 1, crashes: 1, restart: 3, model: sync, round: 50ms }
+    faults {
+        eot: 85,
+        eff: 1,
+        crashes: 1,
+        restart: 3,
+        model: sync,
+        round: 50ms
+    }
     check ldfi expect holds;
 }
 
@@ -247,7 +338,14 @@ spec TripleCommitRestart for Kafka(DEFAULT_REPLICATION_FACTOR = 3, CLIENT_COMMIT
 spec TripleTwoLosses for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
     include Triple;
     include Guarantees;
-    faults { eot: 40, eff: 30, crashes: 0, omissions: 2, model: sync, round: 50ms }
+    faults {
+        eot: 40,
+        eff: 30,
+        crashes: 0,
+        omissions: 2,
+        model: sync,
+        round: 50ms
+    }
     check ldfi expect holds;
 }
 
@@ -258,7 +356,14 @@ spec TripleTwoLosses for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
 spec TriplePartitionsRestart for Kafka(DEFAULT_REPLICATION_FACTOR = 3, DEFAULT_PARTITIONS = 2, CLIENT_BATCHES = 2) {
     include Triple;
     include Guarantees;
-    faults { eot: 95, eff: 1, crashes: 1, restart: 3, model: sync, round: 50ms }
+    faults {
+        eot: 95,
+        eff: 1,
+        crashes: 1,
+        restart: 3,
+        model: sync,
+        round: 50ms
+    }
     check ldfi expect holds;
 }
 
@@ -267,7 +372,16 @@ spec TriplePartitionsRestart for Kafka(DEFAULT_REPLICATION_FACTOR = 3, DEFAULT_P
 spec TripleDelay for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
     include Triple;
     include Guarantees;
-    faults { eot: 40, eff: 30, crashes: 0, omissions: 0, model: async, delay: 2, delays: 1, round: 50ms }
+    faults {
+        eot: 40,
+        eff: 30,
+        crashes: 0,
+        omissions: 0,
+        model: async,
+        delay: 2,
+        delays: 1,
+        round: 50ms
+    }
     check ldfi expect holds;
 }
 
@@ -276,6 +390,15 @@ spec TripleDelay for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
 spec TripleDelayLong for Kafka(DEFAULT_REPLICATION_FACTOR = 3) {
     include Triple;
     include Guarantees;
-    faults { eot: 40, eff: 30, crashes: 0, omissions: 0, model: async, delay: 12, delays: 1, round: 50ms }
+    faults {
+        eot: 40,
+        eff: 30,
+        crashes: 0,
+        omissions: 0,
+        model: async,
+        delay: 12,
+        delays: 1,
+        round: 50ms
+    }
     check ldfi expect holds;
 }

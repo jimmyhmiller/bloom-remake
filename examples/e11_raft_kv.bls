@@ -50,8 +50,18 @@ channel redirect(id: ReqId #1, leader: Option<Node<Server>> #2): Server -> Clien
 channel request_vote(term: u64, last_idx: u64, last_term: u64): Server -> Server;
 channel vote(term: u64, granted: bool): Server -> Server;
 /// One log entry of the leader of `term`, with the term of the entry before it (the consistency check, §5.3).
-channel entry(term: u64, idx: u64, eterm: u64, prev_term: u64, origin: Node<Server>, session: Session, id: ReqId,
-              kind: u8, key: Key, val: Option<Val>): Server -> Server;
+channel entry(
+    term: u64,
+    idx: u64,
+    eterm: u64,
+    prev_term: u64,
+    origin: Node<Server>,
+    session: Session,
+    id: ReqId,
+    kind: u8,
+    key: Key,
+    val: Option<Val>
+): Server -> Server;
 /// A heartbeat: the leader's log holds `(prev_idx, prev_term)`, and its commit index is `commit`.
 channel beat(term: u64, prev_idx: u64, prev_term: u64, commit: u64): Server -> Server;
 /// A follower's answer: its log agrees with the leader's up to `idx`.
@@ -68,8 +78,17 @@ at Server {
     /// sends), and who took the request (`origin`, its client `session` and request `id`) so that server can answer
     /// when the entry is applied. An entry's `prev` stays true: an entry is stored only after its predecessor's term
     /// matched, and replacing the predecessor truncates it too.
-    durable table log(idx: u64, term: u64, prev: u64, origin: Node<Server>, session: Session, id: ReqId, kind: u8,
-                      key: Key, val: Option<Val>) key(idx);
+    durable table log(
+        idx: u64,
+        term: u64,
+        prev: u64,
+        origin: Node<Server>,
+        session: Session,
+        id: ReqId,
+        kind: u8,
+        key: Key,
+        val: Option<Val>
+    ) key(idx);
 
     // ---- volatile state
     table won(term: u64);
@@ -122,9 +141,7 @@ at Server {
     }
 
     // ---- elections (as e03)
-    view rv_ok(c, t) =
-        request_vote(t, li, lt) from c, eff(t), last_log(mi, mt)
-        where lt > mt || (lt == mt && li >= mi);
+    view rv_ok(c, t) = request_vote(t, li, lt) from c, eff(t), last_log(mi, mt) where lt > mt || (lt == mt && li >= mi);
     view fresh_grant(c, t) = rv_ok(c, t), not voted_for(t, _), choose!(c per t);
     view grant(c, t) {
         fresh_grant(c, t);
@@ -143,9 +160,8 @@ at Server {
         entry(term: t, ..), eff(t);
     }
     view granted_now() = grant(_, _);
-    view timed_out(t) =
-        poll, eff(t), deadline(d), not leader(t), not granted_now(), not heard_leader()
-        where now() >= d;
+    view timed_out(t) = poll, eff(t), deadline(d), not leader(t), not granted_now(), not heard_leader()
+            where now() >= d;
     view reset_timer() {
         granted_now();
         heard_leader();
@@ -214,7 +230,7 @@ at Server {
     }
     /// At every heartbeat, each follower gets its unacknowledged entries again (at most `BATCH`) and a beat.
     resend: on heartbeat, leader(t), match_idx(f, m), log(i, et, pt, o, ss, id, k, key, val)
-        where i > m && i <= m + BATCH {
+            where i > m && i <= m + BATCH {
         send entry(t, i, et, pt, o, ss, id, k, key, val) to f;
     }
     view term_at(i, it) {
@@ -245,10 +261,10 @@ at Server {
     /// Entries of the leader of our term whose predecessor matches: in the log, or earlier in the same batch.
     view acceptable(i, et) {
         entry(term: t, idx: i, eterm: et, prev_term: pt, ..), eff(t), let j = if i > 0 { i - 1 } else { 0 },
-            log(idx: j, term: pt, ..);
+                log(idx: j, term: pt, ..);
         entry(term: t, idx: i, eterm: et, prev_term: pt, ..), eff(t) where i == 1 && pt == 0;
         entry(term: t, idx: i, eterm: et, prev_term: pt, ..), eff(t), let j = if i > 0 { i - 1 } else { 0 },
-            acceptable(j, pt);
+                acceptable(j, pt);
     }
     /// A stored entry that conflicts with an acceptable one (same index, another term): it and all after it go.
     view conflict(c = min!(i)) = acceptable(i, et), log(idx: i, term: lt, ..) where lt != et;
@@ -291,9 +307,9 @@ at Server {
         next applied(c);
     }
     /// The newest write to `key` before entry `i` of this batch, if any.
-    view write_before(i, key, j = max!(w)) =
-        to_apply(i), log(i, _, _, _, _, _, _, key, _), to_apply(w), log(w, _, _, _, _, _, k, key, _)
-        where w < i && k != GET;
+    view write_before(i, key, j = max!(w)) = to_apply(i), log(i, _, _, _, _, _, _, key, _), to_apply(w),
+            log(w, _, _, _, _, _, k, key, _)
+            where w < i && k != GET;
     /// The value of `key` just before entry `i` is applied.
     view value_before(i, key, v) {
         write_before(i, key, j), log(j, _, _, _, _, _, k, key, Some(v)) where k == PUT;

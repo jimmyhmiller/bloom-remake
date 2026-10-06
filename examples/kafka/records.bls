@@ -42,24 +42,27 @@ fn batch_header(b: Bytes) -> Option<BatchHeader> {
 /// that is not whole, so it costs one step per batch.
 fn split_batches(b: Bytes) -> Option<Vec<Bytes>> {
     // One step per whole batch: the position after it, and the batch.
-    let steps = range(0, b.len() / BATCH_HEADER + 1).scan_while((0, Bytes::empty()), |acc, _i| {
-        let pos = acc.0;
-        if pos == b.len() {
-            None
-        } else {
-            match b.i32_be_at(pos + 8) {
-                Some(n) => {
-                    if n < 49i32 {
-                        None
-                    } else {
-                        let size = 12 + n as u64;
-                        if size > b.len() - pos { None } else { b.slice(pos, pos + size).map(|x| (pos + size, x)) }
+    let steps = range(0, b.len() / BATCH_HEADER + 1).scan_while(
+        (0, Bytes::empty()),
+        |acc, _i| {
+            let pos = acc.0;
+            if pos == b.len() {
+                None
+            } else {
+                match b.i32_be_at(pos + 8) {
+                    Some(n) => {
+                        if n < 49i32 {
+                            None
+                        } else {
+                            let size = 12 + n as u64;
+                            if size > b.len() - pos { None } else { b.slice(pos, pos + size).map(|x| (pos + size, x)) }
+                        }
                     }
+                    None => None,
                 }
-                None => None,
             }
         }
-    });
+    );
     let end = match steps.last() {
         Some(s) => s.0,
         None => 0,
@@ -72,10 +75,7 @@ fn split_batches(b: Bytes) -> Option<Vec<Bytes>> {
 fn batch_ok(b: Bytes) -> bool {
     match batch_header(b) {
         Some(h) => {
-            h.magic == 2i8
-                && 12 + h.length as u64 == b.len()
-                && h.record_count >= 0i32
-                && h.last_offset_delta >= 0i32
+            h.magic == 2i8 && 12 + h.length as u64 == b.len() && h.record_count >= 0i32 && h.last_offset_delta >= 0i32
                 && b.slice(21, b.len()).map(|covered| crc32c(covered) == h.crc).unwrap_or(false)
         }
         None => false,
@@ -116,16 +116,19 @@ fn kafka_snappy(b: Bytes, max: u64) -> Option<Bytes> {
         snappy_block(b, max)
     } else {
         // At most one chunk per 5 bytes (a length and a byte).
-        let end = range(0, b.len() / 5 + 1).fold(Some(([], 16)), |acc, _i| acc.and_then(|a| {
-            let (out, pos) = a;
-            if pos == b.len() {
-                Some((out, pos))
-            } else {
-                b.u32_be_at(pos).and_then(|n| b.slice(pos + 4, pos + 4 + n as u64).and_then(|chunk| {
-                    snappy_block(chunk, max).map(|x| (out.push(x), pos + 4 + n as u64))
-                }))
-            }
-        }));
+        let end = range(0, b.len() / 5 + 1).fold(
+            Some(([], 16)),
+            |acc, _i| acc.and_then(|a| {
+                let (out, pos) = a;
+                if pos == b.len() {
+                    Some((out, pos))
+                } else {
+                    b.u32_be_at(pos).and_then(|n| b.slice(pos + 4, pos + 4 + n as u64).and_then(|chunk| {
+                        snappy_block(chunk, max).map(|x| (out.push(x), pos + 4 + n as u64))
+                    }))
+                }
+            })
+        );
         end.and_then(|e| {
             let all = Bytes::join(e.0);
             if e.1 == b.len() && all.len() <= max { Some(all) } else { None }
@@ -155,7 +158,13 @@ fn batch_records(b: Bytes, h: BatchHeader) -> Option<Bytes> {
 
 /// A record: its length, then its attributes, timestamp delta, offset delta, key (null: -1), value (never null here)
 /// and headers (kept as bytes).
-format Record { body: prefixed(varint, 0, (ignored(i8, 0i8), varint, varint, nullable(prefixed(varint, 0, rest)), prefixed(varint, 0, rest), rest)) }
+format Record {
+    body: prefixed(
+        varint,
+        0,
+        (ignored(i8, 0i8), varint, varint, nullable(prefixed(varint, 0, rest)), prefixed(varint, 0, rest), rest)
+    )
+}
 
 /// A batch's records, in order (the count from its header): (offset, timestamp, value). `None` if they do not parse
 /// or do not fill the records section.
@@ -163,13 +172,19 @@ fn batch_rows(b: Bytes) -> Option<Vec<(i64, i64, Bytes)>> {
     let h = batch_header(b)?;
     let r = batch_records(b, h)?;
     let n = if h.record_count < 0i32 { 0 } else { h.record_count as u64 };
-    let end = range(0, n).fold(Some(([], 0)), |acc, _i| acc.and_then(|a| {
-        let (out, pos) = a;
-        Record::decode(r, pos).and_then(|rec| {
-            let (td, od, _key, value, _headers) = rec.0.body;
-            add_i64(h.base_offset, od).and_then(|o| add_i64(h.base_timestamp, td).map(|t| (out.push((o, t, value)), rec.1)))
+    let end = range(0, n).fold(
+        Some(([], 0)),
+        |acc, _i| acc.and_then(|a| {
+            let (out, pos) = a;
+            Record::decode(r, pos).and_then(|rec| {
+                let (td, od, _key, value, _headers) = rec.0.body;
+                add_i64(h.base_offset, od).and_then(|o| add_i64(h.base_timestamp, td).map(|t| (
+                    out.push((o, t, value)),
+                    rec.1
+                )))
+            })
         })
-    }));
+    );
     end.and_then(|e| if e.1 == r.len() { Some(e.0) } else { None })
 }
 

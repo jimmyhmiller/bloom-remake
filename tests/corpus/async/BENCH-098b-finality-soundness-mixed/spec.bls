@@ -15,7 +15,10 @@ spec MixedFinalitySound for r#program {
     fact s_in(7) @ SRC at tick 2;
     fact s_in(1) @ SRC at tick 3;
 
-    faults { crashes: 1, model: async }
+    faults {
+        crashes: 1,
+        model: async
+    }
 
     /// Replicas never finalize different values (the tables only grow, so updates commute: FT Prop 33).
     invariant q_agrees: never q_final_present(x) @ a, q_final_absent(x) @ b;
@@ -36,5 +39,8 @@ spec MixedFinalitySound for r#program {
     invariant absent_stays_absent: never q_final_absent(x) @ a, q(x) @ a;
     invariant q_c_false_stays_false: never q_c_final_false() @ a, q_c() @ a;
 
-    check sim { runs: 10000, seed: 1 } expect holds;
+    check sim {
+        runs: 10000,
+        seed: 1
+    } expect holds;
 }

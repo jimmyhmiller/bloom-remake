@@ -18,8 +18,7 @@ role Deriver: cluster;
 role Tallier: cluster;
 
 /// R(a, b, c, d): a company's listing for a day, sealed per company by the source.
-channel listing(company: String, day: u64, price: u64, volume: u64): Source -> Deriver
-    sealed by (company);
+channel listing(company: String, day: u64, price: u64, volume: u64): Source -> Deriver sealed by(company);
 channel by_company(company: String, day: u64): Deriver -> Tallier;
 channel by_ticker(ticker: String, day: u64): Deriver -> Tallier;
 channel by_tag(tag: String, day: u64): Deriver -> Tallier;

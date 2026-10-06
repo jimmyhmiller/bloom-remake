@@ -9,8 +9,9 @@ spec CompanyControlAsp for r#program {
     fact share("a", "c", 40) @ N at tick 1;
     fact share("b", "c", 20) @ N at tick 1;
 
-    invariant no_control "a company controls another":
-        never c(_, _) @ N;
+    invariant no_control "a company controls another": never c(_, _) @ N;
 
-    check asp { ticks: 3 } expect holds;
+    check asp {
+        ticks: 3
+    } expect holds;
 }

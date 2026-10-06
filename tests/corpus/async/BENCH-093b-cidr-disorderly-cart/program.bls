@@ -8,9 +8,9 @@
 program disorderly_cart version 1;
 
 /// Figure 11, CartProtocol: the client/server channels.
-channel action_msg(@server: Node, client: Node, session: u64, reqid: u64, item: String, action: String);
-channel checkout_msg(@server: Node, client: Node, session: u64, reqid: u64);
-channel response_msg(@client: Node, server: Node, session: u64, contents: Vec<String>);
+channel action_msg(@ server: Node, client: Node, session: u64, reqid: u64, item: String, action: String);
+channel checkout_msg(@ server: Node, client: Node, session: u64, reqid: u64);
+channel response_msg(@ client: Node, server: Node, session: u64, contents: Vec<String>);
 
 /// Figure 11, CartClientProtocol: the client's interface.
 input client_action(server: Node, session: u64, reqid: u64, item: String, action: String);
@@ -57,7 +57,7 @@ netted: on checkout_msg(srv, c, sess, _), action_cnt(sess, item, "Add", n_add), 
 /// `response_msg <~ status.group([client, server, session], accum(cnt.times.map{item}))`: each item repeated `cnt`
 /// times.
 reply: on status(srv, c, sess, item, cnt), i in 0..cnt {
-    send response_msg(c, srv, sess, collect!(item by (item, i)));
+    send response_msg(c, srv, sess, collect!(item by(item, i)));
 }
 
 // ---- replication of cart_action among the server replicas (Figure 17, best-effort multicast)

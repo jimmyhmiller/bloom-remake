@@ -14,8 +14,8 @@ scratch ls(address: Node, val: String);
 scratch rs(address: Node, val: String);
 table lt(address: Node, val: String);
 table rt(address: Node, val: String);
-channel lchan(@address: Node, val: String);
-channel rchan(@address: Node, val: String);
+channel lchan(@ address: Node, val: String);
+channel rchan(@ address: Node, val: String);
 output result(address: Node, val: String);
 
 /// BBG: `lchan <~ ul; rchan <~ ur`.

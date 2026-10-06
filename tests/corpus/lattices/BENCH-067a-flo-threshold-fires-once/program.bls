@@ -11,7 +11,7 @@ cell total: LPSet<u64>;
 table fired(v: u64);
 output emitted(v: u64);
 
-fold: while let s = lpset{ n | num(n) } {
+fold: while let s = lpset { n | num(n) } {
     emit total(s);
 }
 crossed: while let Some(_) = threshold(total.sum(), LMax::of(7u64)) {

@@ -38,7 +38,7 @@ pub choreography TwoPhaseCommit(TIMEOUT: Duration = 5s, RETRY: Duration = 500ms)
         timer retry every RETRY;
 
         start: on begin(id) from c, not txn(id, _, _) {
-            next txn(id, c, now());                 // durable before `prepare` leaves
+            next txn(id, c, now()); // durable before `prepare` leaves
             for p in Participant {
                 send prepare(id) to p;
             }
@@ -48,7 +48,7 @@ pub choreography TwoPhaseCommit(TIMEOUT: Duration = 5s, RETRY: Duration = 500ms)
             send outcome(id, d) to c;
         }
         re_prepare: on retry, txn(id, _, _), p in Participant, not decision(id, _)
-            where not (p in yes_from[id]), not (p in no_from[id]) {
+                where not (p in yes_from[id]), not (p in no_from[id]) {
             send prepare(id) to p;
         }
     }
@@ -105,7 +105,7 @@ pub choreography TwoPhaseCommit(TIMEOUT: Duration = 5s, RETRY: Duration = 500ms)
         /// A participant that voted both ways would give two verdicts for one id; the key of `decision` turns
         /// that into a loud SEM-050 error at the next tick instead of a silent pick.
         decide_once: while verdict(id, d), not decision(id, _) {
-            next decision(id, d);                   // durable: logged before `announce` runs
+            next decision(id, d); // durable: logged before `announce` runs
         }
         announce: on inserted decision(id, d), txn(id, c, _) {
             send outcome(id, d) to c;
@@ -135,8 +135,10 @@ pub choreography TwoPhaseCommit(TIMEOUT: Duration = 5s, RETRY: Duration = 500ms)
             }
         }
 
-        invariant known_decision "a decision from an unknown program version was applied":
-            never decided(_, Decision::Unknown);
+        invariant known_decision "a decision from an unknown program version was applied": never decided(
+                    _,
+                    Decision::Unknown
+                );
     }
 }
 
@@ -145,7 +147,7 @@ role App: external;
 role Coord;
 role Worker: cluster;
 
-import TwoPhaseCommit(TIMEOUT = 2s) as tpc with (Client = App, Coordinator = Coord, Participant = Worker);
+import TwoPhaseCommit(TIMEOUT = 2s) as tpc with(Client = App, Coordinator = Coord, Participant = Worker);
 
 at Worker {
     /// The local resource manager's refusals, fed by the host: the instance's `refuse` input is written by its

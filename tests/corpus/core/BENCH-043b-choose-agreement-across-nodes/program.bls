@@ -32,6 +32,6 @@ at Peer {
         emit heard(p, g, v);
     }
 
-    invariant agree "two nodes with the same candidates chose differently":
-        never heard(_, g, v), pick(g, w) where v != w;
+    invariant agree "two nodes with the same candidates chose differently": never heard(_, g, v), pick(g, w)
+            where v != w;
 }

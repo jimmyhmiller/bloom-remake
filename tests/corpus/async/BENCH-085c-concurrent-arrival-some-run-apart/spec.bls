@@ -7,5 +7,8 @@ spec SomeRunApart for r#program {
     /// `concurrent` (each message is sent once), so this bounded liveness property fails.
     liveness always_together: eventually concurrent() @ N1 within 4 ticks after 0;
 
-    check bmc { ticks: 6, delay: 2 } expect fails;
+    check bmc {
+        ticks: 6,
+        delay: 2
+    } expect fails;
 }

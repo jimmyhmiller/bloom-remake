@@ -8,7 +8,12 @@ spec LwwSeenLdfi for r#program {
     fact write(1, "r1", "x") @ R1 at tick 1;
     fact write(1, "r2", "y") @ R2 at tick 1;
 
-    faults { eot: 4, eff: 2, crashes: 0, model: sync }
+    faults {
+        eot: 4,
+        eff: 2,
+        crashes: 0,
+        model: sync
+    }
 
     view pre() = not crashed(R3);
     view post() = seen_v11() @ R3;

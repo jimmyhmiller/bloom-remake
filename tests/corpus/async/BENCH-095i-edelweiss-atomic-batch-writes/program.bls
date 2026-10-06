@@ -11,7 +11,7 @@
 
 program edelweiss_atomic_batch_writes version 1;
 
-table write(wid: u64, batch: u64, name: String, val: u64) key(wid) sealed by (batch);
+table write(wid: u64, batch: u64, name: String, val: u64) key(wid) sealed by(batch);
 table commit(batch: u64);
 table write_log(wid: u64, batch: u64, name: String, val: u64, prev_wid: u64) key(wid);
 table dom(wid: u64);
@@ -34,7 +34,8 @@ close: on close_batch(b) {
 }
 
 /// `write_commit_event <= (write * commit).lefts(:batch => :batch).notin(write_log, 0 => :wid)`
-view write_commit_event(wid, batch, name, val) = write(wid, batch, name, val), commit(batch), not write_log(wid, _, _, _, _);
+view write_commit_event(wid, batch, name, val) = write(wid, batch, name, val), commit(batch),
+        not write_log(wid, _, _, _, _);
 view live(wid, batch, name, val, prev_wid) = write_log(wid, batch, name, val, prev_wid), not dom(wid);
 
 log_write: while write_commit_event(w, b, n, v), outer live(lw, _lb, n, _lv, _lp) {

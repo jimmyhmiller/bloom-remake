@@ -136,7 +136,7 @@ pub module Raft(ONE_VOTE: bool = true, LOG_CHECK: bool = true, COMMIT_QUORUM: bo
     /// the same index.
     view acceptable(c, t) {
         request(t, li, lt) from c, top_term(t), not starts(t), last_entry(mi, mt)
-            where LOG_CHECK, lt > mt || (lt == mt && li >= mi);
+                where LOG_CHECK, lt > mt || (lt == mt && li >= mi);
         request(t, _, _) from c, top_term(t), not starts(t) where not LOG_CHECK;
     }
     view eligible(c, t) = acceptable(c, t), not cast(t, _);

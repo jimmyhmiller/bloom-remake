@@ -108,7 +108,11 @@ fn error_message(error: i16) -> Option<String> {
 }
 
 /// The answer for each key, in order: (key, error, node id, host, port).
-fn encode_find_coordinator_response(correlation_id: i32, version: i16, answers: Vec<(String, i16, i32, String, i32)>) -> Bytes {
+fn encode_find_coordinator_response(
+    correlation_id: i32,
+    version: i16,
+    answers: Vec<(String, i16, i32, String, i32)>
+) -> Bytes {
     let first = match answers.first() {
         Some(a) => a,
         None => error("encode_find_coordinator_response: a request with no key"),
@@ -120,14 +124,25 @@ fn encode_find_coordinator_response(correlation_id: i32, version: i16, answers: 
         node_id: first.2,
         host: first.3,
         port: first.4,
-        coordinators: answers.map(|a| Coordinator { key: a.0, node_id: a.2, host: a.3, port: a.4, error: a.1, message: error_message(a.1) }),
+        coordinators: answers.map(|a| Coordinator {
+            key: a.0,
+            node_id: a.2,
+            host: a.3,
+            port: a.4,
+            error: a.1,
+            message: error_message(a.1)
+        }),
     };
     group_frame(API_FIND_COORDINATOR, version, correlation_id, FindCoordinatorResponse::encode(r, version))
 }
 
 // ---------------------------------------------------------------- JoinGroup (11), versions 2–9 (flexible 6+)
 
-format JoinProtocol(version: i16) { name: kstr(version >= 6i16), metadata: kbytes(version >= 6i16), tags if version >= 6i16 }
+format JoinProtocol(version: i16) {
+    name: kstr(version >= 6i16),
+    metadata: kbytes(version >= 6i16),
+    tags if version >= 6i16
+}
 format JoinGroupRequest(version: i16) {
     group_id: kstr(version >= 6i16),
     session_timeout_ms: i32,
@@ -171,7 +186,11 @@ format JoinGroupResponse(version: i16) {
 
 // ---------------------------------------------------------------- SyncGroup (14), versions 0–5 (flexible 4+)
 
-format SyncAssignment(version: i16) { member_id: kstr(version >= 4i16), assignment: kbytes(version >= 4i16), tags if version >= 4i16 }
+format SyncAssignment(version: i16) {
+    member_id: kstr(version >= 4i16),
+    assignment: kbytes(version >= 4i16),
+    tags if version >= 4i16
+}
 format SyncGroupRequest(version: i16) {
     group_id: kstr(version >= 4i16),
     generation: i32,
@@ -215,7 +234,11 @@ fn decode_heartbeat(c: Cur, version: i16) -> Option<HeartbeatRequest> {
     HeartbeatRequest::decode(c.buf, c.pos, version).map(|r| r.0)
 }
 
-format HeartbeatResponse(version: i16) { throttle: i32 if version >= 1i16, error: i16, tags if version >= 4i16 }
+format HeartbeatResponse(version: i16) {
+    throttle: i32 if version >= 1i16,
+    error: i16,
+    tags if version >= 4i16
+}
 
 // ---------------------------------------------------------------- LeaveGroup (13), versions 0–5 (flexible 4+)
 
@@ -290,7 +313,11 @@ fn commit_entries(r: OffsetCommitRequest) -> Vec<(String, i32, i64, i32, Option<
     r.topics.map(|t| t.partitions.map(|p| (t.name, p.partition, p.offset, p.leader_epoch, p.metadata))).flatten()
 }
 
-format CommitPartitionResponse(version: i16) { partition: i32, error: i16, tags if version >= 8i16 }
+format CommitPartitionResponse(version: i16) {
+    partition: i32,
+    error: i16,
+    tags if version >= 8i16
+}
 format CommitTopicResponse(version: i16) {
     name: kstr(version >= 8i16),
     partitions: karray(version >= 8i16, CommitPartitionResponse(version)),
@@ -313,7 +340,12 @@ fn none_as(errors: Vec<i16>, e: i16) -> Vec<i16> {
 }
 
 /// The answer, one error per partition in request order (`errors`, by position).
-fn encode_offset_commit_response(correlation_id: i32, version: i16, req: OffsetCommitRequest, errors: Vec<i16>) -> Bytes {
+fn encode_offset_commit_response(
+    correlation_id: i32,
+    version: i16,
+    req: OffsetCommitRequest,
+    errors: Vec<i16>
+) -> Bytes {
     let counts = req.topics.map(|t| t.partitions.len());
     let answers = errors.enumerate();
     let grouped = by_topic(counts, answers);
@@ -327,7 +359,12 @@ fn encode_offset_commit_response(correlation_id: i32, version: i16, req: OffsetC
             },
         }),
     });
-    group_frame(API_OFFSET_COMMIT, version, correlation_id, OffsetCommitResponse::encode(OffsetCommitResponse { throttle: 0i32, topics: topics }, version))
+    group_frame(
+        API_OFFSET_COMMIT,
+        version,
+        correlation_id,
+        OffsetCommitResponse::encode(OffsetCommitResponse { throttle: 0i32, topics: topics }, version)
+    )
 }
 
 // ---------------------------------------------------------------- OffsetFetch (9), versions 1–9 (flexible 6+)
@@ -395,16 +432,20 @@ format OffsetFetchResponse(version: i16) {
 }
 
 /// One group's answer: its error, and per topic its partitions' (partition, offset, leader epoch, metadata, error).
-struct GroupOffsets { group: String, error: i16, topics: Vec<(String, Vec<(i32, i64, i32, Option<String>, i16)>)> }
+struct GroupOffsets {
+    group: String,
+    error: i16,
+    topics: Vec<(String, Vec<(i32, i64, i32, Option<String>, i16)>)>
+}
 
 /// The partitions of a group-level error answer: before v2 (no group-level error field) each partition asked for,
 /// with the error; from v2 none.
-fn error_topics(ts: Option<Vec<(String, Vec<i32>)>>, err: i16, version: i16) -> Vec<(String, Vec<(i32, i64, i32, Option<String>, i16)>)> {
-    if version >= 2i16 {
-        []
-    } else {
-        ts.unwrap_or([]).map(|t| (t.0, t.1.map(|p| (p, -1i64, -1i32, Some(""), err))))
-    }
+fn error_topics(
+    ts: Option<Vec<(String, Vec<i32>)>>,
+    err: i16,
+    version: i16
+) -> Vec<(String, Vec<(i32, i64, i32, Option<String>, i16)>)> {
+    if version >= 2i16 { [] } else { ts.unwrap_or([]).map(|t| (t.0, t.1.map(|p| (p, -1i64, -1i32, Some(""), err)))) }
 }
 
 /// The answer. Before v2 a group-level error goes in every partition (there is no top-level error).
@@ -412,7 +453,10 @@ fn fetched_topics(version: i16, g: GroupOffsets) -> Vec<FetchedOffsetsTopic> {
     g.topics.map(|t| FetchedOffsetsTopic {
         name: t.0,
         partitions: t.1.map(|p| FetchedOffset {
-            partition: p.0, offset: p.1, leader_epoch: p.2, metadata: p.3,
+            partition: p.0,
+            offset: p.1,
+            leader_epoch: p.2,
+            metadata: p.3,
             error: if version < 2i16 && g.error != NONE { g.error } else { p.4 },
         }),
     })
@@ -471,7 +515,12 @@ format DescribeGroupsResponse(version: i16) {
 }
 
 fn encode_describe_groups_response(correlation_id: i32, version: i16, groups: Vec<DescribedGroup>) -> Bytes {
-    group_frame(API_DESCRIBE_GROUPS, version, correlation_id, DescribeGroupsResponse::encode(DescribeGroupsResponse { throttle: 0i32, groups: groups }, version))
+    group_frame(
+        API_DESCRIBE_GROUPS,
+        version,
+        correlation_id,
+        DescribeGroupsResponse::encode(DescribeGroupsResponse { throttle: 0i32, groups: groups }, version)
+    )
 }
 
 // ---------------------------------------------------------------- ListGroups (16), versions 0–5 (flexible 3+)
@@ -503,7 +552,12 @@ format ListGroupsResponse(version: i16) {
 
 /// The groups (id, protocol type, state) a ListGroups request's filters keep, answered. Every group here is a
 /// classic group.
-fn encode_list_groups_response(correlation_id: i32, version: i16, req: ListGroupsRequest, groups: Vec<(String, String, String)>) -> Bytes {
+fn encode_list_groups_response(
+    correlation_id: i32,
+    version: i16,
+    req: ListGroupsRequest,
+    groups: Vec<(String, String, String)>
+) -> Bytes {
     let states = req.states.map(|s| s.to_lowercase());
     let types = req.types.map(|s| s.to_lowercase());
     let kept = groups.filter(|g| (states.is_empty() || states.contains(g.2.to_lowercase()))
@@ -551,7 +605,11 @@ fn code_point_at(b: Bytes, k: u64) -> (u64, u64) {
     } else if b0 < 240u64 {
         ((b0 % 16u64) * 4096u64 + (byte_at(b, k + 1u64) % 64u64) * 64u64 + byte_at(b, k + 2u64) % 64u64, 3u64)
     } else {
-        ((b0 % 8u64) * 262144u64 + (byte_at(b, k + 1u64) % 64u64) * 4096u64 + (byte_at(b, k + 2u64) % 64u64) * 64u64 + byte_at(b, k + 3u64) % 64u64, 4u64)
+        (
+            (b0 % 8u64) * 262144u64 + (byte_at(b, k + 1u64) % 64u64) * 4096u64 + (byte_at(b, k + 2u64) % 64u64) * 64u64
+                + byte_at(b, k + 3u64) % 64u64,
+            4u64
+        )
     }
 }
 
@@ -566,7 +624,13 @@ fn byte_at(b: Bytes, j: u64) -> u64 {
 /// `Utils.abs(groupId.hashCode()) % partitions`, where `Utils.abs` maps the minimum to 0.
 fn group_partition(group: String, partitions: i32) -> i32 {
     let h = java_hash(group) as i64;
-    let a = if h == -2147483648i64 { 0i64 } else if h < 0i64 { 0i64 - h } else { h };
+    let a = if h == -2147483648i64 {
+        0i64
+    } else if h < 0i64 {
+        0i64 - h
+    } else {
+        h
+    };
     (a % (partitions as i64)) as i32
 }
 
@@ -592,8 +656,17 @@ fn client_host(peer: String) -> String {
 
 /// The id Kafka gives a new member: its client id, a dash and a UUID (here from two 64-bit values).
 fn member_id_for(client: String, hi: u64, lo: u64) -> String {
-    let uuid = Bytes::join([hex(hi / 4294967296u64, 8u64), dash(), hex((hi / 65536u64) % 65536u64, 4u64), dash(),
-        hex(hi % 65536u64, 4u64), dash(), hex(lo / 281474976710656u64, 4u64), dash(), hex(lo % 281474976710656u64, 12u64)]);
+    let uuid = Bytes::join([
+        hex(hi / 4294967296u64, 8u64),
+        dash(),
+        hex((hi / 65536u64) % 65536u64, 4u64),
+        dash(),
+        hex(hi % 65536u64, 4u64),
+        dash(),
+        hex(lo / 281474976710656u64, 4u64),
+        dash(),
+        hex(lo % 281474976710656u64, 12u64)
+    ]);
     match client.to_utf8().concat(dash()).concat(uuid).from_utf8() {
         Some(s) => s,
         None => error("member_id_for: a client id that is not UTF-8"),
@@ -635,7 +708,8 @@ fn decode_offsets_entry(b: Bytes) -> Option<OffsetsEntry> {
 
 /// The items of an offset commit with only the last value of each (topic, partition), in their order.
 fn last_per_partition(items: Vec<(String, Bytes, i32, i64, i32, Option<String>)>) -> Vec<(String, Bytes, i32, i64, i32, Option<String>)> {
-    items.enumerate().filter(|e| not items.enumerate().any(|f| f.0 > e.0 && (f.1).0 == (e.1).0 && (f.1).2 == (e.1).2)).map(|e| e.1)
+    items.enumerate().filter(|e| not items.enumerate().any(|f| f.0 > e.0 && (f.1).0 == (e.1).0
+        && (f.1).2 == (e.1).2)).map(|e| e.1)
 }
 
 /// The most metadata an offset commit may carry (Kafka's `offset.metadata.max.bytes`).

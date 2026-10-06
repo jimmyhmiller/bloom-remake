@@ -41,6 +41,7 @@ invariant r_total "a group with candidates has no draw": never pool(g, _), not r
 invariant rs_is_candidate "sticky choose_rand holds a non-candidate": never rs(g, v), not pool(g, v);
 invariant one_rs "sticky choose_rand holds two values": never rs(g, v1), rs(g, v2) where v1 != v2;
 invariant rs_total "a group with candidates has no sticky draw": never pool(g, _), not rs(g, _);
-invariant rs_sticky "sticky choose_rand redrew while its value was still a candidate":
-    never rs_prev(g, v), pool(g, v), rs(g, w) where v != w;
+invariant rs_sticky "sticky choose_rand redrew while its value was still a candidate": never rs_prev(g, v), pool(g, v),
+        rs(g, w)
+        where v != w;
 invariant rs_redraws "sticky choose_rand kept a deleted value": never rs_prev(g, v), rs(g, v), not pool(g, v);

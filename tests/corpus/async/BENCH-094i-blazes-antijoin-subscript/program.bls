@@ -16,8 +16,7 @@ role Source: cluster;
 role Filterer: cluster;
 
 channel r_msg(x: u64, z: u64): Source -> Filterer;
-channel s_sealed(x: u64, y: String): Source -> Filterer
-    sealed by (x);
+channel s_sealed(x: u64, y: String): Source -> Filterer sealed by(x);
 channel s_open(x: u64, y: String): Source -> Filterer;
 
 /// `select * from R where x not in (select x from S where y = 'Yahoo!')`, over the R and S tuples received so far.

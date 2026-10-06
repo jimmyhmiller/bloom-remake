@@ -46,7 +46,7 @@ spec PaxosMadeEpr for r#program {
     /// (13) Once v2 is proposed in r2, no other value is choosable in a lower round: every quorum has a node that
     /// left r1 without voting for v1 there.
     invariant nothing_else_choosable: never propose_msg(r2, v2), r1 in 0..r2, value(v1) @ _, v1 != v2,
-        quorum n in Replica { any { vote_msg(n, r1, v1); not left_round(n, r1) } };
+            quorum n in Replica { any { vote_msg(n, r1, v1); not left_round(n, r1) } };
     /// (14) Joining a round leaves every lower round.
     invariant joining_leaves_lower: never joined_round(n, r2), r1 in 0..r2, not left_round(n, r1);
     /// (15) A node that sent an acknowledgement for r has joined r.
@@ -63,11 +63,7 @@ spec PaxosMadeEpr for r#program {
     invariant one_recorded_proposal: never proposed(r, v1) @ o, proposed(r, v2) @ o where v1 != v2;
     invariant one_owner: never owns(r, a) @ x, owns(r, b) @ y where a != b;
 
-    prove agreement by induction using unique_proposal, vote_needs_proposal, decision_needs_quorum,
-        ack_bottom_no_vote, ack_vote_below, ack_vote_cast, ack_vote_highest, no_vote_at_bottom,
-        nothing_else_choosable, joining_leaves_lower, ack_means_joined, votes_recorded, recorded_votes_sent,
-        acks_were_sent, tallied_votes_were_sent, owners_start_rounds, owners_propose, proposals_recorded,
-        one_recorded_proposal, one_owner;
+    prove agreement by induction using unique_proposal, vote_needs_proposal, decision_needs_quorum, ack_bottom_no_vote, ack_vote_below, ack_vote_cast, ack_vote_highest, no_vote_at_bottom, nothing_else_choosable, joining_leaves_lower, ack_means_joined, votes_recorded, recorded_votes_sent, acks_were_sent, tallied_votes_were_sent, owners_start_rounds, owners_propose, proposals_recorded, one_recorded_proposal, one_owner;
 
     check smt expect holds;
 }

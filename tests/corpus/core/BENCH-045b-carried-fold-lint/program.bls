@@ -26,7 +26,7 @@ load_log: on append(i, x) {
     emit log(i, x);
 }
 
-view next_bad(b2 = fold!(b, step, x by i)) = per bad(b), log(i, x);    // expect: BLS0601
+view next_bad(b2 = fold!(b, step, x by i)) = per bad(b), log(i, x); // expect: BLS0601
 
 advance_bad: while next_bad(b2) {
     upsert bad(b2);

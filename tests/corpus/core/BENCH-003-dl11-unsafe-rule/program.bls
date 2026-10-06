@@ -10,7 +10,7 @@ static q(a: i64);
 
 fact q(1);
 
-view p(a, b: i64) = q(a);                   // expect: BLS0500 (b is bound by no positive literal)
+view p(a, b: i64) = q(a); // expect: BLS0500 (b is bound by no positive literal)
 
 output out(a: i64, b: i64);
 

@@ -10,8 +10,8 @@ module TestNm {
     input i1(key: Node, val: String);
     input i2(key: Node, val: String);
     output response(key: Node, val: String);
-    channel c1(@address: Node, val: String);
-    channel c2(@address: Node, val: String);
+    channel c1(@ address: Node, val: String);
+    channel c2(@ address: Node, val: String);
     table guard1(key: Node, val: String);
     table guard2(key: Node, val: String);
 

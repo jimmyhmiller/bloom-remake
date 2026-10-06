@@ -38,6 +38,6 @@ report_changed: on inserted elems(x) {
     emit changed(x);
 }
 
-reduce: while let m = lmax{ n | nums(n) } {
+reduce: while let m = lmax { n | nums(n) } {
     emit reduced(m);
 }

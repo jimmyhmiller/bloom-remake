@@ -17,7 +17,7 @@ fact item(1);
 output echo(n: u64);
 
 forge: while item(n) {
-    emit request(n);                        // expect: BLS0406 (a module never writes its own input)
+    emit request(n); // expect: BLS0406 (a module never writes its own input)
 }
 
 reply: on request(n) {

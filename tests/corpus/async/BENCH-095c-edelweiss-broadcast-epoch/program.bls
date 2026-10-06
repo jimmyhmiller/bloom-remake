@@ -12,9 +12,9 @@
 
 program edelweiss_broadcast_epoch_all version 1;
 
-table node(addr: Node, epoch: u64) sealed by (epoch);
-table log(id: u64, epoch: u64, val: String) key(id) sealed by (epoch);
-channel chn(@addr: Node, id: u64, epoch: u64, val: String) key(addr, id);
+table node(addr: Node, epoch: u64) sealed by(epoch);
+table log(id: u64, epoch: u64, val: String) key(id) sealed by(epoch);
+channel chn(@ addr: Node, id: u64, epoch: u64, val: String) key(addr, id);
 
 /// From the host: membership, messages this node originates, and the end of an epoch.
 input member(addr: Node, epoch: u64);

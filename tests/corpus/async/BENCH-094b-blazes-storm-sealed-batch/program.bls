@@ -16,12 +16,9 @@ role Counter: cluster;
 role Committer;
 
 /// The tweet stream, one tweet to one splitter.
-channel tweet(batch: u64, id: u64, text: String): Spout -> Splitter
-    partition by id
-    sealed by (batch);
+channel tweet(batch: u64, id: u64, text: String): Spout -> Splitter partition by id sealed by(batch);
 /// The word stream, hash-partitioned on the word.
-channel word(batch: u64, word: String, id: u64, pos: u64): Splitter -> Counter
-    partition by word;
+channel word(batch: u64, word: String, id: u64, pos: u64): Splitter -> Counter partition by word;
 /// The counts, to the committer.
 channel tally(batch: u64, word: String, n: u64): Counter -> Committer;
 

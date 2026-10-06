@@ -20,7 +20,13 @@ spec CausalCrdtConvergence for r#program {
     fact mv_write("c", 22) @ R3 at tick 4;
     fact ew_disable() @ R1 at tick 6;
 
-    faults { eot: 30, eff: 1, crashes: 0, model: async, delay: 3 }
+    faults {
+        eot: 30,
+        eff: 1,
+        crashes: 0,
+        model: async,
+        delay: 3
+    }
 
     /// Some replica holds a member, flag or value that another replica lacks.
     view aw_differ(e) = aw_members(e) @ x, y in Replica, not aw_members(e) @ y;
@@ -30,5 +36,8 @@ spec CausalCrdtConvergence for r#program {
     view pre() = not crashed(R1), not crashed(R2), not crashed(R3);
     view post() = not aw_differ(_), not ew_differ(), not mv_differ(_);
 
-    check sim { runs: 500, seed: 11 } expect holds;
+    check sim {
+        runs: 500,
+        seed: 11
+    } expect holds;
 }

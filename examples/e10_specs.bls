@@ -77,7 +77,12 @@ spec Clique {
 spec SimpleLogFaults for SimpleLog {
     include Clique;
     include DelivAssert;
-    faults { eot: 4, eff: 2, crashes: 0, model: sync }
+    faults {
+        eot: 4,
+        eff: 2,
+        crashes: 0,
+        model: sync
+    }
     check ldfi expect fails;
 }
 
@@ -85,7 +90,12 @@ spec SimpleLogFaults for SimpleLog {
 spec AckRbFaults for AckRb {
     include Clique;
     include DelivAssert;
-    faults { eot: 8, eff: 6, crashes: 1, model: sync }
+    faults {
+        eot: 8,
+        eff: 6,
+        crashes: 1,
+        model: sync
+    }
 
     /// A live holder and a live neighbor that lacks the message. After the last omission, every live holder
     /// resends to every unacknowledged live neighbor, so such pairs disappear within one round.
@@ -93,14 +103,23 @@ spec AckRbFaults for AckRb {
     liveness spreads: eventually not missing_live(_, "hello") within 2 ticks after eff;
 
     check ldfi expect holds;
-    check bmc { ticks: 8 } expect holds;
+    check bmc {
+        ticks: 8
+    } expect holds;
 }
 
 /// Election safety for E3 (Raft §5.2): at most one leader per term.
 spec RaftElectionSafety for e03_raft_election {
     nodes S1, S2, S3;
     assign Server = [S1, S2, S3];
-    faults { eot: 30, eff: 20, crashes: 1, model: async, delay: 3, round: 10ms }
+    faults {
+        eot: 30,
+        eff: 20,
+        crashes: 1,
+        model: async,
+        delay: 3,
+        round: 10ms
+    }
 
     /// The history form: no two nodes ever won the same term, anywhere in the run.
     invariant election_safety: never ever won(t) @ a, ever won(t) @ b where a != b;
@@ -115,7 +134,13 @@ spec RaftElectionSafety for e03_raft_election {
 
     prove one_leader by induction using vote_once, reply_backed, tally_backed, won_by_quorum;
 
-    check bmc { ticks: 30, delay: 3 } expect holds;
+    check bmc {
+        ticks: 30,
+        delay: 3
+    } expect holds;
     check smt expect holds;
-    check sim { runs: 20000, seed: 7 } expect holds;
+    check sim {
+        runs: 20000,
+        seed: 7
+    } expect holds;
 }

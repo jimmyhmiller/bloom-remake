@@ -22,8 +22,7 @@ role CacheServer: cluster;
 role Analyst: cluster;
 
 /// Stream c: every click, to every reporting server.
-channel click(click_id: u64, id: u64, campaign: String, window: u64): AdServer -> Reporter
-    sealed by (window);
+channel click(click_id: u64, id: u64, campaign: String, window: u64): AdServer -> Reporter sealed by(window);
 /// Stream q: an analyst's request, to a cache server.
 channel ask(q: u64, id: u64, campaign: String): Analyst -> CacheServer;
 /// A cache server passes the request on to the reporting servers.

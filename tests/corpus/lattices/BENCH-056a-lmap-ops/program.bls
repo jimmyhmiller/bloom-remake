@@ -25,7 +25,7 @@ cell big_keys: LSet<String>;
 cell from_coll: LMap<String, LMax<u64>>;
 
 feed1: on put1(k, v) {
-    emit m1(map[k => v]);                   // SimpleMap: values merge per key with max
+    emit m1(map[k => v]); // SimpleMap: values merge per key with max
 }
 feed2: on put2(k, v) {
     emit m2(map[k => v]);
@@ -56,11 +56,11 @@ at_absent: while let x = m1.at("zz") {
 }
 /// MapApply: Bud's `m4.apply(:size).apply(:gt_eq, 2).filter.key_set`, the keys whose sets have at least two
 /// elements. A generator over the map, a monotone `size` and a threshold, folded into an lset.
-apply: while let b = lset{ k | (k, s) in m4 where s.size() >= 2 } {
+apply: while let b = lset { k | (k, s) in m4 where s.size() >= 2 } {
     emit big_keys(b);
 }
 /// MapFromCollection: a collection folded into a map lattice.
-from_collection: while let c = lmap{ k => LMax::of(v) | kv(k, v) } {
+from_collection: while let c = lmap { k => LMax::of(v) | kv(k, v) } {
     emit from_coll(c);
 }
 

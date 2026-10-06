@@ -11,5 +11,8 @@ spec AlwaysAChain for r#program {
     invariant first_has_no_predecessor: never f(u) @ N1, n(_, u) @ N1;
     invariant no_self_loop: never n(u, u) @ N1;
 
-    check sim { runs: 200, seed: 1 } expect holds;
+    check sim {
+        runs: 200,
+        seed: 1
+    } expect holds;
 }

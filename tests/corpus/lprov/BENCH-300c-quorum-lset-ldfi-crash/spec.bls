@@ -12,7 +12,12 @@ spec QuorumCrash for r#program {
     fact cast() @ V4 at tick 1;
     fact cast() @ V5 at tick 1;
 
-    faults { eot: 4, eff: 2, crashes: 1, model: sync }
+    faults {
+        eot: 4,
+        eff: 2,
+        crashes: 1,
+        model: sync
+    }
 
     view pre() = not crashed(C);
     view post() = decided() @ C;

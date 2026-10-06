@@ -49,7 +49,7 @@ pos_reached: while incs.size() >= 10 {
 
 /// pn.value >= 10: the difference of the two sizes is an exact (revealed) read, a point of order.
 value_reached: while let v = (reveal!(incs.size()).unwrap_or(0) as i64) - (reveal!(decs.size()).unwrap_or(0) as i64)
-    where v >= 10 {
+        where v >= 10 {
     emit value_ge_10();
 }
 

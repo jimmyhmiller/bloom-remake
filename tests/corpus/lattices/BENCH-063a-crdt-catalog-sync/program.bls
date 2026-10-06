@@ -98,10 +98,8 @@ at Replica {
 
     // ---- queries
     view gc_total(t) = let t = gc.sum_values();
-    view pn_value(v) =
-        let p = reveal!(pn.p.sum_values()).unwrap_or(0),
-        let n = reveal!(pn.n.sum_values()).unwrap_or(0),
-        let v = p as i64 - n as i64;
+    view pn_value(v) = let p = reveal!(pn.p.sum_values()).unwrap_or(0), let n = reveal!(pn.n.sum_values()).unwrap_or(0),
+            let v = p as i64 - n as i64;
     view gset_members(e) = e in gs;
     view tp_members(e) = e in tp.adds, not (e in tp.removes);
     view reg_value(v) = let Some(v) = reg.val!().get();

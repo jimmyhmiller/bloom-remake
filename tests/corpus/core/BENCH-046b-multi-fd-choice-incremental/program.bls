@@ -26,5 +26,5 @@ invariant fd_x "x is matched twice": never matching(x, y1), matching(x, y2) wher
 invariant fd_y "y is matched twice": never matching(x1, y), matching(x2, y) where x1 != x2;
 invariant maximal "an edge with two unmatched ends could be added": never g(x, y), not matched_x(x), not matched_y(y);
 /// No edge is ever removed, and the new edge is in its own conflict component, so no earlier match may change.
-invariant component_stable "adding an unrelated edge changed an earlier match":
-    never matching_prev(x, y), not matching(x, y);
+invariant component_stable "adding an unrelated edge changed an earlier match": never matching_prev(x, y),
+        not matching(x, y);

@@ -9,10 +9,17 @@ spec PresenceModels for r#program {
 
     fact do_put("k", 1) @ CL at tick 1;
 
-    faults { eot: 8, eff: 1, crashes: 0, model: async, delay: 2 }
+    faults {
+        eot: 8,
+        eff: 1,
+        crashes: 0,
+        model: async,
+        delay: 2
+    }
 
-    invariant key_present "r3 lacks k at the horizon":
-        never not has_k() @ R3 at tick 8;
+    invariant key_present "r3 lacks k at the horizon": never not has_k() @ R3 at tick 8;
 
-    check asp { ticks: 8 } expect holds;
+    check asp {
+        ticks: 8
+    } expect holds;
 }

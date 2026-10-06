@@ -19,7 +19,7 @@ fact node("n2");
 fact node("n3");
 
 table log(id: u64, val: String, deps: Set<u64>) key(id);
-channel chn(@addr: Node, id: u64, val: String, deps: Set<u64>) key(addr, id);
+channel chn(@ addr: Node, id: u64, val: String, deps: Set<u64>) key(addr, id);
 table safe_log(id: u64, val: String, deps: Set<u64>) key(id);
 
 /// From the host: a message this node originates, with the ids it causally depends on.

@@ -2,7 +2,7 @@
 
 program chat version 1;
 
-use e02_reliable_broadcast::{ReliableBroadcast, MsgId};
+use e02_reliable_broadcast::{ ReliableBroadcast, MsgId };
 
 /// Every node of the deployment, this one included.
 static member(n: Node);

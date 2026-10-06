@@ -7,7 +7,12 @@ spec MergeAtSenderLdfi for r#program {
 
     fact go() @ A at tick 1;
 
-    faults { eot: 3, eff: 2, crashes: 0, model: sync }
+    faults {
+        eot: 3,
+        eff: 2,
+        crashes: 0,
+        model: sync
+    }
 
     view pre() = not crashed(R);
     view post() = has_two() @ R;

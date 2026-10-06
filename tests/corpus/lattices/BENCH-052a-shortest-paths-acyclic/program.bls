@@ -23,10 +23,10 @@ load: on link_in(f, t, c) {
     emit link(f, t, c);
 }
 direct: while link(f, t, c) {
-    emit path(f, t, "direct", c);           // c is lifted into LMin<u64>
+    emit path(f, t, "direct", c); // c is lifted into LMin<u64>
 }
 extend: while link(f, t, c), path(t, t2, _, pc) {
-    emit path(f, t2, t, pc + c);             // LMin + constant: a morphism
+    emit path(f, t2, t, pc + c); // LMin + constant: a morphism
 }
 summarize: while path(f, t, _, c) {
     emit min_cost(f, t, c);

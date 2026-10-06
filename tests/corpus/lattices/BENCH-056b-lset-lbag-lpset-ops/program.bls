@@ -59,25 +59,25 @@ eqjoin: while x in s1, y in s1 where y == x + 1 {
     emit eq(set[(x, y)]);
 }
 /// SetSimpleGroupCnt: the collection grouped into a map of sets; the per-group count is read in `group_cnt`.
-group: while let m = lmap{ g => set[x] | grouped(g, x) } {
+group: while let m = lmap { g => set[x] | grouped(g, x) } {
     emit groups(m);
 }
 view group_cnt(g, n) = (g, s) in groups, let n = s.size();
 /// SetToCollection: a generator over the set.
 view elems(x) = x in s1;
 /// NotInToLattice: a stratified negation feeding a lattice fold.
-not_in_lattice: while let s = lset{ x | a_t(x), not b_t(x) } {
+not_in_lattice: while let s = lset { x | a_t(x), not b_t(x) } {
     emit not_in(s);
 }
 /// SimpleSum: SUM(DISTINCT …) over a set of non-negative numbers; a repeated number counts once.
-sum_feed: while let p = lpset{ m | sum_in(m) } {
+sum_feed: while let p = lpset { m | sum_in(m) } {
     emit ps(p);
 }
 sum: while let t = ps.sum() {
     emit total(t);
 }
 /// SimpleBag: bag merge keeps the larger multiplicity; `+` adds multiplicities.
-bag_feed: while let b = lbag{ e | bag_in(e) } {
+bag_feed: while let b = lbag { e | bag_in(e) } {
     emit bag1(b);
 }
 bag_double: while let b = bag1 + bag1 {

@@ -18,10 +18,19 @@ spec MutantW3 for r#program {
     fact local_update("z", -1) @ B at tick 3;
     fact local_update("y", 1) @ C at tick 1;
 
-    faults { eot: 60, eff: 20, crashes: 0, model: async, delay: 3 }
+    faults {
+        eot: 60,
+        eff: 20,
+        crashes: 0,
+        model: async,
+        delay: 3
+    }
 
     view pre() = not crashed(A), not crashed(B), not crashed(C);
     view post() = raw("x", 1) @ A, raw("x", 1) @ B, raw("x", 1) @ C;
 
-    check sim { runs: 1000, seed: 7 } expect fails;
+    check sim {
+        runs: 1000,
+        seed: 7
+    } expect fails;
 }

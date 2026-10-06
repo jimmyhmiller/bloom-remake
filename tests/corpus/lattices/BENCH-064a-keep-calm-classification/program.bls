@@ -80,7 +80,7 @@ at Replica {
     report_checkout: while in_cart(e) {
         emit checkout(e);
     }
-    report_suspicious: while lset{ id | txns(id, a) where a >= 1000 }.size() > 50 {
+    report_suspicious: while lset { id | txns(id, a) where a >= 1000 }.size() > 50 {
         emit suspicious();
     }
     report_big: while cart.adds.size() + cart.removes.size() > 100 {

@@ -12,7 +12,10 @@ spec ReachFinalitySound for r#program {
     fact add_edge("t", "u") @ SRC at tick 3;
     fact end_of_edges() @ SRC at tick 4;
 
-    faults { crashes: 1, model: async }
+    faults {
+        crashes: 1,
+        model: async
+    }
 
     /// Replicas never finalize different values (FT Prop 15, 33: the edge table only grows, so updates commute).
     invariant reach_agrees: never reach_final() @ a, reach_final_false() @ b;
@@ -29,5 +32,8 @@ spec ReachFinalitySound for r#program {
     invariant final_true_holds: never reach_final() @ a, not reach() @ a;
     invariant final_false_absent: never reach_z_final_false() @ a, reach_z() @ a;
 
-    check sim { runs: 10000, seed: 1 } expect holds;
+    check sim {
+        runs: 10000,
+        seed: 1
+    } expect holds;
 }

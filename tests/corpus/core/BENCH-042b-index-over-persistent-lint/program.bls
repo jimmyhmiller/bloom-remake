@@ -12,7 +12,7 @@ record: on arrive(p) {
     emit all_req(p);
 }
 
-view rank(p, i = index!()) = all_req(p);    // expect: BLS0601 (index! over a persistent input)
+view rank(p, i = index!()) = all_req(p); // expect: BLS0601 (index! over a persistent input)
 
 report: while rank(p, i) {
     emit ranked(p, i);

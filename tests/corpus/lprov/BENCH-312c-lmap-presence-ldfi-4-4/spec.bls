@@ -8,7 +8,12 @@ spec PresenceLdfi44 for r#program {
 
     fact do_put("k", 1) @ CL at tick 1;
 
-    faults { eot: 4, eff: 4, crashes: 0, model: sync }
+    faults {
+        eot: 4,
+        eff: 4,
+        crashes: 0,
+        model: sync
+    }
 
     view pre() = not crashed(R3);
     view post() = has_k() @ R3;
