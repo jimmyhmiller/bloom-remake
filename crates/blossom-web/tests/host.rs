@@ -457,11 +457,11 @@ fn the_inspector_explains_an_element_down_to_the_events_and_rules() {
     let why = a.why("label-1").unwrap();
     let mut tree = String::new();
     render(&why, 0, &mut tree);
-    // The label's element and its text, each made by rule `item` this round.
-    let elem = find(&why, r#"elem("label-1", "view-1", 1, "label")"#).unwrap_or_else(|| panic!("{tree}"));
-    assert!(elem.how.starts_with("rule `item` in round "), "{tree}");
+    // The label's element (under the todo's derived `view` div) and its text, each made by rule `frame` this round.
+    let elem = find(&why, r#"elem("label-1", "todo-1/div.0", 1, "label")"#).unwrap_or_else(|| panic!("{tree}"));
+    assert!(elem.how.starts_with("rule `frame` in round "), "{tree}");
     let text = find(&why, r#"text("label-1", "Walk the dog")"#).unwrap_or_else(|| panic!("{tree}"));
-    assert!(text.how.starts_with("rule `item` in round "), "{tree}");
+    assert!(text.how.starts_with("rule `frame` in round "), "{tree}");
     // From the todo, toggled by its checkbox's change, added by the Enter that typed it.
     let done = find(&why, r#"todos(1, "Walk the dog", true)"#).unwrap_or_else(|| panic!("{tree}"));
     assert!(done.how.ends_with("by rule `toggle`"), "{tree}");

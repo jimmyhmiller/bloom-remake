@@ -36,11 +36,6 @@ view is_editing(n, e) {
     todos(n, _, _), not editing(n), let e = false;
 }
 
-/// A todo's element of a kind: `toggle-3`.
-fn id_of(kind: String, n: u64) -> String {
-    kind ++ "-" ++ n.to_string()
-}
-
 /// The list a URL hash shows.
 fn filter_of(hash: String) -> String {
     if hash == "#/active" {
@@ -92,7 +87,7 @@ add: on keydown(id, key, value), next_id(n) where id == "new-todo" && key == "En
     upsert draft("");
 }
 
-toggle: on change(id, checked), todos(n, title, _done) where id == id_of("toggle", n) {
+toggle: on change(id, checked), todos(n, title, _done) where id == f"toggle-{n}" {
     upsert todos(n, title, checked);
 }
 
@@ -100,7 +95,7 @@ toggle_all: on change(id, checked), todos(n, title, _done) where id == "toggle-a
     upsert todos(n, title, checked);
 }
 
-destroy: on click(id), todos(n, title, done) where id == id_of("destroy", n) {
+destroy: on click(id), todos(n, title, done) where id == f"destroy-{n}" {
     delete todos(n, title, done);
 }
 
@@ -108,122 +103,86 @@ clear_completed: on click(id), todos(n, title, done) where id == "clear-complete
     delete todos(n, title, done);
 }
 
-start_edit: on dblclick(id), todos(n, _title, _done) where id == id_of("label", n) {
+start_edit: on dblclick(id), todos(n, _title, _done) where id == f"label-{n}" {
     upsert editing(n);
 }
 
 /// Enter or leaving the field saves the edit (an empty title deletes the todo); Escape drops it. The field's removal
 /// fires a blur after Enter or Escape, when nothing is being edited any more.
 save_edit: on keydown(id, key, value), editing(n), todos(n, _title, done)
-        where id == id_of("edit", n) && key == "Enter" && value.trim() != "" {
+        where id == f"edit-{n}" && key == "Enter" && value.trim() != "" {
     upsert todos(n, value.trim(), done);
     delete editing(n);
 }
 drop_empty_edit: on keydown(id, key, value), editing(n), todos(n, title, done)
-        where id == id_of("edit", n) && key == "Enter" && value.trim() == "" {
+        where id == f"edit-{n}" && key == "Enter" && value.trim() == "" {
     delete todos(n, title, done);
     delete editing(n);
 }
-cancel_edit: on keydown(id, key, _value), editing(n) where id == id_of("edit", n) && key == "Escape" {
+cancel_edit: on keydown(id, key, _value), editing(n) where id == f"edit-{n}" && key == "Escape" {
     delete editing(n);
 }
-blur_edit: on blur(id, value), editing(n), todos(n, _title, done) where id == id_of("edit", n) && value.trim() != "" {
+blur_edit: on blur(id, value), editing(n), todos(n, _title, done) where id == f"edit-{n}" && value.trim() != "" {
     upsert todos(n, value.trim(), done);
     delete editing(n);
 }
 blur_empty_edit: on blur(id, value), editing(n), todos(n, title, done)
-        where id == id_of("edit", n) && value.trim() == "" {
+        where id == f"edit-{n}" && value.trim() == "" {
     delete todos(n, title, done);
     delete editing(n);
 }
 
 // ---------------------------------------------------------------- the page
 
-frame: while total(all), left(active), filter(f), typed_now(d) {
-    emit elem("app", "", 0, "section");
-    emit attr("app", "class", "todoapp");
-    emit elem("header", "app", 0, "header");
-    emit attr("header", "class", "header");
-    emit elem("title", "header", 0, "h1");
-    emit text("title", "todos");
-    emit elem("new-todo", "header", 1, "input");
-    emit attr("new-todo", "class", "new-todo");
-    emit attr("new-todo", "placeholder", "What needs to be done?");
-    emit attr("new-todo", "value", d);
-    if all > 0u64 {
-        emit elem("main", "app", 1, "section");
-        emit attr("main", "class", "main");
-        emit elem("toggle-all", "main", 0, "input");
-        emit attr("toggle-all", "id", "toggle-all");
-        emit attr("toggle-all", "class", "toggle-all");
-        emit attr("toggle-all", "type", "checkbox");
-        emit attr("toggle-all", "checked", if active == 0u64 { "true" } else { "false" });
-        emit elem("toggle-all-label", "main", 1, "label");
-        emit attr("toggle-all-label", "for", "toggle-all");
-        emit text("toggle-all-label", "Mark all as complete");
-        emit elem("list", "main", 2, "ul");
-        emit attr("list", "class", "todo-list");
-        emit elem("footer", "app", 2, "footer");
-        emit attr("footer", "class", "footer");
-        emit elem("count", "footer", 0, "span");
-        emit attr("count", "class", "todo-count");
-        emit elem("count-n", "count", 0, "strong");
-        emit text("count-n", active.to_string());
-        emit elem("count-words", "count", 1, "span");
-        emit text("count-words", plural(active));
-        emit elem("filters", "footer", 1, "ul");
-        emit attr("filters", "class", "filters");
-        emit elem("filter-all", "filters", 0, "li");
-        emit elem("link-all", "filter-all", 0, "a");
-        emit attr("link-all", "href", "#/");
-        emit attr("link-all", "class", link_class(f, "all"));
-        emit text("link-all", "All");
-        emit elem("filter-active", "filters", 1, "li");
-        emit elem("link-active", "filter-active", 0, "a");
-        emit attr("link-active", "href", "#/active");
-        emit attr("link-active", "class", link_class(f, "active"));
-        emit text("link-active", "Active");
-        emit elem("filter-completed", "filters", 2, "li");
-        emit elem("link-completed", "filter-completed", 0, "a");
-        emit attr("link-completed", "href", "#/completed");
-        emit attr("link-completed", "class", link_class(f, "completed"));
-        emit text("link-completed", "Completed");
-    }
-    if all > active {
-        emit elem("clear-completed", "footer", 2, "button");
-        emit attr("clear-completed", "class", "clear-completed");
-        emit text("clear-completed", "Clear completed");
-    }
-    emit elem("info", "", 1, "footer");
-    emit attr("info", "class", "info");
-    emit elem("info-edit", "info", 0, "p");
-    emit text("info-edit", "Double-click to edit a todo");
-    emit elem("info-blossom", "info", 1, "p");
-    emit text("info-blossom", "Written in Blossom");
+/// A filter's link in the footer.
+fragment link(name: String, href: String, f: String, words: String) {
+    li { a[id: f"link-{name}"](href: href, class: link_class(f, name)) { words } }
 }
 
-/// The new-todo field has the focus unless a todo is being edited.
+frame: while total(all), left(active), filter(f), typed_now(d) {
+    emit html section[id: "app"](class: "todoapp") {
+        header(class: "header") {
+            h1 { "todos" }
+            input[id: "new-todo"](class: "new-todo", placeholder: "What needs to be done?", value: d);
+        }
+        if all > 0u64 {
+            section[id: "main"](class: "main") {
+                input[id: "toggle-all"](id: "toggle-all", class: "toggle-all", type: "checkbox", checked: active == 0u64);
+                label(for: "toggle-all") { "Mark all as complete" }
+                ul[id: "list"](class: "todo-list") {
+                    for todos(n, title, done), is_editing(n, e) where shown(f, done) {
+                        li[id: f"todo-{n}", pos: n as i64](class: item_class(done, e)) {
+                            div(class: "view") {
+                                input[id: f"toggle-{n}"](class: "toggle", type: "checkbox", checked: done);
+                                label[id: f"label-{n}"] { title }
+                                button[id: f"destroy-{n}"](class: "destroy");
+                            }
+                            if e { input[id: f"edit-{n}"](class: "edit", value: title); }
+                        }
+                    }
+                }
+            }
+            footer[id: "footer"](class: "footer") {
+                span[id: "count"](class: "todo-count") { strong { active } span { plural(active) } }
+                ul(class: "filters") {
+                    link("all", "#/", f, "All");
+                    link("active", "#/active", f, "Active");
+                    link("completed", "#/completed", f, "Completed");
+                }
+                if all > active { button[id: "clear-completed"](class: "clear-completed") { "Clear completed" } }
+            }
+        }
+    }
+    emit html footer[pos: 1](class: "info") {
+        p { "Double-click to edit a todo" }
+        p { "Written in Blossom" }
+    }
+}
+
+/// The new-todo field has the focus unless a todo is being edited; the field of the one being edited has it then.
 focus_new: while total(_all), not editing(_) {
     emit focus("new-todo");
 }
-
-item: while todos(n, title, done), filter(f), is_editing(n, e) where shown(f, done) {
-    emit elem(id_of("todo", n), "list", n as i64, "li");
-    emit attr(id_of("todo", n), "class", item_class(done, e));
-    emit elem(id_of("view", n), id_of("todo", n), 0, "div");
-    emit attr(id_of("view", n), "class", "view");
-    emit elem(id_of("toggle", n), id_of("view", n), 0, "input");
-    emit attr(id_of("toggle", n), "class", "toggle");
-    emit attr(id_of("toggle", n), "type", "checkbox");
-    emit attr(id_of("toggle", n), "checked", if done { "true" } else { "false" });
-    emit elem(id_of("label", n), id_of("view", n), 1, "label");
-    emit text(id_of("label", n), title);
-    emit elem(id_of("destroy", n), id_of("view", n), 2, "button");
-    emit attr(id_of("destroy", n), "class", "destroy");
-    if e {
-        emit elem(id_of("edit", n), id_of("todo", n), 1, "input");
-        emit attr(id_of("edit", n), "class", "edit");
-        emit attr(id_of("edit", n), "value", title);
-        emit focus(id_of("edit", n));
-    }
+focus_edit: while editing(n) {
+    emit focus(f"edit-{n}");
 }

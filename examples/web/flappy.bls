@@ -88,161 +88,54 @@ crash: on frame(_k, _at), screen("game"), crashed(), score(n), best_score(b) {
 
 // ---------------------------------------------------------------- drawing
 
+const PLUM: String = "rgb(84, 56, 71)";
+
 /// A tilt for the bird: nose up when it climbs, down as it falls.
 fn tilt(v: f64) -> f64 {
     clamp(-v * 30.0, -25.0, 80.0)
 }
 
-page: while screen(s), bird(y, v), score(n), best_score(b) {
-    emit elem("game", "", 0, "svg");
-    emit attr("game", "viewBox", "10 0 80 100");
-    emit attr("game", "width", "480");
-    emit attr("game", "height", "600");
-    emit attr("game", "tabindex", "0");
-    emit attr("game", "style", "display: block; margin: 24px auto; max-width: 100%; height: auto; user-select: none; touch-action: manipulation; cursor: pointer; outline: none; border-radius: 6px; box-shadow: 0 6px 24px rgb(0 0 0 / 0.18)");
-    emit attr("game", "font-family", "system-ui, -apple-system, sans-serif");
-    emit elem("game-style", "game", 0, "style");
-    emit text("game-style", ".label { fill: white; stroke: rgb(84, 56, 71); stroke-width: 0.45; paint-order: stroke; font-weight: 700 }");
-    emit focus("game");
-    // The sky, a city, the grass and the ground.
-    emit elem("sky", "game", 0, "rect");
-    emit attr("sky", "x", "0");
-    emit attr("sky", "y", "0");
-    emit attr("sky", "width", "100");
-    emit attr("sky", "height", "95");
-    emit attr("sky", "fill", "rgb(112, 197, 206)");
-    emit elem("city", "game", 1, "path");
-    emit attr("city", "d", "M10 78 h6 v-9 h5 v6 h4 v-13 h6 v10 h3 v-6 h7 v12 h4 v-16 h6 v9 h5 v-5 h6 v11 h4 v-8 h7 v10 h4 v-7 h7 v6 h6 v18 h-80 z");
-    emit attr("city", "fill", "rgb(160, 220, 222)");
-    emit elem("bushes", "game", 2, "path");
-    emit attr("bushes", "d", "M10 90 q4 -9 8 -3 q4 -8 9 -1 q5 -8 9 -1 q4 -7 9 0 q5 -9 9 -1 q4 -7 9 0 q4 -8 9 -1 q4 -6 8 1 v6 h-80 z");
-    emit attr("bushes", "fill", "rgb(94, 190, 90)");
-    emit elem("ground", "game", 3, "rect");
-    emit attr("ground", "x", "0");
-    emit attr("ground", "y", "90");
-    emit attr("ground", "width", "100");
-    emit attr("ground", "height", "10");
-    emit attr("ground", "fill", "rgb(222, 216, 149)");
-    emit elem("grass", "game", 4, "rect");
-    emit attr("grass", "x", "0");
-    emit attr("grass", "y", "90");
-    emit attr("grass", "width", "100");
-    emit attr("grass", "height", "1.6");
-    emit attr("grass", "fill", "rgb(115, 191, 46)");
-    // The bird, tilted by its velocity.
-    emit elem("bird", "game", 8, "g");
-    emit attr("bird", "transform", "translate(" ++ X.to_string() ++ " " ++ y.to_string() ++ ") rotate(" ++ tilt(v).to_string() ++ ")");
-    emit elem("bird-body", "bird", 0, "ellipse");
-    emit attr("bird-body", "rx", "5");
-    emit attr("bird-body", "ry", "4.2");
-    emit attr("bird-body", "fill", "rgb(250, 210, 50)");
-    emit attr("bird-body", "stroke", "rgb(84, 56, 71)");
-    emit attr("bird-body", "stroke-width", "0.6");
-    emit elem("bird-wing", "bird", 1, "ellipse");
-    emit attr("bird-wing", "cx", "-1.8");
-    emit attr("bird-wing", "cy", "0.6");
-    emit attr("bird-wing", "rx", "2.4");
-    emit attr("bird-wing", "ry", "1.5");
-    emit attr("bird-wing", "fill", "rgb(255, 245, 220)");
-    emit attr("bird-wing", "stroke", "rgb(84, 56, 71)");
-    emit attr("bird-wing", "stroke-width", "0.5");
-    emit elem("bird-eye", "bird", 2, "circle");
-    emit attr("bird-eye", "cx", "2.2");
-    emit attr("bird-eye", "cy", "-1.5");
-    emit attr("bird-eye", "r", "1.5");
-    emit attr("bird-eye", "fill", "white");
-    emit attr("bird-eye", "stroke", "rgb(84, 56, 71)");
-    emit attr("bird-eye", "stroke-width", "0.4");
-    emit elem("bird-pupil", "bird", 3, "circle");
-    emit attr("bird-pupil", "cx", "2.7");
-    emit attr("bird-pupil", "cy", "-1.4");
-    emit attr("bird-pupil", "r", "0.6");
-    emit attr("bird-pupil", "fill", "rgb(84, 56, 71)");
-    emit elem("bird-beak", "bird", 4, "path");
-    emit attr("bird-beak", "d", "M3.6 0.2 L7 0.9 L3.6 2.2 Z");
-    emit attr("bird-beak", "fill", "rgb(240, 110, 60)");
-    emit attr("bird-beak", "stroke", "rgb(84, 56, 71)");
-    emit attr("bird-beak", "stroke-width", "0.4");
-    if s == "menu" {
-        emit elem("message", "game", 10, "text");
-        emit attr("message", "x", "50");
-        emit attr("message", "y", "45");
-        emit attr("message", "text-anchor", "middle");
-        emit attr("message", "class", "label");
-        emit attr("message", "font-size", "6");
-        emit text("message", "Click to begin!");
-    }
-    if s == "game" {
-        emit elem("score", "game", 10, "text");
-        emit attr("score", "x", "50");
-        emit attr("score", "y", "14");
-        emit attr("score", "text-anchor", "middle");
-        emit attr("score", "font-size", "9");
-        emit attr("score", "font-weight", "700");
-        emit attr("score", "fill", "white");
-        emit attr("score", "stroke", "rgb(84, 56, 71)");
-        emit attr("score", "stroke-width", "0.5");
-        emit text("score", n.to_string());
-    }
-    if s == "over" {
-        emit elem("over", "game", 10, "text");
-        emit attr("over", "x", "50");
-        emit attr("over", "y", "30");
-        emit attr("over", "text-anchor", "middle");
-        emit attr("over", "class", "label");
-        emit attr("over", "font-size", "7");
-        emit attr("over", "font-weight", "700");
-        emit text("over", "Game Over");
-        emit elem("final", "game", 11, "text");
-        emit attr("final", "x", "50");
-        emit attr("final", "y", "52");
-        emit attr("final", "text-anchor", "middle");
-        emit attr("final", "class", "label");
-        emit attr("final", "font-size", "6");
-        emit text("final", "Score " ++ n.to_string());
-        emit elem("best", "game", 12, "text");
-        emit attr("best", "x", "50");
-        emit attr("best", "y", "62");
-        emit attr("best", "text-anchor", "middle");
-        emit attr("best", "class", "label");
-        emit attr("best", "font-size", "6");
-        emit text("best", "Best " ++ b.to_string());
-        emit elem("again", "game", 13, "text");
-        emit attr("again", "x", "50");
-        emit attr("again", "y", "82");
-        emit attr("again", "text-anchor", "middle");
-        emit attr("again", "class", "label");
-        emit attr("again", "font-size", "4");
-        emit text("again", "Click to play again!");
-    }
+/// A line of text over the scene.
+fragment banner(name: String, y: f64, size: f64, words: String) {
+    text[id: name](x: 50, y: y, text-anchor: "middle", font-size: size, class: "label") { words }
 }
 
 /// An obstacle: a pillar above the gap and one below, each with a head, moved as one group.
-fn pillar_id(part: String, n: u64) -> String {
-    part ++ "-" ++ n.to_string()
+fragment pillar(k: u64, x: f64, h: f64) {
+    g[id: f"obstacle-{k}"](transform: f"translate({x} 0)", fill: "rgb(115, 191, 46)", stroke: PLUM, stroke-width: 0.5) {
+        rect[id: f"top-{k}"](width: 10, height: h);
+        rect(x: -1, y: h - 5.0, width: 12, height: 5);
+        rect(y: h + GAP, width: 10, height: 90.0 - h - GAP);
+        rect(x: -1, y: h + GAP, width: 12, height: 5);
+    }
 }
 
-obstacles: while obstacle_at(n, x, h) {
-    emit elem(pillar_id("obstacle", n), "game", 2, "g");
-    emit attr(pillar_id("obstacle", n), "transform", "translate(" ++ x.to_string() ++ " 0)");
-    emit elem(pillar_id("top", n), pillar_id("obstacle", n), 0, "rect");
-    emit attr(pillar_id("top", n), "width", "10");
-    emit attr(pillar_id("top", n), "height", h.to_string());
-    emit elem(pillar_id("top-head", n), pillar_id("obstacle", n), 1, "rect");
-    emit attr(pillar_id("top-head", n), "x", "-1");
-    emit attr(pillar_id("top-head", n), "y", (h - 5.0).to_string());
-    emit attr(pillar_id("top-head", n), "width", "12");
-    emit attr(pillar_id("top-head", n), "height", "5");
-    emit elem(pillar_id("bottom", n), pillar_id("obstacle", n), 2, "rect");
-    emit attr(pillar_id("bottom", n), "y", (h + GAP).to_string());
-    emit attr(pillar_id("bottom", n), "width", "10");
-    emit attr(pillar_id("bottom", n), "height", (90.0 - h - GAP).to_string());
-    emit elem(pillar_id("bottom-head", n), pillar_id("obstacle", n), 3, "rect");
-    emit attr(pillar_id("bottom-head", n), "x", "-1");
-    emit attr(pillar_id("bottom-head", n), "y", (h + GAP).to_string());
-    emit attr(pillar_id("bottom-head", n), "width", "12");
-    emit attr(pillar_id("bottom-head", n), "height", "5");
-    emit attr(pillar_id("obstacle", n), "fill", "rgb(115, 191, 46)");
-    emit attr(pillar_id("obstacle", n), "stroke", "rgb(84, 56, 71)");
-    emit attr(pillar_id("obstacle", n), "stroke-width", "0.5");
+page: while screen(s), bird(y, v), score(n), best_score(b) {
+    emit html svg[id: "game"](viewBox: "10 0 80 100", width: 480, height: 600, tabindex: 0,
+            font-family: "system-ui, -apple-system, sans-serif",
+            style: "display: block; margin: 24px auto; max-width: 100%; height: auto; user-select: none; touch-action: manipulation; cursor: pointer; outline: none; border-radius: 6px; box-shadow: 0 6px 24px rgb(0 0 0 / 0.18)") {
+        style { ".label { fill: white; stroke: rgb(84, 56, 71); stroke-width: 0.45; paint-order: stroke; font-weight: 700 }" }
+        rect[id: "sky"](x: 0, y: 0, width: 100, height: 95, fill: "rgb(112, 197, 206)");
+        path(fill: "rgb(160, 220, 222)", d: "M10 78 h6 v-9 h5 v6 h4 v-13 h6 v10 h3 v-6 h7 v12 h4 v-16 h6 v9 h5 v-5 h6 v11 h4 v-8 h7 v10 h4 v-7 h7 v6 h6 v18 h-80 z");
+        path(fill: "rgb(94, 190, 90)", d: "M10 90 q4 -9 8 -3 q4 -8 9 -1 q5 -8 9 -1 q4 -7 9 0 q5 -9 9 -1 q4 -7 9 0 q4 -8 9 -1 q4 -6 8 1 q5 -8 10 6 h-80 z");
+        for obstacle_at(k, x, h) { pillar(k, x, h); }
+        rect(x: 0, y: 90, width: 100, height: 10, fill: "rgb(222, 216, 149)");
+        rect(x: 0, y: 90, width: 100, height: 1.6, fill: "rgb(115, 191, 46)");
+        g[id: "bird"](transform: f"translate({X} {y}) rotate({tilt(v)})", stroke: PLUM) {
+            ellipse[id: "bird-body"](rx: 5, ry: 4.2, fill: "rgb(250, 210, 50)", stroke-width: 0.6);
+            ellipse[id: "bird-wing"](cx: -1.8, cy: 0.6, rx: 2.4, ry: 1.5, fill: "rgb(255, 245, 220)", stroke-width: 0.5);
+            circle(cx: 2.2, cy: -1.5, r: 1.5, fill: "white", stroke-width: 0.4);
+            circle(cx: 2.7, cy: -1.4, r: 0.6, fill: PLUM, stroke: "none");
+            path(d: "M3.6 0.2 L7 0.9 L3.6 2.2 Z", fill: "rgb(240, 110, 60)", stroke-width: 0.4);
+        }
+        if s == "menu" { banner("message", 45.0, 6.0, "Click to begin!"); }
+        if s == "game" { banner("score", 14.0, 9.0, n.to_string()); }
+        if s == "over" {
+            banner("over", 30.0, 7.0, "Game Over");
+            banner("final", 52.0, 6.0, f"Score {n}");
+            banner("best", 62.0, 6.0, f"Best {b}");
+            banner("again", 82.0, 4.0, "Click to play again!");
+        }
+    }
+    emit focus("game");
 }

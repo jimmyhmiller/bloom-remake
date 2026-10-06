@@ -50,7 +50,8 @@ listened to), each into a round of its own:
 | `blur(id: String, value: String)` | A field loses focus. |
 | `change(id: String, checked: bool)` | A checkbox changes. |
 
-`examples/web/ui.bls` declares these, for a program to `include`.
+`examples/web/ui.bls` declares these, for a program to `include`, and the tree `html` over `elem`, `attr` and `text`,
+so a page is written as `emit html div[id: "box"](class: "x") { span { "hi" } }` (docs/design/SUGAR.md §3).
 
 ### A round
 

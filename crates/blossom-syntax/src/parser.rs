@@ -1769,7 +1769,8 @@ impl Parser<'_> {
             }
         }
     }
-    /// Whether an element starts here: a name (dashed or dotted) followed by `[`, `(`, `{` or `;`.
+    /// Whether an element (or a fragment call) starts here: a name (dashed or dotted) followed by `[` or `{`, or by
+    /// `( … )` and then `;`, `[` or `{`. A call that ends otherwise (`plural(n)` before `}`) is content.
     fn element_ahead(&self) -> bool {
         if !self.nth(0).is_word() {
             return false;
@@ -1778,7 +1779,28 @@ impl Parser<'_> {
         while matches!(self.nth(n), MINUS | DOT) && self.nth(n + 1).is_word() {
             n += 2;
         }
-        matches!(self.nth(n), L_BRACK | L_PAREN | L_CURLY)
+        match self.nth(n) {
+            L_BRACK | L_CURLY => true,
+            L_PAREN => {
+                let mut depth = 0usize;
+                loop {
+                    match self.nth(n) {
+                        L_PAREN | L_BRACK | L_CURLY => depth += 1,
+                        R_PAREN | R_BRACK | R_CURLY => {
+                            depth = depth.saturating_sub(1);
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        EOF => return false,
+                        _ => {}
+                    }
+                    n += 1;
+                }
+                matches!(self.nth(n + 1), SEMI | L_CURLY | L_BRACK)
+            }
+            _ => false,
+        }
     }
     fn body(&mut self, no_struct: bool) {
         let m = self.start();
