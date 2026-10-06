@@ -1531,3 +1531,26 @@ fn floats_type_check_and_say_how_to_write_one() {
     ));
     assert!(d.iter().any(|(c, _)| c == "BLS0908" || c == "BLS0300"), "{d:?}");
 }
+
+#[test]
+fn interpolation_converts_its_holes_and_checks_its_specs() {
+    let ok = with_head(
+        "output o(s: String);\n\
+         a: on go(k, v) { emit o(f\"k={k} v={v} big={k > v} half={(k as f64) / 2.0:.1} {{}} {\"lit\"}\"); }\n",
+    );
+    assert_eq!(diags(ok), Vec::<(String, String)>::new());
+    // A spec other than `.N`.
+    let d = diags(with_head(
+        "output o(s: String);\na: on go(k, v) { emit o(f\"{k:x}\"); }\n",
+    ));
+    assert!(d.iter().any(|(c, _)| c == "BLS0435"), "{d:?}");
+    // A hole whose type has no to_string, and `.N` on an integer: the methods' type errors.
+    let d = diags(with_head(
+        "output o(s: String);\na: on go(k, v) { emit o(f\"{[k]}\"); }\n",
+    ));
+    assert!(d.iter().any(|(_, m)| m.contains("`to_string` on Vec<u64>")), "{d:?}");
+    let d = diags(with_head(
+        "output o(s: String);\na: on go(k, v) { emit o(f\"{k:.2}\"); }\n",
+    ));
+    assert!(d.iter().any(|(_, m)| m.contains("`to_fixed` on u64")), "{d:?}");
+}

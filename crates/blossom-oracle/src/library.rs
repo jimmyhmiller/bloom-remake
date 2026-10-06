@@ -171,6 +171,14 @@ fn option(v: Value) -> ExprResult<Option<Value>> {
     }
 }
 
+/// A numeric library call's string: its runtime error is BLSR004, a mistyped call an oracle bug.
+fn num_str(r: Result<String, float::NumError>) -> ExprResult<String> {
+    r.map_err(|e| match e {
+        float::NumError::Arithmetic(m) => ExprError::Arithmetic(m),
+        float::NumError::Type(m) => bug(m),
+    })
+}
+
 /// A numeric library call's value: its runtime error is BLSR004, a mistyped call an oracle bug.
 fn num(r: Result<Value, float::NumError>) -> ExprResult<Value> {
     r.map_err(|e| match e {
@@ -382,6 +390,15 @@ pub(crate) fn lib(scope: &Scope<'_>, env: &[Option<Value>], f: LibFn, args: &[Ex
         },
         LibFn::FloatToString => match val(0)? {
             Value::F64(x) => Value::Str(float::to_string(x).into()),
+            other => return Err(bug(format!("`to_string` of {other:?}"))),
+        },
+        LibFn::FloatFixed => match (val(0)?, val(1)?) {
+            (Value::F64(x), Value::Int(IntValue::U64(n))) => Value::Str(num_str(float::to_fixed(x, n))?.into()),
+            (x, n) => return Err(bug(format!("`to_fixed` of {x:?} and {n:?}"))),
+        },
+        LibFn::StrToString => Value::Str(str_of(val(0)?)?),
+        LibFn::BoolToString => match val(0)? {
+            Value::Bool(b) => Value::Str(if b { "true" } else { "false" }.into()),
             other => return Err(bug(format!("`to_string` of {other:?}"))),
         },
         LibFn::Abs => num(float::abs(&val(0)?))?,

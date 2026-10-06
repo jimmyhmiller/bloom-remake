@@ -1980,6 +1980,37 @@ impl Parser<'_> {
                 self.bump();
                 self.complete(m, LITERALEXPR)
             }
+            FSTRING_START => {
+                // `f"text {expr[:spec]} text"`: the lexer splits it into text runs and holes (LANGUAGE §2.4).
+                self.bump();
+                loop {
+                    match self.nth(0) {
+                        FSTRING_TEXT => self.bump(),
+                        L_CURLY => {
+                            let h = self.start();
+                            self.bump();
+                            let no_struct = self.no_struct;
+                            self.no_struct = false;
+                            self.expr(0);
+                            self.no_struct = no_struct;
+                            if self.eat(COLON) {
+                                self.expect(FSTRING_SPEC);
+                            }
+                            self.expect(R_CURLY);
+                            self.complete(h, FSTRINGHOLE);
+                        }
+                        FSTRING_END => {
+                            self.bump();
+                            break;
+                        }
+                        _ => {
+                            self.error(code!("BLS0100"), "unterminated interpolated string", &[FSTRING_END]);
+                            break;
+                        }
+                    }
+                }
+                self.complete(m, FSTRINGEXPR)
+            }
             UNDERSCORE => {
                 self.bump();
                 self.complete(m, WILDCARD)

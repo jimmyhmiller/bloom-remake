@@ -471,6 +471,23 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
             Value::F64(x) => Ok(Value::Str(Arc::from(float::to_string(x)))),
             other => Err(bug(format!("`to_string` of {other:?}"))),
         },
+        LibFn::FloatFixed => match (arg_value(cx, env, f, args, 0)?, arg_value(cx, env, f, args, 1)?) {
+            (Value::F64(x), Value::Int(IntValue::U64(n))) => float::to_fixed(x, n)
+                .map(|s| Value::Str(Arc::from(s)))
+                .map_err(|e| match e {
+                    float::NumError::Arithmetic(m) => ExprError::Arithmetic(m),
+                    float::NumError::Type(m) => bug(m),
+                }),
+            (x, n) => Err(bug(format!("`to_fixed` of {x:?} and {n:?}"))),
+        },
+        LibFn::StrToString => match arg_value(cx, env, f, args, 0)? {
+            Value::Str(s) => Ok(Value::Str(s)),
+            other => Err(bug(format!("`to_string` of {other:?}"))),
+        },
+        LibFn::BoolToString => match arg_value(cx, env, f, args, 0)? {
+            Value::Bool(b) => Ok(Value::Str(Arc::from(if b { "true" } else { "false" }))),
+            other => Err(bug(format!("`to_string` of {other:?}"))),
+        },
         LibFn::Abs => num(float::abs(&arg_value(cx, env, f, args, 0)?)),
         LibFn::Min | LibFn::Max => {
             let (a, b) = (arg_value(cx, env, f, args, 0)?, arg_value(cx, env, f, args, 1)?);

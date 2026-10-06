@@ -35,9 +35,13 @@ pub fn lex(file: FileId, text: &str) -> Lexed {
         tokens: Vec::new(),
         errors: Vec::new(),
         previous: SyntaxKind::EOF,
+        modes: Vec::new(),
     };
     while l.pos < text.len() {
-        l.token();
+        l.next();
+    }
+    if let Some(Mode::Text { start } | Mode::Hole { start, .. }) = l.modes.first().copied() {
+        l.error(start, code!("BLS0002"), "unterminated interpolated string");
     }
     l.push(SyntaxKind::EOF, l.pos);
     Lexed {
@@ -52,6 +56,17 @@ struct Lexer<'a> {
     tokens: Vec<Token>,
     errors: Vec<Diagnostic>,
     previous: SyntaxKind,
+    /// Inside interpolated strings (innermost last): their text, or a hole's tokens.
+    modes: Vec<Mode>,
+}
+
+/// Where the lexer is inside an interpolated string `f"…{e}…"` (LANGUAGE §2.4). `start` is the literal's `f`.
+#[derive(Clone, Copy)]
+enum Mode {
+    /// In the string's text.
+    Text { start: usize },
+    /// In a hole: ordinary tokens, `depth` brackets deep. At depth 0, `}` closes the hole and `:` starts its spec.
+    Hole { start: usize, depth: u32 },
 }
 fn offset(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
@@ -63,6 +78,98 @@ fn word(c: char) -> bool {
     word_start(c) || c.is_ascii_digit()
 }
 impl Lexer<'_> {
+    /// The next token, in the current mode.
+    fn next(&mut self) {
+        use SyntaxKind::*;
+        match self.modes.last().copied() {
+            None => self.token(),
+            Some(Mode::Text { .. }) => self.fstring_text(),
+            Some(Mode::Hole { start, depth }) => {
+                let at = self.pos;
+                if depth == 0 && self.starts("}") {
+                    self.bump();
+                    self.modes.pop();
+                    self.push(R_CURLY, at);
+                } else if depth == 0 && self.starts(":") && !self.starts("::") {
+                    self.bump();
+                    self.push(COLON, at);
+                    let spec = self.pos;
+                    self.consume(|c| !matches!(c, '}' | '"' | '\n' | '\r'));
+                    if self.pos > spec {
+                        self.push(FSTRING_SPEC, spec);
+                    }
+                } else {
+                    let modes = self.modes.len();
+                    self.token();
+                    // An `f"` inside the hole opens a string of its own; otherwise brackets nest.
+                    if self.modes.len() == modes {
+                        let depth = match self.tokens.last().map(|t| t.kind) {
+                            Some(L_PAREN | L_BRACK | L_CURLY) => depth + 1,
+                            Some(R_PAREN | R_BRACK | R_CURLY) => depth.saturating_sub(1),
+                            _ => depth,
+                        };
+                        if let Some(top) = self.modes.last_mut() {
+                            *top = Mode::Hole { start, depth };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// An interpolated string's text, up to its next hole or its end.
+    fn fstring_text(&mut self) {
+        use SyntaxKind::*;
+        let start = self.pos;
+        let text = |me: &mut Self| {
+            if me.pos > start {
+                me.push(FSTRING_TEXT, start);
+            }
+        };
+        loop {
+            match self.ch() {
+                None => {
+                    text(self);
+                    return;
+                }
+                Some('"') => {
+                    text(self);
+                    let at = self.pos;
+                    self.bump();
+                    self.modes.pop();
+                    self.push(FSTRING_END, at);
+                    return;
+                }
+                Some('{') if self.starts("{{") => self.pos += 2,
+                Some('}') if self.starts("}}") => self.pos += 2,
+                Some('{') => {
+                    text(self);
+                    let at = self.pos;
+                    self.bump();
+                    let lit = match self.modes.last() {
+                        Some(Mode::Text { start } | Mode::Hole { start, .. }) => *start,
+                        None => at,
+                    };
+                    self.modes.push(Mode::Hole { start: lit, depth: 0 });
+                    self.push(L_CURLY, at);
+                    return;
+                }
+                Some('}') => {
+                    let at = self.pos;
+                    self.bump();
+                    self.error(at, code!("BLS0005"), "a lone `}` in an interpolated string: write `}}`");
+                }
+                Some('\\') => {
+                    if !self.escape() {
+                        text(self);
+                        return;
+                    }
+                }
+                Some(_) => self.bump(),
+            }
+        }
+    }
+
     fn rest(&self) -> &str {
         self.text.get(self.pos..).unwrap_or("")
     }
@@ -148,6 +255,10 @@ impl Lexer<'_> {
             self.pos += prefix;
             self.raw_string(start, hashes);
             if bytes { BYTES_LIT } else { RAW_STRING_LIT }
+        } else if self.starts("f\"") {
+            self.pos += 2;
+            self.modes.push(Mode::Text { start });
+            FSTRING_START
         } else if c == '"' || self.starts("b\"") {
             let bytes = c == 'b';
             if bytes {
@@ -231,45 +342,55 @@ impl Lexer<'_> {
     fn string(&mut self, start: usize) {
         self.bump();
         while let Some(c) = self.ch() {
-            self.bump();
             if c == '"' {
+                self.bump();
                 return;
             }
             if c != '\\' {
+                self.bump();
                 continue;
             }
-            let escape = self.pos.saturating_sub(1);
-            match self.ch() {
-                Some('n' | 'r' | 't' | '\\' | '"' | '\'' | '0') => self.bump(),
-                Some('u') => {
-                    self.bump();
-                    let mut valid = false;
-                    if self.starts("{") {
-                        self.bump();
-                        let digits = self.pos;
-                        self.consume(|c| c.is_ascii_hexdigit());
-                        let s = self.text.get(digits..self.pos).unwrap_or("");
-                        valid = !s.is_empty()
-                            && s.len() <= 6
-                            && u32::from_str_radix(s, 16).ok().and_then(char::from_u32).is_some();
-                        if self.starts("}") {
-                            self.bump();
-                        } else {
-                            valid = false;
-                        }
-                    }
-                    if !valid {
-                        self.error(escape, code!("BLS0005"), "invalid Unicode escape");
-                    }
-                }
-                Some(_) => {
-                    self.bump();
-                    self.error(escape, code!("BLS0005"), "unknown string escape");
-                }
-                None => break,
+            if !self.escape() {
+                break;
             }
         }
         self.error(start, code!("BLS0002"), "unterminated string");
+    }
+
+    /// An escape at `\`: checks it and moves past it. False when the text ends after the backslash.
+    fn escape(&mut self) -> bool {
+        let escape = self.pos;
+        self.bump();
+        match self.ch() {
+            Some('n' | 'r' | 't' | '\\' | '"' | '\'' | '0') => self.bump(),
+            Some('u') => {
+                self.bump();
+                let mut valid = false;
+                if self.starts("{") {
+                    self.bump();
+                    let digits = self.pos;
+                    self.consume(|c| c.is_ascii_hexdigit());
+                    let s = self.text.get(digits..self.pos).unwrap_or("");
+                    valid = !s.is_empty()
+                        && s.len() <= 6
+                        && u32::from_str_radix(s, 16).ok().and_then(char::from_u32).is_some();
+                    if self.starts("}") {
+                        self.bump();
+                    } else {
+                        valid = false;
+                    }
+                }
+                if !valid {
+                    self.error(escape, code!("BLS0005"), "invalid Unicode escape");
+                }
+            }
+            Some(_) => {
+                self.bump();
+                self.error(escape, code!("BLS0005"), "unknown string escape");
+            }
+            None => return false,
+        }
+        true
     }
     fn number(&mut self, start: usize) -> SyntaxKind {
         use SyntaxKind::*;

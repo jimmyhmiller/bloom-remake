@@ -1106,6 +1106,14 @@ fn expected_float(view: &str, a: i64, b: i64) -> Value {
             s(p / 8.0),
         ]),
         "v_ints" => tuple(vec![i(a.abs()), i(a.min(b)), i(a.max(b)), i(a.clamp(-5, 5))]),
+        "v_fmt" => Value::Str(
+            format!(
+                "{}|{a}|{p:.2}|{}|{{x}}|s|<{b}>\t.",
+                if p == 0.0 { 0.0 } else { p },
+                a > b
+            )
+            .into(),
+        ),
         other => panic!("no view {other}"),
     }
 }
@@ -1142,7 +1150,7 @@ fn floats_agree_on_both_evaluators_and_with_ieee() {
         };
         for (t, rows) in per_tick.iter().enumerate() {
             let instance = &run.node_tick(Tick(t as u64), NodeId(0)).unwrap().instance;
-            for view in ["v_arith", "v_order", "v_lib", "v_text", "v_ints"] {
+            for view in ["v_arith", "v_order", "v_lib", "v_text", "v_ints", "v_fmt"] {
                 let rel = artifact.rel_named(view).unwrap();
                 let got: BTreeSet<Vec<Value>> = instance.rows(rel).map(|r| r.to_vec()).collect();
                 let want: BTreeSet<Vec<Value>> = rows
