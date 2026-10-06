@@ -217,6 +217,8 @@ pub(crate) struct Plan {
     pub checks: Vec<usize>,
     /// The dependencies (atoms, then negations and lookups in body order), by literal index.
     pub deps: Vec<usize>,
+    /// Each literal's place in `deps`, by literal index (`None`: not a dependency).
+    pub dep_pos: Vec<Option<usize>>,
     /// The stores the dependencies read.
     pub dep_keys: Vec<StoreKey>,
     pub head: StoreKey,
@@ -255,10 +257,15 @@ impl FramePlan {
         if *id != rule.id || rule.kind != RuleKind::Inductive {
             return None;
         }
-        let vars: Vec<&Term> = rule.head.args.iter().filter_map(|h| match h {
-            HeadArg::Term(t @ Term::Var(_)) => Some(t),
-            _ => None,
-        }).collect();
+        let vars: Vec<&Term> = rule
+            .head
+            .args
+            .iter()
+            .filter_map(|h| match h {
+                HeadArg::Term(t @ Term::Var(_)) => Some(t),
+                _ => None,
+            })
+            .collect();
         if vars.len() != rule.head.args.len() {
             return None;
         }
@@ -310,7 +317,9 @@ impl CopyPlan {
     /// The copy plan of `rule`, if its body is one positive atom and its head plain terms over the atom's
     /// variables.
     fn of(rule: &Rule) -> Option<CopyPlan> {
-        let [Literal::Pos(a)] = rule.body.lits.as_slice() else { return None };
+        let [Literal::Pos(a)] = rule.body.lits.as_slice() else {
+            return None;
+        };
         let mut first: std::collections::BTreeMap<VarId, usize> = std::collections::BTreeMap::new();
         let mut cols = Vec::new();
         for (i, t) in atom_terms(a).enumerate() {
@@ -621,10 +630,21 @@ impl Plan {
             RuleKind::Async => StoreKey::Async(rule.head.rel),
         };
         let no_atoms = atoms.is_empty();
-        let dep_keys = deps.iter().filter_map(|l| rule.body.lits.get(*l).and_then(dep_store)).collect();
+        let dep_keys = deps
+            .iter()
+            .filter_map(|l| rule.body.lits.get(*l).and_then(dep_store))
+            .collect();
         let aggregate = crate::strata::is_aggregate(rule);
         let copy = if aggregate { None } else { CopyPlan::of(rule) };
-        let skip = if lits.iter().any(|l| matches!(l, Literal::Gen { src: GenSource::TableFn { .. }, .. })) {
+        let skip = if lits.iter().any(|l| {
+            matches!(
+                l,
+                Literal::Gen {
+                    src: GenSource::TableFn { .. },
+                    ..
+                }
+            )
+        }) {
             Skip::Never
         } else {
             Skip::WhenUnchanged
@@ -641,6 +661,15 @@ impl Plan {
             } else {
                 Regime::Delta
             },
+            dep_pos: {
+                let mut at = vec![None; rule.body.lits.len()];
+                for (i, lit) in deps.iter().enumerate() {
+                    if let Some(slot) = at.get_mut(*lit) {
+                        *slot = Some(i);
+                    }
+                }
+                at
+            },
             deps,
             dep_keys,
             head,
@@ -653,7 +682,12 @@ impl Plan {
 
     /// The steps of a term driven by literal `driver` (`None`: a full evaluation). `cost(lit, cols, range)` estimates
     /// the rows atom `lit` yields per probe on `cols` (narrowed by a range, if `range`).
-    pub fn order_for(&self, rule: &Rule, driver: Option<usize>, cost: &dyn Fn(usize, &[usize], bool) -> usize) -> Order {
+    pub fn order_for(
+        &self,
+        rule: &Rule,
+        driver: Option<usize>,
+        cost: &dyn Fn(usize, &[usize], bool) -> usize,
+    ) -> Order {
         let (skip, bound) = match driver {
             None => (None, BTreeSet::new()),
             Some(lit) => (
@@ -689,7 +723,9 @@ impl Plan {
             }
             let mut best: Option<Candidate> = None;
             for (pos, &lit) in left.iter().enumerate() {
-                let Some(Literal::Pos(a)) = rule.body.lits.get(lit) else { continue };
+                let Some(Literal::Pos(a)) = rule.body.lits.get(lit) else {
+                    continue;
+                };
                 let cols = bound_columns(a, &bound);
                 let range = self.range_for(rule, a, &cols, &bound, next);
                 let key = self.key_for(rule, a, &cols, &bound, next);
@@ -769,7 +805,10 @@ impl Plan {
             }
             for &lit in pending {
                 let Some(l) = rule.body.lits.get(lit) else { break };
-                if let Literal::Bind { pat: Pattern::Var(x), expr } = l
+                if let Literal::Bind {
+                    pat: Pattern::Var(x),
+                    expr,
+                } = l
                     && x == v
                 {
                     if vars_of(expr).is_subset(bound) && keyable(expr) {
@@ -790,14 +829,25 @@ impl Plan {
     /// including the first check that can fail: the rows the range drops fail a guard that runs before any check
     /// that could raise an error on them (LANGUAGE §9.14). A guard's conjuncts count up to its first fallible one. An
     /// end that fails to evaluate is no bound (`range_end`): the guard then raises its error on the rows it reaches.
-    fn range_for(&self, rule: &Rule, a: &Atom, cols: &[usize], bound: &BTreeSet<VarId>, next: usize) -> Option<RangeProbe> {
+    fn range_for(
+        &self,
+        rule: &Rule,
+        a: &Atom,
+        cols: &[usize],
+        bound: &BTreeSet<VarId>,
+        next: usize,
+    ) -> Option<RangeProbe> {
         let mut probe: Option<RangeProbe> = None;
         'checks: for &lit in self.checks.get(next..).unwrap_or_default() {
             let l = rule.body.lits.get(lit)?;
             if let Literal::Guard(e) = l {
                 for c in conjuncts(e) {
                     if let Some((col, end, lower)) = range_conjunct(c, a, cols, bound) {
-                        let p = probe.get_or_insert(RangeProbe { col, lo: None, hi: None });
+                        let p = probe.get_or_insert(RangeProbe {
+                            col,
+                            lo: None,
+                            hi: None,
+                        });
                         if p.col == col {
                             if lower {
                                 p.lo.get_or_insert(end);
@@ -1252,9 +1302,17 @@ impl Search<'_, '_> {
             };
         };
         match step {
-            Step::Atom { lit, cols, range, key } => {
-                self.atom(pc, *lit, cols, range.as_ref(), key.as_deref(), env, rows, looked, failed)
-            }
+            Step::Atom { lit, cols, range, key } => self.atom(
+                pc,
+                *lit,
+                cols,
+                range.as_ref(),
+                key.as_deref(),
+                env,
+                rows,
+                looked,
+                failed,
+            ),
             Step::Check(_) if failed.is_some() => self.run(pc + 1, env, rows, looked, failed),
             Step::Check(k) => {
                 let lit = *self
@@ -1378,10 +1436,15 @@ impl Search<'_, '_> {
                     let cols = non_wild(a);
                     let mut values = Vec::with_capacity(cols.len());
                     for c in &cols {
-                        let t = a.args.get(*c).ok_or_else(|| internal_error!("a negated column is out of range"))?;
+                        let t = a
+                            .args
+                            .get(*c)
+                            .ok_or_else(|| internal_error!("a negated column is out of range"))?;
                         values.push(expr::term(self.cx, env, t).map_err(fatal)?);
                     }
-                    let present = self.store(StoreKey::Main(a.rel))?.any((self.old)(lit), &cols, &values)?;
+                    let present = self
+                        .store(StoreKey::Main(a.rel))?
+                        .any((self.old)(lit), &cols, &values)?;
                     Ok(!present)
                 }
             }

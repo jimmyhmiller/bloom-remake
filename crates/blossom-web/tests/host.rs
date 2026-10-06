@@ -856,7 +856,7 @@ fn fragments_draw_what_their_expansion_draws_and_keep_their_variables_to_themsel
     b.start(None, "", T0).unwrap();
     assert_eq!(a.page(), b.page());
     // Three `every` elements, not the one the caller's `x` would have joined to.
-    assert_eq!(a.page().ids().filter(|i| i.starts_with('e')).count(), 3);
+    assert_eq!(a.page().ids().into_iter().filter(|i| i.starts_with('e')).count(), 3);
 }
 
 /// A page that shows which of its one-shot and bounded timers fired (LANGUAGE §15.2).

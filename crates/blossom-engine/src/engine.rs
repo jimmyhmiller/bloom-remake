@@ -928,7 +928,6 @@ impl Engine {
             }
             drivers = rest;
         }
-        let position: BTreeMap<usize, usize> = plan.deps.iter().enumerate().map(|(i, l)| (*l, i)).collect();
         // The join order of each driver's terms, from the stores as they are now.
         let cost = |lit: usize, cols: &[usize], range: bool| -> usize {
             let Some(Literal::Pos(a)) = rule.body.lits.get(lit) else {
@@ -950,10 +949,11 @@ impl Engine {
                 _ => 0,
             })
             .collect();
-        let mut orders: BTreeMap<Option<usize>, Arc<rule::Order>> = BTreeMap::new();
+        // A rule has few drivers' literals: a short list, searched.
+        let mut orders: Vec<(Option<usize>, Arc<rule::Order>)> = Vec::new();
         for (driver, _) in &drivers {
             let lit = driver.lit();
-            if orders.contains_key(&lit) {
+            if orders.iter().any(|(l, _)| *l == lit) {
                 continue;
             }
             let mut cache = self.orders.borrow_mut();
@@ -965,14 +965,16 @@ impl Engine {
                     order
                 }
             };
-            orders.insert(lit, order);
+            orders.push((lit, order));
         }
         let mut buffers = rule::TermBuffers::default();
         for (driver, pos) in drivers {
             let order = orders
-                .get(&driver.lit())
+                .iter()
+                .find(|(l, _)| *l == driver.lit())
+                .map(|(_, o)| o)
                 .ok_or_else(|| internal_error!("no join order for driver {:?}", driver.lit()))?;
-            let old = |lit: usize| position.get(&lit).is_some_and(|q| *q > pos);
+            let old = |lit: usize| plan.dep_pos.get(lit).copied().flatten().is_some_and(|q| q > pos);
             let mut emit = |f: Found<'_>| -> expr::ExprResult<()> {
                 if plan.aggregate {
                     let mut group = Vec::new();
