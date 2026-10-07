@@ -78,3 +78,17 @@ fn a_damaged_or_foreign_encoding_is_refused() {
         "Server is not a client role"
     );
 }
+
+/// The leak check is not vacuous: the whole program, posing as the tab's part, names the server's relations and rules.
+#[test]
+fn the_leak_check_finds_the_servers_part() {
+    let full = todos();
+    let honest = ClientArtifact::project(&full, "Browser").unwrap();
+    let posing = ClientArtifact {
+        program: full.program.clone(),
+        ..honest
+    };
+    let leaks = posing.leaks(&full);
+    assert!(leaks.iter().any(|l| l.contains("`items`")), "{leaks:?}");
+    assert!(leaks.iter().any(|l| l.contains("rule `take")), "{leaks:?}");
+}
