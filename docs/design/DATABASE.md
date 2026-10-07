@@ -94,10 +94,36 @@ blossom query --deploy d.toml --node s --store data/s 'all(k, v) = store(k, v)'
   of earlier ticks.
 - Queries: the shared TodoMVC and the KV store, live and offline, prefix and full scans, as-of, refusals.
 
-## 7. Next: the engine on the database
+## 7. Next: the engine on the database (S24, planned)
 
-The engine keeps a relation as counting maps with indexes built on use (`blossom-engine::store`), and a table's rows
-are carried to the next tick by its frame rule. Reading durable relations from the database means: a store whose
-rows live in the database and whose hot part is cached; frame carrying without touching every row (the database
-already holds the carried state); index probes as prefix scans; and recovery that opens the database instead of
-loading a checkpoint. Then checkpoints retire, and the WAL truncates behind the database alone.
+Today the engine holds every relation in memory (`blossom-engine::store::Store`: rows with support counts, indexes
+built on use) and recovers durable ones from the checkpoint chain; the database is a second copy. Moving durable
+relations onto the database, so a node's durable state may outgrow its memory and checkpoints retire:
+
+1. **A tiered store for each durable table.** `base`: the table as of the previous tick, which is the database at the
+   released tick plus an in-memory overlay of the computed-but-unreleased ticks' deltas. `hot`: the counting store of
+   only the rows whose support this tick is more than their carry (a cold row's support is exactly 1, its carry, and
+   is not stored). A row moves into `hot` when a derivation or a deletion touches it, and back out when its support
+   returns to its carry at the end of the tick.
+2. **No next-state store for durable tables.** The frame (`FramePlan`, already incremental: only the rows that
+   changed this tick move) yields the tick's delta directly; the delta is the WAL record, joins the overlay, and goes
+   to the database when the tick is released. `retract_all` and other whole-store operations never apply to tables.
+3. **Reads.** `contains(row)`: `hot`, then the overlay, then a point lookup in the database (`Lsm::get`, a key's
+   newest entry at or below the version). `present()`: a merge of the three, ordered by key. `old()` (the table at
+   the start of the tick) is `base` itself.
+4. **Indexes as keyspaces.** A plan's probes on a key prefix are prefix scans. For every other column set a plan
+   probes (known when the engine plans the program), the database keeps a secondary keyspace
+   `tag' ++ cols ++ row`, written with every apply. Probes merge the keyspace's scan with `hot` and the overlay.
+5. **Lattice tables** keep their merged cells in the database and their live contributions in `hot` (a cell's carried
+   row is one contribution).
+6. **Blob counts** (FOREIGN-PROTOCOLS §5) move to a keyspace of their own, kept with every apply.
+7. **A block cache**: decoded SSTable blocks in a bounded LRU (`storage.cache_bytes`), so a node's working set stays
+   in memory and the rest is read on demand.
+8. **Recovery and checkpoints.** A node boots on its database (the WAL after the database's flushed tick applied
+   to it); it loads no image. Checkpoints retire: the WAL truncates behind the database alone, and blob collection
+   anchors to its flushes.
+9. **Order-preserving keys** (§3), so range probes (`x > 5`) become range scans.
+
+Tests: every suite and the corpus run on the tiered stores (the engine and the oracle still agree on every corpus
+program); a node whose durable state is several times its cache; kill -9 and the crash simulation over the
+database as the only durable state.
