@@ -192,8 +192,6 @@ pub struct Node<E: Executor> {
     last_now: Instant,
     /// Whether the last tick staged a change (its inductive heads differ from the state it started with).
     staged: bool,
-    /// The durable rows after the last computed tick.
-    image: DurableImage,
     /// The program's durable relations: their committed rows are the database's (the driver reads them).
     durable: BTreeSet<RelId>,
     timers: TimerTable,
@@ -360,7 +358,6 @@ impl<E: Executor> Node<E> {
             durable_blobs: boot.stored,
             timers: TimerTable::new(p, cfg.role, boot.now)?,
             durable: schema.rels.iter().map(|(r, _, _)| *r).collect(),
-            image: boot.image,
             exec,
             cfg,
             schema,
@@ -703,7 +700,6 @@ impl<E: Executor> Node<E> {
             new_blobs.push((b, bytes));
         }
         self.staged = !out.changes.is_empty();
-        self.image.apply(&delta);
         self.booted = true;
         self.last_now = now;
         self.halting = halts;
