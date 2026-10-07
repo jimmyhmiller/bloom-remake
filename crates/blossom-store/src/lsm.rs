@@ -81,6 +81,9 @@ impl Default for LsmOptions {
 }
 
 const MAGIC: &[u8; 8] = b"BLSSST01";
+/// Format 2 adds a Bloom filter of the table's keys: its place follows the version range in the footer.
+const MAGIC2: &[u8; 8] = b"BLSSST02";
+const FOOTER2: usize = FOOTER + 8 + 4;
 /// The footer: magic, index offset (u64), index length (u32), entries (u64), lowest and highest version (u64), CRC32C.
 const FOOTER: usize = 8 + 8 + 4 + 8 + 8 + 8 + 4;
 const MANIFEST_FORMAT: u16 = 1;
@@ -177,6 +180,78 @@ fn decode_block(path: &Path, offset: u64, mut body: &[u8]) -> Result<Vec<Entry>,
         return Err(bad());
     }
     Ok(out)
+}
+
+/// A Bloom filter of a table's keys: `bits` bits, `probes` positions per key (FNV-1a, double hashing).
+#[derive(Clone, Debug)]
+struct Bloom {
+    bits: Vec<u8>,
+    probes: u32,
+}
+
+impl Bloom {
+    const BITS_PER_KEY: usize = 10;
+    const PROBES: u32 = 7;
+
+    fn hashes(key: &[u8]) -> (u64, u64) {
+        let fnv = |basis: u64| {
+            key.iter()
+                .fold(basis, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3))
+        };
+        (fnv(0xcbf2_9ce4_8422_2325), fnv(0x8422_2325_cbf2_9ce4) | 1)
+    }
+
+    fn of(hashes: &[(u64, u64)]) -> Bloom {
+        let nbits = (hashes.len() * Bloom::BITS_PER_KEY).max(64);
+        let mut bits = vec![0u8; nbits.div_ceil(8)];
+        let m = (bits.len() * 8) as u64;
+        for (h1, h2) in hashes {
+            for i in 0..u64::from(Bloom::PROBES) {
+                let bit = h1.wrapping_add(i.wrapping_mul(*h2)) % m;
+                if let Some(byte) = bits.get_mut((bit / 8) as usize) {
+                    *byte |= 1 << (bit % 8);
+                }
+            }
+        }
+        Bloom {
+            bits,
+            probes: Bloom::PROBES,
+        }
+    }
+
+    /// Whether the key may be in the table (`false`: it is not).
+    fn may_contain(&self, key: &[u8]) -> bool {
+        let (h1, h2) = Bloom::hashes(key);
+        let m = (self.bits.len() * 8) as u64;
+        if m == 0 {
+            return true;
+        }
+        (0..u64::from(self.probes)).all(|i| {
+            let bit = h1.wrapping_add(i.wrapping_mul(h2)) % m;
+            self.bits
+                .get((bit / 8) as usize)
+                .is_some_and(|b| b & (1 << (bit % 8)) != 0)
+        })
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.bits.len() + 8);
+        out.extend_from_slice(&self.probes.to_le_bytes());
+        out.extend_from_slice(&self.bits);
+        with_crc(out)
+    }
+
+    fn decode(path: &Path, offset: u64, raw: &[u8]) -> Result<Bloom, StoreError> {
+        let mut body = checked(raw).ok_or_else(|| corrupt(path, offset, "filter checksum"))?;
+        let probes = get_u32(&mut body).ok_or_else(|| corrupt(path, offset, "a malformed filter"))?;
+        if probes == 0 || probes > 32 {
+            return Err(corrupt(path, offset, format!("a filter of {probes} probes")));
+        }
+        Ok(Bloom {
+            bits: body.to_vec(),
+            probes,
+        })
+    }
 }
 
 /// One data block as the index knows it.
@@ -301,6 +376,8 @@ struct Sst {
     file: Mutex<Box<dyn VfsFile>>,
     index: Vec<BlockRef>,
     cache: Arc<BlockCache>,
+    /// The filter of its keys (format 2; a format-1 table has none).
+    filter: Option<Bloom>,
 }
 
 impl Sst {
@@ -314,21 +391,47 @@ impl Sst {
                 format!("{len} bytes, the manifest says {}", meta.bytes),
             ));
         }
-        let footer_at = len
-            .checked_sub(FOOTER as u64)
-            .ok_or_else(|| corrupt(&path, 0, "shorter than its footer"))?;
-        let mut footer = vec![0u8; FOOTER];
-        read_exact(&*file, footer_at, &mut footer)?;
+        // A format-2 footer is longer; a table shorter than one is format 1 or nothing.
+        let footer_at2 = len.checked_sub(FOOTER2 as u64);
+        let mut footer2 = vec![0u8; FOOTER2];
+        let v2 = match footer_at2 {
+            Some(at) => {
+                read_exact(&*file, at, &mut footer2)?;
+                footer2.get(..8) == Some(MAGIC2.as_slice())
+            }
+            None => false,
+        };
+        let (footer_at, footer) = match footer_at2 {
+            Some(at) if v2 => (at, footer2),
+            _ => {
+                let at = len
+                    .checked_sub(FOOTER as u64)
+                    .ok_or_else(|| corrupt(&path, 0, "shorter than its footer"))?;
+                let mut footer = vec![0u8; FOOTER];
+                read_exact(&*file, at, &mut footer)?;
+                (at, footer)
+            }
+        };
         let body = checked(&footer).ok_or_else(|| corrupt(&path, footer_at, "footer checksum"))?;
         let mut f = body;
         let bad = || corrupt(&path, footer_at, "a malformed footer");
-        if take(&mut f, 8) != Some(MAGIC.as_slice()) {
+        let magic = take(&mut f, 8);
+        if magic != Some(MAGIC.as_slice()) && magic != Some(MAGIC2.as_slice()) {
             return Err(corrupt(&path, footer_at, "not an SSTable"));
         }
         let index_at = get_u64(&mut f).ok_or_else(bad)?;
         let index_len = get_u32(&mut f).ok_or_else(bad)?;
         let entries = get_u64(&mut f).ok_or_else(bad)?;
         let (min_version, max_version) = (get_u64(&mut f).ok_or_else(bad)?, get_u64(&mut f).ok_or_else(bad)?);
+        let filter = if v2 {
+            let at = get_u64(&mut f).ok_or_else(bad)?;
+            let flen = get_u32(&mut f).ok_or_else(bad)?;
+            let mut raw = vec![0u8; flen as usize];
+            read_exact(&*file, at, &mut raw)?;
+            Some(Bloom::decode(&path, at, &raw)?)
+        } else {
+            None
+        };
         if (entries, min_version, max_version) != (meta.entries, meta.min_version, meta.max_version) {
             return Err(corrupt(&path, footer_at, "the footer disagrees with the manifest"));
         }
@@ -358,6 +461,7 @@ impl Sst {
             file: Mutex::new(file),
             index,
             cache,
+            filter,
         })
     }
 
@@ -403,6 +507,9 @@ impl Sst {
 
     /// The newest entry of `key` at or below `as_of`: its version and op.
     fn get(&self, key: &[u8], as_of: u64) -> Result<Option<(u64, Op)>, StoreError> {
+        if self.filter.as_ref().is_some_and(|f| !f.may_contain(key)) {
+            return Ok(None);
+        }
         let start = self.index.partition_point(|b| b.last.as_slice() < key);
         for b in self.index.iter().skip(start) {
             if b.first.as_slice() > key {
@@ -466,6 +573,8 @@ fn write_table(
     let mut first: Option<Vec<u8>> = None;
     let mut last: Vec<u8> = Vec::new();
     let (mut count, mut min_v, mut max_v) = (0u64, u64::MAX, 0u64);
+    // Each distinct key's hashes, for the filter (a key's versions are adjacent).
+    let mut hashes: Vec<(u64, u64)> = Vec::new();
     let mut flush_block = |file: &mut Box<dyn VfsFile>,
                            block: &mut Vec<u8>,
                            in_block: &mut u64,
@@ -493,6 +602,9 @@ fn write_table(
         let e = e?;
         if first.is_none() {
             first = Some(e.key.clone());
+        }
+        if count == 0 || e.key != last {
+            hashes.push(Bloom::hashes(&e.key));
         }
         encode_entry(&mut block, &e.key, e.version, e.op);
         in_block += 1;
@@ -523,8 +635,11 @@ fn write_table(
     let ix = with_crc(ix);
     let index_at = offset;
     file.append(&ix)?;
-    let mut footer = Vec::with_capacity(FOOTER);
-    footer.extend_from_slice(MAGIC);
+    let filter = Bloom::of(&hashes).encode();
+    let filter_at = index_at + ix.len() as u64;
+    file.append(&filter)?;
+    let mut footer = Vec::with_capacity(FOOTER2);
+    footer.extend_from_slice(MAGIC2);
     footer.extend_from_slice(&index_at.to_le_bytes());
     footer.extend_from_slice(
         &u32::try_from(ix.len())
@@ -534,6 +649,12 @@ fn write_table(
     footer.extend_from_slice(&count.to_le_bytes());
     footer.extend_from_slice(&min_v.to_le_bytes());
     footer.extend_from_slice(&max_v.to_le_bytes());
+    footer.extend_from_slice(&filter_at.to_le_bytes());
+    footer.extend_from_slice(
+        &u32::try_from(filter.len())
+            .map_err(|_| invalid("a filter over 4 GiB"))?
+            .to_le_bytes(),
+    );
     let footer = with_crc(footer);
     file.append(&footer)?;
     file.sync_data()?;
@@ -1170,5 +1291,23 @@ impl<I: Iterator<Item = Result<Entry, StoreError>>> Iterator for Gc<I> {
             }
             return Some(Ok(e));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_filter_has_no_false_negatives_and_few_false_positives() {
+        let keys: Vec<Vec<u8>> = (0..2000u32).map(|i| format!("key-{i}").into_bytes()).collect();
+        let hashes: Vec<(u64, u64)> = keys.iter().map(|k| Bloom::hashes(k)).collect();
+        let f = Bloom::decode(Path::new("t"), 0, &Bloom::of(&hashes).encode()).unwrap();
+        assert!(keys.iter().all(|k| f.may_contain(k)));
+        let false_positives = (0..2000u32)
+            .filter(|i| f.may_contain(format!("absent-{i}").as_bytes()))
+            .count();
+        // About 1% at 10 bits a key and 7 probes.
+        assert!(false_positives < 60, "{false_positives} false positives in 2000");
     }
 }
