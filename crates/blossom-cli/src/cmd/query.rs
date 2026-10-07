@@ -47,16 +47,27 @@ pub struct Args {
     pub query: String,
 }
 
-/// The program's files from disk, with the query's view added to the root file.
+/// The file the query's view is in, which the root file includes (at the node's role): what its diagnostics name.
+const QUERY_FILE: &str = "<query>.bls";
+
+/// The program's files from disk, the root file including the query's.
 struct WithQuery {
-    extra: String,
+    /// What the root file gains (the include), and the query file's text.
+    include: String,
+    query: String,
 }
 
 impl Loader for WithQuery {
     fn load(&mut self, from: Option<&str>, path: &str) -> Result<LoadedFile, String> {
+        if path == QUERY_FILE {
+            return Ok(LoadedFile {
+                key: std::sync::Arc::from(QUERY_FILE),
+                text: self.query.clone(),
+            });
+        }
         let mut f = Loader::load(&mut FsLoader, from, path)?;
         if from.is_none() {
-            f.text.push_str(&self.extra);
+            f.text.push_str(&self.include);
         }
         Ok(f)
     }
@@ -92,10 +103,10 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
         eprintln!("blossom query: the deployment has no node `{}`", args.node);
         return Exit::Usage.into();
     };
-    let view = format!("view {};", args.query.trim().trim_end_matches(';'));
-    let extra = match &entry.role {
-        Some(role) => format!("\n\nat {role} {{\n    {view}\n}}\n"),
-        None => format!("\n\n{view}\n"),
+    let query = format!("view {};\n", args.query.trim().trim_end_matches(';'));
+    let include = match &entry.role {
+        Some(role) => format!("\n\nat {role} {{\n    include \"{QUERY_FILE}\";\n}}\n"),
+        None => format!("\n\ninclude \"{QUERY_FILE}\";\n"),
     };
     let nodes: Vec<NodeSpec> = spec
         .nodes
@@ -114,7 +125,8 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
         eprintln!("blossom query: the program path {} is not UTF-8", spec.source.display());
         return Exit::Refused.into();
     };
-    let (compiled, sources) = blossom_driver::bls::compile_with_loader(root, &nodes, &params, &mut WithQuery { extra });
+    let (compiled, sources) =
+        blossom_driver::bls::compile_with_loader(root, &nodes, &params, &mut WithQuery { include, query });
     let artifact = match compiled {
         Ok((a, _)) => a,
         Err(blossom_front::api::BlsError::Rejected(found)) => {
