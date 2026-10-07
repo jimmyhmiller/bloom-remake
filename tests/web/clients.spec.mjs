@@ -1,0 +1,199 @@
+// Pages as members of a node's program (docs/design/CLIENTS.md): a real `blossom run --web` serves the shared TodoMVC
+// (examples/web/todos_shared.bls) and the chat (examples/web/chat.bls), and Chromium tabs run as members of their
+// `Browser` role. Two tabs stay in sync, a reload keeps a tab's identity and state, a tab cut off from the node keeps
+// working and catches up, and the node's restart is survived. Needs the CLI: BLOSSOM_BIN (scripts/test-tiers.sh web
+// builds it and sets it).
+import { test, expect } from "@playwright/test";
+import { spawn } from "node:child_process";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createServer } from "node:net";
+
+const repo = resolve(fileURLToPath(new URL(".", import.meta.url)), "..", "..");
+const bin = process.env.BLOSSOM_BIN;
+
+/** A free TCP port on localhost. */
+function freePort() {
+  return new Promise((done, fail) => {
+    const s = createServer();
+    s.on("error", fail);
+    s.listen(0, "127.0.0.1", () => {
+      const { port } = s.address();
+      s.close(() => done(port));
+    });
+  });
+}
+
+/** A one-node deployment of examples/web/PROGRAM.bls, serving the page; `start`/`kill` run and stop the node. */
+async function deployment(program) {
+  const dir = mkdtempSync(join(tmpdir(), `blossom-clients-${program}-`));
+  const peer = await freePort();
+  const web = await freePort();
+  const deploy = join(dir, "deploy.toml");
+  writeFileSync(
+    deploy,
+    [
+      "format = 1",
+      "[deployment]",
+      `id = "${program}-web"`,
+      `program = "${program}"`,
+      "version = 1",
+      `source = "${join(repo, "examples", "web", `${program}.bls`)}"`,
+      "[[node]]",
+      'name = "s"',
+      'role = "Server"',
+      `addr = "127.0.0.1:${peer}"`,
+      `principal = "spiffe://test/${program}/Server/s"`,
+      "[security]",
+      'mode = "insecure-dev"',
+      "[storage]",
+      'data_dir = "data"',
+      "",
+    ].join("\n"),
+  );
+  let child = null;
+  const d = {
+    url: `http://localhost:${web}/`,
+    /** Starts the node (a new one the first time) and waits for its readiness line. */
+    async start(fresh) {
+      const args = ["run", "--deploy", deploy, "--node", "s", "--insecure-dev", "--web", `127.0.0.1:${web}`];
+      args.push("--web-root", join(repo, "web"));
+      if (fresh) args.push("--init-fresh");
+      child = spawn(bin, args, {
+        env: { ...process.env, BLOSSOM_SEED: "00112233445566778899aabbccddeeff" },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let err = "";
+      child.stderr.on("data", (b) => (err += b));
+      await new Promise((ready, fail) => {
+        let out = "";
+        child.stdout.on("data", (b) => {
+          out += b;
+          if (out.includes(" ready: ")) ready();
+        });
+        child.on("exit", (code) => fail(new Error(`blossom run exited (${code}): ${err}`)));
+      });
+    },
+    /** Kills the node outright (no shutdown: a crash). */
+    async kill() {
+      if (!child) return;
+      const c = child;
+      child = null;
+      await new Promise((gone) => {
+        c.on("exit", gone);
+        c.kill("SIGKILL");
+      });
+    },
+    async remove() {
+      await d.kill();
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+  return d;
+}
+
+async function open(page, url) {
+  page.on("pageerror", (e) => console.log("page error:", e.message));
+  await page.goto(url);
+  await expect(page.locator("body")).toHaveAttribute("data-blossom", "ready");
+}
+
+const labels = (page) => page.locator(".todo-list li label");
+/** The element the program calls `id`. */
+const bid = (page, id) => page.locator(`[data-bid="${id}"]`);
+const sync = (page) => bid(page, "sync");
+
+async function add(page, title) {
+  await page.locator(".new-todo").fill(title);
+  await page.locator(".new-todo").press("Enter");
+}
+
+test.describe("members of a node's program", () => {
+  test.skip(!bin, "BLOSSOM_BIN names the blossom CLI (scripts/test-tiers.sh web sets it)");
+
+  test("two tabs share one todo list; a reload keeps a tab's identity", async ({ context }) => {
+    const d = await deployment("todos_shared");
+    try {
+      await d.start(true);
+      const a = await context.newPage();
+      const b = await context.newPage();
+      await open(a, d.url);
+      await open(b, d.url);
+      await expect(sync(a)).toHaveText("synced with the server");
+      await expect(sync(b)).toHaveText("synced with the server");
+      await add(a, "buy milk");
+      await expect(labels(b)).toHaveText(["buy milk"]);
+      await add(b, "walk the dog");
+      await expect(labels(a)).toHaveText(["buy milk", "walk the dog"]);
+      // The two tabs are different members: each made one todo, under its own identity.
+      const ids = await a.locator(".todo-list li").evaluateAll((els) => els.map((e) => e.dataset.bid));
+      expect(new Set(ids.map((id) => id.replace(/^todo-\d+-/, ""))).size).toBe(2);
+      // b ticks a's todo; a sees it.
+      await b.locator(".todo-list li").filter({ hasText: "buy milk" }).locator(".toggle").check();
+      await expect(a.locator(".todo-list li.completed label")).toHaveText(["buy milk"]);
+      // A reload is the same member: its next todo is numbered after its first.
+      await b.reload();
+      await expect(b.locator("body")).toHaveAttribute("data-blossom", "ready");
+      await expect(labels(b)).toHaveText(["buy milk", "walk the dog"]);
+      await add(b, "feed the cat");
+      await expect(labels(a)).toHaveText(["buy milk", "walk the dog", "feed the cat"]);
+      const bids = await a.locator(".todo-list li").evaluateAll((els) => els.map((e) => e.dataset.bid));
+      const bOwner = bids[1].replace(/^todo-\d+-/, "");
+      expect(bids[2]).toBe(`todo-1-${bOwner}`);
+    } finally {
+      await d.remove();
+    }
+  });
+
+  test("a tab keeps working while the node is down and catches up after its restart", async ({ context }) => {
+    const d = await deployment("todos_shared");
+    try {
+      await d.start(true);
+      const a = await context.newPage();
+      const b = await context.newPage();
+      await open(a, d.url);
+      await open(b, d.url);
+      await add(a, "before the crash");
+      await expect(labels(b)).toHaveText(["before the crash"]);
+      await d.kill();
+      await expect(sync(a)).toHaveText("offline: changes wait until the server is back");
+      await expect(sync(b)).toHaveText("offline: changes wait until the server is back");
+      // Offline, a tab still works on its own copy, and the change waits in its link.
+      await add(a, "while it was down");
+      await expect(labels(a)).toHaveText(["before the crash", "while it was down"]);
+      await expect(labels(b)).toHaveText(["before the crash"]);
+      // The node comes back (its store survived the crash); both tabs reconnect, and the waiting change goes out.
+      await d.start(false);
+      await expect(sync(a)).toHaveText("synced with the server", { timeout: 15_000 });
+      await expect(sync(b)).toHaveText("synced with the server", { timeout: 15_000 });
+      await expect(labels(b)).toHaveText(["before the crash", "while it was down"]);
+      await add(b, "after");
+      await expect(labels(a)).toHaveText(["before the crash", "while it was down", "after"]);
+    } finally {
+      await d.remove();
+    }
+  });
+
+  test("a chat between two tabs", async ({ context }) => {
+    const d = await deployment("chat");
+    try {
+      await d.start(true);
+      const a = await context.newPage();
+      const b = await context.newPage();
+      await open(a, d.url);
+      await open(b, d.url);
+      await expect(bid(a, "status")).toHaveText("online, 2 here");
+      await bid(a, "say").fill("hello");
+      await bid(a, "say").press("Enter");
+      await expect(b.locator(".lines .text")).toHaveText(["hello"]);
+      await expect(a.locator(".lines li[data-mine=true] .text")).toHaveText(["hello"]);
+      await expect(b.locator(".lines li[data-mine=true]")).toHaveCount(0);
+      await b.close();
+      await expect(bid(a, "status")).toHaveText("online, 1 here");
+    } finally {
+      await d.remove();
+    }
+  });
+});

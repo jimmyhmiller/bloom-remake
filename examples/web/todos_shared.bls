@@ -1,0 +1,281 @@
+//! TodoMVC shared between browser tabs (docs/design/CLIENTS.md): the same app as todomvc.bls, but every tab is a
+//! member of the client role `Browser`, and the server keeps the list. One program says both sides.
+//!
+//! A todo is known by the tab that made it and that tab's number for it. A tab changes its own copy at once (so it
+//! works offline) and sends the todo's new state to the server as a `set`; the server takes the last `set` of each todo
+//! in a tick, numbers the todo's versions, and tells every tab online the new state. A tab keeps the newest version it
+//! heard of each todo, so tabs agree once the messages are in. A deleted todo stays as a tombstone (`alive = false`), so
+//! a tab that missed the delete learns of it. A tab whose link did not resume gets every todo.
+
+program todos_shared version 1;
+
+role Server;
+role Browser: client;
+
+/// A todo's new state, from the tab that changed it: `s` numbers the tab's changes, so the last one of a tick wins.
+channel set(w: Node<Browser>, n: u64, s: u64, at: Instant, title: String, done: bool, alive: bool): Browser -> Server;
+/// A todo's state as the server has it, at version `v`.
+channel todo(w: Node<Browser>, n: u64, v: u64, at: Instant, title: String, done: bool, alive: bool): Server -> Browser;
+
+at Server {
+    /// Every todo, by its tab and number, at its latest version; kept across restarts.
+    durable table items(w: Node<Browser>, n: u64, v: u64, at: Instant, title: String, done: bool, alive: bool) key(w, n);
+    /// The tabs connected now.
+    table online(b: Node<Browser>);
+
+    join: on Browser.connected(b, _) {
+        emit online(b);
+    }
+    leave: on Browser.disconnected(b) {
+        delete online(b);
+    }
+    /// The last change of each todo in a tick (between tabs, the greater tab).
+    view latest(w, n, at, t, d, a) = set(w, n, s, at, t, d, a) from b, choose_most!((s, b, at, t, d, a) per (w, n));
+    view version(w, n, v = max!(x default 0u64)) = per latest(w, n, _, _, _, _), items(w, n, x, _, _, _, _);
+
+    take: on latest(w, n, at, t, d, a), version(w, n, v) {
+        upsert items(w, n, v + 1u64, at, t, d, a);
+    }
+    tell: on inserted items(w, n, v, at, t, d, a), online(o) {
+        send todo(w, n, v, at, t, d, a) to o;
+    }
+    /// A tab whose link did not resume gets every todo.
+    greet: on Browser.connected(b, false), items(w, n, v, at, t, d, a) {
+        send todo(w, n, v, at, t, d, a) to b;
+    }
+}
+
+at Browser {
+    include "ui.bls";
+
+    /// The todos as this tab knows them, by tab and number: each one's version from the server (0 for one made here
+    /// that the server has not confirmed); kept across reloads.
+    durable table todos(w: Node<Browser>, n: u64, v: u64, at: Instant, title: String, done: bool, alive: bool) key(w, n);
+    /// The number of this tab's next todo, and of its next change.
+    durable table next_n(n: u64) key();
+    durable table next_s(s: u64) key();
+    /// The text typed in the new-todo field.
+    table draft(s: String) key();
+    /// The todo being edited.
+    table editing(w: Node<Browser>, n: u64) key();
+    /// The list the URL shows: "all", "active" or "completed".
+    table showing(f: String) key();
+    /// Whether the link to the server is up.
+    table up(s: Node<Server>);
+
+    view next_id(n = max!(x default 0u64)) = next_n(x);
+    view next_change(s = max!(x default 0u64)) = next_s(x);
+    view live(w, n, at, title, done) = todos(w, n, _, at, title, done, true);
+    view total(k = count!((w, n) default 0u64)) = live(w, n, _, _, _);
+    view left(k = count!((w, n) default 0u64)) = live(w, n, _, _, done) where not done;
+    view filter(f) {
+        showing(f);
+        not showing(_), let f = "all";
+    }
+    view typed_now(s) {
+        draft(s);
+        not draft(_), let s = "";
+    }
+    /// Each todo's element ids.
+    view key_of(w, n, k) = live(w, n, _, _, _), let k = f"{n}-{w}";
+    view toggle_of(id, w, n) = key_of(w, n, k), let id = f"toggle-{k}";
+    view destroy_of(id, w, n) = key_of(w, n, k), let id = f"destroy-{k}";
+    view label_of(id, w, n) = key_of(w, n, k), let id = f"label-{k}";
+    view edit_of(id, w, n) = key_of(w, n, k), let id = f"edit-{k}";
+    view is_editing(w, n, e) {
+        editing(w, n), let e = true;
+        live(w, n, _, _, _), not editing(w, n), let e = false;
+    }
+    view sync(s) {
+        up(_), let s = "synced with the server";
+        not up(_), let s = "offline: changes wait until the server is back";
+    }
+
+    /// The list a URL hash shows.
+    fn filter_of(hash: String) -> String {
+        if hash == "#/active" {
+            "active"
+        } else if hash == "#/completed" {
+            "completed"
+        } else {
+            "all"
+        }
+    }
+
+    fn shown(f: String, done: bool) -> bool {
+        f == "all" || (f == "active" && not done) || (f == "completed" && done)
+    }
+
+    fn item_class(done: bool, editing: bool) -> String {
+        if done && editing {
+            "completed editing"
+        } else if done {
+            "completed"
+        } else if editing {
+            "editing"
+        } else {
+            ""
+        }
+    }
+
+    fn plural(k: u64) -> String {
+        if k == 1u64 { " item left" } else { " items left" }
+    }
+
+    fn link_class(f: String, mine: String) -> String {
+        if f == mine { "selected" } else { "" }
+    }
+
+    // ------------------------------------------------------------ the server
+
+    /// The newest version heard of each todo; one older than what the tab has changes nothing.
+    view heard(w, n, v, at, t, d, a) = todo(w, n, v, at, t, d, a), choose_most!((v, at, t, d, a) per (w, n));
+    hear_new: on heard(w, n, v, at, t, d, a), not todos(w, n, _, _, _, _, _) {
+        upsert todos(w, n, v, at, t, d, a);
+    }
+    hear: on heard(w, n, v, at, t, d, a), todos(w, n, v0, _, _, _, _) where v > v0 {
+        upsert todos(w, n, v, at, t, d, a);
+    }
+    link: on Server.connected(s, _) {
+        emit up(s);
+    }
+    lost: on Server.disconnected(s) {
+        delete up(s);
+    }
+
+    // ------------------------------------------------------------ events
+
+    route: on route(hash) {
+        upsert showing(filter_of(hash));
+    }
+
+    typing: on typed(id, value) where id == "new-todo" {
+        upsert draft(value);
+    }
+
+    /// A change of a todo: here at once, and to the server (it waits in the link while the server is unreachable).
+    add: on keydown(id, key, value), next_id(n), next_change(s), srv in Server
+            where id == "new-todo" && key == "Enter" && value.trim() != "" {
+        upsert todos(self, n, 0u64, now(), value.trim(), false, true);
+        send set(self, n, s, now(), value.trim(), false, true) to srv;
+        upsert next_n(n + 1u64);
+        upsert next_s(s + 1u64);
+        upsert draft("");
+    }
+
+    toggle: on change(id, checked), toggle_of(id, w, n), todos(w, n, v, at, title, _done, true), next_change(s),
+            srv in Server {
+        upsert todos(w, n, v, at, title, checked, true);
+        send set(w, n, s, at, title, checked, true) to srv;
+        upsert next_s(s + 1u64);
+    }
+
+    toggle_all: on change(id, checked), todos(w, n, v, at, title, _done, true), next_change(s), srv in Server
+            where id == "toggle-all" {
+        upsert todos(w, n, v, at, title, checked, true);
+        send set(w, n, s, at, title, checked, true) to srv;
+        upsert next_s(s + 1u64);
+    }
+
+    destroy: on click(id), destroy_of(id, w, n), todos(w, n, v, at, title, done, true), next_change(s),
+            srv in Server {
+        upsert todos(w, n, v, at, title, done, false);
+        send set(w, n, s, at, title, done, false) to srv;
+        upsert next_s(s + 1u64);
+    }
+
+    clear_completed: on click(id), todos(w, n, v, at, title, done, true), next_change(s), srv in Server
+            where id == "clear-completed" && done {
+        upsert todos(w, n, v, at, title, done, false);
+        send set(w, n, s, at, title, done, false) to srv;
+        upsert next_s(s + 1u64);
+    }
+
+    start_edit: on dblclick(id), label_of(id, w, n) {
+        upsert editing(w, n);
+    }
+
+    /// Enter or leaving the field saves the edit (an empty title deletes the todo); Escape drops it. The field's
+    /// removal fires a blur after Enter or Escape, when nothing is being edited any more.
+    save_edit: on keydown(id, key, value), editing(w, n), edit_of(id, w, n), todos(w, n, v, at, _title, done, true),
+            next_change(s), srv in Server where key == "Enter" {
+        upsert todos(w, n, v, at, value.trim(), done, value.trim() != "");
+        send set(w, n, s, at, value.trim(), done, value.trim() != "") to srv;
+        upsert next_s(s + 1u64);
+        delete editing(w, n);
+    }
+    cancel_edit: on keydown(id, key, _value), editing(w, n), edit_of(id, w, n) where key == "Escape" {
+        delete editing(w, n);
+    }
+    blur_edit: on blur(id, value), editing(w, n), edit_of(id, w, n), todos(w, n, v, at, _title, done, true),
+            next_change(s), srv in Server {
+        upsert todos(w, n, v, at, value.trim(), done, value.trim() != "");
+        send set(w, n, s, at, value.trim(), done, value.trim() != "") to srv;
+        upsert next_s(s + 1u64);
+        delete editing(w, n);
+    }
+
+    // ------------------------------------------------------------ the page
+
+    /// A filter's link in the footer.
+    fragment link(name: String, href: String, f: String, words: String) {
+        li { a[id: f"link-{name}"](href: href, class: link_class(f, name)) { words } }
+    }
+
+    frame: while total(all), left(active), filter(f), typed_now(d), sync(st) {
+        emit html section[id: "app"](class: "todoapp") {
+            header(class: "header") {
+                h1 { "todos" }
+                input[id: "new-todo"](class: "new-todo", placeholder: "What needs to be done?", value: d);
+            }
+            if all > 0u64 {
+                section[id: "main"](class: "main") {
+                    input[id: "toggle-all"](
+                        id: "toggle-all",
+                        class: "toggle-all",
+                        type: "checkbox",
+                        checked: active == 0u64
+                    );
+                    label(for: "toggle-all") { "Mark all as complete" }
+                    ul[id: "list"](class: "todo-list") {
+                        for live(w, n, at, title, done), key_of(w, n, k), is_editing(w, n, e) where shown(f, done) {
+                            li[id: f"todo-{k}", pos: at.as_millis()](class: item_class(done, e)) {
+                                div(class: "view") {
+                                    input[id: f"toggle-{k}"](class: "toggle", type: "checkbox", checked: done);
+                                    label[id: f"label-{k}"] { title }
+                                    button[id: f"destroy-{k}"](class: "destroy");
+                                }
+                                if e { input[id: f"edit-{k}"](class: "edit", value: title); }
+                            }
+                        }
+                    }
+                }
+                footer[id: "footer"](class: "footer") {
+                    span[id: "count"](class: "todo-count") {
+                        strong { active }
+                        span { plural(active) }
+                    }
+                    ul(class: "filters") {
+                        link("all", "#/", f, "All");
+                        link("active", "#/active", f, "Active");
+                        link("completed", "#/completed", f, "Completed");
+                    }
+                    if all > active { button[id: "clear-completed"](class: "clear-completed") { "Clear completed" } }
+                }
+            }
+        }
+        emit html footer[pos: 1](class: "info") {
+            p[id: "sync"] { st }
+            p { "Double-click to edit a todo" }
+            p { "Written in Blossom, shared by every tab" }
+        }
+    }
+
+    /// The new-todo field has the focus unless a todo is being edited; the field of the one being edited has it then.
+    focus_new: while total(_all), not editing(_, _) {
+        emit focus("new-todo");
+    }
+    focus_edit: while editing(w, n), key_of(w, n, k) {
+        emit focus(f"edit-{k}");
+    }
+}

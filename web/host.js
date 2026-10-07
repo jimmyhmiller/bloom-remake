@@ -10,18 +10,29 @@
 //
 // Beside the app: the inspector (click an element, see why it is there; it holds the clock while it is on) and the
 // editor (the app's source, edited and re-run in place, the durable state kept when its schema stays).
-import init, { compile } from "./pkg/blossom_web.js";
+//
+// Served by a node (`blossom run --web`, docs/design/CLIENTS.md §5), the page is a member of the program's client
+// role: it compiles the program the node's `/blossom/app.json` gives, connects to the node over a WebSocket, and
+// runs as the member the node admits. It keeps its link (identity, what it took, what it sent and the node has not
+// acknowledged) in localStorage beside its durable tables, so a reload is the same member and a line typed while the
+// node is unreachable goes out when it is back; it reconnects with backoff. Tabs of one browser share localStorage
+// but are different members: each tab holds a numbered slot (a Web Lock, released when the tab goes) and keeps its
+// state under it, so a reload takes its slot back and a second tab takes the next. The program is the node's: the
+// editor is off.
+import init, { compile, compileClient, WebApp } from "./pkg/blossom_web.js";
 
 const search = new URLSearchParams(location.search);
-const appName = search.get("app") ?? "todomvc";
+let appName = search.get("app") ?? "todomvc";
 /** Benchmark mode: `null` (off), `""` (saves nothing) or `"persist"`. */
 const bench = search.get("bench");
 const saving = bench === null || bench === "persist";
-const root = `${appName}.bls`;
+let root = `${appName}.bls`;
 const mount = document.getElementById("app");
 const statusLine = document.getElementById("blossom-status");
-const storageKey = `blossom:${appName}`;
+let storageKey = `blossom:${appName}`;
 const sourceKey = `blossom-source:${appName}`;
+/** The stylesheet of each example app that has one. */
+const STYLES = { todomvc: "todomvc.css", todos_shared: "todomvc.css", chat: "chat.css" };
 
 /** The elements the program made, by its ids. */
 let nodes = new Map();
@@ -117,8 +128,8 @@ function now() {
 // The durable tables in localStorage: one entry per row, `blossom:NAME:row:TABLE:ROW` (the row as JSON), and the
 // tables' schema hashes under `blossom:NAME:tables`, so a round writes only the rows it changed. (Before, the whole
 // state was one entry, `blossom:NAME`: it is read once and rewritten in this form.)
-const rowPrefix = `${storageKey}:row:`;
-const tablesKey = `${storageKey}:tables`;
+let rowPrefix = `${storageKey}:row:`;
+let tablesKey = `${storageKey}:tables`;
 
 /** The saved durable tables, as the JSON `start` takes (empty: none). */
 function loadSaved() {
@@ -163,7 +174,10 @@ function persist(soon) {
   }
   if (saveTimer !== null) clearTimeout(saveTimer);
   saveTimer = null;
-  if (app && saving) writeSaved(JSON.parse(app.saveChanges()));
+  if (!app || !saving) return;
+  // The link first: a line the rows say was sent is then in the link's queue too.
+  if (member) localStorage.setItem(member.linkKey, app.linkState());
+  writeSaved(JSON.parse(app.saveChanges()));
 }
 addEventListener("pagehide", () => persist(false));
 
@@ -190,6 +204,7 @@ function drain() {
       const next = queue.shift();
       try {
         apply(JSON.parse(app.dispatch(JSON.stringify(next), now())));
+        flushFrames();
         persist(false);
         inspector.refresh();
       } catch (err) {
@@ -235,6 +250,7 @@ function frame() {
   busy = true;
   try {
     const patches = JSON.parse(app.advance(now()));
+    flushFrames();
     if (patches.length > 0) {
       apply(patches);
       persist(true);
@@ -293,6 +309,210 @@ function run(files) {
   report(started.notes.join("\n"));
   inspector.refresh();
   return { diags: warnings, ok: true, notes: started.notes };
+}
+
+// ---------------------------------------------------------------- a member of a node's program
+
+/** The member page's state (`null` for a page on its own): the program, its link before the page runs, the frames
+ * that link's handshake left, where it stores its link, and the connection. */
+let member = null;
+
+/** Writes the frames the last rounds left for the server (none while the link is down: they wait in the link). */
+function flushFrames() {
+  if (!member) return;
+  for (let f = app.takeFrame(); f !== undefined; f = app.takeFrame()) member.conn.write(f);
+}
+
+/** The WebSocket to the node: opened again after a loss, waiting longer each time (up to 5 s). */
+class Connection {
+  constructor(url, onOpen, onFrame, onClose) {
+    Object.assign(this, { url, onOpen, onFrame, onClose, ws: null, failures: 0, timer: null });
+  }
+
+  open() {
+    this.timer = null;
+    const ws = new WebSocket(this.url);
+    ws.binaryType = "arraybuffer";
+    this.ws = ws;
+    ws.onopen = () => this.onOpen();
+    ws.onmessage = (e) => {
+      if (this.ws === ws) this.onFrame(new Uint8Array(e.data));
+    };
+    ws.onclose = () => {
+      if (this.ws !== ws) return;
+      this.ws = null;
+      this.onClose();
+      this.retry();
+    };
+  }
+
+  /** The handshake finished: the next loss starts the backoff over. */
+  welcomed() {
+    this.failures = 0;
+  }
+
+  retry() {
+    if (this.timer !== null) return;
+    const wait = Math.min(5000, 200 * 2 ** this.failures) * (0.75 + Math.random() / 2);
+    this.failures = Math.min(this.failures + 1, 10);
+    this.timer = setTimeout(() => this.open(), wait);
+  }
+
+  write(bytes) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(bytes);
+  }
+
+  /** Drops the connection (the link's loss follows, as for any loss). */
+  drop() {
+    if (this.ws) this.ws.close();
+  }
+}
+
+/** A frame from the node: the handshake's, until the page runs; then the app's. */
+function memberFrame(bytes) {
+  if (!app) {
+    let welcomed;
+    try {
+      welcomed = member.link.recv(bytes);
+    } catch (err) {
+      report(`error: ${err}`);
+      member.conn.drop();
+      return;
+    }
+    if (welcomed) {
+      member.conn.welcomed();
+      startMember(WebApp.member(member.client, member.link));
+    }
+    return;
+  }
+  busy = true;
+  try {
+    const heard = JSON.parse(app.linkRecv(bytes, now()));
+    if (heard.restart) {
+      restartMember("the server no longer knows this page: it starts over as a new member");
+      return;
+    }
+    apply(heard.patches);
+    flushFrames();
+    persist(false);
+    inspector.soon();
+  } catch (err) {
+    report(`error: ${err}`);
+  } finally {
+    busy = false;
+  }
+  drain();
+}
+
+/** The connection ended: the program hears its link is down. */
+function memberClosed() {
+  if (!app) {
+    member.link.down();
+    return;
+  }
+  busy = true;
+  try {
+    apply(JSON.parse(app.linkDown(now())));
+    persist(false);
+  } catch (err) {
+    report(`error: ${err}`);
+  } finally {
+    busy = false;
+  }
+  drain();
+}
+
+/** The connection opened: the link's first frame. */
+function memberOpened() {
+  member.conn.write(app ? app.linkHello() : member.link.hello());
+}
+
+/** Runs the member page (its identity known): from its saved tables, the link's leftover frames written first. */
+function startMember(next) {
+  member.client = null;
+  member.link = null;
+  app = next;
+  listening = new Set(JSON.parse(app.listens()));
+  nodes = new Map();
+  mount.replaceChildren();
+  let started;
+  try {
+    started = JSON.parse(app.start(loadSaved(), location.hash, now()));
+  } catch (err) {
+    report(`error: ${err}`);
+    return;
+  }
+  apply(started.patches);
+  flushFrames();
+  persist(false);
+  report(started.notes.join("\n"));
+  inspector.refresh();
+}
+
+/** Forgets the member's stored state and loads the page again. */
+function restartMember(why) {
+  report(why);
+  const old = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key.startsWith(`${storageKey}:`) || key === storageKey) old.push(key);
+  }
+  for (const key of old) localStorage.removeItem(key);
+  location.reload();
+}
+
+/** The first free slot of `base` (a Web Lock this page holds until it goes): its number. */
+async function claimSlot(base) {
+  if (!navigator.locks) {
+    throw new Error("a member page needs the Web Locks API, which browsers give pages over https or on localhost");
+  }
+  for (let i = 0; ; i++) {
+    const got = await new Promise((resolve) => {
+      navigator.locks.request(`${base}:slot:${i}`, { ifAvailable: true }, (lock) => {
+        resolve(lock !== null);
+        // Held for the page's life.
+        return lock === null ? undefined : new Promise(() => {});
+      });
+    });
+    if (got) return i;
+  }
+}
+
+/** The page as a member of the node's program, from the node's app.json: compiles it, and runs it at once when the
+ * page knows its identity from an earlier visit (its link connects meanwhile), or after the first handshake. */
+async function runMember(appText) {
+  const desc = JSON.parse(appText);
+  root = desc.root;
+  appName = root.replace(/^.*\//, "").replace(/\.bls$/, "");
+  const base = `blossom-member:${desc.deployment}:${desc.node}:${root}`;
+  storageKey = `${base}:${await claimSlot(base)}`;
+  rowPrefix = `${storageKey}:row:`;
+  tablesKey = `${storageKey}:tables`;
+  let client;
+  try {
+    client = compileClient(root, JSON.stringify(desc.files), appText);
+  } catch (err) {
+    const { diags, error } = diagnostics(err);
+    report(error ?? diags.map((d) => d.rendered).join("\n"));
+    return;
+  }
+  const linkKey = `${storageKey}:link`;
+  const link = client.link(localStorage.getItem(linkKey) ?? "");
+  const url = new URL(desc.link, location.href);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  member = { client, link, linkKey, conn: new Connection(url, memberOpened, memberFrame, memberClosed) };
+  if (link.hasMember()) startMember(WebApp.member(client, link));
+  else report("connecting to the server…");
+  member.conn.open();
+}
+
+/** The node's app.json when a node serves the page (`null` when the page is on its own). */
+async function served() {
+  if (search.has("app")) return null;
+  const res = await fetch("blossom/app.json");
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`cannot load blossom/app.json: ${res.status}`);
+  return res.text();
 }
 
 // ---------------------------------------------------------------- the panel
@@ -556,7 +776,23 @@ function editorEvents() {
 async function main() {
   await init();
   const css = document.getElementById("app-css");
-  if (appName === "todomvc") css.href = "todomvc.css";
+  const appText = await served();
+  if (appText !== null) {
+    listen();
+    inspectEvents();
+    buttons.source.hidden = true;
+    buttons.inspect.addEventListener("click", () => inspector.toggle(!inspector.on));
+    document.getElementById("blossom-close").addEventListener("click", () => {
+      inspector.toggle(false);
+      show(null);
+    });
+    await runMember(appText);
+    if (STYLES[appName]) css.href = STYLES[appName];
+    requestAnimationFrame(frame);
+    document.body.dataset.blossom = "ready";
+    return;
+  }
+  if (STYLES[appName]) css.href = STYLES[appName];
   const original = { "ui.bls": await fetchSource("ui.bls"), [root]: await fetchSource(root) };
   let files = { ...original };
   const edited = bench === null ? localStorage.getItem(sourceKey) : null;

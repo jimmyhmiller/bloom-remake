@@ -1,0 +1,89 @@
+/* The chat example (examples/web/chat.bls), served by a node (docs/design/CLIENTS.md). */
+:root {
+  --chat-bg: #f4f1ec;
+  --chat-card: #fffdf9;
+  --chat-fg: #24211d;
+  --chat-muted: #7a7268;
+  --chat-line: #e4ddd2;
+  --chat-mine: #e8f0e4;
+  --chat-accent: #3d6b4f;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --chat-bg: #1b1a18;
+    --chat-card: #252321;
+    --chat-fg: #ece6dc;
+    --chat-muted: #a39a8e;
+    --chat-line: #38342f;
+    --chat-mine: #2a3a2f;
+    --chat-accent: #8fc3a0;
+  }
+}
+body {
+  margin: 0;
+  background: var(--chat-bg);
+  color: var(--chat-fg);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.chat {
+  box-sizing: border-box;
+  max-width: 40rem;
+  margin: 2rem auto;
+  padding: 1.25rem 1.5rem;
+  background: var(--chat-card);
+  border: 1px solid var(--chat-line);
+  border-radius: 10px;
+}
+.chat h1 {
+  margin: 0;
+  font-size: 1.4rem;
+  font-weight: 600;
+}
+.chat .status {
+  margin: 0.25rem 0 1rem;
+  color: var(--chat-muted);
+  font-size: 0.9rem;
+}
+.chat .lines {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-height: 6rem;
+}
+.chat .line {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  padding: 0.35rem 0.6rem;
+  border-radius: 6px;
+}
+.chat .line[data-mine="true"] {
+  background: var(--chat-mine);
+}
+.chat .who {
+  flex: none;
+  color: var(--chat-accent);
+  font: 0.78rem/1 ui-monospace, "SF Mono", Menlo, monospace;
+}
+.chat .text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.chat #say,
+.chat input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  font: inherit;
+  color: inherit;
+  background: var(--chat-bg);
+  border: 1px solid var(--chat-line);
+  border-radius: 6px;
+}
+.chat input:focus {
+  outline: 2px solid var(--chat-accent);
+  outline-offset: 1px;
+}

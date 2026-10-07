@@ -18,6 +18,9 @@ shift || true
 
 web() {
   scripts/build-web.sh
+  # The client-member specs (tests/web/clients.spec.mjs) run real nodes: `blossom run --web`.
+  cargo build -q -p blossom-cli
+  export BLOSSOM_BIN="${CARGO_TARGET_DIR:-$PWD/target}/debug/blossom"
   (cd tests/web && npm ci --no-audit --no-fund && npx playwright test)
 }
 
