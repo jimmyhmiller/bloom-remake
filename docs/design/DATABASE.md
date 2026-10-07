@@ -196,6 +196,9 @@ Moving durable relations onto the database, so a node's durable state may outgro
 - *The node* boots on the database (`Boot::database`): recovery replays the WAL into it and builds an image only to
   start a database the store did not have. `Executor::reset_on` hands the executor the database: the engine tiers
   what it can; an executor of whole instances (the oracle, a recording) reads every table.
+- *The default.* Tiering is on (the user's choice, 2026-10-07): a deployment sets `storage.tiered = false` to keep
+  every table in memory (`EngineConfig::in_memory`, `Executors::tiered`), the database still its durable store, for
+  state that fits in memory and the in-memory engine's latency.
 - *Checking.* `Backend::Checked` runs the engine and the oracle side by side and fails the first tick whose outputs
   differ; `BLOSSOM_EVALUATOR=checked` makes every simulated cluster run it.
 

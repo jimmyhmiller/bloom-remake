@@ -60,6 +60,9 @@ pub struct EngineConfig {
     /// How many rows each tiered table keeps of its recent probes (docs/design/DATABASE.md §7, the hot tier; `None`:
     /// [`crate::store::HOT_ROWS`]).
     pub hot_rows: Option<usize>,
+    /// Keep every durable table in memory even when started on the node's database ([`Engine::reset_on`] tiers
+    /// none): a deployment's `storage.tiered = false`, for state that fits in memory and the in-memory engine's speed.
+    pub in_memory: bool,
 }
 
 /// The per-group state of an aggregate rule: per aggregate column, the support of each distinct argument tuple, and
@@ -129,6 +132,8 @@ pub struct Engine {
     tiered: BTreeSet<RelId>,
     /// How many rows each tiered table keeps of its recent probes.
     hot_rows: usize,
+    /// Tier no table (`EngineConfig::in_memory`).
+    in_memory: bool,
 }
 
 fn kinds(p: &Program) -> Vec<Option<Kind>> {
@@ -546,6 +551,7 @@ impl Engine {
             tierable,
             tiered: BTreeSet::new(),
             hot_rows: cfg.hot_rows.unwrap_or(crate::store::HOT_ROWS),
+            in_memory: cfg.in_memory,
             program,
         };
         engine.build_indexes()?;
@@ -623,10 +629,15 @@ impl Engine {
             return Err(internal_error!("a reset onto the cold side carries rows of the tiered table {rel:?}").into());
         }
         // The durable tables the engine keeps in memory start from the cold side's rows.
+        let tiering = if self.in_memory {
+            BTreeMap::new()
+        } else {
+            self.tierable.clone()
+        };
         let mut carried = carried;
         if let Some(v) = cold.version()? {
             for rel in cold.tables() {
-                if self.tierable.contains_key(&rel) {
+                if tiering.contains_key(&rel) {
                     continue;
                 }
                 for row in cold.probe(rel, &[], &[], None, v)? {
@@ -635,7 +646,7 @@ impl Engine {
             }
         }
         self.reset(carried)?;
-        for (rel, key) in self.tierable.clone() {
+        for (rel, key) in tiering {
             self.stores.insert(
                 StoreKey::Main(rel),
                 Store::tiered(crate::store::Tiered::new(
