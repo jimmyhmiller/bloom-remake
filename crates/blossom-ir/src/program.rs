@@ -41,8 +41,17 @@ impl ValidatedProgram {
     /// The least program computing the view `view` from the durable relations it reads, each an input of it
     /// (docs/design/DATABASE.md §5), and those relations' names. A view that reads anything else (but static
     /// relations) is refused.
-    pub fn query(&self, view: blossom_base::idx::RelId) -> Result<(Self, Vec<String>), IrError> {
-        crate::query::query(self, view)
+    pub fn query(
+        &self,
+        view: blossom_base::idx::RelId,
+        role: Option<blossom_base::idx::RoleId>,
+    ) -> Result<(Self, Vec<String>), IrError> {
+        crate::query::query(self, view, role)
+    }
+    /// Whether every read of `rel` by a rule is an atom (`r(…)` or `notin r(…)`): no lookup, aggregate weight or
+    /// other expression reads it. A reader may then take only the rows its atoms can match.
+    pub fn read_only_by_atoms(&self, rel: blossom_base::idx::RelId) -> bool {
+        crate::query::read_only_by_atoms(&self.program, rel)
     }
     /// Cached identity.
     pub fn digest(&self) -> ProgramDigest {

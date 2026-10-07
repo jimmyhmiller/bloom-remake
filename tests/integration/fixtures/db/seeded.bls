@@ -1,0 +1,19 @@
+//! A node that writes its durable table in its very first tick (tick 0), for `runtime_db.rs`: the database must tell
+//! "flushed through tick 0" from "nothing flushed". A one-shot timer writes once more a little later.
+program seeded version 1;
+
+role Keeper;
+
+at Keeper {
+    timer later once after 50ms;
+
+    durable table seeded(n: u64, label: String);
+
+    seed: on boot() {
+        emit seeded(1u64, "one");
+        emit seeded(2u64, "two");
+    }
+    more: on later(_count, _at) {
+        emit seeded(3u64, "three");
+    }
+}

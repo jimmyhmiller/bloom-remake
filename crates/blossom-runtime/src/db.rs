@@ -22,15 +22,44 @@ use blossom_store::{Lsn, Vfs};
 
 use crate::RuntimeError;
 
+/// The format of the database's keys (`DurableCodec::row_key`): 1, the order-preserving encoding. A database written
+/// in another is rebuilt from the recovered rows when the node opens it.
+pub const KEY_FORMAT: u32 = 1;
+
 fn store_error(e: blossom_store::StoreError) -> RuntimeError {
     RuntimeError::Store(e)
 }
 
-/// Flushes `lsm`'s memtable, notes the tick its tables now cover in `mark`, and compacts what is due.
-fn flush(lsm: &Lsm, mark: &AtomicU64) -> Result<(), RuntimeError> {
-    if let Some(f) = lsm.flush().map_err(store_error)? {
-        mark.store(f.version, Ordering::SeqCst);
+/// Removes the tree under `db_dir` (its tables and manifest), so a database starts again there.
+fn clear(fs: &dyn Vfs, db_dir: &Path) -> Result<(), RuntimeError> {
+    let sst = db_dir.join("sst");
+    match fs.list(&sst) {
+        Err(blossom_store::StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(store_error(e)),
+        Ok(files) => {
+            for f in files {
+                fs.remove(&f).map_err(store_error)?;
+            }
+            fs.sync_dir(&sst).map_err(store_error)?;
+        }
     }
+    for f in fs.list(db_dir).map_err(store_error)? {
+        if f != sst {
+            fs.remove(&f).map_err(store_error)?;
+        }
+    }
+    fs.sync_dir(db_dir).map_err(store_error)
+}
+
+/// The first tick tables covering every tick up to `flushed` do not cover.
+fn watermark(flushed: Option<u64>) -> u64 {
+    flushed.map_or(0, |v| v.saturating_add(1))
+}
+
+/// Flushes `lsm`'s memtable, notes the first tick its tables do not cover in `mark`, and compacts what is due.
+fn flush(lsm: &Lsm, mark: &AtomicU64) -> Result<(), RuntimeError> {
+    let f = lsm.flush().map_err(store_error)?;
+    mark.store(watermark(f.version), Ordering::SeqCst);
     while lsm.compact().map_err(store_error)? {}
     Ok(())
 }
@@ -41,10 +70,10 @@ pub struct Database {
     artifact: Arc<BlsArtifact>,
     schema: DurableSchema,
     names: Arc<[Arc<str>]>,
-    /// The tick the tables cover, for the committer's truncation.
+    /// The first tick the tables do not cover (every tick below it is in them), for the committer's truncation.
     flushed: Arc<AtomicU64>,
-    /// Asks the database thread to flush (dropped when the database goes, which ends the thread).
-    work: Mutex<Option<Sender<()>>>,
+    /// Asks the database thread to flush (closed when the database closes, which ends the thread).
+    work: Arc<Mutex<Option<Sender<()>>>>,
 }
 
 impl Database {
@@ -57,14 +86,25 @@ impl Database {
         opts: LsmOptions,
     ) -> Result<(Database, bool), RuntimeError> {
         let db_dir = dir.join("db");
-        let fresh = !fs.list(dir).map_err(store_error)?.iter().any(|p| p == &db_dir)
-            || !fs
-                .list(&db_dir)
-                .map_err(store_error)?
-                .iter()
-                .any(|p| p.file_name().is_some_and(|n| n == "MANIFEST"));
-        let lsm = Lsm::open(fs, &db_dir, opts).map_err(store_error)?;
-        let flushed = Arc::new(AtomicU64::new(lsm.flushed().map_err(store_error)?.version));
+        let fresh = match blossom_store::lsm::manifest_format(&*fs, &db_dir).map_err(store_error)? {
+            None => true,
+            Some(KEY_FORMAT) => false,
+            // Keys of another format: the tree goes, and the database starts again from the recovered rows.
+            Some(_) => {
+                clear(&*fs, &db_dir)?;
+                true
+            }
+        };
+        let lsm = Lsm::open(
+            fs,
+            &db_dir,
+            LsmOptions {
+                format: KEY_FORMAT,
+                ..opts
+            },
+        )
+        .map_err(store_error)?;
+        let flushed = Arc::new(AtomicU64::new(watermark(lsm.flushed().map_err(store_error)?.version)));
         let schema = DurableSchema::of(artifact.program.get());
         Ok((
             Database {
@@ -73,7 +113,7 @@ impl Database {
                 schema,
                 names,
                 flushed,
-                work: Mutex::new(None),
+                work: Arc::new(Mutex::new(None)),
             },
             fresh,
         ))
@@ -103,22 +143,36 @@ impl Database {
             .map_err(store_error)?
             .identity
             .store_uuid;
-        let lsm = Lsm::open_read_only(fs.clone(), &dir.join("db"), LsmOptions::default()).map_err(store_error)?;
-        let flushed = Arc::new(AtomicU64::new(lsm.flushed().map_err(store_error)?.version));
+        let db_dir = dir.join("db");
+        if blossom_store::lsm::manifest_format(&*fs, &db_dir).map_err(store_error)? != Some(KEY_FORMAT) {
+            return Err(RuntimeError::Config(
+                "the store has no database of this build's format: start the node once to (re)build it".into(),
+            ));
+        }
+        let lsm = Lsm::open_read_only(
+            fs.clone(),
+            &db_dir,
+            LsmOptions {
+                format: KEY_FORMAT,
+                ..LsmOptions::default()
+            },
+        )
+        .map_err(store_error)?;
+        let flushed = Arc::new(AtomicU64::new(watermark(lsm.flushed().map_err(store_error)?.version)));
         let db = Database {
             lsm: Arc::new(lsm),
             schema: DurableSchema::of(artifact.program.get()),
             artifact,
             names,
             flushed,
-            work: Mutex::new(None),
+            work: Arc::new(Mutex::new(None)),
         };
         let scan = blossom_store::WalScan::scan(&*fs, &blossom_node::recovery::wal_dir(dir), uuid, false)
             .map_err(store_error)?;
         let codec = db.codec();
         let after = db.lsm.flushed().map_err(store_error)?.version;
         for (lsn, rec) in scan.records() {
-            if rec.tick <= after {
+            if after.is_some_and(|a| rec.tick <= a) {
                 continue;
             }
             let payload = match rec.kind {
@@ -141,9 +195,23 @@ impl Database {
         DurableCodec::new(self.artifact.program.get(), &self.schema, self.names.clone())
     }
 
-    /// The tick the tables cover (shared with the committer).
+    /// The first tick the tables do not cover (shared with the committer).
     pub fn flushed_tick(&self) -> Arc<AtomicU64> {
         self.flushed.clone()
+    }
+
+    /// Asks the database thread for a flush (a no-op before it starts and after it closes): the committer asks when a
+    /// truncation waits on the database.
+    pub fn flush_request(&self) -> Box<dyn Fn() + Send> {
+        let work = self.work.clone();
+        Box::new(move || {
+            if let Ok(w) = work.lock()
+                && let Some(tx) = w.as_ref()
+            {
+                // The thread is gone only when the node stops.
+                let _ = tx.send(());
+            }
+        })
     }
 
     /// Brings the database up to the recovered store: the WAL records after what its tables hold (`wal`, in order),
@@ -157,18 +225,23 @@ impl Database {
     ) -> Result<(), RuntimeError> {
         let codec = self.codec();
         let last = wal.last().map(|(_, t, _)| *t).max(checkpoint_tick);
-        if fresh && let Some(last) = last {
-            let mut changes = Vec::new();
-            for (rel, rows) in &image.rows {
-                for row in rows {
-                    changes.push((codec.row_key(*rel, row)?, Op::Put));
+        if fresh {
+            if let Some(last) = last {
+                let mut changes = Vec::new();
+                for (rel, rows) in &image.rows {
+                    for row in rows {
+                        changes.push((codec.row_key(*rel, row)?, Op::Put));
+                    }
                 }
+                self.lsm.apply(last, last, changes).map_err(store_error)?;
+                // The database knows nothing of the ticks before: an as-of read of one is refused, not answered
+                // empty.
+                self.lsm.raise_floor(last).map_err(store_error)?;
             }
-            self.lsm.apply(last, last, changes).map_err(store_error)?;
             return Ok(());
         }
         let flushed = self.lsm.flushed().map_err(store_error)?.version;
-        for (_, tick, delta) in wal.iter().filter(|(_, t, _)| *t > flushed) {
+        for (_, tick, delta) in wal.iter().filter(|(_, t, _)| flushed.is_none_or(|f| *t > f)) {
             self.apply_with(&codec, *tick, delta)?;
         }
         Ok(())
@@ -250,8 +323,8 @@ impl Database {
         self.lsm.apply(tick, tick, changes).map_err(store_error)
     }
 
-    /// The newest tick applied, and the oldest an as-of read may ask for.
-    pub fn range(&self) -> Result<(u64, u64), RuntimeError> {
+    /// The oldest tick an as-of read may ask for, and the newest applied (`None`: none yet).
+    pub fn range(&self) -> Result<(u64, Option<u64>), RuntimeError> {
         Ok((
             self.lsm.floor().map_err(store_error)?,
             self.lsm.applied().map_err(store_error)?,
@@ -264,11 +337,26 @@ impl Database {
         let prefix = codec.key_prefix(rel, leading)?;
         let mut out = Vec::new();
         for key in self.lsm.scan(&prefix, tick).map_err(store_error)? {
-            let row = codec.key_row(rel, &key)?;
-            // The prefix may cover fewer leading columns than asked (field numbers reorder the encoding).
-            if row.iter().zip(leading).all(|(a, b)| a == b) {
-                out.push(row);
-            }
+            out.push(codec.key_row(rel, &key)?);
+        }
+        Ok(out)
+    }
+
+    /// The rows of `rel` whose leading columns are `leading` and whose next column lies within `lo` and `hi`, as of
+    /// `tick`: a range scan, in key (value) order.
+    pub fn rows_range(
+        &self,
+        rel: RelId,
+        leading: &[blossom_value::Value],
+        lo: std::ops::Bound<&blossom_value::Value>,
+        hi: std::ops::Bound<&blossom_value::Value>,
+        tick: u64,
+    ) -> Result<Vec<Row>, RuntimeError> {
+        let codec = self.codec();
+        let (start, end) = codec.key_range(rel, leading, lo, hi)?;
+        let mut out = Vec::new();
+        for key in self.lsm.scan_range(&start, end.as_deref(), tick).map_err(store_error)? {
+            out.push(codec.key_row(rel, &key)?);
         }
         Ok(out)
     }
