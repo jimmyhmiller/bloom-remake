@@ -343,7 +343,7 @@ fn raft_kv_is_safe_on_five_nodes_with_downtime() {
 /// The term node `n` leads, if it is a leader.
 #[cfg(test)]
 fn leads(c: &Cluster, safety: &RaftSafety, n: NodeId) -> Option<u64> {
-    let state = c.state(n)?;
+    let state = c.state(n).unwrap()?;
     let term = state.rows(safety.current_term).map(|r| u64_at(r, 0)).max()?;
     state.rows(safety.won).any(|r| u64_at(r, 0) == term).then_some(term)
 }
@@ -366,7 +366,7 @@ fn await_leader(c: &mut Cluster, safety: &RaftSafety, among: &[NodeId], above: u
     }
     let states: Vec<String> = (0..3)
         .map(|n| {
-            let st = c.state(NodeId(n));
+            let st = c.state(NodeId(n)).unwrap();
             let st = st.as_ref();
             let term = st.and_then(|s| s.rows(safety.current_term).map(|r| u64_at(r, 0)).max());
             let last = st.and_then(|s| s.rows(safety.log).map(|r| (u64_at(r, 0), u64_at(r, 1))).max());
@@ -400,6 +400,7 @@ fn write_through(c: &mut Cluster, to: NodeId, d: i64) {
 #[cfg(test)]
 fn last_entry(c: &Cluster, safety: &RaftSafety, n: NodeId) -> (u64, u64) {
     c.state(n)
+        .unwrap()
         .and_then(|s| s.rows(safety.log).map(|r| (u64_at(r, 1), u64_at(r, 0))).max())
         .unwrap_or((0, 0))
 }
@@ -667,7 +668,7 @@ fn a_new_leaders_first_append_is_a_burst() {
             // Every client sends to the new leader at the same instant.
             write_through(&mut c, l, 1_500_000);
             wait(&mut c, 400_000_000);
-            let st = c.state(l).unwrap();
+            let st = c.state(l).unwrap().unwrap();
             if st.rows(safety.log).filter(|r| u64_at(r, 1) == t).count() >= 2 {
                 bursts += 1;
             }

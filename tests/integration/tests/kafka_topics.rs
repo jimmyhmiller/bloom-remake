@@ -935,6 +935,7 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
             had = cluster
                 .state(stopped)
                 .unwrap()
+                .unwrap()
                 .rows(rel("rlog"))
                 .filter(|r| r[0] == ctl)
                 .map(|r| int(&r[1]))
@@ -947,6 +948,7 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
             for n in (0..setup.brokers - 1).map(NodeId) {
                 let point = cluster
                     .state(n)
+                    .unwrap()
                     .unwrap_or_else(|| panic!("seed {seed}: broker {n:?} is down"))
                     .rows(rel("rsnap"))
                     .find(|r| r[0] == ctl)
@@ -996,6 +998,7 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
         let rows = |n: u32, rel: &str| -> Vec<Vec<Value>> {
             let state = cluster
                 .state(NodeId(n))
+                .unwrap()
                 .unwrap_or_else(|| panic!("seed {seed}: broker {n} is down"));
             let mut rs: Vec<Vec<Value>> = state
                 .rows(artifact.rel_named(rel).unwrap())

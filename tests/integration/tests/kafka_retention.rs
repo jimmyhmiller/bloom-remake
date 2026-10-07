@@ -507,7 +507,7 @@ fn retention_deletes_whole_segments_from_the_front() {
             );
         }
         // Nothing is left below the log starts.
-        let state = cluster.state(NodeId(0)).expect("the broker is up");
+        let state = cluster.state(NodeId(0)).unwrap().expect("the broker is up");
         let tids: Vec<Value> = TOPICS
             .iter()
             .map(|n| {

@@ -564,11 +564,16 @@ impl<'p> Cluster<'p> {
     }
 
     /// Node `n`'s carried state, or `None` while it is down (O(state)).
-    pub fn state(&self, n: NodeId) -> Option<Instance> {
+    pub fn state(&self, n: NodeId) -> Result<Option<Instance>, SimError> {
         self.nodes
             .get(n.0 as usize)
             .and_then(|s| s.driver.as_ref())
-            .map(|d| d.node.carried())
+            .map(|d| {
+                d.node
+                    .carried()
+                    .map_err(|e| SimError::Internal(internal_error!("node {}'s state: {e}", n.0)))
+            })
+            .transpose()
     }
 
     /// Partitions the network into `groups`: messages cross no group boundary (a node in no group is isolated).
@@ -736,8 +741,9 @@ impl<'p> Cluster<'p> {
         let owned: Vec<Option<Instance>> = self
             .nodes
             .iter()
-            .map(|s| s.driver.as_ref().map(|d| d.node.carried()))
-            .collect();
+            .map(|s| s.driver.as_ref().map(|d| d.node.carried()).transpose())
+            .collect::<Result<_, _>>()
+            .map_err(|e| SimError::Internal(internal_error!("a node's state: {e}")))?;
         let states: Vec<Option<&Instance>> = owned.iter().map(Option::as_ref).collect();
         let mut violation = None;
         for o in &mut self.observers {
@@ -835,10 +841,18 @@ impl<'p> Cluster<'p> {
             // state at every tick. The run stops with the relations the last tick changed.
             at_once += 1;
             if at_once == LIVELOCK_TICKS {
-                watched = Some(driver.node.carried());
+                watched = Some(
+                    driver
+                        .node
+                        .carried()
+                        .map_err(|e| node_failure(n, driver.node.next_tick(), e))?,
+                );
             }
             if at_once > LIVELOCK_TICKS {
-                let now_state = driver.node.carried();
+                let now_state = driver
+                    .node
+                    .carried()
+                    .map_err(|e| node_failure(n, driver.node.next_tick(), e))?;
                 let p = self.artifact.program.get();
                 let name = |r: &RelId| p.rels.get(*r).map_or_else(|| format!("{r:?}"), |d| d.name.to_string());
                 let before = watched.take().unwrap_or_default();

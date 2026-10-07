@@ -1361,6 +1361,7 @@ fn check_runs(setup: &Setup) -> Totals {
             .map(|n| {
                 cluster
                     .state(*n)
+                    .unwrap()
                     .unwrap_or_else(|| panic!("{}", fail(&cluster, &format!("broker {n:?} is down"))))
             })
             .collect();
@@ -1730,7 +1731,7 @@ fn a_follower_behind_its_leaders_log_start_catches_up_from_a_snapshot() {
             _ => None,
         };
         let mut held: BTreeMap<Value, i64> = BTreeMap::new();
-        for r in cluster.state(lagging).unwrap().rows(rel("rlog")) {
+        for r in cluster.state(lagging).unwrap().unwrap().rows(rel("rlog")) {
             if let Some(g) = group_of(r) {
                 let e = held.entry(g).or_insert(0);
                 *e = (*e).max(int(&r[1]));
@@ -1750,6 +1751,7 @@ fn a_follower_behind_its_leaders_log_start_catches_up_from_a_snapshot() {
         for (k, n) in survivors.iter().enumerate() {
             let points: BTreeMap<Value, i64> = cluster
                 .state(*n)
+                .unwrap()
                 .unwrap()
                 .rows(rel("rsnap"))
                 .map(|r| (r[0].clone(), int(&r[1])))
@@ -1795,7 +1797,7 @@ fn a_follower_behind_its_leaders_log_start_catches_up_from_a_snapshot() {
                 &format!("the producers sent {} of 240", shared.borrow().sent.len())
             )
         );
-        let states: Vec<_> = brokers.values().map(|n| cluster.state(*n).unwrap()).collect();
+        let states: Vec<_> = brokers.values().map(|n| cluster.state(*n).unwrap().unwrap()).collect();
         let tid = states[0]
             .rows(rel("mtopic"))
             .find(|r| r[0] == Value::Str(TOPIC.into()))
@@ -2265,21 +2267,21 @@ fn reassignments_replaced_cancelled_or_deleted_settle() {
                 fail(&cluster, cluster.violation().unwrap_or(""))
             );
             let at = *done.borrow();
-            if at == doomed_move && !b5_down && cluster.state(brokers[4]).is_some() {
+            if at == doomed_move && !b5_down && cluster.state(brokers[4]).unwrap().is_some() {
                 cluster.crash(brokers[4], CrashWrites::Random).unwrap();
                 b5_down = true;
             }
-            if at > doomed_delete && b5_down && cluster.state(brokers[4]).is_none() {
+            if at > doomed_delete && b5_down && cluster.state(brokers[4]).unwrap().is_none() {
                 cluster.restart(brokers[4]).unwrap();
             }
         }
         assert_eq!(*done.borrow(), total, "{}", fail(&cluster, "the script did not finish"));
-        if cluster.state(brokers[4]).is_none() {
+        if cluster.state(brokers[4]).unwrap().is_none() {
             cluster.restart(brokers[4]).unwrap();
         }
         cluster.step_until(20_000_000_000).unwrap();
         for n in &brokers {
-            let s = cluster.state(*n).unwrap();
+            let s = cluster.state(*n).unwrap().unwrap();
             assert_eq!(
                 s.rows(rel("mreassign")).count(),
                 0,
@@ -2424,6 +2426,7 @@ fn a_restarted_broker_learns_every_partitions_leader_again() {
         let ids: Vec<Value> = cluster
             .state(NodeId(0))
             .unwrap()
+            .unwrap()
             .rows(rel("mtopic"))
             .filter(|r| topics.iter().any(|t| r[0] == Value::Str((*t).into())))
             .map(|r| r[1].clone())
@@ -2431,6 +2434,7 @@ fn a_restarted_broker_learns_every_partitions_leader_again() {
         assert_eq!(ids.len(), topics.len(), "{}", fail(&cluster, "a topic is missing"));
         let views: Vec<Vec<Value>> = cluster
             .state(restarted)
+            .unwrap()
             .unwrap()
             .rows(rel("leader_view"))
             .map(|r| r.to_vec())
@@ -2444,6 +2448,7 @@ fn a_restarted_broker_learns_every_partitions_leader_again() {
                     .filter_map(|n| {
                         cluster
                             .state(n)
+                            .unwrap()
                             .unwrap()
                             .rows(rel("won"))
                             .filter(|r| r[0] == g)
@@ -2508,6 +2513,7 @@ fn late_copies(slow: bool) {
         cluster
             .state(n)
             .unwrap()
+            .unwrap()
             .rows(rel("mtopic"))
             .any(|r| r[0] == Value::Str(topic.into()))
     };
@@ -2535,6 +2541,7 @@ fn late_copies(slow: bool) {
         // The controller's leader (the newest term's), the broker cut from it, and the third.
         let leader = cluster
             .state(NodeId(0))
+            .unwrap()
             .unwrap()
             .rows(rel("leader_of"))
             .filter(|r| r[0] == ctl)
@@ -2607,6 +2614,7 @@ fn late_copies(slow: bool) {
             }
             let point = cluster
                 .state(origin)
+                .unwrap()
                 .unwrap()
                 .rows(rel("rsnap"))
                 .find(|r| r[0] == ctl)

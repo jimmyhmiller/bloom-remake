@@ -854,7 +854,11 @@ impl App {
             None => {
                 for (id, r) in program.rels.iter_enumerated() {
                     if r.durable {
-                        for row in self.engine.carried_rows(id) {
+                        let rows = self
+                            .engine
+                            .carried_rows(id)
+                            .map_err(|e| HostError::Store(e.to_string()))?;
+                        for row in rows {
                             out.put.push((name(id), store::row_json(&row)?));
                         }
                     }
@@ -877,7 +881,11 @@ impl App {
 
     /// The durable tables, as JSON (for `localStorage`).
     pub fn saved(&self) -> Result<String, HostError> {
-        store::save(self.compiled.artifact.program.get(), &self.engine.carried_instance())
+        let carried = self
+            .engine
+            .carried_instance()
+            .map_err(|e| HostError::Store(e.to_string()))?;
+        store::save(self.compiled.artifact.program.get(), &carried)
     }
 
     /// The page the last round left.

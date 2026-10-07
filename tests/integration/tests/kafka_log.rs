@@ -486,7 +486,7 @@ fn both_clients_see_one_log_and_every_acknowledged_record_once() {
         assert!(writer.borrow().done, "seed {seed}: the Rust client did not finish");
         // Settle without faults until the Blossom client is done, then read the final log.
         cluster.step_until(6_000_000_000).unwrap();
-        let state = cluster.state(NodeId(1)).expect("the client node is up");
+        let state = cluster.state(NodeId(1)).unwrap().expect("the client node is up");
         assert!(
             state.rows(rel("read_done")).next().is_some(),
             "seed {seed}: the Blossom client did not finish reading"
