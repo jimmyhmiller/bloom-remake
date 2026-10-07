@@ -27,6 +27,7 @@
 //! [storage]
 //! data_dir = "data"               # each node's store is <data_dir>/<node name>, relative to this file
 //! checkpoint_wal_bytes = 67108864
+//! history_ticks = 65536             # how far back a database query may read (docs/design/DATABASE.md §4)
 //! tail_certification = "strict"   # or "crc": one fsync per group commit, as etcd (see blossom_store::Certification)
 //!
 //! [stream_limits]                 # optional, in bytes (FOREIGN-PROTOCOLS §1.2; defaults in streams::StreamLimits)
@@ -120,6 +121,7 @@ struct RawSecurity {
 struct RawStorage {
     data_dir: PathBuf,
     checkpoint_wal_bytes: Option<u64>,
+    history_ticks: Option<u64>,
     tail_certification: Option<String>,
 }
 
@@ -171,6 +173,8 @@ pub struct DeploymentSpec {
     pub security: SecurityMode,
     pub data_dir: PathBuf,
     pub checkpoint_wal_bytes: u64,
+    /// How many ticks back a query of the node's database may read (docs/design/DATABASE.md §4).
+    pub history_ticks: u64,
     /// The byte limits of the nodes' streams (`[stream_limits]`).
     pub stream_limits: crate::streams::StreamLimits,
     /// How new stores certify their WAL tail (an existing store keeps the one it was created with, and must match).
@@ -302,6 +306,7 @@ impl DeploymentSpec {
             security,
             data_dir: resolve(raw.storage.data_dir),
             checkpoint_wal_bytes: raw.storage.checkpoint_wal_bytes.unwrap_or(256 * 1024 * 1024),
+            history_ticks: raw.storage.history_ticks.unwrap_or(65_536),
             tail_certification,
             stream_limits,
         })

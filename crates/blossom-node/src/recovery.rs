@@ -135,6 +135,9 @@ pub struct Opened {
     pub checkpoint: Option<CheckpointId>,
     /// How many WAL records recovery replayed.
     pub replayed: usize,
+    /// Every WAL record's position, tick and durable delta, in order, those the checkpoint covers included: the node's database
+    /// applies the ones after what it holds (docs/design/DATABASE.md §4).
+    pub wal_deltas: Vec<(Lsn, u64, crate::durable::Delta)>,
     /// The node's durable blobs (FOREIGN-PROTOCOLS §5).
     pub blobs: Arc<blossom_store::BlobStore>,
 }
@@ -283,6 +286,7 @@ pub fn open(
     let mut last_now = record.last_now;
     let mut last_tick: Option<u64> = checkpoint.map(|c| c.tick);
     let mut replayed = 0;
+    let mut wal_deltas = Vec::new();
     for (lsn, rec) in scan.records() {
         let delta = match rec.kind {
             KIND_DELTA => rec.payload.as_slice(),
@@ -300,6 +304,8 @@ pub fn open(
                 )));
             }
         };
+        let decoded = codec.decode_delta(delta)?;
+        wal_deltas.push((*lsn, rec.tick, decoded.clone()));
         if checkpoint.is_some_and(|c| *lsn < c.lsn) {
             continue;
         }
@@ -311,7 +317,7 @@ pub fn open(
                 last_tick.unwrap_or_default()
             )));
         }
-        image.apply(&codec.decode_delta(delta)?);
+        image.apply(&decoded);
         last_tick = Some(rec.tick);
         last_now = last_now.max(rec.now);
         replayed += 1;
@@ -414,6 +420,7 @@ pub fn open(
         lock,
         checkpoint,
         replayed,
+        wal_deltas,
         blobs,
     })
 }
