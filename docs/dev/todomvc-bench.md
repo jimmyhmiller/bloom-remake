@@ -13,6 +13,11 @@ plus the work until the next frame. The suites:
 
 `tests/web/bench/todomvc.mjs` drives it in headless Chromium and prints the table; `--json FILE` keeps every metric.
 
+## After S19 (2026-10-06)
+
+Tick-scoped relations, hashed supports and incremental saving (docs/plan/notes/S19.md): Blossom about 40–49 ms
+(the machine's load moves it; React 22–23 in the same runs), with saving 45 ms (was 64); natively 17–18 ms.
+
 ## Results after S18 (2026-10-06): 52.8 ms
 
 Same machine and method, 10 iterations, mean ms per iteration:
