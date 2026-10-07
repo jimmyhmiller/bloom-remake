@@ -120,8 +120,8 @@ impl Store {
     /// The stored rows of the released (durable) image: chunk and blob.
     fn stored(&self, d: &ManualDriver<'_, Box<dyn Executor>>) -> Vec<(Vec<u8>, BlobRef)> {
         let rel = self.artifact.rel_named("stored").unwrap();
-        d.node
-            .released_image()
+        d.released_image()
+            .unwrap()
             .rows
             .get(&rel)
             .into_iter()

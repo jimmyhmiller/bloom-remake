@@ -382,7 +382,7 @@ pub(crate) struct MemberLinks {
 /// What the engine needs from the node and its counters while handling member events.
 pub(crate) trait Host {
     /// Offers a delivery to the node; its message number, or `None` when the ACL refused it.
-    fn offer(&mut self, from: NodeId, role: RoleId, rel: RelId, row: Row) -> Option<u64>;
+    fn offer(&mut self, from: NodeId, role: RoleId, rel: RelId, row: Row) -> Result<Option<u64>, RuntimeError>;
     /// Offers a link event, an input of the node's next tick.
     fn event(&mut self, rel: RelId, row: Row);
     fn me(&self) -> NodeId;
@@ -422,7 +422,7 @@ impl MemberLinks {
         }
     }
 
-    pub(crate) fn handle(&mut self, e: MemberEvent, host: &mut dyn Host) {
+    pub(crate) fn handle(&mut self, e: MemberEvent, host: &mut dyn Host) -> Result<(), RuntimeError> {
         match e {
             MemberEvent::Open {
                 member,
@@ -456,7 +456,7 @@ impl MemberLinks {
                         rows: Vec::new(),
                     },
                     host,
-                );
+                )?;
             }
             MemberEvent::Msg {
                 member,
@@ -466,10 +466,12 @@ impl MemberLinks {
                 rows,
             } => {
                 let me = host.me();
-                let Some(m) = self.members.get_mut(&member) else { return };
+                let Some(m) = self.members.get_mut(&member) else {
+                    return Ok(());
+                };
                 if m.conn.as_ref().is_none_or(|c| c.id != conn) {
                     // A message on a connection that was replaced: the member resends it on the new one.
-                    return;
+                    return Ok(());
                 }
                 if seq <= m.in_floor {
                     m.pending.push_back((None, seq));
@@ -481,7 +483,7 @@ impl MemberLinks {
                             host.dropped_unroutable(1);
                             continue;
                         }
-                        if let Some(n) = host.offer(member, m.role, rel, row) {
+                        if let Some(n) = host.offer(member, m.role, rel, row)? {
                             last = Some(n);
                         }
                     }
@@ -490,7 +492,9 @@ impl MemberLinks {
                 self.acknowledge(host);
             }
             MemberEvent::Ack { member, conn, seq } => {
-                let Some(m) = self.members.get_mut(&member) else { return };
+                let Some(m) = self.members.get_mut(&member) else {
+                    return Ok(());
+                };
                 if m.conn.as_ref().is_some_and(|c| c.id == conn) {
                     while m.replay.front().is_some_and(|(s, _)| *s <= seq) {
                         if let Some((_, f)) = m.replay.pop_front() {
@@ -500,12 +504,15 @@ impl MemberLinks {
                 }
             }
             MemberEvent::Closed { member, conn } => {
-                let Some(m) = self.members.get_mut(&member) else { return };
+                let Some(m) = self.members.get_mut(&member) else {
+                    return Ok(());
+                };
                 if m.conn.as_ref().is_some_and(|c| c.id == conn) {
                     drop_link(member, m, &self.links, host);
                 }
             }
         }
+        Ok(())
     }
 
     /// A member's new connection, `(received, acked)` its view of the link.

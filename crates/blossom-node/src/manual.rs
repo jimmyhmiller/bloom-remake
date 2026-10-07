@@ -46,6 +46,23 @@ impl<'p, E: Executor> ManualDriver<'p, E> {
         &self.opened.database
     }
 
+    /// The released durable rows (the database's, as of the newest released tick).
+    pub fn released_image(&self) -> Result<crate::durable::DurableImage, NodeError> {
+        self.opened.database.latest_image()
+    }
+
+    /// Admission by ACL ([`Node::admits`]), the committed rows of durable tables read from the database.
+    pub fn admits(
+        &self,
+        acl: &crate::acl::AclTable,
+        facts: &blossom_ir::tick::Instance,
+        rel: blossom_base::RelId,
+        source: crate::acl::Source<'_>,
+    ) -> Result<bool, NodeError> {
+        let db = &self.opened.database;
+        self.node.admits(acl, facts, rel, source, &|r, p| db.committed(r, p))
+    }
+
     /// Runs ticks while the node is ready at `now`, making each durable before the next. Returns the released ticks.
     pub fn run_until_quiescent(&mut self, now: Instant) -> Result<Vec<ReleasedTick>, NodeError> {
         let mut out = Vec::new();

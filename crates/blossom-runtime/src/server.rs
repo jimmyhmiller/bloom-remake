@@ -1223,6 +1223,7 @@ fn session(stream: TcpStream, ctx: &Accept) -> Result<(), RuntimeError> {
 /// The node and counters as a member link sees them.
 struct MemberHost<'a> {
     node: &'a mut Node<Box<dyn Executor>>,
+    db: &'a crate::db::Database,
     acl: &'a AclTable,
     oracle: &'a Arc<Oracle>,
     stats: &'a Stats,
@@ -1232,17 +1233,23 @@ struct MemberHost<'a> {
 }
 
 impl Host for MemberHost<'_> {
-    fn offer(&mut self, from: NodeId, role: RoleId, rel: RelId, row: Row) -> Option<u64> {
+    fn offer(&mut self, from: NodeId, role: RoleId, rel: RelId, row: Row) -> Result<Option<u64>, RuntimeError> {
         let source = Source::Node {
             role: Some(role),
             principal: "",
         };
-        if !self.node.admits(self.acl, self.oracle.static_facts(), rel, source) {
+        let db = self.db;
+        if !self
+            .node
+            .admits(self.acl, self.oracle.static_facts(), rel, source, &|r, p| {
+                db.committed(r, p)
+            })?
+        {
             bump(&self.stats.rejected_acl, 1);
-            return None;
+            return Ok(None);
         }
         bump(&self.stats.delivered, 1);
-        Some(self.node.offer_delivery(Delivery { rel, from, row }))
+        Ok(Some(self.node.offer_delivery(Delivery { rel, from, row })))
     }
 
     fn event(&mut self, rel: RelId, row: Row) {
@@ -1497,7 +1504,7 @@ impl Engine {
                     role: self.roles.get(from.0 as usize).copied().flatten(),
                     principal: &principal,
                 };
-                if self.admit(rel, source) {
+                if self.admit(rel, source)? {
                     bump(&self.stats.delivered, 1);
                     self.node.offer_delivery(Delivery { rel, from, row });
                 }
@@ -1508,7 +1515,7 @@ impl Engine {
                 rel,
                 row,
             } => {
-                if self.admit(rel, Source::Session { principal: &principal }) {
+                if self.admit(rel, Source::Session { principal: &principal })? {
                     bump(&self.stats.ingress, 1);
                     self.node.offer_ingress(Ingress { rel, session, row });
                 }
@@ -1519,6 +1526,7 @@ impl Engine {
                 }
                 let mut host = MemberHost {
                     node: &mut self.node,
+                    db: &self.db,
                     acl: &self.acl,
                     oracle: &self.oracle,
                     stats: &self.stats,
@@ -1526,7 +1534,7 @@ impl Engine {
                     names: &self.names,
                     seed: self.seed,
                 };
-                self.members.handle(e, &mut host);
+                self.members.handle(e, &mut host)?;
             }
         }
         Ok(())
@@ -1568,13 +1576,19 @@ impl Engine {
         Ok(None)
     }
 
-    /// Admission by ACL (the node reads the committed rows `principal in REL` needs), counting rejections.
-    fn admit(&self, rel: RelId, source: Source<'_>) -> bool {
-        let admitted = self.node.admits(&self.acl, self.oracle.static_facts(), rel, source);
+    /// Admission by ACL (the node reads the committed rows `principal in REL` needs, a durable table's from the
+    /// database), counting rejections.
+    fn admit(&self, rel: RelId, source: Source<'_>) -> Result<bool, RuntimeError> {
+        let db = &self.db;
+        let admitted = self
+            .node
+            .admits(&self.acl, self.oracle.static_facts(), rel, source, &|r, p| {
+                db.committed(r, p)
+            })?;
         if !admitted {
             bump(&self.stats.rejected_acl, 1);
         }
-        admitted
+        Ok(admitted)
     }
 
     /// Sends a released tick's frames: to peers merged per (destination, channel), to sessions per (session,
@@ -1635,6 +1649,7 @@ impl Engine {
                 bump(&self.stats.dropped_oversized, oversized);
                 let mut host = MemberHost {
                     node: &mut self.node,
+                    db: &self.db,
                     acl: &self.acl,
                     oracle: &self.oracle,
                     stats: &self.stats,
@@ -1649,6 +1664,7 @@ impl Engine {
             // The messages this tick took are durable now: their members' batches are acknowledged.
             let mut host = MemberHost {
                 node: &mut self.node,
+                db: &self.db,
                 acl: &self.acl,
                 oracle: &self.oracle,
                 stats: &self.stats,

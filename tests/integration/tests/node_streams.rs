@@ -105,8 +105,8 @@ impl Store {
     /// The recorded chunks in the released (durable) image.
     fn seen(&self, d: &ManualDriver<'_, Box<dyn Executor>>) -> Vec<Vec<u8>> {
         let rel = self.artifact.rel_named("seen").unwrap();
-        d.node
-            .released_image()
+        d.released_image()
+            .unwrap()
             .rows
             .get(&rel)
             .into_iter()
