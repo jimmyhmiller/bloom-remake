@@ -231,6 +231,24 @@ impl Database {
         Ok(out)
     }
 
+    /// Whether `rel` holds a row led by `principal` as of the newest tick applied (an ACL's `principal in REL`, read
+    /// by prefix).
+    pub fn committed(&self, rel: RelId, principal: &str) -> Result<bool, NodeError> {
+        let Some(tick) = self.lsm.applied()? else {
+            return Ok(false);
+        };
+        let lead = [blossom_value::Value::Principal(Arc::from(principal))];
+        Ok(!self.rows(rel, &lead, tick)?.is_empty())
+    }
+
+    /// Every durable relation's rows as of the newest tick applied (none applied: none).
+    pub fn latest_image(&self) -> Result<DurableImage, NodeError> {
+        match self.lsm.applied()? {
+            Some(t) => self.image(t),
+            None => Ok(DurableImage::default()),
+        }
+    }
+
     /// Every durable relation's rows as of `tick`.
     pub fn image(&self, tick: u64) -> Result<DurableImage, NodeError> {
         let mut image = DurableImage::default();

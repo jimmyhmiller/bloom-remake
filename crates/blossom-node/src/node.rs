@@ -194,8 +194,8 @@ pub struct Node<E: Executor> {
     staged: bool,
     /// The durable rows after the last computed tick.
     image: DurableImage,
-    /// The durable rows after the last released tick: what a checkpoint at the synced frontier holds.
-    released_image: DurableImage,
+    /// The program's durable relations: their committed rows are the database's (the driver reads them).
+    durable: BTreeSet<RelId>,
     timers: TimerTable,
     inbox: VecDeque<Message>,
     /// The messages offered and taken so far in this incarnation (`ReleasedTick::taken`).
@@ -359,7 +359,7 @@ impl<E: Executor> Node<E> {
             store_blobs: boot.blobs.clone(),
             durable_blobs: boot.stored,
             timers: TimerTable::new(p, cfg.role, boot.now)?,
-            released_image: boot.image.clone(),
+            durable: schema.rels.iter().map(|(r, _, _)| *r).collect(),
             image: boot.image,
             exec,
             cfg,
@@ -410,12 +410,6 @@ impl<E: Executor> Node<E> {
         self.tick
     }
 
-    /// The durable rows after the last released tick. Every tick up to [`Node::released_tick`] is released, so
-    /// every WAL record up to it is synced: a checkpoint of this image covers the synced frontier.
-    pub fn released_image(&self) -> &DurableImage {
-        &self.released_image
-    }
-
     pub fn released_tick(&self) -> Option<Tick> {
         self.released
     }
@@ -448,24 +442,35 @@ impl<E: Executor> Node<E> {
 
     /// Admission by ACL (ARCHITECTURE §5.8): whether a message on `rel` from `source` is admitted. `principal in REL`
     /// reads REL's committed rows: the deployment's static rows, the program's facts (`facts`, the evaluator's
-    /// static rows), the rows at the last released tick for a durable table, or else those at the last computed tick.
+    /// static rows), for a durable table the rows at the last released tick (`committed(REL, principal)`: whether the
+    /// node's database holds a row of REL led by the principal), or else the rows at the last computed tick.
     pub fn admits(
         &self,
         acl: &crate::acl::AclTable,
         facts: &Instance,
         rel: RelId,
         source: crate::acl::Source<'_>,
-    ) -> bool {
+        committed: &dyn Fn(RelId, &str) -> Result<bool, NodeError>,
+    ) -> Result<bool, NodeError> {
+        let failed = std::cell::RefCell::new(None);
         let principal_in = |r: RelId, p: &str| {
             let is = |row: &Row| matches!(row.first(), Some(blossom_value::Value::Principal(x)) if &**x == p);
             self.cfg.statics.iter().any(|(sr, row)| *sr == r && is(row))
                 || facts.rows(r).any(is)
-                || match self.released_image.rows.get(&r) {
-                    Some(rows) => rows.iter().any(is),
-                    None => self.exec.carried_rows(r).iter().any(is),
+                || if self.durable.contains(&r) {
+                    committed(r, p).unwrap_or_else(|e| {
+                        failed.borrow_mut().get_or_insert(e);
+                        false
+                    })
+                } else {
+                    self.exec.carried_rows(r).iter().any(is)
                 }
         };
-        acl.admit(rel, source, &principal_in).is_ok()
+        let admitted = acl.admit(rel, source, &principal_in).is_ok();
+        match failed.into_inner() {
+            Some(e) => Err(e),
+            None => Ok(admitted),
+        }
     }
 
     /// A channel tuple from a peer, already admitted. Returns its number among the messages offered to this
@@ -783,7 +788,7 @@ impl<E: Executor> Node<E> {
         self.cache_trim_at = kept.saturating_mul(2).max(self.cfg.blob_cache_bytes);
     }
 
-    /// The candidate blobs [`Node::released_image`] does not hold: the ones a database flush of it may let go. Taken
+    /// The candidate blobs the released durable rows do not hold: the ones a database flush of them may let go. Taken
     /// when the flush is asked for (every released tick applied to the database); its work is the candidates', not the
     /// image's.
     pub fn collection_candidates(&self) -> BTreeSet<blossom_value::BlobRef> {
@@ -860,7 +865,6 @@ impl<E: Executor> Node<E> {
             let Some(p) = self.parked.pop_front() else {
                 break;
             };
-            self.released_image.apply(&p.delta);
             for (inserted, deleted) in p.delta.changes.values() {
                 count_blobs(&mut self.released_refs, inserted, true)?;
                 count_blobs(&mut self.released_refs, deleted, false)?;

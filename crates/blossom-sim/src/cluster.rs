@@ -938,15 +938,18 @@ impl<'p> Cluster<'p> {
                     self.run.dropped += 1;
                     return Ok(());
                 };
-                if d.node.admits(
-                    &self.acl,
-                    facts,
-                    rel,
-                    Source::Node {
-                        role,
-                        principal: &principal,
-                    },
-                ) {
+                let admitted = d
+                    .admits(
+                        &self.acl,
+                        facts,
+                        rel,
+                        Source::Node {
+                            role,
+                            principal: &principal,
+                        },
+                    )
+                    .map_err(|e| SimError::Internal(internal_error!("node {} admission failed: {e}", to.0)))?;
+                if admitted {
                     d.node.offer_delivery(Delivery { rel, from, row });
                 } else {
                     self.run.dropped += 1;
@@ -977,9 +980,10 @@ impl<'p> Cluster<'p> {
                         s
                     }
                 };
-                if d.node
+                let admitted = d
                     .admits(&self.acl, facts, rel, Source::Session { principal: &principal })
-                {
+                    .map_err(|e| SimError::Internal(internal_error!("node {} admission failed: {e}", to.0)))?;
+                if admitted {
                     d.node.offer_ingress(Ingress { rel, session, row });
                 } else {
                     self.run.dropped += 1;

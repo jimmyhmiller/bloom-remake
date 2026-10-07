@@ -112,8 +112,8 @@ impl Store {
     fn stored(&self, d: &ManualDriver<'_, Box<dyn Executor>>) -> Vec<Vec<u8>> {
         let rel = self.artifact.rel_named("stored").unwrap();
         let mut out: Vec<Vec<u8>> = d
-            .node
             .released_image()
+            .unwrap()
             .rows
             .get(&rel)
             .into_iter()
@@ -218,7 +218,7 @@ fn a_store_from_before_the_database_moves_onto_one() {
             t += 1;
             d.run_until_quiescent(Instant(t)).unwrap();
             if i == 9 {
-                mid = Some((d.node.released_tick().unwrap(), d.node.released_image().clone()));
+                mid = Some((d.node.released_tick().unwrap(), d.released_image().unwrap()));
             }
         }
         let (tick, image) = mid.unwrap();
@@ -274,8 +274,8 @@ fn a_store_from_before_the_database_moves_onto_one() {
     let d = k.boot(&legacy);
     assert_eq!(k.stored(&d), expected);
     let holds_marker = |d: &ManualDriver<'_, Box<dyn Executor>>| {
-        d.node
-            .released_image()
+        d.released_image()
+            .unwrap()
             .rows
             .get(&peeked)
             .is_some_and(|r| r.contains(&marker))
@@ -293,4 +293,73 @@ fn a_store_from_before_the_database_moves_onto_one() {
     let d = k.boot(&again);
     assert_eq!(k.stored(&d), expected);
     assert!(holds_marker(&d), "the database holds what the checkpoint held");
+}
+
+/// An ACL over a durable table reads its committed rows from the database: before the boot tick fills `members`,
+/// nobody is admitted; after it, the members are and others are not; after a restart, from the recovered database.
+#[test]
+fn an_acl_over_a_durable_table_reads_the_database() {
+    use blossom_node::acl::{AclTable, Source};
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/db/gate.bls");
+    let nodes = [NodeSpec {
+        name: "s".into(),
+        role: Some("Server".into()),
+    }];
+    let artifact = compile_file(path.to_str().unwrap(), &nodes).0.unwrap().0;
+    let names: Arc<[Arc<str>]> = artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect();
+    let oracle = Arc::new(
+        Oracle::new(artifact.program.clone())
+            .unwrap()
+            .with_roles(artifact.roles.clone())
+            .with_seed(blossom_value::Seed([9; 16]))
+            .unwrap()
+            .with_node_names(names.to_vec())
+            .unwrap(),
+    );
+    let schema = DurableSchema::of(artifact.program.get());
+    let acl = AclTable::of(artifact.program.get());
+    let enter = artifact.rel_named("enter").unwrap();
+    let fs = SimFs::default();
+    let boot = |fs: &SimFs| {
+        let opened = recovery::open(
+            Arc::new(fs.clone()) as Arc<dyn Vfs>,
+            &StoreSpec {
+                dir: PathBuf::from("/data/s"),
+                identity: identity(),
+                mode: OpenMode::InitFresh,
+                certification: blossom_store::Certification::Strict,
+                database: blossom_store::lsm::LsmOptions::default(),
+            },
+            &artifact.program,
+            names.clone(),
+            Instant(0),
+            7,
+        )
+        .unwrap();
+        let exec: Box<dyn Executor> = Box::new(OracleExecutor::new(oracle.clone()));
+        let role = artifact.roles.first().copied().flatten();
+        let node = Node::boot(
+            NodeConfig::new(NodeId(0), role),
+            &artifact.program,
+            exec,
+            opened.boot.clone(),
+        )
+        .unwrap();
+        ManualDriver::new(node, artifact.program.get(), &schema, names.clone(), opened)
+    };
+    let facts = oracle.static_facts();
+    let admits = |d: &ManualDriver<'_, Box<dyn Executor>>, p: &str| {
+        d.admits(&acl, facts, enter, Source::Session { principal: p }).unwrap()
+    };
+    let mut d = boot(&fs);
+    assert!(!admits(&d, "s"), "nobody is a member before the boot tick");
+    d.run_until_quiescent(Instant(1)).unwrap();
+    assert!(admits(&d, "s"), "the node directory's principal, copied into members");
+    assert!(!admits(&d, "intruder"));
+    drop(d);
+    let mut image = fs.fork().unwrap();
+    image.crash(&mut |_| WriteFate::Survive).unwrap();
+    let d = boot(&image);
+    assert!(admits(&d, "s"), "after a restart, from the recovered database");
+    assert!(!admits(&d, "intruder"));
 }

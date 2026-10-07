@@ -150,8 +150,8 @@ impl Kvs {
 
     fn store(&self, d: &ManualDriver<'_, Box<dyn Executor>>) -> Vec<(String, Vec<u8>)> {
         let rel = self.rel("store");
-        d.node
-            .released_image()
+        d.released_image()
+            .unwrap()
             .rows
             .get(&rel)
             .into_iter()

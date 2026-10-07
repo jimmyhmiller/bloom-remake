@@ -1,0 +1,21 @@
+//! An ACL over a durable table, for `node_database.rs`: `enter` admits only principals in `members`, which the boot
+//! tick fills from the node directory. Its committed rows are the node's database's.
+program gate version 1;
+
+role Client: external;
+role Server;
+
+#[accept(external, principal in members)]
+channel enter(word: String): Client -> Server;
+
+at Server {
+    durable table members(p: Principal);
+    durable table entered(word: String);
+
+    seed: on boot(), node_dir(_, _, p, _) {
+        emit members(p);
+    }
+    come_in: on enter(w) {
+        emit entered(w);
+    }
+}
