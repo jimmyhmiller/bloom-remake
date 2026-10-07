@@ -29,9 +29,17 @@ pub struct Args {
     /// The node whose database to query.
     #[arg(long)]
     pub node: String,
-    /// The node's admin listener (`blossom run --admin ADDR`).
-    #[arg(long, value_name = "ADDR")]
-    pub admin: SocketAddr,
+    /// The running node's admin listener (`blossom run --admin ADDR`).
+    #[arg(
+        long,
+        value_name = "ADDR",
+        conflicts_with = "store",
+        required_unless_present = "store"
+    )]
+    pub admin: Option<SocketAddr>,
+    /// A stopped node's store directory, read in place (it takes the store's lock).
+    #[arg(long, value_name = "DIR")]
+    pub store: Option<PathBuf>,
     /// Read the database as of this tick (default: the newest released).
     #[arg(long, value_name = "TICK")]
     pub as_of: Option<u64>,
@@ -136,7 +144,12 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
         view: name.to_owned(),
         as_of: args.as_of,
     };
-    let answer = match ask(args.admin, &req) {
+    let result = match (&args.admin, &args.store) {
+        (Some(addr), _) => ask(*addr, &req),
+        (None, Some(dir)) => offline(dir, &artifact, req),
+        (None, None) => Err("a query needs --admin ADDR or --store DIR".into()),
+    };
+    let answer = match result {
         Ok(a) => a,
         Err(e) => {
             eprintln!("blossom query: {e}");
@@ -154,6 +167,25 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
         answer.tick
     );
     ExitCode::SUCCESS
+}
+
+/// Answers the query from the stopped node's store `dir`.
+fn offline(
+    dir: &std::path::Path,
+    artifact: &blossom_artifact::bls::BlsArtifact,
+    req: QueryRequest,
+) -> Result<Answer, String> {
+    let names: std::sync::Arc<[std::sync::Arc<str>]> = artifact
+        .nodes
+        .iter()
+        .map(|n| std::sync::Arc::from(n.as_str()))
+        .collect();
+    let (db, _lock) =
+        blossom_runtime::db::Database::open_offline(dir, std::sync::Arc::new(artifact.clone()), names.clone())
+            .map_err(|e| e.to_string())?;
+    let externs = crate::common::std_externs().map_err(|e| e.to_string())?;
+    let now = blossom_runtime::clock::wall_now()?;
+    blossom_runtime::query::answer(req, &db, &artifact.program, &names, externs, now).map_err(|e| e.to_string())
 }
 
 /// Sends the query to the admin listener at `addr`: its answer, or why not.

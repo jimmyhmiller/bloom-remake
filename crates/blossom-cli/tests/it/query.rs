@@ -1,7 +1,7 @@
 //! S23: `blossom query` (docs/design/DATABASE.md §5). `blossom run --admin` serves e01's key-value store; a client
 //! puts three keys and deletes one; queries of the durable `store` see the database as of the newest released tick,
 //! and as of an earlier one; a query binding the key reads by prefix; a query of a relation that is not durable is
-//! refused.
+//! refused; a stopped node's store answers in place.
 
 use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
@@ -152,6 +152,28 @@ fn queries_read_the_durable_store_as_of_released_ticks() {
     // A tick outside the history is refused by the node.
     let past = query(&deploy, &admin, Some(now + 1_000_000), "all(k, v) = store(k, v)");
     assert!(!past.status.success());
+    // A store is read in place only while its node is stopped.
+    let store = deploy.parent().unwrap().join("data").join("s1");
+    let busy = offline(&deploy, &store, "all(k, v) = store(k, v)");
+    assert!(
+        String::from_utf8_lossy(&busy.stderr).contains("the node is running"),
+        "{busy:?}"
+    );
     let _ = server.kill();
     let _ = server.wait();
+    // Killed: the tables and the WAL after them give what the next recovery would.
+    let (stopped, _) = keys(&offline(&deploy, &store, "all(k, v) = store(k, v)"));
+    assert_eq!(stopped, ["\"apple\"", "\"cherry\""]);
+}
+
+#[cfg(test)]
+fn offline(deploy: &Path, store: &Path, text: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_blossom"))
+        .args(["query", "--deploy"])
+        .arg(deploy)
+        .args(["--node", "s1", "--store"])
+        .arg(store)
+        .arg(text)
+        .output()
+        .unwrap()
 }

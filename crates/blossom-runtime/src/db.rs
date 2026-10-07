@@ -79,6 +79,63 @@ impl Database {
         ))
     }
 
+    /// A stopped node's database, read without changing a file (`blossom query --store`): under the store's lock,
+    /// its tables, and the WAL records after them applied in memory (the records the node's next recovery keeps).
+    /// The lock comes back with it: the node cannot start while it is held.
+    pub fn open_offline(
+        dir: &Path,
+        artifact: Arc<BlsArtifact>,
+        names: Arc<[Arc<str>]>,
+    ) -> Result<(Database, blossom_store::StoreLock), RuntimeError> {
+        let fs: Arc<dyn Vfs> = Arc::new(blossom_store::RealFs);
+        let lock = match blossom_store::StoreLock::acquire(&*fs, dir) {
+            Ok(l) => l,
+            Err(blossom_store::StoreError::Locked { pid, .. }) => {
+                return Err(RuntimeError::Config(format!(
+                    "the node is running (process {}): query it through its admin listener",
+                    pid.trim()
+                )));
+            }
+            Err(e) => return Err(store_error(e)),
+        };
+        let uuid = blossom_store::MetaStore::new(fs.clone(), dir)
+            .read()
+            .map_err(store_error)?
+            .identity
+            .store_uuid;
+        let lsm = Lsm::open_read_only(fs.clone(), &dir.join("db"), LsmOptions::default()).map_err(store_error)?;
+        let flushed = Arc::new(AtomicU64::new(lsm.flushed().map_err(store_error)?.version));
+        let db = Database {
+            lsm: Arc::new(lsm),
+            schema: DurableSchema::of(artifact.program.get()),
+            artifact,
+            names,
+            flushed,
+            work: Mutex::new(None),
+        };
+        let scan = blossom_store::WalScan::scan(&*fs, &blossom_node::recovery::wal_dir(dir), uuid, false)
+            .map_err(store_error)?;
+        let codec = db.codec();
+        let after = db.lsm.flushed().map_err(store_error)?.version;
+        for (lsn, rec) in scan.records() {
+            if rec.tick <= after {
+                continue;
+            }
+            let payload = match rec.kind {
+                blossom_node::recovery::KIND_DELTA => rec.payload.as_slice(),
+                blossom_node::recovery::KIND_DELTA_BLOBS => blossom_node::recovery::logged_blobs(&rec.payload, *lsn)?.1,
+                other => {
+                    return Err(RuntimeError::Config(format!(
+                        "the WAL record at LSN {} has kind {other}, which this build does not know",
+                        lsn.0
+                    )));
+                }
+            };
+            db.apply_with(&codec, rec.tick, &codec.decode_delta(payload)?)?;
+        }
+        Ok((db, lock))
+    }
+
     /// The codec of the program's durable rows.
     pub fn codec(&self) -> DurableCodec<'_> {
         DurableCodec::new(self.artifact.program.get(), &self.schema, self.names.clone())
