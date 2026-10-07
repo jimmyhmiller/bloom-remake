@@ -760,9 +760,20 @@ struct State {
 /// What a flush or compaction left durable: the version and mark the tables cover.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Flushed {
+    version: Option<u64>,
+    mark: u64,
+}
+
+impl Flushed {
     /// Every version at or below this one is in the tables (`None`: no version is).
-    pub version: Option<u64>,
-    pub mark: u64,
+    pub fn version(&self) -> Option<u64> {
+        self.version
+    }
+
+    /// The caller's mark that came with the newest version flushed.
+    pub fn mark(&self) -> u64 {
+        self.mark
+    }
 }
 
 /// A versioned LSM tree.
