@@ -137,6 +137,11 @@ relations onto the database, so a node's durable state may outgrow its memory an
    to it); it loads no image. Checkpoints retire: the WAL truncates behind the database alone, and blob collection
    anchors to its flushes.
 9. **Range probes** of plans become range scans of the order-preserving keys (§3).
+10. **One durability path for the runtime and the simulator.** The simulator's cluster recovers nodes through
+    `blossom-node`'s `ManualDriver` and checkpoints over `SimFs`, as the runtime does through `recovery::open`. The
+    database lives in `blossom-runtime` today, so the simulator never exercises it. Before checkpoints retire, the
+    database moves into the shared path (its tree and feeding into `blossom-node`'s recovery and drivers, its
+    flushes driven deterministically under simulation), so every crash the simulator explores reaches it.
 
 Tests: every suite and the corpus run on the tiered stores (the engine and the oracle still agree on every corpus
 program); a node whose durable state is several times its cache; kill -9 and the crash simulation over the
