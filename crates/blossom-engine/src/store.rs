@@ -395,8 +395,9 @@ pub(crate) struct Tiered {
     overlay_by: RefCell<BTreeMap<Vec<usize>, RowsBy>>,
     /// The hot tier: recent probes' answers, kept with the cold side.
     hot: RefCell<Hot>,
-    /// What probes found, for the planner's estimates (the cold side keeps no statistics): by the probe's columns and
-    /// whether it took a range, a running average of its rows, in sixteenths of a row.
+    /// What probes found, for the planner's estimates (the cold side keeps no statistics), as running averages in
+    /// sixteenths of a row: by the probe's columns, the rows a prefix holds (`false`: an index's average bucket, as an
+    /// in-memory store knows it), and the rows a range of a prefix gave (`true`).
     seen: RefCell<BTreeMap<(Vec<usize>, bool), u64>>,
     /// Moves whenever an average crosses a power of two: a join order planned on the old ones is planned again.
     epoch: std::cell::Cell<u64>,
@@ -486,11 +487,14 @@ impl Tiered {
         matches: &impl Fn(&Row) -> bool,
     ) -> Result<Arc<Vec<Row>>, EvalError> {
         let rows = self.read_cold(cols, values, range, matches)?;
-        self.observe(cols, range.is_some(), rows.len());
+        if range.is_some() {
+            self.observe(cols, true, rows.len());
+        }
         Ok(rows)
     }
 
-    /// A probe on `cols` (with a range or not) found `rows` rows: the running average moves an eighth of the way.
+    /// A prefix of `cols` holds `rows` rows (`range`: a range of one gave them): the running average moves an eighth
+    /// of the way.
     fn observe(&self, cols: &[usize], range: bool, rows: usize) {
         let x = (rows as u64).saturating_mul(16);
         let mut seen = self.seen.borrow_mut();
@@ -510,20 +514,24 @@ impl Tiered {
         }
     }
 
-    /// About how many rows a probe on `cols` (with a range or not) finds: as probes found, or one for a probe not
-    /// seen yet (it is tried, then known).
+    /// About how many rows a probe on `cols` finds, with a range on one more column or not. Its prefix's rows: all
+    /// of them for no columns, one for the key, else as prefixes were found to hold, or one for columns not seen yet
+    /// (the probe is tried, then known). A range: a small fraction of its prefix's rows, as an in-memory store
+    /// reckons, or what ranges of that shape gave if more (a range read from the cold side costs what it gives).
     fn estimate(&self, cols: &[usize], range: bool) -> usize {
-        if cols.is_empty() && !range {
-            return self.len;
-        }
-        if !range && !self.key.is_empty() && self.key.iter().all(|k| cols.contains(k)) {
-            return 1;
-        }
         let seen = self.seen.borrow();
-        match (seen.get(&(cols.to_vec(), range)), seen.get(&(cols.to_vec(), false))) {
-            (Some(avg), _) => (*avg / 16).max(1) as usize,
-            (None, Some(prefix)) if range => (*prefix / 16 / 16 + 1) as usize,
-            _ => 1,
+        let avg = |r: bool| seen.get(&(cols.to_vec(), r)).map(|a| (*a / 16).max(1) as usize);
+        let prefix = if cols.is_empty() {
+            self.len
+        } else if !self.key.is_empty() && self.key.iter().all(|k| cols.contains(k)) {
+            1
+        } else {
+            avg(false).unwrap_or(1)
+        };
+        if range {
+            (prefix / 16 + 1).max(avg(true).unwrap_or(0))
+        } else {
+            prefix
         }
     }
 
@@ -561,6 +569,8 @@ impl Tiered {
         let (large, max) = {
             let mut hot = self.hot.borrow_mut();
             if let Some(all) = hot.probe(cols, values) {
+                drop(hot);
+                self.observe(cols, false, all.len());
                 return Ok(ranged(all));
             }
             (hot.is_large(cols, values), hot.largest())
@@ -569,11 +579,16 @@ impl Tiered {
             match self.cold.probe_at_most(self.rel, cols, values, v, max)? {
                 Some(mut all) => {
                     all.sort_unstable();
+                    self.observe(cols, false, all.len());
                     let all = Arc::new(all);
                     self.hot.borrow_mut().keep_probe(cols, values, all.clone());
                     return Ok(ranged(all));
                 }
-                None => self.hot.borrow_mut().mark_large(cols, values),
+                None => {
+                    self.hot.borrow_mut().mark_large(cols, values);
+                    // Its rows are not counted: more than a probe may keep, so large for the planner.
+                    self.observe(cols, false, max.saturating_mul(16));
+                }
             }
         }
         // A large prefix: its range from the hot tier when asked before, else from the cold side (kept if small).
@@ -584,6 +599,9 @@ impl Tiered {
         }
         let mut rows = self.cold.probe(self.rel, cols, values, range, v)?;
         rows.sort_unstable();
+        if range.is_none() {
+            self.observe(cols, false, rows.len());
+        }
         let rows = Arc::new(rows);
         if let Some(r) = &range {
             self.hot.borrow_mut().keep_range(cols, values, r, rows.clone());
