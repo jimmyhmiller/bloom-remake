@@ -309,3 +309,52 @@ fn a_recorded_node_replays_exactly_and_explains_its_rows() {
     }
     let _ = std::fs::remove_dir_all(&traces);
 }
+
+/// The stats count the engine's time per tick and say what its memory holds: the durable table `store` is tiered
+/// (docs/design/DATABASE.md §7), and shows as `resident.store.tiered` once the node has run past a second.
+#[test]
+fn stats_count_tick_time_and_name_the_resident_stores() {
+    use std::sync::atomic::Ordering;
+    let (spec, artifact) = setup("stats");
+    let server = start(&spec, &artifact);
+    let id = identity(&spec, &artifact);
+    let mut c = Client::connect(
+        server.client_addr.unwrap(),
+        artifact.clone(),
+        &id,
+        "p",
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    let put = c.rel("put").unwrap();
+    for i in 0..3u64 {
+        c.send(
+            put,
+            &[vec![
+                Value::Int(IntValue::U64(i)),
+                Value::Str(format!("k{i}").into()),
+                Value::Bytes(vec![1u8].into()),
+            ]],
+        )
+        .unwrap();
+        assert!(
+            c.recv(Some(Duration::from_secs(10))).unwrap().is_some(),
+            "put {i} is acknowledged"
+        );
+        std::thread::sleep(Duration::from_millis(600));
+    }
+    let stats = &server.stats;
+    assert!(stats.ticks.load(Ordering::Relaxed) > 0);
+    assert!(stats.tick_nanos.load(Ordering::Relaxed) > 0, "tick time is counted");
+    assert!(stats.tick_max_nanos.load(Ordering::Relaxed) > 0);
+    assert!(
+        stats.db_apply_nanos.load(Ordering::Relaxed) > 0,
+        "applies to the database are timed"
+    );
+    let resident = stats.resident_snapshot();
+    assert!(
+        resident.iter().any(|(name, _)| name == "resident.store.tiered"),
+        "the tiered table shows among the resident stores: {resident:?}"
+    );
+    server.stop().unwrap();
+}

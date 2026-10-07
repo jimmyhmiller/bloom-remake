@@ -65,6 +65,14 @@ pub trait Executor: Send {
     fn resident_rows(&self) -> Option<usize> {
         None
     }
+    /// The rows each of its stores holds in memory, largest first, if it counts them (`Engine::resident_by_store`).
+    fn resident_by_store(&self) -> Option<Vec<(RelId, &'static str, usize)>> {
+        None
+    }
+    /// The work of each rule in the last tick, if the executor measures it.
+    fn last_tick_work(&self) -> Option<BTreeMap<RuleId, RuleWork>> {
+        None
+    }
     /// The work of each rule so far (rows examined, expression nodes evaluated), if the executor measures it.
     fn work_by_rule(&self) -> Option<BTreeMap<RuleId, RuleWork>>;
     /// Starts (afresh) or stops counting each function's work; false if the executor cannot.
@@ -203,6 +211,14 @@ impl<X: Executor + ?Sized> Executor for Box<X> {
         (**self).resident_rows()
     }
 
+    fn resident_by_store(&self) -> Option<Vec<(RelId, &'static str, usize)>> {
+        (**self).resident_by_store()
+    }
+
+    fn last_tick_work(&self) -> Option<BTreeMap<RuleId, RuleWork>> {
+        (**self).last_tick_work()
+    }
+
     fn work_by_rule(&self) -> Option<BTreeMap<RuleId, RuleWork>> {
         (**self).work_by_rule()
     }
@@ -247,6 +263,14 @@ impl Executor for blossom_engine::Engine {
 
     fn resident_rows(&self) -> Option<usize> {
         Some(self.held_rows())
+    }
+
+    fn resident_by_store(&self) -> Option<Vec<(RelId, &'static str, usize)>> {
+        Some(blossom_engine::Engine::resident_by_store(self))
+    }
+
+    fn last_tick_work(&self) -> Option<BTreeMap<RuleId, RuleWork>> {
+        Some(blossom_engine::Engine::last_tick_work(self).clone())
     }
 
     fn work_by_rule(&self) -> Option<BTreeMap<RuleId, RuleWork>> {
@@ -544,6 +568,14 @@ impl Executor for CheckedExecutor {
 
     fn resident_rows(&self) -> Option<usize> {
         Some(self.engine.held_rows())
+    }
+
+    fn resident_by_store(&self) -> Option<Vec<(RelId, &'static str, usize)>> {
+        Some(self.engine.resident_by_store())
+    }
+
+    fn last_tick_work(&self) -> Option<BTreeMap<RuleId, RuleWork>> {
+        Some(self.engine.last_tick_work().clone())
     }
 
     fn work_by_rule(&self) -> Option<BTreeMap<RuleId, RuleWork>> {

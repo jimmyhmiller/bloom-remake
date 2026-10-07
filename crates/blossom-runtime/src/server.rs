@@ -106,6 +106,22 @@ pub struct Stats {
     /// The rows the engine holds in memory after the last tick (a tiered table counts only what memory holds of it,
     /// docs/design/DATABASE.md §7); 0 for an executor that does not count them.
     pub resident_rows: AtomicU64,
+    /// The time ticks took on the engine thread, in total and at most, and how many took over 4 and 16 ms.
+    pub tick_nanos: AtomicU64,
+    pub tick_max_nanos: AtomicU64,
+    pub ticks_over_4ms: AtomicU64,
+    pub ticks_over_16ms: AtomicU64,
+    /// The time applying released ticks to the database took on the engine thread, in total and at most.
+    pub db_apply_nanos: AtomicU64,
+    pub db_apply_max_nanos: AtomicU64,
+    /// The time the database's flushes (and the compactions after them) took on its thread, in total and at most.
+    pub db_flush_nanos: AtomicU64,
+    pub db_flush_max_nanos: AtomicU64,
+    /// The stores holding the most rows in memory (`resident.<relation>.<store>`), refreshed about once a second.
+    pub resident: std::sync::Mutex<Vec<(String, u64)>>,
+    /// The rules' work in ticks over 4 ms, summed by rule label: how many such ticks each worked in, the rows it
+    /// examined and the expression nodes it evaluated (`slow.<rule>`, the most steps first).
+    pub slow: std::sync::Mutex<BTreeMap<String, (u64, u64, u64)>>,
     /// The time WAL syncs took, in total and at most, and how many took over 4, 16 and 64 ms.
     pub wal_sync_nanos: AtomicU64,
     pub wal_sync_max_nanos: AtomicU64,
@@ -142,6 +158,22 @@ pub struct Stats {
 
 impl Stats {
     /// Every counter, by name, as read now (each read on its own: the counters move while they are read).
+    /// The stores holding the most rows in memory, by name (`resident.<relation>.<store>`), and the rules that
+    /// worked most in slow ticks (`slow.<rule>.ticks|rows|steps`).
+    pub fn resident_snapshot(&self) -> Vec<(String, u64)> {
+        let mut out = self.resident.lock().map(|r| r.clone()).unwrap_or_default();
+        if let Ok(slow) = self.slow.lock() {
+            let mut by: Vec<(&String, &(u64, u64, u64))> = slow.iter().collect();
+            by.sort_by_key(|(_, (_, _, steps))| std::cmp::Reverse(*steps));
+            for (rule, (ticks, rows, steps)) in by.into_iter().take(10) {
+                out.push((format!("slow.{rule}.ticks"), *ticks));
+                out.push((format!("slow.{rule}.rows"), *rows));
+                out.push((format!("slow.{rule}.steps"), *steps));
+            }
+        }
+        out
+    }
+
     pub fn snapshot(&self) -> Vec<(&'static str, u64)> {
         let r = |c: &AtomicU64| c.load(Ordering::Relaxed);
         vec![
@@ -155,6 +187,14 @@ impl Stats {
             ("sessions", r(&self.sessions)),
             ("db_flushes", r(&self.db_flushes)),
             ("resident_rows", r(&self.resident_rows)),
+            ("tick_nanos", r(&self.tick_nanos)),
+            ("tick_max_nanos", r(&self.tick_max_nanos)),
+            ("ticks_over_4ms", r(&self.ticks_over_4ms)),
+            ("ticks_over_16ms", r(&self.ticks_over_16ms)),
+            ("db_apply_nanos", r(&self.db_apply_nanos)),
+            ("db_apply_max_nanos", r(&self.db_apply_max_nanos)),
+            ("db_flush_nanos", r(&self.db_flush_nanos)),
+            ("db_flush_max_nanos", r(&self.db_flush_max_nanos)),
             ("wal_sync_nanos", r(&self.wal_sync_nanos)),
             ("wal_sync_max_nanos", r(&self.wal_sync_max_nanos)),
             ("wal_syncs_over_4ms", r(&self.wal_syncs_over_4ms)),
@@ -608,6 +648,7 @@ impl Server {
             let control = ctl_tx.clone();
             let (tx, handle) = crate::db::start(
                 db.clone(),
+                stats.clone(),
                 Box::new(move |r| {
                     // The engine is gone only when the node stops.
                     let _ = control.send(Control::DatabaseFlushed(r));
@@ -758,6 +799,7 @@ impl Server {
                 _lock: lock,
                 clock: SystemClock::anchored_at(boot.now),
                 stats: stats.clone(),
+                resident_noted: None,
             };
             let (data, env) = (data.clone(), stream_env.clone());
             std::thread::Builder::new()
@@ -1361,6 +1403,8 @@ struct Engine {
     _lock: StoreLock,
     clock: SystemClock,
     stats: Arc<Stats>,
+    /// When the stats last took the stores holding the most rows.
+    resident_noted: Option<Stopwatch>,
 }
 
 impl Engine {
@@ -1406,14 +1450,30 @@ impl Engine {
             // Run ticks while ready (bounded by the node's in-flight limit).
             while self.node.ready(self.clock.now())? {
                 let now = self.clock.now();
+                let clock = Stopwatch::start();
                 let fx = self
                     .node
                     .run_tick(now)
                     .map_err(|f| RuntimeError::Fault(f.to_string()))?;
+                let took = clock.nanos();
                 bump(&self.stats.ticks, 1);
+                bump(&self.stats.tick_nanos, took);
+                self.stats.tick_max_nanos.fetch_max(took, Ordering::Relaxed);
+                for (over, c) in [
+                    (4_000_000, &self.stats.ticks_over_4ms),
+                    (16_000_000, &self.stats.ticks_over_16ms),
+                ] {
+                    if took > over {
+                        bump(c, 1);
+                    }
+                }
+                if took > 4_000_000 {
+                    self.note_slow();
+                }
                 if let Some(n) = self.node.resident_rows() {
                     self.stats.resident_rows.store(n as u64, Ordering::Relaxed);
                 }
+                self.note_resident();
                 if let Some(r) = fx.reserve {
                     self.record.reserved_tick = r.ticks.0;
                     self.record.last_now = self.record.last_now.max(r.now.0);
@@ -1599,6 +1659,56 @@ impl Engine {
         Ok(admitted)
     }
 
+    /// A slow tick: its rules' work joins the stats' sums.
+    fn note_slow(&mut self) {
+        let Some(work) = self.node.last_tick_work() else {
+            return;
+        };
+        let p = self.artifact.program.get();
+        if let Ok(mut slow) = self.stats.slow.lock() {
+            for (rule, w) in work {
+                let label = p
+                    .rules
+                    .get(rule)
+                    .map_or_else(|| format!("{rule:?}"), |r| r.label.to_string());
+                let e = slow.entry(label).or_insert((0, 0, 0));
+                e.0 += 1;
+                e.1 += w.rows;
+                e.2 += w.steps;
+            }
+        }
+    }
+
+    /// About once a second, the stores holding the most rows in memory, for the stats.
+    fn note_resident(&mut self) {
+        if self
+            .resident_noted
+            .as_ref()
+            .is_some_and(|at| at.nanos() < 1_000_000_000)
+        {
+            return;
+        }
+        self.resident_noted = Some(Stopwatch::start());
+        let Some(stores) = self.node.resident_by_store() else {
+            return;
+        };
+        let p = self.artifact.program.get();
+        let top: Vec<(String, u64)> = stores
+            .into_iter()
+            .take(12)
+            .map(|(rel, kind, n)| {
+                let name = p
+                    .rels
+                    .get(rel)
+                    .map_or_else(|| format!("{rel:?}"), |d| d.name.to_string());
+                (format!("resident.{name}.{kind}"), n as u64)
+            })
+            .collect();
+        if let Ok(mut r) = self.stats.resident.lock() {
+            *r = top;
+        }
+    }
+
     /// Sends a released tick's frames: to peers merged per (destination, channel), to sessions per (session,
     /// channel), split into frames under the size limit; a send to this node itself is delivered locally.
     fn dispatch(
@@ -1610,7 +1720,11 @@ impl Engine {
         let p = program.get();
         for t in released {
             bump(&self.stats.released, 1);
+            let clock = Stopwatch::start();
             self.db.apply(t.tick.0, &t.delta)?;
+            let took = clock.nanos();
+            bump(&self.stats.db_apply_nanos, took);
+            self.stats.db_apply_max_nanos.fetch_max(took, Ordering::Relaxed);
             if self.db.needs_flush()? {
                 self.ask_flush()?;
             }

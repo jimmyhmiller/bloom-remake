@@ -117,11 +117,14 @@ fn write_stats(path: &std::path::Path, stats: &blossom_runtime::server::Stats) {
     tmp.push(".tmp");
     let tmp = std::path::PathBuf::from(tmp);
     loop {
-        let text: String = stats
+        let mut text: String = stats
             .snapshot()
             .iter()
             .map(|(name, value)| format!("{name} {value}\n"))
             .collect();
+        for (name, value) in stats.resident_snapshot() {
+            text.push_str(&format!("{name} {value}\n"));
+        }
         if let Err(e) = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path)) {
             eprintln!("blossom run: writing the stats to {}: {e}", path.display());
             return;

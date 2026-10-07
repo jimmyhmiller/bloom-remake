@@ -106,6 +106,8 @@ pub struct Engine {
     examined: u64,
     /// The work of each rule (rows examined, expression nodes evaluated).
     examined_by: BTreeMap<RuleId, RuleWork>,
+    /// The work of each rule in the last tick (cleared at each tick's start).
+    tick_work: BTreeMap<RuleId, RuleWork>,
     /// The blobs the current tick created (`Blob::of`), with their bytes.
     new_blobs: std::cell::RefCell<BTreeMap<blossom_value::BlobRef, Arc<[u8]>>>,
     /// Each (rule, driver literal)'s join order, with the sizes of the stores its atoms read when it was chosen, in
@@ -542,6 +544,7 @@ impl Engine {
             unsettled: BTreeSet::new(),
             examined: 0,
             examined_by: BTreeMap::new(),
+            tick_work: BTreeMap::new(),
             new_blobs: std::cell::RefCell::new(BTreeMap::new()),
             orders: std::cell::RefCell::new(BTreeMap::new()),
             buffers: std::cell::RefCell::new(rule::TermBuffers::default()),
@@ -707,6 +710,7 @@ impl Engine {
 
     fn step_inner(&mut self, input: &StepInput<'_>, observe: &[RelId]) -> Result<StepOutput, EvalError> {
         let tick = input.tick;
+        self.tick_work.clear();
         let wrap = |e: ExprError| to_eval(e, tick, None);
         // 1. What changes.
         self.stores.clear_deltas();
@@ -1993,6 +1997,33 @@ impl Engine {
         self.stores.values().map(Store::resident_len).sum()
     }
 
+    /// The rows each store holds in memory, largest first: the relation, which of its stores (`main`, `next`, `sent`,
+    /// `async`; a tiered table's `main` counts what memory holds of it), and how many. For operators: what the state
+    /// in memory is made of.
+    pub fn resident_by_store(&self) -> Vec<(RelId, &'static str, usize)> {
+        let mut out: Vec<(RelId, &'static str, usize)> = self
+            .stores
+            .iter()
+            .map(|(key, s)| {
+                let (rel, kind) = match key {
+                    StoreKey::Main(r) => (r, if self.tiered.contains(&r) { "tiered" } else { "main" }),
+                    StoreKey::Next(r) => (r, "next"),
+                    StoreKey::Sent(r) => (r, "sent"),
+                    StoreKey::Async(r) => (r, "async"),
+                };
+                (rel, kind, s.resident_len())
+            })
+            .filter(|(_, _, n)| *n > 0)
+            .collect();
+        out.sort_by_key(|e| std::cmp::Reverse(e.2));
+        out
+    }
+
+    /// The work of each rule in the last tick (the rules that did any).
+    pub fn last_tick_work(&self) -> &BTreeMap<RuleId, RuleWork> {
+        &self.tick_work
+    }
+
     /// Rows the atom probes returned since the engine was created: the join work, measured without a clock.
     pub fn rows_examined(&self) -> u64 {
         self.examined
@@ -2017,11 +2048,16 @@ impl Engine {
     fn count_writes(&mut self, rule: RuleId, writes: u64) {
         if writes > 0 {
             self.examined_by.entry(rule).or_default().writes += writes;
+            self.tick_work.entry(rule).or_default().writes += writes;
         }
     }
 
     fn count(&mut self, rule: RuleId, examined: u64, steps: u64) {
         self.examined += examined;
+        let t = self.tick_work.entry(rule).or_default();
+        t.rows += examined;
+        t.steps += steps;
+        t.evals += 1;
         let w = self.examined_by.entry(rule).or_default();
         w.rows += examined;
         w.steps += steps;

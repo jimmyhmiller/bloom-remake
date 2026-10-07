@@ -157,6 +157,14 @@ impl Executor for Recording {
         self.inner.resident_rows()
     }
 
+    fn resident_by_store(&self) -> Option<Vec<(RelId, &'static str, usize)>> {
+        self.inner.resident_by_store()
+    }
+
+    fn last_tick_work(&self) -> Option<BTreeMap<RuleId, RuleWork>> {
+        self.inner.last_tick_work()
+    }
+
     fn work_by_rule(&self) -> Option<BTreeMap<RuleId, RuleWork>> {
         self.inner.work_by_rule()
     }
