@@ -109,10 +109,41 @@ struct Hot {
     /// Probes known to find more rows than one may keep: a range probe of one reads the cold side's range.
     large: BTreeMap<Vec<usize>, blossom_base::det::DetMap<Vec<Value>, u64>>,
     contains: blossom_base::det::DetMap<Row, (bool, u64)>,
-    /// The rows kept: every probe's, and one per membership.
+    /// Range probes of large prefixes, by the probe's columns and the range's column, then their values: each range
+    /// asked (its bounds), its rows (sorted) and when they were last used. A range asked again (a follower fetching
+    /// from where it stands) costs no read of the cold side.
+    ranges: BTreeMap<(Vec<usize>, usize), RangesBy>,
+    /// The rows kept: every probe's and range's, and one per membership.
     rows: usize,
     clock: u64,
     budget: usize,
+}
+
+/// A range probe's rows kept in the hot tier: its bounds, its rows (sorted) and when they were last used.
+struct KeptRange {
+    lo: Bound<Value>,
+    hi: Bound<Value>,
+    rows: Arc<Vec<Row>>,
+    used: u64,
+}
+
+/// A prefix's kept ranges by its values.
+type RangesBy = blossom_base::det::DetMap<Vec<Value>, Vec<KeptRange>>;
+
+/// The most ranges kept for one prefix: past it, the least recently used goes.
+const RANGES_PER_PREFIX: usize = 8;
+
+/// Whether `v` lies within `lo` and `hi`.
+fn within_bounds(v: &Value, lo: &Bound<Value>, hi: &Bound<Value>) -> bool {
+    (match lo {
+        Bound::Included(l) => v >= l,
+        Bound::Excluded(l) => v > l,
+        Bound::Unbounded => true,
+    }) && (match hi {
+        Bound::Included(h) => v <= h,
+        Bound::Excluded(h) => v < h,
+        Bound::Unbounded => true,
+    })
 }
 
 impl Hot {
@@ -178,6 +209,48 @@ impl Hot {
         self.trim();
     }
 
+    fn range(&mut self, cols: &[usize], values: &[Value], range: &ColRange<'_>) -> Option<Arc<Vec<Row>>> {
+        let now = self.tick();
+        let (col, lo, hi) = range;
+        let kept = self.ranges.get_mut(&(cols.to_vec(), *col))?.get_mut(values)?;
+        let entry = kept.iter_mut().find(|k| k.lo.as_ref() == *lo && k.hi.as_ref() == *hi)?;
+        entry.used = now;
+        Some(entry.rows.clone())
+    }
+
+    /// Keeps a range probe's rows (sorted).
+    fn keep_range(&mut self, cols: &[usize], values: &[Value], range: &ColRange<'_>, rows: Arc<Vec<Row>>) {
+        if rows.len() > self.largest() {
+            return;
+        }
+        let now = self.tick();
+        let (col, lo, hi) = range;
+        let kept = self
+            .ranges
+            .entry((cols.to_vec(), *col))
+            .or_default()
+            .entry(values.to_vec())
+            .or_default();
+        self.rows += rows.len();
+        if let Some(at) = kept.iter().position(|k| k.lo.as_ref() == *lo && k.hi.as_ref() == *hi) {
+            let old = kept.remove(at);
+            self.rows -= old.rows.len();
+        }
+        if kept.len() == RANGES_PER_PREFIX
+            && let Some((at, _)) = kept.iter().enumerate().min_by_key(|(_, k)| k.used)
+        {
+            let old = kept.remove(at);
+            self.rows -= old.rows.len();
+        }
+        kept.push(KeptRange {
+            lo: lo.cloned(),
+            hi: hi.cloned(),
+            rows,
+            used: now,
+        });
+        self.trim();
+    }
+
     fn holds(&mut self, row: &Row) -> Option<bool> {
         let now = self.tick();
         let (present, used) = self.contains.get_mut(row)?;
@@ -221,6 +294,35 @@ impl Hot {
                 _ => {}
             }
         }
+        for ((cols, col), by_values) in self.ranges.iter_mut() {
+            let values = key(row, cols);
+            let Some(kept) = by_values.get_mut(&values) else {
+                continue;
+            };
+            let Some(v) = row.get(*col) else { continue };
+            kept.retain_mut(|k| {
+                if !within_bounds(v, &k.lo, &k.hi) {
+                    return true;
+                }
+                match (k.rows.binary_search(row), present) {
+                    (Err(at), true) => {
+                        Arc::make_mut(&mut k.rows).insert(at, row.clone());
+                        self.rows += 1;
+                    }
+                    (Ok(at), false) => {
+                        Arc::make_mut(&mut k.rows).remove(at);
+                        self.rows -= 1;
+                    }
+                    _ => {}
+                }
+                // A range that outgrows what one may keep goes.
+                if k.rows.len() > largest {
+                    self.rows -= k.rows.len();
+                    return false;
+                }
+                true
+            });
+        }
         if let Some((held, _)) = self.contains.get_mut(row) {
             *held = present;
         }
@@ -236,6 +338,11 @@ impl Hot {
             .values()
             .flat_map(|m| m.values().map(|(_, u)| *u))
             .chain(self.contains.values().map(|(_, u)| *u))
+            .chain(
+                self.ranges
+                    .values()
+                    .flat_map(|m| m.values().flat_map(|ks| ks.iter().map(|k| k.used))),
+            )
             .collect();
         uses.sort_unstable();
         let cut = uses.get(uses.len() / 2).copied().unwrap_or(0);
@@ -250,6 +357,19 @@ impl Hot {
             });
         }
         self.probes.retain(|_, m| !m.is_empty());
+        for by_values in self.ranges.values_mut() {
+            by_values.retain(|_, kept| {
+                kept.retain(|k| {
+                    let keep = k.used > cut;
+                    if keep {
+                        rows += k.rows.len();
+                    }
+                    keep
+                });
+                !kept.is_empty()
+            });
+        }
+        self.ranges.retain(|_, m| !m.is_empty());
         self.contains.retain(|_, (_, u)| *u > cut);
         self.rows = rows + self.contains.len();
     }
@@ -275,6 +395,11 @@ pub(crate) struct Tiered {
     overlay_by: RefCell<BTreeMap<Vec<usize>, RowsBy>>,
     /// The hot tier: recent probes' answers, kept with the cold side.
     hot: RefCell<Hot>,
+    /// What probes found, for the planner's estimates (the cold side keeps no statistics): by the probe's columns and
+    /// whether it took a range, a running average of its rows, in sixteenths of a row.
+    seen: RefCell<BTreeMap<(Vec<usize>, bool), u64>>,
+    /// Moves whenever an average crosses a power of two: a join order planned on the old ones is planned again.
+    epoch: std::cell::Cell<u64>,
     /// The change to the present rows the last carry made: the next tick's change (`Store::ins`, `Store::del`).
     staged: (BTreeSet<Row>, BTreeSet<Row>),
     /// No tick has begun since the store was made (at a reset), and whether the current tick is the first: as after
@@ -321,6 +446,8 @@ impl Tiered {
                 budget: hot_rows,
                 ..Hot::default()
             }),
+            seen: RefCell::new(BTreeMap::new()),
+            epoch: std::cell::Cell::new(0),
             staged: (BTreeSet::new(), BTreeSet::new()),
             fresh: true,
             first: false,
@@ -352,6 +479,55 @@ impl Tiered {
     /// The cold side's rows for a probe on `cols` holding `values` (and, with `range`, the rows of those that
     /// `matches`), sorted: from the hot tier, else read and kept there when few enough.
     fn cold_rows(
+        &self,
+        cols: &[usize],
+        values: &[Value],
+        range: Option<ColRange<'_>>,
+        matches: &impl Fn(&Row) -> bool,
+    ) -> Result<Arc<Vec<Row>>, EvalError> {
+        let rows = self.read_cold(cols, values, range, matches)?;
+        self.observe(cols, range.is_some(), rows.len());
+        Ok(rows)
+    }
+
+    /// A probe on `cols` (with a range or not) found `rows` rows: the running average moves an eighth of the way.
+    fn observe(&self, cols: &[usize], range: bool, rows: usize) {
+        let x = (rows as u64).saturating_mul(16);
+        let mut seen = self.seen.borrow_mut();
+        let crossed = match seen.get_mut(&(cols.to_vec(), range)) {
+            Some(avg) => {
+                let old = *avg;
+                *avg = (old.saturating_mul(7).saturating_add(x)) / 8;
+                old.max(1).ilog2() != (*avg).max(1).ilog2()
+            }
+            None => {
+                seen.insert((cols.to_vec(), range), x);
+                true
+            }
+        };
+        if crossed {
+            self.epoch.set(self.epoch.get().wrapping_add(1));
+        }
+    }
+
+    /// About how many rows a probe on `cols` (with a range or not) finds: as probes found, or one for a probe not
+    /// seen yet (it is tried, then known).
+    fn estimate(&self, cols: &[usize], range: bool) -> usize {
+        if cols.is_empty() && !range {
+            return self.len;
+        }
+        if !range && !self.key.is_empty() && self.key.iter().all(|k| cols.contains(k)) {
+            return 1;
+        }
+        let seen = self.seen.borrow();
+        match (seen.get(&(cols.to_vec(), range)), seen.get(&(cols.to_vec(), false))) {
+            (Some(avg), _) => (*avg / 16).max(1) as usize,
+            (None, Some(prefix)) if range => (*prefix / 16 / 16 + 1) as usize,
+            _ => 1,
+        }
+    }
+
+    fn read_cold(
         &self,
         cols: &[usize],
         values: &[Value],
@@ -400,9 +576,19 @@ impl Tiered {
                 None => self.hot.borrow_mut().mark_large(cols, values),
             }
         }
+        // A large prefix: its range from the hot tier when asked before, else from the cold side (kept if small).
+        if let Some(r) = &range
+            && let Some(rows) = self.hot.borrow_mut().range(cols, values, r)
+        {
+            return Ok(rows);
+        }
         let mut rows = self.cold.probe(self.rel, cols, values, range, v)?;
         rows.sort_unstable();
-        Ok(Arc::new(rows))
+        let rows = Arc::new(rows);
+        if let Some(r) = &range {
+            self.hot.borrow_mut().keep_range(cols, values, r, rows.clone());
+        }
+        Ok(rows)
     }
 
     /// The overlay's corrections to the cold side's rows for a probe on `cols` holding `values` (sorted, `cold`):
@@ -1001,18 +1187,31 @@ impl Store {
         self.indexes.borrow_mut().insert(cols.to_vec(), index);
     }
 
-    /// About how many present rows match a probe on `cols`: all of them, or the average bucket of the index. A
-    /// tiered store guesses without reading the cold side: one row for a probe on the key, else an eighth.
+    /// About how many rows a probe on `cols` finds, with a range on one more column (a small fraction of the probe's
+    /// rows, assumed) or not. A tiered store answers from what its probes found ([`Tiered`]).
+    pub fn estimate_probe(&self, cols: &[usize], range: bool) -> usize {
+        if let Some(t) = &self.tiered {
+            return t.estimate(cols, range);
+        }
+        let rows = self.estimate(cols);
+        if range { rows / 16 + 1 } else { rows }
+    }
+
+    /// The store's size as the planner's cached join orders see it: the power of two of its rows (stores below
+    /// `small` rows count as one size), and for a tiered store the epoch of its estimates.
+    pub fn size_class(&self, small: usize) -> u64 {
+        let bits = u64::from((usize::BITS - self.present_len().leading_zeros()).max(small.trailing_zeros()));
+        match &self.tiered {
+            Some(t) => bits | (t.epoch.get() << 8),
+            None => bits,
+        }
+    }
+
+    /// About how many present rows match a probe on `cols`: all of them, or the average bucket of the index.
     pub fn estimate(&self, cols: &[usize]) -> usize {
         let n = self.present_len();
         if cols.is_empty() {
             return n;
-        }
-        if let Some(t) = &self.tiered {
-            if !t.key.is_empty() && t.key.iter().all(|k| cols.contains(k)) {
-                return 1;
-            }
-            return n.div_ceil(8).max(1);
         }
         self.ensure_index(cols);
         let keys = self.indexes.borrow().get(cols).map_or(1, BTreeMap::len).max(1);
