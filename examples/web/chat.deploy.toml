@@ -1,0 +1,26 @@
+# A one-node deployment of chat.bls whose page is served by the node (docs/design/CLIENTS.md §4). From the repository
+# root, after scripts/build-web.sh:
+#
+#   BLOSSOM_SEED=$(openssl rand -hex 16) blossom run --deploy examples/web/chat.deploy.toml --node s --insecure-dev \
+#       --init-fresh --web 127.0.0.1:8080
+#
+# then open http://localhost:8080/ in two tabs. Later runs drop --init-fresh to keep the store (and keep the same seed).
+format = 1
+
+[deployment]
+id = "chat-demo"
+program = "chat"
+version = 1
+source = "chat.bls"
+
+[[node]]
+name = "s"
+role = "Server"
+addr = "127.0.0.1:7461"
+principal = "spiffe://demo/chat/Server/s"
+
+[security]
+mode = "insecure-dev"
+
+[storage]
+data_dir = ".data"

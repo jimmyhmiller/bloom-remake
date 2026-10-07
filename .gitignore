@@ -19,3 +19,4 @@ __pycache__/
 /tests/web/node_modules/
 /tests/web/test-results/
 /tests/web/playwright-report/
+/examples/web/.data/
