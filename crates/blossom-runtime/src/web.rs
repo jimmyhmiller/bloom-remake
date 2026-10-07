@@ -295,15 +295,17 @@ pub fn app_json(
 ) -> Result<String, String> {
     use serde_json::{Map, Value, json};
     let root = spec.source.to_str().ok_or("the program path is not UTF-8")?;
-    // Paths compare canonically (a deployment's `source` may hold `..` segments the loader resolved).
-    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let base = canonical(spec.source.parent().unwrap_or(Path::new("")));
-    let key = |path: &str| {
-        canonical(Path::new(path))
-            .strip_prefix(&base)
+    // Paths compare canonically (a deployment's `source` may hold `..` segments the loader resolved). Every file the
+    // program loaded exists, and the page names it relative to the root's directory.
+    let canonical = |p: &Path| std::fs::canonicalize(p).map_err(|e| format!("{}: {e}", p.display()));
+    let base = canonical(spec.source.parent().unwrap_or(Path::new(".")))?;
+    let key = |path: &str| -> Result<String, String> {
+        let full = canonical(Path::new(path))?;
+        full.strip_prefix(&base)
             .ok()
             .and_then(|p| p.to_str())
-            .map_or_else(|| path.to_owned(), |p| p.replace('\\', "/"))
+            .map(|p| p.replace('\\', "/"))
+            .ok_or_else(|| format!("{path} is not under the program's directory {}", base.display()))
     };
     let mut files = Map::new();
     for f in sources.files() {
@@ -311,7 +313,7 @@ pub fn app_json(
             sources.path(f).map_err(|e| e.to_string())?,
             sources.text(f).map_err(|e| e.to_string())?,
         );
-        files.insert(key(path), Value::String(text.to_string()));
+        files.insert(key(path)?, Value::String(text.to_string()));
     }
     let hex = |b: [u8; 16]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
     let params: Map<String, Value> = spec
@@ -333,7 +335,7 @@ pub fn app_json(
         .map(|n| json!({ "name": n.name, "role": n.role }))
         .collect();
     let app = json!({
-        "root": key(root),
+        "root": key(root)?,
         "files": files,
         "params": params,
         "nodes": nodes,
