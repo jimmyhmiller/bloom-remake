@@ -154,7 +154,7 @@ impl<'p, E: Executor> ManualDriver<'p, E> {
     /// Hands released ticks on, each applied to the database first (it holds only released ticks).
     fn release(&mut self, ticks: Vec<ReleasedTick>, sink: &mut dyn FnMut(ReleasedTick)) -> Result<(), NodeError> {
         for t in ticks {
-            self.opened.database.apply(t.tick.0, &t.delta)?;
+            self.opened.database.apply_tick(t.tick.0, &t.delta, &t.views)?;
             sink(t);
         }
         Ok(())

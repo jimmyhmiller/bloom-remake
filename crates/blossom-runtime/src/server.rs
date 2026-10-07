@@ -1721,7 +1721,7 @@ impl Engine {
         for t in released {
             bump(&self.stats.released, 1);
             let clock = Stopwatch::start();
-            self.db.apply(t.tick.0, &t.delta)?;
+            self.db.apply_tick(t.tick.0, &t.delta, &t.views)?;
             let took = clock.nanos();
             bump(&self.stats.db_apply_nanos, took);
             self.stats.db_apply_max_nanos.fetch_max(took, Ordering::Relaxed);

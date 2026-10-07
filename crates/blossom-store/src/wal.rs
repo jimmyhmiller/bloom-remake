@@ -240,8 +240,9 @@ pub struct FileWal {
 }
 impl FileWal {
     /// The truncation a database flush allows: through the end of the older segments (not the one being written)
-    /// whose every record's tick the flush covers, in order (`None`: not even the first). The token proves the
-    /// truncation safe: the records it removes are in the database's tables.
+    /// whose every record's tick is before the flushed version, in order (`None`: not even the first). The token
+    /// proves the truncation safe: the records it removes are in the database's tables. The flushed version's own
+    /// record stays: a restart catches the database's views up from it (docs/design/DATABASE.md §8).
     pub fn truncation(&self, flushed: &crate::lsm::Flushed) -> Result<Option<TruncateToken>, StoreError> {
         let Some(covered) = flushed.version() else {
             return Ok(None);
@@ -250,7 +251,7 @@ impl FileWal {
         let mut through = None;
         for segment in &scan.segments {
             if segment.header.segment_seq >= self.header.segment_seq
-                || segment.records.iter().any(|(_, r)| r.tick > covered)
+                || segment.records.iter().any(|(_, r)| r.tick >= covered)
             {
                 break;
             }

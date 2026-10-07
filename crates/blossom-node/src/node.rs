@@ -107,6 +107,9 @@ pub struct Boot {
     pub blobs: Arc<dyn blossom_value::BlobSource>,
     /// The blobs the store holds: every recovered row's, and any no row holds, which a collection may delete.
     pub stored: BTreeSet<blossom_value::BlobRef>,
+    /// The catch-up of the database's durable views (DATABASE.md §8): `None` when the database started at this
+    /// recovery (its views are built at the first tick).
+    pub catch_up: Option<blossom_ir::tick::CatchUp>,
 }
 
 /// Whether the node is running.
@@ -149,6 +152,9 @@ pub struct ReleasedTick {
     /// The tick's change to the durable rows (empty when it changed none): the node's database applies it
     /// (docs/design/DATABASE.md §4).
     pub delta: Delta,
+    /// The tick's changes to the durable views (each changed row's support before and after): the database applies
+    /// them with `delta` (DATABASE.md §8). Not in the WAL: recomputed from the tables after a restart.
+    pub views: BTreeMap<RelId, Vec<(Row, u64, u64)>>,
 }
 
 /// A computed tick waiting for release.
@@ -158,6 +164,7 @@ struct Parked {
     /// Whether the tick has a WAL record.
     wal: bool,
     delta: Delta,
+    views: BTreeMap<RelId, Vec<(Row, u64, u64)>>,
     sends: Vec<Send>,
     egress: Vec<Egress>,
     host: Vec<HostOut>,
@@ -331,7 +338,14 @@ impl<E: Executor> Node<E> {
         }
         let schema = DurableSchema::of(p);
         let streams = StreamInbox::new(node_streams(p, cfg.role), cfg.max_stream_bytes);
-        exec.reset_on(Instance::default(), boot.database.clone())?;
+        exec.reset_on(
+            Instance::default(),
+            boot.database.clone(),
+            blossom_engine::Resume {
+                statics: cfg.statics.clone(),
+                catch_up: boot.catch_up.clone(),
+            },
+        )?;
         // The executor starts on the recovered rows, which are also the released ones. Every blob the store holds is
         // durable; those no row holds are candidates for collection.
         let carried_refs = boot.database.blob_counts()?;
@@ -724,6 +738,7 @@ impl<E: Executor> Node<E> {
             tick,
             wal,
             delta: delta.clone(),
+            views: std::mem::take(&mut out.views),
             sends: out.outbox.into_iter().collect(),
             egress: out.egress.into_iter().collect(),
             host: out.host.into_iter().collect(),
@@ -895,6 +910,7 @@ impl<E: Executor> Node<E> {
                 retired: p.retired,
                 taken: p.taken,
                 delta: p.delta,
+                views: p.views,
             });
         }
         Ok(out)

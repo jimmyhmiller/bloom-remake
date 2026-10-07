@@ -208,3 +208,44 @@ the first tick after a boot); the node's per-blob counts.
 Tests: every suite and the corpus run on the tiered stores (the engine and the oracle still agree on every corpus
 program); a node whose durable state is several times its cache; kill -9 and the crash simulation over the
 database as the only durable state.
+
+## 8. Durable views (S26)
+
+Measured on the Kafka broker after S25: of ~340000 rows in memory, nearly all belong to views over the durable
+tables (a row per log entry each: `batch$keep`, `readable_batch`, `data_rlog`, `term_at`, an `argmax`'s candidates,
+…), tiered or not. They are also why the first tick after a restart reads every tiered table whole: a view starts
+empty after a reset and is derived again from all its table's rows. The tables moved to the database in S24; the
+views over them follow here.
+
+**What is durable.** A rule is *durable* when it is deductive, kept by delta queries (no reading of time) and every
+relation it reads is a source that is the same after a restart: a tiered table, a static relation, or a relation
+whose every support is durable (a *durable view*). A durable view's rows are a function of the durable tables, so
+they can be kept in the database with them and are right after a restart. (Steps: first the views whose every rule
+is durable and reads tiered tables, statics or other durable views; then relations mixing durable and volatile
+rules, whose durable supports are kept and whose volatile ones stay in memory; then the durable tables the engine
+keeps in memory (`resolve`, sealed, lattice) as sources; then aggregates over durable sources.)
+
+**Keeping them.** A durable view's store is tiered like a table's, with support counts: memory holds the counts the
+database does not hold yet and a hot tier; the database holds each row (`vtag(view, definition) ++ row key`) and, for a
+row of more than one support, its count (`ctag(…) ++ row key ++ count`). A tick's changes to durable views (each
+changed row's count before and after) go with the released tick, applied with the tables' delta at the tick's version;
+they are not logged in the WAL: they are recomputed from the tables'.
+
+**Versions.** A view's rows at tick `t` are computed from the tables as tick `t` starts, the state the tables have at
+version `t-1`; they are applied at version `t`. So at version `v` the database holds the tables as of `v` and the
+views as of the tables at `v-1`.
+
+**The restart.** The database's tables cover version `F` (its last flush): the views there are those of the tables at
+`F-1`. Recovery replays the WAL after `F` into the tables (version `V`, the last released tick), and hands the engine
+the replayed ticks' changes from tick `F` on (the WAL keeps tick `F`'s record: it truncates only records before the
+flushed version). At its first tick the engine first catches the views up, before the tick: the tiered tables read
+as of `V-1` (their last record undone in the overlay), showing the net change of ticks `F..V-1` as their change, and
+only the durable rules run. Then the boot tick runs as any tick: the tables show tick `V`'s change, and the views
+move with it. What memory held and the restart lost (views that are not durable, aggregates' groups, the next
+state's other supports, recursive strata) is derived again at the boot tick in full. A view whose definition is new
+(a new program, or a store from before views) starts empty and is built at that boot from its tables' rows, once.
+
+**Definitions.** A view's keyspace is named by its relation and a hash of its definition (its rules, and the
+definitions of the views and the schemas of the tables it reads): another program's view of the same name is
+another keyspace, and its rows are never read for this one. Each keyspace has a definition key, written with the
+view's complete rows: a store holds it only once the view is complete there.

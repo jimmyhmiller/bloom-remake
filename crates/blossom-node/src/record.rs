@@ -87,9 +87,14 @@ impl Executor for Recording {
 
     /// The trace holds the whole state the executor starts from (read from the database, O(state)): a replay starts
     /// from it without the store.
-    fn reset_on(&mut self, carried: Instance, cold: Arc<dyn blossom_engine::ColdTables>) -> Result<(), EvalError> {
+    fn reset_on(
+        &mut self,
+        carried: Instance,
+        cold: Arc<dyn blossom_engine::ColdTables>,
+        resume: blossom_engine::Resume,
+    ) -> Result<(), EvalError> {
         self.boot(&crate::eval::whole_instance(carried.clone(), &*cold)?)?;
-        self.inner.reset_on(carried, cold)
+        self.inner.reset_on(carried, cold, resume)
     }
 
     fn step(&mut self, input: &StepInput<'_>, observe: &[RelId]) -> Result<StepOutput, EvalError> {

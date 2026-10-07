@@ -94,8 +94,9 @@ type RowsBy = blossom_base::det::DetMap<Vec<Value>, BTreeSet<Row>>;
 /// A probe's rows kept in the hot tier (sorted), and when they were last used.
 type Kept = (Arc<Vec<Row>>, u64);
 
-/// How many rows a tiered table keeps of its recent probes by default (`EngineConfig::hot_rows`).
-pub(crate) const HOT_ROWS: usize = 1 << 14;
+/// How many rows an engine's tiered stores keep of their recent probes, together, by default
+/// (`EngineConfig::hot_rows`).
+pub(crate) const HOT_ROWS: usize = 1 << 16;
 
 /// A tiered table's hot tier: the cold side's answers to its recent probes (the rows with given values in given
 /// columns, sorted, and whether a row is there), kept equal to the cold side's newest version as it moves: each
@@ -108,7 +109,8 @@ struct Hot {
     probes: BTreeMap<Vec<usize>, blossom_base::det::DetMap<Vec<Value>, Kept>>,
     /// Probes known to find more rows than one may keep: a range probe of one reads the cold side's range.
     large: BTreeMap<Vec<usize>, blossom_base::det::DetMap<Vec<Value>, u64>>,
-    contains: blossom_base::det::DetMap<Row, (bool, u64)>,
+    /// Rows asked for: their support on the cold side (a table's 0 or 1), and when last used.
+    contains: blossom_base::det::DetMap<Row, (u64, u64)>,
     /// Range probes of large prefixes, by the probe's columns and the range's column, then their values: each range
     /// asked (its bounds), its rows (sorted) and when they were last used. A range asked again (a follower fetching
     /// from where it stands) costs no read of the cold side.
@@ -251,24 +253,25 @@ impl Hot {
         self.trim();
     }
 
-    fn holds(&mut self, row: &Row) -> Option<bool> {
+    fn support(&mut self, row: &Row) -> Option<u64> {
         let now = self.tick();
-        let (present, used) = self.contains.get_mut(row)?;
+        let (support, used) = self.contains.get_mut(row)?;
         *used = now;
-        Some(*present)
+        Some(*support)
     }
 
-    fn keep_holds(&mut self, row: &Row, present: bool) {
+    fn keep_support(&mut self, row: &Row, support: u64) {
         let now = self.tick();
-        if self.contains.insert(row.clone(), (present, now)).is_none() {
+        if self.contains.insert(row.clone(), (support, now)).is_none() {
             self.rows += 1;
         }
         self.trim();
     }
 
-    /// The cold side now holds `row` as `present`: every kept answer it touches follows (a probe that outgrows what
-    /// one may keep goes, and is known large).
-    fn caught_up(&mut self, row: &Row, present: bool) {
+    /// The cold side now holds `row` with `support` (absent at 0): every kept answer it touches follows (a probe that
+    /// outgrows what one may keep goes, and is known large).
+    fn caught_up(&mut self, row: &Row, support: u64) {
+        let present = support > 0;
         let largest = self.largest();
         for (cols, by_values) in self.probes.iter_mut() {
             let values = key(row, cols);
@@ -324,15 +327,30 @@ impl Hot {
             });
         }
         if let Some((held, _)) = self.contains.get_mut(row) {
-            *held = present;
+            *held = support;
         }
     }
 
     /// Past the budget, the least recently used half goes.
     fn trim(&mut self) {
-        if self.rows <= self.budget {
-            return;
+        if self.rows > self.budget {
+            self.halve();
         }
+    }
+
+    /// Down to `target` rows, the least recently used half at a time.
+    fn shrink(&mut self, target: usize) {
+        while self.rows > target {
+            let before = self.rows;
+            self.halve();
+            if self.rows >= before {
+                return;
+            }
+        }
+    }
+
+    /// The least recently used half of what is kept goes.
+    fn halve(&mut self) {
         let mut uses: Vec<u64> = self
             .probes
             .values()
@@ -387,7 +405,14 @@ pub(crate) struct Tiered {
     key: Vec<usize>,
     /// Whether the table's rows can hold blobs (its in-memory store counts them).
     blobs: bool,
-    overlay: blossom_base::det::DetMap<Row, (bool, u64)>,
+    overlay: blossom_base::det::DetMap<Row, (u64, u64)>,
+    /// A durable view (docs/design/DATABASE.md §8): its rows have support counts, which the overlay and the cold side
+    /// hold (a table's are 0 or 1, its carry), and its rules write it within a tick.
+    counted: bool,
+    /// The tick whose changes the store takes now (a durable view's label for its overlay entries).
+    now: u64,
+    /// A durable view's rows whose support changed since the changes were last taken, with their support before.
+    changed: BTreeMap<Row, u64>,
     /// The overlay's rows by the tick that set them.
     by_tick: BTreeMap<u64, BTreeSet<Row>>,
     /// The overlay's rows by the values of the columns a probe asks for: built for a column list on its first probe
@@ -430,6 +455,8 @@ impl Tiered {
         key: Vec<usize>,
         blobs: bool,
         hot_rows: usize,
+        counted: bool,
+        fresh: bool,
     ) -> Result<Tiered, EvalError> {
         let len = match cold.version()? {
             Some(v) => cold.count(rel, v)?,
@@ -441,6 +468,9 @@ impl Tiered {
             key,
             blobs,
             overlay: blossom_base::det::DetMap::new(),
+            counted,
+            now: 0,
+            changed: BTreeMap::new(),
             by_tick: BTreeMap::new(),
             overlay_by: RefCell::new(BTreeMap::new()),
             hot: RefCell::new(Hot {
@@ -450,31 +480,60 @@ impl Tiered {
             seen: RefCell::new(BTreeMap::new()),
             epoch: std::cell::Cell::new(0),
             staged: (BTreeSet::new(), BTreeSet::new()),
-            fresh: true,
+            fresh,
             first: false,
             len,
         })
     }
 
-    /// Whether the cold side holds `row` at its newest version (the carry before any tick's change).
-    fn cold_carried(&self, row: &Row) -> Result<bool, EvalError> {
-        if let Some(present) = self.hot.borrow_mut().holds(row) {
-            return Ok(present);
+    /// `row`'s support on the cold side at its newest version (a table's: whether it is carried before any tick's
+    /// change).
+    fn cold_support(&self, row: &Row) -> Result<u64, EvalError> {
+        if let Some(support) = self.hot.borrow_mut().support(row) {
+            return Ok(support);
         }
-        let present = match self.cold.version()? {
-            Some(v) => self.cold.contains(self.rel, row, v)?,
-            None => false,
+        let support = match self.cold.version()? {
+            Some(v) => self.cold.support(self.rel, row, v)?,
+            None => 0,
         };
-        self.hot.borrow_mut().keep_holds(row, present);
-        Ok(present)
+        self.hot.borrow_mut().keep_support(row, support);
+        Ok(support)
     }
 
-    /// Whether `row` is carried.
-    fn carried(&self, row: &Row) -> Result<bool, EvalError> {
-        if let Some((present, _)) = self.overlay.get(row) {
-            return Ok(*present);
+    /// Whether the cold side holds `row` at its newest version.
+    fn cold_carried(&self, row: &Row) -> Result<bool, EvalError> {
+        Ok(self.cold_support(row)? > 0)
+    }
+
+    /// `row`'s support: as the overlay says, else as the cold side does.
+    fn support(&self, row: &Row) -> Result<u64, EvalError> {
+        match self.overlay.get(row) {
+            Some((support, _)) => Ok(*support),
+            None => self.cold_support(row),
         }
-        self.cold_carried(row)
+    }
+
+    /// Whether `row` is carried (a durable view's: has support).
+    fn carried(&self, row: &Row) -> Result<bool, EvalError> {
+        Ok(self.support(row)? > 0)
+    }
+
+    /// Sets `row`'s support in the overlay, as tick `tick` left it.
+    fn set_overlay(&mut self, row: &Row, support: u64, tick: u64) {
+        match self.overlay.insert(row.clone(), (support, tick)) {
+            Some((_, old)) => {
+                if old != tick
+                    && let Some(rows) = self.by_tick.get_mut(&old)
+                {
+                    rows.remove(row);
+                    if rows.is_empty() {
+                        self.by_tick.remove(&old);
+                    }
+                }
+            }
+            None => self.index_overlay(row, true),
+        }
+        self.by_tick.entry(tick).or_default().insert(row.clone());
     }
 
     /// The cold side's rows for a probe on `cols` holding `values` (and, with `range`, the rows of those that
@@ -635,7 +694,7 @@ impl Tiered {
             index
         });
         for row in index.get(values).into_iter().flatten() {
-            let present = self.overlay.get(row).is_some_and(|(present, _)| *present);
+            let present = self.overlay.get(row).is_some_and(|(support, _)| *support > 0);
             match (cold.binary_search(row), present) {
                 (Ok(at), false) => {
                     gone.insert(at);
@@ -728,7 +787,7 @@ impl Tiered {
             .get(values)
             .into_iter()
             .flatten()
-            .filter(|r| self.overlay.get(*r).is_some_and(|(present, _)| !*present))
+            .filter(|r| self.overlay.get(*r).is_some_and(|(support, _)| *support == 0))
             .count()
     }
 
@@ -891,6 +950,18 @@ impl Store {
         }
     }
 
+    /// How many rows a tiered store's hot tier keeps.
+    pub fn hot_rows(&self) -> usize {
+        self.tiered.as_ref().map_or(0, |t| t.hot.borrow().rows)
+    }
+
+    /// Shrinks a tiered store's hot tier to `target` rows, the least recently used first.
+    pub fn shrink_hot(&mut self, target: usize) {
+        if let Some(t) = self.tiered.as_deref_mut() {
+            t.hot.get_mut().shrink(target);
+        }
+    }
+
     /// How many rows memory holds: the present rows, or a tiered store's overlay and other support.
     pub fn resident_len(&self) -> usize {
         match &self.tiered {
@@ -915,8 +986,10 @@ impl Store {
             return Ok(());
         }
         self.touched = true;
-        if self.tiered.is_some() {
-            return self.add_tiered(row, w);
+        match self.tiered.as_deref() {
+            Some(t) if t.counted => return self.add_counted(row, w),
+            Some(_) => return self.add_tiered(row, w),
+            None => {}
         }
         let Some(spec) = self.cell.clone() else {
             let count = self.counts.entry(row.clone()).or_insert(0);
@@ -967,6 +1040,72 @@ impl Store {
         Ok(())
     }
 
+    /// A durable view's support (docs/design/DATABASE.md §8): its count as the overlay or the cold side holds it,
+    /// moved by `w`; the row shows or hides when it crosses zero.
+    fn add_counted(&mut self, row: Row, w: i64) -> ExprResult<()> {
+        let t = self
+            .tiered
+            .as_deref_mut()
+            .ok_or_else(|| bug("a counted add to a store that is not tiered".into()))?;
+        let before = t.support(&row).map_err(ExprError::Eval)?;
+        let after = i64::try_from(before)
+            .ok()
+            .and_then(|b| b.checked_add(w))
+            .and_then(|a| u64::try_from(a).ok())
+            .ok_or_else(|| bug(format!("the support of {row:?} went negative")))?;
+        t.changed.entry(row.clone()).or_insert(before);
+        let now = t.now;
+        t.set_overlay(&row, after, now);
+        match (before > 0, after > 0) {
+            (false, true) => self.show(row),
+            (true, false) => self.hide(&row),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// A tiered table's row as an earlier version held it (`present`), in the overlay, until a carry replaces the
+    /// entry: the restart's catch-up reads the tables as of the tick before the last one (DATABASE.md §8).
+    pub fn rewind(&mut self, row: &Row, present: bool) -> Result<(), EvalError> {
+        let t = self
+            .tiered
+            .as_deref_mut()
+            .ok_or_else(|| internal_error!("a rewind of a store that is not tiered"))?;
+        let was = t.carried(row)?;
+        t.set_overlay(row, u64::from(present), u64::MAX);
+        match (was, present) {
+            (false, true) => t.len += 1,
+            (true, false) => t.len = t.len.saturating_sub(1),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// A durable view's rows whose support changed since they were last taken: each with its support before and now.
+    pub fn take_changes(&mut self) -> Result<Vec<(Row, u64, u64)>, EvalError> {
+        let Some(t) = self.tiered.as_deref_mut() else {
+            return Ok(Vec::new());
+        };
+        let changed = std::mem::take(&mut t.changed);
+        let mut out = Vec::with_capacity(changed.len());
+        for (row, before) in changed {
+            let now = t.support(&row)?;
+            if now != before {
+                out.push((row, before, now));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Sets the store's rows and change directly (the restart's catch-up: a tiered table's net change since the
+    /// views' version, DATABASE.md §8).
+    pub fn set_change(&mut self, ins: BTreeSet<Row>, del: BTreeSet<Row>) {
+        self.touched = !ins.is_empty() || !del.is_empty();
+        self.generation = self.generation.wrapping_add(1);
+        self.ins = ins;
+        self.del = del;
+    }
+
     /// A tiered store's support other than the carry (a program fact's).
     fn add_tiered(&mut self, row: Row, w: i64) -> ExprResult<()> {
         let was = self.contains(&row).map_err(ExprError::Eval)?;
@@ -997,18 +1136,7 @@ impl Store {
             .tiered
             .as_deref_mut()
             .ok_or_else(|| internal_error!("a carry into a store that is not tiered"))?;
-        match t.overlay.insert(row.clone(), (present, tick)) {
-            Some((_, old)) => {
-                if let Some(rows) = t.by_tick.get_mut(&old) {
-                    rows.remove(row);
-                    if rows.is_empty() {
-                        t.by_tick.remove(&old);
-                    }
-                }
-            }
-            None => t.index_overlay(row, true),
-        }
-        t.by_tick.entry(tick).or_default().insert(row.clone());
+        t.set_overlay(row, u64::from(present), tick);
         if other {
             return Ok(());
         }
@@ -1032,10 +1160,11 @@ impl Store {
 
     /// A tiered store at a tick's start (after its change was cleared): the last carry's change becomes the tick's,
     /// and the overlay's entries the cold side has caught up with go.
-    pub fn begin_tick(&mut self) -> Result<(), EvalError> {
+    pub fn begin_tick(&mut self, tick: u64) -> Result<(), EvalError> {
         let Some(t) = self.tiered.as_deref_mut() else {
             return Ok(());
         };
+        t.now = tick;
         t.first = std::mem::take(&mut t.fresh);
         if t.first {
             // Every row is new to the rules (their stores start empty after a reset): read whole, this once.
@@ -1052,8 +1181,8 @@ impl Store {
             let kept = t.by_tick.split_off(&v.saturating_add(1));
             for rows in std::mem::replace(&mut t.by_tick, kept).into_values() {
                 for row in rows {
-                    if let Some((present, _)) = t.overlay.remove(&row) {
-                        t.hot.get_mut().caught_up(&row, present);
+                    if let Some((support, _)) = t.overlay.remove(&row) {
+                        t.hot.get_mut().caught_up(&row, support);
                     }
                     t.index_overlay(&row, false);
                 }
@@ -1110,11 +1239,13 @@ impl Store {
         Ok((self.contains(row)? && !self.ins.contains(row)) || self.del.contains(row))
     }
 
-    /// A tiered store in the first tick after its reset: whether `row` was carried at the reset (the table's next
-    /// state before the tick). `None`: not such a store, or not its first tick.
-    pub fn carried_at_reset(&self, row: &Row) -> Result<Option<bool>, EvalError> {
+    /// A tiered table: whether `row` is carried into this tick, its next state as the last tick left it (a tiered
+    /// store takes each tick's change at that tick's end, and nothing changes its carry within a tick). In the first
+    /// tick after a reset that showed all its rows as new, the cold side's. `None`: not a tiered table.
+    pub fn carried_in(&self, row: &Row) -> Result<Option<bool>, EvalError> {
         match &self.tiered {
             Some(t) if t.first => t.cold_carried(row).map(Some),
+            Some(t) if !t.counted => t.carried(row).map(Some),
             _ => Ok(None),
         }
     }

@@ -21,6 +21,16 @@ pub trait ColdTables: Send + Sync {
     fn tables(&self) -> Vec<RelId>;
     /// Whether `rel` holds `row` as of `at`.
     fn contains(&self, rel: RelId, row: &Row, at: u64) -> Result<bool, EvalError>;
+    /// `row`'s support in `rel` as of `at`: for a table, 1 if it holds the row, else 0; for a durable view
+    /// (docs/design/DATABASE.md §8), its count of derivations.
+    fn support(&self, rel: RelId, row: &Row, at: u64) -> Result<u64, EvalError> {
+        Ok(u64::from(self.contains(rel, row, at)?))
+    }
+    /// Opens the keyspaces of the program's durable views (each with its definition's hash) for this run: `true` if
+    /// every one is complete there (its rows as of the views' version, DATABASE.md §8) and `resume` (the caller can
+    /// catch them up); else every view starts empty in a keyspace of its own, and is complete once the first tick
+    /// writes it.
+    fn open_views(&self, views: &[(RelId, [u8; 32])], resume: bool) -> Result<bool, EvalError>;
     /// The rows of `rel` as of `at` whose columns `cols` hold `values` and, with `range`, whose column lies within
     /// its bounds. No columns and no range: every row.
     fn probe(
@@ -61,4 +71,14 @@ pub trait ColdTables: Send + Sync {
         let rows = self.probe(rel, cols, values, None, at)?;
         Ok((rows.len() <= max).then_some(rows))
     }
+}
+
+/// How an engine resumes on the cold side ([`crate::Engine::reset_on`]): the deployment's static rows (fed as each
+/// tick's events; they name the views' definitions with the program's), and the catch-up of the durable views if
+/// the caller has one (the WAL's ticks since the database's views, docs/design/DATABASE.md §8; `None`: the views are
+/// built again).
+#[derive(Clone, Debug, Default)]
+pub struct Resume {
+    pub statics: Vec<(RelId, Row)>,
+    pub catch_up: Option<blossom_ir::tick::CatchUp>,
 }

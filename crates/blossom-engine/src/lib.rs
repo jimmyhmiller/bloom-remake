@@ -17,6 +17,6 @@ mod rule;
 mod store;
 mod strata;
 
-pub use cold::{ColRange, ColdTables};
+pub use cold::{ColRange, ColdTables, Resume};
 pub use engine::{Engine, EngineConfig};
 

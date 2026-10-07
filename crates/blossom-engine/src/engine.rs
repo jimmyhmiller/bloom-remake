@@ -57,8 +57,8 @@ pub struct EngineConfig {
     /// This node's role when it is a client member (CLIENTS.md §2): its id is outside the deployment, so `roles` and
     /// `node_names` do not name it.
     pub client_role: Option<RoleId>,
-    /// How many rows each tiered table keeps of its recent probes (docs/design/DATABASE.md §7, the hot tier; `None`:
-    /// [`crate::store::HOT_ROWS`]).
+    /// How many rows the engine's tiered stores keep of their recent probes, together (docs/design/DATABASE.md §7,
+    /// the hot tier; `None`: [`crate::store::HOT_ROWS`]).
     pub hot_rows: Option<usize>,
     /// Keep every durable table in memory even when started on the node's database ([`Engine::reset_on`] tiers
     /// none): a deployment's `storage.tiered = false`, for state that fits in memory and the in-memory engine's speed.
@@ -136,6 +136,15 @@ pub struct Engine {
     hot_rows: usize,
     /// Tier no table (`EngineConfig::in_memory`).
     in_memory: bool,
+    /// The durable views kept on the cold side since the last reset (docs/design/DATABASE.md §8), and the rules that
+    /// write them.
+    views: BTreeSet<RelId>,
+    view_rules: BTreeSet<RuleId>,
+    /// The catch-up the first tick after a resume runs first, if the views resumed from the cold side.
+    boot: Option<blossom_ir::tick::CatchUp>,
+    /// The first tick after resuming on the cold side with its views: what memory held and the restart lost is
+    /// derived in full (the views and tiered tables show only the tick's change).
+    rebuilding: bool,
 }
 
 fn kinds(p: &Program) -> Vec<Option<Kind>> {
@@ -555,6 +564,10 @@ impl Engine {
             tiered: BTreeSet::new(),
             hot_rows: cfg.hot_rows.unwrap_or(crate::store::HOT_ROWS),
             in_memory: cfg.in_memory,
+            views: BTreeSet::new(),
+            view_rules: BTreeSet::new(),
+            boot: None,
+            rebuilding: false,
             program,
         };
         engine.build_indexes()?;
@@ -602,6 +615,10 @@ impl Engine {
     /// sees the carried state, the facts and its inputs as new.
     pub fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
         self.tiered.clear();
+        self.views.clear();
+        self.view_rules.clear();
+        self.boot = None;
+        self.rebuilding = false;
         for s in self.stores.values_mut() {
             *s = s.emptied();
         }
@@ -623,7 +640,12 @@ impl Engine {
     /// Starts over as [`Engine::reset`] does, from the durable tables of `cold` at its newest version and the volatile
     /// rows `carried` (none of a durable table's): the tables that can be tiered are (docs/design/DATABASE.md §7),
     /// their rows read from the cold side and memory keeping only what it does not hold yet; the others are loaded.
-    pub fn reset_on(&mut self, carried: Instance, cold: Arc<dyn crate::cold::ColdTables>) -> Result<(), EvalError> {
+    pub fn reset_on(
+        &mut self,
+        carried: Instance,
+        cold: Arc<dyn crate::cold::ColdTables>,
+        resume: crate::cold::Resume,
+    ) -> Result<(), EvalError> {
         if let Some(rel) = self
             .tierable
             .keys()
@@ -649,6 +671,30 @@ impl Engine {
             }
         }
         self.reset(carried)?;
+        let p = self.program.clone();
+        let p = p.get();
+        for rel in tiering.keys() {
+            self.tiered.insert(*rel);
+        }
+        // The durable views (those whose rows can hold blobs stay in memory: a view's blob is not counted as the
+        // carried rows' are).
+        let views: BTreeSet<RelId> = if self.in_memory {
+            BTreeSet::new()
+        } else {
+            self.durable_views()
+                .into_iter()
+                .filter(|r| !rel_holds_blobs(p, *r))
+                .collect()
+        };
+        let defs = self.view_definitions(&views, &resume.statics)?;
+        let ready = if views.is_empty() {
+            false
+        } else {
+            cold.open_views(&defs, resume.catch_up.is_some())?
+        };
+        // Resuming: the views are as the cold side keeps them, caught up at the first tick; else they are built at
+        // the first tick from all their tables' rows, as after any reset.
+        let resuming = ready && resume.catch_up.is_some();
         for (rel, key) in tiering {
             self.stores.insert(
                 StoreKey::Main(rel),
@@ -656,13 +702,312 @@ impl Engine {
                     rel,
                     cold.clone(),
                     key,
-                    rel_holds_blobs(self.program.get(), rel),
+                    rel_holds_blobs(p, rel),
                     self.hot_rows,
+                    false,
+                    !resuming,
                 )?),
             );
-            self.tiered.insert(rel);
+        }
+        for rel in &views {
+            self.stores.insert(
+                StoreKey::Main(*rel),
+                Store::tiered(crate::store::Tiered::new(
+                    *rel,
+                    cold.clone(),
+                    Vec::new(),
+                    false,
+                    self.hot_rows,
+                    true,
+                    !resuming,
+                )?),
+            );
+        }
+        self.view_rules = p
+            .rules
+            .iter_enumerated()
+            .filter(|(id, r)| self.plans.contains_key(id) && views.contains(&r.head.rel))
+            .map(|(id, _)| id)
+            .collect();
+        self.views = views;
+        if resuming {
+            // The static rows and facts are as before the restart: loaded without showing as a change.
+            let wrap = |e: ExprError| to_eval(e, Tick(0), None);
+            let mut statics: BTreeMap<StoreKey, BTreeSet<Row>> = BTreeMap::new();
+            for (rel, row) in &resume.statics {
+                statics.entry(StoreKey::Main(*rel)).or_default().insert(row.clone());
+            }
+            for (key, rows) in &statics {
+                for row in rows {
+                    self.store(*key)?.add(row.clone(), 1).map_err(wrap)?;
+                }
+            }
+            for f in &p.facts {
+                let row = f
+                    .row
+                    .iter()
+                    .map(|c| {
+                        p.consts
+                            .get(*c)
+                            .cloned()
+                            .ok_or_else(|| internal_error!("unknown constant {c:?}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.store(StoreKey::Main(f.rel))?
+                    .add(Row::from(row), 1)
+                    .map_err(wrap)?;
+            }
+            self.facts_loaded = true;
+            self.inputs = statics;
+            self.settle(Tick(0))?;
+            self.stores.clear_deltas();
+            self.boot = resume.catch_up;
+            self.rebuilding = true;
         }
         Ok(())
+    }
+
+    /// Each durable view's definition hash (docs/design/DATABASE.md §8): its rules, and what they read (a view's
+    /// definition, a table's schema, a static relation's rows), so another program's view or other statics name
+    /// another keyspace.
+    fn view_definitions(
+        &self,
+        views: &BTreeSet<RelId>,
+        statics: &[(RelId, Row)],
+    ) -> Result<Vec<(RelId, [u8; 32])>, EvalError> {
+        let p = self.program.get();
+        let mut done: BTreeMap<RelId, [u8; 32]> = BTreeMap::new();
+        let mut pending: Vec<RelId> = views.iter().copied().collect();
+        let mut guard = 0usize;
+        while let Some(rel) = pending.pop() {
+            guard += 1;
+            if guard > views.len().saturating_mul(views.len()).saturating_add(64) {
+                return Err(internal_error!("the durable views' definitions do not order").into());
+            }
+            if done.contains_key(&rel) {
+                continue;
+            }
+            let rules: Vec<&Rule> = p
+                .rules
+                .iter_enumerated()
+                .filter(|(id, r)| r.head.rel == rel && self.plans.contains_key(id))
+                .map(|(_, r)| r)
+                .collect();
+            let mut reads: BTreeSet<RelId> = BTreeSet::new();
+            for r in &rules {
+                for l in &r.body.lits {
+                    match l {
+                        Literal::Pos(a) | Literal::Neg(a) => {
+                            reads.insert(a.rel);
+                        }
+                        Literal::Lookup { rel, .. } => {
+                            reads.insert(*rel);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let waiting: Vec<RelId> = reads
+                .iter()
+                .copied()
+                .filter(|r| views.contains(r) && !done.contains_key(r) && *r != rel)
+                .collect();
+            if !waiting.is_empty() {
+                pending.push(rel);
+                pending.extend(waiting);
+                continue;
+            }
+            let mut h = blake3::Hasher::new();
+            let mut put = |bytes: &[u8]| {
+                h.update(&(bytes.len() as u64).to_be_bytes());
+                h.update(bytes);
+            };
+            let decl = p
+                .rels
+                .get(rel)
+                .ok_or_else(|| internal_error!("durable view {rel:?} is not declared"))?;
+            put(decl.name.to_string().as_bytes());
+            put(format!("{:?}", decl.schema).as_bytes());
+            let mut texts: Vec<String> = rules.iter().map(|r| blossom_ir::printer::rule_text(p, r)).collect();
+            texts.sort();
+            for t in &texts {
+                put(t.as_bytes());
+            }
+            for r in &reads {
+                let d = p
+                    .rels
+                    .get(*r)
+                    .ok_or_else(|| internal_error!("relation {r:?} is not declared"))?;
+                put(d.name.to_string().as_bytes());
+                put(format!("{:?}", d.schema).as_bytes());
+                if let Some(def) = done.get(r) {
+                    put(def);
+                }
+                if d.class == RelClass::Static {
+                    let mut rows: Vec<String> = statics
+                        .iter()
+                        .filter(|(sr, _)| sr == r)
+                        .map(|(_, row)| format!("{row:?}"))
+                        .chain(p.facts.iter().filter(|f| f.rel == *r).map(|f| format!("{:?}", f.row)))
+                        .collect();
+                    rows.sort();
+                    for row in &rows {
+                        put(row.as_bytes());
+                    }
+                }
+            }
+            done.insert(rel, *h.finalize().as_bytes());
+        }
+        Ok(views.iter().filter_map(|v| done.get(v).map(|d| (*v, *d))).collect())
+    }
+
+    /// The derived relations that are functions of the tiered tables alone (docs/design/DATABASE.md §8): each rule
+    /// defining one is a deductive rule kept by delta queries (no aggregate, no recursion, no reading of time), whose
+    /// atoms read tiered tables, static relations or other such relations; no fact holds a row of one, and no other
+    /// rule writes one. Their rows can be kept in the database with the tables', and are the same after a restart.
+    pub fn durable_views(&self) -> BTreeSet<RelId> {
+        let p = self.program.get();
+        let recursive: BTreeSet<RelId> = self
+            .strata
+            .iter()
+            .filter(|s| s.recursive)
+            .flat_map(|s| s.rules.iter().chain(&s.aggregates))
+            .filter_map(|id| p.rules.get(*id).map(|r| r.head.rel))
+            .collect();
+        let facts: BTreeSet<RelId> = p.facts.iter().map(|f| f.rel).collect();
+        let mut by_head: BTreeMap<RelId, Vec<RuleId>> = BTreeMap::new();
+        for (id, rule) in p.rules.iter_enumerated() {
+            if self.plans.contains_key(&id) {
+                by_head.entry(rule.head.rel).or_default().push(id);
+            }
+        }
+        let mut views: BTreeSet<RelId> = by_head
+            .iter()
+            .filter(|(rel, ids)| {
+                p.rels
+                    .get(**rel)
+                    .is_some_and(|d| d.class == RelClass::Idb && !d.durable)
+                    && !self.scoped.contains(rel)
+                    && !recursive.contains(rel)
+                    && !facts.contains(rel)
+                    && ids.iter().all(|id| {
+                        let (Some(rule), Some(plan)) = (p.rules.get(*id), self.plans.get(id)) else {
+                            return false;
+                        };
+                        rule.kind == RuleKind::Deductive
+                            && plan.regime == Regime::Delta
+                            && !plan.aggregate
+                            && plan.frame.is_none()
+                    })
+            })
+            .map(|(rel, _)| *rel)
+            .collect();
+        let source = |rel: &RelId, views: &BTreeSet<RelId>| {
+            self.tiered.contains(rel)
+                || views.contains(rel)
+                || p.rels.get(*rel).is_some_and(|d| d.class == RelClass::Static)
+        };
+        loop {
+            let reads_other = |rel: &RelId| {
+                by_head.get(rel).into_iter().flatten().any(|id| {
+                    p.rules.get(*id).is_none_or(|rule| {
+                        rule.body.lits.iter().any(|l| match l {
+                            Literal::Pos(a) | Literal::Neg(a) => a.sender.is_some() || !source(&a.rel, &views),
+                            Literal::Lookup { rel, .. } => !source(rel, &views),
+                            _ => false,
+                        })
+                    })
+                })
+            };
+            let out: Vec<RelId> = views.iter().copied().filter(|r| reads_other(r)).collect();
+            if out.is_empty() {
+                return views;
+            }
+            for r in out {
+                views.remove(&r);
+            }
+        }
+    }
+
+    /// A resume's catch-up of the durable views, before the first tick (docs/design/DATABASE.md §8): the tiered tables
+    /// read as of the tick before the last released one (its change undone in their overlays), showing the net
+    /// change since the views' version, and only the views' rules run; then the last tick's change is carried, to
+    /// show as the first tick's change. The views' changes are the first tick's.
+    fn catch_up(&mut self, input: &StepInput<'_>, c: &blossom_ir::tick::CatchUp) -> Result<(), EvalError> {
+        let program = self.program.clone();
+        let p = program.get();
+        self.stores.clear_deltas();
+        let empty = Vec::new();
+        for rel in self.tiered.clone() {
+            let store = self.store(StoreKey::Main(rel))?;
+            for row in c.last.inserted.get(&rel).unwrap_or(&empty) {
+                store.rewind(row, false)?;
+            }
+            for row in c.last.deleted.get(&rel).unwrap_or(&empty) {
+                store.rewind(row, true)?;
+            }
+            let ins: BTreeSet<Row> = c.before.inserted.get(&rel).unwrap_or(&empty).iter().cloned().collect();
+            let del: BTreeSet<Row> = c.before.deleted.get(&rel).unwrap_or(&empty).iter().cloned().collect();
+            store.set_change(ins, del);
+        }
+        for rel in self.views.clone() {
+            self.store(StoreKey::Main(rel))?.begin_tick(input.tick.0)?;
+        }
+        let strata = self.strata.clone();
+        for s in strata.iter() {
+            for id in &s.rules {
+                if self.view_rules.contains(id) {
+                    self.maintain(p, input, *id)?;
+                }
+            }
+            self.settle(input.tick)?;
+        }
+        for rel in self.tiered.clone() {
+            let store = self.store(StoreKey::Main(rel))?;
+            for row in c.last.deleted.get(&rel).unwrap_or(&empty) {
+                store.carry(row, false, c.last_tick)?;
+            }
+            for row in c.last.inserted.get(&rel).unwrap_or(&empty) {
+                store.carry(row, true, c.last_tick)?;
+            }
+        }
+        self.stores.clear_deltas();
+        Ok(())
+    }
+
+    /// Keeps the tiered stores' hot tiers within the engine's budget together: past it, the largest gives up half,
+    /// the least recently used first, until they fit.
+    fn balance_hot(&mut self) {
+        let keys: Vec<StoreKey> = self
+            .tiered
+            .iter()
+            .chain(&self.views)
+            .map(|r| StoreKey::Main(*r))
+            .collect();
+        loop {
+            let sizes: Vec<(usize, StoreKey)> = keys
+                .iter()
+                .filter_map(|k| self.stores.get(k).map(|s| (s.hot_rows(), *k)))
+                .collect();
+            let total: usize = sizes.iter().map(|(n, _)| n).sum();
+            if total <= self.hot_rows {
+                return;
+            }
+            let Some((largest, key)) = sizes.into_iter().max_by_key(|(n, _)| *n) else {
+                return;
+            };
+            if largest == 0 {
+                return;
+            }
+            let Some(s) = self.stores.get_mut(&key) else {
+                return;
+            };
+            s.shrink_hot(largest / 2);
+            if s.hot_rows() >= largest {
+                // Nothing more to give up.
+                return;
+            }
+        }
     }
 
     /// A store to write. A lattice store written is settled at the next [`Engine::settle`].
@@ -714,9 +1059,13 @@ impl Engine {
         let wrap = |e: ExprError| to_eval(e, tick, None);
         // 1. What changes.
         self.stores.clear_deltas();
+        // A resume's catch-up of the durable views runs first (DATABASE.md §8).
+        if let Some(catch_up) = self.boot.take() {
+            self.catch_up(input, &catch_up)?;
+        }
         // A tiered table took the last tick's change at that tick's end: it shows as this tick's change.
-        for rel in self.tiered.clone() {
-            self.store(StoreKey::Main(rel))?.begin_tick()?;
+        for rel in self.tiered.iter().chain(&self.views).copied().collect::<Vec<_>>() {
+            self.store(StoreKey::Main(rel))?.begin_tick(input.tick.0)?;
         }
         let pending = std::mem::take(&mut self.pending);
         for (rel, rows) in &pending.deleted {
@@ -920,6 +1269,15 @@ impl Engine {
                 .unwrap_or_default();
             out.observed.insert(*rel, rows);
         }
+        // The durable views' changes (DATABASE.md §8).
+        for rel in self.views.clone() {
+            let changes = self.store(StoreKey::Main(rel))?.take_changes()?;
+            if !changes.is_empty() {
+                out.views.insert(rel, changes);
+            }
+        }
+        self.rebuilding = false;
+        self.balance_hot();
         // A tiered table takes its change now: its rows are the next tick's from here on.
         for rel in self.tiered.clone() {
             let store = self.store(StoreKey::Main(rel))?;
@@ -1012,9 +1370,9 @@ impl Engine {
         rows.extend(next.delta().map(|(r, _)| r));
         let (mut ins, mut gone) = (Vec::new(), Vec::new());
         for row in rows {
-            // The first tick after a reset onto the cold side compares with what was carried then, as the baseline
-            // does for the other relations.
-            let was = match rel.carried_at_reset(row)? {
+            // A tiered table's next state as the last tick left it is its carry (the first tick after a reset that
+            // showed all its rows as new: what the cold side held, as the baseline does for the other relations).
+            let was = match rel.carried_in(row)? {
                 Some(carried) => carried,
                 None => frame_holds(rel, del, keep, row, true)? || next.contained(row)?,
             };
@@ -1118,7 +1476,8 @@ impl Engine {
                 }
             }
             let unchanged = !plan.dep_keys.iter().any(|k| self.stores.changed(k));
-            if plan.regime == Regime::Delta && unchanged {
+            let rebuild = self.rebuilding && !self.view_rules.contains(&id);
+            if plan.regime == Regime::Delta && unchanged && !rebuild {
                 return Ok(());
             }
             if plan.regime == Regime::Recompute
@@ -1143,7 +1502,10 @@ impl Engine {
                 self.apply(p, input, rule, &plan, terms)
             }
             Regime::Delta => {
-                let terms = self.evaluate(p, input, rule, &plan, false)?;
+                // The first tick after a resume derives what memory lost in full (the views it reads show only the
+                // tick's change).
+                let full = self.rebuilding && !self.view_rules.contains(&id);
+                let terms = self.evaluate(p, input, rule, &plan, full)?;
                 self.count(rule.id, terms.examined, terms.steps);
                 self.apply(p, input, rule, &plan, terms)
             }
@@ -1596,7 +1958,7 @@ impl Engine {
     fn recursive_stratum(&mut self, p: &Program, input: &StepInput<'_>, s: &Stratum) -> Result<(), EvalError> {
         let tick = input.tick;
         let ids: Vec<RuleId> = s.aggregates.iter().chain(&s.rules).copied().collect();
-        let mut dirty = false;
+        let mut dirty = self.rebuilding;
         for id in &ids {
             let plan = self
                 .plans
@@ -2006,7 +2368,9 @@ impl Engine {
             .iter()
             .map(|(key, s)| {
                 let (rel, kind) = match key {
-                    StoreKey::Main(r) => (r, if self.tiered.contains(&r) { "tiered" } else { "main" }),
+                    StoreKey::Main(r) if self.tiered.contains(&r) => (r, "tiered"),
+                    StoreKey::Main(r) if self.views.contains(&r) => (r, "view"),
+                    StoreKey::Main(r) => (r, "main"),
                     StoreKey::Next(r) => (r, "next"),
                     StoreKey::Sent(r) => (r, "sent"),
                     StoreKey::Async(r) => (r, "async"),
