@@ -591,7 +591,7 @@ impl Server {
         } = opened;
         // The node's database (docs/design/DATABASE.md): the engine applies each released tick to it; its thread
         // flushes when the engine asks, and the committer truncates the WAL behind each flush.
-        let db = Arc::new(database);
+        let db = database;
         {
             let (tx, stats) = (ctl_tx.clone(), stats.clone());
             let blobs = blob_store.clone();

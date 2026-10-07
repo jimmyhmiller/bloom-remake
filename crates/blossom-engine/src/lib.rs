@@ -9,6 +9,7 @@
 //! compares the two at every tick. The word-level kernel, the planner's physical plans and generated code are later
 //! work.
 
+mod cold;
 mod engine;
 mod expr;
 mod func;
@@ -16,5 +17,6 @@ mod rule;
 mod store;
 mod strata;
 
+pub use cold::{ColRange, ColdTables};
 pub use engine::{Engine, EngineConfig};
 

@@ -5,14 +5,16 @@
 //! (`FileWal::truncation`). Its methods take `&self`, so a runtime may flush on a thread of its own while the engine
 //! thread applies.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use blossom_base::RelId;
 use blossom_ir::ValidatedProgram;
 use blossom_oracle::Row;
 use blossom_store::lsm::{Flushed, Lsm, LsmOptions, Op};
 use blossom_store::{StoreError, Vfs, WalScan};
+use blossom_value::BlobRef;
 
 use crate::NodeError;
 use crate::durable::{Delta, DurableCodec, DurableImage, DurableSchema};
@@ -20,6 +22,63 @@ use crate::durable::{Delta, DurableCodec, DurableImage, DurableSchema};
 /// The format of the database's keys (`DurableCodec::row_key`): 1, the order-preserving encoding. A database written
 /// in an older one is rebuilt from the recovered rows when its node opens it; a newer one is refused.
 pub const KEY_FORMAT: u32 = 1;
+
+/// How many keys a scan of the tree holds at once (`Lsm::scan_page`).
+const PAGE_KEYS: usize = 512;
+
+/// 8 bytes naming a keyspace: BLAKE3 over `parts`, each after its length.
+fn label(parts: &[&[u8]]) -> [u8; 8] {
+    let mut h = blake3::Hasher::new();
+    for p in parts {
+        h.update(&(p.len() as u64).to_be_bytes());
+        h.update(p);
+    }
+    let mut tag = [0u8; 8];
+    for (t, b) in tag.iter_mut().zip(h.finalize().as_bytes()) {
+        *t = *b;
+    }
+    tag
+}
+
+/// The keyspace of the definitions of the derived keyspaces (docs/design/DATABASE.md §7): one key each.
+fn defs_tag() -> [u8; 8] {
+    label(&[b"keyspace definitions"])
+}
+
+/// A definition key's kind: an index (then the relation's tag and the columns, `u32` big-endian each), or the blob
+/// keyspaces of every relation.
+const DEF_INDEX: u8 = 1;
+const DEF_BLOBS: u8 = 2;
+
+fn cols_bytes(cols: &[usize]) -> Result<Vec<u8>, NodeError> {
+    let mut out = Vec::with_capacity(cols.len() * 4);
+    for c in cols {
+        let c = u32::try_from(*c).map_err(|_| blossom_base::internal_error!("column {c} out of range"))?;
+        out.extend_from_slice(&c.to_be_bytes());
+    }
+    Ok(out)
+}
+
+/// The tag of the index of the relation tagged `rel_tag` on `cols`, in that order.
+fn index_tag(rel_tag: &[u8; 8], cols: &[usize]) -> Result<[u8; 8], NodeError> {
+    Ok(label(&[b"index", rel_tag, &cols_bytes(cols)?]))
+}
+
+/// The tag of the blob keyspace of the relation tagged `rel_tag`: a key per blob a row holds, after the blob.
+fn blob_tag(rel_tag: &[u8; 8]) -> [u8; 8] {
+    label(&[b"blobs", rel_tag])
+}
+
+/// The derived keyspaces the tree keeps with every apply (docs/design/DATABASE.md §7).
+#[derive(Default)]
+struct Derived {
+    /// Each relation's indexes: their columns, in key order.
+    indexes: BTreeMap<RelId, BTreeSet<Vec<usize>>>,
+    /// Whether the blob keyspaces are kept.
+    blobs: bool,
+    /// Definitions made while no version was applied: written with the next one.
+    unwritten: Vec<Vec<u8>>,
+}
 
 /// Removes the tree under `db_dir` (its tables and manifest), so a database starts again there.
 fn clear(fs: &dyn Vfs, db_dir: &Path) -> Result<(), NodeError> {
@@ -43,11 +102,19 @@ fn clear(fs: &dyn Vfs, db_dir: &Path) -> Result<(), NodeError> {
 }
 
 /// A node's database.
+///
+/// It is the cold side of the engine's tiered tables (`blossom_engine::ColdTables`): their probes read it at its
+/// newest applied version.
 pub struct Database {
     lsm: Lsm,
     program: ValidatedProgram,
     schema: DurableSchema,
     names: Arc<[Arc<str>]>,
+    /// The durable relations by their tags.
+    tags: BTreeMap<[u8; 8], RelId>,
+    /// The derived keyspaces, held while a version is applied or one is built.
+    derived: Mutex<Derived>,
+    read_only: bool,
 }
 
 impl Database {
@@ -84,16 +151,204 @@ impl Database {
                 ..opts
             },
         )?;
-        Ok((Database::with(lsm, program, names), fresh))
+        let db = Database::with(lsm, program, names, false)?;
+        db.keep_blobs()?;
+        Ok((db, fresh))
     }
 
-    fn with(lsm: Lsm, program: &ValidatedProgram, names: Arc<[Arc<str>]>) -> Database {
-        Database {
+    fn with(
+        lsm: Lsm,
+        program: &ValidatedProgram,
+        names: Arc<[Arc<str>]>,
+        read_only: bool,
+    ) -> Result<Database, NodeError> {
+        let mut db = Database {
             lsm,
             schema: DurableSchema::of(program.get()),
             program: program.clone(),
             names,
+            tags: BTreeMap::new(),
+            derived: Mutex::new(Derived::default()),
+            read_only,
+        };
+        let codec = db.codec();
+        let mut tags = BTreeMap::new();
+        for (rel, _, _) in &db.schema.rels {
+            tags.insert(codec.rel_tag(*rel)?, *rel);
         }
+        drop(codec);
+        db.tags = tags;
+        db.load_definitions()?;
+        Ok(db)
+    }
+
+    fn derived(&self) -> Result<std::sync::MutexGuard<'_, Derived>, NodeError> {
+        self.derived
+            .lock()
+            .map_err(|_| blossom_base::internal_error!("the database's keyspace lock is poisoned").into())
+    }
+
+    /// Reads the derived keyspaces' definitions (those of relations this program has no more are left alone: no
+    /// apply keeps them, nor their relation's rows).
+    fn load_definitions(&self) -> Result<(), NodeError> {
+        let Some(at) = self.lsm.applied()? else {
+            return Ok(());
+        };
+        let tag = defs_tag();
+        let mut d = self.derived()?;
+        for key in self.lsm.scan(&tag, at)? {
+            let body = key.get(tag.len()..).unwrap_or_default();
+            match body.split_first() {
+                Some((&DEF_BLOBS, [])) => d.blobs = true,
+                Some((&DEF_INDEX, rest)) if rest.len() >= 8 && (rest.len() - 8) % 4 == 0 => {
+                    let (rel_tag, cols) = rest.split_at(8);
+                    let Some(rel) = <[u8; 8]>::try_from(rel_tag).ok().and_then(|t| self.tags.get(&t)) else {
+                        continue;
+                    };
+                    let cols: Vec<usize> = cols
+                        .chunks_exact(4)
+                        .filter_map(|c| <[u8; 4]>::try_from(c).ok())
+                        .map(|c| u32::from_be_bytes(c) as usize)
+                        .collect();
+                    d.indexes.entry(*rel).or_default().insert(cols);
+                }
+                _ => {
+                    return Err(NodeError::Store(format!(
+                        "the database holds a keyspace definition this build does not know ({body:?})"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Keeps the blob keyspaces from now on: built from the rows at the applied version when the tree has rows and
+    /// none yet (a database from before them), in one amendment with their definition.
+    fn keep_blobs(&self) -> Result<(), NodeError> {
+        let mut d = self.derived()?;
+        if d.blobs {
+            return Ok(());
+        }
+        let mut def = defs_tag().to_vec();
+        def.push(DEF_BLOBS);
+        let Some(at) = self.lsm.applied()? else {
+            d.blobs = true;
+            d.unwritten.push(def);
+            return Ok(());
+        };
+        let codec = self.codec();
+        let mut changes = Vec::new();
+        for (rel, _, _) in &self.schema.rels {
+            self.each_row(&codec, *rel, at, &mut |row| {
+                for b in row_blobs(&row) {
+                    changes.push((Self::blob_key(&codec, *rel, &b, &row)?, Op::Put));
+                }
+                Ok(())
+            })?;
+        }
+        changes.push((def, Op::Put));
+        self.lsm.amend(changes)?;
+        d.blobs = true;
+        Ok(())
+    }
+
+    /// The key of `row` of `rel` in the blob keyspace, under blob `b`.
+    fn blob_key(codec: &DurableCodec<'_>, rel: RelId, b: &BlobRef, row: &Row) -> Result<Vec<u8>, NodeError> {
+        let mut tag = blob_tag(&codec.rel_tag(rel)?).to_vec();
+        tag.extend_from_slice(&b.hash);
+        tag.extend_from_slice(&b.len.to_be_bytes());
+        codec.tagged_key(&tag, rel, &[], row)
+    }
+
+    /// Calls `each` with every row of `rel` as of `at`, a page of keys at a time.
+    fn each_row(
+        &self,
+        codec: &DurableCodec<'_>,
+        rel: RelId,
+        at: u64,
+        each: &mut dyn FnMut(Row) -> Result<(), NodeError>,
+    ) -> Result<(), NodeError> {
+        let tag = codec.rel_tag(rel)?;
+        let end = crate::keycode::successor(&tag);
+        self.each_key(&tag, end.as_deref(), at, &mut |key| each(codec.key_row(rel, key)?))
+    }
+
+    /// Calls `each` with every key from `start` to `end` as of `at`, a page at a time.
+    fn each_key(
+        &self,
+        start: &[u8],
+        end: Option<&[u8]>,
+        at: u64,
+        each: &mut dyn FnMut(&[u8]) -> Result<(), NodeError>,
+    ) -> Result<(), NodeError> {
+        let mut from = start.to_vec();
+        loop {
+            let page = self.lsm.scan_page(&from, end, at, PAGE_KEYS)?;
+            for key in &page.keys {
+                each(key)?;
+            }
+            match page.next {
+                Some(n) => from = n,
+                None => return Ok(()),
+            }
+        }
+    }
+
+    /// Keeps an index of `rel` on `cols` from now on (a probe of a tiered table on columns its keys do not lead
+    /// with): built from the rows at the applied version, in one amendment with its definition.
+    pub fn keep_index(&self, rel: RelId, cols: &[usize]) -> Result<(), NodeError> {
+        let mut d = self.derived()?;
+        if d.indexes.get(&rel).is_some_and(|i| i.contains(cols)) {
+            return Ok(());
+        }
+        if self.read_only {
+            return Err(NodeError::Store("a database opened read-only builds no index".into()));
+        }
+        let codec = self.codec();
+        let rel_tag = codec.rel_tag(rel)?;
+        let mut def = defs_tag().to_vec();
+        def.push(DEF_INDEX);
+        def.extend_from_slice(&rel_tag);
+        def.extend_from_slice(&cols_bytes(cols)?);
+        match self.lsm.applied()? {
+            None => d.unwritten.push(def),
+            Some(at) => {
+                let tag = index_tag(&rel_tag, cols)?;
+                let mut changes = Vec::new();
+                self.each_row(&codec, rel, at, &mut |row| {
+                    changes.push((codec.tagged_key(&tag, rel, cols, &row)?, Op::Put));
+                    Ok(())
+                })?;
+                changes.push((def, Op::Put));
+                self.lsm.amend(changes)?;
+            }
+        }
+        d.indexes.entry(rel).or_default().insert(cols.to_vec());
+        Ok(())
+    }
+
+    /// The keys a change of `row` of `rel` writes: its own, and one in each derived keyspace that holds it.
+    fn expand(
+        codec: &DurableCodec<'_>,
+        d: &Derived,
+        rel: RelId,
+        row: &Row,
+        op: Op,
+        out: &mut Vec<(Vec<u8>, Op)>,
+    ) -> Result<(), NodeError> {
+        out.push((codec.row_key(rel, row)?, op));
+        if let Some(indexes) = d.indexes.get(&rel) {
+            let rel_tag = codec.rel_tag(rel)?;
+            for cols in indexes {
+                out.push((codec.tagged_key(&index_tag(&rel_tag, cols)?, rel, cols, row)?, op));
+            }
+        }
+        if d.blobs {
+            for b in row_blobs(row) {
+                out.push((Self::blob_key(codec, rel, &b, row)?, op));
+            }
+        }
+        Ok(())
     }
 
     /// A stopped node's database read without changing a file (a tool's: `blossom query --store`): its tables, and
@@ -123,7 +378,7 @@ impl Database {
                 ..LsmOptions::default()
             },
         )?;
-        let db = Database::with(lsm, program, names);
+        let db = Database::with(lsm, program, names, true)?;
         let scan = WalScan::scan(&*fs, &crate::recovery::wal_dir(dir), uuid, false)?;
         let codec = db.codec();
         let after = db.flushed()?;
@@ -146,12 +401,14 @@ impl Database {
     /// WAL replayed, or nothing at all). The ticks before have no history here: an as-of read of one is refused.
     pub fn bootstrap(&self, tick: u64, image: &DurableImage) -> Result<(), NodeError> {
         let codec = self.codec();
+        let mut d = self.derived()?;
         let mut changes = Vec::new();
         for (rel, rows) in &image.rows {
             for row in rows {
-                changes.push((codec.row_key(*rel, row)?, Op::Put));
+                Self::expand(&codec, &d, *rel, row, Op::Put, &mut changes)?;
             }
         }
+        changes.extend(d.unwritten.drain(..).map(|k| (k, Op::Put)));
         self.lsm.apply(tick, tick, changes)?;
         Ok(self.lsm.raise_floor(tick)?)
     }
@@ -166,15 +423,17 @@ impl Database {
         if delta.is_empty() {
             return Ok(());
         }
+        let mut d = self.derived()?;
         let mut changes = Vec::new();
         for (rel, (inserted, deleted)) in &delta.changes {
             for row in deleted {
-                changes.push((codec.row_key(*rel, row)?, Op::Del));
+                Self::expand(codec, &d, *rel, row, Op::Del, &mut changes)?;
             }
             for row in inserted {
-                changes.push((codec.row_key(*rel, row)?, Op::Put));
+                Self::expand(codec, &d, *rel, row, Op::Put, &mut changes)?;
             }
         }
+        changes.extend(d.unwritten.drain(..).map(|k| (k, Op::Put)));
         Ok(self.lsm.apply(tick, tick, changes)?)
     }
 
@@ -269,5 +528,168 @@ impl Database {
     /// The durable relations: id and name.
     pub fn relations(&self) -> Vec<(RelId, Arc<str>)> {
         self.schema.rels.iter().map(|(r, n, _)| (*r, n.clone())).collect()
+    }
+}
+
+/// The blobs `row` holds.
+fn row_blobs(row: &Row) -> BTreeSet<BlobRef> {
+    let mut out = BTreeSet::new();
+    for v in row.iter() {
+        blossom_value::blobs_in(v, &mut out);
+    }
+    out
+}
+
+impl std::fmt::Debug for Database {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Database")
+            .field("relations", &self.schema.rels.len())
+            .field("read_only", &self.read_only)
+            .finish()
+    }
+}
+
+impl Database {
+    /// How many rows of the durable relations hold each blob as of the newest applied version (a node booting on the
+    /// database counts its carried rows' blobs from the blob keyspaces, a page at a time).
+    pub fn blob_counts(&self) -> Result<BTreeMap<BlobRef, u64>, NodeError> {
+        let mut out = BTreeMap::new();
+        let Some(at) = self.lsm.applied()? else {
+            return Ok(out);
+        };
+        if !self.derived()?.blobs {
+            return Err(blossom_base::internal_error!("the database keeps no blob keyspace").into());
+        }
+        for tag in self.tags.keys() {
+            let prefix = blob_tag(tag);
+            let end = crate::keycode::successor(&prefix);
+            self.each_key(&prefix, end.as_deref(), at, &mut |key| {
+                let blob = key
+                    .get(prefix.len()..prefix.len() + 40)
+                    .and_then(|b| {
+                        let (hash, len) = b.split_at(32);
+                        Some(BlobRef {
+                            hash: hash.try_into().ok()?,
+                            len: u64::from_be_bytes(len.try_into().ok()?),
+                        })
+                    })
+                    .ok_or_else(|| NodeError::Store("a blob key too short for its blob".into()))?;
+                *out.entry(blob).or_insert(0) += 1;
+                Ok(())
+            })?;
+        }
+        Ok(out)
+    }
+
+    /// The rows a page-at-a-time scan of `start..end` finds, from keys under `tag`.
+    fn rows_between(
+        &self,
+        codec: &DurableCodec<'_>,
+        tag: &[u8],
+        rel: RelId,
+        start: &[u8],
+        end: Option<&[u8]>,
+        at: u64,
+    ) -> Result<Vec<Row>, NodeError> {
+        let mut out = Vec::new();
+        self.each_key(start, end, at, &mut |key| {
+            out.push(codec.tagged_row(tag, rel, key)?);
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    fn probe_rows(
+        &self,
+        rel: RelId,
+        cols: &[usize],
+        values: &[blossom_value::Value],
+        range: Option<blossom_engine::ColRange<'_>>,
+        at: u64,
+    ) -> Result<Vec<Row>, NodeError> {
+        let codec = self.codec();
+        let rel_tag = codec.rel_tag(rel)?;
+        // The relation's own keys lead with its columns in declaration order: a probe on a leading run of them (and a
+        // range on the next) reads them; any other reads an index.
+        let leading = cols.iter().enumerate().all(|(i, c)| i == *c);
+        let (tag, key_cols) = match range {
+            Some((col, _, _)) if leading && col == cols.len() => (rel_tag, cols.to_vec()),
+            None if leading => (rel_tag, cols.to_vec()),
+            _ => {
+                let mut key_cols = cols.to_vec();
+                if let Some((col, _, _)) = range {
+                    key_cols.push(col);
+                }
+                // An index answers only as of the version it was built at or after: probes read the newest.
+                if self.lsm.applied()? != Some(at) {
+                    return Err(blossom_base::internal_error!(
+                        "an index probe as of version {at}, not the newest applied"
+                    )
+                    .into());
+                }
+                self.keep_index(rel, &key_cols)?;
+                (index_tag(&rel_tag, &key_cols)?, key_cols)
+            }
+        };
+        match range {
+            Some((col, lo, hi)) => {
+                let lead = key_cols.get(..cols.len()).unwrap_or_default();
+                let (start, end) = codec.tagged_range(&tag, rel, lead, values, col, lo, hi)?;
+                self.rows_between(&codec, &tag, rel, &start, end.as_deref(), at)
+            }
+            None => {
+                let prefix = codec.tagged_prefix(&tag, rel, &key_cols, values)?;
+                let end = crate::keycode::successor(&prefix);
+                self.rows_between(&codec, &tag, rel, &prefix, end.as_deref(), at)
+            }
+        }
+    }
+}
+
+/// A database error as the evaluator reports it.
+fn storage(e: NodeError) -> blossom_ir::tick::EvalError {
+    match e {
+        NodeError::Internal(i) => blossom_ir::tick::EvalError::Internal(i),
+        NodeError::Unimplemented(u) => blossom_ir::tick::EvalError::Unimplemented(u),
+        other => blossom_ir::tick::EvalError::Storage(other.to_string()),
+    }
+}
+
+impl blossom_engine::ColdTables for Database {
+    fn version(&self) -> Result<Option<u64>, blossom_ir::tick::EvalError> {
+        self.lsm.applied().map_err(|e| storage(e.into()))
+    }
+
+    fn tables(&self) -> Vec<RelId> {
+        self.schema.rels.iter().map(|(r, _, _)| *r).collect()
+    }
+
+    fn contains(&self, rel: RelId, row: &Row, at: u64) -> Result<bool, blossom_ir::tick::EvalError> {
+        let key = self.codec().row_key(rel, row).map_err(storage)?;
+        self.lsm.get(&key, at).map_err(|e| storage(e.into()))
+    }
+
+    fn probe(
+        &self,
+        rel: RelId,
+        cols: &[usize],
+        values: &[blossom_value::Value],
+        range: Option<blossom_engine::ColRange<'_>>,
+        at: u64,
+    ) -> Result<Vec<Row>, blossom_ir::tick::EvalError> {
+        self.probe_rows(rel, cols, values, range, at).map_err(storage)
+    }
+
+    fn count(&self, rel: RelId, at: u64) -> Result<usize, blossom_ir::tick::EvalError> {
+        let codec = self.codec();
+        let tag = codec.rel_tag(rel).map_err(storage)?;
+        let end = crate::keycode::successor(&tag);
+        let mut n = 0usize;
+        self.each_key(&tag, end.as_deref(), at, &mut |_| {
+            n += 1;
+            Ok(())
+        })
+        .map_err(storage)?;
+        Ok(n)
     }
 }

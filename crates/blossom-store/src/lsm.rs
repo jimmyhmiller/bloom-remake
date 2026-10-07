@@ -490,19 +490,44 @@ impl Sst {
     /// The entries with keys from `start` (inclusive) to `end` (exclusive; `None`: no end), at or below `as_of`, in
     /// order.
     fn scan(&self, start: &[u8], end: Option<&[u8]>, as_of: u64, out: &mut Vec<Entry>) -> Result<(), StoreError> {
+        self.scan_keys(start, end, as_of, usize::MAX, out).map(|_| ())
+    }
+
+    /// The entries at or below `as_of` of the first `keys` distinct keys from `start` to `end` (every version of
+    /// each), into `out`. Returns the last key taken when the range holds more keys than that (`None`: none left).
+    fn scan_keys(
+        &self,
+        start: &[u8],
+        end: Option<&[u8]>,
+        as_of: u64,
+        keys: usize,
+        out: &mut Vec<Entry>,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
         let before_end = |k: &[u8]| end.is_none_or(|e| k < e);
         let first = self.index.partition_point(|b| b.last.as_slice() < start);
+        let mut taken = 0usize;
+        let mut last: Option<Vec<u8>> = None;
         for b in self.index.iter().skip(first) {
             if !before_end(&b.first) {
                 break;
             }
             for e in self.block(b)?.iter() {
-                if e.key.as_slice() >= start && before_end(&e.key) && e.version <= as_of {
+                if e.key.as_slice() < start || !before_end(&e.key) {
+                    continue;
+                }
+                if last.as_deref() != Some(e.key.as_slice()) {
+                    if taken == keys {
+                        return Ok(last);
+                    }
+                    taken += 1;
+                    last = Some(e.key.clone());
+                }
+                if e.version <= as_of {
                     out.push(e.clone());
                 }
             }
         }
-        Ok(())
+        Ok(None)
     }
 
     /// The newest entry of `key` at or below `as_of`: its version and op.
@@ -744,6 +769,14 @@ impl Manifest {
 
 type Mem = BTreeMap<(Vec<u8>, Reverse<u64>), Op>;
 
+/// A page of a scan ([`Lsm::scan_page`]): the keys present, in order, and where the next page starts (`None`: the
+/// range is done).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Page {
+    pub keys: Vec<Vec<u8>>,
+    pub next: Option<Vec<u8>>,
+}
+
 /// What the tree holds now.
 struct State {
     mem: Mem,
@@ -940,6 +973,21 @@ impl Lsm {
         }
         s.applied = Some(version);
         s.applied_mark = mark;
+        Ok(())
+    }
+
+    /// Adds `changes` to the newest applied version, which stays the newest (no version is applied): keys a caller
+    /// derives from the rows already there, between two versions (a keyspace built from a table, docs/design/
+    /// DATABASE.md §7). No entry of the newest version may hold one of the keys. Refused before any version.
+    pub fn amend(&self, changes: impl IntoIterator<Item = (Vec<u8>, Op)>) -> Result<(), StoreError> {
+        let mut s = self.write()?;
+        let version = s
+            .applied
+            .ok_or_else(|| invalid("an amendment of a tree with no version applied"))?;
+        for (key, op) in changes {
+            s.mem_bytes += key.len() + 16;
+            s.mem.insert((key, Reverse(version)), op);
+        }
         Ok(())
     }
 
@@ -1144,6 +1192,97 @@ impl Lsm {
         }
         newest.retain(|_, (_, op)| *op == Op::Put);
         Ok(newest.into_keys().collect())
+    }
+
+    /// A page of [`Lsm::scan_range`]: the keys present as of `as_of` among the next `keys` distinct keys any
+    /// memtable or table holds from `start` to `end` (live or deleted, so a page may hold fewer, even none), in
+    /// order, and where the next page starts (`None`: the range is done). A scan holds one page at a time, however
+    /// large the range.
+    pub fn scan_page(&self, start: &[u8], end: Option<&[u8]>, as_of: u64, keys: usize) -> Result<Page, StoreError> {
+        if keys == 0 {
+            return Err(invalid("a scan page of no keys"));
+        }
+        let before_end = |k: &[u8]| end.is_none_or(|e| k < e);
+        // Each source gives the entries of its next `keys` keys and the last one if it has more: every source is
+        // complete up to the smallest such key, which bounds the page.
+        let mut bound: Option<Vec<u8>> = None;
+        let mut cut = |last: Option<Vec<u8>>| {
+            if let Some(l) = last
+                && bound.as_ref().is_none_or(|b| l < *b)
+            {
+                bound = Some(l);
+            }
+        };
+        let mut entries: Vec<(Vec<u8>, u64, Op)> = Vec::new();
+        let tables = {
+            let s = self.read()?;
+            if as_of < s.manifest.floor || s.applied.is_some_and(|a| as_of > a) {
+                return Err(invalid(format!(
+                    "version {as_of} is outside the history kept (from version {})",
+                    s.manifest.floor
+                )));
+            }
+            let mems = std::iter::once(&s.mem).chain(s.frozen.as_ref().map(|(m, _, _)| &**m));
+            for mem in mems {
+                let mut taken = 0usize;
+                let mut last: Option<&Vec<u8>> = None;
+                let mut more = None;
+                for ((key, Reverse(version)), op) in mem.range((start.to_vec(), Reverse(u64::MAX))..) {
+                    if !before_end(key) {
+                        break;
+                    }
+                    if last != Some(key) {
+                        if taken == keys {
+                            more = last.cloned();
+                            break;
+                        }
+                        taken += 1;
+                        last = Some(key);
+                    }
+                    if *version <= as_of {
+                        entries.push((key.clone(), *version, *op));
+                    }
+                }
+                cut(more);
+            }
+            s.tables.clone()
+        };
+        let mut found = Vec::new();
+        for t in &tables {
+            found.clear();
+            let more = t.scan_keys(start, end, as_of, keys, &mut found)?;
+            entries.extend(found.drain(..).map(|e| (e.key, e.version, e.op)));
+            cut(more);
+        }
+        let mut newest: BTreeMap<Vec<u8>, (u64, Op)> = BTreeMap::new();
+        for (key, version, op) in entries {
+            if bound.as_ref().is_some_and(|b| key > *b) {
+                continue;
+            }
+            let slot = newest.entry(key).or_insert((version, op));
+            if version > slot.0 {
+                *slot = (version, op);
+            }
+        }
+        // The sources together may hold more keys below the bound than a page: it ends at the page's last.
+        if newest.len() > keys {
+            let rest = newest.keys().nth(keys).cloned();
+            if let Some(r) = rest {
+                newest.split_off(&r);
+            }
+            bound = newest.keys().next_back().cloned();
+        }
+        let keys = newest
+            .into_iter()
+            .filter(|(_, (_, op))| *op == Op::Put)
+            .map(|(k, _)| k)
+            .collect();
+        // The next page starts just past the bound: the smallest key greater than it.
+        let next = bound.map(|mut b| {
+            b.push(0);
+            b
+        });
+        Ok(Page { keys, next })
     }
 
     /// Whether `key` is present as of version `as_of` (the same refusals as [`Lsm::scan`]).

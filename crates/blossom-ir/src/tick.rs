@@ -152,6 +152,10 @@ pub enum EvalError {
     /// unrecorded.
     #[error("recording the trace: {0}")]
     Trace(String),
+    /// The node's database could not be read where the evaluator keeps a durable table's rows (a tiered table's
+    /// cold rows, docs/design/DATABASE.md §7): the tick fails rather than read a partial table.
+    #[error("reading the database: {0}")]
+    Storage(String),
     #[error(transparent)]
     Unimplemented(#[from] Unimplemented),
     #[error(transparent)]
