@@ -8,6 +8,7 @@
 //! only the rows with them are read (a prefix scan of the database).
 
 use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::sync::Arc;
 
 use blossom_base::RelId;
@@ -94,6 +95,110 @@ pub fn leading_constants(program: &ValidatedProgram, rel: RelId) -> Vec<Value> {
     agreed.unwrap_or_default()
 }
 
+/// What a query reads of a relation: the rows whose leading columns are `leading` and whose next column lies within
+/// `lo` and `hi`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Scan {
+    pub leading: Vec<Value>,
+    pub lo: Bound<Value>,
+    pub hi: Bound<Value>,
+}
+
+/// Whether the database's key order is the value order for `v` (and a comparison of it a range of keys).
+fn ranged(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Bool(_) | Value::Int(_) | Value::Str(_) | Value::Bytes(_) | Value::Duration(_) | Value::Instant(_)
+    )
+}
+
+/// The tighter of two lower bounds (`upper`: of two upper bounds).
+fn tighter(a: Bound<Value>, b: Bound<Value>, upper: bool) -> Bound<Value> {
+    use Bound::*;
+    match (&a, &b) {
+        (Unbounded, _) => b,
+        (_, Unbounded) => a,
+        (Included(x) | Excluded(x), Included(y) | Excluded(y)) => {
+            let (x_wins, tie) = if upper { (x < y, x == y) } else { (x > y, x == y) };
+            if tie {
+                // At the same value an excluded bound is the tighter.
+                if matches!(a, Excluded(_)) { a } else { b }
+            } else if x_wins {
+                a
+            } else {
+                b
+            }
+        }
+    }
+}
+
+/// What the query must read of `rel`: its leading constants and, when the relation has one read (an atom) and that
+/// read's rule compares the next column with constants, the range they allow. Reading only these rows is exact: every
+/// derivation through the atom satisfies the comparisons, which the query's rules still check.
+pub fn scan_of(program: &ValidatedProgram, rel: RelId) -> Scan {
+    let leading = leading_constants(program, rel);
+    let mut scan = Scan {
+        leading,
+        lo: Bound::Unbounded,
+        hi: Bound::Unbounded,
+    };
+    if !program.read_only_by_atoms(rel) {
+        return scan;
+    }
+    let q = program.get();
+    let mut reads = Vec::new();
+    for r in q.rules.iter() {
+        for lit in &r.body.lits {
+            match lit {
+                Literal::Pos(a) if a.rel == rel => reads.push((r, a)),
+                Literal::Neg(a) if a.rel == rel => return scan,
+                _ => {}
+            }
+        }
+    }
+    let [(rule, atom)] = reads.as_slice() else {
+        return scan;
+    };
+    let Some(Term::Var(x)) = atom.args.get(scan.leading.len()) else {
+        return scan;
+    };
+    for lit in &rule.body.lits {
+        let Literal::Guard(blossom_ir::core::Expr::Binary { op, lhs, rhs }) = lit else {
+            continue;
+        };
+        use blossom_ir::core::{BinOp, Expr};
+        // `x op c`, or `c op x` read the other way round.
+        let (op, c) = match (&**lhs, &**rhs) {
+            (Expr::Term(Term::Var(v)), Expr::Term(Term::Const(c))) if v == x => (op.clone(), *c),
+            (Expr::Term(Term::Const(c)), Expr::Term(Term::Var(v))) if v == x => {
+                let flipped = match op {
+                    BinOp::Lt => BinOp::Gt,
+                    BinOp::Le => BinOp::Ge,
+                    BinOp::Gt => BinOp::Lt,
+                    BinOp::Ge => BinOp::Le,
+                    other => other.clone(),
+                };
+                (flipped, *c)
+            }
+            _ => continue,
+        };
+        let Some(c) = q.consts.get(c).cloned().filter(ranged) else {
+            continue;
+        };
+        let (lo, hi) = match op {
+            BinOp::Gt => (Bound::Excluded(c), Bound::Unbounded),
+            BinOp::Ge => (Bound::Included(c), Bound::Unbounded),
+            BinOp::Lt => (Bound::Unbounded, Bound::Excluded(c)),
+            BinOp::Le => (Bound::Unbounded, Bound::Included(c)),
+            BinOp::Eq => (Bound::Included(c.clone()), Bound::Included(c)),
+            _ => continue,
+        };
+        scan.lo = tighter(scan.lo, lo, false);
+        scan.hi = tighter(scan.hi, hi, true);
+    }
+    scan
+}
+
 /// Answers `req` from `db`, as of the tick it asks: the query's rules run as the node `me` at that tick (the node's
 /// program `node`, its node names `names`, the host functions `externs`, the instant `now` the query runs at).
 #[allow(clippy::too_many_arguments)]
@@ -149,7 +254,13 @@ pub fn answer(
                 "the query was compiled against another schema of `{name}` than this node runs"
             )));
         }
-        for row in db.rows(nid, &leading_constants(&program, qid), tick)? {
+        let scan = scan_of(&program, qid);
+        let rows = if matches!((&scan.lo, &scan.hi), (Bound::Unbounded, Bound::Unbounded)) {
+            db.rows(nid, &scan.leading, tick)?
+        } else {
+            db.rows_range(nid, &scan.leading, scan.lo.as_ref(), scan.hi.as_ref(), tick)?
+        };
+        for row in rows {
             events.push((qid, row));
         }
     }

@@ -144,6 +144,16 @@ fn queries_read_the_durable_store_as_of_released_ticks() {
     assert_eq!(one, ["\"cherry\""]);
     let (prefixed, _) = keys(&query(&deploy, &admin, None, "val(v) = store(\"apple\", v)"));
     assert_eq!(prefixed.len(), 1);
+    // A comparison on the key: a range read.
+    let (after_b, _) = keys(&query(&deploy, &admin, None, "late(k) = store(k, _), k > \"banana\""));
+    assert_eq!(after_b, ["\"cherry\""]);
+    let (upto, _) = keys(&query(
+        &deploy,
+        &admin,
+        Some(before),
+        "early(k) = store(k, _), \"banana\" >= k",
+    ));
+    assert_eq!(upto, ["\"apple\"", "\"banana\""]);
     // A relation that is not durable is not in the database.
     let refused = query(&deploy, &admin, None, "reqs(i) = put(i, _, _)");
     assert!(!refused.status.success());

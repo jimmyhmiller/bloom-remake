@@ -38,14 +38,21 @@ tick inside the history the node keeps (§4) can be asked for.
 
 ## 3. Rows as keys
 
-A durable relation's row is the key `tag ++ row`: `tag` is 8 bytes of BLAKE3 over the relation's name and schema
-hash, and `row` is the row in the durable tuple codec (`Node` values by name, so keys survive a renumbering). The
-codec writes the column count, then each column tagged with its field number, in field-number order; it is canonical
-and each column is self-delimiting, so rows that agree on their leading columns share a byte prefix
-(`Codec::encode_row_prefix`): a lookup with the leading columns bound is a prefix scan, and a scan of the relation is
-a scan of its tag. Where explicit field numbers reorder the columns, the prefix covers fewer of them and the reader
-filters for the rest.
-(Ranges in value order on a column need an order-preserving encoding: a follow-up.)
+A durable relation's row is the key `tag ++ ordered(columns) ++ codec(row) ++ len`:
+
+- `tag`: 8 bytes of BLAKE3 over the relation's name and schema hash;
+- `ordered(columns)`: each column's value in declaration order, in an order-preserving encoding
+  (`blossom-node::keycode`): within a column's type, bytes order as values do for `bool`, the integers, `f64`
+  (totalOrder), strings and bytes (escaped, so no encoding is a prefix of another), `Duration`, `Instant`, nodes (by
+  name), and tuples, structs, enums, `Vec` and `Option` of those; other values (sets, maps, lattice values, …) are
+  encoded whole in the canonical codec, escaped: equal values, equal bytes, in no meaningful order;
+- `codec(row)`: the row in the durable tuple codec (`Node` values by name), which is what reading a key decodes, and
+  its length as a big-endian `u32`.
+
+So rows agreeing on their leading columns share a prefix (a lookup binding them is a prefix scan), keys order as rows
+do column by column (a comparison on the next column is a range scan), and a scan of the relation is a scan of its
+tag. The database's manifest records this key format (1); a database written in another is rebuilt from the
+recovered rows when its node opens it.
 
 ## 4. How the node keeps it
 
@@ -76,8 +83,11 @@ blossom query --deploy d.toml --node s --store data/s 'all(k, v) = store(k, v)'
   it; `ValidatedProgram::query` keeps the view's rules and the rules of every view they read, and turns each durable
   relation read into an input. A query that reads anything else (but static relations) is refused: only durable
   relations are in the database. The node never compiles: it gets this small IR program (`QueryRequest`, postcard).
-- **Evaluating.** The oracle evaluates the kept rules over the durable relations' rows as of the tick: read from the
-  database by prefix where the body binds a relation's leading columns, by tag otherwise.
+- **Evaluating.** The oracle evaluates the kept rules, as the node at the tick asked, over the durable relations' rows
+  as of that tick. A relation read only by atoms is read by prefix when every atom binds its leading columns to the
+  same constants; a relation read by one atom, by a range when that atom's rule compares the next column with
+  constants (`>`, `>=`, `<`, `<=`, `==`, either way round, the tightest bounds winning); by its tag otherwise. The
+  rules still check every comparison, so reading only those rows is exact.
 - **Where.** Live, against a running node: `blossom run --admin ADDR` serves `POST /query` on its own listener; the
   answer is JSON (the tick read, the columns, the rows, each value as Blossom writes it). Relations are matched by
   name and schema hash: a query compiled against another version of the program is refused. The admin plane has no
@@ -122,7 +132,7 @@ relations onto the database, so a node's durable state may outgrow its memory an
 8. **Recovery and checkpoints.** A node boots on its database (the WAL after the database's flushed tick applied
    to it); it loads no image. Checkpoints retire: the WAL truncates behind the database alone, and blob collection
    anchors to its flushes.
-9. **Order-preserving keys** (§3), so range probes (`x > 5`) become range scans.
+9. **Range probes** of plans become range scans of the order-preserving keys (§3).
 
 Tests: every suite and the corpus run on the tiered stores (the engine and the oracle still agree on every corpus
 program); a node whose durable state is several times its cache; kill -9 and the crash simulation over the
