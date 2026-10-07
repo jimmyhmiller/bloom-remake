@@ -1,0 +1,66 @@
+//! Tiered tables (docs/design/DATABASE.md §7), for `node_tiered.rs`: durable tables the engine reads from the node's
+//! database. Probes on the leading columns (and a range on the next) read the table's own keys; probes on other
+//! columns read an index the database builds on first use. A view over a durable table is derived again from all of
+//! it after a restart; a guarded table drops rows its guard no longer holds; a durable table holds blobs.
+program tiered version 1;
+
+input put(k: u64, v: u64);
+input drop(k: u64);
+input find(v: u64);
+input below(n: u64);
+input under(n: u64);
+input arm(k: u64);
+input disarm(k: u64);
+input stash(k: u64, bytes: Bytes);
+
+durable table kv(k: u64, v: u64) key(k);
+durable table found(k: u64, v: u64) key(k);
+durable table swept(k: u64) key(k);
+durable table small(k: u64) key(k);
+
+put_it: on put(k, v) {
+    upsert kv(k, v);
+}
+
+drop_it: on drop(k), kv(k, v) {
+    delete kv(k, v);
+}
+
+/// A probe on the value column: an index.
+find_it: on find(v), kv(k, v) {
+    emit found(k, v);
+}
+
+/// A range on the leading column: the table's own keys.
+sweep_it: on below(n), kv(k, v) where k < n {
+    emit swept(k);
+}
+
+/// A range on the value column, with nothing bound before it: an index on the value.
+under_it: on under(n), kv(k, v) where v < n {
+    emit small(k);
+}
+
+/// A view over the durable table: rebuilt from all of it after a restart.
+view big(k) = kv(k, v), v >= 1000;
+durable table big_seen(k: u64) key(k);
+see_big: on put(k, _), big(k) {
+    emit big_seen(k);
+}
+
+/// A guarded durable table: a row lives while its key is armed.
+durable table armed(k: u64) key(k);
+durable table watched(k: u64) key(k) while armed(k);
+arm_it: on arm(k) {
+    emit armed(k);
+    emit watched(k);
+}
+disarm_it: on disarm(k), armed(k) {
+    delete armed(k);
+}
+
+/// Blobs in a durable table.
+durable table stashed(k: u64, blob: Blob) key(k);
+stash_it: on stash(k, b), let blob = Blob::of(b) {
+    upsert stashed(k, blob);
+}

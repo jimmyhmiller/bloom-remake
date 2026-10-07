@@ -131,7 +131,7 @@ pub struct Opened {
     pub boot: Boot,
     pub wal: FileWal,
     /// The node's database, holding every released tick of every incarnation (this boot's included once it runs).
-    pub database: Database,
+    pub database: Arc<Database>,
     pub meta: MetaStore,
     /// The `META` record as written at this boot.
     pub record: MetaRecord,
@@ -269,11 +269,13 @@ pub fn open(
     // 2. The database: the rows its tables hold, as of the tick they cover. A store from before the database (none,
     //    or one of an older key format) starts from its checkpoint chain, once.
     let (database, fresh) = Database::open(fs.clone(), dir, program, names, spec.database)?;
+    let database = Arc::new(database);
     let legacy = if fresh {
         FileCheckpoints::from_existing(fs.clone(), dir).current()?
     } else {
         None
     };
+    //    The rows recovery replays onto: the database itself, or (a fresh one) an image it then starts from.
     let (mut image, from) = match (fresh, legacy) {
         (true, Some(id)) => {
             let checkpoints = FileCheckpoints::from_existing(fs.clone(), dir);
@@ -282,13 +284,10 @@ pub fn open(
             for layer in checkpoints.read_layers(id)? {
                 image.apply(&codec.decode_delta(&layer)?);
             }
-            (image, Some(id.tick))
+            (Some(image), Some(id.tick))
         }
-        (true, None) => (DurableImage::default(), None),
-        (false, _) => match database.flushed()? {
-            Some(t) => (database.image(t)?, Some(t)),
-            None => (DurableImage::default(), None),
-        },
+        (true, None) => (Some(DurableImage::default()), None),
+        (false, _) => (None, database.flushed()?),
     };
     // 3. The WAL after it.
     let wdir = wal_dir(dir);
@@ -318,9 +317,9 @@ pub fn open(
             )));
         }
         let decoded = codec.decode_delta(delta)?;
-        image.apply(&decoded);
-        if !fresh {
-            database.apply(rec.tick, &decoded)?;
+        match &mut image {
+            Some(image) => image.apply(&decoded),
+            None => database.apply(rec.tick, &decoded)?,
         }
         last_tick = Some(rec.tick);
         last_now = last_now.max(rec.now);
@@ -328,7 +327,7 @@ pub fn open(
     }
     // A database the store did not have starts from the recovered rows, at the last recovered tick, and is flushed:
     // from here it is the base of every recovery, and the legacy checkpoints go.
-    if fresh {
+    if let Some(image) = image {
         if let Some(t) = last_tick {
             database.bootstrap(t, &image)?;
         }
@@ -340,14 +339,7 @@ pub fn open(
     // The blobs the recovered rows hold were made durable before their records synced (as files, or logged in a
     // record and restored above): check it, so a store that lost one refuses to start rather than failing a later
     // tick that reads it.
-    let mut referenced = std::collections::BTreeSet::new();
-    for rows in image.rows.values() {
-        for r in rows {
-            for v in r.iter() {
-                blossom_value::blobs_in(v, &mut referenced);
-            }
-        }
-    }
+    let referenced = database.blob_counts()?;
     // The provisional files of blobs no surviving record logs go (their bytes may have gone with their records).
     blobs.drop_unrestored()?;
     // Every blob the store holds is durable, or pending (logged in a surviving record, synced before its WAL goes);
@@ -355,7 +347,7 @@ pub fn open(
     // deleted) are the node's first candidates for collection.
     let stored: std::collections::BTreeSet<blossom_value::BlobRef> =
         blobs.list()?.into_iter().chain(blobs.pending_blobs()?).collect();
-    if let Some(missing) = referenced.iter().find(|b| !stored.contains(b)) {
+    if let Some(missing) = referenced.keys().find(|b| !stored.contains(b)) {
         return Err(NodeError::Store(format!(
             "a recovered row holds blob {}, which the blob store does not have",
             missing.hex()
@@ -415,7 +407,7 @@ pub fn open(
     .certified(record.certification);
     Ok(Opened {
         boot: Boot {
-            image,
+            database: database.clone(),
             tick: Tick(boot_tick),
             reserved: Tick(reserved),
             time_reserved,

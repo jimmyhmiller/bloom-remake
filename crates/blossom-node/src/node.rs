@@ -27,7 +27,7 @@ use blossom_ir::core::{EventSource, RelClass};
 use blossom_ir::tick::{Delivery, Egress, HostOut, Ingress, Instance, Row, Send, StepInput};
 use blossom_value::time::{Instant, NodeId, Tick};
 
-use crate::durable::{Delta, DurableImage, DurableSchema};
+use crate::durable::{Delta, DurableSchema};
 use crate::eval::Executor;
 use crate::streams::{NodeStream, Observed, StreamInbox, node_streams};
 use crate::timers::TimerTable;
@@ -88,8 +88,8 @@ impl NodeConfig {
 /// What recovery hands the node.
 #[derive(Clone, Debug)]
 pub struct Boot {
-    /// The durable rows as of the last synced tick.
-    pub image: DurableImage,
+    /// The node's database, holding the durable rows as of the last synced tick: the executor starts on it.
+    pub database: Arc<crate::database::Database>,
     /// The incarnation's first tick.
     pub tick: Tick,
     /// The highest tick the incarnation may run before the driver extends the reservation.
@@ -331,13 +331,10 @@ impl<E: Executor> Node<E> {
         }
         let schema = DurableSchema::of(p);
         let streams = StreamInbox::new(node_streams(p, cfg.role), cfg.max_stream_bytes);
-        exec.reset(boot.image.instance())?;
-        // The executor starts from the recovered rows, which are also the released image. Every blob the store
-        // holds is durable; those no row holds are candidates for collection.
-        let mut carried_refs = BTreeMap::new();
-        for rows in boot.image.rows.values() {
-            count_blobs(&mut carried_refs, rows, true)?;
-        }
+        exec.reset_on(Instance::default(), boot.database.clone())?;
+        // The executor starts on the recovered rows, which are also the released ones. Every blob the store holds is
+        // durable; those no row holds are candidates for collection.
+        let carried_refs = boot.database.blob_counts()?;
         let released_refs = carried_refs.clone();
         let candidates = boot
             .stored
@@ -419,6 +416,11 @@ impl<E: Executor> Node<E> {
     /// The executor's join work so far, in rows examined, if it measures it.
     pub fn rows_examined(&self) -> Option<u64> {
         self.exec.rows_examined()
+    }
+
+    /// The rows the executor holds in memory, if it counts them.
+    pub fn resident_rows(&self) -> Option<usize> {
+        self.exec.resident_rows()
     }
 
     /// Whether this incarnation booted from durable state (`recovered()` holds in its boot tick).

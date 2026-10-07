@@ -10,8 +10,10 @@
 //! The architecture's evaluator is word-level (the engine ingests encoded batches); this one is value-level.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use blossom_base::{FnId, RelId, RuleId};
+use blossom_engine::ColdTables;
 use blossom_ir::tick::{
     Changes, EvalError, FnWork, Instance, Row, RuleWork, StepInput, StepOutput, TickInput, TickOutput,
 };
@@ -44,6 +46,12 @@ impl<E: Evaluator + ?Sized> Evaluator for &E {
 pub trait Executor: Send {
     /// Starts from `carried` (at boot: the recovered durable state). The next step continues from it.
     fn reset(&mut self, carried: Instance) -> Result<(), EvalError>;
+    /// Starts from the durable tables of `cold` (the node's database, at its newest version) and the volatile rows
+    /// `carried`: an executor that keeps whole instances reads every table (O(state)); the engine reads the tables
+    /// it does not tier and keeps the others on the cold side (docs/design/DATABASE.md §7).
+    fn reset_on(&mut self, carried: Instance, cold: Arc<dyn ColdTables>) -> Result<(), EvalError> {
+        self.reset(whole_instance(carried, &*cold)?)
+    }
     /// Runs one tick from the executor's own carried state. `observe` names relations whose final contents at this
     /// tick the caller needs (the `halt` output).
     fn step(&mut self, input: &StepInput<'_>, observe: &[RelId]) -> Result<StepOutput, EvalError>;
@@ -53,6 +61,10 @@ pub trait Executor: Send {
     fn carried(&self) -> Result<Instance, EvalError>;
     /// The join work done so far, in rows examined, if the executor measures it.
     fn rows_examined(&self) -> Option<u64>;
+    /// The rows the executor holds in memory, if it counts them (the engine: not its tiered tables' cold rows).
+    fn resident_rows(&self) -> Option<usize> {
+        None
+    }
     /// The work of each rule so far (rows examined, expression nodes evaluated), if the executor measures it.
     fn work_by_rule(&self) -> Option<BTreeMap<RuleId, RuleWork>>;
     /// Starts (afresh) or stops counting each function's work; false if the executor cannot.
@@ -63,6 +75,19 @@ pub trait Executor: Send {
     /// row or a request without creating it again. (The node counts the carried rows' blobs itself, from each tick's
     /// changes.)
     fn holds_blob(&self, b: &blossom_value::BlobRef) -> bool;
+}
+
+/// `carried` with every table of `cold` at its newest version.
+pub fn whole_instance(carried: Instance, cold: &dyn ColdTables) -> Result<Instance, EvalError> {
+    let mut whole = carried;
+    if let Some(v) = cold.version()? {
+        for rel in cold.tables() {
+            for row in cold.probe(rel, &[], &[], None, v)? {
+                whole.insert(rel, row);
+            }
+        }
+    }
+    Ok(whole)
 }
 
 /// Any [`Evaluator`] as an [`Executor`]: it keeps the carried state and diffs each tick's next state against it.
@@ -154,6 +179,10 @@ impl<X: Executor + ?Sized> Executor for Box<X> {
         (**self).reset(carried)
     }
 
+    fn reset_on(&mut self, carried: Instance, cold: Arc<dyn ColdTables>) -> Result<(), EvalError> {
+        (**self).reset_on(carried, cold)
+    }
+
     fn step(&mut self, input: &StepInput<'_>, observe: &[RelId]) -> Result<StepOutput, EvalError> {
         (**self).step(input, observe)
     }
@@ -168,6 +197,10 @@ impl<X: Executor + ?Sized> Executor for Box<X> {
 
     fn rows_examined(&self) -> Option<u64> {
         (**self).rows_examined()
+    }
+
+    fn resident_rows(&self) -> Option<usize> {
+        (**self).resident_rows()
     }
 
     fn work_by_rule(&self) -> Option<BTreeMap<RuleId, RuleWork>> {
@@ -192,6 +225,10 @@ impl Executor for blossom_engine::Engine {
         blossom_engine::Engine::reset(self, carried)
     }
 
+    fn reset_on(&mut self, carried: Instance, cold: Arc<dyn ColdTables>) -> Result<(), EvalError> {
+        blossom_engine::Engine::reset_on(self, carried, cold)
+    }
+
     fn step(&mut self, input: &StepInput<'_>, observe: &[RelId]) -> Result<StepOutput, EvalError> {
         blossom_engine::Engine::step(self, input, observe)
     }
@@ -206,6 +243,10 @@ impl Executor for blossom_engine::Engine {
 
     fn rows_examined(&self) -> Option<u64> {
         Some(blossom_engine::Engine::rows_examined(self))
+    }
+
+    fn resident_rows(&self) -> Option<usize> {
+        Some(self.held_rows())
     }
 
     fn work_by_rule(&self) -> Option<BTreeMap<RuleId, RuleWork>> {
@@ -289,6 +330,21 @@ pub enum Backend {
     Engine,
     /// The reference oracle behind [`OracleExecutor`]: a tick re-evaluates the whole state.
     Oracle,
+    /// The engine checked against the oracle at every tick ([`CheckedExecutor`]): the differential suite in any
+    /// harness (a node's tiered tables included, docs/design/DATABASE.md §7).
+    Checked,
+}
+
+impl Backend {
+    /// The backend `BLOSSOM_EVALUATOR` names (`engine`, `oracle` or `checked`), or the default: how a test run asks
+    /// every harness that takes the default for another evaluator.
+    pub fn from_env() -> Result<Backend, String> {
+        match std::env::var("BLOSSOM_EVALUATOR") {
+            Ok(v) => v.parse(),
+            Err(std::env::VarError::NotPresent) => Ok(Backend::default()),
+            Err(e) => Err(format!("BLOSSOM_EVALUATOR: {e}")),
+        }
+    }
 }
 
 impl std::str::FromStr for Backend {
@@ -298,7 +354,8 @@ impl std::str::FromStr for Backend {
         match s {
             "engine" => Ok(Backend::Engine),
             "oracle" => Ok(Backend::Oracle),
-            other => Err(format!("unknown evaluator `{other}` (engine or oracle)")),
+            "checked" => Ok(Backend::Checked),
+            other => Err(format!("unknown evaluator `{other}` (engine, oracle or checked)")),
         }
     }
 }
@@ -359,6 +416,138 @@ impl Executors {
                 self.engine.clone(),
             )?),
             Backend::Oracle => Box::new(OracleExecutor::new(self.oracle.clone())),
+            Backend::Checked => Box::new(CheckedExecutor {
+                engine: blossom_engine::Engine::new(self.program.clone(), node, self.engine.clone())?,
+                oracle: OracleExecutor::new(self.oracle.clone()),
+                program: self.program.clone(),
+            }),
         })
+    }
+}
+
+/// The engine and the reference oracle side by side: every tick runs on both, from the same inputs, and a tick
+/// whose outputs differ fails, naming the first difference. The engine's output is the node's.
+pub struct CheckedExecutor {
+    engine: blossom_engine::Engine,
+    oracle: OracleExecutor<std::sync::Arc<Oracle>>,
+    program: blossom_ir::ValidatedProgram,
+}
+
+/// The first difference between two ticks' outputs (the oracle's, then the engine's), if any, relations by name.
+fn first_difference(p: &blossom_ir::core::Program, oracle: &StepOutput, engine: &StepOutput) -> Option<String> {
+    let rows = |c: &BTreeMap<RelId, Vec<Row>>| -> BTreeMap<String, std::collections::BTreeSet<Row>> {
+        c.iter()
+            .filter(|(_, rows)| !rows.is_empty())
+            .map(|(r, rows)| {
+                let name = p.rels.get(*r).map_or_else(|| format!("{r:?}"), |d| d.name.to_string());
+                (name, rows.iter().cloned().collect())
+            })
+            .collect()
+    };
+    let (oi, ei) = (rows(&oracle.changes.inserted), rows(&engine.changes.inserted));
+    if oi != ei {
+        return Some(format!("inserted rows: oracle {oi:?}, engine {ei:?}"));
+    }
+    let (od, ed) = (rows(&oracle.changes.deleted), rows(&engine.changes.deleted));
+    if od != ed {
+        return Some(format!("deleted rows: oracle {od:?}, engine {ed:?}"));
+    }
+    if oracle.outbox != engine.outbox {
+        return Some(format!("sends: oracle {:?}, engine {:?}", oracle.outbox, engine.outbox));
+    }
+    if oracle.egress != engine.egress {
+        return Some(format!(
+            "egress: oracle {:?}, engine {:?}",
+            oracle.egress, engine.egress
+        ));
+    }
+    if oracle.host != engine.host {
+        return Some(format!(
+            "host outputs: oracle {:?}, engine {:?}",
+            oracle.host, engine.host
+        ));
+    }
+    let (oo, eo) = (rows(&oracle.observed), rows(&engine.observed));
+    if oo != eo {
+        return Some(format!("observed rows: oracle {oo:?}, engine {eo:?}"));
+    }
+    None
+}
+
+impl Executor for CheckedExecutor {
+    fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
+        self.oracle.reset(carried.clone())?;
+        self.engine.reset(carried)
+    }
+
+    fn reset_on(&mut self, carried: Instance, cold: Arc<dyn ColdTables>) -> Result<(), EvalError> {
+        self.oracle.reset_on(carried.clone(), cold.clone())?;
+        self.engine.reset_on(carried, cold)
+    }
+
+    fn step(&mut self, input: &StepInput<'_>, observe: &[RelId]) -> Result<StepOutput, EvalError> {
+        let oracle = self.oracle.step(input, observe);
+        let engine = blossom_engine::Engine::step(&mut self.engine, input, observe);
+        match (oracle, engine) {
+            (Ok(o), Ok(e)) => match first_difference(self.program.get(), &o, &e) {
+                None => Ok(e),
+                Some(d) => Err(blossom_base::internal_error!(
+                    "the engine and the oracle differ at tick {} of node {}: {d}",
+                    input.tick.0,
+                    input.node.0
+                )
+                .into()),
+            },
+            // The same program error (the code: its detail may list rows in another order), or the same failure.
+            (Err(EvalError::Program { error: o, .. }), Err(e @ EvalError::Program { .. })) if matches!(&e, EvalError::Program { error, .. } if error.code == o.code) => {
+                Err(e)
+            }
+            (Err(o), Err(e)) if o.to_string() == e.to_string() => Err(e),
+            (o, e) => Err(blossom_base::internal_error!(
+                "the engine and the oracle differ at tick {} of node {}: oracle {:?}, engine {:?}",
+                input.tick.0,
+                input.node.0,
+                o.map(|_| "ok").map_err(|x| x.to_string()),
+                e.map(|_| "ok").map_err(|x| x.to_string())
+            )
+            .into()),
+        }
+    }
+
+    fn carried_rows(&self, rel: RelId) -> Result<Vec<Row>, EvalError> {
+        blossom_engine::Engine::carried_rows(&self.engine, rel)
+    }
+
+    fn carried(&self) -> Result<Instance, EvalError> {
+        let (o, e) = (self.oracle.carried()?, self.engine.carried_instance()?);
+        if o != e {
+            return Err(blossom_base::internal_error!("the engine's carried state is not the oracle's").into());
+        }
+        Ok(e)
+    }
+
+    fn rows_examined(&self) -> Option<u64> {
+        Some(blossom_engine::Engine::rows_examined(&self.engine))
+    }
+
+    fn resident_rows(&self) -> Option<usize> {
+        Some(self.engine.held_rows())
+    }
+
+    fn work_by_rule(&self) -> Option<BTreeMap<RuleId, RuleWork>> {
+        Some(blossom_engine::Engine::work_by_rule(&self.engine).clone())
+    }
+
+    fn profile_functions(&mut self, on: bool) -> bool {
+        self.engine.set_profile_functions(on);
+        true
+    }
+
+    fn work_by_function(&self) -> Option<BTreeMap<FnId, FnWork>> {
+        blossom_engine::Engine::work_by_function(&self.engine)
+    }
+
+    fn holds_blob(&self, b: &blossom_value::BlobRef) -> bool {
+        blossom_engine::Engine::holds_blob(&self.engine, b)
     }
 }

@@ -122,6 +122,14 @@ fn agree(lsm: &Lsm, model: &Model) {
                 .filter(|k| k.as_slice() >= lo && hi.is_none_or(|h| k.as_slice() < h))
                 .collect();
             assert_eq!(lsm.scan_range(lo, hi, v).unwrap(), want, "as of {v}, {lo:?}..{hi:?}");
+            // The same range a page at a time, with pages of every size from one key.
+            for keys in [1, 2, 5, 64] {
+                assert_eq!(
+                    paged(lsm, lo, hi, v, keys),
+                    want,
+                    "as of {v}, {lo:?}..{hi:?} in pages of {keys}"
+                );
+            }
         }
         // Point lookups of present keys and of keys the model never had or has deleted.
         for k in present
@@ -137,6 +145,53 @@ fn agree(lsm: &Lsm, model: &Model) {
             }
         }
     }
+}
+
+#[cfg(test)]
+/// A range read with `Lsm::scan_page`, `keys` at a time; every page but the last ends the range short.
+fn paged(lsm: &Lsm, lo: &[u8], hi: Option<&[u8]>, v: u64, keys: usize) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut start = lo.to_vec();
+    loop {
+        let page = lsm.scan_page(&start, hi, v, keys).unwrap();
+        assert!(
+            page.keys.len() <= keys,
+            "a page of {} keys asked for {keys}",
+            page.keys.len()
+        );
+        if let (Some(last), Some(next)) = (page.keys.last(), &page.next) {
+            assert!(last < next, "a page ends past where the next starts");
+        }
+        out.extend(page.keys);
+        match page.next {
+            Some(n) => start = n,
+            None => return out,
+        }
+    }
+}
+
+#[test]
+fn an_amendment_joins_the_newest_version() {
+    let fs: Arc<dyn Vfs> = Arc::new(SimFs::default());
+    let dir = Path::new("/db");
+    let lsm = Lsm::open(fs.clone(), dir, opts()).unwrap();
+    assert!(lsm.amend([(b"x".to_vec(), Op::Put)]).is_err(), "no version applied yet");
+    lsm.apply(1, 10, [(b"a".to_vec(), Op::Put)]).unwrap();
+    lsm.apply(2, 20, [(b"b".to_vec(), Op::Put)]).unwrap();
+    lsm.amend([(b"x".to_vec(), Op::Put)]).unwrap();
+    assert_eq!(lsm.applied().unwrap(), Some(2), "an amendment applies no version");
+    assert_eq!(
+        lsm.scan(b"", 2).unwrap(),
+        vec![b"a".to_vec(), b"b".to_vec(), b"x".to_vec()]
+    );
+    assert_eq!(lsm.scan(b"", 1).unwrap(), vec![b"a".to_vec()]);
+    // Flushed with the version it joined, and kept through a reopen.
+    let flushed = lsm.flush().unwrap();
+    assert_eq!((flushed.version(), flushed.mark()), (Some(2), 20));
+    drop(lsm);
+    let again = Lsm::open(fs, dir, opts()).unwrap();
+    assert!(again.get(b"x", 2).unwrap());
+    assert!(!again.get(b"x", 1).unwrap());
 }
 
 #[test]

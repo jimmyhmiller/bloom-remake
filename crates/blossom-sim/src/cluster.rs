@@ -101,7 +101,8 @@ pub struct ClusterConfig {
     pub duration: i64,
     /// The principal clients claim.
     pub principal: String,
-    /// The evaluator the nodes run.
+    /// The evaluator the nodes run. `BLOSSOM_EVALUATOR` (`engine`, `oracle`, `checked`) overrides it for a test run:
+    /// `checked` runs every node's engine against the oracle at every tick.
     pub backend: Backend,
     /// How the nodes' stores certify their WAL tails.
     pub certification: blossom_store::Certification,
@@ -349,8 +350,12 @@ impl<'p> Cluster<'p> {
         protocol: Box<dyn ClientProtocol + 'p>,
         cfg: ClusterConfig,
     ) -> Result<Cluster<'p>, SimError> {
+        let backend = match std::env::var_os("BLOSSOM_EVALUATOR") {
+            Some(_) => Backend::from_env().map_err(|e| SimError::Internal(internal_error!("{e}")))?,
+            None => cfg.backend,
+        };
         let executors = Executors::new(
-            cfg.backend,
+            backend,
             artifact.program.clone(),
             artifact.roles.clone(),
             artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect(),

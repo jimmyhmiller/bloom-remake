@@ -245,16 +245,27 @@ impl<'p> DurableCodec<'p> {
     /// and keys order as rows do column by column); then the row in the durable codec and that encoding's length (a
     /// big-endian `u32`), which is what [`DurableCodec::key_row`] reads back.
     pub fn row_key(&self, rel: RelId, row: &Row) -> Result<Vec<u8>, NodeError> {
-        let cols = self.cols(rel)?;
-        if cols.len() != row.len() {
-            return Err(WireError::Malformed(format!("{} values for {} columns", row.len(), cols.len())).into());
+        let all: Vec<usize> = (0..row.len()).collect();
+        self.tagged_key(&self.rel_tag(rel)?, rel, &all, row)
+    }
+
+    /// A key of a keyspace of `rel` (its rows, or a keyspace derived from them): `tag`; the values of columns `cols`
+    /// of `row`, in that order, in the key encoding; the row in the durable codec; that encoding's length.
+    pub fn tagged_key(&self, tag: &[u8], rel: RelId, cols: &[usize], row: &Row) -> Result<Vec<u8>, NodeError> {
+        let decl = self.cols(rel)?;
+        if decl.len() != row.len() {
+            return Err(WireError::Malformed(format!("{} values for {} columns", row.len(), decl.len())).into());
         }
-        let mut key = self.rel_tag(rel)?.to_vec();
-        for (c, v) in cols.iter().zip(row.iter()) {
-            self.put_key_value(c, v, &mut key)?;
+        let mut key = tag.to_vec();
+        for c in cols {
+            let (col, v) = decl
+                .get(*c)
+                .zip(row.get(*c))
+                .ok_or_else(|| WireError::Malformed(format!("column {c} of a narrower relation")))?;
+            self.put_key_value(col, v, &mut key)?;
         }
         let at = key.len();
-        self.codec.encode_row(cols, row, &mut key)?;
+        self.codec.encode_row(decl, row, &mut key)?;
         let len = u32::try_from(key.len() - at).map_err(|_| WireError::Limit("a row over 4 GiB"))?;
         key.extend_from_slice(&len.to_be_bytes());
         Ok(key)
@@ -262,13 +273,29 @@ impl<'p> DurableCodec<'p> {
 
     /// The key prefix of the rows of `rel` whose leading columns (in declaration order) are `leading`.
     pub fn key_prefix(&self, rel: RelId, leading: &[blossom_value::Value]) -> Result<Vec<u8>, NodeError> {
-        let cols = self.cols(rel)?;
-        let cols = cols
-            .get(..leading.len())
-            .ok_or_else(|| WireError::Malformed(format!("{} leading columns of a narrower relation", leading.len())))?;
-        let mut key = self.rel_tag(rel)?.to_vec();
-        for (c, v) in cols.iter().zip(leading) {
-            self.put_key_value(c, v, &mut key)?;
+        let cols: Vec<usize> = (0..leading.len()).collect();
+        self.tagged_prefix(&self.rel_tag(rel)?, rel, &cols, leading)
+    }
+
+    /// The prefix of the keys under `tag` (keyed by columns `cols` of `rel`, [`DurableCodec::tagged_key`]) whose
+    /// columns `cols` hold `values`.
+    pub fn tagged_prefix(
+        &self,
+        tag: &[u8],
+        rel: RelId,
+        cols: &[usize],
+        values: &[blossom_value::Value],
+    ) -> Result<Vec<u8>, NodeError> {
+        if cols.len() != values.len() {
+            return Err(WireError::Malformed(format!("{} values for {} columns", values.len(), cols.len())).into());
+        }
+        let decl = self.cols(rel)?;
+        let mut key = tag.to_vec();
+        for (c, v) in cols.iter().zip(values) {
+            let col = decl
+                .get(*c)
+                .ok_or_else(|| WireError::Malformed(format!("column {c} of a narrower relation")))?;
+            self.put_key_value(col, v, &mut key)?;
         }
         Ok(key)
     }
@@ -283,15 +310,33 @@ impl<'p> DurableCodec<'p> {
         lo: std::ops::Bound<&blossom_value::Value>,
         hi: std::ops::Bound<&blossom_value::Value>,
     ) -> Result<(Vec<u8>, Option<Vec<u8>>), NodeError> {
+        let cols: Vec<usize> = (0..leading.len()).collect();
+        self.tagged_range(&self.rel_tag(rel)?, rel, &cols, leading, leading.len(), lo, hi)
+    }
+
+    /// The keys under `tag` (keyed by columns `cols` then `col` of `rel`) whose columns `cols` hold `values` and
+    /// whose column `col` lies within `lo` and `hi`: from the first key (inclusive) to the end (exclusive, `None`:
+    /// no end).
+    #[allow(clippy::too_many_arguments)]
+    pub fn tagged_range(
+        &self,
+        tag: &[u8],
+        rel: RelId,
+        cols: &[usize],
+        values: &[blossom_value::Value],
+        col: usize,
+        lo: std::ops::Bound<&blossom_value::Value>,
+        hi: std::ops::Bound<&blossom_value::Value>,
+    ) -> Result<(Vec<u8>, Option<Vec<u8>>), NodeError> {
         use std::ops::Bound;
-        let prefix = self.key_prefix(rel, leading)?;
-        let col = self
+        let prefix = self.tagged_prefix(tag, rel, cols, values)?;
+        let decl = self
             .cols(rel)?
-            .get(leading.len())
+            .get(col)
             .ok_or_else(|| WireError::Malformed("a range past the relation's last column".into()))?;
         let at = |v: &blossom_value::Value| -> Result<Vec<u8>, NodeError> {
             let mut k = prefix.clone();
-            self.put_key_value(col, v, &mut k)?;
+            self.put_key_value(decl, v, &mut k)?;
             Ok(k)
         };
         let start = match lo {
@@ -312,9 +357,13 @@ impl<'p> DurableCodec<'p> {
 
     /// The row a database key of `rel` holds.
     pub fn key_row(&self, rel: RelId, key: &[u8]) -> Result<Row, NodeError> {
-        let tag = self.rel_tag(rel)?;
-        if !key.starts_with(tag.as_slice()) {
-            return Err(WireError::Malformed("a database key of another relation".into()).into());
+        self.tagged_row(&self.rel_tag(rel)?, rel, key)
+    }
+
+    /// The row a key under `tag` of `rel` holds ([`DurableCodec::tagged_key`]): read from its end.
+    pub fn tagged_row(&self, tag: &[u8], rel: RelId, key: &[u8]) -> Result<Row, NodeError> {
+        if !key.starts_with(tag) {
+            return Err(WireError::Malformed("a database key of another keyspace".into()).into());
         }
         let (rest, len) = key
             .split_at_checked(key.len().saturating_sub(4))

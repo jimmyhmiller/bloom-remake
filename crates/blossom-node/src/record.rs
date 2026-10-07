@@ -66,16 +66,30 @@ impl BlobSource for Tap<'_> {
     }
 }
 
-impl Executor for Recording {
-    fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
+impl Recording {
+    /// Writes the boot record: the state the executor starts from.
+    fn boot(&mut self, carried: &Instance) -> Result<(), EvalError> {
         let image: Vec<(RelId, Vec<Row>)> = carried
             .rels
             .iter()
             .map(|(r, rows)| (*r, rows.iter().cloned().collect()))
             .collect();
         self.write(&NodeRecord::Boot { image })?;
-        self.flush()?;
+        self.flush()
+    }
+}
+
+impl Executor for Recording {
+    fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
+        self.boot(&carried)?;
         self.inner.reset(carried)
+    }
+
+    /// The trace holds the whole state the executor starts from (read from the database, O(state)): a replay starts
+    /// from it without the store.
+    fn reset_on(&mut self, carried: Instance, cold: Arc<dyn blossom_engine::ColdTables>) -> Result<(), EvalError> {
+        self.boot(&crate::eval::whole_instance(carried.clone(), &*cold)?)?;
+        self.inner.reset_on(carried, cold)
     }
 
     fn step(&mut self, input: &StepInput<'_>, observe: &[RelId]) -> Result<StepOutput, EvalError> {
@@ -137,6 +151,10 @@ impl Executor for Recording {
 
     fn rows_examined(&self) -> Option<u64> {
         self.inner.rows_examined()
+    }
+
+    fn resident_rows(&self) -> Option<usize> {
+        self.inner.resident_rows()
     }
 
     fn work_by_rule(&self) -> Option<BTreeMap<RuleId, RuleWork>> {

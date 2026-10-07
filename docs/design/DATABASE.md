@@ -154,6 +154,44 @@ Moving durable relations onto the database, so a node's durable state may outgro
     database moves into the shared path (its tree and feeding into `blossom-node`'s recovery and drivers, its
     flushes driven deterministically under simulation), so every crash the simulator explores reaches it.
 
+**How S24 builds items 1–7 (step 2c).**
+
+- *Store.* `Lsm::amend` writes keys at the newest applied version (a derived keyspace built between two ticks: it
+  claims no tick). `Lsm::scan_page` reads a range a bounded page at a time, so no scan holds a whole table.
+- *Derived keyspaces in the database.* An index of relation `r` on columns `C` is the keyspace
+  `itag(r, C) ++ keycode(row[C]) ++ codec(row) ++ len`; the blobs of `r` the keyspace `btag(r) ++ blob ++ codec(row)
+  ++ len`. Each has a definition key (under a keyspace of its own); `Database::apply` and `bootstrap` keep every
+  defined keyspace with the rows they write. The blob keyspaces are defined at open (built from the rows when a
+  database from before them has rows); an index is defined the first time a probe needs it, and built from the rows
+  at the applied version in the same `amend` as its definition (a crash loses both or neither; the build holds the
+  new keys in memory, once). A definition made before any version is applied is written with the first.
+- *The engine's cold side* is a trait (`blossom_engine::ColdTables`: the newest version, the tables, contains, a
+  probe by columns with an optional range on one more, count; all as of a version) the node's `Database`
+  implements. A probe on a leading run of the declared columns (and a range on the next) reads the relation's own
+  keys; any other reads an index, and only as of the newest version.
+- *Tiered tables.* After `Engine::reset_on(volatile, cold)`, a durable set table carried by its frame and written by
+  no rule but its next state's keeps in memory only: the carry's changes the database may not hold yet (`overlay`,
+  each row's newest carried membership with the tick that set it), support other than the carry (a program fact's),
+  and the tick's change. A row is carried as the overlay says, else as the database says at its newest version: an
+  overlay entry the database has caught up with agrees with it (no later tick changed the row, or the entry would be
+  newer), and is dropped at a tick's start. The store takes a tick's change to its next state at the end of that
+  tick, before the node can release the tick to the database, so every read is at the database's newest version;
+  the change shows as the next tick's. Its first tick after the reset shows every row as new (the rules' stores
+  start empty after any reset, and derive from all of the table), reading the table whole once, and its next state
+  is compared with what the database held (as the baseline does for the other relations). Tables the engine does
+  not tier (lattice tables, sealed and resolved ones, those a rule writes) are loaded from the database.
+- *Blobs.* The executor answers only for rows beyond the carried state (`Executor::holds_blob`), and a tiered table
+  holds only carried rows once a tick has ended: it answers for none. The node counts the carried rows' blobs from
+  the blob keyspaces at boot, then from each tick's change.
+- *The node* boots on the database (`Boot::database`): recovery replays the WAL into it and builds an image only to
+  start a database the store did not have. `Executor::reset_on` hands the executor the database: the engine tiers
+  what it can; an executor of whole instances (the oracle, a recording) reads every table.
+- *Checking.* `Backend::Checked` runs the engine and the oracle side by side and fails the first tick whose outputs
+  differ; `BLOSSOM_EVALUATOR=checked` makes every simulated cluster run it.
+
+Still in memory: lattice and sealed durable tables; the views over durable tables (rebuilt from all of a table at
+the first tick after a boot); the node's per-blob counts.
+
 Tests: every suite and the corpus run on the tiered stores (the engine and the oracle still agree on every corpus
 program); a node whose durable state is several times its cache; kill -9 and the crash simulation over the
 database as the only durable state.

@@ -118,6 +118,12 @@ pub struct Engine {
     /// to the next (docs/design/DATABASE.md §7). A lattice table's next state merges the frame's rows with the other
     /// contributions, so its `Next` store holds them all.
     framed: BTreeMap<RelId, rule::FramePlan>,
+    /// The framed tables that may be tiered (durable, and written by no rule but their next state's), with their key
+    /// columns.
+    tierable: BTreeMap<RelId, Vec<usize>>,
+    /// The tables tiered since the last reset ([`Engine::reset_on`]): their rows are the cold side's, and their
+    /// `Main` store takes each tick's change to its next state at the tick's end.
+    tiered: BTreeSet<RelId>,
 }
 
 fn kinds(p: &Program) -> Vec<Option<Kind>> {
@@ -325,6 +331,13 @@ fn tick_scoped(p: &Program, rules: &[RuleId], recursive: &BTreeSet<RelId>) -> BT
     }
 }
 
+/// Whether a table's frame carries `row` (`FramePlan`: in the table, not deleted, and kept), at the start of the
+/// tick (`old`) or now.
+fn frame_holds(rel: &Store, del: &Store, keep: Option<&Store>, row: &Row, old: bool) -> Result<bool, EvalError> {
+    let has = |s: &Store| if old { s.contained(row) } else { s.contains(row) };
+    Ok(has(rel)? && !has(del)? && keep.map(has).transpose()?.unwrap_or(true))
+}
+
 impl Engine {
     /// Prepares `program` for node `node`: checks what it evaluates, stratifies, plans every rule the node runs, and
     /// creates and indexes every store.
@@ -456,6 +469,20 @@ impl Engine {
                 framed.insert(rel, frame.clone());
             }
         }
+        let deduced: BTreeSet<RelId> = p
+            .rules
+            .iter_enumerated()
+            .filter(|(id, r)| plans.contains_key(id) && r.kind == RuleKind::Deductive)
+            .map(|(_, r)| r.head.rel)
+            .collect();
+        let tierable = framed
+            .keys()
+            .filter_map(|rel| {
+                let decl = p.rels.get(*rel)?;
+                (decl.durable && !deduced.contains(rel))
+                    .then(|| (*rel, decl.schema.key.iter().map(|c| c.index()).collect()))
+            })
+            .collect();
         let mut keyed = Vec::new();
         for (id, r) in p.rels.iter_enumerated() {
             if r.schema.payload.is_empty() {
@@ -511,6 +538,8 @@ impl Engine {
             fn_work: None,
             scoped: scoped_derived,
             framed,
+            tierable,
+            tiered: BTreeSet::new(),
             program,
         };
         engine.build_indexes()?;
@@ -557,8 +586,9 @@ impl Engine {
     /// Starts over from `carried` (at boot: the recovered durable state): every store is emptied, and the next tick
     /// sees the carried state, the facts and its inputs as new.
     pub fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
+        self.tiered.clear();
         for s in self.stores.values_mut() {
-            *s = Store::new(s.cell.clone(), s.counts_blobs());
+            *s = s.emptied();
         }
         self.prev.clear();
         self.recomputed.clear();
@@ -573,6 +603,45 @@ impl Engine {
         self.pending = pending;
         self.baseline = Some(carried);
         self.build_indexes()
+    }
+
+    /// Starts over as [`Engine::reset`] does, from the durable tables of `cold` at its newest version and the volatile
+    /// rows `carried` (none of a durable table's): the tables that can be tiered are (docs/design/DATABASE.md §7),
+    /// their rows read from the cold side and memory keeping only what it does not hold yet; the others are loaded.
+    pub fn reset_on(&mut self, carried: Instance, cold: Arc<dyn crate::cold::ColdTables>) -> Result<(), EvalError> {
+        if let Some(rel) = self
+            .tierable
+            .keys()
+            .find(|r| carried.rels.get(r).is_some_and(|rows| !rows.is_empty()))
+        {
+            return Err(internal_error!("a reset onto the cold side carries rows of the tiered table {rel:?}").into());
+        }
+        // The durable tables the engine keeps in memory start from the cold side's rows.
+        let mut carried = carried;
+        if let Some(v) = cold.version()? {
+            for rel in cold.tables() {
+                if self.tierable.contains_key(&rel) {
+                    continue;
+                }
+                for row in cold.probe(rel, &[], &[], None, v)? {
+                    carried.insert(rel, row);
+                }
+            }
+        }
+        self.reset(carried)?;
+        for (rel, key) in self.tierable.clone() {
+            self.stores.insert(
+                StoreKey::Main(rel),
+                Store::tiered(crate::store::Tiered::new(
+                    rel,
+                    cold.clone(),
+                    key,
+                    rel_holds_blobs(self.program.get(), rel),
+                )?),
+            );
+            self.tiered.insert(rel);
+        }
+        Ok(())
     }
 
     /// A store to write. A lattice store written is settled at the next [`Engine::settle`].
@@ -623,13 +692,23 @@ impl Engine {
         let wrap = |e: ExprError| to_eval(e, tick, None);
         // 1. What changes.
         self.stores.clear_deltas();
+        // A tiered table took the last tick's change at that tick's end: it shows as this tick's change.
+        for rel in self.tiered.clone() {
+            self.store(StoreKey::Main(rel))?.begin_tick()?;
+        }
         let pending = std::mem::take(&mut self.pending);
         for (rel, rows) in &pending.deleted {
+            if self.tiered.contains(rel) {
+                continue;
+            }
             for r in rows {
                 self.store(StoreKey::Main(*rel))?.add(r.clone(), -1).map_err(wrap)?;
             }
         }
         for (rel, rows) in &pending.inserted {
+            if self.tiered.contains(rel) {
+                continue;
+            }
             for r in rows {
                 self.store(StoreKey::Main(*rel))?.add(r.clone(), 1).map_err(wrap)?;
             }
@@ -755,9 +834,19 @@ impl Engine {
             }
         }
         if let Some(base) = self.baseline.take() {
-            // The first tick after a reset: the change is relative to the carried state it started from.
-            let next = self.next_instance()?;
-            changes = Changes::between(&base, &next);
+            // The first tick after a reset: the change is relative to the carried state it started from (a tiered
+            // table's started from the cold side, as its stores did).
+            let next = self.next_instance(false)?;
+            let mut fresh = Changes::between(&base, &next);
+            for rel in &self.tiered {
+                if let Some(rows) = changes.inserted.remove(rel) {
+                    fresh.inserted.insert(*rel, rows);
+                }
+                if let Some(rows) = changes.deleted.remove(rel) {
+                    fresh.deleted.insert(*rel, rows);
+                }
+            }
+            changes = fresh;
         }
         self.pending = changes.clone();
         let mut out = StepOutput {
@@ -776,7 +865,7 @@ impl Engine {
                 self.program.get().rels.get(rel).map(|r| &r.class),
                 Some(RelClass::HostOut(_))
             );
-            for row in s.present() {
+            for row in s.present()? {
                 if to_host {
                     out.host.insert(blossom_ir::tick::HostOut { rel, row: row.clone() });
                     continue;
@@ -805,17 +894,38 @@ impl Engine {
                 .stores
                 .get(&StoreKey::Main(*rel))
                 .map(Store::present_sorted)
+                .transpose()?
                 .unwrap_or_default();
             out.observed.insert(*rel, rows);
+        }
+        // A tiered table takes its change now: its rows are the next tick's from here on.
+        for rel in self.tiered.clone() {
+            let store = self.store(StoreKey::Main(rel))?;
+            for r in out.changes.deleted.get(&rel).into_iter().flatten() {
+                store.carry(r, false, tick.0)?;
+            }
+            for r in out.changes.inserted.get(&rel).into_iter().flatten() {
+                store.carry(r, true, tick.0)?;
+            }
         }
         Ok(out)
     }
 
-    fn next_instance(&self) -> Result<Instance, EvalError> {
+    /// The next tick's carried state, with the tiered tables' rows (`tiered`: read from the cold side, after the
+    /// tick's end) or without them.
+    fn next_instance(&self, tiered: bool) -> Result<Instance, EvalError> {
         let mut next = Instance::default();
         for (key, s) in self.stores.iter() {
             if let StoreKey::Next(rel) = key {
-                for r in s.present() {
+                if self.tiered.contains(&rel) {
+                    if tiered {
+                        for r in self.tiered_rows(rel)? {
+                            next.insert(rel, r);
+                        }
+                    }
+                    continue;
+                }
+                for r in s.present()? {
                     next.insert(rel, r.clone());
                 }
                 if let Some(frame) = self.framed.get(&rel) {
@@ -826,6 +936,14 @@ impl Engine {
             }
         }
         Ok(next)
+    }
+
+    /// A tiered table's rows: after a tick's end, the next tick's.
+    fn tiered_rows(&self, rel: RelId) -> Result<Vec<Row>, EvalError> {
+        self.stores
+            .get(&StoreKey::Main(rel))
+            .ok_or_else(|| internal_error!("no store for the tiered table {rel:?}"))?
+            .present_sorted()
     }
 
     /// The stores a table's frame reads.
@@ -845,11 +963,13 @@ impl Engine {
     /// The rows a framed table's frame carries into the next state: its present rows not deleted, and kept.
     fn frame_rows(&self, frame: &rule::FramePlan) -> Result<Vec<Row>, EvalError> {
         let (rel, del, keep) = self.frame_stores(frame)?;
-        Ok(rel
-            .present()
-            .filter(|r| !del.contains(r) && keep.is_none_or(|k| k.contains(r)))
-            .cloned()
-            .collect())
+        let mut out = Vec::new();
+        for r in rel.present()? {
+            if frame_holds(rel, del, keep, r, false)? {
+                out.push(r.clone());
+            }
+        }
+        Ok(out)
     }
 
     /// How the tick changed a framed table's next state (`Engine::framed`): the rows it gained and those it lost. A
@@ -870,10 +990,13 @@ impl Engine {
         rows.extend(next.delta().map(|(r, _)| r));
         let (mut ins, mut gone) = (Vec::new(), Vec::new());
         for row in rows {
-            let was = (rel.contained(row) && !del.contained(row) && keep.is_none_or(|k| k.contained(row)))
-                || next.contained(row);
-            let is =
-                (rel.contains(row) && !del.contains(row) && keep.is_none_or(|k| k.contains(row))) || next.contains(row);
+            // The first tick after a reset onto the cold side compares with what was carried then, as the baseline
+            // does for the other relations.
+            let was = match rel.carried_at_reset(row)? {
+                Some(carried) => carried,
+                None => frame_holds(rel, del, keep, row, true)? || next.contained(row)?,
+            };
+            let is = frame_holds(rel, del, keep, row, false)? || next.contains(row)?;
             match (was, is) {
                 (false, true) => ins.push(row.clone()),
                 (true, false) => gone.push(row.clone()),
@@ -886,8 +1009,16 @@ impl Engine {
     /// The whole carried state: what the next tick starts from (O(state)).
     pub fn carried_instance(&self) -> Result<Instance, EvalError> {
         match &self.baseline {
-            Some(base) => Ok(base.clone()),
-            None => self.next_instance(),
+            Some(base) => {
+                let mut carried = base.clone();
+                for rel in &self.tiered {
+                    for r in self.tiered_rows(*rel)? {
+                        carried.insert(*rel, r);
+                    }
+                }
+                Ok(carried)
+            }
+            None => self.next_instance(true),
         }
     }
 
@@ -902,6 +1033,9 @@ impl Engine {
 
     /// The carried rows of `rel`: what the next tick starts from.
     pub fn carried_rows(&self, rel: RelId) -> Result<Vec<Row>, EvalError> {
+        if self.tiered.contains(&rel) {
+            return self.tiered_rows(rel);
+        }
         if let Some(base) = &self.baseline {
             return Ok(base.rows(rel).cloned().collect());
         }
@@ -909,6 +1043,7 @@ impl Engine {
             .stores
             .get(&StoreKey::Next(rel))
             .map(Store::present_sorted)
+            .transpose()?
             .unwrap_or_default();
         if let Some(frame) = self.framed.get(&rel) {
             rows.extend(self.frame_rows(frame)?);
@@ -1121,8 +1256,8 @@ impl Engine {
         }
         let mut out = Terms::default();
         for row in rows {
-            let was = rel.contained(row) && !del.contained(row) && keep.is_none_or(|k| k.contained(row));
-            let is = rel.contains(row) && !del.contains(row) && keep.is_none_or(|k| k.contains(row));
+            let was = frame_holds(rel, del, keep, row, true)?;
+            let is = frame_holds(rel, del, keep, row, false)?;
             if was != is {
                 out.heads.insert(row.clone(), if is { 1 } else { -1 });
             }
@@ -1685,7 +1820,7 @@ impl Engine {
                     if w > 0 && !mine.contains(&row) {
                         mine.insert(row.clone());
                         let store = self.store(plan.head)?;
-                        let fresh = !store.contains(&row);
+                        let fresh = !store.contains(&row)?;
                         store.add(row.clone(), 1).map_err(|e| to_eval(e, tick, Some(rule)))?;
                         if fresh {
                             changed = true;
@@ -1753,7 +1888,9 @@ impl Engine {
             let Some(row) = self
                 .stores
                 .get(&StoreKey::Main(rule.head.rel))
-                .and_then(|s| s.present().min())
+                .map(Store::present)
+                .transpose()?
+                .and_then(|mut rows| rows.next().map(|first| rows.fold(first, std::cmp::min)))
             else {
                 continue;
             };
@@ -1787,6 +1924,9 @@ impl Engine {
         if input.capture {
             return Err(blossom_base::unimplemented_error!("TEST-050", "provenance capture in the engine").into());
         }
+        if !self.tiered.is_empty() {
+            return Err(internal_error!("a whole-instance tick of an engine whose tables are tiered").into());
+        }
         let step = self.step(
             &StepInput {
                 node: input.node,
@@ -1803,14 +1943,14 @@ impl Engine {
         let mut instance = Instance::default();
         for (key, s) in self.stores.iter() {
             if let StoreKey::Main(rel) = key {
-                for r in s.present() {
+                for r in s.present()? {
                     instance.insert(rel, r.clone());
                 }
             }
         }
         Ok(TickOutput {
             instance,
-            next: self.next_instance()?,
+            next: self.next_instance(true)?,
             outbox: step.outbox,
             egress: step.egress,
             host: step.host,
@@ -1821,14 +1961,17 @@ impl Engine {
 
     /// Whether a row of any store holds `b`: derived rows keep their blobs across ticks without re-creating them.
     /// Each store counts its rows' blobs as they change, so this is a lookup per store that can hold blobs.
+    /// A tiered table holds only carried rows once a tick has ended, so it answers for none: the node counts the
+    /// carried rows' blobs itself.
     pub fn holds_blob(&self, b: &blossom_value::BlobRef) -> bool {
         self.stores.values().any(|s| s.holds_blob(b))
     }
 
-    /// The rows the engine's stores hold now, all relations together: its state's size in rows. A table carried by
-    /// its frame counts once (`Engine::framed`), not once for its rows and again for its next state.
+    /// The rows the engine's stores hold in memory now, all relations together: its state's size in rows. A table
+    /// carried by its frame counts once (`Engine::framed`), not once for its rows and again for its next state; a
+    /// tiered table counts only what memory holds of it.
     pub fn held_rows(&self) -> usize {
-        self.stores.values().map(Store::present_len).sum()
+        self.stores.values().map(Store::resident_len).sum()
     }
 
     /// Rows the atom probes returned since the engine was created: the join work, measured without a clock.
