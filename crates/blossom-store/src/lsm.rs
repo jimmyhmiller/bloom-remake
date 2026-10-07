@@ -894,6 +894,11 @@ impl Lsm {
     /// Raises the oldest version an as-of read may ask for to `version` (versions below it are not what they were:
     /// a tree started from a snapshot holds nothing of its past). Recorded with the next flush.
     pub fn raise_floor(&self, version: u64) -> Result<(), StoreError> {
+        // Not while a flush or compaction writes a manifest copied before it.
+        let _work = self
+            .work
+            .lock()
+            .map_err(|_| invalid("the database's work lock is poisoned"))?;
         let mut s = self.write()?;
         s.manifest.floor = s.manifest.floor.max(version);
         Ok(())

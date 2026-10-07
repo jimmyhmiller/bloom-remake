@@ -23,7 +23,7 @@ use blossom_store::{Lsn, Vfs};
 use crate::RuntimeError;
 
 /// The format of the database's keys (`DurableCodec::row_key`): 1, the order-preserving encoding. A database written
-/// in another is rebuilt from the recovered rows when the node opens it.
+/// in an older one is rebuilt from the recovered rows when the node opens it; a newer one is refused.
 pub const KEY_FORMAT: u32 = 1;
 
 fn store_error(e: blossom_store::StoreError) -> RuntimeError {
@@ -89,10 +89,16 @@ impl Database {
         let fresh = match blossom_store::lsm::manifest_format(&*fs, &db_dir).map_err(store_error)? {
             None => true,
             Some(KEY_FORMAT) => false,
-            // Keys of another format: the tree goes, and the database starts again from the recovered rows.
-            Some(_) => {
+            // Keys of an older format: the tree goes, and the database starts again from the recovered rows.
+            Some(f) if f < KEY_FORMAT => {
                 clear(&*fs, &db_dir)?;
                 true
+            }
+            // A newer build's database: rebuilding it would lose its history, so the node does not start.
+            Some(f) => {
+                return Err(RuntimeError::Config(format!(
+                    "the store's database is in key format {f}, newer than this build's ({KEY_FORMAT})"
+                )));
             }
         };
         let lsm = Lsm::open(
