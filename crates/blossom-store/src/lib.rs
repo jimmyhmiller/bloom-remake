@@ -4,6 +4,7 @@
 mod blob;
 mod ckpt;
 mod clients;
+pub mod lsm;
 pub mod conformance;
 pub mod crash;
 mod meta;
