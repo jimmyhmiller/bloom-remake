@@ -486,14 +486,25 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
                 }
             })
         }
-        Expr::Lattice { op, args } => {
-            let (kind, lop) = lattice_op(scope, op)?;
-            let mut vs = Vec::with_capacity(args.len());
-            for a in args {
-                vs.push(eval(scope, env, a)?);
+        Expr::Lattice { op, args } => match lattice_op(scope, op)? {
+            LatEval::Builtin(kind, lop) => {
+                let mut vs = Vec::with_capacity(args.len());
+                for a in args {
+                    vs.push(eval(scope, env, a)?);
+                }
+                Ok(kind.eval(lop, &vs)?)
             }
-            Ok(kind.eval(lop, &vs)?)
-        }
+            LatEval::Field(kind, i) => match args.as_slice() {
+                [a] => match eval(scope, env, a)? {
+                    Value::Lattice(l) => Ok(Value::Lattice(kind.field(&l, i)?)),
+                    other => Err(ExprError::Oracle(internal_error!("a field read of {other:?}").into())),
+                },
+                _ => Err(ExprError::Oracle(
+                    internal_error!("a field read takes one argument").into(),
+                )),
+            },
+            LatEval::Method(f) => crate::library::call(scope, env, f, args),
+        },
         Expr::Let { pat, value, body } => crate::library::let_in(scope, env, pat, value, body),
         Expr::Closure { .. } => Err(ExprError::Oracle(
             internal_error!("a closure evaluated outside a combinator's argument").into(),
@@ -502,8 +513,15 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
     }
 }
 
+/// How a lattice operation is evaluated (its catalogue entry's implementation).
+enum LatEval<'s> {
+    Builtin(&'s blossom_lattice::Kind, blossom_lattice::Op),
+    Field(&'s blossom_lattice::Kind, usize),
+    Method(blossom_base::FnId),
+}
+
 /// The lattice and operation an IR operation reference names.
-fn lattice_op<'s>(scope: &'s Scope<'_>, op: &LatOpRef) -> ExprResult<(&'s blossom_lattice::Kind, blossom_lattice::Op)> {
+fn lattice_op<'s>(scope: &'s Scope<'_>, op: &LatOpRef) -> ExprResult<LatEval<'s>> {
     let kind = scope
         .oracle
         .kinds
@@ -514,10 +532,24 @@ fn lattice_op<'s>(scope: &'s Scope<'_>, op: &LatOpRef) -> ExprResult<(&'s blosso
                 blossom_base::unimplemented_error!("LANG-124", "lattice {:?} in the oracle", op.lattice).into(),
             )
         })?;
-    let lop = blossom_lattice::Op::from_name(kind, op.op.as_str()).ok_or_else(|| {
-        ExprError::Oracle(internal_error!("lattice operation `{}` is not in {kind:?}'s catalogue", op.op).into())
-    })?;
-    Ok((kind, lop))
+    let decl = scope
+        .program
+        .lattices
+        .get(op.lattice)
+        .and_then(|l| l.ops.iter().find(|d| d.name == op.op))
+        .ok_or_else(|| {
+            ExprError::Oracle(internal_error!("lattice operation `{}` is not in {kind:?}'s catalogue", op.op).into())
+        })?;
+    Ok(match decl.imp {
+        blossom_ir::core::LatOpImpl::Builtin => {
+            let lop = blossom_lattice::Op::from_name(kind, op.op.as_str()).ok_or_else(|| {
+                ExprError::Oracle(internal_error!("`{}` is not a built-in operation of {kind:?}", op.op).into())
+            })?;
+            LatEval::Builtin(kind, lop)
+        }
+        blossom_ir::core::LatOpImpl::Field(i) => LatEval::Field(kind, i as usize),
+        blossom_ir::core::LatOpImpl::Method(f) => LatEval::Method(f),
+    })
 }
 
 /// A constructed value of type `ty`.

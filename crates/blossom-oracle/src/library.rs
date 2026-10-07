@@ -349,6 +349,42 @@ pub(crate) fn lib(scope: &Scope<'_>, env: &[Option<Value>], f: LibFn, args: &[Ex
             Value::Map(m) => opt(m.get(&val(1)?).cloned()),
             other => return Err(bug(format!("`get` on {other:?}"))),
         },
+        LibFn::MapKeys => match val(0)? {
+            Value::Map(m) => Value::Vec(m.keys().cloned().collect()),
+            other => return Err(bug(format!("`keys` of {other:?}"))),
+        },
+        LibFn::MapValues => match val(0)? {
+            Value::Map(m) => Value::Vec(m.values().cloned().collect()),
+            other => return Err(bug(format!("`values` of {other:?}"))),
+        },
+        LibFn::MapEntries => match val(0)? {
+            Value::Map(m) => Value::Vec(
+                m.iter()
+                    .map(|(k, v)| Value::Tuple(Arc::from(vec![k.clone(), v.clone()])))
+                    .collect(),
+            ),
+            other => return Err(bug(format!("`entries` of {other:?}"))),
+        },
+        LibFn::MapInsert => match val(0)? {
+            Value::Map(m) => {
+                let mut out = (*m).clone();
+                out.insert(val(1)?, val(2)?);
+                Value::Map(Arc::new(out))
+            }
+            other => return Err(bug(format!("`insert` into {other:?}"))),
+        },
+        LibFn::MapRemove => match val(0)? {
+            Value::Map(m) => {
+                let mut out = (*m).clone();
+                out.remove(&val(1)?);
+                Value::Map(Arc::new(out))
+            }
+            other => return Err(bug(format!("`remove` from {other:?}"))),
+        },
+        LibFn::MapContainsKey => match val(0)? {
+            Value::Map(m) => Value::Bool(m.contains_key(&val(1)?)),
+            other => return Err(bug(format!("`contains_key` on {other:?}"))),
+        },
         LibFn::OptIsSome => Value::Bool(option(val(0)?)?.is_some()),
         LibFn::OptIsNone => Value::Bool(option(val(0)?)?.is_none()),
         LibFn::OptUnwrapOr => match option(val(0)?)? {

@@ -213,6 +213,56 @@ pub const PART_TYPE: &str = "$builtin::Part";
 
 /// A stream's relations (FOREIGN-PROTOCOLS §1.1): each exists with its class and schema, the connect-only ones
 /// exactly for a connect stream, and each belongs to one stream.
+/// Checks how each catalogue operation of `lat` is implemented: a field read names a field of a product and has its
+/// type, a method's function has the operation's signature, and a stable operation names a threshold of the catalogue.
+fn check_lattice_ops(p: &Program, lat: &LatticeDef) -> Result<(), String> {
+    // The lattice's own type, which a field read or a method takes first (a lattice only the catalogue uses may
+    // have none).
+    let me = || {
+        p.types
+            .lookup(&TypeDef::Lattice(lat.id))
+            .ok_or_else(|| format!("lattice {} has no type", lat.name))
+    };
+    for op in &lat.ops {
+        let what = |detail: &str| format!("{}.{}: {detail}", lat.name, op.name);
+        match op.imp {
+            LatOpImpl::Builtin => {}
+            LatOpImpl::Field(n) => {
+                let LatticeCtor::Product { fields, .. } = &lat.ctor else {
+                    return Err(what("a field read of a lattice that is not a product"));
+                };
+                let (_, field) = fields
+                    .get(n as usize)
+                    .ok_or_else(|| what("a field read past the product's fields"))?;
+                let field_ty = p.types.lookup(&TypeDef::Lattice(*field));
+                if op.params.as_slice() != [(me()?, MonoClass::Morphism)]
+                    || Some(op.ret) != field_ty
+                    || op.kind != LatOpKind::Morphism
+                {
+                    return Err(what(
+                        "a field read is a morphism from the product to the field's lattice",
+                    ));
+                }
+            }
+            LatOpImpl::Method(f) => {
+                let f = p.fns.get(f).ok_or_else(|| what("a method without its function"))?;
+                let params: Vec<TypeId> = op.params.iter().map(|(t, _)| *t).collect();
+                let declared: Vec<TypeId> = f.params.iter().map(|(_, t)| *t).collect();
+                if params != declared || op.ret != f.ret || params.first() != Some(&me()?) {
+                    return Err(what("a method's function does not have the operation's signature"));
+                }
+            }
+        }
+        if let LatOpKind::Stable { after } = op.kind {
+            let guard = lat.ops.iter().find(|o| o.name == after);
+            if !guard.is_some_and(|g| g.kind == LatOpKind::Threshold && g.params.len() == 1) {
+                return Err(what("a stable operation's guard is not a threshold of the catalogue"));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn check_stream(p: &Program, st: &StreamDecl) -> Result<(), String> {
     let name = &st.name;
     let ty = |d: TypeDef| {
@@ -413,6 +463,8 @@ pub(crate) fn validate(p: &Program) -> Vec<IrError> {
             None,
             "lattice id is not its table position".into(),
         );
+        let result = check_lattice_ops(p, lat);
+        check(result.is_ok(), 8, None, None, result.err().unwrap_or_default());
     }
     for (id, group) in p.groups.iter_enumerated() {
         check(
@@ -1836,6 +1888,46 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
                 return Err(format!("{f:?}: a key of the map's key type"));
             }
             lookup(TypeDef::Option(v))
+        }
+        LibFn::MapKeys | LibFn::MapValues | LibFn::MapEntries => {
+            arity(1)?;
+            let (k, v) = match def(ty(0)?)? {
+                TypeDef::Map(k, v) => (k, v),
+                _ => return Err(format!("{f:?} on a map")),
+            };
+            match f {
+                LibFn::MapKeys => lookup(TypeDef::Vec(k)),
+                LibFn::MapValues => lookup(TypeDef::Vec(v)),
+                _ => lookup(TypeDef::Vec(lookup(TypeDef::Tuple(vec![k, v]))?)),
+            }
+        }
+        LibFn::MapInsert => {
+            arity(3)?;
+            let m = ty(0)?;
+            let (k, v) = match def(m)? {
+                TypeDef::Map(k, v) => (k, v),
+                _ => return Err(format!("{f:?}: insert into a map")),
+            };
+            if !assignable(p, ty(1)?, k) || !assignable(p, ty(2)?, v) {
+                return Err(format!("{f:?}: a key and a value of the map's types"));
+            }
+            Ok(m)
+        }
+        LibFn::MapRemove | LibFn::MapContainsKey => {
+            arity(2)?;
+            let m = ty(0)?;
+            let k = match def(m)? {
+                TypeDef::Map(k, _) => k,
+                _ => return Err(format!("{f:?} on a map")),
+            };
+            if !same_but_roles(p, k, ty(1)?) {
+                return Err(format!("{f:?}: a key of the map's key type"));
+            }
+            if f == LibFn::MapRemove {
+                Ok(m)
+            } else {
+                lookup(TypeDef::Bool)
+            }
         }
         LibFn::VecFold => {
             arity(3)?;

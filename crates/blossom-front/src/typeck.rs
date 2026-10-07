@@ -52,8 +52,11 @@ pub fn check(hir: &mut Hir, diags: &mut Diagnostics) -> Result<(), InternalError
         settle_duration: false,
         roles: BTreeMap::new(),
         free: BTreeSet::new(),
+        products: products(hir),
+        guard_stack: Vec::new(),
     };
     cx.errors_before = cx.diags.error_count();
+    method_classes(hir, cx.diags);
     cx.run(hir);
     match cx.bugs.into_iter().next() {
         Some(bug) => Err(bug),
@@ -92,12 +95,14 @@ enum LatS {
     PSet(T),
     Point(T),
     Map(T, T),
+    /// A product lattice (LANGUAGE §11.8), by its type: nominal, its fields fixed.
+    Product(TypeId),
 }
 
 impl LatS {
     fn args(&self) -> Vec<T> {
         match self {
-            LatS::Bool => Vec::new(),
+            LatS::Bool | LatS::Product(_) => Vec::new(),
             LatS::Max(e) | LatS::Min(e) | LatS::Set(e) | LatS::PSet(e) | LatS::Point(e) => vec![*e],
             LatS::Map(k, v) => vec![*k, *v],
         }
@@ -112,6 +117,16 @@ impl LatS {
             LatS::PSet(_) => "LPSet",
             LatS::Point(_) => "LPoint",
             LatS::Map(..) => "LMap",
+            LatS::Product(_) => "product lattice",
+        }
+    }
+
+    /// Whether two lattice shapes have one constructor (their arguments aside).
+    fn same_ctor(&self, other: &LatS) -> bool {
+        match (self, other) {
+            (LatS::Product(a), LatS::Product(b)) => a == b,
+            (LatS::Product(_), _) | (_, LatS::Product(_)) => false,
+            _ => self.name() == other.name() && self.args().len() == other.args().len(),
         }
     }
 
@@ -142,6 +157,8 @@ enum MethodTarget {
     Lattice(Op),
     /// A method of a plain value (the standard library, Appendix B).
     Plain(Builtin),
+    /// A method of a product lattice's `impl`; `exact` for a banged read of a stable method.
+    User { name: Symbol, exact: bool },
 }
 
 #[derive(Clone, Debug)]
@@ -213,10 +230,50 @@ enum Deferred {
         banged: bool,
         /// The receiver's variable, when it is one (its bindings decide the non-⊥ refinement, SEM-101 N4).
         recv_var: Option<(u32, u32)>,
+        /// The methods the body's guards call on that variable (a `stable` read's threshold, LANGUAGE §11.6).
+        guarded_by: Vec<Symbol>,
         args: Vec<T>,
         res: T,
         span: Span,
     },
+}
+
+/// What type checking needs of a product lattice: its name, its built-in lattice and its fields' types.
+#[derive(Clone, Debug)]
+struct Product {
+    name: String,
+    kind: Kind,
+    fields: Vec<(Symbol, TypeId)>,
+}
+
+/// Every product lattice of the HIR, by type.
+fn products(hir: &Hir) -> BTreeMap<TypeId, Product> {
+    let mut out = BTreeMap::new();
+    for (i, ctor) in hir.lattices.iter().enumerate() {
+        let LatticeCtor::Product { name, fields } = ctor else {
+            continue;
+        };
+        let id = blossom_base::LatticeTypeId::from_raw(u32::try_from(i).unwrap_or(u32::MAX));
+        let (Some(ty), Some(kind)) = (
+            hir.types.lookup(&TypeDef::Lattice(id)),
+            crate::lower::lattice::kind_of(&hir.lattices, ctor),
+        ) else {
+            continue;
+        };
+        let fields = fields
+            .iter()
+            .filter_map(|(f, l)| hir.types.lookup(&TypeDef::Lattice(*l)).map(|t| (*f, t)))
+            .collect();
+        out.insert(
+            ty,
+            Product {
+                name: name.to_string(),
+                kind,
+                fields,
+            },
+        );
+    }
+    out
 }
 
 struct Checker<'d> {
@@ -271,6 +328,11 @@ struct Checker<'d> {
     /// `Node` leaves a flow created, whose role is only what flows in (nothing, for a `None`'s): the roots of classes
     /// that no declared type joined.
     free: BTreeSet<T>,
+    /// The product lattices, by type.
+    products: BTreeMap<TypeId, Product>,
+    /// The method calls the guards of the bodies being walked make on variables, innermost last: `(scope, var,
+    /// method)` (a `stable` read needs its threshold among them, LANGUAGE §11.6).
+    guard_stack: Vec<(u32, u32, Symbol)>,
 }
 
 #[derive(Clone, Debug)]
@@ -436,6 +498,7 @@ impl Checker<'_> {
                         };
                         LatS::Map(k, v)
                     }
+                    LatticeCtor::Product { .. } => LatS::Product(ty),
                     other => {
                         self.bugs
                             .push(internal_error!("lattice {other:?} reached type checking"));
@@ -479,6 +542,10 @@ impl Checker<'_> {
                 Shape::Vec(t) => format!("Vec<{}>", self.describe(types, t)),
                 Shape::Set(t) => format!("Set<{}>", self.describe(types, t)),
                 Shape::Map(k, v) => format!("Map<{}, {}>", self.describe(types, k), self.describe(types, v)),
+                Shape::Lat(LatS::Product(ty)) => self
+                    .products
+                    .get(&ty)
+                    .map_or_else(|| type_name(types, ty), |p| format!("lattice {}", p.name)),
                 Shape::Lat(l) => {
                     let args: Vec<String> = l.args().iter().map(|t| self.describe(types, *t)).collect();
                     if args.is_empty() {
@@ -555,9 +622,7 @@ impl Checker<'_> {
                     }
                     (Shape::Lat(x), Shape::Lat(y)) => {
                         let (xs, ys) = (x.args(), y.args());
-                        x.name() == y.name()
-                            && xs.len() == ys.len()
-                            && xs.iter().zip(&ys).all(|(a, b)| self.unify_inner(types, *a, *b))
+                        x.same_ctor(y) && xs.iter().zip(&ys).all(|(a, b)| self.unify_inner(types, *a, *b))
                     }
                     _ => false,
                 };
@@ -697,7 +762,7 @@ impl Checker<'_> {
                     | (Shape::Vec(x), Shape::Vec(y))
                     | (Shape::Set(x), Shape::Set(y)) => Some(vec![(*x, *y)]),
                     (Shape::Map(k1, v1), Shape::Map(k2, v2)) => Some(vec![(*k1, *k2), (*v1, *v2)]),
-                    (Shape::Lat(x), Shape::Lat(y)) if x.name() == y.name() && x.args().len() == y.args().len() => {
+                    (Shape::Lat(x), Shape::Lat(y)) if x.same_ctor(y) => {
                         Some(x.args().into_iter().zip(y.args()).collect())
                     }
                     _ => None,
@@ -786,6 +851,7 @@ impl Checker<'_> {
                     let k = fresh(self, *k);
                     LatS::Map(k, fresh(self, *v))
                 }
+                LatS::Product(ty) => LatS::Product(*ty),
             }),
         };
         self.set(target, Node::Bound(shape));
@@ -900,6 +966,7 @@ impl Checker<'_> {
         let r = self.find(t);
         if let Node::Bound(Shape::Lat(l)) = self.node(r) {
             let ctor = match l {
+                LatS::Product(ty) => return Some(ty),
                 LatS::Bool => LatticeCtor::Bool,
                 LatS::Max(e) => LatticeCtor::Max(self.solved(hir, e)?),
                 LatS::Min(e) => LatticeCtor::Min(self.solved(hir, e)?),
@@ -1166,10 +1233,13 @@ impl Checker<'_> {
         let mut handlers = std::mem::take(&mut hir.handlers);
         for h in &mut handlers {
             self.placed = h.role;
+            let mark = self.guard_stack.len();
+            self.push_guards(h.scope, &h.header);
             self.body(hir, h.scope, &mut h.header, h.role);
             let mut outer = BTreeSet::new();
             Self::positively_bound(&h.header, &mut outer);
             self.stmts(hir, h.scope, &mut h.stmts, h.role, &outer);
+            self.guard_stack.truncate(mark);
         }
         hir.handlers = handlers;
         let mut views = std::mem::take(&mut hir.views);
@@ -1177,7 +1247,10 @@ impl Checker<'_> {
             let role = self.rel_of(hir, v.rel).role;
             self.placed = role;
             for (scope, body) in &mut v.alternatives {
+                let mark = self.guard_stack.len();
+                self.push_guards(*scope, body);
                 self.body(hir, *scope, body, role);
+                self.guard_stack.truncate(mark);
             }
             if self.apply {
                 continue;
@@ -1335,10 +1408,13 @@ impl Checker<'_> {
                         self.block_terms.push(inside);
                         saved
                     };
+                    let mark = self.guard_stack.len();
+                    self.push_guards(scope, cond);
                     self.body(hir, scope, cond, role);
                     let mut inner = outer.clone();
                     Self::positively_bound(cond, &mut inner);
                     self.stmts(hir, scope, stmts, role, &inner);
+                    self.guard_stack.truncate(mark);
                     for (v, t) in saved {
                         self.set_var_term(scope, v, t);
                     }
@@ -1918,6 +1994,42 @@ impl Checker<'_> {
                 *ty = tyref;
                 t
             }
+            HExprKind::Struct { ty, fields, base } if self.products.contains_key(ty) => {
+                // A product literal (LANGUAGE §11.2): each field lifts into its lattice; a left-out field is ⊥.
+                let ty = *ty;
+                let ftys: Vec<TypeId> = self
+                    .products
+                    .get(&ty)
+                    .map(|p| p.fields.iter().map(|(_, t)| *t).collect())
+                    .unwrap_or_default();
+                for (f, fty) in fields.iter_mut().zip(ftys) {
+                    let ft = self.expr(hir, scope, f);
+                    let want = if self.apply { 0 } else { self.of_type(hir, fty) };
+                    self.coerce_site(hir, f, ft, want, true);
+                }
+                if let Some(b) = base {
+                    let bt = self.expr(hir, scope, b);
+                    if !self.apply {
+                        let want = self.bound(Shape::Lat(LatS::Product(ty)));
+                        self.unify(&hir.types, bt, want, b.span);
+                    }
+                }
+                if self.apply {
+                    self.next_term()
+                } else {
+                    let t = self.bound(Shape::Lat(LatS::Product(ty)));
+                    self.record(t)
+                }
+            }
+            HExprKind::Bottom(ty) => {
+                let ty = *ty;
+                if self.apply {
+                    self.next_term()
+                } else {
+                    let t = self.of_type(hir, ty);
+                    self.record(t)
+                }
+            }
             HExprKind::Struct { ty, fields, base } => {
                 let ty = *ty;
                 let ftys: Vec<TypeId> = match hir.types.get(ty) {
@@ -1964,6 +2076,30 @@ impl Checker<'_> {
             HExprKind::Field { base, name, index } => {
                 let name = *name;
                 let b = self.expr(hir, scope, base);
+                if self.apply
+                    && let Some(LatS::Product(pty)) = self.lat(b)
+                {
+                    // A product's field read is a morphism of its catalogue (LANGUAGE §11.8).
+                    let t = self.next_term();
+                    let found = self
+                        .products
+                        .get(&pty)
+                        .and_then(|p| p.fields.iter().position(|(f, _)| *f == name));
+                    let Some(i) = found else {
+                        return t;
+                    };
+                    let recv = std::mem::replace(base.as_mut(), HExpr::new(HExprKind::Tick, span));
+                    e.kind = HExprKind::LatOp {
+                        lattice: pty,
+                        op: HLatOp::Field(u32::try_from(i).unwrap_or(u32::MAX)),
+                        args: vec![recv],
+                    };
+                    match self.solved(hir, t) {
+                        Some(ty) => e.ty = Some(ty),
+                        None => self.error(span, "cannot infer the type of this expression".into()),
+                    }
+                    return t;
+                }
                 if self.apply {
                     let bt = self.leaf(b);
                     if let Some(TypeDef::Struct(s)) = bt.and_then(|t| hir.types.get(t)) {
@@ -2368,7 +2504,16 @@ impl Checker<'_> {
                         });
                     }
                     e.kind = match res.target {
-                        MethodTarget::Lattice(op) => HExprKind::LatOp { lattice, op, args: out },
+                        MethodTarget::Lattice(op) => HExprKind::LatOp {
+                            lattice,
+                            op: HLatOp::Builtin(op),
+                            args: out,
+                        },
+                        MethodTarget::User { name, exact } => HExprKind::LatOp {
+                            lattice,
+                            op: HLatOp::Method { name, exact },
+                            args: out,
+                        },
                         MethodTarget::Plain(f) => HExprKind::Builtin { f, args: out },
                     };
                     match self.solved(hir, t) {
@@ -2380,12 +2525,22 @@ impl Checker<'_> {
                     let slot = self.methods.len();
                     self.methods.push(None);
                     let res = self.fresh(false);
+                    let guarded_by = match recv_var {
+                        Some((sc, v)) => self
+                            .guard_stack
+                            .iter()
+                            .filter(|(s2, v2, _)| *s2 == sc && *v2 == v)
+                            .map(|(_, _, n)| *n)
+                            .collect(),
+                        None => Vec::new(),
+                    };
                     self.deferred.push(Deferred::Method {
                         slot,
                         recv: r,
                         name,
                         banged,
                         recv_var,
+                        guarded_by,
                         args: ts,
                         res,
                         span,
@@ -2797,6 +2952,23 @@ impl Checker<'_> {
                 }
             }
             Deferred::Field { base, name, res, span } => {
+                if let Some(LatS::Product(pty)) = self.lat(base) {
+                    let field = self
+                        .products
+                        .get(&pty)
+                        .and_then(|p| p.fields.iter().find(|(f, _)| *f == name).map(|(_, t)| *t));
+                    match field {
+                        Some(ft) => {
+                            let ft = self.of_type(hir, ft);
+                            self.unify(&hir.types, res, ft, span);
+                        }
+                        None => {
+                            let d = self.describe(&hir.types, base);
+                            self.error(span, format!("{d} has no field `{}`", name.as_str()));
+                        }
+                    }
+                    return true;
+                }
                 let Some(bt) = self.leaf(base) else {
                     return !self.is_unbound(base) && {
                         self.error(span, format!("no field `{}` on a non-struct value", name.as_str()));
@@ -3152,10 +3324,16 @@ impl Checker<'_> {
                 name,
                 banged,
                 recv_var,
+                ref guarded_by,
                 ref args,
                 res,
                 span,
             } => {
+                if let Some(LatS::Product(pty)) = self.lat(recv)
+                    && let Some(m) = hir.method(pty, name).cloned()
+                {
+                    return self.user_method(hir, slot, &m, banged, guarded_by, args, res, span);
+                }
                 let nonbot = recv_var.is_some_and(|v| self.non_bottom(hir, v));
                 self.method(hir, slot, recv, name, banged, nonbot, args, res, span)
             }
@@ -3216,6 +3394,7 @@ impl Checker<'_> {
             LatS::PSet(_) => Kind::PSet,
             LatS::Point(_) => Kind::Point,
             LatS::Map(_, v) => Kind::Map(Box::new(self.lat_kind(v)?)),
+            LatS::Product(ty) => self.products.get(&ty)?.kind.clone(),
         })
     }
 
@@ -3242,6 +3421,8 @@ impl Checker<'_> {
             return;
         };
         match lat {
+            // No plain value lifts into a product: it is written as a literal.
+            LatS::Product(_) => self.unify(&hir.types, from, to, span),
             LatS::Max(e) | LatS::Min(e) | LatS::Point(e) => self.unify(&hir.types, from, e, span),
             LatS::Bool => {
                 let b = self.con(&mut hir.types, TypeDef::Bool);
@@ -3373,7 +3554,8 @@ impl Checker<'_> {
             match Op::method(&kind, name.as_str()) {
                 Some(op) => op,
                 None => {
-                    self.error(span, format!("`{}` has no method `{}`", lat.name(), name.as_str()));
+                    let d = self.describe(&hir.types, recv);
+                    self.error(span, format!("{d} has no method `{}`", name.as_str()));
                     return true;
                 }
             }
@@ -3503,6 +3685,161 @@ impl Checker<'_> {
         true
     }
 
+    /// A call of a product lattice's method (LANGUAGE §11.8): its arguments flow (or lift) into its parameters, and
+    /// its class decides the bang (§11.4). A `stable … after t` read is monotone where the same body guards the
+    /// receiver with `t` (`guarded_by`); elsewhere it needs a bang (BLS0703) and is the method's exact entry.
+    #[allow(clippy::too_many_arguments)]
+    fn user_method(
+        &mut self,
+        hir: &mut Hir,
+        slot: usize,
+        m: &HMethod,
+        banged: bool,
+        guarded_by: &[Symbol],
+        args: &[T],
+        res: T,
+        span: Span,
+    ) -> bool {
+        let Some(f) = hir.fns.get(m.f.index()).cloned() else {
+            self.bugs.push(internal_error!("method {:?} has no function", m.name));
+            return true;
+        };
+        let name = m.name.as_str();
+        let params: Vec<TypeId> = f.params.iter().skip(1).map(|(_, t)| *t).collect();
+        if args.len() != params.len() {
+            self.diags.push(
+                Diagnostic::new(
+                    code!("BLS0301"),
+                    format!("`{name}` takes {} argument(s), {} given", params.len(), args.len()),
+                )
+                .with_primary(span),
+            );
+            return true;
+        }
+        if args.iter().any(|a| self.closures.contains_key(a)) {
+            self.error(
+                span,
+                format!("`{name}` does not take a closure: only the collection combinators do"),
+            );
+            return true;
+        }
+        let mut exact = false;
+        match &m.class {
+            HClass::None | HClass::Antitone => {
+                if !banged {
+                    let what = if m.class == HClass::None {
+                        "has no class, so it is not monotone"
+                    } else {
+                        "is antitone"
+                    };
+                    self.diags.push(
+                        Diagnostic::new(
+                            code!("BLS0700"),
+                            format!("`{name}` {what}: write `{name}!` to make the exact read visible"),
+                        )
+                        .with_primary(span),
+                    );
+                }
+            }
+            HClass::Morphism | HClass::Bimorphism | HClass::Monotone | HClass::Threshold => {
+                if banged {
+                    self.diags.push(
+                        Diagnostic::new(
+                            code!("BLS0701"),
+                            format!("`{name}` is monotone: the bang is superfluous"),
+                        )
+                        .with_primary(span),
+                    );
+                }
+            }
+            HClass::Stable { after } => {
+                let guarded = guarded_by.contains(after);
+                if banged {
+                    exact = true;
+                    if guarded {
+                        self.diags.push(
+                            Diagnostic::new(
+                                code!("BLS0701"),
+                                format!(
+                                    "`{name}` is stable once `{}` holds, and this body guards it: the bang is superfluous",
+                                    after.as_str()
+                                ),
+                            )
+                            .with_primary(span),
+                        );
+                    }
+                } else if !guarded {
+                    self.diags.push(
+                        Diagnostic::new(
+                            code!("BLS0703"),
+                            format!(
+                                "`{name}` is stable only once `{after}` holds: guard the receiver with `.{after}()` in \
+                                 this body, or write `{name}!` for an exact read",
+                                after = after.as_str()
+                            ),
+                        )
+                        .with_primary(span),
+                    );
+                }
+            }
+        }
+        let mut lifts = Vec::with_capacity(args.len());
+        for (a, p) in args.iter().zip(&params) {
+            let pt = self.of_type(hir, *p);
+            let s = self.lifts.len();
+            self.lifts.push((false, pt));
+            self.deferred.push(Deferred::Coerce {
+                slot: s,
+                from: *a,
+                to: pt,
+                check: true,
+                span,
+            });
+            lifts.push(Some(s));
+        }
+        let r = self.of_type(hir, f.ret);
+        self.unify(&hir.types, res, r, span);
+        if let Some(slot) = self.methods.get_mut(slot) {
+            *slot = Some(MethodRes {
+                target: MethodTarget::User { name: m.name, exact },
+                lifts,
+            });
+        }
+        true
+    }
+
+    /// Pushes the method calls `body`'s guards make on its variables (each a conjunct `x.t()`).
+    fn push_guards(&mut self, scope: ScopeId, body: &HBody) {
+        fn conj(e: &HExpr, scope: ScopeId, out: &mut Vec<(u32, u32, Symbol)>) {
+            match &e.kind {
+                HExprKind::Binary {
+                    op: BinOp::And,
+                    lhs,
+                    rhs,
+                } => {
+                    conj(lhs, scope, out);
+                    conj(rhs, scope, out);
+                }
+                HExprKind::Method {
+                    recv,
+                    name,
+                    banged: false,
+                    args,
+                } if args.is_empty() => {
+                    if let HExprKind::Var(v) = recv.kind {
+                        out.push((scope.0, v.0, *name));
+                    }
+                }
+                _ => {}
+            }
+        }
+        for l in &body.lits {
+            if let HLit::Guard(e) = l {
+                conj(e, scope, &mut self.guard_stack);
+            }
+        }
+    }
+
     /// A method of a plain value (LANGUAGE Appendix B), by the receiver's shape: `Some(true)` when resolved (or
     /// reported), `None` when the receiver has no such method.
     #[allow(clippy::too_many_arguments)]
@@ -3548,6 +3885,12 @@ impl Checker<'_> {
             (Shape::Vec(_), _, "to_set") => (Builtin::Lib(LibFn::VecToSet), None, 0),
             (Shape::Vec(_), _, "to_map") => (Builtin::Lib(LibFn::VecToMap), None, 0),
             (Shape::Map(..), _, "get") => (Builtin::Lib(LibFn::MapGet), None, 1),
+            (Shape::Map(..), _, "keys") => (Builtin::Lib(LibFn::MapKeys), None, 0),
+            (Shape::Map(..), _, "values") => (Builtin::Lib(LibFn::MapValues), None, 0),
+            (Shape::Map(..), _, "entries") => (Builtin::Lib(LibFn::MapEntries), None, 0),
+            (Shape::Map(..), _, "insert") => (Builtin::Lib(LibFn::MapInsert), None, 2),
+            (Shape::Map(..), _, "remove") => (Builtin::Lib(LibFn::MapRemove), None, 1),
+            (Shape::Map(..), _, "contains_key") => (Builtin::Lib(LibFn::MapContainsKey), None, 1),
             (Shape::Option(_), _, "is_some") => (Builtin::Lib(LibFn::OptIsSome), None, 0),
             (Shape::Option(_), _, "is_none") => (Builtin::Lib(LibFn::OptIsNone), None, 0),
             (Shape::Option(_), _, "unwrap_or") => (Builtin::Lib(LibFn::OptUnwrapOr), None, 1),
@@ -3804,6 +4147,30 @@ impl Checker<'_> {
                 }
                 self.bound(Shape::Option(*v))
             }
+            (Shape::Map(k, _), Builtin::Lib(LibFn::MapKeys)) => self.bound(Shape::Vec(*k)),
+            (Shape::Map(_, v), Builtin::Lib(LibFn::MapValues)) => self.bound(Shape::Vec(*v)),
+            (Shape::Map(k, v), Builtin::Lib(LibFn::MapEntries)) => {
+                let pair = self.bound(Shape::Tuple(vec![*k, *v]));
+                self.bound(Shape::Vec(pair))
+            }
+            (Shape::Map(k, v), Builtin::Lib(LibFn::MapInsert)) => {
+                // The copy has the map's type: the key and value are of its key and value types.
+                if let (Some(x), Some(y)) = (a0, a1) {
+                    self.unify(&hir.types, x, *k, span);
+                    self.unify(&hir.types, y, *v, span);
+                }
+                recv
+            }
+            (Shape::Map(k, _), Builtin::Lib(LibFn::MapRemove | LibFn::MapContainsKey)) => {
+                if let Some(x) = a0 {
+                    self.relate(x, *k, span);
+                }
+                if matches!(target, Builtin::Lib(LibFn::MapRemove)) {
+                    recv
+                } else {
+                    bool_t
+                }
+            }
             (_, Builtin::Lib(LibFn::BytesSlice)) => {
                 for a in [a0, a1].into_iter().flatten() {
                     self.unify(&hir.types, a, u64_t, span);
@@ -3923,6 +4290,24 @@ impl Checker<'_> {
                     None => self.fresh(false),
                 };
                 self.bound(Shape::Map(*k, inner))
+            }
+            // The struct of the fields' reveals.
+            LatS::Product(ty) => {
+                let revealed = hir
+                    .lattice_of(*ty)
+                    .map(|(id, _)| id)
+                    .map(|id| hir.reveal_type(id, false));
+                match revealed {
+                    Some(Ok(t)) => self.of_type(hir, t),
+                    Some(Err(e)) => {
+                        self.bugs.push(e);
+                        self.fresh(false)
+                    }
+                    None => {
+                        self.bugs.push(internal_error!("product {ty:?} is not a lattice"));
+                        self.fresh(false)
+                    }
+                }
             }
         }
     }
@@ -4093,6 +4478,60 @@ fn is_int_shape(types: &TypeTable, s: &Shape) -> bool {
 }
 
 /// A readable type name for messages.
+/// A method's class constrains its signature (LANGUAGE §11.8): a threshold gives a `bool` or an `Option`; a morphism,
+/// bimorphism, monotone or antitone method gives a lattice. A classed method is classed in its receiver, so its other
+/// parameters are plain values, except a bimorphism's, which takes another lattice and is a morphism in each.
+fn method_classes(hir: &Hir, diags: &mut Diagnostics) {
+    for m in &hir.methods {
+        let Some(f) = hir.fns.get(m.f.index()) else {
+            continue;
+        };
+        let is_lattice = |t: TypeId| matches!(hir.types.get(t), Some(TypeDef::Lattice(_)));
+        let lattice_params = f.params.iter().skip(1).filter(|(_, t)| is_lattice(*t)).count();
+        let class = match &m.class {
+            HClass::None => continue,
+            HClass::Morphism => "morphism",
+            HClass::Bimorphism => "bimorphism",
+            HClass::Monotone => "monotone",
+            HClass::Antitone => "antitone",
+            HClass::Threshold => "threshold",
+            HClass::Stable { .. } => "stable",
+        };
+        let mut problem = None;
+        match &m.class {
+            HClass::Threshold => {
+                if !matches!(hir.types.get(f.ret), Some(TypeDef::Bool | TypeDef::Option(_))) {
+                    problem = Some(format!(
+                        "a `threshold` method gives a `bool` or an `Option`, not {}",
+                        type_name(&hir.types, f.ret)
+                    ));
+                }
+            }
+            HClass::Morphism | HClass::Bimorphism | HClass::Monotone | HClass::Antitone if !is_lattice(f.ret) => {
+                problem = Some(format!(
+                    "a `{class}` method gives a lattice value, not {}: an order-preserving read into a plain value \
+                     is a `threshold` (or `stable`)",
+                    type_name(&hir.types, f.ret)
+                ));
+            }
+            _ => {}
+        }
+        if problem.is_none() {
+            if m.class == HClass::Bimorphism && lattice_params == 0 {
+                problem = Some("a `bimorphism` method takes another lattice value besides `self`".into());
+            } else if m.class != HClass::Bimorphism && lattice_params > 0 {
+                problem = Some(format!(
+                    "a `{class}` method is classed in its receiver: its other parameters are plain values (a method \
+                     of two lattices is a `bimorphism`, or has no class)"
+                ));
+            }
+        }
+        if let Some(msg) = problem {
+            diags.push(Diagnostic::new(code!("BLS0300"), format!("`{}`: {msg}", m.name.as_str())).with_primary(m.span));
+        }
+    }
+}
+
 pub(crate) fn type_name(types: &TypeTable, ty: TypeId) -> String {
     match types.get(ty) {
         Some(TypeDef::Bool) => "bool".into(),

@@ -192,19 +192,26 @@ fn scenario(name: &str, artifact: &BlsArtifact, seed: u64) -> usize {
                 node: n1,
                 tick: t1,
                 error: e1,
+                also: a1,
             }),
             Err(SimError::Node {
                 node: n2,
                 tick: t2,
                 error: e2,
+                also: a2,
             }),
         ) => {
             let code = |e: &OracleError| match e {
                 OracleError::Program { error, .. } => Some(error.code),
                 _ => None,
             };
+            // Every other failure of the round agrees too.
+            let others = |a: &[(blossom_value::time::NodeId, OracleError)]| -> Vec<_> {
+                a.iter().map(|(n, e)| (*n, code(e))).collect()
+            };
+            let (o1, o2) = (others(a1), others(a2));
             assert!(
-                n1 == n2 && t1 == t2 && code(e1).is_some() && code(e1) == code(e2),
+                n1 == n2 && t1 == t2 && code(e1).is_some() && code(e1) == code(e2) && o1 == o2,
                 "{name} seed {seed}: the oracle failed at node {} tick {} ({e1}); the engine at node {} tick {} ({e2})",
                 n1.0,
                 t1.0,

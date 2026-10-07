@@ -82,10 +82,12 @@ pub fn lower(hir: &Hir, deployment: &Deployment<'_>) -> Result<Lowered, Internal
         labels: BTreeSet::new(),
         rel_names: BTreeSet::new(),
         fns: Vec::new(),
+        fn_order: Vec::new(),
         fn_origins: Vec::new(),
         prefer: BTreeMap::new(),
         projections: BTreeMap::new(),
     };
+    l.assign_fn_ids()?;
     l.declare_lattices()?;
     for r in &hir.roles {
         let kind = match r.kind {
@@ -157,6 +159,8 @@ pub(crate) struct Lowerer<'h> {
     /// HIR function → IR function: an instance of a generic function shares the IR function of the first instance
     /// with its template, type arguments and function arguments.
     pub fns: Vec<blossom_base::FnId>,
+    /// The HIR functions to lower, one per IR function, in IR order (`assign_fn_ids`).
+    pub fn_order: Vec<usize>,
     /// IR function → the HIR function it was lowered from.
     pub fn_origins: Vec<crate::hir::HFnId>,
     /// Each `resolve prefer` table's staging relations: its listed writes (with their rank) and its unlisted ones.

@@ -101,14 +101,10 @@ rel  = "ew_disable"
 rows = [[]]
 
 [backend.oracle]
-status = "unimplemented"
-unimplemented = ["LANG-082", "LANG-088", "LANG-122", "LANG-124", "LANG-125", "LANG-135", "LANG-137", "LANG-153"]
-until = "M6"
+status = "pass"
 
 [backend.interp]
-status = "unimplemented"
-unimplemented = ["LANG-082", "LANG-088", "LANG-122", "LANG-124", "LANG-125", "LANG-135", "LANG-137", "LANG-153"]
-until = "M7"
+status = "pass"
 
 # ---- AW-Set: the concurrent add of x beats r1's remove
 [[expect]]

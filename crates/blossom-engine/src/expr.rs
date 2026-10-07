@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use blossom_base::{ParamId, RoleId, internal_error};
 use blossom_ir::core::{
-    BinOp, BuiltinFn, BuiltinScalar, CollKind, Expr, FnRef, GenSource, LatOpRef, MajorityDomain, Pattern, Program,
-    RangeKind, Term, UnOp,
+    BinOp, BuiltinFn, BuiltinScalar, CollKind, Expr, FnRef, GenSource, LatOpImpl, LatOpRef, MajorityDomain, Pattern,
+    Program, RangeKind, Term, UnOp,
 };
 use blossom_ir::tick::EvalError;
 use blossom_lattice::{Kind, LatticeError};
@@ -454,14 +454,23 @@ pub(crate) fn eval_in(cx: &Ctx<'_>, env: &mut Frame<'_>, e: &Expr) -> ExprResult
                 }
             })
         }
-        Expr::Lattice { op, args } => {
-            let (kind, lop) = lattice_op(cx, op)?;
-            let mut vs = Vec::with_capacity(args.len());
-            for a in args {
-                vs.push(eval_in(cx, env, a)?);
+        Expr::Lattice { op, args } => match lattice_op(cx, op)? {
+            LatEval::Builtin(kind, lop) => {
+                let mut vs = Vec::with_capacity(args.len());
+                for a in args {
+                    vs.push(eval_in(cx, env, a)?);
+                }
+                Ok(kind.eval(lop, &vs)?)
             }
-            Ok(kind.eval(lop, &vs)?)
-        }
+            LatEval::Field(kind, i) => match args.as_slice() {
+                [a] => match eval_in(cx, env, a)? {
+                    Value::Lattice(l) => Ok(Value::Lattice(kind.field(&l, i)?)),
+                    other => Err(bug(format!("a field read of {other:?}"))),
+                },
+                _ => Err(bug("a field read takes one argument".into())),
+            },
+            LatEval::Method(f) => crate::func::call(cx, env, f, args),
+        },
         Expr::Let { pat, value, body } => crate::func::let_expr(cx, env, pat, value, body),
         Expr::Closure { .. } => Err(bug("a closure evaluated outside a combinator".into())),
         Expr::Typed { expr, .. } => eval_in(cx, env, expr),
@@ -602,16 +611,35 @@ fn param(cx: &Ctx<'_>, p: ParamId) -> ExprResult<Value> {
         .ok_or_else(|| bug(format!("the default of {} is not a constant", decl.name)))
 }
 
-fn lattice_op<'s>(cx: &'s Ctx<'_>, op: &LatOpRef) -> ExprResult<(&'s Kind, blossom_lattice::Op)> {
+/// How a lattice operation is evaluated (its catalogue entry's implementation).
+enum LatEval<'s> {
+    Builtin(&'s Kind, blossom_lattice::Op),
+    Field(&'s Kind, usize),
+    Method(blossom_base::FnId),
+}
+
+fn lattice_op<'s>(cx: &'s Ctx<'_>, op: &LatOpRef) -> ExprResult<LatEval<'s>> {
     let kind = cx
         .shared
         .kinds
         .get(op.lattice.index())
         .and_then(Option::as_ref)
         .ok_or_else(|| unimplemented!("LANG-124", &format!("lattice {:?}", op.lattice)))?;
-    let lop = blossom_lattice::Op::from_name(kind, op.op.as_str())
-        .ok_or_else(|| bug(format!("`{}` is not an operation of {kind:?}", op.op)))?;
-    Ok((kind, lop))
+    let decl = cx
+        .program
+        .lattices
+        .get(op.lattice)
+        .and_then(|l| l.ops.iter().find(|d| d.name == op.op))
+        .ok_or_else(|| bug(format!("`{}` is not in the catalogue of {kind:?}", op.op)))?;
+    Ok(match decl.imp {
+        LatOpImpl::Builtin => LatEval::Builtin(
+            kind,
+            blossom_lattice::Op::from_name(kind, op.op.as_str())
+                .ok_or_else(|| bug(format!("`{}` is not an operation of {kind:?}", op.op)))?,
+        ),
+        LatOpImpl::Field(i) => LatEval::Field(kind, i as usize),
+        LatOpImpl::Method(f) => LatEval::Method(f),
+    })
 }
 
 fn builtin(cx: &Ctx<'_>, env: &mut Frame<'_>, f: &BuiltinFn, args: &[Expr]) -> ExprResult<Value> {

@@ -37,18 +37,25 @@ pub(super) fn compare(reference: &Result<SyncRun, SimError>, mine: &Result<SyncR
                 node: n1,
                 tick: t1,
                 error: e1,
+                also: a1,
             }),
             Err(SimError::Node {
                 node: n2,
                 tick: t2,
                 error: e2,
+                also: a2,
             }),
         ) => {
             let code = |e: &OracleError| match e {
                 OracleError::Program { error, .. } => Some(error.code),
                 _ => None,
             };
-            if n1 == n2 && t1 == t2 && code(e1).is_some() && code(e1) == code(e2) {
+            // Every other failure of the round agrees too.
+            let others = |a: &[(blossom_value::time::NodeId, OracleError)]| -> Vec<_> {
+                a.iter().map(|(n, e)| (*n, code(e))).collect()
+            };
+            let (o1, o2) = (others(a1), others(a2));
+            if n1 == n2 && t1 == t2 && code(e1).is_some() && code(e1) == code(e2) && o1 == o2 {
                 Ok(())
             } else {
                 Err(format!(

@@ -90,6 +90,8 @@ const LAT_BOOL: u8 = 2;
 const LAT_ELEM: u8 = 3;
 const LAT_SET: u8 = 4;
 const LAT_MAP: u8 = 5;
+/// A product's fields, each length-prefixed (LANGUAGE §11.8).
+const LAT_SEQ: u8 = 6;
 
 /// Appends `v` as LEB128.
 pub fn put_varint(out: &mut Vec<u8>, mut v: u64) {
@@ -388,6 +390,16 @@ impl<'p> Codec<'p> {
                     put_bytes(out, &nested);
                 }
             }
+            (LatticeCtor::Product { fields, .. }, LatValue::Seq(vs)) if fields.len() == vs.len() => {
+                out.push(LAT_SEQ);
+                put_varint(out, vs.len() as u64);
+                for ((_, id), v) in fields.iter().zip(vs.iter()) {
+                    let inner = self.lattice(*id)?.clone();
+                    let mut nested = Vec::new();
+                    self.encode_lattice(&inner, v, &mut nested)?;
+                    put_bytes(out, &nested);
+                }
+            }
             (c, v) => return Err(WireError::Unsupported(format!("the lattice value {v:?} of {c:?}"))),
         }
         Ok(())
@@ -632,6 +644,23 @@ impl<'p> Codec<'p> {
                     out.insert(key, v);
                 }
                 LatValue::Map(Arc::new(out))
+            }
+            (LAT_SEQ, LatticeCtor::Product { fields, .. }) => {
+                let n = get_count(input)?;
+                if n != fields.len() {
+                    return Err(WireError::Malformed(format!(
+                        "{n} fields for a product of {}",
+                        fields.len()
+                    )));
+                }
+                let mut out = Vec::with_capacity(n);
+                for (_, id) in fields {
+                    let inner = self.lattice(*id)?.clone();
+                    let mut nested = get_bytes(input, "a product field")?;
+                    out.push(self.decode_lattice(&inner, &mut nested, depth + 1)?);
+                    done(nested, "a product field")?;
+                }
+                LatValue::Seq(out.into())
             }
             (k, c) => return Err(WireError::Malformed(format!("lattice kind {k} for {c:?}"))),
         })

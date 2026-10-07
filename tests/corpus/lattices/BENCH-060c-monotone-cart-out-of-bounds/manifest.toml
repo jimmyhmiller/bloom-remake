@@ -38,16 +38,10 @@ rel  = "do_checkout"
 rows = [["r1", 1, 4, 1]]
 
 [backend.oracle]
-status = "unimplemented"
-unimplemented = ["LANG-122", "LANG-124", "LANG-126", "LANG-135", "LANG-137", "LANG-153", "LANG-180", "LANG-241",
-                 "SEM-030", "SEM-050"]
-until = "M6"
+status = "pass"
 
 [backend.interp]
-status = "unimplemented"
-unimplemented = ["LANG-122", "LANG-124", "LANG-126", "LANG-135", "LANG-137", "LANG-153", "LANG-180", "LANG-241",
-                 "SEM-030", "SEM-050"]
-until = "M7"
+status = "pass"
 
 [[expect_error]]
 code = "BLSR010"

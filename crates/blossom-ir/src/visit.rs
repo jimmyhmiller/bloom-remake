@@ -316,7 +316,10 @@ impl Remap for LatticeCtor {
             Self::Bag(v0) => Self::Bag(v0.remap(m)),
             Self::PSet(v0) => Self::PSet(v0.remap(m)),
             Self::Pair(v0, v1) => Self::Pair(v0.remap(m), v1.remap(m)),
-            Self::Product(v0) => Self::Product(v0.remap(m)),
+            Self::Product { name, fields } => Self::Product {
+                name: name.remap(m),
+                fields: fields.remap(m),
+            },
             Self::Lex { chain, inner } => Self::Lex {
                 chain: chain.remap(m),
                 inner: inner.remap(m),
@@ -352,6 +355,16 @@ impl Remap for LatOpDecl {
             join_prime: self.join_prime.remap(m),
             derivative: self.derivative.remap(m),
             incompatible_thresholds: self.incompatible_thresholds.remap(m),
+            imp: self.imp.remap(m),
+        }
+    }
+}
+impl Remap for LatOpImpl {
+    fn remap(&self, m: &mut impl Mapper) -> Self {
+        match self {
+            Self::Builtin => Self::Builtin,
+            Self::Field(n) => Self::Field(*n),
+            Self::Method(f) => Self::Method(f.remap(m)),
         }
     }
 }

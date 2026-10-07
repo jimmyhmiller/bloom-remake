@@ -366,6 +366,10 @@ pub(crate) struct Resolver<'t, 'd> {
     pub members: BTreeMap<HRoleId, HRelId>,
     /// Structs and enums already interned, by home (defining file and module body, `types::Home::body_id`) and name.
     pub nominal: BTreeMap<(FileKey, usize, Symbol), TypeId>,
+    /// The user lattices being resolved, by home and name: one met again contains itself.
+    pub lattices_resolving: BTreeSet<(FileKey, usize, Symbol)>,
+    /// The `impl` items already resolved (by address): an item is resolved once, however many scopes reach it.
+    pub impls_done: BTreeSet<usize>,
     pub rel_spans: BTreeMap<HRelId, Span>,
     /// Frontend bugs met while resolving (a lookup of an id the resolver minted that fails).
     pub bugs: Vec<InternalError>,
@@ -423,6 +427,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 invariants: Vec::new(),
                 guards: Vec::new(),
                 fns: Vec::new(),
+                methods: Vec::new(),
                 streams: Vec::new(),
                 scopes: Vec::new(),
                 var_types: Vec::new(),
@@ -431,6 +436,8 @@ impl<'t, 'd> Resolver<'t, 'd> {
             builtins: BTreeMap::new(),
             members: BTreeMap::new(),
             nominal: BTreeMap::new(),
+            lattices_resolving: BTreeSet::new(),
+            impls_done: BTreeSet::new(),
             rel_spans: BTreeMap::new(),
             bugs: Vec::new(),
             empty: ModScope::empty(FileKey::Root),
@@ -2151,6 +2158,8 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 | ItemKind::Fn(_)
                 | ItemKind::ExternFn(_)
                 | ItemKind::Stream { .. }
+                | ItemKind::Lattice(_)
+                | ItemKind::Impl(_)
                 | ItemKind::Unsupported { .. } => {}
                 ItemKind::Param { .. } => {}
             }
