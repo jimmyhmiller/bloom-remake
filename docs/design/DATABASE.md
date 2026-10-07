@@ -87,7 +87,9 @@ blossom query --deploy d.toml --node s --store data/s 'all(k, v) = store(k, v)'
   as of that tick. A relation read only by atoms is read by prefix when every atom binds its leading columns to the
   same constants; a relation read by one atom, by a range when that atom's rule compares the next column with
   constants (`>`, `>=`, `<`, `<=`, `==`, either way round, the tightest bounds winning); by its tag otherwise. The
-  rules still check every comparison, so reading only those rows is exact.
+  rules still check every comparison, so reading only those rows is exact. (One difference remains: a row outside
+  the range never reaches the query's rules, so an expression that would have raised a runtime error on it, like a
+  division by zero, does not.)
 - **Where.** Live, against a running node: `blossom run --admin ADDR` serves `POST /query` on its own listener; the
   answer is JSON (the tick read, the columns, the rows, each value as Blossom writes it). Relations are matched by
   name and schema hash: a query compiled against another version of the program is refused. The admin plane has no
