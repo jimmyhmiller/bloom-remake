@@ -59,6 +59,8 @@ pub struct LsmOptions {
     /// How many versions back from the newest an as-of read may go: compaction keeps every version above
     /// `newest - history` and, per key, the newest at or below it.
     pub history: u64,
+    /// The bytes of decoded blocks the tree keeps for reads.
+    pub cache_bytes: usize,
 }
 
 impl Default for LsmOptions {
@@ -69,6 +71,7 @@ impl Default for LsmOptions {
             tier: 4,
             max_tables: 12,
             history: 65_536,
+            cache_bytes: 32 << 20,
         }
     }
 }
@@ -191,6 +194,101 @@ struct TableMeta {
     max_version: u64,
 }
 
+/// Decoded blocks, by table and offset, in a bounded least-recently-used cache shared by a tree's tables.
+pub(crate) struct BlockCache {
+    capacity: usize,
+    inner: Mutex<CacheInner>,
+}
+
+/// A cached block: its entries, its last use and its size.
+struct Slot {
+    block: Arc<Vec<Entry>>,
+    used: u64,
+    bytes: usize,
+}
+
+#[derive(Default)]
+struct CacheInner {
+    blocks: BTreeMap<(u64, u64), Slot>,
+    /// Each block's last use, oldest first.
+    uses: BTreeMap<u64, (u64, u64)>,
+    clock: u64,
+    bytes: usize,
+}
+
+impl BlockCache {
+    fn new(capacity: usize) -> BlockCache {
+        BlockCache {
+            capacity,
+            inner: Mutex::new(CacheInner::default()),
+        }
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, CacheInner>, StoreError> {
+        self.inner
+            .lock()
+            .map_err(|_| invalid("the block cache's lock is poisoned"))
+    }
+
+    fn get(&self, key: (u64, u64)) -> Result<Option<Arc<Vec<Entry>>>, StoreError> {
+        let mut c = self.lock()?;
+        c.clock += 1;
+        let now = c.clock;
+        let Some(slot) = c.blocks.get_mut(&key) else {
+            return Ok(None);
+        };
+        let (block, old) = (slot.block.clone(), std::mem::replace(&mut slot.used, now));
+        c.uses.remove(&old);
+        c.uses.insert(now, key);
+        Ok(Some(block))
+    }
+
+    fn put(&self, key: (u64, u64), block: Arc<Vec<Entry>>, bytes: usize) -> Result<(), StoreError> {
+        let mut c = self.lock()?;
+        if bytes > self.capacity {
+            return Ok(());
+        }
+        c.clock += 1;
+        let now = c.clock;
+        if let Some(old) = c.blocks.insert(
+            key,
+            Slot {
+                block,
+                used: now,
+                bytes,
+            },
+        ) {
+            c.uses.remove(&old.used);
+            c.bytes -= old.bytes;
+        }
+        c.uses.insert(now, key);
+        c.bytes += bytes;
+        while c.bytes > self.capacity {
+            let Some((_, oldest)) = c.uses.pop_first() else { break };
+            if let Some(old) = c.blocks.remove(&oldest) {
+                c.bytes -= old.bytes;
+            }
+        }
+        Ok(())
+    }
+
+    /// Drops a removed table's blocks.
+    fn forget(&self, table: u64) -> Result<(), StoreError> {
+        let mut c = self.lock()?;
+        let gone: Vec<((u64, u64), u64, usize)> = c
+            .blocks
+            .range((table, 0)..=(table, u64::MAX))
+            .map(|(k, slot)| (*k, slot.used, slot.bytes))
+            .collect();
+        for (k, used, b) in gone {
+            c.blocks.remove(&k);
+            c.uses.remove(&used);
+            c.bytes -= b;
+        }
+        Ok(())
+    }
+}
+
 /// An open SSTable.
 struct Sst {
     meta: TableMeta,
@@ -198,10 +296,11 @@ struct Sst {
     /// Shared by readers on several threads; a read holds it for one block.
     file: Mutex<Box<dyn VfsFile>>,
     index: Vec<BlockRef>,
+    cache: Arc<BlockCache>,
 }
 
 impl Sst {
-    fn open(fs: &dyn Vfs, path: PathBuf, meta: TableMeta) -> Result<Sst, StoreError> {
+    fn open(fs: &dyn Vfs, path: PathBuf, meta: TableMeta, cache: Arc<BlockCache>) -> Result<Sst, StoreError> {
         let file = fs.open(&path, OpenOpts::default())?;
         let len = file.len()?;
         if len != meta.bytes {
@@ -254,10 +353,23 @@ impl Sst {
             path,
             file: Mutex::new(file),
             index,
+            cache,
         })
     }
 
-    fn block(&self, b: &BlockRef) -> Result<Vec<Entry>, StoreError> {
+    /// A block, from the cache or read (and cached).
+    fn block(&self, b: &BlockRef) -> Result<Arc<Vec<Entry>>, StoreError> {
+        let key = (self.meta.id, b.offset);
+        if let Some(block) = self.cache.get(key)? {
+            return Ok(block);
+        }
+        let block = Arc::new(self.read_block(b)?);
+        self.cache.put(key, block.clone(), b.len as usize)?;
+        Ok(block)
+    }
+
+    /// A block read from the file, bypassing the cache (a compaction reads each block once).
+    fn read_block(&self, b: &BlockRef) -> Result<Vec<Entry>, StoreError> {
         let mut raw = vec![0u8; b.len as usize];
         {
             let file = self.file.lock().map_err(|_| invalid("an SSTable's lock is poisoned"))?;
@@ -274,13 +386,28 @@ impl Sst {
             if b.first.as_slice() > prefix && !b.first.starts_with(prefix) {
                 break;
             }
-            for e in self.block(b)? {
+            for e in self.block(b)?.iter() {
                 if e.key.starts_with(prefix) && e.version <= as_of {
-                    out.push(e);
+                    out.push(e.clone());
                 }
             }
         }
         Ok(())
+    }
+
+    /// The newest entry of `key` at or below `as_of`: its version and op.
+    fn get(&self, key: &[u8], as_of: u64) -> Result<Option<(u64, Op)>, StoreError> {
+        let start = self.index.partition_point(|b| b.last.as_slice() < key);
+        for b in self.index.iter().skip(start) {
+            if b.first.as_slice() > key {
+                break;
+            }
+            // Versions of a key are newest first: the first at or below `as_of` is the one.
+            if let Some(e) = self.block(b)?.iter().find(|e| e.key == key && e.version <= as_of) {
+                return Ok(Some((e.version, e.op)));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -474,6 +601,7 @@ pub struct Lsm {
     work: Mutex<()>,
     /// Opened by a reader: nothing it applies is written.
     read_only: bool,
+    cache: Arc<BlockCache>,
 }
 
 impl Lsm {
@@ -527,12 +655,14 @@ impl Lsm {
             }
             m
         };
+        let cache = Arc::new(BlockCache::new(opts.cache_bytes));
         let mut tables = Vec::new();
         for t in &manifest.tables {
             tables.push(Arc::new(Sst::open(
                 &*fs,
                 sst_dir.join(format!("{}.sst", t.id)),
                 t.clone(),
+                cache.clone(),
             )?));
         }
         // What a crash left: tables no manifest names, and temporary files.
@@ -569,6 +699,7 @@ impl Lsm {
             }),
             work: Mutex::new(()),
             read_only,
+            cache,
         })
     }
 
@@ -672,7 +803,7 @@ impl Lsm {
         });
         let meta = write_table(&*self.fs, &path, id, self.opts.block_bytes, entries)?;
         let table = match meta {
-            Some(m) => Some(Arc::new(Sst::open(&*self.fs, path, m)?)),
+            Some(m) => Some(Arc::new(Sst::open(&*self.fs, path, m, self.cache.clone())?)),
             None => None,
         };
         let mut s = self.write()?;
@@ -731,7 +862,7 @@ impl Lsm {
         };
         let meta = write_table(&*self.fs, &path, id, self.opts.block_bytes, kept)?;
         let table = match meta {
-            Some(m) => Some(Arc::new(Sst::open(&*self.fs, path, m)?)),
+            Some(m) => Some(Arc::new(Sst::open(&*self.fs, path, m, self.cache.clone())?)),
             None => None,
         };
         let mut s = self.write()?;
@@ -758,6 +889,7 @@ impl Lsm {
         drop(s);
         for t in &chosen {
             self.fs.remove(&t.path)?;
+            self.cache.forget(t.meta.id)?;
         }
         self.fs.sync_dir(&self.dir.join("sst"))?;
         Ok(true)
@@ -811,6 +943,43 @@ impl Lsm {
         }
         newest.retain(|_, (_, op)| *op == Op::Put);
         Ok(newest.into_keys().collect())
+    }
+
+    /// Whether `key` is present as of version `as_of` (the same refusals as [`Lsm::scan`]).
+    pub fn get(&self, key: &[u8], as_of: u64) -> Result<bool, StoreError> {
+        let (mut newest, tables) = {
+            let s = self.read()?;
+            if as_of < s.manifest.floor || as_of > s.applied {
+                return Err(invalid(format!(
+                    "version {as_of} is outside the history kept (versions {} to {})",
+                    s.manifest.floor, s.applied
+                )));
+            }
+            let mut newest: Option<(u64, Op)> = None;
+            let mems = std::iter::once(&s.mem).chain(s.frozen.as_ref().map(|(m, _, _)| &**m));
+            for mem in mems {
+                let found = mem
+                    .range((key.to_vec(), Reverse(as_of))..)
+                    .next()
+                    .filter(|((k, _), _)| k.as_slice() == key)
+                    .map(|((_, Reverse(v)), op)| (*v, *op));
+                if let Some(f) = found
+                    && newest.is_none_or(|n| f.0 > n.0)
+                {
+                    newest = Some(f);
+                }
+            }
+            (newest, s.tables.clone())
+        };
+        // A merged table may hold versions on either side of another's: every table is asked.
+        for t in &tables {
+            if let Some(f) = t.get(key, as_of)?
+                && newest.is_none_or(|n| f.0 > n.0)
+            {
+                newest = Some(f);
+            }
+        }
+        Ok(newest.is_some_and(|(_, op)| op == Op::Put))
     }
 
     /// The SSTables now live: their ids and sizes, newest first (for tests and tooling).
@@ -875,7 +1044,7 @@ impl Merge {
             let Some(b) = t.index.get(*next_block) else {
                 break None;
             };
-            *entries = t.block(b)?.into_iter();
+            *entries = t.read_block(b)?.into_iter();
             *next_block += 1;
         };
         if let Some(e) = &e {

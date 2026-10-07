@@ -92,6 +92,7 @@ fn opts() -> LsmOptions {
         tier: 3,
         max_tables: 6,
         history: 25,
+        cache_bytes: 2048,
     }
 }
 
@@ -103,8 +104,22 @@ const PREFIXES: [&[u8]; 6] = [b"", b"a", b"b", b"c\x01", b"d\x02\x03", b"z"];
 fn agree(lsm: &Lsm, model: &Model) {
     let (floor, applied) = (lsm.floor().unwrap(), lsm.applied().unwrap());
     for v in floor..=applied {
+        let present = model.at(b"", v);
         for p in PREFIXES {
             assert_eq!(lsm.scan(p, v).unwrap(), model.at(p, v), "as of {v}, prefix {p:?}");
+        }
+        // Point lookups of present keys and of keys the model never had or has deleted.
+        for k in present
+            .iter()
+            .take(8)
+            .chain([b"zz".to_vec(), b"a\x05\x05\x05".to_vec()].iter())
+        {
+            assert_eq!(lsm.get(k, v).unwrap(), present.contains(k), "get {k:?} as of {v}");
+        }
+        for (_, changes) in model.log.iter().filter(|(cv, _)| *cv <= v).rev().take(3) {
+            for (k, _) in changes {
+                assert_eq!(lsm.get(k, v).unwrap(), present.contains(k), "get {k:?} as of {v}");
+            }
         }
     }
 }
