@@ -64,3 +64,22 @@ durable table stashed(k: u64, blob: Blob) key(k);
 stash_it: on stash(k, b), let blob = Blob::of(b) {
     upsert stashed(k, blob);
 }
+
+/// Negation on a durable table: on its leading column (the table's own keys), and on its value (an index).
+input check(k: u64);
+input check_value(v: u64);
+durable table missing(k: u64) key(k);
+durable table unused(v: u64) key(v);
+check_it: on check(k), not kv(k, _) {
+    emit missing(k);
+}
+check_value_it: on check_value(v), not kv(_, v) {
+    emit unused(v);
+}
+
+/// Negation on the whole table: with a small hot tier, a prefix too large to keep, checked by its first rows.
+input check_empty(x: u64);
+durable table seen_empty(x: u64) key(x);
+check_empty_it: on check_empty(x), not kv(_, _) {
+    emit seen_empty(x);
+}

@@ -597,18 +597,84 @@ impl Database {
         let mut out = Vec::new();
         let mut from = start.to_vec();
         loop {
-            let page = self.lsm.scan_page(&from, end, at, PAGE_KEYS)?;
+            // With a bound, a page no larger than what proves it passed.
+            let keys = max.map_or(PAGE_KEYS, |m| (m + 1).saturating_sub(out.len()).clamp(1, PAGE_KEYS));
+            let page = self.lsm.scan_page(&from, end, at, keys)?;
+            if max.is_some_and(|m| out.len() + page.keys.len() > m) {
+                return Ok(None);
+            }
             for key in &page.keys {
                 out.push(codec.tagged_row(tag, rel, key)?);
-            }
-            if max.is_some_and(|m| out.len() > m) {
-                return Ok(None);
             }
             match page.next {
                 Some(n) => from = n,
                 None => return Ok(Some(out)),
             }
         }
+    }
+
+    /// The first `n` rows in key order of `rel` as of `at` whose columns `cols` hold `values`, and whether there are
+    /// more: a scan of one short page (only those rows are decoded).
+    fn first_rows(
+        &self,
+        rel: RelId,
+        cols: &[usize],
+        values: &[blossom_value::Value],
+        at: u64,
+        n: usize,
+    ) -> Result<(Vec<Row>, bool), NodeError> {
+        let codec = self.codec();
+        let (tag, prefix) = self.probe_prefix(&codec, rel, cols, values, at)?;
+        let end = crate::keycode::successor(&prefix);
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        let mut from = prefix;
+        let mut more = false;
+        loop {
+            let page = self
+                .lsm
+                .scan_page(&from, end.as_deref(), at, n.saturating_add(1).min(PAGE_KEYS))?;
+            keys.extend(page.keys);
+            if keys.len() > n {
+                more = true;
+                break;
+            }
+            match page.next {
+                Some(next) => from = next,
+                None => break,
+            }
+        }
+        keys.truncate(n);
+        let rows = keys
+            .iter()
+            .map(|k| codec.tagged_row(&tag, rel, k))
+            .collect::<Result<_, _>>()?;
+        Ok((rows, more))
+    }
+
+    /// The keyspace a probe on `cols` (no range) reads, and the prefix of its keys holding `values`: the relation's
+    /// own keys for a leading run of its columns, else an index (kept from now on).
+    fn probe_prefix(
+        &self,
+        codec: &DurableCodec<'_>,
+        rel: RelId,
+        cols: &[usize],
+        values: &[blossom_value::Value],
+        at: u64,
+    ) -> Result<(Vec<u8>, Vec<u8>), NodeError> {
+        let rel_tag = codec.rel_tag(rel)?;
+        let tag: Vec<u8> = if cols.iter().enumerate().all(|(i, c)| i == *c) {
+            rel_tag.to_vec()
+        } else {
+            if self.lsm.applied()? != Some(at) {
+                return Err(
+                    blossom_base::internal_error!("an index probe as of version {at}, not the newest applied").into(),
+                );
+            }
+            self.keep_index(rel, cols)?;
+            index_tag(&rel_tag, cols)?.to_vec()
+        };
+        let prefix = codec.tagged_prefix(&tag, rel, cols, values)?;
+        Ok((tag, prefix))
     }
 
     /// The rows of `rel` as of `at` whose columns `cols` hold `values` (and, with `range`, whose column lies within
@@ -706,6 +772,17 @@ impl blossom_engine::ColdTables for Database {
         max: usize,
     ) -> Result<Option<Vec<Row>>, blossom_ir::tick::EvalError> {
         self.probe_rows(rel, cols, values, None, at, Some(max)).map_err(storage)
+    }
+
+    fn probe_some(
+        &self,
+        rel: RelId,
+        cols: &[usize],
+        values: &[blossom_value::Value],
+        at: u64,
+        n: usize,
+    ) -> Result<(Vec<Row>, bool), blossom_ir::tick::EvalError> {
+        self.first_rows(rel, cols, values, at, n).map_err(storage)
     }
 
     fn count(&self, rel: RelId, at: u64) -> Result<usize, blossom_ir::tick::EvalError> {

@@ -187,9 +187,19 @@ fn tiered_tables_agree_with_the_oracle_through_restarts_flushes_and_compactions(
                     if !keys.insert(key) {
                         continue;
                     }
-                    match rng.below(10) {
+                    match rng.below(13) {
+                        12 => k.offer(&mut d, "check_empty", vec![u(key)]),
+                        10 => k.offer(&mut d, "check", vec![u(key)]),
+                        11 => k.offer(&mut d, "check_value", vec![u(rng.below(2000))]),
                         0..=3 => k.offer(&mut d, "put", vec![u(key), u(rng.below(2000))]),
-                        4 => k.offer(&mut d, "drop", vec![u(key)]),
+                        // Drops often enough that the table empties now and then.
+                        4 => {
+                            for k2 in 0..60 {
+                                if rng.below(3) == 0 {
+                                    k.offer(&mut d, "drop", vec![u(k2)]);
+                                }
+                            }
+                        }
                         5 => k.offer(&mut d, "find", vec![u(rng.below(2000))]),
                         6 => k.offer(&mut d, "below", vec![u(rng.below(60))]),
                         7 => k.offer(&mut d, "under", vec![u(rng.below(2000))]),
