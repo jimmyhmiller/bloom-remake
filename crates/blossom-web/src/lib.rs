@@ -307,6 +307,9 @@ impl Compiled {
     }
 }
 
+/// A durable relation's rows added and removed since the host last saved.
+type Unsaved = (BTreeSet<Row>, BTreeSet<Row>);
+
 /// The most rounds without events an event's effects may take to settle.
 pub const SETTLE: u32 = 1000;
 
@@ -326,7 +329,7 @@ pub struct App {
     /// The rounds the inspector can explain.
     history: why::History,
     /// The durable rows added and removed since the host last saved (`None`: it must save them all).
-    unsaved: Option<BTreeMap<RelId, (BTreeSet<Row>, BTreeSet<Row>)>>,
+    unsaved: Option<BTreeMap<RelId, Unsaved>>,
 }
 
 /// What starting a program did: the first page, and what the restore could not keep.
