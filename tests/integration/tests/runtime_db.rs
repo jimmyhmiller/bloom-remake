@@ -509,3 +509,23 @@ fn the_database_recovers_from_a_crash_anywhere_in_its_flushes() {
         }
     }
 }
+
+/// `storage.tiered` (docs/design/DATABASE.md §7): on unless a deployment opts out.
+#[test]
+fn storage_tiered_is_on_unless_a_deployment_opts_out() {
+    let (spec, _) = setup("tiered-default");
+    assert!(spec.tiered, "a deployment that says nothing tiers its tables");
+    let dir = std::env::temp_dir().join(format!("blossom-db-tiered-off-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let text = format!(
+        "format = 1\n[deployment]\nid = \"t\"\nprogram = \"chat\"\nversion = 1\nsource = \"{}\"\n\
+         [[node]]\nname = \"s\"\nrole = \"Server\"\naddr = \"127.0.0.1:{}\"\nprincipal = \"spiffe://test/t/Server/s\"\n\
+         [security]\nmode = \"insecure-dev\"\n[storage]\ndata_dir = \"data\"\ntiered = false\n",
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/clients/chat.bls")
+            .display(),
+        free_port(),
+    );
+    assert!(!DeploymentSpec::parse(&text, &dir).unwrap().tiered);
+}

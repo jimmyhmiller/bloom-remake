@@ -408,6 +408,12 @@ impl Executors {
         self
     }
 
+    /// Whether the engines tier the durable tables they can (`EngineConfig::in_memory` when not).
+    pub fn tiered(mut self, tiered: bool) -> Executors {
+        self.engine.in_memory = !tiered;
+        self
+    }
+
     /// The oracle for the deployment (its static facts serve admission whichever backend runs).
     pub fn oracle(&self) -> &std::sync::Arc<Oracle> {
         &self.oracle

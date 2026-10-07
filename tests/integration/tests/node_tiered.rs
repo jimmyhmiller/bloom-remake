@@ -59,6 +59,10 @@ struct Fixture {
 #[cfg(test)]
 impl Fixture {
     fn with_hot_rows(backend: Backend, hot_rows: Option<usize>) -> Fixture {
+        Fixture::with(backend, hot_rows, true)
+    }
+
+    fn with(backend: Backend, hot_rows: Option<usize>, tiered: bool) -> Fixture {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/db/tiered.bls");
         let (result, _) = compile_file(
             path.to_str().unwrap(),
@@ -81,6 +85,7 @@ impl Fixture {
         if let Some(rows) = hot_rows {
             executors = executors.with_hot_rows(rows);
         }
+        executors = executors.tiered(tiered);
         Fixture {
             schema: DurableSchema::of(artifact.program.get()),
             artifact,
@@ -277,4 +282,42 @@ fn a_tiered_table_is_held_on_disk_not_in_memory() {
         "after a restart the engine holds {held} rows of a 5000-row table"
     );
     assert_eq!(k.released(&d)["kv"].len(), 5000);
+}
+
+#[test]
+fn storage_tiered_false_keeps_every_table_in_memory() {
+    // The deployment's opt-out (`storage.tiered = false`): the engine starts on the database but loads its tables,
+    // and agrees with the oracle through a restart.
+    for backend in [Backend::Engine, Backend::Checked] {
+        let k = Fixture::with(backend, None, false);
+        let fs = SimFs::default();
+        let mut d = k.boot(&fs);
+        let mut t = 10i64;
+        d.run_until_quiescent(Instant(t)).unwrap();
+        for batch in 0..10u64 {
+            for i in 0..100u64 {
+                k.offer(&mut d, "put", vec![u(batch * 100 + i), u(i)]);
+            }
+            t += 1;
+            d.run_until_quiescent(Instant(t)).unwrap();
+        }
+        d.flush().unwrap();
+        drop(d);
+        let fs = crashed(&fs);
+        let mut d = k.boot(&fs);
+        t += 10_000_000_000;
+        for _ in 0..3 {
+            k.offer(&mut d, "find", vec![u(7)]);
+            t += 1;
+            d.run_until_quiescent(Instant(t)).unwrap();
+        }
+        let held = d.node.resident_rows().unwrap();
+        assert!(
+            held >= 1000,
+            "{backend:?}: the engine holds {held} rows of a 1000-row table it keeps in memory"
+        );
+        let released = k.released(&d);
+        assert_eq!(released["kv"].len(), 1000);
+        assert_eq!(released["found"].len(), 10);
+    }
 }

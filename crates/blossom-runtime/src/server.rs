@@ -432,7 +432,8 @@ impl Server {
             names.to_vec(),
             seed,
             cfg.externs.clone(),
-        )?;
+        )?
+        .tiered(spec.tiered);
         let oracle = executors.oracle().clone();
         let nonce = OsEntropy.boot_nonce().map_err(RuntimeError::Config)?;
         let dir = cfg.dir.clone().unwrap_or_else(|| spec.data_dir.join(&entry.name));
