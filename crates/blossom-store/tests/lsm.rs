@@ -131,7 +131,7 @@ fn reads_as_of_every_version_kept_agree_with_the_model() {
         // Reopened: the tables give the state as of the flushed version; the versions after it apply again.
         lsm.flush().unwrap();
         let flushed = lsm.flushed().unwrap();
-        assert_eq!((flushed.version, flushed.lsn), (160, 1600));
+        assert_eq!((flushed.version, flushed.mark), (160, 1600));
         drop(lsm);
         let again = Lsm::open(fs.clone(), dir, opts()).unwrap();
         assert_eq!(again.applied().unwrap(), 160);

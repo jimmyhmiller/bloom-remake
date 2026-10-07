@@ -220,6 +220,8 @@ enum Control {
     CheckpointDone(Result<Option<blossom_store::ChainInfo>, String>),
     /// Data was queued.
     Wake,
+    /// The database could not flush or compact.
+    DatabaseFailed(String),
     Stop,
 }
 
@@ -239,6 +241,8 @@ enum Commit {
         blobs: Vec<(blossom_value::BlobRef, Arc<[u8]>)>,
     },
     Truncate(TruncateToken),
+    /// The database flushed: a truncation waiting for it may go.
+    Flushed,
 }
 
 /// The bounded data queue between the readers and the engine.
@@ -365,6 +369,8 @@ pub struct Server {
     /// The tick this incarnation booted at, and its restart count.
     pub boot_tick: Tick,
     pub restarts: u64,
+    /// The node's database (docs/design/DATABASE.md): what queries read.
+    pub database: Arc<crate::db::Database>,
 }
 
 /// The store identity the deployment expects for a node.
@@ -479,6 +485,45 @@ impl Server {
             }
         };
         let node = Node::boot(ncfg, &artifact.program, exec, boot.clone())?;
+        // The database (docs/design/DATABASE.md): up to the recovered store before the node runs.
+        let (db, fresh) = crate::db::Database::open(
+            Arc::new(RealFs),
+            &dir,
+            artifact.clone(),
+            names.clone(),
+            blossom_store::lsm::LsmOptions {
+                history: spec.history_ticks,
+                ..blossom_store::lsm::LsmOptions::default()
+            },
+        )?;
+        db.recover(
+            fresh,
+            &opened.wal_deltas,
+            &opened.boot.image,
+            opened.checkpoint.map(|c| c.tick),
+        )?;
+        // A database the store did not have starts from the recovered rows: flushed now, so the WAL may truncate.
+        if fresh {
+            db.flush_now()?;
+        }
+        // While the engine recovers from checkpoints, the database is a second copy of the durable rows: it must
+        // agree with the recovered ones, or the node refuses to start (docs/design/DATABASE.md §4).
+        let latest = db.range()?.1;
+        let mut recovered = opened.boot.image.clone();
+        recovered.rows.retain(|_, rows| !rows.is_empty());
+        let mut held = db.image(latest)?;
+        held.rows.retain(|_, rows| !rows.is_empty());
+        if held != recovered {
+            return Err(RuntimeError::Config(format!(
+                "the node's database (as of tick {latest}) disagrees with its recovered durable rows: {} relations \
+                 against {}",
+                held.rows.len(),
+                recovered.rows.len()
+            )));
+        }
+        let db = Arc::new(db);
+        let wal_ticks: Vec<(blossom_store::Lsn, u64)> =
+            opened.wal_deltas.iter().map(|(lsn, tick, _)| (*lsn, *tick)).collect();
         let restarts = opened.record.restarts;
         let last_checkpoint_lsn = opened.checkpoint.map_or(0, |c| c.lsn.0);
         let opened_chain = opened.checkpoints.chain()?;
@@ -578,9 +623,27 @@ impl Server {
         {
             let (tx, stats) = (ctl_tx.clone(), stats.clone());
             let blobs = blob_store.clone();
+            let gate = TruncationGate {
+                db_flushed: db.flushed_tick(),
+                records: wal_ticks.into_iter().collect(),
+            };
             threads.push(spawn("committer", move || {
-                committer(wal, &blobs, commit_rx, tx, stats)
+                committer(wal, &blobs, commit_rx, tx, stats, gate)
             })?);
+        }
+        {
+            let commit = commit_tx.clone();
+            let control = ctl_tx.clone();
+            threads.push(db.start(
+                Box::new(move || {
+                    // The committer is gone only when the node stops.
+                    let _ = commit.send(Commit::Flushed);
+                }),
+                Box::new(move |e| {
+                    // The engine is gone only when the node stops.
+                    let _ = control.send(Control::DatabaseFailed(e));
+                }),
+            )?);
         }
         {
             let (tx, commit, stats) = (ctl_tx.clone(), commit_tx.clone(), stats.clone());
@@ -687,6 +750,7 @@ impl Server {
         }
         let engine = {
             let e = Engine {
+                db: db.clone(),
                 streams: stream_env.clone(),
                 backlog_bytes: spec.stream_limits.backlog_bytes,
                 blob_store: blob_store.clone(),
@@ -736,6 +800,7 @@ impl Server {
                 .map_err(RuntimeError::Io)?
         };
         Ok(Server {
+            database: db,
             engine: Some(engine),
             control: ctl_tx,
             data,
@@ -786,6 +851,8 @@ impl Server {
         self.stream_queue.close();
         self.conns.close_all();
         self.streams.close_all();
+        // The database thread ends when its request channel closes.
+        self.database.close();
         for t in self.threads.drain(..) {
             // A thread that panicked has already reported through its connection; joining just reaps it.
             let _ = t.join();
@@ -809,13 +876,40 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> Result<JoinHandle<()>
         .map_err(RuntimeError::Io)
 }
 
-/// The committer (Invariant B): append everything submitted as one batch, sync once, report.
+/// What holds a WAL truncation back: the database must hold every record it removes (docs/design/DATABASE.md §4).
+struct TruncationGate {
+    /// The tick the database's tables cover.
+    db_flushed: Arc<AtomicU64>,
+    /// The position and tick of every record in the WAL, in order.
+    records: VecDeque<(blossom_store::Lsn, u64)>,
+}
+
+impl TruncationGate {
+    /// Whether every record a truncation through `upto` removes is in the database's tables.
+    fn allows(&self, upto: blossom_store::Lsn) -> bool {
+        let flushed = self.db_flushed.load(Ordering::SeqCst);
+        self.records
+            .iter()
+            .take_while(|(lsn, _)| *lsn <= upto)
+            .all(|(_, tick)| *tick <= flushed)
+    }
+
+    fn truncated(&mut self, upto: blossom_store::Lsn) {
+        while self.records.front().is_some_and(|(lsn, _)| *lsn <= upto) {
+            self.records.pop_front();
+        }
+    }
+}
+
+/// The committer (Invariant B): append everything submitted as one batch, sync once, report. A truncation waits
+/// until the database holds what it removes.
 fn committer(
     mut wal: FileWal,
     blob_store: &blossom_store::BlobStore,
     rx: Receiver<Commit>,
     tx: Sender<Control>,
     stats: Arc<Stats>,
+    mut gate: TruncationGate,
 ) {
     let mut batch: u64 = 0;
     let mut truncates: Vec<TruncateToken> = Vec::new();
@@ -858,6 +952,7 @@ fn committer(
                             return;
                         }
                     };
+                    gate.records.push_back((lsn, tick.0));
                     if let Err(e) = blob_store.write_logged(&record.logged, lsn) {
                         let _ = tx.send(Control::WalFailed(format!("the blobs of tick {} failed: {e}", tick.0)));
                         return;
@@ -865,6 +960,7 @@ fn committer(
                     appended += 1;
                 }
                 Commit::Truncate(t) => truncates.push(t),
+                Commit::Flushed => {}
             }
         }
         if appended > 0 {
@@ -899,12 +995,15 @@ fn committer(
                 }
             }
         }
-        // Truncation happens at a batch boundary, after the sync.
-        for t in truncates.drain(..) {
+        // Truncation happens at a batch boundary, after the sync, in order, as far as the database allows.
+        while truncates.first().is_some_and(|t| gate.allows(t.lsn())) {
+            let t = truncates.remove(0);
+            let upto = t.lsn();
             if let Err(e) = wal.truncate_through(t) {
                 let _ = tx.send(Control::WalFailed(format!("WAL truncation failed: {e}")));
                 return;
             }
+            gate.truncated(upto);
         }
     }
 }
@@ -1304,6 +1403,8 @@ fn web_accept_loop(listener: TcpListener, ctx: WebCtx, stop: Arc<AtomicBool>, co
 }
 
 struct Engine {
+    /// The node's database: each released tick's durable delta goes to it.
+    db: Arc<crate::db::Database>,
     node: Node<Box<dyn Executor>>,
     blob_store: Arc<blossom_store::BlobStore>,
     /// The checkpoint in progress: its tick and the blobs its rows hold.
@@ -1537,7 +1638,7 @@ impl Engine {
                 self.dispatch(released, codec)?;
                 self.maybe_checkpoint(t, durable)?;
             }
-            Control::WalFailed(e) => return Err(RuntimeError::Fault(e)),
+            Control::WalFailed(e) | Control::DatabaseFailed(e) => return Err(RuntimeError::Fault(e)),
             Control::CheckpointDone(r) => {
                 self.checkpoint_busy = false;
                 self.chain = r.map_err(|e| RuntimeError::Fault(format!("checkpoint failed: {e}")))?;
@@ -1576,6 +1677,7 @@ impl Engine {
         let p = program.get();
         for t in released {
             bump(&self.stats.released, 1);
+            self.db.apply(t.tick.0, &t.delta)?;
             let mut to_peers: BTreeMap<(NodeId, RelId), Vec<&Row>> = BTreeMap::new();
             let mut to_members: BTreeMap<(NodeId, RelId), Vec<&Row>> = BTreeMap::new();
             for s in &t.sends {

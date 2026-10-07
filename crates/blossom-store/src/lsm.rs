@@ -412,10 +412,10 @@ struct Manifest {
     format: u16,
     /// Live SSTables, newest first.
     tables: Vec<TableMeta>,
-    /// The version (tick) and WAL position the flushed entries cover: every entry at or below the version is in the
+    /// The version (tick) and mark the flushed entries cover: every entry at or below the version is in the
     /// tables.
     flushed_version: u64,
-    flushed_lsn: u64,
+    flushed_mark: u64,
     /// The oldest version an as-of read may ask for: compaction merged away what is below it.
     floor: u64,
     next_id: u64,
@@ -427,7 +427,7 @@ impl Manifest {
             format: MANIFEST_FORMAT,
             tables: Vec::new(),
             flushed_version: 0,
-            flushed_lsn: 0,
+            flushed_mark: 0,
             floor: 0,
             next_id: 1,
         }
@@ -440,20 +440,20 @@ type Mem = BTreeMap<(Vec<u8>, Reverse<u64>), Op>;
 struct State {
     mem: Mem,
     mem_bytes: usize,
-    /// A memtable being flushed (still read), with the version and WAL position it covers.
+    /// A memtable being flushed (still read), with the version and mark it covers.
     frozen: Option<(Arc<Mem>, u64, u64)>,
     tables: Vec<Arc<Sst>>,
     manifest: Manifest,
-    /// The newest version applied, and the WAL position of its record.
+    /// The newest version applied, and the caller's mark with it.
     applied: u64,
-    applied_lsn: u64,
+    applied_mark: u64,
 }
 
-/// What a flush or compaction left durable: the version and WAL position the tables cover.
+/// What a flush or compaction left durable: the version and mark the tables cover.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Flushed {
     pub version: u64,
-    pub lsn: u64,
+    pub mark: u64,
 }
 
 /// A versioned LSM tree.
@@ -516,7 +516,7 @@ impl Lsm {
         if removed {
             fs.sync_dir(&sst_dir)?;
         }
-        let (applied, applied_lsn) = (manifest.flushed_version, manifest.flushed_lsn);
+        let (applied, applied_mark) = (manifest.flushed_version, manifest.flushed_mark);
         Ok(Lsm {
             fs,
             dir: dir.to_path_buf(),
@@ -528,7 +528,7 @@ impl Lsm {
                 tables,
                 manifest,
                 applied,
-                applied_lsn,
+                applied_mark,
             }),
             work: Mutex::new(()),
         })
@@ -546,12 +546,12 @@ impl Lsm {
             .map_err(|_| invalid("the database's lock is poisoned"))
     }
 
-    /// The version and WAL position the durable tables cover: a recovery applies what came after.
+    /// The version and mark the durable tables cover: a recovery applies what came after.
     pub fn flushed(&self) -> Result<Flushed, StoreError> {
         let s = self.read()?;
         Ok(Flushed {
             version: s.manifest.flushed_version,
-            lsn: s.manifest.flushed_lsn,
+            mark: s.manifest.flushed_mark,
         })
     }
 
@@ -565,11 +565,12 @@ impl Lsm {
         Ok(self.read()?.manifest.floor)
     }
 
-    /// Applies one version's changes (`version` above every one before; `lsn` the WAL position of its record).
+    /// Applies one version's changes: `version` above every one before, and `mark` a position of the caller's that the
+    /// version reaches (what [`Lsm::flushed`] reports back once the version is in the tables).
     pub fn apply(
         &self,
         version: u64,
-        lsn: u64,
+        mark: u64,
         changes: impl IntoIterator<Item = (Vec<u8>, Op)>,
     ) -> Result<(), StoreError> {
         let mut s = self.write()?;
@@ -584,7 +585,7 @@ impl Lsm {
             s.mem.insert((key, Reverse(version)), op);
         }
         s.applied = version;
-        s.applied_lsn = lsn;
+        s.applied_mark = mark;
         Ok(())
     }
 
@@ -600,7 +601,7 @@ impl Lsm {
             .work
             .lock()
             .map_err(|_| invalid("the database's work lock is poisoned"))?;
-        let (frozen, version, lsn, id) = {
+        let (frozen, version, mark, id) = {
             let mut s = self.write()?;
             // A flush that failed left its memtable frozen: it goes out with this one (its versions are older).
             if let Some((old, _, _)) = s.frozen.take() {
@@ -614,11 +615,11 @@ impl Lsm {
             }
             let mem = Arc::new(std::mem::take(&mut s.mem));
             s.mem_bytes = 0;
-            let (version, lsn) = (s.applied, s.applied_lsn);
-            s.frozen = Some((mem.clone(), version, lsn));
+            let (version, mark) = (s.applied, s.applied_mark);
+            s.frozen = Some((mem.clone(), version, mark));
             let id = s.manifest.next_id;
             s.manifest.next_id += 1;
-            (mem, version, lsn, id)
+            (mem, version, mark, id)
         };
         let path = self.dir.join("sst").join(format!("{id}.sst"));
         let entries = frozen.iter().map(|((key, Reverse(version)), op)| {
@@ -639,14 +640,14 @@ impl Lsm {
             manifest.tables.insert(0, t.meta.clone());
         }
         manifest.flushed_version = version;
-        manifest.flushed_lsn = lsn;
+        manifest.flushed_mark = mark;
         self.write_manifest(&manifest)?;
         if let Some(t) = table {
             s.tables.insert(0, t);
         }
         s.manifest = manifest;
         s.frozen = None;
-        Ok(Some(Flushed { version, lsn }))
+        Ok(Some(Flushed { version, mark }))
     }
 
     fn write_manifest(&self, m: &Manifest) -> Result<(), StoreError> {

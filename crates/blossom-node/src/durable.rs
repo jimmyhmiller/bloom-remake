@@ -252,6 +252,51 @@ impl<'p> DurableCodec<'p> {
         }
     }
 
+    /// The 8 bytes that begin every database key of the durable relation `rel` (docs/design/DATABASE.md §3): BLAKE3
+    /// over its name and schema hash.
+    pub fn rel_tag(&self, rel: RelId) -> Result<[u8; 8], NodeError> {
+        let (name, hash) = self.name_hash(rel)?;
+        let mut h = blake3::Hasher::new();
+        h.update(name.as_bytes());
+        h.update(&[0]);
+        h.update(&hash);
+        let mut tag = [0u8; 8];
+        for (t, b) in tag.iter_mut().zip(h.finalize().as_bytes()) {
+            *t = *b;
+        }
+        Ok(tag)
+    }
+
+    /// A row's database key: its relation's tag, then the row in the durable tuple codec (`Node` values by name).
+    /// Each column is self-delimiting, so rows agreeing on their leading columns share a key prefix.
+    pub fn row_key(&self, rel: RelId, row: &Row) -> Result<Vec<u8>, NodeError> {
+        let mut key = self.rel_tag(rel)?.to_vec();
+        self.codec.encode_row(self.cols(rel)?, row, &mut key)?;
+        Ok(key)
+    }
+
+    /// A key prefix of the rows of `rel` whose leading columns are `leading`: every such row's key starts with it.
+    /// It covers as many of the leading columns as come first in the encoding (all of them, unless explicit field
+    /// numbers reorder the columns); a reader filters for the rest.
+    pub fn key_prefix(&self, rel: RelId, leading: &[blossom_value::Value]) -> Result<Vec<u8>, NodeError> {
+        let mut key = self.rel_tag(rel)?.to_vec();
+        self.codec.encode_row_prefix(self.cols(rel)?, leading, &mut key)?;
+        Ok(key)
+    }
+
+    /// The row a database key of `rel` holds.
+    pub fn key_row(&self, rel: RelId, key: &[u8]) -> Result<Row, NodeError> {
+        let tag = self.rel_tag(rel)?;
+        let mut body = key
+            .strip_prefix(tag.as_slice())
+            .ok_or_else(|| WireError::Malformed("a database key of another relation".into()))?;
+        let row = self.codec.decode_row(self.cols(rel)?, &mut body)?;
+        if !body.is_empty() {
+            return Err(WireError::Malformed("trailing bytes in a database key".into()).into());
+        }
+        Ok(Arc::from(row))
+    }
+
     /// A WAL record payload: every changed relation's inserts and deletes.
     pub fn encode_delta(&self, delta: &Delta) -> Result<Vec<u8>, NodeError> {
         let mut out = Vec::new();

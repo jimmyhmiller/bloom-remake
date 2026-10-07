@@ -149,6 +149,9 @@ pub struct ReleasedTick {
     /// How many offered messages this incarnation's ticks up to this one took: every message offered before that
     /// count was taken by a tick that is now durable (the driver acknowledges a client member's messages by it).
     pub taken: u64,
+    /// The tick's change to the durable rows (empty when it changed none): the node's database applies it
+    /// (docs/design/DATABASE.md §4).
+    pub delta: Delta,
 }
 
 /// A computed tick waiting for release.
@@ -900,6 +903,7 @@ impl<E: Executor> Node<E> {
                 host: p.host,
                 retired: p.retired,
                 taken: p.taken,
+                delta: p.delta,
             });
         }
         Ok(out)
