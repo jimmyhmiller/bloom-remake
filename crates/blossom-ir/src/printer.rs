@@ -521,11 +521,18 @@ pub fn print(p: &Program) -> String {
 /// `x.to_string()` for a value of type `ty` with no `to_string` of its own in the library (Appendix B): the value in
 /// source syntax ([`value_text`]), its nodes by the names the deployment gave them (`node#3` for one it named none).
 pub fn to_string_text(program: &Program, v: &Value, ty: TypeId, node_names: &[std::sync::Arc<str>]) -> String {
-    value_text(Some(program), v, Some(ty), &|n| {
-        node_names
+    value_text(Some(program), v, Some(ty), &|n| node_text(n, node_names))
+}
+
+/// A node's name: the deployment's (`node#3` for one it named none), or a client member's `#serial@server`
+/// (CLIENTS.md §2; the value's type gives the role, which [`value_text`] writes in front).
+pub fn node_text(n: NodeId, node_names: &[std::sync::Arc<str>]) -> String {
+    match n.client_parts() {
+        Some((server, serial)) => format!("#{serial}@{}", node_text(server, node_names)),
+        None => node_names
             .get(n.0 as usize)
-            .map_or_else(|| format!("node#{}", n.0), |s| s.to_string())
-    })
+            .map_or_else(|| format!("node#{}", n.0), |s| s.to_string()),
+    }
 }
 
 /// A value of type `ty` in `program`'s type table, in source syntax: enum variants and struct fields by name,
@@ -561,6 +568,17 @@ impl<'a> Texts<'a> {
     fn value(&self, v: &Value, ty: Option<TypeId>) -> String {
         let def = self.def(ty);
         match v {
+            // A client member is written with its role: `Browser#3@n1`.
+            Value::Node(n) if n.is_client() => {
+                let role = match def {
+                    Some(TypeDef::Node(Some(r))) => self
+                        .program
+                        .and_then(|p| p.roles.get(*r))
+                        .map_or_else(|| "client".to_owned(), |r| r.name.to_string()),
+                    _ => "client".to_owned(),
+                };
+                format!("{role}{}", (self.node)(*n))
+            }
             Value::Node(n) => (self.node)(*n),
             Value::Str(s) => format!("{s:?}"),
             Value::Bool(b) => b.to_string(),

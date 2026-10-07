@@ -33,9 +33,37 @@ impl Tick {
     }
 }
 
-/// A dense node id, assigned in canonical directory order (ARCHITECTURE §5.9).
+/// A dense node id, assigned in canonical directory order (ARCHITECTURE §5.9), or a client member's (CLIENTS.md §2):
+/// the top bit set, then the id of the server node that admitted it (11 bits) and its serial there (20 bits).
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct NodeId(pub u32);
+
+impl NodeId {
+    /// The top bit: set on a client member's id.
+    pub const CLIENT: u32 = 1 << 31;
+    /// The most server nodes that admit clients, and the most clients one admits.
+    pub const CLIENT_SERVERS: u32 = 1 << 11;
+    pub const CLIENT_SERIALS: u32 = 1 << 20;
+
+    /// The client member `serial` admitted by server node `server`; `None` past the bounds.
+    pub fn client(server: NodeId, serial: u32) -> Option<NodeId> {
+        (server.0 < Self::CLIENT_SERVERS && serial < Self::CLIENT_SERIALS)
+            .then_some(NodeId(Self::CLIENT | server.0 << 20 | serial))
+    }
+
+    /// Whether this is a client member's id.
+    pub fn is_client(self) -> bool {
+        self.0 & Self::CLIENT != 0
+    }
+
+    /// A client member's server node and serial.
+    pub fn client_parts(self) -> Option<(NodeId, u32)> {
+        self.is_client().then_some((
+            NodeId((self.0 >> 20) & (Self::CLIENT_SERVERS - 1)),
+            self.0 & (Self::CLIENT_SERIALS - 1),
+        ))
+    }
+}
 
 /// Nanoseconds since the deployment epoch.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize)]

@@ -168,6 +168,8 @@ pub(crate) struct Shared {
     pub choice: Option<Seed>,
     /// Each node's seed σn, by node id.
     pub node_seeds: Vec<Seed>,
+    /// This node's seed when it is a client member (its id is outside the deployment).
+    pub client_seed: Option<Seed>,
     /// Each node's role, by node id.
     pub roles: Vec<Option<RoleId>>,
     /// The built-in lattice of each declared lattice, by lattice id.
@@ -179,6 +181,15 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
+    /// Node `n`'s seed σn.
+    pub fn seed_of(&self, n: blossom_value::time::NodeId) -> Option<Seed> {
+        if n.is_client() {
+            self.client_seed
+        } else {
+            self.node_seeds.get(n.0 as usize).copied()
+        }
+    }
+
     pub fn role_size(&self, r: RoleId) -> u64 {
         self.roles.iter().filter(|x| **x == Some(r)).count() as u64
     }
@@ -789,9 +800,7 @@ fn fingerprint(v: &Value) -> ExprResult<blossom_value::fp::Fingerprint> {
 fn rand(cx: &Ctx<'_>, key: &[Value]) -> ExprResult<Value> {
     let seed = cx
         .shared
-        .node_seeds
-        .get(cx.node.0 as usize)
-        .copied()
+        .seed_of(cx.node)
         .ok_or_else(|| bug(format!("a `rand` draw on node {}, which has no seed", cx.node.0)))?;
     let fp = blossom_value::fp::fingerprint_row(key).map_err(|e| bug(format!("fingerprinting a rand key: {e}")))?;
     let x = blossom_value::prf::prf(&seed, "rand", &[fp], &[cx.incarnation, cx.tick.0])
@@ -804,9 +813,7 @@ fn rand(cx: &Ctx<'_>, key: &[Value]) -> ExprResult<Value> {
 fn rand_range(cx: &Ctx<'_>, lo: &Value, hi: &Value, key: &[Value]) -> ExprResult<Value> {
     let seed = cx
         .shared
-        .node_seeds
-        .get(cx.node.0 as usize)
-        .copied()
+        .seed_of(cx.node)
         .ok_or_else(|| bug(format!("a `rand` draw on node {}, which has no seed", cx.node.0)))?;
     let fp = blossom_value::fp::fingerprint_row(key).map_err(|e| bug(format!("fingerprinting a rand key: {e}")))?;
     let draw = |span: u128| {

@@ -73,6 +73,7 @@ pub(crate) fn classify(hir: &Hir) -> Result<BTreeSet<HRelId>, InternalError> {
             | HRelKind::Timer { .. }
             | HRelKind::Boot
             | HRelKind::Recovered
+            | HRelKind::Link { .. }
             | HRelKind::Stream(crate::hir::HStreamRel::Event(_)) => {
                 events.insert(id);
             }

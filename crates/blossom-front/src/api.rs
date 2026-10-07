@@ -101,7 +101,11 @@ pub(crate) fn checking_nodes(hir: &crate::hir::Hir) -> Vec<NodeSpec> {
     }
     hir.roles
         .iter()
-        .filter(|r| r.name.segments().len() == 1 && r.kind != crate::hir::RoleKind::External)
+        // An external or client role holds no node of the deployment.
+        .filter(|r| {
+            r.name.segments().len() == 1
+                && !matches!(r.kind, crate::hir::RoleKind::External | crate::hir::RoleKind::Client)
+        })
         .map(|r| NodeSpec {
             name: format!("{}1", r.name.to_string().to_lowercase()),
             role: Some(r.name.to_string()),
@@ -289,7 +293,8 @@ pub(crate) fn deployment(
         let ok = match r.kind {
             crate::hir::RoleKind::Process => count == 1,
             crate::hir::RoleKind::Cluster => count >= 1,
-            crate::hir::RoleKind::External => true,
+            // A client role's members join at run time; a simulation may name some (CLIENTS.md §6).
+            crate::hir::RoleKind::External | crate::hir::RoleKind::Client => true,
         };
         if !ok {
             diags.push(Diagnostic::new(
