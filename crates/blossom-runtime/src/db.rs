@@ -59,7 +59,7 @@ fn watermark(flushed: Option<u64>) -> u64 {
 /// Flushes `lsm`'s memtable, notes the first tick its tables do not cover in `mark`, and compacts what is due.
 fn flush(lsm: &Lsm, mark: &AtomicU64) -> Result<(), RuntimeError> {
     let f = lsm.flush().map_err(store_error)?;
-    mark.store(watermark(f.version), Ordering::SeqCst);
+    mark.store(watermark(f.version()), Ordering::SeqCst);
     while lsm.compact().map_err(store_error)? {}
     Ok(())
 }
@@ -110,7 +110,7 @@ impl Database {
             },
         )
         .map_err(store_error)?;
-        let flushed = Arc::new(AtomicU64::new(watermark(lsm.flushed().map_err(store_error)?.version)));
+        let flushed = Arc::new(AtomicU64::new(watermark(lsm.flushed().map_err(store_error)?.version())));
         let schema = DurableSchema::of(artifact.program.get());
         Ok((
             Database {
@@ -164,7 +164,7 @@ impl Database {
             },
         )
         .map_err(store_error)?;
-        let flushed = Arc::new(AtomicU64::new(watermark(lsm.flushed().map_err(store_error)?.version)));
+        let flushed = Arc::new(AtomicU64::new(watermark(lsm.flushed().map_err(store_error)?.version())));
         let db = Database {
             lsm: Arc::new(lsm),
             schema: DurableSchema::of(artifact.program.get()),
@@ -176,7 +176,7 @@ impl Database {
         let scan = blossom_store::WalScan::scan(&*fs, &blossom_node::recovery::wal_dir(dir), uuid, false)
             .map_err(store_error)?;
         let codec = db.codec();
-        let after = db.lsm.flushed().map_err(store_error)?.version;
+        let after = db.lsm.flushed().map_err(store_error)?.version();
         for (lsn, rec) in scan.records() {
             if after.is_some_and(|a| rec.tick <= a) {
                 continue;
@@ -246,7 +246,7 @@ impl Database {
             }
             return Ok(());
         }
-        let flushed = self.lsm.flushed().map_err(store_error)?.version;
+        let flushed = self.lsm.flushed().map_err(store_error)?.version();
         for (_, tick, delta) in wal.iter().filter(|(_, t, _)| flushed.is_none_or(|f| *t > f)) {
             self.apply_with(&codec, *tick, delta)?;
         }

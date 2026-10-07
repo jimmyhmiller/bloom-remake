@@ -179,7 +179,7 @@ fn reads_as_of_every_version_kept_agree_with_the_model() {
         // Reopened: the tables give the state as of the flushed version; the versions after it apply again.
         lsm.flush().unwrap();
         let flushed = lsm.flushed().unwrap();
-        assert_eq!((flushed.version, flushed.mark), (Some(160), 1600));
+        assert_eq!((flushed.version(), flushed.mark()), (Some(160), 1600));
         drop(lsm);
         let again = Lsm::open(fs.clone(), dir, opts()).unwrap();
         assert_eq!(again.applied().unwrap(), Some(160));
@@ -224,7 +224,7 @@ fn a_crash_anywhere_in_a_flush_or_compaction_reopens_to_the_manifests_state() {
             let fs: Arc<dyn Vfs> = Arc::new(crashed);
             let reopened = Lsm::open(fs, dir, opts())
                 .unwrap_or_else(|e| panic!("cut {i} ({fate:?}): the tree does not open: {e}"));
-            let flushed = reopened.flushed().unwrap().version.unwrap();
+            let flushed = reopened.flushed().unwrap().version().unwrap();
             assert!((60..=110).contains(&flushed), "cut {i}: flushed {flushed}");
             // The versions after the manifest's, from the WAL in a node: applied again, the tree is whole.
             for (v, changes) in model.log.iter().filter(|(v, _)| *v > flushed) {
@@ -264,13 +264,13 @@ fn version_zero_and_the_first_flush() {
     let fs: Arc<dyn Vfs> = Arc::new(SimFs::default());
     let dir = Path::new("/db");
     let lsm = Lsm::open(fs.clone(), dir, opts()).unwrap();
-    assert_eq!(lsm.flushed().unwrap().version, None);
+    assert_eq!(lsm.flushed().unwrap().version(), None);
     assert_eq!(
         blossom_store::lsm::manifest_format(&*fs, dir).unwrap(),
         None,
         "no manifest before a flush"
     );
-    assert_eq!(lsm.flush().unwrap().version, None);
+    assert_eq!(lsm.flush().unwrap().version(), None);
     assert_eq!(
         blossom_store::lsm::manifest_format(&*fs, dir).unwrap(),
         Some(7),
@@ -280,12 +280,12 @@ fn version_zero_and_the_first_flush() {
     assert!(lsm.apply(0, 0, vec![]).is_err(), "version 0 twice");
     drop(lsm);
     let again = Lsm::open(fs.clone(), dir, opts()).unwrap();
-    assert_eq!(again.flushed().unwrap().version, None, "version 0 was never flushed");
+    assert_eq!(again.flushed().unwrap().version(), None, "version 0 was never flushed");
     again.apply(0, 0, vec![(b"zero".to_vec(), Op::Put)]).unwrap();
-    assert_eq!(again.flush().unwrap().version, Some(0));
+    assert_eq!(again.flush().unwrap().version(), Some(0));
     drop(again);
     let third = Lsm::open(fs, dir, opts()).unwrap();
-    assert_eq!(third.flushed().unwrap().version, Some(0));
+    assert_eq!(third.flushed().unwrap().version(), Some(0));
     assert_eq!(third.scan(b"", 0).unwrap(), vec![b"zero".to_vec()]);
     assert!(third.apply(0, 0, vec![]).is_err());
 }

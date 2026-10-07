@@ -51,7 +51,7 @@ impl SyncedTick {
         self.lsn
     }
 }
-/// Proof that a checkpoint has been installed durably.
+/// Proof that a truncation is safe: a checkpoint installed durably, or a database flush covering the records.
 #[derive(Debug)]
 pub struct TruncateToken {
     pub(crate) lsn: Lsn,
@@ -239,6 +239,26 @@ pub struct FileWal {
     receipt_written: bool,
 }
 impl FileWal {
+    /// The truncation a database flush allows: through the end of the older segments (not the one being written)
+    /// whose every record's tick the flush covers, in order (`None`: not even the first). The token proves the
+    /// truncation safe: the records it removes are in the database's tables.
+    pub fn truncation(&self, flushed: &crate::lsm::Flushed) -> Result<Option<TruncateToken>, StoreError> {
+        let Some(covered) = flushed.version() else {
+            return Ok(None);
+        };
+        let scan = WalScan::scan(&*self.fs, &self.dir, self.header.store_uuid, false)?;
+        let mut through = None;
+        for segment in &scan.segments {
+            if segment.header.segment_seq >= self.header.segment_seq
+                || segment.records.iter().any(|(_, r)| r.tick > covered)
+            {
+                break;
+            }
+            through = Some(segment.end);
+        }
+        Ok(through.map(|lsn| TruncateToken { lsn }))
+    }
+
     /// This WAL's tail certification (strict by default; it must match how its store was created).
     pub fn certified(mut self, certification: crate::Certification) -> Self {
         self.certification = certification;
