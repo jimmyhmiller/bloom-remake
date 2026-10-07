@@ -1,13 +1,13 @@
 //! S21: client roles (docs/design/CLIENTS.md). Browser tabs are members of a `client` role that hold rules; the server
 //! and the tabs see each other's links come and go (`Browser.connected`, `Server.disconnected`). In simulation a client
 //! member is a node of the deployment: the chat fixture runs on the oracle and the engine alike, through a tab's
-//! crash and restart.
+//! crash and restart. LDFI searches the omissions of client channels like any other's (`chat_ldfi.bls`).
 
 use std::path::Path;
 use std::sync::Arc;
 
 use blossom_artifact::bls::BlsArtifact;
-use blossom_driver::bls::compile_file;
+use blossom_driver::bls::{compile_file, compile_spec_file};
 use blossom_front::api::{BlsError, NodeSpec};
 use blossom_node::EngineEvaluator;
 use blossom_sim::FaultSchedule;
@@ -191,4 +191,34 @@ fn a_tab_runs_as_a_client_member_outside_the_deployment() {
         blossom_ir::printer::to_string_text(p, &Value::Node(me), node_t, &names),
         "Browser#3@s"
     );
+}
+
+/// The server sends each line once: losing its `heard` to the second tab loses the line there, and LDFI finds that
+/// omission on the client channel (and only that one: losing the tab's `say` loses `pre` too).
+#[test]
+fn ldfi_finds_a_lost_message_on_a_client_channel() {
+    use blossom_ldfi::report::fault_labels;
+    use blossom_ldfi::{FailureSpec, LdfiConfig, Verdict};
+    use blossom_sim::spec::{SpecSim, is_good};
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/clients/chat_ldfi.bls");
+    let (result, _) = compile_spec_file(path.to_str().unwrap(), "ChatFaults");
+    let (compiled, _) = result.unwrap_or_else(|e| panic!("{e:?}"));
+    let faults = compiled.faults.unwrap();
+    let artifact = compiled.artifact;
+    let fs = FailureSpec::new(faults.eot, faults.eff, faults.crashes, artifact.nodes.len() as u32).unwrap();
+    let sim = SpecSim::new(&artifact).unwrap();
+    let mut config = LdfiConfig::new(fs.clone());
+    config.workers = 2;
+    config.find_all = true;
+    let report = blossom_ldfi::run(&sim, &config).unwrap();
+    assert_eq!(report.verdict, Verdict::Counterexample);
+    let ff = sim.run(fs.eot, &Default::default(), false).unwrap();
+    let ff_post = sim.outcome(&ff, fs.eot, false).unwrap().post;
+    let mut found = Vec::new();
+    for ce in &report.counterexamples {
+        let run = sim.run(fs.eot, &ce.faults, false).unwrap();
+        assert!(!is_good(&ff_post, &sim.outcome(&run, fs.eot, false).unwrap()));
+        found.push(fault_labels(&artifact, &ce.faults));
+    }
+    assert_eq!(found, vec![vec!["O(S,B2,3)".to_owned()]], "{found:?}");
 }

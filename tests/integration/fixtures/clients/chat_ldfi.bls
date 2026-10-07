@@ -1,0 +1,62 @@
+//! LDFI over a client role (docs/design/CLIENTS.md §6): the chat of `chat.bls` as a module, a server and two tabs.
+//! The server sends each line once, so losing the server's `heard` to the other tab loses the line there: a
+//! counterexample on a client channel. This file is a library of modules and specs.
+
+pub module Chat {
+    role Server;
+    role Browser: client;
+
+    channel say(text: String): Browser -> Server;
+    channel heard(who: Node<Browser>, text: String): Server -> Browser;
+
+    at Server {
+        table online(b: Node<Browser>);
+        durable table log(who: Node<Browser>, text: String);
+
+        join: on Browser.connected(b, _) {
+            emit online(b);
+        }
+        leave: on Browser.disconnected(b) {
+            delete online(b);
+        }
+        store: on say(t) from b {
+            emit log(b, t);
+        }
+        fan: on say(t) from b, online(o) {
+            send heard(b, t) to o;
+        }
+    }
+
+    at Browser {
+        input line(text: String);
+        durable table seen(who: Node<Browser>, text: String);
+
+        talk: on line(t), srv in Server {
+            send say(t) to srv;
+        }
+        hear: on heard(w, t) {
+            emit seen(w, t);
+        }
+    }
+}
+
+/// The server and two tabs; B1 says "hi" at tick 2.
+spec Tabs {
+    nodes S, B1, B2;
+    assign Server = [S];
+    assign Browser = [B1, B2];
+    fact line("hi") @ B1 at tick 2;
+}
+
+/// A line the server took reaches the other tab.
+spec Reaches {
+    view pre(w, t) = log(w, t) @ S;
+    view post(w, t) = log(w, t) @ S, seen(w, t) @ B2;
+}
+
+spec ChatFaults for Chat {
+    include Tabs;
+    include Reaches;
+    faults { eot: 6, eff: 4, crashes: 0, model: sync }
+    check ldfi expect fails;
+}
