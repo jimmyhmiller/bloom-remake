@@ -423,6 +423,16 @@ impl<E: Executor> Node<E> {
         self.exec.resident_rows()
     }
 
+    /// The rows each of the executor's stores holds in memory, largest first, if it counts them.
+    pub fn resident_by_store(&self) -> Option<Vec<(RelId, &'static str, usize)>> {
+        self.exec.resident_by_store()
+    }
+
+    /// The work of each rule in the last tick, if the executor measures it.
+    pub fn last_tick_work(&self) -> Option<BTreeMap<blossom_base::RuleId, blossom_ir::tick::RuleWork>> {
+        self.exec.last_tick_work()
+    }
+
     /// Whether this incarnation booted from durable state (`recovered()` holds in its boot tick).
     pub fn recovered(&self) -> bool {
         self.recovered

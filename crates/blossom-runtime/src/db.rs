@@ -17,14 +17,21 @@ use crate::RuntimeError;
 /// the tables then cover, or why the flush failed. The thread ends when the sender it returns is dropped.
 pub(crate) fn start(
     db: Arc<Database>,
+    stats: Arc<crate::server::Stats>,
     done: Box<dyn Fn(Result<Flushed, String>) + Send>,
 ) -> Result<(Sender<()>, std::thread::JoinHandle<()>), RuntimeError> {
+    use std::sync::atomic::Ordering;
     let (tx, rx) = mpsc::channel::<()>();
     let handle = std::thread::Builder::new()
         .name("database".into())
         .spawn(move || {
             while rx.recv().is_ok() {
-                done(db.flush().map_err(|e| e.to_string()));
+                let clock = crate::clock::Stopwatch::start();
+                let result = db.flush().map_err(|e| e.to_string());
+                let took = clock.nanos();
+                stats.db_flush_nanos.fetch_add(took, Ordering::Relaxed);
+                stats.db_flush_max_nanos.fetch_max(took, Ordering::Relaxed);
+                done(result);
             }
         })
         .map_err(RuntimeError::Io)?;

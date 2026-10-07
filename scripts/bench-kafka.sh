@@ -12,7 +12,8 @@
 #
 # Environment: KAFKA_HOME (default: the repository's .tools/kafka_*), BENCH_DIR (scratch data, default
 # /tmp/bench-kafka), BLOSSOM (the blossom binary, default target/release/blossom), REDPANDA_IMAGE, OUT; for Blossom,
-# TAIL_CERT (strict | crc) and RECORD=1 (each broker records a trace into $BENCH_DIR/blossom/traces).
+# TAIL_CERT (strict | crc), TIERED (true | false: storage.tiered) and RECORD=1 (each broker records a trace into
+# $BENCH_DIR/blossom/traces).
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 KAFKA_HOME=${KAFKA_HOME:-$(ls -d "$ROOT"/.tools/kafka_* 2>/dev/null | head -1)}
@@ -48,6 +49,7 @@ blossom_up() {
     printf '\n[statics]\nbroker = [["b1", 1, "127.0.0.1", 19092], ["b2", 2, "127.0.0.1", 19093], '
     printf '["b3", 3, "127.0.0.1", 19094]]\n\n[security]\nmode = "insecure-dev"\n\n[storage]\ndata_dir = "data"\n'
     printf 'tail_certification = "%s"\n' "${TAIL_CERT:-strict}"
+    printf 'tiered = %s\n' "${TIERED:-true}"
   } > "$d/deploy.toml"
   printf 'seed = "00112233445566778899aabbccddeeff"\n' > "$d/k.secrets"
   chmod 600 "$d/k.secrets"
