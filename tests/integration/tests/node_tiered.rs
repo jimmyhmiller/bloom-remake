@@ -200,7 +200,8 @@ fn tiered_tables_agree_with_the_oracle_through_restarts_flushes_and_compactions(
                     if !keys.insert(key) {
                         continue;
                     }
-                    match rng.below(13) {
+                    match rng.below(14) {
+                        13 => k.offer(&mut d, "raise", vec![u(rng.below(2000))]),
                         12 => k.offer(&mut d, "check_empty", vec![u(key)]),
                         10 => k.offer(&mut d, "check", vec![u(key)]),
                         11 => k.offer(&mut d, "check_value", vec![u(rng.below(2000))]),
