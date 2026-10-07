@@ -139,6 +139,9 @@ pub struct Engine {
     /// The durable views kept on the cold side since the last reset (docs/design/DATABASE.md §8), and the rules that
     /// write them.
     views: BTreeSet<RelId>,
+    /// The durable tables kept in memory since the last reset onto the cold side (loaded from it): sources of durable
+    /// views as the tiered tables are.
+    durable_in_memory: BTreeSet<RelId>,
     view_rules: BTreeSet<RuleId>,
     /// The catch-up the first tick after a resume runs first, if the views resumed from the cold side.
     boot: Option<blossom_ir::tick::CatchUp>,
@@ -565,6 +568,7 @@ impl Engine {
             hot_rows: cfg.hot_rows.unwrap_or(crate::store::HOT_ROWS),
             in_memory: cfg.in_memory,
             views: BTreeSet::new(),
+            durable_in_memory: BTreeSet::new(),
             view_rules: BTreeSet::new(),
             boot: None,
             rebuilding: false,
@@ -616,6 +620,7 @@ impl Engine {
     pub fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
         self.tiered.clear();
         self.views.clear();
+        self.durable_in_memory.clear();
         self.view_rules.clear();
         self.boot = None;
         self.rebuilding = false;
@@ -676,6 +681,7 @@ impl Engine {
         for rel in tiering.keys() {
             self.tiered.insert(*rel);
         }
+        self.durable_in_memory = cold.tables().into_iter().filter(|r| !self.tiered.contains(r)).collect();
         // The durable views (those whose rows can hold blobs stay in memory: a view's blob is not counted as the
         // carried rows' are).
         let views: BTreeSet<RelId> = if self.in_memory {
@@ -759,6 +765,33 @@ impl Engine {
             }
             self.facts_loaded = true;
             self.inputs = statics;
+            // The durable tables kept in memory start as the views' version had them (the WAL's changes since
+            // undone): the catch-up shows the changes but the last, the first tick the last (as their pending change).
+            if let Some(c) = &resume.catch_up {
+                let base = self.baseline.clone().unwrap_or_default();
+                for rel in self.durable_in_memory.clone() {
+                    let mut rows: BTreeSet<Row> = base.rows(rel).cloned().collect();
+                    for changes in [&c.last, &c.before] {
+                        for row in changes.inserted.get(&rel).into_iter().flatten() {
+                            rows.remove(row);
+                        }
+                        for row in changes.deleted.get(&rel).into_iter().flatten() {
+                            rows.insert(row.clone());
+                        }
+                    }
+                    for row in rows {
+                        self.store(StoreKey::Main(rel))?.add(row, 1).map_err(wrap)?;
+                    }
+                    self.pending.inserted.remove(&rel);
+                    self.pending.deleted.remove(&rel);
+                    if let Some(rows) = c.last.inserted.get(&rel) {
+                        self.pending.inserted.insert(rel, rows.clone());
+                    }
+                    if let Some(rows) = c.last.deleted.get(&rel) {
+                        self.pending.deleted.insert(rel, rows.clone());
+                    }
+                }
+            }
             self.settle(Tick(0))?;
             self.stores.clear_deltas();
             self.boot = resume.catch_up;
@@ -904,6 +937,7 @@ impl Engine {
             .collect();
         let source = |rel: &RelId, views: &BTreeSet<RelId>| {
             self.tiered.contains(rel)
+                || self.durable_in_memory.contains(rel)
                 || views.contains(rel)
                 || p.rels.get(*rel).is_some_and(|d| d.class == RelClass::Static)
         };
@@ -950,6 +984,16 @@ impl Engine {
             let del: BTreeSet<Row> = c.before.deleted.get(&rel).unwrap_or(&empty).iter().cloned().collect();
             store.set_change(ins, del);
         }
+        let wrap = |e: ExprError| to_eval(e, input.tick, None);
+        for rel in self.durable_in_memory.clone() {
+            for row in c.before.deleted.get(&rel).unwrap_or(&empty) {
+                self.store(StoreKey::Main(rel))?.add(row.clone(), -1).map_err(wrap)?;
+            }
+            for row in c.before.inserted.get(&rel).unwrap_or(&empty) {
+                self.store(StoreKey::Main(rel))?.add(row.clone(), 1).map_err(wrap)?;
+            }
+        }
+        self.settle(input.tick)?;
         for rel in self.views.clone() {
             self.store(StoreKey::Main(rel))?.begin_tick(input.tick.0)?;
         }

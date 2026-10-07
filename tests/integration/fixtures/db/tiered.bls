@@ -83,3 +83,16 @@ durable table seen_empty(x: u64) key(x);
 check_empty_it: on check_empty(x), not kv(_, _) {
     emit seen_empty(x);
 }
+
+/// A durable table kept in memory (`resolve`: the highest written wins), read by a view with a tiered table: the view
+/// is durable, and catches up after a restart from the table's changes too.
+input raise(t: u64);
+durable table floor_at(t: u64) key() resolve choose_most(t);
+raise_it: on raise(t) {
+    next floor_at(t);
+}
+view above(k) = kv(k, v), floor_at(t) where v >= t;
+durable table above_seen(k: u64) key(k);
+see_above: on put(k, _), above(k) {
+    emit above_seen(k);
+}
