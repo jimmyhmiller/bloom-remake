@@ -175,7 +175,7 @@ fn every_kind_of_timer_fires_the_same_on_a_node_and_a_spent_timer_sleeps() {
         // Then only the physical firings wake it, and once every timer is spent nothing does.
         assert_eq!(wakeups, [100, 200, 250, 300], "engine {engine}: wake-ups");
         let table = |name: &str| {
-            let rows = d.node.carried_rows(artifact.rel_named(name).unwrap());
+            let rows = d.node.carried_rows(artifact.rel_named(name).unwrap()).unwrap();
             fired(rows.iter().map(|r| &r[..]))
         };
         assert_eq!(table("beat_fired"), [(0, 100), (1, 200), (2, 300)], "engine {engine}");

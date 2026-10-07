@@ -127,11 +127,11 @@ impl Executor for Recording {
         result
     }
 
-    fn carried_rows(&self, rel: RelId) -> Vec<Row> {
+    fn carried_rows(&self, rel: RelId) -> Result<Vec<Row>, EvalError> {
         self.inner.carried_rows(rel)
     }
 
-    fn carried(&self) -> Instance {
+    fn carried(&self) -> Result<Instance, EvalError> {
         self.inner.carried()
     }
 

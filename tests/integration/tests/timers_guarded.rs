@@ -224,8 +224,8 @@ fn a_guarded_timer_on_a_node_fires_the_same_and_a_dormant_node_sleeps() {
                 );
             }
         }
-        let fired = d.node.carried_rows(artifact.rel_named("fired").unwrap());
-        let slow = d.node.carried_rows(artifact.rel_named("slow_fired").unwrap());
+        let fired = d.node.carried_rows(artifact.rel_named("fired").unwrap()).unwrap();
+        let slow = d.node.carried_rows(artifact.rel_named("slow_fired").unwrap()).unwrap();
         assert_eq!(
             counts(fired.iter().map(|r| &r[..])),
             NODE_BEATS,

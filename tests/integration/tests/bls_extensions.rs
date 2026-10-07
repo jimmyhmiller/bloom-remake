@@ -411,6 +411,7 @@ fn a_range_guard_narrows_past_a_fallible_let() {
     let examined = engine.rows_examined() - before;
     let got: BTreeSet<Vec<Value>> = engine
         .carried_rows(rel("got"))
+        .unwrap()
         .into_iter()
         .map(|r| r.to_vec())
         .collect();

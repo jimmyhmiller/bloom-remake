@@ -550,7 +550,7 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
             run.log.join("\n")
         );
         cluster.step_until(3_500_000_000).unwrap();
-        let state = cluster.state(NodeId(0)).expect("the broker is up");
+        let state = cluster.state(NodeId(0)).unwrap().expect("the broker is up");
         let tid = state
             .rows(artifact.rel_named("mtopic").unwrap())
             .find(|r| r[0] == Value::Str(TOPIC.into()))

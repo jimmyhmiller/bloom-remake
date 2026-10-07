@@ -415,8 +415,8 @@ impl<E: Executor> Node<E> {
     }
 
     /// The carried rows of `rel` at the last computed tick.
-    pub fn carried_rows(&self, rel: RelId) -> Vec<Row> {
-        self.exec.carried_rows(rel)
+    pub fn carried_rows(&self, rel: RelId) -> Result<Vec<Row>, NodeError> {
+        Ok(self.exec.carried_rows(rel)?)
     }
 
     /// The executor's join work so far, in rows examined, if it measures it.
@@ -431,8 +431,8 @@ impl<E: Executor> Node<E> {
 
     /// The whole carried state at the last computed tick, for inspection (O(state): tests and tools, not the hot
     /// path).
-    pub fn carried(&self) -> Instance {
-        self.exec.carried()
+    pub fn carried(&self) -> Result<Instance, NodeError> {
+        Ok(self.exec.carried()?)
     }
 
     /// The deployment's static rows.
@@ -463,7 +463,13 @@ impl<E: Executor> Node<E> {
                         false
                     })
                 } else {
-                    self.exec.carried_rows(r).iter().any(is)
+                    match self.exec.carried_rows(r) {
+                        Ok(rows) => rows.iter().any(is),
+                        Err(e) => {
+                            failed.borrow_mut().get_or_insert(e.into());
+                            false
+                        }
+                    }
                 }
         };
         let admitted = acl.admit(rel, source, &principal_in).is_ok();

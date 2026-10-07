@@ -344,7 +344,7 @@ fn a_tick_reads_a_blob_whose_record_is_not_synced_yet() {
         node.offer_input(rel("peek"), Arc::from(vec![Value::Bytes(key.clone())]));
         node.run_tick(Instant(3))
             .unwrap_or_else(|f| panic!("engine {engine}: {f}"));
-        let peeked = node.carried_rows(rel("peeked"));
+        let peeked = node.carried_rows(rel("peeked")).unwrap();
         assert_eq!(peeked.len(), 1, "engine {engine}");
         assert_eq!(peeked[0][1], Value::Bytes(key.clone()), "engine {engine}");
     }

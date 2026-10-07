@@ -1160,7 +1160,7 @@ fn check_groups(seeds: std::ops::RangeInclusive<u64>, scenario: Scenario) -> u64
         if scenario == Scenario::Zombie || scenario == Scenario::ZombieBare {
             cluster.run_until(3_000_000_000).unwrap();
             // The coordinator: the leader of the group's `__consumer_offsets` partition (Kafka's hash of the id).
-            let st0 = cluster.state(brokers[&1]).unwrap();
+            let st0 = cluster.state(brokers[&1]).unwrap().unwrap();
             let offsets_tid = st0
                 .rows(rel("mtopic"))
                 .find(|r| r[0] == Value::Str("__consumer_offsets".into()))
@@ -1175,6 +1175,7 @@ fn check_groups(seeds: std::ops::RangeInclusive<u64>, scenario: Scenario) -> u64
             let leads = |cluster: &Cluster<'_>, n: NodeId| {
                 cluster
                     .state(n)
+                    .unwrap()
                     .is_some_and(|st| st.rows(rel_won).any(|r| r[0] == group_g))
             };
             let leaders: Vec<NodeId> = brokers.values().copied().filter(|n| leads(&cluster, *n)).collect();
@@ -1288,6 +1289,7 @@ fn check_groups(seeds: std::ops::RangeInclusive<u64>, scenario: Scenario) -> u64
             .map(|n| {
                 cluster
                     .state(*n)
+                    .unwrap()
                     .unwrap_or_else(|| panic!("{}", fail(&cluster, &format!("broker {n:?} is down"))))
             })
             .collect();

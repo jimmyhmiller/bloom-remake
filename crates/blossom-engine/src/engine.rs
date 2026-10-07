@@ -112,6 +112,12 @@ pub struct Engine {
     fn_work: Option<std::cell::RefCell<BTreeMap<blossom_base::FnId, FnWork>>>,
     /// The derived tick-scoped relations ([`tick_scoped`]), emptied at the start of every tick.
     scoped: Vec<RelId>,
+    /// The set tables carried by their frame (`FramePlan`), whose next state is a delta over their present rows: the
+    /// frame's part (the rows of `Main` not deleted, and kept) is read from the stores it reads, and their `Next`
+    /// store holds only the other next-state rules' support. A table keeps no second copy of its rows from one tick
+    /// to the next (docs/design/DATABASE.md §7). A lattice table's next state merges the frame's rows with the other
+    /// contributions, so its `Next` store holds them all.
+    framed: BTreeMap<RelId, rule::FramePlan>,
 }
 
 fn kinds(p: &Program) -> Vec<Option<Kind>> {
@@ -441,6 +447,15 @@ impl Engine {
                 stores.insert_absent(plan.head, || Store::new(spec, rel_holds_blobs(p, rel)));
             }
         }
+        let mut framed = BTreeMap::new();
+        for id in inductive.iter() {
+            if let Some(plan) = plans.get(id)
+                && let (Some(frame), StoreKey::Next(rel)) = (&plan.frame, plan.head)
+                && stores.get(&plan.head).is_some_and(|s| s.cell.is_none())
+            {
+                framed.insert(rel, frame.clone());
+            }
+        }
         let mut keyed = Vec::new();
         for (id, r) in p.rels.iter_enumerated() {
             if r.schema.payload.is_empty() {
@@ -495,6 +510,7 @@ impl Engine {
             buffers: std::cell::RefCell::new(rule::TermBuffers::default()),
             fn_work: None,
             scoped: scoped_derived,
+            framed,
             program,
         };
         engine.build_indexes()?;
@@ -721,15 +737,21 @@ impl Engine {
             if changes.inserted.contains_key(&rel) || changes.deleted.contains_key(&rel) {
                 continue;
             }
-            let s = self
-                .stores
-                .get(&plan.head)
-                .ok_or_else(|| internal_error!("no next store"))?;
-            if !s.ins.is_empty() {
-                changes.inserted.insert(rel, s.ins.iter().cloned().collect());
+            let (ins, del) = match self.framed.get(&rel) {
+                Some(frame) => self.framed_change(frame, &plan.head)?,
+                None => {
+                    let s = self
+                        .stores
+                        .get(&plan.head)
+                        .ok_or_else(|| internal_error!("no next store"))?;
+                    (s.ins.iter().cloned().collect(), s.del.iter().cloned().collect())
+                }
+            };
+            if !ins.is_empty() {
+                changes.inserted.insert(rel, ins);
             }
-            if !s.del.is_empty() {
-                changes.deleted.insert(rel, s.del.iter().cloned().collect());
+            if !del.is_empty() {
+                changes.deleted.insert(rel, del);
             }
         }
         if let Some(base) = self.baseline.take() {
@@ -796,16 +818,76 @@ impl Engine {
                 for r in s.present() {
                     next.insert(rel, r.clone());
                 }
+                if let Some(frame) = self.framed.get(&rel) {
+                    for r in self.frame_rows(frame)? {
+                        next.insert(rel, r);
+                    }
+                }
             }
         }
         Ok(next)
     }
 
+    /// The stores a table's frame reads.
+    fn frame_stores(&self, frame: &rule::FramePlan) -> Result<(&Store, &Store, Option<&Store>), EvalError> {
+        let store = |k: &StoreKey| {
+            self.stores
+                .get(k)
+                .ok_or_else(|| EvalError::from(internal_error!("no store for {k:?}")))
+        };
+        Ok((
+            store(&frame.rel)?,
+            store(&frame.del)?,
+            frame.keep.as_ref().map(store).transpose()?,
+        ))
+    }
+
+    /// The rows a framed table's frame carries into the next state: its present rows not deleted, and kept.
+    fn frame_rows(&self, frame: &rule::FramePlan) -> Result<Vec<Row>, EvalError> {
+        let (rel, del, keep) = self.frame_stores(frame)?;
+        Ok(rel
+            .present()
+            .filter(|r| !del.contains(r) && keep.is_none_or(|k| k.contains(r)))
+            .cloned()
+            .collect())
+    }
+
+    /// How the tick changed a framed table's next state (`Engine::framed`): the rows it gained and those it lost. A
+    /// row is in the next state while the frame carries it or another next-state rule supports it (its `Next` store,
+    /// `next`), so it can change only where it changed in a store the frame reads or in `next`; its membership at the
+    /// start of the tick reads each store as it was then.
+    fn framed_change(&self, frame: &rule::FramePlan, next: &StoreKey) -> Result<(Vec<Row>, Vec<Row>), EvalError> {
+        let (rel, del, keep) = self.frame_stores(frame)?;
+        let next = self
+            .stores
+            .get(next)
+            .ok_or_else(|| internal_error!("no store for {next:?}"))?;
+        let mut rows: BTreeSet<&Row> = rel.delta().map(|(r, _)| r).collect();
+        rows.extend(del.delta().map(|(r, _)| r));
+        if let Some(k) = keep {
+            rows.extend(k.delta().map(|(r, _)| r));
+        }
+        rows.extend(next.delta().map(|(r, _)| r));
+        let (mut ins, mut gone) = (Vec::new(), Vec::new());
+        for row in rows {
+            let was = (rel.contained(row) && !del.contained(row) && keep.is_none_or(|k| k.contained(row)))
+                || next.contained(row);
+            let is =
+                (rel.contains(row) && !del.contains(row) && keep.is_none_or(|k| k.contains(row))) || next.contains(row);
+            match (was, is) {
+                (false, true) => ins.push(row.clone()),
+                (true, false) => gone.push(row.clone()),
+                _ => {}
+            }
+        }
+        Ok((ins, gone))
+    }
+
     /// The whole carried state: what the next tick starts from (O(state)).
-    pub fn carried_instance(&self) -> Instance {
+    pub fn carried_instance(&self) -> Result<Instance, EvalError> {
         match &self.baseline {
-            Some(base) => base.clone(),
-            None => self.next_instance().unwrap_or_default(),
+            Some(base) => Ok(base.clone()),
+            None => self.next_instance(),
         }
     }
 
@@ -819,14 +901,21 @@ impl Engine {
     }
 
     /// The carried rows of `rel`: what the next tick starts from.
-    pub fn carried_rows(&self, rel: RelId) -> Vec<Row> {
+    pub fn carried_rows(&self, rel: RelId) -> Result<Vec<Row>, EvalError> {
         if let Some(base) = &self.baseline {
-            return base.rows(rel).cloned().collect();
+            return Ok(base.rows(rel).cloned().collect());
         }
-        self.stores
+        let mut rows = self
+            .stores
             .get(&StoreKey::Next(rel))
             .map(Store::present_sorted)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if let Some(frame) = self.framed.get(&rel) {
+            rows.extend(self.frame_rows(frame)?);
+            rows.sort_unstable();
+            rows.dedup();
+        }
+        Ok(rows)
     }
 
     fn ctx<'a>(&'a self, p: &'a Program, input: &StepInput<'a>) -> Ctx<'a> {
@@ -857,6 +946,10 @@ impl Engine {
                 .plans
                 .get(&id)
                 .ok_or_else(|| internal_error!("rule {id:?} has no plan"))?;
+            // A framed table's frame writes nothing: its part of the next state is read where it is wanted.
+            if plan.frame.is_some() && self.framed.contains_key(&rule.head.rel) {
+                return Ok(());
+            }
             if plan.regime == Regime::Scoped {
                 // No row in a scoped atom: no valuation, and the head was emptied at the start of the tick.
                 let live = plan
@@ -1730,6 +1823,12 @@ impl Engine {
     /// Each store counts its rows' blobs as they change, so this is a lookup per store that can hold blobs.
     pub fn holds_blob(&self, b: &blossom_value::BlobRef) -> bool {
         self.stores.values().any(|s| s.holds_blob(b))
+    }
+
+    /// The rows the engine's stores hold now, all relations together: its state's size in rows. A table carried by
+    /// its frame counts once (`Engine::framed`), not once for its rows and again for its next state.
+    pub fn held_rows(&self) -> usize {
+        self.stores.values().map(Store::present_len).sum()
     }
 
     /// Rows the atom probes returned since the engine was created: the join work, measured without a clock.

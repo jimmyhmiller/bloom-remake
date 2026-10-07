@@ -163,8 +163,8 @@ impl<R: Read> Replay<R> {
     }
 
     /// The carried state the next tick starts from.
-    pub fn carried(&self) -> Instance {
-        self.engine.carried()
+    pub fn carried(&self) -> Result<Instance, ReplayError> {
+        self.engine.carried().map_err(ReplayError::from)
     }
 
     fn read(&mut self) -> Result<Option<NodeRecord>, ReplayError> {
@@ -256,7 +256,7 @@ impl<R: Read> Replay<R> {
         }
         let blobs = BlobMap(self.blobs.clone());
         let examined = if examine {
-            let carried = self.engine.carried();
+            let carried = self.engine.carried()?;
             Some(self.oracle.tick(&TickInput {
                 node: self.node,
                 incarnation: self.incarnation,

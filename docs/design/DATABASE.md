@@ -117,13 +117,13 @@ blossom query --deploy d.toml --node s --store data/s 'all(k, v) = store(k, v)'
 
 Done in S24's first step: the database is the durable state of every driver (item 10 below), checkpoints are retired
 (item 8, except that the engine still loads the recovered rows), and the simulator's crashes reach the database.
-The rest:
+Done in its second: the node keeps no copy of the released rows (admission reads the database), and a set table
+carried by its frame has no next-state copy (item 2: its `Next` store holds only the other next-state rules'
+support, and the tick's change to the next state is computed from the stores the frame reads). The rest:
 
 Today the engine holds every relation in memory (`blossom-engine::store::Store`: rows with support counts, indexes
-built on use), a table twice (its `Main` store, the rows now, and its `Next` store, the rows the next tick starts
-from, whose change is applied to `Main` at the next tick's start), and recovers durable ones from the checkpoint
-chain; the database is a third copy. Moving durable
-relations onto the database, so a node's durable state may outgrow its memory and checkpoints retire:
+built on use) and loads the durable ones from the recovered rows at boot; the database holds them again on disk.
+Moving durable relations onto the database, so a node's durable state may outgrow its memory:
 
 1. **A tiered store for each durable table.** `base`: the table as of the previous tick, which is the database at the
    released tick plus an in-memory overlay of the computed-but-unreleased ticks' deltas. `hot`: the counting store of

@@ -291,7 +291,7 @@ fn the_blossom_client_and_a_rust_client_see_the_same_answers() {
         // The Blossom client's: its tables survive only its current incarnation, so run it on without faults until
         // it has answers, then compare.
         cluster.step_until(2_500_000_000).unwrap();
-        let state = cluster.state(NodeId(1)).expect("the client node is up");
+        let state = cluster.state(NodeId(1)).unwrap().expect("the client node is up");
         let versions: BTreeSet<Versions> = state
             .rows(artifact.rel_named("versions_seen").unwrap())
             .map(|r| (int16(&r[0]), ranges(&r[1])))

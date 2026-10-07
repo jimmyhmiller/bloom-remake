@@ -432,7 +432,7 @@ fn chain_work(n: u64) -> u64 {
     let before = engine.rows_examined();
     step(&mut engine, 1, vec![(rel("ask"), u(u64::MAX))]);
     let work = engine.rows_examined() - before;
-    let len = engine.carried_rows(rel("asked")).len();
+    let len = engine.carried_rows(rel("asked")).unwrap().len();
     assert_eq!(len, 1);
     work
 }

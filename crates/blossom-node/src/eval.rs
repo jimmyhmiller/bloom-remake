@@ -48,9 +48,9 @@ pub trait Executor: Send {
     /// tick the caller needs (the `halt` output).
     fn step(&mut self, input: &StepInput<'_>, observe: &[RelId]) -> Result<StepOutput, EvalError>;
     /// The carried rows of `rel` (for admission's `principal in REL` on a volatile table).
-    fn carried_rows(&self, rel: RelId) -> Vec<Row>;
+    fn carried_rows(&self, rel: RelId) -> Result<Vec<Row>, EvalError>;
     /// The whole carried state, for inspection (O(state)).
-    fn carried(&self) -> Instance;
+    fn carried(&self) -> Result<Instance, EvalError>;
     /// The join work done so far, in rows examined, if the executor measures it.
     fn rows_examined(&self) -> Option<u64>;
     /// The work of each rule so far (rows examined, expression nodes evaluated), if the executor measures it.
@@ -115,12 +115,12 @@ impl<E: Evaluator> Executor for OracleExecutor<E> {
         })
     }
 
-    fn carried_rows(&self, rel: RelId) -> Vec<Row> {
-        self.carried.rows(rel).cloned().collect()
+    fn carried_rows(&self, rel: RelId) -> Result<Vec<Row>, EvalError> {
+        Ok(self.carried.rows(rel).cloned().collect())
     }
 
-    fn carried(&self) -> Instance {
-        self.carried.clone()
+    fn carried(&self) -> Result<Instance, EvalError> {
+        Ok(self.carried.clone())
     }
 
     /// The reference evaluator does not count its work.
@@ -158,11 +158,11 @@ impl<X: Executor + ?Sized> Executor for Box<X> {
         (**self).step(input, observe)
     }
 
-    fn carried_rows(&self, rel: RelId) -> Vec<Row> {
+    fn carried_rows(&self, rel: RelId) -> Result<Vec<Row>, EvalError> {
         (**self).carried_rows(rel)
     }
 
-    fn carried(&self) -> Instance {
+    fn carried(&self) -> Result<Instance, EvalError> {
         (**self).carried()
     }
 
@@ -196,11 +196,11 @@ impl Executor for blossom_engine::Engine {
         blossom_engine::Engine::step(self, input, observe)
     }
 
-    fn carried_rows(&self, rel: RelId) -> Vec<Row> {
+    fn carried_rows(&self, rel: RelId) -> Result<Vec<Row>, EvalError> {
         blossom_engine::Engine::carried_rows(self, rel)
     }
 
-    fn carried(&self) -> Instance {
+    fn carried(&self) -> Result<Instance, EvalError> {
         self.carried_instance()
     }
 
@@ -268,7 +268,7 @@ impl Evaluator for EngineEvaluator {
             *incarnation = input.incarnation;
         }
         if self.check_carried {
-            let mine = engine.carried_instance();
+            let mine = engine.carried_instance()?;
             if mine != *input.carried {
                 return Err(blossom_base::internal_error!(
                     "node {} ticked from a carried state that is not the engine's own",

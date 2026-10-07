@@ -104,7 +104,7 @@ fn run(seed: u64, faults: bool) -> (BTreeMap<Value, u64>, usize) {
         artifact.rel_named("commit").unwrap(),
     );
     let configs = (0..4u32)
-        .filter_map(|n| cluster.state(blossom_value::time::NodeId(n)))
+        .filter_map(|n| cluster.state(blossom_value::time::NodeId(n)).unwrap())
         .map(|s| {
             let c = s.rows(commit).find(|r| r[0] == moving).map_or(0, |r| u64_at(r, 1));
             s.rows(rlog)
@@ -161,7 +161,7 @@ struct Directed<'a> {
 #[cfg(test)]
 impl Directed<'_> {
     fn leads(&self, n: blossom_value::time::NodeId) -> Option<u64> {
-        let state = self.c.state(n)?;
+        let state = self.c.state(n).unwrap()?;
         let term = state
             .rows(self.rterm)
             .filter(|r| r[0] == self.g)
@@ -177,6 +177,7 @@ impl Directed<'_> {
     fn last(&self, n: blossom_value::time::NodeId) -> (u64, u64) {
         self.c
             .state(n)
+            .unwrap()
             .and_then(|s| {
                 s.rows(self.rlog)
                     .filter(|r| r[0] == self.g)

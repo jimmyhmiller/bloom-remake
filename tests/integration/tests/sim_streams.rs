@@ -374,7 +374,7 @@ fn a_node_dials_another_nodes_stream_in_the_simulator() {
         .unwrap();
         cluster.step_until(500_000_000).unwrap();
         let cli = artifact.nodes.iter().position(|n| n.as_str() == "cli").unwrap();
-        let state = cluster.state(NodeId(cli as u32)).unwrap();
+        let state = cluster.state(NodeId(cli as u32)).unwrap().unwrap();
         let got = artifact.rel_named("got").unwrap();
         let mut chunks: Vec<(u64, Vec<u8>)> = state
             .rows(got)
@@ -467,7 +467,7 @@ fn connections_that_open_and_close_constantly_survive_every_fault() {
                 run.log.iter().filter(|l| l.contains("violation")).collect::<Vec<_>>()
             );
             let cli = artifact.nodes.iter().position(|n| n.as_str() == "cli").unwrap();
-            if let Some(state) = cluster.state(NodeId(cli as u32)) {
+            if let Some(state) = cluster.state(NodeId(cli as u32)).unwrap() {
                 for r in state.rows(artifact.rel_named("heard").unwrap()) {
                     let blossom_value::Value::Bytes(b) = &r[0] else {
                         panic!("{r:?}")
