@@ -6,14 +6,15 @@
 //! - the **committer thread** owns the WAL: it takes every submitted record, appends them as one batch, syncs once,
 //!   and reports the synced tick (Invariant B: batch k+1 is never written before batch k's sync returned). A failed
 //!   append or sync poisons the WAL and faults the node;
-//! - the **checkpoint thread** writes a checkpoint of the durable rows at a synced tick, installs it, removes the
-//!   older ones, and hands the truncation token to the committer;
+//! - the **database thread** flushes the node's database when the engine asks (its memtable full, or the WAL past
+//!   its threshold); the engine applies each released tick to it, and the committer truncates the WAL behind each
+//!   flush (docs/design/DATABASE.md);
 //! - **listeners** accept peer and client connections; a **reader thread** per connection decodes batches, and a
 //!   **writer thread** per peer and per session sends frames.
 //!
 //! Tick `t+1` computes while tick `t`'s fsync is in flight (pipelined group commit, ARCH-10).
 //!
-//! Two queues reach the engine. Control (sync reports, checkpoint results, stop) is unbounded and always drained.
+//! Two queues reach the engine. Control (sync reports, database flushes, stop) is unbounded and always drained.
 //! Data (peer deliveries, client messages) is bounded: the engine takes data only while the node's inbox has room, so
 //! a full queue blocks the readers and pushes back on the senders' TCP connections (DIST-008).
 //!
@@ -39,8 +40,7 @@ use blossom_node::recovery::{self, StoreSpec, tick_record};
 use blossom_node::{Backend, Executor, Executors, Node, NodeConfig, NodeState, ReleasedTick};
 use blossom_oracle::{Delivery, Ingress, Oracle, Row};
 use blossom_store::{
-    CheckpointWriter, FileCheckpoints, FileWal, MetaRecord, MetaStore, OpenMode, RealFs, StoreIdentity, StoreLock,
-    SyncedTick, TruncateToken, WalRecordBuf, WalWriter,
+    FileWal, MetaRecord, MetaStore, OpenMode, RealFs, StoreIdentity, StoreLock, SyncedTick, WalRecordBuf, WalWriter,
 };
 use blossom_value::Seed;
 use blossom_value::time::{Instant, NodeId, Tick};
@@ -101,22 +101,21 @@ pub struct Stats {
     pub ingress: AtomicU64,
     pub egress: AtomicU64,
     pub sessions: AtomicU64,
-    pub checkpoints: AtomicU64,
+    /// The database's flushes.
+    pub db_flushes: AtomicU64,
     /// The time WAL syncs took, in total and at most, and how many took over 4, 16 and 64 ms.
     pub wal_sync_nanos: AtomicU64,
     pub wal_sync_max_nanos: AtomicU64,
     pub wal_syncs_over_4ms: AtomicU64,
     pub wal_syncs_over_16ms: AtomicU64,
     pub wal_syncs_over_64ms: AtomicU64,
-    /// The time checkpoints took (written, installed, pruned, their logged blobs made files), in total.
-    pub checkpoint_nanos: AtomicU64,
     /// How long messages from peers, and clients' stream data, waited between their reader queueing them and the
     /// engine taking them: at most, and how many waited over 4 ms.
     pub peer_wait_max_nanos: AtomicU64,
     pub peer_waits_over_4ms: AtomicU64,
     pub stream_wait_max_nanos: AtomicU64,
     pub stream_waits_over_4ms: AtomicU64,
-    /// Blobs deleted after checkpoints (no row can reach them).
+    /// Blobs deleted after database flushes (no row can reach them).
     pub blobs_collected: AtomicU64,
     /// Rejected by an ACL (an omission, SEM-090).
     pub rejected_acl: AtomicU64,
@@ -151,13 +150,12 @@ impl Stats {
             ("ingress", r(&self.ingress)),
             ("egress", r(&self.egress)),
             ("sessions", r(&self.sessions)),
-            ("checkpoints", r(&self.checkpoints)),
+            ("db_flushes", r(&self.db_flushes)),
             ("wal_sync_nanos", r(&self.wal_sync_nanos)),
             ("wal_sync_max_nanos", r(&self.wal_sync_max_nanos)),
             ("wal_syncs_over_4ms", r(&self.wal_syncs_over_4ms)),
             ("wal_syncs_over_16ms", r(&self.wal_syncs_over_16ms)),
             ("wal_syncs_over_64ms", r(&self.wal_syncs_over_64ms)),
-            ("checkpoint_nanos", r(&self.checkpoint_nanos)),
             ("peer_wait_max_nanos", r(&self.peer_wait_max_nanos)),
             ("peer_waits_over_4ms", r(&self.peer_waits_over_4ms)),
             ("stream_wait_max_nanos", r(&self.stream_wait_max_nanos)),
@@ -218,20 +216,11 @@ enum Data {
 enum Control {
     Synced(SyncedTick),
     WalFailed(String),
-    /// A checkpoint was installed; the shape of the chain it ends.
-    CheckpointDone(Result<Option<blossom_store::ChainInfo>, String>),
+    /// The database flushed: what its tables cover (the WAL may truncate behind it), or why it failed.
+    DatabaseFlushed(Result<blossom_store::lsm::Flushed, String>),
     /// Data was queued.
     Wake,
-    /// The database could not flush or compact.
-    DatabaseFailed(String),
     Stop,
-}
-
-/// What the checkpoint thread writes (FOREIGN-PROTOCOLS §6): a delta layer (encoded on the engine thread: its cost
-/// follows the change), or a full image, encoded on the checkpoint thread so the engine only copies row handles.
-enum CheckpointJob {
-    Layer(Vec<u8>),
-    Full(blossom_node::durable::DurableImage),
 }
 
 enum Commit {
@@ -242,9 +231,8 @@ enum Commit {
         /// The blobs the record references that are not durable yet: made durable before the record syncs.
         blobs: Vec<(blossom_value::BlobRef, Arc<[u8]>)>,
     },
-    Truncate(TruncateToken),
-    /// The database flushed: a truncation waiting for it may go.
-    Flushed,
+    /// The database flushed: the WAL truncates the records its tables cover.
+    Truncate(blossom_store::lsm::Flushed),
 }
 
 /// The bounded data queue between the readers and the engine.
@@ -451,8 +439,12 @@ impl Server {
                 identity: store_identity(spec, &artifact, &cfg.node)?,
                 mode: cfg.mode,
                 certification: spec.tail_certification,
+                database: blossom_store::lsm::LsmOptions {
+                    history: spec.history_ticks,
+                    ..blossom_store::lsm::LsmOptions::default()
+                },
             },
-            program,
+            &artifact.program,
             names.clone(),
             wall_now().map_err(RuntimeError::Config)?,
             nonce,
@@ -489,48 +481,7 @@ impl Server {
             }
         };
         let node = Node::boot(ncfg, &artifact.program, exec, boot.clone())?;
-        // The database (docs/design/DATABASE.md): up to the recovered store before the node runs.
-        let (db, fresh) = crate::db::Database::open(
-            Arc::new(RealFs),
-            &dir,
-            artifact.clone(),
-            names.clone(),
-            blossom_store::lsm::LsmOptions {
-                history: spec.history_ticks,
-                ..blossom_store::lsm::LsmOptions::default()
-            },
-        )?;
-        db.recover(
-            fresh,
-            &opened.wal_deltas,
-            &opened.boot.image,
-            opened.checkpoint.map(|c| c.tick),
-        )?;
-        // A database the store did not have starts from the recovered rows: flushed now, so the WAL may truncate.
-        if fresh {
-            db.flush_now()?;
-        }
-        // While the engine recovers from checkpoints, the database is a second copy of the durable rows: it must
-        // agree with the recovered ones, or the node refuses to start (docs/design/DATABASE.md §4).
-        let latest = db.range()?.1.unwrap_or(0);
-        let mut recovered = opened.boot.image.clone();
-        recovered.rows.retain(|_, rows| !rows.is_empty());
-        let mut held = db.image(latest)?;
-        held.rows.retain(|_, rows| !rows.is_empty());
-        if held != recovered {
-            return Err(RuntimeError::Config(format!(
-                "the node's database (as of tick {latest}) disagrees with its recovered durable rows: {} relations \
-                 against {}",
-                held.rows.len(),
-                recovered.rows.len()
-            )));
-        }
-        let db = Arc::new(db);
-        let wal_ticks: Vec<(blossom_store::Lsn, u64)> =
-            opened.wal_deltas.iter().map(|(lsn, tick, _)| (*lsn, *tick)).collect();
         let restarts = opened.record.restarts;
-        let last_checkpoint_lsn = opened.checkpoint.map_or(0, |c| c.lsn.0);
-        let opened_chain = opened.checkpoints.chain()?;
 
         let peer_listener =
             TcpListener::bind(entry.addr).map_err(|e| RuntimeError::Net(format!("bind {}: {e}", entry.addr)))?;
@@ -626,53 +577,40 @@ impl Server {
             stop: stop.clone(),
         };
         let (commit_tx, commit_rx) = mpsc::channel::<Commit>();
-        let (ckpt_tx, ckpt_rx) = mpsc::channel::<(CheckpointJob, SyncedTick)>();
         let id = identity(spec, &artifact);
         let catalog = Arc::new(Catalog::of(program)?);
         let mut threads = Vec::new();
 
         let recovery::Opened {
             wal,
-            checkpoints,
+            database,
             meta,
             record,
             lock,
             ..
         } = opened;
+        // The node's database (docs/design/DATABASE.md): the engine applies each released tick to it; its thread
+        // flushes when the engine asks, and the committer truncates the WAL behind each flush.
+        let db = Arc::new(database);
         {
             let (tx, stats) = (ctl_tx.clone(), stats.clone());
             let blobs = blob_store.clone();
-            let gate = TruncationGate {
-                db_flushed: db.flushed_tick(),
-                flush: db.flush_request(),
-                asked: None,
-                records: wal_ticks.into_iter().collect(),
-            };
             threads.push(spawn("committer", move || {
-                committer(wal, &blobs, commit_rx, tx, stats, gate)
+                committer(wal, &blobs, commit_rx, tx, stats)
             })?);
         }
-        {
-            let commit = commit_tx.clone();
+        let flush = {
             let control = ctl_tx.clone();
-            threads.push(db.start(
-                Box::new(move || {
-                    // The committer is gone only when the node stops.
-                    let _ = commit.send(Commit::Flushed);
-                }),
-                Box::new(move |e| {
+            let (tx, handle) = crate::db::start(
+                db.clone(),
+                Box::new(move |r| {
                     // The engine is gone only when the node stops.
-                    let _ = control.send(Control::DatabaseFailed(e));
+                    let _ = control.send(Control::DatabaseFlushed(r));
                 }),
-            )?);
-        }
-        {
-            let (tx, commit, stats) = (ctl_tx.clone(), commit_tx.clone(), stats.clone());
-            let (artifact, names, blobs) = (artifact.clone(), names.clone(), blob_store.clone());
-            threads.push(spawn("checkpoint", move || {
-                checkpointer(checkpoints, &artifact, names, &blobs, ckpt_rx, commit, tx, &stats)
-            })?);
-        }
+            )?;
+            threads.push(handle);
+            tx
+        };
         // Peer writers: one per other node.
         let mut peers: BTreeMap<NodeId, SyncSender<Vec<u8>>> = BTreeMap::new();
         for (i, n) in spec.nodes.iter().enumerate() {
@@ -788,7 +726,7 @@ impl Server {
                 streams: stream_env.clone(),
                 backlog_bytes: spec.stream_limits.backlog_bytes,
                 blob_store: blob_store.clone(),
-                checkpoint_blobs: None,
+                flush_blobs: None,
                 node,
                 artifact: artifact.clone(),
                 schema: DurableSchema::of(program),
@@ -806,11 +744,10 @@ impl Server {
                 data: data.clone(),
                 inbox_cap,
                 commit: commit_tx,
-                checkpoint: ckpt_tx,
-                checkpoint_bytes: spec.checkpoint_wal_bytes,
-                checkpoint_busy: false,
-                last_checkpoint_lsn,
-                chain: opened_chain,
+                flush,
+                flush_wal_bytes: spec.checkpoint_wal_bytes,
+                flush_busy: false,
+                last_flush_lsn: 0,
                 meta,
                 record,
                 _lock: lock,
@@ -886,8 +823,7 @@ impl Server {
         self.stream_queue.close();
         self.conns.close_all();
         self.streams.close_all();
-        // The database thread ends when its request channel closes.
-        self.database.close();
+        // The database thread ended with the engine, which held its request channel.
         for t in self.threads.drain(..) {
             // A thread that panicked has already reported through its connection; joining just reaps it.
             let _ = t.join();
@@ -911,47 +847,17 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> Result<JoinHandle<()>
         .map_err(RuntimeError::Io)
 }
 
-/// What holds a WAL truncation back: the database must hold every record it removes (docs/design/DATABASE.md §4).
-struct TruncationGate {
-    /// The first tick the database's tables do not cover.
-    db_flushed: Arc<AtomicU64>,
-    /// Asks the database for a flush, when a truncation waits on it.
-    flush: Box<dyn Fn() + Send>,
-    /// The truncation a flush was last asked for.
-    asked: Option<blossom_store::Lsn>,
-    /// The position and tick of every record in the WAL, in order.
-    records: VecDeque<(blossom_store::Lsn, u64)>,
-}
-
-impl TruncationGate {
-    /// Whether every record a truncation through `upto` removes is in the database's tables.
-    fn allows(&self, upto: blossom_store::Lsn) -> bool {
-        let flushed = self.db_flushed.load(Ordering::SeqCst);
-        self.records
-            .iter()
-            .take_while(|(lsn, _)| *lsn <= upto)
-            .all(|(_, tick)| *tick < flushed)
-    }
-
-    fn truncated(&mut self, upto: blossom_store::Lsn) {
-        while self.records.front().is_some_and(|(lsn, _)| *lsn <= upto) {
-            self.records.pop_front();
-        }
-    }
-}
-
-/// The committer (Invariant B): append everything submitted as one batch, sync once, report. A truncation waits
-/// until the database holds what it removes.
+/// The committer (Invariant B): append everything submitted as one batch, sync once, report; and truncate the WAL
+/// behind the database's flushes.
 fn committer(
     mut wal: FileWal,
     blob_store: &blossom_store::BlobStore,
     rx: Receiver<Commit>,
     tx: Sender<Control>,
     stats: Arc<Stats>,
-    mut gate: TruncationGate,
 ) {
     let mut batch: u64 = 0;
-    let mut truncates: Vec<TruncateToken> = Vec::new();
+    let mut truncates: Vec<blossom_store::lsm::Flushed> = Vec::new();
     while let Ok(first) = rx.recv() {
         let mut work = vec![first];
         while let Ok(more) = rx.try_recv() {
@@ -991,15 +897,13 @@ fn committer(
                             return;
                         }
                     };
-                    gate.records.push_back((lsn, tick.0));
                     if let Err(e) = blob_store.write_logged(&record.logged, lsn) {
                         let _ = tx.send(Control::WalFailed(format!("the blobs of tick {} failed: {e}", tick.0)));
                         return;
                     }
                     appended += 1;
                 }
-                Commit::Truncate(t) => truncates.push(t),
-                Commit::Flushed => {}
+                Commit::Truncate(f) => truncates.push(f),
             }
         }
         if appended > 0 {
@@ -1034,66 +938,22 @@ fn committer(
                 }
             }
         }
-        // Truncation happens at a batch boundary, after the sync, in order, as far as the database allows.
-        while truncates.first().is_some_and(|t| gate.allows(t.lsn())) {
-            let t = truncates.remove(0);
-            let upto = t.lsn();
-            if let Err(e) = wal.truncate_through(t) {
+        // Truncation happens at a batch boundary, after the sync: the blobs logged in the records a flush covers become
+        // files, and the older segments it wholly covers go.
+        for f in truncates.drain(..) {
+            let truncated = (|| -> Result<(), blossom_store::StoreError> {
+                if let Some(lsn) = wal.covered(&f)? {
+                    blob_store.sync_logged_below(lsn)?;
+                }
+                match wal.truncation(&f)? {
+                    Some(token) => wal.truncate_through(token),
+                    None => Ok(()),
+                }
+            })();
+            if let Err(e) = truncated {
                 let _ = tx.send(Control::WalFailed(format!("WAL truncation failed: {e}")));
                 return;
             }
-            gate.truncated(upto);
-        }
-        // A truncation still waiting waits on the database: a flush is asked for once per truncation (the memtable
-        // may grow slowly while the WAL does not, as with large blobs logged in it).
-        if let Some(t) = truncates.first()
-            && gate.asked != Some(t.lsn())
-        {
-            gate.asked = Some(t.lsn());
-            (gate.flush)();
-        }
-    }
-}
-
-/// The checkpoint thread: write, install, remove the older checkpoints, hand the truncation token to the committer.
-#[allow(clippy::too_many_arguments)]
-fn checkpointer(
-    mut ckpt: FileCheckpoints,
-    artifact: &BlsArtifact,
-    names: Arc<[Arc<str>]>,
-    blobs: &blossom_store::BlobStore,
-    rx: Receiver<(CheckpointJob, SyncedTick)>,
-    commit: Sender<Commit>,
-    tx: Sender<Control>,
-    stats: &Stats,
-) {
-    let program = artifact.program.get();
-    let schema = DurableSchema::of(program);
-    let codec = DurableCodec::new(program, &schema, names);
-    while let Ok((job, covers)) = rx.recv() {
-        let clock = Stopwatch::start();
-        let written = match job {
-            CheckpointJob::Layer(delta) => ckpt.write_layer(&delta, covers).map_err(|e| e.to_string()),
-            CheckpointJob::Full(image) => codec
-                .encode_image(&image)
-                .map_err(|e| e.to_string())
-                .and_then(|snap| ckpt.write(snap, covers).map_err(|e| e.to_string())),
-        };
-        let result = written
-            .and_then(|id| ckpt.install(id).map_err(|e| e.to_string()))
-            .and_then(|token| ckpt.prune().map(|_| token).map_err(|e| e.to_string()))
-            // The blobs logged in the WAL about to go are made durable as files first (here, off the tick path).
-            .and_then(|token| {
-                blobs
-                    .sync_logged_below(token.lsn())
-                    .map(|_| token)
-                    .map_err(|e| e.to_string())
-            })
-            .and_then(|token| commit.send(Commit::Truncate(token)).map_err(|e| e.to_string()))
-            .and_then(|()| ckpt.chain().map_err(|e| e.to_string()));
-        bump(&stats.checkpoint_nanos, clock.nanos());
-        if tx.send(Control::CheckpointDone(result)).is_err() {
-            return;
         }
     }
 }
@@ -1454,8 +1314,8 @@ struct Engine {
     db: Arc<crate::db::Database>,
     node: Node<Box<dyn Executor>>,
     blob_store: Arc<blossom_store::BlobStore>,
-    /// The checkpoint in progress: its tick and the blobs its rows hold.
-    checkpoint_blobs: Option<(Tick, std::collections::BTreeSet<blossom_value::BlobRef>)>,
+    /// The flush asked for: the tick every applied tick up to which it covers, and the collection candidates then.
+    flush_blobs: Option<(Tick, std::collections::BTreeSet<blossom_value::BlobRef>)>,
     streams: StreamEnv,
     /// The undelivered stream bytes past which the engine takes no more stream reports.
     backlog_bytes: u64,
@@ -1478,12 +1338,12 @@ struct Engine {
     /// The most messages the node's inbox holds before the engine stops taking data.
     inbox_cap: usize,
     commit: Sender<Commit>,
-    checkpoint: Sender<(CheckpointJob, SyncedTick)>,
-    /// The shape of the installed checkpoint chain (`None` without one), from the last checkpoint.
-    chain: Option<blossom_store::ChainInfo>,
-    checkpoint_bytes: u64,
-    checkpoint_busy: bool,
-    last_checkpoint_lsn: u64,
+    /// Asks the database thread for a flush.
+    flush: Sender<()>,
+    /// The WAL bytes past which a flush is asked for, whether one is under way, and the WAL position of the last.
+    flush_wal_bytes: u64,
+    flush_busy: bool,
+    last_flush_lsn: u64,
     meta: MetaStore,
     record: MetaRecord,
     _lock: StoreLock,
@@ -1518,14 +1378,14 @@ impl Engine {
             };
             match ctl.recv_timeout(wait) {
                 Ok(m) => {
-                    if let Some(stopped) = self.control(m, &codec, &durable)? {
+                    if let Some(stopped) = self.control(m, &codec)? {
                         return Ok(stopped);
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return Err(internal_error!("the engine's inbox closed").into()),
             }
-            if let Some(stopped) = self.drain(&ctl, &codec, &durable)? {
+            if let Some(stopped) = self.drain(&ctl, &codec)? {
                 return Ok(stopped);
             }
             if *self.node.state() == NodeState::Halted {
@@ -1563,7 +1423,7 @@ impl Engine {
                         self.dispatch(released, &codec)?;
                     }
                 }
-                if let Some(stopped) = self.drain(&ctl, &codec, &durable)? {
+                if let Some(stopped) = self.drain(&ctl, &codec)? {
                     return Ok(stopped);
                 }
             }
@@ -1575,10 +1435,9 @@ impl Engine {
         &mut self,
         ctl: &Receiver<Control>,
         codec: &blossom_wire::codec::Codec<'_>,
-        durable: &DurableCodec<'_>,
     ) -> Result<Option<Stopped>, RuntimeError> {
         while let Ok(m) = ctl.try_recv() {
-            if let Some(stopped) = self.control(m, codec, durable)? {
+            if let Some(stopped) = self.control(m, codec)? {
                 return Ok(Some(stopped));
             }
         }
@@ -1673,26 +1532,31 @@ impl Engine {
         Ok(())
     }
 
-    fn control(
-        &mut self,
-        m: Control,
-        codec: &blossom_wire::codec::Codec<'_>,
-        durable: &DurableCodec<'_>,
-    ) -> Result<Option<Stopped>, RuntimeError> {
+    fn control(&mut self, m: Control, codec: &blossom_wire::codec::Codec<'_>) -> Result<Option<Stopped>, RuntimeError> {
         match m {
             Control::Synced(t) => {
                 let released = self.node.wal_synced(Tick(t.tick()))?;
                 self.dispatch(released, codec)?;
-                self.maybe_checkpoint(t, durable)?;
+                // The WAL grew past its threshold since the last flush: the database flushes, and the WAL truncates
+                // behind it.
+                if t.lsn().0.saturating_sub(self.last_flush_lsn) >= self.flush_wal_bytes {
+                    self.last_flush_lsn = t.lsn().0;
+                    self.ask_flush()?;
+                }
             }
-            Control::WalFailed(e) | Control::DatabaseFailed(e) => return Err(RuntimeError::Fault(e)),
-            Control::CheckpointDone(r) => {
-                self.checkpoint_busy = false;
-                self.chain = r.map_err(|e| RuntimeError::Fault(format!("checkpoint failed: {e}")))?;
-                bump(&self.stats.checkpoints, 1);
-                // The installed checkpoint is where recovery starts now: the blobs no recovery and no running rule
-                // can reach go (FOREIGN-PROTOCOLS §5).
-                if let Some((tick, outside)) = self.checkpoint_blobs.take() {
+            Control::WalFailed(e) => return Err(RuntimeError::Fault(e)),
+            Control::DatabaseFlushed(r) => {
+                self.flush_busy = false;
+                let flushed = r.map_err(|e| RuntimeError::Fault(format!("the database: {e}")))?;
+                bump(&self.stats.db_flushes, 1);
+                self.commit
+                    .send(Commit::Truncate(flushed))
+                    .map_err(|_| RuntimeError::Fault("the committer stopped".into()))?;
+                // Recovery starts from these tables now: the blobs no recovery and no running rule can reach go
+                // (FOREIGN-PROTOCOLS §5).
+                if let Some((tick, outside)) = self.flush_blobs.take()
+                    && flushed.version().is_some_and(|v| v >= tick.0)
+                {
                     let gone = self.node.blob_garbage(tick, &outside);
                     let deleted = self.blob_store.delete(&gone)?;
                     bump(&self.stats.blobs_collected, deleted as u64);
@@ -1725,6 +1589,9 @@ impl Engine {
         for t in released {
             bump(&self.stats.released, 1);
             self.db.apply(t.tick.0, &t.delta)?;
+            if self.db.needs_flush()? {
+                self.ask_flush()?;
+            }
             let mut to_peers: BTreeMap<(NodeId, RelId), Vec<&Row>> = BTreeMap::new();
             let mut to_members: BTreeMap<(NodeId, RelId), Vec<&Row>> = BTreeMap::new();
             for s in &t.sends {
@@ -1881,26 +1748,20 @@ impl Engine {
         Ok(())
     }
 
-    /// Starts a checkpoint of the durable rows at the synced tick `t` when the WAL has grown past the threshold
-    /// since the last one. Every tick up to `t` has just been released, so the released image is the image at `t`.
-    fn maybe_checkpoint(&mut self, t: SyncedTick, durable: &DurableCodec<'_>) -> Result<(), RuntimeError> {
-        if self.checkpoint_busy || t.lsn().0.saturating_sub(self.last_checkpoint_lsn) < self.checkpoint_bytes {
+    /// Asks the database thread for a flush, unless one is under way. Every released tick is applied to the
+    /// database already (dispatch applies each as it releases it): the flush covers the released tick now, from which
+    /// the collection candidates are taken.
+    fn ask_flush(&mut self) -> Result<(), RuntimeError> {
+        if self.flush_busy {
             return Ok(());
         }
-        if self.node.released_tick() < Some(Tick(t.tick())) {
-            return Err(internal_error!("a synced tick is not released").into());
-        }
-        // A delta layer when the change since the installed checkpoint is known and the chain has room; otherwise a
-        // full image.
-        let job = match self.node.take_checkpoint_delta() {
-            Some(d) if blossom_node::durable::layer_fits(self.chain) => CheckpointJob::Layer(durable.encode_delta(&d)?),
-            _ => CheckpointJob::Full(self.node.released_image().clone()),
+        let Some(released) = self.node.released_tick() else {
+            return Ok(());
         };
-        self.checkpoint_blobs = Some((Tick(t.tick()), self.node.checkpoint_candidates()));
-        self.checkpoint_busy = true;
-        self.last_checkpoint_lsn = t.lsn().0;
-        self.checkpoint
-            .send((job, t))
-            .map_err(|_| RuntimeError::Fault("the checkpoint thread stopped".into()))
+        self.flush_blobs = Some((released, self.node.collection_candidates()));
+        self.flush_busy = true;
+        self.flush
+            .send(())
+            .map_err(|_| RuntimeError::Fault("the database thread stopped".into()))
     }
 }

@@ -9,6 +9,7 @@
 //! slices.
 
 pub mod acl;
+pub mod database;
 pub mod durable;
 pub mod env;
 pub mod eval;

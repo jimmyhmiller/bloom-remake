@@ -107,9 +107,6 @@ pub struct Boot {
     pub blobs: Arc<dyn blossom_value::BlobSource>,
     /// The blobs the store holds: every recovered row's, and any no row holds, which a collection may delete.
     pub stored: BTreeSet<blossom_value::BlobRef>,
-    /// Whether the image is exactly the installed checkpoint's (recovery replayed no WAL record after it): only then
-    /// can the next checkpoint be a delta layer on it.
-    pub at_checkpoint: bool,
 }
 
 /// Whether the node is running.
@@ -219,14 +216,8 @@ pub struct Node<E: Executor> {
     durable_blobs: BTreeSet<blossom_value::BlobRef>,
     /// Where durable blobs are read.
     store_blobs: Arc<dyn blossom_value::BlobSource>,
-    /// The net change of the released durable rows since the last checkpoint: the next checkpoint's delta layer.
-    since_checkpoint: crate::durable::DeltaAcc,
-    /// Whether `since_checkpoint` is the whole change since the installed checkpoint (false after a recovery that
-    /// replayed WAL records, until the next full checkpoint).
-    layerable: bool,
-    /// The blobs the WAL records since the last checkpoint reference (in their inserted rows, new or already
-    /// durable), each with the latest such record's tick: a recovery from that checkpoint may replay rows that hold
-    /// them.
+    /// The blobs the WAL records since the database's last flush reference (in their inserted rows, new or already
+    /// durable), each with the latest such record's tick: a recovery from that flush may replay rows that hold them.
     recent_blobs: BTreeMap<blossom_value::BlobRef, Tick>,
     /// How many rows of the executor's carried state (every relation it carries, durable or not) hold each blob.
     carried_refs: BTreeMap<blossom_value::BlobRef, u64>,
@@ -358,8 +349,6 @@ impl<E: Executor> Node<E> {
             .collect();
         Ok(Node {
             blob_cache: BTreeMap::new(),
-            since_checkpoint: crate::durable::DeltaAcc::default(),
-            layerable: boot.at_checkpoint,
             recent_blobs: BTreeMap::new(),
             carried_refs,
             released_refs,
@@ -794,25 +783,10 @@ impl<E: Executor> Node<E> {
         self.cache_trim_at = kept.saturating_mul(2).max(self.cfg.blob_cache_bytes);
     }
 
-    /// The net change of the released durable rows since the last checkpoint, for a delta-layer checkpoint of
-    /// [`Node::released_image`] (FOREIGN-PROTOCOLS §6); `None` when the change is not known (after a recovery that
-    /// replayed WAL records, or with no checkpoint yet): the checkpoint must then be full. Taking it starts the next
-    /// run: call it whenever a checkpoint of the released image is written, full or layered.
-    /// A checkpoint whose change was taken (`take_checkpoint_delta`) failed to be written or installed: the change
-    /// is lost to the next layer, so the next checkpoint must be a full image.
-    pub fn checkpoint_failed(&mut self) {
-        self.layerable = false;
-    }
-
-    pub fn take_checkpoint_delta(&mut self) -> Option<crate::durable::Delta> {
-        let d = self.since_checkpoint.take();
-        let layerable = std::mem::replace(&mut self.layerable, true);
-        layerable.then_some(d)
-    }
-
-    /// The candidate blobs a checkpoint of [`Node::released_image`] does not hold: the ones its installation may
-    /// let go. Taken when the checkpoint is; its work is the candidates', not the image's.
-    pub fn checkpoint_candidates(&self) -> BTreeSet<blossom_value::BlobRef> {
+    /// The candidate blobs [`Node::released_image`] does not hold: the ones a database flush of it may let go. Taken
+    /// when the flush is asked for (every released tick applied to the database); its work is the candidates', not the
+    /// image's.
+    pub fn collection_candidates(&self) -> BTreeSet<blossom_value::BlobRef> {
         self.candidates
             .iter()
             .filter(|b| !self.released_refs.contains_key(*b))
@@ -820,18 +794,18 @@ impl<E: Executor> Node<E> {
             .collect()
     }
 
-    /// The blobs the store may delete once a checkpoint at `checkpoint` is installed, of `outside` (the
-    /// [`Node::checkpoint_candidates`] taken with it): those no recovery can reach (the checkpoint does not hold
-    /// them, no WAL record after it references them) and the running node may not write or send (no carried row,
-    /// derived row, parked output or unsynced record holds them). They stop being durable here: a row that needs one later
-    /// writes it again.
+    /// The blobs the store may delete once the database's tables cover tick `flushed`, of `outside` (the
+    /// [`Node::collection_candidates`] taken when that flush was asked for): those no recovery can reach (the database
+    /// does not hold them, no WAL record after the flush references them) and the running node may not write or send
+    /// (no carried row, derived row, parked output or unsynced record holds them). They stop being durable here: a row
+    /// that needs one later writes it again.
     pub fn blob_garbage(
         &mut self,
-        checkpoint: Tick,
+        flushed: Tick,
         outside: &BTreeSet<blossom_value::BlobRef>,
     ) -> Vec<blossom_value::BlobRef> {
-        // Recovery starts from the checkpoint now: only the records after it are replayed.
-        self.recent_blobs.retain(|_, t| *t > checkpoint);
+        // Recovery starts from the flushed tables now: only the records after them are replayed.
+        self.recent_blobs.retain(|_, t| *t > flushed);
         let parked = self.parked_blobs();
         let mut gone = Vec::new();
         for b in outside {
@@ -891,7 +865,6 @@ impl<E: Executor> Node<E> {
                 count_blobs(&mut self.released_refs, inserted, true)?;
                 count_blobs(&mut self.released_refs, deleted, false)?;
             }
-            self.since_checkpoint.add(&p.delta);
             self.released = Some(p.tick);
             if p.halts {
                 self.state = NodeState::Halted;

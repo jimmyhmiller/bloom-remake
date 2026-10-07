@@ -1,10 +1,12 @@
 //! A synchronous driver (ARCHITECTURE §5.10 `ManualDriver`): runs a node's ticks on the calling thread, appending
-//! and syncing each tick's WAL record before running the next. No pipelining: it is the simplest correct driver, for
-//! tests, tools and embedding without threads. The network runtime pipelines the same node (`blossom-runtime`).
+//! and syncing each tick's WAL record before running the next, and applying each released tick to the node's
+//! database (docs/design/DATABASE.md), which it flushes when it grows (or when asked), truncating the WAL behind it.
+//! No pipelining: it is the simplest correct driver, for tests, tools, the simulator and embedding without threads.
+//! The network runtime pipelines the same node (`blossom-runtime`).
 
 use blossom_base::internal_error;
 use blossom_ir::core::Program;
-use blossom_store::{CheckpointWriter, MetaRecord, MetaStore, SyncedTick, WalRecordBuf, WalWriter};
+use blossom_store::{MetaRecord, MetaStore, WalRecordBuf, WalWriter};
 use blossom_value::time::{Instant, Tick};
 
 use crate::durable::DurableCodec;
@@ -17,10 +19,6 @@ pub struct ManualDriver<'p, E: Executor> {
     codec: DurableCodec<'p>,
     opened: Opened,
     batch: u64,
-    /// The latest synced tick with a WAL record, and the byte frontier covering it.
-    synced: Option<SyncedTick>,
-    /// The tick the latest checkpoint covers (from recovery, or taken here).
-    checkpointed: Option<u64>,
 }
 
 impl<'p, E: Executor> ManualDriver<'p, E> {
@@ -35,14 +33,17 @@ impl<'p, E: Executor> ManualDriver<'p, E> {
             node,
             codec: DurableCodec::new(program, schema, names),
             batch: 0,
-            synced: None,
-            checkpointed: opened.checkpoint.map(|c| c.tick),
             opened,
         }
     }
 
     pub fn meta(&self) -> &MetaRecord {
         &self.opened.record
+    }
+
+    /// The node's database.
+    pub fn database(&self) -> &crate::database::Database {
+        &self.opened.database
     }
 
     /// Runs ticks while the node is ready at `now`, making each durable before the next. Returns the released ticks.
@@ -112,65 +113,57 @@ impl<'p, E: Executor> ManualDriver<'p, E> {
             self.opened.record.reserved_tick = r.ticks.0;
             self.opened.record.last_now = self.opened.record.last_now.max(r.now.0);
             MetaStore::write(&self.opened.meta, &self.opened.record)?;
-            self.node.reserved(r)?.into_iter().for_each(&mut *sink);
+            let released = self.node.reserved(r)?;
+            self.release(released, sink)?;
         }
-        let Some(delta) = &fx.wal else {
-            self.node.release_ready()?.into_iter().for_each(&mut *sink);
-            return Ok(());
+        let released = match &fx.wal {
+            None => self.node.release_ready()?,
+            Some(delta) => {
+                self.append(fx, delta)?;
+                let synced = self.opened.wal.sync()?;
+                let tick = synced
+                    .synced_tick()
+                    .ok_or_else(|| internal_error!("a sync after an append covers no tick"))?;
+                self.node.wal_synced(Tick(tick.tick()))?
+            }
         };
-        self.append(fx, delta)?;
-        let synced = self.opened.wal.sync()?;
-        let tick = synced
-            .synced_tick()
-            .ok_or_else(|| internal_error!("a sync after an append covers no tick"))?;
-        self.synced = Some(tick);
-        self.node
-            .wal_synced(Tick(tick.tick()))?
-            .into_iter()
-            .for_each(&mut *sink);
+        self.release(released, sink)?;
+        if self.opened.database.needs_flush()? {
+            self.flush()?;
+        }
         Ok(())
     }
 
-    /// Checkpoints the durable rows at the synced frontier and truncates the WAL it covers. Requires every computed
-    /// tick to be released (always true between calls of this driver).
-    pub fn checkpoint(&mut self) -> Result<(), NodeError> {
-        let Some(covers) = self.synced else {
-            return Ok(());
-        };
-        // Nothing was written since the last checkpoint: it already covers this tick.
-        if self.checkpointed == Some(covers.tick()) {
-            return Ok(());
+    /// Hands released ticks on, each applied to the database first (it holds only released ticks).
+    fn release(&mut self, ticks: Vec<ReleasedTick>, sink: &mut dyn FnMut(ReleasedTick)) -> Result<(), NodeError> {
+        for t in ticks {
+            self.opened.database.apply(t.tick.0, &t.delta)?;
+            sink(t);
         }
+        Ok(())
+    }
+
+    /// Flushes the database (every released tick is in it: this driver releases each tick before the next runs),
+    /// truncates the WAL behind it, and deletes the blobs no recovery from it can reach and the node no longer needs.
+    pub fn flush(&mut self) -> Result<(), NodeError> {
         if self.node.parked() != 0 {
-            return Err(internal_error!("checkpoint with ticks still parked").into());
+            return Err(internal_error!("a database flush with ticks still parked").into());
         }
-        let outside = self.node.checkpoint_candidates();
-        // A delta layer when the change since the installed checkpoint is known and the chain has room; otherwise a
-        // full image (FOREIGN-PROTOCOLS §6).
-        let delta = self.node.take_checkpoint_delta();
-        let written = (|| -> Result<_, NodeError> {
-            let id = match delta {
-                Some(d) if crate::durable::layer_fits(self.opened.checkpoints.chain()?) => {
-                    let payload = self.codec.encode_delta(&d)?;
-                    self.opened.checkpoints.write_layer(&payload, covers)?
-                }
-                _ => {
-                    let snap = self.codec.encode_image(self.node.released_image())?;
-                    self.opened.checkpoints.write(snap, covers)?
-                }
-            };
-            Ok(self.opened.checkpoints.install(id)?)
-        })();
-        // The change was taken: if it did not become a checkpoint, the next one must be full.
-        let token = written.inspect_err(|_| self.node.checkpoint_failed())?;
-        // The blobs logged in the WAL about to go are made durable as files first.
-        self.opened.blobs.sync_logged_below(token.lsn())?;
-        self.opened.wal.truncate_through(token)?;
-        self.opened.checkpoints.prune()?;
-        self.checkpointed = Some(covers.tick());
-        // Recovery starts from this checkpoint now: the blobs nothing can reach go.
-        let gone = self.node.blob_garbage(Tick(covers.tick()), &outside);
-        self.opened.blobs.delete(&gone)?;
+        let outside = self.node.collection_candidates();
+        let flushed = self.opened.database.flush()?;
+        // The blobs logged in the records the tables now cover become files (the rows that hold them are in the
+        // tables), and the WAL segments the tables wholly cover go.
+        if let Some(lsn) = self.opened.wal.covered(&flushed)? {
+            self.opened.blobs.sync_logged_below(lsn)?;
+        }
+        if let Some(token) = self.opened.wal.truncation(&flushed)? {
+            self.opened.wal.truncate_through(token)?;
+        }
+        if let Some(t) = flushed.version() {
+            // Recovery starts from these tables now: the blobs nothing can reach go.
+            let gone = self.node.blob_garbage(Tick(t), &outside);
+            self.opened.blobs.delete(&gone)?;
+        }
         Ok(())
     }
 }

@@ -259,6 +259,21 @@ impl FileWal {
         Ok(through.map(|lsn| TruncateToken { lsn }))
     }
 
+    /// The position past every record a database flush covers (the first record of a later tick, or the end): the
+    /// blobs logged below it may be made files, as the rows that hold them are in the database's tables (`None`: the
+    /// flush covers no tick).
+    pub fn covered(&self, flushed: &crate::lsm::Flushed) -> Result<Option<Lsn>, StoreError> {
+        let Some(covered) = flushed.version() else {
+            return Ok(None);
+        };
+        let scan = WalScan::scan(&*self.fs, &self.dir, self.header.store_uuid, false)?;
+        Ok(Some(
+            scan.records()
+                .find(|(_, r)| r.tick > covered)
+                .map_or(scan.end, |(lsn, _)| *lsn),
+        ))
+    }
+
     /// This WAL's tail certification (strict by default; it must match how its store was created).
     pub fn certified(mut self, certification: crate::Certification) -> Self {
         self.certification = certification;

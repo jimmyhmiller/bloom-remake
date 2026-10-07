@@ -3,28 +3,30 @@
 //! In order, and a crash anywhere in it leaves the old checkpoint and WAL intact:
 //!
 //! 1. take `LOCK`; read `META` and check the identity against the deployment;
-//! 2. load the checkpoint named by `CURRENT`;
-//! 3. replay the WAL records after the checkpoint (a torn tail is truncated: it was never synced, so never
-//!    acknowledged);
+//! 2. open the database (docs/design/DATABASE.md): the durable rows its tables hold, as of the tick they cover;
+//! 3. replay the WAL records after that tick, into the recovered rows and the database (a torn tail is truncated:
+//!    it was never synced, so never acknowledged). A store from before the database starts it from its checkpoint
+//!    chain and the WAL after it, once: the database is flushed then, and the checkpoints go;
 //! 4. reserve ticks: boot at `reserved + 1` (at tick 0 on the first boot), and make `boot + 65 536` the new bound;
 //! 5. count the restart, pick the boot instant `max(wall, last_now + 1 ns)` (`META.last_now` bounds every instant a
 //!    released tick had), reserve time up to one `TIME_STEP` past it, write `META`, and open a new WAL segment.
 //!
-//! The layout under the node's directory: `LOCK`, `META`, `CURRENT`, `ckpt/<tick>/`, `wal/<seq>.seg`.
+//! The layout under the node's directory: `LOCK`, `META`, `db/` (the database), `wal/<seq>.seg`, `blobs/`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use blossom_base::internal_error;
-use blossom_ir::core::Program;
+use blossom_ir::ValidatedProgram;
 use blossom_store::{
-    Certification, CheckpointId, FileCheckpoints, FileWal, Lsn, MetaRecord, MetaStore, OpenMode, SegmentHeader,
-    StoreError, StoreIdentity, StoreLock, Vfs, WalScan, durable_dir,
+    Certification, FileCheckpoints, FileWal, Lsn, MetaRecord, MetaStore, OpenMode, SegmentHeader, StoreError,
+    StoreIdentity, StoreLock, Vfs, WalScan, durable_dir,
 };
 use blossom_value::time::{Instant, Tick};
 use blossom_wire::codec::put_varint;
 
 use crate::NodeError;
+use crate::database::Database;
 use crate::durable::{DurableCodec, DurableImage, DurableSchema};
 use crate::node::{Boot, RESERVE_STEP, TIME_STEP};
 
@@ -115,6 +117,8 @@ pub fn logged_blobs(payload: &[u8], lsn: Lsn) -> Result<(Vec<blossom_store::Blob
 #[derive(Clone, Debug)]
 pub struct StoreSpec {
     pub dir: PathBuf,
+    /// How the database flushes, caches and keeps history.
+    pub database: blossom_store::lsm::LsmOptions,
     /// The identity the deployment expects (`store_uuid` is ignored: it is the store's own).
     pub identity: StoreIdentity,
     pub mode: OpenMode,
@@ -126,18 +130,16 @@ pub struct StoreSpec {
 pub struct Opened {
     pub boot: Boot,
     pub wal: FileWal,
-    pub checkpoints: FileCheckpoints,
+    /// The node's database, holding every released tick of every incarnation (this boot's included once it runs).
+    pub database: Database,
     pub meta: MetaStore,
     /// The `META` record as written at this boot.
     pub record: MetaRecord,
     pub lock: StoreLock,
-    /// The checkpoint recovery started from.
-    pub checkpoint: Option<CheckpointId>,
+    /// The tick recovery started from (the database's tables, or a legacy checkpoint's), if any.
+    pub base: Option<u64>,
     /// How many WAL records recovery replayed.
     pub replayed: usize,
-    /// Every WAL record's position, tick and durable delta, in order, those the checkpoint covers included: the node's database
-    /// applies the ones after what it holds (docs/design/DATABASE.md §4).
-    pub wal_deltas: Vec<(Lsn, u64, crate::durable::Delta)>,
     /// The node's durable blobs (FOREIGN-PROTOCOLS §5).
     pub blobs: Arc<blossom_store::BlobStore>,
 }
@@ -147,7 +149,7 @@ impl std::fmt::Debug for Opened {
         f.debug_struct("Opened")
             .field("boot", &self.boot)
             .field("record", &self.record)
-            .field("checkpoint", &self.checkpoint)
+            .field("base", &self.base)
             .field("replayed", &self.replayed)
             .finish_non_exhaustive()
     }
@@ -223,7 +225,7 @@ fn write_fresh(
 pub fn open(
     fs: Arc<dyn Vfs>,
     spec: &StoreSpec,
-    program: &Program,
+    program: &ValidatedProgram,
     names: Arc<[Arc<str>]>,
     wall: Instant,
     boot_nonce: u64,
@@ -262,21 +264,31 @@ pub fn open(
         )));
     }
     let uuid = record.identity.store_uuid;
-    let schema = DurableSchema::of(program);
-    let codec = DurableCodec::new(program, &schema, names);
-    // 2. The checkpoint.
-    let checkpoints = FileCheckpoints::new(fs.clone(), dir)?;
-    let checkpoint = checkpoints.current()?;
-    let mut image = match checkpoint {
-        Some(id) => {
+    let schema = DurableSchema::of(program.get());
+    let codec = DurableCodec::new(program.get(), &schema, names.clone());
+    // 2. The database: the rows its tables hold, as of the tick they cover. A store from before the database (none,
+    //    or one of an older key format) starts from its checkpoint chain, once.
+    let (database, fresh) = Database::open(fs.clone(), dir, program, names, spec.database)?;
+    let legacy = if fresh {
+        FileCheckpoints::from_existing(fs.clone(), dir).current()?
+    } else {
+        None
+    };
+    let (mut image, from) = match (fresh, legacy) {
+        (true, Some(id)) => {
+            let checkpoints = FileCheckpoints::from_existing(fs.clone(), dir);
             let mut image = codec.decode_image(&checkpoints.read(id)?)?;
             // A checkpoint is its full image and the delta layers after it, applied in order.
             for layer in checkpoints.read_layers(id)? {
                 image.apply(&codec.decode_delta(&layer)?);
             }
-            image
+            (image, Some(id.tick))
         }
-        None => DurableImage::default(),
+        (true, None) => (DurableImage::default(), None),
+        (false, _) => match database.flushed()? {
+            Some(t) => (database.image(t)?, Some(t)),
+            None => (DurableImage::default(), None),
+        },
     };
     // 3. The WAL after it.
     let wdir = wal_dir(dir);
@@ -284,29 +296,17 @@ pub fn open(
     let scan = WalScan::scan(&*fs, &wdir, uuid, true)?;
     let blobs = Arc::new(blossom_store::BlobStore::open(fs.clone(), dir)?);
     let mut last_now = record.last_now;
-    let mut last_tick: Option<u64> = checkpoint.map(|c| c.tick);
+    let mut last_tick: Option<u64> = from;
     let mut replayed = 0;
-    let mut wal_deltas = Vec::new();
     for (lsn, rec) in scan.records() {
-        let delta = match rec.kind {
-            KIND_DELTA => rec.payload.as_slice(),
-            KIND_DELTA_BLOBS => {
-                // The blobs it logs are restored even when the checkpoint covers it: their files may not be durable
-                // yet (they are synced before the WAL that logs them goes).
-                let (logged, delta) = logged_blobs(&rec.payload, *lsn)?;
-                blobs.restore_logged(&logged, *lsn)?;
-                delta
-            }
-            other => {
-                return Err(NodeError::Store(format!(
-                    "WAL record at LSN {} has kind {other}, which this build does not know",
-                    lsn.0
-                )));
-            }
-        };
-        let decoded = codec.decode_delta(delta)?;
-        wal_deltas.push((*lsn, rec.tick, decoded.clone()));
-        if checkpoint.is_some_and(|c| *lsn < c.lsn) {
+        if rec.kind == KIND_DELTA_BLOBS {
+            // The blobs it logs are restored even when the base covers it: their files may not be durable yet (they
+            // are synced before the WAL that logs them goes).
+            let (logged, _) = logged_blobs(&rec.payload, *lsn)?;
+            blobs.restore_logged(&logged, *lsn)?;
+        }
+        let delta = record_delta(rec, *lsn)?;
+        if from.is_some_and(|b| rec.tick <= b) {
             continue;
         }
         if last_tick.is_some_and(|t| rec.tick <= t) {
@@ -317,10 +317,25 @@ pub fn open(
                 last_tick.unwrap_or_default()
             )));
         }
+        let decoded = codec.decode_delta(delta)?;
         image.apply(&decoded);
+        if !fresh {
+            database.apply(rec.tick, &decoded)?;
+        }
         last_tick = Some(rec.tick);
         last_now = last_now.max(rec.now);
         replayed += 1;
+    }
+    // A database the store did not have starts from the recovered rows, at the last recovered tick, and is flushed:
+    // from here it is the base of every recovery, and the legacy checkpoints go.
+    if fresh {
+        if let Some(t) = last_tick {
+            database.bootstrap(t, &image)?;
+        }
+        database.flush()?;
+        if legacy.is_some() {
+            remove_checkpoints(&*fs, dir)?;
+        }
     }
     // The blobs the recovered rows hold were made durable before their records synced (as files, or logged in a
     // record and restored above): check it, so a store that lost one refuses to start rather than failing a later
@@ -406,23 +421,58 @@ pub fn open(
             time_reserved,
             now,
             // Durable state was reloaded iff an earlier incarnation's first boot tick became durable (it always
-            // leaves a WAL record, which a checkpoint may since cover): a crash before that boots fresh again.
-            recovered: checkpoint.is_some() || replayed > 0,
+            // leaves a WAL record, which the database's tables may since cover): a crash before that boots fresh
+            // again.
+            recovered: from.is_some() || replayed > 0,
             incarnation: record.restarts,
             blobs: blobs.clone(),
             stored,
-            at_checkpoint: checkpoint.is_some() && replayed == 0,
         },
         wal,
-        checkpoints,
+        database,
         meta,
         record,
         lock,
-        checkpoint,
+        base: from,
         replayed,
-        wal_deltas,
         blobs,
     })
+}
+
+/// The durable delta a WAL record carries (after the blobs a `KIND_DELTA_BLOBS` record logs).
+pub fn record_delta(rec: &blossom_store::WalRecordBuf, lsn: Lsn) -> Result<&[u8], NodeError> {
+    match rec.kind {
+        KIND_DELTA => Ok(rec.payload.as_slice()),
+        KIND_DELTA_BLOBS => Ok(logged_blobs(&rec.payload, lsn)?.1),
+        other => Err(NodeError::Store(format!(
+            "WAL record at LSN {} has kind {other}, which this build does not know",
+            lsn.0
+        ))),
+    }
+}
+
+/// Removes a store's legacy checkpoint chain (`ckpt/` and `CURRENT`), once the database holds what it held.
+fn remove_checkpoints(fs: &dyn Vfs, dir: &Path) -> Result<(), NodeError> {
+    let ckpt = dir.join("ckpt");
+    match fs.list(&ckpt) {
+        Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+        Ok(entries) => {
+            for d in entries {
+                for f in fs.list(&d)? {
+                    fs.remove(&f)?;
+                }
+                fs.remove_dir(&d)?;
+            }
+            fs.sync_dir(&ckpt)?;
+        }
+    }
+    let current = dir.join("CURRENT");
+    if fs.list(dir)?.contains(&current) {
+        fs.remove(&current)?;
+        fs.sync_dir(dir)?;
+    }
+    Ok(())
 }
 
 /// The absolute offset after every existing segment: the stream position a new segment starts at.

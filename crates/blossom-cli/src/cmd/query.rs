@@ -219,8 +219,7 @@ fn offline(
         .map(|n| std::sync::Arc::from(n.as_str()))
         .collect();
     let (db, _lock) =
-        blossom_runtime::db::Database::open_offline(dir, std::sync::Arc::new(artifact.clone()), names.clone())
-            .map_err(|e| e.to_string())?;
+        blossom_runtime::db::open_offline(dir, &artifact.program, names.clone()).map_err(|e| e.to_string())?;
     let externs = crate::common::std_externs().map_err(|e| e.to_string())?;
     let now = blossom_runtime::clock::wall_now()?;
     blossom_runtime::query::answer(req, &db, me, &artifact.program, &names, externs, now).map_err(|e| e.to_string())
