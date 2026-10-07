@@ -10,9 +10,11 @@ use std::sync::Arc;
 use blossom_store::lsm::{Lsm, LsmOptions, Op};
 use blossom_store::{SimFs, Vfs, WriteFate};
 
+#[cfg(test)]
 /// A deterministic generator (SplitMix64).
 struct Rng(u64);
 
+#[cfg(test)]
 impl Rng {
     fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -27,6 +29,7 @@ impl Rng {
     }
 }
 
+#[cfg(test)]
 /// Keys under four one-byte "relations", each with a variable-length body.
 fn key(rng: &mut Rng) -> Vec<u8> {
     let mut k = vec![b'a' + rng.below(4) as u8];
@@ -37,12 +40,18 @@ fn key(rng: &mut Rng) -> Vec<u8> {
     k
 }
 
+#[cfg(test)]
+/// One version's changes.
+type Changes = Vec<(Vec<u8>, Op)>;
+
+#[cfg(test)]
 /// The changes of each version, and the model they build.
 #[derive(Default, Clone)]
 struct Model {
-    log: Vec<(u64, Vec<(Vec<u8>, Op)>)>,
+    log: Vec<(u64, Changes)>,
 }
 
+#[cfg(test)]
 impl Model {
     /// The present keys with `prefix` as of `version`.
     fn at(&self, prefix: &[u8], version: u64) -> Vec<Vec<u8>> {
@@ -75,6 +84,7 @@ impl Model {
     }
 }
 
+#[cfg(test)]
 fn opts() -> LsmOptions {
     LsmOptions {
         memtable_bytes: 600,
@@ -85,8 +95,10 @@ fn opts() -> LsmOptions {
     }
 }
 
+#[cfg(test)]
 const PREFIXES: [&[u8]; 6] = [b"", b"a", b"b", b"c\x01", b"d\x02\x03", b"z"];
 
+#[cfg(test)]
 /// Every as-of read the tree allows agrees with the model.
 fn agree(lsm: &Lsm, model: &Model) {
     let (floor, applied) = (lsm.floor().unwrap(), lsm.applied().unwrap());
@@ -139,6 +151,7 @@ fn reads_as_of_every_version_kept_agree_with_the_model() {
     }
 }
 
+#[cfg(test)]
 /// Runs the workload to `upto` with a flush when due, compactions after it; returns the model.
 fn run(lsm: &Lsm, rng: &mut Rng, model: &mut Model, from: u64, upto: u64) {
     for v in from..=upto {
@@ -176,7 +189,7 @@ fn a_crash_anywhere_in_a_flush_or_compaction_reopens_to_the_manifests_state() {
             let reopened = Lsm::open(fs, dir, opts())
                 .unwrap_or_else(|e| panic!("cut {i} ({fate:?}): the tree does not open: {e}"));
             let flushed = reopened.flushed().unwrap().version;
-            assert!(flushed >= 60 && flushed <= 110, "cut {i}: flushed {flushed}");
+            assert!((60..=110).contains(&flushed), "cut {i}: flushed {flushed}");
             // The versions after the manifest's, from the WAL in a node: applied again, the tree is whole.
             for (v, changes) in model.log.iter().filter(|(v, _)| *v > flushed) {
                 reopened.apply(*v, *v, changes.clone()).unwrap();
