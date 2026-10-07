@@ -40,8 +40,11 @@ tick inside the history the node keeps (§4) can be asked for.
 
 A durable relation's row is the key `tag ++ row`: `tag` is 8 bytes of BLAKE3 over the relation's name and schema
 hash, and `row` is the row in the durable tuple codec (`Node` values by name, so keys survive a renumbering). The
-codec is canonical and each column is self-delimiting, so rows that agree on their leading columns share a byte
-prefix: a lookup with the leading columns bound is a prefix scan, and a scan of the relation is a scan of its tag.
+codec writes the column count, then each column tagged with its field number, in field-number order; it is canonical
+and each column is self-delimiting, so rows that agree on their leading columns share a byte prefix
+(`Codec::encode_row_prefix`): a lookup with the leading columns bound is a prefix scan, and a scan of the relation is
+a scan of its tag. Where explicit field numbers reorder the columns, the prefix covers fewer of them and the reader
+filters for the rest.
 (Ranges in value order on a column need an order-preserving encoding: a follow-up.)
 
 ## 4. How the node keeps it
@@ -61,23 +64,26 @@ prefix: a lookup with the leading columns bound is a prefix scan, and a scan of 
 
 ## 5. Queries
 
-A query is a Datalog body over the program's durable relations, with the same syntax as a view's body:
+A query is a view over the program's durable relations, written as a view is without its keyword:
 
 ```
-blossom query --deploy d.toml --node s 'todos(w, n, _, _, t, false, true)'
-blossom query --deploy d.toml --node s --as-of 812 'items(w, n, v, _, t, _, true), v > 2u64'
+blossom query --deploy d.toml --node s --admin 127.0.0.1:9900 'open(t) = todos(_, _, _, _, t, false, true)'
+blossom query --deploy d.toml --node s --admin 127.0.0.1:9900 --as-of 812 'big(k) = store(k, v), v.len() > 2'
+blossom query --deploy d.toml --node s --store data/s 'all(k, v) = store(k, v)'
 ```
 
-- **Compiling.** The query becomes a view `query$(x̄)` over the named variables of the body, in the order they first
-  appear, added at the node's role to the deployed program; the program is compiled again with it, and the view's
-  rules (and the views they use) are kept, over the durable relations they read. A query that reads anything else
-  is refused: only durable relations are in the database.
+- **Compiling.** The CLI adds `view <query>;` at the node's role to the deployed program's root file and compiles
+  it; `ValidatedProgram::query` keeps the view's rules and the rules of every view they read, and turns each durable
+  relation read into an input. A query that reads anything else (but static relations) is refused: only durable
+  relations are in the database. The node never compiles: it gets this small IR program (`QueryRequest`, postcard).
 - **Evaluating.** The oracle evaluates the kept rules over the durable relations' rows as of the tick: read from the
   database by prefix where the body binds a relation's leading columns, by tag otherwise.
-- **Where.** Live, against a running node: `blossom run --admin ADDR` serves `POST /query` (the query, and an
-  optional `as_of` tick) on its own listener; the answer is JSON (the tick read, the columns, the rows). The admin
-  plane has no authentication yet (DIST-066), so it is refused outside `insecure-dev`. Offline: `blossom query
-  --store DIR` opens a stopped node's database read-only (it takes the store lock).
+- **Where.** Live, against a running node: `blossom run --admin ADDR` serves `POST /query` on its own listener; the
+  answer is JSON (the tick read, the columns, the rows, each value as Blossom writes it). Relations are matched by
+  name and schema hash: a query compiled against another version of the program is refused. The admin plane has no
+  authentication yet (DIST-066), so `--admin` is refused outside `insecure-dev`. Offline: `blossom query --store DIR`
+  takes the store's lock (a running node's store is refused), opens the database without changing a file, and
+  applies the WAL records after its tables in memory: the state the node's next recovery would boot with.
 
 ## 6. Tests
 
