@@ -1224,7 +1224,12 @@ impl<'p> Cluster<'p> {
 fn node_failure(n: NodeId, tick: blossom_value::time::Tick, e: blossom_node::NodeError) -> SimError {
     use blossom_ir::tick::EvalError;
     match e {
-        blossom_node::NodeError::Eval(error @ EvalError::Program { .. }) => SimError::Node { node: n, tick, error },
+        blossom_node::NodeError::Eval(error @ EvalError::Program { .. }) => SimError::Node {
+            node: n,
+            tick,
+            error,
+            also: Vec::new(),
+        },
         blossom_node::NodeError::Eval(EvalError::Unimplemented(u)) | blossom_node::NodeError::Unimplemented(u) => {
             SimError::Unimplemented(u)
         }

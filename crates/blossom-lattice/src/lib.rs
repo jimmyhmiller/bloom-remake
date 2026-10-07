@@ -6,9 +6,12 @@
 //! frontend uses for the bang rule and the analyses for polarity.
 //!
 //! Slice 2 (docs/design/SLICES.md) implements the core of Bloom^L: `LBool`, `LMax`, `LMin`, `LSet`, `LPSet`, `LMap` and
-//! `LPoint`, with join, ⊥, order, lifts, `reveal!`, and the operations the language reads them with. The other
-//! built-ins (`LBag`, `Lex`, `LDom`, causal and tombstone lattices, products), groups and rings, the lattice heap and
-//! the law harness belong to later slices (WP M3.1, M4.6).
+//! `LPoint`, with join, ⊥, order, lifts, `reveal!`, and the operations the language reads them with. S20 adds products
+//! (user-defined `lattice X { … }`, LANGUAGE §11.8) and the merge and class laws ([`laws`]). The other built-ins
+//! (`LBag`, `Lex`, `LDom`, causal and tombstone lattices), groups and rings and the lattice heap belong to later
+//! slices (WP M3.1, M4.6).
+
+pub mod laws;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -34,6 +37,9 @@ pub enum Kind {
     Map(Box<Kind>),
     /// `LPoint<T>`: ⊥ or one value; two different values conflict (BLSR006).
     Point,
+    /// A product of lattices (`lattice X { f: L, … }`, LANGUAGE §11.8), over [`LatValue::Seq`]: ⊥ is every field ⊥,
+    /// merge and order are fieldwise.
+    Product(Vec<Kind>),
 }
 
 /// Why a lattice operation failed.
@@ -180,8 +186,11 @@ impl Op {
     pub fn applies(self, kind: &Kind) -> bool {
         let set_like = matches!(kind, Kind::Set | Kind::PSet);
         let chain = matches!(kind, Kind::Max | Kind::Min);
+        let product = matches!(kind, Kind::Product(_));
         match self {
-            Op::Join | Op::Reveal | Op::IsBot | Op::Leq | Op::Of | Op::Lift => true,
+            Op::Join | Op::Reveal | Op::IsBot | Op::Leq | Op::Of => true,
+            // No plain type lifts into a product: its values are written as literals.
+            Op::Lift => !product,
             Op::RevealNonBot => matches!(kind, Kind::Max | Kind::Min | Kind::Point),
             Op::Contains | Op::Nonempty | Op::IsEmpty | Op::Intersect | Op::MinElem | Op::MaxElem => set_like,
             Op::Size => set_like || matches!(kind, Kind::Map(_)),
@@ -252,13 +261,11 @@ impl Op {
             | Op::Not
             | Op::Lift
             | Op::LiftEntries => 1,
-            Op::Of => {
-                if matches!(kind, Kind::Map(_)) {
-                    2
-                } else {
-                    1
-                }
-            }
+            Op::Of => match kind {
+                Kind::Map(_) => 2,
+                Kind::Product(fields) => fields.len(),
+                _ => 1,
+            },
             _ => 2,
         }
     }
@@ -282,13 +289,13 @@ impl Op {
             Op::KeySet | Op::MinElem | Op::MaxElem => (K::Morphism, vec![C::Morphism]),
             Op::Leq => (K::Antitone, vec![C::Antitone, C::Monotone]),
             Op::Less => (K::NonMonotone, vec![C::NonMonotone, C::NonMonotone]),
-            Op::Of => {
-                if matches!(kind, Kind::Map(_)) {
-                    (K::Morphism, vec![C::Constant, C::Morphism])
-                } else {
-                    (K::Morphism, vec![C::Constant])
-                }
-            }
+            Op::Of => match kind {
+                Kind::Map(_) => (K::Morphism, vec![C::Constant, C::Morphism]),
+                // A product is built from its fields: a morphism in each (fieldwise merge).
+                Kind::Product(fields) if fields.len() == 1 => (K::Morphism, vec![C::Morphism]),
+                Kind::Product(fields) => (K::Bimorphism, vec![C::Bimorphism; fields.len()]),
+                _ => (K::Morphism, vec![C::Constant]),
+            },
             Op::Lift => (K::Morphism, vec![C::Constant]),
             Op::LiftEntries => (K::Morphism, vec![C::Morphism]),
         };
@@ -346,6 +353,7 @@ impl Kind {
             Kind::Max | Kind::Min | Kind::Point => LatValue::Bottom,
             Kind::Set | Kind::PSet => LatValue::Set(Arc::new(BTreeSet::new())),
             Kind::Map(_) => LatValue::Map(Arc::new(BTreeMap::new())),
+            Kind::Product(fields) => LatValue::Seq(fields.iter().map(Kind::bottom).collect()),
         }
     }
 
@@ -356,7 +364,28 @@ impl Kind {
             (_, LatValue::Bottom) => true,
             (Kind::Set | Kind::PSet, LatValue::Set(s)) => s.is_empty(),
             (Kind::Map(_), LatValue::Map(m)) => m.is_empty(),
+            (Kind::Product(fields), LatValue::Seq(vs)) => {
+                fields.len() == vs.len() && fields.iter().zip(vs.iter()).all(|(k, v)| k.is_bottom(v))
+            }
             _ => false,
+        }
+    }
+
+    /// Field `i` of a product value (a morphism, LANGUAGE §11.8).
+    pub fn field(&self, v: &LatValue, i: usize) -> Result<LatValue, LatticeError> {
+        match (self, v) {
+            (Kind::Product(fields), LatValue::Seq(vs)) if fields.len() == vs.len() => {
+                vs.get(i).cloned().ok_or_else(|| shape("a field read", v))
+            }
+            _ => Err(shape("a field read", v)),
+        }
+    }
+
+    /// The fields of a product value, after checking its shape.
+    fn fields<'v>(&self, fields: &[Kind], v: &'v LatValue) -> Result<&'v [LatValue], LatticeError> {
+        match v {
+            LatValue::Seq(vs) if vs.len() == fields.len() => Ok(vs),
+            other => Err(LatticeError::Shape(format!("{other:?} is not a value of {self:?}"))),
         }
     }
 
@@ -401,6 +430,14 @@ impl Kind {
                 }
                 LatValue::Map(Arc::new(out))
             }
+            (Kind::Product(fields), x, y) => {
+                let (xs, ys) = (self.fields(fields, x)?, self.fields(fields, y)?);
+                let mut out = Vec::with_capacity(fields.len());
+                for ((k, a), b) in fields.iter().zip(xs).zip(ys) {
+                    out.push(k.join(a, b)?);
+                }
+                LatValue::Seq(out.into())
+            }
             (_, x, y) => return Err(LatticeError::Shape(format!("join of {x:?} and {y:?} in {self:?}"))),
         })
     }
@@ -420,6 +457,15 @@ impl Kind {
                     match y.get(k) {
                         Some(w) if inner.leq(v, w)? => {}
                         _ => return Ok(false),
+                    }
+                }
+                true
+            }
+            (Kind::Product(fields), x, y) => {
+                let (xs, ys) = (self.fields(fields, x)?, self.fields(fields, y)?);
+                for ((k, a), b) in fields.iter().zip(xs).zip(ys) {
+                    if !k.leq(a, b)? {
+                        return Ok(false);
                     }
                 }
                 true
@@ -480,6 +526,15 @@ impl Kind {
                     out.insert(k.clone(), inner.reveal(x, true)?);
                 }
                 Value::Map(Arc::new(out))
+            }
+            // The struct of the fields' reveals (a field may be ⊥, so it is not refined).
+            (Kind::Product(fields), v) => {
+                let vs = self.fields(fields, v)?;
+                let mut out = Vec::with_capacity(fields.len());
+                for (k, x) in fields.iter().zip(vs) {
+                    out.push(k.reveal(x, false)?);
+                }
+                Value::Struct(out.into())
             }
             (_, other) => return Err(shape("reveal", other)),
         })
@@ -666,6 +721,13 @@ impl Kind {
                         m.insert(arg(0)?.clone(), v);
                     }
                     Ok(Value::Lattice(LatValue::Map(Arc::new(m))))
+                }
+                Kind::Product(fields) => {
+                    let mut out = Vec::with_capacity(fields.len());
+                    for (k, x) in fields.iter().zip(args) {
+                        out.push(k.lift(x)?);
+                    }
+                    Ok(Value::Lattice(LatValue::Seq(out.into())))
                 }
                 _ => Ok(Value::Lattice(self.lift(arg(0)?)?)),
             },

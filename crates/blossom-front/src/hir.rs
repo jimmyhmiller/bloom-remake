@@ -60,6 +60,8 @@ pub struct Hir {
     pub guards: Vec<HGuard>,
     /// Pure functions (LANGUAGE §16.1).
     pub fns: Vec<HFn>,
+    /// The methods of product lattices (LANGUAGE §11.8); each is also a function of [`Hir::fns`].
+    pub methods: Vec<HMethod>,
     /// Byte streams (FOREIGN-PROTOCOLS §1), in declaration order.
     pub streams: Vec<HStream>,
     /// Variable tables, one per rule scope (and one per function).
@@ -96,6 +98,57 @@ impl Hir {
             Some(blossom_value::TypeDef::Lattice(id)) => self.lattices.get(id.index()).map(|c| (*id, c)),
             _ => None,
         }
+    }
+
+    /// The method `name` of the product lattice `lattice`.
+    pub fn method(&self, lattice: TypeId, name: Symbol) -> Option<&HMethod> {
+        self.methods.iter().find(|m| m.lattice == lattice && m.name == name)
+    }
+
+    /// `reveal!`'s result type for lattice `id` (LANGUAGE §11.4): `R(L)`, or `R⁺(L)` with `nonbot`. A product reveals
+    /// to the struct of its fields' reveals, named after it.
+    pub fn reveal_type(&mut self, id: blossom_base::LatticeTypeId, nonbot: bool) -> Result<TypeId, InternalError> {
+        use blossom_ir::core::LatticeCtor as C;
+        use blossom_value::TypeDef as D;
+        let ctor = self
+            .lattices
+            .get(id.index())
+            .cloned()
+            .ok_or_else(|| internal_error!("lattice {id:?} is not declared"))?;
+        let def = match ctor {
+            C::Bool => D::Bool,
+            C::Max(e) | C::Min(e) | C::Point(e) => {
+                if nonbot {
+                    return Ok(e);
+                }
+                D::Option(e)
+            }
+            C::Set(e) | C::PSet(e) => D::Set(e),
+            C::Map(k, inner) => D::Map(k, self.reveal_type(inner, true)?),
+            C::Product { name, fields } => {
+                let mut out = Vec::new();
+                for (f, l) in fields {
+                    out.push(blossom_value::types::FieldDef {
+                        name: f,
+                        ty: self.reveal_type(l, false)?,
+                        field_no: None,
+                        default: None,
+                        since: None,
+                        deprecated: None,
+                        renamed_from: None,
+                    });
+                }
+                D::Struct(blossom_value::types::StructDef {
+                    name,
+                    fields: out,
+                    reserved: Vec::new(),
+                })
+            }
+            other => return Err(internal_error!("lattice {other:?} has no reveal")),
+        };
+        self.types
+            .insert(def)
+            .map_err(|e| internal_error!("interning a type: {e}"))
     }
 
     /// `ty` with every `Node<R>` inside it widened to `Node`.
@@ -792,10 +845,12 @@ pub enum HExprKind {
         bot: bool,
         args: Vec<HExpr>,
     },
+    /// ⊥ of a lattice type: a product field a literal leaves out (LANGUAGE §11.2).
+    Bottom(TypeId),
     /// A lattice operation, resolved by type checking: the receiver first (LANGUAGE §11.4–11.5).
     LatOp {
         lattice: TypeId,
-        op: blossom_lattice::Op,
+        op: HLatOp,
         args: Vec<HExpr>,
     },
     /// A value lifted into a lattice where a lattice is expected (LANGUAGE §5.6), inserted by type checking.
@@ -901,6 +956,40 @@ pub struct HFn {
     pub scheme: Option<HScheme>,
     /// Whether its evaluation counts against the step budget (LANGUAGE §16.1).
     pub metered: bool,
+}
+
+/// An operation of a lattice's catalogue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HLatOp {
+    /// A built-in operation.
+    Builtin(blossom_lattice::Op),
+    /// Field `n` of a product (a morphism).
+    Field(u32),
+    /// A method of the lattice's `impl`; `exact` for a banged read of a stable method (its non-monotone entry).
+    Method { name: Symbol, exact: bool },
+}
+
+/// A method of a product lattice (LANGUAGE §11.8): its function takes the lattice value first.
+#[derive(Clone, Debug)]
+pub struct HMethod {
+    /// The product lattice's type.
+    pub lattice: TypeId,
+    pub name: Symbol,
+    pub class: HClass,
+    pub f: HFnId,
+    pub span: Span,
+}
+
+/// A method's declared class (LANGUAGE §11.4); `None` is non-monotone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HClass {
+    None,
+    Morphism,
+    Bimorphism,
+    Monotone,
+    Antitone,
+    Threshold,
+    Stable { after: Symbol },
 }
 
 #[derive(Clone, Debug)]

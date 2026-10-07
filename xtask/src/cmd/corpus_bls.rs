@@ -241,6 +241,17 @@ fn value(a: &BlsArtifact, types: &TypeTable, v: &toml::Value, ty: blossom_base::
             }
             Value::Bytes(out.into())
         }
+        (toml::Value::Array(pairs), TypeDef::Map(k, v)) => {
+            // A map as `[key, value]` pairs.
+            let mut out = std::collections::BTreeMap::new();
+            for pair in pairs {
+                let [key, val] = pair.as_array().map(Vec::as_slice).ok_or_else(bad)? else {
+                    return Err(bad());
+                };
+                out.insert(value(a, types, key, *k)?, value(a, types, val, *v)?);
+            }
+            Value::Map(Arc::new(out))
+        }
         // A lattice column is written as its revealed value (a set as an array, a map as `[key, value]` pairs).
         (_, TypeDef::Lattice(id)) => Value::Lattice(lattice_value(a, types, v, *id)?),
         (toml::Value::Table(t), _) if t.contains_key("blossom") => {
@@ -461,28 +472,51 @@ pub(super) fn oracle(root: &str, m: &toml::Table, engine: bool) -> Outcome {
             }
             r
         }
-        Err(SimError::Node { node, tick, error }) => {
-            if let OracleError::Unimplemented(u) = &error {
-                return Outcome::NotRunnable(u.to_string());
+        Err(SimError::Node {
+            node,
+            tick,
+            error,
+            also,
+        }) => {
+            // Every node that failed in the round, first the one the run names.
+            let failures: Vec<(NodeId, &OracleError)> = std::iter::once((node, &error))
+                .chain(also.iter().map(|(n, e)| (*n, e)))
+                .collect();
+            for (_, e) in &failures {
+                if let OracleError::Unimplemented(u) = e {
+                    return Outcome::NotRunnable(u.to_string());
+                }
             }
-            let code = match &error {
+            let code = |e: &OracleError| match e {
                 OracleError::Program { error, .. } => Some(error.code),
                 _ => None,
             };
-            let matched = expected_errors.iter().any(|x| {
+            let expected = |x: &toml::Value, n: NodeId, e: &OracleError| {
                 let want_node = x
                     .get("node")
                     .and_then(toml::Value::as_str)
                     .and_then(|n| artifact.node_id(n));
                 let want_tick = x.get("tick").and_then(toml::Value::as_integer);
-                x.get("code").and_then(toml::Value::as_str) == code
-                    && want_node.is_none_or(|n| n == node)
+                x.get("code").and_then(toml::Value::as_str) == code(e)
+                    && want_node.is_none_or(|w| w == n)
                     && want_tick.is_none_or(|t| u64::try_from(t).ok() == Some(tick.0))
-            });
-            if matched && expected_errors.len() == 1 {
-                return Outcome::Pass(format!("the expected runtime error {} happened", code.unwrap_or("?")));
+            };
+            // The failures are exactly the expected errors: each failure expected, each expected error seen.
+            let all_expected = failures
+                .iter()
+                .all(|(n, e)| expected_errors.iter().any(|x| expected(x, *n, e)));
+            let all_seen = expected_errors
+                .iter()
+                .all(|x| failures.iter().any(|(n, e)| expected(x, *n, e)));
+            if !expected_errors.is_empty() && all_expected && all_seen {
+                let codes: Vec<&str> = failures.iter().map(|(_, e)| code(e).unwrap_or("?")).collect();
+                return Outcome::Pass(format!("the expected runtime error(s) {} happened", codes.join(", ")));
             }
-            return Outcome::Fail(format!("runtime error: {error} (node {}, tick {})", node.0, tick.0));
+            let text: Vec<String> = failures
+                .iter()
+                .map(|(n, e)| format!("{e} (node {}, tick {})", n.0, tick.0))
+                .collect();
+            return Outcome::Fail(format!("runtime error: {}", text.join("; ")));
         }
         Err(SimError::Unimplemented(u)) => return Outcome::NotRunnable(u.to_string()),
         Err(e) => return Outcome::Fail(e.to_string()),

@@ -124,6 +124,12 @@ fn kinds(p: &Program) -> Vec<Option<Kind>> {
             LatticeCtor::PSet(_) => Kind::PSet,
             LatticeCtor::Point(_) => Kind::Point,
             LatticeCtor::Map(_, inner) => Kind::Map(Box::new(kind(p, &p.lattices.get(*inner)?.ctor, depth + 1)?)),
+            LatticeCtor::Product { fields, .. } => Kind::Product(
+                fields
+                    .iter()
+                    .map(|(_, id)| kind(p, &p.lattices.get(*id)?.ctor, depth + 1))
+                    .collect::<Option<Vec<Kind>>>()?,
+            ),
             _ => return None,
         })
     }

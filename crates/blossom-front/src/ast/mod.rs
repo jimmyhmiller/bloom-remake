@@ -129,6 +129,10 @@ pub enum ItemKind {
     Tree(TreeDecl),
     /// `fragment NAME(params) { items }` (docs/design/SUGAR.md §4).
     Fragment(FragmentItem),
+    /// `lattice Name = L;` or `lattice Name { f: L, … }` (LANGUAGE §11.8).
+    Lattice(LatticeItem),
+    /// `impl Name { methods }` on a product lattice (LANGUAGE §11.8).
+    Impl(ImplItem),
     /// A construct this build parses but does not accept yet; the converter has already reported it (BLS0908).
     Unsupported {
         what: &'static str,
@@ -160,6 +164,54 @@ pub struct FormatField {
     pub cond: Option<Expr>,
     pub default: Option<Expr>,
     pub span: Span,
+}
+
+/// A user-defined lattice (LANGUAGE §11.8).
+#[derive(Clone, Debug)]
+pub struct LatticeItem {
+    pub name: Ident,
+    pub generics: Vec<GenericParam>,
+    pub body: LatticeBody,
+}
+
+#[derive(Clone, Debug)]
+pub enum LatticeBody {
+    /// `= L;`: another name for a lattice type.
+    Alias(Type),
+    /// `{ f: L, … }`: a product of lattices, merged fieldwise.
+    Product(Vec<FieldDecl>),
+}
+
+/// `impl Name { … }`: the methods of a product lattice (LANGUAGE §11.8).
+#[derive(Clone, Debug)]
+pub struct ImplItem {
+    pub ty: Type,
+    pub methods: Vec<Method>,
+    pub span: Span,
+}
+
+/// A method: a pure function whose first parameter is `self` (not among `f.params`), with the class its `fn` prefix
+/// declares.
+#[derive(Clone, Debug)]
+pub struct Method {
+    pub attrs: Vec<Attr>,
+    pub class: MethodClass,
+    pub f: FnItem,
+    /// The span of the class word, when there is one.
+    pub class_span: Option<Span>,
+}
+
+/// A method's class (LANGUAGE §11.4, §11.8); `None` is non-monotone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MethodClass {
+    None,
+    Morphism,
+    Bimorphism,
+    Monotone,
+    Antitone,
+    Threshold,
+    /// `stable fn m(self) -> T after t`.
+    Stable { after: Ident },
 }
 
 /// A pure function: total, non-recursive, its body a block of `let`s and a final expression (LANGUAGE §16.1).

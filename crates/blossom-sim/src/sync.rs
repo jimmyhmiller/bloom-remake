@@ -22,12 +22,14 @@ pub enum SimError {
     /// The program cannot be prepared for evaluation (for example, it does not stratify).
     #[error("the program cannot run: {0}")]
     Load(OracleError),
-    /// A node's tick failed: a program error (BLSRnnn) or an evaluator error.
-    #[error("node {} at tick {}: {error}", .node.0, .tick.0)]
+    /// A node's tick failed: a program error (BLSRnnn) or an evaluator error. The other nodes of a synchronous round
+    /// run too (their ticks do not depend on this one), and `also` holds every other failure of the round.
+    #[error("node {} at tick {}: {error}{}", .node.0, .tick.0, others(.also))]
     Node {
         node: NodeId,
         tick: Tick,
         error: OracleError,
+        also: Vec<(NodeId, OracleError)>,
     },
     /// A node stayed ready (its state changing) for `ticks` ticks at one instant: the program never quiesces, so
     /// simulated time cannot advance. `changed` names the relations that kept changing.
@@ -44,6 +46,10 @@ pub enum SimError {
     Unimplemented(#[from] blossom_base::Unimplemented),
     #[error(transparent)]
     Internal(#[from] InternalError),
+}
+
+fn others(also: &[(NodeId, OracleError)]) -> String {
+    also.iter().map(|(n, e)| format!("; node {}: {e}", n.0)).collect()
 }
 
 /// A lost message: everything `from` sends to `to` in round `send`.
@@ -345,6 +351,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                 slot.sort();
                 slot.dedup();
             }
+            let mut failed: Vec<(NodeId, OracleError)> = Vec::new();
             for (i, (state, delivered)) in carried.iter().zip(inbox.iter()).enumerate() {
                 let node = NodeId(u32::try_from(i).map_err(|_| internal_error!("node index overflow"))?);
                 if halted.get(i).copied().unwrap_or(false) {
@@ -448,21 +455,28 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                 let node_blobs = blobs
                     .get(i)
                     .ok_or_else(|| internal_error!("node {i} has no blob map"))?;
-                let out = self
-                    .eval
-                    .tick(&TickInput {
-                        incarnation: incarnation.get(i).copied().unwrap_or(1),
-                        node,
-                        tick,
-                        now: now_at(config.round, tick)?,
-                        carried: state,
-                        events,
-                        delivered,
-                        ingress,
-                        capture: config.capture,
-                        blobs: node_blobs,
-                    })
-                    .map_err(|error| SimError::Node { node, tick, error })?;
+                let out = match self.eval.tick(&TickInput {
+                    incarnation: incarnation.get(i).copied().unwrap_or(1),
+                    node,
+                    tick,
+                    now: now_at(config.round, tick)?,
+                    carried: state,
+                    events,
+                    delivered,
+                    ingress,
+                    capture: config.capture,
+                    blobs: node_blobs,
+                }) {
+                    Ok(out) => out,
+                    Err(error) => {
+                        // The round's other ticks do not depend on this one: they run, and the run stops after it
+                        // with every failure.
+                        failed.push((node, error));
+                        round.push(NodeTick::default());
+                        next_carried.push(Instance::default());
+                        continue;
+                    }
+                };
                 if let Some(b) = blobs.get_mut(i) {
                     b.0.extend(out.blobs.iter().map(|(k, v)| (*k, v.clone())));
                 }
@@ -552,6 +566,15 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                     host,
                     streams: stream_events,
                     ran: true,
+                });
+            }
+            let mut failed = failed.into_iter();
+            if let Some((node, error)) = failed.next() {
+                return Err(SimError::Node {
+                    node,
+                    tick,
+                    error,
+                    also: failed.collect(),
                 });
             }
             if let Some(f) = fabric.as_mut() {

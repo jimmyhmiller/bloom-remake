@@ -5,12 +5,13 @@
 //! declared after, each with its own catalogue, until nothing new is needed.
 
 use blossom_base::{InternalError, LatticeTypeId, QualName, Symbol, TypeId, internal_error};
-use blossom_ir::core::{HeightClass, LatOpDecl, LatOpKind, LatticeCtor, LatticeDef, LawStatus, MonoClass};
+use blossom_ir::core::{HeightClass, LatOpDecl, LatOpImpl, LatOpKind, LatticeCtor, LatticeDef, LawStatus, MonoClass};
 use blossom_lattice::{Kind, Op};
 use blossom_value::types::IntTy;
 use blossom_value::{TypeDef, TypeTable};
 
 use super::{Lowerer, ir};
+use crate::hir::{HClass, HMethod, Hir};
 use crate::typeck::type_name;
 
 /// The built-in lattice of constructor `ctor`, looking nested lattices up in `ctors`.
@@ -23,8 +24,72 @@ pub(crate) fn kind_of(ctors: &[LatticeCtor], ctor: &LatticeCtor) -> Option<Kind>
         LatticeCtor::PSet(_) => Kind::PSet,
         LatticeCtor::Point(_) => Kind::Point,
         LatticeCtor::Map(_, inner) => Kind::Map(Box::new(kind_of(ctors, ctors.get(inner.index())?)?)),
+        LatticeCtor::Product { fields, .. } => Kind::Product(
+            fields
+                .iter()
+                .map(|(_, id)| kind_of(ctors, ctors.get(id.index())?))
+                .collect::<Option<Vec<Kind>>>()?,
+        ),
         _ => return None,
     })
+}
+
+/// The IR catalogue name of a product's field read: `.f`, apart from every operation and method name.
+pub(crate) fn field_op(field: Symbol) -> Symbol {
+    Symbol::intern(&format!(".{}", field.as_str()))
+}
+
+/// The IR catalogue name of a method: its own, or `m!` for a stable method's exact entry.
+pub(crate) fn method_op(name: Symbol, exact: bool) -> Symbol {
+    if exact {
+        Symbol::intern(&format!("{}!", name.as_str()))
+    } else {
+        name
+    }
+}
+
+/// A method's class for each of its parameters (the receiver first) and its operation kind, as its declaration says
+/// (LANGUAGE §11.4, §11.8). Plain parameters are constants; a stable method's guarded entry is monotone in its
+/// receiver (`exact`: its banged entry, non-monotone).
+pub(crate) fn method_sig(hir: &Hir, m: &HMethod, exact: bool) -> (Vec<MonoClass>, LatOpKind) {
+    let params: Vec<TypeId> = hir
+        .fns
+        .get(m.f.index())
+        .map(|f| f.params.iter().map(|(_, t)| *t).collect())
+        .unwrap_or_default();
+    let (receiver, lattice_arg, kind) = match &m.class {
+        HClass::None => (MonoClass::NonMonotone, MonoClass::NonMonotone, LatOpKind::NonMonotone),
+        HClass::Morphism => (MonoClass::Morphism, MonoClass::NonMonotone, LatOpKind::Morphism),
+        HClass::Bimorphism => (MonoClass::Bimorphism, MonoClass::Bimorphism, LatOpKind::Bimorphism),
+        HClass::Monotone => (MonoClass::Monotone, MonoClass::NonMonotone, LatOpKind::Monotone),
+        HClass::Antitone => (MonoClass::Antitone, MonoClass::NonMonotone, LatOpKind::Antitone),
+        HClass::Threshold => (MonoClass::Threshold, MonoClass::NonMonotone, LatOpKind::Threshold),
+        HClass::Stable { .. } if exact => (MonoClass::NonMonotone, MonoClass::NonMonotone, LatOpKind::NonMonotone),
+        HClass::Stable { after } => (
+            MonoClass::Monotone,
+            MonoClass::NonMonotone,
+            LatOpKind::Stable { after: *after },
+        ),
+    };
+    let classes = params
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            if i == 0 {
+                receiver
+            } else if matches!(hir.types.get(*t), Some(TypeDef::Lattice(_))) {
+                lattice_arg
+            } else {
+                MonoClass::Constant
+            }
+        })
+        .collect();
+    (classes, kind)
+}
+
+/// A method's function's classes: its declaration's, except that a stable method is, as a function, non-monotone.
+pub(crate) fn fn_classes(hir: &Hir, m: &HMethod) -> Vec<MonoClass> {
+    method_sig(hir, m, true).0
 }
 
 /// The built-in lattice of lattice type `ty`.
@@ -58,7 +123,18 @@ pub(crate) fn lattice_name(types: &TypeTable, ctors: &[LatticeCtor], ctor: &Latt
                 .unwrap_or_else(|| "?".to_owned());
             format!("LMap<{}, {v}>", t(k))
         }
+        LatticeCtor::Product { name, .. } => name.to_string(),
         other => format!("{other:?}"),
+    }
+}
+
+/// Whether a lattice's thresholds may have exact supports (TEST-140): every lattice but `LPoint` (and a product with an
+/// `LPoint` field).
+fn distributive(kind: &Kind) -> bool {
+    match kind {
+        Kind::Point => false,
+        Kind::Product(fields) => fields.iter().all(distributive),
+        _ => true,
     }
 }
 
@@ -113,6 +189,30 @@ impl Lowerer<'_> {
                 let v = self.reveal_type(ctors, &c, true)?;
                 self.intern_type(TypeDef::Map(*k, v))
             }
+            // The struct of the fields' reveals, named after the product (as `Hir::reveal_type` builds it).
+            LatticeCtor::Product { name, fields } => {
+                let mut out = Vec::new();
+                for (f, id) in fields {
+                    let c = ctors
+                        .get(id.index())
+                        .cloned()
+                        .ok_or_else(|| internal_error!("lattice {id:?} is not declared"))?;
+                    out.push(blossom_value::types::FieldDef {
+                        name: *f,
+                        ty: self.reveal_type(ctors, &c, false)?,
+                        field_no: None,
+                        default: None,
+                        since: None,
+                        deprecated: None,
+                        renamed_from: None,
+                    });
+                }
+                self.intern_type(TypeDef::Struct(blossom_value::types::StructDef {
+                    name: name.clone(),
+                    fields: out,
+                    reserved: Vec::new(),
+                }))
+            }
             other => Err(internal_error!("lattice {other:?} reached lowering")),
         }
     }
@@ -144,6 +244,9 @@ impl Lowerer<'_> {
             for op in Op::catalogue(&kind) {
                 ops.push(self.op_decl(&mut ctors, ty, &ctor, &kind, op)?);
             }
+            if let LatticeCtor::Product { fields, .. } = &ctor {
+                ops.extend(self.product_ops(ty, fields)?);
+            }
             let name = lattice_name(self.b.types(), &ctors, &ctor);
             let declared = self
                 .b
@@ -156,8 +259,12 @@ impl Lowerer<'_> {
                         Kind::Bool | Kind::Point => HeightClass::Acc,
                         _ => HeightClass::Unknown,
                     },
-                    laws: LawStatus::Builtin,
-                    distributive: !matches!(kind, Kind::Point),
+                    // A product's merge, ⊥ and order are its fields', so its laws hold by construction.
+                    laws: match kind {
+                        Kind::Product(_) => LawStatus::Proved,
+                        _ => LawStatus::Builtin,
+                    },
+                    distributive: distributive(&kind),
                     dense_domain: None,
                 })
                 .map_err(ir)?;
@@ -169,6 +276,59 @@ impl Lowerer<'_> {
             i += 1;
         }
         Ok(())
+    }
+
+    /// A product's field reads (morphisms) and its methods (LANGUAGE §11.8): a stable method has its guarded entry and
+    /// its exact one (`m!`).
+    fn product_ops(&mut self, ty: TypeId, fields: &[(Symbol, LatticeTypeId)]) -> Result<Vec<LatOpDecl>, InternalError> {
+        let mut ops = Vec::new();
+        for (i, (f, id)) in fields.iter().enumerate() {
+            let ret = self.lattice_id_type(*id)?;
+            ops.push(LatOpDecl {
+                name: field_op(*f),
+                params: vec![(ty, MonoClass::Morphism)],
+                ret,
+                kind: LatOpKind::Morphism,
+                join_prime: false,
+                derivative: None,
+                incompatible_thresholds: false,
+                imp: LatOpImpl::Field(u32::try_from(i).map_err(|_| internal_error!("too many fields"))?),
+            });
+        }
+        let methods: Vec<HMethod> = self.hir.methods.iter().filter(|m| m.lattice == ty).cloned().collect();
+        for m in methods {
+            let f = self
+                .hir
+                .fns
+                .get(m.f.index())
+                .ok_or_else(|| internal_error!("method `{}` has no function", m.name))?;
+            let ret = f.ret;
+            let types: Vec<TypeId> = f.params.iter().map(|(_, t)| *t).collect();
+            let fid = *self
+                .fns
+                .get(m.f.index())
+                .ok_or_else(|| internal_error!("method `{}` has no IR function", m.name))?;
+            let entries: &[bool] = if matches!(m.class, HClass::Stable { .. }) {
+                &[false, true]
+            } else {
+                &[false]
+            };
+            for &exact in entries {
+                let (classes, kind) = method_sig(self.hir, &m, exact);
+                ops.push(LatOpDecl {
+                    name: method_op(m.name, exact),
+                    params: types.iter().copied().zip(classes).collect(),
+                    ret,
+                    kind,
+                    // Not claimed: only a checked claim may say a threshold is join-prime.
+                    join_prime: false,
+                    derivative: None,
+                    incompatible_thresholds: false,
+                    imp: LatOpImpl::Method(fid),
+                });
+            }
+        }
+        Ok(ops)
     }
 
     /// The catalogue entry of `op` on the lattice `ty` (constructor `ctor`).
@@ -226,6 +386,13 @@ impl Lowerer<'_> {
             Op::MinElem => (vec![ty], self.lattice_type(ctors, LatticeCtor::Min(need(elem)?))?),
             Op::MaxElem => (vec![ty], self.lattice_type(ctors, LatticeCtor::Max(need(elem)?))?),
             Op::Of => match (ctor, map) {
+                (LatticeCtor::Product { fields, .. }, _) => {
+                    let mut args = Vec::new();
+                    for (_, id) in fields {
+                        args.push(self.lattice_id_type(*id)?);
+                    }
+                    (args, ty)
+                }
                 (LatticeCtor::Bool, _) => (vec![bool_t], ty),
                 (_, Some((k, v))) => (vec![k, v], ty),
                 _ => (vec![need(elem)?], ty),
@@ -255,6 +422,7 @@ impl Lowerer<'_> {
             join_prime: threshold,
             derivative: None,
             incompatible_thresholds: false,
+            imp: LatOpImpl::Builtin,
         })
     }
 }

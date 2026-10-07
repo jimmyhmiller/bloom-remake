@@ -742,13 +742,13 @@ impl<'a> Texts<'a> {
                     match ctor {
                         Some(C::Pair(a, b)) => [a, b].get(i).and_then(|id| self.lattice_ctor(**id)),
                         Some(C::Lex { chain, inner }) => [chain, inner].get(i).and_then(|id| self.lattice_ctor(**id)),
-                        Some(C::Product(fs)) => fs.get(i).and_then(|(_, id)| self.lattice_ctor(*id)),
+                        Some(C::Product { fields, .. }) => fields.get(i).and_then(|(_, id)| self.lattice_ctor(*id)),
                         Some(C::VecUnion(id)) => self.lattice_ctor(*id),
                         _ => None,
                     }
                 };
                 let field = |i: usize| match ctor {
-                    Some(C::Product(fs)) => fs.get(i).map(|(name, _)| format!("{name}: ")),
+                    Some(C::Product { fields, .. }) => fields.get(i).map(|(name, _)| format!("{name}: ")),
                     _ => None,
                 };
                 let items = xs
@@ -757,6 +757,8 @@ impl<'a> Texts<'a> {
                     .map(|(i, x)| format!("{}{}", field(i).unwrap_or_default(), self.lattice(x, part(i))));
                 match ctor {
                     Some(C::VecUnion(_)) => format!("[{}]", join(items)),
+                    // A product as its literal: `Cart { ops: {…}, expect: ⊥ }`.
+                    Some(C::Product { name, .. }) => format!("{name} {{ {} }}", join(items)),
                     _ => format!("({})", join(items)),
                 }
             }

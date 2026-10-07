@@ -47,6 +47,7 @@ pub(crate) enum Def<'t> {
     Module(&'t ast::ModuleItem, Home<'t>),
     Protocol(&'t ast::ProtocolItem, Home<'t>),
     Const(&'t ast::Type, &'t ast::Expr, Home<'t>),
+    Lattice(&'t ast::LatticeItem, Home<'t>),
 }
 
 impl<'t> Resolver<'t, '_> {
@@ -63,6 +64,7 @@ impl<'t> Resolver<'t, '_> {
                 ItemKind::Module(m) if m.name.name == name => Some(Def::Module(m, home.clone())),
                 ItemKind::Protocol(p) if p.name.name == name => Some(Def::Protocol(p, home.clone())),
                 ItemKind::Const { name: n, ty, value } if n.name == name => Some(Def::Const(ty, value, home.clone())),
+                ItemKind::Lattice(l) if l.name.name == name => Some(Def::Lattice(l, home.clone())),
                 _ => None,
             };
             if found.is_some() {
@@ -381,6 +383,15 @@ impl<'t> Resolver<'t, '_> {
                 }
                 self.enum_type(en, home)
             }
+            Some(Def::Lattice(l, home)) => {
+                if !arity(self, 0) || !l.generics.is_empty() {
+                    if !l.generics.is_empty() {
+                        self.unsupported("LANG-023", "generic lattices", span);
+                    }
+                    return None;
+                }
+                self.user_lattice(l, home, span)
+            }
             _ => {
                 self.error(code!("BLS0200"), name.span, format!("unknown type `{text}`"));
                 None
@@ -410,6 +421,111 @@ impl<'t> Resolver<'t, '_> {
         );
         self.nominal.insert(key, t);
         Some(t)
+    }
+
+    /// A user-defined lattice (LANGUAGE §11.8): an alias names another lattice type; a product is nominal, its fields
+    /// lattices.
+    fn user_lattice(&mut self, l: &'t ast::LatticeItem, home: Home<'t>, use_span: Span) -> Option<TypeId> {
+        let key = (home.file.clone(), home.body_id(), l.name.name);
+        if let Some(t) = self.nominal.get(&key) {
+            return Some(*t);
+        }
+        if !self.lattices_resolving.insert(key.clone()) {
+            self.error(
+                code!("BLS0300"),
+                use_span,
+                format!("the lattice `{}` contains itself", l.name.as_str()),
+            );
+            return None;
+        }
+        let fs = self.home_scope(&home);
+        let t = match &l.body {
+            ast::LatticeBody::Alias(target) => {
+                let t = self.resolve_type(fs, target);
+                match t {
+                    Some(t) if self.hir.lattice_of(t).is_some() => Some(t),
+                    Some(_) => {
+                        self.error(
+                            code!("BLS0300"),
+                            target.span(),
+                            format!(
+                                "`lattice {} = …` names a lattice type; for a plain type write `type`",
+                                l.name.as_str()
+                            ),
+                        );
+                        None
+                    }
+                    None => None,
+                }
+            }
+            ast::LatticeBody::Product(fields) => self.product_type(fs, l, fields),
+        };
+        self.lattices_resolving.remove(&key);
+        let t = t?;
+        self.nominal.insert(key, t);
+        Some(t)
+    }
+
+    fn product_type(&mut self, fs: ScopeIdx, l: &'t ast::LatticeItem, fields: &'t [ast::FieldDecl]) -> Option<TypeId> {
+        let mut out = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut ok = true;
+        for f in fields {
+            let Some(name) = f.name else {
+                ok = false;
+                continue;
+            };
+            if !seen.insert(name.name) {
+                self.error(
+                    code!("BLS0201"),
+                    name.span,
+                    format!("field `{}` is declared twice", name.as_str()),
+                );
+                ok = false;
+                continue;
+            }
+            if let Some(a) = f.attrs.first() {
+                self.error(
+                    code!("BLS0210"),
+                    a.span,
+                    "a field of a product lattice takes no attributes",
+                );
+                ok = false;
+            }
+            match self.resolve_type(fs, &f.ty) {
+                Some(t) => match self.hir.lattice_of(t) {
+                    Some((id, _)) => out.push((name.name, id)),
+                    None => {
+                        self.error(
+                            code!("BLS0300"),
+                            f.ty.span(),
+                            format!(
+                                "a field of the product lattice `{}` is a lattice: `{}` is not one",
+                                l.name.as_str(),
+                                crate::typeck::type_name(&self.hir.types, t)
+                            ),
+                        );
+                        ok = false;
+                    }
+                },
+                None => ok = false,
+            }
+        }
+        if out.is_empty() && ok {
+            self.error(
+                code!("BLS0300"),
+                l.name.span,
+                format!("the product lattice `{}` has no fields", l.name.as_str()),
+            );
+            return None;
+        }
+        if !ok {
+            return None;
+        }
+        self.intern_lattice_or_bug(blossom_ir::core::LatticeCtor::Product {
+            name: QualName::single(l.name.name),
+            fields: out,
+        })
     }
 
     fn enum_type(&mut self, en: &'t ast::EnumItem, home: Home<'t>) -> Option<TypeId> {
@@ -514,6 +630,19 @@ impl<'t> Resolver<'t, '_> {
             Some(Def::Struct(st, home)) if st.generics.is_empty() => self.struct_type(st, home),
             _ => None,
         }
+    }
+
+    /// The product lattice named `name` (directly, or through a lattice alias), for its literals.
+    pub fn product_named(&mut self, s: ScopeIdx, name: Ident) -> Option<TypeId> {
+        let ty = match self.find_def(s, name.name) {
+            Some(Def::Lattice(l, home)) if l.generics.is_empty() => self.user_lattice(l, home, name.span)?,
+            _ => return None,
+        };
+        matches!(
+            self.hir.lattice_of(ty),
+            Some((_, blossom_ir::core::LatticeCtor::Product { .. }))
+        )
+        .then_some(ty)
     }
 
     /// A constant or value parameter named `name`, folded.

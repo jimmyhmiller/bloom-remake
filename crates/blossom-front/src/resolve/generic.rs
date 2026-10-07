@@ -482,7 +482,8 @@ fn children(kind: &mut HExprKind) -> Vec<&mut HExpr> {
         | HExprKind::TypedInt(..)
         | HExprKind::SelfNode
         | HExprKind::Now
-        | HExprKind::Tick => {}
+        | HExprKind::Tick
+        | HExprKind::Bottom(_) => {}
         HExprKind::Binary { lhs, rhs, .. } => {
             out.push(lhs);
             out.push(rhs);

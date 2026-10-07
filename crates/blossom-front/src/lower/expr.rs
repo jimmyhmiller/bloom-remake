@@ -158,9 +158,17 @@ pub(crate) fn try_const(hir: &Hir, e: &HExpr) -> Option<Value> {
                 fields: vs.into(),
             })
         }
-        HExprKind::Struct { fields, .. } => {
+        HExprKind::Struct { ty, fields, .. } => {
             let vs: Option<Vec<Value>> = fields.iter().map(|x| try_const(hir, x)).collect();
-            Some(Value::Struct(vs?.into()))
+            match super::lattice::kind_of_type(&hir.types, &hir.lattices, *ty) {
+                // A product literal: its fields' values, each lifted into its lattice.
+                Some(kind) => kind.eval(blossom_lattice::Op::Of, &vs?).ok(),
+                None => Some(Value::Struct(vs?.into())),
+            }
+        }
+        HExprKind::Bottom(ty) => {
+            let kind = super::lattice::kind_of_type(&hir.types, &hir.lattices, *ty)?;
+            Some(Value::Lattice(kind.bottom()))
         }
         HExprKind::Collection { kind, elems } => {
             let vs: Option<Vec<Value>> = elems.iter().map(|x| try_const(hir, x)).collect();
@@ -422,11 +430,21 @@ impl Lowerer<'_> {
                 for x in fields {
                     fs.push(self.expr(d, x)?);
                 }
-                Expr::Construct {
-                    ty: *ty,
-                    variant: None,
-                    fields: fs,
+                match self.lattice_id(*ty) {
+                    // A product literal: the product of its fields (each already of its lattice).
+                    Some(lattice) => self.lat_op(lattice, blossom_lattice::Op::Of, fs),
+                    None => Expr::Construct {
+                        ty: *ty,
+                        variant: None,
+                        fields: fs,
+                    },
                 }
+            }
+            HExprKind::Bottom(ty) => {
+                let kind = self
+                    .lattice_kind(*ty)
+                    .ok_or_else(|| internal_error!("⊥ of a non-lattice type"))?;
+                return Ok(Expr::Term(self.konst(Value::Lattice(kind.bottom()))?));
             }
             HExprKind::TupleIndex { base, index } => Expr::Field {
                 base: Box::new(self.expr(d, base)?),
@@ -629,7 +647,30 @@ impl Lowerer<'_> {
                 for x in args {
                     xs.push(self.expr(d, x)?);
                 }
-                self.lat_op(id, *op, xs)
+                match op {
+                    HLatOp::Builtin(op) => self.lat_op(id, *op, xs),
+                    HLatOp::Field(i) => {
+                        let field = match self.hir.lattices.get(id.index()) {
+                            Some(ir::LatticeCtor::Product { fields, .. }) => fields.get(*i as usize).map(|f| f.0),
+                            _ => None,
+                        };
+                        let field = field.ok_or_else(|| internal_error!("field {i} of a non-product lattice"))?;
+                        Expr::Lattice {
+                            op: ir::LatOpRef {
+                                lattice: id,
+                                op: super::lattice::field_op(field),
+                            },
+                            args: xs,
+                        }
+                    }
+                    HLatOp::Method { name, exact } => Expr::Lattice {
+                        op: ir::LatOpRef {
+                            lattice: id,
+                            op: super::lattice::method_op(*name, *exact),
+                        },
+                        args: xs,
+                    },
+                }
             }
             HExprKind::Method { name, .. } => {
                 return Err(internal_error!(
@@ -713,12 +754,9 @@ impl Lowerer<'_> {
         })
     }
 
-    /// The pure functions (LANGUAGE §16.1), declared in HIR order. Instances of a generic function with the same
-    /// template, type arguments and function arguments are one IR function (their bodies are the same), named after
-    /// them: `read_array<Item, read_item>`. A body is one expression over the function's own variables, the
-    /// parameters first.
-    pub fn functions(&mut self) -> Result<(), InternalError> {
-        // Every HIR function's IR function first: bodies call instances made after them.
+    /// Every HIR function's IR function, before anything is declared: bodies call instances made after them, and a
+    /// lattice's catalogue names its methods' functions.
+    pub fn assign_fn_ids(&mut self) -> Result<(), InternalError> {
         let mut seen: BTreeMap<(u32, Vec<TypeId>, Vec<HFnId>), blossom_base::FnId> = BTreeMap::new();
         let mut order = Vec::new();
         for (i, f) in self.hir.fns.iter().enumerate() {
@@ -737,6 +775,16 @@ impl Lowerer<'_> {
             }
             self.fns.push(id);
         }
+        self.fn_order = order;
+        Ok(())
+    }
+
+    /// The pure functions (LANGUAGE §16.1), declared in HIR order. Instances of a generic function with the same
+    /// template, type arguments and function arguments are one IR function (their bodies are the same), named after
+    /// them: `read_array<Item, read_item>`. A body is one expression over the function's own variables, the
+    /// parameters first.
+    pub fn functions(&mut self) -> Result<(), InternalError> {
+        let order = std::mem::take(&mut self.fn_order);
         for (k, i) in order.into_iter().enumerate() {
             let Some(f) = self.hir.fns.get(i) else {
                 return Err(internal_error!("function {i} vanished while lowering"));
@@ -776,6 +824,7 @@ impl Lowerer<'_> {
                 .map_err(|e| internal_error!("too many variables in `{}`: {e}", f.name))?;
             }
             let n = params.len();
+            let method = self.hir.methods.iter().find(|m| m.f.index() == i).cloned();
             let name = match &f.scheme {
                 Some(s) => self.instance_name(f, s),
                 None => f.name.clone(),
@@ -790,14 +839,21 @@ impl Lowerer<'_> {
                     vars,
                     body,
                     props: ir::FnProps {
-                        // Parameters are plain values (lattice-typed ones are rejected until function classes,
-                        // LANG-182), and every function is monotone in a value under its discrete order.
-                        classes: vec![blossom_value::MonoClass::Monotone; n],
+                        // A method's classes are its declaration's (LANGUAGE §11.8). Other functions' parameters
+                        // are plain values (lattice-typed ones are rejected until function classes, LANG-182), and
+                        // every function is monotone in a value under its discrete order.
+                        classes: match &method {
+                            Some(m) => super::lattice::fn_classes(self.hir, m),
+                            None => vec![blossom_value::MonoClass::Monotone; n],
+                        },
                         injective: blossom_value::Claim::Absent,
                         commutative: blossom_value::Claim::Absent,
                         associative: blossom_value::Claim::Absent,
                         idempotent: blossom_value::Claim::Absent,
-                        stable_after: None,
+                        stable_after: match method.as_ref().map(|m| &m.class) {
+                            Some(crate::hir::HClass::Stable { after }) => Some(*after),
+                            _ => None,
+                        },
                         metered: f.metered,
                     },
                 })

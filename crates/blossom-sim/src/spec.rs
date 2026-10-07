@@ -296,6 +296,7 @@ impl<'a> SpecSim<'a> {
                 node: NodeId(0),
                 tick: eot,
                 error,
+                also: Vec::new(),
             })?;
         let rows = |rel: RelId| out.instance.rows(rel).cloned().collect::<BTreeSet<_>>();
         Ok(Outcome {
@@ -346,7 +347,12 @@ impl<'a> SpecSim<'a> {
                 capture: false,
                 blobs: &blossom_value::NoBlobs,
             })
-            .map_err(|error| SimError::Node { node, tick, error })
+            .map_err(|error| SimError::Node {
+                node,
+                tick,
+                error,
+                also: Vec::new(),
+            })
     }
 
     /// Every node's tuples of `ded`'s protocol relation, prefixed with the node, as rows of `rel`.

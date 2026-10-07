@@ -47,6 +47,8 @@ pub(crate) struct RuleCx {
     pub template: Option<usize>,
     /// The label of the handler whose statements are being resolved (for `resolve prefer`, LANGUAGE §10.7).
     pub label: Option<Symbol>,
+    /// A method's receiver: what `self` names in its body (LANGUAGE §11.8).
+    pub receiver: Option<HVarId>,
 }
 
 /// The functions a call resolves to before any declared one (LANGUAGE §9.12, §15, §16.1, Appendix B); a `fn` may not
@@ -67,6 +69,9 @@ pub(super) const BUILTIN_FNS: &[&str] = &[
     "range",
     "error",
 ];
+
+/// The operations every lattice has (LANGUAGE §11.4–11.5), which a method may not shadow.
+const RESERVED_METHODS: &[&str] = &["join", "reveal", "is_bot", "leq", "lt", "of", "bot"];
 
 fn is_var_name(name: &str) -> bool {
     name.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') && name != "_"
@@ -93,6 +98,7 @@ impl<'t> Resolver<'t, '_> {
             calls: BTreeSet::new(),
             template: None,
             label: None,
+            receiver: None,
         }
     }
 
@@ -113,12 +119,20 @@ impl<'t> Resolver<'t, '_> {
     /// instantiate them; then those bodies, each in its own scope with the parameters as its first variables; then
     /// calls that form a cycle are reported (BLS0213).
     pub(crate) fn functions(&mut self, s: ScopeIdx, items: &'t [ast::Item]) {
-        let mut fns: Vec<(&'t ast::FnItem, HFnId)> = Vec::new();
+        let mut fns: Vec<(&'t ast::FnItem, HFnId, Option<HVarId>)> = Vec::new();
         let mut templates = Vec::new();
-        let mut stack = vec![items];
-        while let Some(items) = stack.pop() {
+        let mut impls = Vec::new();
+        let top = self.scope(s).own_items.is_none();
+        let mut stack = vec![(items, top)];
+        while let Some((items, top)) = stack.pop() {
             for item in items {
                 match &item.kind {
+                    ast::ItemKind::Impl(imp) if top => impls.push(imp),
+                    ast::ItemKind::Impl(imp) => self.error(
+                        code!("BLS0110"),
+                        imp.span,
+                        "an `impl` is an item of a file's top level, outside modules and `at` sections",
+                    ),
                     ast::ItemKind::Fn(f) if super::generic::is_template(f) => {
                         if let Some(t) = self.declare_template(s, f) {
                             templates.push(t);
@@ -130,20 +144,23 @@ impl<'t> Resolver<'t, '_> {
                             if let Some(h) = self.hir.fns.get_mut(id.index()) {
                                 h.metered = f.metered;
                             }
-                            fns.push((f, id));
+                            fns.push((f, id, None));
                         }
                     }
                     ast::ItemKind::ExternFn(f) => self.extern_fn(s, f),
-                    ast::ItemKind::At { items, .. } => stack.push(items),
+                    ast::ItemKind::At { items, .. } => stack.push((items, false)),
                     _ => {}
                 }
             }
+        }
+        for imp in impls {
+            fns.extend(self.declare_impl(s, imp));
         }
         for t in templates {
             self.resolve_template(t);
         }
         let mut calls: BTreeMap<HFnId, BTreeSet<HFnId>> = BTreeMap::new();
-        for (f, id) in fns {
+        for (f, id, receiver) in fns {
             let (scope, params) = match self.hir.fns.get(id.index()) {
                 Some(h) => (h.scope, h.params.clone()),
                 None => {
@@ -166,8 +183,11 @@ impl<'t> Resolver<'t, '_> {
                 calls: BTreeSet::new(),
                 template: None,
                 label: None,
+                receiver,
             };
-            for ((name, _), (v, _)) in f.params.iter().zip(&params) {
+            // A method's receiver is its first parameter, not among the item's.
+            let skip = usize::from(receiver.is_some());
+            for ((name, _), (v, _)) in f.params.iter().zip(params.iter().skip(skip)) {
                 if let Some(frame) = cx.frames.last_mut() {
                     frame.insert(name.name, *v);
                 }
@@ -530,6 +550,134 @@ impl<'t> Resolver<'t, '_> {
         });
         self.scope_mut(s).fns.insert(name.name, id);
         Some(id)
+    }
+
+    /// The methods of an `impl` (LANGUAGE §11.8), declared once whatever scope reaches the item: each is a function
+    /// whose first parameter is the receiver (the variable `self` names), with its class. The lattice must be a
+    /// product; a method's name may not be one of the lattice's own operations or another method's.
+    fn declare_impl(&mut self, s: ScopeIdx, imp: &'t ast::ImplItem) -> Vec<(&'t ast::FnItem, HFnId, Option<HVarId>)> {
+        let mut out = Vec::new();
+        if !self.impls_done.insert(imp as *const ast::ImplItem as usize) {
+            return out;
+        }
+        let Some(lattice) = self.resolve_type(s, &imp.ty) else {
+            return out;
+        };
+        let lattice_name = match self.hir.lattice_of(lattice) {
+            Some((_, blossom_ir::core::LatticeCtor::Product { name, .. })) => name.clone(),
+            _ => {
+                self.error(
+                    code!("BLS0110"),
+                    imp.ty.span(),
+                    format!(
+                        "an `impl` gives methods to a product lattice (`lattice X {{ … }}`): `{}` is not one",
+                        crate::typeck::type_name(&self.hir.types, lattice)
+                    ),
+                );
+                return out;
+            }
+        };
+        for m in &imp.methods {
+            let name = m.f.name;
+            if RESERVED_METHODS.contains(&name.as_str()) {
+                self.error(
+                    code!("BLS0201"),
+                    name.span,
+                    format!(
+                        "`{}` is an operation of every lattice; name this method differently",
+                        name.as_str()
+                    ),
+                );
+                continue;
+            }
+            if self.hir.method(lattice, name.name).is_some() {
+                self.error(
+                    code!("BLS0201"),
+                    name.span,
+                    format!("`{lattice_name}` has two methods named `{}`", name.as_str()),
+                );
+                continue;
+            }
+            let class = match &m.class {
+                ast::MethodClass::None => HClass::None,
+                ast::MethodClass::Morphism => HClass::Morphism,
+                ast::MethodClass::Bimorphism => HClass::Bimorphism,
+                ast::MethodClass::Monotone => HClass::Monotone,
+                ast::MethodClass::Antitone => HClass::Antitone,
+                ast::MethodClass::Threshold => HClass::Threshold,
+                ast::MethodClass::Stable { after } => HClass::Stable { after: after.name },
+            };
+            let mut cx = self.rule_cx(s, None);
+            let receiver = self.new_var(&mut cx, Symbol::intern("self"), name.span, false);
+            let mut params = vec![(receiver, lattice)];
+            let mut seen = BTreeSet::new();
+            let mut ok = true;
+            for (p, ty) in &m.f.params {
+                if !seen.insert(p.name) {
+                    self.error(
+                        code!("BLS0201"),
+                        p.span,
+                        format!("parameter `{}` is declared twice", p.as_str()),
+                    );
+                    ok = false;
+                }
+                let v = self.new_var(&mut cx, p.name, p.span, false);
+                match self.resolve_type(s, ty) {
+                    Some(t) => params.push((v, t)),
+                    None => ok = false,
+                }
+            }
+            let Some(ret) = self.resolve_type(s, &m.f.ret) else {
+                continue;
+            };
+            if !ok {
+                continue;
+            }
+            let id = HFnId(u32::try_from(self.hir.fns.len()).unwrap_or(u32::MAX));
+            let mut segs = lattice_name.segments().to_vec();
+            segs.push(name.name);
+            self.hir.fns.push(HFn {
+                name: blossom_base::QualName::new(segs),
+                scope: cx.scope,
+                params,
+                ret,
+                // A placeholder until the body is resolved (see `declare_fn`).
+                body: HFnBody::Expr(HExpr::new(HExprKind::Tuple(Vec::new()), m.f.body.span)),
+                span: m.f.span,
+                scheme: None,
+                metered: m.f.metered,
+            });
+            self.hir.methods.push(HMethod {
+                lattice,
+                name: name.name,
+                class,
+                f: id,
+                span: name.span,
+            });
+            out.push((&m.f, id, Some(receiver)));
+        }
+        // A stable method's threshold is a threshold method of the same lattice.
+        for m in &imp.methods {
+            let ast::MethodClass::Stable { after } = &m.class else {
+                continue;
+            };
+            let ok = self.hir.method(lattice, after.name).is_some_and(|t| {
+                t.class == HClass::Threshold && self.hir.fns.get(t.f.index()).is_some_and(|f| f.params.len() == 1)
+            });
+            if !ok {
+                self.error(
+                    code!("BLS0300"),
+                    after.span,
+                    format!(
+                        "`stable … after {}`: `{}` is not a `threshold fn {}(self)` of `{lattice_name}`",
+                        after.as_str(),
+                        after.as_str(),
+                        after.as_str()
+                    ),
+                );
+            }
+        }
+        out
     }
 
     /// A `let` pattern in a function body: a name (always a new variable, shadowing any earlier one), `_`, or a
@@ -2110,7 +2258,10 @@ impl<'t> Resolver<'t, '_> {
                     self.unsupported("LANG-023", "qualified struct names", span);
                     return None;
                 };
-                let Some(ty) = self.struct_named(cx.ms, *name) else {
+                let Some(ty) = self
+                    .struct_named(cx.ms, *name)
+                    .or_else(|| self.product_named(cx.ms, *name))
+                else {
                     self.error(
                         code!("BLS0200"),
                         name.span,
@@ -2118,12 +2269,26 @@ impl<'t> Resolver<'t, '_> {
                     );
                     return None;
                 };
-                let Some(TypeDef::Struct(def)) = self.hir.types.get(ty).cloned() else {
-                    return None;
+                // A struct's fields, or a product lattice's (whose literal may leave fields out: they are ⊥,
+                // LANGUAGE §11.2), with the lattice type of each.
+                let (field_names, product): (Vec<Symbol>, Option<Vec<TypeId>>) = match self.hir.types.get(ty).cloned() {
+                    Some(TypeDef::Struct(def)) => (def.fields.iter().map(|f| f.name).collect(), None),
+                    Some(TypeDef::Lattice(_)) => match self.hir.lattice_of(ty) {
+                        Some((_, blossom_ir::core::LatticeCtor::Product { fields, .. })) => {
+                            let fields = fields.clone();
+                            let mut tys = Vec::new();
+                            for (_, l) in &fields {
+                                tys.push(self.intern_type(TypeDef::Lattice(*l), span));
+                            }
+                            (fields.iter().map(|f| f.0).collect(), Some(tys))
+                        }
+                        _ => return None,
+                    },
+                    _ => return None,
                 };
-                let mut slots: Vec<Option<HExpr>> = vec![None; def.fields.len()];
+                let mut slots: Vec<Option<HExpr>> = vec![None; field_names.len()];
                 for (f, v) in fields {
-                    let Some(i) = def.fields.iter().position(|d| d.name == f.name) else {
+                    let Some(i) = field_names.iter().position(|d| *d == f.name) else {
                         self.error(
                             code!("BLS0302"),
                             f.span,
@@ -2156,25 +2321,28 @@ impl<'t> Resolver<'t, '_> {
                     None => None,
                 };
                 let mut out = Vec::new();
-                for (s, field) in slots.into_iter().zip(&def.fields) {
+                for (i, (s, field)) in slots.into_iter().zip(&field_names).enumerate() {
                     match (s, &from) {
                         (Some(v), _) => out.push(v),
                         (None, Some((var, value))) => out.push(HExpr::new(
                             HExprKind::Field {
                                 base: Box::new(HExpr::new(HExprKind::Var(*var), value.span)),
-                                name: field.name,
+                                name: *field,
                                 index: None,
                             },
                             value.span,
                         )),
-                        (None, None) => {
-                            self.error(
-                                code!("BLS0303"),
-                                span,
-                                format!("field `{}` of `{}` is not given", field.name, name.as_str()),
-                            );
-                            return None;
-                        }
+                        (None, None) => match product.as_ref().and_then(|tys| tys.get(i)) {
+                            Some(t) => out.push(HExpr::new(HExprKind::Bottom(*t), span)),
+                            None => {
+                                self.error(
+                                    code!("BLS0303"),
+                                    span,
+                                    format!("field `{field}` of `{}` is not given", name.as_str()),
+                                );
+                                return None;
+                            }
+                        },
                     }
                 }
                 if let Some((var, value)) = from {
@@ -2208,10 +2376,14 @@ impl<'t> Resolver<'t, '_> {
                 return None;
             }
             ExprKind::SelfNode => {
-                if self.impure(cx, span, "`self`") {
-                    return None;
+                if let Some(v) = cx.receiver {
+                    HExprKind::Var(v)
+                } else {
+                    if self.impure(cx, span, "`self`") {
+                        return None;
+                    }
+                    HExprKind::SelfNode
                 }
-                HExprKind::SelfNode
             }
             ExprKind::Block { lets, result } => {
                 if !cx.in_fn {

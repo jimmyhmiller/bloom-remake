@@ -382,6 +382,14 @@ impl Cx<'_> {
             }
             ItemKind::Fact(_) => Site::Item("fact"),
             ItemKind::Fn(_) | ItemKind::ExternFn(_) => Site::Item("fn"),
+            // A product's fields take no attributes (the resolver reports any).
+            ItemKind::Lattice(_) => Site::Item("lattice"),
+            ItemKind::Impl(imp) => {
+                for m in &imp.methods {
+                    self.attrs(&m.attrs, Site::Item("fn"));
+                }
+                Site::Item("impl")
+            }
             ItemKind::Stream { .. } => Site::Item("stream"),
             ItemKind::Invariant(_) => Site::Invariant,
             ItemKind::Interpose(_) => Site::Item("interpose"),

@@ -257,6 +257,7 @@ fn mentioned_expr(e: &HExpr, out: &mut BTreeSet<HVarId>) {
         | HExprKind::IntLit(..)
         | HExprKind::TypedInt(..)
         | HExprKind::SelfNode
+        | HExprKind::Bottom(_)
         | HExprKind::Now
         | HExprKind::Tick => {}
     }

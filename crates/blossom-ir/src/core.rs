@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 /// Lattice data and shared operation classes.
 pub mod lattice {
-    pub use super::{LatOpDecl, LatticeCtor, LatticeDef};
+    pub use super::{LatOpDecl, LatOpImpl, LatticeCtor, LatticeDef};
     pub use blossom_value::class::*;
 }
 // blossom-ir::core::lattice (built on blossom-lattice's catalogue)
@@ -33,8 +33,16 @@ pub enum LatticeCtor {
     Bag(TypeId),
     PSet(TypeId),
     Pair(LatticeTypeId, LatticeTypeId),
-    Product(Vec<(Symbol, LatticeTypeId)>),
-    Lex { chain: LatticeTypeId, inner: LatticeTypeId },
+    /// A user-defined product (`lattice X { f: L, … }`, LANGUAGE §11.8): nominal, so two products with the same fields
+    /// are different lattices. Merge, ⊥ and order are fieldwise.
+    Product {
+        name: QualName,
+        fields: Vec<(Symbol, LatticeTypeId)>,
+    },
+    Lex {
+        chain: LatticeTypeId,
+        inner: LatticeTypeId,
+    },
     WithBot(LatticeTypeId),
     WithTop(LatticeTypeId),
     Conflict(TypeId),
@@ -42,11 +50,17 @@ pub enum LatticeCtor {
     Unit,
     VecUnion(LatticeTypeId),
     UnionFind(TypeId), // LANG-130 (VClock is an alias of Map(Node, Max(u64)))
-    Dom { version: LatticeTypeId, value: TypeId }, // LDom / MV-register (LANG-132)
+    Dom {
+        version: LatticeTypeId,
+        value: TypeId,
+    }, // LDom / MV-register (LANG-132)
     Causal(DotStoreKind),
-    Tombstone { base: LatticeTypeId, tomb: TombKind }, // LANG-133/134
-    DomPairUnsafe(LatticeTypeId, TypeId),              // LANG-136: `unsafe` only
-    Extern(ExternLatticeRef),                          // LANG-135 (3): a Rust type implementing Merge
+    Tombstone {
+        base: LatticeTypeId,
+        tomb: TombKind,
+    }, // LANG-133/134
+    DomPairUnsafe(LatticeTypeId, TypeId), // LANG-136: `unsafe` only
+    Extern(ExternLatticeRef),             // LANG-135 (3): a Rust type implementing Merge
 }
 /// LatOpDecl data in the Dedalus core IR.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +72,24 @@ pub struct LatOpDecl {
     pub join_prime: bool, // thresholds only: t(a ⊔ b) ⇒ t(a) ∨ t(b); ANA-141 needs it (BENCH-302)
     pub derivative: Option<FnId>, // f′(x, dx) for semi-naive over Mon non-morphisms (ENG-141, P1)
     pub incompatible_thresholds: bool, // generic `threshold(t1..tn)` precondition (LANG-126)
+    /// How the operation is evaluated.
+    #[serde(default)]
+    pub imp: LatOpImpl,
+}
+
+/// How a catalogue operation is evaluated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LatOpImpl {
+    /// A built-in operation of `blossom-lattice`, by the catalogue name.
+    #[default]
+    Builtin,
+    /// Field `n` of a product (a morphism): `(self) -> field lattice`.
+    Field(u32),
+    /// A method of the lattice's `impl` (LANGUAGE §11.8): the IR function, called with the operation's arguments.
+    /// A `stable fn m … after t` has two entries on one function: `m`, classed `Stable { after: t }` and monotone in
+    /// its receiver, which the frontend uses only where the same body guards the receiver with `t`, and `m!`,
+    /// non-monotone, for a banged read.
+    Method(FnId),
 }
 
 /// FnDecl data in the Dedalus core IR.
@@ -720,6 +752,16 @@ pub enum LibFn {
     VecToMap,
     /// `m.get(k) -> Option<V>`.
     MapGet,
+    /// `m.keys() -> Vec<K>`, `m.values() -> Vec<V>`, `m.entries() -> Vec<(K, V)>`: in key order (LANG-118).
+    MapKeys,
+    MapValues,
+    MapEntries,
+    /// `m.insert(k, v)`: a copy with `k` mapped to `v`.
+    MapInsert,
+    /// `m.remove(k)`: a copy without `k`.
+    MapRemove,
+    /// `m.contains_key(k)`.
+    MapContainsKey,
     /// `o.is_some()`, `o.is_none()`, `o.unwrap_or(d)`.
     OptIsSome,
     OptIsNone,

@@ -5,7 +5,7 @@
 //! as BLS0908 (not implemented in this build) with its span, and replaced by a placeholder that later phases skip
 //! because the program is rejected anyway.
 
-use blossom_base::{Diagnostic, Diagnostics, FeatureId, FileId, Span, Symbol};
+use blossom_base::{Diagnostic, Diagnostics, FeatureId, FileId, Span, Symbol, code};
 use blossom_syntax::{SyntaxKind, SyntaxKind::*, SyntaxNode, SyntaxToken};
 
 use super::*;
@@ -492,8 +492,8 @@ impl Cx<'_> {
             SPECITEM => ItemKind::Spec(self.spec(node)),
             FNITEM => ItemKind::Fn(self.fn_item(node, span)?),
             EXTERNITEM => self.extern_item(node, span)?,
-            IMPLITEM => self.unsupported_item("LANG-180", "impl blocks", span),
-            LATTICETYPEITEM => self.unsupported_item("LANG-135", "user-defined lattices", span),
+            IMPLITEM => ItemKind::Impl(self.impl_item(node, span)?),
+            LATTICETYPEITEM => ItemKind::Lattice(self.lattice_item(node, span)?),
             AGGREGATEITEM => self.unsupported_item("LANG-105", "user-defined aggregates", span),
             SERVICEITEM => self.unsupported_item("LANG-184", "async services", span),
             BLOCKITEM => self.unsupported_item("LANG-007", "named blocks", span),
@@ -1903,8 +1903,149 @@ impl Cx<'_> {
         }))
     }
 
+    /// `lattice Name = L;` or `lattice Name { f: L, … }` (LANGUAGE §11.8).
+    fn lattice_item(&mut self, node: &SyntaxNode, span: Span) -> Option<LatticeItem> {
+        let name = self.need_name(node);
+        let generics = self.generics(node);
+        let body = if has_token(node, EQ) {
+            LatticeBody::Alias(self.need_type(node))
+        } else {
+            let (fields, tuple) = self.field_decls(node);
+            if tuple {
+                self.diags.push(
+                    Diagnostic::new(
+                        code!("BLS0300"),
+                        "a product lattice names its fields: `lattice X { f: L, … }`",
+                    )
+                    .with_primary(span),
+                );
+                return None;
+            }
+            LatticeBody::Product(fields)
+        };
+        Some(LatticeItem { name, generics, body })
+    }
+
+    /// `impl Name { methods }` (LANGUAGE §11.8). An `impl` holds methods only; `impl Trait for X` is not Blossom.
+    fn impl_item(&mut self, node: &SyntaxNode, span: Span) -> Option<ImplItem> {
+        if has_token(node, FOR_KW) {
+            self.diags.push(
+                Diagnostic::new(
+                    code!("BLS0110"),
+                    "`impl … for …` is not Blossom: write `impl X { … }` with the methods of the lattice `X`",
+                )
+                .with_primary(span),
+            );
+            return None;
+        }
+        if child_of(node, GENERICS).is_some() {
+            self.unsupported("LANG-180", "generic `impl` blocks", span);
+            return None;
+        }
+        let ty = self.need_type(node);
+        let mut methods = Vec::new();
+        for child in node.children() {
+            let cspan = self.span(&child);
+            match child.kind() {
+                TYPE => {}
+                FNITEM => {
+                    if let Some(m) = self.method(&child, cspan) {
+                        methods.push(m);
+                    }
+                }
+                _ => {
+                    self.diags.push(
+                        Diagnostic::new(
+                            code!("BLS0110"),
+                            "an `impl` holds methods only (`[class] fn m(self, …)`)",
+                        )
+                        .with_primary(cspan),
+                    );
+                }
+            }
+        }
+        Some(ImplItem { ty, methods, span })
+    }
+
+    /// A method of an `impl`: `[class] fn name(self, params) -> T [after t] { body }`.
+    fn method(&mut self, node: &SyntaxNode, span: Span) -> Option<Method> {
+        let class_tok = tokens(node).find(|t| t.kind() == IDENT);
+        let class_span = class_tok.as_ref().map(|t| self.token_span(t));
+        let Some(sig) = child_of(node, FNSIG) else {
+            self.malformed("a method without a signature", span);
+            return None;
+        };
+        let class = match class_tok.as_ref().map(|t| t.text()) {
+            None => MethodClass::None,
+            Some("morphism") => MethodClass::Morphism,
+            Some("bimorphism") => MethodClass::Bimorphism,
+            Some("monotone") => MethodClass::Monotone,
+            Some("antitone") => MethodClass::Antitone,
+            Some("threshold") => MethodClass::Threshold,
+            Some("stable") => {
+                // `after NAME` follows the result type: the name after the word `after`.
+                let after = sig
+                    .children_with_tokens()
+                    .skip_while(|e| !(e.kind() == IDENT && e.as_token().is_some_and(|t| t.text() == "after")))
+                    .find_map(|e| e.into_node().filter(|n| n.kind() == NAME))
+                    .map(|n| self.ident(&n));
+                match after {
+                    Some(after) => MethodClass::Stable { after },
+                    None => {
+                        self.malformed("a stable method without its threshold", span);
+                        return None;
+                    }
+                }
+            }
+            Some(other) => {
+                self.malformed(&format!("the method class `{other}`"), span);
+                return None;
+            }
+        };
+        let has_self = children_of(&sig, FNPARAM)
+            .next()
+            .is_some_and(|p| has_token(&p, SELF_KW));
+        if !has_self {
+            self.diags
+                .push(Diagnostic::new(code!("BLS0110"), "a method of an `impl` takes `self` first").with_primary(span));
+            return None;
+        }
+        let (name, generics, params, ret) = self.signature(node, span, true)?;
+        if !generics.is_empty() {
+            self.unsupported("LANG-180", "generic methods", span);
+            return None;
+        }
+        let Some(body) = child_of(node, BLOCKEXPR).map(|b| self.block_expr(&b)) else {
+            self.malformed("a method without a body", span);
+            return None;
+        };
+        let mut f = FnItem {
+            name,
+            generics,
+            params,
+            ret,
+            body,
+            span,
+            metered: true,
+        };
+        desugar::fn_body(&mut f, self.diags);
+        let attrs = self.attrs(node);
+        Some(Method {
+            attrs,
+            class,
+            f,
+            class_span,
+        })
+    }
+
     /// A function's name, parameters and result type (`fn` and `extern fn` items).
     fn fn_signature(&mut self, node: &SyntaxNode, span: Span) -> Option<FnSig> {
+        self.signature(node, span, false)
+    }
+
+    /// A function's or (with `method`) a method's signature: a method's class and its leading `self` are read by
+    /// [`Self::method`] and left out here.
+    fn signature(&mut self, node: &SyntaxNode, span: Span, method: bool) -> Option<FnSig> {
         let Some(sig) = child_of(node, FNSIG) else {
             self.malformed("a function without a signature", span);
             return None;
@@ -1919,7 +2060,7 @@ impl Cx<'_> {
             return None;
         }
         // A class prefix (`monotone fn`, `threshold fn`, …) is a direct token of the item (LANGUAGE §16.1).
-        if let Some(class) = tokens(node).find(|t| t.kind() == IDENT) {
+        if !method && let Some(class) = tokens(node).find(|t| t.kind() == IDENT) {
             self.unsupported(
                 "LANG-182",
                 &format!("function classes (`{} fn`)", class.text()),
@@ -1929,16 +2070,32 @@ impl Cx<'_> {
         }
         let name = self.need_name(&sig);
         let mut params = Vec::new();
-        for p in children_of(&sig, FNPARAM) {
+        for (i, p) in children_of(&sig, FNPARAM).enumerate() {
             let pspan = self.span(&p);
+            if method && i == 0 && has_token(&p, SELF_KW) {
+                continue;
+            }
             let pat = expr_children(&p).next().map(|e| self.expr(&e));
             let ty = child_of(&p, TYPE).map(|t| self.ty(&t));
             match (pat.map(|e| e.kind), ty) {
                 (Some(ExprKind::Path(path, targs)), Some(ty)) if targs.is_empty() && path.len() == 1 => {
                     params.extend(path.into_iter().map(|n| (n, ty.clone())));
                 }
+                (None, None) if method => {
+                    self.diags.push(
+                        Diagnostic::new(code!("BLS0110"), "`self` is a method's first parameter only")
+                            .with_primary(pspan),
+                    );
+                    return None;
+                }
                 (None, None) => {
-                    self.unsupported("LANG-180", "methods (`self` parameters)", pspan);
+                    self.diags.push(
+                        Diagnostic::new(
+                            code!("BLS0110"),
+                            "`self` is the first parameter of a method in an `impl` of a lattice only",
+                        )
+                        .with_primary(pspan),
+                    );
                     return None;
                 }
                 _ => {

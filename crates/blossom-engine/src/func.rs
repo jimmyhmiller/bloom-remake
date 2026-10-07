@@ -398,6 +398,39 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
             }
             Ok(Value::Map(Arc::new(m)))
         }
+        LibFn::MapKeys | LibFn::MapValues | LibFn::MapEntries => match arg_value(cx, env, f, args, 0)? {
+            Value::Map(m) => Ok(Value::Vec(match f {
+                LibFn::MapKeys => m.keys().cloned().collect(),
+                LibFn::MapValues => m.values().cloned().collect(),
+                _ => m
+                    .iter()
+                    .map(|(k, v)| Value::Tuple(Arc::from(vec![k.clone(), v.clone()])))
+                    .collect(),
+            })),
+            other => Err(bug(format!("`{f:?}` on {other:?}"))),
+        },
+        LibFn::MapInsert => match arg_value(cx, env, f, args, 0)? {
+            Value::Map(m) => {
+                let (k, v) = (arg_value(cx, env, f, args, 1)?, arg_value(cx, env, f, args, 2)?);
+                let mut out = (*m).clone();
+                out.insert(k, v);
+                Ok(Value::Map(Arc::new(out)))
+            }
+            other => Err(bug(format!("`insert` into {other:?}"))),
+        },
+        LibFn::MapRemove => match arg_value(cx, env, f, args, 0)? {
+            Value::Map(m) => {
+                let k = arg_value(cx, env, f, args, 1)?;
+                let mut out = (*m).clone();
+                out.remove(&k);
+                Ok(Value::Map(Arc::new(out)))
+            }
+            other => Err(bug(format!("`remove` from {other:?}"))),
+        },
+        LibFn::MapContainsKey => match arg_value(cx, env, f, args, 0)? {
+            Value::Map(m) => Ok(Value::Bool(m.contains_key(&arg_value(cx, env, f, args, 1)?))),
+            other => Err(bug(format!("`contains_key` on {other:?}"))),
+        },
         LibFn::MapGet => match arg_value(cx, env, f, args, 0)? {
             Value::Map(m) => {
                 let k = arg_value(cx, env, f, args, 1)?;
