@@ -19,6 +19,7 @@ struct Fixture {
     lmax: TypeId,
     lset: TypeId,
     lmap: TypeId,
+    product: TypeId,
     node: TypeId,
 }
 
@@ -124,12 +125,27 @@ fn fixture() -> Fixture {
     let lset = lattice(LatticeCtor::Set(str_t), "LSet", &mut b);
     let lmax_id = blossom_base::LatticeTypeId::from_raw(0);
     let lmap = lattice(LatticeCtor::Map(str_t, lmax_id), "LMap", &mut b);
+    let lset_id = blossom_base::LatticeTypeId::from_raw(1);
+    let lmap_id = blossom_base::LatticeTypeId::from_raw(2);
+    let product = lattice(
+        LatticeCtor::Product {
+            name: QualName::parse_dotted("Cart").unwrap(),
+            fields: vec![
+                (Symbol::intern("hi"), lmax_id),
+                (Symbol::intern("tags"), lset_id),
+                (Symbol::intern("seen"), lmap_id),
+            ],
+        },
+        "Cart",
+        &mut b,
+    );
     Fixture {
         program: b.program().clone(),
         scalars,
         lmax,
         lset,
         lmap,
+        product,
         node,
     }
 }
@@ -190,12 +206,32 @@ fn lattices_round_trip() {
         assert_eq!(roundtrip(&c, f.lmax, &Value::Lattice(v.clone())), Value::Lattice(v));
     }
     let set = LatValue::Set(Arc::new(BTreeSet::from([Value::str("a"), Value::str("b")])));
-    assert_eq!(roundtrip(&c, f.lset, &Value::Lattice(set.clone())), Value::Lattice(set));
+    assert_eq!(
+        roundtrip(&c, f.lset, &Value::Lattice(set.clone())),
+        Value::Lattice(set.clone())
+    );
     let map = LatValue::Map(Arc::new(BTreeMap::from([
         (Value::str("k"), e(3)),
         (Value::str("z"), e(9)),
     ])));
-    assert_eq!(roundtrip(&c, f.lmap, &Value::Lattice(map.clone())), Value::Lattice(map));
+    assert_eq!(
+        roundtrip(&c, f.lmap, &Value::Lattice(map.clone())),
+        Value::Lattice(map.clone())
+    );
+    // A product: its fields in order, ⊥ ones included.
+    for v in [
+        LatValue::Seq(Arc::from(vec![e(2), set.clone(), map.clone()])),
+        LatValue::Seq(Arc::from(vec![
+            LatValue::Bottom,
+            LatValue::Set(Arc::new(BTreeSet::new())),
+            map,
+        ])),
+    ] {
+        assert_eq!(roundtrip(&c, f.product, &Value::Lattice(v.clone())), Value::Lattice(v));
+    }
+    // A product value with the wrong number of fields is refused both ways.
+    let short = Value::Lattice(LatValue::Seq(Arc::from(vec![e(2)])));
+    assert!(c.encode_value(f.product, &short, &mut Vec::new()).is_err());
 }
 
 #[test]

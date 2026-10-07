@@ -8,6 +8,11 @@ use blossom_value::Value;
 use blossom_value::time::NodeId;
 use blossom_value::value::{GroupValue, LatValue};
 
+/// A type as Blossom writes it (a lattice by its catalogue name).
+pub fn type_text(p: &Program, id: TypeId) -> String {
+    type_name(p, id)
+}
+
 fn type_name(p: &Program, id: TypeId) -> String {
     match p.types.get(id) {
         None => format!("<type:{}>", id.raw()),

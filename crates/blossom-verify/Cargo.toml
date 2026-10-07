@@ -11,6 +11,8 @@ license.workspace = true
 blossom-base.workspace = true
 blossom-value.workspace = true
 blossom-ir.workspace = true
+blossom-lattice.workspace = true
+blossom-oracle.workspace = true
 blossom-artifact.workspace = true
 blossom-analysis.workspace = true
 blossom-prov.workspace = true
@@ -18,6 +20,7 @@ blossom-sim.workspace = true
 blossom-trace.workspace = true
 blossom-smt.workspace = true
 blossom-sat.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

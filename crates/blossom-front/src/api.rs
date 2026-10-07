@@ -186,6 +186,15 @@ fn compile_for(
         .iter()
         .position(|r| r.kind == crate::hir::HRelKind::Halt)
         .and_then(|i| lowered.rels.get(i).copied());
+    let methods = lowered
+        .fn_origins
+        .iter()
+        .enumerate()
+        .filter_map(|(i, h)| {
+            let m = hir.methods.iter().find(|m| m.f == *h)?;
+            Some((blossom_base::FnId::from_raw(u32::try_from(i).ok()?), m.span))
+        })
+        .collect();
     Ok((
         BlsArtifact {
             nodes: names,
@@ -193,6 +202,7 @@ fn compile_for(
             program: lowered.program,
             surface: lowered.surface.into_iter().collect(),
             halt,
+            methods,
         },
         diags,
     ))

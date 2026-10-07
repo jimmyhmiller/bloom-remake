@@ -46,9 +46,13 @@ fn nodes_of(source: &str) -> Vec<NodeSpec> {
     let mut nodes = Vec::new();
     for line in source.lines() {
         // Top-level roles only (a module's roles are its parameters).
-        let Some(rest) = line.strip_prefix("role ") else { continue };
+        let Some(rest) = line.strip_prefix("role ") else {
+            continue;
+        };
         let rest = rest.trim_end_matches(';');
-        let (name, kind) = rest.split_once(':').map_or((rest.trim(), ""), |(n, k)| (n.trim(), k.trim()));
+        let (name, kind) = rest
+            .split_once(':')
+            .map_or((rest.trim(), ""), |(n, k)| (n.trim(), k.trim()));
         let count = match kind {
             "external" => 0,
             "cluster" => 2,
@@ -90,7 +94,12 @@ fn small_value(a: &BlsArtifact, ty: TypeId, rng: &mut Rng) -> Option<Value> {
                 Value::Option(Some(Arc::new(small_value(a, *t, rng)?)))
             }
         }
-        TypeDef::Tuple(ts) => Value::Tuple(ts.iter().map(|t| small_value(a, *t, rng)).collect::<Option<Vec<_>>>()?.into()),
+        TypeDef::Tuple(ts) => Value::Tuple(
+            ts.iter()
+                .map(|t| small_value(a, *t, rng))
+                .collect::<Option<Vec<_>>>()?
+                .into(),
+        ),
         _ => return None,
     })
 }
@@ -134,7 +143,12 @@ fn scenario(name: &str, artifact: &BlsArtifact, seed: u64) -> usize {
             continue;
         }
         for _ in 0..8 {
-            let row: Option<Vec<Value>> = decl.schema.cols.iter().map(|c| small_value(&artifact, c.ty, &mut rng)).collect();
+            let row: Option<Vec<Value>> = decl
+                .schema
+                .cols
+                .iter()
+                .map(|c| small_value(&artifact, c.ty, &mut rng))
+                .collect();
             let Some(row) = row else { break };
             inputs.push(InputEvent {
                 node: at[rng.below(at.len() as u64) as usize],
@@ -219,13 +233,17 @@ fn scenario(name: &str, artifact: &BlsArtifact, seed: u64) -> usize {
                 t2.0
             );
         }
-        (a, b) => panic!("{name} seed {seed}: the oracle gave {:?}; the engine {:?}", a.as_ref().err(), b.as_ref().err()),
+        (a, b) => panic!(
+            "{name} seed {seed}: the oracle gave {:?}; the engine {:?}",
+            a.as_ref().err(),
+            b.as_ref().err()
+        ),
     }
     inputs.len()
 }
 
-/// Examples that need a feature this build does not implement (BLS0908): user-defined lattices and impl blocks (e05),
-/// reliable channels, seals, partitioning and final outputs (e06), soft tables (e08).
+/// Examples that need a feature this build does not implement (BLS0908): final outputs (e05, e06; e06 also reliable
+/// channels, seals and partitioning), soft tables (e08).
 #[cfg(test)]
 const SKIPPED: &[&str] = &["e05_lattices.bls", "e06_wordcount.bls", "e08_failure_detector.bls"];
 
@@ -257,7 +275,13 @@ fn the_engine_agrees_with_the_oracle_on_every_example_under_random_inputs() {
         ran += 1;
     }
     // The examples that need features this build lacks; any other example must run.
-    assert_eq!(skipped, SKIPPED, "the examples that do not compile in this build changed");
+    assert_eq!(
+        skipped, SKIPPED,
+        "the examples that do not compile in this build changed"
+    );
     assert!(ran >= 6, "only {ran} examples ran");
-    assert!(events > 100, "only {events} input events: the scenarios exercised little");
+    assert!(
+        events > 100,
+        "only {events} input events: the scenarios exercised little"
+    );
 }

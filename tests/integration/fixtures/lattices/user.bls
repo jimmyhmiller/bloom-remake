@@ -1,0 +1,106 @@
+//! User-defined lattices (LANGUAGE §11.8), for `bls_user_lattices.rs`: an alias, a product read and written every way
+//! (literals that leave fields out, field reads, `join`, `reveal!`, `is_bot!`, `leq!`), and a method of every class,
+//! read where the bang rule allows (a stable method guarded in a handler's header, a view's body and an `if`).
+program user_lattices version 1;
+
+/// Another name for a built-in lattice: nothing to check.
+lattice Voters = LSet<u64>;
+
+/// A vote on one question: who said yes, who said no, and the quorum, once fixed.
+lattice Tally {
+    yes: Voters,
+    no: LSet<u64>,
+    quorum: LPoint<u64>,
+}
+
+impl Tally {
+    /// Passed once a quorum is fixed and that many voted yes: a threshold.
+    threshold fn passed(self) -> bool {
+        match reveal!(self.quorum) {
+            Some(q) => reveal!(self.yes).len() >= q,
+            None => false,
+        }
+    }
+
+    /// The quorum (0 until it is fixed): fixed (an `LPoint`) once the vote passed.
+    stable fn quorum_of(self) -> u64 after passed {
+        match reveal!(self.quorum) {
+            Some(q) => q,
+            None => 0,
+        }
+    }
+
+    /// Everyone who voted: grows as votes arrive.
+    monotone fn turnout(self) -> LMax<u64> {
+        LMax::of(reveal!(self.yes).len() + reveal!(self.no).len())
+    }
+
+    /// The yes side: a field read, so a morphism.
+    morphism fn ayes(self) -> LSet<u64> {
+        self.yes
+    }
+
+    /// Who said yes on both questions: a morphism in each.
+    bimorphism fn ayes_with(self, other: Tally) -> LSet<u64> {
+        self.yes.intersect(other.yes)
+    }
+
+    /// Still open: true until the vote passes, so it only falls.
+    antitone fn open(self) -> LBool {
+        LBool::of(not self.passed())
+    }
+
+    /// Yes votes minus no votes: no class, so callers write `lead!`.
+    fn lead(self) -> i64 {
+        (reveal!(self.yes).len() as i64) - (reveal!(self.no).len() as i64)
+    }
+}
+
+input vote(q: u64, voter: u64, yes: bool);
+input fix(q: u64, quorum: u64);
+
+table tallies(q: u64, t: Tally);
+table turnouts(q: u64, n: LMax<u64>);
+table opens(q: u64, o: LBool);
+table both(s: LSet<u64>);
+
+/// A stable read guarded in the handler's header.
+table passed_with(q: u64, quorum: u64);
+/// A stable read guarded in a view's body.
+view passed_too(q, quorum) = tallies(q, t), t.passed(), let quorum = t.quorum_of();
+/// An exact read and a banged stable read, wherever they are.
+view leads(q, l) = tallies(q, t), let l = t.lead!();
+view quorums(q, n) = tallies(q, t), let n = t.quorum_of!();
+/// Plain reads of a product: its fields, its reveal and its order.
+view yes_count(q, n) = tallies(q, t), let n = reveal!(t.yes).len();
+view revealed(q, r) = tallies(q, t), let r = reveal!(t);
+view behind(q, p) = tallies(q, t), tallies(p, u), q != p, t.leq!(u);
+view empty_no(q) = tallies(q, t), t.no.is_empty!();
+
+cast: on vote(q, v, yes) {
+    if yes {
+        emit tallies(q, Tally { yes: set[v] });
+    } else {
+        emit tallies(q, Tally { no: set[v] });
+    }
+}
+set: on fix(q, n) {
+    emit tallies(q, Tally { quorum: LPoint::of(n) });
+}
+record: while tallies(q, t) where t.passed() {
+    emit passed_with(q, t.quorum_of());
+}
+count: while tallies(q, t) {
+    emit turnouts(q, t.turnout());
+    emit opens(q, t.open!());
+    if t.passed() {
+        emit passed_with(q, t.quorum_of());
+    }
+}
+pair: while tallies(1, a), tallies(2, b) {
+    emit both(a.ayes_with(b).join(a.ayes()));
+}
+/// A merge of two tallies through `join`, into question 0.
+merge: while tallies(1, a), tallies(2, b) {
+    emit tallies(0, a.join(b));
+}

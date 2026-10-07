@@ -11,14 +11,17 @@
 //! it is plain data, not merged. A value that passes through one is followed to its uses in the rules that read the
 //! helper, so the read it came from is judged by those uses. Values bound by a generator over a set-like lattice or
 //! the keys of a map lattice only appear as the lattice grows: they are data like an atom's columns and stay monotone
-//! in any use; the values of a map lattice are lattices and carry the map's polarity.
+//! in any use; the values of a map lattice are lattices and carry the map's polarity. So does a guarded stable read
+//! (a `stable fn … after t` method's monotone entry): fixed wherever it is read, its value is data too.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use blossom_base::{RelId, RuleId, VarId};
 use blossom_value::TypeDef;
 
-use crate::core::{BinOp, Expr, GenSource, HeadArg, Literal, MonoClass, Origin, Pattern, Program, Rule, Term, UnOp};
+use crate::core::{
+    BinOp, Expr, GenSource, HeadArg, LatOpKind, Literal, MonoClass, Origin, Pattern, Program, Rule, Term, UnOp,
+};
 
 /// How a read reaches a use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -350,11 +353,40 @@ impl Cx<'_> {
                 rhs,
             } => self.walk(lhs, p).union(self.walk(rhs, p)),
             Expr::Lattice { op, args } => {
-                let classes: Vec<MonoClass> = self
+                let decl = self
                     .p
                     .lattices
                     .get(op.lattice)
-                    .and_then(|l| l.ops.iter().find(|d| d.name == op.op))
+                    .and_then(|l| l.ops.iter().find(|d| d.name == op.op));
+                // A guarded stable read (LANGUAGE §11.6; the frontend uses this entry only where the body guards the
+                // receiver with the threshold): every state it is read in has the threshold, and there its value no
+                // longer changes, so the value appears as the receiver grows and stays: data, like a generator's
+                // element, whatever it is used for.
+                if let Some(d) = decl
+                    && matches!(d.kind, LatOpKind::Stable { .. })
+                {
+                    let mut out = Flow::default();
+                    for (i, a) in args.iter().enumerate() {
+                        let f = if i == 0 {
+                            let f = self.walk(a, Polarity::Monotone);
+                            Flow {
+                                lat: BTreeSet::new(),
+                                data: f
+                                    .lat
+                                    .iter()
+                                    .filter(|(_, q)| *q == Polarity::Monotone)
+                                    .map(|(s, _)| *s)
+                                    .chain(f.data.iter().copied())
+                                    .collect(),
+                            }
+                        } else {
+                            self.walk(a, Polarity::Exact)
+                        };
+                        out = out.union(f);
+                    }
+                    return out;
+                }
+                let classes: Vec<MonoClass> = decl
                     .map(|d| d.params.iter().map(|(_, c)| *c).collect())
                     .unwrap_or_default();
                 let mut out = Flow::default();
