@@ -292,6 +292,25 @@ fn two_pages_chat_through_the_server_and_a_page_offline_catches_up() {
     b.pump(500);
     assert_eq!(a.lines(), ["hello"]);
     assert_eq!(b.lines(), ["hello"]);
+    // The inspector explains the line on b's page down to the message from the server it came in.
+    let id = b
+        .texts
+        .iter()
+        .find(|(_, t)| t.as_str() == "hello")
+        .map(|(id, _)| id.clone())
+        .unwrap();
+    let whys = b.app.why(&id).unwrap();
+    let mut hows = Vec::new();
+    let mut stack: Vec<&blossom_web::why::Why> = whys.iter().collect();
+    while let Some(w) = stack.pop() {
+        hows.push(format!("{} <- {}", w.fact, w.how));
+        stack.extend(w.because.iter());
+    }
+    assert!(
+        hows.iter()
+            .any(|h| h.starts_with("heard(") && h.contains(" <- received from s in round ")),
+        "{hows:#?}"
+    );
     // A page whose link is down queues its line; it goes out when the link is back.
     b.disconnect();
     assert_eq!(
