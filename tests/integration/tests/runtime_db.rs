@@ -393,3 +393,112 @@ fn a_rebuilt_database_starts_again_after_a_crash_and_refuses_the_past() {
     );
     server.stop().unwrap();
 }
+
+/// The database over a simulated filesystem, a crash at every operation of its flushes and compactions: reopened and
+/// given the WAL (every tick's delta) and the recovered rows, as a node's recovery gives them, it equals the rows as of
+/// the last tick, and its watermark never claims a tick its tables lack.
+#[test]
+fn the_database_recovers_from_a_crash_anywhere_in_its_flushes() {
+    use blossom_node::durable::{Delta, DurableImage};
+    use blossom_store::{Lsn, SimFs, Vfs, WriteFate};
+    use std::collections::BTreeSet;
+    let (_, a) = seeded("simcrash");
+    let rel = a.rel_named("seeded").unwrap();
+    let names: Arc<[Arc<str>]> = a.nodes.iter().map(|n| Arc::from(n.as_str())).collect();
+    let opts = blossom_store::lsm::LsmOptions {
+        memtable_bytes: 300,
+        block_bytes: 96,
+        tier: 2,
+        max_tables: 4,
+        history: 6,
+        ..blossom_store::lsm::LsmOptions::default()
+    };
+    let row = |n: u64| -> blossom_oracle::Row {
+        Arc::from(vec![
+            Value::Int(blossom_value::value::IntValue::U64(n)),
+            Value::str("x"),
+        ])
+    };
+    let sim = SimFs::default();
+    let dir = Path::new("/store");
+    let open = |fs: &SimFs| {
+        blossom_runtime::db::Database::open(
+            Arc::new(fs.clone()) as Arc<dyn Vfs>,
+            dir,
+            a.clone(),
+            names.clone(),
+            opts,
+        )
+        .unwrap()
+    };
+    let (db, fresh) = open(&sim);
+    assert!(fresh);
+    db.recover(true, &[], &DurableImage::default(), None).unwrap();
+    db.flush_now().unwrap();
+    // Each tick inserts its row and deletes the one three ticks before.
+    let mut wal: Vec<(Lsn, u64, Delta)> = Vec::new();
+    let mut present: BTreeSet<u64> = BTreeSet::new();
+    let mut images: Vec<BTreeSet<u64>> = Vec::new();
+    for t in 0..60u64 {
+        if t == 20 {
+            sim.enable_crash_recording().unwrap();
+        }
+        let mut changes = std::collections::BTreeMap::new();
+        let deleted = if t >= 3 { vec![row(t - 3)] } else { vec![] };
+        changes.insert(rel, (vec![row(t)], deleted));
+        let delta = Delta { changes };
+        present.insert(t);
+        if t >= 3 {
+            present.remove(&(t - 3));
+        }
+        images.push(present.clone());
+        db.apply(t, &delta).unwrap();
+        wal.push((Lsn(t), t, delta));
+        if t % 5 == 4 {
+            db.flush_now().unwrap();
+        }
+    }
+    let cuts = sim.recorded_cuts().unwrap();
+    assert!(cuts.len() > 20, "{} cuts", cuts.len());
+    let last = 59u64;
+    let image = || {
+        let mut im = DurableImage::default();
+        im.rows
+            .insert(rel, images[last as usize].iter().map(|n| row(*n)).collect());
+        im
+    };
+    for (i, cut) in cuts.iter().enumerate() {
+        for fate in [WriteFate::Lost, WriteFate::Survive] {
+            let mut crashed = cut.fork().unwrap();
+            crashed.crash(&mut |_| fate).unwrap();
+            let (db, fresh) = open(&crashed);
+            // The watermark: every tick below it is in the tables.
+            let mark = db.flushed_tick().load(std::sync::atomic::Ordering::SeqCst);
+            db.recover(fresh, &wal, &image(), Some(last)).unwrap();
+            let held: BTreeSet<u64> = db
+                .rows(rel, &[], last)
+                .unwrap()
+                .iter()
+                .map(|r| match &r[0] {
+                    Value::Int(blossom_value::value::IntValue::U64(n)) => *n,
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            assert_eq!(held, images[last as usize], "cut {i} ({fate:?}), watermark {mark}");
+            // As of any tick the history kept since the watermark's, the rows are what they were then.
+            let (floor, _) = db.range().unwrap();
+            for t in floor.max(mark.saturating_sub(1))..=last {
+                let held: BTreeSet<u64> = db
+                    .rows(rel, &[], t)
+                    .unwrap()
+                    .iter()
+                    .filter_map(|r| match &r[0] {
+                        Value::Int(blossom_value::value::IntValue::U64(n)) => Some(*n),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(held, images[t as usize], "cut {i} ({fate:?}), as of {t}");
+            }
+        }
+    }
+}
