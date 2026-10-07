@@ -169,8 +169,16 @@ fn crashed(fs: &SimFs) -> SimFs {
 
 #[test]
 fn tiered_tables_agree_with_the_oracle_through_restarts_flushes_and_compactions() {
-    // With the default hot tier, and with one so small it is trimmed all the time.
-    for (seed, hot_rows) in [(0u64, None), (1, Some(8)), (2, None), (3, Some(8))] {
+    // With the default hot tier; one so small it is trimmed all the time; and one whose probes keep at most 10 rows,
+    // so the whole table is a large prefix whose small ranges are kept.
+    for (seed, hot_rows) in [
+        (0u64, None),
+        (1, Some(8)),
+        (2, None),
+        (3, Some(8)),
+        (4, Some(640)),
+        (5, Some(640)),
+    ] {
         let k = Fixture::with_hot_rows(Backend::Checked, hot_rows);
         let mut rng = Rng(seed);
         let mut fs = SimFs::default();
@@ -206,7 +214,7 @@ fn tiered_tables_agree_with_the_oracle_through_restarts_flushes_and_compactions(
                             }
                         }
                         5 => k.offer(&mut d, "find", vec![u(rng.below(2000))]),
-                        6 => k.offer(&mut d, "below", vec![u(rng.below(60))]),
+                        6 => k.offer(&mut d, "below", vec![u(rng.below(12))]),
                         7 => k.offer(&mut d, "under", vec![u(rng.below(2000))]),
                         8 => {
                             let input = if rng.below(2) == 0 { "arm" } else { "disarm" };

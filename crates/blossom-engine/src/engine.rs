@@ -1318,19 +1318,20 @@ impl Engine {
             let Some(Literal::Pos(a)) = rule.body.lits.get(lit) else {
                 return usize::MAX;
             };
-            let rows = self.stores.get(&rule::atom_store(a)).map_or(0, |s| s.estimate(cols));
-            // A range keeps some of the rows its probe finds: assume a small fraction.
-            if range { rows / 16 + 1 } else { rows }
+            self.stores
+                .get(&rule::atom_store(a))
+                .map_or(0, |s| s.estimate_probe(cols, range))
         };
         // The orders are kept while every store stays within its power of two; stores below `SMALL_STORE` rows count
         // as one size (they flip between a few rows from tick to tick, and any order joins them cheaply).
-        let sizes: Vec<u32> = plan
+        let sizes: Vec<u64> = plan
             .atoms
             .iter()
             .map(|lit| match rule.body.lits.get(*lit) {
-                Some(Literal::Pos(a)) => self.stores.get(&rule::atom_store(a)).map_or(0, |s| {
-                    (usize::BITS - s.present_len().leading_zeros()).max(SMALL_STORE.trailing_zeros())
-                }),
+                Some(Literal::Pos(a)) => self
+                    .stores
+                    .get(&rule::atom_store(a))
+                    .map_or(0, |s| s.size_class(SMALL_STORE)),
                 _ => 0,
             })
             .collect();
@@ -2033,7 +2034,7 @@ impl Engine {
 }
 
 /// A join order with the sizes of the stores it was chosen for, in powers of two (`Engine::orders`).
-type CachedOrder = (Vec<u32>, Arc<rule::Order>);
+type CachedOrder = (Vec<u64>, Arc<rule::Order>);
 
 /// A rule's evaluated change: head rows (or aggregate tuples) with signed weights, and runtime errors per valuation.
 #[derive(Default)]
