@@ -6,7 +6,7 @@
 //! carries one link frame (blossom-wire) per binary message.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::net::TcpStream;
 use std::path::{Component, Path, PathBuf};
 
@@ -33,12 +33,15 @@ impl Request {
 }
 
 /// Reads a request's head.
-pub fn read_request(r: &mut BufReader<TcpStream>) -> Result<Request, RuntimeError> {
+pub fn read_request(r: &mut impl BufRead) -> Result<Request, RuntimeError> {
     let mut lines = Vec::new();
     let mut total = 0;
     loop {
         let mut line = String::new();
-        let n = r.read_line(&mut line).map_err(RuntimeError::Io)?;
+        // At most what is left of the head's budget (and one byte more, to tell a head over it): a line without its
+        // end cannot grow past it.
+        let budget = (MAX_HEAD - total + 1) as u64;
+        let n = r.by_ref().take(budget).read_line(&mut line).map_err(RuntimeError::Io)?;
         if n == 0 {
             return Err(RuntimeError::Net("the connection closed inside a request".into()));
         }
@@ -412,6 +415,18 @@ mod tests {
         write_binary(&mut out, &[7; 300]).unwrap();
         assert_eq!(out.get(..4), Some([0x82, 126, 1, 44].as_slice()));
         assert!(read_message(&mut out.as_slice()).is_err());
+    }
+
+    #[test]
+    fn a_request_head_is_read_within_its_budget() {
+        let req = read_request(&mut "GET /a?b=c HTTP/1.1\r\nUpgrade: WebSocket\r\n\r\n".as_bytes()).unwrap();
+        assert_eq!((req.method.as_str(), req.path.as_str()), ("GET", "/a"));
+        assert_eq!(req.header("upgrade"), Some("WebSocket"));
+        // A line without its end is not read past the head's budget.
+        let endless = vec![b'a'; 4 * MAX_HEAD];
+        let mut r = endless.as_slice();
+        assert!(read_request(&mut r).is_err());
+        assert_eq!(r.len(), 4 * MAX_HEAD - MAX_HEAD - 1);
     }
 
     #[test]
