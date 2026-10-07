@@ -69,6 +69,7 @@ fn start(spec: &DeploymentSpec, a: &Arc<BlsArtifact>, mode: OpenMode, port: u16)
         backend: blossom_node::Backend::Engine,
         externs: Arc::new(blossom_std_host::registry().unwrap()),
         record: None,
+        admin: None,
         web: Some(WebConfig {
             addr: format!("127.0.0.1:{port}").parse().unwrap(),
             root: None,
@@ -187,4 +188,38 @@ fn the_database_holds_the_durable_rows_as_of_every_tick_and_survives_restarts() 
     let server = start(&spec, &a, OpenMode::Existing, port);
     assert_eq!(log(&server, &a, None), ["fifth", "first", "fourth", "second", "third"]);
     server.stop().unwrap();
+}
+
+/// A query whose reads of a durable relation all bind its leading column reads by prefix: the query program keeps the
+/// constant in the atom, where the node finds it.
+#[test]
+fn a_query_binding_the_leading_column_reads_by_prefix() {
+    let dir = std::env::temp_dir().join(format!("blossom-db-prefix-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/e01_kvs.bls");
+    let mut text = std::fs::read_to_string(&source).unwrap();
+    text.push_str("\nat Server {\n    view val(v) = store(\"apple\", v);\n    view all(k) = store(k, _);\n}\n");
+    let copy = dir.join("e01_query.bls");
+    std::fs::write(&copy, text).unwrap();
+    let nodes = [NodeSpec {
+        name: "s1".into(),
+        role: Some("Server".into()),
+    }];
+    let a = compile_file(copy.to_str().unwrap(), &nodes).0.unwrap().0;
+    for (view, want) in [("val", vec![Value::str("apple")]), ("all", vec![])] {
+        let (q, inputs) = a.program.query(a.rel_named(view).unwrap()).unwrap();
+        assert_eq!(inputs, ["store"]);
+        let store = q
+            .get()
+            .rels
+            .iter_enumerated()
+            .find(|(_, r)| r.name.to_string() == "store")
+            .map(|(id, _)| id)
+            .unwrap();
+        assert_eq!(
+            blossom_runtime::query::leading_constants(q.get(), store),
+            want,
+            "{view}"
+        );
+    }
 }

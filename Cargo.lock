@@ -290,6 +290,7 @@ dependencies = [
  "clap_complete",
  "kafka-protocol",
  "mimalloc",
+ "serde_json",
  "uuid",
 ]
 
@@ -535,6 +536,7 @@ dependencies = [
  "blossom-trace",
  "blossom-value",
  "blossom-wire",
+ "postcard",
  "serde",
  "serde_json",
  "sha1",

@@ -40,6 +40,8 @@ enum Commands {
     Explain(cmd::explain::Args),
     /// Run a node.
     Run(cmd::run::Args),
+    /// Query a running node's database (Datalog).
+    Query(cmd::query::Args),
     /// Create a deployment, or launch one locally.
     Deploy(cmd::deploy::Args),
     /// Create node identities and report node status.
@@ -111,6 +113,7 @@ fn dispatch(cli: Cli) -> ExitCode {
         Commands::Plan(args) => cmd::plan::run(args, &cx),
         Commands::Explain(args) => cmd::explain::run(args, &cx),
         Commands::Run(args) => cmd::run::run(args, &cx),
+        Commands::Query(args) => cmd::query::run(args, &cx),
         Commands::Deploy(args) => cmd::deploy::run(args, &cx),
         Commands::Node(args) => cmd::node::run(args, &cx),
         Commands::Config(args) => cmd::config::run(args, &cx),

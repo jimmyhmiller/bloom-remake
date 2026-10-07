@@ -14,6 +14,7 @@ pub mod ldfi;
 pub mod lsp;
 pub mod node;
 pub mod plan;
+pub mod query;
 pub mod release;
 pub mod repl;
 pub mod run;

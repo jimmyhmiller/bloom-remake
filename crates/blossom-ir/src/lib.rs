@@ -21,9 +21,9 @@ pub mod obs;
 pub mod plan;
 pub mod polarity;
 pub mod spec;
+pub mod strata;
 pub mod tick;
 pub mod timers;
-pub mod strata;
 
 mod canonical;
 
@@ -33,6 +33,7 @@ pub mod printer;
 mod tests;
 
 mod projection;
+mod query;
 
 /// Version of the core IR and plan data contract.
 pub const API_VERSION: u32 = 1;

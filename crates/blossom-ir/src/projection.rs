@@ -8,47 +8,47 @@ use blossom_base::{IndexVec, idx::*};
 use blossom_value::TypeTable;
 use std::collections::BTreeSet;
 #[derive(Default)]
-struct Needed {
-    types: BTreeSet<TypeId>,
-    lattices: BTreeSet<LatticeTypeId>,
-    groups: BTreeSet<GroupTypeId>,
-    consts: BTreeSet<ConstId>,
-    params: BTreeSet<ParamId>,
-    fns: BTreeSet<FnId>,
-    udas: BTreeSet<UdaId>,
-    services: BTreeSet<ServiceId>,
-    roles: BTreeSet<RoleId>,
-    rels: BTreeSet<RelId>,
-    rules: BTreeSet<RuleId>,
-    constructs: BTreeSet<ConstructId>,
-    sites: BTreeSet<SiteId>,
-    invariants: BTreeSet<InvariantId>,
+pub(crate) struct Needed {
+    pub(crate) types: BTreeSet<TypeId>,
+    pub(crate) lattices: BTreeSet<LatticeTypeId>,
+    pub(crate) groups: BTreeSet<GroupTypeId>,
+    pub(crate) consts: BTreeSet<ConstId>,
+    pub(crate) params: BTreeSet<ParamId>,
+    pub(crate) fns: BTreeSet<FnId>,
+    pub(crate) udas: BTreeSet<UdaId>,
+    pub(crate) services: BTreeSet<ServiceId>,
+    pub(crate) roles: BTreeSet<RoleId>,
+    pub(crate) rels: BTreeSet<RelId>,
+    pub(crate) rules: BTreeSet<RuleId>,
+    pub(crate) constructs: BTreeSet<ConstructId>,
+    pub(crate) sites: BTreeSet<SiteId>,
+    pub(crate) invariants: BTreeSet<InvariantId>,
 }
 macro_rules! needed {($($method:ident:$field:ident:$ty:ident),*)=>{$(fn $method(&mut self,id:$ty)->$ty{self.$field.insert(id);id})*};}
 impl Mapper for Needed {
     needed!(typeid:types:TypeId,latticetypeid:lattices:LatticeTypeId,grouptypeid:groups:GroupTypeId,constid:consts:ConstId,paramid:params:ParamId,fnid:fns:FnId,udaid:udas:UdaId,serviceid:services:ServiceId,roleid:roles:RoleId,relid:rels:RelId,ruleid:rules:RuleId,constructid:constructs:ConstructId,siteid:sites:SiteId,invariantid:invariants:InvariantId);
 }
-struct Numbering {
-    types: Vec<Option<TypeId>>,
-    lattices: Vec<Option<LatticeTypeId>>,
-    groups: Vec<Option<GroupTypeId>>,
-    consts: Vec<Option<ConstId>>,
-    params: Vec<Option<ParamId>>,
-    fns: Vec<Option<FnId>>,
-    udas: Vec<Option<UdaId>>,
-    services: Vec<Option<ServiceId>>,
-    roles: Vec<Option<RoleId>>,
-    rels: Vec<Option<RelId>>,
-    rules: Vec<Option<RuleId>>,
-    constructs: Vec<Option<ConstructId>>,
-    sites: Vec<Option<SiteId>>,
-    invariants: Vec<Option<InvariantId>>,
+pub(crate) struct Numbering {
+    pub(crate) types: Vec<Option<TypeId>>,
+    pub(crate) lattices: Vec<Option<LatticeTypeId>>,
+    pub(crate) groups: Vec<Option<GroupTypeId>>,
+    pub(crate) consts: Vec<Option<ConstId>>,
+    pub(crate) params: Vec<Option<ParamId>>,
+    pub(crate) fns: Vec<Option<FnId>>,
+    pub(crate) udas: Vec<Option<UdaId>>,
+    pub(crate) services: Vec<Option<ServiceId>>,
+    pub(crate) roles: Vec<Option<RoleId>>,
+    pub(crate) rels: Vec<Option<RelId>>,
+    pub(crate) rules: Vec<Option<RuleId>>,
+    pub(crate) constructs: Vec<Option<ConstructId>>,
+    pub(crate) sites: Vec<Option<SiteId>>,
+    pub(crate) invariants: Vec<Option<InvariantId>>,
 }
 macro_rules! number {($($method:ident:$field:ident:$ty:ident),*)=>{$(fn $method(&mut self,id:$ty)->$ty{self.$field.get(id.index()).and_then(|x|*x).unwrap_or(id)})*};}
 impl Mapper for Numbering {
     number!(typeid:types:TypeId,latticetypeid:lattices:LatticeTypeId,grouptypeid:groups:GroupTypeId,constid:consts:ConstId,paramid:params:ParamId,fnid:fns:FnId,udaid:udas:UdaId,serviceid:services:ServiceId,roleid:roles:RoleId,relid:rels:RelId,ruleid:rules:RuleId,constructid:constructs:ConstructId,siteid:sites:SiteId,invariantid:invariants:InvariantId);
 }
-fn renumber<I: Idx>(len: usize, selected: &BTreeSet<I>) -> Vec<Option<I>> {
+pub(crate) fn renumber<I: Idx>(len: usize, selected: &BTreeSet<I>) -> Vec<Option<I>> {
     let mut out = vec![None; len];
     for (n, id) in selected.iter().enumerate() {
         if let Some(slot) = out.get_mut(id.index()) {
@@ -57,12 +57,12 @@ fn renumber<I: Idx>(len: usize, selected: &BTreeSet<I>) -> Vec<Option<I>> {
     }
     out
 }
-fn select<I: Idx, T: Clone>(table: &IndexVec<I, T>, ids: &BTreeSet<I>) -> Result<IndexVec<I, T>, IrError> {
+pub(crate) fn select<I: Idx, T: Clone>(table: &IndexVec<I, T>, ids: &BTreeSet<I>) -> Result<IndexVec<I, T>, IrError> {
     IndexVec::try_from_iter(ids.iter().filter_map(|id| table.get(*id).cloned()))
         .map_err(|e| IrError::builder(e.to_string()))
 }
 impl Needed {
-    fn size(&self) -> usize {
+    pub(crate) fn size(&self) -> usize {
         self.types.len()
             + self.lattices.len()
             + self.groups.len()
@@ -227,39 +227,7 @@ pub(crate) fn project(valid: &ValidatedProgram, role: RoleId) -> Result<Validate
             break;
         }
     }
-    // The validator derives the types of expressions structurally (a node, a tuple of kept types, …) and looks them
-    // up, so every anonymous type over what is kept stays too. Named types (structs, enums, lattices, groups, extern
-    // types) stay only where something kept names them.
-    loop {
-        let mut grew = false;
-        for (id, def) in p.types.iter() {
-            if want.types.contains(&id) {
-                continue;
-            }
-            let kept = |t: &TypeId| want.types.contains(t);
-            let anonymous = match def {
-                blossom_value::TypeDef::Node(Some(r)) => want.roles.contains(r),
-                blossom_value::TypeDef::Tuple(ts) => ts.iter().all(kept),
-                blossom_value::TypeDef::Vec(t) | blossom_value::TypeDef::Set(t) | blossom_value::TypeDef::Option(t) => {
-                    kept(t)
-                }
-                blossom_value::TypeDef::Map(k, v) => kept(k) && kept(v),
-                blossom_value::TypeDef::Struct(_)
-                | blossom_value::TypeDef::Enum(_)
-                | blossom_value::TypeDef::Lattice(_)
-                | blossom_value::TypeDef::Group(_)
-                | blossom_value::TypeDef::Extern(_) => false,
-                _ => true,
-            };
-            if anonymous {
-                want.types.insert(id);
-                grew = true;
-            }
-        }
-        if !grew {
-            break;
-        }
-    }
+    keep_anonymous_types(p, &mut want);
     let mut n = Numbering {
         types: renumber(p.types.len(), &want.types),
         lattices: renumber(p.lattices.len(), &want.lattices),
@@ -321,4 +289,40 @@ pub(crate) fn project(valid: &ValidatedProgram, role: RoleId) -> Result<Validate
     out.migrations = p.migrations.remap(&mut n);
     out.translations = p.translations.remap(&mut n);
     ValidatedProgram::validate(out).map_err(|mut errs| errs.remove(0))
+}
+
+/// Keeps every anonymous type over what `want` keeps. The validator derives the types of expressions structurally (a
+/// node, a tuple of kept types, …) and looks them up, so they must stay; named types (structs, enums, lattices, groups,
+/// extern types) stay only where something kept names them.
+pub(crate) fn keep_anonymous_types(p: &Program, want: &mut Needed) {
+    loop {
+        let mut grew = false;
+        for (id, def) in p.types.iter() {
+            if want.types.contains(&id) {
+                continue;
+            }
+            let kept = |t: &TypeId| want.types.contains(t);
+            let anonymous = match def {
+                blossom_value::TypeDef::Node(Some(r)) => want.roles.contains(r),
+                blossom_value::TypeDef::Tuple(ts) => ts.iter().all(kept),
+                blossom_value::TypeDef::Vec(t) | blossom_value::TypeDef::Set(t) | blossom_value::TypeDef::Option(t) => {
+                    kept(t)
+                }
+                blossom_value::TypeDef::Map(k, v) => kept(k) && kept(v),
+                blossom_value::TypeDef::Struct(_)
+                | blossom_value::TypeDef::Enum(_)
+                | blossom_value::TypeDef::Lattice(_)
+                | blossom_value::TypeDef::Group(_)
+                | blossom_value::TypeDef::Extern(_) => false,
+                _ => true,
+            };
+            if anonymous {
+                want.types.insert(id);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
 }

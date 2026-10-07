@@ -102,6 +102,7 @@ data_dir = "data"
         backend: blossom_node::Backend::Engine,
         externs: Arc::new(blossom_std_host::registry().unwrap()),
         record: None,
+        admin: None,
         web: None,
     })
     .unwrap();

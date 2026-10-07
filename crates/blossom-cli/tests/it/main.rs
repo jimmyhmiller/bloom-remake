@@ -5,6 +5,7 @@ mod fmt;
 mod kafka3;
 mod kafka_kill9;
 mod kill9;
+mod query;
 mod raft3;
 
 use std::process::Command;

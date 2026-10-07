@@ -84,6 +84,7 @@ fn start(spec: &DeploymentSpec, artifact: &Arc<BlsArtifact>) -> Server {
         backend: blossom_node::Backend::Engine,
         externs: Arc::new(blossom_std_host::registry().unwrap()),
         record: None,
+        admin: None,
         web: None,
     })
     .unwrap()
@@ -217,6 +218,7 @@ fn a_recorded_node_replays_exactly_and_explains_its_rows() {
         backend: blossom_node::Backend::Engine,
         externs: Arc::new(blossom_std_host::registry().unwrap()),
         record: Some(traces.clone()),
+        admin: None,
         web: None,
     })
     .unwrap();

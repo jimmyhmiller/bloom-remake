@@ -86,6 +86,7 @@ fn start(spec: &DeploymentSpec, artifact: &Arc<BlsArtifact>, mode: OpenMode, por
         backend: blossom_node::Backend::Engine,
         externs: Arc::new(blossom_std_host::registry().unwrap()),
         record: None,
+        admin: None,
         web: Some(WebConfig {
             addr: format!("127.0.0.1:{port}").parse().unwrap(),
             root: None,

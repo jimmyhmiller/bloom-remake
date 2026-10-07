@@ -54,6 +54,10 @@ pub struct Args {
     /// `/blossom/app.json` and the WebSocket `/blossom/link`.
     #[arg(long, value_name = "ADDR")]
     pub web: Option<std::net::SocketAddr>,
+    /// Serve queries of the node's database on this address (`blossom query`, docs/design/DATABASE.md §5). The admin
+    /// plane has no authentication yet: `insecure-dev` deployments only.
+    #[arg(long, value_name = "ADDR")]
+    pub admin: Option<std::net::SocketAddr>,
     /// The page's files for `--web`: the built browser host (`index.html`, `host.js`, `pkg/`).
     #[arg(long, value_name = "DIR", default_value = "web")]
     pub web_root: PathBuf,
@@ -175,6 +179,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
         externs,
         record: args.record.clone(),
         web,
+        admin: args.admin,
     }) {
         Ok(s) => s,
         Err(e) => {
@@ -187,6 +192,9 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
         .map_or_else(|| "no client listener".to_string(), |a| format!("clients on {a}"));
     if let Some(a) = server.web_addr {
         clients.push_str(&format!(", the page on http://{a}/"));
+    }
+    if let Some(a) = server.admin_addr {
+        clients.push_str(&format!(", queries on {a}"));
     }
     println!(
         "blossom: node {} ready: peers on {}, {clients} (boot tick {}, incarnation {})",
