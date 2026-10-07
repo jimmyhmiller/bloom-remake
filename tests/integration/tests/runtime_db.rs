@@ -198,7 +198,12 @@ fn a_query_binding_the_leading_column_reads_by_prefix() {
     std::fs::create_dir_all(&dir).unwrap();
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/e01_kvs.bls");
     let mut text = std::fs::read_to_string(&source).unwrap();
-    text.push_str("\nat Server {\n    view val(v) = store(\"apple\", v);\n    view all(k) = store(k, _);\n}\n");
+    text.push_str(
+        "\nat Server {\n    view val(v) = store(\"apple\", v);\n    view all(k) = store(k, _);\n    \
+         view mid(k) = store(k, _), k > \"b\", k <= \"d\", k > \"a\";\n    \
+         view flipped(k) = store(k, _), \"m\" >= k;\n    \
+         view twice(k) = store(k, v), store(v2, _), k > \"b\", v2 == \"x\";\n}\n",
+    );
     let copy = dir.join("e01_query.bls");
     std::fs::write(&copy, text).unwrap();
     let nodes = [NodeSpec {
@@ -224,6 +229,36 @@ fn a_query_binding_the_leading_column_reads_by_prefix() {
             .map(|(id, _)| id)
             .unwrap();
         assert_eq!(blossom_runtime::query::leading_constants(&q, store), want, "{view}");
+    }
+    // Ranges: the tightest bounds of the comparisons on the first free column, read either way round; none when the
+    // relation is read twice.
+    use std::ops::Bound;
+    for (view, lo, hi) in [
+        (
+            "mid",
+            Bound::Excluded(Value::str("b")),
+            Bound::Included(Value::str("d")),
+        ),
+        ("flipped", Bound::Unbounded, Bound::Included(Value::str("m"))),
+        ("twice", Bound::Unbounded, Bound::Unbounded),
+    ] {
+        let server = a
+            .program
+            .get()
+            .roles
+            .iter_enumerated()
+            .find(|(_, r)| r.name.to_string() == "Server")
+            .map(|(id, _)| id);
+        let (q, _) = a.program.query(a.rel_named(view).unwrap(), server).unwrap();
+        let store = q
+            .get()
+            .rels
+            .iter_enumerated()
+            .find(|(_, r)| r.name.to_string() == "store")
+            .map(|(id, _)| id)
+            .unwrap();
+        let scan = blossom_runtime::query::scan_of(&q, store);
+        assert_eq!((scan.lo, scan.hi), (lo, hi), "{view}");
     }
 }
 
