@@ -7,12 +7,14 @@
 //! ([`server`], `--insecure-dev` only), and a client session library ([`client`]). TLS, QUIC, the ops listener and
 //! the admin plane are later slices.
 
+mod admin;
 pub mod client;
 pub mod clock;
 pub mod db;
 pub mod deploy;
 pub mod members;
 pub mod net;
+pub mod query;
 pub mod server;
 pub mod streams;
 pub mod web;

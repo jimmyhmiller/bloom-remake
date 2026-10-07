@@ -38,6 +38,12 @@ impl ValidatedProgram {
     pub fn project(&self, role: blossom_base::idx::RoleId) -> Result<Self, IrError> {
         crate::projection::project(self, role)
     }
+    /// The least program computing the view `view` from the durable relations it reads, each an input of it
+    /// (docs/design/DATABASE.md §5), and those relations' names. A view that reads anything else (but static
+    /// relations) is refused.
+    pub fn query(&self, view: blossom_base::idx::RelId) -> Result<(Self, Vec<String>), IrError> {
+        crate::query::query(self, view)
+    }
     /// Cached identity.
     pub fn digest(&self) -> ProgramDigest {
         self.digest

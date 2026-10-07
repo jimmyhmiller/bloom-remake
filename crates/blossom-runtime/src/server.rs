@@ -78,6 +78,8 @@ pub struct ServerConfig {
     pub record: Option<PathBuf>,
     /// Serve the page and client members' links (docs/design/CLIENTS.md §4).
     pub web: Option<WebConfig>,
+    /// Serve queries of the node's database here (docs/design/DATABASE.md §5); `insecure-dev` only.
+    pub admin: Option<SocketAddr>,
 }
 
 /// `blossom run --web`: where to listen, and the page's files. The node makes `/blossom/app.json` and each client
@@ -361,6 +363,8 @@ pub struct Server {
     pub client_addr: Option<SocketAddr>,
     /// Where `--web` serves the page and client links.
     pub web_addr: Option<SocketAddr>,
+    /// Where `--admin` serves queries.
+    pub admin_addr: Option<SocketAddr>,
     /// The address each `listen` stream accepts on, by stream name.
     pub stream_addrs: BTreeMap<String, SocketAddr>,
     pub stream_stats: Arc<StreamStats>,
@@ -544,6 +548,21 @@ impl Server {
             None => None,
         };
         let web_addr = match &web_listener {
+            Some(l) => Some(l.local_addr().map_err(RuntimeError::Io)?),
+            None => None,
+        };
+        let admin_listener = match cfg.admin {
+            Some(_) if spec.security != crate::deploy::SecurityMode::InsecureDev => {
+                return Err(RuntimeError::Config(
+                    "the admin plane has no authentication yet (DIST-066): `--admin` needs security.mode = \
+                     \"insecure-dev\""
+                        .into(),
+                ));
+            }
+            Some(a) => Some(TcpListener::bind(a).map_err(|e| RuntimeError::Net(format!("bind {a}: {e}")))?),
+            None => None,
+        };
+        let admin_addr = match &admin_listener {
             Some(l) => Some(l.local_addr().map_err(RuntimeError::Io)?),
             None => None,
         };
@@ -742,6 +761,18 @@ impl Server {
                 web_accept_loop(l, ctx, stop, conns, stats)
             })?);
         }
+        if let Some(l) = admin_listener {
+            let ctx = crate::admin::AdminCtx {
+                db: db.clone(),
+                artifact: artifact.clone(),
+                names: names.clone(),
+                externs: cfg.externs.clone(),
+            };
+            let stop = stop.clone();
+            threads.push(spawn("admin-listener", move || {
+                crate::admin::accept_loop(l, ctx, stop)
+            })?);
+        }
         for (i, l) in stream_listeners {
             let env = stream_env.clone();
             threads.push(spawn("stream-listener", move || {
@@ -812,6 +843,7 @@ impl Server {
             peer_addr,
             client_addr,
             web_addr,
+            admin_addr,
             stream_addrs,
             stream_stats,
             streams,
