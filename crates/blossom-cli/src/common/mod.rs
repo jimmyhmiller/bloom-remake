@@ -78,13 +78,16 @@ pub mod bls {
         report(blossom_driver::bls::compile_file_with(file, nodes, params))
     }
 
-    /// [`compile_with`] for a deployment: with the deployed build's lints (BLS1006).
-    pub fn compile_deployed(
+    /// [`compile_with`] for a deployment, with the deployed build's lints (BLS1006) and the source files it read
+    /// (`blossom run --web` serves them to the page).
+    pub fn compile_deployed_with_sources(
         file: &str,
         nodes: &[blossom_front::api::NodeSpec],
         params: &std::collections::BTreeMap<String, blossom_front::api::ParamBinding>,
-    ) -> Result<blossom_artifact::bls::BlsArtifact, ExitCode> {
-        report(blossom_driver::bls::compile_deployed(file, nodes, params))
+    ) -> Result<(blossom_artifact::bls::BlsArtifact, blossom_base::SourceDb), ExitCode> {
+        let (result, sources) = blossom_driver::bls::compile_deployed(file, nodes, params);
+        let artifact = report((result, sources.clone()))?;
+        Ok((artifact, sources))
     }
 
     /// Prints a compile's diagnostics; on failure, the exit code to return.

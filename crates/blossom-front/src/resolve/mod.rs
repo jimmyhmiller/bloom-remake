@@ -1037,6 +1037,11 @@ impl<'t, 'd> Resolver<'t, 'd> {
     /// their shapes (BLS0434).
     fn trees(&mut self, s: ScopeIdx, items: &'t [ast::Item]) {
         for item in items {
+            // A tree or fragment placed at a role (the page interface inside a client role's `at`, CLIENTS.md §1).
+            if let ItemKind::At { items: inner, .. } = &item.kind {
+                self.trees(s, inner);
+                continue;
+            }
             if let ItemKind::Fragment(f) = &item.kind {
                 if self.scope(s).fragments.contains_key(&f.name.name) {
                     self.error(

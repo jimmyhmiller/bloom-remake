@@ -287,6 +287,7 @@ dependencies = [
  "clap_complete",
  "kafka-protocol",
  "mimalloc",
+ "serde_json",
  "uuid",
 ]
 
@@ -381,6 +382,7 @@ dependencies = [
  "blossom-trace",
  "blossom-value",
  "blossom-verify",
+ "blossom-web",
  "blossom-wire",
  "bytes",
  "kafka-protocol",
@@ -532,6 +534,8 @@ dependencies = [
  "blossom-value",
  "blossom-wire",
  "serde",
+ "serde_json",
+ "sha1",
  "thiserror",
  "toml",
 ]
@@ -1807,6 +1811,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest",
 ]
 
 [[package]]

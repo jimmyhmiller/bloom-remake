@@ -34,6 +34,8 @@ pub struct Round {
     /// The clock the round ran at.
     pub now: Instant,
     pub events: Vec<(RelId, Row)>,
+    /// The messages it took from the server (a client member's round, CLIENTS.md §5).
+    pub delivered: Vec<blossom_ir::tick::Delivery>,
     pub changes: Changes,
     /// The rows it wrote (`changes`' insertions).
     pub inserted: BTreeSet<(RelId, Row)>,
@@ -110,6 +112,8 @@ const DEPTH: usize = 24;
 
 /// Explains facts of the rounds in a history, re-running each round it needs once.
 pub struct Explainer<'a> {
+    /// The node the rounds ran as.
+    node: NodeId,
     program: &'a Program,
     oracle: Oracle,
     history: &'a History,
@@ -147,7 +151,7 @@ impl<'a> Explainer<'a> {
     pub fn new(
         program: &'a Program,
         oracle: blossom_ir::ValidatedProgram,
-        roles: Vec<Option<blossom_base::RoleId>>,
+        who: &crate::Who,
         seed: blossom_value::Seed,
         history: &'a History,
     ) -> Result<Explainer<'a>, HostError> {
@@ -161,12 +165,17 @@ impl<'a> Explainer<'a> {
             Arc::new(blossom_value::ExternRegistry::default()),
         )
         .map_err(fail)?
-        .with_roles(roles)
+        .with_roles(who.roles.clone())
         .with_seed(seed)
         .map_err(fail)?
-        .with_node_names(vec![Arc::from("app")])
+        .with_node_names(who.names.clone())
         .map_err(fail)?;
+        let oracle = match who.client_role {
+            Some(r) => oracle.with_client_role(r),
+            None => oracle,
+        };
         Ok(Explainer {
+            node: who.node,
             program,
             oracle,
             history,
@@ -188,13 +197,13 @@ impl<'a> Explainer<'a> {
         let out = self
             .oracle
             .tick(&TickInput {
-                node: NodeId(0),
+                node: self.node,
                 incarnation: 1,
                 tick: Tick(tick),
                 now: round.now,
                 carried: &before,
                 events: &round.events,
-                delivered: &[],
+                delivered: &round.delivered,
                 ingress: &[],
                 capture: true,
                 blobs: &blossom_value::NoBlobs,
@@ -558,6 +567,7 @@ mod tests {
                 tick: t,
                 now: Instant(0),
                 events: Vec::new(),
+                delivered: Vec::new(),
                 changes: changes.clone(),
                 inserted: BTreeSet::new(),
             });

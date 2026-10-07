@@ -1,0 +1,125 @@
+//! A chat room (docs/design/CLIENTS.md): one program, a server and the browser tabs. The tabs are members of the
+//! client role `Browser` and run the page; the server keeps the log and who is online. There is no API besides the
+//! channels: a line typed in a tab is a `say` to the server, which fans it out to every tab online as `heard`.
+//!
+//! Each tab numbers its own lines, so a line is known by its tab and number: one sent again (after a reconnect)
+//! changes nothing. A tab that connects without resuming its link gets the whole log; one whose link resumed already
+//! has it. Who is online comes from the link events, so a closed tab leaves the list at once.
+
+program chat version 1;
+
+role Server;
+role Browser: client;
+
+channel say(k: u64, text: String): Browser -> Server;
+channel heard(who: Node<Browser>, k: u64, at: Instant, text: String): Server -> Browser;
+channel presence(who: Node<Browser>, here: bool): Server -> Browser;
+
+at Server {
+    /// Every line said, by its tab and number, with when the server took it; kept across restarts.
+    durable table log(who: Node<Browser>, k: u64, at: Instant, text: String) key(who, k);
+    /// The tabs connected now.
+    table online(b: Node<Browser>);
+
+    join: on Browser.connected(b, _) {
+        emit online(b);
+    }
+    leave: on Browser.disconnected(b) {
+        delete online(b);
+    }
+    /// Who is here, to every tab (the new one included), when someone comes or goes.
+    arrive: on Browser.connected(b, _), online(o) {
+        send presence(b, true) to o;
+    }
+    seen: on Browser.connected(b, _), online(o) where o != b {
+        send presence(o, true) to b;
+    }
+    gone: on Browser.disconnected(b), online(o) where o != b {
+        send presence(b, false) to o;
+    }
+    store: on say(k, t) from b, not log(b, k, _, _) {
+        next log(b, k, now(), t);
+    }
+    fan: on say(k, t) from b, online(o), not log(b, k, _, _) {
+        send heard(b, k, now(), t) to o;
+    }
+    /// A tab whose link did not resume gets the whole log.
+    greet: on Browser.connected(b, false), log(w, k, at, t) {
+        send heard(w, k, at, t) to b;
+    }
+}
+
+at Browser {
+    include "ui.bls";
+
+    /// The lines heard, by tab and number; kept across reloads.
+    durable table lines(who: Node<Browser>, k: u64, at: Instant, text: String) key(who, k);
+    /// The number of this tab's next line.
+    durable table sent_n(n: u64) key();
+    /// Who is here (this tab included).
+    table here(b: Node<Browser>);
+    /// Whether the link to the server is up.
+    table up(s: Node<Server>);
+    table draft(s: String) key();
+
+    view next_k(k = max!(n default 0u64)) = sent_n(n);
+
+    hear: on heard(w, k, at, t), not lines(w, k, _, _) {
+        next lines(w, k, at, t);
+    }
+    come: on presence(b, true) {
+        emit here(b);
+    }
+    go: on presence(b, false) {
+        delete here(b);
+    }
+    link: on Server.connected(s, _) {
+        emit up(s);
+    }
+    lost: on Server.disconnected(s) {
+        delete up(s);
+    }
+    /// Offline, nobody is known to be here.
+    forget: on Server.disconnected(_), here(b) {
+        delete here(b);
+    }
+    type_it: on typed("say", v) {
+        upsert draft(v);
+    }
+    /// Sends while offline wait for the link: the line goes out when it is back.
+    send_it: on keydown("say", "Enter", v), srv in Server, next_k(k) where v != "" {
+        send say(k, v) to srv;
+        upsert sent_n(k + 1u64);
+        upsert draft("");
+    }
+
+    view typed_now(s) {
+        draft(s);
+        not draft(_), let s = "";
+    }
+    view online_count(k = count!(b default 0u64)) = here(b);
+    view status(s) {
+        up(_), online_count(k), let s = f"online, {k} here";
+        not up(_), let s = "offline: lines wait until the server is back";
+    }
+    view mine(w, k) = lines(w, k, _, _) where w == self;
+
+    page: while status(s), typed_now(d) {
+        emit html div[id: "chat"](class: "chat") {
+            h1 { "Chat" }
+            p[id: "status"](class: "status") { s }
+            ul[id: "lines"](class: "lines") {
+                for lines(w, k, at, t) {
+                    li[id: f"line-{k}-{w}", pos: at.as_millis()](class: "line") {
+                        span[id: f"who-{k}-{w}"](class: "who") { w.to_string() }
+                        span[id: f"text-{k}-{w}"](class: "text") { t }
+                    }
+                }
+            }
+            input[id: "say"](placeholder: "Say something and press Enter", value: d);
+        }
+    }
+    own: while mine(w, k) {
+        emit attr(f"line-{k}-{w}", "data-mine", "true");
+    }
+}

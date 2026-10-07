@@ -4,10 +4,14 @@
 //! HELLO    0x01 := magic:"BLSM" proto:u16 deployment:[16] program_id:[16] program_version:u32 peer directory:[16]
 //!                  restarts:u64 boot_nonce:u64 n:varint (sid:varint name:str schema_hash:[16]){n}
 //!          peer := 0 node:u32 | 1 principal:str                 (a node of the deployment, or a client session)
+//!                | 2 role:str token:bytes received:u64 acked:u64  (a client member, CLIENTS.md §3; empty token: new)
 //! HELLO_OK 0x02 := accepted_version:u32 n:varint (sid:varint){n}
 //! REJECT   0x03 := reason:u8 detail:str
 //! GOAWAY   0x04 := reason:u8
+//! WELCOME  0x05 := member:u32 token:bytes resumed:u8 floor:u64 seed:[16]  (to a client member, after HELLO_OK)
 //! BATCH    0x10 := sid:varint send_tick:varint kind:u8 count:varint tuple{count}
+//! MSG      0x11 := seq:varint BATCH-body                         (a batch on a member link, numbered)
+//! ACK      0x12 := seq:varint                                    (everything up to seq was taken)
 //! ```
 //!
 //! The architecture's HELLO names only a node; a client session's HELLO carries the principal it claims, which only
@@ -25,7 +29,10 @@ const T_HELLO: u8 = 0x01;
 const T_HELLO_OK: u8 = 0x02;
 const T_REJECT: u8 = 0x03;
 const T_GOAWAY: u8 = 0x04;
+const T_WELCOME: u8 = 0x05;
 const T_BATCH: u8 = 0x10;
+const T_MSG: u8 = 0x11;
+const T_ACK: u8 = 0x12;
 
 /// Who opened a connection.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,6 +41,15 @@ pub enum Peer {
     Node(u32),
     /// A client session, with the principal it claims.
     Client { principal: String },
+    /// A member of a client role (docs/design/CLIENTS.md §3): its role, its token (`None` the first time), the
+    /// sequence number of the last message it took from the server, and of the last of its own the server
+    /// acknowledged.
+    Member {
+        role: String,
+        token: Option<Vec<u8>>,
+        received: u64,
+        acked: u64,
+    },
 }
 
 /// One channel as the sender knows it: its schema id on this connection, name and schema hash.
@@ -99,10 +115,77 @@ pub const KIND_PLAIN: u8 = 0;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame {
     Hello(Hello),
-    HelloOk { accepted_version: u32, sids: Vec<u32> },
-    Reject { reason: RejectReason, detail: String },
-    GoAway { reason: u8 },
+    HelloOk {
+        accepted_version: u32,
+        sids: Vec<u32>,
+    },
+    Reject {
+        reason: RejectReason,
+        detail: String,
+    },
+    GoAway {
+        reason: u8,
+    },
     Batch(Batch),
+    /// The server's answer to a member's `HELLO` (after `HELLO_OK`): its identity, whether the link takes up where
+    /// the last one left off, the last of the member's messages the server holds (the member resends the rest), and
+    /// the member's own root seed (derived from the deployment's, which a member never sees).
+    Welcome {
+        member: u32,
+        token: Vec<u8>,
+        resumed: bool,
+        floor: u64,
+        seed: [u8; 16],
+    },
+    /// A batch on a member link, with its sequence number on that direction.
+    Msg {
+        seq: u64,
+        batch: Batch,
+    },
+    /// Everything up to `seq` on that direction of a member link was taken.
+    Ack {
+        seq: u64,
+    },
+}
+
+fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
+    put_varint(out, b.len() as u64);
+    out.extend_from_slice(b);
+}
+
+fn get_bytes(input: &mut &[u8]) -> Result<Vec<u8>, WireError> {
+    let n = usize::try_from(get_varint(input)?).map_err(|_| WireError::Limit("byte string length"))?;
+    Ok(take(input, n, "a byte string")?.to_vec())
+}
+
+fn put_batch(out: &mut Vec<u8>, b: &Batch) {
+    put_varint(out, u64::from(b.sid));
+    put_varint(out, b.send_tick);
+    out.push(b.kind);
+    put_varint(out, b.count);
+    out.extend_from_slice(&b.body);
+}
+
+fn get_batch(input: &mut &[u8], limits: &WireLimits) -> Result<Batch, WireError> {
+    let sid = u32::try_from(get_varint(input)?).map_err(|_| WireError::Malformed("sid".into()))?;
+    let send_tick = get_varint(input)?;
+    let (&kind, rest) = input.split_first().ok_or(WireError::Truncated("batch kind"))?;
+    *input = rest;
+    if kind != KIND_PLAIN {
+        return Err(WireError::Unsupported(format!("batch kind {kind}")));
+    }
+    let count = get_varint(input)?;
+    if count > limits.max_tuples_per_batch as u64 || count > input.len() as u64 {
+        return Err(WireError::Limit("tuples per batch"));
+    }
+    let body = std::mem::take(input).to_vec();
+    Ok(Batch {
+        sid,
+        send_tick,
+        kind,
+        count,
+        body,
+    })
 }
 
 fn put_str(out: &mut Vec<u8>, s: &str) {
@@ -146,6 +229,18 @@ impl Frame {
                         body.push(1);
                         put_str(&mut body, principal);
                     }
+                    Peer::Member {
+                        role,
+                        token,
+                        received,
+                        acked,
+                    } => {
+                        body.push(2);
+                        put_str(&mut body, role);
+                        put_bytes(&mut body, token.as_deref().unwrap_or(&[]));
+                        body.extend_from_slice(&received.to_le_bytes());
+                        body.extend_from_slice(&acked.to_le_bytes());
+                    }
                 }
                 body.extend_from_slice(&h.directory);
                 body.extend_from_slice(&h.restarts.to_le_bytes());
@@ -176,12 +271,31 @@ impl Frame {
                 T_GOAWAY
             }
             Frame::Batch(b) => {
-                put_varint(&mut body, u64::from(b.sid));
-                put_varint(&mut body, b.send_tick);
-                body.push(b.kind);
-                put_varint(&mut body, b.count);
-                body.extend_from_slice(&b.body);
+                put_batch(&mut body, b);
                 T_BATCH
+            }
+            Frame::Welcome {
+                member,
+                token,
+                resumed,
+                floor,
+                seed,
+            } => {
+                body.extend_from_slice(&member.to_le_bytes());
+                put_bytes(&mut body, token);
+                body.push(u8::from(*resumed));
+                body.extend_from_slice(&floor.to_le_bytes());
+                body.extend_from_slice(seed);
+                T_WELCOME
+            }
+            Frame::Msg { seq, batch } => {
+                put_varint(&mut body, *seq);
+                put_batch(&mut body, batch);
+                T_MSG
+            }
+            Frame::Ack { seq } => {
+                put_varint(&mut body, *seq);
+                T_ACK
             }
         };
         let mut out = Vec::with_capacity(body.len() + 5);
@@ -211,6 +325,16 @@ impl Frame {
                     1 => Peer::Client {
                         principal: get_str(input)?,
                     },
+                    2 => {
+                        let role = get_str(input)?;
+                        let token = get_bytes(input)?;
+                        Peer::Member {
+                            role,
+                            token: (!token.is_empty()).then_some(token),
+                            received: u64::from_le_bytes(le(input, "received")?),
+                            acked: u64::from_le_bytes(le(input, "acked")?),
+                        }
+                    }
                     other => return Err(WireError::Malformed(format!("peer kind {other}"))),
                 };
                 let directory = arr16(input, "directory digest")?;
@@ -264,27 +388,30 @@ impl Frame {
                 *input = rest;
                 Frame::GoAway { reason }
             }
-            T_BATCH => {
-                let sid = u32::try_from(get_varint(input)?).map_err(|_| WireError::Malformed("sid".into()))?;
-                let send_tick = get_varint(input)?;
-                let (&kind, rest) = input.split_first().ok_or(WireError::Truncated("batch kind"))?;
+            T_BATCH => Frame::Batch(get_batch(input, limits)?),
+            T_WELCOME => {
+                let member = u32::from_le_bytes(le(input, "member")?);
+                let token = get_bytes(input)?;
+                let (&resumed, rest) = input.split_first().ok_or(WireError::Truncated("resumed"))?;
                 *input = rest;
-                if kind != KIND_PLAIN {
-                    return Err(WireError::Unsupported(format!("batch kind {kind}")));
+                Frame::Welcome {
+                    member,
+                    token,
+                    resumed: resumed != 0,
+                    floor: u64::from_le_bytes(le(input, "floor")?),
+                    seed: arr16(input, "seed")?,
                 }
-                let count = get_varint(input)?;
-                if count > limits.max_tuples_per_batch as u64 || count > input.len() as u64 {
-                    return Err(WireError::Limit("tuples per batch"));
-                }
-                let body = std::mem::take(input).to_vec();
-                Frame::Batch(Batch {
-                    sid,
-                    send_tick,
-                    kind,
-                    count,
-                    body,
-                })
             }
+            T_MSG => {
+                let seq = get_varint(input)?;
+                Frame::Msg {
+                    seq,
+                    batch: get_batch(input, limits)?,
+                }
+            }
+            T_ACK => Frame::Ack {
+                seq: get_varint(input)?,
+            },
             other => return Err(WireError::Malformed(format!("frame type {other:#x}"))),
         };
         if !input.is_empty() {

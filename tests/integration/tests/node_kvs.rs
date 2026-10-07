@@ -377,7 +377,7 @@ fn invariant_r_holds_under_random_sync_schedules() {
                     match kind {
                         0 => node.offer_ingress(k.get(1, i as u64, "a")),
                         _ => node.offer_ingress(k.put(1, i as u64, "a", &[kind, i as u8])),
-                    }
+                    };
                     let fx = node.run_tick(Instant(now)).unwrap();
                     computed.push((fx.tick, fx.wal.is_some()));
                     released.extend(node.release_ready().unwrap().iter().map(|r| r.tick));

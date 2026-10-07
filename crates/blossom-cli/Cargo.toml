@@ -16,6 +16,7 @@ doc = false
 
 # Every non-test crate (ARCHITECTURE §1.2), so each subcommand's WP only edits its own `src/cmd/<name>.rs`.
 [dependencies]
+serde_json.workspace = true
 blossom-base.workspace = true
 blossom-value.workspace = true
 blossom-lattice.workspace = true

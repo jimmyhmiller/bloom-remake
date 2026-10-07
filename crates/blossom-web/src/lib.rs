@@ -8,6 +8,7 @@
 //! each round's page is diffed against the last into DOM patches. The core here is plain Rust, which native tests
 //! drive; `wasm` is the page's API over it.
 
+pub mod link;
 pub mod page;
 pub mod store;
 #[cfg(target_arch = "wasm32")]
@@ -51,6 +52,20 @@ pub enum HostError {
     /// The saved state could not be read or written.
     #[error("the saved state: {0}")]
     Store(String),
+    /// The link to the server (a client member's, docs/design/CLIENTS.md §5) failed.
+    #[error("the link: {0}")]
+    Link(String),
+}
+
+/// Who a program's rounds run as: its node, and the deployment's nodes and roles (for the evaluators and the
+/// inspector).
+#[derive(Clone, Debug)]
+pub struct Who {
+    pub node: NodeId,
+    pub roles: Vec<Option<blossom_base::RoleId>>,
+    pub names: Vec<Arc<str>>,
+    /// The client role, for a client member (whose node is outside the deployment).
+    pub client_role: Option<blossom_base::RoleId>,
 }
 
 /// A diagnostic of a compile, for the editor: its rendering (as `blossom check` prints it) and where it points.
@@ -141,6 +156,63 @@ pub struct Compiled {
     /// The event inputs it declares, by name.
     inputs: BTreeMap<&'static str, RelId>,
     pub warnings: Vec<Diag>,
+    /// What a client member's page plays (CLIENTS.md §5); `None` for a page on its own.
+    client: Option<ClientPart>,
+}
+
+/// The part a client member's page plays in a deployment.
+#[derive(Clone, Debug)]
+struct ClientPart {
+    role: blossom_base::RoleId,
+    role_name: String,
+    /// The server node the page connects to, and the connection identity it checks.
+    server: NodeId,
+    identity: blossom_wire::link::Identity,
+    /// The link events of its link to the server: `connected`, `disconnected`.
+    connected: Option<RelId>,
+    disconnected: Option<RelId>,
+}
+
+/// The deployment a client member's page compiles for (`/blossom/app.json`, CLIENTS.md §4).
+#[derive(Clone, Debug, Deserialize)]
+pub struct ClientDeployment {
+    /// The deployment's nodes: name and role.
+    pub nodes: Vec<ClientNode>,
+    /// The server node that served the page.
+    pub node: String,
+    /// The connection identity (hex): the deployment id and the node directory's digest.
+    pub deployment: String,
+    pub directory: String,
+    /// The deployment's parameters.
+    #[serde(default)]
+    pub params: BTreeMap<String, ClientParam>,
+    /// The client role the page plays (needed only when the program has several).
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ClientNode {
+    pub name: String,
+    pub role: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClientParam {
+    Int(i128),
+    Bool(bool),
+    Text(String),
+}
+
+fn hex16(s: &str) -> Result<[u8; 16], String> {
+    let bytes: Option<Vec<u8>> = (0..s.len())
+        .step_by(2)
+        .map(|i| s.get(i..i + 2).and_then(|h| u8::from_str_radix(h, 16).ok()))
+        .collect();
+    bytes
+        .and_then(|b| <[u8; 16]>::try_from(b).ok())
+        .ok_or_else(|| format!("`{s}` is not 16 bytes of hex"))
 }
 
 /// Sources in memory: `path` → text.
@@ -195,6 +267,19 @@ fn type_name(program: &blossom_ir::core::Program, ty: blossom_base::TypeId) -> S
     }
 }
 
+fn host_diag(message: String) -> Diag {
+    Diag {
+        severity: "error".to_owned(),
+        code: String::new(),
+        rendered: format!("error: {message}"),
+        message,
+        file: None,
+        line: None,
+        column: None,
+        range: None,
+    }
+}
+
 /// Compiles the program `root` of `files` (`path` → source) for the browser: one node, no roles. Its diagnostics
 /// on failure.
 pub fn compile(root: &str, files: &BTreeMap<String, String>) -> Result<Compiled, Vec<Diag>> {
@@ -202,7 +287,102 @@ pub fn compile(root: &str, files: &BTreeMap<String, String>) -> Result<Compiled,
         name: "app".to_owned(),
         role: None,
     }];
-    let (result, sources) = blossom_driver::bls::compile_with_loader(root, &nodes, &BTreeMap::new(), &mut Files(files));
+    compile_for(root, files, &nodes, &BTreeMap::new())
+}
+
+/// Compiles the program for a client member's page (CLIENTS.md §5): for the deployment the server gave, the page
+/// playing its client role.
+pub fn compile_client(
+    root: &str,
+    files: &BTreeMap<String, String>,
+    deployment: &ClientDeployment,
+) -> Result<Compiled, Vec<Diag>> {
+    let nodes: Vec<NodeSpec> = deployment
+        .nodes
+        .iter()
+        .map(|n| NodeSpec {
+            name: n.name.clone(),
+            role: n.role.clone(),
+        })
+        .collect();
+    let params = deployment
+        .params
+        .iter()
+        .map(|(k, v)| {
+            use blossom_front::api::ParamBinding as B;
+            let b = match v {
+                ClientParam::Int(n) => B::Int(*n),
+                ClientParam::Bool(b) => B::Bool(*b),
+                ClientParam::Text(t) => B::Text(t.clone()),
+            };
+            (k.clone(), b)
+        })
+        .collect();
+    let mut compiled = compile_for(root, files, &nodes, &params)?;
+    let p = compiled.artifact.program.get();
+    let clients: Vec<(blossom_base::RoleId, String)> = p
+        .roles
+        .iter_enumerated()
+        .filter(|(_, r)| r.kind == blossom_ir::core::RoleKind::Client)
+        .map(|(id, r)| (id, r.name.to_string()))
+        .collect();
+    let chosen = match (&deployment.role, clients.as_slice()) {
+        (Some(want), _) => clients.iter().find(|(_, n)| n == want).cloned(),
+        (None, [only]) => Some(only.clone()),
+        _ => None,
+    };
+    let Some((role, role_name)) = chosen else {
+        return Err(vec![host_diag(match &deployment.role {
+            Some(r) => format!("`{r}` is not a client role of the program"),
+            None => "a page plays a client role (`role R: client;`): the program declares none, or several and \
+                     app.json names none"
+                .to_owned(),
+        })]);
+    };
+    let Some(server) = compiled.artifact.node_id(&deployment.node) else {
+        return Err(vec![host_diag(format!(
+            "the deployment has no node `{}`",
+            deployment.node
+        ))]);
+    };
+    let server_role = compiled.artifact.roles.get(server.0 as usize).copied().flatten();
+    let link = |up: bool| {
+        p.rels
+            .iter_enumerated()
+            .find(|(_, r)| {
+                matches!(&r.class, RelClass::Event(blossom_ir::core::EventSource::Link { peer, up: u })
+                    if Some(*peer) == server_role && *u == up)
+            })
+            .map(|(id, _)| id)
+    };
+    let (connected, disconnected) = (link(true), link(false));
+    let identity = (|| -> Result<blossom_wire::link::Identity, String> {
+        Ok(blossom_wire::link::Identity {
+            deployment: hex16(&deployment.deployment)?,
+            program_id: p.meta.program_id,
+            program_version: p.meta.version,
+            directory: hex16(&deployment.directory)?,
+        })
+    })()
+    .map_err(|e| vec![host_diag(e)])?;
+    compiled.client = Some(ClientPart {
+        role,
+        role_name,
+        server,
+        identity,
+        connected,
+        disconnected,
+    });
+    Ok(compiled)
+}
+
+fn compile_for(
+    root: &str,
+    files: &BTreeMap<String, String>,
+    nodes: &[NodeSpec],
+    params: &BTreeMap<String, blossom_front::api::ParamBinding>,
+) -> Result<Compiled, Vec<Diag>> {
+    let (result, sources) = blossom_driver::bls::compile_with_loader(root, nodes, params, &mut Files(files));
     let (artifact, warnings) = match result {
         Ok(ok) => ok,
         Err(BlsError::Rejected(found)) => return Err(diags(&found, &sources)),
@@ -292,6 +472,7 @@ pub fn compile(root: &str, files: &BTreeMap<String, String>) -> Result<Compiled,
         artifact,
         outputs,
         inputs,
+        client: None,
     })
 }
 
@@ -304,6 +485,14 @@ impl Compiled {
     /// The DOM events the program listens to: the inputs it declares and reads (`route` included).
     pub fn listens(&self) -> Vec<&'static str> {
         self.inputs.keys().copied().collect()
+    }
+
+    /// The link a client member's page opens to its server, resuming `state` (`None` for a page on its own).
+    pub fn link(&self, state: Option<&link::LinkState>) -> Result<Option<link::Link>, HostError> {
+        match &self.client {
+            None => Ok(None),
+            Some(c) => link::Link::new(&self.artifact, &c.role_name, c.server, c.identity.clone(), state).map(Some),
+        }
     }
 }
 
@@ -330,6 +519,14 @@ pub struct App {
     history: why::History,
     /// The durable rows added and removed since the host last saved (`None`: it must save them all).
     unsaved: Option<BTreeMap<RelId, Unsaved>>,
+    /// Who the rounds run as.
+    who: Who,
+    /// A client member's link to its server, the messages it brought for the next round, the sends of the rounds
+    /// since the last flush, and the frames to write.
+    link: Option<link::Link>,
+    inbox: Vec<blossom_ir::tick::Delivery>,
+    outbox: Vec<blossom_ir::tick::Send>,
+    frames: Vec<Vec<u8>>,
 }
 
 /// What starting a program did: the first page, and what the restore could not keep.
@@ -342,13 +539,49 @@ pub struct Started {
 impl App {
     /// A program ready to start, its randomness drawn from `seed`.
     pub fn new(compiled: Compiled, seed: blossom_value::Seed) -> Result<App, HostError> {
+        let who = Who {
+            node: NodeId(0),
+            roles: compiled.artifact.roles.clone(),
+            names: vec![Arc::from("app")],
+            client_role: None,
+        };
+        App::with(compiled, seed, who, None)
+    }
+
+    /// A client member's page (CLIENTS.md §5): it runs as the member `link` names, with the member's seed, and talks
+    /// to its server over `link`.
+    pub fn member(compiled: Compiled, link: link::Link) -> Result<App, HostError> {
+        let client = compiled
+            .client
+            .clone()
+            .ok_or_else(|| HostError::Link("the program was not compiled for a client member".into()))?;
+        let member = link
+            .member()
+            .cloned()
+            .ok_or_else(|| HostError::Link("the link has no member yet (no WELCOME)".into()))?;
+        let who = Who {
+            node: member.id,
+            roles: compiled.artifact.roles.clone(),
+            names: compiled.artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect(),
+            client_role: Some(client.role),
+        };
+        App::with(compiled, blossom_value::Seed(member.seed), who, Some(link))
+    }
+
+    fn with(
+        compiled: Compiled,
+        seed: blossom_value::Seed,
+        who: Who,
+        link: Option<link::Link>,
+    ) -> Result<App, HostError> {
         let engine = Engine::new(
             compiled.artifact.program.clone(),
-            NodeId(0),
+            who.node,
             EngineConfig {
-                roles: compiled.artifact.roles.clone(),
-                node_names: vec![Arc::from("app")],
+                roles: who.roles.clone(),
+                node_names: who.names.clone(),
                 seed: Some(seed),
+                client_role: who.client_role,
                 ..EngineConfig::default()
             },
         )
@@ -366,7 +599,98 @@ impl App {
             now: Instant(0),
             history: why::History::new(),
             unsaved: None,
+            who,
+            link,
+            inbox: Vec::new(),
+            outbox: Vec::new(),
+            frames: Vec::new(),
         })
+    }
+
+    /// The first frame of a connection to the server (a client member's page).
+    pub fn link_hello(&mut self) -> Result<Vec<u8>, HostError> {
+        self.link
+            .as_mut()
+            .map(link::Link::hello)
+            .ok_or_else(|| HostError::Link("this page has no server".into()))
+    }
+
+    /// Takes a frame from the server at `now`: the handshake's `WELCOME` raises the link's `connected` event, and a
+    /// batch's messages are delivered in a round; the patches.
+    pub fn link_recv(&mut self, bytes: &[u8], now: Instant) -> Result<Vec<Patch>, HostError> {
+        self.tick_to(now);
+        let link = self
+            .link
+            .as_mut()
+            .ok_or_else(|| HostError::Link("this page has no server".into()))?;
+        let (heard, frames) = link.recv(bytes)?;
+        let server = link.server();
+        self.frames.extend(frames);
+        match heard {
+            link::Heard::Welcome { member, resumed } => {
+                if member.id != self.who.node {
+                    return Err(HostError::Link(format!(
+                        "the server gave this page another identity ({:?}, it ran as {:?}): start it over",
+                        member.id, self.who.node
+                    )));
+                }
+                let event = self
+                    .compiled
+                    .client
+                    .as_ref()
+                    .and_then(|c| c.connected)
+                    .map(|rel| (rel, Arc::from(vec![Value::Node(server), Value::Bool(resumed)])));
+                self.settle(event.as_slice())
+            }
+            link::Heard::Deliveries(d) => {
+                self.inbox.extend(d);
+                self.settle(&[])
+            }
+            link::Heard::Nothing => Ok(Vec::new()),
+        }
+    }
+
+    /// The connection to the server ended at `now`: the link's `disconnected` event; the patches.
+    pub fn link_down(&mut self, now: Instant) -> Result<Vec<Patch>, HostError> {
+        self.tick_to(now);
+        let Some(link) = self.link.as_mut() else {
+            return Ok(Vec::new());
+        };
+        let was_up = link.is_up();
+        link.down();
+        let server = link.server();
+        let event = self
+            .compiled
+            .client
+            .as_ref()
+            .and_then(|c| c.disconnected)
+            .filter(|_| was_up)
+            .map(|rel| (rel, Arc::from(vec![Value::Node(server)])));
+        match event {
+            Some(e) => self.settle(&[e]),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// The frames to write to the server since the last call (acknowledgements, and the rounds' sends while the link
+    /// is up; sends made while it is down wait in the link).
+    pub fn take_frames(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.frames)
+    }
+
+    /// What the page stores to resume its link after a reload.
+    pub fn link_state(&self) -> Option<link::LinkState> {
+        self.link.as_ref().map(link::Link::state)
+    }
+
+    /// Hands the rounds' sends to the link.
+    fn flush_sends(&mut self) -> Result<(), HostError> {
+        let sends = std::mem::take(&mut self.outbox);
+        if let Some(link) = self.link.as_mut() {
+            let frames = link.send(&sends, self.tick)?;
+            self.frames.extend(frames);
+        }
+        Ok(())
     }
 
     /// The rounds run so far.
@@ -439,13 +763,23 @@ impl App {
                 error: e.to_string(),
             })?,
         );
-        let boot: Vec<(RelId, Row)> = self
+        let mut boot: Vec<(RelId, Row)> = self
             .compiled
             .artifact
             .boot()
             .map(|b| (b, Arc::from(Vec::new())))
             .into_iter()
             .collect();
+        // A member page made after its link's `WELCOME` (the first connection) starts with the link up.
+        if let (Some(link), Some(rel)) = (
+            self.link.as_ref().filter(|l| l.is_up()),
+            self.compiled.client.as_ref().and_then(|c| c.connected),
+        ) {
+            boot.push((
+                rel,
+                Arc::from(vec![Value::Node(link.server()), Value::Bool(link.resumed())]),
+            ));
+        }
         let mut patches = self.settle(&boot)?;
         patches.extend(self.dispatch(&Event::Route { hash: hash.to_owned() }, now)?);
         Ok(Started { patches, notes })
@@ -503,6 +837,7 @@ impl App {
             changed = self.round(&[])?;
             quiet_rounds += 1;
         }
+        self.flush_sends()?;
         Ok(self.page.take_patches())
     }
 
@@ -522,16 +857,17 @@ impl App {
         let events = events.as_slice();
         // The page takes its outputs' changes; the timers' guards are read whole.
         let observe: Vec<RelId> = self.timers.iter().flat_map(|t| t.guards()).collect();
+        let delivered = std::mem::take(&mut self.inbox);
         let out = self
             .engine
             .step(
                 &StepInput {
-                    node: NodeId(0),
+                    node: self.who.node,
                     incarnation: 1,
                     tick: Tick(tick),
                     now,
                     events,
-                    delivered: &[],
+                    delivered: &delivered,
                     ingress: &[],
                     blobs: &blossom_value::NoBlobs,
                 },
@@ -548,10 +884,12 @@ impl App {
                 error: e.to_string(),
             })?;
         }
+        self.outbox.extend(out.outbox.iter().cloned());
         self.history.push(why::Round {
             tick,
             now,
             events: events.to_vec(),
+            delivered,
             inserted: out
                 .changes
                 .inserted
@@ -604,7 +942,7 @@ impl App {
         let explainer = why::Explainer::new(
             self.compiled.artifact.program.get(),
             self.compiled.artifact.program.clone(),
-            self.compiled.artifact.roles.clone(),
+            &self.who,
             self.seed,
             &self.history,
         )?;

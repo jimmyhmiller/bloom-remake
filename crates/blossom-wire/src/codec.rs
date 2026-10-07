@@ -250,12 +250,21 @@ impl<'p> Codec<'p> {
             }
             (TypeDef::Node(_), Value::Node(n)) => match &self.nodes {
                 NodeEncoding::Dense => put_varint(out, u64::from(n.0)),
-                NodeEncoding::ByName(names) => {
-                    let name = names
-                        .get(n.0 as usize)
-                        .ok_or_else(|| WireError::Malformed(format!("node {} has no name", n.0)))?;
-                    put_bytes(out, name.as_bytes());
-                }
+                // A client member (docs/design/CLIENTS.md §2) is written `#serial@server`, its admitting node by name.
+                NodeEncoding::ByName(names) => match n.client_parts() {
+                    Some((server, serial)) => {
+                        let name = names
+                            .get(server.0 as usize)
+                            .ok_or_else(|| WireError::Malformed(format!("node {} has no name", server.0)))?;
+                        put_bytes(out, format!("#{serial}@{name}").as_bytes());
+                    }
+                    None => {
+                        let name = names
+                            .get(n.0 as usize)
+                            .ok_or_else(|| WireError::Malformed(format!("node {} has no name", n.0)))?;
+                        put_bytes(out, name.as_bytes());
+                    }
+                },
             },
             (TypeDef::Tuple(ts), Value::Tuple(vs)) => {
                 let mut inner = Vec::new();
@@ -474,11 +483,25 @@ impl<'p> Codec<'p> {
                 )),
                 NodeEncoding::ByName(names) => {
                     let name = utf8(get_bytes(input, "a node name")?)?;
-                    let i = names
-                        .iter()
-                        .position(|n| &**n == name)
-                        .ok_or_else(|| WireError::Malformed(format!("no node named `{name}` in the directory")))?;
-                    Value::Node(NodeId(u32::try_from(i).map_err(|_| WireError::Limit("node id"))?))
+                    let index = |name: &str| -> Result<NodeId, WireError> {
+                        let i = names
+                            .iter()
+                            .position(|n| &**n == name)
+                            .ok_or_else(|| WireError::Malformed(format!("no node named `{name}` in the directory")))?;
+                        Ok(NodeId(u32::try_from(i).map_err(|_| WireError::Limit("node id"))?))
+                    };
+                    match name.strip_prefix('#').and_then(|rest| rest.split_once('@')) {
+                        Some((serial, server)) => {
+                            let serial: u32 = serial
+                                .parse()
+                                .map_err(|_| WireError::Malformed(format!("`{name}` is not a client member")))?;
+                            Value::Node(
+                                NodeId::client(index(server)?, serial)
+                                    .ok_or_else(|| WireError::Malformed(format!("`{name}` is out of range")))?,
+                            )
+                        }
+                        None => Value::Node(index(name)?),
+                    }
                 }
             },
             TypeDef::Tuple(ts) => {

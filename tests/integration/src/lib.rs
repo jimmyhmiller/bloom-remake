@@ -5,6 +5,7 @@
 //! Cargo discovers them automatically, so adding one needs no manifest edit.
 
 pub mod raft_safety;
+pub mod ws;
 
 /// Whether this is the full test tier (`BLOSSOM_FULL=1`): every seed of a multi-seed simulation, and the tests marked
 /// `#[ignore = "full tier"]` (run with `-- --include-ignored`). Otherwise the fast tier, for every change: one seed.
