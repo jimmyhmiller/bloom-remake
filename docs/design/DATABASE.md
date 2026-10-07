@@ -107,7 +107,9 @@ blossom query --deploy d.toml --node s --store data/s 'all(k, v) = store(k, v)'
 ## 7. Next: the engine on the database (S24, planned)
 
 Today the engine holds every relation in memory (`blossom-engine::store::Store`: rows with support counts, indexes
-built on use) and recovers durable ones from the checkpoint chain; the database is a second copy. Moving durable
+built on use), a table twice (its `Main` store, the rows now, and its `Next` store, the rows the next tick starts
+from, whose change is applied to `Main` at the next tick's start), and recovers durable ones from the checkpoint
+chain; the database is a third copy. Moving durable
 relations onto the database, so a node's durable state may outgrow its memory and checkpoints retire:
 
 1. **A tiered store for each durable table.** `base`: the table as of the previous tick, which is the database at the
