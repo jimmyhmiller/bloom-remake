@@ -16,6 +16,11 @@ Eve (UI as relations). "If you can make a to-do MVC style UI in the browser, tha
 
 No app-specific host code: the browser host is a generic layer any Blossom program can use; TodoMVC is one program.
 
+**Since S21 (user, 2026-10-06)** B1 has a second mode: a page served by a node (`blossom run --web`) runs as a member
+of the program's `client` role, the same program's server side running on the node. The compiler and the engine still
+run in the page; only the messages go over the wire. Everything here holds in both modes, except the editor, which a
+member page turns off (the program is the node's). docs/design/CLIENTS.md has the design.
+
 ## The model
 
 ### A program and the page
