@@ -402,6 +402,12 @@ impl Executors {
         self.backend
     }
 
+    /// The engines keep `rows` rows of each tiered table's recent probes (`EngineConfig::hot_rows`).
+    pub fn with_hot_rows(mut self, rows: usize) -> Executors {
+        self.engine.hot_rows = Some(rows);
+        self
+    }
+
     /// The oracle for the deployment (its static facts serve admission whichever backend runs).
     pub fn oracle(&self) -> &std::sync::Arc<Oracle> {
         &self.oracle

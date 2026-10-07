@@ -33,4 +33,17 @@ pub trait ColdTables: Send + Sync {
     ) -> Result<Vec<Row>, EvalError>;
     /// How many rows `rel` holds as of `at`.
     fn count(&self, rel: RelId, at: u64) -> Result<usize, EvalError>;
+    /// The rows of `rel` as of `at` whose columns `cols` hold `values`, if there are at most `max` (`None`: more,
+    /// found without reading them all).
+    fn probe_at_most(
+        &self,
+        rel: RelId,
+        cols: &[usize],
+        values: &[Value],
+        at: u64,
+        max: usize,
+    ) -> Result<Option<Vec<Row>>, EvalError> {
+        let rows = self.probe(rel, cols, values, None, at)?;
+        Ok((rows.len() <= max).then_some(rows))
+    }
 }

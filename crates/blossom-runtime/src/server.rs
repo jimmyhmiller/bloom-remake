@@ -103,6 +103,9 @@ pub struct Stats {
     pub sessions: AtomicU64,
     /// The database's flushes.
     pub db_flushes: AtomicU64,
+    /// The rows the engine holds in memory after the last tick (a tiered table counts only what memory holds of it,
+    /// docs/design/DATABASE.md §7); 0 for an executor that does not count them.
+    pub resident_rows: AtomicU64,
     /// The time WAL syncs took, in total and at most, and how many took over 4, 16 and 64 ms.
     pub wal_sync_nanos: AtomicU64,
     pub wal_sync_max_nanos: AtomicU64,
@@ -151,6 +154,7 @@ impl Stats {
             ("egress", r(&self.egress)),
             ("sessions", r(&self.sessions)),
             ("db_flushes", r(&self.db_flushes)),
+            ("resident_rows", r(&self.resident_rows)),
             ("wal_sync_nanos", r(&self.wal_sync_nanos)),
             ("wal_sync_max_nanos", r(&self.wal_sync_max_nanos)),
             ("wal_syncs_over_4ms", r(&self.wal_syncs_over_4ms)),
@@ -1406,6 +1410,9 @@ impl Engine {
                     .run_tick(now)
                     .map_err(|f| RuntimeError::Fault(f.to_string()))?;
                 bump(&self.stats.ticks, 1);
+                if let Some(n) = self.node.resident_rows() {
+                    self.stats.resident_rows.store(n as u64, Ordering::Relaxed);
+                }
                 if let Some(r) = fx.reserve {
                     self.record.reserved_tick = r.ticks.0;
                     self.record.last_now = self.record.last_now.max(r.now.0);

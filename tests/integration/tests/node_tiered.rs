@@ -58,7 +58,7 @@ struct Fixture {
 
 #[cfg(test)]
 impl Fixture {
-    fn new(backend: Backend) -> Fixture {
+    fn with_hot_rows(backend: Backend, hot_rows: Option<usize>) -> Fixture {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/db/tiered.bls");
         let (result, _) = compile_file(
             path.to_str().unwrap(),
@@ -69,7 +69,7 @@ impl Fixture {
         );
         let artifact = result.unwrap_or_else(|e| panic!("tiered.bls: {e:?}")).0;
         let names: Arc<[Arc<str>]> = artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect();
-        let executors = Executors::new(
+        let mut executors = Executors::new(
             backend,
             artifact.program.clone(),
             artifact.roles.clone(),
@@ -78,6 +78,9 @@ impl Fixture {
             Arc::new(blossom_value::ExternRegistry::new()),
         )
         .unwrap();
+        if let Some(rows) = hot_rows {
+            executors = executors.with_hot_rows(rows);
+        }
         Fixture {
             schema: DurableSchema::of(artifact.program.get()),
             artifact,
@@ -161,8 +164,9 @@ fn crashed(fs: &SimFs) -> SimFs {
 
 #[test]
 fn tiered_tables_agree_with_the_oracle_through_restarts_flushes_and_compactions() {
-    let k = Fixture::new(Backend::Checked);
-    for seed in 0..3u64 {
+    // With the default hot tier, and with one so small it is trimmed all the time.
+    for (seed, hot_rows) in [(0u64, None), (1, Some(8)), (2, None), (3, Some(8))] {
+        let k = Fixture::with_hot_rows(Backend::Checked, hot_rows);
         let mut rng = Rng(seed);
         let mut fs = SimFs::default();
         let mut t = 10i64;
@@ -216,7 +220,8 @@ fn tiered_tables_agree_with_the_oracle_through_restarts_flushes_and_compactions(
 
 #[test]
 fn a_tiered_table_is_held_on_disk_not_in_memory() {
-    let k = Fixture::new(Backend::Engine);
+    // A hot tier of 256 rows: the engine holds that much of the table at most, besides the ticks not yet released.
+    let k = Fixture::with_hot_rows(Backend::Engine, Some(256));
     let fs = SimFs::default();
     let mut d = k.boot(&fs);
     let mut t = 10i64;
