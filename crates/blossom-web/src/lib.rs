@@ -55,6 +55,10 @@ pub enum HostError {
     /// The link to the server (a client member's, docs/design/CLIENTS.md §5) failed.
     #[error("the link: {0}")]
     Link(String),
+    /// The server gave the page another identity than the one it ran as (it lost the old one): the page's state
+    /// belongs to the old identity, so it must start over.
+    #[error("the server gave this page another identity ({given:?}; it ran as {ran:?}): start it over")]
+    Identity { given: NodeId, ran: NodeId },
 }
 
 /// Who a program's rounds run as: its node, and the deployment's nodes and roles (for the evaluators and the
@@ -629,10 +633,10 @@ impl App {
         match heard {
             link::Heard::Welcome { member, resumed } => {
                 if member.id != self.who.node {
-                    return Err(HostError::Link(format!(
-                        "the server gave this page another identity ({:?}, it ran as {:?}): start it over",
-                        member.id, self.who.node
-                    )));
+                    return Err(HostError::Identity {
+                        given: member.id,
+                        ran: self.who.node,
+                    });
                 }
                 let event = self
                     .compiled

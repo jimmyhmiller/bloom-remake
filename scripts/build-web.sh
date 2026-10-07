@@ -13,7 +13,7 @@ if [ -z "$want" ] || [ "$have" != "$want" ]; then
 fi
 cargo build -p blossom-web --target wasm32-unknown-unknown --release
 rm -rf web/pkg
-wasm-bindgen --target web --no-typescript --out-dir web/pkg target/wasm32-unknown-unknown/release/blossom_web.wasm
+wasm-bindgen --target web --no-typescript --out-dir web/pkg "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/blossom_web.wasm"
 mkdir -p web/pkg/apps
 cp examples/web/*.bls web/pkg/apps/
 echo "built web/pkg ($(du -h web/pkg/blossom_web_bg.wasm | cut -f1) wasm)"

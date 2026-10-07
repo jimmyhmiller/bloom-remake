@@ -1,7 +1,8 @@
 //! S21: the page as a client member (docs/design/CLIENTS.md §5), without a browser. A real node serves the chat example
 //! with `--web`; two pages fetch `/blossom/app.json`, compile the program for the deployment it names, open their links
 //! and run as members of `Browser`: a line typed in one appears in both, a page whose link is down queues its line and
-//! sends it on the next connection, and a reloaded page resumes its identity.
+//! sends it on the next connection, and a reloaded page resumes its identity. The shared TodoMVC keeps two pages'
+//! lists the same through adds, toggles, deletes and an offline edit.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -25,9 +26,9 @@ fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
-/// The chat example deployed on one server node `s`, serving its page on `port`.
+/// The example `program` (examples/web/PROGRAM.bls) deployed on one server node `s`, serving its page on `port`.
 #[cfg(test)]
-fn serve(name: &str, port: u16) -> Server {
+fn serve(name: &str, program: &str, port: u16) -> Server {
     let dir = std::env::temp_dir().join(format!("blossom-pages-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -38,11 +39,11 @@ fn serve(name: &str, port: u16) -> Server {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/web/chat.bls");
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../examples/web/{program}.bls"));
     let text = format!(
-        "format = 1\n[deployment]\nid = \"chat-pages\"\nprogram = \"chat\"\nversion = 1\nsource = \"{}\"\n\
+        "format = 1\n[deployment]\nid = \"{program}-pages\"\nprogram = \"{program}\"\nversion = 1\nsource = \"{}\"\n\
          secrets = \"chat.secrets\"\n[[node]]\nname = \"s\"\nrole = \"Server\"\naddr = \"127.0.0.1:{}\"\n\
-         principal = \"spiffe://test/chat/Server/s\"\n[security]\nmode = \"insecure-dev\"\n[storage]\ndata_dir = \"data\"\n",
+         principal = \"spiffe://test/{program}/Server/s\"\n[security]\nmode = \"insecure-dev\"\n[storage]\ndata_dir = \"data\"\n",
         source.display(),
         free_port(),
     );
@@ -104,6 +105,9 @@ struct Tab {
     app: App,
     ws: Option<Ws>,
     texts: BTreeMap<String, String>,
+    /// The elements on the page, and the `checked` attributes.
+    alive: std::collections::BTreeSet<String>,
+    checked: BTreeMap<String, String>,
     now: i64,
 }
 
@@ -130,6 +134,8 @@ impl Tab {
             app,
             ws: Some(ws),
             texts: BTreeMap::new(),
+            alive: Default::default(),
+            checked: BTreeMap::new(),
             now: 1_000,
         };
         for f in early {
@@ -149,8 +155,24 @@ impl Tab {
 
     fn apply(&mut self, patches: &[Patch]) {
         for p in patches {
-            if let Patch::Text { id, text } = p {
-                self.texts.insert(id.clone(), text.clone());
+            match p {
+                Patch::Text { id, text } => {
+                    self.texts.insert(id.clone(), text.clone());
+                }
+                Patch::Create { id, .. } => {
+                    self.alive.insert(id.clone());
+                }
+                Patch::Remove { id } => {
+                    self.alive.remove(id);
+                    self.texts.remove(id);
+                }
+                Patch::Attr { id, name, value } if name == "checked" => {
+                    self.checked.insert(id.clone(), value.clone());
+                }
+                Patch::Unattr { id, name } if name == "checked" => {
+                    self.checked.remove(id);
+                }
+                _ => {}
             }
         }
     }
@@ -177,19 +199,53 @@ impl Tab {
 
     fn say(&mut self, text: &str) {
         self.now += 1;
-        let patches = self
-            .app
-            .dispatch(
-                &Event::Keydown {
-                    id: "say".into(),
-                    key: "Enter".into(),
-                    value: text.into(),
-                },
-                Instant(self.now),
-            )
-            .unwrap();
+        self.event(Event::Keydown {
+            id: "say".into(),
+            key: "Enter".into(),
+            value: text.into(),
+        });
+    }
+
+    fn event(&mut self, event: Event) {
+        self.now += 1;
+        let patches = self.app.dispatch(&event, Instant(self.now)).unwrap();
         self.apply(&patches);
         self.flush();
+    }
+
+    /// The todos' titles on the page, sorted, with whether each is done.
+    fn todos(&self) -> Vec<(String, bool)> {
+        let mut out: Vec<(String, bool)> = Vec::new();
+        for (id, title) in &self.texts {
+            let Some(k) = id.strip_prefix("label-") else { continue };
+            if !self.alive.contains(&format!("todo-{k}")) {
+                continue;
+            }
+            let done = self.checked.get(&format!("toggle-{k}")).is_some_and(|c| c == "true");
+            out.push((title.clone(), done));
+        }
+        out.sort();
+        out
+    }
+
+    /// The element id of the todo titled `title`'s `part` (`toggle`, `destroy`, `label`).
+    fn todo_id(&self, title: &str, part: &str) -> String {
+        let k = self
+            .texts
+            .iter()
+            .filter(|(_, t)| t.as_str() == title)
+            .filter_map(|(id, _)| id.strip_prefix("label-"))
+            .find(|k| self.alive.contains(&format!("todo-{k}")))
+            .unwrap();
+        format!("{part}-{k}")
+    }
+
+    fn add(&mut self, title: &str) {
+        self.event(Event::Keydown {
+            id: "new-todo".into(),
+            key: "Enter".into(),
+            value: title.into(),
+        });
     }
 
     /// The lines on the page, sorted.
@@ -224,7 +280,7 @@ impl Tab {
 #[test]
 fn two_pages_chat_through_the_server_and_a_page_offline_catches_up() {
     let port = free_port();
-    let server = serve("chat", port);
+    let server = serve("chat", "chat", port);
     let mut a = Tab::open(port, None);
     let mut b = Tab::open(port, None);
     a.pump(300);
@@ -263,5 +319,47 @@ fn two_pages_chat_through_the_server_and_a_page_offline_catches_up() {
     assert!(b2.lines().contains(&"welcome back".to_owned()), "{:?}", b2.lines());
     drop(a);
     drop(b2);
+    server.stop().unwrap();
+}
+
+#[test]
+fn two_pages_share_one_todo_list_through_the_server() {
+    let port = free_port();
+    let server = serve("todos", "todos_shared", port);
+    let mut a = Tab::open(port, None);
+    let mut b = Tab::open(port, None);
+    a.pump(300);
+    b.pump(300);
+    assert_eq!(a.texts.get("sync").map(String::as_str), Some("synced with the server"));
+    a.add("buy milk");
+    a.pump(400);
+    b.pump(400);
+    b.add("walk the dog");
+    b.pump(400);
+    a.pump(400);
+    let both = [("buy milk".to_owned(), false), ("walk the dog".to_owned(), false)];
+    assert_eq!(a.todos(), both);
+    assert_eq!(b.todos(), both);
+    // b toggles a's todo; a sees it done.
+    let id = b.todo_id("buy milk", "toggle");
+    b.event(Event::Change { id, checked: true });
+    b.pump(400);
+    a.pump(400);
+    assert_eq!(a.todos()[0], ("buy milk".to_owned(), true));
+    // An edit made offline reaches the other page when the link is back.
+    a.disconnect();
+    let id = a.todo_id("walk the dog", "destroy");
+    a.event(Event::Click { id });
+    a.add("call mum");
+    b.pump(300);
+    assert_eq!(b.todos().len(), 2, "nothing reached the server while a was offline");
+    a.reconnect(port);
+    b.pump(500);
+    a.pump(300);
+    let after = [("buy milk".to_owned(), true), ("call mum".to_owned(), false)];
+    assert_eq!(a.todos(), after);
+    assert_eq!(b.todos(), after);
+    drop(a);
+    drop(b);
     server.stop().unwrap();
 }

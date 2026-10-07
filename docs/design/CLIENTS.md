@@ -115,8 +115,9 @@ listeners, with a thread per connection. The page connects back to the node that
 
 ## 5. The page
 
-The browser host (BROWSER.md) learns a second mode. With `?server` it loads `/blossom/app.json`, compiles the program
-for the given deployment, and runs it as its client member:
+The browser host (BROWSER.md) learns a second mode. Served by a node (it finds `/blossom/app.json`; a page with
+`?app=` or served statically, where that is a 404, runs on its own as before) it compiles the program for the given
+deployment and runs it as a client member:
 
 - the engine runs as the member's `NodeId` with the client role, so only the rules placed at the client role run;
 - each round's sends (`StepOutput.outbox`) go to the link (or the offline queue); the server's messages arrive as the
@@ -124,11 +125,30 @@ for the given deployment, and runs it as its client member:
 - the link events are inputs of the round in which the link comes up or goes down;
 - the inspector records deliveries, so `why` explains a row that came from the server down to the message it came in.
 
+What the page keeps, and where:
+
+- **The link state** (`LinkState`: the member's id, token and seed; the last server batch taken; the last own batch
+  acknowledged; the own batches not yet acknowledged, which are the offline queue) and the client role's durable
+  tables, in `localStorage`. After every round the link state is written first and the tables second, so a line the
+  tables say was sent is always in the queue as well.
+- **One member per tab.** Tabs of one browser share `localStorage` but must be different members, or two tabs would
+  present one token. Each tab holds a numbered slot, a Web Lock (`navigator.locks`) held for the page's life, and keeps
+  its state under that slot. A reload releases the slot and takes it back; a second tab takes the next free one. Web
+  Locks exist only in secure contexts (https, or localhost); elsewhere the page says so and does not run.
+- **A page that knows its member runs at once** from what it stored, and its link connects meanwhile, so the program
+  works while the node is unreachable. The first visit waits for the first `WELCOME`. The page itself comes from the
+  node, so a page cannot be loaded while the node is down (no service worker).
+- **A lost identity.** When the node no longer knows the token (a fresh store) and admits the page as a new member,
+  the stored state belongs to the old identity: the page clears it and starts over.
+- The WebSocket reconnects after a loss with backoff (200 ms doubling to 5 s, jittered); a finished handshake resets
+  it. The program is the node's, so the source editor is off in this mode; the inspector works.
+
 ## 6. The simulator, LDFI and tests
 
 - In a simulation, a client member is a node of the client role named in the deployment (`--nodes s=Server,b1=Browser,
   b2=Browser`). Its link to each server node is up from the start, raising `connected(…, false)` in the first round; a
-  crash of a client member takes its links down (`disconnected`), and its restart brings them back as a resume. The
+  crash of a client member takes its links down (`disconnected`), and its restart brings them back as a new link
+  (`resumed` is false: a simulated link loses what it carried while down). The
   omission and delay faults of channels apply to client links like any other.
 - LDFI searches the omissions of client channels as of any other: "if the add is lost, does the tab ever show it?"
 - Tests: frontend (the kind, placement, the membership errors, link events); oracle and engine agree on a program with
