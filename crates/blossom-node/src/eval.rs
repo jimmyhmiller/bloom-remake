@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use blossom_base::{FnId, RelId, RuleId};
-use blossom_engine::ColdTables;
+use blossom_engine::{ColdTables, Resume};
 use blossom_ir::tick::{
     Changes, EvalError, FnWork, Instance, Row, RuleWork, StepInput, StepOutput, TickInput, TickOutput,
 };
@@ -49,7 +49,10 @@ pub trait Executor: Send {
     /// Starts from the durable tables of `cold` (the node's database, at its newest version) and the volatile rows
     /// `carried`: an executor that keeps whole instances reads every table (O(state)); the engine reads the tables
     /// it does not tier and keeps the others on the cold side (docs/design/DATABASE.md §7).
-    fn reset_on(&mut self, carried: Instance, cold: Arc<dyn ColdTables>) -> Result<(), EvalError> {
+    /// `resume`: the deployment's static rows and the durable views' catch-up (DATABASE.md §8), for an executor
+    /// that keeps views on the cold side.
+    fn reset_on(&mut self, carried: Instance, cold: Arc<dyn ColdTables>, resume: Resume) -> Result<(), EvalError> {
+        let _ = resume;
         self.reset(whole_instance(carried, &*cold)?)
     }
     /// Runs one tick from the executor's own carried state. `observe` names relations whose final contents at this
@@ -145,6 +148,7 @@ impl<E: Evaluator> Executor for OracleExecutor<E> {
             host: out.host,
             observed,
             blobs: out.blobs,
+            views: BTreeMap::new(),
         })
     }
 
@@ -187,8 +191,8 @@ impl<X: Executor + ?Sized> Executor for Box<X> {
         (**self).reset(carried)
     }
 
-    fn reset_on(&mut self, carried: Instance, cold: Arc<dyn ColdTables>) -> Result<(), EvalError> {
-        (**self).reset_on(carried, cold)
+    fn reset_on(&mut self, carried: Instance, cold: Arc<dyn ColdTables>, resume: Resume) -> Result<(), EvalError> {
+        (**self).reset_on(carried, cold, resume)
     }
 
     fn step(&mut self, input: &StepInput<'_>, observe: &[RelId]) -> Result<StepOutput, EvalError> {
@@ -241,8 +245,8 @@ impl Executor for blossom_engine::Engine {
         blossom_engine::Engine::reset(self, carried)
     }
 
-    fn reset_on(&mut self, carried: Instance, cold: Arc<dyn ColdTables>) -> Result<(), EvalError> {
-        blossom_engine::Engine::reset_on(self, carried, cold)
+    fn reset_on(&mut self, carried: Instance, cold: Arc<dyn ColdTables>, resume: Resume) -> Result<(), EvalError> {
+        blossom_engine::Engine::reset_on(self, carried, cold, resume)
     }
 
     fn step(&mut self, input: &StepInput<'_>, observe: &[RelId]) -> Result<StepOutput, EvalError> {
@@ -516,9 +520,9 @@ impl Executor for CheckedExecutor {
         self.engine.reset(carried)
     }
 
-    fn reset_on(&mut self, carried: Instance, cold: Arc<dyn ColdTables>) -> Result<(), EvalError> {
-        self.oracle.reset_on(carried.clone(), cold.clone())?;
-        self.engine.reset_on(carried, cold)
+    fn reset_on(&mut self, carried: Instance, cold: Arc<dyn ColdTables>, resume: Resume) -> Result<(), EvalError> {
+        self.oracle.reset_on(carried.clone(), cold.clone(), resume.clone())?;
+        self.engine.reset_on(carried, cold, resume)
     }
 
     fn step(&mut self, input: &StepInput<'_>, observe: &[RelId]) -> Result<StepOutput, EvalError> {

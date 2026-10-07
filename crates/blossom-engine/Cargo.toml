@@ -13,6 +13,7 @@ blossom-value.workspace = true
 blossom-lattice.workspace = true
 blossom-ir.workspace = true
 blossom-kernel.workspace = true
+blake3.workspace = true
 
 [lints]
 workspace = true

@@ -249,6 +249,15 @@ pub struct FnWork {
     pub self_steps: u64,
 }
 
+/// A restart's catch-up of the durable views (docs/design/DATABASE.md §8): the durable tables' net change over the
+/// ticks the views have not seen but the last, and the last released tick's change (with its tick).
+#[derive(Clone, Debug, Default)]
+pub struct CatchUp {
+    pub before: Changes,
+    pub last: Changes,
+    pub last_tick: u64,
+}
+
 /// What one tick of a stateful executor produces.
 #[derive(Clone, Debug, Default)]
 pub struct StepOutput {
@@ -261,6 +270,9 @@ pub struct StepOutput {
     pub observed: BTreeMap<RelId, Vec<Row>>,
     /// The blobs the tick created, with their bytes (as [`TickOutput::blobs`]).
     pub blobs: BTreeMap<blossom_value::BlobRef, std::sync::Arc<[u8]>>,
+    /// The tick's changes to durable views (docs/design/DATABASE.md §8): each changed row's support before and after.
+    /// Kept in the database with the tick's tables, not logged: they are recomputed from the tables.
+    pub views: BTreeMap<RelId, Vec<(Row, u64, u64)>>,
 }
 
 /// Checks that `registry` provides every host function `program` declares (`extern fn`), with the declared

@@ -32,7 +32,7 @@ Declared in the root `Cargo.toml` (`[workspace.dependencies]`), versions verifie
 | rowan | 0.16.1 | MIT OR Apache-2.0 | syntax | the lossless CST (ARCHITECTURE §13.2) |
 | xxhash-rust | 0.8.18 (xxh3) | **BSL-1.0** | value (M2.1) | xxh3-64 value fingerprints (ENG-032, ARCH-18); see the note below |
 | siphasher | 1.0.4 | MIT OR Apache-2.0 | base, value | SipHash-1-3: rule-label hashes (LANGUAGE §4.3) and the PRF (SEM-084) |
-| blake3 | 1.8.7 | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception | value (M2.1) | program, schema and plan digests; checkpoint files (ARCH-18) |
+| blake3 | 1.8.7 | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception | value (M2.1); engine (S26) | program, schema and plan digests; checkpoint files (ARCH-18); durable views' definition hashes (DATABASE.md §8) |
 | crc32c | 0.6.8 | Apache-2.0/MIT | store | WAL record checksums (ARCH-10) |
 | bytes | 1.12.1 | MIT | wire, node | refcounted frame buffers |
 | proptest | 1.11.0 | MIT OR Apache-2.0 | tests of every crate; `arbitrary` features | property tests and generators (ARCHITECTURE §11.6) |

@@ -49,6 +49,15 @@ fn defs_tag() -> [u8; 8] {
 /// keyspaces of every relation.
 const DEF_INDEX: u8 = 1;
 const DEF_BLOBS: u8 = 2;
+/// A durable view's keyspace (docs/design/DATABASE.md §8): then its definition's hash (32 bytes) and the generation
+/// of views it belongs to (8, big-endian). Written with the view's complete rows.
+const DEF_VIEW: u8 = 3;
+
+/// The tags of a durable view's keyspaces: its rows, and the counts of its rows of more than one support.
+fn view_tags(def: &[u8; 32], generation: u64) -> ([u8; 8], [u8; 8]) {
+    let rows = label(&[b"view", def, &generation.to_be_bytes()]);
+    (rows, label(&[b"view counts", &rows]))
+}
 
 fn cols_bytes(cols: &[usize]) -> Result<Vec<u8>, NodeError> {
     let mut out = Vec::with_capacity(cols.len() * 4);
@@ -78,6 +87,22 @@ struct Derived {
     blobs: bool,
     /// Definitions made while no version was applied: written with the next one.
     unwritten: Vec<Vec<u8>>,
+    /// The durable views of this run: their keyspaces' tags (rows, counts).
+    views: BTreeMap<RelId, ([u8; 8], [u8; 8])>,
+    /// The views' definitions the database holds: each definition's newest generation.
+    view_defs: BTreeMap<[u8; 32], u64>,
+    /// Indexes of keyspaces no durable relation is known by (views', until they are opened).
+    orphan_indexes: BTreeMap<[u8; 8], BTreeSet<Vec<usize>>>,
+}
+
+impl Derived {
+    /// The tag of `rel`'s rows: a durable view's keyspace, or the durable relation's.
+    fn tag(&self, codec: &DurableCodec<'_>, rel: RelId) -> Result<[u8; 8], NodeError> {
+        match self.views.get(&rel) {
+            Some((rows, _)) => Ok(*rows),
+            None => codec.rel_tag(rel),
+        }
+    }
 }
 
 /// Removes the tree under `db_dir` (its tables and manifest), so a database starts again there.
@@ -202,15 +227,30 @@ impl Database {
                 Some((&DEF_BLOBS, [])) => d.blobs = true,
                 Some((&DEF_INDEX, rest)) if rest.len() >= 8 && (rest.len() - 8) % 4 == 0 => {
                     let (rel_tag, cols) = rest.split_at(8);
-                    let Some(rel) = <[u8; 8]>::try_from(rel_tag).ok().and_then(|t| self.tags.get(&t)) else {
-                        continue;
-                    };
                     let cols: Vec<usize> = cols
                         .chunks_exact(4)
                         .filter_map(|c| <[u8; 4]>::try_from(c).ok())
                         .map(|c| u32::from_be_bytes(c) as usize)
                         .collect();
-                    d.indexes.entry(*rel).or_default().insert(cols);
+                    let Ok(rel_tag) = <[u8; 8]>::try_from(rel_tag) else {
+                        continue;
+                    };
+                    match self.tags.get(&rel_tag) {
+                        Some(rel) => {
+                            d.indexes.entry(*rel).or_default().insert(cols);
+                        }
+                        None => {
+                            d.orphan_indexes.entry(rel_tag).or_default().insert(cols);
+                        }
+                    }
+                }
+                Some((&DEF_VIEW, rest)) if rest.len() == 40 => {
+                    let (def, generation) = rest.split_at(32);
+                    if let (Ok(def), Ok(generation)) = (<[u8; 32]>::try_from(def), <[u8; 8]>::try_from(generation)) {
+                        let generation = u64::from_be_bytes(generation);
+                        let newest = d.view_defs.entry(def).or_insert(generation);
+                        *newest = (*newest).max(generation);
+                    }
                 }
                 _ => {
                     return Err(NodeError::Store(format!(
@@ -239,7 +279,8 @@ impl Database {
         let codec = self.codec();
         let mut changes = Vec::new();
         for (rel, _, _) in &self.schema.rels {
-            self.each_row(&codec, *rel, at, &mut |row| {
+            let tag = codec.rel_tag(*rel)?;
+            self.each_row(&codec, &tag, *rel, at, &mut |row| {
                 for b in row_blobs(&row) {
                     changes.push((Self::blob_key(&codec, *rel, &b, &row)?, Op::Put));
                 }
@@ -264,13 +305,15 @@ impl Database {
     fn each_row(
         &self,
         codec: &DurableCodec<'_>,
+        tag: &[u8; 8],
         rel: RelId,
         at: u64,
         each: &mut dyn FnMut(Row) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
-        let tag = codec.rel_tag(rel)?;
-        let end = crate::keycode::successor(&tag);
-        self.each_key(&tag, end.as_deref(), at, &mut |key| each(codec.key_row(rel, key)?))
+        let end = crate::keycode::successor(tag);
+        self.each_key(tag, end.as_deref(), at, &mut |key| {
+            each(codec.tagged_row(tag, rel, key)?)
+        })
     }
 
     /// Calls `each` with every key from `start` to `end` as of `at`, a page at a time.
@@ -305,7 +348,7 @@ impl Database {
             return Err(NodeError::Store("a database opened read-only builds no index".into()));
         }
         let codec = self.codec();
-        let rel_tag = codec.rel_tag(rel)?;
+        let rel_tag = d.tag(&codec, rel)?;
         let mut def = defs_tag().to_vec();
         def.push(DEF_INDEX);
         def.extend_from_slice(&rel_tag);
@@ -315,7 +358,7 @@ impl Database {
             Some(at) => {
                 let tag = index_tag(&rel_tag, cols)?;
                 let mut changes = Vec::new();
-                self.each_row(&codec, rel, at, &mut |row| {
+                self.each_row(&codec, &rel_tag, rel, at, &mut |row| {
                     changes.push((codec.tagged_key(&tag, rel, cols, &row)?, Op::Put));
                     Ok(())
                 })?;
@@ -336,9 +379,10 @@ impl Database {
         op: Op,
         out: &mut Vec<(Vec<u8>, Op)>,
     ) -> Result<(), NodeError> {
-        out.push((codec.row_key(rel, row)?, op));
+        let rel_tag = d.tag(codec, rel)?;
+        let all: Vec<usize> = (0..row.len()).collect();
+        out.push((codec.tagged_key(&rel_tag, rel, &all, row)?, op));
         if let Some(indexes) = d.indexes.get(&rel) {
-            let rel_tag = codec.rel_tag(rel)?;
             for cols in indexes {
                 out.push((codec.tagged_key(&index_tag(&rel_tag, cols)?, rel, cols, row)?, op));
             }
@@ -387,7 +431,7 @@ impl Database {
                 continue;
             }
             let payload = crate::recovery::record_delta(rec, *lsn)?;
-            db.apply_with(&codec, rec.tick, &codec.decode_delta(payload)?)?;
+            db.apply_with(&codec, rec.tick, &codec.decode_delta(payload)?, &BTreeMap::new())?;
         }
         Ok(db)
     }
@@ -416,11 +460,29 @@ impl Database {
     /// Applies a released tick's durable delta (none: the tick changed no durable row).
     pub fn apply(&self, tick: u64, delta: &Delta) -> Result<(), NodeError> {
         let codec = self.codec();
-        self.apply_with(&codec, tick, delta)
+        self.apply_with(&codec, tick, delta, &BTreeMap::new())
     }
 
-    fn apply_with(&self, codec: &DurableCodec<'_>, tick: u64, delta: &Delta) -> Result<(), NodeError> {
-        if delta.is_empty() {
+    /// Applies a released tick's durable delta and its changes to the durable views (each changed row's support
+    /// before and after, DATABASE.md §8), as one version.
+    pub fn apply_tick(
+        &self,
+        tick: u64,
+        delta: &Delta,
+        views: &BTreeMap<RelId, Vec<(Row, u64, u64)>>,
+    ) -> Result<(), NodeError> {
+        let codec = self.codec();
+        self.apply_with(&codec, tick, delta, views)
+    }
+
+    fn apply_with(
+        &self,
+        codec: &DurableCodec<'_>,
+        tick: u64,
+        delta: &Delta,
+        views: &BTreeMap<RelId, Vec<(Row, u64, u64)>>,
+    ) -> Result<(), NodeError> {
+        if delta.is_empty() && views.values().all(Vec::is_empty) {
             return Ok(());
         }
         let mut d = self.derived()?;
@@ -431,6 +493,33 @@ impl Database {
             }
             for row in inserted {
                 Self::expand(codec, &d, *rel, row, Op::Put, &mut changes)?;
+            }
+        }
+        for (rel, rows) in views {
+            let counts =
+                d.views.get(rel).map(|t| t.1).ok_or_else(|| {
+                    blossom_base::internal_error!("changes to {rel:?}, which is no durable view here")
+                })?;
+            for (row, before, after) in rows {
+                // The row's key (and its indexes') changes only when it comes or goes; a count key holds a support
+                // of more than one.
+                match (*before > 0, *after > 0) {
+                    (false, true) => Self::expand(codec, &d, *rel, row, Op::Put, &mut changes)?,
+                    (true, false) => Self::expand(codec, &d, *rel, row, Op::Del, &mut changes)?,
+                    _ => {}
+                }
+                let all: Vec<usize> = (0..row.len()).collect();
+                let count_key = |n: u64| -> Result<Vec<u8>, NodeError> {
+                    let mut k = codec.tagged_key(&counts, *rel, &all, row)?;
+                    k.extend_from_slice(&n.to_be_bytes());
+                    Ok(k)
+                };
+                if *before > 1 {
+                    changes.push((count_key(*before)?, Op::Del));
+                }
+                if *after > 1 {
+                    changes.push((count_key(*after)?, Op::Put));
+                }
             }
         }
         changes.extend(d.unwritten.drain(..).map(|k| (k, Op::Put)));
@@ -581,6 +670,75 @@ impl Database {
         Ok(out)
     }
 
+    /// The tag of `rel`'s rows: a durable view's keyspace of this run, or the durable relation's.
+    fn tag_of(&self, codec: &DurableCodec<'_>, rel: RelId) -> Result<[u8; 8], NodeError> {
+        self.derived()?.tag(codec, rel)
+    }
+
+    /// `row`'s support in `rel` as of `at`: whether a table holds it; a durable view's count (its row key, and a count
+    /// key for more than one support).
+    fn view_support(&self, rel: RelId, row: &Row, at: u64) -> Result<u64, NodeError> {
+        let codec = self.codec();
+        let (tag, counts) = {
+            let d = self.derived()?;
+            match d.views.get(&rel) {
+                Some(t) => (t.0, Some(t.1)),
+                None => (d.tag(&codec, rel)?, None),
+            }
+        };
+        let all: Vec<usize> = (0..row.len()).collect();
+        if !self.lsm.get(&codec.tagged_key(&tag, rel, &all, row)?, at)? {
+            return Ok(0);
+        }
+        let Some(counts) = counts else {
+            return Ok(1);
+        };
+        let prefix = codec.tagged_key(&counts, rel, &all, row)?;
+        let end = crate::keycode::successor(&prefix);
+        let page = self.lsm.scan_page(&prefix, end.as_deref(), at, 1)?;
+        match page.keys.first() {
+            None => Ok(1),
+            Some(key) => {
+                let n = key
+                    .get(prefix.len()..)
+                    .and_then(|b| <[u8; 8]>::try_from(b).ok())
+                    .map(u64::from_be_bytes)
+                    .ok_or_else(|| NodeError::Store("a view's count key without its count".into()))?;
+                Ok(n)
+            }
+        }
+    }
+
+    /// Opens the durable views' keyspaces for this run (`ColdTables::open_views`, DATABASE.md §8).
+    fn open_view_keyspaces(&self, views: &[(RelId, [u8; 32])], resume: bool) -> Result<bool, NodeError> {
+        let mut d = self.derived()?;
+        let ready = resume && views.iter().all(|(_, def)| d.view_defs.contains_key(def));
+        let fresh = d.view_defs.values().max().map_or(0, |g| g.saturating_add(1));
+        d.views.clear();
+        for (rel, def) in views {
+            let generation = if ready {
+                d.view_defs.get(def).copied().unwrap_or(fresh)
+            } else {
+                fresh
+            };
+            let tags = view_tags(def, generation);
+            if let Some(cols) = d.orphan_indexes.remove(&tags.0) {
+                d.indexes.entry(*rel).or_default().extend(cols);
+            }
+            d.views.insert(*rel, tags);
+            if !ready {
+                // Written with the next applied version, which holds the view's rows from its start.
+                let mut key = defs_tag().to_vec();
+                key.push(DEF_VIEW);
+                key.extend_from_slice(def);
+                key.extend_from_slice(&generation.to_be_bytes());
+                d.unwritten.push(key);
+                d.view_defs.insert(*def, generation);
+            }
+        }
+        Ok(ready)
+    }
+
     /// The rows a page-at-a-time scan of `start..end` finds, from keys under `tag`; `None` once there are more than
     /// `max` (the scan stops there).
     #[allow(clippy::too_many_arguments)]
@@ -661,7 +819,7 @@ impl Database {
         values: &[blossom_value::Value],
         at: u64,
     ) -> Result<(Vec<u8>, Vec<u8>), NodeError> {
-        let rel_tag = codec.rel_tag(rel)?;
+        let rel_tag = self.tag_of(codec, rel)?;
         let tag: Vec<u8> = if cols.iter().enumerate().all(|(i, c)| i == *c) {
             rel_tag.to_vec()
         } else {
@@ -689,7 +847,7 @@ impl Database {
         max: Option<usize>,
     ) -> Result<Option<Vec<Row>>, NodeError> {
         let codec = self.codec();
-        let rel_tag = codec.rel_tag(rel)?;
+        let rel_tag = self.tag_of(&codec, rel)?;
         // The relation's own keys lead with its columns in declaration order: a probe on a leading run of them (and a
         // range on the next) reads them; any other reads an index.
         let leading = cols.iter().enumerate().all(|(i, c)| i == *c);
@@ -746,8 +904,19 @@ impl blossom_engine::ColdTables for Database {
     }
 
     fn contains(&self, rel: RelId, row: &Row, at: u64) -> Result<bool, blossom_ir::tick::EvalError> {
-        let key = self.codec().row_key(rel, row).map_err(storage)?;
+        let codec = self.codec();
+        let tag = self.tag_of(&codec, rel).map_err(storage)?;
+        let all: Vec<usize> = (0..row.len()).collect();
+        let key = codec.tagged_key(&tag, rel, &all, row).map_err(storage)?;
         self.lsm.get(&key, at).map_err(|e| storage(e.into()))
+    }
+
+    fn support(&self, rel: RelId, row: &Row, at: u64) -> Result<u64, blossom_ir::tick::EvalError> {
+        self.view_support(rel, row, at).map_err(storage)
+    }
+
+    fn open_views(&self, views: &[(RelId, [u8; 32])], resume: bool) -> Result<bool, blossom_ir::tick::EvalError> {
+        self.open_view_keyspaces(views, resume).map_err(storage)
     }
 
     fn probe(
@@ -787,7 +956,7 @@ impl blossom_engine::ColdTables for Database {
 
     fn count(&self, rel: RelId, at: u64) -> Result<usize, blossom_ir::tick::EvalError> {
         let codec = self.codec();
-        let tag = codec.rel_tag(rel).map_err(storage)?;
+        let tag = self.tag_of(&codec, rel).map_err(storage)?;
         let end = crate::keycode::successor(&tag);
         let mut n = 0usize;
         self.each_key(&tag, end.as_deref(), at, &mut |_| {

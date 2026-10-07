@@ -13,11 +13,13 @@
 //!
 //! The layout under the node's directory: `LOCK`, `META`, `db/` (the database), `wal/<seq>.seg`, `blobs/`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use blossom_base::internal_error;
+use blossom_base::{RelId, internal_error};
 use blossom_ir::ValidatedProgram;
+use blossom_ir::tick::Row;
 use blossom_store::{
     Certification, FileCheckpoints, FileWal, Lsn, MetaRecord, MetaStore, OpenMode, SegmentHeader, StoreError,
     StoreIdentity, StoreLock, Vfs, WalScan, durable_dir,
@@ -27,7 +29,7 @@ use blossom_wire::codec::put_varint;
 
 use crate::NodeError;
 use crate::database::Database;
-use crate::durable::{DurableCodec, DurableImage, DurableSchema};
+use crate::durable::{Delta, DurableCodec, DurableImage, DurableSchema};
 use crate::node::{Boot, RESERVE_STEP, TIME_STEP};
 
 /// The on-disk format of this build.
@@ -297,6 +299,9 @@ pub fn open(
     let mut last_now = record.last_now;
     let mut last_tick: Option<u64> = from;
     let mut replayed = 0;
+    // The ticks since the database's views (its flushed tick on, DATABASE.md §8): their deltas, in order, for the
+    // engine's catch-up of the views.
+    let mut since_views: Vec<(u64, Delta)> = Vec::new();
     for (lsn, rec) in scan.records() {
         if rec.kind == KIND_DELTA_BLOBS {
             // The blobs it logs are restored even when the base covers it: their files may not be durable yet (they
@@ -305,6 +310,9 @@ pub fn open(
             blobs.restore_logged(&logged, *lsn)?;
         }
         let delta = record_delta(rec, *lsn)?;
+        if image.is_none() && from.is_none_or(|f| rec.tick >= f) {
+            since_views.push((rec.tick, codec.decode_delta(delta)?));
+        }
         if from.is_some_and(|b| rec.tick <= b) {
             continue;
         }
@@ -405,6 +413,9 @@ pub fn open(
         base,
     )?
     .certified(record.certification);
+    // A database the store had: its views catch up from the ticks since (none for a database started here, whose views
+    // are built at the first tick).
+    let catch_up = if fresh { None } else { Some(catch_up_of(since_views)) };
     Ok(Opened {
         boot: Boot {
             database: database.clone(),
@@ -419,6 +430,7 @@ pub fn open(
             incarnation: record.restarts,
             blobs: blobs.clone(),
             stored,
+            catch_up,
         },
         wal,
         database,
@@ -529,4 +541,57 @@ fn no_state(spec: &StoreSpec) -> NodeError {
         spec.identity.node_name,
         spec.dir.display()
     ))
+}
+
+/// The catch-up of a database's views (DATABASE.md §8) from the deltas of the ticks since them, in order: the net
+/// change of all but the last, and the last.
+fn catch_up_of(mut ticks: Vec<(u64, Delta)>) -> blossom_ir::tick::CatchUp {
+    let Some((last_tick, last)) = ticks.pop() else {
+        return blossom_ir::tick::CatchUp::default();
+    };
+    // The net change: a row inserted then deleted (or deleted then inserted) is no change.
+    let mut ins: BTreeMap<RelId, std::collections::BTreeSet<Row>> = BTreeMap::new();
+    let mut del: BTreeMap<RelId, std::collections::BTreeSet<Row>> = BTreeMap::new();
+    for (_, delta) in ticks {
+        for (rel, (inserted, deleted)) in delta.changes {
+            let (i, d) = (ins.entry(rel).or_default(), del.entry(rel).or_default());
+            for row in deleted {
+                if !i.remove(&row) {
+                    d.insert(row);
+                }
+            }
+            for row in inserted {
+                if !d.remove(&row) {
+                    i.insert(row);
+                }
+            }
+        }
+    }
+    let changes = |m: BTreeMap<RelId, std::collections::BTreeSet<Row>>| -> BTreeMap<RelId, Vec<Row>> {
+        m.into_iter()
+            .filter(|(_, rows)| !rows.is_empty())
+            .map(|(rel, rows)| (rel, rows.into_iter().collect()))
+            .collect()
+    };
+    blossom_ir::tick::CatchUp {
+        before: blossom_ir::tick::Changes {
+            inserted: changes(ins),
+            deleted: changes(del),
+        },
+        last: blossom_ir::tick::Changes {
+            inserted: last
+                .changes
+                .iter()
+                .map(|(r, (i, _))| (*r, i.clone()))
+                .filter(|(_, i)| !i.is_empty())
+                .collect(),
+            deleted: last
+                .changes
+                .iter()
+                .map(|(r, (_, d))| (*r, d.clone()))
+                .filter(|(_, d)| !d.is_empty())
+                .collect(),
+        },
+        last_tick,
+    }
 }
