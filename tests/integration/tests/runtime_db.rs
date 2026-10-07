@@ -173,7 +173,7 @@ fn the_database_holds_the_durable_rows_as_of_every_tick_and_survives_restarts() 
         0
     );
     // Flushed to a table, then more in the memtable only (the WAL holds it).
-    server.database.flush_now().unwrap();
+    server.database.flush().unwrap();
     say(&mut ws, &a, s, 4, "fourth");
     drop(ws);
     server.stop().unwrap();
@@ -364,7 +364,7 @@ fn a_rebuilt_database_starts_again_after_a_crash_and_refuses_the_past() {
         blossom_runtime::db::Database::open(
             Arc::new(blossom_store::RealFs),
             &store,
-            a.clone(),
+            &a.program,
             names.clone(),
             blossom_store::lsm::LsmOptions::default(),
         )
@@ -372,7 +372,7 @@ fn a_rebuilt_database_starts_again_after_a_crash_and_refuses_the_past() {
     };
     let (db, fresh) = open();
     assert!(fresh);
-    db.recover(true, &[], &Default::default(), Some(5)).unwrap();
+    db.bootstrap(5, &Default::default()).unwrap();
     drop(db);
     let (db, fresh) = open();
     assert!(fresh, "a bootstrap that never flushed is started again");
@@ -425,7 +425,7 @@ fn the_database_recovers_from_a_crash_anywhere_in_its_flushes() {
         blossom_runtime::db::Database::open(
             Arc::new(fs.clone()) as Arc<dyn Vfs>,
             dir,
-            a.clone(),
+            &a.program,
             names.clone(),
             opts,
         )
@@ -433,8 +433,7 @@ fn the_database_recovers_from_a_crash_anywhere_in_its_flushes() {
     };
     let (db, fresh) = open(&sim);
     assert!(fresh);
-    db.recover(true, &[], &DurableImage::default(), None).unwrap();
-    db.flush_now().unwrap();
+    db.flush().unwrap();
     // Each tick inserts its row and deletes the one three ticks before.
     let mut wal: Vec<(Lsn, u64, Delta)> = Vec::new();
     let mut present: BTreeSet<u64> = BTreeSet::new();
@@ -455,7 +454,7 @@ fn the_database_recovers_from_a_crash_anywhere_in_its_flushes() {
         db.apply(t, &delta).unwrap();
         wal.push((Lsn(t), t, delta));
         if t % 5 == 4 {
-            db.flush_now().unwrap();
+            db.flush().unwrap();
         }
     }
     let cuts = sim.recorded_cuts().unwrap();
@@ -472,9 +471,17 @@ fn the_database_recovers_from_a_crash_anywhere_in_its_flushes() {
             let mut crashed = cut.fork().unwrap();
             crashed.crash(&mut |_| fate).unwrap();
             let (db, fresh) = open(&crashed);
-            // The watermark: every tick below it is in the tables.
-            let mark = db.flushed_tick().load(std::sync::atomic::Ordering::SeqCst);
-            db.recover(fresh, &wal, &image(), Some(last)).unwrap();
+            // What recovery does (blossom-node's recovery::open): a database the store did not have starts from the
+            // recovered rows; one it had takes the WAL records after its tables.
+            let flushed = db.flushed().unwrap();
+            let mark = flushed.map_or(0, |f| f + 1);
+            if fresh {
+                db.bootstrap(last, &image()).unwrap();
+            } else {
+                for (_, t, delta) in wal.iter().filter(|(_, t, _)| flushed.is_none_or(|f| *t > f)) {
+                    db.apply(*t, delta).unwrap();
+                }
+            }
             let held: BTreeSet<u64> = db
                 .rows(rel, &[], last)
                 .unwrap()

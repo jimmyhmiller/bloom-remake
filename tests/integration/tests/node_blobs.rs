@@ -85,8 +85,9 @@ impl Store {
                 identity: identity(),
                 mode: OpenMode::InitFresh,
                 certification: blossom_store::Certification::Strict,
+                database: blossom_store::lsm::LsmOptions::default(),
             },
-            self.artifact.program.get(),
+            &self.artifact.program,
             self.names.clone(),
             Instant(0),
             7,
@@ -202,7 +203,7 @@ fn every_crash_point_keeps_every_acknowledged_blob() {
                 assert_eq!(released[0].0, chunk, "chunk {i}'s acknowledgement");
                 acked.push((chunk, released[0].1));
                 if i % 5 == 4 {
-                    d.checkpoint().unwrap();
+                    d.flush().unwrap();
                 }
             }
         }
@@ -268,7 +269,7 @@ fn a_recovered_node_reads_its_blobs_and_collects_the_unreferenced_ones() {
             for (i, c) in chunks.iter().enumerate() {
                 send(&fs, &mut d, conn, c, 2 + i as i64);
             }
-            d.checkpoint().unwrap();
+            d.flush().unwrap();
         }
         // A blob no row holds, as a crash between a blob's write and its record's sync leaves one.
         let orphan: Arc<[u8]> = Arc::from(&b"written, never recorded"[..]);
@@ -290,7 +291,7 @@ fn a_recovered_node_reads_its_blobs_and_collects_the_unreferenced_ones() {
                 .offer_input(forget, Arc::from(vec![Value::Bytes(Arc::from(&c[..]))]));
         }
         d.run_until_quiescent(Instant(LATER + 1)).unwrap();
-        d.checkpoint().unwrap();
+        d.flush().unwrap();
         let mut left: Vec<BlobRef> = store.list().unwrap();
         left.sort();
         let mut want: Vec<BlobRef> = chunks.iter().skip(3).map(|c| BlobRef::of(c)).collect();
@@ -375,7 +376,7 @@ fn a_blob_a_record_after_the_checkpoint_references_is_kept() {
         sync(&mut node, 3);
         // A checkpoint of this state holds no row with the blob: it is a candidate its installation may let go.
         let checkpoint = node.next_tick().prev().unwrap();
-        let outside = node.checkpoint_candidates();
+        let outside = node.collection_candidates();
         assert!(outside.contains(&blob), "engine {engine}");
         // After it: the row again (the blob is still durable, so it is not written again), then deleted.
         node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone())]));
@@ -394,7 +395,7 @@ fn a_blob_a_record_after_the_checkpoint_references_is_kept() {
         // last tick's rows until the next tick runs: the deleted row, the event that deleted it.)
         sync(&mut node, 6);
         let later = node.next_tick().prev().unwrap();
-        let outside = node.checkpoint_candidates();
+        let outside = node.collection_candidates();
         let gone = node.blob_garbage(later, &outside);
         assert_eq!(gone, vec![blob], "engine {engine}");
         assert_eq!(store.delete(&gone).unwrap(), 1, "engine {engine}");
@@ -496,7 +497,7 @@ fn logged_blobs_are_synced_before_the_wal_that_logs_them_is_truncated() {
             d.run_until_quiescent(Instant(LATER + 2)).unwrap();
             send(&fs, &mut d, conn2, b"after the restart", LATER + 3);
             assert_eq!(segments(&fs), 2, "engine {engine}");
-            d.checkpoint().unwrap();
+            d.flush().unwrap();
             assert_eq!(segments(&fs), 1, "engine {engine}: the first segment was not truncated");
         }
         let mut image = fs.fork().unwrap();

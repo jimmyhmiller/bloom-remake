@@ -1,9 +1,10 @@
 //! Durable state (ARCHITECTURE §5.6): the rows of a program's `durable` relations, what a restart recovers.
 //!
 //! A tick whose durable rows change writes one WAL record: per changed relation, its name, schema hash, and the rows
-//! inserted and deleted, in the tuple codec with `Node` values by name. A checkpoint holds every durable relation's
-//! rows. Recovery loads the checkpoint named by `CURRENT` and replays the WAL records after it; a record naming a
-//! relation this build does not have, or with another schema hash, is a refusal (migrations are a later slice).
+//! inserted and deleted, in the tuple codec with `Node` values by name. The node's database (`crate::database`) holds
+//! every durable relation's rows; recovery opens it and replays the WAL records after what its tables hold (a store
+//! from before the database: its checkpoint chain, once). A record naming a relation this build does not have, or
+//! with another schema hash, is a refusal (migrations are a later slice).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -63,53 +64,6 @@ pub struct Delta {
 impl Delta {
     pub fn is_empty(&self) -> bool {
         self.changes.values().all(|(i, d)| i.is_empty() && d.is_empty())
-    }
-}
-
-/// The most delta layers a checkpoint chain holds before the next checkpoint is a full image again.
-pub const MAX_CHECKPOINT_LAYERS: usize = 16;
-
-/// Whether the next checkpoint may be a delta layer on the installed chain `chain`, with the change since it known:
-/// the chain has room, and its layers are still smaller than its image. Compacting when the layers outgrow the image
-/// keeps the total work of checkpoints proportional to the change (as in a log-structured merge).
-pub fn layer_fits(chain: Option<blossom_store::ChainInfo>) -> bool {
-    chain.is_some_and(|c| c.layers < MAX_CHECKPOINT_LAYERS && c.layer_bytes < c.base_bytes.max(64 * 1024))
-}
-
-/// The net change of a run of consecutive deltas (the changes since a checkpoint): a row inserted then deleted
-/// leaves no trace, and one deleted then inserted again none either. Its size follows the change, not the state.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct DeltaAcc {
-    changes: BTreeMap<RelId, (BTreeSet<Row>, BTreeSet<Row>)>,
-}
-
-impl DeltaAcc {
-    /// Adds the next delta (which applies to the image the accumulated ones lead to).
-    pub fn add(&mut self, d: &Delta) {
-        for (rel, (inserts, deletes)) in &d.changes {
-            let (ins, del) = self.changes.entry(*rel).or_default();
-            for r in deletes {
-                if !ins.remove(r) {
-                    del.insert(r.clone());
-                }
-            }
-            for r in inserts {
-                if !del.remove(r) {
-                    ins.insert(r.clone());
-                }
-            }
-        }
-    }
-
-    /// The accumulated change as one delta, leaving the accumulator empty.
-    pub fn take(&mut self) -> Delta {
-        Delta {
-            changes: std::mem::take(&mut self.changes)
-                .into_iter()
-                .filter(|(_, (i, d))| !i.is_empty() || !d.is_empty())
-                .map(|(rel, (i, d))| (rel, (i.into_iter().collect(), d.into_iter().collect())))
-                .collect(),
-        }
     }
 }
 

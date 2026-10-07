@@ -56,18 +56,25 @@ recovered rows when its node opens it.
 
 ## 4. How the node keeps it
 
-- **Feeding.** Each released tick's durable delta (now part of `ReleasedTick`) is applied to the database at the
-  tick's number, on the engine thread, after the tick's WAL record is synced. So the database only ever holds
-  released ticks.
-- **Flushing** happens on a database thread when the memtable passes 4 MiB, and compaction after a flush.
-- **Recovery.** The manifest names the tick its SSTables cover; the WAL records after it are applied again
-  (the WAL keeps them: its truncation waits for both the checkpoint and the database flush).
+The database is the node's durable state (since S24; before, it was a copy beside a checkpoint chain).
+
+- **Feeding.** Each released tick's durable delta (part of `ReleasedTick`) is applied to the database at the tick's
+  number by the driver, after the tick's WAL record is synced. So the database only ever holds released ticks.
+- **Flushing.** The manual driver flushes when the memtable passes its size, or when asked (the simulator asks at
+  random). The runtime's engine asks its database thread for a flush when the memtable passes its size or the WAL
+  has grown `storage.checkpoint_wal_bytes` since the last; compaction follows each flush.
+- **The WAL behind it.** After a flush, the blobs logged in the records the tables cover become files
+  (`FileWal::covered`), and the older WAL segments the tables wholly cover go (`FileWal::truncation`, whose token
+  only a `Flushed` from the tree can make). Blob collection anchors to flushes: the blobs no recovery from the tables
+  and no running rule can reach are deleted.
+- **Recovery** (`blossom-node::recovery`, the same for the runtime, the manual driver and the simulator) opens the
+  database, takes its rows as of the tick its tables cover, and applies the WAL records after that tick to both those
+  rows and the database. A store from before the database recovers from its checkpoint chain and the WAL after it
+  once: the database starts from those rows (its history begins there), is flushed, and the checkpoints go.
 - **History.** `storage.history_ticks` (default 65 536) is how far back an as-of query may go; older versions are
   merged away by compaction.
-- **Checkpoints stay, for now.** The engine still holds every relation in memory, and recovers it from the
-  checkpoint chain. The database is a second, queryable copy of the durable rows. The engine reading durable
-  relations from the database through a cache (so a node's durable state may outgrow its memory, and checkpoints
-  retire) is §7.
+- **The engine** still loads the recovered rows into memory and keeps every relation there; reading durable relations
+  from the database instead is §7.
 
 ## 5. Queries
 
@@ -106,7 +113,11 @@ blossom query --deploy d.toml --node s --store data/s 'all(k, v) = store(k, v)'
   of earlier ticks.
 - Queries: the shared TodoMVC and the KV store, live and offline, prefix and full scans, as-of, refusals.
 
-## 7. Next: the engine on the database (S24, planned)
+## 7. Next: the engine on the database (S24)
+
+Done in S24's first step: the database is the durable state of every driver (item 10 below), checkpoints are retired
+(item 8, except that the engine still loads the recovered rows), and the simulator's crashes reach the database.
+The rest:
 
 Today the engine holds every relation in memory (`blossom-engine::store::Store`: rows with support counts, indexes
 built on use), a table twice (its `Main` store, the rows now, and its `Next` store, the rows the next tick starts

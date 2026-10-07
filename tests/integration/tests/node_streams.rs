@@ -82,8 +82,9 @@ impl Store {
                 identity: identity(),
                 mode: OpenMode::InitFresh,
                 certification: blossom_store::Certification::Strict,
+                database: blossom_store::lsm::LsmOptions::default(),
             },
-            self.artifact.program.get(),
+            &self.artifact.program,
             self.names.clone(),
             Instant(0),
             7,
@@ -159,7 +160,7 @@ fn every_crash_point_keeps_every_acknowledged_chunk() {
             assert_eq!(released_at.len(), 1, "chunk {i} acknowledged once");
             acked.push((chunk, released_at[0]));
             if i % 5 == 4 {
-                d.checkpoint().unwrap();
+                d.flush().unwrap();
             }
         }
     }

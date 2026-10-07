@@ -434,8 +434,17 @@ impl<'p> Cluster<'p> {
                 identity: identity(&names, n),
                 mode: if fresh { OpenMode::InitFresh } else { OpenMode::Existing },
                 certification,
+                // Small, so a run's flushes and compactions (and crashes inside them) are many.
+                database: blossom_store::lsm::LsmOptions {
+                    memtable_bytes: 4 << 10,
+                    block_bytes: 512,
+                    tier: 3,
+                    max_tables: 8,
+                    history: 4096,
+                    ..blossom_store::lsm::LsmOptions::default()
+                },
             },
-            artifact.program.get(),
+            &artifact.program,
             names.clone(),
             Instant(now),
             u64::from(n.0) ^ slot.restarts,
@@ -857,13 +866,13 @@ impl<'p> Cluster<'p> {
                 released.push(t);
             }
         }
-        // Occasionally checkpoint, to exercise recovery from checkpoints.
+        // Occasionally flush the database (beside the flushes its size makes), to exercise recovery from its tables.
         if self.rng.below(50) == 0
             && let Some(driver) = self.nodes.get_mut(n.0 as usize).and_then(|s| s.driver.as_mut())
         {
             driver
-                .checkpoint()
-                .map_err(|e| SimError::Internal(internal_error!("node {} checkpoint failed: {e}", n.0)))?;
+                .flush()
+                .map_err(|e| SimError::Internal(internal_error!("node {} database flush failed: {e}", n.0)))?;
         }
         let mut local: Vec<Delivery> = Vec::new();
         for t in released {

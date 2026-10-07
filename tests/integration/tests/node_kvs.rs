@@ -102,8 +102,9 @@ impl Kvs {
                 identity: identity(),
                 mode: OpenMode::InitFresh,
                 certification: self.certification,
+                database: blossom_store::lsm::LsmOptions::default(),
             },
-            self.artifact.program.get(),
+            &self.artifact.program,
             self.names.clone(),
             Instant(wall),
             7,
@@ -292,7 +293,7 @@ fn recovery_replays_the_wal_after_a_checkpoint() {
             d.node.offer_ingress(k.put(1, i, &format!("k{i}"), b"old"));
             d.run_until_quiescent(Instant(10 + i as i64)).unwrap();
         }
-        d.checkpoint().unwrap();
+        d.flush().unwrap();
         for i in 0..5u64 {
             d.node.offer_ingress(k.put(1, 100 + i, &format!("k{i}"), b"new"));
             d.run_until_quiescent(Instant(100 + i as i64)).unwrap();
@@ -351,8 +352,9 @@ fn invariant_r_holds_under_random_sync_schedules() {
                     identity: identity(),
                     mode: OpenMode::InitFresh,
                     certification: k.certification,
+                    database: blossom_store::lsm::LsmOptions::default(),
                 },
-                k.artifact.program.get(),
+                &k.artifact.program,
                 k.names.clone(),
                 Instant(0),
                 1,
@@ -432,7 +434,7 @@ fn crash_points(k: &Kvs) {
             assert_eq!(released_at.len(), 1);
             acked.push((key, val, released_at[0]));
             if i % 5 == 4 {
-                d.checkpoint().unwrap();
+                d.flush().unwrap();
             }
         }
     }
@@ -640,8 +642,8 @@ fn the_clock_does_not_go_back_after_a_checkpoint() {
         d.node.offer_ingress(k.put(1, 1, "a", b"x"));
         let r = d.run_until_quiescent(Instant(5_000_000_000)).unwrap();
         assert_eq!(replies(&k, &r).len(), 1, "the put was released at instant 5 s");
-        d.checkpoint().unwrap();
-        d.checkpoint().unwrap(); // nothing new: a no-op
+        d.flush().unwrap();
+        d.flush().unwrap(); // nothing new: a no-op
     }
     fs.crash(&mut |_| WriteFate::Lost).unwrap();
     let d = k.boot(&fs, 2_000);
@@ -707,8 +709,9 @@ fn a_store_refuses_another_tail_certification() {
             identity: identity(),
             mode: OpenMode::Existing,
             certification: crc.certification,
+            database: blossom_store::lsm::LsmOptions::default(),
         },
-        crc.artifact.program.get(),
+        &crc.artifact.program,
         crc.names.clone(),
         Instant(10),
         2,
