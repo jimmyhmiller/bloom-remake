@@ -119,6 +119,37 @@ test("routing: all, active, completed, and back", async ({ page }) => {
   await expect(labels(page)).toHaveText(["one", "two", "three"]);
 });
 
+test("persistence: each durable row is its own entry, and the older one-entry form is read once and rewritten", async ({
+  page,
+}) => {
+  await add(page, "one", "two");
+  const rows = await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("blossom:todomvc:row:todos:")));
+  expect(rows.length).toBe(2);
+  // The same state in the older form: one entry holding every table.
+  await page.evaluate(() => {
+    const schemas = JSON.parse(localStorage.getItem("blossom:todomvc:tables"));
+    const rows = Object.fromEntries(Object.keys(schemas).map((t) => [t, []]));
+    for (const k of Object.keys(localStorage)) {
+      if (!k.startsWith("blossom:todomvc:row:")) continue;
+      const rest = k.slice("blossom:todomvc:row:".length);
+      const cut = rest.indexOf(":[");
+      rows[rest.slice(0, cut)].push(JSON.parse(rest.slice(cut + 1)));
+      localStorage.removeItem(k);
+    }
+    localStorage.removeItem("blossom:todomvc:tables");
+    const tables = Object.keys(schemas).map((name) => ({ name, schema: schemas[name], rows: rows[name] }));
+    localStorage.setItem("blossom:todomvc", JSON.stringify({ tables }));
+  });
+  await page.reload();
+  await expect(page.locator("body")).toHaveAttribute("data-blossom", "ready");
+  await expect(labels(page)).toHaveText(["one", "two"]);
+  const after = await page.evaluate(() => ({
+    old: localStorage.getItem("blossom:todomvc"),
+    rows: Object.keys(localStorage).filter((k) => k.startsWith("blossom:todomvc:row:todos:")).length,
+  }));
+  expect(after).toEqual({ old: null, rows: 2 });
+});
+
 test("persistence: a reload keeps the todos, their state and the route", async ({ page }) => {
   await add(page, "one", "two");
   await items(page).nth(0).locator(".toggle").check();

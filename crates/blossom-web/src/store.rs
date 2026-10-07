@@ -1,6 +1,10 @@
 //! Persistence (BROWSER.md "Persistence"): a program's durable tables, saved after every round and restored at
 //! boot, as JSON (what the page keeps in `localStorage`). Each table is saved with its schema hash (the runtime's,
 //! `blossom_wire::catalog::schema_hash`): a table whose schema changed is not restored, and the host says so.
+//!
+//! The host keeps one entry per row, so a round costs the rows it changed: [`changes`] gives the rows added and
+//! removed since the last call (all of them, `full`, the first time), and a restore takes them back as [`save`]'s
+//! JSON, which the host assembles from its entries.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -42,6 +46,38 @@ pub fn save(program: &Program, carried: &Instance) -> Result<String, HostError> 
         })
         .collect();
     serde_json::to_string(&Saved { tables }).map_err(|e| HostError::Store(format!("saving the durable tables: {e}")))
+}
+
+/// The durable rows a host adds and removes since it last saved: all of them (`full`: it drops what it had) the first
+/// time after a start, then the changes. Each row as its JSON, which is also the key a host keeps it under.
+#[derive(Serialize)]
+pub struct SaveChanges {
+    pub full: bool,
+    /// Each durable table's schema hash, in hex, by name.
+    pub tables: BTreeMap<String, String>,
+    /// (table, row as JSON).
+    pub put: Vec<(String, String)>,
+    pub delete: Vec<(String, String)>,
+}
+
+/// The durable tables of `program` with their schema hashes, by name.
+pub fn schemas(program: &Program) -> BTreeMap<String, String> {
+    program
+        .rels
+        .iter_enumerated()
+        .filter(|(_, r)| r.durable)
+        .map(|(id, r)| {
+            (
+                r.name.to_string(),
+                hex(&blossom_wire::catalog::schema_hash(program, id)),
+            )
+        })
+        .collect()
+}
+
+/// A row as the JSON a host keeps it under.
+pub fn row_json(row: &Row) -> Result<String, HostError> {
+    serde_json::to_string(&row.to_vec()).map_err(|e| HostError::Store(format!("saving a row: {e}")))
 }
 
 /// What a restore found: the durable rows to start from, and the tables it could not restore (gone, or with

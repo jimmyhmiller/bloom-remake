@@ -14,7 +14,7 @@ pub mod store;
 mod wasm;
 pub mod why;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use blossom_artifact::bls::BlsArtifact;
@@ -296,6 +296,11 @@ pub fn compile(root: &str, files: &BTreeMap<String, String>) -> Result<Compiled,
 }
 
 impl Compiled {
+    /// The compiled program.
+    pub fn artifact(&self) -> &BlsArtifact {
+        &self.artifact
+    }
+
     /// The DOM events the program listens to: the inputs it declares and reads (`route` included).
     pub fn listens(&self) -> Vec<&'static str> {
         self.inputs.keys().copied().collect()
@@ -320,6 +325,8 @@ pub struct App {
     now: Instant,
     /// The rounds the inspector can explain.
     history: why::History,
+    /// The durable rows added and removed since the host last saved (`None`: it must save them all).
+    unsaved: Option<BTreeMap<RelId, (BTreeSet<Row>, BTreeSet<Row>)>>,
 }
 
 /// What starting a program did: the first page, and what the restore could not keep.
@@ -355,6 +362,7 @@ impl App {
             timers: None,
             now: Instant(0),
             history: why::History::new(),
+            unsaved: None,
         })
     }
 
@@ -420,6 +428,7 @@ impl App {
         })?;
         self.tick = 0;
         self.page = Page::default();
+        self.unsaved = None;
         self.now = now;
         self.timers = Some(
             TimerTable::new(self.compiled.artifact.program.get(), None, now).map_err(|e| HostError::Round {
@@ -562,6 +571,27 @@ impl App {
             focus: changes("focus"),
         };
         self.page.apply(&delta)?;
+        // The durable rows the host has not saved: a row added and removed again since is neither.
+        if let Some(unsaved) = self.unsaved.as_mut() {
+            let program = self.compiled.artifact.program.get();
+            let durable = |rel: &RelId| program.rels.get(*rel).is_some_and(|r| r.durable);
+            for (rel, rows) in out.changes.inserted.iter().filter(|(r, _)| durable(r)) {
+                let (ins, del) = unsaved.entry(*rel).or_default();
+                for row in rows {
+                    if !del.remove(row) {
+                        ins.insert(Arc::clone(row));
+                    }
+                }
+            }
+            for (rel, rows) in out.changes.deleted.iter().filter(|(r, _)| durable(r)) {
+                let (ins, del) = unsaved.entry(*rel).or_default();
+                for row in rows {
+                    if !ins.remove(row) {
+                        del.insert(Arc::clone(row));
+                    }
+                }
+            }
+        }
         Ok(!out.changes.inserted.is_empty() || !out.changes.deleted.is_empty())
     }
 
@@ -588,6 +618,42 @@ impl App {
                 out.extend(explainer.why(*rel, row, last, 0)?);
             }
         }
+        Ok(out)
+    }
+
+    /// The durable rows to add to and remove from the host's store since the last call: every row the first time after a
+    /// start (`full`), then only those the rounds since changed (BROWSER.md "Persistence").
+    pub fn save_changes(&mut self) -> Result<store::SaveChanges, HostError> {
+        let program = self.compiled.artifact.program.get();
+        let name = |rel: RelId| program.rels.get(rel).map(|r| r.name.to_string()).unwrap_or_default();
+        let mut out = store::SaveChanges {
+            full: self.unsaved.is_none(),
+            tables: store::schemas(program),
+            put: Vec::new(),
+            delete: Vec::new(),
+        };
+        match self.unsaved.take() {
+            None => {
+                for (id, r) in program.rels.iter_enumerated() {
+                    if r.durable {
+                        for row in self.engine.carried_rows(id) {
+                            out.put.push((name(id), store::row_json(&row)?));
+                        }
+                    }
+                }
+            }
+            Some(changes) => {
+                for (rel, (ins, del)) in changes {
+                    for row in &ins {
+                        out.put.push((name(rel), store::row_json(row)?));
+                    }
+                    for row in &del {
+                        out.delete.push((name(rel), store::row_json(row)?));
+                    }
+                }
+            }
+        }
+        self.unsaved = Some(BTreeMap::new());
         Ok(out)
     }
 

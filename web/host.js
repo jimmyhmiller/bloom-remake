@@ -114,6 +114,46 @@ function now() {
   return performance.timeOrigin + performance.now();
 }
 
+// The durable tables in localStorage: one entry per row, `blossom:NAME:row:TABLE:ROW` (the row as JSON), and the
+// tables' schema hashes under `blossom:NAME:tables`, so a round writes only the rows it changed. (Before, the whole
+// state was one entry, `blossom:NAME`: it is read once and rewritten in this form.)
+const rowPrefix = `${storageKey}:row:`;
+const tablesKey = `${storageKey}:tables`;
+
+/** The saved durable tables, as the JSON `start` takes (empty: none). */
+function loadSaved() {
+  const tables = localStorage.getItem(tablesKey);
+  if (tables === null) return localStorage.getItem(storageKey) ?? "";
+  const rows = new Map(Object.keys(JSON.parse(tables)).map((name) => [name, []]));
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (!key.startsWith(rowPrefix)) continue;
+    // A table's name may hold `::` (a module's); a row's JSON starts with `[`.
+    const rest = key.slice(rowPrefix.length);
+    const cut = rest.indexOf(":[");
+    const name = rest.slice(0, cut);
+    if (cut >= 0 && rows.has(name)) rows.get(name).push(JSON.parse(rest.slice(cut + 1)));
+  }
+  const schemas = JSON.parse(tables);
+  return JSON.stringify({ tables: [...rows].map(([name, r]) => ({ name, schema: schemas[name], rows: r })) });
+}
+
+/** Writes what the program's durable tables gained and lost since the last save (everything, the first time). */
+function writeSaved(c) {
+  if (c.full) {
+    const old = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key.startsWith(rowPrefix)) old.push(key);
+    }
+    for (const key of old) localStorage.removeItem(key);
+    localStorage.removeItem(storageKey);
+    localStorage.setItem(tablesKey, JSON.stringify(c.tables));
+  }
+  for (const [table, row] of c.delete) localStorage.removeItem(`${rowPrefix}${table}:${row}`);
+  for (const [table, row] of c.put) localStorage.setItem(`${rowPrefix}${table}:${row}`, "");
+}
+
 /** Saves the durable tables: at once, or (while the clock runs, which may change them every frame) soon after. */
 let saveTimer = null;
 function persist(soon) {
@@ -123,7 +163,7 @@ function persist(soon) {
   }
   if (saveTimer !== null) clearTimeout(saveTimer);
   saveTimer = null;
-  if (app && saving) localStorage.setItem(storageKey, app.saved());
+  if (app && saving) writeSaved(JSON.parse(app.saveChanges()));
 }
 addEventListener("pagehide", () => persist(false));
 
@@ -234,7 +274,7 @@ function run(files) {
     return diagnostics(err);
   }
   const warnings = JSON.parse(next.warnings());
-  const saved = app ? app.saved() : bench !== null ? "" : (localStorage.getItem(storageKey) ?? "");
+  const saved = app ? app.saved() : bench !== null ? "" : loadSaved();
   let started;
   try {
     started = JSON.parse(next.start(saved, location.hash, now()));
