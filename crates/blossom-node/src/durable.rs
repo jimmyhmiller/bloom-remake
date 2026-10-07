@@ -174,6 +174,7 @@ pub struct DurableCodec<'p> {
     program: &'p Program,
     schema: &'p DurableSchema,
     codec: Codec<'p>,
+    names: Arc<[Arc<str>]>,
 }
 
 impl<'p> DurableCodec<'p> {
@@ -181,7 +182,8 @@ impl<'p> DurableCodec<'p> {
         DurableCodec {
             program,
             schema,
-            codec: Codec::new(program, NodeEncoding::ByName(names), WireLimits::default()),
+            codec: Codec::new(program, NodeEncoding::ByName(names.clone()), WireLimits::default()),
+            names,
         }
     }
 
@@ -267,29 +269,107 @@ impl<'p> DurableCodec<'p> {
         Ok(tag)
     }
 
-    /// A row's database key: its relation's tag, then the row in the durable tuple codec (`Node` values by name).
-    /// Each column is self-delimiting, so rows agreeing on their leading columns share a key prefix.
+    /// The key encoding of column `col`'s value `v` (`crate::keycode`).
+    fn put_key_value(
+        &self,
+        col: &blossom_ir::core::Column,
+        v: &blossom_value::Value,
+        out: &mut Vec<u8>,
+    ) -> Result<(), NodeError> {
+        let fallback = |v: &blossom_value::Value| -> Result<Vec<u8>, String> {
+            let mut bytes = Vec::new();
+            self.codec
+                .encode_row(std::slice::from_ref(col), std::slice::from_ref(v), &mut bytes)
+                .map_err(|e| e.to_string())?;
+            Ok(bytes)
+        };
+        crate::keycode::encode(v, &self.names, &fallback, out).map_err(|e| WireError::Malformed(e).into())
+    }
+
+    /// A row's database key (docs/design/DATABASE.md §3): its relation's tag; each column's value in the
+    /// order-preserving key encoding, in declaration order (rows agreeing on their leading columns share a prefix,
+    /// and keys order as rows do column by column); then the row in the durable codec and that encoding's length (a
+    /// big-endian `u32`), which is what [`DurableCodec::key_row`] reads back.
     pub fn row_key(&self, rel: RelId, row: &Row) -> Result<Vec<u8>, NodeError> {
+        let cols = self.cols(rel)?;
+        if cols.len() != row.len() {
+            return Err(WireError::Malformed(format!("{} values for {} columns", row.len(), cols.len())).into());
+        }
         let mut key = self.rel_tag(rel)?.to_vec();
-        self.codec.encode_row(self.cols(rel)?, row, &mut key)?;
+        for (c, v) in cols.iter().zip(row.iter()) {
+            self.put_key_value(c, v, &mut key)?;
+        }
+        let at = key.len();
+        self.codec.encode_row(cols, row, &mut key)?;
+        let len = u32::try_from(key.len() - at).map_err(|_| WireError::Limit("a row over 4 GiB"))?;
+        key.extend_from_slice(&len.to_be_bytes());
         Ok(key)
     }
 
-    /// A key prefix of the rows of `rel` whose leading columns are `leading`: every such row's key starts with it.
-    /// It covers as many of the leading columns as come first in the encoding (all of them, unless explicit field
-    /// numbers reorder the columns); a reader filters for the rest.
+    /// The key prefix of the rows of `rel` whose leading columns (in declaration order) are `leading`.
     pub fn key_prefix(&self, rel: RelId, leading: &[blossom_value::Value]) -> Result<Vec<u8>, NodeError> {
+        let cols = self.cols(rel)?;
+        let cols = cols
+            .get(..leading.len())
+            .ok_or_else(|| WireError::Malformed(format!("{} leading columns of a narrower relation", leading.len())))?;
         let mut key = self.rel_tag(rel)?.to_vec();
-        self.codec.encode_row_prefix(self.cols(rel)?, leading, &mut key)?;
+        for (c, v) in cols.iter().zip(leading) {
+            self.put_key_value(c, v, &mut key)?;
+        }
         Ok(key)
+    }
+
+    /// The keys of the rows of `rel` whose leading columns are `leading` and whose next column lies within `lo` and
+    /// `hi` (in value order, which the key encoding keeps for the types a program compares): from the first key
+    /// (inclusive) to the end (exclusive, `None`: no end).
+    pub fn key_range(
+        &self,
+        rel: RelId,
+        leading: &[blossom_value::Value],
+        lo: std::ops::Bound<&blossom_value::Value>,
+        hi: std::ops::Bound<&blossom_value::Value>,
+    ) -> Result<(Vec<u8>, Option<Vec<u8>>), NodeError> {
+        use std::ops::Bound;
+        let prefix = self.key_prefix(rel, leading)?;
+        let col = self
+            .cols(rel)?
+            .get(leading.len())
+            .ok_or_else(|| WireError::Malformed("a range past the relation's last column".into()))?;
+        let at = |v: &blossom_value::Value| -> Result<Vec<u8>, NodeError> {
+            let mut k = prefix.clone();
+            self.put_key_value(col, v, &mut k)?;
+            Ok(k)
+        };
+        let start = match lo {
+            Bound::Unbounded => prefix.clone(),
+            Bound::Included(v) => at(v)?,
+            // Past every key with this value in the column.
+            Bound::Excluded(v) => {
+                crate::keycode::successor(&at(v)?).ok_or_else(|| WireError::Malformed("an empty range".into()))?
+            }
+        };
+        let end = match hi {
+            Bound::Unbounded => crate::keycode::successor(&prefix),
+            Bound::Included(v) => crate::keycode::successor(&at(v)?),
+            Bound::Excluded(v) => Some(at(v)?),
+        };
+        Ok((start, end))
     }
 
     /// The row a database key of `rel` holds.
     pub fn key_row(&self, rel: RelId, key: &[u8]) -> Result<Row, NodeError> {
         let tag = self.rel_tag(rel)?;
-        let mut body = key
-            .strip_prefix(tag.as_slice())
-            .ok_or_else(|| WireError::Malformed("a database key of another relation".into()))?;
+        if !key.starts_with(tag.as_slice()) {
+            return Err(WireError::Malformed("a database key of another relation".into()).into());
+        }
+        let (rest, len) = key
+            .split_at_checked(key.len().saturating_sub(4))
+            .ok_or_else(|| WireError::Malformed("a database key without its row".into()))?;
+        let len = u32::from_be_bytes(len.try_into().map_err(|_| WireError::Truncated("a database key"))?) as usize;
+        let mut body = rest
+            .get(rest.len().saturating_sub(len)..)
+            .filter(|_| len <= rest.len().saturating_sub(tag.len()))
+            .ok_or_else(|| WireError::Malformed("a database key shorter than its row".into()))?;
         let row = self.codec.decode_row(self.cols(rel)?, &mut body)?;
         if !body.is_empty() {
             return Err(WireError::Malformed("trailing bytes in a database key".into()).into());

@@ -126,7 +126,7 @@ fn say(ws: &mut Ws, a: &BlsArtifact, server: NodeId, seq: u64, text: &str) {
 #[cfg(test)]
 fn log(server: &Server, a: &BlsArtifact, tick: Option<u64>) -> Vec<String> {
     let db = &server.database;
-    let tick = tick.unwrap_or_else(|| db.range().unwrap().1);
+    let tick = tick.unwrap_or_else(|| db.range().unwrap().1.unwrap());
     let rel = a.rel_named("log").unwrap();
     let mut out: Vec<String> = db
         .rows(rel, &[], tick)
@@ -149,7 +149,7 @@ fn the_database_holds_the_durable_rows_as_of_every_tick_and_survives_restarts() 
     let s = a.node_id("s").unwrap();
     let (mut ws, me, token) = open(port, &spec, &a, None);
     say(&mut ws, &a, s, 1, "first");
-    let after_first = server.database.range().unwrap().1;
+    let after_first = server.database.range().unwrap().1.unwrap();
     say(&mut ws, &a, s, 2, "second");
     say(&mut ws, &a, s, 3, "third");
     assert_eq!(log(&server, &a, None), ["first", "second", "third"]);
@@ -207,7 +207,14 @@ fn a_query_binding_the_leading_column_reads_by_prefix() {
     }];
     let a = compile_file(copy.to_str().unwrap(), &nodes).0.unwrap().0;
     for (view, want) in [("val", vec![Value::str("apple")]), ("all", vec![])] {
-        let (q, inputs) = a.program.query(a.rel_named(view).unwrap()).unwrap();
+        let server = a
+            .program
+            .get()
+            .roles
+            .iter_enumerated()
+            .find(|(_, r)| r.name.to_string() == "Server")
+            .map(|(id, _)| id);
+        let (q, inputs) = a.program.query(a.rel_named(view).unwrap(), server).unwrap();
         assert_eq!(inputs, ["store"]);
         let store = q
             .get()
@@ -216,10 +223,138 @@ fn a_query_binding_the_leading_column_reads_by_prefix() {
             .find(|(_, r)| r.name.to_string() == "store")
             .map(|(id, _)| id)
             .unwrap();
-        assert_eq!(
-            blossom_runtime::query::leading_constants(q.get(), store),
-            want,
-            "{view}"
-        );
+        assert_eq!(blossom_runtime::query::leading_constants(&q, store), want, "{view}");
     }
+}
+
+/// A node of `fixtures/db/seeded.bls` (it writes at tick 0) in a fresh directory: its deployment and program.
+#[cfg(test)]
+fn seeded(name: &str) -> (DeploymentSpec, Arc<BlsArtifact>) {
+    let dir = std::env::temp_dir().join(format!("blossom-db-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let secrets = dir.join("s.secrets");
+    std::fs::write(&secrets, "seed = \"00112233445566778899aabbccddeeff\"\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/db/seeded.bls");
+    let text = format!(
+        "format = 1\n[deployment]\nid = \"seeded\"\nprogram = \"seeded\"\nversion = 1\nsource = \"{}\"\n\
+         secrets = \"s.secrets\"\n[[node]]\nname = \"k\"\nrole = \"Keeper\"\naddr = \"127.0.0.1:{}\"\n\
+         principal = \"spiffe://test/seeded/Keeper/k\"\n[security]\nmode = \"insecure-dev\"\n[storage]\n\
+         data_dir = \"data\"\n",
+        source.display(),
+        free_port(),
+    );
+    let spec = DeploymentSpec::parse(&text, &dir).unwrap();
+    let nodes = [NodeSpec {
+        name: "k".into(),
+        role: Some("Keeper".into()),
+    }];
+    let (compiled, _) = compile_file(&spec.source.to_string_lossy(), &nodes);
+    (spec, Arc::new(compiled.unwrap().0))
+}
+
+#[cfg(test)]
+fn start_seeded(spec: &DeploymentSpec, a: &Arc<BlsArtifact>, mode: OpenMode) -> Server {
+    Server::start(ServerConfig {
+        spec: spec.clone(),
+        artifact: a.clone(),
+        node: "k".into(),
+        mode,
+        dir: None,
+        backend: blossom_node::Backend::Engine,
+        externs: Arc::new(blossom_std_host::registry().unwrap()),
+        record: None,
+        web: None,
+        admin: None,
+    })
+    .unwrap()
+}
+
+#[cfg(test)]
+fn seeded_rows(server: &Server, a: &BlsArtifact) -> usize {
+    match server.database.range().unwrap().1 {
+        Some(tick) => server
+            .database
+            .rows(a.rel_named("seeded").unwrap(), &[], tick)
+            .unwrap()
+            .len(),
+        None => 0,
+    }
+}
+
+/// Rows written at tick 0 and never flushed are applied again after a restart (a tick-0 version is not "nothing").
+#[test]
+fn rows_written_at_tick_zero_survive_a_restart_before_any_flush() {
+    let (spec, a) = seeded("tick0");
+    let server = start_seeded(&spec, &a, OpenMode::InitFresh);
+    for _ in 0..100 {
+        if server.database.range().unwrap().1.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // Stopped before the timer's write: only tick 0's rows, never flushed.
+    assert_eq!(server.database.range().unwrap().1, Some(0));
+    assert_eq!(seeded_rows(&server, &a), 2);
+    server.stop().unwrap();
+    let server = start_seeded(&spec, &a, OpenMode::Existing);
+    assert!(seeded_rows(&server, &a) >= 2);
+    server.stop().unwrap();
+}
+
+/// A database rebuilt from a store's recovered rows: a bootstrap a crash cut short (no flush) leaves no manifest, so
+/// the next boot starts it again; and its history begins at the rebuild.
+#[test]
+fn a_rebuilt_database_starts_again_after_a_crash_and_refuses_the_past() {
+    let (spec, a) = seeded("rebuild");
+    let server = start_seeded(&spec, &a, OpenMode::InitFresh);
+    for _ in 0..200 {
+        if seeded_rows(&server, &a) == 3 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(seeded_rows(&server, &a), 3, "the timer's row arrived");
+    server.stop().unwrap();
+    let store = spec.data_dir.join("k");
+    std::fs::remove_dir_all(store.join("db")).unwrap();
+    let names: Arc<[Arc<str>]> = a.nodes.iter().map(|n| Arc::from(n.as_str())).collect();
+    // A bootstrap cut short: the rows reach the memtable, never a table.
+    let open = || {
+        blossom_runtime::db::Database::open(
+            Arc::new(blossom_store::RealFs),
+            &store,
+            a.clone(),
+            names.clone(),
+            blossom_store::lsm::LsmOptions::default(),
+        )
+        .unwrap()
+    };
+    let (db, fresh) = open();
+    assert!(fresh);
+    db.recover(true, &[], &Default::default(), Some(5)).unwrap();
+    drop(db);
+    let (db, fresh) = open();
+    assert!(fresh, "a bootstrap that never flushed is started again");
+    drop(db);
+    // The node rebuilds it, and refuses reads before the rebuild rather than answering them empty.
+    let server = start_seeded(&spec, &a, OpenMode::Existing);
+    assert_eq!(seeded_rows(&server, &a), 3);
+    let (floor, newest) = server.database.range().unwrap();
+    assert!(
+        floor > 0 && Some(floor) == newest,
+        "the floor is the rebuild's tick ({floor}, {newest:?})"
+    );
+    assert!(
+        server
+            .database
+            .rows(a.rel_named("seeded").unwrap(), &[], floor - 1)
+            .is_err()
+    );
+    server.stop().unwrap();
 }

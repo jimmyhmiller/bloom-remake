@@ -19,6 +19,8 @@ use crate::web;
 #[derive(Clone)]
 pub(crate) struct AdminCtx {
     pub db: Arc<Database>,
+    /// The node the queries run as.
+    pub me: blossom_value::time::NodeId,
     pub artifact: Arc<BlsArtifact>,
     pub names: Arc<[Arc<str>]>,
     pub externs: Arc<blossom_value::ExternRegistry>,
@@ -82,6 +84,7 @@ fn run(body: &[u8], ctx: &AdminCtx) -> Result<Answer, RuntimeError> {
     answer(
         req,
         &ctx.db,
+        ctx.me,
         &ctx.artifact.program,
         &ctx.names,
         ctx.externs.clone(),

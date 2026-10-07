@@ -512,7 +512,7 @@ impl Server {
         }
         // While the engine recovers from checkpoints, the database is a second copy of the durable rows: it must
         // agree with the recovered ones, or the node refuses to start (docs/design/DATABASE.md §4).
-        let latest = db.range()?.1;
+        let latest = db.range()?.1.unwrap_or(0);
         let mut recovered = opened.boot.image.clone();
         recovered.rows.retain(|_, rows| !rows.is_empty());
         let mut held = db.image(latest)?;
@@ -644,6 +644,8 @@ impl Server {
             let blobs = blob_store.clone();
             let gate = TruncationGate {
                 db_flushed: db.flushed_tick(),
+                flush: db.flush_request(),
+                asked: None,
                 records: wal_ticks.into_iter().collect(),
             };
             threads.push(spawn("committer", move || {
@@ -764,6 +766,7 @@ impl Server {
         if let Some(l) = admin_listener {
             let ctx = crate::admin::AdminCtx {
                 db: db.clone(),
+                me,
                 artifact: artifact.clone(),
                 names: names.clone(),
                 externs: cfg.externs.clone(),
@@ -910,8 +913,12 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> Result<JoinHandle<()>
 
 /// What holds a WAL truncation back: the database must hold every record it removes (docs/design/DATABASE.md §4).
 struct TruncationGate {
-    /// The tick the database's tables cover.
+    /// The first tick the database's tables do not cover.
     db_flushed: Arc<AtomicU64>,
+    /// Asks the database for a flush, when a truncation waits on it.
+    flush: Box<dyn Fn() + Send>,
+    /// The truncation a flush was last asked for.
+    asked: Option<blossom_store::Lsn>,
     /// The position and tick of every record in the WAL, in order.
     records: VecDeque<(blossom_store::Lsn, u64)>,
 }
@@ -923,7 +930,7 @@ impl TruncationGate {
         self.records
             .iter()
             .take_while(|(lsn, _)| *lsn <= upto)
-            .all(|(_, tick)| *tick <= flushed)
+            .all(|(_, tick)| *tick < flushed)
     }
 
     fn truncated(&mut self, upto: blossom_store::Lsn) {
@@ -1036,6 +1043,14 @@ fn committer(
                 return;
             }
             gate.truncated(upto);
+        }
+        // A truncation still waiting waits on the database: a flush is asked for once per truncation (the memtable
+        // may grow slowly while the WAL does not, as with large blobs logged in it).
+        if let Some(t) = truncates.first()
+            && gate.asked != Some(t.lsn())
+        {
+            gate.asked = Some(t.lsn());
+            (gate.flush)();
         }
     }
 }

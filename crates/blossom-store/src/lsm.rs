@@ -61,6 +61,9 @@ pub struct LsmOptions {
     pub history: u64,
     /// The bytes of decoded blocks the tree keeps for reads.
     pub cache_bytes: usize,
+    /// The owner's format of its keys, recorded in the manifest: a tree written in another one is refused
+    /// ([`manifest_format`] tells it beforehand).
+    pub format: u32,
 }
 
 impl Default for LsmOptions {
@@ -72,6 +75,7 @@ impl Default for LsmOptions {
             max_tables: 12,
             history: 65_536,
             cache_bytes: 32 << 20,
+            format: 0,
         }
     }
 }
@@ -379,15 +383,17 @@ impl Sst {
         decode_block(&self.path, b.offset, body)
     }
 
-    /// The entries whose key starts with `prefix`, at or below `as_of`, in order.
-    fn scan(&self, prefix: &[u8], as_of: u64, out: &mut Vec<Entry>) -> Result<(), StoreError> {
-        let start = self.index.partition_point(|b| b.last.as_slice() < prefix);
-        for b in self.index.iter().skip(start) {
-            if b.first.as_slice() > prefix && !b.first.starts_with(prefix) {
+    /// The entries with keys from `start` (inclusive) to `end` (exclusive; `None`: no end), at or below `as_of`, in
+    /// order.
+    fn scan(&self, start: &[u8], end: Option<&[u8]>, as_of: u64, out: &mut Vec<Entry>) -> Result<(), StoreError> {
+        let before_end = |k: &[u8]| end.is_none_or(|e| k < e);
+        let first = self.index.partition_point(|b| b.last.as_slice() < start);
+        for b in self.index.iter().skip(first) {
+            if !before_end(&b.first) {
                 break;
             }
             for e in self.block(b)?.iter() {
-                if e.key.starts_with(prefix) && e.version <= as_of {
+                if e.key.as_slice() >= start && before_end(&e.key) && e.version <= as_of {
                     out.push(e.clone());
                 }
             }
@@ -409,6 +415,18 @@ impl Sst {
         }
         Ok(None)
     }
+}
+
+/// The smallest byte string greater than every one starting with `prefix` (`None`: there is none).
+fn successor(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut out = prefix.to_vec();
+    while let Some(last) = out.pop() {
+        if last < 0xff {
+            out.push(last + 1);
+            return Some(out);
+        }
+    }
+    None
 }
 
 fn read_exact(file: &dyn VfsFile, mut off: u64, mut buf: &mut [u8]) -> Result<(), StoreError> {
@@ -532,6 +550,36 @@ fn write_table(
     }))
 }
 
+/// `dir`'s manifest, if it has one.
+fn read_manifest(fs: &dyn Vfs, dir: &Path) -> Result<Option<Manifest>, StoreError> {
+    let path = dir.join("MANIFEST");
+    if !fs.list(dir)?.iter().any(|p| p == &path) {
+        return Ok(None);
+    }
+    let bytes = read_path(fs, &path)?;
+    let body = bytes.get(32..).ok_or_else(|| corrupt(&path, 0, "MANIFEST truncated"))?;
+    if bytes.get(..32) != Some(blake3::hash(body).as_bytes().as_slice()) {
+        return Err(corrupt(&path, 0, "MANIFEST checksum"));
+    }
+    let m: Manifest = serde_json::from_slice(body).map_err(|e| invalid(e.to_string()))?;
+    if m.format != MANIFEST_FORMAT {
+        return Err(invalid(format!(
+            "database format {} (this build reads {MANIFEST_FORMAT})",
+            m.format
+        )));
+    }
+    Ok(Some(m))
+}
+
+/// The key format the tree under `dir` was written in (`None`: there is no tree there).
+pub fn manifest_format(fs: &dyn Vfs, dir: &Path) -> Result<Option<u32>, StoreError> {
+    match fs.list(dir) {
+        Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+        Ok(_) => Ok(read_manifest(fs, dir)?.map(|m| m.key_format)),
+    }
+}
+
 /// Writes `m` as `dir`'s manifest, atomically: BLAKE3 over the body, then the body.
 fn write_manifest(fs: &dyn Vfs, dir: &Path, m: &Manifest) -> Result<(), StoreError> {
     let body = serde_json::to_vec(m).map_err(|e| invalid(e.to_string()))?;
@@ -549,19 +597,23 @@ struct Manifest {
     tables: Vec<TableMeta>,
     /// The version (tick) and mark the flushed entries cover: every entry at or below the version is in the
     /// tables.
-    flushed_version: u64,
+    flushed_version: Option<u64>,
     flushed_mark: u64,
     /// The oldest version an as-of read may ask for: compaction merged away what is below it.
     floor: u64,
     next_id: u64,
+    /// The owner's format of its keys ([`LsmOptions::format`]).
+    #[serde(default)]
+    key_format: u32,
 }
 
 impl Manifest {
-    fn empty() -> Manifest {
+    fn empty(key_format: u32) -> Manifest {
         Manifest {
+            key_format,
             format: MANIFEST_FORMAT,
             tables: Vec::new(),
-            flushed_version: 0,
+            flushed_version: None,
             flushed_mark: 0,
             floor: 0,
             next_id: 1,
@@ -579,15 +631,16 @@ struct State {
     frozen: Option<(Arc<Mem>, u64, u64)>,
     tables: Vec<Arc<Sst>>,
     manifest: Manifest,
-    /// The newest version applied, and the caller's mark with it.
-    applied: u64,
+    /// The newest version applied (`None`: none yet), and the caller's mark with it.
+    applied: Option<u64>,
     applied_mark: u64,
 }
 
 /// What a flush or compaction left durable: the version and mark the tables cover.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Flushed {
-    pub version: u64,
+    /// Every version at or below this one is in the tables (`None`: no version is).
+    pub version: Option<u64>,
     pub mark: u64,
 }
 
@@ -630,30 +683,18 @@ impl Lsm {
         } else {
             crate::vfs::durable_dir(&*fs, &sst_dir)?;
         }
-        let manifest_path = dir.join("MANIFEST");
-        let manifest = if fs.list(dir)?.iter().any(|p| p == &manifest_path) {
-            let bytes = read_path(&*fs, &manifest_path)?;
-            let body = bytes
-                .get(32..)
-                .ok_or_else(|| corrupt(&manifest_path, 0, "MANIFEST truncated"))?;
-            if bytes.get(..32) != Some(blake3::hash(body).as_bytes().as_slice()) {
-                return Err(corrupt(&manifest_path, 0, "MANIFEST checksum"));
-            }
-            let m: Manifest = serde_json::from_slice(body).map_err(|e| invalid(e.to_string()))?;
-            if m.format != MANIFEST_FORMAT {
+        let manifest = if let Some(m) = read_manifest(&*fs, dir)? {
+            if m.key_format != opts.format {
                 return Err(invalid(format!(
-                    "database format {} (this build reads {MANIFEST_FORMAT})",
-                    m.format
+                    "the database's keys are in format {}, this build writes format {}",
+                    m.key_format, opts.format
                 )));
             }
             m
         } else {
-            // A new tree has a manifest from the start: a reader finds a database, empty as it is.
-            let m = Manifest::empty();
-            if !read_only {
-                write_manifest(&*fs, dir, &m)?;
-            }
-            m
+            // A new tree gets its manifest with its first flush: until then a reader finds no database, and its owner
+            // starts it again after a crash.
+            Manifest::empty(opts.format)
         };
         let cache = Arc::new(BlockCache::new(opts.cache_bytes));
         let mut tables = Vec::new();
@@ -724,9 +765,17 @@ impl Lsm {
         })
     }
 
-    /// The newest version applied.
-    pub fn applied(&self) -> Result<u64, StoreError> {
+    /// The newest version applied (`None`: none yet).
+    pub fn applied(&self) -> Result<Option<u64>, StoreError> {
         Ok(self.read()?.applied)
+    }
+
+    /// Raises the oldest version an as-of read may ask for to `version` (versions below it are not what they were:
+    /// a tree started from a snapshot holds nothing of its past). Recorded with the next flush.
+    pub fn raise_floor(&self, version: u64) -> Result<(), StoreError> {
+        let mut s = self.write()?;
+        s.manifest.floor = s.manifest.floor.max(version);
+        Ok(())
     }
 
     /// The oldest version an as-of read may ask for.
@@ -743,17 +792,16 @@ impl Lsm {
         changes: impl IntoIterator<Item = (Vec<u8>, Op)>,
     ) -> Result<(), StoreError> {
         let mut s = self.write()?;
-        if version <= s.applied && s.applied != 0 {
-            return Err(invalid(format!(
-                "version {version} applied after version {}",
-                s.applied
-            )));
+        if let Some(a) = s.applied
+            && version <= a
+        {
+            return Err(invalid(format!("version {version} applied after version {a}")));
         }
         for (key, op) in changes {
             s.mem_bytes += key.len() + 16;
             s.mem.insert((key, Reverse(version)), op);
         }
-        s.applied = version;
+        s.applied = Some(version);
         s.applied_mark = mark;
         Ok(())
     }
@@ -763,9 +811,9 @@ impl Lsm {
         Ok(self.read()?.mem_bytes >= self.opts.memtable_bytes)
     }
 
-    /// Writes the memtable as an SSTable and the manifest naming it: what the tables now cover (`None` when the
-    /// memtable was empty).
-    pub fn flush(&self) -> Result<Option<Flushed>, StoreError> {
+    /// Writes the memtable as an SSTable, then the manifest naming it and the version the tables now cover (every one
+    /// applied). The manifest is written even when the memtable is empty: the first flush of a new tree creates it.
+    pub fn flush(&self) -> Result<Flushed, StoreError> {
         if self.read_only {
             return Err(invalid("a database opened read-only is not flushed or compacted"));
         }
@@ -773,7 +821,7 @@ impl Lsm {
             .work
             .lock()
             .map_err(|_| invalid("the database's work lock is poisoned"))?;
-        let (frozen, version, mark, id) = {
+        let (frozen, version, mark, id, mut manifest) = {
             let mut s = self.write()?;
             // A flush that failed left its memtable frozen: it goes out with this one (its versions are older).
             if let Some((old, _, _)) = s.frozen.take() {
@@ -782,44 +830,49 @@ impl Lsm {
                     s.mem_bytes += k.0.len() + 16;
                 }
             }
-            if s.mem.is_empty() {
-                return Ok(None);
-            }
             let mem = Arc::new(std::mem::take(&mut s.mem));
             s.mem_bytes = 0;
             let (version, mark) = (s.applied, s.applied_mark);
-            s.frozen = Some((mem.clone(), version, mark));
             let id = s.manifest.next_id;
-            s.manifest.next_id += 1;
-            (mem, version, mark, id)
+            if !mem.is_empty() {
+                s.frozen = Some((mem.clone(), version.unwrap_or_default(), mark));
+                s.manifest.next_id += 1;
+            }
+            (mem, version, mark, id, s.manifest.clone())
         };
-        let path = self.dir.join("sst").join(format!("{id}.sst"));
-        let entries = frozen.iter().map(|((key, Reverse(version)), op)| {
-            Ok(Entry {
-                key: key.clone(),
-                version: *version,
-                op: *op,
-            })
-        });
-        let meta = write_table(&*self.fs, &path, id, self.opts.block_bytes, entries)?;
-        let table = match meta {
-            Some(m) => Some(Arc::new(Sst::open(&*self.fs, path, m, self.cache.clone())?)),
-            None => None,
+        let table = if frozen.is_empty() {
+            None
+        } else {
+            let path = self.dir.join("sst").join(format!("{id}.sst"));
+            let entries = frozen.iter().map(|((key, Reverse(version)), op)| {
+                Ok(Entry {
+                    key: key.clone(),
+                    version: *version,
+                    op: *op,
+                })
+            });
+            match write_table(&*self.fs, &path, id, self.opts.block_bytes, entries)? {
+                Some(m) => Some(Arc::new(Sst::open(&*self.fs, path, m, self.cache.clone())?)),
+                None => None,
+            }
         };
-        let mut s = self.write()?;
-        let mut manifest = s.manifest.clone();
         if let Some(t) = &table {
             manifest.tables.insert(0, t.meta.clone());
         }
         manifest.flushed_version = version;
         manifest.flushed_mark = mark;
+        // Only flushes and compactions change the manifest, and they run one at a time: written outside the state's
+        // lock, so applies and reads go on meanwhile.
         self.write_manifest(&manifest)?;
+        let mut s = self.write()?;
         if let Some(t) = table {
             s.tables.insert(0, t);
         }
+        // A floor raised since the manifest was copied stays raised.
+        manifest.floor = manifest.floor.max(s.manifest.floor);
         s.manifest = manifest;
         s.frozen = None;
-        Ok(Some(Flushed { version, mark }))
+        Ok(Flushed { version, mark })
     }
 
     fn write_manifest(&self, m: &Manifest) -> Result<(), StoreError> {
@@ -840,7 +893,7 @@ impl Lsm {
             let Some(chosen) = pick(&s.tables, self.opts) else {
                 return Ok(false);
             };
-            let horizon = s.applied.saturating_sub(self.opts.history);
+            let horizon = s.applied.map_or(0, |a| a.saturating_sub(self.opts.history));
             // A delete at or below the horizon may go when no table outside the merge holds a version that old.
             let bottom = s
                 .tables
@@ -865,8 +918,9 @@ impl Lsm {
             Some(m) => Some(Arc::new(Sst::open(&*self.fs, path, m, self.cache.clone())?)),
             None => None,
         };
-        let mut s = self.write()?;
-        let mut manifest = s.manifest.clone();
+        // Only flushes and compactions change the manifest, and they run one at a time: written outside the state's
+        // lock, so applies and reads go on meanwhile.
+        let mut manifest = self.read()?.manifest.clone();
         let gone: Vec<u64> = chosen.iter().map(|t| t.meta.id).collect();
         // The merged table takes the place of the newest table it merged, keeping the newest-first order of the rest.
         let at = manifest
@@ -880,6 +934,8 @@ impl Lsm {
         }
         manifest.floor = manifest.floor.max(horizon);
         self.write_manifest(&manifest)?;
+        let mut s = self.write()?;
+        manifest.floor = manifest.floor.max(s.manifest.floor);
         s.tables.retain(|t| !gone.contains(&t.meta.id));
         if let Some(t) = table {
             let at = at.min(s.tables.len());
@@ -898,6 +954,13 @@ impl Lsm {
     /// The keys starting with `prefix` present as of version `as_of`, in order. A version below the floor (merged
     /// away) or above the newest applied is refused.
     pub fn scan(&self, prefix: &[u8], as_of: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+        self.scan_range(prefix, successor(prefix).as_deref(), as_of)
+    }
+
+    /// The keys from `start` (inclusive) to `end` (exclusive; `None`: no end) present as of version `as_of`, in order
+    /// (the same refusals as [`Lsm::scan`]).
+    pub fn scan_range(&self, start: &[u8], end: Option<&[u8]>, as_of: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+        let before_end = |k: &[u8]| end.is_none_or(|e| k < e);
         let (mut newest, tables) = {
             let s = self.read()?;
             if as_of < s.manifest.floor {
@@ -906,18 +969,19 @@ impl Lsm {
                     s.manifest.floor
                 )));
             }
-            if as_of > s.applied {
+            if let Some(a) = s.applied
+                && as_of > a
+            {
                 return Err(invalid(format!(
-                    "version {as_of} is newer than the newest applied ({})",
-                    s.applied
+                    "version {as_of} is newer than the newest applied ({a})"
                 )));
             }
             // The newest entry at or below `as_of` per key, from the memtables (newer than every table).
             let mut newest: BTreeMap<Vec<u8>, (u64, Op)> = BTreeMap::new();
             let mems = std::iter::once(&s.mem).chain(s.frozen.as_ref().map(|(m, _, _)| &**m));
             for mem in mems {
-                for ((key, Reverse(version)), op) in mem.range((prefix.to_vec(), Reverse(u64::MAX))..) {
-                    if !key.starts_with(prefix) {
+                for ((key, Reverse(version)), op) in mem.range((start.to_vec(), Reverse(u64::MAX))..) {
+                    if !before_end(key) {
                         break;
                     }
                     if *version <= as_of {
@@ -933,7 +997,7 @@ impl Lsm {
         let mut found = Vec::new();
         for t in &tables {
             found.clear();
-            t.scan(prefix, as_of, &mut found)?;
+            t.scan(start, end, as_of, &mut found)?;
             for e in found.drain(..) {
                 let slot = newest.entry(e.key).or_insert((e.version, e.op));
                 if e.version > slot.0 {
@@ -949,10 +1013,10 @@ impl Lsm {
     pub fn get(&self, key: &[u8], as_of: u64) -> Result<bool, StoreError> {
         let (mut newest, tables) = {
             let s = self.read()?;
-            if as_of < s.manifest.floor || as_of > s.applied {
+            if as_of < s.manifest.floor || s.applied.is_some_and(|a| as_of > a) {
                 return Err(invalid(format!(
-                    "version {as_of} is outside the history kept (versions {} to {})",
-                    s.manifest.floor, s.applied
+                    "version {as_of} is outside the history kept (from version {})",
+                    s.manifest.floor
                 )));
             }
             let mut newest: Option<(u64, Op)> = None;

@@ -722,30 +722,6 @@ impl<'p> Codec<'p> {
         Ok(())
     }
 
-    /// The bytes every [`Codec::encode_row`] of a row of `cols` starts with when its leading columns (in declaration
-    /// order) are `leading`: as many of them as come first in the encoding, which orders columns by field number too.
-    /// How many it covered comes back; the rest are not in the prefix.
-    pub fn encode_row_prefix(&self, cols: &[Column], leading: &[Value], out: &mut Vec<u8>) -> Result<usize, WireError> {
-        let numbers = Self::numbers(cols);
-        let mut order: Vec<usize> = (0..cols.len()).collect();
-        order.sort_by_key(|i| numbers.get(*i).copied());
-        put_varint(out, cols.len() as u64);
-        let mut covered = 0;
-        for (pos, i) in order.into_iter().enumerate() {
-            // The encoding's next column must be the next leading column for the prefix to go on.
-            if pos != i || pos >= leading.len() {
-                break;
-            }
-            let (Some(c), Some(v), Some(n)) = (cols.get(i), leading.get(i), numbers.get(i)) else {
-                return Err(WireError::Malformed("column index".into()));
-            };
-            put_varint(out, (u64::from(*n) << 3) | u64::from(self.wire_type(c.ty)?));
-            self.encode_value(c.ty, v, out)?;
-            covered += 1;
-        }
-        Ok(covered)
-    }
-
     /// Reads a row of `cols`.
     pub fn decode_row(&self, cols: &[Column], input: &mut &[u8]) -> Result<Vec<Value>, WireError> {
         let tys: Vec<TypeId> = cols.iter().map(|c| c.ty).collect();

@@ -157,7 +157,16 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
         eprintln!("blossom query: the compiled program has no view `{name}`");
         return Exit::Internal.into();
     };
-    let program = match artifact.program.query(rel) {
+    let role = entry.role.as_deref().and_then(|r| {
+        artifact
+            .program
+            .get()
+            .roles
+            .iter_enumerated()
+            .find(|(_, d)| d.name.to_string() == r)
+            .map(|(id, _)| id)
+    });
+    let program = match artifact.program.query(rel, role) {
         Ok((p, _)) => p,
         Err(e) => {
             eprintln!("blossom query: {e}");
@@ -171,7 +180,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
     };
     let result = match (&args.admin, &args.store) {
         (Some(addr), _) => ask(*addr, &req),
-        (None, Some(dir)) => offline(dir, &artifact, req),
+        (None, Some(dir)) => offline(dir, &artifact, &args.node, req),
         (None, None) => Err("a query needs --admin ADDR or --store DIR".into()),
     };
     let answer = match result {
@@ -198,8 +207,12 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
 fn offline(
     dir: &std::path::Path,
     artifact: &blossom_artifact::bls::BlsArtifact,
+    node: &str,
     req: QueryRequest,
 ) -> Result<Answer, String> {
+    let me = artifact
+        .node_id(node)
+        .ok_or_else(|| format!("the deployment has no node `{node}`"))?;
     let names: std::sync::Arc<[std::sync::Arc<str>]> = artifact
         .nodes
         .iter()
@@ -210,7 +223,7 @@ fn offline(
             .map_err(|e| e.to_string())?;
     let externs = crate::common::std_externs().map_err(|e| e.to_string())?;
     let now = blossom_runtime::clock::wall_now()?;
-    blossom_runtime::query::answer(req, &db, &artifact.program, &names, externs, now).map_err(|e| e.to_string())
+    blossom_runtime::query::answer(req, &db, me, &artifact.program, &names, externs, now).map_err(|e| e.to_string())
 }
 
 /// Sends the query to the admin listener at `addr`: its answer, or why not.

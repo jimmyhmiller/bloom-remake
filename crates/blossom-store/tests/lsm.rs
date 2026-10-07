@@ -93,6 +93,7 @@ fn opts() -> LsmOptions {
         max_tables: 6,
         history: 25,
         cache_bytes: 2048,
+        format: 7,
     }
 }
 
@@ -102,11 +103,25 @@ const PREFIXES: [&[u8]; 6] = [b"", b"a", b"b", b"c\x01", b"d\x02\x03", b"z"];
 #[cfg(test)]
 /// Every as-of read the tree allows agrees with the model.
 fn agree(lsm: &Lsm, model: &Model) {
-    let (floor, applied) = (lsm.floor().unwrap(), lsm.applied().unwrap());
+    let (floor, applied) = (lsm.floor().unwrap(), lsm.applied().unwrap().unwrap());
     for v in floor..=applied {
         let present = model.at(b"", v);
         for p in PREFIXES {
             assert_eq!(lsm.scan(p, v).unwrap(), model.at(p, v), "as of {v}, prefix {p:?}");
+        }
+        // Ranges: from a key to another, and to the end.
+        for (lo, hi) in [
+            (&b"a\x02"[..], Some(&b"b\x03"[..])),
+            (b"b", Some(b"b")),
+            (b"c\x04", None),
+            (b"", Some(b"a\x01\x01")),
+        ] {
+            let want: Vec<Vec<u8>> = model
+                .at(b"", v)
+                .into_iter()
+                .filter(|k| k.as_slice() >= lo && hi.is_none_or(|h| k.as_slice() < h))
+                .collect();
+            assert_eq!(lsm.scan_range(lo, hi, v).unwrap(), want, "as of {v}, {lo:?}..{hi:?}");
         }
         // Point lookups of present keys and of keys the model never had or has deleted.
         for k in present
@@ -158,10 +173,10 @@ fn reads_as_of_every_version_kept_agree_with_the_model() {
         // Reopened: the tables give the state as of the flushed version; the versions after it apply again.
         lsm.flush().unwrap();
         let flushed = lsm.flushed().unwrap();
-        assert_eq!((flushed.version, flushed.mark), (160, 1600));
+        assert_eq!((flushed.version, flushed.mark), (Some(160), 1600));
         drop(lsm);
         let again = Lsm::open(fs.clone(), dir, opts()).unwrap();
-        assert_eq!(again.applied().unwrap(), 160);
+        assert_eq!(again.applied().unwrap(), Some(160));
         agree(&again, &model);
     }
 }
@@ -203,7 +218,7 @@ fn a_crash_anywhere_in_a_flush_or_compaction_reopens_to_the_manifests_state() {
             let fs: Arc<dyn Vfs> = Arc::new(crashed);
             let reopened = Lsm::open(fs, dir, opts())
                 .unwrap_or_else(|e| panic!("cut {i} ({fate:?}): the tree does not open: {e}"));
-            let flushed = reopened.flushed().unwrap().version;
+            let flushed = reopened.flushed().unwrap().version.unwrap();
             assert!((60..=110).contains(&flushed), "cut {i}: flushed {flushed}");
             // The versions after the manifest's, from the WAL in a node: applied again, the tree is whole.
             for (v, changes) in model.log.iter().filter(|(v, _)| *v > flushed) {
@@ -218,4 +233,53 @@ fn a_crash_anywhere_in_a_flush_or_compaction_reopens_to_the_manifests_state() {
             }
         }
     }
+}
+
+/// A tree written in another key format is refused, and its format told beforehand.
+#[test]
+fn a_tree_in_another_key_format_is_refused() {
+    let fs: Arc<dyn Vfs> = Arc::new(SimFs::default());
+    let dir = Path::new("/db");
+    assert_eq!(blossom_store::lsm::manifest_format(&*fs, dir).unwrap(), None);
+    let lsm = Lsm::open(fs.clone(), dir, opts()).unwrap();
+    lsm.apply(1, 1, vec![(b"k".to_vec(), Op::Put)]).unwrap();
+    lsm.flush().unwrap();
+    drop(lsm);
+    assert_eq!(blossom_store::lsm::manifest_format(&*fs, dir).unwrap(), Some(7));
+    let other = LsmOptions { format: 8, ..opts() };
+    assert!(Lsm::open(fs.clone(), dir, other).is_err());
+    assert!(Lsm::open(fs, dir, opts()).is_ok());
+}
+
+/// Version 0 is a version: "nothing flushed" and "flushed through version 0" are told apart, so a reopened tree applies
+/// what came after exactly; and a new tree has no manifest until its first flush, which writes one even when empty.
+#[test]
+fn version_zero_and_the_first_flush() {
+    let fs: Arc<dyn Vfs> = Arc::new(SimFs::default());
+    let dir = Path::new("/db");
+    let lsm = Lsm::open(fs.clone(), dir, opts()).unwrap();
+    assert_eq!(lsm.flushed().unwrap().version, None);
+    assert_eq!(
+        blossom_store::lsm::manifest_format(&*fs, dir).unwrap(),
+        None,
+        "no manifest before a flush"
+    );
+    assert_eq!(lsm.flush().unwrap().version, None);
+    assert_eq!(
+        blossom_store::lsm::manifest_format(&*fs, dir).unwrap(),
+        Some(7),
+        "an empty flush writes it"
+    );
+    lsm.apply(0, 0, vec![(b"zero".to_vec(), Op::Put)]).unwrap();
+    assert!(lsm.apply(0, 0, vec![]).is_err(), "version 0 twice");
+    drop(lsm);
+    let again = Lsm::open(fs.clone(), dir, opts()).unwrap();
+    assert_eq!(again.flushed().unwrap().version, None, "version 0 was never flushed");
+    again.apply(0, 0, vec![(b"zero".to_vec(), Op::Put)]).unwrap();
+    assert_eq!(again.flush().unwrap().version, Some(0));
+    drop(again);
+    let third = Lsm::open(fs, dir, opts()).unwrap();
+    assert_eq!(third.flushed().unwrap().version, Some(0));
+    assert_eq!(third.scan(b"", 0).unwrap(), vec![b"zero".to_vec()]);
+    assert!(third.apply(0, 0, vec![]).is_err());
 }

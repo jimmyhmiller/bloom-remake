@@ -56,8 +56,13 @@ pub struct Answer {
     pub rows: Vec<Vec<String>>,
 }
 
-/// The constants every positive read of `rel` binds its leading columns to, when all agree.
-pub fn leading_constants(q: &Program, rel: RelId) -> Vec<Value> {
+/// The constants every positive read of `rel` binds its leading columns to, when all agree and every read of it is
+/// an atom (a lookup or an expression reading it needs every row).
+pub fn leading_constants(program: &ValidatedProgram, rel: RelId) -> Vec<Value> {
+    if !program.read_only_by_atoms(rel) {
+        return Vec::new();
+    }
+    let q = program.get();
     let mut agreed: Option<Vec<Value>> = None;
     for r in q.rules.iter() {
         for lit in &r.body.lits {
@@ -89,11 +94,13 @@ pub fn leading_constants(q: &Program, rel: RelId) -> Vec<Value> {
     agreed.unwrap_or_default()
 }
 
-/// Answers `req` from `db`, as of the tick it asks (the node's program `node`, its node names `names`, the host
-/// functions `externs`, the instant `now` the query runs at).
+/// Answers `req` from `db`, as of the tick it asks: the query's rules run as the node `me` at that tick (the node's
+/// program `node`, its node names `names`, the host functions `externs`, the instant `now` the query runs at).
+#[allow(clippy::too_many_arguments)]
 pub fn answer(
     req: QueryRequest,
     db: &Database,
+    me: NodeId,
     node: &ValidatedProgram,
     names: &[Arc<str>],
     externs: Arc<blossom_value::ExternRegistry>,
@@ -113,11 +120,17 @@ pub fn answer(
         )));
     };
     let (floor, applied) = db.range()?;
-    let tick = req.as_of.unwrap_or(applied);
-    if tick < floor || tick > applied {
-        return Err(RuntimeError::Config(format!(
-            "tick {tick} is outside the database's history (ticks {floor} to {applied})"
-        )));
+    let tick = match (req.as_of, applied) {
+        (Some(t), _) => t,
+        (None, Some(a)) => a,
+        // Nothing applied yet: the database is empty as of its floor.
+        (None, None) => floor,
+    };
+    if tick < floor || applied.map_or(tick != floor, |a| tick > a) {
+        return Err(RuntimeError::Config(match applied {
+            Some(a) => format!("tick {tick} is outside the database's history (ticks {floor} to {a})"),
+            None => format!("tick {tick} is outside the database's history (no tick yet)"),
+        }));
     }
     let durable: BTreeMap<String, RelId> = db.relations().into_iter().map(|(r, n)| (n.to_string(), r)).collect();
     let mut events = Vec::new();
@@ -136,15 +149,15 @@ pub fn answer(
                 "the query was compiled against another schema of `{name}` than this node runs"
             )));
         }
-        for row in db.rows(nid, &leading_constants(q, qid), tick)? {
+        for row in db.rows(nid, &leading_constants(&program, qid), tick)? {
             events.push((qid, row));
         }
     }
     let oracle = blossom_oracle::Oracle::with_externs(program.clone(), blossom_oracle::Limits::default(), externs)?;
     let out = oracle.tick(&TickInput {
-        node: NodeId(0),
+        node: me,
         incarnation: 1,
-        tick: Tick(0),
+        tick: Tick(tick),
         now,
         carried: &Instance::default(),
         events: &events,

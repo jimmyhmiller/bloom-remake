@@ -15,8 +15,13 @@ use crate::projection::{Needed, Numbering, renumber, select};
 use crate::visit::Remap;
 use crate::{IrError, ValidatedProgram, core::*};
 
-/// The query program for the view `view`, and the durable relations it reads (by name, as its inputs).
-pub(crate) fn query(valid: &ValidatedProgram, view: RelId) -> Result<(ValidatedProgram, Vec<String>), IrError> {
+/// The query program for the view `view` as a node of `role` computes it (its rules placed there or nowhere), and the
+/// durable relations it reads (by name, as its inputs).
+pub(crate) fn query(
+    valid: &ValidatedProgram,
+    view: RelId,
+    role: Option<RoleId>,
+) -> Result<(ValidatedProgram, Vec<String>), IrError> {
     let p = valid.get();
     if p.rels.get(view).is_none() {
         return Err(IrError::builder(format!("no relation {view:?} to query")));
@@ -35,7 +40,7 @@ pub(crate) fn query(valid: &ValidatedProgram, view: RelId) -> Result<(ValidatedP
                 .ok_or_else(|| IrError::builder("a query references a missing relation"))?;
             if derived(r) {
                 for (rule, rd) in p.rules.iter_enumerated() {
-                    if rd.head.rel == id {
+                    if rd.head.rel == id && rd.role.is_none_or(|r| Some(r) == role) {
                         want.rules.insert(rule);
                     }
                 }
@@ -61,7 +66,7 @@ pub(crate) fn query(valid: &ValidatedProgram, view: RelId) -> Result<(ValidatedP
                 .clone();
             construct.rules.retain(|id| want.rules.contains(id));
             construct.rels.retain(|id| want.rels.contains(id));
-            construct.surface.remap(&mut want);
+            construct.remap(&mut want);
         }
         for id in want.sites.clone() {
             p.sites
@@ -112,6 +117,17 @@ pub(crate) fn query(valid: &ValidatedProgram, view: RelId) -> Result<(ValidatedP
         }
         if old == want.size() {
             break;
+        }
+    }
+    // A query is one tick: a rule that derives at the next tick, or sends, cannot contribute to it.
+    for id in &want.rules {
+        if let Some(r) = p.rules.get(*id)
+            && r.kind != RuleKind::Deductive
+        {
+            return Err(IrError::builder(format!(
+                "the query's views use `{}`, which derives at a later tick: a query is answered within one tick",
+                r.label.text
+            )));
         }
     }
     // What the query reads must be in the database (or the deployment's facts).
@@ -212,4 +228,40 @@ pub(crate) fn query(valid: &ValidatedProgram, view: RelId) -> Result<(ValidatedP
         .remap(&mut n);
     let program = ValidatedProgram::validate(out).map_err(|mut errs| errs.remove(0))?;
     Ok((program, inputs))
+}
+
+/// Counts the occurrences of one relation in what it maps.
+struct CountRel {
+    rel: RelId,
+    seen: usize,
+}
+
+impl crate::visit::Mapper for CountRel {
+    fn relid(&mut self, id: RelId) -> RelId {
+        if id == self.rel {
+            self.seen += 1;
+        }
+        id
+    }
+}
+
+/// See `ValidatedProgram::read_only_by_atoms`.
+pub(crate) fn read_only_by_atoms(p: &Program, rel: RelId) -> bool {
+    let mut count = CountRel { rel, seen: 0 };
+    let mut atoms = 0;
+    for r in p.rules.iter() {
+        r.remap(&mut count);
+        if r.head.rel == rel {
+            atoms += 1;
+        }
+        for l in &r.body.lits {
+            if let Literal::Pos(a) | Literal::Neg(a) = l
+                && a.rel == rel
+            {
+                atoms += 1;
+            }
+        }
+    }
+    // Heads are counted with the atoms: a head writes the relation, it does not read it.
+    count.seen == atoms
 }
