@@ -1,7 +1,9 @@
 //! The page's API (BROWSER.md "Architecture"): the host core behind `wasm-bindgen`, strings and JSON in and out. The
 //! page (`web/host.js`) applies the patches to the DOM, keeps the saved state in `localStorage`, and reports events.
 
-use std::collections::{BTreeMap, VecDeque};
+#[cfg(feature = "compiler")]
+use std::collections::BTreeMap;
+use std::collections::VecDeque;
 
 use wasm_bindgen::prelude::*;
 
@@ -36,6 +38,7 @@ pub struct WebApp {
     frames: VecDeque<Vec<u8>>,
 }
 
+#[cfg(feature = "compiler")]
 fn diags_error(diags: Vec<crate::Diag>) -> JsValue {
     match json(&diags) {
         Ok(text) => JsValue::from_str(&text),
@@ -44,6 +47,7 @@ fn diags_error(diags: Vec<crate::Diag>) -> JsValue {
 }
 
 /// The root of a program's randomness, from 32 hex digits (the page draws them from `crypto.getRandomValues`).
+#[cfg(feature = "compiler")]
 fn seed(hex: &str) -> Result<blossom_value::Seed, JsValue> {
     let bad = || JsValue::from_str(&format!("a seed is 32 hex digits, not `{hex}`"));
     if hex.len() != 32 || !hex.is_ascii() {
@@ -60,7 +64,8 @@ fn seed(hex: &str) -> Result<blossom_value::Seed, JsValue> {
 }
 
 /// Compiles `root` of `files_json` (a JSON object, path → source), its randomness rooted at `seed_hex`. Throws the
-/// diagnostics, as JSON, on failure; warnings are in [`WebApp::warnings`].
+/// diagnostics, as JSON, on failure; warnings are in [`WebApp::warnings`]. (Not in a member page's build.)
+#[cfg(feature = "compiler")]
 #[wasm_bindgen]
 pub fn compile(root: &str, files_json: &str, seed_hex: &str) -> Result<WebApp, JsValue> {
     let files: BTreeMap<String, String> = serde_json::from_str(files_json).map_err(js_error)?;
@@ -71,20 +76,24 @@ pub fn compile(root: &str, files_json: &str, seed_hex: &str) -> Result<WebApp, J
     })
 }
 
-/// A program compiled for a client member's page (docs/design/CLIENTS.md §5), before it runs.
+/// What a client member's page runs (docs/design/CLIENTS.md §8), before it runs.
 #[wasm_bindgen]
 pub struct WebClient {
     compiled: Compiled,
 }
 
-/// Compiles `root` of `files_json` for the deployment `app_json` names (the server's `/blossom/app.json`), the page
-/// playing its client role. Throws the diagnostics, as JSON, on failure.
-#[wasm_bindgen(js_name = compileClient)]
-pub fn compile_client(root: &str, files_json: &str, app_json: &str) -> Result<WebClient, JsValue> {
-    let files: BTreeMap<String, String> = serde_json::from_str(files_json).map_err(js_error)?;
+/// Reads the client artifact `bytes` the server served, for the deployment `app_json` names (the server's
+/// `/blossom/app.json`). Throws when it cannot be read.
+#[wasm_bindgen(js_name = loadClient)]
+pub fn load_client(bytes: &[u8], app_json: &str) -> Result<WebClient, JsValue> {
     let deployment: ClientDeployment = serde_json::from_str(app_json).map_err(js_error)?;
-    let compiled = crate::compile_client(root, &files, &deployment).map_err(diags_error)?;
+    let compiled = crate::load_client(bytes, &deployment).map_err(js_error)?;
     Ok(WebClient { compiled })
+}
+
+/// A refusal as the page reads it: `{reason, detail}`.
+fn refusal(reason: &str, detail: &str) -> serde_json::Value {
+    serde_json::json!({ "reason": reason, "detail": detail })
 }
 
 #[wasm_bindgen]
@@ -133,18 +142,28 @@ impl WebLink {
         self.link.hello()
     }
 
-    /// Takes a frame from the server: whether it finished the handshake (the page can then run). Throws when the
-    /// server refused the page or sent a message before the handshake finished.
-    pub fn recv(&mut self, bytes: &[u8]) -> Result<bool, JsValue> {
-        let (heard, frames) = self.link.recv(bytes).map_err(js_error)?;
+    /// Takes a frame from the server: `{welcome, refused}`. `welcome` is true when it finished the handshake (the page
+    /// can then run); `refused` is `{reason, detail}` when the server refused the page (`program`: the page was built
+    /// from another program, and loading it again gets the current one). Throws on anything else that goes wrong.
+    pub fn recv(&mut self, bytes: &[u8]) -> Result<String, JsValue> {
+        let (heard, frames) = match self.link.recv(bytes) {
+            Ok(ok) => ok,
+            Err(HostError::Refused { reason, detail }) => {
+                return json(&serde_json::json!({ "welcome": false, "refused": refusal(&reason, &detail) }));
+            }
+            Err(e) => return Err(js_error(e)),
+        };
         self.frames.extend(frames);
-        match heard {
-            Heard::Welcome { .. } => Ok(true),
-            Heard::Nothing => Ok(false),
-            Heard::Deliveries(_) => Err(JsValue::from_str(
-                "the server sent messages before the handshake finished",
-            )),
-        }
+        let welcome = match heard {
+            Heard::Welcome { .. } => true,
+            Heard::Nothing => false,
+            Heard::Deliveries(_) => {
+                return Err(JsValue::from_str(
+                    "the server sent messages before the handshake finished",
+                ));
+            }
+        };
+        json(&serde_json::json!({ "welcome": welcome, "refused": null }))
     }
 
     /// The connection ended before the handshake finished.
@@ -171,13 +190,18 @@ impl WebApp {
         self.app.link_hello().map_err(js_error)
     }
 
-    /// Takes a frame from the server at `now_ms`: `{patches, restart}`. `restart` is true when the server gave the
+    /// Takes a frame from the server at `now_ms`: `{patches, restart, refused}` (`refused` as for [`WebLink::recv`]). `restart` is true when the server gave the
     /// page another identity (it lost the old one): the page's state is the old identity's, and it must start over.
     #[wasm_bindgen(js_name = linkRecv)]
     pub fn link_recv(&mut self, bytes: &[u8], now_ms: f64) -> Result<String, JsValue> {
         match self.app.link_recv(bytes, instant(now_ms)?) {
-            Ok(patches) => json(&serde_json::json!({ "patches": patches, "restart": false })),
-            Err(HostError::Identity { .. }) => json(&serde_json::json!({ "patches": [], "restart": true })),
+            Ok(patches) => json(&serde_json::json!({ "patches": patches, "restart": false, "refused": null })),
+            Err(HostError::Identity { .. }) => {
+                json(&serde_json::json!({ "patches": [], "restart": true, "refused": null }))
+            }
+            Err(HostError::Refused { reason, detail }) => json(&serde_json::json!({
+                "patches": [], "restart": false, "refused": refusal(&reason, &detail)
+            })),
             Err(e) => Err(js_error(e)),
         }
     }

@@ -74,20 +74,6 @@ pub fn exit_of(e: &RuntimeError) -> Exit {
 
 /// Loads the deployment spec and compiles its program for its nodes.
 pub fn load(deploy: &std::path::Path) -> Result<(DeploymentSpec, Arc<blossom_artifact::bls::BlsArtifact>), ExitCode> {
-    load_with_sources(deploy).map(|(spec, artifact, _)| (spec, artifact))
-}
-
-/// [`load`], with the program's source files.
-pub fn load_with_sources(
-    deploy: &std::path::Path,
-) -> Result<
-    (
-        DeploymentSpec,
-        Arc<blossom_artifact::bls::BlsArtifact>,
-        blossom_base::SourceDb,
-    ),
-    ExitCode,
-> {
     let spec = DeploymentSpec::load(deploy).map_err(|e| {
         eprintln!("{e}");
         ExitCode::from(exit_of(&e))
@@ -105,8 +91,8 @@ pub fn load_with_sources(
         return Err(Exit::Refused.into());
     };
     let params = spec.params.iter().map(|(k, v)| (k.clone(), param_binding(v))).collect();
-    let (artifact, sources) = bls::compile_deployed_with_sources(source, &nodes, &params)?;
-    Ok((spec, Arc::new(artifact), sources))
+    let artifact = bls::compile_deployed(source, &nodes, &params)?;
+    Ok((spec, Arc::new(artifact)))
 }
 
 /// A deployment's parameter value for the compiler.
@@ -143,7 +129,7 @@ fn write_stats(path: &std::path::Path, stats: &blossom_runtime::server::Stats) {
 /// Runs the command.
 pub fn run(args: Args, cx: &Context) -> ExitCode {
     let _ = cx;
-    let (spec, artifact, sources) = match load_with_sources(&args.deploy) {
+    let (spec, artifact) = match load(&args.deploy) {
         Ok(x) => x,
         Err(code) => return code,
     };
@@ -158,17 +144,10 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
                 );
                 return Exit::Refused.into();
             }
-            match blossom_runtime::web::app_json(&spec, &sources, &args.node) {
-                Ok(app) => Some(blossom_runtime::server::WebConfig {
-                    addr,
-                    root: Some(args.web_root.clone()),
-                    app,
-                }),
-                Err(e) => {
-                    eprintln!("blossom run: {e}");
-                    return Exit::Internal.into();
-                }
-            }
+            Some(blossom_runtime::server::WebConfig {
+                addr,
+                root: Some(args.web_root.clone()),
+            })
         }
     };
     if spec.security == SecurityMode::InsecureDev && !args.insecure_dev {

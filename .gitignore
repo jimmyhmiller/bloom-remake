@@ -16,6 +16,7 @@ __pycache__/
 .tools/
 # The browser host's build (scripts/build-web.sh).
 /web/pkg/
+/web/pkg-member/
 /tests/web/node_modules/
 /tests/web/test-results/
 /tests/web/playwright-report/

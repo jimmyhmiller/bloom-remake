@@ -12,6 +12,9 @@ blossom-base.workspace = true
 blossom-value.workspace = true
 blossom-ir.workspace = true
 blossom-schema.workspace = true
+serde.workspace = true
+postcard.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

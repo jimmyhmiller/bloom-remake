@@ -170,13 +170,32 @@ What the page keeps, and where:
    inspector with deliveries.
 4. **Demos**: shared TodoMVC and a chat room, with Playwright tests.
 
-## Out of scope
+## 8. What a page is given (S22)
 
-- **The split of the program (next slice, S22).** `/blossom/app.json` ships the whole source and the page compiles it,
-  running only the client role's rules: the server's rules are readable by every visitor, and the page carries the
-  compiler. S22 projects the program onto the client role at build time (`blossom build --role R`: the role's rules,
-  the channels it uses as schemas, the types and functions they need, its link events), serves that precompiled
-  artifact to an engine-only page, checks that it names nothing placed elsewhere, and adds its digest to the handshake.
+A page never gets the program's source, nor any rule or relation placed at another role. The node projects the
+program onto each client role when it starts (`ClientArtifact::project`, over the IR's role projection):
+
+- **What is kept:** the role's rules (without their role guard); the relations they read and write; every channel the
+  role is an end of, as a schema (its other end's rules stay home); the link events at the role and the member
+  relations and node directory of the roles it deals with (the deployment, which the page is given anyway); the
+  types, functions, constants, lattices and sites those reach; and the anonymous types over them (the validator
+  derives expression types structurally). Named types stay only where something kept names them.
+- **The leak check** (`ClientArtifact::leaks`): every relation of the projection is the role's, shared, one of its
+  channels, its link events, or a member relation; every rule is placed at the role. A node refuses to serve a
+  projection that fails it (`blossom run --web` does not start), and so does `blossom build`.
+- **The encoding:** `BLSC`, a format number, then the program as data (postcard) with its digest, the role, the
+  deployment's nodes and their roles in the projection's numbering. Decoding validates the program again and checks
+  the digest. Served at `/blossom/client/ROLE`; `/blossom/app.json` names the program, the node, the connection
+  identity and where each role's artifact is, and nothing else. `blossom build --deploy D --role R --out F` writes
+  the same bytes.
+- **The page holds no compiler.** `web/pkg-member/` is `blossom-web` built without its `compiler` feature: the engine,
+  the oracle (for the inspector) and the link (3.8 MB of wasm against 6.2 MB with the compiler). The host loads it
+  when a node serves the page and the full build only for a page on its own.
+- **A stale page.** A member's `HELLO` carries the first 16 bytes of its projection's digest (`part`); the node
+  refuses a link whose part is not the one it serves (`REJECT program`). The page then loads again, which gets the
+  current program, unless it did so in the last 30 seconds (then it says why and keeps trying).
+
+## Out of scope
 
 - Client-to-client links (WebRTC); clients relaying to other server nodes; load balancing a tab across server nodes.
 - Authentication beyond the token (principals for clients come with LANG-240's security modes).

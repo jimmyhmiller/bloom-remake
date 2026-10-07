@@ -6,4 +6,5 @@
 //! (docs/design/SLICES.md). The rest of the crate is a placeholder that exposes nothing (PLAN §4 D1).
 
 pub mod bls;
+pub mod client;
 pub mod sim;

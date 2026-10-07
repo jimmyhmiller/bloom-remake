@@ -56,9 +56,8 @@ fn serve(name: &str, program: &str, port: u16) -> Server {
             role: n.role.clone(),
         })
         .collect();
-    let (compiled, sources) = compile_deployed(&spec.source.to_string_lossy(), &nodes, &BTreeMap::new());
+    let (compiled, _) = compile_deployed(&spec.source.to_string_lossy(), &nodes, &BTreeMap::new());
     let artifact = Arc::new(compiled.unwrap().0);
-    let app = blossom_runtime::web::app_json(&spec, &sources, "s").unwrap();
     Server::start(ServerConfig {
         spec,
         artifact,
@@ -71,7 +70,6 @@ fn serve(name: &str, program: &str, port: u16) -> Server {
         web: Some(WebConfig {
             addr: format!("127.0.0.1:{port}").parse().unwrap(),
             root: None,
-            app,
         }),
     })
     .unwrap()
@@ -79,24 +77,31 @@ fn serve(name: &str, program: &str, port: u16) -> Server {
 
 /// `GET path` from the node's web listener: the body.
 #[cfg(test)]
-fn get(port: u16, path: &str) -> String {
+fn get_bytes(port: u16, path: &str) -> Vec<u8> {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     write!(s, "GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
-    let mut all = String::new();
-    s.read_to_string(&mut all).unwrap();
-    let (head, body) = all.split_once("\r\n\r\n").unwrap();
+    let mut all = Vec::new();
+    s.read_to_end(&mut all).unwrap();
+    let at = all.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    let head = String::from_utf8_lossy(&all[..at]).into_owned();
     assert!(head.starts_with("HTTP/1.1 200"), "{head}");
-    body.to_owned()
+    all[at + 4..].to_vec()
 }
 
-/// What the page compiles, from `/blossom/app.json`.
+#[cfg(test)]
+fn get(port: u16, path: &str) -> String {
+    String::from_utf8(get_bytes(port, path)).unwrap()
+}
+
+/// What the page runs: the artifact `/blossom/app.json` points it to. No source reaches it.
 #[cfg(test)]
 fn compiled(port: u16) -> Compiled {
-    let app: serde_json::Value = serde_json::from_str(&get(port, "/blossom/app.json")).unwrap();
-    let files: BTreeMap<String, String> = serde_json::from_value(app["files"].clone()).unwrap();
-    let root = app["root"].as_str().unwrap();
+    let text = get(port, "/blossom/app.json");
+    let app: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(app.get("files").is_none() && !text.contains(".bls"), "{text}");
+    let path = app["clients"]["Browser"].as_str().unwrap();
     let deployment: ClientDeployment = serde_json::from_value(app.clone()).unwrap();
-    blossom_web::compile_client(root, &files, &deployment).unwrap()
+    blossom_web::load_client(&get_bytes(port, path), &deployment).unwrap()
 }
 
 /// A member page: its app, its link's connection, and the texts its patches set.

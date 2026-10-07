@@ -75,4 +75,5 @@ Appended at each milestone gate from the `## New dependencies` sections of `docs
 | batsat | 0.6.0 | MIT | blossom-sat | Pure-Rust incremental SAT backend | M2.4 |
 | thiserror | workspace | MIT OR Apache-2.0 | blossom-sat | Typed solver errors | M2.4 |
 | sha1 | 0.10.7 | MIT OR Apache-2.0 | blossom-runtime | The WebSocket accept key (RFC 6455 §4.2.2 fixes SHA-1); used for nothing else | S21 |
-| serde_json | workspace | MIT OR Apache-2.0 | blossom-runtime, blossom-cli | `/blossom/app.json`, the program and deployment a client page compiles | S21 |
+| serde_json | workspace | MIT OR Apache-2.0 | blossom-runtime | `/blossom/app.json`, the deployment a client page runs in | S21 |
+| serde, postcard, thiserror | workspace | MIT OR Apache-2.0 | blossom-artifact | the encoded client artifact (docs/design/CLIENTS.md §8) | S22 |

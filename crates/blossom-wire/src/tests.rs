@@ -413,6 +413,7 @@ fn frames_round_trip() {
             program_version: 3,
             peer: Peer::Member {
                 role: "Browser".into(),
+                part: [5; 16],
                 token: None,
                 received: 0,
                 acked: 0,
@@ -429,6 +430,7 @@ fn frames_round_trip() {
             program_version: 3,
             peer: Peer::Member {
                 role: "Browser".into(),
+                part: [6; 16],
                 token: Some(vec![9; 20]),
                 received: 17,
                 acked: 4,

@@ -72,6 +72,14 @@ pub(crate) enum MemberEvent {
     Closed { member: NodeId, conn: u64 },
 }
 
+/// A client role as the web listener serves it: its id, the digest of its part of the program, and that part encoded
+/// (`/blossom/client/ROLE`).
+pub(crate) struct ClientRole {
+    pub id: RoleId,
+    pub part: [u8; 16],
+    pub artifact: Arc<[u8]>,
+}
+
 /// What the web listener's connection threads share.
 #[derive(Clone)]
 pub(crate) struct WebCtx {
@@ -90,7 +98,7 @@ pub(crate) struct WebCtx {
     pub root: Option<PathBuf>,
     pub next_conn: Arc<AtomicU64>,
     /// The program's client roles, by name.
-    pub client_roles: Arc<BTreeMap<String, RoleId>>,
+    pub client_roles: Arc<BTreeMap<String, ClientRole>>,
 }
 
 /// Serves one HTTP connection: a file, `app.json`, or a member's link.
@@ -103,6 +111,15 @@ pub(crate) fn web_conn(stream: TcpStream, ctx: &WebCtx) -> Result<(), RuntimeErr
     }
     match req.path.as_str() {
         "/blossom/app.json" => web::respond(&mut w, 200, "OK", "application/json", ctx.app.as_bytes()),
+        path if path.starts_with("/blossom/client/") => {
+            match path
+                .strip_prefix("/blossom/client/")
+                .and_then(|r| ctx.client_roles.get(r))
+            {
+                Some(role) => web::respond(&mut w, 200, "OK", "application/octet-stream", &role.artifact),
+                None => web::respond(&mut w, 404, "Not Found", "text/plain", b"no such client role"),
+            }
+        }
         "/blossom/link" => {
             web::upgrade(&mut w, &req)?;
             reader.get_ref().set_read_timeout(None).map_err(RuntimeError::Io)?;
@@ -172,6 +189,7 @@ fn link(mut r: BufReader<TcpStream>, w: TcpStream, ctx: &WebCtx) -> Result<(), R
     }
     let Peer::Member {
         role,
+        part,
         token,
         received,
         acked,
@@ -179,12 +197,19 @@ fn link(mut r: BufReader<TcpStream>, w: TcpStream, ctx: &WebCtx) -> Result<(), R
     else {
         return refuse(RejectReason::NotAllowed, "only client members connect here".into());
     };
-    let Some(role_id) = ctx.client_roles.get(&role).copied() else {
+    let Some(client) = ctx.client_roles.get(&role) else {
         return refuse(
             RejectReason::NotAllowed,
             format!("`{role}` is not a client role of the program"),
         );
     };
+    if part != client.part {
+        return refuse(
+            RejectReason::Program,
+            format!("the page runs another version of `{role}`'s part of the program: load it again"),
+        );
+    }
+    let role_id = client.id;
     let inbound = ctx.catalog.accept(&h.channels);
     let (member, token) = identify(ctx, &role, token)?;
     let conn = ctx.next_conn.fetch_add(1, Ordering::SeqCst);

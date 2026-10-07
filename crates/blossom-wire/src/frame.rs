@@ -41,11 +41,12 @@ pub enum Peer {
     Node(u32),
     /// A client session, with the principal it claims.
     Client { principal: String },
-    /// A member of a client role (docs/design/CLIENTS.md §3): its role, its token (`None` the first time), the
-    /// sequence number of the last message it took from the server, and of the last of its own the server
-    /// acknowledged.
+    /// A member of a client role (docs/design/CLIENTS.md §3): its role, the digest of the part of the program it runs
+    /// (§8: a server refuses a page built from another program), its token (`None` the first time), the sequence
+    /// number of the last message it took from the server, and of the last of its own the server acknowledged.
     Member {
         role: String,
+        part: [u8; 16],
         token: Option<Vec<u8>>,
         received: u64,
         acked: u64,
@@ -231,12 +232,14 @@ impl Frame {
                     }
                     Peer::Member {
                         role,
+                        part,
                         token,
                         received,
                         acked,
                     } => {
                         body.push(2);
                         put_str(&mut body, role);
+                        body.extend_from_slice(part);
                         put_bytes(&mut body, token.as_deref().unwrap_or(&[]));
                         body.extend_from_slice(&received.to_le_bytes());
                         body.extend_from_slice(&acked.to_le_bytes());
@@ -327,9 +330,11 @@ impl Frame {
                     },
                     2 => {
                         let role = get_str(input)?;
+                        let part = arr16(input, "program part")?;
                         let token = get_bytes(input)?;
                         Peer::Member {
                             role,
+                            part,
                             token: (!token.is_empty()).then_some(token),
                             received: u64::from_le_bytes(le(input, "received")?),
                             acked: u64::from_le_bytes(le(input, "acked")?),
