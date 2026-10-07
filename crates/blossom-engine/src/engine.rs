@@ -57,6 +57,9 @@ pub struct EngineConfig {
     /// This node's role when it is a client member (CLIENTS.md §2): its id is outside the deployment, so `roles` and
     /// `node_names` do not name it.
     pub client_role: Option<RoleId>,
+    /// How many rows each tiered table keeps of its recent probes (docs/design/DATABASE.md §7, the hot tier; `None`:
+    /// [`crate::store::HOT_ROWS`]).
+    pub hot_rows: Option<usize>,
 }
 
 /// The per-group state of an aggregate rule: per aggregate column, the support of each distinct argument tuple, and
@@ -124,6 +127,8 @@ pub struct Engine {
     /// The tables tiered since the last reset ([`Engine::reset_on`]): their rows are the cold side's, and their
     /// `Main` store takes each tick's change to its next state at the tick's end.
     tiered: BTreeSet<RelId>,
+    /// How many rows each tiered table keeps of its recent probes.
+    hot_rows: usize,
 }
 
 fn kinds(p: &Program) -> Vec<Option<Kind>> {
@@ -540,6 +545,7 @@ impl Engine {
             framed,
             tierable,
             tiered: BTreeSet::new(),
+            hot_rows: cfg.hot_rows.unwrap_or(crate::store::HOT_ROWS),
             program,
         };
         engine.build_indexes()?;
@@ -637,6 +643,7 @@ impl Engine {
                     cold.clone(),
                     key,
                     rel_holds_blobs(self.program.get(), rel),
+                    self.hot_rows,
                 )?),
             );
             self.tiered.insert(rel);

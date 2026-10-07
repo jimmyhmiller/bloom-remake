@@ -581,7 +581,9 @@ impl Database {
         Ok(out)
     }
 
-    /// The rows a page-at-a-time scan of `start..end` finds, from keys under `tag`.
+    /// The rows a page-at-a-time scan of `start..end` finds, from keys under `tag`; `None` once there are more than
+    /// `max` (the scan stops there).
+    #[allow(clippy::too_many_arguments)]
     fn rows_between(
         &self,
         codec: &DurableCodec<'_>,
@@ -590,15 +592,27 @@ impl Database {
         start: &[u8],
         end: Option<&[u8]>,
         at: u64,
-    ) -> Result<Vec<Row>, NodeError> {
+        max: Option<usize>,
+    ) -> Result<Option<Vec<Row>>, NodeError> {
         let mut out = Vec::new();
-        self.each_key(start, end, at, &mut |key| {
-            out.push(codec.tagged_row(tag, rel, key)?);
-            Ok(())
-        })?;
-        Ok(out)
+        let mut from = start.to_vec();
+        loop {
+            let page = self.lsm.scan_page(&from, end, at, PAGE_KEYS)?;
+            for key in &page.keys {
+                out.push(codec.tagged_row(tag, rel, key)?);
+            }
+            if max.is_some_and(|m| out.len() > m) {
+                return Ok(None);
+            }
+            match page.next {
+                Some(n) => from = n,
+                None => return Ok(Some(out)),
+            }
+        }
     }
 
+    /// The rows of `rel` as of `at` whose columns `cols` hold `values` (and, with `range`, whose column lies within
+    /// it); `None` once there are more than `max`.
     fn probe_rows(
         &self,
         rel: RelId,
@@ -606,7 +620,8 @@ impl Database {
         values: &[blossom_value::Value],
         range: Option<blossom_engine::ColRange<'_>>,
         at: u64,
-    ) -> Result<Vec<Row>, NodeError> {
+        max: Option<usize>,
+    ) -> Result<Option<Vec<Row>>, NodeError> {
         let codec = self.codec();
         let rel_tag = codec.rel_tag(rel)?;
         // The relation's own keys lead with its columns in declaration order: a probe on a leading run of them (and a
@@ -635,12 +650,12 @@ impl Database {
             Some((col, lo, hi)) => {
                 let lead = key_cols.get(..cols.len()).unwrap_or_default();
                 let (start, end) = codec.tagged_range(&tag, rel, lead, values, col, lo, hi)?;
-                self.rows_between(&codec, &tag, rel, &start, end.as_deref(), at)
+                self.rows_between(&codec, &tag, rel, &start, end.as_deref(), at, max)
             }
             None => {
                 let prefix = codec.tagged_prefix(&tag, rel, &key_cols, values)?;
                 let end = crate::keycode::successor(&prefix);
-                self.rows_between(&codec, &tag, rel, &prefix, end.as_deref(), at)
+                self.rows_between(&codec, &tag, rel, &prefix, end.as_deref(), at, max)
             }
         }
     }
@@ -677,7 +692,20 @@ impl blossom_engine::ColdTables for Database {
         range: Option<blossom_engine::ColRange<'_>>,
         at: u64,
     ) -> Result<Vec<Row>, blossom_ir::tick::EvalError> {
-        self.probe_rows(rel, cols, values, range, at).map_err(storage)
+        self.probe_rows(rel, cols, values, range, at, None)
+            .map_err(storage)?
+            .ok_or_else(|| blossom_base::internal_error!("an unbounded probe stopped short").into())
+    }
+
+    fn probe_at_most(
+        &self,
+        rel: RelId,
+        cols: &[usize],
+        values: &[blossom_value::Value],
+        at: u64,
+        max: usize,
+    ) -> Result<Option<Vec<Row>>, blossom_ir::tick::EvalError> {
+        self.probe_rows(rel, cols, values, None, at, Some(max)).map_err(storage)
     }
 
     fn count(&self, rel: RelId, at: u64) -> Result<usize, blossom_ir::tick::EvalError> {

@@ -88,6 +88,169 @@ impl CellSpec {
 
 type Index = BTreeMap<Vec<Value>, BTreeSet<Row>>;
 
+/// Rows by the values of some of their columns, hashed.
+type RowsBy = blossom_base::det::DetMap<Vec<Value>, BTreeSet<Row>>;
+
+/// A probe's rows kept in the hot tier (sorted), and when they were last used.
+type Kept = (Arc<Vec<Row>>, u64);
+
+/// How many rows a tiered table keeps of its recent probes by default (`EngineConfig::hot_rows`).
+pub(crate) const HOT_ROWS: usize = 1 << 14;
+
+/// A tiered table's hot tier: the cold side's answers to its recent probes (the rows with given values in given
+/// columns, sorted, and whether a row is there), kept equal to the cold side's newest version as it moves: each
+/// overlay entry the cold side catches up with is applied to them rather than dropping them, so a probe asked again
+/// costs no read of the cold side. A range probe is answered from its prefix's rows when they are few enough to
+/// keep. Bounded by `budget` rows: past it, the least recently used half goes.
+#[derive(Default)]
+struct Hot {
+    /// By the probe's columns, then their values: the rows, and when they were last used.
+    probes: BTreeMap<Vec<usize>, blossom_base::det::DetMap<Vec<Value>, Kept>>,
+    /// Probes known to find more rows than one may keep: a range probe of one reads the cold side's range.
+    large: BTreeMap<Vec<usize>, blossom_base::det::DetMap<Vec<Value>, u64>>,
+    contains: blossom_base::det::DetMap<Row, (bool, u64)>,
+    /// The rows kept: every probe's, and one per membership.
+    rows: usize,
+    clock: u64,
+    budget: usize,
+}
+
+impl Hot {
+    fn tick(&mut self) -> u64 {
+        self.clock += 1;
+        self.clock
+    }
+
+    /// The most rows one probe may keep.
+    fn largest(&self) -> usize {
+        (self.budget / 4).max(1)
+    }
+
+    fn probe(&mut self, cols: &[usize], values: &[Value]) -> Option<Arc<Vec<Row>>> {
+        let now = self.tick();
+        let (rows, used) = self.probes.get_mut(cols)?.get_mut(values)?;
+        *used = now;
+        Some(rows.clone())
+    }
+
+    fn is_large(&mut self, cols: &[usize], values: &[Value]) -> bool {
+        let now = self.tick();
+        match self.large.get_mut(cols).and_then(|m| m.get_mut(values)) {
+            Some(used) => {
+                *used = now;
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn mark_large(&mut self, cols: &[usize], values: &[Value]) {
+        let now = self.tick();
+        self.large
+            .entry(cols.to_vec())
+            .or_default()
+            .insert(values.to_vec(), now);
+        self.trim();
+    }
+
+    /// Keeps a probe's rows (sorted).
+    fn keep_probe(&mut self, cols: &[usize], values: &[Value], rows: Arc<Vec<Row>>) {
+        let now = self.tick();
+        self.rows += rows.len();
+        if let Some((old, _)) = self
+            .probes
+            .entry(cols.to_vec())
+            .or_default()
+            .insert(values.to_vec(), (rows, now))
+        {
+            self.rows -= old.len();
+        }
+        self.trim();
+    }
+
+    fn holds(&mut self, row: &Row) -> Option<bool> {
+        let now = self.tick();
+        let (present, used) = self.contains.get_mut(row)?;
+        *used = now;
+        Some(*present)
+    }
+
+    fn keep_holds(&mut self, row: &Row, present: bool) {
+        let now = self.tick();
+        if self.contains.insert(row.clone(), (present, now)).is_none() {
+            self.rows += 1;
+        }
+        self.trim();
+    }
+
+    /// The cold side now holds `row` as `present`: every kept answer it touches follows (a probe that outgrows what
+    /// one may keep goes, and is known large).
+    fn caught_up(&mut self, row: &Row, present: bool) {
+        let largest = self.largest();
+        for (cols, by_values) in self.probes.iter_mut() {
+            let values = key(row, cols);
+            let Some((rows, used)) = by_values.get_mut(&values) else {
+                continue;
+            };
+            match (rows.binary_search(row), present) {
+                (Err(at), true) => {
+                    Arc::make_mut(rows).insert(at, row.clone());
+                    self.rows += 1;
+                    if rows.len() > largest {
+                        let used = *used;
+                        if let Some((gone, _)) = by_values.remove(&values) {
+                            self.rows -= gone.len();
+                        }
+                        self.large.entry(cols.clone()).or_default().insert(values, used);
+                    }
+                }
+                (Ok(at), false) => {
+                    Arc::make_mut(rows).remove(at);
+                    self.rows -= 1;
+                }
+                _ => {}
+            }
+        }
+        if let Some((held, _)) = self.contains.get_mut(row) {
+            *held = present;
+        }
+    }
+
+    /// Past the budget, the least recently used half goes.
+    fn trim(&mut self) {
+        let large: usize = self.large.values().map(|m| m.len()).sum();
+        if self.rows + large <= self.budget {
+            return;
+        }
+        let mut uses: Vec<u64> = self
+            .probes
+            .values()
+            .flat_map(|m| m.values().map(|(_, u)| *u))
+            .chain(self.contains.values().map(|(_, u)| *u))
+            .chain(self.large.values().flat_map(|m| m.values().copied()))
+            .collect();
+        uses.sort_unstable();
+        let cut = uses.get(uses.len() / 2).copied().unwrap_or(0);
+        let mut rows = 0usize;
+        for by_values in self.probes.values_mut() {
+            by_values.retain(|_, (r, u)| {
+                let keep = *u > cut;
+                if keep {
+                    rows += r.len();
+                }
+                keep
+            });
+        }
+        self.probes.retain(|_, m| !m.is_empty());
+        for by_values in self.large.values_mut() {
+            by_values.retain(|_, u| *u > cut);
+        }
+        self.large.retain(|_, m| !m.is_empty());
+        self.contains.retain(|_, (_, u)| *u > cut);
+        self.rows = rows + self.contains.len();
+    }
+}
+
 /// A tiered table's cold side and what memory holds of it (docs/design/DATABASE.md §7). A row is present while it is
 /// carried or has other support (`Store::counts`); it is carried as the overlay says, or else as the cold side says
 /// at its newest version. The overlay holds each row's newest carried membership from the ticks since the store
@@ -100,9 +263,14 @@ pub(crate) struct Tiered {
     key: Vec<usize>,
     /// Whether the table's rows can hold blobs (its in-memory store counts them).
     blobs: bool,
-    overlay: BTreeMap<Row, (bool, u64)>,
+    overlay: blossom_base::det::DetMap<Row, (bool, u64)>,
     /// The overlay's rows by the tick that set them.
     by_tick: BTreeMap<u64, BTreeSet<Row>>,
+    /// The overlay's rows by the values of the columns a probe asks for: built for a column list on its first probe
+    /// and kept with every overlay change, so a probe's correction costs its rows, not the overlay's.
+    overlay_by: RefCell<BTreeMap<Vec<usize>, RowsBy>>,
+    /// The hot tier: recent probes' answers, kept with the cold side.
+    hot: RefCell<Hot>,
     /// The change to the present rows the last carry made: the next tick's change (`Store::ins`, `Store::del`).
     staged: (BTreeSet<Row>, BTreeSet<Row>),
     /// No tick has begun since the store was made (at a reset), and whether the current tick is the first: as after
@@ -131,6 +299,7 @@ impl Tiered {
         cold: Arc<dyn ColdTables>,
         key: Vec<usize>,
         blobs: bool,
+        hot_rows: usize,
     ) -> Result<Tiered, EvalError> {
         let len = match cold.version()? {
             Some(v) => cold.count(rel, v)?,
@@ -141,8 +310,13 @@ impl Tiered {
             cold,
             key,
             blobs,
-            overlay: BTreeMap::new(),
+            overlay: blossom_base::det::DetMap::new(),
             by_tick: BTreeMap::new(),
+            overlay_by: RefCell::new(BTreeMap::new()),
+            hot: RefCell::new(Hot {
+                budget: hot_rows,
+                ..Hot::default()
+            }),
             staged: (BTreeSet::new(), BTreeSet::new()),
             fresh: true,
             first: false,
@@ -152,10 +326,15 @@ impl Tiered {
 
     /// Whether the cold side holds `row` at its newest version (the carry before any tick's change).
     fn cold_carried(&self, row: &Row) -> Result<bool, EvalError> {
-        match self.cold.version()? {
-            Some(v) => self.cold.contains(self.rel, row, v),
-            None => Ok(false),
+        if let Some(present) = self.hot.borrow_mut().holds(row) {
+            return Ok(present);
         }
+        let present = match self.cold.version()? {
+            Some(v) => self.cold.contains(self.rel, row, v)?,
+            None => false,
+        };
+        self.hot.borrow_mut().keep_holds(row, present);
+        Ok(present)
     }
 
     /// Whether `row` is carried.
@@ -163,35 +342,147 @@ impl Tiered {
         if let Some((present, _)) = self.overlay.get(row) {
             return Ok(*present);
         }
-        match self.cold.version()? {
-            Some(v) => self.cold.contains(self.rel, row, v),
-            None => Ok(false),
-        }
+        self.cold_carried(row)
     }
 
-    /// The carried rows the cold side finds for a probe, corrected by the overlay: its absent rows removed, its
-    /// present rows that `matches` added.
+    /// The cold side's rows for a probe on `cols` holding `values` (and, with `range`, the rows of those that
+    /// `matches`), sorted: from the hot tier, else read and kept there when few enough.
+    fn cold_rows(
+        &self,
+        cols: &[usize],
+        values: &[Value],
+        range: Option<ColRange<'_>>,
+        matches: &impl Fn(&Row) -> bool,
+    ) -> Result<Arc<Vec<Row>>, EvalError> {
+        let Some(v) = self.cold.version()? else {
+            return Ok(Arc::new(Vec::new()));
+        };
+        let ranged = |all: Arc<Vec<Row>>| match range {
+            None => all,
+            // A range on the column after a leading run: the rows (sorted, one prefix) are in that column's order.
+            Some((col, lo, hi)) if col == cols.len() && cols.iter().enumerate().all(|(i, c)| i == *c) => {
+                fn at(r: &Row, col: usize) -> Option<&Value> {
+                    r.get(col)
+                }
+                let from = all.partition_point(|r| match lo {
+                    Bound::Included(l) => at(r, col).is_none_or(|v| v < l),
+                    Bound::Excluded(l) => at(r, col).is_none_or(|v| v <= l),
+                    Bound::Unbounded => false,
+                });
+                let to = all.partition_point(|r| match hi {
+                    Bound::Included(h) => at(r, col).is_none_or(|v| v <= h),
+                    Bound::Excluded(h) => at(r, col).is_none_or(|v| v < h),
+                    Bound::Unbounded => true,
+                });
+                Arc::new(all.get(from..to.max(from)).unwrap_or_default().to_vec())
+            }
+            Some(_) => Arc::new(all.iter().filter(|r| matches(r)).cloned().collect()),
+        };
+        let (large, max) = {
+            let mut hot = self.hot.borrow_mut();
+            if let Some(all) = hot.probe(cols, values) {
+                return Ok(ranged(all));
+            }
+            (hot.is_large(cols, values), hot.largest())
+        };
+        if !large {
+            match self.cold.probe_at_most(self.rel, cols, values, v, max)? {
+                Some(mut all) => {
+                    all.sort_unstable();
+                    let all = Arc::new(all);
+                    self.hot.borrow_mut().keep_probe(cols, values, all.clone());
+                    return Ok(ranged(all));
+                }
+                None => self.hot.borrow_mut().mark_large(cols, values),
+            }
+        }
+        let mut rows = self.cold.probe(self.rel, cols, values, range, v)?;
+        rows.sort_unstable();
+        Ok(Arc::new(rows))
+    }
+
+    /// The overlay's corrections to the cold side's rows for a probe on `cols` holding `values` (sorted, `cold`):
+    /// the positions of the rows it holds absent, and its present rows with those values that `matches` the cold
+    /// side lacks.
+    fn corrections(
+        &self,
+        cols: &[usize],
+        values: &[Value],
+        cold: &[Row],
+        matches: impl Fn(&Row) -> bool,
+    ) -> (BTreeSet<usize>, Vec<Row>) {
+        let (mut gone, mut added) = (BTreeSet::new(), Vec::new());
+        if self.overlay.is_empty() {
+            return (gone, added);
+        }
+        let mut by = self.overlay_by.borrow_mut();
+        let index = by.entry(cols.to_vec()).or_insert_with(|| {
+            let mut index = blossom_base::det::DetMap::new();
+            for row in self.overlay.keys() {
+                index
+                    .entry(key(row, cols))
+                    .or_insert_with(BTreeSet::new)
+                    .insert(row.clone());
+            }
+            index
+        });
+        for row in index.get(values).into_iter().flatten() {
+            let present = self.overlay.get(row).is_some_and(|(present, _)| *present);
+            match (cold.binary_search(row), present) {
+                (Ok(at), false) => {
+                    gone.insert(at);
+                }
+                (Err(_), true) if matches(row) => added.push(row.clone()),
+                _ => {}
+            }
+        }
+        (gone, added)
+    }
+
+    /// The carried rows for a probe on `cols` holding `values` (and, with `range`, those that `matches`): the cold
+    /// side's, corrected by the overlay. No row twice.
     fn carried_rows(
         &self,
         cols: &[usize],
         values: &[Value],
         range: Option<ColRange<'_>>,
         matches: impl Fn(&Row) -> bool,
-    ) -> Result<BTreeSet<Row>, EvalError> {
-        let mut out: BTreeSet<Row> = match self.cold.version()? {
-            Some(v) => self.cold.probe(self.rel, cols, values, range, v)?.into_iter().collect(),
-            None => BTreeSet::new(),
+    ) -> Result<Vec<Row>, EvalError> {
+        let cold = self.cold_rows(cols, values, range, &matches)?;
+        let (gone, added) = self.corrections(cols, values, &cold, matches);
+        let mut out: Vec<Row> = if gone.is_empty() {
+            cold.to_vec()
+        } else {
+            cold.iter()
+                .enumerate()
+                .filter(|(i, _)| !gone.contains(i))
+                .map(|(_, r)| r.clone())
+                .collect()
         };
-        for (row, (present, _)) in &self.overlay {
-            if *present {
-                if matches(row) {
-                    out.insert(row.clone());
+        out.extend(added);
+        Ok(out)
+    }
+
+    /// Whether a carried row has columns `cols` holding `values` and is `live`.
+    fn any_carried(&self, cols: &[usize], values: &[Value], live: impl Fn(&Row) -> bool) -> Result<bool, EvalError> {
+        let cold = self.cold_rows(cols, values, None, &|_| true)?;
+        let (gone, added) = self.corrections(cols, values, &cold, |_| true);
+        Ok(cold.iter().enumerate().any(|(i, r)| !gone.contains(&i) && live(r)) || added.iter().any(live))
+    }
+
+    /// Keeps the overlay's indexes with a row the overlay gained (`true`) or lost.
+    fn index_overlay(&mut self, row: &Row, gained: bool) {
+        for (cols, index) in self.overlay_by.get_mut().iter_mut() {
+            let k = key(row, cols);
+            if gained {
+                index.entry(k).or_insert_with(BTreeSet::new).insert(row.clone());
+            } else if let Some(rows) = index.get_mut(&k) {
+                rows.remove(row);
+                if rows.is_empty() {
+                    index.remove(&k);
                 }
-            } else {
-                out.remove(row);
             }
         }
-        Ok(out)
     }
 }
 
@@ -341,7 +632,7 @@ impl Store {
     /// How many rows memory holds: the present rows, or a tiered store's overlay and other support.
     pub fn resident_len(&self) -> usize {
         match &self.tiered {
-            Some(t) => t.overlay.len() + self.counts.len(),
+            Some(t) => t.overlay.len() + self.counts.len() + t.hot.borrow().rows,
             None => self.present_len(),
         }
     }
@@ -444,13 +735,16 @@ impl Store {
             .tiered
             .as_deref_mut()
             .ok_or_else(|| internal_error!("a carry into a store that is not tiered"))?;
-        if let Some((_, old)) = t.overlay.insert(row.clone(), (present, tick))
-            && let Some(rows) = t.by_tick.get_mut(&old)
-        {
-            rows.remove(row);
-            if rows.is_empty() {
-                t.by_tick.remove(&old);
+        match t.overlay.insert(row.clone(), (present, tick)) {
+            Some((_, old)) => {
+                if let Some(rows) = t.by_tick.get_mut(&old) {
+                    rows.remove(row);
+                    if rows.is_empty() {
+                        t.by_tick.remove(&old);
+                    }
+                }
             }
+            None => t.index_overlay(row, true),
         }
         t.by_tick.entry(tick).or_default().insert(row.clone());
         if other {
@@ -483,7 +777,7 @@ impl Store {
         t.first = std::mem::take(&mut t.fresh);
         if t.first {
             // Every row is new to the rules (their stores start empty after a reset): read whole, this once.
-            let mut ins = t.carried_rows(&[], &[], None, |_| true)?;
+            let mut ins: BTreeSet<Row> = t.carried_rows(&[], &[], None, |_| true)?.into_iter().collect();
             ins.extend(self.counts.keys().cloned());
             self.touched = true;
             self.generation = self.generation.wrapping_add(1);
@@ -496,7 +790,10 @@ impl Store {
             let kept = t.by_tick.split_off(&v.saturating_add(1));
             for rows in std::mem::replace(&mut t.by_tick, kept).into_values() {
                 for row in rows {
-                    t.overlay.remove(&row);
+                    if let Some((present, _)) = t.overlay.remove(&row) {
+                        t.hot.get_mut().caught_up(&row, present);
+                    }
+                    t.index_overlay(&row, false);
                 }
             }
         }
@@ -562,7 +859,7 @@ impl Store {
 
     pub fn contains(&self, row: &Row) -> Result<bool, EvalError> {
         if let Some(t) = &self.tiered {
-            return Ok(self.counts.contains_key(row) || t.carried(row)?);
+            return Ok((!self.counts.is_empty() && self.counts.contains_key(row)) || t.carried(row)?);
         }
         Ok(if self.cell.is_some() {
             self.merged_rows.contains(row)
@@ -670,8 +967,17 @@ impl Store {
         if let Some(t) = &self.tiered {
             let matches = |r: &Row| holds(r, cols, values);
             let mut out = t.carried_rows(cols, values, None, matches)?;
-            out.extend(self.counts.keys().filter(|r| matches(r)).cloned());
-            return Ok(out.into_iter().collect());
+            // Support other than the carry (rare): its rows, those not carried too.
+            if !self.counts.is_empty() {
+                let carried: BTreeSet<Row> = out.iter().cloned().collect();
+                out.extend(
+                    self.counts
+                        .keys()
+                        .filter(|r| matches(r) && !carried.contains(*r))
+                        .cloned(),
+                );
+            }
+            return Ok(out);
         }
         if cols.is_empty() {
             return Ok(self.present()?.cloned().collect());
@@ -690,8 +996,12 @@ impl Store {
     /// Whether a row of one version has columns `cols` holding `values` (without collecting them).
     pub fn any(&self, old: bool, cols: &[usize], values: &[Value]) -> Result<bool, EvalError> {
         self.settled()?;
-        if self.tiered.is_some() {
-            return Ok(!self.rows(old, cols, values)?.is_empty());
+        if let Some(t) = &self.tiered {
+            let matches = |r: &Row| holds(r, cols, values);
+            let live = |r: &Row| !old || !self.ins.contains(r);
+            return Ok((old && self.del.iter().any(matches))
+                || self.counts.keys().any(|r| matches(r) && live(r))
+                || t.any_carried(cols, values, live)?);
         }
         let matches = |r: &Row| holds(r, cols, values);
         if old && self.del.iter().any(matches) {
@@ -815,12 +1125,25 @@ impl Store {
                 })
         };
         let mut out = t.carried_rows(cols, values, Some((col, lo.as_ref(), hi.as_ref())), within)?;
-        out.extend(self.counts.keys().filter(|r| within(r)).cloned());
+        // Support other than the carry (rare): its rows, those not carried too.
+        if !self.counts.is_empty() {
+            let carried: BTreeSet<Row> = out.iter().cloned().collect();
+            out.extend(
+                self.counts
+                    .keys()
+                    .filter(|r| within(r) && !carried.contains(*r))
+                    .cloned(),
+            );
+        }
+        // At the start of the tick: without the rows the tick inserted, with those it deleted (present before, and
+        // so neither carried nor supported now).
         if old {
-            out.retain(|r| !self.ins.contains(r));
+            if !self.ins.is_empty() {
+                out.retain(|r| !self.ins.contains(r));
+            }
             out.extend(self.del.iter().filter(|r| within(r)).cloned());
         }
-        Ok(out.into_iter().collect())
+        Ok(out)
     }
 
     /// The rows of one version whose columns `cols` hold `values`.

@@ -180,6 +180,16 @@ Moving durable relations onto the database, so a node's durable state may outgro
   start empty after any reset, and derive from all of the table), reading the table whole once, and its next state
   is compared with what the database held (as the baseline does for the other relations). Tables the engine does
   not tier (lattice tables, sealed and resolved ones, those a rule writes) are loaded from the database.
+- *The hot tier.* A row's key is the whole row, so a table updated in place leaves a delete and a new key per
+  update under the same prefix, and the history the tree keeps (`storage.history_ticks`) leaves them there: a probe
+  of the tree walks them. Each tiered table keeps the answers to its recent probes (the rows with given values in
+  given columns, sorted; whether a row is there) in a hot tier bounded in rows (`EngineConfig::hot_rows`, 16384 by
+  default), kept equal to the database's newest version: an overlay entry the database catches up with is applied
+  to them, not dropped, so a probe asked again never reads the tree. A range probe on the column after a leading
+  run is cut from its prefix's kept rows by binary search; a prefix too large to keep is known as such, and its
+  ranges read the tree. The overlay is indexed by the columns probes ask for, so a probe's correction costs the
+  overlay's rows with its values. The Kafka produce benchmark (three brokers, 1 KiB records) went from 724 records/s
+  without the hot tier to within about 10% of the in-memory engine.
 - *Blobs.* The executor answers only for rows beyond the carried state (`Executor::holds_blob`), and a tiered table
   holds only carried rows once a tick has ended: it answers for none. The node counts the carried rows' blobs from
   the blob keyspaces at boot, then from each tick's change.
