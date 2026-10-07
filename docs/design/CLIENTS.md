@@ -172,5 +172,11 @@ What the page keeps, and where:
 
 ## Out of scope
 
+- **The split of the program (next slice, S22).** `/blossom/app.json` ships the whole source and the page compiles it,
+  running only the client role's rules: the server's rules are readable by every visitor, and the page carries the
+  compiler. S22 projects the program onto the client role at build time (`blossom build --role R`: the role's rules,
+  the channels it uses as schemas, the types and functions they need, its link events), serves that precompiled
+  artifact to an engine-only page, checks that it names nothing placed elsewhere, and adds its digest to the handshake.
+
 - Client-to-client links (WebRTC); clients relaying to other server nodes; load balancing a tab across server nodes.
 - Authentication beyond the token (principals for clients come with LANG-240's security modes).
