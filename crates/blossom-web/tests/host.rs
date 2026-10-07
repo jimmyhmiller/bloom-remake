@@ -922,3 +922,83 @@ fn the_clock_fires_one_shot_and_bounded_timers_and_then_sleeps() {
     assert_eq!(a.next_deadline().unwrap(), None);
     assert_eq!(a.advance(ms(10_000)).unwrap(), []);
 }
+
+/// The host keeps one entry per durable row and writes what each event changed (`save_changes`): replaying the
+/// changes onto a store gives, after every event, exactly the rows a whole save holds, and restores the same app.
+#[test]
+fn saving_writes_the_rows_each_event_changed() {
+    let mut a = app("todomvc.bls");
+    a.start(None, "", T0).unwrap();
+    let mut kept: BTreeMap<(String, String), ()> = BTreeMap::new();
+    let apply = |c: blossom_web::store::SaveChanges, kept: &mut BTreeMap<(String, String), ()>| {
+        if c.full {
+            kept.clear();
+        }
+        for k in c.delete {
+            assert!(kept.remove(&k).is_some(), "deleting {k:?}, which was not saved");
+        }
+        for k in c.put {
+            kept.insert(k, ());
+        }
+    };
+    let first = a.save_changes().unwrap();
+    assert!(first.full);
+    apply(first, &mut kept);
+    let whole = |a: &App| -> BTreeSet<(String, String)> {
+        let saved: serde_json::Value = serde_json::from_str(&a.saved().unwrap()).unwrap();
+        saved["tables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|t| {
+                let name = t["name"].as_str().unwrap().to_owned();
+                t["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(move |r| (name.clone(), serde_json::to_string(r).unwrap()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    let events = [
+        ev_key("new-todo", "Enter", "milk"),
+        ev_key("new-todo", "Enter", "eggs"),
+        ev_key("new-todo", "Enter", "bread"),
+        Event::Change {
+            id: "toggle-1".to_owned(),
+            checked: true,
+        },
+        click("destroy-0"),
+        Event::Change {
+            id: "toggle-1".to_owned(),
+            checked: false,
+        },
+        click("clear-completed"),
+    ];
+    for e in events {
+        a.dispatch(&e, T0).unwrap();
+        let c = a.save_changes().unwrap();
+        assert!(!c.full);
+        apply(c, &mut kept);
+        assert_eq!(kept.keys().cloned().collect::<BTreeSet<_>>(), whole(&a), "after {e:?}");
+    }
+    // A store rebuilt from the entries restores the same todos.
+    let mut tables: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
+    for (t, row) in kept.keys() {
+        tables
+            .entry(t.clone())
+            .or_default()
+            .push(serde_json::from_str(row).unwrap());
+    }
+    let schemas = blossom_web::store::schemas(a.compiled().artifact().program.get());
+    let json = serde_json::json!({
+        "tables": schemas.iter().map(|(name, schema)| serde_json::json!({
+            "name": name, "schema": schema, "rows": tables.get(name).cloned().unwrap_or_default()
+        })).collect::<Vec<_>>()
+    });
+    let mut b = app("todomvc.bls");
+    let mut dom = Dom::default();
+    dom.apply(&b.start(Some(&json.to_string()), "", T0).unwrap().patches);
+    assert_eq!(dom.todos(), ["eggs", "bread"]);
+}

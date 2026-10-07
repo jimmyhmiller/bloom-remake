@@ -108,4 +108,11 @@ impl WebApp {
     pub fn saved(&self) -> Result<String, JsValue> {
         self.app.saved().map_err(js_error)
     }
+
+    /// The durable rows to save since the last call, as JSON (`App::save_changes`).
+    #[wasm_bindgen(js_name = saveChanges)]
+    pub fn save_changes(&mut self) -> Result<String, JsValue> {
+        let changes = self.app.save_changes().map_err(js_error)?;
+        json(&changes)
+    }
 }
