@@ -112,8 +112,9 @@ const DEPTH: usize = 24;
 
 /// Explains facts of the rounds in a history, re-running each round it needs once.
 pub struct Explainer<'a> {
-    /// The node the rounds ran as.
+    /// The node the rounds ran as, and the deployment's node names (for printing node values).
     node: NodeId,
+    names: Vec<Arc<str>>,
     program: &'a Program,
     oracle: Oracle,
     history: &'a History,
@@ -176,6 +177,7 @@ impl<'a> Explainer<'a> {
         };
         Ok(Explainer {
             node: who.node,
+            names: who.names.clone(),
             program,
             oracle,
             history,
@@ -237,7 +239,9 @@ impl<'a> Explainer<'a> {
             .enumerate()
             .map(|(i, v)| {
                 let ty = decl.schema.cols.get(i).map(|c| c.ty);
-                blossom_ir::printer::value_text(Some(self.program), v, ty, &|n| format!("node {}", n.0))
+                blossom_ir::printer::value_text(Some(self.program), v, ty, &|n| {
+                    blossom_ir::printer::node_text(n, &self.names)
+                })
             })
             .collect();
         format!("{}({})", decl.name, values.join(", "))
@@ -361,6 +365,10 @@ impl<'a> Explainer<'a> {
         if round.events.iter().any(|(r, x)| *r == rel && x == row) {
             return Ok(leaf(&format!("the event of round {tick}")));
         }
+        if let Some(d) = round.delivered.iter().find(|d| d.rel == rel && d.row == *row) {
+            let from = blossom_ir::printer::node_text(d.from, &self.names);
+            return Ok(leaf(&format!("received from {from} in round {tick}")));
+        }
         let Some(out) = self.run(tick)? else {
             return Ok(leaf("(before the rounds the inspector keeps)"));
         };
@@ -396,12 +404,17 @@ impl<'a> Explainer<'a> {
             }
         }
         for neg in &f.negations {
+            let cols = self.program.rels.get(neg.rel).map(|d| &d.schema.cols);
             let pattern: Vec<String> = neg
                 .pattern
                 .iter()
-                .map(|p| match p {
+                .enumerate()
+                .map(|(i, p)| match p {
                     Some(v) => {
-                        blossom_ir::printer::value_text(Some(self.program), v, None, &|n| format!("node {}", n.0))
+                        let ty = cols.and_then(|c| c.get(i)).map(|c| c.ty);
+                        blossom_ir::printer::value_text(Some(self.program), v, ty, &|n| {
+                            blossom_ir::printer::node_text(n, &self.names)
+                        })
                     }
                     None => "_".to_owned(),
                 })
