@@ -5,7 +5,7 @@
 // builds it and sets it).
 import { test, expect } from "@playwright/test";
 import { spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,9 +26,11 @@ function freePort() {
   });
 }
 
-/** A one-node deployment of examples/web/PROGRAM.bls, serving the page; `start`/`kill` run and stop the node. */
+/** A one-node deployment of examples/web/PROGRAM.bls (a copy of it, which `edit` rewrites), serving the page;
+ * `start`/`kill` run and stop the node. */
 async function deployment(program) {
   const dir = mkdtempSync(join(tmpdir(), `blossom-clients-${program}-`));
+  for (const f of [`${program}.bls`, "ui.bls"]) copyFileSync(join(repo, "examples", "web", f), join(dir, f));
   const peer = await freePort();
   const web = await freePort();
   const deploy = join(dir, "deploy.toml");
@@ -40,7 +42,7 @@ async function deployment(program) {
       `id = "${program}-web"`,
       `program = "${program}"`,
       "version = 1",
-      `source = "${join(repo, "examples", "web", `${program}.bls`)}"`,
+      `source = "${program}.bls"`,
       "[[node]]",
       'name = "s"',
       'role = "Server"',
@@ -86,6 +88,11 @@ async function deployment(program) {
         c.kill("SIGKILL");
       });
     },
+    /** Rewrites the program's source (the node runs it from its next start). */
+    edit(change) {
+      const file = join(dir, `${program}.bls`);
+      writeFileSync(file, change(readFileSync(file, "utf8")));
+    },
     async remove() {
       await d.kill();
       rmSync(dir, { recursive: true, force: true });
@@ -119,10 +126,16 @@ test.describe("members of a node's program", () => {
       await d.start(true);
       const a = await context.newPage();
       const b = await context.newPage();
+      const fetched = [];
+      a.on("request", (r) => fetched.push(new URL(r.url()).pathname));
       await open(a, d.url);
       await open(b, d.url);
       await expect(sync(a)).toHaveText("synced with the server");
       await expect(sync(b)).toHaveText("synced with the server");
+      // The page got its role's part of the program and the engine-only module: no source, no compiler.
+      expect(fetched).toContain("/blossom/client/Browser");
+      expect(fetched).toContain("/pkg-member/blossom_web_bg.wasm");
+      expect(fetched.filter((p) => p.endsWith(".bls") || p.startsWith("/pkg/"))).toEqual([]);
       await add(a, "buy milk");
       await expect(labels(b)).toHaveText(["buy milk"]);
       await add(b, "walk the dog");
@@ -171,6 +184,27 @@ test.describe("members of a node's program", () => {
       await expect(labels(b)).toHaveText(["before the crash", "while it was down"]);
       await add(b, "after");
       await expect(labels(a)).toHaveText(["before the crash", "while it was down", "after"]);
+    } finally {
+      await d.remove();
+    }
+  });
+
+  test("a page built from an older program loads the new one when its link is refused", async ({ context }) => {
+    const d = await deployment("todos_shared");
+    try {
+      await d.start(true);
+      const a = await context.newPage();
+      await open(a, d.url);
+      await add(a, "survives the upgrade");
+      await expect(sync(a)).toHaveText("synced with the server");
+      await expect(a.locator(".info")).toContainText("shared by every tab");
+      // The node comes back running a changed tab part: the open page's link is refused, and it loads again.
+      await d.kill();
+      d.edit((src) => src.replace("Written in Blossom, shared by every tab", "Written in Blossom, now upgraded"));
+      await d.start(false);
+      await expect(a.locator(".info")).toContainText("now upgraded", { timeout: 15_000 });
+      await expect(sync(a)).toHaveText("synced with the server");
+      await expect(labels(a)).toHaveText(["survives the upgrade"]);
     } finally {
       await d.remove();
     }

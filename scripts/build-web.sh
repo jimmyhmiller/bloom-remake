@@ -11,9 +11,14 @@ if [ -z "$want" ] || [ "$have" != "$want" ]; then
   echo "build-web: wasm-bindgen ${want:-?} is needed (found: ${have:-nothing}); run scripts/install-dev-tools.sh" >&2
   exit 1
 fi
+wasm="${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/blossom_web.wasm"
+# A page on its own: the compiler and the engine.
 cargo build -p blossom-web --target wasm32-unknown-unknown --release
-rm -rf web/pkg
-wasm-bindgen --target web --no-typescript --out-dir web/pkg "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/blossom_web.wasm"
+rm -rf web/pkg web/pkg-member
+wasm-bindgen --target web --no-typescript --out-dir web/pkg "$wasm"
+# A client member's page (docs/design/CLIENTS.md §8): the engine only; it runs what its server projected.
+cargo build -p blossom-web --target wasm32-unknown-unknown --release --no-default-features
+wasm-bindgen --target web --no-typescript --out-dir web/pkg-member "$wasm"
 mkdir -p web/pkg/apps
 cp examples/web/*.bls web/pkg/apps/
-echo "built web/pkg ($(du -h web/pkg/blossom_web_bg.wasm | cut -f1) wasm)"
+echo "built web/pkg ($(du -h web/pkg/blossom_web_bg.wasm | cut -f1) wasm) and web/pkg-member ($(du -h web/pkg-member/blossom_web_bg.wasm | cut -f1) wasm)"

@@ -19,7 +19,8 @@
 // but are different members: each tab holds a numbered slot (a Web Lock, released when the tab goes) and keeps its
 // state under it, so a reload takes its slot back and a second tab takes the next. The program is the node's: the
 // editor is off.
-import init, { compile, compileClient, WebApp } from "./pkg/blossom_web.js";
+// The wasm module: with the compiler for a page on its own (pkg/), the engine only for a member page (pkg-member/).
+let wasm = null;
 
 const search = new URLSearchParams(location.search);
 let appName = search.get("app") ?? "todomvc";
@@ -285,7 +286,7 @@ function diagnostics(err) {
 function run(files) {
   let next;
   try {
-    next = compile(root, JSON.stringify(files), seed());
+    next = wasm.compile(root, JSON.stringify(files), seed());
   } catch (err) {
     return diagnostics(err);
   }
@@ -368,26 +369,56 @@ class Connection {
   }
 }
 
+/** The server refused the page. A page built from another version of the program (or for another deployment or node
+ * directory) loads again, which gets the current one, unless it just did; any other refusal is reported, and the
+ * connection tries again later. */
+function refused(r) {
+  member.conn.drop();
+  const stale = ["program", "deployment", "directory"].includes(r.reason);
+  const key = `${storageKey}:reloaded`;
+  let last = 0;
+  try {
+    last = Number(sessionStorage.getItem(key) ?? 0);
+  } catch {}
+  if (stale && Date.now() - last > 30_000) {
+    try {
+      sessionStorage.setItem(key, String(Date.now()));
+    } catch {}
+    report("the server runs a newer version of this page: loading it");
+    location.reload();
+    return;
+  }
+  report(`the server refused this page (${r.reason}): ${r.detail}`);
+}
+
 /** A frame from the node: the handshake's, until the page runs; then the app's. */
 function memberFrame(bytes) {
   if (!app) {
-    let welcomed;
+    let heard;
     try {
-      welcomed = member.link.recv(bytes);
+      heard = JSON.parse(member.link.recv(bytes));
     } catch (err) {
       report(`error: ${err}`);
       member.conn.drop();
       return;
     }
-    if (welcomed) {
+    if (heard.refused) {
+      refused(heard.refused);
+      return;
+    }
+    if (heard.welcome) {
       member.conn.welcomed();
-      startMember(WebApp.member(member.client, member.link));
+      startMember(wasm.WebApp.member(member.client, member.link));
     }
     return;
   }
   busy = true;
   try {
     const heard = JSON.parse(app.linkRecv(bytes, now()));
+    if (heard.refused) {
+      refused(heard.refused);
+      return;
+    }
     if (heard.restart) {
       restartMember("the server no longer knows this page: it starts over as a new member");
       return;
@@ -478,22 +509,32 @@ async function claimSlot(base) {
   }
 }
 
-/** The page as a member of the node's program, from the node's app.json: compiles it, and runs it at once when the
- * page knows its identity from an earlier visit (its link connects meanwhile), or after the first handshake. */
+/** The page as a member of the node's program, from the node's app.json: loads its role's part of the program (no
+ * source, no compiler), and runs it at once when the page knows its identity from an earlier visit (its link connects
+ * meanwhile), or after the first handshake. */
 async function runMember(appText) {
   const desc = JSON.parse(appText);
-  root = desc.root;
-  appName = root.replace(/^.*\//, "").replace(/\.bls$/, "");
-  const base = `blossom-member:${desc.deployment}:${desc.node}:${root}`;
+  appName = desc.program;
+  const roles = Object.keys(desc.clients);
+  if (roles.length !== 1) {
+    report(`the program has ${roles.length} client roles; a page plays one, and this host does not choose`);
+    return;
+  }
+  const role = roles[0];
+  const res = await fetch(new URL(desc.clients[role], location.href));
+  if (!res.ok) {
+    report(`cannot load ${role}'s part of the program: ${res.status}`);
+    return;
+  }
+  const base = `blossom-member:${desc.deployment}:${desc.node}:${role}`;
   storageKey = `${base}:${await claimSlot(base)}`;
   rowPrefix = `${storageKey}:row:`;
   tablesKey = `${storageKey}:tables`;
   let client;
   try {
-    client = compileClient(root, JSON.stringify(desc.files), appText);
+    client = wasm.loadClient(new Uint8Array(await res.arrayBuffer()), appText);
   } catch (err) {
-    const { diags, error } = diagnostics(err);
-    report(error ?? diags.map((d) => d.rendered).join("\n"));
+    report(`error: ${err}`);
     return;
   }
   const linkKey = `${storageKey}:link`;
@@ -501,7 +542,7 @@ async function runMember(appText) {
   const url = new URL(desc.link, location.href);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   member = { client, link, linkKey, conn: new Connection(url, memberOpened, memberFrame, memberClosed) };
-  if (link.hasMember()) startMember(WebApp.member(client, link));
+  if (link.hasMember()) startMember(wasm.WebApp.member(client, link));
   else report("connecting to the server…");
   member.conn.open();
 }
@@ -774,9 +815,10 @@ function editorEvents() {
 // ---------------------------------------------------------------- start
 
 async function main() {
-  await init();
   const css = document.getElementById("app-css");
   const appText = await served();
+  wasm = await import(appText !== null ? "./pkg-member/blossom_web.js" : "./pkg/blossom_web.js");
+  await wasm.default();
   if (appText !== null) {
     listen();
     inspectEvents();

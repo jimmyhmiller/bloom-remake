@@ -227,6 +227,39 @@ pub(crate) fn project(valid: &ValidatedProgram, role: RoleId) -> Result<Validate
             break;
         }
     }
+    // The validator derives the types of expressions structurally (a node, a tuple of kept types, …) and looks them
+    // up, so every anonymous type over what is kept stays too. Named types (structs, enums, lattices, groups, extern
+    // types) stay only where something kept names them.
+    loop {
+        let mut grew = false;
+        for (id, def) in p.types.iter() {
+            if want.types.contains(&id) {
+                continue;
+            }
+            let kept = |t: &TypeId| want.types.contains(t);
+            let anonymous = match def {
+                blossom_value::TypeDef::Node(Some(r)) => want.roles.contains(r),
+                blossom_value::TypeDef::Tuple(ts) => ts.iter().all(kept),
+                blossom_value::TypeDef::Vec(t) | blossom_value::TypeDef::Set(t) | blossom_value::TypeDef::Option(t) => {
+                    kept(t)
+                }
+                blossom_value::TypeDef::Map(k, v) => kept(k) && kept(v),
+                blossom_value::TypeDef::Struct(_)
+                | blossom_value::TypeDef::Enum(_)
+                | blossom_value::TypeDef::Lattice(_)
+                | blossom_value::TypeDef::Group(_)
+                | blossom_value::TypeDef::Extern(_) => false,
+                _ => true,
+            };
+            if anonymous {
+                want.types.insert(id);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
     let mut n = Numbering {
         types: renumber(p.types.len(), &want.types),
         lattices: renumber(p.lattices.len(), &want.lattices),

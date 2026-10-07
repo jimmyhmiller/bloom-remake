@@ -1298,7 +1298,8 @@ fn project_role_prunes_unreferenced_shared_items() {
     let projected = ValidatedProgram::validate(p).unwrap().project(a).unwrap();
     assert_eq!(projected.get().rels.len(), 2);
     assert_eq!(projected.get().fns.len(), 0);
-    assert_eq!(projected.get().types.len(), 1);
+    // The unused `bool` stays: anonymous types are kept, since the validator derives expression types structurally.
+    assert_eq!(projected.get().types.len(), 2);
 }
 
 #[test]

@@ -388,7 +388,6 @@ pub enum Persistence {
     Frame {
         rule: RuleId,
         del: Option<RelId>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         guard: Option<RelId>,
     },
     /// Persistent lattice: the implicit identity rule `r(k̄; X)@next :- r(k̄; X).` (SEM-104).

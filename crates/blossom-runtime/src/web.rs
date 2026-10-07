@@ -285,64 +285,23 @@ fn percent_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// `/blossom/app.json` (docs/design/CLIENTS.md §4): what the page compiles (the program's files, keyed by their path
-/// from the root file's directory, and the deployment's parameters), the deployment it compiles for, the connection
-/// identity, this node's name and where the link is.
-pub fn app_json(
-    spec: &crate::deploy::DeploymentSpec,
-    sources: &blossom_base::SourceDb,
-    node: &str,
-) -> Result<String, String> {
+/// `/blossom/app.json` (docs/design/CLIENTS.md §4, §8): the program's name, the node that serves the page, the connection identity a
+/// member presents (the deployment id and the node directory's digest, hex), where its link is, and where each
+/// client role's part of the program is. No source: a page gets only its role's projection.
+pub fn app_json(spec: &crate::deploy::DeploymentSpec, client_roles: &[String], node: &str) -> Result<String, String> {
     use serde_json::{Map, Value, json};
-    let root = spec.source.to_str().ok_or("the program path is not UTF-8")?;
-    // Paths compare canonically (a deployment's `source` may hold `..` segments the loader resolved). Every file the
-    // program loaded exists, and the page names it relative to the root's directory.
-    let canonical = |p: &Path| std::fs::canonicalize(p).map_err(|e| format!("{}: {e}", p.display()));
-    let base = canonical(spec.source.parent().unwrap_or(Path::new(".")))?;
-    let key = |path: &str| -> Result<String, String> {
-        let full = canonical(Path::new(path))?;
-        full.strip_prefix(&base)
-            .ok()
-            .and_then(|p| p.to_str())
-            .map(|p| p.replace('\\', "/"))
-            .ok_or_else(|| format!("{path} is not under the program's directory {}", base.display()))
-    };
-    let mut files = Map::new();
-    for f in sources.files() {
-        let (path, text) = (
-            sources.path(f).map_err(|e| e.to_string())?,
-            sources.text(f).map_err(|e| e.to_string())?,
-        );
-        files.insert(key(path)?, Value::String(text.to_string()));
-    }
     let hex = |b: [u8; 16]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
-    let params: Map<String, Value> = spec
-        .params
+    let clients: Map<String, Value> = client_roles
         .iter()
-        .map(|(k, v)| {
-            use crate::deploy::ParamValue as V;
-            let v = match v {
-                V::Int(n) => json!({ "int": n }),
-                V::Bool(b) => json!({ "bool": b }),
-                V::Text(t) => json!({ "text": t }),
-            };
-            (k.clone(), v)
-        })
-        .collect();
-    let nodes: Vec<Value> = spec
-        .nodes
-        .iter()
-        .map(|n| json!({ "name": n.name, "role": n.role }))
+        .map(|r| (r.clone(), Value::String(format!("/blossom/client/{r}"))))
         .collect();
     let app = json!({
-        "root": key(root)?,
-        "files": files,
-        "params": params,
-        "nodes": nodes,
+        "program": spec.program,
         "node": node,
         "deployment": hex(spec.deployment_id()),
         "directory": hex(spec.directory_digest()),
         "link": "/blossom/link",
+        "clients": clients,
     });
     serde_json::to_string(&app).map_err(|e| e.to_string())
 }

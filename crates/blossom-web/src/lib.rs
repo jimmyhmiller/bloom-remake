@@ -7,7 +7,13 @@
 //! through the inputs it declares (`route`, `click`, `dblclick`, `press`, `typed`, `keydown`, `blur`, `change`);
 //! each round's page is diffed against the last into DOM patches. The core here is plain Rust, which native tests
 //! drive; `wasm` is the page's API over it.
+//!
+//! A client member's page (docs/design/CLIENTS.md §8) runs the part of a deployment's program its server projected
+//! onto the client role: [`load_client`] reads it, with no compiler. Without the `compiler` feature (the member page's
+//! build) the crate holds no compiler at all.
 
+#[cfg(feature = "compiler")]
+mod compile;
 pub mod link;
 pub mod page;
 pub mod store;
@@ -19,11 +25,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use blossom_artifact::bls::BlsArtifact;
-use blossom_base::{RelId, SourceDb};
+use blossom_artifact::client::ClientArtifact;
+use blossom_base::RelId;
 use blossom_engine::{Engine, EngineConfig};
-use blossom_front::api::{BlsError, NodeSpec};
-use blossom_front::ded::LoadedFile;
-use blossom_front::modules::Loader;
 use blossom_ir::core::RelClass;
 use blossom_ir::tick::{Instance, Row, StepInput};
 use blossom_ir::timers::TimerTable;
@@ -32,6 +36,8 @@ use blossom_value::time::{Instant, NodeId, Tick};
 use blossom_value::types::{IntTy, TypeDef};
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "compiler")]
+pub use compile::compile;
 pub use page::{Page, Patch};
 
 /// What can go wrong running a program in the browser.
@@ -55,6 +61,12 @@ pub enum HostError {
     /// The link to the server (a client member's, docs/design/CLIENTS.md §5) failed.
     #[error("the link: {0}")]
     Link(String),
+    /// The server refused the page's link: `reason` as the protocol names it (`program`, `deployment`, …).
+    #[error("the server refused the page ({reason}): {detail}")]
+    Refused { reason: String, detail: String },
+    /// What the server gave the page to run (its client artifact) could not be read.
+    #[error("the page's program: {0}")]
+    Artifact(String),
     /// The server gave the page another identity than the one it ran as (it lost the old one): the page's state
     /// belongs to the old identity, so it must start over.
     #[error("the server gave this page another identity ({given:?}; it ran as {ran:?}): start it over")]
@@ -172,41 +184,20 @@ struct ClientPart {
     /// The server node the page connects to, and the connection identity it checks.
     server: NodeId,
     identity: blossom_wire::link::Identity,
+    /// The digest of the part of the program the page runs, which its link presents.
+    part: [u8; 16],
     /// The link events of its link to the server: `connected`, `disconnected`.
     connected: Option<RelId>,
     disconnected: Option<RelId>,
 }
 
-/// The deployment a client member's page compiles for (`/blossom/app.json`, CLIENTS.md §4).
+/// The deployment a client member's page runs in (`/blossom/app.json`, CLIENTS.md §4, §8): the server node that
+/// served it, and the connection identity (hex): the deployment id and the node directory's digest.
 #[derive(Clone, Debug, Deserialize)]
 pub struct ClientDeployment {
-    /// The deployment's nodes: name and role.
-    pub nodes: Vec<ClientNode>,
-    /// The server node that served the page.
     pub node: String,
-    /// The connection identity (hex): the deployment id and the node directory's digest.
     pub deployment: String,
     pub directory: String,
-    /// The deployment's parameters.
-    #[serde(default)]
-    pub params: BTreeMap<String, ClientParam>,
-    /// The client role the page plays (needed only when the program has several).
-    #[serde(default)]
-    pub role: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct ClientNode {
-    pub name: String,
-    pub role: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ClientParam {
-    Int(i128),
-    Bool(bool),
-    Text(String),
 }
 
 fn hex16(s: &str) -> Result<[u8; 16], String> {
@@ -219,48 +210,6 @@ fn hex16(s: &str) -> Result<[u8; 16], String> {
         .ok_or_else(|| format!("`{s}` is not 16 bytes of hex"))
 }
 
-/// Sources in memory: `path` → text.
-struct Files<'a>(&'a BTreeMap<String, String>);
-
-impl Loader for Files<'_> {
-    fn load(&mut self, _from: Option<&str>, path: &str) -> Result<LoadedFile, String> {
-        let path = path.trim_start_matches("./");
-        self.0
-            .get(path)
-            .map(|text| LoadedFile {
-                key: Arc::from(path),
-                text: text.clone(),
-            })
-            .ok_or_else(|| format!("no file `{path}`"))
-    }
-}
-
-fn diags(found: &blossom_base::Diagnostics, sources: &SourceDb) -> Vec<Diag> {
-    found
-        .iter()
-        .map(|d| {
-            let at = d.primary.and_then(|s| {
-                let lc = sources.line_col(s.file, s.lo).ok()?;
-                let file = sources.path(s.file).ok()?.to_string();
-                // An editor's offsets (JavaScript's: UTF-16 code units).
-                let text = sources.text(s.file).ok()?;
-                let utf16 = |byte: u32| u32::try_from(text.get(..byte as usize)?.encode_utf16().count()).ok();
-                Some((file, lc.line, lc.column, utf16(s.lo)?, utf16(s.hi)?))
-            });
-            Diag {
-                severity: format!("{:?}", d.severity).to_lowercase(),
-                code: d.code.as_str().to_owned(),
-                message: d.message.clone(),
-                rendered: blossom_driver::render::render(d, sources),
-                file: at.as_ref().map(|a| a.0.clone()),
-                line: at.as_ref().map(|a| a.1),
-                column: at.as_ref().map(|a| a.2),
-                range: at.as_ref().map(|a| (a.3, a.4)),
-            }
-        })
-        .collect()
-}
-
 /// The name of a type, as the host's schemas name it.
 fn type_name(program: &blossom_ir::core::Program, ty: blossom_base::TypeId) -> String {
     match program.types.get(ty) {
@@ -271,6 +220,7 @@ fn type_name(program: &blossom_ir::core::Program, ty: blossom_base::TypeId) -> S
     }
 }
 
+/// An error of the host's own, as a diagnostic.
 fn host_diag(message: String) -> Diag {
     Diag {
         severity: "error".to_owned(),
@@ -284,125 +234,8 @@ fn host_diag(message: String) -> Diag {
     }
 }
 
-/// Compiles the program `root` of `files` (`path` → source) for the browser: one node, no roles. Its diagnostics
-/// on failure.
-pub fn compile(root: &str, files: &BTreeMap<String, String>) -> Result<Compiled, Vec<Diag>> {
-    let nodes = [NodeSpec {
-        name: "app".to_owned(),
-        role: None,
-    }];
-    compile_for(root, files, &nodes, &BTreeMap::new())
-}
-
-/// Compiles the program for a client member's page (CLIENTS.md §5): for the deployment the server gave, the page
-/// playing its client role.
-pub fn compile_client(
-    root: &str,
-    files: &BTreeMap<String, String>,
-    deployment: &ClientDeployment,
-) -> Result<Compiled, Vec<Diag>> {
-    let nodes: Vec<NodeSpec> = deployment
-        .nodes
-        .iter()
-        .map(|n| NodeSpec {
-            name: n.name.clone(),
-            role: n.role.clone(),
-        })
-        .collect();
-    let params = deployment
-        .params
-        .iter()
-        .map(|(k, v)| {
-            use blossom_front::api::ParamBinding as B;
-            let b = match v {
-                ClientParam::Int(n) => B::Int(*n),
-                ClientParam::Bool(b) => B::Bool(*b),
-                ClientParam::Text(t) => B::Text(t.clone()),
-            };
-            (k.clone(), b)
-        })
-        .collect();
-    let mut compiled = compile_for(root, files, &nodes, &params)?;
-    let p = compiled.artifact.program.get();
-    let clients: Vec<(blossom_base::RoleId, String)> = p
-        .roles
-        .iter_enumerated()
-        .filter(|(_, r)| r.kind == blossom_ir::core::RoleKind::Client)
-        .map(|(id, r)| (id, r.name.to_string()))
-        .collect();
-    let chosen = match (&deployment.role, clients.as_slice()) {
-        (Some(want), _) => clients.iter().find(|(_, n)| n == want).cloned(),
-        (None, [only]) => Some(only.clone()),
-        _ => None,
-    };
-    let Some((role, role_name)) = chosen else {
-        return Err(vec![host_diag(match &deployment.role {
-            Some(r) => format!("`{r}` is not a client role of the program"),
-            None => "a page plays a client role (`role R: client;`): the program declares none, or several and \
-                     app.json names none"
-                .to_owned(),
-        })]);
-    };
-    let Some(server) = compiled.artifact.node_id(&deployment.node) else {
-        return Err(vec![host_diag(format!(
-            "the deployment has no node `{}`",
-            deployment.node
-        ))]);
-    };
-    let server_role = compiled.artifact.roles.get(server.0 as usize).copied().flatten();
-    let link = |up: bool| {
-        p.rels
-            .iter_enumerated()
-            .find(|(_, r)| {
-                matches!(&r.class, RelClass::Event(blossom_ir::core::EventSource::Link { peer, up: u })
-                    if Some(*peer) == server_role && *u == up)
-            })
-            .map(|(id, _)| id)
-    };
-    let (connected, disconnected) = (link(true), link(false));
-    let identity = (|| -> Result<blossom_wire::link::Identity, String> {
-        Ok(blossom_wire::link::Identity {
-            deployment: hex16(&deployment.deployment)?,
-            program_id: p.meta.program_id,
-            program_version: p.meta.version,
-            directory: hex16(&deployment.directory)?,
-        })
-    })()
-    .map_err(|e| vec![host_diag(e)])?;
-    compiled.client = Some(ClientPart {
-        role,
-        role_name,
-        server,
-        identity,
-        connected,
-        disconnected,
-    });
-    Ok(compiled)
-}
-
-fn compile_for(
-    root: &str,
-    files: &BTreeMap<String, String>,
-    nodes: &[NodeSpec],
-    params: &BTreeMap<String, blossom_front::api::ParamBinding>,
-) -> Result<Compiled, Vec<Diag>> {
-    let (result, sources) = blossom_driver::bls::compile_with_loader(root, nodes, params, &mut Files(files));
-    let (artifact, warnings) = match result {
-        Ok(ok) => ok,
-        Err(BlsError::Rejected(found)) => return Err(diags(&found, &sources)),
-        Err(e) => {
-            return Err(vec![Diag {
-                severity: "error".to_owned(),
-                code: String::new(),
-                message: e.to_string(),
-                rendered: e.to_string(),
-                file: None,
-                line: None,
-                column: None,
-                range: None,
-            }]);
-        }
-    };
+/// A compiled program as the page runs it: its page outputs and event inputs, checked against the host's schemas.
+fn interface(artifact: BlsArtifact, warnings: Vec<Diag>) -> Result<Compiled, Vec<Diag>> {
     let program = artifact.program.get();
     let interface = |name: &str, schema: &[&str], output: bool| -> Result<Option<RelId>, String> {
         let Some((id, rel)) = program.rels.iter_enumerated().find(|(_, r)| r.name.to_string() == name) else {
@@ -457,27 +290,59 @@ fn compile_for(
         }
     }
     if !problems.is_empty() {
-        return Err(problems
-            .into_iter()
-            .map(|p| Diag {
-                severity: "error".to_owned(),
-                code: String::new(),
-                message: p.clone(),
-                rendered: format!("error: {p}"),
-                file: None,
-                line: None,
-                column: None,
-                range: None,
-            })
-            .collect());
+        return Err(problems.into_iter().map(host_diag).collect());
     }
     Ok(Compiled {
-        warnings: diags(&warnings, &sources),
+        warnings,
         artifact,
         outputs,
         inputs,
         client: None,
     })
+}
+
+/// Reads what a client member's page runs (CLIENTS.md §8): the encoded [`ClientArtifact`] its server serves, for the
+/// deployment `/blossom/app.json` names.
+pub fn load_client(bytes: &[u8], deployment: &ClientDeployment) -> Result<Compiled, HostError> {
+    let client = ClientArtifact::decode(bytes).map_err(|e| HostError::Artifact(e.to_string()))?;
+    let artifact = client.artifact();
+    let p = artifact.program.get();
+    let Some(server) = artifact.node_id(&deployment.node) else {
+        return Err(HostError::Artifact(format!(
+            "the deployment has no node `{}`",
+            deployment.node
+        )));
+    };
+    let server_role = artifact.roles.get(server.0 as usize).copied().flatten();
+    let link = |up: bool| {
+        p.rels
+            .iter_enumerated()
+            .find(|(_, r)| {
+                matches!(&r.class, RelClass::Event(blossom_ir::core::EventSource::Link { peer, up: u })
+                    if Some(*peer) == server_role && *u == up)
+            })
+            .map(|(id, _)| id)
+    };
+    let (connected, disconnected) = (link(true), link(false));
+    let identity = blossom_wire::link::Identity {
+        deployment: hex16(&deployment.deployment).map_err(HostError::Artifact)?,
+        program_id: p.meta.program_id,
+        program_version: p.meta.version,
+        directory: hex16(&deployment.directory).map_err(HostError::Artifact)?,
+    };
+    let part = ClientPart {
+        role: client.role,
+        role_name: client.role_name.clone(),
+        server,
+        identity,
+        part: client.part(),
+        connected,
+        disconnected,
+    };
+    let mut compiled = interface(artifact, Vec::new())
+        .map_err(|diags| HostError::Interface(diags.into_iter().map(|d| d.message).collect::<Vec<_>>().join("; ")))?;
+    compiled.client = Some(part);
+    Ok(compiled)
 }
 
 impl Compiled {
@@ -495,7 +360,15 @@ impl Compiled {
     pub fn link(&self, state: Option<&link::LinkState>) -> Result<Option<link::Link>, HostError> {
         match &self.client {
             None => Ok(None),
-            Some(c) => link::Link::new(&self.artifact, &c.role_name, c.server, c.identity.clone(), state).map(Some),
+            Some(c) => link::Link::new(
+                &self.artifact,
+                &c.role_name,
+                c.part,
+                c.server,
+                c.identity.clone(),
+                state,
+            )
+            .map(Some),
         }
     }
 }

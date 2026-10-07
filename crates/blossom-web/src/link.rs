@@ -59,6 +59,8 @@ pub enum Heard {
 pub struct Link {
     artifact: BlsArtifact,
     role: String,
+    /// The digest of the part of the program the page runs (CLIENTS.md §8).
+    part: [u8; 16],
     server: NodeId,
     id: Identity,
     catalog: Catalog,
@@ -100,10 +102,12 @@ fn link_error(e: impl std::fmt::Display) -> HostError {
 }
 
 impl Link {
-    /// The link of a member of `role` to the node `server`, resuming `state` when the page stored one.
+    /// The link of a member of `role`, running the part `part` of the program, to the node `server`, resuming `state`
+    /// when the page stored one.
     pub fn new(
         artifact: &BlsArtifact,
         role: &str,
+        part: [u8; 16],
         server: NodeId,
         id: Identity,
         state: Option<&LinkState>,
@@ -112,6 +116,7 @@ impl Link {
         let mut link = Link {
             artifact: artifact.clone(),
             role: role.to_owned(),
+            part,
             server,
             id,
             catalog,
@@ -171,6 +176,7 @@ impl Link {
         self.up = false;
         let peer = Peer::Member {
             role: self.role.clone(),
+            part: self.part,
             token: self.member.as_ref().map(|m| m.token.clone()),
             received: self.received,
             acked: self.acked,
@@ -191,15 +197,18 @@ impl Link {
         };
         match frame {
             Frame::Hello(h) => {
-                check_hello(&h, &self.id)
-                    .map_err(|(r, d)| HostError::Link(format!("the server refused ({r:?}): {d}")))?;
+                check_hello(&h, &self.id).map_err(|(r, d)| HostError::Refused {
+                    reason: format!("{r:?}").to_lowercase(),
+                    detail: d,
+                })?;
                 self.inbound = self.catalog.accept(&h.channels);
                 Ok((Heard::Nothing, Vec::new()))
             }
             Frame::HelloOk { .. } => Ok((Heard::Nothing, Vec::new())),
-            Frame::Reject { reason, detail } => {
-                Err(HostError::Link(format!("the server refused ({reason:?}): {detail}")))
-            }
+            Frame::Reject { reason, detail } => Err(HostError::Refused {
+                reason: format!("{reason:?}").to_lowercase(),
+                detail,
+            }),
             Frame::Welcome {
                 member,
                 token,

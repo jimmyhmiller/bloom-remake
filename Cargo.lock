@@ -202,6 +202,9 @@ dependencies = [
  "blossom-ir",
  "blossom-schema",
  "blossom-value",
+ "postcard",
+ "serde",
+ "thiserror",
 ]
 
 [[package]]
@@ -287,7 +290,6 @@ dependencies = [
  "clap_complete",
  "kafka-protocol",
  "mimalloc",
- "serde_json",
  "uuid",
 ]
 

@@ -80,12 +80,12 @@ pub struct ServerConfig {
     pub web: Option<WebConfig>,
 }
 
-/// `blossom run --web`: where to listen, the page's files, and `/blossom/app.json`.
+/// `blossom run --web`: where to listen, and the page's files. The node makes `/blossom/app.json` and each client
+/// role's artifact (docs/design/CLIENTS.md §8) itself.
 #[derive(Clone, Debug)]
 pub struct WebConfig {
     pub addr: SocketAddr,
     pub root: Option<PathBuf>,
-    pub app: String,
 }
 
 /// Counters of what the node did and dropped.
@@ -629,12 +629,35 @@ impl Server {
             }
         }
         if let (Some(l), Some(w)) = (web_listener, &cfg.web) {
-            let client_roles: BTreeMap<String, RoleId> = program
-                .roles
-                .iter_enumerated()
-                .filter(|(_, r)| r.kind == blossom_ir::core::RoleKind::Client)
-                .map(|(id, r)| (r.name.to_string(), id))
-                .collect();
+            // Each client role's part of the program, projected once: what its pages run, and the digest their links
+            // present. A projection that would show a page anything placed at another role is refused.
+            let mut client_roles = BTreeMap::new();
+            for (role, r) in program.roles.iter_enumerated() {
+                if r.kind != blossom_ir::core::RoleKind::Client {
+                    continue;
+                }
+                let name = r.name.to_string();
+                let client = blossom_artifact::client::ClientArtifact::project(&artifact, &name)
+                    .map_err(|e| RuntimeError::Config(e.to_string()))?;
+                let leaks = client.leaks(&artifact);
+                if !leaks.is_empty() {
+                    return Err(RuntimeError::Config(format!(
+                        "the part of the program `{name}`'s pages run would show them: {}",
+                        leaks.join("; ")
+                    )));
+                }
+                let bytes = client.encode().map_err(|e| RuntimeError::Config(e.to_string()))?;
+                client_roles.insert(
+                    name,
+                    crate::members::ClientRole {
+                        id: role,
+                        part: client.part(),
+                        artifact: Arc::from(bytes),
+                    },
+                );
+            }
+            let names: Vec<String> = client_roles.keys().cloned().collect();
+            let app = crate::web::app_json(spec, &names, &cfg.node).map_err(RuntimeError::Config)?;
             let registry = blossom_store::ClientRegistry::open(Arc::new(RealFs), &dir)?;
             let queue = data.clone();
             let ctx = WebCtx {
@@ -646,7 +669,7 @@ impl Server {
                 catalog: catalog.clone(),
                 post: Arc::new(move |e| queue.push(Data::Member(e))),
                 registry: Arc::new(Mutex::new(registry)),
-                app: Arc::from(w.app.as_str()),
+                app: Arc::from(app.as_str()),
                 root: w.root.clone(),
                 next_conn: Arc::new(AtomicU64::new(0)),
                 client_roles: Arc::new(client_roles),

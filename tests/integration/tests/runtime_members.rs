@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use blossom_artifact::bls::BlsArtifact;
+use blossom_artifact::client::ClientArtifact;
 use blossom_driver::bls::compile_file;
 use blossom_front::api::NodeSpec;
 use blossom_integration_tests::ws::Ws;
@@ -88,7 +89,6 @@ fn start(spec: &DeploymentSpec, artifact: &Arc<BlsArtifact>, mode: OpenMode, por
         web: Some(WebConfig {
             addr: format!("127.0.0.1:{port}").parse().unwrap(),
             root: None,
-            app: "{}".into(),
         }),
     })
     .unwrap()
@@ -108,6 +108,7 @@ fn open(
     let catalog = Catalog::of(a.program.get()).unwrap();
     let peer = Peer::Member {
         role: "Browser".into(),
+        part: ClientArtifact::project(a, "Browser").unwrap().part(),
         token,
         received,
         acked,
@@ -248,5 +249,31 @@ fn a_reconnect_closes_the_connection_it_replaces() {
         vec![vec![Value::Node(me), Value::Node(me), Value::str("still here")]]
     );
     drop(new);
+    server.stop().unwrap();
+}
+
+/// A page built from another version of the role's part of the program is refused (CLIENTS.md §8): it must load again.
+#[test]
+fn a_page_built_from_another_program_is_refused() {
+    let (spec, a) = setup("stale");
+    let port = free_port();
+    let server = start(&spec, &a, OpenMode::InitFresh, port);
+    let mut ws = Ws::connect(port).unwrap();
+    let catalog = Catalog::of(a.program.get()).unwrap();
+    let mut part = ClientArtifact::project(&a, "Browser").unwrap().part();
+    part[0] ^= 1;
+    let peer = Peer::Member {
+        role: "Browser".into(),
+        part,
+        token: None,
+        received: 0,
+        acked: 0,
+    };
+    ws.send(&blossom_wire::link::hello(&identity(&spec, &a), peer, 0, 0, &catalog))
+        .unwrap();
+    match ws.recv().unwrap() {
+        Frame::Reject { reason, .. } => assert_eq!(reason, blossom_wire::frame::RejectReason::Program),
+        other => panic!("expected REJECT, got {other:?}"),
+    }
     server.stop().unwrap();
 }

@@ -15,14 +15,20 @@ blossom-base.workspace = true
 blossom-value.workspace = true
 blossom-ir.workspace = true
 blossom-artifact.workspace = true
-blossom-front.workspace = true
-blossom-driver.workspace = true
+blossom-front = { workspace = true, optional = true }
+blossom-driver = { workspace = true, optional = true }
 blossom-engine.workspace = true
 blossom-oracle.workspace = true
 blossom-wire.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[features]
+# The compiler in the page: a page on its own compiles its sources. A client member's page runs what its server
+# projected (docs/design/CLIENTS.md §8) and is built without it.
+default = ["compiler"]
+compiler = ["dep:blossom-front", "dep:blossom-driver"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "=0.2.114"
