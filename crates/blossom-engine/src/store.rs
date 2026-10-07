@@ -121,9 +121,10 @@ impl Hot {
         self.clock
     }
 
-    /// The most rows one probe may keep.
+    /// The most rows one probe may keep: a small share of the budget, so the probes kept are many and a larger
+    /// prefix's ranges read the cold side's range (whose cost is the range's, not the prefix's).
     fn largest(&self) -> usize {
-        (self.budget / 4).max(1)
+        (self.budget / 64).max(2)
     }
 
     fn probe(&mut self, cols: &[usize], values: &[Value]) -> Option<Arc<Vec<Row>>> {
@@ -150,7 +151,16 @@ impl Hot {
             .entry(cols.to_vec())
             .or_default()
             .insert(values.to_vec(), now);
-        self.trim();
+        // The markers are a key each, not rows: past the budget's count, the least recently used half goes.
+        if self.large.values().map(|m| m.len()).sum::<usize>() > self.budget {
+            let mut uses: Vec<u64> = self.large.values().flat_map(|m| m.values().copied()).collect();
+            uses.sort_unstable();
+            let cut = uses.get(uses.len() / 2).copied().unwrap_or(0);
+            for by_values in self.large.values_mut() {
+                by_values.retain(|_, u| *u > cut);
+            }
+            self.large.retain(|_, m| !m.is_empty());
+        }
     }
 
     /// Keeps a probe's rows (sorted).
@@ -218,8 +228,7 @@ impl Hot {
 
     /// Past the budget, the least recently used half goes.
     fn trim(&mut self) {
-        let large: usize = self.large.values().map(|m| m.len()).sum();
-        if self.rows + large <= self.budget {
+        if self.rows <= self.budget {
             return;
         }
         let mut uses: Vec<u64> = self
@@ -227,7 +236,6 @@ impl Hot {
             .values()
             .flat_map(|m| m.values().map(|(_, u)| *u))
             .chain(self.contains.values().map(|(_, u)| *u))
-            .chain(self.large.values().flat_map(|m| m.values().copied()))
             .collect();
         uses.sort_unstable();
         let cut = uses.get(uses.len() / 2).copied().unwrap_or(0);
@@ -242,10 +250,6 @@ impl Hot {
             });
         }
         self.probes.retain(|_, m| !m.is_empty());
-        for by_values in self.large.values_mut() {
-            by_values.retain(|_, u| *u > cut);
-        }
-        self.large.retain(|_, m| !m.is_empty());
         self.contains.retain(|_, (_, u)| *u > cut);
         self.rows = rows + self.contains.len();
     }
@@ -463,11 +467,65 @@ impl Tiered {
         Ok(out)
     }
 
-    /// Whether a carried row has columns `cols` holding `values` and is `live`.
-    fn any_carried(&self, cols: &[usize], values: &[Value], live: impl Fn(&Row) -> bool) -> Result<bool, EvalError> {
-        let cold = self.cold_rows(cols, values, None, &|_| true)?;
-        let (gone, added) = self.corrections(cols, values, &cold, |_| true);
-        Ok(cold.iter().enumerate().any(|(i, r)| !gone.contains(&i) && live(r)) || added.iter().any(live))
+    /// Whether a carried row has columns `cols` holding `values` and is `live` (at most `excluded` rows of the
+    /// cold side's are not). A prefix too large to keep is asked for its first rows only: one more than the overlay
+    /// holds absent and `excluded` together, of which one at least counts if there are that many.
+    fn any_carried(
+        &self,
+        cols: &[usize],
+        values: &[Value],
+        excluded: usize,
+        live: impl Fn(&Row) -> bool,
+    ) -> Result<bool, EvalError> {
+        let large = {
+            let mut hot = self.hot.borrow_mut();
+            hot.probe(cols, values).is_none() && hot.is_large(cols, values)
+        };
+        if !large {
+            let cold = self.cold_rows(cols, values, None, &|_| true)?;
+            let (gone, added) = self.corrections(cols, values, &cold, |_| true);
+            return Ok(cold.iter().enumerate().any(|(i, r)| !gone.contains(&i) && live(r)) || added.iter().any(live));
+        }
+        let Some(v) = self.cold.version()? else {
+            return Ok(false);
+        };
+        let mut n = self.absent_with(cols, values) + excluded + 1;
+        loop {
+            let (mut first, more) = self.cold.probe_some(self.rel, cols, values, v, n)?;
+            first.sort_unstable();
+            let (gone, added) = self.corrections(cols, values, &first, |_| true);
+            if first.iter().enumerate().any(|(i, r)| !gone.contains(&i) && live(r)) || added.iter().any(&live) {
+                return Ok(true);
+            }
+            if !more {
+                return Ok(false);
+            }
+            n = n.saturating_mul(2);
+        }
+    }
+
+    /// How many rows the overlay holds absent with columns `cols` holding `values`.
+    fn absent_with(&self, cols: &[usize], values: &[Value]) -> usize {
+        if self.overlay.is_empty() {
+            return 0;
+        }
+        let mut by = self.overlay_by.borrow_mut();
+        let index = by.entry(cols.to_vec()).or_insert_with(|| {
+            let mut index = blossom_base::det::DetMap::new();
+            for row in self.overlay.keys() {
+                index
+                    .entry(key(row, cols))
+                    .or_insert_with(BTreeSet::new)
+                    .insert(row.clone());
+            }
+            index
+        });
+        index
+            .get(values)
+            .into_iter()
+            .flatten()
+            .filter(|r| self.overlay.get(*r).is_some_and(|(present, _)| !*present))
+            .count()
     }
 
     /// Keeps the overlay's indexes with a row the overlay gained (`true`) or lost.
@@ -999,9 +1057,10 @@ impl Store {
         if let Some(t) = &self.tiered {
             let matches = |r: &Row| holds(r, cols, values);
             let live = |r: &Row| !old || !self.ins.contains(r);
+            let excluded = if old { self.ins.len() } else { 0 };
             return Ok((old && self.del.iter().any(matches))
                 || self.counts.keys().any(|r| matches(r) && live(r))
-                || t.any_carried(cols, values, live)?);
+                || t.any_carried(cols, values, excluded, live)?);
         }
         let matches = |r: &Row| holds(r, cols, values);
         if old && self.del.iter().any(matches) {
