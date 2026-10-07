@@ -92,7 +92,7 @@ pub fn tick_record(
 }
 
 /// The blobs a `KIND_DELTA_BLOBS` record at `lsn` logs, and its delta.
-fn logged_blobs(payload: &[u8], lsn: Lsn) -> Result<(Vec<blossom_store::BlobBytes>, &[u8]), NodeError> {
+pub fn logged_blobs(payload: &[u8], lsn: Lsn) -> Result<(Vec<blossom_store::BlobBytes>, &[u8]), NodeError> {
     let bad = || NodeError::Store(format!("the WAL record at LSN {} logs malformed blobs", lsn.0));
     let take = |at: usize, n: usize| payload.get(at..at.checked_add(n)?);
     let word = |at: usize| -> Result<usize, NodeError> {

@@ -405,6 +405,14 @@ fn write_table(
     }))
 }
 
+/// Writes `m` as `dir`'s manifest, atomically: BLAKE3 over the body, then the body.
+fn write_manifest(fs: &dyn Vfs, dir: &Path, m: &Manifest) -> Result<(), StoreError> {
+    let body = serde_json::to_vec(m).map_err(|e| invalid(e.to_string()))?;
+    let mut bytes = blake3::hash(&body).as_bytes().to_vec();
+    bytes.extend_from_slice(&body);
+    atomic_write(fs, &dir.join("MANIFEST"), &bytes)
+}
+
 /// The manifest's body.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -464,14 +472,36 @@ pub struct Lsm {
     state: RwLock<State>,
     /// Flushes and compactions run one at a time.
     work: Mutex<()>,
+    /// Opened by a reader: nothing it applies is written.
+    read_only: bool,
 }
 
 impl Lsm {
     /// Opens the tree under `dir` (creating it): the tables its manifest names; the files a crash left unnamed are
     /// removed.
     pub fn open(fs: Arc<dyn Vfs>, dir: &Path, opts: LsmOptions) -> Result<Lsm, StoreError> {
+        Lsm::open_with(fs, dir, opts, false)
+    }
+
+    /// Opens an existing tree without changing any file (a tool reading a stopped node's database): what it applies
+    /// stays in memory, and it is never flushed or compacted. A directory with no manifest is refused.
+    pub fn open_read_only(fs: Arc<dyn Vfs>, dir: &Path, opts: LsmOptions) -> Result<Lsm, StoreError> {
+        Lsm::open_with(fs, dir, opts, true)
+    }
+
+    fn open_with(fs: Arc<dyn Vfs>, dir: &Path, opts: LsmOptions, read_only: bool) -> Result<Lsm, StoreError> {
         let sst_dir = dir.join("sst");
-        crate::vfs::durable_dir(&*fs, &sst_dir)?;
+        if read_only {
+            let named = fs
+                .list(dir)?
+                .iter()
+                .any(|p| p.file_name().is_some_and(|n| n == "MANIFEST"));
+            if !named {
+                return Err(invalid(format!("{} holds no database", dir.display())));
+            }
+        } else {
+            crate::vfs::durable_dir(&*fs, &sst_dir)?;
+        }
         let manifest_path = dir.join("MANIFEST");
         let manifest = if fs.list(dir)?.iter().any(|p| p == &manifest_path) {
             let bytes = read_path(&*fs, &manifest_path)?;
@@ -490,7 +520,12 @@ impl Lsm {
             }
             m
         } else {
-            Manifest::empty()
+            // A new tree has a manifest from the start: a reader finds a database, empty as it is.
+            let m = Manifest::empty();
+            if !read_only {
+                write_manifest(&*fs, dir, &m)?;
+            }
+            m
         };
         let mut tables = Vec::new();
         for t in &manifest.tables {
@@ -507,10 +542,12 @@ impl Lsm {
             .map(|t| sst_dir.join(format!("{}.sst", t.id)))
             .collect();
         let mut removed = false;
-        for p in fs.list(&sst_dir)? {
-            if !named.contains(&p) {
-                fs.remove(&p)?;
-                removed = true;
+        if !read_only {
+            for p in fs.list(&sst_dir)? {
+                if !named.contains(&p) {
+                    fs.remove(&p)?;
+                    removed = true;
+                }
             }
         }
         if removed {
@@ -531,6 +568,7 @@ impl Lsm {
                 applied_mark,
             }),
             work: Mutex::new(()),
+            read_only,
         })
     }
 
@@ -597,6 +635,9 @@ impl Lsm {
     /// Writes the memtable as an SSTable and the manifest naming it: what the tables now cover (`None` when the
     /// memtable was empty).
     pub fn flush(&self) -> Result<Option<Flushed>, StoreError> {
+        if self.read_only {
+            return Err(invalid("a database opened read-only is not flushed or compacted"));
+        }
         let _work = self
             .work
             .lock()
@@ -651,14 +692,14 @@ impl Lsm {
     }
 
     fn write_manifest(&self, m: &Manifest) -> Result<(), StoreError> {
-        let body = serde_json::to_vec(m).map_err(|e| invalid(e.to_string()))?;
-        let mut bytes = blake3::hash(&body).as_bytes().to_vec();
-        bytes.extend_from_slice(&body);
-        atomic_write(&*self.fs, &self.dir.join("MANIFEST"), &bytes)
+        write_manifest(&*self.fs, &self.dir, m)
     }
 
     /// Merges SSTables when some are due (see [`LsmOptions`]): whether it merged.
     pub fn compact(&self) -> Result<bool, StoreError> {
+        if self.read_only {
+            return Err(invalid("a database opened read-only is not flushed or compacted"));
+        }
         let _work = self
             .work
             .lock()
