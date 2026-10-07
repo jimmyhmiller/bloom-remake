@@ -146,6 +146,9 @@ pub struct ReleasedTick {
     pub host: Vec<HostOut>,
     /// The connections whose `closed` event this tick delivered: the host closes them after the tick's writes.
     pub retired: Vec<blossom_value::value::ConnId>,
+    /// How many offered messages this incarnation's ticks up to this one took: every message offered before that
+    /// count was taken by a tick that is now durable (the driver acknowledges a client member's messages by it).
+    pub taken: u64,
 }
 
 /// A computed tick waiting for release.
@@ -161,6 +164,8 @@ struct Parked {
     retired: Vec<blossom_value::value::ConnId>,
     halts: bool,
     now: Instant,
+    /// The messages taken by this tick and the ones before it.
+    taken: u64,
 }
 
 /// A message waiting for a tick.
@@ -193,6 +198,9 @@ pub struct Node<E: Executor> {
     released_image: DurableImage,
     timers: TimerTable,
     inbox: VecDeque<Message>,
+    /// The messages offered and taken so far in this incarnation (`ReleasedTick::taken`).
+    offered: u64,
+    taken: u64,
     inputs: Vec<(RelId, Row)>,
     streams: StreamInbox,
     parked: VecDeque<Parked>,
@@ -308,7 +316,8 @@ impl<E: Executor> Node<E> {
                 match src {
                     EventSource::Boot => boot_rel = Some(id),
                     EventSource::Recovered => recovered_rel = Some(id),
-                    EventSource::Timer(_) | EventSource::Input | EventSource::Stream(_) => {}
+                    // A client link's events are offered by the driver as inputs (docs/design/CLIENTS.md §3).
+                    EventSource::Timer(_) | EventSource::Input | EventSource::Stream(_) | EventSource::Link { .. } => {}
                     other => {
                         return Err(blossom_base::unimplemented_error!(
                             "DIST-040",
@@ -375,6 +384,8 @@ impl<E: Executor> Node<E> {
             last_now: boot.now,
             staged: false,
             inbox: VecDeque::new(),
+            offered: 0,
+            taken: 0,
             inputs: Vec::new(),
             streams,
             parked: VecDeque::new(),
@@ -465,14 +476,19 @@ impl<E: Executor> Node<E> {
         acl.admit(rel, source, &principal_in).is_ok()
     }
 
-    /// A channel tuple from a peer, already admitted.
-    pub fn offer_delivery(&mut self, d: Delivery) {
+    /// A channel tuple from a peer, already admitted. Returns its number among the messages offered to this
+    /// incarnation (`ReleasedTick::taken` counts them).
+    pub fn offer_delivery(&mut self, d: Delivery) -> u64 {
         self.inbox.push_back(Message::Deliver(d));
+        self.offered += 1;
+        self.offered - 1
     }
 
-    /// A client session's message, already admitted.
-    pub fn offer_ingress(&mut self, m: Ingress) {
+    /// A client session's message, already admitted. Returns its number among the messages offered.
+    pub fn offer_ingress(&mut self, m: Ingress) -> u64 {
         self.inbox.push_back(Message::Ingress(m));
+        self.offered += 1;
+        self.offered - 1
     }
 
     /// A host row for an `input` relation; it holds at the next tick (LANG-067).
@@ -594,6 +610,7 @@ impl<E: Executor> Node<E> {
                 Some(Message::Ingress(m)) => ingress.push(m),
                 None => break,
             }
+            self.taken += 1;
         }
         // The `halt` output and the timers' guards are read at the end of the tick.
         let observe: Vec<RelId> = self.cfg.halt.into_iter().chain(self.timers.guards()).collect();
@@ -702,6 +719,7 @@ impl<E: Executor> Node<E> {
             retired,
             halts,
             now,
+            taken: self.taken,
         });
         let ticks_low = self.reserved.0.saturating_sub(tick.0) < RESERVE_STEP / 2;
         let time_low = self.time_reserved.0.saturating_sub(now.0) < TIME_STEP / 2;
@@ -881,6 +899,7 @@ impl<E: Executor> Node<E> {
                 egress: p.egress,
                 host: p.host,
                 retired: p.retired,
+                taken: p.taken,
             });
         }
         Ok(out)

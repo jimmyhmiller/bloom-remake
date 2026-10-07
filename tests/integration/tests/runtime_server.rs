@@ -84,6 +84,7 @@ fn start(spec: &DeploymentSpec, artifact: &Arc<BlsArtifact>) -> Server {
         backend: blossom_node::Backend::Engine,
         externs: Arc::new(blossom_std_host::registry().unwrap()),
         record: None,
+        web: None,
     })
     .unwrap()
 }
@@ -216,17 +217,38 @@ fn a_recorded_node_replays_exactly_and_explains_its_rows() {
         backend: blossom_node::Backend::Engine,
         externs: Arc::new(blossom_std_host::registry().unwrap()),
         record: Some(traces.clone()),
+        web: None,
     })
     .unwrap();
     let id = identity(&spec, &artifact);
-    let mut c = Client::connect(server.client_addr.unwrap(), artifact.clone(), &id, "p", Duration::from_secs(5)).unwrap();
+    let mut c = Client::connect(
+        server.client_addr.unwrap(),
+        artifact.clone(),
+        &id,
+        "p",
+        Duration::from_secs(5),
+    )
+    .unwrap();
     let key = Value::Str("k".into());
     let val = Value::Bytes(b"v".to_vec().into());
-    c.send(c.rel("put").unwrap(), &[vec![Value::Int(IntValue::U64(1)), key.clone(), val.clone()]])
-        .unwrap();
-    assert!(c.recv(Some(Duration::from_secs(10))).unwrap().is_some(), "the put is acknowledged");
-    c.send(c.rel("get").unwrap(), &[vec![Value::Int(IntValue::U64(2)), key.clone()]]).unwrap();
-    assert!(c.recv(Some(Duration::from_secs(10))).unwrap().is_some(), "the get is answered");
+    c.send(
+        c.rel("put").unwrap(),
+        &[vec![Value::Int(IntValue::U64(1)), key.clone(), val.clone()]],
+    )
+    .unwrap();
+    assert!(
+        c.recv(Some(Duration::from_secs(10))).unwrap().is_some(),
+        "the put is acknowledged"
+    );
+    c.send(
+        c.rel("get").unwrap(),
+        &[vec![Value::Int(IntValue::U64(2)), key.clone()]],
+    )
+    .unwrap();
+    assert!(
+        c.recv(Some(Duration::from_secs(10))).unwrap().is_some(),
+        "the get is answered"
+    );
     server.stop().unwrap();
 
     let path = traces.join("s1-1.blstrace");
@@ -266,14 +288,22 @@ fn a_recorded_node_replays_exactly_and_explains_its_rows() {
     let derived = replay.why_not(&examined, store, &[Some(key.clone()), None], 3).unwrap();
     assert!(
         derived.iter().any(|w| w.complete > 0
-            && program.rules.get(w.rule).is_some_and(|r| r.kind == blossom_ir::core::RuleKind::Inductive)),
+            && program
+                .rules
+                .get(w.rule)
+                .is_some_and(|r| r.kind == blossom_ir::core::RuleKind::Inductive)),
         "no inductive rule derives the stored row: {derived:?}"
     );
-    let absent = replay.why_not(&examined, store, &[Some(Value::Str("never".into())), None], 3).unwrap();
+    let absent = replay
+        .why_not(&examined, store, &[Some(Value::Str("never".into())), None], 3)
+        .unwrap();
     assert!(!absent.is_empty());
     for w in &absent {
         assert_eq!(w.complete, 0, "a rule derives a key never put: {w:?}");
-        assert!(w.failed.is_some() || w.head_differs.is_some(), "no failing literal named: {w:?}");
+        assert!(
+            w.failed.is_some() || w.head_differs.is_some(),
+            "no failing literal named: {w:?}"
+        );
     }
     let _ = std::fs::remove_dir_all(&traces);
 }

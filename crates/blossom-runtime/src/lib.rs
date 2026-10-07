@@ -10,9 +10,11 @@
 pub mod client;
 pub mod clock;
 pub mod deploy;
+pub mod members;
 pub mod net;
 pub mod server;
 pub mod streams;
+pub mod web;
 
 use blossom_base::{InternalError, Unimplemented};
 

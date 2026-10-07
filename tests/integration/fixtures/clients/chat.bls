@@ -11,7 +11,7 @@ channel heard(who: Node<Browser>, text: String): Server -> Browser;
 
 at Server {
     table online(b: Node<Browser>);
-    table log(who: Node<Browser>, text: String);
+    durable table log(who: Node<Browser>, text: String);
 
     join: on Browser.connected(b, _) {
         emit online(b);

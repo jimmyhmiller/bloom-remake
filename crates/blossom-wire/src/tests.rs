@@ -234,6 +234,30 @@ fn lattices_round_trip() {
     assert!(c.encode_value(f.product, &short, &mut Vec::new()).is_err());
 }
 
+/// A client member (docs/design/CLIENTS.md §2) is written with its admitting node's name: it keeps its identity when
+/// the deployment's nodes are renumbered.
+#[test]
+fn client_members_by_name_survive_renumbering() {
+    let f = fixture();
+    let before = Codec::new(
+        &f.program,
+        NodeEncoding::ByName(Arc::from(vec![Arc::from("a"), Arc::from("b")])),
+        WireLimits::default(),
+    );
+    let member = NodeId::client(NodeId(1), 42).unwrap();
+    let mut buf = Vec::new();
+    before.encode_value(f.node, &Value::Node(member), &mut buf).unwrap();
+    let after = Codec::new(
+        &f.program,
+        NodeEncoding::ByName(Arc::from(vec![Arc::from("b"), Arc::from("a")])),
+        WireLimits::default(),
+    );
+    assert_eq!(
+        after.decode_value(f.node, &mut buf.as_slice()).unwrap(),
+        Value::Node(NodeId::client(NodeId(0), 42).unwrap())
+    );
+}
+
 #[test]
 fn nodes_by_name_survive_renumbering() {
     let f = fixture();
@@ -381,6 +405,57 @@ fn frames_round_trip() {
             count: 1,
             body: vec![1, 8, 3],
         }),
+        // A client member's link (docs/design/CLIENTS.md §3): new, then resuming.
+        Frame::Hello(Hello {
+            proto: 1,
+            deployment: [1; 16],
+            program_id: [2; 16],
+            program_version: 3,
+            peer: Peer::Member {
+                role: "Browser".into(),
+                token: None,
+                received: 0,
+                acked: 0,
+            },
+            directory: [4; 16],
+            restarts: 0,
+            boot_nonce: 0,
+            channels: Vec::new(),
+        }),
+        Frame::Hello(Hello {
+            proto: 1,
+            deployment: [1; 16],
+            program_id: [2; 16],
+            program_version: 3,
+            peer: Peer::Member {
+                role: "Browser".into(),
+                token: Some(vec![9; 20]),
+                received: 17,
+                acked: 4,
+            },
+            directory: [4; 16],
+            restarts: 0,
+            boot_nonce: 0,
+            channels: Vec::new(),
+        }),
+        Frame::Welcome {
+            member: 0x8000_0003,
+            token: vec![9; 20],
+            resumed: true,
+            floor: 4,
+            seed: [5; 16],
+        },
+        Frame::Msg {
+            seq: 300,
+            batch: Batch {
+                sid: 1,
+                send_tick: 9,
+                kind: 0,
+                count: 1,
+                body: vec![1, 8, 3],
+            },
+        },
+        Frame::Ack { seq: 300 },
     ];
     for f in frames {
         let bytes = f.encode();

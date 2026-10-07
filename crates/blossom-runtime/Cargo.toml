@@ -23,6 +23,9 @@ blossom-node.workspace = true
 blossom-oracle.workspace = true
 blake3.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+# The WebSocket handshake's accept key (RFC 6455 §4.2.2), for `blossom run --web` (docs/design/CLIENTS.md §4).
+sha1 = "0.10.6"
 thiserror.workspace = true
 toml.workspace = true
 

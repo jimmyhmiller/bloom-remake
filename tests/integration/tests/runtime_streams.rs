@@ -112,6 +112,7 @@ data_dir = "data"
         backend: blossom_node::Backend::Engine,
         externs: Arc::new(blossom_std_host::registry().unwrap()),
         record: None,
+        web: None,
     })
     .map_err(|e| e.to_string())
 }

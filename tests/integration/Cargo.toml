@@ -43,6 +43,7 @@ blossom-trace.workspace = true
 blossom-value.workspace = true
 blossom-verify.workspace = true
 blossom-wire.workspace = true
+blossom-web.workspace = true
 proptest.workspace = true
 
 [dev-dependencies]

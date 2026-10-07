@@ -8,6 +8,7 @@
 pub mod catalog;
 pub mod codec;
 pub mod frame;
+pub mod link;
 
 #[cfg(test)]
 mod tests;

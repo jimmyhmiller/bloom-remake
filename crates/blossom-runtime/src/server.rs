@@ -50,6 +50,7 @@ use blossom_wire::frame::{Frame, Peer, RejectReason};
 use crate::RuntimeError;
 use crate::clock::{OsEntropy, Stopwatch, SystemClock, wall_now};
 use crate::deploy::DeploymentSpec;
+use crate::members::{Host, MemberEvent, MemberLinks, WebCtx};
 use crate::net::{self, Catalog, Conn, Identity};
 use crate::streams::{Env as StreamEnv, StreamConns, StreamData, StreamQueue, StreamStats};
 use blossom_node::streams::{HostRequest, Observed, host_request};
@@ -75,6 +76,16 @@ pub struct ServerConfig {
     /// Record every tick's inputs to a trace in this directory, `<node>-<incarnation>.blstrace` (ARCHITECTURE
     /// §6.4), for `blossom trace` to replay and question.
     pub record: Option<PathBuf>,
+    /// Serve the page and client members' links (docs/design/CLIENTS.md §4).
+    pub web: Option<WebConfig>,
+}
+
+/// `blossom run --web`: where to listen, the page's files, and `/blossom/app.json`.
+#[derive(Clone, Debug)]
+pub struct WebConfig {
+    pub addr: SocketAddr,
+    pub root: Option<PathBuf>,
+    pub app: String,
 }
 
 /// Counters of what the node did and dropped.
@@ -117,6 +128,12 @@ pub struct Stats {
     pub dropped_queue_full: AtomicU64,
     /// Rows too large for any frame (an omission).
     pub dropped_oversized: AtomicU64,
+    /// Client members' connections (docs/design/CLIENTS.md §3).
+    pub members: AtomicU64,
+    /// A client member's messages addressed to another node than the one it is connected to.
+    pub dropped_unroutable: AtomicU64,
+    /// Web requests and member links that failed (a malformed request, a refused or broken link).
+    pub web_failures: AtomicU64,
 }
 
 impl Stats {
@@ -150,6 +167,9 @@ impl Stats {
             ("dropped_closed_session", r(&self.dropped_closed_session)),
             ("dropped_queue_full", r(&self.dropped_queue_full)),
             ("dropped_oversized", r(&self.dropped_oversized)),
+            ("members", r(&self.members)),
+            ("dropped_unroutable", r(&self.dropped_unroutable)),
+            ("web_failures", r(&self.web_failures)),
         ]
     }
 }
@@ -188,6 +208,8 @@ enum Data {
         rel: RelId,
         row: Row,
     },
+    /// A client member's link (docs/design/CLIENTS.md §3).
+    Member(MemberEvent),
 }
 
 /// What else reaches the engine thread.
@@ -333,6 +355,8 @@ pub struct Server {
     pub node: NodeId,
     pub peer_addr: SocketAddr,
     pub client_addr: Option<SocketAddr>,
+    /// Where `--web` serves the page and client links.
+    pub web_addr: Option<SocketAddr>,
     /// The address each `listen` stream accepts on, by stream name.
     pub stream_addrs: BTreeMap<String, SocketAddr>,
     pub stream_stats: Arc<StreamStats>,
@@ -470,6 +494,14 @@ impl Server {
             Some(l) => Some(l.local_addr().map_err(RuntimeError::Io)?),
             None => None,
         };
+        let web_listener = match &cfg.web {
+            Some(w) => Some(TcpListener::bind(w.addr).map_err(|e| RuntimeError::Net(format!("bind {}: {e}", w.addr)))?),
+            None => None,
+        };
+        let web_addr = match &web_listener {
+            Some(l) => Some(l.local_addr().map_err(RuntimeError::Io)?),
+            None => None,
+        };
 
         // Every `listen` stream at this node has an address in the deployment, and every address names one.
         let mut stream_listeners = Vec::new();
@@ -596,6 +628,34 @@ impl Server {
                 threads.push(spawn("client-listener", move || accept_loop(l, ctx, true))?);
             }
         }
+        if let (Some(l), Some(w)) = (web_listener, &cfg.web) {
+            let client_roles: BTreeMap<String, RoleId> = program
+                .roles
+                .iter_enumerated()
+                .filter(|(_, r)| r.kind == blossom_ir::core::RoleKind::Client)
+                .map(|(id, r)| (r.name.to_string(), id))
+                .collect();
+            let registry = blossom_store::ClientRegistry::open(Arc::new(RealFs), &dir)?;
+            let queue = data.clone();
+            let ctx = WebCtx {
+                artifact: artifact.clone(),
+                id: id.clone(),
+                me,
+                restarts,
+                nonce,
+                catalog: catalog.clone(),
+                post: Arc::new(move |e| queue.push(Data::Member(e))),
+                registry: Arc::new(Mutex::new(registry)),
+                app: Arc::from(w.app.as_str()),
+                root: w.root.clone(),
+                next_conn: Arc::new(AtomicU64::new(0)),
+                client_roles: Arc::new(client_roles),
+            };
+            let (stop, conns, stats) = (stop.clone(), conns.clone(), stats.clone());
+            threads.push(spawn("web-listener", move || {
+                web_accept_loop(l, ctx, stop, conns, stats)
+            })?);
+        }
         for (i, l) in stream_listeners {
             let env = stream_env.clone();
             threads.push(spawn("stream-listener", move || {
@@ -620,6 +680,8 @@ impl Server {
                 principals: spec.nodes.iter().map(|n| Arc::from(n.principal.as_str())).collect(),
                 peers,
                 sessions,
+                members: MemberLinks::of(program),
+                seed,
                 data: data.clone(),
                 inbox_cap,
                 commit: commit_tx,
@@ -661,6 +723,7 @@ impl Server {
             node: me,
             peer_addr,
             client_addr,
+            web_addr,
             stream_addrs,
             stream_stats,
             streams,
@@ -1128,6 +1191,95 @@ fn session(stream: TcpStream, ctx: &Accept) -> Result<(), RuntimeError> {
     result
 }
 
+/// The node and counters as a member link sees them.
+struct MemberHost<'a> {
+    node: &'a mut Node<Box<dyn Executor>>,
+    acl: &'a AclTable,
+    oracle: &'a Arc<Oracle>,
+    stats: &'a Stats,
+    me: NodeId,
+    names: &'a [Arc<str>],
+    seed: Seed,
+}
+
+impl Host for MemberHost<'_> {
+    fn offer(&mut self, from: NodeId, role: RoleId, rel: RelId, row: Row) -> Option<u64> {
+        let source = Source::Node {
+            role: Some(role),
+            principal: "",
+        };
+        if !self.node.admits(self.acl, self.oracle.static_facts(), rel, source) {
+            bump(&self.stats.rejected_acl, 1);
+            return None;
+        }
+        bump(&self.stats.delivered, 1);
+        Some(self.node.offer_delivery(Delivery { rel, from, row }))
+    }
+
+    fn event(&mut self, rel: RelId, row: Row) {
+        self.node.offer_input(rel, row);
+    }
+
+    fn me(&self) -> NodeId {
+        self.me
+    }
+
+    fn dropped_unroutable(&self, n: u64) {
+        bump(&self.stats.dropped_unroutable, n);
+    }
+
+    fn dropped_closed(&self, n: u64) {
+        bump(&self.stats.dropped_closed_session, n);
+    }
+
+    fn rejected_schema(&self, n: u64) {
+        bump(&self.stats.rejected_schema, n);
+    }
+
+    fn member_seed(&self, member: NodeId) -> Result<[u8; 16], String> {
+        let name = format!("client {}", blossom_ir::printer::node_text(member, self.names));
+        blossom_value::Seeds::derive(self.seed, &name)
+            .map(|s| s.node.0)
+            .map_err(|e| format!("deriving the seed of {name}: {e}"))
+    }
+
+    fn link_failed(&self) {
+        bump(&self.stats.web_failures, 1);
+    }
+}
+
+/// Accepts the web listener's connections, each served on a thread of its own ([`crate::members::web_conn`]), until
+/// the node stops.
+fn web_accept_loop(listener: TcpListener, ctx: WebCtx, stop: Arc<AtomicBool>, conns: Arc<Conns>, stats: Arc<Stats>) {
+    if listener.set_nonblocking(true).is_err() {
+        return;
+    }
+    while !stop.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let configured = stream
+                    .set_nonblocking(false)
+                    .and_then(|()| stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT)))
+                    .and_then(|()| stream.set_write_timeout(Some(WRITE_TIMEOUT)));
+                if configured.is_err() {
+                    continue;
+                }
+                let registered = conns.add(&stream);
+                let (ctx, conns, stats) = (ctx.clone(), conns.clone(), stats.clone());
+                // A connection whose thread cannot start is dropped, which closes it.
+                let _ = spawn("web", move || {
+                    // A failed request or link closes its connection and is counted.
+                    if crate::members::web_conn(stream, &ctx).is_err() {
+                        bump(&stats.web_failures, 1);
+                    }
+                    conns.remove(registered);
+                });
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+}
+
 struct Engine {
     node: Node<Box<dyn Executor>>,
     blob_store: Arc<blossom_store::BlobStore>,
@@ -1147,6 +1299,10 @@ struct Engine {
     principals: Vec<Arc<str>>,
     peers: BTreeMap<NodeId, SyncSender<Vec<u8>>>,
     sessions: Sessions,
+    /// Client members' links (docs/design/CLIENTS.md §3).
+    members: MemberLinks,
+    /// The deployment's root seed (members' seeds derive from it).
+    seed: Seed,
     data: Arc<DataQueue>,
     /// The most messages the node's inbox holds before the engine stops taking data.
     inbox_cap: usize,
@@ -1327,6 +1483,21 @@ impl Engine {
                     self.node.offer_ingress(Ingress { rel, session, row });
                 }
             }
+            Data::Member(e) => {
+                if let MemberEvent::Open { .. } = e {
+                    bump(&self.stats.members, 1);
+                }
+                let mut host = MemberHost {
+                    node: &mut self.node,
+                    acl: &self.acl,
+                    oracle: &self.oracle,
+                    stats: &self.stats,
+                    me: self.me,
+                    names: &self.names,
+                    seed: self.seed,
+                };
+                self.members.handle(e, &mut host);
+            }
         }
         Ok(())
     }
@@ -1383,8 +1554,11 @@ impl Engine {
         for t in released {
             bump(&self.stats.released, 1);
             let mut to_peers: BTreeMap<(NodeId, RelId), Vec<&Row>> = BTreeMap::new();
+            let mut to_members: BTreeMap<(NodeId, RelId), Vec<&Row>> = BTreeMap::new();
             for s in &t.sends {
-                if s.to == self.me {
+                if s.to.is_client() {
+                    to_members.entry((s.to, s.rel)).or_default().push(&s.row);
+                } else if s.to == self.me {
                     self.node.offer_delivery(Delivery {
                         rel: s.rel,
                         from: self.me,
@@ -1413,6 +1587,28 @@ impl Engine {
                     }
                 }
             }
+            for ((member, rel), rows) in to_members {
+                let sid = self
+                    .catalog
+                    .sid(rel)
+                    .ok_or_else(|| internal_error!("{rel:?} is not a channel"))?;
+                let (batches, oversized) = net::batches(codec, p, sid, rel, t.tick.0, &rows)?;
+                bump(&self.stats.dropped_oversized, oversized);
+                let mut host = MemberHost {
+                    node: &mut self.node,
+                    acl: &self.acl,
+                    oracle: &self.oracle,
+                    stats: &self.stats,
+                    me: self.me,
+                    names: &self.names,
+                    seed: self.seed,
+                };
+                for b in batches {
+                    self.members.send(member, b, &mut host);
+                }
+            }
+            // The messages this tick took are durable now: their members' batches are acknowledged.
+            self.members.released(t.taken);
             self.dispatch_streams(&t)?;
             let mut to_sessions: BTreeMap<(SessionId, RelId), Vec<&Row>> = BTreeMap::new();
             for e in &t.egress {

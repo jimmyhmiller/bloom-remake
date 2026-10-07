@@ -50,6 +50,13 @@ pub struct Args {
     /// owner only: it holds the deployment's seed), for `blossom trace` to replay and question.
     #[arg(long, value_name = "DIR")]
     pub record: Option<PathBuf>,
+    /// Serve the page and client members' links on this address (docs/design/CLIENTS.md §4): the page's files,
+    /// `/blossom/app.json` and the WebSocket `/blossom/link`.
+    #[arg(long, value_name = "ADDR")]
+    pub web: Option<std::net::SocketAddr>,
+    /// The page's files for `--web`: the built browser host (`index.html`, `host.js`, `pkg/`).
+    #[arg(long, value_name = "DIR", default_value = "web")]
+    pub web_root: PathBuf,
 }
 
 /// The exit code for a runtime error.
@@ -67,6 +74,20 @@ pub fn exit_of(e: &RuntimeError) -> Exit {
 
 /// Loads the deployment spec and compiles its program for its nodes.
 pub fn load(deploy: &std::path::Path) -> Result<(DeploymentSpec, Arc<blossom_artifact::bls::BlsArtifact>), ExitCode> {
+    load_with_sources(deploy).map(|(spec, artifact, _)| (spec, artifact))
+}
+
+/// [`load`], with the program's source files.
+pub fn load_with_sources(
+    deploy: &std::path::Path,
+) -> Result<
+    (
+        DeploymentSpec,
+        Arc<blossom_artifact::bls::BlsArtifact>,
+        blossom_base::SourceDb,
+    ),
+    ExitCode,
+> {
     let spec = DeploymentSpec::load(deploy).map_err(|e| {
         eprintln!("{e}");
         ExitCode::from(exit_of(&e))
@@ -84,8 +105,8 @@ pub fn load(deploy: &std::path::Path) -> Result<(DeploymentSpec, Arc<blossom_art
         return Err(Exit::Refused.into());
     };
     let params = spec.params.iter().map(|(k, v)| (k.clone(), param_binding(v))).collect();
-    let artifact = bls::compile_deployed(source, &nodes, &params)?;
-    Ok((spec, Arc::new(artifact)))
+    let (artifact, sources) = bls::compile_deployed_with_sources(source, &nodes, &params)?;
+    Ok((spec, Arc::new(artifact), sources))
 }
 
 /// A deployment's parameter value for the compiler.
@@ -122,9 +143,33 @@ fn write_stats(path: &std::path::Path, stats: &blossom_runtime::server::Stats) {
 /// Runs the command.
 pub fn run(args: Args, cx: &Context) -> ExitCode {
     let _ = cx;
-    let (spec, artifact) = match load(&args.deploy) {
+    let (spec, artifact, sources) = match load_with_sources(&args.deploy) {
         Ok(x) => x,
         Err(code) => return code,
+    };
+    let web = match args.web {
+        None => None,
+        Some(addr) => {
+            if !args.web_root.join("index.html").is_file() {
+                eprintln!(
+                    "blossom run: `--web` serves the page from {}, which has no index.html (build it with \
+                     scripts/build-web.sh, or pass --web-root)",
+                    args.web_root.display()
+                );
+                return Exit::Refused.into();
+            }
+            match blossom_runtime::web::app_json(&spec, &sources, &args.node) {
+                Ok(app) => Some(blossom_runtime::server::WebConfig {
+                    addr,
+                    root: Some(args.web_root.clone()),
+                    app,
+                }),
+                Err(e) => {
+                    eprintln!("blossom run: {e}");
+                    return Exit::Internal.into();
+                }
+            }
+        }
     };
     if spec.security == SecurityMode::InsecureDev && !args.insecure_dev {
         eprintln!("the deployment uses the plaintext development transport; pass `--insecure-dev` to allow it");
@@ -150,6 +195,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
         backend: args.evaluator,
         externs,
         record: args.record.clone(),
+        web,
     }) {
         Ok(s) => s,
         Err(e) => {
@@ -157,9 +203,12 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
             return exit_of(&e).into();
         }
     };
-    let clients = server
+    let mut clients = server
         .client_addr
         .map_or_else(|| "no client listener".to_string(), |a| format!("clients on {a}"));
+    if let Some(a) = server.web_addr {
+        clients.push_str(&format!(", the page on http://{a}/"));
+    }
     println!(
         "blossom: node {} ready: peers on {}, {clients} (boot tick {}, incarnation {})",
         args.node, server.peer_addr, server.boot_tick.0, server.restarts
