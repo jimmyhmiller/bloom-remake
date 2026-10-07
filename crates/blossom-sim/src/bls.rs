@@ -141,6 +141,7 @@ impl<'a> BlsSim<'a> {
                         .collect();
                     crate::fabric::StreamsConfig::of(self.artifact.program.get(), &names, &self.artifact.roles)
                 }),
+                links: crate::sync::Links::of(self.artifact.program.get(), &self.artifact.roles),
             },
             faults,
         )

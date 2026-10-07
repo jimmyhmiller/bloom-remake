@@ -82,6 +82,8 @@ pub struct Oracle {
     root: Option<blossom_value::Seed>,
     node_names: Vec<Arc<str>>,
     node_seeds: Vec<blossom_value::Seed>,
+    /// The role of the client members this oracle evaluates (CLIENTS.md §2): ids outside the deployment.
+    client_role: Option<RoleId>,
     /// Each node's role, for the `$role(R)` guards of rules placed at a role (LANGUAGE §6.10). Empty for a
     /// role-free program.
     roles: Vec<Option<RoleId>>,
@@ -135,6 +137,7 @@ impl Oracle {
             root: None,
             node_names: Vec::new(),
             node_seeds: Vec::new(),
+            client_role: None,
             program,
             strata,
             plans,
@@ -202,6 +205,21 @@ impl Oracle {
         self
     }
 
+    /// Evaluates client members of `role` (CLIENTS.md §2): a node whose id is a client id runs that role's rules.
+    pub fn with_client_role(mut self, role: RoleId) -> Oracle {
+        self.client_role = Some(role);
+        self
+    }
+
+    /// Node `n`'s role: the deployment's, or the client role for a client id.
+    pub(crate) fn role_of(&self, n: NodeId) -> Option<RoleId> {
+        if n.is_client() {
+            self.client_role
+        } else {
+            self.roles.get(n.0 as usize).copied().flatten()
+        }
+    }
+
     /// Binds deploy-time parameters (LANG-010). A parameter left unbound takes its declared default; one with no
     /// default is an error when it is read.
     pub fn with_params(mut self, params: BTreeMap<blossom_base::ParamId, Value>) -> Oracle {
@@ -264,6 +282,15 @@ impl Oracle {
 
     /// Node `n`'s seed σn.
     pub(crate) fn node_seed(&self, n: NodeId) -> Result<blossom_value::Seed, OracleError> {
+        // A client member's seed derives from its name, as a deployment node's does.
+        if n.is_client()
+            && let Some(root) = self.root
+        {
+            let name = blossom_ir::printer::node_text(n, &self.node_names);
+            return blossom_value::Seeds::derive(root, &name)
+                .map(|s| s.node)
+                .map_err(|e| blossom_base::internal_error!("deriving the seed of client {name}: {e}").into());
+        }
         self.node_seeds.get(n.0 as usize).copied().ok_or_else(|| {
             blossom_base::internal_error!(
                 "a `rand` draw on node {}, but the oracle was given no seed or no node names",
@@ -277,7 +304,7 @@ impl Oracle {
     pub(crate) fn role_members(&self, r: RoleId, nodes: &BTreeSet<Value>) -> u64 {
         nodes
             .iter()
-            .filter(|v| matches!(v, Value::Node(n) if self.roles.get(n.0 as usize).copied().flatten() == Some(r)))
+            .filter(|v| matches!(v, Value::Node(n) if self.role_of(*n) == Some(r)))
             .count() as u64
     }
 
@@ -285,7 +312,7 @@ impl Oracle {
     pub(crate) fn runs_on(&self, rule: &blossom_ir::core::Rule, node: NodeId) -> bool {
         match rule.role {
             None => true,
-            Some(r) => self.roles.get(node.0 as usize).copied().flatten() == Some(r),
+            Some(r) => self.role_of(node) == Some(r),
         }
     }
 

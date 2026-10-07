@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use blossom_base::{InternalError, RelId, internal_error};
 use blossom_ir::obs::FiringRecord;
 use blossom_oracle::{Delivery, Egress, Ingress, Instance, OracleError, Row, TickInput};
+use blossom_value::Value;
 use blossom_value::time::{Duration, Instant, NodeId, Tick};
 
 /// Runs one node's tick: the node's seam, shared with the network runtime.
@@ -157,6 +158,66 @@ pub struct SyncConfig {
     /// The deployment's byte streams, when the world connects them ([`crate::fabric`]); `None` leaves stream events
     /// to the scheduled inputs and drops the requests to the host.
     pub streams: Option<crate::fabric::StreamsConfig>,
+    /// The client links, whose events the round loop raises.
+    pub links: Links,
+}
+
+/// The client links of a deployment (CLIENTS.md §6): every client member is linked to every node of each process or
+/// cluster role. A link is up from the first round; a crash of either end takes it down (`disconnected` at the other
+/// end, in the crash round), and a restart brings it back (`connected` at both ends, in the restart round). A
+/// simulated link loses what it carried while down, so it never resumes (`resumed` is false).
+#[derive(Clone, Debug, Default)]
+pub struct Links {
+    pub pairs: Vec<LinkPair>,
+}
+
+/// One end of a client link: `node` sees `peer` through the relations it reads the link with (a program reads only
+/// the ones it names).
+#[derive(Clone, Debug)]
+pub struct LinkPair {
+    pub node: NodeId,
+    pub peer: NodeId,
+    pub connected: Option<RelId>,
+    pub disconnected: Option<RelId>,
+}
+
+impl Links {
+    /// The links of `program` deployed with `roles` (node `n`'s role is `roles[n]`).
+    pub fn of(program: &blossom_ir::core::Program, roles: &[Option<blossom_base::RoleId>]) -> Links {
+        use blossom_ir::core::{EventSource, RelClass, RoleKind};
+        let kind = |r: Option<blossom_base::RoleId>| r.and_then(|r| program.roles.get(r)).map(|d| &d.kind);
+        let rel = |peer: blossom_base::RoleId, up: bool| {
+            program
+                .rels
+                .iter_enumerated()
+                .find(|(_, r)| matches!(&r.class, RelClass::Event(EventSource::Link { peer: p, up: u }) if *p == peer && *u == up))
+                .map(|(id, _)| id)
+        };
+        let mut pairs = Vec::new();
+        for (i, a) in roles.iter().enumerate() {
+            for (j, b) in roles.iter().enumerate() {
+                let linked = matches!(
+                    (kind(*a), kind(*b)),
+                    (Some(RoleKind::Client), Some(RoleKind::Process | RoleKind::Cluster))
+                        | (Some(RoleKind::Process | RoleKind::Cluster), Some(RoleKind::Client))
+                );
+                let (Some(peer_role), true) = (*b, linked) else {
+                    continue;
+                };
+                let (connected, disconnected) = (rel(peer_role, true), rel(peer_role, false));
+                if connected.is_none() && disconnected.is_none() {
+                    continue;
+                }
+                pairs.push(LinkPair {
+                    node: NodeId(u32::try_from(i).unwrap_or(u32::MAX)),
+                    peer: NodeId(u32::try_from(j).unwrap_or(u32::MAX)),
+                    connected,
+                    disconnected,
+                });
+            }
+        }
+        Links { pairs }
+    }
 }
 
 /// A timer (LANGUAGE §15.2) in the synchronous world: it fires by the node runtime's rule ([`blossom_ir::timers`]),
@@ -439,8 +500,22 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                     Some(f) => f.take(node, tick)?,
                     None => (Vec::new(), Vec::new()),
                 };
+                // Client links that come up or go down this round (`Links`).
+                let mut link_events: Vec<(RelId, Row)> = Vec::new();
+                for pair in config.links.pairs.iter().filter(|p| p.node == node) {
+                    let peer_up = !faults.crashed(pair.peer, tick);
+                    let comes_up =
+                        ((tick == config.first || restarting) && peer_up) || faults.restarts_at(pair.peer, tick);
+                    let goes_down = faults.crashes.get(&pair.peer) == Some(&tick);
+                    if comes_up && let Some(r) = pair.connected {
+                        link_events.push((r, Row::from(vec![Value::Node(pair.peer), Value::Bool(false)])));
+                    }
+                    if goes_down && let Some(r) = pair.disconnected {
+                        link_events.push((r, Row::from(vec![Value::Node(pair.peer)])));
+                    }
+                }
                 let with_more: Vec<(RelId, Row)>;
-                let events = if timer_firings.is_empty() && stream_events.is_empty() {
+                let events = if timer_firings.is_empty() && stream_events.is_empty() && link_events.is_empty() {
                     scheduled
                 } else {
                     with_more = scheduled
@@ -448,6 +523,7 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                         .cloned()
                         .chain(timer_firings)
                         .chain(stream_events.iter().map(|e| (e.rel, e.row.clone())))
+                        .chain(link_events)
                         .collect();
                     &with_more
                 };
@@ -703,6 +779,7 @@ mod tests {
             boot: None,
             recovered: None,
             streams: None,
+            links: Links::default(),
         }
     }
 

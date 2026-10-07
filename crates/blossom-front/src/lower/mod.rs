@@ -94,6 +94,7 @@ pub fn lower(hir: &Hir, deployment: &Deployment<'_>) -> Result<Lowered, Internal
             hir::RoleKind::Process => RoleKind::Process,
             hir::RoleKind::Cluster => RoleKind::Cluster,
             hir::RoleKind::External => RoleKind::External,
+            hir::RoleKind::Client => RoleKind::Client,
         };
         l.b.declare_role(r.name.clone(), kind, r.span).map_err(ir)?;
     }
@@ -469,6 +470,13 @@ impl Lowerer<'_> {
             }
             HRelKind::Stream(hir::HStreamRel::Event(e)) => (RelClass::Event(EventSource::Stream(*e)), None),
             HRelKind::Stream(hir::HStreamRel::Host(op)) => (RelClass::HostOut(*op), None),
+            HRelKind::Link { peer, up } => (
+                RelClass::Event(EventSource::Link {
+                    peer: RoleId::from_raw(peer.0),
+                    up: *up,
+                }),
+                None,
+            ),
         };
         let placement = match &r.kind {
             HRelKind::Channel(_)
@@ -477,6 +485,7 @@ impl Lowerer<'_> {
             | HRelKind::NodeDir
             | HRelKind::Boot
             | HRelKind::Recovered
+            | HRelKind::Link { .. }
             | HRelKind::Halt => Placement::Shared,
             _ => Self::placement(r.role),
         };

@@ -258,6 +258,9 @@ pub enum RoleKind {
     Cluster,
     /// Clients: sessions, not nodes.
     External,
+    /// Members admitted at run time (browser tabs, docs/design/CLIENTS.md): nodes that hold rules but are not part of
+    /// the deployment, so their member set is not known when the program is compiled.
+    Client,
 }
 
 /// A relation.
@@ -355,6 +358,12 @@ pub enum HRelKind {
     /// One of a byte stream's relations (FOREIGN-PROTOCOLS §1): an event the runtime feeds, or a request to the
     /// host, written with `send`.
     Stream(HStreamRel),
+    /// `Q.connected(n: Node<Q>, resumed: bool)` (`up`) or `Q.disconnected(n: Node<Q>)`: the link between this node
+    /// and a node of role `peer`, one of the two being a client role (CLIENTS.md §1).
+    Link {
+        peer: HRoleId,
+        up: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

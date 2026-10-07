@@ -1827,3 +1827,93 @@ fn method_calls_follow_the_bang_rule_by_class() {
         vec!["BLS0301"]
     );
 }
+
+// ---------------------------------------------------------------- client roles (S21, docs/design/CLIENTS.md)
+
+const CLIENTS: &str = "program t version 1;\nrole Server;\nrole Browser: client;\n\
+                       channel say(text: String): Browser -> Server;\n\
+                       channel heard(text: String): Server -> Browser;\n";
+
+fn with_clients(body: &str) -> &'static str {
+    Box::leak(format!("{CLIENTS}{body}").into_boxed_str())
+}
+
+/// The diagnostics compiling a client-role program reports, deployed on one server node (no client is part of a
+/// deployment).
+fn client_codes(src: &'static str) -> Vec<(String, String)> {
+    let mut sources = SourceDb::new();
+    let nodes = [NodeSpec {
+        name: "s1".to_owned(),
+        role: Some("Server".to_owned()),
+    }];
+    match compile("test.bls", &nodes, &mut One(src), &mut sources) {
+        Ok((_, warnings)) => warnings
+            .iter()
+            .map(|d| (d.code.as_str().to_owned(), d.message.clone()))
+            .collect(),
+        Err(BlsError::Rejected(d)) => d
+            .iter()
+            .map(|d| (d.code.as_str().to_owned(), d.message.clone()))
+            .collect(),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+#[test]
+fn a_client_role_holds_rules_and_reads_its_links() {
+    let src = with_clients(
+        "at Server {\n\
+           table online(b: Node<Browser>);\n\
+           j: on Browser.connected(b, _) { emit online(b); }\n\
+           l: on Browser.disconnected(b) { delete online(b); }\n\
+           f: on say(t) from b, online(o) { send heard(t) to o; }\n\
+         }\n\
+         at Browser {\n\
+           input line(text: String);\n\
+           table up(s: Node<Server>);\n\
+           table got(text: String);\n\
+           t: on line(x), s in Server { send say(x) to s; }\n\
+           h: on heard(x) { emit got(x); }\n\
+           u: on Server.connected(s, r) { emit up(s); }\n\
+         }\n",
+    );
+    assert_eq!(client_codes(src), Vec::<(String, String)>::new());
+}
+
+#[test]
+fn a_client_roles_members_are_not_known_statically() {
+    let member = with_clients("at Server { output n(b: Node<Browser>);\nv: on say(t), b in Browser { emit n(b); } }\n");
+    let d = client_codes(member);
+    assert!(!d.is_empty() && d.iter().all(|(c, _)| c == "BLS0404"), "{d:?}");
+    let size = with_clients("at Server { output n(k: u64);\nv: on say(t) { emit n(Browser.size()); } }\n");
+    let d = client_codes(size);
+    assert!(!d.is_empty() && d.iter().all(|(c, _)| c == "BLS0404"), "{d:?}");
+    let quorum = with_clients(
+        "at Server { table acks(s: LSet<Node<Browser>>);\noutput ok();\nv: while acks(s) where majority(s, Browser) { emit ok(); } }\n",
+    );
+    let d = client_codes(quorum);
+    assert!(d.iter().any(|(c, _)| c == "BLS0404"), "{d:?}");
+}
+
+#[test]
+fn clients_talk_through_servers_and_links_cross_a_client_boundary() {
+    let peer = with_clients("channel gossip(text: String): Browser -> Browser;\n");
+    let d = client_codes(peer);
+    assert!(!d.is_empty() && d.iter().all(|(c, _)| c == "BLS0404"), "{d:?}");
+    // `Server.connected` at the server, or `Browser.connected` at a tab: not a client link.
+    let same = with_clients("at Server { output o();\nv: on Server.connected(s, _) { emit o(); } }\n");
+    let d = client_codes(same);
+    assert!(!d.is_empty() && d.iter().all(|(c, _)| c == "BLS0404"), "{d:?}");
+    let tabs = with_clients("at Browser { output o();\nv: on Browser.connected(b, _) { emit o(); } }\n");
+    let d = client_codes(tabs);
+    assert!(!d.is_empty() && d.iter().all(|(c, _)| c == "BLS0404"), "{d:?}");
+    // The runtime feeds the link events.
+    let write = with_clients("at Server { v: on say(t) from b { emit Browser.disconnected(b); } }\n");
+    let d = client_codes(write);
+    assert!(d.iter().any(|(c, _)| c == "BLS0400"), "{d:?}");
+    let kind = client_codes(with_head("role R: tab;\n"));
+    assert!(
+        kind.iter().any(|(c, m)| c == "BLS0200" && m.contains("client")),
+        "{kind:?}"
+    );
+}

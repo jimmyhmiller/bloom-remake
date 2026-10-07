@@ -504,6 +504,7 @@ impl Remap for RoleKind {
             Self::Process => Self::Process,
             Self::Cluster => Self::Cluster,
             Self::External => Self::External,
+            Self::Client => Self::Client,
         }
     }
 }
@@ -551,6 +552,10 @@ impl Remap for EventSource {
             Self::ServiceResult(v0) => Self::ServiceResult(v0.remap(m)),
             Self::Stream(e) => Self::Stream(*e),
             Self::ClusterVersion => Self::ClusterVersion,
+            Self::Link { peer, up } => Self::Link {
+                peer: peer.remap(m),
+                up: *up,
+            },
         }
     }
 }

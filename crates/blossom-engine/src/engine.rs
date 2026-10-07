@@ -54,6 +54,9 @@ pub struct EngineConfig {
     pub max_rounds: u32,
     /// The host functions the program's `extern fn`s call (LANG-181); each is bound when the engine is built.
     pub externs: Arc<blossom_value::ExternRegistry>,
+    /// This node's role when it is a client member (CLIENTS.md §2): its id is outside the deployment, so `roles` and
+    /// `node_names` do not name it.
+    pub client_role: Option<RoleId>,
 }
 
 /// The per-group state of an aggregate rule: per aggregate column, the support of each distinct argument tuple, and
@@ -324,6 +327,7 @@ impl Engine {
         blossom_ir::tick::bind_externs(p, &cfg.externs)?;
         check_supported(p)?;
         let kinds = kinds(p);
+        let mut client_seed = None;
         let (choice, node_seeds) = match cfg.seed {
             Some(root) => {
                 let choice = blossom_value::Seeds::derive(root, "")
@@ -337,11 +341,24 @@ impl Engine {
                             .node,
                     );
                 }
+                // A client member's seed derives from its name, as a deployment node's does.
+                if node.is_client() {
+                    let name = blossom_ir::printer::node_text(node, &cfg.node_names);
+                    client_seed = Some(
+                        blossom_value::Seeds::derive(root, &name)
+                            .map_err(|e| internal_error!("deriving the seed of client {name}: {e}"))?
+                            .node,
+                    );
+                }
                 (Some(choice), seeds)
             }
             None => (None, Vec::new()),
         };
-        let my_role = cfg.roles.get(node.0 as usize).copied().flatten();
+        let my_role = if node.is_client() {
+            cfg.client_role
+        } else {
+            cfg.roles.get(node.0 as usize).copied().flatten()
+        };
         let runs = |rule: &Rule| rule.role.is_none_or(|r| Some(r) == my_role);
         let mut plans = Plans::default();
         let mut inductive = Vec::new();
@@ -447,6 +464,7 @@ impl Engine {
                 params: cfg.params,
                 choice,
                 node_seeds,
+                client_seed,
                 roles: cfg.roles,
                 kinds,
                 externs: cfg.externs,

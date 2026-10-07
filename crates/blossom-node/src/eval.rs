@@ -227,12 +227,13 @@ impl Executor for blossom_engine::Engine {
 }
 
 /// The engine behind the reference interface, for the simulator and the differential suite: one engine per node,
-/// created at the node's first tick from the carried state that tick names. Every later tick must name the state
-/// that engine carried (the harness feeds each node its own last output), which is checked.
+/// created at the node's first tick from the carried state that tick names. Every later tick of the same incarnation
+/// must name the state that engine carried (the harness feeds each node its own last output), which is checked; a new
+/// incarnation (a restart) starts the engine over from the state its first tick names (what survived the crash).
 pub struct EngineEvaluator {
     program: blossom_ir::ValidatedProgram,
     cfg: blossom_engine::EngineConfig,
-    engines: std::sync::Mutex<BTreeMap<blossom_value::time::NodeId, blossom_engine::Engine>>,
+    engines: std::sync::Mutex<BTreeMap<blossom_value::time::NodeId, (blossom_engine::Engine, u64)>>,
     /// Check at every tick that the carried state named is the one the engine carried (O(state) per tick).
     pub check_carried: bool,
 }
@@ -254,14 +255,18 @@ impl Evaluator for EngineEvaluator {
             .engines
             .lock()
             .map_err(|_| blossom_base::internal_error!("the engine table's lock is poisoned"))?;
-        let engine = match engines.entry(input.node) {
+        let (engine, incarnation) = match engines.entry(input.node) {
             std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::btree_map::Entry::Vacant(v) => {
                 let mut engine = blossom_engine::Engine::new(self.program.clone(), input.node, self.cfg.clone())?;
                 engine.reset(input.carried.clone())?;
-                v.insert(engine)
+                v.insert((engine, input.incarnation))
             }
         };
+        if *incarnation != input.incarnation {
+            engine.reset(input.carried.clone())?;
+            *incarnation = input.incarnation;
+        }
         if self.check_carried {
             let mine = engine.carried_instance();
             if mine != *input.carried {
@@ -348,7 +353,11 @@ impl Executors {
     /// A fresh executor for node `node`; the node resets it to its recovered state at boot.
     pub fn make(&self, node: blossom_value::time::NodeId) -> Result<Box<dyn Executor>, EvalError> {
         Ok(match self.backend {
-            Backend::Engine => Box::new(blossom_engine::Engine::new(self.program.clone(), node, self.engine.clone())?),
+            Backend::Engine => Box::new(blossom_engine::Engine::new(
+                self.program.clone(),
+                node,
+                self.engine.clone(),
+            )?),
             Backend::Oracle => Box::new(OracleExecutor::new(self.oracle.clone())),
         })
     }

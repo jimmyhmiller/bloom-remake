@@ -262,6 +262,8 @@ pub enum RoleKind {
     Process,
     Cluster,
     External,
+    /// Members admitted at run time (docs/design/CLIENTS.md): they hold rules but no node of the deployment.
+    Client,
 }
 
 /// RelDecl data in the Dedalus core IR.
@@ -301,8 +303,10 @@ pub enum RelClass {
 /// EventSource data in the Dedalus core IR.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventSource {
-    Input,                      // a program root's `input`; an instance's input is Idb + interface
-    InputSeal { input: RelId }, // host seal of an input key (LANGUAGE §14.4, input seals)
+    Input, // a program root's `input`; an instance's input is Idb + interface
+    InputSeal {
+        input: RelId,
+    }, // host seal of an input key (LANGUAGE §14.4, input seals)
     Timer(TimerDecl),
     Boot,
     Recovered,
@@ -312,6 +316,12 @@ pub enum EventSource {
     ServiceResult(ServiceId),
     ClusterVersion,      // LANG-264: LMax<u32>, sampled per tick, recorded
     Stream(StreamEvent), // FOREIGN-PROTOCOLS §1: a stream's `opened`, `data`, `closed`, `failed`
+    /// The link between this node and a node of role `peer` came up (`(n, resumed)`) or went down (`(n)`), one of the
+    /// two being a client role (docs/design/CLIENTS.md §1).
+    Link {
+        peer: RoleId,
+        up: bool,
+    },
 }
 /// TimerDecl data in the Dedalus core IR: exactly one of `every d [times m]` (physical, `every`), `every n ticks
 /// [times m]` (logical, `ticks`), `once after d` (physical, `once_after`) and `once` (physical, `once`, no guard), with

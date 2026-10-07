@@ -876,6 +876,47 @@ impl<'t> Resolver<'t, '_> {
         }
     }
 
+    /// Whether a rule placed as `cx` may read a link event to a node of `peer`: one of its role and `peer` is a client
+    /// role and the other a process or cluster role (BLS0404 otherwise).
+    fn link_readable(&mut self, cx: &RuleCx, peer: HRoleId, span: Span) -> bool {
+        let here = cx.placement.map(|r| self.role_of(r).kind);
+        let there = self.role_of(peer).kind;
+        let ok = matches!(
+            (here, there),
+            (Some(RoleKind::Client), RoleKind::Process | RoleKind::Cluster)
+                | (Some(RoleKind::Process | RoleKind::Cluster), RoleKind::Client)
+        );
+        if !ok {
+            let name = self.role_of(peer).name.clone();
+            self.error(
+                code!("BLS0404"),
+                span,
+                format!(
+                    "`{name}.connected` and `{name}.disconnected` are read across a client link: at a client role, \
+                     of a process or cluster role's node, or at a process or cluster role, of a client role's member"
+                ),
+            );
+        }
+        ok
+    }
+
+    /// Whether `role`'s members are known when the program is compiled; a client role's are not (BLS0404).
+    fn static_members(&mut self, role: HRoleId, span: Span, what: &str) -> bool {
+        if self.role_of(role).kind != RoleKind::Client {
+            return true;
+        }
+        let name = self.role_of(role).name.clone();
+        self.error(
+            code!("BLS0404"),
+            span,
+            format!(
+                "{what}: `{name}` is a client role, whose members join at run time; a program learns of them from \
+                 their messages and from `{name}.connected`"
+            ),
+        );
+        false
+    }
+
     /// The relation an atom literal reads, with its arguments (`None` for a bare relation name).
     fn atom_parts<'e>(&mut self, cx: &RuleCx, e: &'e ast::Expr) -> Option<(HRelId, Option<&'e [Arg]>)> {
         match &e.kind {
@@ -1291,6 +1332,12 @@ impl<'t> Resolver<'t, '_> {
             }
             return Some(None);
         };
+        // A link event is read only across a client link (CLIENTS.md §1).
+        if let HRelKind::Link { peer, .. } = self.rel_of(rel).kind
+            && !self.link_readable(cx, peer, a.span)
+        {
+            return None;
+        }
         if a.principal.is_some() {
             self.unsupported("LANG-241", "`principal` bindings", a.span);
             return None;
@@ -1707,6 +1754,9 @@ impl<'t> Resolver<'t, '_> {
             && let [name] = p.as_slice()
             && let Some(role) = self.role_named(cx.ms, name.name)
         {
+            if !self.static_members(role, name.span, "`p in R`") {
+                return None;
+            }
             let pat = self.pattern(cx, lhs)?;
             let members = self.members_rel(role, name.span);
             if generator {
@@ -2788,6 +2838,9 @@ impl<'t> Resolver<'t, '_> {
                     );
                     return None;
                 };
+                if !self.static_members(role, domain.span, "`majority(s, R)`") {
+                    return None;
+                }
                 let s = self.expr(cx, set)?;
                 Some(HExpr::new(
                     HExprKind::Builtin {
@@ -2821,6 +2874,9 @@ impl<'t> Resolver<'t, '_> {
             && let Some(role) = self.role_named(cx.ms, r.name)
         {
             if self.impure(cx, span, "a role's members") {
+                return None;
+            }
+            if !self.static_members(role, r.span, "`R.size()`") {
                 return None;
             }
             if name.as_str() == "size" && args.is_empty() {
@@ -3258,6 +3314,12 @@ impl<'t> Resolver<'t, '_> {
                         );
                         return None;
                     }
+                    // A role's link events: the write is refused below (the runtime feeds them).
+                    None if self.role_named(cx.ms, inst.name).is_some()
+                        && matches!(name.as_str(), "connected" | "disconnected") =>
+                    {
+                        self.lookup_rel(cx.ms, path)
+                    }
                     None => None,
                 }
             }
@@ -3300,7 +3362,8 @@ impl<'t> Resolver<'t, '_> {
                 | HRelKind::Boot
                 | HRelKind::Recovered
                 | HRelKind::Members(_)
-                | HRelKind::NodeDir,
+                | HRelKind::NodeDir
+                | HRelKind::Link { .. },
                 _,
             ) => Some((code!("BLS0400"), bad("this relation is fed by the runtime"))),
             (HRelKind::LocalTick, v) if v != Verb::Next => {

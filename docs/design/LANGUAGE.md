@@ -416,7 +416,7 @@ ModuleItem      = [ 'monotone' ] ( "module" | "choreography" ) IDENT [ Generics 
 ModParams       = "(" [ ModParam { "," ModParam } [ "," ] ] ")" ;
 ModParam        = IDENT ":" ( 'rel' ParamList | Type [ "=" Expr ] ) ;
 ProtocolItem    = "protocol" IDENT [ Generics ] [ ":" Type { "+" Type } ] "{" { Item } "}" ;
-RoleItem        = 'role' IDENT [ ":" ( 'process' | 'cluster' | 'external' ) ] ";" ;
+RoleItem        = 'role' IDENT [ ":" ( 'process' | 'cluster' | 'external' | 'client' ) ] ";" ;
 AtSection       = 'at' IDENT "{" { Item } "}" ;
 InterposeItem   = "interpose" RelPath "as" "(" IDENT "," IDENT ")" "{" { Item } "}" ;
 BlockItem       = 'block' IDENT "{" { Item } "}" ;
@@ -1022,6 +1022,11 @@ at Coordinator { … }            // sections reopen, so the protocol reads in m
   relation parameters.
 - **External roles** hold no rules. A channel whose source is an external role carries a `Session` sender; a
   channel to an external role is egress-only and its `to` expression must be a `Session` (§18.4).
+- **Client roles** (`role Browser: client;`, docs/design/CLIENTS.md) hold rules, like process and cluster roles, but
+  their members are admitted at run time (a browser tab each) and are no node of the deployment. A member is a
+  `Node<R>` on both sides. Its member set is not known when the program is compiled, so `p in R`, `R.size()` and
+  `majority(s, R)` over a client role are BLS0404; a program learns of members from their messages and from the
+  link events (§7.15). Client roles talk only through other roles: a channel between two client roles is BLS0404.
 - **ACLs** are inferred: a channel accepts frames only from the roles that `send` into it (LANG-242 P0, ODD-33).
   A channel whose source role is `external` is open to that role's sessions; declaring the direction is the
   explicit opening ANA-105 asks for.
@@ -1274,6 +1279,7 @@ ticks), §15.2.
 | `halt(kill: bool)` | output | `emit halt(false);` stops the node at the end of the tick; `true` also stops the process |
 | `localtick()` | scratch | `next localtick();` requests another tick (a staged change, SEM-009) |
 | `session_open(s: Session, p: Principal, at: Instant)`, `session_closed(s: Session, reason: String)` | event | external sessions, on roles that receive from an external role (§18.4) |
+| `Q.connected(n: Node<Q>, resumed: bool)`, `Q.disconnected(n: Node<Q>)` | event | a client link (docs/design/CLIENTS.md): at a client role of a process or cluster role `Q`'s node, at a process or cluster role of a client role `Q`'s member; `resumed` when the link took up where the last one left off (BLS0404 elsewhere; written only by the runtime, BLS0400) |
 | `node_dir(node: Node, addr: String, principal: Principal, role: String)` | static | the node directory (LANG-240) |
 | `catalog.rule`, `catalog.depends`, `catalog.stratum`, `catalog.schema`, `catalog.interface` | static | the compiled program's catalog, after `use std::catalog;` (LANG-202) |
 
@@ -3575,7 +3581,7 @@ while`.
 |---|---|
 | program header | `version`, `edition` |
 | item start | `role`, `at`, `cell`, `timer`, `fact`, `service`, `aggregate`, `snapshot`, `block`, `acl`; modifiers `durable`, `soft`, `sealed`, `zset`, `bag`, `final`, `monotone`; function classes `morphism`, `bimorphism`, `monotone`, `antitone`, `threshold`, `stable` |
-| role kinds | `process`, `cluster`, `external` |
+| role kinds | `process`, `cluster`, `external`, `client` |
 | import | `with` |
 | module parameters | `rel` |
 | function signatures | `after` |

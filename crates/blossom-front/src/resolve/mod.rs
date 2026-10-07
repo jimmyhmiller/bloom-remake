@@ -364,6 +364,8 @@ pub(crate) struct Resolver<'t, 'd> {
     pub scopes: Vec<ModScope<'t>>,
     pub builtins: BTreeMap<BuiltinRel, HRelId>,
     pub members: BTreeMap<HRoleId, HRelId>,
+    /// Each role's link events (`Q.connected`, `Q.disconnected`), by role and direction.
+    pub links: BTreeMap<(HRoleId, bool), HRelId>,
     /// Structs and enums already interned, by home (defining file and module body, `types::Home::body_id`) and name.
     pub nominal: BTreeMap<(FileKey, usize, Symbol), TypeId>,
     /// The user lattices being resolved, by home and name: one met again contains itself.
@@ -435,6 +437,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             scopes: Vec::new(),
             builtins: BTreeMap::new(),
             members: BTreeMap::new(),
+            links: BTreeMap::new(),
             nominal: BTreeMap::new(),
             lattices_resolving: BTreeSet::new(),
             impls_done: BTreeSet::new(),
@@ -839,11 +842,12 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 None | Some("process") => RoleKind::Process,
                 Some("cluster") => RoleKind::Cluster,
                 Some("external") => RoleKind::External,
+                Some("client") => RoleKind::Client,
                 Some(other) => {
                     self.error(
                         code!("BLS0200"),
                         kind.map_or(name.span, |k| k.span),
-                        format!("unknown role kind `{other}`: expected process, cluster or external"),
+                        format!("unknown role kind `{other}`: expected process, cluster, external or client"),
                     );
                     RoleKind::Process
                 }
@@ -1879,6 +1883,18 @@ impl<'t, 'd> Resolver<'t, 'd> {
                         let a = self.role_or_node(s, src);
                         let b = self.role_or_node(s, dst);
                         match (a, b) {
+                            (Some(Some(a)), Some(Some(b)))
+                                if self.role_of(a).kind == RoleKind::Client
+                                    && self.role_of(b).kind == RoleKind::Client =>
+                            {
+                                self.error(
+                                    code!("BLS0404"),
+                                    d.name.span,
+                                    "client roles do not talk to each other directly: their members talk through a \
+                                     server role (CLIENTS.md §1)",
+                                );
+                                return None;
+                            }
                             (Some(Some(a)), Some(Some(b))) => Some((a, b)),
                             (Some(None), Some(None)) => None,
                             _ => return None,
@@ -2479,14 +2495,60 @@ impl<'t, 'd> Resolver<'t, 'd> {
                     "crashed" if self.spec.is_some() => Some(self.crashed_oracle(name.span)),
                     _ => None,
                 }),
-            [inst, name] => self
-                .scope(s)
-                .instances
-                .get(&inst.name)
-                .and_then(|i| i.interface.get(&name.name))
-                .map(|(id, _)| *id),
+            [inst, name] => {
+                if let Some(found) = self
+                    .scope(s)
+                    .instances
+                    .get(&inst.name)
+                    .and_then(|i| i.interface.get(&name.name))
+                    .map(|(id, _)| *id)
+                {
+                    return Some(found);
+                }
+                // `Q.connected` / `Q.disconnected`: a role's link events (CLIENTS.md §1).
+                let role = self.scope(s).roles.get(&inst.name).copied()?;
+                match name.as_str() {
+                    "connected" => Some(self.link_rel(role, true, name.span)),
+                    "disconnected" => Some(self.link_rel(role, false, name.span)),
+                    _ => None,
+                }
+            }
             _ => None,
         }
+    }
+
+    /// `Q.connected(n: Node<Q>, resumed: bool)` or `Q.disconnected(n: Node<Q>)`, created on first use.
+    pub fn link_rel(&mut self, peer: HRoleId, up: bool, span: Span) -> HRelId {
+        if let Some(id) = self.links.get(&(peer, up)) {
+            return *id;
+        }
+        let node = self.node_type(Some(peer));
+        let mut cols = vec![HCol {
+            name: Symbol::intern("n"),
+            ty: Some(node),
+        }];
+        if up {
+            cols.push(HCol {
+                name: Symbol::intern("resumed"),
+                ty: Some(self.intern_type(TypeDef::Bool, span)),
+            });
+        }
+        let mut segs = self.role_of(peer).name.segments().to_vec();
+        segs.push(Symbol::intern(if up { "connected" } else { "disconnected" }));
+        let id = self.add_rel(HRel {
+            name: QualName::new(segs),
+            kind: HRelKind::Link { peer, up },
+            cols,
+            key: None,
+            durable: false,
+            cell: false,
+            resolve: None,
+            prefer: None,
+            role: None,
+            span,
+        });
+        self.links.insert((peer, up), id);
+        id
     }
 
     /// `interpose a.i as (outside, inside) { … }`: declares the renamed pair (LANGUAGE §6.9).
