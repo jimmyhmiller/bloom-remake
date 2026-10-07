@@ -24,7 +24,8 @@ at Server {
     join: on Browser.connected(b, _) {
         emit online(b);
     }
-    leave: on Browser.disconnected(b) {
+    /// A tab that dropped and came back within one tick stays online.
+    leave: on Browser.disconnected(b), not Browser.connected(b, _) {
         delete online(b);
     }
     /// Who is here, to every tab (the new one included), when someone comes or goes.
@@ -34,7 +35,7 @@ at Server {
     seen: on Browser.connected(b, _), online(o) where o != b {
         send presence(o, true) to b;
     }
-    gone: on Browser.disconnected(b), online(o) where o != b {
+    gone: on Browser.disconnected(b), not Browser.connected(b, _), online(o) where o != b {
         send presence(b, false) to o;
     }
     store: on say(k, t) from b, not log(b, k, _, _) {

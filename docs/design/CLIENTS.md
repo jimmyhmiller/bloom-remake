@@ -50,6 +50,10 @@ at Browser {
     a node of `S`.
   `resumed` says whether the link took up where the last one left off (§3): nothing sent on it was lost. A program
   resends state on `resumed == false`.
+  A tab that drops and reconnects quickly, or reconnects while its old connection is still open (the node then closes
+  the old one), can bring a `disconnected` and a `connected` of the same member into one tick. Since `delete` takes
+  effect at the next tick and `emit` now, a rule that forgets a member on `disconnected` says so:
+  `leave: on Browser.disconnected(b), not Browser.connected(b, _) { delete online(b); }`.
 - **Channels.** A channel between a client role and another role is an ordinary channel (`Browser -> Server`,
   `Server -> Browser`). Client roles do not talk to each other directly (BLS0404): tabs talk through a server.
 - **Placement.** Inside `at R` of a client role go the page's relations: the browser interface (`ui.bls`) is included

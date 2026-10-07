@@ -19,7 +19,7 @@ use std::io::{BufReader, Read};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 
 use blossom_artifact::bls::BlsArtifact;
@@ -53,6 +53,8 @@ pub(crate) enum MemberEvent {
         acked: u64,
         conn: u64,
         writer: SyncSender<Vec<u8>>,
+        /// The connection's socket, for the engine to close it.
+        socket: TcpStream,
     },
     /// A numbered batch of the member's messages, decoded.
     Msg {
@@ -149,6 +151,7 @@ fn send_now(w: &Mutex<TcpStream>, f: &Frame) -> Result<(), RuntimeError> {
 
 /// A member's link: the handshake, then its messages until the connection ends.
 fn link(mut r: BufReader<TcpStream>, w: TcpStream, ctx: &WebCtx) -> Result<(), RuntimeError> {
+    let socket = w.try_clone().map_err(RuntimeError::Io)?;
     let w = Arc::new(Mutex::new(w));
     let Some(Frame::Hello(h)) = next_frame(&mut r, &w)? else {
         return Err(RuntimeError::Net("a link that did not open with HELLO".into()));
@@ -220,6 +223,7 @@ fn link(mut r: BufReader<TcpStream>, w: TcpStream, ctx: &WebCtx) -> Result<(), R
             acked,
             conn,
             writer: tx.clone(),
+            socket,
         });
     let result = if opened {
         read_messages(&mut r, &w, ctx, member, conn, &inbound)
@@ -308,11 +312,25 @@ fn identify(ctx: &WebCtx, role: &str, token: Option<Vec<u8>>) -> Result<(NodeId,
     Ok((id, token))
 }
 
+/// The connection carrying a member's link.
+struct Conn {
+    id: u64,
+    writer: SyncSender<Vec<u8>>,
+    socket: TcpStream,
+}
+
+impl Conn {
+    /// Writes a frame; `false` when the connection cannot take it (gone, or not keeping up).
+    fn write(&self, frame: Vec<u8>) -> bool {
+        self.writer.try_send(frame).is_ok()
+    }
+}
+
 /// One member's link as the engine keeps it.
 struct Member {
     role: RoleId,
-    /// The connection carrying the link: its number and writer.
-    conn: Option<(u64, SyncSender<Vec<u8>>)>,
+    /// The connection carrying the link.
+    conn: Option<Conn>,
     /// The next number of a batch to the member.
     out_next: u64,
     /// The batches to the member it has not acknowledged, by number.
@@ -353,6 +371,17 @@ pub(crate) trait Host {
     fn link_failed(&self);
 }
 
+/// Ends `member`'s link on its current connection: closes the socket (its connection thread then ends, and the member
+/// reconnects) and tells the program the link is down.
+fn drop_link(member: NodeId, m: &mut Member, links: &BTreeMap<(RoleId, bool), RelId>, host: &mut dyn Host) {
+    let Some(c) = m.conn.take() else { return };
+    // The socket may be closed already; either way the connection is over.
+    let _ = c.socket.shutdown(std::net::Shutdown::Both);
+    if let Some(rel) = links.get(&(m.role, false)) {
+        host.event(*rel, Row::from(vec![Value::Node(member)]));
+    }
+}
+
 impl MemberLinks {
     pub(crate) fn of(program: &Program) -> MemberLinks {
         let mut links = BTreeMap::new();
@@ -378,7 +407,19 @@ impl MemberLinks {
                 acked,
                 conn,
                 writer,
-            } => self.open(member, role, token, received, acked, conn, writer, host),
+                socket,
+            } => self.open(
+                member,
+                role,
+                token,
+                (received, acked),
+                Conn {
+                    id: conn,
+                    writer,
+                    socket,
+                },
+                host,
+            ),
             MemberEvent::Skip { member, conn, seq } => {
                 host.rejected_schema(1);
                 self.handle(
@@ -401,7 +442,7 @@ impl MemberLinks {
             } => {
                 let me = host.me();
                 let Some(m) = self.members.get_mut(&member) else { return };
-                if m.conn.as_ref().is_none_or(|(c, _)| *c != conn) {
+                if m.conn.as_ref().is_none_or(|c| c.id != conn) {
                     // A message on a connection that was replaced: the member resends it on the new one.
                     return;
                 }
@@ -421,11 +462,11 @@ impl MemberLinks {
                     }
                     m.pending.push_back((last, seq));
                 }
-                self.acknowledge();
+                self.acknowledge(host);
             }
             MemberEvent::Ack { member, conn, seq } => {
                 let Some(m) = self.members.get_mut(&member) else { return };
-                if m.conn.as_ref().is_some_and(|(c, _)| *c == conn) {
+                if m.conn.as_ref().is_some_and(|c| c.id == conn) {
                     while m.replay.front().is_some_and(|(s, _)| *s <= seq) {
                         if let Some((_, f)) = m.replay.pop_front() {
                             m.replay_bytes = m.replay_bytes.saturating_sub(f.len());
@@ -435,31 +476,27 @@ impl MemberLinks {
             }
             MemberEvent::Closed { member, conn } => {
                 let Some(m) = self.members.get_mut(&member) else { return };
-                if m.conn.as_ref().is_some_and(|(c, _)| *c == conn) {
-                    m.conn = None;
-                    if let Some(rel) = self.links.get(&(m.role, false)) {
-                        host.event(*rel, Row::from(vec![Value::Node(member)]));
-                    }
+                if m.conn.as_ref().is_some_and(|c| c.id == conn) {
+                    drop_link(member, m, &self.links, host);
                 }
             }
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// A member's new connection, `(received, acked)` its view of the link.
     fn open(
         &mut self,
         member: NodeId,
         role: RoleId,
         token: Vec<u8>,
-        received: u64,
-        acked: u64,
-        conn: u64,
-        writer: SyncSender<Vec<u8>>,
+        (received, acked): (u64, u64),
+        conn: Conn,
         host: &mut dyn Host,
     ) {
         let Ok(seed) = host.member_seed(member) else {
-            // The connection's writer is dropped here, which closes it.
             host.link_failed();
+            // The socket may be closed already; either way the connection is over.
+            let _ = conn.socket.shutdown(std::net::Shutdown::Both);
             return;
         };
         let fresh = !self.members.contains_key(&member);
@@ -474,12 +511,11 @@ impl MemberLinks {
             in_floor: acked,
             pending: VecDeque::new(),
         });
+        // A connection the member left behind (it reconnected before this one was seen to close) ends: the program
+        // hears the link go down before it comes back up.
+        drop_link(member, m, &self.links, host);
         // Resumed when nothing after what the member took is missing from the replay buffer.
         let resumed = !fresh && m.lost_upto <= received && received < m.out_next;
-        let replaced = m.conn.replace((conn, writer.clone()));
-        if let Some((_, old)) = replaced {
-            drop(old);
-        }
         let welcome = Frame::Welcome {
             member: member.0,
             token,
@@ -487,38 +523,41 @@ impl MemberLinks {
             floor: m.in_floor,
             seed,
         };
-        let mut ok = writer.try_send(welcome.encode()).is_ok();
+        let mut ok = conn.write(welcome.encode());
         if resumed {
             for (seq, f) in &m.replay {
                 if *seq > received && ok {
-                    ok = writer.try_send(f.clone()).is_ok();
+                    ok = conn.write(f.clone());
                 }
             }
         }
         if !ok {
-            m.conn = None;
+            // It could not take its handshake: closed before the program hears of it; the member reconnects.
+            let _ = conn.socket.shutdown(std::net::Shutdown::Both);
+            return;
         }
+        m.conn = Some(conn);
         if let Some(rel) = self.links.get(&(role, true)) {
             host.event(*rel, Row::from(vec![Value::Node(member), Value::Bool(resumed)]));
         }
     }
 
     /// The node's released ticks took `taken` messages: acknowledges every member batch whose messages they took.
-    pub(crate) fn released(&mut self, taken: u64) {
+    pub(crate) fn released(&mut self, taken: u64, host: &mut dyn Host) {
         self.taken = self.taken.max(taken);
-        self.acknowledge();
+        self.acknowledge(host);
     }
 
-    fn acknowledge(&mut self) {
-        for m in self.members.values_mut() {
+    fn acknowledge(&mut self, host: &mut dyn Host) {
+        for (member, m) in self.members.iter_mut() {
             let mut upto = None;
             while m.pending.front().is_some_and(|(n, _)| n.is_none_or(|n| n < self.taken)) {
                 upto = m.pending.pop_front().map(|(_, s)| s);
             }
-            if let (Some(seq), Some((_, w))) = (upto, m.conn.as_ref())
-                && w.try_send(Frame::Ack { seq }.encode()).is_err()
+            if let (Some(seq), Some(c)) = (upto, m.conn.as_ref())
+                && !c.write(Frame::Ack { seq }.encode())
             {
-                m.conn = None;
+                drop_link(*member, m, &self.links, host);
             }
         }
     }
@@ -533,12 +572,9 @@ impl MemberLinks {
         let seq = m.out_next;
         m.out_next += 1;
         let frame = Frame::Msg { seq, batch }.encode();
-        if let Some((_, w)) = &m.conn {
-            match w.try_send(frame.clone()) {
-                Ok(()) => {}
-                // A connection that cannot keep up is closed; the member resumes from the replay buffer.
-                Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => m.conn = None,
-            }
+        // A connection that cannot keep up is closed; the member resumes from the replay buffer.
+        if m.conn.as_ref().is_some_and(|c| !c.write(frame.clone())) {
+            drop_link(member, m, &self.links, host);
         }
         m.replay_bytes += frame.len();
         m.replay.push_back((seq, frame));

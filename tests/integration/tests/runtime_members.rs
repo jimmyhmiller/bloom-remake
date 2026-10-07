@@ -225,3 +225,28 @@ fn a_member_is_admitted_heard_acknowledged_and_resumed() {
     drop(ws);
     server.stop().unwrap();
 }
+
+/// A member that reconnects while its old connection is still open (a tab whose network changed): the node closes the
+/// old connection, and the new one carries the link.
+#[test]
+fn a_reconnect_closes_the_connection_it_replaces() {
+    let (spec, a) = setup("replace");
+    let port = free_port();
+    let server = start(&spec, &a, OpenMode::InitFresh, port);
+    let s = a.node_id("s").unwrap();
+    let (mut old, me, token, _, _) = open(port, &spec, &a, None, 0, 0);
+    let (mut new, again, _, resumed, _) = open(port, &spec, &a, Some(token), 0, 0);
+    assert_eq!((again, resumed), (me, true));
+    // The old connection is closed by the node: reading from it ends (a close frame, or the connection's end).
+    let ended = (0..100).any(|_| old.recv_bytes_within(Duration::from_millis(100)).is_err());
+    assert!(ended, "the replaced connection is still open");
+    // The new one works: the member's line comes back to it, as a member still online.
+    say(&mut new, &a, s, 1, "still here");
+    let (rows, _, _) = hear(&mut new, &a, 1);
+    assert_eq!(
+        rows,
+        vec![vec![Value::Node(me), Value::Node(me), Value::str("still here")]]
+    );
+    drop(new);
+    server.stop().unwrap();
+}

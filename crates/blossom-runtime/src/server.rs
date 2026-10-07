@@ -1608,7 +1608,16 @@ impl Engine {
                 }
             }
             // The messages this tick took are durable now: their members' batches are acknowledged.
-            self.members.released(t.taken);
+            let mut host = MemberHost {
+                node: &mut self.node,
+                acl: &self.acl,
+                oracle: &self.oracle,
+                stats: &self.stats,
+                me: self.me,
+                names: &self.names,
+                seed: self.seed,
+            };
+            self.members.released(t.taken, &mut host);
             self.dispatch_streams(&t)?;
             let mut to_sessions: BTreeMap<(SessionId, RelId), Vec<&Row>> = BTreeMap::new();
             for e in &t.egress {
