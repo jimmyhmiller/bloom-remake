@@ -1171,6 +1171,102 @@ impl Lsm {
     pub fn tables(&self) -> Result<Vec<(u64, u64)>, StoreError> {
         Ok(self.read()?.tables.iter().map(|t| (t.meta.id, t.meta.bytes)).collect())
     }
+
+    /// What the tree holds, as its manifest and tables say.
+    pub fn info(&self) -> Result<TreeInfo, StoreError> {
+        let s = self.read()?;
+        Ok(TreeInfo {
+            tables: s
+                .tables
+                .iter()
+                .map(|t| TableInfo {
+                    id: t.meta.id,
+                    bytes: t.meta.bytes,
+                    entries: t.meta.entries,
+                    min_version: t.meta.min_version,
+                    max_version: t.meta.max_version,
+                    blocks: t.index.len(),
+                    filtered: t.filter.is_some(),
+                })
+                .collect(),
+            flushed: s.manifest.flushed_version,
+            applied: s.applied,
+            floor: s.manifest.floor,
+            key_format: s.manifest.key_format,
+            memtable_entries: s.mem.len(),
+        })
+    }
+
+    /// Reads every block of every table, checking what a read would not: entries strictly in order (key, then version
+    /// descending), each block's first and last keys as its index says, the entry count and version range as the
+    /// manifest says, and every key in the table's filter. The entries checked.
+    pub fn verify(&self) -> Result<u64, StoreError> {
+        let tables = self.read()?.tables.clone();
+        let mut checked = 0u64;
+        for t in &tables {
+            let mut count = 0u64;
+            let mut prev: Option<(Vec<u8>, u64)> = None;
+            for b in &t.index {
+                let entries = t.read_block(b)?;
+                let at = |reason: &str| corrupt(&t.path, b.offset, reason.to_owned());
+                if entries.first().map(|e| &e.key) != Some(&b.first) || entries.last().map(|e| &e.key) != Some(&b.last)
+                {
+                    return Err(at("a block's keys disagree with the index"));
+                }
+                for e in entries.iter() {
+                    if let Some((pk, pv)) = &prev {
+                        let in_order = pk.as_slice() < e.key.as_slice() || (pk == &e.key && *pv > e.version);
+                        if !in_order {
+                            return Err(at("entries out of order"));
+                        }
+                    }
+                    if e.version < t.meta.min_version || e.version > t.meta.max_version {
+                        return Err(at("an entry outside the table's version range"));
+                    }
+                    if t.filter.as_ref().is_some_and(|f| !f.may_contain(&e.key)) {
+                        return Err(at("a key its filter does not hold"));
+                    }
+                    prev = Some((e.key.clone(), e.version));
+                    count += 1;
+                }
+            }
+            if count != t.meta.entries {
+                return Err(corrupt(
+                    &t.path,
+                    0,
+                    format!("{count} entries, the manifest says {}", t.meta.entries),
+                ));
+            }
+            checked += count;
+        }
+        Ok(checked)
+    }
+}
+
+/// A table as [`Lsm::info`] describes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableInfo {
+    pub id: u64,
+    pub bytes: u64,
+    pub entries: u64,
+    pub min_version: u64,
+    pub max_version: u64,
+    pub blocks: usize,
+    /// Whether it has a filter (format 2).
+    pub filtered: bool,
+}
+
+/// A tree as [`Lsm::info`] describes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TreeInfo {
+    /// Live tables, newest first.
+    pub tables: Vec<TableInfo>,
+    /// The version the tables cover, the newest applied (the memtable's too), and the oldest an as-of read may ask.
+    pub flushed: Option<u64>,
+    pub applied: Option<u64>,
+    pub floor: u64,
+    pub key_format: u32,
+    pub memtable_entries: usize,
 }
 
 /// The tables to merge, if any are due: four or more within a factor of two in size, or all of them past the most.

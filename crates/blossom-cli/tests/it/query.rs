@@ -169,11 +169,30 @@ fn queries_read_the_durable_store_as_of_released_ticks() {
         String::from_utf8_lossy(&busy.stderr).contains("the node is running"),
         "{busy:?}"
     );
+    let busy = Command::new(env!("CARGO_BIN_EXE_blossom"))
+        .args(["store", "db"])
+        .arg(&store)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&busy.stderr).contains("the node is running"),
+        "{busy:?}"
+    );
     let _ = server.kill();
     let _ = server.wait();
     // Killed: the tables and the WAL after them give what the next recovery would.
     let (stopped, _) = keys(&offline(&deploy, &store, "all(k, v) = store(k, v)"));
     assert_eq!(stopped, ["\"apple\"", "\"cherry\""]);
+    // The database described and verified in place.
+    let db = Command::new(env!("CARGO_BIN_EXE_blossom"))
+        .args(["store", "db"])
+        .arg(&store)
+        .arg("--verify")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&db.stdout);
+    assert!(db.status.success(), "{db:?}");
+    assert!(text.contains("key format 1") && text.contains("verified"), "{text}");
 }
 
 #[cfg(test)]

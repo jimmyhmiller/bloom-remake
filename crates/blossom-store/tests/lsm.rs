@@ -163,6 +163,12 @@ fn reads_as_of_every_version_kept_agree_with_the_model() {
             }
         }
         assert!(compactions > 0, "seed {seed}: the workload never compacted");
+        let info = lsm.info().unwrap();
+        assert_eq!(
+            lsm.verify().unwrap(),
+            info.tables.iter().map(|t| t.entries).sum::<u64>()
+        );
+        assert!(info.tables.iter().all(|t| t.filtered && t.blocks > 0));
         assert!(
             lsm.floor().unwrap() > 0,
             "seed {seed}: compaction merged no history away"
@@ -282,4 +288,26 @@ fn version_zero_and_the_first_flush() {
     assert_eq!(third.flushed().unwrap().version, Some(0));
     assert_eq!(third.scan(b"", 0).unwrap(), vec![b"zero".to_vec()]);
     assert!(third.apply(0, 0, vec![]).is_err());
+}
+
+/// Verification reads every block: a flipped byte anywhere in a table is found.
+#[test]
+fn verify_finds_a_damaged_block() {
+    let sim = SimFs::default();
+    let fs: Arc<dyn Vfs> = Arc::new(sim.clone());
+    let dir = Path::new("/db");
+    let lsm = Lsm::open(fs.clone(), dir, opts()).unwrap();
+    for v in 1..=40u64 {
+        let changes = (0..8u8)
+            .map(|i| (vec![b'k', i, (v % 7) as u8], Op::Put))
+            .collect::<Vec<_>>();
+        lsm.apply(v, v, changes).unwrap();
+    }
+    lsm.flush().unwrap();
+    assert!(lsm.verify().unwrap() > 0);
+    let (id, _) = lsm.tables().unwrap()[0];
+    drop(lsm);
+    sim.corrupt(&dir.join("sst").join(format!("{id}.sst")), 20).unwrap();
+    let reopened = Lsm::open(fs, dir, opts()).unwrap();
+    assert!(reopened.verify().is_err());
 }
