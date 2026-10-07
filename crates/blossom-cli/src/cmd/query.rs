@@ -47,6 +47,9 @@ pub struct Args {
     pub query: String,
 }
 
+/// What the query's view is called inside the program.
+const QUERY_PREFIX: &str = "__query_";
+
 /// The file the query's view is in, which the root file includes (at the node's role): what its diagnostics name.
 const QUERY_FILE: &str = "<query>.bls";
 
@@ -103,7 +106,17 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
         eprintln!("blossom query: the deployment has no node `{}`", args.node);
         return Exit::Usage.into();
     };
-    let query = format!("view {};\n", args.query.trim().trim_end_matches(';'));
+    // The view lives in the program's namespace: a name of its own keeps the query's name from clashing with the
+    // program's (`total` is a common view name).
+    let internal = format!("{QUERY_PREFIX}{name}");
+    let Some(rest) = args.query.trim().trim_end_matches(';').strip_prefix(name) else {
+        eprintln!(
+            "blossom query: a query is a view, `name(columns) = body` (got `{}`)",
+            args.query
+        );
+        return Exit::Usage.into();
+    };
+    let query = format!("view {internal}{rest};\n");
     let include = match &entry.role {
         Some(role) => format!("\n\nat {role} {{\n    include \"{QUERY_FILE}\";\n}}\n"),
         None => format!("\n\ninclude \"{QUERY_FILE}\";\n"),
@@ -140,7 +153,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
             return Exit::UserError.into();
         }
     };
-    let Some(rel) = artifact.rel_named(name) else {
+    let Some(rel) = artifact.rel_named(&internal) else {
         eprintln!("blossom query: the compiled program has no view `{name}`");
         return Exit::Internal.into();
     };
@@ -153,7 +166,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
     };
     let req = QueryRequest {
         program: program.get().clone(),
-        view: name.to_owned(),
+        view: internal.clone(),
         as_of: args.as_of,
     };
     let result = match (&args.admin, &args.store) {
