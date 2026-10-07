@@ -16,7 +16,8 @@ at Server {
     join: on Browser.connected(b, _) {
         emit online(b);
     }
-    leave: on Browser.disconnected(b) {
+    /// A tab that dropped and came back within one tick stays online.
+    leave: on Browser.disconnected(b), not Browser.connected(b, _) {
         delete online(b);
     }
     store: on say(t) from b {
