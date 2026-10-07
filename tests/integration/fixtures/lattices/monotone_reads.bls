@@ -1,0 +1,50 @@
+//! Monotone views over a product lattice (BLS0702, LANGUAGE §11.6, §13.5): a threshold method, a monotone method and a
+//! stable read guarded by its threshold are monotone; a stable read with a bang and a method with no class are points
+//! of order.
+program monotone_reads version 1;
+
+lattice Box {
+    items: LSet<u64>,
+    cap: LPoint<u64>,
+}
+
+impl Box {
+    threshold fn full(self) -> bool {
+        match reveal!(self.cap) {
+            Some(c) => reveal!(self.items).len() >= c,
+            None => false,
+        }
+    }
+    stable fn cap_of(self) -> u64 after full {
+        match reveal!(self.cap) {
+            Some(c) => c,
+            None => error("no capacity yet"),
+        }
+    }
+    monotone fn count(self) -> LMax<u64> {
+        self.items.size()
+    }
+    fn spare(self) -> u64 {
+        match reveal!(self.cap) {
+            Some(c) => c - reveal!(self.items).len(),
+            None => 0,
+        }
+    }
+}
+
+input put(k: u64, x: u64);
+input limit(k: u64, c: u64);
+table boxes(k: u64, b: Box);
+
+store: on put(k, x) {
+    emit boxes(k, Box { items: set[x] });
+}
+cap: on limit(k, c) {
+    emit boxes(k, Box { cap: LPoint::of(c) });
+}
+
+monotone view full_boxes(k) = boxes(k, b), b.full();
+monotone view many(k) = boxes(k, b), b.count() >= 3u64;
+monotone view full_caps(k, c) = boxes(k, b), b.full(), let c = b.cap_of();
+monotone view caps(k, c) = boxes(k, b), let c = b.cap_of!();
+monotone view spares(k, s) = boxes(k, b), let s = b.spare!();

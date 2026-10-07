@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use blossom_base::{RelId, RoleId, Symbol};
+use blossom_base::{FnId, RelId, RoleId, Span, Symbol};
 use blossom_ir::ValidatedProgram;
 use blossom_ir::core::{EventSource, RelClass};
 use blossom_value::time::NodeId;
@@ -21,6 +21,9 @@ pub struct BlsArtifact {
     pub surface: BTreeMap<RelId, Vec<usize>>,
     /// The built-in `halt(kill: bool)` output, if the program writes it.
     pub halt: Option<RelId>,
+    /// The function of each method of a product lattice (LANGUAGE §11.8), with the span of the method's name: where
+    /// the law harness reports a refuted class claim (BLS0704).
+    pub methods: BTreeMap<FnId, Span>,
 }
 
 impl BlsArtifact {

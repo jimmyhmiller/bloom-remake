@@ -42,6 +42,14 @@ pub use blossom_ir::tick::{Delivery, Egress, HostOut, Ingress, Instance, Row, Se
 /// Why the oracle could not evaluate: the evaluators' shared error.
 pub type OracleError = blossom_ir::tick::EvalError;
 
+/// Why [`Oracle::eval_op`] gave no value: a program error (a hard runtime error, by its code and message) or an
+/// evaluator error.
+#[derive(Debug)]
+pub enum CallError {
+    Program(String),
+    Oracle(OracleError),
+}
+
 /// Evaluation limits.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
@@ -137,6 +145,48 @@ impl Oracle {
             roles: Vec::new(),
             params: BTreeMap::new(),
             externs,
+        })
+    }
+
+    /// Evaluates the catalogue operation `op` of `lattice` on `args`, outside any tick (as node 0 at tick 0): for the
+    /// law harness, which calls a lattice's methods on generated values. A method is a pure function, so it reads
+    /// nothing a tick would give it.
+    pub fn eval_op(
+        &self,
+        lattice: blossom_base::LatticeTypeId,
+        op: blossom_base::Symbol,
+        args: &[Value],
+    ) -> Result<Value, CallError> {
+        use blossom_ir::core::{Expr, LatOpRef, Term};
+        // The arguments are the values of variables 0, 1, … of an environment of their own.
+        let mut vars = Vec::with_capacity(args.len());
+        for i in 0..args.len() {
+            let v = u32::try_from(i)
+                .map_err(|_| CallError::Oracle(blossom_base::internal_error!("too many arguments").into()))?;
+            vars.push(Expr::Term(Term::Var(blossom_base::VarId::from_raw(v))));
+        }
+        let e = Expr::Lattice {
+            op: LatOpRef { lattice, op },
+            args: vars,
+        };
+        let env: Vec<Option<Value>> = args.iter().cloned().map(Some).collect();
+        let scope = expr::Scope {
+            incarnation: 1,
+            program: self.program.get(),
+            node: blossom_value::time::NodeId(0),
+            tick: blossom_value::time::Tick(0),
+            now: blossom_value::time::Instant(0),
+            oracle: self,
+            fuel: expr::Fuel::default(),
+            blobs: &blossom_value::NoBlobs,
+            new_blobs: std::cell::RefCell::new(BTreeMap::new()),
+        };
+        expr::eval(&scope, &env, &e).map_err(|e| match e {
+            expr::ExprError::Arithmetic(m) => CallError::Program(format!("BLSR004: {m}")),
+            expr::ExprError::Conflict(m) => CallError::Program(format!("BLSR006: {m}")),
+            expr::ExprError::Refused(m) => CallError::Program(format!("BLSR010: {m}")),
+            expr::ExprError::Budget(m) => CallError::Program(format!("BLSR012: {m}")),
+            expr::ExprError::Oracle(e) => CallError::Oracle(e),
         })
     }
 

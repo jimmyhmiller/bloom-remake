@@ -119,3 +119,41 @@ fn explain_prints_a_code_its_meaning_and_where_the_reference_uses_it() {
     assert_eq!(list.lines().count(), blossom_base::codes::REGISTRY.len());
     assert!(list.lines().any(|l| l.starts_with("BLSR004  R  ")), "{list}");
 }
+
+/// A fixture of the integration tests' user-defined lattices.
+#[cfg(test)]
+fn lattice_fixture(name: &str) -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/integration/fixtures/lattices")
+        .join(name)
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn check_runs_the_law_harness_and_reports_refuted_claims() {
+    // True claims: the program checks, and `--laws` says what was tested.
+    let out = blossom(&["check", "--laws", &lattice_fixture("user.bls")]);
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let report = String::from_utf8(out.stdout).unwrap();
+    assert!(report.contains("lattice Tally: merge, ⊥ and order proven"), "{report}");
+    for line in [
+        "passed: threshold, tested",
+        "quorum_of: stable, tested",
+        "ayes_with: bimorphism, tested",
+    ] {
+        assert!(report.contains(line), "{line}: {report}");
+    }
+    // False claims: BLS0704 at each method, with its counterexample, and exit 1.
+    let out = blossom(&["check", &lattice_fixture("refuted.bls")]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(err.matches("error[BLS0704]").count(), 6, "{err}");
+    assert!(err.contains("`small` of `Pair` is declared `threshold`"), "{err}");
+    assert!(err.contains("note: f(a) = true"), "{err}");
+    // `blossom sim` compiles through the same path: a refuted claim stops it before it runs.
+    let out = blossom(&["sim", &lattice_fixture("refuted.bls"), "--nodes", "n1", "--ticks", "1"]);
+    assert_eq!(out.status.code(), Some(1), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("error[BLS0704]"));
+}

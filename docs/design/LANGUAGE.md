@@ -2241,6 +2241,25 @@ BLS0704, and the result is reported "proven" or "tested". Composition and produc
 ⊥ and order; `extern` lattices are "tested". Method bodies are pure and may `reveal!` freely. A group or ring type can
 never be declared a lattice (LANG-142).
 
+- **Where.** An `impl` gives methods to a product lattice (BLS0110 on anything else) and is an item of a file's top
+  level, outside modules and `at` sections (BLS0110): a lattice and its methods are types, not per instance. A
+  method takes `self` first; its name may not be an operation every lattice has (`join`, `reveal`, `is_bot`, `leq`,
+  `lt`, `of`, `bot`: BLS0201). A product's fields are lattices (BLS0300) and take no attributes; `x.f` reads one (a
+  morphism). Fields and methods have separate names (`c.ops` and `c.ops()` may both exist).
+- **Signatures.** A class constrains a method's signature (BLS0300): a `threshold` gives a `bool` or an `Option`; a
+  `morphism`, `bimorphism`, `monotone` or `antitone` method gives a lattice. A classed method is classed in its
+  receiver, so its other parameters are plain values, except a `bimorphism`'s, which takes at least one more lattice
+  and is a morphism in each. `stable … after t` names a `threshold fn t(self)` of the same lattice (BLS0300).
+- **The same body** (§11.6, BLS0703): a rule body's conjuncts, which for a handler's statements include its header
+  and the conditions of the `if` blocks around them. The guard is a conjunct `x.t()` on the very variable the read
+  is made on. A guarded stable read is monotone: its value is fixed wherever it is read, so the analyses treat it as
+  data (§13.2). With a bang a stable read is exact anywhere.
+- **The law harness** runs wherever a program is compiled to be checked or run (`blossom check`, `run`, `sim`,
+  `trace`), on values generated from the lattice's types over small domains, through the reference evaluator; a case
+  on which the method raises a runtime error is set aside, and a `stable` claim is checked only on states its
+  threshold holds on. `blossom check --laws` prints each lattice's status and how many cases each claim held on.
+  This build has no SMT proofs of claims (VER-014): a method's claim is "tested", never "proven".
+
 ### 11.9 Lattices in messages; monotone reset (LANG-137, LANG-284, CR-52)
 
 A channel column may be a lattice. The channel's key is its non-lattice columns, so the sender merges all of a tick's
@@ -3520,7 +3539,7 @@ All functions are pure. Methods on values use `.`; there are no closures outside
 | Vec | `len`, `get(i) -> Option<T>`, `first`, `last`, `push`, `concat`, `contains`, `enumerate() -> Vec<(u64, T)>`, `sort`, `reverse`, `flatten()` (on a `Vec<Vec<T>>`), `dedup`, `map`, `filter`, `filter_map`, `fold`, `scan(init, |acc, x| e) -> Vec<A>` (the accumulator after each element), `scan_while(init, |acc, x| e) -> Vec<A>` (`e: Option<A>`; as `scan`, stopping at the first step that is `None`: over a `range`, a loop that ends early), `all`, `any` (closures: function bodies only); `to_set() -> Set<T>`, `to_map() -> Map<K, V>` (on a `Vec<(K, V)>`: a repeated key keeps its last value) |
 | Ranges | `range(lo: u64, hi: u64) -> Vec<u64>`: `lo` up to, not including, `hi`; a combinator over `range(…)` walks it without building it |
 | Set | `len`, `contains`, `insert`, `remove`, `union`, `intersection`, `difference`, `items() -> Vec<T>` |
-| Map | `len`, `get(k) -> Option<V>`, `contains(k)`, `contains_key`, `insert`, `remove`, `keys`, `values`, `entries() -> Vec<(K, V)>` |
+| Map | `len`, `get(k) -> Option<V>`, `contains(k)`, `contains_key`, `insert(k, v)`, `remove(k)` (copies), `keys() -> Vec<K>`, `values() -> Vec<V>`, `entries() -> Vec<(K, V)>` (in key order) |
 | Option | `is_some`, `is_none`, `unwrap_or(d)`, `map`, `and_then`; `Some`, `None` |
 | Time | `now()`, `tick()`; `Duration::from_millis`, `.as_millis()` (a `Duration`'s, or an `Instant`'s since the deployment epoch, which is the Unix epoch in a deployment), `Instant - Instant`, `Instant ± Duration`, `Duration ± Duration`, `d * k`, `k * d`, `d / k` (§5.1) |
 | Randomness | `random()`, `rand(k…)`, `rand_float(k…)`, `rand_range(lo, hi, k…)` (§15.1) |

@@ -99,7 +99,20 @@ pub mod bls {
                 for d in warnings.iter() {
                     eprint!("{}", render(d, &sources));
                 }
-                Ok(a)
+                // A refuted class claim rejects the program (BLS0704).
+                match laws(&a) {
+                    Ok((refuted, _)) if refuted.is_empty() => Ok(a),
+                    Ok((refuted, _)) => {
+                        for d in refuted.iter() {
+                            eprint!("{}", render(d, &sources));
+                        }
+                        Err(Exit::UserError.into())
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        Err(Exit::Internal.into())
+                    }
+                }
             }
             Err(BlsError::Rejected(diags)) => {
                 for d in diags.iter() {
@@ -118,6 +131,16 @@ pub mod bls {
                 Err(Exit::Internal.into())
             }
         }
+    }
+
+    /// The law harness on a compiled program (TEST-083, LANGUAGE §11.8): the BLS0704 error of each refuted class
+    /// claim of its user-defined lattices' methods, and the whole report.
+    pub fn laws(
+        artifact: &blossom_artifact::bls::BlsArtifact,
+    ) -> Result<(blossom_base::Diagnostics, blossom_verify::laws::Report), String> {
+        let externs = super::std_externs()?;
+        let report = blossom_verify::laws::check(artifact, externs).map_err(|e| format!("the law harness: {e}"))?;
+        Ok((blossom_verify::laws::diagnostics(&report, artifact), report))
     }
 
     /// A duration written like a Blossom literal: `500ms`, `1s`, `2m`.

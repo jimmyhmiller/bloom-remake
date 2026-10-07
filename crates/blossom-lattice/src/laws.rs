@@ -22,6 +22,8 @@ pub struct Counterexample {
     pub values: Vec<(String, Value)>,
     /// What failed, in words.
     pub detail: String,
+    /// The argument `a` and `b` stand for (0, the receiver, unless a bimorphism's other lattice argument failed).
+    pub varied: usize,
 }
 
 /// Why a check stopped.
@@ -59,12 +61,18 @@ fn lat(v: &LatValue) -> Value {
     Value::Lattice(v.clone())
 }
 
-fn refuted(law: &'static str, values: Vec<(&str, Value)>, detail: impl Into<String>) -> LawError {
+fn refuted(law: &'static str, values: Vec<(String, Value)>, detail: impl Into<String>) -> LawError {
     LawError::Refuted(Box::new(Counterexample {
         law,
-        values: values.into_iter().map(|(n, v)| (n.to_owned(), v)).collect(),
+        values,
         detail: detail.into(),
+        varied: 0,
     }))
+}
+
+/// Names for a counterexample's values.
+fn named(values: Vec<(&str, Value)>) -> Vec<(String, Value)> {
+    values.into_iter().map(|(n, v)| (n.to_owned(), v)).collect()
 }
 
 /// Checks the merge laws of `kind` on every pair and triple of `samples` (which should include ⊥ and joins).
@@ -73,32 +81,38 @@ pub fn merge_laws(kind: &Kind, samples: &[LatValue]) -> Result<Tally, LawError> 
     let bot = kind.bottom();
     for a in samples {
         if !kind.is_bottom(&bot) {
-            return Err(refuted("⊥", vec![("⊥", lat(&bot))], "⊥ is not bottom"));
+            return Err(refuted("⊥", named(vec![("⊥", lat(&bot))]), "⊥ is not bottom"));
         }
         match join(kind, a, a)? {
             Some(j) if j == *a => {}
             Some(j) => {
                 return Err(refuted(
                     "idempotence",
-                    vec![("a", lat(a)), ("a ⊔ a", lat(&j))],
+                    named(vec![("a", lat(a)), ("a ⊔ a", lat(&j))]),
                     "a ⊔ a ≠ a",
                 ));
             }
-            None => return Err(refuted("idempotence", vec![("a", lat(a))], "a has no join with itself")),
+            None => {
+                return Err(refuted(
+                    "idempotence",
+                    named(vec![("a", lat(a))]),
+                    "a has no join with itself",
+                ));
+            }
         }
         match join(kind, a, &bot)? {
             Some(j) if j == *a => {}
-            _ => return Err(refuted("⊥ identity", vec![("a", lat(a))], "a ⊔ ⊥ ≠ a")),
+            _ => return Err(refuted("⊥ identity", named(vec![("a", lat(a))]), "a ⊔ ⊥ ≠ a")),
         }
         if !leq(kind, &bot, a)? {
-            return Err(refuted("⊥ identity", vec![("a", lat(a))], "⊥ ⋢ a"));
+            return Err(refuted("⊥ identity", named(vec![("a", lat(a))]), "⊥ ⋢ a"));
         }
         for b in samples {
             let (ab, ba) = (join(kind, a, b)?, join(kind, b, a)?);
             if ab != ba {
                 return Err(refuted(
                     "commutativity",
-                    vec![("a", lat(a)), ("b", lat(b))],
+                    named(vec![("a", lat(a)), ("b", lat(b))]),
                     "a ⊔ b ≠ b ⊔ a",
                 ));
             }
@@ -109,7 +123,7 @@ pub fn merge_laws(kind: &Kind, samples: &[LatValue]) -> Result<Tally, LawError> 
             if leq(kind, a, b)? != (ab == *b) {
                 return Err(refuted(
                     "order agrees with merge",
-                    vec![("a", lat(a)), ("b", lat(b)), ("a ⊔ b", lat(&ab))],
+                    named(vec![("a", lat(a)), ("b", lat(b)), ("a ⊔ b", lat(&ab))]),
                     "a ⊑ b disagrees with a ⊔ b = b",
                 ));
             }
@@ -123,7 +137,7 @@ pub fn merge_laws(kind: &Kind, samples: &[LatValue]) -> Result<Tally, LawError> 
                     (Some(l), Some(r)) if l != r => {
                         return Err(refuted(
                             "associativity",
-                            vec![("a", lat(a)), ("b", lat(b)), ("c", lat(c))],
+                            named(vec![("a", lat(a)), ("b", lat(b)), ("c", lat(c))]),
                             "(a ⊔ b) ⊔ c ≠ a ⊔ (b ⊔ c)",
                         ));
                     }
@@ -132,7 +146,7 @@ pub fn merge_laws(kind: &Kind, samples: &[LatValue]) -> Result<Tally, LawError> 
                     _ => {
                         return Err(refuted(
                             "associativity",
-                            vec![("a", lat(a)), ("b", lat(b)), ("c", lat(c))],
+                            named(vec![("a", lat(a)), ("b", lat(b)), ("c", lat(c))]),
                             "one association has a join and the other does not",
                         ));
                     }
@@ -156,7 +170,8 @@ pub enum Claim {
     Antitone,
     /// `a ⊑ b ∧ f(a) ⇒ f(b)`; for an `Option` result, `f(a) = Some(v) ⇒ f(b) = Some(v)`.
     Threshold,
-    /// `a ⊑ b ∧ t(a) ⇒ f(a) = f(b)`, with `t` the guarding threshold.
+    /// `a ⊑ b ∧ t(a) ∧ t(b) ⇒ f(a) = f(b)`, with `t` the guarding threshold: a read guarded by `t` never sees a
+    /// state `t` fails on (a run-time error aborts the tick first).
     Stable,
 }
 
@@ -268,14 +283,15 @@ pub fn check_claim(op: &Checked<'_>, budget: usize) -> Result<Tally, LawError> {
                     args
                 };
                 let (at_a, at_ab) = (with(&a), with(&ab));
+                // `a` and `b` (the argument varied), the other arguments by position, then what failed.
                 let named = |extra: Vec<(&'static str, Value)>| {
-                    let mut vs: Vec<(&str, Value)> = vec![("a", lat(&a)), ("b", lat(b))];
+                    let mut vs: Vec<(String, Value)> = vec![("a".to_owned(), lat(&a)), ("b".to_owned(), lat(b))];
                     for (k, v) in base.iter().enumerate() {
                         if k != i {
-                            vs.push(("argument", v.clone()));
+                            vs.push((format!("argument {k}"), v.clone()));
                         }
                     }
-                    vs.extend(extra);
+                    vs.extend(extra.into_iter().map(|(n, v)| (n.to_owned(), v)));
                     vs
                 };
                 let outcome = match op.claim {
@@ -363,7 +379,10 @@ pub fn check_claim(op: &Checked<'_>, budget: usize) -> Result<Tally, LawError> {
                             t.skipped += 1;
                             continue;
                         };
-                        if g != Value::Bool(true) {
+                        // A state the threshold fails on (a run-time error) is one no guarded read reaches; one it
+                        // does not hold on breaks the threshold's own claim, which that claim's check reports.
+                        let g_ab = guard(&[Value::Lattice(ab.clone())]);
+                        if g != Value::Bool(true) || g_ab != Ok(Value::Bool(true)) {
                             t.skipped += 1;
                             continue;
                         }
@@ -382,6 +401,10 @@ pub fn check_claim(op: &Checked<'_>, budget: usize) -> Result<Tally, LawError> {
                         }
                     }
                 };
+                if let Err(LawError::Refuted(mut c)) = outcome {
+                    c.varied = i;
+                    return Err(LawError::Refuted(c));
+                }
                 outcome?;
                 t.checked += 1;
             }

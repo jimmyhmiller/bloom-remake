@@ -211,7 +211,9 @@ pub enum MethodClass {
     Antitone,
     Threshold,
     /// `stable fn m(self) -> T after t`.
-    Stable { after: Ident },
+    Stable {
+        after: Ident,
+    },
 }
 
 /// A pure function: total, non-recursive, its body a block of `let`s and a final expression (LANGUAGE §16.1).

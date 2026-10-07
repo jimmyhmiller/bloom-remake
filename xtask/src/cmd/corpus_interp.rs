@@ -80,7 +80,8 @@ fn compare_runs(a: &SyncRun, b: &SyncRun) -> Result<(), String> {
                 return Err(format!("tick {t} node {n}: ran {} against {}", x.ran, y.ran));
             }
             if x.instance != y.instance {
-                let rels: std::collections::BTreeSet<_> = x.instance.rels.keys().chain(y.instance.rels.keys()).collect();
+                let rels: std::collections::BTreeSet<_> =
+                    x.instance.rels.keys().chain(y.instance.rels.keys()).collect();
                 for rel in rels {
                     let (ox, oy) = (x.instance.rels.get(rel), y.instance.rels.get(rel));
                     if ox != oy {
@@ -107,7 +108,10 @@ fn compare_runs(a: &SyncRun, b: &SyncRun) -> Result<(), String> {
                 return Err(format!("tick {t} node {n}: different deliveries"));
             }
             if x.egress != y.egress {
-                return Err(format!("tick {t} node {n}: replies {:?} against {:?}", x.egress, y.egress));
+                return Err(format!(
+                    "tick {t} node {n}: replies {:?} against {:?}",
+                    x.egress, y.egress
+                ));
             }
         }
     }

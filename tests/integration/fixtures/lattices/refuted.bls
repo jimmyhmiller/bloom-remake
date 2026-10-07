@@ -1,0 +1,52 @@
+//! Class claims the law harness refutes (BLS0704), for `bls_user_lattices.rs`: each method of `Pair` but `has_a`
+//! claims a class it does not have.
+program refuted version 1;
+
+lattice Pair {
+    a: LMax<u64>,
+    b: LSet<u64>,
+}
+
+impl Pair {
+    /// True: once `a` reaches 1 it stays there.
+    threshold fn has_a(self) -> bool {
+        self.a >= 1u64
+    }
+
+    /// Falls as `b` grows: antitone, not a threshold.
+    threshold fn small(self) -> bool {
+        reveal!(self.b).len() < 2
+    }
+
+    /// `b`'s size as an `LMin` rises numerically, which is down in `LMin`'s order: antitone, not monotone.
+    monotone fn shrinking(self) -> LMin<u64> {
+        LMin::of(reveal!(self.b).len())
+    }
+
+    /// Monotone, but `|{1} ∪ {2}| = 2` is not `max(|{1}|, |{2}|)`: not a morphism.
+    morphism fn count(self) -> LMax<u64> {
+        self.b.size()
+    }
+
+    /// Rises with `a`: monotone, not antitone.
+    antitone fn first(self) -> LMax<u64> {
+        self.a
+    }
+
+    /// `b` keeps growing after `a` reaches 1: not stable.
+    stable fn members(self) -> u64 after has_a {
+        reveal!(self.b).len()
+    }
+
+    /// Monotone in each, but a size is not a morphism: not a bimorphism.
+    bimorphism fn common(self, other: Pair) -> LMax<u64> {
+        self.b.intersect(other.b).size()
+    }
+}
+
+input put(k: u64, a: u64, b: u64);
+table pairs(k: u64, p: Pair);
+
+store: on put(k, a, b) {
+    emit pairs(k, Pair { a: LMax::of(a), b: set[b] });
+}

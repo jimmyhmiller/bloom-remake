@@ -1658,3 +1658,172 @@ fn a_fragment_parameter_may_not_name_a_constant() {
     ));
     assert!(d.iter().any(|(c, _)| c == "BLS0436"), "{d:?}");
 }
+
+// ---------------------------------------------------------------- user-defined lattices (S20, LANGUAGE §11.8)
+
+/// A product with a method of each class, for the user-lattice tests below.
+const CART: &str = "lattice Cart { ops: LMap<u64, LPoint<u64>>, expect: LPoint<u64> }\n\
+                    impl Cart {\n\
+                        threshold fn complete(self) -> bool { match reveal!(self.expect) { Some(n) => reveal!(self.ops).len() >= n, None => false } }\n\
+                        stable fn total(self) -> u64 after complete { reveal!(self.ops).values().fold(0u64, |a, x| a + x) }\n\
+                        monotone fn size(self) -> LMax<u64> { self.ops.size() }\n\
+                        antitone fn waiting(self) -> LBool { LBool::of(not self.complete()) }\n\
+                        fn missing(self) -> u64 { match reveal!(self.expect) { Some(n) => n, None => 0 } }\n\
+                    }\n\
+                    table carts(k: u64, c: Cart);\n\
+                    output done(k: u64, t: u64);\n\
+                    a: on go(k, v) { emit carts(k, Cart { ops: map[v => v] }); emit carts(k, Cart { expect: LPoint::of(v) }); }\n";
+
+fn with_cart(body: &str) -> &'static str {
+    Box::leak(format!("{HEAD}{CART}{body}").into_boxed_str())
+}
+
+#[test]
+fn product_lattices_compile_with_their_literals_fields_and_methods() {
+    let src = with_cart(
+        "b: while carts(k, c) where c.complete() { emit done(k, c.total()); }\n\
+         view sized(k, n) = carts(k, c), let n = reveal!(c.size());\n\
+         view exact(k, m) = carts(k, c), let m = c.missing!();\n\
+         view later(k, t) = carts(k, c), let t = c.total!();\n\
+         view inside(k, t) = carts(k, c), c.complete(), let t = c.total();\n\
+         c: while carts(k, c) { if c.complete() { emit done(k, c.total()); } }\n\
+         view left(k, w) = carts(k, c), let w = reveal!(c.waiting!());\n\
+         view fields(k, e) = carts(k, c), let e = reveal!(c.expect);\n\
+         view joined(k, j) = carts(k, c), let j = reveal!(c.join(Cart { expect: LPoint::of(1u64) }));\n",
+    );
+    assert_eq!(codes(src), Vec::<String>::new());
+}
+
+#[test]
+fn a_lattice_alias_names_a_lattice_and_a_product_holds_lattices() {
+    assert_eq!(
+        codes(with_head("lattice V = LSet<u64>;\ntable t(k: u64, v: V);\n")),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        codes(with_head("lattice V = u64;\n table t(k: u64, v: V);\n")),
+        vec!["BLS0300"]
+    );
+    assert_eq!(
+        codes(with_head("lattice P { a: u64 }\ntable t(k: u64, v: P);\n")),
+        vec!["BLS0300"]
+    );
+    assert_eq!(
+        codes(with_head("lattice P { }\ntable t(k: u64, v: P);\n")),
+        vec!["BLS0300"]
+    );
+    assert!(codes(with_head("lattice P { a: P }\ntable t(k: u64, v: P);\n")).contains(&"BLS0300".to_owned()));
+    assert_eq!(
+        codes(with_head(
+            "lattice P { a: LMax<u64>, a: LMax<u64> }\ntable t(k: u64, v: P);\n"
+        )),
+        vec!["BLS0201"]
+    );
+    // A literal names only the product's fields.
+    let d = codes(with_head(
+        "lattice P { a: LMax<u64> }\ntable t(k: u64, v: P);\nx: on go(k, v) { emit t(k, P { b: v }); }\n",
+    ));
+    assert_eq!(d, vec!["BLS0302"]);
+}
+
+#[test]
+fn an_impl_gives_methods_to_a_product_at_a_files_top_level() {
+    let on_struct = with_head("struct S { a: u64 }\nimpl S { fn f(self) -> u64 { 1u64 } }\n");
+    assert_eq!(codes(on_struct), vec!["BLS0110"]);
+    let in_module = with_head(
+        "lattice P { a: LMax<u64> }\nmodule M() { impl P { fn f(self) -> u64 { 1u64 } } }\nimport M() as m;\n",
+    );
+    assert!(
+        codes(in_module).contains(&"BLS0110".to_owned()),
+        "{:?}",
+        codes(in_module)
+    );
+    let no_self = with_head("lattice P { a: LMax<u64> }\nimpl P { fn f(x: u64) -> u64 { x } }\n");
+    assert_eq!(codes(no_self), vec!["BLS0110"]);
+    let twice =
+        with_head("lattice P { a: LMax<u64> }\nimpl P { fn f(self) -> u64 { 1u64 }\nfn f(self) -> u64 { 2u64 } }\n");
+    assert_eq!(codes(twice), vec!["BLS0201"]);
+    let reserved = with_head("lattice P { a: LMax<u64> }\nimpl P { fn join(self) -> u64 { 1u64 } }\n");
+    assert_eq!(codes(reserved), vec!["BLS0201"]);
+    let trait_impl = with_head("lattice P { a: LMax<u64> }\nimpl Show for P { fn f(self) -> u64 { 1u64 } }\n");
+    assert_eq!(codes(trait_impl), vec!["BLS0110"]);
+    let not_threshold = with_head(
+        "lattice P { a: LMax<u64> }\nimpl P { fn t(self) -> bool { true }\nstable fn s(self) -> u64 after t { 1u64 } }\n",
+    );
+    assert_eq!(codes(not_threshold), vec!["BLS0300"]);
+}
+
+#[test]
+fn a_methods_class_constrains_its_signature() {
+    let case = |m: &str| {
+        codes(Box::leak(
+            format!("{HEAD}lattice P {{ a: LMax<u64> }}\nimpl P {{ {m} }}\n").into_boxed_str(),
+        ))
+    };
+    assert_eq!(case("threshold fn t(self) -> u64 { 1u64 }"), vec!["BLS0300"]);
+    assert_eq!(
+        case("threshold fn t(self) -> Option<u64> { reveal!(self.a) }"),
+        Vec::<String>::new()
+    );
+    assert_eq!(case("monotone fn m(self) -> u64 { 1u64 }"), vec!["BLS0300"]);
+    assert_eq!(
+        case("morphism fn m(self, o: P) -> LMax<u64> { self.a }"),
+        vec!["BLS0300"]
+    );
+    assert_eq!(
+        case("bimorphism fn m(self, k: u64) -> LMax<u64> { self.a }"),
+        vec!["BLS0300"]
+    );
+    assert_eq!(
+        case("bimorphism fn m(self, o: P) -> LMax<u64> { self.a.join(o.a) }"),
+        Vec::<String>::new()
+    );
+    assert_eq!(case("fn plain(self, o: P) -> u64 { 1u64 }"), Vec::<String>::new());
+}
+
+#[test]
+fn method_calls_follow_the_bang_rule_by_class() {
+    let case = |body: &str| codes(with_cart(body));
+    // No class: non-monotone, so a bang; an antitone method too.
+    assert_eq!(
+        case("view m(k, x) = carts(k, c), let x = c.missing();\n"),
+        vec!["BLS0700"]
+    );
+    assert_eq!(
+        case("view w(k, x) = carts(k, c), let x = reveal!(c.waiting());\n"),
+        vec!["BLS0700"]
+    );
+    // A threshold and a monotone method need none: a bang is superfluous.
+    assert_eq!(case("view d(k) = carts(k, c), c.complete!();\n"), vec!["BLS0701"]);
+    assert_eq!(
+        case("view s(k, x) = carts(k, c), let x = reveal!(c.size!());\n"),
+        vec!["BLS0701"]
+    );
+    // A stable read needs its threshold on the same receiver in the same body, or a bang.
+    assert_eq!(
+        case("view t(k, x) = carts(k, c), let x = c.total();\n"),
+        vec!["BLS0703"]
+    );
+    assert_eq!(
+        case("view t(k, x) = carts(k, c), carts(j, d), d.complete(), let x = c.total();\n"),
+        vec!["BLS0703"]
+    );
+    assert_eq!(
+        case("b: while carts(k, c) { emit done(k, c.total()); }\n"),
+        vec!["BLS0703"]
+    );
+    assert_eq!(
+        case("view t(k, x) = carts(k, c), c.complete(), let x = c.total!();\n"),
+        vec!["BLS0701"]
+    );
+    // Methods and fields a product does not have (the result's type is then unknown too).
+    let only_0300 = |d: Vec<String>| !d.is_empty() && d.iter().all(|c| c == "BLS0300");
+    assert!(only_0300(case("view n(k, x) = carts(k, c), let x = c.nope!();\n")));
+    assert!(only_0300(case(
+        "view n(k, x) = carts(k, c), let x = reveal!(c.nope);\n"
+    )));
+    assert_eq!(
+        case("view n(k, x) = carts(k, c), let x = c.missing!(1u64);\n"),
+        vec!["BLS0301"]
+    );
+}

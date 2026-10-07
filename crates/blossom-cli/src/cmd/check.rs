@@ -32,6 +32,9 @@ pub struct Args {
     /// Treat warnings as errors.
     #[arg(long)]
     pub strict: bool,
+    /// Print what the law harness found for each user-defined lattice: its laws and each method's class claim.
+    #[arg(long)]
+    pub laws: bool,
 }
 
 /// What the checks found, across the program and the specs.
@@ -98,7 +101,23 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
         } else {
             blossom_driver::bls::compile_file(&args.file, &nodes(&args.nodes))
         };
+        let artifact = result.as_ref().ok().map(|(a, _)| a.clone());
         out.add(result, &sources);
+        // The law harness on the program's lattices (BLS0704 for a refuted claim).
+        if let Some(a) = artifact {
+            match crate::common::bls::laws(&a) {
+                Ok((refuted, report)) => {
+                    out.report(&refuted, &sources);
+                    if args.laws {
+                        print!("{}", law_text(&report));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    out.internal = true;
+                }
+            }
+        }
     }
     for name in &specs {
         let (result, sources) = blossom_driver::bls::compile_spec_file(&args.file, name);
@@ -116,6 +135,36 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
     } else {
         Exit::Ok.into()
     }
+}
+
+/// The law harness's report, one lattice to a paragraph.
+fn law_text(report: &blossom_verify::laws::Report) -> String {
+    use blossom_verify::laws::{Outcome, claim_word};
+    let mut out = String::new();
+    if report.lattices.is_empty() {
+        out.push_str("no user-defined lattices\n");
+    }
+    for l in &report.lattices {
+        let status = match l.status {
+            blossom_ir::core::LawStatus::Proved => "proven (a product of lattices)",
+            blossom_ir::core::LawStatus::Tested => "tested",
+            blossom_ir::core::LawStatus::Builtin => "built in",
+            blossom_ir::core::LawStatus::Refuted => "refuted",
+        };
+        out.push_str(&format!(
+            "lattice {}: merge, ⊥ and order {status}; checked on {} case(s)\n",
+            l.name, l.merge.checked
+        ));
+        for c in &l.claims {
+            let what = match &c.outcome {
+                Outcome::Tested(t) => format!("tested on {} case(s), {} set aside", t.checked, t.skipped),
+                Outcome::Refuted(r) => format!("refuted ({}): {}", r.law, r.detail),
+                Outcome::Untested(why) => format!("not tested: {why}"),
+            };
+            out.push_str(&format!("  {}: {}, {what}\n", c.method, claim_word(c.claim)));
+        }
+    }
+    out
 }
 
 /// `--nodes`: `name` or `name=Role` each.

@@ -461,7 +461,9 @@ impl<'p> Codec<'p> {
                 match (hash, len) {
                     (Some(h), Some(l)) if l.len() == 8 => Value::Blob(blossom_value::value::BlobRef {
                         hash: h.try_into().map_err(|_| WireError::Malformed("a blob hash".into()))?,
-                        len: u64::from_le_bytes(l.try_into().map_err(|_| WireError::Malformed("a blob length".into()))?),
+                        len: u64::from_le_bytes(
+                            l.try_into().map_err(|_| WireError::Malformed("a blob length".into()))?,
+                        ),
                     }),
                     _ => return Err(WireError::Malformed("a blob handle is 40 bytes".into())),
                 }
