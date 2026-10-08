@@ -1,9 +1,10 @@
 //! HTTP/1.1 and WebSocket (RFC 6455) for `blossom run --web` (docs/design/CLIENTS.md §4): the page's files, the
-//! program and deployment the page compiles (`/blossom/app.json`), and the WebSocket a client member's link runs
-//! over (`/blossom/link`, [`crate::members`]).
+//! program and deployment the page compiles (`/blossom/app.json`), and a client member's link: over a WebSocket
+//! (`/blossom/link`, [`crate::members`]) or over plain requests (`/blossom/http/…`, [`crate::http_link`]).
 //!
-//! One request per connection (`Connection: close`), on a thread of its own like the other listeners. A WebSocket
-//! carries one link frame (blossom-wire) per binary message.
+//! A connection is served on a thread of its own like the other listeners, and kept for the client's next request
+//! unless it asks to close it (HTTP/1.1's default). A WebSocket carries one link frame (blossom-wire) per binary
+//! message.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Read, Write};
@@ -18,11 +19,12 @@ use crate::RuntimeError;
 const MAX_HEAD: usize = 16 * 1024;
 pub const MAX_MESSAGE: usize = 16 * 1024 * 1024;
 
-/// A request's method, path (without its query) and headers (names lowercased).
+/// A request's method, path (without its query), protocol version and headers (names lowercased).
 #[derive(Debug)]
 pub struct Request {
     pub method: String,
     pub path: String,
+    pub version: String,
     pub headers: BTreeMap<String, String>,
 }
 
@@ -30,6 +32,43 @@ impl Request {
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers.get(name).map(String::as_str)
     }
+
+    /// Whether the client keeps the connection for another request: HTTP/1.1's default, unless it says `close`;
+    /// HTTP/1.0 only when it says `keep-alive`.
+    pub fn keep_alive(&self) -> bool {
+        let says = |v: &str| {
+            self.header("connection")
+                .is_some_and(|c| c.split(',').any(|t| t.trim().eq_ignore_ascii_case(v)))
+        };
+        if self.version == "HTTP/1.1" {
+            !says("close")
+        } else {
+            says("keep-alive")
+        }
+    }
+}
+
+/// Reads a request's body: `Content-Length` bytes, at most `max` (a chunked body is refused).
+pub fn read_body(r: &mut impl Read, req: &Request, max: usize) -> Result<Vec<u8>, RuntimeError> {
+    if req.header("transfer-encoding").is_some() {
+        return Err(RuntimeError::Net(
+            "a chunked request body (give its Content-Length)".into(),
+        ));
+    }
+    let len = match req.header("content-length") {
+        None => 0,
+        Some(v) => v
+            .parse::<usize>()
+            .map_err(|_| RuntimeError::Net(format!("a Content-Length of `{v}`")))?,
+    };
+    if len > max {
+        return Err(RuntimeError::Net(format!(
+            "a request body of {len} bytes (at most {max})"
+        )));
+    }
+    let mut body = vec![0u8; len];
+    r.read_exact(&mut body).map_err(RuntimeError::Io)?;
+    Ok(body)
 }
 
 /// Reads a request's head.
@@ -61,6 +100,7 @@ pub fn read_request(r: &mut impl BufRead) -> Result<Request, RuntimeError> {
     let (Some(method), Some(target)) = (parts.next(), parts.next()) else {
         return Err(RuntimeError::Net(format!("a malformed request line `{first}`")));
     };
+    let version = parts.next().unwrap_or("HTTP/1.0").to_owned();
     let path = target.split(['?', '#']).next().unwrap_or("/").to_owned();
     let mut headers = BTreeMap::new();
     for l in it {
@@ -71,8 +111,50 @@ pub fn read_request(r: &mut impl BufRead) -> Result<Request, RuntimeError> {
     Ok(Request {
         method: method.to_owned(),
         path,
+        version,
         headers,
     })
+}
+
+/// A response to write: its status, reason, content type, extra headers and body.
+pub struct Response<'a> {
+    pub status: u16,
+    pub reason: &'a str,
+    pub content_type: &'a str,
+    pub headers: &'a [(&'a str, &'a str)],
+    pub body: &'a [u8],
+}
+
+impl<'a> Response<'a> {
+    pub fn new(status: u16, reason: &'a str, content_type: &'a str, body: &'a [u8]) -> Response<'a> {
+        Response {
+            status,
+            reason,
+            content_type,
+            headers: &[],
+            body,
+        }
+    }
+
+    /// Writes the response whole; the connection stays open for another request when `keep` (else it says it
+    /// closes).
+    pub fn write(&self, w: &mut impl Write, keep: bool) -> Result<(), RuntimeError> {
+        let mut head = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: {}\r\n",
+            self.status,
+            self.reason,
+            self.content_type,
+            self.body.len(),
+            if keep { "keep-alive" } else { "close" }
+        );
+        for (k, v) in self.headers {
+            head.push_str(&format!("{k}: {v}\r\n"));
+        }
+        head.push_str("\r\n");
+        w.write_all(head.as_bytes()).map_err(RuntimeError::Io)?;
+        w.write_all(self.body).map_err(RuntimeError::Io)?;
+        w.flush().map_err(RuntimeError::Io)
+    }
 }
 
 /// Writes a whole response and closes the exchange.
@@ -83,13 +165,7 @@ pub fn respond(
     content_type: &str,
     body: &[u8],
 ) -> Result<(), RuntimeError> {
-    let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    w.write_all(head.as_bytes()).map_err(RuntimeError::Io)?;
-    w.write_all(body).map_err(RuntimeError::Io)?;
-    w.flush().map_err(RuntimeError::Io)
+    Response::new(status, reason, content_type, body).write(w, false)
 }
 
 /// The `Sec-WebSocket-Accept` value for a client's `Sec-WebSocket-Key` (RFC 6455 §4.2.2).
@@ -285,10 +361,44 @@ fn percent_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// How a page's link reaches the node (docs/design/CLIENTS.md §3, §3a): the node serves both; `app.json` says which a
+/// page uses.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Transport {
+    /// One WebSocket, held open (`/blossom/link`).
+    #[default]
+    WebSocket,
+    /// Plain requests (`/blossom/http/…`): a long-polled receive and a request per send.
+    Http,
+}
+
+impl Transport {
+    pub fn name(self) -> &'static str {
+        match self {
+            Transport::WebSocket => "websocket",
+            Transport::Http => "http",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Transport> {
+        match s {
+            "websocket" => Some(Transport::WebSocket),
+            "http" => Some(Transport::Http),
+            _ => None,
+        }
+    }
+}
+
 /// `/blossom/app.json` (docs/design/CLIENTS.md §4, §8): the program's name, the node that serves the page, the connection identity a
-/// member presents (the deployment id and the node directory's digest, hex), where its link is, and where each
-/// client role's part of the program is. No source: a page gets only its role's projection.
-pub fn app_json(spec: &crate::deploy::DeploymentSpec, client_roles: &[String], node: &str) -> Result<String, String> {
+/// member presents (the deployment id and the node directory's digest, hex), where its link is (a WebSocket's and
+/// plain requests'), which of the two the page uses, and where each client role's part of the program is. No source:
+/// a page gets only its role's projection.
+pub fn app_json(
+    spec: &crate::deploy::DeploymentSpec,
+    client_roles: &[String],
+    node: &str,
+    transport: Transport,
+) -> Result<String, String> {
     use serde_json::{Map, Value, json};
     let hex = |b: [u8; 16]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
     let clients: Map<String, Value> = client_roles
@@ -301,6 +411,8 @@ pub fn app_json(spec: &crate::deploy::DeploymentSpec, client_roles: &[String], n
         "deployment": hex(spec.deployment_id()),
         "directory": hex(spec.directory_digest()),
         "link": "/blossom/link",
+        "http": "/blossom/http",
+        "transport": transport.name(),
         "clients": clients,
     });
     serde_json::to_string(&app).map_err(|e| e.to_string())

@@ -4,8 +4,56 @@
 //! Each WP owns the test files with its prefix (for example `front1_*.rs` for M3.5, `engine1_*.rs` for M6.1).
 //! Cargo discovers them automatically, so adding one needs no manifest edit.
 
+pub mod http_link;
 pub mod raft_safety;
 pub mod ws;
+
+/// A member's link as the tests drive it, over a WebSocket ([`ws::Ws`]) or plain requests ([`http_link::HttpLink`]).
+pub trait LinkClient {
+    fn send(&mut self, f: &blossom_wire::frame::Frame) -> std::io::Result<()>;
+    fn recv(&mut self) -> std::io::Result<blossom_wire::frame::Frame>;
+    /// Whether the node ended this connection within `d` (a replaced one).
+    fn ended_within(&mut self, d: std::time::Duration) -> bool;
+}
+
+impl LinkClient for ws::Ws {
+    fn send(&mut self, f: &blossom_wire::frame::Frame) -> std::io::Result<()> {
+        ws::Ws::send(self, f)
+    }
+
+    fn recv(&mut self) -> std::io::Result<blossom_wire::frame::Frame> {
+        ws::Ws::recv(self)
+    }
+
+    fn ended_within(&mut self, d: std::time::Duration) -> bool {
+        let step = std::time::Duration::from_millis(100);
+        (0..(d.as_millis() / 100).max(1)).any(|_| self.recv_bytes_within(step).is_err())
+    }
+}
+
+impl LinkClient for http_link::HttpLink {
+    fn send(&mut self, f: &blossom_wire::frame::Frame) -> std::io::Result<()> {
+        http_link::HttpLink::send(self, f)
+    }
+
+    fn recv(&mut self) -> std::io::Result<blossom_wire::frame::Frame> {
+        http_link::HttpLink::recv(self)
+    }
+
+    /// An ended session answers `410` at once; a live one answers a send.
+    fn ended_within(&mut self, d: std::time::Duration) -> bool {
+        let step = std::time::Duration::from_millis(100);
+        (0..(d.as_millis() / 100).max(1)).any(|_| {
+            let ended = self
+                .send_status(&blossom_wire::frame::Frame::Ack { seq: 0 })
+                .is_ok_and(|s| s == 410);
+            if !ended {
+                std::thread::sleep(step);
+            }
+            ended
+        })
+    }
+}
 
 /// Whether this is the full test tier (`BLOSSOM_FULL=1`): every seed of a multi-seed simulation, and the tests marked
 /// `#[ignore = "full tier"]` (run with `-- --include-ignored`). Otherwise the fast tier, for every change: one seed.

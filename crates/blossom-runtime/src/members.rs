@@ -1,5 +1,5 @@
 //! Client members' links (docs/design/CLIENTS.md §2–§3): browser tabs that are nodes of a client role, connected over
-//! a WebSocket served by [`crate::web`].
+//! a WebSocket served by [`crate::web`], or over plain requests ([`crate::http_link`]).
 //!
 //! **Identity.** A member's first `HELLO` carries no token: the node admits it in its client registry
 //! ([`blossom_store::ClientRegistry`]) and mints its id (`NodeId::client(me, serial)`) and a token (the serial and 16
@@ -12,10 +12,11 @@
 //! member took (`resumed`); otherwise, and after a restart of the node, it does not, and the link events tell the
 //! program so. A receiver drops a batch it already took, by its number.
 //!
-//! Connection threads do the handshake and decode; the engine thread owns the links' state ([`MemberLinks`]).
+//! Connection threads do the handshake and decode; the engine thread owns the links' state ([`MemberLinks`]). A link's
+//! connection is a WebSocket's socket or an HTTP session ([`Closer`]); the engine sees the same events either way.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::io::{BufReader, Read};
+use std::io::{BufRead, BufReader, Read};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -53,8 +54,8 @@ pub(crate) enum MemberEvent {
         acked: u64,
         conn: u64,
         writer: SyncSender<Vec<u8>>,
-        /// The connection's socket, for the engine to close it.
-        socket: TcpStream,
+        /// Ends the connection, for the engine.
+        closer: Closer,
     },
     /// A numbered batch of the member's messages, decoded.
     Msg {
@@ -99,40 +100,194 @@ pub(crate) struct WebCtx {
     pub next_conn: Arc<AtomicU64>,
     /// The program's client roles, by name.
     pub client_roles: Arc<BTreeMap<String, ClientRole>>,
+    /// The links over plain requests.
+    pub sessions: Arc<crate::http_link::Sessions>,
 }
 
-/// Serves one HTTP connection: a file, `app.json`, or a member's link.
+/// How the engine ends a link's connection: a WebSocket's socket, or an HTTP session.
+pub(crate) enum Closer {
+    Socket(TcpStream),
+    Session(Arc<crate::http_link::Session>),
+}
+
+impl Closer {
+    /// Ends the connection: its thread (or the session's next request) then ends, and the member reconnects. The
+    /// engine, which closes it, already knows: nothing is posted back.
+    pub(crate) fn close(&self) {
+        match self {
+            // The socket may be closed already; either way the connection is over.
+            Closer::Socket(s) => {
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
+            Closer::Session(s) => s.end(false),
+        }
+    }
+}
+
+/// Fills `buf` from the operating system's entropy.
+pub(crate) fn urandom(buf: &mut [u8]) -> Result<(), RuntimeError> {
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(buf))
+        .map_err(|e| RuntimeError::Config(format!("reading /dev/urandom: {e}")))
+}
+
+/// Serves one HTTP connection: its requests (a file, `app.json`, a client role's part, a request of a link over HTTP)
+/// while the client keeps it, or a member's WebSocket link.
 pub(crate) fn web_conn(stream: TcpStream, ctx: &WebCtx) -> Result<(), RuntimeError> {
     let mut reader = BufReader::new(stream.try_clone().map_err(RuntimeError::Io)?);
-    let req = web::read_request(&mut reader)?;
     let mut w = stream;
+    let mut first = true;
+    loop {
+        // Between requests on a kept connection, its end (or no request within the read timeout) ends it: no failure.
+        if !first && reader.fill_buf().map_or(true, |b| b.is_empty()) {
+            return Ok(());
+        }
+        first = false;
+        let req = web::read_request(&mut reader)?;
+        if req.path == "/blossom/link" {
+            web::upgrade(&mut w, &req)?;
+            reader.get_ref().set_read_timeout(None).map_err(RuntimeError::Io)?;
+            return link(reader, w, ctx);
+        }
+        // A request with a body this listener does not read closes its connection (the body is not taken as the next
+        // request); a link's requests read theirs.
+        let link_request = req.path.starts_with("/blossom/http/");
+        let bodied =
+            req.header("content-length").is_some_and(|l| l != "0") || req.header("transfer-encoding").is_some();
+        let keep = req.keep_alive() && (link_request || !bodied);
+        if let Some(rest) = req.path.strip_prefix("/blossom/http/") {
+            let rest = rest.to_owned();
+            crate::http_link::serve(&rest, &req, &mut reader, &mut w, ctx, keep)?;
+        } else {
+            serve_get(&req, &mut w, ctx, keep)?;
+        }
+        if !keep {
+            return Ok(());
+        }
+    }
+}
+
+/// A `GET` for a file, `app.json` or a client role's part.
+fn serve_get(req: &web::Request, w: &mut TcpStream, ctx: &WebCtx, keep: bool) -> Result<(), RuntimeError> {
+    let r = web::Response::new;
     if req.method != "GET" {
-        return web::respond(&mut w, 405, "Method Not Allowed", "text/plain", b"GET only");
+        return r(405, "Method Not Allowed", "text/plain", b"GET only").write(w, keep);
     }
     match req.path.as_str() {
-        "/blossom/app.json" => web::respond(&mut w, 200, "OK", "application/json", ctx.app.as_bytes()),
+        "/blossom/app.json" => r(200, "OK", "application/json", ctx.app.as_bytes()).write(w, keep),
         path if path.starts_with("/blossom/client/") => {
             match path
                 .strip_prefix("/blossom/client/")
                 .and_then(|r| ctx.client_roles.get(r))
             {
-                Some(role) => web::respond(&mut w, 200, "OK", "application/octet-stream", &role.artifact),
-                None => web::respond(&mut w, 404, "Not Found", "text/plain", b"no such client role"),
+                Some(role) => r(200, "OK", "application/octet-stream", &role.artifact).write(w, keep),
+                None => r(404, "Not Found", "text/plain", b"no such client role").write(w, keep),
             }
         }
-        "/blossom/link" => {
-            web::upgrade(&mut w, &req)?;
-            reader.get_ref().set_read_timeout(None).map_err(RuntimeError::Io)?;
-            link(reader, w, ctx)
-        }
-        path => match ctx.root.as_ref().and_then(|r| web::file_of(r, path)) {
+        path => match ctx.root.as_ref().and_then(|root| web::file_of(root, path)) {
             Some(file) => {
                 let body = std::fs::read(&file).map_err(RuntimeError::Io)?;
-                web::respond(&mut w, 200, "OK", web::content_type(&file), &body)
+                r(200, "OK", web::content_type(&file), &body).write(w, keep)
             }
-            None => web::respond(&mut w, 404, "Not Found", "text/plain", b"not found"),
+            None => r(404, "Not Found", "text/plain", b"not found").write(w, keep),
         },
     }
+}
+
+/// A member admitted by its `HELLO`: who it is, and the link as it sees it.
+pub(crate) struct Admitted {
+    pub member: NodeId,
+    pub role: RoleId,
+    pub token: Vec<u8>,
+    pub received: u64,
+    pub acked: u64,
+    /// The member's channels this node takes, by the member's sid.
+    pub inbound: BTreeMap<u32, RelId>,
+}
+
+/// Checks a member's `HELLO` and finds (or mints) its identity; the refusal to send it otherwise.
+pub(crate) fn admit(ctx: &WebCtx, h: blossom_wire::frame::Hello) -> Result<Admitted, AdmitError> {
+    if let Err((reason, detail)) = crate::net::check_hello(&h, &ctx.id) {
+        return Err(AdmitError::Refused(reason, detail));
+    }
+    let Peer::Member {
+        role,
+        part,
+        token,
+        received,
+        acked,
+    } = h.peer
+    else {
+        return Err(AdmitError::Refused(
+            RejectReason::NotAllowed,
+            "only client members connect here".into(),
+        ));
+    };
+    let Some(client) = ctx.client_roles.get(&role) else {
+        return Err(AdmitError::Refused(
+            RejectReason::NotAllowed,
+            format!("`{role}` is not a client role of the program"),
+        ));
+    };
+    if part != client.part {
+        return Err(AdmitError::Refused(
+            RejectReason::Program,
+            format!("the page runs another version of `{role}`'s part of the program: load it again"),
+        ));
+    }
+    let inbound = ctx.catalog.accept(&h.channels);
+    let (member, token) = identify(ctx, &role, token).map_err(AdmitError::Failed)?;
+    Ok(Admitted {
+        member,
+        role: client.id,
+        token,
+        received,
+        acked,
+        inbound,
+    })
+}
+
+/// Why a member was not admitted: a refusal it is told of, or this node's failure.
+pub(crate) enum AdmitError {
+    Refused(RejectReason, String),
+    Failed(RuntimeError),
+}
+
+/// The node's frames that answer an admitted member's `HELLO`: its own `HELLO` and `HELLO_OK`.
+pub(crate) fn hello_answer(ctx: &WebCtx, a: &Admitted) -> [Frame; 2] {
+    [
+        crate::net::hello(&ctx.id, Peer::Node(ctx.me.0), ctx.restarts, ctx.nonce, &ctx.catalog),
+        Frame::HelloOk {
+            accepted_version: ctx.id.program_version,
+            sids: a.inbound.keys().copied().collect(),
+        },
+    ]
+}
+
+/// A member's batch or acknowledgement, as the engine takes it; `None` for a frame a member does not send on its link.
+pub(crate) fn member_event(
+    codec: &Codec<'_>,
+    p: &Program,
+    a: (NodeId, u64),
+    inbound: &BTreeMap<u32, RelId>,
+    frame: Frame,
+) -> Result<Option<MemberEvent>, RuntimeError> {
+    let (member, conn) = a;
+    Ok(Some(match frame {
+        Frame::Msg { seq, batch } => match inbound.get(&batch.sid).copied() {
+            Some(rel) => MemberEvent::Msg {
+                member,
+                conn,
+                seq,
+                rel,
+                rows: decode(codec, p, rel, &batch)?,
+            },
+            // A channel whose schema differs between the ends: its batch is dropped, and taken (acknowledged).
+            None => MemberEvent::Skip { member, conn, seq },
+        },
+        Frame::Ack { seq } => MemberEvent::Ack { member, conn, seq },
+        _ => return Ok(None),
+    }))
 }
 
 /// Reads one link frame: a binary message holding exactly one frame. Pings are answered on the way.
@@ -184,34 +339,11 @@ fn link(mut r: BufReader<TcpStream>, w: TcpStream, ctx: &WebCtx) -> Result<(), R
         );
         Err(RuntimeError::Net(format!("refused a member: {detail}")))
     };
-    if let Err((reason, detail)) = crate::net::check_hello(&h, &ctx.id) {
-        return refuse(reason, detail);
-    }
-    let Peer::Member {
-        role,
-        part,
-        token,
-        received,
-        acked,
-    } = h.peer
-    else {
-        return refuse(RejectReason::NotAllowed, "only client members connect here".into());
+    let admitted = match admit(ctx, h) {
+        Ok(a) => a,
+        Err(AdmitError::Refused(reason, detail)) => return refuse(reason, detail),
+        Err(AdmitError::Failed(e)) => return Err(e),
     };
-    let Some(client) = ctx.client_roles.get(&role) else {
-        return refuse(
-            RejectReason::NotAllowed,
-            format!("`{role}` is not a client role of the program"),
-        );
-    };
-    if part != client.part {
-        return refuse(
-            RejectReason::Program,
-            format!("the page runs another version of `{role}`'s part of the program: load it again"),
-        );
-    }
-    let role_id = client.id;
-    let inbound = ctx.catalog.accept(&h.channels);
-    let (member, token) = identify(ctx, &role, token)?;
     let conn = ctx.next_conn.fetch_add(1, Ordering::SeqCst);
     let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(WRITE_QUEUE);
     let writer = {
@@ -233,22 +365,26 @@ fn link(mut r: BufReader<TcpStream>, w: TcpStream, ctx: &WebCtx) -> Result<(), R
             })
             .map_err(RuntimeError::Io)?
     };
-    let hello = crate::net::hello(&ctx.id, Peer::Node(ctx.me.0), ctx.restarts, ctx.nonce, &ctx.catalog);
-    let ok = Frame::HelloOk {
-        accepted_version: ctx.id.program_version,
-        sids: inbound.keys().copied().collect(),
-    };
+    let [hello, ok] = hello_answer(ctx, &admitted);
+    let Admitted {
+        member,
+        role,
+        token,
+        received,
+        acked,
+        inbound,
+    } = admitted;
     let opened = tx.send(hello.encode()).is_ok()
         && tx.send(ok.encode()).is_ok()
         && (ctx.post)(MemberEvent::Open {
             member,
-            role: role_id,
+            role,
             token,
             received,
             acked,
             conn,
             writer: tx.clone(),
-            socket,
+            closer: Closer::Socket(socket),
         });
     let result = if opened {
         read_messages(&mut r, &w, ctx, member, conn, &inbound)
@@ -279,22 +415,9 @@ fn read_messages(
             // A closed or failed connection ends the link; the member reconnects.
             Ok(None) | Err(_) => return Ok(()),
         };
-        let event = match frame {
-            Frame::Msg { seq, batch } => match inbound.get(&batch.sid).copied() {
-                Some(rel) => MemberEvent::Msg {
-                    member,
-                    conn,
-                    seq,
-                    rel,
-                    rows: decode(&codec, p, rel, &batch)?,
-                },
-                // A channel whose schema differs between the ends: its batch is dropped, and taken (acknowledged).
-                None => MemberEvent::Skip { member, conn, seq },
-            },
-            Frame::Ack { seq } => MemberEvent::Ack { member, conn, seq },
-            other => {
-                return Err(RuntimeError::Net(format!("a member sent {other:?} on its link")));
-            }
+        let shown = format!("{frame:?}");
+        let Some(event) = member_event(&codec, p, (member, conn), inbound, frame)? else {
+            return Err(RuntimeError::Net(format!("a member sent {shown} on its link")));
         };
         if !(ctx.post)(event) {
             return Ok(());
@@ -324,9 +447,7 @@ fn identify(ctx: &WebCtx, role: &str, token: Option<Vec<u8>>) -> Result<(NodeId,
         }
     }
     let mut secret = [0u8; SECRET_LEN];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut secret))
-        .map_err(|e| RuntimeError::Config(format!("reading /dev/urandom: {e}")))?;
+    urandom(&mut secret)?;
     let serial = reg
         .admit(role, &secret, NodeId::CLIENT_SERIALS)?
         .ok_or_else(|| RuntimeError::Net("this node admitted as many client members as it can".into()))?;
@@ -341,7 +462,7 @@ fn identify(ctx: &WebCtx, role: &str, token: Option<Vec<u8>>) -> Result<(NodeId,
 struct Conn {
     id: u64,
     writer: SyncSender<Vec<u8>>,
-    socket: TcpStream,
+    closer: Closer,
 }
 
 impl Conn {
@@ -400,8 +521,7 @@ pub(crate) trait Host {
 /// reconnects) and tells the program the link is down.
 fn drop_link(member: NodeId, m: &mut Member, links: &BTreeMap<(RoleId, bool), RelId>, host: &mut dyn Host) {
     let Some(c) = m.conn.take() else { return };
-    // The socket may be closed already; either way the connection is over.
-    let _ = c.socket.shutdown(std::net::Shutdown::Both);
+    c.closer.close();
     if let Some(rel) = links.get(&(m.role, false)) {
         host.event(*rel, Row::from(vec![Value::Node(member)]));
     }
@@ -432,7 +552,7 @@ impl MemberLinks {
                 acked,
                 conn,
                 writer,
-                socket,
+                closer,
             } => self.open(
                 member,
                 role,
@@ -441,7 +561,7 @@ impl MemberLinks {
                 Conn {
                     id: conn,
                     writer,
-                    socket,
+                    closer,
                 },
                 host,
             ),
@@ -527,8 +647,7 @@ impl MemberLinks {
     ) {
         let Ok(seed) = host.member_seed(member) else {
             host.link_failed();
-            // The socket may be closed already; either way the connection is over.
-            let _ = conn.socket.shutdown(std::net::Shutdown::Both);
+            conn.closer.close();
             return;
         };
         let fresh = !self.members.contains_key(&member);
@@ -565,7 +684,7 @@ impl MemberLinks {
         }
         if !ok {
             // It could not take its handshake: closed before the program hears of it; the member reconnects.
-            let _ = conn.socket.shutdown(std::net::Shutdown::Both);
+            conn.closer.close();
             return;
         }
         m.conn = Some(conn);

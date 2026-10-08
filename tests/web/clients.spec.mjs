@@ -1,7 +1,8 @@
 // Pages as members of a node's program (docs/design/CLIENTS.md): a real `blossom run --web` serves the shared TodoMVC
 // (examples/web/todos_shared.bls) and the chat (examples/web/chat.bls), and Chromium tabs run as members of their
 // `Browser` role. Two tabs stay in sync, a reload keeps a tab's identity and state, a tab cut off from the node keeps
-// working and catches up, and the node's restart is survived. Needs the CLI: BLOSSOM_BIN (scripts/test-tiers.sh web
+// working and catches up, and the node's restart is survived. Every test runs twice: with the link over a WebSocket,
+// and over plain requests (`--web-link http`, CLIENTS.md §3a), where the page opens no WebSocket at all. Needs the CLI: BLOSSOM_BIN (scripts/test-tiers.sh web
 // builds it and sets it).
 import { test, expect } from "@playwright/test";
 import { spawn } from "node:child_process";
@@ -28,7 +29,7 @@ function freePort() {
 
 /** A one-node deployment of examples/web/PROGRAM.bls (a copy of it, which `edit` rewrites), serving the page;
  * `start`/`kill` run and stop the node. */
-async function deployment(program) {
+async function deployment(program, link) {
   const dir = mkdtempSync(join(tmpdir(), `blossom-clients-${program}-`));
   for (const f of [`${program}.bls`, "ui.bls"]) copyFileSync(join(repo, "examples", "web", f), join(dir, f));
   const peer = await freePort();
@@ -61,6 +62,7 @@ async function deployment(program) {
     /** Starts the node (a new one the first time) and waits for its readiness line. */
     async start(fresh) {
       const args = ["run", "--deploy", deploy, "--node", "s", "--insecure-dev", "--web", `127.0.0.1:${web}`];
+      args.push("--web-link", link);
       args.push("--web-root", join(repo, "web"));
       if (fresh) args.push("--init-fresh");
       child = spawn(bin, args, {
@@ -101,8 +103,15 @@ async function deployment(program) {
   return d;
 }
 
+/** The WebSockets each page opened (none over the HTTP link). */
+const sockets = new WeakMap();
+
 async function open(page, url) {
   page.on("pageerror", (e) => console.log("page error:", e.message));
+  if (!sockets.has(page)) {
+    sockets.set(page, []);
+    page.on("websocket", (ws) => sockets.get(page).push(ws.url()));
+  }
   await page.goto(url);
   await expect(page.locator("body")).toHaveAttribute("data-blossom", "ready");
 }
@@ -117,11 +126,20 @@ async function add(page, title) {
   await page.locator(".new-todo").press("Enter");
 }
 
-test.describe("members of a node's program", () => {
+for (const link of ["websocket", "http"]) test.describe(`members of a node's program (${link} link)`, () => {
   test.skip(!bin, "BLOSSOM_BIN names the blossom CLI (scripts/test-tiers.sh web sets it)");
 
+  /** Over the HTTP link, no page opened a WebSocket; over the WebSocket one, each did. */
+  function checkTransport(...pages) {
+    for (const p of pages) {
+      const opened = sockets.get(p) ?? [];
+      if (link === "http") expect(opened).toEqual([]);
+      else expect(opened.length).toBeGreaterThan(0);
+    }
+  }
+
   test("two tabs share one todo list; a reload keeps a tab's identity", async ({ context }) => {
-    const d = await deployment("todos_shared");
+    const d = await deployment("todos_shared", link);
     try {
       await d.start(true);
       const a = await context.newPage();
@@ -155,13 +173,14 @@ test.describe("members of a node's program", () => {
       const bids = await a.locator(".todo-list li").evaluateAll((els) => els.map((e) => e.dataset.bid));
       const bOwner = bids[1].replace(/^todo-\d+-/, "");
       expect(bids[2]).toBe(`todo-1-${bOwner}`);
+      checkTransport(a, b);
     } finally {
       await d.remove();
     }
   });
 
   test("a tab keeps working while the node is down and catches up after its restart", async ({ context }) => {
-    const d = await deployment("todos_shared");
+    const d = await deployment("todos_shared", link);
     try {
       await d.start(true);
       const a = await context.newPage();
@@ -184,13 +203,14 @@ test.describe("members of a node's program", () => {
       await expect(labels(b)).toHaveText(["before the crash", "while it was down"]);
       await add(b, "after");
       await expect(labels(a)).toHaveText(["before the crash", "while it was down", "after"]);
+      checkTransport(a, b);
     } finally {
       await d.remove();
     }
   });
 
   test("a page built from an older program loads the new one when its link is refused", async ({ context }) => {
-    const d = await deployment("todos_shared");
+    const d = await deployment("todos_shared", link);
     try {
       await d.start(true);
       const a = await context.newPage();
@@ -211,7 +231,7 @@ test.describe("members of a node's program", () => {
   });
 
   test("a chat between two tabs", async ({ context }) => {
-    const d = await deployment("chat");
+    const d = await deployment("chat", link);
     try {
       await d.start(true);
       const a = await context.newPage();
@@ -224,6 +244,7 @@ test.describe("members of a node's program", () => {
       await expect(b.locator(".lines .text")).toHaveText(["hello"]);
       await expect(a.locator(".lines li[data-mine=true] .text")).toHaveText(["hello"]);
       await expect(b.locator(".lines li[data-mine=true]")).toHaveCount(0);
+      checkTransport(a, b);
       await b.close();
       await expect(bid(a, "status")).toHaveText("online, 1 here");
     } finally {
