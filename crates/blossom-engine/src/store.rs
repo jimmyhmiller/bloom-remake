@@ -98,6 +98,9 @@ type Kept = (Arc<Vec<Row>>, u64);
 /// (`EngineConfig::hot_rows`).
 pub(crate) const HOT_ROWS: usize = 1 << 16;
 
+/// The most rows a hot tier keeps of one probe (Kafka at 300000 records: 1024 cost an eighth of the throughput).
+const PROBE_ROWS: usize = 256;
+
 /// A tiered table's hot tier: the cold side's answers to its recent probes (the rows with given values in given
 /// columns, sorted, and whether a row is there), kept equal to the cold side's newest version as it moves: each
 /// overlay entry the cold side catches up with is applied to them rather than dropping them, so a probe asked again
@@ -154,10 +157,12 @@ impl Hot {
         self.clock
     }
 
-    /// The most rows one probe may keep: a small share of the budget, so the probes kept are many and a larger
-    /// prefix's ranges read the cold side's range (whose cost is the range's, not the prefix's).
+    /// The most rows one probe may keep: a small share of the budget, so the probes kept are many, and never more
+    /// than [`PROBE_ROWS`]: a kept answer is read whole and kept current row by row, and a prefix not known yet is
+    /// read up to it, so a larger prefix's ranges and first rows are read from the cold side instead (their cost is
+    /// what they read, not the prefix).
     fn largest(&self) -> usize {
-        (self.budget / 64).max(2)
+        (self.budget / 64).clamp(2, PROBE_ROWS)
     }
 
     fn probe(&mut self, cols: &[usize], values: &[Value]) -> Option<Arc<Vec<Row>>> {
