@@ -3555,6 +3555,13 @@ All functions are pure. Methods on values use `.`; there are no closures outside
 | Versions | `cluster_version()` |
 | Errors | `error("message")`: a located hard error (BLSR010) |
 
+**Strings, as built.** `s.split(sep)` gives the pieces between the occurrences of `sep`, in order, empty ones kept
+(`"a,,b".split(",")` is `["a", "", "b"]`); `s.replace(from, to)` replaces every occurrence of `from`, left to right and
+not overlapping. Both are BLSR004 for an empty `sep` or `from`. `starts_with`, `ends_with` and `contains` take a
+string (an empty one is in every string). `parse_u64` and `parse_i64` read an optional sign (`+` only for
+`parse_u64`) and decimal digits, `None` for anything else or a value out of range. `v.sort()` orders a vector's
+elements in the canonical order of values, keeping duplicates.
+
 **`to_string`.** Every value has one. An integer is its decimal digits, an `f64` as §5.1 says, a `bool` `true` or
 `false`, a `String` itself. Every other value is written as Blossom writes it, recursively: a string inside it quoted
 and escaped (`"a\"b"`), an `f64` inside it as a literal (`1.0`), `()`, tuples `(a, b)`, `[a, b]`, `set[a, b]`,

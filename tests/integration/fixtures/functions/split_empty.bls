@@ -1,0 +1,7 @@
+//! `split` and `replace` by an empty string are BLSR004 (LANGUAGE Appendix B), for `bls_functions.rs`: the separator
+//! comes from the input, so the program compiles and the error is the evaluators'.
+program split_empty version 1;
+
+input e(sep: String);
+
+view v(x) = e(sep), let x = ("a,b".split(sep), "a,b".replace(sep, "-"));

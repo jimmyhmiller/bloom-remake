@@ -1,0 +1,254 @@
+//! An HTTP API written in Blossom itself: a notes service on a `listen` byte stream (FOREIGN-PROTOCOLS §1). The
+//! runtime only moves bytes; this program parses HTTP/1.1 requests out of each connection's bytes, answers them from a
+//! durable table, and writes the responses. Not how a page talks to a node (that is the link, CLIENTS.md §3, §3a): a
+//! way to speak a protocol a client already knows, here to `curl`.
+//!
+//!   GET    /notes        200, every note: [{"id": 1, "text": "…"}, …]
+//!   GET    /notes/ID     200, one note; 404 if there is none
+//!   POST   /notes        201, the body (UTF-8 text) as a new note: {"id": ID}
+//!   DELETE /notes/ID     204; 404 if there is none
+//!
+//! Requests on a connection are answered in order, one a tick, so a client may send the next before the last is
+//! answered (pipelining) and keep the connection (HTTP/1.1's default) or ask to close it (`Connection: close`).
+//! A `201` is written only once the note is durable: a stream write is released with its tick, after the tick's WAL
+//! record is synced.
+//!
+//!   blossom run --deploy examples/http/notes.deploy.toml --node n1 --insecure-dev --init-fresh
+//!   curl -d 'buy milk' localhost:8090/notes
+//!   curl localhost:8090/notes
+program notes version 1;
+
+stream http: listen;
+
+/// A note: its id, text, and when it was written.
+durable table note(id: u64, text: String, at: Instant) key(id);
+/// The id the next note takes.
+durable table next_note(n: u64) key();
+
+/// Per connection: the bytes not answered yet, and the next write's sequence number.
+table conn(c: Conn, pending: Bytes, seq: u64) key(c) while not http.closed(c, _);
+
+/// The most bytes a request (head and body) may take.
+const MAX_REQUEST: u64 = 1048576;
+
+// ---------------------------------------------------------------- parsing
+
+/// A request at the front of a connection's bytes: what it asks, whether the client closes the connection after it,
+/// and how many bytes it took. `bad` says why it cannot be answered ("" when it can).
+struct Req {
+    method: String,
+    path: String,
+    body: String,
+    close: bool,
+    used: u64,
+    bad: String
+}
+
+fn bad_request(why: String) -> Req {
+    Req { method: "", path: "", body: "", close: true, used: 0, bad: why }
+}
+
+/// The value of header `name` (lowercase) among a request's header lines (the headers this program reads hold no
+/// `:` in their values).
+fn header(lines: Vec<String>, name: String) -> Option<String> {
+    let pairs = lines.map(|l| l.split(":")).filter(|kv| kv.len() == 2);
+    let named = pairs.filter(|kv| kv.get(0).unwrap_or("").trim().to_lowercase() == name);
+    named.map(|kv| kv.get(1).unwrap_or("").trim()).first()
+}
+
+/// The request at the front of `b`, if all of it has arrived (`None`: wait for more bytes).
+fn parse(b: Bytes) -> Option<Req> {
+    match b.from_utf8() {
+        // Bytes that are not text yet: a character cut at the chunk's end (wait), or no text at all (refuse).
+        None => if b.len() > MAX_REQUEST { Some(bad_request("a request that is not UTF-8 text")) } else { None },
+        Some(text) => {
+            let parts = text.split("\r\n\r\n");
+            if parts.len() < 2 {
+                if b.len() > MAX_REQUEST { Some(bad_request("a request head too large")) } else { None }
+            } else {
+                let head = parts.first().unwrap_or("");
+                let lines = head.split("\r\n");
+                let first = lines.first().unwrap_or("").split(" ");
+                let method = first.get(0).unwrap_or("");
+                let target = first.get(1).unwrap_or("");
+                let version = first.get(2).unwrap_or("");
+                let path = target.split("?").first().unwrap_or("");
+                let length = header(lines, "content-length").and_then(|v| v.parse_u64());
+                let connection = header(lines, "connection").unwrap_or("").to_lowercase();
+                let close = connection == "close" || (version != "HTTP/1.1" && connection != "keep-alive");
+                let start = head.to_utf8().len() + 4;
+                match length {
+                    None => if header(lines, "content-length").is_some() {
+                        Some(bad_request("a Content-Length that is not a number"))
+                    } else if header(lines, "transfer-encoding").is_some() {
+                        Some(bad_request("a chunked body (send its Content-Length)"))
+                    } else if version != "HTTP/1.1" && version != "HTTP/1.0" {
+                        Some(bad_request("not an HTTP/1.x request"))
+                    } else {
+                        Some(Req { method: method, path: path, body: "", close: close, used: start, bad: "" })
+                    },
+                    Some(n) => if start + n > MAX_REQUEST {
+                        Some(bad_request("a request body too large"))
+                    } else if b.len() < start + n {
+                        None
+                    } else {
+                        match b.slice(start, start + n).and_then(|x| x.from_utf8()) {
+                            Some(body) => Some(Req {
+                                method: method,
+                                path: path,
+                                body: body,
+                                close: close,
+                                used: start + n,
+                                bad: ""
+                            }),
+                            None => Some(bad_request("a body that is not UTF-8 text")),
+                        }
+                    },
+                }
+            }
+        }
+    }
+}
+
+/// What a request asks for: `list`, `get`, `create` or `delete` (with the note's id), or why it cannot be had.
+fn route(method: String, path: String) -> (String, u64) {
+    let segs = path.split("/");
+    if path == "/notes" {
+        if method == "GET" {
+            ("list", 0u64)
+        } else if method == "POST" {
+            ("create", 0u64)
+        } else {
+            ("method", 0u64)
+        }
+    } else if segs.len() == 3 && segs.get(1) == Some("notes") {
+        match segs.get(2).unwrap_or("").parse_u64() {
+            Some(id) => if method == "GET" {
+                ("get", id)
+            } else if method == "DELETE" {
+                ("delete", id)
+            } else {
+                ("method", 0u64)
+            },
+            None => ("missing", 0u64),
+        }
+    } else {
+        ("missing", 0u64)
+    }
+}
+
+// ---------------------------------------------------------------- answering
+
+/// `s` as a JSON string.
+fn json(s: String) -> String {
+    "\"" ++ s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+        ++ "\""
+}
+
+fn note_json(id: u64, text: String) -> String {
+    "{\"id\": " ++ id.to_string() ++ ", \"text\": " ++ json(text) ++ "}"
+}
+
+/// Notes as a JSON array, in id order.
+fn notes_json(xs: Vec<(u64, String)>) -> String {
+    "[" ++ xs.sort().map(|x| note_json(x.0, x.1)).fold("", |a, s| if a == "" { s } else { a ++ ", " ++ s }) ++ "]"
+}
+
+/// A whole response.
+fn response(status: u64, reason: String, body: String, close: bool) -> Bytes {
+    let b = body.to_utf8();
+    let head = "HTTP/1.1 " ++ status.to_string() ++ " " ++ reason ++ "\r\nContent-Type: application/json\r\n"
+        ++ "Content-Length: "
+        ++ b.len().to_string()
+        ++ "\r\n"
+        ++ (if close { "Connection: close\r\n" } else { "" })
+        ++ "\r\n";
+    head.to_utf8().concat(b)
+}
+
+fn error_body(why: String) -> String {
+    "{\"error\": " ++ json(why) ++ "}"
+}
+
+accept: on http.opened(c, _peer, _at) {
+    emit conn(c, Bytes::empty(), 0);
+}
+
+/// This tick's chunk on each connection.
+view chunk(c, b) = http.data(c, _seq, b);
+
+/// A connection's bytes this tick: those not answered yet, with this tick's chunk.
+view bytes_now(c, all, seq) {
+    conn(c, p, seq), chunk(c, b), let all = p.concat(b);
+    conn(c, p, seq), not chunk(c, _), let all = p;
+}
+
+/// The request at the front of a connection's bytes, once all of it is there, and what it asks for.
+view front(c, r, kind, id) = bytes_now(c, all, _), let Some(r) = parse(all), let (kind, id) = route(r.method, r.path);
+
+/// This tick's new notes, in connection order, each with the id it takes.
+view creating(c) = front(c, r, "create", _) where r.bad == "";
+view creating_all(cs = collect!(c)) = creating(c);
+view new_id(c, id) = creating_all(cs), first_id(n), (k, c) in cs.enumerate(), let id = n + k;
+view first_id(n) {
+    next_note(n);
+    not next_note(_), let n = 1u64;
+}
+
+/// The response to each connection's front request, and whether the connection closes after it.
+view reply(c, out, close) {
+    front(c, r, _, _), let out = response(400, "Bad Request", error_body(r.bad), true), let close = true
+            where r.bad != "";
+    front(c, r, "method", _), let out = response(405, "Method Not Allowed", error_body("not allowed here"), r.close),
+            let close = r.close
+            where r.bad == "";
+    front(c, r, "missing", _), let out = response(404, "Not Found", error_body("no such path"), r.close),
+            let close = r.close
+            where r.bad == "";
+    front(c, r, "list", _), every_note(js), let out = response(200, "OK", js, r.close), let close = r.close
+            where r.bad == "";
+    front(c, r, "list", _), not any_note(), let out = response(200, "OK", "[]", r.close), let close = r.close
+            where r.bad == "";
+    front(c, r, "get", id), note(id, text, _), let out = response(200, "OK", note_json(id, text), r.close),
+            let close = r.close
+            where r.bad == "";
+    front(c, r, "get", id), not note(id, _, _),
+            let out = response(404, "Not Found", error_body("no such note"), r.close), let close = r.close
+            where r.bad == "";
+    front(c, r, "create", _), new_id(c, id),
+            let out = response(201, "Created", "{\"id\": " ++ id.to_string() ++ "}", r.close), let close = r.close
+            where r.bad == "";
+    front(c, r, "delete", id), note(id, _, _), let out = response(204, "No Content", "", r.close), let close = r.close
+            where r.bad == "";
+    front(c, r, "delete", id), not note(id, _, _),
+            let out = response(404, "Not Found", error_body("no such note"), r.close), let close = r.close
+            where r.bad == "";
+}
+
+/// Every note, as a JSON array in id order.
+view all_notes(xs = collect!((id, text))) = note(id, text, _);
+view every_note(js) = all_notes(xs), let js = notes_json(xs);
+view any_note() = note(_, _, _);
+
+/// The front request is answered: its response written, its bytes consumed.
+answer: while reply(c, out, close), conn(c, _, seq), bytes_now(c, all, _), front(c, r, _, _) {
+    send http.write(c, seq, [Part::Bytes(out)]);
+    upsert conn(c, all.slice(r.used, all.len()).unwrap_or(Bytes::empty()), seq + 1);
+}
+hang_up: while reply(c, _, true) {
+    send http.close(c);
+}
+/// A request not all there yet: its bytes wait for the rest.
+wait: while bytes_now(c, all, seq), not front(c, _, _, _), conn(c, p, _) where all != p {
+    upsert conn(c, all, seq);
+}
+
+create: while front(c, r, "create", _), new_id(c, id) where r.bad == "" {
+    emit note(id, r.body, now());
+}
+count: while creating_all(cs), first_id(n) {
+    upsert next_note(n + cs.len());
+}
+remove: while front(_c, r, "delete", id), note(id, text, at) where r.bad == "" {
+    delete note(id, text, at);
+}

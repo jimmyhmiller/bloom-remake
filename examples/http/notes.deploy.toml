@@ -1,0 +1,33 @@
+# A one-node deployment of notes.bls: an HTTP API written in Blossom, on the node's `http` stream. From the repository
+# root:
+#
+#   BLOSSOM_SEED=$(openssl rand -hex 16) blossom run --deploy examples/http/notes.deploy.toml --node n1 --insecure-dev \
+#       --init-fresh
+#
+# then, in another shell:
+#
+#   curl -d 'buy milk' localhost:8090/notes          # {"id": 1}
+#   curl localhost:8090/notes                        # [{"id": 1, "text": "buy milk"}]
+#   curl localhost:8090/notes/1                      # {"id": 1, "text": "buy milk"}
+#   curl -X DELETE localhost:8090/notes/1            # (204)
+#
+# Later runs drop --init-fresh to keep the notes (and keep the same seed).
+format = 1
+
+[deployment]
+id = "notes-demo"
+program = "notes"
+version = 1
+source = "notes.bls"
+
+[[node]]
+name = "n1"
+addr = "127.0.0.1:7471"
+principal = "spiffe://demo/notes/n1"
+streams = { http = "127.0.0.1:8090" }
+
+[security]
+mode = "insecure-dev"
+
+[storage]
+data_dir = ".data"

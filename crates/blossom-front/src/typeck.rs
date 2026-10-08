@@ -3872,6 +3872,7 @@ impl Checker<'_> {
             (Shape::Vec(_), _, "concat") => (Builtin::Lib(LibFn::VecConcat), None, 1),
             (Shape::Vec(_), _, "is_empty") => (Builtin::Lib(LibFn::VecIsEmpty), None, 0),
             (Shape::Vec(_), _, "reverse") => (Builtin::Lib(LibFn::VecReverse), None, 0),
+            (Shape::Vec(_), _, "sort") => (Builtin::Lib(LibFn::VecSort), None, 0),
             (Shape::Vec(_), _, "flatten") => (Builtin::Lib(LibFn::VecFlatten), None, 0),
             (Shape::Vec(_), _, "enumerate") => (Builtin::Lib(LibFn::VecEnumerate), None, 0),
             (Shape::Vec(_), _, "map") => (Builtin::Lib(LibFn::VecMap), Some(0), 1),
@@ -3902,6 +3903,13 @@ impl Checker<'_> {
             (_, Some(TypeDef::Str), "to_lowercase") => (Builtin::Lib(LibFn::StrToLowercase), None, 0),
             (_, Some(TypeDef::Str), "to_utf8") => (Builtin::Lib(LibFn::StrToUtf8), None, 0),
             (_, Some(TypeDef::Str), "trim") => (Builtin::Lib(LibFn::StrTrim), None, 0),
+            (_, Some(TypeDef::Str), "to_uppercase") => (Builtin::Lib(LibFn::StrToUppercase), None, 0),
+            (_, Some(TypeDef::Str), "split") => (Builtin::Lib(LibFn::StrSplit), None, 1),
+            (_, Some(TypeDef::Str), "replace") => (Builtin::Lib(LibFn::StrReplace), None, 2),
+            (_, Some(TypeDef::Str), "starts_with") => (Builtin::Lib(LibFn::StrStartsWith), None, 1),
+            (_, Some(TypeDef::Str), "ends_with") => (Builtin::Lib(LibFn::StrEndsWith), None, 1),
+            (_, Some(TypeDef::Str), "contains") => (Builtin::Lib(LibFn::StrContains), None, 1),
+            (_, Some(TypeDef::Str), "parse_u64") => (Builtin::Lib(LibFn::StrParseU64), None, 0),
             (_, Some(TypeDef::Int(_)), "to_string") => (Builtin::Lib(LibFn::IntToString), None, 0),
             (_, Some(TypeDef::F64), "to_string") => (Builtin::Lib(LibFn::FloatToString), None, 0),
             (_, Some(TypeDef::F64), "to_fixed") => (Builtin::Lib(LibFn::FloatFixed), None, 1),
@@ -4018,7 +4026,7 @@ impl Checker<'_> {
                         self.bound(Shape::Vec(out))
                     }
                     LibFn::VecIsEmpty => bool_t,
-                    LibFn::VecReverse => recv,
+                    LibFn::VecReverse | LibFn::VecSort => recv,
                     // The elements are vectors, and the result is one of their type.
                     LibFn::VecFlatten => {
                         let x = self.fresh(false);
@@ -4191,7 +4199,29 @@ impl Checker<'_> {
                 recv
             }
             (_, Builtin::Lib(LibFn::StrSplitWhitespace)) => self.bound(Shape::Vec(recv)),
-            (_, Builtin::Lib(LibFn::StrToLowercase | LibFn::StrTrim)) => recv,
+            (_, Builtin::Lib(LibFn::StrToLowercase | LibFn::StrTrim | LibFn::StrToUppercase)) => recv,
+            (_, Builtin::Lib(LibFn::StrSplit)) => {
+                if let Some(x) = a0 {
+                    self.unify(&hir.types, x, recv, span);
+                }
+                self.bound(Shape::Vec(recv))
+            }
+            (_, Builtin::Lib(LibFn::StrReplace)) => {
+                for x in [a0, a1].into_iter().flatten() {
+                    self.unify(&hir.types, x, recv, span);
+                }
+                recv
+            }
+            (_, Builtin::Lib(LibFn::StrStartsWith | LibFn::StrEndsWith | LibFn::StrContains)) => {
+                if let Some(x) = a0 {
+                    self.unify(&hir.types, x, recv, span);
+                }
+                self.con(&mut hir.types, TypeDef::Bool)
+            }
+            (_, Builtin::Lib(LibFn::StrParseU64)) => {
+                let u = self.con(&mut hir.types, TypeDef::Int(IntTy::U64));
+                self.bound(Shape::Option(u))
+            }
             (_, Builtin::Lib(LibFn::IntToString | LibFn::FloatToString | LibFn::BoolToString | LibFn::StrToString)) => {
                 self.con(&mut hir.types, TypeDef::Str)
             }

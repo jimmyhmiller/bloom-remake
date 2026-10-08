@@ -257,6 +257,11 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
             out.reverse();
             Ok(Value::Vec(out.into()))
         }
+        LibFn::VecSort => {
+            let mut out = arg_vector(cx, env, f, args, 0)?.to_vec();
+            out.sort();
+            Ok(Value::Vec(out.into()))
+        }
         LibFn::VecFlatten => {
             let mut out = Vec::new();
             for inner in arg_vector(cx, env, f, args, 0)?.iter() {
@@ -556,6 +561,46 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
                 s.parse::<i64>().ok().map(|n| Value::Int(IntValue::I64(n))),
             )),
             other => Err(bug(format!("`parse_i64` of {other:?}"))),
+        },
+        LibFn::StrParseU64 => match arg_value(cx, env, f, args, 0)? {
+            Value::Str(s) => Ok(some_or_none(
+                s.parse::<u64>().ok().map(|n| Value::Int(IntValue::U64(n))),
+            )),
+            other => Err(bug(format!("`parse_u64` of {other:?}"))),
+        },
+        LibFn::StrSplit => match (arg_value(cx, env, f, args, 0)?, arg_value(cx, env, f, args, 1)?) {
+            (Value::Str(_), Value::Str(sep)) if sep.is_empty() => {
+                Err(ExprError::Arithmetic("`split` by an empty separator".into()))
+            }
+            (Value::Str(s), Value::Str(sep)) => {
+                Ok(Value::Vec(s.split(&*sep).map(|w| Value::Str(Arc::from(w))).collect()))
+            }
+            (s, sep) => Err(bug(format!("`split` of {s:?} by {sep:?}"))),
+        },
+        LibFn::StrReplace => match (
+            arg_value(cx, env, f, args, 0)?,
+            arg_value(cx, env, f, args, 1)?,
+            arg_value(cx, env, f, args, 2)?,
+        ) {
+            (Value::Str(_), Value::Str(from), Value::Str(_)) if from.is_empty() => {
+                Err(ExprError::Arithmetic("`replace` of an empty string".into()))
+            }
+            (Value::Str(s), Value::Str(from), Value::Str(to)) => Ok(Value::Str(Arc::from(s.replace(&*from, &to)))),
+            (s, from, to) => Err(bug(format!("`replace` in {s:?} of {from:?} by {to:?}"))),
+        },
+        LibFn::StrStartsWith | LibFn::StrEndsWith | LibFn::StrContains => {
+            match (arg_value(cx, env, f, args, 0)?, arg_value(cx, env, f, args, 1)?) {
+                (Value::Str(s), Value::Str(p)) => Ok(Value::Bool(match f {
+                    LibFn::StrStartsWith => s.starts_with(&*p),
+                    LibFn::StrEndsWith => s.ends_with(&*p),
+                    _ => s.contains(&*p),
+                })),
+                (s, p) => Err(bug(format!("a test of {s:?} with {p:?}"))),
+            }
+        }
+        LibFn::StrToUppercase => match arg_value(cx, env, f, args, 0)? {
+            Value::Str(s) => Ok(Value::Str(Arc::from(s.to_uppercase()))),
+            other => Err(bug(format!("`to_uppercase` of {other:?}"))),
         },
         LibFn::StrToUtf8 => match arg_value(cx, env, f, args, 0)? {
             Value::Str(s) => Ok(Value::Bytes(Arc::from(s.as_bytes()))),

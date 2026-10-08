@@ -1782,7 +1782,7 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
             elem(ty(0)?)?;
             boolt()
         }
-        LibFn::VecReverse => {
+        LibFn::VecReverse | LibFn::VecSort => {
             arity(1)?;
             let v = ty(0)?;
             elem(v)?;
@@ -2086,6 +2086,39 @@ fn lib_type(p: &Program, r: Cx<'_>, f: LibFn, args: &[Expr]) -> Result<TypeId, S
             arity(1)?;
             same(ty(0)?, lookup(TypeDef::Str)?, "parse_i64 of a String")?;
             lookup(TypeDef::Option(lookup(TypeDef::Int(IntTy::I64))?))
+        }
+        LibFn::StrParseU64 => {
+            arity(1)?;
+            same(ty(0)?, lookup(TypeDef::Str)?, "parse_u64 of a String")?;
+            lookup(TypeDef::Option(lookup(TypeDef::Int(IntTy::U64))?))
+        }
+        LibFn::StrSplit => {
+            arity(2)?;
+            let st = lookup(TypeDef::Str)?;
+            same(ty(0)?, st, "split of a String")?;
+            same(ty(1)?, st, "split by a String")?;
+            lookup(TypeDef::Vec(st))
+        }
+        LibFn::StrReplace => {
+            arity(3)?;
+            let st = lookup(TypeDef::Str)?;
+            for i in 0..3 {
+                same(ty(i)?, st, "replace of Strings")?;
+            }
+            Ok(st)
+        }
+        LibFn::StrStartsWith | LibFn::StrEndsWith | LibFn::StrContains => {
+            arity(2)?;
+            let st = lookup(TypeDef::Str)?;
+            same(ty(0)?, st, "a String's test")?;
+            same(ty(1)?, st, "a String's test of a String")?;
+            boolt()
+        }
+        LibFn::StrToUppercase => {
+            arity(1)?;
+            let st = lookup(TypeDef::Str)?;
+            same(ty(0)?, st, "to_uppercase of a String")?;
+            Ok(st)
         }
         LibFn::StrToUtf8 => {
             arity(1)?;

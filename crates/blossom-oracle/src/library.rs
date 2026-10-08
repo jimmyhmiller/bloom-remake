@@ -234,6 +234,11 @@ pub(crate) fn lib(scope: &Scope<'_>, env: &[Option<Value>], f: LibFn, args: &[Ex
         }
         LibFn::VecIsEmpty => Value::Bool(vec_of(val(0)?)?.is_empty()),
         LibFn::VecReverse => Value::Vec(vec_of(val(0)?)?.iter().rev().cloned().collect()),
+        LibFn::VecSort => {
+            let mut v: Vec<Value> = vec_of(val(0)?)?.iter().cloned().collect();
+            v.sort();
+            Value::Vec(v.into())
+        }
         LibFn::VecFlatten => {
             let mut out = Vec::new();
             for inner in vec_of(val(0)?)?.iter() {
@@ -450,6 +455,28 @@ pub(crate) fn lib(scope: &Scope<'_>, env: &[Option<Value>], f: LibFn, args: &[Ex
             .parse::<i64>()
             .ok()
             .map(|n| Value::Int(IntValue::I64(n)))),
+        LibFn::StrParseU64 => opt(str_of(val(0)?)?
+            .parse::<u64>()
+            .ok()
+            .map(|n| Value::Int(IntValue::U64(n)))),
+        LibFn::StrSplit => {
+            let (s, sep) = (str_of(val(0)?)?, str_of(val(1)?)?);
+            if sep.is_empty() {
+                return Err(ExprError::Arithmetic("`split` by an empty separator".into()));
+            }
+            Value::Vec(s.split(&*sep).map(|w| Value::Str(w.into())).collect())
+        }
+        LibFn::StrReplace => {
+            let (s, from, to) = (str_of(val(0)?)?, str_of(val(1)?)?, str_of(val(2)?)?);
+            if from.is_empty() {
+                return Err(ExprError::Arithmetic("`replace` of an empty string".into()));
+            }
+            Value::Str(s.replace(&*from, &to).into())
+        }
+        LibFn::StrStartsWith => Value::Bool(str_of(val(0)?)?.starts_with(&*str_of(val(1)?)?)),
+        LibFn::StrEndsWith => Value::Bool(str_of(val(0)?)?.ends_with(&*str_of(val(1)?)?)),
+        LibFn::StrContains => Value::Bool(str_of(val(0)?)?.contains(&*str_of(val(1)?)?)),
+        LibFn::StrToUppercase => Value::Str(str_of(val(0)?)?.to_uppercase().into()),
         LibFn::BytesFromUtf8 => {
             let b = bytes_of(val(0)?)?;
             opt(std::str::from_utf8(&b).ok().map(|s| Value::Str(s.into())))
