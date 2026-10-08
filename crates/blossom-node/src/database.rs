@@ -282,7 +282,7 @@ impl Database {
             let tag = codec.rel_tag(*rel)?;
             self.each_row(&codec, &tag, *rel, at, &mut |row| {
                 for b in row_blobs(&row) {
-                    changes.push((Self::blob_key(&codec, *rel, &b, &row)?, Op::Put));
+                    changes.push((Self::blob_key(&codec, &tag, *rel, &b, &row)?, Op::Put));
                 }
                 Ok(())
             })?;
@@ -294,8 +294,14 @@ impl Database {
     }
 
     /// The key of `row` of `rel` in the blob keyspace, under blob `b`.
-    fn blob_key(codec: &DurableCodec<'_>, rel: RelId, b: &BlobRef, row: &Row) -> Result<Vec<u8>, NodeError> {
-        let mut tag = blob_tag(&codec.rel_tag(rel)?).to_vec();
+    fn blob_key(
+        codec: &DurableCodec<'_>,
+        rel_tag: &[u8; 8],
+        rel: RelId,
+        b: &BlobRef,
+        row: &Row,
+    ) -> Result<Vec<u8>, NodeError> {
+        let mut tag = blob_tag(rel_tag).to_vec();
         tag.extend_from_slice(&b.hash);
         tag.extend_from_slice(&b.len.to_be_bytes());
         codec.tagged_key(&tag, rel, &[], row)
@@ -389,7 +395,7 @@ impl Database {
         }
         if d.blobs {
             for b in row_blobs(row) {
-                out.push((Self::blob_key(codec, rel, &b, row)?, op));
+                out.push((Self::blob_key(codec, &rel_tag, rel, &b, row)?, op));
             }
         }
         Ok(())
@@ -649,7 +655,8 @@ impl Database {
         if !self.derived()?.blobs {
             return Err(blossom_base::internal_error!("the database keeps no blob keyspace").into());
         }
-        for tag in self.tags.keys() {
+        let view_tags: Vec<[u8; 8]> = self.derived()?.views.values().map(|(rows, _)| *rows).collect();
+        for tag in self.tags.keys().chain(&view_tags) {
             let prefix = blob_tag(tag);
             let end = crate::keycode::successor(&prefix);
             self.each_key(&prefix, end.as_deref(), at, &mut |key| {
@@ -695,16 +702,20 @@ impl Database {
         };
         let prefix = codec.tagged_key(&counts, rel, &all, row)?;
         let end = crate::keycode::successor(&prefix);
-        let page = self.lsm.scan_page(&prefix, end.as_deref(), at, 1)?;
-        match page.keys.first() {
-            None => Ok(1),
-            Some(key) => {
-                let n = key
+        // Pages until a live key: an older count's key, deleted, sorts among them.
+        let mut from = prefix.clone();
+        loop {
+            let page = self.lsm.scan_page(&from, end.as_deref(), at, PAGE_KEYS)?;
+            if let Some(key) = page.keys.first() {
+                return key
                     .get(prefix.len()..)
                     .and_then(|b| <[u8; 8]>::try_from(b).ok())
                     .map(u64::from_be_bytes)
-                    .ok_or_else(|| NodeError::Store("a view's count key without its count".into()))?;
-                Ok(n)
+                    .ok_or_else(|| NodeError::Store("a view's count key without its count".into()));
+            }
+            match page.next {
+                Some(next) => from = next,
+                None => return Ok(1),
             }
         }
     }

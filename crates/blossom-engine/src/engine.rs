@@ -139,10 +139,17 @@ pub struct Engine {
     /// The durable views kept on the cold side since the last reset (docs/design/DATABASE.md §8), and the rules that
     /// write them.
     views: BTreeSet<RelId>,
+    /// The aggregate rules among the views' rules, by their shape: kept without the groups' tuples in memory.
+    durable_aggs: BTreeMap<RuleId, AggShape>,
+    /// The rules of mixed relations (kept on the cold side for their durable rules' support) that are not durable:
+    /// their support is kept in memory only, and derived again after a restart.
+    volatile_rules: BTreeSet<RuleId>,
     /// The durable tables kept in memory since the last reset onto the cold side (loaded from it): sources of durable
     /// views as the tiered tables are.
     durable_in_memory: BTreeSet<RelId>,
     view_rules: BTreeSet<RuleId>,
+    /// The durable tables the views' rules read: each tick reports their rows it held beyond those carried into it.
+    view_sources: BTreeSet<RelId>,
     /// The catch-up the first tick after a resume runs first, if the views resumed from the cold side.
     boot: Option<blossom_ir::tick::CatchUp>,
     /// The first tick after resuming on the cold side with its views: what memory held and the restart lost is
@@ -568,8 +575,11 @@ impl Engine {
             hot_rows: cfg.hot_rows.unwrap_or(crate::store::HOT_ROWS),
             in_memory: cfg.in_memory,
             views: BTreeSet::new(),
+            durable_aggs: BTreeMap::new(),
+            volatile_rules: BTreeSet::new(),
             durable_in_memory: BTreeSet::new(),
             view_rules: BTreeSet::new(),
+            view_sources: BTreeSet::new(),
             boot: None,
             rebuilding: false,
             program,
@@ -620,8 +630,11 @@ impl Engine {
     pub fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
         self.tiered.clear();
         self.views.clear();
+        self.durable_aggs.clear();
+        self.volatile_rules.clear();
         self.durable_in_memory.clear();
         self.view_rules.clear();
+        self.view_sources.clear();
         self.boot = None;
         self.rebuilding = false;
         for s in self.stores.values_mut() {
@@ -682,15 +695,14 @@ impl Engine {
             self.tiered.insert(*rel);
         }
         self.durable_in_memory = cold.tables().into_iter().filter(|r| !self.tiered.contains(r)).collect();
-        // The durable views (those whose rows can hold blobs stay in memory: a view's blob is not counted as the
-        // carried rows' are).
-        let views: BTreeSet<RelId> = if self.in_memory {
-            BTreeSet::new()
+        // The durable views (a view's blob is one a row it reads holds: its rules make none), and the mixed relations
+        // kept on the cold side for their durable rules' support.
+        let (views, volatile_rules) = if self.in_memory {
+            (BTreeSet::new(), BTreeSet::new())
         } else {
-            self.durable_views()
-                .into_iter()
-                .filter(|r| !rel_holds_blobs(p, *r))
-                .collect()
+            let views = self.durable_views();
+            let (mixed, volatile) = self.mixed_relations(&views);
+            (views.union(&mixed).copied().collect(), volatile)
         };
         let defs = self.view_definitions(&views, &resume.statics)?;
         let ready = if views.is_empty() {
@@ -722,7 +734,7 @@ impl Engine {
                     *rel,
                     cold.clone(),
                     Vec::new(),
-                    false,
+                    rel_holds_blobs(p, *rel),
                     self.hot_rows,
                     true,
                     !resuming,
@@ -732,8 +744,36 @@ impl Engine {
         self.view_rules = p
             .rules
             .iter_enumerated()
-            .filter(|(id, r)| self.plans.contains_key(id) && views.contains(&r.head.rel))
+            .filter(|(id, r)| {
+                self.plans.contains_key(id) && views.contains(&r.head.rel) && !volatile_rules.contains(id)
+            })
             .map(|(id, _)| id)
+            .collect();
+        self.view_sources = self
+            .view_rules
+            .iter()
+            .filter_map(|id| p.rules.get(*id))
+            .flat_map(|rule| {
+                rule.body.lits.iter().filter_map(|l| match l {
+                    Literal::Pos(a) | Literal::Neg(a) => Some(a.rel),
+                    Literal::Lookup { rel, .. } => Some(*rel),
+                    _ => None,
+                })
+            })
+            .filter(|rel| self.tiered.contains(rel) || self.durable_in_memory.contains(rel))
+            .collect();
+        self.volatile_rules = volatile_rules;
+        self.durable_aggs = self
+            .view_rules
+            .iter()
+            .filter_map(|id| {
+                let rule = p.rules.get(*id)?;
+                let plan = self.plans.get(id)?;
+                if !plan.aggregate {
+                    return None;
+                }
+                agg_shape(rule).map(|s| (*id, s))
+            })
             .collect();
         self.views = views;
         if resuming {
@@ -914,6 +954,7 @@ impl Engine {
                 by_head.entry(rule.head.rel).or_default().push(id);
             }
         }
+        let pure: std::cell::RefCell<BTreeMap<blossom_base::FnId, bool>> = std::cell::RefCell::new(BTreeMap::new());
         let mut views: BTreeSet<RelId> = by_head
             .iter()
             .filter(|(rel, ids)| {
@@ -929,8 +970,9 @@ impl Engine {
                         };
                         rule.kind == RuleKind::Deductive
                             && plan.regime == Regime::Delta
-                            && !plan.aggregate
+                            && (!plan.aggregate || (ids.len() == 1 && agg_shape(rule).is_some()))
                             && plan.frame.is_none()
+                            && crate::purity::rule_is_pure(p, rule, &mut pure.borrow_mut())
                     })
             })
             .map(|(rel, _)| *rel)
@@ -999,6 +1041,13 @@ impl Engine {
         }
         let strata = self.strata.clone();
         for s in strata.iter() {
+            // As at any tick: a stratum's aggregates first, then its rules.
+            for id in &s.aggregates {
+                if self.view_rules.contains(id) {
+                    self.maintain(p, input, *id)?;
+                }
+            }
+            self.settle(input.tick)?;
             for id in &s.rules {
                 if self.view_rules.contains(id) {
                     self.maintain(p, input, *id)?;
@@ -1052,6 +1101,72 @@ impl Engine {
                 return;
             }
         }
+    }
+
+    /// The relations mixing durable rules (as a durable view's: deductive by delta queries, pure, reading durable
+    /// sources and `views`) with others (deductive, no aggregate or recursion), and those other rules: their durable
+    /// support can be kept on the cold side, the rest in memory (DATABASE.md §8). Not sources of durable views: part of
+    /// them is lost on a restart.
+    fn mixed_relations(&self, views: &BTreeSet<RelId>) -> (BTreeSet<RelId>, BTreeSet<RuleId>) {
+        let p = self.program.get();
+        let recursive: BTreeSet<RelId> = self
+            .strata
+            .iter()
+            .filter(|s| s.recursive)
+            .flat_map(|s| s.rules.iter().chain(&s.aggregates))
+            .filter_map(|id| p.rules.get(*id).map(|r| r.head.rel))
+            .collect();
+        let facts: BTreeSet<RelId> = p.facts.iter().map(|f| f.rel).collect();
+        let source = |rel: &RelId| {
+            self.tiered.contains(rel)
+                || self.durable_in_memory.contains(rel)
+                || views.contains(rel)
+                || p.rels.get(*rel).is_some_and(|d| d.class == RelClass::Static)
+        };
+        let mut memo = BTreeMap::new();
+        let mut by_head: BTreeMap<RelId, Vec<RuleId>> = BTreeMap::new();
+        for (id, rule) in p.rules.iter_enumerated() {
+            if self.plans.contains_key(&id) {
+                by_head.entry(rule.head.rel).or_default().push(id);
+            }
+        }
+        let (mut mixed, mut volatile) = (BTreeSet::new(), BTreeSet::new());
+        for (rel, ids) in by_head {
+            let candidate = p.rels.get(rel).is_some_and(|d| d.class == RelClass::Idb && !d.durable)
+                && !views.contains(&rel)
+                && !self.scoped.contains(&rel)
+                && !recursive.contains(&rel)
+                && !facts.contains(&rel)
+                && ids.iter().all(|id| {
+                    let (Some(rule), Some(plan)) = (p.rules.get(*id), self.plans.get(id)) else {
+                        return false;
+                    };
+                    rule.kind == RuleKind::Deductive && !plan.aggregate && plan.frame.is_none()
+                });
+            if !candidate {
+                continue;
+            }
+            let durable: Vec<bool> = ids
+                .iter()
+                .map(|id| {
+                    let (Some(rule), Some(plan)) = (p.rules.get(*id), self.plans.get(id)) else {
+                        return false;
+                    };
+                    plan.regime == Regime::Delta
+                        && crate::purity::rule_is_pure(p, rule, &mut memo)
+                        && rule.body.lits.iter().all(|l| match l {
+                            Literal::Pos(a) | Literal::Neg(a) => a.sender.is_none() && source(&a.rel),
+                            Literal::Lookup { rel, .. } => source(rel),
+                            _ => true,
+                        })
+                })
+                .collect();
+            if durable.iter().any(|d| *d) {
+                mixed.insert(rel);
+                volatile.extend(ids.iter().zip(&durable).filter(|(_, d)| !**d).map(|(id, _)| *id));
+            }
+        }
+        (mixed, volatile)
     }
 
     /// A store to write. A lattice store written is settled at the next [`Engine::settle`].
@@ -1313,11 +1428,21 @@ impl Engine {
                 .unwrap_or_default();
             out.observed.insert(*rel, rows);
         }
-        // The durable views' changes (DATABASE.md §8).
+        // The durable views' changes (DATABASE.md §8), and how their sources' rows at the tick differ from those
+        // carried in: the views' rows were computed from them.
         for rel in self.views.clone() {
             let changes = self.store(StoreKey::Main(rel))?.take_changes()?;
             if !changes.is_empty() {
                 out.views.insert(rel, changes);
+            }
+        }
+        for rel in self.view_sources.clone() {
+            let (shown, hidden) = self.written(rel, &pending)?;
+            if !shown.is_empty() {
+                out.written.inserted.insert(rel, shown);
+            }
+            if !hidden.is_empty() {
+                out.written.deleted.insert(rel, hidden);
             }
         }
         self.rebuilding = false;
@@ -1333,6 +1458,39 @@ impl Engine {
             }
         }
         Ok(out)
+    }
+
+    /// How a durable table's rows at the tick's end differ from those carried into the tick (`pending`: the change
+    /// the tick started with, the carry of a table kept in memory): the rows its rules wrote this tick that were not
+    /// carried, and the carried rows not present (a lattice's, merged past). A tiered table's carried rows stay.
+    fn written(&self, rel: RelId, pending: &Changes) -> Result<(Vec<Row>, Vec<Row>), EvalError> {
+        let s = self
+            .stores
+            .get(&StoreKey::Main(rel))
+            .ok_or_else(|| internal_error!("no store for the durable table {rel:?}"))?;
+        if self.tiered.contains(&rel) {
+            return Ok((s.uncarried(), Vec::new()));
+        }
+        // A table kept in memory: its change since the tick began, against the carry applied at its start.
+        let (pins, pdel): (BTreeSet<&Row>, BTreeSet<&Row>) = (
+            pending.inserted.get(&rel).into_iter().flatten().collect(),
+            pending.deleted.get(&rel).into_iter().flatten().collect(),
+        );
+        let mut shown: Vec<Row> = s.ins.iter().filter(|r| !pins.contains(r)).cloned().collect();
+        let mut hidden: Vec<Row> = s.del.iter().filter(|r| !pdel.contains(r)).cloned().collect();
+        for r in &pdel {
+            if s.contains(r)? {
+                shown.push((*r).clone());
+            }
+        }
+        for r in &pins {
+            if !s.contains(r)? {
+                hidden.push((*r).clone());
+            }
+        }
+        shown.sort();
+        hidden.sort();
+        Ok((shown, hidden))
     }
 
     /// The next tick's carried state, with the tiered tables' rows (`tiered`: read from the cold side, after the
@@ -1840,16 +1998,22 @@ impl Engine {
         if let Some((_, (_, Some(e)))) = terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
             return Err(to_eval(e, tick, Some(rule)));
         }
+        if let Some(shape) = self.durable_aggs.get(&rule.id).cloned() {
+            return self.apply_durable_aggregate(p, rule, plan, &shape, terms.aggs, tick);
+        }
         if plan.aggregate {
             return self.apply_aggregates(p, rule, plan, terms.aggs, tick);
         }
+        let volatile = self.volatile_rules.contains(&rule.id);
         let store = self.store(plan.head)?;
         let mut writes = 0u64;
         for (row, w) in terms.heads {
             if w != 0 {
                 writes += 1;
             }
-            store.add(row, w).map_err(|e| to_eval(e, tick, Some(rule)))?;
+            store
+                .add_by(row, w, volatile)
+                .map_err(|e| to_eval(e, tick, Some(rule)))?;
         }
         self.count_writes(rule.id, writes);
         Ok(())
@@ -1920,6 +2084,143 @@ impl Engine {
         Ok(())
     }
 
+    /// A durable view's aggregate (DATABASE.md §8): each touched group's row from its source as it is now, without
+    /// the groups' tuples in memory. A `max` or `min` moves by the tuples that came, and reads its group only when its
+    /// current value went; the others read their group.
+    fn apply_durable_aggregate(
+        &mut self,
+        p: &Program,
+        rule: &Rule,
+        plan: &Plan,
+        shape: &AggShape,
+        changes: BTreeMap<(Vec<Value>, usize, Vec<Value>), i64>,
+        tick: Tick,
+    ) -> Result<(), EvalError> {
+        let wrap = |e: ExprError| to_eval(e, tick, Some(rule));
+        let mut by_group: BTreeMap<Vec<Value>, Vec<(Vec<Value>, i64)>> = BTreeMap::new();
+        for ((group, _, tuple), w) in changes {
+            if w != 0 {
+                by_group.entry(group).or_default().push((tuple, w));
+            }
+        }
+        let src = StoreKey::Main(shape.src);
+        let mut edits: Vec<(Option<Row>, Option<Row>)> = Vec::new();
+        for (group, tuples) in by_group {
+            let head = self
+                .stores
+                .get(&plan.head)
+                .ok_or_else(|| internal_error!("no store for {:?}", plan.head))?;
+            let current = head.new_rows(&shape.head_group, &group)?.into_iter().next();
+            let source = self
+                .stores
+                .get(&src)
+                .ok_or_else(|| internal_error!("no store for {src:?}"))?;
+            let mut probe_cols = shape.src_group.clone();
+            probe_cols.extend(&shape.src_tuple);
+            let present = |old: bool, t: &[Value]| -> Result<bool, EvalError> {
+                let mut values = group.clone();
+                values.extend_from_slice(t);
+                source.any(old, &probe_cols, &values)
+            };
+            let incremental = matches!(shape.func, AggFunc::Max | AggFunc::Min);
+            let new = match (&current, incremental) {
+                (Some(cur), true) => {
+                    let value = cur
+                        .get(shape.head_agg)
+                        .ok_or_else(|| internal_error!("an aggregate's row without its value"))?;
+                    let mut went = false;
+                    let mut best: Option<Value> = None;
+                    for (t, w) in &tuples {
+                        let v = t.first().ok_or_else(|| internal_error!("an empty aggregate tuple"))?;
+                        if *w < 0 && v == value && !present(false, t)? {
+                            went = true;
+                        }
+                        if *w > 0 {
+                            let better = best.as_ref().is_none_or(|b| match shape.func {
+                                AggFunc::Max => v > b,
+                                _ => v < b,
+                            });
+                            if better {
+                                best = Some(v.clone());
+                            }
+                        }
+                    }
+                    if went {
+                        self.group_from_source(p, rule, shape, &group, tick)?
+                    } else {
+                        match best {
+                            Some(b)
+                                if match shape.func {
+                                    AggFunc::Max => b > *value,
+                                    _ => b < *value,
+                                } =>
+                            {
+                                let mut row = cur.to_vec();
+                                if let Some(slot) = row.get_mut(shape.head_agg) {
+                                    *slot = b;
+                                }
+                                Some(Row::from(row))
+                            }
+                            _ => Some(cur.clone()),
+                        }
+                    }
+                }
+                _ => self.group_from_source(p, rule, shape, &group, tick)?,
+            };
+            if new != current {
+                edits.push((current, new));
+            }
+        }
+        let store = self.store(plan.head)?;
+        let mut writes = 0u64;
+        for (old, new) in edits {
+            if let Some(o) = old {
+                writes += 1;
+                store.add(o, -1).map_err(wrap)?;
+            }
+            if let Some(n) = new {
+                writes += 1;
+                store.add(n, 1).map_err(wrap)?;
+            }
+        }
+        self.count_writes(rule.id, writes);
+        Ok(())
+    }
+
+    /// A group's aggregate row from its source's rows now (`None`: the group has none).
+    fn group_from_source(
+        &self,
+        p: &Program,
+        rule: &Rule,
+        shape: &AggShape,
+        group: &[Value],
+        tick: Tick,
+    ) -> Result<Option<Row>, EvalError> {
+        let source = self
+            .stores
+            .get(&StoreKey::Main(shape.src))
+            .ok_or_else(|| internal_error!("no store for {:?}", shape.src))?;
+        let mut set: BTreeMap<Vec<Value>, i64> = BTreeMap::new();
+        for row in source.new_rows(&shape.src_group, group)? {
+            let tuple: Vec<Value> = shape
+                .src_tuple
+                .iter()
+                .map(|c| {
+                    row.get(*c)
+                        .cloned()
+                        .ok_or_else(|| internal_error!("a source row too short"))
+                })
+                .collect::<Result<_, _>>()?;
+            set.insert(tuple, 1);
+        }
+        if set.is_empty() {
+            return Ok(None);
+        }
+        group_row(p, rule, group, &[set])
+            .map(Some)
+            .map_err(|e| to_eval(e, tick, Some(rule)))
+    }
+
     /// A recompute rule: evaluated in full, its change is the difference from its last output.
     fn recompute_rule(
         &mut self,
@@ -1962,19 +2263,24 @@ impl Engine {
         // Only the difference from the last output is applied: a row in both, with the same support, is left alone
         // (retracting and re-adding it would change nothing but rebuild its index entries and touch the store).
         let old = self.prev.remove(&rule.id).unwrap_or_default();
+        let volatile = self.volatile_rules.contains(&rule.id);
         let store = self.store(plan.head)?;
         let mut writes = 0u64;
         for (row, w) in &old {
             let d = new.get(row).copied().unwrap_or(0) - w;
             if d != 0 {
                 writes += 1;
-                store.add(row.clone(), d).map_err(|e| to_eval(e, tick, Some(rule)))?;
+                store
+                    .add_by(row.clone(), d, volatile)
+                    .map_err(|e| to_eval(e, tick, Some(rule)))?;
             }
         }
         for (row, w) in &new {
             if !old.contains_key(row) {
                 writes += 1;
-                store.add(row.clone(), *w).map_err(|e| to_eval(e, tick, Some(rule)))?;
+                store
+                    .add_by(row.clone(), *w, volatile)
+                    .map_err(|e| to_eval(e, tick, Some(rule)))?;
             }
         }
         self.count_writes(rule.id, writes);
@@ -2427,6 +2733,21 @@ impl Engine {
         out
     }
 
+    /// Every relation's rows as the last tick left them (O(state), for checking against a reference): the stores of
+    /// the relations at the tick, a durable view's from the cold side, and not a tiered table's (it holds the next
+    /// tick's rows by then).
+    pub fn instance_now(&self) -> Result<BTreeMap<RelId, BTreeSet<Row>>, EvalError> {
+        let mut out = BTreeMap::new();
+        for (key, s) in self.stores.iter() {
+            let StoreKey::Main(rel) = key else { continue };
+            if self.tiered.contains(&rel) {
+                continue;
+            }
+            out.insert(rel, s.present_sorted()?.into_iter().collect());
+        }
+        Ok(out)
+    }
+
     /// The work of each rule in the last tick (the rules that did any).
     pub fn last_tick_work(&self) -> &BTreeMap<RuleId, RuleWork> {
         &self.tick_work
@@ -2496,6 +2817,68 @@ struct Terms {
 }
 
 /// An aggregate rule's head row for a group whose live argument tuples are `tuples` (per aggregate column).
+/// A durable aggregate's shape (DATABASE.md §8): one aggregate over one source atom, its group and tuple read from
+/// the atom's columns.
+#[derive(Clone, Debug)]
+pub(crate) struct AggShape {
+    src: RelId,
+    /// The source columns holding the group's values, in the head's order, and the aggregate's tuple's.
+    src_group: Vec<usize>,
+    src_tuple: Vec<usize>,
+    /// The head's group columns and its aggregate column.
+    head_group: Vec<usize>,
+    head_agg: usize,
+    func: AggFunc,
+}
+
+/// The shape of `rule` if it is an aggregate a durable view can keep without its groups' tuples: one positive atom
+/// (no sender, no weight), group terms and the aggregate's tuple all variables of the atom, one `count`, `min`,
+/// `max`, `sum` or `collect` with no order (a `min` or `max` of one value).
+fn agg_shape(rule: &Rule) -> Option<AggShape> {
+    let [Literal::Pos(atom)] = rule.body.lits.as_slice() else {
+        return None;
+    };
+    if atom.sender.is_some() || atom.weight.is_some() {
+        return None;
+    }
+    let col_of = |t: &blossom_ir::core::Term| -> Option<usize> {
+        let blossom_ir::core::Term::Var(v) = t else { return None };
+        atom.args
+            .iter()
+            .position(|a| matches!(a, blossom_ir::core::Term::Var(x) if x == v))
+    };
+    let (mut src_group, mut head_group, mut agg) = (Vec::new(), Vec::new(), None);
+    for (i, a) in rule.head.args.iter().enumerate() {
+        match a {
+            HeadArg::Term(t) => {
+                src_group.push(col_of(t)?);
+                head_group.push(i);
+            }
+            HeadArg::Agg(call) => {
+                if agg.is_some() || call.order.is_some() {
+                    return None;
+                }
+                agg = Some((i, call));
+            }
+        }
+    }
+    let (head_agg, call) = agg?;
+    let src_tuple: Vec<usize> = call.args.iter().map(col_of).collect::<Option<_>>()?;
+    let ok = match call.func {
+        AggFunc::Min | AggFunc::Max | AggFunc::Sum => src_tuple.len() == 1,
+        AggFunc::Count | AggFunc::CollectVec => !src_tuple.is_empty(),
+        _ => false,
+    };
+    ok.then(|| AggShape {
+        src: atom.rel,
+        src_group,
+        src_tuple,
+        head_group,
+        head_agg,
+        func: call.func.clone(),
+    })
+}
+
 fn group_row(p: &Program, rule: &Rule, group: &[Value], tuples: &[BTreeMap<Vec<Value>, i64>]) -> expr::ExprResult<Row> {
     let mut keys = group.iter();
     let mut aggs = tuples.iter();

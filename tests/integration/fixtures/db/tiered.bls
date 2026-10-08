@@ -96,3 +96,60 @@ durable table above_seen(k: u64) key(k);
 see_above: on put(k, _), above(k) {
     emit above_seen(k);
 }
+
+/// Durable views holding blobs (a row it reads holds them), and aggregates kept without their groups in memory.
+view stash_copy(k, blob) = stashed(k, blob);
+view kv_max(mx = max!(v)) = kv(_, v);
+view kv_min(mn = min!(v)) = kv(_, v);
+view kv_count(n = count!(k)) = kv(k, _);
+durable table seen_stats(k: u64, mx: u64, mn: u64, n: u64) key(k);
+durable table seen_stash(k: u64, len: u64) key(k);
+see_stats: on find(k), kv_max(mx), kv_min(mn), kv_count(n) {
+    upsert seen_stats(k, mx, mn, n);
+}
+see_stash: on check(k), stash_copy(k, blob) {
+    upsert seen_stash(k, blob.len());
+}
+
+/// A projection: a value's rows are as many as the keys holding it (supports above one, counted in the database).
+view vals(v) = kv(_, v);
+input check_val(v: u64);
+durable table val_seen(v: u64, there: bool) key(v);
+see_val: on check_val(v), vals(v) {
+    upsert val_seen(v, true);
+}
+miss_val: on check_val(v), not vals(v) {
+    upsert val_seen(v, false);
+}
+
+/// A relation mixing a durable rule (over `kv`) and one over a volatile table: its durable support is kept with the
+/// database's, the other in memory and derived again after a restart.
+input pend(k: u64);
+table pending(k: u64) key(k);
+pend_it: on pend(k) {
+    emit pending(k);
+}
+view either(k) {
+    kv(k, _);
+    pending(k);
+}
+durable table either_seen(k: u64, there: bool) key(k);
+see_either: on check(k), either(k) {
+    upsert either_seen(k, true);
+}
+miss_either: on check(k), not either(k) {
+    upsert either_seen(k, false);
+}
+
+/// A durable lattice table (kept in memory), written the tick its input arrives: a view over it is computed from the
+/// tick's rows, a row merged past its carried one.
+input bump(k: u64, n: u64);
+durable table peak(k: u64, n: LMax<u64>);
+bump_it: on bump(k, n) {
+    emit peak(k, LMax::of(n));
+}
+view peak_at(k, n) = peak(k, m), let n = reveal!(m);
+durable table peak_seen(k: u64, n: u64) key(k);
+see_peak: on check(k), peak_at(k, n) {
+    upsert peak_seen(k, n);
+}

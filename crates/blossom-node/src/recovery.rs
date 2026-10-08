@@ -415,7 +415,11 @@ pub fn open(
     .certified(record.certification);
     // A database the store had: its views catch up from the ticks since (none for a database started here, whose views
     // are built at the first tick).
-    let catch_up = if fresh { None } else { Some(catch_up_of(since_views)) };
+    let catch_up = if fresh {
+        None
+    } else {
+        Some(catch_up_of(from, since_views))
+    };
     Ok(Opened {
         boot: Boot {
             database: database.clone(),
@@ -543,55 +547,72 @@ fn no_state(spec: &StoreSpec) -> NodeError {
     ))
 }
 
-/// The catch-up of a database's views (DATABASE.md §8) from the deltas of the ticks since them, in order: the net
-/// change of all but the last, and the last.
-fn catch_up_of(mut ticks: Vec<(u64, Delta)>) -> blossom_ir::tick::CatchUp {
+/// The catch-up of a database's views (DATABASE.md §8) from the deltas of the ticks since them, in order (the first
+/// is the views' tick `from`'s, if it logged one): the change from the rows the views were computed from (the tables
+/// before tick `from`, with what that tick wrote beyond them) to the tables before the last tick, and the last
+/// tick's change.
+fn catch_up_of(from: Option<u64>, mut ticks: Vec<(u64, Delta)>) -> blossom_ir::tick::CatchUp {
+    let written = match ticks.first_mut() {
+        Some((t, delta)) if Some(*t) == from => std::mem::take(&mut delta.written),
+        _ => BTreeMap::new(),
+    };
     let Some((last_tick, last)) = ticks.pop() else {
         return blossom_ir::tick::CatchUp::default();
     };
-    // The net change: a row inserted then deleted (or deleted then inserted) is no change.
-    let mut ins: BTreeMap<RelId, std::collections::BTreeSet<Row>> = BTreeMap::new();
-    let mut del: BTreeMap<RelId, std::collections::BTreeSet<Row>> = BTreeMap::new();
-    for (_, delta) in ticks {
-        for (rel, (inserted, deleted)) in delta.changes {
-            let (i, d) = (ins.entry(rel).or_default(), del.entry(rel).or_default());
+    // Each row a tick changed (or the views' tick wrote): whether the views' rows saw it, and whether it is in the
+    // tables before the last tick. A row's first change tells whether the tables held it before.
+    let mut rows: BTreeMap<RelId, BTreeMap<Row, (bool, bool)>> = BTreeMap::new();
+    for (_, delta) in &ticks {
+        for (rel, (inserted, deleted)) in &delta.changes {
+            let of = rows.entry(*rel).or_default();
             for row in deleted {
-                if !i.remove(&row) {
-                    d.insert(row);
-                }
+                of.entry(row.clone()).or_insert((true, true)).1 = false;
             }
             for row in inserted {
-                if !d.remove(&row) {
-                    i.insert(row);
-                }
+                of.entry(row.clone()).or_insert((false, false)).1 = true;
             }
         }
     }
-    let changes = |m: BTreeMap<RelId, std::collections::BTreeSet<Row>>| -> BTreeMap<RelId, Vec<Row>> {
-        m.into_iter()
-            .filter(|(_, rows)| !rows.is_empty())
-            .map(|(rel, rows)| (rel, rows.into_iter().collect()))
-            .collect()
-    };
+    // The views' tick's rows: the tables before it, with the rows it wrote and without the carried ones it did not
+    // keep (a row first seen here was not changed since: the tables before the last tick hold it as before).
+    for (rel, (shown, hidden)) in written {
+        let of = rows.entry(rel).or_default();
+        for row in shown {
+            of.entry(row).or_insert((false, false)).0 = true;
+        }
+        for row in hidden {
+            of.entry(row).or_insert((true, true)).0 = false;
+        }
+    }
+    let mut before = blossom_ir::tick::Changes::default();
+    for (rel, of) in rows {
+        let (mut ins, mut del) = (Vec::new(), Vec::new());
+        for (row, (seen, now)) in of {
+            match (seen, now) {
+                (false, true) => ins.push(row),
+                (true, false) => del.push(row),
+                _ => {}
+            }
+        }
+        if !ins.is_empty() {
+            before.inserted.insert(rel, ins);
+        }
+        if !del.is_empty() {
+            before.deleted.insert(rel, del);
+        }
+    }
+    let mut changes = blossom_ir::tick::Changes::default();
+    for (rel, (inserted, deleted)) in last.changes {
+        if !inserted.is_empty() {
+            changes.inserted.insert(rel, inserted);
+        }
+        if !deleted.is_empty() {
+            changes.deleted.insert(rel, deleted);
+        }
+    }
     blossom_ir::tick::CatchUp {
-        before: blossom_ir::tick::Changes {
-            inserted: changes(ins),
-            deleted: changes(del),
-        },
-        last: blossom_ir::tick::Changes {
-            inserted: last
-                .changes
-                .iter()
-                .map(|(r, (i, _))| (*r, i.clone()))
-                .filter(|(_, i)| !i.is_empty())
-                .collect(),
-            deleted: last
-                .changes
-                .iter()
-                .map(|(r, (_, d))| (*r, d.clone()))
-                .filter(|(_, d)| !d.is_empty())
-                .collect(),
-        },
+        before,
+        last: changes,
         last_tick,
     }
 }

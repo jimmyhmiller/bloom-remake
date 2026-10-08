@@ -11,6 +11,7 @@
 
 mod cold;
 mod engine;
+mod purity;
 mod expr;
 mod func;
 mod rule;

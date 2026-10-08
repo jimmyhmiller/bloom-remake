@@ -231,16 +231,22 @@ row of more than one support, its count (`ctag(…) ++ row key ++ count`). A tic
 changed row's count before and after) go with the released tick, applied with the tables' delta at the tick's version;
 they are not logged in the WAL: they are recomputed from the tables'.
 
-**Versions.** A view's rows at tick `t` are computed from the tables as tick `t` starts, the state the tables have at
-version `t-1`; they are applied at version `t`. So at version `v` the database holds the tables as of `v` and the
-views as of the tables at `v-1`.
+**Versions.** A view's rows at tick `t` are computed from its sources' rows at tick `t`: the tables at version `t-1`
+(what was carried into the tick), with what tick `t`'s rules wrote into them (a row emitted into a durable table
+shows the tick it is written; a lattice row merges past its carried one). They are applied at version `t`. So at
+version `v` the database holds the tables as of `v` and the views as of the tables at `v-1` with what tick `v` wrote.
+What a tick wrote into the views' sources is not in the tables at any version (a row written and deleted in the tick
+never is), so each tick's WAL record logs it with the tick's change: its rows that were not carried, and the carried
+ones not present, mostly as bits over the change's inserts and deletes.
 
 **The restart.** The database's tables cover version `F` (its last flush): the views there are those of the tables at
-`F-1`. Recovery replays the WAL after `F` into the tables (version `V`, the last released tick), and hands the engine
-the replayed ticks' changes from tick `F` on (the WAL keeps tick `F`'s record: it truncates only records before the
-flushed version). At its first tick the engine first catches the views up, before the tick: the tiered tables read
-as of `V-1` (their last record undone in the overlay), showing the net change of ticks `F..V-1` as their change, and
-only the durable rules run. Then the boot tick runs as any tick: the tables show tick `V`'s change, and the views
+`F-1` with what tick `F` wrote. Recovery replays the WAL after `F` into the tables (version `V`, the last released
+tick), and hands the engine the change from the views' rows to the tables at `V-1`, computed from the records from
+tick `F`'s on (the WAL keeps tick `F`'s record: it truncates only records before the flushed version; a tick that
+changed no durable row and wrote nothing beyond its carried rows has none, and its rows were the tables'). At its
+first tick the engine first catches the views up, before the tick: the tiered tables read as of `V-1` (their last
+record undone in the overlay), showing that change as theirs (the durable tables kept in memory start from the views'
+rows and take it), and only the durable rules run. Then the boot tick runs as any tick: the tables show tick `V`'s change, and the views
 move with it. What memory held and the restart lost (views that are not durable, aggregates' groups, the next
 state's other supports, recursive strata) is derived again at the boot tick in full. A view whose definition is new
 (a new program, or a store from before views) starts empty and is built at that boot from its tables' rows, once.
