@@ -19,7 +19,10 @@ channel todo(w: Node<Browser>, n: u64, v: u64, at: Instant, title: String, done:
 
 at Server {
     /// Every todo, by its tab and number, at its latest version; kept across restarts.
-    durable table items(w: Node<Browser>, n: u64, v: u64, at: Instant, title: String, done: bool, alive: bool) key(w, n);
+    durable table items(w: Node<Browser>, n: u64, v: u64, at: Instant, title: String, done: bool, alive: bool) key(
+        w,
+        n
+    );
     /// The tabs connected now.
     table online(b: Node<Browser>);
 
@@ -31,7 +34,7 @@ at Server {
         delete online(b);
     }
     /// The last change of each todo in a tick (between tabs, the greater tab).
-    view latest(w, n, at, t, d, a) = set(w, n, s, at, t, d, a) from b, choose_most!((s, b, at, t, d, a) per (w, n));
+    view latest(w, n, at, t, d, a) = set(w, n, s, at, t, d, a) from b, choose_most!((s, b, at, t, d, a) per(w, n));
     view version(w, n, v = max!(x default 0u64)) = per latest(w, n, _, _, _, _), items(w, n, x, _, _, _, _);
 
     take: on latest(w, n, at, t, d, a), version(w, n, v) {
@@ -51,7 +54,10 @@ at Browser {
 
     /// The todos as this tab knows them, by tab and number: each one's version from the server (0 for one made here
     /// that the server has not confirmed); kept across reloads.
-    durable table todos(w: Node<Browser>, n: u64, v: u64, at: Instant, title: String, done: bool, alive: bool) key(w, n);
+    durable table todos(w: Node<Browser>, n: u64, v: u64, at: Instant, title: String, done: bool, alive: bool) key(
+        w,
+        n
+    );
     /// The number of this tab's next todo, and of its next change.
     durable table next_n(n: u64) key();
     durable table next_s(s: u64) key();
@@ -130,7 +136,7 @@ at Browser {
     // ------------------------------------------------------------ the server
 
     /// The newest version heard of each todo; one older than what the tab has changes nothing.
-    view heard(w, n, v, at, t, d, a) = todo(w, n, v, at, t, d, a), choose_most!((v, at, t, d, a) per (w, n));
+    view heard(w, n, v, at, t, d, a) = todo(w, n, v, at, t, d, a), choose_most!((v, at, t, d, a) per(w, n));
     hear_new: on heard(w, n, v, at, t, d, a), not todos(w, n, _, _, _, _, _) {
         upsert todos(w, n, v, at, t, d, a);
     }
@@ -178,8 +184,7 @@ at Browser {
         upsert next_s(s + 1u64);
     }
 
-    destroy: on click(id), destroy_of(id, w, n), todos(w, n, v, at, title, done, true), next_change(s),
-            srv in Server {
+    destroy: on click(id), destroy_of(id, w, n), todos(w, n, v, at, title, done, true), next_change(s), srv in Server {
         upsert todos(w, n, v, at, title, done, false);
         send set(w, n, s, at, title, done, false) to srv;
         upsert next_s(s + 1u64);
@@ -199,7 +204,8 @@ at Browser {
     /// Enter or leaving the field saves the edit (an empty title deletes the todo); Escape drops it. The field's
     /// removal fires a blur after Enter or Escape, when nothing is being edited any more.
     save_edit: on keydown(id, key, value), editing(w, n), edit_of(id, w, n), todos(w, n, v, at, _title, done, true),
-            next_change(s), srv in Server where key == "Enter" {
+            next_change(s), srv in Server
+            where key == "Enter" {
         upsert todos(w, n, v, at, value.trim(), done, value.trim() != "");
         send set(w, n, s, at, value.trim(), done, value.trim() != "") to srv;
         upsert next_s(s + 1u64);
