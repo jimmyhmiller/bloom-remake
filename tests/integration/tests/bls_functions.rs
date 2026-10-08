@@ -214,6 +214,42 @@ fn expected(view: &str, n: u64, s: &str, b: &[u8]) -> (Value, Value) {
                     .map(|x| Value::Int(IntValue::I64(x)))),
             ]),
         ),
+        "v_text" => {
+            let strs = |v: Vec<&str>| Value::Vec(v.into_iter().map(|w| Value::Str(w.into())).collect());
+            let pieces = tuple(vec![
+                strs(s.split(' ').collect()),
+                strs(s.trim().split('a').collect()),
+                Value::Str(s.replace('a', "<>").into()),
+                Value::Str(s.replace(' ', "").into()),
+                Value::Str(s.to_uppercase().into()),
+            ]);
+            let tests = tuple(
+                [s.starts_with(' '), s.ends_with('x'), s.contains("ar"), true, true]
+                    .into_iter()
+                    .map(Value::Bool)
+                    .collect(),
+            );
+            (
+                Value::Str(s.into()),
+                tuple(vec![
+                    pieces,
+                    tests,
+                    opt(s.trim().parse::<u64>().ok().map(u)),
+                    opt(Some(u(n))),
+                ]),
+            )
+        }
+        "v_sorted" => {
+            let mut words: Vec<&str> = s.split_whitespace().collect();
+            words.sort();
+            (
+                Value::Str(s.into()),
+                tuple(vec![
+                    Value::Vec(words.into_iter().map(|w| Value::Str(w.into())).collect()),
+                    u(s.len() as u64),
+                ]),
+            )
+        }
         "v_arms" => (
             u(n),
             tuple(vec![
@@ -308,6 +344,8 @@ const VIEWS: &[&str] = &[
     "v_prefix",
     "v_arms",
     "v_parse",
+    "v_text",
+    "v_sorted",
     "v_hash",
     "v_match",
     "v_try",
@@ -999,6 +1037,38 @@ fn a_shift_outside_the_width_is_blsr004_on_both_evaluators() {
     assert_eq!(rows, vec![vec![iv(IntValue::U32, 1 << 31)]]);
     assert!(matches!(
         differential_hosted(&artifact, &[at(1, 31), at(2, 32)], 3),
+        Hosted::Failed(Tick(2), code) if code == "BLSR004"
+    ));
+}
+
+#[test]
+fn a_split_or_replace_by_an_empty_string_is_blsr004_on_both_evaluators() {
+    let artifact = compile("split_empty.bls");
+    let e = artifact.rel_named("e").unwrap();
+    let at = |t: u64, sep: &str| InputEvent {
+        node: NodeId(0),
+        tick: Tick(t),
+        rel: e,
+        row: Arc::from(vec![Value::Str(sep.into())]),
+    };
+    let Hosted::Ran(run) = differential_hosted(&artifact, &[at(1, ",")], 2) else {
+        panic!("a split by a comma runs");
+    };
+    let v = artifact.rel_named("v").unwrap();
+    let rows: Vec<Vec<Value>> = run
+        .node_tick(Tick(1), NodeId(0))
+        .unwrap()
+        .instance
+        .rows(v)
+        .map(|r| r.to_vec())
+        .collect();
+    let strs = |xs: &[&str]| Value::Vec(xs.iter().map(|w| Value::Str((*w).into())).collect());
+    assert_eq!(
+        rows,
+        vec![vec![tuple(vec![strs(&["a", "b"]), Value::Str("a-b".into())])]]
+    );
+    assert!(matches!(
+        differential_hosted(&artifact, &[at(1, ","), at(2, "")], 3),
         Hosted::Failed(Tick(2), code) if code == "BLSR004"
     ));
 }

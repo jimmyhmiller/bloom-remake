@@ -852,6 +852,23 @@ pub enum LibFn {
     BoolToString,
     /// `s.to_string()` on a `String`: `s` (every type has a `to_string`, Appendix B; interpolation relies on it).
     StrToString,
+    /// `s.split(sep) -> Vec<String>`: the pieces between the occurrences of `sep`, in order, empty ones kept (`"a,,b"`
+    /// gives `"a"`, `""`, `"b"`); an empty `sep` is BLSR004.
+    StrSplit,
+    /// `s.replace(from, to) -> String`: every occurrence of `from`, left to right and not overlapping, replaced by
+    /// `to`; an empty `from` is BLSR004.
+    StrReplace,
+    /// `s.starts_with(p)`, `s.ends_with(p)`, `s.contains(p) -> bool` (an empty `p` is in every string).
+    StrStartsWith,
+    StrEndsWith,
+    StrContains,
+    /// `s.to_uppercase()`: Unicode uppercase mapping.
+    StrToUppercase,
+    /// `s.parse_u64() -> Option<u64>`: the decimal integer `s` spells (an optional `+`, then digits), `None` for
+    /// anything else or a value outside `u64`.
+    StrParseU64,
+    /// `v.sort() -> Vec<T>`: the elements in the canonical order of values (LANGUAGE §5.4), duplicates kept.
+    VecSort,
 }
 
 /// Construct data in the Dedalus core IR.

@@ -206,3 +206,12 @@ view v_strings(s, x) = e(n, s, _),
     let x = (s.trim(), s.trim() == "", s.trim() ++ "!", n.to_string(), (0i64 - n as i64).to_string());
 /// Decimal parsing, of the words and of the number as text.
 view v_parse(s, x) = e(n, s, _), let x = (s.parse_i64(), s.to_lowercase().parse_i64());
+/// Splitting, replacing and testing text (S27), and unsigned parsing; a vector sorted.
+fn pieces(s: String) -> (Vec<String>, Vec<String>, String, String, String) {
+    (s.split(" "), s.trim().split("a"), s.replace("a", "<>"), s.replace(" ", ""), s.to_uppercase())
+}
+fn tests(s: String) -> (bool, bool, bool, bool, bool) {
+    (s.starts_with(" "), s.ends_with("x"), s.contains("ar"), s.contains(""), s.trim().starts_with(s.trim()))
+}
+view v_text(s, x) = e(n, s, _), let x = (pieces(s), tests(s), s.trim().parse_u64(), n.to_string().parse_u64());
+view v_sorted(s, x) = e(_, s, _), let x = (s.split_whitespace().sort(), s.to_utf8().len());
