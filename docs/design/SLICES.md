@@ -209,5 +209,7 @@ durability settings. The numbers are reported honestly, as in the etcd compariso
 - **Systems.** Multi-Paxos, the Anna-style KVS, BOOM-FS, BOOM-MR/HOP, the lineage dataflow engine and Tide
   (M9.2, M9.3, M10.3, M11.1, M12.1, M12.2, M13.1).
 - **Operations and release** (M8.7, M11.5, M12.3, M12.4, M13.3, M13.4, M14.1).
+- **Object storage** (OBJECT-STORAGE.md): tiered storage under the store, so a node's immutable files live in a
+  bucket. Researched 2026-10-08, not planned.
 
 Each is still a slice: a named end-to-end demo and corpus gate, built through every layer it touches.
