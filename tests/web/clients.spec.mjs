@@ -1,9 +1,9 @@
 // Pages as members of a node's program (docs/design/CLIENTS.md): a real `blossom run --web` serves the shared TodoMVC
 // (examples/web/todos_shared.bls) and the chat (examples/web/chat.bls), and Chromium tabs run as members of their
 // `Browser` role. Two tabs stay in sync, a reload keeps a tab's identity and state, a tab cut off from the node keeps
-// working and catches up, and the node's restart is survived. Every test runs twice: with the link over a WebSocket,
-// and over plain requests (`--web-link http`, CLIENTS.md §3a), where the page opens no WebSocket at all. Needs the CLI: BLOSSOM_BIN (scripts/test-tiers.sh web
-// builds it and sets it).
+// working and catches up, and the node's restart is survived. Every test runs twice, with the deployment's `[web]
+// link` (CLIENTS.md §3a) set to a WebSocket and to plain requests, where the page opens no WebSocket at all. Needs the
+// CLI: BLOSSOM_BIN (scripts/test-tiers.sh web builds it and sets it).
 import { test, expect } from "@playwright/test";
 import { spawn } from "node:child_process";
 import { copyFileSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
@@ -53,6 +53,8 @@ async function deployment(program, link) {
       'mode = "insecure-dev"',
       "[storage]",
       'data_dir = "data"',
+      "[web]",
+      `link = "${link}"`,
       "",
     ].join("\n"),
   );
@@ -62,7 +64,6 @@ async function deployment(program, link) {
     /** Starts the node (a new one the first time) and waits for its readiness line. */
     async start(fresh) {
       const args = ["run", "--deploy", deploy, "--node", "s", "--insecure-dev", "--web", `127.0.0.1:${web}`];
-      args.push("--web-link", link);
       args.push("--web-root", join(repo, "web"));
       if (fresh) args.push("--init-fresh");
       child = spawn(bin, args, {

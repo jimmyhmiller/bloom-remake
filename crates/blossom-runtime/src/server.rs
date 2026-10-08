@@ -88,8 +88,6 @@ pub struct ServerConfig {
 pub struct WebConfig {
     pub addr: SocketAddr,
     pub root: Option<PathBuf>,
-    /// The link a page uses (`app.json`); the node serves both.
-    pub transport: crate::web::Transport,
 }
 
 /// Counters of what the node did and dropped.
@@ -727,7 +725,7 @@ impl Server {
                 );
             }
             let names: Vec<String> = client_roles.keys().cloned().collect();
-            let app = crate::web::app_json(spec, &names, &cfg.node, w.transport).map_err(RuntimeError::Config)?;
+            let app = crate::web::app_json(spec, &names, &cfg.node, spec.web_link).map_err(RuntimeError::Config)?;
             let registry = blossom_store::ClientRegistry::open(Arc::new(RealFs), &dir)?;
             let queue = data.clone();
             let ctx = WebCtx {

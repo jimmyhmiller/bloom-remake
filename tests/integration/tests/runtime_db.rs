@@ -73,7 +73,6 @@ fn start(spec: &DeploymentSpec, a: &Arc<BlsArtifact>, mode: OpenMode, port: u16)
         web: Some(WebConfig {
             addr: format!("127.0.0.1:{port}").parse().unwrap(),
             root: None,
-            transport: blossom_runtime::web::Transport::WebSocket,
         }),
     })
     .unwrap()
@@ -532,4 +531,39 @@ fn storage_tiered_is_on_unless_a_deployment_opts_out() {
         free_port(),
     );
     assert!(!DeploymentSpec::parse(&text, &dir).unwrap().tiered);
+}
+
+/// `[web] link` (docs/design/CLIENTS.md §3a): pages use plain requests unless the deployment says `websocket`; any
+/// other value is refused.
+#[test]
+fn a_deployment_says_how_its_pages_link() {
+    use blossom_runtime::web::Transport;
+    let (spec, _) = setup("link-default");
+    assert_eq!(
+        spec.web_link,
+        Transport::Http,
+        "a deployment that says nothing links over plain requests"
+    );
+    let dir = std::env::temp_dir().join(format!("blossom-db-link-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let with = |web: &str| {
+        format!(
+            "format = 1\n[deployment]\nid = \"t\"\nprogram = \"chat\"\nversion = 1\nsource = \"{}\"\n\
+             [[node]]\nname = \"s\"\nrole = \"Server\"\naddr = \"127.0.0.1:{}\"\nprincipal = \"spiffe://test/t/Server/s\"\n\
+             [security]\nmode = \"insecure-dev\"\n[storage]\ndata_dir = \"data\"\n{web}",
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/clients/chat.bls")
+                .display(),
+            free_port(),
+        )
+    };
+    let parse = |web: &str| DeploymentSpec::parse(&with(web), &dir);
+    assert_eq!(
+        parse("[web]\nlink = \"websocket\"\n").unwrap().web_link,
+        Transport::WebSocket
+    );
+    assert_eq!(parse("[web]\nlink = \"http\"\n").unwrap().web_link, Transport::Http);
+    let refused = parse("[web]\nlink = \"carrier pigeon\"\n").unwrap_err().to_string();
+    assert!(refused.contains("web.link"), "{refused}");
 }

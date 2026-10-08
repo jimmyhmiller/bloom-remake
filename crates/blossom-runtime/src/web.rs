@@ -361,14 +361,14 @@ fn percent_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// How a page's link reaches the node (docs/design/CLIENTS.md §3, §3a): the node serves both; `app.json` says which a
-/// page uses.
+/// How a page's link reaches the node (docs/design/CLIENTS.md §3, §3a): the node serves both; the deployment's
+/// `[web] link` says which a page uses (`app.json`), plain requests unless it says otherwise.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Transport {
     /// One WebSocket, held open (`/blossom/link`).
-    #[default]
     WebSocket,
     /// Plain requests (`/blossom/http/…`): a long-polled receive and a request per send.
+    #[default]
     Http,
 }
 

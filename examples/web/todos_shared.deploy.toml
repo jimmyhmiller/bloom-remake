@@ -29,3 +29,7 @@ mode = "insecure-dev"
 
 [storage]
 data_dir = ".data"
+
+# How the pages reach the node (docs/design/CLIENTS.md §3a): plain HTTP requests (the default), or "websocket".
+[web]
+link = "http"

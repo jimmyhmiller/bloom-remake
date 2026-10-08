@@ -93,7 +93,6 @@ fn start(spec: &DeploymentSpec, artifact: &Arc<BlsArtifact>, mode: OpenMode, por
         web: Some(WebConfig {
             addr: format!("127.0.0.1:{port}").parse().unwrap(),
             root: None,
-            transport: blossom_runtime::web::Transport::WebSocket,
         }),
     })
     .unwrap()
@@ -413,7 +412,8 @@ Host: localhost
         assert_eq!(answer.headers.get("connection").map(String::as_str), Some("keep-alive"));
         let app: serde_json::Value = serde_json::from_slice(&answer.body).unwrap();
         assert_eq!(app["http"], "/blossom/http");
-        assert_eq!(app["transport"], "websocket");
+        // Plain requests, the deployment not saying otherwise.
+        assert_eq!(app["transport"], "http");
     }
     server.stop().unwrap();
 }
