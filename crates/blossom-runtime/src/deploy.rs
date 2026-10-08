@@ -32,6 +32,9 @@
 //!                                 # every table in memory (faster while it fits), the database still the durable store
 //! tail_certification = "strict"   # or "crc": one fsync per group commit, as etcd (see blossom_store::Certification)
 //!
+//! [web]                           # optional: pages served with `blossom run --web` (docs/design/CLIENTS.md §3a, §4)
+//! link = "http"                   # a page's link: "http" (plain requests, the default) or "websocket"
+//!
 //! [stream_limits]                 # optional, in bytes (FOREIGN-PROTOCOLS §1.2; defaults in streams::StreamLimits)
 //! max_stream_bytes = 1048576      # one connection's `data` in one tick
 //! read_ahead_bytes = 1048576      # one connection's reads queued ahead of the engine
@@ -75,6 +78,15 @@ struct RawSpec {
     storage: RawStorage,
     #[serde(default)]
     stream_limits: RawStreamLimits,
+    #[serde(default)]
+    web: RawWeb,
+}
+
+/// `[web]`: how the pages a node serves reach it.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawWeb {
+    link: Option<String>,
 }
 
 /// `[stream_limits]`: the byte limits of the nodes' streams; each defaults to [`StreamLimits::default`]'s.
@@ -185,6 +197,9 @@ pub struct DeploymentSpec {
     pub stream_limits: crate::streams::StreamLimits,
     /// How new stores certify their WAL tail (an existing store keeps the one it was created with, and must match).
     pub tail_certification: blossom_store::Certification,
+    /// The link the pages a node serves use (`[web] link`): plain requests unless the deployment says `websocket`.
+    /// The program means the same over either (docs/design/CLIENTS.md §3a): it is where the program runs that decides.
+    pub web_link: crate::web::Transport,
 }
 
 fn invalid(key: &str, what: impl std::fmt::Display) -> RuntimeError {
@@ -300,6 +315,11 @@ impl DeploymentSpec {
             backlog_bytes: positive("backlog_bytes", l.backlog_bytes, d.backlog_bytes)?,
             write_queue_bytes: positive("write_queue_bytes", l.write_queue_bytes, d.write_queue_bytes)?,
         };
+        let web_link = match raw.web.link.as_deref() {
+            None => crate::web::Transport::default(),
+            Some(l) => crate::web::Transport::parse(l)
+                .ok_or_else(|| invalid("web.link", format!("`{l}` is neither \"http\" nor \"websocket\"")))?,
+        };
         Ok(DeploymentSpec {
             id: raw.deployment.id,
             program: raw.deployment.program,
@@ -316,6 +336,7 @@ impl DeploymentSpec {
             tiered: raw.storage.tiered.unwrap_or(true),
             tail_certification,
             stream_limits,
+            web_link,
         })
     }
 

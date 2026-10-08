@@ -51,15 +51,10 @@ pub struct Args {
     #[arg(long, value_name = "DIR")]
     pub record: Option<PathBuf>,
     /// Serve the page and client members' links on this address (docs/design/CLIENTS.md §4): the page's files,
-    /// `/blossom/app.json`, and a member's link over a WebSocket (`/blossom/link`) or plain requests
-    /// (`/blossom/http/…`).
+    /// `/blossom/app.json`, and a member's link over plain requests (`/blossom/http/…`) or a WebSocket
+    /// (`/blossom/link`); the deployment's `[web] link` says which pages use.
     #[arg(long, value_name = "ADDR")]
     pub web: Option<std::net::SocketAddr>,
-    /// The link the page uses for `--web` (docs/design/CLIENTS.md §3a): `websocket` (one connection held open) or
-    /// `http` (plain requests: a long-polled receive and a request per send). The node serves both; a page's
-    /// `?link=` overrides it.
-    #[arg(long, value_name = "LINK", default_value = "websocket", value_parser = ["websocket", "http"])]
-    pub web_link: String,
     /// Serve queries of the node's database on this address (`blossom query`, docs/design/DATABASE.md §5). The admin
     /// plane has no authentication yet: `insecure-dev` deployments only.
     #[arg(long, value_name = "ADDR")]
@@ -157,17 +152,9 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
                 );
                 return Exit::Refused.into();
             }
-            let Some(transport) = blossom_runtime::web::Transport::parse(&args.web_link) else {
-                eprintln!(
-                    "blossom run: `--web-link {}` is neither `websocket` nor `http`",
-                    args.web_link
-                );
-                return Exit::Usage.into();
-            };
             Some(blossom_runtime::server::WebConfig {
                 addr,
                 root: Some(args.web_root.clone()),
-                transport,
             })
         }
     };

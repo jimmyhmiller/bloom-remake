@@ -13,7 +13,8 @@ The user (2026-10-06): "Could we make the browser a participant in this with a s
 
 S27 (2026-10-08): "I definitely want to be able to do the HTTP stuff, and make it so you don't have to do web sockets.
 I don't know how I want to expose that, but that's the goal." The link also runs over plain requests (§3a); the node
-serves both, and which a page uses is a flag for now (`--web-link`, §4).
+serves both. Asked where the choice belongs, the user chose the deployment, with plain requests by default: the
+program means the same over either, so it is where it runs that decides (`[web] link`, §4).
 
 ## 1. The language
 
@@ -152,8 +153,9 @@ listeners:
 
 - `GET /` and the page's files from `--web-root` (the built host: `index.html`, `host.js`, `host.css`, `pkg/`);
 - `GET /blossom/app.json`: the program's source files, the deployment (node names and roles), this node's name, the
-  WebSocket path (`link`), the requests' path (`http`), and which of the two a page uses (`transport`: `websocket`,
-  or `http` with `--web-link http`; a page's `?link=websocket|http` overrides it);
+  WebSocket path (`link`), the requests' path (`http`), and which of the two a page uses (`transport`: the
+  deployment's `[web] link`, `http` unless it says `websocket`; a page's `?link=websocket|http` overrides it, for
+  tests);
 - `GET /blossom/link` upgraded to a WebSocket: the link of §3;
 - `/blossom/http/…`: the link of §3a.
 
