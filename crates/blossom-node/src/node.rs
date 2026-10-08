@@ -303,6 +303,19 @@ fn count_blobs<'r>(
     Ok(changed)
 }
 
+/// The durable views' rows a tick's changes brought and took (their support crossing zero).
+fn view_presence(views: &BTreeMap<RelId, Vec<(Row, u64, u64)>>) -> (Vec<Row>, Vec<Row>) {
+    let (mut came, mut went) = (Vec::new(), Vec::new());
+    for (row, before, after) in views.values().flatten() {
+        match (*before > 0, *after > 0) {
+            (false, true) => came.push(row.clone()),
+            (true, false) => went.push(row.clone()),
+            _ => {}
+        }
+    }
+    (came, went)
+}
+
 impl<E: Executor> Node<E> {
     /// Boots a node of `program` (the program the executor runs) from recovered state: the executor starts from the
     /// durable rows (volatile state does not survive a restart).
@@ -679,6 +692,16 @@ impl<E: Executor> Node<E> {
                 }
             }
         }
+        // A durable view's rows are kept as the carried ones are (DATABASE.md §8): their blobs count the same.
+        let (came, went) = view_presence(&out.views);
+        for b in count_blobs(&mut self.carried_refs, &came, true)? {
+            self.candidates.remove(&b);
+        }
+        for b in count_blobs(&mut self.carried_refs, &went, false)? {
+            if self.durable_blobs.contains(&b) {
+                self.candidates.insert(b);
+            }
+        }
         // The durable delta is the change to the durable relations.
         let mut delta = Delta::default();
         for (rel, rows) in &out.changes.inserted {
@@ -691,6 +714,18 @@ impl<E: Executor> Node<E> {
                 delta.changes.entry(*rel).or_default().1.extend(rows.iter().cloned());
             }
         }
+        // How the durable views' sources' rows at the tick differ from the carried ones: logged with the change, for
+        // a restart's catch-up of the views (DATABASE.md §8).
+        for (rel, rows) in std::mem::take(&mut out.written.inserted) {
+            if self.schema.contains(rel) && !rows.is_empty() {
+                delta.written.entry(rel).or_default().0 = rows;
+            }
+        }
+        for (rel, rows) in std::mem::take(&mut out.written.deleted) {
+            if self.schema.contains(rel) && !rows.is_empty() {
+                delta.written.entry(rel).or_default().1 = rows;
+            }
+        }
         let halts = self
             .cfg
             .halt
@@ -699,7 +734,7 @@ impl<E: Executor> Node<E> {
         // A new node's first boot tick always leaves a WAL record, even an empty one: it marks the store as holding
         // a boot that happened, so a restart knows it recovers (`recovered()`). Until that record is durable the
         // boot did not happen: nothing of it is released, and a crash before the sync boots fresh again.
-        let wal = !delta.is_empty() || (!self.booted && !self.recovered);
+        let wal = !delta.is_quiet() || (!self.booted && !self.recovered);
         // The blobs the record's new rows reference and that are not durable yet: the driver makes them durable
         // before the record syncs.
         let mut referenced = BTreeSet::new();
@@ -898,6 +933,9 @@ impl<E: Executor> Node<E> {
                 count_blobs(&mut self.released_refs, inserted, true)?;
                 count_blobs(&mut self.released_refs, deleted, false)?;
             }
+            let (came, went) = view_presence(&p.views);
+            count_blobs(&mut self.released_refs, &came, true)?;
+            count_blobs(&mut self.released_refs, &went, false)?;
             self.released = Some(p.tick);
             if p.halts {
                 self.state = NodeState::Halted;

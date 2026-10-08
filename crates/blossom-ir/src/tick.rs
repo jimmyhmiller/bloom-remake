@@ -249,8 +249,9 @@ pub struct FnWork {
     pub self_steps: u64,
 }
 
-/// A restart's catch-up of the durable views (docs/design/DATABASE.md §8): the durable tables' net change over the
-/// ticks the views have not seen but the last, and the last released tick's change (with its tick).
+/// A restart's catch-up of the durable views (docs/design/DATABASE.md §8): the durable tables' change from the rows the
+/// views were computed from (the tables before the views' tick, with what that tick wrote beyond them) to the tables
+/// before the last released tick, and the last released tick's change (with its tick).
 #[derive(Clone, Debug, Default)]
 pub struct CatchUp {
     pub before: Changes,
@@ -273,6 +274,10 @@ pub struct StepOutput {
     /// The tick's changes to durable views (docs/design/DATABASE.md §8): each changed row's support before and after.
     /// Kept in the database with the tick's tables, not logged: they are recomputed from the tables.
     pub views: BTreeMap<RelId, Vec<(Row, u64, u64)>>,
+    /// For the durable views' sources: how each one's rows at the tick differ from those carried into it (its rules
+    /// wrote them): rows present beyond the carried ones, and carried ones not present (a lattice's row merged past).
+    /// The views' rows at the tick were computed from them (DATABASE.md §8): a restart's catch-up starts there.
+    pub written: Changes,
 }
 
 /// Checks that `registry` provides every host function `program` declares (`extern fn`), with the declared

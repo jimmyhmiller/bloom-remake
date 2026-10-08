@@ -435,6 +435,9 @@ pub(crate) struct Tiered {
     first: bool,
     /// How many rows are present.
     len: usize,
+    /// The rows present this tick that were not carried into it (a rule of the tick wrote them): what the tick's
+    /// rows hold beyond the table's previous version (docs/design/DATABASE.md §8).
+    uncarried: BTreeSet<Row>,
 }
 
 impl std::fmt::Debug for Tiered {
@@ -483,6 +486,7 @@ impl Tiered {
             fresh,
             first: false,
             len,
+            uncarried: BTreeSet::new(),
         })
     }
 
@@ -892,10 +896,31 @@ impl Store {
         }
     }
 
-    /// Whether a present row holds `b`. A tiered table answers for none: after a tick's end its rows are exactly the
-    /// carried ones, whose blobs the node counts itself (`Engine::holds_blob`).
+    /// Whether a present row holds `b`. A tiered store answers for its rows of support kept in memory only (a mixed
+    /// relation's other rules'): its other rows are carried or kept with the database's, whose blobs the node counts
+    /// itself (`Engine::holds_blob`).
     pub fn holds_blob(&self, b: &blossom_value::BlobRef) -> bool {
+        if self.tiered.is_some() {
+            return self.counts.keys().any(|row| {
+                let mut bs = BTreeSet::new();
+                row.iter().for_each(|v| blossom_value::blobs_in(v, &mut bs));
+                bs.contains(b)
+            });
+        }
         self.blob_refs.as_ref().is_some_and(|m| m.contains_key(b))
+    }
+
+    /// Adds `w` to `row`'s support, as [`Store::add`] does; `volatile`: support kept in memory only, never with the
+    /// database's (a mixed relation's rules that are not durable, DATABASE.md §8).
+    pub fn add_by(&mut self, row: Row, w: i64, volatile: bool) -> ExprResult<()> {
+        if volatile && self.tiered.is_some() {
+            if w == 0 {
+                return Ok(());
+            }
+            self.touched = true;
+            return self.add_tiered(row, w);
+        }
+        self.add(row, w)
     }
 
     fn count_blobs(&mut self, row: &Row, shown: bool) {
@@ -1056,7 +1081,9 @@ impl Store {
         t.changed.entry(row.clone()).or_insert(before);
         let now = t.now;
         t.set_overlay(&row, after, now);
-        match (before > 0, after > 0) {
+        // Support kept in memory only (a mixed relation's other rules') keeps the row present either way.
+        let other = self.counts.contains_key(&row);
+        match (before > 0 || other, after > 0 || other) {
             (false, true) => self.show(row),
             (true, false) => self.hide(&row),
             _ => {}
@@ -1119,12 +1146,33 @@ impl Store {
             return Err(bug(format!("the support of {row:?} went negative")));
         }
         let is = self.contains(&row).map_err(ExprError::Eval)?;
+        // A row that shows or hides here is not carried (a carried row is present either way).
+        if let Some(t) = self.tiered.as_deref_mut() {
+            match (was, is) {
+                (false, true) => {
+                    t.uncarried.insert(row.clone());
+                }
+                (true, false) => {
+                    t.uncarried.remove(&row);
+                }
+                _ => {}
+            }
+        }
         match (was, is) {
             (false, true) => self.show(row),
             (true, false) => self.hide(&row),
             _ => {}
         }
         Ok(())
+    }
+
+    /// A tiered table's rows present this tick that were not carried into it (DATABASE.md §8); none for another
+    /// store.
+    pub fn uncarried(&self) -> Vec<Row> {
+        self.tiered
+            .as_deref()
+            .map(|t| t.uncarried.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// A tiered store takes tick `tick`'s change to its carry (the change to the table's next state, a net one: a row
@@ -1165,6 +1213,7 @@ impl Store {
             return Ok(());
         };
         t.now = tick;
+        t.uncarried.clear();
         t.first = std::mem::take(&mut t.fresh);
         if t.first {
             // Every row is new to the rules (their stores start empty after a reset): read whole, this once.

@@ -59,11 +59,22 @@ pub struct DurableImage {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Delta {
     pub changes: BTreeMap<RelId, (Vec<Row>, Vec<Row>)>,
+    /// For the durable views' sources (docs/design/DATABASE.md §8): how the tick's rows differ from those carried
+    /// into it (rows its rules wrote, and carried rows not present). Logged with the change (most are among its
+    /// inserts and deletes, logged as bits over them): a restart's catch-up of the views starts from the rows of the
+    /// tick the database's views were computed at.
+    pub written: BTreeMap<RelId, (Vec<Row>, Vec<Row>)>,
 }
 
 impl Delta {
+    /// Whether the tick changed no durable row.
     pub fn is_empty(&self) -> bool {
         self.changes.values().all(|(i, d)| i.is_empty() && d.is_empty())
+    }
+
+    /// Whether the tick has nothing to log: it changed no durable row, and its rows were the carried ones.
+    pub fn is_quiet(&self) -> bool {
+        self.is_empty() && self.written.values().all(|(i, d)| i.is_empty() && d.is_empty())
     }
 }
 
@@ -96,7 +107,10 @@ impl DurableImage {
                 changes.insert(*rel, (Vec::new(), old.iter().cloned().collect()));
             }
         }
-        Delta { changes }
+        Delta {
+            changes,
+            written: BTreeMap::new(),
+        }
     }
 
     pub fn apply(&mut self, delta: &Delta) {
@@ -395,6 +409,39 @@ impl<'p> DurableCodec<'p> {
             self.put_rows(*rel, inserts, &mut out)?;
             self.put_rows(*rel, deletes, &mut out)?;
         }
+        // The rows the tick wrote beyond its carried ones (a record before them has none): each side as bits over the
+        // change's rows of that side, and the rows not among them.
+        let written: Vec<_> = delta
+            .written
+            .iter()
+            .filter(|(_, (i, d))| !i.is_empty() || !d.is_empty())
+            .collect();
+        if written.is_empty() {
+            return Ok(out);
+        }
+        put_varint(&mut out, written.len() as u64);
+        let none = (Vec::new(), Vec::new());
+        for (rel, (shown, hidden)) in written {
+            self.put_header(*rel, &mut out)?;
+            let (inserts, deletes) = delta.changes.get(rel).unwrap_or(&none);
+            for (rows, among) in [(shown, inserts), (hidden, deletes)] {
+                let at: BTreeMap<&Row, usize> = among.iter().enumerate().map(|(i, r)| (r, i)).collect();
+                let mut bits = vec![0u8; among.len().div_ceil(8)];
+                let mut others = Vec::new();
+                for row in rows {
+                    let Some(i) = at.get(row) else {
+                        others.push(row.clone());
+                        continue;
+                    };
+                    let byte = bits.get_mut(i / 8).ok_or_else(|| {
+                        blossom_base::internal_error!("a written row's bit is past the change's rows")
+                    })?;
+                    *byte |= 1 << (i % 8);
+                }
+                out.extend_from_slice(&bits);
+                self.put_rows(*rel, &others, &mut out)?;
+            }
+        }
         Ok(out)
     }
 
@@ -408,10 +455,34 @@ impl<'p> DurableCodec<'p> {
             let deletes = self.get_rows(rel, input)?;
             changes.insert(rel, (inserts, deletes));
         }
+        let mut written = BTreeMap::new();
+        if !input.is_empty() {
+            let n = get_varint(input)?;
+            let none = (Vec::new(), Vec::new());
+            for _ in 0..n {
+                let rel = self.get_header(input)?;
+                let (inserts, deletes) = changes.get(&rel).unwrap_or(&none);
+                let mut sides = Vec::with_capacity(2);
+                for among in [inserts, deletes] {
+                    let bits = take(input, among.len().div_ceil(8), "a WAL record's written rows")?;
+                    let mut rows: Vec<Row> = among
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| bits.get(i / 8).is_some_and(|b| b & (1 << (i % 8)) != 0))
+                        .map(|(_, r)| r.clone())
+                        .collect();
+                    rows.extend(self.get_rows(rel, input)?);
+                    sides.push(rows);
+                }
+                let hidden = sides.pop().unwrap_or_default();
+                let shown = sides.pop().unwrap_or_default();
+                written.insert(rel, (shown, hidden));
+            }
+        }
         if !input.is_empty() {
             return Err(WireError::Malformed("trailing bytes in a WAL record".into()).into());
         }
-        Ok(Delta { changes })
+        Ok(Delta { changes, written })
     }
 
     /// A checkpoint of every durable relation: `relations[i]` holds relation `i` of the catalog.

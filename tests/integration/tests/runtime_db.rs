@@ -445,7 +445,10 @@ fn the_database_recovers_from_a_crash_anywhere_in_its_flushes() {
         let mut changes = std::collections::BTreeMap::new();
         let deleted = if t >= 3 { vec![row(t - 3)] } else { vec![] };
         changes.insert(rel, (vec![row(t)], deleted));
-        let delta = Delta { changes };
+        let delta = Delta {
+            changes,
+            ..Delta::default()
+        };
         present.insert(t);
         if t >= 3 {
             present.remove(&(t - 3));

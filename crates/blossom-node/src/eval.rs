@@ -105,6 +105,8 @@ pub fn whole_instance(carried: Instance, cold: &dyn ColdTables) -> Result<Instan
 pub struct OracleExecutor<E: Evaluator> {
     eval: E,
     carried: Instance,
+    /// The last tick's whole instance, when asked to keep it (`CheckedExecutor`, to name what differs).
+    instance: Option<Instance>,
 }
 
 impl<E: Evaluator> OracleExecutor<E> {
@@ -112,7 +114,14 @@ impl<E: Evaluator> OracleExecutor<E> {
         OracleExecutor {
             eval,
             carried: Instance::default(),
+            instance: None,
         }
+    }
+
+    /// Keeps each tick's whole instance (O(state) a tick).
+    fn keeping_instances(mut self) -> OracleExecutor<E> {
+        self.instance = Some(Instance::default());
+        self
     }
 }
 
@@ -140,6 +149,9 @@ impl<E: Evaluator> Executor for OracleExecutor<E> {
             .iter()
             .map(|r| (*r, out.instance.rows(*r).cloned().collect()))
             .collect();
+        if self.instance.is_some() {
+            self.instance = Some(out.instance.clone());
+        }
         self.carried = out.next;
         Ok(StepOutput {
             changes,
@@ -149,6 +161,7 @@ impl<E: Evaluator> Executor for OracleExecutor<E> {
             observed,
             blobs: out.blobs,
             views: BTreeMap::new(),
+            written: Changes::default(),
         })
     }
 
@@ -458,7 +471,7 @@ impl Executors {
             Backend::Oracle => Box::new(OracleExecutor::new(self.oracle.clone())),
             Backend::Checked => Box::new(CheckedExecutor {
                 engine: blossom_engine::Engine::new(self.program.clone(), node, self.engine.clone())?,
-                oracle: OracleExecutor::new(self.oracle.clone()),
+                oracle: OracleExecutor::new(self.oracle.clone()).keeping_instances(),
                 program: self.program.clone(),
             }),
         })
@@ -514,6 +527,40 @@ fn first_difference(p: &blossom_ir::core::Program, oracle: &StepOutput, engine: 
     None
 }
 
+impl CheckedExecutor {
+    /// The relations whose rows at the last tick differ between the oracle and the engine (the engine's tiered tables
+    /// left out: they hold the next tick's rows by then, and their changes are compared already).
+    fn differing_relations(&self) -> String {
+        let p = self.program.get();
+        let Some(oracle) = &self.oracle.instance else {
+            return "(the oracle kept no instance)".into();
+        };
+        let engine = match self.engine.instance_now() {
+            Ok(i) => i,
+            Err(e) => return format!("(the engine's instance: {e})"),
+        };
+        let mut out = Vec::new();
+        for (rel, rows) in &engine {
+            let theirs: std::collections::BTreeSet<Row> = oracle.rows(*rel).cloned().collect();
+            if *rows != theirs {
+                let name = p
+                    .rels
+                    .get(*rel)
+                    .map_or_else(|| format!("{rel:?}"), |d| d.name.to_string());
+                let only_engine: Vec<&Row> = rows.difference(&theirs).take(3).collect();
+                let only_oracle: Vec<&Row> = theirs.difference(rows).take(3).collect();
+                out.push(format!(
+                    "{name} (engine only {only_engine:?}, oracle only {only_oracle:?})"
+                ));
+            }
+            if out.len() == 5 {
+                break;
+            }
+        }
+        if out.is_empty() { "none".into() } else { out.join("; ") }
+    }
+}
+
 impl Executor for CheckedExecutor {
     fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
         self.oracle.reset(carried.clone())?;
@@ -532,9 +579,10 @@ impl Executor for CheckedExecutor {
             (Ok(o), Ok(e)) => match first_difference(self.program.get(), &o, &e) {
                 None => Ok(e),
                 Some(d) => Err(blossom_base::internal_error!(
-                    "the engine and the oracle differ at tick {} of node {}: {d}",
+                    "the engine and the oracle differ at tick {} of node {}: {d}; relations that differ at the tick: {}",
                     input.tick.0,
-                    input.node.0
+                    input.node.0,
+                    self.differing_relations()
                 )
                 .into()),
             },
