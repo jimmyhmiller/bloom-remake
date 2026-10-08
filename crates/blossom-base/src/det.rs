@@ -90,6 +90,9 @@ const fn folded_multiply(x: u64, y: u64) -> u64 {
     (full as u64) ^ ((full >> 64) as u64)
 }
 
+/// From this many bytes on, [`DetHasher::write`] mixes four words at a time.
+const LONG: usize = 64;
+
 /// A keyed folded-multiply hasher. Created by [`DetState`]; byte order is fixed (little-endian), so hashes are
 /// the same on every platform.
 #[derive(Clone, Debug)]
@@ -132,7 +135,25 @@ impl Hasher for DetHasher {
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        let mut chunks = bytes.chunks_exact(8);
+        let mut rest = bytes;
+        if bytes.len() >= LONG {
+            // A long input: four chains over its words in turn, each mixed as a short input's are. They do not wait
+            // on each other, so they run side by side; then each is folded in, in order.
+            let mut lanes = [self.acc ^ PI[0], self.acc ^ PI[1], self.acc ^ PI[2], self.acc ^ PI[3]];
+            let mut blocks = bytes.chunks_exact(32);
+            for block in &mut blocks {
+                for (lane, chunk) in lanes.iter_mut().zip(block.chunks_exact(8)) {
+                    let mut word = [0u8; 8];
+                    word.copy_from_slice(chunk);
+                    *lane = folded_multiply(*lane ^ u64::from_le_bytes(word), self.mul);
+                }
+            }
+            for lane in lanes {
+                self.write_u64(lane);
+            }
+            rest = blocks.remainder();
+        }
+        let mut chunks = rest.chunks_exact(8);
         for chunk in &mut chunks {
             let mut word = [0u8; 8];
             word.copy_from_slice(chunk);
@@ -1007,6 +1028,35 @@ mod tests {
         assert_eq!(a.sorted(), c.sorted());
         assert_eq!(format!("{a:?}"), format!("{c:?}"));
         assert_eq!(serde_json::to_string(&a).unwrap(), serde_json::to_string(&c).unwrap());
+    }
+
+    /// A long input (four chains over its words) tells apart inputs that differ in one byte, in every chain, in
+    /// the words after the last whole block, and in their length.
+    #[test]
+    fn long_inputs_differ_by_any_byte() {
+        let fixed = DetState::fixed();
+        let hash = |bytes: &[u8]| {
+            let mut h = fixed.build_hasher();
+            h.write(bytes);
+            h.finish()
+        };
+        let base: Vec<u8> = (0..150u32).map(|i| (i * 7) as u8).collect();
+        let mut seen = std::collections::BTreeSet::new();
+        assert!(seen.insert(hash(&base)));
+        for at in 0..base.len() {
+            let mut other = base.clone();
+            other[at] ^= 1;
+            assert!(seen.insert(hash(&other)), "a change at byte {at} collides");
+        }
+        for len in LONG - 1..base.len() {
+            assert!(seen.insert(hash(&base[..len])), "a prefix of {len} bytes collides");
+        }
+        // Words swapped between two chains.
+        let mut swapped = base.clone();
+        swapped.copy_within(0..8, 8);
+        swapped[..8].copy_from_slice(&base[8..16]);
+        assert!(seen.insert(hash(&swapped)));
+        assert_eq!(hash(&base), hash(&base.clone()));
     }
 
     #[test]
