@@ -12,6 +12,7 @@ pub mod client;
 pub mod clock;
 pub mod db;
 pub mod deploy;
+pub mod http_link;
 pub mod members;
 pub mod net;
 pub mod query;

@@ -11,6 +11,10 @@ The user (2026-10-06): "Could we make the browser a participant in this with a s
 - **C3.** Demos: TodoMVC with its list on the server, then a chat room.
 - **C4.** `blossom run` serves the page and a WebSocket (`--web ADDR`); no separate dev server.
 
+S27 (2026-10-08): "I definitely want to be able to do the HTTP stuff, and make it so you don't have to do web sockets.
+I don't know how I want to expose that, but that's the goal." The link also runs over plain requests (§3a); the node
+serves both, and which a page uses is a flag for now (`--web-link`, §4).
+
 ## 1. The language
 
 ```blossom
@@ -104,18 +108,57 @@ A client's message must be addressed to the server node it is connected to; one 
 counted (`dropped_unroutable`). Replies to a client that is not connected go to its replay buffer while its identity
 is known, else they are dropped and counted (`dropped_closed_session`).
 
+## 3a. The link over plain requests (S27)
+
+The same link without a held connection: the frames, their numbers and acknowledgements, the replay buffer, the
+offline queue and `resumed` are §3's. Requests carry the frames, and a **session** stands for the connection: it is
+what a `connected` opens and a `disconnected` closes.
+
+- `POST /blossom/http/open`, the body the page's `HELLO`: answered with the node's `HELLO` and `HELLO_OK` (or a
+  `REJECT`) and, when the member is admitted, the session's id in `Blossom-Session` (128 random bits: only the page
+  holding it can use the session; the token is presented once, at the open).
+- `GET /blossom/http/SESSION/recv`: the node's frames for the page in order (the `WELCOME`, then `MSG`s and `ACK`s),
+  answered as soon as there are some or empty after 25 s (a long poll). The page keeps exactly one outstanding, and
+  only receives answer with frames, so the frames arrive in order without a numbering of their own.
+- `POST /blossom/http/SESSION/send`: the page's frames (`MSG`, `ACK`), answered `204`. A page sends a request at a
+  time; frames written meanwhile go together in the next.
+- `POST /blossom/http/SESSION/close`: the page is going (`navigator.sendBeacon` on a final `pagehide`).
+
+A body is frames, each a 4-byte big-endian length and the frame's bytes. Requests on a connection the client keeps
+(HTTP/1.1 keep-alive) are served in turn: a poll does not open a connection each time.
+
+**When a session ends.** The program hears the link go down, as when a socket closes, when:
+
+- the page closes it;
+- the connection of its waiting receive closes (a closed tab: the node checks the connection twice a second while the
+  receive waits);
+- no request reached it for 30 s (a page polls well within that: a receive is answered within 25 s and the next one
+  sent at once);
+- the page does not take what the node sends (4096 frames or 32 MiB waiting), or a receive's answer cannot be written;
+- the member opens another session (the node ends the one it replaces, as it closes a replaced WebSocket).
+
+A request on an ended or unknown session is answered `410 Gone`, and any failed request is the page's loss of the
+connection: it opens a new session with backoff, presenting what it took, and the link resumes from the replay
+buffer. So a frame lost with a failed answer is resent; the page drops what it took twice, by number.
+
+**What it costs.** A frame from the node reaches the page as fast as over a WebSocket (the receive is waiting); a
+frame from the page costs a request. Between receives the page is not connected, and that is fine: the session, not a
+socket, is the connection.
+
 ## 4. `blossom run --web`
 
 `blossom run --deploy d.toml --node n1 --web 127.0.0.1:8080 [--web-root web]` serves, next to the peer and client
 listeners:
 
 - `GET /` and the page's files from `--web-root` (the built host: `index.html`, `host.js`, `host.css`, `pkg/`);
-- `GET /blossom/app.json`: the program's source files, the deployment (node names and roles), this node's name and
-  the WebSocket path;
-- `GET /blossom/link` upgraded to a WebSocket: the link of §3.
+- `GET /blossom/app.json`: the program's source files, the deployment (node names and roles), this node's name, the
+  WebSocket path (`link`), the requests' path (`http`), and which of the two a page uses (`transport`: `websocket`,
+  or `http` with `--web-link http`; a page's `?link=websocket|http` overrides it);
+- `GET /blossom/link` upgraded to a WebSocket: the link of §3;
+- `/blossom/http/…`: the link of §3a.
 
-The HTTP server is HTTP/1.1 with the WebSocket handshake (RFC 6455), hand-written over std threads like the other
-listeners, with a thread per connection. The page connects back to the node that served it.
+The HTTP server is HTTP/1.1 with keep-alive and the WebSocket handshake (RFC 6455), hand-written over std threads like
+the other listeners, with a thread per connection. The page connects back to the node that served it.
 
 ## 5. The page
 
@@ -144,8 +187,8 @@ What the page keeps, and where:
   node, so a page cannot be loaded while the node is down (no service worker).
 - **A lost identity.** When the node no longer knows the token (a fresh store) and admits the page as a new member,
   the stored state belongs to the old identity: the page clears it and starts over.
-- The WebSocket reconnects after a loss with backoff (200 ms doubling to 5 s, jittered); a finished handshake resets
-  it. The program is the node's, so the source editor is off in this mode; the inspector works.
+- The WebSocket (or the HTTP session, §3a) reconnects after a loss with backoff (200 ms doubling to 5 s, jittered); a
+  finished handshake resets it. The program is the node's, so the source editor is off in this mode; the inspector works.
 
 ## 6. The simulator, LDFI and tests
 

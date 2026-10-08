@@ -71,6 +71,7 @@ fn serve(name: &str, program: &str, port: u16) -> Server {
         web: Some(WebConfig {
             addr: format!("127.0.0.1:{port}").parse().unwrap(),
             root: None,
+            transport: blossom_runtime::web::Transport::WebSocket,
         }),
     })
     .unwrap()

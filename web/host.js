@@ -12,8 +12,9 @@
 // editor (the app's source, edited and re-run in place, the durable state kept when its schema stays).
 //
 // Served by a node (`blossom run --web`, docs/design/CLIENTS.md §5), the page is a member of the program's client
-// role: it compiles the program the node's `/blossom/app.json` gives, connects to the node over a WebSocket, and
-// runs as the member the node admits. It keeps its link (identity, what it took, what it sent and the node has not
+// role: it compiles the program the node's `/blossom/app.json` gives, connects to the node (over a WebSocket, or over
+// plain requests when the node says `http` or the page's `?link=http` does: docs/design/CLIENTS.md §3a), and runs as
+// the member the node admits. It keeps its link (identity, what it took, what it sent and the node has not
 // acknowledged) in localStorage beside its durable tables, so a reload is the same member and a line typed while the
 // node is unreachable goes out when it is back; it reconnects with backoff. Tabs of one browser share localStorage
 // but are different members: each tab holds a numbered slot (a Web Lock, released when the tab goes) and keeps its
@@ -369,6 +370,161 @@ class Connection {
   }
 }
 
+/** A body of link frames, each a 4-byte big-endian length and the frame (docs/design/CLIENTS.md §3a). */
+function encodeFrames(frames) {
+  const total = frames.reduce((n, f) => n + 4 + f.length, 0);
+  const out = new Uint8Array(total);
+  const view = new DataView(out.buffer);
+  let at = 0;
+  for (const f of frames) {
+    view.setUint32(at, f.length);
+    out.set(f, at + 4);
+    at += 4 + f.length;
+  }
+  return out;
+}
+
+function decodeFrames(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const frames = [];
+  for (let at = 0; at < bytes.length; ) {
+    if (at + 4 > bytes.length) throw new Error("a truncated frame length from the node");
+    const len = view.getUint32(at);
+    if (at + 4 + len > bytes.length) throw new Error("a truncated frame from the node");
+    frames.push(bytes.slice(at + 4, at + 4 + len));
+    at += 4 + len;
+  }
+  return frames;
+}
+
+/** The link over plain requests (docs/design/CLIENTS.md §3a), as `Connection` is over a WebSocket: the first frame
+ * opens a session; one receive (long-polled) is outstanding while it lasts, and only receives bring the node's frames,
+ * so they come in order; the page's frames go out a request at a time, those written meanwhile together. A failed
+ * request is the connection's loss: the next session resumes the link, as a WebSocket's reconnect does. */
+class HttpConnection {
+  constructor(base, onOpen, onFrame, onClose) {
+    Object.assign(this, { base, onOpen, onFrame, onClose, session: null, opening: false, open_: false });
+    Object.assign(this, { generation: 0, failures: 0, timer: null, queue: [], sending: false });
+    addEventListener("pagehide", (e) => {
+      // A page going for good closes its session at once; one kept in the back/forward cache keeps it (its lease ends
+      // it if the page does not come back).
+      if (!e.persisted && this.session) navigator.sendBeacon(`${this.base}/${this.session}/close`);
+    });
+  }
+
+  open() {
+    this.timer = null;
+    this.generation += 1;
+    Object.assign(this, { session: null, opening: false, open_: true, queue: [], sending: false });
+    this.onOpen();
+  }
+
+  /** The handshake finished: the next loss starts the backoff over. */
+  welcomed() {
+    this.failures = 0;
+  }
+
+  retry() {
+    if (this.timer !== null) return;
+    const wait = Math.min(5000, 200 * 2 ** this.failures) * (0.75 + Math.random() / 2);
+    this.failures = Math.min(this.failures + 1, 10);
+    this.timer = setTimeout(() => this.open(), wait);
+  }
+
+  /** The connection is lost (a failed request, an ended session): the link hears so, and a new session follows. */
+  lost(generation) {
+    if (generation !== this.generation || !this.open_) return;
+    this.generation += 1;
+    this.open_ = false;
+    this.session = null;
+    this.onClose();
+    this.retry();
+  }
+
+  write(bytes) {
+    if (!this.open_) return;
+    if (this.session === null) {
+      // The first frame (the HELLO) opens the session; frames before its answer wait in the link, as on a socket
+      // not open yet.
+      if (!this.opening) this.start(bytes);
+      return;
+    }
+    this.queue.push(bytes);
+    this.flush();
+  }
+
+  async start(hello) {
+    const generation = this.generation;
+    this.opening = true;
+    let res, frames;
+    try {
+      res = await fetch(`${this.base}/open`, { method: "POST", body: encodeFrames([hello]), cache: "no-store" });
+      if (!res.ok) throw new Error(`open: ${res.status}`);
+      frames = decodeFrames(await res.arrayBuffer());
+    } catch {
+      this.lost(generation);
+      return;
+    }
+    if (generation !== this.generation) return;
+    this.opening = false;
+    this.session = res.headers.get("Blossom-Session");
+    for (const f of frames) if (generation === this.generation) this.onFrame(f);
+    if (this.session === null) {
+      // Refused: the answer was the REJECT, which the link has heard.
+      this.lost(generation);
+      return;
+    }
+    if (generation === this.generation) this.receive(generation);
+  }
+
+  async receive(generation) {
+    while (generation === this.generation) {
+      let frames;
+      try {
+        const res = await fetch(`${this.base}/${this.session}/recv`, { cache: "no-store" });
+        if (!res.ok) throw new Error(`recv: ${res.status}`);
+        frames = decodeFrames(await res.arrayBuffer());
+      } catch {
+        this.lost(generation);
+        return;
+      }
+      for (const f of frames) if (generation === this.generation) this.onFrame(f);
+    }
+  }
+
+  async flush() {
+    if (this.sending || this.queue.length === 0 || this.session === null) return;
+    const generation = this.generation;
+    const frames = this.queue;
+    this.queue = [];
+    this.sending = true;
+    try {
+      const res = await fetch(`${this.base}/${this.session}/send`, {
+        method: "POST",
+        body: encodeFrames(frames),
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error(`send: ${res.status}`);
+    } catch {
+      this.sending = false;
+      this.lost(generation);
+      return;
+    }
+    if (generation !== this.generation) return;
+    this.sending = false;
+    this.flush();
+  }
+
+  /** Drops the connection (the link's loss follows, as for any loss). */
+  drop() {
+    if (this.session) {
+      fetch(`${this.base}/${this.session}/close`, { method: "POST", cache: "no-store" }).catch(() => {});
+    }
+    this.lost(this.generation);
+  }
+}
+
 /** The server refused the page. A page built from another version of the program (or for another deployment or node
  * directory) loads again, which gets the current one, unless it just did; any other refusal is reported, and the
  * connection tries again later. */
@@ -539,9 +695,17 @@ async function runMember(appText) {
   }
   const linkKey = `${storageKey}:link`;
   const link = client.link(localStorage.getItem(linkKey) ?? "");
-  const url = new URL(desc.link, location.href);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  member = { client, link, linkKey, conn: new Connection(url, memberOpened, memberFrame, memberClosed) };
+  const transport = search.get("link") ?? desc.transport ?? "websocket";
+  let conn;
+  if (transport === "http") {
+    const base = new URL(desc.http, location.href).href.replace(/\/$/, "");
+    conn = new HttpConnection(base, memberOpened, memberFrame, memberClosed);
+  } else {
+    const url = new URL(desc.link, location.href);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    conn = new Connection(url, memberOpened, memberFrame, memberClosed);
+  }
+  member = { client, link, linkKey, conn };
   if (link.hasMember()) startMember(wasm.WebApp.member(client, link));
   else report("connecting to the server…");
   member.conn.open();
