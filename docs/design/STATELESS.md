@@ -51,16 +51,18 @@ pub trait StateStore: Send + Sync {
     fn commit(&self, object: &str, expected: u64, writes: &[Write]) -> Result<Commit, StoreError>;
     /// Returns when the object's version is past `since`, or at `deadline`: the version then.
     fn wait(&self, object: &str, since: u64, deadline: Instant) -> Result<u64, StoreError>;
-    /// Asks for the object to be woken at `at` (milliseconds since the epoch); a later ask for an earlier time wins.
+    /// Adds a hint that the object wants waking at `at` (milliseconds since the epoch). Hints are a set.
     fn schedule(&self, object: &str, at: u64) -> Result<(), StoreError>;
-    /// The objects due at `now` (at most `limit`), each with the time it was due.
+    /// The hints due at `now` (at most `limit`), earliest first.
     fn due(&self, now: u64, limit: usize) -> Result<Vec<(String, u64)>, StoreError>;
-    /// Forgets the object's wake at `at` (only if it is still that one).
+    /// Removes one hint.
     fn unschedule(&self, object: &str, at: u64) -> Result<(), StoreError>;
     /// Unversioned records outside any object, last write wins: pages' presence (§6.4).
     fn put_side(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
     fn get_side(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError>;
     fn delete_side(&self, key: &str) -> Result<(), StoreError>;
+    /// Housekeeping a host's sweeper runs now and then (the S3 store's garbage); most stores have none.
+    fn maintain(&self, now: u64) -> Result<(), StoreError>;
 }
 ```
 
@@ -69,9 +71,12 @@ version it names). Two commits at the same version: at most one succeeds. A comm
 A commit whose outcome is unknown (the connection failed after it was sent) is reported as an error, never as a
 conflict or a success; the caller treats the object as unknown and loads it again.
 
-**Waking.** `schedule` happens before the commit that needs it (so a crash between the two leaves an extra wake,
-never a lost one); `due` and `unschedule` let any instance find the objects whose time came. A spurious wake costs a
-load and nothing else: a node with no timer due runs no tick and commits nothing.
+**Waking.** The truth about when an object wants running is in its own committed state (its next wake, an entry of
+the object); the store's wake hints only help hosts find it. A hint is added before the commit that needs it (so a
+crash between the two leaves an extra hint, never a missing one), and a sweeper removes a hint only after the object
+has run past it. Hints are a set, not one slot per object: a slot overwritten by a later time and then removed by a
+sweeper that woke the object for the earlier one would lose the later wake. A spurious wake costs a load and nothing
+else: a node with no timer due runs no tick and commits nothing.
 
 **Conformance.** `blossom_statestore::conformance` is one suite every adapter runs: atomicity, the version check,
 concurrent committers from several threads (exactly one winner per version, every winner's writes visible, no lost
@@ -113,19 +118,23 @@ change. Connections are pooled; TLS is supported (rustls), required when the URL
 S3 has no transaction across keys, so an object's state is a **manifest** plus **blobs**:
 
 - `PREFIX/o/OBJECT/head`: the manifest: the version, and each entry's key with either its value (values of at most
-  1 KiB are inline) or the name of the blob that holds it;
-- `PREFIX/o/OBJECT/b/HASH`: a blob, named by the BLAKE3 of its bytes, written once (`If-None-Match: *`), never
-  changed.
+  1 KiB are inline) or the name, length and SHA-256 of the blob that holds it;
+- `PREFIX/o/OBJECT/b/NAME`: a blob, written once (`If-None-Match: *`) under a name no other write uses (the version
+  it was written for, the handle's random nonce, a counter), never changed.
 
-A commit uploads the blobs the new manifest names that are not there yet, then writes the manifest with `If-Match:
-ETAG` (the ETag of the manifest it loaded; `If-None-Match: *` for version 0). S3 answers `412 Precondition Failed`
-when another commit came first: a conflict. This is the conditional write S3 (since 2024), R2, GCS and MinIO support.
-Blobs are immutable, so an instance caches them by name without ever checking them again; a load reads the manifest
-and only the blobs it has not seen.
+A commit uploads the blobs of the values it writes, then writes the manifest with `If-Match: ETAG` (the ETag of the
+manifest it built from; `If-None-Match: *` for version 0). S3 answers `412 Precondition Failed` when another commit
+came first: a conflict. This is the conditional write S3 (since 2024), R2, GCS and MinIO support. Blobs are immutable,
+so an instance caches them by name without ever checking them again; a load reads the manifest and only the blobs it
+has not seen.
 
-Blobs no manifest names any more (a value overwritten, a commit that lost) are deleted by a collector that lists an
-object's blobs and deletes those the current manifest does not name and that are older than a grace period (10
-minutes by default), so a reader that loaded an older manifest a moment ago still finds its blobs.
+Blobs no manifest names any more (a value overwritten, a commit that lost) are deleted by `maintain`, which lists an
+object's blobs, then reads its manifest, and deletes those it does not name that are older than a grace period (10
+minutes by default). Blobs are not named by their content on purpose: a commit names only blobs its base manifest
+named or blobs it just wrote, never an old blob it found again, so a collector that read any manifest no newer than
+the current one keeps every blob the current one names. (A content-addressed blob could be found again by a commit
+just as the collector deletes it.) A commit that took past half the grace period gives up before writing its
+manifest, and so does a collection.
 
 Wakes are objects too (`PREFIX/w/AT/OBJECT`, `AT` zero-padded so a listing is in time order), as are side records
 (`PREFIX/s/KEY`). `wait` polls the manifest with `If-None-Match` on its ETag (a `304` costs nothing to transfer),
@@ -240,8 +249,9 @@ Delivery is exactly once and in order per sender and target: stronger than a cha
 ## 9. Timers and the sweeper
 
 An object's next wake is the earliest of its node's next timer, its sessions' deadlines and its outbox's retry
-(§6.4, §8), scheduled before each commit. Each `blossom serve` instance runs a sweeper (every 250 ms by default):
-`due`, then a wake request on each object due, then `unschedule`. Several sweepers may wake one object at once; the
+(§6.4, §8): an entry of the object, with a hint scheduled before each commit that changes it. Each `blossom serve`
+instance runs a sweeper (every 250 ms by default): `due`, then a wake request on each object due (which commits the
+object's next wake, if it moved), then `unschedule` of the hint it handled; and `maintain` now and then. Several sweepers may wake one object at once; the
 version check makes that harmless. A platform that freezes idle instances (a function) calls `POST /blossom/wake`
 from a scheduler instead (`--sweep off`), which runs one sweep and answers what it woke.
 
