@@ -26,7 +26,7 @@ export function freePort() {
  * the program's stylesheet when it has one (examples/web/PROGRAM.css); `start`/`kill` run and stop the node. */
 export async function deployment(program, link) {
   const dir = mkdtempSync(join(tmpdir(), `blossom-clients-${program}-`));
-  for (const f of [`${program}.bls`, "ui.bls"]) copyFileSync(join(repo, "examples", "web", f), join(dir, f));
+  for (const f of [`${program}.bls`, "ui.bls", "events.bls"]) copyFileSync(join(repo, "examples", "web", f), join(dir, f));
   const css = join(repo, "examples", "web", `${program}.css`);
   const style = existsSync(css);
   if (style) copyFileSync(css, join(dir, `${program}.css`));

@@ -52,8 +52,9 @@ test.describe("example apps on a node", () => {
       const poll = (p) => p.locator(".poll", { hasText: "Lunch?" });
       const counts = (p) => poll(p).locator(".choice .count");
       await expect(poll(b).locator(".choice .text")).toHaveText(["Tacos", "Ramen", "Salad"]);
-      await poll(b).locator(".choice", { hasText: "Ramen" }).click();
-      await poll(a).locator(".choice", { hasText: "Ramen" }).click();
+      // A click on a choice's text (an element inside the button) is a click on the choice.
+      await poll(b).locator(".choice .text", { hasText: "Ramen" }).click();
+      await poll(a).locator(".choice .count").nth(1).click();
       await expect(counts(a)).toHaveText(["0", "2", "0"]);
       await expect(counts(b)).toHaveText(["0", "2", "0"]);
       await expect(poll(b).locator(".voters").nth(1)).toHaveText("Ada, Bob");

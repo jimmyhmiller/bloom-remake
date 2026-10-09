@@ -174,3 +174,38 @@ fn outer_over_a_generated_column_and_constant_collections() {
     assert_eq!(rows(&a, &run, 0, n1, "const_name"), vec![named(1, "one"), named(4, "four")]);
     assert_eq!(rows(&a, &run, 0, n1, "odd_square"), vec![vec![u(1)], vec![u(3)], vec![u(5)]]);
 }
+
+#[test]
+fn collect_and_index_order_by_their_keys() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/apps/aggregates_by.bls");
+    let a = compile(&path, &[("n1", None)]);
+    let n1 = a.node_id("n1").unwrap();
+    let u = |x: u64| Value::Int(blossom_value::value::IntValue::U64(x));
+    let add = |t: u64, name: &str, score: u64, at: u64| InputEvent {
+        node: n1,
+        tick: Tick(t),
+        rel: a.rel_named("add").unwrap(),
+        row: Arc::from(vec![Value::str(name), u(score), u(at)]),
+    };
+    let run = differential(
+        &a,
+        &[add(1, "zed", 5, 1), add(1, "amy", 9, 2), add(2, "kim", 5, 3), add(2, "bob", 9, 4)],
+        4,
+    );
+    let names = |xs: &[&str]| Value::Vec(xs.iter().map(|s| Value::str(*s)).collect::<Vec<_>>().into());
+    assert_eq!(rows(&a, &run, 4, n1, "arrival"), vec![vec![names(&["zed", "amy", "kim", "bob"])]]);
+    assert_eq!(
+        rows(&a, &run, 4, n1, "by_score"),
+        vec![vec![u(5), names(&["zed", "kim"])], vec![u(9), names(&["amy", "bob"])]]
+    );
+    let rank = |n: &str, s: u64, r: u64| vec![Value::str(n), u(s), u(r)];
+    assert_eq!(
+        rows(&a, &run, 4, n1, "ranked"),
+        vec![rank("amy", 9, 2), rank("bob", 9, 3), rank("kim", 5, 0), rank("zed", 5, 1)]
+    );
+    // Even arrivals first (at % 2 == 0), then odd; each by arrival.
+    assert_eq!(
+        rows(&a, &run, 4, n1, "ranked2"),
+        vec![rank("amy", 2, 0), rank("bob", 4, 1), rank("kim", 3, 3), rank("zed", 1, 2)]
+    );
+}

@@ -98,6 +98,7 @@ at Server {
 
 at Browser {
     include "ui.bls";
+    include "events.bls";
 
     durable table me(name: String) key();
     /// The number of this tab's next card, and of its next change.
@@ -188,11 +189,11 @@ at Browser {
             deck(tw, tn, _, _, c, r, true), outer drop_prev(p), next_change(s), srv in Server {
         change(w, n, v, s, t, c, between(p, r), true, srv);
     }
-    drop_on_column: on drop(id, _), card_id(id, w, n), not dropped_on_card(_, _), dropped_on(spot), column_id(spot, c),
+    drop_on_column: on drop(id, _), card_id(id, w, n), not dropped_on_card(_, _), dropped(_, spot), column_id(spot, c),
             last_rank(c, top), deck(w, n, (v, _), t, _, _, true), next_change(s), srv in Server {
         change(w, n, v, s, t, c, top + 1.0, true, srv);
     }
-    start_edit: on dblclick(_), clicked_in(id), card_id(id, w, n), not mine_editing(w, n), srv in Server {
+    start_edit: on dblclicked(id), card_id(id, w, n), not mine_editing(w, n), srv in Server {
         upsert mine_editing(w, n);
         send editing(w, n, true) to srv;
     }
@@ -212,17 +213,8 @@ at Browser {
     view live(w, n, t, c, r) = deck(w, n, _, t, c, r, true);
     view key_of(w, n, k) = deck(w, n, _, _, _, _, _), let k = f"{n}-{w}";
     view card_id(id, w, n) = key_of(w, n, k), let id = f"card-{k}";
-    /// An event names the innermost element under the pointer; what it is in comes from the page itself: the
-    /// element and its ancestors, walked up the `elem` rows.
-    view dropped_on(a) {
-        drop(_, t), let a = t;
-        dropped_on(x), elem(x, a, _, _) where a != "";
-    }
-    view clicked_in(a) {
-        dblclick(t), let a = t;
-        clicked_in(x), elem(x, a, _, _) where a != "";
-    }
-    view dropped_on_card(w, n) = dropped_on(t), card_id(t, w, n);
+    /// A card dropped on another (anywhere in it): the target card.
+    view dropped_on_card(w, n) = dropped(_, t), card_id(t, w, n);
     view edit_field(id, w, n) = key_of(w, n, k), let id = f"edit-{k}";
     view remove_button(id, w, n) = key_of(w, n, k), let id = f"remove-{k}";
     view arrow(id, w, n, c) {

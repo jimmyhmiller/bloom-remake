@@ -163,6 +163,17 @@ make the programmer write, and where each is in a Blossom app:
 - **A page's stylesheet** came from a table of app names in `host.js`. A deployment now names it: `[web] style`.
 - **The inspector** listed a rule once per path that credited it ("by rules `hear_poll`, `poll_list`, `hear_poll`,
   …"); it names each once.
+- **`collect!(e by k̄)` and `index!(by k̄)`** (LANG-100, LANG-097) are implemented: `collect!` aggregates
+  `(k̄, e, valuation)` and keeps `e` (the IR's `CollectVecAt`), `index!` ranks `(k̄, head tuple)`. An `index!` key
+  reads only the view's columns (BLS0511), so each tuple has one. Descending keys are still not implemented.
+- **Events name the element you meant.** `examples/web/events.bls` (include it after `ui.bls`) has `clicked(id)`,
+  `dblclicked(id)`, `pressed(id)` and `dropped(item, id)`: the element an event names and every element it is inside,
+  walked up the page's `elem` rows. Polls had a real bug here: a click on a choice's text named the text's `span`
+  and the vote was dropped. The Playwright test now clicks the text.
+- **A page that silently disappears** is warned about: BLS1011, for a `while` handler that writes an output and needs
+  a row of an ungrouped aggregate view with no `default`.
+- **`if … else` as content**: `p { if open { "a" } else { "b" } }` was BLS0303 ("one content"); an `if` and its
+  `else` now each may give the element its content.
 
 ### Open gaps (worked around in the apps)
 
@@ -172,18 +183,9 @@ make the programmer write, and where each is in a Blossom app:
    channels are shared. Tic-tac-toe decides wins on the server with views and highlights the winning line on the
    page with a second copy of the same join. A way to place one view (or block) at several roles would let the page
    run the referee's rules too, for instant feedback, from one definition.
-3. **`index!(by …)` and `collect!(… by …)`** are not implemented (LANG-097, LANG-100). The apps put the sort key
-   first in the ranked tuple instead, which orders the same way.
-4. **A resolution cost is one column** (LANG-117). The board puts its two-part version in one tuple column.
-5. **Events name the innermost element.** Tree elements without an id get a derived one, so a click or drop on a
-   card's title names the title's `span`, not the card. The board walks up its own `elem` rows to find the card
-   (`dropped_on`). A helper in `ui.bls`, or events that carry the target's ancestors, would make this one line.
-6. **An aggregate over nothing has no row.** Pixels' page rule read `total(k = count!(…))` with no default, so on an
-   empty canvas the whole page silently did not render. A lint could warn when a page rule's header depends on an
-   aggregate view without a default or a driver.
-7. **`if` is not an expression where a tree expects content** (`p { if open { "a" } else { "b" } }` is read as an
-   `if` block). The apps call a function instead.
-8. **`index!` over persistent state re-ranks every tick** (BLS0601), with the quadratic reference lowering. Fine for a
+3. **A resolution cost is one column** (LANG-117). The board puts its two-part version in one tuple column.
+4. **Descending `by` keys** (`collect!(e by k desc)`) are not implemented (LANG-118).
+5. **`index!` over persistent state re-ranks every tick** (BLS0601), with the quadratic reference lowering. Fine for a
    board; a large list would want the engine's sort.
 
 ### Mistakes made while writing the apps

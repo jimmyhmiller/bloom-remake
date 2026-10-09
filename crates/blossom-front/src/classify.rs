@@ -8,7 +8,10 @@
 //!
 //! Then: an `on` handler needs a positive event literal in its header (BLS0504), a `while` handler with one is
 //! warned about (BLS0505), and a handler that `emit`s a relation it tests negatively in its header or a block
-//! condition is rejected (BLS0506) unless the statement carries `#[allow(self_negation)]`.
+//! condition is rejected (BLS0506) unless the statement carries `#[allow(self_negation)]`. A `while` handler that
+//! writes an output (a page, say) and whose header needs a row of an ungrouped aggregate view with no `default` is
+//! warned about (BLS1011): over an empty input the view has no row, so nothing is written (a page that disappears
+//! while its list is empty). Elsewhere such a header is the usual way to wait for a first row, and is not warned.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -55,7 +58,55 @@ pub fn check(hir: &Hir, diags: &mut Diagnostics) -> Result<(), InternalError> {
             ),
             _ => {}
         }
+        if h.trigger == Trigger::While && writes_output(hir, &h.stmts)? {
+            empty_aggregates(hir, h, diags)?;
+        }
         self_negation(hir, h, diags)?;
+    }
+    Ok(())
+}
+
+/// Whether a statement among `stmts` (or in their blocks) writes an `output` relation.
+fn writes_output(hir: &Hir, stmts: &[HStmt]) -> Result<bool, InternalError> {
+    for s in stmts {
+        let hit = match s {
+            HStmt::Verb(v) => matches!(hir.rel(v.target)?.kind, HRelKind::Output { .. }),
+            HStmt::Block { stmts, .. } => writes_output(hir, stmts)?,
+        };
+        if hit {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// BLS1011: the header's positive atoms of views whose every column is an aggregate (no grouping column, no driver)
+/// and that have an aggregate without a `default`: an empty input gives them no row.
+fn empty_aggregates(hir: &Hir, h: &HHandler, diags: &mut Diagnostics) -> Result<(), InternalError> {
+    for l in &h.header.lits {
+        let HLit::Atom(a) = l else { continue };
+        let Some(v) = hir.views.iter().find(|v| v.rel == a.rel) else {
+            continue;
+        };
+        let HViewShape::Aggregate { cols, driver: None, .. } = &v.shape else {
+            continue;
+        };
+        let ungrouped = cols.iter().all(|c| matches!(c, HViewAggCol::Agg(_)));
+        let bare = cols.iter().any(|c| matches!(c, HViewAggCol::Agg(g) if g.default.is_none()));
+        if ungrouped && bare {
+            let name = &hir.rel(a.rel)?.name;
+            diags.push(
+                Diagnostic::new(
+                    code!("BLS1011"),
+                    format!(
+                        "`{name}` has no row while its input is empty, so this `while` handler does not hold then; \
+                         give its aggregate a `default`"
+                    ),
+                )
+                .with_primary(a.span)
+                .with_label(v.span, format!("`{name}` is declared here")),
+            );
+        }
     }
     Ok(())
 }

@@ -729,6 +729,7 @@ impl Remap for AggFunc {
             Self::BoolAnd => Self::BoolAnd,
             Self::BoolOr => Self::BoolOr,
             Self::CollectVec => Self::CollectVec,
+            Self::CollectVecAt { at } => Self::CollectVecAt { at: *at },
             Self::CollectSet => Self::CollectSet,
             Self::CollectMap => Self::CollectMap,
             Self::Percentile { num, den } => Self::Percentile {

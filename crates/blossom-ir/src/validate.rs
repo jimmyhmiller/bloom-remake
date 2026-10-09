@@ -1219,6 +1219,11 @@ fn agg_type(p: &Program, r: Cx<'_>, a: &AggCall, ty: TypeId) -> bool {
             matches!(p.types.get(ty), Some(TypeDef::Vec(t)) if a.args.first().is_some_and(|arg| term_type(p, r, arg, *t)))
                 && a.args.iter().all(|arg| !matches!(arg, Term::Wild))
         }
+        AggFunc::CollectVecAt { at } => {
+            let at = *at as usize;
+            matches!(p.types.get(ty), Some(TypeDef::Vec(t)) if a.args.get(at).is_some_and(|arg| term_type(p, r, arg, *t)))
+                && a.args.iter().all(|arg| !matches!(arg, Term::Wild))
+        }
         AggFunc::CollectSet => {
             matches!(p.types.get(ty),Some(TypeDef::Set(t)) if a.args.len()==1&&a.args.first().is_some_and(|arg|term_type(p,r,arg,*t)))
         }

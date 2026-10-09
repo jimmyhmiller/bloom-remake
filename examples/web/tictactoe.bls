@@ -90,8 +90,8 @@ at Server {
         delete waiting(b, since);
     }
     /// The longest waiting are paired first, two by two; the one who waited longer plays X.
-    view ranked(since, b, r = index!()) = waiting(b, since);
-    view pair(x, o, p) = ranked(_, x, r), ranked(_, o, r2), let p = r / 2u64 where r % 2u64 == 0u64 && r2 == r + 1u64;
+    view ranked(b, since, r = index!(by since)) = waiting(b, since);
+    view pair(x, o, p) = ranked(x, _, r), ranked(o, _, r2), let p = r / 2u64 where r % 2u64 == 0u64 && r2 == r + 1u64;
     view next_game(g = max!(h + 1u64 default 0u64)) = games(h, _, _, _);
     start: while pair(x, o, p), next_game(g0), waiting(x, sx), waiting(o, so) {
         next games(g0 + p, x, o, now());

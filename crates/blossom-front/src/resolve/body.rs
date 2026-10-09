@@ -3565,9 +3565,24 @@ impl<'t> Resolver<'t, '_> {
             "max" => AggKind::Max,
             "collect" => AggKind::Collect,
             "index" => {
-                if let Some(c) = clauses.first() {
-                    self.unsupported("LANG-097", &format!("`index!` with `{}`", c.keyword.as_str()), c.span);
-                    return None;
+                let mut by = Vec::new();
+                for c in clauses {
+                    if c.keyword.as_str() != "by" {
+                        self.unsupported("LANG-097", &format!("`index!` with `{}`", c.keyword.as_str()), c.span);
+                        return None;
+                    }
+                    if c.order.iter().any(|(_, desc)| *desc) {
+                        self.unsupported("LANG-118", "a descending `by` key in `index!`", c.span);
+                        return None;
+                    }
+                    let keys: Vec<&ast::Expr> = if c.order.is_empty() {
+                        c.exprs.iter().collect()
+                    } else {
+                        c.order.iter().map(|(e, _)| e).collect()
+                    };
+                    for k in keys {
+                        by.push(self.expr(cx, k)?);
+                    }
                 }
                 if !args.is_empty() {
                     self.error(code!("BLS0301"), span, "`index!` takes no argument");
@@ -3577,6 +3592,7 @@ impl<'t> Resolver<'t, '_> {
                     func: AggKind::Index,
                     args: Vec::new(),
                     default: None,
+                    by,
                     span,
                 });
             }
@@ -3586,6 +3602,7 @@ impl<'t> Resolver<'t, '_> {
             }
         };
         let mut default = None;
+        let mut by = Vec::new();
         for c in clauses {
             match c.keyword.as_str() {
                 "default" => {
@@ -3594,6 +3611,33 @@ impl<'t> Resolver<'t, '_> {
                         return None;
                     };
                     default = Some(self.expr(cx, d)?);
+                }
+                // LANGUAGE §10.1: the values in (keys, canonical) order.
+                "by" if func == AggKind::Collect => {
+                    if c.order.iter().any(|(_, desc)| *desc) {
+                        self.unsupported("LANG-118", "a descending `by` key in `collect!`", c.span);
+                        return None;
+                    }
+                    let keys: Vec<&ast::Expr> = if c.order.is_empty() {
+                        c.exprs.iter().collect()
+                    } else {
+                        c.order.iter().map(|(e, _)| e).collect()
+                    };
+                    if keys.is_empty() {
+                        self.error(code!("BLS0301"), c.span, "`by` takes at least one key");
+                        return None;
+                    }
+                    for k in keys {
+                        by.push(self.expr(cx, k)?);
+                    }
+                }
+                "by" => {
+                    self.error(
+                        code!("BLS0301"),
+                        c.span,
+                        format!("`by` orders the values of `collect!` and `index!`, not `{}!`", name.as_str()),
+                    );
+                    return None;
                 }
                 other => {
                     self.unsupported("LANG-100", &format!("the aggregate clause `{other}`"), c.span);
@@ -3634,6 +3678,7 @@ impl<'t> Resolver<'t, '_> {
             func,
             args: exprs,
             default,
+            by,
             span,
         })
     }
@@ -3755,6 +3800,32 @@ impl<'t> Resolver<'t, '_> {
                             return;
                         }
                     },
+                }
+            }
+            // `index!(by k̄)` numbers the head tuples: its keys read only the view's columns, so each tuple has one.
+            let heads: BTreeSet<HVarId> = cols
+                .iter()
+                .filter_map(|c| match c {
+                    HViewAggCol::Group(v) => Some(*v),
+                    HViewAggCol::Agg(_) => None,
+                })
+                .collect();
+            for c in &cols {
+                if let HViewAggCol::Agg(a) = c
+                    && a.func == crate::hir::AggKind::Index
+                {
+                    for k in &a.by {
+                        let mut used = BTreeSet::new();
+                        crate::lower::mentioned_expr(k, &mut used);
+                        if !used.is_subset(&heads) {
+                            self.error(
+                                code!("BLS0511"),
+                                k.span,
+                                "an `index!` key reads only the view's own columns (each numbered tuple has one key)",
+                            );
+                            return;
+                        }
+                    }
                 }
             }
             let mut driver = None;

@@ -754,7 +754,7 @@ pub static REGISTRY: &[CodeInfo] = &[
         "blossom-front",
         &[],
         CodeOrigin::Language,
-        "a `default` with grouping columns but no `per` driver, a driver that does not determine the group, or, with a driver, an aggregate with no identity (`min!`, `max!`, `index!`) and no `default`",
+        "a `default` with grouping columns but no `per` driver, a driver that does not determine the group, with a driver, an aggregate with no identity (`min!`, `max!`, `index!`) and no `default`, or an `index!` key (`by`) that reads more than the view's columns",
     ),
     info(
         "BLS0600",
@@ -1061,6 +1061,14 @@ pub static REGISTRY: &[CodeInfo] = &[
         "a level-triggered `send` in a deployed program whose node has neither a timer nor a heartbeat that would make it resend while idle",
     ),
     info(
+        "BLS1011",
+        Warning,
+        "blossom-front",
+        &[],
+        CodeOrigin::Language,
+        "a `while` handler that writes an output needs a row of an ungrouped aggregate view with no `default`, which has none while its input is empty",
+    ),
+    info(
         "BLSR001",
         Runtime,
         "blossom-engine",
@@ -1320,8 +1328,8 @@ mod tests {
     fn codes_registry_unique() {
         assert_eq!(
             REGISTRY.len(),
-            134,
-            "LANGUAGE §20 has 130 codes; ARCHITECTURE §0.3 adds 4"
+            135,
+            "LANGUAGE §20 has 131 codes; ARCHITECTURE §0.3 adds 4"
         );
         for (a, b) in REGISTRY.iter().zip(REGISTRY.iter().skip(1)) {
             assert!(

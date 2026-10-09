@@ -39,7 +39,12 @@ pub(crate) fn check_supported(p: &Program) -> Result<(), OracleError> {
                 // A count may be over the empty tuple (`count!(*)` over a header that binds nothing).
                 let supported = matches!(
                     agg.func,
-                    AggFunc::Count | AggFunc::Sum | AggFunc::Min | AggFunc::Max | AggFunc::CollectVec
+                    AggFunc::Count
+                        | AggFunc::Sum
+                        | AggFunc::Min
+                        | AggFunc::Max
+                        | AggFunc::CollectVec
+                        | AggFunc::CollectVecAt { .. }
                 ) && agg.order.is_none()
                     && (!agg.args.is_empty() || matches!(agg.func, AggFunc::Count));
                 if !supported {
@@ -998,6 +1003,18 @@ fn fold(func: AggFunc, set: &BTreeSet<Vec<Value>>) -> expr::ExprResult<Value> {
                     t.first()
                         .cloned()
                         .ok_or_else(|| ExprError::Oracle(internal_error!("collect over an empty tuple").into()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::Vec(vals.into()))
+        }
+        // The component `at` of each distinct tuple, in the set's (canonical) order: by the keys before it.
+        AggFunc::CollectVecAt { at } => {
+            let vals = set
+                .iter()
+                .map(|t| {
+                    t.get(at as usize)
+                        .cloned()
+                        .ok_or_else(|| ExprError::Oracle(internal_error!("collect past a tuple's end").into()))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Value::Vec(vals.into()))

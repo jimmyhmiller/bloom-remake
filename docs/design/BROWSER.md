@@ -56,6 +56,11 @@ listened to), each into a round of its own:
 | `change(id: String, checked: bool)` | A checkbox changes. |
 | `drop(id: String, target: String)` | HTML drag and drop: an element the program made `draggable` is dropped on (or inside) an element with an id. Meanwhile the dragged element has `data-dragging` and the one under it `data-dragover`. |
 
+`examples/web/events.bls` adds, for a program that includes it after `ui.bls`, the pointer events by what they land in:
+`clicked(id)`, `dblclicked(id)`, `pressed(id)` and `dropped(item, id)` hold the element an event names and every
+element it is inside (walked up the page's `elem` rows), since in a tree literal every element has an id and a click
+on a button's text names the text.
+
 `examples/web/ui.bls` declares these, for a program to `include`, and the tree `html` over `elem`, `attr` and `text`,
 so a page is written as `emit html div[id: "box"](class: "x") { span { "hi" } }` (docs/design/SUGAR.md §3).
 

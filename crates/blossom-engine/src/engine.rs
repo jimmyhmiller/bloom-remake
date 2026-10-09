@@ -213,7 +213,12 @@ fn check_supported(p: &Program) -> Result<(), EvalError> {
             if let HeadArg::Agg(agg) = a {
                 let ok = matches!(
                     agg.func,
-                    AggFunc::Count | AggFunc::Sum | AggFunc::Min | AggFunc::Max | AggFunc::CollectVec
+                    AggFunc::Count
+                        | AggFunc::Sum
+                        | AggFunc::Min
+                        | AggFunc::Max
+                        | AggFunc::CollectVec
+                        | AggFunc::CollectVecAt { .. }
                 ) && agg.order.is_none()
                     && (!agg.args.is_empty() || matches!(agg.func, AggFunc::Count));
                 if !ok {
@@ -2866,7 +2871,7 @@ fn agg_shape(rule: &Rule) -> Option<AggShape> {
     let src_tuple: Vec<usize> = call.args.iter().map(col_of).collect::<Option<_>>()?;
     let ok = match call.func {
         AggFunc::Min | AggFunc::Max | AggFunc::Sum => src_tuple.len() == 1,
-        AggFunc::Count | AggFunc::CollectVec => !src_tuple.is_empty(),
+        AggFunc::Count | AggFunc::CollectVec | AggFunc::CollectVecAt { .. } => !src_tuple.is_empty(),
         _ => false,
     };
     ok.then(|| AggShape {
@@ -2969,6 +2974,18 @@ fn fold(
                     t.first()
                         .cloned()
                         .ok_or_else(|| bug("a collect over an empty tuple".into()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::Vec(vals.into()))
+        }
+        // The component `at` of each distinct tuple, in the set's (canonical) order: by the keys before it.
+        AggFunc::CollectVecAt { at } => {
+            let vals = set
+                .keys()
+                .map(|t| {
+                    t.get(*at as usize)
+                        .cloned()
+                        .ok_or_else(|| bug("a collect past a tuple's end".into()))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Value::Vec(vals.into()))

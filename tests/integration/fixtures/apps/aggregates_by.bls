@@ -1,0 +1,19 @@
+//! `collect!(e by k̄)` and `index!(by k̄)` (LANGUAGE §10.1, §10.5): values and ranks in (keys, canonical) order.
+
+program aggregates_by version 1;
+
+input add(name: String, score: u64, at: u64);
+table entries(name: String, score: u64, at: u64);
+
+keep: on add(n, s, a) {
+    emit entries(n, s, a);
+}
+
+/// The names in the order they arrived, not alphabetically.
+view arrival(names = collect!(n by a)) = entries(n, _, a);
+/// The names by score, then by arrival; per score.
+view by_score(s, names = collect!(n by a)) = entries(n, s, a);
+/// Ranks by score (a tie broken by the name).
+view ranked(name, score, r = index!(by score)) = entries(name, score, _);
+/// Ranks by score, then by arrival (two keys).
+view ranked2(name, at, r = index!(by(at % 2u64, at))) = entries(name, _, at);

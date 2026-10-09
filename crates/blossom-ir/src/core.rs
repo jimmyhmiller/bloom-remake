@@ -477,6 +477,11 @@ pub enum AggFunc {
     BoolAnd,
     BoolOr,
     CollectVec,
+    /// The component `at` of each distinct argument tuple, in the tuples' canonical order: `collect!(e by k̄)`
+    /// aggregates (k̄, e, valuation) and keeps `e`, so the vector is ordered by the keys first (LANG-118).
+    CollectVecAt {
+        at: u32,
+    },
     CollectSet,
     CollectMap,                        // canonical order (LANG-118); duplicate map key = BLSR005
     Percentile { num: u32, den: u32 }, // nearest rank, canonical tiebreak
