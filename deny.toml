@@ -24,6 +24,9 @@ allow = [
 exceptions = [
     { allow = ["MPL-2.0"], crate = "imbl" },
     { allow = ["MPL-2.0"], crate = "webpki-roots" },
+    # webpki-roots 1.0 relicensed its data (Mozilla's root list) from MPL-2.0 to the permissive CDLA-Permissive-2.0;
+    # the state store adapters' TLS uses it (docs/design/STATELESS.md §4).
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
     # ARCHITECTURE §1.2 names xxhash-rust (xxh3, ENG-032) for blossom-value but its allowlist omits the crate's
     # license, the permissive Boost Software License. Allowed for this crate only; see docs/design/DEPENDENCIES.md.
     { allow = ["BSL-1.0"], crate = "xxhash-rust" },
