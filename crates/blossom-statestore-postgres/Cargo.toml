@@ -1,0 +1,21 @@
+[package]
+name = "blossom-statestore-postgres"
+description = "A state store in Postgres (docs/design/STATELESS.md §4.2): commits under a version check in one transaction, LISTEN/NOTIFY to wake waiters, TLS by rustls."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+blossom-statestore.workspace = true
+postgres = "0.19.14"
+postgres_rustls = "0.1.5"
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1.0.9"
+
+[dev-dependencies]
+postgres = "0.19.14"
+
+[lints]
+workspace = true
