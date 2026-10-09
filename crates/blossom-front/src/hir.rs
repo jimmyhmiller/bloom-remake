@@ -447,6 +447,9 @@ pub enum HandlerKind {
 #[derive(Clone, Debug)]
 pub struct HHandler {
     pub scope: ScopeId,
+    /// From role `R`'s copy of an `at` section of several roles: its generated names carry `R`, which tells the
+    /// copies apart.
+    pub section: Option<HRoleId>,
     pub label: Option<Symbol>,
     pub trigger: Trigger,
     pub kind: HandlerKind,

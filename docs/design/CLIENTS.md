@@ -62,7 +62,9 @@ at Browser {
 - **Channels.** A channel between a client role and another role is an ordinary channel (`Browser -> Server`,
   `Server -> Browser`). Client roles do not talk to each other directly (BLS0404): tabs talk through a server.
 - **Placement.** Inside `at R` of a client role go the page's relations: the browser interface (`ui.bls`) is included
-  there. A client role's durable tables persist in the page's storage (BROWSER.md §Persistence).
+  there. What both ends keep, and the rules both apply, go in a section of both roles, `at Server, Browser { … }`
+  (LANGUAGE §6.10): each end has its own copy under the one name (examples/web/tictactoe.bls judges a game at the
+  server and shows its outcome at the page by the same views). A client role's durable tables persist in the page's storage (BROWSER.md §Persistence).
 
 **Meaning.** The Dedalus meaning is the one of §6.10: one program, every rule guarded by its role, `Node<R>` a sort.
 A client member is a node of role `R` whose existence is dynamic; the link events are inputs that the transport

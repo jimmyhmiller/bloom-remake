@@ -1,9 +1,10 @@
 //! Tic-tac-toe with a lobby (docs/design/CLIENTS.md): press Play and the server pairs you with the next player who
 //! does, or watch any game being played. One program holds both ends; the channels are the whole API.
 //!
-//! The server is the referee: it pairs the players who have waited longest, numbers the games, takes a move only from
-//! the player whose turn it is, on an empty square, in a game that is not over, and decides the outcome from the
-//! moves. The pages show what the server decided; a page's own state is only what it is looking at.
+//! The server is the referee: it pairs the players who have waited longest, numbers the games, and takes a move only
+//! from the player whose turn it is, on an empty square, in a game that is not over. The games, their moves and the
+//! rules that decide an outcome are written once, in a section placed at both ends (`at Server, Browser`): the
+//! server judges by them, and each page shows the outcome and the winning line by the same rules.
 
 program tictactoe version 1;
 
@@ -38,18 +39,34 @@ channel resign(g: u64): Browser -> Server;
 
 channel game(g: u64, x: Node<Browser>, o: Node<Browser>, at: Instant): Server -> Browser;
 channel moved(g: u64, k: u64, cell: u64): Server -> Browser;
-/// How a game ended: "X" or "O" won, or "draw".
-channel ended(g: u64, outcome: String): Server -> Browser;
+channel gave_up(g: u64, b: Node<Browser>): Server -> Browser;
 channel person(b: Node<Browser>, name: String, here: bool, at: Instant): Server -> Browser;
+
+/// The games and the rules of the game, at the server and at every tab: each end keeps its own copy of the games
+/// (the server's decide, a tab's are what the server told it) and judges them by the same views.
+at Server, Browser {
+    durable table games(g: u64, x: Node<Browser>, o: Node<Browser>, at: Instant) key(g);
+    /// Game `g`'s `k`-th move.
+    durable table moves(g: u64, k: u64, cell: u64) key(g, k);
+    durable table resigned(g: u64, b: Node<Browser>) key(g);
+
+    view mark(g, cell, m) = moves(g, k, cell), let m = mark_of(k);
+    /// A line of three marks: who has it, and its squares.
+    view three(g, m, a, b, c) = (a, b, c) in LINES, mark(g, a, m), mark(g, b, m), mark(g, c, m);
+    view made(g, k = count!(m)) = per games(g, _, _, _), moves(g, m, _);
+    /// "X" or "O" won, or "draw".
+    view outcome(g, m) {
+        three(g, m, _, _, _);
+        resigned(g, r), games(g, x, _, _), let m = "O" where r == x;
+        resigned(g, r), games(g, _, o, _), let m = "X" where r == o;
+        made(g, 9u64), not three(g, _, _, _, _), let m = "draw";
+    }
+}
 
 at Server {
     durable table names(b: Node<Browser>, name: String) key(b) resolve choose;
     /// The players waiting for a game, since when.
     durable table waiting(b: Node<Browser>, since: Instant) key(b);
-    durable table games(g: u64, x: Node<Browser>, o: Node<Browser>, at: Instant) key(g);
-    /// Game `g`'s `k`-th move.
-    durable table moves(g: u64, k: u64, cell: u64) key(g, k);
-    durable table resigned(g: u64, b: Node<Browser>) key(g);
     table online(b: Node<Browser>);
 
     join: on Browser.connected(b, _) {
@@ -68,16 +85,6 @@ at Server {
 
     // ------------------------------------------------------------ the referee
 
-    view line(a, b, c) = (a, b, c) in LINES;
-    view mark(g, cell, m) = moves(g, k, cell), let m = mark_of(k);
-    view three(g, m) = line(a, b, c), mark(g, a, m), mark(g, b, m), mark(g, c, m);
-    view made(g, k = count!(m)) = per games(g, _, _, _), moves(g, m, _);
-    view outcome(g, m) {
-        three(g, m);
-        resigned(g, r), games(g, x, _, _), let m = "O" where r == x;
-        resigned(g, r), games(g, _, o, _), let m = "X" where r == o;
-        made(g, 9u64), not three(g, _), let m = "draw";
-    }
     view playing(b) {
         games(g, b, _, _), not outcome(g, _);
         games(g, _, b, _), not outcome(g, _);
@@ -120,8 +127,8 @@ at Server {
     tell_move: on inserted moves(g, k, cell), online(b) {
         send moved(g, k, cell) to b;
     }
-    tell_end: on inserted outcome(g, m), online(b) {
-        send ended(g, m) to b;
+    tell_resign: on inserted resigned(g, r), online(b) {
+        send gave_up(g, r) to b;
     }
     tell_person: on inserted presence(p, name, here), online(b) {
         send person(p, name, here, now()) to b;
@@ -133,8 +140,8 @@ at Server {
         for moves(g, k, cell) {
             send moved(g, k, cell) to b;
         }
-        for outcome(g, m) {
-            send ended(g, m) to b;
+        for resigned(g, r) {
+            send gave_up(g, r) to b;
         }
         for presence(p, name, here) {
             send person(p, name, here, now()) to b;
@@ -150,10 +157,6 @@ at Browser {
     durable table seeking(since: Instant) key();
     /// The games this tab has left the board of.
     durable table dismissed(g: u64);
-    /// What the server said, kept across reloads.
-    durable table game_list(g: u64, x: Node<Browser>, o: Node<Browser>, at: Instant) key(g);
-    durable table move_list(g: u64, k: u64, cell: u64) key(g, k);
-    durable table outcomes(g: u64, outcome: String) key(g);
     durable table people(b: Node<Browser>, name: String, here: bool, at: Instant) key(b) resolve choose_most(at);
     /// The game this tab is watching.
     table watching(g: u64) key();
@@ -161,19 +164,19 @@ at Browser {
     table up(s: Node<Server>);
 
     hear_game: on game(g, x, o, at) {
-        next game_list(g, x, o, at);
+        next games(g, x, o, at);
     }
     hear_move: on moved(g, k, cell) {
-        next move_list(g, k, cell);
+        next moves(g, k, cell);
     }
-    hear_end: on ended(g, m) {
-        next outcomes(g, m);
+    hear_resign: on gave_up(g, r) {
+        next resigned(g, r);
     }
     hear_person: on person(b, name, here, at) {
         next people(b, name, here, at);
     }
     /// A new game of this tab's answers its asking (a tab asks only while it plays no game).
-    matched: on game(g, x, o, _), not game_list(g, _, _, _), seeking(since) where x == self || o == self {
+    matched: on game(g, x, o, _), not games(g, _, _, _), seeking(since) where x == self || o == self {
         delete seeking(since);
     }
     link: on Server.connected(s, _) {
@@ -213,7 +216,7 @@ at Browser {
     pick: on click(id), square(id, g, cell), my_turn(g), srv in Server {
         send play(g, cell) to srv;
     }
-    give_up: on click("resign"), board(g), mine(g, _), not outcomes(g, _), srv in Server {
+    give_up: on click("resign"), board(g), mine(g, _), not outcome(g, _), srv in Server {
         send resign(g) to srv;
     }
     watch: on click(id), watch_button(id, g) {
@@ -230,11 +233,11 @@ at Browser {
         people(b, name, _, _) where b != self;
         me(name), let b = self;
     }
-    view called(b, name) = game_list(_, x, o, _), b in [x, o], outer name_of(b, n), let name = n.unwrap_or("someone");
+    view called(b, name) = games(_, x, o, _), b in [x, o], outer name_of(b, n), let name = n.unwrap_or("someone");
     /// This tab's games, and its mark in each.
     view mine(g, m) {
-        game_list(g, x, _, _), let m = "X" where x == self;
-        game_list(g, _, o, _), let m = "O" where o == self;
+        games(g, x, _, _), let m = "X" where x == self;
+        games(g, _, o, _), let m = "O" where o == self;
     }
     view latest_mine(g = max!(h)) = mine(h, _);
     /// The board on the page: the game being watched, else this tab's latest game unless it left it.
@@ -242,31 +245,27 @@ at Browser {
         watching(g);
         not watching(_), latest_mine(g), not dismissed(g), not seeking(_);
     }
-    view moves_in(g, k = count!(m)) = per game_list(g, _, _, _), move_list(g, m, _);
-    view square_mark(g, cell, m) = move_list(g, k, cell), let m = mark_of(k);
-    view winning(g, cell) = board(g), (a, b, c) in LINES, square_mark(g, a, m), square_mark(g, b, m),
-            square_mark(g, c, m), cell in [a, b, c];
-    /// The board's squares: each one's mark ("" when empty) and whether it is on the winning line.
+    /// The board's winning line, by the shared rules.
+    view winning(g, cell) = board(g), three(g, _, a, b, c), cell in [a, b, c];
     view squares(g, cell, m, w) {
-        board(g), cell in 0u64..9u64, outer square_mark(g, cell, sm), winning(g, cell), let m = sm.unwrap_or(""),
-                let w = true;
-        board(g), cell in 0u64..9u64, outer square_mark(g, cell, sm), not winning(g, cell), let m = sm.unwrap_or(""),
+        board(g), cell in 0u64..9u64, outer mark(g, cell, sm), winning(g, cell), let m = sm.unwrap_or(""), let w = true;
+        board(g), cell in 0u64..9u64, outer mark(g, cell, sm), not winning(g, cell), let m = sm.unwrap_or(""),
                 let w = false;
     }
     view square(id, g, cell) = squares(g, cell, _, _), let id = f"sq-{g}-{cell}";
     /// Whether it is this tab's move in game `g`.
-    view my_turn(g) = board(g), not outcomes(g, _), moves_in(g, k), mine(g, m) where m == mark_of(k);
+    view my_turn(g) = board(g), not outcome(g, _), made(g, k), mine(g, m) where m == mark_of(k);
     view turn_of(g, t) {
         my_turn(g), let t = true;
         board(g), not my_turn(g), let t = false;
     }
     /// This tab's mark in the board's game ("" when watching), and its outcome ("" while it goes oname).
-    view seat(g, m, end) = board(g), outer mine(g, mm), outer outcomes(g, e), let m = mm.unwrap_or(""),
+    view seat(g, m, end) = board(g), outer mine(g, mm), outer outcome(g, e), let m = mm.unwrap_or(""),
             let end = e.unwrap_or("");
-    view headline(g, s) = board(g), game_list(g, x, o, _), called(x, xname), called(o, oname), moves_in(g, k),
-            outer outcomes(g, end), outer mine(g, m), let s = status_line(xname, oname, mark_of(k), end, m);
-    view live_games(g, xname, oname, k) = game_list(g, x, o, _), not outcomes(g, _), called(x, xname), called(o, oname),
-            moves_in(g, k);
+    view headline(g, s) = board(g), games(g, x, o, _), called(x, xname), called(o, oname), made(g, k),
+            outer outcome(g, end), outer mine(g, m), let s = status_line(xname, oname, mark_of(k), end, m);
+    view live_games(g, xname, oname, k) = games(g, x, o, _), not outcome(g, _), called(x, xname), called(o, oname),
+            made(g, k);
     view watch_button(id, g) = live_games(g, _, _, _), let id = f"watch-{g}";
     view here(b, name) = people(b, name, true, _), up(_) where b != self;
     view status(s, c) {

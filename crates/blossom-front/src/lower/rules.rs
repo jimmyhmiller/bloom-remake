@@ -828,7 +828,13 @@ impl<'h> Lowerer<'h> {
     }
 
     fn handler(&mut self, h: &'h HHandler) -> Result<(), InternalError> {
-        let module = self.hir.scope(h.scope)?.module.clone();
+        let mut module = self.hir.scope(h.scope)?.module.clone();
+        // A copy of a handler from an `at` section of several roles: named under its role (`Browser.take$when`).
+        if let Some(r) = h.section {
+            let mut segs = module.segments().to_vec();
+            segs.extend(self.hir.role(r)?.name.segments().iter().copied());
+            module = QualName::new(segs);
+        }
         let label = match (h.kind, h.label) {
             (HandlerKind::Bootstrap, _) => "bootstrap".to_owned(),
             (HandlerKind::BootstrapFresh, _) => "bootstrap_fresh".to_owned(),

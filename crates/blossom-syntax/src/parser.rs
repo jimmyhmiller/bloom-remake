@@ -134,6 +134,21 @@ impl Parser<'_> {
             .nth(n)
             .map(|(i, _)| i)
     }
+    /// After `at`: a role name, more after commas, then `{` (an `at` section, not `at tick`).
+    fn at_section_ahead(&self) -> bool {
+        let mut k = 1;
+        loop {
+            if self.nth(k) != IDENT {
+                return false;
+            }
+            match self.nth(k + 1) {
+                L_CURLY => return true,
+                COMMA => k += 2,
+                _ => return false,
+            }
+        }
+    }
+
     fn nth(&self, n: usize) -> SyntaxKind {
         self.raw_index(n)
             .and_then(|i| self.tokens.get(i))
@@ -735,9 +750,13 @@ impl Parser<'_> {
             self.expect(SEMI);
             return ROLEITEM;
         }
-        if self.ctx("at") && self.nth(1) == IDENT && self.nth(2) == L_CURLY {
+        if self.ctx("at") && self.at_section_ahead() {
+            // `at R { … }`, or `at R1, R2 { … }`: items placed at each of the roles.
             self.bump();
             self.name(false);
+            while self.eat(COMMA) {
+                self.name(false);
+            }
             self.items_block(false);
             return ATSECTION;
         }

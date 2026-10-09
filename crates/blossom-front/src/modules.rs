@@ -208,9 +208,9 @@ fn expand_items(
                     .with_primary(item.span),
                 );
             }
-            ItemKind::At { role, items } => {
+            ItemKind::At { roles, items } => {
                 item.kind = ItemKind::At {
-                    role,
+                    roles,
                     items: expand_items(items, key, loader, sources, diags, stack),
                 };
                 out.push(item);

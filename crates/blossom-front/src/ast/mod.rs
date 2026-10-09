@@ -98,8 +98,9 @@ pub enum ItemKind {
         name: Ident,
         kind: Option<Ident>,
     },
+    /// `at R { … }` or `at R1, R2, … { … }`: the items placed at each role (LANGUAGE §6.10).
     At {
-        role: Ident,
+        roles: Vec<Ident>,
         items: Vec<Item>,
     },
     Rel(RelDecl),

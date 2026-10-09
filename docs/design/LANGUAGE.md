@@ -417,7 +417,7 @@ ModParams       = "(" [ ModParam { "," ModParam } [ "," ] ] ")" ;
 ModParam        = IDENT ":" ( 'rel' ParamList | Type [ "=" Expr ] ) ;
 ProtocolItem    = "protocol" IDENT [ Generics ] [ ":" Type { "+" Type } ] "{" { Item } "}" ;
 RoleItem        = 'role' IDENT [ ":" ( 'process' | 'cluster' | 'external' | 'client' ) ] ";" ;
-AtSection       = 'at' IDENT "{" { Item } "}" ;
+AtSection       = 'at' IDENT { "," IDENT } "{" { Item } "}" ;
 InterposeItem   = "interpose" RelPath "as" "(" IDENT "," IDENT ")" "{" { Item } "}" ;
 BlockItem       = 'block' IDENT "{" { Item } "}" ;
 OverrideItem    = "override" ItemKind ;                   (* a labelled HandlerItem, a ViewDecl or a BlockItem *)
@@ -1011,7 +1011,13 @@ at Coordinator { … }            // sections reopen, so the protocol reads in m
 ```
 
 - **Placement.** Relations, cells, timers, views, handlers, bootstraps and invariants inside `at R` live on role
-  `R`. Types, constants, parameters, functions, channels and `static` relations declared outside every `at` are
+  `R`. **Sections of several roles.** `at R1, R2 { … }` places every item at each role, as if the section were written
+  once per role: each role has its own copy of each relation (`R1.r`, `R2.r` in the IR, in traces and in queries), and
+  each rule runs at each role over that role's copies. Inside any `at R` section a relation's plain name is `R`'s copy,
+  so a table both ends keep (a server's list and a page's view of it) has one name, and a view or handler written once
+  runs at both. `R.r` names `R`'s copy anywhere (still placed at `R`, BLS0404). A role's copy and a relation of the same
+  name placed at that role are BLS0201. Not yet in such a section: `import` (an alias per role), invariants,
+  interpositions and `resolve prefer` (BLS0908). Types, constants, parameters, functions, channels and `static` relations declared outside every `at` are
   shared. A channel's send side belongs to its source role and its receive side to its destination role: a `send`
   of `c: A -> B` must be placed at `A`, and an atom of `c` read at `B` (BLS0404).
 - **Role expressions.** A role name used as a value is its member set: `p in R` is a generator (binding

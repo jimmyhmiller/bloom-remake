@@ -441,9 +441,13 @@ impl Cx<'_> {
                 }
             }
             ATSECTION => {
-                let role = self.need_name(node);
+                let roles = self.names(node);
+                if roles.is_empty() {
+                    self.malformed("an `at` section without a role", span);
+                    return None;
+                }
                 let items = self.items(node);
-                ItemKind::At { role, items }
+                ItemKind::At { roles, items }
             }
             RELDECL => ItemKind::Rel(self.rel_decl(node)),
             TIMERDECL => {

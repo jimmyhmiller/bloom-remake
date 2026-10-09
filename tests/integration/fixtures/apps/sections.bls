@@ -1,0 +1,57 @@
+//! An `at` section of several roles (LANGUAGE §6.10): the game's moves and its rules, written once, at the server and
+//! at each tab. Each end has its own `moves` (`Server.moves`, `Browser.moves`); the server's rules write its own, the
+//! tab's its own, and `three` holds at both from one definition.
+
+program sections version 1;
+
+role Server;
+role Browser: client;
+
+const LINES: Vec<(u64, u64, u64)> = [
+    (0, 1, 2),
+    (3, 4, 5),
+    (6, 7, 8),
+    (0, 3, 6),
+    (1, 4, 7),
+    (2, 5, 8),
+    (0, 4, 8),
+    (2, 4, 6)
+];
+
+fn mark_of(k: u64) -> String {
+    if k % 2u64 == 0u64 { "X" } else { "O" }
+}
+
+channel play(g: u64, cell: u64): Browser -> Server;
+channel moved(g: u64, k: u64, cell: u64): Server -> Browser;
+
+/// The game's state and its rules, at both ends: each end has its own `moves`.
+at Server, Browser {
+    table moves(g: u64, k: u64, cell: u64) key(g, k);
+    view mark(g, cell, m) = moves(g, k, cell), let m = mark_of(k);
+    view three(g, m) = (a, b, c) in LINES, mark(g, a, m), mark(g, b, m), mark(g, c, m);
+    view made(g, k = count!(m)) = moves(g, m, _);
+}
+
+at Server {
+    take: on play(g, cell) from b, not three(g, _), not mark(g, cell, _), outer made(g, n) where cell < 9u64 {
+        next moves(g, n.unwrap_or(0u64), cell);
+    }
+    table online(b: Node<Browser>);
+    join: on Browser.connected(b, _) {
+        emit online(b);
+    }
+    tell: on inserted moves(g, k, c), online(b) {
+        send moved(g, k, c) to b;
+    }
+}
+
+at Browser {
+    input tap(g: u64, cell: u64);
+    hear: on moved(g, k, c) {
+        next moves(g, k, c);
+    }
+    ask: on tap(g, cell), srv in Server, not three(g, _) {
+        send play(g, cell) to srv;
+    }
+}
