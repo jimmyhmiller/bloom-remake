@@ -139,9 +139,15 @@ struct Fired {
     because: Vec<Why>,
 }
 
-/// "rule `a`", or "rules `a`, `b`".
+/// "rule `a`", or "rules `a`, `b`": each once, in the order they come (a write credited through an expansion names
+/// the rules that fed it once per path).
 fn names(rules: &[String]) -> String {
-    let quoted: Vec<String> = rules.iter().map(|r| format!("`{r}`")).collect();
+    let mut seen = std::collections::BTreeSet::new();
+    let quoted: Vec<String> = rules
+        .iter()
+        .filter(|r| seen.insert(r.as_str()))
+        .map(|r| format!("`{r}`"))
+        .collect();
     match quoted.len() {
         1 => format!("rule {}", quoted.join("")),
         _ => format!("rules {}", quoted.join(", ")),
