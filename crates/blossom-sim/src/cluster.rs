@@ -273,6 +273,11 @@ struct SimNode<'p> {
     sessions: BTreeMap<SessionId, usize>,
     /// While the node is down: when it restarts (`i64::MAX`: when a script restarts it).
     down_until: Option<i64>,
+    /// How long each of its ticks takes, in virtual nanoseconds (0: no time at all, the default).
+    tick_cost: i64,
+    /// While its last ticks are still running: until when. What arrives meanwhile waits for its next tick, as on a
+    /// real node whose engine is busy.
+    busy_until: i64,
 }
 
 /// The protocol of a cluster without key-value clients (`clients = 0`), for runs driven by stream clients or a
@@ -402,6 +407,8 @@ impl<'p> Cluster<'p> {
                 next_conn: 0,
                 sessions: BTreeMap::new(),
                 down_until: None,
+                tick_cost: 0,
+                busy_until: 0,
             });
             c.boot(node_id(i)?, true)?;
         }
@@ -461,6 +468,7 @@ impl<'p> Cluster<'p> {
         slot.next_conn = 0;
         slot.sessions.clear();
         slot.down_until = None;
+        slot.busy_until = 0;
         let mut cfg = NodeConfig::new(n, artifact.roles.get(n.0 as usize).copied().flatten());
         cfg.halt = artifact.halt;
         cfg.statics = statics;
@@ -615,6 +623,20 @@ impl<'p> Cluster<'p> {
         self.crash_node(n, writes, i64::MAX, false)
     }
 
+    /// Makes each of node `n`'s ticks take `cost` virtual nanoseconds from now on: a slow node. While it runs a tick,
+    /// what reaches it waits for its next tick (which takes everything that waited, as the runtime does), its timers
+    /// that fall due are taken together then, and its messages leave when the tick ends. Byte-stream writes are not
+    /// delayed.
+    pub fn set_tick_cost(&mut self, n: NodeId, cost: i64) -> Result<(), SimError> {
+        let slot = self
+            .nodes
+            .get_mut(n.0 as usize)
+            .ok_or_else(|| SimError::Internal(internal_error!("no node {}", n.0)))?;
+        slot.tick_cost = cost.max(0);
+        self.note(format!("node {} ticks take {cost} ns", n.0));
+        Ok(())
+    }
+
     /// Restarts a crashed node from its store.
     pub fn restart(&mut self, n: NodeId) -> Result<(), SimError> {
         if self.nodes.get(n.0 as usize).is_none_or(|s| s.driver.is_some()) {
@@ -698,7 +720,10 @@ impl<'p> Cluster<'p> {
                 if let Some(t) = n.down_until {
                     next = next.min(t);
                 }
-                if let Some(d) = &n.driver
+                // A busy node does nothing before its ticks end, whatever falls due meanwhile.
+                if n.busy_until > self.now {
+                    next = next.min(n.busy_until);
+                } else if let Some(d) = &n.driver
                     && let Some(t) = d.node.next_deadline().map_err(|e| internal_error!("{e}"))?
                 {
                     next = next.min(t.0.saturating_sub(n.offset));
@@ -822,7 +847,7 @@ impl<'p> Cluster<'p> {
             return Err(internal_error!("no node {}", n.0).into());
         };
         let now = Instant(self.now.saturating_add(slot.offset));
-        if slot.driver.is_none() {
+        if slot.driver.is_none() || slot.busy_until > self.now {
             return Ok(());
         }
         let sessions = slot.sessions.clone();
@@ -830,6 +855,7 @@ impl<'p> Cluster<'p> {
         // dispatches them on release: a later tick may drop a blob from the cache, or a checkpoint collect it.
         let mut released: Vec<ReleasedTick> = Vec::new();
         let mut at_once = 0u64;
+        let mut ran = 0i64;
         let mut watched: Option<blossom_ir::tick::Instance> = None;
         loop {
             let Some(driver) = self.nodes.get_mut(n.0 as usize).and_then(|s| s.driver.as_mut()) else {
@@ -878,6 +904,7 @@ impl<'p> Cluster<'p> {
                 .run_one(now)
                 .map_err(|e| node_failure(n, driver.node.next_tick(), e))?;
             self.run.ticks += 1;
+            ran += 1;
             for mut t in ticks {
                 let host = std::mem::take(&mut t.host);
                 let retired = std::mem::take(&mut t.retired);
@@ -893,6 +920,14 @@ impl<'p> Cluster<'p> {
                 .flush()
                 .map_err(|e| SimError::Internal(internal_error!("node {} database flush failed: {e}", n.0)))?;
         }
+        // A slow node's ticks end, and their messages leave, `tick_cost` after they began.
+        let done = match self.nodes.get_mut(n.0 as usize) {
+            Some(slot) if slot.tick_cost > 0 && ran > 0 => {
+                slot.busy_until = self.now.saturating_add(slot.tick_cost.saturating_mul(ran));
+                slot.busy_until
+            }
+            _ => self.now,
+        };
         let mut local: Vec<Delivery> = Vec::new();
         for t in released {
             for s in t.sends {
@@ -909,8 +944,8 @@ impl<'p> Cluster<'p> {
                     continue;
                 }
                 let delay = self.rng.range(self.cfg.latency.0, self.cfg.latency.1);
-                self.schedule(
-                    delay,
+                self.schedule_at(
+                    done + delay.max(1),
                     Envelope::Peer {
                         from: n,
                         to: s.to,
@@ -925,8 +960,8 @@ impl<'p> Cluster<'p> {
                     continue;
                 };
                 let delay = self.rng.range(self.cfg.latency.0, self.cfg.latency.1);
-                self.schedule(
-                    delay,
+                self.schedule_at(
+                    done + delay.max(1),
                     Envelope::ToClient {
                         client,
                         rel: e.rel,
