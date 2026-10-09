@@ -303,7 +303,7 @@ impl Oracle {
         if let Some(m) = self.members.get(n)
             && let Some(root) = self.root
         {
-            let name = blossom_ir::members::member_name(self.program.get(), &m);
+            let name = blossom_ir::members::member_name(&m);
             return blossom_value::Seeds::derive(root, &name)
                 .map(|s| s.node)
                 .map_err(|e| blossom_base::internal_error!("deriving the seed of member {name}: {e}").into());

@@ -5,7 +5,7 @@
 //! order as the values do for the types a program compares: `bool`, the integers (big-endian, the sign bit flipped for
 //! signed ones), `f64` (IEEE 754 totalOrder), strings and bytes (escaped: `00` is written `00 FF`, and `00 01` ends
 //! them), `Duration` and `Instant`, nodes (a deployment's by name, which is their order; a client member by its
-//! server's name and serial; a keyed member by its role's id and its key), and tuples, structs, enums, `Vec` and `Option` of those. A value holding anything else
+//! server's name and serial; a keyed member by its role's name and its key), and tuples, structs, enums, `Vec` and `Option` of those. A value holding anything else
 //! (sets, maps, lattice and group values, blobs, extern values, …) is encoded whole in the caller's canonical codec,
 //! escaped: equal values give equal bytes, distinct ones distinct bytes, in no meaningful order.
 
@@ -186,11 +186,11 @@ where
                 }
             }
         }
-        // After every node id, by role id, then key (the schema hash pins the keyed roles' ids).
+        // After every node id, by role name, then key.
         Value::Member(m) => {
             out.push(NODE);
             out.push(2);
-            out.extend_from_slice(&m.role.raw().to_be_bytes());
+            put_escaped(out, m.role_name.as_bytes());
             put_escaped(out, m.key.as_bytes());
         }
         Value::Tuple(xs) | Value::Struct(xs) => {
@@ -271,21 +271,23 @@ mod tests {
             [-5i64, 0, 7].iter().map(|x| Value::Duration(Duration(*x))).collect(),
             {
                 // Keyed members after the nodes, by role, then key.
-                let m = |r: u32, k: &str| {
-                    Value::Member(blossom_value::time::MemberRef {
-                        role: blossom_base::RoleId::from_raw(r),
-                        key: k.into(),
-                    })
+                let m = |r: u32, name: &str, k: &str| {
+                    Value::Member(blossom_value::time::MemberRef::new(
+                        blossom_base::RoleId::from_raw(r),
+                        name,
+                        k,
+                    ))
                 };
                 vec![
                     Value::Node(NodeId(0)),
                     Value::Node(NodeId(1)),
                     Value::Node(NodeId(2)),
-                    m(0, ""),
-                    m(0, "\0"),
-                    m(0, "a"),
-                    m(1, ""),
-                    m(300, "a"),
+                    m(3, "Game", ""),
+                    m(3, "Game", "\0"),
+                    m(3, "Game", "a"),
+                    m(0, "Game\0", ""),
+                    m(1, "Room", ""),
+                    m(1, "Room", "a"),
                 ]
             },
             vec![

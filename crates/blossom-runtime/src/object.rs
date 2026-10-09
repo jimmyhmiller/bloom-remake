@@ -187,7 +187,7 @@ impl ObjectNode {
                     return Err(RuntimeError::Config(format!(
                         "node {} does not host the role of {}",
                         cfg.node,
-                        blossom_ir::members::member_name(program, m)
+                        blossom_ir::members::member_name(m)
                     )));
                 }
                 let me = cfg
@@ -195,7 +195,7 @@ impl ObjectNode {
                     .id(m)
                     .ok_or_else(|| RuntimeError::Config("the host has given every member id".into()))?;
                 let mut identity = crate::server::store_identity(spec, &artifact, &cfg.node)?;
-                identity.node_name = blossom_ir::members::member_name(program, m).into();
+                identity.node_name = blossom_ir::members::member_name(m).into();
                 (me, Some(m.role), identity)
             }
             None if host_role.is_some_and(|r| program.is_keyed(r)) => {

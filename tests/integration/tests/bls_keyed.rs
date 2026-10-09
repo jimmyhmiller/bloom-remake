@@ -13,7 +13,7 @@ use blossom_node::EngineEvaluator;
 use blossom_sim::FaultSchedule;
 use blossom_sim::bls::{BlsSim, InputEvent};
 use blossom_value::Value;
-use blossom_value::time::{Duration, MemberRef, Tick};
+use blossom_value::time::{Duration, Tick};
 use blossom_value::value::IntValue;
 
 #[cfg(test)]
@@ -51,15 +51,8 @@ fn u(n: u64) -> Value {
 
 #[cfg(test)]
 fn game(a: &BlsArtifact, key: &str) -> Value {
-    let role = a
-        .program
-        .get()
-        .roles
-        .iter_enumerated()
-        .find(|(_, r)| r.name.to_string() == "Game")
-        .map(|(id, _)| id)
-        .unwrap();
-    Value::Member(MemberRef { role, key: key.into() })
+    let p = a.program.get();
+    Value::Member(p.member(p.keyed_role_named("Game").unwrap(), key))
 }
 
 #[cfg(test)]

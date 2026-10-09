@@ -117,13 +117,7 @@ pub fn of_deployment<N: AsRef<str>>(
             && program.is_keyed(*r)
         {
             let id = NodeId(u32::try_from(i).map_err(|_| "too many nodes".to_string())?);
-            out.insert(
-                id,
-                MemberRef {
-                    role: *r,
-                    key: std::sync::Arc::from(name.as_ref()),
-                },
-            )?;
+            out.insert(id, program.member(*r, name.as_ref()))?;
         }
     }
     Ok(out)
@@ -131,10 +125,6 @@ pub fn of_deployment<N: AsRef<str>>(
 
 /// A member as source writes it, `Game:"game-17"`: its name everywhere (a member's seed σn derives from it, so it is
 /// the same on every host and in simulation).
-pub fn member_name(program: &Program, m: &MemberRef) -> String {
-    let role = program
-        .roles
-        .get(m.role)
-        .map_or_else(|| format!("role#{}", m.role.raw()), |r| r.name.to_string());
-    format!("{role}:{:?}", m.key)
+pub fn member_name(m: &MemberRef) -> String {
+    format!("{}:{:?}", m.role_name, m.key)
 }

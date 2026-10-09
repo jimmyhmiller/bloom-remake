@@ -102,10 +102,7 @@ pub fn member_of(program: &Program, role: u32, key: String) -> Result<MemberRef,
             role.raw()
         )));
     }
-    Ok(MemberRef {
-        role,
-        key: Arc::from(key),
-    })
+    Ok(program.member(role, key))
 }
 
 #[cfg(test)]
@@ -129,10 +126,7 @@ mod tests {
             );
             Routing { roles: r }
         };
-        let m = |k: usize| MemberRef {
-            role: RoleId::from_raw(1),
-            key: Arc::from(format!("game-{k}")),
-        };
+        let m = |k: usize| MemberRef::new(RoleId::from_raw(1), "Game", format!("game-{k}"));
         let two = role(&["h1", "h2"]);
         let three = role(&["h1", "h2", "h3"]);
         let mut on = [0usize; 3];

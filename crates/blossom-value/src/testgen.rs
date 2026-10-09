@@ -76,10 +76,11 @@ fn arb_leaf() -> impl Strategy<Value = Value> {
         (0u64..3).prop_map(|n| Value::Session(SessionId(n))),
         "[xy]{0,2}".prop_map(|s| Value::Principal(s.as_str().into())),
         (0u32..3).prop_map(|n| Value::Node(NodeId(n))),
-        (0u32..2, "[gh]{0,2}").prop_map(|(r, k)| Value::Member(MemberRef {
-            role: blossom_base::RoleId::from_raw(r),
-            key: k.as_str().into()
-        })),
+        (0u32..2, "[gh]{0,2}").prop_map(|(r, k)| Value::Member(MemberRef::new(
+            blossom_base::RoleId::from_raw(r),
+            ["Game", "Room"][r as usize],
+            k.as_str()
+        ))),
         ("[pq]", proptest::collection::vec(0u8..2, 0..2)).prop_map(|(c, b)| Value::Extern {
             codec: ExternCodecId(c.as_str().into()),
             bytes: b.into()

@@ -21,7 +21,7 @@ use blossom_runtime::keyed::Routing;
 use blossom_runtime::server::{Server, ServerConfig, identity};
 use blossom_store::OpenMode;
 use blossom_value::Value;
-use blossom_value::time::{MemberRef, NodeId};
+use blossom_value::time::NodeId;
 use blossom_value::value::IntValue;
 
 #[cfg(test)]
@@ -145,11 +145,8 @@ fn wait_for(lobby: &Server, a: &BlsArtifact, rel: &str, want: &[Vec<Value>]) {
 fn games_run_on_their_hosts_and_survive_a_host_restart() {
     let (spec, a) = setup();
     let p = a.program.get();
-    let game_role = p.keyed_roles().next().unwrap().id;
-    let member = |key: &str| MemberRef {
-        role: game_role,
-        key: key.into(),
-    };
+    let game_role = p.keyed_role_named("Game").unwrap();
+    let member = |key: &str| p.member(game_role, key);
     let routing = Routing::of(&spec, &a).unwrap();
     let (h1, h2) = (a.node_id("h1").unwrap(), a.node_id("h2").unwrap());
     let host = |key: &str| routing.host_of(&member(key)).unwrap();
