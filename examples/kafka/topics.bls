@@ -57,7 +57,10 @@ fn config_value_ok(name: String, value: String) -> Option<bool> {
     } else if name == "min.insync.replicas" {
         // Kafka's `atLeast(1)`.
         Some(value.parse_i64().map(|n| n >= 1 && n <= 2147483647).unwrap_or(false))
-    } else if name == "max.message.bytes" || name == "segment.bytes" {
+    } else if name == "max.message.bytes" {
+        // A batch is one replicated entry (`ENTRY_MAX`).
+        Some(value.parse_i64().map(|n| n >= 0 && n as u64 <= ENTRY_MAX).unwrap_or(false))
+    } else if name == "segment.bytes" {
         Some(nonneg_int)
     } else {
         None

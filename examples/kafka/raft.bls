@@ -8,7 +8,7 @@
 //! - `member_id(n, id)`: each broker's member id (a configuration names its members by id);
 //! - `hosts(g)`: whether this broker keeps `g`'s log although no configuration names it yet (a member being added);
 //! - `proposals(g, xs)`: at most one row per group and tick, the entries this broker would append to `g` if it
-//!   leads it, in order: (kind, position, bytes as a blob);
+//!   leads it, in order: (kind, position, bytes as a blob), each entry's bytes at most `RAFT_ENTRY_MAX`;
 //! - `preferred(g, n)`: the member that leads a new group (Kafka's first replica leads a new partition): term 1 is
 //!   its (see `initial_vote`), so a new group has a leader at once, without an election.
 //! - `compactable(g, i, pos)`: an index whose entries (it and every one before) this broker no longer needs, and
@@ -38,10 +38,11 @@
 //!
 //! Replication (AppendEntries, §5.3): the leader sends each follower its new entries in the tick after it appends
 //! them, and at every heartbeat it sends each follower its entries from the last index that follower acknowledged,
-//! with a `beat` carrying its commit index; a message carries at most `RAFT_BATCH` entries after a given index and
-//! that index's term. A follower takes a batch whose predecessor matches its log whole, so the network may reorder
-//! messages without slowing it down: it removes a conflicting suffix, stores the batch, and acknowledges the batch's
-//! last index. A new leader's first entry is a NOOP of its term, so the entries it inherited commit without waiting
+//! with a `beat` carrying its commit index; a message carries the entries after a given index and that index's term,
+//! at most `RAFT_BATCH` of them and `RAFT_BATCH_BYTES` of their bytes (always at least one: an entry alone fits a
+//! message, `RAFT_ENTRY_MAX`). A follower takes a batch whose predecessor matches its log whole, so the network may
+//! reorder messages without slowing it down: it removes a conflicting suffix, stores the batch, and acknowledges the
+//! batch's last index. A new leader's first entry is a NOOP of its term, so the entries it inherited commit without waiting
 //! for a client's (§5.4.2, §8).
 
 /// A replication group: a topic id and a partition (the controller is the metadata topic's partition 0).
@@ -52,6 +53,12 @@ param RAFT_ELECTION_MAX: Duration = 600ms;
 param RAFT_HEARTBEAT: Duration = 50ms;
 param RAFT_POLL: Duration = 20ms;
 param RAFT_BATCH: u64 = 64;
+/// The most bytes of entries a message carries when it carries more than one (as Kafka bounds a replica fetch by
+/// `replica.fetch.max.bytes`, never by a count of batches).
+param RAFT_BATCH_BYTES: u64 = 4194304;
+/// The most bytes one entry holds: a message carrying it alone must fit a frame between nodes (16 MiB, with room for
+/// the message's other fields), or it would be dropped every time it is sent and the follower would never catch up.
+const RAFT_ENTRY_MAX: u64 = 15728640;
 /// Whether a leader that hears from no majority for a period steps down (CheckQuorum, §6.2; below). Raft is safe
 /// without it; a test that needs a leader cut off to go on appending turns it off.
 param RAFT_CHECK_QUORUM: bool = true;
@@ -139,7 +146,9 @@ fn no_members() -> Vec<i32> {
 /// the leader may, adding or removing exactly one member of `cur`. Anything else is a program error.
 fn checked_configs(xs: Vec<(u8, i64, Blob)>, cur: Vec<i32>, ready: bool) -> Vec<(u8, i64, Blob)> {
     let configs = xs.filter(|x| x.0 == CONFIG);
-    if configs.is_empty() {
+    if xs.any(|x| x.2.len() > RAFT_ENTRY_MAX) {
+        error("raft: an entry larger than RAFT_ENTRY_MAX proposed (it could never be sent to a follower)")
+    } else if configs.is_empty() {
         xs
     } else if configs.len() > 1 {
         error("raft: two configuration changes proposed in one tick")
@@ -157,6 +166,16 @@ fn one_member_change(cur: Vec<i32>, proposed: Vec<i32>) -> bool {
     let added = proposed.filter(|x| not cur.contains(x)).len();
     let removed = cur.filter(|x| not proposed.contains(x)).len();
     proposed.to_set().len() == proposed.len() && added + removed == 1
+}
+
+/// Where a batch after `from` ends, given its candidate entries' indexes and sizes in index order: after as many as
+/// fit in `budget` bytes, and after the first whatever its size.
+fn batch_end(from: u64, sizes: Vec<(u64, u64)>, budget: u64) -> u64 {
+    sizes.fold((from, 0u64, true), |acc, x| if acc.2 && (acc.0 == from || acc.1 + x.1 <= budget) {
+        (x.0, acc.1 + x.1, true)
+    } else {
+        (acc.0, acc.1, false)
+    }).0
 }
 
 /// The bytes of a stored entry (a blob only ever holds its whole bytes).
@@ -500,18 +519,26 @@ at Broker {
     /// the tick after their append), and at every heartbeat after what it last acknowledged (so lost or refused
     /// batches go again).
     /// A follower that acknowledged a batch short of the log gets the next one at once, so one catching up takes a
-    /// batch per round trip.
+    /// batch per round trip. A follower whose broker is not heard alive gets nothing again at a heartbeat: a down
+    /// broker would otherwise cost its leader a batch read and encoded at every heartbeat, for nothing.
     view out_from(g, f, from) {
         leader(g, _), rsent(g, f, from), last_log(g, li, _) where li > from;
-        raft_heartbeat, leader(g, t), not idle(g, t), match_idx(g, f, from);
+        raft_heartbeat, leader(g, t), not idle(g, t), match_idx(g, f, from), peer_alive(f);
         ack(g, t, from, _) from f, leader(g, t), members(g, f), last_log(g, li, _) where from < li;
     }
-    /// A batch's entries: a range of the log (found by index, not by scanning it), read only for the batch.
-    view out_rows(g, f, from, i, et, k, pos, data) = out_from(g, f, from), not behind_snapshot(g, from),
-            rlog(g, i, et, _pt, k, pos, data)
+    /// A batch's candidate entries, by index and size: the next `RAFT_BATCH` of the log (a range, found by index, not
+    /// by scanning it), their bytes not read.
+    view out_sizes(g, f, from, ss = collect!((i, n))) = per out_from(g, f, from), not behind_snapshot(g, from),
+            rlog(g: g, idx: i, data: data, ..), let n = data.len()
             where i > from && i <= from + RAFT_BATCH;
-    view out_batch(g, f, from, es = collect!((i, et, k, pos, b))) = per out_from(g, f, from),
-            not behind_snapshot(g, from), out_rows(g, f, from, i, et, k, pos, data), let b = log_bytes(data);
+    /// Where each batch ends: as many candidates as fit `RAFT_BATCH_BYTES`, and always the first (`from` itself for
+    /// none).
+    view out_end(g, f, from, e) = out_sizes(g, f, from, ss), let e = batch_end(from, ss, RAFT_BATCH_BYTES);
+    /// A batch's entries, read only for the batch.
+    view out_rows(g, f, from, i, et, k, pos, data) = out_end(g, f, from, e), rlog(g, i, et, _pt, k, pos, data)
+            where i > from && i <= e;
+    view out_batch(g, f, from, es = collect!((i, et, k, pos, b))) = per out_end(g, f, from, _e),
+            out_rows(g, f, from, i, et, k, pos, data), let b = log_bytes(data);
     /// At a heartbeat, a follower that acknowledged less than the snapshot point gets the point.
     send_snapshot: on raft_heartbeat, leader(g, t), match_idx(g, f, m), rsnap(g, s, st, pos, conf) where m < s {
         send snapshot(g, t, s, st, pos, conf) to f;
@@ -519,8 +546,13 @@ at Broker {
     replicate: while out_batch(g, f, from, es), leader(g, t), term_at(g, from, ft) {
         send entries(g, t, from, ft, es) to f;
     }
-    pushed: while leader(g, _), rsent(g, f, s), last_log(g, li, _) where li > s {
-        next rsent(g, f, if li > s + RAFT_BATCH { s + RAFT_BATCH } else { li });
+    /// What was pushed to a follower ends where its batch did.
+    pushed: while leader(g, _), rsent(g, f, s), out_end(g, f, s, e) where e > s {
+        next rsent(g, f, e);
+    }
+    /// Entries compacted away are never pushed: the follower gets the snapshot point at a heartbeat instead.
+    pushed_compacted: while leader(g, _), rsent(g, f, s), rsnap(g, p, _, _, _) where s < p {
+        next rsent(g, f, p);
     }
     /// An idle group's leader sends no heartbeat (at the heartbeat it goes quiet it sends `quiesce` alone, so the
     /// followers do not see it with a heartbeat and take the group as active).
