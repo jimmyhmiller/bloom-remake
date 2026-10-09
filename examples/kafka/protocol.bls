@@ -126,6 +126,10 @@ fn values_of<K, T>(xs: Vec<(K, T)>) -> Vec<T> {
 /// The most bytes one request may take (Kafka's `socket.request.max.bytes` default).
 const MAX_FRAME: u64 = 104857600;
 
+/// The most bytes one replicated entry may hold (a produced batch, an offset commit): at most `raft.bls`'s
+/// `RAFT_ENTRY_MAX`, so a message between brokers can always carry it.
+const ENTRY_MAX: u64 = 15728640;
+
 /// A size-prefixed frame around `body`.
 fn frame(body: Bytes) -> Bytes {
     Bytes::from_i32_be(body.len() as i32).concat(body)

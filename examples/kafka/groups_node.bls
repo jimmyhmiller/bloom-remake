@@ -330,29 +330,33 @@ view commit_errors_now(c, i, es = collect!((k, err))) = per commit_head(c, i, _s
 /// queued.
 table commit_decided(c: Conn, i: u64, errors: Vec<i16>) key(c, i) while queued(c, i, _, _);
 table commit_placed(c: Conn, i: u64, g: Group, idx: u64, term: u64) key(c, i) while queued(c, i, _, _);
-view commit_new(c, i, req, errors) = commit_head(c, i, _s, _v, _corr, _fr, _at, req), not commit_decided(c, i, _),
+/// A new commit's errors partition by partition.
+view commit_checked(c, i, req, errors) = commit_head(c, i, _s, _v, _corr, _fr, _at, req), not commit_decided(c, i, _),
         commit_errors_now(c, i, es), let errors = values_of(es)
         where es.len() == commit_entries(req).len();
+/// The OFFSETS entry's bytes for a new commit: the last value given for each partition to be committed.
+view commit_bytes(c, i, b) = commit_checked(c, i, req, _errors), my_id(me), commit_items(c, i, items),
+        let b = encode_offsets_entry(OffsetsEntry {
+            tag: hash64(("commit", me, c, i)),
+            group: req.group_id,
+            items: items
+        });
+/// A new commit's errors: as checked, and INVALID_COMMIT_OFFSET_SIZE for each partition to be committed if its entry
+/// would be larger than a replicated entry may be (`ENTRY_MAX`), as Kafka answers a commit too large for the offsets
+/// topic's batches.
+view commit_new(c, i, req, errors) = commit_checked(c, i, req, errors0), commit_bytes(c, i, b),
+        let errors = if b.len() > ENTRY_MAX { none_as(errors0, INVALID_COMMIT_OFFSET_SIZE) } else { errors0 };
 decide_commit: while commit_new(c, i, _req, errors) {
     upsert commit_decided(c, i, errors);
 }
-/// The OFFSETS entry a new commit appends to its group's partition (when any partition is to be committed): the
-/// last value given for each partition of the request.
-view commit_entry_of(c, i, g, x) = commit_new(c, i, req, _errors), commit_rank(c, i, g, k), my_id(me),
-        commit_items(c, i, items),
-        let x = (
-            OFFSETS,
-            k as i64,
-            Blob::of(encode_offsets_entry(OffsetsEntry {
-                tag: hash64(("commit", me, c, i)),
-                group: req.group_id,
-                items: items
-            }))
-        );
-view commit_item(c, i, k, it) = commit_new(c, i, req, errors), (k, e) in commit_entries(req).enumerate(),
+/// The OFFSETS entry a new commit appends to its group's partition (when any partition is to be committed).
+view commit_entry_of(c, i, g, x) = commit_new_in(c, i, g, _o), commit_rank(c, i, g, k), commit_bytes(c, i, b),
+        let x = (OFFSETS, k as i64, Blob::of(b));
+view commit_item(c, i, k, it) = commit_checked(c, i, req, errors), (k, e) in commit_entries(req).enumerate(),
         let Some(err) = errors.get(k), topic_parts(e.0, id, _n), let it = (e.0, id, e.1, e.2, e.3, e.4)
         where err == NONE;
-view commit_items_by(c, i, xs = collect!((k, it))) = per commit_new(c, i, _req, _errors), commit_item(c, i, k, it);
+view commit_items_by(c, i, xs = collect!((k, it))) = per commit_checked(c, i, _req, _errors),
+        commit_item(c, i, k, it);
 /// A partition named twice in one request is committed at its last value, as Kafka does.
 view commit_items(c, i, items) = commit_items_by(c, i, xs), let items = last_per_partition(values_of(xs));
 /// The order of each new commit among its group partition's new commits this tick: arrival, then connection and

@@ -50,6 +50,8 @@ input dcluster_resp(corr: i32, version: i16, ops: bool, endpoint: i8, brokers: V
 input alter_resp(corr: i32, frame: Bytes, errors: Vec<(u64, i16)>);
 input list_resp_r(corr: i32, frame: Bytes, ongoing: Vec<(String, i32, Vec<i32>, Vec<i32>)>);
 input seq_case(id: u64, batches: Vec<Bytes>);
+/// A topic configuration to check: its name and value.
+input config_case(name: String, value: String);
 /// Bytes to split into frames.
 input stream_bytes(b: Bytes);
 /// Chunks to reassemble into frames, fed in order.
@@ -238,6 +240,7 @@ view v_dcluster_resp(corr, b) = dcluster_resp(corr, version, ops, endpoint, brok
 view v_fetch_resp(corr, b) = fetch_resp(corr, f, err, answers), let b = fetch_bytes_of(corr, f, err, answers);
 view v_list_resp(corr, b) = list_resp(corr, f, answers), let b = list_bytes_of(corr, f, answers);
 view v_seq(id, outs) = seq_case(id, batches), let outs = sequence_each(batches);
+view v_config(name, value, ok) = config_case(name, value), let ok = config_value_ok(name, value);
 view v_init_pid(f, r) = req(f), let r = init_pid_of(f);
 /// Each entry's check of a Produce request (error, message), as the broker checks it.
 view v_produce_check(f, cs) = req(f), let Some(r) = produce_of(f), let cs = produce_checks(r);

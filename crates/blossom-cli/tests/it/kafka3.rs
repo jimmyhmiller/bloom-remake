@@ -253,12 +253,46 @@ impl Cluster {
 
     /// Broker `i`'s tick count, as its stats file last said (it rewrites the file every second).
     fn ticks(&self, i: usize) -> u64 {
+        self.stat(i, "ticks")
+    }
+
+    /// Broker `i`'s counter `name`, as its stats file last said.
+    fn stat(&self, i: usize, name: &str) -> u64 {
         let text = std::fs::read_to_string(self.stats_path(i)).unwrap();
+        let prefix = format!("{name} ");
         text.lines()
-            .find_map(|l| l.strip_prefix("ticks "))
-            .unwrap_or_else(|| panic!("no tick count in {text:?}"))
+            .find_map(|l| l.strip_prefix(prefix.as_str()))
+            .unwrap_or_else(|| panic!("no {name} in {text:?}"))
             .parse()
             .unwrap()
+    }
+
+    /// For a failure's message: each running broker's view of partition 0's leader, and its counters of slow work.
+    fn diagnose(&self) -> String {
+        let mut out = String::new();
+        for (i, p) in self.procs.iter().enumerate() {
+            if p.is_none() {
+                out.push_str(&format!("\n{}: down", self.names[i]));
+                continue;
+            }
+            let leader = metadata(&self.ports, self.ports[i]).map(|(_, l)| l[&0]);
+            let leader = leader.and_then(|lp| self.ports.iter().position(|p| *p == lp));
+            out.push_str(&format!(
+                "\n{}: partition 0 led by {:?}",
+                self.names[i],
+                leader.map(|l| &self.names[l])
+            ));
+            let text = std::fs::read_to_string(self.stats_path(i)).unwrap_or_default();
+            for l in text.lines() {
+                if ["tick_max", "slow.", "peer_wait", "dropped_", "wal_sync"]
+                    .iter()
+                    .any(|k| l.starts_with(k))
+                {
+                    out.push_str(&format!("\n  {l}"));
+                }
+            }
+        }
+        out
     }
 
     fn kill(&mut self, i: usize) {
@@ -741,6 +775,154 @@ fn three_brokers_keep_every_acknowledged_record_under_kill_9_and_partitions() {
         let p = p.as_mut().expect("every broker runs");
         assert!(p.try_wait().unwrap().is_none(), "broker {} exited", i + 1);
     }
+}
+
+/// One acks=all batch of `values` to partition `p` at the broker on `port`: its error code, or `None` if the broker
+/// did not answer within the read timeout.
+#[cfg(test)]
+fn produce_one(port: u16, p: i32, values: &[String], corr: i32) -> Option<i16> {
+    let mut s = connect(port).ok()?;
+    let req = ProduceRequest::default()
+        .with_acks(-1)
+        .with_timeout_ms(3000)
+        .with_topic_data(vec![
+            TopicProduceData::default()
+                .with_name(topic_name())
+                .with_partition_data(vec![
+                    PartitionProduceData::default()
+                        .with_index(p)
+                        .with_records(Some(Bytes::from(batch(values)))),
+                ]),
+        ]);
+    let mut body = call(&mut s, &framed(0, 12, corr, &req)).ok()?;
+    ResponseHeader::decode(&mut body, ProduceResponse::header_version(12)).ok()?;
+    let r = ProduceResponse::decode(&mut body, 12).ok()?;
+    Some(r.responses[0].partition_responses[0].error_code)
+}
+
+/// Partition 0's leader (its index among the brokers) and the topic's id, as any broker on `live` reports it.
+#[cfg(test)]
+fn leader_of_0(ports: &[u16], live: &[usize]) -> Option<(usize, [u8; 16])> {
+    live.iter().find_map(|i| {
+        let mut s = connect(ports[*i]).ok()?;
+        let req = MetadataRequest::default()
+            .with_topics(Some(vec![
+                MetadataRequestTopic::default().with_name(Some(topic_name())),
+            ]))
+            .with_allow_auto_topic_creation(false);
+        let mut body = call(&mut s, &framed(3, 13, 1, &req)).ok()?;
+        ResponseHeader::decode(&mut body, MetadataResponse::header_version(13)).ok()?;
+        let r = MetadataResponse::decode(&mut body, 13).ok()?;
+        let t = r.topics.first().filter(|t| t.error_code == 0)?;
+        let l = t.partitions.iter().find(|p| p.partition_index == 0)?.leader_id.0;
+        (1..=3).contains(&l).then(|| ((l - 1) as usize, *t.topic_id.as_bytes()))
+    })
+}
+
+/// A follower that missed batches near the size limit catches up on them. Each batch is about 900 KiB, under the
+/// default `max.message.bytes` (1 MiB), and a message between brokers is at most 16 MiB: a replication message that
+/// carried a fixed number of entries (once 64) was too large to send, was dropped, and was sent again at every
+/// heartbeat, so the follower never caught up. Here the follower that missed the batches is the only other one left
+/// when the next batch is produced: it is committed only once that follower holds everything before it.
+///
+/// The producer follows partition 0's leader as a client does (a leader may move while the follower is down).
+///
+/// It needs about 37 MiB of batches, which a debug build's brokers handle too slowly (ticks of a third of a second
+/// with one batch); the full tier runs it from a release build (`scripts/test-tiers.sh full`).
+#[test]
+#[ignore = "full tier"]
+#[allow(clippy::print_stderr)] // How often the leader moved is reported, not checked.
+fn a_restarted_follower_catches_up_on_batches_near_the_size_limit() {
+    const BATCHES: usize = 40;
+    const VALUE_BYTES: usize = 900 * 1024;
+    if cfg!(debug_assertions) {
+        skipped(
+            "a_restarted_follower_catches_up_on_batches_near_the_size_limit needs a release build: \
+             cargo test --release -p blossom-cli --test it a_restarted_follower -- --ignored",
+        );
+        return;
+    }
+    let _one = crate::one_cluster();
+    let mut cluster = Cluster::new("large");
+    let ports = cluster.ports.clone();
+    create_topic(&ports);
+    let mut corr = 0;
+    let mut moves = 0;
+    // One batch, until acknowledged by partition 0's leader of the moment among `live`.
+    let mut produce = |cluster: &Cluster, live: &[usize], values: &[String], what: &str| {
+        let (clock, limit) = (Stopwatch::start(), Duration::from_secs(30));
+        loop {
+            assert!(
+                clock.elapsed() < limit,
+                "{what}: not acknowledged within {limit:?}{}",
+                cluster.diagnose()
+            );
+            corr += 1;
+            let Some((l, _)) = leader_of_0(&ports, live) else {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            };
+            match produce_one(ports[l], 0, values, corr) {
+                Some(0) => return,
+                Some(NOT_LEADER_OR_FOLLOWER | LEADER_NOT_AVAILABLE) => moves += 1,
+                Some(REQUEST_TIMED_OUT) | None => {}
+                Some(code) => panic!("{what}: a produce answered {code}{}", cluster.diagnose()),
+            }
+        }
+    };
+    let all = [0, 1, 2];
+    let first = vec!["first".to_owned()];
+    produce(&cluster, &all, &first, "the first batch");
+
+    // Acknowledged by the leader and one follower while the other is down.
+    let (l, _) = leader_of_0(&ports, &all).expect("partition 0 has a leader");
+    let behind = (l + 1) % 3;
+    cluster.kill(behind);
+    let up: Vec<usize> = all.iter().copied().filter(|i| *i != behind).collect();
+    let values: Vec<String> = (0..BATCHES)
+        .map(|n| format!("{n:04}:{}", "x".repeat(VALUE_BYTES)))
+        .collect();
+    for v in &values {
+        produce(&cluster, &up, std::slice::from_ref(v), "a large batch");
+    }
+
+    // The follower comes back and catches up; then the other one goes, so the next batch needs it.
+    cluster.start(behind, false);
+    std::thread::sleep(Duration::from_secs(5));
+    let (l, _) = leader_of_0(&ports, &up).expect("partition 0 has a leader");
+    let other = *up.iter().find(|i| **i != l).unwrap();
+    cluster.kill(other);
+    let left: Vec<usize> = all.iter().copied().filter(|i| *i != other).collect();
+    let last = vec!["last".to_owned()];
+    produce(&cluster, &left, &last, "the batch after the catch-up");
+    for i in &left {
+        assert_eq!(
+            cluster.stat(*i, "dropped_oversized"),
+            0,
+            "{} dropped messages too large for a frame",
+            cluster.names[*i]
+        );
+    }
+
+    let (l, tid) = leader_of_0(&ports, &left).expect("partition 0 has a leader");
+    let log = read_partition(ports[l], tid, 0).expect("the leader answers");
+    // A produce that timed out may have been appended and is sent again: a value can follow itself.
+    for (i, (off, _)) in log.iter().enumerate() {
+        assert_eq!(*off, i as i64, "a gap before offset {off}");
+    }
+    let mut held: Vec<&String> = log.iter().map(|(_, v)| v).collect();
+    held.dedup();
+    let expected: Vec<&String> = first.iter().chain(&values).chain(&last).collect();
+    assert_eq!(
+        held.len(),
+        expected.len(),
+        "the partition holds {} distinct records in a row",
+        held.len()
+    );
+    assert!(held == expected, "the partition's records differ from those produced");
+    // How often the producer had to find a new leader (CheckQuorum steps down a leader whose slow ticks leave a
+    // follower's acknowledgements queued past a period).
+    eprintln!("partition 0's leader moved {moves} time(s) under the producer");
 }
 
 /// Sequential one-record acks=all produces to one partition's leader, one at a time, timed: the latency a producer

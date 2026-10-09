@@ -134,9 +134,9 @@ fn config_ok(name: &str, value: &str) -> bool {
         "compression.type" => value == "producer",
         "message.timestamp.type" => value == "CreateTime",
         "retention.ms" | "retention.bytes" => int.is_some_and(|n| n >= -1),
-        "max.message.bytes" | "min.insync.replicas" | "segment.bytes" => {
-            int.is_some_and(|n| (0..=i64::from(i32::MAX)).contains(&n))
-        }
+        // A batch is one replicated entry, which a message between brokers carries whole (`ENTRY_MAX`).
+        "max.message.bytes" => int.is_some_and(|n| (0..=15_728_640).contains(&n)),
+        "min.insync.replicas" | "segment.bytes" => int.is_some_and(|n| (0..=i64::from(i32::MAX)).contains(&n)),
         _ => false,
     }
 }

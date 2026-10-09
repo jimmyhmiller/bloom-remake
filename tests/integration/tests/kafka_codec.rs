@@ -1831,6 +1831,35 @@ fn reassignment_requests_decode_and_answers_encode() {
     }
 }
 
+/// `max.message.bytes` is bounded by what one replicated entry may hold (`ENTRY_MAX`, 15 MiB): a message between
+/// brokers must carry a batch whole, or a follower could never be sent it.
+#[test]
+fn max_message_bytes_is_bounded_by_a_replicated_entry() {
+    let artifact = compile();
+    let cases = [
+        ("max.message.bytes", "0", true),
+        ("max.message.bytes", "1048588", true),
+        ("max.message.bytes", "15728640", true),
+        ("max.message.bytes", "15728641", false),
+        ("max.message.bytes", "2147483647", false),
+        ("max.message.bytes", "-1", false),
+        ("segment.bytes", "2147483647", true),
+    ];
+    let inputs: Vec<InputEvent> = cases
+        .iter()
+        .map(|(n, v, _)| input(&artifact, "config_case", vec![s(n), s(v)]))
+        .collect();
+    let run = run(&artifact, &inputs);
+    let got = rows(&artifact, &run, "v_config");
+    for (n, v, ok) in cases {
+        let row = got
+            .iter()
+            .find(|r| r[0] == s(n) && r[1] == s(v))
+            .unwrap_or_else(|| panic!("no answer for {n} = {v}"));
+        assert_eq!(row[2], opt(Some(Value::Bool(ok))), "{n} = {v}");
+    }
+}
+
 #[cfg(test)]
 fn producer_batch(pid: i64, epoch: i16, seq: i32, n: usize) -> Vec<u8> {
     use kafka_protocol::records::{Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType};
