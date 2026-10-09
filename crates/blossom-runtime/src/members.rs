@@ -53,9 +53,8 @@ pub(crate) enum MemberEvent {
         received: u64,
         acked: u64,
         conn: u64,
-        writer: SyncSender<Vec<u8>>,
-        /// Ends the connection, for the engine.
-        closer: Closer,
+        /// The connection, as the engine writes to it and ends it.
+        link: Box<dyn LinkConn>,
     },
     /// A numbered batch of the member's messages, decoded.
     Msg {
@@ -81,6 +80,38 @@ pub(crate) struct ClientRole {
     pub artifact: Arc<[u8]>,
 }
 
+/// Each client role's part of the program, projected once: what its pages run, and the digest their links present. A
+/// projection that would show a page anything placed at another role is refused.
+pub(crate) fn project_clients(artifact: &BlsArtifact) -> Result<BTreeMap<String, ClientRole>, RuntimeError> {
+    let program = artifact.program.get();
+    let mut client_roles = BTreeMap::new();
+    for (role, r) in program.roles.iter_enumerated() {
+        if r.kind != blossom_ir::core::RoleKind::Client {
+            continue;
+        }
+        let name = r.name.to_string();
+        let client = blossom_artifact::client::ClientArtifact::project(artifact, &name)
+            .map_err(|e| RuntimeError::Config(e.to_string()))?;
+        let leaks = client.leaks(artifact);
+        if !leaks.is_empty() {
+            return Err(RuntimeError::Config(format!(
+                "the part of the program `{name}`'s pages run would show them: {}",
+                leaks.join("; ")
+            )));
+        }
+        let bytes = client.encode().map_err(|e| RuntimeError::Config(e.to_string()))?;
+        client_roles.insert(
+            name,
+            ClientRole {
+                id: role,
+                part: client.part(),
+                artifact: Arc::from(bytes),
+            },
+        );
+    }
+    Ok(client_roles)
+}
+
 /// What the web listener's connection threads share.
 #[derive(Clone)]
 pub(crate) struct WebCtx {
@@ -104,6 +135,30 @@ pub(crate) struct WebCtx {
     pub client_roles: Arc<BTreeMap<String, ClientRole>>,
     /// The links over plain requests.
     pub sessions: Arc<crate::http_link::Sessions>,
+}
+
+/// A connection carrying a member's link, as the engine writes to it: a connection thread's queue here, a socket of
+/// the host elsewhere ([`crate::object`]).
+pub(crate) trait LinkConn: Send {
+    /// Writes a frame; `false` when the connection cannot take it (gone, or not keeping up).
+    fn write(&self, frame: Vec<u8>) -> bool;
+    /// Ends the connection; the member reconnects.
+    fn close(&self);
+}
+
+/// A connection served by a thread of this runtime: frames go to its writer's queue.
+pub(crate) struct ThreadConn {
+    pub writer: SyncSender<Vec<u8>>,
+    pub closer: Closer,
+}
+
+impl LinkConn for ThreadConn {
+    fn write(&self, frame: Vec<u8>) -> bool {
+        self.writer.try_send(frame).is_ok()
+    }
+    fn close(&self) {
+        self.closer.close();
+    }
 }
 
 /// How the engine ends a link's connection: a WebSocket's socket, or an HTTP session.
@@ -214,7 +269,19 @@ pub(crate) struct Admitted {
 
 /// Checks a member's `HELLO` and finds (or mints) its identity; the refusal to send it otherwise.
 pub(crate) fn admit(ctx: &WebCtx, h: blossom_wire::frame::Hello) -> Result<Admitted, AdmitError> {
-    if let Err((reason, detail)) = crate::net::check_hello(&h, &ctx.id) {
+    admit_with(&ctx.id, &ctx.catalog, &ctx.client_roles, h, &mut |role, token| identify(ctx, role, token))
+}
+
+/// [`admit`], with what it needs given: the node's identity, its channel catalog and client roles, and how a member
+/// is identified (`identify(role, token)`).
+pub(crate) fn admit_with(
+    id: &Identity,
+    catalog: &Catalog,
+    client_roles: &BTreeMap<String, ClientRole>,
+    h: blossom_wire::frame::Hello,
+    identify: &mut dyn FnMut(&str, Option<Vec<u8>>) -> Result<(NodeId, Vec<u8>), RuntimeError>,
+) -> Result<Admitted, AdmitError> {
+    if let Err((reason, detail)) = crate::net::check_hello(&h, id) {
         return Err(AdmitError::Refused(reason, detail));
     }
     let Peer::Member {
@@ -230,7 +297,7 @@ pub(crate) fn admit(ctx: &WebCtx, h: blossom_wire::frame::Hello) -> Result<Admit
             "only client members connect here".into(),
         ));
     };
-    let Some(client) = ctx.client_roles.get(&role) else {
+    let Some(client) = client_roles.get(&role) else {
         return Err(AdmitError::Refused(
             RejectReason::NotAllowed,
             format!("`{role}` is not a client role of the program"),
@@ -242,8 +309,8 @@ pub(crate) fn admit(ctx: &WebCtx, h: blossom_wire::frame::Hello) -> Result<Admit
             format!("the page runs another version of `{role}`'s part of the program: load it again"),
         ));
     }
-    let inbound = ctx.catalog.accept(&h.channels);
-    let (member, token) = identify(ctx, &role, token).map_err(AdmitError::Failed)?;
+    let inbound = catalog.accept(&h.channels);
+    let (member, token) = identify(&role, token).map_err(AdmitError::Failed)?;
     Ok(Admitted {
         member,
         role: client.id,
@@ -390,8 +457,10 @@ fn link(mut r: BufReader<TcpStream>, w: TcpStream, ctx: &WebCtx) -> Result<(), R
             received,
             acked,
             conn,
-            writer: tx.clone(),
-            closer: Closer::Socket(socket),
+            link: Box::new(ThreadConn {
+                writer: tx.clone(),
+                closer: Closer::Socket(socket),
+            }),
         });
     let result = if opened {
         read_messages(&mut r, &w, ctx, member, conn, &inbound)
@@ -442,24 +511,35 @@ fn identify(ctx: &WebCtx, role: &str, token: Option<Vec<u8>>) -> Result<(NodeId,
         .registry
         .lock()
         .map_err(|_| internal_error!("the client registry's lock is poisoned"))?;
+    identify_in(&mut reg, ctx.me, role, token, &mut urandom)
+}
+
+/// [`identify`] in a registry, a new token's secret drawn from `random`.
+pub(crate) fn identify_in(
+    reg: &mut ClientRegistry,
+    me: NodeId,
+    role: &str,
+    token: Option<Vec<u8>>,
+    random: &mut dyn FnMut(&mut [u8]) -> Result<(), RuntimeError>,
+) -> Result<(NodeId, Vec<u8>), RuntimeError> {
     if let Some(t) = token
         && let (Some(serial), Some(secret)) = (t.get(..4), t.get(4..))
         && let (Ok(serial), Ok(secret)) = (<[u8; 4]>::try_from(serial), <[u8; SECRET_LEN]>::try_from(secret))
     {
         let serial = u32::from_le_bytes(serial);
         if reg.check(serial, &secret) == Some(role)
-            && let Some(id) = NodeId::client(ctx.me, serial)
+            && let Some(id) = NodeId::client(me, serial)
         {
             return Ok((id, t));
         }
     }
     let mut secret = [0u8; SECRET_LEN];
-    urandom(&mut secret)?;
+    random(&mut secret)?;
     let serial = reg
         .admit(role, &secret, NodeId::CLIENT_SERIALS)?
         .ok_or_else(|| RuntimeError::Net("this node admitted as many client members as it can".into()))?;
-    let id = NodeId::client(ctx.me, serial)
-        .ok_or_else(|| RuntimeError::Config(format!("node {} has too high an id to admit client members", ctx.me.0)))?;
+    let id = NodeId::client(me, serial)
+        .ok_or_else(|| RuntimeError::Config(format!("node {} has too high an id to admit client members", me.0)))?;
     let mut token = serial.to_le_bytes().to_vec();
     token.extend_from_slice(&secret);
     Ok((id, token))
@@ -468,14 +548,13 @@ fn identify(ctx: &WebCtx, role: &str, token: Option<Vec<u8>>) -> Result<(NodeId,
 /// The connection carrying a member's link.
 struct Conn {
     id: u64,
-    writer: SyncSender<Vec<u8>>,
-    closer: Closer,
+    link: Box<dyn LinkConn>,
 }
 
 impl Conn {
     /// Writes a frame; `false` when the connection cannot take it (gone, or not keeping up).
     fn write(&self, frame: Vec<u8>) -> bool {
-        self.writer.try_send(frame).is_ok()
+        self.link.write(frame)
     }
 }
 
@@ -528,7 +607,7 @@ pub(crate) trait Host {
 /// reconnects) and tells the program the link is down.
 fn drop_link(member: NodeId, m: &mut Member, links: &BTreeMap<(RoleId, bool), RelId>, host: &mut dyn Host) {
     let Some(c) = m.conn.take() else { return };
-    c.closer.close();
+    c.link.close();
     if let Some(rel) = links.get(&(m.role, false)) {
         host.event(*rel, Row::from(vec![Value::Node(member)]));
     }
@@ -558,20 +637,8 @@ impl MemberLinks {
                 received,
                 acked,
                 conn,
-                writer,
-                closer,
-            } => self.open(
-                member,
-                role,
-                token,
-                (received, acked),
-                Conn {
-                    id: conn,
-                    writer,
-                    closer,
-                },
-                host,
-            ),
+                link,
+            } => self.open(member, role, token, (received, acked), Conn { id: conn, link }, host),
             MemberEvent::Skip { member, conn, seq } => {
                 host.rejected_schema(1);
                 self.handle(
@@ -654,7 +721,7 @@ impl MemberLinks {
     ) {
         let Ok(seed) = host.member_seed(member) else {
             host.link_failed();
-            conn.closer.close();
+            conn.link.close();
             return;
         };
         let fresh = !self.members.contains_key(&member);
@@ -691,7 +758,7 @@ impl MemberLinks {
         }
         if !ok {
             // It could not take its handshake: closed before the program hears of it; the member reconnects.
-            conn.closer.close();
+            conn.link.close();
             return;
         }
         m.conn = Some(conn);

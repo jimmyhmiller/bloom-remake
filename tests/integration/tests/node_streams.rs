@@ -73,7 +73,7 @@ impl Store {
         }
     }
 
-    fn boot<'a>(&'a self, fs: &SimFs) -> ManualDriver<'a, Box<dyn Executor>> {
+    fn boot<'a>(&'a self, fs: &SimFs) -> ManualDriver<Box<dyn Executor>> {
         let fs: Arc<dyn Vfs> = Arc::new(fs.clone());
         let opened = recovery::open(
             fs,
@@ -95,7 +95,7 @@ impl Store {
         let node = Node::boot(cfg, &self.artifact.program, exec, opened.boot.clone()).unwrap();
         ManualDriver::new(
             node,
-            self.artifact.program.get(),
+            &self.artifact.program,
             &self.schema,
             self.names.clone(),
             opened,
@@ -103,7 +103,7 @@ impl Store {
     }
 
     /// The recorded chunks in the released (durable) image.
-    fn seen(&self, d: &ManualDriver<'_, Box<dyn Executor>>) -> Vec<Vec<u8>> {
+    fn seen(&self, d: &ManualDriver<Box<dyn Executor>>) -> Vec<Vec<u8>> {
         let rel = self.artifact.rel_named("seen").unwrap();
         d.released_image()
             .unwrap()

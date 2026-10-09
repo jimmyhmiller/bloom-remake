@@ -697,33 +697,9 @@ impl Server {
             }
         }
         if let (Some(l), Some(w)) = (web_listener, &cfg.web) {
-            // Each client role's part of the program, projected once: what its pages run, and the digest their links
-            // present. A projection that would show a page anything placed at another role is refused.
-            let mut client_roles = BTreeMap::new();
-            for (role, r) in program.roles.iter_enumerated() {
-                if r.kind != blossom_ir::core::RoleKind::Client {
-                    continue;
-                }
-                let name = r.name.to_string();
-                let client = blossom_artifact::client::ClientArtifact::project(&artifact, &name)
-                    .map_err(|e| RuntimeError::Config(e.to_string()))?;
-                let leaks = client.leaks(&artifact);
-                if !leaks.is_empty() {
-                    return Err(RuntimeError::Config(format!(
-                        "the part of the program `{name}`'s pages run would show them: {}",
-                        leaks.join("; ")
-                    )));
-                }
-                let bytes = client.encode().map_err(|e| RuntimeError::Config(e.to_string()))?;
-                client_roles.insert(
-                    name,
-                    crate::members::ClientRole {
-                        id: role,
-                        part: client.part(),
-                        artifact: Arc::from(bytes),
-                    },
-                );
-            }
+            // Each client role's part of the program, projected once (refused if it would show a page anything placed
+            // at another role).
+            let client_roles = crate::members::project_clients(&artifact)?;
             let names: Vec<String> = client_roles.keys().cloned().collect();
             let app = crate::web::app_json(spec, &names, &cfg.node, spec.web_link).map_err(RuntimeError::Config)?;
             let registry = blossom_store::ClientRegistry::open(Arc::new(RealFs), &dir)?;

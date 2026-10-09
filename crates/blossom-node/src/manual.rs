@@ -5,7 +5,7 @@
 //! The network runtime pipelines the same node (`blossom-runtime`).
 
 use blossom_base::internal_error;
-use blossom_ir::core::Program;
+use blossom_ir::ValidatedProgram;
 use blossom_store::{MetaRecord, MetaStore, WalRecordBuf, WalWriter};
 use blossom_value::time::{Instant, Tick};
 
@@ -14,24 +14,29 @@ use crate::node::{Node, ReleasedTick, TickEffects};
 use crate::recovery::{Opened, tick_record};
 use crate::{Executor, NodeError};
 
-pub struct ManualDriver<'p, E: Executor> {
+/// Owns what it needs (the program is shared, an `Arc`), so a host can keep it as long as the node runs.
+pub struct ManualDriver<E: Executor> {
     pub node: Node<E>,
-    codec: DurableCodec<'p>,
+    program: ValidatedProgram,
+    schema: crate::durable::DurableSchema,
+    names: std::sync::Arc<[std::sync::Arc<str>]>,
     opened: Opened,
     batch: u64,
 }
 
-impl<'p, E: Executor> ManualDriver<'p, E> {
+impl<E: Executor> ManualDriver<E> {
     pub fn new(
         node: Node<E>,
-        program: &'p Program,
-        schema: &'p crate::durable::DurableSchema,
+        program: &ValidatedProgram,
+        schema: &crate::durable::DurableSchema,
         names: std::sync::Arc<[std::sync::Arc<str>]>,
         opened: Opened,
-    ) -> ManualDriver<'p, E> {
+    ) -> ManualDriver<E> {
         ManualDriver {
             node,
-            codec: DurableCodec::new(program, schema, names),
+            program: program.clone(),
+            schema: schema.clone(),
+            names,
             batch: 0,
             opened,
         }
@@ -113,7 +118,8 @@ impl<'p, E: Executor> ManualDriver<'p, E> {
             .batch
             .checked_add(1)
             .ok_or_else(|| internal_error!("the WAL batch counter overflows"))?;
-        let record = tick_record(&self.opened.blobs, &fx.blobs, self.codec.encode_delta(delta)?)?;
+        let codec = DurableCodec::new(self.program.get(), &self.schema, self.names.clone());
+        let record = tick_record(&self.opened.blobs, &fx.blobs, codec.encode_delta(delta)?)?;
         let lsn = self.opened.wal.append(&WalRecordBuf {
             batch: self.batch,
             tick: fx.tick.0,

@@ -15,6 +15,7 @@ pub mod deploy;
 pub mod http_link;
 pub mod members;
 pub mod net;
+pub mod object;
 pub mod query;
 pub mod server;
 pub mod streams;

@@ -76,7 +76,7 @@ impl Store {
         }
     }
 
-    fn boot<'a>(&'a self, fs: &SimFs) -> ManualDriver<'a, Box<dyn Executor>> {
+    fn boot<'a>(&'a self, fs: &SimFs) -> ManualDriver<Box<dyn Executor>> {
         let fs: Arc<dyn Vfs> = Arc::new(fs.clone());
         let opened = recovery::open(
             fs,
@@ -110,7 +110,7 @@ impl Store {
         let node = Node::boot(cfg, &self.artifact.program, exec, opened.boot.clone()).unwrap();
         ManualDriver::new(
             node,
-            self.artifact.program.get(),
+            &self.artifact.program,
             &self.schema,
             self.names.clone(),
             opened,
@@ -118,7 +118,7 @@ impl Store {
     }
 
     /// The stored rows of the released (durable) image: chunk and blob.
-    fn stored(&self, d: &ManualDriver<'_, Box<dyn Executor>>) -> Vec<(Vec<u8>, BlobRef)> {
+    fn stored(&self, d: &ManualDriver<Box<dyn Executor>>) -> Vec<(Vec<u8>, BlobRef)> {
         let rel = self.artifact.rel_named("stored").unwrap();
         d.released_image()
             .unwrap()
@@ -139,7 +139,7 @@ impl Store {
 #[cfg(test)]
 fn send(
     fs: &SimFs,
-    d: &mut ManualDriver<'_, Box<dyn Executor>>,
+    d: &mut ManualDriver<Box<dyn Executor>>,
     conn: ConnId,
     chunk: &[u8],
     at: i64,
@@ -169,7 +169,7 @@ fn send(
 }
 
 #[cfg(test)]
-fn open_conn(d: &mut ManualDriver<'_, Box<dyn Executor>>, conn: ConnId) {
+fn open_conn(d: &mut ManualDriver<Box<dyn Executor>>, conn: ConnId) {
     d.node
         .observe_stream(Observed::Opened {
             stream: 0,

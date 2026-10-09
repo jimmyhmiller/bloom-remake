@@ -358,8 +358,10 @@ fn open(body: &[u8], w: &mut TcpStream, ctx: &WebCtx, keep: bool) -> Result<(), 
         received: admitted.received,
         acked: admitted.acked,
         conn,
-        writer: tx,
-        closer: Closer::Session(session.clone()),
+        link: Box::new(crate::members::ThreadConn {
+            writer: tx,
+            closer: Closer::Session(session.clone()),
+        }),
     });
     if !opened {
         session.end(false);

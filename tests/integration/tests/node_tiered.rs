@@ -95,7 +95,7 @@ impl Fixture {
         }
     }
 
-    fn boot<'a>(&'a self, fs: &SimFs) -> ManualDriver<'a, Box<dyn Executor>> {
+    fn boot<'a>(&'a self, fs: &SimFs) -> ManualDriver<Box<dyn Executor>> {
         let fs: Arc<dyn Vfs> = Arc::new(fs.clone());
         let opened = recovery::open(
             fs,
@@ -129,20 +129,20 @@ impl Fixture {
         .unwrap();
         ManualDriver::new(
             node,
-            self.artifact.program.get(),
+            &self.artifact.program,
             &self.schema,
             self.names.clone(),
             opened,
         )
     }
 
-    fn offer(&self, d: &mut ManualDriver<'_, Box<dyn Executor>>, input: &str, values: Vec<Value>) {
+    fn offer(&self, d: &mut ManualDriver<Box<dyn Executor>>, input: &str, values: Vec<Value>) {
         let rel = self.artifact.rel_named(input).unwrap();
         d.node.offer_input(rel, Arc::from(values));
     }
 
     /// Every durable relation's released rows, by name.
-    fn released(&self, d: &ManualDriver<'_, Box<dyn Executor>>) -> BTreeMap<String, Vec<Vec<Value>>> {
+    fn released(&self, d: &ManualDriver<Box<dyn Executor>>) -> BTreeMap<String, Vec<Vec<Value>>> {
         let p = self.artifact.program.get();
         let mut out = BTreeMap::new();
         for (rel, rows) in d.released_image().unwrap().rows {
@@ -272,7 +272,7 @@ fn a_tiered_table_is_held_on_disk_not_in_memory() {
     t += 1;
     d.run_until_quiescent(Instant(t)).unwrap();
     let held = d.node.resident_rows().unwrap();
-    let names = |d: &ManualDriver<'_, Box<dyn Executor>>| -> Vec<(String, &'static str, usize)> {
+    let names = |d: &ManualDriver<Box<dyn Executor>>| -> Vec<(String, &'static str, usize)> {
         let p = k.artifact.program.get();
         d.node
             .resident_by_store()
@@ -364,7 +364,7 @@ fn a_restart_catches_the_views_up_from_what_the_flushed_tick_wrote() {
         let fs = SimFs::default();
         let t = std::cell::Cell::new(10i64);
         let mut d = k.boot(&fs);
-        let tick = |d: &mut ManualDriver<'_, Box<dyn Executor>>, inputs: &[(&str, Vec<Value>)]| {
+        let tick = |d: &mut ManualDriver<Box<dyn Executor>>, inputs: &[(&str, Vec<Value>)]| {
             for (input, values) in inputs {
                 k.offer(d, input, values.clone());
             }
