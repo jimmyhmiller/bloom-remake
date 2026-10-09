@@ -355,8 +355,7 @@ view commit_entry_of(c, i, g, x) = commit_new_in(c, i, g, _o), commit_rank(c, i,
 view commit_item(c, i, k, it) = commit_checked(c, i, req, errors), (k, e) in commit_entries(req).enumerate(),
         let Some(err) = errors.get(k), topic_parts(e.0, id, _n), let it = (e.0, id, e.1, e.2, e.3, e.4)
         where err == NONE;
-view commit_items_by(c, i, xs = collect!((k, it))) = per commit_checked(c, i, _req, _errors),
-        commit_item(c, i, k, it);
+view commit_items_by(c, i, xs = collect!((k, it))) = per commit_checked(c, i, _req, _errors), commit_item(c, i, k, it);
 /// A partition named twice in one request is committed at its last value, as Kafka does.
 view commit_items(c, i, items) = commit_items_by(c, i, xs), let items = last_per_partition(values_of(xs));
 /// The order of each new commit among its group partition's new commits this tick: arrival, then connection and

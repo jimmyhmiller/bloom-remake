@@ -171,11 +171,14 @@ fn one_member_change(cur: Vec<i32>, proposed: Vec<i32>) -> bool {
 /// Where a batch after `from` ends, given its candidate entries' indexes and sizes in index order: after as many as
 /// fit in `budget` bytes, and after the first whatever its size.
 fn batch_end(from: u64, sizes: Vec<(u64, u64)>, budget: u64) -> u64 {
-    sizes.fold((from, 0u64, true), |acc, x| if acc.2 && (acc.0 == from || acc.1 + x.1 <= budget) {
-        (x.0, acc.1 + x.1, true)
-    } else {
-        (acc.0, acc.1, false)
-    }).0
+    sizes.fold(
+        (from, 0u64, true),
+        |acc, x| if acc.2 && (acc.0 == from || acc.1 + x.1 <= budget) {
+            (x.0, acc.1 + x.1, true)
+        } else {
+            (acc.0, acc.1, false)
+        }
+    ).0
 }
 
 /// The bytes of a stored entry (a blob only ever holds its whole bytes).
