@@ -389,10 +389,13 @@ impl Transport {
     }
 }
 
+/// Where a node serves the deployment's stylesheet (`[web] style`).
+pub const STYLE_PATH: &str = "/blossom/style.css";
+
 /// `/blossom/app.json` (docs/design/CLIENTS.md §4, §8): the program's name, the node that serves the page, the connection identity a
 /// member presents (the deployment id and the node directory's digest, hex), where its link is (a WebSocket's and
-/// plain requests'), which of the two the page uses, and where each client role's part of the program is. No source:
-/// a page gets only its role's projection.
+/// plain requests'), which of the two the page uses, where each client role's part of the program is, and the page's
+/// stylesheet when the deployment names one (`[web] style`). No source: a page gets only its role's projection.
 pub fn app_json(
     spec: &crate::deploy::DeploymentSpec,
     client_roles: &[String],
@@ -415,6 +418,10 @@ pub fn app_json(
         "transport": transport.name(),
         "clients": clients,
     });
+    let mut app = app;
+    if spec.web_style.is_some() {
+        app["style"] = Value::String(STYLE_PATH.to_owned());
+    }
     serde_json::to_string(&app).map_err(|e| e.to_string())
 }
 

@@ -1,0 +1,88 @@
+/* The shared board (examples/web/board.bls): its deployment names this file (`[web] style`). */
+@import url("/apps.css");
+
+.app.board {
+  max-width: 68rem;
+}
+.columns {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.9rem;
+  align-items: start;
+}
+@media (max-width: 720px) {
+  .columns {
+    grid-template-columns: 1fr;
+  }
+}
+.column {
+  background: color-mix(in srgb, var(--app-line) 45%, transparent);
+  border-radius: var(--app-radius);
+  padding: 0.7rem;
+}
+.column[data-dragover] {
+  outline: 2px dashed var(--app-accent);
+}
+.column h2 {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.95rem;
+  margin: 0.1rem 0.2rem 0.6rem;
+}
+.column h2 .count {
+  color: var(--app-muted);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.cards {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 0.6rem;
+  min-height: 2.5rem;
+}
+.cards .card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.5rem;
+  margin: 0 0 0.45rem;
+  padding: 0.55rem 0.6rem 0.55rem 0.75rem;
+  cursor: grab;
+  box-shadow: 0 1px 0 var(--app-line);
+}
+.cards .card[data-dragging] {
+  opacity: 0.4;
+}
+.cards .card[data-dragover] {
+  box-shadow: 0 -3px 0 var(--app-accent);
+}
+.cards .card.busy {
+  border-color: var(--app-warn);
+}
+.card .title {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.card .edit {
+  flex: 1;
+}
+.card .by {
+  flex-basis: 100%;
+  order: 3;
+  font-size: 0.78rem;
+  color: var(--app-warn);
+}
+.card .tools {
+  display: flex;
+  opacity: 0.35;
+}
+.card:hover .tools {
+  opacity: 1;
+}
+.app .card .tools button {
+  padding: 0 0.35rem;
+}
+.app input.add {
+  background: var(--app-card);
+}

@@ -111,6 +111,8 @@ pub enum Event {
     Keydown { id: String, key: String, value: String },
     Blur { id: String, value: String },
     Change { id: String, checked: bool },
+    /// An element dragged onto another (HTML drag and drop): the dragged element's id and the target's.
+    Drop { id: String, target: String },
 }
 
 impl Event {
@@ -125,6 +127,7 @@ impl Event {
             Event::Keydown { .. } => "keydown",
             Event::Blur { .. } => "blur",
             Event::Change { .. } => "change",
+            Event::Drop { .. } => "drop",
         }
     }
 
@@ -137,6 +140,7 @@ impl Event {
             Event::Input { id, value } | Event::Blur { id, value } => vec![s(id), s(value)],
             Event::Keydown { id, key, value } => vec![s(id), s(key), s(value)],
             Event::Change { id, checked } => vec![s(id), Value::Bool(*checked)],
+            Event::Drop { id, target } => vec![s(id), s(target)],
         };
         Arc::from(values)
     }
@@ -152,7 +156,7 @@ const OUTPUTS: [(&str, &[&str]); 4] = [
     ("text", &[STR, STR]),
     ("focus", &[STR]),
 ];
-const INPUTS: [(&str, &[&str]); 8] = [
+const INPUTS: [(&str, &[&str]); 9] = [
     ("route", &[STR]),
     ("click", &[STR]),
     ("dblclick", &[STR]),
@@ -161,6 +165,7 @@ const INPUTS: [(&str, &[&str]); 8] = [
     ("keydown", &[STR, STR, STR]),
     ("blur", &[STR, STR]),
     ("change", &[STR, BOOL]),
+    ("drop", &[STR, STR]),
 ];
 
 /// A program compiled for the browser.

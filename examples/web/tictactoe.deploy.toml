@@ -1,0 +1,34 @@
+# A one-node deployment of tictactoe.bls whose page is served by the node (docs/design/CLIENTS.md §4). From the repository
+# root: `scripts/run-app.sh tictactoe`, then open http://localhost:8080/ in two tabs. By hand, after scripts/build-web.sh:
+#
+#   BLOSSOM_SEED=$(openssl rand -hex 16) blossom run --deploy examples/web/tictactoe.deploy.toml --node s --insecure-dev \
+#       --init-fresh --web 127.0.0.1:8080
+#
+# Later runs drop --init-fresh to keep the store (and keep the same seed).
+# With `--admin 127.0.0.1:9900`, ask the node's database while it runs:
+#
+#   blossom query --deploy examples/web/tictactoe.deploy.toml --node s --admin 127.0.0.1:9900 \
+#       'live(g) = games(g, _, _, _)'
+format = 1
+
+[deployment]
+id = "tictactoe-demo"
+program = "tictactoe"
+version = 1
+source = "tictactoe.bls"
+
+[[node]]
+name = "s"
+role = "Server"
+addr = "127.0.0.1:7473"
+principal = "spiffe://demo/tictactoe/Server/s"
+
+[security]
+mode = "insecure-dev"
+
+[storage]
+data_dir = ".data/tictactoe"
+
+[web]
+link = "http"
+style = "tictactoe.css"

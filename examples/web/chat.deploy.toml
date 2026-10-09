@@ -9,7 +9,7 @@
 #
 #   blossom query --deploy examples/web/chat.deploy.toml --node s --admin 127.0.0.1:9900 'said(who, text) = log(who, _, _, text)'
 #
-# or, with the node stopped, `--store examples/web/.data/s` in place of `--admin`.
+# or, with the node stopped, `--store examples/web/.data/chat/s` in place of `--admin`.
 format = 1
 
 [deployment]
@@ -28,7 +28,7 @@ principal = "spiffe://demo/chat/Server/s"
 mode = "insecure-dev"
 
 [storage]
-data_dir = ".data"
+data_dir = ".data/chat"
 
 # How the pages reach the node (docs/design/CLIENTS.md §3a): plain HTTP requests (the default), or "websocket".
 [web]

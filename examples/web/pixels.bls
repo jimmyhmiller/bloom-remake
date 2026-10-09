@@ -1,0 +1,250 @@
+//! A shared pixel canvas (docs/design/CLIENTS.md), after Reddit's r/place: everyone paints one square at a time on the
+//! same grid, with a short wait between squares, and sees everyone else's squares appear. One program says both ends;
+//! the channels are the whole API.
+//!
+//! The server keeps the canvas and enforces the wait: a paint that comes too soon after the painter's last one is
+//! refused. A page shows its own paint at once, as pending, and drops it when the server answers (`done`): if the
+//! server took it, the canvas the server sends has it; if not, the square shows what the server has.
+
+program pixels version 1;
+
+role Server;
+role Browser: client;
+
+const SIZE: u64 = 24u64;
+/// How long a painter waits between squares.
+const COOLDOWN: Duration = 1500ms;
+const PALETTE: Vec<String> = [
+    "#222222",
+    "#ffffff",
+    "#e4572e",
+    "#f3a712",
+    "#f6e05e",
+    "#29bf12",
+    "#00a5cf",
+    "#5b3cc4",
+    "#e86bb5",
+    "#8a5a2b"
+];
+
+channel hello(name: String): Browser -> Server;
+/// Paint square `(x, y)` with palette color `c`: the tab's `s`-th paint.
+channel paint(x: u64, y: u64, c: u64, s: u64): Browser -> Server;
+
+/// Whether the server took the tab's `s`-th paint.
+channel done(s: u64, ok: bool): Server -> Browser;
+/// A square as the server has it: its color, who painted it, and the canvas's version when they did.
+channel square(x: u64, y: u64, c: u64, by: Node<Browser>, v: u64): Server -> Browser;
+channel person(b: Node<Browser>, name: String, here: bool, at: Instant): Server -> Browser;
+
+at Server {
+    durable table names(b: Node<Browser>, name: String) key(b) resolve choose;
+    durable table canvas(x: u64, y: u64, c: u64, by: Node<Browser>, v: u64) key(x, y);
+    /// When each painter last painted.
+    durable table last_paint(b: Node<Browser>, at: Instant) key(b);
+    table online(b: Node<Browser>);
+
+    join: on Browser.connected(b, _) {
+        emit online(b);
+    }
+    leave: on Browser.disconnected(b), not Browser.connected(b, _) {
+        delete online(b);
+    }
+    named: on hello(name) from b where name.trim() != "" {
+        next names(b, name.trim());
+    }
+
+    /// One paint per painter per tick: their latest. A painter may paint once the wait since their last is over.
+    view asked(b, x, y, c, s) = paint(x, y, c, s) from b, choose_most!((s, x, y, c) per b);
+    view rested(b) {
+        asked(b, _, _, _, _), not last_paint(b, _);
+        asked(b, _, _, _, _), last_paint(b, at) where now() - at >= COOLDOWN;
+    }
+    /// The canvas's version: one more for every tick that paints.
+    view version(v = max!(x default 0u64)) = canvas(_, _, _, _, x);
+    /// Two painters on one square in one tick: the greater one's paint stands.
+    view winner(x, y, b) = asked(b, x, y, _, _), rested(b), choose_most!(b per(x, y));
+    take: on asked(b, x, y, c, s), rested(b) where x < SIZE && y < SIZE && c < PALETTE.len() {
+        upsert last_paint(b, now());
+        send done(s, true) to b;
+    }
+    stand: on asked(b, x, y, c, _), winner(x, y, b), version(v) where x < SIZE && y < SIZE && c < PALETTE.len() {
+        upsert canvas(x, y, c, b, v + 1u64);
+    }
+    refuse: on paint(_x, _y, _c, s) from b, not take_ok(b, s) {
+        send done(s, false) to b;
+    }
+    view take_ok(b, s) = asked(b, x, y, c, s), rested(b) where x < SIZE && y < SIZE && c < PALETTE.len();
+
+    view presence(b, name, here) {
+        names(b, name), online(b), let here = true;
+        names(b, name), not online(b), let here = false;
+    }
+    tell_square: on inserted canvas(x, y, c, by, v), online(o) {
+        send square(x, y, c, by, v) to o;
+    }
+    tell_person: on inserted presence(p, name, here), online(o) {
+        send person(p, name, here, now()) to o;
+    }
+    greet: on Browser.connected(o, false) {
+        for canvas(x, y, c, by, v) {
+            send square(x, y, c, by, v) to o;
+        }
+        for presence(p, name, here) {
+            send person(p, name, here, now()) to o;
+        }
+    }
+}
+
+at Browser {
+    include "ui.bls";
+
+    durable table me(name: String) key();
+    durable table brush(c: u64) key();
+    durable table next_s(s: u64) key();
+    /// The canvas as the server has it (the newest version of each square).
+    durable table squares(x: u64, y: u64, c: u64, by: Node<Browser>, v: u64) key(x, y) resolve choose_most(v);
+    /// This tab's paints the server has not answered yet.
+    durable table pending(s: u64, x: u64, y: u64, c: u64);
+    durable table people(b: Node<Browser>, name: String, here: bool, at: Instant) key(b) resolve choose_most(at);
+    /// Until when this tab waits before its next paint, and how much of the wait is left.
+    durable table resting(until: Instant) key();
+    table left(ms: u64) key();
+    table up(s: Node<Server>);
+
+    timer clock every 100ms while resting;
+
+    view next_paint(s = max!(x default 0u64)) = next_s(x);
+    view color(c = max!(x default 0u64)) = brush(x);
+
+    hear_square: on square(x, y, c, by, v) {
+        next squares(x, y, c, by, v);
+    }
+    hear_done: on done(s, _), pending(s, x, y, c) {
+        delete pending(s, x, y, c);
+    }
+    hear_person: on person(b, name, here, at) {
+        next people(b, name, here, at);
+    }
+    link: on Server.connected(s, _) {
+        emit up(s);
+    }
+    named: on Server.connected(s, _), me(name) {
+        send hello(name) to s;
+    }
+    lost: on Server.disconnected(s) {
+        delete up(s);
+    }
+    tick_down: on clock(_, at), resting(until) where at < until {
+        upsert left(((until - at).as_millis()) as u64);
+    }
+    rested: on clock(_, at), resting(until) where at >= until {
+        delete resting(until);
+        upsert left(0u64);
+    }
+
+    // ------------------------------------------------------------ events
+
+    sign_in: on keydown("name", "Enter", value), srv in Server where value.trim() != "" {
+        upsert me(value.trim());
+        send hello(value.trim()) to srv;
+    }
+    pick: on click(id), swatch(id, c) {
+        upsert brush(c);
+    }
+    /// A paint shows at once (pending) and goes to the server; the page waits as the server will.
+    draw: on press(id), cell(id, x, y), color(c), next_paint(s), srv in Server, not resting(_) {
+        emit pending(s, x, y, c);
+        send paint(x, y, c, s) to srv;
+        upsert next_s(s + 1u64);
+        upsert resting(now() + COOLDOWN);
+        upsert left(COOLDOWN.as_millis() as u64);
+    }
+
+    // ------------------------------------------------------------ what the page shows
+
+    view coord(x, y) = x in 0u64..SIZE, y in 0u64..SIZE;
+    view cell(id, x, y) = coord(x, y), let id = f"px-{x}-{y}";
+    view swatch(id, c) = (c, _hex) in PALETTE.enumerate(), let id = f"swatch-{c}";
+    /// What a square shows: this tab's latest pending paint, else the server's color, else white.
+    view latest_pending(x, y, s = max!(t)) = pending(t, x, y, _);
+    view shown(x, y, hex) {
+        latest_pending(x, y, s), pending(s, x, y, c), let hex = PALETTE.get(c).unwrap_or("#ffffff");
+        coord(x, y), not latest_pending(x, y, _), squares(x, y, c, _, _), let hex = PALETTE.get(c).unwrap_or("#ffffff");
+        coord(x, y), not latest_pending(x, y, _), not squares(x, y, _, _, _), let hex = "#ffffff";
+    }
+    view name_of(b, name) {
+        people(b, name, _, _) where b != self;
+        me(name), let b = self;
+    }
+    /// Whose squares are on the canvas now, most first.
+    view owned(b, k = count!((x, y))) = squares(x, y, _, b, _);
+    view board(name, k, i) = owned(b, k), name_of(b, name), let i = 0i64 - k as i64;
+    view total(k = count!((x, y) default 0u64)) = squares(x, y, _, _, _);
+    view here(b, name) = people(b, name, true, _), up(_) where b != self;
+    view status(s, c) {
+        up(_), let s = "live", let c = "status";
+        not up(_), let s = "offline", let c = "status offline";
+    }
+    view wait_line(s) {
+        resting(_), left(ms), let s = f"Wait {wait_text(ms)}";
+        resting(_), not left(_), let s = "Wait…";
+        not resting(_), let s = "Click a square to paint it";
+    }
+
+    fn wait_text(ms: u64) -> String {
+        f"{ms / 1000u64}.{(ms % 1000u64) / 100u64}s"
+    }
+
+    // ------------------------------------------------------------ the page
+
+    welcome: while not me(_) {
+        emit html div[id: "pixels"](class: "app pixels") {
+            h1 { "Pixels" }
+            p(class: "lead") { "One canvas, everyone painting, one square at a time." }
+            input[id: "name"](class: "big", placeholder: "Your name, then Enter");
+        }
+        emit focus("name");
+    }
+
+    page: while me(my), status(st, sc), color(cur), wait_line(wl), total(all) {
+        emit html div[id: "pixels"](class: "app pixels") {
+            header(class: "top") {
+                h1 { "Pixels" }
+                span[id: "status"](class: sc) { st }
+            }
+            p[id: "who"](class: "who") { f"You are {my}." }
+            ul[id: "here"](class: "here") {
+                for here(b, name) { li[key: b.to_string()](class: "person") { name } }
+            }
+            div(class: "layout") {
+                svg[id: "canvas"](class: "canvas", viewBox: f"0 0 {SIZE} {SIZE}", "shape-rendering": "crispEdges") {
+                    for shown(x, y, hex) {
+                        rect[id: f"px-{x}-{y}", pos: (y * SIZE + x) as i64](x: x, y: y, width: 1, height: 1, fill: hex);
+                    }
+                }
+                aside(class: "side") {
+                    p[id: "wait"](class: "wait") { wl }
+                    div[id: "palette"](class: "palette") {
+                        for (c, hex) in PALETTE.enumerate() {
+                            button[id: f"swatch-{c}", pos: c as i64](
+                                class: if c == cur { "swatch on" } else { "swatch" },
+                                style: f"background: {hex}",
+                                title: hex
+                            );
+                        }
+                    }
+                    h2 { f"Squares ({all})" }
+                    ol[id: "leaders"](class: "leaders") {
+                        for board(name, k, i) {
+                            li[key: name, pos: i] {
+                                span { name }
+                                span(class: "count") { k }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

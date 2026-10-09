@@ -1002,3 +1002,38 @@ fn saving_writes_the_rows_each_event_changed() {
     dom.apply(&b.start(Some(&json.to_string()), "", T0).unwrap().patches);
     assert_eq!(dom.todos(), ["eggs", "bread"]);
 }
+
+/// A drop (HTML drag and drop) is an event of its own: the dragged element and the one it lands on. A program reads
+/// where it landed from its own page, walking up the `elem` rows, as the board example does.
+#[test]
+fn a_drop_names_the_dragged_element_and_the_target() {
+    let mut a = app_of(
+        "dnd",
+        "table place(item: String, box: String) key(item);\n\
+         start: on boot() { emit place(\"apple\", \"left\"); }\n\
+         view landed(x) { drop(_, t), let x = t; landed(y), elem(y, x, _, _) where x != \"\"; }\n\
+         move_it: on drop(item, _), landed(b), place(item, _) where b == \"left\" || b == \"right\" {\n\
+             upsert place(item, b);\n\
+         }\n\
+         page: while place(item, b) {\n\
+             emit html div[id: \"root\"] {\n\
+                 section[id: \"left\"] { if b == \"left\" { span[id: item](draggable: \"true\") { item } } }\n\
+                 section[id: \"right\"] { p { \"drop here\" } if b == \"right\" { span[id: item](draggable: \"true\") { item } } }\n\
+             }\n\
+         }\n",
+    );
+    assert!(a.compiled().listens().contains(&"drop"));
+    let mut dom = Dom::default();
+    dom.apply(&a.start(None, "", T0).unwrap().patches);
+    assert_eq!(dom.children["left"], ["apple"]);
+    assert_eq!(dom.attr("apple", "draggable").as_deref(), Some("true"));
+    // Dropped on the paragraph inside the right box (a derived id): it lands in the box.
+    let target = dom.children["right"][0].clone();
+    let drop = Event::Drop {
+        id: "apple".to_owned(),
+        target,
+    };
+    dom.apply(&a.dispatch(&drop, T0).unwrap());
+    assert!(dom.children.get("left").is_none_or(|c| c.is_empty()), "{:?}", dom.children);
+    assert_eq!(dom.children["right"].last().map(String::as_str), Some("apple"));
+}

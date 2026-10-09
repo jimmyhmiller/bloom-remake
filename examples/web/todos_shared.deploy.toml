@@ -9,7 +9,7 @@
 #
 #   blossom query --deploy examples/web/todos_shared.deploy.toml --node s --admin 127.0.0.1:9900 'open(title) = items(_, _, _, _, title, false, true)'
 #
-# or, with the node stopped, `--store examples/web/.data/s` in place of `--admin`.
+# or, with the node stopped, `--store examples/web/.data/todos_shared/s` in place of `--admin`.
 format = 1
 
 [deployment]
@@ -28,7 +28,7 @@ principal = "spiffe://demo/todos_shared/Server/s"
 mode = "insecure-dev"
 
 [storage]
-data_dir = ".data"
+data_dir = ".data/todos_shared"
 
 # How the pages reach the node (docs/design/CLIENTS.md §3a): plain HTTP requests (the default), or "websocket".
 [web]

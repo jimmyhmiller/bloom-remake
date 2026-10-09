@@ -34,6 +34,7 @@
 //!
 //! [web]                           # optional: pages served with `blossom run --web` (docs/design/CLIENTS.md §3a, §4)
 //! link = "http"                   # a page's link: "http" (plain requests, the default) or "websocket"
+//! style = "app.css"               # optional: the page's stylesheet, relative to this file (`/blossom/style.css`)
 //!
 //! [stream_limits]                 # optional, in bytes (FOREIGN-PROTOCOLS §1.2; defaults in streams::StreamLimits)
 //! max_stream_bytes = 1048576      # one connection's `data` in one tick
@@ -87,6 +88,7 @@ struct RawSpec {
 #[serde(deny_unknown_fields)]
 struct RawWeb {
     link: Option<String>,
+    style: Option<PathBuf>,
 }
 
 /// `[stream_limits]`: the byte limits of the nodes' streams; each defaults to [`StreamLimits::default`]'s.
@@ -200,6 +202,9 @@ pub struct DeploymentSpec {
     /// The link the pages a node serves use (`[web] link`): plain requests unless the deployment says `websocket`.
     /// The program means the same over either (docs/design/CLIENTS.md §3a): it is where the program runs that decides.
     pub web_link: crate::web::Transport,
+    /// The pages' stylesheet (`[web] style`), resolved against the spec's directory: served as
+    /// `/blossom/style.css` and named in `app.json`, so an app's look comes with its deployment.
+    pub web_style: Option<PathBuf>,
 }
 
 fn invalid(key: &str, what: impl std::fmt::Display) -> RuntimeError {
@@ -320,6 +325,16 @@ impl DeploymentSpec {
             Some(l) => crate::web::Transport::parse(l)
                 .ok_or_else(|| invalid("web.link", format!("`{l}` is neither \"http\" nor \"websocket\"")))?,
         };
+        let web_style = match raw.web.style {
+            None => None,
+            Some(s) => {
+                let s = resolve(s);
+                if !s.is_file() {
+                    return Err(invalid("web.style", format!("`{}` is not a file", s.display())));
+                }
+                Some(s)
+            }
+        };
         Ok(DeploymentSpec {
             id: raw.deployment.id,
             program: raw.deployment.program,
@@ -337,6 +352,7 @@ impl DeploymentSpec {
             tail_certification,
             stream_limits,
             web_link,
+            web_style,
         })
     }
 

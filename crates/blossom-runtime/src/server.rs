@@ -739,6 +739,7 @@ impl Server {
                 registry: Arc::new(Mutex::new(registry)),
                 app: Arc::from(app.as_str()),
                 root: w.root.clone(),
+                style: spec.web_style.clone(),
                 next_conn: Arc::new(AtomicU64::new(0)),
                 client_roles: Arc::new(client_roles),
                 sessions: Arc::new(crate::http_link::Sessions::default()),

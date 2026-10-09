@@ -54,6 +54,7 @@ listened to), each into a round of its own:
 | `keydown(id: String, key: String, value: String)` | A key (DOM `key` names: `Enter`, `Escape`, …), with the field's value. |
 | `blur(id: String, value: String)` | A field loses focus. |
 | `change(id: String, checked: bool)` | A checkbox changes. |
+| `drop(id: String, target: String)` | HTML drag and drop: an element the program made `draggable` is dropped on (or inside) an element with an id. Meanwhile the dragged element has `data-dragging` and the one under it `data-dragover`. |
 
 `examples/web/ui.bls` declares these, for a program to `include`, and the tree `html` over `elem`, `attr` and `text`,
 so a page is written as `emit html div[id: "box"](class: "x") { span { "hi" } }` (docs/design/SUGAR.md §3).

@@ -1,0 +1,346 @@
+//! A shared kanban board (docs/design/CLIENTS.md): cards in three columns, added, renamed, dragged between and within
+//! columns and deleted by anyone, with every tab showing the same board and who is editing which card. One program
+//! says both ends; the channels are the whole API.
+//!
+//! A card is known by the tab that made it and that tab's number for it. A tab changes its own copy at once (so it
+//! works offline) and sends the card's new state to the server as a `put`; the server takes the last `put` of each card
+//! in a tick, numbers the card's versions, and tells every tab online. A tab keeps the newest state of each card: the
+//! server's version first, then its own changes since: `ver` is the pair (server version, own change), and the table
+//! keeps the greatest (`resolve choose_most(ver)`). A deleted card stays as a
+//! tombstone (`alive = false`), so a tab that missed the delete learns of it.
+//!
+//! A card's place in its column is a number between its neighbours' (`rank`): a card dropped on another goes just
+//! before it, one dropped on a column goes last.
+
+program board version 1;
+
+role Server;
+role Browser: client;
+
+/// The columns, by number.
+const COLUMNS: Vec<(u64, String)> = [(0u64, "To do"), (1u64, "Doing"), (2u64, "Done")];
+
+/// The tab's name, sent whenever its link comes up.
+channel hello(name: String): Browser -> Server;
+/// A card's new state, the tab's `s`-th change.
+channel put(w: Node<Browser>, n: u64, s: u64, title: String, col: u64, rank: f64, alive: bool): Browser -> Server;
+/// The tab starts or stops editing a card.
+channel editing(w: Node<Browser>, n: u64, on: bool): Browser -> Server;
+
+/// A card's state as the server has it, at version `v`.
+channel card(w: Node<Browser>, n: u64, v: u64, title: String, col: u64, rank: f64, alive: bool): Server -> Browser;
+/// Who is editing a card.
+channel editor(b: Node<Browser>, w: Node<Browser>, n: u64, on: bool): Server -> Browser;
+channel person(b: Node<Browser>, name: String, here: bool, at: Instant): Server -> Browser;
+
+at Server {
+    durable table names(b: Node<Browser>, name: String) key(b) resolve choose;
+    durable table cards(w: Node<Browser>, n: u64, v: u64, title: String, col: u64, rank: f64, alive: bool) key(w, n);
+    /// The cards being edited, by whom.
+    table editors(b: Node<Browser>, w: Node<Browser>, n: u64);
+    table online(b: Node<Browser>);
+
+    join: on Browser.connected(b, _) {
+        emit online(b);
+    }
+    leave: on Browser.disconnected(b), not Browser.connected(b, _) {
+        delete online(b);
+    }
+    /// A tab that leaves edits nothing.
+    left: on Browser.disconnected(b), not Browser.connected(b, _), editors(b, w, n) {
+        delete editors(b, w, n);
+    }
+    named: on hello(name) from b where name.trim() != "" {
+        next names(b, name.trim());
+    }
+
+    /// The last change of each card in a tick (between tabs, the greater tab).
+    view latest(w, n, t, c, r, a) = put(w, n, s, t, c, r, a) from b, choose_most!((s, b, t, c, r, a) per(w, n));
+    view version(w, n, v = max!(x default 0u64)) = per latest(w, n, _, _, _, _), cards(w, n, x, _, _, _, _);
+    take: on latest(w, n, t, c, r, a), version(w, n, v) where t.trim() != "" && c < COLUMNS.len() {
+        upsert cards(w, n, v + 1u64, t.trim(), c, r, a);
+    }
+    edit_start: on editing(w, n, true) from b {
+        emit editors(b, w, n);
+    }
+    edit_stop: on editing(w, n, false) from b, editors(b, w, n) {
+        delete editors(b, w, n);
+    }
+
+    view presence(b, name, here) {
+        names(b, name), online(b), let here = true;
+        names(b, name), not online(b), let here = false;
+    }
+    tell_card: on inserted cards(w, n, v, t, c, r, a), online(o) {
+        send card(w, n, v, t, c, r, a) to o;
+    }
+    tell_editor: on inserted editors(b, w, n), online(o) where o != b {
+        send editor(b, w, n, true) to o;
+    }
+    tell_editor_done: on deleted editors(b, w, n), online(o) where o != b {
+        send editor(b, w, n, false) to o;
+    }
+    tell_person: on inserted presence(p, name, here), online(o) {
+        send person(p, name, here, now()) to o;
+    }
+    greet: on Browser.connected(o, false) {
+        for cards(w, n, v, t, c, r, a) {
+            send card(w, n, v, t, c, r, a) to o;
+        }
+        for editors(b, w, n) where b != o {
+            send editor(b, w, n, true) to o;
+        }
+        for presence(p, name, here) {
+            send person(p, name, here, now()) to o;
+        }
+    }
+}
+
+at Browser {
+    include "ui.bls";
+
+    durable table me(name: String) key();
+    /// The number of this tab's next card, and of its next change.
+    durable table next_n(n: u64) key();
+    durable table next_s(s: u64) key();
+    /// The cards as this tab knows them: the server's version `v` of each as `(v, 0)`, or this tab's change `s` made
+    /// since as `(v, s)`.
+    durable table deck(w: Node<Browser>, n: u64, ver: (u64, u64), title: String, col: u64, rank: f64, alive: bool) key(
+        w,
+        n
+    ) resolve choose_most(ver);
+    durable table people(b: Node<Browser>, name: String, here: bool, at: Instant) key(b) resolve choose_most(at);
+    /// Who else is editing which card.
+    table others_editing(b: Node<Browser>, w: Node<Browser>, n: u64);
+    /// The card this tab is editing.
+    table mine_editing(w: Node<Browser>, n: u64) key();
+    table drafts(field: String, s: String) key(field);
+    table up(s: Node<Server>);
+
+    view next_card(n = max!(x default 0u64)) = next_n(x);
+    view next_change(s = max!(x default 1u64)) = next_s(x);
+
+    // ------------------------------------------------------------ the server
+
+    hear_card: on card(w, n, v, t, c, r, a) {
+        next deck(w, n, (v, 0u64), t, c, r, a);
+    }
+    hear_editor: on editor(b, w, n, true) {
+        emit others_editing(b, w, n);
+    }
+    hear_editor_done: on editor(b, w, n, false), others_editing(b, w, n) {
+        delete others_editing(b, w, n);
+    }
+    hear_person: on person(b, name, here, at) {
+        next people(b, name, here, at);
+    }
+    link: on Server.connected(s, _) {
+        emit up(s);
+    }
+    named: on Server.connected(s, _), me(name) {
+        send hello(name) to s;
+    }
+    /// After a reconnect, the server knows nothing of what this tab edits: say it again.
+    still_editing: on Server.connected(s, _), mine_editing(w, n) {
+        send editing(w, n, true) to s;
+    }
+    lost: on Server.disconnected(s) {
+        delete up(s);
+    }
+    forget: on Server.disconnected(_), others_editing(b, w, n) {
+        delete others_editing(b, w, n);
+    }
+
+    // ------------------------------------------------------------ events
+
+    typing: on typed(id, value) {
+        upsert drafts(id, value);
+    }
+    sign_in: on keydown("name", "Enter", value), srv in Server where value.trim() != "" {
+        upsert me(value.trim());
+        send hello(value.trim()) to srv;
+    }
+
+    /// Every change of a card: here at once, and to the server (it waits in the link while the server is unreachable).
+    fragment change(w: Node<Browser>, n: u64, v: u64, s: u64, t: String, c: u64, r: f64, a: bool, srv: Node<Server>) {
+        next deck(w, n, (v, s), t, c, r, a);
+        send put(w, n, s, t, c, r, a) to srv;
+        upsert next_s(s + 1u64);
+    }
+
+    add: on keydown(id, "Enter", value), add_field(id, c), last_rank(c, top), next_card(n), next_change(s),
+            srv in Server
+            where value.trim() != "" {
+        change(self, n, 0u64, s, value.trim(), c, top + 1.0, true, srv);
+        upsert next_n(n + 1u64);
+        upsert drafts(id, "");
+    }
+    /// The arrows move a card to the end of the next column.
+    shift: on click(id), arrow(id, w, n, c), last_rank(c, top), deck(w, n, (v, _), t, _, _, true), next_change(s),
+            srv in Server {
+        change(w, n, v, s, t, c, top + 1.0, true, srv);
+    }
+    remove: on click(id), remove_button(id, w, n), deck(w, n, (v, _), t, c, r, true), next_change(s), srv in Server {
+        change(w, n, v, s, t, c, r, false, srv);
+    }
+    /// A card dropped on a card goes just before it; one dropped on a column goes last.
+    drop_on_card: on drop(id, _), card_id(id, w, n), dropped_on_card(tw, tn), deck(w, n, (v, _), t, _, _, true),
+            deck(tw, tn, _, _, c, r, true), outer drop_prev(p), next_change(s), srv in Server {
+        change(w, n, v, s, t, c, between(p, r), true, srv);
+    }
+    drop_on_column: on drop(id, _), card_id(id, w, n), not dropped_on_card(_, _), dropped_on(spot), column_id(spot, c),
+            last_rank(c, top), deck(w, n, (v, _), t, _, _, true), next_change(s), srv in Server {
+        change(w, n, v, s, t, c, top + 1.0, true, srv);
+    }
+    start_edit: on dblclick(_), clicked_in(id), card_id(id, w, n), not mine_editing(w, n), srv in Server {
+        upsert mine_editing(w, n);
+        send editing(w, n, true) to srv;
+    }
+    save_edit: on keydown(id, "Enter", value), edit_field(id, w, n), deck(w, n, (v, _), _, c, r, true), next_change(s),
+            srv in Server {
+        change(w, n, v, s, title_or_old(value), c, r, true, srv);
+        delete mine_editing(w, n);
+        send editing(w, n, false) to srv;
+    }
+    cancel_edit: on keydown(id, "Escape", _), edit_field(id, w, n), srv in Server {
+        delete mine_editing(w, n);
+        send editing(w, n, false) to srv;
+    }
+
+    // ------------------------------------------------------------ what the page shows
+
+    view live(w, n, t, c, r) = deck(w, n, _, t, c, r, true);
+    view key_of(w, n, k) = deck(w, n, _, _, _, _, _), let k = f"{n}-{w}";
+    view card_id(id, w, n) = key_of(w, n, k), let id = f"card-{k}";
+    /// An event names the innermost element under the pointer; what it is in comes from the page itself: the
+    /// element and its ancestors, walked up the `elem` rows.
+    view dropped_on(a) {
+        drop(_, t), let a = t;
+        dropped_on(x), elem(x, a, _, _) where a != "";
+    }
+    view clicked_in(a) {
+        dblclick(t), let a = t;
+        clicked_in(x), elem(x, a, _, _) where a != "";
+    }
+    view dropped_on_card(w, n) = dropped_on(t), card_id(t, w, n);
+    view edit_field(id, w, n) = key_of(w, n, k), let id = f"edit-{k}";
+    view remove_button(id, w, n) = key_of(w, n, k), let id = f"remove-{k}";
+    view arrow(id, w, n, c) {
+        live(w, n, _, c0, _), key_of(w, n, k), let c = c0 + 1u64, let id = f"right-{k}" where c0 + 1u64 < COLUMNS.len();
+        live(w, n, _, c0, _), key_of(w, n, k), let c = c0 - 1u64, let id = f"left-{k}" where c0 > 0u64;
+    }
+    view column(c, name) = (c, name) in COLUMNS;
+    view column_id(id, c) {
+        column(c, _), let id = f"col-{c}";
+        column(c, _), let id = f"list-{c}";
+    }
+    view add_field(id, c) = column(c, _), let id = f"add-{c}";
+    view last_rank(c, top = max!(r default 0.0)) = per column(c, _), live(_, _, _, c, r);
+    view col_count(c, k = count!((w, n))) = per column(c, _), live(w, n, _, c, _);
+    /// The rank of the card before the one a card is dropped on (the dropped card itself aside).
+    view drop_prev(p = max!(r)) = drop(id, _), card_id(id, w, n), dropped_on_card(tw, tn), live(tw, tn, _, c, tr),
+            live(w2, n2, _, c, r)
+            where r < tr && (w2 != w || n2 != n);
+    /// A card's place on the page: by column, then rank (ties by the card).
+    view order(c, r, w, n, i = index!()) = live(w, n, _, c, r);
+    view others(w, n, names = collect!(name)) = others_editing(b, w, n), name_of(b, name);
+    view name_of(b, name) {
+        people(b, name, _, _) where b != self;
+        me(name), let b = self;
+    }
+    view typed_in(f, s) = add_field(f, _), outer drafts(f, d), let s = d.unwrap_or("");
+    view here(b, name) = people(b, name, true, _), up(_) where b != self;
+    view status(s, c) {
+        up(_), let s = "live", let c = "status";
+        not up(_), let s = "offline: changes wait until the server is back", let c = "status offline";
+    }
+    view cards_shown(w, n, k, t, c, i, e, by) {
+        live(w, n, t, c, r), key_of(w, n, k), order(c, r, w, n, i), mine_editing(w, n), let e = true, let by = "";
+        live(w, n, t, c, r), key_of(w, n, k), order(c, r, w, n, i), not mine_editing(w, n), others(w, n, names),
+                let e = false, let by = joined(names);
+        live(w, n, t, c, r), key_of(w, n, k), order(c, r, w, n, i), not mine_editing(w, n), not others(w, n, _),
+                let e = false, let by = "";
+    }
+
+    /// The rank between a card's predecessor (if any) and the card.
+    fn between(p: Option<f64>, r: f64) -> f64 {
+        if p.is_some() { (p.unwrap_or(0.0) + r) / 2.0 } else { r - 1.0 }
+    }
+
+    fn title_or_old(value: String) -> String {
+        value.trim()
+    }
+
+    fn joined(names: Vec<String>) -> String {
+        names.fold("", |acc, x| if acc == "" { x } else { acc ++ ", " ++ x })
+    }
+
+    fn card_class(editing: bool, by: String) -> String {
+        if editing {
+            "card editing"
+        } else if by != "" {
+            "card busy"
+        } else {
+            "card"
+        }
+    }
+
+    // ------------------------------------------------------------ the page
+
+    welcome: while not me(_) {
+        emit html div[id: "board"](class: "app board") {
+            h1 { "Board" }
+            p(class: "lead") { "A kanban board everyone edits at once." }
+            input[id: "name"](class: "big", placeholder: "Your name, then Enter");
+        }
+        emit focus("name");
+    }
+
+    page: while me(my), status(st, sc) {
+        emit html div[id: "board"](class: "app board") {
+            header(class: "top") {
+                h1 { "Board" }
+                span[id: "status"](class: sc) { st }
+            }
+            p[id: "who"](class: "who") { f"You are {my}. Drag cards between columns; double-click one to rename it." }
+            ul[id: "here"](class: "here") {
+                for here(b, name) { li[key: b.to_string()](class: "person") { name } }
+            }
+            div[id: "columns"](class: "columns") {
+                for column(c, name), col_count(c, k), typed_in(f"add-{c}", d) {
+                    section[id: f"col-{c}", pos: c as i64](class: "column") {
+                        h2 {
+                            span { name }
+                            span(class: "count") { k }
+                        }
+                        ul[id: f"list-{c}"](class: "cards") {
+                            for cards_shown(w, n, key, t, c, i, e, by) {
+                                li[id: f"card-{key}", pos: i as i64](
+                                    class: card_class(e, by),
+                                    draggable: if e { "false" } else { "true" }
+                                ) {
+                                    if e { input[id: f"edit-{key}"](class: "edit", value: t); }
+                                    if not e { span(class: "title") { t } }
+                                    if by != "" { span(class: "by") { f"✎ {by}" } }
+                                    div(class: "tools") {
+                                        if c > 0u64 {
+                                            button[id: f"left-{key}"](class: "quiet", title: "Move left") { "←" }
+                                        }
+                                        if c + 1u64 < COLUMNS.len() {
+                                            button[id: f"right-{key}"](class: "quiet", title: "Move right") { "→" }
+                                        }
+                                        button[id: f"remove-{key}"](class: "quiet", title: "Delete") { "×" }
+                                    }
+                                }
+                            }
+                        }
+                        input[id: f"add-{c}"](class: "add", placeholder: "Add a card, then Enter", value: d);
+                    }
+                }
+            }
+        }
+    }
+    focus_edit: while mine_editing(w, n), key_of(w, n, k) {
+        emit focus(f"edit-{k}");
+    }
+}
