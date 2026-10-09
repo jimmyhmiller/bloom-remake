@@ -52,6 +52,15 @@ struct Contribution {
 /// Builds the provenance graph of `run` and its `outcome`.
 pub fn build(artifact: &SimArtifact, run: &SyncRun, outcome: &Outcome) -> Result<ProvGraph, LdfiError> {
     let protocol = artifact.protocol.get();
+    // Lineage reads node values as node ids; a keyed member is a role and a key (docs/design/KEYED.md §5).
+    if let Some(r) = protocol.keyed_roles().next() {
+        return Err(blossom_base::unimplemented_error!(
+            "TEST-020",
+            "lineage over a program with a keyed role (`{}`); LDFI by enumeration runs it",
+            r.name
+        )
+        .into());
+    }
     // Lattice-valued relations and the columns that identify a cell (key and payload).
     let cells: BTreeMap<RelId, Vec<usize>> = protocol
         .rels

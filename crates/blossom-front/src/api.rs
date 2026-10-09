@@ -101,10 +101,13 @@ pub(crate) fn checking_nodes(hir: &crate::hir::Hir) -> Vec<NodeSpec> {
     }
     hir.roles
         .iter()
-        // An external or client role holds no node of the deployment.
+        // An external, client or keyed role holds no node of the deployment.
         .filter(|r| {
             r.name.segments().len() == 1
-                && !matches!(r.kind, crate::hir::RoleKind::External | crate::hir::RoleKind::Client)
+                && !matches!(
+                    r.kind,
+                    crate::hir::RoleKind::External | crate::hir::RoleKind::Client | crate::hir::RoleKind::Keyed
+                )
         })
         .map(|r| NodeSpec {
             name: format!("{}1", r.name.to_string().to_lowercase()),
@@ -293,8 +296,9 @@ pub(crate) fn deployment(
         let ok = match r.kind {
             crate::hir::RoleKind::Process => count == 1,
             crate::hir::RoleKind::Cluster => count >= 1,
-            // A client role's members join at run time; a simulation may name some (CLIENTS.md §6).
-            crate::hir::RoleKind::External | crate::hir::RoleKind::Client => true,
+            // A client role's members join at run time, a keyed role's are created on demand; a simulation may name
+            // some (CLIENTS.md §6, KEYED.md §3).
+            crate::hir::RoleKind::External | crate::hir::RoleKind::Client | crate::hir::RoleKind::Keyed => true,
         };
         if !ok {
             diags.push(Diagnostic::new(

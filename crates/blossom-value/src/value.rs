@@ -19,7 +19,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ValueError;
-use crate::time::{Duration, Instant, NodeId};
+use crate::time::{Duration, Instant, MemberRef, NodeId};
 use crate::types::{ExternCodecId, IntTy};
 
 /// A value of any Blossom type.
@@ -51,6 +51,8 @@ pub enum Value {
     Principal(Arc<str>),
     /// `Node` / `Node<R>`.
     Node(NodeId),
+    /// `Node<R>` for a keyed role `R`: a member named by its key (docs/design/KEYED.md).
+    Member(MemberRef),
     /// A tuple (at least one element; `()` is [`Value::Unit`], and deserialization rejects an empty tuple).
     Tuple(Arc<[Value]>),
     /// A struct: its fields in declaration order.

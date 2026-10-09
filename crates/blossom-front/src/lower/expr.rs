@@ -732,6 +732,10 @@ impl Lowerer<'_> {
                     Builtin::RoleSize(r) => ir::BuiltinFn::Size {
                         role: RoleId::from_raw(r.0),
                     },
+                    Builtin::Named(r) => ir::BuiltinFn::Named {
+                        role: RoleId::from_raw(r.0),
+                    },
+                    Builtin::MemberKey => ir::BuiltinFn::MemberKey,
                     Builtin::RandRange => ir::BuiltinFn::RandRange,
                     Builtin::Rand => ir::BuiltinFn::Rand,
                     Builtin::RandFloat => ir::BuiltinFn::RandFloat,

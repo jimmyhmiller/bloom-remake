@@ -48,6 +48,9 @@ pub enum Output {
     Close { conn: u64 },
 }
 
+/// Fills a buffer with secret random bytes.
+pub type Random = Box<dyn FnMut(&mut [u8]) -> Result<(), RuntimeError> + Send>;
+
 /// Where an object's node starts.
 pub struct ObjectConfig {
     pub spec: DeploymentSpec,
@@ -63,7 +66,7 @@ pub struct ObjectConfig {
     pub now: Instant,
     pub nonce: u64,
     /// Fills a buffer with secret random bytes (client members' tokens).
-    pub random: Box<dyn FnMut(&mut [u8]) -> Result<(), RuntimeError> + Send>,
+    pub random: Random,
     pub externs: Arc<ExternRegistry>,
 }
 
@@ -137,7 +140,7 @@ pub struct ObjectNode {
     restarts: u64,
     nonce: u64,
     app: String,
-    random: Box<dyn FnMut(&mut [u8]) -> Result<(), RuntimeError> + Send>,
+    random: Random,
     next_conn: u64,
     pub stats: ObjectStats,
 }
@@ -152,6 +155,7 @@ impl ObjectNode {
         if names.len() != artifact.nodes.len() || names.iter().zip(&artifact.nodes).any(|(a, b)| **a != *b.as_str()) {
             return Err(internal_error!("the program was compiled for other nodes than the deployment's").into());
         }
+        crate::refuse_keyed(program)?;
         let (me, _) = spec.node(&cfg.node)?;
         let role = artifact.roles.get(me.0 as usize).copied().flatten();
         let executors = Executors::new(

@@ -86,7 +86,7 @@ fn event(a: &BlsArtifact, node: &str, t: u64, rel: &str, args: &[&str]) -> Input
         node: a.node_id(node).unwrap(),
         tick: Tick(t),
         rel: a.rel_named(rel).unwrap(),
-        row: Arc::from(args.iter().map(|s| Value::str(*s)).collect::<Vec<_>>()),
+        row: Arc::from(args.iter().map(|s| Value::str(s)).collect::<Vec<_>>()),
     }
 }
 
@@ -197,7 +197,7 @@ fn collect_and_index_order_by_their_keys() {
         &[add(1, "zed", 5, 1), add(1, "amy", 9, 2), add(2, "kim", 5, 3), add(2, "bob", 9, 4)],
         4,
     );
-    let names = |xs: &[&str]| Value::Vec(xs.iter().map(|s| Value::str(*s)).collect::<Vec<_>>().into());
+    let names = |xs: &[&str]| Value::Vec(xs.iter().map(|s| Value::str(s)).collect::<Vec<_>>().into());
     assert_eq!(rows(&a, &run, 4, n1, "arrival"), vec![vec![names(&["zed", "amy", "kim", "bob"])]]);
     assert_eq!(
         rows(&a, &run, 4, n1, "by_score"),

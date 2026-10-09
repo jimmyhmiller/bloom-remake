@@ -409,7 +409,8 @@ impl TypeTable {
 
     /// Checks that `value` has the shape of type `ty` (LANGUAGE §5). The contents of lattice, group and extern
     /// values are the business of their owning crates (`blossom-lattice`, the extern codec), and `Node<R>` role
-    /// membership is a deployment fact; for those only the kind of value is checked.
+    /// membership is a deployment fact; for those only the kind of value is checked (a keyed member's role is in the
+    /// value, so it is checked).
     pub fn check_value(&self, ty: TypeId, value: &Value) -> Result<(), ValueError> {
         let def = self.def(ty)?;
         let mismatch = |reason: String| ValueError::TypeMismatch { ty, reason };
@@ -427,8 +428,17 @@ impl TypeTable {
             | (TypeDef::Conn, Value::Conn(_))
             | (TypeDef::Principal, Value::Principal(_))
             | (TypeDef::Node(_), Value::Node(_))
+            | (TypeDef::Node(None), Value::Member(_))
             | (TypeDef::Lattice(_), Value::Lattice(_))
             | (TypeDef::Group(_), Value::Group(_)) => Ok(()),
+            // A keyed member carries its role, so `Node<R>` checks it.
+            (TypeDef::Node(Some(r)), Value::Member(m)) => {
+                if m.role == *r {
+                    Ok(())
+                } else {
+                    Err(mismatch(format!("a member of role {:?}, not of {r:?}", m.role)))
+                }
+            }
             (TypeDef::Int(t), Value::Int(i)) => {
                 if i.ty() == *t {
                     Ok(())
@@ -542,7 +552,7 @@ fn value_kind(value: &Value) -> &'static str {
         Value::Session(_) => "Session",
         Value::Conn(_) => "Conn",
         Value::Principal(_) => "Principal",
-        Value::Node(_) => "Node",
+        Value::Node(_) | Value::Member(_) => "Node",
         Value::Tuple(_) => "a tuple",
         Value::Struct(_) => "a struct",
         Value::Enum { .. } | Value::UnknownVariant { .. } => "an enum value",

@@ -23,8 +23,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::{StoreError, Vfs, VfsFile, VfsLock, invalid};
 use crate::vfs::OpenOpts;
+use crate::{StoreError, Vfs, VfsFile, VfsLock, invalid};
 
 /// The size of a chunk: big enough that a WAL record or an SSTable block takes few, small enough for any value limit
 /// (a Durable Object's is 2 MB).
@@ -93,6 +93,9 @@ pub struct JournalKv {
     writes: Mutex<BTreeMap<String, Option<Vec<u8>>>>,
 }
 
+/// A journaled write: the key, and its value or `None` for a deletion.
+pub type Write = (String, Option<Vec<u8>>);
+
 impl JournalKv {
     /// A store holding `entries` (what the host's storage holds), with nothing journaled.
     pub fn load(entries: impl IntoIterator<Item = (String, Vec<u8>)>) -> JournalKv {
@@ -103,7 +106,7 @@ impl JournalKv {
     }
 
     /// The writes since the last call, each key's last: its value, or `None` for a deletion.
-    pub fn take_writes(&self) -> Result<Vec<(String, Option<Vec<u8>>)>, StoreError> {
+    pub fn take_writes(&self) -> Result<Vec<Write>, StoreError> {
         let mut writes = self.writes.lock().map_err(|_| invalid("journal mutex poisoned"))?;
         Ok(std::mem::take(&mut *writes).into_iter().collect())
     }
@@ -207,7 +210,10 @@ impl KvFs {
             named.insert(u64_of(&v, &k)?);
         }
         for k in self.kv().list("i/")? {
-            let id = u64::from_str_radix(&k[2..], 16).map_err(|_| invalid(format!("a malformed inode key {k}")))?;
+            let hex = k
+                .strip_prefix("i/")
+                .ok_or_else(|| invalid(format!("a malformed inode key {k}")))?;
+            let id = u64::from_str_radix(hex, 16).map_err(|_| invalid(format!("a malformed inode key {k}")))?;
             if !named.contains(&id) {
                 self.drop_inode(id)?;
             }
@@ -250,7 +256,11 @@ impl KvFs {
 
     /// A name's removal: the inode goes now if no handle has it open, else when its last handle closes.
     fn unlink(&self, id: u64) -> Result<(), StoreError> {
-        let mut open = self.inner.open.lock().map_err(|_| invalid("open-files mutex poisoned"))?;
+        let mut open = self
+            .inner
+            .open
+            .lock()
+            .map_err(|_| invalid("open-files mutex poisoned"))?;
         match open.get_mut(&id) {
             Some((n, gone)) if *n > 0 => {
                 *gone = true;
@@ -264,13 +274,21 @@ impl KvFs {
     }
 
     fn opened(&self, id: u64) -> Result<(), StoreError> {
-        let mut open = self.inner.open.lock().map_err(|_| invalid("open-files mutex poisoned"))?;
+        let mut open = self
+            .inner
+            .open
+            .lock()
+            .map_err(|_| invalid("open-files mutex poisoned"))?;
         open.entry(id).or_insert((0, false)).0 += 1;
         Ok(())
     }
 
     fn closed(&self, id: u64) -> Result<(), StoreError> {
-        let mut open = self.inner.open.lock().map_err(|_| invalid("open-files mutex poisoned"))?;
+        let mut open = self
+            .inner
+            .open
+            .lock()
+            .map_err(|_| invalid("open-files mutex poisoned"))?;
         let drop_it = match open.get_mut(&id) {
             Some((n, gone)) => {
                 *n -= 1;
@@ -315,10 +333,16 @@ impl KvFs {
             if chunk.len() < within + take {
                 chunk.resize(within + take, 0);
             }
-            chunk[within..within + take].copy_from_slice(&rest[..take]);
+            let (now, later) = rest
+                .split_at_checked(take)
+                .ok_or_else(|| invalid("a write longer than its data"))?;
+            chunk
+                .get_mut(within..within + take)
+                .ok_or_else(|| invalid("a chunk shorter than its write"))?
+                .copy_from_slice(now);
             self.kv().put(&key, &chunk)?;
             pos += take as u64;
-            rest = &rest[take..];
+            rest = later;
         }
         if pos > len {
             self.set_len(id, pos)?;
@@ -360,7 +384,12 @@ impl VfsFile for KvFile {
             if take == 0 {
                 return Err(invalid(format!("chunk {index} of inode {:016x} is short", self.id)));
             }
-            buf[done..done + take].copy_from_slice(&chunk[within..within + take]);
+            let from = chunk
+                .get(within..within + take)
+                .ok_or_else(|| invalid(format!("chunk {index} of inode {:016x} is short", self.id)))?;
+            buf.get_mut(done..done + take)
+                .ok_or_else(|| invalid("a read past its buffer"))?
+                .copy_from_slice(from);
             done += take;
         }
         Ok(done)
@@ -483,9 +512,16 @@ impl Vfs for KvFs {
         let mut out = BTreeSet::new();
         for prefix in ["n/", "d/"] {
             let start = path_key(prefix, dir)?;
-            let start = if start.ends_with('/') { start } else { format!("{start}/") };
+            let start = if start.ends_with('/') {
+                start
+            } else {
+                format!("{start}/")
+            };
             for k in self.kv().list(&start)? {
-                let p = PathBuf::from(&k[prefix.len()..]);
+                let p = PathBuf::from(
+                    k.strip_prefix(prefix)
+                        .ok_or_else(|| invalid(format!("{k} is not under {prefix}")))?,
+                );
                 if p.parent() == Some(dir) {
                     out.insert(p);
                 }
@@ -549,7 +585,15 @@ mod tests {
         let (_, fs) = fs();
         fs.create_dir_all(Path::new("/d")).unwrap();
         let data: Vec<u8> = (0..(3 * CHUNK + 17)).map(|i| (i % 251) as u8).collect();
-        let mut f = fs.open(Path::new("/d/f"), OpenOpts { create: true, ..OpenOpts::default() }).unwrap();
+        let mut f = fs
+            .open(
+                Path::new("/d/f"),
+                OpenOpts {
+                    create: true,
+                    ..OpenOpts::default()
+                },
+            )
+            .unwrap();
         // Appends that straddle chunk boundaries.
         for piece in data.chunks(CHUNK / 3 + 5) {
             f.append(piece).unwrap();
@@ -567,9 +611,25 @@ mod tests {
     fn a_rename_moves_the_name_and_replaces_the_target() {
         let (kv, fs) = fs();
         fs.create_dir_all(Path::new("/d")).unwrap();
-        let mut a = fs.open(Path::new("/d/a"), OpenOpts { create: true, ..OpenOpts::default() }).unwrap();
+        let mut a = fs
+            .open(
+                Path::new("/d/a"),
+                OpenOpts {
+                    create: true,
+                    ..OpenOpts::default()
+                },
+            )
+            .unwrap();
         a.append(b"new").unwrap();
-        let mut b = fs.open(Path::new("/d/b"), OpenOpts { create: true, ..OpenOpts::default() }).unwrap();
+        let mut b = fs
+            .open(
+                Path::new("/d/b"),
+                OpenOpts {
+                    create: true,
+                    ..OpenOpts::default()
+                },
+            )
+            .unwrap();
         b.append(b"old").unwrap();
         drop(b);
         fs.rename(Path::new("/d/a"), Path::new("/d/b")).unwrap();
@@ -585,7 +645,15 @@ mod tests {
     fn a_removed_file_open_elsewhere_lives_until_its_handle_closes() {
         let (kv, fs) = fs();
         fs.create_dir_all(Path::new("/d")).unwrap();
-        let mut f = fs.open(Path::new("/d/f"), OpenOpts { create: true, ..OpenOpts::default() }).unwrap();
+        let mut f = fs
+            .open(
+                Path::new("/d/f"),
+                OpenOpts {
+                    create: true,
+                    ..OpenOpts::default()
+                },
+            )
+            .unwrap();
         f.append(b"still here").unwrap();
         fs.remove(Path::new("/d/f")).unwrap();
         let mut buf = [0; 10];
@@ -602,7 +670,15 @@ mod tests {
         {
             let fs = KvFs::open(kv.clone()).unwrap();
             fs.create_dir_all(Path::new("/d")).unwrap();
-            let mut f = fs.open(Path::new("/d/f"), OpenOpts { create: true, ..OpenOpts::default() }).unwrap();
+            let mut f = fs
+                .open(
+                    Path::new("/d/f"),
+                    OpenOpts {
+                        create: true,
+                        ..OpenOpts::default()
+                    },
+                )
+                .unwrap();
             f.append(b"x").unwrap();
             fs.remove(Path::new("/d/f")).unwrap();
             // The process "crashes" with the handle open: nothing drops it.
@@ -619,7 +695,15 @@ mod tests {
         let journal = Arc::new(JournalKv::default());
         let fs = KvFs::open(journal.clone()).unwrap();
         fs.create_dir_all(Path::new("/d")).unwrap();
-        let mut f = fs.open(Path::new("/d/f"), OpenOpts { create: true, ..OpenOpts::default() }).unwrap();
+        let mut f = fs
+            .open(
+                Path::new("/d/f"),
+                OpenOpts {
+                    create: true,
+                    ..OpenOpts::default()
+                },
+            )
+            .unwrap();
         f.append(&vec![7; CHUNK + 10]).unwrap();
         drop(f);
         fs.rename(Path::new("/d/f"), Path::new("/d/g")).unwrap();

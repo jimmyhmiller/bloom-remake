@@ -114,6 +114,11 @@ fn builtin_name(p: &Program, f: &BuiltinFn) -> String {
             "$size<{}>",
             p.roles.get(*role).map_or("<?>".into(), |r| r.name.to_string())
         ),
+        BuiltinFn::Named { role } => format!(
+            "$named<{}>",
+            p.roles.get(*role).map_or("<?>".into(), |r| r.name.to_string())
+        ),
+        BuiltinFn::MemberKey => "$member_key".into(),
         BuiltinFn::Len => "$len".into(),
         BuiltinFn::IntCast(t) => format!("$as_{}", t.name()),
         BuiltinFn::Lib(f) => format!("$lib_{f:?}"),
@@ -580,6 +585,14 @@ impl<'a> Texts<'a> {
                 format!("{role}{}", (self.node)(*n))
             }
             Value::Node(n) => (self.node)(*n),
+            // A keyed member by its role and key: `Game:"game-17"`.
+            Value::Member(m) => {
+                let role = self
+                    .program
+                    .and_then(|p| p.roles.get(m.role))
+                    .map_or_else(|| format!("role#{}", m.role.raw()), |r| r.name.to_string());
+                format!("{role}:{:?}", m.key)
+            }
             Value::Str(s) => format!("{s:?}"),
             Value::Bool(b) => b.to_string(),
             Value::Unit => "()".to_owned(),

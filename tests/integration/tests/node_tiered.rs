@@ -95,7 +95,7 @@ impl Fixture {
         }
     }
 
-    fn boot<'a>(&'a self, fs: &SimFs) -> ManualDriver<Box<dyn Executor>> {
+    fn boot(&self, fs: &SimFs) -> ManualDriver<Box<dyn Executor>> {
         let fs: Arc<dyn Vfs> = Arc::new(fs.clone());
         let opened = recovery::open(
             fs,

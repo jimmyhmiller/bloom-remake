@@ -445,12 +445,16 @@ pub(super) fn oracle(root: &str, m: &toml::Table, engine: bool) -> Outcome {
         {
             return Outcome::NotRunnable(format!("the oracle does not run it: {u}"));
         }
-        let cfg = super::corpus_interp::engine_config(
+        let cfg = match super::corpus_interp::engine_config(
+            artifact.program.get(),
             &artifact.roles,
             &artifact.nodes,
             blossom_value::Seed::from_u64(seed),
             externs.clone(),
-        );
+        ) {
+            Ok(c) => c,
+            Err(e) => return Outcome::Fail(format!("the deployment's members: {e}")),
+        };
         let ev = blossom_node::EngineEvaluator::new(artifact.program.clone(), cfg);
         let mine = sim.run_on(&ev, &inputs, Tick(last), round, &schedule, false);
         if let Err(d) = super::corpus_interp::compare(&reference, &mine) {

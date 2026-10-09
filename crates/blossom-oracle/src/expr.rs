@@ -160,7 +160,7 @@ pub(crate) fn term(scope: &Scope<'_>, env: &[Option<Value>], t: &Term) -> ExprRe
 pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprResult<Value> {
     match e {
         Expr::Term(t) => term(scope, env, t),
-        Expr::Scalar(BuiltinScalar::SelfNode) => Ok(Value::Node(scope.node)),
+        Expr::Scalar(BuiltinScalar::SelfNode) => Ok(scope.oracle.members().value(scope.node)),
         Expr::Scalar(BuiltinScalar::Tick) => Ok(Value::Int(IntValue::U64(scope.tick.0))),
         Expr::Scalar(BuiltinScalar::Now) => Ok(Value::Instant(scope.now)),
         Expr::Scalar(s @ (BuiltinScalar::Incarnation | BuiltinScalar::Host)) => Err(ExprError::Oracle(
@@ -291,6 +291,34 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
             f: FnRef::Builtin(BuiltinFn::Size { role }),
             ..
         } => Ok(Value::Int(IntValue::U64(scope.oracle.role_size(*role)))),
+        Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::Named { role }),
+            args,
+        } => {
+            let [k] = args.as_slice() else {
+                return Err(ExprError::Oracle(internal_error!("`named` takes one key").into()));
+            };
+            match eval(scope, env, k)? {
+                Value::Str(key) => Ok(Value::Member(blossom_value::time::MemberRef { role: *role, key })),
+                other => Err(ExprError::Oracle(internal_error!("`named` of {other:?}").into())),
+            }
+        }
+        Expr::Call {
+            f: FnRef::Builtin(BuiltinFn::MemberKey),
+            args,
+        } => {
+            let [m] = args.as_slice() else {
+                return Err(ExprError::Oracle(
+                    internal_error!("a member's key takes one member").into(),
+                ));
+            };
+            match eval(scope, env, m)? {
+                Value::Member(m) => Ok(Value::Str(m.key)),
+                other => Err(ExprError::Oracle(
+                    internal_error!("the key of {other:?}, not a keyed member").into(),
+                )),
+            }
+        }
         Expr::Call {
             f: FnRef::Builtin(BuiltinFn::Error { .. }),
             args,
@@ -742,7 +770,7 @@ fn binary(op: BinOp, l: Value, r: Value) -> ExprResult<Value> {
                 | (Value::Instant(_), Value::Instant(_))
                 | (Value::Str(_), Value::Str(_))
                 | (Value::Bytes(_), Value::Bytes(_))
-                | (Value::Node(_), Value::Node(_)) => true,
+                | (Value::Node(_) | Value::Member(_), Value::Node(_) | Value::Member(_)) => true,
                 _ => false,
             };
             if !same_kind {

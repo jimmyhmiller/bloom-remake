@@ -92,13 +92,13 @@ impl Kvs {
     }
 
     /// Opens (recovers) the store on `fs` and boots the node.
-    fn boot<'a>(&'a self, fs: &SimFs, wall: i64) -> ManualDriver<Box<dyn Executor>> {
+    fn boot(&self, fs: &SimFs, wall: i64) -> ManualDriver<Box<dyn Executor>> {
         // A clone of a `SimFs` is another handle on the same filesystem.
         self.boot_on(Arc::new(fs.clone()), wall)
     }
 
     /// Opens (recovers) the store on any filesystem and boots the node.
-    fn boot_on<'a>(&'a self, fs: Arc<dyn Vfs>, wall: i64) -> ManualDriver<Box<dyn Executor>> {
+    fn boot_on(&self, fs: Arc<dyn Vfs>, wall: i64) -> ManualDriver<Box<dyn Executor>> {
         let opened = recovery::open(
             fs,
             &StoreSpec {

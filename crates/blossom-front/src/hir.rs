@@ -261,6 +261,9 @@ pub enum RoleKind {
     /// Members admitted at run time (browser tabs, docs/design/CLIENTS.md): nodes that hold rules but are not part of
     /// the deployment, so their member set is not known when the program is compiled.
     Client,
+    /// Members named by a key and created on demand (docs/design/KEYED.md): `R.named(k)` is one; their member set is
+    /// not known when the program is compiled either.
+    Keyed,
 }
 
 /// A relation.
@@ -1069,6 +1072,10 @@ pub enum Builtin {
     Len,
     /// `R.size()`: a role's cardinality.
     RoleSize(HRoleId),
+    /// `R.named(k)`: the member of keyed role `R` named by the string `k`.
+    Named(HRoleId),
+    /// `self.key()` at a keyed role: the member's key.
+    MemberKey,
     /// `c.contains(x)` on a `Vec` or `Set` (an element) or a `Map` (a key); the receiver first.
     Contains,
     /// `rand_range(lo, hi, k…)` (LANGUAGE §15.1): an unbiased value in `[lo, hi)`, the same for the same key within a

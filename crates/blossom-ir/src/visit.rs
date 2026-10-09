@@ -505,6 +505,7 @@ impl Remap for RoleKind {
             Self::Cluster => Self::Cluster,
             Self::External => Self::External,
             Self::Client => Self::Client,
+            Self::Keyed => Self::Keyed,
         }
     }
 }
@@ -954,6 +955,8 @@ impl Remap for BuiltinFn {
             Self::PrincipalOf => Self::PrincipalOf,
             Self::RoleOf => Self::RoleOf,
             Self::Size { role } => Self::Size { role: role.remap(m) },
+            Self::Named { role } => Self::Named { role: role.remap(m) },
+            Self::MemberKey => Self::MemberKey,
             Self::Len => Self::Len,
             Self::IntCast(t) => Self::IntCast(*t),
             Self::Lib(f) => Self::Lib(*f),

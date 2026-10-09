@@ -65,6 +65,16 @@ impl NodeId {
     }
 }
 
+/// A keyed member (docs/design/KEYED.md): the member of the keyed role `role` named by `key`. Its identity is the key
+/// itself, so two keys never share one; members order by role, then key, after every [`NodeId`].
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+pub struct MemberRef {
+    /// The keyed role.
+    pub role: blossom_base::RoleId,
+    /// The member's key.
+    pub key: std::sync::Arc<str>,
+}
+
 /// Nanoseconds since the deployment epoch.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize)]
 pub struct Instant(pub i64);

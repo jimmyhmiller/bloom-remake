@@ -27,6 +27,12 @@ pub struct BlsArtifact {
 }
 
 impl BlsArtifact {
+    /// The deployment's keyed members (docs/design/KEYED.md): a node of a keyed role is the member its name keys.
+    pub fn members(&self) -> Result<blossom_ir::members::Members, String> {
+        let names: Vec<&str> = self.nodes.iter().map(|n| n.as_str()).collect();
+        blossom_ir::members::of_deployment(self.program.get(), &names, &self.roles)
+    }
+
     /// The node named `name`.
     pub fn node_id(&self, name: &str) -> Option<NodeId> {
         self.nodes

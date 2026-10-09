@@ -814,11 +814,14 @@ impl<'t> Resolver<'t, '_> {
                 let mut values = Vec::with_capacity(xs.len());
                 let mut types = Vec::with_capacity(xs.len());
                 for (i, x) in xs.iter().enumerate() {
-                    let (v, t) = self.const_value(s, x, want.as_ref().map(|w| w[i]))?;
+                    let (v, t) = self.const_value(s, x, want.as_ref().and_then(|w| w.get(i).copied()))?;
                     values.push(v);
                     types.push(t);
                 }
-                (Value::Tuple(values.into()), self.intern_type(TypeDef::Tuple(types), e.span))
+                (
+                    Value::Tuple(values.into()),
+                    self.intern_type(TypeDef::Tuple(types), e.span),
+                )
             }
             ExprKind::Vec(xs) | ExprKind::Set(xs) => {
                 let mut elem = match &expected_def {
@@ -833,7 +836,11 @@ impl<'t> Resolver<'t, '_> {
                     values.push(v);
                 }
                 let Some(elem) = elem else {
-                    self.error(code!("BLS0300"), e.span, "an empty constant collection needs a declared type");
+                    self.error(
+                        code!("BLS0300"),
+                        e.span,
+                        "an empty constant collection needs a declared type",
+                    );
                     return None;
                 };
                 if matches!(e.kind, ExprKind::Vec(_)) {
@@ -862,7 +869,11 @@ impl<'t> Resolver<'t, '_> {
                     }
                 }
                 let (Some(kt), Some(vt)) = (kt, vt) else {
-                    self.error(code!("BLS0300"), e.span, "an empty constant collection needs a declared type");
+                    self.error(
+                        code!("BLS0300"),
+                        e.span,
+                        "an empty constant collection needs a declared type",
+                    );
                     return None;
                 };
                 (

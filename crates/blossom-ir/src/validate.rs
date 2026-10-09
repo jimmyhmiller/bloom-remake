@@ -2324,6 +2324,23 @@ fn builtin_type(p: &Program, r: Cx<'_>, b: &BuiltinFn, args: &[Expr]) -> Result<
             arity(0)?;
             lookup(TypeDef::Int(IntTy::U64))
         }
+        BuiltinFn::Named { role } => {
+            arity(1)?;
+            if !p.is_keyed(*role) {
+                return Err("`named` of a role that is not keyed".into());
+            }
+            if !matches!(types.first().and_then(|t| p.types.get(*t)), Some(TypeDef::Str)) {
+                return Err("`named` expects a String key".into());
+            }
+            lookup(TypeDef::Node(Some(*role)))
+        }
+        BuiltinFn::MemberKey => {
+            arity(1)?;
+            if !matches!(types.first().and_then(|t| p.types.get(*t)), Some(TypeDef::Node(Some(r))) if p.is_keyed(*r)) {
+                return Err("a member's key expects a Node of a keyed role".into());
+            }
+            lookup(TypeDef::Str)
+        }
         BuiltinFn::IntCast(to) => {
             arity(1)?;
             if !matches!(

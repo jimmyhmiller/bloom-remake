@@ -13,7 +13,7 @@ fn js(e: String) -> JsValue {
 
 /// A connection id as JavaScript passes it: a whole, non-negative number.
 fn conn_of(id: f64) -> Result<u64, JsValue> {
-    if id.fract() != 0.0 || id < 0.0 || id > 9_007_199_254_740_991.0 {
+    if id.fract() != 0.0 || !(0.0..=9_007_199_254_740_991.0).contains(&id) {
         return Err(js(format!("{id} is not a connection id")));
     }
     Ok(id as u64)

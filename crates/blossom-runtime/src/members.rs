@@ -232,8 +232,7 @@ fn serve_get(req: &web::Request, w: &mut TcpStream, ctx: &WebCtx, keep: bool) ->
     }
     match req.path.as_str() {
         "/blossom/app.json" => r(200, "OK", "application/json", ctx.app.as_bytes()).write(w, keep),
-        web::STYLE_PATH if ctx.style.is_some() => {
-            let file = ctx.style.as_ref().expect("checked by the guard");
+        web::STYLE_PATH if let Some(file) = &ctx.style => {
             let body = std::fs::read(file).map_err(RuntimeError::Io)?;
             r(200, "OK", "text/css; charset=utf-8", &body).write(w, keep)
         }
@@ -269,8 +268,13 @@ pub(crate) struct Admitted {
 
 /// Checks a member's `HELLO` and finds (or mints) its identity; the refusal to send it otherwise.
 pub(crate) fn admit(ctx: &WebCtx, h: blossom_wire::frame::Hello) -> Result<Admitted, AdmitError> {
-    admit_with(&ctx.id, &ctx.catalog, &ctx.client_roles, h, &mut |role, token| identify(ctx, role, token))
+    admit_with(&ctx.id, &ctx.catalog, &ctx.client_roles, h, &mut |role, token| {
+        identify(ctx, role, token)
+    })
 }
+
+/// Identifies a member of a client role by its token (or none): its node id and its token.
+pub(crate) type Identify<'a> = dyn FnMut(&str, Option<Vec<u8>>) -> Result<(NodeId, Vec<u8>), RuntimeError> + 'a;
 
 /// [`admit`], with what it needs given: the node's identity, its channel catalog and client roles, and how a member
 /// is identified (`identify(role, token)`).
@@ -279,7 +283,7 @@ pub(crate) fn admit_with(
     catalog: &Catalog,
     client_roles: &BTreeMap<String, ClientRole>,
     h: blossom_wire::frame::Hello,
-    identify: &mut dyn FnMut(&str, Option<Vec<u8>>) -> Result<(NodeId, Vec<u8>), RuntimeError>,
+    identify: &mut Identify<'_>,
 ) -> Result<Admitted, AdmitError> {
     if let Err((reason, detail)) = crate::net::check_hello(&h, id) {
         return Err(AdmitError::Refused(reason, detail));

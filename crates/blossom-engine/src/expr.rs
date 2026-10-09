@@ -168,10 +168,13 @@ pub(crate) struct Shared {
     pub choice: Option<Seed>,
     /// Each node's seed σn, by node id.
     pub node_seeds: Vec<Seed>,
-    /// This node's seed when it is a client member (its id is outside the deployment).
-    pub client_seed: Option<Seed>,
+    /// This node's seed when it is a client member (its id is outside the deployment) or a keyed member (seeded by
+    /// its member name).
+    pub own_seed: Option<Seed>,
     /// Each node's role, by node id.
     pub roles: Vec<Option<RoleId>>,
+    /// The keyed members the host gave node ids.
+    pub members: Arc<blossom_ir::members::Members>,
     /// The built-in lattice of each declared lattice, by lattice id.
     pub kinds: Vec<Option<Kind>>,
     /// The host functions of the program's `extern fn`s, bound when the engine was built.
@@ -183,8 +186,8 @@ pub(crate) struct Shared {
 impl Shared {
     /// Node `n`'s seed σn.
     pub fn seed_of(&self, n: blossom_value::time::NodeId) -> Option<Seed> {
-        if n.is_client() {
-            self.client_seed
+        if n.is_client() || self.members.get(n).is_some() {
+            self.own_seed
         } else {
             self.node_seeds.get(n.0 as usize).copied()
         }
@@ -316,7 +319,7 @@ pub(crate) fn eval_in(cx: &Ctx<'_>, env: &mut Frame<'_>, e: &Expr) -> ExprResult
         Expr::Term(t) => term(cx, env.slots(), t),
         Expr::Param(p) => param(cx, *p),
         Expr::Scalar(s) => match s {
-            BuiltinScalar::SelfNode => Ok(Value::Node(cx.node)),
+            BuiltinScalar::SelfNode => Ok(cx.shared.members.value(cx.node)),
             BuiltinScalar::Tick => {
                 cx.reads_time.set(true);
                 Ok(Value::Int(IntValue::U64(cx.tick.0)))
@@ -674,6 +677,14 @@ fn builtin(cx: &Ctx<'_>, env: &mut Frame<'_>, f: &BuiltinFn, args: &[Expr]) -> E
             Ok(Value::Int(IntValue::U64(n as u64)))
         }
         BuiltinFn::Size { role } => Ok(Value::Int(IntValue::U64(cx.shared.role_size(*role)))),
+        BuiltinFn::Named { role } => match arg(0)? {
+            Value::Str(key) => Ok(Value::Member(blossom_value::time::MemberRef { role: *role, key })),
+            other => Err(bug(format!("`named` of {other:?}"))),
+        },
+        BuiltinFn::MemberKey => match arg(0)? {
+            Value::Member(m) => Ok(Value::Str(m.key)),
+            other => Err(bug(format!("the key of {other:?}, not a keyed member"))),
+        },
         BuiltinFn::IntCast(to) => match arg(0)? {
             // Truncated toward zero; NaN, infinite or out of range is BLSR004 (LANGUAGE §5.1).
             Value::F64(x) => float::to_int(x, *to)
@@ -887,7 +898,7 @@ fn binary(op: &BinOp, l: Value, r: Value) -> ExprResult<Value> {
                 | (Value::Instant(_), Value::Instant(_))
                 | (Value::Str(_), Value::Str(_))
                 | (Value::Bytes(_), Value::Bytes(_))
-                | (Value::Node(_), Value::Node(_)) => true,
+                | (Value::Node(_) | Value::Member(_), Value::Node(_) | Value::Member(_)) => true,
                 _ => false,
             };
             if !comparable {

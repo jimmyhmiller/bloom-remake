@@ -2237,7 +2237,14 @@ impl Checker<'_> {
                             self.con(&mut hir.types, TypeDef::Int(IntTy::U64))
                         }
                         Builtin::RandFloat => self.con(&mut hir.types, TypeDef::F64),
-                        Builtin::ToString => self.con(&mut hir.types, TypeDef::Str),
+                        Builtin::ToString | Builtin::MemberKey => self.con(&mut hir.types, TypeDef::Str),
+                        Builtin::Named(role) => {
+                            if let Some(k) = ats.first() {
+                                let s = self.con(&mut hir.types, TypeDef::Str);
+                                self.unify(&hir.types, *k, s, span);
+                            }
+                            self.con(&mut hir.types, TypeDef::Node(Some(RoleId::from_raw(role.0))))
+                        }
                         Builtin::Error => {
                             // The message is a String; the call never returns, so it takes its context's type.
                             if let Some(m) = ats.first() {

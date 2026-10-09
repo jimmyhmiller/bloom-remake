@@ -96,6 +96,7 @@ pub fn lower(hir: &Hir, deployment: &Deployment<'_>) -> Result<Lowered, Internal
             hir::RoleKind::Cluster => RoleKind::Cluster,
             hir::RoleKind::External => RoleKind::External,
             hir::RoleKind::Client => RoleKind::Client,
+            hir::RoleKind::Keyed => RoleKind::Keyed,
         };
         l.b.declare_role(r.name.clone(), kind, r.span).map_err(ir)?;
     }
