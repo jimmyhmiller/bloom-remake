@@ -213,9 +213,7 @@ impl StateStore for SqliteStore {
             )
             .map_err(unavailable)?;
             tx.commit().map_err(unavailable)?;
-            Ok(Commit::Done {
-                version: expected + 1,
-            })
+            Ok(Commit::Done { version: expected + 1 })
         })
     }
 
@@ -253,7 +251,9 @@ impl StateStore for SqliteStore {
                 .prepare_cached("select object, at from wakes where at <= ?1 order by at, object limit ?2")
                 .map_err(unavailable)?;
             let rows = stmt
-                .query_map(params![now, limit], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                .query_map(params![now, limit], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                })
                 .map_err(unavailable)?;
             rows.map(|r| {
                 let (o, at) = r.map_err(unavailable)?;
@@ -300,7 +300,8 @@ impl StateStore for SqliteStore {
     fn delete_side(&self, key: &str) -> Result<(), StateError> {
         check_name("side key", key)?;
         self.with_conn(|conn| {
-            conn.execute("delete from side where key = ?1", [key]).map_err(unavailable)?;
+            conn.execute("delete from side where key = ?1", [key])
+                .map_err(unavailable)?;
             Ok(())
         })
     }

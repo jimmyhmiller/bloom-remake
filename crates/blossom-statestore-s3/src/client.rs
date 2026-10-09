@@ -81,11 +81,7 @@ impl Client {
             .max_idle_connections_per_host(32)
             .build()
             .new_agent();
-        Client {
-            agent,
-            endpoint,
-            creds,
-        }
+        Client { agent, endpoint, creds }
     }
 
     /// The request path (encoded) and the URL for `key` (empty: the bucket itself).
@@ -165,12 +161,7 @@ impl Client {
             }
             other => Failure::NoAnswer(format!("{url}: {other}")),
         })?;
-        let header = |name: &str| {
-            res.headers()
-                .get(name)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned)
-        };
+        let header = |name: &str| res.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
         let (etag, meta_version) = (header("etag"), header("x-amz-meta-blossom-version"));
         let status = res.status().as_u16();
         let body = if method == "HEAD" {
@@ -247,7 +238,9 @@ pub fn unescape(s: &str) -> String {
             "gt" => Some('>'),
             "quot" => Some('"'),
             "apos" => Some('\''),
-            e if e.starts_with("#x") => u32::from_str_radix(e.get(2..).unwrap_or(""), 16).ok().and_then(char::from_u32),
+            e if e.starts_with("#x") => u32::from_str_radix(e.get(2..).unwrap_or(""), 16)
+                .ok()
+                .and_then(char::from_u32),
             e if e.starts_with('#') => e.get(1..).and_then(|n| n.parse().ok()).and_then(char::from_u32),
             _ => None,
         };

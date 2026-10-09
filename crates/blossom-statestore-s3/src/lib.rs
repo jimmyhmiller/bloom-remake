@@ -282,7 +282,8 @@ fn os_nonce() -> Result<String, StateError> {
 }
 
 fn lock<'a>(m: &'a Mutex<Cache>) -> Result<MutexGuard<'a, Cache>, StateError> {
-    m.lock().map_err(|_| StateError::Unavailable("the S3 store's cache lock is poisoned".into()))
+    m.lock()
+        .map_err(|_| StateError::Unavailable("the S3 store's cache lock is poisoned".into()))
 }
 
 /// Elapsed time for `wait` and a commit's deadline: a host's I/O, not a node's clock.
@@ -302,10 +303,7 @@ impl S3Store {
     /// A handle on the store `cfg` names. Nothing is checked until the first request.
     pub fn open(cfg: S3Config) -> Result<S3Store, StateError> {
         if !(cfg.prefix.is_empty() || cfg.prefix.ends_with('/')) {
-            return Err(StateError::Config(format!(
-                "a prefix ends in `/` (`{}`)",
-                cfg.prefix
-            )));
+            return Err(StateError::Config(format!("a prefix ends in `/` (`{}`)", cfg.prefix)));
         }
         Ok(S3Store {
             client: Client::new(cfg.endpoint.clone(), cfg.credentials.clone()),
@@ -341,11 +339,17 @@ impl S3Store {
             )
             .into_bytes()
         };
-        let r = self.client.send("PUT", "", &[], &[], &body).map_err(Failure::unavailable)?;
+        let r = self
+            .client
+            .send("PUT", "", &[], &[], &body)
+            .map_err(Failure::unavailable)?;
         if r.status == 200 || (r.status == 409 && error_text(&r).contains("BucketAlreadyOwnedByYou")) {
             Ok(())
         } else {
-            Err(StateError::Unavailable(format!("s3: creating the bucket: {}", error_text(&r))))
+            Err(StateError::Unavailable(format!(
+                "s3: creating the bucket: {}",
+                error_text(&r)
+            )))
         }
     }
 
@@ -411,7 +415,9 @@ impl S3Store {
             return Err(S3Store::unexpected("reading a blob", &r));
         }
         if r.body.len() as u64 != len || Sha256::digest(&r.body).as_slice() != sha {
-            return Err(StateError::Corrupt(format!("blob {name} of `{object}` is not what its manifest says")));
+            return Err(StateError::Corrupt(format!(
+                "blob {name} of `{object}` is not what its manifest says"
+            )));
         }
         let b = Arc::new(r.body);
         lock(&self.cache)?.blobs.insert(name.to_owned(), b.clone());
@@ -500,7 +506,10 @@ impl S3Store {
             if let Some(t) = &token {
                 query.push(("continuation-token".to_string(), t.clone()));
             }
-            let r = self.client.send("GET", "", &query, &[], &[]).map_err(Failure::unavailable)?;
+            let r = self
+                .client
+                .send("GET", "", &query, &[], &[])
+                .map_err(Failure::unavailable)?;
             if r.status != 200 {
                 return Err(S3Store::unexpected("listing", &r));
             }
@@ -517,7 +526,9 @@ impl S3Store {
             }
             token = tag(&xml, "NextContinuationToken");
             if token.is_none() {
-                return Err(StateError::Corrupt("a truncated listing with no continuation token".into()));
+                return Err(StateError::Corrupt(
+                    "a truncated listing with no continuation token".into(),
+                ));
             }
         }
     }
@@ -596,7 +607,11 @@ pub fn parse_url(url: &str, credentials: Credentials) -> Result<S3Config, StateE
                         .map_err(|_| StateError::Config(format!("poll_ms is a number, not `{v}`")))?,
                 )
             }
-            other => return Err(StateError::Config(format!("an S3 store URL has no parameter `{other}`"))),
+            other => {
+                return Err(StateError::Config(format!(
+                    "an S3 store URL has no parameter `{other}`"
+                )));
+            }
         }
     }
     let (scheme, host) = match &endpoint {
@@ -802,8 +817,12 @@ impl StateStore for S3Store {
         let mut out = Vec::new();
         let mut bad = None;
         self.list(&dir, limit.min(1000), |key, _| {
-            let Some(rest) = key.strip_prefix(&dir) else { return true };
-            let Some((at, obj)) = rest.split_once('/') else { return true };
+            let Some(rest) = key.strip_prefix(&dir) else {
+                return true;
+            };
+            let Some((at, obj)) = rest.split_once('/') else {
+                return true;
+            };
             match (at.parse::<u64>(), decode(obj)) {
                 (Ok(at), Some(obj)) => {
                     if at > now || out.len() >= limit {
@@ -942,14 +961,21 @@ mod tests {
         let mut damaged = bytes.clone();
         damaged[10] ^= 1;
         assert!(matches!(Manifest::decode(&damaged, None), Err(StateError::Corrupt(_))));
-        assert!(matches!(Manifest::decode(&bytes[..10], None), Err(StateError::Corrupt(_))));
+        assert!(matches!(
+            Manifest::decode(&bytes[..10], None),
+            Err(StateError::Corrupt(_))
+        ));
     }
 
     #[test]
     fn names_encode_to_one_segment() {
         for name in ["a", "a/b", "..", "%2F", "é", "a b", "member/Room/lunch"] {
             let e = encode(name);
-            assert!(e.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'%'), "{e}");
+            assert!(
+                e.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'%'),
+                "{e}"
+            );
             assert_eq!(decode(&e).as_deref(), Some(name));
         }
         assert_ne!(encode("a/b"), encode("a%2Fb"));
@@ -964,7 +990,11 @@ mod tests {
         };
         let cfg = parse_url("s3://b/p/q?endpoint=http://127.0.0.1:9000&region=r&poll_ms=50", c()).unwrap();
         assert_eq!(
-            (cfg.endpoint.scheme.as_str(), cfg.endpoint.host.as_str(), cfg.endpoint.bucket.as_str()),
+            (
+                cfg.endpoint.scheme.as_str(),
+                cfg.endpoint.host.as_str(),
+                cfg.endpoint.bucket.as_str()
+            ),
             ("http", "127.0.0.1:9000", "b")
         );
         assert_eq!((cfg.prefix.as_str(), cfg.endpoint.path_style), ("p/q/", true));
@@ -973,7 +1003,13 @@ mod tests {
         assert_eq!(aws.endpoint.host, "s3.us-east-1.amazonaws.com");
         assert!(!aws.endpoint.path_style);
         assert_eq!(aws.prefix, "");
-        for bad in ["s3://", "postgres://x", "s3://b?nope=1", "s3://b?endpoint=ftp://x", "s3://b?path_style=yes"] {
+        for bad in [
+            "s3://",
+            "postgres://x",
+            "s3://b?nope=1",
+            "s3://b?endpoint=ftp://x",
+            "s3://b?path_style=yes",
+        ] {
             assert!(parse_url(bad, c()).is_err(), "{bad}");
         }
     }
