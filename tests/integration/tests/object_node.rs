@@ -60,6 +60,7 @@ fn open(kv: &Arc<MemKv>, now: i64) -> ObjectNode {
             Ok(())
         }),
         externs: Arc::new(blossom_std_host::registry().unwrap()),
+        hibernation: None,
     })
     .unwrap()
 }

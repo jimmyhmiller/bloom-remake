@@ -18,6 +18,7 @@ blossom-kernel.workspace = true
 blossom-engine.workspace = true
 blossom-wire.workspace = true
 blossom-store.workspace = true
+blossom-statestore.workspace = true
 blossom-trace.workspace = true
 blossom-node.workspace = true
 blossom-oracle.workspace = true

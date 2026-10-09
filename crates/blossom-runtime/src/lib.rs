@@ -20,6 +20,7 @@ pub mod net;
 pub mod object;
 pub mod query;
 pub mod server;
+pub mod stateless;
 pub mod streams;
 pub mod web;
 

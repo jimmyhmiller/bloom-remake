@@ -408,7 +408,11 @@ pub fn host_request(
                     // `Part::Blob(b, lo, hi)`: bytes of a stored blob. A range outside it is the program's error,
                     // refused like a bad `seq`; a missing blob is a host bug.
                     Value::Enum { variant: 1, fields } => match &**fields {
-                        [Value::Blob(r), Value::Int(IntValue::U64(lo)), Value::Int(IntValue::U64(hi))] => {
+                        [
+                            Value::Blob(r),
+                            Value::Int(IntValue::U64(lo)),
+                            Value::Int(IntValue::U64(hi)),
+                        ] => {
                             let b = blobs
                                 .get(r)
                                 .ok_or_else(|| internal_error!("the bytes of blob {} are not available", r.hex()))?;

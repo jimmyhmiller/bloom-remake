@@ -99,8 +99,14 @@ fn refused_for_depth(e: &BlsError) -> bool {
 #[cfg(test)]
 fn at_the_bound(tag: &str, shape: impl Fn(usize) -> String, value: impl Fn(usize) -> u64) {
     let (mut lo, mut hi) = (1usize, 4096usize);
-    assert!(compile(&shape(lo), tag).is_ok(), "{tag}: the smallest program is refused");
-    assert!(compile(&shape(hi), tag).as_ref().is_err_and(refused_for_depth), "{tag}: {hi} compiles");
+    assert!(
+        compile(&shape(lo), tag).is_ok(),
+        "{tag}: the smallest program is refused"
+    );
+    assert!(
+        compile(&shape(hi), tag).as_ref().is_err_and(refused_for_depth),
+        "{tag}: {hi} compiles"
+    );
     while hi - lo > 1 {
         let mid = (lo + hi) / 2;
         match compile(&shape(mid), tag) {

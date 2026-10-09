@@ -1,0 +1,194 @@
+//! A chat with rooms (docs/design/STATELESS.md): every room is a member of the keyed role `Room`, named by the page's
+//! URL (`/?member=lunch`) and created when its first page opens it. A line typed in a tab is a `say` to its room,
+//! which fans it out to every tab in the room as `heard`. The lobby, a node of its own, keeps the rooms there are: a
+//! room tells it when its first tab comes, and it tells every room of the others, so each tab lists the other rooms.
+//!
+//! Each tab numbers its own lines, so a line is known by its tab and number: one sent again (after a reconnect)
+//! changes nothing. A tab that connects without resuming its link gets the room's whole log; one whose link resumed
+//! already has it. Who is here comes from the link events, so a closed tab leaves the list.
+//!
+//! On a stateless host (`blossom serve`) every room, the lobby and every tab's link live in the state store; any
+//! instance answers any request.
+
+program keyed_chat version 1;
+
+role Room: keyed;
+role Lobby;
+role Browser: client;
+
+channel say(k: u64, text: String): Browser -> Room;
+channel heard(who: Node<Browser>, k: u64, at: Instant, text: String): Room -> Browser;
+channel presence(who: Node<Browser>, here: bool): Room -> Browser;
+/// The room's own name, and the other rooms the lobby knows.
+channel room(key: String): Room -> Browser;
+channel other(key: String): Room -> Browser;
+
+/// A room tells the lobby it is there; the lobby tells each room of the others.
+channel opened(key: String): Room -> Lobby;
+channel known(key: String): Lobby -> Room;
+
+at Room {
+    /// Every line said, by its tab and number, with when the room took it.
+    durable table log(who: Node<Browser>, k: u64, at: Instant, text: String) key(who, k);
+    /// The other rooms the lobby told of.
+    durable table neighbors(key: String);
+    /// Whether the room told the lobby it is there.
+    durable table announced(done: bool) key();
+    /// The tabs connected now.
+    table online(b: Node<Browser>);
+
+    join: on Browser.connected(b, _) {
+        emit online(b);
+    }
+    leave: on Browser.disconnected(b), not Browser.connected(b, _) {
+        delete online(b);
+    }
+    arrive: on Browser.connected(b, _), online(o) {
+        send presence(b, true) to o;
+    }
+    seen: on Browser.connected(b, _), online(o) where o != b {
+        send presence(o, true) to b;
+    }
+    gone: on Browser.disconnected(b), not Browser.connected(b, _), online(o) where o != b {
+        send presence(b, false) to o;
+    }
+    store: on say(k, t) from b, not log(b, k, _, _) {
+        next log(b, k, now(), t);
+    }
+    fan: on say(k, t) from b, online(o), not log(b, k, _, _) {
+        send heard(b, k, now(), t) to o;
+    }
+    name: on Browser.connected(b, _) {
+        send room(self.key()) to b;
+    }
+    others: on Browser.connected(b, _), neighbors(r) {
+        send other(r) to b;
+    }
+    /// A tab whose link did not resume gets the whole log.
+    greet: on Browser.connected(b, false), log(w, k, at, t) {
+        send heard(w, k, at, t) to b;
+    }
+    announce: on Browser.connected(_, _), l in Lobby, not announced(true) {
+        send opened(self.key()) to l;
+        upsert announced(true);
+    }
+    learn: on known(r), not neighbors(r) where r != self.key() {
+        next neighbors(r);
+    }
+    spread: on known(r), online(b), not neighbors(r) where r != self.key() {
+        send other(r) to b;
+    }
+}
+
+at Lobby {
+    /// Every room that ever had a tab.
+    durable table all_rooms(key: String);
+
+    note: on opened(r), not all_rooms(r) {
+        next all_rooms(r);
+    }
+    /// The rooms there were hear of the new one, and the new one hears of each.
+    tell_old: on opened(r), all_rooms(o), not all_rooms(r) {
+        send known(r) to Room.named(o);
+    }
+    tell_new: on opened(r), all_rooms(o), not all_rooms(r) {
+        send known(o) to Room.named(r);
+    }
+}
+
+at Browser {
+    include "ui.bls";
+
+    /// The lines heard, by tab and number; kept across reloads.
+    durable table lines(who: Node<Browser>, k: u64, at: Instant, text: String) key(who, k);
+    /// The number of this tab's next line.
+    durable table sent_n(n: u64) key();
+    durable table called(key: String) key();
+    durable table listed(key: String);
+    /// Who is here (this tab included).
+    table here(b: Node<Browser>);
+    /// Whether the link to the room is up.
+    table up(r: Node<Room>);
+    /// The room, once the link reached it: lines typed while offline go to it when the link is back.
+    durable table host(r: Node<Room>) key();
+    table draft(s: String) key();
+
+    view next_k(k = max!(n default 0u64)) = sent_n(n);
+
+    hear: on heard(w, k, at, t), not lines(w, k, _, _) {
+        next lines(w, k, at, t);
+    }
+    hear_room: on room(k) {
+        upsert called(k);
+    }
+    hear_other: on other(k), not listed(k) {
+        next listed(k);
+    }
+    come: on presence(b, true) {
+        emit here(b);
+    }
+    go: on presence(b, false) {
+        delete here(b);
+    }
+    link: on Room.connected(r, _) {
+        emit up(r);
+        upsert host(r);
+    }
+    lost: on Room.disconnected(r) {
+        delete up(r);
+    }
+    /// Offline, nobody is known to be here.
+    forget: on Room.disconnected(_), here(b) {
+        delete here(b);
+    }
+    type_it: on typed("say", v) {
+        upsert draft(v);
+    }
+    /// Sends while offline wait for the link: the line goes out when it is back.
+    send_it: on keydown("say", "Enter", v), host(r), next_k(k) where v != "" {
+        send say(k, v) to r;
+        upsert sent_n(k + 1u64);
+        upsert draft("");
+    }
+
+    view typed_now(s) {
+        draft(s);
+        not draft(_), let s = "";
+    }
+    view title(t) {
+        called(k), let t = f"Room {k}";
+        not called(_), let t = "Room";
+    }
+    view online_count(k = count!(b default 0u64)) = here(b);
+    view status(s) {
+        up(_), online_count(k), let s = f"online, {k} here";
+        not up(_), let s = "offline: lines wait until the room is back";
+    }
+    view mine(w, k) = lines(w, k, _, _) where w == self;
+
+    page: while title(name), status(s), typed_now(d) {
+        emit html div[id: "chat"](class: "chat") {
+            h1[id: "title"] { name }
+            p[id: "status"](class: "status") { s }
+            ul[id: "rooms"](class: "rooms") {
+                for listed(r) {
+                    li[id: f"room-{r}"] {
+                        a[id: f"go-{r}"](href: f"?member={r}") { r }
+                    }
+                }
+            }
+            ul[id: "lines"](class: "lines") {
+                for lines(w, k, at, t) {
+                    li[id: f"line-{k}-{w}", pos: at.as_millis()](class: "line") {
+                        span[id: f"who-{k}-{w}"](class: "who") { w.to_string() }
+                        span[id: f"text-{k}-{w}"](class: "text") { t }
+                    }
+                }
+            }
+            input[id: "say"](placeholder: "Say something and press Enter", value: d);
+        }
+    }
+    own: while mine(w, k) {
+        emit attr(f"line-{k}-{w}", "data-mine", "true");
+    }
+}

@@ -671,6 +671,20 @@ struct Member {
     pending: VecDeque<(Option<u64>, u64)>,
 }
 
+/// A member's link as it is kept between requests when no process holds it (docs/design/STATELESS.md §6.1): its
+/// numbering, the batches it has not acknowledged, and the connection carrying it. Nothing waits for an
+/// acknowledgement between requests, so the batches waiting for one are not part of it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LinkImage {
+    pub role: u32,
+    pub conn: Option<u64>,
+    pub out_next: u64,
+    /// The batches to the member it has not acknowledged, by number, each its encoded `MSG` frame.
+    pub replay: Vec<(u64, Vec<u8>)>,
+    pub lost_upto: u64,
+    pub in_floor: u64,
+}
+
 /// The links of every member this incarnation saw (engine thread).
 pub(crate) struct MemberLinks {
     members: BTreeMap<NodeId, Member>,
@@ -864,6 +878,61 @@ impl MemberLinks {
         if let Some(rel) = self.links.get(&(role, true)) {
             host.event(*rel, Row::from(vec![Value::Node(member), Value::Bool(resumed)]));
         }
+    }
+
+    /// Every member's link as it is kept between requests. A member's batch still waiting for its acknowledgement is
+    /// a fault: at the end of a request the node is quiescent, so every message it was given was taken.
+    pub(crate) fn images(&self) -> Result<BTreeMap<NodeId, LinkImage>, RuntimeError> {
+        self.members
+            .iter()
+            .map(|(id, m)| {
+                if !m.pending.is_empty() {
+                    return Err(internal_error!(
+                        "member {} has batches waiting for their acknowledgement at the end of a request",
+                        id.0
+                    )
+                    .into());
+                }
+                Ok((
+                    *id,
+                    LinkImage {
+                        role: m.role.raw(),
+                        conn: m.conn.as_ref().map(|c| c.id),
+                        out_next: m.out_next,
+                        replay: m.replay.iter().cloned().collect(),
+                        lost_upto: m.lost_upto,
+                        in_floor: m.in_floor,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// Takes up the links `images` keep (a node loaded for a request), each connection's link made by `link`.
+    pub(crate) fn restore(
+        &mut self,
+        images: BTreeMap<NodeId, LinkImage>,
+        link: &mut dyn FnMut(u64) -> Box<dyn LinkConn>,
+    ) {
+        self.members = images
+            .into_iter()
+            .map(|(id, i)| {
+                let replay_bytes = i.replay.iter().map(|(_, f)| f.len()).sum();
+                (
+                    id,
+                    Member {
+                        role: RoleId::from_raw(i.role),
+                        conn: i.conn.map(|c| Conn { id: c, link: link(c) }),
+                        out_next: i.out_next,
+                        replay: i.replay.into_iter().collect(),
+                        replay_bytes,
+                        lost_upto: i.lost_upto,
+                        in_floor: i.in_floor,
+                        pending: VecDeque::new(),
+                    },
+                )
+            })
+            .collect();
     }
 
     /// The node's released ticks took `taken` messages: acknowledges every member batch whose messages they took.

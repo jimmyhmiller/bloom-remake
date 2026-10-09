@@ -1,0 +1,35 @@
+# A deployment of keyed_chat.bls for stateless hosting (docs/design/STATELESS.md): its rooms (members of the keyed
+# role `Room`, one per `/?member=NAME`), its lobby and every page's link live in a state store; `blossom serve`
+# instances keep nothing between requests. From the repository root, after scripts/build-web.sh:
+#
+#   BLOSSOM_SEED=$(openssl rand -hex 16) blossom serve --deploy examples/web/keyed_chat.deploy.toml \
+#       --store sqlite:examples/web/.data/keyed_chat.db --web 127.0.0.1:8080
+#
+# then open http://localhost:8080/?member=lunch in two tabs. Run several instances on other ports, over one store
+# (Postgres or S3 for instances on several machines), behind any load balancer.
+format = 1
+
+[deployment]
+id = "keyed-chat-demo"
+program = "keyed_chat"
+version = 1
+source = "keyed_chat.bls"
+
+[[node]]
+name = "rooms"
+role = "Room"
+addr = "127.0.0.1:7481"
+principal = "spiffe://demo/keyed_chat/Room/rooms"
+
+[[node]]
+name = "lobby"
+role = "Lobby"
+addr = "127.0.0.1:7482"
+principal = "spiffe://demo/keyed_chat/Lobby/lobby"
+
+[security]
+mode = "insecure-dev"
+
+[storage]
+data_dir = ".data/keyed_chat"
+

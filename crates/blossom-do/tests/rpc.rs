@@ -41,8 +41,16 @@ impl Platform {
         if !self.objects.contains_key(name) {
             self.now += 1.0;
             let entries = self.entries(name);
-            let o = Object::open(&self.files, &self.deploy, name, SEED, &entries, instant_of_ms(self.now), 1)
-                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            let o = Object::open(
+                &self.files,
+                &self.deploy,
+                name,
+                SEED,
+                &entries,
+                instant_of_ms(self.now),
+                1,
+            )
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
             self.objects.insert(name.to_owned(), o);
         }
         self.objects.get_mut(name).unwrap()
@@ -141,7 +149,10 @@ fn objects_message_each_other_and_keep_it_across_a_restart() {
     // Each game is an object of its own, and the ledger one more.
     let mut names: Vec<&String> = p.objects.keys().collect();
     names.sort();
-    assert_eq!(names, ["member/Game/a", "member/Game/b", "member/Game/ledger", "node/lobby"]);
+    assert_eq!(
+        names,
+        ["member/Game/a", "member/Game/b", "member/Game/ledger", "node/lobby"]
+    );
     assert_eq!(p.objects["member/Game/a"].rows("began").unwrap(), vec![vec![u(1)]]);
     // Every object starts again from its storage alone.
     p.objects.clear();

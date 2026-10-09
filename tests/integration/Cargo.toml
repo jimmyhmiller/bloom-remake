@@ -38,6 +38,7 @@ blossom-smt.workspace = true
 blossom-std-host.workspace = true
 blossom-std-src.workspace = true
 blossom-store.workspace = true
+blossom-statestore.workspace = true
 blossom-syntax.workspace = true
 blossom-trace.workspace = true
 blossom-value.workspace = true

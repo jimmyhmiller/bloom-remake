@@ -42,7 +42,8 @@ use blossom_wire::frame::{Frame, RejectReason};
 use crate::RuntimeError;
 use crate::deploy::DeploymentSpec;
 use crate::members::{
-    AdmitError, Admitted, ClientRole, Host, LinkConn, MemberEvent, MemberLinks, admit_with, identify_in, member_event,
+    AdmitError, Admitted, ClientRole, Host, LinkConn, LinkImage, MemberEvent, MemberLinks, admit_with, identify_in,
+    member_event,
 };
 use crate::net::{Catalog, Identity};
 
@@ -98,6 +99,9 @@ pub struct ObjectConfig {
     /// Fills a buffer with secret random bytes (client members' tokens).
     pub random: Random,
     pub externs: Arc<ExternRegistry>,
+    /// The node's state when it last hibernated (a stateless host, docs/design/STATELESS.md §5a): it resumes from it
+    /// instead of starting again. `None`: it starts (a fresh store, or a restart).
+    pub hibernation: Option<blossom_node::Hibernation>,
 }
 
 /// A connection's frames, queued for the host.
@@ -151,6 +155,171 @@ fn bump(c: &AtomicU64, n: u64) {
     c.fetch_add(n, Ordering::Relaxed);
 }
 
+/// A connection as it is kept between requests (docs/design/STATELESS.md §6.2): the member whose link it carries,
+/// and the channels' numbers its `HELLO` agreed.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConnImage {
+    pub member: u32,
+    pub inbound: Vec<(u32, u32)>,
+}
+
+/// One write to an object's entries: a value, or `None` to delete the key.
+pub type EntryWrite = (String, Option<Vec<u8>>);
+
+/// The prefix of the links' entries among an object's entries.
+pub const LINKS_PREFIX: &str = "L/";
+const NEXT_CONN_KEY: &str = "L/n";
+
+fn page_key(id: NodeId) -> String {
+    format!("L/p/{:08x}", id.0)
+}
+
+fn conn_key(conn: u64) -> String {
+    format!("L/c/{conn:016x}")
+}
+
+fn hex_of<T: TryFrom<u64>>(key: &str, prefix: &str) -> Result<T, RuntimeError> {
+    key.strip_prefix(prefix)
+        .and_then(|h| u64::from_str_radix(h, 16).ok())
+        .and_then(|n| T::try_from(n).ok())
+        .ok_or_else(|| {
+            RuntimeError::Store(blossom_store::StoreError::Invalid(format!(
+                "a malformed link entry {key}"
+            )))
+        })
+}
+
+/// The pages' links and their connections, as an object's entries keep them between requests (docs/design/
+/// STATELESS.md §6).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LinkState {
+    pub pages: BTreeMap<NodeId, LinkImage>,
+    pub conns: BTreeMap<u64, ConnImage>,
+    /// The number of the next connection.
+    pub next_conn: u64,
+}
+
+/// Where a page's receives are (docs/design/STATELESS.md §6.3): the number of the last batch, and the last
+/// acknowledgement, it was given.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cursor {
+    pub msg: u64,
+    pub ack: u64,
+}
+
+impl Cursor {
+    /// The cursor as the page carries it (opaque to the page).
+    pub fn text(&self) -> String {
+        format!("{}.{}", self.msg, self.ack)
+    }
+
+    pub fn parse(s: &str) -> Option<Cursor> {
+        let (m, a) = s.split_once('.')?;
+        Some(Cursor {
+            msg: m.parse().ok()?,
+            ack: a.parse().ok()?,
+        })
+    }
+}
+
+/// What a receive answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Received {
+    /// Frames for the page (none: nothing new), and where it is then.
+    Frames { frames: Vec<Vec<u8>>, next: Cursor },
+    /// The connection's link is over (why): the page opens another and resumes.
+    Gone(&'static str),
+}
+
+impl LinkState {
+    /// The links' state among an object's entries (those under [`LINKS_PREFIX`]; others are ignored).
+    pub fn decode<'a>(entries: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> Result<LinkState, RuntimeError> {
+        let bad = |k: &str, e: postcard::Error| {
+            RuntimeError::Store(blossom_store::StoreError::Invalid(format!("link entry {k}: {e}")))
+        };
+        let mut state = LinkState::default();
+        for (k, v) in entries {
+            if k == NEXT_CONN_KEY {
+                state.next_conn = postcard::from_bytes(v).map_err(|e| bad(k, e))?;
+            } else if k.starts_with("L/p/") {
+                state.pages.insert(
+                    NodeId(hex_of(k, "L/p/")?),
+                    postcard::from_bytes(v).map_err(|e| bad(k, e))?,
+                );
+            } else if k.starts_with("L/c/") {
+                state
+                    .conns
+                    .insert(hex_of(k, "L/c/")?, postcard::from_bytes(v).map_err(|e| bad(k, e))?);
+            } else if k.starts_with(LINKS_PREFIX) {
+                return Err(RuntimeError::Store(blossom_store::StoreError::Invalid(format!(
+                    "an unknown link entry {k}"
+                ))));
+            }
+        }
+        Ok(state)
+    }
+
+    fn encode(&self) -> Result<BTreeMap<String, Vec<u8>>, RuntimeError> {
+        let enc = |e: postcard::Error| internal_error!("encoding a link entry: {e}");
+        let mut out = BTreeMap::new();
+        out.insert(
+            NEXT_CONN_KEY.to_owned(),
+            postcard::to_allocvec(&self.next_conn).map_err(enc)?,
+        );
+        for (id, p) in &self.pages {
+            out.insert(page_key(*id), postcard::to_allocvec(p).map_err(enc)?);
+        }
+        for (c, i) in &self.conns {
+            out.insert(conn_key(*c), postcard::to_allocvec(i).map_err(enc)?);
+        }
+        Ok(out)
+    }
+
+    /// The member a connection carries the link of, while it does.
+    pub fn member_of(&self, conn: u64) -> Option<NodeId> {
+        let c = self.conns.get(&conn)?;
+        let member = NodeId(c.member);
+        (self.pages.get(&member)?.conn == Some(conn)).then_some(member)
+    }
+
+    /// Where a connection just opened is: its open's answer gave its `WELCOME`, the replay after what the page took,
+    /// and what the open's ticks sent it.
+    pub fn opened(&self, conn: u64) -> Option<Cursor> {
+        let p = self.pages.get(&self.member_of(conn)?)?;
+        Some(Cursor {
+            msg: p.out_next.saturating_sub(1),
+            ack: p.in_floor,
+        })
+    }
+
+    /// What a receive on `conn` from `at` answers (docs/design/STATELESS.md §6.3): the batches after the cursor, and
+    /// an `ACK` if the node took more of the page's since.
+    pub fn receive(&self, conn: u64, at: Cursor) -> Received {
+        let Some(member) = self.member_of(conn) else {
+            return Received::Gone("the session ended");
+        };
+        let Some(p) = self.pages.get(&member) else {
+            return Received::Gone("the session ended");
+        };
+        if p.lost_upto > at.msg {
+            return Received::Gone("batches the page had not received left the replay buffer");
+        }
+        let mut next = at;
+        let mut frames = Vec::new();
+        for (seq, f) in &p.replay {
+            if *seq > at.msg {
+                frames.push(f.clone());
+                next.msg = *seq;
+            }
+        }
+        if p.in_floor > at.ack {
+            frames.push(Frame::Ack { seq: p.in_floor }.encode());
+            next.ack = p.in_floor;
+        }
+        Received::Frames { frames, next }
+    }
+}
+
 /// One node, run by its host's calls.
 pub struct ObjectNode {
     driver: ManualDriver<Box<dyn Executor>>,
@@ -182,6 +351,8 @@ pub struct ObjectNode {
     /// Each deployment node's principal, by id.
     principals: Vec<String>,
     pub stats: ObjectStats,
+    /// The links' entries as last restored or exported (docs/design/STATELESS.md §6.1), to write only what changed.
+    persisted: BTreeMap<String, Vec<u8>>,
 }
 
 impl ObjectNode {
@@ -266,7 +437,11 @@ impl ObjectNode {
         ncfg.halt = artifact.halt;
         ncfg.max_stream_bytes = spec.stream_limits.max_stream_bytes;
         ncfg.statics = spec.static_rows(program, &names)?;
-        let node = Node::boot(ncfg, &artifact.program, executors.make(me)?, opened.boot.clone())?;
+        let exec = executors.make(me)?;
+        let node = match cfg.hibernation {
+            Some(h) => Node::resume(ncfg, &artifact.program, exec, opened.boot.clone(), h)?,
+            None => Node::boot(ncfg, &artifact.program, exec, opened.boot.clone())?,
+        };
         if !node.streams().is_empty() {
             return Err(blossom_base::unimplemented_error!(
                 "DIST-001",
@@ -306,6 +481,7 @@ impl ObjectNode {
             member: cfg.member.clone(),
             members_table: members,
             stats: ObjectStats::default(),
+            persisted: BTreeMap::new(),
             artifact,
         })
     }
@@ -395,6 +571,83 @@ impl ObjectNode {
             Ok(mut out) => std::mem::take(&mut *out),
             Err(_) => Vec::new(),
         }
+    }
+
+    /// The node's state to resume from at the next request (docs/design/STATELESS.md §5a).
+    pub fn hibernate(&self) -> Result<blossom_node::Hibernation, RuntimeError> {
+        Ok(self.driver.node.hibernate()?)
+    }
+
+    /// The pages' links and their connections now. Only a connection that still carries its member's link is
+    /// kept: one a reconnect replaced, or one still in its handshake, ended with the request.
+    pub fn link_state(&self) -> Result<LinkState, RuntimeError> {
+        let pages = self.members.images()?;
+        let conns = self
+            .conns
+            .iter()
+            .filter_map(|(c, s)| match s {
+                ConnState::Member { member, inbound } if pages.get(member).is_some_and(|p| p.conn == Some(*c)) => {
+                    Some((
+                        *c,
+                        ConnImage {
+                            member: member.0,
+                            inbound: inbound.iter().map(|(sid, rel)| (*sid, rel.raw())).collect(),
+                        },
+                    ))
+                }
+                _ => None,
+            })
+            .collect();
+        Ok(LinkState {
+            pages,
+            conns,
+            next_conn: self.next_conn,
+        })
+    }
+
+    /// Takes up the links an object's entries kept (a node loaded for a request, docs/design/STATELESS.md §6.1).
+    pub fn restore_links(&mut self, state: LinkState) -> Result<(), RuntimeError> {
+        self.persisted = state.encode()?;
+        self.next_conn = state.next_conn;
+        self.conns = state
+            .conns
+            .iter()
+            .map(|(c, i)| {
+                (
+                    *c,
+                    ConnState::Member {
+                        member: NodeId(i.member),
+                        inbound: i
+                            .inbound
+                            .iter()
+                            .map(|(sid, rel)| (*sid, RelId::from_raw(*rel)))
+                            .collect(),
+                    },
+                )
+            })
+            .collect();
+        let out = self.out.clone();
+        self.members
+            .restore(state.pages, &mut |conn| Box::new(QueuedConn { conn, out: out.clone() }));
+        Ok(())
+    }
+
+    /// The writes that bring the links' entries up to date: what changed since the last restore or export.
+    pub fn export_links(&mut self) -> Result<Vec<EntryWrite>, RuntimeError> {
+        let now = self.link_state()?.encode()?;
+        let mut writes = Vec::new();
+        for (k, v) in &now {
+            if self.persisted.get(k) != Some(v) {
+                writes.push((k.clone(), Some(v.clone())));
+            }
+        }
+        for k in self.persisted.keys() {
+            if !now.contains_key(k) {
+                writes.push((k.clone(), None));
+            }
+        }
+        self.persisted = now;
+        Ok(writes)
     }
 
     /// The node's committed rows of a durable relation, by its name (for tests and tools).
