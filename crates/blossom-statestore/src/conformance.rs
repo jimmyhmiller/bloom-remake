@@ -451,23 +451,33 @@ impl Stopwatch {
     }
 }
 
-/// One test per conformance case, each on a fresh harness: `statestore_conformance!(|| make_harness())`.
+/// One test per conformance case, each on a fresh harness: `statestore_conformance!(|| make_harness())`. A suite
+/// that needs a service the fast tier does not start is ignored there:
+/// `statestore_conformance!(ignore = "needs Postgres: scripts/test-services.sh", || make_harness())`.
 #[macro_export]
 macro_rules! statestore_conformance {
+    (ignore = $why:literal, $make:expr) => {
+        $crate::statestore_conformance!(@all [ignore = $why] $make);
+    };
     ($make:expr) => {
-        $crate::statestore_conformance!(@cases $make;
+        $crate::statestore_conformance!(@all [] $make);
+    };
+    (@all [$($attr:meta)*] $make:expr) => {
+        $crate::statestore_conformance!(@cases [$($attr)*] $make;
             unknown_object, commit_and_load, version_check, writes_in_order, objects_apart, names_checked,
             strange_keys, large_values, concurrent_committers, waits, wait_is_prompt, wakes, side_records);
     };
-    (@cases $make:expr; $($case:ident),*) => {
-        $(
-            #[test]
-            fn $case() {
-                let harness = ($make)();
-                if let Err(err) = $crate::conformance::$case(&harness) {
-                    panic!("{}: {err}", stringify!($case));
-                }
+    (@cases $attrs:tt $make:expr; $($case:ident),*) => {
+        $( $crate::statestore_conformance!(@one $attrs $make; $case); )*
+    };
+    (@one [$($attr:meta)*] $make:expr; $case:ident) => {
+        #[test]
+        $(#[$attr])*
+        fn $case() {
+            let harness = ($make)();
+            if let Err(err) = $crate::conformance::$case(&harness) {
+                panic!("{}: {err}", stringify!($case));
             }
-        )*
+        }
     };
 }

@@ -6,9 +6,13 @@
 # wasm build, then Playwright in headless Chromium (needs node, wasm-bindgen from scripts/install-dev-tools.sh, and
 # Playwright's Chromium: `npx playwright install chromium` in tests/web); the full tier runs it too.
 #
+# `services` is the tests that need Postgres and S3 (docs/design/STATELESS.md §10): it starts them
+# (scripts/test-services.sh) and runs the state store adapters' suites; the full tier runs it too.
+#
 #   scripts/test-tiers.sh fast [cargo test args...]
 #   scripts/test-tiers.sh full
 #   scripts/test-tiers.sh web
+#   scripts/test-tiers.sh services
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # The checkout's own tools come first: the pinned solvers (scripts/install-solvers.sh) and any client tools a machine
@@ -31,6 +35,12 @@ web() {
   (cd tests/web && npm ci --no-audit --no-fund && npx playwright test)
 }
 
+services() {
+  scripts/test-services.sh start
+  eval "$(scripts/test-services.sh env)"
+  cargo test --no-fail-fast -p blossom-statestore-postgres -p blossom-statestore-s3 -- --include-ignored
+}
+
 case "$tier" in
   fast)
     cargo test --workspace --no-fail-fast "$@"
@@ -49,14 +59,18 @@ case "$tier" in
     for area in core lattices async net; do
       cargo run -q -p xtask -- corpus --check --area "$area" || status=1
     done
+    services || status=1
     web || status=1
     exit "$status"
     ;;
   web)
     web
     ;;
+  services)
+    services
+    ;;
   *)
-    echo "usage: $0 fast|full|web [cargo test args...]" >&2
+    echo "usage: $0 fast|full|web|services [cargo test args...]" >&2
     exit 2
     ;;
 esac
