@@ -1,0 +1,14 @@
+[package]
+name = "blossom-statestore"
+description = "External state stores for stateless hosting (docs/design/STATELESS.md): objects of versioned entries, committed under a version check; wakes and side records. The trait, a memory store with injected faults, and the conformance suite every adapter runs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true
